@@ -5,16 +5,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
 
-// projectRoot represents a detected project and its available LSP servers.
+// projectRoot represents a detected project and its resolved LSP server.
+// Each (dir, server-command) pair gets its own root — multiple project types
+// at the same dir produce separate entries.
 type projectRoot struct {
-	Dir     string
-	Servers []Server
+	Dir    string
+	Server Server
 }
 
 // ignoredDirs are directories skipped during project detection.
@@ -34,35 +35,71 @@ var ignoredDirs = map[string]bool{
 	".nuxt":        true,
 }
 
-// detectionResult contains discovered project roots and any projects
-// where no LSP server binary was found.
-type detectionResult struct {
-	Roots   []projectRoot
-	Missing []MissingServer
+// projectBinDirs lists the per-ecosystem subdirectories where a language
+// server binary may be installed as a project dependency. Probed in order
+// at each level of the walk; first match wins.
+var projectBinDirs = []string{
+	filepath.Join("node_modules", ".bin"), // npm / pnpm / yarn-classic
+	filepath.Join(".venv", "bin"),         // uv, python -m venv (.venv)
+	filepath.Join("venv", "bin"),          // python -m venv (venv)
+	filepath.Join("vendor", "bin"),        // composer (PHP)
 }
 
-// MissingServer describes a detected project type with no available LSP server.
-type MissingServer struct {
-	ProjectName string // e.g. "go", "typescript"
-	Servers     []string // candidate commands that were not found
+// hasFileMatching returns true if any file in dir's subtree matches one of
+// the given globs. Used to gate detection of project types whose marker
+// (e.g. package.json) is too loose on its own — Vue, Svelte, and Astro all
+// share the npm marker family but only apply when the project actually
+// contains files of their own extension.
+func hasFileMatching(fsys fs.FS, relDir string, patterns []string) bool {
+	prefix := ""
+	if relDir != "" && relDir != "." {
+		prefix = filepath.ToSlash(relDir) + "/"
+	}
+	for _, pat := range patterns {
+		matches, err := doublestar.Glob(fsys, prefix+"**/"+pat)
+		if err == nil && len(matches) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveCommand returns the absolute path of command if it lives under one
+// of projectBinDirs between dir and workingDir (inclusive). Empty string
+// means no local install was found — caller falls back to exec.LookPath.
+func resolveCommand(dir, workingDir, command string) string {
+	cur := filepath.Clean(dir)
+	root := filepath.Clean(workingDir)
+	for {
+		for _, sub := range projectBinDirs {
+			candidate := filepath.Join(cur, sub, command)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+				return candidate
+			}
+		}
+		if cur == root || !isSubPath(root, cur) {
+			return ""
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return ""
+		}
+		cur = parent
+	}
 }
 
 // detectAll scans the working directory tree for known project markers and
-// returns all detected project roots with their available LSP servers.
-func detectAll(workingDir string) detectionResult {
+// returns the detected project roots with their available LSP servers.
+func detectAll(workingDir string) []projectRoot {
 	var roots []projectRoot
-	seen := make(map[string]bool)          // dir+command dedup
-	lookPathCache := make(map[string]bool) // command -> available
-	detectedTypes := make(map[string]bool) // project types where markers were found
-	resolvedTypes := make(map[string]bool) // project types with at least one server
+	seen := make(map[string]bool)           // dir+command dedup
+	resolveCache := make(map[string]string) // dir+command -> absolute path or bare command ("" = unavailable)
 
 	fsys := filteredFS{root: workingDir}
 
 	for _, pt := range knownProjects {
 		for _, marker := range pt.Markers {
-			pattern := "**/" + marker
-
-			matches, err := doublestar.Glob(fsys, pattern)
+			matches, err := doublestar.Glob(fsys, "**/"+marker)
 			if err != nil {
 				continue
 			}
@@ -74,7 +111,15 @@ func detectAll(workingDir string) detectionResult {
 					continue
 				}
 
-				detectedTypes[pt.Name] = true
+				if len(pt.Requires) > 0 {
+					relDir, err := filepath.Rel(workingDir, dir)
+					if err != nil {
+						continue
+					}
+					if !hasFileMatching(fsys, relDir, pt.Requires) {
+						continue
+					}
+				}
 
 				for _, candidate := range pt.Servers {
 					key := dir + "\x00" + candidate.Command
@@ -83,43 +128,29 @@ func detectAll(workingDir string) detectionResult {
 					}
 					seen[key] = true
 
-					available, cached := lookPathCache[candidate.Command]
+					path, cached := resolveCache[key]
 					if !cached {
-						_, err := exec.LookPath(candidate.Command)
-						available = err == nil
-						lookPathCache[candidate.Command] = available
+						if abs := resolveCommand(dir, workingDir, candidate.Command); abs != "" {
+							path = abs
+						} else if _, err := exec.LookPath(candidate.Command); err == nil {
+							path = candidate.Command
+						}
+						resolveCache[key] = path
 					}
-					if !available {
+					if path == "" {
 						continue
 					}
 
-					roots = append(roots, projectRoot{
-						Dir:     dir,
-						Servers: []Server{candidate},
-					})
-					resolvedTypes[pt.Name] = true
+					server := candidate
+					server.Command = path
+					roots = append(roots, projectRoot{Dir: dir, Server: server})
 					break // first available server per project type per dir
 				}
 			}
 		}
 	}
 
-	var missing []MissingServer
-	for _, pt := range knownProjects {
-		if !detectedTypes[pt.Name] || resolvedTypes[pt.Name] {
-			continue
-		}
-		var cmds []string
-		for _, s := range pt.Servers {
-			cmds = append(cmds, s.Command)
-		}
-		missing = append(missing, MissingServer{
-			ProjectName: pt.Name,
-			Servers:     cmds,
-		})
-	}
-
-	return detectionResult{Roots: roots, Missing: missing}
+	return roots
 }
 
 // excluded returns true if any of the exclude markers exist in dir.
@@ -159,11 +190,6 @@ func (f filteredFS) ReadDir(name string) ([]fs.DirEntry, error) {
 
 func (f filteredFS) Stat(name string) (fs.FileInfo, error) {
 	return os.Stat(filepath.Join(f.root, name))
-}
-
-// hasLanguage checks if the language/extension is in the list.
-func hasLanguage(languages []string, ext string) bool {
-	return slices.Contains(languages, ext)
 }
 
 // isSubPath checks if child is under parent directory.

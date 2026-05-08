@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -19,7 +20,7 @@ type Manager struct {
 	restarts   map[string]int      // restart count per server command
 	mu         sync.Mutex
 
-	detection  detectionResult // cached detection results
+	roots      []projectRoot // cached detection results
 	detectOnce sync.Once
 }
 
@@ -40,20 +41,15 @@ func (m *Manager) WorkingDir() string {
 }
 
 // detect returns cached detection results, running detection once.
-func (m *Manager) detect() *detectionResult {
+func (m *Manager) detect() []projectRoot {
 	m.detectOnce.Do(func() {
-		m.detection = detectAll(m.workingDir)
+		m.roots = detectAll(m.workingDir)
 	})
-	return &m.detection
+	return m.roots
 }
 
-// MissingServers returns project types detected in the workspace
-// that have no available LSP server binary.
-func (m *Manager) MissingServers() []MissingServer {
-	return m.detect().Missing
-}
-
-// FindServer finds an appropriate LSP server for the given file.
+// FindServer returns the most-nested project root's server that handles the
+// given file's extension, or nil if none.
 func (m *Manager) FindServer(filePath string) *Server {
 	ext := strings.TrimPrefix(filepath.Ext(filePath), ".")
 	if ext == "" {
@@ -61,46 +57,39 @@ func (m *Manager) FindServer(filePath string) *Server {
 	}
 
 	dir := filepath.Dir(filePath)
-	roots := m.detect().Roots
-
 	var best *Server
 	bestLen := -1
 
-	for _, root := range roots {
+	for _, root := range m.detect() {
 		if !isSubPath(root.Dir, dir) {
 			continue
 		}
 		if len(root.Dir) <= bestLen {
 			continue
 		}
-		for _, s := range root.Servers {
-			if hasLanguage(s.Languages, ext) {
-				srv := s
-				best = &srv
-				bestLen = len(root.Dir)
-				break
-			}
+		if !slices.Contains(root.Server.Languages, ext) {
+			continue
 		}
+		srv := root.Server
+		best = &srv
+		bestLen = len(root.Dir)
 	}
 
 	return best
 }
 
-// DetectServers finds all available LSP servers for the workspace.
+// DetectServers returns one entry per unique server command across all
+// detected project roots.
 func (m *Manager) DetectServers() []Server {
-	roots := m.detect().Roots
-
 	var servers []Server
 	seen := make(map[string]bool)
 
-	for _, root := range roots {
-		for _, s := range root.Servers {
-			if seen[s.Command] {
-				continue
-			}
-			seen[s.Command] = true
-			servers = append(servers, s)
+	for _, root := range m.detect() {
+		if seen[root.Server.Command] {
+			continue
 		}
+		seen[root.Server.Command] = true
+		servers = append(servers, root.Server)
 	}
 
 	return servers

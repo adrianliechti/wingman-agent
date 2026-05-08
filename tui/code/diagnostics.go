@@ -24,11 +24,10 @@ type fileDiagnostics struct {
 }
 
 // showDiagnosticsView collects diagnostics in the background and displays
-// the results when ready.
+// the results when ready. All output (loading, empty/error state) is
+// rendered inside the modal so the chat view stays free of residue once
+// the user closes it.
 func (a *App) showDiagnosticsView() {
-	t := theme.Default
-	fmt.Fprint(a.chatView, a.formatNotice("Collecting diagnostics…", t.BrBlack))
-
 	go func() {
 		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
 		defer cancel()
@@ -36,22 +35,12 @@ func (a *App) showDiagnosticsView() {
 		files, err := a.collectDiagnostics(ctx)
 
 		a.app.QueueUpdateDraw(func() {
-			if err != nil {
-				fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Diagnostics: %v", err), t.Yellow))
-				return
-			}
-
-			if len(files) == 0 {
-				fmt.Fprint(a.chatView, a.formatNotice("No diagnostics found", t.BrBlack))
-				return
-			}
-
-			a.showDiagnosticsModal(files)
+			a.showDiagnosticsModal(files, err)
 		})
 	}()
 }
 
-func (a *App) showDiagnosticsModal(files []fileDiagnostics) {
+func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 	t := theme.Default
 	a.activeModal = ModalDiagnostics
 
@@ -73,8 +62,13 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics) {
 
 	renderFileList := func() {
 		fileListView.Clear()
-		var sb strings.Builder
 
+		if len(files) == 0 {
+			fmt.Fprintf(fileListView, "  [%s]No diagnostics found[-]\n", t.BrBlack)
+			return
+		}
+
+		var sb strings.Builder
 		for i, f := range files {
 			var icon string
 			var iconColor tcell.Color
@@ -187,17 +181,9 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics) {
 	updateHintBar()
 
 	// === LAYOUT ===
-	separator := tview.NewBox().SetBackgroundColor(tcell.ColorDefault)
-	separator.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		for i := y; i < y+height; i++ {
-			screen.SetContent(x, i, '│', nil, tcell.StyleDefault.Foreground(t.BrBlack))
-		}
-		return x + 1, y, width - 1, height
-	})
-
 	panelsContainer := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(fileListView, 40, 0, true).
-		AddItem(separator, 1, 0, false).
+		AddItem(verticalSeparator(t.BrBlack), 1, 0, false).
 		AddItem(diagContentView, 0, 1, false)
 	panelsContainer.SetBackgroundColor(tcell.ColorDefault)
 
@@ -210,47 +196,46 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics) {
 		AddItem(nil, rightMargin, 0, false)
 	contentWithMargins.SetBackgroundColor(tcell.ColorDefault)
 
+	// === BANNER (collection error, if any) ===
+	var bannerRow *tview.Flex
+	if collectErr != nil {
+		bannerView := tview.NewTextView().
+			SetDynamicColors(true).
+			SetWrap(false)
+		bannerView.SetBackgroundColor(tcell.ColorDefault)
+		fmt.Fprintf(bannerView, "[%s]Error:[-] %s", t.Yellow, collectErr.Error())
+
+		bannerRow = tview.NewFlex().SetDirection(tview.FlexColumn).
+			AddItem(nil, leftMargin, 0, false).
+			AddItem(bannerView, 0, 1, false).
+			AddItem(nil, rightMargin, 0, false)
+		bannerRow.SetBackgroundColor(tcell.ColorDefault)
+	}
+
 	bottomBar := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(hintBar, 0, 1, false).
 		AddItem(statusBar, 40, 0, false)
 	bottomBar.SetBackgroundColor(tcell.ColorDefault)
-	bottomBar.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		for row := y; row < y+height; row++ {
-			for col := x; col < x+width; col++ {
-				screen.SetContent(col, row, ' ', nil, tcell.StyleDefault)
-			}
-		}
-		return x, y, width, height
-	})
 
 	bottomBarWithMargins := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(nil, inputLeftMargin, 0, false).
 		AddItem(bottomBar, 0, 1, false).
 		AddItem(nil, inputRightMargin, 0, false)
 	bottomBarWithMargins.SetBackgroundColor(tcell.ColorDefault)
-	bottomBarWithMargins.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		for row := y; row < y+height; row++ {
-			for col := x; col < x+width; col++ {
-				screen.SetContent(col, row, ' ', nil, tcell.StyleDefault)
-			}
-		}
-		return x, y, width, height
-	})
+	// Outer wrapper paints the full row width so the hint/status content sits
+	// on a clean line (no bleed-through from underlying chat content).
+	bottomBarWithMargins.SetDrawFunc(fillRow)
 
 	topSpacer := tview.NewBox().SetBackgroundColor(tcell.ColorDefault)
 	statusSpacer := tview.NewBox().SetBackgroundColor(tcell.ColorDefault)
-	statusSpacer.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		for row := y; row < y+height; row++ {
-			for col := x; col < x+width; col++ {
-				screen.SetContent(col, row, ' ', nil, tcell.StyleDefault)
-			}
-		}
-		return x, y, width, height
-	})
+	statusSpacer.SetDrawFunc(fillRow)
 
 	container := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(topSpacer, 1, 0, false).
-		AddItem(contentWithMargins, 0, 1, true).
+		AddItem(topSpacer, 1, 0, false)
+	if bannerRow != nil {
+		container.AddItem(bannerRow, 2, 0, false) // 1 line of text + 1 trailing blank
+	}
+	container.AddItem(contentWithMargins, 0, 1, true).
 		AddItem(statusSpacer, 1, 0, false).
 		AddItem(bottomBarWithMargins, 1, 0, false)
 	container.SetBackgroundColor(tcell.ColorDefault)

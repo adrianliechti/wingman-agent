@@ -15,6 +15,7 @@ type projectType struct {
 	Markers  []string // Files that indicate this project type (e.g., ["go.mod"])
 	Servers  []Server // Server candidates in priority order (first available wins)
 	Excludes []string // Marker files that exclude this project type (e.g., Deno excludes TS)
+	Requires []string // Optional: globs (e.g., "*.vue") that must match at least one file under the marker's dir
 }
 
 // knownProjects contains the registry of known project types and their LSP servers.
@@ -121,7 +122,7 @@ var knownProjects = []projectType{
 	// C/C++
 	{
 		Name:    "cpp",
-		Markers: []string{"compile_commands.json", "CMakeLists.txt", ".clangd", "Makefile"},
+		Markers: []string{"compile_commands.json", "CMakeLists.txt", ".clangd"},
 		Servers: []Server{
 			{
 				Name:       "clangd",
@@ -351,8 +352,9 @@ var knownProjects = []projectType{
 	},
 	// Vue
 	{
-		Name:    "vue",
-		Markers: []string{"package.json", "package-lock.json", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"},
+		Name:     "vue",
+		Markers:  []string{"package.json", "package-lock.json", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"},
+		Requires: []string{"*.vue"},
 		Servers: []Server{
 			{
 				Name:       "vue-language-server",
@@ -365,8 +367,9 @@ var knownProjects = []projectType{
 	},
 	// Svelte
 	{
-		Name:    "svelte",
-		Markers: []string{"package.json", "package-lock.json", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"},
+		Name:     "svelte",
+		Markers:  []string{"package.json", "package-lock.json", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"},
+		Requires: []string{"*.svelte"},
 		Servers: []Server{
 			{
 				Name:       "svelteserver",
@@ -379,8 +382,9 @@ var knownProjects = []projectType{
 	},
 	// Astro
 	{
-		Name:    "astro",
-		Markers: []string{"package.json", "package-lock.json", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"},
+		Name:     "astro",
+		Markers:  []string{"package.json", "package-lock.json", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"},
+		Requires: []string{"*.astro"},
 		Servers: []Server{
 			{
 				Name:       "astro-ls",
@@ -394,7 +398,7 @@ var knownProjects = []projectType{
 	// Bash / Shell
 	{
 		Name:    "bash",
-		Markers: []string{".bashrc", ".bash_profile", ".zshrc", "*.sh"},
+		Markers: []string{".bashrc", ".bash_profile", ".zshrc"},
 		Servers: []Server{
 			{
 				Name:       "bash-language-server",

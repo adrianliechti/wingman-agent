@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -226,7 +225,6 @@ func (a *App) Run() error {
 				))
 			}
 			a.updateStatusBar()
-			a.showMissingLSPHint()
 		})
 	}()
 
@@ -372,31 +370,6 @@ func (a *App) localLSPDiagnostics(ctx context.Context, absPath, path string) str
 	a.lspTracker.MarkDelivered(uri, newDiags)
 
 	return lsp.FormatNewDiagnostics(newDiags, path, a.agent.LSP.WorkingDir())
-}
-
-func (a *App) showMissingLSPHint() {
-	// LSP isn't initialized in unsupported workspaces — nothing to hint about.
-	if a.agent.LSP == nil {
-		return
-	}
-
-	// When bridge is connected, LSP comes from the IDE — no local servers needed.
-	if a.agent.Bridge != nil && a.agent.Bridge.IsConnected() {
-		return
-	}
-
-	missing := a.agent.LSP.MissingServers()
-	if len(missing) == 0 {
-		return
-	}
-
-	t := theme.Default
-
-	for _, m := range missing {
-		fmt.Fprintf(a.chatView, "  [%s]┃[-] [%s]No LSP server found for %s (install %s)[-]\n",
-			t.BrBlack, t.BrBlack, m.ProjectName, strings.Join(m.Servers, " or "))
-	}
-	fmt.Fprint(a.chatView, "\n")
 }
 
 func (a *App) isToolHidden(name string) bool {

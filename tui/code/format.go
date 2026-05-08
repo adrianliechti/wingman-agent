@@ -20,37 +20,26 @@ func (a *App) contentWidth() int {
 	return a.chatWidth - len(chatIndent) - chatBarWidth
 }
 
-func (a *App) formatUserMessage(content string) string {
-	t := theme.Default
-
+// formatBarMessage renders content with a colored vertical bar prefix on
+// every wrapped line, terminated by a blank line. Shared backend for the
+// user / assistant message formatters.
+func (a *App) formatBarMessage(content string, color tcell.Color) string {
 	var result strings.Builder
-
 	for line := range strings.SplitSeq(strings.TrimRight(content, "\n"), "\n") {
 		for _, wl := range markdown.WrapLine(line, a.contentWidth()) {
-			fmt.Fprintf(&result, "%s[%s]┃[-] %s\n", chatIndent, t.Cyan, wl)
+			fmt.Fprintf(&result, "%s[%s]┃[-] %s\n", chatIndent, color, wl)
 		}
 	}
-
 	result.WriteString("\n")
-
 	return result.String()
 }
 
+func (a *App) formatUserMessage(content string) string {
+	return a.formatBarMessage(content, theme.Default.Cyan)
+}
+
 func (a *App) formatAssistantMessage(content string) string {
-	t := theme.Default
-
-	var result strings.Builder
-	rendered := strings.TrimRight(markdown.Render(content), "\n")
-
-	for line := range strings.SplitSeq(rendered, "\n") {
-		for _, wl := range markdown.WrapLine(line, a.contentWidth()) {
-			fmt.Fprintf(&result, "%s[%s]┃[-] %s\n", chatIndent, t.Blue, wl)
-		}
-	}
-
-	result.WriteString("\n")
-
-	return result.String()
+	return a.formatBarMessage(markdown.Render(content), theme.Default.Blue)
 }
 
 func (a *App) formatPrompt(title string, message string, hint string) string {
@@ -192,29 +181,18 @@ func (a *App) formatReasoningCollapsed(summary string) string {
 }
 
 func (a *App) formatReasoning(summary string) string {
-	t := theme.Default
-
-	var result strings.Builder
-	title := fmt.Sprintf("[%s::b]◆ thinking[-::-]", t.Magenta)
-	fmt.Fprintf(&result, "%s[%s]┃[-] %s\n", chatIndent, t.Magenta, title)
-
-	for line := range strings.SplitSeq(strings.TrimRight(summary, "\n"), "\n") {
-		for _, wl := range markdown.WrapLine(line, a.contentWidth()) {
-			fmt.Fprintf(&result, "%s[%s]┃[-] [%s::i]%s[-::-]\n", chatIndent, t.Magenta, t.BrBlack, tview.Escape(wl))
-		}
-	}
-
-	result.WriteString("\n")
-
-	return result.String()
+	return a.formatReasoningWithTitle(summary, "◆ thinking")
 }
 
 func (a *App) formatReasoningProgress(summary string) string {
+	return a.formatReasoningWithTitle(summary, "◆ thinking...")
+}
+
+func (a *App) formatReasoningWithTitle(summary, title string) string {
 	t := theme.Default
 
 	var result strings.Builder
-	title := fmt.Sprintf("[%s::b]◆ thinking...[-::-]", t.Magenta)
-	fmt.Fprintf(&result, "%s[%s]┃[-] %s\n", chatIndent, t.Magenta, title)
+	fmt.Fprintf(&result, "%s[%s]┃[-] [%s::b]%s[-::-]\n", chatIndent, t.Magenta, t.Magenta, title)
 
 	for line := range strings.SplitSeq(strings.TrimRight(summary, "\n"), "\n") {
 		for _, wl := range markdown.WrapLine(line, a.contentWidth()) {

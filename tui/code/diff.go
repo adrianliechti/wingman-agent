@@ -180,22 +180,10 @@ func (a *App) showDiffView() {
 
 	// === LAYOUT ===
 
-	// Vertical separator between panels
-	separator := tview.NewBox().SetBackgroundColor(tcell.ColorDefault)
-	separator.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		sepColor := t.BrBlack
-
-		for i := y; i < y+height; i++ {
-			screen.SetContent(x, i, '│', nil, tcell.StyleDefault.Foreground(sepColor))
-		}
-
-		return x + 1, y, width - 1, height
-	})
-
 	// Two-pane content area
 	panelsContainer := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(fileListView, 40, 0, true).
-		AddItem(separator, 1, 0, false).
+		AddItem(verticalSeparator(t.BrBlack), 1, 0, false).
 		AddItem(diffContentView, 0, 1, false)
 	panelsContainer.SetBackgroundColor(tcell.ColorDefault)
 
@@ -215,48 +203,19 @@ func (a *App) showDiffView() {
 		AddItem(hintBar, 0, 1, false).
 		AddItem(statusBar, 0, 1, false)
 	bottomBar.SetBackgroundColor(tcell.ColorDefault)
-	// Clear the entire bottom bar area before drawing to prevent underlying content from showing through
-	bottomBar.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		for row := y; row < y+height; row++ {
-			for col := x; col < x+width; col++ {
-				screen.SetContent(col, row, ' ', nil, tcell.StyleDefault)
-			}
-		}
+	bottomBar.SetDrawFunc(fillRow)
 
-		return x, y, width, height
-	})
-
-	// Bottom bar with margins
 	bottomBarWithMargins := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(nil, inputLeftMargin, 0, false).
 		AddItem(bottomBar, 0, 1, false).
 		AddItem(nil, inputRightMargin, 0, false)
 	bottomBarWithMargins.SetBackgroundColor(tcell.ColorDefault)
-	// Clear margins as well
-	bottomBarWithMargins.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		for row := y; row < y+height; row++ {
-			for col := x; col < x+width; col++ {
-				screen.SetContent(col, row, ' ', nil, tcell.StyleDefault)
-			}
-		}
+	bottomBarWithMargins.SetDrawFunc(fillRow)
 
-		return x, y, width, height
-	})
-
-	// Top spacer - blank line
 	topSpacer := tview.NewBox().SetBackgroundColor(tcell.ColorDefault)
 
-	// Spacer above status bar - blank line
 	statusSpacer := tview.NewBox().SetBackgroundColor(tcell.ColorDefault)
-	statusSpacer.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		for row := y; row < y+height; row++ {
-			for col := x; col < x+width; col++ {
-				screen.SetContent(col, row, ' ', nil, tcell.StyleDefault)
-			}
-		}
-
-		return x, y, width, height
-	})
+	statusSpacer.SetDrawFunc(fillRow)
 
 	// Final container
 	container := tview.NewFlex().SetDirection(tview.FlexRow).
