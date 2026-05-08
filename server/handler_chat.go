@@ -114,15 +114,19 @@ func (s *Server) handleSend(ctx context.Context, msg ClientMessage) {
 	}
 
 	streamCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
 
 	s.wsMu.Lock()
 	s.streamCancel = cancel
+	s.streamDone = done
 	s.wsMu.Unlock()
 
 	defer func() {
 		s.wsMu.Lock()
 		s.streamCancel = nil
+		s.streamDone = nil
 		s.wsMu.Unlock()
+		close(done)
 	}()
 
 	// Track the last sent phase so we only emit transitions, not one frame

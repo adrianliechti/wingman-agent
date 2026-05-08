@@ -126,6 +126,22 @@ export function useWebSocket() {
 			sub(msg);
 		}
 		switch (msg.type) {
+			case "session": {
+				// Authoritative reset whenever the server announces a session
+				// (initial connect, /api/sessions/new, or session load). Drop any
+				// in-flight stream state so late events from a cancelled turn
+				// can't leak into the new session.
+				streamingRef.current = "";
+				streamingIdRef.current = "";
+				reasoningRef.current = "";
+				reasoningIdRef.current = "";
+				reasoningEntryIdRef.current = "";
+				setEntries([]);
+				setPhase("idle");
+				setPrompt(null);
+				break;
+			}
+
 			case "messages": {
 				setEntries(messagesToEntries(msg.messages));
 				break;

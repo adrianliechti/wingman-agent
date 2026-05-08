@@ -46,10 +46,13 @@ type Server struct {
 	mu       sync.Mutex
 	planMode bool
 
-	// WebSocket state (single client)
+	// WebSocket state (single client). streamCancel and streamDone are set
+	// together while a handleSend goroutine is running; streamDone is closed
+	// when it returns, so callers can wait for all of its events to drain.
 	wsMu         sync.Mutex
 	wsConn       *websocket.Conn
 	streamCancel context.CancelFunc
+	streamDone   chan struct{}
 
 	// Channels for ask/prompt relay
 	askCh    chan string
@@ -345,6 +348,17 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
+	// Cancel any in-flight stream and wait for its goroutine to return, so
+	// no late text_delta / tool_call events arrive after the SessionEvent
+	// below — those would re-populate the freshly-cleared client.
+	s.wsMu.Lock()
+	cancel, done := s.streamCancel, s.streamDone
+	s.wsMu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+	}
+
 	s.agent.Messages = nil
 	s.agent.Usage = agent.Usage{}
 	s.sessionID = newSessionID()
@@ -353,6 +367,7 @@ func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
 	// listing so it replaces stale state. capabilities_changed covers the
 	// case where the user ran `git init` between sessions.
 	s.agent.RestartRewind()
+	s.sendMessage(SessionEvent{ID: s.sessionID})
 	s.sendMessage(CapabilitiesChangedEvent{})
 	s.sendMessage(DiffsChangedEvent{})
 	s.sendMessage(CheckpointsChangedEvent{})
