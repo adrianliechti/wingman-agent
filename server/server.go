@@ -363,15 +363,16 @@ func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
 	s.agent.Usage = agent.Usage{}
 	s.sessionID = newSessionID()
 
-	// Re-baseline rewind for the new session and nudge every right-panel
-	// listing so it replaces stale state. capabilities_changed covers the
-	// case where the user ran `git init` between sessions.
+	// Re-baseline rewind for the new session and nudge the right-panel
+	// listings whose state actually changes (rewind baseline). File tree
+	// is driven by fsnotify and doesn't need a session-boundary refresh.
+	// capabilities_changed covers the case where the user ran `git init`
+	// between sessions.
 	s.agent.RestartRewind()
 	s.sendMessage(SessionEvent{ID: s.sessionID})
 	s.sendMessage(CapabilitiesChangedEvent{})
 	s.sendMessage(DiffsChangedEvent{})
 	s.sendMessage(CheckpointsChangedEvent{})
-	s.sendMessage(FilesChangedEvent{})
 	s.sendMessage(SessionsChangedEvent{})
 	s.sendMessage(UsageEvent{})
 

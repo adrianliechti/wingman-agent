@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,9 +19,12 @@ func (s *Server) handleDiffs(w http.ResponseWriter, r *http.Request) {
 
 	diffs, err := s.agent.Rewind.DiffFromBaseline()
 	if err != nil {
-		// Real git failure (corrupt baseline, snapshot failed, …). Surface it
-		// to stderr so it's actually visible; the panel still renders empty.
-		fmt.Fprintf(os.Stderr, "diffs: %v\n", err)
+		// ErrClosed means the manager was torn down (RestartRewind on
+		// session-new) while this poll was in flight. Silently return empty;
+		// the next poll lands on the fresh manager.
+		if !errors.Is(err, rewind.ErrClosed) {
+			fmt.Fprintf(os.Stderr, "diffs: %v\n", err)
+		}
 		writeJSON(w, []DiffEntry{})
 		return
 	}

@@ -2,23 +2,23 @@
 
 @theme {
 	--color-bg: #0a0a0a;
-	--color-bg-surface: #111111;
-	--color-bg-elevated: #181818;
-	--color-bg-hover: #1a1a1a;
-	--color-bg-active: #222222;
-	--color-bg-input: #161616;
+	--color-bg-surface: #141414;
+	--color-bg-elevated: #1c1c1c;
+	--color-bg-hover: #1f1f1f;
+	--color-bg-active: #2a2a2a;
+	--color-bg-input: #181818;
 
-	--color-fg: #e0e0e0;
-	--color-fg-muted: #888888;
-	--color-fg-dim: #555555;
+	--color-fg: #e6e6e6;
+	--color-fg-muted: #a3a3a3;
+	--color-fg-dim: #737373;
 
-	--color-border: #1e1e1e;
-	--color-border-subtle: #161616;
-	--color-border-strong: #333333;
+	--color-border: #2a2a2a;
+	--color-border-subtle: #1f1f1f;
+	--color-border-strong: #404040;
 
-	--color-accent: #888888;
-	--color-accent-hover: #aaaaaa;
-	--color-accent-muted: #333333;
+	--color-accent: #a3a3a3;
+	--color-accent-hover: #d4d4d4;
+	--color-accent-muted: #404040;
 
 	--color-success: #34d399;
 	--color-danger: #f87171;
@@ -43,23 +43,23 @@
 @media (prefers-color-scheme: light) {
 	:root {
 		--color-bg: #ffffff;
-		--color-bg-surface: #f7f7f7;
-		--color-bg-elevated: #f0f0f0;
-		--color-bg-hover: #ededed;
-		--color-bg-active: #e3e3e3;
+		--color-bg-surface: #f5f5f5;
+		--color-bg-elevated: #ececec;
+		--color-bg-hover: #e8e8e8;
+		--color-bg-active: #dcdcdc;
 		--color-bg-input: #fafafa;
 
-		--color-fg: #1a1a1a;
-		--color-fg-muted: #555555;
-		--color-fg-dim: #999999;
+		--color-fg: #171717;
+		--color-fg-muted: #525252;
+		--color-fg-dim: #737373;
 
-		--color-border: #e5e5e5;
-		--color-border-subtle: #ededed;
-		--color-border-strong: #cccccc;
+		--color-border: #d4d4d4;
+		--color-border-subtle: #e5e5e5;
+		--color-border-strong: #a3a3a3;
 
-		--color-accent: #555555;
-		--color-accent-hover: #1a1a1a;
-		--color-accent-muted: #d0d0d0;
+		--color-accent: #525252;
+		--color-accent-hover: #171717;
+		--color-accent-muted: #c4c4c4;
 
 		--color-success: #059669;
 		--color-danger: #dc2626;

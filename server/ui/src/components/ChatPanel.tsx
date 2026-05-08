@@ -8,6 +8,7 @@ import {
 	X,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useColorScheme } from "../hooks/useColorScheme";
 import type { ChatEntry } from "../hooks/useWebSocket";
 import type { Phase } from "../types/protocol";
 import { FilePicker } from "./FilePicker";
@@ -28,6 +29,7 @@ interface Props {
 const PIN_TOP_GAP = 16;
 
 export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
+	const scheme = useColorScheme();
 	const [input, setInput] = useState("");
 	const [files, setFiles] = useState<string[]>([]);
 	const [showPicker, setShowPicker] = useState(false);
@@ -340,10 +342,12 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 			>
 				{entries.length === 0 && phase === "idle" ? (
 					<div className="h-full flex items-center justify-center">
-						<div className="text-center max-w-sm">
-							<div className="text-[28px] font-semibold text-fg mb-2">
-								Wingman
-							</div>
+						<div className="flex flex-col items-center text-center max-w-sm">
+							<img
+								src={scheme === "light" ? "/icon_light.svg" : "/icon_dark.svg"}
+								alt="Wingman"
+								className="w-20 h-20 mb-4 opacity-80"
+							/>
 							<div className="text-[13px] text-fg-dim leading-relaxed">
 								Ask me to write code, fix bugs, explore files, or run commands.
 							</div>

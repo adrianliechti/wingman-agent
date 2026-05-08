@@ -25,6 +25,12 @@ import (
 	"github.com/go-git/go-git/v5/utils/merkletrie"
 )
 
+// ErrClosed is returned by public methods after Cleanup has run. Callers
+// (notably the polled /api/diffs handler) should treat it as a transient
+// no-op rather than a real failure — RestartRewind installs a fresh
+// Manager and the next poll will succeed.
+var ErrClosed = errors.New("rewind manager closed")
+
 type Checkpoint struct {
 	Hash    string
 	Message string
@@ -46,6 +52,7 @@ type Manager struct {
 	worktree     *git.Worktree
 	gitDir       string
 	baselineHash plumbing.Hash
+	closed       bool
 
 	// Exclude patterns are read once on first use and cached for the
 	// session — gitignore rules rarely change mid-session and the per-call
@@ -358,6 +365,10 @@ func (m *Manager) Commit(message string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.closed {
+		return ErrClosed
+	}
+
 	m.worktree.Excludes = m.excludes()
 
 	status, err := m.worktree.Status()
@@ -393,6 +404,10 @@ func (m *Manager) List() ([]Checkpoint, error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.closed {
+		return nil, ErrClosed
+	}
 
 	ref, err := m.repo.Head()
 	if err != nil {
@@ -438,6 +453,10 @@ func (m *Manager) Restore(hash string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.closed {
+		return ErrClosed
+	}
+
 	m.worktree.Excludes = m.excludes()
 
 	if err := m.worktree.Clean(&git.CleanOptions{
@@ -467,8 +486,17 @@ func (m *Manager) Restore(hash string) error {
 func (m *Manager) Cleanup() {
 	// Wait for init so we don't race with the goroutine writing into gitDir.
 	<-m.initDone
+	// Take the mutex so any in-flight DiffFromBaseline / Commit / List /
+	// Restore finishes before we wipe the gitDir out from under it. Without
+	// this, RestartRewind on session-new races a polled /api/diffs request
+	// and surfaces "entry not found" / "reference not found" from go-git
+	// when the object store disappears mid-snapshot.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closed = true
 	if m.gitDir != "" {
 		os.RemoveAll(m.gitDir)
+		m.gitDir = ""
 	}
 }
 
@@ -614,6 +642,10 @@ func (m *Manager) DiffFromBaseline() ([]FileDiff, error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.closed {
+		return nil, ErrClosed
+	}
 
 	if m.baselineHash.IsZero() {
 		return nil, errors.New("no baseline available")

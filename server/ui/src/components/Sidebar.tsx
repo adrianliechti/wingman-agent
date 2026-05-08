@@ -50,12 +50,6 @@ export function Sidebar({
 		});
 	}, [subscribe, loadSessions]);
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: reload when session changes
-	useEffect(() => {
-		// eslint-disable-next-line react-hooks/set-state-in-effect -- reload session list when active session changes
-		loadSessions();
-	}, [currentSessionId, loadSessions]);
-
 	const handleDelete = async (e: React.MouseEvent, id: string) => {
 		e.stopPropagation();
 		await fetch(`/api/sessions/${id}`, { method: "DELETE" });
