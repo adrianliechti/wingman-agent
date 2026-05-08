@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 
-version: '3'
+version: "3"
 
 tasks:
   ui:
@@ -10,22 +10,16 @@ tasks:
       - npm install
       - npm run build
 
-  server:
-    desc: Run the server
-    deps: [ui]
-    cmds:
-      - go run . server
-
-  agent:
+  cli:
     desc: Run the agent TUI
     cmds:
       - go run .
 
-  install:
-    desc: Install wingman to GOPATH/bin or GOBIN
+  web:
+    desc: Run the server
     deps: [ui]
     cmds:
-      - dest="$(go env GOBIN)" && [ -z "$dest" ] && dest="$(go env GOPATH)/bin" && go build -o "$dest/wingman" .
+      - go run . server
 
   app:
     desc: Build and launch the Wails desktop app
@@ -34,3 +28,9 @@ tasks:
     cmds:
       - wails build
       - open "build/bin/Wingman Agent.app"
+
+  install:
+    desc: Install wingman to GOPATH/bin or GOBIN
+    deps: [ui]
+    cmds:
+      - dest="$(go env GOBIN)" && [ -z "$dest" ] && dest="$(go env GOPATH)/bin" && go build -o "$dest/wingman" .

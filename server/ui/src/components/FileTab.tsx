@@ -62,15 +62,15 @@ export function FileTab({ path, line, subscribe, onDeleted }: Props) {
 
 	if (loading) {
 		return (
-			<div className="flex items-center justify-center h-full text-fg-dim text-sm">
-				Loading...
+			<div className="flex items-center justify-center h-full text-fg-dim text-[12px]">
+				Loading…
 			</div>
 		);
 	}
 
 	if (!file) {
 		return (
-			<div className="flex items-center justify-center h-full text-fg-dim text-sm">
+			<div className="flex items-center justify-center h-full text-fg-dim text-[12px]">
 				Failed to load file
 			</div>
 		);

@@ -1,4 +1,4 @@
-import { History, Undo2 } from "lucide-react";
+import { ClipboardCopy, History, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { CheckpointEntry, ServerMessage } from "../types/protocol";
 
@@ -6,9 +6,15 @@ interface Props {
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
 }
 
+interface MenuState {
+	x: number;
+	y: number;
+	checkpoint: CheckpointEntry;
+}
+
 export function CheckpointsPanel({ subscribe }: Props) {
 	const [checkpoints, setCheckpoints] = useState<CheckpointEntry[]>([]);
-	const [restoring, setRestoring] = useState<string | null>(null);
+	const [menu, setMenu] = useState<MenuState | null>(null);
 
 	const load = useCallback(async () => {
 		try {
@@ -38,27 +44,48 @@ export function CheckpointsPanel({ subscribe }: Props) {
 		});
 	}, [subscribe, load]);
 
-	const restore = useCallback(
-		async (cp: CheckpointEntry) => {
-			const ok = window.confirm(
-				`Restore working tree to "${cp.message}"?\n\nThis will overwrite uncommitted changes.`,
+	useEffect(() => {
+		if (!menu) return;
+		const close = () => setMenu(null);
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape") close();
+		};
+		document.addEventListener("mousedown", close);
+		document.addEventListener("scroll", close, true);
+		document.addEventListener("keydown", onKey);
+		return () => {
+			document.removeEventListener("mousedown", close);
+			document.removeEventListener("scroll", close, true);
+			document.removeEventListener("keydown", onKey);
+		};
+	}, [menu]);
+
+	const handleRestore = async (cp: CheckpointEntry) => {
+		setMenu(null);
+		const ok = window.confirm(
+			`Restore working tree to "${cp.message}"?\n\nThis will overwrite uncommitted changes.`,
+		);
+		if (!ok) return;
+		await fetch(`/api/checkpoints/${encodeURIComponent(cp.hash)}/restore`, {
+			method: "POST",
+		});
+	};
+
+	const handleCopyHash = (cp: CheckpointEntry) => {
+		setMenu(null);
+		navigator.clipboard
+			.write([
+				new ClipboardItem({
+					"text/plain": new Blob([cp.hash], { type: "text/plain" }),
+				}),
+			])
+			.catch((e) =>
+				alert(`Copy failed: ${e instanceof Error ? e.message : String(e)}`),
 			);
-			if (!ok) return;
-			setRestoring(cp.hash);
-			try {
-				await fetch(
-					`/api/checkpoints/${encodeURIComponent(cp.hash)}/restore`,
-					{ method: "POST" },
-				);
-			} finally {
-				setRestoring(null);
-			}
-		},
-		[],
-	);
+	};
 
 	return (
-		<div className="flex flex-col h-full overflow-hidden bg-bg">
+		<div className="flex flex-col h-full overflow-hidden bg-bg relative">
 			<div className="h-8 px-3 flex items-center shrink-0">
 				<span className="text-[11px] text-fg-muted">Checkpoints</span>
 			</div>
@@ -73,7 +100,12 @@ export function CheckpointsPanel({ subscribe }: Props) {
 					return (
 						<div
 							key={cp.hash}
-							className="group flex items-center gap-2 mx-1 px-2 py-1.5 rounded text-[12px] text-fg-muted hover:bg-bg-hover hover:text-fg transition-colors"
+							className="flex items-center gap-2 mx-1 px-2 py-1.5 rounded text-[12px] text-fg-muted hover:bg-bg-hover hover:text-fg transition-colors cursor-default"
+							onContextMenu={(e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								setMenu({ x: e.clientX, y: e.clientY, checkpoint: cp });
+							}}
 							title={cp.hash}
 						>
 							<History
@@ -88,19 +120,56 @@ export function CheckpointsPanel({ subscribe }: Props) {
 									{cp.time}
 								</span>
 							</div>
-							<button
-								type="button"
-								className="w-5 h-5 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg cursor-pointer transition-colors opacity-0 group-hover:opacity-100 disabled:opacity-50"
-								onClick={() => restore(cp)}
-								disabled={restoring !== null}
-								title="Restore working tree to this checkpoint"
-							>
-								<Undo2 size={12} />
-							</button>
 						</div>
 					);
 				})}
 			</div>
+			{menu && (
+				<div
+					className="fixed z-100 min-w-[160px] bg-bg-elevated border border-border-subtle rounded-md shadow-2xl py-1 text-[12px]"
+					style={{ left: menu.x, top: menu.y }}
+					onMouseDown={(e) => e.stopPropagation()}
+					onContextMenu={(e) => e.preventDefault()}
+				>
+					<CheckpointMenuItem
+						icon={<ClipboardCopy size={12} />}
+						label="Copy hash"
+						onClick={() => handleCopyHash(menu.checkpoint)}
+					/>
+					<div className="my-1 border-t border-border-subtle" />
+					<CheckpointMenuItem
+						icon={<RotateCcw size={12} />}
+						label="Restore"
+						onClick={() => handleRestore(menu.checkpoint)}
+						danger
+					/>
+				</div>
+			)}
 		</div>
+	);
+}
+
+function CheckpointMenuItem({
+	icon,
+	label,
+	onClick,
+	danger,
+}: {
+	icon: React.ReactNode;
+	label: string;
+	onClick: () => void;
+	danger?: boolean;
+}) {
+	return (
+		<button
+			type="button"
+			className={`w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-bg-hover transition-colors ${danger ? "text-red-400 hover:text-red-300" : "text-fg-muted hover:text-fg"}`}
+			onClick={onClick}
+		>
+			<span className="w-3.5 flex items-center justify-center shrink-0">
+				{icon}
+			</span>
+			<span>{label}</span>
+		</button>
 	);
 }

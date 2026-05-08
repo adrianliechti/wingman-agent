@@ -7,6 +7,7 @@ import {
 	PanelLeftOpen,
 	PanelRightClose,
 	PanelRightOpen,
+	Plus,
 	X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -56,7 +57,7 @@ export default function App() {
 	const showProblems = capabilities?.lsp ?? false;
 	const [sessionId, setSessionId] = useState("");
 	const [rightTab, setRightTab] = useState<RightTab>("changes");
-	const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+	const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 	const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
 
 	// The server pushes its current session id on WS connect; mirror it locally
@@ -208,16 +209,26 @@ export default function App() {
 					<div className="h-10 flex items-stretch bg-bg shrink-0 overflow-x-auto">
 						<button
 							type="button"
-							className="flex items-center justify-center w-10 h-10 text-fg-dim hover:text-fg-muted cursor-pointer transition-colors shrink-0"
+							className="self-center flex items-center justify-center w-8 h-8 ml-1 rounded-md text-fg-dim hover:text-fg-muted hover:bg-bg-hover cursor-pointer transition-colors shrink-0"
 							onClick={() => setSidebarCollapsed((c) => !c)}
 							title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
 						>
 							{sidebarCollapsed ? (
-								<PanelLeftOpen size={15} />
+								<PanelLeftOpen size={13} />
 							) : (
-								<PanelLeftClose size={15} />
+								<PanelLeftClose size={13} />
 							)}
 						</button>
+						{sidebarCollapsed && (
+							<button
+								type="button"
+								className="self-center flex items-center justify-center w-8 h-8 rounded-md text-fg-dim hover:text-fg-muted hover:bg-bg-hover cursor-pointer transition-colors shrink-0"
+								onClick={handleNewSession}
+								title="New session"
+							>
+								<Plus size={13} />
+							</button>
+						)}
 						{tabs.map((tab) => {
 							const active = tab.id === activeTabId;
 							const Icon =
@@ -283,14 +294,14 @@ export default function App() {
 						)}
 						<button
 							type="button"
-							className="flex items-center justify-center w-10 h-10 text-fg-dim hover:text-fg-muted cursor-pointer transition-colors shrink-0"
+							className="self-center flex items-center justify-center w-8 h-8 mr-1 rounded-md text-fg-dim hover:text-fg-muted hover:bg-bg-hover cursor-pointer transition-colors shrink-0"
 							onClick={() => setRightPanelCollapsed((c) => !c)}
 							title={rightPanelCollapsed ? "Show panel" : "Hide panel"}
 						>
 							{rightPanelCollapsed ? (
-								<PanelRightOpen size={15} />
+								<PanelRightOpen size={13} />
 							) : (
-								<PanelRightClose size={15} />
+								<PanelRightClose size={13} />
 							)}
 						</button>
 					</div>
@@ -354,6 +365,7 @@ export default function App() {
 									<div className="flex-[3] min-h-0 overflow-hidden">
 										<DiffsPanel
 											onOpenDiff={openDiff}
+											onOpenFile={openFile}
 											subscribe={subscribe}
 										/>
 									</div>

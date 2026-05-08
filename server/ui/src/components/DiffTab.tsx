@@ -71,7 +71,7 @@ export function DiffTab({ path, subscribe, onDeleted }: Props) {
 	if (loading) {
 		return (
 			<div className="h-full flex items-center justify-center text-fg-dim text-[12px]">
-				Loading diff…
+				Loading…
 			</div>
 		);
 	}

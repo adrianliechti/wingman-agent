@@ -1,8 +1,12 @@
 package server
 
 import (
+	"encoding/json"
+	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -219,4 +223,182 @@ func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
 		Content:  string(data),
 		Language: lang,
 	})
+}
+
+// resolveWorkspacePath validates a relative path against traversal/absolute
+// escape and returns the absolute path under RootPath. Used by the mutating
+// handlers; the read-only handlers above stick with fs.FS rooted at Root.
+func (s *Server) resolveWorkspacePath(p string) (string, bool) {
+	if p == "" {
+		return "", false
+	}
+	cleaned := path.Clean(p)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || path.IsAbs(cleaned) {
+		return "", false
+	}
+	return filepath.Join(s.agent.RootPath, filepath.FromSlash(cleaned)), true
+}
+
+func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
+	abs, ok := s.resolveWorkspacePath(r.URL.Query().Get("path"))
+	if !ok {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	if err := os.RemoveAll(abs); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.sendMessage(FilesChangedEvent{})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleFileRename(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	fromAbs, ok := s.resolveWorkspacePath(body.From)
+	if !ok {
+		http.Error(w, "invalid from path", http.StatusBadRequest)
+		return
+	}
+	toAbs, ok := s.resolveWorkspacePath(body.To)
+	if !ok {
+		http.Error(w, "invalid to path", http.StatusBadRequest)
+		return
+	}
+
+	// Refuse to clobber an existing entry — rename is also used as the inline
+	// edit and the user expects an error rather than silent overwrite.
+	if _, err := os.Lstat(toAbs); err == nil {
+		http.Error(w, "destination already exists", http.StatusConflict)
+		return
+	}
+
+	if err := os.Rename(fromAbs, toAbs); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.sendMessage(FilesChangedEvent{})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	fromAbs, ok := s.resolveWorkspacePath(body.From)
+	if !ok {
+		http.Error(w, "invalid from path", http.StatusBadRequest)
+		return
+	}
+	toAbs, ok := s.resolveWorkspacePath(body.To)
+	if !ok {
+		http.Error(w, "invalid to path", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := os.Lstat(toAbs); err == nil {
+		http.Error(w, "destination already exists", http.StatusConflict)
+		return
+	}
+
+	info, err := os.Lstat(fromAbs)
+	if err != nil {
+		http.Error(w, "source not found", http.StatusNotFound)
+		return
+	}
+
+	if err := copyPath(fromAbs, toAbs, info); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.sendMessage(FilesChangedEvent{})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func copyPath(src, dst string, info os.FileInfo) error {
+	if info.IsDir() {
+		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			ei, err := e.Info()
+			if err != nil {
+				return err
+			}
+			if err := copyPath(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), ei); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Skip symlinks and other non-regular files; the file tree filters most
+	// of these out, but a hand-crafted request shouldn't be able to dereference
+	// a link out of the workspace.
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
+	abs, ok := s.resolveWorkspacePath(r.URL.Query().Get("path"))
+	if !ok {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+	if info.IsDir() {
+		http.Error(w, "path is a directory", http.StatusBadRequest)
+		return
+	}
+
+	name := filepath.Base(abs)
+	disposition := "attachment; filename=\"" + strings.ReplaceAll(name, "\"", "") + "\"; filename*=UTF-8''" + url.PathEscape(name)
+	w.Header().Set("Content-Disposition", disposition)
+	// Let http.ServeFile pick the Content-Type from the extension / sniff —
+	// the attachment disposition above forces a download regardless of type,
+	// and the real MIME is what the clipboard copy path needs.
+	http.ServeFile(w, r, abs)
 }
