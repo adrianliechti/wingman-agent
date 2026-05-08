@@ -31,12 +31,6 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 	const [input, setInput] = useState("");
 	const [files, setFiles] = useState<string[]>([]);
 	const [showPicker, setShowPicker] = useState(false);
-	// One-shot expand/collapse signal: bumping `tick` triggers each TurnView's
-	// override to snap to `open`. Per-turn clicks afterwards override again.
-	const [expandSignal, setExpandSignal] = useState<{
-		open: boolean;
-		tick: number;
-	} | null>(null);
 	const containerRef = useRef<HTMLDivElement>(null);
 	const contentRef = useRef<HTMLDivElement>(null);
 	const spacerRef = useRef<HTMLDivElement>(null);
@@ -115,6 +109,13 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 		pendingAnchorRef.current = visible ?? below ?? above;
 	}, [entries]);
 
+	// Set an anchor *target* (rather than capturing the current position): the
+	// apply step will scroll so that `id`'s top sits at `viewportTop` after
+	// commit. Used to bring the first working entry to the top on expand.
+	const setAnchorTarget = useCallback((id: string, viewportTop: number) => {
+		pendingAnchorRef.current = { id, viewportTop };
+	}, []);
+
 	const applyPendingAnchor = useCallback(() => {
 		const c = containerRef.current;
 		const content = contentRef.current;
@@ -131,14 +132,6 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 			writeScrollTop(c, c.scrollTop + delta);
 		}
 	}, [writeScrollTop]);
-
-	const toggleExpandAll = useCallback(() => {
-		captureAnchor();
-		setExpandSignal((prev) => ({
-			open: prev ? !prev.open : true,
-			tick: (prev?.tick ?? 0) + 1,
-		}));
-	}, [captureAnchor]);
 
 	const isActive = phase !== "idle";
 
@@ -341,16 +334,6 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 
 	return (
 		<div className="h-full relative overflow-hidden bg-bg">
-			{entries.length > 0 && (
-				<button
-					type="button"
-					onClick={toggleExpandAll}
-					className="absolute top-2 right-3 z-10 text-[11px] text-fg-dim hover:text-fg font-mono cursor-pointer px-1.5 py-0.5 rounded hover:bg-bg-hover"
-					title="Expand or collapse all turns"
-				>
-					{expandSignal?.open ? "collapse all" : "expand all"}
-				</button>
-			)}
 			<div
 				className="h-full overflow-y-auto pb-24 [overflow-anchor:none]"
 				ref={containerRef}
@@ -384,8 +367,8 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 										turn={turn}
 										isActive={isActive}
 										phase={phase}
-										expandSignal={expandSignal}
 										captureAnchor={captureAnchor}
+										setAnchorTarget={setAnchorTarget}
 										applyPendingAnchor={applyPendingAnchor}
 									/>
 								);
@@ -582,10 +565,11 @@ function buildTurns(entries: ChatEntry[]): Turn[] {
 			if (e.type === "user") continue;
 		}
 		const t = turns[turns.length - 1];
+		if (t.final) {
+			t.working.push(t.final);
+			t.final = null;
+		}
 		if (e.type === "assistant" || e.type === "error") {
-			// New terminal entry — bump the previous final (if any) into working
-			// so only the latest assistant text is treated as "the answer".
-			if (t.final) t.working.push(t.final);
 			t.final = e;
 		} else {
 			t.working.push(e);
@@ -606,15 +590,15 @@ function TurnView({
 	turn,
 	isActive,
 	phase,
-	expandSignal,
 	captureAnchor,
+	setAnchorTarget,
 	applyPendingAnchor,
 }: {
 	turn: Turn;
 	isActive: boolean;
 	phase: Phase;
-	expandSignal: { open: boolean; tick: number } | null;
 	captureAnchor: () => void;
+	setAnchorTarget: (id: string, viewportTop: number) => void;
 	applyPendingAnchor: () => void;
 }) {
 	// Collapsed when: turn is finished AND has a final answer AND has working
@@ -623,36 +607,27 @@ function TurnView({
 	// User clicks pin an override.
 	const canCollapse =
 		!isActive && turn.final !== null && turn.working.length > 0;
-	// Override is bound to the signal tick it was set against. A later signal
-	// bump (tick > override.tick) supersedes the override; a click made after
-	// a signal stamps itself with that signal's tick so the *next* signal will
-	// supersede it. This makes "expand all" → "collapse one" → "expand all"
-	// behave the way users expect without an effect or store of per-turn state.
-	const [override, setOverride] = useState<{
-		value: boolean;
-		tick: number;
-	} | null>(null);
-	const signalTick = expandSignal?.tick ?? 0;
-	const signalWins = signalTick > (override?.tick ?? 0);
-	const effective = signalWins ? expandSignal?.open : override?.value;
-	const expanded = effective ?? !canCollapse;
+	const [override, setOverride] = useState<boolean | null>(null);
+	const expanded = override ?? !canCollapse;
 	const setExpanded = (value: boolean) => {
-		// Snapshot pre-mutation scroll position so the apply effect below can
-		// keep the visible content stable across the per-turn collapse/expand.
-		captureAnchor();
-		setOverride({ value, tick: signalTick });
+		// On expand, target the first working entry to the top of the viewport
+		// (matches the pinned-user-message gap). On collapse, snapshot the
+		// current viewport position so surrounding content stays stable.
+		if (value && turn.working[0]) {
+			setAnchorTarget(turn.working[0].id, PIN_TOP_GAP);
+		} else {
+			captureAnchor();
+		}
+		setOverride(value);
 	};
 
-	// After the working area's commit lands (auto-collapse, manual click, or
-	// expand-all signal), restore any pending anchor. Child effects run before
-	// the parent's, so this fires before ChatPanel's spacer-trim sees the new
-	// scrollTop. Skip the initial mount — only transitions matter.
-	const skipFirstRef = useRef(true);
+	// After the working area's commit lands (auto-collapse or manual click),
+	// restore any pending anchor. Child effects run before the parent's, so
+	// this fires before ChatPanel's spacer-trim sees the new scrollTop.
+	const prevExpandedRef = useRef(expanded);
 	useLayoutEffect(() => {
-		if (skipFirstRef.current) {
-			skipFirstRef.current = false;
-			return;
-		}
+		if (prevExpandedRef.current === expanded) return;
+		prevExpandedRef.current = expanded;
 		applyPendingAnchor();
 	}, [expanded, applyPendingAnchor]);
 

@@ -22,10 +22,10 @@ tasks:
       - go run .
 
   install:
-    desc: Install wingman to GOPATH/bin
+    desc: Install wingman to GOPATH/bin or GOBIN
     deps: [ui]
     cmds:
-      - go install .
+      - dest="$(go env GOBIN)" && [ -z "$dest" ] && dest="$(go env GOPATH)/bin" && go build -o "$dest/wingman" .
 
   app:
     desc: Build and launch the Wails desktop app
