@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	clawtui "github.com/adrianliechti/wingman-agent/tui/claw"
 	codetui "github.com/adrianliechti/wingman-agent/tui/code"
 
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/claw"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/channel"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -43,6 +45,9 @@ func main() {
 		return
 	case "server":
 		runServer(ctx)
+		return
+	case "acp":
+		runACP(ctx)
 		return
 	case "claw":
 		runClaw(ctx)
@@ -86,6 +91,18 @@ func runServer(ctx context.Context) {
 	defer c.Close()
 
 	if err := server.New(ctx, c, *port).Run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runACP(ctx context.Context) {
+	// stdout is reserved for the ACP JSON-RPC stream — redirect any default
+	// slog writers (used by transitive deps like the openai and mcp SDKs)
+	// to stderr so a stray log line can't corrupt the protocol.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	if err := acp.Run(ctx, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -212,6 +229,7 @@ func printHelp(w io.Writer) {
 Usage:
   wingman [--resume [id]]      Launch the agent TUI
   wingman server [-port N]     Run the web UI server
+  wingman acp                  Run as an ACP stdio server
   wingman claw                 Run the claw multi-agent runner
   wingman proxy [-port N]      Run the API proxy + dashboard (requires WINGMAN_URL)
   wingman run <target> [args]  Run an external agent through wingman
