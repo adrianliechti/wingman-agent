@@ -18,6 +18,11 @@ interface Props {
 	// Renders a spinner so the user sees which background sessions are busy
 	// even while another one is on screen.
 	runningSessionIds?: Set<string>;
+	// canCreateNew controls whether the "+" button is shown. False when
+	// clicking would be a no-op (no active session, or the active one is
+	// already empty — in both cases the user starts a session by typing,
+	// not by clicking).
+	canCreateNew?: boolean;
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
 }
 
@@ -27,6 +32,7 @@ export function Sidebar({
 	onNewSession,
 	onSessionDeleted,
 	runningSessionIds,
+	canCreateNew,
 	subscribe,
 }: Props) {
 	const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -71,14 +77,16 @@ export function Sidebar({
 				<span className="text-[11px] font-medium text-fg-dim uppercase tracking-wider">
 					Sessions
 				</span>
-				<button
-					type="button"
-					onClick={onNewSession}
-					className="w-7 h-7 flex items-center justify-center rounded-md text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-					title="New session"
-				>
-					<Plus size={14} />
-				</button>
+				{canCreateNew && (
+					<button
+						type="button"
+						onClick={onNewSession}
+						className="w-7 h-7 flex items-center justify-center rounded-md text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
+						title="New session"
+					>
+						<Plus size={14} />
+					</button>
+				)}
 			</div>
 
 			{/* Session List */}

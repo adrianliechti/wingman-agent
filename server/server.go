@@ -52,17 +52,16 @@ type Server struct {
 
 	sessionsDir string
 
-	// Sessions held in memory. sessionsOrder keeps iteration deterministic
-	// across reconnects so the UI's auto-pick of "first session" is stable.
+	// Sessions + the shared model/effort selection. Sessions read model
+	// and effort via late-bound Config.Model/Effort (called inside agent.
+	// Send), but neither is hot enough to warrant its own mutex.
+	// sessionsOrder keeps iteration deterministic across reconnects so
+	// the UI's auto-pick of "first session" is stable.
 	mu            sync.Mutex
 	sessions      map[string]*Session
 	sessionsOrder []string
-
-	// Shared model/effort selection. Sessions read these via late-bound
-	// Config.Model/Effort, so changing the picker doesn't need to iterate.
-	cfgMu  sync.Mutex
-	model  string
-	effort string
+	model         string
+	effort        string
 
 	// WebSocket fan-out. Every event goes to every connected client tagged
 	// with its session id (or untagged for server-level events); the React
@@ -117,11 +116,7 @@ func New(ctx context.Context, workDir string, port int) (*Server, error) {
 
 // Close releases the workspace (Root, MCP, LSP, Rewind, scratch). Sessions
 // share these resources, so individual session Close is now a no-op.
-func (s *Server) Close() {
-	if s.workspace != nil {
-		s.workspace.Close()
-	}
-}
+func (s *Server) Close() { s.workspace.Close() }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -186,7 +181,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/checkpoints", s.handleCheckpoints)
 	mux.HandleFunc("POST /api/checkpoints/{hash}/restore", s.handleCheckpointRestore)
 	mux.HandleFunc("GET /api/sessions", s.handleSessions)
-	mux.HandleFunc("POST /api/sessions/new", s.handleNewSession)
 	mux.HandleFunc("POST /api/sessions/{id}/load", s.handleLoadSession)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /api/model", s.handleModel)
@@ -208,17 +202,56 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.Handle("/", fileServer)
 }
 
-func (s *Server) registerSession(sess *Session) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sessions[sess.ID] = sess
-	s.sessionsOrder = append(s.sessionsOrder, sess.ID)
-}
-
 func (s *Server) getSession(id string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sessions[id]
+}
+
+// register stores sess in the map + order slice. Caller must hold s.mu —
+// both call sites (getOrCreateSession, loadSession) already do, since
+// they're the lookup-or-create transaction.
+func (s *Server) register(sess *Session) {
+	s.sessions[sess.ID] = sess
+	s.sessionsOrder = append(s.sessionsOrder, sess.ID)
+}
+
+// getOrCreateSession returns the in-memory session for id, creating one
+// (with that id) if it doesn't exist yet. Used by the WS Send dispatch:
+// "+" in the UI is a client-side reset, so the first MsgSend with a fresh
+// id is where the server actually allocates the conversation. The whole
+// lookup-or-create happens under s.mu so concurrent sends with the same
+// id can't both create agents and orphan one.
+func (s *Server) getOrCreateSession(id string) *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[id]; ok {
+		return sess
+	}
+	sess := s.newSession(id)
+	s.register(sess)
+	return sess
+}
+
+// loadSession returns the in-memory session for id, loading it from disk
+// into memory if necessary. Like getOrCreateSession, the entire lookup-
+// or-load happens under s.mu so two simultaneous loads can't race.
+// Returns an error only when the id isn't in memory and isn't on disk.
+func (s *Server) loadSession(id string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[id]; ok {
+		return sess, nil
+	}
+	saved, err := session.Load(s.sessionsDir, id)
+	if err != nil {
+		return nil, err
+	}
+	sess := s.newSession(id)
+	sess.Agent.Messages = saved.State.Messages
+	sess.Agent.Usage = saved.State.Usage
+	s.register(sess)
+	return sess, nil
 }
 
 // allSessions returns a snapshot of every in-memory session in creation
@@ -273,27 +306,27 @@ func (s *Server) send(f Frame) {
 }
 
 func (s *Server) currentModel() string {
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.model
 }
 
 func (s *Server) currentEffort() string {
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.effort
 }
 
 func (s *Server) setModel(model string) {
-	s.cfgMu.Lock()
+	s.mu.Lock()
 	s.model = model
-	s.cfgMu.Unlock()
+	s.mu.Unlock()
 }
 
 func (s *Server) setEffort(effort string) {
-	s.cfgMu.Lock()
+	s.mu.Lock()
 	s.effort = effort
-	s.cfgMu.Unlock()
+	s.mu.Unlock()
 }
 
 // autoSelectModel picks a default model on startup if none is set. Prefers
@@ -342,9 +375,14 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// In-memory sessions that don't have an on-disk file yet only show up
+	// once they've got messages — otherwise the sidebar would flash with
+	// every transient "+"-style placeholder. The window between the first
+	// user message landing in agent.Messages and session.Save() at end of
+	// turn is microseconds; sidebar refetches in that window catch them.
 	nowStr := time.Now().Format(time.RFC3339)
 	for _, sess := range s.allSessions() {
-		if seen[sess.ID] {
+		if seen[sess.ID] || len(sess.Agent.Messages) == 0 {
 			continue
 		}
 		result = append(result, SessionEntry{
@@ -363,19 +401,6 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
-func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
-	sess := s.newSession(newSessionID())
-	s.registerSession(sess)
-	// Brand-new sessions are empty by definition. No session_state push —
-	// it would race the lazy-create-on-send flow (client appends user entry
-	// after the POST returns, server's empty-snapshot would erase it). The
-	// creating client creates its slot locally on receiving the {id}; other
-	// clients get one when they click the sidebar entry.
-	s.broadcast(Frame{Type: EvtSessionsChanged})
-
-	writeJSON(w, map[string]string{"id": sess.ID})
-}
-
 func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -383,26 +408,17 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess := s.getSession(id)
-	if sess == nil {
-		// Not in memory — load from disk into a new in-memory session so
-		// further sends in this session resume correctly.
-		saved, err := session.Load(s.sessionsDir, id)
-		if err != nil {
-			http.Error(w, "session not found", http.StatusNotFound)
-			return
-		}
-		newSess := s.newSession(id)
-		newSess.Agent.Messages = saved.State.Messages
-		newSess.Agent.Usage = saved.State.Usage
-		s.registerSession(newSess)
-		sess = newSess
-		s.broadcast(Frame{Type: EvtSessionsChanged})
+	sess, err := s.loadSession(id)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
 	}
 
 	// Push full state via WS so every tab observing this session sees the
 	// same snapshot the requesting tab will. The HTTP response is just an
-	// ack — the client doesn't need the payload here.
+	// ack — the client doesn't need the payload here. No SessionsChanged
+	// broadcast: disk sessions are already in the sidebar list, so loading
+	// one into memory doesn't change what's listed.
 	sess.sendState()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -428,7 +444,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if inMem {
-		sess.close()
+		sess.cancel()
 	}
 
 	if err := session.Delete(s.sessionsDir, id); err != nil && !os.IsNotExist(err) {

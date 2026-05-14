@@ -5,7 +5,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	iofs "io/fs"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,11 +27,13 @@ import (
 //go:embed skills/*/SKILL.md
 var bundledFS embed.FS
 
-// UI is the interface a frontend must provide to the coding agent.
+// UI is the elicitation hook a frontend can provide to handle ask/confirm
+// prompts from tools (e.g. shell's dangerous-command confirmation). Pass
+// nil to NewAgent to silently accept the safe defaults (Confirm → true,
+// Ask → "").
 type UI interface {
 	Ask(ctx context.Context, message string) (string, error)
 	Confirm(ctx context.Context, message string) (bool, error)
-	StatusUpdate(status string)
 }
 
 // Workspace owns the resources shared by every Agent (conversation) bound
@@ -167,9 +169,6 @@ func (w *Workspace) InitMCP(ctx context.Context) error {
 
 // Close tears down every workspace-owned resource.
 func (w *Workspace) Close() {
-	if w == nil {
-		return
-	}
 	if w.MCP != nil {
 		w.MCP.Close()
 	}
@@ -322,7 +321,7 @@ func isSupportedWorkspace(dir string) bool {
 	done := make(chan struct{})
 
 	go func() {
-		filepath.WalkDir(dir, func(_ string, _ iofs.DirEntry, _ error) error {
+		filepath.WalkDir(dir, func(_ string, _ fs.DirEntry, _ error) error {
 			return nil
 		})
 		close(done)

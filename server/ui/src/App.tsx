@@ -126,21 +126,15 @@ export default function App() {
 		[activeTabId],
 	);
 
-	const createSession = useCallback(async (): Promise<string | undefined> => {
-		const res = await fetch("/api/sessions/new", { method: "POST" });
-		if (!res.ok) return undefined;
-		const data = (await res.json()) as { id?: string };
-		return data.id;
-	}, []);
-
-	const handleNewSession = useCallback(async () => {
-		const id = await createSession();
-		if (!id) return;
-		// Server pushes session_state for the new slot via WS — no need to
-		// ensureSession here; the slot will materialize when the event lands.
-		setSessionId(id);
+	const handleNewSession = useCallback(() => {
+		// Mint the new session id locally and switch to it. Using a UUID (vs.
+		// clearing sessionId) keeps the auto-pick effect inert — otherwise
+		// it would land on the first existing session and the chat would
+		// re-fill with old content. The server learns about this id when
+		// the user actually sends a message (lazy-create in handleSend).
+		setSessionId(crypto.randomUUID());
 		setActiveTabId("chat");
-	}, [createSession]);
+	}, []);
 
 	const handleSessionDeleted = useCallback(
 		(id: string) => {
@@ -173,20 +167,18 @@ export default function App() {
 	);
 
 	const handleSend = useCallback(
-		async (text: string, files?: string[]) => {
+		(text: string, files?: string[]) => {
+			// Lazy-create: when there's no active session, mint a fresh UUID
+			// and use it for the send. The server adopts unknown ids on first
+			// MsgSend, so this materializes the conversation on the round-trip.
 			let sid = sessionId;
-			// Lazy-create on first send: clicking "+" and then typing is two
-			// steps; this collapses it. The slot will materialize via the
-			// session_state event from the server.
 			if (!sid) {
-				const id = await createSession();
-				if (!id) return;
-				sid = id;
-				setSessionId(id);
+				sid = crypto.randomUUID();
+				setSessionId(sid);
 			}
 			sendChat(sid, text, files);
 		},
-		[createSession, sendChat, sessionId],
+		[sendChat, sessionId],
 	);
 
 	const handleCancel = useCallback(() => {
@@ -204,6 +196,14 @@ export default function App() {
 		Object.values(sessions)
 			.filter((s) => s.phase !== "idle")
 			.map((s) => s.id),
+	);
+
+	// "+" only makes sense when the active session has real content. Without
+	// it, clicking either reuses the current empty session or has nothing
+	// meaningful to do — so we hide it. The user creates the first session
+	// by typing (lazy-create on send) or by picking one from the sidebar.
+	const canCreateNew = !!(
+		sessionId && (sessions[sessionId]?.entries.length ?? 0) > 0
 	);
 
 	return (
@@ -234,6 +234,7 @@ export default function App() {
 							onNewSession={handleNewSession}
 							onSessionDeleted={handleSessionDeleted}
 							runningSessionIds={runningSessionIds}
+							canCreateNew={canCreateNew}
 							subscribe={subscribe}
 						/>
 					</div>
@@ -254,7 +255,7 @@ export default function App() {
 								<PanelLeftClose size={13} />
 							)}
 						</button>
-						{sidebarCollapsed && (
+						{sidebarCollapsed && canCreateNew && (
 							<button
 								type="button"
 								className="self-center flex items-center justify-center w-8 h-8 rounded-md text-fg-dim hover:text-fg-muted hover:bg-bg-hover cursor-pointer transition-colors shrink-0"

@@ -33,10 +33,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.wsMu.Unlock()
 	}()
 
-	// On connect: announce every in-memory session as one session_state
-	// frame. Sessions are now lightweight (workspace owns the shared
-	// resources), so listing every one of them is cheap.
+	// On connect: announce every in-memory session that has actual content.
+	// Skipping empty ones avoids surfacing the brief window between
+	// getOrCreateSession registering a session and agent.Send appending
+	// the first user message.
 	for _, sess := range s.allSessions() {
+		if len(sess.Agent.Messages) == 0 {
+			continue
+		}
 		sess.sendState()
 	}
 
@@ -54,16 +58,22 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		sess := s.getSession(msg.SessionID)
-		if sess == nil {
-			continue
-		}
-
 		switch msg.Type {
 		case MsgSend:
+			// Auto-create on first send: "+" is a client-side reset that
+			// doesn't hit the server, so the session is unknown to us until
+			// the user actually sends. The client supplies the id (a UUID
+			// it generated); we adopt it.
+			if msg.SessionID == "" {
+				continue
+			}
+			sess := s.getOrCreateSession(msg.SessionID)
 			go s.handleSend(sess, msg)
+
 		case MsgCancel:
-			sess.cancel()
+			if sess := s.getSession(msg.SessionID); sess != nil {
+				sess.cancel()
+			}
 		}
 	}
 }

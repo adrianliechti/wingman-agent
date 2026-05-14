@@ -4,8 +4,6 @@ import (
 	"context"
 	"sync"
 
-	"github.com/google/uuid"
-
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
@@ -22,10 +20,6 @@ type Session struct {
 	mu           sync.Mutex
 	streamCancel context.CancelFunc
 	phase        string // "idle" | "thinking" | "streaming" | "tool_running"
-}
-
-func newSessionID() string {
-	return uuid.New().String()
 }
 
 // newSession spins up a fresh Agent against the server's Workspace and
@@ -85,6 +79,8 @@ func (sess *Session) currentPhase() string {
 }
 
 // cancel halts any in-flight Send for this session. No-op if idle.
+// Sessions don't own any resources beyond their stream context (the
+// workspace's MCP/LSP/Rewind are shared), so cancel is the entire shutdown.
 func (sess *Session) cancel() {
 	sess.mu.Lock()
 	cancel := sess.streamCancel
@@ -92,10 +88,4 @@ func (sess *Session) cancel() {
 	if cancel != nil {
 		cancel()
 	}
-}
-
-// close cancels any in-flight stream. The session's Agent shares the
-// workspace's resources; there's nothing else to release.
-func (sess *Session) close() {
-	sess.cancel()
 }

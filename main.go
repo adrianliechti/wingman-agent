@@ -84,6 +84,7 @@ func runServer(ctx context.Context) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	defer srv.Close()
 
 	if err := srv.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

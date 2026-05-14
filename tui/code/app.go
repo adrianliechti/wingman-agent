@@ -111,10 +111,6 @@ func New(ctx context.Context, agent *code.Agent, sessionID string) *App {
 		mouseEnabled: true,
 	}
 
-	// Override the default Instructions wiring with one that consults the
-	// TUI's currentMode (the prompt picker can flip plan/agent at runtime).
-	agent.Config.Instructions = a.currentInstructions
-
 	return a
 }
 
