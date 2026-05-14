@@ -75,7 +75,12 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fsys := s.agent.Root.FS()
+	a := s.anyAgent()
+	if a == nil {
+		http.Error(w, "no workspace", http.StatusServiceUnavailable)
+		return
+	}
+	fsys := a.Root.FS()
 
 	entries, err := fs.ReadDir(fsys, dirPath)
 	if err != nil {
@@ -130,7 +135,12 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 
 	const limit = 50
 
-	fsys := s.agent.Root.FS()
+	a := s.anyAgent()
+	if a == nil {
+		http.Error(w, "no workspace", http.StatusServiceUnavailable)
+		return
+	}
+	fsys := a.Root.FS()
 
 	type hit struct {
 		Path string `json:"path"`
@@ -194,7 +204,12 @@ func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fsys := s.agent.Root.FS()
+	a := s.anyAgent()
+	if a == nil {
+		http.Error(w, "no workspace", http.StatusServiceUnavailable)
+		return
+	}
+	fsys := a.Root.FS()
 
 	data, err := fs.ReadFile(fsys, filePath)
 	if err != nil {
@@ -236,7 +251,11 @@ func (s *Server) resolveWorkspacePath(p string) (string, bool) {
 	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || path.IsAbs(cleaned) {
 		return "", false
 	}
-	return filepath.Join(s.agent.RootPath, filepath.FromSlash(cleaned)), true
+	a := s.anyAgent()
+	if a == nil {
+		return "", false
+	}
+	return filepath.Join(a.RootPath, filepath.FromSlash(cleaned)), true
 }
 
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
@@ -251,7 +270,7 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.sendMessage(FilesChangedEvent{})
+	s.broadcast(FilesChangedEvent{})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -288,7 +307,7 @@ func (s *Server) handleFileRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.sendMessage(FilesChangedEvent{})
+	s.broadcast(FilesChangedEvent{})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -329,7 +348,7 @@ func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.sendMessage(FilesChangedEvent{})
+	s.broadcast(FilesChangedEvent{})
 	w.WriteHeader(http.StatusNoContent)
 }
 

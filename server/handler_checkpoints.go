@@ -5,12 +5,13 @@ import (
 )
 
 func (s *Server) handleCheckpoints(w http.ResponseWriter, r *http.Request) {
-	if s.agent.Rewind == nil {
+	sess := s.sessionFromRequest(r)
+	if sess == nil || sess.Agent.Rewind == nil {
 		writeJSON(w, []CheckpointEntry{})
 		return
 	}
 
-	checkpoints, err := s.agent.Rewind.List()
+	checkpoints, err := sess.Agent.Rewind.List()
 	if err != nil {
 		writeJSON(w, []CheckpointEntry{})
 		return
@@ -35,18 +36,22 @@ func (s *Server) handleCheckpointRestore(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if s.agent.Rewind == nil {
+	sess := s.sessionFromRequest(r)
+	if sess == nil || sess.Agent.Rewind == nil {
 		http.Error(w, "rewind not available", http.StatusServiceUnavailable)
 		return
 	}
 
-	if err := s.agent.Rewind.Restore(hash); err != nil {
+	if err := sess.Agent.Rewind.Restore(hash); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Working tree just changed; nudge the UI even though fsnotify will fire too.
-	s.sendMessage(DiffsChangedEvent{})
+	// Working tree just changed; nudge this session's diffs view and the
+	// shared file tree (other sessions get their own DiffsChanged on next
+	// poll fingerprint flip).
+	sess.sendMessage(DiffsChangedEvent{})
+	s.broadcast(FilesChangedEvent{})
 
 	w.WriteHeader(http.StatusNoContent)
 }

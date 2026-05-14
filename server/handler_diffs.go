@@ -12,12 +12,13 @@ import (
 )
 
 func (s *Server) handleDiffs(w http.ResponseWriter, r *http.Request) {
-	if s.agent.Rewind == nil {
+	sess := s.sessionFromRequest(r)
+	if sess == nil || sess.Agent.Rewind == nil {
 		writeJSON(w, []DiffEntry{})
 		return
 	}
 
-	diffs, err := s.agent.Rewind.DiffFromBaseline()
+	diffs, err := sess.Agent.Rewind.DiffFromBaseline()
 	if err != nil {
 		// ErrClosed means the manager was torn down (RestartRewind on
 		// session-new) while this poll was in flight. Silently return empty;
@@ -62,7 +63,8 @@ func (s *Server) handleDiffs(w http.ResponseWriter, r *http.Request) {
 // added file removes it. Per-file scope is what makes this distinct from
 // /api/checkpoints/{hash}/restore, which rolls back the whole working tree.
 func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
-	if s.agent.Rewind == nil {
+	sess := s.sessionFromRequest(r)
+	if sess == nil || sess.Agent.Rewind == nil {
 		http.Error(w, "rewind not available", http.StatusServiceUnavailable)
 		return
 	}
@@ -74,7 +76,7 @@ func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
 	}
 	relPath := r.URL.Query().Get("path")
 
-	diffs, err := s.agent.Rewind.DiffFromBaseline()
+	diffs, err := sess.Agent.Rewind.DiffFromBaseline()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -109,8 +111,8 @@ func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.sendMessage(DiffsChangedEvent{})
-	s.sendMessage(FilesChangedEvent{})
+	sess.sendMessage(DiffsChangedEvent{})
+	s.broadcast(FilesChangedEvent{})
 
 	w.WriteHeader(http.StatusNoContent)
 }

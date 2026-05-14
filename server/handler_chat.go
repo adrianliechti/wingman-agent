@@ -7,56 +7,49 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/coder/websocket"
+
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
-
-	"github.com/coder/websocket"
 )
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // Allow connections from any origin
+		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		return
 	}
 	defer conn.CloseNow()
 
-	// Set as active connection
 	s.wsMu.Lock()
-	s.wsConn = conn
+	s.wsConns[conn] = struct{}{}
 	s.wsMu.Unlock()
 
 	defer func() {
 		s.wsMu.Lock()
-		s.wsConn = nil
+		delete(s.wsConns, conn)
 		s.wsMu.Unlock()
 	}()
 
-	// Send current session id so the client can match it against sidebar
-	// entries (e.g. to detect when the user deletes the active session).
-	s.sendMessage(SessionEvent{ID: s.sessionID})
-
-	// Send current messages on connect
-	messages := convertMessages(s.agent.Messages)
-	if len(messages) > 0 {
-		s.sendMessage(MessagesEvent{Messages: messages})
+	// On connect: announce every in-memory session so the client can hydrate
+	// its per-session state without an extra REST roundtrip per session.
+	for _, sess := range s.allSessions() {
+		sess.sendMessage(SessionEvent{ID: sess.ID})
+		if msgs := convertMessages(sess.Agent.Messages); len(msgs) > 0 {
+			sess.sendMessage(MessagesEvent{Messages: msgs})
+		}
+		u := sess.Agent.Usage
+		if u.InputTokens > 0 || u.OutputTokens > 0 {
+			sess.sendMessage(UsageEvent{
+				InputTokens:  u.InputTokens,
+				CachedTokens: u.CachedTokens,
+				OutputTokens: u.OutputTokens,
+			})
+		}
+		sess.sendMessage(PhaseEvent{Phase: "idle"})
 	}
-
-	// Send current usage
-	usage := s.agent.Usage
-	if usage.InputTokens > 0 || usage.OutputTokens > 0 {
-		s.sendMessage(UsageEvent{
-			InputTokens:  usage.InputTokens,
-			CachedTokens: usage.CachedTokens,
-			OutputTokens: usage.OutputTokens,
-		})
-	}
-
-	// Send model info
-	s.sendMessage(PhaseEvent{Phase: "idle"})
 
 	ctx := r.Context()
 
@@ -71,92 +64,77 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		sess := s.getSession(msg.SessionID)
+		if sess == nil {
+			continue
+		}
+
 		switch msg.Type {
 		case MsgSend:
-			go s.handleSend(ctx, msg)
-
+			go s.handleSend(ctx, sess, msg)
 		case MsgCancel:
-			s.wsMu.Lock()
-			if s.streamCancel != nil {
-				s.streamCancel()
-			}
-			s.wsMu.Unlock()
-
-		case MsgPromptResponse:
-			select {
-			case s.promptCh <- msg.Approved:
-			default:
-			}
-
-		case MsgAskResponse:
-			select {
-			case s.askCh <- msg.Answer:
-			default:
-			}
+			sess.cancel()
 		}
 	}
 }
 
-func (s *Server) handleSend(ctx context.Context, msg ClientMessage) {
+func (s *Server) handleSend(ctx context.Context, sess *Session, msg ClientMessage) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Atomic claim of the stream slot. agent.Send is not concurrent-safe per
+	// agent (it mutates Messages), and two WS connections could otherwise
+	// both race past a check-then-act busy guard.
+	sess.mu.Lock()
+	if sess.streamCancel != nil {
+		sess.mu.Unlock()
+		return
+	}
+	sess.streamCancel = cancel
+	sess.mu.Unlock()
+
+	defer func() {
+		sess.mu.Lock()
+		sess.streamCancel = nil
+		sess.mu.Unlock()
+	}()
+
 	var input []agent.Content
 
 	if msg.Text != "" {
-		// If the message starts with a slash command that matches one of the
-		// agent's skills, replace the user text with the rendered skill content
-		// (mirrors the CLI's invokeSkill flow in app/app_ui.go:652).
 		text := s.resolveSkill(msg.Text)
 		input = append(input, agent.Content{Text: text})
 	}
 
-	// Add file references as context
 	for _, f := range msg.Files {
 		input = append(input, agent.Content{Text: fmt.Sprintf("[File: %s]", f)})
 	}
 
-	streamCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-
-	s.wsMu.Lock()
-	s.streamCancel = cancel
-	s.streamDone = done
-	s.wsMu.Unlock()
-
-	defer func() {
-		s.wsMu.Lock()
-		s.streamCancel = nil
-		s.streamDone = nil
-		s.wsMu.Unlock()
-		close(done)
-	}()
-
-	// Track the last sent phase so we only emit transitions, not one frame
-	// per content chunk. The client just calls setPhase on each event, so
-	// repeats are pure noise.
 	currentPhase := ""
 	setPhase := func(p string) {
 		if p == currentPhase {
 			return
 		}
 		currentPhase = p
-		s.sendMessage(PhaseEvent{Phase: p})
+		sess.sendMessage(PhaseEvent{Phase: p})
 	}
 
 	setPhase("thinking")
 
-	for msg, err := range s.agent.Send(streamCtx, input) {
+	for evMsg, err := range sess.Agent.Send(streamCtx, input) {
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				s.sendMessage(ErrorEvent{Message: "Cancelled"})
+				sess.sendMessage(ErrorEvent{Message: "Cancelled"})
 			} else {
-				s.sendMessage(ErrorEvent{Message: err.Error()})
+				sess.sendMessage(ErrorEvent{Message: err.Error()})
 			}
 			break
 		}
 
-		for _, c := range msg.Content {
+		for _, c := range evMsg.Content {
 			switch {
 			case c.ToolCall != nil:
-				s.sendMessage(ToolCallEvent{
+				sess.sendMessage(ToolCallEvent{
 					ID:   c.ToolCall.ID,
 					Name: c.ToolCall.Name,
 					Args: c.ToolCall.Args,
@@ -165,7 +143,7 @@ func (s *Server) handleSend(ctx context.Context, msg ClientMessage) {
 				setPhase("tool_running")
 
 			case c.ToolResult != nil:
-				s.sendMessage(ToolResultEvent{
+				sess.sendMessage(ToolResultEvent{
 					ID:      c.ToolResult.ID,
 					Name:    c.ToolResult.Name,
 					Content: c.ToolResult.Content,
@@ -173,85 +151,52 @@ func (s *Server) handleSend(ctx context.Context, msg ClientMessage) {
 
 			case c.Reasoning != nil && c.Reasoning.Summary != "":
 				setPhase("thinking")
-				s.sendMessage(ReasoningDeltaEvent{
+				sess.sendMessage(ReasoningDeltaEvent{
 					ID:   c.Reasoning.ID,
 					Text: c.Reasoning.Summary,
 				})
 
 			case c.Text != "":
 				setPhase("streaming")
-				s.sendMessage(TextDeltaEvent{Text: c.Text})
+				sess.sendMessage(TextDeltaEvent{Text: c.Text})
 			}
 		}
 
-		// Send usage updates
-		usage := s.agent.Usage
-		s.sendMessage(UsageEvent{
-			InputTokens:  usage.InputTokens,
-			CachedTokens: usage.CachedTokens,
-			OutputTokens: usage.OutputTokens,
+		u := sess.Agent.Usage
+		sess.sendMessage(UsageEvent{
+			InputTokens:  u.InputTokens,
+			CachedTokens: u.CachedTokens,
+			OutputTokens: u.OutputTokens,
 		})
 	}
 
-	// The agent likely touched files this turn — the FileTree refetches
-	// even in scratch mode, where there's no watcher to fire this for us.
-	s.sendMessage(FilesChangedEvent{})
+	sess.sendMessage(FilesChangedEvent{})
 
-	// Refresh diffs and diagnostics on supported workspaces. The checkpoint
-	// commit walks the worktree and would block turn-end on a large repo,
-	// so run it in the background and announce once it lands.
-	if s.agent.Rewind != nil {
+	if sess.Agent.Rewind != nil {
 		commitMsg := msg.Text
 		if commitMsg == "" {
 			commitMsg = "<unknown>"
 		}
 		go func() {
-			if err := s.agent.Rewind.Commit(commitMsg); err == nil {
-				s.sendMessage(CheckpointsChangedEvent{})
+			if err := sess.Agent.Rewind.Commit(commitMsg); err == nil {
+				sess.sendMessage(CheckpointsChangedEvent{})
 			}
 		}()
-		s.sendMessage(DiffsChangedEvent{})
+		sess.sendMessage(DiffsChangedEvent{})
 	}
-	if s.agent.LSP != nil {
-		s.sendMessage(DiagnosticsChangedEvent{})
+	if sess.Agent.LSP != nil {
+		s.broadcast(DiagnosticsChangedEvent{})
 	}
 
-	// Save session and notify the sidebar so the new/updated entry shows up
-	// without waiting for the periodic poll.
 	state := agent.State{
-		Messages: s.agent.Messages,
-		Usage:    s.agent.Usage,
+		Messages: sess.Agent.Messages,
+		Usage:    sess.Agent.Usage,
 	}
-	if err := session.Save(s.sessionsDir, s.sessionID, state); err == nil && len(state.Messages) > 0 {
-		s.sendMessage(SessionsChangedEvent{})
+	if err := session.Save(s.sessionsDir, sess.ID, state); err == nil && len(state.Messages) > 0 {
+		s.broadcast(SessionsChangedEvent{})
 	}
 
-	s.sendMessage(DoneEvent{})
+	sess.sendMessage(DoneEvent{})
 	setPhase("idle")
 }
 
-func (s *Server) autoSelectModel(ctx context.Context) {
-	if s.agent.Config.Model != nil && s.agent.Model() != "" {
-		return
-	}
-
-	models, err := s.agent.Models(ctx)
-	if err != nil {
-		return
-	}
-
-	for _, allowed := range code.AvailableModels {
-		for _, model := range models {
-			if model.ID == allowed.ID {
-				modelID := model.ID
-				s.agent.Config.Model = func() string { return modelID }
-				return
-			}
-		}
-	}
-
-	if len(models) > 0 {
-		modelID := models[0].ID
-		s.agent.Config.Model = func() string { return modelID }
-	}
-}

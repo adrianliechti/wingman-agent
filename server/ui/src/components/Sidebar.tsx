@@ -1,4 +1,4 @@
-import { MessageSquare, Plus, X } from "lucide-react";
+import { Loader2, MessageSquare, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { ServerMessage } from "../types/protocol";
 
@@ -14,6 +14,10 @@ interface Props {
 	onSessionSelect: (id: string) => void;
 	onNewSession: () => void;
 	onSessionDeleted?: (id: string) => void;
+	// Set of session ids with an active phase (thinking/streaming/tool_running).
+	// Renders a spinner so the user sees which background sessions are busy
+	// even while another one is on screen.
+	runningSessionIds?: Set<string>;
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
 }
 
@@ -22,6 +26,7 @@ export function Sidebar({
 	onSessionSelect,
 	onNewSession,
 	onSessionDeleted,
+	runningSessionIds,
 	subscribe,
 }: Props) {
 	const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -104,7 +109,11 @@ export function Sidebar({
 									onClick={() => onSessionSelect(s.id)}
 									title={s.title || s.id}
 								>
+									{runningSessionIds?.has(s.id) ? (
+									<Loader2 size={12} className="shrink-0 text-accent animate-spin" />
+								) : (
 									<MessageSquare size={12} className="shrink-0 text-fg-dim" />
+								)}
 									<div className="min-w-0 flex-1">
 										<div className="truncate text-[12px] leading-snug">
 											{displayTitle}

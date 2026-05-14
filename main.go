@@ -78,14 +78,13 @@ func runServer(ctx context.Context) {
 		os.Exit(1)
 	}
 
-	c, err := code.New(wd, nil)
+	srv, err := server.New(ctx, wd, *port)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer c.Close()
 
-	if err := server.New(ctx, c, *port).Run(ctx); err != nil {
+	if err := srv.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

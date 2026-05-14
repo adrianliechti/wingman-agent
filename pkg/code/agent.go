@@ -32,6 +32,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/google/uuid"
 )
 
 // isGitRepo reports whether dir is the root of a real git working tree.
@@ -132,7 +133,7 @@ func New(workDir string, ui UI) (*Agent, error) {
 		return nil, fmt.Errorf("failed to open workspace root: %w", err)
 	}
 
-	scratchDir := filepath.Join(os.TempDir(), fmt.Sprintf("wingman-%d", time.Now().Unix()))
+	scratchDir := filepath.Join(os.TempDir(), "wingman-"+uuid.New().String())
 
 	if err := os.MkdirAll(scratchDir, 0755); err != nil {
 		root.Close()

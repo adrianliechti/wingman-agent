@@ -1,21 +1,25 @@
 // Client -> Server
 interface SendMessage {
 	type: "send";
+	session: string;
 	text: string;
 	files?: string[];
 }
 
 interface CancelMessage {
 	type: "cancel";
+	session: string;
 }
 
 interface PromptResponseMessage {
 	type: "prompt_response";
+	session: string;
 	approved: boolean;
 }
 
 interface AskResponseMessage {
 	type: "ask_response";
+	session: string;
 	answer: string;
 }
 
@@ -25,20 +29,25 @@ export type ClientMessage =
 	| PromptResponseMessage
 	| AskResponseMessage;
 
-// Server -> Client
+// Server -> Client. `session` is set on every event that pertains to a
+// specific conversation; events about workspace-level state (files, diffs,
+// sessions list, capabilities) leave it unset and apply to every view.
 interface TextDeltaMessage {
 	type: "text_delta";
+	session: string;
 	text: string;
 }
 
 interface ReasoningDeltaMessage {
 	type: "reasoning_delta";
+	session: string;
 	id: string;
 	text: string;
 }
 
 interface ToolCallMessage {
 	type: "tool_call";
+	session: string;
 	id: string;
 	name: string;
 	args: string;
@@ -47,6 +56,7 @@ interface ToolCallMessage {
 
 interface ToolResultMessage {
 	type: "tool_result";
+	session: string;
 	id: string;
 	name: string;
 	content: string;
@@ -54,31 +64,37 @@ interface ToolResultMessage {
 
 interface PhaseMessage {
 	type: "phase";
+	session: string;
 	phase: Phase;
 	hint?: string;
 }
 
 interface PromptMessage {
 	type: "prompt";
+	session: string;
 	question: string;
 }
 
 interface AskMessage {
 	type: "ask";
+	session: string;
 	question: string;
 }
 
 interface ErrorMessage {
 	type: "error";
+	session: string;
 	message: string;
 }
 
 interface DoneMessage {
 	type: "done";
+	session: string;
 }
 
 interface UsageMessage {
 	type: "usage";
+	session: string;
 	input_tokens: number;
 	cached_tokens: number;
 	output_tokens: number;
@@ -86,20 +102,24 @@ interface UsageMessage {
 
 interface MessagesMessage {
 	type: "messages";
+	session: string;
 	messages: ConversationMessage[];
 }
 
 interface SessionMessage {
 	type: "session";
+	session: string;
 	id: string;
 }
 
 interface DiffsChangedMessage {
 	type: "diffs_changed";
+	session?: string;
 }
 
 interface CheckpointsChangedMessage {
 	type: "checkpoints_changed";
+	session?: string;
 }
 
 interface SessionsChangedMessage {

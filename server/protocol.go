@@ -10,13 +10,15 @@ const (
 
 // ClientMessage is the envelope for all client-to-server WebSocket messages.
 // Inbound messages share one struct because the type isn't known until the
-// frame is unmarshaled.
+// frame is unmarshaled. SessionID routes the message to one of the server's
+// in-memory sessions; concurrent sessions stream independently.
 type ClientMessage struct {
-	Type     string   `json:"type"`
-	Text     string   `json:"text,omitempty"`
-	Files    []string `json:"files,omitempty"`
-	Approved bool     `json:"approved,omitempty"`
-	Answer   string   `json:"answer,omitempty"`
+	Type      string   `json:"type"`
+	SessionID string   `json:"session,omitempty"`
+	Text      string   `json:"text,omitempty"`
+	Files     []string `json:"files,omitempty"`
+	Approved  bool     `json:"approved,omitempty"`
+	Answer    string   `json:"answer,omitempty"`
 }
 
 // ServerEvent is implemented by every outbound WebSocket event. sendMessage
