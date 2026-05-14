@@ -3,12 +3,18 @@ package agent
 import (
 	"os"
 	"strings"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+)
+
+const (
+	DefaultMaxTurns    = 100
+	DefaultToolTimeout = 10 * time.Minute
 )
 
 type Config struct {
@@ -21,6 +27,10 @@ type Config struct {
 	ContextMessages func() []Message
 
 	Hooks hook.Hooks
+
+	// Zero applies the default. Negative disables.
+	MaxTurns    int
+	ToolTimeout time.Duration
 }
 
 // Derive creates a new Config sharing the same client and model.

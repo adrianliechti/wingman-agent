@@ -39,8 +39,20 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 	a.appendContextMessages()
 	a.Messages = append(a.Messages, userMessage(input))
 
+	maxTurns := a.MaxTurns
+	if maxTurns == 0 {
+		maxTurns = DefaultMaxTurns
+	}
+
 	return func(yield func(Message, error) bool) {
+		turns := 0
 		for {
+			turns++
+			if maxTurns > 0 && turns > maxTurns {
+				yield(Message{}, ErrMaxTurnsExceeded)
+				return
+			}
+
 			a.removeOrphanedToolMessages()
 
 			model := ""
@@ -143,38 +155,7 @@ func (a *Agent) processToolCalls(ctx context.Context, calls []ToolCall, tools []
 			return errYieldStopped
 		}
 
-		hc := tool.ToolCall{ID: tc.ID, Name: tc.Name, Args: tc.Args}
-
-		var result string
-
-		for _, h := range a.Hooks.PreToolUse {
-			r, err := h(ctx, hc)
-
-			if err != nil {
-				result = fmt.Sprintf("error: %v", err)
-				break
-			}
-
-			if r != "" {
-				result = r
-				break
-			}
-		}
-
-		if result == "" {
-			result = a.executeTool(ctx, tc, tools)
-		}
-
-		for _, h := range a.Hooks.PostToolUse {
-			r, err := h(ctx, hc, result)
-
-			if err != nil {
-				result = fmt.Sprintf("error: %v", err)
-				break
-			}
-
-			result = r
-		}
+		result := a.runSingleToolCall(ctx, tc, tools)
 
 		resultMsg := Message{
 			Role: RoleAssistant,
@@ -194,6 +175,53 @@ func (a *Agent) processToolCalls(ctx context.Context, calls []ToolCall, tools []
 	}
 
 	return nil
+}
+
+func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool.Tool) string {
+	timeout := a.ToolTimeout
+	if timeout == 0 {
+		timeout = DefaultToolTimeout
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	hc := tool.ToolCall{ID: tc.ID, Name: tc.Name, Args: tc.Args}
+
+	var result string
+
+	for _, h := range a.Hooks.PreToolUse {
+		r, err := h(ctx, hc)
+
+		if err != nil {
+			result = fmt.Sprintf("error: %v", err)
+			break
+		}
+
+		if r != "" {
+			result = r
+			break
+		}
+	}
+
+	if result == "" {
+		result = a.executeTool(ctx, tc, tools)
+	}
+
+	for _, h := range a.Hooks.PostToolUse {
+		r, err := h(ctx, hc, result)
+
+		if err != nil {
+			result = fmt.Sprintf("error: %v", err)
+			break
+		}
+
+		result = r
+	}
+
+	return result
 }
 
 func (a *Agent) executeTool(ctx context.Context, tc ToolCall, tools []tool.Tool) string {
