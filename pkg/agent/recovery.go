@@ -24,6 +24,46 @@ func isRecoverableError(err error) bool {
 	}
 }
 
+func isReasoningHistoryError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	message := strings.ToLower(err.Error())
+	encryptedContentError :=
+		(strings.Contains(message, "encrypted content") || strings.Contains(message, "encrypted_content")) &&
+			(strings.Contains(message, "could not be verified") ||
+				strings.Contains(message, "could not be decrypted") ||
+				strings.Contains(message, "could not be parsed") ||
+				strings.Contains(message, "could not be decoded"))
+
+	return encryptedContentError ||
+		(strings.Contains(message, "reasoning") && strings.Contains(message, "required following item"))
+}
+
+func withoutReasoningMessages(messages []Message) ([]Message, int) {
+	filtered := make([]Message, 0, len(messages))
+	removed := 0
+
+	for _, m := range messages {
+		copy := Message{Role: m.Role, Hidden: m.Hidden}
+
+		for _, c := range m.Content {
+			if c.Reasoning != nil {
+				removed++
+				continue
+			}
+			copy.Content = append(copy.Content, c)
+		}
+
+		if len(copy.Content) > 0 {
+			filtered = append(filtered, copy)
+		}
+	}
+
+	return filtered, removed
+}
+
 func (a *Agent) removeOrphanedToolMessages() {
 
 	callIDs := make(map[string]bool)

@@ -71,10 +71,20 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 
 			if err != nil {
 				if !errors.Is(err, errYieldStopped) && !errors.Is(err, context.Canceled) && isRecoverableError(err) {
-					a.compactMessages(ctx)
+					if isReasoningHistoryError(err) {
+						filteredMessages, removedReasoning := withoutReasoningMessages(a.Messages)
+						if removedReasoning > 0 {
+							req.messages = filteredMessages
+							resp, err = complete(ctx, a.client, req, yield)
+						}
+					}
 
-					req.messages = a.Messages
-					resp, err = complete(ctx, a.client, req, yield)
+					if err != nil && !errors.Is(err, errYieldStopped) && !errors.Is(err, context.Canceled) && isRecoverableError(err) {
+						a.compactMessages(ctx)
+
+						req.messages = a.Messages
+						resp, err = complete(ctx, a.client, req, yield)
+					}
 				}
 
 				if err != nil {

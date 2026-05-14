@@ -170,7 +170,7 @@ func assistantToInput(m Message) []responses.ResponseInputItemUnionParam {
 }
 
 func reasoningToInput(r *Reasoning) *responses.ResponseReasoningItemParam {
-	if r == nil || r.ID == "" {
+	if r == nil {
 		return nil
 	}
 
@@ -188,9 +188,18 @@ func reasoningToInput(r *Reasoning) *responses.ResponseReasoningItemParam {
 		p.EncryptedContent = openai.String(r.Signature)
 	}
 
-	if len(p.Content) == 0 && len(p.Summary) == 0 {
+	if len(p.Content) == 0 && len(p.Summary) == 0 && !p.EncryptedContent.Valid() {
+		return nil
+	}
+
+	if len(p.Summary) == 0 {
 		p.Summary = []responses.ResponseReasoningItemSummaryParam{{Text: ""}}
 	}
+
+	// Responses stateless replay can reject preserved reasoning ids unless the
+	// exact paired following item is also present. Keep the reasoning payload but
+	// omit the id on the wire.
+	p.SetExtraFields(map[string]any{"id": param.Omit})
 
 	return p
 }
