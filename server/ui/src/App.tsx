@@ -18,7 +18,6 @@ import { DiffTab } from "./components/DiffTab";
 import { FileTab } from "./components/FileTab";
 import { FileTree } from "./components/FileTree";
 import { ProblemsPanel } from "./components/ProblemsPanel";
-import { PromptDialog } from "./components/PromptDialog";
 import { Sidebar } from "./components/Sidebar";
 import { useCapabilities } from "./hooks/useCapabilities";
 import { messagesToEntries, useWebSocket } from "./hooks/useWebSocket";
@@ -42,8 +41,6 @@ export default function App() {
 		sessions,
 		sendChat,
 		cancel,
-		respondPrompt,
-		respondAsk,
 		setSessionEntries,
 		ensureSession,
 		removeSession,
@@ -62,7 +59,6 @@ export default function App() {
 	const entries = activeSession?.entries ?? EMPTY_ENTRIES;
 	const phase = activeSession?.phase ?? "idle";
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
-	const prompt = activeSession?.prompt ?? null;
 
 	// On first WS connect the server announces every in-memory session
 	// (handler_chat.handleWebSocket). Latch onto whichever shows up first
@@ -188,20 +184,6 @@ export default function App() {
 	const handleCancel = useCallback(() => {
 		if (sessionId) cancel(sessionId);
 	}, [cancel, sessionId]);
-
-	const handlePromptResponse = useCallback(
-		(approved: boolean) => {
-			if (sessionId) respondPrompt(sessionId, approved);
-		},
-		[respondPrompt, sessionId],
-	);
-
-	const handleAskResponse = useCallback(
-		(answer: string) => {
-			if (sessionId) respondAsk(sessionId, answer);
-		},
-		[respondAsk, sessionId],
-	);
 
 	const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
 
@@ -443,12 +425,6 @@ export default function App() {
 					</div>
 				</div>
 			</div>
-
-			<PromptDialog
-				prompt={prompt}
-				onPromptResponse={handlePromptResponse}
-				onAskResponse={handleAskResponse}
-			/>
 
 			{!connected && (
 				<div className="absolute inset-0 z-50 flex items-center justify-center backdrop-blur-md bg-bg/60">

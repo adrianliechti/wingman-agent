@@ -33,22 +33,20 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.wsMu.Unlock()
 	}()
 
-	// On connect: announce every in-memory session so the client can hydrate
-	// its per-session state without an extra REST roundtrip per session.
+	// On connect: announce every in-memory session as one session_state frame.
+	// Client uses it to populate per-session slots in one shot — no separate
+	// session+messages+usage+phase chatter. Phase reflects the actual current
+	// state so reconnecting mid-stream doesn't flash "idle" first.
 	for _, sess := range s.allSessions() {
-		sess.sendMessage(SessionEvent{ID: sess.ID})
-		if msgs := convertMessages(sess.Agent.Messages); len(msgs) > 0 {
-			sess.sendMessage(MessagesEvent{Messages: msgs})
-		}
 		u := sess.Agent.Usage
-		if u.InputTokens > 0 || u.OutputTokens > 0 {
-			sess.sendMessage(UsageEvent{
-				InputTokens:  u.InputTokens,
-				CachedTokens: u.CachedTokens,
-				OutputTokens: u.OutputTokens,
-			})
-		}
-		sess.sendMessage(PhaseEvent{Phase: "idle"})
+		sess.send(Frame{
+			Type:         EvtSessionState,
+			Phase:        sess.currentPhase(),
+			Messages:     convertMessages(sess.Agent.Messages),
+			InputTokens:  u.InputTokens,
+			CachedTokens: u.CachedTokens,
+			OutputTokens: u.OutputTokens,
+		})
 	}
 
 	ctx := r.Context()
@@ -110,67 +108,65 @@ func (s *Server) handleSend(ctx context.Context, sess *Session, msg ClientMessag
 		input = append(input, agent.Content{Text: fmt.Sprintf("[File: %s]", f)})
 	}
 
-	currentPhase := ""
-	setPhase := func(p string) {
-		if p == currentPhase {
-			return
-		}
-		currentPhase = p
-		sess.sendMessage(PhaseEvent{Phase: p})
-	}
-
-	setPhase("thinking")
+	sess.setPhase("thinking")
 
 	for evMsg, err := range sess.Agent.Send(streamCtx, input) {
 		if err != nil {
+			text := err.Error()
 			if errors.Is(err, context.Canceled) {
-				sess.sendMessage(ErrorEvent{Message: "Cancelled"})
-			} else {
-				sess.sendMessage(ErrorEvent{Message: err.Error()})
+				text = "Cancelled"
 			}
+			sess.send(Frame{Type: EvtError, Message: text})
 			break
 		}
 
 		for _, c := range evMsg.Content {
 			switch {
 			case c.ToolCall != nil:
-				sess.sendMessage(ToolCallEvent{
+				sess.send(Frame{
+					Type: EvtToolCall,
 					ID:   c.ToolCall.ID,
 					Name: c.ToolCall.Name,
 					Args: c.ToolCall.Args,
 					Hint: tui.ExtractToolHint(c.ToolCall.Args, c.ToolCall.Name),
 				})
-				setPhase("tool_running")
+				sess.setPhase("tool_running")
 
 			case c.ToolResult != nil:
-				sess.sendMessage(ToolResultEvent{
+				sess.send(Frame{
+					Type:    EvtToolResult,
 					ID:      c.ToolResult.ID,
 					Name:    c.ToolResult.Name,
 					Content: c.ToolResult.Content,
 				})
 
 			case c.Reasoning != nil && c.Reasoning.Summary != "":
-				setPhase("thinking")
-				sess.sendMessage(ReasoningDeltaEvent{
+				sess.setPhase("thinking")
+				sess.send(Frame{
+					Type: EvtReasoningDelta,
 					ID:   c.Reasoning.ID,
 					Text: c.Reasoning.Summary,
 				})
 
 			case c.Text != "":
-				setPhase("streaming")
-				sess.sendMessage(TextDeltaEvent{Text: c.Text})
+				sess.setPhase("streaming")
+				sess.send(Frame{Type: EvtTextDelta, Text: c.Text})
 			}
 		}
 
 		u := sess.Agent.Usage
-		sess.sendMessage(UsageEvent{
+		sess.send(Frame{
+			Type:         EvtUsage,
 			InputTokens:  u.InputTokens,
 			CachedTokens: u.CachedTokens,
 			OutputTokens: u.OutputTokens,
 		})
 	}
 
-	sess.sendMessage(FilesChangedEvent{})
+	// Workspace-level changes (files touched, diffs shifted): every session's
+	// view of the working dir is affected, so broadcast. Checkpoints are
+	// per-session (each session has its own Rewind shadow repo), so tag.
+	s.broadcast(Frame{Type: EvtFilesChanged})
 
 	if sess.Agent.Rewind != nil {
 		commitMsg := msg.Text
@@ -179,13 +175,13 @@ func (s *Server) handleSend(ctx context.Context, sess *Session, msg ClientMessag
 		}
 		go func() {
 			if err := sess.Agent.Rewind.Commit(commitMsg); err == nil {
-				sess.sendMessage(CheckpointsChangedEvent{})
+				sess.send(Frame{Type: EvtCheckpointsChanged})
 			}
 		}()
-		sess.sendMessage(DiffsChangedEvent{})
+		s.broadcast(Frame{Type: EvtDiffsChanged})
 	}
 	if sess.Agent.LSP != nil {
-		s.broadcast(DiagnosticsChangedEvent{})
+		s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 	}
 
 	state := agent.State{
@@ -193,10 +189,9 @@ func (s *Server) handleSend(ctx context.Context, sess *Session, msg ClientMessag
 		Usage:    sess.Agent.Usage,
 	}
 	if err := session.Save(s.sessionsDir, sess.ID, state); err == nil && len(state.Messages) > 0 {
-		s.broadcast(SessionsChangedEvent{})
+		s.broadcast(Frame{Type: EvtSessionsChanged})
 	}
 
-	sess.sendMessage(DoneEvent{})
-	setPhase("idle")
+	sess.send(Frame{Type: EvtDone})
+	sess.setPhase("idle")
 }
-

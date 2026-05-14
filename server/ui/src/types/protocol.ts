@@ -1,4 +1,6 @@
-// Client -> Server
+// Client → Server. `session` routes the message to one of the server's
+// in-memory sessions; concurrent sessions stream independently.
+
 interface SendMessage {
 	type: "send";
 	session: string;
@@ -11,27 +13,23 @@ interface CancelMessage {
 	session: string;
 }
 
-interface PromptResponseMessage {
-	type: "prompt_response";
+export type ClientMessage = SendMessage | CancelMessage;
+
+// Server → Client. Per-session events carry `session`; workspace-level
+// events leave it unset. The hook routes per-session events into the
+// sessions map; subscribers see every frame (used by panels that refetch
+// on workspace-level signals).
+
+interface SessionStateMessage {
+	type: "session_state";
 	session: string;
-	approved: boolean;
+	phase: Phase;
+	messages?: ConversationMessage[];
+	input_tokens?: number;
+	cached_tokens?: number;
+	output_tokens?: number;
 }
 
-interface AskResponseMessage {
-	type: "ask_response";
-	session: string;
-	answer: string;
-}
-
-export type ClientMessage =
-	| SendMessage
-	| CancelMessage
-	| PromptResponseMessage
-	| AskResponseMessage;
-
-// Server -> Client. `session` is set on every event that pertains to a
-// specific conversation; events about workspace-level state (files, diffs,
-// sessions list, capabilities) leave it unset and apply to every view.
 interface TextDeltaMessage {
 	type: "text_delta";
 	session: string;
@@ -66,19 +64,14 @@ interface PhaseMessage {
 	type: "phase";
 	session: string;
 	phase: Phase;
-	hint?: string;
 }
 
-interface PromptMessage {
-	type: "prompt";
+interface UsageMessage {
+	type: "usage";
 	session: string;
-	question: string;
-}
-
-interface AskMessage {
-	type: "ask";
-	session: string;
-	question: string;
+	input_tokens: number;
+	cached_tokens: number;
+	output_tokens: number;
 }
 
 interface ErrorMessage {
@@ -92,31 +85,6 @@ interface DoneMessage {
 	session: string;
 }
 
-interface UsageMessage {
-	type: "usage";
-	session: string;
-	input_tokens: number;
-	cached_tokens: number;
-	output_tokens: number;
-}
-
-interface MessagesMessage {
-	type: "messages";
-	session: string;
-	messages: ConversationMessage[];
-}
-
-interface SessionMessage {
-	type: "session";
-	session: string;
-	id: string;
-}
-
-interface DiffsChangedMessage {
-	type: "diffs_changed";
-	session?: string;
-}
-
 interface CheckpointsChangedMessage {
 	type: "checkpoints_changed";
 	session?: string;
@@ -124,6 +92,10 @@ interface CheckpointsChangedMessage {
 
 interface SessionsChangedMessage {
 	type: "sessions_changed";
+}
+
+interface DiffsChangedMessage {
+	type: "diffs_changed";
 }
 
 interface FilesChangedMessage {
@@ -139,26 +111,22 @@ interface CapabilitiesChangedMessage {
 }
 
 export type ServerMessage =
+	| SessionStateMessage
 	| TextDeltaMessage
 	| ReasoningDeltaMessage
 	| ToolCallMessage
 	| ToolResultMessage
 	| PhaseMessage
-	| PromptMessage
-	| AskMessage
+	| UsageMessage
 	| ErrorMessage
 	| DoneMessage
-	| UsageMessage
-	| MessagesMessage
-	| SessionMessage
-	| DiffsChangedMessage
 	| CheckpointsChangedMessage
 	| SessionsChangedMessage
+	| DiffsChangedMessage
 	| FilesChangedMessage
 	| DiagnosticsChangedMessage
 	| CapabilitiesChangedMessage;
 
-// Shared types
 export type Phase = "idle" | "thinking" | "streaming" | "tool_running";
 
 export interface ConversationMessage {

@@ -242,35 +242,16 @@ func (s *Server) sessionFromRequest(r *http.Request) *Session {
 // broadcast emits a workspace-level event (no session id) to every connected
 // WebSocket. Use this for state that applies to every session view: file
 // tree changes, capabilities, the sessions list.
-func (s *Server) broadcast(e ServerEvent) { s.sendMessage("", e) }
+func (s *Server) broadcast(f Frame) {
+	f.Session = ""
+	s.send(f)
+}
 
-// sendMessage emits an event to every connected WebSocket. `session` is
-// stamped on the wire so the React client routes per-session.
-func (s *Server) sendMessage(sessionID string, e ServerEvent) {
-	payload, err := json.Marshal(e)
-	if err != nil {
-		return
-	}
-
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &fields); err != nil {
-		return
-	}
-
-	typeJSON, err := json.Marshal(e.serverEventType())
-	if err != nil {
-		return
-	}
-	fields["type"] = typeJSON
-
-	if sessionID != "" {
-		idJSON, err := json.Marshal(sessionID)
-		if err == nil {
-			fields["session"] = idJSON
-		}
-	}
-
-	data, err := json.Marshal(fields)
+// send marshals a Frame and fans it out to every WS client. Call sites
+// build Frames inline — `s.broadcast(...)` for workspace events,
+// `sess.send(...)` for per-session events (it sets f.Session).
+func (s *Server) send(f Frame) {
+	data, err := json.Marshal(f)
 	if err != nil {
 		return
 	}
@@ -387,7 +368,7 @@ func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.registerSession(sess)
-	s.broadcast(SessionsChangedEvent{})
+	s.broadcast(Frame{Type: EvtSessionsChanged})
 
 	writeJSON(w, map[string]string{"id": sess.ID})
 }
@@ -417,7 +398,7 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		newSess.Agent.Usage = saved.State.Usage
 		s.registerSession(newSess)
 		sess = newSess
-		s.broadcast(SessionsChangedEvent{})
+		s.broadcast(Frame{Type: EvtSessionsChanged})
 	}
 
 	messages := convertMessages(sess.Agent.Messages)
@@ -452,9 +433,10 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// If we just removed the last in-memory session, create a fresh one so
-	// workspace-shared endpoints always have an agent to talk to.
-	needsBootstrap := len(s.sessions) == 0
+	// Bootstrap a fresh session if we just removed the last one. Gate on
+	// inMem so two concurrent deletes for the same id don't both fire — the
+	// second won't have removed anything, so it shouldn't replace.
+	needsBootstrap := inMem && len(s.sessions) == 0
 	s.mu.Unlock()
 
 	if inMem {
@@ -473,7 +455,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.broadcast(SessionsChangedEvent{})
+	s.broadcast(Frame{Type: EvtSessionsChanged})
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -662,22 +644,22 @@ func (s *Server) pollFiles(ctx context.Context) {
 				for _, sess := range s.allSessions() {
 					sess.Agent.SyncProjectMode()
 				}
-				s.broadcast(CapabilitiesChangedEvent{})
+				s.broadcast(Frame{Type: EvtCapabilitiesChanged})
 				if a.LSP != nil {
-					s.broadcast(DiagnosticsChangedEvent{})
+					s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 				}
 				prevGit = gitNow
 			}
 
 			if a.Rewind == nil {
-				s.broadcast(FilesChangedEvent{})
+				s.broadcast(Frame{Type: EvtFilesChanged})
 				continue
 			}
 
 			fp := a.Rewind.Fingerprint()
 			if fp != prevFingerprint {
-				s.broadcast(FilesChangedEvent{})
-				s.broadcast(DiffsChangedEvent{})
+				s.broadcast(Frame{Type: EvtFilesChanged})
+				s.broadcast(Frame{Type: EvtDiffsChanged})
 				prevFingerprint = fp
 			}
 		}

@@ -47,11 +47,10 @@ func (s *Server) handleCheckpointRestore(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Working tree just changed; nudge this session's diffs view and the
-	// shared file tree (other sessions get their own DiffsChanged on next
-	// poll fingerprint flip).
-	sess.sendMessage(DiffsChangedEvent{})
-	s.broadcast(FilesChangedEvent{})
+	// Working tree just changed; every session watching this dir is affected,
+	// so broadcast both.
+	s.broadcast(Frame{Type: EvtDiffsChanged})
+	s.broadcast(Frame{Type: EvtFilesChanged})
 
 	w.WriteHeader(http.StatusNoContent)
 }

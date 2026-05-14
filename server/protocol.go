@@ -1,136 +1,68 @@
 package server
 
-// Client -> Server message types
+// Inbound WebSocket message types. The client tells the server what it
+// wants done; the server tags every reply with `session` so the React
+// client can route per-session state without an out-of-band registry.
 const (
-	MsgSend           = "send"
-	MsgCancel         = "cancel"
-	MsgPromptResponse = "prompt_response"
-	MsgAskResponse    = "ask_response"
+	MsgSend   = "send"
+	MsgCancel = "cancel"
 )
 
-// ClientMessage is the envelope for all client-to-server WebSocket messages.
-// Inbound messages share one struct because the type isn't known until the
-// frame is unmarshaled. SessionID routes the message to one of the server's
-// in-memory sessions; concurrent sessions stream independently.
+// ClientMessage is the envelope for every client → server WebSocket frame.
+// Inbound shares one struct because the type isn't known until unmarshal.
 type ClientMessage struct {
 	Type      string   `json:"type"`
 	SessionID string   `json:"session,omitempty"`
 	Text      string   `json:"text,omitempty"`
 	Files     []string `json:"files,omitempty"`
-	Approved  bool     `json:"approved,omitempty"`
-	Answer    string   `json:"answer,omitempty"`
 }
 
-// ServerEvent is implemented by every outbound WebSocket event. sendMessage
-// emits the wire payload as {"type": <serverEventType>, ...struct fields}.
-type ServerEvent interface {
-	serverEventType() string
+// Outbound WebSocket event names.
+const (
+	EvtSessionState         = "session_state"   // hello: full snapshot for a session
+	EvtTextDelta            = "text_delta"      // streaming assistant text
+	EvtReasoningDelta       = "reasoning_delta" // streaming chain-of-thought summary
+	EvtToolCall             = "tool_call"       // assistant invoking a tool
+	EvtToolResult           = "tool_result"     // tool result for a prior call
+	EvtPhase                = "phase"           // idle | thinking | streaming | tool_running
+	EvtUsage                = "usage"           // token accounting update
+	EvtError                = "error"           // turn-level error message
+	EvtDone                 = "done"            // end of a Send turn
+	EvtFilesChanged         = "files_changed"   // workspace file tree dirty
+	EvtDiffsChanged         = "diffs_changed"   // workspace diffs dirty
+	EvtCheckpointsChanged   = "checkpoints_changed"
+	EvtSessionsChanged      = "sessions_changed"
+	EvtDiagnosticsChanged   = "diagnostics_changed"
+	EvtCapabilitiesChanged  = "capabilities_changed"
+)
+
+// Frame is the wire shape for every server → client event. One flat struct
+// instead of an interface + 18 typed events: a single Marshal call per
+// emit, no envelope-injection dance. Fields are `omitempty` so unused ones
+// don't bloat the wire; the React side discriminates on `Type` exactly
+// like the previous per-struct design.
+type Frame struct {
+	Type    string `json:"type"`
+	Session string `json:"session,omitempty"`
+
+	Text    string `json:"text,omitempty"`
+	ID      string `json:"id,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Args    string `json:"args,omitempty"`
+	Hint    string `json:"hint,omitempty"`
+	Content string `json:"content,omitempty"`
+	Phase   string `json:"phase,omitempty"`
+	Message string `json:"message,omitempty"`
+
+	InputTokens  int64 `json:"input_tokens,omitempty"`
+	CachedTokens int64 `json:"cached_tokens,omitempty"`
+	OutputTokens int64 `json:"output_tokens,omitempty"`
+
+	Messages []ConversationMessage `json:"messages,omitempty"`
 }
 
-type TextDeltaEvent struct {
-	Text string `json:"text"`
-}
-
-func (TextDeltaEvent) serverEventType() string { return "text_delta" }
-
-type ReasoningDeltaEvent struct {
-	ID   string `json:"id"`
-	Text string `json:"text"`
-}
-
-func (ReasoningDeltaEvent) serverEventType() string { return "reasoning_delta" }
-
-type ToolCallEvent struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Args string `json:"args"`
-	Hint string `json:"hint,omitempty"`
-}
-
-func (ToolCallEvent) serverEventType() string { return "tool_call" }
-
-type ToolResultEvent struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
-}
-
-func (ToolResultEvent) serverEventType() string { return "tool_result" }
-
-type PhaseEvent struct {
-	Phase string `json:"phase"`
-	Hint  string `json:"hint,omitempty"`
-}
-
-func (PhaseEvent) serverEventType() string { return "phase" }
-
-type PromptEvent struct {
-	Question string `json:"question"`
-}
-
-func (PromptEvent) serverEventType() string { return "prompt" }
-
-type AskEvent struct {
-	Question string `json:"question"`
-}
-
-func (AskEvent) serverEventType() string { return "ask" }
-
-type ErrorEvent struct {
-	Message string `json:"message"`
-}
-
-func (ErrorEvent) serverEventType() string { return "error" }
-
-type DoneEvent struct{}
-
-func (DoneEvent) serverEventType() string { return "done" }
-
-type UsageEvent struct {
-	InputTokens  int64 `json:"input_tokens"`
-	CachedTokens int64 `json:"cached_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
-}
-
-func (UsageEvent) serverEventType() string { return "usage" }
-
-type MessagesEvent struct {
-	Messages []ConversationMessage `json:"messages"`
-}
-
-func (MessagesEvent) serverEventType() string { return "messages" }
-
-type SessionEvent struct {
-	ID string `json:"id"`
-}
-
-func (SessionEvent) serverEventType() string { return "session" }
-
-type DiffsChangedEvent struct{}
-
-func (DiffsChangedEvent) serverEventType() string { return "diffs_changed" }
-
-type CheckpointsChangedEvent struct{}
-
-func (CheckpointsChangedEvent) serverEventType() string { return "checkpoints_changed" }
-
-type SessionsChangedEvent struct{}
-
-func (SessionsChangedEvent) serverEventType() string { return "sessions_changed" }
-
-type FilesChangedEvent struct{}
-
-func (FilesChangedEvent) serverEventType() string { return "files_changed" }
-
-type DiagnosticsChangedEvent struct{}
-
-func (DiagnosticsChangedEvent) serverEventType() string { return "diagnostics_changed" }
-
-type CapabilitiesChangedEvent struct{}
-
-func (CapabilitiesChangedEvent) serverEventType() string { return "capabilities_changed" }
-
-// ConversationMessage is a simplified message for the REST /api/messages endpoint and WebSocket messages payload.
+// ConversationMessage is the message shape replayed in session_state's
+// `messages` field, and returned by /api/sessions/{id}/load.
 type ConversationMessage struct {
 	Role    string                `json:"role"`
 	Content []ConversationContent `json:"content"`
@@ -161,7 +93,8 @@ type ConversationResult struct {
 	Content string `json:"content"`
 }
 
-// FileEntry represents a file or directory in the file browser.
+// REST payload shapes.
+
 type FileEntry struct {
 	Name  string `json:"name"`
 	Path  string `json:"path"`
@@ -169,14 +102,12 @@ type FileEntry struct {
 	Size  int64  `json:"size"`
 }
 
-// FileContent represents the content of a file.
 type FileContent struct {
 	Path     string `json:"path"`
 	Content  string `json:"content"`
 	Language string `json:"language"`
 }
 
-// DiffEntry represents a file diff from baseline.
 type DiffEntry struct {
 	Path     string `json:"path"`
 	Status   string `json:"status"` // "added", "modified", "deleted"
@@ -186,14 +117,12 @@ type DiffEntry struct {
 	Language string `json:"language,omitempty"`
 }
 
-// CheckpointEntry represents a single rewind checkpoint.
 type CheckpointEntry struct {
 	Hash    string `json:"hash"`
 	Message string `json:"message"`
 	Time    string `json:"time"`
 }
 
-// SessionEntry represents a saved chat session in the sidebar list.
 type SessionEntry struct {
 	ID        string `json:"id"`
 	Title     string `json:"title,omitempty"`

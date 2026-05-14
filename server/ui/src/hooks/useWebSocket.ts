@@ -58,30 +58,25 @@ interface Usage {
 	outputTokens: number;
 }
 
-// SessionState bundles everything the UI needs to render one session view.
-// The hook stores a map keyed by session id; concurrent sends in different
-// sessions update their own slots without ever cross-contaminating.
+// SessionState is everything the UI needs to render one session view. The
+// hook stores a map keyed by session id; concurrent sends in different
+// sessions update their own slots without cross-contamination.
 export interface SessionState {
 	id: string;
 	entries: ChatEntry[];
 	phase: Phase;
 	usage: Usage;
-	prompt: { type: "prompt" | "ask"; question: string } | null;
 }
 
+const EMPTY_USAGE: Usage = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+
 function emptySession(id: string): SessionState {
-	return {
-		id,
-		entries: [],
-		phase: "idle",
-		usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 },
-		prompt: null,
-	};
+	return { id, entries: [], phase: "idle", usage: EMPTY_USAGE };
 }
 
 // Per-session streaming refs (which assistant entry is currently growing,
-// which reasoning block, etc.). Kept off the React state tree so streaming
-// deltas don't re-render every consumer of useWebSocket.
+// which reasoning block, etc.). Kept off React state so streaming deltas
+// don't re-render every consumer of useWebSocket.
 interface StreamRefs {
 	streamingId: string;
 	streamingContent: string;
@@ -107,6 +102,8 @@ export function useWebSocket() {
 
 	const streamRefs = useRef<Record<string, StreamRefs>>({});
 
+	// Panels (FileTree, DiffsPanel, …) subscribe to raw frames so they can
+	// refetch on workspace-level events without going through React state.
 	const subscribersRef = useRef<Set<(msg: ServerMessage) => void>>(new Set());
 
 	const subscribe = useCallback((handler: (msg: ServerMessage) => void) => {
@@ -127,12 +124,16 @@ export function useWebSocket() {
 		return s;
 	};
 
+	// updateSession applies a transformation to one session's slot, creating
+	// it if missing. The reducer pattern lets handlers compose ("set phase
+	// AND append entry") without separate setter calls.
 	const updateSession = useCallback(
 		(id: string, fn: (s: SessionState) => SessionState) => {
 			setSessions((prev) => {
-				const existing = prev[id] ?? emptySession(id);
-				const updated = fn(existing);
-				if (updated === existing) return prev;
+				const existing = prev[id];
+				const base = existing ?? emptySession(id);
+				const updated = fn(base);
+				if (existing && updated === existing) return prev;
 				return { ...prev, [id]: updated };
 			});
 		},
@@ -141,32 +142,12 @@ export function useWebSocket() {
 
 	const finalizeStreaming = (id: string) => {
 		const s = getStream(id);
-		if (s.streamingId && s.streamingContent) {
-			const entryId = s.streamingId;
-			const content = s.streamingContent;
-			updateSession(id, (sess) => ({
-				...sess,
-				entries: sess.entries.map((e) =>
-					e.id === entryId ? { ...e, content } : e,
-				),
-			}));
-		}
 		s.streamingId = "";
 		s.streamingContent = "";
 	};
 
 	const finalizeReasoning = (id: string) => {
 		const s = getStream(id);
-		if (s.reasoningEntryId && s.reasoningContent) {
-			const entryId = s.reasoningEntryId;
-			const content = s.reasoningContent;
-			updateSession(id, (sess) => ({
-				...sess,
-				entries: sess.entries.map((e) =>
-					e.id === entryId ? { ...e, content } : e,
-				),
-			}));
-		}
 		s.reasoningEntryId = "";
 		s.reasoningId = "";
 		s.reasoningContent = "";
@@ -180,21 +161,26 @@ export function useWebSocket() {
 		}
 
 		// Workspace-level events (no session) propagate through subscribers
-		// only — they don't affect per-session state.
+		// only — they don't touch per-session state.
 		const sid = "session" in msg ? msg.session : undefined;
 		if (!sid) return;
 
 		switch (msg.type) {
-			case "session": {
-				// Server announces a session: hydrate its slot if absent.
-				updateSession(sid, (sess) => sess);
-				break;
-			}
-
-			case "messages": {
-				updateSession(sid, (sess) => ({
-					...sess,
-					entries: messagesToEntries(msg.messages),
+			case "session_state": {
+				// Authoritative snapshot for this session on WS connect.
+				streamRefs.current[sid] = emptyStreamRefs();
+				setSessions((prev) => ({
+					...prev,
+					[sid]: {
+						id: sid,
+						entries: messagesToEntries(msg.messages ?? []),
+						phase: msg.phase ?? "idle",
+						usage: {
+							inputTokens: msg.input_tokens ?? 0,
+							cachedTokens: msg.cached_tokens ?? 0,
+							outputTokens: msg.output_tokens ?? 0,
+						},
+					},
 				}));
 				break;
 			}
@@ -202,63 +188,68 @@ export function useWebSocket() {
 			case "text_delta": {
 				finalizeReasoning(sid);
 				const s = getStream(sid);
-				if (!s.streamingId) {
-					const id = nextId();
-					s.streamingId = id;
-					s.streamingContent = "";
-					updateSession(sid, (sess) => ({
-						...sess,
-						entries: [
-							...sess.entries,
-							{ id, type: "assistant", content: "" },
-						],
-					}));
+				let entryId = s.streamingId;
+				if (!entryId) {
+					entryId = nextId();
+					s.streamingId = entryId;
 				}
 				s.streamingContent += msg.text;
-				const entryId = s.streamingId;
 				const content = s.streamingContent;
-				updateSession(sid, (sess) => ({
-					...sess,
-					entries: sess.entries.map((e) =>
-						e.id === entryId ? { ...e, content } : e,
-					),
-				}));
+				updateSession(sid, (sess) => {
+					const existing = sess.entries.find((e) => e.id === entryId);
+					if (!existing) {
+						return {
+							...sess,
+							entries: [
+								...sess.entries,
+								{ id: entryId, type: "assistant", content },
+							],
+						};
+					}
+					return {
+						...sess,
+						entries: sess.entries.map((e) =>
+							e.id === entryId ? { ...e, content } : e,
+						),
+					};
+				});
 				break;
 			}
 
 			case "reasoning_delta": {
 				finalizeStreaming(sid);
 				const s = getStream(sid);
+				// New reasoning block (different upstream id) — start fresh.
 				if (s.reasoningEntryId && s.reasoningId !== msg.id) {
 					finalizeReasoning(sid);
 				}
-				if (!s.reasoningEntryId) {
-					const entryId = nextId();
+				let entryId = s.reasoningEntryId;
+				if (!entryId) {
+					entryId = nextId();
 					s.reasoningEntryId = entryId;
 					s.reasoningId = msg.id;
-					s.reasoningContent = "";
-					updateSession(sid, (sess) => ({
-						...sess,
-						entries: [
-							...sess.entries,
-							{
-								id: entryId,
-								type: "reasoning",
-								content: "",
-								reasoningId: msg.id,
-							},
-						],
-					}));
 				}
 				s.reasoningContent += msg.text;
-				const entryId = s.reasoningEntryId;
 				const content = s.reasoningContent;
-				updateSession(sid, (sess) => ({
-					...sess,
-					entries: sess.entries.map((e) =>
-						e.id === entryId ? { ...e, content } : e,
-					),
-				}));
+				const reasoningId = msg.id;
+				updateSession(sid, (sess) => {
+					const existing = sess.entries.find((e) => e.id === entryId);
+					if (!existing) {
+						return {
+							...sess,
+							entries: [
+								...sess.entries,
+								{ id: entryId, type: "reasoning", content, reasoningId },
+							],
+						};
+					}
+					return {
+						...sess,
+						entries: sess.entries.map((e) =>
+							e.id === entryId ? { ...e, content } : e,
+						),
+					};
+				});
 				break;
 			}
 
@@ -299,20 +290,6 @@ export function useWebSocket() {
 
 			case "phase":
 				updateSession(sid, (sess) => ({ ...sess, phase: msg.phase }));
-				break;
-
-			case "prompt":
-				updateSession(sid, (sess) => ({
-					...sess,
-					prompt: { type: "prompt", question: msg.question },
-				}));
-				break;
-
-			case "ask":
-				updateSession(sid, (sess) => ({
-					...sess,
-					prompt: { type: "ask", question: msg.question },
-				}));
 				break;
 
 			case "error": {
@@ -375,34 +352,9 @@ export function useWebSocket() {
 		[send],
 	);
 
-	const respondPrompt = useCallback(
-		(sessionId: string, approved: boolean) => {
-			send({ type: "prompt_response", session: sessionId, approved });
-			updateSession(sessionId, (sess) => ({ ...sess, prompt: null }));
-		},
-		[send, updateSession],
-	);
-
-	const respondAsk = useCallback(
-		(sessionId: string, answer: string) => {
-			send({ type: "ask_response", session: sessionId, answer });
-			updateSession(sessionId, (sess) => ({ ...sess, prompt: null }));
-		},
-		[send, updateSession],
-	);
-
-	// Imperative helpers for handlers that mutate session state (load,
-	// new, delete).
 	const setSessionEntries = useCallback(
 		(sessionId: string, entries: ChatEntry[]) => {
 			updateSession(sessionId, (sess) => ({ ...sess, entries }));
-		},
-		[updateSession],
-	);
-
-	const setSessionUsage = useCallback(
-		(sessionId: string, usage: Usage) => {
-			updateSession(sessionId, (sess) => ({ ...sess, usage }));
 		},
 		[updateSession],
 	);
@@ -502,10 +454,7 @@ export function useWebSocket() {
 		sessions,
 		sendChat,
 		cancel,
-		respondPrompt,
-		respondAsk,
 		setSessionEntries,
-		setSessionUsage,
 		ensureSession,
 		removeSession,
 		subscribe,

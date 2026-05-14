@@ -111,8 +111,10 @@ func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sess.sendMessage(DiffsChangedEvent{})
-	s.broadcast(FilesChangedEvent{})
+	// File-system level changes affect every session's view of the working
+	// dir, so broadcast both.
+	s.broadcast(Frame{Type: EvtDiffsChanged})
+	s.broadcast(Frame{Type: EvtFilesChanged})
 
 	w.WriteHeader(http.StatusNoContent)
 }

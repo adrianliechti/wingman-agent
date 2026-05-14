@@ -23,6 +23,7 @@ type Session struct {
 
 	mu           sync.Mutex
 	streamCancel context.CancelFunc
+	phase        string // "idle" | "thinking" | "streaming" | "tool_running"
 }
 
 func newSessionID() string {
@@ -71,10 +72,33 @@ func (sess *Session) currentInstructions() string {
 	return code.BuildInstructions(sess.Agent.InstructionsData())
 }
 
-// sendMessage broadcasts a server event tagged with this session's id so the
-// React client can dispatch it into per-session state.
-func (sess *Session) sendMessage(e ServerEvent) {
-	sess.server.sendMessage(sess.ID, e)
+// send fans a server event out to every WS client, tagged with this
+// session's id so the React client can dispatch it into per-session state.
+func (sess *Session) send(f Frame) {
+	f.Session = sess.ID
+	sess.server.send(f)
+}
+
+// setPhase records the session's current phase on the struct (so reconnects
+// can replay it) and emits a Phase event. Caller already holds no lock.
+func (sess *Session) setPhase(p string) {
+	sess.mu.Lock()
+	if sess.phase == p {
+		sess.mu.Unlock()
+		return
+	}
+	sess.phase = p
+	sess.mu.Unlock()
+	sess.send(Frame{Type: EvtPhase, Phase: p})
+}
+
+func (sess *Session) currentPhase() string {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.phase == "" {
+		return "idle"
+	}
+	return sess.phase
 }
 
 // cancel halts any in-flight Send for this session. No-op if idle.
