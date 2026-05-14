@@ -1,3 +1,0 @@
-{{- if .BridgeInstructions}}
-{{.BridgeInstructions}}
-{{- end}}

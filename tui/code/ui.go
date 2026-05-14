@@ -649,13 +649,7 @@ func (a *App) submitInput() {
 
 	a.clearPendingContent()
 
-	go func() {
-		if bridgeContext := a.bridgeContext(); bridgeContext != "" {
-			input = append(input, agent.Content{Text: bridgeContext})
-		}
-
-		a.streamResponse(input)
-	}()
+	go a.streamResponse(input)
 }
 
 func (a *App) invokeSkill(s *skill.Skill, args string) {
@@ -690,12 +684,7 @@ func (a *App) invokeSkill(s *skill.Skill, args string) {
 	input = append(input, a.pendingContent...)
 	a.clearPendingContent()
 
-	go func() {
-		if bridgeContext := a.bridgeContext(); bridgeContext != "" {
-			input = append(input, agent.Content{Text: bridgeContext})
-		}
-		a.streamResponse(input)
-	}()
+	go a.streamResponse(input)
 }
 
 func (a *App) switchToChat() {
@@ -1024,10 +1013,6 @@ func (a *App) updateInputHint() {
 		expandLabel = "expand more"
 	case 2:
 		expandLabel = "collapse"
-	}
-
-	if a.agent.Bridge != nil && a.agent.Bridge.IsConnected() {
-		parts = append(parts, fmt.Sprintf("[%s]⬢[-]", t.Green))
 	}
 
 	if !a.mouseEnabled {

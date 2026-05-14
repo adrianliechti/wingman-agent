@@ -33,26 +33,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.wsMu.Unlock()
 	}()
 
-	// On connect: announce every in-memory session as one session_state frame.
-	// Client uses it to populate per-session slots in one shot — no separate
-	// session+messages+usage+phase chatter. Phase reflects the actual current
-	// state so reconnecting mid-stream doesn't flash "idle" first.
+	// On connect: announce every in-memory session as one session_state
+	// frame. Sessions are now lightweight (workspace owns the shared
+	// resources), so listing every one of them is cheap.
 	for _, sess := range s.allSessions() {
-		u := sess.Agent.Usage
-		sess.send(Frame{
-			Type:         EvtSessionState,
-			Phase:        sess.currentPhase(),
-			Messages:     convertMessages(sess.Agent.Messages),
-			InputTokens:  u.InputTokens,
-			CachedTokens: u.CachedTokens,
-			OutputTokens: u.OutputTokens,
-		})
+		sess.sendState()
 	}
 
-	ctx := r.Context()
-
+	// Use the request ctx only for the conn.Read loop (so the goroutine
+	// exits cleanly when the WS closes). Agent turns deliberately don't
+	// inherit from r.Context() — see Server.ctx.
 	for {
-		_, data, err := conn.Read(ctx)
+		_, data, err := conn.Read(r.Context())
 		if err != nil {
 			return
 		}
@@ -69,23 +61,30 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		switch msg.Type {
 		case MsgSend:
-			go s.handleSend(ctx, sess, msg)
+			go s.handleSend(sess, msg)
 		case MsgCancel:
 			sess.cancel()
 		}
 	}
 }
 
-func (s *Server) handleSend(ctx context.Context, sess *Session, msg ClientMessage) {
-	streamCtx, cancel := context.WithCancel(ctx)
+func (s *Server) handleSend(sess *Session, msg ClientMessage) {
+	// Server-lifetime ctx, not the WS request ctx: a tab refresh or WS
+	// reconnect must not abort an in-flight agent turn. The only legit
+	// cancel sources are MsgCancel (via sess.cancel) and server shutdown.
+	streamCtx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
 	// Atomic claim of the stream slot. agent.Send is not concurrent-safe per
 	// agent (it mutates Messages), and two WS connections could otherwise
-	// both race past a check-then-act busy guard.
+	// both race past a check-then-act busy guard. If another tab beat us
+	// here, the client already optimistically appended a user entry —
+	// emit an error so the UI surfaces the dropped send instead of
+	// silently swallowing it.
 	sess.mu.Lock()
 	if sess.streamCancel != nil {
 		sess.mu.Unlock()
+		sess.send(Frame{Type: EvtError, Message: "session is busy"})
 		return
 	}
 	sess.streamCancel = cancel
@@ -163,24 +162,24 @@ func (s *Server) handleSend(ctx context.Context, sess *Session, msg ClientMessag
 		})
 	}
 
-	// Workspace-level changes (files touched, diffs shifted): every session's
-	// view of the working dir is affected, so broadcast. Checkpoints are
-	// per-session (each session has its own Rewind shadow repo), so tag.
+	// Files touched, diffs shifted, checkpoint potentially commit'd — all
+	// workspace-level now that Rewind is shared.
+	ws := s.workspace
 	s.broadcast(Frame{Type: EvtFilesChanged})
 
-	if sess.Agent.Rewind != nil {
+	if ws.Rewind != nil {
 		commitMsg := msg.Text
 		if commitMsg == "" {
 			commitMsg = "<unknown>"
 		}
 		go func() {
-			if err := sess.Agent.Rewind.Commit(commitMsg); err == nil {
-				sess.send(Frame{Type: EvtCheckpointsChanged})
+			if err := ws.Commit(commitMsg); err == nil {
+				s.broadcast(Frame{Type: EvtCheckpointsChanged})
 			}
 		}()
 		s.broadcast(Frame{Type: EvtDiffsChanged})
 	}
-	if sess.Agent.LSP != nil {
+	if ws.LSP != nil {
 		s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 	}
 
@@ -192,6 +191,7 @@ func (s *Server) handleSend(ctx context.Context, sess *Session, msg ClientMessag
 		s.broadcast(Frame{Type: EvtSessionsChanged})
 	}
 
-	sess.send(Frame{Type: EvtDone})
+	// Setting phase to idle is the turn-end signal — the client folds its
+	// streaming-ref cleanup into the phase handler.
 	sess.setPhase("idle")
 }

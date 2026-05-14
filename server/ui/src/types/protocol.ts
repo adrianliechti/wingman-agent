@@ -80,11 +80,6 @@ interface ErrorMessage {
 	message: string;
 }
 
-interface DoneMessage {
-	type: "done";
-	session: string;
-}
-
 interface CheckpointsChangedMessage {
 	type: "checkpoints_changed";
 	session?: string;
@@ -119,7 +114,6 @@ export type ServerMessage =
 	| PhaseMessage
 	| UsageMessage
 	| ErrorMessage
-	| DoneMessage
 	| CheckpointsChangedMessage
 	| SessionsChangedMessage
 	| DiffsChangedMessage
@@ -147,6 +141,7 @@ interface ConversationContent {
 		hint?: string;
 	};
 	tool_result?: {
+		id?: string;
 		name: string;
 		args: string;
 		content: string;

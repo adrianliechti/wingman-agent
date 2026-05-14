@@ -2,16 +2,11 @@ package server
 
 import (
 	"net/http"
+	"time"
 )
 
 func (s *Server) handleCheckpoints(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessionFromRequest(r)
-	if sess == nil || sess.Agent.Rewind == nil {
-		writeJSON(w, []CheckpointEntry{})
-		return
-	}
-
-	checkpoints, err := sess.Agent.Rewind.List()
+	checkpoints, err := s.workspace.Checkpoints()
 	if err != nil {
 		writeJSON(w, []CheckpointEntry{})
 		return
@@ -22,7 +17,7 @@ func (s *Server) handleCheckpoints(w http.ResponseWriter, r *http.Request) {
 		result = append(result, CheckpointEntry{
 			Hash:    cp.Hash,
 			Message: cp.Message,
-			Time:    cp.Time.Format("2006-01-02 15:04:05"),
+			Time:    cp.Time.Format(time.RFC3339),
 		})
 	}
 
@@ -36,19 +31,12 @@ func (s *Server) handleCheckpointRestore(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	sess := s.sessionFromRequest(r)
-	if sess == nil || sess.Agent.Rewind == nil {
-		http.Error(w, "rewind not available", http.StatusServiceUnavailable)
-		return
-	}
-
-	if err := sess.Agent.Rewind.Restore(hash); err != nil {
+	if err := s.workspace.Restore(hash); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Working tree just changed; every session watching this dir is affected,
-	// so broadcast both.
+	// Working tree just changed; every connected client sees it.
 	s.broadcast(Frame{Type: EvtDiffsChanged})
 	s.broadcast(Frame{Type: EvtFilesChanged})
 

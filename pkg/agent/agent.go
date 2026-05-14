@@ -19,22 +19,6 @@ type Agent struct {
 	Usage    Usage
 }
 
-// Models lists the available models from the API.
-func (a *Agent) Models(ctx context.Context) ([]ModelInfo, error) {
-	resp, err := a.client.Models.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var models []ModelInfo
-
-	for _, m := range resp.Data {
-		models = append(models, ModelInfo{ID: m.ID})
-	}
-
-	return models, nil
-}
-
 func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, error] {
 	a.appendContextMessages()
 	a.Messages = append(a.Messages, userMessage(input))

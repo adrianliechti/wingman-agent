@@ -27,7 +27,6 @@ const (
 	EvtPhase                = "phase"           // idle | thinking | streaming | tool_running
 	EvtUsage                = "usage"           // token accounting update
 	EvtError                = "error"           // turn-level error message
-	EvtDone                 = "done"            // end of a Send turn
 	EvtFilesChanged         = "files_changed"   // workspace file tree dirty
 	EvtDiffsChanged         = "diffs_changed"   // workspace diffs dirty
 	EvtCheckpointsChanged   = "checkpoints_changed"
@@ -88,6 +87,7 @@ type ConversationTool struct {
 }
 
 type ConversationResult struct {
+	ID      string `json:"id,omitempty"`
 	Name    string `json:"name"`
 	Args    string `json:"args,omitempty"`
 	Content string `json:"content"`

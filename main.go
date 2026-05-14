@@ -13,6 +13,7 @@ import (
 	clawtui "github.com/adrianliechti/wingman-agent/tui/claw"
 	codetui "github.com/adrianliechti/wingman-agent/tui/code"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/claw"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/channel"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -144,15 +145,21 @@ func runTUI(ctx context.Context, sessionID string) {
 		os.Exit(1)
 	}
 
-	c, err := code.New(wd, nil)
+	cfg, err := agent.DefaultConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer c.Close()
+	ws, err := code.NewWorkspace(wd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer ws.Close()
+	c := ws.NewAgent(cfg, nil)
 
 	if sessionID == "latest" {
-		sessions, err := session.List(filepath.Join(filepath.Dir(c.MemoryPath), "sessions"))
+		sessions, err := session.List(filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -166,7 +173,7 @@ func runTUI(ctx context.Context, sessionID string) {
 	}
 
 	if sessionID != "" {
-		s, err := session.Load(filepath.Join(filepath.Dir(c.MemoryPath), "sessions"), sessionID)
+		s, err := session.Load(filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"), sessionID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)

@@ -30,12 +30,8 @@ func (s *Server) resolveSkill(text string) string {
 		args = parts[1]
 	}
 
-	a := s.anyAgent()
-	if a == nil {
-		return text
-	}
-
-	sk := skill.FindSkill(name, a.Skills)
+	ws := s.workspace
+	sk := skill.FindSkill(name, ws.Skills)
 	if sk == nil {
 		return text
 	}
@@ -46,22 +42,16 @@ func (s *Server) resolveSkill(text string) string {
 		_, _ = skill.MaterializeBundled(sk)
 	}
 
-	content, err := sk.GetContent(a.RootPath)
+	content, err := sk.GetContent(ws.RootPath)
 	if err != nil {
 		return text
 	}
 
-	return sk.ApplyArguments(content, args, sk.AbsoluteDir(a.RootPath))
+	return sk.ApplyArguments(content, args, sk.AbsoluteDir(ws.RootPath))
 }
 
 func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
-	a := s.anyAgent()
-	if a == nil {
-		writeJSON(w, []SkillEntry{})
-		return
-	}
-	skills := a.Skills
-
+	skills := s.workspace.Skills
 	result := make([]SkillEntry, 0, len(skills))
 	for _, sk := range skills {
 		result = append(result, SkillEntry{

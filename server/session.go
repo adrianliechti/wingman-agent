@@ -2,19 +2,17 @@ package server
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"sync"
 
 	"github.com/google/uuid"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
-// Session wraps one code.Agent (own MCP/LSP/Rewind/Messages/Usage) with the
-// per-conversation BFF state: a stream cancel so concurrent sends in different
-// sessions can be controlled independently.
+// Session is one conversation bound to the server's Workspace. Lightweight:
+// own Messages/Usage/PlanMode via code.NewAgent (which Derives its Config
+// from the workspace's), plus per-conversation BFF state (stream cancel,
+// phase).
 type Session struct {
 	ID    string
 	Agent *code.Agent
@@ -30,46 +28,16 @@ func newSessionID() string {
 	return uuid.New().String()
 }
 
-// newSession creates a fresh code.Agent for this session and wires
-// per-session instructions/hooks. Heavy workspace resources (MCP/LSP/Rewind)
-// are initialized lazily in a goroutine so creating a session stays cheap.
-func (s *Server) newSession(id string) (*Session, error) {
-	a, err := code.New(s.workDir, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create agent: %w", err)
-	}
-
-	sess := &Session{ID: id, Agent: a, server: s}
-
-	// Late-bind model/effort/instructions to the server. Changing the model
-	// in the picker updates s.model under cfgMu; every session's next Send
-	// picks it up automatically — no iterate-and-overwrite needed.
+// newSession spins up a fresh Agent against the server's Workspace and
+// late-binds model/effort to server-wide settings — Workspace.NewAgent
+// already wires Instructions, ContextMessages, and the truncation hook.
+func (s *Server) newSession(id string) *Session {
+	a := s.workspace.NewAgent(s.config, nil)
+	// Every Send reads the current server-wide model/effort, so changing
+	// the picker doesn't need to iterate sessions.
 	a.Config.Model = s.currentModel
 	a.Config.Effort = s.currentEffort
-	a.Config.Instructions = sess.currentInstructions
-
-	// Mirror the single-session truncation hook: cap large tool outputs and
-	// dump the full text to this session's scratch dir.
-	a.Config.Hooks.PostToolUse = append(a.Config.Hooks.PostToolUse,
-		truncation.New(truncation.DefaultMaxBytes, a.ScratchPath),
-	)
-
-	// Warm workspace probes + MCP off the request goroutine. Using
-	// context.Background rather than the request ctx because the session
-	// outlives the request that created it — cancelling InitMCP mid-flight
-	// would leave the session without MCP tools.
-	go func() {
-		a.WarmUp()
-		if err := a.InitMCP(context.Background()); err != nil {
-			fmt.Fprintf(os.Stderr, "MCP init warning (session %s): %v\n", id, err)
-		}
-	}()
-
-	return sess, nil
-}
-
-func (sess *Session) currentInstructions() string {
-	return code.BuildInstructions(sess.Agent.InstructionsData())
+	return &Session{ID: id, Agent: a, server: s}
 }
 
 // send fans a server event out to every WS client, tagged with this
@@ -79,8 +47,23 @@ func (sess *Session) send(f Frame) {
 	sess.server.send(f)
 }
 
+// sendState pushes a session_state frame carrying the current snapshot
+// (phase, messages, usage). Used by WS hello and handleLoadSession — every
+// "populate this slot" path goes through here.
+func (sess *Session) sendState() {
+	u := sess.Agent.Usage
+	sess.send(Frame{
+		Type:         EvtSessionState,
+		Phase:        sess.currentPhase(),
+		Messages:     convertMessages(sess.Agent.Messages),
+		InputTokens:  u.InputTokens,
+		CachedTokens: u.CachedTokens,
+		OutputTokens: u.OutputTokens,
+	})
+}
+
 // setPhase records the session's current phase on the struct (so reconnects
-// can replay it) and emits a Phase event. Caller already holds no lock.
+// can replay it) and emits a Phase event.
 func (sess *Session) setPhase(p string) {
 	sess.mu.Lock()
 	if sess.phase == p {
@@ -111,9 +94,8 @@ func (sess *Session) cancel() {
 	}
 }
 
+// close cancels any in-flight stream. The session's Agent shares the
+// workspace's resources; there's nothing else to release.
 func (sess *Session) close() {
 	sess.cancel()
-	if sess.Agent != nil {
-		sess.Agent.Close()
-	}
 }

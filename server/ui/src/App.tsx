@@ -20,7 +20,7 @@ import { FileTree } from "./components/FileTree";
 import { ProblemsPanel } from "./components/ProblemsPanel";
 import { Sidebar } from "./components/Sidebar";
 import { useCapabilities } from "./hooks/useCapabilities";
-import { messagesToEntries, useWebSocket } from "./hooks/useWebSocket";
+import { useWebSocket } from "./hooks/useWebSocket";
 
 interface CenterTab {
 	id: string;
@@ -41,8 +41,6 @@ export default function App() {
 		sessions,
 		sendChat,
 		cancel,
-		setSessionEntries,
-		ensureSession,
 		removeSession,
 		subscribe,
 	} = useWebSocket();
@@ -128,29 +126,32 @@ export default function App() {
 		[activeTabId],
 	);
 
-	const handleNewSession = useCallback(async () => {
+	const createSession = useCallback(async (): Promise<string | undefined> => {
 		const res = await fetch("/api/sessions/new", { method: "POST" });
-		const data = await res.json();
-		ensureSession(data.id);
-		setSessionId(data.id);
+		if (!res.ok) return undefined;
+		const data = (await res.json()) as { id?: string };
+		return data.id;
+	}, []);
+
+	const handleNewSession = useCallback(async () => {
+		const id = await createSession();
+		if (!id) return;
+		// Server pushes session_state for the new slot via WS — no need to
+		// ensureSession here; the slot will materialize when the event lands.
+		setSessionId(id);
 		setActiveTabId("chat");
-	}, [ensureSession]);
+	}, [createSession]);
 
 	const handleSessionDeleted = useCallback(
 		(id: string) => {
 			removeSession(id);
 			if (id === sessionId) {
-				// The server keeps at least one session alive (handleDeleteSession
-				// auto-bootstraps); pick whatever's left as the new active.
-				const remaining = Object.keys(sessions).filter((sid) => sid !== id);
-				if (remaining.length > 0) {
-					setSessionId(remaining[0]);
-				} else {
-					setSessionId("");
-				}
+				// No auto-bootstrap on the server — clear the active session
+				// and let the user pick from the sidebar or type to create.
+				setSessionId("");
 			}
 		},
-		[removeSession, sessionId, sessions],
+		[removeSession, sessionId],
 	);
 
 	const handleSessionSelect = useCallback(
@@ -161,24 +162,31 @@ export default function App() {
 				setActiveTabId("chat");
 				return;
 			}
-			// Disk-only session: load it server-side and hydrate the slot.
+			// Disk-only session: ask server to load it. Server registers it,
+			// then pushes a session_state event via WS to populate the slot.
 			const res = await fetch(`/api/sessions/${id}/load`, { method: "POST" });
 			if (!res.ok) return;
-			const data = await res.json();
-			ensureSession(id);
-			setSessionEntries(id, messagesToEntries(data.messages));
 			setSessionId(id);
 			setActiveTabId("chat");
 		},
-		[ensureSession, sessions, setSessionEntries],
+		[sessions],
 	);
 
 	const handleSend = useCallback(
-		(text: string, files?: string[]) => {
-			if (!sessionId) return;
-			sendChat(sessionId, text, files);
+		async (text: string, files?: string[]) => {
+			let sid = sessionId;
+			// Lazy-create on first send: clicking "+" and then typing is two
+			// steps; this collapses it. The slot will materialize via the
+			// session_state event from the server.
+			if (!sid) {
+				const id = await createSession();
+				if (!id) return;
+				sid = id;
+				setSessionId(id);
+			}
+			sendChat(sid, text, files);
 		},
-		[sendChat, sessionId],
+		[createSession, sendChat, sessionId],
 	);
 
 	const handleCancel = useCallback(() => {

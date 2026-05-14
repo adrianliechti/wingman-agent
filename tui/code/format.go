@@ -84,8 +84,7 @@ func toolDisplay(name string) (string, string) {
 		return "⊕", name
 	case name == "ask_user":
 		return "?", name
-	case strings.HasPrefix(name, "get_lsp_") || strings.HasPrefix(name, "find_lsp_") ||
-		strings.HasPrefix(name, "bridge_get_lsp_") || strings.HasPrefix(name, "bridge_find_lsp_"):
+	case strings.HasPrefix(name, "get_lsp_") || strings.HasPrefix(name, "find_lsp_"):
 		return "◇", name
 	default:
 		return "◈", name

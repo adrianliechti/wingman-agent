@@ -37,15 +37,42 @@ export function messagesToEntries(messages: ConversationMessage[]): ChatEntry[] 
 					reasoningId: c.reasoning.id,
 				});
 			}
-			if (c.tool_result) {
+			if (c.tool_call) {
+				// Restore the call: this matches the entry the live stream
+				// would have produced (tool_call event), with the same toolId
+				// the result will later match against.
 				entries.push({
-					id: crypto.randomUUID(),
+					id: c.tool_call.id || crypto.randomUUID(),
 					type: "tool",
 					content: "",
-					toolName: c.tool_result.name,
-					toolArgs: c.tool_result.args,
-					toolResult: c.tool_result.content,
+					toolId: c.tool_call.id,
+					toolName: c.tool_call.name,
+					toolArgs: c.tool_call.args,
+					toolHint: c.tool_call.hint,
 				});
+			}
+			if (c.tool_result) {
+				// Attach to the call entry by id; fall back to a standalone
+				// entry if the call wasn't in the message list (defensive).
+				const existing =
+					c.tool_result.id !== undefined
+						? entries.findLast(
+								(e) => e.type === "tool" && e.toolId === c.tool_result?.id,
+							)
+						: undefined;
+				if (existing) {
+					existing.toolResult = c.tool_result.content;
+				} else {
+					entries.push({
+						id: c.tool_result.id || crypto.randomUUID(),
+						type: "tool",
+						content: "",
+						toolId: c.tool_result.id,
+						toolName: c.tool_result.name,
+						toolArgs: c.tool_result.args,
+						toolResult: c.tool_result.content,
+					});
+				}
 			}
 		}
 	}
@@ -289,6 +316,12 @@ export function useWebSocket() {
 			}
 
 			case "phase":
+				// phase=idle is the turn-end signal — clear streaming refs so
+				// the next turn starts a fresh assistant/reasoning entry.
+				if (msg.phase === "idle") {
+					finalizeStreaming(sid);
+					finalizeReasoning(sid);
+				}
 				updateSession(sid, (sess) => ({ ...sess, phase: msg.phase }));
 				break;
 
@@ -304,11 +337,6 @@ export function useWebSocket() {
 				}));
 				break;
 			}
-
-			case "done":
-				finalizeStreaming(sid);
-				finalizeReasoning(sid);
-				break;
 
 			case "usage":
 				updateSession(sid, (sess) => ({
@@ -352,13 +380,6 @@ export function useWebSocket() {
 		[send],
 	);
 
-	const setSessionEntries = useCallback(
-		(sessionId: string, entries: ChatEntry[]) => {
-			updateSession(sessionId, (sess) => ({ ...sess, entries }));
-		},
-		[updateSession],
-	);
-
 	const removeSession = useCallback((sessionId: string) => {
 		setSessions((prev) => {
 			if (!(sessionId in prev)) return prev;
@@ -367,13 +388,6 @@ export function useWebSocket() {
 		});
 		delete streamRefs.current[sessionId];
 	}, []);
-
-	const ensureSession = useCallback(
-		(sessionId: string) => {
-			updateSession(sessionId, (sess) => sess);
-		},
-		[updateSession],
-	);
 
 	useEffect(() => {
 		let reconnectTimer: ReturnType<typeof setTimeout>;
@@ -454,8 +468,6 @@ export function useWebSocket() {
 		sessions,
 		sendChat,
 		cancel,
-		setSessionEntries,
-		ensureSession,
 		removeSession,
 		subscribe,
 	};

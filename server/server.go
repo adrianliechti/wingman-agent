@@ -30,18 +30,30 @@ var staticFiles embed.FS
 var StaticFS, _ = fs.Sub(staticFiles, "static")
 
 type Server struct {
-	workDir string
-	port    int
+	port int
+
+	// workspace owns the workdir-shared resources (Root, MCP, LSP, Rewind,
+	// Skills). Each session is a code.Agent bound to it.
+	workspace *code.Workspace
+
+	// config carries the upstream API client + late-bound model/effort
+	// getters. Workspace.NewAgent Derives each session's own Config from
+	// this. Server.handleModels uses it directly to list available models
+	// without needing a session.
+	config *agent.Config
+
+	// ctx lives for the lifetime of the server. Agent turns and background
+	// goroutines (pollFiles, async MCP warmup) tie their cancellation to
+	// this — NOT to any HTTP request ctx. Tying a Send to r.Context() would
+	// cancel the agent mid-turn on a WS disconnect/reconnect.
+	ctx context.Context
 
 	mux *http.ServeMux
 
 	sessionsDir string
 
-	// Sessions held in memory. New() creates an initial session so the
-	// workspace-shared endpoints (files, capabilities, models, …) always
-	// have an agent to delegate to via anyAgent. sessionsOrder keeps
-	// iteration deterministic across reconnects so the UI's "default
-	// session" pick is stable.
+	// Sessions held in memory. sessionsOrder keeps iteration deterministic
+	// across reconnects so the UI's auto-pick of "first session" is stable.
 	mu            sync.Mutex
 	sessions      map[string]*Session
 	sessionsOrder []string
@@ -60,31 +72,35 @@ type Server struct {
 }
 
 func New(ctx context.Context, workDir string, port int) (*Server, error) {
-	s := &Server{
-		workDir:  workDir,
-		port:     port,
-		sessions: map[string]*Session{},
-		wsConns:  map[*websocket.Conn]struct{}{},
-	}
-
-	// Bootstrap: create an initial in-memory session so the workspace-shared
-	// endpoints (files, capabilities, …) always have an agent to read from.
-	initial, err := s.newSession(newSessionID())
+	cfg, err := agent.DefaultConfig()
 	if err != nil {
 		return nil, err
 	}
-	s.registerSession(initial)
+	ws, err := code.NewWorkspace(workDir)
+	if err != nil {
+		return nil, err
+	}
 
-	// Run the initial workspace probe synchronously so /api/capabilities is
-	// authoritative by the time the browser hits it. The async goroutine
-	// inside newSession is a no-op after this (warmupOnce).
-	initial.Agent.WarmUp()
+	s := &Server{
+		port:        port,
+		workspace:   ws,
+		config:      cfg,
+		ctx:         ctx,
+		sessionsDir: filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
+		sessions:    map[string]*Session{},
+		wsConns:     map[*websocket.Conn]struct{}{},
+	}
 
-	// sessionsDir lives under the project's memory dir, computed by code.New
-	// — read it off the first session so we don't duplicate the path logic.
-	s.sessionsDir = filepath.Join(filepath.Dir(initial.Agent.MemoryPath), "sessions")
+	// Synchronous workspace probe so /api/capabilities is authoritative by
+	// the time the browser first hits it. MCP setup runs async — slow MCP
+	// servers shouldn't block startup.
+	ws.WarmUp()
+	go func() {
+		if err := ws.InitMCP(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "MCP init warning: %v\n", err)
+		}
+	}()
 
-	// Auto-select a model now that the initial agent's client is wired up.
 	s.autoSelectModel(ctx)
 
 	// Poll for outside-the-agent file changes so the FileTree/Diffs panels
@@ -97,6 +113,14 @@ func New(ctx context.Context, workDir string, port int) (*Server, error) {
 	s.registerRoutes(s.mux)
 
 	return s, nil
+}
+
+// Close releases the workspace (Root, MCP, LSP, Rewind, scratch). Sessions
+// share these resources, so individual session Close is now a no-op.
+func (s *Server) Close() {
+	if s.workspace != nil {
+		s.workspace.Close()
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -211,32 +235,12 @@ func (s *Server) allSessions() []*Session {
 	return out
 }
 
-// anyAgent returns any in-memory session's agent for workspace-shared
-// queries (files, capabilities, models, diagnostics). Returns nil only if
-// every session has been deleted — the initial-session bootstrap in New
-// keeps that from happening under normal use.
-func (s *Server) anyAgent() *code.Agent {
-	all := s.allSessions()
-	if len(all) == 0 {
-		return nil
-	}
-	return all[0].Agent
-}
-
 // sessionFromRequest resolves the target session for a per-session HTTP
-// endpoint via ?session=… , falling back to any session if absent. Per-session
-// routes that take {id} in the path (load/delete) read it themselves.
+// endpoint via ?session=…. Returns nil if missing or unknown — callers
+// 404 / 503 their response accordingly. (Per-session routes that take {id}
+// in the path — load/delete — read it themselves.)
 func (s *Server) sessionFromRequest(r *http.Request) *Session {
-	if id := r.URL.Query().Get("session"); id != "" {
-		if sess := s.getSession(id); sess != nil {
-			return sess
-		}
-	}
-	all := s.allSessions()
-	if len(all) == 0 {
-		return nil
-	}
-	return all[0]
+	return s.getSession(r.URL.Query().Get("session"))
 }
 
 // broadcast emits a workspace-level event (no session id) to every connected
@@ -299,11 +303,7 @@ func (s *Server) autoSelectModel(ctx context.Context) {
 	if s.currentModel() != "" {
 		return
 	}
-	a := s.anyAgent()
-	if a == nil {
-		return
-	}
-	models, err := a.Models(ctx)
+	models, err := s.config.Models(ctx)
 	if err != nil || len(models) == 0 {
 		return
 	}
@@ -324,8 +324,10 @@ func (s *Server) autoSelectModel(ctx context.Context) {
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	// Combine on-disk (saved) and in-memory (possibly empty/new) sessions.
 	// Saved entries carry the real CreatedAt/Title; in-memory-only entries
-	// are brand new with nothing on disk yet, so they get "now".
-	const tsFmt = "2006-01-02 15:04"
+	// are brand new with nothing on disk yet, so they get "now". Timestamps
+	// are RFC3339 so the React side can parse them with `new Date(...)`
+	// across browsers — the previous "YYYY-MM-DD HH:MM" format isn't
+	// standard for Date parsing and gave NaN on some runtimes.
 	seen := map[string]bool{}
 	result := []SessionEntry{}
 
@@ -335,12 +337,12 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		result = append(result, SessionEntry{
 			ID:        sess.ID,
 			Title:     sess.Title,
-			CreatedAt: sess.CreatedAt.Format(tsFmt),
-			UpdatedAt: sess.UpdatedAt.Format(tsFmt),
+			CreatedAt: sess.CreatedAt.Format(time.RFC3339),
+			UpdatedAt: sess.UpdatedAt.Format(time.RFC3339),
 		})
 	}
 
-	nowStr := time.Now().Format(tsFmt)
+	nowStr := time.Now().Format(time.RFC3339)
 	for _, sess := range s.allSessions() {
 		if seen[sess.ID] {
 			continue
@@ -352,8 +354,8 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// "YYYY-MM-DD HH:MM" sorts chronologically as a string, so we don't need
-	// a parallel time.Time field just for ordering.
+	// RFC3339 sorts chronologically as a string, so no parallel time.Time
+	// field needed for ordering.
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].UpdatedAt > result[j].UpdatedAt
 	})
@@ -362,12 +364,13 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.newSession(newSessionID())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	sess := s.newSession(newSessionID())
 	s.registerSession(sess)
+	// Brand-new sessions are empty by definition. No session_state push —
+	// it would race the lazy-create-on-send flow (client appends user entry
+	// after the POST returns, server's empty-snapshot would erase it). The
+	// creating client creates its slot locally on receiving the {id}; other
+	// clients get one when they click the sidebar entry.
 	s.broadcast(Frame{Type: EvtSessionsChanged})
 
 	writeJSON(w, map[string]string{"id": sess.ID})
@@ -389,11 +392,7 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
 		}
-		newSess, err := s.newSession(id)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		newSess := s.newSession(id)
 		newSess.Agent.Messages = saved.State.Messages
 		newSess.Agent.Usage = saved.State.Usage
 		s.registerSession(newSess)
@@ -401,18 +400,11 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		s.broadcast(Frame{Type: EvtSessionsChanged})
 	}
 
-	messages := convertMessages(sess.Agent.Messages)
-	usage := sess.Agent.Usage
-	writeJSON(w, map[string]any{
-		"id":       sess.ID,
-		"messages": messages,
-		"usage": map[string]int64{
-			"input_tokens":  usage.InputTokens,
-			"cached_tokens": usage.CachedTokens,
-			"output_tokens": usage.OutputTokens,
-		},
-		"mode": modeStringFor(sess),
-	})
+	// Push full state via WS so every tab observing this session sees the
+	// same snapshot the requesting tab will. The HTTP response is just an
+	// ack — the client doesn't need the payload here.
+	sess.sendState()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
@@ -433,10 +425,6 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// Bootstrap a fresh session if we just removed the last one. Gate on
-	// inMem so two concurrent deletes for the same id don't both fire — the
-	// second won't have removed anything, so it shouldn't replace.
-	needsBootstrap := inMem && len(s.sessions) == 0
 	s.mu.Unlock()
 
 	if inMem {
@@ -446,13 +434,6 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if err := session.Delete(s.sessionsDir, id); err != nil && !os.IsNotExist(err) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-
-	if needsBootstrap {
-		newSess, err := s.newSession(newSessionID())
-		if err == nil {
-			s.registerSession(newSess)
-		}
 	}
 
 	s.broadcast(Frame{Type: EvtSessionsChanged})
@@ -465,13 +446,7 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	a := s.anyAgent()
-	if a == nil {
-		writeJSON(w, []map[string]string{})
-		return
-	}
-
-	models, err := a.Models(r.Context())
+	models, err := s.config.Models(r.Context())
 	if err != nil {
 		writeJSON(w, []map[string]string{})
 		return
@@ -527,9 +502,7 @@ func (s *Server) handleSetEffort(w http.ResponseWriter, r *http.Request) {
 
 	switch body.Effort {
 	case "", "auto":
-		s.setEffort("")
-		writeJSON(w, map[string]string{"effort": ""})
-		return
+		body.Effort = ""
 	case "low", "medium", "high":
 	default:
 		http.Error(w, "effort must be auto, low, medium, or high", http.StatusBadRequest)
@@ -537,18 +510,11 @@ func (s *Server) handleSetEffort(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.setEffort(body.Effort)
-
 	writeJSON(w, map[string]string{"effort": body.Effort})
 }
 
 func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
-	a := s.anyAgent()
-	if a == nil || a.LSP == nil {
-		writeJSON(w, []any{})
-		return
-	}
-
-	allDiags := a.LSP.CollectAllDiagnostics(r.Context())
+	allDiags := s.workspace.Diagnostics(r.Context())
 
 	type diagItem struct {
 		Path     string `json:"path"`
@@ -563,7 +529,7 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 	for filePath, diags := range allDiags {
 		relPath := filePath
-		if rel, err := filepath.Rel(a.RootPath, filePath); err == nil {
+		if rel, err := filepath.Rel(s.workspace.RootPath, filePath); err == nil {
 			relPath = rel
 		}
 
@@ -615,10 +581,8 @@ func (s *Server) pollFiles(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	prevGit := false
-	if a := s.anyAgent(); a != nil {
-		prevGit = a.IsGitRepo()
-	}
+	ws := s.workspace
+	prevGit := ws.IsGitRepo()
 	var prevFingerprint uint64
 
 	for {
@@ -633,30 +597,25 @@ func (s *Server) pollFiles(ctx context.Context) {
 				continue
 			}
 
-			a := s.anyAgent()
-			if a == nil {
-				continue
-			}
-
-			gitNow := a.IsGitRepo()
+			gitNow := ws.IsGitRepo()
 			if gitNow != prevGit {
-				// SyncProjectMode every session so they all observe `git init`.
-				for _, sess := range s.allSessions() {
-					sess.Agent.SyncProjectMode()
-				}
+				// Workspace rebuilds LSP once for the whole server when git
+				// status flips (typically: agent ran `git init` in a scratch
+				// dir). All sessions inherit via Workspace.LSP.
+				ws.SyncProjectMode()
 				s.broadcast(Frame{Type: EvtCapabilitiesChanged})
-				if a.LSP != nil {
+				if ws.LSP != nil {
 					s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 				}
 				prevGit = gitNow
 			}
 
-			if a.Rewind == nil {
+			if ws.Rewind == nil {
 				s.broadcast(Frame{Type: EvtFilesChanged})
 				continue
 			}
 
-			fp := a.Rewind.Fingerprint()
+			fp := ws.Rewind.Fingerprint()
 			if fp != prevFingerprint {
 				s.broadcast(Frame{Type: EvtFilesChanged})
 				s.broadcast(Frame{Type: EvtDiffsChanged})
@@ -667,19 +626,14 @@ func (s *Server) pollFiles(ctx context.Context) {
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
-	a := s.anyAgent()
+	ws := s.workspace
 	caps := map[string]any{
-		"git":   false,
-		"lsp":   false,
-		"diffs": false,
+		"git":   ws.IsGitRepo(),
+		"lsp":   ws.LSP != nil,
+		"diffs": ws.Rewind != nil,
 	}
-	if a != nil {
-		caps["git"] = a.IsGitRepo()
-		caps["lsp"] = a.LSP != nil
-		caps["diffs"] = a.Rewind != nil
-		if a.Rewind == nil {
-			caps["notice"] = "This directory is too large for full features. Diffs, checkpoints, and code intelligence are disabled — chat and file browsing still work."
-		}
+	if ws.Rewind == nil {
+		caps["notice"] = "This directory is too large for full features. Diffs, checkpoints, and code intelligence are disabled — chat and file browsing still work."
 	}
 	writeJSON(w, caps)
 }
@@ -720,6 +674,7 @@ func convertMessages(messages []agent.Message) []ConversationMessage {
 
 			if c.ToolResult != nil {
 				cc.ToolResult = &ConversationResult{
+					ID:      c.ToolResult.ID,
 					Name:    c.ToolResult.Name,
 					Args:    c.ToolResult.Args,
 					Content: c.ToolResult.Content,

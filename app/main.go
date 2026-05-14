@@ -16,7 +16,6 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
-	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/server"
 )
 
@@ -26,8 +25,8 @@ var publicFS embed.FS
 type App struct {
 	ctx context.Context
 
-	mu    sync.Mutex
-	agent *code.Agent
+	mu     sync.Mutex
+	server *server.Server
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -53,11 +52,11 @@ func (a *App) SaveSettings(s Settings) error {
 
 func (a *App) shutdown(ctx context.Context) {
 	a.mu.Lock()
-	agent := a.agent
+	srv := a.server
 	a.mu.Unlock()
 
-	if agent != nil {
-		agent.Close()
+	if srv != nil {
+		srv.Close()
 	}
 }
 
@@ -77,32 +76,30 @@ func (a *App) OpenWorkspace(path string) (string, error) {
 	}
 
 	a.mu.Lock()
-	if a.agent != nil {
+	if a.server != nil {
 		a.mu.Unlock()
 		return "", errors.New("workspace already open")
 	}
 	a.mu.Unlock()
 
-	c, err := code.New(path, nil)
+	srv, err := server.New(a.ctx, path, 0)
 	if err != nil {
 		return "", err
 	}
-
-	s := server.New(a.ctx, c, 0)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		c.Close()
+		srv.Close()
 		return "", err
 	}
 	go func() {
-		if err := http.Serve(listener, s); err != nil && !errors.Is(err, net.ErrClosed) {
+		if err := http.Serve(listener, srv); err != nil && !errors.Is(err, net.ErrClosed) {
 			log.Printf("server listener: %v", err)
 		}
 	}()
 
 	a.mu.Lock()
-	a.agent = c
+	a.server = srv
 	a.mu.Unlock()
 
 	return fmt.Sprintf("http://%s", listener.Addr().String()), nil

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"strings"
 	"time"
@@ -40,6 +41,22 @@ func (c *Config) Derive() *Config {
 		Model:  c.Model,
 		Effort: c.Effort,
 	}
+}
+
+// Models lists the available models from the API.
+func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {
+	resp, err := c.client.Models.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var models []ModelInfo
+
+	for _, m := range resp.Data {
+		models = append(models, ModelInfo{ID: m.ID})
+	}
+
+	return models, nil
 }
 
 func DefaultConfig() (*Config, error) {

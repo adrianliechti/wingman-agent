@@ -10,19 +10,3 @@ func (a *App) currentInstructions() string {
 
 	return code.BuildInstructions(data)
 }
-
-func (a *App) bridgeInstructions() string {
-	if a.agent.Bridge == nil {
-		return ""
-	}
-
-	return a.agent.Bridge.GetInstructions()
-}
-
-func (a *App) bridgeContext() string {
-	if a.agent.Bridge == nil {
-		return ""
-	}
-
-	return a.agent.Bridge.GetContext()
-}

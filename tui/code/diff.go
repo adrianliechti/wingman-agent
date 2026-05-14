@@ -15,13 +15,7 @@ import (
 func (a *App) showDiffView() {
 	t := theme.Default
 
-	if a.agent.Rewind == nil {
-		fmt.Fprint(a.chatView, a.formatNotice("Diff unavailable in this workspace", t.Yellow))
-		return
-	}
-
-	diffs, err := a.agent.Rewind.DiffFromBaseline()
-
+	diffs, err := a.agent.Diffs()
 	if err != nil {
 		fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("%v", err), t.Yellow))
 		return

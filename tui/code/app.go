@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -14,7 +13,6 @@ import (
 	"github.com/rivo/tview"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
@@ -113,11 +111,9 @@ func New(ctx context.Context, agent *code.Agent, sessionID string) *App {
 		mouseEnabled: true,
 	}
 
+	// Override the default Instructions wiring with one that consults the
+	// TUI's currentMode (the prompt picker can flip plan/agent at runtime).
 	agent.Config.Instructions = a.currentInstructions
-
-	agent.Config.Hooks.PostToolUse = append(agent.Config.Hooks.PostToolUse,
-		truncation.New(truncation.DefaultMaxBytes, agent.ScratchPath),
-	)
 
 	return a
 }
@@ -161,7 +157,7 @@ func (a *App) saveSession() {
 }
 
 func (a *App) stop() {
-	// Shut down bridge, MCP, LSP, and rewind in one call.
+	// Shut down MCP, LSP, and rewind in one call.
 	a.agent.Close()
 
 	// Save session before stopping
@@ -290,86 +286,6 @@ func (a *App) closeActiveModal() {
 	case ModalDiagnostics:
 		a.closeDiagnosticsView()
 	}
-}
-
-func (a *App) lspDiagnostics(ctx context.Context, path string) string {
-	if a.agent.LSP == nil {
-		return ""
-	}
-
-	absPath := path
-	if !filepath.IsAbs(absPath) {
-		absPath = filepath.Join(a.agent.LSP.WorkingDir(), path)
-	}
-
-	// When bridge is connected, notify it and use its diagnostics.
-	if a.agent.Bridge != nil && a.agent.Bridge.IsConnected() {
-		return a.bridgeDiagnostics(ctx, absPath)
-	}
-
-	return a.localLSPDiagnostics(ctx, absPath, path)
-}
-
-func (a *App) bridgeDiagnostics(ctx context.Context, absPath string) string {
-	a.agent.Bridge.NotifyFileUpdated(ctx, absPath)
-
-	// Give the IDE time to re-analyze the file after notification
-	time.Sleep(500 * time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	result, err := a.agent.Bridge.GetDiagnostics(ctx, absPath)
-	if err != nil || result == "" || result == "[]" {
-		return ""
-	}
-
-	return result
-}
-
-func (a *App) localLSPDiagnostics(ctx context.Context, absPath, path string) string {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	uri := lsp.FileURI(absPath)
-
-	session, err := a.agent.LSP.GetSession(ctx, absPath)
-	if err != nil {
-		return ""
-	}
-
-	// Capture baseline diagnostics before syncing the changed file content.
-	// This lets us diff against what existed before the edit.
-	baselineDiags := session.PushDiagnostics(uri)
-	if len(baselineDiags) == 0 {
-		baselineDiags = session.CollectDiagnostics(ctx, uri)
-	}
-	a.lspTracker.SetBaseline(uri, baselineDiags)
-
-	// Clear push diagnostics so we get fresh ones after the change
-	session.ClearPushDiagnostics(uri)
-
-	// Now sync the updated file content to the LSP server (sends didChange + didSave)
-	if _, err := session.OpenDocument(ctx, absPath); err != nil {
-		return ""
-	}
-
-	// Wait for new diagnostics
-	diags := session.WaitForDiagnostics(ctx, uri)
-	if len(diags) == 0 {
-		return ""
-	}
-
-	// Filter to only new diagnostics, sort by severity, cap volume
-	newDiags := a.lspTracker.FilterNew(uri, diags)
-	if len(newDiags) == 0 {
-		return ""
-	}
-
-	// Mark as delivered for cross-turn deduplication
-	a.lspTracker.MarkDelivered(uri, newDiags)
-
-	return lsp.FormatNewDiagnostics(newDiags, path, a.agent.LSP.WorkingDir())
 }
 
 func (a *App) isToolHidden(name string) bool {
