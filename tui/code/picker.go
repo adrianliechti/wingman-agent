@@ -56,7 +56,6 @@ func (a *App) showPicker(title string, items []PickerItem, selectedID string, on
 		return event
 	})
 
-	// Calculate dimensions
 	maxWidth := len(title) + 4
 
 	for _, item := range items {
@@ -67,7 +66,6 @@ func (a *App) showPicker(title string, items []PickerItem, selectedID string, on
 	boxWidth := maxWidth + 4
 	boxHeight := len(items) + 4
 
-	// Create bordered container with opaque background
 	box := tview.NewFlex().SetDirection(tview.FlexRow)
 	box.Box = tview.NewBox()
 	box.AddItem(list, 0, 1, true)
@@ -79,7 +77,6 @@ func (a *App) showPicker(title string, items []PickerItem, selectedID string, on
 	box.SetBackgroundColor(tview.Styles.PrimitiveBackgroundColor)
 	box.SetBorderPadding(1, 1, 2, 2)
 
-	// Create centered modal layout
 	modal := tview.NewFlex().
 		AddItem(nil, 0, 1, false).
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).

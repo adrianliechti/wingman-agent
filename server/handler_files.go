@@ -12,7 +12,6 @@ import (
 	"strings"
 )
 
-// Language mapping for syntax highlighting hints
 var extToLanguage = map[string]string{
 	".go":    "go",
 	".js":    "javascript",
@@ -68,7 +67,6 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		dirPath = "."
 	}
 
-	// Sanitize path
 	dirPath = path.Clean(dirPath)
 	if strings.HasPrefix(dirPath, "..") {
 		http.Error(w, "invalid path", http.StatusBadRequest)
@@ -88,12 +86,10 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	for _, entry := range entries {
 		name := entry.Name()
 
-		// Skip hidden files/dirs
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
 
-		// Skip common large directories
 		if entry.IsDir() {
 			if name == "node_modules" || name == "__pycache__" || name == ".venv" || name == "vendor" {
 				continue
@@ -187,7 +183,6 @@ func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sanitize
 	filePath = path.Clean(filePath)
 	if strings.HasPrefix(filePath, "..") {
 		http.Error(w, "invalid path", http.StatusBadRequest)
@@ -205,7 +200,6 @@ func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	lang := extToLanguage[ext]
 
-	// Special cases
 	base := strings.ToLower(filepath.Base(filePath))
 	if lang == "" {
 		switch base {
@@ -225,9 +219,6 @@ func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resolveWorkspacePath validates a relative path against traversal/absolute
-// escape and returns the absolute path under RootPath. Used by the mutating
-// handlers; the read-only handlers above stick with fs.FS rooted at Root.
 func (s *Server) resolveWorkspacePath(p string) (string, bool) {
 	if p == "" {
 		return "", false
@@ -276,8 +267,6 @@ func (s *Server) handleFileRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Refuse to clobber an existing entry — rename is also used as the inline
-	// edit and the user expects an error rather than silent overwrite.
 	if _, err := os.Lstat(toAbs); err == nil {
 		http.Error(w, "destination already exists", http.StatusConflict)
 		return
@@ -354,9 +343,7 @@ func copyPath(src, dst string, info os.FileInfo) error {
 		return nil
 	}
 
-	// Skip symlinks and other non-regular files; the file tree filters most
-	// of these out, but a hand-crafted request shouldn't be able to dereference
-	// a link out of the workspace.
+	// Symlinks must not be dereferenced — could escape the workspace.
 	if !info.Mode().IsRegular() {
 		return nil
 	}
@@ -384,10 +371,8 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lstat (not Stat) so symlinks don't get auto-resolved to outside-the-
-	// workspace targets. resolveWorkspacePath only checks the lexical path;
-	// without this guard, a symlink inside the workspace pointing at, say,
-	// /etc/passwd would be happily served.
+	// Lstat (not Stat): resolveWorkspacePath checks only the lexical path,
+	// so a symlink inside the workspace could otherwise serve /etc/passwd.
 	info, err := os.Lstat(abs)
 	if err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
@@ -405,8 +390,5 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	name := filepath.Base(abs)
 	disposition := "attachment; filename=\"" + strings.ReplaceAll(name, "\"", "") + "\"; filename*=UTF-8''" + url.PathEscape(name)
 	w.Header().Set("Content-Disposition", disposition)
-	// Let http.ServeFile pick the Content-Type from the extension / sniff —
-	// the attachment disposition above forces a download regardless of type,
-	// and the real MIME is what the clipboard copy path needs.
 	http.ServeFile(w, r, abs)
 }

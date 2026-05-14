@@ -13,13 +13,11 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/claw/tool/schedule"
 )
 
-// AgentManager provides the operations needed by the management tools.
 type AgentManager interface {
 	CreateAgent(name string) error
 	DeleteAgent(name string) error
 }
 
-// Tools returns agent lifecycle management tools.
 func Tools(mgr AgentManager, store *memory.Store) []tool.Tool {
 	return []tool.Tool{
 		{
@@ -76,14 +74,12 @@ func Tools(mgr AgentManager, store *memory.Store) []tool.Tool {
 					return "", err
 				}
 
-				// Write AGENTS.md
 				if instructions, ok := args["instructions"].(string); ok && instructions != "" {
 					if err := store.WriteAgent(name, instructions); err != nil {
 						return "", fmt.Errorf("agent created but failed to write AGENTS.md: %w", err)
 					}
 				}
 
-				// Write tasks.yaml
 				if taskList, ok := args["tasks"].([]any); ok && len(taskList) > 0 {
 					agentDir := store.AgentDir(name)
 					var tasks []schedule.Task

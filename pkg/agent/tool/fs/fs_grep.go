@@ -19,8 +19,8 @@ import (
 
 const (
 	DefaultGrepLimit     = 200
-	DefaultScanBufSize   = 64 * 1024   // 64KB initial buffer
-	MaxScanBufSize       = 1024 * 1024 // 1MB max buffer for long lines
+	DefaultScanBufSize   = 64 * 1024
+	MaxScanBufSize       = 1024 * 1024
 	MaxLineDisplayLength = 200
 )
 
@@ -162,7 +162,6 @@ func GrepTool(root *os.Root) tool.Tool {
 			if l, ok := args["head_limit"].(float64); ok && l > 0 {
 				headLimit = int(l)
 			}
-			// Support legacy "limit" parameter
 			if l, ok := args["limit"].(float64); ok && l > 0 {
 				headLimit = int(l)
 			}
@@ -185,7 +184,6 @@ func GrepTool(root *os.Root) tool.Tool {
 				outputMode = m
 			}
 
-			// Compile regex
 			regexPattern := pattern
 			if literal {
 				regexPattern = regexp.QuoteMeta(pattern)
@@ -196,7 +194,7 @@ func GrepTool(root *os.Root) tool.Tool {
 				flags += "i"
 			}
 			if multiline {
-				flags += "s" // dotall: . matches \n
+				flags += "s"
 			}
 			if flags != "" {
 				regexPattern = "(?" + flags + ")" + regexPattern
@@ -208,7 +206,6 @@ func GrepTool(root *os.Root) tool.Tool {
 				return "", fmt.Errorf("invalid regex pattern: %w", err)
 			}
 
-			// Check if path exists
 			info, err := root.Stat(searchPathFS)
 
 			if err != nil {
@@ -217,7 +214,6 @@ func GrepTool(root *os.Root) tool.Tool {
 
 			fsys := root.FS()
 
-			// If path is a file, search just that file
 			if !info.IsDir() {
 				matches := searchFileWithContext(fsys, searchPathFS, re, beforeContext, afterContext, headLimit+resultOffset, multiline)
 
@@ -225,7 +221,6 @@ func GrepTool(root *os.Root) tool.Tool {
 					return "No matches found", nil
 				}
 
-				// Apply offset
 				if resultOffset > 0 {
 					if resultOffset >= len(matches) {
 						return "No matches found (offset beyond results)", nil
@@ -252,7 +247,6 @@ func GrepTool(root *os.Root) tool.Tool {
 			skippedCount := 0
 			limitReached := false
 
-			// For files_with_matches and count modes, track per-file data
 			type fileMatch struct {
 				path  string
 				count int
@@ -260,12 +254,10 @@ func GrepTool(root *os.Root) tool.Tool {
 			var fileMatches []fileMatch
 
 			err = walkWorkspace(ctx, fsys, searchPathFS, func(path, relPath string) error {
-				// Check glob pattern
 				if glob != "" {
 					matched, _ := doublestar.Match(glob, pathpkg.Base(path))
 
 					if !matched {
-						// Also try matching against the full relative path
 						matched, _ = doublestar.Match(glob, relPath)
 
 						if !matched {
@@ -274,12 +266,10 @@ func GrepTool(root *os.Root) tool.Tool {
 					}
 				}
 
-				// Skip binary files (simple heuristic: check extension)
 				if isBinaryFile(path) {
 					return nil
 				}
 
-				// For files_with_matches mode, just check if file has any match
 				if outputMode == "files_with_matches" {
 					matches := searchFileWithContext(fsys, path, re, 0, 0, 1, multiline)
 					if len(matches) > 0 {
@@ -300,7 +290,6 @@ func GrepTool(root *os.Root) tool.Tool {
 					return nil
 				}
 
-				// For count mode, count all matches in file
 				if outputMode == "count" {
 					matches := searchFileWithContext(fsys, path, re, 0, 0, 10000, multiline)
 					if len(matches) > 0 {
@@ -321,7 +310,6 @@ func GrepTool(root *os.Root) tool.Tool {
 					return nil
 				}
 
-				// Content mode: full results with context
 				remaining := headLimit - len(results) + resultOffset - skippedCount
 
 				if remaining <= 0 {
@@ -355,7 +343,6 @@ func GrepTool(root *os.Root) tool.Tool {
 				return "", fmt.Errorf("search failed: %w", err)
 			}
 
-			// Build output based on mode
 			var output string
 
 			switch outputMode {
@@ -379,7 +366,7 @@ func GrepTool(root *os.Root) tool.Tool {
 				}
 				output = strings.Join(lines, "\n")
 
-			default: // "content"
+			default:
 				if len(results) == 0 {
 					return "No matches found", nil
 				}
@@ -423,7 +410,6 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 	var lines []string
 	scanner := bufio.NewScanner(f)
 
-	// Use a reasonable buffer size for long lines
 	buf := make([]byte, 0, DefaultScanBufSize)
 	scanner.Buffer(buf, MaxScanBufSize)
 
@@ -450,7 +436,7 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 		offset := 0
 		for i, line := range lines {
 			lineStarts[i] = offset
-			offset += len(line) + 1 // +1 for the joining '\n'
+			offset += len(line) + 1
 		}
 
 		for _, m := range re.FindAllStringIndex(full, -1) {
@@ -467,7 +453,6 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 			}
 		}
 	} else {
-		// First pass: find all matching lines
 		for i, line := range lines {
 			if re.MatchString(line) {
 				matchedLines[i] = true
@@ -479,7 +464,6 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 		return nil
 	}
 
-	// Second pass: collect results with context
 	printed := make(map[int]bool)
 	lastPrinted := -2
 
@@ -488,7 +472,6 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 			continue
 		}
 
-		// Check if we've hit the limit
 		if len(results) >= limit {
 			break
 		}
@@ -496,7 +479,6 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 		start := max(0, i-beforeContext)
 		end := min(len(lines)-1, i+afterContext)
 
-		// Add separator if there's a gap
 		if lastPrinted >= 0 && start > lastPrinted+1 {
 			results = append(results, "--")
 		}
@@ -513,7 +495,6 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 				prefix = ">"
 			}
 
-			// Format: path:linenum:prefix:content
 			lineContent := lines[j]
 
 			if len(lineContent) > MaxLineDisplayLength {

@@ -10,7 +10,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
-// setPhase updates the phase and spinner state.
 // Must be called from the UI goroutine (e.g. inside QueueUpdateDraw or an input handler).
 func (a *App) setPhase(phase AppPhase) {
 	a.phase = phase
@@ -25,12 +24,8 @@ func (a *App) setPhase(phase AppPhase) {
 	}
 }
 
-// render queues a UI update with the current state.
-// Skipped while a confirmation prompt is active to avoid wiping it.
-//
-// renderChat reads the transient streaming/tool fields from a directly, so
-// callers don't pass them in. Messages is still captured before the closure
-// to avoid a race with a.agent.Messages being mutated mid-flight.
+// Messages is captured before the closure to avoid a race with
+// a.agent.Messages being mutated mid-flight.
 func (a *App) render() {
 	if a.promptActive || a.askActive {
 		return
@@ -42,8 +37,6 @@ func (a *App) render() {
 	})
 }
 
-// clearStreamingState resets the transient overlay so the next renderChat
-// shows only committed messages.
 func (a *App) clearStreamingState() {
 	a.streamingText = ""
 	a.streamingReasoning = ""
@@ -51,11 +44,9 @@ func (a *App) clearStreamingState() {
 	a.currentToolHint = ""
 }
 
-// streamResponse processes user input and streams the response
 func (a *App) streamResponse(input []agent.Content) {
 	t := theme.Default
 
-	// Create cancellable context for this stream
 	streamCtx, cancel := context.WithCancel(a.ctx)
 
 	a.streamMu.Lock()
@@ -68,7 +59,6 @@ func (a *App) streamResponse(input []agent.Content) {
 		a.streamMu.Unlock()
 	}()
 
-	// Recover from panics so the UI never locks up
 	defer func() {
 		if r := recover(); r != nil {
 			a.clearStreamingState()
@@ -106,9 +96,7 @@ func (a *App) streamResponse(input []agent.Content) {
 				a.currentToolName = ""
 				a.currentToolHint = ""
 				a.streamingText = ""
-				// Don't re-render here — let the next event (ToolCall or Text)
-				// update the view. This avoids flashing empty state between
-				// rapid tool call/result pairs.
+				// Skip render: rapid tool call/result pairs would flash empty state.
 
 			case c.Reasoning != nil && c.Reasoning.Summary != "":
 				if a.phase != PhaseThinking {
@@ -134,7 +122,6 @@ func (a *App) streamResponse(input []agent.Content) {
 			}
 		}
 
-		// Update token count during the loop so the statusbar stays current
 		usage := a.agent.Usage
 		a.inputTokens = usage.InputTokens
 		a.cachedTokens = usage.CachedTokens

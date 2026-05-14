@@ -28,14 +28,12 @@ type Tool struct {
 	Effect      func(args map[string]any) Effect
 }
 
-// ToolCall describes a pending tool invocation.
 type ToolCall struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Args string `json:"args,omitempty"`
 }
 
-// Elicitation allows tools to request information from the user.
 type Elicitation struct {
 	Ask     func(ctx context.Context, message string) (string, error)
 	Confirm func(ctx context.Context, message string) (bool, error)

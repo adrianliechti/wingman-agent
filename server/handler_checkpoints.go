@@ -36,7 +36,6 @@ func (s *Server) handleCheckpointRestore(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Working tree just changed; every connected client sees it.
 	s.broadcast(Frame{Type: EvtDiffsChanged})
 	s.broadcast(Frame{Type: EvtFilesChanged})
 

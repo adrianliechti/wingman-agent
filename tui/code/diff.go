@@ -28,7 +28,6 @@ func (a *App) showDiffView() {
 
 	a.activeModal = ModalDiff
 
-	// Calculate stats
 	var added, modified, deleted int
 	var totalInsertions, totalDeletions int
 
@@ -48,10 +47,8 @@ func (a *App) showDiffView() {
 		totalDeletions += del
 	}
 
-	// Track selection state
 	selectedIndex := 0
 
-	// === FILE LIST ===
 	fileListView := tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
@@ -81,16 +78,13 @@ func (a *App) showDiffView() {
 				statusIcon = "○"
 			}
 
-			// Get per-file stats
 			ins, del := countDiffStats(diff.Patch)
 			statsStr := fmt.Sprintf("[%s]+%d[-] [%s]-%d[-]", t.Green, ins, t.Red, del)
 
 			if i == selectedIndex {
-				// Selected: cyan arrow, cyan filename
 				fmt.Fprintf(&sb, "  [%s]▶[-] [%s]%s[-] [%s::b]%s[-::-] %s\n",
 					t.Cyan, statusColor, statusIcon, t.Cyan, diff.Path, statsStr)
 			} else {
-				// Unselected: status colored icon, normal filename
 				fmt.Fprintf(&sb, "    [%s]%s[-] [%s]%s[-] %s\n",
 					statusColor, statusIcon, t.Foreground, diff.Path, statsStr)
 			}
@@ -100,7 +94,6 @@ func (a *App) showDiffView() {
 		fileListView.ScrollTo(selectedIndex, 0)
 	}
 
-	// === DIFF CONTENT ===
 	diffContentView := tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
@@ -115,20 +108,17 @@ func (a *App) showDiffView() {
 		diff := diffs[selectedIndex]
 		diffContentView.Clear()
 
-		// Diff content with syntax highlighting (no header - path is already in the diff)
 		highlighted := markdown.HighlightDiff(diff.Patch)
 		diffContentView.SetText(highlighted)
 		diffContentView.ScrollToBeginning()
 	}
 
-	// Initial render
 	renderFileList()
 
 	if len(diffs) > 0 {
 		renderDiffContent()
 	}
 
-	// === BOTTOM BAR (hint + status) ===
 	hintBar := tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft)
@@ -139,7 +129,6 @@ func (a *App) showDiffView() {
 		SetTextAlign(tview.AlignRight)
 	statusBar.SetBackgroundColor(tcell.ColorDefault)
 
-	// Build status text
 	var statParts []string
 
 	if added > 0 {
@@ -156,7 +145,6 @@ func (a *App) showDiffView() {
 	fmt.Fprintf(statusBar, "[%s]%d file(s)[-] %s  [%s]+%d[-] [%s]-%d[-]",
 		t.BrBlack, len(diffs), strings.Join(statParts, " "), t.Green, totalInsertions, t.Red, totalDeletions)
 
-	// Track which panel has focus
 	focusedPanel := 0 // 0 = fileList, 1 = diffContent
 
 	updateHintBar := func() {
@@ -172,27 +160,21 @@ func (a *App) showDiffView() {
 	}
 	updateHintBar()
 
-	// === LAYOUT ===
-
-	// Two-pane content area
 	panelsContainer := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(fileListView, 40, 0, true).
 		AddItem(verticalSeparator(t.BrBlack), 1, 0, false).
 		AddItem(diffContentView, 0, 1, false)
 	panelsContainer.SetBackgroundColor(tcell.ColorDefault)
 
-	// Get margins based on compact mode
 	leftMargin, rightMargin := a.getMargins()
 	inputLeftMargin, inputRightMargin := a.getInputMargins()
 
-	// Add margins (matching chat mode)
 	contentWithMargins := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(nil, leftMargin, 0, false).
 		AddItem(panelsContainer, 0, 1, true).
 		AddItem(nil, rightMargin, 0, false)
 	contentWithMargins.SetBackgroundColor(tcell.ColorDefault)
 
-	// Bottom bar with hint and status
 	bottomBar := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(hintBar, 0, 1, false).
 		AddItem(statusBar, 0, 1, false)
@@ -211,15 +193,12 @@ func (a *App) showDiffView() {
 	statusSpacer := tview.NewBox().SetBackgroundColor(tcell.ColorDefault)
 	statusSpacer.SetDrawFunc(fillRow)
 
-	// Final container
 	container := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(topSpacer, 1, 0, false).
 		AddItem(contentWithMargins, 0, 1, true).
 		AddItem(statusSpacer, 1, 0, false).
 		AddItem(bottomBarWithMargins, 1, 0, false)
 	container.SetBackgroundColor(tcell.ColorDefault)
-
-	// === INPUT HANDLING ===
 
 	fileListView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
@@ -348,13 +327,11 @@ func (a *App) closeDiffView() {
 	}
 }
 
-// countDiffStats counts insertions and deletions in a unified diff patch
 func countDiffStats(patch string) (insertions, deletions int) {
 	for line := range strings.SplitSeq(patch, "\n") {
 		if len(line) == 0 {
 			continue
 		}
-		// Skip diff headers
 		if strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") ||
 			strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "diff ") ||
 			strings.HasPrefix(line, "index ") {

@@ -25,20 +25,17 @@ const maxToolOutputLen = 500
 const compactWidthThreshold = 100
 const compactHeightThreshold = 22
 
-// isCompactMode returns true if padding should be removed (small screen or vscode caller)
 func (a *App) isCompactMode() bool {
 	if os.Getenv("WINGMAN_CALLER") == "vscode" {
 		return true
 	}
 
-	// Try to get terminal size directly
 	if width, height, err := term.GetSize(int(os.Stdout.Fd())); err == nil && width > 0 {
 		if width < compactWidthThreshold || height < compactHeightThreshold {
 			return true
 		}
 	}
 
-	// Fallback: chatWidth is set during draw
 	if a.chatWidth > 0 && a.chatWidth+6 < compactWidthThreshold {
 		return true
 	}
@@ -46,7 +43,6 @@ func (a *App) isCompactMode() bool {
 	return false
 }
 
-// getMargins returns (left, right) margins based on compact mode
 func (a *App) getMargins() (int, int) {
 	if a.isCompactMode() {
 		return 0, 0
@@ -54,7 +50,6 @@ func (a *App) getMargins() (int, int) {
 	return 2, 4
 }
 
-// getInputMargins returns (left, right) margins for input area based on compact mode
 func (a *App) getInputMargins() (int, int) {
 	if a.isCompactMode() {
 		return 0, 0
@@ -62,15 +57,11 @@ func (a *App) getInputMargins() (int, int) {
 	return 4, 4
 }
 
-// isStreaming returns true if the app is currently processing a request
 func (a *App) isStreaming() bool {
 	return a.phase != PhaseIdle
 }
 
-// Input handling
-
 func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
-	// Handle Escape: close modals, cancel stream, or clear input
 	if event.Key() == tcell.KeyEscape {
 		if a.hasActiveModal() {
 			a.closeActiveModal()
@@ -80,13 +71,11 @@ func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
 			a.cancelStream()
 			return nil
 		}
-		// Clear input and pending content when idle
 		a.input.SetText("", true)
 		a.clearPendingContent()
 		return nil
 	}
 
-	// Handle Ctrl+C: copy if text selected, else close modals, cancel stream, or stop app
 	if event.Key() == tcell.KeyCtrlC {
 		if !a.hasActiveModal() && a.input.HasSelection() {
 			selectedText, _, _ := a.input.GetSelection()
@@ -107,7 +96,6 @@ func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 
-	// Ctrl+E: cycle through expand levels 0→1→2→0.
 	if event.Key() == tcell.KeyCtrlE && !a.hasActiveModal() {
 		a.expandLevel = (a.expandLevel + 1) % 3
 
@@ -120,18 +108,15 @@ func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 
-	// Ctrl+T: toggle mouse capture so the user can select text natively
 	if event.Key() == tcell.KeyCtrlT && !a.hasActiveModal() {
 		a.toggleMouseCapture()
 		return nil
 	}
 
-	// Let modal handle its own events
 	if a.hasActiveModal() {
 		return event
 	}
 
-	// Handle @ to trigger file picker (don't insert @ into input)
 	if event.Rune() == '@' && !a.isStreaming() {
 		a.showFilePicker("", func(paths []string) {
 			for _, p := range paths {
@@ -139,16 +124,15 @@ func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
 			}
 		})
 
-		return nil // consume the event - don't type @
+		return nil
 	}
 
-	// Handle ask mode (free-text input, submit with Enter)
 	if a.askActive {
 		if event.Key() == tcell.KeyEnter {
 			text := strings.TrimSpace(a.input.GetText())
 
 			if text == "" {
-				return nil // don't submit empty answers
+				return nil
 			}
 
 			a.input.SetText("", true)
@@ -162,7 +146,6 @@ func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		return event
 	}
 
-	// Handle prompt mode
 	if a.promptActive {
 		switch event.Rune() {
 		case 'y', 'Y':
@@ -180,10 +163,9 @@ func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
 			return nil
 		}
 
-		return nil // consume all input when prompt is active
+		return nil
 	}
 
-	// Ctrl+Y: copy last assistant message to clipboard
 	if event.Key() == tcell.KeyCtrlY && !a.hasActiveModal() {
 		a.copyLastResponse()
 		return nil
@@ -195,7 +177,6 @@ func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	}
 
 	if event.Key() == tcell.KeyTab && !a.isStreaming() {
-		// Tab-complete slash commands
 		text := a.input.GetText()
 		if strings.HasPrefix(text, "/") && !strings.Contains(text, " ") {
 			matches := a.matchingCommands(text)
@@ -203,7 +184,6 @@ func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
 				a.input.SetText(matches[0].Name, true)
 				return nil
 			}
-			// Find longest common prefix among matches
 			if len(matches) > 1 {
 				prefix := matches[0].Name
 				for _, m := range matches[1:] {
@@ -222,7 +202,6 @@ func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 
-	// Shift+Tab cycles through models
 	if event.Key() == tcell.KeyBacktab && !a.isStreaming() {
 		a.cycleModel()
 		return nil
@@ -243,7 +222,7 @@ func (a *App) resetPlaceholder() {
 }
 
 func (a *App) promptUser(message string) (bool, error) {
-	// Serialize prompts — tool calls may run concurrently
+	// Tool calls may run concurrently; prompts must serialize.
 	a.promptMu.Lock()
 	defer a.promptMu.Unlock()
 
@@ -314,7 +293,6 @@ func (a *App) copyTextToClipboard(text string) {
 func (a *App) copyLastResponse() {
 	messages := a.agent.Messages
 
-	// Find the last assistant message (walking backwards)
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == agent.RoleAssistant {
 			for _, c := range messages[i].Content {
@@ -328,9 +306,8 @@ func (a *App) copyLastResponse() {
 	}
 }
 
-// pasteFromClipboard reads the clipboard off the UI thread, then applies
-// changes back on the UI thread via QueueUpdateDraw. This prevents blocking the
-// tview event loop (which would freeze the app and ignore Ctrl+C).
+// Reads clipboard off the UI thread to avoid blocking the tview event loop
+// (which would freeze the app and ignore Ctrl+C).
 func (a *App) pasteFromClipboard() {
 	go func() {
 		contents, err := clipboard.Read()
@@ -346,7 +323,6 @@ func (a *App) pasteFromClipboard() {
 				}
 
 				if c.Text != "" {
-					// Check if the clipboard text contains file paths
 					paths := detectFilePaths(c.Text, a.agent.RootPath)
 					if len(paths) > 0 {
 						for _, p := range paths {
@@ -356,7 +332,6 @@ func (a *App) pasteFromClipboard() {
 						continue
 					}
 
-					// Get selection range (start, end are byte positions)
 					_, start, end := a.input.GetSelection()
 					a.input.Replace(start, end, c.Text)
 				}
@@ -368,14 +343,13 @@ func (a *App) pasteFromClipboard() {
 }
 
 func (a *App) cancelStream() {
-	// Cancel the stream context first
 	a.streamMu.Lock()
 	if a.streamCancel != nil {
 		a.streamCancel()
 	}
 	a.streamMu.Unlock()
 
-	// Unblock any pending ask/prompt so the stream goroutine can exit
+	// Unblock any pending ask/prompt so the stream goroutine can exit.
 	if a.askActive {
 		a.input.SetText("", true)
 
@@ -418,7 +392,6 @@ func (a *App) resumeSession() {
 		return
 	}
 
-	// Resume the most recent session
 	last, err := session.Load(filepath.Join(filepath.Dir(a.agent.MemoryPath), "sessions"), sessions[0].ID)
 	if err != nil {
 		fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Failed to load session: %v", err), t.Red))
@@ -430,13 +403,11 @@ func (a *App) resumeSession() {
 
 	a.sessionID = last.ID
 
-	// Update token count from restored session
 	usage := a.agent.Usage
 	a.inputTokens = usage.InputTokens
 	a.cachedTokens = usage.CachedTokens
 	a.outputTokens = usage.OutputTokens
 
-	// Re-render chat with restored messages
 	a.switchToChat()
 	a.renderChat(a.agent.Messages)
 	a.updateStatusBar()
@@ -496,7 +467,6 @@ func (a *App) submitInput() {
 		builtinCmds := a.builtinCommands()
 		skillCmds := a.skillCommands()
 
-		// Find longest name across all commands for alignment
 		maxLen := 0
 		for _, cmd := range builtinCmds {
 			if len(cmd.Name) > maxLen {
@@ -590,7 +560,6 @@ func (a *App) submitInput() {
 
 	}
 
-	// Check for skill slash commands: /skill-name [args]
 	if strings.HasPrefix(query, "/") {
 		parts := strings.SplitN(query[1:], " ", 2)
 		skillName := parts[0]
@@ -605,7 +574,6 @@ func (a *App) submitInput() {
 			return
 		}
 
-		// Unknown slash command
 		a.input.SetText("", true)
 		a.switchToChat()
 		fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Unknown command: /%s", skillName), theme.Default.Yellow))
@@ -613,12 +581,11 @@ func (a *App) submitInput() {
 	}
 
 	a.switchToChat()
-	a.app.ForceDraw() // Ensure chatWidth is set before printing user message
+	a.app.ForceDraw() // chatWidth must be set before formatUserMessage
 	a.input.SetText("", true)
 
 	imageCount := a.countPendingImages()
 
-	// Build display text with attachments
 	displayText := query
 	if imageCount > 0 || len(a.pendingFiles) > 0 {
 		var attachments []string
@@ -634,7 +601,6 @@ func (a *App) submitInput() {
 	}
 	fmt.Fprint(a.chatView, a.formatUserMessage(displayText))
 
-	// Build input for agent - display text plus hidden file list for context
 	input := []agent.Content{{Text: displayText}}
 	input = append(input, a.pendingContent...)
 
@@ -660,16 +626,12 @@ func (a *App) invokeSkill(s *skill.Skill, args string) {
 		return
 	}
 
-	// Bundled skills materialize on first use so they show up in the
-	// catalog from the next turn onward.
 	if s.Bundled {
 		_, _ = skill.MaterializeBundled(s)
 	}
 
-	// Apply argument + ${SKILL_DIR} substitution
 	content = s.ApplyArguments(content, args, s.AbsoluteDir(a.agent.RootPath))
 
-	// Display as a user message
 	a.switchToChat()
 	a.app.ForceDraw()
 
@@ -679,7 +641,6 @@ func (a *App) invokeSkill(s *skill.Skill, args string) {
 	}
 	fmt.Fprint(a.chatView, a.formatUserMessage(displayText))
 
-	// Send skill content as the prompt
 	input := []agent.Content{{Text: content}}
 	input = append(input, a.pendingContent...)
 	a.clearPendingContent()
@@ -695,14 +656,10 @@ func (a *App) switchToChat() {
 	a.rebuildContentPages()
 }
 
-// rebuildContentPages rebuilds the content area.
-// Welcome mode: logo centered at top, chatView pinned at bottom (above input).
-// Chat mode: chatView fills the entire area.
 func (a *App) rebuildContentPages() {
 	a.contentPages.Clear()
 
 	if a.showWelcome && !a.isCompactMode() {
-		// Logo centered in upper area; notices flow directly below it.
 		a.contentPages.AddItem(nil, 0, 2, false)
 		a.contentPages.AddItem(a.welcomeView, 12, 0, false)
 		a.contentPages.AddItem(a.chatView, 0, 3, false)
@@ -710,8 +667,6 @@ func (a *App) rebuildContentPages() {
 		a.contentPages.AddItem(a.chatView, 0, 1, false)
 	}
 }
-
-// UI setup and layout
 
 func (a *App) setupUI() {
 	t := theme.Default
@@ -759,15 +714,13 @@ func (a *App) buildLayout() *tview.Flex {
 		a.updateInputHint()
 	})
 
-	// Handle Ctrl+V/Cmd+V to paste from clipboard (images + text)
 	a.input.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		// Check for paste: Ctrl+V or Cmd+V (macOS)
 		isPaste := event.Key() == tcell.KeyCtrlV || (event.Modifiers()&tcell.ModMeta != 0 && (event.Rune() == 'v' || event.Rune() == 'V'))
 
 		if isPaste {
 			a.pasteFromClipboard()
 
-			return nil // Consume event - we handled the paste
+			return nil
 		}
 
 		return event
@@ -821,13 +774,11 @@ func (a *App) buildLayout() *tview.Flex {
 		if newWidth != a.chatWidth {
 			a.chatWidth = newWidth
 
-			// Re-render chat on resize to re-wrap content to new width
 			if !a.showWelcome && !a.promptActive && !a.askActive && len(a.agent.Messages) > 0 {
 				a.renderChat(a.agent.Messages)
 			}
 		}
 
-		// Toggle logo visibility on resize while in welcome mode
 		if a.showWelcome {
 			compact := a.isCompactMode()
 			if compact != a.lastCompact {
@@ -848,8 +799,6 @@ func (a *App) buildLayout() *tview.Flex {
 
 	return a.mainLayout
 }
-
-// View updates
 
 func (a *App) updateInputHeight() {
 	text := a.input.GetText()
@@ -960,10 +909,6 @@ func (a *App) matchingCommands(prefix string) []slashCommand {
 	return matches
 }
 
-// toggleMouseCapture toggles tview's mouse capture. When disabled the terminal
-// handles mouse events natively so the user can select and copy text with the
-// mouse. When enabled, tview captures wheel/click events for scrolling and
-// focus handling.
 func (a *App) toggleMouseCapture() {
 	a.mouseEnabled = !a.mouseEnabled
 	a.app.EnableMouse(a.mouseEnabled)
@@ -971,14 +916,13 @@ func (a *App) toggleMouseCapture() {
 }
 
 func (a *App) updateInputHint() {
-	// Don't overwrite inputHint while the spinner owns it
+	// The spinner owns inputHint while streaming.
 	if a.isStreaming() {
 		return
 	}
 
 	t := theme.Default
 
-	// Show command completions when typing /
 	text := a.input.GetText()
 	if strings.HasPrefix(text, "/") && !strings.Contains(text, " ") {
 		matches := a.matchingCommands(text)
@@ -1030,12 +974,8 @@ func (a *App) updateInputHint() {
 	a.inputHint.SetText(strings.Join(parts, "  "))
 }
 
-// Chat rendering (inlined from ChatRenderer)
-
-// renderChat redraws the chat view from committed messages plus the current
-// transient overlay (a.streamingReasoning / a.streamingText / a.currentTool*).
-// Callers don't pass streaming state — it's read straight from the App so any
-// redraw (resize, expand toggle, stream tick) reflects the same source of truth.
+// Streaming state is read from a.* (not parameters) so every redraw path
+// reflects the same source of truth.
 func (a *App) renderChat(messages []agent.Message) {
 	a.chatView.Clear()
 
@@ -1058,20 +998,14 @@ func (a *App) renderChat(messages []agent.Message) {
 			a.renderMessage(*t.user)
 		}
 
-		// Finished turns collapse the working block to a one-line summary at
-		// expand level 0; level 1 expands them to per-entry one-liners; level
-		// 2 also expands reasoning text and tool output (handled inside
-		// renderMessage). The active turn always renders per-entry.
 		showSummary := !active && a.expandLevel == 0 && len(t.working) > 0
 		if showSummary {
 			separateFromTools()
 			fmt.Fprint(a.chatView, a.formatTurnSummary(&t))
 		} else {
 			for _, m := range t.working {
-				// Skip messages with no displayable content (e.g. assistant
-				// messages carrying only tool_calls). They emit nothing but
-				// would otherwise flip prevWasTool=false and force a blank
-				// separator before the next tool result group.
+				// Skip empty messages: would otherwise flip prevWasTool=false
+				// and wedge a blank separator before the next tool result.
 				if !hasVisibleContent(m) {
 					continue
 				}
@@ -1090,7 +1024,6 @@ func (a *App) renderChat(messages []agent.Message) {
 		}
 	}
 
-	// Live streaming overlay attaches to the active (last) turn.
 	if a.streamingReasoning != "" {
 		separateFromTools()
 		fmt.Fprint(a.chatView, a.formatReasoningProgress(a.streamingReasoning))
@@ -1117,10 +1050,9 @@ func isToolMessage(msg agent.Message) bool {
 	return false
 }
 
-// hasVisibleContent reports whether renderMessage would emit anything for msg.
-// Messages with only tool_call content (and nothing else) produce no output and
-// must be skipped, otherwise the prevWasTool separator wedges blank lines
-// between groups of consecutive tool results.
+// Reports whether renderMessage would emit anything for msg. Messages with
+// only tool_call content produce no output; skipping them keeps the
+// prevWasTool separator from wedging blanks between consecutive tool results.
 func hasVisibleContent(msg agent.Message) bool {
 	for _, c := range msg.Content {
 		if c.ToolResult != nil {
@@ -1138,7 +1070,6 @@ func hasVisibleContent(msg agent.Message) bool {
 
 func (a *App) renderMessage(msg agent.Message) {
 	for _, c := range msg.Content {
-		// Tool results
 		if c.ToolResult != nil {
 			if a.isToolHidden(c.ToolResult.Name) {
 				continue
@@ -1159,12 +1090,10 @@ func (a *App) renderMessage(msg agent.Message) {
 			continue
 		}
 
-		// Tool calls have no displayable content
 		if c.ToolCall != nil {
 			continue
 		}
 
-		// Reasoning summary (collapsed when expand is off, full when on)
 		if c.Reasoning != nil && c.Reasoning.Summary != "" {
 			if a.expandLevel >= 2 {
 				fmt.Fprint(a.chatView, a.formatReasoning(c.Reasoning.Summary))
@@ -1174,7 +1103,6 @@ func (a *App) renderMessage(msg agent.Message) {
 			continue
 		}
 
-		// Text content
 		if c.Text != "" {
 			switch msg.Role {
 			case agent.RoleUser:

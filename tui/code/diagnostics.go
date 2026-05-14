@@ -22,10 +22,6 @@ type fileDiagnostics struct {
 	Warnings    int
 }
 
-// showDiagnosticsView collects diagnostics in the background and displays
-// the results when ready. All output (loading, empty/error state) is
-// rendered inside the modal so the chat view stays free of residue once
-// the user closes it.
 func (a *App) showDiagnosticsView() {
 	go func() {
 		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
@@ -43,7 +39,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 	t := theme.Default
 	a.activeModal = ModalDiagnostics
 
-	// Stats
 	totalErrors, totalWarnings := 0, 0
 	for _, f := range files {
 		totalErrors += f.Errors
@@ -52,7 +47,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 
 	selectedIndex := 0
 
-	// === FILE LIST ===
 	fileListView := tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
@@ -98,7 +92,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 		fileListView.ScrollTo(selectedIndex, 0)
 	}
 
-	// === DIAGNOSTICS CONTENT ===
 	diagContentView := tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
@@ -151,7 +144,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 	renderFileList()
 	renderDiagContent()
 
-	// === BOTTOM BAR ===
 	hintBar := tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft)
@@ -179,7 +171,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 	}
 	updateHintBar()
 
-	// === LAYOUT ===
 	panelsContainer := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(fileListView, 40, 0, true).
 		AddItem(verticalSeparator(t.BrBlack), 1, 0, false).
@@ -195,7 +186,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 		AddItem(nil, rightMargin, 0, false)
 	contentWithMargins.SetBackgroundColor(tcell.ColorDefault)
 
-	// === BANNER (collection error, if any) ===
 	var bannerRow *tview.Flex
 	if collectErr != nil {
 		bannerView := tview.NewTextView().
@@ -221,8 +211,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 		AddItem(bottomBar, 0, 1, false).
 		AddItem(nil, inputRightMargin, 0, false)
 	bottomBarWithMargins.SetBackgroundColor(tcell.ColorDefault)
-	// Outer wrapper paints the full row width so the hint/status content sits
-	// on a clean line (no bleed-through from underlying chat content).
 	bottomBarWithMargins.SetDrawFunc(fillRow)
 
 	topSpacer := tview.NewBox().SetBackgroundColor(tcell.ColorDefault)
@@ -232,14 +220,13 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 	container := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(topSpacer, 1, 0, false)
 	if bannerRow != nil {
-		container.AddItem(bannerRow, 2, 0, false) // 1 line of text + 1 trailing blank
+		container.AddItem(bannerRow, 2, 0, false)
 	}
 	container.AddItem(contentWithMargins, 0, 1, true).
 		AddItem(statusSpacer, 1, 0, false).
 		AddItem(bottomBarWithMargins, 1, 0, false)
 	container.SetBackgroundColor(tcell.ColorDefault)
 
-	// === INPUT HANDLING ===
 	fileListView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyUp:

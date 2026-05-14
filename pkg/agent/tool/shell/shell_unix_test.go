@@ -46,36 +46,29 @@ func TestIsReadOnlyCommand_PipeSafety(t *testing.T) {
 		command  string
 		readOnly bool
 	}{
-		// Simple read-only commands
 		{"ls", true},
 		{"git status", true},
 		{"cat foo.txt", true},
 		{"echo hello", true},
 
-		// Read-only pipes (all segments read-only)
 		{"cat foo.txt | grep bar", true},
 		{"git log | head -20", true},
 		{"ls -la | sort | head", true},
 
-		// Mutating pipes (at least one segment mutates or is unknown)
 		{"echo foo | rm -rf /", false},
 		{"cat foo | xargs rm", false},
 		{"ls | xargs chmod 777", false},
 
-		// Mutating chains
 		{"cat foo && rm -rf /", false},
 		{"echo hello ; rm -rf /", false},
 		{"git status || rm -rf /", false},
 
-		// Command substitution is always treated as mutating/unknown
 		{"echo $(whoami)", false},
 		{"echo `whoami`", false},
 
-		// Quoted pipes should not be split
 		{`echo "hello | world"`, true},
 		{`echo 'hello && world'`, true},
 
-		// Read-only chained commands
 		{"git status && git diff", true},
 		{"ls ; echo done", true},
 	}

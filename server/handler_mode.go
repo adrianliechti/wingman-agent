@@ -5,9 +5,6 @@ import (
 	"net/http"
 )
 
-// modeStringFor reads a session's current mode. PlanMode lives on the
-// session's agent (its instructions builder reads it directly), so the
-// server doesn't need to track a parallel copy.
 func modeStringFor(sess *Session) string {
 	if sess != nil && sess.Agent != nil && sess.Agent.PlanMode {
 		return "plan"

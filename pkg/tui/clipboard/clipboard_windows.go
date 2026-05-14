@@ -33,7 +33,6 @@ func buildWriteTextCommand(text string) *exec.Cmd {
 	return cmd
 }
 
-// Read reads text and image content from the Windows clipboard.
 func Read() ([]Content, error) {
 	var contents []Content
 
@@ -59,8 +58,6 @@ func readText() (string, error) {
 }
 
 func readImage() (string, error) {
-	// Use the same approach as opencode-ai (TypeScript version)
-	// Load System.Windows.Forms assembly and use in-memory stream
 	script := `Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [System.Convert]::ToBase64String($ms.ToArray()) }`
 
 	output, err := runPowerShell(script, true)
@@ -75,7 +72,6 @@ func readImage() (string, error) {
 		return "", nil
 	}
 
-	// Verify it's valid base64 and has data
 	if _, err := base64.StdEncoding.DecodeString(data); err != nil {
 		return "", err
 	}
@@ -83,7 +79,6 @@ func readImage() (string, error) {
 	return "data:image/png;base64," + data, nil
 }
 
-// WriteText writes text to the Windows clipboard.
 func WriteText(text string) error {
 	cmd := buildWriteTextCommand(text)
 

@@ -20,9 +20,6 @@ func (a *App) contentWidth() int {
 	return a.chatWidth - len(chatIndent) - chatBarWidth
 }
 
-// formatBarMessage renders content with a colored vertical bar prefix on
-// every wrapped line, terminated by a blank line. Shared backend for the
-// user / assistant message formatters.
 func (a *App) formatBarMessage(content string, color tcell.Color) string {
 	var result strings.Builder
 	for line := range strings.SplitSeq(strings.TrimRight(content, "\n"), "\n") {
@@ -70,7 +67,6 @@ func (a *App) formatPrompt(title string, message string, hint string) string {
 	return result.String()
 }
 
-// toolDisplay returns the icon and label for a tool.
 func toolDisplay(name string) (string, string) {
 	switch {
 	case name == "agent":
@@ -92,7 +88,7 @@ func toolDisplay(name string) (string, string) {
 }
 
 func (a *App) toolHintSpace(label string) int {
-	prefixLen := len(chatIndent) + chatBarWidth + 2 // bar + space + icon
+	prefixLen := len(chatIndent) + chatBarWidth + 2
 	if label != "" {
 		prefixLen += 1 + len(label)
 	}

@@ -34,7 +34,6 @@ type Config struct {
 	ToolTimeout time.Duration
 }
 
-// Derive creates a new Config sharing the same client and model.
 func (c *Config) Derive() *Config {
 	return &Config{
 		client: c.client,
@@ -43,7 +42,6 @@ func (c *Config) Derive() *Config {
 	}
 }
 
-// Models lists the available models from the API.
 func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {
 	resp, err := c.client.Models.List(ctx)
 	if err != nil {

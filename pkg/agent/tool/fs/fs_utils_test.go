@@ -7,8 +7,6 @@ import (
 	"testing"
 )
 
-// TestNormalizePath tests path normalization for the current platform.
-// Note: This tests actual behavior on the current OS.
 func TestNormalizePath(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -36,7 +34,6 @@ func TestNormalizePath(t *testing.T) {
 		},
 	}
 
-	// Add platform-specific tests for actual runtime behavior
 	if runtime.GOOS == "windows" {
 		tests = append(tests, []struct {
 			name       string
@@ -102,7 +99,6 @@ func TestNormalizePath(t *testing.T) {
 	}
 }
 
-// TestIsOutsideWorkspace tests workspace boundary detection for the current platform.
 func TestIsOutsideWorkspace(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -130,7 +126,6 @@ func TestIsOutsideWorkspace(t *testing.T) {
 		},
 	}
 
-	// Add platform-specific tests
 	if runtime.GOOS == "windows" {
 		tests = append(tests, []struct {
 			name       string
@@ -202,7 +197,6 @@ func TestIsOutsideWorkspace(t *testing.T) {
 	}
 }
 
-// TestCleanPath tests path cleaning behavior.
 func TestCleanPath(t *testing.T) {
 	tests := []struct {
 		name string
@@ -242,12 +236,8 @@ func TestCleanPath(t *testing.T) {
 	}
 }
 
-// TestPathHandlingLogic tests cross-platform path handling logic.
-// These tests verify the correctness of path handling algorithms
-// independent of the current OS, using only forward slashes.
 func TestPathHandlingLogic(t *testing.T) {
 	t.Run("relative path detection", func(t *testing.T) {
-		// Relative paths should never be considered outside workspace
 		relativePaths := []string{
 			"foo/bar.txt",
 			"./file.go",
@@ -256,9 +246,8 @@ func TestPathHandlingLogic(t *testing.T) {
 		}
 
 		for _, path := range relativePaths {
-			// On all platforms, these should not be treated as absolute
 			if filepath.IsAbs(filepath.FromSlash(path)) {
-				continue // skip if this is actually absolute on current OS
+				continue
 			}
 
 			if isOutsideWorkspace(path, "/any/workspace") {
@@ -268,7 +257,6 @@ func TestPathHandlingLogic(t *testing.T) {
 	})
 
 	t.Run("path cleaning preserves relative structure", func(t *testing.T) {
-		// Verify path cleaning handles various inputs correctly
 		testCases := []struct {
 			input    string
 			expected string
@@ -289,9 +277,6 @@ func TestPathHandlingLogic(t *testing.T) {
 	})
 }
 
-// TestWindowsPathBehavior tests Windows-specific path patterns.
-// These tests document expected behavior for Windows-style paths.
-// On non-Windows systems, they test that such paths are handled gracefully.
 func TestWindowsPathBehavior(t *testing.T) {
 	t.Run("windows drive letter detection", func(t *testing.T) {
 		windowsPaths := []struct {
@@ -307,8 +292,6 @@ func TestWindowsPathBehavior(t *testing.T) {
 		}
 
 		for _, tc := range windowsPaths {
-			// Test that our code would recognize Windows absolute paths
-			// by checking if it starts with a drive letter pattern
 			isWinAbs := len(tc.path) >= 2 &&
 				((tc.path[0] >= 'A' && tc.path[0] <= 'Z') || (tc.path[0] >= 'a' && tc.path[0] <= 'z')) &&
 				tc.path[1] == ':' ||
@@ -322,17 +305,14 @@ func TestWindowsPathBehavior(t *testing.T) {
 
 	t.Run("windows different drives are outside workspace", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
-			// On Windows, test actual behavior
 			if !isOutsideWorkspace("D:\\data", "C:\\project") {
 				t.Error("different drives should be outside workspace on Windows")
 			}
 		}
-		// Document the expected behavior
 		t.Log("Windows: Paths on different drives should be considered outside workspace")
 	})
 }
 
-// TestUnixPathBehavior tests Unix-specific path patterns.
 func TestUnixPathBehavior(t *testing.T) {
 	t.Run("unix absolute path detection", func(t *testing.T) {
 		unixPaths := []struct {
@@ -348,7 +328,6 @@ func TestUnixPathBehavior(t *testing.T) {
 		}
 
 		for _, tc := range unixPaths {
-			// On Unix, absolute paths start with /
 			isUnixAbs := len(tc.path) > 0 && tc.path[0] == '/'
 
 			if isUnixAbs != tc.isAbsUnix {
@@ -389,12 +368,8 @@ func TestUnixPathBehavior(t *testing.T) {
 	}
 }
 
-// TestSlashNormalization tests that forward slashes are handled consistently.
-// This is important because LLMs often provide paths with forward slashes
-// regardless of the target platform.
 func TestSlashNormalization(t *testing.T) {
 	t.Run("forward slashes in relative paths", func(t *testing.T) {
-		// Forward slashes should work on all platforms
 		result := normalizePath("src/pkg/main.go", "/workspace")
 		expected := filepath.FromSlash("src/pkg/main.go")
 
@@ -874,7 +849,6 @@ func TestMapFuzzyIndexToOriginal(t *testing.T) {
 	}
 }
 
-// TestNormalizePathForComparison tests case-sensitivity handling across platforms.
 func TestNormalizePathForComparison(t *testing.T) {
 	t.Run("case normalization on case-insensitive systems", func(t *testing.T) {
 		path := "/Users/Test/Project/File.go"
@@ -882,12 +856,10 @@ func TestNormalizePathForComparison(t *testing.T) {
 
 		switch runtime.GOOS {
 		case "windows", "darwin":
-			// Windows and macOS should lowercase for comparison
 			if normalized != "/users/test/project/file.go" {
 				t.Errorf("normalizePathForComparison(%q) = %q, want lowercase on %s", path, normalized, runtime.GOOS)
 			}
 		default:
-			// Linux should preserve case
 			if normalized != path {
 				t.Errorf("normalizePathForComparison(%q) = %q, want unchanged on %s", path, normalized, runtime.GOOS)
 			}
@@ -897,14 +869,12 @@ func TestNormalizePathForComparison(t *testing.T) {
 	t.Run("path comparison works with different cases", func(t *testing.T) {
 		switch runtime.GOOS {
 		case "windows", "darwin":
-			// On case-insensitive systems, paths with different cases should match
 			path1 := normalizePathForComparison("/Users/Test/Project")
 			path2 := normalizePathForComparison("/users/test/project")
 			if path1 != path2 {
 				t.Errorf("paths should match after normalization on %s: %q != %q", runtime.GOOS, path1, path2)
 			}
 		default:
-			// On Linux, paths with different cases should NOT match
 			path1 := normalizePathForComparison("/Users/Test/Project")
 			path2 := normalizePathForComparison("/users/test/project")
 			if path1 == path2 {
@@ -914,7 +884,6 @@ func TestNormalizePathForComparison(t *testing.T) {
 	})
 }
 
-// TestGenerateDiffStringFormat tests that the diff output uses the go-diff library properly.
 func TestGenerateDiffStringFormat(t *testing.T) {
 	t.Run("diff shows deletions with minus prefix", func(t *testing.T) {
 		oldContent := "line1\nremove me\nline3"
@@ -947,7 +916,6 @@ func TestGenerateDiffStringFormat(t *testing.T) {
 		newContent := "line1\nnew\nline3"
 		diff := generateDiffString(oldContent, newContent)
 
-		// Should show line numbers in the diff output
 		if !strings.Contains(diff, "2") {
 			t.Errorf("diff should show line numbers: %q", diff)
 		}
@@ -958,7 +926,6 @@ func TestGenerateDiffStringFormat(t *testing.T) {
 		newContent := "func main() {\n\tfmt.Println(\"new\")\n\treturn\n}"
 		diff := generateDiffString(oldContent, newContent)
 
-		// Should show both deletion and addition
 		if !strings.Contains(diff, "-") || !strings.Contains(diff, "+") {
 			t.Errorf("diff should show both deletions and additions: %q", diff)
 		}

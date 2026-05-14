@@ -10,7 +10,6 @@ import (
 	"strings"
 )
 
-// Read reads text and image content from the macOS clipboard.
 func Read() ([]Content, error) {
 	var contents []Content
 
@@ -77,7 +76,6 @@ func readImage() (string, error) {
 	return "data:image/png;base64," + encoded, nil
 }
 
-// WriteText writes text to the macOS clipboard.
 func WriteText(text string) error {
 	cmd := exec.Command("pbcopy")
 	cmd.Stdin = strings.NewReader(text)

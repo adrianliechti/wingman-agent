@@ -5,10 +5,6 @@ import (
 	"strings"
 )
 
-// LSP Protocol Types
-
-// Initialize
-
 type InitializeParams struct {
 	ProcessID    int                `json:"processId"`
 	RootURI      string             `json:"rootUri"`
@@ -52,8 +48,6 @@ type DiagnosticClientCapabilities struct{}
 
 type CallHierarchyClientCapabilities struct{}
 
-// Text Document
-
 type TextDocumentIdentifier struct {
 	URI string `json:"uri"`
 }
@@ -92,8 +86,6 @@ type PublishDiagnosticsParams struct {
 	Diagnostics []Diagnostic `json:"diagnostics"`
 }
 
-// Primitives
-
 type Position struct {
 	Line      int `json:"line"`
 	Character int `json:"character"`
@@ -109,8 +101,6 @@ type Location struct {
 	Range Range  `json:"range"`
 }
 
-// Position-based Operations
-
 type TextDocumentPositionParams struct {
 	TextDocument TextDocumentIdentifier `json:"textDocument"`
 	Position     Position               `json:"position"`
@@ -125,8 +115,6 @@ type ReferenceParams struct {
 type ReferenceContext struct {
 	IncludeDeclaration bool `json:"includeDeclaration"`
 }
-
-// Hover
 
 type HoverResponse struct {
 	Contents HoverContents `json:"contents"`
@@ -177,12 +165,9 @@ func (h *HoverContents) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 
-	// Fallback: use raw string
 	h.Value = string(data)
 	return nil
 }
-
-// Diagnostics
 
 type Diagnostic struct {
 	Range    Range  `json:"range"`
@@ -207,8 +192,6 @@ type FullDocumentDiagnosticReport struct {
 	Kind  string       `json:"kind"`
 	Items []Diagnostic `json:"items"`
 }
-
-// Document Symbols
 
 type DocumentSymbolParams struct {
 	TextDocument TextDocumentIdentifier `json:"textDocument"`
@@ -243,8 +226,6 @@ type WorkspaceSymbol struct {
 		Range *Range `json:"range,omitempty"`
 	} `json:"location"`
 }
-
-// Call Hierarchy
 
 type CallHierarchyItem struct {
 	Name           string          `json:"name"`

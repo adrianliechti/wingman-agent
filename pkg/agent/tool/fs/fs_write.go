@@ -56,7 +56,6 @@ func WriteTool(root *os.Root) tool.Tool {
 				return "", fmt.Errorf("content is required")
 			}
 
-			// Check if file exists before writing (for create vs update reporting)
 			_, existsErr := root.ReadFile(normalizedPath)
 			isNew := existsErr != nil
 

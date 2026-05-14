@@ -17,7 +17,6 @@ type PreToolUse func(ctx context.Context, call tool.ToolCall) (string, error)
 // or return the same result to pass through.
 type PostToolUse func(ctx context.Context, call tool.ToolCall, result string) (string, error)
 
-// Hooks holds the registered hook functions for an agent.
 type Hooks struct {
 	PreToolUse  []PreToolUse
 	PostToolUse []PostToolUse

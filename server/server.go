@@ -32,40 +32,26 @@ var StaticFS, _ = fs.Sub(staticFiles, "static")
 type Server struct {
 	port int
 
-	// workspace owns the workdir-shared resources (Root, MCP, LSP, Rewind,
-	// Skills). Each session is a code.Agent bound to it.
 	workspace *code.Workspace
 
-	// config carries the upstream API client + late-bound model/effort
-	// getters. Workspace.NewAgent Derives each session's own Config from
-	// this. Server.handleModels uses it directly to list available models
-	// without needing a session.
 	config *agent.Config
 
 	// ctx lives for the lifetime of the server. Agent turns and background
-	// goroutines (pollFiles, async MCP warmup) tie their cancellation to
-	// this — NOT to any HTTP request ctx. Tying a Send to r.Context() would
-	// cancel the agent mid-turn on a WS disconnect/reconnect.
+	// goroutines tie their cancellation to this — NOT to any HTTP request
+	// ctx. Tying a Send to r.Context() would cancel the agent mid-turn on
+	// a WS disconnect/reconnect.
 	ctx context.Context
 
 	mux *http.ServeMux
 
 	sessionsDir string
 
-	// Sessions + the shared model/effort selection. Sessions read model
-	// and effort via late-bound Config.Model/Effort (called inside agent.
-	// Send), but neither is hot enough to warrant its own mutex.
-	// sessionsOrder keeps iteration deterministic across reconnects so
-	// the UI's auto-pick of "first session" is stable.
 	mu            sync.Mutex
 	sessions      map[string]*Session
 	sessionsOrder []string
 	model         string
 	effort        string
 
-	// WebSocket fan-out. Every event goes to every connected client tagged
-	// with its session id (or untagged for server-level events); the React
-	// side dispatches.
 	wsMu    sync.Mutex
 	wsConns map[*websocket.Conn]struct{}
 }
@@ -90,9 +76,6 @@ func New(ctx context.Context, workDir string, port int) (*Server, error) {
 		wsConns:     map[*websocket.Conn]struct{}{},
 	}
 
-	// Synchronous workspace probe so /api/capabilities is authoritative by
-	// the time the browser first hits it. MCP setup runs async — slow MCP
-	// servers shouldn't block startup.
 	ws.WarmUp()
 	go func() {
 		if err := ws.InitMCP(context.Background()); err != nil {
@@ -102,10 +85,8 @@ func New(ctx context.Context, workDir string, port int) (*Server, error) {
 
 	s.autoSelectModel(ctx)
 
-	// Poll for outside-the-agent file changes so the FileTree/Diffs panels
-	// reflect terminal `rm`s and IDE saves. Polling beats fsnotify here:
-	// zero FDs (kqueue's per-dir watcher cost was the original $HOME crash),
-	// one path everywhere, ≤2s latency — fine for this UI.
+	// Polling beats fsnotify here: zero FDs (kqueue's per-dir watcher cost
+	// was the original $HOME crash), one path everywhere.
 	go s.pollFiles(ctx)
 
 	s.mux = http.NewServeMux()
@@ -114,8 +95,6 @@ func New(ctx context.Context, workDir string, port int) (*Server, error) {
 	return s, nil
 }
 
-// Close releases the workspace (Root, MCP, LSP, Rewind, scratch). Sessions
-// share these resources, so individual session Close is now a no-op.
 func (s *Server) Close() { s.workspace.Close() }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -208,20 +187,12 @@ func (s *Server) getSession(id string) *Session {
 	return s.sessions[id]
 }
 
-// register stores sess in the map + order slice. Caller must hold s.mu —
-// both call sites (getOrCreateSession, loadSession) already do, since
-// they're the lookup-or-create transaction.
+// Caller must hold s.mu.
 func (s *Server) register(sess *Session) {
 	s.sessions[sess.ID] = sess
 	s.sessionsOrder = append(s.sessionsOrder, sess.ID)
 }
 
-// getOrCreateSession returns the in-memory session for id, creating one
-// (with that id) if it doesn't exist yet. Used by the WS Send dispatch:
-// "+" in the UI is a client-side reset, so the first MsgSend with a fresh
-// id is where the server actually allocates the conversation. The whole
-// lookup-or-create happens under s.mu so concurrent sends with the same
-// id can't both create agents and orphan one.
 func (s *Server) getOrCreateSession(id string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -233,10 +204,6 @@ func (s *Server) getOrCreateSession(id string) *Session {
 	return sess
 }
 
-// loadSession returns the in-memory session for id, loading it from disk
-// into memory if necessary. Like getOrCreateSession, the entire lookup-
-// or-load happens under s.mu so two simultaneous loads can't race.
-// Returns an error only when the id isn't in memory and isn't on disk.
 func (s *Server) loadSession(id string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -254,8 +221,6 @@ func (s *Server) loadSession(id string) (*Session, error) {
 	return sess, nil
 }
 
-// allSessions returns a snapshot of every in-memory session in creation
-// order. Callers can iterate without holding s.mu.
 func (s *Server) allSessions() []*Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -268,25 +233,15 @@ func (s *Server) allSessions() []*Session {
 	return out
 }
 
-// sessionFromRequest resolves the target session for a per-session HTTP
-// endpoint via ?session=…. Returns nil if missing or unknown — callers
-// 404 / 503 their response accordingly. (Per-session routes that take {id}
-// in the path — load/delete — read it themselves.)
 func (s *Server) sessionFromRequest(r *http.Request) *Session {
 	return s.getSession(r.URL.Query().Get("session"))
 }
 
-// broadcast emits a workspace-level event (no session id) to every connected
-// WebSocket. Use this for state that applies to every session view: file
-// tree changes, capabilities, the sessions list.
 func (s *Server) broadcast(f Frame) {
 	f.Session = ""
 	s.send(f)
 }
 
-// send marshals a Frame and fans it out to every WS client. Call sites
-// build Frames inline — `s.broadcast(...)` for workspace events,
-// `sess.send(...)` for per-session events (it sets f.Session).
 func (s *Server) send(f Frame) {
 	data, err := json.Marshal(f)
 	if err != nil {
@@ -329,9 +284,6 @@ func (s *Server) setEffort(effort string) {
 	s.mu.Unlock()
 }
 
-// autoSelectModel picks a default model on startup if none is set. Prefers
-// the curated list (code.AvailableModels) over whatever the API happens to
-// return first.
 func (s *Server) autoSelectModel(ctx context.Context) {
 	if s.currentModel() != "" {
 		return
@@ -355,12 +307,6 @@ func (s *Server) autoSelectModel(ctx context.Context) {
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	// Combine on-disk (saved) and in-memory (possibly empty/new) sessions.
-	// Saved entries carry the real CreatedAt/Title; in-memory-only entries
-	// are brand new with nothing on disk yet, so they get "now". Timestamps
-	// are RFC3339 so the React side can parse them with `new Date(...)`
-	// across browsers — the previous "YYYY-MM-DD HH:MM" format isn't
-	// standard for Date parsing and gave NaN on some runtimes.
 	seen := map[string]bool{}
 	result := []SessionEntry{}
 
@@ -375,11 +321,6 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// In-memory sessions that don't have an on-disk file yet only show up
-	// once they've got messages — otherwise the sidebar would flash with
-	// every transient "+"-style placeholder. The window between the first
-	// user message landing in agent.Messages and session.Save() at end of
-	// turn is microseconds; sidebar refetches in that window catch them.
 	nowStr := time.Now().Format(time.RFC3339)
 	for _, sess := range s.allSessions() {
 		if seen[sess.ID] || len(sess.Agent.Messages) == 0 {
@@ -392,8 +333,6 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// RFC3339 sorts chronologically as a string, so no parallel time.Time
-	// field needed for ordering.
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].UpdatedAt > result[j].UpdatedAt
 	})
@@ -414,11 +353,6 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Push full state via WS so every tab observing this session sees the
-	// same snapshot the requesting tab will. The HTTP response is just an
-	// ack — the client doesn't need the payload here. No SessionsChanged
-	// broadcast: disk sessions are already in the sidebar list, so loading
-	// one into memory doesn't change what's listed.
 	sess.sendState()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -588,9 +522,6 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
-// pollFiles watches the working dir for external changes. Same shape as the
-// single-session version, but the workspace probes target any session's
-// agent (they all watch the same dir).
 func (s *Server) pollFiles(ctx context.Context) {
 	const interval = 2 * time.Second
 
@@ -615,9 +546,6 @@ func (s *Server) pollFiles(ctx context.Context) {
 
 			gitNow := ws.IsGitRepo()
 			if gitNow != prevGit {
-				// Workspace rebuilds LSP once for the whole server when git
-				// status flips (typically: agent ran `git init` in a scratch
-				// dir). All sessions inherit via Workspace.LSP.
 				ws.SyncProjectMode()
 				s.broadcast(Frame{Type: EvtCapabilitiesChanged})
 				if ws.LSP != nil {

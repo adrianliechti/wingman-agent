@@ -7,7 +7,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
-// SkillEntry is the wire shape for the slash-command picker.
 type SkillEntry struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description,omitempty"`
@@ -15,9 +14,6 @@ type SkillEntry struct {
 	Arguments   []string `json:"arguments,omitempty"`
 }
 
-// resolveSkill rewrites a "/skillname [args]" message into the skill's
-// rendered content with arguments substituted. If text doesn't start with `/`
-// or no skill matches, it's returned unchanged.
 func (s *Server) resolveSkill(text string) string {
 	if !strings.HasPrefix(text, "/") {
 		return text
@@ -36,8 +32,6 @@ func (s *Server) resolveSkill(text string) string {
 		return text
 	}
 
-	// Bundled skills materialize on first use so they show up in the
-	// catalog from the next turn onward.
 	if sk.Bundled {
 		_, _ = skill.MaterializeBundled(sk)
 	}

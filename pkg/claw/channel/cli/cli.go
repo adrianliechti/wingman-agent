@@ -60,7 +60,6 @@ func (c *Channel) Start(ctx context.Context, handler channel.MessageHandler) err
 				return nil
 			}
 
-			// Switch agent: /agent <name>
 			if rest, ok := strings.CutPrefix(text, "/agent "); ok {
 				name := strings.TrimSpace(rest)
 				if name != "" {
@@ -72,7 +71,6 @@ func (c *Channel) Start(ctx context.Context, handler channel.MessageHandler) err
 				continue
 			}
 
-			// Show current agent
 			if text == "/agent" {
 				fmt.Printf("Current agent: %s\n", c.agentName())
 				c.printPrompt()

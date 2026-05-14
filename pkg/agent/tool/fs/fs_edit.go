@@ -86,7 +86,6 @@ func EditTool(root *os.Root) tool.Tool {
 			matchResult := fuzzyFindText(normalizedContent, normalizedOldText)
 
 			if !matchResult.found {
-				// Provide a helpful snippet of what the file actually contains near the beginning
 				preview := normalizedContent
 				if len(preview) > 200 {
 					preview = preview[:200] + "..."
@@ -106,10 +105,7 @@ func EditTool(root *os.Root) tool.Tool {
 			var newContent string
 
 			if replaceAll {
-				// For replace_all, use the fuzzy-normalized version to find all occurrences
-				// but apply the replacement on the original content
 				if matchResult.usedFuzzyMatch {
-					// When fuzzy matching was used, we need to iteratively replace
 					newContent = baseContent
 					for {
 						mr := fuzzyFindText(newContent, normalizedOldText)

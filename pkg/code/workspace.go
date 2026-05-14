@@ -27,23 +27,13 @@ import (
 //go:embed skills/*/SKILL.md
 var bundledFS embed.FS
 
-// UI is the elicitation hook a frontend can provide to handle ask/confirm
-// prompts from tools (e.g. shell's dangerous-command confirmation). Pass
-// nil to NewAgent to silently accept the safe defaults (Confirm → true,
-// Ask → "").
+// UI is the elicitation hook a frontend provides for tool ask/confirm
+// prompts. Pass nil to NewAgent for safe defaults (Confirm → true, Ask → "").
 type UI interface {
 	Ask(ctx context.Context, message string) (string, error)
 	Confirm(ctx context.Context, message string) (bool, error)
 }
 
-// Workspace owns the resources shared by every Agent (conversation) bound
-// to a working directory: the filesystem root, MCP/LSP/Rewind services,
-// and the skills catalog. It does NOT own the API client — that lives on
-// *agent.Config, separated so Workspace stays a pure workdir handle.
-//
-// One Workspace can back many Agents: the server holds one Workspace per
-// running instance plus an *agent.Config (the API template), and produces
-// per-session Agents via Workspace.NewAgent(cfg, ui).
 type Workspace struct {
 	Root        *os.Root
 	RootPath    string
@@ -53,11 +43,8 @@ type Workspace struct {
 	Skills []skill.Skill
 
 	MCP *mcp.Manager
-	// LSP is set by WarmUp when the workspace is a supported git repo;
-	// nil otherwise. Callers nil-check before use.
-	LSP *lsp.Manager
-	// Rewind is set by WarmUp when the workspace is supported (git repo or
-	// small enough to walk in time); nil otherwise.
+	// LSP and Rewind are set by WarmUp; nil for unsupported workspaces.
+	LSP    *lsp.Manager
 	Rewind *rewind.Manager
 
 	warmupOnce sync.Once
@@ -67,9 +54,6 @@ type Workspace struct {
 	lspTools []tool.Tool
 }
 
-// NewWorkspace opens the working directory, discovers skills, allocates a
-// scratch dir, and loads the MCP config. Heavy probes (Rewind/LSP setup,
-// MCP connect) happen lazily in WarmUp/InitMCP.
 func NewWorkspace(workDir string) (*Workspace, error) {
 	root, err := os.OpenRoot(workDir)
 	if err != nil {
@@ -89,10 +73,7 @@ func NewWorkspace(workDir string) (*Workspace, error) {
 		return nil, fmt.Errorf("create memory directory: %w", err)
 	}
 
-	// Skill precedence (later overrides earlier):
-	//   bundled  → shipped with the binary, hidden from catalog until invoked
-	//   personal → ~/.claude/skills, ~/.wingman/skills (user-wide)
-	//   project  → .claude, .wingman, .skills, .github, .opencode (this repo)
+	// Skill precedence (later overrides earlier): bundled → personal → project.
 	bundled := loadBundledSkills()
 	personal := skill.MustDiscoverPersonal()
 	discovered := skill.MustDiscover(workDir)
@@ -110,22 +91,17 @@ func NewWorkspace(workDir string) (*Workspace, error) {
 	}, nil
 }
 
-// WarmUp runs the slow workspace probe and initializes Rewind/LSP if the
-// directory is supported. Idempotent: the first caller does the work,
-// subsequent callers block on sync.Once until it finishes.
-//
-// Three resulting modes:
-//
+// WarmUp probes the workspace and initializes Rewind/LSP. Idempotent.
+// Resulting modes:
 //   - supported git repo  → Rewind set, LSP set, lspTools set
 //   - supported scratch   → Rewind set, LSP nil, lspTools nil
-//   - unsupported (huge)  → Rewind nil, LSP nil; UI falls back to chat-only
+//   - unsupported (huge)  → Rewind nil, LSP nil
 func (w *Workspace) WarmUp() {
 	w.warmupOnce.Do(func() {
 		if !isSupportedWorkspace(w.RootPath) {
 			return
 		}
 
-		// Sweep stale shadow repos from prior crashed sessions.
 		rewind.CleanupOrphans()
 		rewindManager := rewind.New(w.RootPath)
 
@@ -144,8 +120,6 @@ func (w *Workspace) WarmUp() {
 	})
 }
 
-// InitMCP connects MCP servers and fetches their tools. Call this after
-// the UI is ready (typically async).
 func (w *Workspace) InitMCP(ctx context.Context) error {
 	if w.MCP == nil {
 		return nil
@@ -167,7 +141,6 @@ func (w *Workspace) InitMCP(ctx context.Context) error {
 	return nil
 }
 
-// Close tears down every workspace-owned resource.
 func (w *Workspace) Close() {
 	if w.MCP != nil {
 		w.MCP.Close()
@@ -186,15 +159,12 @@ func (w *Workspace) Close() {
 	}
 }
 
-// IsGitRepo reports whether the working directory is currently a git repo.
-// Re-evaluated on each call so callers can react to `git init` / `rm -rf
-// .git` happening mid-session.
+// IsGitRepo is re-evaluated each call so callers can react to mid-session
+// `git init` / `rm -rf .git`.
 func (w *Workspace) IsGitRepo() bool { return isGitRepo(w.RootPath) }
 
-// SyncProjectMode rebuilds LSP when the working dir's git status flips
-// (typically: agent ran `git init` in a scratch dir). No-op on unsupported
-// workspaces — `git init` alone doesn't make a 1M-file home folder small
-// enough to support full features.
+// SyncProjectMode rebuilds LSP when the working dir's git status flips.
+// No-op on unsupported workspaces.
 func (w *Workspace) SyncProjectMode() {
 	if w.Rewind == nil {
 		return
@@ -217,9 +187,6 @@ func (w *Workspace) SyncProjectMode() {
 	}
 }
 
-// Diagnostics returns the workspace's current diagnostics keyed by file
-// path. Empty if LSP isn't running (huge dir / non-git workspace) — that
-// folds the nil-check that every caller would otherwise duplicate.
 func (w *Workspace) Diagnostics(ctx context.Context) map[string][]lsp.Diagnostic {
 	if w.LSP == nil {
 		return nil
@@ -227,13 +194,10 @@ func (w *Workspace) Diagnostics(ctx context.Context) map[string][]lsp.Diagnostic
 	return w.LSP.CollectAllDiagnostics(ctx)
 }
 
-// Checkpoint operations. Each is a no-op (or returns nil/empty) when
-// Rewind isn't running, so call sites don't need to duplicate the
-// nil-check. Use w.Rewind directly for poll-loop primitives like
-// Fingerprint that aren't user-facing.
+// Checkpoint operations no-op when Rewind isn't running so call sites
+// don't need to nil-check. Use w.Rewind directly for non-user-facing
+// poll-loop primitives like Fingerprint.
 
-// Commit snapshots the current worktree under msg. No-op if checkpoints
-// aren't being tracked.
 func (w *Workspace) Commit(msg string) error {
 	if w.Rewind == nil {
 		return nil
@@ -241,7 +205,6 @@ func (w *Workspace) Commit(msg string) error {
 	return w.Rewind.Commit(msg)
 }
 
-// Diffs returns the changes from the current checkpoint baseline.
 func (w *Workspace) Diffs() ([]rewind.FileDiff, error) {
 	if w.Rewind == nil {
 		return nil, nil
@@ -249,7 +212,6 @@ func (w *Workspace) Diffs() ([]rewind.FileDiff, error) {
 	return w.Rewind.DiffFromBaseline()
 }
 
-// Checkpoints lists committed checkpoints, newest last.
 func (w *Workspace) Checkpoints() ([]rewind.Checkpoint, error) {
 	if w.Rewind == nil {
 		return nil, nil
@@ -257,7 +219,6 @@ func (w *Workspace) Checkpoints() ([]rewind.Checkpoint, error) {
 	return w.Rewind.List()
 }
 
-// Restore rolls the worktree back to the named checkpoint.
 func (w *Workspace) Restore(hash string) error {
 	if w.Rewind == nil {
 		return errors.New("checkpoint tracking is not available for this workspace")
@@ -265,7 +226,6 @@ func (w *Workspace) Restore(hash string) error {
 	return w.Rewind.Restore(hash)
 }
 
-// MemoryContent reads MEMORY.md, trimming to memoryMaxBytes.
 func (w *Workspace) MemoryContent() string {
 	data, err := os.ReadFile(filepath.Join(w.MemoryPath, memoryFileName))
 	if err != nil {
@@ -288,8 +248,8 @@ func (w *Workspace) MemoryContent() string {
 	return content
 }
 
-// managedTools snapshots MCP + LSP tools under w.mu so Agent.tools() can
-// build its tool list without racing WarmUp / InitMCP.
+// managedTools snapshots MCP + LSP tools under w.mu so Agent.tools()
+// doesn't race WarmUp / InitMCP.
 func (w *Workspace) managedTools() (mcpTools, lspTools []tool.Tool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -298,20 +258,14 @@ func (w *Workspace) managedTools() (mcpTools, lspTools []tool.Tool) {
 	return
 }
 
-// isGitRepo reports whether dir is the root of a real git working tree.
-// Used as the single project-mode gate for LSP detection and rewind init —
-// keeping the predicate in one place ensures both features agree on what
-// "this is a project" means.
 func isGitRepo(dir string) bool {
 	_, err := git.PlainOpen(dir)
 	return err == nil
 }
 
-// isSupportedWorkspace decides whether wingman's heavier features (rewind,
-// LSP, diffs panel) should run for this directory. A real git repo is
-// always supported. Otherwise we walk the tree with a wall-clock budget:
-// if it finishes in time the directory is small enough; if it doesn't,
-// classify as unsupported and let the UI fall back to chat + file browsing.
+// isSupportedWorkspace returns true for git repos, or non-repos whose tree
+// walk completes within a wall-clock budget (huge dirs like $HOME bail
+// out so the UI falls back to chat + file browsing).
 func isSupportedWorkspace(dir string) bool {
 	if isGitRepo(dir) {
 		return true

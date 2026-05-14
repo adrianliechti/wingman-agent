@@ -233,7 +233,6 @@ func Tools(agentDir string) []tool.Tool {
 	}
 }
 
-// LoadTasks reads tasks from the agent's tasks.yaml file.
 func LoadTasks(agentDir string) []Task {
 	data, err := os.ReadFile(filepath.Join(agentDir, tasksFile))
 	if err != nil {
@@ -246,7 +245,6 @@ func LoadTasks(agentDir string) []Task {
 	return f.Tasks
 }
 
-// SaveTasks writes tasks to the agent's tasks.yaml file.
 func SaveTasks(agentDir string, tasks []Task) error {
 	out, err := yaml.Marshal(taskFile{Tasks: tasks})
 	if err != nil {
@@ -256,7 +254,6 @@ func SaveTasks(agentDir string, tasks []Task) error {
 	return os.WriteFile(filepath.Join(agentDir, tasksFile), out, 0644)
 }
 
-// NextRun computes when a task should next run.
 func NextRun(t Task, now time.Time) time.Time {
 	if t.Status != "active" {
 		return time.Time{}
@@ -264,7 +261,6 @@ func NextRun(t Task, now time.Time) time.Time {
 
 	sched := t.Schedule
 
-	// Interval: "every 15m"
 	if rest, ok := strings.CutPrefix(sched, "every "); ok {
 		d, err := time.ParseDuration(rest)
 		if err != nil {
@@ -278,16 +274,14 @@ func NextRun(t Task, now time.Time) time.Time {
 		return t.LastRun.Add(d)
 	}
 
-	// One-time: ISO 8601
 	if ts, err := time.Parse(time.RFC3339, sched); err == nil {
 		if t.LastRun != nil {
-			return time.Time{} // already ran
+			return time.Time{}
 		}
 
 		return ts
 	}
 
-	// Cron expression
 	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 
 	s, err := parser.Parse(sched)
@@ -303,14 +297,12 @@ func NextRun(t Task, now time.Time) time.Time {
 	return s.Next(anchor)
 }
 
-// IsDue returns true if the task should run now.
 func IsDue(t Task, now time.Time) bool {
 	next := NextRun(t, now)
 	return !next.IsZero() && !next.After(now)
 }
 
 func validateSchedule(sched string) error {
-	// Interval
 	if rest, ok := strings.CutPrefix(sched, "every "); ok {
 		_, err := time.ParseDuration(rest)
 		if err != nil {
@@ -320,12 +312,10 @@ func validateSchedule(sched string) error {
 		return nil
 	}
 
-	// ISO 8601 timestamp
 	if _, err := time.Parse(time.RFC3339, sched); err == nil {
 		return nil
 	}
 
-	// Cron expression
 	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 
 	if _, err := parser.Parse(sched); err != nil {

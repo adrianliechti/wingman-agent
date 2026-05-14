@@ -17,7 +17,6 @@ const (
 )
 
 func (c *Claw) startScheduler(ctx context.Context, name string, ma *managedAgent) {
-	// Run overdue tasks immediately on startup
 	c.tickScheduler(ctx, name, ma)
 
 	ticker := time.NewTicker(schedulerTick)
@@ -56,7 +55,7 @@ func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent)
 		t.LastRun = &now
 		modified = true
 
-		// Mark completed one-time tasks
+		// one-time tasks (RFC3339 timestamp) complete after running
 		if _, err := time.Parse(time.RFC3339, t.Schedule); err == nil {
 			t.Status = "completed"
 		}
@@ -66,7 +65,6 @@ func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent)
 		return
 	}
 
-	// Remove completed tasks and save
 	var active []schedule.Task
 
 	for _, t := range tasks {

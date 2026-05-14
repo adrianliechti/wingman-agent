@@ -115,7 +115,6 @@ func WrapLine(line string, width int) []string {
 			currentWordLen += runewidth.RuneWidth(r)
 			flushWord()
 		} else {
-			// Hard-wrap oversized words that exceed the width
 			if currentWordLen >= width {
 				flushWord()
 			}

@@ -7,5 +7,4 @@ import (
 )
 
 func setSysProcAttr(cmd *exec.Cmd) {
-	// No special attributes needed on non-Windows platforms.
 }

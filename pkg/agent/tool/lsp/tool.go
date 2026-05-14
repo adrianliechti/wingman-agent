@@ -10,7 +10,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
-// NewTools creates the LSP tools for coding agents.
 func NewTools(manager *lsp.Manager) []tool.Tool {
 	return []tool.Tool{
 		diagnosticsTool(manager),
@@ -248,8 +247,6 @@ func hierarchyTool(manager *lsp.Manager) tool.Tool {
 		},
 	}
 }
-
-// --- helpers ---
 
 func positionParams() map[string]any {
 	return map[string]any{

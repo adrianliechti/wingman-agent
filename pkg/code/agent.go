@@ -25,32 +25,21 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
-// Agent is a single conversation against a Workspace. Holds Messages and
-// Usage (via the embedded *agent.Agent) plus the per-session flags.
-// *Workspace is embedded anonymously so callers can reach workdir state
-// directly — agent.RootPath, agent.LSP, agent.WarmUp() — without a dot
-// chain.
 type Agent struct {
 	*agent.Agent
 	*Workspace
 
 	PlanMode bool
 
-	// baseTools is the session-specific tool list (fs/shell/fetch/search/
-	// ask/subagent). Stored on Agent because shell.Tools and ask.Tools
-	// close over the session's UI elicit. MCP/LSP tools live on Workspace
-	// and get merged in tools() at call time.
+	// baseTools closes over the session's UI elicit (shell, ask) and
+	// sessionCfg (subagent); MCP/LSP tools live on Workspace and merge in
+	// tools() at call time.
 	baseTools []tool.Tool
 
 	lastMemoryHash string
 	mu             sync.Mutex
 }
 
-// NewAgent constructs an Agent bound to this Workspace, deriving its
-// Config from the template `cfg` (which carries the upstream API client +
-// late-bound model/effort getters). The server uses this to spin up many
-// agents (one per session) sharing one Workspace + one Config. The TUI/
-// Wails app call it as: ws := code.NewWorkspace(wd); a := ws.NewAgent(cfg, nil).
 func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
 	sessionCfg := cfg.Derive()
 
@@ -63,17 +52,10 @@ func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
 	sessionCfg.ContextMessages = a.memoryContextMessages
 	sessionCfg.Instructions = a.Instructions
 
-	// Truncation hook: cap large tool outputs and dump the full text to the
-	// workspace's scratch dir so the model can `read` a specific range if
-	// it needs the elided middle. Every caller (TUI, server) wants this; do
-	// it once here instead of forcing each to remember.
 	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,
 		truncation.New(truncation.DefaultMaxBytes, ws.ScratchPath),
 	)
 
-	// Build the session-specific base tool list. Shell + ask depend on the
-	// elicit closure (per-session UI prompts); subagent embeds sessionCfg
-	// so child agents inherit this session's model/effort.
 	elicit := buildElicit(ui)
 
 	var allowedReadRoots []string
@@ -116,8 +98,6 @@ func buildElicit(ui UI) *tool.Elicitation {
 	}
 }
 
-// tools returns the merged tool list for this turn: session base +
-// workspace MCP + workspace LSP, filtered through plan mode if active.
 func (a *Agent) tools() []tool.Tool {
 	tools := append([]tool.Tool{}, a.baseTools...)
 
@@ -161,8 +141,6 @@ func planModeEffectExecute(t tool.Tool) func(context.Context, map[string]any) (s
 		return t.Execute(ctx, args)
 	}
 }
-
-// Memory and plan content
 
 const (
 	memoryFileName      = "MEMORY.md"
@@ -230,11 +208,6 @@ func (a *Agent) latestMemoryContextText() string {
 	return ""
 }
 
-// Instructions
-
-// Instructions renders the full system prompt for this turn (plan vs agent
-// base + current SectionData). Wired into Config.Instructions in NewAgent
-// so the agent.Send loop reads the live value each turn.
 func (a *Agent) Instructions() string {
 	return BuildInstructions(a.InstructionsData())
 }
@@ -267,8 +240,8 @@ func (a *Agent) InstructionsData() prompt.SectionData {
 const projectInstructionsMaxBytes = 25 * 1024
 
 // ReadProjectInstructions walks from wd up to the filesystem root,
-// collecting AGENTS.md and CLAUDE.md files. Returns them concatenated
-// with headers, closest ancestor first. Truncates at 25KB.
+// concatenating AGENTS.md / CLAUDE.md with headers, closest ancestor first.
+// Truncates at 25KB.
 func ReadProjectInstructions(wd string) string {
 	var parts []string
 

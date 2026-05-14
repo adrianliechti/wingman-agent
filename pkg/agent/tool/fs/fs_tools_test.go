@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-// createTestRoot creates a test os.Root with a temporary directory
 func createTestRoot(t *testing.T) (*os.Root, string, func()) {
 	t.Helper()
 
@@ -40,7 +39,6 @@ func TestReadTool(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	// Create test file
 	content := "line1\nline2\nline3\nline4\nline5"
 	testFile := filepath.Join(tmpDir, "test.txt")
 
@@ -124,7 +122,7 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("read with absolute path inside workspace", func(t *testing.T) {
 		result, err := readTool.Execute(context.Background(), map[string]any{
-			"path": testFile, // absolute path
+			"path": testFile,
 		})
 
 		if err != nil {
@@ -137,7 +135,6 @@ func TestReadTool(t *testing.T) {
 	})
 
 	t.Run("read rejects binary files", func(t *testing.T) {
-		// Create a fake "binary" file by extension. We shouldn't even try to read it.
 		os.WriteFile(filepath.Join(tmpDir, "logo.png"), []byte("\x89PNG\r\n\x1a\n"), 0644)
 
 		_, err := readTool.Execute(context.Background(), map[string]any{
@@ -174,7 +171,6 @@ func TestWriteTool(t *testing.T) {
 			t.Errorf("expected 'Created' message, got: %s", result)
 		}
 
-		// Verify file was created
 		content, err := os.ReadFile(filepath.Join(tmpDir, "newfile.txt"))
 
 		if err != nil {
@@ -196,7 +192,6 @@ func TestWriteTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// Verify file was created
 		content, err := os.ReadFile(filepath.Join(tmpDir, "subdir", "nested", "file.txt"))
 
 		if err != nil {
@@ -209,7 +204,6 @@ func TestWriteTool(t *testing.T) {
 	})
 
 	t.Run("overwrite existing file", func(t *testing.T) {
-		// First write
 		_, err := writeTool.Execute(context.Background(), map[string]any{
 			"path":    "overwrite.txt",
 			"content": "original",
@@ -227,7 +221,6 @@ func TestWriteTool(t *testing.T) {
 			t.Fatalf("unexpected read error: %v", err)
 		}
 
-		// Overwrite
 		_, err = writeTool.Execute(context.Background(), map[string]any{
 			"path":    "overwrite.txt",
 			"content": "updated",
@@ -267,7 +260,6 @@ func TestEditTool(t *testing.T) {
 	editTool := EditTool(root)
 
 	t.Run("simple edit", func(t *testing.T) {
-		// Create test file
 		testFile := filepath.Join(tmpDir, "edit_test.txt")
 		os.WriteFile(testFile, []byte("hello world"), 0644)
 
@@ -414,7 +406,6 @@ func TestLsTool(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	// Create test directory structure
 	os.MkdirAll(filepath.Join(tmpDir, "subdir"), 0755)
 	os.WriteFile(filepath.Join(tmpDir, "file1.txt"), []byte("content"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "file2.go"), []byte("content"), 0644)
@@ -505,7 +496,6 @@ func TestFindTool(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	// Create test directory structure
 	os.MkdirAll(filepath.Join(tmpDir, "src", "pkg"), 0755)
 	os.MkdirAll(filepath.Join(tmpDir, "node_modules", "dep"), 0755)
 	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("content"), 0644)
@@ -514,7 +504,6 @@ func TestFindTool(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, "src", "app.ts"), []byte("content"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "node_modules", "dep", "index.js"), []byte("content"), 0644)
 
-	// Create .gitignore
 	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.log\n"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "debug.log"), []byte("content"), 0644)
 
@@ -606,7 +595,7 @@ func TestFindTool(t *testing.T) {
 	t.Run("find with absolute path", func(t *testing.T) {
 		result, err := findTool.Execute(context.Background(), map[string]any{
 			"pattern": "**/*.go",
-			"path":    tmpDir, // absolute path to workspace root
+			"path":    tmpDir,
 		})
 
 		if err != nil {
@@ -669,7 +658,6 @@ func TestGrepTool(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	// Create test files
 	os.WriteFile(filepath.Join(tmpDir, "file1.go"), []byte("package main\n\nfunc Hello() {\n\treturn \"hello\"\n}"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "file2.go"), []byte("package util\n\nfunc World() {\n\treturn \"world\"\n}"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "readme.md"), []byte("# Hello World\nThis is a test."), 0644)
@@ -747,11 +735,9 @@ func TestGrepTool(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		// Should include the match line
 		if !strings.Contains(result, "func Hello") {
 			t.Errorf("expected match line, got: %s", result)
 		}
-		// Context should include lines around the match
 		lines := strings.Split(result, "\n")
 
 		if len(lines) < 2 {
@@ -795,7 +781,7 @@ func TestGrepTool(t *testing.T) {
 	t.Run("grep with absolute path", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
 			"pattern": "func",
-			"path":    tmpDir, // absolute path to workspace root
+			"path":    tmpDir,
 		})
 
 		if err != nil {
@@ -849,7 +835,6 @@ func TestPathHandlingCrossplatform(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	// Create nested structure
 	os.MkdirAll(filepath.Join(tmpDir, "a", "b", "c"), 0755)
 	os.WriteFile(filepath.Join(tmpDir, "a", "b", "c", "file.txt"), []byte("content"), 0644)
 
@@ -926,8 +911,6 @@ func TestTools(t *testing.T) {
 	}
 }
 
-// TestFindSkipsSymlinks verifies that symlinks are skipped during file traversal
-// to prevent infinite loops from circular symlinks.
 func TestFindSkipsSymlinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink tests may require elevated privileges on Windows")
@@ -936,12 +919,10 @@ func TestFindSkipsSymlinks(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	// Create directory structure with a file at root level
 	os.WriteFile(filepath.Join(tmpDir, "root.txt"), []byte("root content"), 0644)
 	os.MkdirAll(filepath.Join(tmpDir, "dir1"), 0755)
 	os.WriteFile(filepath.Join(tmpDir, "dir1", "file.txt"), []byte("content"), 0644)
 
-	// Create a symlink pointing to the parent (circular)
 	symlink := filepath.Join(tmpDir, "dir1", "circular")
 	if err := os.Symlink(tmpDir, symlink); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
@@ -949,7 +930,6 @@ func TestFindSkipsSymlinks(t *testing.T) {
 
 	findTool := FindTool(root)
 
-	// This should complete without hanging or error
 	result, err := findTool.Execute(context.Background(), map[string]any{
 		"pattern": "*.txt",
 	})
@@ -958,13 +938,11 @@ func TestFindSkipsSymlinks(t *testing.T) {
 		t.Fatalf("find should not fail with symlinks: %v", err)
 	}
 
-	// Should find regular files but not follow the circular symlink infinitely
 	if !strings.Contains(result, "root.txt") && !strings.Contains(result, "file.txt") {
 		t.Errorf("expected txt files in results, got: %s", result)
 	}
 }
 
-// TestGrepSkipsSymlinks verifies that symlinks are skipped during grep traversal.
 func TestGrepSkipsSymlinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink tests may require elevated privileges on Windows")
@@ -973,11 +951,9 @@ func TestGrepSkipsSymlinks(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	// Create directory structure
 	os.MkdirAll(filepath.Join(tmpDir, "dir1"), 0755)
 	os.WriteFile(filepath.Join(tmpDir, "dir1", "file.txt"), []byte("searchme"), 0644)
 
-	// Create a symlink pointing to the parent (circular)
 	symlink := filepath.Join(tmpDir, "dir1", "circular")
 	if err := os.Symlink(tmpDir, symlink); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
@@ -985,7 +961,6 @@ func TestGrepSkipsSymlinks(t *testing.T) {
 
 	grepTool := GrepTool(root)
 
-	// This should complete without hanging or error
 	result, err := grepTool.Execute(context.Background(), map[string]any{
 		"pattern": "searchme",
 	})
@@ -994,18 +969,15 @@ func TestGrepSkipsSymlinks(t *testing.T) {
 		t.Fatalf("grep should not fail with symlinks: %v", err)
 	}
 
-	// Should find the match
 	if !strings.Contains(result, "searchme") {
 		t.Errorf("expected 'searchme' in results, got: %s", result)
 	}
 }
 
-// TestContextCancellation verifies that operations respect context cancellation.
 func TestContextCancellation(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	// Create many files to make the operation take longer
 	for i := range 100 {
 		dir := filepath.Join(tmpDir, "dir"+string(rune('a'+i%26)))
 		os.MkdirAll(dir, 0755)
@@ -1014,15 +986,13 @@ func TestContextCancellation(t *testing.T) {
 
 	findTool := FindTool(root)
 
-	// Create a cancelled context
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
 	_, err := findTool.Execute(ctx, map[string]any{
 		"pattern": "*.txt",
 	})
 
-	// Should return a context error
 	if err == nil {
 		t.Log("Operation completed before context cancellation was detected (acceptable for fast operations)")
 	} else if !strings.Contains(err.Error(), "context") {
@@ -1030,7 +1000,6 @@ func TestContextCancellation(t *testing.T) {
 	}
 }
 
-// TestMacOSCaseInsensitivePaths tests that path comparison works correctly on macOS.
 func TestMacOSCaseInsensitivePaths(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS-specific test")
@@ -1039,17 +1008,11 @@ func TestMacOSCaseInsensitivePaths(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	// Create a file
 	os.WriteFile(filepath.Join(tmpDir, "TestFile.txt"), []byte("content"), 0644)
 
 	readTool := ReadTool(root)
 
-	// On macOS, paths with different cases should work due to case-insensitive filesystem
-	// Using the absolute path with different case
 	upperPath := strings.ToUpper(tmpDir) + "/TESTFILE.TXT"
-
-	// Try to read with different case - this tests filesystem behavior, not our normalization
-	// The key is that our workspace boundary detection should work with case differences
 	lowerPath := strings.ToLower(tmpDir) + "/testfile.txt"
 
 	// Both should resolve within the workspace (not "outside workspace" error)
@@ -1057,7 +1020,6 @@ func TestMacOSCaseInsensitivePaths(t *testing.T) {
 		"path": upperPath,
 	})
 
-	// We expect either success or "file not found" but NOT "outside workspace"
 	if err != nil && strings.Contains(err.Error(), "outside workspace") {
 		t.Errorf("path with different case should not be considered outside workspace: %v", err)
 	}

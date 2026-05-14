@@ -76,8 +76,6 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 	}
 }
 
-// readFromAllowedLocation tries the workspace root first, then falls back to
-// any path inside the allow-list. Returns the file contents or an error.
 func readFromAllowedLocation(root *os.Root, workingDir, path string, allowedRoots []string) ([]byte, error) {
 	if !isOutsideWorkspace(path, workingDir) {
 		normalizedPath := normalizePath(path, workingDir)
@@ -126,7 +124,6 @@ func expandHome(path string) string {
 	return path
 }
 
-// formatRead applies the truncation + line-numbering display logic.
 func formatRead(content []byte, offset, limit int) (string, error) {
 	if len(content) == 0 {
 		return "(empty file)", nil

@@ -137,7 +137,6 @@ func symbolKindName(kind int) string {
 	return "Symbol"
 }
 
-// FormatDiagnostics formats diagnostics into a human-readable string.
 func FormatDiagnostics(diagnostics []Diagnostic, filePath string, workingDir string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Diagnostics (%d found):\n", len(diagnostics))
@@ -155,7 +154,6 @@ func FormatDiagnostics(diagnostics []Diagnostic, filePath string, workingDir str
 	return sb.String()
 }
 
-// DiagnosticSeverityName returns the human-readable name for a diagnostic severity.
 func DiagnosticSeverityName(severity int) string {
 	switch severity {
 	case DiagnosticSeverityError:

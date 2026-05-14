@@ -243,9 +243,6 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + " [truncated]"
 }
 
-// truncateMessagesForRecovery is the non-LLM fallback when summarization fails.
-// It keeps the tail of the history and runs orphan cleanup so the next API call
-// has a coherent (if shorter) transcript instead of wiped tool history.
 func (a *Agent) truncateMessagesForRecovery() {
 	if len(a.Messages) > minRecoveryMessagesToPreserve {
 		a.Messages = a.Messages[len(a.Messages)-minRecoveryMessagesToPreserve:]

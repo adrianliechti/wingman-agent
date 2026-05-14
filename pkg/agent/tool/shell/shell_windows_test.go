@@ -15,7 +15,6 @@ func TestBuildCommandWindows_UsesCorrectShell(t *testing.T) {
 
 	cmd := buildCommand(ctx, command, workingDir)
 
-	// Should use either pwsh or powershell
 	base := cmd.Path
 	if !strings.Contains(base, "pwsh") && !strings.Contains(base, "powershell") {
 		t.Fatalf("expected pwsh or powershell, got %q", base)
@@ -29,7 +28,6 @@ func TestBuildCommandWindows_SetsCorrectFlags(t *testing.T) {
 
 	cmd := buildCommand(ctx, command, workingDir)
 
-	// Check that -NoProfile, -NoLogo, -NonInteractive, -Command are present
 	args := strings.Join(cmd.Args, " ")
 	for _, flag := range []string{"-NoProfile", "-NoLogo", "-NonInteractive", "-Command"} {
 		if !strings.Contains(args, flag) {
@@ -44,7 +42,6 @@ func TestBuildCommandWindows_SetsUTF8Encoding(t *testing.T) {
 
 	cmd := buildCommand(ctx, command, `C:\`)
 
-	// The last arg should contain the UTF-8 encoding prefix + original command
 	lastArg := cmd.Args[len(cmd.Args)-1]
 	if !strings.Contains(lastArg, "[Console]::OutputEncoding") {
 		t.Error("expected UTF-8 encoding wrapper in command")
@@ -83,11 +80,9 @@ func TestBuildCommandWindows_SetsGitEditor(t *testing.T) {
 
 func TestFindPowerShell(t *testing.T) {
 	ps := findPowerShell()
-	// Should return something non-empty
 	if ps == "" {
 		t.Fatal("findPowerShell returned empty string")
 	}
-	// Should be either pwsh or powershell
 	if !strings.Contains(ps, "pwsh") && !strings.Contains(ps, "powershell") {
 		t.Errorf("expected pwsh or powershell, got %q", ps)
 	}

@@ -1,4 +1,3 @@
-// Package text provides small string utilities shared across the codebase.
 package text
 
 import (
@@ -7,11 +6,9 @@ import (
 	"unicode/utf8"
 )
 
-// TruncateMiddle returns s unchanged when its byte length fits within
-// maxBytes. Otherwise it keeps a head and a tail of the input, joined by a
-// "…N chars truncated…" marker, with the byte budget split evenly between
-// head and tail at UTF-8 boundaries. The returned string may exceed
-// maxBytes by the marker length.
+// TruncateMiddle keeps a head and tail of s joined by a "…N chars
+// truncated…" marker, splitting the byte budget at UTF-8 boundaries.
+// The returned string may exceed maxBytes by the marker length.
 func TruncateMiddle(s string, maxBytes int) string {
 	if s == "" {
 		return ""
@@ -44,9 +41,6 @@ func splitBudget(budget int) (left, right int) {
 	return left, budget - left
 }
 
-// splitString picks a prefix whose byte-end is <= beginningBytes and a
-// suffix whose byte-start is >= len(s)-endBytes, both at UTF-8 boundaries.
-// Returns the count of dropped chars and slices into s.
 func splitString(s string, beginningBytes, endBytes int) (removedChars int, head, tail string) {
 	if s == "" {
 		return 0, "", ""

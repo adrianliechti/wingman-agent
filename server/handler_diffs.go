@@ -46,10 +46,6 @@ func (s *Server) handleDiffs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
-// handleDiffRevert restores a single file to its baseline state. Reverting a
-// modified or deleted file writes the baseline content back; reverting an
-// added file removes it. Per-file scope is what makes this distinct from
-// /api/checkpoints/{hash}/restore, which rolls back the whole working tree.
 func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
 	abs, ok := s.resolveWorkspacePath(r.URL.Query().Get("path"))
 	if !ok {

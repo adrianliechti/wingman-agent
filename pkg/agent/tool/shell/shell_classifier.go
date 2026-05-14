@@ -197,7 +197,6 @@ func splitCommandSegments(command string) []string {
 	return segments
 }
 
-// isSingleCommandReadOnly checks whether one segment of a pipeline is read-only.
 func isSingleCommandReadOnly(command string) bool {
 	command = strings.TrimSpace(command)
 

@@ -8,11 +8,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
-// turn groups a user message with everything the agent did before its next
-// final answer. Reasoning, tool results, and intermediate assistant text all
-// land in `working`; the latest assistant message that actually produced text
-// becomes `final`. This mirrors the web UI's grouping so finished turns can
-// be rendered as `user → ▸ 1 thought, 20 tools → final`.
 type turn struct {
 	user    *agent.Message
 	working []agent.Message
@@ -49,8 +44,8 @@ func buildTurns(messages []agent.Message) []turn {
 			}
 		}
 		if hasText {
-			// New text-bearing assistant message — bump the previous final (if
-			// any) into working so only the latest counts as "the answer".
+			// Only the latest text-bearing assistant message counts as "the
+			// answer"; demote any prior final into working.
 			if cur.final != nil {
 				cur.working = append(cur.working, *cur.final)
 			}

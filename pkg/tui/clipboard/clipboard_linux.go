@@ -8,7 +8,6 @@ import (
 	"strings"
 )
 
-// Read reads text and image content from the Linux clipboard.
 func Read() ([]Content, error) {
 	var contents []Content
 
@@ -53,9 +52,8 @@ func readImage() (string, error) {
 	return "data:image/png;base64," + encoded, nil
 }
 
-// WriteText writes text to the Linux clipboard.
 func WriteText(text string) error {
-	// Try wl-copy (Wayland) first, then xclip (X11)
+	// wl-copy (Wayland), then xclip (X11)
 	cmd := exec.Command("wl-copy")
 	cmd.Stdin = strings.NewReader(text)
 

@@ -106,7 +106,6 @@ func searchWingman(ctx context.Context, baseURL, token, query string) (string, e
 		return "", err
 	}
 
-	// Try to parse as structured response with results array
 	var structured struct {
 		Results []struct {
 			Title   string `json:"title"`
@@ -131,7 +130,6 @@ func searchWingman(ctx context.Context, baseURL, token, query string) (string, e
 		return sb.String(), nil
 	}
 
-	// Return raw text if not structured
 	result := strings.TrimSpace(string(data))
 
 	if result == "" {

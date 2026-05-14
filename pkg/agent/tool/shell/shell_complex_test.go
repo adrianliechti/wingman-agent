@@ -110,7 +110,6 @@ func TestComplex_CommandSubstitution(t *testing.T) {
 }
 
 func TestComplex_EmbeddedPython(t *testing.T) {
-	// Skip if python3 not available
 	result := runShell(t, `python3 -c "print('hello from python')" 2>/dev/null || python -c "print('hello from python')" 2>/dev/null || echo "python not found"`)
 	if !strings.Contains(result, "hello from python") && !strings.Contains(result, "python not found") {
 		t.Errorf("embedded python failed, got: %q", result)
@@ -153,7 +152,6 @@ func TestComplex_SpecialCharacters(t *testing.T) {
 }
 
 func TestComplex_MultiLineHeredocScript(t *testing.T) {
-	// This simulates what the model would send for a complex git commit
 	result := runShell(t, `cat <<'EOF'
 This is a multi-line
 commit message with "quotes"
@@ -165,12 +163,10 @@ EOF`)
 }
 
 func TestComplex_LargeOutputTruncation(t *testing.T) {
-	// Generate output larger than maxLines (2000)
 	result := runShell(t, `for i in $(seq 1 3000); do echo "line $i"; done`)
 	if !strings.Contains(result, "Output truncated") {
 		t.Errorf("expected truncation notice, got length: %d", len(result))
 	}
-	// Should contain the LAST lines (tail truncation)
 	if !strings.Contains(result, "line 3000") {
 		t.Errorf("expected last lines preserved, got tail: %q", result[len(result)-100:])
 	}

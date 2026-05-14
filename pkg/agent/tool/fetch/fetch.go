@@ -14,7 +14,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-const maxFetchBytes = 100 * 1024 // 100KB max content
+const maxFetchBytes = 100 * 1024
 
 func Tools() []tool.Tool {
 	description := strings.Join([]string{

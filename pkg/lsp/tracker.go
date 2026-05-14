@@ -9,18 +9,13 @@ import (
 
 const maxDiagnosticsPerFile = 10
 
-// DiagnosticTracker tracks baselines and deduplicates diagnostics across turns.
 type DiagnosticTracker struct {
-	// baselines stores the diagnostic keys present before a file was edited.
-	baselines map[string]map[string]struct{} // uri -> set of diagnostic keys
-
-	// delivered tracks diagnostic keys already shown to the model, keyed by URI.
+	baselines map[string]map[string]struct{}
 	delivered map[string]map[string]struct{}
 
 	mu sync.Mutex
 }
 
-// NewDiagnosticTracker creates a new tracker.
 func NewDiagnosticTracker() *DiagnosticTracker {
 	return &DiagnosticTracker{
 		baselines: make(map[string]map[string]struct{}),
@@ -28,8 +23,6 @@ func NewDiagnosticTracker() *DiagnosticTracker {
 	}
 }
 
-// SetBaseline records the current diagnostics as a baseline before a file is edited.
-// Only new diagnostics (not in the baseline) will be shown after the edit.
 func (t *DiagnosticTracker) SetBaseline(uri string, diags []Diagnostic) {
 	keys := make(map[string]struct{}, len(diags))
 	for _, d := range diags {
@@ -38,13 +31,10 @@ func (t *DiagnosticTracker) SetBaseline(uri string, diags []Diagnostic) {
 
 	t.mu.Lock()
 	t.baselines[uri] = keys
-	// Clear delivered diagnostics for this file so fresh ones come through
 	delete(t.delivered, uri)
 	t.mu.Unlock()
 }
 
-// FilterNew returns only diagnostics that are new — not in the baseline and
-// not previously delivered. It also applies volume limiting and severity sorting.
 func (t *DiagnosticTracker) FilterNew(uri string, diags []Diagnostic) []Diagnostic {
 	t.mu.Lock()
 	baseline := t.baselines[uri]
@@ -55,14 +45,12 @@ func (t *DiagnosticTracker) FilterNew(uri string, diags []Diagnostic) []Diagnost
 	for _, d := range diags {
 		key := diagnosticKey(d)
 
-		// Skip diagnostics that existed before the edit
 		if baseline != nil {
 			if _, inBaseline := baseline[key]; inBaseline {
 				continue
 			}
 		}
 
-		// Skip diagnostics already delivered in a previous turn
 		if deliveredSet != nil {
 			if _, wasDelivered := deliveredSet[key]; wasDelivered {
 				continue
@@ -72,12 +60,10 @@ func (t *DiagnosticTracker) FilterNew(uri string, diags []Diagnostic) []Diagnost
 		filtered = append(filtered, d)
 	}
 
-	// Sort by severity (errors first)
 	sort.Slice(filtered, func(i, j int) bool {
 		return filtered[i].Severity < filtered[j].Severity
 	})
 
-	// Cap per file
 	if len(filtered) > maxDiagnosticsPerFile {
 		filtered = filtered[:maxDiagnosticsPerFile]
 	}
@@ -85,7 +71,6 @@ func (t *DiagnosticTracker) FilterNew(uri string, diags []Diagnostic) []Diagnost
 	return filtered
 }
 
-// MarkDelivered records that these diagnostics have been shown to the model.
 func (t *DiagnosticTracker) MarkDelivered(uri string, diags []Diagnostic) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -99,12 +84,10 @@ func (t *DiagnosticTracker) MarkDelivered(uri string, diags []Diagnostic) {
 	}
 }
 
-// diagnosticKey creates a unique key for deduplication based on location + message.
 func diagnosticKey(d Diagnostic) string {
 	return fmt.Sprintf("%d:%d:%d:%s", d.Range.Start.Line, d.Range.Start.Character, d.Severity, d.Message)
 }
 
-// FormatNewDiagnostics formats only new diagnostics, with severity symbols and volume limiting.
 func FormatNewDiagnostics(diagnostics []Diagnostic, filePath string, workingDir string) string {
 	if len(diagnostics) == 0 {
 		return ""

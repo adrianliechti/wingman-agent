@@ -18,7 +18,7 @@ import (
 
 const (
 	DefaultMaxLines = 2000
-	DefaultMaxBytes = 30 * 1024 // 30KB
+	DefaultMaxBytes = 30 * 1024
 )
 
 // normalizePath converts an absolute path to a relative path if it starts with the working directory.
@@ -36,12 +36,10 @@ func normalizePath(path, workingDir string) string {
 	return filepath.FromSlash(path)
 }
 
-// normalizePathFS normalizes a path and converts to forward slashes for fs.FS operations.
 func normalizePathFS(path, workingDir string) string {
 	return pathpkg.Clean(filepath.ToSlash(normalizePath(path, workingDir)))
 }
 
-// ensurePathInWorkspace validates that a path is inside the workspace and returns a normalized path.
 func ensurePathInWorkspace(pathArg, workingDir, action string) (string, error) {
 	if isOutsideWorkspace(pathArg, workingDir) {
 		return "", fmt.Errorf("cannot %s: path %q is outside workspace %q", action, pathArg, workingDir)
@@ -50,7 +48,6 @@ func ensurePathInWorkspace(pathArg, workingDir, action string) (string, error) {
 	return normalizePath(pathArg, workingDir), nil
 }
 
-// ensurePathInWorkspaceFS validates that a path is inside the workspace and returns a normalized fs.FS path.
 func ensurePathInWorkspaceFS(pathArg, workingDir, action string) (string, error) {
 	if isOutsideWorkspace(pathArg, workingDir) {
 		return "", fmt.Errorf("cannot %s: path %q is outside workspace %q", action, pathArg, workingDir)
@@ -59,8 +56,6 @@ func ensurePathInWorkspaceFS(pathArg, workingDir, action string) (string, error)
 	return normalizePathFS(pathArg, workingDir), nil
 }
 
-// isOutsideWorkspace checks if an absolute path is outside the workspace.
-// Returns true if the path is absolute and doesn't start with workingDir.
 func isOutsideWorkspace(path, workingDir string) bool {
 	if !filepath.IsAbs(path) {
 		return false
@@ -147,7 +142,6 @@ func normalizePathForComparison(path string) string {
 	return path
 }
 
-// pathError creates a helpful error message for path-related issues.
 func pathError(action, originalPath, normalizedPath, workingDir string, err error) error {
 	if isOutsideWorkspace(originalPath, workingDir) {
 		return fmt.Errorf("%s failed: path %q is outside workspace %q", action, originalPath, workingDir)
@@ -244,7 +238,6 @@ func mapFuzzyIndexToOriginal(original, fuzzy string, fuzzyIdx int) int {
 }
 
 func normalizeForFuzzyMatch(text string) string {
-	// Trim trailing whitespace from each line
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
 		lines[i] = strings.TrimRight(line, " \t")
@@ -318,7 +311,6 @@ func fuzzyFindText(content, oldText string) fuzzyMatchResult {
 func generateDiffString(oldContent, newContent string) string {
 	dmp := diffmatchpatch.New()
 
-	// Create line-based diff for better readability
 	oldLines, newLines, lineArray := dmp.DiffLinesToChars(oldContent, newContent)
 	diffs := dmp.DiffMain(oldLines, newLines, false)
 	diffs = dmp.DiffCharsToLines(diffs, lineArray)
@@ -331,7 +323,6 @@ func generateDiffString(oldContent, newContent string) string {
 	for _, diff := range diffs {
 		lines := strings.Split(diff.Text, "\n")
 
-		// Remove empty last element from split if text ends with newline
 		if len(lines) > 0 && lines[len(lines)-1] == "" {
 			lines = lines[:len(lines)-1]
 		}
@@ -356,7 +347,6 @@ func generateDiffString(oldContent, newContent string) string {
 	return output.String()
 }
 
-// Common ignore directories that should be skipped during file traversal
 var defaultIgnoreDirs = map[string]bool{
 	".git":         true,
 	".hg":          true,
@@ -386,14 +376,12 @@ var binaryExtensions = map[string]bool{
 	".pyc": true, ".pyo": true, ".class": true, ".o": true, ".a": true,
 }
 
-// isBinaryFile checks if a file is likely binary based on its extension
 func isBinaryFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 
 	return binaryExtensions[ext]
 }
 
-// relPathSlash returns the relative path from base to target using forward slashes
 func relPathSlash(base, target string) string {
 	rel, err := filepath.Rel(filepath.FromSlash(base), filepath.FromSlash(target))
 
@@ -412,7 +400,6 @@ func relPathFromBase(base, path string) string {
 	return relPathSlash(base, path)
 }
 
-// pathDomain returns the path split into components for gitignore matching
 func pathDomain(fsPath string) []string {
 	if fsPath == "" || fsPath == "." {
 		return nil
@@ -421,7 +408,6 @@ func pathDomain(fsPath string) []string {
 	return strings.Split(fsPath, "/")
 }
 
-// loadGitignore loads gitignore patterns from a .gitignore file
 func loadGitignore(fsys fs.FS, domain []string) []gitignore.Pattern {
 	gitignorePath := ".gitignore"
 
@@ -466,7 +452,6 @@ func walkWorkspace(ctx context.Context, fsys fs.FS, root string, onFile func(pat
 			return nil
 		}
 
-		// Check for context cancellation
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

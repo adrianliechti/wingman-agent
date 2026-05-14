@@ -2,7 +2,6 @@ package code
 
 import "github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 
-// Modal represents the currently active modal type
 type Modal string
 
 const (
@@ -13,7 +12,6 @@ const (
 	ModalDiagnostics Modal = "diagnostics"
 )
 
-// AppPhase represents the current operational phase of the application
 type AppPhase int
 
 const (
@@ -24,13 +22,11 @@ const (
 	PhaseToolRunning
 )
 
-// PhaseConfig holds display configuration for each phase
 type PhaseConfig struct {
 	Message string
 	Color   string
 }
 
-// GetPhaseConfig returns the display configuration for a given phase
 func GetPhaseConfig(phase AppPhase) PhaseConfig {
 	t := theme.Default
 
@@ -58,7 +54,6 @@ func GetPhaseConfig(phase AppPhase) PhaseConfig {
 	}
 }
 
-// Mode represents the operational mode
 type Mode int
 
 const (

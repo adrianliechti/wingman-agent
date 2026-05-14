@@ -27,14 +27,11 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/claw/tool/schedule"
 )
 
-// managedAgent holds a registered agent and its per-agent resources.
 type managedAgent struct {
 	name  string
 	agent *agent.Agent
 }
 
-// Claw is the main orchestrator — the Go equivalent of nanoclaw's index.ts.
-// It connects channels to explicitly registered agents.
 type Claw struct {
 	config *Config
 	agents sync.Map // name -> *managedAgent
@@ -45,8 +42,7 @@ func New(config *Config) *Claw {
 	return &Claw{config: config}
 }
 
-// Init loads all registered agents from the memory store.
-// Must be called before Run.
+// Init must be called before Run.
 func (c *Claw) Init() error {
 	names, err := c.config.Memory.ListAgents()
 	if err != nil {
@@ -59,13 +55,11 @@ func (c *Claw) Init() error {
 		}
 	}
 
-	// Ensure main agent has a default check-in task
 	c.ensureDefaultTasks("main")
 
 	return nil
 }
 
-// Run starts schedulers and all channels, blocking until ctx is cancelled.
 func (c *Claw) Run(ctx context.Context) error {
 	if len(c.config.Channels) == 0 {
 		return fmt.Errorf("no channels configured")
@@ -73,7 +67,6 @@ func (c *Claw) Run(ctx context.Context) error {
 
 	c.runCtx = ctx
 
-	// Start per-agent schedulers
 	c.agents.Range(func(k, v any) bool {
 		go c.startScheduler(ctx, k.(string), v.(*managedAgent))
 		return true
@@ -91,8 +84,6 @@ func (c *Claw) Run(ctx context.Context) error {
 	return primary.Start(ctx, c.handleMessage)
 }
 
-// CreateAgent registers a new agent by creating its directory structure
-// and loading it. Returns an error if the agent already exists.
 func (c *Claw) CreateAgent(name string) error {
 	if name == "" || strings.ContainsAny(name, "/\\:*?\"<>|") || name == "global" {
 		return fmt.Errorf("invalid agent name %q", name)
@@ -111,7 +102,6 @@ func (c *Claw) CreateAgent(name string) error {
 		return err
 	}
 
-	// Start scheduler for the new agent if we're already running
 	if c.runCtx != nil {
 		go c.startScheduler(c.runCtx, name, ma)
 	}
@@ -119,7 +109,6 @@ func (c *Claw) CreateAgent(name string) error {
 	return nil
 }
 
-// DeleteAgent removes a registered agent and its data.
 func (c *Claw) DeleteAgent(name string) error {
 	if name == "main" {
 		return fmt.Errorf("cannot delete the main agent")
@@ -130,14 +119,11 @@ func (c *Claw) DeleteAgent(name string) error {
 	return c.config.Memory.RemoveAgent(name)
 }
 
-// ListAgents returns the names of all registered agents.
 func (c *Claw) ListAgents() ([]string, error) {
 	return c.config.Memory.ListAgents()
 }
 
-// loadAgent creates the runtime for a registered agent.
 func (c *Claw) loadAgent(name string) (*managedAgent, error) {
-	// Open workspace root for sandboxed file access
 	workDir := c.config.Memory.WorkspaceDir(name)
 	if name == "main" {
 		workDir = c.config.Memory.Dir()
@@ -155,17 +141,14 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 	cfg := c.config.AgentConfig.Derive()
 	cfg.Instructions = func() string { return c.buildInstructions(name) }
 
-	// Cap large tool outputs at the wire layer and save the full text under
-	// the workspace so the read tool's existing sandboxed root can reach it
-	// — the hook's hint tells the model to `read` the saved path to
-	// retrieve the elided middle.
+	// Cap large tool outputs at the wire layer; the hook saves the full text under .scratch
+	// so the model can `read` the path to retrieve the elided middle.
 	scratchDir := filepath.Join(workDir, ".scratch")
 	_ = os.MkdirAll(scratchDir, 0755)
 	cfg.Hooks.PostToolUse = append(cfg.Hooks.PostToolUse,
 		truncation.New(truncation.DefaultMaxBytes, scratchDir),
 	)
 
-	// Build per-agent tools - collected into a slice that the closure references
 	agentTools := slices.Concat(
 		fs.Tools(root),
 		shell.Tools(workDir, nil),
@@ -173,26 +156,23 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 		schedule.Tools(c.config.Memory.AgentDir(name)),
 	)
 
-	// Add MCP tools
 	if c.config.MCP != nil {
 		if mcpTools, err := mcp.Tools(context.Background(), c.config.MCP); err == nil {
 			agentTools = append(agentTools, mcpTools...)
 		}
 	}
 
-	// Main agent gets agent management tools
 	if name == "main" {
 		agentTools = append(agentTools, manage.Tools(c, c.config.Memory)...)
 	}
 
-	// Subagent (filters itself out via name check)
+	// subagent filters itself out via name check
 	agentTools = append(agentTools, subagent.Tools(cfg)...)
 
 	cfg.Tools = func() []tool.Tool { return agentTools }
 
 	a := &agent.Agent{Config: cfg}
 
-	// Restore session if one exists
 	sessionPath := c.sessionPath(name)
 
 	var state agent.State
@@ -209,7 +189,6 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 	return ma, nil
 }
 
-// GetAgent returns a loaded agent by name.
 func (c *Claw) GetAgent(name string) *agent.Agent {
 	if ma, ok := c.agents.Load(name); ok {
 		return ma.(*managedAgent).agent
@@ -225,7 +204,6 @@ func (c *Claw) getAgent(chatID string) *managedAgent {
 	return nil
 }
 
-// AgentDir returns the directory for an agent.
 func (c *Claw) AgentDir(name string) string {
 	return c.config.Memory.AgentDir(name)
 }
@@ -293,7 +271,6 @@ func (c *Claw) findChannel(chatID string) channel.Channel {
 	return nil
 }
 
-// buildInstructions constructs the system prompt for an agent.
 func (c *Claw) buildInstructions(name string) string {
 	assistantName := c.config.AssistantName
 	if assistantName == "" {
@@ -304,7 +281,7 @@ func (c *Claw) buildInstructions(name string) string {
 
 	var b strings.Builder
 
-	// SOUL.md first - immutable identity (outside workspace, agent cannot modify)
+	// SOUL.md is immutable identity, outside workspace so the agent cannot modify it
 	if soul := c.config.Memory.SoulContent(name); soul != "" {
 		b.WriteString(soul)
 		b.WriteString("\n\n")
@@ -327,7 +304,7 @@ func (c *Claw) buildInstructions(name string) string {
 		b.WriteString(c.config.Instructions)
 	}
 
-	// AGENTS.md - mutable instructions (agent can modify)
+	// AGENTS.md is mutable instructions the agent can modify
 	if content := c.config.Memory.Content(name); content != "" {
 		b.WriteString("\n\n")
 		b.WriteString(content)

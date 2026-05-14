@@ -13,20 +13,16 @@ import (
 
 const maxRestarts = 3
 
-// Manager caches LSP sessions so servers are reused across tool invocations.
 type Manager struct {
 	workingDir string
-	sessions   map[string]*Session // keyed by server command
-	restarts   map[string]int      // restart count per server command
+	sessions   map[string]*Session
+	restarts   map[string]int
 	mu         sync.Mutex
 
-	roots      []projectRoot // cached detection results
+	roots      []projectRoot
 	detectOnce sync.Once
 }
 
-// NewManager creates a new LSP session manager. Callers should only
-// instantiate one when LSP is actually wanted for the workspace; outside
-// project mode they should keep the field nil.
 func NewManager(workingDir string) *Manager {
 	return &Manager{
 		workingDir: workingDir,
@@ -35,12 +31,10 @@ func NewManager(workingDir string) *Manager {
 	}
 }
 
-// WorkingDir returns the working directory for this manager.
 func (m *Manager) WorkingDir() string {
 	return m.workingDir
 }
 
-// detect returns cached detection results, running detection once.
 func (m *Manager) detect() []projectRoot {
 	m.detectOnce.Do(func() {
 		m.roots = detectAll(m.workingDir)
@@ -48,8 +42,8 @@ func (m *Manager) detect() []projectRoot {
 	return m.roots
 }
 
-// FindServer returns the most-nested project root's server that handles the
-// given file's extension, or nil if none.
+// FindServer returns the most-nested project root's server that handles
+// the given file's extension, or nil if none.
 func (m *Manager) FindServer(filePath string) *Server {
 	ext := strings.TrimPrefix(filepath.Ext(filePath), ".")
 	if ext == "" {
@@ -78,8 +72,6 @@ func (m *Manager) FindServer(filePath string) *Server {
 	return best
 }
 
-// DetectServers returns one entry per unique server command across all
-// detected project roots.
 func (m *Manager) DetectServers() []Server {
 	var servers []Server
 	seen := make(map[string]bool)
@@ -95,7 +87,6 @@ func (m *Manager) DetectServers() []Server {
 	return servers
 }
 
-// GetSession returns a cached session or creates a new one for the given file.
 func (m *Manager) GetSession(ctx context.Context, filePath string) (*Session, error) {
 	server := m.FindServer(filePath)
 	if server == nil {
@@ -105,12 +96,11 @@ func (m *Manager) GetSession(ctx context.Context, filePath string) (*Session, er
 	return m.GetSessionByServer(ctx, *server)
 }
 
-// GetSessionByServer returns a cached session or creates a new one for a specific server.
-// If the server has crashed, it attempts to restart it and re-open previously opened documents.
+// GetSessionByServer returns a cached session or creates a new one. If the server crashed,
+// it restarts and re-opens previously opened documents.
 func (m *Manager) GetSessionByServer(ctx context.Context, server Server) (*Session, error) {
 	key := server.Command
 
-	// Fast path: check cache
 	m.mu.Lock()
 	if session, ok := m.sessions[key]; ok {
 		if session.IsAlive() {
@@ -118,7 +108,6 @@ func (m *Manager) GetSessionByServer(ctx context.Context, server Server) (*Sessi
 			return session, nil
 		}
 
-		// Server crashed — collect state for recovery
 		openedURIs := session.OpenedDocURIs()
 		restartCount := m.restarts[key]
 		delete(m.sessions, key)
@@ -128,14 +117,13 @@ func (m *Manager) GetSessionByServer(ctx context.Context, server Server) (*Sessi
 			return nil, fmt.Errorf("LSP server %s crashed %d times, not restarting", server.Name, restartCount)
 		}
 
-		// Attempt restart
 		newSession, err := connect(ctx, m.workingDir, server)
 		if err != nil {
 			return nil, fmt.Errorf("restart %s: %w", server.Name, err)
 		}
 
 		m.mu.Lock()
-		// Check for concurrent restart race
+		// concurrent restart race
 		if existing, ok := m.sessions[key]; ok && existing.IsAlive() {
 			m.mu.Unlock()
 			newSession.Close()
@@ -145,7 +133,6 @@ func (m *Manager) GetSessionByServer(ctx context.Context, server Server) (*Sessi
 		m.restarts[key] = restartCount + 1
 		m.mu.Unlock()
 
-		// Re-open previously opened documents (best-effort)
 		for _, uri := range openedURIs {
 			path := uriToPath(uri)
 			if path != "" {
@@ -157,14 +144,13 @@ func (m *Manager) GetSessionByServer(ctx context.Context, server Server) (*Sessi
 	}
 	m.mu.Unlock()
 
-	// Slow path: first connection
 	session, err := connect(ctx, m.workingDir, server)
 	if err != nil {
 		return nil, err
 	}
 
-	// Store result, handle concurrent connection race
 	m.mu.Lock()
+	// concurrent connection race
 	if existing, ok := m.sessions[key]; ok && existing.IsAlive() {
 		m.mu.Unlock()
 		session.Close()
@@ -176,7 +162,6 @@ func (m *Manager) GetSessionByServer(ctx context.Context, server Server) (*Sessi
 	return session, nil
 }
 
-// Close shuts down all cached sessions.
 func (m *Manager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -187,7 +172,6 @@ func (m *Manager) Close() {
 	}
 }
 
-// CollectAllDiagnostics returns raw diagnostics grouped by file path.
 func (m *Manager) CollectAllDiagnostics(ctx context.Context) map[string][]Diagnostic {
 	servers := m.DetectServers()
 	result := make(map[string][]Diagnostic)
@@ -214,7 +198,6 @@ func (m *Manager) CollectAllDiagnostics(ctx context.Context) map[string][]Diagno
 	return result
 }
 
-// WorkspaceDiagnostics collects diagnostics across all workspace files.
 func (m *Manager) WorkspaceDiagnostics(ctx context.Context) (string, error) {
 	servers := m.DetectServers()
 	if len(servers) == 0 {
@@ -256,7 +239,6 @@ func (m *Manager) WorkspaceDiagnostics(ctx context.Context) (string, error) {
 	return fmt.Sprintf("Workspace Diagnostics (%d found):\n%s", totalDiags, sb.String()), nil
 }
 
-// WorkspaceSymbols searches for symbols across the workspace.
 func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) (string, error) {
 	servers := m.DetectServers()
 	if len(servers) == 0 {
@@ -277,14 +259,13 @@ func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) (string, e
 			continue
 		}
 
-		// Try SymbolInformation[] first (has location.uri with range)
+		// SymbolInformation[] has location.uri with range; WorkspaceSymbol[] may omit range.
 		var symInfos []SymbolInformation
 		if err := unmarshalResult(result, &symInfos); err == nil && len(symInfos) > 0 && symInfos[0].Location.URI != "" {
 			allSymInfos = append(allSymInfos, symInfos...)
 			continue
 		}
 
-		// Fall back to WorkspaceSymbol[] (location range may be omitted)
 		var wsSymbols []WorkspaceSymbol
 		if err := unmarshalResult(result, &wsSymbols); err == nil {
 			allWsSymbols = append(allWsSymbols, wsSymbols...)

@@ -74,8 +74,6 @@ func formatCodeBlock(code, lang string, t theme.Theme) string {
 	return result.String()
 }
 
-// HighlightDiff applies syntax highlighting to a unified diff string
-// using theme-consistent colors for additions/deletions
 func HighlightDiff(diff string) string {
 	t := theme.Default
 	lines := strings.Split(diff, "\n")
@@ -94,22 +92,16 @@ func HighlightDiff(diff string) string {
 
 		switch {
 		case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
-			// File headers - bold foreground
 			fmt.Fprintf(&result, "%s[%s::b]%s[-::-]\n", lineNum, t.Foreground, escaped)
 		case strings.HasPrefix(line, "@@"):
-			// Hunk headers - cyan
 			fmt.Fprintf(&result, "%s[%s]%s[-]\n", lineNum, t.Cyan, escaped)
 		case strings.HasPrefix(line, "+"):
-			// Additions - green
 			fmt.Fprintf(&result, "%s[%s]%s[-]\n", lineNum, t.Green, escaped)
 		case strings.HasPrefix(line, "-"):
-			// Deletions - red
 			fmt.Fprintf(&result, "%s[%s]%s[-]\n", lineNum, t.Red, escaped)
 		case strings.HasPrefix(line, "diff "), strings.HasPrefix(line, "index "):
-			// Meta lines - dim
 			fmt.Fprintf(&result, "%s[%s]%s[-]\n", lineNum, t.BrBlack, escaped)
 		default:
-			// Context lines - normal
 			fmt.Fprintf(&result, "%s%s\n", lineNum, escaped)
 		}
 	}

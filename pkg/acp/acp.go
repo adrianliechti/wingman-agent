@@ -19,12 +19,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
-// Run starts the ACP stdio server and blocks until the peer disconnects or
-// ctx is cancelled. All live sessions and workspaces are released before
-// returning.
-//
-// in/out are parameters (not os.Stdin/os.Stdout) so callers can wire pipes
-// for tests; the binary's main passes the real stdio handles.
 func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	cfg, err := agent.DefaultConfig()
 	if err != nil {
@@ -58,15 +52,9 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	return nil
 }
 
-// Server is the ACP agent. One Server hosts many sessions; sessions sharing
-// the same cwd share a single *code.Workspace (so MCP/LSP/Rewind aren't
-// duplicated). Refcounted: the workspace is torn down when its last session
-// closes.
 type Server struct {
 	conn *acp.AgentSideConnection
 
-	// config is the API-client template. Each session's *agent.Config is
-	// Derive()d from this so they share the upstream client.
 	config *agent.Config
 
 	mu         sync.Mutex
@@ -124,8 +112,6 @@ func (s *Server) attachSession(ctx context.Context, cwd string, id acp.SessionId
 		return nil, nil, nil, err
 	}
 
-	// Synchronous warmup: an immediately-following Prompt would otherwise
-	// race ahead of LSP/MCP tool registration.
 	w.ws.WarmUp()
 	if err := w.ws.InitMCP(ctx); err != nil {
 		s.releaseWorkspace(w)
@@ -150,10 +136,6 @@ func (s *Server) attachSession(ctx context.Context, cwd string, id acp.SessionId
 	return a, models, sessionConfigOptions(a), nil
 }
 
-// acquireWorkspace returns the cached *code.Workspace for cwd, opening a
-// new one if necessary. Refs is incremented; pair with releaseWorkspace.
-// Key is the cleaned absolute path so "." and the resolved path share an
-// entry.
 func (s *Server) acquireWorkspace(cwd string) (*workspaceEntry, error) {
 	key, err := filepath.Abs(cwd)
 	if err != nil {
@@ -169,9 +151,6 @@ func (s *Server) acquireWorkspace(cwd string) (*workspaceEntry, error) {
 	}
 	s.mu.Unlock()
 
-	// Build the workspace outside the lock — NewWorkspace can be slow
-	// (skill discovery, MCP config load). A racing acquire for the same cwd
-	// would create a duplicate; we collapse them on re-check.
 	ws, err := code.NewWorkspace(cwd)
 	if err != nil {
 		return nil, err
@@ -192,8 +171,7 @@ func (s *Server) acquireWorkspace(cwd string) (*workspaceEntry, error) {
 	return w, nil
 }
 
-// releaseWorkspace decrements the ref count and closes the workspace when
-// it hits zero. Caller must not hold s.mu.
+// Caller must not hold s.mu.
 func (s *Server) releaseWorkspace(w *workspaceEntry) {
 	s.mu.Lock()
 	w.refs--
@@ -206,9 +184,6 @@ func (s *Server) releaseWorkspace(w *workspaceEntry) {
 	w.ws.Close()
 }
 
-// UnstableSetSessionModel handles the (experimental) session/set_model
-// request. Picked up by the SDK via a structural type assertion, so we
-// don't need to implement the full acp.AgentExperimental interface.
 func (s *Server) UnstableSetSessionModel(_ context.Context, params acp.UnstableSetSessionModelRequest) (acp.UnstableSetSessionModelResponse, error) {
 	a := s.lookupAgent(params.SessionId)
 	if a == nil {
@@ -226,14 +201,11 @@ func (s *Server) CloseSession(_ context.Context, params acp.CloseSessionRequest)
 	s.mu.Unlock()
 
 	if sess != nil {
-		// Session-scoped resources (the agent) are GC'd; the workspace is
-		// shared, so only its refcount drops here.
 		s.releaseWorkspace(sess.workspace)
 	}
 	return acp.CloseSessionResponse{}, nil
 }
 
-// lookupAgent returns the *code.Agent for a session id, or nil if unknown.
 func (s *Server) lookupAgent(id acp.SessionId) *code.Agent {
 	if sess := s.lookupSession(id); sess != nil {
 		return sess.agent
@@ -247,8 +219,6 @@ func (s *Server) lookupSession(id acp.SessionId) *sessionEntry {
 	return s.sessions[id]
 }
 
-// Cancel is a no-op: the SDK already cancels the in-flight Prompt's context
-// before invoking us. Our Prompt loop observes that via context.Canceled.
 func (s *Server) Cancel(_ context.Context, _ acp.CancelNotification) error { return nil }
 
 func (s *Server) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
@@ -278,8 +248,6 @@ func (s *Server) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Prom
 			if errors.Is(err, context.Canceled) {
 				return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
 			}
-			// Surface as a final assistant message rather than failing the
-			// whole connection — some ACP clients close on Prompt error.
 			notify(acp.UpdateAgentMessageText("error: " + err.Error()))
 			return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 		}
@@ -426,9 +394,6 @@ func (s *Server) replayMessages(ctx context.Context, sid acp.SessionId, messages
 	}
 }
 
-// SetSessionConfigOption handles the stable session/set_config_option
-// request. We expose a single option: "effort" (reasoning effort), as a
-// select with values auto/low/medium/high.
 func (s *Server) SetSessionConfigOption(_ context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
 	if params.ValueId == nil {
 		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("expected select value")
@@ -462,9 +427,6 @@ func (s *Server) SetSessionMode(_ context.Context, _ acp.SetSessionModeRequest) 
 	return acp.SetSessionModeResponse{}, nil
 }
 
-// noopUI satisfies code.UI for the ACP mode: no in-tool Ask/Confirm prompts
-// (the agent runs auto-allow). ACP has its own permission-request channel,
-// but wingman tools don't surface elicitations through it today.
 type noopUI struct{}
 
 func (noopUI) Ask(_ context.Context, _ string) (string, error) {
@@ -475,9 +437,6 @@ func (noopUI) Confirm(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }
 
-// promptToContent converts ACP prompt blocks to the agent's input shape.
-// We advertise no image/audio/embedded-context capabilities, so well-
-// behaved clients only send Text and ResourceLink.
 func promptToContent(blocks []acp.ContentBlock) []agent.Content {
 	out := make([]agent.Content, 0, len(blocks))
 	for _, b := range blocks {
@@ -491,8 +450,6 @@ func promptToContent(blocks []acp.ContentBlock) []agent.Content {
 	return out
 }
 
-// parseRawInput tries to expose tool args as a structured value to the
-// client; falls back to the raw string if the agent emitted non-JSON args.
 func parseRawInput(args string) any {
 	if args == "" {
 		return nil
@@ -504,9 +461,6 @@ func parseRawInput(args string) any {
 	return args
 }
 
-// availableModels exposes the curated model list (pkg/code.AvailableModels)
-// to ACP clients so the IDE's model picker can render the same options the
-// TUI/web UI shows.
 func availableModels() []acp.ModelInfo {
 	out := make([]acp.ModelInfo, 0, len(code.AvailableModels))
 	for _, m := range code.AvailableModels {
@@ -518,18 +472,10 @@ func availableModels() []acp.ModelInfo {
 	return out
 }
 
-// setAgentModel installs a model selector on the agent. agent.Config.Model
-// is a thunk so each turn picks up the latest value — replacing it here
-// takes effect on the next Send iteration.
 func setAgentModel(a *code.Agent, modelID string) {
 	a.Config.Model = func() string { return modelID }
 }
 
-// sessionConfigOptions builds the full set of config options for a
-// session, with each option's currentValue reflecting the agent's actual
-// state. This is what every NewSession / SetSessionConfigOption response
-// must carry — clients use it as the authoritative session config view.
-//
 // Once config_options is non-empty, strict clients (Zed) treat it as
 // canonical and ignore the legacy Models/Modes fields entirely. So every
 // selector wingman wants visible — model included — has to live here.
@@ -540,7 +486,6 @@ func sessionConfigOptions(a *code.Agent) []acp.SessionConfigOption {
 	}
 }
 
-// currentModel reads the agent's selected model id, or "" if unset.
 func currentModel(a *code.Agent) string {
 	if a.Config.Model == nil {
 		return ""
@@ -548,7 +493,6 @@ func currentModel(a *code.Agent) string {
 	return a.Config.Model()
 }
 
-// modelConfigOption advertises wingman's curated model list as a select.
 func modelConfigOption(current string) acp.SessionConfigOption {
 	opts := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(code.AvailableModels))
 	for _, m := range code.AvailableModels {
@@ -567,8 +511,6 @@ func modelConfigOption(current string) acp.SessionConfigOption {
 	}
 }
 
-// currentEffort reads the agent's reasoning-effort selection back as the
-// option-value-id wingman exposes ("auto" when no override is set).
 func currentEffort(a *code.Agent) string {
 	if a.Config.Effort == nil {
 		return "auto"
@@ -579,9 +521,6 @@ func currentEffort(a *code.Agent) string {
 	return "auto"
 }
 
-// effortConfigOption advertises wingman's reasoning-effort knob to ACP
-// clients as a select. v0.13+ of the SDK adds a named "thought_level"
-// category constant; until then the option ships uncategorized.
 func effortConfigOption(current string) acp.SessionConfigOption {
 	opts := acp.SessionConfigSelectOptionsUngrouped{
 		{Value: "auto", Name: "Auto"},
@@ -599,9 +538,6 @@ func effortConfigOption(current string) acp.SessionConfigOption {
 	}
 }
 
-// setAgentEffort applies a reasoning-effort selection to the agent.
-// Valid values mirror the web UI's POST /api/effort handler at
-// server/server.go:496.
 func setAgentEffort(a *code.Agent, effort string) error {
 	switch effort {
 	case "", "auto":
@@ -615,9 +551,6 @@ func setAgentEffort(a *code.Agent, effort string) error {
 	return nil
 }
 
-// mapKind classifies wingman tools onto ACP's ToolKind enum so IDEs can
-// pick appropriate icons / grouping. Cosmetic — mismatches don't affect
-// behavior. Tool names match pkg/agent/tool/{fs,shell,fetch,search}/.
 func mapKind(name string) acp.ToolKind {
 	switch name {
 	case "read", "ls", "find":

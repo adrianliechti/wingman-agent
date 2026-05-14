@@ -44,8 +44,7 @@ func queryTerminalBackground() bool {
 		result = false
 	}
 
-	// Drain any pending input that might arrive after timeout by doing
-	// non-blocking reads while still in raw mode
+	// Drain pending input that might arrive after timeout, while still in raw mode.
 	syscall.SetNonblock(fd, true)
 	drainBuf := make([]byte, 64)
 

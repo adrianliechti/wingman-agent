@@ -12,15 +12,8 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
-// DefaultMaxBytes is the wire-size cap each entry point applies to tool
-// results. Outputs above this cap are middle-truncated (head + "…N chars
-// truncated…" + tail) so both ends survive.
 const DefaultMaxBytes = 16 * 1024
 
-// New returns a PostToolUse hook that caps tool results at maxBytes via
-// middle truncation. If scratchDir is non-empty, the full untruncated
-// output is saved there and the model is told where to find it, so it can
-// re-read specific ranges instead of re-running the tool.
 func New(maxBytes int, scratchDir string) hook.PostToolUse {
 	return func(ctx context.Context, call tool.ToolCall, result string) (string, error) {
 		if len(result) <= maxBytes {

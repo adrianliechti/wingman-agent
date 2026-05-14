@@ -10,7 +10,6 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 )
 
-// projectRoot represents a detected project and its resolved LSP server.
 // Each (dir, server-command) pair gets its own root — multiple project types
 // at the same dir produce separate entries.
 type projectRoot struct {
@@ -18,7 +17,6 @@ type projectRoot struct {
 	Server Server
 }
 
-// ignoredDirs are directories skipped during project detection.
 var ignoredDirs = map[string]bool{
 	".git":         true,
 	".hg":          true,
@@ -35,21 +33,15 @@ var ignoredDirs = map[string]bool{
 	".nuxt":        true,
 }
 
-// projectBinDirs lists the per-ecosystem subdirectories where a language
-// server binary may be installed as a project dependency. Probed in order
-// at each level of the walk; first match wins.
+// projectBinDirs are per-ecosystem subdirectories probed in order at each level of the walk;
+// first match wins.
 var projectBinDirs = []string{
-	filepath.Join("node_modules", ".bin"), // npm / pnpm / yarn-classic
-	filepath.Join(".venv", "bin"),         // uv, python -m venv (.venv)
-	filepath.Join("venv", "bin"),          // python -m venv (venv)
-	filepath.Join("vendor", "bin"),        // composer (PHP)
+	filepath.Join("node_modules", ".bin"),
+	filepath.Join(".venv", "bin"),
+	filepath.Join("venv", "bin"),
+	filepath.Join("vendor", "bin"),
 }
 
-// hasFileMatching returns true if any file in dir's subtree matches one of
-// the given globs. Used to gate detection of project types whose marker
-// (e.g. package.json) is too loose on its own — Vue, Svelte, and Astro all
-// share the npm marker family but only apply when the project actually
-// contains files of their own extension.
 func hasFileMatching(fsys fs.FS, relDir string, patterns []string) bool {
 	prefix := ""
 	if relDir != "" && relDir != "." {
@@ -64,9 +56,8 @@ func hasFileMatching(fsys fs.FS, relDir string, patterns []string) bool {
 	return false
 }
 
-// resolveCommand returns the absolute path of command if it lives under one
-// of projectBinDirs between dir and workingDir (inclusive). Empty string
-// means no local install was found — caller falls back to exec.LookPath.
+// resolveCommand returns the absolute path of command if it lives under one of projectBinDirs
+// between dir and workingDir (inclusive); empty string means caller falls back to exec.LookPath.
 func resolveCommand(dir, workingDir, command string) string {
 	cur := filepath.Clean(dir)
 	root := filepath.Clean(workingDir)
@@ -88,12 +79,10 @@ func resolveCommand(dir, workingDir, command string) string {
 	}
 }
 
-// detectAll scans the working directory tree for known project markers and
-// returns the detected project roots with their available LSP servers.
 func detectAll(workingDir string) []projectRoot {
 	var roots []projectRoot
-	seen := make(map[string]bool)           // dir+command dedup
-	resolveCache := make(map[string]string) // dir+command -> absolute path or bare command ("" = unavailable)
+	seen := make(map[string]bool)
+	resolveCache := make(map[string]string)
 
 	fsys := filteredFS{root: workingDir}
 
@@ -144,7 +133,7 @@ func detectAll(workingDir string) []projectRoot {
 					server := candidate
 					server.Command = path
 					roots = append(roots, projectRoot{Dir: dir, Server: server})
-					break // first available server per project type per dir
+					break
 				}
 			}
 		}
@@ -153,7 +142,6 @@ func detectAll(workingDir string) []projectRoot {
 	return roots
 }
 
-// excluded returns true if any of the exclude markers exist in dir.
 func excluded(dir string, excludes []string) bool {
 	for _, marker := range excludes {
 		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
@@ -163,7 +151,7 @@ func excluded(dir string, excludes []string) bool {
 	return false
 }
 
-// filteredFS wraps os.DirFS but skips ignored directories.
+// filteredFS wraps os.DirFS but skips ignoredDirs and dot-directories.
 type filteredFS struct {
 	root string
 }
@@ -192,7 +180,6 @@ func (f filteredFS) Stat(name string) (fs.FileInfo, error) {
 	return os.Stat(filepath.Join(f.root, name))
 }
 
-// isSubPath checks if child is under parent directory.
 func isSubPath(parent, child string) bool {
 	parent = filepath.Clean(parent)
 	child = filepath.Clean(child)

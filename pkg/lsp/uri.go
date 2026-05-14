@@ -6,7 +6,6 @@ import (
 	"strings"
 )
 
-// FileURI converts a file path to a file:// URI.
 func FileURI(path string) string {
 	absPath := path
 	if !isAbsolutePath(path) {

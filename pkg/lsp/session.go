@@ -16,7 +16,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/lsp/jsonrpc2"
 )
 
-// Session represents a connected LSP server session.
 type Session struct {
 	server     Server
 	conn       *jsonrpc2.Connection
@@ -25,13 +24,12 @@ type Session struct {
 	workingDir string
 	cancelFunc context.CancelFunc
 
-	docVersion int64 // atomic counter for document versions
+	docVersion int64
 
 	openedDocs map[string]struct{}
 	mu         sync.Mutex
 
-	// Push-based diagnostics from textDocument/publishDiagnostics notifications.
-	pushDiags   map[string][]Diagnostic // keyed by URI
+	pushDiags   map[string][]Diagnostic
 	pushDiagsMu sync.Mutex
 }
 
@@ -109,12 +107,10 @@ func connect(ctx context.Context, workingDir string, server Server) (*Session, e
 	return session, nil
 }
 
-// IsAlive returns true if the underlying LSP server process is still running.
 func (s *Session) IsAlive() bool {
 	return s.cmd.ProcessState == nil
 }
 
-// OpenedDocURIs returns the URIs of all documents that were opened in this session.
 func (s *Session) OpenedDocURIs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -126,7 +122,6 @@ func (s *Session) OpenedDocURIs() []string {
 	return uris
 }
 
-// Close shuts down the LSP server connection.
 func (s *Session) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -137,8 +132,7 @@ func (s *Session) Close() {
 	s.cancelFunc()
 }
 
-// CallAndAwait invokes an LSP method and waits for the result.
-// It retries transient errors (e.g. rust-analyzer's "content modified") with exponential backoff.
+// CallAndAwait retries transient LSP errors (e.g. rust-analyzer's "content modified") with exponential backoff.
 func (s *Session) CallAndAwait(ctx context.Context, method string, params any, result any) error {
 	var err error
 
@@ -164,7 +158,6 @@ const maxRetries = 3
 
 var retryBaseDelay = 500 * time.Millisecond
 
-// isTransientError returns true for LSP error codes that are worth retrying.
 func isTransientError(err error) bool {
 	var wireErr *jsonrpc2.WireError
 	if !errors.As(err, &wireErr) {
@@ -172,9 +165,9 @@ func isTransientError(err error) bool {
 	}
 
 	switch wireErr.Code {
-	case -32801: // ContentModified (rust-analyzer, etc.)
+	case -32801: // ContentModified
 		return true
-	case -32800: // RequestCancelled (server-side cancel, may succeed on retry)
+	case -32800: // RequestCancelled
 		return true
 	case -32802: // ServerCancelled
 		return true
@@ -183,7 +176,6 @@ func isTransientError(err error) bool {
 	}
 }
 
-// OpenDocument opens a document in the LSP server, syncing content if already open.
 func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, error) {
 	uri := FileURI(filePath)
 
@@ -209,7 +201,7 @@ func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, er
 			return "", fmt.Errorf("didChange: %w", err)
 		}
 
-		// Send didSave — many LSP servers only trigger full diagnostics on save
+		// many LSP servers only trigger full diagnostics on save
 		s.conn.Notify(ctx, "textDocument/didSave", DidSaveTextDocumentParams{
 			TextDocument: TextDocumentIdentifier{URI: uri},
 		})
@@ -237,7 +229,6 @@ func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, er
 	return uri, nil
 }
 
-// PushDiagnostics returns any diagnostics received via publishDiagnostics for the URI.
 func (s *Session) PushDiagnostics(uri string) []Diagnostic {
 	s.pushDiagsMu.Lock()
 	diags := s.pushDiags[uri]
@@ -245,24 +236,19 @@ func (s *Session) PushDiagnostics(uri string) []Diagnostic {
 	return diags
 }
 
-// ClearPushDiagnostics removes cached push diagnostics for a URI,
-// so that fresh diagnostics will be collected after the next change.
 func (s *Session) ClearPushDiagnostics(uri string) {
 	s.pushDiagsMu.Lock()
 	delete(s.pushDiags, uri)
 	s.pushDiagsMu.Unlock()
 }
 
-// CollectDiagnostics retrieves diagnostics for a single document URI.
-// It first checks push-based diagnostics (from publishDiagnostics notifications),
-// then falls back to pull-based diagnostics (textDocument/diagnostic request).
+// CollectDiagnostics prefers push-based diagnostics (publishDiagnostics notifications) and
+// falls back to pull-based (textDocument/diagnostic).
 func (s *Session) CollectDiagnostics(ctx context.Context, uri string) []Diagnostic {
-	// Check push-based diagnostics first (event-driven, most reliable)
 	if diags := s.PushDiagnostics(uri); len(diags) > 0 {
 		return diags
 	}
 
-	// Fall back to pull-based diagnostics
 	params := DocumentDiagnosticParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},
 	}
@@ -288,15 +274,11 @@ func (s *Session) CollectDiagnostics(ctx context.Context, uri string) []Diagnost
 	return nil
 }
 
-// WaitForDiagnostics waits for diagnostics until results appear or the context expires.
-// It checks both push-based (publishDiagnostics notifications) and pull-based sources.
 func (s *Session) WaitForDiagnostics(ctx context.Context, uri string) []Diagnostic {
-	// First attempt immediately.
 	if diags := s.CollectDiagnostics(ctx, uri); len(diags) > 0 {
 		return diags
 	}
 
-	// Poll with a short interval, giving the server time to analyze.
 	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -312,7 +294,6 @@ func (s *Session) WaitForDiagnostics(ctx context.Context, uri string) []Diagnost
 	}
 }
 
-// Diagnostics returns formatted diagnostics for a single file.
 func (s *Session) Diagnostics(ctx context.Context, uri string, filePath string) (string, error) {
 	diags := s.CollectDiagnostics(ctx, uri)
 	if len(diags) == 0 {
@@ -322,12 +303,10 @@ func (s *Session) Diagnostics(ctx context.Context, uri string, filePath string) 
 	return FormatDiagnostics(diags, filePath, s.workingDir), nil
 }
 
-// Definition returns the definition location(s) for the symbol at the given position.
 func (s *Session) Definition(ctx context.Context, uri string, line, column int) (string, error) {
 	return s.locationOp(ctx, "textDocument/definition", "Definition", uri, line, column)
 }
 
-// References returns all references to the symbol at the given position.
 func (s *Session) References(ctx context.Context, uri string, line, column int) (string, error) {
 	params := ReferenceParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},
@@ -352,12 +331,10 @@ func (s *Session) References(ctx context.Context, uri string, line, column int) 
 	return formatLocations("References", locations, s.workingDir), nil
 }
 
-// Implementation returns the implementation location(s) for the symbol at the given position.
 func (s *Session) Implementation(ctx context.Context, uri string, line, column int) (string, error) {
 	return s.locationOp(ctx, "textDocument/implementation", "Implementations", uri, line, column)
 }
 
-// Hover returns hover information for the symbol at the given position.
 func (s *Session) Hover(ctx context.Context, uri string, line, column int) (string, error) {
 	params := TextDocumentPositionParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},
@@ -385,7 +362,6 @@ func (s *Session) Hover(ctx context.Context, uri string, line, column int) (stri
 	return hover.Contents.Value, nil
 }
 
-// DocumentSymbols returns the symbols in a document.
 func (s *Session) DocumentSymbols(ctx context.Context, uri string, filePath string) (string, error) {
 	params := DocumentSymbolParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},
@@ -400,13 +376,12 @@ func (s *Session) DocumentSymbols(ctx context.Context, uri string, filePath stri
 		return "No symbols found", nil
 	}
 
-	// Try SymbolInformation[] first — check for location.uri which is unique to it
+	// SymbolInformation[] is identifiable by location.uri
 	var symInfos []SymbolInformation
 	if err := json.Unmarshal(result, &symInfos); err == nil && len(symInfos) > 0 && symInfos[0].Location.URI != "" {
 		return formatSymbolInformations(symInfos, s.workingDir), nil
 	}
 
-	// Fall back to DocumentSymbol[] (hierarchical, has selectionRange but no location)
 	var docSymbols []DocumentSymbol
 	if err := json.Unmarshal(result, &docSymbols); err == nil && len(docSymbols) > 0 {
 		return formatDocumentSymbols(docSymbols, filePath, s.workingDir, 0), nil
@@ -415,7 +390,6 @@ func (s *Session) DocumentSymbols(ctx context.Context, uri string, filePath stri
 	return "No symbols found", nil
 }
 
-// CallHierarchy returns incoming or outgoing calls for the symbol at the given position.
 func (s *Session) CallHierarchy(ctx context.Context, uri string, line, column int, incoming bool) (string, error) {
 	params := TextDocumentPositionParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},
@@ -437,8 +411,6 @@ func (s *Session) CallHierarchy(ctx context.Context, uri string, line, column in
 	}
 	return s.outgoingCalls(ctx, items[0])
 }
-
-// --- private helpers ---
 
 func (s *Session) initialize(ctx context.Context) error {
 	params := InitializeParams{

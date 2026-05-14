@@ -21,12 +21,10 @@ import (
 )
 
 type App struct {
-	// Core dependencies
 	ctx   context.Context
 	app   *tview.Application
 	agent *code.Agent
 
-	// UI Components
 	pages       *tview.Pages
 	chatView    *tview.TextView
 	welcomeView *tview.TextView
@@ -34,20 +32,16 @@ type App struct {
 	statusBar   *tview.TextView
 	inputHint   *tview.TextView
 
-	// Layout containers
 	contentPages  *tview.Flex
 	chatContainer *tview.Flex
 	inputSection  *tview.Flex
 	inputFrame    *tview.Frame
 	mainLayout    *tview.Flex
 
-	// Components
 	spinner *Spinner
 
-	// Session
 	sessionID string
 
-	// State
 	phase          AppPhase
 	currentMode    Mode
 	showWelcome    bool
@@ -57,9 +51,7 @@ type App struct {
 	promptMu       sync.Mutex
 	askActive      bool
 	askResponse    chan string
-	// 0 = summary (finished turns collapse to one line), 1 = list (per-entry
-	// one-liners), 2 = full (reasoning text + tool output expanded). Ctrl+E
-	// cycles through.
+	// 0 = summary, 1 = list, 2 = full. Ctrl+E cycles through.
 	expandLevel    int
 	inputTokens    int64
 	cachedTokens   int64
@@ -69,22 +61,18 @@ type App struct {
 	pendingContent []agent.Content
 	pendingFiles   []string
 
-	// Stream cancellation
 	streamCancel context.CancelFunc
 	streamMu     sync.Mutex
 
-	// Current streaming display state. Mutated from the streaming goroutine
-	// and read inside QueueUpdateDraw closures — same race-tolerant pattern
-	// used for currentToolName/Hint, since these are display-only.
+	// Mutated from the streaming goroutine and read inside QueueUpdateDraw
+	// closures — display-only fields, race-tolerant.
 	currentToolName    string
 	currentToolHint    string
 	streamingText      string
 	streamingReasoning string
 
-	// LSP diagnostics tracker
 	lspTracker *lsp.DiagnosticTracker
 
-	// Mouse capture state (toggle to allow native terminal text selection)
 	mouseEnabled bool
 }
 
@@ -153,21 +141,18 @@ func (a *App) saveSession() {
 }
 
 func (a *App) stop() {
-	// Shut down MCP, LSP, and rewind in one call.
 	a.agent.Close()
 
-	// Save session before stopping
 	a.saveSession()
 
 	a.app.EnableMouse(false)
 	a.app.Stop()
 
-	// Explicitly disable mouse tracking modes that tview may have enabled.
-	// tview's screen.Fini() should handle this, but a race between terminal
-	// restore and pending mouse events can leak escape sequences to the shell.
+	// Disable mouse tracking modes. tview's screen.Fini() should handle this,
+	// but a race between terminal restore and pending mouse events can leak
+	// escape sequences to the shell.
 	fmt.Fprint(os.Stdout, "\033[?1000l\033[?1002l\033[?1003l\033[?1006l")
 
-	// Show session summary so the user can resume
 	if len(a.agent.Messages) > 0 {
 		usage := a.agent.Usage
 		fmt.Fprintf(os.Stderr, "\n")
@@ -184,7 +169,6 @@ func (a *App) stop() {
 func (a *App) Run() error {
 	a.setupUI()
 
-	// Auto-select model if not configured
 	a.autoSelectModel()
 
 	mainLayout := a.buildLayout()
@@ -193,9 +177,6 @@ func (a *App) Run() error {
 	a.pages.SetBackgroundColor(tcell.ColorDefault)
 	a.pages.AddPage("main", mainLayout, true, true)
 
-	// Show "Preparing..." while the workspace probe + Rewind/LSP boot in
-	// the background. On a small/git workspace this clears in milliseconds;
-	// on a big non-git directory it caps at agent.WarmUp's wall-clock budget.
 	a.setPhase(PhasePreparing)
 
 	go func() {
@@ -220,8 +201,7 @@ func (a *App) Run() error {
 		})
 	}()
 
-	// Render restored session (from --resume or /resume) directly. The view
-	// is allowed to be mutated before app.Run() starts the event loop.
+	// Mutation before app.Run() is safe.
 	if messages := a.agent.Messages; len(messages) > 0 {
 		a.switchToChat()
 		a.renderChat(messages)
@@ -265,12 +245,10 @@ func (a *App) toggleMode() {
 	a.exitPlanMode()
 }
 
-// hasActiveModal returns true if any modal is currently open
 func (a *App) hasActiveModal() bool {
 	return a.activeModal != ModalNone
 }
 
-// closeActiveModal closes the currently active modal
 func (a *App) closeActiveModal() {
 	switch a.activeModal {
 	case ModalPicker:

@@ -1,15 +1,10 @@
 package server
 
-// Inbound WebSocket message types. The client tells the server what it
-// wants done; the server tags every reply with `session` so the React
-// client can route per-session state without an out-of-band registry.
 const (
 	MsgSend   = "send"
 	MsgCancel = "cancel"
 )
 
-// ClientMessage is the envelope for every client → server WebSocket frame.
-// Inbound shares one struct because the type isn't known until unmarshal.
 type ClientMessage struct {
 	Type      string   `json:"type"`
 	SessionID string   `json:"session,omitempty"`
@@ -17,29 +12,23 @@ type ClientMessage struct {
 	Files     []string `json:"files,omitempty"`
 }
 
-// Outbound WebSocket event names.
 const (
-	EvtSessionState         = "session_state"   // hello: full snapshot for a session
-	EvtTextDelta            = "text_delta"      // streaming assistant text
-	EvtReasoningDelta       = "reasoning_delta" // streaming chain-of-thought summary
-	EvtToolCall             = "tool_call"       // assistant invoking a tool
-	EvtToolResult           = "tool_result"     // tool result for a prior call
-	EvtPhase                = "phase"           // idle | thinking | streaming | tool_running
-	EvtUsage                = "usage"           // token accounting update
-	EvtError                = "error"           // turn-level error message
-	EvtFilesChanged         = "files_changed"   // workspace file tree dirty
-	EvtDiffsChanged         = "diffs_changed"   // workspace diffs dirty
-	EvtCheckpointsChanged   = "checkpoints_changed"
-	EvtSessionsChanged      = "sessions_changed"
-	EvtDiagnosticsChanged   = "diagnostics_changed"
-	EvtCapabilitiesChanged  = "capabilities_changed"
+	EvtSessionState        = "session_state"
+	EvtTextDelta           = "text_delta"
+	EvtReasoningDelta      = "reasoning_delta"
+	EvtToolCall            = "tool_call"
+	EvtToolResult          = "tool_result"
+	EvtPhase               = "phase"
+	EvtUsage               = "usage"
+	EvtError               = "error"
+	EvtFilesChanged        = "files_changed"
+	EvtDiffsChanged        = "diffs_changed"
+	EvtCheckpointsChanged  = "checkpoints_changed"
+	EvtSessionsChanged     = "sessions_changed"
+	EvtDiagnosticsChanged  = "diagnostics_changed"
+	EvtCapabilitiesChanged = "capabilities_changed"
 )
 
-// Frame is the wire shape for every server → client event. One flat struct
-// instead of an interface + 18 typed events: a single Marshal call per
-// emit, no envelope-injection dance. Fields are `omitempty` so unused ones
-// don't bloat the wire; the React side discriminates on `Type` exactly
-// like the previous per-struct design.
 type Frame struct {
 	Type    string `json:"type"`
 	Session string `json:"session,omitempty"`
@@ -60,8 +49,6 @@ type Frame struct {
 	Messages []ConversationMessage `json:"messages,omitempty"`
 }
 
-// ConversationMessage is the message shape replayed in session_state's
-// `messages` field, and returned by /api/sessions/{id}/load.
 type ConversationMessage struct {
 	Role    string                `json:"role"`
 	Content []ConversationContent `json:"content"`
@@ -93,8 +80,6 @@ type ConversationResult struct {
 	Content string `json:"content"`
 }
 
-// REST payload shapes.
-
 type FileEntry struct {
 	Name  string `json:"name"`
 	Path  string `json:"path"`
@@ -110,7 +95,7 @@ type FileContent struct {
 
 type DiffEntry struct {
 	Path     string `json:"path"`
-	Status   string `json:"status"` // "added", "modified", "deleted"
+	Status   string `json:"status"`
 	Patch    string `json:"patch"`
 	Original string `json:"original,omitempty"`
 	Modified string `json:"modified,omitempty"`
