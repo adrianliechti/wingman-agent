@@ -16,22 +16,29 @@ const options: { value: Mode; label: string; description: string }[] = [
 	},
 ];
 
-export function ModePicker() {
+interface Props {
+	sessionId: string;
+}
+
+export function ModePicker({ sessionId }: Props) {
 	const [mode, setMode] = useState<Mode>("agent");
 	const [open, setOpen] = useState(false);
 	const popRef = useRef<HTMLDivElement>(null);
 	const btnRef = useRef<HTMLButtonElement>(null);
 
+	const qs = sessionId ? `?session=${encodeURIComponent(sessionId)}` : "";
+
 	useEffect(() => {
-		fetch("/api/mode")
+		if (!sessionId) return;
+		fetch(`/api/mode${qs}`)
 			.then((r) => r.json())
 			.then((data) => setMode(data.mode === "plan" ? "plan" : "agent"))
 			.catch(() => {});
-	}, []);
+	}, [qs, sessionId]);
 
 	const select = useCallback(
 		(next: Mode) => {
-			fetch("/api/mode", {
+			fetch(`/api/mode${qs}`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ mode: next }),
@@ -44,7 +51,7 @@ export function ModePicker() {
 				.catch(() => {});
 			setOpen(false);
 		},
-		[],
+		[qs],
 	);
 
 	useEffect(() => {

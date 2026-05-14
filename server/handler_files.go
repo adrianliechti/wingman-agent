@@ -75,7 +75,7 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fsys := s.agent.Root.FS()
+	fsys := s.workspace.Root.FS()
 
 	entries, err := fs.ReadDir(fsys, dirPath)
 	if err != nil {
@@ -130,7 +130,7 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 
 	const limit = 50
 
-	fsys := s.agent.Root.FS()
+	fsys := s.workspace.Root.FS()
 
 	type hit struct {
 		Path string `json:"path"`
@@ -194,7 +194,7 @@ func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fsys := s.agent.Root.FS()
+	fsys := s.workspace.Root.FS()
 
 	data, err := fs.ReadFile(fsys, filePath)
 	if err != nil {
@@ -236,7 +236,7 @@ func (s *Server) resolveWorkspacePath(p string) (string, bool) {
 	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || path.IsAbs(cleaned) {
 		return "", false
 	}
-	return filepath.Join(s.agent.RootPath, filepath.FromSlash(cleaned)), true
+	return filepath.Join(s.workspace.RootPath, filepath.FromSlash(cleaned)), true
 }
 
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
@@ -251,7 +251,7 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.sendMessage(FilesChangedEvent{})
+	s.broadcast(Frame{Type: EvtFilesChanged})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -288,7 +288,7 @@ func (s *Server) handleFileRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.sendMessage(FilesChangedEvent{})
+	s.broadcast(Frame{Type: EvtFilesChanged})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -329,7 +329,7 @@ func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.sendMessage(FilesChangedEvent{})
+	s.broadcast(Frame{Type: EvtFilesChanged})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -384,13 +384,21 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := os.Stat(abs)
+	// Lstat (not Stat) so symlinks don't get auto-resolved to outside-the-
+	// workspace targets. resolveWorkspacePath only checks the lexical path;
+	// without this guard, a symlink inside the workspace pointing at, say,
+	// /etc/passwd would be happily served.
+	info, err := os.Lstat(abs)
 	if err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
 	}
 	if info.IsDir() {
 		http.Error(w, "path is a directory", http.StatusBadRequest)
+		return
+	}
+	if !info.Mode().IsRegular() {
+		http.Error(w, "not a regular file", http.StatusBadRequest)
 		return
 	}
 

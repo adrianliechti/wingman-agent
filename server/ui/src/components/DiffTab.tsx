@@ -6,11 +6,12 @@ import type { DiffEntry, ServerMessage } from "../types/protocol";
 
 interface Props {
 	path: string;
+	sessionId: string;
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
 	onDeleted?: () => void;
 }
 
-export function DiffTab({ path, subscribe, onDeleted }: Props) {
+export function DiffTab({ path, sessionId, subscribe, onDeleted }: Props) {
 	const [diff, setDiff] = useState<DiffEntry | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
@@ -29,7 +30,8 @@ export function DiffTab({ path, subscribe, onDeleted }: Props) {
 
 	const load = useCallback(async () => {
 		try {
-			const res = await fetch("/api/diffs");
+			const qs = sessionId ? `?session=${encodeURIComponent(sessionId)}` : "";
+			const res = await fetch(`/api/diffs${qs}`);
 			if (!res.ok) {
 				setError("failed to load diffs");
 				setLoading(false);
@@ -49,7 +51,7 @@ export function DiffTab({ path, subscribe, onDeleted }: Props) {
 			setError(String(e));
 			setLoading(false);
 		}
-	}, [path]);
+	}, [path, sessionId]);
 
 	useEffect(() => {
 		hadDiffRef.current = false;

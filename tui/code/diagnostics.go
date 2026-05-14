@@ -2,7 +2,6 @@ package code
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -338,119 +337,10 @@ func (a *App) closeDiagnosticsView() {
 }
 
 func (a *App) collectDiagnostics(ctx context.Context) ([]fileDiagnostics, error) {
-	if a.agent.LSP == nil {
-		return nil, nil
-	}
-	if a.agent.Bridge != nil && a.agent.Bridge.IsConnected() {
-		return a.collectBridgeDiagnostics(ctx)
-	}
-	return a.collectLocalDiagnostics(ctx)
-}
-
-func (a *App) collectBridgeDiagnostics(ctx context.Context) ([]fileDiagnostics, error) {
-	result, err := a.agent.Bridge.GetDiagnostics(ctx, "")
-	if err != nil {
-		return nil, err
-	}
-
-	if result == "" || result == "{}" {
-		return nil, nil
-	}
-
-	// Bridge returns workspace diagnostics as { "path": [...diags] }
-	var raw map[string][]json.RawMessage
-	if err := json.Unmarshal([]byte(result), &raw); err != nil {
-		return nil, nil
-	}
-
-	workDir := a.agent.LSP.WorkingDir()
+	workDir := a.agent.RootPath
 	var files []fileDiagnostics
 
-	for path, rawDiags := range raw {
-		if len(rawDiags) == 0 {
-			continue
-		}
-
-		var diags []lsp.Diagnostic
-		for _, rd := range rawDiags {
-			var d struct {
-				Range struct {
-					Start struct {
-						Line      int `json:"line"`
-						Character int `json:"character"`
-					} `json:"start"`
-					End struct {
-						Line      int `json:"line"`
-						Character int `json:"character"`
-					} `json:"end"`
-				} `json:"range"`
-				Severity string `json:"severity"`
-				Message  string `json:"message"`
-				Source   string `json:"source"`
-			}
-			if err := json.Unmarshal(rd, &d); err != nil {
-				continue
-			}
-
-			severity := lsp.DiagnosticSeverityError
-			switch d.Severity {
-			case "Warning":
-				severity = lsp.DiagnosticSeverityWarning
-			case "Info":
-				severity = lsp.DiagnosticSeverityInformation
-			case "Hint":
-				severity = lsp.DiagnosticSeverityHint
-			}
-
-			diags = append(diags, lsp.Diagnostic{
-				Range: lsp.Range{
-					Start: lsp.Position{Line: d.Range.Start.Line, Character: d.Range.Start.Character},
-					End:   lsp.Position{Line: d.Range.End.Line, Character: d.Range.End.Character},
-				},
-				Severity: severity,
-				Source:   d.Source,
-				Message:  d.Message,
-			})
-		}
-
-		if len(diags) == 0 {
-			continue
-		}
-
-		fd := fileDiagnostics{
-			Path:        relPath(workDir, path),
-			Diagnostics: diags,
-		}
-		for _, d := range diags {
-			if d.Severity == lsp.DiagnosticSeverityError {
-				fd.Errors++
-			} else if d.Severity == lsp.DiagnosticSeverityWarning {
-				fd.Warnings++
-			}
-		}
-		files = append(files, fd)
-	}
-
-	sort.Slice(files, func(i, j int) bool {
-		if files[i].Errors != files[j].Errors {
-			return files[i].Errors > files[j].Errors
-		}
-		return files[i].Path < files[j].Path
-	})
-
-	return files, nil
-}
-
-func (a *App) collectLocalDiagnostics(ctx context.Context) ([]fileDiagnostics, error) {
-	allDiags := a.agent.LSP.CollectAllDiagnostics(ctx)
-	if len(allDiags) == 0 {
-		return nil, nil
-	}
-
-	workDir := a.agent.LSP.WorkingDir()
-	var files []fileDiagnostics
-
-	for path, diags := range allDiags {
+	for path, diags := range a.agent.Diagnostics(ctx) {
 		if len(diags) == 0 {
 			continue
 		}

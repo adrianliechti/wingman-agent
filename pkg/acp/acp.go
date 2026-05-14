@@ -7,22 +7,35 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"sync"
+	"time"
 
 	acp "github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
 // Run starts the ACP stdio server and blocks until the peer disconnects or
-// ctx is cancelled. All live sessions are closed before returning.
+// ctx is cancelled. All live sessions and workspaces are released before
+// returning.
 //
 // in/out are parameters (not os.Stdin/os.Stdout) so callers can wire pipes
 // for tests; the binary's main passes the real stdio handles.
 func Run(ctx context.Context, in io.Reader, out io.Writer) error {
-	s := &Server{sessions: map[acp.SessionId]*code.Agent{}}
+	cfg, err := agent.DefaultConfig()
+	if err != nil {
+		return err
+	}
+
+	s := &Server{
+		config:     cfg,
+		sessions:   map[acp.SessionId]*sessionEntry{},
+		workspaces: map[string]*workspaceEntry{},
+	}
 	s.conn = acp.NewAgentSideConnection(s, out, in)
 	s.conn.SetLogger(slog.Default())
 
@@ -32,24 +45,58 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	}
 
 	s.mu.Lock()
-	for _, a := range s.sessions {
-		a.Close()
+	for id, sess := range s.sessions {
+		delete(s.sessions, id)
+		sess.workspace.refs = 0
+	}
+	for key, w := range s.workspaces {
+		w.ws.Close()
+		delete(s.workspaces, key)
 	}
 	s.mu.Unlock()
 
 	return nil
 }
 
+// Server is the ACP agent. One Server hosts many sessions; sessions sharing
+// the same cwd share a single *code.Workspace (so MCP/LSP/Rewind aren't
+// duplicated). Refcounted: the workspace is torn down when its last session
+// closes.
 type Server struct {
 	conn *acp.AgentSideConnection
 
-	mu       sync.Mutex
-	sessions map[acp.SessionId]*code.Agent
+	// config is the API-client template. Each session's *agent.Config is
+	// Derive()d from this so they share the upstream client.
+	config *agent.Config
+
+	mu         sync.Mutex
+	sessions   map[acp.SessionId]*sessionEntry
+	workspaces map[string]*workspaceEntry
+}
+
+type sessionEntry struct {
+	id        acp.SessionId
+	agent     *code.Agent
+	workspace *workspaceEntry
+}
+
+type workspaceEntry struct {
+	ws   *code.Workspace
+	key  string
+	refs int
 }
 
 func (s *Server) Initialize(_ context.Context, _ acp.InitializeRequest) (acp.InitializeResponse, error) {
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
+		AgentCapabilities: acp.AgentCapabilities{
+			LoadSession: true,
+			SessionCapabilities: acp.SessionCapabilities{
+				List:   &acp.SessionListCapabilities{},
+				Resume: &acp.SessionResumeCapabilities{},
+				Close:  &acp.SessionCloseCapabilities{},
+			},
+		},
 	}, nil
 }
 
@@ -58,45 +105,112 @@ func (s *Server) Authenticate(_ context.Context, _ acp.AuthenticateRequest) (acp
 }
 
 func (s *Server) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
-	a, err := code.New(params.Cwd, noopUI{})
+	sid := acp.SessionId(uuid.NewString())
+	_, models, opts, err := s.attachSession(ctx, params.Cwd, sid)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
+	}
+	return acp.NewSessionResponse{
+		SessionId:     sid,
+		Models:        models,
+		ConfigOptions: opts,
+	}, nil
+}
+
+// On error after acquireWorkspace, caller must releaseWorkspace to keep refs honest.
+func (s *Server) attachSession(ctx context.Context, cwd string, id acp.SessionId) (*code.Agent, *acp.SessionModelState, []acp.SessionConfigOption, error) {
+	w, err := s.acquireWorkspace(cwd)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	// Synchronous warmup: an immediately-following Prompt would otherwise
 	// race ahead of LSP/MCP tool registration.
-	a.WarmUp()
-	if err := a.InitMCP(ctx); err != nil {
-		a.Close()
-		return acp.NewSessionResponse{}, err
+	w.ws.WarmUp()
+	if err := w.ws.InitMCP(ctx); err != nil {
+		s.releaseWorkspace(w)
+		return nil, nil, nil, err
 	}
 
-	sid := acp.SessionId(uuid.NewString())
+	a := w.ws.NewAgent(s.config, noopUI{})
 
 	s.mu.Lock()
-	s.sessions[sid] = a
+	s.sessions[id] = &sessionEntry{id: id, agent: a, workspace: w}
 	s.mu.Unlock()
 
-	resp := acp.NewSessionResponse{SessionId: sid}
+	var models *acp.SessionModelState
 	if available := availableModels(); len(available) > 0 {
 		current := string(available[0].ModelId)
 		setAgentModel(a, current)
-		resp.Models = &acp.SessionModelState{
+		models = &acp.SessionModelState{
 			AvailableModels: available,
 			CurrentModelId:  acp.ModelId(current),
 		}
 	}
-	resp.ConfigOptions = sessionConfigOptions(a)
-	return resp, nil
+	return a, models, sessionConfigOptions(a), nil
+}
+
+// acquireWorkspace returns the cached *code.Workspace for cwd, opening a
+// new one if necessary. Refs is incremented; pair with releaseWorkspace.
+// Key is the cleaned absolute path so "." and the resolved path share an
+// entry.
+func (s *Server) acquireWorkspace(cwd string) (*workspaceEntry, error) {
+	key, err := filepath.Abs(cwd)
+	if err != nil {
+		return nil, err
+	}
+	key = filepath.Clean(key)
+
+	s.mu.Lock()
+	if w, ok := s.workspaces[key]; ok {
+		w.refs++
+		s.mu.Unlock()
+		return w, nil
+	}
+	s.mu.Unlock()
+
+	// Build the workspace outside the lock — NewWorkspace can be slow
+	// (skill discovery, MCP config load). A racing acquire for the same cwd
+	// would create a duplicate; we collapse them on re-check.
+	ws, err := code.NewWorkspace(cwd)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if existing, ok := s.workspaces[key]; ok {
+		s.mu.Unlock()
+		ws.Close()
+		s.mu.Lock()
+		existing.refs++
+		s.mu.Unlock()
+		return existing, nil
+	}
+	w := &workspaceEntry{ws: ws, key: key, refs: 1}
+	s.workspaces[key] = w
+	s.mu.Unlock()
+	return w, nil
+}
+
+// releaseWorkspace decrements the ref count and closes the workspace when
+// it hits zero. Caller must not hold s.mu.
+func (s *Server) releaseWorkspace(w *workspaceEntry) {
+	s.mu.Lock()
+	w.refs--
+	if w.refs > 0 {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.workspaces, w.key)
+	s.mu.Unlock()
+	w.ws.Close()
 }
 
 // UnstableSetSessionModel handles the (experimental) session/set_model
 // request. Picked up by the SDK via a structural type assertion, so we
 // don't need to implement the full acp.AgentExperimental interface.
 func (s *Server) UnstableSetSessionModel(_ context.Context, params acp.UnstableSetSessionModelRequest) (acp.UnstableSetSessionModelResponse, error) {
-	s.mu.Lock()
-	a := s.sessions[params.SessionId]
-	s.mu.Unlock()
+	a := s.lookupAgent(params.SessionId)
 	if a == nil {
 		return acp.UnstableSetSessionModelResponse{}, fmt.Errorf("session %s not found", params.SessionId)
 	}
@@ -107,14 +221,30 @@ func (s *Server) UnstableSetSessionModel(_ context.Context, params acp.UnstableS
 
 func (s *Server) CloseSession(_ context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
 	s.mu.Lock()
-	a := s.sessions[params.SessionId]
+	sess := s.sessions[params.SessionId]
 	delete(s.sessions, params.SessionId)
 	s.mu.Unlock()
 
-	if a != nil {
-		a.Close()
+	if sess != nil {
+		// Session-scoped resources (the agent) are GC'd; the workspace is
+		// shared, so only its refcount drops here.
+		s.releaseWorkspace(sess.workspace)
 	}
 	return acp.CloseSessionResponse{}, nil
+}
+
+// lookupAgent returns the *code.Agent for a session id, or nil if unknown.
+func (s *Server) lookupAgent(id acp.SessionId) *code.Agent {
+	if sess := s.lookupSession(id); sess != nil {
+		return sess.agent
+	}
+	return nil
+}
+
+func (s *Server) lookupSession(id acp.SessionId) *sessionEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessions[id]
 }
 
 // Cancel is a no-op: the SDK already cancels the in-flight Prompt's context
@@ -122,12 +252,19 @@ func (s *Server) CloseSession(_ context.Context, params acp.CloseSessionRequest)
 func (s *Server) Cancel(_ context.Context, _ acp.CancelNotification) error { return nil }
 
 func (s *Server) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
-	s.mu.Lock()
-	a := s.sessions[params.SessionId]
-	s.mu.Unlock()
-	if a == nil {
+	sess := s.lookupSession(params.SessionId)
+	if sess == nil {
 		return acp.PromptResponse{}, fmt.Errorf("session %s not found", params.SessionId)
 	}
+	a := sess.agent
+
+	defer func() {
+		state := agent.State{
+			Messages: a.Messages,
+			Usage:    a.Usage,
+		}
+		_ = session.Save(code.SessionsDir(sess.workspace.key), string(sess.id), state)
+	}()
 
 	notify := func(u acp.SessionUpdate) {
 		_ = s.conn.SessionUpdate(ctx, acp.SessionNotification{
@@ -176,14 +313,117 @@ func (s *Server) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Prom
 	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 }
 
-// Stub methods required by the acp.Agent interface.
+func (s *Server) ListSessions(_ context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+	if params.Cwd == nil || *params.Cwd == "" {
+		return acp.ListSessionsResponse{Sessions: []acp.SessionInfo{}}, nil
+	}
+	cwd := *params.Cwd
 
-func (s *Server) ListSessions(_ context.Context, _ acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
-	return acp.ListSessionsResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionList)
+	saved, err := session.List(code.SessionsDir(cwd))
+	if err != nil {
+		return acp.ListSessionsResponse{}, err
+	}
+
+	out := make([]acp.SessionInfo, 0, len(saved))
+	for _, sess := range saved {
+		info := acp.SessionInfo{
+			SessionId: acp.SessionId(sess.ID),
+			Cwd:       cwd,
+		}
+		if sess.Title != "" {
+			t := sess.Title
+			info.Title = &t
+		}
+		if !sess.UpdatedAt.IsZero() {
+			u := sess.UpdatedAt.UTC().Format(time.RFC3339)
+			info.UpdatedAt = &u
+		}
+		out = append(out, info)
+	}
+	return acp.ListSessionsResponse{Sessions: out}, nil
 }
 
-func (s *Server) ResumeSession(_ context.Context, _ acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
-	return acp.ResumeSessionResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionResume)
+func (s *Server) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
+	saved, err := session.Load(code.SessionsDir(params.Cwd), string(params.SessionId))
+	if err != nil {
+		return acp.ResumeSessionResponse{}, fmt.Errorf("session %s not found: %w", params.SessionId, err)
+	}
+
+	a, models, opts, err := s.attachSession(ctx, params.Cwd, params.SessionId)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+	a.Messages = saved.State.Messages
+	a.Usage = saved.State.Usage
+
+	return acp.ResumeSessionResponse{
+		Models:        models,
+		ConfigOptions: opts,
+	}, nil
+}
+
+func (s *Server) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+	saved, err := session.Load(code.SessionsDir(params.Cwd), string(params.SessionId))
+	if err != nil {
+		return acp.LoadSessionResponse{}, fmt.Errorf("session %s not found: %w", params.SessionId, err)
+	}
+
+	a, models, opts, err := s.attachSession(ctx, params.Cwd, params.SessionId)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+	a.Messages = saved.State.Messages
+	a.Usage = saved.State.Usage
+
+	s.replayMessages(ctx, params.SessionId, saved.State.Messages)
+
+	return acp.LoadSessionResponse{
+		Models:        models,
+		ConfigOptions: opts,
+	}, nil
+}
+
+func (s *Server) replayMessages(ctx context.Context, sid acp.SessionId, messages []agent.Message) {
+	notify := func(u acp.SessionUpdate) {
+		_ = s.conn.SessionUpdate(ctx, acp.SessionNotification{
+			SessionId: sid,
+			Update:    u,
+		})
+	}
+
+	for _, m := range messages {
+		if m.Hidden {
+			continue
+		}
+		for _, c := range m.Content {
+			switch {
+			case c.ToolCall != nil:
+				notify(acp.StartToolCall(
+					acp.ToolCallId(c.ToolCall.ID),
+					c.ToolCall.Name,
+					acp.WithStartKind(mapKind(c.ToolCall.Name)),
+					acp.WithStartStatus(acp.ToolCallStatusInProgress),
+					acp.WithStartRawInput(parseRawInput(c.ToolCall.Args)),
+				))
+			case c.ToolResult != nil:
+				notify(acp.UpdateToolCall(
+					acp.ToolCallId(c.ToolResult.ID),
+					acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
+					acp.WithUpdateContent([]acp.ToolCallContent{
+						acp.ToolContent(acp.TextBlock(c.ToolResult.Content)),
+					}),
+				))
+			case c.Reasoning != nil && c.Reasoning.Summary != "":
+				notify(acp.UpdateAgentThoughtText(c.Reasoning.Summary))
+			case c.Text != "":
+				if m.Role == agent.RoleUser {
+					notify(acp.UpdateUserMessageText(c.Text))
+				} else {
+					notify(acp.UpdateAgentMessageText(c.Text))
+				}
+			}
+		}
+	}
 }
 
 // SetSessionConfigOption handles the stable session/set_config_option
@@ -195,9 +435,7 @@ func (s *Server) SetSessionConfigOption(_ context.Context, params acp.SetSession
 	}
 	p := params.ValueId
 
-	s.mu.Lock()
-	a := s.sessions[p.SessionId]
-	s.mu.Unlock()
+	a := s.lookupAgent(p.SessionId)
 	if a == nil {
 		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("session %s not found", p.SessionId)
 	}
@@ -225,7 +463,8 @@ func (s *Server) SetSessionMode(_ context.Context, _ acp.SetSessionModeRequest) 
 }
 
 // noopUI satisfies code.UI for the ACP mode: no in-tool Ask/Confirm prompts
-// (the agent runs auto-allow), no status surface.
+// (the agent runs auto-allow). ACP has its own permission-request channel,
+// but wingman tools don't surface elicitations through it today.
 type noopUI struct{}
 
 func (noopUI) Ask(_ context.Context, _ string) (string, error) {
@@ -234,9 +473,6 @@ func (noopUI) Ask(_ context.Context, _ string) (string, error) {
 
 func (noopUI) Confirm(_ context.Context, _ string) (bool, error) {
 	return true, nil
-}
-
-func (noopUI) StatusUpdate(_ string) {
 }
 
 // promptToContent converts ACP prompt blocks to the agent's input shape.

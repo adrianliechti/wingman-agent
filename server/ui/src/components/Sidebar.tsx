@@ -1,4 +1,4 @@
-import { MessageSquare, Plus, X } from "lucide-react";
+import { Loader2, MessageSquare, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { ServerMessage } from "../types/protocol";
 
@@ -14,6 +14,15 @@ interface Props {
 	onSessionSelect: (id: string) => void;
 	onNewSession: () => void;
 	onSessionDeleted?: (id: string) => void;
+	// Set of session ids with an active phase (thinking/streaming/tool_running).
+	// Renders a spinner so the user sees which background sessions are busy
+	// even while another one is on screen.
+	runningSessionIds?: Set<string>;
+	// canCreateNew controls whether the "+" button is shown. False when
+	// clicking would be a no-op (no active session, or the active one is
+	// already empty — in both cases the user starts a session by typing,
+	// not by clicking).
+	canCreateNew?: boolean;
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
 }
 
@@ -22,6 +31,8 @@ export function Sidebar({
 	onSessionSelect,
 	onNewSession,
 	onSessionDeleted,
+	runningSessionIds,
+	canCreateNew,
 	subscribe,
 }: Props) {
 	const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -66,14 +77,16 @@ export function Sidebar({
 				<span className="text-[11px] font-medium text-fg-dim uppercase tracking-wider">
 					Sessions
 				</span>
-				<button
-					type="button"
-					onClick={onNewSession}
-					className="w-7 h-7 flex items-center justify-center rounded-md text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-					title="New session"
-				>
-					<Plus size={14} />
-				</button>
+				{canCreateNew && (
+					<button
+						type="button"
+						onClick={onNewSession}
+						className="w-7 h-7 flex items-center justify-center rounded-md text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
+						title="New session"
+					>
+						<Plus size={14} />
+					</button>
+				)}
 			</div>
 
 			{/* Session List */}
@@ -104,7 +117,11 @@ export function Sidebar({
 									onClick={() => onSessionSelect(s.id)}
 									title={s.title || s.id}
 								>
+									{runningSessionIds?.has(s.id) ? (
+									<Loader2 size={12} className="shrink-0 text-accent animate-spin" />
+								) : (
 									<MessageSquare size={12} className="shrink-0 text-fg-dim" />
+								)}
 									<div className="min-w-0 flex-1">
 										<div className="truncate text-[12px] leading-snug">
 											{displayTitle}

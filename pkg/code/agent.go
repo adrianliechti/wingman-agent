@@ -3,9 +3,7 @@ package code
 import (
 	"context"
 	"crypto/sha256"
-	"embed"
 	"fmt"
-	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,180 +13,71 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/ask"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fetch"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
-	lsptool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/lsp"
-	toolmcp "github.com/adrianliechti/wingman-agent/pkg/agent/tool/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/search"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
-	"github.com/adrianliechti/wingman-agent/pkg/code/bridge"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
-	"github.com/adrianliechti/wingman-agent/pkg/lsp"
-	"github.com/adrianliechti/wingman-agent/pkg/mcp"
-	"github.com/adrianliechti/wingman-agent/pkg/rewind"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
-
-	"github.com/go-git/go-git/v5"
 )
 
-// isGitRepo reports whether dir is the root of a real git working tree.
-// Used as the single project-mode gate for LSP detection and rewind init —
-// keeping the predicate in one place ensures both features agree on what
-// "this is a project" means.
-func isGitRepo(dir string) bool {
-	_, err := git.PlainOpen(dir)
-	return err == nil
-}
-
-// isSupportedWorkspace decides whether wingman's heavier features (rewind,
-// LSP, diffs panel) should run for this directory. A real git repo is
-// always supported. Otherwise we walk the tree with a wall-clock budget:
-// if it finishes in time the directory is small enough; if it doesn't,
-// classify as unsupported and let the UI fall back to chat + file
-// browsing. The walk runs in a goroutine so a slow readdir can't block
-// startup; the leftover walk drains harmlessly in the background.
-func isSupportedWorkspace(dir string) bool {
-	if isGitRepo(dir) {
-		return true
-	}
-
-	const budget = 4 * time.Second
-	done := make(chan struct{})
-
-	go func() {
-		filepath.WalkDir(dir, func(_ string, _ iofs.DirEntry, _ error) error {
-			return nil
-		})
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return true
-	case <-time.After(budget):
-		return false
-	}
-}
-
-//go:embed skills/*/SKILL.md
-var bundledFS embed.FS
-
-// UI is the interface a frontend must provide to the coding agent.
-type UI interface {
-	Ask(ctx context.Context, message string) (string, error)
-	Confirm(ctx context.Context, message string) (bool, error)
-	StatusUpdate(status string)
-}
-
+// Agent is a single conversation against a Workspace. Holds Messages and
+// Usage (via the embedded *agent.Agent) plus the per-session flags.
+// *Workspace is embedded anonymously so callers can reach workdir state
+// directly — agent.RootPath, agent.LSP, agent.WarmUp() — without a dot
+// chain.
 type Agent struct {
 	*agent.Agent
-
-	Root        *os.Root
-	RootPath    string
-	MemoryPath  string
-	ScratchPath string
-
-	Skills []skill.Skill
-
-	MCP *mcp.Manager
-	// LSP is set by WarmUp when the workspace is a supported git repo;
-	// nil otherwise. Callers nil-check before use.
-	LSP *lsp.Manager
-	// Rewind is set by WarmUp when the workspace is supported (git repo or
-	// small enough to walk in time); nil otherwise. Rewind == nil is the
-	// canonical "unsupported workspace" signal — UI shows the limited-mode
-	// banner and hides the Changes/Problems tabs.
-	Rewind *rewind.Manager
-	Bridge *bridge.Bridge
-
-	// warmupDone is closed when WarmUp completes (success or otherwise) so
-	// callers can await its readiness without polling.
-	warmupOnce sync.Once
-	warmupDone chan struct{}
+	*Workspace
 
 	PlanMode bool
 
+	// baseTools is the session-specific tool list (fs/shell/fetch/search/
+	// ask/subagent). Stored on Agent because shell.Tools and ask.Tools
+	// close over the session's UI elicit. MCP/LSP tools live on Workspace
+	// and get merged in tools() at call time.
 	baseTools []tool.Tool
-	mcpTools  []tool.Tool
-	lspTools  []tool.Tool
 
 	lastMemoryHash string
 	mu             sync.Mutex
 }
 
-func New(workDir string, ui UI) (*Agent, error) {
-	agentCfg, err := agent.DefaultConfig()
+// NewAgent constructs an Agent bound to this Workspace, deriving its
+// Config from the template `cfg` (which carries the upstream API client +
+// late-bound model/effort getters). The server uses this to spin up many
+// agents (one per session) sharing one Workspace + one Config. The TUI/
+// Wails app call it as: ws := code.NewWorkspace(wd); a := ws.NewAgent(cfg, nil).
+func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
+	sessionCfg := cfg.Derive()
 
-	if err != nil {
-		return nil, err
+	a := &Agent{
+		Agent:     &agent.Agent{Config: sessionCfg},
+		Workspace: ws,
 	}
 
-	root, err := os.OpenRoot(workDir)
+	sessionCfg.Tools = a.tools
+	sessionCfg.ContextMessages = a.memoryContextMessages
+	sessionCfg.Instructions = a.Instructions
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to open workspace root: %w", err)
-	}
+	// Truncation hook: cap large tool outputs and dump the full text to the
+	// workspace's scratch dir so the model can `read` a specific range if
+	// it needs the elided middle. Every caller (TUI, server) wants this; do
+	// it once here instead of forcing each to remember.
+	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,
+		truncation.New(truncation.DefaultMaxBytes, ws.ScratchPath),
+	)
 
-	scratchDir := filepath.Join(os.TempDir(), fmt.Sprintf("wingman-%d", time.Now().Unix()))
+	// Build the session-specific base tool list. Shell + ask depend on the
+	// elicit closure (per-session UI prompts); subagent embeds sessionCfg
+	// so child agents inherit this session's model/effort.
+	elicit := buildElicit(ui)
 
-	if err := os.MkdirAll(scratchDir, 0755); err != nil {
-		root.Close()
-		return nil, fmt.Errorf("failed to create scratch directory: %w", err)
-	}
-
-	memoryDir := projectMemoryDir(workDir)
-
-	if err := os.MkdirAll(memoryDir, 0755); err != nil {
-		os.RemoveAll(scratchDir)
-		root.Close()
-		return nil, fmt.Errorf("failed to create memory directory: %w", err)
-	}
-
-	elicit := &tool.Elicitation{
-		Ask: func(ctx context.Context, msg string) (string, error) {
-			if ui == nil {
-				return "", nil
-			}
-
-			return ui.Ask(ctx, msg)
-		},
-		Confirm: func(ctx context.Context, msg string) (bool, error) {
-			if ui == nil {
-				return true, nil
-			}
-
-			return ui.Confirm(ctx, msg)
-		},
-	}
-
-	// Skill precedence (later overrides earlier):
-	//   bundled  → shipped with the binary, hidden from catalog until invoked
-	//   personal → ~/.claude/skills, ~/.wingman/skills (user-wide)
-	//   project  → .claude, .wingman, .skills, .github, .opencode (this repo)
-	//
-	// Bundled skills aren't materialized at startup — the user discovers
-	// them via the slash-command picker (which lists all skills, on-disk or
-	// not). On first invocation MaterializeBundled writes the file under
-	// ~/.wingman/skills and updates Location, so the catalog picks them up
-	// from the next prompt build onward.
-	bundled := loadBundledSkills()
-	personal := skill.MustDiscoverPersonal()
-	discovered := skill.MustDiscover(workDir)
-	mergedSkills := skill.Merge(skill.Merge(bundled, personal), discovered)
-
-	// The read tool is sandboxed to workDir; let it also reach personal
-	// skill directories that live outside the workspace. We add each
-	// already-discovered personal skill dir (so the model can read its
-	// SKILL.md plus any bundled scripts/references), AND ~/.wingman/skills
-	// as a whole — bundled skills materialize into that tree on first
-	// invocation and need to be readable in the same session.
-	// Also allow the scratch dir: the truncation hook saves full tool
-	// outputs there, and its hint tells the model to `read` that path.
 	var allowedReadRoots []string
-	for _, s := range mergedSkills {
+	for _, s := range ws.Skills {
 		if s.Location != "" && filepath.IsAbs(s.Location) {
 			allowedReadRoots = append(allowedReadRoots, s.Location)
 		}
@@ -196,120 +85,45 @@ func New(workDir string, ui UI) (*Agent, error) {
 	if home, err := os.UserHomeDir(); err == nil {
 		allowedReadRoots = append(allowedReadRoots, filepath.Join(home, ".wingman", "skills"))
 	}
-	allowedReadRoots = append(allowedReadRoots, scratchDir)
+	allowedReadRoots = append(allowedReadRoots, ws.ScratchPath)
 
-	baseTools := slices.Concat(
-		fs.Tools(root, allowedReadRoots...),
-		shell.Tools(workDir, elicit),
+	a.baseTools = slices.Concat(
+		fs.Tools(ws.Root, allowedReadRoots...),
+		shell.Tools(ws.RootPath, elicit),
 		fetch.Tools(),
 		search.Tools(),
 		ask.Tools(elicit),
-		subagent.Tools(agentCfg),
+		subagent.Tools(sessionCfg),
 	)
 
-	mcpManager, _ := mcp.Load(filepath.Join(workDir, "mcp.json"))
-
-	a := &Agent{
-		Agent: &agent.Agent{Config: agentCfg},
-
-		Root:        root,
-		RootPath:    workDir,
-		MemoryPath:  memoryDir,
-		ScratchPath: scratchDir,
-
-		Skills: mergedSkills,
-
-		MCP: mcpManager,
-
-		warmupDone: make(chan struct{}),
-
-		baseTools: baseTools,
-	}
-
-	agentCfg.Tools = a.tools
-	agentCfg.ContextMessages = a.memoryContextMessages
-
-	return a, nil
+	return a
 }
 
-// WarmUp runs the slow workspace probe and initializes Rewind/LSP if the
-// directory is supported. Idempotent and safe to call from any goroutine —
-// the first call does the work, the rest wait on warmupDone. Callers that
-// want to gate on completion (e.g. server startup) can use WaitWarmUp.
-//
-// Three resulting modes:
-//
-//   - supported git repo  → Rewind set, LSP set, lspTools set
-//   - supported scratch   → Rewind set, LSP nil, lspTools nil
-//   - unsupported (huge)  → Rewind nil, LSP nil; UI falls back to chat-only
-func (a *Agent) WarmUp() {
-	a.warmupOnce.Do(func() {
-		defer close(a.warmupDone)
-
-		if !isSupportedWorkspace(a.RootPath) {
-			return
-		}
-
-		// Sweep stale shadow repos from prior crashed sessions before
-		// starting a new one. Cheap and safe (mtime-gated).
-		rewind.CleanupOrphans()
-		rewindManager := rewind.New(a.RootPath)
-
-		var lspManager *lsp.Manager
-		var lspTools []tool.Tool
-		if isGitRepo(a.RootPath) {
-			lspManager = lsp.NewManager(a.RootPath)
-			lspTools = lsptool.NewTools(lspManager)
-		}
-
-		a.mu.Lock()
-		a.Rewind = rewindManager
-		a.LSP = lspManager
-		a.lspTools = lspTools
-		a.mu.Unlock()
-	})
+func buildElicit(ui UI) *tool.Elicitation {
+	return &tool.Elicitation{
+		Ask: func(ctx context.Context, msg string) (string, error) {
+			if ui == nil {
+				return "", nil
+			}
+			return ui.Ask(ctx, msg)
+		},
+		Confirm: func(ctx context.Context, msg string) (bool, error) {
+			if ui == nil {
+				return true, nil
+			}
+			return ui.Confirm(ctx, msg)
+		},
+	}
 }
 
-// WaitWarmUp blocks until WarmUp has completed.
-func (a *Agent) WaitWarmUp() {
-	<-a.warmupDone
-}
-
-// InitMCP connects MCP servers, fetches their tools, and sets up the
-// IDE bridge. Call this after the UI is ready (typically async).
-func (a *Agent) InitMCP(ctx context.Context) error {
-	if a.MCP == nil {
-		return nil
-	}
-
-	if err := a.MCP.Connect(ctx); err != nil {
-		return err
-	}
-
-	mcpTools, err := toolmcp.Tools(ctx, a.MCP)
-	if err != nil {
-		return err
-	}
-
-	a.mu.Lock()
-	a.mcpTools = mcpTools
-	a.mu.Unlock()
-
-	a.Bridge = bridge.Setup(ctx, a.RootPath, a.MCP)
-
-	return nil
-}
-
+// tools returns the merged tool list for this turn: session base +
+// workspace MCP + workspace LSP, filtered through plan mode if active.
 func (a *Agent) tools() []tool.Tool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	tools := append([]tool.Tool{}, a.baseTools...)
-	tools = append(tools, a.mcpTools...)
 
-	if a.Bridge == nil || !a.Bridge.IsConnected() {
-		tools = append(tools, a.lspTools...)
-	}
+	mcpTools, lspTools := a.managedTools()
+	tools = append(tools, mcpTools...)
+	tools = append(tools, lspTools...)
 
 	if a.PlanMode {
 		tools = planModeTools(tools)
@@ -348,80 +162,6 @@ func planModeEffectExecute(t tool.Tool) func(context.Context, map[string]any) (s
 	}
 }
 
-// IsGitRepo reports whether the agent's working directory is currently a git
-// repo. Re-evaluated on each call so callers can react to `git init` (or
-// `rm -rf .git`) happening mid-session.
-func (a *Agent) IsGitRepo() bool {
-	return isGitRepo(a.RootPath)
-}
-
-// RestartRewind tears down the existing rewind manager and creates a fresh
-// one, re-baselining at the current state. Used on /sessions/new so the
-// checkpoint history is scoped to one conversation. No-op on unsupported
-// workspaces (Rewind == nil). LSP is intentionally untouched —
-// gopls/etc. are slow to spin up and shouldn't churn on session boundaries.
-func (a *Agent) RestartRewind() {
-	if a.Rewind == nil {
-		return
-	}
-	a.Rewind.Cleanup()
-	a.Rewind = rewind.New(a.RootPath)
-}
-
-// SyncProjectMode rebuilds LSP when the working dir's git status flips
-// (typically: agent ran `git init` in a scratch dir). No-op on unsupported
-// workspaces — `git init` alone doesn't make a 1M-file home folder small
-// enough to support full features.
-func (a *Agent) SyncProjectMode() {
-	if a.Rewind == nil {
-		return
-	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	oldLSP := a.LSP
-	if isGitRepo(a.RootPath) {
-		a.LSP = lsp.NewManager(a.RootPath)
-		a.lspTools = lsptool.NewTools(a.LSP)
-	} else {
-		a.LSP = nil
-		a.lspTools = nil
-	}
-
-	if oldLSP != nil {
-		oldLSP.Close()
-	}
-}
-
-func (a *Agent) Close() {
-	if a.Bridge != nil {
-		a.Bridge.Close()
-	}
-
-	if a.MCP != nil {
-		a.MCP.Close()
-	}
-
-	if a.LSP != nil {
-		a.LSP.Close()
-	}
-
-	if a.Rewind != nil {
-		a.Rewind.Cleanup()
-	}
-
-	if a.ScratchPath != "" {
-		os.RemoveAll(a.ScratchPath)
-	}
-
-	if a.Root != nil {
-		a.Root.Close()
-	}
-}
-
-// Path accessors
-
 // Memory and plan content
 
 const (
@@ -430,29 +170,6 @@ const (
 	memoryContextPrefix = "Current MEMORY.md:\n\n"
 	memoryContextEmpty  = "MEMORY.md is currently empty."
 )
-
-func (a *Agent) MemoryContent() string {
-	data, err := os.ReadFile(filepath.Join(a.MemoryPath, memoryFileName))
-	if err != nil {
-		return ""
-	}
-
-	content := strings.TrimSpace(string(data))
-	if content == "" {
-		return ""
-	}
-
-	if len(content) > memoryMaxBytes {
-		truncated := content[:memoryMaxBytes]
-		if idx := strings.LastIndex(truncated, "\n"); idx > 0 {
-			truncated = truncated[:idx]
-		}
-
-		content = truncated + "\n\n> WARNING: MEMORY.md exceeded 25KB and was truncated."
-	}
-
-	return content
-}
 
 func (a *Agent) memoryContextMessages() []agent.Message {
 	content := a.MemoryContent()
@@ -515,6 +232,13 @@ func (a *Agent) latestMemoryContextText() string {
 
 // Instructions
 
+// Instructions renders the full system prompt for this turn (plan vs agent
+// base + current SectionData). Wired into Config.Instructions in NewAgent
+// so the agent.Send loop reads the live value each turn.
+func (a *Agent) Instructions() string {
+	return BuildInstructions(a.InstructionsData())
+}
+
 func BuildInstructions(data prompt.SectionData) string {
 	base := prompt.Instructions
 
@@ -537,37 +261,7 @@ func (a *Agent) InstructionsData() prompt.SectionData {
 		ProjectInstructions: ReadProjectInstructions(a.RootPath),
 	}
 
-	if a.Bridge != nil && a.Bridge.IsConnected() {
-		data.BridgeInstructions = a.Bridge.GetInstructions()
-	}
-
 	return data
-}
-
-// Helpers
-
-func projectMemoryDir(workingDir string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = os.TempDir()
-	}
-
-	sanitized := filepath.Clean(workingDir)
-
-	if vol := filepath.VolumeName(sanitized); vol != "" {
-		sanitized = strings.TrimPrefix(sanitized, vol)
-	}
-
-	sanitized = strings.TrimPrefix(sanitized, string(filepath.Separator))
-	sanitized = strings.ReplaceAll(sanitized, string(filepath.Separator), "_")
-	sanitized = strings.ToLower(sanitized)
-
-	return filepath.Join(home, ".wingman", "projects", sanitized, "memory")
-}
-
-func loadBundledSkills() []skill.Skill {
-	skills, _ := skill.LoadBundled(bundledFS, "skills")
-	return skills
 }
 
 const projectInstructionsMaxBytes = 25 * 1024

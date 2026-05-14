@@ -2,15 +2,11 @@ package server
 
 import (
 	"net/http"
+	"time"
 )
 
 func (s *Server) handleCheckpoints(w http.ResponseWriter, r *http.Request) {
-	if s.agent.Rewind == nil {
-		writeJSON(w, []CheckpointEntry{})
-		return
-	}
-
-	checkpoints, err := s.agent.Rewind.List()
+	checkpoints, err := s.workspace.Checkpoints()
 	if err != nil {
 		writeJSON(w, []CheckpointEntry{})
 		return
@@ -21,7 +17,7 @@ func (s *Server) handleCheckpoints(w http.ResponseWriter, r *http.Request) {
 		result = append(result, CheckpointEntry{
 			Hash:    cp.Hash,
 			Message: cp.Message,
-			Time:    cp.Time.Format("2006-01-02 15:04:05"),
+			Time:    cp.Time.Format(time.RFC3339),
 		})
 	}
 
@@ -35,18 +31,14 @@ func (s *Server) handleCheckpointRestore(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if s.agent.Rewind == nil {
-		http.Error(w, "rewind not available", http.StatusServiceUnavailable)
-		return
-	}
-
-	if err := s.agent.Rewind.Restore(hash); err != nil {
+	if err := s.workspace.Restore(hash); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Working tree just changed; nudge the UI even though fsnotify will fire too.
-	s.sendMessage(DiffsChangedEvent{})
+	// Working tree just changed; every connected client sees it.
+	s.broadcast(Frame{Type: EvtDiffsChanged})
+	s.broadcast(Frame{Type: EvtFilesChanged})
 
 	w.WriteHeader(http.StatusNoContent)
 }

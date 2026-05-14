@@ -28,9 +28,6 @@ var sectionSkills string
 //go:embed section_project.txt
 var sectionProject string
 
-//go:embed section_bridge.txt
-var sectionBridge string
-
 var sectionTemplates = []struct {
 	title string
 	tmpl  *template.Template
@@ -40,7 +37,6 @@ var sectionTemplates = []struct {
 	{"Session Plan", template.Must(template.New("plan").Parse(sectionPlan))},
 	{"Skills", template.Must(template.New("skills").Parse(sectionSkills))},
 	{"Project Guidelines", template.Must(template.New("project").Parse(sectionProject))},
-	{"Bridge", template.Must(template.New("bridge").Parse(sectionBridge))},
 }
 
 type SectionData struct {
@@ -53,7 +49,6 @@ type SectionData struct {
 	MemoryContent       string
 	Skills              string
 	ProjectInstructions string
-	BridgeInstructions  string
 }
 
 // Section is a titled block of the system prompt.

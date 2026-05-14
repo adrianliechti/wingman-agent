@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { DiffEntry, ServerMessage } from "../types/protocol";
 
 interface Props {
+	sessionId: string;
 	onOpenDiff?: (path: string) => void;
 	onOpenFile?: (path: string) => void;
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
@@ -18,13 +19,15 @@ interface MenuState {
 	diff: DiffEntry;
 }
 
-export function DiffsPanel({ onOpenDiff, onOpenFile, subscribe }: Props) {
+export function DiffsPanel({ sessionId, onOpenDiff, onOpenFile, subscribe }: Props) {
 	const [diffs, setDiffs] = useState<DiffEntry[]>([]);
 	const [menu, setMenu] = useState<MenuState | null>(null);
 
+	const qs = sessionId ? `?session=${encodeURIComponent(sessionId)}` : "";
+
 	const loadDiffs = useCallback(async () => {
 		try {
-			const res = await fetch("/api/diffs");
+			const res = await fetch(`/api/diffs${qs}`);
 			if (!res.ok) {
 				setDiffs([]);
 				return;
@@ -34,7 +37,7 @@ export function DiffsPanel({ onOpenDiff, onOpenFile, subscribe }: Props) {
 		} catch {
 			setDiffs([]);
 		}
-	}, []);
+	}, [qs]);
 
 	useEffect(() => {
 		// eslint-disable-next-line react-hooks/set-state-in-effect -- standard data-load on mount
@@ -93,8 +96,10 @@ export function DiffsPanel({ onOpenDiff, onOpenFile, subscribe }: Props) {
 					? "Restore"
 					: "Revert changes to";
 		if (!confirm(`${verb} "${diff.path}"?`)) return;
+		const params = new URLSearchParams({ path: diff.path });
+		if (sessionId) params.set("session", sessionId);
 		const res = await fetch(
-			`/api/diffs/revert?path=${encodeURIComponent(diff.path)}`,
+			`/api/diffs/revert?${params.toString()}`,
 			{ method: "POST" },
 		);
 		if (!res.ok) {

@@ -15,16 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/coder/websocket"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 	"github.com/adrianliechti/wingman-agent/pkg/system"
-
-	"github.com/coder/websocket"
 )
 
 //go:embed static/*
@@ -33,86 +30,93 @@ var staticFiles embed.FS
 var StaticFS, _ = fs.Sub(staticFiles, "static")
 
 type Server struct {
-	agent     *code.Agent
-	port      int
-	sessionID string
+	port int
+
+	// workspace owns the workdir-shared resources (Root, MCP, LSP, Rewind,
+	// Skills). Each session is a code.Agent bound to it.
+	workspace *code.Workspace
+
+	// config carries the upstream API client + late-bound model/effort
+	// getters. Workspace.NewAgent Derives each session's own Config from
+	// this. Server.handleModels uses it directly to list available models
+	// without needing a session.
+	config *agent.Config
+
+	// ctx lives for the lifetime of the server. Agent turns and background
+	// goroutines (pollFiles, async MCP warmup) tie their cancellation to
+	// this — NOT to any HTTP request ctx. Tying a Send to r.Context() would
+	// cancel the agent mid-turn on a WS disconnect/reconnect.
+	ctx context.Context
 
 	mux *http.ServeMux
 
 	sessionsDir string
 
-	// planMode toggles between the default agent system prompt and the
-	// planning-only prompt; protected by mu.
-	mu       sync.Mutex
-	planMode bool
+	// Sessions + the shared model/effort selection. Sessions read model
+	// and effort via late-bound Config.Model/Effort (called inside agent.
+	// Send), but neither is hot enough to warrant its own mutex.
+	// sessionsOrder keeps iteration deterministic across reconnects so
+	// the UI's auto-pick of "first session" is stable.
+	mu            sync.Mutex
+	sessions      map[string]*Session
+	sessionsOrder []string
+	model         string
+	effort        string
 
-	// WebSocket state (single client). streamCancel and streamDone are set
-	// together while a handleSend goroutine is running; streamDone is closed
-	// when it returns, so callers can wait for all of its events to drain.
-	wsMu         sync.Mutex
-	wsConn       *websocket.Conn
-	streamCancel context.CancelFunc
-	streamDone   chan struct{}
-
-	// Channels for ask/prompt relay
-	askCh    chan string
-	promptCh chan bool
+	// WebSocket fan-out. Every event goes to every connected client tagged
+	// with its session id (or untagged for server-level events); the React
+	// side dispatches.
+	wsMu    sync.Mutex
+	wsConns map[*websocket.Conn]struct{}
 }
 
-func New(ctx context.Context, agent *code.Agent, port int) *Server {
-	sessionsDir := filepath.Join(filepath.Dir(agent.MemoryPath), "sessions")
+func New(ctx context.Context, workDir string, port int) (*Server, error) {
+	cfg, err := agent.DefaultConfig()
+	if err != nil {
+		return nil, err
+	}
+	ws, err := code.NewWorkspace(workDir)
+	if err != nil {
+		return nil, err
+	}
 
 	s := &Server{
-		agent:     agent,
-		port:      port,
-		sessionID: newSessionID(),
-
-		sessionsDir: sessionsDir,
-
-		askCh:    make(chan string, 1),
-		promptCh: make(chan bool, 1),
+		port:        port,
+		workspace:   ws,
+		config:      cfg,
+		ctx:         ctx,
+		sessionsDir: filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
+		sessions:    map[string]*Session{},
+		wsConns:     map[*websocket.Conn]struct{}{},
 	}
 
-	// Workspace probe + Rewind/LSP setup. Up to 4s on a non-git directory
-	// that's too large; the browser opens after this completes so /api/
-	// capabilities returns the correct state on first fetch.
-	s.agent.WarmUp()
+	// Synchronous workspace probe so /api/capabilities is authoritative by
+	// the time the browser first hits it. MCP setup runs async — slow MCP
+	// servers shouldn't block startup.
+	ws.WarmUp()
+	go func() {
+		if err := ws.InitMCP(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "MCP init warning: %v\n", err)
+		}
+	}()
 
-	// Init MCP
-	if err := s.agent.InitMCP(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "MCP init warning: %v\n", err)
-	}
-
-	// Wire the system prompt builder. Mirrors the CLI's setup in app/app.go:115
-	// — the agent invokes this lazily on every Send, so toggling plan mode
-	// takes effect on the next turn.
-	s.agent.Config.Instructions = s.currentInstructions
-
-	// Cap large tool outputs at the wire layer and save the full text to a
-	// scratch file so the model can `read` a specific range if it needs the
-	// elided middle. Same hook as the TUI uses (tui/code/app.go).
-	s.agent.Config.Hooks.PostToolUse = append(s.agent.Config.Hooks.PostToolUse,
-		truncation.New(truncation.DefaultMaxBytes, s.agent.ScratchPath),
-	)
-
-	// Poll for changes from outside the agent (terminal `rm`, IDE saves, etc.)
-	// so the FileTree and Diffs panels reflect them. Polling instead of
-	// fsnotify: zero FDs (kqueue's per-dir watcher cost was the original
-	// $HOME crash), one path everywhere, ≤2s latency — fine for this UI.
-	go s.pollFiles(ctx)
-
-	// Auto-select model
 	s.autoSelectModel(ctx)
+
+	// Poll for outside-the-agent file changes so the FileTree/Diffs panels
+	// reflect terminal `rm`s and IDE saves. Polling beats fsnotify here:
+	// zero FDs (kqueue's per-dir watcher cost was the original $HOME crash),
+	// one path everywhere, ≤2s latency — fine for this UI.
+	go s.pollFiles(ctx)
 
 	s.mux = http.NewServeMux()
 	s.registerRoutes(s.mux)
 
-	return s
+	return s, nil
 }
 
-func newSessionID() string {
-	return uuid.New().String()
-}
+// Close releases the workspace (Root, MCP, LSP, Rewind, scratch). Sessions
+// share these resources, so individual session Close is now a no-op.
+func (s *Server) Close() { s.workspace.Close() }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -141,7 +145,6 @@ func (s *Server) Run(ctx context.Context) error {
 		Handler: s,
 	}
 
-	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -154,8 +157,6 @@ func (s *Server) Run(ctx context.Context) error {
 	url := fmt.Sprintf("http://localhost:%d", s.port)
 	fmt.Fprintf(os.Stderr, "Wingman running at %s\n", url)
 
-	// Open the URL in the user's default browser unless explicitly disabled
-	// (CI, headless servers, SSH sessions, …).
 	if os.Getenv("WINGMAN_NO_BROWSER") == "" {
 		openBrowser(url)
 	}
@@ -168,7 +169,6 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
-	// API routes
 	mux.HandleFunc("GET /api/files", s.handleFiles)
 	mux.HandleFunc("GET /api/files/read", s.handleFileRead)
 	mux.HandleFunc("GET /api/files/search", s.handleFilesSearch)
@@ -180,10 +180,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/diffs/revert", s.handleDiffRevert)
 	mux.HandleFunc("GET /api/checkpoints", s.handleCheckpoints)
 	mux.HandleFunc("POST /api/checkpoints/{hash}/restore", s.handleCheckpointRestore)
-	mux.HandleFunc("GET /api/messages", s.handleMessages)
-	mux.HandleFunc("GET /api/usage", s.handleUsage)
 	mux.HandleFunc("GET /api/sessions", s.handleSessions)
-	mux.HandleFunc("POST /api/sessions/new", s.handleNewSession)
 	mux.HandleFunc("POST /api/sessions/{id}/load", s.handleLoadSession)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /api/model", s.handleModel)
@@ -198,87 +195,463 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /api/ws", s.handleWebSocketURL)
 
-	// WebSocket
 	mux.HandleFunc("/ws", s.handleWebSocket)
 
-	// Static files
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	fileServer := http.FileServer(http.FS(staticFS))
 	mux.Handle("/", fileServer)
 }
 
-func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
-	messages := convertMessages(s.agent.Messages)
-	writeJSON(w, messages)
+func (s *Server) getSession(id string) *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessions[id]
 }
 
-func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
-	usage := s.agent.Usage
-	writeJSON(w, map[string]int64{
-		"input_tokens":  usage.InputTokens,
-		"cached_tokens": usage.CachedTokens,
-		"output_tokens": usage.OutputTokens,
-	})
+// register stores sess in the map + order slice. Caller must hold s.mu —
+// both call sites (getOrCreateSession, loadSession) already do, since
+// they're the lookup-or-create transaction.
+func (s *Server) register(sess *Session) {
+	s.sessions[sess.ID] = sess
+	s.sessionsOrder = append(s.sessionsOrder, sess.ID)
 }
 
-// sendMessage marshals an event with its type field injected and writes it
-// to the active WebSocket. Field order in the resulting JSON is unspecified —
-// JSON consumers don't depend on it.
-func (s *Server) sendMessage(e ServerEvent) {
+// getOrCreateSession returns the in-memory session for id, creating one
+// (with that id) if it doesn't exist yet. Used by the WS Send dispatch:
+// "+" in the UI is a client-side reset, so the first MsgSend with a fresh
+// id is where the server actually allocates the conversation. The whole
+// lookup-or-create happens under s.mu so concurrent sends with the same
+// id can't both create agents and orphan one.
+func (s *Server) getOrCreateSession(id string) *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[id]; ok {
+		return sess
+	}
+	sess := s.newSession(id)
+	s.register(sess)
+	return sess
+}
+
+// loadSession returns the in-memory session for id, loading it from disk
+// into memory if necessary. Like getOrCreateSession, the entire lookup-
+// or-load happens under s.mu so two simultaneous loads can't race.
+// Returns an error only when the id isn't in memory and isn't on disk.
+func (s *Server) loadSession(id string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[id]; ok {
+		return sess, nil
+	}
+	saved, err := session.Load(s.sessionsDir, id)
+	if err != nil {
+		return nil, err
+	}
+	sess := s.newSession(id)
+	sess.Agent.Messages = saved.State.Messages
+	sess.Agent.Usage = saved.State.Usage
+	s.register(sess)
+	return sess, nil
+}
+
+// allSessions returns a snapshot of every in-memory session in creation
+// order. Callers can iterate without holding s.mu.
+func (s *Server) allSessions() []*Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Session, 0, len(s.sessions))
+	for _, id := range s.sessionsOrder {
+		if sess, ok := s.sessions[id]; ok {
+			out = append(out, sess)
+		}
+	}
+	return out
+}
+
+// sessionFromRequest resolves the target session for a per-session HTTP
+// endpoint via ?session=…. Returns nil if missing or unknown — callers
+// 404 / 503 their response accordingly. (Per-session routes that take {id}
+// in the path — load/delete — read it themselves.)
+func (s *Server) sessionFromRequest(r *http.Request) *Session {
+	return s.getSession(r.URL.Query().Get("session"))
+}
+
+// broadcast emits a workspace-level event (no session id) to every connected
+// WebSocket. Use this for state that applies to every session view: file
+// tree changes, capabilities, the sessions list.
+func (s *Server) broadcast(f Frame) {
+	f.Session = ""
+	s.send(f)
+}
+
+// send marshals a Frame and fans it out to every WS client. Call sites
+// build Frames inline — `s.broadcast(...)` for workspace events,
+// `sess.send(...)` for per-session events (it sets f.Session).
+func (s *Server) send(f Frame) {
+	data, err := json.Marshal(f)
+	if err != nil {
+		return
+	}
+
 	s.wsMu.Lock()
-	conn := s.wsConn
+	conns := make([]*websocket.Conn, 0, len(s.wsConns))
+	for c := range s.wsConns {
+		conns = append(conns, c)
+	}
 	s.wsMu.Unlock()
 
-	if conn == nil {
-		return
+	for _, c := range conns {
+		c.Write(context.Background(), websocket.MessageText, data)
 	}
-
-	payload, err := json.Marshal(e)
-	if err != nil {
-		return
-	}
-
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &fields); err != nil {
-		return
-	}
-
-	typeJSON, err := json.Marshal(e.serverEventType())
-	if err != nil {
-		return
-	}
-	fields["type"] = typeJSON
-
-	data, err := json.Marshal(fields)
-	if err != nil {
-		return
-	}
-
-	conn.Write(context.Background(), websocket.MessageText, data)
 }
 
-func (s *Server) askUser(ctx context.Context, question string) (string, error) {
-	s.sendMessage(AskEvent{Question: question})
-
-	// Drain any stale response
-	select {
-	case <-s.askCh:
-	default:
-	}
-
-	return <-s.askCh, nil
+func (s *Server) currentModel() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.model
 }
 
-func (s *Server) promptUser(ctx context.Context, prompt string) (bool, error) {
-	s.sendMessage(PromptEvent{Question: prompt})
+func (s *Server) currentEffort() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.effort
+}
 
-	// Drain any stale response
-	select {
-	case <-s.promptCh:
-	default:
+func (s *Server) setModel(model string) {
+	s.mu.Lock()
+	s.model = model
+	s.mu.Unlock()
+}
+
+func (s *Server) setEffort(effort string) {
+	s.mu.Lock()
+	s.effort = effort
+	s.mu.Unlock()
+}
+
+// autoSelectModel picks a default model on startup if none is set. Prefers
+// the curated list (code.AvailableModels) over whatever the API happens to
+// return first.
+func (s *Server) autoSelectModel(ctx context.Context) {
+	if s.currentModel() != "" {
+		return
+	}
+	models, err := s.config.Models(ctx)
+	if err != nil || len(models) == 0 {
+		return
 	}
 
-	return <-s.promptCh, nil
+	upstream := make(map[string]bool, len(models))
+	for _, m := range models {
+		upstream[m.ID] = true
+	}
+	for _, m := range code.AvailableModels {
+		if upstream[m.ID] {
+			s.setModel(m.ID)
+			return
+		}
+	}
+	s.setModel(models[0].ID)
+}
+
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	// Combine on-disk (saved) and in-memory (possibly empty/new) sessions.
+	// Saved entries carry the real CreatedAt/Title; in-memory-only entries
+	// are brand new with nothing on disk yet, so they get "now". Timestamps
+	// are RFC3339 so the React side can parse them with `new Date(...)`
+	// across browsers — the previous "YYYY-MM-DD HH:MM" format isn't
+	// standard for Date parsing and gave NaN on some runtimes.
+	seen := map[string]bool{}
+	result := []SessionEntry{}
+
+	saved, _ := session.List(s.sessionsDir)
+	for _, sess := range saved {
+		seen[sess.ID] = true
+		result = append(result, SessionEntry{
+			ID:        sess.ID,
+			Title:     sess.Title,
+			CreatedAt: sess.CreatedAt.Format(time.RFC3339),
+			UpdatedAt: sess.UpdatedAt.Format(time.RFC3339),
+		})
+	}
+
+	// In-memory sessions that don't have an on-disk file yet only show up
+	// once they've got messages — otherwise the sidebar would flash with
+	// every transient "+"-style placeholder. The window between the first
+	// user message landing in agent.Messages and session.Save() at end of
+	// turn is microseconds; sidebar refetches in that window catch them.
+	nowStr := time.Now().Format(time.RFC3339)
+	for _, sess := range s.allSessions() {
+		if seen[sess.ID] || len(sess.Agent.Messages) == 0 {
+			continue
+		}
+		result = append(result, SessionEntry{
+			ID:        sess.ID,
+			CreatedAt: nowStr,
+			UpdatedAt: nowStr,
+		})
+	}
+
+	// RFC3339 sorts chronologically as a string, so no parallel time.Time
+	// field needed for ordering.
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].UpdatedAt > result[j].UpdatedAt
+	})
+
+	writeJSON(w, result)
+}
+
+func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "session id required", http.StatusBadRequest)
+		return
+	}
+
+	sess, err := s.loadSession(id)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	// Push full state via WS so every tab observing this session sees the
+	// same snapshot the requesting tab will. The HTTP response is just an
+	// ack — the client doesn't need the payload here. No SessionsChanged
+	// broadcast: disk sessions are already in the sidebar list, so loading
+	// one into memory doesn't change what's listed.
+	sess.sendState()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "session id required", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	sess, inMem := s.sessions[id]
+	if inMem {
+		delete(s.sessions, id)
+		for i, sid := range s.sessionsOrder {
+			if sid == id {
+				s.sessionsOrder = append(s.sessionsOrder[:i], s.sessionsOrder[i+1:]...)
+				break
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	if inMem {
+		sess.cancel()
+	}
+
+	if err := session.Delete(s.sessionsDir, id); err != nil && !os.IsNotExist(err) {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.broadcast(Frame{Type: EvtSessionsChanged})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]string{"model": s.currentModel()})
+}
+
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	models, err := s.config.Models(r.Context())
+	if err != nil {
+		writeJSON(w, []map[string]string{})
+		return
+	}
+
+	upstream := make(map[string]bool, len(models))
+	for _, m := range models {
+		upstream[m.ID] = true
+	}
+
+	result := make([]map[string]string, 0, len(code.AvailableModels))
+	for _, m := range code.AvailableModels {
+		if !upstream[m.ID] {
+			continue
+		}
+		result = append(result, map[string]string{
+			"id":   m.ID,
+			"name": m.Name,
+		})
+	}
+
+	writeJSON(w, result)
+}
+
+func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Model string `json:"model"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Model == "" {
+		http.Error(w, "model is required", http.StatusBadRequest)
+		return
+	}
+
+	s.setModel(body.Model)
+
+	writeJSON(w, map[string]string{"model": body.Model})
+}
+
+func (s *Server) handleEffort(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]string{"effort": s.currentEffort()})
+}
+
+func (s *Server) handleSetEffort(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Effort string `json:"effort"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	switch body.Effort {
+	case "", "auto":
+		body.Effort = ""
+	case "low", "medium", "high":
+	default:
+		http.Error(w, "effort must be auto, low, medium, or high", http.StatusBadRequest)
+		return
+	}
+
+	s.setEffort(body.Effort)
+	writeJSON(w, map[string]string{"effort": body.Effort})
+}
+
+func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
+	allDiags := s.workspace.Diagnostics(r.Context())
+
+	type diagItem struct {
+		Path     string `json:"path"`
+		Line     int    `json:"line"`
+		Column   int    `json:"column"`
+		Severity string `json:"severity"`
+		Message  string `json:"message"`
+		Source   string `json:"source,omitempty"`
+	}
+
+	var result []diagItem
+
+	for filePath, diags := range allDiags {
+		relPath := filePath
+		if rel, err := filepath.Rel(s.workspace.RootPath, filePath); err == nil {
+			relPath = rel
+		}
+
+		for _, d := range diags {
+			sev := "info"
+			switch d.Severity {
+			case lsp.DiagnosticSeverityError:
+				sev = "error"
+			case lsp.DiagnosticSeverityWarning:
+				sev = "warning"
+			}
+
+			result = append(result, diagItem{
+				Path:     relPath,
+				Line:     d.Range.Start.Line + 1,
+				Column:   d.Range.Start.Character + 1,
+				Severity: sev,
+				Message:  d.Message,
+				Source:   d.Source,
+			})
+		}
+	}
+
+	if result == nil {
+		result = []diagItem{}
+	}
+
+	sevOrder := map[string]int{"error": 0, "warning": 1, "info": 2}
+	sort.Slice(result, func(i, j int) bool {
+		si, sj := sevOrder[result[i].Severity], sevOrder[result[j].Severity]
+		if si != sj {
+			return si < sj
+		}
+		if result[i].Path != result[j].Path {
+			return result[i].Path < result[j].Path
+		}
+		return result[i].Line < result[j].Line
+	})
+
+	writeJSON(w, result)
+}
+
+// pollFiles watches the working dir for external changes. Same shape as the
+// single-session version, but the workspace probes target any session's
+// agent (they all watch the same dir).
+func (s *Server) pollFiles(ctx context.Context) {
+	const interval = 2 * time.Second
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	ws := s.workspace
+	prevGit := ws.IsGitRepo()
+	var prevFingerprint uint64
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.wsMu.Lock()
+			hasClient := len(s.wsConns) > 0
+			s.wsMu.Unlock()
+			if !hasClient {
+				continue
+			}
+
+			gitNow := ws.IsGitRepo()
+			if gitNow != prevGit {
+				// Workspace rebuilds LSP once for the whole server when git
+				// status flips (typically: agent ran `git init` in a scratch
+				// dir). All sessions inherit via Workspace.LSP.
+				ws.SyncProjectMode()
+				s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+				if ws.LSP != nil {
+					s.broadcast(Frame{Type: EvtDiagnosticsChanged})
+				}
+				prevGit = gitNow
+			}
+
+			if ws.Rewind == nil {
+				s.broadcast(Frame{Type: EvtFilesChanged})
+				continue
+			}
+
+			fp := ws.Rewind.Fingerprint()
+			if fp != prevFingerprint {
+				s.broadcast(Frame{Type: EvtFilesChanged})
+				s.broadcast(Frame{Type: EvtDiffsChanged})
+				prevFingerprint = fp
+			}
+		}
+	}
+}
+
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	ws := s.workspace
+	caps := map[string]any{
+		"git":   ws.IsGitRepo(),
+		"lsp":   ws.LSP != nil,
+		"diffs": ws.Rewind != nil,
+	}
+	if ws.Rewind == nil {
+		caps["notice"] = "This directory is too large for full features. Diffs, checkpoints, and code intelligence are disabled — chat and file browsing still work."
+	}
+	writeJSON(w, caps)
 }
 
 func convertMessages(messages []agent.Message) []ConversationMessage {
@@ -317,6 +690,7 @@ func convertMessages(messages []agent.Message) []ConversationMessage {
 
 			if c.ToolResult != nil {
 				cc.ToolResult = &ConversationResult{
+					ID:      c.ToolResult.ID,
 					Name:    c.ToolResult.Name,
 					Args:    c.ToolResult.Args,
 					Content: c.ToolResult.Content,
@@ -332,338 +706,8 @@ func convertMessages(messages []agent.Message) []ConversationMessage {
 	return result
 }
 
-func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	sessions, err := session.List(s.sessionsDir)
-	if err != nil {
-		writeJSON(w, []SessionEntry{})
-		return
-	}
-
-	result := make([]SessionEntry, 0, len(sessions))
-	for _, sess := range sessions {
-		result = append(result, SessionEntry{
-			ID:        sess.ID,
-			Title:     sess.Title,
-			CreatedAt: sess.CreatedAt.Format("2006-01-02 15:04"),
-			UpdatedAt: sess.UpdatedAt.Format("2006-01-02 15:04"),
-		})
-	}
-
-	writeJSON(w, result)
-}
-
-func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
-	// Cancel any in-flight stream and wait for its goroutine to return, so
-	// no late text_delta / tool_call events arrive after the SessionEvent
-	// below — those would re-populate the freshly-cleared client.
-	s.wsMu.Lock()
-	cancel, done := s.streamCancel, s.streamDone
-	s.wsMu.Unlock()
-	if cancel != nil {
-		cancel()
-		<-done
-	}
-
-	s.agent.Messages = nil
-	s.agent.Usage = agent.Usage{}
-	s.sessionID = newSessionID()
-
-	// Re-baseline rewind for the new session and nudge the right-panel
-	// listings whose state actually changes (rewind baseline). File tree
-	// is driven by fsnotify and doesn't need a session-boundary refresh.
-	// capabilities_changed covers the case where the user ran `git init`
-	// between sessions.
-	s.agent.RestartRewind()
-	s.sendMessage(SessionEvent{ID: s.sessionID})
-	s.sendMessage(CapabilitiesChangedEvent{})
-	s.sendMessage(DiffsChangedEvent{})
-	s.sendMessage(CheckpointsChangedEvent{})
-	s.sendMessage(SessionsChangedEvent{})
-	s.sendMessage(UsageEvent{})
-
-	writeJSON(w, map[string]string{"id": s.sessionID})
-}
-
-func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if id == "" {
-		http.Error(w, "session id required", http.StatusBadRequest)
-		return
-	}
-
-	sess, err := session.Load(s.sessionsDir, id)
-	if err != nil {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
-	}
-
-	s.agent.Messages = sess.State.Messages
-	s.agent.Usage = sess.State.Usage
-	s.sessionID = id
-	s.sendMessage(UsageEvent{
-		InputTokens:  s.agent.Usage.InputTokens,
-		CachedTokens: s.agent.Usage.CachedTokens,
-		OutputTokens: s.agent.Usage.OutputTokens,
-	})
-
-	messages := convertMessages(s.agent.Messages)
-	writeJSON(w, messages)
-}
-
-func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if id == "" {
-		http.Error(w, "session id required", http.StatusBadRequest)
-		return
-	}
-
-	if err := session.Delete(s.sessionsDir, id); err != nil {
-		if os.IsNotExist(err) {
-			http.Error(w, "session not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	s.sendMessage(SessionsChangedEvent{})
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
-	model := ""
-	if s.agent.Config.Model != nil {
-		model = s.agent.Model()
-	}
-	writeJSON(w, map[string]string{"model": model})
-}
-
-func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	models, err := s.agent.Models(r.Context())
-	if err != nil {
-		writeJSON(w, []map[string]string{})
-		return
-	}
-
-	// Index upstream models by ID so we can confirm each curated entry is
-	// actually offered before exposing it.
-	upstream := make(map[string]bool, len(models))
-	for _, m := range models {
-		upstream[m.ID] = true
-	}
-
-	// Preserve the curated order from code.AvailableModels — that's the order
-	// the user expects to see in the picker.
-	result := make([]map[string]string, 0, len(code.AvailableModels))
-	for _, m := range code.AvailableModels {
-		if !upstream[m.ID] {
-			continue
-		}
-		result = append(result, map[string]string{
-			"id":   m.ID,
-			"name": m.Name,
-		})
-	}
-
-	writeJSON(w, result)
-}
-
-func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Model string `json:"model"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Model == "" {
-		http.Error(w, "model is required", http.StatusBadRequest)
-		return
-	}
-
-	modelID := body.Model
-	s.agent.Config.Model = func() string { return modelID }
-
-	writeJSON(w, map[string]string{"model": modelID})
-}
-
-func (s *Server) handleEffort(w http.ResponseWriter, r *http.Request) {
-	effort := ""
-	if s.agent.Config.Effort != nil {
-		effort = s.agent.Effort()
-	}
-	writeJSON(w, map[string]string{"effort": effort})
-}
-
-func (s *Server) handleSetEffort(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Effort string `json:"effort"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
-		return
-	}
-
-	switch body.Effort {
-	case "", "auto":
-		s.agent.Config.Effort = nil
-		writeJSON(w, map[string]string{"effort": ""})
-		return
-	case "low", "medium", "high":
-	default:
-		http.Error(w, "effort must be auto, low, medium, or high", http.StatusBadRequest)
-		return
-	}
-
-	effort := body.Effort
-	s.agent.Config.Effort = func() string { return effort }
-
-	writeJSON(w, map[string]string{"effort": effort})
-}
-
-func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
-	if s.agent.LSP == nil {
-		writeJSON(w, []any{})
-		return
-	}
-
-	allDiags := s.agent.LSP.CollectAllDiagnostics(r.Context())
-
-	type diagItem struct {
-		Path     string `json:"path"`
-		Line     int    `json:"line"`
-		Column   int    `json:"column"`
-		Severity string `json:"severity"`
-		Message  string `json:"message"`
-		Source   string `json:"source,omitempty"`
-	}
-
-	var result []diagItem
-
-	for filePath, diags := range allDiags {
-		// Make path relative to workspace
-		relPath := filePath
-		if rel, err := filepath.Rel(s.agent.RootPath, filePath); err == nil {
-			relPath = rel
-		}
-
-		for _, d := range diags {
-			sev := "info"
-			switch d.Severity {
-			case lsp.DiagnosticSeverityError:
-				sev = "error"
-			case lsp.DiagnosticSeverityWarning:
-				sev = "warning"
-			}
-
-			result = append(result, diagItem{
-				Path:     relPath,
-				Line:     d.Range.Start.Line + 1, // 0-based to 1-based
-				Column:   d.Range.Start.Character + 1,
-				Severity: sev,
-				Message:  d.Message,
-				Source:   d.Source,
-			})
-		}
-	}
-
-	if result == nil {
-		result = []diagItem{}
-	}
-
-	// Sort: errors first, then warnings, then info; within same severity by path then line
-	sevOrder := map[string]int{"error": 0, "warning": 1, "info": 2}
-	sort.Slice(result, func(i, j int) bool {
-		si, sj := sevOrder[result[i].Severity], sevOrder[result[j].Severity]
-		if si != sj {
-			return si < sj
-		}
-		if result[i].Path != result[j].Path {
-			return result[i].Path < result[j].Path
-		}
-		return result[i].Line < result[j].Line
-	})
-
-	writeJSON(w, result)
-}
-
-// pollFiles watches the working dir for external changes (terminal `rm`,
-// IDE saves, etc.) so the FileTree and Diffs panels stay current. Each tick:
-//
-//  1. If no UI is connected, skip — the walk isn't free.
-//  2. If the git status flipped (`git init` / `rm -rf .git`), rebuild LSP and
-//     broadcast capabilities_changed so the right-panel tabs adjust.
-//  3. Compute a worktree fingerprint and emit FilesChanged + DiffsChanged
-//     only when it moves. Avoids two full server walks per tick on quiet
-//     repos (one for /api/files, one for /api/diffs' snapshotTree).
-func (s *Server) pollFiles(ctx context.Context) {
-	const interval = 2 * time.Second
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	prevGit := s.agent.IsGitRepo()
-	var prevFingerprint uint64
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.wsMu.Lock()
-			hasClient := s.wsConn != nil
-			s.wsMu.Unlock()
-			if !hasClient {
-				continue
-			}
-
-			gitNow := s.agent.IsGitRepo()
-			if gitNow != prevGit {
-				s.agent.SyncProjectMode()
-				s.sendMessage(CapabilitiesChangedEvent{})
-				if s.agent.LSP != nil {
-					s.sendMessage(DiagnosticsChangedEvent{})
-				}
-				prevGit = gitNow
-			}
-
-			// On unsupported workspaces, skip the worktree fingerprint walk
-			// (would chew through a huge dir) and just nudge the file tree.
-			// The tree's per-dir fetches are cheap; expanded dirs refresh
-			// without scanning everything.
-			if s.agent.Rewind == nil {
-				s.sendMessage(FilesChangedEvent{})
-				continue
-			}
-
-			fp := s.agent.Rewind.Fingerprint()
-			if fp != prevFingerprint {
-				s.sendMessage(FilesChangedEvent{})
-				s.sendMessage(DiffsChangedEvent{})
-				prevFingerprint = fp
-			}
-		}
-	}
-}
-
-// handleCapabilities reports which features the working directory supports.
-// The web UI fetches this once on load to decide which tabs/panels to show.
-// Rewind/LSP only run on "supported" workspaces (git repos or directories
-// small enough to walk in WarmUp's budget); on an unsupported dir (e.g.
-// $HOME) those backends never started and the UI surfaces `notice` as a
-// banner so the user understands why the right-panel tabs are missing.
-func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
-	caps := map[string]any{
-		"git":   s.agent.IsGitRepo(),
-		"lsp":   s.agent.LSP != nil,
-		"diffs": s.agent.Rewind != nil,
-	}
-	if s.agent.Rewind == nil {
-		caps["notice"] = "This directory is too large for full features. Diffs, checkpoints, and code intelligence are disabled — chat and file browsing still work."
-	}
-	writeJSON(w, caps)
-}
-
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
 }
+

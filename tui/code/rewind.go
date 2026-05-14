@@ -9,14 +9,12 @@ import (
 func (a *App) showRewindPicker() {
 	t := theme.Default
 
-	if a.agent.Rewind == nil {
+	checkpoints, err := a.agent.Checkpoints()
+	if err != nil {
 		fmt.Fprint(a.chatView, a.formatNotice("Rewind unavailable in this workspace", t.Yellow))
 		return
 	}
-
-	checkpoints, err := a.agent.Rewind.List()
-
-	if err != nil || len(checkpoints) == 0 {
+	if len(checkpoints) == 0 {
 		fmt.Fprint(a.chatView, a.formatNotice("No checkpoints available", t.Yellow))
 		return
 	}
@@ -31,7 +29,7 @@ func (a *App) showRewindPicker() {
 	}
 
 	a.showPicker("Rewind to", items, "", func(item PickerItem) {
-		if err := a.agent.Rewind.Restore(item.ID); err != nil {
+		if err := a.agent.Restore(item.ID); err != nil {
 			fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Failed to restore: %v", err), t.Red))
 			return
 		}
@@ -41,15 +39,11 @@ func (a *App) showRewindPicker() {
 }
 
 func (a *App) commitRewind(message string) {
-	if a.agent.Rewind == nil {
-		return
-	}
-
 	if len(message) > 50 {
 		message = message[:50]
 	}
 
 	go func() {
-		_ = a.agent.Rewind.Commit(message)
+		_ = a.agent.Commit(message)
 	}()
 }

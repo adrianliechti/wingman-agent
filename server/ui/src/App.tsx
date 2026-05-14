@@ -18,10 +18,9 @@ import { DiffTab } from "./components/DiffTab";
 import { FileTab } from "./components/FileTab";
 import { FileTree } from "./components/FileTree";
 import { ProblemsPanel } from "./components/ProblemsPanel";
-import { PromptDialog } from "./components/PromptDialog";
 import { Sidebar } from "./components/Sidebar";
 import { useCapabilities } from "./hooks/useCapabilities";
-import { messagesToEntries, useWebSocket } from "./hooks/useWebSocket";
+import { useWebSocket } from "./hooks/useWebSocket";
 
 interface CenterTab {
 	id: string;
@@ -33,25 +32,19 @@ interface CenterTab {
 
 type RightTab = "changes" | "files";
 
+const EMPTY_ENTRIES: never[] = [];
+const EMPTY_USAGE = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+
 export default function App() {
 	const {
 		connected,
-		phase,
-		entries,
-		prompt,
+		sessions,
 		sendChat,
 		cancel,
-		respondPrompt,
-		respondAsk,
-		setEntries,
+		removeSession,
 		subscribe,
-		usage,
 	} = useWebSocket();
 	const capabilities = useCapabilities(subscribe);
-	// `diffs` controls whether the Changes tab is mounted at all (rewind is
-	// available everywhere now). `git` controls the *default* tab — in a
-	// non-git scratch dir there's nothing useful to show in Changes on first
-	// load, so fall through to Files.
 	const showChanges = capabilities?.diffs ?? false;
 	const inGitRepo = capabilities?.git ?? false;
 	const showProblems = capabilities?.lsp ?? false;
@@ -60,22 +53,20 @@ export default function App() {
 	const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 	const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
 
-	// The server pushes its current session id on WS connect; mirror it locally
-	// so handlers like handleSessionDeleted can recognize the active session
-	// even before the user has switched/created one in the UI.
-	useEffect(() => {
-		return subscribe((msg) => {
-			if (msg.type === "session") {
-				setSessionId(msg.id);
-			}
-		});
-	}, [subscribe]);
+	const activeSession = sessionId ? sessions[sessionId] : undefined;
+	const entries = activeSession?.entries ?? EMPTY_ENTRIES;
+	const phase = activeSession?.phase ?? "idle";
+	const usage = activeSession?.usage ?? EMPTY_USAGE;
 
-	// Auto-switch the right-panel tab on first load and on git-status flips:
-	//   - first load in scratch mode → Files (Changes is empty until edits)
-	//   - flip on (agent ran `git init`) → Changes
-	//   - flip off (user `rm -rf .git`'d) → Files
-	// Only fires on actual flips so manual tab choices persist across reconnects.
+	// On first WS connect the server announces every in-memory session
+	// (handler_chat.handleWebSocket). Latch onto whichever shows up first
+	// so the user has an active session selected without a manual click.
+	useEffect(() => {
+		if (sessionId) return;
+		const first = Object.keys(sessions)[0];
+		if (first) setSessionId(first);
+	}, [sessionId, sessions]);
+
 	const [prevInGit, setPrevInGit] = useState<boolean | null>(null);
 	if (capabilities && prevInGit !== inGitRepo) {
 		setPrevInGit(inGitRepo);
@@ -86,7 +77,6 @@ export default function App() {
 		}
 	}
 
-	// Center tabs: chat is always first, files are added dynamically
 	const [tabs, setTabs] = useState<CenterTab[]>([
 		{ id: "chat", type: "chat", label: "Session" },
 	]);
@@ -96,7 +86,6 @@ export default function App() {
 		(path: string, line?: number) => {
 			const existing = tabs.find((t) => t.type === "file" && t.path === path);
 			if (existing) {
-				// Update line if provided
 				if (line) {
 					setTabs((prev) =>
 						prev.map((t) => (t.id === existing.id ? { ...t, line } : t)),
@@ -130,46 +119,92 @@ export default function App() {
 
 	const closeTab = useCallback(
 		(id: string) => {
-			if (id === "chat") return; // can't close chat
+			if (id === "chat") return;
 			setTabs((prev) => prev.filter((t) => t.id !== id));
 			if (activeTabId === id) setActiveTabId("chat");
 		},
 		[activeTabId],
 	);
 
-	const handleNewSession = useCallback(async () => {
-		const res = await fetch("/api/sessions/new", { method: "POST" });
-		const data = await res.json();
-		setSessionId(data.id);
-		setEntries([]);
+	const handleNewSession = useCallback(() => {
+		// Mint the new session id locally and switch to it. Using a UUID (vs.
+		// clearing sessionId) keeps the auto-pick effect inert — otherwise
+		// it would land on the first existing session and the chat would
+		// re-fill with old content. The server learns about this id when
+		// the user actually sends a message (lazy-create in handleSend).
+		setSessionId(crypto.randomUUID());
 		setActiveTabId("chat");
-	}, [setEntries]);
+	}, []);
 
 	const handleSessionDeleted = useCallback(
 		(id: string) => {
+			removeSession(id);
 			if (id === sessionId) {
-				handleNewSession();
+				// No auto-bootstrap on the server — clear the active session
+				// and let the user pick from the sidebar or type to create.
+				setSessionId("");
 			}
 		},
-		[sessionId, handleNewSession],
+		[removeSession, sessionId],
 	);
 
 	const handleSessionSelect = useCallback(
 		async (id: string) => {
+			// Already in memory? just switch — its state is already up to date.
+			if (sessions[id]) {
+				setSessionId(id);
+				setActiveTabId("chat");
+				return;
+			}
+			// Disk-only session: ask server to load it. Server registers it,
+			// then pushes a session_state event via WS to populate the slot.
 			const res = await fetch(`/api/sessions/${id}/load`, { method: "POST" });
 			if (!res.ok) return;
-			const messages = await res.json();
-			setEntries(messagesToEntries(messages));
 			setSessionId(id);
 			setActiveTabId("chat");
 		},
-		[setEntries],
+		[sessions],
 	);
+
+	const handleSend = useCallback(
+		(text: string, files?: string[]) => {
+			// Lazy-create: when there's no active session, mint a fresh UUID
+			// and use it for the send. The server adopts unknown ids on first
+			// MsgSend, so this materializes the conversation on the round-trip.
+			let sid = sessionId;
+			if (!sid) {
+				sid = crypto.randomUUID();
+				setSessionId(sid);
+			}
+			sendChat(sid, text, files);
+		},
+		[sendChat, sessionId],
+	);
+
+	const handleCancel = useCallback(() => {
+		if (sessionId) cancel(sessionId);
+	}, [cancel, sessionId]);
 
 	const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
 
 	const [noticeDismissed, setNoticeDismissed] = useState(false);
 	const showNotice = !!capabilities?.notice && !noticeDismissed;
+
+	// Sessions whose phase indicates an in-flight turn — drives the sidebar's
+	// running badge so the user sees which background conversations are busy.
+	const runningSessionIds = new Set(
+		Object.values(sessions)
+			.filter((s) => s.phase !== "idle")
+			.map((s) => s.id),
+	);
+
+	// "+" only makes sense when the active session has real content. Without
+	// it, clicking either reuses the current empty session or has nothing
+	// meaningful to do — so we hide it. The user creates the first session
+	// by typing (lazy-create on send) or by picking one from the sidebar.
+	const canCreateNew = !!(
+		sessionId && (sessions[sessionId]?.entries.length ?? 0) > 0
+	);
 
 	return (
 		<div className="relative flex flex-col h-screen bg-bg text-fg">
@@ -198,6 +233,8 @@ export default function App() {
 							onSessionSelect={handleSessionSelect}
 							onNewSession={handleNewSession}
 							onSessionDeleted={handleSessionDeleted}
+							runningSessionIds={runningSessionIds}
+							canCreateNew={canCreateNew}
 							subscribe={subscribe}
 						/>
 					</div>
@@ -205,7 +242,6 @@ export default function App() {
 
 				{/* Center Panel */}
 				<div className="flex-1 flex flex-col overflow-hidden min-w-0 bg-bg">
-					{/* Tab bar */}
 					<div className="h-10 flex items-stretch bg-bg shrink-0 overflow-x-auto">
 						<button
 							type="button"
@@ -219,7 +255,7 @@ export default function App() {
 								<PanelLeftClose size={13} />
 							)}
 						</button>
-						{sidebarCollapsed && (
+						{sidebarCollapsed && canCreateNew && (
 							<button
 								type="button"
 								className="self-center flex items-center justify-center w-8 h-8 rounded-md text-fg-dim hover:text-fg-muted hover:bg-bg-hover cursor-pointer transition-colors shrink-0"
@@ -281,13 +317,13 @@ export default function App() {
 						<div className="flex-1" />
 						{(usage.inputTokens > 0 || usage.outputTokens > 0) && (
 							<div className="flex items-center px-3 text-[11px] text-fg-dim tabular-nums whitespace-nowrap">
-								{"\u2191"}
+								{"↑"}
 								{formatTokens(usage.inputTokens)}
 								{usage.cachedTokens > 0 && (
 									<span className="ml-1">({formatTokens(usage.cachedTokens)} cached)</span>
 								)}
 								<span className="ml-2">
-									{"\u2193"}
+									{"↓"}
 									{formatTokens(usage.outputTokens)}
 								</span>
 							</div>
@@ -306,21 +342,22 @@ export default function App() {
 						</button>
 					</div>
 
-					{/* Divider */}
 					<div className="h-px bg-border-subtle shrink-0" />
 
-					{/* Tab content */}
 					<div className="flex-1 overflow-hidden">
 						{activeTab.type === "chat" ? (
 							<ChatPanel
+								key={sessionId || "no-session"}
+								sessionId={sessionId}
 								entries={entries}
 								phase={phase}
-								onSend={sendChat}
-								onCancel={cancel}
+								onSend={handleSend}
+								onCancel={handleCancel}
 							/>
 						) : activeTab.type === "diff" && activeTab.path ? (
 							<DiffTab
 								path={activeTab.path}
+								sessionId={sessionId}
 								subscribe={subscribe}
 								onDeleted={() => closeTab(activeTab.id)}
 							/>
@@ -364,6 +401,7 @@ export default function App() {
 								<div className="flex flex-col h-full">
 									<div className="flex-[3] min-h-0 overflow-hidden">
 										<DiffsPanel
+											sessionId={sessionId}
 											onOpenDiff={openDiff}
 											onOpenFile={openFile}
 											subscribe={subscribe}
@@ -371,7 +409,7 @@ export default function App() {
 									</div>
 									<div className="h-px bg-border-subtle shrink-0" />
 									<div className="flex-[1] min-h-0 overflow-hidden">
-										<CheckpointsPanel subscribe={subscribe} />
+										<CheckpointsPanel sessionId={sessionId} subscribe={subscribe} />
 									</div>
 								</div>
 							) : (
@@ -396,12 +434,6 @@ export default function App() {
 					</div>
 				</div>
 			</div>
-
-			<PromptDialog
-				prompt={prompt}
-				onPromptResponse={respondPrompt}
-				onAskResponse={respondAsk}
-			/>
 
 			{!connected && (
 				<div className="absolute inset-0 z-50 flex items-center justify-center backdrop-blur-md bg-bg/60">

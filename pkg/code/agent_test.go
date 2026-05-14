@@ -96,7 +96,7 @@ func TestPlanModeShellRejectsMutatingSafeCommands(t *testing.T) {
 
 func TestMemoryContextMessagesOnlyInjectChanges(t *testing.T) {
 	dir := t.TempDir()
-	a := &Agent{MemoryPath: dir}
+	a := &Agent{Workspace: &Workspace{MemoryPath: dir}}
 
 	if got := a.memoryContextMessages(); got != nil {
 		t.Fatalf("initial empty memory should not inject, got %#v", got)
@@ -141,8 +141,8 @@ func TestMemoryContextMessagesUsesSavedHiddenSnapshotOnResume(t *testing.T) {
 	}
 
 	a := &Agent{
-		Agent:      &agent.Agent{},
-		MemoryPath: dir,
+		Agent:     &agent.Agent{},
+		Workspace: &Workspace{MemoryPath: dir},
 	}
 	a.Messages = []agent.Message{{
 		Role:   agent.RoleUser,
