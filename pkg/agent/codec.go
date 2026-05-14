@@ -35,27 +35,9 @@ func toTools(tools []tool.Tool) []responses.ToolUnionParam {
 }
 
 func toInput(messages []Message) []responses.ResponseInputItemUnionParam {
-	// Skip all messages before the last compaction entry.
-	// Compaction replaces the prior context with an encrypted summary,
-	// so earlier messages are redundant for the API but preserved in state.
-	start := 0
-
-	for i := len(messages) - 1; i >= 0; i-- {
-		for _, c := range messages[i].Content {
-			if c.Compaction != nil {
-				start = i
-				break
-			}
-		}
-
-		if start > 0 {
-			break
-		}
-	}
-
 	var items []responses.ResponseInputItemUnionParam
 
-	for _, m := range messages[start:] {
+	for _, m := range messages {
 		switch m.Role {
 		case RoleAssistant:
 			items = append(items, assistantToInput(m)...)
@@ -138,12 +120,6 @@ func assistantToInput(m Message) []responses.ResponseInputItemUnionParam {
 			}
 		}
 
-		if c.Compaction != nil {
-			if p := compactionToInput(c.Compaction); p != nil {
-				items = append(items, responses.ResponseInputItemUnionParam{OfCompaction: p})
-			}
-		}
-
 		if c.ToolCall != nil && c.ToolCall.ID != "" {
 			items = append(items, responses.ResponseInputItemUnionParam{
 				OfFunctionCall: &responses.ResponseFunctionToolCallParam{
@@ -170,30 +146,15 @@ func assistantToInput(m Message) []responses.ResponseInputItemUnionParam {
 }
 
 func reasoningToInput(r *Reasoning) *responses.ResponseReasoningItemParam {
-	if r == nil {
+	if r == nil || r.Summary == "" {
 		return nil
 	}
 
-	p := &responses.ResponseReasoningItemParam{ID: r.ID}
-
-	if r.Text != "" {
-		p.Content = append(p.Content, responses.ResponseReasoningItemContentParam{Text: r.Text})
-	}
-
-	if r.Summary != "" {
-		p.Summary = append(p.Summary, responses.ResponseReasoningItemSummaryParam{Text: r.Summary})
-	}
-
-	if r.Signature != "" {
-		p.EncryptedContent = openai.String(r.Signature)
-	}
-
-	if len(p.Content) == 0 && len(p.Summary) == 0 && !p.EncryptedContent.Valid() {
-		return nil
-	}
-
-	if len(p.Summary) == 0 {
-		p.Summary = []responses.ResponseReasoningItemSummaryParam{{Text: ""}}
+	p := &responses.ResponseReasoningItemParam{
+		ID: r.ID,
+		Summary: []responses.ResponseReasoningItemSummaryParam{
+			{Text: r.Summary},
+		},
 	}
 
 	// Responses stateless replay can reject preserved reasoning ids unless the
@@ -202,31 +163,6 @@ func reasoningToInput(r *Reasoning) *responses.ResponseReasoningItemParam {
 	p.SetExtraFields(map[string]any{"id": param.Omit})
 
 	return p
-}
-
-func compactionToInput(c *Compaction) *responses.ResponseCompactionItemParam {
-	if c == nil || c.Signature == "" {
-		return nil
-	}
-
-	p := &responses.ResponseCompactionItemParam{EncryptedContent: c.Signature}
-	if c.ID != "" {
-		p.ID = openai.String(c.ID)
-	}
-
-	return p
-}
-
-func compactionEventToInput(item responses.ResponseCompactionItem) responses.ResponseInputItemUnionParam {
-	p := &responses.ResponseCompactionItemParam{
-		EncryptedContent: item.EncryptedContent,
-	}
-
-	if item.ID != "" {
-		p.ID = param.NewOpt(item.ID)
-	}
-
-	return responses.ResponseInputItemUnionParam{OfCompaction: p}
 }
 
 func responseToUsage(r responses.Response) Usage {
@@ -285,11 +221,6 @@ func toMessages(items []responses.ResponseInputItemUnionParam) []Message {
 
 		case item.OfReasoning != nil:
 			if m, ok := fromReasoning(item.OfReasoning); ok {
-				messages = append(messages, m)
-			}
-
-		case item.OfCompaction != nil:
-			if m, ok := fromCompaction(item.OfCompaction); ok {
 				messages = append(messages, m)
 			}
 		}
@@ -386,36 +317,19 @@ func inputContentToContents(contentList responses.ResponseInputMessageContentLis
 }
 
 func fromReasoning(r *responses.ResponseReasoningItemParam) (Message, bool) {
-	if r == nil || r.ID == "" {
+	if r == nil {
 		return Message{}, false
 	}
 
 	c := Content{Reasoning: &Reasoning{ID: r.ID}}
 
-	if len(r.Content) > 0 {
-		c.Reasoning.Text = r.Content[0].Text
-	}
-
 	if len(r.Summary) > 0 {
 		c.Reasoning.Summary = r.Summary[0].Text
 	}
 
-	if r.EncryptedContent.Valid() {
-		c.Reasoning.Signature = r.EncryptedContent.Value
-	}
-
-	return Message{Role: RoleAssistant, Content: []Content{c}}, true
-}
-
-func fromCompaction(c *responses.ResponseCompactionItemParam) (Message, bool) {
-	if c == nil || c.EncryptedContent == "" {
+	if c.Reasoning.Summary == "" {
 		return Message{}, false
 	}
 
-	content := Content{Compaction: &Compaction{Signature: c.EncryptedContent}}
-	if c.ID.Valid() {
-		content.Compaction.ID = c.ID.Value
-	}
-
-	return Message{Role: RoleAssistant, Content: []Content{content}}, true
+	return Message{Role: RoleAssistant, Content: []Content{c}}, true
 }

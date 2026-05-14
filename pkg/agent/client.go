@@ -38,15 +38,6 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		Store:      openai.Bool(false),
 		Truncation: responses.ResponseNewParamsTruncationAuto,
 
-		ContextManagement: []responses.ResponseNewParamsContextManagement{{
-			Type:             "compaction",
-			CompactThreshold: openai.Int(200000),
-		}},
-
-		Include: []responses.ResponseIncludable{
-			responses.ResponseIncludableReasoningEncryptedContent,
-		},
-
 		Reasoning: responses.ReasoningParam{
 			Summary: responses.ReasoningSummaryAuto,
 			Effort:  shared.ReasoningEffort(r.effort),
@@ -111,9 +102,6 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 				outputItems = append(outputItems, responses.ResponseInputItemUnionParam{
 					OfFunctionCall: &p,
 				})
-
-			case responses.ResponseCompactionItem:
-				outputItems = append(outputItems, compactionEventToInput(item))
 			}
 
 		case responses.ResponseCompletedEvent:
