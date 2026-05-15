@@ -13,7 +13,6 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/sergi/go-diff/diffmatchpatch"
-
 )
 
 const (
@@ -369,7 +368,7 @@ var binaryExtensions = map[string]bool{
 	".exe": true, ".dll": true, ".so": true, ".dylib": true,
 	".bin": true, ".dat": true, ".db": true, ".sqlite": true,
 	".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
-	".bmp": true, ".ico": true, ".webp": true, ".svg": true,
+	".bmp": true, ".ico": true, ".webp": true,
 	".pdf": true, ".doc": true, ".docx": true, ".xls": true,
 	".xlsx": true, ".ppt": true, ".pptx": true,
 	".zip": true, ".tar": true, ".gz": true, ".rar": true,

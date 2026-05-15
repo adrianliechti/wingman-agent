@@ -32,27 +32,29 @@ func GrepTool(root *os.Root) tool.Tool {
 		Description: strings.Join([]string{
 			fmt.Sprintf("Search file contents for a regex pattern. Respects .gitignore. Default limit %d matches.", DefaultGrepLimit),
 			"- Regex by default; `literal=true` for strings with regex metacharacters. Literal braces need escaping (`interface\\{\\}`).",
-			"- `output_mode`: \"content\" (default), \"files_with_matches\", \"count\". Use `before_context`/`after_context` for surrounding lines.",
-			"- `head_limit`/`offset` paginate; `multiline=true` lets patterns span lines.",
+			"- `output_mode`: \"files_with_matches\" (default — cheap, returns paths only), \"content\" (matched lines, optionally with `before_context`/`after_context`), \"count\". Start with files_with_matches; switch to content only when you need to see lines.",
+			"- Narrow by `type` (e.g. `go`, `ts`, `py`) or `glob` (e.g. `**/*.go`, `*.{ts,tsx}`). Both apply when set.",
+			"- `head_limit`/`offset` paginate; `head_limit=0` is unlimited. `multiline=true` lets patterns span lines.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"pattern":        map[string]any{"type": "string", "description": "Regex pattern (or literal if literal=true)."},
-				"path":           map[string]any{"type": "string", "description": "Search root; defaults to workspace."},
-				"glob":           map[string]any{"type": "string", "description": "Filename filter (e.g. `*.go`, `*.{ts,tsx}`)."},
+				"pattern":          map[string]any{"type": "string", "description": "Regex pattern (or literal if literal=true)."},
+				"path":             map[string]any{"type": "string", "description": "Search root; defaults to workspace."},
+				"glob":             map[string]any{"type": "string", "description": "Filename filter (e.g. `*.go`, `*.{ts,tsx}`)."},
+				"type":             map[string]any{"type": "string", "description": "File type filter (e.g. `go`, `ts`, `tsx`, `py`)."},
 				"case_insensitive": map[string]any{"type": "boolean", "description": "Case-insensitive."},
-				"literal":        map[string]any{"type": "boolean", "description": "Treat pattern as literal string."},
-				"multiline":      map[string]any{"type": "boolean", "description": "Allow patterns to span newlines."},
-				"context":        map[string]any{"type": "integer", "description": "Lines of context before and after each match."},
-				"before_context": map[string]any{"type": "integer", "description": "Lines before each match (overrides context)."},
-				"after_context":  map[string]any{"type": "integer", "description": "Lines after each match (overrides context)."},
-				"head_limit":     map[string]any{"type": "integer", "description": fmt.Sprintf("Max results (default %d).", DefaultGrepLimit)},
-				"offset":         map[string]any{"type": "integer", "description": "Skip N results before head_limit."},
+				"literal":          map[string]any{"type": "boolean", "description": "Treat pattern as literal string."},
+				"multiline":        map[string]any{"type": "boolean", "description": "Allow patterns to span newlines."},
+				"context":          map[string]any{"type": "integer", "description": "Lines of context before and after each match."},
+				"before_context":   map[string]any{"type": "integer", "description": "Lines before each match (overrides context)."},
+				"after_context":    map[string]any{"type": "integer", "description": "Lines after each match (overrides context)."},
+				"head_limit":       map[string]any{"type": "integer", "description": fmt.Sprintf("Max results (default %d, 0 for unlimited).", DefaultGrepLimit)},
+				"offset":           map[string]any{"type": "integer", "description": "Skip N results before head_limit."},
 				"output_mode": map[string]any{
 					"type":        "string",
-					"description": "content | files_with_matches | count.",
+					"description": "files_with_matches | content | count.",
 					"enum":        []string{"content", "files_with_matches", "count"},
 				},
 			},
@@ -84,6 +86,12 @@ func GrepTool(root *os.Root) tool.Tool {
 
 			if g, ok := args["glob"].(string); ok {
 				glob = g
+			}
+
+			typeFilter := ""
+
+			if t, ok := args["type"].(string); ok {
+				typeFilter = strings.ToLower(strings.TrimSpace(t))
 			}
 
 			ignoreCase := false
@@ -118,8 +126,14 @@ func GrepTool(root *os.Root) tool.Tool {
 
 			headLimit := DefaultGrepLimit
 
-			if l, ok := args["head_limit"].(float64); ok && l > 0 {
+			if l, ok := args["head_limit"].(float64); ok && l >= 0 {
 				headLimit = int(l)
+			}
+
+			unlimited := headLimit == 0
+			effectiveLimit := headLimit
+			if unlimited {
+				effectiveLimit = maxInt()
 			}
 
 			resultOffset := 0
@@ -134,7 +148,7 @@ func GrepTool(root *os.Root) tool.Tool {
 				literal = l
 			}
 
-			outputMode := "content"
+			outputMode := "files_with_matches"
 
 			if m, ok := args["output_mode"].(string); ok && m != "" {
 				outputMode = m
@@ -171,7 +185,15 @@ func GrepTool(root *os.Root) tool.Tool {
 			fsys := root.FS()
 
 			if !info.IsDir() {
-				matches := searchFileWithContext(fsys, searchPathFS, re, beforeContext, afterContext, headLimit+resultOffset, multiline)
+				if typeFilter != "" && !matchesType(searchPathFS, typeFilter) {
+					return "No matches found", nil
+				}
+
+				searchLimit := effectiveLimit
+				if !unlimited {
+					searchLimit += resultOffset
+				}
+				matches := searchFileWithContext(fsys, searchPathFS, re, beforeContext, afterContext, searchLimit, multiline)
 
 				if len(matches) == 0 {
 					return "No matches found", nil
@@ -183,16 +205,20 @@ func GrepTool(root *os.Root) tool.Tool {
 					}
 					matches = matches[resultOffset:]
 				}
-				if len(matches) > headLimit {
+				if !unlimited && len(matches) > headLimit {
 					matches = matches[:headLimit]
 				}
 
+				// Report the user-supplied path so single-file output matches
+				// the directory case (which uses workspace-relative paths).
+				reportPath := searchPath
+
 				if outputMode == "files_with_matches" {
-					return filepath.FromSlash(searchPathFS), nil
+					return reportPath, nil
 				}
 
 				if outputMode == "count" {
-					return fmt.Sprintf("%s:%d", filepath.FromSlash(searchPathFS), len(matches)), nil
+					return fmt.Sprintf("%s:%d", reportPath, len(matches)), nil
 				}
 
 				return strings.Join(matches, "\n"), nil
@@ -222,6 +248,10 @@ func GrepTool(root *os.Root) tool.Tool {
 					}
 				}
 
+				if typeFilter != "" && !matchesType(path, typeFilter) {
+					return nil
+				}
+
 				if isBinaryFile(path) {
 					return nil
 				}
@@ -238,7 +268,7 @@ func GrepTool(root *os.Root) tool.Tool {
 
 						fileMatches = append(fileMatches, fileMatch{path: filepath.FromSlash(relPath)})
 
-						if len(fileMatches) >= headLimit {
+						if !unlimited && len(fileMatches) >= headLimit {
 							limitReached = true
 							return filepath.SkipAll
 						}
@@ -258,7 +288,7 @@ func GrepTool(root *os.Root) tool.Tool {
 
 						fileMatches = append(fileMatches, fileMatch{path: filepath.FromSlash(relPath), count: len(matches)})
 
-						if len(fileMatches) >= headLimit {
+						if !unlimited && len(fileMatches) >= headLimit {
 							limitReached = true
 							return filepath.SkipAll
 						}
@@ -266,9 +296,9 @@ func GrepTool(root *os.Root) tool.Tool {
 					return nil
 				}
 
-				remaining := headLimit - len(results) + resultOffset - skippedCount
+				remaining := effectiveLimit - len(results) + resultOffset - skippedCount
 
-				if remaining <= 0 {
+				if !unlimited && remaining <= 0 {
 					limitReached = true
 
 					return filepath.SkipAll
@@ -286,7 +316,7 @@ func GrepTool(root *os.Root) tool.Tool {
 
 					results = append(results, m)
 
-					if len(results) >= headLimit {
+					if !unlimited && len(results) >= headLimit {
 						limitReached = true
 						return filepath.SkipAll
 					}
@@ -354,6 +384,49 @@ func GrepTool(root *os.Root) tool.Tool {
 	}
 }
 
+var grepTypeExtensions = map[string][]string{
+	"c":    {".c"},
+	"cpp":  {".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".h++"},
+	"cs":   {".cs"},
+	"css":  {".css"},
+	"go":   {".go"},
+	"h":    {".h", ".hpp", ".hh", ".hxx"},
+	"html": {".html", ".htm"},
+	"java": {".java"},
+	"js":   {".js", ".jsx", ".mjs", ".cjs"},
+	"json": {".json"},
+	"md":   {".md", ".markdown"},
+	"php":  {".php"},
+	"py":   {".py", ".pyw"},
+	"rb":   {".rb"},
+	"rs":   {".rs"},
+	"sh":   {".sh", ".bash", ".zsh"},
+	"ts":   {".ts", ".mts", ".cts"},
+	"tsx":  {".tsx"},
+	"yaml": {".yaml", ".yml"},
+	"yml":  {".yaml", ".yml"},
+}
+
+func matchesType(path, typeFilter string) bool {
+	exts, ok := grepTypeExtensions[typeFilter]
+	if !ok {
+		return false
+	}
+
+	ext := strings.ToLower(filepath.Ext(path))
+	for _, allowed := range exts {
+		if ext == allowed {
+			return true
+		}
+	}
+
+	return false
+}
+
+func maxInt() int {
+	return int(^uint(0) >> 1)
+}
+
 func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeContext, afterContext, limit int, multiline bool) []string {
 	f, err := fsys.Open(path)
 
@@ -374,8 +447,19 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 		lines = append(lines, scanner.Text())
 	}
 
-	if scanner.Err() != nil {
-		return nil
+	// Preserve `lines` collected before the error. A line longer than
+	// MaxScanBufSize (1MB) — common in minified bundles or generated JSON —
+	// otherwise drops the entire file from results, masking real matches in
+	// the preceding lines. Emit a sentinel `match` for the file so callers
+	// (and the model) can tell scanning stopped early.
+	var scanCutoff string
+	if err := scanner.Err(); err != nil {
+		if err == bufio.ErrTooLong {
+			scanCutoff = fmt.Sprintf("%s:%d:! line exceeds %dKB scan limit; remainder of file skipped", displayPath, len(lines)+1, MaxScanBufSize/1024)
+		} else {
+			// Other scanner errors (I/O) — bail like before.
+			return nil
+		}
 	}
 
 	var results []string
@@ -418,6 +502,9 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 	}
 
 	if len(matchedLines) == 0 {
+		if scanCutoff != "" {
+			return []string{scanCutoff}
+		}
 		return nil
 	}
 
@@ -461,6 +548,10 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 			results = append(results, fmt.Sprintf("%s:%d:%s %s", displayPath, j+1, prefix, lineContent))
 			lastPrinted = j
 		}
+	}
+
+	if scanCutoff != "" && len(results) < limit {
+		results = append(results, scanCutoff)
 	}
 
 	return results

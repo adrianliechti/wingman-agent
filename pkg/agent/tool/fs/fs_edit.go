@@ -15,21 +15,22 @@ func EditTool(root *os.Root) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectMutates),
 
 		Description: strings.Join([]string{
-			"Replace `old_text` with `new_text` in a file. Fails if `old_text` is not unique unless `replace_all=true`.",
-			"- Must `read` the file first in this conversation.",
-			"- Preserve exact indentation as shown AFTER the line-number prefix. Never include the prefix in old_text/new_text.",
-			"- Use the smallest uniquely-identifying old_text (usually 2-4 adjacent lines).",
+			"Replace `old_string` with `new_string` in a file. Fails if `old_string` is not unique unless `replace_all=true`.",
+			"- Read the file first in this conversation so old_string matches current text.",
+			"- Line-number prefixes (`     42\\t…`) shown by `read` are NOT part of file content. Match only the text AFTER the prefix, preserving exact indentation (tabs vs spaces).",
+			"- Use the smallest uniquely-identifying old_string — usually 2-4 adjacent lines. If matching fails, re-read the relevant slice rather than guessing.",
+			"- Do not insert emoji unless the user asked for them.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"path":        map[string]any{"type": "string", "description": "File path."},
-				"old_text":    map[string]any{"type": "string", "description": "Exact text to find. Must be unique unless replace_all=true."},
-				"new_text":    map[string]any{"type": "string", "description": "Replacement text. Must differ from old_text."},
+				"old_string":  map[string]any{"type": "string", "description": "Exact text to find. Must be unique unless replace_all=true."},
+				"new_string":  map[string]any{"type": "string", "description": "Replacement text. Must differ from old_string."},
 				"replace_all": map[string]any{"type": "boolean", "description": "Replace every occurrence."},
 			},
-			"required": []string{"path", "old_text", "new_text"},
+			"required": []string{"path", "old_string", "new_string"},
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
@@ -47,16 +48,20 @@ func EditTool(root *os.Root) tool.Tool {
 				return "", err
 			}
 
-			oldText, ok := args["old_text"].(string)
+			oldText, ok := args["old_string"].(string)
 
 			if !ok || oldText == "" {
-				return "", fmt.Errorf("old_text is required")
+				return "", fmt.Errorf("old_string is required")
 			}
 
-			newText, ok := args["new_text"].(string)
+			newText, ok := args["new_string"].(string)
 
 			if !ok {
-				return "", fmt.Errorf("new_text is required")
+				return "", fmt.Errorf("new_string is required")
+			}
+
+			if oldText == newText {
+				return "", fmt.Errorf("no changes made to %s. old_string and new_string are identical", pathArg)
 			}
 
 			contentBytes, err := root.ReadFile(normalizedPath)
@@ -87,7 +92,7 @@ func EditTool(root *os.Root) tool.Tool {
 				if len(preview) > 200 {
 					preview = preview[:200] + "..."
 				}
-				return "", fmt.Errorf("could not find old_text in %s. Make sure it matches exactly (including whitespace and newlines). File starts with:\n%s", pathArg, preview)
+				return "", fmt.Errorf("could not find old_string in %s. Make sure it matches exactly (including whitespace and newlines). File starts with:\n%s", pathArg, preview)
 			}
 
 			fuzzyContent := normalizeForFuzzyMatch(normalizedContent)
@@ -103,13 +108,20 @@ func EditTool(root *os.Root) tool.Tool {
 
 			if replaceAll {
 				if matchResult.usedFuzzyMatch {
+					if strings.Contains(normalizeForFuzzyMatch(normalizedNewText), fuzzyOldText) {
+						return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
+					}
 					newContent = baseContent
 					for {
 						mr := fuzzyFindText(newContent, normalizedOldText)
 						if !mr.found {
 							break
 						}
-						newContent = mr.contentForReplacement[:mr.index] + normalizedNewText + mr.contentForReplacement[mr.index+mr.matchLength:]
+						nextContent := mr.contentForReplacement[:mr.index] + normalizedNewText + mr.contentForReplacement[mr.index+mr.matchLength:]
+						if nextContent == newContent {
+							return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
+						}
+						newContent = nextContent
 					}
 				} else {
 					newContent = strings.ReplaceAll(baseContent, normalizedOldText, normalizedNewText)

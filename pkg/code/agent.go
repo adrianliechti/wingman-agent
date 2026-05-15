@@ -21,6 +21,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/search"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/todo"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
@@ -75,6 +76,7 @@ func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
 		fetch.Tools(),
 		search.Tools(),
 		ask.Tools(elicit),
+		todo.Tools(),
 		subagent.Tools(sessionCfg),
 	)
 

@@ -34,24 +34,25 @@ var sectionProject string
 const BoundaryMarker = "--- session context ---"
 
 // Static sections live in the cacheable prefix. They change only when the
-// session itself changes (file edits to AGENTS.md / skill (un)install) and
-// are byte-stable across turns within a session.
+// session's on-disk state changes (AGENTS.md / skill (un)install / MEMORY.md
+// edit). The caller is responsible for mtime-tracking these so the rendered
+// string is byte-stable across turns when the source files haven't changed.
 var staticTemplates = []struct {
 	title string
 	tmpl  *template.Template
 }{
 	{"Project Guidelines", template.Must(template.New("project").Parse(sectionProject))},
 	{"Skills", template.Must(template.New("skills").Parse(sectionSkills))},
+	{"Memory", template.Must(template.New("memory").Parse(sectionMemory))},
 }
 
-// Dynamic sections sit after the boundary. They may change per turn
-// (Date rolls daily; Memory changes when MEMORY.md does; Plan is mode-gated).
+// Dynamic sections sit after the boundary. They change per turn — Date rolls
+// daily; Plan is mode-gated.
 var dynamicTemplates = []struct {
 	title string
 	tmpl  *template.Template
 }{
 	{"Session Plan", template.Must(template.New("plan").Parse(sectionPlan))},
-	{"Memory", template.Must(template.New("memory").Parse(sectionMemory))},
 	{"Environment", template.Must(template.New("environment").Parse(sectionEnvironment))},
 }
 

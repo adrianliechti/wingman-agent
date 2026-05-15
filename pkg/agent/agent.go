@@ -20,7 +20,6 @@ type Agent struct {
 }
 
 func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, error] {
-	a.appendContextMessages()
 	a.Messages = append(a.Messages, userMessage(input))
 
 	maxTurns := a.MaxTurns
@@ -102,16 +101,39 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 				}
 				return
 			}
+
+			// Proactive compaction: if the just-completed turn already filled
+			// most of the context window, the next iteration (current
+			// messages + assistant response + appended tool results) will be
+			// even larger. Summarize older history now to avoid hitting the
+			// hard limit mid-task and paying for one wasted round-trip via
+			// the reactive recovery path above.
+			if a.shouldCompactProactively(resp.usage.InputTokens) {
+				a.compactMessages(ctx)
+			}
 		}
 	}
 }
 
-func (a *Agent) appendContextMessages() {
-	if a.ContextMessages == nil {
-		return
+func (a *Agent) shouldCompactProactively(lastInputTokens int64) bool {
+	if lastInputTokens <= 0 {
+		return false
 	}
 
-	a.Messages = append(a.Messages, a.ContextMessages()...)
+	window := a.Config.ContextWindow
+	if window < 0 {
+		return false
+	}
+	if window == 0 {
+		window = DefaultContextWindow
+	}
+
+	reserve := a.Config.ReserveTokens
+	if reserve <= 0 {
+		reserve = DefaultReserveTokens
+	}
+
+	return lastInputTokens > int64(window-reserve)
 }
 
 func extractToolCalls(messages []Message) []ToolCall {
@@ -194,6 +216,9 @@ func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool
 		result = a.executeTool(ctx, tc, tools)
 	}
 
+	// Post hooks form a transform chain: each hook's return value replaces
+	// the running result unconditionally. Hooks that want pass-through must
+	// return the input `result` verbatim — see hook.PostToolUse doc.
 	for _, h := range a.Hooks.PostToolUse {
 		r, err := h(ctx, hc, result)
 

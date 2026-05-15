@@ -19,6 +19,7 @@ func Tools() []tool.Tool {
 	description := strings.Join([]string{
 		"Search the web. Returns titles, URLs, and content snippets.",
 		"- Use for current events, recent docs, library versions — anything time-sensitive.",
+		"- Include the current year in queries about recent docs/versions; your training cutoff is older than \"now\".",
 		"- Skip for stable facts (language syntax, settled APIs); answer from training.",
 	}, "\n")
 

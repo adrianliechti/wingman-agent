@@ -52,6 +52,11 @@ type Workspace struct {
 	mu       sync.Mutex
 	mcpTools []tool.Tool
 	lspTools []tool.Tool
+
+	memoryMu      sync.Mutex
+	memoryCache   string
+	memoryMtime   time.Time
+	memoryMissing bool
 }
 
 func NewWorkspace(workDir string) (*Workspace, error) {
@@ -227,15 +232,36 @@ func (w *Workspace) Restore(hash string) error {
 }
 
 func (w *Workspace) MemoryContent() string {
-	data, err := os.ReadFile(filepath.Join(w.MemoryPath, memoryFileName))
+	w.memoryMu.Lock()
+	defer w.memoryMu.Unlock()
+
+	path := filepath.Join(w.MemoryPath, memoryFileName)
+
+	info, err := os.Stat(path)
 	if err != nil {
+		// Cache the "missing" state so we don't stat on every turn after
+		// a confirmed miss; reset cached content.
+		if !w.memoryMissing {
+			w.memoryMissing = true
+			w.memoryCache = ""
+			w.memoryMtime = time.Time{}
+		}
+		return ""
+	}
+
+	if !w.memoryMissing && info.ModTime().Equal(w.memoryMtime) {
+		return w.memoryCache
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		w.memoryMissing = true
+		w.memoryCache = ""
+		w.memoryMtime = time.Time{}
 		return ""
 	}
 
 	content := strings.TrimSpace(string(data))
-	if content == "" {
-		return ""
-	}
 
 	if len(content) > memoryMaxBytes {
 		truncated := content[:memoryMaxBytes]
@@ -244,6 +270,10 @@ func (w *Workspace) MemoryContent() string {
 		}
 		content = truncated + "\n\n> WARNING: MEMORY.md exceeded 25KB and was truncated."
 	}
+
+	w.memoryCache = content
+	w.memoryMtime = info.ModTime()
+	w.memoryMissing = false
 
 	return content
 }

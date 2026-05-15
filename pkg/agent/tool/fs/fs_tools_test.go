@@ -149,6 +149,22 @@ func TestReadTool(t *testing.T) {
 			t.Errorf("expected 'binary' in error, got: %v", err)
 		}
 	})
+
+	t.Run("read svg as text", func(t *testing.T) {
+		os.WriteFile(filepath.Join(tmpDir, "icon.svg"), []byte(`<svg><title>Logo</title></svg>`), 0644)
+
+		result, err := readTool.Execute(context.Background(), map[string]any{
+			"path": "icon.svg",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error reading svg: %v", err)
+		}
+
+		if !strings.Contains(result, "<title>Logo</title>") {
+			t.Errorf("expected svg text, got: %s", result)
+		}
+	})
 }
 
 func TestWriteTool(t *testing.T) {
@@ -272,9 +288,9 @@ func TestEditTool(t *testing.T) {
 		}
 
 		result, err := editTool.Execute(context.Background(), map[string]any{
-			"path":     "edit_test.txt",
-			"old_text": "world",
-			"new_text": "universe",
+			"path":       "edit_test.txt",
+			"old_string": "world",
+			"new_string": "universe",
 		})
 
 		if err != nil {
@@ -305,9 +321,9 @@ func TestEditTool(t *testing.T) {
 		}
 
 		_, err = editTool.Execute(context.Background(), map[string]any{
-			"path":     "crlf_test.txt",
-			"old_text": "line2",
-			"new_text": "modified",
+			"path":       "crlf_test.txt",
+			"old_string": "line2",
+			"new_string": "modified",
 		})
 
 		if err != nil {
@@ -334,9 +350,9 @@ func TestEditTool(t *testing.T) {
 		}
 
 		_, err = editTool.Execute(context.Background(), map[string]any{
-			"path":     "fuzzy_test.txt",
-			"old_text": "hello\nworld",
-			"new_text": "goodbye\nworld",
+			"path":       "fuzzy_test.txt",
+			"old_string": "hello\nworld",
+			"new_string": "goodbye\nworld",
 		})
 
 		if err != nil {
@@ -363,9 +379,9 @@ func TestEditTool(t *testing.T) {
 		}
 
 		_, err = editTool.Execute(context.Background(), map[string]any{
-			"path":     "duplicate_test.txt",
-			"old_text": "foo",
-			"new_text": "baz",
+			"path":       "duplicate_test.txt",
+			"old_string": "foo",
+			"new_string": "baz",
 		})
 
 		if err == nil {
@@ -390,13 +406,59 @@ func TestEditTool(t *testing.T) {
 		}
 
 		_, err = editTool.Execute(context.Background(), map[string]any{
-			"path":     "nomatch_test.txt",
-			"old_text": "xyz",
-			"new_text": "abc",
+			"path":       "nomatch_test.txt",
+			"old_string": "xyz",
+			"new_string": "abc",
 		})
 
 		if err == nil {
 			t.Error("expected error for no match")
+		}
+	})
+
+	t.Run("edit rejects legacy old_text params", func(t *testing.T) {
+		testFile := filepath.Join(tmpDir, "legacy_params.txt")
+		os.WriteFile(testFile, []byte("hello world"), 0644)
+
+		_, err := editTool.Execute(context.Background(), map[string]any{
+			"path":     "legacy_params.txt",
+			"old_text": "world",
+			"new_text": "universe",
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "old_string is required") {
+			t.Fatalf("expected old_string required error, got: %v", err)
+		}
+	})
+
+	t.Run("edit rejects identical replacement before matching", func(t *testing.T) {
+		testFile := filepath.Join(tmpDir, "identical_test.txt")
+		os.WriteFile(testFile, []byte("hello world"), 0644)
+
+		_, err := editTool.Execute(context.Background(), map[string]any{
+			"path":       "identical_test.txt",
+			"old_string": "world",
+			"new_string": "world",
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "identical") {
+			t.Fatalf("expected identical replacement error, got: %v", err)
+		}
+	})
+
+	t.Run("edit fuzzy replace_all must make progress", func(t *testing.T) {
+		testFile := filepath.Join(tmpDir, "fuzzy_replace_all.txt")
+		os.WriteFile(testFile, []byte("hello   \nworld\nhello   \nworld"), 0644)
+
+		_, err := editTool.Execute(context.Background(), map[string]any{
+			"path":        "fuzzy_replace_all.txt",
+			"old_string":  "hello\nworld",
+			"new_string":  "hello   \nworld",
+			"replace_all": true,
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "made no progress") {
+			t.Fatalf("expected no-progress error, got: %v", err)
 		}
 	})
 
@@ -661,6 +723,7 @@ func TestGrepTool(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, "file1.go"), []byte("package main\n\nfunc Hello() {\n\treturn \"hello\"\n}"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "file2.go"), []byte("package util\n\nfunc World() {\n\treturn \"world\"\n}"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "readme.md"), []byte("# Hello World\nThis is a test."), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "icon.svg"), []byte(`<svg><title>Hello Icon</title></svg>`), 0644)
 
 	grepTool := GrepTool(root)
 
@@ -677,14 +740,15 @@ func TestGrepTool(t *testing.T) {
 			t.Errorf("expected file1.go in results, got: %s", result)
 		}
 
-		if !strings.Contains(result, "Hello") {
-			t.Errorf("expected 'Hello' in results, got: %s", result)
+		if strings.Contains(result, "func Hello") {
+			t.Errorf("default output should list files only, got: %s", result)
 		}
 	})
 
 	t.Run("grep with regex", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
-			"pattern": "func \\w+\\(",
+			"pattern":     "func \\w+\\(",
+			"output_mode": "content",
 		})
 
 		if err != nil {
@@ -698,8 +762,9 @@ func TestGrepTool(t *testing.T) {
 
 	t.Run("grep case insensitive", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
-			"pattern":    "HELLO",
+			"pattern":          "HELLO",
 			"case_insensitive": true,
+			"output_mode":      "content",
 		})
 
 		if err != nil {
@@ -728,8 +793,9 @@ func TestGrepTool(t *testing.T) {
 
 	t.Run("grep with context lines", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
-			"pattern": "func Hello",
-			"context": float64(1),
+			"pattern":     "func Hello",
+			"context":     float64(1),
+			"output_mode": "content",
 		})
 
 		if err != nil {
@@ -780,8 +846,9 @@ func TestGrepTool(t *testing.T) {
 
 	t.Run("grep with absolute path", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
-			"pattern": "func",
-			"path":    tmpDir,
+			"pattern":     "func",
+			"path":        tmpDir,
+			"output_mode": "content",
 		})
 
 		if err != nil {
@@ -802,9 +869,10 @@ func TestGrepTool(t *testing.T) {
 
 		// Without multiline this can't match across newlines.
 		result, err := grepTool.Execute(context.Background(), map[string]any{
-			"pattern":   `struct \{[\s\S]*?field`,
-			"path":      "multi.go",
-			"multiline": true,
+			"pattern":     `struct \{[\s\S]*?field`,
+			"path":        "multi.go",
+			"multiline":   true,
+			"output_mode": "content",
 		})
 
 		if err != nil {
@@ -829,6 +897,107 @@ func TestGrepTool(t *testing.T) {
 			t.Errorf("non-multiline should not match across lines, got: %s", nonMulti)
 		}
 	})
+
+	t.Run("grep type filter", func(t *testing.T) {
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern": "Hello",
+			"type":    "go",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "file1.go") {
+			t.Errorf("expected go file in results, got: %s", result)
+		}
+
+		if strings.Contains(result, "readme.md") {
+			t.Errorf("type=go should exclude markdown files, got: %s", result)
+		}
+	})
+
+	t.Run("grep type and glob both apply", func(t *testing.T) {
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern": "func",
+			"type":    "go",
+			"glob":    "file2.*",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "file2.go") || strings.Contains(result, "file1.go") {
+			t.Errorf("expected only file2.go, got: %s", result)
+		}
+	})
+
+	t.Run("grep head limit zero is unlimited", func(t *testing.T) {
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern":    "package|Hello",
+			"head_limit": float64(0),
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if strings.Contains(result, "limit 0 hit") {
+			t.Errorf("head_limit=0 should not impose a zero-result limit, got: %s", result)
+		}
+		if !strings.Contains(result, "file1.go") || !strings.Contains(result, "file2.go") || !strings.Contains(result, "readme.md") {
+			t.Errorf("expected all matching files, got: %s", result)
+		}
+	})
+
+	t.Run("grep searches svg as text", func(t *testing.T) {
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern": "Hello Icon",
+			"path":    "icon.svg",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "icon.svg") {
+			t.Errorf("expected svg match, got: %s", result)
+		}
+	})
+}
+
+// Regression: a file with a line longer than the bufio scan buffer used to
+// silently drop the entire file from results. Matches in lines before the
+// long line should still be returned, and the model should see a sentinel
+// telling it the file's tail was skipped.
+func TestGrepHandlesLongLines(t *testing.T) {
+	root, tmpDir, cleanup := createTestRoot(t)
+	defer cleanup()
+
+	longLine := strings.Repeat("x", MaxScanBufSize+1024)
+	body := "needle line 1\nneedle line 2\n" + longLine + "\nneedle line 4\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "big.txt"), []byte(body), 0644); err != nil {
+		t.Fatalf("write big.txt: %v", err)
+	}
+
+	grepTool := GrepTool(root)
+
+	result, err := grepTool.Execute(context.Background(), map[string]any{
+		"pattern":     "needle",
+		"output_mode": "content",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(result, "needle line 1") || !strings.Contains(result, "needle line 2") {
+		t.Errorf("expected pre-long-line matches preserved, got: %s", result)
+	}
+
+	if !strings.Contains(result, "exceeds") || !strings.Contains(result, "scan limit") {
+		t.Errorf("expected scan-cutoff sentinel, got: %s", result)
+	}
 }
 
 func TestPathHandlingCrossplatform(t *testing.T) {
@@ -969,8 +1138,8 @@ func TestGrepSkipsSymlinks(t *testing.T) {
 		t.Fatalf("grep should not fail with symlinks: %v", err)
 	}
 
-	if !strings.Contains(result, "searchme") {
-		t.Errorf("expected 'searchme' in results, got: %s", result)
+	if !strings.Contains(result, "dir1/file.txt") {
+		t.Errorf("expected matching file in results, got: %s", result)
 	}
 }
 

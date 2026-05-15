@@ -13,6 +13,7 @@ func TestPlanModeToolsFilterMutations(t *testing.T) {
 	calledShell := false
 	tools := planModeTools([]tool.Tool{
 		{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly)},
+		{Name: "todo_write", Effect: tool.StaticEffect(tool.EffectReadOnly)},
 		{Name: "edit", Effect: tool.StaticEffect(tool.EffectMutates)},
 		{Name: "write", Effect: tool.StaticEffect(tool.EffectMutates)},
 		{
@@ -33,7 +34,7 @@ func TestPlanModeToolsFilterMutations(t *testing.T) {
 	if names["edit"] || names["write"] {
 		t.Fatalf("plan mode should remove edit/write tools, got names: %#v", names)
 	}
-	if !names["read"] || !names["shell"] {
+	if !names["read"] || !names["shell"] || !names["todo_write"] {
 		t.Fatalf("plan mode should keep read/shell tools, got names: %#v", names)
 	}
 
@@ -90,4 +91,3 @@ func TestPlanModeShellRejectsMutatingSafeCommands(t *testing.T) {
 		})
 	}
 }
-

@@ -25,7 +25,7 @@ func NewTools(manager *lsp.Manager) []tool.Tool {
 func diagnosticsTool(manager *lsp.Manager) tool.Tool {
 	return tool.Tool{
 		Name:        "get_lsp_diagnostics",
-		Description: "Get diagnostics (errors, warnings) for a file or the entire workspace.",
+		Description: "Get diagnostics (errors, warnings) for a file or the entire workspace. Clean (empty) output means no issues — success. Omit `path` to scope to the whole workspace (slower).",
 		Effect:      tool.StaticEffect(tool.EffectReadOnly),
 		Parameters: map[string]any{
 			"type": "object",
@@ -155,7 +155,7 @@ func hoverTool(manager *lsp.Manager) tool.Tool {
 func symbolsTool(manager *lsp.Manager) tool.Tool {
 	return tool.Tool{
 		Name:        "find_lsp_symbols",
-		Description: "Get symbols. With a path: returns the symbol outline (functions, classes, variables) of that file. Without a path: searches symbols across the entire workspace by query.",
+		Description: "Get symbols. If `path` is set, returns the symbol outline (functions, classes, variables) of that file and `query` is ignored. Without `path`, searches symbols across the workspace by `query`.",
 		Effect:      tool.StaticEffect(tool.EffectReadOnly),
 		Parameters: map[string]any{
 			"type": "object",
@@ -202,27 +202,27 @@ func symbolsTool(manager *lsp.Manager) tool.Tool {
 func hierarchyTool(manager *lsp.Manager) tool.Tool {
 	return tool.Tool{
 		Name:        "find_lsp_hierarchy",
-		Description: "Get incoming and outgoing calls for a function/method at a given position.",
+		Description: "Trace calls for a function/method at a given position. `direction=incoming` returns WHO CALLS this; `direction=outgoing` returns WHAT THIS CALLS. Position must be on the function name.",
 		Effect:      tool.StaticEffect(tool.EffectReadOnly),
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"path": map[string]any{
 					"type":        "string",
-					"description": "File path relative to the working directory",
+					"description": "File path relative to the working directory.",
 				},
 				"line": map[string]any{
 					"type":        "integer",
-					"description": "Line number (0-based)",
+					"description": "Line number — **0-based**. Subtract 1 from any line number shown by `read` (which is 1-based).",
 				},
 				"column": map[string]any{
 					"type":        "integer",
-					"description": "Column number (0-based)",
+					"description": "Column number — **0-based**.",
 				},
 				"direction": map[string]any{
 					"type":        "string",
 					"enum":        []string{"incoming", "outgoing"},
-					"description": "Direction of the call hierarchy",
+					"description": "incoming = who calls this; outgoing = what this calls.",
 				},
 			},
 			"required": []string{"path", "line", "column", "direction"},
@@ -254,15 +254,15 @@ func positionParams() map[string]any {
 		"properties": map[string]any{
 			"path": map[string]any{
 				"type":        "string",
-				"description": "File path relative to the working directory",
+				"description": "File path relative to the working directory.",
 			},
 			"line": map[string]any{
 				"type":        "integer",
-				"description": "Line number (0-based)",
+				"description": "Line number — **0-based**. Subtract 1 from any line number shown by `read` (which is 1-based).",
 			},
 			"column": map[string]any{
 				"type":        "integer",
-				"description": "Column number (0-based)",
+				"description": "Column number — **0-based**.",
 			},
 		},
 		"required": []string{"path", "line", "column"},

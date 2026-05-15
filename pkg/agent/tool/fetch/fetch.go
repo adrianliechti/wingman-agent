@@ -20,6 +20,7 @@ func Tools() []tool.Tool {
 	description := strings.Join([]string{
 		"Fetch a URL and return its content as text (HTML converted to readable text). Capped at 100KB.",
 		"- URL must be fully-formed (https://...).",
+		"- For GitHub URLs prefer `gh` via `shell` (`gh pr view`, `gh issue view`, `gh api`) — richer, structured output.",
 		"- If a fetch fails (auth required, paywall, blocked), do not retry the same URL — try `search_online` or a public mirror.",
 	}, "\n")
 

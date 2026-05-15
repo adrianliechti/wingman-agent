@@ -164,11 +164,14 @@ EOF`)
 
 func TestComplex_LargeOutputTruncation(t *testing.T) {
 	result := runShell(t, `for i in $(seq 1 3000); do echo "line $i"; done`)
-	if !strings.Contains(result, "truncated to last") {
-		t.Errorf("expected truncation notice, got length: %d", len(result))
+	if !strings.Contains(result, "truncated") || !strings.Contains(result, "head+tail elided") {
+		t.Errorf("expected head+tail truncation notice, got length: %d", len(result))
 	}
 	if !strings.Contains(result, "line 3000") {
 		t.Errorf("expected last lines preserved, got tail: %q", result[len(result)-100:])
+	}
+	if !strings.Contains(result, "line 1\n") {
+		t.Errorf("expected first lines preserved (head), got head: %q", result[:200])
 	}
 }
 

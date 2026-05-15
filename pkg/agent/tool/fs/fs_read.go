@@ -20,9 +20,11 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			fmt.Sprintf("Read a file. Output includes line numbers. Capped at %d lines / %dKB.", DefaultMaxLines, DefaultMaxBytes/1024),
+			fmt.Sprintf("Read a file. Output includes 1-based line numbers (subtract 1 before passing to LSP). Capped at %d lines / %dKB.", DefaultMaxLines, DefaultMaxBytes/1024),
 			"- Required before `edit` on the same file.",
-			"- Use offset/limit to paginate large files; the result tells you where to continue.",
+			"- Path may be workspace-relative or absolute inside an allowed root. `~/` expands to home.",
+			"- Use `offset`/`limit` to paginate large files; the result tells you where to continue.",
+			"- Binary files (PDF, images, archives) are rejected — inspect with an appropriate viewer via `shell` if you must.",
 		}, "\n"),
 
 		Parameters: map[string]any{

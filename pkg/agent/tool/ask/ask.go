@@ -16,6 +16,7 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 	description := strings.Join([]string{
 		"Ask the user a question and wait for their reply. Blocks until they answer.",
 		"- Make a reasonable assumption first; ask only when being wrong would force a meaningful redo.",
+		"- Ask at most one question per turn. If you need a decision between concrete alternatives, list them in the question (e.g. \"Use option A (…) or option B (…)?\").",
 		"- Not for tool-execution yes/no confirmations (handled by the harness).",
 	}, "\n")
 

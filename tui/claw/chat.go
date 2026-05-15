@@ -75,4 +75,3 @@ func (t *TUI) writeToolCall(tc *agent.ToolCall) {
 	fmt.Fprintf(t.chatView, "%s[%s]\u2503[-] [%s::b]\u25c8 %s[-::-][%s]%s[-]\n",
 		indent, th.BrBlack, th.Yellow, tc.Name, th.BrBlack, hint)
 }
-

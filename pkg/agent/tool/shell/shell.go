@@ -21,10 +21,13 @@ const (
 
 func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 	description := strings.Join([]string{
-		fmt.Sprintf("Execute a shell command and return its output. Default timeout %ds, max 600s.", defaultTimeout),
-		"- Quote paths with spaces. Chain dependent commands with `&&` in one call; make separate calls for independent commands.",
-		"- Use `;` only for sequential commands where earlier failures are acceptable.",
-		"- Increase timeout for long-running commands; do not insert `sleep`.",
+		fmt.Sprintf("Execute a command. On Unix/macOS this is `sh`; on Windows this is PowerShell. Default timeout %ds, max 600s.", defaultTimeout),
+		"- Match command syntax to the host OS shown in your environment section. Examples: list dir → `ls` on Unix, `Get-ChildItem` on PowerShell. Read a file → use the `read` tool, not `cat` / `Get-Content`.",
+		"- Working directory persists across calls; shell state (env vars, aliases, `cd` from a prior call) does NOT.",
+		"- Don't use shell to read, edit, or write files (`cat`, `Get-Content`, `sed`, `Set-Content`, heredocs, `> file`, etc.) — use `read` / `edit` / `write` so the user can review the change.",
+		"- Quote paths with spaces. Chain dependent commands with `&&` (Unix) or `;` (PowerShell) in one call; make separate calls for independent commands (parallel beats sequential).",
+		"- Once a check has passed (tests, build, lint), trust it — don't re-run to be sure.",
+		"- Increase timeout for long-running commands; do not insert `sleep` / `Start-Sleep`.",
 	}, "\n")
 
 	return []tool.Tool{{
@@ -158,17 +161,27 @@ func truncateOutput(output string) string {
 		return output
 	}
 
+	// Head + tail elision: preserve diagnostic output at the start (e.g. the
+	// first failing test, the first compiler error) and the trailing summary,
+	// drop the middle. Tail-only truncation loses errors that print at the
+	// start of long output.
 	lines := strings.Split(output, "\n")
 	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
+		head := maxLines / 2
+		tail := maxLines - head
+		elided := len(lines) - head - tail
+		lines = append(append(append([]string{}, lines[:head]...),
+			fmt.Sprintf("... [%d lines elided] ...", elided)),
+			lines[len(lines)-tail:]...)
 	}
 
 	truncated := strings.Join(lines, "\n")
 	if len(truncated) > maxBytes {
-		truncated = truncated[len(truncated)-maxBytes:]
+		half := maxBytes / 2
+		truncated = truncated[:half] + "\n... [bytes elided] ...\n" + truncated[len(truncated)-half:]
 	}
 
-	notice := fmt.Sprintf("[truncated to last %d/%d lines, %dKB/%dKB]\n", maxLines, totalLines, len(truncated)/1024, totalBytes/1024)
+	notice := fmt.Sprintf("[truncated %d→%d lines, %dKB→%dKB; head+tail elided]\n", totalLines, strings.Count(truncated, "\n")+1, totalBytes/1024, len(truncated)/1024)
 
 	return notice + truncated
 }

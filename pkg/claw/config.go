@@ -7,13 +7,13 @@ import (
 	"slices"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fetch"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/search"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/channel"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/channel/cli"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/memory"
+	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 )
 
 type Config struct {

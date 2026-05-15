@@ -16,9 +16,10 @@ func WriteTool(root *os.Root) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectMutates),
 
 		Description: strings.Join([]string{
-			"Create or overwrite a file. Creates parent directories as needed.",
-			"- For existing files, `read` first. Prefer `edit` for partial changes.",
-			"- Do not create *.md / README files unless explicitly asked.",
+			"Create or **overwrite** a file. Creates parent directories as needed.",
+			"- For existing files, `read` first. For partial changes prefer `edit` — smaller diffs, cheaper, and reviewable.",
+			"- Use this only for new files or complete rewrites.",
+			"- Do not create *.md / README files unless the user asked for them. No emoji unless requested.",
 		}, "\n"),
 
 		Parameters: map[string]any{

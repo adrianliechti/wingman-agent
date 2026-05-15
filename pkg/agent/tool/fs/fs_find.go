@@ -24,6 +24,7 @@ func FindTool(root *os.Root) tool.Tool {
 		Description: strings.Join([]string{
 			fmt.Sprintf("Find files by glob pattern (e.g., `**/*.go`, `*.{ts,tsx}`). Sorted newest-first. Respects .gitignore. Default limit %d.", DefaultFindLimit),
 			"- Use `grep` instead when searching by content — it already returns matching file paths.",
+			"- Limit truncates the OLDEST matches; if the file you want is older than recent activity, narrow the pattern.",
 		}, "\n"),
 
 		Parameters: map[string]any{
