@@ -126,6 +126,19 @@ export default function App() {
 		[activeTabId],
 	);
 
+	// Track unsaved-edit state per tab id so we can show a dirty indicator.
+	const [dirtyTabs, setDirtyTabs] = useState<Set<string>>(() => new Set());
+	const setTabDirty = useCallback((id: string, dirty: boolean) => {
+		setDirtyTabs((prev) => {
+			const has = prev.has(id);
+			if (has === dirty) return prev;
+			const next = new Set(prev);
+			if (dirty) next.add(id);
+			else next.delete(id);
+			return next;
+		});
+	}, []);
+
 	const handleNewSession = useCallback(() => {
 		// Mint the new session id locally and switch to it. Using a UUID (vs.
 		// clearing sessionId) keeps the auto-pick effect inert — otherwise
@@ -267,6 +280,7 @@ export default function App() {
 						)}
 						{tabs.map((tab) => {
 							const active = tab.id === activeTabId;
+							const isDirty = dirtyTabs.has(tab.id);
 							const Icon =
 								tab.type === "chat"
 									? MessageSquare
@@ -292,10 +306,17 @@ export default function App() {
 											/>
 										) : (
 											<>
-												<Icon
-													size={13}
-													className={`group-hover:hidden ${active ? "text-fg-muted" : "text-fg-dim"}`}
-												/>
+												{isDirty ? (
+													<span
+														className={`group-hover:hidden w-2 h-2 rounded-full ${active ? "bg-fg-muted" : "bg-fg-dim"}`}
+														aria-label="Unsaved changes"
+													/>
+												) : (
+													<Icon
+														size={13}
+														className={`group-hover:hidden ${active ? "text-fg-muted" : "text-fg-dim"}`}
+													/>
+												)}
 												<button
 													type="button"
 													className="hidden group-hover:flex w-3.5 h-3.5 items-center justify-center text-fg-dim hover:text-fg rounded transition-colors"
@@ -363,10 +384,12 @@ export default function App() {
 							/>
 						) : activeTab.path ? (
 							<FileTab
+								key={activeTab.id}
 								path={activeTab.path}
 								line={activeTab.line}
 								subscribe={subscribe}
 								onDeleted={() => closeTab(activeTab.id)}
+								onDirtyChange={(d) => setTabDirty(activeTab.id, d)}
 							/>
 						) : null}
 					</div>

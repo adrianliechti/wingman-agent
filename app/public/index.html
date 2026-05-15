@@ -54,9 +54,16 @@
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        gap: 1rem;
+        gap: 0.5rem;
         padding: 2rem;
         text-align: center;
+      }
+
+      .brand {
+        width: 96px;
+        height: 96px;
+        margin-bottom: 0.75rem;
+        opacity: 0.85;
       }
 
       h1 {
@@ -239,6 +246,10 @@
   </head>
   <body>
     <main>
+      <picture>
+        <source srcset="/icon_light.svg" media="(prefers-color-scheme: light)" />
+        <img src="/icon_dark.svg" alt="Wingman" class="brand" />
+      </picture>
       <h1>Wingman Agent</h1>
       <p>Open a workspace folder to begin.</p>
       <button id="open">Open Folder...</button>

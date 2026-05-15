@@ -162,8 +162,11 @@ export interface FileEntry {
 
 export interface FileContent {
 	path: string;
-	content: string;
-	language: string;
+	content?: string;
+	language?: string;
+	binary?: boolean;
+	mime?: string;
+	size: number;
 }
 
 export interface DiffEntry {

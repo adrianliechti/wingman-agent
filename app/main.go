@@ -82,7 +82,7 @@ func (a *App) OpenWorkspace(path string) (string, error) {
 	}
 	a.mu.Unlock()
 
-	srv, err := server.New(a.ctx, path, 0)
+	srv, err := server.New(a.ctx, path, nil)
 	if err != nil {
 		return "", err
 	}

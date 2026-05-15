@@ -166,6 +166,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/files", s.handleFileDelete)
 	mux.HandleFunc("POST /api/files/rename", s.handleFileRename)
 	mux.HandleFunc("POST /api/files/copy", s.handleFileCopy)
+	mux.HandleFunc("POST /api/files/write", s.handleFileWrite)
 	mux.HandleFunc("GET /api/diffs", s.handleDiffs)
 	mux.HandleFunc("POST /api/diffs/revert", s.handleDiffRevert)
 	mux.HandleFunc("GET /api/checkpoints", s.handleCheckpoints)

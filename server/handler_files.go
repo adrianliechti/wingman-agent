@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -197,6 +198,39 @@ func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	size := int64(len(data))
+
+	// SVG is XML, so the NUL-byte sniff classifies it as text — but visually
+	// it's far more useful as a rendered image than as raw markup. Route it
+	// to the binary preview path so the browser renders it via <img>.
+	if strings.EqualFold(filepath.Ext(filePath), ".svg") {
+		writeJSON(w, FileContent{
+			Path:   filePath,
+			Binary: true,
+			Mime:   "image/svg+xml",
+			Size:   size,
+		})
+		return
+	}
+
+	// Sniff for binary content. NUL bytes are the cleanest signal — any file
+	// without them in the first 8KB is treated as text and opens in the
+	// editor. JSON/XML stay editable; PNG/PDF/zip/etc. don't.
+	if isBinary(data) {
+		head := data
+		if len(head) > 512 {
+			head = head[:512]
+		}
+		mime := http.DetectContentType(head)
+		writeJSON(w, FileContent{
+			Path:   filePath,
+			Binary: true,
+			Mime:   mime,
+			Size:   size,
+		})
+		return
+	}
+
 	ext := strings.ToLower(filepath.Ext(filePath))
 	lang := extToLanguage[ext]
 
@@ -216,7 +250,61 @@ func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
 		Path:     filePath,
 		Content:  string(data),
 		Language: lang,
+		Size:     size,
 	})
+}
+
+func isBinary(data []byte) bool {
+	const sniff = 8192
+	head := data
+	if len(head) > sniff {
+		head = head[:sniff]
+	}
+	return bytes.IndexByte(head, 0) >= 0
+}
+
+func (s *Server) handleFileWrite(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	abs, ok := s.resolveWorkspacePath(body.Path)
+	if !ok {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	// Lstat (not Stat) so a symlink can't redirect the write outside the
+	// workspace — resolveWorkspacePath only checks the lexical path.
+	info, err := os.Lstat(abs)
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+	if info.IsDir() {
+		http.Error(w, "path is a directory", http.StatusBadRequest)
+		return
+	}
+	if !info.Mode().IsRegular() {
+		http.Error(w, "not a regular file", http.StatusBadRequest)
+		return
+	}
+
+	if err := os.WriteFile(abs, []byte(body.Content), info.Mode().Perm()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.broadcast(Frame{Type: EvtFilesChanged})
+	if s.workspace.Rewind != nil {
+		s.broadcast(Frame{Type: EvtDiffsChanged})
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) resolveWorkspacePath(p string) (string, bool) {

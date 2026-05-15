@@ -21,9 +21,16 @@ tasks:
     cmds:
       - go run . server
 
+  wails:
+    desc: Install the Wails v2 CLI if missing
+    cmds:
+      - go install github.com/wailsapp/wails/v2/cmd/wails@latest
+    status:
+      - command -v wails >/dev/null 2>&1
+
   app:
     desc: Build and launch the Wails desktop app
-    deps: [ui]
+    deps: [ui, wails]
     dir: app
     cmds:
       - wails build

@@ -96,8 +96,12 @@ type FileEntry struct {
 
 type FileContent struct {
 	Path     string `json:"path"`
-	Content  string `json:"content"`
-	Language string `json:"language"`
+	Content  string `json:"content,omitempty"`
+	Language string `json:"language,omitempty"`
+
+	Binary bool   `json:"binary,omitempty"`
+	Mime   string `json:"mime,omitempty"`
+	Size   int64  `json:"size"`
 }
 
 type DiffEntry struct {
