@@ -25,6 +25,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/tui/run/claude"
 	claudedesktop "github.com/adrianliechti/wingman-agent/tui/run/claude-desktop"
 	"github.com/adrianliechti/wingman-agent/tui/run/codex"
+	"github.com/adrianliechti/wingman-agent/tui/run/copilot"
 	"github.com/adrianliechti/wingman-agent/tui/run/gemini"
 	"github.com/adrianliechti/wingman-agent/tui/run/opencode"
 
@@ -141,6 +142,8 @@ func runRun(ctx context.Context) {
 		err = claudedesktop.Run(ctx, os.Args[3:], nil)
 	case "codex":
 		err = codex.Run(ctx, os.Args[3:], nil)
+	case "copilot":
+		err = copilot.Run(ctx, os.Args[3:], nil)
 	case "gemini":
 		err = gemini.Run(ctx, os.Args[3:], nil)
 	case "opencode":
@@ -237,7 +240,7 @@ Usage:
   wingman run <target> [args]  Run an external agent through wingman
 
 Run targets:
-  claude, claude-desktop, codex, gemini, opencode
+  claude, claude-desktop, codex, copilot, gemini, opencode
 
 Flags:
   --resume [id]   Resume the latest (or specified) saved session

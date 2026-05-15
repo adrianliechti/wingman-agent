@@ -313,6 +313,7 @@ When `WINGMAN_URL` is set, Wingman can launch other coding agents pre-configured
 ```bash
 wingman codex [args...]    # Launch OpenAI Codex CLI
 wingman claude [args...]   # Launch Claude Code
+wingman copilot [args...]  # Launch GitHub Copilot CLI
 wingman gemini [args...]   # Launch Gemini CLI
 wingman opencode [args...] # Launch OpenCode
 ```
