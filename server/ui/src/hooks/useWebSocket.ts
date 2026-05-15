@@ -10,6 +10,7 @@ export interface ChatEntry {
 	id: string;
 	type: "user" | "assistant" | "tool" | "reasoning" | "error";
 	content: string;
+	images?: string[];
 	toolName?: string;
 	toolArgs?: string;
 	toolHint?: string;
@@ -21,13 +22,26 @@ export interface ChatEntry {
 export function messagesToEntries(messages: ConversationMessage[]): ChatEntry[] {
 	const entries: ChatEntry[] = [];
 	for (const m of messages) {
+		// Collect images in this message so we can attach them to the user
+		// entry alongside its text (or stand them up as an image-only entry).
+		const isUser = m.role === "user";
+		const msgImages: string[] = isUser
+			? m.content.flatMap((c) => (c.image?.data ? [c.image.data] : []))
+			: [];
+		let imagesAttached = msgImages.length === 0;
+
 		for (const c of m.content) {
 			if (c.text) {
-				entries.push({
+				const entry: ChatEntry = {
 					id: crypto.randomUUID(),
-					type: m.role === "user" ? "user" : "assistant",
+					type: isUser ? "user" : "assistant",
 					content: c.text,
-				});
+				};
+				if (!imagesAttached) {
+					entry.images = msgImages;
+					imagesAttached = true;
+				}
+				entries.push(entry);
 			}
 			if (c.reasoning?.summary) {
 				entries.push({
@@ -74,6 +88,15 @@ export function messagesToEntries(messages: ConversationMessage[]): ChatEntry[] 
 					});
 				}
 			}
+		}
+		// User message with image(s) but no text — render an image-only entry.
+		if (!imagesAttached) {
+			entries.push({
+				id: crypto.randomUUID(),
+				type: "user",
+				content: "",
+				images: msgImages,
+			});
 		}
 	}
 	return entries;
@@ -362,13 +385,16 @@ export function useWebSocket() {
 	}, []);
 
 	const sendChat = useCallback(
-		(sessionId: string, text: string, files?: string[]) => {
+		(sessionId: string, text: string, files?: string[], images?: string[]) => {
 			const id = nextId();
 			updateSession(sessionId, (sess) => ({
 				...sess,
-				entries: [...sess.entries, { id, type: "user", content: text }],
+				entries: [
+					...sess.entries,
+					{ id, type: "user", content: text, images },
+				],
 			}));
-			send({ type: "send", session: sessionId, text, files });
+			send({ type: "send", session: sessionId, text, files, images });
 		},
 		[send, updateSession],
 	);

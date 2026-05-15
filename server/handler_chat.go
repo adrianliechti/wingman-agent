@@ -23,6 +23,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow()
 
+	// Default is 32KB — too small for image data URLs. Allow up to 32MB so
+	// pasted/attached screenshots don't trip the read limit and tear the WS
+	// down (which the client then auto-reconnects, looking like a page reload).
+	conn.SetReadLimit(32 << 20)
+
 	s.wsMu.Lock()
 	s.wsConns[conn] = struct{}{}
 	s.wsMu.Unlock()
@@ -102,6 +107,13 @@ func (s *Server) handleSend(sess *Session, msg ClientMessage) {
 
 	for _, f := range msg.Files {
 		input = append(input, agent.Content{Text: fmt.Sprintf("[File: %s]", f)})
+	}
+
+	for _, img := range msg.Images {
+		if img == "" {
+			continue
+		}
+		input = append(input, agent.Content{File: &agent.File{Data: img}})
 	}
 
 	sess.setPhase("thinking")

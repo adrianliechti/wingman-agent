@@ -612,6 +612,13 @@ func convertMessages(messages []agent.Message) []ConversationMessage {
 				cc.Text = c.Text
 			}
 
+			if c.File != nil && c.File.Data != "" {
+				cc.Image = &ConversationImage{
+					Data: c.File.Data,
+					Name: c.File.Name,
+				}
+			}
+
 			if c.Reasoning != nil && c.Reasoning.Summary != "" {
 				cc.Reasoning = &ConversationReasoning{
 					ID:      c.Reasoning.ID,

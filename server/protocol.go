@@ -10,6 +10,7 @@ type ClientMessage struct {
 	SessionID string   `json:"session,omitempty"`
 	Text      string   `json:"text,omitempty"`
 	Files     []string `json:"files,omitempty"`
+	Images    []string `json:"images,omitempty"` // base64 data URLs, e.g. "data:image/png;base64,..."
 }
 
 const (
@@ -56,9 +57,15 @@ type ConversationMessage struct {
 
 type ConversationContent struct {
 	Text       string                 `json:"text,omitempty"`
+	Image      *ConversationImage     `json:"image,omitempty"`
 	Reasoning  *ConversationReasoning `json:"reasoning,omitempty"`
 	ToolCall   *ConversationTool      `json:"tool_call,omitempty"`
 	ToolResult *ConversationResult    `json:"tool_result,omitempty"`
+}
+
+type ConversationImage struct {
+	Data string `json:"data"` // base64 data URL
+	Name string `json:"name,omitempty"`
 }
 
 type ConversationReasoning struct {

@@ -3,6 +3,7 @@ import {
 	ChevronDown,
 	ChevronRight,
 	LoaderCircle,
+	Paperclip,
 	Plus,
 	Square,
 	X,
@@ -21,8 +22,61 @@ interface Props {
 	sessionId: string;
 	entries: ChatEntry[];
 	phase: Phase;
-	onSend: (text: string, files?: string[]) => void;
+	onSend: (text: string, files?: string[], images?: string[]) => void;
 	onCancel: () => void;
+}
+
+interface PendingImage {
+	id: string;
+	dataUrl: string;
+	name?: string;
+}
+
+function readImageAsDataUrl(file: File): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader();
+		reader.onload = () => resolve(reader.result as string);
+		reader.onerror = () => reject(reader.error);
+		reader.readAsDataURL(file);
+	});
+}
+
+// Vision models clamp inputs anyway (~1568px longest edge for Claude), so a
+// 12MP screenshot is wasted bytes on the wire and in the token bill. Downscale
+// to MAX_EDGE and re-encode as JPEG. GIFs pass through to preserve animation;
+// small images skip the canvas round-trip.
+const MAX_EDGE = 2048;
+const JPEG_QUALITY = 0.9;
+const PASSTHROUGH_MAX_BYTES = 512 * 1024;
+
+async function processImage(file: File): Promise<string> {
+	if (file.type === "image/gif") return readImageAsDataUrl(file);
+
+	let bitmap: ImageBitmap;
+	try {
+		bitmap = await createImageBitmap(file);
+	} catch {
+		return readImageAsDataUrl(file);
+	}
+
+	try {
+		const longest = Math.max(bitmap.width, bitmap.height);
+		if (longest <= MAX_EDGE && file.size <= PASSTHROUGH_MAX_BYTES) {
+			return readImageAsDataUrl(file);
+		}
+		const scale = Math.min(1, MAX_EDGE / longest);
+		const w = Math.max(1, Math.round(bitmap.width * scale));
+		const h = Math.max(1, Math.round(bitmap.height * scale));
+		const canvas = document.createElement("canvas");
+		canvas.width = w;
+		canvas.height = h;
+		const ctx = canvas.getContext("2d");
+		if (!ctx) return readImageAsDataUrl(file);
+		ctx.drawImage(bitmap, 0, 0, w, h);
+		return canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+	} finally {
+		bitmap.close();
+	}
 }
 
 // Visual gap left above a pinned user message — matches the contentRef's
@@ -33,11 +87,13 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 	const scheme = useColorScheme();
 	const [input, setInput] = useState("");
 	const [files, setFiles] = useState<string[]>([]);
+	const [images, setImages] = useState<PendingImage[]>([]);
 	const [showPicker, setShowPicker] = useState(false);
 	const containerRef = useRef<HTMLDivElement>(null);
 	const contentRef = useRef<HTMLDivElement>(null);
 	const spacerRef = useRef<HTMLDivElement>(null);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const imageInputRef = useRef<HTMLInputElement>(null);
 
 	// ── scroll handling ──────────────────────────────────────────────────────
 	//
@@ -284,12 +340,17 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 
 	const handleSubmit = useCallback(() => {
 		const text = input.trim();
-		if (!text || isActive) return;
+		if ((!text && images.length === 0) || isActive) return;
 		submitPendingRef.current = true;
-		onSend(text, files.length > 0 ? files : undefined);
+		onSend(
+			text,
+			files.length > 0 ? files : undefined,
+			images.length > 0 ? images.map((i) => i.dataUrl) : undefined,
+		);
 		setInput("");
 		setFiles([]);
-	}, [input, isActive, onSend, files]);
+		setImages([]);
+	}, [input, isActive, onSend, files, images]);
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
@@ -317,6 +378,42 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 		setFiles((prev) => prev.filter((p) => p !== path));
 	}, []);
 
+	const addImageFiles = useCallback(async (fileList: FileList | File[]) => {
+		const next: PendingImage[] = [];
+		for (const f of Array.from(fileList)) {
+			if (!f.type.startsWith("image/")) continue;
+			try {
+				const dataUrl = await processImage(f);
+				next.push({ id: crypto.randomUUID(), dataUrl, name: f.name });
+			} catch {
+				/* skip unreadable files */
+			}
+		}
+		if (next.length > 0) setImages((prev) => [...prev, ...next]);
+	}, []);
+
+	const removeImage = useCallback((id: string) => {
+		setImages((prev) => prev.filter((i) => i.id !== id));
+	}, []);
+
+	const handlePaste = useCallback(
+		(e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+			const items = e.clipboardData?.items;
+			if (!items) return;
+			const pasted: File[] = [];
+			for (const item of items) {
+				if (item.kind !== "file") continue;
+				if (!item.type.startsWith("image/")) continue;
+				const f = item.getAsFile();
+				if (f) pasted.push(f);
+			}
+			if (pasted.length === 0) return;
+			e.preventDefault();
+			void addImageFiles(pasted);
+		},
+		[addImageFiles],
+	);
+
 	const selectSkill = useCallback(
 		(s: { name: string; arguments?: string[] }) => {
 			const hasArgs = !!s.arguments && s.arguments.length > 0;
@@ -327,12 +424,17 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 			} else if (!isActive) {
 				// No args — fire the skill immediately.
 				submitPendingRef.current = true;
-				onSend(`/${s.name}`, files.length > 0 ? files : undefined);
+				onSend(
+					`/${s.name}`,
+					files.length > 0 ? files : undefined,
+					images.length > 0 ? images.map((i) => i.dataUrl) : undefined,
+				);
 				setInput("");
 				setFiles([]);
+				setImages([]);
 			}
 		},
-		[isActive, onSend, files],
+		[isActive, onSend, files, images],
 	);
 
 	return (
@@ -426,6 +528,32 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 							</div>
 						)}
 
+						{images.length > 0 && (
+							<div className="flex flex-wrap gap-1.5 px-2.5 pt-2">
+								{images.map((img) => (
+									<span
+										key={img.id}
+										className="group relative inline-flex items-center rounded overflow-hidden bg-bg-active"
+										title={img.name || "image"}
+									>
+										<img
+											src={img.dataUrl}
+											alt={img.name || "image"}
+											className="block w-12 h-12 object-cover"
+										/>
+										<button
+											type="button"
+											className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center rounded-full bg-bg/80 text-fg-dim hover:text-fg cursor-pointer"
+											onClick={() => removeImage(img.id)}
+											aria-label="Remove image"
+										>
+											<X size={10} />
+										</button>
+									</span>
+								))}
+							</div>
+						)}
+
 						<div className="px-3 pt-2">
 							<textarea
 								ref={textareaRef}
@@ -434,6 +562,7 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 								value={input}
 								onChange={(e) => setInput(e.target.value)}
 								onKeyDown={handleKeyDown}
+								onPaste={handlePaste}
 								placeholder="Message Wingman…"
 								rows={1}
 							/>
@@ -457,19 +586,39 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 										/>
 									)}
 								</div>
+								<input
+									ref={imageInputRef}
+									type="file"
+									accept="image/*"
+									multiple
+									className="hidden"
+									onChange={(e) => {
+										if (e.target.files) void addImageFiles(e.target.files);
+										e.target.value = "";
+									}}
+								/>
 								<ModePicker sessionId={sessionId} />
 								<ModelPicker />
 							</div>
 
+							<div className="flex items-center gap-0">
+							<button
+								type="button"
+								className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
+								onClick={() => imageInputRef.current?.click()}
+								title="Attach image"
+							>
+								<Paperclip size={14} />
+							</button>
 							<button
 								type="button"
 								className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
-									isActive || input.trim()
+									isActive || input.trim() || images.length > 0
 										? "text-fg-muted hover:text-fg hover:bg-bg-hover"
 										: "text-fg-dim opacity-40 cursor-not-allowed"
 								}`}
 								onClick={isActive ? onCancel : handleSubmit}
-								disabled={!isActive && !input.trim()}
+								disabled={!isActive && !input.trim() && images.length === 0}
 								title={isActive ? "Stop (Esc)" : "Send (Enter)"}
 							>
 								{isActive ? (
@@ -488,6 +637,7 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 									<ArrowUp size={14} />
 								)}
 							</button>
+							</div>
 						</div>
 					</div>
 				</div>
@@ -526,7 +676,30 @@ function EntryView({
 		>
 			<div className="text-[12px] leading-[1.7] break-words min-w-0 font-mono">
 				{isUser ? (
-					<span className="whitespace-pre-wrap text-fg">{entry.content}</span>
+					<>
+						{entry.content && (
+							<span className="whitespace-pre-wrap text-fg">{entry.content}</span>
+						)}
+						{entry.images && entry.images.length > 0 && (
+							<div className={`flex flex-wrap gap-1.5 ${entry.content ? "mt-2" : ""}`}>
+								{entry.images.map((src, i) => (
+									<a
+										key={`${entry.id}-img-${i}`}
+										href={src}
+										target="_blank"
+										rel="noreferrer"
+										className="block rounded overflow-hidden bg-bg-active"
+									>
+										<img
+											src={src}
+											alt="attachment"
+											className="block max-h-40 max-w-[240px] object-contain"
+										/>
+									</a>
+								))}
+							</div>
+						)}
+					</>
 				) : (
 					<>
 						<MarkdownContent text={entry.content} />

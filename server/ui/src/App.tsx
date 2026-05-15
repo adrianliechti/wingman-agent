@@ -167,7 +167,7 @@ export default function App() {
 	);
 
 	const handleSend = useCallback(
-		(text: string, files?: string[]) => {
+		(text: string, files?: string[], images?: string[]) => {
 			// Lazy-create: when there's no active session, mint a fresh UUID
 			// and use it for the send. The server adopts unknown ids on first
 			// MsgSend, so this materializes the conversation on the round-trip.
@@ -176,7 +176,7 @@ export default function App() {
 				sid = crypto.randomUUID();
 				setSessionId(sid);
 			}
-			sendChat(sid, text, files);
+			sendChat(sid, text, files, images);
 		},
 		[sendChat, sessionId],
 	);

@@ -6,6 +6,7 @@ interface SendMessage {
 	session: string;
 	text: string;
 	files?: string[];
+	images?: string[];
 }
 
 interface CancelMessage {
@@ -130,6 +131,10 @@ export interface ConversationMessage {
 
 interface ConversationContent {
 	text?: string;
+	image?: {
+		data: string;
+		name?: string;
+	};
 	reasoning?: {
 		id?: string;
 		summary?: string;
