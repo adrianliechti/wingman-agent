@@ -19,6 +19,10 @@ import (
 const (
 	DefaultMaxLines = 2000
 	DefaultMaxBytes = 30 * 1024
+
+	// MaxEditFileBytes caps the file size that `edit` will operate on.
+	// Larger files should be rewritten with `write` rather than patched.
+	MaxEditFileBytes = 10 * 1024 * 1024
 )
 
 // normalizePath converts an absolute path to a relative path if it starts with the working directory.

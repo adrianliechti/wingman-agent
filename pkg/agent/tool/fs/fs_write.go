@@ -16,21 +16,16 @@ func WriteTool(root *os.Root) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectMutates),
 
 		Description: strings.Join([]string{
-			"Write content to a file. Creates the file and parent directories if they don't exist, overwrites if it does.",
-			"",
-			"Usage:",
-			"- Prefer the `edit` tool for modifying existing files — it only sends the diff and is safer.",
-			"- Only use this tool to create new files or for complete rewrites of existing files.",
-			"- If overwriting an existing file, you MUST read it first to understand the current content.",
-			"- NEVER create documentation files (*.md) or README files unless explicitly requested.",
-			"- After a successful write, the result is authoritative. Do not re-read the file unless you need context the result doesn't show.",
+			"Create or overwrite a file. Creates parent directories as needed.",
+			"- For existing files, `read` first. Prefer `edit` for partial changes.",
+			"- Do not create *.md / README files unless explicitly asked.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":    map[string]any{"type": "string", "description": "File path relative to the working directory"},
-				"content": map[string]any{"type": "string", "description": "Complete content to write to the file"},
+				"path":    map[string]any{"type": "string", "description": "File path."},
+				"content": map[string]any{"type": "string", "description": "File contents."},
 			},
 			"required": []string{"path", "content"},
 		},

@@ -18,14 +18,9 @@ const maxFetchBytes = 100 * 1024
 
 func Tools() []tool.Tool {
 	description := strings.Join([]string{
-		"Fetch content from a URL and return it as text. HTML pages are converted to readable text.",
-		"",
-		"Usage:",
-		"- Use this to read documentation, API references, or any web content.",
-		"- The URL must be a fully-formed valid URL (e.g., https://example.com).",
-		"- Returns extracted text content from the page.",
-		"- Large responses are truncated to 100KB.",
-		"- Fetch fails for URLs that require authentication, are behind a paywall, or block automated access. If a fetch fails, do not retry the same URL — try a public mirror or `search_online` for an alternate source.",
+		"Fetch a URL and return its content as text (HTML converted to readable text). Capped at 100KB.",
+		"- URL must be fully-formed (https://...).",
+		"- If a fetch fails (auth required, paywall, blocked), do not retry the same URL — try `search_online` or a public mirror.",
 	}, "\n")
 
 	return []tool.Tool{{
@@ -37,10 +32,7 @@ func Tools() []tool.Tool {
 			"type": "object",
 
 			"properties": map[string]any{
-				"url": map[string]any{
-					"type":        "string",
-					"description": "The URL to fetch content from",
-				},
+				"url": map[string]any{"type": "string", "description": "Fully-formed URL."},
 			},
 
 			"required": []string{"url"},

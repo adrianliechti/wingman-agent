@@ -2,12 +2,12 @@ package code
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -36,8 +36,9 @@ type Agent struct {
 	// tools() at call time.
 	baseTools []tool.Tool
 
-	lastMemoryHash string
-	mu             sync.Mutex
+	projectInstructionsMu     sync.Mutex
+	projectInstructionsCache  string
+	projectInstructionsMtimes map[string]time.Time
 }
 
 func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
@@ -49,11 +50,10 @@ func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
 	}
 
 	sessionCfg.Tools = a.tools
-	sessionCfg.ContextMessages = a.memoryContextMessages
 	sessionCfg.Instructions = a.Instructions
 
 	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,
-		truncation.New(truncation.DefaultMaxBytes, ws.ScratchPath),
+		truncation.New(ws.ScratchPath),
 	)
 
 	elicit := buildElicit(ui)
@@ -109,6 +109,7 @@ func (a *Agent) tools() []tool.Tool {
 		tools = planModeTools(tools)
 	}
 
+	sort.SliceStable(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	return tools
 }
 
@@ -143,70 +144,9 @@ func planModeEffectExecute(t tool.Tool) func(context.Context, map[string]any) (s
 }
 
 const (
-	memoryFileName      = "MEMORY.md"
-	memoryMaxBytes      = 25 * 1024
-	memoryContextPrefix = "Current MEMORY.md:\n\n"
-	memoryContextEmpty  = "MEMORY.md is currently empty."
+	memoryFileName = "MEMORY.md"
+	memoryMaxBytes = 25 * 1024
 )
-
-func (a *Agent) memoryContextMessages() []agent.Message {
-	content := a.MemoryContent()
-	messageText := ""
-	if content != "" {
-		messageText = memoryContextPrefix + content
-	}
-
-	sum := sha256.Sum256([]byte(content))
-	hash := string(sum[:])
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	prevHash := a.lastMemoryHash
-	if hash == a.lastMemoryHash {
-		return nil
-	}
-	a.lastMemoryHash = hash
-
-	if messageText == "" {
-		messageText = memoryContextEmpty
-		if prevHash == "" && a.latestMemoryContextText() == "" {
-			return nil
-		}
-	}
-
-	if prevHash == "" && a.latestMemoryContextText() == messageText {
-		return nil
-	}
-
-	return []agent.Message{{
-		Role:   agent.RoleUser,
-		Hidden: true,
-		Content: []agent.Content{{
-			Text: messageText,
-		}},
-	}}
-}
-
-func (a *Agent) latestMemoryContextText() string {
-	if a.Agent == nil {
-		return ""
-	}
-
-	for i := len(a.Messages) - 1; i >= 0; i-- {
-		m := a.Messages[i]
-		if !m.Hidden || m.Role != agent.RoleUser || len(m.Content) != 1 {
-			continue
-		}
-
-		text := m.Content[0].Text
-		if strings.HasPrefix(text, memoryContextPrefix) || text == memoryContextEmpty {
-			return text
-		}
-	}
-
-	return ""
-}
 
 func (a *Agent) Instructions() string {
 	return BuildInstructions(a.InstructionsData())
@@ -230,8 +170,9 @@ func (a *Agent) InstructionsData() prompt.SectionData {
 		Arch:                runtime.GOARCH,
 		WorkingDir:          a.RootPath,
 		MemoryDir:           a.MemoryPath,
+		MemoryContent:       a.MemoryContent(),
 		Skills:              skill.FormatForPrompt(a.Skills),
-		ProjectInstructions: ReadProjectInstructions(a.RootPath),
+		ProjectInstructions: a.projectInstructions(),
 	}
 
 	return data
@@ -239,9 +180,85 @@ func (a *Agent) InstructionsData() prompt.SectionData {
 
 const projectInstructionsMaxBytes = 25 * 1024
 
+// projectInstructions returns the rendered AGENTS.md / CLAUDE.md block.
+// It walks ancestor dirs but only re-reads when an mtime changed; otherwise
+// returns the cached string so the static prefix stays byte-stable across turns.
+func (a *Agent) projectInstructions() string {
+	a.projectInstructionsMu.Lock()
+	defer a.projectInstructionsMu.Unlock()
+
+	type entry struct {
+		path  string
+		rel   string
+		mtime time.Time
+	}
+
+	wd := filepath.Clean(a.RootPath)
+	var found []entry
+
+	dir := wd
+	for {
+		for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+			p := filepath.Join(dir, name)
+			info, err := os.Stat(p)
+			if err != nil {
+				continue
+			}
+			rel, _ := filepath.Rel(wd, p)
+			if rel == "" {
+				rel = name
+			}
+			found = append(found, entry{path: p, rel: rel, mtime: info.ModTime()})
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	if len(found) == len(a.projectInstructionsMtimes) {
+		unchanged := true
+		for _, e := range found {
+			if prev, ok := a.projectInstructionsMtimes[e.path]; !ok || !prev.Equal(e.mtime) {
+				unchanged = false
+				break
+			}
+		}
+		if unchanged {
+			return a.projectInstructionsCache
+		}
+	}
+
+	var parts []string
+	mtimes := make(map[string]time.Time, len(found))
+	for _, e := range found {
+		data, err := os.ReadFile(e.path)
+		if err != nil {
+			continue
+		}
+		content := strings.TrimSpace(string(data))
+		if content == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("From %s:\n\n%s", e.rel, content))
+		mtimes[e.path] = e.mtime
+	}
+
+	result := strings.Join(parts, "\n\n---\n\n")
+	if len(result) > projectInstructionsMaxBytes {
+		result = result[:projectInstructionsMaxBytes] + "\n\n[truncated]"
+	}
+
+	a.projectInstructionsCache = result
+	a.projectInstructionsMtimes = mtimes
+	return result
+}
+
 // ReadProjectInstructions walks from wd up to the filesystem root,
 // concatenating AGENTS.md / CLAUDE.md with headers, closest ancestor first.
-// Truncates at 25KB.
+// Truncates at 25KB. Use Agent.projectInstructions for the cached path.
 func ReadProjectInstructions(wd string) string {
 	var parts []string
 

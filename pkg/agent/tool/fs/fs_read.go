@@ -20,23 +20,17 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			fmt.Sprintf("Read the contents of a file. Output includes line numbers. Truncated to %d lines or %dKB.", DefaultMaxLines, DefaultMaxBytes/1024),
-			"",
-			"Usage:",
-			"- You must read a file before editing it.",
-			"- If you read this file earlier in the conversation and nothing has modified it since, the prior result is still current — refer to it instead of re-reading. Re-read only after `edit` or `write`, or when the user indicates external changes.",
-			"- For large files, use offset and limit to read in chunks. The output will tell you where to continue.",
-			"- Read multiple files in parallel by calling this tool multiple times in one response.",
-			"- Prefer `grep` to locate relevant code before reading entire files. Often a single `grep` returns enough context that no `read` is needed.",
-			"- When editing text from read output, preserve the exact indentation as shown AFTER the line number prefix. Never include line numbers in old_text.",
+			fmt.Sprintf("Read a file. Output includes line numbers. Capped at %d lines / %dKB.", DefaultMaxLines, DefaultMaxBytes/1024),
+			"- Required before `edit` on the same file.",
+			"- Use offset/limit to paginate large files; the result tells you where to continue.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":   map[string]any{"type": "string", "description": "File path relative to the working directory, or an absolute path inside an allowed root (e.g. a discovered skill directory). Paths beginning with `~/` are expanded to the user's home directory."},
-				"offset": map[string]any{"type": "integer", "description": "Line number to start reading from (1-based)"},
-				"limit":  map[string]any{"type": "integer", "description": "Maximum number of lines to read. Only provide if the file is too large to read at once."},
+				"path":   map[string]any{"type": "string", "description": "File path; relative to workspace or absolute inside an allowed root. `~/` expands to home."},
+				"offset": map[string]any{"type": "integer", "description": "1-based start line."},
+				"limit":  map[string]any{"type": "integer", "description": "Max lines to read."},
 			},
 			"required": []string{"path"},
 		},
@@ -126,14 +120,14 @@ func expandHome(path string) string {
 
 func formatRead(content []byte, offset, limit int) (string, error) {
 	if len(content) == 0 {
-		return "(empty file)", nil
+		return "<system-reminder>File is empty.</system-reminder>", nil
 	}
 
 	lines := strings.Split(string(content), "\n")
 	total := len(lines)
 
 	if offset >= total {
-		return "", fmt.Errorf("offset %d is beyond end of file (%d lines)", offset+1, total)
+		return fmt.Sprintf("<system-reminder>Offset %d is past end of file (%d lines). Re-issue with a valid offset.</system-reminder>", offset+1, total), nil
 	}
 
 	end := total
@@ -156,10 +150,7 @@ func formatRead(content []byte, offset, limit int) (string, error) {
 	endLine := offset + outputLines
 
 	if truncated || end < total {
-		notice := fmt.Sprintf("\n\n[Lines %d-%d of %d", offset+1, endLine, total)
-		notice += fmt.Sprintf(". Use offset=%d to continue]", endLine+1)
-
-		return output + notice, nil
+		return fmt.Sprintf("%s\n\n[lines %d-%d/%d, offset=%d for more]", output, offset+1, endLine, total, endLine+1), nil
 	}
 
 	return output, nil

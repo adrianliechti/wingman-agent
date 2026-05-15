@@ -15,26 +15,19 @@ func EditTool(root *os.Root) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectMutates),
 
 		Description: strings.Join([]string{
-			"Performs exact string replacements in files. This is the preferred tool for modifying existing files.",
-			"",
-			"Usage:",
-			"- You must use `read` at least once on a file before editing it.",
-			"- When editing text from read output, preserve the exact indentation (tabs/spaces) as shown AFTER the line number prefix. Never include the line number prefix in old_text or new_text.",
-			"- The edit will FAIL if old_text is not unique in the file. Either provide more surrounding context to make it unique, or use replace_all to change every occurrence.",
-			"- Use the smallest old_text that is uniquely identifying — usually 2-4 adjacent lines. Avoid pasting 10+ lines of context when less will work.",
-			"- Use replace_all for renaming variables, functions, or other identifiers across a file.",
-			"- ALWAYS prefer editing existing files over writing new ones.",
-			"- NEVER use the shell tool (sed, awk) for file edits — use this tool instead.",
-			"- After a successful edit, the diff in the result is authoritative. Do not re-read the file unless you need context the diff doesn't show.",
+			"Replace `old_text` with `new_text` in a file. Fails if `old_text` is not unique unless `replace_all=true`.",
+			"- Must `read` the file first in this conversation.",
+			"- Preserve exact indentation as shown AFTER the line-number prefix. Never include the prefix in old_text/new_text.",
+			"- Use the smallest uniquely-identifying old_text (usually 2-4 adjacent lines).",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":        map[string]any{"type": "string", "description": "File path relative to the working directory"},
-				"old_text":    map[string]any{"type": "string", "description": "Exact text to find and replace. Must be unique unless replace_all is true."},
-				"new_text":    map[string]any{"type": "string", "description": "Text to replace the old text with. Must be different from old_text."},
-				"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences of old_text instead of just the first. Useful for renaming variables. (default: false)"},
+				"path":        map[string]any{"type": "string", "description": "File path."},
+				"old_text":    map[string]any{"type": "string", "description": "Exact text to find. Must be unique unless replace_all=true."},
+				"new_text":    map[string]any{"type": "string", "description": "Replacement text. Must differ from old_text."},
+				"replace_all": map[string]any{"type": "boolean", "description": "Replace every occurrence."},
 			},
 			"required": []string{"path", "old_text", "new_text"},
 		},
@@ -70,6 +63,10 @@ func EditTool(root *os.Root) tool.Tool {
 
 			if err != nil {
 				return "", pathError("read file", pathArg, normalizedPath, workingDir, err)
+			}
+
+			if len(contentBytes) > MaxEditFileBytes {
+				return "", fmt.Errorf("file %s is %d bytes; edits are capped at %d bytes — use `write` for full rewrites or narrow the change", pathArg, len(contentBytes), MaxEditFileBytes)
 			}
 
 			bom, content := stripBom(string(contentBytes))

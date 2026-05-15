@@ -28,15 +28,31 @@ var sectionSkills string
 //go:embed section_project.txt
 var sectionProject string
 
-var sectionTemplates = []struct {
+// BoundaryMarker separates the static cacheable prefix from the dynamic
+// per-turn suffix. Plain text (no markdown) so it serves as a deterministic
+// prefix terminator for any caching layer.
+const BoundaryMarker = "--- session context ---"
+
+// Static sections live in the cacheable prefix. They change only when the
+// session itself changes (file edits to AGENTS.md / skill (un)install) and
+// are byte-stable across turns within a session.
+var staticTemplates = []struct {
 	title string
 	tmpl  *template.Template
 }{
-	{"Environment", template.Must(template.New("environment").Parse(sectionEnvironment))},
-	{"Memory", template.Must(template.New("memory").Parse(sectionMemory))},
-	{"Session Plan", template.Must(template.New("plan").Parse(sectionPlan))},
-	{"Skills", template.Must(template.New("skills").Parse(sectionSkills))},
 	{"Project Guidelines", template.Must(template.New("project").Parse(sectionProject))},
+	{"Skills", template.Must(template.New("skills").Parse(sectionSkills))},
+}
+
+// Dynamic sections sit after the boundary. They may change per turn
+// (Date rolls daily; Memory changes when MEMORY.md does; Plan is mode-gated).
+var dynamicTemplates = []struct {
+	title string
+	tmpl  *template.Template
+}{
+	{"Session Plan", template.Must(template.New("plan").Parse(sectionPlan))},
+	{"Memory", template.Must(template.New("memory").Parse(sectionMemory))},
+	{"Environment", template.Must(template.New("environment").Parse(sectionEnvironment))},
 }
 
 type SectionData struct {
@@ -56,10 +72,13 @@ type Section struct {
 	Content string
 }
 
-func RenderSections(data SectionData) []Section {
+func renderSections(templates []struct {
+	title string
+	tmpl  *template.Template
+}, data SectionData) []Section {
 	var sections []Section
 
-	for _, st := range sectionTemplates {
+	for _, st := range templates {
 		var buf bytes.Buffer
 
 		if err := st.tmpl.Execute(&buf, data); err != nil {
@@ -74,12 +93,38 @@ func RenderSections(data SectionData) []Section {
 	return sections
 }
 
+// RenderSections returns every renderable section regardless of static/dynamic
+// classification. Retained for tests and callers that need a flat list.
+func RenderSections(data SectionData) []Section {
+	return append(renderSections(staticTemplates, data), renderSections(dynamicTemplates, data)...)
+}
+
+// BuildInstructions assembles the system prompt with a cacheable static prefix
+// followed by a boundary marker and a dynamic suffix.
 func BuildInstructions(base string, data SectionData) string {
-	sections := append([]Section{{Content: base}}, RenderSections(data)...)
-	return ComposeSections(sections...)
+	var staticParts []Section
+	staticParts = append(staticParts, Section{Content: base})
+	staticParts = append(staticParts, renderSections(staticTemplates, data)...)
+
+	dynamicParts := renderSections(dynamicTemplates, data)
+
+	staticBlock := composeSections(staticParts)
+	dynamicBlock := composeSections(dynamicParts)
+
+	if dynamicBlock == "" {
+		return staticBlock
+	}
+	if staticBlock == "" {
+		return dynamicBlock
+	}
+	return staticBlock + "\n\n" + BoundaryMarker + "\n\n" + dynamicBlock
 }
 
 func ComposeSections(sections ...Section) string {
+	return composeSections(sections)
+}
+
+func composeSections(sections []Section) string {
 	var parts []string
 
 	for _, section := range sections {

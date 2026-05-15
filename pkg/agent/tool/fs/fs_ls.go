@@ -17,23 +17,17 @@ func LsTool(root *os.Root) tool.Tool {
 		Name:   "ls",
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
-		Description: strings.Join([]string{
-			fmt.Sprintf(
-				"List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to %d entries or %dKB (whichever is hit first).",
-				DefaultListLimit,
-				DefaultMaxBytes/1024,
-			),
-			"",
-			"Usage:",
-			"- Prefer `find` or `grep` when looking for specific files or content — they're more targeted.",
-			"- Use `ls` only when you genuinely need to inspect a directory's immediate contents and don't yet know what's there.",
-		}, "\n"),
+		Description: fmt.Sprintf(
+			"List a directory's immediate contents (alphabetical, '/' suffix for dirs, dotfiles included). Capped at %d entries or %dKB. Prefer `find`/`grep` when you know what you're looking for.",
+			DefaultListLimit,
+			DefaultMaxBytes/1024,
+		),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":  map[string]any{"type": "string", "description": "Path to the directory to list (defaults to current directory)"},
-				"limit": map[string]any{"type": "integer", "description": "Maximum number of entries to return"},
+				"path":  map[string]any{"type": "string", "description": "Directory; defaults to workspace."},
+				"limit": map[string]any{"type": "integer", "description": "Max entries."},
 			},
 		},
 
@@ -111,15 +105,15 @@ func LsTool(root *os.Root) tool.Tool {
 			var notices []string
 
 			if len(entries) > limit {
-				notices = append(notices, fmt.Sprintf("%d entries limit reached", limit))
+				notices = append(notices, fmt.Sprintf("limit %d hit", limit))
 			}
 
 			if truncated {
-				notices = append(notices, fmt.Sprintf("%dKB limit reached", DefaultMaxBytes/1024))
+				notices = append(notices, fmt.Sprintf("%dKB cap", DefaultMaxBytes/1024))
 			}
 
 			if len(notices) > 0 {
-				output += fmt.Sprintf("\n\n[%s]", strings.Join(notices, ". "))
+				output += "\n\n[" + strings.Join(notices, "; ") + "]"
 			}
 
 			return output, nil

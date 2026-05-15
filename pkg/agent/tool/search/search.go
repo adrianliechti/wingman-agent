@@ -17,13 +17,9 @@ import (
 
 func Tools() []tool.Tool {
 	description := strings.Join([]string{
-		"Search the web for information. Use this when the answer requires up-to-date information beyond the model's knowledge cutoff.",
-		"",
-		"Usage:",
-		"- Use for current events, recent documentation, library versions, or anything time-sensitive.",
-		"- Skip this tool for stable facts (language syntax, well-known algorithms, settled APIs) — answer from your training instead.",
-		"- Provide clear, specific search queries for best results.",
-		"- Returns titles, URLs, and content snippets from search results.",
+		"Search the web. Returns titles, URLs, and content snippets.",
+		"- Use for current events, recent docs, library versions — anything time-sensitive.",
+		"- Skip for stable facts (language syntax, settled APIs); answer from training.",
 	}, "\n")
 
 	return []tool.Tool{{
@@ -35,10 +31,7 @@ func Tools() []tool.Tool {
 			"type": "object",
 
 			"properties": map[string]any{
-				"query": map[string]any{
-					"type":        "string",
-					"description": "The search query",
-				},
+				"query": map[string]any{"type": "string", "description": "Search query."},
 			},
 
 			"required": []string{"query"},

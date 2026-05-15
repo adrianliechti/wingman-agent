@@ -146,7 +146,7 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 	scratchDir := filepath.Join(workDir, ".scratch")
 	_ = os.MkdirAll(scratchDir, 0755)
 	cfg.Hooks.PostToolUse = append(cfg.Hooks.PostToolUse,
-		truncation.New(truncation.DefaultMaxBytes, scratchDir),
+		truncation.New(scratchDir),
 	)
 
 	agentTools := slices.Concat(

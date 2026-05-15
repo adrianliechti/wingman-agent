@@ -22,28 +22,21 @@ func FindTool(root *os.Root) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			fmt.Sprintf("Find files by glob pattern. Returns paths sorted by modification time (newest first). Respects .gitignore. Default limit: %d.", DefaultFindLimit),
-			"",
-			"Usage:",
-			"- Prefer this tool over shell `find` / `ls -R` for filename pattern discovery.",
-			"- Use `grep` (which lists matching files) when you're looking for content rather than filenames — it often replaces a separate `find` call.",
-			"- Supports glob patterns: \"**/*.go\", \"src/**/*.ts\", \"*.{js,jsx}\".",
-			"- Results are sorted newest-first, so recently changed files appear at the top.",
+			fmt.Sprintf("Find files by glob pattern (e.g., `**/*.go`, `*.{ts,tsx}`). Sorted newest-first. Respects .gitignore. Default limit %d.", DefaultFindLimit),
+			"- Use `grep` instead when searching by content — it already returns matching file paths.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"pattern": map[string]any{"type": "string", "description": "Glob pattern to match files (e.g., \"**/*.go\", \"src/**/*.ts\")"},
-				"path":    map[string]any{"type": "string", "description": "Directory to search in (defaults to working directory)"},
-				"limit":   map[string]any{"type": "integer", "description": fmt.Sprintf("Maximum number of results to return (default: %d)", DefaultFindLimit)},
+				"pattern": map[string]any{"type": "string", "description": "Glob (e.g. `**/*.go`)."},
+				"path":    map[string]any{"type": "string", "description": "Search root; defaults to workspace."},
+				"limit":   map[string]any{"type": "integer", "description": fmt.Sprintf("Max results (default %d).", DefaultFindLimit)},
 			},
 			"required": []string{"pattern"},
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
-			startTime := time.Now()
-
 			pattern, ok := args["pattern"].(string)
 
 			if !ok || pattern == "" {
@@ -141,22 +134,19 @@ func FindTool(root *os.Root) tool.Tool {
 			rawOutput := strings.Join(paths, "\n")
 			truncatedOutput, truncated := truncateHead(rawOutput)
 
-			duration := time.Since(startTime)
-
 			var notices []string
 
 			if resultLimitReached {
-				notices = append(notices, fmt.Sprintf("%d files found, showing newest %d in %dms", totalMatches, limit, duration.Milliseconds()))
-				notices = append(notices, "refine the pattern or raise limit for more results")
+				notices = append(notices, fmt.Sprintf("%d found, showing newest %d", totalMatches, limit))
 			} else {
-				notices = append(notices, fmt.Sprintf("%d files found in %dms", totalMatches, duration.Milliseconds()))
+				notices = append(notices, fmt.Sprintf("%d found", totalMatches))
 			}
 
 			if truncated {
-				notices = append(notices, fmt.Sprintf("%dKB limit reached", DefaultMaxBytes/1024))
+				notices = append(notices, fmt.Sprintf("%dKB cap", DefaultMaxBytes/1024))
 			}
 
-			truncatedOutput += fmt.Sprintf("\n\n[%s]", strings.Join(notices, ". "))
+			truncatedOutput += "\n\n[" + strings.Join(notices, "; ") + "]"
 
 			return truncatedOutput, nil
 		},

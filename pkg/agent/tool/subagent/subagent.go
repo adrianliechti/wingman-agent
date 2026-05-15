@@ -13,23 +13,10 @@ const instructions = "You are an agent performing a specific delegated task. Com
 
 func Tools(cfg *agent.Config) []tool.Tool {
 	description := strings.Join([]string{
-		"Launch an agent to handle a task in a separate context. The agent has access to all tools and runs its own agentic loop. Only the final answer is returned, keeping your context clean.",
-		"",
-		"When to use:",
-		"- Research tasks requiring many tool calls (exploring codebases, finding all usages of a function).",
-		"- Independent subtasks whose intermediate results would clutter your context.",
-		"- You can launch multiple agents in parallel by making multiple tool calls in one response.",
-		"- Make the prompt explicit about whether the agent may edit files or should stay read-only.",
-		"",
-		"When NOT to use:",
-		"- Simple tasks needing 1-2 tool calls -- just use the tools directly.",
-		"- When the user needs to see intermediate results -- they won't be visible.",
-		"",
-		"Prompting tips:",
-		"- The agent has NO access to your conversation history. Write the prompt as a self-contained briefing.",
-		"- Be specific: include file paths, function names, exact requirements, constraints, and desired output shape.",
-		"- Do not ask the agent to synthesize from another agent's findings. Do the synthesis yourself, then delegate a precise next task if needed.",
-		"- Bad: \"Find the bug.\" Good: \"In /src/api/handler.go, the CreateUser function returns 500 on duplicate emails. Find where the error is swallowed and suggest a fix.\"",
+		"Launch a sub-agent for a bounded delegated task. Only the final answer is returned — intermediate tool calls stay out of your context.",
+		"- Use for codebase-wide research, find-all-usages, or independent subtasks. Skip for 1-2 tool-call work.",
+		"- The agent has no access to your conversation. Write a self-contained prompt: file paths, symbols, constraints, expected output shape.",
+		"- State explicitly whether the agent may edit files or is read-only. Do not delegate synthesis — integrate findings yourself.",
 	}, "\n")
 
 	return []tool.Tool{{
@@ -41,10 +28,7 @@ func Tools(cfg *agent.Config) []tool.Tool {
 			"type": "object",
 
 			"properties": map[string]any{
-				"prompt": map[string]any{
-					"type":        "string",
-					"description": "A clear, self-contained task description for the agent. Include all necessary context since it has no access to the current conversation.",
-				},
+				"prompt": map[string]any{"type": "string", "description": "Self-contained task briefing."},
 			},
 
 			"required": []string{"prompt"},

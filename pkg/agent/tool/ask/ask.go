@@ -14,13 +14,9 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 	}
 
 	description := strings.Join([]string{
-		"Ask the user a question and wait for their response. Use this when you need clarification or input to proceed.",
-		"",
-		"Usage:",
-		"- Asking blocks execution until the user replies. Always try a reasonable assumption first; ask only when being wrong would force a meaningful redo.",
-		"- Use when you need the user to make a decision between approaches.",
-		"- Use when requirements are ambiguous and different answers would change your approach.",
-		"- Do NOT use this for yes/no confirmations on tool execution -- those are handled automatically.",
+		"Ask the user a question and wait for their reply. Blocks until they answer.",
+		"- Make a reasonable assumption first; ask only when being wrong would force a meaningful redo.",
+		"- Not for tool-execution yes/no confirmations (handled by the harness).",
 	}, "\n")
 
 	return []tool.Tool{{
@@ -32,10 +28,7 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 			"type": "object",
 
 			"properties": map[string]any{
-				"question": map[string]any{
-					"type":        "string",
-					"description": "The question to ask the user. Be specific and concise.",
-				},
+				"question": map[string]any{"type": "string", "description": "Question for the user."},
 			},
 
 			"required": []string{"question"},

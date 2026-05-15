@@ -6,6 +6,38 @@ import (
 	"unicode/utf8"
 )
 
+// TruncateHead keeps the first maxBytes (rounded to a UTF-8 boundary) of s,
+// followed by a "…N chars truncated…" marker. Useful when only the start of
+// the output is informative (grep matches, find listings).
+func TruncateHead(s string, maxBytes int) string {
+	if s == "" {
+		return ""
+	}
+
+	totalChars := utf8.RuneCountInString(s)
+
+	if maxBytes <= 0 {
+		return formatTruncationMarker(totalChars)
+	}
+
+	if len(s) <= maxBytes {
+		return s
+	}
+
+	prefixEnd := 0
+	removedChars := 0
+	for idx, r := range s {
+		charEnd := idx + utf8.RuneLen(r)
+		if charEnd <= maxBytes {
+			prefixEnd = charEnd
+			continue
+		}
+		removedChars++
+	}
+
+	return s[:prefixEnd] + formatTruncationMarker(removedChars)
+}
+
 // TruncateMiddle keeps a head and tail of s joined by a "…N chars
 // truncated…" marker, splitting the byte budget at UTF-8 boundaries.
 // The returned string may exceed maxBytes by the marker length.

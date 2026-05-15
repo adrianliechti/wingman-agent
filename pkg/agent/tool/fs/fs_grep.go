@@ -30,70 +30,29 @@ func GrepTool(root *os.Root) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			fmt.Sprintf("Search file contents for a pattern. Respects .gitignore. Default limit: %d matches.", DefaultGrepLimit),
-			"",
-			"Usage:",
-			"- Prefer this tool for content search; reach for shell `rg` only when you need a flag this tool doesn't expose.",
-			"- For most tasks, the matches returned here (file path, line number, surrounding lines) are enough — you don't need a follow-up `read` unless you need broader context.",
-			"- For open-ended exploration that may need many rounds of searching, delegate to the `agent` tool instead — it keeps the back-and-forth out of your context.",
-			"- Supports regex (e.g., \"log.*Error\", \"func\\s+\\w+\"). Literal braces need escaping (use `interface\\{\\}` to find `interface{}`).",
-			"- Filter files with glob (e.g., \"*.go\", \"*.{ts,tsx}\").",
-			"- Use literal=true for strings with regex special characters.",
-			"- Output modes: \"content\" shows matching lines (default), \"files_with_matches\" shows only file paths, \"count\" shows match counts per file.",
-			"- Use multiline=true for patterns spanning multiple lines (e.g., multi-line function signatures, struct definitions).",
-			"- Use head_limit and offset to paginate large result sets.",
+			fmt.Sprintf("Search file contents for a regex pattern. Respects .gitignore. Default limit %d matches.", DefaultGrepLimit),
+			"- Regex by default; `literal=true` for strings with regex metacharacters. Literal braces need escaping (`interface\\{\\}`).",
+			"- `output_mode`: \"content\" (default), \"files_with_matches\", \"count\". Use `before_context`/`after_context` for surrounding lines.",
+			"- `head_limit`/`offset` paginate; `multiline=true` lets patterns span lines.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"pattern": map[string]any{
-					"type":        "string",
-					"description": "Search pattern (regex by default, or literal string with literal=true)",
-				},
-				"path": map[string]any{
-					"type":        "string",
-					"description": "Directory or file to search in (defaults to working directory)",
-				},
-				"glob": map[string]any{
-					"type":        "string",
-					"description": "Glob pattern to filter files (e.g., \"*.go\", \"*.{ts,tsx}\")",
-				},
-				"ignoreCase": map[string]any{
-					"type":        "boolean",
-					"description": "Case-insensitive search (default: false)",
-				},
-				"literal": map[string]any{
-					"type":        "boolean",
-					"description": "Treat pattern as literal string, not regex (default: false)",
-				},
-				"multiline": map[string]any{
-					"type":        "boolean",
-					"description": "Enable multiline mode where . matches newlines and patterns can span lines (default: false)",
-				},
-				"context": map[string]any{
-					"type":        "integer",
-					"description": "Number of lines to show before and after each match (default: 0)",
-				},
-				"before_context": map[string]any{
-					"type":        "integer",
-					"description": "Number of lines to show before each match (-B). Overrides context for before.",
-				},
-				"after_context": map[string]any{
-					"type":        "integer",
-					"description": "Number of lines to show after each match (-A). Overrides context for after.",
-				},
-				"head_limit": map[string]any{
-					"type":        "integer",
-					"description": fmt.Sprintf("Maximum number of results to return (default: %d)", DefaultGrepLimit),
-				},
-				"offset": map[string]any{
-					"type":        "integer",
-					"description": "Skip first N results before applying head_limit, for pagination (default: 0)",
-				},
+				"pattern":        map[string]any{"type": "string", "description": "Regex pattern (or literal if literal=true)."},
+				"path":           map[string]any{"type": "string", "description": "Search root; defaults to workspace."},
+				"glob":           map[string]any{"type": "string", "description": "Filename filter (e.g. `*.go`, `*.{ts,tsx}`)."},
+				"case_insensitive": map[string]any{"type": "boolean", "description": "Case-insensitive."},
+				"literal":        map[string]any{"type": "boolean", "description": "Treat pattern as literal string."},
+				"multiline":      map[string]any{"type": "boolean", "description": "Allow patterns to span newlines."},
+				"context":        map[string]any{"type": "integer", "description": "Lines of context before and after each match."},
+				"before_context": map[string]any{"type": "integer", "description": "Lines before each match (overrides context)."},
+				"after_context":  map[string]any{"type": "integer", "description": "Lines after each match (overrides context)."},
+				"head_limit":     map[string]any{"type": "integer", "description": fmt.Sprintf("Max results (default %d).", DefaultGrepLimit)},
+				"offset":         map[string]any{"type": "integer", "description": "Skip N results before head_limit."},
 				"output_mode": map[string]any{
 					"type":        "string",
-					"description": "Output format: \"content\" shows matching lines (default), \"files_with_matches\" shows only file paths, \"count\" shows match counts per file.",
+					"description": "content | files_with_matches | count.",
 					"enum":        []string{"content", "files_with_matches", "count"},
 				},
 			},
@@ -129,7 +88,7 @@ func GrepTool(root *os.Root) tool.Tool {
 
 			ignoreCase := false
 
-			if ic, ok := args["ignoreCase"].(bool); ok {
+			if ic, ok := args["case_insensitive"].(bool); ok {
 				ignoreCase = ic
 			}
 
@@ -160,9 +119,6 @@ func GrepTool(root *os.Root) tool.Tool {
 			headLimit := DefaultGrepLimit
 
 			if l, ok := args["head_limit"].(float64); ok && l > 0 {
-				headLimit = int(l)
-			}
-			if l, ok := args["limit"].(float64); ok && l > 0 {
 				headLimit = int(l)
 			}
 
@@ -378,18 +334,19 @@ func GrepTool(root *os.Root) tool.Tool {
 			var notices []string
 
 			if limitReached {
-				notices = append(notices, fmt.Sprintf("%d results limit reached", headLimit))
 				if resultOffset == 0 {
-					notices = append(notices, fmt.Sprintf("use offset=%d to see more", headLimit))
+					notices = append(notices, fmt.Sprintf("limit %d hit; offset=%d for more", headLimit, headLimit))
+				} else {
+					notices = append(notices, fmt.Sprintf("limit %d hit", headLimit))
 				}
 			}
 
 			if truncated {
-				notices = append(notices, fmt.Sprintf("%dKB limit reached", DefaultMaxBytes/1024))
+				notices = append(notices, fmt.Sprintf("%dKB cap", DefaultMaxBytes/1024))
 			}
 
 			if len(notices) > 0 {
-				output += fmt.Sprintf("\n\n[%s]", strings.Join(notices, ". "))
+				output += "\n\n[" + strings.Join(notices, "; ") + "]"
 			}
 
 			return output, nil

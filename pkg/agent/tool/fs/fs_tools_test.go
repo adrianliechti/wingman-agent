@@ -648,7 +648,7 @@ func TestFindTool(t *testing.T) {
 			t.Errorf("oldest files leaked in despite limit=3, got: %s", result)
 		}
 		// And the notice must surface that we truncated.
-		if !strings.Contains(result, "20 files found, showing newest 3") {
+		if !strings.Contains(result, "20 found, showing newest 3") {
 			t.Errorf("expected truncation notice, got: %s", result)
 		}
 	})
@@ -699,7 +699,7 @@ func TestGrepTool(t *testing.T) {
 	t.Run("grep case insensitive", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
 			"pattern":    "HELLO",
-			"ignoreCase": true,
+			"case_insensitive": true,
 		})
 
 		if err != nil {

@@ -21,24 +21,10 @@ const (
 
 func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 	description := strings.Join([]string{
-		fmt.Sprintf("Execute a shell command and return its output. Default timeout: %ds, max: 600s.", defaultTimeout),
-		"",
-		"IMPORTANT: Prefer dedicated tools for routine file operations:",
-		"- File search: `find` (NOT shell find/ls)",
-		"- Content search: `grep` (NOT shell grep/rg)",
-		"- Read files: `read` (NOT cat/head/tail)",
-		"- Edit files: `edit` (NOT sed/awk)",
-		"- Write files: `write` (NOT echo/cat with heredoc)",
-		"Use shell for build, test, run, package-manager, git, formatter, generator, and project commands.",
-		"",
-		"Usage:",
-		"- Always provide a brief description of what the command does.",
-		"- For multiple independent commands, make multiple shell calls in parallel.",
-		"- For dependent commands, chain with && in a single call (on Windows PowerShell 5.1, use `; if ($?) {` instead since && is not supported).",
-		"- Use ; only when you need sequential execution but don't care if earlier commands fail.",
-		"- For git: prefer new commits over amending; never use --no-verify, --force, or -i (interactive) unless explicitly asked.",
-		"- If a pre-commit hook rejects a commit, the commit did NOT happen. Fix the issue, re-stage, and create a NEW commit — do not use --amend, which would silently rewrite the previous commit.",
-		"- If a command is long-running, increase the timeout instead of using sleep.",
+		fmt.Sprintf("Execute a shell command and return its output. Default timeout %ds, max 600s.", defaultTimeout),
+		"- Quote paths with spaces. Chain dependent commands with `&&` in one call; make separate calls for independent commands.",
+		"- Use `;` only for sequential commands where earlier failures are acceptable.",
+		"- Increase timeout for long-running commands; do not insert `sleep`.",
 	}, "\n")
 
 	return []tool.Tool{{
@@ -50,20 +36,9 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 			"type": "object",
 
 			"properties": map[string]any{
-				"command": map[string]any{
-					"type":        "string",
-					"description": "The shell command to execute",
-				},
-
-				"description": map[string]any{
-					"type":        "string",
-					"description": "Brief description of what this command does (e.g., \"Run unit tests\", \"Install dependencies\")",
-				},
-
-				"timeout": map[string]any{
-					"type":        "integer",
-					"description": fmt.Sprintf("Timeout in seconds (default: %d, max: 600)", defaultTimeout),
-				},
+				"command":     map[string]any{"type": "string", "description": "Command to run."},
+				"description": map[string]any{"type": "string", "description": "Short label (e.g. \"Run unit tests\")."},
+				"timeout":     map[string]any{"type": "integer", "description": fmt.Sprintf("Seconds (default %d, max 600).", defaultTimeout)},
 			},
 
 			"required": []string{"command"},
@@ -193,11 +168,7 @@ func truncateOutput(output string) string {
 		truncated = truncated[len(truncated)-maxBytes:]
 	}
 
-	shownLines := strings.Count(truncated, "\n") + 1
-	shownBytes := len(truncated)
-
-	notice := fmt.Sprintf("[Output truncated: showing last %d of %d lines (%d of %d bytes)]\n\n",
-		shownLines, totalLines, shownBytes, totalBytes)
+	notice := fmt.Sprintf("[truncated to last %d/%d lines, %dKB/%dKB]\n", maxLines, totalLines, len(truncated)/1024, totalBytes/1024)
 
 	return notice + truncated
 }
