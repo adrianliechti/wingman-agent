@@ -31,6 +31,11 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
+func fatal(err error) {
+	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	os.Exit(1)
+}
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -76,24 +81,25 @@ func main() {
 func runServer(ctx context.Context) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	port := fs.Int("port", 9000, "port to listen on")
+	noBrowser := fs.Bool("no-browser", false, "do not open browser on startup")
 	fs.Parse(os.Args[2:])
 
 	wd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 
-	srv, err := server.New(ctx, wd, *port)
+	srv, err := server.New(ctx, wd, &server.ServerOptions{
+		Port:      *port,
+		NoBrowser: *noBrowser,
+	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 	defer srv.Close()
 
 	if err := srv.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 }
 
@@ -104,8 +110,7 @@ func runACP(ctx context.Context) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	if err := acp.Run(ctx, os.Stdin, os.Stdout); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 }
 
@@ -115,8 +120,7 @@ func runProxy(ctx context.Context) {
 	fs.Parse(os.Args[2:])
 
 	if err := proxy.Run(ctx, proxy.Options{Port: *port}); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 }
 
@@ -149,8 +153,7 @@ func runRun(ctx context.Context) {
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 }
 
@@ -159,30 +162,28 @@ func runTUI(ctx context.Context, sessionID string) {
 
 	wd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 
 	cfg, err := agent.DefaultConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
+
 	ws, err := code.NewWorkspace(wd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 	defer ws.Close()
+
 	c := ws.NewAgent(cfg, nil)
+	sessionsDir := filepath.Join(filepath.Dir(ws.MemoryPath), "sessions")
 
 	if sessionID == "latest" {
-		sessions, err := session.List(filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"))
+		sessions, err := session.List(sessionsDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
-
 		if len(sessions) > 0 {
 			sessionID = sessions[0].ID
 		} else {
@@ -191,42 +192,36 @@ func runTUI(ctx context.Context, sessionID string) {
 	}
 
 	if sessionID != "" {
-		s, err := session.Load(filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"), sessionID)
+		s, err := session.Load(sessionsDir, sessionID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
-
 		c.Messages = s.State.Messages
 		c.Usage = s.State.Usage
 	}
 
 	if err := codetui.New(ctx, c, sessionID).Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 }
 
 func runClaw(ctx context.Context) {
 	cfg, cleanup, err := claw.DefaultConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 	defer cleanup()
 
 	c := claw.New(cfg)
 
 	if err := c.Init(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 
 	cfg.Channels = []channel.Channel{clawtui.New(c)}
 
 	if err := c.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 }
 
@@ -235,7 +230,7 @@ func printHelp(w io.Writer) {
 
 Usage:
   wingman [--resume [id]]      Launch the agent TUI
-  wingman server [-port N]     Run the web UI server
+  wingman server [-port N] [-no-browser]  Run the web UI server
   wingman acp                  Run as an ACP stdio server
   wingman claw                 Run the claw multi-agent runner
   wingman proxy [-port N]      Run the API proxy + dashboard (requires WINGMAN_URL)

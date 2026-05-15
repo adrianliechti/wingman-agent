@@ -29,8 +29,14 @@ var staticFiles embed.FS
 
 var StaticFS, _ = fs.Sub(staticFiles, "static")
 
+type ServerOptions struct {
+	Port      int
+	NoBrowser bool
+}
+
 type Server struct {
-	port int
+	port      int
+	noBrowser bool
 
 	workspace *code.Workspace
 
@@ -56,7 +62,11 @@ type Server struct {
 	wsConns map[*websocket.Conn]struct{}
 }
 
-func New(ctx context.Context, workDir string, port int) (*Server, error) {
+func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, error) {
+	if opts == nil {
+		opts = new(ServerOptions)
+	}
+
 	cfg, err := agent.DefaultConfig()
 	if err != nil {
 		return nil, err
@@ -67,7 +77,8 @@ func New(ctx context.Context, workDir string, port int) (*Server, error) {
 	}
 
 	s := &Server{
-		port:        port,
+		port:        opts.Port,
+		noBrowser:   opts.NoBrowser,
 		workspace:   ws,
 		config:      cfg,
 		ctx:         ctx,
@@ -136,7 +147,7 @@ func (s *Server) Run(ctx context.Context) error {
 	url := fmt.Sprintf("http://localhost:%d", s.port)
 	fmt.Fprintf(os.Stderr, "Wingman running at %s\n", url)
 
-	if os.Getenv("WINGMAN_NO_BROWSER") == "" {
+	if !s.noBrowser {
 		openBrowser(url)
 	}
 
