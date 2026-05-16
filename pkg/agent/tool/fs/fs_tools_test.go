@@ -60,6 +60,10 @@ func TestReadTool(t *testing.T) {
 		if !strings.Contains(result, "line1") || !strings.Contains(result, "line5") {
 			t.Errorf("expected full content, got: %s", result)
 		}
+
+		if !strings.Contains(result, "1\tline1") {
+			t.Errorf("expected compact cat -n style line numbers, got: %s", result)
+		}
 	})
 
 	t.Run("read with offset", func(t *testing.T) {
@@ -79,6 +83,10 @@ func TestReadTool(t *testing.T) {
 		if !strings.Contains(result, "line3") {
 			t.Errorf("should contain line3, got: %s", result)
 		}
+
+		if !strings.Contains(result, "3\tline3") {
+			t.Errorf("expected offset to start at 1-based line 3, got: %s", result)
+		}
 	})
 
 	t.Run("read with limit", func(t *testing.T) {
@@ -93,6 +101,70 @@ func TestReadTool(t *testing.T) {
 
 		if !strings.Contains(result, "line1") {
 			t.Errorf("should contain line1, got: %s", result)
+		}
+
+		if strings.Contains(result, "line3") {
+			t.Errorf("limit should cap returned lines, got: %s", result)
+		}
+		if !strings.Contains(result, "offset=3") {
+			t.Errorf("expected continuation offset, got: %s", result)
+		}
+	})
+
+	t.Run("read rejects non-positive limit", func(t *testing.T) {
+		_, err := readTool.Execute(context.Background(), map[string]any{
+			"path":  "test.txt",
+			"limit": 0,
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "limit must be") {
+			t.Fatalf("expected limit validation error, got: %v", err)
+		}
+	})
+
+	t.Run("read rejects fractional offset", func(t *testing.T) {
+		_, err := readTool.Execute(context.Background(), map[string]any{
+			"path":   "test.txt",
+			"offset": 1.5,
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "offset must be") {
+			t.Fatalf("expected offset validation error, got: %v", err)
+		}
+	})
+
+	t.Run("read rejects zero offset", func(t *testing.T) {
+		_, err := readTool.Execute(context.Background(), map[string]any{
+			"path":   "test.txt",
+			"offset": 0,
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "positive 1-based") {
+			t.Fatalf("expected offset validation error, got: %v", err)
+		}
+	})
+
+	t.Run("read offset past end returns reminder", func(t *testing.T) {
+		result, err := readTool.Execute(context.Background(), map[string]any{
+			"path":   "test.txt",
+			"offset": 99,
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(result, "shorter than the provided offset (99)") {
+			t.Errorf("expected offset reminder, got: %s", result)
+		}
+	})
+
+	t.Run("read rejects directories", func(t *testing.T) {
+		_, err := readTool.Execute(context.Background(), map[string]any{
+			"path": ".",
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "directory") {
+			t.Fatalf("expected directory error, got: %v", err)
 		}
 	})
 
@@ -267,6 +339,17 @@ func TestWriteTool(t *testing.T) {
 			t.Error("expected error for path outside workspace")
 		}
 	})
+
+	t.Run("write rejects directory path", func(t *testing.T) {
+		_, err := writeTool.Execute(context.Background(), map[string]any{
+			"path":    ".",
+			"content": "should fail",
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "directory") {
+			t.Fatalf("expected directory error, got: %v", err)
+		}
+	})
 }
 
 func TestEditTool(t *testing.T) {
@@ -305,6 +388,74 @@ func TestEditTool(t *testing.T) {
 
 		if string(content) != "hello universe" {
 			t.Errorf("expected 'hello universe', got: %s", content)
+		}
+	})
+
+	t.Run("edit can create file with empty old string", func(t *testing.T) {
+		result, err := editTool.Execute(context.Background(), map[string]any{
+			"path":       "created_by_edit.txt",
+			"old_string": "",
+			"new_string": "created content",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(result, "Successfully") {
+			t.Errorf("expected success message, got: %s", result)
+		}
+
+		content, err := os.ReadFile(filepath.Join(tmpDir, "created_by_edit.txt"))
+		if err != nil {
+			t.Fatalf("failed to read created file: %v", err)
+		}
+		if string(content) != "created content" {
+			t.Errorf("expected created content, got: %s", content)
+		}
+	})
+
+	t.Run("edit rejects empty old string on non-empty file", func(t *testing.T) {
+		testFile := filepath.Join(tmpDir, "nonempty_empty_old.txt")
+		os.WriteFile(testFile, []byte("existing"), 0644)
+
+		_, err := editTool.Execute(context.Background(), map[string]any{
+			"path":       "nonempty_empty_old.txt",
+			"old_string": "",
+			"new_string": "replacement",
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "already has content") {
+			t.Fatalf("expected non-empty file error, got: %v", err)
+		}
+	})
+
+	t.Run("edit preserves curly quote style", func(t *testing.T) {
+		testFile := filepath.Join(tmpDir, "curly_quotes.txt")
+		os.WriteFile(testFile, []byte("title: “Hello”\n"), 0644)
+
+		_, err := ReadTool(root).Execute(context.Background(), map[string]any{
+			"path": "curly_quotes.txt",
+		})
+		if err != nil {
+			t.Fatalf("unexpected read error: %v", err)
+		}
+
+		_, err = editTool.Execute(context.Background(), map[string]any{
+			"path":       "curly_quotes.txt",
+			"old_string": `"Hello"`,
+			"new_string": `"World"`,
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		content, err := os.ReadFile(testFile)
+		if err != nil {
+			t.Fatalf("failed to read file: %v", err)
+		}
+		if string(content) != "title: “World”\n" {
+			t.Errorf("expected curly quote style preserved, got: %s", content)
 		}
 	})
 
@@ -464,97 +615,7 @@ func TestEditTool(t *testing.T) {
 
 }
 
-func TestLsTool(t *testing.T) {
-	root, tmpDir, cleanup := createTestRoot(t)
-	defer cleanup()
-
-	os.MkdirAll(filepath.Join(tmpDir, "subdir"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "file1.txt"), []byte("content"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "file2.go"), []byte("content"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, ".hidden"), []byte("content"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "subdir", "nested.txt"), []byte("content"), 0644)
-
-	lsTool := LsTool(root)
-
-	t.Run("list current directory", func(t *testing.T) {
-		result, err := lsTool.Execute(context.Background(), map[string]any{})
-
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if !strings.Contains(result, "file1.txt") {
-			t.Errorf("expected file1.txt, got: %s", result)
-		}
-
-		if !strings.Contains(result, "subdir/") {
-			t.Errorf("expected subdir/ (with trailing slash), got: %s", result)
-		}
-	})
-
-	t.Run("list includes hidden files", func(t *testing.T) {
-		result, err := lsTool.Execute(context.Background(), map[string]any{})
-
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if !strings.Contains(result, ".hidden") {
-			t.Errorf("expected .hidden file, got: %s", result)
-		}
-	})
-
-	t.Run("list subdirectory", func(t *testing.T) {
-		result, err := lsTool.Execute(context.Background(), map[string]any{
-			"path": "subdir",
-		})
-
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if !strings.Contains(result, "nested.txt") {
-			t.Errorf("expected nested.txt, got: %s", result)
-		}
-	})
-
-	t.Run("list empty directory", func(t *testing.T) {
-		os.MkdirAll(filepath.Join(tmpDir, "empty"), 0755)
-		result, err := lsTool.Execute(context.Background(), map[string]any{
-			"path": "empty",
-		})
-
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if !strings.Contains(result, "empty directory") {
-			t.Errorf("expected empty directory message, got: %s", result)
-		}
-	})
-
-	t.Run("list non-existent path", func(t *testing.T) {
-		_, err := lsTool.Execute(context.Background(), map[string]any{
-			"path": "nonexistent",
-		})
-
-		if err == nil {
-			t.Error("expected error for non-existent path")
-		}
-	})
-
-	t.Run("list file instead of directory", func(t *testing.T) {
-		_, err := lsTool.Execute(context.Background(), map[string]any{
-			"path": "file1.txt",
-		})
-
-		if err == nil {
-			t.Error("expected error when listing a file")
-		}
-	})
-}
-
-func TestFindTool(t *testing.T) {
+func TestGlobTool(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
@@ -565,14 +626,15 @@ func TestFindTool(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, "src", "pkg", "util.go"), []byte("content"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "src", "app.ts"), []byte("content"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "node_modules", "dep", "index.js"), []byte("content"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, ".hidden.go"), []byte("content"), 0644)
 
 	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.log\n"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "debug.log"), []byte("content"), 0644)
 
-	findTool := FindTool(root)
+	globTool := GlobTool(root)
 
-	t.Run("find all go files", func(t *testing.T) {
-		result, err := findTool.Execute(context.Background(), map[string]any{
+	t.Run("glob all go files", func(t *testing.T) {
+		result, err := globTool.Execute(context.Background(), map[string]any{
 			"pattern": "**/*.go",
 		})
 
@@ -593,8 +655,8 @@ func TestFindTool(t *testing.T) {
 		}
 	})
 
-	t.Run("find excludes node_modules", func(t *testing.T) {
-		result, err := findTool.Execute(context.Background(), map[string]any{
+	t.Run("glob includes ignored directories", func(t *testing.T) {
+		result, err := globTool.Execute(context.Background(), map[string]any{
 			"pattern": "**/*.js",
 		})
 
@@ -602,27 +664,31 @@ func TestFindTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if strings.Contains(result, "node_modules") {
-			t.Errorf("should not include node_modules, got: %s", result)
+		if !strings.Contains(result, "node_modules") {
+			t.Errorf("expected node_modules like reference Glob, got: %s", result)
 		}
 	})
 
-	t.Run("find respects gitignore", func(t *testing.T) {
-		result, err := findTool.Execute(context.Background(), map[string]any{
-			"pattern": "*.log",
+	t.Run("glob includes gitignored and hidden files", func(t *testing.T) {
+		result, err := globTool.Execute(context.Background(), map[string]any{
+			"pattern": "*",
 		})
 
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if strings.Contains(result, "debug.log") {
-			t.Errorf("should respect gitignore and exclude .log files, got: %s", result)
+		if !strings.Contains(result, "debug.log") {
+			t.Errorf("expected gitignored file like reference Glob, got: %s", result)
+		}
+
+		if !strings.Contains(result, ".hidden.go") {
+			t.Errorf("expected hidden file like reference Glob, got: %s", result)
 		}
 	})
 
-	t.Run("find in subdirectory", func(t *testing.T) {
-		result, err := findTool.Execute(context.Background(), map[string]any{
+	t.Run("glob in subdirectory", func(t *testing.T) {
+		result, err := globTool.Execute(context.Background(), map[string]any{
 			"pattern": "*.go",
 			"path":    "src",
 		})
@@ -635,37 +701,35 @@ func TestFindTool(t *testing.T) {
 			t.Errorf("should not include files outside src, got: %s", result)
 		}
 
-		if !strings.Contains(result, "app.go") {
+		if !strings.Contains(result, filepath.Join("src", "app.go")) {
 			t.Errorf("expected app.go, got: %s", result)
 		}
 
-		if !strings.Contains(result, filepath.Join("pkg", "util.go")) {
+		if !strings.Contains(result, filepath.Join("src", "pkg", "util.go")) {
 			t.Errorf("pattern without slash should match recursively under path, got: %s", result)
 		}
 	})
 
-	t.Run("find offset paginates newest first", func(t *testing.T) {
-		result, err := findTool.Execute(context.Background(), map[string]any{
+	t.Run("glob path returns workspace-relative paths", func(t *testing.T) {
+		result, err := globTool.Execute(context.Background(), map[string]any{
 			"pattern": "*.go",
-			"limit":   1,
-			"offset":  1,
+			"path":    "src/pkg",
 		})
 
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		lines := strings.Split(strings.Split(result, "\n\n")[0], "\n")
-		if len(lines) != 1 {
-			t.Fatalf("expected one result, got: %s", result)
+		if !strings.Contains(result, filepath.Join("src", "pkg", "util.go")) {
+			t.Errorf("expected workspace-relative path, got: %s", result)
 		}
-		if !strings.Contains(result, "offset=2 for more") {
-			t.Errorf("expected next offset notice, got: %s", result)
+		if strings.Contains(result, "\nutil.go") || result == "util.go" {
+			t.Errorf("did not expect path-relative-only result, got: %s", result)
 		}
 	})
 
-	t.Run("find with no matches", func(t *testing.T) {
-		result, err := findTool.Execute(context.Background(), map[string]any{
+	t.Run("glob with no matches", func(t *testing.T) {
+		result, err := globTool.Execute(context.Background(), map[string]any{
 			"pattern": "*.xyz",
 		})
 
@@ -678,8 +742,8 @@ func TestFindTool(t *testing.T) {
 		}
 	})
 
-	t.Run("find invalid glob", func(t *testing.T) {
-		_, err := findTool.Execute(context.Background(), map[string]any{
+	t.Run("glob invalid pattern", func(t *testing.T) {
+		_, err := globTool.Execute(context.Background(), map[string]any{
 			"pattern": "[",
 		})
 
@@ -688,8 +752,8 @@ func TestFindTool(t *testing.T) {
 		}
 	})
 
-	t.Run("find with absolute path", func(t *testing.T) {
-		result, err := findTool.Execute(context.Background(), map[string]any{
+	t.Run("glob with absolute search path", func(t *testing.T) {
+		result, err := globTool.Execute(context.Background(), map[string]any{
 			"pattern": "**/*.go",
 			"path":    tmpDir,
 		})
@@ -707,44 +771,54 @@ func TestFindTool(t *testing.T) {
 		}
 	})
 
-	t.Run("find returns newest when results exceed limit", func(t *testing.T) {
-		// Regression test: walk must visit every match before sorting, otherwise
-		// "newest first" is just "newest among the first N walked" which depends
-		// on filesystem order. Create files where the newest live alphabetically
-		// last, then assert they survive a small limit.
-		newRoot, newTmp, newCleanup := createTestRoot(t)
-		defer newCleanup()
-
-		base := time.Now().Add(-1 * time.Hour)
-		// 20 files: aa.tmp ... at.tmp. Earlier letter = older.
-		for i := range 20 {
-			name := fmt.Sprintf("%c%c.tmp", 'a', 'a'+i)
-			p := filepath.Join(newTmp, name)
-			os.WriteFile(p, []byte("x"), 0644)
-			os.Chtimes(p, base.Add(time.Duration(i)*time.Minute), base.Add(time.Duration(i)*time.Minute))
-		}
-
-		result, err := FindTool(newRoot).Execute(context.Background(), map[string]any{
-			"pattern": "*.tmp",
-			"limit":   float64(3),
+	t.Run("glob with absolute pattern", func(t *testing.T) {
+		result, err := globTool.Execute(context.Background(), map[string]any{
+			"pattern": filepath.Join(tmpDir, "src", "*.go"),
+			"path":    "node_modules",
 		})
 
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// Newest 3 are the last three alphabetically: ar.tmp, as.tmp, at.tmp.
-		for _, want := range []string{"ar.tmp", "as.tmp", "at.tmp"} {
+		if strings.Contains(result, "main.go") || strings.Contains(result, "node_modules") {
+			t.Errorf("absolute pattern should override path, got: %s", result)
+		}
+
+		if !strings.Contains(result, "app.go") {
+			t.Errorf("expected app.go, got: %s", result)
+		}
+	})
+
+	t.Run("glob returns modified order when results exceed limit", func(t *testing.T) {
+		newRoot, newTmp, newCleanup := createTestRoot(t)
+		defer newCleanup()
+
+		base := time.Now().Add(-1 * time.Hour)
+		for i := range 120 {
+			name := fmt.Sprintf("f%03d.tmp", i)
+			p := filepath.Join(newTmp, name)
+			os.WriteFile(p, []byte("x"), 0644)
+			os.Chtimes(p, base.Add(time.Duration(i)*time.Minute), base.Add(time.Duration(i)*time.Minute))
+		}
+
+		result, err := GlobTool(newRoot).Execute(context.Background(), map[string]any{
+			"pattern": "*.tmp",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		for _, want := range []string{"f000.tmp", "f001.tmp", "f002.tmp"} {
 			if !strings.Contains(result, want) {
-				t.Errorf("expected newest file %s in result, got: %s", want, result)
+				t.Errorf("expected oldest file %s in result, got: %s", want, result)
 			}
 		}
-		// Older files must be excluded.
-		if strings.Contains(result, "aa.tmp") || strings.Contains(result, "ab.tmp") {
-			t.Errorf("oldest files leaked in despite limit=3, got: %s", result)
+		if strings.Contains(result, "f118.tmp") || strings.Contains(result, "f119.tmp") {
+			t.Errorf("newest files leaked in despite limit, got: %s", result)
 		}
-		// And the notice must surface that we truncated.
-		if !strings.Contains(result, "20 found, showing 3 from offset 0; offset=3 for more") {
+		if !strings.Contains(result, "(Results are truncated. Consider using a more specific path or pattern.)") {
 			t.Errorf("expected truncation notice, got: %s", result)
 		}
 	})
@@ -792,13 +866,17 @@ func TestGrepTool(t *testing.T) {
 		if !strings.Contains(result, "Hello()") || !strings.Contains(result, "World()") {
 			t.Errorf("expected function matches, got: %s", result)
 		}
+
+		if !strings.Contains(result, "file1.go:3:func Hello") {
+			t.Errorf("expected ripgrep-style line-numbered content, got: %s", result)
+		}
 	})
 
 	t.Run("grep case insensitive", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
-			"pattern":          "HELLO",
-			"case_insensitive": true,
-			"output_mode":      "content",
+			"pattern":     "HELLO",
+			"-i":          true,
+			"output_mode": "content",
 		})
 
 		if err != nil {
@@ -860,6 +938,29 @@ func TestGrepTool(t *testing.T) {
 		if len(lines) < 2 {
 			t.Errorf("expected multiple lines with context, got: %s", result)
 		}
+
+		if !strings.Contains(result, "file1.go-2-") {
+			t.Errorf("expected ripgrep-style context separator, got: %s", result)
+		}
+	})
+
+	t.Run("grep can omit line numbers", func(t *testing.T) {
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern":     "func Hello",
+			"output_mode": "content",
+			"-n":          false,
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if strings.Contains(result, "file1.go:3:") {
+			t.Errorf("did not expect line numbers, got: %s", result)
+		}
+		if !strings.Contains(result, "file1.go:func Hello") {
+			t.Errorf("expected path:content output without line numbers, got: %s", result)
+		}
 	})
 
 	t.Run("grep no matches", func(t *testing.T) {
@@ -871,8 +972,8 @@ func TestGrepTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result, "No matches") {
-			t.Errorf("expected 'No matches', got: %s", result)
+		if result != "No files found" {
+			t.Errorf("expected 'No files found', got: %s", result)
 		}
 	})
 
@@ -884,6 +985,40 @@ func TestGrepTool(t *testing.T) {
 
 		if err == nil || !strings.Contains(err.Error(), "output_mode must be") {
 			t.Fatalf("expected output_mode validation error, got: %v", err)
+		}
+	})
+
+	t.Run("grep rejects fractional numeric parameters", func(t *testing.T) {
+		_, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern":     "Hello",
+			"output_mode": "content",
+			"head_limit":  1.5,
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "head_limit") {
+			t.Fatalf("expected head_limit validation error, got: %v", err)
+		}
+	})
+
+	t.Run("grep rejects negative numeric parameters", func(t *testing.T) {
+		_, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern": "Hello",
+			"offset":  -1,
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "offset") {
+			t.Fatalf("expected offset validation error, got: %v", err)
+		}
+	})
+
+	t.Run("grep rejects fractional context parameters", func(t *testing.T) {
+		_, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern": "Hello",
+			"context": 1.5,
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "context") {
+			t.Fatalf("expected context validation error, got: %v", err)
 		}
 	})
 
@@ -952,12 +1087,14 @@ func TestGrepTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result, "offset beyond results") {
+		if result != "No files found" {
 			t.Errorf("expected single files_with_matches result to be skipped, got: %s", result)
 		}
 	})
 
 	t.Run("grep content offset notice points to next page", func(t *testing.T) {
+		os.WriteFile(filepath.Join(tmpDir, "file3.go"), []byte("package extra\n\nfunc Third() {\n\treturn\n}"), 0644)
+
 		result, err := grepTool.Execute(context.Background(), map[string]any{
 			"pattern":     "func",
 			"output_mode": "content",
@@ -969,8 +1106,82 @@ func TestGrepTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result, "offset=2 for more") {
+		if !strings.Contains(result, "pagination = limit: 1, offset: 1") {
 			t.Errorf("expected next offset notice, got: %s", result)
+		}
+	})
+
+	t.Run("grep files_with_matches sorts by modified time before limit", func(t *testing.T) {
+		oldPath := filepath.Join(tmpDir, "oldmatch.txt")
+		newPath := filepath.Join(tmpDir, "newmatch.txt")
+		os.WriteFile(oldPath, []byte("mtime needle\n"), 0644)
+		os.WriteFile(newPath, []byte("mtime needle\n"), 0644)
+		oldTime := time.Now().Add(-2 * time.Hour)
+		newTime := time.Now().Add(-1 * time.Hour)
+		os.Chtimes(oldPath, oldTime, oldTime)
+		os.Chtimes(newPath, newTime, newTime)
+
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern":    "mtime needle",
+			"head_limit": 1,
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "newmatch.txt") || strings.Contains(result, "oldmatch.txt") {
+			t.Errorf("expected newest matching file only, got: %s", result)
+		}
+		if !strings.Contains(result, "limit: 1") {
+			t.Errorf("expected limit info, got: %s", result)
+		}
+	})
+
+	t.Run("grep includes hidden files and respects gitignore", func(t *testing.T) {
+		os.WriteFile(filepath.Join(tmpDir, ".hidden.txt"), []byte("secret-needle\n"), 0644)
+		os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("ignored.txt\n"), 0644)
+		os.WriteFile(filepath.Join(tmpDir, "ignored.txt"), []byte("secret-needle\n"), 0644)
+
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern": "secret-needle",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, ".hidden.txt") {
+			t.Errorf("expected hidden file match, got: %s", result)
+		}
+		if strings.Contains(result, "ignored.txt") {
+			t.Errorf("expected gitignored file to be skipped, got: %s", result)
+		}
+	})
+
+	t.Run("grep nested gitignore does not leak to siblings", func(t *testing.T) {
+		newRoot, newTmp, newCleanup := createTestRoot(t)
+		defer newCleanup()
+
+		os.MkdirAll(filepath.Join(newTmp, "a"), 0755)
+		os.MkdirAll(filepath.Join(newTmp, "b"), 0755)
+		os.WriteFile(filepath.Join(newTmp, "a", ".gitignore"), []byte("ignored.txt\n"), 0644)
+		os.WriteFile(filepath.Join(newTmp, "a", "ignored.txt"), []byte("leak-needle\n"), 0644)
+		os.WriteFile(filepath.Join(newTmp, "b", "ignored.txt"), []byte("leak-needle\n"), 0644)
+
+		result, err := GrepTool(newRoot).Execute(context.Background(), map[string]any{
+			"pattern": "leak-needle",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if strings.Contains(result, filepath.Join("a", "ignored.txt")) {
+			t.Errorf("expected a/.gitignore to ignore only a/ignored.txt, got: %s", result)
+		}
+		if !strings.Contains(result, filepath.Join("b", "ignored.txt")) {
+			t.Errorf("expected sibling ignored.txt not to be ignored, got: %s", result)
 		}
 	})
 
@@ -1023,7 +1234,7 @@ func TestGrepTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(nonMulti, "No matches") {
+		if nonMulti != "No files found" {
 			t.Errorf("non-multiline should not match across lines, got: %s", nonMulti)
 		}
 	})
@@ -1194,7 +1405,7 @@ func TestTools(t *testing.T) {
 
 	tools := Tools(root)
 
-	expectedNames := []string{"read", "write", "edit", "ls", "find", "grep"}
+	expectedNames := []string{"read", "write", "edit", "grep", "glob"}
 
 	if len(tools) != len(expectedNames) {
 		t.Errorf("expected %d tools, got %d", len(expectedNames), len(tools))
@@ -1221,7 +1432,7 @@ func TestTools(t *testing.T) {
 	}
 }
 
-func TestFindSkipsSymlinks(t *testing.T) {
+func TestGlobSkipsSymlinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink tests may require elevated privileges on Windows")
 	}
@@ -1238,14 +1449,14 @@ func TestFindSkipsSymlinks(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 
-	findTool := FindTool(root)
+	globTool := GlobTool(root)
 
-	result, err := findTool.Execute(context.Background(), map[string]any{
+	result, err := globTool.Execute(context.Background(), map[string]any{
 		"pattern": "*.txt",
 	})
 
 	if err != nil {
-		t.Fatalf("find should not fail with symlinks: %v", err)
+		t.Fatalf("glob should not fail with symlinks: %v", err)
 	}
 
 	if !strings.Contains(result, "root.txt") && !strings.Contains(result, "file.txt") {
@@ -1294,12 +1505,12 @@ func TestContextCancellation(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, "file.txt"), []byte("content"), 0644)
 	}
 
-	findTool := FindTool(root)
+	globTool := GlobTool(root)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := findTool.Execute(ctx, map[string]any{
+	_, err := globTool.Execute(ctx, map[string]any{
 		"pattern": "*.txt",
 	})
 

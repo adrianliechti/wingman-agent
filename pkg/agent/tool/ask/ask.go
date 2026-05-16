@@ -33,7 +33,8 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 				"question": map[string]any{"type": "string", "description": "Question for the user."},
 			},
 
-			"required": []string{"question"},
+			"required":             []string{"question"},
+			"additionalProperties": false,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {

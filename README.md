@@ -99,7 +99,7 @@ wingman --resume <session-id> # resume a specific session
 | `WINGMAN_TOKEN` | Wingman authentication token |
 | `WINGMAN_MODEL` | Model to use |
 
-> **Note:** The `fetch` (URL fetching) and `search_online` (web search) tools require `WINGMAN_URL` to be set, as they delegate to the Wingman server's extract and search APIs.
+> **Note:** The `web_fetch` (URL fetching) and `web_search` (web search) tools require `WINGMAN_URL` to be set, as they delegate to the Wingman server's extract and search APIs.
 
 ### Project Configuration
 
@@ -139,12 +139,11 @@ Wingman comes with powerful built-in tools:
 | `read` | Read file contents with optional line range |
 | `write` | Create or overwrite files |
 | `edit` | Make surgical edits to existing files |
-| `ls` | List directory contents |
-| `find` | Find files using glob patterns |
+| `glob` | Find files using glob patterns |
 | `grep` | Search file contents using regex patterns |
 | `shell` | Execute shell commands |
-| `fetch` | Fetch and extract content from a URL (requires `WINGMAN_URL`) |
-| `search_online` | Search the web for up-to-date information (requires `WINGMAN_URL`) |
+| `web_fetch` | Fetch and analyze content from a URL (requires `WINGMAN_URL`) |
+| `web_search` | Search the web for up-to-date information (requires `WINGMAN_URL`) |
 | `agent` | Launch a sub-agent to handle independent tasks in a separate context |
 | `lsp` | Code intelligence (definitions, references, diagnostics, symbols, call hierarchy) |
 
@@ -194,7 +193,7 @@ The LSP tool provides these operations:
 - **references** — Find all usages of a symbol
 - **hover** — Type information and documentation
 - **documentSymbol** / **workspaceSymbol** — List or search symbols
-- **incomingCalls** / **outgoingCalls** — Explore call graphs
+- **prepareCallHierarchy** / **incomingCalls** / **outgoingCalls** — Explore call graphs
 
 ## 🎨 Modes
 

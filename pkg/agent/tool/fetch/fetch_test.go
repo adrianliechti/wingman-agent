@@ -1,6 +1,41 @@
 package fetch
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
+
+func TestFetchTool(t *testing.T) {
+	fetchTool := Tools()[0]
+
+	if fetchTool.Name != "web_fetch" {
+		t.Errorf("expected name 'web_fetch', got %q", fetchTool.Name)
+	}
+
+	if fetchTool.Description == "" {
+		t.Error("expected non-empty description")
+	}
+
+	if fetchTool.Parameters == nil {
+		t.Error("expected non-nil parameters")
+	}
+
+	if fetchTool.Execute == nil {
+		t.Error("expected non-nil execute function")
+	}
+}
+
+func TestFetchToolMissingPrompt(t *testing.T) {
+	fetchTool := Tools()[0]
+
+	_, err := fetchTool.Execute(context.Background(), map[string]any{
+		"url": "https://example.com/docs",
+	})
+
+	if err == nil {
+		t.Error("expected error for missing prompt parameter")
+	}
+}
 
 func TestNormalizeFetchURL(t *testing.T) {
 	tests := []struct {
@@ -10,7 +45,7 @@ func TestNormalizeFetchURL(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "https", raw: "https://example.com/docs", want: "https://example.com/docs"},
-		{name: "http passthrough", raw: "http://example.com/docs", want: "http://example.com/docs"},
+		{name: "http upgraded", raw: "http://example.com/docs", want: "https://example.com/docs"},
 		{name: "trims", raw: " https://example.com/docs ", want: "https://example.com/docs"},
 		{name: "relative rejected", raw: "example.com/docs", wantErr: true},
 		{name: "ftp rejected", raw: "ftp://example.com/docs", wantErr: true},

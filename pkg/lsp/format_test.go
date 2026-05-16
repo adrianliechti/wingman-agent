@@ -42,6 +42,69 @@ func TestFormatDiagnostics(t *testing.T) {
 	}
 }
 
+func TestFormatLocationsGroupsByFile(t *testing.T) {
+	locations := []Location{
+		{URI: FileURI("/home/user/project/a.go"), Range: Range{Start: Position{Line: 1, Character: 2}}},
+		{URI: FileURI("/home/user/project/a.go"), Range: Range{Start: Position{Line: 4, Character: 0}}},
+		{URI: FileURI("/home/user/project/b.go"), Range: Range{Start: Position{Line: 9, Character: 3}}},
+	}
+
+	result := formatLocations("References", locations, "/home/user/project")
+
+	for _, want := range []string{
+		"References (3 found across 2 files)",
+		"a.go:\n  Line 2:3\n  Line 5:1",
+		"b.go:\n  Line 10:4",
+	} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("formatLocations missing %q in:\n%s", want, result)
+		}
+	}
+}
+
+func TestFormatSymbolInformationsGroupsByFile(t *testing.T) {
+	symbols := []SymbolInformation{
+		{Name: "First", Kind: 12, Location: Location{URI: FileURI("/home/user/project/a.go"), Range: Range{Start: Position{Line: 3}}}},
+		{Name: "Second", Kind: 6, Location: Location{URI: FileURI("/home/user/project/a.go"), Range: Range{Start: Position{Line: 8}}}},
+		{Name: "Third", Kind: 11, Location: Location{URI: FileURI("/home/user/project/b.go"), Range: Range{Start: Position{Line: 13}}}},
+	}
+
+	result := formatSymbolInformations(symbols, "/home/user/project")
+
+	for _, want := range []string{
+		"Symbols (3 found across 2 files)",
+		"a.go:\n  First (Function) - Line 4\n  Second (Method) - Line 9",
+		"b.go:\n  Third (Interface) - Line 14",
+	} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("formatSymbolInformations missing %q in:\n%s", want, result)
+		}
+	}
+}
+
+func TestFormatCallHierarchyItems(t *testing.T) {
+	items := []CallHierarchyItem{
+		{
+			Name:           "Handle",
+			Kind:           12,
+			Detail:         "func(ctx context.Context)",
+			URI:            FileURI("/home/user/project/handler.go"),
+			SelectionRange: Range{Start: Position{Line: 20}},
+		},
+	}
+
+	result := formatCallHierarchyItems(items, "/home/user/project")
+
+	for _, want := range []string{
+		"Call hierarchy items (1 found)",
+		"Handle (Function) - handler.go:21 [func(ctx context.Context)]",
+	} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("formatCallHierarchyItems missing %q in:\n%s", want, result)
+		}
+	}
+}
+
 func TestDiagnosticSeverityName(t *testing.T) {
 	tests := []struct {
 		severity int

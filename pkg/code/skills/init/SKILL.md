@@ -9,7 +9,7 @@ Scan the current project and generate an `AGENTS.md` file in the project root. T
 
 ## Steps
 
-1. **Explore the project structure** -- use `find` and `ls` to understand the directory layout, key files, and technology stack.
+1. **Explore the project structure** -- use `glob` and targeted `grep` searches to understand the directory layout, key files, and technology stack.
 
 2. **Detect the tech stack** -- look for:
    - Language: check file extensions, `go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`, `pom.xml`, etc.

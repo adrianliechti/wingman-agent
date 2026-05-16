@@ -37,7 +37,7 @@ func IsDangerousCommand(command string) bool {
 	if command == "" {
 		return false
 	}
-	if strings.Contains(command, "$(") || strings.Contains(command, "`") {
+	if hasDangerousCommandSubstitution(command) {
 		return true
 	}
 
@@ -61,7 +61,7 @@ func IsReadOnlyCommand(command string) bool {
 	if command == "" {
 		return false
 	}
-	if strings.Contains(command, "$(") || strings.Contains(command, "`") {
+	if hasShellCommandSubstitution(command) {
 		return false
 	}
 	if hasMutationSyntax(command) {
@@ -125,6 +125,145 @@ func containsUnquotedShellRedirection(command string) bool {
 	}
 
 	return false
+}
+
+func hasShellCommandSubstitution(command string) bool {
+	return len(extractCommandSubstitutions(command)) > 0
+}
+
+func hasDangerousCommandSubstitution(command string) bool {
+	for _, sub := range extractCommandSubstitutions(command) {
+		if IsDangerousCommand(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractCommandSubstitutions(command string) []string {
+	var substitutions []string
+
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+
+		if escaped {
+			escaped = false
+			continue
+		}
+
+		if ch == '\\' && !inSingle {
+			escaped = true
+			continue
+		}
+
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+
+		if inSingle {
+			continue
+		}
+
+		if ch == '$' && i+1 < len(command) && command[i+1] == '(' {
+			if sub, end, ok := readParenSubstitution(command, i+2); ok {
+				substitutions = append(substitutions, sub)
+				i = end
+			}
+			continue
+		}
+
+		if ch == '`' {
+			if sub, end, ok := readBacktickSubstitution(command, i+1); ok {
+				substitutions = append(substitutions, sub)
+				i = end
+			}
+		}
+	}
+
+	return substitutions
+}
+
+func readParenSubstitution(command string, start int) (string, int, bool) {
+	depth := 1
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for i := start; i < len(command); i++ {
+		ch := command[i]
+
+		if escaped {
+			escaped = false
+			continue
+		}
+
+		if ch == '\\' && !inSingle {
+			escaped = true
+			continue
+		}
+
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+
+		if inSingle || inDouble {
+			continue
+		}
+
+		if ch == '(' {
+			depth++
+			continue
+		}
+
+		if ch == ')' {
+			depth--
+			if depth == 0 {
+				return command[start:i], i, true
+			}
+		}
+	}
+
+	return "", 0, false
+}
+
+func readBacktickSubstitution(command string, start int) (string, int, bool) {
+	escaped := false
+
+	for i := start; i < len(command); i++ {
+		ch := command[i]
+
+		if escaped {
+			escaped = false
+			continue
+		}
+
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+
+		if ch == '`' {
+			return command[start:i], i, true
+		}
+	}
+
+	return "", 0, false
 }
 
 // splitCommandSegments splits a command string on |, &&, ||, ;, and newline

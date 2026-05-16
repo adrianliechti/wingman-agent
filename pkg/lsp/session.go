@@ -391,17 +391,7 @@ func (s *Session) DocumentSymbols(ctx context.Context, uri string, filePath stri
 }
 
 func (s *Session) CallHierarchy(ctx context.Context, uri string, line, column int, incoming bool) (string, error) {
-	params := TextDocumentPositionParams{
-		TextDocument: TextDocumentIdentifier{URI: uri},
-		Position:     Position{Line: line, Character: column},
-	}
-
-	var prepareResult json.RawMessage
-	if err := s.CallAndAwait(ctx, "textDocument/prepareCallHierarchy", params, &prepareResult); err != nil {
-		return "", err
-	}
-
-	items, err := parseCallHierarchyItems(prepareResult)
+	items, err := s.prepareCallHierarchyItems(ctx, uri, line, column)
 	if err != nil || len(items) == 0 {
 		return "No call hierarchy item found at this position", nil
 	}
@@ -410,6 +400,33 @@ func (s *Session) CallHierarchy(ctx context.Context, uri string, line, column in
 		return s.incomingCalls(ctx, items[0])
 	}
 	return s.outgoingCalls(ctx, items[0])
+}
+
+func (s *Session) PrepareCallHierarchy(ctx context.Context, uri string, line, column int) (string, error) {
+	items, err := s.prepareCallHierarchyItems(ctx, uri, line, column)
+	if err != nil {
+		return "", err
+	}
+
+	if len(items) == 0 {
+		return "No call hierarchy item found at this position", nil
+	}
+
+	return formatCallHierarchyItems(items, s.workingDir), nil
+}
+
+func (s *Session) prepareCallHierarchyItems(ctx context.Context, uri string, line, column int) ([]CallHierarchyItem, error) {
+	params := TextDocumentPositionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri},
+		Position:     Position{Line: line, Character: column},
+	}
+
+	var prepareResult json.RawMessage
+	if err := s.CallAndAwait(ctx, "textDocument/prepareCallHierarchy", params, &prepareResult); err != nil {
+		return nil, err
+	}
+
+	return parseCallHierarchyItems(prepareResult)
 }
 
 func (s *Session) initialize(ctx context.Context) error {

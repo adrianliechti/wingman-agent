@@ -22,16 +22,17 @@ const (
 
 func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 	description := strings.Join([]string{
-		fmt.Sprintf("Execute a command. On Unix/macOS this is `sh`; on Windows this is PowerShell. Default timeout %ds, max 600s.", defaultTimeout),
-		"- Use for build, test, run, package-manager, git, GitHub CLI (`gh`), and other operations that genuinely require a process. Prefer dedicated tools for codebase discovery and file work: `grep`/`find`/LSP for search, `read` for known files, `edit`/`write` for changes.",
-		"- Match command syntax to the host OS shown in your environment section. Examples: list dir → `ls` on Unix, `Get-ChildItem` on PowerShell. Read a file → use the `read` tool, not `cat` / `Get-Content`.",
-		"- Working directory persists across calls; shell state (env vars, aliases, `cd` from a prior call) does NOT.",
-		"- Don't use shell to read, edit, or write files (`cat`, `Get-Content`, `sed`, `Set-Content`, heredocs, `> file`, etc.) — use `read` / `edit` / `write` so the user can review the change.",
-		"- For GitHub URLs or PR/issue/release data, prefer `gh` commands (`gh pr view`, `gh issue view`, `gh api`) over `fetch`; they return structured authenticated data.",
+		fmt.Sprintf("Execute a command in the host shell. On Unix/macOS this uses the user's shell (`$SHELL`, falling back to `/bin/sh`); on Windows this uses PowerShell. Default timeout %ds, max 600s.", defaultTimeout),
+		"- Use for build, test, run, package-manager, git, GitHub CLI (`gh`), Docker/Kubernetes, project scripts, diagnostics, and other terminal operations.",
+		"- Prefer dedicated tools when they are clearly better for the job: `grep`/`glob`/LSP for code search, `read` for targeted file reads, `edit`/`write` for reviewable file changes. Shell is fine when a command is the natural interface or combines several process-level steps.",
+		"- Match command syntax to the host OS shown in your environment section. Examples: list dir -> `ls` on Unix, `Get-ChildItem` on PowerShell.",
+		"- Each call starts in the workspace directory. Shell state (env vars, aliases, `cd` from a prior call) does not persist between calls. Use absolute paths or chain dependent commands in one call.",
+		"- For GitHub URLs or PR/issue/release data, prefer `gh` commands (`gh pr view`, `gh issue view`, `gh api`) over `web_fetch`; they return structured authenticated data.",
 		"- For commits: only commit when asked, inspect `git status`, `git diff`, and recent `git log` first, stage specific files by name, never skip hooks, and create a new commit instead of amending unless explicitly requested.",
-		"- Quote paths with spaces. Chain dependent commands with `&&` (Unix) or `;` (PowerShell) in one call; make separate calls for independent commands (parallel beats sequential).",
+		"- Quote paths with spaces. Chain dependent commands with `&&` on Unix or PowerShell 7+, and with `; if ($?) { ... }` on Windows PowerShell 5.1. Use separate tool calls for independent commands.",
 		"- Once a check has passed (tests, build, lint), trust it — don't re-run to be sure.",
-		"- Increase timeout for long-running commands; do not insert `sleep` / `Start-Sleep`.",
+		"- Increase timeout for long-running commands. Avoid unnecessary `sleep` / `Start-Sleep`; if polling is needed, run a check command instead of sleeping first.",
+		"- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first.",
 	}, "\n")
 
 	return []tool.Tool{{
@@ -48,7 +49,8 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 				"timeout":     map[string]any{"type": "integer", "description": fmt.Sprintf("Seconds (default %d, max 600).", defaultTimeout)},
 			},
 
-			"required": []string{"command"},
+			"required":             []string{"command"},
+			"additionalProperties": false,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {

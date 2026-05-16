@@ -10,46 +10,40 @@ import (
 )
 
 type subagentType struct {
-	Name         string
-	Description  string
-	Instructions string
-	AllowTool    func(tool.Tool) bool
+	Instructions        string
+	AllowTool           func(tool.Tool) bool
+	WrapDynamicReadOnly bool
 }
 
 const generalPurposeInstructions = `You are an agent performing a specific delegated task. Complete only the assigned scope. Unless the task explicitly asks you to edit files, stay read-only. Search broadly when you do not know where something lives, then narrow down. Prefer editing existing files over creating new files, and never create documentation files unless explicitly requested. Lead with findings or changes made, grouped by file when relevant, using file:line references. State assumptions and verification gaps at the end, not at the start. Reply in <=200 words unless the task explicitly asks for more. Do not explain your process.`
 
-const exploreInstructions = `You are a read-only codebase exploration specialist. Complete the caller's search or analysis request efficiently. You may search, read, inspect git state, fetch URLs, and use read-only LSP or shell commands. You must not create, modify, delete, move, or copy files, install dependencies, or run mutating git commands. Use grep/find/LSP before broad reads, read only the line windows that matter, and use parallel tool calls when searches or reads are independent. Lead with the answer and cite file:line references. End with assumptions or gaps only if they matter. Reply in <=200 words unless the task explicitly asks for more.`
+const exploreInstructions = `You are a read-only codebase exploration specialist. Complete the caller's search or analysis request efficiently. You may search, read, inspect git state, fetch URLs, and use read-only LSP or shell commands. You must not create, modify, delete, move, or copy files, install dependencies, or run mutating git commands. Use grep/glob/LSP before broad reads, read only the line windows that matter, and use parallel tool calls when searches or reads are independent. Lead with the answer and cite file:line references. End with assumptions or gaps only if they matter. Reply in <=200 words unless the task explicitly asks for more.`
 
 const verificationInstructions = `You are a verification specialist. Your job is to test whether the implementation actually works, not to confirm by reading code. You must not modify project files, install dependencies, or run git write operations. You may run read-only inspection commands and normal build, test, lint, type-check, or local execution commands. For UI, API, CLI, migration, and integration changes, exercise the behavior directly when possible. Include the exact commands you ran, the relevant output, and a verdict. End with exactly one line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL.`
 
 var subagentTypes = map[string]subagentType{
 	"general-purpose": {
-		Name:         "general-purpose",
-		Description:  "General-purpose agent for complex searches, multi-step research, and scoped implementation work.",
 		Instructions: generalPurposeInstructions,
 		AllowTool:    allowNonAgentTool,
 	},
 	"explore": {
-		Name:         "explore",
-		Description:  "Read-only codebase exploration agent for finding files, tracing usage, and answering architecture questions.",
-		Instructions: exploreInstructions,
-		AllowTool:    allowReadOnlyTool,
+		Instructions:        exploreInstructions,
+		AllowTool:           allowReadOnlyTool,
+		WrapDynamicReadOnly: true,
 	},
 	"verification": {
-		Name:         "verification",
-		Description:  "Verification-only agent for running checks and trying to break an implementation before reporting completion.",
 		Instructions: verificationInstructions,
 		AllowTool:    allowVerificationTool,
 	},
 }
 
-func Tools(cfg *agent.Config) []tool.Tool {
-	availableTypes := []string{"general-purpose", "explore", "verification"}
+var availableTypes = []string{"general-purpose", "explore", "verification"}
 
+func Tools(cfg *agent.Config) []tool.Tool {
 	description := strings.Join([]string{
 		"Launch a sub-agent for a bounded delegated task. Only the final answer is returned; intermediate tool output stays out of your context.",
 		"- Use for open-ended searches, codebase-wide research, independent verification, or scoped implementation work that can proceed without blocking your next local step.",
-		"- Skip for directed 1-2 tool-call work: use `read`, `find`, `grep`, or LSP directly when you already know the path, symbol, or exact query.",
+		"- Skip for directed 1-2 tool-call work: use `read`, `glob`, `grep`, or LSP directly when you already know the path, symbol, or exact query.",
 		"- Choose `subagent_type`: `explore` for read-only codebase research, `verification` for checking an implementation, `general-purpose` for multi-step research or implementation. Defaults to `general-purpose`.",
 		"- Fresh sub-agents start with zero conversation context. Brief them like a capable colleague who just joined: goal, relevant paths/symbols, what you already learned or ruled out, allowed edit scope, and expected output shape. Keep prompts concise but complete; ask for a short report when enough.",
 		"- Never delegate synthesis. Use the returned report as input, then make the decision or user-facing summary yourself.",
@@ -75,7 +69,8 @@ func Tools(cfg *agent.Config) []tool.Tool {
 				"effort": map[string]any{"type": "string", "description": "Optional reasoning effort override for this sub-agent. Omit to inherit the parent effort.", "enum": []string{"low", "medium", "high"}},
 			},
 
-			"required": []string{"description", "prompt"},
+			"required":             []string{"description", "prompt"},
+			"additionalProperties": false,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
@@ -187,7 +182,7 @@ func toolsForType(tools []tool.Tool, typ subagentType) []tool.Tool {
 			continue
 		}
 
-		if typ.Name == "explore" && t.Effect != nil && t.Effect(nil) == tool.EffectDynamic {
+		if typ.WrapDynamicReadOnly && t.Effect != nil && t.Effect(nil) == tool.EffectDynamic {
 			t = readOnlyDynamicTool(t)
 		}
 
@@ -243,7 +238,7 @@ func allowVerificationTool(t tool.Tool) bool {
 	}
 
 	switch t.Name {
-	case "write", "edit", "todo_write", "ask_user":
+	case "write", "edit", "ask_user":
 		return false
 	default:
 		return true

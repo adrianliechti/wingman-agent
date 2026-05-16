@@ -74,13 +74,13 @@ func toolDisplay(name string) (string, string) {
 	case name == "shell":
 		return "$", name
 	case name == "read", name == "write", name == "edit",
-		name == "ls", name == "find", name == "grep":
+		name == "glob", name == "grep":
 		return "⟡", name
-	case name == "fetch", name == "search_online":
+	case name == "web_fetch", name == "web_search":
 		return "⊕", name
 	case name == "ask_user":
 		return "?", name
-	case strings.HasPrefix(name, "get_lsp_") || strings.HasPrefix(name, "find_lsp_"):
+	case name == "lsp":
 		return "◇", name
 	default:
 		return "◈", name

@@ -11,17 +11,19 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
 const (
-	DefaultGrepLimit     = 200
+	DefaultGrepLimit     = 250
 	DefaultScanBufSize   = 64 * 1024
 	MaxScanBufSize       = 1024 * 1024
-	MaxLineDisplayLength = 200
+	MaxLineDisplayLength = 500
 )
 
 func GrepTool(root *os.Root) tool.Tool {
@@ -30,41 +32,41 @@ func GrepTool(root *os.Root) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			fmt.Sprintf("Primary tool for code/content search. Search file contents for a regex pattern. Respects .gitignore. Default limit %d matches.", DefaultGrepLimit),
-			"- Use this before `ls` or broad `read` when looking for symbols, functions, classes, config keys, TODOs, errors, text snippets, or files likely containing a term.",
-			"- Regex by default; `literal=true` for exact strings or text with regex metacharacters. Literal braces need escaping (`interface\\{\\}`).",
-			"- `output_mode`: \"files_with_matches\" (default — cheap, returns paths only), \"content\" (matched lines, optionally with `before_context`/`after_context`), \"count\". Start with files_with_matches; switch to content only when you need to see lines.",
-			"- Narrow by `type` (e.g. `go`, `ts`, `py`) or `glob` (e.g. `**/*.go`, `*.{ts,tsx}`). Both apply when set. Use `path` to limit search to a subtree or single file.",
-			"- Token efficiency: keep `head_limit` small until you know you need more; use `count` to size broad searches before asking for content.",
-			"- `head_limit`/`offset` paginate result entries across all modes; `head_limit=0` is unlimited. `multiline=true` lets patterns span lines.",
+			fmt.Sprintf("Search file contents with regex using ripgrep-style semantics. Respects .gitignore. Default limit: %d results.", DefaultGrepLimit),
+			"- Always use this for content search instead of shell `grep`/`rg` when possible.",
+			"- Supports regex syntax such as `log.*Error` or `function\\s+\\w+`; escape literal braces (`interface\\{\\}`).",
+			"- `output_mode`: `files_with_matches` (default), `content`, or `count`.",
+			"- Filter with `glob` (e.g. `*.js`, `**/*.tsx`) or `type` (e.g. `js`, `py`, `rust`). Use `path` for a subtree or single file.",
+			"- For open-ended searches requiring multiple rounds, use the `agent` tool.",
+			"- `head_limit`/`offset` paginate results; `offset` is 0-based and `head_limit=0` is unlimited. Use `multiline=true` for cross-line patterns.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"pattern":          map[string]any{"type": "string", "description": "Regex pattern (or literal if literal=true)."},
-				"path":             map[string]any{"type": "string", "description": "Search root; defaults to workspace."},
-				"glob":             map[string]any{"type": "string", "description": "Filename filter (e.g. `*.go`, `*.{ts,tsx}`)."},
-				"type":             map[string]any{"type": "string", "description": "File type filter (e.g. `go`, `ts`, `tsx`, `py`)."},
-				"case_insensitive": map[string]any{"type": "boolean", "description": "Case-insensitive."},
-				"-i":               map[string]any{"type": "boolean", "description": "Alias for case_insensitive."},
-				"literal":          map[string]any{"type": "boolean", "description": "Treat pattern as literal string."},
-				"multiline":        map[string]any{"type": "boolean", "description": "Allow patterns to span newlines."},
-				"context":          map[string]any{"type": "integer", "description": "Lines of context before and after each match."},
-				"-C":               map[string]any{"type": "integer", "description": "Alias for context."},
-				"before_context":   map[string]any{"type": "integer", "description": "Lines before each match (overrides context)."},
-				"-B":               map[string]any{"type": "integer", "description": "Alias for before_context."},
-				"after_context":    map[string]any{"type": "integer", "description": "Lines after each match (overrides context)."},
-				"-A":               map[string]any{"type": "integer", "description": "Alias for after_context."},
-				"head_limit":       map[string]any{"type": "integer", "description": fmt.Sprintf("Max results (default %d, 0 for unlimited).", DefaultGrepLimit)},
-				"offset":           map[string]any{"type": "integer", "description": "0-based number of result entries to skip before applying head_limit."},
+				"pattern":        map[string]any{"type": "string", "description": "The regular expression pattern to search for in file contents."},
+				"path":           map[string]any{"type": "string", "description": "Search root; defaults to workspace."},
+				"glob":           map[string]any{"type": "string", "description": "Glob pattern to filter files (e.g. `*.js`, `*.{ts,tsx}`); maps to rg --glob."},
+				"type":           map[string]any{"type": "string", "description": "File type filter (e.g. `go`, `ts`, `tsx`, `py`)."},
+				"-i":             map[string]any{"type": "boolean", "description": "Case-insensitive search."},
+				"-n":             map[string]any{"type": "boolean", "description": "Show line numbers in content output. Defaults to true."},
+				"multiline":      map[string]any{"type": "boolean", "description": "Allow patterns to span newlines."},
+				"context":        map[string]any{"type": "integer", "description": "Lines of context before and after each match."},
+				"-C":             map[string]any{"type": "integer", "description": "Alias for context."},
+				"before_context": map[string]any{"type": "integer", "description": "Lines before each match (overrides context)."},
+				"-B":             map[string]any{"type": "integer", "description": "Alias for before_context."},
+				"after_context":  map[string]any{"type": "integer", "description": "Lines after each match (overrides context)."},
+				"-A":             map[string]any{"type": "integer", "description": "Alias for after_context."},
+				"head_limit":     map[string]any{"type": "integer", "description": fmt.Sprintf("Max results (default %d, 0 for unlimited).", DefaultGrepLimit)},
+				"offset":         map[string]any{"type": "integer", "description": "0-based number of result entries to skip before applying head_limit."},
 				"output_mode": map[string]any{
 					"type":        "string",
 					"description": "files_with_matches | content | count.",
 					"enum":        []string{"content", "files_with_matches", "count"},
 				},
 			},
-			"required": []string{"pattern"},
+			"required":             []string{"pattern"},
+			"additionalProperties": false,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
@@ -88,10 +90,15 @@ func GrepTool(root *os.Root) tool.Tool {
 				return "", err
 			}
 
-			glob := ""
+			var globPatterns []string
 
 			if g, ok := args["glob"].(string); ok {
-				glob = g
+				globPatterns = splitGrepGlobs(g)
+			}
+			for _, glob := range globPatterns {
+				if _, err := doublestar.Match(strings.TrimPrefix(glob, "!"), ""); err != nil {
+					return "", fmt.Errorf("invalid glob pattern: %w", err)
+				}
 			}
 
 			typeFilter := ""
@@ -104,13 +111,13 @@ func GrepTool(root *os.Root) tool.Tool {
 			}
 
 			ignoreCase := false
-
-			if ic, ok := args["case_insensitive"].(bool); ok {
+			if ic, ok := args["-i"].(bool); ok {
 				ignoreCase = ic
 			}
 
-			if ic, ok := args["-i"].(bool); ok {
-				ignoreCase = ic
+			showLineNumbers := true
+			if n, ok := args["-n"].(bool); ok {
+				showLineNumbers = n
 			}
 
 			multiline := false
@@ -123,35 +130,59 @@ func GrepTool(root *os.Root) tool.Tool {
 			beforeContext := 0
 			afterContext := 0
 
-			if c, ok := optionalInt(args, "context"); ok && c > 0 {
+			if c, present, ok := optionalInteger(args, "context"); present {
+				if !ok || c < 0 {
+					return "", fmt.Errorf("context must be a non-negative integer")
+				}
 				contextLines = c
 				beforeContext = contextLines
 				afterContext = contextLines
 			}
 
-			if c, ok := optionalInt(args, "-C"); ok && c > 0 {
+			if c, present, ok := optionalInteger(args, "-C"); present {
+				if !ok || c < 0 {
+					return "", fmt.Errorf("-C must be a non-negative integer")
+				}
 				contextLines = c
 				beforeContext = contextLines
 				afterContext = contextLines
 			}
 
-			if bc, ok := optionalInt(args, "before_context"); ok && bc > 0 {
+			if bc, present, ok := optionalInteger(args, "before_context"); present {
+				if !ok || bc < 0 {
+					return "", fmt.Errorf("before_context must be a non-negative integer")
+				}
 				beforeContext = bc
 			}
 
-			if bc, ok := optionalInt(args, "-B"); ok && bc > 0 {
+			if bc, present, ok := optionalInteger(args, "-B"); present {
+				if !ok || bc < 0 {
+					return "", fmt.Errorf("-B must be a non-negative integer")
+				}
 				beforeContext = bc
 			}
 
-			if ac, ok := optionalInt(args, "after_context"); ok && ac > 0 {
+			if ac, present, ok := optionalInteger(args, "after_context"); present {
+				if !ok || ac < 0 {
+					return "", fmt.Errorf("after_context must be a non-negative integer")
+				}
 				afterContext = ac
 			}
 
-			if ac, ok := optionalInt(args, "-A"); ok && ac > 0 {
+			if ac, present, ok := optionalInteger(args, "-A"); present {
+				if !ok || ac < 0 {
+					return "", fmt.Errorf("-A must be a non-negative integer")
+				}
 				afterContext = ac
 			}
 
-			headLimit := nonNegativeIntArg(args, "head_limit", DefaultGrepLimit)
+			headLimit := DefaultGrepLimit
+			if hl, present, ok := optionalInteger(args, "head_limit"); present {
+				if !ok || hl < 0 {
+					return "", fmt.Errorf("head_limit must be a non-negative integer")
+				}
+				headLimit = hl
+			}
 
 			unlimited := headLimit == 0
 			effectiveLimit := headLimit
@@ -160,13 +191,11 @@ func GrepTool(root *os.Root) tool.Tool {
 			}
 
 			resultOffset := 0
-
-			resultOffset = positiveIntArg(args, "offset", 0)
-
-			literal := false
-
-			if l, ok := args["literal"].(bool); ok {
-				literal = l
+			if offset, present, ok := optionalInteger(args, "offset"); present {
+				if !ok || offset < 0 {
+					return "", fmt.Errorf("offset must be a non-negative integer")
+				}
+				resultOffset = offset
 			}
 
 			outputMode := "files_with_matches"
@@ -180,9 +209,6 @@ func GrepTool(root *os.Root) tool.Tool {
 			}
 
 			regexPattern := pattern
-			if literal {
-				regexPattern = regexp.QuoteMeta(pattern)
-			}
 
 			flags := ""
 			if ignoreCase {
@@ -213,39 +239,40 @@ func GrepTool(root *os.Root) tool.Tool {
 				if typeFilter != "" && !matchesType(searchPathFS, typeFilter) {
 					return "No matches found", nil
 				}
-				if glob != "" {
-					matched, err := doublestar.Match(glob, filepath.ToSlash(filepath.Base(searchPathFS)))
-					if err != nil {
-						return "", fmt.Errorf("invalid glob pattern: %w", err)
-					}
-					matchedPath, err := doublestar.Match(glob, filepath.ToSlash(searchPathFS))
-					if err != nil {
-						return "", fmt.Errorf("invalid glob pattern: %w", err)
-					}
-					if !matched && !matchedPath {
-						return "No matches found", nil
-					}
+				if !matchesGrepGlobs(globPatterns, searchPathFS, searchPathFS) {
+					return "No matches found", nil
 				}
 
-				reportPath := searchPath
-
-				if outputMode == "files_with_matches" && resultOffset > 0 {
-					return "No matches found (offset beyond results)", nil
-				}
+				reportPath := filepath.FromSlash(searchPathFS)
 
 				if outputMode == "count" {
 					count := countFileMatches(fsys, searchPathFS, re, multiline)
 					if count == 0 || resultOffset > 0 {
 						return "No matches found", nil
 					}
-					return fmt.Sprintf("%s:%d", reportPath, count), nil
+					occurrences := "occurrences"
+					if count == 1 {
+						occurrences = "occurrence"
+					}
+					return fmt.Sprintf("%s:%d\n\nFound %d total %s across 1 file.", reportPath, count, count, occurrences), nil
+				}
+
+				if outputMode == "files_with_matches" {
+					matches := searchFileWithContext(fsys, searchPathFS, re, 0, 0, 1, multiline, true)
+					if len(matches) == 0 {
+						return "No files found", nil
+					}
+					if resultOffset > 0 {
+						return "No files found", nil
+					}
+					return fmt.Sprintf("Found 1 file\n%s", reportPath), nil
 				}
 
 				searchLimit := effectiveLimit
 				if !unlimited {
-					searchLimit += resultOffset
+					searchLimit = resultOffset + headLimit + 1
 				}
-				matches := searchFileWithContext(fsys, searchPathFS, re, beforeContext, afterContext, searchLimit, multiline)
+				matches := searchFileWithContext(fsys, searchPathFS, re, beforeContext, afterContext, searchLimit, multiline, showLineNumbers)
 
 				if len(matches) == 0 {
 					return "No matches found", nil
@@ -253,7 +280,7 @@ func GrepTool(root *os.Root) tool.Tool {
 
 				if resultOffset > 0 {
 					if resultOffset >= len(matches) {
-						return "No matches found (offset beyond results)", nil
+						return "No matches found", nil
 					}
 					matches = matches[resultOffset:]
 				}
@@ -263,13 +290,11 @@ func GrepTool(root *os.Root) tool.Tool {
 					resultLimitReached = true
 				}
 
-				if outputMode == "files_with_matches" {
-					return reportPath, nil
-				}
-
 				output := strings.Join(matches, "\n")
-				if resultLimitReached {
-					output += fmt.Sprintf("\n\n[limit %d hit; offset=%d for more]", headLimit, resultOffset+headLimit)
+				if resultLimitReached || resultOffset > 0 {
+					if notice := formatGrepPaginationNotice(resultLimitReached, headLimit, resultOffset); notice != "" {
+						output += "\n\n[" + notice + "]"
+					}
 				}
 
 				return output, nil
@@ -277,26 +302,18 @@ func GrepTool(root *os.Root) tool.Tool {
 
 			var results []string
 			matchCount := 0
-			skippedCount := 0
 			limitReached := false
 
 			type fileMatch struct {
-				path  string
-				count int
+				path    string
+				count   int
+				modTime time.Time
 			}
 			var fileMatches []fileMatch
 
-			err = walkWorkspace(ctx, fsys, searchPathFS, func(path, relPath string) error {
-				if glob != "" {
-					matched, _ := doublestar.Match(glob, pathpkg.Base(path))
-
-					if !matched {
-						matched, _ = doublestar.Match(glob, relPath)
-
-						if !matched {
-							return nil
-						}
-					}
+			err = walkGrepFiles(ctx, fsys, searchPathFS, func(path, relPath string) error {
+				if !matchesGrepGlobs(globPatterns, path, relPath) {
+					return nil
 				}
 
 				if typeFilter != "" && !matchesType(path, typeFilter) {
@@ -308,21 +325,9 @@ func GrepTool(root *os.Root) tool.Tool {
 				}
 
 				if outputMode == "files_with_matches" {
-					matches := searchFileWithContext(fsys, path, re, 0, 0, 1, multiline)
+					matches := searchFileWithContext(fsys, path, re, 0, 0, 1, multiline, true)
 					if len(matches) > 0 {
-						matchCount++
-
-						if matchCount <= resultOffset {
-							skippedCount++
-							return nil
-						}
-
-						fileMatches = append(fileMatches, fileMatch{path: filepath.FromSlash(relPath)})
-
-						if !unlimited && len(fileMatches) >= headLimit {
-							limitReached = true
-							return filepath.SkipAll
-						}
+						fileMatches = append(fileMatches, fileMatch{path: filepath.FromSlash(path), modTime: fileModTime(fsys, path)})
 					}
 					return nil
 				}
@@ -330,24 +335,15 @@ func GrepTool(root *os.Root) tool.Tool {
 				if outputMode == "count" {
 					count := countFileMatches(fsys, path, re, multiline)
 					if count > 0 {
-						matchCount++
-
-						if matchCount <= resultOffset {
-							skippedCount++
-							return nil
-						}
-
-						fileMatches = append(fileMatches, fileMatch{path: filepath.FromSlash(relPath), count: count})
-
-						if !unlimited && len(fileMatches) >= headLimit {
-							limitReached = true
-							return filepath.SkipAll
-						}
+						fileMatches = append(fileMatches, fileMatch{path: filepath.FromSlash(path), count: count})
 					}
 					return nil
 				}
 
-				remaining := effectiveLimit - len(results) + resultOffset - skippedCount
+				remaining := effectiveLimit
+				if !unlimited {
+					remaining = resultOffset + headLimit + 1 - matchCount
+				}
 
 				if !unlimited && remaining <= 0 {
 					limitReached = true
@@ -355,19 +351,18 @@ func GrepTool(root *os.Root) tool.Tool {
 					return filepath.SkipAll
 				}
 
-				matches := searchFileWithContext(fsys, path, re, beforeContext, afterContext, remaining, multiline)
+				matches := searchFileWithContext(fsys, path, re, beforeContext, afterContext, remaining, multiline, showLineNumbers)
 
 				for _, m := range matches {
 					matchCount++
 
 					if matchCount <= resultOffset {
-						skippedCount++
 						continue
 					}
 
 					results = append(results, m)
 
-					if !unlimited && len(results) >= headLimit {
+					if !unlimited && len(results) > headLimit {
 						limitReached = true
 						return filepath.SkipAll
 					}
@@ -385,27 +380,66 @@ func GrepTool(root *os.Root) tool.Tool {
 			switch outputMode {
 			case "files_with_matches":
 				if len(fileMatches) == 0 {
-					return "No matches found", nil
+					return "No files found", nil
 				}
+				sort.Slice(fileMatches, func(i, j int) bool {
+					if fileMatches[i].modTime.Equal(fileMatches[j].modTime) {
+						return fileMatches[i].path < fileMatches[j].path
+					}
+					return fileMatches[i].modTime.After(fileMatches[j].modTime)
+				})
+				if resultOffset >= len(fileMatches) {
+					return "No files found", nil
+				}
+				start := resultOffset
+				end := len(fileMatches)
+				if !unlimited && start+headLimit < end {
+					end = start + headLimit
+					limitReached = true
+				}
+				fileMatches = fileMatches[start:end]
 				paths := make([]string, len(fileMatches))
 				for i, fm := range fileMatches {
 					paths[i] = fm.path
 				}
-				output = strings.Join(paths, "\n")
+				limitInfo := formatGrepLimitInfo(limitReached, headLimit, resultOffset)
+				output = fmt.Sprintf("Found %d %s%s\n%s", len(paths), plural(len(paths), "file"), limitInfo, strings.Join(paths, "\n"))
 
 			case "count":
 				if len(fileMatches) == 0 {
 					return "No matches found", nil
 				}
+				if resultOffset >= len(fileMatches) {
+					return "No matches found", nil
+				}
+				start := resultOffset
+				end := len(fileMatches)
+				if !unlimited && start+headLimit < end {
+					end = start + headLimit
+					limitReached = true
+				}
+				fileMatches = fileMatches[start:end]
 				lines := make([]string, len(fileMatches))
+				totalMatches := 0
 				for i, fm := range fileMatches {
 					lines[i] = fmt.Sprintf("%s:%d", fm.path, fm.count)
+					totalMatches += fm.count
 				}
 				output = strings.Join(lines, "\n")
+				limitInfo := formatGrepLimitInfo(limitReached, headLimit, resultOffset)
+				pagination := ""
+				if limitInfo != "" {
+					pagination = " with pagination =" + limitInfo
+				}
+				output += fmt.Sprintf("\n\nFound %d total %s across %d %s.%s", totalMatches, plural(totalMatches, "occurrence"), len(fileMatches), plural(len(fileMatches), "file"), pagination)
 
 			default:
 				if len(results) == 0 {
 					return "No matches found", nil
+				}
+				if !unlimited && len(results) > headLimit {
+					results = results[:headLimit]
+					limitReached = true
 				}
 				output = strings.Join(results, "\n")
 			}
@@ -414,8 +448,10 @@ func GrepTool(root *os.Root) tool.Tool {
 
 			var notices []string
 
-			if limitReached {
-				notices = append(notices, fmt.Sprintf("limit %d hit; offset=%d for more", headLimit, resultOffset+headLimit))
+			if outputMode == "content" && (limitReached || resultOffset > 0) {
+				if notice := formatGrepPaginationNotice(limitReached, headLimit, resultOffset); notice != "" {
+					notices = append(notices, notice)
+				}
 			}
 
 			if truncated {
@@ -438,6 +474,64 @@ func validGrepOutputMode(mode string) bool {
 	default:
 		return false
 	}
+}
+
+func splitGrepGlobs(glob string) []string {
+	var patterns []string
+	for _, field := range strings.Fields(glob) {
+		if strings.Contains(field, "{") && strings.Contains(field, "}") {
+			patterns = append(patterns, field)
+			continue
+		}
+		for _, part := range strings.Split(field, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				patterns = append(patterns, part)
+			}
+		}
+	}
+	return patterns
+}
+
+func matchesGrepGlobs(globs []string, path, relPath string) bool {
+	if len(globs) == 0 {
+		return true
+	}
+
+	matchedPositive := false
+	hasPositive := false
+	for _, glob := range globs {
+		negated := strings.HasPrefix(glob, "!")
+		pattern := strings.TrimPrefix(glob, "!")
+		if pattern == "" {
+			continue
+		}
+
+		matched := matchesSingleGrepGlob(pattern, path, relPath)
+		if negated {
+			if matched {
+				return false
+			}
+			continue
+		}
+
+		hasPositive = true
+		if matched {
+			matchedPositive = true
+		}
+	}
+
+	return !hasPositive || matchedPositive
+}
+
+func matchesSingleGrepGlob(pattern, path, relPath string) bool {
+	if matched, _ := doublestar.Match(pattern, filepath.Base(path)); matched {
+		return true
+	}
+	if matched, _ := doublestar.Match(pattern, filepath.ToSlash(relPath)); matched {
+		return true
+	}
+	matched, _ := doublestar.Match(pattern, filepath.ToSlash(path))
+	return matched
 }
 
 func countFileMatches(fsys fs.FS, path string, re *regexp.Regexp, multiline bool) int {
@@ -527,7 +621,110 @@ func maxInt() int {
 	return int(^uint(0) >> 1)
 }
 
-func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeContext, afterContext, limit int, multiline bool) []string {
+func plural(n int, singular string) string {
+	if n == 1 {
+		return singular
+	}
+	return singular + "s"
+}
+
+func formatGrepLimitInfo(limitReached bool, limit, offset int) string {
+	var parts []string
+	if limitReached {
+		parts = append(parts, fmt.Sprintf("limit: %d", limit))
+	}
+	if offset > 0 {
+		parts = append(parts, fmt.Sprintf("offset: %d", offset))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, ", ")
+}
+
+func formatGrepPaginationNotice(limitReached bool, limit, offset int) string {
+	info := strings.TrimSpace(formatGrepLimitInfo(limitReached, limit, offset))
+	if info == "" {
+		return ""
+	}
+	return "Showing results with pagination = " + info
+}
+
+func fileModTime(fsys fs.FS, path string) time.Time {
+	info, err := fs.Stat(fsys, path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
+func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, onFile func(path, relPath string) error) error {
+	rootPatterns := loadGitignore(fsys, nil)
+
+	return fs.WalkDir(fsys, root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+
+		if d.IsDir() {
+			if vcsDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+
+			matcher := gitignore.NewMatcher(gitignorePatternsForPath(fsys, rootPatterns, path, true))
+			pathParts := strings.Split(path, "/")
+			if matcher.Match(pathParts, true) {
+				return filepath.SkipDir
+			}
+
+			return nil
+		}
+
+		matcher := gitignore.NewMatcher(gitignorePatternsForPath(fsys, rootPatterns, path, false))
+		pathParts := strings.Split(path, "/")
+		if matcher.Match(pathParts, false) {
+			return nil
+		}
+
+		return onFile(path, relPathFromBase(root, path))
+	})
+}
+
+func gitignorePatternsForPath(fsys fs.FS, rootPatterns []gitignore.Pattern, path string, isDir bool) []gitignore.Pattern {
+	patterns := append([]gitignore.Pattern{}, rootPatterns...)
+	dir := path
+	if !isDir {
+		dir = pathpkg.Dir(dir)
+	}
+
+	var domains [][]string
+	for dir != "." && dir != "/" {
+		domains = append(domains, pathDomain(dir))
+		parent := pathpkg.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	for i := len(domains) - 1; i >= 0; i-- {
+		patterns = append(patterns, loadGitignore(fsys, domains[i])...)
+	}
+
+	return patterns
+}
+
+func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeContext, afterContext, limit int, multiline bool, showLineNumbers bool) []string {
 	f, err := fsys.Open(path)
 
 	if err != nil {
@@ -555,7 +752,7 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 	var scanCutoff string
 	if err := scanner.Err(); err != nil {
 		if err == bufio.ErrTooLong {
-			scanCutoff = fmt.Sprintf("%s:%d:! line exceeds %dKB scan limit; remainder of file skipped", displayPath, len(lines)+1, MaxScanBufSize/1024)
+			scanCutoff = formatGrepLine(displayPath, len(lines)+1, true, fmt.Sprintf("line exceeds %dKB scan limit; remainder of file skipped", MaxScanBufSize/1024), showLineNumbers)
 		} else {
 			// Other scanner errors (I/O) — bail like before.
 			return nil
@@ -633,19 +830,13 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 			}
 			printed[j] = true
 
-			prefix := " "
-
-			if matchedLines[j] {
-				prefix = ">"
-			}
-
 			lineContent := lines[j]
 
 			if len(lineContent) > MaxLineDisplayLength {
 				lineContent = lineContent[:MaxLineDisplayLength-3] + "..."
 			}
 
-			results = append(results, fmt.Sprintf("%s:%d:%s %s", displayPath, j+1, prefix, lineContent))
+			results = append(results, formatGrepLine(displayPath, j+1, matchedLines[j], lineContent, showLineNumbers))
 			lastPrinted = j
 		}
 	}
@@ -655,4 +846,15 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 	}
 
 	return results
+}
+
+func formatGrepLine(path string, lineNumber int, matched bool, content string, showLineNumbers bool) string {
+	separator := "-"
+	if matched {
+		separator = ":"
+	}
+	if showLineNumbers {
+		return fmt.Sprintf("%s%s%d%s%s", path, separator, lineNumber, separator, content)
+	}
+	return fmt.Sprintf("%s%s%s", path, separator, content)
 }

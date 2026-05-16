@@ -15,7 +15,7 @@ Use dedicated tools instead of shell commands when available:
 - To read files use `read` instead of cat, head, tail
 - To edit existing files use `edit` instead of sed or awk
 - To create files use `write` instead of echo redirection
-- To search for files use `find` instead of shell find
+- To search for files use `glob` instead of shell find
 - To search file contents use `grep` instead of shell grep
 Reserve the shell for building, running programs, and operations that require it.
 

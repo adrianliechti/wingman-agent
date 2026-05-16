@@ -670,9 +670,9 @@ func toolTitle(name string, raw any) string {
 				}
 			}
 		}
-	case "fetch":
+	case "web_fetch":
 		detail = str("url")
-	case "search_online":
+	case "web_search":
 		detail = str("query")
 	case "agent":
 		if p := str("prompt"); p != "" {
@@ -712,9 +712,9 @@ func mapKind(name string) acp.ToolKind {
 	switch name {
 	case "read", "ls", "find":
 		return acp.ToolKindRead
-	case "grep", "search_online":
+	case "grep", "web_search":
 		return acp.ToolKindSearch
-	case "fetch":
+	case "web_fetch":
 		return acp.ToolKindFetch
 	case "write", "edit":
 		return acp.ToolKindEdit

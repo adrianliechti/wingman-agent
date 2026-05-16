@@ -148,7 +148,6 @@ func TestToolsForVerificationFiltersEditingTools(t *testing.T) {
 		{Name: "shell", Effect: func(map[string]any) tool.Effect { return tool.EffectDynamic }},
 		{Name: "write", Effect: tool.StaticEffect(tool.EffectMutates)},
 		{Name: "edit", Effect: tool.StaticEffect(tool.EffectMutates)},
-		{Name: "todo_write", Effect: tool.StaticEffect(tool.EffectMutates)},
 		{Name: "ask_user", Effect: tool.StaticEffect(tool.EffectReadOnly)},
 		{Name: "agent", Effect: classifyEffect},
 	}, subagentTypes["verification"])
@@ -157,7 +156,7 @@ func TestToolsForVerificationFiltersEditingTools(t *testing.T) {
 	if !contains(names, "read") || !contains(names, "shell") {
 		t.Fatalf("verification tools = %#v, want read and shell", names)
 	}
-	for _, disallowed := range []string{"write", "edit", "todo_write", "ask_user", "agent"} {
+	for _, disallowed := range []string{"write", "edit", "ask_user", "agent"} {
 		if contains(names, disallowed) {
 			t.Fatalf("verification tools = %#v, should not include %q", names, disallowed)
 		}

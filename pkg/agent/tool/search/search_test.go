@@ -8,8 +8,8 @@ import (
 func TestSearchTool(t *testing.T) {
 	searchTool := Tools()[0]
 
-	if searchTool.Name != "search_online" {
-		t.Errorf("expected name 'search_online', got '%s'", searchTool.Name)
+	if searchTool.Name != "web_search" {
+		t.Errorf("expected name 'web_search', got %q", searchTool.Name)
 	}
 
 	if searchTool.Description == "" {
@@ -32,6 +32,32 @@ func TestSearchToolMissingQuery(t *testing.T) {
 
 	if err == nil {
 		t.Error("expected error for missing query parameter")
+	}
+}
+
+func TestSearchToolShortQuery(t *testing.T) {
+	searchTool := Tools()[0]
+
+	_, err := searchTool.Execute(context.Background(), map[string]any{
+		"query": "x",
+	})
+
+	if err == nil {
+		t.Error("expected error for short query parameter")
+	}
+}
+
+func TestSearchToolCannotMixDomainFilters(t *testing.T) {
+	searchTool := Tools()[0]
+
+	_, err := searchTool.Execute(context.Background(), map[string]any{
+		"query":           "golang programming",
+		"allowed_domains": []any{"go.dev"},
+		"blocked_domains": []any{"example.com"},
+	})
+
+	if err == nil {
+		t.Error("expected error when both allowed_domains and blocked_domains are set")
 	}
 }
 

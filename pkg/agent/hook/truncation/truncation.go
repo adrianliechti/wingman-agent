@@ -41,15 +41,13 @@ func budgetFor(name string) Budget {
 		return Budget{SoftBytes: 8 * 1024, HardBytes: 50 * 1024}
 	case "grep":
 		return Budget{SoftBytes: 8 * 1024, HardBytes: 50 * 1024, HeadBiased: true}
-	case "find":
-		return Budget{SoftBytes: 4 * 1024, HardBytes: 32 * 1024, HeadBiased: true}
-	case "ls":
+	case "glob":
 		return Budget{SoftBytes: 4 * 1024, HardBytes: 32 * 1024, HeadBiased: true}
 	case "read":
 		return Budget{SoftBytes: 64 * 1024, HardBytes: 64 * 1024}
-	case "fetch":
+	case "web_fetch":
 		return Budget{SoftBytes: 16 * 1024, HardBytes: 100 * 1024}
-	case "search_online":
+	case "web_search":
 		return Budget{SoftBytes: 8 * 1024, HardBytes: 32 * 1024}
 	}
 	return Budget{SoftBytes: DefaultMaxBytes, HardBytes: defaultHardBytes}

@@ -2,7 +2,6 @@ package fs
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"io/fs"
 	"math"
@@ -189,24 +188,22 @@ func optionalInt(args map[string]any, key string) (int, bool) {
 		if v > float64(math.MaxInt) || v < float64(math.MinInt) {
 			return 0, false
 		}
+		if math.Trunc(v) != v {
+			return 0, false
+		}
 		return int(v), true
 	default:
 		return 0, false
 	}
 }
 
-func positiveIntArg(args map[string]any, key string, fallback int) int {
-	if v, ok := optionalInt(args, key); ok && v > 0 {
-		return v
+func optionalInteger(args map[string]any, key string) (int, bool, bool) {
+	if _, present := args[key]; !present {
+		return 0, false, true
 	}
-	return fallback
-}
 
-func nonNegativeIntArg(args map[string]any, key string, fallback int) int {
-	if v, ok := optionalInt(args, key); ok && v >= 0 {
-		return v
-	}
-	return fallback
+	value, ok := optionalInt(args, key)
+	return value, true, ok
 }
 
 func detectLineEnding(content string) string {
@@ -384,18 +381,13 @@ func generateDiffString(oldContent, newContent string) string {
 	return output.String()
 }
 
-var defaultIgnoreDirs = map[string]bool{
-	".git":         true,
-	".hg":          true,
-	".svn":         true,
-	"node_modules": true,
-	"__pycache__":  true,
-	".venv":        true,
-	"vendor":       true,
-	".next":        true,
-	".nuxt":        true,
-	"dist":         true,
-	"build":        true,
+var vcsDirs = map[string]bool{
+	".git": true,
+	".svn": true,
+	".hg":  true,
+	".bzr": true,
+	".jj":  true,
+	".sl":  true,
 }
 
 var binaryExtensions = map[string]bool{
@@ -476,56 +468,3 @@ func loadGitignore(fsys fs.FS, domain []string) []gitignore.Pattern {
 	return patterns
 }
 
-// walkWorkspace traverses files under root, respecting gitignore and default ignore dirs.
-// It skips symlinks and calls onFile for each non-ignored file.
-// Returning filepath.SkipAll from onFile stops traversal.
-func walkWorkspace(ctx context.Context, fsys fs.FS, root string, onFile func(path, relPath string) error) error {
-	var allPatterns []gitignore.Pattern
-	allPatterns = append(allPatterns, loadGitignore(fsys, nil)...)
-	matcher := gitignore.NewMatcher(allPatterns)
-
-	return fs.WalkDir(fsys, root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		// Skip symlinks to prevent infinite loops
-		if d.Type()&fs.ModeSymlink != 0 {
-			return nil
-		}
-
-		if d.IsDir() && defaultIgnoreDirs[d.Name()] {
-			return filepath.SkipDir
-		}
-
-		relPath := relPathFromBase(root, path)
-		pathParts := strings.Split(relPath, "/")
-
-		if d.IsDir() {
-			if matcher.Match(pathParts, true) {
-				return filepath.SkipDir
-			}
-
-			newPatterns := loadGitignore(fsys, pathDomain(path))
-
-			if len(newPatterns) > 0 {
-				allPatterns = append(allPatterns, newPatterns...)
-				matcher = gitignore.NewMatcher(allPatterns)
-			}
-
-			return nil
-		}
-
-		if matcher.Match(pathParts, false) {
-			return nil
-		}
-
-		return onFile(path, relPath)
-	})
-}

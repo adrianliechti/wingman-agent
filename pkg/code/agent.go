@@ -21,7 +21,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/search"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/todo"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
@@ -76,7 +75,6 @@ func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
 		fetch.Tools(),
 		search.Tools(),
 		ask.Tools(elicit),
-		todo.Tools(),
 		subagent.Tools(sessionCfg),
 	)
 
@@ -84,17 +82,15 @@ func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
 }
 
 func buildElicit(ui UI) *tool.Elicitation {
+	if ui == nil {
+		return nil
+	}
+
 	return &tool.Elicitation{
 		Ask: func(ctx context.Context, msg string) (string, error) {
-			if ui == nil {
-				return "", nil
-			}
 			return ui.Ask(ctx, msg)
 		},
 		Confirm: func(ctx context.Context, msg string) (bool, error) {
-			if ui == nil {
-				return true, nil
-			}
 			return ui.Confirm(ctx, msg)
 		},
 	}
