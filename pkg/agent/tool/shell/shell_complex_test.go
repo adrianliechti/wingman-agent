@@ -188,3 +188,31 @@ func TestComplex_Timeout(t *testing.T) {
 		t.Errorf("expected timeout message, got: %v", err)
 	}
 }
+
+func TestComplex_IntegerTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	result, err := executeShell(context.Background(), tmpDir, nil, map[string]any{
+		"command": "echo ok",
+		"timeout": 1,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "ok") {
+		t.Fatalf("expected command output, got: %q", result)
+	}
+}
+
+func TestComplex_NonPositiveTimeoutUsesDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	result, err := executeShell(context.Background(), tmpDir, nil, map[string]any{
+		"command": "echo ok",
+		"timeout": 0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "ok") {
+		t.Fatalf("expected command output, got: %q", result)
+	}
+}

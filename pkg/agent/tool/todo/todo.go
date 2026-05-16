@@ -25,8 +25,11 @@ func Tools() []tool.Tool {
 		Description: strings.Join([]string{
 			"Replace the current session todo list. Use for complex multi-step coding work.",
 			"- Store only task progress for this conversation; this does not write files.",
-			"- Exactly one todo should be in_progress while actively working.",
-			"- Skip for single-step or purely conversational tasks.",
+			"- Use proactively for tasks with 3+ meaningful steps, multiple requested changes, plan-mode investigations, or when the user explicitly asks for a todo list.",
+			"- At most one todo may be in_progress at a time. Mark completed immediately after finishing; do not batch all completions at the end.",
+			"- Do not mark a todo completed while tests/checks are failing, implementation is partial, or you are blocked. Add or keep a pending item for the blocker instead.",
+			"- When every todo is completed, the visible list is cleared; the completed update is still accepted.",
+			"- Skip for single-step, trivial, or purely conversational tasks.",
 		}, "\n"),
 
 		Parameters: map[string]any{
@@ -57,9 +60,13 @@ func Tools() []tool.Tool {
 			if err != nil {
 				return "", err
 			}
+			visible := next
+			if allCompleted(next) {
+				visible = nil
+			}
 
 			mu.Lock()
-			todos = next
+			todos = visible
 			output := formatTodos(todos)
 			mu.Unlock()
 
@@ -75,6 +82,7 @@ func parseTodos(args map[string]any) ([]item, error) {
 	}
 
 	todos := make([]item, 0, len(raw))
+	inProgress := 0
 	for i, value := range raw {
 		obj, ok := value.(map[string]any)
 		if !ok {
@@ -90,11 +98,31 @@ func parseTodos(args map[string]any) ([]item, error) {
 		if !ok || !validStatus(status) {
 			return nil, fmt.Errorf("todos[%d].status must be pending, in_progress, or completed", i)
 		}
+		if status == "in_progress" {
+			inProgress++
+			if inProgress > 1 {
+				return nil, fmt.Errorf("only one todo may be in_progress")
+			}
+		}
 
 		todos = append(todos, item{Content: content, Status: status})
 	}
 
 	return todos, nil
+}
+
+func allCompleted(todos []item) bool {
+	if len(todos) == 0 {
+		return false
+	}
+
+	for _, todo := range todos {
+		if todo.Status != "completed" {
+			return false
+		}
+	}
+
+	return true
 }
 
 func validStatus(status string) bool {

@@ -30,11 +30,13 @@ func GrepTool(root *os.Root) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			fmt.Sprintf("Search file contents for a regex pattern. Respects .gitignore. Default limit %d matches.", DefaultGrepLimit),
-			"- Regex by default; `literal=true` for strings with regex metacharacters. Literal braces need escaping (`interface\\{\\}`).",
+			fmt.Sprintf("Primary tool for code/content search. Search file contents for a regex pattern. Respects .gitignore. Default limit %d matches.", DefaultGrepLimit),
+			"- Use this before `ls` or broad `read` when looking for symbols, functions, classes, config keys, TODOs, errors, text snippets, or files likely containing a term.",
+			"- Regex by default; `literal=true` for exact strings or text with regex metacharacters. Literal braces need escaping (`interface\\{\\}`).",
 			"- `output_mode`: \"files_with_matches\" (default — cheap, returns paths only), \"content\" (matched lines, optionally with `before_context`/`after_context`), \"count\". Start with files_with_matches; switch to content only when you need to see lines.",
-			"- Narrow by `type` (e.g. `go`, `ts`, `py`) or `glob` (e.g. `**/*.go`, `*.{ts,tsx}`). Both apply when set.",
-			"- `head_limit`/`offset` paginate; `head_limit=0` is unlimited. `multiline=true` lets patterns span lines.",
+			"- Narrow by `type` (e.g. `go`, `ts`, `py`) or `glob` (e.g. `**/*.go`, `*.{ts,tsx}`). Both apply when set. Use `path` to limit search to a subtree or single file.",
+			"- Token efficiency: keep `head_limit` small until you know you need more; use `count` to size broad searches before asking for content.",
+			"- `head_limit`/`offset` paginate result entries across all modes; `head_limit=0` is unlimited. `multiline=true` lets patterns span lines.",
 		}, "\n"),
 
 		Parameters: map[string]any{
@@ -45,13 +47,17 @@ func GrepTool(root *os.Root) tool.Tool {
 				"glob":             map[string]any{"type": "string", "description": "Filename filter (e.g. `*.go`, `*.{ts,tsx}`)."},
 				"type":             map[string]any{"type": "string", "description": "File type filter (e.g. `go`, `ts`, `tsx`, `py`)."},
 				"case_insensitive": map[string]any{"type": "boolean", "description": "Case-insensitive."},
+				"-i":               map[string]any{"type": "boolean", "description": "Alias for case_insensitive."},
 				"literal":          map[string]any{"type": "boolean", "description": "Treat pattern as literal string."},
 				"multiline":        map[string]any{"type": "boolean", "description": "Allow patterns to span newlines."},
 				"context":          map[string]any{"type": "integer", "description": "Lines of context before and after each match."},
+				"-C":               map[string]any{"type": "integer", "description": "Alias for context."},
 				"before_context":   map[string]any{"type": "integer", "description": "Lines before each match (overrides context)."},
+				"-B":               map[string]any{"type": "integer", "description": "Alias for before_context."},
 				"after_context":    map[string]any{"type": "integer", "description": "Lines after each match (overrides context)."},
+				"-A":               map[string]any{"type": "integer", "description": "Alias for after_context."},
 				"head_limit":       map[string]any{"type": "integer", "description": fmt.Sprintf("Max results (default %d, 0 for unlimited).", DefaultGrepLimit)},
-				"offset":           map[string]any{"type": "integer", "description": "Skip N results before head_limit."},
+				"offset":           map[string]any{"type": "integer", "description": "0-based number of result entries to skip before applying head_limit."},
 				"output_mode": map[string]any{
 					"type":        "string",
 					"description": "files_with_matches | content | count.",
@@ -93,10 +99,17 @@ func GrepTool(root *os.Root) tool.Tool {
 			if t, ok := args["type"].(string); ok {
 				typeFilter = strings.ToLower(strings.TrimSpace(t))
 			}
+			if typeFilter != "" && !validGrepType(typeFilter) {
+				return "", fmt.Errorf("unsupported type %q (supported: %s)", typeFilter, strings.Join(supportedGrepTypes(), ", "))
+			}
 
 			ignoreCase := false
 
 			if ic, ok := args["case_insensitive"].(bool); ok {
+				ignoreCase = ic
+			}
+
+			if ic, ok := args["-i"].(bool); ok {
 				ignoreCase = ic
 			}
 
@@ -110,25 +123,35 @@ func GrepTool(root *os.Root) tool.Tool {
 			beforeContext := 0
 			afterContext := 0
 
-			if c, ok := args["context"].(float64); ok && c > 0 {
-				contextLines = int(c)
+			if c, ok := optionalInt(args, "context"); ok && c > 0 {
+				contextLines = c
 				beforeContext = contextLines
 				afterContext = contextLines
 			}
 
-			if bc, ok := args["before_context"].(float64); ok && bc > 0 {
-				beforeContext = int(bc)
+			if c, ok := optionalInt(args, "-C"); ok && c > 0 {
+				contextLines = c
+				beforeContext = contextLines
+				afterContext = contextLines
 			}
 
-			if ac, ok := args["after_context"].(float64); ok && ac > 0 {
-				afterContext = int(ac)
+			if bc, ok := optionalInt(args, "before_context"); ok && bc > 0 {
+				beforeContext = bc
 			}
 
-			headLimit := DefaultGrepLimit
-
-			if l, ok := args["head_limit"].(float64); ok && l >= 0 {
-				headLimit = int(l)
+			if bc, ok := optionalInt(args, "-B"); ok && bc > 0 {
+				beforeContext = bc
 			}
+
+			if ac, ok := optionalInt(args, "after_context"); ok && ac > 0 {
+				afterContext = ac
+			}
+
+			if ac, ok := optionalInt(args, "-A"); ok && ac > 0 {
+				afterContext = ac
+			}
+
+			headLimit := nonNegativeIntArg(args, "head_limit", DefaultGrepLimit)
 
 			unlimited := headLimit == 0
 			effectiveLimit := headLimit
@@ -138,9 +161,7 @@ func GrepTool(root *os.Root) tool.Tool {
 
 			resultOffset := 0
 
-			if o, ok := args["offset"].(float64); ok && o > 0 {
-				resultOffset = int(o)
-			}
+			resultOffset = positiveIntArg(args, "offset", 0)
 
 			literal := false
 
@@ -152,6 +173,10 @@ func GrepTool(root *os.Root) tool.Tool {
 
 			if m, ok := args["output_mode"].(string); ok && m != "" {
 				outputMode = m
+			}
+
+			if !validGrepOutputMode(outputMode) {
+				return "", fmt.Errorf("output_mode must be content, files_with_matches, or count")
 			}
 
 			regexPattern := pattern
@@ -188,6 +213,33 @@ func GrepTool(root *os.Root) tool.Tool {
 				if typeFilter != "" && !matchesType(searchPathFS, typeFilter) {
 					return "No matches found", nil
 				}
+				if glob != "" {
+					matched, err := doublestar.Match(glob, filepath.ToSlash(filepath.Base(searchPathFS)))
+					if err != nil {
+						return "", fmt.Errorf("invalid glob pattern: %w", err)
+					}
+					matchedPath, err := doublestar.Match(glob, filepath.ToSlash(searchPathFS))
+					if err != nil {
+						return "", fmt.Errorf("invalid glob pattern: %w", err)
+					}
+					if !matched && !matchedPath {
+						return "No matches found", nil
+					}
+				}
+
+				reportPath := searchPath
+
+				if outputMode == "files_with_matches" && resultOffset > 0 {
+					return "No matches found (offset beyond results)", nil
+				}
+
+				if outputMode == "count" {
+					count := countFileMatches(fsys, searchPathFS, re, multiline)
+					if count == 0 || resultOffset > 0 {
+						return "No matches found", nil
+					}
+					return fmt.Sprintf("%s:%d", reportPath, count), nil
+				}
 
 				searchLimit := effectiveLimit
 				if !unlimited {
@@ -205,23 +257,22 @@ func GrepTool(root *os.Root) tool.Tool {
 					}
 					matches = matches[resultOffset:]
 				}
+				resultLimitReached := false
 				if !unlimited && len(matches) > headLimit {
 					matches = matches[:headLimit]
+					resultLimitReached = true
 				}
-
-				// Report the user-supplied path so single-file output matches
-				// the directory case (which uses workspace-relative paths).
-				reportPath := searchPath
 
 				if outputMode == "files_with_matches" {
 					return reportPath, nil
 				}
 
-				if outputMode == "count" {
-					return fmt.Sprintf("%s:%d", reportPath, len(matches)), nil
+				output := strings.Join(matches, "\n")
+				if resultLimitReached {
+					output += fmt.Sprintf("\n\n[limit %d hit; offset=%d for more]", headLimit, resultOffset+headLimit)
 				}
 
-				return strings.Join(matches, "\n"), nil
+				return output, nil
 			}
 
 			var results []string
@@ -277,8 +328,8 @@ func GrepTool(root *os.Root) tool.Tool {
 				}
 
 				if outputMode == "count" {
-					matches := searchFileWithContext(fsys, path, re, 0, 0, 10000, multiline)
-					if len(matches) > 0 {
+					count := countFileMatches(fsys, path, re, multiline)
+					if count > 0 {
 						matchCount++
 
 						if matchCount <= resultOffset {
@@ -286,7 +337,7 @@ func GrepTool(root *os.Root) tool.Tool {
 							return nil
 						}
 
-						fileMatches = append(fileMatches, fileMatch{path: filepath.FromSlash(relPath), count: len(matches)})
+						fileMatches = append(fileMatches, fileMatch{path: filepath.FromSlash(relPath), count: count})
 
 						if !unlimited && len(fileMatches) >= headLimit {
 							limitReached = true
@@ -364,11 +415,7 @@ func GrepTool(root *os.Root) tool.Tool {
 			var notices []string
 
 			if limitReached {
-				if resultOffset == 0 {
-					notices = append(notices, fmt.Sprintf("limit %d hit; offset=%d for more", headLimit, headLimit))
-				} else {
-					notices = append(notices, fmt.Sprintf("limit %d hit", headLimit))
-				}
+				notices = append(notices, fmt.Sprintf("limit %d hit; offset=%d for more", headLimit, resultOffset+headLimit))
 			}
 
 			if truncated {
@@ -382,6 +429,45 @@ func GrepTool(root *os.Root) tool.Tool {
 			return output, nil
 		},
 	}
+}
+
+func validGrepOutputMode(mode string) bool {
+	switch mode {
+	case "content", "files_with_matches", "count":
+		return true
+	default:
+		return false
+	}
+}
+
+func countFileMatches(fsys fs.FS, path string, re *regexp.Regexp, multiline bool) int {
+	f, err := fsys.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, DefaultScanBufSize)
+	scanner.Buffer(buf, MaxScanBufSize)
+
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+
+	if multiline {
+		return len(re.FindAllStringIndex(strings.Join(lines, "\n"), -1))
+	}
+
+	count := 0
+	for _, line := range lines {
+		if re.MatchString(line) {
+			count++
+		}
+	}
+
+	return count
 }
 
 var grepTypeExtensions = map[string][]string{
@@ -405,6 +491,20 @@ var grepTypeExtensions = map[string][]string{
 	"tsx":  {".tsx"},
 	"yaml": {".yaml", ".yml"},
 	"yml":  {".yaml", ".yml"},
+}
+
+func validGrepType(typeFilter string) bool {
+	_, ok := grepTypeExtensions[typeFilter]
+	return ok
+}
+
+func supportedGrepTypes() []string {
+	types := make([]string, 0, len(grepTypeExtensions))
+	for t := range grepTypeExtensions {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	return types
 }
 
 func matchesType(path, typeFilter string) bool {

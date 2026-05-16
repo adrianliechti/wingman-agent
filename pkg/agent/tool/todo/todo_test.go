@@ -37,8 +37,8 @@ func TestTodoWriteReplacesSessionList(t *testing.T) {
 		t.Fatalf("unexpected error replacing list: %v", err)
 	}
 
-	if strings.Contains(result, "Inspect code") || !strings.Contains(result, "[x] Done") {
-		t.Errorf("expected replacement list only, got: %s", result)
+	if strings.Contains(result, "Inspect code") || !strings.Contains(result, "Todo list cleared") {
+		t.Errorf("expected all-completed replacement to clear list, got: %s", result)
 	}
 }
 
@@ -64,6 +64,14 @@ func TestTodoWriteValidation(t *testing.T) {
 			name: "invalid status",
 			args: map[string]any{"todos": []any{map[string]any{"content": "Task", "status": "blocked"}}},
 			want: "status must be pending, in_progress, or completed",
+		},
+		{
+			name: "multiple in progress",
+			args: map[string]any{"todos": []any{
+				map[string]any{"content": "Task 1", "status": "in_progress"},
+				map[string]any{"content": "Task 2", "status": "in_progress"},
+			}},
+			want: "only one todo may be in_progress",
 		},
 	}
 

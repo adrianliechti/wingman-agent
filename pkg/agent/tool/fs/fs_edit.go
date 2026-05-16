@@ -17,8 +17,10 @@ func EditTool(root *os.Root) tool.Tool {
 		Description: strings.Join([]string{
 			"Replace `old_string` with `new_string` in a file. Fails if `old_string` is not unique unless `replace_all=true`.",
 			"- Read the file first in this conversation so old_string matches current text.",
+			"- Prefer this for modifying existing files; it produces smaller, reviewable diffs. Use `write` only for new files or complete rewrites.",
 			"- Line-number prefixes (`     42\\t…`) shown by `read` are NOT part of file content. Match only the text AFTER the prefix, preserving exact indentation (tabs vs spaces).",
 			"- Use the smallest uniquely-identifying old_string — usually 2-4 adjacent lines. If matching fails, re-read the relevant slice rather than guessing.",
+			"- Use `replace_all=true` only for intentional file-wide renames/replacements after confirming every occurrence should change.",
 			"- Do not insert emoji unless the user asked for them.",
 		}, "\n"),
 
@@ -28,7 +30,7 @@ func EditTool(root *os.Root) tool.Tool {
 				"path":        map[string]any{"type": "string", "description": "File path."},
 				"old_string":  map[string]any{"type": "string", "description": "Exact text to find. Must be unique unless replace_all=true."},
 				"new_string":  map[string]any{"type": "string", "description": "Replacement text. Must differ from old_string."},
-				"replace_all": map[string]any{"type": "boolean", "description": "Replace every occurrence."},
+				"replace_all": map[string]any{"type": "boolean", "description": "Replace every occurrence. Use only when all occurrences should change."},
 			},
 			"required": []string{"path", "old_string", "new_string"},
 		},

@@ -18,7 +18,7 @@ func LsTool(root *os.Root) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: fmt.Sprintf(
-			"List a directory's immediate contents (alphabetical, '/' suffix for dirs, dotfiles included). Capped at %d entries or %dKB. Prefer `find`/`grep` when you know what you're looking for.",
+			"List a directory's immediate contents (alphabetical, '/' suffix for dirs, dotfiles included). Capped at %d entries or %dKB. Use only to inspect an unknown directory shape; prefer `grep` for content/symbol discovery and `find` for filename patterns.",
 			DefaultListLimit,
 			DefaultMaxBytes/1024,
 		),
@@ -46,11 +46,7 @@ func LsTool(root *os.Root) tool.Tool {
 				return "", err
 			}
 
-			limit := DefaultListLimit
-
-			if l, ok := args["limit"].(float64); ok && l > 0 {
-				limit = int(l)
-			}
+			limit := positiveIntArg(args, "limit", DefaultListLimit)
 
 			info, err := root.Stat(normalizedPath)
 

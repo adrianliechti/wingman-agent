@@ -84,7 +84,7 @@ func TestReadTool(t *testing.T) {
 	t.Run("read with limit", func(t *testing.T) {
 		result, err := readTool.Execute(context.Background(), map[string]any{
 			"path":  "test.txt",
-			"limit": float64(2),
+			"limit": 2,
 		})
 
 		if err != nil {
@@ -638,6 +638,30 @@ func TestFindTool(t *testing.T) {
 		if !strings.Contains(result, "app.go") {
 			t.Errorf("expected app.go, got: %s", result)
 		}
+
+		if !strings.Contains(result, filepath.Join("pkg", "util.go")) {
+			t.Errorf("pattern without slash should match recursively under path, got: %s", result)
+		}
+	})
+
+	t.Run("find offset paginates newest first", func(t *testing.T) {
+		result, err := findTool.Execute(context.Background(), map[string]any{
+			"pattern": "*.go",
+			"limit":   1,
+			"offset":  1,
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		lines := strings.Split(strings.Split(result, "\n\n")[0], "\n")
+		if len(lines) != 1 {
+			t.Fatalf("expected one result, got: %s", result)
+		}
+		if !strings.Contains(result, "offset=2 for more") {
+			t.Errorf("expected next offset notice, got: %s", result)
+		}
 	})
 
 	t.Run("find with no matches", func(t *testing.T) {
@@ -651,6 +675,16 @@ func TestFindTool(t *testing.T) {
 
 		if !strings.Contains(result, "No files found") {
 			t.Errorf("expected 'No files found', got: %s", result)
+		}
+	})
+
+	t.Run("find invalid glob", func(t *testing.T) {
+		_, err := findTool.Execute(context.Background(), map[string]any{
+			"pattern": "[",
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "invalid glob pattern") {
+			t.Fatalf("expected invalid glob pattern error, got: %v", err)
 		}
 	})
 
@@ -710,7 +744,7 @@ func TestFindTool(t *testing.T) {
 			t.Errorf("oldest files leaked in despite limit=3, got: %s", result)
 		}
 		// And the notice must surface that we truncated.
-		if !strings.Contains(result, "20 found, showing newest 3") {
+		if !strings.Contains(result, "20 found, showing 3 from offset 0; offset=3 for more") {
 			t.Errorf("expected truncation notice, got: %s", result)
 		}
 	})
@@ -776,6 +810,23 @@ func TestGrepTool(t *testing.T) {
 		}
 	})
 
+	t.Run("grep aliases case and context flags", func(t *testing.T) {
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern":     "HELLO",
+			"-i":          true,
+			"-A":          float64(1),
+			"output_mode": "content",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "Hello") || !strings.Contains(result, "return") {
+			t.Errorf("expected case-insensitive match with after context, got: %s", result)
+		}
+	})
+
 	t.Run("grep with glob filter", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
 			"pattern": "Hello",
@@ -825,6 +876,36 @@ func TestGrepTool(t *testing.T) {
 		}
 	})
 
+	t.Run("grep invalid output mode", func(t *testing.T) {
+		_, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern":     "Hello",
+			"output_mode": "bad",
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "output_mode must be") {
+			t.Fatalf("expected output_mode validation error, got: %v", err)
+		}
+	})
+
+	t.Run("grep count is exact above previous cap", func(t *testing.T) {
+		lines := strings.Repeat("needle\n", 10005)
+		os.WriteFile(filepath.Join(tmpDir, "many.txt"), []byte(lines), 0644)
+
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern":     "needle",
+			"path":        "many.txt",
+			"output_mode": "count",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "many.txt:10005") {
+			t.Errorf("expected exact count, got: %s", result)
+		}
+	})
+
 	t.Run("grep single file", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
 			"pattern": "Hello",
@@ -841,6 +922,55 @@ func TestGrepTool(t *testing.T) {
 
 		if strings.Contains(result, "file1.go") {
 			t.Errorf("should only search single file, got: %s", result)
+		}
+	})
+
+	t.Run("grep single file applies glob filter", func(t *testing.T) {
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern": "Hello",
+			"path":    "readme.md",
+			"glob":    "*.go",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "No matches") {
+			t.Errorf("expected glob mismatch to return no matches, got: %s", result)
+		}
+	})
+
+	t.Run("grep single file applies files offset", func(t *testing.T) {
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern": "Hello",
+			"path":    "readme.md",
+			"offset":  1,
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "offset beyond results") {
+			t.Errorf("expected single files_with_matches result to be skipped, got: %s", result)
+		}
+	})
+
+	t.Run("grep content offset notice points to next page", func(t *testing.T) {
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern":     "func",
+			"output_mode": "content",
+			"head_limit":  1,
+			"offset":      1,
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "offset=2 for more") {
+			t.Errorf("expected next offset notice, got: %s", result)
 		}
 	})
 
@@ -914,6 +1044,17 @@ func TestGrepTool(t *testing.T) {
 
 		if strings.Contains(result, "readme.md") {
 			t.Errorf("type=go should exclude markdown files, got: %s", result)
+		}
+	})
+
+	t.Run("grep unsupported type", func(t *testing.T) {
+		_, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern": "Hello",
+			"type":    "notatype",
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "unsupported type") {
+			t.Fatalf("expected unsupported type error, got: %v", err)
 		}
 	})
 

@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -25,7 +26,7 @@ func NewTools(manager *lsp.Manager) []tool.Tool {
 func diagnosticsTool(manager *lsp.Manager) tool.Tool {
 	return tool.Tool{
 		Name:        "get_lsp_diagnostics",
-		Description: "Get diagnostics (errors, warnings) for a file or the entire workspace. Clean (empty) output means no issues — success. Omit `path` to scope to the whole workspace (slower).",
+		Description: "Get language-server diagnostics (errors, warnings) for a file or the entire workspace. Use after edits or when investigating compile/type issues. Clean (empty) output means no issues — success. Omit `path` for workspace diagnostics only when needed; it can be slower.",
 		Effect:      tool.StaticEffect(tool.EffectReadOnly),
 		Parameters: map[string]any{
 			"type": "object",
@@ -67,7 +68,7 @@ func diagnosticsTool(manager *lsp.Manager) tool.Tool {
 func definitionTool(manager *lsp.Manager) tool.Tool {
 	return tool.Tool{
 		Name:        "find_lsp_definition",
-		Description: "Find the definition of a symbol at a given position.",
+		Description: "Find the definition of a symbol at a known file position. Use after `grep`/`read` has located the symbol occurrence. Uses 1-based editor line/column positions, matching `read` and `grep` output.",
 		Effect:      tool.StaticEffect(tool.EffectReadOnly),
 		Parameters:  positionParams(),
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
@@ -89,7 +90,7 @@ func definitionTool(manager *lsp.Manager) tool.Tool {
 func referencesTool(manager *lsp.Manager) tool.Tool {
 	return tool.Tool{
 		Name:        "find_lsp_references",
-		Description: "Find all references to a symbol at a given position across the workspace.",
+		Description: "Find semantic references to a symbol at a known file position across the workspace. Prefer this over text `grep` when you need rename/call-site accuracy. Uses 1-based editor line/column positions, matching `read` and `grep` output.",
 		Effect:      tool.StaticEffect(tool.EffectReadOnly),
 		Parameters:  positionParams(),
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
@@ -111,7 +112,7 @@ func referencesTool(manager *lsp.Manager) tool.Tool {
 func implementationTool(manager *lsp.Manager) tool.Tool {
 	return tool.Tool{
 		Name:        "find_lsp_implementation",
-		Description: "Find implementations of an interface or abstract method at a given position.",
+		Description: "Find implementations of an interface or abstract method at a known file position. Use after locating the interface/member with `grep`, `find_lsp_symbols`, or `read`. Uses 1-based editor line/column positions.",
 		Effect:      tool.StaticEffect(tool.EffectReadOnly),
 		Parameters:  positionParams(),
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
@@ -133,7 +134,7 @@ func implementationTool(manager *lsp.Manager) tool.Tool {
 func hoverTool(manager *lsp.Manager) tool.Tool {
 	return tool.Tool{
 		Name:        "get_lsp_hover",
-		Description: "Get hover information (type info, documentation) for a symbol at a given position.",
+		Description: "Get hover information (type, signature, documentation) for a symbol at a known file position. Use when local source context is insufficient. Uses 1-based editor line/column positions.",
 		Effect:      tool.StaticEffect(tool.EffectReadOnly),
 		Parameters:  positionParams(),
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
@@ -155,7 +156,7 @@ func hoverTool(manager *lsp.Manager) tool.Tool {
 func symbolsTool(manager *lsp.Manager) tool.Tool {
 	return tool.Tool{
 		Name:        "find_lsp_symbols",
-		Description: "Get symbols. If `path` is set, returns the symbol outline (functions, classes, variables) of that file and `query` is ignored. Without `path`, searches symbols across the workspace by `query`.",
+		Description: "Find symbols. With `path`, returns that file's outline (functions, classes, variables) and ignores `query`. Without `path`, searches workspace symbols by `query`. Use for symbol-name discovery; use `grep` for arbitrary text/config/string searches.",
 		Effect:      tool.StaticEffect(tool.EffectReadOnly),
 		Parameters: map[string]any{
 			"type": "object",
@@ -202,7 +203,7 @@ func symbolsTool(manager *lsp.Manager) tool.Tool {
 func hierarchyTool(manager *lsp.Manager) tool.Tool {
 	return tool.Tool{
 		Name:        "find_lsp_hierarchy",
-		Description: "Trace calls for a function/method at a given position. `direction=incoming` returns WHO CALLS this; `direction=outgoing` returns WHAT THIS CALLS. Position must be on the function name.",
+		Description: "Trace semantic calls for a function/method at a known position. `direction=incoming` returns WHO CALLS this; `direction=outgoing` returns WHAT THIS CALLS. Position must be on the function name. Use after `grep`/`read` identifies the exact function. Uses 1-based editor line/column positions.",
 		Effect:      tool.StaticEffect(tool.EffectReadOnly),
 		Parameters: map[string]any{
 			"type": "object",
@@ -213,11 +214,11 @@ func hierarchyTool(manager *lsp.Manager) tool.Tool {
 				},
 				"line": map[string]any{
 					"type":        "integer",
-					"description": "Line number — **0-based**. Subtract 1 from any line number shown by `read` (which is 1-based).",
+					"description": "Line number, 1-based as shown by `read`, `grep`, and editors.",
 				},
 				"column": map[string]any{
 					"type":        "integer",
-					"description": "Column number — **0-based**.",
+					"description": "Column number, 1-based as shown by editors.",
 				},
 				"direction": map[string]any{
 					"type":        "string",
@@ -258,11 +259,11 @@ func positionParams() map[string]any {
 			},
 			"line": map[string]any{
 				"type":        "integer",
-				"description": "Line number — **0-based**. Subtract 1 from any line number shown by `read` (which is 1-based).",
+				"description": "Line number, 1-based as shown by `read`, `grep`, and editors.",
 			},
 			"column": map[string]any{
 				"type":        "integer",
-				"description": "Column number — **0-based**.",
+				"description": "Column number, 1-based as shown by editors.",
 			},
 		},
 		"required": []string{"path", "line", "column"},
@@ -281,10 +282,17 @@ func parsePositionArgs(workingDir string, args map[string]any) (string, int, int
 		return "", 0, 0, fmt.Errorf("file not found: %s", path)
 	}
 
-	line := intArg(args, "line")
-	column := intArg(args, "column")
+	line, ok := requiredPositiveIntArg(args, "line")
+	if !ok {
+		return "", 0, 0, fmt.Errorf("line must be a positive 1-based integer")
+	}
 
-	return path, line, column, nil
+	column, ok := requiredPositiveIntArg(args, "column")
+	if !ok {
+		return "", 0, 0, fmt.Errorf("column must be a positive 1-based integer")
+	}
+
+	return path, line - 1, column - 1, nil
 }
 
 func openFile(ctx context.Context, manager *lsp.Manager, path string) (*lsp.Session, string, error) {
@@ -308,15 +316,23 @@ func absPath(workingDir, path string) string {
 	return path
 }
 
-func intArg(args map[string]any, key string) int {
+func requiredPositiveIntArg(args map[string]any, key string) (int, bool) {
 	switch v := args[key].(type) {
 	case int:
-		return v
+		return v, v > 0
 	case float64:
-		return int(v)
+		if v > float64(math.MaxInt) || v < float64(math.MinInt) {
+			return 0, false
+		}
+		iv := int(v)
+		return iv, iv > 0
 	case int64:
-		return int(v)
+		if v > int64(math.MaxInt) || v < int64(math.MinInt) {
+			return 0, false
+		}
+		iv := int(v)
+		return iv, iv > 0
 	default:
-		return 0
+		return 0, false
 	}
 }

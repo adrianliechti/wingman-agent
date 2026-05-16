@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"runtime"
@@ -22,9 +23,12 @@ const (
 func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 	description := strings.Join([]string{
 		fmt.Sprintf("Execute a command. On Unix/macOS this is `sh`; on Windows this is PowerShell. Default timeout %ds, max 600s.", defaultTimeout),
+		"- Use for build, test, run, package-manager, git, GitHub CLI (`gh`), and other operations that genuinely require a process. Prefer dedicated tools for codebase discovery and file work: `grep`/`find`/LSP for search, `read` for known files, `edit`/`write` for changes.",
 		"- Match command syntax to the host OS shown in your environment section. Examples: list dir → `ls` on Unix, `Get-ChildItem` on PowerShell. Read a file → use the `read` tool, not `cat` / `Get-Content`.",
 		"- Working directory persists across calls; shell state (env vars, aliases, `cd` from a prior call) does NOT.",
 		"- Don't use shell to read, edit, or write files (`cat`, `Get-Content`, `sed`, `Set-Content`, heredocs, `> file`, etc.) — use `read` / `edit` / `write` so the user can review the change.",
+		"- For GitHub URLs or PR/issue/release data, prefer `gh` commands (`gh pr view`, `gh issue view`, `gh api`) over `fetch`; they return structured authenticated data.",
+		"- For commits: only commit when asked, inspect `git status`, `git diff`, and recent `git log` first, stage specific files by name, never skip hooks, and create a new commit instead of amending unless explicitly requested.",
 		"- Quote paths with spaces. Chain dependent commands with `&&` (Unix) or `;` (PowerShell) in one call; make separate calls for independent commands (parallel beats sequential).",
 		"- Once a check has passed (tests, build, lint), trust it — don't re-run to be sure.",
 		"- Increase timeout for long-running commands; do not insert `sleep` / `Start-Sleep`.",
@@ -60,10 +64,9 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 		return "", fmt.Errorf("command is required")
 	}
 
-	timeout := defaultTimeout
-
-	if t, ok := args["timeout"].(float64); ok {
-		timeout = int(t)
+	timeout := shellIntArg(args, "timeout", defaultTimeout)
+	if timeout <= 0 {
+		timeout = defaultTimeout
 	}
 
 	if timeout > 600 {
@@ -114,6 +117,25 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 		}
 
 		return truncated, nil
+	}
+}
+
+func shellIntArg(args map[string]any, key string, fallback int) int {
+	switch v := args[key].(type) {
+	case int:
+		return v
+	case int64:
+		if v > int64(math.MaxInt) || v < int64(math.MinInt) {
+			return fallback
+		}
+		return int(v)
+	case float64:
+		if v > float64(math.MaxInt) || v < float64(math.MinInt) {
+			return fallback
+		}
+		return int(v)
+	default:
+		return fallback
 	}
 }
 

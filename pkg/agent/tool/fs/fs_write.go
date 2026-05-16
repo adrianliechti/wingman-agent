@@ -17,8 +17,9 @@ func WriteTool(root *os.Root) tool.Tool {
 
 		Description: strings.Join([]string{
 			"Create or **overwrite** a file. Creates parent directories as needed.",
-			"- For existing files, `read` first. For partial changes prefer `edit` — smaller diffs, cheaper, and reviewable.",
+			"- For existing files, `read` first so you do not accidentally discard content. For partial changes prefer `edit` — smaller diffs, cheaper, and reviewable.",
 			"- Use this only for new files or complete rewrites.",
+			"- Prefer editing existing files over creating new ones unless a new file is required by the task or local pattern.",
 			"- Do not create *.md / README files unless the user asked for them. No emoji unless requested.",
 		}, "\n"),
 

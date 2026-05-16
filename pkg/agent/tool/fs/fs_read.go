@@ -20,10 +20,14 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			fmt.Sprintf("Read a file. Output includes 1-based line numbers (subtract 1 before passing to LSP). Capped at %d lines / %dKB.", DefaultMaxLines, DefaultMaxBytes/1024),
+			fmt.Sprintf("Read a known file path. Output includes 1-based line numbers. Capped at %d lines / %dKB.", DefaultMaxLines, DefaultMaxBytes/1024),
 			"- Required before `edit` on the same file.",
+			"- Do not use for discovery. If you are looking for a symbol, keyword, config key, error text, or likely file, use `grep` first; if you need filenames by pattern, use `find`.",
+			"- After `grep` finds candidate files, read only the specific file or line window needed for context.",
+			"- Token efficiency: for large files or known locations, use `offset`/`limit`; `offset` is a 1-based start line, not a result skip count.",
+			"- Do not re-read a file already shown in this conversation unless it changed. Use the line numbers already present.",
 			"- Path may be workspace-relative or absolute inside an allowed root. `~/` expands to home.",
-			"- Use `offset`/`limit` to paginate large files; the result tells you where to continue.",
+			"- If output is truncated, the result tells you the next `offset` to continue from.",
 			"- Binary files (PDF, images, archives) are rejected — inspect with an appropriate viewer via `shell` if you must.",
 		}, "\n"),
 
@@ -51,15 +55,11 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 				return "", fmt.Errorf("cannot read %s: file appears to be binary (extension %q). Use the shell tool with an appropriate viewer if you really need to inspect it", pathArg, filepath.Ext(expanded))
 			}
 
-			limit := 0
+			limit := positiveIntArg(args, "limit", 0)
 			offset := 0
 
-			if l, ok := args["limit"].(float64); ok && l > 0 {
-				limit = int(l)
-			}
-
-			if o, ok := args["offset"].(float64); ok && o > 0 {
-				offset = int(o) - 1
+			if o, ok := optionalInt(args, "offset"); ok && o > 0 {
+				offset = o - 1
 			}
 
 			content, err := readFromAllowedLocation(root, workingDir, expanded, allowedReadRoots)

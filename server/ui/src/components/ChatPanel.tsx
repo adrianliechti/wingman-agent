@@ -194,6 +194,12 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 
 	const isActive = phase !== "idle";
 
+	// Return focus to the input when the agent finishes so the user can
+	// keep typing without clicking back.
+	useEffect(() => {
+		if (!isActive) textareaRef.current?.focus();
+	}, [isActive]);
+
 	// Phase non-idle -> idle triggers the active turn's auto-collapse. If the
 	// user scrolled away from the pinned message during streaming, the working
 	// area is partly above the viewport and shrinking it would jump the visible
@@ -350,6 +356,7 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 		setInput("");
 		setFiles([]);
 		setImages([]);
+		textareaRef.current?.focus();
 	}, [input, isActive, onSend, files, images]);
 
 	const handleKeyDown = useCallback(
@@ -372,6 +379,7 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 	const addFile = useCallback((path: string) => {
 		setFiles((prev) => (prev.includes(path) ? prev : [...prev, path]));
 		setShowPicker(false);
+		textareaRef.current?.focus();
 	}, []);
 
 	const removeFile = useCallback((path: string) => {
@@ -557,6 +565,8 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 						<div className="px-3 pt-2">
 							<textarea
 								ref={textareaRef}
+								// biome-ignore lint/a11y/noAutofocus: chat input is the primary control
+								autoFocus
 								className="w-full bg-transparent text-fg text-[12px] font-mono resize-none outline-none leading-[1.7] placeholder:text-fg-dim"
 								style={{ fieldSizing: "content" } as React.CSSProperties}
 								value={input}

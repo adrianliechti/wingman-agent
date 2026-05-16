@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"math"
 	pathpkg "path"
 	"path/filepath"
 	"runtime"
@@ -173,6 +174,39 @@ func truncateHead(content string) (result string, truncated bool) {
 	}
 
 	return result, truncated
+}
+
+func optionalInt(args map[string]any, key string) (int, bool) {
+	switch v := args[key].(type) {
+	case int:
+		return v, true
+	case int64:
+		if v > int64(math.MaxInt) || v < int64(math.MinInt) {
+			return 0, false
+		}
+		return int(v), true
+	case float64:
+		if v > float64(math.MaxInt) || v < float64(math.MinInt) {
+			return 0, false
+		}
+		return int(v), true
+	default:
+		return 0, false
+	}
+}
+
+func positiveIntArg(args map[string]any, key string, fallback int) int {
+	if v, ok := optionalInt(args, key); ok && v > 0 {
+		return v
+	}
+	return fallback
+}
+
+func nonNegativeIntArg(args map[string]any, key string, fallback int) int {
+	if v, ok := optionalInt(args, key); ok && v >= 0 {
+		return v
+	}
+	return fallback
 }
 
 func detectLineEnding(content string) string {

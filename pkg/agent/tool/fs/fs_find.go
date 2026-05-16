@@ -22,17 +22,19 @@ func FindTool(root *os.Root) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			fmt.Sprintf("Find files by glob pattern (e.g., `**/*.go`, `*.{ts,tsx}`). Sorted newest-first. Respects .gitignore. Default limit %d.", DefaultFindLimit),
+			fmt.Sprintf("Find files by glob pattern (e.g., `*.go`, `**/*.{ts,tsx}`). Sorted newest-first. Respects .gitignore. Default limit %d.", DefaultFindLimit),
+			"- Patterns without a slash, like `*.go`, match recursively anywhere under `path`. Use an explicit subtree in `path` to narrow the search.",
 			"- Use `grep` instead when searching by content — it already returns matching file paths.",
-			"- Limit truncates the OLDEST matches; if the file you want is older than recent activity, narrow the pattern.",
+			"- `limit`/`offset` paginate newest-first results. If the file you want is older than recent activity, narrow the pattern or increase offset.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"pattern": map[string]any{"type": "string", "description": "Glob (e.g. `**/*.go`)."},
+				"pattern": map[string]any{"type": "string", "description": "Glob (e.g. `*.go`, `**/*.{ts,tsx}`). Patterns without a slash match recursively."},
 				"path":    map[string]any{"type": "string", "description": "Search root; defaults to workspace."},
 				"limit":   map[string]any{"type": "integer", "description": fmt.Sprintf("Max results (default %d).", DefaultFindLimit)},
+				"offset":  map[string]any{"type": "integer", "description": "0-based number of newest-first results to skip before applying limit."},
 			},
 			"required": []string{"pattern"},
 		},
@@ -40,8 +42,12 @@ func FindTool(root *os.Root) tool.Tool {
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
 			pattern, ok := args["pattern"].(string)
 
-			if !ok || pattern == "" {
+			if !ok || strings.TrimSpace(pattern) == "" {
 				return "", fmt.Errorf("pattern is required")
+			}
+			pattern = normalizeFindPattern(pattern)
+			if _, err := doublestar.Match(pattern, ""); err != nil {
+				return "", fmt.Errorf("invalid glob pattern: %w", err)
 			}
 
 			searchDir := "."
@@ -58,11 +64,8 @@ func FindTool(root *os.Root) tool.Tool {
 				return "", err
 			}
 
-			limit := DefaultFindLimit
-
-			if l, ok := args["limit"].(float64); ok && l > 0 {
-				limit = int(l)
-			}
+			limit := positiveIntArg(args, "limit", DefaultFindLimit)
+			offset := positiveIntArg(args, "offset", 0)
 
 			info, err := root.Stat(searchDirFS)
 
@@ -121,11 +124,18 @@ func FindTool(root *os.Root) tool.Tool {
 				return results[i].modTime.After(results[j].modTime)
 			})
 
+			if offset >= totalMatches {
+				return fmt.Sprintf("No files found matching pattern (offset %d beyond %d results)", offset, totalMatches), nil
+			}
+
+			start := offset
+			end := totalMatches
 			resultLimitReached := false
-			if totalMatches > limit {
-				results = results[:limit]
+			if start+limit < end {
+				end = start + limit
 				resultLimitReached = true
 			}
+			results = results[start:end]
 
 			paths := make([]string, len(results))
 			for i, r := range results {
@@ -138,9 +148,9 @@ func FindTool(root *os.Root) tool.Tool {
 			var notices []string
 
 			if resultLimitReached {
-				notices = append(notices, fmt.Sprintf("%d found, showing newest %d", totalMatches, limit))
+				notices = append(notices, fmt.Sprintf("%d found, showing %d from offset %d; offset=%d for more", totalMatches, len(results), offset, end))
 			} else {
-				notices = append(notices, fmt.Sprintf("%d found", totalMatches))
+				notices = append(notices, fmt.Sprintf("%d found, showing %d from offset %d", totalMatches, len(results), offset))
 			}
 
 			if truncated {
@@ -152,4 +162,12 @@ func FindTool(root *os.Root) tool.Tool {
 			return truncatedOutput, nil
 		},
 	}
+}
+
+func normalizeFindPattern(pattern string) string {
+	pattern = filepath.ToSlash(strings.TrimSpace(pattern))
+	if pattern == "" || strings.Contains(pattern, "/") {
+		return pattern
+	}
+	return "**/" + pattern
 }
