@@ -80,3 +80,37 @@ func OptionalIntArg(args map[string]any, key string) (int, bool, error) {
 
 	return value, true, nil
 }
+
+// NonNegIntArg reads an optional non-negative integer. Returns present=false
+// when the key is absent; returns an error when the value is present but not
+// a non-negative integer. The error message names the key so callers can
+// surface it without further wrapping.
+func NonNegIntArg(args map[string]any, key string) (value int, present bool, err error) {
+	raw, present := args[key]
+	if !present {
+		return 0, false, nil
+	}
+
+	v, ok := IntValue(raw)
+	if !ok || v < 0 {
+		return 0, true, fmt.Errorf("%s must be a non-negative integer", key)
+	}
+
+	return v, true, nil
+}
+
+// PositiveIntArg reads an optional strictly-positive integer (>= 1).
+// Same contract as NonNegIntArg.
+func PositiveIntArg(args map[string]any, key string) (value int, present bool, err error) {
+	raw, present := args[key]
+	if !present {
+		return 0, false, nil
+	}
+
+	v, ok := IntValue(raw)
+	if !ok || v <= 0 {
+		return 0, true, fmt.Errorf("%s must be a positive integer", key)
+	}
+
+	return v, true, nil
+}

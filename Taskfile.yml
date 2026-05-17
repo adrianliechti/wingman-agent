@@ -33,8 +33,8 @@ tasks:
     deps: [ui, wails]
     dir: app
     cmds:
-      - wails build
-      - open "build/bin/Wingman Agent.app"
+      - wails build -clean
+      - open -n "build/bin/Wingman Agent.app"
 
   install:
     desc: Install wingman to GOPATH/bin or GOBIN

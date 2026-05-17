@@ -6,8 +6,16 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
+export function GetWorkspaces() {
+  return window['go']['main']['App']['GetWorkspaces']();
+}
+
 export function OpenWorkspace(arg1) {
   return window['go']['main']['App']['OpenWorkspace'](arg1);
+}
+
+export function RemoveWorkspace(arg1) {
+  return window['go']['main']['App']['RemoveWorkspace'](arg1);
 }
 
 export function SaveSettings(arg1) {

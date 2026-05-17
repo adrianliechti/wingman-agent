@@ -42,12 +42,45 @@ func (a *App) GetSettings() (Settings, error) {
 }
 
 func (a *App) SaveSettings(s Settings) error {
+	current, err := loadSettings()
+	if err == nil {
+		s.Workspaces = current.Workspaces
+	}
+
 	if err := saveSettings(s); err != nil {
 		return err
 	}
 
 	s.Apply()
 	return nil
+}
+
+func (a *App) GetWorkspaces() ([]string, error) {
+	s, err := loadSettings()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(s.Workspaces) > maxWorkspaces {
+		return s.Workspaces[:maxWorkspaces], nil
+	}
+
+	return s.Workspaces, nil
+}
+
+func (a *App) RemoveWorkspace(path string) ([]string, error) {
+	s, err := loadSettings()
+	if err != nil {
+		return nil, err
+	}
+
+	s.RemoveWorkspace(path)
+
+	if err := saveSettings(s); err != nil {
+		return nil, err
+	}
+
+	return s.Workspaces, nil
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -101,6 +134,11 @@ func (a *App) OpenWorkspace(path string) (string, error) {
 	a.mu.Lock()
 	a.server = srv
 	a.mu.Unlock()
+
+	if s, err := loadSettings(); err == nil {
+		s.AddWorkspace(path)
+		_ = saveSettings(s)
+	}
 
 	return fmt.Sprintf("http://%s", listener.Addr().String()), nil
 }

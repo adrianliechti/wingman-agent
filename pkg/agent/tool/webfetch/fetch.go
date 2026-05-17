@@ -62,7 +62,14 @@ func Tools() []tool.Tool {
 				return "", err
 			}
 
-			return extractWingman(ctx, client, normalizedURL, prompt)
+			content, truncated, err := client.Fetch(ctx, normalizedURL, prompt)
+			if err != nil {
+				return "", err
+			}
+			if truncated {
+				content += "\n\n[Content truncated at 100KB]"
+			}
+			return content, nil
 		},
 	}}
 }
@@ -82,17 +89,4 @@ func normalizeFetchURL(raw string) (string, error) {
 	default:
 		return "", fmt.Errorf("url must use http or https")
 	}
-}
-
-func extractWingman(ctx context.Context, client *wingman.Client, urlStr, prompt string) (string, error) {
-	content, truncated, err := client.Fetch(ctx, urlStr, prompt)
-	if err != nil {
-		return "", err
-	}
-
-	if truncated {
-		content += "\n\n[Content truncated at 100KB]"
-	}
-
-	return content, nil
 }

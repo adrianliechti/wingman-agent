@@ -3,12 +3,14 @@ package shell
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
@@ -101,30 +103,24 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("failed to start command: %w", err)
-	}
+	// On ctx cancellation, exec wraps up the command via cmd.Cancel (set in
+	// buildCommand) which kills the whole process group, not just the leader.
+	runErr := cmd.Run()
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-
-	select {
-	case <-ctx.Done():
-		killProcessGroup(cmd)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "", fmt.Errorf("command timed out after %d seconds", timeout)
-	case err := <-done:
-		truncated := truncateOutput(output.String())
-
-		if err != nil {
-			exitCode := -1
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			}
-			truncated += fmt.Sprintf("\n\nCommand exited with code %d", exitCode)
-		}
-
-		return truncated, nil
 	}
+
+	truncated := truncateOutput(output.String())
+	if runErr != nil {
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		truncated += fmt.Sprintf("\n\nCommand exited with code %d", exitCode)
+	}
+	return truncated, nil
 }
 func buildCommand(ctx context.Context, command, workingDir string) *exec.Cmd {
 	var cmd *exec.Cmd
@@ -149,6 +145,10 @@ func buildCommand(ctx context.Context, command, workingDir string) *exec.Cmd {
 	)
 
 	setupProcessGroup(cmd)
+
+	// Override CommandContext's default Process.Kill so timeouts/cancellation
+	// tear down the entire process group, not just the leader.
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 
 	return cmd
 }
@@ -187,10 +187,34 @@ func truncateOutput(output string) string {
 	truncated := strings.Join(lines, "\n")
 	if len(truncated) > maxBytes {
 		half := maxBytes / 2
-		truncated = truncated[:half] + "\n... [bytes elided] ...\n" + truncated[len(truncated)-half:]
+		head := truncated[:utf8BoundaryDown(truncated, half)]
+		tail := truncated[utf8BoundaryUp(truncated, len(truncated)-half):]
+		truncated = head + "\n... [bytes elided] ...\n" + tail
 	}
 
 	notice := fmt.Sprintf("[truncated %d→%d lines, %dKB→%dKB; head+tail elided]\n", totalLines, strings.Count(truncated, "\n")+1, totalBytes/1024, len(truncated)/1024)
 
 	return notice + truncated
+}
+
+// utf8BoundaryDown returns the largest valid UTF-8 boundary <= i.
+func utf8BoundaryDown(s string, i int) int {
+	if i >= len(s) {
+		return len(s)
+	}
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return i
+}
+
+// utf8BoundaryUp returns the smallest valid UTF-8 boundary >= i.
+func utf8BoundaryUp(s string, i int) int {
+	if i <= 0 {
+		return 0
+	}
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return i
 }

@@ -27,6 +27,11 @@ import (
 //go:embed skills/*/SKILL.md
 var bundledFS embed.FS
 
+const (
+	memoryFileName = "MEMORY.md"
+	memoryMaxBytes = 25 * 1024
+)
+
 // UI is the elicitation hook a frontend provides for tool ask/confirm
 // prompts. Pass nil to NewAgent for safe defaults (Confirm → true, Ask → "").
 type UI interface {
@@ -302,19 +307,24 @@ func isSupportedWorkspace(dir string) bool {
 	}
 
 	const budget = 4 * time.Second
-	done := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
 
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		filepath.WalkDir(dir, func(_ string, _ fs.DirEntry, _ error) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return nil
 		})
-		close(done)
 	}()
 
 	select {
 	case <-done:
-		return true
-	case <-time.After(budget):
+		return ctx.Err() == nil
+	case <-ctx.Done():
 		return false
 	}
 }

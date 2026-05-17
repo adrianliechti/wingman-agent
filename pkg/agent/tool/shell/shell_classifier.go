@@ -467,7 +467,7 @@ func isDangerousSingleCommand(command string) bool {
 	case "rundll32", "rundll32.exe":
 		return argsHaveURL(args) && containsArgFold(args, "url.dll,fileprotocolhandler")
 	case "rm":
-		return hasAnyArg(args, "-r", "-R", "-rf", "-fr") || hasAnyArgPrefix(args, "--recursive")
+		return hasRecursiveRemoveArg(args)
 	case "git":
 		return isDangerousGitCommand(args)
 	}
@@ -602,13 +602,33 @@ func isDangerousGitCommand(args []string) bool {
 	case "clean":
 		return true
 	case "reset":
-		return hasAnyArg(args, "--hard")
+		return hasAnyArg(args, "--hard") || hasAnyArgPrefix(args, "--hard=")
 	case "checkout":
 		return hasAnyArg(args, "-f", "--force")
 	case "push":
-		return hasAnyArg(args, "--force", "--force-with-lease", "-f")
+		return hasAnyArg(args, "--force", "--force-with-lease", "-f") ||
+			hasAnyArgPrefix(args, "--force-with-lease=")
 	case "branch":
 		return hasAnyArg(args, "-D")
+	}
+
+	return false
+}
+
+func hasRecursiveRemoveArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "--recursive" || strings.HasPrefix(arg, "--recursive=") {
+			return true
+		}
+
+		if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+			continue
+		}
+
+		flags := strings.TrimLeft(arg, "-")
+		if strings.ContainsAny(flags, "rR") {
+			return true
+		}
 	}
 
 	return false

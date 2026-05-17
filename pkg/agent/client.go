@@ -15,6 +15,7 @@ import (
 type request struct {
 	model        string
 	effort       string
+	reasoning    bool
 	instructions string
 	messages     []Message
 	tools        []tool.Tool
@@ -26,7 +27,7 @@ type response struct {
 }
 
 func complete(ctx context.Context, client *openai.Client, r *request, yield func(Message, error) bool) (*response, error) {
-	stream := client.Responses.NewStreaming(ctx, responses.ResponseNewParams{
+	params := responses.ResponseNewParams{
 		Model:        r.model,
 		Instructions: openai.String(r.instructions),
 
@@ -37,12 +38,23 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 
 		Store:      openai.Bool(false),
 		Truncation: responses.ResponseNewParamsTruncationAuto,
+	}
 
-		Reasoning: responses.ReasoningParam{
-			Summary: responses.ReasoningSummaryAuto,
-			Effort:  shared.ReasoningEffort(r.effort),
-		},
-	})
+	if r.effort != "" || r.reasoning {
+		rp := responses.ReasoningParam{}
+
+		if r.effort != "" {
+			rp.Effort = shared.ReasoningEffort(r.effort)
+		}
+
+		if r.reasoning {
+			rp.Summary = responses.ReasoningSummaryAuto
+		}
+
+		params.Reasoning = rp
+	}
+
+	stream := client.Responses.NewStreaming(ctx, params)
 
 	var outputItems []responses.ResponseInputItemUnionParam
 	var usageDelta Usage

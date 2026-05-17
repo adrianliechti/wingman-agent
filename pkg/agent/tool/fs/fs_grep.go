@@ -2,14 +2,19 @@ package fs
 
 import (
 	"bufio"
+	"bytes"
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"math"
 	"os"
 	pathpkg "path"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,6 +30,156 @@ const (
 	MaxScanBufSize       = 1024 * 1024
 	MaxLineDisplayLength = 500
 )
+
+// grepArgs is the parsed/validated form of the grep tool's input map.
+type grepArgs struct {
+	searchPath      string
+	searchPathFS    string
+	globPatterns    []string
+	typeFilter      string
+	multiline       bool
+	showLineNumbers bool
+	beforeContext   int
+	afterContext    int
+	headLimit       int
+	unlimited       bool
+	effectiveLimit  int
+	resultOffset    int
+	outputMode      string
+	re              *regexp.Regexp
+}
+
+func parseGrepArgs(args map[string]any, workingDir string) (*grepArgs, error) {
+	pattern, _ := args["pattern"].(string)
+	if pattern == "" {
+		return nil, fmt.Errorf("pattern is required")
+	}
+
+	searchPath := "."
+	if p, ok := args["path"].(string); ok && p != "" {
+		searchPath = p
+	}
+	searchPathFS, err := ensurePathInWorkspaceFS(searchPath, workingDir, "search")
+	if err != nil {
+		return nil, err
+	}
+
+	var globPatterns []string
+	if g, ok := args["glob"].(string); ok {
+		globPatterns = splitGrepGlobs(g)
+	}
+	for _, glob := range globPatterns {
+		if _, err := doublestar.Match(strings.TrimPrefix(glob, "!"), ""); err != nil {
+			return nil, fmt.Errorf("invalid glob pattern: %w", err)
+		}
+	}
+
+	typeFilter := ""
+	if t, ok := args["type"].(string); ok {
+		typeFilter = strings.ToLower(strings.TrimSpace(t))
+	}
+	if typeFilter != "" && !validGrepType(typeFilter) {
+		return nil, fmt.Errorf("unsupported type %q (supported: %s)", typeFilter, strings.Join(supportedGrepTypes(), ", "))
+	}
+
+	ignoreCase, _ := args["-i"].(bool)
+	multiline, _ := args["multiline"].(bool)
+	showLineNumbers := true
+	if n, ok := args["-n"].(bool); ok {
+		showLineNumbers = n
+	}
+
+	// context / -C set both sides; -B / -A then override one side.
+	// Aliases are applied in declaration order so the later key wins.
+	beforeContext, afterContext := 0, 0
+	for _, key := range []string{"context", "-C"} {
+		if v, present, err := tool.NonNegIntArg(args, key); present {
+			if err != nil {
+				return nil, err
+			}
+			beforeContext, afterContext = v, v
+		}
+	}
+	for _, key := range []string{"before_context", "-B"} {
+		if v, present, err := tool.NonNegIntArg(args, key); present {
+			if err != nil {
+				return nil, err
+			}
+			beforeContext = v
+		}
+	}
+	for _, key := range []string{"after_context", "-A"} {
+		if v, present, err := tool.NonNegIntArg(args, key); present {
+			if err != nil {
+				return nil, err
+			}
+			afterContext = v
+		}
+	}
+
+	headLimit := DefaultGrepLimit
+	if v, present, err := tool.NonNegIntArg(args, "head_limit"); present {
+		if err != nil {
+			return nil, err
+		}
+		headLimit = v
+	}
+
+	resultOffset := 0
+	if v, present, err := tool.NonNegIntArg(args, "offset"); present {
+		if err != nil {
+			return nil, err
+		}
+		resultOffset = v
+	}
+
+	outputMode := "files_with_matches"
+	if m, ok := args["output_mode"].(string); ok && m != "" {
+		outputMode = m
+	}
+	if !validGrepOutputMode(outputMode) {
+		return nil, fmt.Errorf("output_mode must be content, files_with_matches, or count")
+	}
+
+	regexPattern := pattern
+	flags := ""
+	if ignoreCase {
+		flags += "i"
+	}
+	if multiline {
+		flags += "s"
+	}
+	if flags != "" {
+		regexPattern = "(?" + flags + ")" + regexPattern
+	}
+	re, err := regexp.Compile(regexPattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex pattern: %w", err)
+	}
+
+	unlimited := headLimit == 0
+	effectiveLimit := headLimit
+	if unlimited {
+		effectiveLimit = math.MaxInt
+	}
+
+	return &grepArgs{
+		searchPath:      searchPath,
+		searchPathFS:    searchPathFS,
+		globPatterns:    globPatterns,
+		typeFilter:      typeFilter,
+		multiline:       multiline,
+		showLineNumbers: showLineNumbers,
+		beforeContext:   beforeContext,
+		afterContext:    afterContext,
+		headLimit:       headLimit,
+		unlimited:       unlimited,
+		effectiveLimit:  effectiveLimit,
+		resultOffset:    resultOffset,
+		outputMode:      outputMode,
+		re:              re,
+	}, nil
+}
 
 func GrepTool(root *os.Root) tool.Tool {
 	return tool.Tool{
@@ -70,162 +225,25 @@ func GrepTool(root *os.Root) tool.Tool {
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
-			pattern, ok := args["pattern"].(string)
-
-			if !ok || pattern == "" {
-				return "", fmt.Errorf("pattern is required")
-			}
-
-			searchPath := "."
-
-			if p, ok := args["path"].(string); ok && p != "" {
-				searchPath = p
-			}
-
 			workingDir := root.Name()
-
-			searchPathFS, err := ensurePathInWorkspaceFS(searchPath, workingDir, "search")
-
+			cfg, err := parseGrepArgs(args, workingDir)
 			if err != nil {
 				return "", err
 			}
 
-			var globPatterns []string
-
-			if g, ok := args["glob"].(string); ok {
-				globPatterns = splitGrepGlobs(g)
-			}
-			for _, glob := range globPatterns {
-				if _, err := doublestar.Match(strings.TrimPrefix(glob, "!"), ""); err != nil {
-					return "", fmt.Errorf("invalid glob pattern: %w", err)
-				}
-			}
-
-			typeFilter := ""
-
-			if t, ok := args["type"].(string); ok {
-				typeFilter = strings.ToLower(strings.TrimSpace(t))
-			}
-			if typeFilter != "" && !validGrepType(typeFilter) {
-				return "", fmt.Errorf("unsupported type %q (supported: %s)", typeFilter, strings.Join(supportedGrepTypes(), ", "))
-			}
-
-			ignoreCase := false
-			if ic, ok := args["-i"].(bool); ok {
-				ignoreCase = ic
-			}
-
-			showLineNumbers := true
-			if n, ok := args["-n"].(bool); ok {
-				showLineNumbers = n
-			}
-
-			multiline := false
-
-			if ml, ok := args["multiline"].(bool); ok {
-				multiline = ml
-			}
-
-			contextLines := 0
-			beforeContext := 0
-			afterContext := 0
-
-			if c, present, err := tool.OptionalIntArg(args, "context"); present {
-				if err != nil || c < 0 {
-					return "", fmt.Errorf("context must be a non-negative integer")
-				}
-				contextLines = c
-				beforeContext = contextLines
-				afterContext = contextLines
-			}
-
-			if c, present, err := tool.OptionalIntArg(args, "-C"); present {
-				if err != nil || c < 0 {
-					return "", fmt.Errorf("-C must be a non-negative integer")
-				}
-				contextLines = c
-				beforeContext = contextLines
-				afterContext = contextLines
-			}
-
-			if bc, present, err := tool.OptionalIntArg(args, "before_context"); present {
-				if err != nil || bc < 0 {
-					return "", fmt.Errorf("before_context must be a non-negative integer")
-				}
-				beforeContext = bc
-			}
-
-			if bc, present, err := tool.OptionalIntArg(args, "-B"); present {
-				if err != nil || bc < 0 {
-					return "", fmt.Errorf("-B must be a non-negative integer")
-				}
-				beforeContext = bc
-			}
-
-			if ac, present, err := tool.OptionalIntArg(args, "after_context"); present {
-				if err != nil || ac < 0 {
-					return "", fmt.Errorf("after_context must be a non-negative integer")
-				}
-				afterContext = ac
-			}
-
-			if ac, present, err := tool.OptionalIntArg(args, "-A"); present {
-				if err != nil || ac < 0 {
-					return "", fmt.Errorf("-A must be a non-negative integer")
-				}
-				afterContext = ac
-			}
-
-			headLimit := DefaultGrepLimit
-			if hl, present, err := tool.OptionalIntArg(args, "head_limit"); present {
-				if err != nil || hl < 0 {
-					return "", fmt.Errorf("head_limit must be a non-negative integer")
-				}
-				headLimit = hl
-			}
-
-			unlimited := headLimit == 0
-			effectiveLimit := headLimit
-			if unlimited {
-				effectiveLimit = maxInt()
-			}
-
-			resultOffset := 0
-			if offset, present, err := tool.OptionalIntArg(args, "offset"); present {
-				if err != nil || offset < 0 {
-					return "", fmt.Errorf("offset must be a non-negative integer")
-				}
-				resultOffset = offset
-			}
-
-			outputMode := "files_with_matches"
-
-			if m, ok := args["output_mode"].(string); ok && m != "" {
-				outputMode = m
-			}
-
-			if !validGrepOutputMode(outputMode) {
-				return "", fmt.Errorf("output_mode must be content, files_with_matches, or count")
-			}
-
-			regexPattern := pattern
-
-			flags := ""
-			if ignoreCase {
-				flags += "i"
-			}
-			if multiline {
-				flags += "s"
-			}
-			if flags != "" {
-				regexPattern = "(?" + flags + ")" + regexPattern
-			}
-
-			re, err := regexp.Compile(regexPattern)
-
-			if err != nil {
-				return "", fmt.Errorf("invalid regex pattern: %w", err)
-			}
+			searchPath := cfg.searchPath
+			searchPathFS := cfg.searchPathFS
+			globPatterns := cfg.globPatterns
+			typeFilter := cfg.typeFilter
+			multiline := cfg.multiline
+			showLineNumbers := cfg.showLineNumbers
+			beforeContext, afterContext := cfg.beforeContext, cfg.afterContext
+			headLimit := cfg.headLimit
+			unlimited := cfg.unlimited
+			effectiveLimit := cfg.effectiveLimit
+			resultOffset := cfg.resultOffset
+			outputMode := cfg.outputMode
+			re := cfg.re
 
 			info, err := root.Stat(searchPathFS)
 
@@ -311,7 +329,7 @@ func GrepTool(root *os.Root) tool.Tool {
 			}
 			var fileMatches []fileMatch
 
-			err = walkGrepFiles(ctx, fsys, searchPathFS, func(path, relPath string) error {
+			err = walkGrepFiles(ctx, fsys, searchPathFS, func(path, relPath string, d fs.DirEntry) error {
 				if !matchesGrepGlobs(globPatterns, path, relPath) {
 					return nil
 				}
@@ -327,7 +345,7 @@ func GrepTool(root *os.Root) tool.Tool {
 				if outputMode == "files_with_matches" {
 					matches := searchFileWithContext(fsys, path, re, 0, 0, 1, multiline, true)
 					if len(matches) > 0 {
-						fileMatches = append(fileMatches, fileMatch{path: filepath.FromSlash(path), modTime: fileModTime(fsys, path)})
+						fileMatches = append(fileMatches, fileMatch{path: filepath.FromSlash(path), modTime: entryModTime(d)})
 					}
 					return nil
 				}
@@ -382,11 +400,9 @@ func GrepTool(root *os.Root) tool.Tool {
 				if len(fileMatches) == 0 {
 					return "No files found", nil
 				}
-				sort.Slice(fileMatches, func(i, j int) bool {
-					if fileMatches[i].modTime.Equal(fileMatches[j].modTime) {
-						return fileMatches[i].path < fileMatches[j].path
-					}
-					return fileMatches[i].modTime.After(fileMatches[j].modTime)
+				// Newest mtime first; lexical path as a stable tiebreaker.
+				slices.SortFunc(fileMatches, func(a, b fileMatch) int {
+					return cmp.Or(b.modTime.Compare(a.modTime), cmp.Compare(a.path, b.path))
 				})
 				if resultOffset >= len(fileMatches) {
 					return "No files found", nil
@@ -534,33 +550,69 @@ func matchesSingleGrepGlob(pattern, path, relPath string) bool {
 	return matched
 }
 
-func countFileMatches(fsys fs.FS, path string, re *regexp.Regexp, multiline bool) int {
+// binaryPeekSize is the prefix length sniffed for null bytes when deciding
+// whether a file is binary. 512 bytes is enough to catch common formats
+// (executables, images, compressed archives) without paying for a full read.
+const binaryPeekSize = 512
+
+// openTextFile opens path and returns a reader over the full contents.
+// If the prefix contains a null byte the file is treated as binary,
+// isBinary is set, the file is closed, and the reader is nil.
+// Caller closes the returned io.ReadCloser on the non-binary path.
+func openTextFile(fsys fs.FS, path string) (io.ReadCloser, bool, error) {
 	f, err := fsys.Open(path)
 	if err != nil {
+		return nil, false, err
+	}
+
+	var peek [binaryPeekSize]byte
+	n, err := io.ReadFull(f, peek[:])
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		f.Close()
+		return nil, false, err
+	}
+
+	if bytes.IndexByte(peek[:n], 0) != -1 {
+		f.Close()
+		return nil, true, nil
+	}
+
+	// Re-front the peeked bytes onto the file so the caller can scan from byte 0.
+	return struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(peek[:n]), f), f}, false, nil
+}
+
+func countFileMatches(fsys fs.FS, path string, re *regexp.Regexp, multiline bool) int {
+	rc, isBinary, err := openTextFile(fsys, path)
+	if err != nil || isBinary {
 		return 0
 	}
-	defer f.Close()
+	defer rc.Close()
 
-	var lines []string
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, DefaultScanBufSize)
-	scanner.Buffer(buf, MaxScanBufSize)
+	scanner := bufio.NewScanner(rc)
+	scanner.Buffer(make([]byte, 0, DefaultScanBufSize), MaxScanBufSize)
 
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-
+	// Multiline mode needs the joined buffer so the regex can span newlines;
+	// keep a single builder rather than materializing each line into a slice.
 	if multiline {
-		return len(re.FindAllStringIndex(strings.Join(lines, "\n"), -1))
+		var b strings.Builder
+		first := true
+		for scanner.Scan() {
+			if !first {
+				b.WriteByte('\n')
+			}
+			first = false
+			b.Write(scanner.Bytes())
+		}
+		return len(re.FindAllStringIndex(b.String(), -1))
 	}
 
 	count := 0
-	for _, line := range lines {
-		if re.MatchString(line) {
-			count++
-		}
+	for scanner.Scan() {
+		count += len(re.FindAllIndex(scanner.Bytes(), -1))
 	}
-
 	return count
 }
 
@@ -597,7 +649,7 @@ func supportedGrepTypes() []string {
 	for t := range grepTypeExtensions {
 		types = append(types, t)
 	}
-	sort.Strings(types)
+	slices.Sort(types)
 	return types
 }
 
@@ -606,19 +658,7 @@ func matchesType(path, typeFilter string) bool {
 	if !ok {
 		return false
 	}
-
-	ext := strings.ToLower(filepath.Ext(path))
-	for _, allowed := range exts {
-		if ext == allowed {
-			return true
-		}
-	}
-
-	return false
-}
-
-func maxInt() int {
-	return int(^uint(0) >> 1)
+	return slices.Contains(exts, strings.ToLower(filepath.Ext(path)))
 }
 
 func plural(n int, singular string) string {
@@ -650,16 +690,28 @@ func formatGrepPaginationNotice(limitReached bool, limit, offset int) string {
 	return "Showing results with pagination = " + info
 }
 
-func fileModTime(fsys fs.FS, path string) time.Time {
-	info, err := fs.Stat(fsys, path)
+// lineContaining returns the index of the line whose start offset is the
+// largest value <= offset, clamped to >= 0. lineStarts must be sorted.
+func lineContaining(lineStarts []int, offset int) int {
+	i, found := slices.BinarySearch(lineStarts, offset)
+	if !found {
+		i--
+	}
+	return max(0, i)
+}
+
+// entryModTime returns the directory entry's modification time, or zero if
+// the underlying filesystem cannot report it.
+func entryModTime(d fs.DirEntry) time.Time {
+	info, err := d.Info()
 	if err != nil {
 		return time.Time{}
 	}
 	return info.ModTime()
 }
 
-func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, onFile func(path, relPath string) error) error {
-	rootPatterns := loadGitignore(fsys, nil)
+func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, onFile func(path, relPath string, d fs.DirEntry) error) error {
+	cache := newGitignoreCache(fsys)
 
 	return fs.WalkDir(fsys, root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -680,62 +732,84 @@ func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, onFile func(pat
 			if vcsDirs[d.Name()] {
 				return filepath.SkipDir
 			}
-
-			matcher := gitignore.NewMatcher(gitignorePatternsForPath(fsys, rootPatterns, path, true))
-			pathParts := strings.Split(path, "/")
-			if matcher.Match(pathParts, true) {
+			if cache.matches(path, true) {
 				return filepath.SkipDir
 			}
-
 			return nil
 		}
 
-		matcher := gitignore.NewMatcher(gitignorePatternsForPath(fsys, rootPatterns, path, false))
-		pathParts := strings.Split(path, "/")
-		if matcher.Match(pathParts, false) {
+		if cache.matches(path, false) {
 			return nil
 		}
 
-		return onFile(path, relPathFromBase(root, path))
+		return onFile(path, relPathFromBase(root, path), d)
 	})
 }
 
-func gitignorePatternsForPath(fsys fs.FS, rootPatterns []gitignore.Pattern, path string, isDir bool) []gitignore.Pattern {
-	patterns := append([]gitignore.Pattern{}, rootPatterns...)
+// gitignoreCache memoizes per-directory pattern lists so each directory's
+// .gitignore is read at most once during a walk, instead of once per file.
+type gitignoreCache struct {
+	fsys     fs.FS
+	patterns map[string][]gitignore.Pattern // key: directory fs path ("." or "a/b")
+}
+
+func newGitignoreCache(fsys fs.FS) *gitignoreCache {
+	return &gitignoreCache{
+		fsys:     fsys,
+		patterns: make(map[string][]gitignore.Pattern),
+	}
+}
+
+func (c *gitignoreCache) matches(path string, isDir bool) bool {
 	dir := path
 	if !isDir {
 		dir = pathpkg.Dir(dir)
 	}
 
-	var domains [][]string
-	for dir != "." && dir != "/" {
-		domains = append(domains, pathDomain(dir))
-		parent := pathpkg.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
+	patterns := c.patternsFor(dir)
+	if len(patterns) == 0 {
+		return false
 	}
 
-	for i := len(domains) - 1; i >= 0; i-- {
-		patterns = append(patterns, loadGitignore(fsys, domains[i])...)
+	return gitignore.NewMatcher(patterns).Match(strings.Split(path, "/"), isDir)
+}
+
+func (c *gitignoreCache) patternsFor(dir string) []gitignore.Pattern {
+	if cached, ok := c.patterns[dir]; ok {
+		return cached
 	}
 
-	return patterns
+	var parentPatterns []gitignore.Pattern
+	if dir == "." || dir == "/" {
+		parentPatterns = nil
+	} else {
+		parentPatterns = c.patternsFor(pathpkg.Dir(dir))
+	}
+
+	local := loadGitignore(c.fsys, pathDomain(dir))
+	if len(local) == 0 {
+		c.patterns[dir] = parentPatterns
+		return parentPatterns
+	}
+
+	combined := make([]gitignore.Pattern, 0, len(parentPatterns)+len(local))
+	combined = append(combined, parentPatterns...)
+	combined = append(combined, local...)
+	c.patterns[dir] = combined
+	return combined
 }
 
 func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeContext, afterContext, limit int, multiline bool, showLineNumbers bool) []string {
-	f, err := fsys.Open(path)
-
-	if err != nil {
+	rc, isBinary, err := openTextFile(fsys, path)
+	if err != nil || isBinary {
 		return nil
 	}
-	defer f.Close()
+	defer rc.Close()
 
 	displayPath := filepath.FromSlash(path)
 
 	var lines []string
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(rc)
 
 	buf := make([]byte, 0, DefaultScanBufSize)
 	scanner.Buffer(buf, MaxScanBufSize)
@@ -751,16 +825,16 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 	// (and the model) can tell scanning stopped early.
 	var scanCutoff string
 	if err := scanner.Err(); err != nil {
-		if err == bufio.ErrTooLong {
-			scanCutoff = formatGrepLine(displayPath, len(lines)+1, true, fmt.Sprintf("line exceeds %dKB scan limit; remainder of file skipped", MaxScanBufSize/1024), showLineNumbers)
-		} else {
+		if !errors.Is(err, bufio.ErrTooLong) {
 			// Other scanner errors (I/O) — bail like before.
 			return nil
 		}
+		scanCutoff = formatGrepLine(displayPath, len(lines)+1, true, fmt.Sprintf("line exceeds %dKB scan limit; remainder of file skipped", MaxScanBufSize/1024), showLineNumbers)
 	}
 
 	var results []string
-	matchedLines := make(map[int]bool)
+	matchedLines := make([]bool, len(lines))
+	anyMatch := false
 
 	if multiline {
 		// In multiline mode the regex may span newlines, so we must run it
@@ -779,33 +853,32 @@ func searchFileWithContext(fsys fs.FS, path string, re *regexp.Regexp, beforeCon
 
 		for _, m := range re.FindAllStringIndex(full, -1) {
 			start, end := m[0], m[1]
-			startLine := max(0, sort.Search(len(lineStarts), func(i int) bool { return lineStarts[i] > start })-1)
+			startLine := lineContaining(lineStarts, start)
 			// For zero-width matches, end equals start; clamp so we still mark the starting line.
 			endProbe := end
 			if endProbe > start {
 				endProbe = end - 1
 			}
-			endLine := max(startLine, sort.Search(len(lineStarts), func(i int) bool { return lineStarts[i] > endProbe })-1)
+			endLine := max(startLine, lineContaining(lineStarts, endProbe))
 			for i := startLine; i <= endLine; i++ {
 				matchedLines[i] = true
+				anyMatch = true
 			}
 		}
 	} else {
 		for i, line := range lines {
 			if re.MatchString(line) {
 				matchedLines[i] = true
+				anyMatch = true
 			}
 		}
 	}
 
-	if len(matchedLines) == 0 {
-		if scanCutoff != "" {
-			return []string{scanCutoff}
-		}
+	if !anyMatch {
 		return nil
 	}
 
-	printed := make(map[int]bool)
+	printed := make([]bool, len(lines))
 	lastPrinted := -2
 
 	for i := range lines {

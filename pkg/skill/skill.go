@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -193,7 +193,7 @@ func discover(root string, dirs []string, relativeLocation bool) []Skill {
 		}
 
 		// doublestar.Glob doesn't guarantee ordering; sort for determinism.
-		sort.Strings(matches)
+		slices.Sort(matches)
 
 		for _, match := range matches {
 			skillFile := filepath.Join(skillDir, match)

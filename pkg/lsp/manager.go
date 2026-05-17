@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -283,6 +283,17 @@ func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) (string, e
 	return "No symbols found", nil
 }
 
+// skippedDiscoveryDirs are noisy/build/vendored directory names omitted from
+// LSP source file discovery. (Distinct from VCS dirs handled elsewhere.)
+var skippedDiscoveryDirs = map[string]bool{
+	"node_modules": true,
+	"vendor":       true,
+	"__pycache__":  true,
+	"target":       true,
+	"build":        true,
+	"dist":         true,
+}
+
 func discoverSourceFiles(workingDir string, extensions []string, maxFiles int) []string {
 	extSet := make(map[string]bool, len(extensions))
 	for _, ext := range extensions {
@@ -290,14 +301,14 @@ func discoverSourceFiles(workingDir string, extensions []string, maxFiles int) [
 	}
 
 	var files []string
-	filepath.Walk(workingDir, func(path string, info os.FileInfo, err error) error {
+	filepath.WalkDir(workingDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 
-		if info.IsDir() {
-			name := info.Name()
-			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "__pycache__" || name == "target" || name == "build" || name == "dist" {
+		if d.IsDir() {
+			name := d.Name()
+			if path != workingDir && (strings.HasPrefix(name, ".") || skippedDiscoveryDirs[name]) {
 				return filepath.SkipDir
 			}
 			return nil

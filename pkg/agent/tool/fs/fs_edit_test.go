@@ -170,8 +170,8 @@ func TestEditTool(t *testing.T) {
 
 		content, _ := os.ReadFile(testFile)
 
-		if !strings.Contains(string(content), "goodbye") {
-			t.Errorf("expected fuzzy match to work, got: %s", content)
+		if string(content) != "goodbye\nworld" {
+			t.Errorf("expected fuzzy match to replace whole match, got: %s", content)
 		}
 	})
 
@@ -268,6 +268,21 @@ func TestEditTool(t *testing.T) {
 
 		if err == nil || !strings.Contains(err.Error(), "made no progress") {
 			t.Fatalf("expected no-progress error, got: %v", err)
+		}
+	})
+
+	t.Run("edit does not fuzzy match whitespace-only old string", func(t *testing.T) {
+		testFile := filepath.Join(tmpDir, "whitespace_old.txt")
+		os.WriteFile(testFile, []byte("hello\nworld"), 0644)
+
+		_, err := editTool.Execute(context.Background(), map[string]any{
+			"path":       "whitespace_old.txt",
+			"old_string": "   ",
+			"new_string": "x",
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "could not find old_string") {
+			t.Fatalf("expected no match error, got: %v", err)
 		}
 	})
 

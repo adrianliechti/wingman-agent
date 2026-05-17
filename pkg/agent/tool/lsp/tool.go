@@ -70,6 +70,18 @@ func lspTool(manager *lsp.Manager) tool.Tool {
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
 			operation, _ := args["operation"].(string)
 
+			runPosition := func(fn func(session *lsp.Session, uri string, line, column int) (string, error)) (string, error) {
+				path, line, column, err := parsePositionArgs(manager.WorkingDir(), args)
+				if err != nil {
+					return "", err
+				}
+				session, uri, err := openFile(ctx, manager, path)
+				if err != nil {
+					return "", err
+				}
+				return fn(session, uri, line, column)
+			}
+
 			switch operation {
 			case "diagnostics":
 				path, _ := args["path"].(string)
@@ -90,93 +102,43 @@ func lspTool(manager *lsp.Manager) tool.Tool {
 				return session.Diagnostics(ctx, uri, path)
 			case "workspaceDiagnostics":
 				return manager.WorkspaceDiagnostics(ctx)
-			case "goToDefinition":
-				path, line, column, err := parsePositionArgs(manager.WorkingDir(), args)
-				if err != nil {
-					return "", err
-				}
-
-				session, uri, err := openFile(ctx, manager, path)
-				if err != nil {
-					return "", err
-				}
-
-				return session.Definition(ctx, uri, line, column)
-			case "findReferences":
-				path, line, column, err := parsePositionArgs(manager.WorkingDir(), args)
-				if err != nil {
-					return "", err
-				}
-
-				session, uri, err := openFile(ctx, manager, path)
-				if err != nil {
-					return "", err
-				}
-
-				return session.References(ctx, uri, line, column)
-			case "hover":
-				path, line, column, err := parsePositionArgs(manager.WorkingDir(), args)
-				if err != nil {
-					return "", err
-				}
-
-				session, uri, err := openFile(ctx, manager, path)
-				if err != nil {
-					return "", err
-				}
-
-				return session.Hover(ctx, uri, line, column)
-			case "goToImplementation":
-				path, line, column, err := parsePositionArgs(manager.WorkingDir(), args)
-				if err != nil {
-					return "", err
-				}
-
-				session, uri, err := openFile(ctx, manager, path)
-				if err != nil {
-					return "", err
-				}
-
-				return session.Implementation(ctx, uri, line, column)
+			case "workspaceSymbol":
+				query, _ := args["query"].(string)
+				return manager.WorkspaceSymbols(ctx, query)
 			case "documentSymbol":
 				path, err := requiredFileArg(manager.WorkingDir(), args, "path")
 				if err != nil {
 					return "", err
 				}
-
 				session, uri, err := openFile(ctx, manager, path)
 				if err != nil {
 					return "", err
 				}
-
 				return session.DocumentSymbols(ctx, uri, path)
-			case "workspaceSymbol":
-				query, _ := args["query"].(string)
-				return manager.WorkspaceSymbols(ctx, query)
+			case "goToDefinition":
+				return runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
+					return s.Definition(ctx, uri, line, column)
+				})
+			case "findReferences":
+				return runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
+					return s.References(ctx, uri, line, column)
+				})
+			case "hover":
+				return runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
+					return s.Hover(ctx, uri, line, column)
+				})
+			case "goToImplementation":
+				return runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
+					return s.Implementation(ctx, uri, line, column)
+				})
 			case "prepareCallHierarchy":
-				path, line, column, err := parsePositionArgs(manager.WorkingDir(), args)
-				if err != nil {
-					return "", err
-				}
-
-				session, uri, err := openFile(ctx, manager, path)
-				if err != nil {
-					return "", err
-				}
-
-				return session.PrepareCallHierarchy(ctx, uri, line, column)
+				return runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
+					return s.PrepareCallHierarchy(ctx, uri, line, column)
+				})
 			case "incomingCalls", "outgoingCalls":
-				path, line, column, err := parsePositionArgs(manager.WorkingDir(), args)
-				if err != nil {
-					return "", err
-				}
-
-				session, uri, err := openFile(ctx, manager, path)
-				if err != nil {
-					return "", err
-				}
-
-				return session.CallHierarchy(ctx, uri, line, column, operation == "incomingCalls")
+				return runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
+					return s.CallHierarchy(ctx, uri, line, column, operation == "incomingCalls")
+				})
 			default:
 				return "", fmt.Errorf("operation must be one of: diagnostics, workspaceDiagnostics, goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls")
 			}
@@ -195,6 +157,13 @@ func requiredFileArg(workingDir string, args map[string]any, key string) (string
 
 func resolveExistingFile(workingDir, path string) (string, error) {
 	path = absPath(workingDir, path)
+	path = filepath.Clean(path)
+	workingDir = filepath.Clean(workingDir)
+
+	rel, err := filepath.Rel(workingDir, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("path is outside workspace: %s", path)
+	}
 
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {

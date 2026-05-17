@@ -10,24 +10,34 @@
         --bg: #0a0a0a;
         --bg-elevated: #181818;
         --bg-hover: #1a1a1a;
-        --fg: #e0e0e0;
+        --bg-active: #1f1f1f;
+        --fg: #e8e8e8;
         --fg-muted: #888888;
         --border: #1e1e1e;
-        --border-strong: #333333;
+        --border-strong: #2a2a2a;
+        --border-focus: #4a4a4a;
         --danger: #f87171;
       }
 
       @media (prefers-color-scheme: light) {
         :root {
           --bg: #ffffff;
-          --bg-elevated: #f0f0f0;
-          --bg-hover: #ededed;
+          --bg-elevated: #f4f4f4;
+          --bg-hover: #eeeeee;
+          --bg-active: #e6e6e6;
           --fg: #1a1a1a;
-          --fg-muted: #555555;
-          --border: #e5e5e5;
-          --border-strong: #cccccc;
+          --fg-muted: #666666;
+          --border: #ebebeb;
+          --border-strong: #d4d4d4;
+          --border-focus: #b0b0b0;
           --danger: #dc2626;
         }
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
       }
 
       html,
@@ -48,90 +58,364 @@
         -moz-osx-font-smoothing: grayscale;
       }
 
-      main {
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 0.5rem;
-        padding: 2rem;
-        text-align: center;
-      }
-
-      .brand {
-        width: 96px;
-        height: 96px;
-        margin-bottom: 0.75rem;
-        opacity: 0.85;
-      }
-
-      h1 {
-        margin: 0;
-        font-size: 1.5rem;
-        font-weight: 500;
-        letter-spacing: -0.01em;
-      }
-
-      p {
-        margin: 0;
-        color: var(--fg-muted);
-      }
-
       button {
         font: inherit;
-        margin-top: 0.75rem;
-        padding: 0.55rem 1.1rem;
+        font-size: 13px;
+        padding: 0.45rem 1rem;
         border-radius: 6px;
         border: 1px solid var(--border-strong);
         background: var(--bg-elevated);
         color: var(--fg);
         cursor: pointer;
         transition:
-          background 0.12s,
-          border-color 0.12s;
+          background 0.1s ease,
+          border-color 0.1s ease,
+          color 0.1s ease;
       }
 
       button:hover:not(:disabled) {
         background: var(--bg-hover);
+        border-color: var(--border-focus);
+      }
+
+      button:active:not(:disabled) {
+        background: var(--bg-active);
+      }
+
+      button:focus-visible {
+        outline: 2px solid var(--border-focus);
+        outline-offset: 2px;
       }
 
       button:disabled {
-        opacity: 0.5;
+        opacity: 0.4;
         cursor: not-allowed;
       }
 
-      .error {
-        min-height: 1.2em;
-        margin-top: 0.25rem;
-        color: var(--danger);
-        font-size: 12px;
+      .page {
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
       }
 
-      .settings-toggle {
-        position: fixed;
-        left: 12px;
-        bottom: 12px;
-        width: 32px;
-        height: 32px;
-        margin: 0;
+      .layout {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .brand-panel {
+        justify-self: end;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding-right: 3.5rem;
+        border-right: 1px solid var(--border);
+      }
+
+      .brand {
+        width: 80px;
+        height: 80px;
+        opacity: 0.85;
+      }
+
+      .actions {
+        justify-self: start;
+        padding-left: 3.5rem;
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        justify-content: center;
+      }
+
+      /* ============ Empty state ============ */
+
+      .layout.empty .workspaces {
+        display: none;
+      }
+
+      .dropzone {
+        width: max-content;
+        min-width: 148px;
+        height: 88px;
+        padding: 0 1.75rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        background: transparent;
+        border: 1px dashed var(--border-strong);
+        border-radius: 8px;
+        color: var(--fg-muted);
+        cursor: pointer;
+        transition:
+          background 0.1s ease,
+          border-color 0.1s ease,
+          color 0.1s ease;
+      }
+
+      .dropzone:hover:not(:disabled) {
+        background: var(--bg-elevated);
+        border-color: var(--border-focus);
+        color: var(--fg);
+      }
+
+      .dropzone:active:not(:disabled) {
+        background: var(--bg-active);
+      }
+
+      .dropzone-icon {
+        width: 20px;
+        height: 20px;
+        flex-shrink: 0;
+      }
+
+      .dropzone-title {
+        font-size: 12px;
+        font-weight: 500;
+        line-height: 1.2;
+        text-align: center;
+        letter-spacing: 0.01em;
+      }
+
+      /* ============ Populated state ============ */
+
+      .layout.has-workspaces .dropzone {
+        display: none;
+      }
+
+      .workspaces {
+        width: 280px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 26px;
+        column-gap: 0.5rem;
+        row-gap: 0.35rem;
+        align-items: center;
+      }
+
+      .workspaces-title {
+        grid-column: 1;
+        margin: 0 0 0 10px;
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--fg-muted);
+        opacity: 0.6;
+      }
+
+      .workspaces-list {
+        grid-column: 1 / -1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        margin-top: 2px;
+      }
+
+      .workspace-item {
+        position: relative;
+        border-radius: 6px;
+      }
+
+      .workspace-open {
+        width: 100%;
+        min-width: 0;
+        padding: 7px 34px 7px 10px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+        text-align: left;
+        cursor: pointer;
+        transition:
+          background 0.1s ease;
+      }
+
+      .workspace-open:hover:not(:disabled) {
+        background: var(--bg-elevated);
+        border-color: transparent;
+      }
+
+      .workspace-open:focus-visible {
+        outline: 2px solid var(--border-focus);
+        outline-offset: -2px;
+      }
+
+      .workspace-icon {
+        flex-shrink: 0;
+        width: 15px;
+        height: 15px;
+        color: var(--fg-muted);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 0.7;
+      }
+
+      .workspace-open:hover .workspace-icon,
+      .workspace-open:focus-visible .workspace-icon {
+        color: var(--fg);
+        opacity: 1;
+      }
+
+      .workspace-icon svg {
+        width: 15px;
+        height: 15px;
+      }
+
+      .workspace-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+      }
+
+      .workspace-name {
+        font-size: 13px;
+        font-weight: 450;
+        color: var(--fg);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .workspace-path {
+        font-size: 11px;
+        color: var(--fg-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        opacity: 0.8;
+      }
+
+      .workspace-remove {
+        position: absolute;
+        right: 5px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 20px;
+        height: 20px;
         padding: 0;
         display: flex;
         align-items: center;
         justify-content: center;
         border: none;
+        border-radius: 4px;
         background: transparent;
         color: var(--fg-muted);
+        opacity: 0;
+        cursor: pointer;
+        transition:
+          opacity 0.1s ease,
+          color 0.1s ease,
+          background 0.1s ease;
+      }
+
+      .workspace-item:hover .workspace-remove,
+      .workspace-item:focus-within .workspace-remove {
+        opacity: 1;
+      }
+
+      .workspace-remove:hover:not(:disabled) {
+        background: var(--bg-hover);
+        color: var(--fg);
+        border-color: transparent;
+      }
+
+      .workspace-remove svg {
+        width: 11px;
+        height: 11px;
+      }
+
+      .workspace-add {
+        grid-column: 2;
+        grid-row: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        border: none;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--fg-muted);
+        cursor: pointer;
+        transition:
+          background 0.1s ease,
+          color 0.1s ease;
+      }
+
+      .workspace-add:hover:not(:disabled) {
+        background: var(--bg-elevated);
+        color: var(--fg);
+        border-color: transparent;
+      }
+
+      .workspace-add-icon {
+        flex-shrink: 0;
+        width: 14px;
+        height: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .workspace-add svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      /* ============ Misc ============ */
+
+      .error {
+        min-height: 1.2em;
+        margin-top: 0.5rem;
+        color: var(--danger);
+        font-size: 11px;
+        text-align: center;
+        letter-spacing: 0.01em;
+      }
+
+      .settings-toggle {
+        position: fixed;
+        left: 14px;
+        bottom: 14px;
+        width: 30px;
+        height: 30px;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--fg-muted);
+        opacity: 0.5;
+        transition:
+          opacity 0.1s ease,
+          background 0.1s ease,
+          color 0.1s ease;
       }
 
       .settings-toggle:hover:not(:disabled) {
+        opacity: 1;
         color: var(--fg);
-        background: transparent;
+        background: var(--bg-elevated);
+        border-color: transparent;
       }
 
       .settings-toggle svg {
-        width: 16px;
-        height: 16px;
+        width: 15px;
+        height: 15px;
       }
 
       .drawer {
@@ -140,13 +424,14 @@
         left: 0;
         bottom: 0;
         max-height: 100vh;
-        width: min(380px, 100vw);
+        width: min(360px, 100vw);
         margin: 0;
         padding: 0;
-        background: var(--bg);
+        background: var(--bg-elevated);
         color: var(--fg);
         border: none;
-        border-right: 1px solid var(--border);
+        border-right: 1px solid var(--border-strong);
+        box-shadow: 4px 0 24px rgba(0, 0, 0, 0.18);
       }
 
       .drawer[open] {
@@ -155,85 +440,98 @@
       }
 
       .drawer::backdrop {
-        background: rgba(0, 0, 0, 0.4);
+        background: rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(2px);
+        -webkit-backdrop-filter: blur(2px);
       }
 
       .drawer-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 1rem 1.25rem;
+        padding: 0.9rem 1.25rem;
         border-bottom: 1px solid var(--border);
       }
 
       .drawer-header h2 {
         margin: 0;
-        font-size: 14px;
+        font-size: 13px;
         font-weight: 500;
+        letter-spacing: 0.01em;
       }
 
       .drawer-close {
         background: none;
         border: none;
         color: var(--fg-muted);
-        font-size: 18px;
+        font-size: 16px;
         line-height: 1;
         cursor: pointer;
-        padding: 4px;
-        margin: 0;
+        padding: 4px 6px;
+        border-radius: 4px;
+        opacity: 0.6;
+        transition:
+          opacity 0.1s ease,
+          background 0.1s ease;
       }
 
       .drawer-close:hover {
+        opacity: 1;
         color: var(--fg);
-        background: none;
+        background: var(--bg-hover);
+        border-color: transparent;
       }
 
       .drawer-body {
-        padding: 1rem 1.25rem;
+        padding: 1.1rem 1.25rem;
         display: flex;
         flex-direction: column;
-        gap: 0.85rem;
+        gap: 1rem;
         overflow-y: auto;
       }
 
       .drawer-body label {
         display: flex;
         flex-direction: column;
-        gap: 0.3rem;
-        font-size: 12px;
+        gap: 0.35rem;
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
         color: var(--fg-muted);
+        opacity: 0.8;
       }
 
       .drawer-body input {
         font: inherit;
         font-size: 13px;
-        padding: 0.5rem 0.65rem;
+        font-weight: 400;
+        letter-spacing: normal;
+        text-transform: none;
+        padding: 0.5rem 0.7rem;
         border-radius: 6px;
         border: 1px solid var(--border-strong);
-        background: var(--bg-elevated);
+        background: var(--bg);
         color: var(--fg);
+        transition: border-color 0.1s ease;
       }
 
       .drawer-body input:focus {
         outline: none;
-        border-color: var(--fg-muted);
+        border-color: var(--border-focus);
       }
 
       .drawer-footer {
         margin-top: auto;
-        padding: 1rem 1.25rem;
+        padding: 0.9rem 1.25rem;
         border-top: 1px solid var(--border);
         display: flex;
         align-items: center;
         gap: 0.75rem;
       }
 
-      .drawer-footer button {
-        margin: 0;
-      }
-
       .drawer-status {
-        font-size: 12px;
+        font-size: 11px;
         color: var(--fg-muted);
         flex: 1;
         text-align: right;
@@ -245,16 +543,37 @@
     </style>
   </head>
   <body>
-    <main>
-      <picture>
-        <source srcset="/icon_light.svg" media="(prefers-color-scheme: light)" />
-        <img src="/icon_dark.svg" alt="Wingman" class="brand" />
-      </picture>
-      <h1>Wingman Agent</h1>
-      <p>Open a workspace folder to begin.</p>
-      <button id="open">Open Folder...</button>
-      <div class="error" id="error"></div>
-    </main>
+    <div class="page">
+      <div id="layout" class="layout empty">
+        <aside class="brand-panel">
+          <picture>
+            <source srcset="/icon_light.svg" media="(prefers-color-scheme: light)" />
+            <img src="/icon_dark.svg" alt="Wingman Agent" class="brand" />
+          </picture>
+        </aside>
+        <main class="actions">
+          <button id="open-dropzone" class="dropzone" type="button">
+            <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 7a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.4.6l1 1a2 2 0 0 0 1.4.6H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            </svg>
+            <span class="dropzone-title">Open Folder...</span>
+          </button>
+          <section id="workspaces" class="workspaces" aria-label="Workspaces">
+            <h2 class="workspaces-title">Workspaces</h2>
+            <div id="workspaces-list" class="workspaces-list"></div>
+            <button id="open-add" class="workspace-add" type="button" title="Open folder" aria-label="Open folder">
+              <span class="workspace-add-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+              </span>
+            </button>
+          </section>
+          <div class="error" id="error"></div>
+        </main>
+      </div>
+    </div>
 
     <button id="settings-toggle" class="settings-toggle" title="Settings" aria-label="Settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -284,9 +603,24 @@
       </div>
     </dialog>
 
-    <script>
-      const openBtn = document.getElementById("open");
+    <script type="module">
+      import {
+        GetSettings,
+        GetWorkspaces,
+        OpenWorkspace,
+        RemoveWorkspace,
+        SaveSettings,
+        SelectFolder,
+      } from "/wailsjs/go/main/App.js";
+
+      const layoutEl = document.getElementById("layout");
       const errEl = document.getElementById("error");
+
+      const dropzoneBtn = document.getElementById("open-dropzone");
+      const addBtn = document.getElementById("open-add");
+      const openButtons = [dropzoneBtn, addBtn];
+
+      const workspacesListEl = document.getElementById("workspaces-list");
 
       const settingsToggle = document.getElementById("settings-toggle");
       const drawer = document.getElementById("drawer");
@@ -301,10 +635,106 @@
         drawerStatus.classList.toggle("error", !!isError);
       }
 
+      function basename(path) {
+        if (!path) return "";
+        const trimmed = path.replace(/[\/\\]+$/, "");
+        const sep = trimmed.lastIndexOf("/") >= 0 ? "/" : "\\";
+        const idx = trimmed.lastIndexOf(sep);
+        return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+      }
+
+      function prettyPath(path) {
+        if (!path) return "";
+        let p = path.replace(/[\/\\]+$/, "");
+        const home = p.match(/^(\/Users\/[^\/]+|\/home\/[^\/]+|[A-Z]:\\Users\\[^\\]+)/);
+        if (home) {
+          p = "~" + p.slice(home[0].length);
+        }
+        const sep = p.indexOf("\\") >= 0 ? "\\" : "/";
+        const idx = p.lastIndexOf(sep);
+        return idx > 0 ? p.slice(0, idx) : p;
+      }
+
+      const FOLDER_ICON =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.4.6l1 1a2 2 0 0 0 1.4.6H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+
+      const CLOSE_ICON =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+
+      function renderWorkspaces(workspaces) {
+        workspacesListEl.innerHTML = "";
+        const has = workspaces && workspaces.length > 0;
+        layoutEl.classList.toggle("empty", !has);
+        layoutEl.classList.toggle("has-workspaces", has);
+        if (!has) return;
+
+        for (const path of workspaces) {
+          const item = document.createElement("div");
+          item.className = "workspace-item";
+
+          const open = document.createElement("button");
+          open.type = "button";
+          open.className = "workspace-open";
+          open.title = path;
+          open.addEventListener("click", () => openPath(path));
+
+          const icon = document.createElement("span");
+          icon.className = "workspace-icon";
+          icon.innerHTML = FOLDER_ICON;
+
+          const info = document.createElement("div");
+          info.className = "workspace-info";
+
+          const name = document.createElement("span");
+          name.className = "workspace-name";
+          name.textContent = basename(path) || path;
+
+          const sub = document.createElement("span");
+          sub.className = "workspace-path";
+          sub.textContent = prettyPath(path);
+
+          info.appendChild(name);
+          info.appendChild(sub);
+
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "workspace-remove";
+          remove.title = "Remove workspace";
+          remove.setAttribute("aria-label", "Remove workspace");
+          remove.innerHTML = CLOSE_ICON;
+          remove.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            remove.disabled = true;
+            try {
+              await RemoveWorkspace(path);
+              await loadWorkspaces();
+            } catch (err) {
+              errEl.textContent = String(err);
+              remove.disabled = false;
+            }
+          });
+
+          open.appendChild(icon);
+          open.appendChild(info);
+          item.appendChild(open);
+          item.appendChild(remove);
+          workspacesListEl.appendChild(item);
+        }
+      }
+
+      async function loadWorkspaces() {
+        try {
+          const workspaces = await GetWorkspaces();
+          renderWorkspaces(workspaces || []);
+        } catch (e) {
+          renderWorkspaces([]);
+        }
+      }
+
       let settingsLoaded = false;
       async function loadSettings() {
         try {
-          const s = await window.go.main.App.GetSettings();
+          const s = await GetSettings();
           urlInput.value = s?.url || "";
           tokenInput.value = s?.token || "";
           settingsLoaded = true;
@@ -316,7 +746,7 @@
       settingsToggle.addEventListener("click", () => {
         if (!settingsLoaded) loadSettings();
         setDrawerStatus("");
-        drawer.showModal();
+        if (!drawer.open) drawer.showModal();
       });
       drawerClose.addEventListener("click", () => drawer.close());
       drawer.addEventListener("click", (e) => {
@@ -327,7 +757,7 @@
         saveBtn.disabled = true;
         setDrawerStatus("");
         try {
-          await window.go.main.App.SaveSettings({
+          await SaveSettings({
             url: urlInput.value.trim(),
             token: tokenInput.value,
           });
@@ -339,24 +769,52 @@
         }
       });
 
-      openBtn.addEventListener("click", async () => {
-        openBtn.disabled = true;
+      function setOpenDisabled(disabled) {
+        for (const b of openButtons) b.disabled = disabled;
+      }
+
+      let isOpening = false;
+
+      async function openPath(path) {
+        if (isOpening) return;
+        isOpening = true;
+        setOpenDisabled(true);
         errEl.textContent = "";
         try {
-          const path = await window.go.main.App.SelectFolder();
-          if (!path) {
-            openBtn.disabled = false;
-            return;
-          }
-          openBtn.textContent = "Loading...";
-          const url = await window.go.main.App.OpenWorkspace(path);
+          const url = await OpenWorkspace(path);
           window.location.href = url;
         } catch (e) {
           errEl.textContent = String(e);
-          openBtn.disabled = false;
-          openBtn.textContent = "Open Folder...";
+          setOpenDisabled(false);
+          isOpening = false;
         }
-      });
+      }
+
+      async function pickAndOpen() {
+        if (isOpening) return;
+        isOpening = true;
+        setOpenDisabled(true);
+        errEl.textContent = "";
+        try {
+          const path = await SelectFolder();
+          if (!path) {
+            setOpenDisabled(false);
+            isOpening = false;
+            return;
+          }
+          const url = await OpenWorkspace(path);
+          window.location.href = url;
+        } catch (e) {
+          errEl.textContent = String(e);
+          setOpenDisabled(false);
+          isOpening = false;
+        }
+      }
+
+      dropzoneBtn.addEventListener("click", pickAndOpen);
+      addBtn.addEventListener("click", pickAndOpen);
+
+      loadWorkspaces();
     </script>
   </body>
 </html>

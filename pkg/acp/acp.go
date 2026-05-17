@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -40,10 +42,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	}
 
 	s.mu.Lock()
-	sessionIDs := make([]acp.SessionId, 0, len(s.sessions))
-	for id := range s.sessions {
-		sessionIDs = append(sessionIDs, id)
-	}
+	sessionIDs := slices.Collect(maps.Keys(s.sessions))
 	s.mu.Unlock()
 
 	for _, id := range sessionIDs {
@@ -311,7 +310,9 @@ func (s *Server) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Prom
 			Messages: a.Messages,
 			Usage:    a.Usage,
 		}
-		_ = session.Save(code.SessionsDir(sess.workspace.key), string(sess.id), state)
+		if err := session.Save(code.SessionsDir(sess.workspace.key), string(sess.id), state); err != nil {
+			slog.Warn("save session failed", "session", sess.id, "err", err)
+		}
 	}()
 
 	notify := func(u acp.SessionUpdate) {

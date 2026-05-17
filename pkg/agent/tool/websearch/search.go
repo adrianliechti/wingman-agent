@@ -82,11 +82,14 @@ func stringSliceArg(args map[string]any, key string) ([]string, error) {
 		return nil, nil
 	}
 
+	// Already a []string (rare — only when the caller bypassed JSON
+	// unmarshaling). Filter and return.
+	if direct, ok := raw.([]string); ok {
+		return trimNonEmpty(direct), nil
+	}
+
 	values, ok := raw.([]any)
 	if !ok {
-		if strings, ok := raw.([]string); ok {
-			return strings, nil
-		}
 		return nil, fmt.Errorf("%s must be an array of strings", key)
 	}
 
@@ -100,8 +103,17 @@ func stringSliceArg(args map[string]any, key string) ([]string, error) {
 			result = append(result, s)
 		}
 	}
-
 	return result, nil
+}
+
+func trimNonEmpty(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func searchWingman(ctx context.Context, client *wingman.Client, query string, allowedDomains, blockedDomains []string) (string, error) {

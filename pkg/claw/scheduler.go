@@ -34,7 +34,11 @@ func (c *Claw) startScheduler(ctx context.Context, name string, ma *managedAgent
 
 func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent) {
 	agentDir := c.config.Memory.AgentDir(name)
-	tasks := schedule.LoadTasks(agentDir)
+	tasks, err := schedule.LoadTasksError(agentDir)
+	if err != nil {
+		log.Printf("scheduler %s: failed to load tasks: %v", name, err)
+		return
+	}
 
 	if len(tasks) == 0 {
 		return
@@ -55,8 +59,7 @@ func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent)
 		t.LastRun = &now
 		modified = true
 
-		// one-time tasks (RFC3339 timestamp) complete after running
-		if _, err := time.Parse(time.RFC3339, t.Schedule); err == nil {
+		if schedule.IsOneTime(t.Schedule) {
 			t.Status = "completed"
 		}
 	}
@@ -73,7 +76,10 @@ func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent)
 		}
 	}
 
-	schedule.SaveTasks(agentDir, active)
+	if err := schedule.SaveTasks(agentDir, active); err != nil {
+		log.Printf("scheduler %s: failed to save tasks: %v", name, err)
+		return
+	}
 
 	if len(duePrompts) == 0 {
 		return

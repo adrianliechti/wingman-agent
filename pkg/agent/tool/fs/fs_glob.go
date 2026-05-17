@@ -1,12 +1,13 @@
 package fs
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -80,24 +81,13 @@ func GlobTool(root *os.Root) tool.Tool {
 			}
 			var results []fileResult
 
-			err = walkAllFiles(ctx, fsys, searchDirFS, func(path, relPath string) error {
+			err = walkAllFiles(ctx, fsys, searchDirFS, func(path, relPath string, d fs.DirEntry) error {
 				matched, err := doublestar.Match(pattern, relPath)
-
-				if err != nil {
+				if err != nil || !matched {
 					return nil
 				}
 
-				if matched {
-					var modTime time.Time
-					if fi, err := fsys.Open(path); err == nil {
-						if stat, err := fi.Stat(); err == nil {
-							modTime = stat.ModTime()
-						}
-						fi.Close()
-					}
-					results = append(results, fileResult{path: filepath.FromSlash(path), modTime: modTime})
-				}
-
+				results = append(results, fileResult{path: filepath.FromSlash(path), modTime: entryModTime(d)})
 				return nil
 			})
 
@@ -111,11 +101,9 @@ func GlobTool(root *os.Root) tool.Tool {
 				return "No files found matching pattern", nil
 			}
 
-			sort.Slice(results, func(i, j int) bool {
-				if results[i].modTime.Equal(results[j].modTime) {
-					return results[i].path < results[j].path
-				}
-				return results[i].modTime.Before(results[j].modTime)
+			// Oldest mtime first; lexical path as a stable tiebreaker.
+			slices.SortFunc(results, func(a, b fileResult) int {
+				return cmp.Or(a.modTime.Compare(b.modTime), cmp.Compare(a.path, b.path))
 			})
 
 			end := totalMatches
@@ -160,33 +148,13 @@ func resolveGlobSearch(searchDir, pattern, workingDir string) (string, string, e
 			return "", "", fmt.Errorf("cannot search: pattern %q is outside workspace %q", pattern, workingDir)
 		}
 
-		base, relativePattern := extractGlobBaseDirectory(filepath.ToSlash(rel))
-		searchDirFS = base
-		if searchDirFS == "" {
-			searchDirFS = "."
-		}
-		pattern = relativePattern
+		searchDirFS, pattern = doublestar.SplitPattern(filepath.ToSlash(rel))
 	}
 
 	return searchDirFS, normalizeGlobPattern(pattern), nil
 }
 
-func extractGlobBaseDirectory(pattern string) (string, string) {
-	first := strings.IndexAny(pattern, "*?{[")
-	if first == -1 {
-		return filepath.ToSlash(filepath.Dir(pattern)), filepath.Base(pattern)
-	}
-
-	staticPrefix := pattern[:first]
-	lastSlash := strings.LastIndex(staticPrefix, "/")
-	if lastSlash == -1 {
-		return "", pattern
-	}
-
-	return pattern[:lastSlash], pattern[lastSlash+1:]
-}
-
-func walkAllFiles(ctx context.Context, fsys fs.FS, root string, onFile func(path, relPath string) error) error {
+func walkAllFiles(ctx context.Context, fsys fs.FS, root string, onFile func(path, relPath string, d fs.DirEntry) error) error {
 	return fs.WalkDir(fsys, root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -209,7 +177,7 @@ func walkAllFiles(ctx context.Context, fsys fs.FS, root string, onFile func(path
 			return nil
 		}
 
-		return onFile(path, relPathFromBase(root, path))
+		return onFile(path, relPathFromBase(root, path), d)
 	})
 }
 

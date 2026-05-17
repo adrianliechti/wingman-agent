@@ -175,21 +175,9 @@ func truncateHead(content string) (result string, truncated bool) {
 }
 
 func detectLineEnding(content string) string {
-	crlfIdx := strings.Index(content, "\r\n")
-	lfIdx := strings.Index(content, "\n")
-
-	if lfIdx == -1 {
-		return "\n"
-	}
-
-	if crlfIdx == -1 {
-		return "\n"
-	}
-
-	if crlfIdx < lfIdx {
+	if strings.Contains(content, "\r\n") {
 		return "\r\n"
 	}
-
 	return "\n"
 }
 
@@ -216,97 +204,107 @@ func stripBom(content string) (bom string, text string) {
 	return "", content
 }
 
-func mapFuzzyIndexToOriginal(original, fuzzy string, fuzzyIdx int) int {
-	if fuzzyIdx <= 0 {
-		return 0
-	}
-
-	if fuzzyIdx >= len(fuzzy) {
-		return len(original)
-	}
-
-	fuzzyPos := 0
-	originalPos := 0
-
-	for originalPos < len(original) && fuzzyPos < fuzzyIdx {
-		_, origSize := utf8.DecodeRuneInString(original[originalPos:])
-		_, fuzzySize := utf8.DecodeRuneInString(fuzzy[fuzzyPos:])
-
-		originalPos += origSize
-		fuzzyPos += fuzzySize
-	}
-
-	return originalPos
+func normalizeForFuzzyMatch(text string) string {
+	normalized, _ := normalizeForFuzzyMatchWithMap(text)
+	return normalized
 }
 
-func normalizeForFuzzyMatch(text string) string {
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimRight(line, " \t")
+func normalizeForFuzzyMatchWithMap(text string) (string, []int) {
+	var b strings.Builder
+	offsetMap := []int{0}
+
+	for lineStart := 0; lineStart <= len(text); {
+		lineEnd := strings.IndexByte(text[lineStart:], '\n')
+		hasNewline := lineEnd != -1
+		if hasNewline {
+			lineEnd += lineStart
+		} else {
+			lineEnd = len(text)
+		}
+
+		trimmedEnd := lineEnd
+		for trimmedEnd > lineStart && (text[trimmedEnd-1] == ' ' || text[trimmedEnd-1] == '\t') {
+			trimmedEnd--
+		}
+
+		for pos := lineStart; pos < trimmedEnd; {
+			r, size := utf8.DecodeRuneInString(text[pos:trimmedEnd])
+			replacement := normalizeFuzzyRune(r)
+			b.WriteString(replacement)
+
+			originalBytes := text[pos : pos+size]
+			if replacement == originalBytes {
+				for i := 1; i <= size; i++ {
+					offsetMap = append(offsetMap, pos+i)
+				}
+			} else {
+				for i := 0; i < len(replacement); i++ {
+					offsetMap = append(offsetMap, pos+size)
+				}
+			}
+
+			pos += size
+		}
+
+		if !hasNewline {
+			break
+		}
+
+		b.WriteByte('\n')
+		offsetMap = append(offsetMap, lineEnd+1)
+		lineStart = lineEnd + 1
 	}
-	text = strings.Join(lines, "\n")
 
-	// Replace common Unicode variations that LLMs often introduce
-	replacer := strings.NewReplacer(
-		// Smart quotes → ASCII quotes
-		"\u2018", "'", "\u2019", "'", "\u201A", "'", "\u201B", "'", // single
-		"\u201C", "\"", "\u201D", "\"", "\u201E", "\"", "\u201F", "\"", // double
-		// Dashes → hyphen
-		"\u2010", "-", "\u2011", "-", "\u2012", "-", "\u2013", "-",
-		"\u2014", "-", "\u2015", "-", "\u2212", "-",
-		// Special spaces → regular space
-		"\u00A0", " ", "\u2002", " ", "\u2003", " ", "\u2004", " ", "\u2005", " ",
-		"\u2006", " ", "\u2007", " ", "\u2008", " ", "\u2009", " ", "\u200A", " ",
-		"\u202F", " ", "\u205F", " ", "\u3000", " ",
-	)
+	return b.String(), offsetMap
+}
 
-	return replacer.Replace(text)
+func normalizeFuzzyRune(r rune) string {
+	switch r {
+	case '\u2018', '\u2019', '\u201A', '\u201B':
+		return "'"
+	case '\u201C', '\u201D', '\u201E', '\u201F':
+		return "\""
+	case '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212':
+		return "-"
+	case '\u00A0', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008',
+		'\u2009', '\u200A', '\u202F', '\u205F', '\u3000':
+		return " "
+	default:
+		return string(r)
+	}
 }
 
 type fuzzyMatchResult struct {
-	found                 bool
-	index                 int
-	matchLength           int
-	usedFuzzyMatch        bool
-	contentForReplacement string
+	found          bool
+	index          int
+	matchLength    int
+	usedFuzzyMatch bool
 }
 
 func fuzzyFindText(content, oldText string) fuzzyMatchResult {
-	exactIndex := strings.Index(content, oldText)
-
-	if exactIndex != -1 {
-		return fuzzyMatchResult{
-			found:                 true,
-			index:                 exactIndex,
-			matchLength:           len(oldText),
-			usedFuzzyMatch:        false,
-			contentForReplacement: content,
-		}
+	if i := strings.Index(content, oldText); i != -1 {
+		return fuzzyMatchResult{found: true, index: i, matchLength: len(oldText)}
 	}
 
-	fuzzyContent := normalizeForFuzzyMatch(content)
 	fuzzyOldText := normalizeForFuzzyMatch(oldText)
-	fuzzyIndex := strings.Index(fuzzyContent, fuzzyOldText)
-
-	if fuzzyIndex == -1 {
-		return fuzzyMatchResult{
-			found:                 false,
-			index:                 -1,
-			matchLength:           0,
-			usedFuzzyMatch:        false,
-			contentForReplacement: content,
-		}
+	if fuzzyOldText == "" {
+		return fuzzyMatchResult{index: -1}
 	}
 
-	originalIndex := mapFuzzyIndexToOriginal(content, fuzzyContent, fuzzyIndex)
-	originalEndIndex := mapFuzzyIndexToOriginal(content, fuzzyContent, fuzzyIndex+len(fuzzyOldText))
+	fuzzyContent, fuzzyToOriginal := normalizeForFuzzyMatchWithMap(content)
+	fuzzyIndex := strings.Index(fuzzyContent, fuzzyOldText)
+	if fuzzyIndex == -1 {
+		return fuzzyMatchResult{index: -1}
+	}
+
+	originalIndex := fuzzyToOriginal[fuzzyIndex]
+	originalEnd := fuzzyToOriginal[fuzzyIndex+len(fuzzyOldText)]
 
 	return fuzzyMatchResult{
-		found:                 true,
-		index:                 originalIndex,
-		matchLength:           originalEndIndex - originalIndex,
-		usedFuzzyMatch:        true,
-		contentForReplacement: content,
+		found:          true,
+		index:          originalIndex,
+		matchLength:    originalEnd - originalIndex,
+		usedFuzzyMatch: true,
 	}
 }
 

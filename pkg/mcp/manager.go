@@ -7,7 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"os/exec"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -42,15 +42,8 @@ func Load(path string) (*Manager, error) {
 func (m *Manager) Connect(ctx context.Context) error {
 	var errs []error
 
-	names := make([]string, 0, len(m.Servers))
-	for name := range m.Servers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		server := m.Servers[name]
-		if err := m.connect(ctx, name, server); err != nil {
+	for _, name := range slices.Sorted(maps.Keys(m.Servers)) {
+		if err := m.connect(ctx, name, m.Servers[name]); err != nil {
 			errs = append(errs, err)
 		}
 	}

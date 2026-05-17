@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
@@ -127,7 +128,6 @@ func EditTool(root *os.Root) tool.Tool {
 				return "", fmt.Errorf("found %d occurrences of the text in %s. The text must be unique — provide more context to make it unique, or set replace_all=true to replace all occurrences", occurrences, pathArg)
 			}
 
-			baseContent := matchResult.contentForReplacement
 			var newContent string
 
 			if replaceAll {
@@ -135,26 +135,26 @@ func EditTool(root *os.Root) tool.Tool {
 					if strings.Contains(normalizeForFuzzyMatch(actualNewText), fuzzyOldText) {
 						return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
 					}
-					newContent = baseContent
+					newContent = normalizedContent
 					for {
 						mr := fuzzyFindText(newContent, actualOldText)
 						if !mr.found {
 							break
 						}
-						nextContent := mr.contentForReplacement[:mr.index] + actualNewText + mr.contentForReplacement[mr.index+mr.matchLength:]
-						if nextContent == newContent {
+						next := newContent[:mr.index] + actualNewText + newContent[mr.index+mr.matchLength:]
+						if next == newContent {
 							return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
 						}
-						newContent = nextContent
+						newContent = next
 					}
 				} else {
-					newContent = strings.ReplaceAll(baseContent, actualOldText, actualNewText)
+					newContent = strings.ReplaceAll(normalizedContent, actualOldText, actualNewText)
 				}
 			} else {
-				newContent = baseContent[:matchResult.index] + actualNewText + baseContent[matchResult.index+matchResult.matchLength:]
+				newContent = normalizedContent[:matchResult.index] + actualNewText + normalizedContent[matchResult.index+matchResult.matchLength:]
 			}
 
-			if baseContent == newContent {
+			if normalizedContent == newContent {
 				return "", fmt.Errorf("no changes made to %s. The replacement produced identical content", pathArg)
 			}
 
@@ -164,16 +164,14 @@ func EditTool(root *os.Root) tool.Tool {
 				return "", pathError("write file", pathArg, normalizedPath, workingDir, err)
 			}
 
-			diff := generateDiffString(baseContent, newContent)
+			diff := generateDiffString(normalizedContent, newContent)
 
-			result := fmt.Sprintf("Successfully replaced text in %s.\n\n%s", pathArg, diff)
-
-			return result, nil
+			return fmt.Sprintf("Successfully replaced text in %s.\n\n%s", pathArg, diff), nil
 		},
 	}
 }
 
-func writeRootFile(root *os.Root, path, content string) error {
+func writeRootFile(root *os.Root, path, content string) (err error) {
 	dir := filepath.Dir(path)
 	if dir != "." && dir != "" {
 		if err := root.MkdirAll(dir, 0755); err != nil {
@@ -185,80 +183,76 @@ func writeRootFile(root *os.Root, path, content string) error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if closeErr := outFile.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to close file: %w", closeErr)
+		}
+	}()
 
 	if _, err := outFile.WriteString(content); err != nil {
-		outFile.Close()
 		return fmt.Errorf("failed to write file: %w", err)
-	}
-
-	if err := outFile.Close(); err != nil {
-		return fmt.Errorf("failed to close file: %w", err)
 	}
 
 	return nil
 }
 
+// findActualEditString returns the slice of `content` that matches `oldText`
+// up to curly/ASCII quote normalization. When the curly form differs from the
+// caller-supplied straight form, the original-content slice is returned so
+// preserveEditQuoteStyle can mirror the file's quote style back into newText.
 func findActualEditString(content, oldText string) string {
 	if strings.Contains(content, oldText) {
 		return oldText
 	}
 
-	contentRunes := []rune(content)
-	normalizedContent := normalizeEditQuoteRunes(contentRunes)
-	normalizedOldText := []rune(normalizeEditQuotes(oldText))
-	idx := indexRuneSlice(normalizedContent, normalizedOldText)
-	if idx == -1 || idx+len(normalizedOldText) > len(contentRunes) {
+	normContent, offsets := normalizeEditQuotesWithMap(content)
+	normOld := normalizeEditQuotes(oldText)
+
+	idx := strings.Index(normContent, normOld)
+	if idx == -1 {
 		return oldText
 	}
 
-	return string(contentRunes[idx : idx+len(normalizedOldText)])
+	return content[offsets[idx]:offsets[idx+len(normOld)]]
 }
 
-func normalizeEditQuoteRunes(runes []rune) []rune {
-	normalized := make([]rune, len(runes))
-	for i, r := range runes {
-		switch r {
-		case '‘', '’':
-			normalized[i] = '\''
-		case '“', '”':
-			normalized[i] = '"'
-		default:
-			normalized[i] = r
-		}
-	}
-	return normalized
-}
-
-func indexRuneSlice(haystack, needle []rune) int {
-	if len(needle) == 0 {
-		return 0
-	}
-	if len(needle) > len(haystack) {
-		return -1
-	}
-	for i := 0; i <= len(haystack)-len(needle); i++ {
-		matched := true
-		for j, r := range needle {
-			if haystack[i+j] != r {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			return i
-		}
-	}
-	return -1
-}
+var editQuoteReplacer = strings.NewReplacer(
+	"‘", "'", "’", "'", // ‘ ’
+	"“", "\"", "”", "\"", // “ ”
+)
 
 func normalizeEditQuotes(text string) string {
-	replacer := strings.NewReplacer(
-		"‘", "'",
-		"’", "'",
-		"“", "\"",
-		"”", "\"",
-	)
-	return replacer.Replace(text)
+	return editQuoteReplacer.Replace(text)
+}
+
+// normalizeEditQuotesWithMap returns the quote-normalized text alongside a
+// byte-offset map: offsets[i] is the byte index in the original text that
+// corresponds to byte index i in the normalized text. Length is
+// len(normalized)+1 so callers can take the end offset of a match.
+func normalizeEditQuotesWithMap(text string) (string, []int) {
+	var b strings.Builder
+	b.Grow(len(text))
+	offsets := make([]int, 0, len(text)+1)
+	offsets = append(offsets, 0)
+
+	for i := 0; i < len(text); {
+		r, size := utf8.DecodeRuneInString(text[i:])
+		switch r {
+		case '‘', '’':
+			b.WriteByte('\'')
+			offsets = append(offsets, i+size)
+		case '“', '”':
+			b.WriteByte('"')
+			offsets = append(offsets, i+size)
+		default:
+			b.WriteString(text[i : i+size])
+			for j := 1; j <= size; j++ {
+				offsets = append(offsets, i+j)
+			}
+		}
+		i += size
+	}
+	return b.String(), offsets
 }
 
 func preserveEditQuoteStyle(oldText, actualOldText, newText string) string {

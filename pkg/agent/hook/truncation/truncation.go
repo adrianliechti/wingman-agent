@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -94,12 +92,19 @@ func writeScratch(scratchDir, toolName, content string) string {
 	if scratchDir == "" {
 		return ""
 	}
-	name := fmt.Sprintf("result-%s-%d.txt", sanitizeName(toolName), time.Now().UnixNano())
-	path := filepath.Join(scratchDir, name)
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	// os.CreateTemp avoids the timestamp-collision window of constructing
+	// names manually under concurrent tool calls (the trailing "*" is
+	// replaced with a unique suffix and the file is opened atomically).
+	f, err := os.CreateTemp(scratchDir, "result-"+sanitizeName(toolName)+"-*.txt")
+	if err != nil {
 		return ""
 	}
-	return path
+	defer f.Close()
+	if _, err := f.WriteString(content); err != nil {
+		os.Remove(f.Name())
+		return ""
+	}
+	return f.Name()
 }
 
 func formatPersisted(totalBytes int, scratchPath, preview string) string {

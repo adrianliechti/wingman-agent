@@ -7,12 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
@@ -159,6 +156,8 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 	if c.config.MCP != nil {
 		if mcpTools, err := mcp.Tools(context.Background(), c.config.MCP); err == nil {
 			agentTools = append(agentTools, mcpTools...)
+		} else {
+			log.Printf("warning: load MCP tools for agent %q: %v", name, err)
 		}
 	}
 
@@ -315,23 +314,22 @@ func (c *Claw) buildInstructions(name string) string {
 
 func (c *Claw) ensureDefaultTasks(name string) {
 	agentDir := c.config.Memory.AgentDir(name)
-	tasks := schedule.LoadTasks(agentDir)
-
-	if len(tasks) > 0 {
+	if len(schedule.LoadTasks(agentDir)) > 0 {
 		return
 	}
 
-	defaultTasks := []schedule.Task{
-		{
-			ID:        uuid.NewString(),
-			Prompt:    "Check if there is anything you should proactively do. Review your workspace, check pending items, and report anything that needs attention.",
-			Schedule:  "every 30m",
-			Status:    "active",
-			CreatedAt: time.Now().UTC(),
-		},
+	task, err := schedule.NewTask(
+		"Check if there is anything you should proactively do. Review your workspace, check pending items, and report anything that needs attention.",
+		"every 30m",
+	)
+	if err != nil {
+		log.Printf("warning: build default task for %q: %v", name, err)
+		return
 	}
 
-	schedule.SaveTasks(agentDir, defaultTasks)
+	if err := schedule.SaveTasks(agentDir, []schedule.Task{task}); err != nil {
+		log.Printf("warning: save default task for %q: %v", name, err)
+	}
 }
 
 func nameFromChatID(chatID string) string {

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -36,13 +37,21 @@ type App struct {
 	activePage string
 
 	seenRequests int
+
+	// runCtx is cancelled when the app stops, so the auto-refresh ticker
+	// goroutine in Run can exit cleanly instead of polling forever.
+	runCtx    context.Context
+	runCancel context.CancelFunc
 }
 
 func newApp(p *proxy.Proxy) *App {
+	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
 		app:        tview.NewApplication(),
 		p:          p,
 		activePage: pageStart,
+		runCtx:     ctx,
+		runCancel:  cancel,
 	}
 
 	a.build()
@@ -215,31 +224,39 @@ func (a *App) Run() error {
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 
-		for range ticker.C {
-			a.app.QueueUpdateDraw(func() {
-				entries := a.p.Store.List()
+		for {
+			select {
+			case <-a.runCtx.Done():
+				return
+			case <-ticker.C:
+				a.app.QueueUpdateDraw(func() {
+					entries := a.p.Store.List()
 
-				if a.activePage == pageStart && len(entries) > 0 && a.seenRequests == 0 {
-					a.seenRequests = len(entries)
-					a.switchTo(pageList)
-				} else {
-					a.seenRequests = len(entries)
-				}
+					if a.activePage == pageStart && len(entries) > 0 && a.seenRequests == 0 {
+						a.seenRequests = len(entries)
+						a.switchTo(pageList)
+					} else {
+						a.seenRequests = len(entries)
+					}
 
-				if a.activePage == pageList {
-					a.renderTable()
-				}
+					if a.activePage == pageList {
+						a.renderTable()
+					}
 
-				a.updateStatusBar()
-			})
+					a.updateStatusBar()
+				})
+			}
 		}
 	}()
 
-	return a.app.Run()
+	err := a.app.Run()
+	a.runCancel()
+	return err
 }
 
 func (a *App) Stop() {
 	a.app.Stop()
+	a.runCancel()
 }
 
 func (a *App) startPageContent() string {

@@ -57,23 +57,19 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			}
 
 			limit := 0
-			if l, present, err := tool.OptionalIntArg(args, "limit"); present {
+			if v, present, err := tool.PositiveIntArg(args, "limit"); present {
 				if err != nil {
-					return "", fmt.Errorf("limit must be a positive integer")
+					return "", err
 				}
-				if l <= 0 {
-					return "", fmt.Errorf("limit must be a positive integer")
-				}
-				limit = l
+				limit = v
 			}
 
 			startLine := 1
-
-			if o, present, err := tool.OptionalIntArg(args, "offset"); present {
-				if err != nil || o <= 0 {
+			if v, present, err := tool.PositiveIntArg(args, "offset"); present {
+				if err != nil {
 					return "", fmt.Errorf("offset must be a positive 1-based integer")
 				}
-				startLine = o
+				startLine = v
 			}
 
 			content, err := readFromAllowedLocation(root, workingDir, expanded, allowedReadRoots)

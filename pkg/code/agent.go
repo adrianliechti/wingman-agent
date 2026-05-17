@@ -1,13 +1,13 @@
 package code
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +50,7 @@ func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
 	}
 
 	sessionCfg.Tools = a.tools
+	sessionCfg.Reasoning = func() bool { return a.PlanMode }
 	sessionCfg.Instructions = a.Instructions
 
 	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,
@@ -107,7 +108,7 @@ func (a *Agent) tools() []tool.Tool {
 		tools = planModeTools(tools)
 	}
 
-	sort.SliceStable(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
+	slices.SortStableFunc(tools, func(a, b tool.Tool) int { return cmp.Compare(a.Name, b.Name) })
 	return tools
 }
 
@@ -141,11 +142,6 @@ func planModeEffectExecute(t tool.Tool) func(context.Context, map[string]any) (s
 	}
 }
 
-const (
-	memoryFileName = "MEMORY.md"
-	memoryMaxBytes = 25 * 1024
-)
-
 func (a *Agent) Instructions() string {
 	return BuildInstructions(a.InstructionsData())
 }
@@ -178,24 +174,20 @@ func (a *Agent) InstructionsData() prompt.SectionData {
 
 const projectInstructionsMaxBytes = 25 * 1024
 
-// projectInstructions returns the rendered AGENTS.md / CLAUDE.md block.
-// It walks ancestor dirs but only re-reads when an mtime changed; otherwise
-// returns the cached string so the static prefix stays byte-stable across turns.
-func (a *Agent) projectInstructions() string {
-	a.projectInstructionsMu.Lock()
-	defer a.projectInstructionsMu.Unlock()
+type projectInstructionsEntry struct {
+	path  string
+	rel   string
+	mtime time.Time
+}
 
-	type entry struct {
-		path  string
-		rel   string
-		mtime time.Time
-	}
+// findProjectInstructions walks from wd up to the filesystem root and returns
+// the AGENTS.md / CLAUDE.md files it finds along the way (closest ancestor
+// first).
+func findProjectInstructions(wd string) []projectInstructionsEntry {
+	wd = filepath.Clean(wd)
+	var found []projectInstructionsEntry
 
-	wd := filepath.Clean(a.RootPath)
-	var found []entry
-
-	dir := wd
-	for {
+	for dir := wd; ; {
 		for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
 			p := filepath.Join(dir, name)
 			info, err := os.Stat(p)
@@ -206,7 +198,7 @@ func (a *Agent) projectInstructions() string {
 			if rel == "" {
 				rel = name
 			}
-			found = append(found, entry{path: p, rel: rel, mtime: info.ModTime()})
+			found = append(found, projectInstructionsEntry{path: p, rel: rel, mtime: info.ModTime()})
 		}
 
 		parent := filepath.Dir(dir)
@@ -216,22 +208,18 @@ func (a *Agent) projectInstructions() string {
 		dir = parent
 	}
 
-	if len(found) == len(a.projectInstructionsMtimes) {
-		unchanged := true
-		for _, e := range found {
-			if prev, ok := a.projectInstructionsMtimes[e.path]; !ok || !prev.Equal(e.mtime) {
-				unchanged = false
-				break
-			}
-		}
-		if unchanged {
-			return a.projectInstructionsCache
-		}
-	}
+	return found
+}
 
-	var parts []string
-	mtimes := make(map[string]time.Time, len(found))
-	for _, e := range found {
+// renderProjectInstructions reads the listed entries and assembles the
+// "From <rel>:\n\n<content>" block, truncating at projectInstructionsMaxBytes.
+// Returns the rendered string and the mtime map for the entries actually
+// included (for cache invalidation).
+func renderProjectInstructions(entries []projectInstructionsEntry) (string, map[string]time.Time) {
+	parts := make([]string, 0, len(entries))
+	mtimes := make(map[string]time.Time, len(entries))
+
+	for _, e := range entries {
 		data, err := os.ReadFile(e.path)
 		if err != nil {
 			continue
@@ -248,7 +236,32 @@ func (a *Agent) projectInstructions() string {
 	if len(result) > projectInstructionsMaxBytes {
 		result = result[:projectInstructionsMaxBytes] + "\n\n[truncated]"
 	}
+	return result, mtimes
+}
 
+// projectInstructions returns the rendered AGENTS.md / CLAUDE.md block.
+// It walks ancestor dirs but only re-reads when an mtime changed; otherwise
+// returns the cached string so the static prefix stays byte-stable across turns.
+func (a *Agent) projectInstructions() string {
+	a.projectInstructionsMu.Lock()
+	defer a.projectInstructionsMu.Unlock()
+
+	found := findProjectInstructions(a.RootPath)
+
+	if len(found) == len(a.projectInstructionsMtimes) {
+		unchanged := true
+		for _, e := range found {
+			if prev, ok := a.projectInstructionsMtimes[e.path]; !ok || !prev.Equal(e.mtime) {
+				unchanged = false
+				break
+			}
+		}
+		if unchanged {
+			return a.projectInstructionsCache
+		}
+	}
+
+	result, mtimes := renderProjectInstructions(found)
 	a.projectInstructionsCache = result
 	a.projectInstructionsMtimes = mtimes
 	return result
@@ -258,43 +271,6 @@ func (a *Agent) projectInstructions() string {
 // concatenating AGENTS.md / CLAUDE.md with headers, closest ancestor first.
 // Truncates at 25KB. Use Agent.projectInstructions for the cached path.
 func ReadProjectInstructions(wd string) string {
-	var parts []string
-
-	dir := filepath.Clean(wd)
-
-	for {
-		for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-			data, err := os.ReadFile(filepath.Join(dir, name))
-			if err != nil {
-				continue
-			}
-
-			content := strings.TrimSpace(string(data))
-			if content == "" {
-				continue
-			}
-
-			rel, _ := filepath.Rel(wd, filepath.Join(dir, name))
-			if rel == "" {
-				rel = name
-			}
-
-			parts = append(parts, fmt.Sprintf("From %s:\n\n%s", rel, content))
-		}
-
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-
-		dir = parent
-	}
-
-	result := strings.Join(parts, "\n\n---\n\n")
-
-	if len(result) > projectInstructionsMaxBytes {
-		result = result[:projectInstructionsMaxBytes] + "\n\n[truncated]"
-	}
-
+	result, _ := renderProjectInstructions(findProjectInstructions(wd))
 	return result
 }

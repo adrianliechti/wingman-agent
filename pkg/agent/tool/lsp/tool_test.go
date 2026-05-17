@@ -109,6 +109,32 @@ func TestLSPToolRejectsDirectories(t *testing.T) {
 	}
 }
 
+func TestLSPToolRejectsPathsOutsideWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.go")
+	if err := os.WriteFile(outside, []byte("package outside\n"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	lspTool := NewTools(corelsp.NewManager(tmpDir))[0]
+
+	_, err := lspTool.Execute(context.Background(), map[string]any{
+		"operation": "documentSymbol",
+		"path":      outside,
+	})
+	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
+		t.Fatalf("expected outside workspace error, got: %v", err)
+	}
+
+	_, err = lspTool.Execute(context.Background(), map[string]any{
+		"operation": "documentSymbol",
+		"path":      "../outside.go",
+	})
+	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
+		t.Fatalf("expected relative outside workspace error, got: %v", err)
+	}
+}
+
 func newTestManager(t *testing.T) *corelsp.Manager {
 	t.Helper()
 	tmpDir := t.TempDir()

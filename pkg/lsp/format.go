@@ -13,43 +13,48 @@ func relPath(workingDir, path string) string {
 	return path
 }
 
+// pathGroup is the generic result type for groupByPath.
+type pathGroup[T any] struct {
+	Path  string
+	Items []T
+}
+
+// groupByPath groups items by the file path returned by pathOf, preserving
+// first-seen order so output is deterministic for a given input slice.
+func groupByPath[T any](items []T, pathOf func(T) string) []pathGroup[T] {
+	indexes := make(map[string]int)
+	var groups []pathGroup[T]
+
+	for _, item := range items {
+		path := pathOf(item)
+		idx, ok := indexes[path]
+		if !ok {
+			idx = len(groups)
+			indexes[path] = idx
+			groups = append(groups, pathGroup[T]{Path: path})
+		}
+		groups[idx].Items = append(groups[idx].Items, item)
+	}
+
+	return groups
+}
+
 func formatLocations(title string, locations []Location, workingDir string) string {
+	files := groupByPath(locations, func(l Location) string {
+		return relPath(workingDir, uriToPath(l.URI))
+	})
+
 	var sb strings.Builder
-	files := groupLocationsByFile(locations, workingDir)
 	fmt.Fprintf(&sb, "%s (%d found across %d files):\n", title, len(locations), len(files))
 
 	for _, file := range files {
 		fmt.Fprintf(&sb, "\n%s:\n", file.Path)
-		for _, loc := range file.Locations {
+		for _, loc := range file.Items {
 			fmt.Fprintf(&sb, "  Line %d:%d\n", loc.Range.Start.Line+1, loc.Range.Start.Character+1)
 		}
 	}
 
 	return sb.String()
-}
-
-type locationsByFile struct {
-	Path      string
-	Locations []Location
-}
-
-func groupLocationsByFile(locations []Location, workingDir string) []locationsByFile {
-	indexes := map[string]int{}
-	files := []locationsByFile{}
-
-	for _, loc := range locations {
-		path := relPath(workingDir, uriToPath(loc.URI))
-		idx, ok := indexes[path]
-		if !ok {
-			idx = len(files)
-			indexes[path] = idx
-			files = append(files, locationsByFile{Path: path})
-		}
-
-		files[idx].Locations = append(files[idx].Locations, loc)
-	}
-
-	return files
 }
 
 func formatDocumentSymbols(symbols []DocumentSymbol, filePath string, workingDir string, indent int) string {
@@ -77,13 +82,16 @@ func formatDocumentSymbols(symbols []DocumentSymbol, filePath string, workingDir
 }
 
 func formatSymbolInformations(symbols []SymbolInformation, workingDir string) string {
+	files := groupByPath(symbols, func(s SymbolInformation) string {
+		return relPath(workingDir, uriToPath(s.Location.URI))
+	})
+
 	var sb strings.Builder
-	files := groupSymbolInformationsByFile(symbols, workingDir)
 	fmt.Fprintf(&sb, "Symbols (%d found across %d files):\n", len(symbols), len(files))
 
 	for _, file := range files {
 		fmt.Fprintf(&sb, "\n%s:\n", file.Path)
-		for _, sym := range file.Symbols {
+		for _, sym := range file.Items {
 			fmt.Fprintf(&sb, "  %s (%s) - Line %d\n", sym.Name, symbolKindName(sym.Kind), sym.Location.Range.Start.Line+1)
 		}
 	}
@@ -91,38 +99,17 @@ func formatSymbolInformations(symbols []SymbolInformation, workingDir string) st
 	return sb.String()
 }
 
-type symbolInformationsByFile struct {
-	Path    string
-	Symbols []SymbolInformation
-}
-
-func groupSymbolInformationsByFile(symbols []SymbolInformation, workingDir string) []symbolInformationsByFile {
-	indexes := map[string]int{}
-	files := []symbolInformationsByFile{}
-
-	for _, sym := range symbols {
-		path := relPath(workingDir, uriToPath(sym.Location.URI))
-		idx, ok := indexes[path]
-		if !ok {
-			idx = len(files)
-			indexes[path] = idx
-			files = append(files, symbolInformationsByFile{Path: path})
-		}
-
-		files[idx].Symbols = append(files[idx].Symbols, sym)
-	}
-
-	return files
-}
-
 func formatWorkspaceSymbols(symbols []WorkspaceSymbol, workingDir string) string {
+	files := groupByPath(symbols, func(s WorkspaceSymbol) string {
+		return relPath(workingDir, uriToPath(s.Location.URI))
+	})
+
 	var sb strings.Builder
-	files := groupWorkspaceSymbolsByFile(symbols, workingDir)
 	fmt.Fprintf(&sb, "Symbols (%d found across %d files):\n", len(symbols), len(files))
 
 	for _, file := range files {
 		fmt.Fprintf(&sb, "\n%s:\n", file.Path)
-		for _, sym := range file.Symbols {
+		for _, sym := range file.Items {
 			if sym.Location.Range != nil {
 				fmt.Fprintf(&sb, "  %s (%s) - Line %d\n", sym.Name, symbolKindName(sym.Kind), sym.Location.Range.Start.Line+1)
 			} else {
@@ -132,30 +119,6 @@ func formatWorkspaceSymbols(symbols []WorkspaceSymbol, workingDir string) string
 	}
 
 	return sb.String()
-}
-
-type workspaceSymbolsByFile struct {
-	Path    string
-	Symbols []WorkspaceSymbol
-}
-
-func groupWorkspaceSymbolsByFile(symbols []WorkspaceSymbol, workingDir string) []workspaceSymbolsByFile {
-	indexes := map[string]int{}
-	files := []workspaceSymbolsByFile{}
-
-	for _, sym := range symbols {
-		path := relPath(workingDir, uriToPath(sym.Location.URI))
-		idx, ok := indexes[path]
-		if !ok {
-			idx = len(files)
-			indexes[path] = idx
-			files = append(files, workspaceSymbolsByFile{Path: path})
-		}
-
-		files[idx].Symbols = append(files[idx].Symbols, sym)
-	}
-
-	return files
 }
 
 func formatCallHierarchyItems(items []CallHierarchyItem, workingDir string) string {

@@ -33,7 +33,8 @@ type taskFile struct {
 func Tools(agentDir string) []tool.Tool {
 	return []tool.Tool{
 		{
-			Name: "schedule_task",
+			Name:   "schedule_task",
+			Effect: tool.StaticEffect(tool.EffectMutates),
 			Description: strings.Join([]string{
 				"Schedule a recurring or one-time task.",
 				"",
@@ -54,51 +55,45 @@ func Tools(agentDir string) []tool.Tool {
 						"description": "Schedule expression: \"every 15m\", cron expression, or ISO 8601 timestamp.",
 					},
 				},
-				"required": []string{"prompt", "schedule"},
+				"required":             []string{"prompt", "schedule"},
+				"additionalProperties": false,
 			},
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
 				prompt, _ := args["prompt"].(string)
 				sched, _ := args["schedule"].(string)
 
-				if prompt == "" {
-					return "", fmt.Errorf("prompt is required")
-				}
-
-				if sched == "" {
-					return "", fmt.Errorf("schedule is required")
-				}
-
-				if err := validateSchedule(sched); err != nil {
+				task, err := NewTask(prompt, sched)
+				if err != nil {
 					return "", err
 				}
 
-				task := Task{
-					ID:        newID(),
-					Prompt:    prompt,
-					Schedule:  sched,
-					Status:    "active",
-					CreatedAt: time.Now().UTC(),
+				tasks, err := LoadTasksError(agentDir)
+				if err != nil {
+					return "", err
 				}
-
-				tasks := LoadTasks(agentDir)
 				tasks = append(tasks, task)
 
 				if err := SaveTasks(agentDir, tasks); err != nil {
 					return "", err
 				}
 
-				return fmt.Sprintf("Task %s scheduled (%s): %s", task.ID, sched, prompt), nil
+				return fmt.Sprintf("Task %s scheduled (%s): %s", task.ID, task.Schedule, task.Prompt), nil
 			},
 		},
 		{
 			Name:        "list_tasks",
 			Description: "List all scheduled tasks with their status and next run time.",
+			Effect:      tool.StaticEffect(tool.EffectReadOnly),
 			Parameters: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
+				"type":                 "object",
+				"properties":           map[string]any{},
+				"additionalProperties": false,
 			},
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
-				tasks := LoadTasks(agentDir)
+				tasks, err := LoadTasksError(agentDir)
+				if err != nil {
+					return "", err
+				}
 
 				if len(tasks) == 0 {
 					return "No tasks scheduled.", nil
@@ -124,6 +119,7 @@ func Tools(agentDir string) []tool.Tool {
 		{
 			Name:        "pause_task",
 			Description: "Pause a scheduled task by ID.",
+			Effect:      tool.StaticEffect(tool.EffectMutates),
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -132,16 +128,19 @@ func Tools(agentDir string) []tool.Tool {
 						"description": "Task ID to pause.",
 					},
 				},
-				"required": []string{"id"},
+				"required":             []string{"id"},
+				"additionalProperties": false,
 			},
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
 				id, _ := args["id"].(string)
+				id = strings.TrimSpace(id)
 				return updateStatus(agentDir, id, "paused")
 			},
 		},
 		{
 			Name:        "resume_task",
 			Description: "Resume a paused task by ID.",
+			Effect:      tool.StaticEffect(tool.EffectMutates),
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -150,16 +149,19 @@ func Tools(agentDir string) []tool.Tool {
 						"description": "Task ID to resume.",
 					},
 				},
-				"required": []string{"id"},
+				"required":             []string{"id"},
+				"additionalProperties": false,
 			},
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
 				id, _ := args["id"].(string)
+				id = strings.TrimSpace(id)
 				return updateStatus(agentDir, id, "active")
 			},
 		},
 		{
 			Name:        "remove_task",
 			Description: "Remove a scheduled task by ID.",
+			Effect:      tool.StaticEffect(tool.EffectMutates),
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -168,15 +170,20 @@ func Tools(agentDir string) []tool.Tool {
 						"description": "Task ID to remove.",
 					},
 				},
-				"required": []string{"id"},
+				"required":             []string{"id"},
+				"additionalProperties": false,
 			},
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
 				id, _ := args["id"].(string)
+				id = strings.TrimSpace(id)
 				if id == "" {
 					return "", fmt.Errorf("id is required")
 				}
 
-				tasks := LoadTasks(agentDir)
+				tasks, err := LoadTasksError(agentDir)
+				if err != nil {
+					return "", err
+				}
 				var kept []Task
 
 				for _, t := range tasks {
@@ -199,6 +206,7 @@ func Tools(agentDir string) []tool.Tool {
 		{
 			Name:        "run_task",
 			Description: "Run a scheduled task immediately, regardless of its schedule. Useful for testing.",
+			Effect:      tool.StaticEffect(tool.EffectMutates),
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -207,21 +215,28 @@ func Tools(agentDir string) []tool.Tool {
 						"description": "Task ID to run now.",
 					},
 				},
-				"required": []string{"id"},
+				"required":             []string{"id"},
+				"additionalProperties": false,
 			},
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
 				id, _ := args["id"].(string)
+				id = strings.TrimSpace(id)
 				if id == "" {
 					return "", fmt.Errorf("id is required")
 				}
 
-				tasks := LoadTasks(agentDir)
+				tasks, err := LoadTasksError(agentDir)
+				if err != nil {
+					return "", err
+				}
 
 				for i := range tasks {
 					if tasks[i].ID == id {
 						now := time.Now()
 						tasks[i].LastRun = &now
-						SaveTasks(agentDir, tasks)
+						if err := SaveTasks(agentDir, tasks); err != nil {
+							return "", err
+						}
 
 						return fmt.Sprintf("Task triggered. Execute now:\n\n%s", tasks[i].Prompt), nil
 					}
@@ -234,15 +249,25 @@ func Tools(agentDir string) []tool.Tool {
 }
 
 func LoadTasks(agentDir string) []Task {
+	tasks, _ := LoadTasksError(agentDir)
+	return tasks
+}
+
+func LoadTasksError(agentDir string) ([]Task, error) {
 	data, err := os.ReadFile(filepath.Join(agentDir, tasksFile))
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
 
 	var f taskFile
-	yaml.Unmarshal(data, &f)
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		return nil, err
+	}
 
-	return f.Tasks
+	return f.Tasks, nil
 }
 
 func SaveTasks(agentDir string, tasks []Task) error {
@@ -251,7 +276,45 @@ func SaveTasks(agentDir string, tasks []Task) error {
 		return err
 	}
 
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		return err
+	}
+
 	return os.WriteFile(filepath.Join(agentDir, tasksFile), out, 0644)
+}
+
+var cronParser = cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+
+// parsedSchedule is the union of supported schedule forms. Exactly one field
+// is set on a successful parse. Parsing once at validation/run time keeps
+// NextRun, IsDue, and ValidateSchedule from re-implementing format detection.
+type parsedSchedule struct {
+	interval time.Duration
+	once     time.Time
+	cron     cron.Schedule
+}
+
+func parseSchedule(sched string) (parsedSchedule, error) {
+	if rest, ok := strings.CutPrefix(sched, "every "); ok {
+		d, err := time.ParseDuration(rest)
+		if err != nil {
+			return parsedSchedule{}, fmt.Errorf("invalid interval %q: %w", sched, err)
+		}
+		if d <= 0 {
+			return parsedSchedule{}, fmt.Errorf("invalid interval %q: duration must be positive", sched)
+		}
+		return parsedSchedule{interval: d}, nil
+	}
+
+	if ts, err := time.Parse(time.RFC3339, sched); err == nil {
+		return parsedSchedule{once: ts}, nil
+	}
+
+	if s, err := cronParser.Parse(sched); err == nil {
+		return parsedSchedule{cron: s}, nil
+	}
+
+	return parsedSchedule{}, fmt.Errorf("invalid schedule %q: must be \"every <duration>\", a cron expression, or an ISO 8601 timestamp", sched)
 }
 
 func NextRun(t Task, now time.Time) time.Time {
@@ -259,42 +322,29 @@ func NextRun(t Task, now time.Time) time.Time {
 		return time.Time{}
 	}
 
-	sched := t.Schedule
-
-	if rest, ok := strings.CutPrefix(sched, "every "); ok {
-		d, err := time.ParseDuration(rest)
-		if err != nil {
-			return time.Time{}
-		}
-
-		if t.LastRun == nil {
-			return now
-		}
-
-		return t.LastRun.Add(d)
-	}
-
-	if ts, err := time.Parse(time.RFC3339, sched); err == nil {
-		if t.LastRun != nil {
-			return time.Time{}
-		}
-
-		return ts
-	}
-
-	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-
-	s, err := parser.Parse(sched)
+	p, err := parseSchedule(t.Schedule)
 	if err != nil {
 		return time.Time{}
 	}
 
-	anchor := now
-	if t.LastRun != nil {
-		anchor = *t.LastRun
+	switch {
+	case p.interval > 0:
+		if t.LastRun == nil {
+			return now
+		}
+		return t.LastRun.Add(p.interval)
+	case !p.once.IsZero():
+		if t.LastRun != nil {
+			return time.Time{}
+		}
+		return p.once
+	default:
+		anchor := now
+		if t.LastRun != nil {
+			anchor = *t.LastRun
+		}
+		return p.cron.Next(anchor)
 	}
-
-	return s.Next(anchor)
 }
 
 func IsDue(t Task, now time.Time) bool {
@@ -302,27 +352,16 @@ func IsDue(t Task, now time.Time) bool {
 	return !next.IsZero() && !next.After(now)
 }
 
-func validateSchedule(sched string) error {
-	if rest, ok := strings.CutPrefix(sched, "every "); ok {
-		_, err := time.ParseDuration(rest)
-		if err != nil {
-			return fmt.Errorf("invalid interval %q: %w", sched, err)
-		}
+// IsOneTime reports whether a schedule represents a single fire-and-done run
+// (RFC3339 timestamp). Recurring schedules (interval, cron) return false.
+func IsOneTime(sched string) bool {
+	p, err := parseSchedule(sched)
+	return err == nil && !p.once.IsZero()
+}
 
-		return nil
-	}
-
-	if _, err := time.Parse(time.RFC3339, sched); err == nil {
-		return nil
-	}
-
-	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-
-	if _, err := parser.Parse(sched); err != nil {
-		return fmt.Errorf("invalid schedule %q: must be \"every <duration>\", a cron expression, or an ISO 8601 timestamp", sched)
-	}
-
-	return nil
+func ValidateSchedule(sched string) error {
+	_, err := parseSchedule(sched)
+	return err
 }
 
 func updateStatus(agentDir, id, status string) (string, error) {
@@ -330,7 +369,10 @@ func updateStatus(agentDir, id, status string) (string, error) {
 		return "", fmt.Errorf("id is required")
 	}
 
-	tasks := LoadTasks(agentDir)
+	tasks, err := LoadTasksError(agentDir)
+	if err != nil {
+		return "", err
+	}
 	found := false
 
 	for i := range tasks {
@@ -354,4 +396,29 @@ func updateStatus(agentDir, id, status string) (string, error) {
 
 func newID() string {
 	return uuid.NewString()
+}
+
+// NewTask builds a validated, active task. Returns the task or an error if
+// either field is empty or the schedule expression is invalid.
+func NewTask(prompt, sched string) (Task, error) {
+	prompt = strings.TrimSpace(prompt)
+	sched = strings.TrimSpace(sched)
+
+	if prompt == "" {
+		return Task{}, fmt.Errorf("prompt is required")
+	}
+	if sched == "" {
+		return Task{}, fmt.Errorf("schedule is required")
+	}
+	if err := ValidateSchedule(sched); err != nil {
+		return Task{}, err
+	}
+
+	return Task{
+		ID:        newID(),
+		Prompt:    prompt,
+		Schedule:  sched,
+		Status:    "active",
+		CreatedAt: time.Now().UTC(),
+	}, nil
 }

@@ -11,9 +11,9 @@ func setupProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func killProcessGroup(cmd *exec.Cmd) {
+func killProcessGroup(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
-		return
+		return nil
 	}
-	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }

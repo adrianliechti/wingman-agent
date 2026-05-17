@@ -229,6 +229,24 @@ func TestGrepTool(t *testing.T) {
 		}
 	})
 
+	t.Run("grep count counts occurrences, not matching lines", func(t *testing.T) {
+		os.WriteFile(filepath.Join(tmpDir, "occurrences.txt"), []byte("needle needle\nneedle\n"), 0644)
+
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern":     "needle",
+			"path":        "occurrences.txt",
+			"output_mode": "count",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "occurrences.txt:3") {
+			t.Errorf("expected occurrence count, got: %s", result)
+		}
+	})
+
 	t.Run("grep single file", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
 			"pattern": "Hello",
@@ -537,6 +555,91 @@ func TestGrepHandlesLongLines(t *testing.T) {
 
 	if !strings.Contains(result, "exceeds") || !strings.Contains(result, "scan limit") {
 		t.Errorf("expected scan-cutoff sentinel, got: %s", result)
+	}
+}
+
+func TestGrepLongLineWithoutMatchDoesNotCreateFalsePositive(t *testing.T) {
+	root, tmpDir, cleanup := createTestRoot(t)
+	defer cleanup()
+
+	longLine := strings.Repeat("x", MaxScanBufSize+1024)
+	if err := os.WriteFile(filepath.Join(tmpDir, "big.txt"), []byte(longLine), 0644); err != nil {
+		t.Fatalf("write big.txt: %v", err)
+	}
+
+	grepTool := GrepTool(root)
+
+	result, err := grepTool.Execute(context.Background(), map[string]any{
+		"pattern": "needle",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result != "No files found" {
+		t.Errorf("expected no false positive for long line without match, got: %s", result)
+	}
+}
+
+// TestGrepSkipsExtensionlessBinaryFiles ensures the null-byte sniff catches
+// binary files that slip past the extension-based filter (e.g. compiled
+// executables or data blobs with no extension). Previously these were opened
+// and the bufio scanner returned ErrTooLong, producing a noisy sentinel.
+func TestGrepSkipsExtensionlessBinaryFiles(t *testing.T) {
+	root, tmpDir, cleanup := createTestRoot(t)
+	defer cleanup()
+
+	// Mix a null byte into payload that also contains the needle, so a naive
+	// scanner would report a match.
+	payload := append([]byte("prefix needle line\n"), 0x00, 0x01, 0x02, 0x03)
+	payload = append(payload, []byte("\nmore needle data")...)
+	if err := os.WriteFile(filepath.Join(tmpDir, "blob"), payload, 0644); err != nil {
+		t.Fatalf("write blob: %v", err)
+	}
+
+	// A neighbor text file to confirm the walk still produces real results.
+	if err := os.WriteFile(filepath.Join(tmpDir, "neighbor.txt"), []byte("needle here\n"), 0644); err != nil {
+		t.Fatalf("write neighbor: %v", err)
+	}
+
+	result, err := GrepTool(root).Execute(context.Background(), map[string]any{
+		"pattern":     "needle",
+		"output_mode": "content",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if strings.Contains(result, "blob") {
+		t.Errorf("expected binary file 'blob' to be skipped, got: %s", result)
+	}
+	if !strings.Contains(result, "neighbor.txt") {
+		t.Errorf("expected neighbor.txt match preserved, got: %s", result)
+	}
+}
+
+// TestGrepBinaryDetectionDoesNotMisfireOnSmallFiles guards the io.ReadFull
+// path: files shorter than the peek window must still be scanned, not
+// treated as binary because of the short-read error.
+func TestGrepBinaryDetectionDoesNotMisfireOnSmallFiles(t *testing.T) {
+	root, tmpDir, cleanup := createTestRoot(t)
+	defer cleanup()
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "tiny.txt"), []byte("needle"), 0644); err != nil {
+		t.Fatalf("write tiny.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "empty.txt"), nil, 0644); err != nil {
+		t.Fatalf("write empty.txt: %v", err)
+	}
+
+	result, err := GrepTool(root).Execute(context.Background(), map[string]any{
+		"pattern": "needle",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "tiny.txt") {
+		t.Errorf("expected tiny.txt match, got: %s", result)
 	}
 }
 

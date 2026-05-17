@@ -346,12 +346,8 @@ func (s *Session) Hover(ctx context.Context, uri string, line, column int) (stri
 		return "", err
 	}
 
-	if result == nil || string(result) == "null" {
-		return "No hover information available", nil
-	}
-
 	var hover HoverResponse
-	if err := json.Unmarshal(result, &hover); err != nil {
+	if err := unmarshalResult(result, &hover); err != nil {
 		return "", err
 	}
 

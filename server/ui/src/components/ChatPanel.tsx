@@ -711,12 +711,7 @@ function EntryView({
 						)}
 					</>
 				) : (
-					<>
-						<MarkdownContent text={entry.content} />
-						{isStreaming && (
-							<span className="inline-block w-[6px] h-[14px] bg-fg-dim align-text-bottom ml-0.5 animate-[blink_1s_step-end_infinite]" />
-						)}
-					</>
+					<MarkdownContent text={entry.content} />
 				)}
 			</div>
 		</div>
@@ -833,7 +828,7 @@ function TurnView({
 							onCollapse={() => setExpanded(false)}
 						/>
 						{isActive &&
-							phase !== "streaming" &&
+							!(phase === "streaming" && turn.final?.type === "assistant") &&
 							turn.working[turn.working.length - 1]?.type !==
 								"reasoning" && <PhaseIndicator phase={phase} />}
 					</>
@@ -853,11 +848,12 @@ function TurnView({
 					}
 				/>
 			)}
-			{/* Active turn with no final yet and no working: still show indicator */}
-			{isActive &&
-				turn.working.length === 0 &&
-				!turn.final &&
-				phase !== "streaming" && <PhaseIndicator phase={phase} />}
+			{/* Active turn with no final yet and no working: still show indicator.
+			    Persist through the brief gap between phase=streaming and the
+			    first text delta materializing turn.final. */}
+			{isActive && turn.working.length === 0 && !turn.final && (
+				<PhaseIndicator phase={phase} />
+			)}
 		</>
 	);
 }
@@ -1060,7 +1056,7 @@ function ReasoningView({
 			<div className="text-[11px] whitespace-pre-wrap break-words text-fg-dim font-mono leading-relaxed italic">
 				{summary}
 				{isStreaming && (
-					<span className="inline-block w-[5px] h-[10px] bg-fg-dim align-text-bottom ml-0.5 animate-[blink_1s_step-end_infinite]" />
+					<span className="inline-block w-[3px] h-[10px] bg-fg-dim/40 align-text-bottom ml-0.5 animate-[pulse_1.4s_ease-in-out_infinite]" />
 				)}
 			</div>
 		</div>

@@ -125,36 +125,31 @@ func Tools(cfg *agent.Config) []tool.Tool {
 
 			sub := &agent.Agent{Config: subcfg}
 
-			// Only the final assistant text is the "answer". Reset the buffer
-			// on each new assistant text message; the last message wins. This
-			// drops intermediate narration like "I'll start by exploring…"
-			// that the model emits before tool calls.
-			var lastText strings.Builder
+			// Only the final assistant text is the "answer". The latest
+			// non-empty message wins, which drops intermediate narration
+			// like "I'll start by exploring…" emitted before tool calls.
+			var lastText string
 
 			for msg, err := range sub.Send(ctx, []agent.Content{{Text: prompt}}) {
 				if err != nil {
 					return "", fmt.Errorf("agent error: %w", err)
 				}
 
-				var msgText strings.Builder
+				var parts []string
 				for _, c := range msg.Content {
 					if c.Text != "" {
-						msgText.WriteString(c.Text)
+						parts = append(parts, c.Text)
 					}
 				}
-
-				if msgText.Len() > 0 {
-					lastText.Reset()
-					lastText.WriteString(msgText.String())
+				if len(parts) > 0 {
+					lastText = strings.Join(parts, "")
 				}
 			}
 
-			text := strings.TrimSpace(lastText.String())
-
+			text := strings.TrimSpace(lastText)
 			if text == "" {
 				return "Sub-agent completed but produced no output.", nil
 			}
-
 			return text, nil
 		},
 	}}
@@ -244,7 +239,9 @@ func allowVerificationTool(t tool.Tool) bool {
 	switch t.Name {
 	case "write", "edit", "ask_user":
 		return false
-	default:
+	case "shell":
 		return true
+	default:
+		return t.Effect != nil && t.Effect(nil) == tool.EffectReadOnly
 	}
 }

@@ -49,7 +49,7 @@ func Run(ctx context.Context, args []string, options *Options) error {
 		env = append(env, k+"="+v)
 	}
 
-	cmd := exec.Command(options.Path, args...)
+	cmd := exec.CommandContext(ctx, options.Path, args...)
 	cmd.Env = env
 
 	cmd.Stdin = os.Stdin

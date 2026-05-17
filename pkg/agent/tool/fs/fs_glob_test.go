@@ -140,6 +140,72 @@ func TestGlobTool(t *testing.T) {
 		}
 	})
 
+	t.Run("glob multi-wildcard substring pattern", func(t *testing.T) {
+		newRoot, newTmp, newCleanup := createTestRoot(t)
+		defer newCleanup()
+
+		os.MkdirAll(filepath.Join(newTmp, "ui", "components"), 0755)
+		os.WriteFile(filepath.Join(newTmp, "ui", "components", "WorkspaceSelector.tsx"), []byte("x"), 0644)
+		os.WriteFile(filepath.Join(newTmp, "ui", "components", "workspace_selector.tsx"), []byte("x"), 0644)
+		os.WriteFile(filepath.Join(newTmp, "ui", "components", "Workspace.tsx"), []byte("x"), 0644)
+		os.WriteFile(filepath.Join(newTmp, "ui", "components", "Selector.tsx"), []byte("x"), 0644)
+
+		result, err := GlobTool(newRoot).Execute(context.Background(), map[string]any{
+			"pattern": "**/*orkspace*elector*",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "WorkspaceSelector.tsx") {
+			t.Errorf("expected WorkspaceSelector.tsx, got: %s", result)
+		}
+
+		if !strings.Contains(result, "workspace_selector.tsx") {
+			t.Errorf("expected workspace_selector.tsx, got: %s", result)
+		}
+
+		if strings.Contains(result, "Workspace.tsx") && !strings.Contains(result, "WorkspaceSelector.tsx") {
+			t.Errorf("Workspace.tsx alone should not match pattern requiring elector, got: %s", result)
+		}
+
+		if strings.Contains(result, "\nSelector.tsx") || strings.HasPrefix(result, "Selector.tsx") {
+			t.Errorf("Selector.tsx should not match pattern requiring orkspace, got: %s", result)
+		}
+	})
+
+	t.Run("glob pattern is case-sensitive", func(t *testing.T) {
+		newRoot, newTmp, newCleanup := createTestRoot(t)
+		defer newCleanup()
+
+		os.WriteFile(filepath.Join(newTmp, "WorkspaceSelector.tsx"), []byte("x"), 0644)
+
+		result, err := GlobTool(newRoot).Execute(context.Background(), map[string]any{
+			"pattern": "**/*workspace*selector*",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "No files found") {
+			t.Errorf("expected case-sensitive miss, got: %s", result)
+		}
+
+		result, err = GlobTool(newRoot).Execute(context.Background(), map[string]any{
+			"pattern": "**/*Workspace*Selector*",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "WorkspaceSelector.tsx") {
+			t.Errorf("expected match on exact case, got: %s", result)
+		}
+	})
+
 	t.Run("glob invalid pattern", func(t *testing.T) {
 		_, err := globTool.Execute(context.Background(), map[string]any{
 			"pattern": "[",

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -103,8 +103,9 @@ func List(sessionsDir string) ([]Session, error) {
 		sessions = append(sessions, s)
 	}
 
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+	// Newest first.
+	slices.SortFunc(sessions, func(a, b Session) int {
+		return b.UpdatedAt.Compare(a.UpdatedAt)
 	})
 
 	return sessions, nil

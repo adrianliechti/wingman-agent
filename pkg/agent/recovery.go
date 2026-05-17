@@ -8,6 +8,8 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
+
+	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 func isRecoverableError(err error) bool {
@@ -181,19 +183,19 @@ func recoverySummaryTranscript(messages []Message) string {
 		m := messages[i]
 		for _, c := range m.Content {
 			if c.Text != "" {
-				fmt.Fprintf(&mb, "[%s]: %s\n\n", m.Role, truncate(c.Text, 2000))
+				fmt.Fprintf(&mb, "[%s]: %s\n\n", m.Role, text.TruncateHead(c.Text, 2000))
 			}
 
 			if c.Refusal != "" {
-				fmt.Fprintf(&mb, "[%s]: %s\n\n", m.Role, truncate(c.Refusal, 2000))
+				fmt.Fprintf(&mb, "[%s]: %s\n\n", m.Role, text.TruncateHead(c.Refusal, 2000))
 			}
 
 			if c.ToolCall != nil {
-				fmt.Fprintf(&mb, "[tool call]: %s(%s)\n\n", c.ToolCall.Name, truncate(c.ToolCall.Args, 200))
+				fmt.Fprintf(&mb, "[tool call]: %s(%s)\n\n", c.ToolCall.Name, text.TruncateHead(c.ToolCall.Args, 200))
 			}
 
 			if c.ToolResult != nil {
-				fmt.Fprintf(&mb, "[tool result]: %s\n\n", truncate(c.ToolResult.Content, 500))
+				fmt.Fprintf(&mb, "[tool result]: %s\n\n", text.TruncateHead(c.ToolResult.Content, 500))
 			}
 		}
 
@@ -217,13 +219,6 @@ func recoverySummaryTranscript(messages []Message) string {
 	}
 
 	return sb.String()
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + " [truncated]"
 }
 
 func (a *Agent) truncateMessagesForRecovery() {
