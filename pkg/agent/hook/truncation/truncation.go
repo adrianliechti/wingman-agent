@@ -4,87 +4,41 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
-// DefaultMaxBytes is the soft cap applied to tools without a per-tool budget.
-// Outputs at or below this size are returned verbatim.
-const DefaultMaxBytes = 16 * 1024
+// MaxBytes is the default per-tool cap on inline output. Outputs above this
+// size are persisted to a scratch file and replaced with a preview envelope.
+const MaxBytes = 100 * 1024
 
-const (
-	defaultHardBytes    = 64 * 1024
-	persistPreviewBytes = 2 * 1024
-)
+// grepMaxBytes is a tighter cap for grep, whose results compound across
+// turns more than other tools.
+const grepMaxBytes = 20 * 1024
 
-// Budget describes how a tool's output is trimmed. Outputs ≤ SoftBytes pass
-// through unchanged. Above SoftBytes but ≤ HardBytes, the output is trimmed
-// in-place (head+tail middle-elide, or head-only if HeadBiased) and the full
-// text is also saved to scratch so the model can `read` it. Above HardBytes,
-// the inline output is replaced with a <persisted-output> envelope containing
-// only a small preview plus the scratch path.
-type Budget struct {
-	SoftBytes  int
-	HardBytes  int
-	HeadBiased bool
-}
+const previewBytes = 2 * 1024
 
-// budgetFor returns the budget for a given tool name. Tools not explicitly
-// listed fall back to the default soft / hard caps.
-func budgetFor(name string) Budget {
-	switch name {
-	case "shell":
-		return Budget{SoftBytes: 8 * 1024, HardBytes: 50 * 1024}
-	case "grep":
-		return Budget{SoftBytes: 8 * 1024, HardBytes: 50 * 1024, HeadBiased: true}
-	case "glob":
-		return Budget{SoftBytes: 4 * 1024, HardBytes: 32 * 1024, HeadBiased: true}
-	case "read":
-		return Budget{SoftBytes: 64 * 1024, HardBytes: 64 * 1024}
-	case "web_fetch":
-		return Budget{SoftBytes: 16 * 1024, HardBytes: 100 * 1024}
-	case "web_search":
-		return Budget{SoftBytes: 8 * 1024, HardBytes: 32 * 1024}
+// budgetFor returns the per-tool inline output cap.
+func budgetFor(name string) int {
+	if name == "grep" {
+		return grepMaxBytes
 	}
-	return Budget{SoftBytes: DefaultMaxBytes, HardBytes: defaultHardBytes}
+	return MaxBytes
 }
 
-// New returns a PostToolUse hook that trims tool output according to per-tool
-// budgets, persisting the full text to scratchDir when the hard cap is hit.
+// New returns a PostToolUse hook that persists oversized tool output and
+// substitutes a preview envelope. Tools that self-cap below their budget
+// pass through untouched.
 func New(scratchDir string) hook.PostToolUse {
-	return func(ctx context.Context, call tool.ToolCall, result string) (string, error) {
-		total := len(result)
-		b := budgetFor(call.Name)
-
-		if total <= b.SoftBytes {
+	return func(_ context.Context, call tool.ToolCall, result string) (string, error) {
+		budget := budgetFor(call.Name)
+		if len(result) <= budget {
 			return result, nil
 		}
-
-		// Hard cap: replace inline with a small preview envelope pointing
-		// at a scratch file. Cheaper to carry on every subsequent turn.
-		if total > b.HardBytes {
-			path := writeScratch(scratchDir, call.Name, result)
-			previewBytes := persistPreviewBytes
-			if previewBytes > total {
-				previewBytes = total
-			}
-			preview := result[:previewBytes]
-			return formatPersisted(total, path, preview), nil
-		}
-
-		// Soft cap: inline trim + scratch fallback so the elided portion is
-		// retrievable via `read`.
-		var trimmed string
-		if b.HeadBiased {
-			trimmed = text.TruncateHead(result, b.SoftBytes)
-		} else {
-			trimmed = text.TruncateMiddle(result, b.SoftBytes)
-		}
-
 		path := writeScratch(scratchDir, call.Name, result)
-		return formatTrimmed(total, path, trimmed), nil
+		return formatPersisted(len(result), path, result[:previewBytes]), nil
 	}
 }
 
@@ -92,9 +46,7 @@ func writeScratch(scratchDir, toolName, content string) string {
 	if scratchDir == "" {
 		return ""
 	}
-	// os.CreateTemp avoids the timestamp-collision window of constructing
-	// names manually under concurrent tool calls (the trailing "*" is
-	// replaced with a unique suffix and the file is opened atomically).
+	// os.CreateTemp avoids timestamp collisions under concurrent tool calls.
 	f, err := os.CreateTemp(scratchDir, "result-"+sanitizeName(toolName)+"-*.txt")
 	if err != nil {
 		return ""
@@ -108,29 +60,18 @@ func writeScratch(scratchDir, toolName, content string) string {
 }
 
 func formatPersisted(totalBytes int, scratchPath, preview string) string {
-	var b string
-	b += "<persisted-output>\n"
-	b += fmt.Sprintf("Output was %d bytes — too large for inline.", totalBytes)
+	var b strings.Builder
+	b.WriteString("<persisted-output>\n")
+	fmt.Fprintf(&b, "Output was %d bytes — too large for inline.", totalBytes)
 	if scratchPath != "" {
-		b += fmt.Sprintf(" Full output saved to: %s", scratchPath)
+		fmt.Fprintf(&b, " Full output saved to: %s", scratchPath)
 	}
-	b += "\n\n"
-	b += fmt.Sprintf("Preview (first %d bytes):\n\n%s", len(preview), preview)
+	fmt.Fprintf(&b, "\n\nPreview (first %d bytes):\n\n%s", len(preview), preview)
 	if scratchPath != "" {
-		b += "\n\nUse `read` on the path above to retrieve specific ranges."
+		b.WriteString("\n\nUse `read` on the path above to retrieve specific ranges.")
 	}
-	b += "\n</persisted-output>"
-	return b
-}
-
-func formatTrimmed(totalBytes int, scratchPath, trimmed string) string {
-	var notice string
-	if scratchPath != "" {
-		notice = fmt.Sprintf("[Output truncated: %d bytes — full output at %s; use `read` on that path for the elided portion.]\n\n", totalBytes, scratchPath)
-	} else {
-		notice = fmt.Sprintf("[Output truncated: %d bytes. Re-run with a narrower scope if you need more.]\n\n", totalBytes)
-	}
-	return notice + trimmed
+	b.WriteString("\n</persisted-output>")
+	return b.String()
 }
 
 func sanitizeName(s string) string {

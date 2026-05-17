@@ -2,6 +2,7 @@ package fs_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,33 @@ func TestReadTool(t *testing.T) {
 		}
 		if !strings.Contains(result, "offset=3") {
 			t.Errorf("expected continuation offset, got: %s", result)
+		}
+	})
+
+	t.Run("read honors limit larger than DefaultMaxLines", func(t *testing.T) {
+		// Short-line file (~3K lines) where the 30KB byte cap doesn't kick in
+		// for the first few thousand. The explicit limit must not be silently
+		// clipped to DefaultMaxLines.
+		var b strings.Builder
+		for i := 1; i <= 3000; i++ {
+			fmt.Fprintf(&b, "L%d\n", i)
+		}
+		os.WriteFile(filepath.Join(tmpDir, "long.txt"), []byte(b.String()), 0644)
+
+		result, err := readTool.Execute(context.Background(), map[string]any{
+			"path":  "long.txt",
+			"limit": 2500,
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "2500\tL2500") {
+			t.Errorf("expected line 2500 in output (DefaultMaxLines was 2000), got: %s", result[max(0, len(result)-200):])
+		}
+		if strings.Contains(result, "2501\tL2501") {
+			t.Errorf("limit=2500 should stop at line 2500, got: %s", result[max(0, len(result)-200):])
 		}
 	})
 

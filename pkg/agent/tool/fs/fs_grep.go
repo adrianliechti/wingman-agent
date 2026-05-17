@@ -460,22 +460,10 @@ func GrepTool(root *os.Root) tool.Tool {
 				output = strings.Join(results, "\n")
 			}
 
-			output, truncated := truncateHead(output)
-
-			var notices []string
-
 			if outputMode == "content" && (limitReached || resultOffset > 0) {
 				if notice := formatGrepPaginationNotice(limitReached, headLimit, resultOffset); notice != "" {
-					notices = append(notices, notice)
+					output += "\n\n[" + notice + "]"
 				}
-			}
-
-			if truncated {
-				notices = append(notices, fmt.Sprintf("%dKB cap", DefaultMaxBytes/1024))
-			}
-
-			if len(notices) > 0 {
-				output += "\n\n[" + strings.Join(notices, "; ") + "]"
 			}
 
 			return output, nil

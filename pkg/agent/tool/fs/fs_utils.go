@@ -156,24 +156,6 @@ func pathError(action, originalPath, normalizedPath, workingDir string, err erro
 	return fmt.Errorf("%s failed: %s: %w", action, originalPath, err)
 }
 
-func truncateHead(content string) (result string, truncated bool) {
-	lines := strings.Split(content, "\n")
-
-	if len(lines) > DefaultMaxLines {
-		lines = lines[:DefaultMaxLines]
-		truncated = true
-	}
-
-	result = strings.Join(lines, "\n")
-
-	if len(result) > DefaultMaxBytes {
-		result = result[:DefaultMaxBytes]
-		truncated = true
-	}
-
-	return result, truncated
-}
-
 func detectLineEnding(content string) string {
 	if strings.Contains(content, "\r\n") {
 		return "\r\n"

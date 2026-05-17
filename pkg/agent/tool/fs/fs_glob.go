@@ -119,18 +119,13 @@ func GlobTool(root *os.Root) tool.Tool {
 				paths[i] = r.path
 			}
 
-			rawOutput := strings.Join(paths, "\n")
+			output := strings.Join(paths, "\n")
 
 			if resultLimitReached {
-				rawOutput += "\n(Results are truncated. Consider using a more specific path or pattern.)"
+				output += "\n(Results are truncated. Consider using a more specific path or pattern.)"
 			}
 
-			truncatedOutput, truncated := truncateHead(rawOutput)
-			if truncated {
-				truncatedOutput += fmt.Sprintf("\n(%dKB cap reached.)", DefaultMaxBytes/1024)
-			}
-
-			return truncatedOutput, nil
+			return output, nil
 		},
 	}
 }

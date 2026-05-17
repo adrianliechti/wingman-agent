@@ -159,7 +159,7 @@ func formatRead(content []byte, startLine, limit int) (string, error) {
 	}
 
 	maxLines := DefaultMaxLines
-	if limit > 0 && limit < maxLines {
+	if limit > 0 {
 		maxLines = limit
 	}
 

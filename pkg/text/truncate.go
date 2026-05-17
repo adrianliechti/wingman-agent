@@ -2,114 +2,31 @@ package text
 
 import (
 	"fmt"
-	"strings"
 	"unicode/utf8"
 )
 
-// TruncateHead keeps the first maxBytes (rounded to a UTF-8 boundary) of s,
-// followed by a "…N chars truncated…" marker. Useful when only the start of
-// the output is informative (grep matches, find listings).
+// TruncateHead keeps the first maxBytes of s at a UTF-8 boundary and appends
+// a "…N chars truncated…" marker. Useful when only the start of the value is
+// informative.
 func TruncateHead(s string, maxBytes int) string {
 	if s == "" {
 		return ""
 	}
-
-	totalChars := utf8.RuneCountInString(s)
-
 	if maxBytes <= 0 {
-		return formatTruncationMarker(totalChars)
+		return marker(utf8.RuneCountInString(s))
 	}
-
 	if len(s) <= maxBytes {
 		return s
 	}
-
-	prefixEnd := 0
-	removedChars := 0
-	for idx, r := range s {
-		charEnd := idx + utf8.RuneLen(r)
-		if charEnd <= maxBytes {
-			prefixEnd = charEnd
-			continue
-		}
-		removedChars++
+	// Walk back from maxBytes to the nearest rune start so the cut lands
+	// on a UTF-8 boundary.
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-
-	return s[:prefixEnd] + formatTruncationMarker(removedChars)
+	return s[:cut] + marker(utf8.RuneCountInString(s[cut:]))
 }
 
-// TruncateMiddle keeps a head and tail of s joined by a "…N chars
-// truncated…" marker, splitting the byte budget at UTF-8 boundaries.
-// The returned string may exceed maxBytes by the marker length.
-func TruncateMiddle(s string, maxBytes int) string {
-	if s == "" {
-		return ""
-	}
-
-	totalChars := utf8.RuneCountInString(s)
-
-	if maxBytes <= 0 {
-		return formatTruncationMarker(totalChars)
-	}
-
-	if len(s) <= maxBytes {
-		return s
-	}
-
-	leftBudget, rightBudget := splitBudget(maxBytes)
-	removedChars, head, tail := splitString(s, leftBudget, rightBudget)
-	marker := formatTruncationMarker(removedChars)
-
-	var b strings.Builder
-	b.Grow(len(head) + len(marker) + len(tail))
-	b.WriteString(head)
-	b.WriteString(marker)
-	b.WriteString(tail)
-	return b.String()
-}
-
-func splitBudget(budget int) (left, right int) {
-	left = budget / 2
-	return left, budget - left
-}
-
-func splitString(s string, beginningBytes, endBytes int) (removedChars int, head, tail string) {
-	if s == "" {
-		return 0, "", ""
-	}
-
-	length := len(s)
-	tailStartTarget := max(length-endBytes, 0)
-
-	prefixEnd := 0
-	suffixStart := length
-	suffixStarted := false
-
-	for idx, r := range s {
-		charEnd := idx + utf8.RuneLen(r)
-		if charEnd <= beginningBytes {
-			prefixEnd = charEnd
-			continue
-		}
-
-		if idx >= tailStartTarget {
-			if !suffixStarted {
-				suffixStart = idx
-				suffixStarted = true
-			}
-			continue
-		}
-
-		removedChars++
-	}
-
-	if suffixStart < prefixEnd {
-		suffixStart = prefixEnd
-	}
-
-	return removedChars, s[:prefixEnd], s[suffixStart:]
-}
-
-func formatTruncationMarker(removedChars int) string {
-	return fmt.Sprintf("…%d chars truncated…", removedChars)
+func marker(removed int) string {
+	return fmt.Sprintf("…%d chars truncated…", removed)
 }
