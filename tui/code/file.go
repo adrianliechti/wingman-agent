@@ -6,7 +6,7 @@ import (
 	"io/fs"
 	pathpkg "path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -242,7 +242,7 @@ func (a *App) showFilePicker(initialQuery string, onSelect func(paths []string))
 				for path := range selected {
 					paths = append(paths, path)
 				}
-				sort.Strings(paths)
+				slices.Sort(paths)
 
 				if len(paths) == 0 {
 					idx := list.GetCurrentItem()

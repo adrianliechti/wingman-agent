@@ -1,10 +1,11 @@
 package code
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -879,14 +880,14 @@ func (a *App) skillCommands() []slashCommand {
 	for _, s := range a.agent.Skills {
 		cmds = append(cmds, slashCommand{"/" + s.Name, s.Description})
 	}
-	sort.SliceStable(cmds, func(i, j int) bool {
-		if cmds[i].Name == "/init" {
-			return true
+	slices.SortStableFunc(cmds, func(a, b slashCommand) int {
+		if a.Name == "/init" {
+			return -1
 		}
-		if cmds[j].Name == "/init" {
-			return false
+		if b.Name == "/init" {
+			return 1
 		}
-		return cmds[i].Name < cmds[j].Name
+		return cmp.Compare(a.Name, b.Name)
 	})
 	return cmds
 }

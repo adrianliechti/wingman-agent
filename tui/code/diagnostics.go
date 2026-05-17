@@ -1,10 +1,11 @@
 package code
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -346,11 +347,11 @@ func (a *App) collectDiagnostics(ctx context.Context) ([]fileDiagnostics, error)
 		files = append(files, fd)
 	}
 
-	sort.Slice(files, func(i, j int) bool {
-		if files[i].Errors != files[j].Errors {
-			return files[i].Errors > files[j].Errors
+	slices.SortFunc(files, func(a, b fileDiagnostics) int {
+		if a.Errors != b.Errors {
+			return cmp.Compare(b.Errors, a.Errors)
 		}
-		return files[i].Path < files[j].Path
+		return cmp.Compare(a.Path, b.Path)
 	})
 
 	return files, nil

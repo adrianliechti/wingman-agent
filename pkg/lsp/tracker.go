@@ -1,8 +1,9 @@
 package lsp
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -60,8 +61,8 @@ func (t *DiagnosticTracker) FilterNew(uri string, diags []Diagnostic) []Diagnost
 		filtered = append(filtered, d)
 	}
 
-	sort.Slice(filtered, func(i, j int) bool {
-		return filtered[i].Severity < filtered[j].Severity
+	slices.SortFunc(filtered, func(a, b Diagnostic) int {
+		return cmp.Compare(a.Severity, b.Severity)
 	})
 
 	if len(filtered) > maxDiagnosticsPerFile {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"embed"
 	"encoding/json"
@@ -10,7 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -345,8 +346,8 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].UpdatedAt > result[j].UpdatedAt
+	slices.SortFunc(result, func(a, b SessionEntry) int {
+		return cmp.Compare(b.UpdatedAt, a.UpdatedAt)
 	})
 
 	writeJSON(w, result)
@@ -520,15 +521,15 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sevOrder := map[string]int{"error": 0, "warning": 1, "info": 2}
-	sort.Slice(result, func(i, j int) bool {
-		si, sj := sevOrder[result[i].Severity], sevOrder[result[j].Severity]
+	slices.SortFunc(result, func(a, b diagItem) int {
+		si, sj := sevOrder[a.Severity], sevOrder[b.Severity]
 		if si != sj {
-			return si < sj
+			return cmp.Compare(si, sj)
 		}
-		if result[i].Path != result[j].Path {
-			return result[i].Path < result[j].Path
+		if a.Path != b.Path {
+			return cmp.Compare(a.Path, b.Path)
 		}
-		return result[i].Line < result[j].Line
+		return cmp.Compare(a.Line, b.Line)
 	})
 
 	writeJSON(w, result)

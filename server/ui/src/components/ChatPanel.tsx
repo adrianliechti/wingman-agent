@@ -11,6 +11,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useColorScheme } from "../hooks/useColorScheme";
 import type { ChatEntry } from "../hooks/useWebSocket";
+import { sampleSpinnerVerb } from "../spinnerVerbs";
 import type { Phase } from "../types/protocol";
 import { FilePicker } from "./FilePicker";
 import { MarkdownContent } from "./MarkdownContent";
@@ -830,7 +831,7 @@ function TurnView({
 						{isActive &&
 							!(phase === "streaming" && turn.final?.type === "assistant") &&
 							turn.working[turn.working.length - 1]?.type !==
-								"reasoning" && <PhaseIndicator phase={phase} />}
+								"reasoning" && <PhaseIndicator />}
 					</>
 				) : (
 					<WorkingSummary
@@ -852,7 +853,7 @@ function TurnView({
 			    Persist through the brief gap between phase=streaming and the
 			    first text delta materializing turn.final. */}
 			{isActive && turn.working.length === 0 && !turn.final && (
-				<PhaseIndicator phase={phase} />
+				<PhaseIndicator />
 			)}
 		</>
 	);
@@ -948,15 +949,14 @@ function WorkingSummary({
 	);
 }
 
-function PhaseIndicator({ phase }: { phase: Phase }) {
-	// Caller gates on phase !== "streaming", so the only labels reachable here
-	// are "thinking" and "tool_running".
-	const label = phase === "tool_running" ? "Working" : "Thinking";
+function PhaseIndicator() {
+	// Pick a verb once per mount so the label stays stable while shown.
+	const [verb] = useState(sampleSpinnerVerb);
 
 	return (
 		<div className="mb-4 pl-3">
 			<div className="flex items-baseline gap-1.5 text-[12px] text-fg-dim font-mono italic">
-				<span>{label}</span>
+				<span>{verb}</span>
 				<span className="inline-flex gap-[3px]">
 					<span
 						className="w-[3px] h-[3px] rounded-full bg-fg-dim animate-pulse"
