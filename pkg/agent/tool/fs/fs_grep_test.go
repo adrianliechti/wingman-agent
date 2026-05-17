@@ -509,6 +509,72 @@ func TestGrepTool(t *testing.T) {
 		}
 	})
 
+	t.Run("grep skips VCS directories", func(t *testing.T) {
+		newRoot, newTmp, newCleanup := createTestRoot(t)
+		defer newCleanup()
+
+		os.MkdirAll(filepath.Join(newTmp, ".git"), 0755)
+		os.MkdirAll(filepath.Join(newTmp, "src"), 0755)
+		os.WriteFile(filepath.Join(newTmp, ".git", "config"), []byte("vcs-needle\n"), 0644)
+		os.WriteFile(filepath.Join(newTmp, "src", "main.go"), []byte("vcs-needle\n"), 0644)
+
+		result, err := GrepTool(newRoot).Execute(context.Background(), map[string]any{
+			"pattern": "vcs-needle",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, filepath.Join("src", "main.go")) {
+			t.Errorf("expected src/main.go in results, got: %s", result)
+		}
+		if strings.Contains(result, ".git") {
+			t.Errorf(".git contents must be skipped, got: %s", result)
+		}
+	})
+
+	t.Run("grep with -B before context", func(t *testing.T) {
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern":     "return",
+			"-B":          float64(2),
+			"output_mode": "content",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// "return" lives on line 4 of file1.go; -B=2 should include lines 2 and 3.
+		if !strings.Contains(result, "file1.go-2-") {
+			t.Errorf("expected file1.go line 2 as before-context, got: %s", result)
+		}
+		if !strings.Contains(result, "file1.go-3-") {
+			t.Errorf("expected file1.go line 3 as before-context, got: %s", result)
+		}
+	})
+
+	t.Run("grep negated glob excludes matching files", func(t *testing.T) {
+		newRoot, newTmp, newCleanup := createTestRoot(t)
+		defer newCleanup()
+
+		os.WriteFile(filepath.Join(newTmp, "keep.go"), []byte("needle\n"), 0644)
+		os.WriteFile(filepath.Join(newTmp, "drop.log"), []byte("needle\n"), 0644)
+
+		result, err := GrepTool(newRoot).Execute(context.Background(), map[string]any{
+			"pattern": "needle",
+			"glob":    "!*.log",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, "keep.go") {
+			t.Errorf("expected keep.go in results, got: %s", result)
+		}
+		if strings.Contains(result, "drop.log") {
+			t.Errorf("negated glob should exclude drop.log, got: %s", result)
+		}
+	})
+
 	t.Run("grep searches svg as text", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
 			"pattern": "Hello Icon",

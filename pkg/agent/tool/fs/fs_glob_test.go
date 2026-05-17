@@ -254,6 +254,58 @@ func TestGlobTool(t *testing.T) {
 		}
 	})
 
+	t.Run("glob skips VCS directories", func(t *testing.T) {
+		newRoot, newTmp, newCleanup := createTestRoot(t)
+		defer newCleanup()
+
+		os.MkdirAll(filepath.Join(newTmp, ".git", "objects"), 0755)
+		os.MkdirAll(filepath.Join(newTmp, ".svn"), 0755)
+		os.MkdirAll(filepath.Join(newTmp, "src"), 0755)
+		os.WriteFile(filepath.Join(newTmp, ".git", "objects", "blob.txt"), []byte("x"), 0644)
+		os.WriteFile(filepath.Join(newTmp, ".svn", "entries.txt"), []byte("x"), 0644)
+		os.WriteFile(filepath.Join(newTmp, "src", "main.txt"), []byte("x"), 0644)
+
+		result, err := GlobTool(newRoot).Execute(context.Background(), map[string]any{
+			"pattern": "**/*.txt",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(result, filepath.Join("src", "main.txt")) {
+			t.Errorf("expected src/main.txt in results, got: %s", result)
+		}
+		if strings.Contains(result, ".git") {
+			t.Errorf(".git contents must be skipped, got: %s", result)
+		}
+		if strings.Contains(result, ".svn") {
+			t.Errorf(".svn contents must be skipped, got: %s", result)
+		}
+	})
+
+	t.Run("glob rejects path pointing to a file", func(t *testing.T) {
+		_, err := globTool.Execute(context.Background(), map[string]any{
+			"pattern": "*.go",
+			"path":    "main.go",
+		})
+		if err == nil {
+			t.Fatal("expected error when path is not a directory")
+		}
+		if !strings.Contains(err.Error(), "not a directory") {
+			t.Errorf("expected 'not a directory' error, got: %v", err)
+		}
+	})
+
+	t.Run("glob path outside workspace rejected", func(t *testing.T) {
+		_, err := globTool.Execute(context.Background(), map[string]any{
+			"pattern": "*.go",
+			"path":    "/etc",
+		})
+		if err == nil {
+			t.Fatal("expected error for search path outside workspace")
+		}
+	})
+
 	t.Run("glob returns modified order when results exceed limit", func(t *testing.T) {
 		newRoot, newTmp, newCleanup := createTestRoot(t)
 		defer newCleanup()

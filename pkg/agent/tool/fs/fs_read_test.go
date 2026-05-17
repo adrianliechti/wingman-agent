@@ -225,6 +225,21 @@ func TestReadTool(t *testing.T) {
 		}
 	})
 
+	t.Run("read warns on empty file", func(t *testing.T) {
+		os.WriteFile(filepath.Join(tmpDir, "empty.txt"), []byte(""), 0644)
+
+		result, err := readTool.Execute(context.Background(), map[string]any{
+			"path": "empty.txt",
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(result, "<system-reminder>") || !strings.Contains(result, "empty") {
+			t.Errorf("expected empty-file system-reminder, got: %s", result)
+		}
+	})
+
 	t.Run("read svg as text", func(t *testing.T) {
 		os.WriteFile(filepath.Join(tmpDir, "icon.svg"), []byte(`<svg><title>Logo</title></svg>`), 0644)
 
@@ -238,6 +253,64 @@ func TestReadTool(t *testing.T) {
 
 		if !strings.Contains(result, "<title>Logo</title>") {
 			t.Errorf("expected svg text, got: %s", result)
+		}
+	})
+}
+
+func TestReadAllowedReadRoots(t *testing.T) {
+	root, _, cleanup := createTestRoot(t)
+	defer cleanup()
+
+	// Build an "outside" directory and authorize it via allowedReadRoots.
+	outside, err := os.MkdirTemp("", "fs_outside_*")
+	if err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	defer os.RemoveAll(outside)
+
+	allowedFile := filepath.Join(outside, "allowed.txt")
+	os.WriteFile(allowedFile, []byte("allowed content"), 0644)
+
+	denied, err := os.MkdirTemp("", "fs_denied_*")
+	if err != nil {
+		t.Fatalf("mkdir denied: %v", err)
+	}
+	defer os.RemoveAll(denied)
+	deniedFile := filepath.Join(denied, "secret.txt")
+	os.WriteFile(deniedFile, []byte("secret"), 0644)
+
+	readTool := ReadTool(root, outside)
+
+	t.Run("absolute path inside allowed root is readable", func(t *testing.T) {
+		result, err := readTool.Execute(context.Background(), map[string]any{
+			"path": allowedFile,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(result, "allowed content") {
+			t.Errorf("expected allowed content, got: %s", result)
+		}
+	})
+
+	t.Run("absolute path outside both workspace and allowed roots is rejected", func(t *testing.T) {
+		_, err := readTool.Execute(context.Background(), map[string]any{
+			"path": deniedFile,
+		})
+		if err == nil {
+			t.Fatal("expected error for path outside workspace and allow-list")
+		}
+		if !strings.Contains(err.Error(), "outside workspace") {
+			t.Errorf("expected 'outside workspace' error, got: %v", err)
+		}
+	})
+
+	t.Run("relative path outside workspace is rejected even with allow-list", func(t *testing.T) {
+		_, err := readTool.Execute(context.Background(), map[string]any{
+			"path": "../escape.txt",
+		})
+		if err == nil {
+			t.Fatal("expected error for relative path outside workspace")
 		}
 	})
 }

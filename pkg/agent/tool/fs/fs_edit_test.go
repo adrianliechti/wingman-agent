@@ -271,6 +271,62 @@ func TestEditTool(t *testing.T) {
 		}
 	})
 
+	t.Run("edit replace_all replaces every occurrence", func(t *testing.T) {
+		testFile := filepath.Join(tmpDir, "replace_all.txt")
+		os.WriteFile(testFile, []byte("foo bar foo baz foo"), 0644)
+
+		_, err := ReadTool(root).Execute(context.Background(), map[string]any{
+			"path": "replace_all.txt",
+		})
+		if err != nil {
+			t.Fatalf("unexpected read error: %v", err)
+		}
+
+		_, err = editTool.Execute(context.Background(), map[string]any{
+			"path":        "replace_all.txt",
+			"old_string":  "foo",
+			"new_string":  "qux",
+			"replace_all": true,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		content, _ := os.ReadFile(testFile)
+		if string(content) != "qux bar qux baz qux" {
+			t.Errorf("expected all 'foo' replaced with 'qux', got: %s", content)
+		}
+	})
+
+	t.Run("edit rejects file exceeding MaxEditFileBytes", func(t *testing.T) {
+		testFile := filepath.Join(tmpDir, "huge.txt")
+		// 1 byte over the cap. Write a sparse-friendly pattern.
+		huge := strings.Repeat("a", MaxEditFileBytes+1)
+		os.WriteFile(testFile, []byte(huge), 0644)
+
+		_, err := editTool.Execute(context.Background(), map[string]any{
+			"path":       "huge.txt",
+			"old_string": "a",
+			"new_string": "b",
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "capped at") {
+			t.Fatalf("expected size cap error, got: %v", err)
+		}
+	})
+
+	t.Run("edit on non-existent file with non-empty old_string fails", func(t *testing.T) {
+		_, err := editTool.Execute(context.Background(), map[string]any{
+			"path":       "does_not_exist.txt",
+			"old_string": "something",
+			"new_string": "else",
+		})
+
+		if err == nil {
+			t.Fatal("expected error for non-existent file with non-empty old_string")
+		}
+	})
+
 	t.Run("edit does not fuzzy match whitespace-only old string", func(t *testing.T) {
 		testFile := filepath.Join(tmpDir, "whitespace_old.txt")
 		os.WriteFile(testFile, []byte("hello\nworld"), 0644)
