@@ -222,7 +222,7 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 	// Show the skill picker while the user is still typing the slash command
 	// (no whitespace yet — once they add a space we treat the rest as args).
 	const skillMatch = input.match(/^\/(\S*)$/);
-	const showSkills = !!skillMatch && !isActive;
+	const showSkills = !!skillMatch;
 	const skillQuery = skillMatch ? skillMatch[1] : "";
 
 	// One-shot: jump to bottom on the first paint with restored history (not
@@ -347,7 +347,10 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 
 	const handleSubmit = useCallback(() => {
 		const text = input.trim();
-		if ((!text && images.length === 0) || isActive) return;
+		if (!text && images.length === 0) return;
+		// While a turn is in flight, this submit queues onto the server side.
+		// The agent will pick it up at its next safe boundary and respond as
+		// part of the same Send loop — visually it lands as a new turn.
 		submitPendingRef.current = true;
 		onSend(
 			text,
@@ -358,7 +361,7 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 		setFiles([]);
 		setImages([]);
 		textareaRef.current?.focus();
-	}, [input, isActive, onSend, files, images]);
+	}, [input, onSend, files, images]);
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
@@ -430,20 +433,21 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 				// Pre-fill the slash command and let the user type arguments.
 				setInput(`/${s.name} `);
 				textareaRef.current?.focus();
-			} else if (!isActive) {
-				// No args — fire the skill immediately.
-				submitPendingRef.current = true;
-				onSend(
-					`/${s.name}`,
-					files.length > 0 ? files : undefined,
-					images.length > 0 ? images.map((i) => i.dataUrl) : undefined,
-				);
-				setInput("");
-				setFiles([]);
-				setImages([]);
+				return;
 			}
+			// No args — fire the skill immediately. The server queues onto an
+			// in-flight turn when one is running.
+			submitPendingRef.current = true;
+			onSend(
+				`/${s.name}`,
+				files.length > 0 ? files : undefined,
+				images.length > 0 ? images.map((i) => i.dataUrl) : undefined,
+			);
+			setInput("");
+			setFiles([]);
+			setImages([]);
 		},
-		[isActive, onSend, files, images],
+		[onSend, files, images],
 	);
 
 	return (
@@ -621,33 +625,56 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 							>
 								<Paperclip size={14} />
 							</button>
-							<button
-								type="button"
-								className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
-									isActive || input.trim() || images.length > 0
-										? "text-fg-muted hover:text-fg hover:bg-bg-hover"
-										: "text-fg-dim opacity-40 cursor-not-allowed"
-								}`}
-								onClick={isActive ? onCancel : handleSubmit}
-								disabled={!isActive && !input.trim() && images.length === 0}
-								title={isActive ? "Stop (Esc)" : "Send (Enter)"}
-							>
-								{isActive ? (
-									<>
-										<LoaderCircle
-											size={14}
-											className="animate-spin group-hover:hidden"
-										/>
-										<Square
-											size={10}
-											fill="currentColor"
-											className="hidden group-hover:block"
-										/>
-									</>
-								) : (
-									<ArrowUp size={14} />
-								)}
-							</button>
+							{(() => {
+								// Button modes: if the input has content, the primary
+								// action is Send — which queues onto an in-flight turn
+								// when one is running. Otherwise, while a turn is
+								// active, the button stops it. Idle + empty = disabled.
+								const hasInput =
+									input.trim() !== "" || images.length > 0;
+								const mode: "send" | "stop" | "disabled" = hasInput
+									? "send"
+									: isActive
+										? "stop"
+										: "disabled";
+								return (
+									<button
+										type="button"
+										className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
+											mode === "disabled"
+												? "text-fg-dim opacity-40 cursor-not-allowed"
+												: "text-fg-muted hover:text-fg hover:bg-bg-hover"
+										}`}
+										onClick={
+											mode === "stop" ? onCancel : handleSubmit
+										}
+										disabled={mode === "disabled"}
+										title={
+											mode === "stop"
+												? "Stop (Esc)"
+												: mode === "send" && isActive
+													? "Queue (Enter)"
+													: "Send (Enter)"
+										}
+									>
+										{mode === "stop" ? (
+											<>
+												<LoaderCircle
+													size={14}
+													className="animate-spin group-hover:hidden"
+												/>
+												<Square
+													size={10}
+													fill="currentColor"
+													className="hidden group-hover:block"
+												/>
+											</>
+										) : (
+											<ArrowUp size={14} />
+										)}
+									</button>
+								);
+							})()}
 							</div>
 						</div>
 					</div>

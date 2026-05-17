@@ -74,30 +74,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleSend(sess *Session, msg ClientMessage) {
-	// Server-lifetime ctx, not the WS request ctx: a tab refresh or WS
-	// reconnect must not abort an in-flight agent turn.
-	streamCtx, cancel := context.WithCancel(s.ctx)
-	defer cancel()
-
-	// agent.Send is not concurrent-safe per agent (mutates Messages); the
-	// stream-slot claim must be atomic to avoid two WS connections racing
-	// past a check-then-act guard.
-	sess.mu.Lock()
-	if sess.streamCancel != nil {
-		sess.mu.Unlock()
-		sess.send(Frame{Type: EvtError, Message: "session is busy"})
-		return
-	}
-	sess.streamCancel = cancel
-	sess.mu.Unlock()
-
-	defer func() {
-		sess.mu.Lock()
-		sess.streamCancel = nil
-		sess.mu.Unlock()
-	}()
-
+func (s *Server) buildInput(msg ClientMessage) []agent.Content {
 	var input []agent.Content
 
 	if msg.Text != "" {
@@ -116,9 +93,38 @@ func (s *Server) handleSend(sess *Session, msg ClientMessage) {
 		input = append(input, agent.Content{File: &agent.File{Data: img}})
 	}
 
+	return input
+}
+
+func (s *Server) handleSend(sess *Session, msg ClientMessage) {
+	// Server-lifetime ctx, not the WS request ctx: a tab refresh or WS
+	// reconnect must not abort an in-flight agent turn.
+	streamCtx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+
+	input := s.buildInput(msg)
+
+	// Send returns nil if a turn is already running — the input was queued
+	// onto it and will be drained at the next safe boundary inside the
+	// existing loop. Nothing else for this handler to do.
+	stream := sess.Agent.Send(streamCtx, input)
+	if stream == nil {
+		return
+	}
+
+	sess.mu.Lock()
+	sess.streamCancel = cancel
+	sess.mu.Unlock()
+
+	defer func() {
+		sess.mu.Lock()
+		sess.streamCancel = nil
+		sess.mu.Unlock()
+	}()
+
 	sess.setPhase("thinking")
 
-	for evMsg, err := range sess.Agent.Send(streamCtx, input) {
+	for evMsg, err := range stream {
 		if err != nil {
 			text := err.Error()
 			if errors.Is(err, context.Canceled) {

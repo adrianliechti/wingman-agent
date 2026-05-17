@@ -49,7 +49,6 @@ type Config struct {
 	Model        func() string
 	Effort       func() string
 	Tools        func() []tool.Tool
-	Reasoning    func() bool
 	Instructions func() string
 
 	Hooks hook.Hooks

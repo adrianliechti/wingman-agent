@@ -69,4 +69,7 @@ func (sess *Session) cancel() {
 	if cancel != nil {
 		cancel()
 	}
+	// The agent's Send-loop defer clears its pending-input queue on exit,
+	// so cancelling the context also discards anything that had been queued
+	// onto this turn — no separate flush needed.
 }

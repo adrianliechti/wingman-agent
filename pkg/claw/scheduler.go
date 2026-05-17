@@ -100,9 +100,19 @@ func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent)
 func (c *Claw) runScheduledTask(ctx context.Context, name string, ma *managedAgent, prompt string) {
 	input := []agent.Content{{Text: prompt}}
 
+	// If the agent is mid-turn on user work, don't queue the scheduled
+	// prompt onto it — that would mix system-injected instructions into the
+	// user's conversation. Skip this firing; the scheduler will run again
+	// at the next interval.
+	stream := ma.agent.Send(ctx, input)
+	if stream == nil {
+		log.Printf("scheduler %s: agent busy, skipping run", name)
+		return
+	}
+
 	var result strings.Builder
 
-	for msg, err := range ma.agent.Send(ctx, input) {
+	for msg, err := range stream {
 		if err != nil {
 			log.Printf("scheduler %s: error: %v", name, err)
 			return

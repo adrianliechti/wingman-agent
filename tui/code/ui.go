@@ -208,7 +208,9 @@ func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 
-	if event.Key() == tcell.KeyEnter && !a.isStreaming() {
+	if event.Key() == tcell.KeyEnter {
+		// Always allow submit — while a stream is in flight, the agent will
+		// queue the input onto the running turn (see Agent.Send).
 		a.submitInput()
 		return nil
 	}
@@ -422,6 +424,20 @@ func (a *App) showError(title string, err error) {
 	fmt.Fprint(a.chatView, a.formatError(title, err.Error()))
 }
 
+// Exact-match TUI commands that may not run mid-stream. Kept in sync with the
+// switch in submitInput.
+func isBuiltinCommand(query string) bool {
+	switch query {
+	case "/quit", "/clear", "/resume", "/help",
+		"/models", "/model", "/effort",
+		"/plan", "/agent",
+		"/rewind", "/diff", "/problems",
+		"/copy", "/paste":
+		return true
+	}
+	return false
+}
+
 func (a *App) countPendingImages() int {
 	count := 0
 
@@ -435,13 +451,18 @@ func (a *App) countPendingImages() int {
 }
 
 func (a *App) submitInput() {
-	if a.phase != PhaseIdle {
-		return
-	}
-
 	query := strings.TrimSpace(a.input.GetText())
 
 	if query == "" {
+		return
+	}
+
+	// Built-in slash commands mutate TUI state (modals, pickers, rewind) and
+	// only make sense between turns. While streaming, ignore them so the
+	// user can't accidentally pop a modal mid-response. Regular messages and
+	// skill invocations fall through to the Send path, which queues onto
+	// the running turn when one is active.
+	if a.phase != PhaseIdle && isBuiltinCommand(query) {
 		return
 	}
 
@@ -832,6 +853,13 @@ func (a *App) updateStatusBar() {
 	}
 
 	parts = append(parts, fmt.Sprintf("[%s]%s[-]", t.Cyan, code.ModelName(a.agent.Model())))
+
+	if a.agent.Config.Effort != nil {
+		if effort := a.agent.Config.Effort(); effort != "" {
+			parts = append(parts, fmt.Sprintf("[%s]%s[-]", t.Cyan, strings.ToUpper(effort[:1])+effort[1:]))
+		}
+	}
+
 	parts = append(parts, fmt.Sprintf("[%s]%s[-]", t.Yellow, modeLabel))
 
 	a.statusBar.SetText(strings.Join(parts, " • "))

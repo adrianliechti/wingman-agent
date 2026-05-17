@@ -231,7 +231,15 @@ func (c *Claw) handleMessage(ctx context.Context, msg channel.Message) {
 	input := []agent.Content{{Text: msg.Content}}
 	name := nameFromChatID(msg.ChatID)
 
-	for msg, err := range ma.agent.Send(ctx, input) {
+	// Send returns nil if this agent already has a turn in flight — the
+	// input was queued onto it. The active loop owns the response stream;
+	// nothing for this handler to do.
+	turn := ma.agent.Send(ctx, input)
+	if turn == nil {
+		return
+	}
+
+	for msg, err := range turn {
 		if err != nil {
 			fmt.Fprintf(stream, "\nerror: %v", err)
 			break

@@ -49,6 +49,16 @@ func (a *App) streamResponse(input []agent.Content) {
 
 	streamCtx, cancel := context.WithCancel(a.ctx)
 
+	// Send returns nil if a turn is already running for this agent — the
+	// input was queued onto it and the in-flight loop will pick it up at
+	// its next safe boundary. Bail out without touching streamCancel /
+	// phase / commit, since the active stream owns those.
+	stream := a.agent.Send(streamCtx, input)
+	if stream == nil {
+		cancel()
+		return
+	}
+
 	a.streamMu.Lock()
 	a.streamCancel = cancel
 	a.streamMu.Unlock()
@@ -75,7 +85,7 @@ func (a *App) streamResponse(input []agent.Content) {
 
 	a.setPhase(PhaseThinking)
 
-	for msg, err := range a.agent.Send(streamCtx, input) {
+	for msg, err := range stream {
 		if err != nil {
 			streamErr = err
 			break

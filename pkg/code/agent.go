@@ -50,7 +50,6 @@ func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
 	}
 
 	sessionCfg.Tools = a.tools
-	sessionCfg.Reasoning = func() bool { return a.PlanMode }
 	sessionCfg.Instructions = a.Instructions
 
 	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,

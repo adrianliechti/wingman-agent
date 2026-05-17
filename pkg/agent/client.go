@@ -15,7 +15,6 @@ import (
 type request struct {
 	model        string
 	effort       string
-	reasoning    bool
 	instructions string
 	messages     []Message
 	tools        []tool.Tool
@@ -40,17 +39,10 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		Truncation: responses.ResponseNewParamsTruncationAuto,
 	}
 
-	if r.effort != "" || r.reasoning {
+	if r.effort != "" {
 		rp := responses.ReasoningParam{}
 
-		if r.effort != "" {
-			rp.Effort = shared.ReasoningEffort(r.effort)
-		}
-
-		if r.reasoning {
-			rp.Summary = responses.ReasoningSummaryAuto
-		}
-
+		rp.Effort = shared.ReasoningEffort(r.effort)
 		params.Reasoning = rp
 	}
 
