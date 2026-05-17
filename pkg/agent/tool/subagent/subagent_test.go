@@ -1,6 +1,7 @@
 package subagent_test
 
 import (
+	"strings"
 	"testing"
 
 	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
@@ -38,6 +39,32 @@ func TestAgentToolSchemaIncludesTypedSubagentParameters(t *testing.T) {
 		if !contains(enum, name) {
 			t.Fatalf("agent_type enum = %#v, missing %q", enum, name)
 		}
+	}
+}
+
+func TestAgentToolRejectsInvalidExecuteInputs(t *testing.T) {
+	agentTool := Tools(&agent.Config{})[0]
+
+	cases := []struct {
+		name     string
+		args     map[string]any
+		wantSub  string
+	}{
+		{"missing description", map[string]any{"prompt": "p", "agent_type": "explore"}, "description is required"},
+		{"blank description", map[string]any{"description": "   ", "prompt": "p", "agent_type": "explore"}, "description is required"},
+		{"missing prompt", map[string]any{"description": "d", "agent_type": "explore"}, "prompt is required"},
+		{"blank prompt", map[string]any{"description": "d", "prompt": "\t\n", "agent_type": "explore"}, "prompt is required"},
+		{"missing agent_type", map[string]any{"description": "d", "prompt": "p"}, "agent_type is required"},
+		{"unknown agent_type", map[string]any{"description": "d", "prompt": "p", "agent_type": "ninja"}, "unknown agent_type"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := agentTool.Execute(t.Context(), tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("err = %v, want error containing %q", err, tc.wantSub)
+			}
+		})
 	}
 }
 

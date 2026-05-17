@@ -78,3 +78,47 @@ func TestSearchToolNotRegisteredWithoutWingmanURL(t *testing.T) {
 		t.Fatalf("Tools() returned %d tools, want 0", len(tools))
 	}
 }
+
+func TestSearchToolWhitespaceQueryRejected(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "https://wingman.example")
+	searchTool := Tools()[0]
+
+	_, err := searchTool.Execute(context.Background(), map[string]any{
+		"query": "   \t\n  ",
+	})
+	if err == nil {
+		t.Fatal("expected whitespace-only query to be rejected")
+	}
+}
+
+func TestSearchToolRejectsNonStringDomainEntries(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "https://wingman.example")
+	searchTool := Tools()[0]
+
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{
+			name: "allowed_domains contains number",
+			args: map[string]any{"query": "golang", "allowed_domains": []any{"go.dev", 42}},
+		},
+		{
+			name: "allowed_domains not an array",
+			args: map[string]any{"query": "golang", "allowed_domains": "go.dev"},
+		},
+		{
+			name: "blocked_domains contains bool",
+			args: map[string]any{"query": "golang", "blocked_domains": []any{true}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := searchTool.Execute(context.Background(), tc.args)
+			if err == nil {
+				t.Fatal("expected type-validation error")
+			}
+		})
+	}
+}

@@ -62,6 +62,9 @@ func TestFetchToolValidatesAndNormalizesURL(t *testing.T) {
 	}{
 		{name: "relative rejected", url: "example.com/docs"},
 		{name: "ftp rejected", url: "ftp://example.com/docs"},
+		{name: "no host rejected", url: "https://"},
+		{name: "file scheme rejected", url: "file:///etc/passwd"},
+		{name: "scheme-less with leading whitespace rejected", url: "  example.com  "},
 	}
 
 	for _, tt := range tests {
@@ -74,5 +77,35 @@ func TestFetchToolValidatesAndNormalizesURL(t *testing.T) {
 				t.Fatalf("expected URL validation error")
 			}
 		})
+	}
+}
+
+func TestFetchToolMissingURL(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "https://wingman.example")
+	fetchTool := Tools()[0]
+
+	cases := []map[string]any{
+		{"prompt": "extract"},
+		{"url": "", "prompt": "extract"},
+		{"url": 42, "prompt": "extract"},
+	}
+	for _, args := range cases {
+		_, err := fetchTool.Execute(context.Background(), args)
+		if err == nil || err.Error() != "url is required" {
+			t.Errorf("args=%v: expected 'url is required', got %v", args, err)
+		}
+	}
+}
+
+func TestFetchToolBlankPromptRejected(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "https://wingman.example")
+	fetchTool := Tools()[0]
+
+	_, err := fetchTool.Execute(context.Background(), map[string]any{
+		"url":    "https://example.com",
+		"prompt": "   \t\n",
+	})
+	if err == nil || err.Error() != "prompt is required" {
+		t.Fatalf("expected blank-prompt rejection, got: %v", err)
 	}
 }
