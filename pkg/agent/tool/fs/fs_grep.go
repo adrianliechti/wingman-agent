@@ -130,8 +130,8 @@ func GrepTool(root *os.Root) tool.Tool {
 			beforeContext := 0
 			afterContext := 0
 
-			if c, present, ok := optionalInteger(args, "context"); present {
-				if !ok || c < 0 {
+			if c, present, err := tool.OptionalIntArg(args, "context"); present {
+				if err != nil || c < 0 {
 					return "", fmt.Errorf("context must be a non-negative integer")
 				}
 				contextLines = c
@@ -139,8 +139,8 @@ func GrepTool(root *os.Root) tool.Tool {
 				afterContext = contextLines
 			}
 
-			if c, present, ok := optionalInteger(args, "-C"); present {
-				if !ok || c < 0 {
+			if c, present, err := tool.OptionalIntArg(args, "-C"); present {
+				if err != nil || c < 0 {
 					return "", fmt.Errorf("-C must be a non-negative integer")
 				}
 				contextLines = c
@@ -148,37 +148,37 @@ func GrepTool(root *os.Root) tool.Tool {
 				afterContext = contextLines
 			}
 
-			if bc, present, ok := optionalInteger(args, "before_context"); present {
-				if !ok || bc < 0 {
+			if bc, present, err := tool.OptionalIntArg(args, "before_context"); present {
+				if err != nil || bc < 0 {
 					return "", fmt.Errorf("before_context must be a non-negative integer")
 				}
 				beforeContext = bc
 			}
 
-			if bc, present, ok := optionalInteger(args, "-B"); present {
-				if !ok || bc < 0 {
+			if bc, present, err := tool.OptionalIntArg(args, "-B"); present {
+				if err != nil || bc < 0 {
 					return "", fmt.Errorf("-B must be a non-negative integer")
 				}
 				beforeContext = bc
 			}
 
-			if ac, present, ok := optionalInteger(args, "after_context"); present {
-				if !ok || ac < 0 {
+			if ac, present, err := tool.OptionalIntArg(args, "after_context"); present {
+				if err != nil || ac < 0 {
 					return "", fmt.Errorf("after_context must be a non-negative integer")
 				}
 				afterContext = ac
 			}
 
-			if ac, present, ok := optionalInteger(args, "-A"); present {
-				if !ok || ac < 0 {
+			if ac, present, err := tool.OptionalIntArg(args, "-A"); present {
+				if err != nil || ac < 0 {
 					return "", fmt.Errorf("-A must be a non-negative integer")
 				}
 				afterContext = ac
 			}
 
 			headLimit := DefaultGrepLimit
-			if hl, present, ok := optionalInteger(args, "head_limit"); present {
-				if !ok || hl < 0 {
+			if hl, present, err := tool.OptionalIntArg(args, "head_limit"); present {
+				if err != nil || hl < 0 {
 					return "", fmt.Errorf("head_limit must be a non-negative integer")
 				}
 				headLimit = hl
@@ -191,8 +191,8 @@ func GrepTool(root *os.Root) tool.Tool {
 			}
 
 			resultOffset := 0
-			if offset, present, ok := optionalInteger(args, "offset"); present {
-				if !ok || offset < 0 {
+			if offset, present, err := tool.OptionalIntArg(args, "offset"); present {
+				if err != nil || offset < 0 {
 					return "", fmt.Errorf("offset must be a non-negative integer")
 				}
 				resultOffset = offset

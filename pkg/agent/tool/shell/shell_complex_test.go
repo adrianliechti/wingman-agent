@@ -203,6 +203,17 @@ func TestComplex_IntegerTimeout(t *testing.T) {
 	}
 }
 
+func TestComplex_FractionalTimeoutRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+	_, err := executeShell(context.Background(), tmpDir, nil, map[string]any{
+		"command": "echo ok",
+		"timeout": 1.5,
+	})
+	if err == nil || !strings.Contains(err.Error(), "timeout must be an integer") {
+		t.Fatalf("expected timeout validation error, got: %v", err)
+	}
+}
+
 func TestComplex_NonPositiveTimeoutUsesDefault(t *testing.T) {
 	tmpDir := t.TempDir()
 	result, err := executeShell(context.Background(), tmpDir, nil, map[string]any{

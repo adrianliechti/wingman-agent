@@ -92,13 +92,6 @@ func EditTool(root *os.Root) tool.Tool {
 					return "", fmt.Errorf("cannot create or replace empty file %s: file already has content", pathArg)
 				}
 
-				dir := filepath.Dir(normalizedPath)
-				if dir != "." && dir != "" {
-					if err := root.MkdirAll(dir, 0755); err != nil {
-						return "", pathError("create directory", pathArg, normalizedPath, workingDir, err)
-					}
-				}
-
 				finalContent := bom + restoreLineEndings(normalizedNewText, originalEnding)
 				if err := writeRootFile(root, normalizedPath, finalContent); err != nil {
 					return "", pathError("write file", pathArg, normalizedPath, workingDir, err)
@@ -181,6 +174,13 @@ func EditTool(root *os.Root) tool.Tool {
 }
 
 func writeRootFile(root *os.Root, path, content string) error {
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		if err := root.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+
 	outFile, err := root.Create(path)
 	if err != nil {
 		return err

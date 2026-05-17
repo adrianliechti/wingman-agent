@@ -1,4 +1,4 @@
-package fetch
+package webfetch
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 )
 
 func TestFetchTool(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "https://wingman.example")
+
 	fetchTool := Tools()[0]
 
 	if fetchTool.Name != "web_fetch" {
@@ -26,6 +28,8 @@ func TestFetchTool(t *testing.T) {
 }
 
 func TestFetchToolMissingPrompt(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "https://wingman.example")
+
 	fetchTool := Tools()[0]
 
 	_, err := fetchTool.Execute(context.Background(), map[string]any{
@@ -34,6 +38,14 @@ func TestFetchToolMissingPrompt(t *testing.T) {
 
 	if err == nil {
 		t.Error("expected error for missing prompt parameter")
+	}
+}
+
+func TestFetchToolNotRegisteredWithoutWingmanURL(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "")
+
+	if tools := Tools(); len(tools) != 0 {
+		t.Fatalf("Tools() returned %d tools, want 0", len(tools))
 	}
 }
 

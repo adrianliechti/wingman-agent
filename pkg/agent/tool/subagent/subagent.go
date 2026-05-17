@@ -41,12 +41,29 @@ var availableTypes = []string{"general-purpose", "explore", "verification"}
 
 func Tools(cfg *agent.Config) []tool.Tool {
 	description := strings.Join([]string{
-		"Launch a sub-agent for a bounded delegated task. Only the final answer is returned; intermediate tool output stays out of your context.",
-		"- Use for open-ended searches, codebase-wide research, independent verification, or scoped implementation work that can proceed without blocking your next local step.",
-		"- Skip for directed 1-2 tool-call work: use `read`, `glob`, `grep`, or LSP directly when you already know the path, symbol, or exact query.",
-		"- Choose `subagent_type`: `explore` for read-only codebase research, `verification` for checking an implementation, `general-purpose` for multi-step research or implementation. Defaults to `general-purpose`.",
-		"- Fresh sub-agents start with zero conversation context. Brief them like a capable colleague who just joined: goal, relevant paths/symbols, what you already learned or ruled out, allowed edit scope, and expected output shape. Keep prompts concise but complete; ask for a short report when enough.",
-		"- Never delegate synthesis. Use the returned report as input, then make the decision or user-facing summary yourself.",
+		"Launch a new agent to handle complex, multi-step tasks autonomously. The agent runs in a separate context and returns one final message.",
+		"",
+		"Available agent types:",
+		"- general-purpose: Research complex questions, search code, and execute scoped multi-step tasks.",
+		"- explore: Read-only codebase research. Use for broad searches, subsystem mapping, and finding relevant files or symbols.",
+		"- verification: Run checks to verify an implementation. Use after non-trivial changes when direct testing is useful.",
+		"",
+		"When to use:",
+		"- Open-ended searches where you are not confident that one or two direct tool calls will find the answer.",
+		"- Independent research or verification whose intermediate tool output would clutter your context.",
+		"- Scoped implementation or investigation work that can proceed without blocking your next step.",
+		"",
+		"When NOT to use:",
+		"- Reading a specific known file path: use `read` instead.",
+		"- Finding files by a known pattern: use `glob` instead.",
+		"- Searching for a known symbol or string: use `grep` or LSP instead.",
+		"- Synthesis across multiple results: do the synthesis yourself after agents return.",
+		"",
+		"Usage notes:",
+		"- Provide a self-contained prompt; the agent does not have your conversation history.",
+		"- Include relevant paths, symbols, constraints, allowed edit scope, and expected output shape.",
+		"- The `agent_type` parameter is required; choose the narrowest fitting agent type.",
+		"- Agent outputs should generally be trusted; verify only when the task requires direct proof.",
 	}, "\n")
 
 	return []tool.Tool{{
@@ -60,16 +77,14 @@ func Tools(cfg *agent.Config) []tool.Tool {
 			"properties": map[string]any{
 				"description": map[string]any{"type": "string", "description": "Short 3-5 word label for the UI (for example, `Audit auth middleware`)."},
 				"prompt":      map[string]any{"type": "string", "description": "Self-contained task briefing. Include goal, relevant paths/symbols, allowed edit scope, what is out of scope, and the expected report shape."},
-				"subagent_type": map[string]any{
+				"agent_type": map[string]any{
 					"type":        "string",
-					"description": "Agent type to use. `explore` is read-only; `verification` runs checks without editing; `general-purpose` can research or implement within the prompt scope.",
+					"description": "Agent type to use. Must be one of the available agent types.",
 					"enum":        availableTypes,
 				},
-				"model":  map[string]any{"type": "string", "description": "Optional model override for this sub-agent. Omit to inherit the parent model."},
-				"effort": map[string]any{"type": "string", "description": "Optional reasoning effort override for this sub-agent. Omit to inherit the parent effort.", "enum": []string{"low", "medium", "high"}},
 			},
 
-			"required":             []string{"description", "prompt"},
+			"required":             []string{"description", "prompt", "agent_type"},
 			"additionalProperties": false,
 		},
 
@@ -86,31 +101,19 @@ func Tools(cfg *agent.Config) []tool.Tool {
 				return "", fmt.Errorf("prompt is required")
 			}
 
-			subagentName := "general-purpose"
-			if raw, ok := args["subagent_type"].(string); ok && strings.TrimSpace(raw) != "" {
-				subagentName = strings.ToLower(strings.TrimSpace(raw))
+			subagentName, ok := args["agent_type"].(string)
+			if !ok || strings.TrimSpace(subagentName) == "" {
+				return "", fmt.Errorf("agent_type is required")
 			}
+			subagentName = strings.ToLower(strings.TrimSpace(subagentName))
 
 			typ, ok := subagentTypes[subagentName]
 			if !ok {
-				return "", fmt.Errorf("unknown subagent_type %q (available: %s)", subagentName, strings.Join(availableTypes, ", "))
+				return "", fmt.Errorf("unknown agent_type %q (available: %s)", subagentName, strings.Join(availableTypes, ", "))
 			}
 
 			subcfg := cfg.Derive()
 			subcfg.Instructions = func() string { return typ.Instructions }
-
-			if model, ok := args["model"].(string); ok && strings.TrimSpace(model) != "" {
-				v := strings.TrimSpace(model)
-				subcfg.Model = func() string { return v }
-			}
-
-			if effort, ok := args["effort"].(string); ok && strings.TrimSpace(effort) != "" {
-				v := strings.ToLower(strings.TrimSpace(effort))
-				if !validEffort(v) {
-					return "", fmt.Errorf("effort must be low, medium, or high")
-				}
-				subcfg.Effort = func() string { return v }
-			}
 
 			subcfg.Tools = func() []tool.Tool {
 				if cfg.Tools == nil {
@@ -162,10 +165,11 @@ func classifyEffect(args map[string]any) tool.Effect {
 		return tool.EffectDynamic
 	}
 
-	subagentName := "general-purpose"
-	if raw, ok := args["subagent_type"].(string); ok && strings.TrimSpace(raw) != "" {
-		subagentName = strings.ToLower(strings.TrimSpace(raw))
+	subagentName, ok := args["agent_type"].(string)
+	if !ok || strings.TrimSpace(subagentName) == "" {
+		return tool.EffectDynamic
 	}
+	subagentName = strings.ToLower(strings.TrimSpace(subagentName))
 
 	if subagentName == "explore" {
 		return tool.EffectReadOnly
@@ -242,14 +246,5 @@ func allowVerificationTool(t tool.Tool) bool {
 		return false
 	default:
 		return true
-	}
-}
-
-func validEffort(effort string) bool {
-	switch effort {
-	case "low", "medium", "high":
-		return true
-	default:
-		return false
 	}
 }

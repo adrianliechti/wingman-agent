@@ -3,7 +3,6 @@ package lsp
 import (
 	"context"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,25 +251,6 @@ func absPath(workingDir, path string) string {
 }
 
 func requiredPositiveIntArg(args map[string]any, key string) (int, bool) {
-	switch v := args[key].(type) {
-	case int:
-		return v, v > 0
-	case float64:
-		if v > float64(math.MaxInt) || v < float64(math.MinInt) {
-			return 0, false
-		}
-		if math.Trunc(v) != v {
-			return 0, false
-		}
-		iv := int(v)
-		return iv, iv > 0
-	case int64:
-		if v > int64(math.MaxInt) || v < int64(math.MinInt) {
-			return 0, false
-		}
-		iv := int(v)
-		return iv, iv > 0
-	default:
-		return 0, false
-	}
+	value, ok := tool.IntArg(args, key)
+	return value, ok && value > 0
 }

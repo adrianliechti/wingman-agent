@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"runtime"
@@ -66,7 +65,13 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 		return "", fmt.Errorf("command is required")
 	}
 
-	timeout := shellIntArg(args, "timeout", defaultTimeout)
+	timeout := defaultTimeout
+	if value, present, err := tool.OptionalIntArg(args, "timeout"); present {
+		if err != nil {
+			return "", err
+		}
+		timeout = value
+	}
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
@@ -121,26 +126,6 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 		return truncated, nil
 	}
 }
-
-func shellIntArg(args map[string]any, key string, fallback int) int {
-	switch v := args[key].(type) {
-	case int:
-		return v
-	case int64:
-		if v > int64(math.MaxInt) || v < int64(math.MinInt) {
-			return fallback
-		}
-		return int(v)
-	case float64:
-		if v > float64(math.MaxInt) || v < float64(math.MinInt) {
-			return fallback
-		}
-		return int(v)
-	default:
-		return fallback
-	}
-}
-
 func buildCommand(ctx context.Context, command, workingDir string) *exec.Cmd {
 	var cmd *exec.Cmd
 

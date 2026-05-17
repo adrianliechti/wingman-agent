@@ -16,11 +16,11 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/ask"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fetch"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/search"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/webfetch"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
@@ -72,8 +72,8 @@ func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
 	a.baseTools = slices.Concat(
 		fs.Tools(ws.Root, allowedReadRoots...),
 		shell.Tools(ws.RootPath, elicit),
-		fetch.Tools(),
-		search.Tools(),
+		webfetch.Tools(),
+		websearch.Tools(),
 		ask.Tools(elicit),
 		subagent.Tools(sessionCfg),
 	)

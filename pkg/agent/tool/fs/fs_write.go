@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -64,27 +63,8 @@ func WriteTool(root *os.Root) tool.Tool {
 				return "", pathError("stat file", pathArg, normalizedPath, workingDir, err)
 			}
 
-			dir := filepath.Dir(normalizedPath)
-
-			if dir != "." && dir != "" {
-				if err := root.MkdirAll(dir, 0755); err != nil {
-					return "", pathError("create directory", pathArg, normalizedPath, workingDir, err)
-				}
-			}
-
-			file, err := root.Create(normalizedPath)
-
-			if err != nil {
-				return "", pathError("create file", pathArg, normalizedPath, workingDir, err)
-			}
-
-			if _, err := file.WriteString(content); err != nil {
-				file.Close()
-				return "", fmt.Errorf("failed to write file: %w", err)
-			}
-
-			if err := file.Close(); err != nil {
-				return "", fmt.Errorf("failed to close file: %w", err)
+			if err := writeRootFile(root, normalizedPath, content); err != nil {
+				return "", pathError("write file", pathArg, normalizedPath, workingDir, err)
 			}
 
 			action := "Updated"

@@ -16,8 +16,8 @@ func TestAgentToolSchemaIncludesTypedSubagentParameters(t *testing.T) {
 	if !ok {
 		t.Fatalf("required has type %T", agentTool.Parameters["required"])
 	}
-	if !contains(required, "description") || !contains(required, "prompt") {
-		t.Fatalf("required = %#v, want description and prompt", required)
+	if !contains(required, "description") || !contains(required, "prompt") || !contains(required, "agent_type") {
+		t.Fatalf("required = %#v, want description, prompt, and agent_type", required)
 	}
 
 	properties, ok := agentTool.Parameters["properties"].(map[string]any)
@@ -25,18 +25,18 @@ func TestAgentToolSchemaIncludesTypedSubagentParameters(t *testing.T) {
 		t.Fatalf("properties has type %T", agentTool.Parameters["properties"])
 	}
 
-	subagentType, ok := properties["subagent_type"].(map[string]any)
+	subagentType, ok := properties["agent_type"].(map[string]any)
 	if !ok {
-		t.Fatalf("subagent_type property has type %T", properties["subagent_type"])
+		t.Fatalf("agent_type property has type %T", properties["agent_type"])
 	}
 
 	enum, ok := subagentType["enum"].([]string)
 	if !ok {
-		t.Fatalf("subagent_type enum has type %T", subagentType["enum"])
+		t.Fatalf("agent_type enum has type %T", subagentType["enum"])
 	}
 	for _, name := range []string{"general-purpose", "explore", "verification"} {
 		if !contains(enum, name) {
-			t.Fatalf("subagent_type enum = %#v, missing %q", enum, name)
+			t.Fatalf("agent_type enum = %#v, missing %q", enum, name)
 		}
 	}
 }
@@ -48,11 +48,11 @@ func TestClassifyEffect(t *testing.T) {
 		want tool.Effect
 	}{
 		{"nil args", nil, tool.EffectDynamic},
-		{"default", map[string]any{}, tool.EffectMutates},
-		{"general purpose", map[string]any{"subagent_type": "general-purpose"}, tool.EffectMutates},
-		{"explore", map[string]any{"subagent_type": "explore"}, tool.EffectReadOnly},
-		{"explore trims case", map[string]any{"subagent_type": " Explore "}, tool.EffectReadOnly},
-		{"verification", map[string]any{"subagent_type": "verification"}, tool.EffectMutates},
+		{"missing type", map[string]any{}, tool.EffectDynamic},
+		{"general purpose", map[string]any{"agent_type": "general-purpose"}, tool.EffectMutates},
+		{"explore", map[string]any{"agent_type": "explore"}, tool.EffectReadOnly},
+		{"explore trims case", map[string]any{"agent_type": " Explore "}, tool.EffectReadOnly},
+		{"verification", map[string]any{"agent_type": "verification"}, tool.EffectMutates},
 	}
 
 	for _, tt := range tests {
@@ -80,6 +80,14 @@ func TestAgentToolValidatesRequiredArguments(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "prompt is required") {
 		t.Fatalf("expected prompt validation error, got: %v", err)
+	}
+
+	_, err = agentTool.Execute(context.Background(), map[string]any{
+		"description": "Find auth",
+		"prompt":      "Find auth middleware",
+	})
+	if err == nil || !strings.Contains(err.Error(), "agent_type is required") {
+		t.Fatalf("expected agent_type validation error, got: %v", err)
 	}
 }
 

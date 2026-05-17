@@ -1,23 +1,21 @@
-package fetch
+package webfetch
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"mime/multipart"
-	"net/http"
 	"net/url"
-	"os"
 	"strings"
-	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/wingman"
 )
 
-const maxFetchBytes = 100 * 1024
-
 func Tools() []tool.Tool {
+	client, err := wingman.FromEnv()
+	if err != nil {
+		return nil
+	}
+
 	description := strings.Join([]string{
 		"Fetch a fully formed URL, convert HTML to markdown, and process it with the supplied prompt.",
 		"- Fails for authenticated/private URLs (Google Docs, Confluence, Jira, GitHub private pages); prefer an authenticated MCP tool when available.",
@@ -64,13 +62,7 @@ func Tools() []tool.Tool {
 				return "", err
 			}
 
-			wingmanURL := os.Getenv("WINGMAN_URL")
-
-			if wingmanURL == "" {
-				return "", fmt.Errorf("web_fetch is not available: WINGMAN_URL is not configured")
-			}
-
-			return extractWingman(ctx, wingmanURL, os.Getenv("WINGMAN_TOKEN"), normalizedURL, prompt)
+			return extractWingman(ctx, client, normalizedURL, prompt)
 		},
 	}}
 }
@@ -92,64 +84,14 @@ func normalizeFetchURL(raw string) (string, error) {
 	}
 }
 
-func extractWingman(ctx context.Context, baseURL, token, urlStr, prompt string) (string, error) {
-	endpoint := strings.TrimRight(baseURL, "/") + "/v1/extract"
-
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-
-	if err := writer.WriteField("url", urlStr); err != nil {
-		return "", err
-	}
-
-	if err := writer.WriteField("prompt", prompt); err != nil {
-		return "", err
-	}
-
-	writer.Close()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, &body)
-
+func extractWingman(ctx context.Context, client *wingman.Client, urlStr, prompt string) (string, error) {
+	content, truncated, err := client.Fetch(ctx, urlStr, prompt)
 	if err != nil {
 		return "", err
 	}
 
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("extract API returned HTTP %d", resp.StatusCode)
-	}
-
-	limited := io.LimitReader(resp.Body, maxFetchBytes+1)
-
-	data, err := io.ReadAll(limited)
-
-	if err != nil {
-		return "", err
-	}
-
-	content := strings.TrimSpace(string(data))
-
-	if len(data) > maxFetchBytes {
-		content = content[:maxFetchBytes] + "\n\n[Content truncated at 100KB]"
-	}
-
-	if content == "" {
-		return "", fmt.Errorf("empty response from extract API")
+	if truncated {
+		content += "\n\n[Content truncated at 100KB]"
 	}
 
 	return content, nil

@@ -1,4 +1,4 @@
-package search
+package websearch
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 )
 
 func TestSearchTool(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "https://wingman.example")
+
 	searchTool := Tools()[0]
 
 	if searchTool.Name != "web_search" {
@@ -26,6 +28,8 @@ func TestSearchTool(t *testing.T) {
 }
 
 func TestSearchToolMissingQuery(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "https://wingman.example")
+
 	searchTool := Tools()[0]
 
 	_, err := searchTool.Execute(context.Background(), map[string]any{})
@@ -36,6 +40,8 @@ func TestSearchToolMissingQuery(t *testing.T) {
 }
 
 func TestSearchToolShortQuery(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "https://wingman.example")
+
 	searchTool := Tools()[0]
 
 	_, err := searchTool.Execute(context.Background(), map[string]any{
@@ -48,6 +54,8 @@ func TestSearchToolShortQuery(t *testing.T) {
 }
 
 func TestSearchToolCannotMixDomainFilters(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "https://wingman.example")
+
 	searchTool := Tools()[0]
 
 	_, err := searchTool.Execute(context.Background(), map[string]any{
@@ -61,16 +69,10 @@ func TestSearchToolCannotMixDomainFilters(t *testing.T) {
 	}
 }
 
-func TestSearchToolNoWingmanURL(t *testing.T) {
-	searchTool := Tools()[0]
-
+func TestSearchToolNotRegisteredWithoutWingmanURL(t *testing.T) {
 	t.Setenv("WINGMAN_URL", "")
 
-	_, err := searchTool.Execute(context.Background(), map[string]any{
-		"query": "golang programming",
-	})
-
-	if err == nil {
-		t.Error("expected error when WINGMAN_URL is not set")
+	if tools := Tools(); len(tools) != 0 {
+		t.Fatalf("Tools() returned %d tools, want 0", len(tools))
 	}
 }

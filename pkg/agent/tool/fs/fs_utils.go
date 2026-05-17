@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"io/fs"
-	"math"
 	pathpkg "path"
 	"path/filepath"
 	"runtime"
@@ -173,37 +172,6 @@ func truncateHead(content string) (result string, truncated bool) {
 	}
 
 	return result, truncated
-}
-
-func optionalInt(args map[string]any, key string) (int, bool) {
-	switch v := args[key].(type) {
-	case int:
-		return v, true
-	case int64:
-		if v > int64(math.MaxInt) || v < int64(math.MinInt) {
-			return 0, false
-		}
-		return int(v), true
-	case float64:
-		if v > float64(math.MaxInt) || v < float64(math.MinInt) {
-			return 0, false
-		}
-		if math.Trunc(v) != v {
-			return 0, false
-		}
-		return int(v), true
-	default:
-		return 0, false
-	}
-}
-
-func optionalInteger(args map[string]any, key string) (int, bool, bool) {
-	if _, present := args[key]; !present {
-		return 0, false, true
-	}
-
-	value, ok := optionalInt(args, key)
-	return value, true, ok
 }
 
 func detectLineEnding(content string) string {
@@ -467,4 +435,3 @@ func loadGitignore(fsys fs.FS, domain []string) []gitignore.Pattern {
 
 	return patterns
 }
-

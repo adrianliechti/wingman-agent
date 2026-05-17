@@ -57,8 +57,8 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			}
 
 			limit := 0
-			if l, present, ok := optionalInteger(args, "limit"); present {
-				if !ok {
+			if l, present, err := tool.OptionalIntArg(args, "limit"); present {
+				if err != nil {
 					return "", fmt.Errorf("limit must be a positive integer")
 				}
 				if l <= 0 {
@@ -69,8 +69,8 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 
 			startLine := 1
 
-			if o, present, ok := optionalInteger(args, "offset"); present {
-				if !ok || o <= 0 {
+			if o, present, err := tool.OptionalIntArg(args, "offset"); present {
+				if err != nil || o <= 0 {
 					return "", fmt.Errorf("offset must be a positive 1-based integer")
 				}
 				startLine = o

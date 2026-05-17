@@ -1,21 +1,21 @@
-package search
+package websearch
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"mime/multipart"
-	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/wingman"
 )
 
 func Tools() []tool.Tool {
+	client, err := wingman.FromEnv()
+	if err != nil {
+		return nil
+	}
+
 	currentMonthYear := time.Now().Format("January 2006")
 
 	description := strings.Join([]string{
@@ -71,13 +71,7 @@ func Tools() []tool.Tool {
 				return "", fmt.Errorf("cannot specify both allowed_domains and blocked_domains in the same request")
 			}
 
-			wingmanURL := os.Getenv("WINGMAN_URL")
-
-			if wingmanURL == "" {
-				return "", fmt.Errorf("web_search is not available: WINGMAN_URL is not configured")
-			}
-
-			return searchWingman(ctx, wingmanURL, os.Getenv("WINGMAN_TOKEN"), query, allowedDomains, blockedDomains)
+			return searchWingman(ctx, client, query, allowedDomains, blockedDomains)
 		},
 	}}
 }
@@ -110,84 +104,18 @@ func stringSliceArg(args map[string]any, key string) ([]string, error) {
 	return result, nil
 }
 
-func searchWingman(ctx context.Context, baseURL, token, query string, allowedDomains, blockedDomains []string) (string, error) {
-	endpoint := strings.TrimRight(baseURL, "/") + "/v1/search"
-
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-
-	if err := writer.WriteField("query", query); err != nil {
-		return "", err
-	}
-
-	if len(allowedDomains) > 0 {
-		data, err := json.Marshal(allowedDomains)
-		if err != nil {
-			return "", err
-		}
-		if err := writer.WriteField("allowed_domains", string(data)); err != nil {
-			return "", err
-		}
-	}
-
-	if len(blockedDomains) > 0 {
-		data, err := json.Marshal(blockedDomains)
-		if err != nil {
-			return "", err
-		}
-		if err := writer.WriteField("blocked_domains", string(data)); err != nil {
-			return "", err
-		}
-	}
-
-	writer.Close()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, &body)
-
+func searchWingman(ctx context.Context, client *wingman.Client, query string, allowedDomains, blockedDomains []string) (string, error) {
+	results, text, err := client.Search(ctx, query, allowedDomains, blockedDomains)
 	if err != nil {
 		return "", err
 	}
 
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("search API returned HTTP %d", resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(resp.Body)
-
-	if err != nil {
-		return "", err
-	}
-
-	var structured struct {
-		Results []struct {
-			Title   string `json:"title"`
-			URL     string `json:"url"`
-			Content string `json:"content"`
-		} `json:"results"`
-	}
-
-	if err := json.Unmarshal(data, &structured); err == nil && len(structured.Results) > 0 {
+	if len(results) > 0 {
 		var sb strings.Builder
 
 		fmt.Fprintf(&sb, "Web search results for query: %q\n\n", query)
 
-		for i, r := range structured.Results {
+		for i, r := range results {
 			fmt.Fprintf(&sb, "## %d. %s\n", i+1, r.Title)
 
 			if r.URL != "" {
@@ -202,11 +130,5 @@ func searchWingman(ctx context.Context, baseURL, token, query string, allowedDom
 		return sb.String(), nil
 	}
 
-	result := strings.TrimSpace(string(data))
-
-	if result == "" {
-		return "", fmt.Errorf("empty response from search API")
-	}
-
-	return result, nil
+	return text, nil
 }
