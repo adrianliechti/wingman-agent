@@ -1,8 +1,10 @@
-package text
+package text_test
 
 import (
 	"strings"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 func TestTruncateMiddleEmpty(t *testing.T) {

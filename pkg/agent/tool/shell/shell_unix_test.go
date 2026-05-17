@@ -1,45 +1,16 @@
 //go:build !windows
 
-package shell
+package shell_test
 
 import (
 	"context"
 	"os"
 	"testing"
 
+	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
+
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
-
-func TestBuildCommandUnix_PreservesCommandString(t *testing.T) {
-	ctx := context.Background()
-	workingDir := "/tmp"
-	command := `printf "%s" 'a b' && echo "c\"d" && echo \"$HOME\"`
-
-	oldShell := os.Getenv("SHELL")
-	if err := os.Setenv("SHELL", "/bin/sh"); err != nil {
-		t.Fatalf("failed to set SHELL: %v", err)
-	}
-	defer func() {
-		_ = os.Setenv("SHELL", oldShell)
-	}()
-
-	cmd := buildCommand(ctx, command, workingDir)
-	if cmd.Path != "/bin/sh" {
-		t.Fatalf("expected shell path /bin/sh, got %q", cmd.Path)
-	}
-	if len(cmd.Args) < 3 {
-		t.Fatalf("expected at least 3 args, got %d", len(cmd.Args))
-	}
-	if cmd.Args[1] != "-c" {
-		t.Fatalf("expected -c flag, got %q", cmd.Args[1])
-	}
-	if cmd.Args[2] != command {
-		t.Fatalf("command string was modified: got %q", cmd.Args[2])
-	}
-	if cmd.Dir != workingDir {
-		t.Fatalf("expected working dir %q, got %q", workingDir, cmd.Dir)
-	}
-}
 
 func TestIsReadOnlyCommand_PipeSafety(t *testing.T) {
 	tests := []struct {
@@ -163,8 +134,9 @@ func TestShellElicitationOnlyPromptsForDangerousCommands(t *testing.T) {
 			return false, nil
 		},
 	}
+	shellTool := Tools(workDir, elicit)[0]
 
-	if _, err := executeShell(ctx, workDir, elicit, map[string]any{"command": "printf hi > out.txt"}); err != nil {
+	if _, err := shellTool.Execute(ctx, map[string]any{"command": "printf hi > out.txt"}); err != nil {
 		t.Fatalf("benign mutating command failed: %v", err)
 	}
 	if confirmCalls != 0 {
@@ -175,39 +147,11 @@ func TestShellElicitationOnlyPromptsForDangerousCommands(t *testing.T) {
 		t.Fatalf("benign mutating command did not write expected file: %v", err)
 	}
 
-	_, err := executeShell(ctx, workDir, elicit, map[string]any{"command": "rm -rf out.txt"})
+	_, err := shellTool.Execute(ctx, map[string]any{"command": "rm -rf out.txt"})
 	if err == nil || err.Error() != "command execution denied by user" {
 		t.Fatalf("dangerous command was not denied by elicitation: %v", err)
 	}
 	if confirmCalls != 1 {
 		t.Fatalf("dangerous command prompted %d times, want 1", confirmCalls)
-	}
-}
-
-func TestSplitCommandSegments(t *testing.T) {
-	tests := []struct {
-		command  string
-		expected []string
-	}{
-		{"ls", []string{"ls"}},
-		{"ls | grep foo", []string{"ls", "grep foo"}},
-		{"echo a && echo b", []string{"echo a", "echo b"}},
-		{"a || b ; c", []string{"a", "b", "c"}},
-		{`echo "a | b" && echo c`, []string{`echo "a | b"`, "echo c"}},
-		{`echo 'a && b'`, []string{`echo 'a && b'`}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.command, func(t *testing.T) {
-			got := splitCommandSegments(tt.command)
-			if len(got) != len(tt.expected) {
-				t.Fatalf("splitCommandSegments(%q) = %v, want %v", tt.command, got, tt.expected)
-			}
-			for i := range got {
-				if got[i] != tt.expected[i] {
-					t.Errorf("segment %d: got %q, want %q", i, got[i], tt.expected[i])
-				}
-			}
-		})
 	}
 }

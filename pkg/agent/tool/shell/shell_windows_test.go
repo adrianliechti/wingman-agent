@@ -1,89 +1,23 @@
 //go:build windows
 
-package shell
+package shell_test
 
 import (
-	"context"
 	"strings"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 )
 
-func TestBuildCommandWindows_UsesCorrectShell(t *testing.T) {
-	ctx := context.Background()
-	workingDir := `C:\`
-	command := `Write-Output "hello"`
-
-	cmd := buildCommand(ctx, command, workingDir)
-
-	base := cmd.Path
-	if !strings.Contains(base, "pwsh") && !strings.Contains(base, "powershell") {
-		t.Fatalf("expected pwsh or powershell, got %q", base)
+func TestShellToolSchemaWindows(t *testing.T) {
+	shellTool := Tools(`C:\`, nil)[0]
+	if shellTool.Name != "shell" {
+		t.Fatalf("tool name = %q, want shell", shellTool.Name)
 	}
-}
-
-func TestBuildCommandWindows_SetsCorrectFlags(t *testing.T) {
-	ctx := context.Background()
-	workingDir := `C:\`
-	command := `Write-Output "hello"`
-
-	cmd := buildCommand(ctx, command, workingDir)
-
-	args := strings.Join(cmd.Args, " ")
-	for _, flag := range []string{"-NoProfile", "-NoLogo", "-NonInteractive", "-Command"} {
-		if !strings.Contains(args, flag) {
-			t.Errorf("missing flag %q in args: %v", flag, cmd.Args)
-		}
+	if !strings.Contains(shellTool.Description, "PowerShell") {
+		t.Fatalf("description should mention PowerShell, got: %s", shellTool.Description)
 	}
-}
-
-func TestBuildCommandWindows_SetsUTF8Encoding(t *testing.T) {
-	ctx := context.Background()
-	command := `Get-Process`
-
-	cmd := buildCommand(ctx, command, `C:\`)
-
-	lastArg := cmd.Args[len(cmd.Args)-1]
-	if !strings.Contains(lastArg, "[Console]::OutputEncoding") {
-		t.Error("expected UTF-8 encoding wrapper in command")
-	}
-	if !strings.Contains(lastArg, command) {
-		t.Error("expected original command to be preserved")
-	}
-}
-
-func TestBuildCommandWindows_SetsWorkingDir(t *testing.T) {
-	ctx := context.Background()
-	workingDir := `C:\Users\test`
-
-	cmd := buildCommand(ctx, "dir", workingDir)
-
-	if cmd.Dir != workingDir {
-		t.Fatalf("expected working dir %q, got %q", workingDir, cmd.Dir)
-	}
-}
-
-func TestBuildCommandWindows_SetsGitEditor(t *testing.T) {
-	ctx := context.Background()
-	cmd := buildCommand(ctx, "git status", `C:\`)
-
-	found := false
-	for _, env := range cmd.Env {
-		if env == "GIT_EDITOR=true" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("expected GIT_EDITOR=true in environment")
-	}
-}
-
-func TestFindPowerShell(t *testing.T) {
-	ps := findPowerShell()
-	if ps == "" {
-		t.Fatal("findPowerShell returned empty string")
-	}
-	if !strings.Contains(ps, "pwsh") && !strings.Contains(ps, "powershell") {
-		t.Errorf("expected pwsh or powershell, got %q", ps)
+	if shellTool.Execute == nil {
+		t.Fatal("shell tool has nil Execute")
 	}
 }

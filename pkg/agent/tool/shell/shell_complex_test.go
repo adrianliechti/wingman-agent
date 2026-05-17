@@ -1,22 +1,24 @@
 //go:build !windows
 
-package shell
+package shell_test
 
 import (
 	"context"
 	"strings"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 )
 
 func runShell(t *testing.T, command string) string {
 	t.Helper()
 	tmpDir := t.TempDir()
-	result, err := executeShell(context.Background(), tmpDir, nil, map[string]any{
+	result, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
 		"command": command,
 		"timeout": float64(10),
 	})
 	if err != nil {
-		t.Fatalf("executeShell error: %v", err)
+		t.Fatalf("shell Execute error: %v", err)
 	}
 	return result
 }
@@ -177,7 +179,7 @@ func TestComplex_LargeOutputTruncation(t *testing.T) {
 
 func TestComplex_Timeout(t *testing.T) {
 	tmpDir := t.TempDir()
-	_, err := executeShell(context.Background(), tmpDir, nil, map[string]any{
+	_, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
 		"command": "sleep 30",
 		"timeout": float64(1),
 	})
@@ -191,7 +193,7 @@ func TestComplex_Timeout(t *testing.T) {
 
 func TestComplex_IntegerTimeout(t *testing.T) {
 	tmpDir := t.TempDir()
-	result, err := executeShell(context.Background(), tmpDir, nil, map[string]any{
+	result, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
 		"command": "echo ok",
 		"timeout": 1,
 	})
@@ -205,7 +207,7 @@ func TestComplex_IntegerTimeout(t *testing.T) {
 
 func TestComplex_FractionalTimeoutRejected(t *testing.T) {
 	tmpDir := t.TempDir()
-	_, err := executeShell(context.Background(), tmpDir, nil, map[string]any{
+	_, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
 		"command": "echo ok",
 		"timeout": 1.5,
 	})
@@ -216,7 +218,7 @@ func TestComplex_FractionalTimeoutRejected(t *testing.T) {
 
 func TestComplex_NonPositiveTimeoutUsesDefault(t *testing.T) {
 	tmpDir := t.TempDir()
-	result, err := executeShell(context.Background(), tmpDir, nil, map[string]any{
+	result, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
 		"command": "echo ok",
 		"timeout": 0,
 	})

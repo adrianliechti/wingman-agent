@@ -1,4 +1,4 @@
-package wingman
+package wingman_test
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/wingman"
 )
 
 func TestFromEnv(t *testing.T) {

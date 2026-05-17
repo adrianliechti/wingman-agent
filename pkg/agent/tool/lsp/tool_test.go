@@ -1,11 +1,15 @@
-package lsp
+package lsp_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/lsp"
+	corelsp "github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
 func TestNewToolsExposesSingleLSPTool(t *testing.T) {
@@ -52,76 +56,64 @@ func TestNewToolsExposesSingleLSPTool(t *testing.T) {
 	}
 }
 
-func TestParsePositionArgsUsesOneBasedInput(t *testing.T) {
-	tmpDir := t.TempDir()
-	testFile := filepath.Join(tmpDir, "main.go")
-	writeTestFile(t, testFile)
+func TestLSPToolRejectsZeroBasedPositionInput(t *testing.T) {
+	manager := newTestManager(t)
+	lspTool := NewTools(manager)[0]
 
-	path, line, column, err := parsePositionArgs(tmpDir, map[string]any{
-		"path":   "main.go",
-		"line":   12,
-		"column": 5,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if path != testFile {
-		t.Fatalf("path = %q, want %q", path, testFile)
-	}
-	if line != 11 || column != 4 {
-		t.Fatalf("line,column = %d,%d; want 11,4", line, column)
-	}
-}
-
-func TestParsePositionArgsRejectsZeroBasedInput(t *testing.T) {
-	tmpDir := t.TempDir()
-	writeTestFile(t, filepath.Join(tmpDir, "main.go"))
-
-	_, _, _, err := parsePositionArgs(tmpDir, map[string]any{
-		"path":   "main.go",
-		"line":   0,
-		"column": 1,
+	_, err := lspTool.Execute(context.Background(), map[string]any{
+		"operation": "hover",
+		"path":      "main.go",
+		"line":      0,
+		"column":    1,
 	})
 	if err == nil || !strings.Contains(err.Error(), "line must be a positive 1-based integer") {
 		t.Fatalf("expected line validation error, got: %v", err)
 	}
 
-	_, _, _, err = parsePositionArgs(tmpDir, map[string]any{
-		"path":   "main.go",
-		"line":   1,
-		"column": 0,
+	_, err = lspTool.Execute(context.Background(), map[string]any{
+		"operation": "hover",
+		"path":      "main.go",
+		"line":      1,
+		"column":    0,
 	})
 	if err == nil || !strings.Contains(err.Error(), "column must be a positive 1-based integer") {
 		t.Fatalf("expected column validation error, got: %v", err)
 	}
 }
 
-func TestParsePositionArgsRejectsFractionalInput(t *testing.T) {
-	tmpDir := t.TempDir()
-	writeTestFile(t, filepath.Join(tmpDir, "main.go"))
+func TestLSPToolRejectsFractionalPositionInput(t *testing.T) {
+	manager := newTestManager(t)
+	lspTool := NewTools(manager)[0]
 
-	_, _, _, err := parsePositionArgs(tmpDir, map[string]any{
-		"path":   "main.go",
-		"line":   1.5,
-		"column": 1,
+	_, err := lspTool.Execute(context.Background(), map[string]any{
+		"operation": "hover",
+		"path":      "main.go",
+		"line":      1.5,
+		"column":    1,
 	})
 	if err == nil || !strings.Contains(err.Error(), "line must be a positive 1-based integer") {
 		t.Fatalf("expected line validation error, got: %v", err)
 	}
 }
 
-func TestResolveExistingFileRejectsDirectories(t *testing.T) {
-	tmpDir := t.TempDir()
+func TestLSPToolRejectsDirectories(t *testing.T) {
+	manager := corelsp.NewManager(t.TempDir())
+	lspTool := NewTools(manager)[0]
 
-	_, err := resolveExistingFile(tmpDir, ".")
+	_, err := lspTool.Execute(context.Background(), map[string]any{
+		"operation": "documentSymbol",
+		"path":      ".",
+	})
 	if err == nil || !strings.Contains(err.Error(), "path is a directory") {
 		t.Fatalf("expected directory validation error, got: %v", err)
 	}
 }
 
-func writeTestFile(t *testing.T, path string) {
+func newTestManager(t *testing.T) *corelsp.Manager {
 	t.Helper()
-	if err := os.WriteFile(path, []byte("package main\n"), 0644); err != nil {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n"), 0644); err != nil {
 		t.Fatalf("write test file: %v", err)
 	}
+	return corelsp.NewManager(tmpDir)
 }

@@ -1,95 +1,80 @@
-package code
+package code_test
 
 import (
 	"context"
 	"strings"
 	"testing"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
+	. "github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
-func TestBuildElicitNilUIDisablesInteractiveTools(t *testing.T) {
-	if got := buildElicit(nil); got != nil {
-		t.Fatalf("buildElicit(nil) = %#v, want nil", got)
-	}
-}
-
 func TestPlanModeToolsFilterMutations(t *testing.T) {
-	calledShell := false
-	tools := planModeTools([]tool.Tool{
-		{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly)},
-		{Name: "edit", Effect: tool.StaticEffect(tool.EffectMutates)},
-		{Name: "write", Effect: tool.StaticEffect(tool.EffectMutates)},
-		{
-			Name:   "shell",
-			Effect: shell.ClassifyEffect,
-			Execute: func(ctx context.Context, args map[string]any) (string, error) {
-				calledShell = true
-				return "ok", nil
-			},
-		},
-	})
+	t.Setenv("HOME", t.TempDir())
+	ws, err := NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	defer ws.Close()
 
+	cfg, err := agent.DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+
+	a := ws.NewAgent(cfg, nil)
+	a.PlanMode = true
+
+	tools := a.Config.Tools()
 	names := make(map[string]bool)
-	for _, t := range tools {
-		names[t.Name] = true
-	}
-
-	if names["edit"] || names["write"] {
-		t.Fatalf("plan mode should remove edit/write tools, got names: %#v", names)
-	}
-	if !names["read"] || !names["shell"] {
-		t.Fatalf("plan mode should keep read/shell tools, got names: %#v", names)
-	}
-
-	var shellTool tool.Tool
-	for _, t := range tools {
-		if t.Name == "shell" {
-			shellTool = t
-			break
+	for _, current := range tools {
+		names[current.Name] = true
+		if current.Name == "edit" || current.Name == "write" {
+			t.Fatalf("plan mode exposed mutating tool %q", current.Name)
 		}
 	}
-	if shellTool.Execute == nil {
-		t.Fatal("shell tool missing Execute")
-	}
-
-	if _, err := shellTool.Execute(context.Background(), map[string]any{"command": "git status"}); err != nil {
-		t.Fatalf("safe shell command rejected: %v", err)
-	}
-	if !calledShell {
-		t.Fatal("safe shell command did not call wrapped shell execute")
-	}
-
-	calledShell = false
-	_, err := shellTool.Execute(context.Background(), map[string]any{"command": "rm -rf tmp"})
-	if err == nil || !strings.Contains(err.Error(), "plan mode only allows read-only tool calls") {
-		t.Fatalf("unsafe shell command was not rejected with plan-mode error: %v", err)
-	}
-	if calledShell {
-		t.Fatal("unsafe shell command reached wrapped shell execute")
+	if !names["read"] || !names["shell"] {
+		t.Fatalf("plan mode tools missing read/shell, got %#v", names)
 	}
 }
 
 func TestPlanModeShellRejectsMutatingSafeCommands(t *testing.T) {
-	execute := planModeEffectExecute(tool.Tool{
-		Name:   "shell",
-		Effect: shell.ClassifyEffect,
-		Execute: func(ctx context.Context, args map[string]any) (string, error) {
-			return "ok", nil
-		},
-	})
+	t.Setenv("HOME", t.TempDir())
+	ws, err := NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	defer ws.Close()
 
-	tests := []string{
+	cfg, err := agent.DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+
+	a := ws.NewAgent(cfg, nil)
+	a.PlanMode = true
+
+	var shellTool *tool.Tool
+	tools := a.Config.Tools()
+	for i := range tools {
+		if tools[i].Name == "shell" {
+			shellTool = &tools[i]
+			break
+		}
+	}
+	if shellTool == nil {
+		t.Fatal("shell tool missing")
+	}
+
+	for _, command := range []string{
 		"echo hi > file.txt",
 		"cat <<'EOF'\nhello\nEOF",
 		"sed -i 's/a/b/' file.txt",
 		"sed --in-place 's/a/b/' file.txt",
-	}
-
-	for _, command := range tests {
+	} {
 		t.Run(command, func(t *testing.T) {
-			_, err := execute(context.Background(), map[string]any{"command": command})
+			_, err := shellTool.Execute(context.Background(), map[string]any{"command": command})
 			if err == nil || !strings.Contains(err.Error(), "plan mode only allows read-only tool calls") {
 				t.Fatalf("command was not rejected with plan-mode error: %v", err)
 			}

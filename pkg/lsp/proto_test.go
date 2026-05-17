@@ -1,8 +1,10 @@
-package lsp
+package lsp_test
 
 import (
 	"encoding/json"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
 func TestHoverContents_UnmarshalJSON(t *testing.T) {

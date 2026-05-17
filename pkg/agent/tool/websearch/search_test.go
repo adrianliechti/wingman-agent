@@ -1,8 +1,10 @@
-package websearch
+package websearch_test
 
 import (
 	"context"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/websearch"
 )
 
 func TestSearchTool(t *testing.T) {

@@ -1,7 +1,9 @@
-package fs
+package fs_test
 
 import (
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 )
 
 func TestTools(t *testing.T) {

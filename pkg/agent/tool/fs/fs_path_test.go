@@ -1,4 +1,4 @@
-package fs
+package fs_test
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 )
 
 func TestPathHandlingCrossplatform(t *testing.T) {

@@ -1,4 +1,4 @@
-package fs
+package fs_test
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 )
 
 func TestGlobTool(t *testing.T) {

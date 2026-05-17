@@ -1,4 +1,4 @@
-package fs
+package fs_test
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 )
 
 func TestWriteTool(t *testing.T) {

@@ -1,8 +1,10 @@
-package lsp
+package lsp_test
 
 import (
 	"strings"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
 func diag(line, col, severity int, msg string) Diagnostic {
@@ -82,8 +84,8 @@ func TestDiagnosticTracker_FilterNew_CapsVolume(t *testing.T) {
 
 	result := tracker.FilterNew("file:///test.go", diags)
 
-	if len(result) != maxDiagnosticsPerFile {
-		t.Fatalf("expected %d diagnostics (cap), got %d", maxDiagnosticsPerFile, len(result))
+	if len(result) != 10 {
+		t.Fatalf("expected 10 diagnostics (cap), got %d", len(result))
 	}
 }
 
