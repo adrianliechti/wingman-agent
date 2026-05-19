@@ -17,7 +17,6 @@ const (
 )
 
 func (c *Claw) startScheduler(ctx context.Context, name string, ma *managedAgent) {
-	// Run overdue tasks immediately on startup
 	c.tickScheduler(ctx, name, ma)
 
 	ticker := time.NewTicker(schedulerTick)
@@ -35,7 +34,11 @@ func (c *Claw) startScheduler(ctx context.Context, name string, ma *managedAgent
 
 func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent) {
 	agentDir := c.config.Memory.AgentDir(name)
-	tasks := schedule.LoadTasks(agentDir)
+	tasks, err := schedule.LoadTasksError(agentDir)
+	if err != nil {
+		log.Printf("scheduler %s: failed to load tasks: %v", name, err)
+		return
+	}
 
 	if len(tasks) == 0 {
 		return
@@ -56,8 +59,7 @@ func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent)
 		t.LastRun = &now
 		modified = true
 
-		// Mark completed one-time tasks
-		if _, err := time.Parse(time.RFC3339, t.Schedule); err == nil {
+		if schedule.IsOneTime(t.Schedule) {
 			t.Status = "completed"
 		}
 	}
@@ -66,7 +68,6 @@ func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent)
 		return
 	}
 
-	// Remove completed tasks and save
 	var active []schedule.Task
 
 	for _, t := range tasks {
@@ -75,7 +76,10 @@ func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent)
 		}
 	}
 
-	schedule.SaveTasks(agentDir, active)
+	if err := schedule.SaveTasks(agentDir, active); err != nil {
+		log.Printf("scheduler %s: failed to save tasks: %v", name, err)
+		return
+	}
 
 	if len(duePrompts) == 0 {
 		return
@@ -96,9 +100,19 @@ func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent)
 func (c *Claw) runScheduledTask(ctx context.Context, name string, ma *managedAgent, prompt string) {
 	input := []agent.Content{{Text: prompt}}
 
+	// If the agent is mid-turn on user work, don't queue the scheduled
+	// prompt onto it — that would mix system-injected instructions into the
+	// user's conversation. Skip this firing; the scheduler will run again
+	// at the next interval.
+	stream := ma.agent.Send(ctx, input)
+	if stream == nil {
+		log.Printf("scheduler %s: agent busy, skipping run", name)
+		return
+	}
+
 	var result strings.Builder
 
-	for msg, err := range ma.agent.Send(ctx, input) {
+	for msg, err := range stream {
 		if err != nil {
 			log.Printf("scheduler %s: error: %v", name, err)
 			return

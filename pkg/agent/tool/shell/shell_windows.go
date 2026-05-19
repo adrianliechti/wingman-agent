@@ -14,9 +14,9 @@ func setupProcessGroup(cmd *exec.Cmd) {
 	}
 }
 
-func killProcessGroup(cmd *exec.Cmd) {
+func killProcessGroup(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
-		return
+		return nil
 	}
-	exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprintf("%d", cmd.Process.Pid)).Run()
+	return exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprintf("%d", cmd.Process.Pid)).Run()
 }

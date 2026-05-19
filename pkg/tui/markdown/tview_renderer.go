@@ -13,21 +13,18 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
-// TviewRenderer renders goldmark AST to tview dynamic color format
+// TviewRenderer renders goldmark AST to tview dynamic color format.
 type TviewRenderer struct {
 	theme theme.Theme
 }
 
-// NewTviewRenderer creates a new tview renderer
 func NewTviewRenderer() *TviewRenderer {
 	return &TviewRenderer{
 		theme: theme.Default,
 	}
 }
 
-// RegisterFuncs implements renderer.NodeRenderer
 func (r *TviewRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
-	// Block nodes
 	reg.Register(ast.KindDocument, r.renderDocument)
 	reg.Register(ast.KindHeading, r.renderHeading)
 	reg.Register(ast.KindBlockquote, r.renderBlockquote)
@@ -39,7 +36,6 @@ func (r *TviewRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 	reg.Register(ast.KindThematicBreak, r.renderThematicBreak)
 	reg.Register(ast.KindHTMLBlock, r.renderHTMLBlock)
 
-	// Inline nodes
 	reg.Register(ast.KindText, r.renderText)
 	reg.Register(ast.KindString, r.renderString)
 	reg.Register(ast.KindCodeSpan, r.renderCodeSpan)
@@ -49,7 +45,6 @@ func (r *TviewRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 	reg.Register(ast.KindImage, r.renderImage)
 	reg.Register(ast.KindRawHTML, r.renderRawHTML)
 
-	// GFM extensions
 	reg.Register(east.KindTable, r.renderTable)
 	reg.Register(east.KindTableHeader, r.renderTableHeader)
 	reg.Register(east.KindTableRow, r.renderTableRow)
@@ -66,7 +61,6 @@ func (r *TviewRenderer) renderHeading(w util.BufWriter, source []byte, node ast.
 	n := node.(*ast.Heading)
 
 	if entering {
-		// Add spacing before heading (unless it's the first element)
 		if node.PreviousSibling() != nil {
 			w.WriteString("\n")
 		}
@@ -123,7 +117,6 @@ func (r *TviewRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte, n
 
 		if n.Info != nil {
 			lang = string(n.Info.Segment.Value(source))
-			// Extract just the language, ignore any metadata after space
 			if idx := strings.IndexByte(lang, ' '); idx >= 0 {
 				lang = lang[:idx]
 			}
@@ -151,7 +144,6 @@ func (r *TviewRenderer) renderParagraph(w util.BufWriter, source []byte, node as
 
 func (r *TviewRenderer) renderList(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		// Add spacing before list (unless it's the first element or nested)
 		if node.PreviousSibling() != nil {
 			if _, isListItem := node.Parent().(*ast.ListItem); !isListItem {
 				w.WriteString("\n")
@@ -167,7 +159,6 @@ func (r *TviewRenderer) renderListItem(w util.BufWriter, source []byte, node ast
 		n := node.(*ast.ListItem)
 		parent := n.Parent().(*ast.List)
 
-		// Calculate indent level
 		var indent strings.Builder
 
 		for p := parent.Parent(); p != nil; p = p.Parent() {
@@ -177,7 +168,6 @@ func (r *TviewRenderer) renderListItem(w util.BufWriter, source []byte, node ast
 		}
 
 		if parent.IsOrdered() {
-			// Find index of this item
 			idx := 1
 
 			for c := parent.FirstChild(); c != nil; c = c.NextSibling() {
@@ -320,8 +310,6 @@ func (r *TviewRenderer) renderRawHTML(w util.BufWriter, source []byte, node ast.
 	return ast.WalkContinue, nil
 }
 
-// GFM extension renderers
-
 func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if !entering {
 		w.WriteString("\n")
@@ -329,12 +317,10 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 		return ast.WalkContinue, nil
 	}
 
-	// Add spacing before table
 	if node.PreviousSibling() != nil {
 		w.WriteString("\n")
 	}
 
-	// Collect all rows and cells to calculate column widths
 	table := node.(*east.Table)
 	var rows [][]string
 	var isHeader []bool
@@ -345,7 +331,6 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 		isHeader = append(isHeader, header)
 
 		for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
-			// Extract cell text
 			var cellText strings.Builder
 
 			for child := cell.FirstChild(); child != nil; child = child.NextSibling() {
@@ -354,7 +339,6 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 				} else if str, ok := child.(*ast.String); ok {
 					cellText.Write(str.Value)
 				} else {
-					// For other nodes, try to get text content
 					for c := child.FirstChild(); c != nil; c = c.NextSibling() {
 						if t, ok := c.(*ast.Text); ok {
 							cellText.Write(t.Segment.Value(source))
@@ -367,7 +351,6 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 		rows = append(rows, cells)
 	}
 
-	// Calculate max width for each column
 	colWidths := make([]int, len(table.Alignments))
 
 	for _, row := range rows {
@@ -380,7 +363,6 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 		}
 	}
 
-	// Render with proper padding
 	for rowIdx, row := range rows {
 		for i, cell := range row {
 			if i > 0 {
@@ -396,7 +378,6 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 				w.WriteString(escaped)
 			}
 
-			// Right-pad to column width + 1 trailing space
 			if i < len(colWidths) {
 				padding := colWidths[i] - visibleLen(cell) + 1
 
@@ -408,7 +389,6 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 
 		w.WriteString("\n")
 
-		// Horizontal separator after the header row
 		if isHeader[rowIdx] {
 			for i, width := range colWidths {
 				if i > 0 {
@@ -425,18 +405,16 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 	return ast.WalkSkipChildren, nil
 }
 
+// renderTableHeader, renderTableRow, renderTableCell are no-ops; renderTable handles tables.
 func (r *TviewRenderer) renderTableHeader(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
-	// Handled by renderTable
 	return ast.WalkContinue, nil
 }
 
 func (r *TviewRenderer) renderTableRow(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
-	// Handled by renderTable
 	return ast.WalkContinue, nil
 }
 
 func (r *TviewRenderer) renderTableCell(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
-	// Handled by renderTable
 	return ast.WalkContinue, nil
 }
 

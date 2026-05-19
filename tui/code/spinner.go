@@ -10,7 +10,6 @@ import (
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// Spinner provides an animated status indicator
 type Spinner struct {
 	view     *tview.TextView
 	app      *tview.Application
@@ -23,7 +22,6 @@ type Spinner struct {
 	phase  AppPhase
 }
 
-// NewSpinner creates a new spinner component
 func NewSpinner(app *tview.Application, view *tview.TextView) *Spinner {
 	return &Spinner{
 		view:     view,
@@ -32,7 +30,6 @@ func NewSpinner(app *tview.Application, view *tview.TextView) *Spinner {
 	}
 }
 
-// Start begins the spinner animation with the given phase.
 // Must be called from the UI goroutine (e.g. inside QueueUpdateDraw).
 func (s *Spinner) Start(phase AppPhase) {
 	s.mu.Lock()
@@ -56,7 +53,6 @@ func (s *Spinner) Start(phase AppPhase) {
 	go s.run()
 }
 
-// Stop halts the spinner animation.
 // Must be called from the UI goroutine (e.g. inside QueueUpdateDraw).
 func (s *Spinner) Stop() {
 	s.mu.Lock()
@@ -88,7 +84,6 @@ func (s *Spinner) run() {
 	}
 }
 
-// queueRender schedules a UI update for the spinner frame.
 func (s *Spinner) queueRender() {
 	s.app.QueueUpdateDraw(func() {
 		s.mu.Lock()
@@ -101,7 +96,7 @@ func (s *Spinner) queueRender() {
 	})
 }
 
-// render updates the view text. Must be called with mu held.
+// Caller must hold s.mu.
 func (s *Spinner) render() {
 	config := GetPhaseConfig(s.phase)
 	if config.Message == "" {

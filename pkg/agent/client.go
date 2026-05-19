@@ -26,7 +26,7 @@ type response struct {
 }
 
 func complete(ctx context.Context, client *openai.Client, r *request, yield func(Message, error) bool) (*response, error) {
-	stream := client.Responses.NewStreaming(ctx, responses.ResponseNewParams{
+	params := responses.ResponseNewParams{
 		Model:        r.model,
 		Instructions: openai.String(r.instructions),
 
@@ -37,21 +37,16 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 
 		Store:      openai.Bool(false),
 		Truncation: responses.ResponseNewParamsTruncationAuto,
+	}
 
-		ContextManagement: []responses.ResponseNewParamsContextManagement{{
-			Type:             "compaction",
-			CompactThreshold: openai.Int(200000),
-		}},
+	if r.effort != "" {
+		rp := responses.ReasoningParam{}
 
-		Include: []responses.ResponseIncludable{
-			responses.ResponseIncludableReasoningEncryptedContent,
-		},
+		rp.Effort = shared.ReasoningEffort(r.effort)
+		params.Reasoning = rp
+	}
 
-		Reasoning: responses.ReasoningParam{
-			Summary: responses.ReasoningSummaryAuto,
-			Effort:  shared.ReasoningEffort(r.effort),
-		},
-	})
+	stream := client.Responses.NewStreaming(ctx, params)
 
 	var outputItems []responses.ResponseInputItemUnionParam
 	var usageDelta Usage
@@ -111,9 +106,6 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 				outputItems = append(outputItems, responses.ResponseInputItemUnionParam{
 					OfFunctionCall: &p,
 				})
-
-			case responses.ResponseCompactionItem:
-				outputItems = append(outputItems, compactionEventToInput(item))
 			}
 
 		case responses.ResponseCompletedEvent:

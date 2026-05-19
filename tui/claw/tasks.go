@@ -53,7 +53,6 @@ func (t *TUI) refreshTasks() {
 }
 
 func humanSchedule(sched string) string {
-	// Interval: "every 15m" -> "every 15 min"
 	if strings.HasPrefix(sched, "every ") {
 		d, err := time.ParseDuration(strings.TrimPrefix(sched, "every "))
 		if err != nil {
@@ -84,7 +83,6 @@ func humanSchedule(sched string) string {
 		return fmt.Sprintf("every %s", d)
 	}
 
-	// One-time: ISO timestamp -> "Apr 15, 09:00"
 	if ts, err := time.Parse(time.RFC3339, sched); err == nil {
 		now := time.Now()
 
@@ -101,23 +99,19 @@ func humanSchedule(sched string) string {
 		return ts.Format("Jan 2, 15:04")
 	}
 
-	// Cron: parse common patterns
 	fields := strings.Fields(sched)
 
 	if len(fields) >= 5 {
 		min, hour, dom, _, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
 
-		// "0 9 * * *" -> "daily at 09:00"
 		if dom == "*" && dow == "*" && min != "*" && hour != "*" {
 			return fmt.Sprintf("daily at %s:%s", zeroPad(hour), zeroPad(min))
 		}
 
-		// "0 9 * * 1-5" -> "weekdays at 09:00"
 		if dom == "*" && dow == "1-5" && min != "*" && hour != "*" {
 			return fmt.Sprintf("weekdays at %s:%s", zeroPad(hour), zeroPad(min))
 		}
 
-		// "0 9 * * 1" -> "Mon at 09:00"
 		dayNames := map[string]string{"0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed", "4": "Thu", "5": "Fri", "6": "Sat", "7": "Sun"}
 
 		if dom == "*" && min != "*" && hour != "*" {
@@ -126,7 +120,6 @@ func humanSchedule(sched string) string {
 			}
 		}
 
-		// "*/15 * * * *" -> "every 15 min"
 		if strings.HasPrefix(min, "*/") && hour == "*" && dom == "*" && dow == "*" {
 			return fmt.Sprintf("every %s min", strings.TrimPrefix(min, "*/"))
 		}

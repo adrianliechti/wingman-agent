@@ -12,11 +12,11 @@ import (
 
 const (
 	indent   = "    "
-	barWidth = 4 // "┃ " + padding
+	barWidth = 4
 )
 
 func (t *TUI) contentWidth() int {
-	w := t.chatWidth - len(indent) - barWidth - 4 // 4 for right margin
+	w := t.chatWidth - len(indent) - barWidth - 4
 	if w < 40 {
 		return 40
 	}
@@ -75,4 +75,3 @@ func (t *TUI) writeToolCall(tc *agent.ToolCall) {
 	fmt.Fprintf(t.chatView, "%s[%s]\u2503[-] [%s::b]\u25c8 %s[-::-][%s]%s[-]\n",
 		indent, th.BrBlack, th.Yellow, tc.Name, th.BrBlack, hint)
 }
-

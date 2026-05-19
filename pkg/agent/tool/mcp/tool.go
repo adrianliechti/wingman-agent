@@ -1,11 +1,13 @@
 package mcp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,35 +17,39 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 )
 
+const (
+	// listToolsTimeout bounds the initial ListTools handshake. MCP servers
+	// that hang here block agent startup, so this is intentionally short.
+	listToolsTimeout = 30 * time.Second
+
+	// callToolTimeout caps a single MCP tool invocation. Long enough for
+	// legitimate slow tools (web fetches, builds, queries) without letting a
+	// hung server stall the agent indefinitely.
+	callToolTimeout = 5 * time.Minute
+)
+
 func Tools(ctx context.Context, m *mcp.Manager) ([]tool.Tool, error) {
 	var tools []tool.Tool
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, listToolsTimeout)
 	defer cancel()
 
 	sessions := m.Sessions()
-	names := make([]string, 0, len(sessions))
-	for name := range sessions {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 
-	for _, serverName := range names {
+	for _, serverName := range slices.Sorted(maps.Keys(sessions)) {
 		session := sessions[serverName]
 		result, err := session.ListTools(ctx, nil)
-
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to list tools from MCP server %s: %v\n", serverName, err)
 			continue
 		}
 
-		sort.Slice(result.Tools, func(i, j int) bool {
-			return result.Tools[i].Name < result.Tools[j].Name
+		slices.SortFunc(result.Tools, func(a, b *sdkmcp.Tool) int {
+			return cmp.Compare(a.Name, b.Name)
 		})
 
 		for _, mcpTool := range result.Tools {
-			t := convertTool(serverName, session, *mcpTool)
-			tools = append(tools, t)
+			tools = append(tools, convertTool(serverName, session, *mcpTool))
 		}
 	}
 
@@ -51,39 +57,46 @@ func Tools(ctx context.Context, m *mcp.Manager) ([]tool.Tool, error) {
 }
 
 func convertTool(serverName string, session *sdkmcp.ClientSession, mcpTool sdkmcp.Tool) tool.Tool {
-	prefixedName := fmt.Sprintf("%s_%s", serverName, mcpTool.Name)
-
-	var params map[string]any
-
-	if mcpTool.InputSchema != nil {
-		if schema, ok := mcpTool.InputSchema.(map[string]any); ok {
-			params = schema
-		} else if schemaBytes, err := json.Marshal(mcpTool.InputSchema); err == nil {
-			json.Unmarshal(schemaBytes, &params)
-		}
-	}
-
-	if params == nil {
-		params = map[string]any{
-			"type":       "object",
-			"properties": map[string]any{},
-		}
-	}
-
 	return tool.Tool{
-		Name:        prefixedName,
+		Name:        fmt.Sprintf("%s_%s", serverName, mcpTool.Name),
 		Description: mcpTool.Description,
-
-		Parameters: params,
-
+		Effect:      tool.StaticEffect(tool.EffectMutates),
+		Parameters:  schemaToParams(serverName, mcpTool),
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
 			return callTool(ctx, session, mcpTool.Name, args)
 		},
 	}
 }
 
+// schemaToParams coerces an MCP tool's InputSchema to a JSONSchema-style
+// map[string]any. The SDK may hand us either a map directly or a typed
+// struct; in the latter case we round-trip through JSON. Falls back to an
+// empty object schema (and logs) when conversion fails.
+func schemaToParams(serverName string, mcpTool sdkmcp.Tool) map[string]any {
+	empty := map[string]any{"type": "object", "properties": map[string]any{}}
+
+	if mcpTool.InputSchema == nil {
+		return empty
+	}
+	if schema, ok := mcpTool.InputSchema.(map[string]any); ok {
+		return schema
+	}
+
+	schemaBytes, err := json.Marshal(mcpTool.InputSchema)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: marshal schema for %s_%s: %v\n", serverName, mcpTool.Name, err)
+		return empty
+	}
+	var params map[string]any
+	if err := json.Unmarshal(schemaBytes, &params); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: unmarshal schema for %s_%s: %v\n", serverName, mcpTool.Name, err)
+		return empty
+	}
+	return params
+}
+
 func callTool(ctx context.Context, session *sdkmcp.ClientSession, name string, args map[string]any) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, callToolTimeout)
 	defer cancel()
 
 	result, err := session.CallTool(ctx, &sdkmcp.CallToolParams{

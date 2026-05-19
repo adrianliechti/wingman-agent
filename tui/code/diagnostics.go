@@ -1,11 +1,11 @@
 package code
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,10 +23,6 @@ type fileDiagnostics struct {
 	Warnings    int
 }
 
-// showDiagnosticsView collects diagnostics in the background and displays
-// the results when ready. All output (loading, empty/error state) is
-// rendered inside the modal so the chat view stays free of residue once
-// the user closes it.
 func (a *App) showDiagnosticsView() {
 	go func() {
 		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
@@ -44,7 +40,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 	t := theme.Default
 	a.activeModal = ModalDiagnostics
 
-	// Stats
 	totalErrors, totalWarnings := 0, 0
 	for _, f := range files {
 		totalErrors += f.Errors
@@ -53,7 +48,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 
 	selectedIndex := 0
 
-	// === FILE LIST ===
 	fileListView := tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
@@ -99,7 +93,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 		fileListView.ScrollTo(selectedIndex, 0)
 	}
 
-	// === DIAGNOSTICS CONTENT ===
 	diagContentView := tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
@@ -152,7 +145,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 	renderFileList()
 	renderDiagContent()
 
-	// === BOTTOM BAR ===
 	hintBar := tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft)
@@ -180,7 +172,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 	}
 	updateHintBar()
 
-	// === LAYOUT ===
 	panelsContainer := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(fileListView, 40, 0, true).
 		AddItem(verticalSeparator(t.BrBlack), 1, 0, false).
@@ -196,7 +187,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 		AddItem(nil, rightMargin, 0, false)
 	contentWithMargins.SetBackgroundColor(tcell.ColorDefault)
 
-	// === BANNER (collection error, if any) ===
 	var bannerRow *tview.Flex
 	if collectErr != nil {
 		bannerView := tview.NewTextView().
@@ -222,8 +212,6 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 		AddItem(bottomBar, 0, 1, false).
 		AddItem(nil, inputRightMargin, 0, false)
 	bottomBarWithMargins.SetBackgroundColor(tcell.ColorDefault)
-	// Outer wrapper paints the full row width so the hint/status content sits
-	// on a clean line (no bleed-through from underlying chat content).
 	bottomBarWithMargins.SetDrawFunc(fillRow)
 
 	topSpacer := tview.NewBox().SetBackgroundColor(tcell.ColorDefault)
@@ -233,14 +221,13 @@ func (a *App) showDiagnosticsModal(files []fileDiagnostics, collectErr error) {
 	container := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(topSpacer, 1, 0, false)
 	if bannerRow != nil {
-		container.AddItem(bannerRow, 2, 0, false) // 1 line of text + 1 trailing blank
+		container.AddItem(bannerRow, 2, 0, false)
 	}
 	container.AddItem(contentWithMargins, 0, 1, true).
 		AddItem(statusSpacer, 1, 0, false).
 		AddItem(bottomBarWithMargins, 1, 0, false)
 	container.SetBackgroundColor(tcell.ColorDefault)
 
-	// === INPUT HANDLING ===
 	fileListView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyUp:
@@ -338,81 +325,10 @@ func (a *App) closeDiagnosticsView() {
 }
 
 func (a *App) collectDiagnostics(ctx context.Context) ([]fileDiagnostics, error) {
-	if a.agent.LSP == nil {
-		return nil, nil
-	}
-	if a.agent.Bridge != nil && a.agent.Bridge.IsConnected() {
-		return a.collectBridgeDiagnostics(ctx)
-	}
-	return a.collectLocalDiagnostics(ctx)
-}
-
-func (a *App) collectBridgeDiagnostics(ctx context.Context) ([]fileDiagnostics, error) {
-	result, err := a.agent.Bridge.GetDiagnostics(ctx, "")
-	if err != nil {
-		return nil, err
-	}
-
-	if result == "" || result == "{}" {
-		return nil, nil
-	}
-
-	// Bridge returns workspace diagnostics as { "path": [...diags] }
-	var raw map[string][]json.RawMessage
-	if err := json.Unmarshal([]byte(result), &raw); err != nil {
-		return nil, nil
-	}
-
-	workDir := a.agent.LSP.WorkingDir()
+	workDir := a.agent.RootPath
 	var files []fileDiagnostics
 
-	for path, rawDiags := range raw {
-		if len(rawDiags) == 0 {
-			continue
-		}
-
-		var diags []lsp.Diagnostic
-		for _, rd := range rawDiags {
-			var d struct {
-				Range struct {
-					Start struct {
-						Line      int `json:"line"`
-						Character int `json:"character"`
-					} `json:"start"`
-					End struct {
-						Line      int `json:"line"`
-						Character int `json:"character"`
-					} `json:"end"`
-				} `json:"range"`
-				Severity string `json:"severity"`
-				Message  string `json:"message"`
-				Source   string `json:"source"`
-			}
-			if err := json.Unmarshal(rd, &d); err != nil {
-				continue
-			}
-
-			severity := lsp.DiagnosticSeverityError
-			switch d.Severity {
-			case "Warning":
-				severity = lsp.DiagnosticSeverityWarning
-			case "Info":
-				severity = lsp.DiagnosticSeverityInformation
-			case "Hint":
-				severity = lsp.DiagnosticSeverityHint
-			}
-
-			diags = append(diags, lsp.Diagnostic{
-				Range: lsp.Range{
-					Start: lsp.Position{Line: d.Range.Start.Line, Character: d.Range.Start.Character},
-					End:   lsp.Position{Line: d.Range.End.Line, Character: d.Range.End.Character},
-				},
-				Severity: severity,
-				Source:   d.Source,
-				Message:  d.Message,
-			})
-		}
-
+	for path, diags := range a.agent.Diagnostics(ctx) {
 		if len(diags) == 0 {
 			continue
 		}
@@ -431,49 +347,11 @@ func (a *App) collectBridgeDiagnostics(ctx context.Context) ([]fileDiagnostics, 
 		files = append(files, fd)
 	}
 
-	sort.Slice(files, func(i, j int) bool {
-		if files[i].Errors != files[j].Errors {
-			return files[i].Errors > files[j].Errors
+	slices.SortFunc(files, func(a, b fileDiagnostics) int {
+		if a.Errors != b.Errors {
+			return cmp.Compare(b.Errors, a.Errors)
 		}
-		return files[i].Path < files[j].Path
-	})
-
-	return files, nil
-}
-
-func (a *App) collectLocalDiagnostics(ctx context.Context) ([]fileDiagnostics, error) {
-	allDiags := a.agent.LSP.CollectAllDiagnostics(ctx)
-	if len(allDiags) == 0 {
-		return nil, nil
-	}
-
-	workDir := a.agent.LSP.WorkingDir()
-	var files []fileDiagnostics
-
-	for path, diags := range allDiags {
-		if len(diags) == 0 {
-			continue
-		}
-
-		fd := fileDiagnostics{
-			Path:        relPath(workDir, path),
-			Diagnostics: diags,
-		}
-		for _, d := range diags {
-			if d.Severity == lsp.DiagnosticSeverityError {
-				fd.Errors++
-			} else if d.Severity == lsp.DiagnosticSeverityWarning {
-				fd.Warnings++
-			}
-		}
-		files = append(files, fd)
-	}
-
-	sort.Slice(files, func(i, j int) bool {
-		if files[i].Errors != files[j].Errors {
-			return files[i].Errors > files[j].Errors
-		}
-		return files[i].Path < files[j].Path
+		return cmp.Compare(a.Path, b.Path)
 	})
 
 	return files, nil

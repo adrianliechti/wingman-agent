@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	clawtui "github.com/adrianliechti/wingman-agent/tui/claw"
 	codetui "github.com/adrianliechti/wingman-agent/tui/code"
 
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/claw"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/channel"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -22,11 +25,17 @@ import (
 	"github.com/adrianliechti/wingman-agent/tui/run/claude"
 	claudedesktop "github.com/adrianliechti/wingman-agent/tui/run/claude-desktop"
 	"github.com/adrianliechti/wingman-agent/tui/run/codex"
+	"github.com/adrianliechti/wingman-agent/tui/run/copilot"
 	"github.com/adrianliechti/wingman-agent/tui/run/gemini"
 	"github.com/adrianliechti/wingman-agent/tui/run/opencode"
 
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
+
+func fatal(err error) {
+	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	os.Exit(1)
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -43,6 +52,9 @@ func main() {
 		return
 	case "server":
 		runServer(ctx)
+		return
+	case "acp":
+		runACP(ctx)
 		return
 	case "claw":
 		runClaw(ctx)
@@ -70,24 +82,36 @@ func main() {
 func runServer(ctx context.Context) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	port := fs.Int("port", 9000, "port to listen on")
+	noBrowser := fs.Bool("no-browser", false, "do not open browser on startup")
 	fs.Parse(os.Args[2:])
 
 	wd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 
-	c, err := code.New(wd, nil)
+	srv, err := server.New(ctx, wd, &server.ServerOptions{
+		Port:      *port,
+		NoBrowser: *noBrowser,
+	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
-	defer c.Close()
+	defer srv.Close()
 
-	if err := server.New(ctx, c, *port).Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	if err := srv.Run(ctx); err != nil {
+		fatal(err)
+	}
+}
+
+func runACP(ctx context.Context) {
+	// stdout is reserved for the ACP JSON-RPC stream — redirect any default
+	// slog writers (used by transitive deps like the openai and mcp SDKs)
+	// to stderr so a stray log line can't corrupt the protocol.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	if err := acp.Run(ctx, os.Stdin, os.Stdout); err != nil {
+		fatal(err)
 	}
 }
 
@@ -97,8 +121,7 @@ func runProxy(ctx context.Context) {
 	fs.Parse(os.Args[2:])
 
 	if err := proxy.Run(ctx, proxy.Options{Port: *port}); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 }
 
@@ -119,6 +142,8 @@ func runRun(ctx context.Context) {
 		err = claudedesktop.Run(ctx, os.Args[3:], nil)
 	case "codex":
 		err = codex.Run(ctx, os.Args[3:], nil)
+	case "copilot":
+		err = copilot.Run(ctx, os.Args[3:], nil)
 	case "gemini":
 		err = gemini.Run(ctx, os.Args[3:], nil)
 	case "opencode":
@@ -131,8 +156,7 @@ func runRun(ctx context.Context) {
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 }
 
@@ -141,24 +165,28 @@ func runTUI(ctx context.Context, sessionID string) {
 
 	wd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 
-	c, err := code.New(wd, nil)
+	cfg, err := agent.DefaultConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
-	defer c.Close()
+
+	ws, err := code.NewWorkspace(wd)
+	if err != nil {
+		fatal(err)
+	}
+	defer ws.Close()
+
+	c := ws.NewAgent(cfg, nil)
+	sessionsDir := filepath.Join(filepath.Dir(ws.MemoryPath), "sessions")
 
 	if sessionID == "latest" {
-		sessions, err := session.List(filepath.Join(filepath.Dir(c.MemoryPath), "sessions"))
+		sessions, err := session.List(sessionsDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
-
 		if len(sessions) > 0 {
 			sessionID = sessions[0].ID
 		} else {
@@ -167,42 +195,36 @@ func runTUI(ctx context.Context, sessionID string) {
 	}
 
 	if sessionID != "" {
-		s, err := session.Load(filepath.Join(filepath.Dir(c.MemoryPath), "sessions"), sessionID)
+		s, err := session.Load(sessionsDir, sessionID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
-
 		c.Messages = s.State.Messages
 		c.Usage = s.State.Usage
 	}
 
 	if err := codetui.New(ctx, c, sessionID).Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 }
 
 func runClaw(ctx context.Context) {
 	cfg, cleanup, err := claw.DefaultConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 	defer cleanup()
 
 	c := claw.New(cfg)
 
 	if err := c.Init(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 
 	cfg.Channels = []channel.Channel{clawtui.New(c)}
 
 	if err := c.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 }
 
@@ -211,13 +233,14 @@ func printHelp(w io.Writer) {
 
 Usage:
   wingman [--resume [id]]      Launch the agent TUI
-  wingman server [-port N]     Run the web UI server
+  wingman server [-port N] [-no-browser]  Run the web UI server
+  wingman acp                  Run as an ACP stdio server
   wingman claw                 Run the claw multi-agent runner
   wingman proxy [-port N]      Run the API proxy + dashboard (requires WINGMAN_URL)
   wingman run <target> [args]  Run an external agent through wingman
 
 Run targets:
-  claude, claude-desktop, codex, gemini, opencode
+  claude, claude-desktop, codex, copilot, gemini, opencode
 
 Flags:
   --resume [id]   Resume the latest (or specified) saved session

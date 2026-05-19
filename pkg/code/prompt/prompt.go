@@ -28,19 +28,33 @@ var sectionSkills string
 //go:embed section_project.txt
 var sectionProject string
 
-//go:embed section_bridge.txt
-var sectionBridge string
+// BoundaryMarker separates the static cacheable prefix from the dynamic
+// per-turn suffix. Plain text (no markdown) so it serves as a deterministic
+// prefix terminator for any caching layer.
+const BoundaryMarker = "--- session context ---"
 
-var sectionTemplates = []struct {
+// Static sections live in the cacheable prefix. They change only when the
+// session's on-disk state changes (AGENTS.md / skill (un)install / memory
+// file add/edit/delete). The caller is responsible for mtime-tracking these
+// so the rendered string is byte-stable across turns when the source files
+// haven't changed.
+var staticTemplates = []struct {
 	title string
 	tmpl  *template.Template
 }{
-	{"Environment", template.Must(template.New("environment").Parse(sectionEnvironment))},
-	{"Memory", template.Must(template.New("memory").Parse(sectionMemory))},
-	{"Session Plan", template.Must(template.New("plan").Parse(sectionPlan))},
-	{"Skills", template.Must(template.New("skills").Parse(sectionSkills))},
 	{"Project Guidelines", template.Must(template.New("project").Parse(sectionProject))},
-	{"Bridge", template.Must(template.New("bridge").Parse(sectionBridge))},
+	{"Skills", template.Must(template.New("skills").Parse(sectionSkills))},
+	{"Memory", template.Must(template.New("memory").Parse(sectionMemory))},
+}
+
+// Dynamic sections sit after the boundary. They change per turn — Date rolls
+// daily; Plan is mode-gated.
+var dynamicTemplates = []struct {
+	title string
+	tmpl  *template.Template
+}{
+	{"Session Plan", template.Must(template.New("plan").Parse(sectionPlan))},
+	{"Environment", template.Must(template.New("environment").Parse(sectionEnvironment))},
 }
 
 type SectionData struct {
@@ -53,21 +67,20 @@ type SectionData struct {
 	MemoryContent       string
 	Skills              string
 	ProjectInstructions string
-	BridgeInstructions  string
 }
 
-// Section is a titled block of the system prompt.
 type Section struct {
 	Title   string
 	Content string
 }
 
-// RenderSections renders all section templates with the given data,
-// returning only non-empty sections.
-func RenderSections(data SectionData) []Section {
+func renderSections(templates []struct {
+	title string
+	tmpl  *template.Template
+}, data SectionData) []Section {
 	var sections []Section
 
-	for _, st := range sectionTemplates {
+	for _, st := range templates {
 		var buf bytes.Buffer
 
 		if err := st.tmpl.Execute(&buf, data); err != nil {
@@ -82,16 +95,38 @@ func RenderSections(data SectionData) []Section {
 	return sections
 }
 
-// BuildInstructions composes a full system prompt from a base prompt and
-// dynamic section data (environment, memory, skills, etc.).
-func BuildInstructions(base string, data SectionData) string {
-	sections := append([]Section{{Content: base}}, RenderSections(data)...)
-	return ComposeSections(sections...)
+// RenderSections returns every renderable section regardless of static/dynamic
+// classification. Retained for tests and callers that need a flat list.
+func RenderSections(data SectionData) []Section {
+	return append(renderSections(staticTemplates, data), renderSections(dynamicTemplates, data)...)
 }
 
-// ComposeSections joins sections into a single system prompt string.
-// Empty sections are skipped. Titled sections get a ## header.
+// BuildInstructions assembles the system prompt with a cacheable static prefix
+// followed by a boundary marker and a dynamic suffix.
+func BuildInstructions(base string, data SectionData) string {
+	var staticParts []Section
+	staticParts = append(staticParts, Section{Content: base})
+	staticParts = append(staticParts, renderSections(staticTemplates, data)...)
+
+	dynamicParts := renderSections(dynamicTemplates, data)
+
+	staticBlock := composeSections(staticParts)
+	dynamicBlock := composeSections(dynamicParts)
+
+	if dynamicBlock == "" {
+		return staticBlock
+	}
+	if staticBlock == "" {
+		return dynamicBlock
+	}
+	return staticBlock + "\n\n" + BoundaryMarker + "\n\n" + dynamicBlock
+}
+
 func ComposeSections(sections ...Section) string {
+	return composeSections(sections)
+}
+
+func composeSections(sections []Section) string {
 	var parts []string
 
 	for _, section := range sections {

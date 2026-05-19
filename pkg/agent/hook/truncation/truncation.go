@@ -4,47 +4,89 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"time"
+	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
-// DefaultMaxBytes is the wire-size cap each entry point applies to tool
-// results. Outputs above this cap are middle-truncated (head + "…N chars
-// truncated…" + tail) so both ends survive.
-const DefaultMaxBytes = 16 * 1024
+// MaxBytes is the default per-tool cap on inline output. Outputs above this
+// size are persisted to a scratch file and replaced with a preview envelope.
+const MaxBytes = 100 * 1024
 
-// New returns a PostToolUse hook that caps tool results at maxBytes via
-// middle truncation. If scratchDir is non-empty, the full untruncated
-// output is saved there and the model is told where to find it, so it can
-// re-read specific ranges instead of re-running the tool.
-func New(maxBytes int, scratchDir string) hook.PostToolUse {
-	return func(ctx context.Context, call tool.ToolCall, result string) (string, error) {
-		if len(result) <= maxBytes {
+// grepMaxBytes is a tighter cap for grep, whose results compound across
+// turns more than other tools.
+const grepMaxBytes = 20 * 1024
+
+const previewBytes = 2 * 1024
+
+// budgetFor returns the per-tool inline output cap.
+func budgetFor(name string) int {
+	if name == "grep" {
+		return grepMaxBytes
+	}
+	return MaxBytes
+}
+
+// New returns a PostToolUse hook that persists oversized tool output and
+// substitutes a preview envelope. Tools that self-cap below their budget
+// pass through untouched.
+func New(scratchDir string) hook.PostToolUse {
+	return func(_ context.Context, call tool.ToolCall, result string) (string, error) {
+		budget := budgetFor(call.Name)
+		if len(result) <= budget {
 			return result, nil
 		}
-
-		totalBytes := len(result)
-		truncated := text.TruncateMiddle(result, maxBytes)
-
-		var notice string
-
-		if scratchDir != "" {
-			name := fmt.Sprintf("result-%d.txt", time.Now().UnixNano())
-			path := filepath.Join(scratchDir, name)
-
-			if err := os.WriteFile(path, []byte(result), 0644); err == nil {
-				notice = fmt.Sprintf("[Output truncated: %d bytes — head and tail kept, middle elided. Full output saved to %s; use `read` on that path to retrieve a specific range.]\n\n", totalBytes, path)
-			}
-		}
-
-		if notice == "" {
-			notice = fmt.Sprintf("[Output truncated: %d bytes — head and tail kept, middle elided. Re-run with a narrower scope if you need the omitted section.]\n\n", totalBytes)
-		}
-
-		return notice + truncated, nil
+		path := writeScratch(scratchDir, call.Name, result)
+		return formatPersisted(len(result), path, result[:previewBytes]), nil
 	}
+}
+
+func writeScratch(scratchDir, toolName, content string) string {
+	if scratchDir == "" {
+		return ""
+	}
+	// os.CreateTemp avoids timestamp collisions under concurrent tool calls.
+	f, err := os.CreateTemp(scratchDir, "result-"+sanitizeName(toolName)+"-*.txt")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if _, err := f.WriteString(content); err != nil {
+		os.Remove(f.Name())
+		return ""
+	}
+	return f.Name()
+}
+
+func formatPersisted(totalBytes int, scratchPath, preview string) string {
+	var b strings.Builder
+	b.WriteString("<persisted-output>\n")
+	fmt.Fprintf(&b, "Output was %d bytes — too large for inline.", totalBytes)
+	if scratchPath != "" {
+		fmt.Fprintf(&b, " Full output saved to: %s", scratchPath)
+	}
+	fmt.Fprintf(&b, "\n\nPreview (first %d bytes):\n\n%s", len(preview), preview)
+	if scratchPath != "" {
+		b.WriteString("\n\nUse `read` on the path above to retrieve specific ranges.")
+	}
+	b.WriteString("\n</persisted-output>")
+	return b.String()
+}
+
+func sanitizeName(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+			out = append(out, c)
+		default:
+			out = append(out, '_')
+		}
+	}
+	if len(out) == 0 {
+		return "tool"
+	}
+	return string(out)
 }

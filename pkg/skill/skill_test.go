@@ -1,12 +1,21 @@
-package skill
+package skill_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"testing/fstest"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
-func TestParseSkillData(t *testing.T) {
-	data := `---
+func TestDiscoverParsesSkillData(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".wingman", "skills", "test-skill")
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
 name: test-skill
 description: A test skill
 when-to-use: When testing
@@ -15,42 +24,53 @@ arguments: [query, file]
 # Test Skill
 
 Do the thing with ${ARGUMENTS}.
-Use ${query} to search in ${file}.`
+Use ${query} to search in ${file}.`), 0644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
 
-	skill, content, err := parseSkillData(data)
+	skills, err := Discover(root)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Discover error: %v", err)
+	}
+	if len(skills) != 1 {
+		t.Fatalf("skills = %#v, want one skill", skills)
 	}
 
-	if skill.Name != "test-skill" {
-		t.Errorf("Name = %q, want %q", skill.Name, "test-skill")
-	}
-	if skill.Description != "A test skill" {
-		t.Errorf("Description = %q, want %q", skill.Description, "A test skill")
-	}
-	if skill.WhenToUse != "When testing" {
-		t.Errorf("WhenToUse = %q, want %q", skill.WhenToUse, "When testing")
+	skill := skills[0]
+	if skill.Name != "test-skill" || skill.Description != "A test skill" || skill.WhenToUse != "When testing" {
+		t.Fatalf("skill metadata = %#v", skill)
 	}
 	if len(skill.Arguments) != 2 || skill.Arguments[0] != "query" || skill.Arguments[1] != "file" {
-		t.Errorf("Arguments = %v, want [query file]", skill.Arguments)
+		t.Fatalf("Arguments = %v, want [query file]", skill.Arguments)
 	}
-	if content == "" {
-		t.Error("expected non-empty content")
+	content, err := skill.GetContent(root)
+	if err != nil {
+		t.Fatalf("GetContent: %v", err)
 	}
 	if content != "# Test Skill\n\nDo the thing with ${ARGUMENTS}.\nUse ${query} to search in ${file}." {
-		t.Errorf("unexpected content: %q", content)
+		t.Fatalf("unexpected content: %q", content)
 	}
 }
 
-func TestParseSkillData_MissingFields(t *testing.T) {
-	data := `---
+func TestDiscoverSkipsSkillDataMissingFields(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".wingman", "skills", "incomplete")
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
 name: incomplete
 ---
-Content here.`
+Content here.`), 0644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
 
-	_, _, err := parseSkillData(data)
-	if err == nil {
-		t.Error("expected error for missing description")
+	skills, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover error: %v", err)
+	}
+	if len(skills) != 0 {
+		t.Fatalf("expected invalid skill to be skipped, got %#v", skills)
 	}
 }
 

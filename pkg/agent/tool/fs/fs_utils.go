@@ -2,9 +2,9 @@ package fs
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"io/fs"
+	"os"
 	pathpkg "path"
 	"path/filepath"
 	"runtime"
@@ -13,12 +13,15 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/sergi/go-diff/diffmatchpatch"
-
 )
 
 const (
 	DefaultMaxLines = 2000
-	DefaultMaxBytes = 30 * 1024 // 30KB
+	DefaultMaxBytes = 30 * 1024
+
+	// MaxEditFileBytes caps the file size that `edit` will operate on.
+	// Larger files should be rewritten with `write` rather than patched.
+	MaxEditFileBytes = 10 * 1024 * 1024
 )
 
 // normalizePath converts an absolute path to a relative path if it starts with the working directory.
@@ -36,21 +39,27 @@ func normalizePath(path, workingDir string) string {
 	return filepath.FromSlash(path)
 }
 
-// normalizePathFS normalizes a path and converts to forward slashes for fs.FS operations.
 func normalizePathFS(path, workingDir string) string {
 	return pathpkg.Clean(filepath.ToSlash(normalizePath(path, workingDir)))
 }
 
-// ensurePathInWorkspace validates that a path is inside the workspace and returns a normalized path.
-func ensurePathInWorkspace(pathArg, workingDir, action string) (string, error) {
-	if isOutsideWorkspace(pathArg, workingDir) {
-		return "", fmt.Errorf("cannot %s: path %q is outside workspace %q", action, pathArg, workingDir)
+// expandHome resolves a leading `~` to the user's home dir. Accepts both
+// `~/...` (forward slash) and `~\...` (Windows backslash) forms.
+func expandHome(path string) string {
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+		return path
 	}
-
-	return normalizePath(pathArg, workingDir), nil
+	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }
 
-// ensurePathInWorkspaceFS validates that a path is inside the workspace and returns a normalized fs.FS path.
 func ensurePathInWorkspaceFS(pathArg, workingDir, action string) (string, error) {
 	if isOutsideWorkspace(pathArg, workingDir) {
 		return "", fmt.Errorf("cannot %s: path %q is outside workspace %q", action, pathArg, workingDir)
@@ -59,8 +68,161 @@ func ensurePathInWorkspaceFS(pathArg, workingDir, action string) (string, error)
 	return normalizePathFS(pathArg, workingDir), nil
 }
 
-// isOutsideWorkspace checks if an absolute path is outside the workspace.
-// Returns true if the path is absolute and doesn't start with workingDir.
+// matchAllowedRoot reports whether absPath falls inside any allowedRoots
+// entry. On match it returns the cleaned root path and the path relative
+// to that root in OS-native form ("" when absPath equals the root itself).
+// Comparison is case-insensitive on macOS/Windows.
+func matchAllowedRoot(absPath string, allowedRoots []string) (rootClean, sub string, ok bool) {
+	cleaned := cleanPath(absPath)
+	cmpPath := normalizePathForComparison(cleaned)
+	sep := string(filepath.Separator)
+
+	for _, allowed := range allowedRoots {
+		allowedClean := cleanPath(allowed)
+		cmpAllowed := normalizePathForComparison(allowedClean)
+		if cmpPath == cmpAllowed {
+			return allowedClean, "", true
+		}
+		if strings.HasPrefix(cmpPath, cmpAllowed+sep) {
+			// Case-folding preserves byte length, so slicing the input by
+			// the allowed-root's byte length yields the original-case tail.
+			return allowedClean, cleaned[len(allowedClean)+1:], true
+		}
+	}
+	return "", "", false
+}
+
+// fileTarget classifies a read/write/edit path. When InWorkspace is true,
+// RelPath holds the root-relative path for os.Root ops. Otherwise AbsPath
+// holds an absolute path inside an allowed root for raw os.* ops.
+type fileTarget struct {
+	InWorkspace bool
+	RelPath     string
+	AbsPath     string
+}
+
+// statFileTarget routes to root.Stat or os.Stat based on the target.
+func statFileTarget(root *os.Root, target fileTarget) (os.FileInfo, error) {
+	if target.InWorkspace {
+		return root.Stat(target.RelPath)
+	}
+	return os.Stat(target.AbsPath)
+}
+
+// readFileTarget routes to root.ReadFile or os.ReadFile.
+func readFileTarget(root *os.Root, target fileTarget) ([]byte, error) {
+	if target.InWorkspace {
+		return root.ReadFile(target.RelPath)
+	}
+	return os.ReadFile(target.AbsPath)
+}
+
+// writeFileTarget routes to the workspace-sandboxed writer or to raw
+// os.MkdirAll + os.WriteFile for allowed roots.
+func writeFileTarget(root *os.Root, target fileTarget, content string) error {
+	if target.InWorkspace {
+		return writeRootFile(root, target.RelPath, content)
+	}
+	if err := os.MkdirAll(filepath.Dir(target.AbsPath), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(target.AbsPath, []byte(content), 0644)
+}
+
+// resolveFileTarget classifies pathArg for read/write/edit. Paths inside
+// workingDir resolve to root-relative form. Absolute paths inside any
+// allowedRoot resolve to absolute form for raw os.* ops. Anything else is
+// rejected.
+func resolveFileTarget(pathArg, workingDir string, allowedRoots []string, action string) (fileTarget, error) {
+	pathArg = expandHome(pathArg)
+
+	if !isOutsideWorkspace(pathArg, workingDir) {
+		return fileTarget{InWorkspace: true, RelPath: normalizePath(pathArg, workingDir)}, nil
+	}
+
+	if !filepath.IsAbs(pathArg) {
+		return fileTarget{}, fmt.Errorf("cannot %s: relative path %q is outside workspace", action, pathArg)
+	}
+
+	if rootClean, sub, ok := matchAllowedRoot(pathArg, allowedRoots); ok {
+		abs := rootClean
+		if sub != "" {
+			abs = filepath.Join(rootClean, sub)
+		}
+		return fileTarget{AbsPath: abs}, nil
+	}
+
+	return fileTarget{}, fmt.Errorf("cannot %s: path %q is outside workspace %q and not in any allowed root", action, pathArg, workingDir)
+}
+
+// searchTarget locates a resolved search root for grep/glob. Workspace
+// paths reuse the workspace root; absolute paths inside an allowed read
+// root open a fresh os.Root scoped to that root. Callers must invoke
+// Close when done. ReportPath formats result paths so workspace results
+// remain workspace-relative while allowed-root results are absolute and
+// remain recognizable to the model.
+type searchTarget struct {
+	Root        *os.Root
+	SearchDirFS string
+	close       func()
+
+	reportPrefix string
+}
+
+func (st *searchTarget) Close() {
+	if st.close != nil {
+		st.close()
+	}
+}
+
+func (st *searchTarget) ReportPath(fsPath string) string {
+	if st.reportPrefix == "" {
+		return filepath.FromSlash(fsPath)
+	}
+	return filepath.Join(st.reportPrefix, filepath.FromSlash(fsPath))
+}
+
+// resolveSearchTarget classifies pathArg for grep/glob. Paths inside
+// workingDir reuse workspaceRoot. Absolute paths inside any allowedReadRoot
+// open a fresh os.Root that the caller must Close. Anything else is rejected.
+func resolveSearchTarget(pathArg, workingDir string, workspaceRoot *os.Root, allowedReadRoots []string, action string) (*searchTarget, error) {
+	pathArg = expandHome(pathArg)
+
+	if !isOutsideWorkspace(pathArg, workingDir) {
+		searchDirFS, err := ensurePathInWorkspaceFS(pathArg, workingDir, action)
+		if err != nil {
+			return nil, err
+		}
+		return &searchTarget{Root: workspaceRoot, SearchDirFS: searchDirFS}, nil
+	}
+
+	if !filepath.IsAbs(pathArg) {
+		return nil, fmt.Errorf("cannot %s: relative path %q is outside workspace", action, pathArg)
+	}
+
+	rootClean, sub, ok := matchAllowedRoot(pathArg, allowedReadRoots)
+	if !ok {
+		return nil, fmt.Errorf("cannot %s: path %q is outside workspace %q and not in any allowed read root", action, pathArg, workingDir)
+	}
+
+	r, err := os.OpenRoot(rootClean)
+	if err != nil {
+		return nil, fmt.Errorf("cannot %s: open allowed root %q: %w", action, rootClean, err)
+	}
+
+	searchDirFS := "."
+	if sub != "" {
+		searchDirFS = filepath.ToSlash(sub)
+	}
+
+	return &searchTarget{
+		Root:         r,
+		SearchDirFS:  searchDirFS,
+		reportPrefix: rootClean,
+		close:        func() { r.Close() },
+	}, nil
+}
+
 func isOutsideWorkspace(path, workingDir string) bool {
 	if !filepath.IsAbs(path) {
 		return false
@@ -147,53 +309,10 @@ func normalizePathForComparison(path string) string {
 	return path
 }
 
-// pathError creates a helpful error message for path-related issues.
-func pathError(action, originalPath, normalizedPath, workingDir string, err error) error {
-	if isOutsideWorkspace(originalPath, workingDir) {
-		return fmt.Errorf("%s failed: path %q is outside workspace %q", action, originalPath, workingDir)
-	}
-
-	if originalPath != normalizedPath {
-		return fmt.Errorf("%s failed: %s (resolved from %s): %w", action, normalizedPath, originalPath, err)
-	}
-
-	return fmt.Errorf("%s failed: %s: %w", action, originalPath, err)
-}
-
-func truncateHead(content string) (result string, truncated bool) {
-	lines := strings.Split(content, "\n")
-
-	if len(lines) > DefaultMaxLines {
-		lines = lines[:DefaultMaxLines]
-		truncated = true
-	}
-
-	result = strings.Join(lines, "\n")
-
-	if len(result) > DefaultMaxBytes {
-		result = result[:DefaultMaxBytes]
-		truncated = true
-	}
-
-	return result, truncated
-}
-
 func detectLineEnding(content string) string {
-	crlfIdx := strings.Index(content, "\r\n")
-	lfIdx := strings.Index(content, "\n")
-
-	if lfIdx == -1 {
-		return "\n"
-	}
-
-	if crlfIdx == -1 {
-		return "\n"
-	}
-
-	if crlfIdx < lfIdx {
+	if strings.Contains(content, "\r\n") {
 		return "\r\n"
 	}
-
 	return "\n"
 }
 
@@ -220,105 +339,113 @@ func stripBom(content string) (bom string, text string) {
 	return "", content
 }
 
-func mapFuzzyIndexToOriginal(original, fuzzy string, fuzzyIdx int) int {
-	if fuzzyIdx <= 0 {
-		return 0
-	}
-
-	if fuzzyIdx >= len(fuzzy) {
-		return len(original)
-	}
-
-	fuzzyPos := 0
-	originalPos := 0
-
-	for originalPos < len(original) && fuzzyPos < fuzzyIdx {
-		_, origSize := utf8.DecodeRuneInString(original[originalPos:])
-		_, fuzzySize := utf8.DecodeRuneInString(fuzzy[fuzzyPos:])
-
-		originalPos += origSize
-		fuzzyPos += fuzzySize
-	}
-
-	return originalPos
+func normalizeForFuzzyMatch(text string) string {
+	normalized, _ := normalizeForFuzzyMatchWithMap(text)
+	return normalized
 }
 
-func normalizeForFuzzyMatch(text string) string {
-	// Trim trailing whitespace from each line
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimRight(line, " \t")
+func normalizeForFuzzyMatchWithMap(text string) (string, []int) {
+	var b strings.Builder
+	offsetMap := []int{0}
+
+	for lineStart := 0; lineStart <= len(text); {
+		lineEnd := strings.IndexByte(text[lineStart:], '\n')
+		hasNewline := lineEnd != -1
+		if hasNewline {
+			lineEnd += lineStart
+		} else {
+			lineEnd = len(text)
+		}
+
+		trimmedEnd := lineEnd
+		for trimmedEnd > lineStart && (text[trimmedEnd-1] == ' ' || text[trimmedEnd-1] == '\t') {
+			trimmedEnd--
+		}
+
+		for pos := lineStart; pos < trimmedEnd; {
+			r, size := utf8.DecodeRuneInString(text[pos:trimmedEnd])
+			replacement := normalizeFuzzyRune(r)
+			b.WriteString(replacement)
+
+			originalBytes := text[pos : pos+size]
+			if replacement == originalBytes {
+				for i := 1; i <= size; i++ {
+					offsetMap = append(offsetMap, pos+i)
+				}
+			} else {
+				for i := 0; i < len(replacement); i++ {
+					offsetMap = append(offsetMap, pos+size)
+				}
+			}
+
+			pos += size
+		}
+
+		if !hasNewline {
+			break
+		}
+
+		b.WriteByte('\n')
+		offsetMap = append(offsetMap, lineEnd+1)
+		lineStart = lineEnd + 1
 	}
-	text = strings.Join(lines, "\n")
 
-	// Replace common Unicode variations that LLMs often introduce
-	replacer := strings.NewReplacer(
-		// Smart quotes → ASCII quotes
-		"\u2018", "'", "\u2019", "'", "\u201A", "'", "\u201B", "'", // single
-		"\u201C", "\"", "\u201D", "\"", "\u201E", "\"", "\u201F", "\"", // double
-		// Dashes → hyphen
-		"\u2010", "-", "\u2011", "-", "\u2012", "-", "\u2013", "-",
-		"\u2014", "-", "\u2015", "-", "\u2212", "-",
-		// Special spaces → regular space
-		"\u00A0", " ", "\u2002", " ", "\u2003", " ", "\u2004", " ", "\u2005", " ",
-		"\u2006", " ", "\u2007", " ", "\u2008", " ", "\u2009", " ", "\u200A", " ",
-		"\u202F", " ", "\u205F", " ", "\u3000", " ",
-	)
+	return b.String(), offsetMap
+}
 
-	return replacer.Replace(text)
+func normalizeFuzzyRune(r rune) string {
+	switch r {
+	case '\u2018', '\u2019', '\u201A', '\u201B':
+		return "'"
+	case '\u201C', '\u201D', '\u201E', '\u201F':
+		return "\""
+	case '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212':
+		return "-"
+	case '\u00A0', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008',
+		'\u2009', '\u200A', '\u202F', '\u205F', '\u3000':
+		return " "
+	default:
+		return string(r)
+	}
 }
 
 type fuzzyMatchResult struct {
-	found                 bool
-	index                 int
-	matchLength           int
-	usedFuzzyMatch        bool
-	contentForReplacement string
+	found          bool
+	index          int
+	matchLength    int
+	usedFuzzyMatch bool
 }
 
 func fuzzyFindText(content, oldText string) fuzzyMatchResult {
-	exactIndex := strings.Index(content, oldText)
-
-	if exactIndex != -1 {
-		return fuzzyMatchResult{
-			found:                 true,
-			index:                 exactIndex,
-			matchLength:           len(oldText),
-			usedFuzzyMatch:        false,
-			contentForReplacement: content,
-		}
+	if i := strings.Index(content, oldText); i != -1 {
+		return fuzzyMatchResult{found: true, index: i, matchLength: len(oldText)}
 	}
 
-	fuzzyContent := normalizeForFuzzyMatch(content)
 	fuzzyOldText := normalizeForFuzzyMatch(oldText)
-	fuzzyIndex := strings.Index(fuzzyContent, fuzzyOldText)
-
-	if fuzzyIndex == -1 {
-		return fuzzyMatchResult{
-			found:                 false,
-			index:                 -1,
-			matchLength:           0,
-			usedFuzzyMatch:        false,
-			contentForReplacement: content,
-		}
+	if fuzzyOldText == "" {
+		return fuzzyMatchResult{index: -1}
 	}
 
-	originalIndex := mapFuzzyIndexToOriginal(content, fuzzyContent, fuzzyIndex)
-	originalEndIndex := mapFuzzyIndexToOriginal(content, fuzzyContent, fuzzyIndex+len(fuzzyOldText))
+	fuzzyContent, fuzzyToOriginal := normalizeForFuzzyMatchWithMap(content)
+	fuzzyIndex := strings.Index(fuzzyContent, fuzzyOldText)
+	if fuzzyIndex == -1 {
+		return fuzzyMatchResult{index: -1}
+	}
+
+	originalIndex := fuzzyToOriginal[fuzzyIndex]
+	originalEnd := fuzzyToOriginal[fuzzyIndex+len(fuzzyOldText)]
 
 	return fuzzyMatchResult{
-		found:                 true,
-		index:                 originalIndex,
-		matchLength:           originalEndIndex - originalIndex,
-		usedFuzzyMatch:        true,
-		contentForReplacement: content,
+		found:          true,
+		index:          originalIndex,
+		matchLength:    originalEnd - originalIndex,
+		usedFuzzyMatch: true,
 	}
 }
 
 func generateDiffString(oldContent, newContent string) string {
 	dmp := diffmatchpatch.New()
 
-	// Create line-based diff for better readability
 	oldLines, newLines, lineArray := dmp.DiffLinesToChars(oldContent, newContent)
 	diffs := dmp.DiffMain(oldLines, newLines, false)
 	diffs = dmp.DiffCharsToLines(diffs, lineArray)
@@ -331,7 +458,6 @@ func generateDiffString(oldContent, newContent string) string {
 	for _, diff := range diffs {
 		lines := strings.Split(diff.Text, "\n")
 
-		// Remove empty last element from split if text ends with newline
 		if len(lines) > 0 && lines[len(lines)-1] == "" {
 			lines = lines[:len(lines)-1]
 		}
@@ -356,26 +482,20 @@ func generateDiffString(oldContent, newContent string) string {
 	return output.String()
 }
 
-// Common ignore directories that should be skipped during file traversal
-var defaultIgnoreDirs = map[string]bool{
-	".git":         true,
-	".hg":          true,
-	".svn":         true,
-	"node_modules": true,
-	"__pycache__":  true,
-	".venv":        true,
-	"vendor":       true,
-	".next":        true,
-	".nuxt":        true,
-	"dist":         true,
-	"build":        true,
+var vcsDirs = map[string]bool{
+	".git": true,
+	".svn": true,
+	".hg":  true,
+	".bzr": true,
+	".jj":  true,
+	".sl":  true,
 }
 
 var binaryExtensions = map[string]bool{
 	".exe": true, ".dll": true, ".so": true, ".dylib": true,
 	".bin": true, ".dat": true, ".db": true, ".sqlite": true,
 	".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
-	".bmp": true, ".ico": true, ".webp": true, ".svg": true,
+	".bmp": true, ".ico": true, ".webp": true,
 	".pdf": true, ".doc": true, ".docx": true, ".xls": true,
 	".xlsx": true, ".ppt": true, ".pptx": true,
 	".zip": true, ".tar": true, ".gz": true, ".rar": true,
@@ -386,14 +506,12 @@ var binaryExtensions = map[string]bool{
 	".pyc": true, ".pyo": true, ".class": true, ".o": true, ".a": true,
 }
 
-// isBinaryFile checks if a file is likely binary based on its extension
 func isBinaryFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 
 	return binaryExtensions[ext]
 }
 
-// relPathSlash returns the relative path from base to target using forward slashes
 func relPathSlash(base, target string) string {
 	rel, err := filepath.Rel(filepath.FromSlash(base), filepath.FromSlash(target))
 
@@ -412,7 +530,6 @@ func relPathFromBase(base, path string) string {
 	return relPathSlash(base, path)
 }
 
-// pathDomain returns the path split into components for gitignore matching
 func pathDomain(fsPath string) []string {
 	if fsPath == "" || fsPath == "." {
 		return nil
@@ -421,7 +538,6 @@ func pathDomain(fsPath string) []string {
 	return strings.Split(fsPath, "/")
 }
 
-// loadGitignore loads gitignore patterns from a .gitignore file
 func loadGitignore(fsys fs.FS, domain []string) []gitignore.Pattern {
 	gitignorePath := ".gitignore"
 
@@ -451,59 +567,4 @@ func loadGitignore(fsys fs.FS, domain []string) []gitignore.Pattern {
 	}
 
 	return patterns
-}
-
-// walkWorkspace traverses files under root, respecting gitignore and default ignore dirs.
-// It skips symlinks and calls onFile for each non-ignored file.
-// Returning filepath.SkipAll from onFile stops traversal.
-func walkWorkspace(ctx context.Context, fsys fs.FS, root string, onFile func(path, relPath string) error) error {
-	var allPatterns []gitignore.Pattern
-	allPatterns = append(allPatterns, loadGitignore(fsys, nil)...)
-	matcher := gitignore.NewMatcher(allPatterns)
-
-	return fs.WalkDir(fsys, root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-
-		// Check for context cancellation
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		// Skip symlinks to prevent infinite loops
-		if d.Type()&fs.ModeSymlink != 0 {
-			return nil
-		}
-
-		if d.IsDir() && defaultIgnoreDirs[d.Name()] {
-			return filepath.SkipDir
-		}
-
-		relPath := relPathFromBase(root, path)
-		pathParts := strings.Split(relPath, "/")
-
-		if d.IsDir() {
-			if matcher.Match(pathParts, true) {
-				return filepath.SkipDir
-			}
-
-			newPatterns := loadGitignore(fsys, pathDomain(path))
-
-			if len(newPatterns) > 0 {
-				allPatterns = append(allPatterns, newPatterns...)
-				matcher = gitignore.NewMatcher(allPatterns)
-			}
-
-			return nil
-		}
-
-		if matcher.Match(pathParts, false) {
-			return nil
-		}
-
-		return onFile(path, relPath)
-	})
 }

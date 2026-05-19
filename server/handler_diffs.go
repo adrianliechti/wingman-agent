@@ -12,16 +12,10 @@ import (
 )
 
 func (s *Server) handleDiffs(w http.ResponseWriter, r *http.Request) {
-	if s.agent.Rewind == nil {
-		writeJSON(w, []DiffEntry{})
-		return
-	}
-
-	diffs, err := s.agent.Rewind.DiffFromBaseline()
+	diffs, err := s.workspace.Diffs()
 	if err != nil {
-		// ErrClosed means the manager was torn down (RestartRewind on
-		// session-new) while this poll was in flight. Silently return empty;
-		// the next poll lands on the fresh manager.
+		// ErrClosed means the manager was torn down while this poll was in
+		// flight. Silently return empty; the next poll lands on a fresh one.
 		if !errors.Is(err, rewind.ErrClosed) {
 			fmt.Fprintf(os.Stderr, "diffs: %v\n", err)
 		}
@@ -29,8 +23,7 @@ func (s *Server) handleDiffs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var result []DiffEntry
-
+	result := []DiffEntry{}
 	for _, d := range diffs {
 		status := "modified"
 		switch d.Status {
@@ -50,23 +43,10 @@ func (s *Server) handleDiffs(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if result == nil {
-		result = []DiffEntry{}
-	}
-
 	writeJSON(w, result)
 }
 
-// handleDiffRevert restores a single file to its baseline state. Reverting a
-// modified or deleted file writes the baseline content back; reverting an
-// added file removes it. Per-file scope is what makes this distinct from
-// /api/checkpoints/{hash}/restore, which rolls back the whole working tree.
 func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
-	if s.agent.Rewind == nil {
-		http.Error(w, "rewind not available", http.StatusServiceUnavailable)
-		return
-	}
-
 	abs, ok := s.resolveWorkspacePath(r.URL.Query().Get("path"))
 	if !ok {
 		http.Error(w, "invalid path", http.StatusBadRequest)
@@ -74,7 +54,7 @@ func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
 	}
 	relPath := r.URL.Query().Get("path")
 
-	diffs, err := s.agent.Rewind.DiffFromBaseline()
+	diffs, err := s.workspace.Diffs()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -109,8 +89,8 @@ func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.sendMessage(DiffsChangedEvent{})
-	s.sendMessage(FilesChangedEvent{})
+	s.broadcast(Frame{Type: EvtDiffsChanged})
+	s.broadcast(Frame{Type: EvtFilesChanged})
 
 	w.WriteHeader(http.StatusNoContent)
 }

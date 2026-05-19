@@ -25,8 +25,7 @@ type Content struct {
 
 	File *File `json:"file,omitempty"`
 
-	Reasoning  *Reasoning  `json:"reasoning,omitempty"`
-	Compaction *Compaction `json:"compaction,omitempty"`
+	Reasoning *Reasoning `json:"reasoning,omitempty"`
 
 	ToolCall   *ToolCall   `json:"tool_call,omitempty"`
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
@@ -62,13 +61,5 @@ type ToolResult struct {
 type Reasoning struct {
 	ID string `json:"id,omitempty"`
 
-	Text      string `json:"text,omitempty"`
-	Summary   string `json:"summary,omitempty"`
-	Signature string `json:"signature,omitempty"`
-}
-
-type Compaction struct {
-	ID string `json:"id,omitempty"`
-
-	Signature string `json:"signature,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }

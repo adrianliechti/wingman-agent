@@ -3,12 +3,14 @@ package shell
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
@@ -21,24 +23,17 @@ const (
 
 func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 	description := strings.Join([]string{
-		fmt.Sprintf("Execute a shell command and return its output. Default timeout: %ds, max: 600s.", defaultTimeout),
-		"",
-		"IMPORTANT: Prefer dedicated tools for routine file operations:",
-		"- File search: `find` (NOT shell find/ls)",
-		"- Content search: `grep` (NOT shell grep/rg)",
-		"- Read files: `read` (NOT cat/head/tail)",
-		"- Edit files: `edit` (NOT sed/awk)",
-		"- Write files: `write` (NOT echo/cat with heredoc)",
-		"Use shell for build, test, run, package-manager, git, formatter, generator, and project commands.",
-		"",
-		"Usage:",
-		"- Always provide a brief description of what the command does.",
-		"- For multiple independent commands, make multiple shell calls in parallel.",
-		"- For dependent commands, chain with && in a single call (on Windows PowerShell 5.1, use `; if ($?) {` instead since && is not supported).",
-		"- Use ; only when you need sequential execution but don't care if earlier commands fail.",
-		"- For git: prefer new commits over amending; never use --no-verify, --force, or -i (interactive) unless explicitly asked.",
-		"- If a pre-commit hook rejects a commit, the commit did NOT happen. Fix the issue, re-stage, and create a NEW commit — do not use --amend, which would silently rewrite the previous commit.",
-		"- If a command is long-running, increase the timeout instead of using sleep.",
+		fmt.Sprintf("Execute a command in the host shell. On Unix/macOS this uses the user's shell (`$SHELL`, falling back to `/bin/sh`); on Windows this uses PowerShell. Default timeout %ds, max 600s.", defaultTimeout),
+		"- Use for build, test, run, package-manager, git, GitHub CLI (`gh`), Docker/Kubernetes, project scripts, diagnostics, and other terminal operations.",
+		"- Prefer dedicated tools when they are clearly better for the job: `grep`/`glob`/LSP for code search, `read` for targeted file reads, `edit`/`write` for reviewable file changes. Shell is fine when a command is the natural interface or combines several process-level steps.",
+		"- Match command syntax to the host OS shown in your environment section. Examples: list dir -> `ls` on Unix, `Get-ChildItem` on PowerShell.",
+		"- Each call starts in the workspace directory. Shell state (env vars, aliases, `cd` from a prior call) does not persist between calls. Use absolute paths or chain dependent commands in one call.",
+		"- For GitHub URLs or PR/issue/release data, prefer `gh` commands (`gh pr view`, `gh issue view`, `gh api`) over `web_fetch`; they return structured authenticated data.",
+		"- For commits: only commit when asked, inspect `git status`, `git diff`, and recent `git log` first, stage specific files by name, never skip hooks, and create a new commit instead of amending unless explicitly requested.",
+		"- Quote paths with spaces. Chain dependent commands with `&&` on Unix or PowerShell 7+, and with `; if ($?) { ... }` on Windows PowerShell 5.1. Use separate tool calls for independent commands.",
+		"- Once a check has passed (tests, build, lint), trust it — don't re-run to be sure.",
+		"- Increase timeout for long-running commands. Avoid unnecessary `sleep` / `Start-Sleep`; if polling is needed, run a check command instead of sleeping first.",
+		"- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first.",
 	}, "\n")
 
 	return []tool.Tool{{
@@ -50,23 +45,13 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 			"type": "object",
 
 			"properties": map[string]any{
-				"command": map[string]any{
-					"type":        "string",
-					"description": "The shell command to execute",
-				},
-
-				"description": map[string]any{
-					"type":        "string",
-					"description": "Brief description of what this command does (e.g., \"Run unit tests\", \"Install dependencies\")",
-				},
-
-				"timeout": map[string]any{
-					"type":        "integer",
-					"description": fmt.Sprintf("Timeout in seconds (default: %d, max: 600)", defaultTimeout),
-				},
+				"command":     map[string]any{"type": "string", "description": "Command to run."},
+				"description": map[string]any{"type": "string", "description": "Short label (e.g. \"Run unit tests\")."},
+				"timeout":     map[string]any{"type": "integer", "description": fmt.Sprintf("Seconds (default %d, max 600).", defaultTimeout)},
 			},
 
-			"required": []string{"command"},
+			"required":             []string{"command"},
+			"additionalProperties": false,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
@@ -83,9 +68,14 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 	}
 
 	timeout := defaultTimeout
-
-	if t, ok := args["timeout"].(float64); ok {
-		timeout = int(t)
+	if value, present, err := tool.OptionalIntArg(args, "timeout"); present {
+		if err != nil {
+			return "", err
+		}
+		timeout = value
+	}
+	if timeout <= 0 {
+		timeout = defaultTimeout
 	}
 
 	if timeout > 600 {
@@ -113,32 +103,25 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("failed to start command: %w", err)
-	}
+	// On ctx cancellation, exec wraps up the command via cmd.Cancel (set in
+	// buildCommand) which kills the whole process group, not just the leader.
+	runErr := cmd.Run()
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-
-	select {
-	case <-ctx.Done():
-		killProcessGroup(cmd)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "", fmt.Errorf("command timed out after %d seconds", timeout)
-	case err := <-done:
-		truncated := truncateOutput(output.String())
-
-		if err != nil {
-			exitCode := -1
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			}
-			truncated += fmt.Sprintf("\n\nCommand exited with code %d", exitCode)
-		}
-
-		return truncated, nil
 	}
-}
 
+	truncated := truncateOutput(output.String())
+	if runErr != nil {
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		truncated += fmt.Sprintf("\n\nCommand exited with code %d", exitCode)
+	}
+	return truncated, nil
+}
 func buildCommand(ctx context.Context, command, workingDir string) *exec.Cmd {
 	var cmd *exec.Cmd
 
@@ -163,6 +146,10 @@ func buildCommand(ctx context.Context, command, workingDir string) *exec.Cmd {
 
 	setupProcessGroup(cmd)
 
+	// Override CommandContext's default Process.Kill so timeouts/cancellation
+	// tear down the entire process group, not just the leader.
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+
 	return cmd
 }
 
@@ -183,21 +170,51 @@ func truncateOutput(output string) string {
 		return output
 	}
 
+	// Head + tail elision: preserve diagnostic output at the start (e.g. the
+	// first failing test, the first compiler error) and the trailing summary,
+	// drop the middle. Tail-only truncation loses errors that print at the
+	// start of long output.
 	lines := strings.Split(output, "\n")
 	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
+		head := maxLines / 2
+		tail := maxLines - head
+		elided := len(lines) - head - tail
+		lines = append(append(append([]string{}, lines[:head]...),
+			fmt.Sprintf("... [%d lines elided] ...", elided)),
+			lines[len(lines)-tail:]...)
 	}
 
 	truncated := strings.Join(lines, "\n")
 	if len(truncated) > maxBytes {
-		truncated = truncated[len(truncated)-maxBytes:]
+		half := maxBytes / 2
+		head := truncated[:utf8BoundaryDown(truncated, half)]
+		tail := truncated[utf8BoundaryUp(truncated, len(truncated)-half):]
+		truncated = head + "\n... [bytes elided] ...\n" + tail
 	}
 
-	shownLines := strings.Count(truncated, "\n") + 1
-	shownBytes := len(truncated)
-
-	notice := fmt.Sprintf("[Output truncated: showing last %d of %d lines (%d of %d bytes)]\n\n",
-		shownLines, totalLines, shownBytes, totalBytes)
+	notice := fmt.Sprintf("[truncated %d→%d lines, %dKB→%dKB; head+tail elided]\n", totalLines, strings.Count(truncated, "\n")+1, totalBytes/1024, len(truncated)/1024)
 
 	return notice + truncated
+}
+
+// utf8BoundaryDown returns the largest valid UTF-8 boundary <= i.
+func utf8BoundaryDown(s string, i int) int {
+	if i >= len(s) {
+		return len(s)
+	}
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return i
+}
+
+// utf8BoundaryUp returns the smallest valid UTF-8 boundary >= i.
+func utf8BoundaryUp(s string, i int) int {
+	if i <= 0 {
+		return 0
+	}
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return i
 }

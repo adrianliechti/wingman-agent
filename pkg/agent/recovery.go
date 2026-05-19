@@ -8,6 +8,8 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
+
+	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 func isRecoverableError(err error) bool {
@@ -42,13 +44,11 @@ func (a *Agent) removeOrphanedToolMessages() {
 	}
 
 	dropped := make(map[int]bool)
-	droppedToolCall := make(map[int]bool)
 
 	for i, m := range a.Messages {
 		for _, c := range m.Content {
 			if c.ToolCall != nil && !outputIDs[c.ToolCall.ID] {
 				dropped[i] = true
-				droppedToolCall[i] = true
 				break
 			}
 
@@ -56,18 +56,6 @@ func (a *Agent) removeOrphanedToolMessages() {
 				dropped[i] = true
 				break
 			}
-		}
-	}
-
-	// A reasoning item dangling in front of a dropped tool_call will be rejected
-	// by the Responses API. Drop any contiguous reasoning-only run immediately
-	// preceding a dropped tool_call message.
-	for i := range droppedToolCall {
-		for j := i - 1; j >= 0; j-- {
-			if !isReasoningOnlyMessage(a.Messages[j]) {
-				break
-			}
-			dropped[j] = true
 		}
 	}
 
@@ -83,18 +71,6 @@ func (a *Agent) removeOrphanedToolMessages() {
 	}
 
 	a.Messages = cleaned
-}
-
-func isReasoningOnlyMessage(m Message) bool {
-	if len(m.Content) == 0 {
-		return false
-	}
-	for _, c := range m.Content {
-		if c.Reasoning == nil {
-			return false
-		}
-	}
-	return true
 }
 
 func (a *Agent) compactMessages(ctx context.Context) {
@@ -157,11 +133,20 @@ func (a *Agent) summarizeMessages(ctx context.Context, messages []Message) (stri
 	resp, err := a.client.Responses.New(ctx, responses.ResponseNewParams{
 		Model: model,
 		Instructions: openai.String(
-			"Summarize the following earlier conversation between a user and an AI assistant. " +
-				"Preserve all important context: what the user asked, what was done, what files were modified, " +
-				"key decisions made, and the current state of the task. " +
-				"Be concise but complete. Format as a briefing the assistant can use to continue the conversation. " +
-				"Do not answer the user's latest request; only summarize the prior context.",
+			"An LLM context limit was reached during an active working session between a user and you (the assistant). " +
+				"Produce a continuation briefing for yourself so the session can resume seamlessly. " +
+				"Frame and tone for an agent reader (you), not a human — completeness matters more than brevity. " +
+				"Do not answer the user's latest request; only summarize the prior context. " +
+				"Do not introduce new ideas unless the user already confirmed them.\n\n" +
+				"Include these sections:\n" +
+				"1. User Intent — all goals and requests\n" +
+				"2. Technical Concepts — tools, methods, libraries discussed\n" +
+				"3. Files + Code — viewed/edited files with key code and why changes were made\n" +
+				"4. Errors + Fixes — bugs encountered, resolutions, user corrections\n" +
+				"5. Problem Solving — issues solved or still in progress\n" +
+				"6. Pending Tasks — unresolved user requests\n" +
+				"7. Current Work — what was active when the limit hit: file names, code, alignment to the latest instruction\n" +
+				"8. Next Step — only if it directly continues an explicit user instruction",
 		),
 		Input: responses.ResponseNewParamsInputUnion{
 			OfString: openai.String(transcript),
@@ -198,19 +183,19 @@ func recoverySummaryTranscript(messages []Message) string {
 		m := messages[i]
 		for _, c := range m.Content {
 			if c.Text != "" {
-				fmt.Fprintf(&mb, "[%s]: %s\n\n", m.Role, truncate(c.Text, 2000))
+				fmt.Fprintf(&mb, "[%s]: %s\n\n", m.Role, text.TruncateHead(c.Text, 2000))
 			}
 
 			if c.Refusal != "" {
-				fmt.Fprintf(&mb, "[%s]: %s\n\n", m.Role, truncate(c.Refusal, 2000))
+				fmt.Fprintf(&mb, "[%s]: %s\n\n", m.Role, text.TruncateHead(c.Refusal, 2000))
 			}
 
 			if c.ToolCall != nil {
-				fmt.Fprintf(&mb, "[tool call]: %s(%s)\n\n", c.ToolCall.Name, truncate(c.ToolCall.Args, 200))
+				fmt.Fprintf(&mb, "[tool call]: %s(%s)\n\n", c.ToolCall.Name, text.TruncateHead(c.ToolCall.Args, 200))
 			}
 
 			if c.ToolResult != nil {
-				fmt.Fprintf(&mb, "[tool result]: %s\n\n", truncate(c.ToolResult.Content, 500))
+				fmt.Fprintf(&mb, "[tool result]: %s\n\n", text.TruncateHead(c.ToolResult.Content, 500))
 			}
 		}
 
@@ -236,16 +221,6 @@ func recoverySummaryTranscript(messages []Message) string {
 	return sb.String()
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + " [truncated]"
-}
-
-// truncateMessagesForRecovery is the non-LLM fallback when summarization fails.
-// It keeps the tail of the history and runs orphan cleanup so the next API call
-// has a coherent (if shorter) transcript instead of wiped tool history.
 func (a *Agent) truncateMessagesForRecovery() {
 	if len(a.Messages) > minRecoveryMessagesToPreserve {
 		a.Messages = a.Messages[len(a.Messages)-minRecoveryMessagesToPreserve:]

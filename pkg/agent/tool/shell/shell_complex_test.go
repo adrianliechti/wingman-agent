@@ -1,22 +1,24 @@
 //go:build !windows
 
-package shell
+package shell_test
 
 import (
 	"context"
 	"strings"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 )
 
 func runShell(t *testing.T, command string) string {
 	t.Helper()
 	tmpDir := t.TempDir()
-	result, err := executeShell(context.Background(), tmpDir, nil, map[string]any{
+	result, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
 		"command": command,
 		"timeout": float64(10),
 	})
 	if err != nil {
-		t.Fatalf("executeShell error: %v", err)
+		t.Fatalf("shell Execute error: %v", err)
 	}
 	return result
 }
@@ -110,7 +112,6 @@ func TestComplex_CommandSubstitution(t *testing.T) {
 }
 
 func TestComplex_EmbeddedPython(t *testing.T) {
-	// Skip if python3 not available
 	result := runShell(t, `python3 -c "print('hello from python')" 2>/dev/null || python -c "print('hello from python')" 2>/dev/null || echo "python not found"`)
 	if !strings.Contains(result, "hello from python") && !strings.Contains(result, "python not found") {
 		t.Errorf("embedded python failed, got: %q", result)
@@ -153,7 +154,6 @@ func TestComplex_SpecialCharacters(t *testing.T) {
 }
 
 func TestComplex_MultiLineHeredocScript(t *testing.T) {
-	// This simulates what the model would send for a complex git commit
 	result := runShell(t, `cat <<'EOF'
 This is a multi-line
 commit message with "quotes"
@@ -165,20 +165,21 @@ EOF`)
 }
 
 func TestComplex_LargeOutputTruncation(t *testing.T) {
-	// Generate output larger than maxLines (2000)
 	result := runShell(t, `for i in $(seq 1 3000); do echo "line $i"; done`)
-	if !strings.Contains(result, "Output truncated") {
-		t.Errorf("expected truncation notice, got length: %d", len(result))
+	if !strings.Contains(result, "truncated") || !strings.Contains(result, "head+tail elided") {
+		t.Errorf("expected head+tail truncation notice, got length: %d", len(result))
 	}
-	// Should contain the LAST lines (tail truncation)
 	if !strings.Contains(result, "line 3000") {
 		t.Errorf("expected last lines preserved, got tail: %q", result[len(result)-100:])
+	}
+	if !strings.Contains(result, "line 1\n") {
+		t.Errorf("expected first lines preserved (head), got head: %q", result[:200])
 	}
 }
 
 func TestComplex_Timeout(t *testing.T) {
 	tmpDir := t.TempDir()
-	_, err := executeShell(context.Background(), tmpDir, nil, map[string]any{
+	_, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
 		"command": "sleep 30",
 		"timeout": float64(1),
 	})
@@ -187,5 +188,44 @@ func TestComplex_Timeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("expected timeout message, got: %v", err)
+	}
+}
+
+func TestComplex_IntegerTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	result, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
+		"command": "echo ok",
+		"timeout": 1,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "ok") {
+		t.Fatalf("expected command output, got: %q", result)
+	}
+}
+
+func TestComplex_FractionalTimeoutRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+	_, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
+		"command": "echo ok",
+		"timeout": 1.5,
+	})
+	if err == nil || !strings.Contains(err.Error(), "timeout must be an integer") {
+		t.Fatalf("expected timeout validation error, got: %v", err)
+	}
+}
+
+func TestComplex_NonPositiveTimeoutUsesDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	result, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
+		"command": "echo ok",
+		"timeout": 0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "ok") {
+		t.Fatalf("expected command output, got: %q", result)
 	}
 }

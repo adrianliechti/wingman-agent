@@ -7,7 +7,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
-// SkillEntry is the wire shape for the slash-command picker.
 type SkillEntry struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description,omitempty"`
@@ -15,9 +14,6 @@ type SkillEntry struct {
 	Arguments   []string `json:"arguments,omitempty"`
 }
 
-// resolveSkill rewrites a "/skillname [args]" message into the skill's
-// rendered content with arguments substituted. If text doesn't start with `/`
-// or no skill matches, it's returned unchanged.
 func (s *Server) resolveSkill(text string) string {
 	if !strings.HasPrefix(text, "/") {
 		return text
@@ -30,28 +26,26 @@ func (s *Server) resolveSkill(text string) string {
 		args = parts[1]
 	}
 
-	sk := skill.FindSkill(name, s.agent.Skills)
+	ws := s.workspace
+	sk := skill.FindSkill(name, ws.Skills)
 	if sk == nil {
 		return text
 	}
 
-	// Bundled skills materialize on first use so they show up in the
-	// catalog from the next turn onward.
 	if sk.Bundled {
 		_, _ = skill.MaterializeBundled(sk)
 	}
 
-	content, err := sk.GetContent(s.agent.RootPath)
+	content, err := sk.GetContent(ws.RootPath)
 	if err != nil {
 		return text
 	}
 
-	return sk.ApplyArguments(content, args, sk.AbsoluteDir(s.agent.RootPath))
+	return sk.ApplyArguments(content, args, sk.AbsoluteDir(ws.RootPath))
 }
 
 func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
-	skills := s.agent.Skills
-
+	skills := s.workspace.Skills
 	result := make([]SkillEntry, 0, len(skills))
 	for _, sk := range skills {
 		result = append(result, SkillEntry{

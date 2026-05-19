@@ -1,8 +1,10 @@
-package lsp
+package lsp_test
 
 import (
 	"strings"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
 func diag(line, col, severity int, msg string) Diagnostic {
@@ -32,13 +34,11 @@ func TestDiagnosticTracker_FilterNew_WithBaseline(t *testing.T) {
 	tracker := NewDiagnosticTracker()
 	uri := "file:///test.go"
 
-	// Pre-existing diagnostic
 	baseline := []Diagnostic{
 		diag(5, 0, DiagnosticSeverityWarning, "unused import"),
 	}
 	tracker.SetBaseline(uri, baseline)
 
-	// After edit: one pre-existing + one new
 	all := []Diagnostic{
 		diag(1, 0, DiagnosticSeverityError, "undefined variable"),
 		diag(5, 0, DiagnosticSeverityWarning, "unused import"),
@@ -84,8 +84,8 @@ func TestDiagnosticTracker_FilterNew_CapsVolume(t *testing.T) {
 
 	result := tracker.FilterNew("file:///test.go", diags)
 
-	if len(result) != maxDiagnosticsPerFile {
-		t.Fatalf("expected %d diagnostics (cap), got %d", maxDiagnosticsPerFile, len(result))
+	if len(result) != 10 {
+		t.Fatalf("expected 10 diagnostics (cap), got %d", len(result))
 	}
 }
 
@@ -98,14 +98,12 @@ func TestDiagnosticTracker_CrossTurnDeduplication(t *testing.T) {
 		diag(2, 0, DiagnosticSeverityError, "error two"),
 	}
 
-	// First turn: both should appear
 	result := tracker.FilterNew(uri, diags)
 	if len(result) != 2 {
 		t.Fatalf("turn 1: expected 2, got %d", len(result))
 	}
 	tracker.MarkDelivered(uri, result)
 
-	// Second turn with same diagnostics: should be empty
 	result = tracker.FilterNew(uri, diags)
 	if len(result) != 0 {
 		t.Fatalf("turn 2: expected 0 (already delivered), got %d", len(result))
@@ -123,14 +121,13 @@ func TestDiagnosticTracker_SetBaseline_ClearsDelivered(t *testing.T) {
 	result := tracker.FilterNew(uri, diags)
 	tracker.MarkDelivered(uri, result)
 
-	// Verify it's deduplicated
 	result = tracker.FilterNew(uri, diags)
 	if len(result) != 0 {
 		t.Fatalf("expected 0 after delivery, got %d", len(result))
 	}
 
-	// SetBaseline clears delivered, so editing the file again allows
-	// previously-delivered diagnostics through (if they're not in the baseline)
+	// SetBaseline clears delivered, so previously-delivered diagnostics come back through
+	// (when they're not in the baseline).
 	tracker.SetBaseline(uri, nil)
 
 	result = tracker.FilterNew(uri, diags)

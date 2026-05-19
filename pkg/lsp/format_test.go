@@ -1,8 +1,10 @@
-package lsp
+package lsp_test
 
 import (
 	"strings"
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
 func TestFormatDiagnostics(t *testing.T) {

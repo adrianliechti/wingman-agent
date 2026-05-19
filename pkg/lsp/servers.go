@@ -1,24 +1,21 @@
 package lsp
 
-// Server describes an LSP server binary and how to invoke it.
 type Server struct {
-	Name       string   // Display name (e.g., "gopls")
-	Command    string   // Binary name (e.g., "gopls")
-	Args       []string // Arguments (e.g., ["serve"])
-	Languages  []string // File extensions without dot (e.g., ["go"])
-	LanguageID string   // LSP language identifier (e.g., "go")
+	Name       string
+	Command    string
+	Args       []string
+	Languages  []string
+	LanguageID string
 }
 
-// projectType maps project markers to LSP server candidates.
 type projectType struct {
-	Name     string   // Project type name (e.g., "go")
-	Markers  []string // Files that indicate this project type (e.g., ["go.mod"])
-	Servers  []Server // Server candidates in priority order (first available wins)
-	Excludes []string // Marker files that exclude this project type (e.g., Deno excludes TS)
-	Requires []string // Optional: globs (e.g., "*.vue") that must match at least one file under the marker's dir
+	Name     string
+	Markers  []string
+	Servers  []Server
+	Excludes []string
+	Requires []string
 }
 
-// knownProjects contains the registry of known project types and their LSP servers.
 var knownProjects = []projectType{
 	// Deno (must be before TypeScript so it takes priority when deno.json is present)
 	{
@@ -34,7 +31,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// TypeScript / JavaScript
 	{
 		Name:     "typescript",
 		Markers:  []string{"tsconfig.json", "jsconfig.json", "package.json", "package-lock.json", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"},
@@ -56,7 +52,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Go
 	{
 		Name:    "go",
 		Markers: []string{"go.mod", "go.work", "go.sum"},
@@ -70,7 +65,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Rust
 	{
 		Name:    "rust",
 		Markers: []string{"Cargo.toml", "Cargo.lock"},
@@ -84,7 +78,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Python
 	{
 		Name:    "python",
 		Markers: []string{"pyproject.toml", "setup.py", "requirements.txt", "Pipfile", "setup.cfg", "pyrightconfig.json"},
@@ -119,7 +112,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// C/C++
 	{
 		Name:    "cpp",
 		Markers: []string{"compile_commands.json", "CMakeLists.txt", ".clangd"},
@@ -140,7 +132,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Java
 	{
 		Name:    "java",
 		Markers: []string{"pom.xml", "build.gradle", "build.gradle.kts", ".project", ".classpath"},
@@ -154,7 +145,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// C# / .NET
 	{
 		Name:    "csharp",
 		Markers: []string{"*.csproj", "*.sln", "*.slnx", "global.json"},
@@ -175,7 +165,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// F#
 	{
 		Name:    "fsharp",
 		Markers: []string{"*.fsproj", "*.sln", "*.slnx", "global.json"},
@@ -189,7 +178,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Ruby
 	{
 		Name:    "ruby",
 		Markers: []string{"Gemfile", ".ruby-version", "Rakefile"},
@@ -210,7 +198,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// PHP
 	{
 		Name:    "php",
 		Markers: []string{"composer.json", "artisan"},
@@ -231,7 +218,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Zig
 	{
 		Name:    "zig",
 		Markers: []string{"build.zig", "zls.json"},
@@ -245,7 +231,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Lua
 	{
 		Name:    "lua",
 		Markers: []string{".luarc.json", ".luarc.jsonc", ".luacheckrc"},
@@ -259,7 +244,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Kotlin
 	{
 		Name:    "kotlin",
 		Markers: []string{"settings.gradle.kts", "build.gradle.kts"},
@@ -273,7 +257,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Swift
 	{
 		Name:    "swift",
 		Markers: []string{"Package.swift"},
@@ -287,7 +270,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Elixir
 	{
 		Name:    "elixir",
 		Markers: []string{"mix.exs", "mix.lock"},
@@ -308,7 +290,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Haskell
 	{
 		Name:    "haskell",
 		Markers: []string{"stack.yaml", "cabal.project", "hie.yaml", "*.cabal"},
@@ -322,7 +303,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Scala
 	{
 		Name:    "scala",
 		Markers: []string{"build.sbt", ".metals", "build.sc"},
@@ -336,7 +316,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Dart
 	{
 		Name:    "dart",
 		Markers: []string{"pubspec.yaml", "analysis_options.yaml"},
@@ -350,7 +329,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Vue
 	{
 		Name:     "vue",
 		Markers:  []string{"package.json", "package-lock.json", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"},
@@ -365,7 +343,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Svelte
 	{
 		Name:     "svelte",
 		Markers:  []string{"package.json", "package-lock.json", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"},
@@ -380,7 +357,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Astro
 	{
 		Name:     "astro",
 		Markers:  []string{"package.json", "package-lock.json", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"},
@@ -395,7 +371,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Bash / Shell
 	{
 		Name:    "bash",
 		Markers: []string{".bashrc", ".bash_profile", ".zshrc"},
@@ -409,7 +384,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Terraform
 	{
 		Name:    "terraform",
 		Markers: []string{"main.tf", "terraform.tf", ".terraform", ".terraform.lock.hcl"},
@@ -423,7 +397,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// YAML
 	{
 		Name:    "yaml",
 		Markers: []string{".yamllint", "mkdocs.yml", "docker-compose.yml"},
@@ -437,7 +410,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Dockerfile
 	{
 		Name:    "docker",
 		Markers: []string{"Dockerfile", "Containerfile"},
@@ -451,7 +423,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// OCaml
 	{
 		Name:    "ocaml",
 		Markers: []string{"dune-project", "dune-workspace", ".merlin", "*.opam"},
@@ -465,7 +436,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Gleam
 	{
 		Name:    "gleam",
 		Markers: []string{"gleam.toml"},
@@ -479,7 +449,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Clojure
 	{
 		Name:    "clojure",
 		Markers: []string{"deps.edn", "project.clj", "shadow-cljs.edn", "bb.edn"},
@@ -493,7 +462,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Nix
 	{
 		Name:    "nix",
 		Markers: []string{"flake.nix", "default.nix", "shell.nix"},
@@ -507,7 +475,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Prisma
 	{
 		Name:    "prisma",
 		Markers: []string{"schema.prisma"},
@@ -521,7 +488,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// Typst
 	{
 		Name:    "typst",
 		Markers: []string{"typst.toml"},
@@ -535,7 +501,6 @@ var knownProjects = []projectType{
 			},
 		},
 	},
-	// LaTeX
 	{
 		Name:    "latex",
 		Markers: []string{".latexmkrc", "latexmkrc", ".texlabroot"},

@@ -4,26 +4,22 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/memory"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/tool/schedule"
 )
 
-// AgentManager provides the operations needed by the management tools.
 type AgentManager interface {
 	CreateAgent(name string) error
 	DeleteAgent(name string) error
 }
 
-// Tools returns agent lifecycle management tools.
 func Tools(mgr AgentManager, store *memory.Store) []tool.Tool {
 	return []tool.Tool{
 		{
-			Name: "create_agent",
+			Name:   "create_agent",
+			Effect: tool.StaticEffect(tool.EffectMutates),
 			Description: strings.Join([]string{
 				"Create a new agent with its own isolated workspace and optional scheduled tasks.",
 				"",
@@ -59,57 +55,39 @@ func Tools(mgr AgentManager, store *memory.Store) []tool.Tool {
 									"description": "Schedule: \"every 15m\", cron expression, or ISO 8601 timestamp.",
 								},
 							},
-							"required": []string{"prompt", "schedule"},
+							"required":             []string{"prompt", "schedule"},
+							"additionalProperties": false,
 						},
 						"description": "Scheduled tasks for the agent.",
 					},
 				},
-				"required": []string{"name"},
+				"required":             []string{"name"},
+				"additionalProperties": false,
 			},
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
 				name, _ := args["name"].(string)
+				name = strings.TrimSpace(name)
 				if name == "" {
 					return "", fmt.Errorf("name is required")
+				}
+
+				tasks, err := parseTasksArg(args)
+				if err != nil {
+					return "", err
 				}
 
 				if err := mgr.CreateAgent(name); err != nil {
 					return "", err
 				}
 
-				// Write AGENTS.md
 				if instructions, ok := args["instructions"].(string); ok && instructions != "" {
 					if err := store.WriteAgent(name, instructions); err != nil {
 						return "", fmt.Errorf("agent created but failed to write AGENTS.md: %w", err)
 					}
 				}
 
-				// Write tasks.yaml
-				if taskList, ok := args["tasks"].([]any); ok && len(taskList) > 0 {
+				if len(tasks) > 0 {
 					agentDir := store.AgentDir(name)
-					var tasks []schedule.Task
-
-					for _, t := range taskList {
-						m, ok := t.(map[string]any)
-						if !ok {
-							continue
-						}
-
-						prompt := strVal(m, "prompt")
-						sched := strVal(m, "schedule")
-
-						if prompt == "" || sched == "" {
-							continue
-						}
-
-						tasks = append(tasks, schedule.Task{
-							ID:        uuid.NewString(),
-							Prompt:    prompt,
-							Schedule:  sched,
-							Status:    "active",
-							CreatedAt: time.Now().UTC(),
-						})
-					}
-
 					if err := schedule.SaveTasks(agentDir, tasks); err != nil {
 						return "", fmt.Errorf("agent created but failed to save tasks: %w", err)
 					}
@@ -123,8 +101,8 @@ func Tools(mgr AgentManager, store *memory.Store) []tool.Tool {
 					fmt.Fprintf(&result, "AGENTS.md: written (%d bytes)\n", len(instructions))
 				}
 
-				if taskList, ok := args["tasks"].([]any); ok && len(taskList) > 0 {
-					fmt.Fprintf(&result, "tasks.yaml: %d task(s) scheduled\n", len(taskList))
+				if len(tasks) > 0 {
+					fmt.Fprintf(&result, "tasks.yaml: %d task(s) scheduled\n", len(tasks))
 				}
 
 				return result.String(), nil
@@ -133,6 +111,7 @@ func Tools(mgr AgentManager, store *memory.Store) []tool.Tool {
 		{
 			Name:        "delete_agent",
 			Description: "Unregister an agent, stop its scheduled task, and delete all its data. Cannot delete the main agent.",
+			Effect:      tool.StaticEffect(tool.EffectDangerous),
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -141,10 +120,12 @@ func Tools(mgr AgentManager, store *memory.Store) []tool.Tool {
 						"description": "Name of the agent to delete.",
 					},
 				},
-				"required": []string{"name"},
+				"required":             []string{"name"},
+				"additionalProperties": false,
 			},
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
 				name, _ := args["name"].(string)
+				name = strings.TrimSpace(name)
 				if name == "" {
 					return "", fmt.Errorf("name is required")
 				}
@@ -159,7 +140,34 @@ func Tools(mgr AgentManager, store *memory.Store) []tool.Tool {
 	}
 }
 
-func strVal(m map[string]any, key string) string {
-	v, _ := m[key].(string)
-	return v
+func parseTasksArg(args map[string]any) ([]schedule.Task, error) {
+	raw, ok := args["tasks"]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+
+	taskList, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("tasks must be an array")
+	}
+
+	tasks := make([]schedule.Task, 0, len(taskList))
+	for i, t := range taskList {
+		m, ok := t.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("tasks[%d] must be an object", i)
+		}
+
+		prompt, _ := m["prompt"].(string)
+		sched, _ := m["schedule"].(string)
+
+		task, err := schedule.NewTask(prompt, sched)
+		if err != nil {
+			return nil, fmt.Errorf("tasks[%d]: %w", i, err)
+		}
+
+		tasks = append(tasks, task)
+	}
+
+	return tasks, nil
 }

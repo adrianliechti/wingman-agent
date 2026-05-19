@@ -7,7 +7,8 @@ import { useColorScheme } from "../hooks/useColorScheme";
 import { defineWingmanThemes, wingmanThemeName } from "../monacoThemes";
 
 export function MarkdownContent({ text }: { text: string }) {
-	if (!text) return null;
+	const trimmed = text?.replace(/\s+$/, "");
+	if (!trimmed) return null;
 
 	return (
 		<Markdown
@@ -66,7 +67,11 @@ export function MarkdownContent({ text }: { text: string }) {
 					);
 				},
 				p({ children }) {
-					return <p className="mb-2 text-fg-muted">{children}</p>;
+					return (
+						<p className="mb-2 last:mb-0 empty:hidden text-fg-muted">
+							{children}
+						</p>
+					);
 				},
 				ul({ children }) {
 					return (
@@ -130,7 +135,7 @@ export function MarkdownContent({ text }: { text: string }) {
 				},
 			}}
 		>
-			{text}
+			{trimmed}
 		</Markdown>
 	);
 }

@@ -1,7 +1,9 @@
-package shell
+package shell_test
 
 import (
 	"testing"
+
+	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )

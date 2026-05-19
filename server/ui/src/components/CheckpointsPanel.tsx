@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { CheckpointEntry, ServerMessage } from "../types/protocol";
 
 interface Props {
+	sessionId: string;
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
 }
 
@@ -12,13 +13,15 @@ interface MenuState {
 	checkpoint: CheckpointEntry;
 }
 
-export function CheckpointsPanel({ subscribe }: Props) {
+export function CheckpointsPanel({ sessionId, subscribe }: Props) {
 	const [checkpoints, setCheckpoints] = useState<CheckpointEntry[]>([]);
 	const [menu, setMenu] = useState<MenuState | null>(null);
 
+	const qs = sessionId ? `?session=${encodeURIComponent(sessionId)}` : "";
+
 	const load = useCallback(async () => {
 		try {
-			const res = await fetch("/api/checkpoints");
+			const res = await fetch(`/api/checkpoints${qs}`);
 			if (!res.ok) {
 				setCheckpoints([]);
 				return;
@@ -28,7 +31,7 @@ export function CheckpointsPanel({ subscribe }: Props) {
 		} catch {
 			setCheckpoints([]);
 		}
-	}, []);
+	}, [qs]);
 
 	useEffect(() => {
 		// eslint-disable-next-line react-hooks/set-state-in-effect -- standard data-load on mount
@@ -66,9 +69,10 @@ export function CheckpointsPanel({ subscribe }: Props) {
 			`Restore working tree to "${cp.message}"?\n\nThis will overwrite uncommitted changes.`,
 		);
 		if (!ok) return;
-		await fetch(`/api/checkpoints/${encodeURIComponent(cp.hash)}/restore`, {
-			method: "POST",
-		});
+		await fetch(
+			`/api/checkpoints/${encodeURIComponent(cp.hash)}/restore${qs}`,
+			{ method: "POST" },
+		);
 	};
 
 	const handleCopyHash = (cp: CheckpointEntry) => {

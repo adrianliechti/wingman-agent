@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"sync"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
@@ -17,26 +18,33 @@ type Agent struct {
 
 	Messages []Message
 	Usage    Usage
+
+	queueMu      sync.Mutex
+	running      bool
+	pendingInput [][]Content
 }
 
-// Models lists the available models from the API.
-func (a *Agent) Models(ctx context.Context) ([]ModelInfo, error) {
-	resp, err := a.client.Models.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var models []ModelInfo
-
-	for _, m := range resp.Data {
-		models = append(models, ModelInfo{ID: m.ID})
-	}
-
-	return models, nil
-}
-
+// Send routes input one of two ways:
+//   - if a turn loop is already running for this agent, the input is queued
+//     and Send returns nil. The in-flight loop will drain the queue at its
+//     next safe boundary (between iterations, never inside a tool_call /
+//     tool_result pair).
+//   - otherwise, the input opens a new turn and Send returns an iterator
+//     over the stream. The loop's exit clears the running flag and discards
+//     any queue leftovers, so a cancel that aborts the loop also drops
+//     queued work.
 func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, error] {
-	a.appendContextMessages()
+	a.queueMu.Lock()
+	if a.running {
+		if len(input) > 0 {
+			a.pendingInput = append(a.pendingInput, input)
+		}
+		a.queueMu.Unlock()
+		return nil
+	}
+	a.running = true
+	a.queueMu.Unlock()
+
 	a.Messages = append(a.Messages, userMessage(input))
 
 	maxTurns := a.MaxTurns
@@ -45,11 +53,21 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 	}
 
 	return func(yield func(Message, error) bool) {
+		// Recover from panics so the running flag is always released —
+		// otherwise the agent would refuse all future Send calls.
+		defer func() {
+			if r := recover(); r != nil {
+				a.endRun()
+				panic(r)
+			}
+		}()
+
 		turns := 0
 		for {
 			turns++
 			if maxTurns > 0 && turns > maxTurns {
 				yield(Message{}, ErrMaxTurnsExceeded)
+				a.endRun()
 				return
 			}
 
@@ -94,6 +112,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 				}
 
 				if err != nil {
+					a.endRun()
 					if err != errYieldStopped {
 						yield(Message{}, err)
 					}
@@ -108,26 +127,82 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 
 			calls := extractToolCalls(resp.messages)
 
-			if len(calls) == 0 {
-				return
+			if len(calls) > 0 {
+				if err := a.processToolCalls(ctx, calls, tools, yield); err != nil {
+					a.endRun()
+					if err != errYieldStopped {
+						yield(Message{}, err)
+					}
+					return
+				}
 			}
 
-			if err := a.processToolCalls(ctx, calls, tools, yield); err != nil {
-				if err != errYieldStopped {
-					yield(Message{}, err)
-				}
+			// Atomic exit-or-continue: drain pending input and decide
+			// whether to keep looping under a single critical section.
+			// Doing both under the same lock prevents a concurrent Send from
+			// queueing input between an unlocked drain and a return — which
+			// would strand that input with no loop left to process it. The
+			// drain itself is also a safe injection point: every tool_call
+			// above is paired with a tool_result, so appending user
+			// messages here cannot split the (tool_call, tool_result) pair
+			// the Responses API requires to be contiguous.
+			a.queueMu.Lock()
+			queued := a.pendingInput
+			a.pendingInput = nil
+			if len(queued) == 0 && len(calls) == 0 {
+				a.running = false
+				a.queueMu.Unlock()
 				return
+			}
+			a.queueMu.Unlock()
+
+			for _, in := range queued {
+				a.Messages = append(a.Messages, userMessage(in))
+			}
+
+			// Proactive compaction: if the just-completed turn already filled
+			// most of the context window, the next iteration (current
+			// messages + assistant response + appended tool results) will be
+			// even larger. Summarize older history now to avoid hitting the
+			// hard limit mid-task and paying for one wasted round-trip via
+			// the reactive recovery path above.
+			if a.shouldCompactProactively(resp.usage.InputTokens) {
+				a.compactMessages(ctx)
 			}
 		}
 	}
 }
 
-func (a *Agent) appendContextMessages() {
-	if a.ContextMessages == nil {
-		return
+// endRun releases the running slot and discards any leftover queued input.
+// Called from every non-clean exit path in Send's loop (errors, max turns,
+// recovered panics); the clean exit clears the same state inline while
+// already holding queueMu.
+func (a *Agent) endRun() {
+	a.queueMu.Lock()
+	a.running = false
+	a.pendingInput = nil
+	a.queueMu.Unlock()
+}
+
+func (a *Agent) shouldCompactProactively(lastInputTokens int64) bool {
+	if lastInputTokens <= 0 {
+		return false
 	}
 
-	a.Messages = append(a.Messages, a.ContextMessages()...)
+	window := a.Config.ContextWindow
+	if window < 0 {
+		return false
+	}
+	if window == 0 {
+		window = DefaultContextWindow
+	}
+
+	reserve := a.Config.ReserveTokens
+	if reserve <= 0 {
+		reserve = DefaultReserveTokens
+	}
+
+	return lastInputTokens > int64(window-reserve)
 }
 
 func extractToolCalls(messages []Message) []ToolCall {
@@ -210,6 +285,9 @@ func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool
 		result = a.executeTool(ctx, tc, tools)
 	}
 
+	// Post hooks form a transform chain: each hook's return value replaces
+	// the running result unconditionally. Hooks that want pass-through must
+	// return the input `result` verbatim — see hook.PostToolUse doc.
 	for _, h := range a.Hooks.PostToolUse {
 		r, err := h(ctx, hc, result)
 

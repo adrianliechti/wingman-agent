@@ -16,7 +16,6 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
-	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/server"
 )
 
@@ -26,8 +25,8 @@ var publicFS embed.FS
 type App struct {
 	ctx context.Context
 
-	mu    sync.Mutex
-	agent *code.Agent
+	mu     sync.Mutex
+	server *server.Server
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -43,6 +42,11 @@ func (a *App) GetSettings() (Settings, error) {
 }
 
 func (a *App) SaveSettings(s Settings) error {
+	current, err := loadSettings()
+	if err == nil {
+		s.Workspaces = current.Workspaces
+	}
+
 	if err := saveSettings(s); err != nil {
 		return err
 	}
@@ -51,13 +55,41 @@ func (a *App) SaveSettings(s Settings) error {
 	return nil
 }
 
+func (a *App) GetWorkspaces() ([]string, error) {
+	s, err := loadSettings()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(s.Workspaces) > maxWorkspaces {
+		return s.Workspaces[:maxWorkspaces], nil
+	}
+
+	return s.Workspaces, nil
+}
+
+func (a *App) RemoveWorkspace(path string) ([]string, error) {
+	s, err := loadSettings()
+	if err != nil {
+		return nil, err
+	}
+
+	s.RemoveWorkspace(path)
+
+	if err := saveSettings(s); err != nil {
+		return nil, err
+	}
+
+	return s.Workspaces, nil
+}
+
 func (a *App) shutdown(ctx context.Context) {
 	a.mu.Lock()
-	agent := a.agent
+	srv := a.server
 	a.mu.Unlock()
 
-	if agent != nil {
-		agent.Close()
+	if srv != nil {
+		srv.Close()
 	}
 }
 
@@ -77,33 +109,36 @@ func (a *App) OpenWorkspace(path string) (string, error) {
 	}
 
 	a.mu.Lock()
-	if a.agent != nil {
+	if a.server != nil {
 		a.mu.Unlock()
 		return "", errors.New("workspace already open")
 	}
 	a.mu.Unlock()
 
-	c, err := code.New(path, nil)
+	srv, err := server.New(a.ctx, path, nil)
 	if err != nil {
 		return "", err
 	}
-
-	s := server.New(a.ctx, c, 0)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		c.Close()
+		srv.Close()
 		return "", err
 	}
 	go func() {
-		if err := http.Serve(listener, s); err != nil && !errors.Is(err, net.ErrClosed) {
+		if err := http.Serve(listener, srv); err != nil && !errors.Is(err, net.ErrClosed) {
 			log.Printf("server listener: %v", err)
 		}
 	}()
 
 	a.mu.Lock()
-	a.agent = c
+	a.server = srv
 	a.mu.Unlock()
+
+	if s, err := loadSettings(); err == nil {
+		s.AddWorkspace(path)
+		_ = saveSettings(s)
+	}
 
 	return fmt.Sprintf("http://%s", listener.Addr().String()), nil
 }

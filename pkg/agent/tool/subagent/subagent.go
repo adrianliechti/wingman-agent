@@ -9,97 +9,239 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-const instructions = "You are an agent performing a specific delegated task. Complete only the assigned scope. Unless the task explicitly asks you to edit files, stay read-only. When done, provide a concise result with file:line references when relevant, followed by any uncertainty or verification gaps. Do not explain your process."
+type subagentType struct {
+	Instructions        string
+	AllowTool           func(tool.Tool) bool
+	WrapDynamicReadOnly bool
+}
+
+const generalPurposeInstructions = `You are an agent performing a specific delegated task. Complete only the assigned scope. Unless the task explicitly asks you to edit files, stay read-only. Search broadly when you do not know where something lives, then narrow down. Prefer editing existing files over creating new files, and never create documentation files unless explicitly requested. Lead with findings or changes made, grouped by file when relevant, using file:line references. State assumptions and verification gaps at the end, not at the start. Reply in <=200 words unless the task explicitly asks for more. Do not explain your process.`
+
+const exploreInstructions = `You are a read-only codebase exploration specialist. Complete the caller's search or analysis request efficiently. You may search, read, inspect git state, fetch URLs, and use read-only LSP or shell commands. You must not create, modify, delete, move, or copy files, install dependencies, or run mutating git commands. Use grep/glob/LSP before broad reads, read only the line windows that matter, and use parallel tool calls when searches or reads are independent. Lead with the answer and cite file:line references. End with assumptions or gaps only if they matter. Reply in <=200 words unless the task explicitly asks for more.`
+
+const verificationInstructions = `You are a verification specialist. Your job is to test whether the implementation actually works, not to confirm by reading code. You must not modify project files, install dependencies, or run git write operations. You may run read-only inspection commands and normal build, test, lint, type-check, or local execution commands. For UI, API, CLI, migration, and integration changes, exercise the behavior directly when possible. Include the exact commands you ran, the relevant output, and a verdict. End with exactly one line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL.`
+
+var subagentTypes = map[string]subagentType{
+	"general-purpose": {
+		Instructions: generalPurposeInstructions,
+		AllowTool:    allowNonAgentTool,
+	},
+	"explore": {
+		Instructions:        exploreInstructions,
+		AllowTool:           allowReadOnlyTool,
+		WrapDynamicReadOnly: true,
+	},
+	"verification": {
+		Instructions: verificationInstructions,
+		AllowTool:    allowVerificationTool,
+	},
+}
+
+var availableTypes = []string{"general-purpose", "explore", "verification"}
 
 func Tools(cfg *agent.Config) []tool.Tool {
 	description := strings.Join([]string{
-		"Launch an agent to handle a task in a separate context. The agent has access to all tools and runs its own agentic loop. Only the final answer is returned, keeping your context clean.",
+		"Launch a new agent to handle complex, multi-step tasks autonomously. The agent runs in a separate context and returns one final message.",
+		"",
+		"Available agent types:",
+		"- general-purpose: Research complex questions, search code, and execute scoped multi-step tasks.",
+		"- explore: Read-only codebase research. Use for broad searches, subsystem mapping, and finding relevant files or symbols.",
+		"- verification: Run checks to verify an implementation. Use after non-trivial changes when direct testing is useful.",
 		"",
 		"When to use:",
-		"- Research tasks requiring many tool calls (exploring codebases, finding all usages of a function).",
-		"- Independent subtasks whose intermediate results would clutter your context.",
-		"- You can launch multiple agents in parallel by making multiple tool calls in one response.",
-		"- Make the prompt explicit about whether the agent may edit files or should stay read-only.",
+		"- Open-ended searches where you are not confident that one or two direct tool calls will find the answer.",
+		"- Independent research or verification whose intermediate tool output would clutter your context.",
+		"- Scoped implementation or investigation work that can proceed without blocking your next step.",
 		"",
 		"When NOT to use:",
-		"- Simple tasks needing 1-2 tool calls -- just use the tools directly.",
-		"- When the user needs to see intermediate results -- they won't be visible.",
+		"- Reading a specific known file path: use `read` instead.",
+		"- Finding files by a known pattern: use `glob` instead.",
+		"- Searching for a known symbol or string: use `grep` or LSP instead.",
+		"- Synthesis across multiple results: do the synthesis yourself after agents return.",
 		"",
-		"Prompting tips:",
-		"- The agent has NO access to your conversation history. Write the prompt as a self-contained briefing.",
-		"- Be specific: include file paths, function names, exact requirements, constraints, and desired output shape.",
-		"- Do not ask the agent to synthesize from another agent's findings. Do the synthesis yourself, then delegate a precise next task if needed.",
-		"- Bad: \"Find the bug.\" Good: \"In /src/api/handler.go, the CreateUser function returns 500 on duplicate emails. Find where the error is swallowed and suggest a fix.\"",
+		"Usage notes:",
+		"- Provide a self-contained prompt; the agent does not have your conversation history.",
+		"- Include relevant paths, symbols, constraints, allowed edit scope, and expected output shape.",
+		"- The `agent_type` parameter is required; choose the narrowest fitting agent type.",
+		"- Agent outputs should generally be trusted; verify only when the task requires direct proof.",
 	}, "\n")
 
 	return []tool.Tool{{
 		Name:        "agent",
 		Description: description,
-		Effect:      tool.StaticEffect(tool.EffectMutates),
+		Effect:      classifyEffect,
 
 		Parameters: map[string]any{
 			"type": "object",
 
 			"properties": map[string]any{
-				"prompt": map[string]any{
+				"description": map[string]any{"type": "string", "description": "Short 3-5 word label for the UI (for example, `Audit auth middleware`)."},
+				"prompt":      map[string]any{"type": "string", "description": "Self-contained task briefing. Include goal, relevant paths/symbols, allowed edit scope, what is out of scope, and the expected report shape."},
+				"agent_type": map[string]any{
 					"type":        "string",
-					"description": "A clear, self-contained task description for the agent. Include all necessary context since it has no access to the current conversation.",
+					"description": "Agent type to use. Must be one of the available agent types.",
+					"enum":        availableTypes,
 				},
 			},
 
-			"required": []string{"prompt"},
+			"required":             []string{"description", "prompt", "agent_type"},
+			"additionalProperties": false,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
+			description, ok := args["description"].(string)
+
+			if !ok || strings.TrimSpace(description) == "" {
+				return "", fmt.Errorf("description is required")
+			}
+
 			prompt, ok := args["prompt"].(string)
 
-			if !ok || prompt == "" {
+			if !ok || strings.TrimSpace(prompt) == "" {
 				return "", fmt.Errorf("prompt is required")
 			}
 
+			subagentName, ok := args["agent_type"].(string)
+			if !ok || strings.TrimSpace(subagentName) == "" {
+				return "", fmt.Errorf("agent_type is required")
+			}
+			subagentName = strings.ToLower(strings.TrimSpace(subagentName))
+
+			typ, ok := subagentTypes[subagentName]
+			if !ok {
+				return "", fmt.Errorf("unknown agent_type %q (available: %s)", subagentName, strings.Join(availableTypes, ", "))
+			}
+
 			subcfg := cfg.Derive()
-			subcfg.Instructions = func() string { return instructions }
+			subcfg.Instructions = func() string { return typ.Instructions }
+
 			subcfg.Tools = func() []tool.Tool {
 				if cfg.Tools == nil {
 					return nil
 				}
 
-				var filtered []tool.Tool
-
-				for _, t := range cfg.Tools() {
-					if t.Name == "agent" || t.Hidden {
-						continue
-					}
-
-					filtered = append(filtered, t)
-				}
-
-				return filtered
+				return toolsForType(cfg.Tools(), typ)
 			}
 
 			sub := &agent.Agent{Config: subcfg}
 
-			var result strings.Builder
+			// Only the final assistant text is the "answer". The latest
+			// non-empty message wins, which drops intermediate narration
+			// like "I'll start by exploring…" emitted before tool calls.
+			var lastText string
 
 			for msg, err := range sub.Send(ctx, []agent.Content{{Text: prompt}}) {
 				if err != nil {
 					return "", fmt.Errorf("agent error: %w", err)
 				}
 
+				var parts []string
 				for _, c := range msg.Content {
 					if c.Text != "" {
-						result.WriteString(c.Text)
+						parts = append(parts, c.Text)
 					}
+				}
+				if len(parts) > 0 {
+					lastText = strings.Join(parts, "")
 				}
 			}
 
-			text := strings.TrimSpace(result.String())
-
+			text := strings.TrimSpace(lastText)
 			if text == "" {
 				return "Sub-agent completed but produced no output.", nil
 			}
-
 			return text, nil
 		},
 	}}
+}
+
+func classifyEffect(args map[string]any) tool.Effect {
+	if args == nil {
+		return tool.EffectDynamic
+	}
+
+	subagentName, ok := args["agent_type"].(string)
+	if !ok || strings.TrimSpace(subagentName) == "" {
+		return tool.EffectDynamic
+	}
+	subagentName = strings.ToLower(strings.TrimSpace(subagentName))
+
+	if subagentName == "explore" {
+		return tool.EffectReadOnly
+	}
+
+	return tool.EffectMutates
+}
+
+func toolsForType(tools []tool.Tool, typ subagentType) []tool.Tool {
+	filtered := make([]tool.Tool, 0, len(tools))
+
+	for _, t := range tools {
+		if !typ.AllowTool(t) {
+			continue
+		}
+
+		if typ.WrapDynamicReadOnly && t.Effect != nil && t.Effect(nil) == tool.EffectDynamic {
+			t = readOnlyDynamicTool(t)
+		}
+
+		filtered = append(filtered, t)
+	}
+
+	return filtered
+}
+
+func readOnlyDynamicTool(t tool.Tool) tool.Tool {
+	originalExecute := t.Execute
+	originalEffect := t.Effect
+
+	t.Execute = func(ctx context.Context, args map[string]any) (string, error) {
+		if originalEffect(args) != tool.EffectReadOnly {
+			return "", fmt.Errorf("explore subagent only allows read-only %s calls", t.Name)
+		}
+		if originalExecute == nil {
+			return "", fmt.Errorf("tool %s has no executor", t.Name)
+		}
+		return originalExecute(ctx, args)
+	}
+
+	return t
+}
+
+func allowNonAgentTool(t tool.Tool) bool {
+	return t.Name != "agent" && !t.Hidden
+}
+
+func allowReadOnlyTool(t tool.Tool) bool {
+	if t.Name == "ask_user" {
+		return false
+	}
+
+	if !allowNonAgentTool(t) || t.Effect == nil {
+		return false
+	}
+
+	switch t.Effect(nil) {
+	case tool.EffectReadOnly:
+		return true
+	case tool.EffectDynamic:
+		return true
+	default:
+		return false
+	}
+}
+
+func allowVerificationTool(t tool.Tool) bool {
+	if !allowNonAgentTool(t) {
+		return false
+	}
+
+	switch t.Name {
+	case "write", "edit", "ask_user":
+		return false
+	case "shell":
+		return true
+	default:
+		return t.Effect != nil && t.Effect(nil) == tool.EffectReadOnly
+	}
 }

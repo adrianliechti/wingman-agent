@@ -25,10 +25,8 @@ import (
 	"github.com/go-git/go-git/v5/utils/merkletrie"
 )
 
-// ErrClosed is returned by public methods after Cleanup has run. Callers
-// (notably the polled /api/diffs handler) should treat it as a transient
-// no-op rather than a real failure — RestartRewind installs a fresh
-// Manager and the next poll will succeed.
+// ErrClosed is returned after Cleanup; callers should treat it as a
+// transient no-op (RestartRewind installs a fresh Manager).
 var ErrClosed = errors.New("rewind manager closed")
 
 type Checkpoint struct {
@@ -38,9 +36,7 @@ type Checkpoint struct {
 }
 
 // Manager runs a shadow git repo in /tmp that snapshots the working dir on
-// each user turn. Init is async — New returns immediately and methods block
-// on a ready channel until the shadow repo is set up. The shadow repo works
-// in any directory, with or without an existing user .git.
+// each user turn. Init is async; methods block on initDone until ready.
 type Manager struct {
 	workingDir string
 
@@ -54,20 +50,17 @@ type Manager struct {
 	baselineHash plumbing.Hash
 	closed       bool
 
-	// Exclude patterns are read once on first use and cached for the
-	// session — gitignore rules rarely change mid-session and the per-call
-	// reads (in-tree .gitignore + global + system + XDG) add up when the
-	// diff panel polls. RestartRewind creates a fresh Manager so config
-	// edits take effect across sessions.
+	// Exclude patterns are cached for the session; RestartRewind creates a
+	// fresh Manager so gitignore edits take effect across sessions.
 	excludesOnce    sync.Once
 	excludesPattern []gitignore.Pattern
 	excludesMatcher gitignore.Matcher
 }
 
-// readThroughStorage is a Storer that delegates writes to a primary store and
-// falls back to a read-only secondary object store on cache misses. It lets us
-// reference objects from the user's .git/objects without copying them into our
-// temp rewind store, which avoids an O(repo-size) walk at startup.
+// readThroughStorage delegates writes to a primary store and falls back to a
+// read-only secondary object store on misses. Lets us reference objects from
+// the user's .git/objects without copying them — avoids an O(repo-size) walk
+// at startup.
 type readThroughStorage struct {
 	storage.Storer
 	secondary storer.EncodedObjectStorer
@@ -107,10 +100,6 @@ func (s *readThroughStorage) EncodedObjectSize(h plumbing.Hash) (int64, error) {
 	return size, err
 }
 
-// New starts a rewind manager for the given working directory. The shadow
-// repo is initialized in a goroutine; methods block on it via the ready
-// channel. Failures during init surface as errors from those methods, so
-// the caller never has to deal with a nil Manager.
 func New(workingDir string) *Manager {
 	m := &Manager{
 		workingDir: workingDir,
@@ -120,9 +109,8 @@ func New(workingDir string) *Manager {
 	return m
 }
 
-// CleanupOrphans removes leftover shadow repos from prior sessions that
-// didn't get a chance to clean up (e.g. SIGKILL). Only deletes dirs whose
-// mtime is older than the cutoff so concurrently-running sessions are safe.
+// CleanupOrphans removes leftover shadow repos from prior crashed sessions.
+// Only deletes dirs older than the cutoff so concurrent sessions are safe.
 func CleanupOrphans() {
 	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), "wingman-rewind-*"))
 	cutoff := time.Now().Add(-24 * time.Hour)
@@ -149,9 +137,8 @@ func (m *Manager) init() {
 	}
 	m.gitDir = gitDir
 
-	// If the working dir is already a git repo, read through to its object
-	// store so we can baseline against HEAD's tree without copying. Otherwise
-	// we build a self-contained shadow repo from a working-tree snapshot.
+	// Read through to the user repo's object store when present so we can
+	// baseline against HEAD's tree without copying objects.
 	var userStorer storer.EncodedObjectStorer
 	var userHead *object.Commit
 	if userRepo, err := git.PlainOpen(m.workingDir); err == nil {
@@ -215,15 +202,14 @@ func (m *Manager) init() {
 	}
 }
 
-// ready blocks until init finishes and returns its error (if any).
 func (m *Manager) ready() error {
 	<-m.initDone
 	return m.initErr
 }
 
 // baselineFromHEAD writes a baseline commit pointing at the user repo's HEAD
-// tree. The tree itself stays in the user's .git/objects and is reachable
-// through readThroughStorage — O(1) writes regardless of repo size.
+// tree; the tree itself stays in the user's .git/objects reachable through
+// readThroughStorage. O(1) regardless of repo size.
 func (m *Manager) baselineFromHEAD(headCommit *object.Commit) error {
 	sig := object.Signature{Name: "wingman", Email: "wingman@local", When: time.Now()}
 	baselineCommit := &object.Commit{
@@ -251,9 +237,6 @@ func (m *Manager) baselineFromHEAD(headCommit *object.Commit) error {
 	return nil
 }
 
-// baselineFromWorkingTree snapshots whatever's on disk into a real commit.
-// Used when there's no user HEAD to point at — fresh `git init` with no
-// commits, or no .git at all (scratch dir).
 func (m *Manager) baselineFromWorkingTree() error {
 	m.worktree.Excludes = m.excludes()
 
@@ -277,9 +260,8 @@ func (m *Manager) baselineFromWorkingTree() error {
 	return nil
 }
 
-// setHead points master at the given hash and makes HEAD a symbolic ref to
-// master. Used by both the baseline path and Restore so subsequent commits
-// always attach via HEAD→master rather than landing on a detached HEAD.
+// setHead points master at hash and makes HEAD a symbolic ref to master so
+// subsequent commits attach via HEAD→master rather than landing detached.
 func (m *Manager) setHead(hash plumbing.Hash) error {
 	branch := plumbing.NewBranchReferenceName("master")
 	if err := m.repo.Storer.SetReference(plumbing.NewHashReference(branch, hash)); err != nil {
@@ -291,27 +273,21 @@ func (m *Manager) setHead(hash plumbing.Hash) error {
 	return nil
 }
 
-// excludes returns the cached gitignore patterns for the worktree. Safe to
-// call after init has succeeded; internal callers reach this through ready()
-// already so the worktree is guaranteed set up.
 func (m *Manager) excludes() []gitignore.Pattern {
 	m.excludesOnce.Do(m.computeExcludes)
 	return m.excludesPattern
 }
 
-// excludeMatcher returns the cached matcher built from the same patterns as
-// excludes(). Used internally by Fingerprint to skip ignored entries.
 func (m *Manager) excludeMatcher() gitignore.Matcher {
 	m.excludesOnce.Do(m.computeExcludes)
 	return m.excludesMatcher
 }
 
 func (m *Manager) computeExcludes() {
-	// In-tree patterns: .git/info/exclude and recursive .gitignore files.
 	patterns, _ := gitignore.ReadPatterns(m.worktree.Filesystem, nil)
 
-	// core.excludesfile from ~/.gitconfig and /etc/gitconfig. The helpers
-	// expect a filesystem rooted at "/" so absolute paths resolve.
+	// go-git's global/system helpers expect a filesystem rooted at "/"
+	// so absolute paths in core.excludesfile resolve.
 	rootFS := osfs.New("/")
 	if global, err := gitignore.LoadGlobalPatterns(rootFS); err == nil {
 		patterns = append(patterns, global...)
@@ -320,9 +296,8 @@ func (m *Manager) computeExcludes() {
 		patterns = append(patterns, system...)
 	}
 
-	// XDG-standard $XDG_CONFIG_HOME/git/ignore (default ~/.config/git/ignore).
-	// Git honors this even when core.excludesfile is unset; go-git does not,
-	// so we read it ourselves.
+	// Git honors $XDG_CONFIG_HOME/git/ignore even when core.excludesfile is
+	// unset; go-git does not, so we read it ourselves.
 	patterns = append(patterns, readXDGIgnore()...)
 
 	m.excludesPattern = patterns
@@ -436,11 +411,9 @@ func (m *Manager) List() ([]Checkpoint, error) {
 	return checkpoints, nil
 }
 
-// Restore rolls the working tree back to a checkpoint and re-baselines so
-// "diff from baseline" thereafter means "since the restore." Excludes are
-// loaded before Clean so gitignored files (node_modules, .env, build
-// artifacts) are preserved — without that guard, Clean would silently nuke
-// them on rollback.
+// Restore rolls the working tree back to a checkpoint and re-baselines.
+// Excludes MUST be loaded before Clean — otherwise Clean silently nukes
+// gitignored files (node_modules, .env, build artifacts) on rollback.
 func (m *Manager) Restore(hash string) error {
 	if hash == "" {
 		return errors.New("empty hash")
@@ -473,8 +446,6 @@ func (m *Manager) Restore(hash string) error {
 		return fmt.Errorf("failed to checkout: %w", err)
 	}
 
-	// Move master to match so future commits attach via HEAD→master rather
-	// than landing on a detached HEAD.
 	if err := m.setHead(target); err != nil {
 		return err
 	}
@@ -484,13 +455,11 @@ func (m *Manager) Restore(hash string) error {
 }
 
 func (m *Manager) Cleanup() {
-	// Wait for init so we don't race with the goroutine writing into gitDir.
+	// Wait for init so we don't race the goroutine writing into gitDir, then
+	// take the mutex so any in-flight DiffFromBaseline / Commit / List /
+	// Restore finishes before we wipe gitDir — otherwise go-git surfaces
+	// "entry not found" / "reference not found" mid-snapshot.
 	<-m.initDone
-	// Take the mutex so any in-flight DiffFromBaseline / Commit / List /
-	// Restore finishes before we wipe the gitDir out from under it. Without
-	// this, RestartRewind on session-new races a polled /api/diffs request
-	// and surfaces "entry not found" / "reference not found" from go-git
-	// when the object store disappears mid-snapshot.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.closed = true
@@ -501,12 +470,8 @@ func (m *Manager) Cleanup() {
 }
 
 // Fingerprint returns a 64-bit digest of the worktree's visible state
-// (relative path, mtime, size for every non-ignored file). Used by the
-// server's polling loop to gate FilesChanged/DiffsChanged emits — when
-// the digest is unchanged we skip the events entirely. Always skips .git
-// and gitignored entries; doesn't hash content, so a `touch` will fire a
-// refetch even when no diff actually changed (the client just gets an
-// empty diff back).
+// (relative path, mtime, size for every non-ignored file). Doesn't hash
+// content, so a `touch` will fire a refetch even when no diff changed.
 func (m *Manager) Fingerprint() uint64 {
 	if err := m.ready(); err != nil {
 		return 0
@@ -558,7 +523,6 @@ func (m *Manager) Fingerprint() uint64 {
 	return h.Sum64()
 }
 
-// FileStatus represents the status of a file in the diff
 type FileStatus int
 
 const (
@@ -567,22 +531,19 @@ const (
 	StatusDeleted
 )
 
-// FileDiff represents a diff for a single file
 type FileDiff struct {
 	Path   string
 	Status FileStatus
 	Patch  string
 
-	// Original is the file's content at the baseline (empty when added).
 	Original string
-	// Modified is the file's content in the current working tree (empty when deleted).
 	Modified string
 }
 
-// snapshotTree captures the current working tree as a tree object without polluting
-// the user-visible checkpoint history. It works by writing a transient commit and
-// then resetting the branch ref back to where it was before — the commit and tree
-// objects remain in the object store as garbage, which is fine for a /tmp repo.
+// snapshotTree captures the working tree as a tree object without polluting
+// the user-visible checkpoint history: it writes a transient commit then
+// resets the branch ref. The orphaned commit/tree objects are GC'd by the
+// /tmp repo lifecycle.
 func (m *Manager) snapshotTree() (*object.Tree, error) {
 	prevHead, err := m.repo.Head()
 	if err != nil {
@@ -604,7 +565,7 @@ func (m *Manager) snapshotTree() (*object.Tree, error) {
 		AllowEmptyCommits: true,
 	})
 
-	// Always try to roll the branch ref back, even if the commit failed.
+	// Roll the branch ref back even if the commit failed.
 	if rollbackErr := m.repo.Storer.SetReference(plumbing.NewHashReference(prevHead.Name(), prevHead.Hash())); rollbackErr != nil {
 		if err == nil {
 			err = fmt.Errorf("failed to reset HEAD after snapshot: %w", rollbackErr)
@@ -628,13 +589,10 @@ func (m *Manager) snapshotTree() (*object.Tree, error) {
 	return tree, nil
 }
 
-// DiffFromBaseline returns the diff between the baseline and the current working
-// tree. The right-hand side is taken from the live working tree (not HEAD), so
-// changes from any source — agent tools, the user's terminal, an external editor
-// — are reflected.
-//
-// Returns (nil, nil) when the working tree matches the baseline (no diff).
-// Errors are reserved for actual git failures so callers can distinguish.
+// DiffFromBaseline diffs the baseline against the live working tree (not
+// HEAD), so changes from any source — agent tools, terminal, external
+// editor — are reflected. Returns (nil, nil) when there's no diff; errors
+// are reserved for actual git failures.
 func (m *Manager) DiffFromBaseline() ([]FileDiff, error) {
 	if err := m.ready(); err != nil {
 		return nil, err

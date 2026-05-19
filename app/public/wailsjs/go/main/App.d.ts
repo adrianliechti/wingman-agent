@@ -4,7 +4,11 @@ import {main} from '../models';
 
 export function GetSettings():Promise<main.Settings>;
 
+export function GetWorkspaces():Promise<Array<string>>;
+
 export function OpenWorkspace(arg1:string):Promise<string>;
+
+export function RemoveWorkspace(arg1:string):Promise<Array<string>>;
 
 export function SaveSettings(arg1:main.Settings):Promise<void>;
 

@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/alecthomas/chroma/v2 v2.24.1
 	github.com/bmatcuk/doublestar/v4 v4.10.0
+	github.com/coder/acp-go-sdk v0.12.2
 	github.com/coder/websocket v1.8.14
 	github.com/gdamore/tcell/v2 v2.13.9
 	github.com/go-git/go-billy/v5 v5.9.0
@@ -15,6 +16,7 @@ require (
 	github.com/openai/openai-go/v3 v3.35.0
 	github.com/rivo/tview v0.42.0
 	github.com/robfig/cron/v3 v3.0.1
+	github.com/rs/cors v1.11.1
 	github.com/sahilm/fuzzy v0.1.2
 	github.com/sergi/go-diff v1.4.0
 	github.com/yuin/goldmark v1.8.2
@@ -34,7 +36,6 @@ require (
 	github.com/gdamore/encoding v1.0.1 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
-	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/kevinburke/ssh_config v1.6.0 // indirect
@@ -56,6 +57,5 @@ require (
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )

@@ -1,4 +1,5 @@
 import Editor, { type Monaco } from "@monaco-editor/react";
+import { FileDigit } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useColorScheme } from "../hooks/useColorScheme";
 import { defineWingmanThemes, wingmanThemeName } from "../monacoThemes";
@@ -9,20 +10,44 @@ interface Props {
 	line?: number;
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
 	onDeleted?: () => void;
+	onDirtyChange?: (dirty: boolean) => void;
 }
 
-export function FileTab({ path, line, subscribe, onDeleted }: Props) {
+export function FileTab({ path, line, subscribe, onDeleted, onDirtyChange }: Props) {
 	const [file, setFile] = useState<FileContent | null>(null);
 	const [loading, setLoading] = useState(true);
+	const [value, setValue] = useState("");
+	const [saving, setSaving] = useState(false);
 	const monacoRef = useRef<Monaco | null>(null);
 	const scheme = useColorScheme();
 
-	// Keep onDeleted in a ref so `load` stays stable and the WebSocket
-	// subscription doesn't tear down/re-subscribe on every render.
 	const onDeletedRef = useRef(onDeleted);
 	useEffect(() => {
 		onDeletedRef.current = onDeleted;
 	});
+
+	const dirty = file !== null && !file.binary && value !== (file.content ?? "");
+	const dirtyRef = useRef(dirty);
+	const valueRef = useRef(value);
+	const fileRef = useRef(file);
+	useEffect(() => {
+		dirtyRef.current = dirty;
+		valueRef.current = value;
+		fileRef.current = file;
+	});
+
+	const onDirtyChangeRef = useRef(onDirtyChange);
+	useEffect(() => {
+		onDirtyChangeRef.current = onDirtyChange;
+	});
+
+	useEffect(() => {
+		onDirtyChangeRef.current?.(dirty);
+	}, [dirty]);
+
+	useEffect(() => {
+		return () => onDirtyChangeRef.current?.(false);
+	}, []);
 
 	const load = useCallback(async () => {
 		try {
@@ -39,6 +64,7 @@ export function FileTab({ path, line, subscribe, onDeleted }: Props) {
 			}
 			const data: FileContent = await res.json();
 			setFile(data);
+			setValue(data.content ?? "");
 			setLoading(false);
 		} catch {
 			setLoading(false);
@@ -55,10 +81,33 @@ export function FileTab({ path, line, subscribe, onDeleted }: Props) {
 		if (!subscribe) return;
 		return subscribe((msg) => {
 			if (msg.type === "files_changed") {
+				if (dirtyRef.current) return;
 				load();
 			}
 		});
 	}, [subscribe, load]);
+
+	const save = useCallback(async () => {
+		const f = fileRef.current;
+		if (!f || f.binary || saving) return;
+		const content = valueRef.current;
+		if (content === (f.content ?? "")) return;
+		setSaving(true);
+		try {
+			const res = await fetch("/api/files/write", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ path: f.path, content }),
+			});
+			if (res.ok) {
+				setFile({ ...f, content });
+			}
+		} catch {
+			/* swallow */
+		} finally {
+			setSaving(false);
+		}
+	}, [saving]);
 
 	if (loading) {
 		return (
@@ -76,24 +125,34 @@ export function FileTab({ path, line, subscribe, onDeleted }: Props) {
 		);
 	}
 
+	if (file.binary) {
+		return <BinaryPreview file={file} />;
+	}
+
 	return (
 		<Editor
 			height="100%"
 			language={file.language || undefined}
-			value={file.content}
+			value={value}
 			theme={wingmanThemeName(scheme)}
 			beforeMount={(monaco) => {
 				monacoRef.current = monaco;
 				defineWingmanThemes(monaco);
 			}}
-			onMount={(editor) => {
+			onMount={(editor, monaco) => {
 				if (line && line > 0) {
 					editor.revealLineInCenter(line);
 					editor.setPosition({ lineNumber: line, column: 1 });
 				}
+				editor.addCommand(
+					monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
+					() => {
+						void save();
+					},
+				);
 			}}
+			onChange={(v) => setValue(v ?? "")}
 			options={{
-				readOnly: true,
 				minimap: { enabled: false },
 				fontSize: 12,
 				lineNumbers: "on",
@@ -103,5 +162,76 @@ export function FileTab({ path, line, subscribe, onDeleted }: Props) {
 				padding: { top: 8 },
 			}}
 		/>
+	);
+}
+
+function BinaryPreview({ file }: { file: FileContent }) {
+	const mime = file.mime ?? "application/octet-stream";
+	const src = `/api/files/download?path=${encodeURIComponent(file.path)}`;
+
+	return (
+		<div className="h-full w-full bg-bg overflow-auto">
+			<PreviewBody mime={mime} src={src} />
+		</div>
+	);
+}
+
+function PreviewBody({ mime, src }: { mime: string; src: string }) {
+	if (mime.startsWith("image/")) {
+		return (
+			<div className="h-full w-full flex items-center justify-center p-6">
+				<img
+					src={src}
+					alt=""
+					className="max-h-full max-w-full object-contain [image-rendering:auto]"
+				/>
+			</div>
+		);
+	}
+	if (mime.startsWith("video/")) {
+		return (
+			<div className="h-full w-full flex items-center justify-center p-6 bg-black/40">
+				<video
+					src={src}
+					controls
+					className="max-h-full max-w-full"
+				>
+					<track kind="captions" />
+				</video>
+			</div>
+		);
+	}
+	if (mime.startsWith("audio/")) {
+		return (
+			<div className="h-full w-full flex items-center justify-center p-6">
+				<audio src={src} controls className="w-full max-w-xl">
+					<track kind="captions" />
+				</audio>
+			</div>
+		);
+	}
+	if (mime === "application/pdf") {
+		return (
+			<object
+				data={src}
+				type="application/pdf"
+				className="w-full h-full"
+				aria-label="PDF preview"
+			>
+				<UnknownBinary src={src} />
+			</object>
+		);
+	}
+	return <UnknownBinary src={src} />;
+}
+
+function UnknownBinary({ src: _src }: { src: string }) {
+	return (
+		<div className="h-full w-full flex flex-col items-center justify-center gap-3 p-6 text-center">
+			<FileDigit size={36} className="text-fg-dim/60" strokeWidth={1.25} />
+			<div className="text-fg-dim text-[12px] font-mono">
+				Binary file — no inline preview
+			</div>
+		</div>
 	);
 }

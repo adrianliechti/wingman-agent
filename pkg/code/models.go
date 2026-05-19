@@ -1,16 +1,12 @@
 package code
 
-// Model is a curated entry in wingman's UI model picker. It carries both the
-// upstream provider's ID and a friendly display name.
 type Model struct {
 	ID   string
 	Name string
 }
 
-// AvailableModels is the curated allowlist of models that wingman exposes in
-// its UI. Lives in this package (not pkg/agent) so the underlying agent
-// runtime stays provider-agnostic — pkg/agent doesn't know or care which
-// models are "blessed."
+// AvailableModels lives here (not pkg/agent) so the agent runtime stays
+// provider-agnostic.
 var AvailableModels = []Model{
 	{ID: "claude-sonnet-4-6", Name: "Claude Sonnet 4.6"},
 	{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5"},
@@ -26,8 +22,6 @@ var AvailableModels = []Model{
 	{ID: "claude-opus-4-5", Name: "Claude Opus 4.5"},
 }
 
-// ModelName returns the friendly display name for a model ID, falling back
-// to the ID itself if the model isn't in the curated list.
 func ModelName(id string) string {
 	for _, m := range AvailableModels {
 		if m.ID == id {

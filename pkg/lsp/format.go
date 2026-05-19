@@ -13,13 +13,45 @@ func relPath(workingDir, path string) string {
 	return path
 }
 
-func formatLocations(title string, locations []Location, workingDir string) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s (%d found):\n", title, len(locations))
+// pathGroup is the generic result type for groupByPath.
+type pathGroup[T any] struct {
+	Path  string
+	Items []T
+}
 
-	for _, loc := range locations {
-		path := relPath(workingDir, uriToPath(loc.URI))
-		fmt.Fprintf(&sb, "  %s:%d:%d\n", path, loc.Range.Start.Line+1, loc.Range.Start.Character+1)
+// groupByPath groups items by the file path returned by pathOf, preserving
+// first-seen order so output is deterministic for a given input slice.
+func groupByPath[T any](items []T, pathOf func(T) string) []pathGroup[T] {
+	indexes := make(map[string]int)
+	var groups []pathGroup[T]
+
+	for _, item := range items {
+		path := pathOf(item)
+		idx, ok := indexes[path]
+		if !ok {
+			idx = len(groups)
+			indexes[path] = idx
+			groups = append(groups, pathGroup[T]{Path: path})
+		}
+		groups[idx].Items = append(groups[idx].Items, item)
+	}
+
+	return groups
+}
+
+func formatLocations(title string, locations []Location, workingDir string) string {
+	files := groupByPath(locations, func(l Location) string {
+		return relPath(workingDir, uriToPath(l.URI))
+	})
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s (%d found across %d files):\n", title, len(locations), len(files))
+
+	for _, file := range files {
+		fmt.Fprintf(&sb, "\n%s:\n", file.Path)
+		for _, loc := range file.Items {
+			fmt.Fprintf(&sb, "  Line %d:%d\n", loc.Range.Start.Line+1, loc.Range.Start.Character+1)
+		}
 	}
 
 	return sb.String()
@@ -50,28 +82,56 @@ func formatDocumentSymbols(symbols []DocumentSymbol, filePath string, workingDir
 }
 
 func formatSymbolInformations(symbols []SymbolInformation, workingDir string) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Symbols (%d found):\n", len(symbols))
+	files := groupByPath(symbols, func(s SymbolInformation) string {
+		return relPath(workingDir, uriToPath(s.Location.URI))
+	})
 
-	for _, sym := range symbols {
-		path := relPath(workingDir, uriToPath(sym.Location.URI))
-		fmt.Fprintf(&sb, "  %s (%s) - %s:%d\n", sym.Name, symbolKindName(sym.Kind), path, sym.Location.Range.Start.Line+1)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Symbols (%d found across %d files):\n", len(symbols), len(files))
+
+	for _, file := range files {
+		fmt.Fprintf(&sb, "\n%s:\n", file.Path)
+		for _, sym := range file.Items {
+			fmt.Fprintf(&sb, "  %s (%s) - Line %d\n", sym.Name, symbolKindName(sym.Kind), sym.Location.Range.Start.Line+1)
+		}
 	}
 
 	return sb.String()
 }
 
 func formatWorkspaceSymbols(symbols []WorkspaceSymbol, workingDir string) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Symbols (%d found):\n", len(symbols))
+	files := groupByPath(symbols, func(s WorkspaceSymbol) string {
+		return relPath(workingDir, uriToPath(s.Location.URI))
+	})
 
-	for _, sym := range symbols {
-		path := relPath(workingDir, uriToPath(sym.Location.URI))
-		if sym.Location.Range != nil {
-			fmt.Fprintf(&sb, "  %s (%s) - %s:%d\n", sym.Name, symbolKindName(sym.Kind), path, sym.Location.Range.Start.Line+1)
-		} else {
-			fmt.Fprintf(&sb, "  %s (%s) - %s\n", sym.Name, symbolKindName(sym.Kind), path)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Symbols (%d found across %d files):\n", len(symbols), len(files))
+
+	for _, file := range files {
+		fmt.Fprintf(&sb, "\n%s:\n", file.Path)
+		for _, sym := range file.Items {
+			if sym.Location.Range != nil {
+				fmt.Fprintf(&sb, "  %s (%s) - Line %d\n", sym.Name, symbolKindName(sym.Kind), sym.Location.Range.Start.Line+1)
+			} else {
+				fmt.Fprintf(&sb, "  %s (%s)\n", sym.Name, symbolKindName(sym.Kind))
+			}
 		}
+	}
+
+	return sb.String()
+}
+
+func formatCallHierarchyItems(items []CallHierarchyItem, workingDir string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Call hierarchy items (%d found):\n", len(items))
+
+	for _, item := range items {
+		path := relPath(workingDir, uriToPath(item.URI))
+		detail := ""
+		if item.Detail != "" {
+			detail = " [" + item.Detail + "]"
+		}
+		fmt.Fprintf(&sb, "  %s (%s) - %s:%d%s\n", item.Name, symbolKindName(item.Kind), path, item.SelectionRange.Start.Line+1, detail)
 	}
 
 	return sb.String()
@@ -137,7 +197,6 @@ func symbolKindName(kind int) string {
 	return "Symbol"
 }
 
-// FormatDiagnostics formats diagnostics into a human-readable string.
 func FormatDiagnostics(diagnostics []Diagnostic, filePath string, workingDir string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Diagnostics (%d found):\n", len(diagnostics))
@@ -155,7 +214,6 @@ func FormatDiagnostics(diagnostics []Diagnostic, filePath string, workingDir str
 	return sb.String()
 }
 
-// DiagnosticSeverityName returns the human-readable name for a diagnostic severity.
 func DiagnosticSeverityName(severity int) string {
 	switch severity {
 	case DiagnosticSeverityError:

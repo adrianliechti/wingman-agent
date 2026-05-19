@@ -19,10 +19,10 @@ func metadataFromOpenAI(reqBody, respBody []byte) metadata {
 
 	var obj struct {
 		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			InputTokens      int `json:"input_tokens"`
-			OutputTokens     int `json:"output_tokens"`
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			InputTokens         int `json:"input_tokens"`
+			OutputTokens        int `json:"output_tokens"`
 			PromptTokensDetails struct {
 				CachedTokens int `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`
@@ -50,10 +50,10 @@ func metadataFromOpenAISSE(reqBody, sseBody []byte) metadata {
 		var obj struct {
 			// /v1/chat/completions streaming (final chunk with include_usage)
 			Usage struct {
-				PromptTokens     int `json:"prompt_tokens"`
-				CompletionTokens int `json:"completion_tokens"`
-				InputTokens      int `json:"input_tokens"`
-				OutputTokens     int `json:"output_tokens"`
+				PromptTokens        int `json:"prompt_tokens"`
+				CompletionTokens    int `json:"completion_tokens"`
+				InputTokens         int `json:"input_tokens"`
+				OutputTokens        int `json:"output_tokens"`
 				PromptTokensDetails struct {
 					CachedTokens int `json:"cached_tokens"`
 				} `json:"prompt_tokens_details"`
@@ -64,8 +64,8 @@ func metadataFromOpenAISSE(reqBody, sseBody []byte) metadata {
 			// /v1/responses streaming (response.completed / response.done events)
 			Response struct {
 				Usage struct {
-					InputTokens  int `json:"input_tokens"`
-					OutputTokens int `json:"output_tokens"`
+					InputTokens        int `json:"input_tokens"`
+					OutputTokens       int `json:"output_tokens"`
 					InputTokensDetails struct {
 						CachedTokens int `json:"cached_tokens"`
 					} `json:"input_tokens_details"`

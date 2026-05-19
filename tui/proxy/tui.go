@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -36,13 +37,21 @@ type App struct {
 	activePage string
 
 	seenRequests int
+
+	// runCtx is cancelled when the app stops, so the auto-refresh ticker
+	// goroutine in Run can exit cleanly instead of polling forever.
+	runCtx    context.Context
+	runCancel context.CancelFunc
 }
 
 func newApp(p *proxy.Proxy) *App {
+	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
 		app:        tview.NewApplication(),
 		p:          p,
 		activePage: pageStart,
+		runCtx:     ctx,
+		runCancel:  cancel,
 	}
 
 	a.build()
@@ -57,21 +66,18 @@ func (a *App) build() {
 		return false
 	})
 
-	// Status bar
 	a.statusBar = tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft)
 	a.statusBar.SetBackgroundColor(tcell.ColorDefault)
 	a.updateStatusBar()
 
-	// Start page
 	a.startView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetWordWrap(true)
 	a.startView.SetBackgroundColor(tcell.ColorDefault)
 	a.startView.SetText(a.startPageContent())
 
-	// Request list table
 	a.table = tview.NewTable().
 		SetSelectable(true, false).
 		SetFixed(1, 0)
@@ -81,14 +87,12 @@ func (a *App) build() {
 		Foreground(th.Foreground))
 	a.renderTable()
 
-	// Detail view
 	a.detail = tview.NewTextView().
 		SetDynamicColors(true).
 		SetWordWrap(true).
 		SetScrollable(true)
 	a.detail.SetBackgroundColor(tcell.ColorDefault)
 
-	// Pages
 	a.pages = tview.NewPages()
 	a.pages.SetBackgroundColor(tcell.ColorDefault)
 
@@ -110,7 +114,6 @@ func (a *App) build() {
 	a.pages.AddPage(pageList, listLayout, true, false)
 	a.pages.AddPage(pageDetail, detailLayout, true, false)
 
-	// Input handling
 	a.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch a.activePage {
 		case pageStart:
@@ -138,7 +141,7 @@ func (a *App) build() {
 				row, _ := a.table.GetSelection()
 				if row > 0 {
 					entries := a.p.Store.List()
-					idx := len(entries) - row // newest first, row 0 is header
+					idx := len(entries) - row
 					if idx >= 0 && idx < len(entries) {
 						a.selectedID = entries[idx].ID
 						a.renderDetail()
@@ -221,32 +224,39 @@ func (a *App) Run() error {
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 
-		for range ticker.C {
-			a.app.QueueUpdateDraw(func() {
-				entries := a.p.Store.List()
+		for {
+			select {
+			case <-a.runCtx.Done():
+				return
+			case <-ticker.C:
+				a.app.QueueUpdateDraw(func() {
+					entries := a.p.Store.List()
 
-				// Auto-switch to list on first request
-				if a.activePage == pageStart && len(entries) > 0 && a.seenRequests == 0 {
-					a.seenRequests = len(entries)
-					a.switchTo(pageList)
-				} else {
-					a.seenRequests = len(entries)
-				}
+					if a.activePage == pageStart && len(entries) > 0 && a.seenRequests == 0 {
+						a.seenRequests = len(entries)
+						a.switchTo(pageList)
+					} else {
+						a.seenRequests = len(entries)
+					}
 
-				if a.activePage == pageList {
-					a.renderTable()
-				}
+					if a.activePage == pageList {
+						a.renderTable()
+					}
 
-				a.updateStatusBar()
-			})
+					a.updateStatusBar()
+				})
+			}
 		}
 	}()
 
-	return a.app.Run()
+	err := a.app.Run()
+	a.runCancel()
+	return err
 }
 
 func (a *App) Stop() {
 	a.app.Stop()
+	a.runCancel()
 }
 
 func (a *App) startPageContent() string {
@@ -298,7 +308,7 @@ func (a *App) renderTable() {
 			SetExpansion(1)
 
 		if i == 2 {
-			cell.SetExpansion(3) // URL gets more space
+			cell.SetExpansion(3)
 		}
 
 		a.table.SetCell(0, i, cell)
@@ -306,7 +316,6 @@ func (a *App) renderTable() {
 
 	entries := a.p.Store.List()
 
-	// Newest first
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
 		row := len(entries) - i
@@ -356,7 +365,6 @@ func (a *App) renderTable() {
 		}
 	}
 
-	// Keep selection valid
 	if rowCount := a.table.GetRowCount(); rowCount > 1 {
 		row, _ := a.table.GetSelection()
 		if row < 1 {
@@ -376,7 +384,6 @@ func (a *App) renderDetail() {
 
 	var b strings.Builder
 
-	// Summary header
 	statusColor := th.Green
 	if entry.Status >= 400 {
 		statusColor = th.Yellow
@@ -407,13 +414,11 @@ func (a *App) renderDetail() {
 		fmt.Fprintf(&b, "  [%s]Error[-]     [%s]%s[-]\n", th.BrBlack, th.Red, entry.Error)
 	}
 
-	// Request body
 	if len(entry.RequestBody) > 0 {
 		fmt.Fprintf(&b, "\n  [%s::b]─── Request Body ───[-::-]\n\n", th.Yellow)
 		fmt.Fprint(&b, formatJSON(entry.RequestBody, th))
 	}
 
-	// Response body
 	if len(entry.ResponseBody) > 0 {
 		fmt.Fprintf(&b, "\n  [%s::b]─── Response Body ───[-::-]\n\n", th.Yellow)
 

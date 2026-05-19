@@ -28,7 +28,7 @@ func Run(ctx context.Context, args []string, options *Options) error {
 	env := options.Env
 	env = append(env, "OPENCODE_CONFIG_CONTENT="+cfg)
 
-	cmd := exec.Command(options.Path, args...)
+	cmd := exec.CommandContext(ctx, options.Path, args...)
 	cmd.Env = env
 
 	cmd.Stdin = os.Stdin

@@ -8,9 +8,45 @@ import (
 	"path/filepath"
 )
 
+const maxWorkspaces = 3
+
 type Settings struct {
-	WingmanURL   string `json:"url"`
-	WingmanToken string `json:"token"`
+	WingmanURL   string   `json:"url"`
+	WingmanToken string   `json:"token"`
+	Workspaces   []string `json:"workspaces,omitempty"`
+}
+
+func (s *Settings) AddWorkspace(path string) {
+	if path == "" {
+		return
+	}
+
+	filtered := make([]string, 0, len(s.Workspaces)+1)
+	filtered = append(filtered, path)
+	for _, p := range s.Workspaces {
+		if p == path {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+
+	if len(filtered) > maxWorkspaces {
+		filtered = filtered[:maxWorkspaces]
+	}
+
+	s.Workspaces = filtered
+}
+
+func (s *Settings) RemoveWorkspace(path string) {
+	filtered := make([]string, 0, len(s.Workspaces))
+	for _, p := range s.Workspaces {
+		if p == path {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+
+	s.Workspaces = filtered
 }
 
 func settingsPath() (string, error) {

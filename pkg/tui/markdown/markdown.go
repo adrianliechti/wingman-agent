@@ -16,8 +16,7 @@ import (
 func Render(text string) string {
 	t := theme.Default
 
-	// Handle incomplete code blocks (streaming)
-	// Count opening ``` markers that aren't closed
+	// Handle incomplete code blocks during streaming (odd count of ``` markers).
 	completeText := text
 	incompleteCode := ""
 	incompleteLang := ""
@@ -25,7 +24,6 @@ func Render(text string) string {
 	backtickCount := strings.Count(text, "```")
 
 	if backtickCount%2 == 1 {
-		// Find the last incomplete code block
 		incompleteCodeBlockRe := regexp.MustCompile("(?s)```([\\w+#.-]*)\\n([^`]*)$")
 		matches := incompleteCodeBlockRe.FindStringSubmatchIndex(text)
 
@@ -36,8 +34,7 @@ func Render(text string) string {
 		}
 	}
 
-	// Create goldmark with GFM and custom tview renderer
-	// Priority 100 ensures our renderer takes precedence over the default HTML renderer (1000)
+	// Priority 100 ensures our renderer takes precedence over the default HTML renderer (1000).
 	md := goldmark.New(
 		goldmark.WithExtensions(extension.GFM),
 		goldmark.WithRenderer(
@@ -52,13 +49,11 @@ func Render(text string) string {
 	var buf bytes.Buffer
 
 	if err := md.Convert([]byte(completeText), &buf); err != nil {
-		// Fallback to original text on error
 		return text
 	}
 
 	result := buf.String()
 
-	// Append incomplete code block if present
 	if incompleteCode != "" {
 		result += formatCodeBlock(incompleteCode, incompleteLang, t)
 	}

@@ -3,6 +3,7 @@ import {
 	ChevronDown,
 	ChevronRight,
 	LoaderCircle,
+	Paperclip,
 	Plus,
 	Square,
 	X,
@@ -10,6 +11,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useColorScheme } from "../hooks/useColorScheme";
 import type { ChatEntry } from "../hooks/useWebSocket";
+import { sampleSpinnerVerb } from "../spinnerVerbs";
 import type { Phase } from "../types/protocol";
 import { FilePicker } from "./FilePicker";
 import { MarkdownContent } from "./MarkdownContent";
@@ -20,23 +22,80 @@ import { SkillPicker } from "./SkillPicker";
 interface Props {
 	entries: ChatEntry[];
 	phase: Phase;
-	onSend: (text: string, files?: string[]) => void;
+	mode: "agent" | "plan";
+	onSelectMode: (next: "agent" | "plan") => void;
+	onSend: (text: string, files?: string[], images?: string[]) => void;
 	onCancel: () => void;
+}
+
+interface PendingImage {
+	id: string;
+	dataUrl: string;
+	name?: string;
+}
+
+function readImageAsDataUrl(file: File): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader();
+		reader.onload = () => resolve(reader.result as string);
+		reader.onerror = () => reject(reader.error);
+		reader.readAsDataURL(file);
+	});
+}
+
+// Vision models clamp inputs anyway (~1568px longest edge for Claude), so a
+// 12MP screenshot is wasted bytes on the wire and in the token bill. Downscale
+// to MAX_EDGE and re-encode as JPEG. GIFs pass through to preserve animation;
+// small images skip the canvas round-trip.
+const MAX_EDGE = 2048;
+const JPEG_QUALITY = 0.9;
+const PASSTHROUGH_MAX_BYTES = 512 * 1024;
+
+async function processImage(file: File): Promise<string> {
+	if (file.type === "image/gif") return readImageAsDataUrl(file);
+
+	let bitmap: ImageBitmap;
+	try {
+		bitmap = await createImageBitmap(file);
+	} catch {
+		return readImageAsDataUrl(file);
+	}
+
+	try {
+		const longest = Math.max(bitmap.width, bitmap.height);
+		if (longest <= MAX_EDGE && file.size <= PASSTHROUGH_MAX_BYTES) {
+			return readImageAsDataUrl(file);
+		}
+		const scale = Math.min(1, MAX_EDGE / longest);
+		const w = Math.max(1, Math.round(bitmap.width * scale));
+		const h = Math.max(1, Math.round(bitmap.height * scale));
+		const canvas = document.createElement("canvas");
+		canvas.width = w;
+		canvas.height = h;
+		const ctx = canvas.getContext("2d");
+		if (!ctx) return readImageAsDataUrl(file);
+		ctx.drawImage(bitmap, 0, 0, w, h);
+		return canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+	} finally {
+		bitmap.close();
+	}
 }
 
 // Visual gap left above a pinned user message — matches the contentRef's
 // py-4 padding so the first message and subsequent submissions look the same.
 const PIN_TOP_GAP = 16;
 
-export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
+export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel }: Props) {
 	const scheme = useColorScheme();
 	const [input, setInput] = useState("");
 	const [files, setFiles] = useState<string[]>([]);
+	const [images, setImages] = useState<PendingImage[]>([]);
 	const [showPicker, setShowPicker] = useState(false);
 	const containerRef = useRef<HTMLDivElement>(null);
 	const contentRef = useRef<HTMLDivElement>(null);
 	const spacerRef = useRef<HTMLDivElement>(null);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const imageInputRef = useRef<HTMLInputElement>(null);
 
 	// ── scroll handling ──────────────────────────────────────────────────────
 	//
@@ -137,6 +196,12 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 
 	const isActive = phase !== "idle";
 
+	// Return focus to the input when the agent finishes so the user can
+	// keep typing without clicking back.
+	useEffect(() => {
+		if (!isActive) textareaRef.current?.focus();
+	}, [isActive]);
+
 	// Phase non-idle -> idle triggers the active turn's auto-collapse. If the
 	// user scrolled away from the pinned message during streaming, the working
 	// area is partly above the viewport and shrinking it would jump the visible
@@ -158,7 +223,7 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 	// Show the skill picker while the user is still typing the slash command
 	// (no whitespace yet — once they add a space we treat the rest as args).
 	const skillMatch = input.match(/^\/(\S*)$/);
-	const showSkills = !!skillMatch && !isActive;
+	const showSkills = !!skillMatch;
 	const skillQuery = skillMatch ? skillMatch[1] : "";
 
 	// One-shot: jump to bottom on the first paint with restored history (not
@@ -283,12 +348,21 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 
 	const handleSubmit = useCallback(() => {
 		const text = input.trim();
-		if (!text || isActive) return;
+		if (!text && images.length === 0) return;
+		// While a turn is in flight, this submit queues onto the server side.
+		// The agent will pick it up at its next safe boundary and respond as
+		// part of the same Send loop — visually it lands as a new turn.
 		submitPendingRef.current = true;
-		onSend(text, files.length > 0 ? files : undefined);
+		onSend(
+			text,
+			files.length > 0 ? files : undefined,
+			images.length > 0 ? images.map((i) => i.dataUrl) : undefined,
+		);
 		setInput("");
 		setFiles([]);
-	}, [input, isActive, onSend, files]);
+		setImages([]);
+		textareaRef.current?.focus();
+	}, [input, onSend, files, images]);
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
@@ -310,11 +384,48 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 	const addFile = useCallback((path: string) => {
 		setFiles((prev) => (prev.includes(path) ? prev : [...prev, path]));
 		setShowPicker(false);
+		textareaRef.current?.focus();
 	}, []);
 
 	const removeFile = useCallback((path: string) => {
 		setFiles((prev) => prev.filter((p) => p !== path));
 	}, []);
+
+	const addImageFiles = useCallback(async (fileList: FileList | File[]) => {
+		const next: PendingImage[] = [];
+		for (const f of Array.from(fileList)) {
+			if (!f.type.startsWith("image/")) continue;
+			try {
+				const dataUrl = await processImage(f);
+				next.push({ id: crypto.randomUUID(), dataUrl, name: f.name });
+			} catch {
+				/* skip unreadable files */
+			}
+		}
+		if (next.length > 0) setImages((prev) => [...prev, ...next]);
+	}, []);
+
+	const removeImage = useCallback((id: string) => {
+		setImages((prev) => prev.filter((i) => i.id !== id));
+	}, []);
+
+	const handlePaste = useCallback(
+		(e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+			const items = e.clipboardData?.items;
+			if (!items) return;
+			const pasted: File[] = [];
+			for (const item of items) {
+				if (item.kind !== "file") continue;
+				if (!item.type.startsWith("image/")) continue;
+				const f = item.getAsFile();
+				if (f) pasted.push(f);
+			}
+			if (pasted.length === 0) return;
+			e.preventDefault();
+			void addImageFiles(pasted);
+		},
+		[addImageFiles],
+	);
 
 	const selectSkill = useCallback(
 		(s: { name: string; arguments?: string[] }) => {
@@ -323,15 +434,21 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 				// Pre-fill the slash command and let the user type arguments.
 				setInput(`/${s.name} `);
 				textareaRef.current?.focus();
-			} else if (!isActive) {
-				// No args — fire the skill immediately.
-				submitPendingRef.current = true;
-				onSend(`/${s.name}`, files.length > 0 ? files : undefined);
-				setInput("");
-				setFiles([]);
+				return;
 			}
+			// No args — fire the skill immediately. The server queues onto an
+			// in-flight turn when one is running.
+			submitPendingRef.current = true;
+			onSend(
+				`/${s.name}`,
+				files.length > 0 ? files : undefined,
+				images.length > 0 ? images.map((i) => i.dataUrl) : undefined,
+			);
+			setInput("");
+			setFiles([]);
+			setImages([]);
 		},
-		[isActive, onSend, files],
+		[onSend, files, images],
 	);
 
 	return (
@@ -425,14 +542,43 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 							</div>
 						)}
 
+						{images.length > 0 && (
+							<div className="flex flex-wrap gap-1.5 px-2.5 pt-2">
+								{images.map((img) => (
+									<span
+										key={img.id}
+										className="group relative inline-flex items-center rounded overflow-hidden bg-bg-active"
+										title={img.name || "image"}
+									>
+										<img
+											src={img.dataUrl}
+											alt={img.name || "image"}
+											className="block w-12 h-12 object-cover"
+										/>
+										<button
+											type="button"
+											className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center rounded-full bg-bg/80 text-fg-dim hover:text-fg cursor-pointer"
+											onClick={() => removeImage(img.id)}
+											aria-label="Remove image"
+										>
+											<X size={10} />
+										</button>
+									</span>
+								))}
+							</div>
+						)}
+
 						<div className="px-3 pt-2">
 							<textarea
 								ref={textareaRef}
+								// biome-ignore lint/a11y/noAutofocus: chat input is the primary control
+								autoFocus
 								className="w-full bg-transparent text-fg text-[12px] font-mono resize-none outline-none leading-[1.7] placeholder:text-fg-dim"
 								style={{ fieldSizing: "content" } as React.CSSProperties}
 								value={input}
 								onChange={(e) => setInput(e.target.value)}
 								onKeyDown={handleKeyDown}
+								onPaste={handlePaste}
 								placeholder="Message Wingman…"
 								rows={1}
 							/>
@@ -456,37 +602,81 @@ export function ChatPanel({ entries, phase, onSend, onCancel }: Props) {
 										/>
 									)}
 								</div>
-								<ModePicker />
+								<input
+									ref={imageInputRef}
+									type="file"
+									accept="image/*"
+									multiple
+									className="hidden"
+									onChange={(e) => {
+										if (e.target.files) void addImageFiles(e.target.files);
+										e.target.value = "";
+									}}
+								/>
+								<ModePicker mode={mode} onSelect={onSelectMode} />
 								<ModelPicker />
 							</div>
 
+							<div className="flex items-center gap-0">
 							<button
 								type="button"
-								className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
-									isActive || input.trim()
-										? "text-fg-muted hover:text-fg hover:bg-bg-hover"
-										: "text-fg-dim opacity-40 cursor-not-allowed"
-								}`}
-								onClick={isActive ? onCancel : handleSubmit}
-								disabled={!isActive && !input.trim()}
-								title={isActive ? "Stop (Esc)" : "Send (Enter)"}
+								className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
+								onClick={() => imageInputRef.current?.click()}
+								title="Attach image"
 							>
-								{isActive ? (
-									<>
-										<LoaderCircle
-											size={14}
-											className="animate-spin group-hover:hidden"
-										/>
-										<Square
-											size={10}
-											fill="currentColor"
-											className="hidden group-hover:block"
-										/>
-									</>
-								) : (
-									<ArrowUp size={14} />
-								)}
+								<Paperclip size={14} />
 							</button>
+							{(() => {
+								// Button modes: if the input has content, the primary
+								// action is Send — which queues onto an in-flight turn
+								// when one is running. Otherwise, while a turn is
+								// active, the button stops it. Idle + empty = disabled.
+								const hasInput =
+									input.trim() !== "" || images.length > 0;
+								const mode: "send" | "stop" | "disabled" = hasInput
+									? "send"
+									: isActive
+										? "stop"
+										: "disabled";
+								return (
+									<button
+										type="button"
+										className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
+											mode === "disabled"
+												? "text-fg-dim opacity-40 cursor-not-allowed"
+												: "text-fg-muted hover:text-fg hover:bg-bg-hover"
+										}`}
+										onClick={
+											mode === "stop" ? onCancel : handleSubmit
+										}
+										disabled={mode === "disabled"}
+										title={
+											mode === "stop"
+												? "Stop (Esc)"
+												: mode === "send" && isActive
+													? "Queue (Enter)"
+													: "Send (Enter)"
+										}
+									>
+										{mode === "stop" ? (
+											<>
+												<LoaderCircle
+													size={14}
+													className="animate-spin group-hover:hidden"
+												/>
+												<Square
+													size={10}
+													fill="currentColor"
+													className="hidden group-hover:block"
+												/>
+											</>
+										) : (
+											<ArrowUp size={14} />
+										)}
+									</button>
+								);
+							})()}
+							</div>
 						</div>
 					</div>
 				</div>
@@ -525,14 +715,32 @@ function EntryView({
 		>
 			<div className="text-[12px] leading-[1.7] break-words min-w-0 font-mono">
 				{isUser ? (
-					<span className="whitespace-pre-wrap text-fg">{entry.content}</span>
-				) : (
 					<>
-						<MarkdownContent text={entry.content} />
-						{isStreaming && (
-							<span className="inline-block w-[6px] h-[14px] bg-fg-dim align-text-bottom ml-0.5 animate-[blink_1s_step-end_infinite]" />
+						{entry.content && (
+							<span className="whitespace-pre-wrap text-fg">{entry.content}</span>
+						)}
+						{entry.images && entry.images.length > 0 && (
+							<div className={`flex flex-wrap gap-1.5 ${entry.content ? "mt-2" : ""}`}>
+								{entry.images.map((src, i) => (
+									<a
+										key={`${entry.id}-img-${i}`}
+										href={src}
+										target="_blank"
+										rel="noreferrer"
+										className="block rounded overflow-hidden bg-bg-active"
+									>
+										<img
+											src={src}
+											alt="attachment"
+											className="block max-h-40 max-w-[240px] object-contain"
+										/>
+									</a>
+								))}
+							</div>
 						)}
 					</>
+				) : (
+					<MarkdownContent text={entry.content} />
 				)}
 			</div>
 		</div>
@@ -649,9 +857,9 @@ function TurnView({
 							onCollapse={() => setExpanded(false)}
 						/>
 						{isActive &&
-							phase !== "streaming" &&
+							!(phase === "streaming" && turn.final?.type === "assistant") &&
 							turn.working[turn.working.length - 1]?.type !==
-								"reasoning" && <PhaseIndicator phase={phase} />}
+								"reasoning" && <PhaseIndicator />}
 					</>
 				) : (
 					<WorkingSummary
@@ -669,11 +877,12 @@ function TurnView({
 					}
 				/>
 			)}
-			{/* Active turn with no final yet and no working: still show indicator */}
-			{isActive &&
-				turn.working.length === 0 &&
-				!turn.final &&
-				phase !== "streaming" && <PhaseIndicator phase={phase} />}
+			{/* Active turn with no final yet and no working: still show indicator.
+			    Persist through the brief gap between phase=streaming and the
+			    first text delta materializing turn.final. */}
+			{isActive && turn.working.length === 0 && !turn.final && (
+				<PhaseIndicator />
+			)}
 		</>
 	);
 }
@@ -768,15 +977,14 @@ function WorkingSummary({
 	);
 }
 
-function PhaseIndicator({ phase }: { phase: Phase }) {
-	// Caller gates on phase !== "streaming", so the only labels reachable here
-	// are "thinking" and "tool_running".
-	const label = phase === "tool_running" ? "Working" : "Thinking";
+function PhaseIndicator() {
+	// Pick a verb once per mount so the label stays stable while shown.
+	const [verb] = useState(sampleSpinnerVerb);
 
 	return (
 		<div className="mb-4 pl-3">
 			<div className="flex items-baseline gap-1.5 text-[12px] text-fg-dim font-mono italic">
-				<span>{label}</span>
+				<span>{verb}</span>
 				<span className="inline-flex gap-[3px]">
 					<span
 						className="w-[3px] h-[3px] rounded-full bg-fg-dim animate-pulse"
@@ -876,7 +1084,7 @@ function ReasoningView({
 			<div className="text-[11px] whitespace-pre-wrap break-words text-fg-dim font-mono leading-relaxed italic">
 				{summary}
 				{isStreaming && (
-					<span className="inline-block w-[5px] h-[10px] bg-fg-dim align-text-bottom ml-0.5 animate-[blink_1s_step-end_infinite]" />
+					<span className="inline-block w-[3px] h-[10px] bg-fg-dim/40 align-text-bottom ml-0.5 animate-[pulse_1.4s_ease-in-out_infinite]" />
 				)}
 			</div>
 		</div>

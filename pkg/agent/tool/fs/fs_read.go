@@ -20,25 +20,25 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			fmt.Sprintf("Read the contents of a file. Output includes line numbers. Truncated to %d lines or %dKB.", DefaultMaxLines, DefaultMaxBytes/1024),
-			"",
-			"Usage:",
-			"- You must read a file before editing it.",
-			"- If you read this file earlier in the conversation and nothing has modified it since, the prior result is still current — refer to it instead of re-reading. Re-read only after `edit` or `write`, or when the user indicates external changes.",
-			"- For large files, use offset and limit to read in chunks. The output will tell you where to continue.",
-			"- Read multiple files in parallel by calling this tool multiple times in one response.",
-			"- Prefer `grep` to locate relevant code before reading entire files. Often a single `grep` returns enough context that no `read` is needed.",
-			"- When editing text from read output, preserve the exact indentation as shown AFTER the line number prefix. Never include line numbers in old_text.",
+			fmt.Sprintf("Read a known file path. Results use cat -n format with 1-based line numbers. Defaults to the first %d lines.", DefaultMaxLines),
+			"- Required before `edit` on the same file.",
+			"- Do not use for discovery: use `grep` for content/symbols and `glob` for filename patterns.",
+			"- After `grep` finds candidates, read only the file or line window needed for context.",
+			"- Use `offset` and `limit` for long files or known ranges. `offset` is a 1-based start line, not a result skip count.",
+			"- Do not re-read a file already shown unless it changed; use the existing line numbers.",
+			"- Reads files only, not directories. Use `glob` to find files in a directory.",
+			"- Binary files (PDF, images, archives) are rejected.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":   map[string]any{"type": "string", "description": "File path relative to the working directory, or an absolute path inside an allowed root (e.g. a discovered skill directory). Paths beginning with `~/` are expanded to the user's home directory."},
-				"offset": map[string]any{"type": "integer", "description": "Line number to start reading from (1-based)"},
-				"limit":  map[string]any{"type": "integer", "description": "Maximum number of lines to read. Only provide if the file is too large to read at once."},
+				"path":   map[string]any{"type": "string", "description": "File path."},
+				"offset": map[string]any{"type": "integer", "description": "1-based line number to start reading from. Only provide for large files or known ranges. Defaults to 1."},
+				"limit":  map[string]any{"type": "integer", "description": "Positive number of lines to read. Only provide for large files or known ranges."},
 			},
-			"required": []string{"path"},
+			"required":             []string{"path"},
+			"additionalProperties": false,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
@@ -49,121 +49,110 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			}
 
 			workingDir := root.Name()
-			expanded := expandHome(pathArg)
 
-			if isBinaryFile(expanded) {
-				return "", fmt.Errorf("cannot read %s: file appears to be binary (extension %q). Use the shell tool with an appropriate viewer if you really need to inspect it", pathArg, filepath.Ext(expanded))
+			if isBinaryFile(pathArg) {
+				return "", fmt.Errorf("cannot read %s: file appears to be binary (extension %q). Use the shell tool with an appropriate viewer if you really need to inspect it", pathArg, filepath.Ext(pathArg))
 			}
 
 			limit := 0
-			offset := 0
-
-			if l, ok := args["limit"].(float64); ok && l > 0 {
-				limit = int(l)
+			if v, present, err := tool.PositiveIntArg(args, "limit"); present {
+				if err != nil {
+					return "", err
+				}
+				limit = v
 			}
 
-			if o, ok := args["offset"].(float64); ok && o > 0 {
-				offset = int(o) - 1
+			startLine := 1
+			if v, present, err := tool.PositiveIntArg(args, "offset"); present {
+				if err != nil {
+					return "", fmt.Errorf("offset must be a positive 1-based integer")
+				}
+				startLine = v
 			}
 
-			content, err := readFromAllowedLocation(root, workingDir, expanded, allowedReadRoots)
+			target, err := resolveFileTarget(pathArg, workingDir, allowedReadRoots, "read file")
 			if err != nil {
 				return "", err
 			}
 
-			return formatRead(content, offset, limit)
+			info, err := statFileTarget(root, target)
+			if err != nil {
+				return "", fmt.Errorf("stat file %q: %w", pathArg, err)
+			}
+			if info.IsDir() {
+				return "", fmt.Errorf("cannot read file: path %q is a directory; use glob to find files inside it", pathArg)
+			}
+
+			content, err := readFileTarget(root, target)
+			if err != nil {
+				return "", fmt.Errorf("read file %q: %w", pathArg, err)
+			}
+
+			return formatRead(content, startLine, limit)
 		},
 	}
 }
 
-// readFromAllowedLocation tries the workspace root first, then falls back to
-// any path inside the allow-list. Returns the file contents or an error.
-func readFromAllowedLocation(root *os.Root, workingDir, path string, allowedRoots []string) ([]byte, error) {
-	if !isOutsideWorkspace(path, workingDir) {
-		normalizedPath := normalizePath(path, workingDir)
-		content, err := root.ReadFile(normalizedPath)
-		if err != nil {
-			return nil, pathError("read file", path, normalizedPath, workingDir, err)
-		}
-		return content, nil
-	}
-
-	if !filepath.IsAbs(path) {
-		return nil, fmt.Errorf("cannot read file: relative path %q is outside workspace", path)
-	}
-
-	cleaned := cleanPath(path)
-	cmpPath := normalizePathForComparison(cleaned)
-	for _, allowed := range allowedRoots {
-		allowedClean := cleanPath(allowed)
-		cmpAllowed := normalizePathForComparison(allowedClean)
-		if cmpPath == cmpAllowed || strings.HasPrefix(cmpPath, cmpAllowed+string(filepath.Separator)) {
-			content, err := os.ReadFile(cleaned)
-			if err != nil {
-				return nil, fmt.Errorf("read file %q: %w", path, err)
-			}
-			return content, nil
-		}
-	}
-
-	return nil, fmt.Errorf("cannot read file: path %q is outside workspace and not in any allowed root", path)
-}
-
-// expandHome resolves a leading `~` to the user's home dir. Accepts both
-// `~/...` (forward slash) and `~\...` (Windows backslash) forms.
-func expandHome(path string) string {
-	if path == "~" {
-		if home, err := os.UserHomeDir(); err == nil {
-			return home
-		}
-		return path
-	}
-	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
-}
-
-// formatRead applies the truncation + line-numbering display logic.
-func formatRead(content []byte, offset, limit int) (string, error) {
+func formatRead(content []byte, startLine, limit int) (string, error) {
 	if len(content) == 0 {
-		return "(empty file)", nil
+		return "<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>", nil
 	}
 
-	lines := strings.Split(string(content), "\n")
+	_, text := stripBom(string(content))
+	lines := strings.Split(normalizeToLF(text), "\n")
 	total := len(lines)
+	offset := startLine - 1
 
 	if offset >= total {
-		return "", fmt.Errorf("offset %d is beyond end of file (%d lines)", offset+1, total)
+		return fmt.Sprintf("<system-reminder>Warning: the file exists but is shorter than the provided offset (%d). The file has %d lines.</system-reminder>", startLine, total), nil
 	}
 
-	end := total
-
-	if limit > 0 && offset+limit < total {
-		end = offset + limit
+	maxLines := DefaultMaxLines
+	if limit > 0 {
+		maxLines = limit
 	}
+
+	end := min(total, offset+maxLines)
 
 	var numbered []string
 
 	for i, line := range lines[offset:end] {
 		lineNum := offset + i + 1
-		numbered = append(numbered, fmt.Sprintf("%6d\t%s", lineNum, line))
+		numbered = append(numbered, fmt.Sprintf("%d\t%s", lineNum, line))
 	}
 
 	selected := strings.Join(numbered, "\n")
-	output, truncated := truncateHead(selected)
+	output, bytesTruncated := truncateReadOutput(selected)
 
-	outputLines := len(strings.Split(output, "\n"))
+	outputLines := 0
+	if output != "" {
+		outputLines = strings.Count(output, "\n") + 1
+	}
 	endLine := offset + outputLines
 
-	if truncated || end < total {
-		notice := fmt.Sprintf("\n\n[Lines %d-%d of %d", offset+1, endLine, total)
-		notice += fmt.Sprintf(". Use offset=%d to continue]", endLine+1)
-
-		return output + notice, nil
+	if bytesTruncated || end < total {
+		notice := fmt.Sprintf("Showing lines %d-%d of %d", startLine, endLine, total)
+		if bytesTruncated {
+			notice += fmt.Sprintf("; %dKB cap reached", DefaultMaxBytes/1024)
+		}
+		if endLine < total {
+			notice += fmt.Sprintf("; use offset=%d to continue", endLine+1)
+		}
+		return fmt.Sprintf("%s\n\n[%s]", output, notice), nil
 	}
 
 	return output, nil
+}
+
+func truncateReadOutput(content string) (string, bool) {
+	if len(content) <= DefaultMaxBytes {
+		return content, false
+	}
+
+	cut := strings.LastIndex(content[:DefaultMaxBytes], "\n")
+	if cut <= 0 {
+		return content[:DefaultMaxBytes], true
+	}
+
+	return content[:cut], true
 }
