@@ -58,6 +58,46 @@ func ensurePathInWorkspaceFS(pathArg, workingDir, action string) (string, error)
 	return normalizePathFS(pathArg, workingDir), nil
 }
 
+// writeTarget classifies a write/edit path. Exactly one of (InWorkspace,
+// AbsoluteAllowed) is true on success. RelPath is set when InWorkspace
+// (root-relative for os.Root ops); AbsPath is set when AbsoluteAllowed
+// (raw os.* ops). Mirrors the read-side classification in
+// readFromAllowedLocation but returns a target descriptor instead of
+// performing the read inline.
+type writeTarget struct {
+	InWorkspace     bool
+	AbsoluteAllowed bool
+	RelPath         string
+	AbsPath         string
+}
+
+// resolveWriteTarget classifies pathArg for write/edit. Paths inside
+// workingDir resolve to root-relative form. Absolute paths inside any
+// allowedWriteRoot resolve to absolute form for raw os.* ops. Anything
+// else is rejected.
+func resolveWriteTarget(pathArg, workingDir string, allowedWriteRoots []string, action string) (writeTarget, error) {
+	if !isOutsideWorkspace(pathArg, workingDir) {
+		return writeTarget{InWorkspace: true, RelPath: normalizePath(pathArg, workingDir)}, nil
+	}
+
+	if !filepath.IsAbs(pathArg) {
+		return writeTarget{}, fmt.Errorf("cannot %s: relative path %q is outside workspace", action, pathArg)
+	}
+
+	cleaned := cleanPath(pathArg)
+	cmpPath := normalizePathForComparison(cleaned)
+
+	for _, allowed := range allowedWriteRoots {
+		allowedClean := cleanPath(allowed)
+		cmpAllowed := normalizePathForComparison(allowedClean)
+		if cmpPath == cmpAllowed || strings.HasPrefix(cmpPath, cmpAllowed+string(filepath.Separator)) {
+			return writeTarget{AbsoluteAllowed: true, AbsPath: cleaned}, nil
+		}
+	}
+
+	return writeTarget{}, fmt.Errorf("cannot %s: path %q is outside workspace %q and not in any allowed write root", action, pathArg, workingDir)
+}
+
 func isOutsideWorkspace(path, workingDir string) bool {
 	if !filepath.IsAbs(path) {
 		return false

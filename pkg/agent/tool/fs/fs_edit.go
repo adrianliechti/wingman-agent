@@ -11,7 +11,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-func EditTool(root *os.Root) tool.Tool {
+func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 	return tool.Tool{
 		Name:   "edit",
 		Effect: tool.StaticEffect(tool.EffectMutates),
@@ -24,13 +24,14 @@ func EditTool(root *os.Root) tool.Tool {
 			"- Use the smallest unique `old_string` — usually 2-4 adjacent lines. If matching fails, re-read the relevant slice.",
 			"- To create a new file or replace an empty file, use empty `old_string`; non-empty files reject empty `old_string`.",
 			"- Use `replace_all=true` for intentional file-wide renames/replacements.",
+			"- Path may be workspace-relative or absolute inside an allowed write root.",
 			"- Do not insert emoji unless asked.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":        map[string]any{"type": "string", "description": "File path to modify; relative to workspace or absolute inside the workspace."},
+				"path":        map[string]any{"type": "string", "description": "File path to modify; relative to workspace or absolute inside an allowed write root."},
 				"old_string":  map[string]any{"type": "string", "description": "Exact text to replace. Must be unique unless replace_all=true. Use an empty string only to create a new file or replace an empty file."},
 				"new_string":  map[string]any{"type": "string", "description": "Replacement text. Must differ from old_string."},
 				"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences of old_string. Defaults to false."},
@@ -47,9 +48,7 @@ func EditTool(root *os.Root) tool.Tool {
 			}
 
 			workingDir := root.Name()
-
-			normalizedPath, err := ensurePathInWorkspace(pathArg, workingDir, "edit file")
-
+			target, err := resolveWriteTarget(pathArg, workingDir, allowedWriteRoots, "edit file")
 			if err != nil {
 				return "", err
 			}
@@ -70,11 +69,14 @@ func EditTool(root *os.Root) tool.Tool {
 				return "", fmt.Errorf("no changes made to %s. old_string and new_string are identical", pathArg)
 			}
 
-			contentBytes, err := root.ReadFile(normalizedPath)
+			contentBytes, err := readEditTarget(root, target)
 
 			if err != nil {
 				if !os.IsNotExist(err) || oldText != "" {
-					return "", pathError("read file", pathArg, normalizedPath, workingDir, err)
+					if target.InWorkspace {
+						return "", pathError("read file", pathArg, target.RelPath, workingDir, err)
+					}
+					return "", fmt.Errorf("read file %q: %w", pathArg, err)
 				}
 			}
 
@@ -94,8 +96,11 @@ func EditTool(root *os.Root) tool.Tool {
 				}
 
 				finalContent := bom + restoreLineEndings(normalizedNewText, originalEnding)
-				if err := writeRootFile(root, normalizedPath, finalContent); err != nil {
-					return "", pathError("write file", pathArg, normalizedPath, workingDir, err)
+				if err := writeEditTarget(root, target, finalContent); err != nil {
+					if target.InWorkspace {
+						return "", pathError("write file", pathArg, target.RelPath, workingDir, err)
+					}
+					return "", fmt.Errorf("write file %q: %w", pathArg, err)
 				}
 
 				diff := generateDiffString("", normalizedNewText)
@@ -160,8 +165,11 @@ func EditTool(root *os.Root) tool.Tool {
 
 			finalContent := bom + restoreLineEndings(newContent, originalEnding)
 
-			if err := writeRootFile(root, normalizedPath, finalContent); err != nil {
-				return "", pathError("write file", pathArg, normalizedPath, workingDir, err)
+			if err := writeEditTarget(root, target, finalContent); err != nil {
+				if target.InWorkspace {
+					return "", pathError("write file", pathArg, target.RelPath, workingDir, err)
+				}
+				return "", fmt.Errorf("write file %q: %w", pathArg, err)
 			}
 
 			diff := generateDiffString(normalizedContent, newContent)
@@ -169,6 +177,28 @@ func EditTool(root *os.Root) tool.Tool {
 			return fmt.Sprintf("Successfully replaced text in %s.\n\n%s", pathArg, diff), nil
 		},
 	}
+}
+
+// readEditTarget reads either through os.Root (workspace) or directly via
+// os.ReadFile (allowed write root). Mirrors the read-side branching in
+// readFromAllowedLocation.
+func readEditTarget(root *os.Root, target writeTarget) ([]byte, error) {
+	if target.InWorkspace {
+		return root.ReadFile(target.RelPath)
+	}
+	return os.ReadFile(target.AbsPath)
+}
+
+// writeEditTarget writes either through os.Root (workspace) or via
+// os.WriteFile + parent MkdirAll (allowed write root).
+func writeEditTarget(root *os.Root, target writeTarget, content string) error {
+	if target.InWorkspace {
+		return writeRootFile(root, target.RelPath, content)
+	}
+	if err := os.MkdirAll(filepath.Dir(target.AbsPath), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(target.AbsPath, []byte(content), 0644)
 }
 
 func writeRootFile(root *os.Root, path, content string) (err error) {

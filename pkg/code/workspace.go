@@ -329,13 +329,18 @@ func isSupportedWorkspace(dir string) bool {
 	}
 }
 
-func projectMemoryDir(workingDir string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = os.TempDir()
+// projectKey returns the canonical project identifier used in the
+// ~/.wingman/projects/{key}/ path. When workingDir is inside a git
+// worktree, the key derives from the canonical (main) repo root so all
+// worktrees of one repo share memory and sessions. Outside git, the raw
+// workingDir is used.
+func projectKey(workingDir string) string {
+	root := findCanonicalGitRoot(workingDir)
+	if root == "" {
+		root = workingDir
 	}
 
-	sanitized := filepath.Clean(workingDir)
+	sanitized := filepath.Clean(root)
 
 	if vol := filepath.VolumeName(sanitized); vol != "" {
 		sanitized = strings.TrimPrefix(sanitized, vol)
@@ -345,11 +350,82 @@ func projectMemoryDir(workingDir string) string {
 	sanitized = strings.ReplaceAll(sanitized, string(filepath.Separator), "_")
 	sanitized = strings.ToLower(sanitized)
 
-	return filepath.Join(home, ".wingman", "projects", sanitized, "memory")
+	return sanitized
+}
+
+func projectMemoryDir(workingDir string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.TempDir()
+	}
+
+	return filepath.Join(home, ".wingman", "projects", projectKey(workingDir), "memory")
 }
 
 func SessionsDir(workingDir string) string {
 	return filepath.Join(filepath.Dir(projectMemoryDir(workingDir)), "sessions")
+}
+
+// findCanonicalGitRoot walks up from dir looking for a `.git` entry.
+// If `.git` is a directory, the containing dir is the canonical root.
+// If `.git` is a file (worktree pointer), it follows the gitdir reference
+// and reads the worktree's `commondir` to locate the main repo's .git;
+// the canonical root is the parent of that. Returns "" when no git
+// metadata is found or the pointer chain is malformed.
+func findCanonicalGitRoot(dir string) string {
+	cur := filepath.Clean(dir)
+	for {
+		gitPath := filepath.Join(cur, ".git")
+		info, err := os.Lstat(gitPath)
+		if err == nil {
+			if info.IsDir() {
+				return cur
+			}
+			return resolveWorktreeRoot(cur, gitPath)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return ""
+		}
+		cur = parent
+	}
+}
+
+func resolveWorktreeRoot(worktreeDir, gitFile string) string {
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return ""
+	}
+
+	const prefix = "gitdir:"
+	line := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(line, prefix) {
+		return ""
+	}
+
+	gitdir := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(worktreeDir, gitdir)
+	}
+	gitdir = filepath.Clean(gitdir)
+
+	// Standard worktree layout writes commondir next to HEAD; it points
+	// (usually relatively) at the main repo's .git directory.
+	if data, err := os.ReadFile(filepath.Join(gitdir, "commondir")); err == nil {
+		common := strings.TrimSpace(string(data))
+		if !filepath.IsAbs(common) {
+			common = filepath.Join(gitdir, common)
+		}
+		return filepath.Dir(filepath.Clean(common))
+	}
+
+	// Fallback: assume <main>/.git/worktrees/<name>. Walk up two parents
+	// (worktrees → .git) and verify the last hop is `.git`.
+	parent := filepath.Dir(filepath.Dir(gitdir))
+	if filepath.Base(parent) == ".git" {
+		return filepath.Dir(parent)
+	}
+	return ""
 }
 
 func loadBundledSkills() []skill.Skill {

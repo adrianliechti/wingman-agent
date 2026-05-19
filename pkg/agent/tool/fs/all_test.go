@@ -10,7 +10,7 @@ func TestTools(t *testing.T) {
 	root, _, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	tools := Tools(root)
+	tools := Tools(root, nil)
 
 	expectedNames := []string{"read", "write", "edit", "grep", "glob"}
 

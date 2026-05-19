@@ -69,8 +69,17 @@ func (ws *Workspace) NewAgent(cfg *agent.Config, ui UI) *Agent {
 	}
 	allowedReadRoots = append(allowedReadRoots, ws.ScratchPath)
 
+	var allowedWriteRoots []string
+	if ws.MemoryPath != "" {
+		allowedReadRoots = append(allowedReadRoots, ws.MemoryPath)
+		allowedWriteRoots = append(allowedWriteRoots, ws.MemoryPath)
+	}
+
 	a.baseTools = slices.Concat(
-		fs.Tools(ws.Root, allowedReadRoots...),
+		fs.Tools(ws.Root, &fs.Options{
+			AllowedReadRoots:  allowedReadRoots,
+			AllowedWriteRoots: allowedWriteRoots,
+		}),
 		shell.Tools(ws.RootPath, elicit),
 		webfetch.Tools(),
 		websearch.Tools(),

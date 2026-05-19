@@ -147,7 +147,7 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 	)
 
 	agentTools := slices.Concat(
-		fs.Tools(root),
+		fs.Tools(root, nil),
 		shell.Tools(workDir, nil),
 		c.config.Tools,
 		schedule.Tools(c.config.Memory.AgentDir(name)),
