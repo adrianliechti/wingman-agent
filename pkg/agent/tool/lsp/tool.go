@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -49,7 +50,7 @@ func lspTool(manager *lsp.Manager) tool.Tool {
 				},
 				"path": map[string]any{
 					"type":        "string",
-					"description": "File path relative to the working directory. Required for file and position operations; optional for diagnostics; ignored for workspaceDiagnostics/workspaceSymbol.",
+					"description": "File path. Required for file and position operations; optional for diagnostics; ignored for workspaceDiagnostics/workspaceSymbol.",
 				},
 				"line": map[string]any{
 					"type":        "integer",
@@ -156,13 +157,15 @@ func requiredFileArg(workingDir string, args map[string]any, key string) (string
 }
 
 func resolveExistingFile(workingDir, path string) (string, error) {
-	path = absPath(workingDir, path)
+	path = expandHome(path)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(workingDir, path)
+	}
 	path = filepath.Clean(path)
 	workingDir = filepath.Clean(workingDir)
 
-	rel, err := filepath.Rel(workingDir, path)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("path is outside workspace: %s", path)
+	if !pathInsideWorkspace(path, workingDir) {
+		return "", fmt.Errorf("path %q is outside workspace %q", path, workingDir)
 	}
 
 	info, err := os.Stat(path)
@@ -177,6 +180,38 @@ func resolveExistingFile(workingDir, path string) (string, error) {
 	}
 
 	return path, nil
+}
+
+// pathInsideWorkspace reports whether path is workingDir or a descendant.
+// Comparison is case-insensitive on macOS/Windows so a workspace path with
+// non-matching casing still resolves.
+func pathInsideWorkspace(path, workingDir string) bool {
+	cp, cw := path, workingDir
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		cp = strings.ToLower(cp)
+		cw = strings.ToLower(cw)
+	}
+	if cp == cw {
+		return true
+	}
+	return strings.HasPrefix(cp, cw+string(filepath.Separator))
+}
+
+// expandHome resolves a leading `~` to the user's home dir; mirrors the
+// behaviour of the fs tools so the model can use the same path form.
+func expandHome(path string) string {
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+		return path
+	}
+	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }
 
 func parsePositionArgs(workingDir string, args map[string]any) (string, int, int, error) {
@@ -210,13 +245,6 @@ func openFile(ctx context.Context, manager *lsp.Manager, path string) (*lsp.Sess
 	}
 
 	return session, uri, nil
-}
-
-func absPath(workingDir, path string) string {
-	if !filepath.IsAbs(path) {
-		return filepath.Join(workingDir, path)
-	}
-	return path
 }
 
 func requiredPositiveIntArg(args map[string]any, key string) (int, bool) {

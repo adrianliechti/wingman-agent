@@ -2,7 +2,7 @@
 Persistent memory at `{{.MemoryDir}}`. The memory directory is an allowed write root, so use the normal `write` / `edit` / `read` / `glob` tools with absolute paths inside it. See the `memory` skill for when to save, what to save, and the file format.
 {{- if .MemoryContent}}
 
-Current MEMORY.md:
+Saved memories (auto-indexed from the memory dir):
 
 {{.MemoryContent}}
 {{- end}}

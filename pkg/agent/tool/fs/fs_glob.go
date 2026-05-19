@@ -18,15 +18,17 @@ import (
 
 const DefaultGlobLimit = 100
 
-func GlobTool(root *os.Root) tool.Tool {
+func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 	return tool.Tool{
 		Name:   "glob",
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			fmt.Sprintf("Fast filename search using glob patterns like `**/*.js` or `src/**/*.ts`. Returns workspace-relative paths sorted by modification time, limited to %d results.", DefaultGlobLimit),
-			"- Use for finding files by name or wildcard. Use `grep` for file contents, symbols, errors, TODOs, or config keys.",
-			"- Includes hidden and gitignored files, similar to `rg --files --hidden --no-ignore`; skips VCS directories.",
+			"- Fast file pattern matching tool that works with any codebase size.",
+			"- Supports glob patterns like `**/*.js` or `src/**/*.ts`.",
+			"- Returns matching file paths sorted by modification time (oldest first).",
+			"- Use this tool when you need to find files by name patterns. Use `grep` for content/symbols.",
+			"- Symlinks and version-control directories (`.git`, `.svn`, …) are skipped. All other files (including dotfiles) are listed; exclude them with a more specific pattern.",
 			"- For open-ended searches requiring multiple rounds, use the `agent` tool.",
 		}, "\n"),
 
@@ -34,7 +36,7 @@ func GlobTool(root *os.Root) tool.Tool {
 			"type": "object",
 			"properties": map[string]any{
 				"pattern": map[string]any{"type": "string", "description": "The glob pattern to match files against."},
-				"path":    map[string]any{"type": "string", "description": "The directory to search in. Omit this field to use the workspace root. Must be a valid directory path if provided."},
+				"path":    map[string]any{"type": "string", "description": "The directory to search in. Defaults to workspace root. Must be a valid directory path if provided."},
 			},
 			"required":             []string{"pattern"},
 			"additionalProperties": false,
@@ -54,26 +56,27 @@ func GlobTool(root *os.Root) tool.Tool {
 
 			workingDir := root.Name()
 
-			searchDirFS, pattern, err := resolveGlobSearch(searchDir, pattern, workingDir)
-
+			target, pattern, err := resolveGlobSearch(searchDir, pattern, workingDir, root, allowedReadRoots)
 			if err != nil {
 				return "", err
 			}
+			defer target.Close()
+
 			if _, err := doublestar.Match(pattern, ""); err != nil {
 				return "", fmt.Errorf("invalid glob pattern: %w", err)
 			}
 
-			info, err := root.Stat(searchDirFS)
+			info, err := target.Root.Stat(target.SearchDirFS)
 
 			if err != nil {
-				return "", pathError("stat path", searchDir, searchDirFS, workingDir, err)
+				return "", fmt.Errorf("stat path %q: %w", searchDir, err)
 			}
 
 			if !info.IsDir() {
 				return "", fmt.Errorf("path is not a directory: %s", searchDir)
 			}
 
-			fsys := root.FS()
+			fsys := vcsFilteredFS{target.Root.FS()}
 
 			type fileResult struct {
 				path    string
@@ -81,15 +84,22 @@ func GlobTool(root *os.Root) tool.Tool {
 			}
 			var results []fileResult
 
-			err = walkAllFiles(ctx, fsys, searchDirFS, func(path, relPath string, d fs.DirEntry) error {
-				matched, err := doublestar.Match(pattern, relPath)
-				if err != nil || !matched {
-					return nil
-				}
+			// GlobWalk traverses fsys rooted at fs.FS root, so the pattern
+			// must include the SearchDirFS prefix when not at the root.
+			fullPattern := pattern
+			if target.SearchDirFS != "." && target.SearchDirFS != "" {
+				fullPattern = target.SearchDirFS + "/" + pattern
+			}
 
-				results = append(results, fileResult{path: filepath.FromSlash(path), modTime: entryModTime(d)})
+			err = doublestar.GlobWalk(fsys, fullPattern, func(p string, d fs.DirEntry) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+				}
+				results = append(results, fileResult{path: target.ReportPath(p), modTime: entryModTime(d)})
 				return nil
-			})
+			}, doublestar.WithFilesOnly(), doublestar.WithNoFollow())
 
 			if err != nil && err != filepath.SkipAll {
 				return "", fmt.Errorf("failed to search directory: %w", err)
@@ -98,7 +108,7 @@ func GlobTool(root *os.Root) tool.Tool {
 			totalMatches := len(results)
 
 			if totalMatches == 0 {
-				return "No files found matching pattern", nil
+				return "No files found", nil
 			}
 
 			// Oldest mtime first; lexical path as a stable tiebreaker.
@@ -130,50 +140,45 @@ func GlobTool(root *os.Root) tool.Tool {
 	}
 }
 
-func resolveGlobSearch(searchDir, pattern, workingDir string) (string, string, error) {
-	searchDirFS, err := ensurePathInWorkspaceFS(searchDir, workingDir, "search")
-	if err != nil {
-		return "", "", err
-	}
-
+func resolveGlobSearch(searchDir, pattern, workingDir string, workspaceRoot *os.Root, allowedReadRoots []string) (*searchTarget, string, error) {
 	pattern = filepath.ToSlash(strings.TrimSpace(pattern))
-	if filepath.IsAbs(pattern) {
-		rel, ok := relPathWithinWorkspace(pattern, workingDir)
-		if !ok {
-			return "", "", fmt.Errorf("cannot search: pattern %q is outside workspace %q", pattern, workingDir)
-		}
 
-		searchDirFS, pattern = doublestar.SplitPattern(filepath.ToSlash(rel))
+	// An absolute pattern overrides searchDir: split it into (dir, glob) and
+	// route the dir through the same allow-list as a `path` argument.
+	if filepath.IsAbs(pattern) {
+		dir, rest := doublestar.SplitPattern(pattern)
+		target, err := resolveSearchTarget(filepath.FromSlash(dir), workingDir, workspaceRoot, allowedReadRoots, "search")
+		if err != nil {
+			return nil, "", err
+		}
+		return target, normalizeGlobPattern(rest), nil
 	}
 
-	return searchDirFS, normalizeGlobPattern(pattern), nil
+	target, err := resolveSearchTarget(searchDir, workingDir, workspaceRoot, allowedReadRoots, "search")
+	if err != nil {
+		return nil, "", err
+	}
+	return target, normalizeGlobPattern(pattern), nil
 }
 
-func walkAllFiles(ctx context.Context, fsys fs.FS, root string, onFile func(path, relPath string, d fs.DirEntry) error) error {
-	return fs.WalkDir(fsys, root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
+// vcsFilteredFS is a fs.FS wrapper that hides version-control directories
+// (.git, .svn, …) from doublestar.GlobWalk. Mirrors claude's
+// `--glob !.git` exclusions without disabling general dotfile matching.
+type vcsFilteredFS struct{ fs.FS }
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+func (f vcsFilteredFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	entries, err := fs.ReadDir(f.FS, name)
+	if err != nil {
+		return nil, err
+	}
+	filtered := entries[:0]
+	for _, e := range entries {
+		if e.IsDir() && vcsDirs[e.Name()] {
+			continue
 		}
-
-		if d.Type()&fs.ModeSymlink != 0 {
-			return nil
-		}
-
-		if d.IsDir() {
-			if vcsDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		return onFile(path, relPathFromBase(root, path), d)
-	})
+		filtered = append(filtered, e)
+	}
+	return filtered, nil
 }
 
 func normalizeGlobPattern(pattern string) string {

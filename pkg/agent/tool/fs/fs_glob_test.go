@@ -76,12 +76,13 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
+		// Matches claude/ripgrep: `*` includes dotfiles and gitignored files.
 		if !strings.Contains(result, "debug.log") {
-			t.Errorf("expected gitignored file like reference Glob, got: %s", result)
+			t.Errorf("expected gitignored file in result, got: %s", result)
 		}
 
 		if !strings.Contains(result, ".hidden.go") {
-			t.Errorf("expected hidden file like reference Glob, got: %s", result)
+			t.Errorf("expected hidden file in result, got: %s", result)
 		}
 	})
 
@@ -303,6 +304,51 @@ func TestGlobTool(t *testing.T) {
 		})
 		if err == nil {
 			t.Fatal("expected error for search path outside workspace")
+		}
+	})
+
+	t.Run("glob honors allowed read roots", func(t *testing.T) {
+		outside, err := os.MkdirTemp("", "fs_glob_outside_*")
+		if err != nil {
+			t.Fatalf("mkdir outside: %v", err)
+		}
+		defer os.RemoveAll(outside)
+
+		os.WriteFile(filepath.Join(outside, "note.md"), []byte("x"), 0644)
+		os.MkdirAll(filepath.Join(outside, "sub"), 0755)
+		os.WriteFile(filepath.Join(outside, "sub", "inner.md"), []byte("y"), 0644)
+
+		denied, err := os.MkdirTemp("", "fs_glob_denied_*")
+		if err != nil {
+			t.Fatalf("mkdir denied: %v", err)
+		}
+		defer os.RemoveAll(denied)
+		os.WriteFile(filepath.Join(denied, "secret.md"), []byte("z"), 0644)
+
+		toolWithRoot := GlobTool(root, outside)
+
+		result, err := toolWithRoot.Execute(context.Background(), map[string]any{
+			"pattern": "**/*.md",
+			"path":    outside,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := filepath.Join(outside, "note.md")
+		if !strings.Contains(result, want) {
+			t.Errorf("expected %s in result, got: %s", want, result)
+		}
+		wantInner := filepath.Join(outside, "sub", "inner.md")
+		if !strings.Contains(result, wantInner) {
+			t.Errorf("expected %s in result, got: %s", wantInner, result)
+		}
+
+		_, err = toolWithRoot.Execute(context.Background(), map[string]any{
+			"pattern": "*.md",
+			"path":    denied,
+		})
+		if err == nil {
+			t.Fatal("expected error for path outside workspace and allow-list")
 		}
 	})
 

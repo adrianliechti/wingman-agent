@@ -327,6 +327,18 @@ func TestEditTool(t *testing.T) {
 		}
 	})
 
+	t.Run("edit rejects directory path", func(t *testing.T) {
+		os.MkdirAll(filepath.Join(tmpDir, "subdir"), 0755)
+		_, err := editTool.Execute(context.Background(), map[string]any{
+			"path":       "subdir",
+			"old_string": "anything",
+			"new_string": "else",
+		})
+		if err == nil || !strings.Contains(err.Error(), "is a directory") {
+			t.Fatalf("expected directory error, got: %v", err)
+		}
+	})
+
 	t.Run("edit does not fuzzy match whitespace-only old string", func(t *testing.T) {
 		testFile := filepath.Join(tmpDir, "whitespace_old.txt")
 		os.WriteFile(testFile, []byte("hello\nworld"), 0644)

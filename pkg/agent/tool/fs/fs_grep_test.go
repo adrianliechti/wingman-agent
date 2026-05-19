@@ -739,3 +739,70 @@ func TestGrepSkipsSymlinks(t *testing.T) {
 		t.Errorf("expected matching file in results, got: %s", result)
 	}
 }
+
+func TestGrepAllowedReadRoots(t *testing.T) {
+	root, _, cleanup := createTestRoot(t)
+	defer cleanup()
+
+	outside, err := os.MkdirTemp("", "fs_grep_outside_*")
+	if err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	defer os.RemoveAll(outside)
+
+	os.WriteFile(filepath.Join(outside, "memory.md"), []byte("recall this detail\n"), 0644)
+	os.MkdirAll(filepath.Join(outside, "sub"), 0755)
+	os.WriteFile(filepath.Join(outside, "sub", "other.md"), []byte("recall this detail too\n"), 0644)
+
+	denied, err := os.MkdirTemp("", "fs_grep_denied_*")
+	if err != nil {
+		t.Fatalf("mkdir denied: %v", err)
+	}
+	defer os.RemoveAll(denied)
+	os.WriteFile(filepath.Join(denied, "secret.md"), []byte("recall\n"), 0644)
+
+	grepTool := GrepTool(root, outside)
+
+	t.Run("directory inside allowed root is searchable", func(t *testing.T) {
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern": "recall",
+			"path":    outside,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := filepath.Join(outside, "memory.md")
+		if !strings.Contains(result, want) {
+			t.Errorf("expected %s in result, got: %s", want, result)
+		}
+		wantSub := filepath.Join(outside, "sub", "other.md")
+		if !strings.Contains(result, wantSub) {
+			t.Errorf("expected %s in result, got: %s", wantSub, result)
+		}
+	})
+
+	t.Run("single file inside allowed root is searchable", func(t *testing.T) {
+		filePath := filepath.Join(outside, "memory.md")
+		result, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern":     "recall",
+			"path":        filePath,
+			"output_mode": "content",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(result, filePath) {
+			t.Errorf("expected absolute path %s in result, got: %s", filePath, result)
+		}
+	})
+
+	t.Run("path outside both workspace and allow-list is rejected", func(t *testing.T) {
+		_, err := grepTool.Execute(context.Background(), map[string]any{
+			"pattern": "recall",
+			"path":    denied,
+		})
+		if err == nil {
+			t.Fatal("expected error for path outside workspace and allow-list")
+		}
+	})
+}

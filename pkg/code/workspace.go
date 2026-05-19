@@ -8,12 +8,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/google/uuid"
+	"gopkg.in/yaml.v3"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	lsptool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/lsp"
@@ -27,10 +29,7 @@ import (
 //go:embed skills/*/SKILL.md
 var bundledFS embed.FS
 
-const (
-	memoryFileName = "MEMORY.md"
-	memoryMaxBytes = 25 * 1024
-)
+const memoryMaxBytes = 25 * 1024
 
 // UI is the elicitation hook a frontend provides for tool ask/confirm
 // prompts. Pass nil to NewAgent for safe defaults (Confirm → true, Ask → "").
@@ -58,10 +57,9 @@ type Workspace struct {
 	mcpTools []tool.Tool
 	lspTools []tool.Tool
 
-	memoryMu      sync.Mutex
-	memoryCache   string
-	memoryMtime   time.Time
-	memoryMissing bool
+	memoryMu          sync.Mutex
+	memoryCache       string
+	memoryFingerprint string
 }
 
 func NewWorkspace(workDir string) (*Workspace, error) {
@@ -236,51 +234,121 @@ func (w *Workspace) Restore(hash string) error {
 	return w.Rewind.Restore(hash)
 }
 
+// MemoryContent renders an index of the memory dir for injection into the
+// system prompt: one line per `*.md` file with a short hook. The hook is
+// the file's frontmatter `description`, falling back to the first non-empty
+// line of the body (heading markers stripped). Cached by per-file mtime so
+// repeat turns don't re-read.
 func (w *Workspace) MemoryContent() string {
 	w.memoryMu.Lock()
 	defer w.memoryMu.Unlock()
 
-	path := filepath.Join(w.MemoryPath, memoryFileName)
+	files := listMemoryFiles(w.MemoryPath)
 
-	info, err := os.Stat(path)
-	if err != nil {
-		// Cache the "missing" state so we don't stat on every turn after
-		// a confirmed miss; reset cached content.
-		if !w.memoryMissing {
-			w.memoryMissing = true
-			w.memoryCache = ""
-			w.memoryMtime = time.Time{}
-		}
-		return ""
+	var fp strings.Builder
+	for _, f := range files {
+		fmt.Fprintf(&fp, "%s\x00%d\n", f.name, f.mtime.UnixNano())
 	}
-
-	if !w.memoryMissing && info.ModTime().Equal(w.memoryMtime) {
+	if fp.String() == w.memoryFingerprint {
 		return w.memoryCache
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		w.memoryMissing = true
-		w.memoryCache = ""
-		w.memoryMtime = time.Time{}
-		return ""
+	var lines []string
+	for _, f := range files {
+		line := "- " + f.name
+		if hook := extractMemoryHook(filepath.Join(w.MemoryPath, f.name)); hook != "" {
+			line += " — " + hook
+		}
+		lines = append(lines, line)
 	}
 
-	content := strings.TrimSpace(string(data))
-
+	content := strings.Join(lines, "\n")
 	if len(content) > memoryMaxBytes {
-		truncated := content[:memoryMaxBytes]
-		if idx := strings.LastIndex(truncated, "\n"); idx > 0 {
-			truncated = truncated[:idx]
+		content = content[:memoryMaxBytes]
+		if idx := strings.LastIndex(content, "\n"); idx > 0 {
+			content = content[:idx]
 		}
-		content = truncated + "\n\n> WARNING: MEMORY.md exceeded 25KB and was truncated."
+		content += "\n\n> WARNING: memory index exceeded 25KB and was truncated."
 	}
 
 	w.memoryCache = content
-	w.memoryMtime = info.ModTime()
-	w.memoryMissing = false
-
+	w.memoryFingerprint = fp.String()
 	return content
+}
+
+type memoryFile struct {
+	name  string
+	mtime time.Time
+}
+
+func listMemoryFiles(dir string) []memoryFile {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var files []memoryFile
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, memoryFile{name: e.Name(), mtime: info.ModTime()})
+	}
+
+	slices.SortFunc(files, func(a, b memoryFile) int { return strings.Compare(a.name, b.name) })
+	return files
+}
+
+// extractMemoryHook returns a one-line hook for the index: the frontmatter
+// `description` when set, otherwise the first non-empty line of the body
+// with leading `#`s stripped.
+func extractMemoryHook(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	text := string(data)
+
+	if fmBody, body, ok := splitFrontmatter(text); ok {
+		var fm struct {
+			Description string `yaml:"description"`
+		}
+		if err := yaml.Unmarshal([]byte(fmBody), &fm); err == nil {
+			if d, _, _ := strings.Cut(strings.TrimSpace(fm.Description), "\n"); d != "" {
+				return strings.TrimSpace(d)
+			}
+		}
+		text = body
+	}
+
+	for line := range strings.SplitSeq(text, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
+		}
+	}
+	return ""
+}
+
+// splitFrontmatter returns the YAML frontmatter body and the post-fence
+// body when text begins with a `---`-fenced block.
+func splitFrontmatter(text string) (fm, body string, ok bool) {
+	rest, found := strings.CutPrefix(text, "---\n")
+	if !found {
+		rest, found = strings.CutPrefix(text, "---\r\n")
+	}
+	if !found {
+		return "", "", false
+	}
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return "", "", false
+	}
+	body = strings.TrimLeft(rest[end+len("\n---"):], "\r\n")
+	return rest[:end], body, true
 }
 
 // managedTools snapshots MCP + LSP tools under w.mu so Agent.tools()

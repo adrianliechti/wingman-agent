@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io/fs"
+	"os"
 	pathpkg "path"
 	"path/filepath"
 	"runtime"
@@ -42,12 +43,21 @@ func normalizePathFS(path, workingDir string) string {
 	return pathpkg.Clean(filepath.ToSlash(normalizePath(path, workingDir)))
 }
 
-func ensurePathInWorkspace(pathArg, workingDir, action string) (string, error) {
-	if isOutsideWorkspace(pathArg, workingDir) {
-		return "", fmt.Errorf("cannot %s: path %q is outside workspace %q", action, pathArg, workingDir)
+// expandHome resolves a leading `~` to the user's home dir. Accepts both
+// `~/...` (forward slash) and `~\...` (Windows backslash) forms.
+func expandHome(path string) string {
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+		return path
 	}
-
-	return normalizePath(pathArg, workingDir), nil
+	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }
 
 func ensurePathInWorkspaceFS(pathArg, workingDir, action string) (string, error) {
@@ -58,44 +68,159 @@ func ensurePathInWorkspaceFS(pathArg, workingDir, action string) (string, error)
 	return normalizePathFS(pathArg, workingDir), nil
 }
 
-// writeTarget classifies a write/edit path. Exactly one of (InWorkspace,
-// AbsoluteAllowed) is true on success. RelPath is set when InWorkspace
-// (root-relative for os.Root ops); AbsPath is set when AbsoluteAllowed
-// (raw os.* ops). Mirrors the read-side classification in
-// readFromAllowedLocation but returns a target descriptor instead of
-// performing the read inline.
-type writeTarget struct {
-	InWorkspace     bool
-	AbsoluteAllowed bool
-	RelPath         string
-	AbsPath         string
+// matchAllowedRoot reports whether absPath falls inside any allowedRoots
+// entry. On match it returns the cleaned root path and the path relative
+// to that root in OS-native form ("" when absPath equals the root itself).
+// Comparison is case-insensitive on macOS/Windows.
+func matchAllowedRoot(absPath string, allowedRoots []string) (rootClean, sub string, ok bool) {
+	cleaned := cleanPath(absPath)
+	cmpPath := normalizePathForComparison(cleaned)
+	sep := string(filepath.Separator)
+
+	for _, allowed := range allowedRoots {
+		allowedClean := cleanPath(allowed)
+		cmpAllowed := normalizePathForComparison(allowedClean)
+		if cmpPath == cmpAllowed {
+			return allowedClean, "", true
+		}
+		if strings.HasPrefix(cmpPath, cmpAllowed+sep) {
+			// Case-folding preserves byte length, so slicing the input by
+			// the allowed-root's byte length yields the original-case tail.
+			return allowedClean, cleaned[len(allowedClean)+1:], true
+		}
+	}
+	return "", "", false
 }
 
-// resolveWriteTarget classifies pathArg for write/edit. Paths inside
+// fileTarget classifies a read/write/edit path. When InWorkspace is true,
+// RelPath holds the root-relative path for os.Root ops. Otherwise AbsPath
+// holds an absolute path inside an allowed root for raw os.* ops.
+type fileTarget struct {
+	InWorkspace bool
+	RelPath     string
+	AbsPath     string
+}
+
+// statFileTarget routes to root.Stat or os.Stat based on the target.
+func statFileTarget(root *os.Root, target fileTarget) (os.FileInfo, error) {
+	if target.InWorkspace {
+		return root.Stat(target.RelPath)
+	}
+	return os.Stat(target.AbsPath)
+}
+
+// readFileTarget routes to root.ReadFile or os.ReadFile.
+func readFileTarget(root *os.Root, target fileTarget) ([]byte, error) {
+	if target.InWorkspace {
+		return root.ReadFile(target.RelPath)
+	}
+	return os.ReadFile(target.AbsPath)
+}
+
+// writeFileTarget routes to the workspace-sandboxed writer or to raw
+// os.MkdirAll + os.WriteFile for allowed roots.
+func writeFileTarget(root *os.Root, target fileTarget, content string) error {
+	if target.InWorkspace {
+		return writeRootFile(root, target.RelPath, content)
+	}
+	if err := os.MkdirAll(filepath.Dir(target.AbsPath), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(target.AbsPath, []byte(content), 0644)
+}
+
+// resolveFileTarget classifies pathArg for read/write/edit. Paths inside
 // workingDir resolve to root-relative form. Absolute paths inside any
-// allowedWriteRoot resolve to absolute form for raw os.* ops. Anything
-// else is rejected.
-func resolveWriteTarget(pathArg, workingDir string, allowedWriteRoots []string, action string) (writeTarget, error) {
+// allowedRoot resolve to absolute form for raw os.* ops. Anything else is
+// rejected.
+func resolveFileTarget(pathArg, workingDir string, allowedRoots []string, action string) (fileTarget, error) {
+	pathArg = expandHome(pathArg)
+
 	if !isOutsideWorkspace(pathArg, workingDir) {
-		return writeTarget{InWorkspace: true, RelPath: normalizePath(pathArg, workingDir)}, nil
+		return fileTarget{InWorkspace: true, RelPath: normalizePath(pathArg, workingDir)}, nil
 	}
 
 	if !filepath.IsAbs(pathArg) {
-		return writeTarget{}, fmt.Errorf("cannot %s: relative path %q is outside workspace", action, pathArg)
+		return fileTarget{}, fmt.Errorf("cannot %s: relative path %q is outside workspace", action, pathArg)
 	}
 
-	cleaned := cleanPath(pathArg)
-	cmpPath := normalizePathForComparison(cleaned)
-
-	for _, allowed := range allowedWriteRoots {
-		allowedClean := cleanPath(allowed)
-		cmpAllowed := normalizePathForComparison(allowedClean)
-		if cmpPath == cmpAllowed || strings.HasPrefix(cmpPath, cmpAllowed+string(filepath.Separator)) {
-			return writeTarget{AbsoluteAllowed: true, AbsPath: cleaned}, nil
+	if rootClean, sub, ok := matchAllowedRoot(pathArg, allowedRoots); ok {
+		abs := rootClean
+		if sub != "" {
+			abs = filepath.Join(rootClean, sub)
 		}
+		return fileTarget{AbsPath: abs}, nil
 	}
 
-	return writeTarget{}, fmt.Errorf("cannot %s: path %q is outside workspace %q and not in any allowed write root", action, pathArg, workingDir)
+	return fileTarget{}, fmt.Errorf("cannot %s: path %q is outside workspace %q and not in any allowed root", action, pathArg, workingDir)
+}
+
+// searchTarget locates a resolved search root for grep/glob. Workspace
+// paths reuse the workspace root; absolute paths inside an allowed read
+// root open a fresh os.Root scoped to that root. Callers must invoke
+// Close when done. ReportPath formats result paths so workspace results
+// remain workspace-relative while allowed-root results are absolute and
+// remain recognizable to the model.
+type searchTarget struct {
+	Root        *os.Root
+	SearchDirFS string
+	close       func()
+
+	reportPrefix string
+}
+
+func (st *searchTarget) Close() {
+	if st.close != nil {
+		st.close()
+	}
+}
+
+func (st *searchTarget) ReportPath(fsPath string) string {
+	if st.reportPrefix == "" {
+		return filepath.FromSlash(fsPath)
+	}
+	return filepath.Join(st.reportPrefix, filepath.FromSlash(fsPath))
+}
+
+// resolveSearchTarget classifies pathArg for grep/glob. Paths inside
+// workingDir reuse workspaceRoot. Absolute paths inside any allowedReadRoot
+// open a fresh os.Root that the caller must Close. Anything else is rejected.
+func resolveSearchTarget(pathArg, workingDir string, workspaceRoot *os.Root, allowedReadRoots []string, action string) (*searchTarget, error) {
+	pathArg = expandHome(pathArg)
+
+	if !isOutsideWorkspace(pathArg, workingDir) {
+		searchDirFS, err := ensurePathInWorkspaceFS(pathArg, workingDir, action)
+		if err != nil {
+			return nil, err
+		}
+		return &searchTarget{Root: workspaceRoot, SearchDirFS: searchDirFS}, nil
+	}
+
+	if !filepath.IsAbs(pathArg) {
+		return nil, fmt.Errorf("cannot %s: relative path %q is outside workspace", action, pathArg)
+	}
+
+	rootClean, sub, ok := matchAllowedRoot(pathArg, allowedReadRoots)
+	if !ok {
+		return nil, fmt.Errorf("cannot %s: path %q is outside workspace %q and not in any allowed read root", action, pathArg, workingDir)
+	}
+
+	r, err := os.OpenRoot(rootClean)
+	if err != nil {
+		return nil, fmt.Errorf("cannot %s: open allowed root %q: %w", action, rootClean, err)
+	}
+
+	searchDirFS := "."
+	if sub != "" {
+		searchDirFS = filepath.ToSlash(sub)
+	}
+
+	return &searchTarget{
+		Root:         r,
+		SearchDirFS:  searchDirFS,
+		reportPrefix: rootClean,
+		close:        func() { r.Close() },
+	}, nil
 }
 
 func isOutsideWorkspace(path, workingDir string) bool {
@@ -182,18 +307,6 @@ func normalizePathForComparison(path string) string {
 		return strings.ToLower(path)
 	}
 	return path
-}
-
-func pathError(action, originalPath, normalizedPath, workingDir string, err error) error {
-	if isOutsideWorkspace(originalPath, workingDir) {
-		return fmt.Errorf("%s failed: path %q is outside workspace %q", action, originalPath, workingDir)
-	}
-
-	if originalPath != normalizedPath {
-		return fmt.Errorf("%s failed: %s (resolved from %s): %w", action, normalizedPath, originalPath, err)
-	}
-
-	return fmt.Errorf("%s failed: %s: %w", action, originalPath, err)
 }
 
 func detectLineEnding(content string) string {

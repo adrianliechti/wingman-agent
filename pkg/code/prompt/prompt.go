@@ -34,9 +34,10 @@ var sectionProject string
 const BoundaryMarker = "--- session context ---"
 
 // Static sections live in the cacheable prefix. They change only when the
-// session's on-disk state changes (AGENTS.md / skill (un)install / MEMORY.md
-// edit). The caller is responsible for mtime-tracking these so the rendered
-// string is byte-stable across turns when the source files haven't changed.
+// session's on-disk state changes (AGENTS.md / skill (un)install / memory
+// file add/edit/delete). The caller is responsible for mtime-tracking these
+// so the rendered string is byte-stable across turns when the source files
+// haven't changed.
 var staticTemplates = []struct {
 	title string
 	tmpl  *template.Template

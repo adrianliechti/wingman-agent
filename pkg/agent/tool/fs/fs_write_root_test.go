@@ -141,6 +141,93 @@ func TestEditToolRejectsEditsOutsideAllowedRoots(t *testing.T) {
 	}
 }
 
+func TestExpandHomeAcrossTools(t *testing.T) {
+	// Place an allowed root inside $HOME so `~/`-prefixed paths can resolve
+	// to it. Picks a unique subdir name to avoid clobbering anything real.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir: %v", err)
+	}
+	allowedDir, err := os.MkdirTemp(home, ".wingman_test_home_*")
+	if err != nil {
+		t.Skipf("cannot mkdtemp under home: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(allowedDir) })
+
+	rel, err := filepath.Rel(home, allowedDir)
+	if err != nil {
+		t.Fatalf("rel: %v", err)
+	}
+	tildePrefix := "~/" + filepath.ToSlash(rel)
+
+	workspaceDir, err := os.MkdirTemp("", "fs_home_workspace_*")
+	if err != nil {
+		t.Fatalf("mkdtemp workspace: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(workspaceDir) })
+
+	root, err := os.OpenRoot(workspaceDir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	t.Cleanup(func() { root.Close() })
+
+	t.Run("write expands ~/", func(t *testing.T) {
+		_, err := WriteTool(root, allowedDir).Execute(context.Background(), map[string]any{
+			"path":    tildePrefix + "/note.md",
+			"content": "via tilde",
+		})
+		if err != nil {
+			t.Fatalf("write via ~/: %v", err)
+		}
+		data, _ := os.ReadFile(filepath.Join(allowedDir, "note.md"))
+		if string(data) != "via tilde" {
+			t.Errorf("expected file written via ~/, got %q", data)
+		}
+	})
+
+	t.Run("edit expands ~/", func(t *testing.T) {
+		_, err := EditTool(root, allowedDir).Execute(context.Background(), map[string]any{
+			"path":       tildePrefix + "/note.md",
+			"old_string": "via tilde",
+			"new_string": "via tilde edited",
+		})
+		if err != nil {
+			t.Fatalf("edit via ~/: %v", err)
+		}
+		data, _ := os.ReadFile(filepath.Join(allowedDir, "note.md"))
+		if string(data) != "via tilde edited" {
+			t.Errorf("expected edit via ~/, got %q", data)
+		}
+	})
+
+	t.Run("glob expands ~/", func(t *testing.T) {
+		result, err := GlobTool(root, allowedDir).Execute(context.Background(), map[string]any{
+			"pattern": "*.md",
+			"path":    tildePrefix,
+		})
+		if err != nil {
+			t.Fatalf("glob via ~/: %v", err)
+		}
+		if !strings.Contains(result, "note.md") {
+			t.Errorf("expected glob to find note.md via ~/, got: %s", result)
+		}
+	})
+
+	t.Run("grep expands ~/", func(t *testing.T) {
+		result, err := GrepTool(root, allowedDir).Execute(context.Background(), map[string]any{
+			"pattern": "via tilde",
+			"path":    tildePrefix,
+		})
+		if err != nil {
+			t.Fatalf("grep via ~/: %v", err)
+		}
+		if !strings.Contains(result, "note.md") {
+			t.Errorf("expected grep to find note.md via ~/, got: %s", result)
+		}
+	})
+}
+
 func TestWriteToolWithoutAllowedRootsStillRespectsWorkspace(t *testing.T) {
 	root, workspaceDir, _, cleanup := createWriteRootSetup(t)
 	defer cleanup()

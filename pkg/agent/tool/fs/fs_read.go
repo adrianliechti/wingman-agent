@@ -26,7 +26,6 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			"- After `grep` finds candidates, read only the file or line window needed for context.",
 			"- Use `offset` and `limit` for long files or known ranges. `offset` is a 1-based start line, not a result skip count.",
 			"- Do not re-read a file already shown unless it changed; use the existing line numbers.",
-			"- Path may be workspace-relative or absolute inside an allowed root. `~/` expands to home.",
 			"- Reads files only, not directories. Use `glob` to find files in a directory.",
 			"- Binary files (PDF, images, archives) are rejected.",
 		}, "\n"),
@@ -34,7 +33,7 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":   map[string]any{"type": "string", "description": "File path; relative to workspace or absolute inside an allowed root. `~/` expands to home."},
+				"path":   map[string]any{"type": "string", "description": "File path."},
 				"offset": map[string]any{"type": "integer", "description": "1-based line number to start reading from. Only provide for large files or known ranges. Defaults to 1."},
 				"limit":  map[string]any{"type": "integer", "description": "Positive number of lines to read. Only provide for large files or known ranges."},
 			},
@@ -50,10 +49,9 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			}
 
 			workingDir := root.Name()
-			expanded := expandHome(pathArg)
 
-			if isBinaryFile(expanded) {
-				return "", fmt.Errorf("cannot read %s: file appears to be binary (extension %q). Use the shell tool with an appropriate viewer if you really need to inspect it", pathArg, filepath.Ext(expanded))
+			if isBinaryFile(pathArg) {
+				return "", fmt.Errorf("cannot read %s: file appears to be binary (extension %q). Use the shell tool with an appropriate viewer if you really need to inspect it", pathArg, filepath.Ext(pathArg))
 			}
 
 			limit := 0
@@ -72,76 +70,27 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 				startLine = v
 			}
 
-			content, err := readFromAllowedLocation(root, workingDir, expanded, allowedReadRoots)
+			target, err := resolveFileTarget(pathArg, workingDir, allowedReadRoots, "read file")
 			if err != nil {
 				return "", err
+			}
+
+			info, err := statFileTarget(root, target)
+			if err != nil {
+				return "", fmt.Errorf("stat file %q: %w", pathArg, err)
+			}
+			if info.IsDir() {
+				return "", fmt.Errorf("cannot read file: path %q is a directory; use glob to find files inside it", pathArg)
+			}
+
+			content, err := readFileTarget(root, target)
+			if err != nil {
+				return "", fmt.Errorf("read file %q: %w", pathArg, err)
 			}
 
 			return formatRead(content, startLine, limit)
 		},
 	}
-}
-
-func readFromAllowedLocation(root *os.Root, workingDir, path string, allowedRoots []string) ([]byte, error) {
-	if !isOutsideWorkspace(path, workingDir) {
-		normalizedPath := normalizePath(path, workingDir)
-		info, err := root.Stat(normalizedPath)
-		if err != nil {
-			return nil, pathError("stat file", path, normalizedPath, workingDir, err)
-		}
-		if info.IsDir() {
-			return nil, fmt.Errorf("cannot read file: path %q is a directory; use glob to find files inside it", path)
-		}
-		content, err := root.ReadFile(normalizedPath)
-		if err != nil {
-			return nil, pathError("read file", path, normalizedPath, workingDir, err)
-		}
-		return content, nil
-	}
-
-	if !filepath.IsAbs(path) {
-		return nil, fmt.Errorf("cannot read file: relative path %q is outside workspace", path)
-	}
-
-	cleaned := cleanPath(path)
-	cmpPath := normalizePathForComparison(cleaned)
-	for _, allowed := range allowedRoots {
-		allowedClean := cleanPath(allowed)
-		cmpAllowed := normalizePathForComparison(allowedClean)
-		if cmpPath == cmpAllowed || strings.HasPrefix(cmpPath, cmpAllowed+string(filepath.Separator)) {
-			info, err := os.Stat(cleaned)
-			if err != nil {
-				return nil, fmt.Errorf("stat file %q: %w", path, err)
-			}
-			if info.IsDir() {
-				return nil, fmt.Errorf("cannot read file: path %q is a directory; use glob to find files inside it", path)
-			}
-			content, err := os.ReadFile(cleaned)
-			if err != nil {
-				return nil, fmt.Errorf("read file %q: %w", path, err)
-			}
-			return content, nil
-		}
-	}
-
-	return nil, fmt.Errorf("cannot read file: path %q is outside workspace and not in any allowed root", path)
-}
-
-// expandHome resolves a leading `~` to the user's home dir. Accepts both
-// `~/...` (forward slash) and `~\...` (Windows backslash) forms.
-func expandHome(path string) string {
-	if path == "~" {
-		if home, err := os.UserHomeDir(); err == nil {
-			return home
-		}
-		return path
-	}
-	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
 }
 
 func formatRead(content []byte, startLine, limit int) (string, error) {
