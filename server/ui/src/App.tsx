@@ -10,7 +10,7 @@ import {
 	Plus,
 	X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatPanel } from "./components/ChatPanel";
 import { CheckpointsPanel } from "./components/CheckpointsPanel";
 import { DiffsPanel } from "./components/DiffsPanel";
@@ -179,19 +179,61 @@ export default function App() {
 		[sessions],
 	);
 
+	// Pin a sessionId we just minted locally — used to skip the mode GET that
+	// would otherwise race with our optimistic POST and overwrite the user's
+	// selection with the server's default before the POST commits.
+	const justMintedSidRef = useRef("");
+
+	const ensureSessionId = useCallback(() => {
+		if (sessionId) return sessionId;
+		const sid = crypto.randomUUID();
+		justMintedSidRef.current = sid;
+		setSessionId(sid);
+		return sid;
+	}, [sessionId]);
+
 	const handleSend = useCallback(
 		(text: string, files?: string[], images?: string[]) => {
 			// Lazy-create: when there's no active session, mint a fresh UUID
 			// and use it for the send. The server adopts unknown ids on first
 			// MsgSend, so this materializes the conversation on the round-trip.
-			let sid = sessionId;
-			if (!sid) {
-				sid = crypto.randomUUID();
-				setSessionId(sid);
-			}
+			const sid = ensureSessionId();
 			sendChat(sid, text, files, images);
 		},
-		[sendChat, sessionId],
+		[sendChat, ensureSessionId],
+	);
+
+	const [mode, setMode] = useState<"agent" | "plan">("agent");
+
+	// Sync mode whenever sessionId changes to point at a session we didn't
+	// just mint. For just-minted ids, the server has no state yet and our
+	// optimistic local mode is the truth — fetching would clobber it.
+	useEffect(() => {
+		if (!sessionId) return;
+		if (justMintedSidRef.current === sessionId) {
+			justMintedSidRef.current = "";
+			return;
+		}
+		fetch(`/api/mode?session=${encodeURIComponent(sessionId)}`)
+			.then((r) => r.json())
+			.then((data) => setMode(data.mode === "plan" ? "plan" : "agent"))
+			.catch(() => {});
+	}, [sessionId]);
+
+	const selectMode = useCallback(
+		(next: "agent" | "plan") => {
+			const sid = ensureSessionId();
+			setMode(next);
+			fetch(`/api/mode?session=${encodeURIComponent(sid)}`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ mode: next }),
+			})
+				.then((r) => r.json())
+				.then((data) => setMode(data.mode === "plan" ? "plan" : "agent"))
+				.catch(() => {});
+		},
+		[ensureSessionId],
 	);
 
 	const handleCancel = useCallback(() => {
@@ -369,9 +411,10 @@ export default function App() {
 						{activeTab.type === "chat" ? (
 							<ChatPanel
 								key={sessionId || "no-session"}
-								sessionId={sessionId}
 								entries={entries}
 								phase={phase}
+								mode={mode}
+								onSelectMode={selectMode}
 								onSend={handleSend}
 								onCancel={handleCancel}
 							/>
