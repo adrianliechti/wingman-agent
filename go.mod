@@ -42,6 +42,7 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
+	github.com/rs/cors v1.11.1 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/skeema/knownhosts v1.3.2 // indirect

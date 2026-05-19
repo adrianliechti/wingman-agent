@@ -10,6 +10,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"time"
+
+	"github.com/rs/cors"
 )
 
 func (p *Proxy) Start(ctx context.Context) error {
@@ -96,7 +98,7 @@ func (p *Proxy) Start(ctx context.Context) error {
 
 	server := &http.Server{
 		Addr:    p.Addr,
-		Handler: mux,
+		Handler: cors.AllowAll().Handler(mux),
 	}
 
 	go func() {
