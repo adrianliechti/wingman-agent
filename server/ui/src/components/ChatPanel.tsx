@@ -20,9 +20,10 @@ import { ModePicker } from "./ModePicker";
 import { SkillPicker } from "./SkillPicker";
 
 interface Props {
-	sessionId: string;
 	entries: ChatEntry[];
 	phase: Phase;
+	mode: "agent" | "plan";
+	onSelectMode: (next: "agent" | "plan") => void;
 	onSend: (text: string, files?: string[], images?: string[]) => void;
 	onCancel: () => void;
 }
@@ -84,7 +85,7 @@ async function processImage(file: File): Promise<string> {
 // py-4 padding so the first message and subsequent submissions look the same.
 const PIN_TOP_GAP = 16;
 
-export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props) {
+export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel }: Props) {
 	const scheme = useColorScheme();
 	const [input, setInput] = useState("");
 	const [files, setFiles] = useState<string[]>([]);
@@ -612,7 +613,7 @@ export function ChatPanel({ sessionId, entries, phase, onSend, onCancel }: Props
 										e.target.value = "";
 									}}
 								/>
-								<ModePicker sessionId={sessionId} />
+								<ModePicker mode={mode} onSelect={onSelectMode} />
 								<ModelPicker />
 							</div>
 

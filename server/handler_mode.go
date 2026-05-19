@@ -30,11 +30,14 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess := s.sessionFromRequest(r)
-	if sess == nil {
-		http.Error(w, "session not found", http.StatusNotFound)
+	id := r.URL.Query().Get("session")
+	if id == "" {
+		http.Error(w, "session id required", http.StatusBadRequest)
 		return
 	}
+	// Lazy-create — mirrors MsgSend so the user can pick a mode before
+	// the first message creates the session on its own.
+	sess := s.getOrCreateSession(id)
 
 	sess.Agent.PlanMode = body.Mode == "plan"
 

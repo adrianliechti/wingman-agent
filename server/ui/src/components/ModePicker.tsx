@@ -1,5 +1,5 @@
 import { Compass, Wrench } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Mode = "agent" | "plan";
 
@@ -17,42 +17,14 @@ const options: { value: Mode; label: string; description: string }[] = [
 ];
 
 interface Props {
-	sessionId: string;
+	mode: Mode;
+	onSelect: (next: Mode) => void;
 }
 
-export function ModePicker({ sessionId }: Props) {
-	const [mode, setMode] = useState<Mode>("agent");
+export function ModePicker({ mode, onSelect }: Props) {
 	const [open, setOpen] = useState(false);
 	const popRef = useRef<HTMLDivElement>(null);
 	const btnRef = useRef<HTMLButtonElement>(null);
-
-	const qs = sessionId ? `?session=${encodeURIComponent(sessionId)}` : "";
-
-	useEffect(() => {
-		if (!sessionId) return;
-		fetch(`/api/mode${qs}`)
-			.then((r) => r.json())
-			.then((data) => setMode(data.mode === "plan" ? "plan" : "agent"))
-			.catch(() => {});
-	}, [qs, sessionId]);
-
-	const select = useCallback(
-		(next: Mode) => {
-			fetch(`/api/mode${qs}`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ mode: next }),
-			})
-				.then((r) => r.json())
-				.then((data) => {
-					const m: Mode = data.mode === "plan" ? "plan" : "agent";
-					setMode(m);
-				})
-				.catch(() => {});
-			setOpen(false);
-		},
-		[qs],
-	);
 
 	useEffect(() => {
 		if (!open) return;
@@ -102,7 +74,10 @@ export function ModePicker({ sessionId }: Props) {
 							<button
 								type="button"
 								key={opt.value}
-								onClick={() => select(opt.value)}
+								onClick={() => {
+									onSelect(opt.value);
+									setOpen(false);
+								}}
 								className={`w-full flex items-start gap-2 px-3 py-2 text-left cursor-pointer transition-colors ${
 									active
 										? "bg-bg-active text-fg"
