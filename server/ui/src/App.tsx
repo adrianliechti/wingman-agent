@@ -11,6 +11,14 @@ import {
 	X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+	Group,
+	Panel,
+	type PanelImperativeHandle,
+	Separator,
+	useDefaultLayout,
+	usePanelRef,
+} from "react-resizable-panels";
 import { ChatPanel } from "./components/ChatPanel";
 import { CheckpointsPanel } from "./components/CheckpointsPanel";
 import { DiffsPanel } from "./components/DiffsPanel";
@@ -52,6 +60,11 @@ export default function App() {
 	const [rightTab, setRightTab] = useState<RightTab>("changes");
 	const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 	const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
+	const leftPanelRef = usePanelRef();
+	const rightPanelRef = usePanelRef();
+	const { defaultLayout, onLayoutChanged } = useDefaultLayout({
+		id: "wingman-layout",
+	});
 
 	const activeSession = sessionId ? sessions[sessionId] : undefined;
 	const entries = activeSession?.entries ?? EMPTY_ENTRIES;
@@ -276,32 +289,44 @@ export default function App() {
 					</button>
 				</div>
 			)}
-			<div className="flex flex-1 overflow-hidden">
+			<Group
+				orientation="horizontal"
+				id="wingman-layout"
+				defaultLayout={defaultLayout}
+				onLayoutChanged={onLayoutChanged}
+				className="flex-1 overflow-hidden"
+			>
 				{/* Left Sidebar */}
-				<div
-					className="shrink-0 overflow-hidden transition-[width] duration-200 ease-in-out border-r border-border-subtle"
-					style={{ width: sidebarCollapsed ? 0 : 224, borderRightWidth: sidebarCollapsed ? 0 : 1 }}
+				<Panel
+					panelRef={leftPanelRef}
+					id="sidebar"
+					defaultSize="0px"
+					collapsible
+					collapsedSize="0px"
+					minSize="224px"
+					groupResizeBehavior="preserve-pixel-size"
+					onResize={({ inPixels }) => setSidebarCollapsed(inPixels === 0)}
+					className="overflow-hidden"
 				>
-					<div className="w-56 h-full">
-						<Sidebar
-							currentSessionId={sessionId}
-							onSessionSelect={handleSessionSelect}
-							onNewSession={handleNewSession}
-							onSessionDeleted={handleSessionDeleted}
-							runningSessionIds={runningSessionIds}
-							canCreateNew={canCreateNew}
-							subscribe={subscribe}
-						/>
-					</div>
-				</div>
+					<Sidebar
+						currentSessionId={sessionId}
+						onSessionSelect={handleSessionSelect}
+						onNewSession={handleNewSession}
+						onSessionDeleted={handleSessionDeleted}
+						runningSessionIds={runningSessionIds}
+						canCreateNew={canCreateNew}
+						subscribe={subscribe}
+					/>
+				</Panel>
+				<ResizeHandle />
 
 				{/* Center Panel */}
-				<div className="flex-1 flex flex-col overflow-hidden min-w-0 bg-bg">
+				<Panel id="center" minSize="320px" className="flex flex-col overflow-hidden min-w-0 bg-bg">
 					<div className="h-10 flex items-stretch bg-bg shrink-0 overflow-x-auto">
 						<button
 							type="button"
 							className="self-center flex items-center justify-center w-8 h-8 ml-1 rounded-md text-fg-dim hover:text-fg-muted hover:bg-bg-hover cursor-pointer transition-colors shrink-0"
-							onClick={() => setSidebarCollapsed((c) => !c)}
+							onClick={() => togglePanel(leftPanelRef.current)}
 							title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
 						>
 							{sidebarCollapsed ? (
@@ -394,7 +419,7 @@ export default function App() {
 						<button
 							type="button"
 							className="self-center flex items-center justify-center w-8 h-8 mr-1 rounded-md text-fg-dim hover:text-fg-muted hover:bg-bg-hover cursor-pointer transition-colors shrink-0"
-							onClick={() => setRightPanelCollapsed((c) => !c)}
+							onClick={() => togglePanel(rightPanelRef.current)}
 							title={rightPanelCollapsed ? "Show panel" : "Hide panel"}
 						>
 							{rightPanelCollapsed ? (
@@ -436,14 +461,22 @@ export default function App() {
 							/>
 						) : null}
 					</div>
-				</div>
+				</Panel>
+				<ResizeHandle />
 
 				{/* Right Panel */}
-				<div
-					className="shrink-0 overflow-hidden transition-[width] duration-200 ease-in-out border-l border-border-subtle"
-					style={{ width: rightPanelCollapsed ? 0 : 288, borderLeftWidth: rightPanelCollapsed ? 0 : 1 }}
+				<Panel
+					panelRef={rightPanelRef}
+					id="right"
+					defaultSize="288px"
+					collapsible
+					collapsedSize="0px"
+					minSize="288px"
+					groupResizeBehavior="preserve-pixel-size"
+					onResize={({ inPixels }) => setRightPanelCollapsed(inPixels === 0)}
+					className="overflow-hidden"
 				>
-					<div className="w-72 h-full flex flex-col bg-bg">
+					<div className="h-full flex flex-col bg-bg">
 						<div className="h-10 flex items-stretch shrink-0">
 							{showChanges && (
 								<RightTabButton
@@ -498,8 +531,8 @@ export default function App() {
 							)}
 						</div>
 					</div>
-				</div>
-			</div>
+				</Panel>
+			</Group>
 
 			{!connected && (
 				<div className="absolute inset-0 z-50 flex items-center justify-center backdrop-blur-md bg-bg/60">
@@ -517,6 +550,18 @@ function formatTokens(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
 	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
 	return String(n);
+}
+
+function togglePanel(panel: PanelImperativeHandle | null) {
+	if (!panel) return;
+	if (panel.isCollapsed()) panel.expand();
+	else panel.collapse();
+}
+
+function ResizeHandle() {
+	return (
+		<Separator className="w-px shrink-0 bg-border-subtle outline-none hover:bg-accent active:bg-accent transition-colors" />
+	);
 }
 
 function RightTabButton({

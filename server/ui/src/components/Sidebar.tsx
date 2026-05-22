@@ -71,7 +71,7 @@ export function Sidebar({
 	const groups = groupSessions(sessions);
 
 	return (
-		<div className="w-56 h-full flex flex-col bg-bg shrink-0">
+		<div className="w-full h-full flex flex-col bg-bg">
 			{/* Header */}
 			<div className="h-10 pl-4 pr-1.5 flex items-center justify-between shrink-0">
 				<span className="text-[11px] font-medium text-fg-dim uppercase tracking-wider">
