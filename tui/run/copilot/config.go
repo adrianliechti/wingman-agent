@@ -2,11 +2,6 @@ package copilot
 
 import (
 	"context"
-	"os"
-	"strings"
-
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
 
 	"github.com/adrianliechti/wingman-agent/tui/run"
 )
@@ -24,44 +19,14 @@ type CopilotConfig struct {
 }
 
 func NewConfig(ctx context.Context, options *Options) (*CopilotConfig, error) {
-	if options == nil {
-		options = new(Options)
-	}
+	options = run.WithDefaults(options)
 
-	if options.WingmanURL == "" {
-		val := os.Getenv("WINGMAN_URL")
+	models, err := run.Models(ctx, options, &run.ModelOptions{
+		Kind:   run.ModelDefault,
+		Filter: run.IsOpenAI,
+	})
 
-		if val == "" {
-			val = "http://localhost:4242"
-		}
-
-		options.WingmanURL = val
-	}
-
-	if options.WingmanToken == "" {
-		val := os.Getenv("WINGMAN_TOKEN")
-
-		if val == "" {
-			val = "-"
-		}
-
-		options.WingmanToken = val
-	}
-
-	client := openai.NewClient(
-		option.WithBaseURL(strings.TrimRight(options.WingmanURL, "/")+"/v1"),
-		option.WithAPIKey(options.WingmanToken),
-	)
-
-	iter := client.Models.ListAutoPaging(ctx)
-
-	available := make(map[string]bool)
-
-	for iter.Next() {
-		available[iter.Current().ID] = true
-	}
-
-	if err := iter.Err(); err != nil {
+	if err != nil {
 		return nil, err
 	}
 
@@ -73,37 +38,9 @@ func NewConfig(ctx context.Context, options *Options) (*CopilotConfig, error) {
 		MaxOutputTokens: 128000,
 	}
 
-	pick := func(candidates ...string) string {
-		for _, id := range candidates {
-			if available[id] {
-				return id
-			}
-		}
-		return ""
+	if len(models) > 0 {
+		cfg.Model = models[0]
 	}
-
-	cfg.Model = pick(
-		// ChatGPT models
-		"gpt-5.5",
-		"gpt-5.4",
-
-		// Codex models
-		"gpt-5.3-codex",
-		"gpt-5.2-codex",
-		"gpt-5.1-codex-max",
-		"gpt-5.1-codex",
-		"gpt-5-codex",
-
-		// Codex Mini models
-		"gpt-5.3-codex-spark",
-		"gpt-5.1-codex-mini",
-
-		// Legacy ChatGPT models
-		"gpt-5.2",
-		"gpt-5.1",
-		"gpt-5",
-		"gpt-5-mini",
-	)
 
 	return cfg, nil
 }

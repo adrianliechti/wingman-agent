@@ -1,4 +1,4 @@
-package goose
+package junie
 
 import (
 	"context"
@@ -8,21 +8,20 @@ import (
 
 type Options = run.Options
 
-type GooseConfig struct {
+type JunieConfig struct {
 	BaseURL   string
 	AuthToken string
 
 	Model     string
 	FastModel string
-
-	ContextLimit int
 }
 
-func NewConfig(ctx context.Context, options *Options) (*GooseConfig, error) {
+func NewConfig(ctx context.Context, options *Options) (*JunieConfig, error) {
 	options = run.WithDefaults(options)
 
 	defaultModels, err := run.Models(ctx, options, &run.ModelOptions{
-		Kind: run.ModelDefault,
+		Kind:   run.ModelDefault,
+		Filter: run.IsOpenAI,
 	})
 
 	if err != nil {
@@ -30,18 +29,17 @@ func NewConfig(ctx context.Context, options *Options) (*GooseConfig, error) {
 	}
 
 	fastModels, err := run.Models(ctx, options, &run.ModelOptions{
-		Kind: run.ModelFast,
+		Kind:   run.ModelFast,
+		Filter: run.IsOpenAI,
 	})
 
 	if err != nil {
 		return nil, err
 	}
 
-	cfg := &GooseConfig{
+	cfg := &JunieConfig{
 		BaseURL:   options.WingmanURL,
 		AuthToken: options.WingmanToken,
-
-		ContextLimit: 200000,
 	}
 
 	if len(defaultModels) > 0 {

@@ -2,11 +2,6 @@ package gemini
 
 import (
 	"context"
-	"os"
-	"strings"
-
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
 
 	"github.com/adrianliechti/wingman-agent/tui/run"
 )
@@ -21,44 +16,14 @@ type GeminiConfig struct {
 }
 
 func NewConfig(ctx context.Context, options *Options) (*GeminiConfig, error) {
-	if options == nil {
-		options = new(Options)
-	}
+	options = run.WithDefaults(options)
 
-	if options.WingmanURL == "" {
-		val := os.Getenv("WINGMAN_URL")
+	models, err := run.Models(ctx, options, &run.ModelOptions{
+		Kind:   run.ModelDefault,
+		Filter: run.IsGoogle,
+	})
 
-		if val == "" {
-			val = "http://localhost:4242"
-		}
-
-		options.WingmanURL = val
-	}
-
-	if options.WingmanToken == "" {
-		val := os.Getenv("WINGMAN_TOKEN")
-
-		if val == "" {
-			val = "-"
-		}
-
-		options.WingmanToken = val
-	}
-
-	client := openai.NewClient(
-		option.WithBaseURL(strings.TrimRight(options.WingmanURL, "/")+"/v1"),
-		option.WithAPIKey(options.WingmanToken),
-	)
-
-	iter := client.Models.ListAutoPaging(ctx)
-
-	available := make(map[string]bool)
-
-	for iter.Next() {
-		available[iter.Current().ID] = true
-	}
-
-	if err := iter.Err(); err != nil {
+	if err != nil {
 		return nil, err
 	}
 
@@ -67,25 +32,9 @@ func NewConfig(ctx context.Context, options *Options) (*GeminiConfig, error) {
 		AuthToken: options.WingmanToken,
 	}
 
-	pick := func(candidates ...string) string {
-		for _, id := range candidates {
-			if available[id] {
-				return id
-			}
-		}
-		return ""
+	if len(models) > 0 {
+		cfg.Model = models[0]
 	}
-
-	cfg.Model = pick(
-		// Gemini Pro models
-		"gemini-3.1-pro-preview",
-		"gemini-3-pro-preview",
-		"gemini-2.5-pro",
-
-		// Gemini Flash models
-		"gemini-3-flash-preview",
-		"gemini-2.5-flash",
-	)
 
 	return cfg, nil
 }

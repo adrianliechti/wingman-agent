@@ -2,11 +2,7 @@ package claude
 
 import (
 	"context"
-	"os"
 	"strings"
-
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
 
 	"github.com/adrianliechti/wingman-agent/tui/run"
 )
@@ -25,64 +21,26 @@ type ClaudeConfig struct {
 }
 
 func NewConfig(ctx context.Context, options *Options) (*ClaudeConfig, error) {
-	if options == nil {
-		options = new(Options)
-	}
+	options = run.WithDefaults(options)
 
-	if options.WingmanURL == "" {
-		val := os.Getenv("WINGMAN_URL")
+	available, err := run.AvailableModels(ctx, options)
 
-		if val == "" {
-			val = "http://localhost:4242"
-		}
-
-		options.WingmanURL = val
-	}
-
-	if options.WingmanToken == "" {
-		val := os.Getenv("WINGMAN_TOKEN")
-
-		if val == "" {
-			val = "-"
-		}
-
-		options.WingmanToken = val
-	}
-
-	client := openai.NewClient(
-		option.WithBaseURL(strings.TrimRight(options.WingmanURL, "/")+"/v1"),
-		option.WithAPIKey(options.WingmanToken),
-	)
-
-	iter := client.Models.ListAutoPaging(ctx)
-
-	available := make(map[string]bool)
-
-	for iter.Next() {
-		available[iter.Current().ID] = true
-	}
-
-	if err := iter.Err(); err != nil {
+	if err != nil {
 		return nil, err
 	}
 
-	cfg := &ClaudeConfig{
+	pick := func(name string) string {
+		return run.Pick(available, func(id string) bool {
+			return strings.Contains(id, name)
+		})
+	}
+
+	return &ClaudeConfig{
 		BaseURL:   options.WingmanURL,
 		AuthToken: options.WingmanToken,
-	}
 
-	pick := func(candidates ...string) string {
-		for _, id := range candidates {
-			if available[id] {
-				return id
-			}
-		}
-		return ""
-	}
-
-	cfg.HaikuModel = pick("claude-haiku-4-6", "claude-haiku-4-5")
-	cfg.SonnetModel = pick("claude-sonnet-4-6", "claude-sonnet-4-5")
-	cfg.OpusModel = pick("claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5")
-
-	return cfg, nil
+		HaikuModel:  pick("haiku"),
+		SonnetModel: pick("sonnet"),
+		OpusModel:   pick("opus"),
+	}, nil
 }
