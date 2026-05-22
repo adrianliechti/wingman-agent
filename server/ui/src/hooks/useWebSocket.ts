@@ -19,7 +19,9 @@ export interface ChatEntry {
 	reasoningId?: string;
 }
 
-export function messagesToEntries(messages: ConversationMessage[]): ChatEntry[] {
+export function messagesToEntries(
+	messages: ConversationMessage[],
+): ChatEntry[] {
 	const entries: ChatEntry[] = [];
 	for (const m of messages) {
 		// Collect images in this message so we can attach them to the user
@@ -389,10 +391,7 @@ export function useWebSocket() {
 			const id = nextId();
 			updateSession(sessionId, (sess) => ({
 				...sess,
-				entries: [
-					...sess.entries,
-					{ id, type: "user", content: text, images },
-				],
+				entries: [...sess.entries, { id, type: "user", content: text, images }],
 			}));
 			send({ type: "send", session: sessionId, text, files, images });
 		},
@@ -413,6 +412,11 @@ export function useWebSocket() {
 			return rest;
 		});
 		delete streamRefs.current[sessionId];
+	}, []);
+
+	const clearSessions = useCallback(() => {
+		setSessions({});
+		streamRefs.current = {};
 	}, []);
 
 	useEffect(() => {
@@ -495,6 +499,7 @@ export function useWebSocket() {
 		sendChat,
 		cancel,
 		removeSession,
+		clearSessions,
 		subscribe,
 	};
 }

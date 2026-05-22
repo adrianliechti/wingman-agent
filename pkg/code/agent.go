@@ -11,17 +11,11 @@ package code
 
 import (
 	"context"
-	"errors"
 	"iter"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 )
-
-// ErrNotSupported signals that the active backend doesn't implement an
-// optional operation (e.g. ACP servers have no DeleteSession RPC).
-// Server / TUI use it to hide affordances and skip mid-flight errors.
-var ErrNotSupported = errors.New("operation not supported by this agent")
 
 // SessionInfo is one row in the backend's session catalog (wingman's
 // on-disk list or the ACP server's ListSessions response).
@@ -55,7 +49,7 @@ type Agent interface {
 	// doesn't expose a model selector.
 	Models() (available []Model, current string)
 
-	// SetModel switches the active model. Returns [ErrNotSupported]
+	// SetModel switches the active model. Returns [errors.ErrUnsupported]
 	// when the backend has no model selector.
 	SetModel(ctx context.Context, id string) error
 
@@ -80,7 +74,7 @@ type Agent interface {
 	LoadSession(ctx context.Context, id string) error
 
 	// DeleteSession removes a session from the catalog. Returns
-	// [ErrNotSupported] when the backend can't delete (ACP).
+	// [errors.ErrUnsupported] when the backend can't delete (ACP).
 	DeleteSession(ctx context.Context, id string) error
 
 	// Messages returns the transcript for a session id. Returns nil

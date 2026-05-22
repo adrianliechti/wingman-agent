@@ -1,4 +1,4 @@
-import { Bot, ChevronDown } from "lucide-react";
+import { Bot, ChevronDown, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ServerMessage } from "../types/protocol";
 
@@ -10,24 +10,19 @@ interface AgentInfo {
 const BUILTIN_AGENT_ID = "wingman";
 
 interface Props {
-	// subscribe is the same WebSocket subscription helper exposed by
-	// useWebSocket; the picker uses it only to react to peer-driven
-	// changes (another tab switched the agent).
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
+	// onSwitchingChange reports the id of an in-flight agent swap (or
+	// null when idle). Parent uses it to render a separate loader
+	// (e.g. in the session list).
+	onSwitchingChange?: (target: string | null) => void;
 }
 
-// AgentPicker is the per-workspace selector for which backend new
-// sessions use (wingman in-process vs. an external ACP server like
-// codex-acp / claude-acp). It's rendered in the Sidebar header — the
-// model + effort picker stays scoped to a single chat.
-//
-// The component hides itself when only the built-in wingman backend is
-// configured (no external agents in ~/.wingman/agents.json), so a
-// default install doesn't grow an unused dropdown.
-export function AgentPicker({ subscribe }: Props) {
+export function AgentPicker({ subscribe, onSwitchingChange }: Props) {
 	const [agents, setAgents] = useState<AgentInfo[]>([]);
 	const [current, setCurrent] = useState(BUILTIN_AGENT_ID);
 	const [open, setOpen] = useState(false);
+	const [switching, setSwitching] = useState<string | null>(null);
+	const [error, setError] = useState<string | null>(null);
 	const popRef = useRef<HTMLDivElement>(null);
 	const btnRef = useRef<HTMLButtonElement>(null);
 
@@ -46,8 +41,6 @@ export function AgentPicker({ subscribe }: Props) {
 		load();
 	}, [load]);
 
-	// React to agent_changed broadcasts so another tab switching the
-	// backend updates this picker too.
 	useEffect(() => {
 		if (!subscribe) return;
 		return subscribe((msg) => {
@@ -56,6 +49,10 @@ export function AgentPicker({ subscribe }: Props) {
 			}
 		});
 	}, [subscribe, load]);
+
+	useEffect(() => {
+		onSwitchingChange?.(switching);
+	}, [switching, onSwitchingChange]);
 
 	useEffect(() => {
 		if (!open) return;
@@ -74,27 +71,48 @@ export function AgentPicker({ subscribe }: Props) {
 		return () => document.removeEventListener("mousedown", handler);
 	}, [open]);
 
-	const select = useCallback((id: string) => {
-		fetch("/api/agent", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ agent: id }),
-		})
-			.then(async (r) => {
-				if (!r.ok) throw new Error(await r.text());
-				return r.json();
-			})
-			.then((data) => setCurrent(data.agent || id))
-			.catch(() => {})
-			.finally(() => setOpen(false));
-	}, []);
+	const select = useCallback(
+		async (id: string) => {
+			if (id === current || switching) return;
+			setSwitching(id);
+			setError(null);
+			setOpen(false);
+			try {
+				const r = await fetch("/api/agent", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ agent: id }),
+				});
+				if (!r.ok) {
+					throw new Error(
+						(await r.text()).trim() || `${r.status} ${r.statusText}`,
+					);
+				}
+				const data = (await r.json()) as { agent?: string };
+				setCurrent(data.agent || id);
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				setError(`Switch failed: ${msg}`);
+				console.error("agent switch failed", e);
+			} finally {
+				setSwitching(null);
+			}
+		},
+		[current, switching],
+	);
 
-	const currentName = useMemo(() => {
-		const match = agents.find((a) => a.id === current);
-		return match?.name || current;
-	}, [agents, current]);
+	useEffect(() => {
+		if (!error) return;
+		const t = setTimeout(() => setError(null), 6000);
+		return () => clearTimeout(t);
+	}, [error]);
 
-	// Single-agent installs see no value in the dropdown — hide it.
+	const displayedName = useMemo(() => {
+		const id = switching ?? current;
+		const match = agents.find((a) => a.id === id);
+		return match?.name || id;
+	}, [agents, current, switching]);
+
 	if (agents.length <= 1) return null;
 
 	return (
@@ -102,15 +120,22 @@ export function AgentPicker({ subscribe }: Props) {
 			<button
 				ref={btnRef}
 				type="button"
-				onClick={() => setOpen((v) => !v)}
-				className="flex items-center gap-1 px-2 h-7 rounded text-[11.5px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors max-w-[180px]"
-				title={`Agent: ${currentName}`}
+				onClick={() => !switching && setOpen((v) => !v)}
+				disabled={!!switching}
+				className="flex items-center gap-1 px-2 h-7 rounded text-[11.5px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors max-w-[180px] disabled:cursor-wait disabled:opacity-70"
+				title={`Agent: ${displayedName}`}
 			>
-				<Bot size={12} className="shrink-0" />
-				<span className="truncate">{currentName}</span>
-				<ChevronDown size={10} className="shrink-0 text-fg-dim" />
+				{switching ? (
+					<Loader2 size={12} className="shrink-0 animate-spin" />
+				) : (
+					<Bot size={12} className="shrink-0" />
+				)}
+				<span className="truncate">{displayedName}</span>
+				{!switching && (
+					<ChevronDown size={10} className="shrink-0 text-fg-dim" />
+				)}
 			</button>
-			{open && (
+			{open && !switching && (
 				<div
 					ref={popRef}
 					className="absolute top-full mt-1 left-0 min-w-[180px] max-w-[260px] bg-bg-elevated/95 backdrop-blur-sm border border-border rounded-md shadow-xl z-50"
@@ -131,6 +156,14 @@ export function AgentPicker({ subscribe }: Props) {
 							</button>
 						))}
 					</div>
+				</div>
+			)}
+			{error && (
+				<div
+					className="absolute top-full mt-1 right-0 min-w-[220px] max-w-[320px] bg-bg-elevated/95 backdrop-blur-sm border border-danger/40 rounded-md shadow-xl z-50 px-3 py-2 text-[11px] text-danger"
+					role="alert"
+				>
+					{error}
 				</div>
 			)}
 		</div>

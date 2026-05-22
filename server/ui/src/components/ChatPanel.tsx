@@ -2,6 +2,7 @@ import {
 	ArrowUp,
 	ChevronDown,
 	ChevronRight,
+	Loader2,
 	LoaderCircle,
 	Paperclip,
 	Plus,
@@ -32,9 +33,10 @@ interface Props {
 	onSelectMode: (next: "agent" | "plan") => void;
 	onSend: (text: string, files?: string[], images?: string[]) => void;
 	onCancel: () => void;
-	// subscribe lets the ModelPicker react to agent_changed broadcasts —
-	// the new backend's model/effort catalog differs from the previous.
-	// Optional so legacy callers still compile.
+	// loading overlays the transcript area with a spinner during slow
+	// session loads (clicking a session in the sidebar).
+	loading?: boolean;
+	// subscribe lets the ModelPicker react to agent_changed broadcasts.
 	subscribe?: (
 		handler: (msg: import("../types/protocol").ServerMessage) => void,
 	) => () => void;
@@ -104,6 +106,7 @@ export function ChatPanel({
 	onSelectMode,
 	onSend,
 	onCancel,
+	loading,
 	subscribe,
 }: Props) {
 	const scheme = useColorScheme();
@@ -483,7 +486,11 @@ export function ChatPanel({
 				className="h-full overflow-y-auto pb-24 [overflow-anchor:none]"
 				ref={containerRef}
 			>
-				{entries.length === 0 && phase === "idle" ? (
+				{loading ? (
+					<div className="h-full flex items-center justify-center">
+						<Loader2 size={16} className="text-fg-dim animate-spin" />
+					</div>
+				) : entries.length === 0 && phase === "idle" ? (
 					<div className="h-full flex items-center justify-center">
 						<div className="flex flex-col items-center text-center max-w-sm">
 							<img

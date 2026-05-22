@@ -44,8 +44,15 @@ const EMPTY_ENTRIES: never[] = [];
 const EMPTY_USAGE = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
 
 export default function App() {
-	const { connected, sessions, sendChat, cancel, removeSession, subscribe } =
-		useWebSocket();
+	const {
+		connected,
+		sessions,
+		sendChat,
+		cancel,
+		removeSession,
+		clearSessions,
+		subscribe,
+	} = useWebSocket();
 	const capabilities = useCapabilities(subscribe);
 	const showChanges = capabilities?.diffs ?? false;
 	const inGitRepo = capabilities?.git ?? false;
@@ -65,14 +72,34 @@ export default function App() {
 	const phase = activeSession?.phase ?? "idle";
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
 
-	// On first WS connect the server announces every in-memory session
-	// (handler_chat.handleWebSocket). Latch onto whichever shows up first
-	// so the user has an active session selected without a manual click.
 	useEffect(() => {
 		if (sessionId) return;
 		const first = Object.keys(sessions)[0];
 		if (first) setSessionId(first);
 	}, [sessionId, sessions]);
+
+	// On agent swap the prior backend's sessions are stale; drop the
+	// cache and immediately allocate a fresh session against the new
+	// agent so the chat tab is ready (and the ModelPicker has a
+	// populated catalog for ACP backends).
+	useEffect(() => {
+		if (!subscribe) return;
+		return subscribe(async (msg) => {
+			if (msg.type !== "agent_changed") return;
+			setSessionId("");
+			clearSessions();
+			try {
+				const res = await fetch("/api/sessions", { method: "POST" });
+				if (!res.ok) return;
+				const data = (await res.json()) as { id?: string };
+				if (!data.id) return;
+				justMintedSidRef.current = data.id;
+				setSessionId(data.id);
+			} catch {
+				// leave empty; user can click +
+			}
+		});
+	}, [subscribe, clearSessions]);
 
 	const [prevInGit, setPrevInGit] = useState<boolean | null>(null);
 	if (capabilities && prevInGit !== inGitRepo) {
@@ -152,66 +179,74 @@ export default function App() {
 		});
 	}, []);
 
-	const handleNewSession = useCallback(() => {
-		// Mint the new session id locally and switch to it. Using a UUID (vs.
-		// clearing sessionId) keeps the auto-pick effect inert — otherwise
-		// it would land on the first existing session and the chat would
-		// re-fill with old content. The server learns about this id when
-		// the user actually sends a message (lazy-create in handleSend).
-		setSessionId(crypto.randomUUID());
-		setActiveTabId("chat");
+	const handleNewSession = useCallback(async () => {
+		try {
+			const res = await fetch("/api/sessions", { method: "POST" });
+			if (!res.ok) return;
+			const data = (await res.json()) as { id?: string };
+			if (!data.id) return;
+			justMintedSidRef.current = data.id;
+			setSessionId(data.id);
+			setActiveTabId("chat");
+		} catch {
+			// leave session alone
+		}
 	}, []);
 
 	const handleSessionDeleted = useCallback(
 		(id: string) => {
 			removeSession(id);
 			if (id === sessionId) {
-				// No auto-bootstrap on the server — clear the active session
-				// and let the user pick from the sidebar or type to create.
 				setSessionId("");
 			}
 		},
 		[removeSession, sessionId],
 	);
 
+	const [loadingSession, setLoadingSession] = useState(false);
+
 	const handleSessionSelect = useCallback(
 		async (id: string) => {
-			// Already in memory? just switch — its state is already up to date.
 			if (sessions[id]) {
 				setSessionId(id);
 				setActiveTabId("chat");
 				return;
 			}
-			// Disk-only session: ask server to load it. Server registers it,
-			// then pushes a session_state event via WS to populate the slot.
-			const res = await fetch(`/api/sessions/${id}/load`, { method: "POST" });
-			if (!res.ok) return;
 			setSessionId(id);
 			setActiveTabId("chat");
+			setLoadingSession(true);
+			try {
+				await fetch(`/api/sessions/${id}/load`, { method: "POST" });
+			} finally {
+				setLoadingSession(false);
+			}
 		},
 		[sessions],
 	);
 
-	// Pin a sessionId we just minted locally — used to skip the mode GET that
-	// would otherwise race with our optimistic POST and overwrite the user's
-	// selection with the server's default before the POST commits.
+	// Skip the mode GET for ids we just allocated — the optimistic POST
+	// for mode would race with the GET and overwrite the user's pick.
 	const justMintedSidRef = useRef("");
 
-	const ensureSessionId = useCallback(() => {
+	const ensureSessionId = useCallback(async (): Promise<string> => {
 		if (sessionId) return sessionId;
-		const sid = crypto.randomUUID();
-		justMintedSidRef.current = sid;
-		setSessionId(sid);
-		return sid;
+		const res = await fetch("/api/sessions", { method: "POST" });
+		if (!res.ok) throw new Error("failed to allocate session");
+		const data = (await res.json()) as { id?: string };
+		if (!data.id) throw new Error("session id missing in response");
+		justMintedSidRef.current = data.id;
+		setSessionId(data.id);
+		return data.id;
 	}, [sessionId]);
 
 	const handleSend = useCallback(
-		(text: string, files?: string[], images?: string[]) => {
-			// Lazy-create: when there's no active session, mint a fresh UUID
-			// and use it for the send. The server adopts unknown ids on first
-			// MsgSend, so this materializes the conversation on the round-trip.
-			const sid = ensureSessionId();
-			sendChat(sid, text, files, images);
+		async (text: string, files?: string[], images?: string[]) => {
+			try {
+				const sid = await ensureSessionId();
+				sendChat(sid, text, files, images);
+			} catch {
+				// allocation failed; user can retry
+			}
 		},
 		[sendChat, ensureSessionId],
 	);
@@ -234,17 +269,20 @@ export default function App() {
 	}, [sessionId]);
 
 	const selectMode = useCallback(
-		(next: "agent" | "plan") => {
-			const sid = ensureSessionId();
-			setMode(next);
-			fetch(`/api/mode?session=${encodeURIComponent(sid)}`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ mode: next }),
-			})
-				.then((r) => r.json())
-				.then((data) => setMode(data.mode === "plan" ? "plan" : "agent"))
-				.catch(() => {});
+		async (next: "agent" | "plan") => {
+			try {
+				const sid = await ensureSessionId();
+				setMode(next);
+				const r = await fetch(`/api/mode?session=${encodeURIComponent(sid)}`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ mode: next }),
+				});
+				const data = await r.json();
+				setMode(data.mode === "plan" ? "plan" : "agent");
+			} catch {
+				// keep optimistic mode
+			}
 		},
 		[ensureSessionId],
 	);
@@ -448,6 +486,7 @@ export default function App() {
 								onSelectMode={selectMode}
 								onSend={handleSend}
 								onCancel={handleCancel}
+								loading={loadingSession}
 								subscribe={subscribe}
 							/>
 						) : activeTab.type === "diff" && activeTab.path ? (

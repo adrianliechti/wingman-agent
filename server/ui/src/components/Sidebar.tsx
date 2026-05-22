@@ -78,9 +78,8 @@ export function Sidebar({
 		});
 	}, [subscribe, loadSessions, loadAgent]);
 
-	// ACP doesn't have a DeleteSession RPC; the server refuses with 405
-	// for external backends. Hide the affordance so the user isn't
-	// surprised by the error.
+	const [switchingAgent, setSwitchingAgent] = useState<string | null>(null);
+
 	const canDelete = agentId === BUILTIN_AGENT_ID;
 
 	const handleDelete = async (e: React.MouseEvent, id: string) => {
@@ -100,7 +99,10 @@ export function Sidebar({
 					Sessions
 				</span>
 				<div className="flex-1" />
-				<AgentPicker subscribe={subscribe} />
+				<AgentPicker
+					subscribe={subscribe}
+					onSwitchingChange={setSwitchingAgent}
+				/>
 				{canCreateNew && (
 					<button
 						type="button"
@@ -115,63 +117,72 @@ export function Sidebar({
 
 			{/* Session List */}
 			<div className="flex-1 overflow-y-auto pb-2">
-				{groups.length === 0 && (
+				{switchingAgent && (
+					<div className="h-full flex items-center justify-center">
+						<Loader2 size={14} className="text-fg-dim animate-spin" />
+					</div>
+				)}
+				{!switchingAgent && groups.length === 0 && (
 					<div className="px-3 py-8 text-[11px] text-fg-dim text-center">
 						No sessions yet
 					</div>
 				)}
-				{groups.map((group) => (
-					<div key={group.label}>
-						<div className="pl-4 pr-3 pt-4 pb-1.5">
-							<span className="text-[10px] font-medium uppercase tracking-wider text-fg-dim">
-								{group.label}
-							</span>
-						</div>
-						{group.sessions.map((s) => {
-							const active = s.id === currentSessionId;
-							const displayTitle = s.title || s.id.substring(0, 8);
-							return (
-								<div
-									key={s.id}
-									className={`group relative flex items-center gap-2 px-2.5 py-1.5 mx-1.5 rounded-md cursor-pointer text-[12px] transition-colors ${
-										active
-											? "bg-bg-active text-fg"
-											: "text-fg-muted hover:bg-bg-hover hover:text-fg"
-									}`}
-									onClick={() => onSessionSelect(s.id)}
-									title={s.title || s.id}
-								>
-									{runningSessionIds?.has(s.id) ? (
-										<Loader2
-											size={12}
-											className="shrink-0 text-accent animate-spin"
-										/>
-									) : (
-										<MessageSquare size={12} className="shrink-0 text-fg-dim" />
-									)}
-									<div className="min-w-0 flex-1">
-										<div className="truncate text-[12px] leading-snug">
-											{displayTitle}
+				{!switchingAgent &&
+					groups.map((group) => (
+						<div key={group.label}>
+							<div className="pl-4 pr-3 pt-4 pb-1.5">
+								<span className="text-[10px] font-medium uppercase tracking-wider text-fg-dim">
+									{group.label}
+								</span>
+							</div>
+							{group.sessions.map((s) => {
+								const active = s.id === currentSessionId;
+								const displayTitle = s.title || s.id.substring(0, 8);
+								return (
+									<div
+										key={s.id}
+										className={`group relative flex items-center gap-2 px-2.5 py-1.5 mx-1.5 rounded-md cursor-pointer text-[12px] transition-colors ${
+											active
+												? "bg-bg-active text-fg"
+												: "text-fg-muted hover:bg-bg-hover hover:text-fg"
+										}`}
+										onClick={() => onSessionSelect(s.id)}
+										title={s.title || s.id}
+									>
+										{runningSessionIds?.has(s.id) ? (
+											<Loader2
+												size={12}
+												className="shrink-0 text-accent animate-spin"
+											/>
+										) : (
+											<MessageSquare
+												size={12}
+												className="shrink-0 text-fg-dim"
+											/>
+										)}
+										<div className="min-w-0 flex-1">
+											<div className="truncate text-[12px] leading-snug">
+												{displayTitle}
+											</div>
+											<div className="text-[10px] text-fg-dim truncate mt-0.5">
+												{relativeTime(s.updated_at)}
+											</div>
 										</div>
-										<div className="text-[10px] text-fg-dim truncate mt-0.5">
-											{relativeTime(s.updated_at)}
-										</div>
+										{canDelete && (
+											<button
+												type="button"
+												onClick={(e) => handleDelete(e, s.id)}
+												className="w-5 h-5 flex items-center justify-center rounded text-fg-dim hover:text-danger opacity-0 group-hover:opacity-100 shrink-0 transition-all"
+												title="Delete session"
+											>
+												<X size={11} />
+											</button>
+										)}
 									</div>
-									{canDelete && (
-										<button
-											type="button"
-											onClick={(e) => handleDelete(e, s.id)}
-											className="w-5 h-5 flex items-center justify-center rounded text-fg-dim hover:text-danger opacity-0 group-hover:opacity-100 shrink-0 transition-all"
-											title="Delete session"
-										>
-											<X size={11} />
-										</button>
-									)}
-								</div>
-							);
-						})}
-					</div>
-				))}
+								);
+							})}
+						</div>
+					))}
 			</div>
 		</div>
 	);

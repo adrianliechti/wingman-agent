@@ -35,9 +35,8 @@ type Agent struct {
 	conn      *acpsdk.ClientSideConnection
 	closeOnce sync.Once
 
-	// Backend-wide config snapshot. ACP exposes models / effort
-	// per-session, but in practice every session under one server
-	// shares the same catalog — we cache the latest seen.
+	caps acpsdk.AgentCapabilities
+
 	configMu   sync.RWMutex
 	models     []code.Model
 	modelID    string
@@ -124,11 +123,15 @@ func New(ws *code.Workspace, def code.AgentDef) (*Agent, error) {
 		sessions:  map[string]*sessionState{},
 	}
 	a.conn = acpsdk.NewClientSideConnection(a, stdin, stdout)
-	a.conn.SetLogger(slog.Default())
+	// SDK logs every connection teardown at INFO. Each agent swap +
+	// shutdown produces one; keep warnings and errors, drop the trace.
+	a.conn.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	})))
 
 	initCtx, cancel := context.WithTimeout(context.Background(), initTimeout)
 	defer cancel()
-	if _, err := a.conn.Initialize(initCtx, acpsdk.InitializeRequest{
+	resp, err := a.conn.Initialize(initCtx, acpsdk.InitializeRequest{
 		ProtocolVersion: acpsdk.ProtocolVersionNumber,
 		ClientCapabilities: acpsdk.ClientCapabilities{
 			Fs: acpsdk.FileSystemCapabilities{
@@ -136,10 +139,12 @@ func New(ws *code.Workspace, def code.AgentDef) (*Agent, error) {
 				WriteTextFile: true,
 			},
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		a.shutdown()
 		return nil, fmt.Errorf("agent %q: initialize: %w", def.Name, err)
 	}
+	a.caps = resp.AgentCapabilities
 	return a, nil
 }
 
@@ -218,6 +223,9 @@ func (a *Agent) anySession() *sessionState {
 // ─── Sessions ─────────────────────────────────────────────────────
 
 func (a *Agent) ListSessions(ctx context.Context) ([]code.SessionInfo, error) {
+	if a.caps.SessionCapabilities.List == nil {
+		return nil, nil
+	}
 	cwd := a.workspace.RootPath
 	resp, err := a.conn.ListSessions(ctx, acpsdk.ListSessionsRequest{Cwd: &cwd})
 	if err != nil {
@@ -248,6 +256,7 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 		return "", err
 	}
 	a.refreshConfig(resp.Models, resp.ConfigOptions)
+
 	id := string(resp.SessionId)
 	a.mu.Lock()
 	a.sessions[id] = &sessionState{
@@ -259,9 +268,12 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 	return id, nil
 }
 
-// LoadSession drains replay synchronously: by the time it returns nil,
-// Messages(id) reflects the loaded transcript.
+// LoadSession drains replay synchronously: Messages(id) reflects the
+// loaded transcript by the time it returns nil.
 func (a *Agent) LoadSession(ctx context.Context, id string) error {
+	if !a.caps.LoadSession {
+		return errors.ErrUnsupported
+	}
 	a.mu.Lock()
 	sess, exists := a.sessions[id]
 	if !exists {
@@ -329,7 +341,7 @@ func (a *Agent) LoadSession(ctx context.Context, id string) error {
 }
 
 func (a *Agent) DeleteSession(_ context.Context, _ string) error {
-	return code.ErrNotSupported
+	return errors.ErrUnsupported
 }
 
 func (a *Agent) Messages(id string) []agent.Message {
@@ -463,7 +475,9 @@ func (a *Agent) Close() error {
 func (a *Agent) shutdown() {
 	a.closeOnce.Do(func() {
 		a.mu.Lock()
+		sessions := make([]*sessionState, 0, len(a.sessions))
 		for _, sess := range a.sessions {
+			sessions = append(sessions, sess)
 			sess.mu.Lock()
 			if sess.inflight != nil {
 				sess.inflight.cancel()
@@ -471,6 +485,15 @@ func (a *Agent) shutdown() {
 			sess.mu.Unlock()
 		}
 		a.mu.Unlock()
+
+		// Protocol: clients MUST NOT call session/close without the cap.
+		if a.caps.SessionCapabilities.Close != nil && len(sessions) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			for _, sess := range sessions {
+				_, _ = a.conn.CloseSession(ctx, acpsdk.CloseSessionRequest{SessionId: sess.id})
+			}
+			cancel()
+		}
 
 		if a.stdin != nil {
 			_ = a.stdin.Close()

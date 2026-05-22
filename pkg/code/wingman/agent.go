@@ -310,12 +310,10 @@ func (a *Agent) HasSession(id string) bool { return a.session(id) != nil }
 func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter.Seq2[agent.Message, error] {
 	a.mu.Lock()
 	s, ok := a.sessions[id]
-	if !ok {
-		// Lazy-create — Send to an unknown id materializes the session.
-		s = a.buildSession()
-		a.sessions[id] = s
-	}
 	a.mu.Unlock()
+	if !ok {
+		return errStream(fmt.Errorf("session %s not found; call NewSession first", id))
+	}
 
 	sendCtx, cancel := context.WithCancel(ctx)
 	s.setCancel(cancel)
@@ -342,6 +340,12 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter
 func (a *Agent) Cancel(id string) {
 	if s := a.session(id); s != nil {
 		s.cancel()
+	}
+}
+
+func errStream(err error) iter.Seq2[agent.Message, error] {
+	return func(yield func(agent.Message, error) bool) {
+		yield(agent.Message{}, err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -209,6 +210,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/checkpoints", s.handleCheckpoints)
 	mux.HandleFunc("POST /api/checkpoints/{hash}/restore", s.handleCheckpointRestore)
 	mux.HandleFunc("GET /api/sessions", s.handleSessions)
+	mux.HandleFunc("POST /api/sessions", s.handleNewSession)
 	mux.HandleFunc("POST /api/sessions/{id}/load", s.handleLoadSession)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /api/model", s.handleModel)
@@ -316,6 +318,10 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	infos, err := a.ListSessions(r.Context())
 	if err != nil {
+		// Surface to the parent log — sidebar still shows "No sessions
+		// yet", but the developer can see whether the ACP server
+		// rejected the call vs genuinely returned empty.
+		fmt.Fprintf(os.Stderr, "list sessions (%s): %v\n", a.Name(), err)
 		writeJSON(w, []SessionEntry{})
 		return
 	}
@@ -334,6 +340,20 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
+	a := s.activeAgent()
+	if a == nil {
+		http.Error(w, "no active agent", http.StatusInternalServerError)
+		return
+	}
+	id, err := a.NewSession(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"id": id})
+}
+
 func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -347,6 +367,10 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 	}
 	// s.ctx (not r.Context()) so a WS reconnect mid-load doesn't abort.
 	if err := a.LoadSession(s.ctx, id); err != nil {
+		if errors.Is(err, errors.ErrUnsupported) {
+			http.Error(w, "load not supported for this agent", http.StatusMethodNotAllowed)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -366,7 +390,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.DeleteSession(r.Context(), id); err != nil {
-		if err == code.ErrNotSupported {
+		if errors.Is(err, errors.ErrUnsupported) {
 			http.Error(w, "delete not supported for this agent", http.StatusMethodNotAllowed)
 			return
 		}
