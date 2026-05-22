@@ -14,7 +14,6 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/session"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
 
@@ -100,8 +99,8 @@ func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	if event.Key() == tcell.KeyCtrlE && !a.hasActiveModal() {
 		a.expandLevel = (a.expandLevel + 1) % 3
 
-		if !a.showWelcome && !a.isStreaming() && !a.promptActive && !a.askActive && len(a.agent.Messages) > 0 {
-			a.renderChat(a.agent.Messages)
+		if !a.showWelcome && !a.isStreaming() && !a.promptActive && !a.askActive && len(a.agent.Messages(a.sessionID)) > 0 {
+			a.renderChat(a.agent.Messages(a.sessionID))
 		}
 
 		a.updateInputHint()
@@ -294,7 +293,7 @@ func (a *App) copyTextToClipboard(text string) {
 }
 
 func (a *App) copyLastResponse() {
-	messages := a.agent.Messages
+	messages := a.agent.Messages(a.sessionID)
 
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == agent.RoleAssistant {
@@ -326,10 +325,10 @@ func (a *App) pasteFromClipboard() {
 				}
 
 				if c.Text != "" {
-					paths := detectFilePaths(c.Text, a.agent.RootPath)
+					paths := detectFilePaths(c.Text, a.agent.Workspace().RootPath)
 					if len(paths) > 0 {
 						for _, p := range paths {
-							a.addFileToContext(normalizeFilePath(p, a.agent.RootPath))
+							a.addFileToContext(normalizeFilePath(p, a.agent.Workspace().RootPath))
 						}
 
 						continue
@@ -378,8 +377,14 @@ func (a *App) clearPendingContent() {
 
 func (a *App) clearChat() {
 	a.chatView.Clear()
-	a.agent.Messages = nil
-	a.agent.Usage = agent.Usage{}
+	// Replace the current session id with a fresh one so subsequent
+	// Send calls open a clean transcript. The old session's in-memory
+	// state stays around in the wingman.Agent map but the UI is
+	// pointing at a new id.
+	id, err := a.agent.NewSession(a.ctx)
+	if err == nil {
+		a.sessionID = id
+	}
 	a.inputTokens = 0
 	a.cachedTokens = 0
 	a.outputTokens = 0
@@ -389,30 +394,27 @@ func (a *App) clearChat() {
 func (a *App) resumeSession() {
 	t := theme.Default
 
-	sessions, err := session.List(filepath.Join(filepath.Dir(a.agent.MemoryPath), "sessions"))
+	sessions, err := a.agent.ListSessions(a.ctx)
 	if err != nil || len(sessions) == 0 {
 		fmt.Fprint(a.chatView, a.formatNotice("No sessions to resume", t.Yellow))
 		return
 	}
 
-	last, err := session.Load(filepath.Join(filepath.Dir(a.agent.MemoryPath), "sessions"), sessions[0].ID)
-	if err != nil {
+	last := sessions[0]
+	if err := a.agent.LoadSession(a.ctx, last.ID); err != nil {
 		fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Failed to load session: %v", err), t.Red))
 		return
 	}
 
-	a.agent.Messages = last.State.Messages
-	a.agent.Usage = last.State.Usage
-
 	a.sessionID = last.ID
 
-	usage := a.agent.Usage
+	usage := a.agent.Usage(a.sessionID)
 	a.inputTokens = usage.InputTokens
 	a.cachedTokens = usage.CachedTokens
 	a.outputTokens = usage.OutputTokens
 
 	a.switchToChat()
-	a.renderChat(a.agent.Messages)
+	a.renderChat(a.agent.Messages(a.sessionID))
 	a.updateStatusBar()
 
 	fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Resumed session from %s", last.UpdatedAt.Format("Jan 2 15:04")), t.Green))
@@ -430,6 +432,7 @@ func isBuiltinCommand(query string) bool {
 	switch query {
 	case "/quit", "/clear", "/resume", "/help",
 		"/models", "/model", "/effort",
+		"/agents",
 		"/plan", "/agent",
 		"/rewind", "/diff", "/problems",
 		"/copy", "/paste":
@@ -533,6 +536,12 @@ func (a *App) submitInput() {
 
 		return
 
+	case "/agents":
+		a.input.SetText("", true)
+		a.showAgentPicker()
+
+		return
+
 	case "/plan":
 		a.input.SetText("", true)
 		a.switchToChat()
@@ -590,7 +599,7 @@ func (a *App) submitInput() {
 			skillArgs = parts[1]
 		}
 
-		if s := skill.FindSkill(skillName, a.agent.Skills); s != nil {
+		if s := skill.FindSkill(skillName, a.agent.Workspace().Skills); s != nil {
 			a.input.SetText("", true)
 			a.invokeSkill(s, skillArgs)
 			return
@@ -641,7 +650,7 @@ func (a *App) submitInput() {
 }
 
 func (a *App) invokeSkill(s *skill.Skill, args string) {
-	content, err := s.GetContent(a.agent.RootPath)
+	content, err := s.GetContent(a.agent.Workspace().RootPath)
 	if err != nil {
 		a.switchToChat()
 		fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Failed to load skill %q: %v", s.Name, err), theme.Default.Red))
@@ -652,7 +661,7 @@ func (a *App) invokeSkill(s *skill.Skill, args string) {
 		_, _ = skill.MaterializeBundled(s)
 	}
 
-	content = s.ApplyArguments(content, args, s.AbsoluteDir(a.agent.RootPath))
+	content = s.ApplyArguments(content, args, s.AbsoluteDir(a.agent.Workspace().RootPath))
 
 	a.switchToChat()
 	a.app.ForceDraw()
@@ -796,8 +805,8 @@ func (a *App) buildLayout() *tview.Flex {
 		if newWidth != a.chatWidth {
 			a.chatWidth = newWidth
 
-			if !a.showWelcome && !a.promptActive && !a.askActive && len(a.agent.Messages) > 0 {
-				a.renderChat(a.agent.Messages)
+			if !a.showWelcome && !a.promptActive && !a.askActive && len(a.agent.Messages(a.sessionID)) > 0 {
+				a.renderChat(a.agent.Messages(a.sessionID))
 			}
 		}
 
@@ -852,12 +861,11 @@ func (a *App) updateStatusBar() {
 		}
 	}
 
-	parts = append(parts, fmt.Sprintf("[%s]%s[-]", t.Cyan, code.ModelName(a.agent.Model())))
+	_, currentModel := a.agent.Models()
+	parts = append(parts, fmt.Sprintf("[%s]%s[-]", t.Cyan, code.ModelName(currentModel)))
 
-	if a.agent.Config.Effort != nil {
-		if effort := a.agent.Config.Effort(); effort != "" {
-			parts = append(parts, fmt.Sprintf("[%s]%s[-]", t.Cyan, strings.ToUpper(effort[:1])+effort[1:]))
-		}
+	if effort, _ := a.agent.Effort(); effort != "" && effort != "auto" {
+		parts = append(parts, fmt.Sprintf("[%s]%s[-]", t.Cyan, strings.ToUpper(effort[:1])+effort[1:]))
 	}
 
 	parts = append(parts, fmt.Sprintf("[%s]%s[-]", t.Yellow, modeLabel))
@@ -880,12 +888,13 @@ func (a *App) builtinCommands() []slashCommand {
 		{"/help", "Show help"},
 		{"/model", "Select AI model"},
 		{"/effort", "Set reasoning effort"},
+		{"/agents", "Select agent backend"},
 		{"/plan", "Enter planning mode"},
 		{"/agent", "Return to execution mode"},
 		{"/problems", "Show problems"},
 	}
 
-	if a.agent.Rewind != nil {
+	if a.agent.Workspace().Rewind != nil {
 		cmds = append(cmds,
 			slashCommand{"/diff", "Show changes from baseline"},
 			slashCommand{"/rewind", "Restore to previous checkpoint"},
@@ -905,7 +914,7 @@ func (a *App) builtinCommands() []slashCommand {
 
 func (a *App) skillCommands() []slashCommand {
 	var cmds []slashCommand
-	for _, s := range a.agent.Skills {
+	for _, s := range a.agent.Workspace().Skills {
 		cmds = append(cmds, slashCommand{"/" + s.Name, s.Description})
 	}
 	slices.SortStableFunc(cmds, func(a, b slashCommand) int {

@@ -1,3 +1,12 @@
+// Package acp exposes wingman as an ACP server. External clients (Zed,
+// other IDEs) speak the ACP protocol over the subprocess stdio; this
+// adapter translates each ACP RPC into a call on a [*wingman.Agent].
+//
+// One wingman.Agent is held per cwd (workspace) and refcounted by
+// session. Inside a workspace, all sessions share model + effort —
+// wingman's design — even though ACP clients expect per-session
+// selection. The wider design picks "shared" over per-session because
+// the wingman UX has always been agent-wide.
 package acp
 
 import (
@@ -14,12 +23,11 @@ import (
 	"sync"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
-	"github.com/google/uuid"
+	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/session"
+	"github.com/adrianliechti/wingman-agent/pkg/code/wingman"
 )
 
 func Run(ctx context.Context, in io.Reader, out io.Writer) error {
@@ -27,13 +35,12 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-
 	s := &Server{
 		config:     cfg,
-		sessions:   map[acp.SessionId]*sessionEntry{},
+		sessions:   map[acpsdk.SessionId]*sessionEntry{},
 		workspaces: map[string]*workspaceEntry{},
 	}
-	s.conn = acp.NewAgentSideConnection(s, out, in)
+	s.conn = acpsdk.NewAgentSideConnection(s, out, in)
 	s.conn.SetLogger(slog.Default())
 
 	select {
@@ -44,117 +51,86 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	s.mu.Lock()
 	sessionIDs := slices.Collect(maps.Keys(s.sessions))
 	s.mu.Unlock()
-
 	for _, id := range sessionIDs {
-		_, _ = s.CloseSession(context.Background(), acp.CloseSessionRequest{SessionId: id})
+		_, _ = s.CloseSession(context.Background(), acpsdk.CloseSessionRequest{SessionId: id})
 	}
-
 	return nil
 }
 
 type Server struct {
-	conn *acp.AgentSideConnection
-
+	conn   *acpsdk.AgentSideConnection
 	config *agent.Config
 
 	mu         sync.Mutex
-	sessions   map[acp.SessionId]*sessionEntry
+	sessions   map[acpsdk.SessionId]*sessionEntry
 	workspaces map[string]*workspaceEntry
 }
 
 type sessionEntry struct {
-	id        acp.SessionId
-	agent     *code.Agent
+	id        acpsdk.SessionId
+	agent     *wingman.Agent
 	workspace *workspaceEntry
 	cancel    context.CancelFunc
 	closing   bool
 }
 
 type workspaceEntry struct {
-	ws   *code.Workspace
-	key  string
-	refs int
+	ws      *code.Workspace
+	agent   *wingman.Agent
+	key     string
+	refs    int
+	initted bool // WarmUp / InitMCP run lazily once per workspace
 }
 
-func (s *Server) Initialize(_ context.Context, _ acp.InitializeRequest) (acp.InitializeResponse, error) {
-	return acp.InitializeResponse{
-		ProtocolVersion: acp.ProtocolVersionNumber,
-		AgentCapabilities: acp.AgentCapabilities{
+func (s *Server) Initialize(_ context.Context, _ acpsdk.InitializeRequest) (acpsdk.InitializeResponse, error) {
+	return acpsdk.InitializeResponse{
+		ProtocolVersion: acpsdk.ProtocolVersionNumber,
+		AgentCapabilities: acpsdk.AgentCapabilities{
 			LoadSession: true,
-			SessionCapabilities: acp.SessionCapabilities{
-				List:   &acp.SessionListCapabilities{},
-				Resume: &acp.SessionResumeCapabilities{},
-				Close:  &acp.SessionCloseCapabilities{},
+			SessionCapabilities: acpsdk.SessionCapabilities{
+				List:   &acpsdk.SessionListCapabilities{},
+				Resume: &acpsdk.SessionResumeCapabilities{},
+				Close:  &acpsdk.SessionCloseCapabilities{},
 			},
 		},
 	}, nil
 }
 
-func (s *Server) Authenticate(_ context.Context, _ acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
-	return acp.AuthenticateResponse{}, nil
+func (s *Server) Authenticate(_ context.Context, _ acpsdk.AuthenticateRequest) (acpsdk.AuthenticateResponse, error) {
+	return acpsdk.AuthenticateResponse{}, nil
 }
 
-func (s *Server) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
+func (s *Server) NewSession(ctx context.Context, params acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
 	cwd, err := normalizeCwd(params.Cwd)
 	if err != nil {
-		return acp.NewSessionResponse{}, err
+		return acpsdk.NewSessionResponse{}, err
 	}
-	sid := acp.SessionId(uuid.NewString())
-	_, models, opts, err := s.attachSession(ctx, cwd, sid)
+	w, err := s.acquireWorkspace(ctx, cwd)
 	if err != nil {
-		return acp.NewSessionResponse{}, err
+		return acpsdk.NewSessionResponse{}, err
 	}
-	return acp.NewSessionResponse{
-		SessionId:     sid,
-		Models:        models,
-		ConfigOptions: opts,
+
+	sid, err := w.agent.NewSession(ctx)
+	if err != nil {
+		s.releaseWorkspace(w)
+		return acpsdk.NewSessionResponse{}, err
+	}
+	acpSid := acpsdk.SessionId(sid)
+	s.registerSession(acpSid, w)
+
+	return acpsdk.NewSessionResponse{
+		SessionId:     acpSid,
+		Models:        modelState(w.agent),
+		ConfigOptions: sessionConfigOptions(w.agent),
 	}, nil
 }
 
-func (s *Server) attachSession(ctx context.Context, cwd string, id acp.SessionId) (*code.Agent, *acp.SessionModelState, []acp.SessionConfigOption, error) {
-	if s.lookupSession(id) != nil {
-		return nil, nil, nil, fmt.Errorf("session %s is already active", id)
-	}
-
-	w, err := s.acquireWorkspace(cwd)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	w.ws.WarmUp()
-	if err := w.ws.InitMCP(ctx); err != nil {
-		s.releaseWorkspace(w)
-		return nil, nil, nil, err
-	}
-
-	a := w.ws.NewAgent(s.config, noopUI{})
-
+// acquireWorkspace returns the (refcounted) workspaceEntry for cwd,
+// lazily constructing it the first time. The workspace and its
+// wingman.Agent live for as long as any session refers to them.
+func (s *Server) acquireWorkspace(ctx context.Context, cwd string) (*workspaceEntry, error) {
 	s.mu.Lock()
-	if s.sessions[id] != nil {
-		s.mu.Unlock()
-		s.releaseWorkspace(w)
-		return nil, nil, nil, fmt.Errorf("session %s is already active", id)
-	}
-	s.sessions[id] = &sessionEntry{id: id, agent: a, workspace: w}
-	s.mu.Unlock()
-
-	var models *acp.SessionModelState
-	if available := availableModels(); len(available) > 0 {
-		current := string(available[0].ModelId)
-		setAgentModel(a, current)
-		models = &acp.SessionModelState{
-			AvailableModels: available,
-			CurrentModelId:  acp.ModelId(current),
-		}
-	}
-	return a, models, sessionConfigOptions(a), nil
-}
-
-func (s *Server) acquireWorkspace(cwd string) (*workspaceEntry, error) {
-	key := cwd
-
-	s.mu.Lock()
-	if w, ok := s.workspaces[key]; ok {
+	if w, ok := s.workspaces[cwd]; ok {
 		w.refs++
 		s.mu.Unlock()
 		return w, nil
@@ -165,17 +141,32 @@ func (s *Server) acquireWorkspace(cwd string) (*workspaceEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	wa := wingman.New(ws, s.config, noopUI{})
 
 	s.mu.Lock()
-	if existing, ok := s.workspaces[key]; ok {
+	if existing, ok := s.workspaces[cwd]; ok {
+		// Concurrent acquire — discard our build, reuse the winner.
 		existing.refs++
 		s.mu.Unlock()
+		_ = wa.Close()
 		ws.Close()
 		return existing, nil
 	}
-	w := &workspaceEntry{ws: ws, key: key, refs: 1}
-	s.workspaces[key] = w
+	w := &workspaceEntry{ws: ws, agent: wa, key: cwd, refs: 1}
+	s.workspaces[cwd] = w
 	s.mu.Unlock()
+
+	// Warm-up runs outside the lock — it's slow (LSP / git probe) and
+	// other acquireWorkspace calls in the meantime get the entry as-is
+	// and skip the init thanks to initted.
+	if !w.initted {
+		ws.WarmUp()
+		if err := ws.InitMCP(ctx); err != nil {
+			slog.Warn("workspace mcp init failed", "cwd", cwd, "err", err)
+		}
+		wa.AutoSelectModel(ctx)
+		w.initted = true
+	}
 	return w, nil
 }
 
@@ -189,7 +180,14 @@ func (s *Server) releaseWorkspace(w *workspaceEntry) {
 	}
 	delete(s.workspaces, w.key)
 	s.mu.Unlock()
+	_ = w.agent.Close()
 	w.ws.Close()
+}
+
+func (s *Server) registerSession(id acpsdk.SessionId, w *workspaceEntry) {
+	s.mu.Lock()
+	s.sessions[id] = &sessionEntry{id: id, agent: w.agent, workspace: w}
+	s.mu.Unlock()
 }
 
 func normalizeCwd(cwd string) (string, error) {
@@ -202,22 +200,23 @@ func normalizeCwd(cwd string) (string, error) {
 	return filepath.Clean(cwd), nil
 }
 
-func (s *Server) UnstableSetSessionModel(_ context.Context, params acp.UnstableSetSessionModelRequest) (acp.UnstableSetSessionModelResponse, error) {
-	a := s.lookupAgent(params.SessionId)
-	if a == nil {
-		return acp.UnstableSetSessionModelResponse{}, fmt.Errorf("session %s not found", params.SessionId)
+func (s *Server) UnstableSetSessionModel(ctx context.Context, params acpsdk.UnstableSetSessionModelRequest) (acpsdk.UnstableSetSessionModelResponse, error) {
+	sess := s.lookupSession(params.SessionId)
+	if sess == nil {
+		return acpsdk.UnstableSetSessionModelResponse{}, fmt.Errorf("session %s not found", params.SessionId)
 	}
-
-	setAgentModel(a, string(params.ModelId))
-	return acp.UnstableSetSessionModelResponse{}, nil
+	if err := sess.agent.SetModel(ctx, string(params.ModelId)); err != nil {
+		return acpsdk.UnstableSetSessionModelResponse{}, err
+	}
+	return acpsdk.UnstableSetSessionModelResponse{}, nil
 }
 
-func (s *Server) CloseSession(_ context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
+func (s *Server) CloseSession(_ context.Context, params acpsdk.CloseSessionRequest) (acpsdk.CloseSessionResponse, error) {
 	s.mu.Lock()
 	sess := s.sessions[params.SessionId]
 	if sess == nil || sess.closing {
 		s.mu.Unlock()
-		return acp.CloseSessionResponse{}, nil
+		return acpsdk.CloseSessionResponse{}, nil
 	}
 	cancel := sess.cancel
 	if cancel != nil {
@@ -231,23 +230,19 @@ func (s *Server) CloseSession(_ context.Context, params acp.CloseSessionRequest)
 		cancel()
 	}
 	s.releaseWorkspace(sess.workspace)
-	return acp.CloseSessionResponse{}, nil
+	return acpsdk.CloseSessionResponse{}, nil
 }
 
-func (s *Server) lookupAgent(id acp.SessionId) *code.Agent {
-	if sess := s.lookupSession(id); sess != nil {
-		return sess.agent
-	}
-	return nil
-}
-
-func (s *Server) lookupSession(id acp.SessionId) *sessionEntry {
+func (s *Server) lookupSession(id acpsdk.SessionId) *sessionEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sessions[id]
 }
 
-func (s *Server) retainSession(id acp.SessionId, cancel context.CancelFunc) (*sessionEntry, func(), error) {
+// retainSession registers a per-prompt cancel function on the session,
+// bumps the workspace refcount so a concurrent CloseSession doesn't
+// tear it down mid-prompt, and returns an unregister function.
+func (s *Server) retainSession(id acpsdk.SessionId, cancel context.CancelFunc) (*sessionEntry, func(), error) {
 	s.mu.Lock()
 	sess := s.sessions[id]
 	if sess == nil {
@@ -265,7 +260,6 @@ func (s *Server) retainSession(id acp.SessionId, cancel context.CancelFunc) (*se
 	sess.workspace.refs++
 	sess.cancel = cancel
 	s.mu.Unlock()
-
 	return sess, func() {
 		s.mu.Lock()
 		if s.sessions[id] == sess {
@@ -279,7 +273,7 @@ func (s *Server) retainSession(id acp.SessionId, cancel context.CancelFunc) (*se
 	}, nil
 }
 
-func (s *Server) Cancel(_ context.Context, params acp.CancelNotification) error {
+func (s *Server) Cancel(_ context.Context, params acpsdk.CancelNotification) error {
 	s.mu.Lock()
 	var cancel context.CancelFunc
 	if sess := s.sessions[params.SessionId]; sess != nil {
@@ -292,138 +286,138 @@ func (s *Server) Cancel(_ context.Context, params acp.CancelNotification) error 
 	return nil
 }
 
-func (s *Server) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	sess, unregister, err := s.retainSession(params.SessionId, cancel)
 	if err != nil {
-		return acp.PromptResponse{}, err
+		return acpsdk.PromptResponse{}, err
 	}
 	defer s.releaseWorkspace(sess.workspace)
 	defer unregister()
 
-	a := sess.agent
-
 	defer func() {
-		state := agent.State{
-			Messages: a.Messages,
-			Usage:    a.Usage,
-		}
-		if err := session.Save(code.SessionsDir(sess.workspace.key), string(sess.id), state); err != nil {
+		if err := sess.agent.Save(string(sess.id)); err != nil {
 			slog.Warn("save session failed", "session", sess.id, "err", err)
 		}
 	}()
 
-	notify := func(u acp.SessionUpdate) {
-		_ = s.conn.SessionUpdate(ctx, acp.SessionNotification{
+	notify := func(u acpsdk.SessionUpdate) {
+		_ = s.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
 			SessionId: params.SessionId,
 			Update:    u,
 		})
 	}
 
-	for msg, err := range a.Send(ctx, promptToContent(params.Prompt)) {
+	for msg, err := range sess.agent.Send(ctx, string(sess.id), promptToContent(params.Prompt)) {
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+				return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
 			}
-			notify(acp.UpdateAgentMessageText("error: " + err.Error()))
-			return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+			notify(acpsdk.UpdateAgentMessageText("error: " + err.Error()))
+			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
 		}
-
 		for _, c := range msg.Content {
 			notifyContent(notify, agent.RoleAssistant, c)
 		}
 	}
-
-	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+	return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
 }
 
-func (s *Server) ListSessions(_ context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+func (s *Server) ListSessions(ctx context.Context, params acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
 	if params.Cwd == nil || *params.Cwd == "" {
-		return acp.ListSessionsResponse{Sessions: []acp.SessionInfo{}}, nil
+		return acpsdk.ListSessionsResponse{Sessions: []acpsdk.SessionInfo{}}, nil
 	}
 	cwd, err := normalizeCwd(*params.Cwd)
 	if err != nil {
-		return acp.ListSessionsResponse{}, err
+		return acpsdk.ListSessionsResponse{}, err
 	}
-
-	saved, err := session.List(code.SessionsDir(cwd))
+	// ListSessions is cheap (filesystem scan), so we don't need to
+	// retain the workspace — peek without spawning anything new.
+	s.mu.Lock()
+	w := s.workspaces[cwd]
+	s.mu.Unlock()
+	if w == nil {
+		// Workspace not yet referenced — build a transient one purely to
+		// enumerate its on-disk sessions, then drop it.
+		ws, err := code.NewWorkspace(cwd)
+		if err != nil {
+			return acpsdk.ListSessionsResponse{}, err
+		}
+		defer ws.Close()
+		w = &workspaceEntry{ws: ws, agent: wingman.New(ws, s.config, noopUI{}), key: cwd}
+	}
+	infos, err := w.agent.ListSessions(ctx)
 	if err != nil {
-		return acp.ListSessionsResponse{}, err
+		return acpsdk.ListSessionsResponse{}, err
 	}
-
-	out := make([]acp.SessionInfo, 0, len(saved))
-	for _, sess := range saved {
-		info := acp.SessionInfo{
-			SessionId: acp.SessionId(sess.ID),
+	out := make([]acpsdk.SessionInfo, 0, len(infos))
+	for _, si := range infos {
+		info := acpsdk.SessionInfo{
+			SessionId: acpsdk.SessionId(si.ID),
 			Cwd:       cwd,
 		}
-		if sess.Title != "" {
-			t := sess.Title
+		if si.Title != "" {
+			t := si.Title
 			info.Title = &t
 		}
-		if !sess.UpdatedAt.IsZero() {
-			u := sess.UpdatedAt.UTC().Format(time.RFC3339)
+		if !si.UpdatedAt.IsZero() {
+			u := si.UpdatedAt.UTC().Format(time.RFC3339)
 			info.UpdatedAt = &u
 		}
 		out = append(out, info)
 	}
-	return acp.ListSessionsResponse{Sessions: out}, nil
+	return acpsdk.ListSessionsResponse{Sessions: out}, nil
 }
 
-func (s *Server) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
-	models, opts, _, err := s.loadAndAttach(ctx, params.Cwd, params.SessionId)
+func (s *Server) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionRequest) (acpsdk.ResumeSessionResponse, error) {
+	w, _, err := s.loadAndAttach(ctx, params.Cwd, params.SessionId)
 	if err != nil {
-		return acp.ResumeSessionResponse{}, err
+		return acpsdk.ResumeSessionResponse{}, err
 	}
-	return acp.ResumeSessionResponse{
-		Models:        models,
-		ConfigOptions: opts,
+	return acpsdk.ResumeSessionResponse{
+		Models:        modelState(w.agent),
+		ConfigOptions: sessionConfigOptions(w.agent),
 	}, nil
 }
 
-func (s *Server) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
-	models, opts, messages, err := s.loadAndAttach(ctx, params.Cwd, params.SessionId)
+func (s *Server) LoadSession(ctx context.Context, params acpsdk.LoadSessionRequest) (acpsdk.LoadSessionResponse, error) {
+	w, messages, err := s.loadAndAttach(ctx, params.Cwd, params.SessionId)
 	if err != nil {
-		return acp.LoadSessionResponse{}, err
+		return acpsdk.LoadSessionResponse{}, err
 	}
 	s.replayMessages(ctx, params.SessionId, messages)
-	return acp.LoadSessionResponse{
-		Models:        models,
-		ConfigOptions: opts,
+	return acpsdk.LoadSessionResponse{
+		Models:        modelState(w.agent),
+		ConfigOptions: sessionConfigOptions(w.agent),
 	}, nil
 }
 
-func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acp.SessionId) (*acp.SessionModelState, []acp.SessionConfigOption, []agent.Message, error) {
+func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.SessionId) (*workspaceEntry, []agent.Message, error) {
 	cwd, err := normalizeCwd(cwdParam)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-
-	saved, err := session.Load(code.SessionsDir(cwd), string(id))
+	w, err := s.acquireWorkspace(ctx, cwd)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("session %s not found: %w", id, err)
+		return nil, nil, err
 	}
-
-	a, models, opts, err := s.attachSession(ctx, cwd, id)
-	if err != nil {
-		return nil, nil, nil, err
+	if err := w.agent.LoadSession(ctx, string(id)); err != nil {
+		s.releaseWorkspace(w)
+		return nil, nil, fmt.Errorf("session %s not found: %w", id, err)
 	}
-	a.Messages = saved.State.Messages
-	a.Usage = saved.State.Usage
-
-	return models, opts, saved.State.Messages, nil
+	s.registerSession(id, w)
+	return w, w.agent.Messages(string(id)), nil
 }
 
-func (s *Server) replayMessages(ctx context.Context, sid acp.SessionId, messages []agent.Message) {
-	notify := func(u acp.SessionUpdate) {
-		_ = s.conn.SessionUpdate(ctx, acp.SessionNotification{
+func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messages []agent.Message) {
+	notify := func(u acpsdk.SessionUpdate) {
+		_ = s.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
 			SessionId: sid,
 			Update:    u,
 		})
 	}
-
 	for _, m := range messages {
 		if m.Hidden {
 			continue
@@ -434,86 +428,82 @@ func (s *Server) replayMessages(ctx context.Context, sid acp.SessionId, messages
 	}
 }
 
-func notifyContent(notify func(acp.SessionUpdate), role agent.MessageRole, c agent.Content) {
+func notifyContent(notify func(acpsdk.SessionUpdate), role agent.MessageRole, c agent.Content) {
 	switch {
 	case c.ToolCall != nil:
 		raw := parseRawInput(c.ToolCall.Args)
-		opts := []acp.ToolCallStartOpt{
-			acp.WithStartKind(mapKind(c.ToolCall.Name)),
-			acp.WithStartStatus(acp.ToolCallStatusInProgress),
-			acp.WithStartRawInput(raw),
+		opts := []acpsdk.ToolCallStartOpt{
+			acpsdk.WithStartKind(mapKind(c.ToolCall.Name)),
+			acpsdk.WithStartStatus(acpsdk.ToolCallStatusInProgress),
+			acpsdk.WithStartRawInput(raw),
 		}
 		if locs := toolLocations(c.ToolCall.Name, raw); len(locs) > 0 {
-			opts = append(opts, acp.WithStartLocations(locs))
+			opts = append(opts, acpsdk.WithStartLocations(locs))
 		}
-		notify(acp.StartToolCall(
-			acp.ToolCallId(c.ToolCall.ID),
+		notify(acpsdk.StartToolCall(
+			acpsdk.ToolCallId(c.ToolCall.ID),
 			toolTitle(c.ToolCall.Name, raw),
 			opts...,
 		))
 	case c.ToolResult != nil:
-		notify(acp.UpdateToolCall(
-			acp.ToolCallId(c.ToolResult.ID),
-			acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
-			acp.WithUpdateContent([]acp.ToolCallContent{
-				acp.ToolContent(acp.TextBlock(c.ToolResult.Content)),
+		notify(acpsdk.UpdateToolCall(
+			acpsdk.ToolCallId(c.ToolResult.ID),
+			acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusCompleted),
+			acpsdk.WithUpdateContent([]acpsdk.ToolCallContent{
+				acpsdk.ToolContent(acpsdk.TextBlock(c.ToolResult.Content)),
 			}),
 		))
 	case c.Reasoning != nil && c.Reasoning.Summary != "":
-		notify(acp.UpdateAgentThoughtText(c.Reasoning.Summary))
+		notify(acpsdk.UpdateAgentThoughtText(c.Reasoning.Summary))
 	case c.Text != "":
 		if role == agent.RoleUser {
-			notify(acp.UpdateUserMessageText(c.Text))
+			notify(acpsdk.UpdateUserMessageText(c.Text))
 		} else {
-			notify(acp.UpdateAgentMessageText(c.Text))
+			notify(acpsdk.UpdateAgentMessageText(c.Text))
 		}
 	}
 }
 
-func (s *Server) SetSessionConfigOption(_ context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
+func (s *Server) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSessionConfigOptionRequest) (acpsdk.SetSessionConfigOptionResponse, error) {
 	if params.ValueId == nil {
-		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("expected select value")
+		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("expected select value")
 	}
 	p := params.ValueId
-
-	a := s.lookupAgent(p.SessionId)
-	if a == nil {
-		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("session %s not found", p.SessionId)
+	sess := s.lookupSession(p.SessionId)
+	if sess == nil {
+		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("session %s not found", p.SessionId)
 	}
-
 	switch string(p.ConfigId) {
 	case "model":
-		setAgentModel(a, string(p.Value))
+		if err := sess.agent.SetModel(ctx, string(p.Value)); err != nil {
+			return acpsdk.SetSessionConfigOptionResponse{}, err
+		}
 	case "effort":
-		if err := setAgentEffort(a, string(p.Value)); err != nil {
-			return acp.SetSessionConfigOptionResponse{}, err
+		if err := sess.agent.SetEffort(ctx, string(p.Value)); err != nil {
+			return acpsdk.SetSessionConfigOptionResponse{}, err
 		}
 	default:
-		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown config id: %s", p.ConfigId)
+		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown config id: %s", p.ConfigId)
 	}
-	// The spec requires the full updated option list on every response —
-	// strict clients (Zed) treat a missing/null configOptions as "session
-	// has no options" and wipe the entire picker UI.
-	return acp.SetSessionConfigOptionResponse{
-		ConfigOptions: sessionConfigOptions(a),
+	// Strict clients (Zed) treat a missing/null configOptions as "session
+	// has no options" and wipe the entire picker UI — return the full list.
+	return acpsdk.SetSessionConfigOptionResponse{
+		ConfigOptions: sessionConfigOptions(sess.agent),
 	}, nil
 }
 
-func (s *Server) SetSessionMode(_ context.Context, _ acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
-	return acp.SetSessionModeResponse{}, nil
+func (s *Server) SetSessionMode(_ context.Context, _ acpsdk.SetSessionModeRequest) (acpsdk.SetSessionModeResponse, error) {
+	return acpsdk.SetSessionModeResponse{}, nil
 }
 
 type noopUI struct{}
 
-func (noopUI) Ask(_ context.Context, _ string) (string, error) {
-	return "", nil
-}
-
+func (noopUI) Ask(_ context.Context, _ string) (string, error) { return "", nil }
 func (noopUI) Confirm(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }
 
-func promptToContent(blocks []acp.ContentBlock) []agent.Content {
+func promptToContent(blocks []acpsdk.ContentBlock) []agent.Content {
 	out := make([]agent.Content, 0, len(blocks))
 	for _, b := range blocks {
 		switch {
@@ -537,102 +527,90 @@ func parseRawInput(args string) any {
 	return args
 }
 
-func availableModels() []acp.ModelInfo {
-	out := make([]acp.ModelInfo, 0, len(code.AvailableModels))
-	for _, m := range code.AvailableModels {
-		out = append(out, acp.ModelInfo{
-			ModelId: acp.ModelId(m.ID),
+// modelState returns the [acpsdk.SessionModelState] derived from the
+// agent's currently visible catalog. Returns nil when the agent has no
+// models (the spec allows missing Models).
+func modelState(a *wingman.Agent) *acpsdk.SessionModelState {
+	available, current := a.Models()
+	if len(available) == 0 {
+		return nil
+	}
+	models := make([]acpsdk.ModelInfo, 0, len(available))
+	for _, m := range available {
+		models = append(models, acpsdk.ModelInfo{
+			ModelId: acpsdk.ModelId(m.ID),
 			Name:    m.Name,
 		})
 	}
-	return out
-}
-
-func setAgentModel(a *code.Agent, modelID string) {
-	a.Config.Model = func() string { return modelID }
-}
-
-// Once config_options is non-empty, strict clients (Zed) treat it as
-// canonical and ignore the legacy Models/Modes fields entirely. So every
-// selector wingman wants visible — model included — has to live here.
-func sessionConfigOptions(a *code.Agent) []acp.SessionConfigOption {
-	return []acp.SessionConfigOption{
-		modelConfigOption(currentModel(a)),
-		effortConfigOption(currentEffort(a)),
+	if current == "" {
+		current = string(models[0].ModelId)
+	}
+	return &acpsdk.SessionModelState{
+		AvailableModels: models,
+		CurrentModelId:  acpsdk.ModelId(current),
 	}
 }
 
-func currentModel(a *code.Agent) string {
-	if a.Config.Model == nil {
-		return ""
+// sessionConfigOptions composes the "model" + "effort" select options
+// from the agent's catalog. Strict clients (Zed) treat a non-empty
+// config_options as canonical, so both selectors must live here.
+func sessionConfigOptions(a *wingman.Agent) []acpsdk.SessionConfigOption {
+	return []acpsdk.SessionConfigOption{
+		modelConfigOption(a),
+		effortConfigOption(a),
 	}
-	return a.Config.Model()
 }
 
-func modelConfigOption(current string) acp.SessionConfigOption {
-	opts := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(code.AvailableModels))
-	for _, m := range code.AvailableModels {
-		opts = append(opts, acp.SessionConfigSelectOption{
-			Value: acp.SessionConfigValueId(m.ID),
+func modelConfigOption(a *wingman.Agent) acpsdk.SessionConfigOption {
+	available, current := a.Models()
+	opts := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(available))
+	for _, m := range available {
+		opts = append(opts, acpsdk.SessionConfigSelectOption{
+			Value: acpsdk.SessionConfigValueId(m.ID),
 			Name:  m.Name,
 		})
 	}
-	return acp.SessionConfigOption{
-		Select: &acp.SessionConfigOptionSelect{
+	return acpsdk.SessionConfigOption{
+		Select: &acpsdk.SessionConfigOptionSelect{
 			Id:           "model",
 			Name:         "Model",
-			CurrentValue: acp.SessionConfigValueId(current),
-			Options:      acp.SessionConfigSelectOptions{Ungrouped: &opts},
+			CurrentValue: acpsdk.SessionConfigValueId(current),
+			Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &opts},
 		},
 	}
 }
 
-func currentEffort(a *code.Agent) string {
-	if a.Config.Effort == nil {
-		return "auto"
+func effortConfigOption(a *wingman.Agent) acpsdk.SessionConfigOption {
+	current, values := a.Effort()
+	opts := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(values))
+	for _, v := range values {
+		opts = append(opts, acpsdk.SessionConfigSelectOption{
+			Value: acpsdk.SessionConfigValueId(v),
+			Name:  titleCase(v),
+		})
 	}
-	if v := a.Config.Effort(); v != "" {
-		return v
-	}
-	return "auto"
-}
-
-func effortConfigOption(current string) acp.SessionConfigOption {
-	opts := acp.SessionConfigSelectOptionsUngrouped{
-		{Value: "auto", Name: "Auto"},
-		{Value: "low", Name: "Low"},
-		{Value: "medium", Name: "Medium"},
-		{Value: "high", Name: "High"},
-	}
-	return acp.SessionConfigOption{
-		Select: &acp.SessionConfigOptionSelect{
+	return acpsdk.SessionConfigOption{
+		Select: &acpsdk.SessionConfigOptionSelect{
 			Id:           "effort",
 			Name:         "Effort",
-			CurrentValue: acp.SessionConfigValueId(current),
-			Options:      acp.SessionConfigSelectOptions{Ungrouped: &opts},
+			CurrentValue: acpsdk.SessionConfigValueId(current),
+			Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &opts},
 		},
 	}
 }
 
-func setAgentEffort(a *code.Agent, effort string) error {
-	switch effort {
-	case "", "auto":
-		a.Config.Effort = nil
-	case "low", "medium", "high":
-		v := effort
-		a.Config.Effort = func() string { return v }
-	default:
-		return fmt.Errorf("effort must be auto, low, medium, or high (got %q)", effort)
+func titleCase(s string) string {
+	if s == "" {
+		return s
 	}
-	return nil
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-// toolTitle returns a human-readable title for a tool call that includes the
-// most informative argument, so IDEs can show e.g. "read: pkg/acp/acp.go"
-// instead of just "read".
+// ─── tool-call shape helpers (unchanged from the previous version) ──
+
+// toolTitle returns a human-readable title for a tool call.
 func toolTitle(name string, raw any) string {
 	args, _ := raw.(map[string]any)
-
 	str := func(key string) string {
 		if args == nil {
 			return ""
@@ -640,7 +618,6 @@ func toolTitle(name string, raw any) string {
 		v, _ := args[key].(string)
 		return v
 	}
-
 	var detail string
 	switch name {
 	case "read", "write", "edit", "ls":
@@ -661,7 +638,6 @@ func toolTitle(name string, raw any) string {
 		}
 	case "shell":
 		if cmd := str("command"); cmd != "" {
-			// Use the human description when provided; fall back to the raw command.
 			if desc := str("description"); desc != "" {
 				detail = desc
 			} else {
@@ -683,45 +659,40 @@ func toolTitle(name string, raw any) string {
 			}
 		}
 	}
-
 	if detail == "" {
 		return name
 	}
 	return name + ": " + strings.TrimSpace(detail)
 }
 
-// toolLocations returns file locations for tools that operate on known paths,
-// enabling "follow-along" navigation in IDEs.
-func toolLocations(name string, raw any) []acp.ToolCallLocation {
+func toolLocations(name string, raw any) []acpsdk.ToolCallLocation {
 	args, _ := raw.(map[string]any)
 	if args == nil {
 		return nil
 	}
-
 	path, _ := args["path"].(string)
-
 	switch name {
 	case "read", "write", "edit", "ls", "find", "grep":
 		if path != "" {
-			return []acp.ToolCallLocation{{Path: path}}
+			return []acpsdk.ToolCallLocation{{Path: path}}
 		}
 	}
 	return nil
 }
 
-func mapKind(name string) acp.ToolKind {
+func mapKind(name string) acpsdk.ToolKind {
 	switch name {
 	case "read", "ls", "find":
-		return acp.ToolKindRead
+		return acpsdk.ToolKindRead
 	case "grep", "web_search":
-		return acp.ToolKindSearch
+		return acpsdk.ToolKindSearch
 	case "web_fetch":
-		return acp.ToolKindFetch
+		return acpsdk.ToolKindFetch
 	case "write", "edit":
-		return acp.ToolKindEdit
+		return acpsdk.ToolKindEdit
 	case "shell":
-		return acp.ToolKindExecute
+		return acpsdk.ToolKindExecute
 	default:
-		return acp.ToolKindOther
+		return acpsdk.ToolKindOther
 	}
 }

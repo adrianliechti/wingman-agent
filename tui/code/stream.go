@@ -25,13 +25,13 @@ func (a *App) setPhase(phase AppPhase) {
 }
 
 // Messages is captured before the closure to avoid a race with
-// a.agent.Messages being mutated mid-flight.
+// a.agent.Messages(sid) being mutated mid-flight.
 func (a *App) render() {
 	if a.promptActive || a.askActive {
 		return
 	}
 
-	messages := a.agent.Messages
+	messages := a.agent.Messages(a.sessionID)
 	a.app.QueueUpdateDraw(func() {
 		a.renderChat(messages)
 	})
@@ -53,7 +53,7 @@ func (a *App) streamResponse(input []agent.Content) {
 	// input was queued onto it and the in-flight loop will pick it up at
 	// its next safe boundary. Bail out without touching streamCancel /
 	// phase / commit, since the active stream owns those.
-	stream := a.agent.Send(streamCtx, input)
+	stream := a.agent.Send(streamCtx, a.sessionID, input)
 	if stream == nil {
 		cancel()
 		return
@@ -132,7 +132,7 @@ func (a *App) streamResponse(input []agent.Content) {
 			}
 		}
 
-		usage := a.agent.Usage
+		usage := a.agent.Usage(a.sessionID)
 		a.inputTokens = usage.InputTokens
 		a.cachedTokens = usage.CachedTokens
 		a.outputTokens = usage.OutputTokens
@@ -153,7 +153,7 @@ func (a *App) streamResponse(input []agent.Content) {
 			}
 		} else {
 			a.clearStreamingState()
-			a.renderChat(a.agent.Messages)
+			a.renderChat(a.agent.Messages(a.sessionID))
 		}
 
 		a.updateStatusBar()

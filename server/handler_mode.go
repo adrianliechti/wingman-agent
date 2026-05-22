@@ -3,18 +3,26 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/adrianliechti/wingman-agent/pkg/code/wingman"
 )
 
-func modeStringFor(sess *Session) string {
-	if sess != nil && sess.Agent != nil && sess.Agent.PlanMode {
-		return "plan"
-	}
-	return "agent"
-}
+// Plan mode is a wingman-only affordance — ACP backends have their own
+// internal mode handling. We expose it via the [*wingman.Agent] type
+// assertion; non-wingman backends report mode="agent" and reject sets
+// with 405.
 
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessionFromRequest(r)
-	writeJSON(w, map[string]string{"mode": modeStringFor(sess)})
+	id := r.URL.Query().Get("session")
+	if id == "" {
+		writeJSON(w, map[string]string{"mode": "agent"})
+		return
+	}
+	mode := "agent"
+	if wa, ok := s.activeAgent().(*wingman.Agent); ok && wa.PlanMode(id) {
+		mode = "plan"
+	}
+	writeJSON(w, map[string]string{"mode": mode})
 }
 
 func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
@@ -29,17 +37,16 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "mode must be \"agent\" or \"plan\"", http.StatusBadRequest)
 		return
 	}
-
 	id := r.URL.Query().Get("session")
 	if id == "" {
 		http.Error(w, "session id required", http.StatusBadRequest)
 		return
 	}
-	// Lazy-create — mirrors MsgSend so the user can pick a mode before
-	// the first message creates the session on its own.
-	sess := s.getOrCreateSession(id)
-
-	sess.Agent.PlanMode = body.Mode == "plan"
-
-	writeJSON(w, map[string]string{"mode": modeStringFor(sess)})
+	wa, ok := s.activeAgent().(*wingman.Agent)
+	if !ok {
+		http.Error(w, "plan mode is only available with the wingman backend", http.StatusMethodNotAllowed)
+		return
+	}
+	wa.SetPlanMode(id, body.Mode == "plan")
+	writeJSON(w, map[string]string{"mode": body.Mode})
 }

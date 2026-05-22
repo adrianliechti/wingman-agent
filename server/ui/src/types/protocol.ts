@@ -106,6 +106,10 @@ interface CapabilitiesChangedMessage {
 	type: "capabilities_changed";
 }
 
+interface AgentChangedMessage {
+	type: "agent_changed";
+}
+
 export type ServerMessage =
 	| SessionStateMessage
 	| TextDeltaMessage
@@ -120,7 +124,8 @@ export type ServerMessage =
 	| DiffsChangedMessage
 	| FilesChangedMessage
 	| DiagnosticsChangedMessage
-	| CapabilitiesChangedMessage;
+	| CapabilitiesChangedMessage
+	| AgentChangedMessage;
 
 export type Phase = "idle" | "thinking" | "streaming" | "tool_running";
 

@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 
 	"github.com/adrianliechti/wingman-agent/server"
 	clawtui "github.com/adrianliechti/wingman-agent/tui/claw"
@@ -19,7 +18,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/claw"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/channel"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/session"
+	"github.com/adrianliechti/wingman-agent/pkg/code/wingman"
 	"github.com/adrianliechti/wingman-agent/tui/proxy"
 
 	"github.com/adrianliechti/wingman-agent/tui/run/claude"
@@ -183,13 +182,16 @@ func runTUI(ctx context.Context, sessionID string) {
 	if err != nil {
 		fatal(err)
 	}
+	// The wingman.Agent's Close() doesn't tear down the workspace
+	// (server shares the workspace across sessions); the TUI owns it
+	// here so closing happens in the right order on shutdown.
 	defer ws.Close()
 
-	c := ws.NewAgent(cfg, nil)
-	sessionsDir := filepath.Join(filepath.Dir(ws.MemoryPath), "sessions")
+	wa := wingman.New(ws, cfg, nil)
 
+	// Resolve "latest" / explicit id to a loaded session, or fresh one.
 	if sessionID == "latest" {
-		sessions, err := session.List(sessionsDir)
+		sessions, err := wa.ListSessions(ctx)
 		if err != nil {
 			fatal(err)
 		}
@@ -199,17 +201,18 @@ func runTUI(ctx context.Context, sessionID string) {
 			sessionID = ""
 		}
 	}
-
 	if sessionID != "" {
-		s, err := session.Load(sessionsDir, sessionID)
+		if err := wa.LoadSession(ctx, sessionID); err != nil {
+			fatal(err)
+		}
+	} else {
+		sessionID, err = wa.NewSession(ctx)
 		if err != nil {
 			fatal(err)
 		}
-		c.Messages = s.State.Messages
-		c.Usage = s.State.Usage
 	}
 
-	if err := codetui.New(ctx, c, sessionID).Run(); err != nil {
+	if err := codetui.New(ctx, wa, sessionID).Run(); err != nil {
 		fatal(err)
 	}
 }

@@ -351,9 +351,11 @@ func splitFrontmatter(text string) (fm, body string, ok bool) {
 	return rest[:end], body, true
 }
 
-// managedTools snapshots MCP + LSP tools under w.mu so Agent.tools()
-// doesn't race WarmUp / InitMCP.
-func (w *Workspace) managedTools() (mcpTools, lspTools []tool.Tool) {
+// ManagedTools snapshots MCP + LSP tools under the workspace mutex so a
+// concurrent WarmUp / InitMCP can't race the per-turn tool() callback.
+// Exported for use by the wingman sub-package, which builds each
+// session's tool set from baseTools + ManagedTools().
+func (w *Workspace) ManagedTools() (mcpTools, lspTools []tool.Tool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	mcpTools = append([]tool.Tool(nil), w.mcpTools...)

@@ -1,6 +1,9 @@
 import { Loader2, MessageSquare, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { ServerMessage } from "../types/protocol";
+import { AgentPicker } from "./AgentPicker";
+
+const BUILTIN_AGENT_ID = "wingman";
 
 interface SessionInfo {
 	id: string;
@@ -36,6 +39,7 @@ export function Sidebar({
 	subscribe,
 }: Props) {
 	const [sessions, setSessions] = useState<SessionInfo[]>([]);
+	const [agentId, setAgentId] = useState(BUILTIN_AGENT_ID);
 
 	const loadSessions = useCallback(async () => {
 		try {
@@ -47,19 +51,37 @@ export function Sidebar({
 		}
 	}, []);
 
+	const loadAgent = useCallback(() => {
+		fetch("/api/agent")
+			.then((r) => r.json())
+			.then((data) => setAgentId(data.agent || BUILTIN_AGENT_ID))
+			.catch(() => {});
+	}, []);
+
 	useEffect(() => {
 		// eslint-disable-next-line react-hooks/set-state-in-effect -- standard data-load on mount
 		loadSessions();
-	}, [loadSessions]);
+		loadAgent();
+	}, [loadSessions, loadAgent]);
 
 	useEffect(() => {
 		if (!subscribe) return;
 		return subscribe((msg) => {
 			if (msg.type === "sessions_changed") {
 				loadSessions();
+			} else if (msg.type === "agent_changed") {
+				// The active agent flipping changes the session catalog
+				// source (wingman on-disk vs. ACP backend's list) — refetch.
+				loadAgent();
+				loadSessions();
 			}
 		});
-	}, [subscribe, loadSessions]);
+	}, [subscribe, loadSessions, loadAgent]);
+
+	// ACP doesn't have a DeleteSession RPC; the server refuses with 405
+	// for external backends. Hide the affordance so the user isn't
+	// surprised by the error.
+	const canDelete = agentId === BUILTIN_AGENT_ID;
 
 	const handleDelete = async (e: React.MouseEvent, id: string) => {
 		e.stopPropagation();
@@ -73,10 +95,12 @@ export function Sidebar({
 	return (
 		<div className="w-full h-full flex flex-col bg-bg">
 			{/* Header */}
-			<div className="h-10 pl-4 pr-1.5 flex items-center justify-between shrink-0">
+			<div className="h-10 pl-4 pr-1.5 flex items-center gap-2 shrink-0">
 				<span className="text-[11px] font-medium text-fg-dim uppercase tracking-wider">
 					Sessions
 				</span>
+				<div className="flex-1" />
+				<AgentPicker subscribe={subscribe} />
 				{canCreateNew && (
 					<button
 						type="button"
@@ -118,10 +142,13 @@ export function Sidebar({
 									title={s.title || s.id}
 								>
 									{runningSessionIds?.has(s.id) ? (
-									<Loader2 size={12} className="shrink-0 text-accent animate-spin" />
-								) : (
-									<MessageSquare size={12} className="shrink-0 text-fg-dim" />
-								)}
+										<Loader2
+											size={12}
+											className="shrink-0 text-accent animate-spin"
+										/>
+									) : (
+										<MessageSquare size={12} className="shrink-0 text-fg-dim" />
+									)}
 									<div className="min-w-0 flex-1">
 										<div className="truncate text-[12px] leading-snug">
 											{displayTitle}
@@ -130,14 +157,16 @@ export function Sidebar({
 											{relativeTime(s.updated_at)}
 										</div>
 									</div>
-									<button
-										type="button"
-										onClick={(e) => handleDelete(e, s.id)}
-										className="w-5 h-5 flex items-center justify-center rounded text-fg-dim hover:text-danger opacity-0 group-hover:opacity-100 shrink-0 transition-all"
-										title="Delete session"
-									>
-										<X size={11} />
-									</button>
+									{canDelete && (
+										<button
+											type="button"
+											onClick={(e) => handleDelete(e, s.id)}
+											className="w-5 h-5 flex items-center justify-center rounded text-fg-dim hover:text-danger opacity-0 group-hover:opacity-100 shrink-0 transition-all"
+											title="Delete session"
+										>
+											<X size={11} />
+										</button>
+									)}
 								</div>
 							);
 						})}

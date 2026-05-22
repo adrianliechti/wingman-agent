@@ -45,7 +45,7 @@ func (f fileMatches) Len() int            { return len(f) }
 
 func (a *App) collectFiles() []fileMatch {
 	var files []fileMatch
-	fsys := a.agent.Root.FS()
+	fsys := a.agent.Workspace().Root.FS()
 
 	var allPatterns []gitignore.Pattern
 	allPatterns = append(allPatterns, loadGitignore(fsys, nil)...)

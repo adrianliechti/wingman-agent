@@ -325,10 +325,10 @@ func (a *App) closeDiagnosticsView() {
 }
 
 func (a *App) collectDiagnostics(ctx context.Context) ([]fileDiagnostics, error) {
-	workDir := a.agent.RootPath
+	workDir := a.agent.Workspace().RootPath
 	var files []fileDiagnostics
 
-	for path, diags := range a.agent.Diagnostics(ctx) {
+	for path, diags := range a.agent.Workspace().Diagnostics(ctx) {
 		if len(diags) == 0 {
 			continue
 		}

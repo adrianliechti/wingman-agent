@@ -8,7 +8,13 @@ import {
 	Square,
 	X,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+} from "react";
 import { useColorScheme } from "../hooks/useColorScheme";
 import type { ChatEntry } from "../hooks/useWebSocket";
 import { sampleSpinnerVerb } from "../spinnerVerbs";
@@ -26,6 +32,12 @@ interface Props {
 	onSelectMode: (next: "agent" | "plan") => void;
 	onSend: (text: string, files?: string[], images?: string[]) => void;
 	onCancel: () => void;
+	// subscribe lets the ModelPicker react to agent_changed broadcasts —
+	// the new backend's model/effort catalog differs from the previous.
+	// Optional so legacy callers still compile.
+	subscribe?: (
+		handler: (msg: import("../types/protocol").ServerMessage) => void,
+	) => () => void;
 }
 
 interface PendingImage {
@@ -85,7 +97,15 @@ async function processImage(file: File): Promise<string> {
 // py-4 padding so the first message and subsequent submissions look the same.
 const PIN_TOP_GAP = 16;
 
-export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel }: Props) {
+export function ChatPanel({
+	entries,
+	phase,
+	mode,
+	onSelectMode,
+	onSend,
+	onCancel,
+	subscribe,
+}: Props) {
 	const scheme = useColorScheme();
 	const [input, setInput] = useState("");
 	const [files, setFiles] = useState<string[]>([]);
@@ -280,8 +300,7 @@ export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel
 		// streaming gets yanked up when the spacer collapses.
 		if (phase === "idle") {
 			pinRef.current = null;
-			const belowUser =
-				container.scrollHeight - pin.top - spacer.offsetHeight;
+			const belowUser = container.scrollHeight - pin.top - spacer.offsetHeight;
 			const minForPin = Math.max(0, container.clientHeight - belowUser);
 			const minForUser = Math.max(
 				0,
@@ -367,7 +386,14 @@ export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
 			// Let SkillPicker handle Enter / Tab / arrows / Escape while it's open.
-			if (showSkills && (e.key === "Enter" || e.key === "Tab" || e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Escape")) {
+			if (
+				showSkills &&
+				(e.key === "Enter" ||
+					e.key === "Tab" ||
+					e.key === "ArrowDown" ||
+					e.key === "ArrowUp" ||
+					e.key === "Escape")
+			) {
 				return;
 			}
 			if (e.key === "Enter" && !e.shiftKey) {
@@ -614,68 +640,65 @@ export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel
 									}}
 								/>
 								<ModePicker mode={mode} onSelect={onSelectMode} />
-								<ModelPicker />
+								<ModelPicker subscribe={subscribe} />
 							</div>
 
 							<div className="flex items-center gap-0">
-							<button
-								type="button"
-								className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-								onClick={() => imageInputRef.current?.click()}
-								title="Attach image"
-							>
-								<Paperclip size={14} />
-							</button>
-							{(() => {
-								// Button modes: if the input has content, the primary
-								// action is Send — which queues onto an in-flight turn
-								// when one is running. Otherwise, while a turn is
-								// active, the button stops it. Idle + empty = disabled.
-								const hasInput =
-									input.trim() !== "" || images.length > 0;
-								const mode: "send" | "stop" | "disabled" = hasInput
-									? "send"
-									: isActive
-										? "stop"
-										: "disabled";
-								return (
-									<button
-										type="button"
-										className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
-											mode === "disabled"
-												? "text-fg-dim opacity-40 cursor-not-allowed"
-												: "text-fg-muted hover:text-fg hover:bg-bg-hover"
-										}`}
-										onClick={
-											mode === "stop" ? onCancel : handleSubmit
-										}
-										disabled={mode === "disabled"}
-										title={
-											mode === "stop"
-												? "Stop (Esc)"
-												: mode === "send" && isActive
-													? "Queue (Enter)"
-													: "Send (Enter)"
-										}
-									>
-										{mode === "stop" ? (
-											<>
-												<LoaderCircle
-													size={14}
-													className="animate-spin group-hover:hidden"
-												/>
-												<Square
-													size={10}
-													fill="currentColor"
-													className="hidden group-hover:block"
-												/>
-											</>
-										) : (
-											<ArrowUp size={14} />
-										)}
-									</button>
-								);
-							})()}
+								<button
+									type="button"
+									className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
+									onClick={() => imageInputRef.current?.click()}
+									title="Attach image"
+								>
+									<Paperclip size={14} />
+								</button>
+								{(() => {
+									// Button modes: if the input has content, the primary
+									// action is Send — which queues onto an in-flight turn
+									// when one is running. Otherwise, while a turn is
+									// active, the button stops it. Idle + empty = disabled.
+									const hasInput = input.trim() !== "" || images.length > 0;
+									const mode: "send" | "stop" | "disabled" = hasInput
+										? "send"
+										: isActive
+											? "stop"
+											: "disabled";
+									return (
+										<button
+											type="button"
+											className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
+												mode === "disabled"
+													? "text-fg-dim opacity-40 cursor-not-allowed"
+													: "text-fg-muted hover:text-fg hover:bg-bg-hover"
+											}`}
+											onClick={mode === "stop" ? onCancel : handleSubmit}
+											disabled={mode === "disabled"}
+											title={
+												mode === "stop"
+													? "Stop (Esc)"
+													: mode === "send" && isActive
+														? "Queue (Enter)"
+														: "Send (Enter)"
+											}
+										>
+											{mode === "stop" ? (
+												<>
+													<LoaderCircle
+														size={14}
+														className="animate-spin group-hover:hidden"
+													/>
+													<Square
+														size={10}
+														fill="currentColor"
+														className="hidden group-hover:block"
+													/>
+												</>
+											) : (
+												<ArrowUp size={14} />
+											)}
+										</button>
+									);
+								})()}
 							</div>
 						</div>
 					</div>
@@ -694,7 +717,10 @@ function EntryView({
 }) {
 	if (entry.type === "error") {
 		return (
-			<div data-entry-id={entry.id} className="mb-4 border-l-2 border-danger pl-3">
+			<div
+				data-entry-id={entry.id}
+				className="mb-4 border-l-2 border-danger pl-3"
+			>
 				<div className="text-[13px] leading-relaxed text-danger break-words">
 					{entry.content}
 				</div>
@@ -717,10 +743,14 @@ function EntryView({
 				{isUser ? (
 					<>
 						{entry.content && (
-							<span className="whitespace-pre-wrap text-fg">{entry.content}</span>
+							<span className="whitespace-pre-wrap text-fg">
+								{entry.content}
+							</span>
 						)}
 						{entry.images && entry.images.length > 0 && (
-							<div className={`flex flex-wrap gap-1.5 ${entry.content ? "mt-2" : ""}`}>
+							<div
+								className={`flex flex-wrap gap-1.5 ${entry.content ? "mt-2" : ""}`}
+							>
 								{entry.images.map((src, i) => (
 									<a
 										key={`${entry.id}-img-${i}`}
@@ -858,8 +888,9 @@ function TurnView({
 						/>
 						{isActive &&
 							!(phase === "streaming" && turn.final?.type === "assistant") &&
-							turn.working[turn.working.length - 1]?.type !==
-								"reasoning" && <PhaseIndicator />}
+							turn.working[turn.working.length - 1]?.type !== "reasoning" && (
+								<PhaseIndicator />
+							)}
 					</>
 				) : (
 					<WorkingSummary
@@ -871,9 +902,7 @@ function TurnView({
 				<EntryView
 					entry={turn.final}
 					isStreaming={
-						isActive &&
-						phase === "streaming" &&
-						turn.final.type === "assistant"
+						isActive && phase === "streaming" && turn.final.type === "assistant"
 					}
 				/>
 			)}
@@ -1025,13 +1054,7 @@ function ToolGroupView({
 	);
 }
 
-function ToolRow({
-	entry,
-	running,
-}: {
-	entry: ChatEntry;
-	running: boolean;
-}) {
+function ToolRow({ entry, running }: { entry: ChatEntry; running: boolean }) {
 	const [expanded, setExpanded] = useState(false);
 	const hint = entry.toolHint || extractHint(entry.toolArgs, entry.toolName);
 	const displayHint = hint ? truncate(hint, 80) : "";
@@ -1080,7 +1103,10 @@ function ReasoningView({
 	if (!summary) return null;
 
 	return (
-		<div data-entry-id={entry.id} className="mb-4 border-l-2 border-purple pl-3">
+		<div
+			data-entry-id={entry.id}
+			className="mb-4 border-l-2 border-purple pl-3"
+		>
 			<div className="text-[11px] whitespace-pre-wrap break-words text-fg-dim font-mono leading-relaxed italic">
 				{summary}
 				{isStreaming && (
@@ -1115,7 +1141,11 @@ function extractHint(argsJSON?: string, toolName?: string): string {
 		]) {
 			const v = args[key];
 			if (typeof v !== "string" || !v) continue;
-			if ((key === "path" || key === "file") && toolName && FS_TOOLS.has(toolName)) {
+			if (
+				(key === "path" || key === "file") &&
+				toolName &&
+				FS_TOOLS.has(toolName)
+			) {
 				return normalizeWorkspacePath(v);
 			}
 			return v;

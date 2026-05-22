@@ -5,7 +5,7 @@ func (a *App) enterPlanMode() {
 		return
 	}
 
-	a.agent.PlanMode = true
+	a.agent.SetPlanMode(a.sessionID, true)
 	a.currentMode = ModePlan
 	a.updateStatusBar()
 }
@@ -15,7 +15,7 @@ func (a *App) exitPlanMode() {
 		return
 	}
 
-	a.agent.PlanMode = false
+	a.agent.SetPlanMode(a.sessionID, false)
 	a.currentMode = ModeAgent
 	a.updateStatusBar()
 }

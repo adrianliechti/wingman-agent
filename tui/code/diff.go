@@ -15,7 +15,7 @@ import (
 func (a *App) showDiffView() {
 	t := theme.Default
 
-	diffs, err := a.agent.Diffs()
+	diffs, err := a.agent.Workspace().Diffs()
 	if err != nil {
 		fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("%v", err), t.Yellow))
 		return

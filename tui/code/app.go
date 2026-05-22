@@ -13,9 +13,8 @@ import (
 	"github.com/rivo/tview"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code/wingman"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
-	"github.com/adrianliechti/wingman-agent/pkg/session"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -23,7 +22,7 @@ import (
 type App struct {
 	ctx   context.Context
 	app   *tview.Application
-	agent *code.Agent
+	agent *wingman.Agent
 
 	pages       *tview.Pages
 	chatView    *tview.TextView
@@ -76,14 +75,14 @@ type App struct {
 	mouseEnabled bool
 }
 
-func New(ctx context.Context, agent *code.Agent, sessionID string) *App {
+func New(ctx context.Context, agent *wingman.Agent, sessionID string) *App {
 	saveExecutablePath()
 
 	if sessionID == "" {
 		sessionID = newSessionID()
 	}
 
-	hasMessages := len(agent.Messages) > 0
+	hasMessages := len(agent.Messages(sessionID)) > 0
 
 	a := &App{
 		ctx:   ctx,
@@ -134,16 +133,14 @@ func saveExecutablePath() {
 }
 
 func (a *App) saveSession() {
-	_ = session.Save(filepath.Join(filepath.Dir(a.agent.MemoryPath), "sessions"), a.sessionID, agent.State{
-		Messages: a.agent.Messages,
-		Usage:    a.agent.Usage,
-	})
+	_ = a.agent.Save(a.sessionID)
 }
 
 func (a *App) stop() {
-	a.agent.Close()
-
 	a.saveSession()
+
+	a.agent.Close()
+	a.agent.Workspace().Close()
 
 	a.app.EnableMouse(false)
 	a.app.Stop()
@@ -153,8 +150,8 @@ func (a *App) stop() {
 	// escape sequences to the shell.
 	fmt.Fprint(os.Stdout, "\033[?1000l\033[?1002l\033[?1003l\033[?1006l")
 
-	if len(a.agent.Messages) > 0 {
-		usage := a.agent.Usage
+	if len(a.agent.Messages(a.sessionID)) > 0 {
+		usage := a.agent.Usage(a.sessionID)
 		fmt.Fprintf(os.Stderr, "\n")
 		if usage.CachedTokens > 0 {
 			fmt.Fprintf(os.Stderr, "  Tokens: \u2191%s (%s cached) \u2193%s\n", tui.FormatTokens(usage.InputTokens), tui.FormatTokens(usage.CachedTokens), tui.FormatTokens(usage.OutputTokens))
@@ -180,9 +177,9 @@ func (a *App) Run() error {
 	a.setPhase(PhasePreparing)
 
 	go func() {
-		a.agent.WarmUp()
+		a.agent.Workspace().WarmUp()
 
-		if err := a.agent.InitMCP(a.ctx); err != nil {
+		if err := a.agent.Workspace().InitMCP(a.ctx); err != nil {
 			a.app.QueueUpdateDraw(func() {
 				a.showError("MCP initialization failed", err)
 			})
@@ -190,7 +187,7 @@ func (a *App) Run() error {
 
 		a.app.QueueUpdateDraw(func() {
 			a.setPhase(PhaseIdle)
-			if a.agent.Rewind == nil {
+			if a.agent.Workspace().Rewind == nil {
 				t := theme.Default
 				fmt.Fprint(a.chatView, a.formatNotice(
 					"Limited mode: working dir is too large for full features. Diffs, checkpoints, and code intelligence are disabled.",
@@ -202,11 +199,11 @@ func (a *App) Run() error {
 	}()
 
 	// Mutation before app.Run() is safe.
-	if messages := a.agent.Messages; len(messages) > 0 {
+	if messages := a.agent.Messages(a.sessionID); len(messages) > 0 {
 		a.switchToChat()
 		a.renderChat(messages)
 
-		usage := a.agent.Usage
+		usage := a.agent.Usage(a.sessionID)
 		a.inputTokens = usage.InputTokens
 		a.cachedTokens = usage.CachedTokens
 		a.outputTokens = usage.OutputTokens
@@ -217,14 +214,14 @@ func (a *App) Run() error {
 		Primitive: a.pages,
 
 		intercept: func(text string) bool {
-			paths := detectFilePaths(text, a.agent.RootPath)
+			paths := detectFilePaths(text, a.agent.Workspace().RootPath)
 
 			if len(paths) == 0 {
 				return false
 			}
 
 			for _, p := range paths {
-				a.addFileToContext(normalizeFilePath(p, a.agent.RootPath))
+				a.addFileToContext(normalizeFilePath(p, a.agent.Workspace().RootPath))
 			}
 
 			a.updateInputHint()
@@ -263,7 +260,7 @@ func (a *App) closeActiveModal() {
 }
 
 func (a *App) isToolHidden(name string) bool {
-	for _, t := range a.agent.Config.Tools() {
+	for _, t := range a.agent.Tools(a.sessionID) {
 		if t.Name == name {
 			return t.Hidden
 		}

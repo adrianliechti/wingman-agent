@@ -20,8 +20,9 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/code/wingman"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
-	"github.com/adrianliechti/wingman-agent/pkg/session"
 	"github.com/adrianliechti/wingman-agent/pkg/system"
 )
 
@@ -40,24 +41,23 @@ type Server struct {
 	noBrowser bool
 
 	workspace *code.Workspace
-
-	config *agent.Config
+	config    *agent.Config
 
 	// ctx lives for the lifetime of the server. Agent turns and background
 	// goroutines tie their cancellation to this — NOT to any HTTP request
 	// ctx. Tying a Send to r.Context() would cancel the agent mid-turn on
 	// a WS disconnect/reconnect.
 	ctx context.Context
-
 	mux *http.ServeMux
 
-	sessionsDir string
+	mu    sync.Mutex
+	agent code.Agent // active backend (wingman by default; swapped on /api/agent)
 
-	mu            sync.Mutex
-	sessions      map[string]*Session
-	sessionsOrder []string
-	model         string
-	effort        string
+	// phases tracks per-session UI phase (idle/thinking/streaming/tool_running).
+	// Lives at the server because phase is computed from streamed events —
+	// the agent only knows about messages.
+	phasesMu sync.Mutex
+	phases   map[string]string
 
 	wsMu    sync.Mutex
 	wsConns map[*websocket.Conn]struct{}
@@ -78,15 +78,18 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	}
 
 	s := &Server{
-		port:        opts.Port,
-		noBrowser:   opts.NoBrowser,
-		workspace:   ws,
-		config:      cfg,
-		ctx:         ctx,
-		sessionsDir: filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
-		sessions:    map[string]*Session{},
-		wsConns:     map[*websocket.Conn]struct{}{},
+		port:      opts.Port,
+		noBrowser: opts.NoBrowser,
+		workspace: ws,
+		config:    cfg,
+		ctx:       ctx,
+		phases:    map[string]string{},
+		wsConns:   map[*websocket.Conn]struct{}{},
 	}
+
+	// Default to the wingman in-process agent; user can swap via
+	// POST /api/agent.
+	s.agent = wingman.New(ws, cfg, nil)
 
 	ws.WarmUp()
 	go func() {
@@ -95,22 +98,57 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 		}
 	}()
 
-	s.autoSelectModel(ctx)
+	// Populate the wingman agent's upstream model cache + pick a default.
+	go func() {
+		if w, ok := s.agent.(*wingman.Agent); ok {
+			w.AutoSelectModel(ctx)
+		}
+	}()
 
-	// Polling beats fsnotify here: zero FDs (kqueue's per-dir watcher cost
-	// was the original $HOME crash), one path everywhere.
 	go s.pollFiles(ctx)
 
 	s.mux = http.NewServeMux()
 	s.registerRoutes(s.mux)
-
 	return s, nil
 }
 
-func (s *Server) Close() { s.workspace.Close() }
+func (s *Server) Close() {
+	// Tear down the active backend (kills ACP subprocess if any), then
+	// the shared workspace.
+	s.mu.Lock()
+	a := s.agent
+	s.agent = nil
+	s.mu.Unlock()
+	if a != nil {
+		_ = a.Close()
+	}
+	s.workspace.Close()
+}
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+// activeAgent returns the currently selected backend under the agent mu.
+// Callers should not hold the mu while doing IO with the agent (the
+// agent's own internal locks already protect it; we just need a stable
+// snapshot of the pointer).
+func (s *Server) activeAgent() code.Agent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.agent
+}
+
+// swapAgent atomically replaces the active backend. Closes the prior
+// one outside the lock to avoid holding mu across IO.
+func (s *Server) swapAgent(next code.Agent) {
+	s.mu.Lock()
+	prev := s.agent
+	s.agent = next
+	s.mu.Unlock()
+	if prev != nil && prev != next {
+		_ = prev.Close()
+	}
 }
 
 func (s *Server) handleWebSocketURL(w http.ResponseWriter, r *http.Request) {
@@ -131,18 +169,17 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	s.port = port
 
-	server := &http.Server{
+	srv := &http.Server{
 		Addr:    fmt.Sprintf("localhost:%d", s.port),
 		Handler: s,
 	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
 	go func() {
 		<-sigCh
 		cancel()
-		server.Close()
+		srv.Close()
 	}()
 
 	url := fmt.Sprintf("http://localhost:%d", s.port)
@@ -152,10 +189,9 @@ func (s *Server) Run(ctx context.Context) error {
 		openBrowser(url)
 	}
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
-
 	return nil
 }
 
@@ -180,6 +216,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/model", s.handleSetModel)
 	mux.HandleFunc("GET /api/effort", s.handleEffort)
 	mux.HandleFunc("POST /api/effort", s.handleSetEffort)
+	mux.HandleFunc("GET /api/agents", s.handleAgents)
+	mux.HandleFunc("GET /api/agent", s.handleAgent)
+	mux.HandleFunc("POST /api/agent", s.handleSetAgent)
 	mux.HandleFunc("GET /api/mode", s.handleMode)
 	mux.HandleFunc("POST /api/mode", s.handleSetMode)
 	mux.HandleFunc("GET /api/diagnostics", s.handleDiagnostics)
@@ -194,60 +233,37 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.Handle("/", fileServer)
 }
 
-func (s *Server) getSession(id string) *Session {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sessions[id]
-}
+// ─── Phase tracking ───────────────────────────────────────────────
 
-// Caller must hold s.mu.
-func (s *Server) register(sess *Session) {
-	s.sessions[sess.ID] = sess
-	s.sessionsOrder = append(s.sessionsOrder, sess.ID)
-}
-
-func (s *Server) getOrCreateSession(id string) *Session {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if sess, ok := s.sessions[id]; ok {
-		return sess
+func (s *Server) sessionPhase(id string) string {
+	s.phasesMu.Lock()
+	defer s.phasesMu.Unlock()
+	if p := s.phases[id]; p != "" {
+		return p
 	}
-	sess := s.newSession(id)
-	s.register(sess)
-	return sess
+	return "idle"
 }
 
-func (s *Server) loadSession(id string) (*Session, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if sess, ok := s.sessions[id]; ok {
-		return sess, nil
+func (s *Server) setSessionPhase(id, phase string) {
+	s.phasesMu.Lock()
+	if s.phases[id] == phase {
+		s.phasesMu.Unlock()
+		return
 	}
-	saved, err := session.Load(s.sessionsDir, id)
-	if err != nil {
-		return nil, err
+	if phase == "" || phase == "idle" {
+		delete(s.phases, id)
+	} else {
+		s.phases[id] = phase
 	}
-	sess := s.newSession(id)
-	sess.Agent.Messages = saved.State.Messages
-	sess.Agent.Usage = saved.State.Usage
-	s.register(sess)
-	return sess, nil
+	s.phasesMu.Unlock()
+	s.sendSession(id, Frame{Type: EvtPhase, Phase: phase})
 }
 
-func (s *Server) allSessions() []*Session {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]*Session, 0, len(s.sessions))
-	for _, id := range s.sessionsOrder {
-		if sess, ok := s.sessions[id]; ok {
-			out = append(out, sess)
-		}
-	}
-	return out
-}
+// ─── Frame send helpers ───────────────────────────────────────────
 
-func (s *Server) sessionFromRequest(r *http.Request) *Session {
-	return s.getSession(r.URL.Query().Get("session"))
+func (s *Server) sendSession(sid string, f Frame) {
+	f.Session = sid
+	s.send(f)
 }
 
 func (s *Server) broadcast(f Frame) {
@@ -260,97 +276,62 @@ func (s *Server) send(f Frame) {
 	if err != nil {
 		return
 	}
-
 	s.wsMu.Lock()
 	conns := make([]*websocket.Conn, 0, len(s.wsConns))
 	for c := range s.wsConns {
 		conns = append(conns, c)
 	}
 	s.wsMu.Unlock()
-
 	for _, c := range conns {
 		c.Write(context.Background(), websocket.MessageText, data)
 	}
 }
 
-func (s *Server) currentModel() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.model
-}
-
-func (s *Server) currentEffort() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.effort
-}
-
-func (s *Server) setModel(model string) {
-	s.mu.Lock()
-	s.model = model
-	s.mu.Unlock()
-}
-
-func (s *Server) setEffort(effort string) {
-	s.mu.Lock()
-	s.effort = effort
-	s.mu.Unlock()
-}
-
-func (s *Server) autoSelectModel(ctx context.Context) {
-	if s.currentModel() != "" {
+// sendSessionState pushes the full transcript snapshot for a session,
+// used after LoadSession and on initial WS connect.
+func (s *Server) sendSessionState(sid string) {
+	a := s.activeAgent()
+	if a == nil {
 		return
 	}
-	models, err := s.config.Models(ctx)
-	if err != nil || len(models) == 0 {
-		return
-	}
-
-	upstream := make(map[string]bool, len(models))
-	for _, m := range models {
-		upstream[m.ID] = true
-	}
-	for _, m := range code.AvailableModels {
-		if upstream[m.ID] {
-			s.setModel(m.ID)
-			return
-		}
-	}
-	s.setModel(models[0].ID)
+	messages := a.Messages(sid)
+	u := a.Usage(sid)
+	s.sendSession(sid, Frame{
+		Type:         EvtSessionState,
+		Phase:        s.sessionPhase(sid),
+		Messages:     convertMessages(messages),
+		InputTokens:  u.InputTokens,
+		CachedTokens: u.CachedTokens,
+		OutputTokens: u.OutputTokens,
+	})
 }
+
+// ─── Session endpoints ────────────────────────────────────────────
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	seen := map[string]bool{}
-	result := []SessionEntry{}
-
-	saved, _ := session.List(s.sessionsDir)
-	for _, sess := range saved {
-		seen[sess.ID] = true
-		result = append(result, SessionEntry{
-			ID:        sess.ID,
-			Title:     sess.Title,
-			CreatedAt: sess.CreatedAt.Format(time.RFC3339),
-			UpdatedAt: sess.UpdatedAt.Format(time.RFC3339),
-		})
+	a := s.activeAgent()
+	if a == nil {
+		writeJSON(w, []SessionEntry{})
+		return
 	}
-
-	nowStr := time.Now().Format(time.RFC3339)
-	for _, sess := range s.allSessions() {
-		if seen[sess.ID] || len(sess.Agent.Messages) == 0 {
-			continue
+	infos, err := a.ListSessions(r.Context())
+	if err != nil {
+		writeJSON(w, []SessionEntry{})
+		return
+	}
+	out := make([]SessionEntry, 0, len(infos))
+	for _, si := range infos {
+		ent := SessionEntry{ID: si.ID, Title: si.Title}
+		if !si.UpdatedAt.IsZero() {
+			ent.UpdatedAt = si.UpdatedAt.Format(time.RFC3339)
+			ent.CreatedAt = ent.UpdatedAt
 		}
-		result = append(result, SessionEntry{
-			ID:        sess.ID,
-			CreatedAt: nowStr,
-			UpdatedAt: nowStr,
-		})
+		out = append(out, ent)
 	}
-
-	slices.SortFunc(result, func(a, b SessionEntry) int {
+	slices.SortFunc(out, func(a, b SessionEntry) int {
 		return cmp.Compare(b.UpdatedAt, a.UpdatedAt)
 	})
-
-	writeJSON(w, result)
+	writeJSON(w, out)
 }
 
 func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
@@ -359,14 +340,17 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session id required", http.StatusBadRequest)
 		return
 	}
-
-	sess, err := s.loadSession(id)
-	if err != nil {
-		http.Error(w, "session not found", http.StatusNotFound)
+	a := s.activeAgent()
+	if a == nil {
+		http.Error(w, "no active agent", http.StatusInternalServerError)
 		return
 	}
-
-	sess.sendState()
+	// s.ctx (not r.Context()) so a WS reconnect mid-load doesn't abort.
+	if err := a.LoadSession(s.ctx, id); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	s.sendSessionState(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -376,61 +360,49 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session id required", http.StatusBadRequest)
 		return
 	}
-
-	s.mu.Lock()
-	sess, inMem := s.sessions[id]
-	if inMem {
-		delete(s.sessions, id)
-		for i, sid := range s.sessionsOrder {
-			if sid == id {
-				s.sessionsOrder = append(s.sessionsOrder[:i], s.sessionsOrder[i+1:]...)
-				break
-			}
+	a := s.activeAgent()
+	if a == nil {
+		http.Error(w, "no active agent", http.StatusInternalServerError)
+		return
+	}
+	if err := a.DeleteSession(r.Context(), id); err != nil {
+		if err == code.ErrNotSupported {
+			http.Error(w, "delete not supported for this agent", http.StatusMethodNotAllowed)
+			return
 		}
-	}
-	s.mu.Unlock()
-
-	if inMem {
-		sess.cancel()
-	}
-
-	if err := session.Delete(s.sessionsDir, id); err != nil && !os.IsNotExist(err) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
+	s.phasesMu.Lock()
+	delete(s.phases, id)
+	s.phasesMu.Unlock()
 	s.broadcast(Frame{Type: EvtSessionsChanged})
-
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{"model": s.currentModel()})
+// ─── Model / Effort endpoints ─────────────────────────────────────
+
+func (s *Server) handleModel(w http.ResponseWriter, _ *http.Request) {
+	a := s.activeAgent()
+	if a == nil {
+		writeJSON(w, map[string]string{"model": ""})
+		return
+	}
+	_, current := a.Models()
+	writeJSON(w, map[string]string{"model": current})
 }
 
-func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	models, err := s.config.Models(r.Context())
-	if err != nil {
+func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
+	a := s.activeAgent()
+	if a == nil {
 		writeJSON(w, []map[string]string{})
 		return
 	}
-
-	upstream := make(map[string]bool, len(models))
-	for _, m := range models {
-		upstream[m.ID] = true
+	available, _ := a.Models()
+	result := make([]map[string]string, 0, len(available))
+	for _, m := range available {
+		result = append(result, map[string]string{"id": m.ID, "name": m.Name})
 	}
-
-	result := make([]map[string]string, 0, len(code.AvailableModels))
-	for _, m := range code.AvailableModels {
-		if !upstream[m.ID] {
-			continue
-		}
-		result = append(result, map[string]string{
-			"id":   m.ID,
-			"name": m.Name,
-		})
-	}
-
 	writeJSON(w, result)
 }
 
@@ -438,43 +410,53 @@ func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Model string `json:"model"`
 	}
-
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Model == "" {
 		http.Error(w, "model is required", http.StatusBadRequest)
 		return
 	}
-
-	s.setModel(body.Model)
-
+	a := s.activeAgent()
+	if a == nil {
+		http.Error(w, "no active agent", http.StatusInternalServerError)
+		return
+	}
+	if err := a.SetModel(r.Context(), body.Model); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	writeJSON(w, map[string]string{"model": body.Model})
 }
 
-func (s *Server) handleEffort(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{"effort": s.currentEffort()})
+func (s *Server) handleEffort(w http.ResponseWriter, _ *http.Request) {
+	a := s.activeAgent()
+	if a == nil {
+		writeJSON(w, map[string]string{"effort": ""})
+		return
+	}
+	current, _ := a.Effort()
+	writeJSON(w, map[string]string{"effort": current})
 }
 
 func (s *Server) handleSetEffort(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Effort string `json:"effort"`
 	}
-
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-
-	switch body.Effort {
-	case "", "auto":
-		body.Effort = ""
-	case "low", "medium", "high":
-	default:
-		http.Error(w, "effort must be auto, low, medium, or high", http.StatusBadRequest)
+	a := s.activeAgent()
+	if a == nil {
+		http.Error(w, "no active agent", http.StatusInternalServerError)
 		return
 	}
-
-	s.setEffort(body.Effort)
+	if err := a.SetEffort(r.Context(), body.Effort); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	writeJSON(w, map[string]string{"effort": body.Effort})
 }
+
+// ─── Diagnostics + Capabilities (workspace-scoped) ────────────────
 
 func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	allDiags := s.workspace.Diagnostics(r.Context())
@@ -489,13 +471,11 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var result []diagItem
-
 	for filePath, diags := range allDiags {
 		relPath := filePath
 		if rel, err := filepath.Rel(s.workspace.RootPath, filePath); err == nil {
 			relPath = rel
 		}
-
 		for _, d := range diags {
 			sev := "info"
 			switch d.Severity {
@@ -504,7 +484,6 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 			case lsp.DiagnosticSeverityWarning:
 				sev = "warning"
 			}
-
 			result = append(result, diagItem{
 				Path:     relPath,
 				Line:     d.Range.Start.Line + 1,
@@ -515,11 +494,9 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-
 	if result == nil {
 		result = []diagItem{}
 	}
-
 	sevOrder := map[string]int{"error": 0, "warning": 1, "info": 2}
 	slices.SortFunc(result, func(a, b diagItem) int {
 		si, sj := sevOrder[a.Severity], sevOrder[b.Severity]
@@ -531,13 +508,24 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		}
 		return cmp.Compare(a.Line, b.Line)
 	})
-
 	writeJSON(w, result)
+}
+
+func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
+	ws := s.workspace
+	caps := map[string]any{
+		"git":   ws.IsGitRepo(),
+		"lsp":   ws.LSP != nil,
+		"diffs": ws.Rewind != nil,
+	}
+	if ws.Rewind == nil {
+		caps["notice"] = "This directory is too large for full features. Diffs, checkpoints, and code intelligence are disabled — chat and file browsing still work."
+	}
+	writeJSON(w, caps)
 }
 
 func (s *Server) pollFiles(ctx context.Context) {
 	const interval = 2 * time.Second
-
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -566,12 +554,10 @@ func (s *Server) pollFiles(ctx context.Context) {
 				}
 				prevGit = gitNow
 			}
-
 			if ws.Rewind == nil {
 				s.broadcast(Frame{Type: EvtFilesChanged})
 				continue
 			}
-
 			fp := ws.Rewind.Fingerprint()
 			if fp != prevFingerprint {
 				s.broadcast(Frame{Type: EvtFilesChanged})
@@ -582,60 +568,27 @@ func (s *Server) pollFiles(ctx context.Context) {
 	}
 }
 
-func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
-	ws := s.workspace
-	caps := map[string]any{
-		"git":   ws.IsGitRepo(),
-		"lsp":   ws.LSP != nil,
-		"diffs": ws.Rewind != nil,
-	}
-	if ws.Rewind == nil {
-		caps["notice"] = "This directory is too large for full features. Diffs, checkpoints, and code intelligence are disabled — chat and file browsing still work."
-	}
-	writeJSON(w, caps)
-}
-
 func convertMessages(messages []agent.Message) []ConversationMessage {
 	var result []ConversationMessage
-
 	for _, m := range messages {
 		if m.Hidden {
 			continue
 		}
-
-		cm := ConversationMessage{
-			Role: string(m.Role),
-		}
-
+		cm := ConversationMessage{Role: string(m.Role)}
 		for _, c := range m.Content {
 			cc := ConversationContent{}
-
 			if c.Text != "" {
 				cc.Text = c.Text
 			}
-
 			if c.File != nil && c.File.Data != "" {
-				cc.Image = &ConversationImage{
-					Data: c.File.Data,
-					Name: c.File.Name,
-				}
+				cc.Image = &ConversationImage{Data: c.File.Data, Name: c.File.Name}
 			}
-
 			if c.Reasoning != nil && c.Reasoning.Summary != "" {
-				cc.Reasoning = &ConversationReasoning{
-					ID:      c.Reasoning.ID,
-					Summary: c.Reasoning.Summary,
-				}
+				cc.Reasoning = &ConversationReasoning{ID: c.Reasoning.ID, Summary: c.Reasoning.Summary}
 			}
-
 			if c.ToolCall != nil {
-				cc.ToolCall = &ConversationTool{
-					ID:   c.ToolCall.ID,
-					Name: c.ToolCall.Name,
-					Args: c.ToolCall.Args,
-				}
+				cc.ToolCall = &ConversationTool{ID: c.ToolCall.ID, Name: c.ToolCall.Name, Args: c.ToolCall.Args}
 			}
-
 			if c.ToolResult != nil {
 				cc.ToolResult = &ConversationResult{
 					ID:      c.ToolResult.ID,
@@ -644,17 +597,39 @@ func convertMessages(messages []agent.Message) []ConversationMessage {
 					Content: c.ToolResult.Content,
 				}
 			}
-
 			cm.Content = append(cm.Content, cc)
 		}
-
 		result = append(result, cm)
 	}
-
 	return result
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+// constructBackend instantiates an agent by name. "" or BuiltinAgentName
+// returns a fresh wingman; otherwise looks up the AgentDef and spawns
+// an acp subprocess.
+func (s *Server) constructBackend(name string) (code.Agent, error) {
+	if name == "" || name == code.BuiltinAgentName {
+		w := wingman.New(s.workspace, s.config, nil)
+		go w.AutoSelectModel(s.ctx)
+		return w, nil
+	}
+	def, ok := findAgentDef(code.LoadAgents(), name)
+	if !ok {
+		return nil, fmt.Errorf("unknown agent %q", name)
+	}
+	return acp.New(s.workspace, def)
+}
+
+func findAgentDef(defs []code.AgentDef, name string) (code.AgentDef, bool) {
+	for _, d := range defs {
+		if d.Name == name {
+			return d, true
+		}
+	}
+	return code.AgentDef{}, false
 }

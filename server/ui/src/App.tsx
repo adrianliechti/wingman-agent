@@ -44,14 +44,8 @@ const EMPTY_ENTRIES: never[] = [];
 const EMPTY_USAGE = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
 
 export default function App() {
-	const {
-		connected,
-		sessions,
-		sendChat,
-		cancel,
-		removeSession,
-		subscribe,
-	} = useWebSocket();
+	const { connected, sessions, sendChat, cancel, removeSession, subscribe } =
+		useWebSocket();
 	const capabilities = useCapabilities(subscribe);
 	const showChanges = capabilities?.diffs ?? false;
 	const inGitRepo = capabilities?.git ?? false;
@@ -108,7 +102,13 @@ export default function App() {
 				return;
 			}
 			const label = path.split("/").pop() || path;
-			const tab: CenterTab = { id: `file:${path}`, type: "file", label, path, line };
+			const tab: CenterTab = {
+				id: `file:${path}`,
+				type: "file",
+				label,
+				path,
+				line,
+			};
 			setTabs((prev) => [...prev, tab]);
 			setActiveTabId(tab.id);
 		},
@@ -321,7 +321,11 @@ export default function App() {
 				<ResizeHandle />
 
 				{/* Center Panel */}
-				<Panel id="center" minSize="320px" className="flex flex-col overflow-hidden min-w-0 bg-bg">
+				<Panel
+					id="center"
+					minSize="320px"
+					className="flex flex-col overflow-hidden min-w-0 bg-bg"
+				>
 					<div className="h-10 flex items-stretch bg-bg shrink-0 overflow-x-auto">
 						<button
 							type="button"
@@ -408,7 +412,9 @@ export default function App() {
 								{"↑"}
 								{formatTokens(usage.inputTokens)}
 								{usage.cachedTokens > 0 && (
-									<span className="ml-1">({formatTokens(usage.cachedTokens)} cached)</span>
+									<span className="ml-1">
+										({formatTokens(usage.cachedTokens)} cached)
+									</span>
 								)}
 								<span className="ml-2">
 									{"↓"}
@@ -442,6 +448,7 @@ export default function App() {
 								onSelectMode={selectMode}
 								onSend={handleSend}
 								onCancel={handleCancel}
+								subscribe={subscribe}
 							/>
 						) : activeTab.type === "diff" && activeTab.path ? (
 							<DiffTab
@@ -508,7 +515,10 @@ export default function App() {
 									</div>
 									<div className="h-px bg-border-subtle shrink-0" />
 									<div className="flex-[1] min-h-0 overflow-hidden">
-										<CheckpointsPanel sessionId={sessionId} subscribe={subscribe} />
+										<CheckpointsPanel
+											sessionId={sessionId}
+											subscribe={subscribe}
+										/>
 									</div>
 								</div>
 							) : (

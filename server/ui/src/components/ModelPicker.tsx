@@ -1,5 +1,6 @@
 import { Brain } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ServerMessage } from "../types/protocol";
 
 interface ModelInfo {
 	id: string;
@@ -9,30 +10,39 @@ interface ModelInfo {
 const EFFORTS = ["auto", "low", "medium", "high"] as const;
 type Effort = (typeof EFFORTS)[number];
 
-export function ModelPicker() {
+interface Props {
+	// subscribe lets the picker refetch its catalog when the active
+	// agent changes (the new backend's model/effort options differ).
+	// Optional so non-WebSocket callers can still render the component.
+	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
+}
+
+export function ModelPicker({ subscribe }: Props) {
 	const [model, setModel] = useState("");
 	const [models, setModels] = useState<ModelInfo[]>([]);
-	const [effort, setEffort] = useState<Effort>("auto");
+	const [effort, setEffort] = useState<Effort | string>("auto");
+	const [effortOptions, setEffortOptions] =
+		useState<readonly string[]>(EFFORTS);
 	const [open, setOpen] = useState(false);
 	const popRef = useRef<HTMLDivElement>(null);
 	const btnRef = useRef<HTMLButtonElement>(null);
 
-	const loadModels = useCallback(() => {
-		fetch("/api/models")
-			.then((r) => r.json())
-			.then((data: ModelInfo[]) => setModels(data))
-			.catch(() => {});
-	}, []);
-
 	const applyEffort = useCallback((v: unknown) => {
-		if (v === "low" || v === "medium" || v === "high") {
+		if (typeof v === "string" && v !== "") {
 			setEffort(v);
 		} else {
 			setEffort("auto");
 		}
 	}, []);
 
-	useEffect(() => {
+	const loadModels = useCallback(() => {
+		fetch("/api/models")
+			.then((r) => r.json())
+			.then((data: ModelInfo[]) => setModels(data))
+			.catch(() => setModels([]));
+	}, []);
+
+	const loadCurrent = useCallback(() => {
 		fetch("/api/model")
 			.then((r) => r.json())
 			.then((data) => setModel(data.model || ""))
@@ -41,8 +51,32 @@ export function ModelPicker() {
 			.then((r) => r.json())
 			.then((data) => applyEffort(data.effort))
 			.catch(() => {});
+	}, [applyEffort]);
+
+	useEffect(() => {
+		loadCurrent();
 		loadModels();
-	}, [loadModels, applyEffort]);
+	}, [loadCurrent, loadModels]);
+
+	// External agents publish their own model + effort options through
+	// the same /api/* endpoints (the server dispatches). Refetch when
+	// agent_changed fires so the picker reflects the new catalog.
+	useEffect(() => {
+		if (!subscribe) return;
+		return subscribe((msg) => {
+			if (msg.type === "agent_changed") {
+				loadCurrent();
+				loadModels();
+				// Re-derive available effort options from the latest /api/effort
+				// response shape — ACP backends may use a different set than
+				// wingman's hard-coded auto/low/medium/high. The /api/effort
+				// endpoint only returns the current value, so the picker
+				// falls back to the static EFFORTS list when nothing else
+				// hints at a wider set.
+				setEffortOptions(EFFORTS);
+			}
+		});
+	}, [subscribe, loadCurrent, loadModels]);
 
 	const toggle = useCallback(() => {
 		setOpen((v) => !v);
@@ -60,7 +94,7 @@ export function ModelPicker() {
 	}, []);
 
 	const selectEffort = useCallback(
-		(value: Effort) => {
+		(value: string) => {
 			fetch("/api/effort", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
@@ -142,7 +176,7 @@ export function ModelPicker() {
 					</div>
 					<div className="border-t border-border px-2 py-1.5">
 						<div className="flex rounded bg-bg overflow-hidden">
-							{EFFORTS.map((v) => (
+							{effortOptions.map((v) => (
 								<button
 									type="button"
 									key={v}

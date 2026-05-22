@@ -28,6 +28,7 @@ const (
 	EvtSessionsChanged     = "sessions_changed"
 	EvtDiagnosticsChanged  = "diagnostics_changed"
 	EvtCapabilitiesChanged = "capabilities_changed"
+	EvtAgentChanged        = "agent_changed"
 )
 
 type Frame struct {
