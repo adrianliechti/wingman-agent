@@ -49,6 +49,7 @@ export default function App() {
 		sessions,
 		sendChat,
 		cancel,
+		respondPrompt,
 		removeSession,
 		clearSessions,
 		subscribe,
@@ -71,6 +72,16 @@ export default function App() {
 	const entries = activeSession?.entries ?? EMPTY_ENTRIES;
 	const phase = activeSession?.phase ?? "idle";
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
+	const prompt = activeSession?.prompt ?? null;
+
+	const handlePromptReply = useCallback(
+		(reply: { text?: string; approved?: boolean }) => {
+			if (sessionId && prompt) {
+				respondPrompt(sessionId, prompt.id, reply);
+			}
+		},
+		[respondPrompt, sessionId, prompt],
+	);
 
 	useEffect(() => {
 		if (sessionId) return;
@@ -488,6 +499,8 @@ export default function App() {
 								onCancel={handleCancel}
 								loading={loadingSession}
 								subscribe={subscribe}
+								prompt={prompt}
+								onPromptReply={handlePromptReply}
 							/>
 						) : activeTab.type === "diff" && activeTab.path ? (
 							<DiffTab

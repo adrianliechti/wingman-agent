@@ -14,7 +14,21 @@ interface CancelMessage {
 	session: string;
 }
 
-export type ClientMessage = SendMessage | CancelMessage;
+// Reply to a server-issued `prompt` frame. `text` carries the user's
+// answer for ask prompts; `approved` carries the y/n decision for
+// confirm prompts.
+interface PromptResponseMessage {
+	type: "prompt_response";
+	session: string;
+	prompt_id: string;
+	text?: string;
+	approved?: boolean;
+}
+
+export type ClientMessage =
+	| SendMessage
+	| CancelMessage
+	| PromptResponseMessage;
 
 // Server → Client. Per-session events carry `session`; workspace-level
 // events leave it unset. The hook routes per-session events into the
@@ -81,6 +95,24 @@ interface ErrorMessage {
 	message: string;
 }
 
+// The agent is blocked on an elicitation; the user must reply with
+// `prompt_response` (or the server cancels with a `prompt_cancel`).
+export type PromptKind = "ask" | "confirm";
+
+interface PromptMessage {
+	type: "prompt";
+	session: string;
+	prompt_id: string;
+	prompt_kind: PromptKind;
+	message: string;
+}
+
+interface PromptCancelMessage {
+	type: "prompt_cancel";
+	session: string;
+	prompt_id: string;
+}
+
 interface CheckpointsChangedMessage {
 	type: "checkpoints_changed";
 	session?: string;
@@ -119,6 +151,8 @@ export type ServerMessage =
 	| PhaseMessage
 	| UsageMessage
 	| ErrorMessage
+	| PromptMessage
+	| PromptCancelMessage
 	| CheckpointsChangedMessage
 	| SessionsChangedMessage
 	| DiffsChangedMessage

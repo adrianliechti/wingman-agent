@@ -33,9 +33,27 @@ const memoryMaxBytes = 25 * 1024
 
 // UI is the elicitation hook a frontend provides for tool ask/confirm
 // prompts. Pass nil to NewAgent for safe defaults (Confirm → true, Ask → "").
+// The session id that triggered the prompt is on ctx via
+// [SessionIDFromContext] for UIs that route prompts per session.
 type UI interface {
 	Ask(ctx context.Context, message string) (string, error)
 	Confirm(ctx context.Context, message string) (bool, error)
+}
+
+type sessionCtxKey struct{}
+
+// WithSessionID stamps sid onto ctx so downstream tool calls can recover
+// it via [SessionIDFromContext]. The coder agent does this in Send so
+// elicitation UIs can route prompts back to the right session.
+func WithSessionID(ctx context.Context, sid string) context.Context {
+	return context.WithValue(ctx, sessionCtxKey{}, sid)
+}
+
+// SessionIDFromContext returns the session id set by [WithSessionID],
+// or "" when none is present.
+func SessionIDFromContext(ctx context.Context) string {
+	sid, _ := ctx.Value(sessionCtxKey{}).(string)
+	return sid
 }
 
 type Workspace struct {

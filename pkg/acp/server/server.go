@@ -143,7 +143,7 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string) (*workspaceEn
 	if err != nil {
 		return nil, err
 	}
-	wa := coder.New(ws, s.config, noopUI{})
+	wa := coder.New(ws, s.config, nil)
 
 	s.mu.Lock()
 	if existing, ok := s.workspaces[cwd]; ok {
@@ -348,7 +348,7 @@ func (s *Server) ListSessions(ctx context.Context, params acpsdk.ListSessionsReq
 			return acpsdk.ListSessionsResponse{}, err
 		}
 		defer ws.Close()
-		w = &workspaceEntry{ws: ws, agent: coder.New(ws, s.config, noopUI{}), key: cwd}
+		w = &workspaceEntry{ws: ws, agent: coder.New(ws, s.config, nil), key: cwd}
 	}
 	infos, err := w.agent.ListSessions(ctx)
 	if err != nil {
@@ -511,13 +511,6 @@ func (s *Server) SetSessionMode(_ context.Context, _ acpsdk.SetSessionModeReques
 	return acpsdk.SetSessionModeResponse{}, nil
 }
 
-type noopUI struct{}
-
-func (noopUI) Ask(_ context.Context, _ string) (string, error) { return "", nil }
-func (noopUI) Confirm(_ context.Context, _ string) (bool, error) {
-	return true, nil
-}
-
 func promptToContent(blocks []acpsdk.ContentBlock) []agent.Content {
 	out := make([]agent.Content, 0, len(blocks))
 	for _, b := range blocks {
@@ -633,16 +626,33 @@ func toolTitle(name string, raw any) string {
 		v, _ := args[key].(string)
 		return v
 	}
+	intArg := func(key string) int {
+		if args == nil {
+			return 0
+		}
+		switch v := args[key].(type) {
+		case float64:
+			return int(v)
+		case int:
+			return v
+		}
+		return 0
+	}
+	truncate := func(s string, max int) string {
+		if len(s) <= max {
+			return s
+		}
+		return s[:max-3] + "..."
+	}
+
 	var detail string
 	switch name {
-	case "read", "write", "edit", "ls":
-		detail = str("path")
-	case "find":
-		if p := str("pattern"); p != "" {
-			detail = p
-			if dir := str("path"); dir != "" {
-				detail = p + " in " + dir
-			}
+	case "read", "write", "edit":
+		// Prefer file_path (current schema); fall back to legacy path key so
+		// replayed sessions emitted before the rename still render usefully.
+		detail = str("file_path")
+		if detail == "" {
+			detail = str("path")
 		}
 	case "grep":
 		if p := str("pattern"); p != "" {
@@ -651,27 +661,48 @@ func toolTitle(name string, raw any) string {
 				detail = p + " in " + path
 			}
 		}
+	case "glob":
+		if p := str("pattern"); p != "" {
+			detail = p
+			if path := str("path"); path != "" {
+				detail = p + " in " + path
+			}
+		}
+	case "lsp":
+		if op := str("operation"); op != "" {
+			detail = op
+			if fp := str("file_path"); fp != "" {
+				if line := intArg("line"); line > 0 {
+					detail = fmt.Sprintf("%s %s:%d", op, fp, line)
+				} else {
+					detail = op + " " + fp
+				}
+			} else if q := str("query"); q != "" {
+				detail = op + " " + q
+			}
+		}
 	case "shell":
 		if cmd := str("command"); cmd != "" {
 			if desc := str("description"); desc != "" {
 				detail = desc
 			} else {
-				detail = cmd
-				if len(detail) > 60 {
-					detail = detail[:57] + "..."
-				}
+				detail = truncate(cmd, 60)
 			}
 		}
 	case "web_fetch":
 		detail = str("url")
 	case "web_search":
 		detail = str("query")
+	case "ask_user":
+		detail = truncate(str("question"), 60)
 	case "agent":
-		if p := str("prompt"); p != "" {
-			detail = p
-			if len(detail) > 60 {
-				detail = detail[:57] + "..."
-			}
+		// Prefix with agent_type so explore/verification/general-purpose are
+		// distinguishable at a glance without expanding the call.
+		prompt := str("prompt")
+		if agentType := str("agent_type"); agentType != "" && prompt != "" {
+			detail = truncate(agentType+": "+prompt, 80)
+		} else if prompt != "" {
+			detail = truncate(prompt, 60)
 		}
 	}
 	if detail == "" {
@@ -685,21 +716,30 @@ func toolLocations(name string, raw any) []acpsdk.ToolCallLocation {
 	if args == nil {
 		return nil
 	}
-	path, _ := args["path"].(string)
+	var path string
 	switch name {
-	case "read", "write", "edit", "ls", "find", "grep":
-		if path != "" {
-			return []acpsdk.ToolCallLocation{{Path: path}}
+	case "read", "write", "edit":
+		path, _ = args["file_path"].(string)
+		if path == "" {
+			// Legacy sessions emitted before the file_path rename.
+			path, _ = args["path"].(string)
 		}
+	case "lsp":
+		path, _ = args["file_path"].(string)
+	case "grep", "glob":
+		path, _ = args["path"].(string)
 	}
-	return nil
+	if path == "" {
+		return nil
+	}
+	return []acpsdk.ToolCallLocation{{Path: path}}
 }
 
 func mapKind(name string) acpsdk.ToolKind {
 	switch name {
-	case "read", "ls", "find":
+	case "read", "lsp":
 		return acpsdk.ToolKindRead
-	case "grep", "web_search":
+	case "grep", "glob", "web_search":
 		return acpsdk.ToolKindSearch
 	case "web_fetch":
 		return acpsdk.ToolKindFetch

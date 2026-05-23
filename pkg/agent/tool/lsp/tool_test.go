@@ -62,7 +62,7 @@ func TestLSPToolRejectsZeroBasedPositionInput(t *testing.T) {
 
 	_, err := lspTool.Execute(context.Background(), map[string]any{
 		"operation": "hover",
-		"path":      "main.go",
+		"file_path": "main.go",
 		"line":      0,
 		"column":    1,
 	})
@@ -72,7 +72,7 @@ func TestLSPToolRejectsZeroBasedPositionInput(t *testing.T) {
 
 	_, err = lspTool.Execute(context.Background(), map[string]any{
 		"operation": "hover",
-		"path":      "main.go",
+		"file_path": "main.go",
 		"line":      1,
 		"column":    0,
 	})
@@ -87,7 +87,7 @@ func TestLSPToolRejectsFractionalPositionInput(t *testing.T) {
 
 	_, err := lspTool.Execute(context.Background(), map[string]any{
 		"operation": "hover",
-		"path":      "main.go",
+		"file_path": "main.go",
 		"line":      1.5,
 		"column":    1,
 	})
@@ -102,7 +102,7 @@ func TestLSPToolRejectsDirectories(t *testing.T) {
 
 	_, err := lspTool.Execute(context.Background(), map[string]any{
 		"operation": "documentSymbol",
-		"path":      ".",
+		"file_path": ".",
 	})
 	if err == nil || !strings.Contains(err.Error(), "path is a directory") {
 		t.Fatalf("expected directory validation error, got: %v", err)
@@ -120,7 +120,7 @@ func TestLSPToolRejectsPathsOutsideWorkspace(t *testing.T) {
 
 	_, err := lspTool.Execute(context.Background(), map[string]any{
 		"operation": "documentSymbol",
-		"path":      outside,
+		"file_path": outside,
 	})
 	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
 		t.Fatalf("expected outside workspace error, got: %v", err)
@@ -128,7 +128,7 @@ func TestLSPToolRejectsPathsOutsideWorkspace(t *testing.T) {
 
 	_, err = lspTool.Execute(context.Background(), map[string]any{
 		"operation": "documentSymbol",
-		"path":      "../outside.go",
+		"file_path": "../outside.go",
 	})
 	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
 		t.Fatalf("expected relative outside workspace error, got: %v", err)

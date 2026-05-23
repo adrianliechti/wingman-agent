@@ -26,7 +26,7 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("read entire file", func(t *testing.T) {
 		result, err := readTool.Execute(context.Background(), map[string]any{
-			"path": "test.txt",
+			"file_path": "test.txt",
 		})
 
 		if err != nil {
@@ -44,8 +44,8 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("read with offset", func(t *testing.T) {
 		result, err := readTool.Execute(context.Background(), map[string]any{
-			"path":   "test.txt",
-			"offset": float64(3),
+			"file_path": "test.txt",
+			"offset":    float64(3),
 		})
 
 		if err != nil {
@@ -67,8 +67,8 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("read with limit", func(t *testing.T) {
 		result, err := readTool.Execute(context.Background(), map[string]any{
-			"path":  "test.txt",
-			"limit": 2,
+			"file_path": "test.txt",
+			"limit":     2,
 		})
 
 		if err != nil {
@@ -98,8 +98,8 @@ func TestReadTool(t *testing.T) {
 		os.WriteFile(filepath.Join(tmpDir, "long.txt"), []byte(b.String()), 0644)
 
 		result, err := readTool.Execute(context.Background(), map[string]any{
-			"path":  "long.txt",
-			"limit": 2500,
+			"file_path": "long.txt",
+			"limit":     2500,
 		})
 
 		if err != nil {
@@ -116,8 +116,8 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("read rejects non-positive limit", func(t *testing.T) {
 		_, err := readTool.Execute(context.Background(), map[string]any{
-			"path":  "test.txt",
-			"limit": 0,
+			"file_path": "test.txt",
+			"limit":     0,
 		})
 
 		if err == nil || !strings.Contains(err.Error(), "limit must be") {
@@ -127,8 +127,8 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("read rejects fractional offset", func(t *testing.T) {
 		_, err := readTool.Execute(context.Background(), map[string]any{
-			"path":   "test.txt",
-			"offset": 1.5,
+			"file_path": "test.txt",
+			"offset":    1.5,
 		})
 
 		if err == nil || !strings.Contains(err.Error(), "offset must be") {
@@ -138,8 +138,8 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("read rejects zero offset", func(t *testing.T) {
 		_, err := readTool.Execute(context.Background(), map[string]any{
-			"path":   "test.txt",
-			"offset": 0,
+			"file_path": "test.txt",
+			"offset":    0,
 		})
 
 		if err == nil || !strings.Contains(err.Error(), "positive 1-based") {
@@ -149,8 +149,8 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("read offset past end returns reminder", func(t *testing.T) {
 		result, err := readTool.Execute(context.Background(), map[string]any{
-			"path":   "test.txt",
-			"offset": 99,
+			"file_path": "test.txt",
+			"offset":    99,
 		})
 
 		if err != nil {
@@ -163,7 +163,7 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("read rejects directories", func(t *testing.T) {
 		_, err := readTool.Execute(context.Background(), map[string]any{
-			"path": ".",
+			"file_path": ".",
 		})
 
 		if err == nil || !strings.Contains(err.Error(), "directory") {
@@ -173,7 +173,7 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("read non-existent file", func(t *testing.T) {
 		_, err := readTool.Execute(context.Background(), map[string]any{
-			"path": "nonexistent.txt",
+			"file_path": "nonexistent.txt",
 		})
 
 		if err == nil {
@@ -183,7 +183,7 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("path outside workspace rejected", func(t *testing.T) {
 		_, err := readTool.Execute(context.Background(), map[string]any{
-			"path": "/etc/passwd",
+			"file_path": "/etc/passwd",
 		})
 
 		if err == nil {
@@ -197,7 +197,7 @@ func TestReadTool(t *testing.T) {
 
 	t.Run("read with absolute path inside workspace", func(t *testing.T) {
 		result, err := readTool.Execute(context.Background(), map[string]any{
-			"path": testFile,
+			"file_path": testFile,
 		})
 
 		if err != nil {
@@ -213,7 +213,7 @@ func TestReadTool(t *testing.T) {
 		os.WriteFile(filepath.Join(tmpDir, "logo.png"), []byte("\x89PNG\r\n\x1a\n"), 0644)
 
 		_, err := readTool.Execute(context.Background(), map[string]any{
-			"path": "logo.png",
+			"file_path": "logo.png",
 		})
 
 		if err == nil {
@@ -229,7 +229,7 @@ func TestReadTool(t *testing.T) {
 		os.WriteFile(filepath.Join(tmpDir, "empty.txt"), []byte(""), 0644)
 
 		result, err := readTool.Execute(context.Background(), map[string]any{
-			"path": "empty.txt",
+			"file_path": "empty.txt",
 		})
 
 		if err != nil {
@@ -244,7 +244,7 @@ func TestReadTool(t *testing.T) {
 		os.WriteFile(filepath.Join(tmpDir, "icon.svg"), []byte(`<svg><title>Logo</title></svg>`), 0644)
 
 		result, err := readTool.Execute(context.Background(), map[string]any{
-			"path": "icon.svg",
+			"file_path": "icon.svg",
 		})
 
 		if err != nil {
@@ -283,7 +283,7 @@ func TestReadAllowedReadRoots(t *testing.T) {
 
 	t.Run("absolute path inside allowed root is readable", func(t *testing.T) {
 		result, err := readTool.Execute(context.Background(), map[string]any{
-			"path": allowedFile,
+			"file_path": allowedFile,
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -295,7 +295,7 @@ func TestReadAllowedReadRoots(t *testing.T) {
 
 	t.Run("absolute path outside both workspace and allowed roots is rejected", func(t *testing.T) {
 		_, err := readTool.Execute(context.Background(), map[string]any{
-			"path": deniedFile,
+			"file_path": deniedFile,
 		})
 		if err == nil {
 			t.Fatal("expected error for path outside workspace and allow-list")
@@ -307,7 +307,7 @@ func TestReadAllowedReadRoots(t *testing.T) {
 
 	t.Run("relative path outside workspace is rejected even with allow-list", func(t *testing.T) {
 		_, err := readTool.Execute(context.Background(), map[string]any{
-			"path": "../escape.txt",
+			"file_path": "../escape.txt",
 		})
 		if err == nil {
 			t.Fatal("expected error for relative path outside workspace")

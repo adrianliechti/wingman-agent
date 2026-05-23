@@ -32,12 +32,12 @@ func FormatTokens(n int64) string {
 // visually distinct as a workspace path rather than a loose identifier.
 var fsTools = map[string]bool{
 	"read": true, "write": true, "edit": true,
-	"ls": true, "find": true, "grep": true,
+	"grep": true, "glob": true,
 }
 
 // workingDirTools default to the workspace root when their path arg is empty or ".".
 var workingDirTools = map[string]bool{
-	"ls": true, "find": true, "grep": true,
+	"grep": true, "glob": true,
 }
 
 func ExtractToolHint(argsJSON, toolName string) string {
@@ -58,6 +58,8 @@ func ExtractToolHint(argsJSON, toolName string) string {
 		"pattern",
 		"command",
 		"prompt",
+		"question",
+		"file_path",
 		"path",
 		"file",
 		"url",
@@ -74,7 +76,7 @@ func ExtractToolHint(argsJSON, toolName string) string {
 			continue
 		}
 		normalized := strings.Join(strings.Fields(str), " ")
-		if (key == "path" || key == "file") && fsTools[toolName] {
+		if (key == "file_path" || key == "path" || key == "file") && fsTools[toolName] {
 			normalized = NormalizeWorkspacePath(normalized)
 		}
 		return normalized

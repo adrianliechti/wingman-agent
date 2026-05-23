@@ -99,7 +99,8 @@ func BuildEnv(parent []string, cfg *ClaudeConfig) []string {
 }
 
 // FindPath locates the `claude` binary, preferring $PATH and falling back
-// to ~/.claude/local/claude (the installer's default location).
+// to the native installer's default locations (~/.local/bin on all
+// platforms, plus the legacy ~/.claude/local).
 func FindPath() (string, error) {
 	if path, err := exec.LookPath("claude"); err == nil {
 		return path, nil
@@ -115,12 +116,17 @@ func FindPath() (string, error) {
 		name = "claude.exe"
 	}
 
-	path := filepath.Join(home, ".claude", "local", name)
-	if _, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("claude is not installed or not on PATH")
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", name),
+		filepath.Join(home, ".claude", "local", name),
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
 	}
 
-	return path, nil
+	return "", fmt.Errorf("claude is not installed or not on PATH")
 }
 
 func Run(ctx context.Context, args []string, options *Options) error {

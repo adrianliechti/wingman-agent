@@ -17,7 +17,7 @@ import {
 	useState,
 } from "react";
 import { useColorScheme } from "../hooks/useColorScheme";
-import type { ChatEntry } from "../hooks/useWebSocket";
+import type { ChatEntry, PendingPrompt } from "../hooks/useWebSocket";
 import { sampleSpinnerVerb } from "../spinnerVerbs";
 import type { Phase } from "../types/protocol";
 import { FilePicker } from "./FilePicker";
@@ -40,6 +40,10 @@ interface Props {
 	subscribe?: (
 		handler: (msg: import("../types/protocol").ServerMessage) => void,
 	) => () => void;
+	// Outstanding agent prompt for this session, if any. While present
+	// the input area swaps to a prompt reply control.
+	prompt?: PendingPrompt | null;
+	onPromptReply?: (reply: { text?: string; approved?: boolean }) => void;
 }
 
 interface PendingImage {
@@ -108,6 +112,8 @@ export function ChatPanel({
 	onCancel,
 	loading,
 	subscribe,
+	prompt,
+	onPromptReply,
 }: Props) {
 	const scheme = useColorScheme();
 	const [input, setInput] = useState("");
@@ -540,6 +546,9 @@ export function ChatPanel({
 			<div className="absolute bottom-0 left-0 right-0">
 				<div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none" />
 				<div className="bg-bg px-4 pb-3">
+					{prompt && onPromptReply ? (
+						<PromptBar prompt={prompt} onReply={onPromptReply} />
+					) : (
 					<div className="relative rounded-lg border border-border-subtle bg-bg-surface/60 hover:border-border focus-within:border-border transition-colors">
 						{showSkills && (
 							<SkillPicker
@@ -709,8 +718,100 @@ export function ChatPanel({
 							</div>
 						</div>
 					</div>
+					)}
 				</div>
 			</div>
+		</div>
+	);
+}
+
+function PromptBar({
+	prompt,
+	onReply,
+}: {
+	prompt: PendingPrompt;
+	onReply: (reply: { text?: string; approved?: boolean }) => void;
+}) {
+	const [text, setText] = useState("");
+	const inputRef = useRef<HTMLTextAreaElement>(null);
+
+	useEffect(() => {
+		inputRef.current?.focus();
+	}, []);
+
+	const submitAsk = useCallback(() => {
+		const value = text.trim();
+		if (!value) return;
+		onReply({ text: value });
+	}, [text, onReply]);
+
+	const handleKeyDown = useCallback(
+		(e: React.KeyboardEvent) => {
+			if (prompt.kind !== "ask") return;
+			if (e.key === "Enter" && !e.shiftKey) {
+				e.preventDefault();
+				submitAsk();
+			}
+		},
+		[prompt.kind, submitAsk],
+	);
+
+	return (
+		<div className="relative rounded-lg border border-warning bg-bg-surface/60">
+			<div className="px-3 pt-2 pb-1 flex items-start gap-2">
+				<span className="text-warning font-mono text-[12px] leading-[1.7] shrink-0">
+					?
+				</span>
+				<span className="text-fg font-mono text-[12px] leading-[1.7] whitespace-pre-wrap break-words">
+					{prompt.message}
+				</span>
+			</div>
+			{prompt.kind === "ask" ? (
+				<>
+					<div className="px-3">
+						<textarea
+							ref={inputRef}
+							// biome-ignore lint/a11y/noAutofocus: prompt is the primary control while open
+							autoFocus
+							className="w-full bg-transparent text-fg text-[12px] font-mono resize-none outline-none leading-[1.7] placeholder:text-fg-dim"
+							style={{ fieldSizing: "content" } as React.CSSProperties}
+							value={text}
+							onChange={(e) => setText(e.target.value)}
+							onKeyDown={handleKeyDown}
+							placeholder="Type your answer and press Enter…"
+							rows={1}
+						/>
+					</div>
+					<div className="flex items-center justify-end px-1.5 pb-1.5 pt-1">
+						<button
+							type="button"
+							className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+							onClick={submitAsk}
+							disabled={text.trim() === ""}
+							title="Submit (Enter)"
+						>
+							Send
+						</button>
+					</div>
+				</>
+			) : (
+				<div className="flex items-center justify-end gap-1 px-1.5 pb-1.5 pt-1">
+					<button
+						type="button"
+						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
+						onClick={() => onReply({ approved: false })}
+					>
+						Deny
+					</button>
+					<button
+						type="button"
+						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-bg bg-success hover:opacity-90 cursor-pointer transition-opacity"
+						onClick={() => onReply({ approved: true })}
+					>
+						Approve
+					</button>
+				</div>
+			)}
 		</div>
 	);
 }

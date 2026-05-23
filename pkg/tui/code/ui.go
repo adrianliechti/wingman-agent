@@ -2,6 +2,7 @@ package code
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -223,10 +224,12 @@ func (a *App) resetPlaceholder() {
 	})
 }
 
-func (a *App) promptUser(message string) (bool, error) {
-	// Tool calls may run concurrently; prompts must serialize.
-	a.promptMu.Lock()
-	defer a.promptMu.Unlock()
+// Confirm implements [code.UI]. Invoked from a tool-execution goroutine
+// (e.g. shell.Tools for dangerous commands); blocks until the user
+// answers y/n in the input area or the context is cancelled.
+func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
+	a.elicitMu.Lock()
+	defer a.elicitMu.Unlock()
 
 	a.promptResponse = make(chan bool, 1)
 	a.promptActive = true
@@ -247,12 +250,20 @@ func (a *App) promptUser(message string) (bool, error) {
 	select {
 	case result := <-a.promptResponse:
 		return result, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
 	case <-a.ctx.Done():
 		return false, a.ctx.Err()
 	}
 }
 
-func (a *App) askUser(question string) (string, error) {
+// Ask implements [code.UI]. Invoked from a tool-execution goroutine
+// (ask_user); blocks until the user types an answer and submits, or
+// the context is cancelled.
+func (a *App) Ask(ctx context.Context, question string) (string, error) {
+	a.elicitMu.Lock()
+	defer a.elicitMu.Unlock()
+
 	a.askResponse = make(chan string, 1)
 	a.askActive = true
 	defer func() {
@@ -269,6 +280,8 @@ func (a *App) askUser(question string) (string, error) {
 	select {
 	case result := <-a.askResponse:
 		return result, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
 	case <-a.ctx.Done():
 		return "", a.ctx.Err()
 	}

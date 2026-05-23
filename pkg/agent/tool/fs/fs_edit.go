@@ -17,33 +17,32 @@ func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectMutates),
 
 		Description: strings.Join([]string{
-			"Perform exact string replacements in files. Fails if `old_string` is not unique unless `replace_all=true`.",
-			"- Read the file first so `old_string` matches current text.",
-			"- Prefer this for existing files; it produces smaller, reviewable diffs. Use `write` only for new files or complete rewrites.",
-			"- `read` line prefixes (`42\\t...`) are not file content. Match only text after the prefix, preserving indentation.",
-			"- Use the smallest unique `old_string` — usually 2-4 adjacent lines. If matching fails, re-read the relevant slice.",
-			"- To create a new file or replace an empty file, use empty `old_string`; non-empty files reject empty `old_string`.",
-			"- Use `replace_all=true` for intentional file-wide renames/replacements.",
-			"- Do not insert emoji unless asked.",
+			"Performs exact string replacements in files.",
+			"- You must `read` the file at least once in this conversation before editing it.",
+			"- Preserve indentation exactly as it appears after the `read` line-number prefix (`42\\t...`). Never include the prefix in old_string/new_string.",
+			"- The edit will FAIL if `old_string` is not unique in the file. Provide more surrounding context to make it unique, or set `replace_all=true` to change every instance.",
+			"- Use the smallest old_string that's clearly unique — usually 2-4 adjacent lines is sufficient.",
+			"- To create a new file (or replace an empty file), use empty `old_string`. Non-empty files reject empty `old_string`.",
+			"- Use `replace_all` for renaming a symbol across a file or other intentional file-wide replacements.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":        map[string]any{"type": "string", "description": "File path to modify."},
-				"old_string":  map[string]any{"type": "string", "description": "Exact text to replace. Must be unique unless replace_all=true. Use an empty string only to create a new file or replace an empty file."},
-				"new_string":  map[string]any{"type": "string", "description": "Replacement text. Must differ from old_string."},
-				"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences of old_string. Defaults to false."},
+				"file_path":   map[string]any{"type": "string", "description": "The absolute path to the file to modify."},
+				"old_string":  map[string]any{"type": "string", "description": "The text to replace. Must be unique unless replace_all=true. Use an empty string only to create a new file or replace an empty file."},
+				"new_string":  map[string]any{"type": "string", "description": "The text to replace it with (must be different from old_string)."},
+				"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences of old_string (default false).", "default": false},
 			},
-			"required":             []string{"path", "old_string", "new_string"},
+			"required":             []string{"file_path", "old_string", "new_string"},
 			"additionalProperties": false,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
-			pathArg, ok := args["path"].(string)
+			pathArg, ok := args["file_path"].(string)
 
 			if !ok || pathArg == "" {
-				return "", fmt.Errorf("path is required")
+				return "", fmt.Errorf("file_path is required")
 			}
 
 			workingDir := root.Name()

@@ -1,8 +1,9 @@
 package server
 
 const (
-	MsgSend   = "send"
-	MsgCancel = "cancel"
+	MsgSend           = "send"
+	MsgCancel         = "cancel"
+	MsgPromptResponse = "prompt_response"
 )
 
 type ClientMessage struct {
@@ -11,6 +12,12 @@ type ClientMessage struct {
 	Text      string   `json:"text,omitempty"`
 	Files     []string `json:"files,omitempty"`
 	Images    []string `json:"images,omitempty"` // base64 data URLs, e.g. "data:image/png;base64,..."
+
+	// Prompt-response fields. PromptID identifies the prompt the user is
+	// answering; Approved is set for confirm prompts, Text reuses the
+	// field above for ask prompts.
+	PromptID string `json:"prompt_id,omitempty"`
+	Approved bool   `json:"approved,omitempty"`
 }
 
 const (
@@ -22,6 +29,8 @@ const (
 	EvtPhase               = "phase"
 	EvtUsage               = "usage"
 	EvtError               = "error"
+	EvtPrompt              = "prompt"
+	EvtPromptCancel        = "prompt_cancel"
 	EvtFilesChanged        = "files_changed"
 	EvtDiffsChanged        = "diffs_changed"
 	EvtCheckpointsChanged  = "checkpoints_changed"
@@ -29,6 +38,11 @@ const (
 	EvtDiagnosticsChanged  = "diagnostics_changed"
 	EvtCapabilitiesChanged = "capabilities_changed"
 	EvtAgentChanged        = "agent_changed"
+)
+
+const (
+	PromptKindAsk     = "ask"
+	PromptKindConfirm = "confirm"
 )
 
 type Frame struct {
@@ -43,6 +57,10 @@ type Frame struct {
 	Content string `json:"content,omitempty"`
 	Phase   string `json:"phase,omitempty"`
 	Message string `json:"message,omitempty"`
+
+	// Prompt fields (EvtPrompt / EvtPromptCancel).
+	PromptID   string `json:"prompt_id,omitempty"`
+	PromptKind string `json:"prompt_kind,omitempty"` // "ask" | "confirm"
 
 	InputTokens  int64 `json:"input_tokens,omitempty"`
 	CachedTokens int64 `json:"cached_tokens,omitempty"`

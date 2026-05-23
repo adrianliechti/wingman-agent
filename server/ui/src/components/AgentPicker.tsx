@@ -1,5 +1,13 @@
 import { Bot, ChevronDown, Loader2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
+import { createPortal } from "react-dom";
 import type { ServerMessage } from "../types/protocol";
 
 interface AgentInfo {
@@ -23,6 +31,9 @@ export function AgentPicker({ subscribe, onSwitchingChange }: Props) {
 	const [open, setOpen] = useState(false);
 	const [switching, setSwitching] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	const [popPos, setPopPos] = useState<{ top: number; left: number } | null>(
+		null,
+	);
 	const popRef = useRef<HTMLDivElement>(null);
 	const btnRef = useRef<HTMLButtonElement>(null);
 
@@ -69,6 +80,27 @@ export function AgentPicker({ subscribe, onSwitchingChange }: Props) {
 		};
 		document.addEventListener("mousedown", handler);
 		return () => document.removeEventListener("mousedown", handler);
+	}, [open]);
+
+	// Position the portal-rendered popup under the button. Recompute on
+	// scroll/resize so it stays anchored when the surrounding layout shifts.
+	useLayoutEffect(() => {
+		if (!open) {
+			setPopPos(null);
+			return;
+		}
+		const place = () => {
+			const r = btnRef.current?.getBoundingClientRect();
+			if (!r) return;
+			setPopPos({ top: r.bottom + 4, left: r.left });
+		};
+		place();
+		window.addEventListener("resize", place);
+		window.addEventListener("scroll", place, true);
+		return () => {
+			window.removeEventListener("resize", place);
+			window.removeEventListener("scroll", place, true);
+		};
 	}, [open]);
 
 	const select = useCallback(
@@ -135,29 +167,34 @@ export function AgentPicker({ subscribe, onSwitchingChange }: Props) {
 					<ChevronDown size={10} className="shrink-0 text-fg-dim" />
 				)}
 			</button>
-			{open && !switching && (
-				<div
-					ref={popRef}
-					className="absolute top-full mt-1 left-0 min-w-[180px] max-w-[260px] bg-bg-elevated/95 backdrop-blur-sm border border-border rounded-md shadow-xl z-50"
-				>
-					<div className="py-1 max-h-[260px] overflow-y-auto">
-						{agents.map((a) => (
-							<button
-								type="button"
-								key={a.id}
-								className={`block w-full text-left px-3 py-1.5 text-[12px] cursor-pointer whitespace-nowrap transition-colors ${
-									a.id === current
-										? "text-fg bg-bg-active"
-										: "text-fg-muted hover:text-fg hover:bg-bg-hover"
-								}`}
-								onClick={() => select(a.id)}
-							>
-								{a.name}
-							</button>
-						))}
-					</div>
-				</div>
-			)}
+			{open &&
+				!switching &&
+				popPos &&
+				createPortal(
+					<div
+						ref={popRef}
+						style={{ position: "fixed", top: popPos.top, left: popPos.left }}
+						className="min-w-[180px] max-w-[260px] bg-bg-elevated/95 backdrop-blur-sm border border-border rounded-md shadow-xl z-50"
+					>
+						<div className="py-1 max-h-[260px] overflow-y-auto">
+							{agents.map((a) => (
+								<button
+									type="button"
+									key={a.id}
+									className={`block w-full text-left px-3 py-1.5 text-[12px] cursor-pointer whitespace-nowrap transition-colors ${
+										a.id === current
+											? "text-fg bg-bg-active"
+											: "text-fg-muted hover:text-fg hover:bg-bg-hover"
+									}`}
+									onClick={() => select(a.id)}
+								>
+									{a.name}
+								</button>
+							))}
+						</div>
+					</div>,
+					document.body,
+				)}
 			{error && (
 				<div
 					className="absolute top-full mt-1 right-0 min-w-[220px] max-w-[320px] bg-bg-elevated/95 backdrop-blur-sm border border-danger/40 rounded-md shadow-xl z-50 px-3 py-2 text-[11px] text-danger"

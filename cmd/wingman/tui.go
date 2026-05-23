@@ -35,7 +35,8 @@ func runTUI(ctx context.Context, sessionID string) {
 
 	wa := coder.New(ws, cfg, nil)
 
-	// Resolve "latest" / explicit id to a loaded session, or fresh one.
+	// Resolve "latest" without building a session — that has to wait
+	// until after the App is wired as the agent's UI.
 	if sessionID == "latest" {
 		sessions, err := wa.ListSessions(ctx)
 		if err != nil {
@@ -47,6 +48,11 @@ func runTUI(ctx context.Context, sessionID string) {
 			sessionID = ""
 		}
 	}
+
+	app := codetui.New(ctx, wa, sessionID)
+	// Wire the App as the agent's elicitation UI before any turn runs.
+	wa.SetUI(app)
+
 	if sessionID != "" {
 		if err := wa.LoadSession(ctx, sessionID); err != nil {
 			fatal(err)
@@ -56,9 +62,10 @@ func runTUI(ctx context.Context, sessionID string) {
 		if err != nil {
 			fatal(err)
 		}
+		app.SetSessionID(sessionID)
 	}
 
-	if err := codetui.New(ctx, wa, sessionID).Run(); err != nil {
+	if err := app.Run(); err != nil {
 		fatal(err)
 	}
 }

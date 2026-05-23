@@ -44,7 +44,9 @@ import (
 type Agent struct {
 	workspace *code.Workspace
 	cfg       *harness.Config
-	ui        code.UI
+
+	uiMu sync.RWMutex
+	ui   code.UI
 
 	sessionsDir string
 
@@ -87,6 +89,22 @@ func New(ws *code.Workspace, cfg *harness.Config, ui code.UI) *Agent {
 
 func (a *Agent) Name() string               { return code.BuiltinAgentName }
 func (a *Agent) Workspace() *code.Workspace { return a.workspace }
+
+// SetUI installs the elicitation UI used by ask_user and shell-confirm
+// hooks. Without a UI the agent falls back to accepted defaults
+// (Confirm → true, Ask → ""); set one before the first turn if you want
+// the user to be prompted. Safe to call concurrently.
+func (a *Agent) SetUI(ui code.UI) {
+	a.uiMu.Lock()
+	a.ui = ui
+	a.uiMu.Unlock()
+}
+
+func (a *Agent) currentUI() code.UI {
+	a.uiMu.RLock()
+	defer a.uiMu.RUnlock()
+	return a.ui
+}
 
 // ─── Models ──────────────────────────────────────────────────────
 
@@ -318,7 +336,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) it
 		return errStream(fmt.Errorf("session %s not found; call NewSession first", id))
 	}
 
-	sendCtx, cancel := context.WithCancel(ctx)
+	sendCtx, cancel := context.WithCancel(code.WithSessionID(ctx, id))
 	s.setCancel(cancel)
 	stream := s.aa.Send(sendCtx, input)
 	if stream == nil {
@@ -404,7 +422,7 @@ func (a *Agent) buildSession() *sessionState {
 		truncation.New(a.workspace.ScratchPath),
 	)
 
-	elicit := buildElicit(a.ui)
+	elicit := a.buildElicit()
 	ws := a.workspace
 
 	var allowedReadRoots []string
@@ -438,15 +456,24 @@ func (a *Agent) buildSession() *sessionState {
 	return s
 }
 
-func buildElicit(ui code.UI) *tool.Elicitation {
-	if ui == nil {
-		return nil
-	}
+// buildElicit returns elicitation hooks that delegate to the currently
+// wired UI and fall back to accepted defaults (Confirm → true, Ask →
+// "") when no UI is set. Closures re-read currentUI() at call time so a
+// SetUI swap is picked up by sessions built afterwards.
+func (a *Agent) buildElicit() *tool.Elicitation {
 	return &tool.Elicitation{
 		Ask: func(ctx context.Context, msg string) (string, error) {
+			ui := a.currentUI()
+			if ui == nil {
+				return "", nil
+			}
 			return ui.Ask(ctx, msg)
 		},
 		Confirm: func(ctx context.Context, msg string) (bool, error) {
+			ui := a.currentUI()
+			if ui == nil {
+				return true, nil
+			}
 			return ui.Confirm(ctx, msg)
 		},
 	}

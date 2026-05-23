@@ -21,7 +21,7 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("hello world"), 0644)
 
 		_, err := ReadTool(root).Execute(context.Background(), map[string]any{
-			"path": "edit_test.txt",
+			"file_path": "edit_test.txt",
 		})
 
 		if err != nil {
@@ -29,7 +29,7 @@ func TestEditTool(t *testing.T) {
 		}
 
 		result, err := editTool.Execute(context.Background(), map[string]any{
-			"path":       "edit_test.txt",
+			"file_path":  "edit_test.txt",
 			"old_string": "world",
 			"new_string": "universe",
 		})
@@ -51,7 +51,7 @@ func TestEditTool(t *testing.T) {
 
 	t.Run("edit can create file with empty old string", func(t *testing.T) {
 		result, err := editTool.Execute(context.Background(), map[string]any{
-			"path":       "created_by_edit.txt",
+			"file_path":  "created_by_edit.txt",
 			"old_string": "",
 			"new_string": "created content",
 		})
@@ -77,7 +77,7 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("existing"), 0644)
 
 		_, err := editTool.Execute(context.Background(), map[string]any{
-			"path":       "nonempty_empty_old.txt",
+			"file_path":  "nonempty_empty_old.txt",
 			"old_string": "",
 			"new_string": "replacement",
 		})
@@ -92,14 +92,14 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("title: “Hello”\n"), 0644)
 
 		_, err := ReadTool(root).Execute(context.Background(), map[string]any{
-			"path": "curly_quotes.txt",
+			"file_path": "curly_quotes.txt",
 		})
 		if err != nil {
 			t.Fatalf("unexpected read error: %v", err)
 		}
 
 		_, err = editTool.Execute(context.Background(), map[string]any{
-			"path":       "curly_quotes.txt",
+			"file_path":  "curly_quotes.txt",
 			"old_string": `"Hello"`,
 			"new_string": `"World"`,
 		})
@@ -122,7 +122,7 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("line1\r\nline2\r\nline3"), 0644)
 
 		_, err := ReadTool(root).Execute(context.Background(), map[string]any{
-			"path": "crlf_test.txt",
+			"file_path": "crlf_test.txt",
 		})
 
 		if err != nil {
@@ -130,7 +130,7 @@ func TestEditTool(t *testing.T) {
 		}
 
 		_, err = editTool.Execute(context.Background(), map[string]any{
-			"path":       "crlf_test.txt",
+			"file_path":  "crlf_test.txt",
 			"old_string": "line2",
 			"new_string": "modified",
 		})
@@ -151,7 +151,7 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("hello   \nworld"), 0644)
 
 		_, err := ReadTool(root).Execute(context.Background(), map[string]any{
-			"path": "fuzzy_test.txt",
+			"file_path": "fuzzy_test.txt",
 		})
 
 		if err != nil {
@@ -159,7 +159,7 @@ func TestEditTool(t *testing.T) {
 		}
 
 		_, err = editTool.Execute(context.Background(), map[string]any{
-			"path":       "fuzzy_test.txt",
+			"file_path":  "fuzzy_test.txt",
 			"old_string": "hello\nworld",
 			"new_string": "goodbye\nworld",
 		})
@@ -180,7 +180,7 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("foo bar foo"), 0644)
 
 		_, err := ReadTool(root).Execute(context.Background(), map[string]any{
-			"path": "duplicate_test.txt",
+			"file_path": "duplicate_test.txt",
 		})
 
 		if err != nil {
@@ -188,7 +188,7 @@ func TestEditTool(t *testing.T) {
 		}
 
 		_, err = editTool.Execute(context.Background(), map[string]any{
-			"path":       "duplicate_test.txt",
+			"file_path":  "duplicate_test.txt",
 			"old_string": "foo",
 			"new_string": "baz",
 		})
@@ -207,7 +207,7 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("hello world"), 0644)
 
 		_, err := ReadTool(root).Execute(context.Background(), map[string]any{
-			"path": "nomatch_test.txt",
+			"file_path": "nomatch_test.txt",
 		})
 
 		if err != nil {
@@ -215,7 +215,7 @@ func TestEditTool(t *testing.T) {
 		}
 
 		_, err = editTool.Execute(context.Background(), map[string]any{
-			"path":       "nomatch_test.txt",
+			"file_path":  "nomatch_test.txt",
 			"old_string": "xyz",
 			"new_string": "abc",
 		})
@@ -230,9 +230,9 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("hello world"), 0644)
 
 		_, err := editTool.Execute(context.Background(), map[string]any{
-			"path":     "legacy_params.txt",
-			"old_text": "world",
-			"new_text": "universe",
+			"file_path": "legacy_params.txt",
+			"old_text":  "world",
+			"new_text":  "universe",
 		})
 
 		if err == nil || !strings.Contains(err.Error(), "old_string is required") {
@@ -245,7 +245,7 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("hello world"), 0644)
 
 		_, err := editTool.Execute(context.Background(), map[string]any{
-			"path":       "identical_test.txt",
+			"file_path":  "identical_test.txt",
 			"old_string": "world",
 			"new_string": "world",
 		})
@@ -260,7 +260,7 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("hello   \nworld\nhello   \nworld"), 0644)
 
 		_, err := editTool.Execute(context.Background(), map[string]any{
-			"path":        "fuzzy_replace_all.txt",
+			"file_path":   "fuzzy_replace_all.txt",
 			"old_string":  "hello\nworld",
 			"new_string":  "hello   \nworld",
 			"replace_all": true,
@@ -276,14 +276,14 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("foo bar foo baz foo"), 0644)
 
 		_, err := ReadTool(root).Execute(context.Background(), map[string]any{
-			"path": "replace_all.txt",
+			"file_path": "replace_all.txt",
 		})
 		if err != nil {
 			t.Fatalf("unexpected read error: %v", err)
 		}
 
 		_, err = editTool.Execute(context.Background(), map[string]any{
-			"path":        "replace_all.txt",
+			"file_path":   "replace_all.txt",
 			"old_string":  "foo",
 			"new_string":  "qux",
 			"replace_all": true,
@@ -305,7 +305,7 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte(huge), 0644)
 
 		_, err := editTool.Execute(context.Background(), map[string]any{
-			"path":       "huge.txt",
+			"file_path":  "huge.txt",
 			"old_string": "a",
 			"new_string": "b",
 		})
@@ -317,7 +317,7 @@ func TestEditTool(t *testing.T) {
 
 	t.Run("edit on non-existent file with non-empty old_string fails", func(t *testing.T) {
 		_, err := editTool.Execute(context.Background(), map[string]any{
-			"path":       "does_not_exist.txt",
+			"file_path":  "does_not_exist.txt",
 			"old_string": "something",
 			"new_string": "else",
 		})
@@ -330,7 +330,7 @@ func TestEditTool(t *testing.T) {
 	t.Run("edit rejects directory path", func(t *testing.T) {
 		os.MkdirAll(filepath.Join(tmpDir, "subdir"), 0755)
 		_, err := editTool.Execute(context.Background(), map[string]any{
-			"path":       "subdir",
+			"file_path":  "subdir",
 			"old_string": "anything",
 			"new_string": "else",
 		})
@@ -344,7 +344,7 @@ func TestEditTool(t *testing.T) {
 		os.WriteFile(testFile, []byte("hello\nworld"), 0644)
 
 		_, err := editTool.Execute(context.Background(), map[string]any{
-			"path":       "whitespace_old.txt",
+			"file_path":  "whitespace_old.txt",
 			"old_string": "   ",
 			"new_string": "x",
 		})

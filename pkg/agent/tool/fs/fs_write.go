@@ -19,28 +19,26 @@ func WriteTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectMutates),
 
 		Description: strings.Join([]string{
-			"Write a file to the local filesystem. Creates parent directories as needed and overwrites an existing file at the same path.",
-			"- For existing files, read first so you do not discard content.",
+			"Writes a file to the local filesystem. Creates parent directories as needed and overwrites any existing file at the same path.",
+			"- For existing files, `read` first so you do not discard content.",
 			"- Prefer `edit` for existing files: it sends only the diff. Use `write` for new files or complete rewrites.",
-			"- Prefer editing existing files unless a new file is required by the task or local pattern.",
-			"- Do not create *.md / README files unless asked. No emoji unless requested.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":    map[string]any{"type": "string", "description": "File path to write."},
-				"content": map[string]any{"type": "string", "description": "Complete file contents to write."},
+				"file_path": map[string]any{"type": "string", "description": "The absolute path to the file to write (must be absolute, not relative)."},
+				"content":   map[string]any{"type": "string", "description": "The content to write to the file."},
 			},
-			"required":             []string{"path", "content"},
+			"required":             []string{"file_path", "content"},
 			"additionalProperties": false,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
-			pathArg, ok := args["path"].(string)
+			pathArg, ok := args["file_path"].(string)
 
 			if !ok || pathArg == "" {
-				return "", fmt.Errorf("path is required")
+				return "", fmt.Errorf("file_path is required")
 			}
 
 			content, ok := args["content"].(string)

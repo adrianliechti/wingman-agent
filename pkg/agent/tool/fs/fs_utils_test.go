@@ -17,14 +17,14 @@ func TestWriteAndReadNormalizeAbsoluteWorkspacePaths(t *testing.T) {
 
 	absPath := filepath.Join(tmpDir, "foo", "bar.txt")
 	_, err := WriteTool(root).Execute(context.Background(), map[string]any{
-		"path":    absPath,
-		"content": "hello",
+		"file_path": absPath,
+		"content":   "hello",
 	})
 	if err != nil {
 		t.Fatalf("write absolute workspace path: %v", err)
 	}
 
-	result, err := ReadTool(root).Execute(context.Background(), map[string]any{"path": absPath})
+	result, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": absPath})
 	if err != nil {
 		t.Fatalf("read absolute workspace path: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestWorkspaceBoundaryViaTools(t *testing.T) {
 	root, _, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	_, err := ReadTool(root).Execute(context.Background(), map[string]any{"path": "/etc/passwd"})
+	_, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": "/etc/passwd"})
 	if runtime.GOOS != "windows" {
 		if err == nil || !strings.Contains(err.Error(), "outside workspace") {
 			t.Fatalf("expected outside workspace error, got: %v", err)
@@ -45,8 +45,8 @@ func TestWorkspaceBoundaryViaTools(t *testing.T) {
 	}
 
 	_, err = WriteTool(root).Execute(context.Background(), map[string]any{
-		"path":    filepath.Join(os.TempDir(), "wingman-outside-test.txt"),
-		"content": "x",
+		"file_path": filepath.Join(os.TempDir(), "wingman-outside-test.txt"),
+		"content":   "x",
 	})
 	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
 		t.Fatalf("expected outside workspace write error, got: %v", err)
@@ -61,7 +61,7 @@ func TestReadRejectsBinaryExtensions(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	_, err := ReadTool(root).Execute(context.Background(), map[string]any{"path": "image.PNG"})
+	_, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": "image.PNG"})
 	if err == nil || !strings.Contains(err.Error(), "binary") {
 		t.Fatalf("expected binary-file rejection, got: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestEditPreservesBOMAndLineEndings(t *testing.T) {
 	}
 
 	_, err := EditTool(root).Execute(context.Background(), map[string]any{
-		"path":       "bom_crlf.txt",
+		"file_path":  "bom_crlf.txt",
 		"old_string": "line2",
 		"new_string": "changed",
 	})
@@ -107,7 +107,7 @@ func TestEditFuzzyMatchesCommonTypography(t *testing.T) {
 	}
 
 	_, err := EditTool(root).Execute(context.Background(), map[string]any{
-		"path":       "typography.txt",
+		"file_path":  "typography.txt",
 		"old_string": "say \"hello\"\nfoo-bar\nhello world",
 		"new_string": "say \"bye\"\nfoo-baz\nhello world",
 	})
@@ -133,7 +133,7 @@ func TestEditReturnsLineDiff(t *testing.T) {
 	}
 
 	result, err := EditTool(root).Execute(context.Background(), map[string]any{
-		"path":       "diff.txt",
+		"file_path":  "diff.txt",
 		"old_string": "old",
 		"new_string": "new",
 	})

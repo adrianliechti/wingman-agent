@@ -7,17 +7,21 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/google/uuid"
-
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
+
+// Compile-time check: the TUI App is the [code.UI] that coder.Agent's
+// ask_user / shell-confirm hooks delegate to. If code.UI grows, the
+// build breaks here so the wiring stays in lockstep with the interface.
+var _ code.UI = (*App)(nil)
 
 type App struct {
 	ctx   context.Context
@@ -41,13 +45,16 @@ type App struct {
 
 	sessionID string
 
-	phase          AppPhase
-	currentMode    Mode
-	showWelcome    bool
-	activeModal    Modal
+	phase       AppPhase
+	currentMode Mode
+	showWelcome bool
+	activeModal Modal
+
+	// elicitMu serializes Ask / Confirm so two concurrent tool calls
+	// can't fight over the input area.
+	elicitMu       sync.Mutex
 	promptActive   bool
 	promptResponse chan bool
-	promptMu       sync.Mutex
 	askActive      bool
 	askResponse    chan string
 	// 0 = summary, 1 = list, 2 = full. Ctrl+E cycles through.
@@ -75,14 +82,14 @@ type App struct {
 	mouseEnabled bool
 }
 
+// New constructs the App. sessionID may be empty when the caller plans
+// to create a new session after wiring the App as the agent's UI (so
+// the new session's tool list includes ask_user); use [App.SetSessionID]
+// to attach the freshly-minted id before [App.Run].
 func New(ctx context.Context, agent *coder.Agent, sessionID string) *App {
 	saveExecutablePath()
 
-	if sessionID == "" {
-		sessionID = newSessionID()
-	}
-
-	hasMessages := len(agent.Messages(sessionID)) > 0
+	hasMessages := sessionID != "" && len(agent.Messages(sessionID)) > 0
 
 	a := &App{
 		ctx:   ctx,
@@ -101,8 +108,10 @@ func New(ctx context.Context, agent *coder.Agent, sessionID string) *App {
 	return a
 }
 
-func newSessionID() string {
-	return uuid.New().String()
+// SetSessionID binds the active session id once it's known. Call once,
+// before [App.Run], after the agent has created or loaded the session.
+func (a *App) SetSessionID(id string) {
+	a.sessionID = id
 }
 
 func saveExecutablePath() {

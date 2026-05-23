@@ -76,6 +76,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if a := s.activeAgent(); a != nil {
 				a.Cancel(msg.SessionID)
 			}
+
+		case MsgPromptResponse:
+			if msg.PromptID == "" {
+				continue
+			}
+			s.resolvePrompt(msg)
 		}
 	}
 }

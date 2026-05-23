@@ -15,7 +15,7 @@ tasks:
     cmds:
       - go run ./cmd/wingman
 
-  web:
+  server:
     desc: Run the server
     deps: [ui]
     cmds:

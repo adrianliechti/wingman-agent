@@ -86,6 +86,18 @@ func detectAgents() []agentRegistration {
 			},
 		})
 	}
+	if path, err := exec.LookPath("opencode"); err == nil {
+		out = append(out, agentRegistration{
+			Name: "OpenCode",
+			Constructor: func(_ context.Context, ws *code.Workspace) (code.Agent, error) {
+				return acp.New(ws, code.AgentDef{
+					Name:    "OpenCode",
+					Command: path,
+					Args:    []string{"acp"},
+				})
+			},
+		})
+	}
 	return out
 }
 

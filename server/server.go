@@ -26,6 +26,10 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/system"
 )
 
+// Compile-time check: the HTTP server is the [code.UI] that any
+// in-process coder.Agent delegates ask_user / shell-confirm to.
+var _ code.UI = (*Server)(nil)
+
 //go:embed static/*
 var staticFiles embed.FS
 
@@ -61,6 +65,13 @@ type Server struct {
 
 	wsMu    sync.Mutex
 	wsConns map[*websocket.Conn]struct{}
+
+	// pendingPrompts maps prompt id → server-side bookkeeping for an
+	// outstanding Ask/Confirm. The WS read loop drains
+	// prompt_response messages into the right channel; sendSessionState
+	// replays the rest on reconnect.
+	promptsMu      sync.Mutex
+	pendingPrompts map[string]pendingPrompt
 }
 
 func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, error) {
@@ -78,18 +89,21 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	}
 
 	s := &Server{
-		port:      opts.Port,
-		noBrowser: opts.NoBrowser,
-		workspace: ws,
-		config:    cfg,
-		ctx:       ctx,
-		phases:    map[string]string{},
-		wsConns:   map[*websocket.Conn]struct{}{},
+		port:           opts.Port,
+		noBrowser:      opts.NoBrowser,
+		workspace:      ws,
+		config:         cfg,
+		ctx:            ctx,
+		phases:         map[string]string{},
+		wsConns:        map[*websocket.Conn]struct{}{},
+		pendingPrompts: map[string]pendingPrompt{},
 	}
 
 	// Default to the wingman in-process agent; user can swap via
 	// POST /api/agent.
-	s.agent = coder.New(ws, cfg, nil)
+	wa := coder.New(ws, cfg, nil)
+	wa.SetUI(s)
+	s.agent = wa
 
 	ws.WarmUp()
 	go func() {
@@ -289,7 +303,9 @@ func (s *Server) send(f Frame) {
 }
 
 // sendSessionState pushes the full transcript snapshot for a session,
-// used after LoadSession and on initial WS connect.
+// used after LoadSession and on initial WS connect. Any prompts the
+// agent is still waiting on are replayed so a reload mid-elicit
+// doesn't leave the user staring at a frozen turn.
 func (s *Server) sendSessionState(sid string) {
 	a := s.activeAgent()
 	if a == nil {
@@ -305,6 +321,9 @@ func (s *Server) sendSessionState(sid string) {
 		CachedTokens: u.CachedTokens,
 		OutputTokens: u.OutputTokens,
 	})
+	for _, f := range s.pendingPromptFramesFor(sid) {
+		s.send(f)
+	}
 }
 
 // ─── Session endpoints ────────────────────────────────────────────
@@ -639,6 +658,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 func (s *Server) constructBackend(name string) (code.Agent, error) {
 	if name == "" || name == code.BuiltinAgentName {
 		w := coder.New(s.workspace, s.config, nil)
+		w.SetUI(s)
 		go w.AutoSelectModel(s.ctx)
 		return w, nil
 	}

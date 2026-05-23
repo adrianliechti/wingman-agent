@@ -3,8 +3,15 @@ import type {
 	ClientMessage,
 	ConversationMessage,
 	Phase,
+	PromptKind,
 	ServerMessage,
 } from "../types/protocol";
+
+export interface PendingPrompt {
+	id: string;
+	kind: PromptKind;
+	message: string;
+}
 
 export interface ChatEntry {
 	id: string;
@@ -118,12 +125,13 @@ export interface SessionState {
 	entries: ChatEntry[];
 	phase: Phase;
 	usage: Usage;
+	prompt: PendingPrompt | null;
 }
 
 const EMPTY_USAGE: Usage = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
 
 function emptySession(id: string): SessionState {
-	return { id, entries: [], phase: "idle", usage: EMPTY_USAGE };
+	return { id, entries: [], phase: "idle", usage: EMPTY_USAGE, prompt: null };
 }
 
 // Per-session streaming refs (which assistant entry is currently growing,
@@ -219,7 +227,10 @@ export function useWebSocket() {
 
 		switch (msg.type) {
 			case "session_state": {
-				// Authoritative snapshot for this session on WS connect.
+				// Authoritative snapshot for this session. Preserve any
+				// existing prompt — the server replays pending prompts as
+				// separate frames right after, and clobbering here would
+				// cause a flicker.
 				streamRefs.current[sid] = emptyStreamRefs();
 				setSessions((prev) => ({
 					...prev,
@@ -232,6 +243,7 @@ export function useWebSocket() {
 							cachedTokens: msg.cached_tokens ?? 0,
 							outputTokens: msg.output_tokens ?? 0,
 						},
+						prompt: prev[sid]?.prompt ?? null,
 					},
 				}));
 				break;
@@ -373,6 +385,25 @@ export function useWebSocket() {
 					},
 				}));
 				break;
+
+			case "prompt":
+				updateSession(sid, (sess) => ({
+					...sess,
+					prompt: {
+						id: msg.prompt_id,
+						kind: msg.prompt_kind,
+						message: msg.message,
+					},
+				}));
+				break;
+
+			case "prompt_cancel":
+				updateSession(sid, (sess) =>
+					sess.prompt?.id === msg.prompt_id
+						? { ...sess, prompt: null }
+						: sess,
+				);
+				break;
 		}
 	};
 
@@ -403,6 +434,30 @@ export function useWebSocket() {
 			send({ type: "cancel", session: sessionId });
 		},
 		[send],
+	);
+
+	// Reply to a server prompt. Clears the local pending state
+	// optimistically — the server's Ask/Confirm goroutine will return
+	// once the response lands, then the rest of the turn streams as
+	// normal.
+	const respondPrompt = useCallback(
+		(
+			sessionId: string,
+			promptId: string,
+			reply: { text?: string; approved?: boolean },
+		) => {
+			updateSession(sessionId, (sess) =>
+				sess.prompt?.id === promptId ? { ...sess, prompt: null } : sess,
+			);
+			send({
+				type: "prompt_response",
+				session: sessionId,
+				prompt_id: promptId,
+				text: reply.text,
+				approved: reply.approved,
+			});
+		},
+		[send, updateSession],
 	);
 
 	const removeSession = useCallback((sessionId: string) => {
@@ -498,6 +553,7 @@ export function useWebSocket() {
 		sessions,
 		sendChat,
 		cancel,
+		respondPrompt,
 		removeSession,
 		clearSessions,
 		subscribe,
