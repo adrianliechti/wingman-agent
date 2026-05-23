@@ -10,7 +10,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/code/wingman"
+	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
 )
 
@@ -41,7 +41,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Replay every session the active agent has in memory so a fresh
 	// connect (page reload / new tab) sees its transcript.
 	if a := s.activeAgent(); a != nil {
-		if w, ok := a.(*wingman.Agent); ok {
+		if w, ok := a.(*coder.Agent); ok {
 			// wingman tracks loaded sessions internally; we don't have a
 			// generic enumerate method, but the UI fetches /api/sessions
 			// on mount so the catalog appears anyway.
@@ -195,7 +195,7 @@ func (s *Server) handleSend(msg ClientMessage) {
 
 	// Wingman persists per-session transcripts to disk; ACP servers
 	// store their own state. Only wingman needs an explicit save here.
-	if w, ok := a.(*wingman.Agent); ok {
+	if w, ok := a.(*coder.Agent); ok {
 		if err := w.Save(sid); err == nil && len(a.Messages(sid)) > 0 {
 			s.broadcast(Frame{Type: EvtSessionsChanged})
 		}

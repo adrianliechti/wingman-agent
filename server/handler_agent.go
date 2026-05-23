@@ -19,8 +19,8 @@ func (s *Server) handleAgents(w http.ResponseWriter, _ *http.Request) {
 	result := []AgentEntry{
 		{ID: code.BuiltinAgentName, Name: "Wingman"},
 	}
-	for _, def := range code.LoadAgents() {
-		result = append(result, AgentEntry{ID: def.Name, Name: def.Name})
+	for _, r := range s.availableAgents() {
+		result = append(result, AgentEntry{ID: r.Name, Name: r.Name})
 	}
 	writeJSON(w, result)
 }

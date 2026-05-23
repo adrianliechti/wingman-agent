@@ -35,6 +35,10 @@ type Agent struct {
 	conn      *acpsdk.ClientSideConnection
 	closeOnce sync.Once
 
+	// inProcess wiring (NewInProcess only). nil for the subprocess path.
+	serverDone <-chan struct{}
+	cleanup    func() error
+
 	caps acpsdk.AgentCapabilities
 
 	configMu   sync.RWMutex
@@ -143,6 +147,62 @@ func New(ws *code.Workspace, def code.AgentDef) (*Agent, error) {
 	if err != nil {
 		a.shutdown()
 		return nil, fmt.Errorf("agent %q: initialize: %w", def.Name, err)
+	}
+	a.caps = resp.AgentCapabilities
+	return a, nil
+}
+
+// NewInProcess wires an in-memory ACP-server agent (e.g. *claude.Agent,
+// *codex.Agent) into a code.Agent backend using io.Pipe pairs — no
+// subprocess for the protocol itself. setupServer is invoked with the
+// server-side AgentSideConnection so libraries that need it (claude,
+// codex) can call SetAgentConnection before the initialize handshake.
+// cleanup runs during Close after the connection is torn down; pass nil
+// for libraries with no resources to release (codex.Spawn returns a
+// closer via *codex.Agent.Close — pass that here).
+func NewInProcess(
+	ws *code.Workspace,
+	name string,
+	serverAgent acpsdk.Agent,
+	setupServer func(*acpsdk.AgentSideConnection),
+	cleanup func() error,
+) (*Agent, error) {
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+
+	a := &Agent{
+		workspace: ws,
+		def:       code.AgentDef{Name: name},
+		stdin:     clientW, // closing this signals EOF to the server side
+		sessions:  map[string]*sessionState{},
+		cleanup:   cleanup,
+	}
+
+	srvConn := acpsdk.NewAgentSideConnection(serverAgent, serverW, serverR)
+	if setupServer != nil {
+		setupServer(srvConn)
+	}
+	a.serverDone = srvConn.Done()
+
+	a.conn = acpsdk.NewClientSideConnection(a, clientW, clientR)
+	a.conn.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	})))
+
+	initCtx, cancel := context.WithTimeout(context.Background(), initTimeout)
+	defer cancel()
+	resp, err := a.conn.Initialize(initCtx, acpsdk.InitializeRequest{
+		ProtocolVersion: acpsdk.ProtocolVersionNumber,
+		ClientCapabilities: acpsdk.ClientCapabilities{
+			Fs: acpsdk.FileSystemCapabilities{
+				ReadTextFile:  true,
+				WriteTextFile: true,
+			},
+		},
+	})
+	if err != nil {
+		a.shutdown()
+		return nil, fmt.Errorf("agent %q: initialize: %w", name, err)
 	}
 	a.caps = resp.AgentCapabilities
 	return a, nil
@@ -498,6 +558,19 @@ func (a *Agent) shutdown() {
 		if a.stdin != nil {
 			_ = a.stdin.Close()
 		}
+
+		// In-process path: wait briefly for the server side to drain, then
+		// run the caller's cleanup (e.g. codex.Spawn shutdown).
+		if a.serverDone != nil {
+			select {
+			case <-a.serverDone:
+			case <-time.After(2 * time.Second):
+			}
+		}
+		if a.cleanup != nil {
+			_ = a.cleanup()
+		}
+
 		if a.cmd == nil || a.cmd.Process == nil {
 			return
 		}

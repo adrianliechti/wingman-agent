@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/adrianliechti/wingman-agent/pkg/code/wingman"
+	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 )
 
 // Plan mode is a wingman-only affordance — ACP backends have their own
-// internal mode handling. We expose it via the [*wingman.Agent] type
+// internal mode handling. We expose it via the [*coder.Agent] type
 // assertion; non-wingman backends report mode="agent" and reject sets
 // with 405.
 
@@ -19,7 +19,7 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mode := "agent"
-	if wa, ok := s.activeAgent().(*wingman.Agent); ok && wa.PlanMode(id) {
+	if wa, ok := s.activeAgent().(*coder.Agent); ok && wa.PlanMode(id) {
 		mode = "plan"
 	}
 	writeJSON(w, map[string]string{"mode": mode})
@@ -42,7 +42,7 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session id required", http.StatusBadRequest)
 		return
 	}
-	wa, ok := s.activeAgent().(*wingman.Agent)
+	wa, ok := s.activeAgent().(*coder.Agent)
 	if !ok {
 		http.Error(w, "plan mode is only available with the wingman backend", http.StatusMethodNotAllowed)
 		return

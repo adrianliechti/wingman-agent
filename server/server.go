@@ -21,8 +21,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/code/acp"
-	"github.com/adrianliechti/wingman-agent/pkg/code/wingman"
+	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/system"
 )
@@ -90,7 +89,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 
 	// Default to the wingman in-process agent; user can swap via
 	// POST /api/agent.
-	s.agent = wingman.New(ws, cfg, nil)
+	s.agent = coder.New(ws, cfg, nil)
 
 	ws.WarmUp()
 	go func() {
@@ -101,7 +100,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 
 	// Populate the wingman agent's upstream model cache + pick a default.
 	go func() {
-		if w, ok := s.agent.(*wingman.Agent); ok {
+		if w, ok := s.agent.(*coder.Agent); ok {
 			w.AutoSelectModel(ctx)
 		}
 	}()
@@ -634,26 +633,19 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // constructBackend instantiates an agent by name. "" or BuiltinAgentName
-// returns a fresh wingman; otherwise looks up the AgentDef and spawns
-// an acp subprocess.
+// returns a fresh wingman; otherwise looks up the registration produced by
+// availableAgents (auto-detected CLIs + ~/.wingman/agents.json entries)
+// and invokes its constructor.
 func (s *Server) constructBackend(name string) (code.Agent, error) {
 	if name == "" || name == code.BuiltinAgentName {
-		w := wingman.New(s.workspace, s.config, nil)
+		w := coder.New(s.workspace, s.config, nil)
 		go w.AutoSelectModel(s.ctx)
 		return w, nil
 	}
-	def, ok := findAgentDef(code.LoadAgents(), name)
-	if !ok {
-		return nil, fmt.Errorf("unknown agent %q", name)
-	}
-	return acp.New(s.workspace, def)
-}
-
-func findAgentDef(defs []code.AgentDef, name string) (code.AgentDef, bool) {
-	for _, d := range defs {
-		if d.Name == name {
-			return d, true
+	for _, r := range s.availableAgents() {
+		if r.Name == name {
+			return r.Constructor(s.ctx, s.workspace)
 		}
 	}
-	return code.AgentDef{}, false
+	return nil, fmt.Errorf("unknown agent %q", name)
 }
