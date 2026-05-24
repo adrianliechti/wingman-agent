@@ -1164,8 +1164,7 @@ function ToolGroupView({
 
 function ToolRow({ entry, running }: { entry: ChatEntry; running: boolean }) {
 	const [expanded, setExpanded] = useState(false);
-	const hint = entry.toolHint || extractHint(entry.toolArgs, entry.toolName);
-	const displayHint = hint ? truncate(hint, 80) : "";
+	const displayHint = entry.toolHint ? truncate(entry.toolHint, 80) : "";
 
 	return (
 		<div data-entry-id={entry.id}>
@@ -1223,51 +1222,6 @@ function ReasoningView({
 			</div>
 		</div>
 	);
-}
-
-// Mirror of pkg/tui/format.go: ExtractToolHint. The server pre-computes Hint
-// using the Go helper, so this only runs as a fallback (e.g. when args are
-// available but Hint isn't). Keep the rules identical.
-const FS_TOOLS = new Set(["read", "write", "edit", "ls", "find", "grep"]);
-const WORKING_DIR_TOOLS = new Set(["ls", "find", "grep"]);
-
-function extractHint(argsJSON?: string, toolName?: string): string {
-	const wdFallback = toolName && WORKING_DIR_TOOLS.has(toolName) ? "/" : "";
-	if (!argsJSON) return wdFallback;
-	try {
-		const args = JSON.parse(argsJSON);
-		for (const key of [
-			"description",
-			"query",
-			"pattern",
-			"command",
-			"prompt",
-			"path",
-			"file",
-			"url",
-			"name",
-		]) {
-			const v = args[key];
-			if (typeof v !== "string" || !v) continue;
-			if (
-				(key === "path" || key === "file") &&
-				toolName &&
-				FS_TOOLS.has(toolName)
-			) {
-				return normalizeWorkspacePath(v);
-			}
-			return v;
-		}
-	} catch {
-		/* ignore */
-	}
-	return wdFallback;
-}
-
-function normalizeWorkspacePath(p: string): string {
-	if (p === "" || p === "." || p === "./") return "/";
-	if (p.startsWith("/") || p.startsWith("~")) return p;
-	return "/" + p;
 }
 
 function truncate(text: string, max: number): string {

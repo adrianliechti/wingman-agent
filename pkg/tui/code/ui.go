@@ -14,6 +14,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
@@ -1118,7 +1119,7 @@ func (a *App) renderMessage(msg agent.Message) {
 				continue
 			}
 
-			hint := tui.ExtractToolHint(c.ToolResult.Args, c.ToolResult.Name)
+			hint := tool.ExtractHint(c.ToolResult.Args, c.ToolResult.Name)
 
 			if a.expandLevel >= 2 {
 				output := c.ToolResult.Content

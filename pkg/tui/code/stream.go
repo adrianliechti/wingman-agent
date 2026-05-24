@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/tui"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
@@ -95,7 +95,7 @@ func (a *App) streamResponse(input []agent.Content) {
 			switch {
 			case c.ToolCall != nil:
 				a.currentToolName = c.ToolCall.Name
-				a.currentToolHint = tui.ExtractToolHint(c.ToolCall.Args, c.ToolCall.Name)
+				a.currentToolHint = tool.ExtractHint(c.ToolCall.Args, c.ToolCall.Name)
 				a.setPhase(PhaseToolRunning)
 				a.streamingText = ""
 				a.streamingReasoning = ""

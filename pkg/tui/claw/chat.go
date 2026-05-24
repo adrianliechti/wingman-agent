@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/tui"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -66,7 +66,7 @@ func (t *TUI) writeFormatted(text string, isAssistant bool) {
 
 func (t *TUI) writeToolCall(tc *agent.ToolCall) {
 	th := theme.Default
-	hint := tui.ExtractToolHint(tc.Args, tc.Name)
+	hint := tool.ExtractHint(tc.Args, tc.Name)
 
 	if hint != "" {
 		hint = " " + hint

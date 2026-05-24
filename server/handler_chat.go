@@ -10,8 +10,8 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/tui"
 )
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +145,7 @@ func (s *Server) handleSend(msg ClientMessage) {
 					ID:   c.ToolCall.ID,
 					Name: c.ToolCall.Name,
 					Args: c.ToolCall.Args,
-					Hint: tui.ExtractToolHint(c.ToolCall.Args, c.ToolCall.Name),
+					Hint: tool.ExtractHint(c.ToolCall.Args, c.ToolCall.Name),
 				})
 				s.setSessionPhase(sid, "tool_running")
 

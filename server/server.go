@@ -20,6 +20,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
@@ -629,7 +630,12 @@ func convertMessages(messages []agent.Message) []ConversationMessage {
 				cc.Reasoning = &ConversationReasoning{ID: c.Reasoning.ID, Summary: c.Reasoning.Summary}
 			}
 			if c.ToolCall != nil {
-				cc.ToolCall = &ConversationTool{ID: c.ToolCall.ID, Name: c.ToolCall.Name, Args: c.ToolCall.Args}
+				cc.ToolCall = &ConversationTool{
+					ID:   c.ToolCall.ID,
+					Name: c.ToolCall.Name,
+					Args: c.ToolCall.Args,
+					Hint: tool.ExtractHint(c.ToolCall.Args, c.ToolCall.Name),
+				}
 			}
 			if c.ToolResult != nil {
 				cc.ToolResult = &ConversationResult{
