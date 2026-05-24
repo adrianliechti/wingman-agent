@@ -38,17 +38,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.wsMu.Unlock()
 	}()
 
-	// Replay every session the active agent has in memory so a fresh
-	// connect (page reload / new tab) sees its transcript.
-	if a := s.activeAgent(); a != nil {
-		if w, ok := a.(*coder.Agent); ok {
-			// wingman tracks loaded sessions internally; we don't have a
-			// generic enumerate method, but the UI fetches /api/sessions
-			// on mount so the catalog appears anyway.
-			_ = w
-		}
-	}
-
 	// Request ctx is used only for the conn.Read loop. Agent turns must
 	// not inherit from r.Context() — see Server.ctx.
 	for {

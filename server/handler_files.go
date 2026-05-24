@@ -13,6 +13,21 @@ import (
 	"strings"
 )
 
+// excludedDirs is the set of directory names that the file browser and
+// the search endpoint both skip (they create huge listings the user
+// never wants in the picker).
+var excludedDirs = map[string]bool{
+	"node_modules": true,
+	"__pycache__":  true,
+	".venv":        true,
+	"vendor":       true,
+	"dist":         true,
+	"build":        true,
+	"target":       true,
+	".next":        true,
+	".cache":       true,
+}
+
 var extToLanguage = map[string]string{
 	".go":         "go",
 	".js":         "javascript",
@@ -91,10 +106,8 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if entry.IsDir() {
-			if name == "node_modules" || name == "__pycache__" || name == ".venv" || name == "vendor" {
-				continue
-			}
+		if entry.IsDir() && excludedDirs[name] {
+			continue
 		}
 
 		entryPath := path.Join(dirPath, name)
@@ -147,11 +160,7 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 			if p == "." {
 				return nil
 			}
-			if strings.HasPrefix(name, ".") {
-				return fs.SkipDir
-			}
-			switch name {
-			case "node_modules", "__pycache__", ".venv", "vendor", "dist", "build", "target", ".next", ".cache":
+			if strings.HasPrefix(name, ".") || excludedDirs[name] {
 				return fs.SkipDir
 			}
 			return nil
@@ -273,27 +282,11 @@ func (s *Server) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	abs, ok := s.resolveWorkspacePath(body.Path)
+	abs, ok := s.resolveExistingRegularFile(w, body.Path)
 	if !ok {
-		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
-
-	// Lstat (not Stat) so a symlink can't redirect the write outside the
-	// workspace — resolveWorkspacePath only checks the lexical path.
-	info, err := os.Lstat(abs)
-	if err != nil {
-		http.Error(w, "file not found", http.StatusNotFound)
-		return
-	}
-	if info.IsDir() {
-		http.Error(w, "path is a directory", http.StatusBadRequest)
-		return
-	}
-	if !info.Mode().IsRegular() {
-		http.Error(w, "not a regular file", http.StatusBadRequest)
-		return
-	}
+	info, _ := os.Lstat(abs) // already validated by resolveExistingRegularFile
 
 	if err := os.WriteFile(abs, []byte(body.Content), info.Mode().Perm()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -316,6 +309,35 @@ func (s *Server) resolveWorkspacePath(p string) (string, bool) {
 		return "", false
 	}
 	return filepath.Join(s.workspace.RootPath, filepath.FromSlash(cleaned)), true
+}
+
+// resolveExistingRegularFile resolves a workspace-relative path and
+// validates it points at an existing regular file (not a directory,
+// not a symlink, not a device). Returns the absolute path or writes
+// the appropriate HTTP error to w.
+func (s *Server) resolveExistingRegularFile(w http.ResponseWriter, p string) (string, bool) {
+	abs, ok := s.resolveWorkspacePath(p)
+	if !ok {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return "", false
+	}
+	// Lstat (not Stat): the resolveWorkspacePath check is lexical, so a
+	// symlink inside the workspace could otherwise redirect the write/read
+	// outside it. Rejecting non-regular files closes that hole.
+	info, err := os.Lstat(abs)
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return "", false
+	}
+	if info.IsDir() {
+		http.Error(w, "path is a directory", http.StatusBadRequest)
+		return "", false
+	}
+	if !info.Mode().IsRegular() {
+		http.Error(w, "not a regular file", http.StatusBadRequest)
+		return "", false
+	}
+	return abs, true
 }
 
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
@@ -453,25 +475,8 @@ func copyPath(src, dst string, info os.FileInfo) error {
 }
 
 func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
-	abs, ok := s.resolveWorkspacePath(r.URL.Query().Get("path"))
+	abs, ok := s.resolveExistingRegularFile(w, r.URL.Query().Get("path"))
 	if !ok {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-
-	// Lstat (not Stat): resolveWorkspacePath checks only the lexical path,
-	// so a symlink inside the workspace could otherwise serve /etc/passwd.
-	info, err := os.Lstat(abs)
-	if err != nil {
-		http.Error(w, "file not found", http.StatusNotFound)
-		return
-	}
-	if info.IsDir() {
-		http.Error(w, "path is a directory", http.StatusBadRequest)
-		return
-	}
-	if !info.Mode().IsRegular() {
-		http.Error(w, "not a regular file", http.StatusBadRequest)
 		return
 	}
 

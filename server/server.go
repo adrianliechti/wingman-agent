@@ -175,8 +175,14 @@ func (s *Server) handleWebSocketURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	// Adopt the caller-supplied ctx as the server-lifetime ctx so the
+	// signal handler below tears down everything that lives off s.ctx
+	// (pollFiles, agent turns started during HTTP handlers, etc.).
+	// Previously these two were independent — pollFiles would outlive
+	// Run if only the local derived ctx was cancelled.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	s.ctx = ctx
 
 	port, err := system.FreePort(s.port)
 	if err != nil {
@@ -287,6 +293,12 @@ func (s *Server) broadcast(f Frame) {
 	s.send(f)
 }
 
+// wsWriteTimeout bounds a single WS write so one stuck client (e.g. a
+// backgrounded tab whose TCP buffer filled up) can't stall the broadcast
+// pipeline. Writes are also fanned out per-connection so a slow client
+// doesn't delay the others.
+const wsWriteTimeout = 5 * time.Second
+
 func (s *Server) send(f Frame) {
 	data, err := json.Marshal(f)
 	if err != nil {
@@ -299,7 +311,16 @@ func (s *Server) send(f Frame) {
 	}
 	s.wsMu.Unlock()
 	for _, c := range conns {
-		c.Write(context.Background(), websocket.MessageText, data)
+		go func(c *websocket.Conn) {
+			ctx, cancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+			defer cancel()
+			if err := c.Write(ctx, websocket.MessageText, data); err != nil {
+				// Slow / dead client: close so its read loop's defer
+				// cleans it out of wsConns. Subsequent broadcasts then
+				// skip it.
+				_ = c.CloseNow()
+			}
+		}(c)
 	}
 }
 
@@ -597,8 +618,12 @@ func (s *Server) pollFiles(ctx context.Context) {
 				}
 				prevGit = gitNow
 			}
+			// Without Rewind we have no cheap "did the tree change?" signal,
+			// so we don't push FilesChanged at all on the poll tick —
+			// clients re-fetch via /api/files on user action. (Broadcasting
+			// every 2s here made the UI thrash and the panel re-fetch
+			// constantly for nothing.)
 			if ws.Rewind == nil {
-				s.broadcast(Frame{Type: EvtFilesChanged})
 				continue
 			}
 			fp := ws.Rewind.Fingerprint()
