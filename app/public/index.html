@@ -782,7 +782,7 @@
         errEl.textContent = "";
         try {
           const url = await OpenWorkspace(path);
-          window.location.href = url;
+          window.location.replace(url);
         } catch (e) {
           errEl.textContent = String(e);
           setOpenDisabled(false);
@@ -803,7 +803,7 @@
             return;
           }
           const url = await OpenWorkspace(path);
-          window.location.href = url;
+          window.location.replace(url);
         } catch (e) {
           errEl.textContent = String(e);
           setOpenDisabled(false);
