@@ -18,8 +18,8 @@ func TestWriteTool(t *testing.T) {
 
 	t.Run("write new file", func(t *testing.T) {
 		result, err := writeTool.Execute(context.Background(), map[string]any{
-			"path":    "newfile.txt",
-			"content": "hello world",
+			"file_path": "newfile.txt",
+			"content":   "hello world",
 		})
 
 		if err != nil {
@@ -43,8 +43,8 @@ func TestWriteTool(t *testing.T) {
 
 	t.Run("write with nested directory", func(t *testing.T) {
 		_, err := writeTool.Execute(context.Background(), map[string]any{
-			"path":    "subdir/nested/file.txt",
-			"content": "nested content",
+			"file_path": "subdir/nested/file.txt",
+			"content":   "nested content",
 		})
 
 		if err != nil {
@@ -64,8 +64,8 @@ func TestWriteTool(t *testing.T) {
 
 	t.Run("overwrite existing file", func(t *testing.T) {
 		_, err := writeTool.Execute(context.Background(), map[string]any{
-			"path":    "overwrite.txt",
-			"content": "original",
+			"file_path": "overwrite.txt",
+			"content":   "original",
 		})
 
 		if err != nil {
@@ -73,7 +73,7 @@ func TestWriteTool(t *testing.T) {
 		}
 
 		_, err = ReadTool(root).Execute(context.Background(), map[string]any{
-			"path": "overwrite.txt",
+			"file_path": "overwrite.txt",
 		})
 
 		if err != nil {
@@ -81,8 +81,8 @@ func TestWriteTool(t *testing.T) {
 		}
 
 		_, err = writeTool.Execute(context.Background(), map[string]any{
-			"path":    "overwrite.txt",
-			"content": "updated",
+			"file_path": "overwrite.txt",
+			"content":   "updated",
 		})
 
 		if err != nil {
@@ -102,8 +102,8 @@ func TestWriteTool(t *testing.T) {
 
 	t.Run("path outside workspace rejected", func(t *testing.T) {
 		_, err := writeTool.Execute(context.Background(), map[string]any{
-			"path":    "/tmp/outside.txt",
-			"content": "should fail",
+			"file_path": "/tmp/outside.txt",
+			"content":   "should fail",
 		})
 
 		if err == nil {
@@ -113,8 +113,8 @@ func TestWriteTool(t *testing.T) {
 
 	t.Run("write rejects directory path", func(t *testing.T) {
 		_, err := writeTool.Execute(context.Background(), map[string]any{
-			"path":    ".",
-			"content": "should fail",
+			"file_path": ".",
+			"content":   "should fail",
 		})
 
 		if err == nil || !strings.Contains(err.Error(), "directory") {

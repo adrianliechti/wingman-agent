@@ -20,32 +20,28 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			fmt.Sprintf("Read a known file path. Results use cat -n format with 1-based line numbers. Defaults to the first %d lines.", DefaultMaxLines),
-			"- Required before `edit` on the same file.",
-			"- Do not use for discovery: use `grep` for content/symbols and `glob` for filename patterns.",
-			"- After `grep` finds candidates, read only the file or line window needed for context.",
+			fmt.Sprintf("Reads a file from the local filesystem. Results use cat -n format with 1-based line numbers. By default reads the first %d lines.", DefaultMaxLines),
 			"- Use `offset` and `limit` for long files or known ranges. `offset` is a 1-based start line, not a result skip count.",
-			"- Do not re-read a file already shown unless it changed; use the existing line numbers.",
-			"- Reads files only, not directories. Use `glob` to find files in a directory.",
+			"- Reads files only, not directories. Use `glob` to list files in a directory.",
 			"- Binary files (PDF, images, archives) are rejected.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":   map[string]any{"type": "string", "description": "File path."},
-				"offset": map[string]any{"type": "integer", "description": "1-based line number to start reading from. Only provide for large files or known ranges. Defaults to 1."},
-				"limit":  map[string]any{"type": "integer", "description": "Positive number of lines to read. Only provide for large files or known ranges."},
+				"file_path": map[string]any{"type": "string", "description": "The absolute path to the file to read."},
+				"offset":    map[string]any{"type": "integer", "description": "1-based line number to start reading from. Only provide for large files or known ranges. Defaults to 1."},
+				"limit":     map[string]any{"type": "integer", "description": "Positive number of lines to read. Only provide for large files or known ranges."},
 			},
-			"required":             []string{"path"},
+			"required":             []string{"file_path"},
 			"additionalProperties": false,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
-			pathArg, ok := args["path"].(string)
+			pathArg, ok := args["file_path"].(string)
 
 			if !ok || pathArg == "" {
-				return "", fmt.Errorf("path is required")
+				return "", fmt.Errorf("file_path is required")
 			}
 
 			workingDir := root.Name()

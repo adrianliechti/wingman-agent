@@ -23,8 +23,8 @@ func TestPathHandlingCrossplatform(t *testing.T) {
 
 	t.Run("forward slash paths work", func(t *testing.T) {
 		_, err := writeTool.Execute(context.Background(), map[string]any{
-			"path":    "a/b/c/new.txt",
-			"content": "test",
+			"file_path": "a/b/c/new.txt",
+			"content":   "test",
 		})
 
 		if err != nil {
@@ -32,7 +32,7 @@ func TestPathHandlingCrossplatform(t *testing.T) {
 		}
 
 		result, err := readTool.Execute(context.Background(), map[string]any{
-			"path": "a/b/c/new.txt",
+			"file_path": "a/b/c/new.txt",
 		})
 
 		if err != nil {
@@ -47,8 +47,8 @@ func TestPathHandlingCrossplatform(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Run("backslash paths work on windows", func(t *testing.T) {
 			_, err := writeTool.Execute(context.Background(), map[string]any{
-				"path":    "a\\b\\c\\win.txt",
-				"content": "windows",
+				"file_path": "a\\b\\c\\win.txt",
+				"content":   "windows",
 			})
 
 			if err != nil {
@@ -75,7 +75,7 @@ func TestMacOSCaseInsensitivePaths(t *testing.T) {
 
 	// Both should resolve within the workspace (not "outside workspace" error)
 	_, err := readTool.Execute(context.Background(), map[string]any{
-		"path": upperPath,
+		"file_path": upperPath,
 	})
 
 	if err != nil && strings.Contains(err.Error(), "outside workspace") {
@@ -83,7 +83,7 @@ func TestMacOSCaseInsensitivePaths(t *testing.T) {
 	}
 
 	_, err = readTool.Execute(context.Background(), map[string]any{
-		"path": lowerPath,
+		"file_path": lowerPath,
 	})
 
 	if err != nil && strings.Contains(err.Error(), "outside workspace") {

@@ -3,8 +3,15 @@ import type {
 	ClientMessage,
 	ConversationMessage,
 	Phase,
+	PromptKind,
 	ServerMessage,
 } from "../types/protocol";
+
+export interface PendingPrompt {
+	id: string;
+	kind: PromptKind;
+	message: string;
+}
 
 export interface ChatEntry {
 	id: string;
@@ -19,7 +26,9 @@ export interface ChatEntry {
 	reasoningId?: string;
 }
 
-export function messagesToEntries(messages: ConversationMessage[]): ChatEntry[] {
+export function messagesToEntries(
+	messages: ConversationMessage[],
+): ChatEntry[] {
 	const entries: ChatEntry[] = [];
 	for (const m of messages) {
 		// Collect images in this message so we can attach them to the user
@@ -116,12 +125,13 @@ export interface SessionState {
 	entries: ChatEntry[];
 	phase: Phase;
 	usage: Usage;
+	prompt: PendingPrompt | null;
 }
 
 const EMPTY_USAGE: Usage = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
 
 function emptySession(id: string): SessionState {
-	return { id, entries: [], phase: "idle", usage: EMPTY_USAGE };
+	return { id, entries: [], phase: "idle", usage: EMPTY_USAGE, prompt: null };
 }
 
 // Per-session streaming refs (which assistant entry is currently growing,
@@ -217,7 +227,10 @@ export function useWebSocket() {
 
 		switch (msg.type) {
 			case "session_state": {
-				// Authoritative snapshot for this session on WS connect.
+				// Authoritative snapshot for this session. Preserve any
+				// existing prompt — the server replays pending prompts as
+				// separate frames right after, and clobbering here would
+				// cause a flicker.
 				streamRefs.current[sid] = emptyStreamRefs();
 				setSessions((prev) => ({
 					...prev,
@@ -230,6 +243,7 @@ export function useWebSocket() {
 							cachedTokens: msg.cached_tokens ?? 0,
 							outputTokens: msg.output_tokens ?? 0,
 						},
+						prompt: prev[sid]?.prompt ?? null,
 					},
 				}));
 				break;
@@ -371,6 +385,25 @@ export function useWebSocket() {
 					},
 				}));
 				break;
+
+			case "prompt":
+				updateSession(sid, (sess) => ({
+					...sess,
+					prompt: {
+						id: msg.prompt_id,
+						kind: msg.prompt_kind,
+						message: msg.message,
+					},
+				}));
+				break;
+
+			case "prompt_cancel":
+				updateSession(sid, (sess) =>
+					sess.prompt?.id === msg.prompt_id
+						? { ...sess, prompt: null }
+						: sess,
+				);
+				break;
 		}
 	};
 
@@ -378,10 +411,12 @@ export function useWebSocket() {
 		handleMessageRef.current = handleMessage;
 	});
 
-	const send = useCallback((msg: ClientMessage) => {
-		if (wsRef.current?.readyState === WebSocket.OPEN) {
-			wsRef.current.send(JSON.stringify(msg));
+	const send = useCallback((msg: ClientMessage): boolean => {
+		if (wsRef.current?.readyState !== WebSocket.OPEN) {
+			return false;
 		}
+		wsRef.current.send(JSON.stringify(msg));
+		return true;
 	}, []);
 
 	const sendChat = useCallback(
@@ -389,10 +424,7 @@ export function useWebSocket() {
 			const id = nextId();
 			updateSession(sessionId, (sess) => ({
 				...sess,
-				entries: [
-					...sess.entries,
-					{ id, type: "user", content: text, images },
-				],
+				entries: [...sess.entries, { id, type: "user", content: text, images }],
 			}));
 			send({ type: "send", session: sessionId, text, files, images });
 		},
@@ -406,13 +438,44 @@ export function useWebSocket() {
 		[send],
 	);
 
+	// Reply to a server prompt. Clears the local pending state
+	// optimistically — the server's Ask/Confirm goroutine will return
+	// once the response lands, then the rest of the turn streams as
+	// normal.
+	const respondPrompt = useCallback(
+		(
+			sessionId: string,
+			promptId: string,
+			reply: { text?: string; approved?: boolean },
+		) => {
+			const sent = send({
+				type: "prompt_response",
+				session: sessionId,
+				prompt_id: promptId,
+				text: reply.text,
+				approved: reply.approved,
+			});
+			if (!sent) return;
+			updateSession(sessionId, (sess) =>
+				sess.prompt?.id === promptId ? { ...sess, prompt: null } : sess,
+			);
+		},
+		[send, updateSession],
+	);
+
 	const removeSession = useCallback((sessionId: string) => {
 		setSessions((prev) => {
 			if (!(sessionId in prev)) return prev;
-			const { [sessionId]: _gone, ...rest } = prev;
+			const rest = { ...prev };
+			delete rest[sessionId];
 			return rest;
 		});
 		delete streamRefs.current[sessionId];
+	}, []);
+
+	const clearSessions = useCallback(() => {
+		setSessions({});
+		streamRefs.current = {};
 	}, []);
 
 	useEffect(() => {
@@ -494,7 +557,9 @@ export function useWebSocket() {
 		sessions,
 		sendChat,
 		cancel,
+		respondPrompt,
 		removeSession,
+		clearSessions,
 		subscribe,
 	};
 }

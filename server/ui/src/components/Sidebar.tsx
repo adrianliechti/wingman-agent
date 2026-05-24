@@ -1,6 +1,9 @@
 import { Loader2, MessageSquare, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { ServerMessage } from "../types/protocol";
+import { AgentPicker } from "./AgentPicker";
+
+const BUILTIN_AGENT_ID = "wingman";
 
 interface SessionInfo {
 	id: string;
@@ -36,6 +39,7 @@ export function Sidebar({
 	subscribe,
 }: Props) {
 	const [sessions, setSessions] = useState<SessionInfo[]>([]);
+	const [agentId, setAgentId] = useState(BUILTIN_AGENT_ID);
 
 	const loadSessions = useCallback(async () => {
 		try {
@@ -47,19 +51,36 @@ export function Sidebar({
 		}
 	}, []);
 
+	const loadAgent = useCallback(() => {
+		fetch("/api/agent")
+			.then((r) => r.json())
+			.then((data) => setAgentId(data.agent || BUILTIN_AGENT_ID))
+			.catch(() => {});
+	}, []);
+
 	useEffect(() => {
 		// eslint-disable-next-line react-hooks/set-state-in-effect -- standard data-load on mount
 		loadSessions();
-	}, [loadSessions]);
+		loadAgent();
+	}, [loadSessions, loadAgent]);
 
 	useEffect(() => {
 		if (!subscribe) return;
 		return subscribe((msg) => {
 			if (msg.type === "sessions_changed") {
 				loadSessions();
+			} else if (msg.type === "agent_changed") {
+				// The active agent flipping changes the session catalog
+				// source (wingman on-disk vs. ACP backend's list) — refetch.
+				loadAgent();
+				loadSessions();
 			}
 		});
-	}, [subscribe, loadSessions]);
+	}, [subscribe, loadSessions, loadAgent]);
+
+	const [switchingAgent, setSwitchingAgent] = useState<string | null>(null);
+
+	const canDelete = agentId === BUILTIN_AGENT_ID;
 
 	const handleDelete = async (e: React.MouseEvent, id: string) => {
 		e.stopPropagation();
@@ -73,10 +94,12 @@ export function Sidebar({
 	return (
 		<div className="w-full h-full flex flex-col bg-bg">
 			{/* Header */}
-			<div className="h-10 pl-4 pr-1.5 flex items-center justify-between shrink-0">
-				<span className="text-[11px] font-medium text-fg-dim uppercase tracking-wider">
-					Sessions
-				</span>
+			<div className="h-10 px-1.5 flex items-center gap-2 shrink-0">
+				<AgentPicker
+					subscribe={subscribe}
+					onSwitchingChange={setSwitchingAgent}
+				/>
+				<div className="flex-1" />
 				{canCreateNew && (
 					<button
 						type="button"
@@ -91,58 +114,72 @@ export function Sidebar({
 
 			{/* Session List */}
 			<div className="flex-1 overflow-y-auto pb-2">
-				{groups.length === 0 && (
+				{switchingAgent && (
+					<div className="h-full flex items-center justify-center">
+						<Loader2 size={14} className="text-fg-dim animate-spin" />
+					</div>
+				)}
+				{!switchingAgent && groups.length === 0 && (
 					<div className="px-3 py-8 text-[11px] text-fg-dim text-center">
 						No sessions yet
 					</div>
 				)}
-				{groups.map((group) => (
-					<div key={group.label}>
-						<div className="pl-4 pr-3 pt-4 pb-1.5">
-							<span className="text-[10px] font-medium uppercase tracking-wider text-fg-dim">
-								{group.label}
-							</span>
-						</div>
-						{group.sessions.map((s) => {
-							const active = s.id === currentSessionId;
-							const displayTitle = s.title || s.id.substring(0, 8);
-							return (
-								<div
-									key={s.id}
-									className={`group relative flex items-center gap-2 px-2.5 py-1.5 mx-1.5 rounded-md cursor-pointer text-[12px] transition-colors ${
-										active
-											? "bg-bg-active text-fg"
-											: "text-fg-muted hover:bg-bg-hover hover:text-fg"
-									}`}
-									onClick={() => onSessionSelect(s.id)}
-									title={s.title || s.id}
-								>
-									{runningSessionIds?.has(s.id) ? (
-									<Loader2 size={12} className="shrink-0 text-accent animate-spin" />
-								) : (
-									<MessageSquare size={12} className="shrink-0 text-fg-dim" />
-								)}
-									<div className="min-w-0 flex-1">
-										<div className="truncate text-[12px] leading-snug">
-											{displayTitle}
-										</div>
-										<div className="text-[10px] text-fg-dim truncate mt-0.5">
-											{relativeTime(s.updated_at)}
-										</div>
-									</div>
-									<button
-										type="button"
-										onClick={(e) => handleDelete(e, s.id)}
-										className="w-5 h-5 flex items-center justify-center rounded text-fg-dim hover:text-danger opacity-0 group-hover:opacity-100 shrink-0 transition-all"
-										title="Delete session"
+				{!switchingAgent &&
+					groups.map((group) => (
+						<div key={group.label}>
+							<div className="pl-4 pr-3 pt-4 pb-1.5">
+								<span className="text-[10px] font-medium uppercase tracking-wider text-fg-dim">
+									{group.label}
+								</span>
+							</div>
+							{group.sessions.map((s) => {
+								const active = s.id === currentSessionId;
+								const displayTitle = s.title || s.id.substring(0, 8);
+								return (
+									<div
+										key={s.id}
+										className={`group relative flex items-center gap-2 px-2.5 py-1.5 mx-1.5 rounded-md cursor-pointer text-[12px] transition-colors ${
+											active
+												? "bg-bg-active text-fg"
+												: "text-fg-muted hover:bg-bg-hover hover:text-fg"
+										}`}
+										onClick={() => onSessionSelect(s.id)}
+										title={s.title || s.id}
 									>
-										<X size={11} />
-									</button>
-								</div>
-							);
-						})}
-					</div>
-				))}
+										{runningSessionIds?.has(s.id) ? (
+											<Loader2
+												size={12}
+												className="shrink-0 text-accent animate-spin"
+											/>
+										) : (
+											<MessageSquare
+												size={12}
+												className="shrink-0 text-fg-dim"
+											/>
+										)}
+										<div className="min-w-0 flex-1">
+											<div className="truncate text-[12px] leading-snug">
+												{displayTitle}
+											</div>
+											<div className="text-[10px] text-fg-dim truncate mt-0.5">
+												{relativeTime(s.updated_at)}
+											</div>
+										</div>
+										{canDelete && (
+											<button
+												type="button"
+												onClick={(e) => handleDelete(e, s.id)}
+												className="w-5 h-5 flex items-center justify-center rounded text-fg-dim hover:text-danger opacity-0 group-hover:opacity-100 shrink-0 transition-all"
+												title="Delete session"
+											>
+												<X size={11} />
+											</button>
+										)}
+									</div>
+								);
+							})}
+						</div>
+					))}
 			</div>
 		</div>
 	);

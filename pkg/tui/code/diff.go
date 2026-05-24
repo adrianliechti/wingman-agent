@@ -1,0 +1,350 @@
+package code
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
+
+	"github.com/adrianliechti/wingman-agent/pkg/rewind"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
+)
+
+func (a *App) showDiffView() {
+	t := theme.Default
+
+	diffs, err := a.agent.Workspace().Diffs()
+	if err != nil {
+		fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("%v", err), t.Yellow))
+		return
+	}
+
+	if len(diffs) == 0 {
+		fmt.Fprint(a.chatView, a.formatNotice("No changes", t.BrBlack))
+		return
+	}
+
+	a.activeModal = ModalDiff
+
+	var added, modified, deleted int
+	var totalInsertions, totalDeletions int
+
+	for _, diff := range diffs {
+		switch diff.Status {
+		case rewind.StatusAdded:
+			added++
+
+		case rewind.StatusModified:
+			modified++
+
+		case rewind.StatusDeleted:
+			deleted++
+		}
+		ins, del := countDiffStats(diff.Patch)
+		totalInsertions += ins
+		totalDeletions += del
+	}
+
+	selectedIndex := 0
+
+	fileListView := tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(true).
+		SetWrap(false)
+	fileListView.SetBackgroundColor(tcell.ColorDefault)
+
+	renderFileList := func() {
+		fileListView.Clear()
+		var sb strings.Builder
+
+		for i, diff := range diffs {
+			var statusColor tcell.Color
+			var statusIcon string
+
+			switch diff.Status {
+			case rewind.StatusAdded:
+				statusColor = t.Green
+				statusIcon = "●"
+			case rewind.StatusModified:
+				statusColor = t.Yellow
+				statusIcon = "●"
+			case rewind.StatusDeleted:
+				statusColor = t.Red
+				statusIcon = "●"
+			default:
+				statusColor = t.Foreground
+				statusIcon = "○"
+			}
+
+			ins, del := countDiffStats(diff.Patch)
+			statsStr := fmt.Sprintf("[%s]+%d[-] [%s]-%d[-]", t.Green, ins, t.Red, del)
+
+			if i == selectedIndex {
+				fmt.Fprintf(&sb, "  [%s]▶[-] [%s]%s[-] [%s::b]%s[-::-] %s\n",
+					t.Cyan, statusColor, statusIcon, t.Cyan, diff.Path, statsStr)
+			} else {
+				fmt.Fprintf(&sb, "    [%s]%s[-] [%s]%s[-] %s\n",
+					statusColor, statusIcon, t.Foreground, diff.Path, statsStr)
+			}
+		}
+
+		fileListView.SetText(sb.String())
+		fileListView.ScrollTo(selectedIndex, 0)
+	}
+
+	diffContentView := tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(true).
+		SetWrap(false)
+	diffContentView.SetBackgroundColor(tcell.ColorDefault)
+
+	renderDiffContent := func() {
+		if selectedIndex < 0 || selectedIndex >= len(diffs) {
+			return
+		}
+
+		diff := diffs[selectedIndex]
+		diffContentView.Clear()
+
+		highlighted := markdown.HighlightDiff(diff.Patch)
+		diffContentView.SetText(highlighted)
+		diffContentView.ScrollToBeginning()
+	}
+
+	renderFileList()
+
+	if len(diffs) > 0 {
+		renderDiffContent()
+	}
+
+	hintBar := tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignLeft)
+	hintBar.SetBackgroundColor(tcell.ColorDefault)
+
+	statusBar := tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignRight)
+	statusBar.SetBackgroundColor(tcell.ColorDefault)
+
+	var statParts []string
+
+	if added > 0 {
+		statParts = append(statParts, fmt.Sprintf("[%s]+%d[-]", t.Green, added))
+	}
+
+	if modified > 0 {
+		statParts = append(statParts, fmt.Sprintf("[%s]~%d[-]", t.Yellow, modified))
+	}
+
+	if deleted > 0 {
+		statParts = append(statParts, fmt.Sprintf("[%s]-%d[-]", t.Red, deleted))
+	}
+	fmt.Fprintf(statusBar, "[%s]%d file(s)[-] %s  [%s]+%d[-] [%s]-%d[-]",
+		t.BrBlack, len(diffs), strings.Join(statParts, " "), t.Green, totalInsertions, t.Red, totalDeletions)
+
+	focusedPanel := 0 // 0 = fileList, 1 = diffContent
+
+	updateHintBar := func() {
+		hintBar.Clear()
+
+		if focusedPanel == 0 {
+			fmt.Fprintf(hintBar, "[%s]esc[-] [%s]close[-]  [%s]tab[-] [%s]switch[-]  [%s]↑↓/jk[-] [%s]select[-]",
+				t.BrBlack, t.Foreground, t.BrBlack, t.Foreground, t.BrBlack, t.Foreground)
+		} else {
+			fmt.Fprintf(hintBar, "[%s]esc[-] [%s]close[-]  [%s]tab[-] [%s]switch[-]  [%s]↑↓/jk[-] [%s]scroll[-]  [%s]g/G[-] [%s]top/bottom[-]",
+				t.BrBlack, t.Foreground, t.BrBlack, t.Foreground, t.BrBlack, t.Foreground, t.BrBlack, t.Foreground)
+		}
+	}
+	updateHintBar()
+
+	panelsContainer := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(fileListView, 40, 0, true).
+		AddItem(verticalSeparator(t.BrBlack), 1, 0, false).
+		AddItem(diffContentView, 0, 1, false)
+	panelsContainer.SetBackgroundColor(tcell.ColorDefault)
+
+	leftMargin, rightMargin := a.getMargins()
+	inputLeftMargin, inputRightMargin := a.getInputMargins()
+
+	contentWithMargins := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(nil, leftMargin, 0, false).
+		AddItem(panelsContainer, 0, 1, true).
+		AddItem(nil, rightMargin, 0, false)
+	contentWithMargins.SetBackgroundColor(tcell.ColorDefault)
+
+	bottomBar := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(hintBar, 0, 1, false).
+		AddItem(statusBar, 0, 1, false)
+	bottomBar.SetBackgroundColor(tcell.ColorDefault)
+	bottomBar.SetDrawFunc(fillRow)
+
+	bottomBarWithMargins := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(nil, inputLeftMargin, 0, false).
+		AddItem(bottomBar, 0, 1, false).
+		AddItem(nil, inputRightMargin, 0, false)
+	bottomBarWithMargins.SetBackgroundColor(tcell.ColorDefault)
+	bottomBarWithMargins.SetDrawFunc(fillRow)
+
+	topSpacer := tview.NewBox().SetBackgroundColor(tcell.ColorDefault)
+
+	statusSpacer := tview.NewBox().SetBackgroundColor(tcell.ColorDefault)
+	statusSpacer.SetDrawFunc(fillRow)
+
+	container := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(topSpacer, 1, 0, false).
+		AddItem(contentWithMargins, 0, 1, true).
+		AddItem(statusSpacer, 1, 0, false).
+		AddItem(bottomBarWithMargins, 1, 0, false)
+	container.SetBackgroundColor(tcell.ColorDefault)
+
+	fileListView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyUp:
+
+			if selectedIndex > 0 {
+				selectedIndex--
+				renderFileList()
+				renderDiffContent()
+			}
+
+			return nil
+
+		case tcell.KeyDown:
+
+			if selectedIndex < len(diffs)-1 {
+				selectedIndex++
+				renderFileList()
+				renderDiffContent()
+			}
+
+			return nil
+		}
+		switch event.Rune() {
+		case 'k':
+
+			if selectedIndex > 0 {
+				selectedIndex--
+				renderFileList()
+				renderDiffContent()
+			}
+
+			return nil
+
+		case 'j':
+
+			if selectedIndex < len(diffs)-1 {
+				selectedIndex++
+				renderFileList()
+				renderDiffContent()
+			}
+
+			return nil
+		}
+
+		return event
+	})
+
+	diffContentView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		row, col := diffContentView.GetScrollOffset()
+
+		switch event.Key() {
+		case tcell.KeyUp:
+
+			if row > 0 {
+				diffContentView.ScrollTo(row-1, col)
+			}
+
+			return nil
+
+		case tcell.KeyDown:
+			diffContentView.ScrollTo(row+1, col)
+
+			return nil
+		}
+		switch event.Rune() {
+		case 'j':
+			diffContentView.ScrollTo(row+1, col)
+
+			return nil
+
+		case 'k':
+
+			if row > 0 {
+				diffContentView.ScrollTo(row-1, col)
+			}
+
+			return nil
+
+		case 'g':
+			diffContentView.ScrollToBeginning()
+
+			return nil
+
+		case 'G':
+			diffContentView.ScrollToEnd()
+
+			return nil
+		}
+
+		return event
+	})
+
+	container.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyTab:
+
+			if focusedPanel == 0 {
+				focusedPanel = 1
+				a.app.SetFocus(diffContentView)
+				updateHintBar()
+			} else {
+				focusedPanel = 0
+				a.app.SetFocus(fileListView)
+				updateHintBar()
+			}
+
+			return nil
+		}
+
+		return event
+	})
+
+	if a.pages != nil {
+		a.pages.AddPage("diff", container, true, true)
+		a.app.SetFocus(fileListView)
+	}
+}
+
+func (a *App) closeDiffView() {
+	a.activeModal = ModalNone
+
+	if a.pages != nil {
+		a.pages.RemovePage("diff")
+		a.app.SetFocus(a.input)
+	}
+}
+
+func countDiffStats(patch string) (insertions, deletions int) {
+	for line := range strings.SplitSeq(patch, "\n") {
+		if len(line) == 0 {
+			continue
+		}
+		if strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") ||
+			strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "diff ") ||
+			strings.HasPrefix(line, "index ") {
+			continue
+		}
+
+		switch line[0] {
+		case '+':
+			insertions++
+		case '-':
+			deletions++
+		}
+	}
+
+	return
+}

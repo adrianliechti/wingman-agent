@@ -10,7 +10,7 @@ import {
 	Plus,
 	X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
 	Group,
 	Panel,
@@ -39,6 +39,10 @@ interface CenterTab {
 }
 
 type RightTab = "changes" | "files";
+interface SelectedSession {
+	id: string;
+	skipModeLoad: boolean;
+}
 
 const EMPTY_ENTRIES: never[] = [];
 const EMPTY_USAGE = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
@@ -49,15 +53,23 @@ export default function App() {
 		sessions,
 		sendChat,
 		cancel,
+		respondPrompt,
 		removeSession,
+		clearSessions,
 		subscribe,
 	} = useWebSocket();
 	const capabilities = useCapabilities(subscribe);
 	const showChanges = capabilities?.diffs ?? false;
-	const inGitRepo = capabilities?.git ?? false;
 	const showProblems = capabilities?.lsp ?? false;
-	const [sessionId, setSessionId] = useState("");
-	const [rightTab, setRightTab] = useState<RightTab>("changes");
+	const firstSessionId = Object.keys(sessions)[0] ?? "";
+	const [selectedSession, setSelectedSession] = useState<SelectedSession>({
+		id: "",
+		skipModeLoad: false,
+	});
+	const sessionId = selectedSession.id || firstSessionId;
+	const [requestedRightTab, setRequestedRightTab] =
+		useState<RightTab>("changes");
+	const rightTab = showChanges ? requestedRightTab : "files";
 	const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 	const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
 	const leftPanelRef = usePanelRef();
@@ -70,25 +82,38 @@ export default function App() {
 	const entries = activeSession?.entries ?? EMPTY_ENTRIES;
 	const phase = activeSession?.phase ?? "idle";
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
+	const prompt = activeSession?.prompt ?? null;
 
-	// On first WS connect the server announces every in-memory session
-	// (handler_chat.handleWebSocket). Latch onto whichever shows up first
-	// so the user has an active session selected without a manual click.
+	const handlePromptReply = useCallback(
+		(reply: { text?: string; approved?: boolean }) => {
+			if (sessionId && prompt) {
+				respondPrompt(sessionId, prompt.id, reply);
+			}
+		},
+		[respondPrompt, sessionId, prompt],
+	);
+
+	// On agent swap the prior backend's sessions are stale; drop the
+	// cache and immediately allocate a fresh session against the new
+	// agent so the chat tab is ready (and the ModelPicker has a
+	// populated catalog for ACP backends).
 	useEffect(() => {
-		if (sessionId) return;
-		const first = Object.keys(sessions)[0];
-		if (first) setSessionId(first);
-	}, [sessionId, sessions]);
-
-	const [prevInGit, setPrevInGit] = useState<boolean | null>(null);
-	if (capabilities && prevInGit !== inGitRepo) {
-		setPrevInGit(inGitRepo);
-		if (prevInGit === null) {
-			if (!inGitRepo) setRightTab("files");
-		} else {
-			setRightTab(inGitRepo ? "changes" : "files");
-		}
-	}
+		if (!subscribe) return;
+		return subscribe(async (msg) => {
+			if (msg.type !== "agent_changed") return;
+			setSelectedSession({ id: "", skipModeLoad: false });
+			clearSessions();
+			try {
+				const res = await fetch("/api/sessions", { method: "POST" });
+				if (!res.ok) return;
+				const data = (await res.json()) as { id?: string };
+				if (!data.id) return;
+				setSelectedSession({ id: data.id, skipModeLoad: true });
+			} catch {
+				// leave empty; user can click +
+			}
+		});
+	}, [subscribe, clearSessions]);
 
 	const [tabs, setTabs] = useState<CenterTab[]>([
 		{ id: "chat", type: "chat", label: "Session" },
@@ -108,7 +133,13 @@ export default function App() {
 				return;
 			}
 			const label = path.split("/").pop() || path;
-			const tab: CenterTab = { id: `file:${path}`, type: "file", label, path, line };
+			const tab: CenterTab = {
+				id: `file:${path}`,
+				type: "file",
+				label,
+				path,
+				line,
+			};
 			setTabs((prev) => [...prev, tab]);
 			setActiveTabId(tab.id);
 		},
@@ -152,66 +183,68 @@ export default function App() {
 		});
 	}, []);
 
-	const handleNewSession = useCallback(() => {
-		// Mint the new session id locally and switch to it. Using a UUID (vs.
-		// clearing sessionId) keeps the auto-pick effect inert — otherwise
-		// it would land on the first existing session and the chat would
-		// re-fill with old content. The server learns about this id when
-		// the user actually sends a message (lazy-create in handleSend).
-		setSessionId(crypto.randomUUID());
-		setActiveTabId("chat");
+	const handleNewSession = useCallback(async () => {
+		try {
+			const res = await fetch("/api/sessions", { method: "POST" });
+			if (!res.ok) return;
+			const data = (await res.json()) as { id?: string };
+			if (!data.id) return;
+			setSelectedSession({ id: data.id, skipModeLoad: true });
+			setActiveTabId("chat");
+		} catch {
+			// leave session alone
+		}
 	}, []);
 
 	const handleSessionDeleted = useCallback(
 		(id: string) => {
 			removeSession(id);
 			if (id === sessionId) {
-				// No auto-bootstrap on the server — clear the active session
-				// and let the user pick from the sidebar or type to create.
-				setSessionId("");
+				setSelectedSession({ id: "", skipModeLoad: false });
 			}
 		},
 		[removeSession, sessionId],
 	);
 
+	const [loadingSession, setLoadingSession] = useState(false);
+
 	const handleSessionSelect = useCallback(
 		async (id: string) => {
-			// Already in memory? just switch — its state is already up to date.
 			if (sessions[id]) {
-				setSessionId(id);
+				setSelectedSession({ id, skipModeLoad: false });
 				setActiveTabId("chat");
 				return;
 			}
-			// Disk-only session: ask server to load it. Server registers it,
-			// then pushes a session_state event via WS to populate the slot.
-			const res = await fetch(`/api/sessions/${id}/load`, { method: "POST" });
-			if (!res.ok) return;
-			setSessionId(id);
+			setSelectedSession({ id, skipModeLoad: false });
 			setActiveTabId("chat");
+			setLoadingSession(true);
+			try {
+				await fetch(`/api/sessions/${id}/load`, { method: "POST" });
+			} finally {
+				setLoadingSession(false);
+			}
 		},
 		[sessions],
 	);
 
-	// Pin a sessionId we just minted locally — used to skip the mode GET that
-	// would otherwise race with our optimistic POST and overwrite the user's
-	// selection with the server's default before the POST commits.
-	const justMintedSidRef = useRef("");
-
-	const ensureSessionId = useCallback(() => {
+	const ensureSessionId = useCallback(async (): Promise<string> => {
 		if (sessionId) return sessionId;
-		const sid = crypto.randomUUID();
-		justMintedSidRef.current = sid;
-		setSessionId(sid);
-		return sid;
+		const res = await fetch("/api/sessions", { method: "POST" });
+		if (!res.ok) throw new Error("failed to allocate session");
+		const data = (await res.json()) as { id?: string };
+		if (!data.id) throw new Error("session id missing in response");
+		setSelectedSession({ id: data.id, skipModeLoad: true });
+		return data.id;
 	}, [sessionId]);
 
 	const handleSend = useCallback(
-		(text: string, files?: string[], images?: string[]) => {
-			// Lazy-create: when there's no active session, mint a fresh UUID
-			// and use it for the send. The server adopts unknown ids on first
-			// MsgSend, so this materializes the conversation on the round-trip.
-			const sid = ensureSessionId();
-			sendChat(sid, text, files, images);
+		async (text: string, files?: string[], images?: string[]) => {
+			try {
+				const sid = await ensureSessionId();
+				sendChat(sid, text, files, images);
+			} catch {
+				// allocation failed; user can retry
+			}
 		},
 		[sendChat, ensureSessionId],
 	);
@@ -222,29 +255,28 @@ export default function App() {
 	// just mint. For just-minted ids, the server has no state yet and our
 	// optimistic local mode is the truth — fetching would clobber it.
 	useEffect(() => {
-		if (!sessionId) return;
-		if (justMintedSidRef.current === sessionId) {
-			justMintedSidRef.current = "";
-			return;
-		}
+		if (!sessionId || selectedSession.skipModeLoad) return;
 		fetch(`/api/mode?session=${encodeURIComponent(sessionId)}`)
 			.then((r) => r.json())
 			.then((data) => setMode(data.mode === "plan" ? "plan" : "agent"))
 			.catch(() => {});
-	}, [sessionId]);
+	}, [sessionId, selectedSession.skipModeLoad]);
 
 	const selectMode = useCallback(
-		(next: "agent" | "plan") => {
-			const sid = ensureSessionId();
-			setMode(next);
-			fetch(`/api/mode?session=${encodeURIComponent(sid)}`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ mode: next }),
-			})
-				.then((r) => r.json())
-				.then((data) => setMode(data.mode === "plan" ? "plan" : "agent"))
-				.catch(() => {});
+		async (next: "agent" | "plan") => {
+			try {
+				const sid = await ensureSessionId();
+				setMode(next);
+				const r = await fetch(`/api/mode?session=${encodeURIComponent(sid)}`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ mode: next }),
+				});
+				const data = await r.json();
+				setMode(data.mode === "plan" ? "plan" : "agent");
+			} catch {
+				// keep optimistic mode
+			}
 		},
 		[ensureSessionId],
 	);
@@ -321,7 +353,11 @@ export default function App() {
 				<ResizeHandle />
 
 				{/* Center Panel */}
-				<Panel id="center" minSize="320px" className="flex flex-col overflow-hidden min-w-0 bg-bg">
+				<Panel
+					id="center"
+					minSize="320px"
+					className="flex flex-col overflow-hidden min-w-0 bg-bg"
+				>
 					<div className="h-10 flex items-stretch bg-bg shrink-0 overflow-x-auto">
 						<button
 							type="button"
@@ -408,7 +444,9 @@ export default function App() {
 								{"↑"}
 								{formatTokens(usage.inputTokens)}
 								{usage.cachedTokens > 0 && (
-									<span className="ml-1">({formatTokens(usage.cachedTokens)} cached)</span>
+									<span className="ml-1">
+										({formatTokens(usage.cachedTokens)} cached)
+									</span>
 								)}
 								<span className="ml-2">
 									{"↓"}
@@ -442,6 +480,10 @@ export default function App() {
 								onSelectMode={selectMode}
 								onSend={handleSend}
 								onCancel={handleCancel}
+								loading={loadingSession}
+								subscribe={subscribe}
+								prompt={prompt}
+								onPromptReply={handlePromptReply}
 							/>
 						) : activeTab.type === "diff" && activeTab.path ? (
 							<DiffTab
@@ -481,14 +523,14 @@ export default function App() {
 							{showChanges && (
 								<RightTabButton
 									active={rightTab === "changes"}
-									onClick={() => setRightTab("changes")}
+									onClick={() => setRequestedRightTab("changes")}
 								>
 									Changes
 								</RightTabButton>
 							)}
 							<RightTabButton
 								active={rightTab === "files"}
-								onClick={() => setRightTab("files")}
+								onClick={() => setRequestedRightTab("files")}
 							>
 								Files
 							</RightTabButton>
@@ -508,7 +550,10 @@ export default function App() {
 									</div>
 									<div className="h-px bg-border-subtle shrink-0" />
 									<div className="flex-[1] min-h-0 overflow-hidden">
-										<CheckpointsPanel sessionId={sessionId} subscribe={subscribe} />
+										<CheckpointsPanel
+											sessionId={sessionId}
+											subscribe={subscribe}
+										/>
 									</div>
 								</div>
 							) : (

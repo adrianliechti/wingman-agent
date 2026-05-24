@@ -48,7 +48,7 @@ func lspTool(manager *lsp.Manager) tool.Tool {
 					},
 					"description": "The LSP operation to perform.",
 				},
-				"path": map[string]any{
+				"file_path": map[string]any{
 					"type":        "string",
 					"description": "File path. Required for file and position operations; optional for diagnostics; ignored for workspaceDiagnostics/workspaceSymbol.",
 				},
@@ -85,7 +85,7 @@ func lspTool(manager *lsp.Manager) tool.Tool {
 
 			switch operation {
 			case "diagnostics":
-				path, _ := args["path"].(string)
+				path, _ := args["file_path"].(string)
 				if strings.TrimSpace(path) == "" {
 					return manager.WorkspaceDiagnostics(ctx)
 				}
@@ -107,7 +107,7 @@ func lspTool(manager *lsp.Manager) tool.Tool {
 				query, _ := args["query"].(string)
 				return manager.WorkspaceSymbols(ctx, query)
 			case "documentSymbol":
-				path, err := requiredFileArg(manager.WorkingDir(), args, "path")
+				path, err := requiredFileArg(manager.WorkingDir(), args, "file_path")
 				if err != nil {
 					return "", err
 				}
@@ -215,7 +215,7 @@ func expandHome(path string) string {
 }
 
 func parsePositionArgs(workingDir string, args map[string]any) (string, int, int, error) {
-	path, err := requiredFileArg(workingDir, args, "path")
+	path, err := requiredFileArg(workingDir, args, "file_path")
 	if err != nil {
 		return "", 0, 0, err
 	}

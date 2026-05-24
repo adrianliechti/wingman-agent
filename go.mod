@@ -5,15 +5,15 @@ go 1.25.0
 require (
 	github.com/alecthomas/chroma/v2 v2.24.1
 	github.com/bmatcuk/doublestar/v4 v4.10.0
-	github.com/coder/acp-go-sdk v0.12.2
+	github.com/coder/acp-go-sdk v0.13.0
 	github.com/coder/websocket v1.8.14
 	github.com/gdamore/tcell/v2 v2.13.9
 	github.com/go-git/go-billy/v5 v5.9.0
-	github.com/go-git/go-git/v5 v5.19.0
+	github.com/go-git/go-git/v5 v5.19.1
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-runewidth v0.0.23
-	github.com/modelcontextprotocol/go-sdk v1.6.0
-	github.com/openai/openai-go/v3 v3.35.0
+	github.com/modelcontextprotocol/go-sdk v1.6.1
+	github.com/openai/openai-go/v3 v3.37.0
 	github.com/rivo/tview v0.42.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/rs/cors v1.11.1
@@ -52,10 +52,10 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	golang.org/x/crypto v0.51.0 // indirect
-	golang.org/x/net v0.54.0 // indirect
+	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )

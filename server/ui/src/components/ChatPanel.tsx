@@ -2,15 +2,22 @@ import {
 	ArrowUp,
 	ChevronDown,
 	ChevronRight,
+	Loader2,
 	LoaderCircle,
 	Paperclip,
 	Plus,
 	Square,
 	X,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+} from "react";
 import { useColorScheme } from "../hooks/useColorScheme";
-import type { ChatEntry } from "../hooks/useWebSocket";
+import type { ChatEntry, PendingPrompt } from "../hooks/useWebSocket";
 import { sampleSpinnerVerb } from "../spinnerVerbs";
 import type { Phase } from "../types/protocol";
 import { FilePicker } from "./FilePicker";
@@ -26,6 +33,17 @@ interface Props {
 	onSelectMode: (next: "agent" | "plan") => void;
 	onSend: (text: string, files?: string[], images?: string[]) => void;
 	onCancel: () => void;
+	// loading overlays the transcript area with a spinner during slow
+	// session loads (clicking a session in the sidebar).
+	loading?: boolean;
+	// subscribe lets the ModelPicker react to agent_changed broadcasts.
+	subscribe?: (
+		handler: (msg: import("../types/protocol").ServerMessage) => void,
+	) => () => void;
+	// Outstanding agent prompt for this session, if any. While present
+	// the input area swaps to a prompt reply control.
+	prompt?: PendingPrompt | null;
+	onPromptReply?: (reply: { text?: string; approved?: boolean }) => void;
 }
 
 interface PendingImage {
@@ -85,7 +103,18 @@ async function processImage(file: File): Promise<string> {
 // py-4 padding so the first message and subsequent submissions look the same.
 const PIN_TOP_GAP = 16;
 
-export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel }: Props) {
+export function ChatPanel({
+	entries,
+	phase,
+	mode,
+	onSelectMode,
+	onSend,
+	onCancel,
+	loading,
+	subscribe,
+	prompt,
+	onPromptReply,
+}: Props) {
 	const scheme = useColorScheme();
 	const [input, setInput] = useState("");
 	const [files, setFiles] = useState<string[]>([]);
@@ -280,8 +309,7 @@ export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel
 		// streaming gets yanked up when the spacer collapses.
 		if (phase === "idle") {
 			pinRef.current = null;
-			const belowUser =
-				container.scrollHeight - pin.top - spacer.offsetHeight;
+			const belowUser = container.scrollHeight - pin.top - spacer.offsetHeight;
 			const minForPin = Math.max(0, container.clientHeight - belowUser);
 			const minForUser = Math.max(
 				0,
@@ -367,7 +395,14 @@ export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
 			// Let SkillPicker handle Enter / Tab / arrows / Escape while it's open.
-			if (showSkills && (e.key === "Enter" || e.key === "Tab" || e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Escape")) {
+			if (
+				showSkills &&
+				(e.key === "Enter" ||
+					e.key === "Tab" ||
+					e.key === "ArrowDown" ||
+					e.key === "ArrowUp" ||
+					e.key === "Escape")
+			) {
 				return;
 			}
 			if (e.key === "Enter" && !e.shiftKey) {
@@ -457,7 +492,11 @@ export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel
 				className="h-full overflow-y-auto pb-24 [overflow-anchor:none]"
 				ref={containerRef}
 			>
-				{entries.length === 0 && phase === "idle" ? (
+				{loading ? (
+					<div className="h-full flex items-center justify-center">
+						<Loader2 size={16} className="text-fg-dim animate-spin" />
+					</div>
+				) : entries.length === 0 && phase === "idle" ? (
 					<div className="h-full flex items-center justify-center">
 						<div className="flex flex-col items-center text-center max-w-sm">
 							<img
@@ -507,6 +546,9 @@ export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel
 			<div className="absolute bottom-0 left-0 right-0">
 				<div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none" />
 				<div className="bg-bg px-4 pb-3">
+					{prompt && onPromptReply ? (
+						<PromptBar prompt={prompt} onReply={onPromptReply} />
+					) : (
 					<div className="relative rounded-lg border border-border-subtle bg-bg-surface/60 hover:border-border focus-within:border-border transition-colors">
 						{showSkills && (
 							<SkillPicker
@@ -614,73 +656,162 @@ export function ChatPanel({ entries, phase, mode, onSelectMode, onSend, onCancel
 									}}
 								/>
 								<ModePicker mode={mode} onSelect={onSelectMode} />
-								<ModelPicker />
+								<ModelPicker subscribe={subscribe} />
 							</div>
 
 							<div className="flex items-center gap-0">
-							<button
-								type="button"
-								className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-								onClick={() => imageInputRef.current?.click()}
-								title="Attach image"
-							>
-								<Paperclip size={14} />
-							</button>
-							{(() => {
-								// Button modes: if the input has content, the primary
-								// action is Send — which queues onto an in-flight turn
-								// when one is running. Otherwise, while a turn is
-								// active, the button stops it. Idle + empty = disabled.
-								const hasInput =
-									input.trim() !== "" || images.length > 0;
-								const mode: "send" | "stop" | "disabled" = hasInput
-									? "send"
-									: isActive
-										? "stop"
-										: "disabled";
-								return (
-									<button
-										type="button"
-										className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
-											mode === "disabled"
-												? "text-fg-dim opacity-40 cursor-not-allowed"
-												: "text-fg-muted hover:text-fg hover:bg-bg-hover"
-										}`}
-										onClick={
-											mode === "stop" ? onCancel : handleSubmit
-										}
-										disabled={mode === "disabled"}
-										title={
-											mode === "stop"
-												? "Stop (Esc)"
-												: mode === "send" && isActive
-													? "Queue (Enter)"
-													: "Send (Enter)"
-										}
-									>
-										{mode === "stop" ? (
-											<>
-												<LoaderCircle
-													size={14}
-													className="animate-spin group-hover:hidden"
-												/>
-												<Square
-													size={10}
-													fill="currentColor"
-													className="hidden group-hover:block"
-												/>
-											</>
-										) : (
-											<ArrowUp size={14} />
-										)}
-									</button>
-								);
-							})()}
+								<button
+									type="button"
+									className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
+									onClick={() => imageInputRef.current?.click()}
+									title="Attach image"
+								>
+									<Paperclip size={14} />
+								</button>
+								{(() => {
+									// Button modes: if the input has content, the primary
+									// action is Send — which queues onto an in-flight turn
+									// when one is running. Otherwise, while a turn is
+									// active, the button stops it. Idle + empty = disabled.
+									const hasInput = input.trim() !== "" || images.length > 0;
+									const mode: "send" | "stop" | "disabled" = hasInput
+										? "send"
+										: isActive
+											? "stop"
+											: "disabled";
+									return (
+										<button
+											type="button"
+											className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
+												mode === "disabled"
+													? "text-fg-dim opacity-40 cursor-not-allowed"
+													: "text-fg-muted hover:text-fg hover:bg-bg-hover"
+											}`}
+											onClick={mode === "stop" ? onCancel : handleSubmit}
+											disabled={mode === "disabled"}
+											title={
+												mode === "stop"
+													? "Stop (Esc)"
+													: mode === "send" && isActive
+														? "Queue (Enter)"
+														: "Send (Enter)"
+											}
+										>
+											{mode === "stop" ? (
+												<>
+													<LoaderCircle
+														size={14}
+														className="animate-spin group-hover:hidden"
+													/>
+													<Square
+														size={10}
+														fill="currentColor"
+														className="hidden group-hover:block"
+													/>
+												</>
+											) : (
+												<ArrowUp size={14} />
+											)}
+										</button>
+									);
+								})()}
 							</div>
 						</div>
 					</div>
+					)}
 				</div>
 			</div>
+		</div>
+	);
+}
+
+function PromptBar({
+	prompt,
+	onReply,
+}: {
+	prompt: PendingPrompt;
+	onReply: (reply: { text?: string; approved?: boolean }) => void;
+}) {
+	const [text, setText] = useState("");
+	const inputRef = useRef<HTMLTextAreaElement>(null);
+
+	useEffect(() => {
+		inputRef.current?.focus();
+	}, []);
+
+	const submitAsk = useCallback(() => {
+		const value = text.trim();
+		if (!value) return;
+		onReply({ text: value });
+	}, [text, onReply]);
+
+	const handleKeyDown = useCallback(
+		(e: React.KeyboardEvent) => {
+			if (prompt.kind !== "ask") return;
+			if (e.key === "Enter" && !e.shiftKey) {
+				e.preventDefault();
+				submitAsk();
+			}
+		},
+		[prompt.kind, submitAsk],
+	);
+
+	return (
+		<div className="relative rounded-lg border border-warning bg-bg-surface/60">
+			<div className="px-3 pt-2 pb-1 flex items-start gap-2">
+				<span className="text-warning font-mono text-[12px] leading-[1.7] shrink-0">
+					?
+				</span>
+				<span className="text-fg font-mono text-[12px] leading-[1.7] whitespace-pre-wrap break-words">
+					{prompt.message}
+				</span>
+			</div>
+			{prompt.kind === "ask" ? (
+				<>
+					<div className="px-3">
+						<textarea
+							ref={inputRef}
+							// biome-ignore lint/a11y/noAutofocus: prompt is the primary control while open
+							autoFocus
+							className="w-full bg-transparent text-fg text-[12px] font-mono resize-none outline-none leading-[1.7] placeholder:text-fg-dim"
+							style={{ fieldSizing: "content" } as React.CSSProperties}
+							value={text}
+							onChange={(e) => setText(e.target.value)}
+							onKeyDown={handleKeyDown}
+							placeholder="Type your answer and press Enter…"
+							rows={1}
+						/>
+					</div>
+					<div className="flex items-center justify-end px-1.5 pb-1.5 pt-1">
+						<button
+							type="button"
+							className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+							onClick={submitAsk}
+							disabled={text.trim() === ""}
+							title="Submit (Enter)"
+						>
+							Send
+						</button>
+					</div>
+				</>
+			) : (
+				<div className="flex items-center justify-end gap-1 px-1.5 pb-1.5 pt-1">
+					<button
+						type="button"
+						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
+						onClick={() => onReply({ approved: false })}
+					>
+						Deny
+					</button>
+					<button
+						type="button"
+						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-bg bg-success hover:opacity-90 cursor-pointer transition-opacity"
+						onClick={() => onReply({ approved: true })}
+					>
+						Approve
+					</button>
+				</div>
+			)}
 		</div>
 	);
 }
@@ -694,7 +825,10 @@ function EntryView({
 }) {
 	if (entry.type === "error") {
 		return (
-			<div data-entry-id={entry.id} className="mb-4 border-l-2 border-danger pl-3">
+			<div
+				data-entry-id={entry.id}
+				className="mb-4 border-l-2 border-danger pl-3"
+			>
 				<div className="text-[13px] leading-relaxed text-danger break-words">
 					{entry.content}
 				</div>
@@ -717,10 +851,14 @@ function EntryView({
 				{isUser ? (
 					<>
 						{entry.content && (
-							<span className="whitespace-pre-wrap text-fg">{entry.content}</span>
+							<span className="whitespace-pre-wrap text-fg">
+								{entry.content}
+							</span>
 						)}
 						{entry.images && entry.images.length > 0 && (
-							<div className={`flex flex-wrap gap-1.5 ${entry.content ? "mt-2" : ""}`}>
+							<div
+								className={`flex flex-wrap gap-1.5 ${entry.content ? "mt-2" : ""}`}
+							>
 								{entry.images.map((src, i) => (
 									<a
 										key={`${entry.id}-img-${i}`}
@@ -858,8 +996,9 @@ function TurnView({
 						/>
 						{isActive &&
 							!(phase === "streaming" && turn.final?.type === "assistant") &&
-							turn.working[turn.working.length - 1]?.type !==
-								"reasoning" && <PhaseIndicator />}
+							turn.working[turn.working.length - 1]?.type !== "reasoning" && (
+								<PhaseIndicator />
+							)}
 					</>
 				) : (
 					<WorkingSummary
@@ -871,9 +1010,7 @@ function TurnView({
 				<EntryView
 					entry={turn.final}
 					isStreaming={
-						isActive &&
-						phase === "streaming" &&
-						turn.final.type === "assistant"
+						isActive && phase === "streaming" && turn.final.type === "assistant"
 					}
 				/>
 			)}
@@ -1025,16 +1162,9 @@ function ToolGroupView({
 	);
 }
 
-function ToolRow({
-	entry,
-	running,
-}: {
-	entry: ChatEntry;
-	running: boolean;
-}) {
+function ToolRow({ entry, running }: { entry: ChatEntry; running: boolean }) {
 	const [expanded, setExpanded] = useState(false);
-	const hint = entry.toolHint || extractHint(entry.toolArgs, entry.toolName);
-	const displayHint = hint ? truncate(hint, 80) : "";
+	const displayHint = entry.toolHint ? truncate(entry.toolHint, 80) : "";
 
 	return (
 		<div data-entry-id={entry.id}>
@@ -1080,7 +1210,10 @@ function ReasoningView({
 	if (!summary) return null;
 
 	return (
-		<div data-entry-id={entry.id} className="mb-4 border-l-2 border-purple pl-3">
+		<div
+			data-entry-id={entry.id}
+			className="mb-4 border-l-2 border-purple pl-3"
+		>
 			<div className="text-[11px] whitespace-pre-wrap break-words text-fg-dim font-mono leading-relaxed italic">
 				{summary}
 				{isStreaming && (
@@ -1089,47 +1222,6 @@ function ReasoningView({
 			</div>
 		</div>
 	);
-}
-
-// Mirror of pkg/tui/format.go: ExtractToolHint. The server pre-computes Hint
-// using the Go helper, so this only runs as a fallback (e.g. when args are
-// available but Hint isn't). Keep the rules identical.
-const FS_TOOLS = new Set(["read", "write", "edit", "ls", "find", "grep"]);
-const WORKING_DIR_TOOLS = new Set(["ls", "find", "grep"]);
-
-function extractHint(argsJSON?: string, toolName?: string): string {
-	const wdFallback = toolName && WORKING_DIR_TOOLS.has(toolName) ? "/" : "";
-	if (!argsJSON) return wdFallback;
-	try {
-		const args = JSON.parse(argsJSON);
-		for (const key of [
-			"description",
-			"query",
-			"pattern",
-			"command",
-			"prompt",
-			"path",
-			"file",
-			"url",
-			"name",
-		]) {
-			const v = args[key];
-			if (typeof v !== "string" || !v) continue;
-			if ((key === "path" || key === "file") && toolName && FS_TOOLS.has(toolName)) {
-				return normalizeWorkspacePath(v);
-			}
-			return v;
-		}
-	} catch {
-		/* ignore */
-	}
-	return wdFallback;
-}
-
-function normalizeWorkspacePath(p: string): string {
-	if (p === "" || p === "." || p === "./") return "/";
-	if (p.startsWith("/") || p.startsWith("~")) return p;
-	return "/" + p;
 }
 
 function truncate(text: string, max: number): string {

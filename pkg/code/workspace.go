@@ -33,9 +33,27 @@ const memoryMaxBytes = 25 * 1024
 
 // UI is the elicitation hook a frontend provides for tool ask/confirm
 // prompts. Pass nil to NewAgent for safe defaults (Confirm → true, Ask → "").
+// The session id that triggered the prompt is on ctx via
+// [SessionIDFromContext] for UIs that route prompts per session.
 type UI interface {
 	Ask(ctx context.Context, message string) (string, error)
 	Confirm(ctx context.Context, message string) (bool, error)
+}
+
+type sessionCtxKey struct{}
+
+// WithSessionID stamps sid onto ctx so downstream tool calls can recover
+// it via [SessionIDFromContext]. The coder agent does this in Send so
+// elicitation UIs can route prompts back to the right session.
+func WithSessionID(ctx context.Context, sid string) context.Context {
+	return context.WithValue(ctx, sessionCtxKey{}, sid)
+}
+
+// SessionIDFromContext returns the session id set by [WithSessionID],
+// or "" when none is present.
+func SessionIDFromContext(ctx context.Context) string {
+	sid, _ := ctx.Value(sessionCtxKey{}).(string)
+	return sid
 }
 
 type Workspace struct {
@@ -351,9 +369,11 @@ func splitFrontmatter(text string) (fm, body string, ok bool) {
 	return rest[:end], body, true
 }
 
-// managedTools snapshots MCP + LSP tools under w.mu so Agent.tools()
-// doesn't race WarmUp / InitMCP.
-func (w *Workspace) managedTools() (mcpTools, lspTools []tool.Tool) {
+// ManagedTools snapshots MCP + LSP tools under the workspace mutex so a
+// concurrent WarmUp / InitMCP can't race the per-turn tool() callback.
+// Exported for use by the wingman sub-package, which builds each
+// session's tool set from baseTools + ManagedTools().
+func (w *Workspace) ManagedTools() (mcpTools, lspTools []tool.Tool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	mcpTools = append([]tool.Tool(nil), w.mcpTools...)

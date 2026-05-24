@@ -10,8 +10,8 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/session"
-	"github.com/adrianliechti/wingman-agent/pkg/tui"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 )
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -23,27 +23,30 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow()
 
-	// Default is 32KB — too small for image data URLs. Allow up to 32MB so
-	// pasted/attached screenshots don't trip the read limit and tear the WS
-	// down (which the client then auto-reconnects, looking like a page reload).
+	// Default is 32KB — too small for image data URLs. Allow up to 32MB
+	// so pasted/attached screenshots don't trip the read limit and tear
+	// the WS down (which the client then auto-reconnects, looking like
+	// a page reload).
 	conn.SetReadLimit(32 << 20)
 
+	client := newWSClient(conn)
 	s.wsMu.Lock()
-	s.wsConns[conn] = struct{}{}
+	s.wsConns[conn] = client
 	s.wsMu.Unlock()
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		client.run()
+	}()
 
 	defer func() {
 		s.wsMu.Lock()
 		delete(s.wsConns, conn)
 		s.wsMu.Unlock()
+		client.close()
+		<-writerDone
 	}()
-
-	for _, sess := range s.allSessions() {
-		if len(sess.Agent.Messages) == 0 {
-			continue
-		}
-		sess.sendState()
-	}
 
 	// Request ctx is used only for the conn.Read loop. Agent turns must
 	// not inherit from r.Context() — see Server.ctx.
@@ -63,66 +66,65 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if msg.SessionID == "" {
 				continue
 			}
-			sess := s.getOrCreateSession(msg.SessionID)
-			go s.handleSend(sess, msg)
+			go s.handleSend(msg)
 
 		case MsgCancel:
-			if sess := s.getSession(msg.SessionID); sess != nil {
-				sess.cancel()
+			if msg.SessionID == "" {
+				continue
 			}
+			if a := s.activeAgent(); a != nil {
+				a.Cancel(msg.SessionID)
+			}
+
+		case MsgPromptResponse:
+			if msg.PromptID == "" {
+				continue
+			}
+			s.resolvePrompt(msg)
 		}
 	}
 }
 
 func (s *Server) buildInput(msg ClientMessage) []agent.Content {
 	var input []agent.Content
-
 	if msg.Text != "" {
 		text := s.resolveSkill(msg.Text)
 		input = append(input, agent.Content{Text: text})
 	}
-
 	for _, f := range msg.Files {
 		input = append(input, agent.Content{Text: fmt.Sprintf("[File: %s]", f)})
 	}
-
 	for _, img := range msg.Images {
 		if img == "" {
 			continue
 		}
 		input = append(input, agent.Content{File: &agent.File{Data: img}})
 	}
-
 	return input
 }
 
-func (s *Server) handleSend(sess *Session, msg ClientMessage) {
-	// Server-lifetime ctx, not the WS request ctx: a tab refresh or WS
-	// reconnect must not abort an in-flight agent turn.
+// handleSend runs one turn through the active agent and streams events
+// to all WS clients. Server-lifetime ctx (not the WS request ctx) so a
+// tab refresh or WS reconnect doesn't abort an in-flight agent turn.
+func (s *Server) handleSend(msg ClientMessage) {
+	a := s.activeAgent()
+	if a == nil {
+		return
+	}
+	sid := msg.SessionID
+	input := s.buildInput(msg)
+
 	streamCtx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	input := s.buildInput(msg)
-
-	// Send returns nil if a turn is already running — the input was queued
-	// onto it and will be drained at the next safe boundary inside the
-	// existing loop. Nothing else for this handler to do.
-	stream := sess.Agent.Send(streamCtx, input)
+	stream := a.Send(streamCtx, sid, input)
 	if stream == nil {
+		// Turn already in flight for this session — input was queued
+		// (wingman) or dropped (acp single-session contract).
 		return
 	}
 
-	sess.mu.Lock()
-	sess.streamCancel = cancel
-	sess.mu.Unlock()
-
-	defer func() {
-		sess.mu.Lock()
-		sess.streamCancel = nil
-		sess.mu.Unlock()
-	}()
-
-	sess.setPhase("thinking")
+	s.setSessionPhase(sid, "thinking")
 
 	for evMsg, err := range stream {
 		if err != nil {
@@ -130,24 +132,24 @@ func (s *Server) handleSend(sess *Session, msg ClientMessage) {
 			if errors.Is(err, context.Canceled) {
 				text = "Cancelled"
 			}
-			sess.send(Frame{Type: EvtError, Message: text})
+			s.sendSession(sid, Frame{Type: EvtError, Message: text})
 			break
 		}
 
 		for _, c := range evMsg.Content {
 			switch {
 			case c.ToolCall != nil:
-				sess.send(Frame{
+				s.sendSession(sid, Frame{
 					Type: EvtToolCall,
 					ID:   c.ToolCall.ID,
 					Name: c.ToolCall.Name,
 					Args: c.ToolCall.Args,
-					Hint: tui.ExtractToolHint(c.ToolCall.Args, c.ToolCall.Name),
+					Hint: tool.ExtractHint(c.ToolCall.Args, c.ToolCall.Name),
 				})
-				sess.setPhase("tool_running")
+				s.setSessionPhase(sid, "tool_running")
 
 			case c.ToolResult != nil:
-				sess.send(Frame{
+				s.sendSession(sid, Frame{
 					Type:    EvtToolResult,
 					ID:      c.ToolResult.ID,
 					Name:    c.ToolResult.Name,
@@ -155,21 +157,21 @@ func (s *Server) handleSend(sess *Session, msg ClientMessage) {
 				})
 
 			case c.Reasoning != nil && c.Reasoning.Summary != "":
-				sess.setPhase("thinking")
-				sess.send(Frame{
+				s.setSessionPhase(sid, "thinking")
+				s.sendSession(sid, Frame{
 					Type: EvtReasoningDelta,
 					ID:   c.Reasoning.ID,
 					Text: c.Reasoning.Summary,
 				})
 
 			case c.Text != "":
-				sess.setPhase("streaming")
-				sess.send(Frame{Type: EvtTextDelta, Text: c.Text})
+				s.setSessionPhase(sid, "streaming")
+				s.sendSession(sid, Frame{Type: EvtTextDelta, Text: c.Text})
 			}
 		}
 
-		u := sess.Agent.Usage
-		sess.send(Frame{
+		u := a.Usage(sid)
+		s.sendSession(sid, Frame{
 			Type:         EvtUsage,
 			InputTokens:  u.InputTokens,
 			CachedTokens: u.CachedTokens,
@@ -196,13 +198,13 @@ func (s *Server) handleSend(sess *Session, msg ClientMessage) {
 		s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 	}
 
-	state := agent.State{
-		Messages: sess.Agent.Messages,
-		Usage:    sess.Agent.Usage,
-	}
-	if err := session.Save(s.sessionsDir, sess.ID, state); err == nil && len(state.Messages) > 0 {
-		s.broadcast(Frame{Type: EvtSessionsChanged})
+	// Wingman persists per-session transcripts to disk; ACP servers
+	// store their own state. Only wingman needs an explicit save here.
+	if w, ok := a.(*coder.Agent); ok {
+		if err := w.Save(sid); err == nil && len(a.Messages(sid)) > 0 {
+			s.broadcast(Frame{Type: EvtSessionsChanged})
+		}
 	}
 
-	sess.setPhase("idle")
+	s.setSessionPhase(sid, "idle")
 }
