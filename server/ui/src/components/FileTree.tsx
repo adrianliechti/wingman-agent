@@ -256,7 +256,11 @@ export function FileTree({ onFileSelect, subscribe }: Props) {
 						style={{ paddingLeft: 12 + depth * 12 }}
 						onClick={() => {
 							if (isRenaming) return;
-							node.is_dir ? toggleDir(node.path) : onFileSelect(node.path);
+							if (node.is_dir) {
+								toggleDir(node.path);
+							} else {
+								onFileSelect(node.path);
+							}
 						}}
 						onContextMenu={(e) => {
 							e.preventDefault();

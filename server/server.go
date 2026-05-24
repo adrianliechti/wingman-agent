@@ -65,7 +65,7 @@ type Server struct {
 	phases   map[string]string
 
 	wsMu    sync.Mutex
-	wsConns map[*websocket.Conn]struct{}
+	wsConns map[*websocket.Conn]*wsClient
 
 	// pendingPrompts maps prompt id → server-side bookkeeping for an
 	// outstanding Ask/Confirm. The WS read loop drains
@@ -96,7 +96,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 		config:         cfg,
 		ctx:            ctx,
 		phases:         map[string]string{},
-		wsConns:        map[*websocket.Conn]struct{}{},
+		wsConns:        map[*websocket.Conn]*wsClient{},
 		pendingPrompts: map[string]pendingPrompt{},
 	}
 
@@ -119,8 +119,6 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 			w.AutoSelectModel(ctx)
 		}
 	}()
-
-	go s.pollFiles(ctx)
 
 	s.mux = http.NewServeMux()
 	s.registerRoutes(s.mux)
@@ -183,6 +181,9 @@ func (s *Server) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.ctx = ctx
+
+	// Started here (not in New) so SIGTERM via the handler below stops it.
+	go s.pollFiles(ctx)
 
 	port, err := system.FreePort(s.port)
 	if err != nil {
@@ -293,11 +294,66 @@ func (s *Server) broadcast(f Frame) {
 	s.send(f)
 }
 
-// wsWriteTimeout bounds a single WS write so one stuck client (e.g. a
-// backgrounded tab whose TCP buffer filled up) can't stall the broadcast
-// pipeline. Writes are also fanned out per-connection so a slow client
-// doesn't delay the others.
-const wsWriteTimeout = 5 * time.Second
+const (
+	wsWriteTimeout = 5 * time.Second
+	wsOutboxBuffer = 256
+)
+
+// wsClient serializes writes for a single connection so frame order is
+// preserved (phase → text_delta → usage → phase, tool_call → tool_result).
+type wsClient struct {
+	conn   *websocket.Conn
+	outbox chan []byte
+
+	mu     sync.Mutex
+	closed bool
+}
+
+func newWSClient(conn *websocket.Conn) *wsClient {
+	return &wsClient{
+		conn:   conn,
+		outbox: make(chan []byte, wsOutboxBuffer),
+	}
+}
+
+func (c *wsClient) enqueue(data []byte) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return false
+	}
+	select {
+	case c.outbox <- data:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *wsClient) close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	c.closed = true
+	close(c.outbox)
+}
+
+func (c *wsClient) run() {
+	for data := range c.outbox {
+		ctx, cancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+		err := c.conn.Write(ctx, websocket.MessageText, data)
+		cancel()
+		if err != nil {
+			_ = c.conn.CloseNow()
+			// Drain so enqueue stays non-blocking until close() runs.
+			for range c.outbox {
+			}
+			return
+		}
+	}
+}
 
 func (s *Server) send(f Frame) {
 	data, err := json.Marshal(f)
@@ -305,29 +361,22 @@ func (s *Server) send(f Frame) {
 		return
 	}
 	s.wsMu.Lock()
-	conns := make([]*websocket.Conn, 0, len(s.wsConns))
-	for c := range s.wsConns {
-		conns = append(conns, c)
+	clients := make([]*wsClient, 0, len(s.wsConns))
+	for _, c := range s.wsConns {
+		clients = append(clients, c)
 	}
 	s.wsMu.Unlock()
-	for _, c := range conns {
-		go func(c *websocket.Conn) {
-			ctx, cancel := context.WithTimeout(context.Background(), wsWriteTimeout)
-			defer cancel()
-			if err := c.Write(ctx, websocket.MessageText, data); err != nil {
-				// Slow / dead client: close so its read loop's defer
-				// cleans it out of wsConns. Subsequent broadcasts then
-				// skip it.
-				_ = c.CloseNow()
-			}
-		}(c)
+	for _, c := range clients {
+		if !c.enqueue(data) {
+			_ = c.conn.CloseNow()
+		}
 	}
 }
 
 // sendSessionState pushes the full transcript snapshot for a session,
-// used after LoadSession and on initial WS connect. Any prompts the
-// agent is still waiting on are replayed so a reload mid-elicit
-// doesn't leave the user staring at a frozen turn.
+// used after LoadSession. Any prompts the agent is still waiting on are
+// replayed so a load mid-elicit doesn't leave the user staring at a
+// frozen turn.
 func (s *Server) sendSessionState(sid string) {
 	a := s.activeAgent()
 	if a == nil {
@@ -618,11 +667,7 @@ func (s *Server) pollFiles(ctx context.Context) {
 				}
 				prevGit = gitNow
 			}
-			// Without Rewind we have no cheap "did the tree change?" signal,
-			// so we don't push FilesChanged at all on the poll tick —
-			// clients re-fetch via /api/files on user action. (Broadcasting
-			// every 2s here made the UI thrash and the panel re-fetch
-			// constantly for nothing.)
+			// No Rewind = no cheap change signal; the UI re-fetches on user action.
 			if ws.Rewind == nil {
 				continue
 			}

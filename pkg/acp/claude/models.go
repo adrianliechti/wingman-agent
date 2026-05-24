@@ -82,8 +82,7 @@ func buildConfigOptions(currentModelID, currentEffort string) []acp.SessionConfi
 		acp.SessionConfigSelectOptions{Ungrouped: &ungrouped},
 	)
 	desc := "Reasoning effort for the selected model"
-	other := acp.SessionConfigOptionCategoryOther("thoughtLevel")
-	cat := acp.SessionConfigOptionCategory{Other: &other}
+	cat := acp.SessionConfigOptionCategoryThoughtLevel
 	opt.Select.Id = "effort"
 	opt.Select.Name = "Effort"
 	opt.Select.Description = &desc

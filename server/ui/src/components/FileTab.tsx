@@ -218,14 +218,14 @@ function PreviewBody({ mime, src }: { mime: string; src: string }) {
 				className="w-full h-full"
 				aria-label="PDF preview"
 			>
-				<UnknownBinary src={src} />
+				<UnknownBinary />
 			</object>
 		);
 	}
-	return <UnknownBinary src={src} />;
+	return <UnknownBinary />;
 }
 
-function UnknownBinary({ src: _src }: { src: string }) {
+function UnknownBinary() {
 	return (
 		<div className="h-full w-full flex flex-col items-center justify-center gap-3 p-6 text-center">
 			<FileDigit size={36} className="text-fg-dim/60" strokeWidth={1.25} />

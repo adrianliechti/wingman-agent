@@ -47,12 +47,13 @@ func (s *Server) handleDiffs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
-	abs, ok := s.resolveWorkspacePath(r.URL.Query().Get("path"))
+	rel, ok := s.workspaceRel(r.URL.Query().Get("path"))
 	if !ok {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
-	relPath := r.URL.Query().Get("path")
+	// Diff.Path is slash-separated; rel may use OS separators.
+	canonical := filepath.ToSlash(rel)
 
 	diffs, err := s.workspace.Diffs()
 	if err != nil {
@@ -62,7 +63,7 @@ func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
 
 	var match *rewind.FileDiff
 	for i := range diffs {
-		if diffs[i].Path == relPath {
+		if diffs[i].Path == canonical {
 			match = &diffs[i]
 			break
 		}
@@ -72,18 +73,22 @@ func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	root := s.workspace.Root
+
 	switch match.Status {
 	case rewind.StatusAdded:
-		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+		if err := root.Remove(rel); err != nil && !os.IsNotExist(err) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	case rewind.StatusModified, rewind.StatusDeleted:
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		if dir := filepath.Dir(rel); dir != "." && dir != "" {
+			if err := root.MkdirAll(dir, 0o755); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
-		if err := os.WriteFile(abs, []byte(match.Original), 0o644); err != nil {
+		if err := root.WriteFile(rel, []byte(match.Original), 0o644); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

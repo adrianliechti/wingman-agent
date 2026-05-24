@@ -29,13 +29,23 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// a page reload).
 	conn.SetReadLimit(32 << 20)
 
+	client := newWSClient(conn)
 	s.wsMu.Lock()
-	s.wsConns[conn] = struct{}{}
+	s.wsConns[conn] = client
 	s.wsMu.Unlock()
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		client.run()
+	}()
+
 	defer func() {
 		s.wsMu.Lock()
 		delete(s.wsConns, conn)
 		s.wsMu.Unlock()
+		client.close()
+		<-writerDone
 	}()
 
 	// Request ctx is used only for the conn.Read loop. Agent turns must

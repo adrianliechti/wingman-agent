@@ -84,24 +84,34 @@ export function AgentPicker({ subscribe, onSwitchingChange }: Props) {
 
 	// Position the portal-rendered popup under the button. Recompute on
 	// scroll/resize so it stays anchored when the surrounding layout shifts.
-	useLayoutEffect(() => {
-		if (!open) {
-			setPopPos(null);
+	const placePopup = useCallback(() => {
+		const r = btnRef.current?.getBoundingClientRect();
+		if (!r) return;
+		setPopPos({ top: r.bottom + 4, left: r.left });
+	}, []);
+
+	const toggleOpen = useCallback(() => {
+		if (switching) return;
+		if (open) {
+			setOpen(false);
 			return;
 		}
+		placePopup();
+		setOpen(true);
+	}, [open, switching, placePopup]);
+
+	useLayoutEffect(() => {
+		if (!open) return;
 		const place = () => {
-			const r = btnRef.current?.getBoundingClientRect();
-			if (!r) return;
-			setPopPos({ top: r.bottom + 4, left: r.left });
+			placePopup();
 		};
-		place();
 		window.addEventListener("resize", place);
 		window.addEventListener("scroll", place, true);
 		return () => {
 			window.removeEventListener("resize", place);
 			window.removeEventListener("scroll", place, true);
 		};
-	}, [open]);
+	}, [open, placePopup]);
 
 	const select = useCallback(
 		async (id: string) => {
@@ -152,7 +162,7 @@ export function AgentPicker({ subscribe, onSwitchingChange }: Props) {
 			<button
 				ref={btnRef}
 				type="button"
-				onClick={() => !switching && setOpen((v) => !v)}
+				onClick={toggleOpen}
 				disabled={!!switching}
 				className="flex items-center gap-1 px-2 h-7 rounded text-[11.5px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors max-w-[180px] disabled:cursor-wait disabled:opacity-70"
 				title={`Agent: ${displayedName}`}

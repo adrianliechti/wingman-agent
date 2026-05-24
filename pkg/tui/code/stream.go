@@ -10,18 +10,40 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
-// Must be called from the UI goroutine (e.g. inside QueueUpdateDraw or an input handler).
-func (a *App) setPhase(phase AppPhase) {
-	a.phase = phase
+func (a *App) getPhase() AppPhase {
+	return AppPhase(a.phase.Load())
+}
 
-	if a.spinner != nil {
-		if phase == PhaseIdle {
-			a.spinner.Stop()
-			a.updateInputHint()
-		} else {
-			a.spinner.Start(phase)
-		}
+// UI goroutine only — Spinner mutates tview state.
+func (a *App) applySpinnerForPhase(phase AppPhase) {
+	if a.spinner == nil {
+		return
 	}
+	if phase == PhaseIdle {
+		a.spinner.Stop()
+		a.updateInputHint()
+	} else {
+		a.spinner.Start(phase)
+	}
+}
+
+// UI goroutine only.
+func (a *App) setPhase(phase AppPhase) {
+	a.phase.Store(int32(phase))
+	a.applySpinnerForPhase(phase)
+}
+
+// queuePhase stores the phase synchronously (visible to cancel/command
+// guards immediately) and queues the spinner update. The closure
+// re-reads the phase so a later change supersedes a stale spinner update.
+func (a *App) queuePhase(phase AppPhase) {
+	a.phase.Store(int32(phase))
+	a.app.QueueUpdateDraw(func() {
+		if a.getPhase() != phase {
+			return
+		}
+		a.applySpinnerForPhase(phase)
+	})
 }
 
 // Messages is captured before the closure to avoid a race with
@@ -38,10 +60,20 @@ func (a *App) render() {
 }
 
 func (a *App) clearStreamingState() {
+	a.streamStateMu.Lock()
 	a.streamingText = ""
 	a.streamingReasoning = ""
 	a.currentToolName = ""
 	a.currentToolHint = ""
+	a.streamStateMu.Unlock()
+}
+
+// snapshotStreamState returns a consistent copy of the four streaming
+// display fields for the UI goroutine to render against.
+func (a *App) snapshotStreamState() (toolName, toolHint, text, reasoning string) {
+	a.streamStateMu.Lock()
+	defer a.streamStateMu.Unlock()
+	return a.currentToolName, a.currentToolHint, a.streamingText, a.streamingReasoning
 }
 
 func (a *App) streamResponse(input []agent.Content) {
@@ -72,7 +104,7 @@ func (a *App) streamResponse(input []agent.Content) {
 	defer func() {
 		if r := recover(); r != nil {
 			a.clearStreamingState()
-			a.setPhase(PhaseIdle)
+			a.queuePhase(PhaseIdle)
 			a.app.QueueUpdateDraw(func() {
 				fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Internal error: %v", r), t.Red))
 				a.updateStatusBar()
@@ -83,7 +115,7 @@ func (a *App) streamResponse(input []agent.Content) {
 	var reasoningID string
 	var streamErr error
 
-	a.setPhase(PhaseThinking)
+	a.queuePhase(PhaseThinking)
 
 	for msg, err := range stream {
 		if err != nil {
@@ -94,54 +126,62 @@ func (a *App) streamResponse(input []agent.Content) {
 		for _, c := range msg.Content {
 			switch {
 			case c.ToolCall != nil:
+				a.streamStateMu.Lock()
 				a.currentToolName = c.ToolCall.Name
 				a.currentToolHint = tool.ExtractHint(c.ToolCall.Args, c.ToolCall.Name)
-				a.setPhase(PhaseToolRunning)
 				a.streamingText = ""
 				a.streamingReasoning = ""
+				a.streamStateMu.Unlock()
 				reasoningID = ""
+				a.queuePhase(PhaseToolRunning)
 				a.render()
 
 			case c.ToolResult != nil:
+				a.streamStateMu.Lock()
 				a.currentToolName = ""
 				a.currentToolHint = ""
 				a.streamingText = ""
+				a.streamStateMu.Unlock()
 				// Skip render: rapid tool call/result pairs would flash empty state.
 
 			case c.Reasoning != nil && c.Reasoning.Summary != "":
-				if a.phase != PhaseThinking {
-					a.setPhase(PhaseThinking)
+				if a.getPhase() != PhaseThinking {
+					a.queuePhase(PhaseThinking)
 				}
+				a.streamStateMu.Lock()
 				// New reasoning item id: drop the prior in-progress block — it'll
 				// reappear from agent.Messages once the request completes.
 				if reasoningID != "" && c.Reasoning.ID != reasoningID {
 					a.streamingReasoning = ""
 				}
-				reasoningID = c.Reasoning.ID
 				a.streamingReasoning += c.Reasoning.Summary
+				a.streamStateMu.Unlock()
+				reasoningID = c.Reasoning.ID
 				a.render()
 
 			case c.Text != "":
-				if a.phase != PhaseStreaming {
-					a.setPhase(PhaseStreaming)
+				if a.getPhase() != PhaseStreaming {
+					a.queuePhase(PhaseStreaming)
 				}
+				a.streamStateMu.Lock()
 				a.streamingReasoning = ""
-				reasoningID = ""
 				a.streamingText += c.Text
+				a.streamStateMu.Unlock()
+				reasoningID = ""
 				a.render()
 			}
 		}
 
 		usage := a.agent.Usage(a.sessionID)
-		a.inputTokens = usage.InputTokens
-		a.cachedTokens = usage.CachedTokens
-		a.outputTokens = usage.OutputTokens
 		a.app.QueueUpdateDraw(func() {
+			a.inputTokens = usage.InputTokens
+			a.cachedTokens = usage.CachedTokens
+			a.outputTokens = usage.OutputTokens
 			a.updateStatusBar()
 		})
 	}
 
-	a.setPhase(PhaseIdle)
+	a.queuePhase(PhaseIdle)
 
 	a.app.QueueUpdateDraw(func() {
 		if streamErr != nil {

@@ -411,10 +411,12 @@ export function useWebSocket() {
 		handleMessageRef.current = handleMessage;
 	});
 
-	const send = useCallback((msg: ClientMessage) => {
-		if (wsRef.current?.readyState === WebSocket.OPEN) {
-			wsRef.current.send(JSON.stringify(msg));
+	const send = useCallback((msg: ClientMessage): boolean => {
+		if (wsRef.current?.readyState !== WebSocket.OPEN) {
+			return false;
 		}
+		wsRef.current.send(JSON.stringify(msg));
+		return true;
 	}, []);
 
 	const sendChat = useCallback(
@@ -446,16 +448,17 @@ export function useWebSocket() {
 			promptId: string,
 			reply: { text?: string; approved?: boolean },
 		) => {
-			updateSession(sessionId, (sess) =>
-				sess.prompt?.id === promptId ? { ...sess, prompt: null } : sess,
-			);
-			send({
+			const sent = send({
 				type: "prompt_response",
 				session: sessionId,
 				prompt_id: promptId,
 				text: reply.text,
 				approved: reply.approved,
 			});
+			if (!sent) return;
+			updateSession(sessionId, (sess) =>
+				sess.prompt?.id === promptId ? { ...sess, prompt: null } : sess,
+			);
 		},
 		[send, updateSession],
 	);
@@ -463,7 +466,8 @@ export function useWebSocket() {
 	const removeSession = useCallback((sessionId: string) => {
 		setSessions((prev) => {
 			if (!(sessionId in prev)) return prev;
-			const { [sessionId]: _gone, ...rest } = prev;
+			const rest = { ...prev };
+			delete rest[sessionId];
 			return rest;
 		});
 		delete streamRefs.current[sessionId];

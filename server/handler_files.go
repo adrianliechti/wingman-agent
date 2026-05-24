@@ -13,9 +13,6 @@ import (
 	"strings"
 )
 
-// excludedDirs is the set of directory names that the file browser and
-// the search endpoint both skip (they create huge listings the user
-// never wants in the picker).
 var excludedDirs = map[string]bool{
 	"node_modules": true,
 	"__pycache__":  true,
@@ -78,16 +75,12 @@ var extToLanguage = map[string]string{
 }
 
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
-	dirPath := r.URL.Query().Get("path")
-	if dirPath == "" {
-		dirPath = "."
-	}
-
-	dirPath = path.Clean(dirPath)
-	if strings.HasPrefix(dirPath, "..") {
+	dirRel, ok := s.workspaceDirRel(r.URL.Query().Get("path"))
+	if !ok {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
+	dirPath := filepath.ToSlash(dirRel)
 
 	fsys := s.workspace.Root.FS()
 
@@ -187,21 +180,12 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
-	filePath := r.URL.Query().Get("path")
-	if filePath == "" {
-		http.Error(w, "path required", http.StatusBadRequest)
+	rel, ok := s.resolveExistingRegularFile(w, r.URL.Query().Get("path"))
+	if !ok {
 		return
 	}
-
-	filePath = path.Clean(filePath)
-	if strings.HasPrefix(filePath, "..") {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-
-	fsys := s.workspace.Root.FS()
-
-	data, err := fs.ReadFile(fsys, filePath)
+	filePath := filepath.ToSlash(rel)
+	data, err := s.workspace.Root.ReadFile(rel)
 	if err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
@@ -282,13 +266,13 @@ func (s *Server) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	abs, ok := s.resolveExistingRegularFile(w, body.Path)
+	rel, ok := s.resolveExistingRegularFile(w, body.Path)
 	if !ok {
 		return
 	}
-	info, _ := os.Lstat(abs) // already validated by resolveExistingRegularFile
+	info, _ := s.workspace.Root.Lstat(rel)
 
-	if err := os.WriteFile(abs, []byte(body.Content), info.Mode().Perm()); err != nil {
+	if err := s.workspace.Root.WriteFile(rel, []byte(body.Content), info.Mode().Perm()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -300,7 +284,11 @@ func (s *Server) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) resolveWorkspacePath(p string) (string, bool) {
+// workspaceRel returns the workspace-relative form of p for use with
+// s.workspace.Root.* — traversal safety comes from those methods (they
+// reject components that resolve outside the root), not from this
+// lexical check alone.
+func (s *Server) workspaceRel(p string) (string, bool) {
 	if p == "" {
 		return "", false
 	}
@@ -308,23 +296,27 @@ func (s *Server) resolveWorkspacePath(p string) (string, bool) {
 	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || path.IsAbs(cleaned) {
 		return "", false
 	}
-	return filepath.Join(s.workspace.RootPath, filepath.FromSlash(cleaned)), true
+	return filepath.FromSlash(cleaned), true
 }
 
-// resolveExistingRegularFile resolves a workspace-relative path and
-// validates it points at an existing regular file (not a directory,
-// not a symlink, not a device). Returns the absolute path or writes
-// the appropriate HTTP error to w.
+func (s *Server) workspaceDirRel(p string) (string, bool) {
+	if p == "" || p == "." {
+		return ".", true
+	}
+	return s.workspaceRel(p)
+}
+
+// resolveExistingRegularFile returns the rel path of an existing
+// regular file (not dir, not symlink, not device), or writes an HTTP
+// error to w. The IsRegular check is what blocks symlinks from
+// redirecting reads/writes outside the workspace.
 func (s *Server) resolveExistingRegularFile(w http.ResponseWriter, p string) (string, bool) {
-	abs, ok := s.resolveWorkspacePath(p)
+	rel, ok := s.workspaceRel(p)
 	if !ok {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return "", false
 	}
-	// Lstat (not Stat): the resolveWorkspacePath check is lexical, so a
-	// symlink inside the workspace could otherwise redirect the write/read
-	// outside it. Rejecting non-regular files closes that hole.
-	info, err := os.Lstat(abs)
+	info, err := s.workspace.Root.Lstat(rel)
 	if err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return "", false
@@ -337,17 +329,17 @@ func (s *Server) resolveExistingRegularFile(w http.ResponseWriter, p string) (st
 		http.Error(w, "not a regular file", http.StatusBadRequest)
 		return "", false
 	}
-	return abs, true
+	return rel, true
 }
 
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
-	abs, ok := s.resolveWorkspacePath(r.URL.Query().Get("path"))
+	rel, ok := s.workspaceRel(r.URL.Query().Get("path"))
 	if !ok {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
 
-	if err := os.RemoveAll(abs); err != nil {
+	if err := s.workspace.Root.RemoveAll(rel); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -366,23 +358,23 @@ func (s *Server) handleFileRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromAbs, ok := s.resolveWorkspacePath(body.From)
+	fromRel, ok := s.workspaceRel(body.From)
 	if !ok {
 		http.Error(w, "invalid from path", http.StatusBadRequest)
 		return
 	}
-	toAbs, ok := s.resolveWorkspacePath(body.To)
+	toRel, ok := s.workspaceRel(body.To)
 	if !ok {
 		http.Error(w, "invalid to path", http.StatusBadRequest)
 		return
 	}
 
-	if _, err := os.Lstat(toAbs); err == nil {
+	if _, err := s.workspace.Root.Lstat(toRel); err == nil {
 		http.Error(w, "destination already exists", http.StatusConflict)
 		return
 	}
 
-	if err := os.Rename(fromAbs, toAbs); err != nil {
+	if err := s.workspace.Root.Rename(fromRel, toRel); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -401,29 +393,31 @@ func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromAbs, ok := s.resolveWorkspacePath(body.From)
+	fromRel, ok := s.workspaceRel(body.From)
 	if !ok {
 		http.Error(w, "invalid from path", http.StatusBadRequest)
 		return
 	}
-	toAbs, ok := s.resolveWorkspacePath(body.To)
+	toRel, ok := s.workspaceRel(body.To)
 	if !ok {
 		http.Error(w, "invalid to path", http.StatusBadRequest)
 		return
 	}
 
-	if _, err := os.Lstat(toAbs); err == nil {
+	root := s.workspace.Root
+
+	if _, err := root.Lstat(toRel); err == nil {
 		http.Error(w, "destination already exists", http.StatusConflict)
 		return
 	}
 
-	info, err := os.Lstat(fromAbs)
+	info, err := root.Lstat(fromRel)
 	if err != nil {
 		http.Error(w, "source not found", http.StatusNotFound)
 		return
 	}
 
-	if err := copyPath(fromAbs, toAbs, info); err != nil {
+	if err := copyPathInRoot(root, fromRel, toRel, info); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -432,12 +426,14 @@ func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func copyPath(src, dst string, info os.FileInfo) error {
+// All IO goes through root so a path component can't escape the
+// workspace. Symlinks are skipped (never followed or copied).
+func copyPathInRoot(root *os.Root, src, dst string, info os.FileInfo) error {
 	if info.IsDir() {
-		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+		if err := root.MkdirAll(dst, info.Mode().Perm()); err != nil {
 			return err
 		}
-		entries, err := os.ReadDir(src)
+		entries, err := fs.ReadDir(root.FS(), filepath.ToSlash(src))
 		if err != nil {
 			return err
 		}
@@ -446,25 +442,24 @@ func copyPath(src, dst string, info os.FileInfo) error {
 			if err != nil {
 				return err
 			}
-			if err := copyPath(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), ei); err != nil {
+			if err := copyPathInRoot(root, filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), ei); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	// Symlinks must not be dereferenced — could escape the workspace.
 	if !info.Mode().IsRegular() {
 		return nil
 	}
 
-	in, err := os.Open(src)
+	in, err := root.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	out, err := root.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
@@ -475,13 +470,26 @@ func copyPath(src, dst string, info os.FileInfo) error {
 }
 
 func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
-	abs, ok := s.resolveExistingRegularFile(w, r.URL.Query().Get("path"))
+	rel, ok := s.resolveExistingRegularFile(w, r.URL.Query().Get("path"))
 	if !ok {
 		return
 	}
 
-	name := filepath.Base(abs)
+	root := s.workspace.Root
+	f, err := root.Open(rel)
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	name := filepath.Base(rel)
 	disposition := "attachment; filename=\"" + strings.ReplaceAll(name, "\"", "") + "\"; filename*=UTF-8''" + url.PathEscape(name)
 	w.Header().Set("Content-Disposition", disposition)
-	http.ServeFile(w, r, abs)
+	http.ServeContent(w, r, name, info.ModTime(), f)
 }

@@ -10,7 +10,7 @@ import {
 	Plus,
 	X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
 	Group,
 	Panel,
@@ -39,6 +39,10 @@ interface CenterTab {
 }
 
 type RightTab = "changes" | "files";
+interface SelectedSession {
+	id: string;
+	skipModeLoad: boolean;
+}
 
 const EMPTY_ENTRIES: never[] = [];
 const EMPTY_USAGE = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
@@ -56,10 +60,16 @@ export default function App() {
 	} = useWebSocket();
 	const capabilities = useCapabilities(subscribe);
 	const showChanges = capabilities?.diffs ?? false;
-	const inGitRepo = capabilities?.git ?? false;
 	const showProblems = capabilities?.lsp ?? false;
-	const [sessionId, setSessionId] = useState("");
-	const [rightTab, setRightTab] = useState<RightTab>("changes");
+	const firstSessionId = Object.keys(sessions)[0] ?? "";
+	const [selectedSession, setSelectedSession] = useState<SelectedSession>({
+		id: "",
+		skipModeLoad: false,
+	});
+	const sessionId = selectedSession.id || firstSessionId;
+	const [requestedRightTab, setRequestedRightTab] =
+		useState<RightTab>("changes");
+	const rightTab = showChanges ? requestedRightTab : "files";
 	const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 	const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
 	const leftPanelRef = usePanelRef();
@@ -83,12 +93,6 @@ export default function App() {
 		[respondPrompt, sessionId, prompt],
 	);
 
-	useEffect(() => {
-		if (sessionId) return;
-		const first = Object.keys(sessions)[0];
-		if (first) setSessionId(first);
-	}, [sessionId, sessions]);
-
 	// On agent swap the prior backend's sessions are stale; drop the
 	// cache and immediately allocate a fresh session against the new
 	// agent so the chat tab is ready (and the ModelPicker has a
@@ -97,30 +101,19 @@ export default function App() {
 		if (!subscribe) return;
 		return subscribe(async (msg) => {
 			if (msg.type !== "agent_changed") return;
-			setSessionId("");
+			setSelectedSession({ id: "", skipModeLoad: false });
 			clearSessions();
 			try {
 				const res = await fetch("/api/sessions", { method: "POST" });
 				if (!res.ok) return;
 				const data = (await res.json()) as { id?: string };
 				if (!data.id) return;
-				justMintedSidRef.current = data.id;
-				setSessionId(data.id);
+				setSelectedSession({ id: data.id, skipModeLoad: true });
 			} catch {
 				// leave empty; user can click +
 			}
 		});
 	}, [subscribe, clearSessions]);
-
-	const [prevInGit, setPrevInGit] = useState<boolean | null>(null);
-	if (capabilities && prevInGit !== inGitRepo) {
-		setPrevInGit(inGitRepo);
-		if (prevInGit === null) {
-			if (!inGitRepo) setRightTab("files");
-		} else {
-			setRightTab(inGitRepo ? "changes" : "files");
-		}
-	}
 
 	const [tabs, setTabs] = useState<CenterTab[]>([
 		{ id: "chat", type: "chat", label: "Session" },
@@ -196,8 +189,7 @@ export default function App() {
 			if (!res.ok) return;
 			const data = (await res.json()) as { id?: string };
 			if (!data.id) return;
-			justMintedSidRef.current = data.id;
-			setSessionId(data.id);
+			setSelectedSession({ id: data.id, skipModeLoad: true });
 			setActiveTabId("chat");
 		} catch {
 			// leave session alone
@@ -208,7 +200,7 @@ export default function App() {
 		(id: string) => {
 			removeSession(id);
 			if (id === sessionId) {
-				setSessionId("");
+				setSelectedSession({ id: "", skipModeLoad: false });
 			}
 		},
 		[removeSession, sessionId],
@@ -219,11 +211,11 @@ export default function App() {
 	const handleSessionSelect = useCallback(
 		async (id: string) => {
 			if (sessions[id]) {
-				setSessionId(id);
+				setSelectedSession({ id, skipModeLoad: false });
 				setActiveTabId("chat");
 				return;
 			}
-			setSessionId(id);
+			setSelectedSession({ id, skipModeLoad: false });
 			setActiveTabId("chat");
 			setLoadingSession(true);
 			try {
@@ -235,18 +227,13 @@ export default function App() {
 		[sessions],
 	);
 
-	// Skip the mode GET for ids we just allocated — the optimistic POST
-	// for mode would race with the GET and overwrite the user's pick.
-	const justMintedSidRef = useRef("");
-
 	const ensureSessionId = useCallback(async (): Promise<string> => {
 		if (sessionId) return sessionId;
 		const res = await fetch("/api/sessions", { method: "POST" });
 		if (!res.ok) throw new Error("failed to allocate session");
 		const data = (await res.json()) as { id?: string };
 		if (!data.id) throw new Error("session id missing in response");
-		justMintedSidRef.current = data.id;
-		setSessionId(data.id);
+		setSelectedSession({ id: data.id, skipModeLoad: true });
 		return data.id;
 	}, [sessionId]);
 
@@ -268,16 +255,12 @@ export default function App() {
 	// just mint. For just-minted ids, the server has no state yet and our
 	// optimistic local mode is the truth — fetching would clobber it.
 	useEffect(() => {
-		if (!sessionId) return;
-		if (justMintedSidRef.current === sessionId) {
-			justMintedSidRef.current = "";
-			return;
-		}
+		if (!sessionId || selectedSession.skipModeLoad) return;
 		fetch(`/api/mode?session=${encodeURIComponent(sessionId)}`)
 			.then((r) => r.json())
 			.then((data) => setMode(data.mode === "plan" ? "plan" : "agent"))
 			.catch(() => {});
-	}, [sessionId]);
+	}, [sessionId, selectedSession.skipModeLoad]);
 
 	const selectMode = useCallback(
 		async (next: "agent" | "plan") => {
@@ -540,14 +523,14 @@ export default function App() {
 							{showChanges && (
 								<RightTabButton
 									active={rightTab === "changes"}
-									onClick={() => setRightTab("changes")}
+									onClick={() => setRequestedRightTab("changes")}
 								>
 									Changes
 								</RightTabButton>
 							)}
 							<RightTabButton
 								active={rightTab === "files"}
-								onClick={() => setRightTab("files")}
+								onClick={() => setRequestedRightTab("files")}
 							>
 								Files
 							</RightTabButton>

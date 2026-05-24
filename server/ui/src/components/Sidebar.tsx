@@ -94,15 +94,12 @@ export function Sidebar({
 	return (
 		<div className="w-full h-full flex flex-col bg-bg">
 			{/* Header */}
-			<div className="h-10 pl-4 pr-1.5 flex items-center gap-2 shrink-0">
-				<span className="text-[11px] font-medium text-fg-dim uppercase tracking-wider">
-					Sessions
-				</span>
-				<div className="flex-1" />
+			<div className="h-10 px-1.5 flex items-center gap-2 shrink-0">
 				<AgentPicker
 					subscribe={subscribe}
 					onSwitchingChange={setSwitchingAgent}
 				/>
+				<div className="flex-1" />
 				{canCreateNew && (
 					<button
 						type="button"

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -45,7 +46,10 @@ type App struct {
 
 	sessionID string
 
-	phase       AppPhase
+	// Atomic so cancel/command guards on the UI goroutine see writes
+	// from the stream goroutine immediately. Spinner side-effects stay
+	// on the UI goroutine — see setPhase / queuePhase.
+	phase       atomic.Int32 // AppPhase
 	currentMode Mode
 	showWelcome bool
 	activeModal Modal
@@ -70,8 +74,10 @@ type App struct {
 	streamCancel context.CancelFunc
 	streamMu     sync.Mutex
 
-	// Mutated from the streaming goroutine and read inside QueueUpdateDraw
-	// closures — display-only fields, race-tolerant.
+	// Written by the stream goroutine, read by the UI goroutine inside
+	// renderChat. Guarded by streamStateMu — eventual consistency is
+	// fine (the next render call will pick up the latest values).
+	streamStateMu      sync.Mutex
 	currentToolName    string
 	currentToolHint    string
 	streamingText      string
@@ -98,7 +104,6 @@ func New(ctx context.Context, agent *coder.Agent, sessionID string) *App {
 
 		sessionID:   sessionID,
 		showWelcome: !hasMessages && os.Getenv("WINGMAN_CALLER") != "vscode",
-		phase:       PhaseIdle,
 
 		lspTracker: lsp.NewDiagnosticTracker(),
 

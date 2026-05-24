@@ -60,7 +60,7 @@ func (a *App) getInputMargins() (int, int) {
 }
 
 func (a *App) isStreaming() bool {
-	return a.phase != PhaseIdle
+	return a.getPhase() != PhaseIdle
 }
 
 func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
@@ -478,7 +478,7 @@ func (a *App) submitInput() {
 	// user can't accidentally pop a modal mid-response. Regular messages and
 	// skill invocations fall through to the Send path, which queues onto
 	// the running turn when one is active.
-	if a.phase != PhaseIdle && isBuiltinCommand(query) {
+	if a.getPhase() != PhaseIdle && isBuiltinCommand(query) {
 		return
 	}
 
@@ -1068,18 +1068,20 @@ func (a *App) renderChat(messages []agent.Message) {
 		}
 	}
 
-	if a.streamingReasoning != "" {
+	toolName, toolHint, streamingText, streamingReasoning := a.snapshotStreamState()
+
+	if streamingReasoning != "" {
 		separateFromTools()
-		fmt.Fprint(a.chatView, a.formatReasoningProgress(a.streamingReasoning))
+		fmt.Fprint(a.chatView, a.formatReasoningProgress(streamingReasoning))
 	}
 
-	if a.streamingText != "" {
+	if streamingText != "" {
 		separateFromTools()
-		fmt.Fprint(a.chatView, a.formatAssistantMessage(a.streamingText))
+		fmt.Fprint(a.chatView, a.formatAssistantMessage(streamingText))
 	}
 
-	if a.currentToolName != "" && !a.isToolHidden(a.currentToolName) {
-		fmt.Fprint(a.chatView, a.formatToolProgress(a.currentToolName, a.currentToolHint))
+	if toolName != "" && !a.isToolHidden(toolName) {
+		fmt.Fprint(a.chatView, a.formatToolProgress(toolName, toolHint))
 	}
 
 	a.chatView.ScrollToEnd()
