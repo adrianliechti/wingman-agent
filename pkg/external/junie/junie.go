@@ -42,20 +42,15 @@ func Run(ctx context.Context, args []string, options *Options) error {
 		return err
 	}
 
-	vars := map[string]string{
-		// Model profile discovery & selection
-		"JUNIE_MODEL_LOCATIONS": dir,
-		"JUNIE_MODEL":           "custom:" + profileName,
-	}
+	seedState()
 
-	env := stripVars(options.Env, vars)
+	cliArgs := append([]string{
+		"--model-location", dir,
+		"--model", "custom:" + profileName,
+	}, args...)
 
-	for k, v := range vars {
-		env = append(env, k+"="+v)
-	}
-
-	cmd := exec.CommandContext(ctx, options.Path, args...)
-	cmd.Env = env
+	cmd := exec.CommandContext(ctx, options.Path, cliArgs...)
+	cmd.Env = options.Env
 
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -86,19 +81,67 @@ func writeProfile(dir string, cfg *JunieConfig) error {
 	return os.WriteFile(filepath.Join(dir, profileName+".json"), data, 0644)
 }
 
-func stripVars(env []string, vars map[string]string) []string {
-	out := env[:0:0]
-
-	for _, e := range env {
-		key := e
-		if i := strings.IndexByte(e, '='); i >= 0 {
-			key = e[:i]
-		}
-		if _, ok := vars[key]; ok {
-			continue
-		}
-		out = append(out, e)
+// seedState writes ~/.junie state files to skip first-run prompts.
+// Only adds missing fields — existing user values are never overwritten.
+func seedState() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
 	}
 
-	return out
+	junieDir := filepath.Join(home, ".junie")
+
+	mergeJSON(filepath.Join(junieDir, "settings.json"), func(s map[string]any) bool {
+		if _, ok := s["shareAnonymousStatistics"]; ok {
+			return false
+		}
+		s["shareAnonymousStatistics"] = "false"
+		return true
+	})
+
+	mergeJSON(filepath.Join(junieDir, "config.json"), func(s map[string]any) bool {
+		if _, ok := s["auto-update"]; ok {
+			return false
+		}
+		s["auto-update"] = false
+		return true
+	})
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+
+	mergeJSON(filepath.Join(junieDir, "misc", "migration_state.json"), func(s map[string]any) bool {
+		projects, _ := s["migratedProjects"].([]any)
+		for _, p := range projects {
+			if str, ok := p.(string); ok && str == cwd {
+				return false
+			}
+		}
+		s["migratedProjects"] = append(projects, cwd)
+		return true
+	})
+}
+
+// mergeJSON loads a JSON object, lets fn mutate it, and writes it back
+// only if fn returns true. Best-effort: errors are swallowed.
+func mergeJSON(path string, fn func(map[string]any) bool) {
+	state := map[string]any{}
+
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &state)
+	}
+
+	if !fn(state) {
+		return
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		return
+	}
+
+	_ = os.MkdirAll(filepath.Dir(path), 0755)
+	_ = os.WriteFile(path, data, 0644)
 }
