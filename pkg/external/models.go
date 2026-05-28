@@ -132,7 +132,7 @@ func Models(ctx context.Context, options *Options, modelOpts *ModelOptions) ([]s
 
 // Pick returns the first available model ID matching predicate. The
 // available set is scanned in descending lexicographic order so that
-// higher version suffixes (e.g. "claude-opus-4-7" over "claude-opus-4-5")
+// higher version suffixes (e.g. "claude-opus-4-8" over "claude-opus-4-5")
 // are preferred. Returns "" if no model matches.
 func Pick(available map[string]bool, predicate func(id string) bool) string {
 	ids := make([]string, 0, len(available))
@@ -174,6 +174,7 @@ var (
 		// Anthropic
 		"claude-sonnet-4-6",
 		"claude-sonnet-4-5",
+		"claude-opus-4-8",
 		"claude-opus-4-7",
 		"claude-opus-4-6",
 		"claude-opus-4-5",

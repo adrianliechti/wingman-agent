@@ -17,6 +17,7 @@ var AvailableModels = []Model{
 	{ID: "gpt-5.3-codex", Name: "GPT 5.3 Codex"},
 	{ID: "gpt-5.2-codex", Name: "GPT 5.2 Codex"},
 
+	{ID: "claude-opus-4-8", Name: "Claude Opus 4.8"},
 	{ID: "claude-opus-4-7", Name: "Claude Opus 4.7"},
 	{ID: "claude-opus-4-6", Name: "Claude Opus 4.6"},
 	{ID: "claude-opus-4-5", Name: "Claude Opus 4.5"},
