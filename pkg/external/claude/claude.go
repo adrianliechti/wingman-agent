@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 )
 
 // BuildVars returns the env-var name→value pairs that route the Claude
@@ -20,16 +19,6 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 		"ANTHROPIC_BASE_URL":   cfg.BaseURL,
 		"ANTHROPIC_API_KEY":    "",
 		"ANTHROPIC_AUTH_TOKEN": cfg.AuthToken,
-
-		// Model configuration
-		"ANTHROPIC_DEFAULT_HAIKU_MODEL":      cfg.HaikuModel,
-		"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Wingman Haiku",
-
-		"ANTHROPIC_DEFAULT_SONNET_MODEL":      cfg.SonnetModel,
-		"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Wingman Sonnet",
-
-		"ANTHROPIC_DEFAULT_OPUS_MODEL":      cfg.OpusModel,
-		"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Wingman Opus",
 
 		// Telemetry & data exfiltration prevention
 		"DISABLE_TELEMETRY":                        "1",
@@ -72,12 +61,20 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 		"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
 	}
 
-	if cfg.SonnetModel != "" {
-		vars["CLAUDE_CODE_SUBAGENT_MODEL"] = cfg.SonnetModel
+	if cfg.HaikuModel != "" {
+		vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = cfg.HaikuModel
 	}
 
-	if cfg.ContextWindow > 0 {
-		vars["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = strconv.Itoa(cfg.ContextWindow)
+	if cfg.SonnetModel != "" {
+		vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] = cfg.SonnetModel
+	}
+
+	if cfg.OpusModel != "" {
+		vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] = cfg.OpusModel
+	}
+
+	if cfg.SonnetModel != "" {
+		vars["CLAUDE_CODE_SUBAGENT_MODEL"] = cfg.SonnetModel
 	}
 
 	return vars
