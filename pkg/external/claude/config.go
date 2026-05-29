@@ -16,31 +16,45 @@ type ClaudeConfig struct {
 	OpusModel   string
 	HaikuModel  string
 	SonnetModel string
-
-	ContextWindow int
 }
 
 func NewConfig(ctx context.Context, options *Options) (*ClaudeConfig, error) {
 	options = external.WithDefaults(options)
 
-	available, err := external.AvailableModels(ctx, options)
+	defaults, err := external.Models(ctx, options, &external.ModelOptions{
+		Kind:   external.ModelDefault,
+		Filter: external.IsAnthropic,
+	})
 
 	if err != nil {
 		return nil, err
 	}
 
-	pick := func(name string) string {
-		return external.Pick(available, func(id string) bool {
-			return strings.Contains(id, name)
-		})
+	fast, err := external.Models(ctx, options, &external.ModelOptions{
+		Kind:   external.ModelFast,
+		Filter: external.IsAnthropic,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	first := func(ids []string, name string) string {
+		for _, id := range ids {
+			if strings.Contains(id, name) {
+				return id
+			}
+		}
+
+		return ""
 	}
 
 	return &ClaudeConfig{
 		BaseURL:   options.WingmanURL,
 		AuthToken: options.WingmanToken,
 
-		HaikuModel:  pick("haiku"),
-		SonnetModel: pick("sonnet"),
-		OpusModel:   pick("opus"),
+		HaikuModel:  first(fast, "haiku"),
+		SonnetModel: first(defaults, "sonnet"),
+		OpusModel:   first(defaults, "opus"),
 	}, nil
 }

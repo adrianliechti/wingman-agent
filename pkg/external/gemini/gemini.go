@@ -51,9 +51,6 @@ func Run(ctx context.Context, args []string, options *Options) error {
 			"enableAutoUpdate":             false,
 			"enableAutoUpdateNotification": false,
 		},
-		"sessionRetention": map[string]any{
-			"maxAge": "7d",
-		},
 
 		// Disabled features
 		"experimental": map[string]any{
