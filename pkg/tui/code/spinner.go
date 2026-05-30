@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/rivo/tview"
+
+	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -16,10 +18,11 @@ type Spinner struct {
 	ticker   *time.Ticker
 	stopChan chan struct{}
 
-	mu     sync.Mutex
-	active bool
-	frame  int
-	phase  AppPhase
+	mu      sync.Mutex
+	active  bool
+	frame   int
+	phase   AppPhase
+	started time.Time
 }
 
 func NewSpinner(app *tview.Application, view *tview.TextView) *Spinner {
@@ -44,6 +47,7 @@ func (s *Spinner) Start(phase AppPhase) {
 	}
 
 	s.active = true
+	s.started = time.Now()
 	s.ticker = time.NewTicker(100 * time.Millisecond)
 	s.stopChan = make(chan struct{})
 
@@ -104,5 +108,14 @@ func (s *Spinner) render() {
 		return
 	}
 	frame := spinnerFrames[s.frame]
-	s.view.SetText(fmt.Sprintf("[%s]%s %s[-]", config.Color, frame, config.Message))
+
+	// Preparing is a fixed startup warmup with nothing to interrupt; every
+	// other phase shows elapsed time and how to bail out.
+	if s.phase == PhasePreparing {
+		s.view.SetText(fmt.Sprintf("[%s]%s %s[-]", config.Color, frame, config.Message))
+		return
+	}
+
+	secs := int(time.Since(s.started).Seconds())
+	s.view.SetText(fmt.Sprintf("[%s]%s %s[-] [%s](%ds · esc to interrupt)[-]", config.Color, frame, config.Message, theme.Default.BrBlack, secs))
 }
