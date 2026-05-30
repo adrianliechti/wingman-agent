@@ -117,7 +117,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 // useful display content are emitted; ephemeral runtime details (mcp startup,
 // review-mode transitions, image generation, etc.) are skipped because they
 // don't round-trip cleanly through ACP's update vocabulary.
-func streamThreadHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, turns []rawTurn) {
+func streamThreadHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, turns []rawTurn, toolOutputs map[string]string) {
 	send := func(u acp.SessionUpdate) {
 		if ctx.Err() != nil {
 			return
@@ -126,12 +126,39 @@ func streamThreadHistory(ctx context.Context, conn *acp.AgentSideConnection, sid
 	}
 	for _, turn := range turns {
 		for _, raw := range turn.Items {
-			replayItem(send, raw)
+			replayItem(send, raw, toolOutputs)
 		}
 	}
 }
 
-func replayItem(send func(acp.SessionUpdate), raw json.RawMessage) {
+// replayToolResult emits a completion update after a replayed StartToolCall so
+// the client surfaces the tool's output. A start call on its own only yields
+// the tool invocation; the client produces a tool result from a terminal-status
+// update.
+func replayToolResult(send func(acp.SessionUpdate), id, status string, content []acp.ToolCallContent) {
+	st := toolStatusFor(status)
+	if st != acp.ToolCallStatusCompleted && st != acp.ToolCallStatusFailed {
+		return
+	}
+	opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(st)}
+	if len(content) > 0 {
+		opts = append(opts, acp.WithUpdateContent(content))
+	}
+	send(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
+}
+
+// replayToolText surfaces a tool's recovered output (from the rollout log) as a
+// completed tool result. thread/resume omits tool output, so the rollout is the
+// only source on replay; tool ids match the rollout's call_id.
+func replayToolText(send func(acp.SessionUpdate), id, status string, outputs map[string]string) {
+	out := outputs[id]
+	if out == "" {
+		return
+	}
+	replayToolResult(send, id, status, []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(out))})
+}
+
+func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs map[string]string) {
 	var probe struct {
 		Type string `json:"type"`
 		ID   string `json:"id"`
@@ -187,27 +214,33 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage) {
 
 	case "commandExecution":
 		var it struct {
-			Command          string  `json:"command"`
-			Cwd              string  `json:"cwd"`
-			Status           string  `json:"status"`
-			AggregatedOutput *string `json:"aggregatedOutput"`
+			Command        string          `json:"command"`
+			Cwd            string          `json:"cwd"`
+			Status         string          `json:"status"`
+			CommandActions []commandAction `json:"commandActions"`
 		}
 		_ = json.Unmarshal(raw, &it)
+		if title, kind, locs, ok := commandActionToolCall(it.CommandActions); ok {
+			opts := []acp.ToolCallStartOpt{
+				acp.WithStartKind(kind),
+				acp.WithStartStatus(toolStatusFor(it.Status)),
+			}
+			if len(locs) > 0 {
+				opts = append(opts, acp.WithStartLocations(locs))
+			}
+			send(acp.StartToolCall(acp.ToolCallId(probe.ID), title, opts...))
+			break
+		}
 		title := stripShellPrefix(it.Command)
 		if title == "" {
 			title = "Run command"
 		}
-		opts := []acp.ToolCallStartOpt{
+		send(acp.StartToolCall(acp.ToolCallId(probe.ID), title,
 			acp.WithStartKind(acp.ToolKindExecute),
 			acp.WithStartStatus(toolStatusFor(it.Status)),
 			acp.WithStartRawInput(map[string]any{"command": it.Command, "cwd": it.Cwd}),
-		}
-		if it.AggregatedOutput != nil && *it.AggregatedOutput != "" {
-			opts = append(opts, acp.WithStartContent([]acp.ToolCallContent{
-				acp.ToolContent(acp.TextBlock(*it.AggregatedOutput)),
-			}))
-		}
-		send(acp.StartToolCall(acp.ToolCallId(probe.ID), title, opts...))
+		))
+		replayToolText(send, probe.ID, it.Status, toolOutputs)
 
 	case "fileChange":
 		var it struct {
@@ -218,6 +251,9 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage) {
 			acp.WithStartKind(acp.ToolKindEdit),
 			acp.WithStartStatus(toolStatusFor(it.Status)),
 		))
+		if content := fileChangeContent(raw); len(content) > 0 {
+			replayToolResult(send, probe.ID, it.Status, content)
+		}
 
 	case "mcpToolCall":
 		var it struct {
@@ -234,6 +270,7 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage) {
 			acp.WithStartStatus(toolStatusFor(it.Status)),
 			acp.WithStartRawInput(map[string]any{"server": it.Server, "tool": it.Tool, "arguments": args}),
 		))
+		replayToolText(send, probe.ID, it.Status, toolOutputs)
 
 	case "dynamicToolCall":
 		var it struct {
@@ -249,6 +286,7 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage) {
 			acp.WithStartStatus(toolStatusFor(it.Status)),
 			acp.WithStartRawInput(map[string]any{"arguments": args}),
 		))
+		replayToolText(send, probe.ID, it.Status, toolOutputs)
 
 	case "webSearch":
 		var it struct {
@@ -263,6 +301,7 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage) {
 			acp.WithStartKind(acp.ToolKindSearch),
 			acp.WithStartStatus(acp.ToolCallStatusCompleted),
 		))
+		replayToolText(send, probe.ID, "completed", toolOutputs)
 	}
 }
 

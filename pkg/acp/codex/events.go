@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -67,6 +68,14 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			d.update(acp.UpdateAgentMessageText(p.Error.Message + "\n\n"))
 		}
 
+	case "warning":
+		var p struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(params, &p) == nil && p.Message != "" {
+			d.update(acp.UpdateAgentMessageText("Warning: " + p.Message + "\n\n"))
+		}
+
 	case "item/commandExecution/outputDelta":
 		// Stream stdout chunks as plain content; the SDK's tool-call helpers
 		// don't yet expose a terminal_output_delta meta block.
@@ -106,10 +115,22 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 	switch kind {
 	case "commandExecution":
 		var it struct {
-			Command string `json:"command"`
-			Cwd     string `json:"cwd"`
+			Command        string          `json:"command"`
+			Cwd            string          `json:"cwd"`
+			CommandActions []commandAction `json:"commandActions"`
 		}
 		_ = json.Unmarshal(env.Item, &it)
+		if title, kind, locs, ok := commandActionToolCall(it.CommandActions); ok {
+			opts := []acp.ToolCallStartOpt{
+				acp.WithStartKind(kind),
+				acp.WithStartStatus(acp.ToolCallStatusInProgress),
+			}
+			if len(locs) > 0 {
+				opts = append(opts, acp.WithStartLocations(locs))
+			}
+			d.update(acp.StartToolCall(acp.ToolCallId(id), title, opts...))
+			break
+		}
 		title := stripShellPrefix(it.Command)
 		if title == "" {
 			title = "Run command"
@@ -121,10 +142,14 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 		))
 
 	case "fileChange":
-		d.update(acp.StartToolCall(acp.ToolCallId(id), "Editing files",
+		opts := []acp.ToolCallStartOpt{
 			acp.WithStartKind(acp.ToolKindEdit),
 			acp.WithStartStatus(acp.ToolCallStatusInProgress),
-		))
+		}
+		if content := fileChangeContent(env.Item); len(content) > 0 {
+			opts = append(opts, acp.WithStartContent(content))
+		}
+		d.update(acp.StartToolCall(acp.ToolCallId(id), "Editing files", opts...))
 
 	case "mcpToolCall":
 		var it struct {
@@ -198,7 +223,18 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		}
 		d.update(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
 
-	case "fileChange", "dynamicToolCall", "mcpToolCall", "webSearch":
+	case "fileChange":
+		var it struct {
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal(env.Item, &it)
+		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(toolStatusFor(it.Status))}
+		if content := fileChangeContent(env.Item); len(content) > 0 {
+			opts = append(opts, acp.WithUpdateContent(content))
+		}
+		d.update(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
+
+	case "dynamicToolCall", "mcpToolCall", "webSearch":
 		var it struct {
 			Status string `json:"status"`
 		}
@@ -270,16 +306,156 @@ func toolStatusFor(s string) acp.ToolCallStatus {
 	}
 }
 
-// stripShellPrefix trims a leading `bash -lc ` / `sh -c ` so tool-call titles
-// show the actual command. Mirrors the TS reference's CommandUtils.
+// commandAction describes a structured interpretation of a commandExecution
+// item (read/search/listFiles) that codex attaches alongside the raw shell
+// command.
+type commandAction struct {
+	Type  string `json:"type"`
+	Path  string `json:"path"`
+	Query string `json:"query"`
+}
+
+// commandActionToolCall maps a commandExecution that resolves to a single
+// structured action onto a descriptive title, tool kind, and locations, so the
+// call renders as e.g. "Read file '...'" or "Search for '...'" instead of the
+// raw shell command. ok is false when there is no single mappable action and
+// the caller should fall back to the plain command title.
+func commandActionToolCall(actions []commandAction) (title string, kind acp.ToolKind, locations []acp.ToolCallLocation, ok bool) {
+	if len(actions) != 1 {
+		return "", "", nil, false
+	}
+	a := actions[0]
+	switch a.Type {
+	case "read":
+		if a.Path == "" {
+			return "", "", nil, false
+		}
+		return fmt.Sprintf("Read file '%s'", a.Path), acp.ToolKindRead, []acp.ToolCallLocation{{Path: a.Path}}, true
+	case "search":
+		return searchTitle(a.Query, a.Path), acp.ToolKindSearch, nil, true
+	case "listFiles":
+		if a.Path != "" {
+			return fmt.Sprintf("List files in '%s'", a.Path), acp.ToolKindRead, nil, true
+		}
+		return "List files", acp.ToolKindRead, nil, true
+	}
+	return "", "", nil, false
+}
+
+func searchTitle(query, path string) string {
+	switch {
+	case query != "" && path != "":
+		return fmt.Sprintf("Search for '%s' in %s", query, path)
+	case query != "":
+		return fmt.Sprintf("Search for '%s'", query)
+	case path != "":
+		return fmt.Sprintf("Search in '%s'", path)
+	default:
+		return "Search"
+	}
+}
+
+// fileChange describes one file modification carried by a fileChange item.
+type fileChange struct {
+	Path string `json:"path"`
+	Kind struct {
+		Type string `json:"type"`
+	} `json:"kind"`
+	Diff string `json:"diff"`
+}
+
+// fileChangeContent converts the changes of a fileChange item into ACP diff
+// content blocks so the edit renders as a before/after diff in the client
+// instead of an empty tool call. Old and new text are reconstructed directly
+// from the unified diff each change carries, which avoids depending on the file
+// contents on disk or on the timing of codex's apply step.
+func fileChangeContent(raw json.RawMessage) []acp.ToolCallContent {
+	var it struct {
+		Changes []fileChange `json:"changes"`
+	}
+	if err := json.Unmarshal(raw, &it); err != nil {
+		return nil
+	}
+	var content []acp.ToolCallContent
+	for _, ch := range it.Changes {
+		if ch.Path == "" {
+			continue
+		}
+		var oldText *string
+		var newText string
+		if ch.Kind.Type == "add" && !isUnifiedDiff(ch.Diff) {
+			// New files may carry raw contents instead of a patch.
+			newText = ch.Diff
+		} else {
+			old, nw := splitUnifiedDiff(ch.Diff)
+			newText = nw
+			if ch.Kind.Type != "add" {
+				oldText = &old
+			}
+		}
+		content = append(content, acp.ToolCallContent{
+			Diff: &acp.ToolCallContentDiff{
+				Type:    "diff",
+				Path:    ch.Path,
+				OldText: oldText,
+				NewText: newText,
+				// Surface the change kind so the client can distinguish a
+				// deletion (newText must be nulled) from an edit-to-empty.
+				Meta: map[string]any{"kind": ch.Kind.Type},
+			},
+		})
+	}
+	return content
+}
+
+func isUnifiedDiff(s string) bool {
+	return strings.HasPrefix(s, "--- ") || strings.Contains(s, "\n--- ")
+}
+
+// splitUnifiedDiff reconstructs the old and new text from a unified diff by
+// walking its hunks: context lines belong to both sides, "-" lines to the old
+// text only, and "+" lines to the new text only.
+func splitUnifiedDiff(diff string) (oldText, newText string) {
+	var oldLines, newLines []string
+	inHunk := false
+	for _, line := range strings.Split(diff, "\n") {
+		switch {
+		case strings.HasPrefix(line, "@@"):
+			inHunk = true
+		case !inHunk:
+			// skip file headers (--- / +++) and any preamble
+		case strings.HasPrefix(line, "\\"):
+			// "\ No newline at end of file" marker
+		case strings.HasPrefix(line, "-"):
+			oldLines = append(oldLines, line[1:])
+		case strings.HasPrefix(line, "+"):
+			newLines = append(newLines, line[1:])
+		default:
+			// context line (" prefix") or a bare empty context line
+			text := line
+			if strings.HasPrefix(line, " ") {
+				text = line[1:]
+			}
+			oldLines = append(oldLines, text)
+			newLines = append(newLines, text)
+		}
+	}
+	return strings.Join(oldLines, "\n"), strings.Join(newLines, "\n")
+}
+
+// shellPrefixRe matches a leading shell invocation such as
+// "bash -lc ", "/bin/zsh -c ", or "sh ", so the underlying command can be
+// shown on its own.
+var shellPrefixRe = regexp.MustCompile(`^(?:/bin/)?(?:bash|zsh|sh)\s+(?:-[lc]+\s+)?`)
+
+// stripShellPrefix trims a leading shell invocation so tool-call titles show
+// the actual command. Mirrors the TS reference's CommandUtils.
 func stripShellPrefix(cmd string) string {
 	c := strings.TrimSpace(cmd)
-	for _, prefix := range []string{"bash -lc ", "bash -c ", "sh -lc ", "sh -c "} {
-		if rest, ok := strings.CutPrefix(c, prefix); ok {
-			rest = strings.TrimSpace(rest)
-			rest = strings.Trim(rest, `'"`)
-			return rest
-		}
+	c = shellPrefixRe.ReplaceAllString(c, "")
+	// Strip a single pair of surrounding single quotes, if present.
+	if len(c) >= 2 && strings.HasPrefix(c, "'") && strings.HasSuffix(c, "'") {
+		c = c[1 : len(c)-1]
 	}
 	return c
 }

@@ -161,6 +161,8 @@ export function useWebSocket() {
 	const [sessions, setSessions] = useState<Record<string, SessionState>>({});
 
 	const streamRefs = useRef<Record<string, StreamRefs>>({});
+	const pendingFlushSessions = useRef<Set<string>>(new Set());
+	const flushFrameRef = useRef<number | null>(null);
 
 	// Panels (FileTree, DiffsPanel, …) subscribe to raw frames so they can
 	// refetch on workspace-level events without going through React state.
@@ -200,6 +202,102 @@ export function useWebSocket() {
 		[],
 	);
 
+	const flushStreamSession = useCallback(
+		(id: string) => {
+			pendingFlushSessions.current.delete(id);
+			const s = streamRefs.current[id];
+			if (!s) return;
+
+			const streaming =
+				s.streamingId && s.streamingContent
+					? {
+							id: s.streamingId,
+							content: s.streamingContent,
+						}
+					: null;
+			const reasoning =
+				s.reasoningEntryId && s.reasoningContent
+					? {
+							id: s.reasoningEntryId,
+							content: s.reasoningContent,
+							reasoningId: s.reasoningId,
+						}
+					: null;
+			if (!streaming && !reasoning) return;
+
+			updateSession(id, (sess) => {
+				let entries = sess.entries;
+				let changed = false;
+
+				const upsert = (entry: ChatEntry) => {
+					const idx = entries.findIndex((e) => e.id === entry.id);
+					if (idx < 0) {
+						entries = [...entries, entry];
+						changed = true;
+						return;
+					}
+
+					const existing = entries[idx];
+					if (
+						existing.content === entry.content &&
+						existing.reasoningId === entry.reasoningId
+					) {
+						return;
+					}
+
+					const next = entries === sess.entries ? [...entries] : entries;
+					next[idx] = { ...existing, ...entry };
+					entries = next;
+					changed = true;
+				};
+
+				if (reasoning) {
+					upsert({
+						id: reasoning.id,
+						type: "reasoning",
+						content: reasoning.content,
+						reasoningId: reasoning.reasoningId,
+					});
+				}
+				if (streaming) {
+					upsert({
+						id: streaming.id,
+						type: "assistant",
+						content: streaming.content,
+					});
+				}
+
+				return changed ? { ...sess, entries } : sess;
+			});
+		},
+		[updateSession],
+	);
+
+	const flushPendingStreams = useCallback(() => {
+		flushFrameRef.current = null;
+		const ids = Array.from(pendingFlushSessions.current);
+		pendingFlushSessions.current.clear();
+		for (const id of ids) flushStreamSession(id);
+	}, [flushStreamSession]);
+
+	const scheduleStreamFlush = useCallback(
+		(id: string) => {
+			pendingFlushSessions.current.add(id);
+			if (flushFrameRef.current !== null) return;
+			flushFrameRef.current = window.requestAnimationFrame(flushPendingStreams);
+		},
+		[flushPendingStreams],
+	);
+
+	const flushActiveStream = useCallback(
+		(id: string) => {
+			const s = streamRefs.current[id];
+			if (!s?.streamingId && !s?.reasoningEntryId) return;
+			flushStreamSession(id);
+		},
+		[flushStreamSession],
+	);
+
 	const finalizeStreaming = (id: string) => {
 		const s = getStream(id);
 		s.streamingId = "";
@@ -231,6 +329,7 @@ export function useWebSocket() {
 				// existing prompt — the server replays pending prompts as
 				// separate frames right after, and clobbering here would
 				// cause a flicker.
+				pendingFlushSessions.current.delete(sid);
 				streamRefs.current[sid] = emptyStreamRefs();
 				setSessions((prev) => ({
 					...prev,
@@ -250,6 +349,9 @@ export function useWebSocket() {
 			}
 
 			case "text_delta": {
+				if (streamRefs.current[sid]?.reasoningEntryId) {
+					flushStreamSession(sid);
+				}
 				finalizeReasoning(sid);
 				const s = getStream(sid);
 				let entryId = s.streamingId;
@@ -258,33 +360,19 @@ export function useWebSocket() {
 					s.streamingId = entryId;
 				}
 				s.streamingContent += msg.text;
-				const content = s.streamingContent;
-				updateSession(sid, (sess) => {
-					const existing = sess.entries.find((e) => e.id === entryId);
-					if (!existing) {
-						return {
-							...sess,
-							entries: [
-								...sess.entries,
-								{ id: entryId, type: "assistant", content },
-							],
-						};
-					}
-					return {
-						...sess,
-						entries: sess.entries.map((e) =>
-							e.id === entryId ? { ...e, content } : e,
-						),
-					};
-				});
+				scheduleStreamFlush(sid);
 				break;
 			}
 
 			case "reasoning_delta": {
+				if (streamRefs.current[sid]?.streamingId) {
+					flushStreamSession(sid);
+				}
 				finalizeStreaming(sid);
 				const s = getStream(sid);
 				// New reasoning block (different upstream id) — start fresh.
 				if (s.reasoningEntryId && s.reasoningId !== msg.id) {
+					flushStreamSession(sid);
 					finalizeReasoning(sid);
 				}
 				let entryId = s.reasoningEntryId;
@@ -294,30 +382,12 @@ export function useWebSocket() {
 					s.reasoningId = msg.id;
 				}
 				s.reasoningContent += msg.text;
-				const content = s.reasoningContent;
-				const reasoningId = msg.id;
-				updateSession(sid, (sess) => {
-					const existing = sess.entries.find((e) => e.id === entryId);
-					if (!existing) {
-						return {
-							...sess,
-							entries: [
-								...sess.entries,
-								{ id: entryId, type: "reasoning", content, reasoningId },
-							],
-						};
-					}
-					return {
-						...sess,
-						entries: sess.entries.map((e) =>
-							e.id === entryId ? { ...e, content } : e,
-						),
-					};
-				});
+				scheduleStreamFlush(sid);
 				break;
 			}
 
 			case "tool_call": {
+				flushActiveStream(sid);
 				finalizeStreaming(sid);
 				finalizeReasoning(sid);
 				const entryId = msg.id || nextId();
@@ -356,6 +426,7 @@ export function useWebSocket() {
 				// phase=idle is the turn-end signal — clear streaming refs so
 				// the next turn starts a fresh assistant/reasoning entry.
 				if (msg.phase === "idle") {
+					flushActiveStream(sid);
 					finalizeStreaming(sid);
 					finalizeReasoning(sid);
 				}
@@ -363,6 +434,7 @@ export function useWebSocket() {
 				break;
 
 			case "error": {
+				flushActiveStream(sid);
 				finalizeStreaming(sid);
 				finalizeReasoning(sid);
 				updateSession(sid, (sess) => ({
@@ -379,9 +451,9 @@ export function useWebSocket() {
 				updateSession(sid, (sess) => ({
 					...sess,
 					usage: {
-						inputTokens: msg.input_tokens,
-						cachedTokens: msg.cached_tokens,
-						outputTokens: msg.output_tokens,
+						inputTokens: msg.input_tokens ?? 0,
+						cachedTokens: msg.cached_tokens ?? 0,
+						outputTokens: msg.output_tokens ?? 0,
 					},
 				}));
 				break;
@@ -421,6 +493,7 @@ export function useWebSocket() {
 
 	const sendChat = useCallback(
 		(sessionId: string, text: string, files?: string[], images?: string[]) => {
+			flushActiveStream(sessionId);
 			const id = nextId();
 			updateSession(sessionId, (sess) => ({
 				...sess,
@@ -428,7 +501,7 @@ export function useWebSocket() {
 			}));
 			send({ type: "send", session: sessionId, text, files, images });
 		},
-		[send, updateSession],
+		[flushActiveStream, send, updateSession],
 	);
 
 	const cancel = useCallback(
@@ -471,11 +544,21 @@ export function useWebSocket() {
 			return rest;
 		});
 		delete streamRefs.current[sessionId];
+		pendingFlushSessions.current.delete(sessionId);
 	}, []);
 
 	const clearSessions = useCallback(() => {
 		setSessions({});
 		streamRefs.current = {};
+		pendingFlushSessions.current.clear();
+	}, []);
+
+	useEffect(() => {
+		return () => {
+			if (flushFrameRef.current !== null) {
+				window.cancelAnimationFrame(flushFrameRef.current);
+			}
+		};
 	}, []);
 
 	useEffect(() => {

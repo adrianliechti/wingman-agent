@@ -720,14 +720,9 @@ func (a *App) rebuildContentPages() {
 	}
 }
 
-// updateWelcome renders the logo plus a short context block (working dir,
-// active model, key hints) shown on the start screen. Safe to call before a
-// model is selected — the model line is simply omitted until one is set.
+// updateWelcome renders the logo plus the working dir and key hints shown on
+// the start screen.
 func (a *App) updateWelcome() {
-	if a.welcomeView == nil {
-		return
-	}
-
 	t := theme.Default
 
 	var b strings.Builder
@@ -901,10 +896,6 @@ func (a *App) estimatedStreamOutputTokens() int64 {
 	_, _, text, reasoning := a.snapshotStreamState()
 
 	chars := utf8.RuneCountInString(text) + utf8.RuneCountInString(reasoning)
-	if chars == 0 {
-		return 0
-	}
-
 	return int64(chars / 4)
 }
 

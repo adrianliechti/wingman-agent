@@ -64,7 +64,7 @@ func detectAgents() []agentRegistration {
 
 	if _, err := claude.FindPath(); err == nil {
 		out = append(out, agentRegistration{
-			Name:        "Claude Code",
+			Name:        "Claude",
 			Constructor: claudeBackend,
 		})
 	}
@@ -76,10 +76,10 @@ func detectAgents() []agentRegistration {
 	}
 	if path, err := exec.LookPath("copilot"); err == nil {
 		out = append(out, agentRegistration{
-			Name: "GitHub Copilot",
+			Name: "Copilot",
 			Constructor: func(_ context.Context, ws *code.Workspace) (code.Agent, error) {
 				return acp.New(ws, code.AgentDef{
-					Name:    "GitHub Copilot",
+					Name:    "Copilot",
 					Command: path,
 					Args:    []string{"--acp", "--stdio"},
 				})
@@ -115,7 +115,7 @@ func claudeBackend(ctx context.Context, ws *code.Workspace) (code.Agent, error) 
 		Env:  claude.BuildEnv(os.Environ(), cfg),
 		Path: path,
 	})
-	return acp.NewInProcess(ws, "Claude Code", srv, func(conn *acpsdk.AgentSideConnection) {
+	return acp.NewInProcess(ws, "Claude", srv, func(conn *acpsdk.AgentSideConnection) {
 		srv.SetAgentConnection(conn)
 	}, nil)
 }

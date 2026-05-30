@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -81,10 +82,10 @@ func projectDirFor(cwd string) string {
 // to build SessionInfo. The CLI writes one of these per line; unknown lines
 // are ignored.
 type historyHeader struct {
-	Type    string                  `json:"type"`
-	AITitle string                  `json:"aiTitle,omitempty"`
-	Cwd     string                  `json:"cwd,omitempty"`
-	Message historyHeaderMessage    `json:"message,omitempty"`
+	Type    string               `json:"type"`
+	AITitle string               `json:"aiTitle,omitempty"`
+	Cwd     string               `json:"cwd,omitempty"`
+	Message historyHeaderMessage `json:"message,omitempty"`
 }
 
 type historyHeaderMessage struct {
@@ -317,6 +318,24 @@ func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 	return nil
 }
 
+// localCommandTagPattern matches the marker tags the CLI wraps around
+// slash-command invocations and their captured output. The live prompt loop
+// never surfaces these; replay must strip them too or the raw XML leaks into
+// the client on session load.
+// Go's RE2 engine has no backreferences, so each tag pair is spelled out.
+var localCommandTagPattern = regexp.MustCompile(`(?s)<command-name>.*?</command-name>|<command-message>.*?</command-message>|<command-args>.*?</command-args>|<local-command-stdout>.*?</local-command-stdout>|<local-command-stderr>.*?</local-command-stderr>`)
+
+// stripMarkerTags removes local-command marker tags, returning the remaining
+// prose. ok is false when nothing renderable is left (e.g. a message that was
+// purely a slash-command marker), signalling the caller to skip it.
+func stripMarkerTags(text string) (string, bool) {
+	stripped := localCommandTagPattern.ReplaceAllString(text, "")
+	if strings.TrimSpace(stripped) == "" {
+		return "", false
+	}
+	return stripped, true
+}
+
 // replayUserMessage emits either a user_message_chunk (for plain text turns)
 // or one or more tool_call_update completions (for the user-role tool_result
 // echoes the CLI writes after each tool returns).
@@ -334,12 +353,13 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 	// Plain-string content: a real user-typed prompt.
 	var s string
 	if err := json.Unmarshal(msg.Content, &s); err == nil {
-		if s == "" {
+		text, ok := stripMarkerTags(s)
+		if !ok {
 			return nil
 		}
 		return conn.SessionUpdate(ctx, acp.SessionNotification{
 			SessionId: sid,
-			Update:    acp.UpdateUserMessageText(s),
+			Update:    acp.UpdateUserMessageText(text),
 		})
 	}
 
@@ -352,12 +372,13 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			if b.Text == "" {
+			text, ok := stripMarkerTags(b.Text)
+			if !ok {
 				continue
 			}
 			if err := conn.SessionUpdate(ctx, acp.SessionNotification{
 				SessionId: sid,
-				Update:    acp.UpdateUserMessageText(b.Text),
+				Update:    acp.UpdateUserMessageText(text),
 			}); err != nil {
 				return err
 			}

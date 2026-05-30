@@ -21,6 +21,7 @@ import (
 	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
+	"github.com/sergi/go-diff/diffmatchpatch"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -658,9 +659,11 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 	case u.ToolCall != nil:
 		tc := u.ToolCall
 		args := rawValueToString(tc.RawInput)
-		name := string(tc.Kind)
+		// Prefer the descriptive title (e.g. "Bash", "mcp.wingman.web_search",
+		// "Read file '...'") over the generic kind ("execute"/"read"/"edit").
+		name := tc.Title
 		if name == "" {
-			name = tc.Title
+			name = string(tc.Kind)
 		}
 		sess.toolCallsMu.Lock()
 		sess.toolCalls[string(tc.ToolCallId)] = toolCall{name: name, args: args}
@@ -846,14 +849,55 @@ func blockText(b acpsdk.ContentBlock) string {
 func toolCallContentText(items []acpsdk.ToolCallContent) string {
 	var parts []string
 	for _, item := range items {
-		if item.Content == nil {
-			continue
-		}
-		if t := blockText(item.Content.Content); t != "" {
-			parts = append(parts, t)
+		switch {
+		case item.Content != nil:
+			if t := blockText(item.Content.Content); t != "" {
+				parts = append(parts, t)
+			}
+		case item.Diff != nil:
+			// File edits arrive as diff blocks (old/new text). Render them as
+			// a unified-style diff so the change is visible in the tool output
+			// instead of showing nothing.
+			if t := diffBlockText(item.Diff); t != "" {
+				parts = append(parts, t)
+			}
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// diffBlockText renders an ACP diff content block as a line-prefixed diff
+// (" " context, "-" removed, "+" added), preceded by the file path.
+func diffBlockText(d *acpsdk.ToolCallContentDiff) string {
+	old := ""
+	if d.OldText != nil {
+		old = *d.OldText
+	}
+
+	dmp := diffmatchpatch.New()
+	c1, c2, lines := dmp.DiffLinesToChars(old, d.NewText)
+	diffs := dmp.DiffCharsToLines(dmp.DiffMain(c1, c2, false), lines)
+
+	var b strings.Builder
+	if d.Path != "" {
+		b.WriteString(d.Path)
+		b.WriteByte('\n')
+	}
+	for _, df := range diffs {
+		prefix := " "
+		switch df.Type {
+		case diffmatchpatch.DiffInsert:
+			prefix = "+"
+		case diffmatchpatch.DiffDelete:
+			prefix = "-"
+		}
+		for _, ln := range strings.Split(strings.TrimSuffix(df.Text, "\n"), "\n") {
+			b.WriteString(prefix)
+			b.WriteString(ln)
+			b.WriteByte('\n')
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func rawValueToString(v any) string {
