@@ -1207,10 +1207,8 @@ const ToolGroupView = memo(function ToolGroupView({
 }) {
 	return (
 		<div className="mb-4 border-l-2 border-purple pl-3">
-			{entries.map((entry, idx) => {
-				const isLastInGroup = idx === entries.length - 1;
-				const running =
-					isTrailing && isLastInGroup && phase !== "idle" && !entry.toolResult;
+			{entries.map((entry) => {
+				const running = isTrailing && phase !== "idle" && !entry.toolResult;
 				return <ToolRow key={entry.id} entry={entry} running={running} />;
 			})}
 		</div>

@@ -220,28 +220,20 @@ func extractToolCalls(messages []Message) []ToolCall {
 }
 
 func (a *Agent) processToolCalls(ctx context.Context, calls []ToolCall, tools []tool.Tool, yield func(Message, error) bool) error {
-	for _, tc := range calls {
-		callMsg := Message{
-			Role:    RoleAssistant,
-			Content: []Content{{ToolCall: &ToolCall{ID: tc.ID, Name: tc.Name, Args: tc.Args}}},
-		}
+	if len(calls) > 1 && a.allReadOnly(calls, tools) {
+		return a.processToolCallsParallel(ctx, calls, tools, yield)
+	}
 
-		if !yield(callMsg, nil) {
+	return a.processToolCallsSequential(ctx, calls, tools, yield)
+}
+
+func (a *Agent) processToolCallsSequential(ctx context.Context, calls []ToolCall, tools []tool.Tool, yield func(Message, error) bool) error {
+	for _, tc := range calls {
+		if !yield(toolCallMessage(tc), nil) {
 			return errYieldStopped
 		}
 
-		result := a.runSingleToolCall(ctx, tc, tools)
-
-		resultMsg := Message{
-			Role: RoleAssistant,
-			Content: []Content{{ToolResult: &ToolResult{
-				ID:      tc.ID,
-				Name:    tc.Name,
-				Args:    tc.Args,
-				Content: result,
-			}}},
-		}
-
+		resultMsg := toolResultMessage(tc, a.runSingleToolCall(ctx, tc, tools))
 		a.Messages = append(a.Messages, resultMsg)
 
 		if !yield(resultMsg, nil) {
@@ -250,6 +242,67 @@ func (a *Agent) processToolCalls(ctx context.Context, calls []ToolCall, tools []
 	}
 
 	return nil
+}
+
+func (a *Agent) processToolCallsParallel(ctx context.Context, calls []ToolCall, tools []tool.Tool, yield func(Message, error) bool) error {
+	for _, tc := range calls {
+		if !yield(toolCallMessage(tc), nil) {
+			return errYieldStopped
+		}
+	}
+
+	type completion struct {
+		index  int
+		result string
+	}
+
+	results := make([]string, len(calls))
+	ch := make(chan completion, len(calls))
+
+	for i, tc := range calls {
+		go func(i int, tc ToolCall) {
+			ch <- completion{i, a.runSingleToolCall(ctx, tc, tools)}
+		}(i, tc)
+	}
+
+	stopped := false
+	for range calls {
+		c := <-ch
+		results[c.index] = c.result
+
+		if !stopped && !yield(toolResultMessage(calls[c.index], c.result), nil) {
+			stopped = true
+		}
+	}
+
+	for i, tc := range calls {
+		a.Messages = append(a.Messages, toolResultMessage(tc, results[i]))
+	}
+
+	if stopped {
+		return errYieldStopped
+	}
+
+	return nil
+}
+
+func toolCallMessage(tc ToolCall) Message {
+	return Message{
+		Role:    RoleAssistant,
+		Content: []Content{{ToolCall: &ToolCall{ID: tc.ID, Name: tc.Name, Args: tc.Args}}},
+	}
+}
+
+func toolResultMessage(tc ToolCall, result string) Message {
+	return Message{
+		Role: RoleAssistant,
+		Content: []Content{{ToolResult: &ToolResult{
+			ID:      tc.ID,
+			Name:    tc.Name,
+			Args:    tc.Args,
+			Content: result,
+		}}},
+	}
 }
 
 func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool.Tool) string {
@@ -324,6 +377,28 @@ func (a *Agent) executeTool(ctx context.Context, tc ToolCall, tools []tool.Tool)
 	}
 
 	return result
+}
+
+func (a *Agent) allReadOnly(calls []ToolCall, tools []tool.Tool) bool {
+	for _, tc := range calls {
+		t := findTool(tc.Name, tools)
+		if t == nil || t.Effect == nil {
+			return false
+		}
+
+		var args map[string]any
+		if tc.Args != "" {
+			if err := json.Unmarshal([]byte(tc.Args), &args); err != nil {
+				return false
+			}
+		}
+
+		if t.Effect(args) != tool.EffectReadOnly {
+			return false
+		}
+	}
+
+	return true
 }
 
 func findTool(name string, tools []tool.Tool) *tool.Tool {

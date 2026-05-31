@@ -263,9 +263,14 @@ Wingman ships with built-in skills that are available immediately via slash comm
 | Skill | Description |
 |-------|-------------|
 | `/init` | Scan the project and generate an `AGENTS.md` with conventions and build commands |
+| `/feature-dev` | Explore, design, implement, and verify non-trivial feature work |
 | `/commit` | Stage and commit changes with a well-crafted commit message |
 | `/code-review` | Review code changes for correctness, style, and security |
-| `/security-review` | Deep security audit using parallel sub-agents |
+| `/security-review` | Concise read-only security audit using parallel sub-agents |
+| `/vuln-scan` | Static vulnerability scan that writes `VULN-FINDINGS.json` / `.md` |
+| `/triage` | Verify, deduplicate, rank, and route raw security findings |
+| `/patch` | Fix verified security findings and prove the remediation |
+| `/threat-model` | Map assets, entry points, trust boundaries, and top threats |
 | `/simplify` | Review changed code for reuse, quality, and efficiency, then fix issues |
 
 ### Custom Skill Example

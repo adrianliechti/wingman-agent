@@ -1,64 +1,57 @@
 ---
 name: code-review
-description: Review code changes and provide feedback on correctness, style, security, and potential issues.
-when-to-use: When the user wants feedback on their changes before committing or submitting a PR.
+description: High-precision review of code changes for real bugs, security regressions, and explicit project-guideline violations, with independent verification before reporting.
+when-to-use: When the user wants feedback on local changes, a branch diff, or a PR before committing or merging.
 arguments: [ref]
 ---
 # Code Review
 
-Review the current code changes and provide constructive feedback.
+Review the requested changes and report only findings you have verified are real. The goal is a short, trustworthy list a senior engineer would stand behind, not an exhaustive dump. A false positive costs more trust than a missed nitpick.
 
-## Phase 1: Identify Changes
+## Phase 1: Gather context
 
-1. Run `git diff` to see unstaged changes, and `git diff --cached` for staged changes
-2. If a specific ref was provided: `git diff ${ref}`
-3. Run `git log --oneline -5` to understand the repo's conventions
+1. `git diff` for unstaged and `git diff --cached` for staged changes. If a ref was provided: `git diff ${ref}`.
+2. `git status --short` to understand whether staged and unstaged changes are mixed.
+3. `git log --oneline -5` to learn commit and change conventions.
+4. Read root `AGENTS.md`/`CLAUDE.md` (if present) and any such files in directories the diff touches. These encode project-specific rules the review must check against.
 
-## Phase 2: Launch Review Agents in Parallel
+If the diff is empty, say so and stop.
 
-Use the `agent` tool to launch all agents concurrently in a single message. Pass each agent the full diff and the list of changed files.
+## Phase 2: Find -- launch review agents in parallel
 
-### Agent 1: Correctness Review
+Launch these as read-only agents concurrently in a single message. Give each the full diff, changed-file list, and relevant guideline files. Each agent returns candidate findings only: `file:line`, a one-line claim, and why it flagged it. Tell each: report anything with a plausible problem, but skip pure style nitpicks and pre-existing issues on lines this diff did not touch.
 
-For each changed file, check:
+### Agent 1 -- Correctness (`code-reviewer`)
+Logic errors (inverted conditions, off-by-one, wrong operator); edge cases (nil/empty, boundaries, concurrency); error handling (swallowed errors, missing cleanup on error paths); resource leaks (files, connections, goroutines); race conditions on shared mutable state; API-contract violations (wrong types, ignored return values).
 
-1. **Logic errors**: incorrect conditions, off-by-one errors, wrong operator, inverted boolean logic
-2. **Edge cases**: nil/null/empty inputs, boundary values, zero-length collections, concurrent access
-3. **Error handling**: errors swallowed or ignored at system boundaries, missing cleanup on error paths
-4. **Resource leaks**: unclosed files, connections, channels, or goroutines that outlive their scope
-5. **Race conditions**: shared mutable state accessed without synchronization in concurrent code
-6. **API contract violations**: callers passing wrong types, missing required fields, ignoring return values
+### Agent 2 -- Quality & consistency (`code-reviewer`)
+Does the change follow the patterns in the surrounding code? Naming clarity; functions doing too much; inconsistent abstraction level; dead code (unused imports, unreachable branches, commented-out code); duplication that should reuse an existing helper.
 
-### Agent 2: Style & Consistency Review
+### Agent 3 -- Security (`security`)
+Input validation at trust boundaries; injection (SQL, command, XSS, template); secrets or PII in logs/responses; auth/authz gaps introduced by the change. Flag with a concrete data-flow story, not a category name. This is a light pass over the diff only. For a full audit with scan and triage artifacts, point the user to `/vuln-scan` then `/triage`.
 
-For each changed file, check:
+### Agent 4 -- Guideline & contract adherence (`code-reviewer`)
+For each rule in the gathered `AGENTS.md`/`CLAUDE.md`, check the diff complies. A finding here must quote the specific rule it violates. Skip rules that are guidance for *writing* code rather than reviewable invariants.
 
-1. **Codebase consistency**: does the new code follow the patterns and conventions already established in surrounding code?
-2. **Naming clarity**: are new names descriptive, unambiguous, and consistent with existing naming?
-3. **Function complexity**: are new functions doing too much? Could they be decomposed?
-4. **Abstraction level**: does the code operate at a consistent level of abstraction within each function?
-5. **Dead code**: unused imports, unreachable branches, commented-out code
+### Agent 5 -- Historical and local-context check (`code-explorer`)
+Read git history and nearby comments for the changed files. Flag only issues where history or local comments reveal a concrete contract the diff violates.
 
-### Agent 3: Security & Testing Review
+## Phase 3: Verify -- confirm each candidate before it survives
 
-For each changed file, check:
+Collapse duplicates (same `file:line` + same issue). Then, for each remaining candidate, launch a skeptical `code-reviewer` verifier in parallel, one per candidate, with this brief:
 
-**Security:**
-1. Input validation at trust boundaries (user input, external APIs, file reads)
-2. Injection vulnerabilities (SQL, command, XSS, template injection)
-3. Sensitive data exposure (logging secrets, leaking PII, debug info in production)
-4. Authentication/authorization gaps introduced by the change
+> Your default assumption is that this finding is WRONG. Re-read the cited code yourself; don't trust the summary. Confirm the problem is real, is reachable, and is on a line THIS diff introduced or changed. Reject it if: it's pre-existing, a linter/compiler/type-checker would catch it, it's intended behavior, it's a nitpick a senior engineer wouldn't raise, or a guideline finding doesn't map to an actual rule. End with exactly:
+> `VERDICT: real | false-positive`
+> `CONFIDENCE: 0-100`
+> `WHY: <one line citing file:line evidence>`
 
-**Testing:**
-1. Are the changes adequately tested?
-2. Are there edge cases that should have tests?
-3. Do existing tests still cover the changed behavior, or do they need updating?
+Keep only findings with `VERDICT: real` and `CONFIDENCE >= 80`. Be willing to drop a plausible-but-unconfirmed finding rather than ship noise.
 
-## Phase 3: Report
+## Phase 4: Report
 
-Wait for all agents to complete. Aggregate findings and present them organized by file, with specific line references. For each issue:
-- **Severity**: error, warning, or suggestion
-- **What**: the issue
-- **Fix**: how to fix it
+Organize survivors by file with `file:line` references. For each:
+- **Severity**: error / warning / suggestion
+- **What**: the issue (and the rule it violates, for guideline findings)
+- **Fix**: the concrete change
 
-End with a brief overall assessment: is this change ready to merge, or does it need work?
+End with a one-line verdict: ready to merge, or needs work. If nothing survived verification, say so plainly — "No high-confidence issues found" is a valid and valuable result.

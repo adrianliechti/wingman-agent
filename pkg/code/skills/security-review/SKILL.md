@@ -1,144 +1,64 @@
 ---
 name: security-review
-description: Perform a thorough security audit of the codebase, identifying high-confidence exploitable vulnerabilities.
-when-to-use: When the user wants a security review or vulnerability scan of the project or specific files.
+description: End-to-end read-only security audit that scans focus areas and adversarially verifies candidates so only high-confidence exploitable vulnerabilities are reported.
+when-to-use: When the user wants a concise security audit of a project or path. Use vuln-scan plus triage when the user wants durable JSON/markdown artifacts.
 arguments: [path]
 ---
 # Security Review
 
-Perform a security-focused code review to identify HIGH-CONFIDENCE security vulnerabilities with real exploitation potential.
+Find HIGH-CONFIDENCE, genuinely exploitable vulnerabilities — not a checklist of theoretical concerns. The discovery pass casts a wide net; a separate adversarial verification pass is what removes false positives. Every reported finding must survive a skeptic who started by assuming it was wrong.
 
-Use the `agent` tool to launch a dedicated sub-agent for this task. The sub-agent should explore the codebase systematically using only read-only tools (read, ls, find, grep). Do NOT use write, edit, or shell tools during the security review.
+This is **read-only**. Spawn `security` agents for all scanning and verification. Never build, run, install, send requests, or probe the target. If a specific `${path}` was provided, scope everything to it. If the user asks for raw scanner output, backlog triage, or patch-ready artifacts, use `/vuln-scan` and `/triage` instead.
 
-Pass everything below the line as the agent prompt. If a specific path was provided, append "SCOPE: Focus your analysis on the path: ${path}" to the prompt.
+## Phase 1: Scope
 
----
+First fix the **environment**, because reachability — and therefore every verdict — is judged against it: is this internet-facing (HTTP is untrusted), an internal service (callers are authenticated peers), a library/SDK (the caller is the trust boundary), or a CLI/batch tool (operator input is trusted, file/network input is not)? State it up front. It decides cases like an env-var- or CLI-driven sink: operator-controlled and excluded in a CLI, but a true positive in a multi-tenant web service.
 
-You are a senior security engineer conducting a focused security audit of this codebase.
+Then map the project: entry points, trust boundaries, where untrusted input enters, what frameworks/sanitizers are already in use. If a `THREAT_MODEL.md` exists, use its entry points and threat list to focus (and take the environment from it). Otherwise propose 3–10 focus areas of the form `<subsystem> (<file/function>) — <key operations>` and tell the user the environment, focus areas, and source-file count before scanning.
 
-OBJECTIVE:
-Perform a security-focused code review to identify HIGH-CONFIDENCE security vulnerabilities that could have real exploitation potential. This is not a general code review - focus ONLY on concrete, exploitable issues.
+## Phase 2: Find — parallel scanners (wide net)
 
-CRITICAL INSTRUCTIONS:
-1. MINIMIZE FALSE POSITIVES: Only flag issues where you are >80% confident of actual exploitability
-2. AVOID NOISE: Skip theoretical issues, style concerns, or low-impact findings
-3. FOCUS ON IMPACT: Prioritize vulnerabilities that could lead to unauthorized access, data breaches, or system compromise
+Launch one `security` agent per focus area, concurrently. On a small target (<15 source files) do a single pass instead. Give each agent its focus area and this brief:
 
-SECURITY CATEGORIES TO EXAMINE:
+> Authorized static security review; focus area: **{area}**. Reason from the code — do not run anything. Report anything with a plausible exploit path; if unsure, report it with low confidence rather than dropping it (a later pass verifies rigorously). For each finding trace: where untrusted input enters → the path to the sink → the trigger condition.
+>
+> HIGH VALUE: memory safety in C/C++ or `unsafe`/FFI (buffer overflow, use-after-free, integer overflow feeding an allocation/index, format-string, untrusted-size-driven recursion/allocation); injection (SQL/command/LDAP/XPath/template, path traversal, unsafe deserialization, eval); auth/authz bypass, privilege escalation, TOCTOU on a security check; hardcoded secrets, broken crypto/cert validation; secrets or PII in logs/errors.
+>
+> LOW VALUE (note briefly, keep looking): null-pointer deref at small fixed offsets with no attacker control; assertion failures or clean error returns — that is correct handling, not a bug.
+>
+> Report `file:line`, category, severity (HIGH/MEDIUM/LOW), confidence (0–1), a description with the data flow, a concrete exploit scenario, and a fix.
 
-**Input Validation Vulnerabilities:**
-- SQL injection via unsanitized user input
-- Command injection in system calls or subprocesses
-- XXE injection in XML parsing
-- Template injection in templating engines
-- NoSQL injection in database queries
-- Path traversal in file operations
+## Phase 3: Verify — adversarial voting
 
-**Authentication & Authorization Issues:**
-- Authentication bypass logic
-- Privilege escalation paths
-- Session management flaws
-- JWT token vulnerabilities
-- Authorization logic bypasses
+Collapse duplicates first — cluster candidates with the same `file:line` + category (and a shared root cause: one vulnerable helper reported per call site, one missing control reported per endpoint), keep the best-described, and drop the rest so duplicates don't each burn verifiers. Then, for each surviving candidate, spawn **3 independent `security` verifiers in parallel** (one message). They must not see each other's reasoning. Each gets:
 
-**Crypto & Secrets Management:**
-- Hardcoded API keys, passwords, or tokens
-- Weak cryptographic algorithms or implementations
-- Improper key storage or management
-- Cryptographic randomness issues
-- Certificate validation bypasses
+> You are a skeptical security engineer. Default assumption: this finding is WRONG. (1) Read the cited code yourself; scanners misread code, and trusting the summary inherits the misread. (2) Trace reachability backward from the sink — can attacker-controlled input (per the environment from Phase 1) actually reach it? Quote the first call site you read. (3) Hunt for protections: validation, parameterization, framework auto-escaping, type/length bounds, auth gates, dead/test code. (4) Stress-test each protection — does it hold on every path?
+>
+> It is FALSE_POSITIVE even if technically accurate when it matches an exclusion below.
+>
+> End with exactly:
+> `VERDICT: TRUE_POSITIVE | FALSE_POSITIVE | CANNOT_VERIFY`
+> `CONFIDENCE: 0-10`
+> `WHY: <2-4 sentences citing file:line for reachability and protections>`
 
-**Injection & Code Execution:**
-- Remote code execution via deserialization
-- Pickle injection in Python applications
-- YAML deserialization vulnerabilities
-- Eval injection in dynamic code execution
-- XSS vulnerabilities in web applications (reflected, stored, DOM-based)
+**Tally:** keep a finding only if the majority vote is `TRUE_POSITIVE`. A tie or majority `CANNOT_VERIFY` drops it (favor precision). Set its confidence to the mean of the agreeing votes.
 
-**Data Exposure:**
-- Sensitive data logging or storage
-- PII handling violations
-- API endpoint data leakage
-- Debug information exposure
+### Exclusions (do not report, even if technically present)
+DoS / rate-limiting / resource exhaustion (but ReDoS, algorithmic blowup, and untrusted-input-driven unbounded recursion ARE in scope); memory-safety issues in memory-safe languages outside `unsafe`/FFI; behavior that is the intended design; missing hardening or a best-practice gap with no concrete exploit path; secrets stored on disk (managed separately); outdated dependency versions; env vars and CLI flags as the attack vector (operator-controlled) — UNLESS the environment from Phase 1 marks them untrusted; weak random used for non-security purposes (jitter, shuffling, dev fallbacks); identifiers unguessable by construction (UUIDv4, 128-bit+ tokens) flagged as "predictable"; client-side code flagged for a server-side vulnerability class; test files and fixtures; docs/markdown; log spoofing; SSRF controlling only the path (not host/protocol); object-storage `../` that doesn't escape a trust boundary; regex injection; open redirect; missing CSRF on stateless/JWT APIs; missing audit logs; timing attacks on non-crypto operations; XSS in an auto-escaping framework (React/Angular/Vue/Jinja autoescape) unless via a raw-HTML escape hatch (`dangerouslySetInnerHTML`, `bypassSecurityTrustHtml`, `v-html`, `|safe`); user input flowing into an LLM prompt; theoretical-only TOCTOU with no realistic window.
 
-Additional notes:
-- Even if something is only exploitable from the local network, it can still be a HIGH severity issue
+## Phase 4: Rank & report
 
-ANALYSIS METHODOLOGY:
+Derive severity from exploitability, not the category name — list the preconditions and the minimum access level, then take the lower of: `0 preconditions + unauthenticated remote → HIGH`; `1–2 + authenticated → MEDIUM`; `3+ or local-only → LOW`. A matching `THREAT_MODEL.md` threat may raise severity one step (never two). Sort by confidence, then severity. For each:
 
-Phase 1 - Repository Context Research:
-- Use the find and grep tools to identify the project structure
-- Identify existing security frameworks and libraries in use
-- Look for established secure coding patterns in the codebase
-- Examine existing sanitization and validation patterns
-- Understand the project's security model and threat model
-
-Phase 2 - Comparative Analysis:
-- Compare code against existing security patterns in the codebase
-- Identify deviations from established secure practices
-- Look for inconsistent security implementations
-- Flag code that introduces new attack surfaces
-
-Phase 3 - Vulnerability Assessment:
-- Examine source files for security implications
-- Trace data flow from user inputs to sensitive operations
-- Look for privilege boundaries being crossed unsafely
-- Identify injection points and unsafe deserialization
-
-HARD EXCLUSIONS - DO NOT REPORT:
-- Denial of Service (DOS) vulnerabilities or resource exhaustion attacks
-- Secrets or credentials stored on disk (managed separately)
-- Rate limiting concerns or service overload scenarios
-- Memory consumption or CPU exhaustion issues
-- Lack of input validation on non-security-critical fields without proven impact
-- Race conditions or timing attacks that are theoretical rather than practical
-- Vulnerabilities related to outdated third-party libraries (managed separately)
-- Memory safety issues in memory-safe languages (Go, Rust, Java, Python, etc.)
-- Files that are only unit tests or test fixtures
-- Log spoofing concerns
-- SSRF vulnerabilities that only control the path (not host or protocol)
-- Regex injection or regex DOS concerns
-- Findings in documentation or markdown files
-- A lack of audit logs
-- Environment variables and CLI flags (these are trusted values)
-- Resource management issues such as memory or file descriptor leaks
-- Open redirect vulnerabilities (low impact)
-- Missing CSRF protection in stateless/JWT-based APIs
-- Timing attacks on non-cryptographic operations
-
-SEVERITY GUIDELINES:
-- **HIGH**: Directly exploitable vulnerabilities leading to RCE, data breach, or authentication bypass
-- **MEDIUM**: Vulnerabilities requiring specific conditions but with significant impact
-- **LOW**: Defense-in-depth issues or lower-impact vulnerabilities
-
-CONFIDENCE SCORING:
-- 0.9-1.0: Certain exploit path identified
-- 0.8-0.9: Clear vulnerability pattern with known exploitation methods
-- 0.7-0.8: Suspicious pattern requiring specific conditions to exploit
-- Below 0.7: Do not report (too speculative)
-
-OUTPUT FORMAT:
-
-For each finding, output in this format:
-
+```
 ## [SEVERITY] Category: file_path:line_number
+- Confidence: 0.XX
+- Preconditions / access: <what must hold, and unauthenticated-remote | authenticated | local>
+- Description: <root cause and data flow>
+- Exploit scenario: <what input, from where, to what effect>
+- Recommendation: <specific fix>
+```
 
-- **Confidence**: 0.XX
-- **Description**: Clear description of the vulnerability
-- **Exploit Scenario**: How an attacker could exploit this
-- **Recommendation**: Specific fix recommendation
+End with a summary (files reviewed; HIGH/MEDIUM/LOW counts). If nothing survived verification, state "No high-confidence vulnerabilities found." For a confirmed HIGH, recommend a human build a proof-of-concept before relying on the finding — do not write one here.
 
-If no vulnerabilities are found, state: "No security vulnerabilities found."
-
-At the end, provide a summary:
-
-## Summary
-- Files reviewed: N
-- High severity: N
-- Medium severity: N
-- Low severity: N
-
-FINAL REMINDER:
-Focus on HIGH and MEDIUM findings only. Better to miss theoretical issues than flood the report with false positives. Each finding should be something a security engineer would confidently raise in a code review.
-
-Begin your analysis now. Use the file exploration tools to understand the codebase, then analyze the code for security implications.
+If the user wants the findings fixed, write the confirmed findings to `SECURITY-FINDINGS.md` (the format above) and hand off to `patch`, which consumes that file. For a deeper engagement, `threat-model` first maps the attack surface to focus this scan.

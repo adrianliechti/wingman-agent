@@ -35,7 +35,18 @@ func TestAgentToolSchemaIncludesTypedSubagentParameters(t *testing.T) {
 	if !ok {
 		t.Fatalf("agent_type enum has type %T", subagentType["enum"])
 	}
-	for _, name := range []string{"general-purpose", "explore", "verification"} {
+	for _, name := range []string{
+		"general-purpose",
+		"explore",
+		"verification",
+		"security",
+		"code-explorer",
+		"code-architect",
+		"code-reviewer",
+		"code-simplifier",
+		"test-engineer",
+		"legacy-analyst",
+	} {
 		if !contains(enum, name) {
 			t.Fatalf("agent_type enum = %#v, missing %q", enum, name)
 		}
@@ -46,9 +57,9 @@ func TestAgentToolRejectsInvalidExecuteInputs(t *testing.T) {
 	agentTool := Tools(&agent.Config{})[0]
 
 	cases := []struct {
-		name     string
-		args     map[string]any
-		wantSub  string
+		name    string
+		args    map[string]any
+		wantSub string
 	}{
 		{"missing description", map[string]any{"prompt": "p", "agent_type": "explore"}, "description is required"},
 		{"blank description", map[string]any{"description": "   ", "prompt": "p", "agent_type": "explore"}, "description is required"},
@@ -82,6 +93,13 @@ func TestAgentToolClassifiesEffectByAgentType(t *testing.T) {
 		{"explore", map[string]any{"agent_type": "explore"}, tool.EffectReadOnly},
 		{"explore trims case", map[string]any{"agent_type": " Explore "}, tool.EffectReadOnly},
 		{"verification", map[string]any{"agent_type": "verification"}, tool.EffectMutates},
+		{"security", map[string]any{"agent_type": "security"}, tool.EffectReadOnly},
+		{"code explorer", map[string]any{"agent_type": "code-explorer"}, tool.EffectReadOnly},
+		{"code architect", map[string]any{"agent_type": "code-architect"}, tool.EffectReadOnly},
+		{"code reviewer", map[string]any{"agent_type": "code-reviewer"}, tool.EffectReadOnly},
+		{"code simplifier", map[string]any{"agent_type": "code-simplifier"}, tool.EffectMutates},
+		{"test engineer", map[string]any{"agent_type": "test-engineer"}, tool.EffectMutates},
+		{"legacy analyst", map[string]any{"agent_type": "legacy-analyst"}, tool.EffectReadOnly},
 	}
 
 	for _, tt := range tests {

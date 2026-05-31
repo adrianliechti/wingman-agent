@@ -1,11 +1,13 @@
 ---
 name: simplify
-description: Review changed code for reuse, quality, and efficiency, then fix any issues found.
+description: Behavior-preserving cleanup of recently changed code for reuse, clarity, consistency, and efficiency.
 when-to-use: After completing code changes, to clean up and improve code quality before committing.
 ---
 # Simplify: Code Review and Cleanup
 
-Review all changed files for reuse, quality, and efficiency. Fix any issues found.
+Review all changed files for reuse, quality, and efficiency, then fix what's worth fixing. This is a quality pass, not a bug hunt — use `/code-review` for correctness.
+
+**Preserve behavior exactly.** Every change here must leave functionality, outputs, and public contracts identical — you are changing *how* the code reads, never *what* it does. Prefer clear, explicit code over clever or maximally compact code; readability wins over fewer lines.
 
 ## Phase 1: Identify Changes
 
@@ -13,9 +15,9 @@ Run `git diff` (or `git diff HEAD` if there are staged changes) to see what chan
 
 ## Phase 2: Launch Three Review Agents in Parallel
 
-Use the `agent` tool to launch all three agents concurrently in a single message. Pass each agent the full diff so it has the complete context.
+Launch all three as agents concurrently in a single message. Pass each the full diff so it has complete context.
 
-### Agent 1: Code Reuse Review
+### Agent 1: Code Reuse Review (`code-simplifier`)
 
 For each change:
 
@@ -23,7 +25,7 @@ For each change:
 2. **Flag any new function that duplicates existing functionality.** Suggest the existing function to use instead.
 3. **Flag any inline logic that could use an existing utility** -- hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
 
-### Agent 2: Code Quality Review
+### Agent 2: Code Quality Review (`code-simplifier`)
 
 Review the same changes for hacky patterns:
 
@@ -34,7 +36,7 @@ Review the same changes for hacky patterns:
 5. **Stringly-typed code**: using raw strings where constants, enums, or typed values already exist in the codebase
 6. **Unnecessary comments**: comments explaining WHAT the code does (well-named identifiers already do that), narrating the change, or referencing the task/caller -- delete; keep only non-obvious WHY (hidden constraints, subtle invariants, workarounds)
 
-### Agent 3: Efficiency Review
+### Agent 3: Efficiency Review (`code-simplifier`)
 
 Review the same changes for efficiency:
 

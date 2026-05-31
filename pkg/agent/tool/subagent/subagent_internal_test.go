@@ -171,6 +171,27 @@ func TestToolsForTypeGeneralPurposeKeepsMutating(t *testing.T) {
 	}
 }
 
+func TestSpecializedReadOnlyAgentsFilterLikeExplore(t *testing.T) {
+	all := []tool.Tool{
+		{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly)},
+		{Name: "write", Effect: tool.StaticEffect(tool.EffectMutates)},
+		{Name: "shell", Effect: tool.StaticEffect(tool.EffectDynamic), Execute: func(context.Context, map[string]any) (string, error) { return "ok", nil }},
+	}
+
+	for _, name := range []string{"code-explorer", "code-architect", "code-reviewer", "legacy-analyst"} {
+		t.Run(name, func(t *testing.T) {
+			filtered := toolsForType(all, subagentTypes[name])
+			names := toolNames(filtered)
+			if !containsName(names, "read") || !containsName(names, "shell") {
+				t.Fatalf("%s must keep read + shell, got %v", name, names)
+			}
+			if containsName(names, "write") {
+				t.Fatalf("%s must reject write, got %v", name, names)
+			}
+		})
+	}
+}
+
 func toolNames(tools []tool.Tool) []string {
 	out := make([]string, len(tools))
 	for i, t := range tools {

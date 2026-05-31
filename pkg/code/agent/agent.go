@@ -72,8 +72,9 @@ type sessionState struct {
 	projectInstructionsCache  string
 	projectInstructionsMtimes map[string]time.Time
 
-	cancelMu sync.Mutex
-	cancelFn context.CancelFunc
+	cancelMu  sync.Mutex
+	cancelFn  context.CancelFunc
+	cancelGen uint64
 }
 
 // New constructs an in-process [code.Agent] rooted at the workspace.
@@ -337,17 +338,23 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) it
 	}
 
 	sendCtx, cancel := context.WithCancel(code.WithSessionID(ctx, id))
-	s.setCancel(cancel)
 	stream := s.aa.Send(sendCtx, input)
 	if stream == nil {
+		// The core agent queued this input onto the turn that is already
+		// running; that turn owns the active cancel func and will drain and
+		// stream our input itself. Leave its cancel untouched (setCancel here
+		// would abort it) and just discard the context we won't use.
 		cancel()
-		s.clearCancel()
 		return nil
 	}
 
+	// We own a fresh turn. Register our cancel and tag it with a generation so
+	// a previously finishing turn's deferred clearCancel can't wipe ours.
+	gen := s.setCancel(cancel)
+
 	return func(yield func(harness.Message, error) bool) {
 		defer func() {
-			s.clearCancel()
+			s.clearCancel(gen)
 			cancel()
 		}()
 		for msg, err := range stream {
@@ -501,19 +508,31 @@ func (a *Agent) buildElicit() *tool.Elicitation {
 	}
 }
 
-func (s *sessionState) setCancel(fn context.CancelFunc) {
+// setCancel registers the cancel func for a newly started turn and returns its
+// generation. It cancels any previous func defensively; under the core agent's
+// one-turn-at-a-time guarantee the previous turn has already cleared its func,
+// so prev is normally nil.
+func (s *sessionState) setCancel(fn context.CancelFunc) uint64 {
 	s.cancelMu.Lock()
 	prev := s.cancelFn
+	s.cancelGen++
+	gen := s.cancelGen
 	s.cancelFn = fn
 	s.cancelMu.Unlock()
 	if prev != nil {
 		prev()
 	}
+	return gen
 }
 
-func (s *sessionState) clearCancel() {
+// clearCancel drops the registered func only if it is still the one tagged with
+// gen, so a finishing turn cannot wipe a newer turn's cancel func when turns
+// chain quickly (e.g. a queued follow-up starting as the prior turn ends).
+func (s *sessionState) clearCancel(gen uint64) {
 	s.cancelMu.Lock()
-	s.cancelFn = nil
+	if s.cancelGen == gen {
+		s.cancelFn = nil
+	}
 	s.cancelMu.Unlock()
 }
 
