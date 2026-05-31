@@ -45,7 +45,7 @@ Work through the blueprint in small, reviewable phases:
 4. Follow local style and helper APIs instead of inventing parallel patterns.
 5. Leave unrelated refactors for later.
 
-Use `test-engineer` for tests when the behavior is broad, stateful, security-sensitive, or regression-prone. For a narrow change, add focused tests directly.
+Use `test-engineer` for tests when the behavior is broad, stateful, security-sensitive, or regression-prone. For a narrow change, add focused tests directly. When you delegate implementation or tests to a mutating subagent, give it a narrow file scope and tell it not to touch unrelated files.
 
 ## Phase 4: Review and verify
 
@@ -64,4 +64,3 @@ Summarize:
 - key files touched;
 - tests/checks run and their result;
 - any deliberate non-goals, follow-up risks, or manual verification still needed.
-

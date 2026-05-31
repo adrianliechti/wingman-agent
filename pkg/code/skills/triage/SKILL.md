@@ -2,17 +2,23 @@
 name: triage
 description: Verify, deduplicate, rank, and route raw security findings from VULN-FINDINGS.json, scanner output, or a markdown report, then write TRIAGE.json and TRIAGE.md.
 when-to-use: When asked to validate scanner output, prioritize vulnerabilities, reduce false positives, review a security backlog, or prepare findings for patching.
-arguments: [findings]
 ---
 # Security Triage
 
-Turn raw security findings into a short list of verified, ranked, owned issues. Prefer `VULN-FINDINGS.json` from `/vuln-scan`, but accept a JSON file, JSONL file, directory of reports, or markdown report in `${findings}`.
+Turn raw security findings into a short list of verified, ranked, owned issues. Prefer `VULN-FINDINGS.json` from `/vuln-scan`, but accept a JSON file, JSONL file, directory of reports, or markdown report.
+
+Arguments: `${ARGUMENTS}`. Parse them yourself:
+- first positional: findings path (required);
+- `--repo PATH`: target repository/source root (default from findings `target`, else `.`);
+- `--votes N`: independent verifier votes per candidate (default 3; use an odd number);
+- `--keep-ties`: keep split votes as `needs_manual_test` instead of dropping them;
+- `--auto`: do not ask clarifying questions; use defaults.
 
 Do not build, run, install, fuzz, send requests, or use the network. Verification is source reading only. You may write only `TRIAGE.json` and `TRIAGE.md`.
 
 ## Phase 0: Parse inputs
 
-Parse `${findings}`. If no path was provided, ask for one. Infer repo path from the findings target when present; otherwise use `.` and state that assumption.
+Parse `${ARGUMENTS}`. If no findings path was provided, ask for one. Infer repo path from `--repo`, then from the findings target when present; otherwise use `.` and state that assumption. Reject unknown flags instead of silently treating them as paths.
 
 Recognized fields:
 
@@ -38,7 +44,7 @@ Establish verification context before judging reachability:
 - Environment: internet-facing service, internal authenticated service, library/SDK, CLI/batch, embedded, or unknown.
 - Trust boundary: where attacker-controlled input enters.
 - Threat model: if `THREAT_MODEL.md` exists in the repo or target path, read it and carry its threats into ranking.
-- Noise policy: default to precision. A finding survives only with majority true-positive votes.
+- Noise policy: default to precision. A finding survives only with majority true-positive votes unless `--keep-ties` was set.
 
 If the environment is unknown, assume externally reachable entry points are untrusted, but flag trust-boundary assumptions in rationale.
 
@@ -54,7 +60,7 @@ Keep the clearest representative and record duplicate ids in `duplicates`.
 
 ## Phase 3: Adversarial verification
 
-For each candidate, launch 3 independent `security` verifiers in parallel. They must not see each other's reasoning. Use this brief:
+For each candidate, launch the configured number of independent `security` verifiers in parallel. They must not see each other's reasoning. Use this brief:
 
 ```text
 You are a skeptical security engineer. Default assumption: this finding is WRONG.
@@ -90,7 +96,7 @@ CONFIDENCE: 0-10
 WHY: 2-4 sentences citing file:line evidence
 ```
 
-Keep a finding only if a majority returns `TRUE_POSITIVE`. A tie or majority `CANNOT_VERIFY` is dropped by default and recorded with the verifier rationales.
+Keep a finding only if a majority returns `TRUE_POSITIVE`. A tie or majority `CANNOT_VERIFY` is dropped by default and recorded with the verifier rationales. If `--keep-ties` was set, keep split votes as `needs_manual_test`, never as confirmed true positives.
 
 ## Phase 4: Severity and ownership
 
@@ -109,7 +115,7 @@ Write `TRIAGE.json`:
 ```json
 {
   "schema": "wingman.triage.v1",
-  "source": "<findings>",
+  "source": "<findings path>",
   "repo": "<repo>",
   "triage_context": {},
   "findings": [],
@@ -133,4 +139,3 @@ Write `TRIAGE.md` sorted by severity then confidence, with one section per survi
 ```
 
 End with counts: true positives, false positives, cannot verify, skipped. If no finding survives, state "No verified vulnerabilities found."
-

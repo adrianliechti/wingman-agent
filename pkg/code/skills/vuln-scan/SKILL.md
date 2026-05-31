@@ -2,26 +2,32 @@
 name: vuln-scan
 description: Static source-code vulnerability scan that maps focus areas, fans out read-only security agents, and writes VULN-FINDINGS.json plus VULN-FINDINGS.md for triage.
 when-to-use: When asked to scan code for vulnerabilities, find security bugs, produce raw security findings, or run the first stage before triage.
-arguments: [path]
 ---
 # Vulnerability Scan
 
-Run an authorized static scan of `${path}` and write raw findings for `/triage`. This is read-only with respect to target code: do not build, run, install dependencies, send requests, or probe services. You may write only `VULN-FINDINGS.json` and `VULN-FINDINGS.md` in the current workspace.
+Run an authorized static scan and write raw findings for `/triage`. This is read-only with respect to target code: do not build, run, install dependencies, send requests, or probe services. You may write only `VULN-FINDINGS.json` and `VULN-FINDINGS.md` in the current workspace.
 
-Default `${path}` to `.`.
+Arguments: `${ARGUMENTS}`. Parse them yourself:
+- first positional: target path (default `.`);
+- `--focus TEXT`: add or restrict to a focus area; may appear more than once;
+- `--single`: skip fan-out and do one pass;
+- `--no-score`: skip Phase 4 confidence calibration.
+
+Reject unknown flags instead of silently treating them as paths.
 
 ## Phase 1: Scope
 
 1. Resolve the target path and count source files.
-2. If `${path}/THREAT_MODEL.md` exists, read its entry-points, trust-boundaries, and threats tables.
-3. If no threat model exists, do quick recon with a `code-explorer` agent: entry points, trust boundaries, source languages, frameworks, dangerous sinks, and 3-10 focus areas of the form `<subsystem> (<file/function>) -- <key operations>`.
-4. State the source-file count, assumed environment, trust boundary, and focus areas before scanning.
+2. If `<target>/THREAT_MODEL.md` exists, read its entry-points, trust-boundaries, and threats tables.
+3. If `--focus` was provided, use exactly those focus areas.
+4. If no threat model or `--focus` exists, do quick recon with a `code-explorer` agent: entry points, trust boundaries, source languages, frameworks, dangerous sinks, and 3-10 focus areas of the form `<subsystem> (<file/function>) -- <key operations>`.
+5. State the source-file count, assumed environment, trust boundary, and focus areas before scanning.
 
-If `${path}` has no source files, stop with a clear error.
+If the target path has no source files, stop with a clear error.
 
 ## Phase 2: Fan out
 
-Unless the target is tiny (<15 source files), launch one `security` agent per focus area in parallel. Cap at 10 agents. On tiny targets, run a single `security` pass.
+Unless the target is tiny (<15 source files) or `--single` was set, launch one `security` agent per focus area in parallel. Cap at 10 agents. On tiny targets, run a single `security` pass.
 
 Each agent gets this brief:
 
@@ -74,7 +80,7 @@ If nothing is reportable, say what you covered and return no finding blocks.
 
 ## Phase 4: Confidence calibration
 
-For each candidate, launch one shallow `security` verifier in parallel:
+Skip this phase if `--no-score` was set. Otherwise, for each candidate, launch one shallow `security` verifier in parallel:
 
 ```text
 Score one raw security finding. Do not execute code or use the network.
@@ -104,5 +110,4 @@ Write `VULN-FINDINGS.json`:
 }
 ```
 
-Write `VULN-FINDINGS.md` with the same findings in human-readable form. End by telling the user the counts and that `/triage VULN-FINDINGS.json --repo ${path}` is the next step.
-
+Write `VULN-FINDINGS.md` with the same findings in human-readable form. End by telling the user the counts and that `/triage VULN-FINDINGS.json --repo <target>` is the next step.

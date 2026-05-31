@@ -51,7 +51,7 @@ var subagentTypes = map[string]subagentType{
 	},
 	"security": {
 		Instructions:        securityInstructions,
-		AllowTool:           allowReadOnlyTool,
+		AllowTool:           allowStaticSecurityTool,
 		WrapDynamicReadOnly: true,
 	},
 	"code-explorer": {
@@ -315,6 +315,15 @@ func allowReadOnlyTool(t tool.Tool) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func allowStaticSecurityTool(t tool.Tool) bool {
+	switch t.Name {
+	case "web_fetch", "web_search":
+		return false
+	default:
+		return allowReadOnlyTool(t)
 	}
 }
 

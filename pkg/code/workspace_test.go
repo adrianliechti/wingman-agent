@@ -230,6 +230,39 @@ func TestMemoryContent_CacheInvalidatesOnFileChange(t *testing.T) {
 	}
 }
 
+func TestLoadBundledSkillsIncludesCoreWorkflows(t *testing.T) {
+	skills := loadBundledSkills()
+
+	names := make(map[string]bool, len(skills))
+	for _, sk := range skills {
+		names[sk.Name] = true
+		if !sk.Bundled {
+			t.Errorf("skill %q should be marked bundled", sk.Name)
+		}
+		if strings.TrimSpace(sk.Content) == "" {
+			t.Errorf("skill %q has empty content", sk.Name)
+		}
+	}
+
+	for _, name := range []string{
+		"code-review",
+		"commit",
+		"feature-dev",
+		"init",
+		"memory",
+		"patch",
+		"security-review",
+		"simplify",
+		"threat-model",
+		"triage",
+		"vuln-scan",
+	} {
+		if !names[name] {
+			t.Errorf("bundled skill %q was not loaded; got %v", name, names)
+		}
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {

@@ -74,6 +74,28 @@ func TestAllowReadOnlyTool(t *testing.T) {
 	}
 }
 
+func TestAllowStaticSecurityToolRejectsNetworkTools(t *testing.T) {
+	tests := []struct {
+		name string
+		tool tool.Tool
+		want bool
+	}{
+		{"read-only allowed", tool.Tool{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly)}, true},
+		{"shell dynamic allowed for wrapping", tool.Tool{Name: "shell", Effect: tool.StaticEffect(tool.EffectDynamic)}, true},
+		{"web fetch rejected", tool.Tool{Name: "web_fetch", Effect: tool.StaticEffect(tool.EffectReadOnly)}, false},
+		{"web search rejected", tool.Tool{Name: "web_search", Effect: tool.StaticEffect(tool.EffectReadOnly)}, false},
+		{"write rejected", tool.Tool{Name: "write", Effect: tool.StaticEffect(tool.EffectMutates)}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := allowStaticSecurityTool(tt.tool); got != tt.want {
+				t.Fatalf("allowStaticSecurityTool() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAllowNonAgentTool(t *testing.T) {
 	if allowNonAgentTool(tool.Tool{Name: "agent"}) {
 		t.Error("agent must be rejected")

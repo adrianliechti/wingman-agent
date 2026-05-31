@@ -15,9 +15,9 @@ Run `git diff` (or `git diff HEAD` if there are staged changes) to see what chan
 
 ## Phase 2: Launch Three Review Agents in Parallel
 
-Launch all three as agents concurrently in a single message. Pass each the full diff so it has complete context.
+Launch all three as `code-reviewer` agents concurrently in a single message. Pass each the full diff so it has complete context. These discovery agents are read-only; you make the edits after aggregating their findings.
 
-### Agent 1: Code Reuse Review (`code-simplifier`)
+### Agent 1: Code Reuse Review
 
 For each change:
 
@@ -25,7 +25,7 @@ For each change:
 2. **Flag any new function that duplicates existing functionality.** Suggest the existing function to use instead.
 3. **Flag any inline logic that could use an existing utility** -- hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
 
-### Agent 2: Code Quality Review (`code-simplifier`)
+### Agent 2: Code Quality Review
 
 Review the same changes for hacky patterns:
 
@@ -36,7 +36,7 @@ Review the same changes for hacky patterns:
 5. **Stringly-typed code**: using raw strings where constants, enums, or typed values already exist in the codebase
 6. **Unnecessary comments**: comments explaining WHAT the code does (well-named identifiers already do that), narrating the change, or referencing the task/caller -- delete; keep only non-obvious WHY (hidden constraints, subtle invariants, workarounds)
 
-### Agent 3: Efficiency Review (`code-simplifier`)
+### Agent 3: Efficiency Review
 
 Review the same changes for efficiency:
 

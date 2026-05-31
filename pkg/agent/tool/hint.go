@@ -31,7 +31,15 @@ func ExtractHint(argsJSON, toolName string) string {
 
 	if desc, ok := args["description"]; ok {
 		if str, ok := desc.(string); ok && str != "" {
-			return strings.Join(strings.Fields(str), " ")
+			label := strings.Join(strings.Fields(str), " ")
+			// The agent tool fans out: several concurrent calls often share the
+			// same description, so append the agent_type to disambiguate them.
+			if toolName == "agent" {
+				if at, ok := args["agent_type"].(string); ok && at != "" {
+					label += " (" + strings.TrimSpace(at) + ")"
+				}
+			}
+			return label
 		}
 	}
 
