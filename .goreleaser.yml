@@ -6,8 +6,16 @@ before:
     - go mod tidy
 
 builds:
-  - binary: wingman
+  - id: wingman
+    binary: wingman
     main: ./cmd/wingman
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
     goos:
       - linux
       - windows
@@ -16,14 +24,46 @@ builds:
       - amd64
       - arm64
 
+archives:
+  - id: wingman
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    # Windows users expect zip.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
 checksum:
   name_template: "checksums.txt"
 
+report_sizes: true
+
 changelog:
   sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
 
-brews:
-  - repository:
+# macOS: Homebrew cask (formula `brews` was deprecated in GoReleaser v2).
+homebrew_casks:
+  - name: wingman
+    repository:
       owner: adrianliechti
       name: homebrew-tap
 
@@ -31,6 +71,19 @@ brews:
       name: Adrian Liechti
       email: adrian@localhost
 
+    homepage: "https://github.com/adrianliechti/wingman-agent"
+    description: "AI-powered coding assistant for your terminal"
+
+    # Unsigned binary: strip the macOS quarantine attribute so it runs without
+    # a Gatekeeper prompt. (Casks only install on macOS; the guard is defensive.)
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/wingman"]
+          end
+
+# Windows: Scoop bucket.
 scoops:
   - repository:
       owner: adrianliechti
