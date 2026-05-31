@@ -52,8 +52,9 @@ type Server struct {
 	// goroutines tie their cancellation to this — NOT to any HTTP request
 	// ctx. Tying a Send to r.Context() would cancel the agent mid-turn on
 	// a WS disconnect/reconnect.
-	ctx context.Context
-	mux *http.ServeMux
+	ctx     context.Context
+	mux     *http.ServeMux
+	handler http.Handler
 
 	mu    sync.Mutex
 	agent code.Agent // active backend (wingman by default; swapped on /api/agent)
@@ -122,6 +123,10 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 
 	s.mux = http.NewServeMux()
 	s.registerRoutes(s.mux)
+
+	csrf := http.NewCrossOriginProtection()
+	s.handler = csrf.Handler(s.mux)
+
 	return s, nil
 }
 
@@ -139,7 +144,7 @@ func (s *Server) Close() {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	s.handler.ServeHTTP(w, r)
 }
 
 // activeAgent returns the currently selected backend under the agent mu.
