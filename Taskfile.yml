@@ -10,18 +10,18 @@ tasks:
       - npm install
       - npm run build
 
-  cli:
+  run:cli:
     desc: Run the agent TUI
     cmds:
       - go run ./cmd/wingman
 
-  server:
-    desc: Run the server
+  run:web:
+    desc: Run the web server
     deps: [ui]
     cmds:
       - go run ./cmd/wingman server
 
-  app:
+  run:app:
     desc: Build and launch the Wails desktop app
     deps: [ui]
     dir: app
@@ -29,11 +29,26 @@ tasks:
       - go run github.com/wailsapp/wails/v2/cmd/wails@v2.12.0 build -clean
       - open -n "build/bin/Wingman Agent.app"
 
-  install:
-    desc: Install wingman to GOPATH/bin or GOBIN
+  install:cli:
+    desc: Build and install the CLI to GOPATH/bin or GOBIN
     deps: [ui]
     cmds:
       - dest="$(go env GOBIN)" && [ -z "$dest" ] && dest="$(go env GOPATH)/bin" && go build -o "$dest/wingman" ./cmd/wingman
+
+  install:app:
+    desc: Build and install the desktop app to /Applications (macOS)
+    deps: [ui]
+    dir: app
+    cmds:
+      - go run github.com/wailsapp/wails/v2/cmd/wails@v2.12.0 build -clean
+      - rm -rf "/Applications/Wingman Agent.app"
+      - cp -R "build/bin/Wingman Agent.app" "/Applications/Wingman Agent.app"
+
+  install:
+    desc: Build and install both the CLI and the desktop app locally
+    cmds:
+      - task: install:cli
+      - task: install:app
 
   release:cli:
     desc: Release the CLI for all platforms + Homebrew cask + Scoop (needs GITHUB_TOKEN)
