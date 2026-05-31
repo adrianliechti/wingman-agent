@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,12 @@ I treat the user's time as the scarcest resource, and their trust as the most va
 `
 
 func (s *Store) RemoveAgent(name string) error {
+	// Backstop against path traversal: `name` is joined into a path below and
+	// os.RemoveAll is destructive, so refuse anything that isn't a single safe
+	// path component even if an upstream caller skipped validation.
+	if !filepath.IsLocal(name) || name == "global" || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("invalid agent name %q", name)
+	}
 	return os.RemoveAll(s.AgentDir(name))
 }
 

@@ -127,6 +127,103 @@ func TestClassifyEffect(t *testing.T) {
 	}
 }
 
+func TestClassifyEffect_WrapperBypass(t *testing.T) {
+	// Destructive commands hidden behind a runner/prefix must still be
+	// classified EffectDangerous so the confirmation prompt fires.
+	dangerous := []string{
+		"env rm -rf tmp",
+		"timeout 5 rm -rf tmp",
+		"timeout -s KILL 5 rm -rf tmp",
+		"nice rm -rf tmp",
+		"nice -n 10 rm -rf tmp",
+		"command rm -rf tmp",
+		"nohup rm -rf tmp",
+		"\\rm -rf tmp",
+		"FOO=1 rm -rf tmp",
+		"FOO=1 BAR=2 rm -rf tmp",
+		"env FOO=1 rm -rf tmp",
+		"echo x | xargs rm -rf",
+		"env sudo reboot",
+	}
+	for _, cmd := range dangerous {
+		t.Run("dangerous/"+cmd, func(t *testing.T) {
+			if got := ClassifyEffect(map[string]any{"command": cmd}); got != tool.EffectDangerous {
+				t.Fatalf("ClassifyEffect(%q) = %q, want EffectDangerous", cmd, got)
+			}
+		})
+	}
+
+	// A runner that still wraps a benign read-only command stays read-only.
+	readOnly := []string{
+		"env ls",
+		"nice cat foo.txt",
+		"command -v ls",
+	}
+	for _, cmd := range readOnly {
+		t.Run("readonly/"+cmd, func(t *testing.T) {
+			if got := ClassifyEffect(map[string]any{"command": cmd}); got != tool.EffectReadOnly {
+				t.Fatalf("ClassifyEffect(%q) = %q, want EffectReadOnly", cmd, got)
+			}
+		})
+	}
+}
+
+func TestClassifyEffect_LoneAmpersandSeparator(t *testing.T) {
+	// A lone `&` backgrounds the first command and starts a new one; a
+	// destructive command after it must not be hidden in the prior segment.
+	cases := []struct {
+		command string
+		want    tool.Effect
+	}{
+		{"sleep 0 & rm -rf tmp", tool.EffectDangerous},
+		{"echo hi & rm -rf tmp", tool.EffectDangerous},
+		{"true & git push --force", tool.EffectDangerous},
+		// `&>` and `>&` are redirections, not separators.
+		{"echo hi &> out.txt", tool.EffectMutates},
+	}
+	for _, tt := range cases {
+		t.Run(tt.command, func(t *testing.T) {
+			if got := ClassifyEffect(map[string]any{"command": tt.command}); got != tt.want {
+				t.Fatalf("ClassifyEffect(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsReadOnlyCommand_WriteCapableAllowlistedTools(t *testing.T) {
+	// Allowlisted tools that can write files via flags (not redirection) must
+	// not classify as read-only.
+	notReadOnly := []string{
+		"sort -o victim.txt input.txt",
+		"sort --output=victim.txt input.txt",
+		"yq -i '.a=1' config.yaml",
+		"yq --in-place '.a=1' config.yaml",
+		"jq -i '.a=1' config.json",
+		"xq -i '.a=1' config.xml",
+	}
+	for _, cmd := range notReadOnly {
+		t.Run("write/"+cmd, func(t *testing.T) {
+			if IsReadOnlyCommand(cmd) {
+				t.Fatalf("IsReadOnlyCommand(%q) = true, want false", cmd)
+			}
+		})
+	}
+
+	// The same tools without the write flag remain read-only.
+	readOnly := []string{
+		"sort input.txt",
+		"yq '.a' config.yaml",
+		"jq '.a' config.json",
+	}
+	for _, cmd := range readOnly {
+		t.Run("read/"+cmd, func(t *testing.T) {
+			if !IsReadOnlyCommand(cmd) {
+				t.Fatalf("IsReadOnlyCommand(%q) = false, want true", cmd)
+			}
+		})
+	}
+}
+
 func TestShellElicitationOnlyPromptsForDangerousCommands(t *testing.T) {
 	ctx := context.Background()
 	workDir := t.TempDir()

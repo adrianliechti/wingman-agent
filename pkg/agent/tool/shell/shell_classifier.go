@@ -321,6 +321,27 @@ func splitCommandSegments(command string) []string {
 			continue
 		}
 
+		// A lone `&` backgrounds the preceding command and starts a new one;
+		// treat it as a separator so a destructive command after it isn't
+		// hidden inside the previous segment. Redirections like `>&`/`<&`/`&>`
+		// are handled by the redirection check, but here a bare `&` not part
+		// of `&&` (already handled above) is a command separator.
+		if ch == '&' {
+			var prev byte
+			if i > 0 {
+				prev = command[i-1]
+			}
+			next := byte(0)
+			if i+1 < len(command) {
+				next = command[i+1]
+			}
+			if prev != '>' && prev != '<' && next != '>' {
+				flush()
+				i++
+				continue
+			}
+		}
+
 		if ch == '|' || ch == ';' || ch == '\n' {
 			flush()
 			i++
@@ -336,15 +357,149 @@ func splitCommandSegments(command string) []string {
 	return segments
 }
 
+// commandRunners are commands that take another command as their operands
+// (e.g. `env rm -rf x`, `timeout 5 rm -rf x`). The classifier must look past
+// the runner to the wrapped command, otherwise a destructive command can be
+// hidden behind a benign-looking runner and skip the confirmation prompt.
+var commandRunners = map[string]bool{
+	"env":     true,
+	"xargs":   true,
+	"timeout": true,
+	"nice":    true,
+	"command": true,
+	"time":    true,
+	"nohup":   true,
+	"stdbuf":  true,
+	"setsid":  true,
+	"ionice":  true,
+	"taskset": true,
+	"setarch": true,
+}
+
+// unwrapCommandWords peels leading VAR=val assignments, a leading backslash on
+// the command name, and known runner prefixes (with their own flags/operands)
+// so classification inspects the real command rather than the wrapper. It
+// returns the resolved words, the lower-cased base command name, and whether a
+// runner prefix consumed the entire input without revealing a real command
+// (unresolved, which callers must treat conservatively).
+func unwrapCommandWords(words []string) (resolved []string, cmd string, unresolved bool) {
+	for {
+		// Strip leading VAR=value environment assignments.
+		for len(words) > 0 && isEnvAssignment(words[0]) {
+			words = words[1:]
+		}
+		if len(words) == 0 {
+			return nil, "", true
+		}
+
+		// A leading backslash bypasses alias/function lookup in the shell but
+		// still runs the underlying command (e.g. `\rm`).
+		name := strings.TrimPrefix(words[0], `\`)
+		base := strings.ToLower(filepath.Base(name))
+
+		if !commandRunners[base] {
+			return words, base, false
+		}
+
+		// Skip the runner's own flags and operands to reach the wrapped
+		// command. For env/nice/timeout/etc. this means skipping leading
+		// `-flag`/`-flag value` tokens (and, for env, further VAR=val pairs).
+		rest := words[1:]
+		rest = skipRunnerFlags(base, rest)
+		if len(rest) == 0 {
+			return nil, base, true
+		}
+		words = rest
+	}
+}
+
+// skipRunnerFlags advances past a runner's own flag arguments so the next
+// token is the wrapped command. It is deliberately conservative: an unknown
+// flag that consumes a value would mis-align, so when in doubt we stop at the
+// first non-flag token and let the caller classify it.
+func skipRunnerFlags(runner string, args []string) []string {
+	for len(args) > 0 {
+		arg := args[0]
+		if !strings.HasPrefix(arg, "-") {
+			break
+		}
+		// `--` ends option parsing; the wrapped command follows.
+		if arg == "--" {
+			return args[1:]
+		}
+		// Flags that take a separate value for common runners.
+		switch runner {
+		case "timeout":
+			// timeout [OPTION] DURATION COMMAND — `-s SIG`/`-k DURATION` take a value.
+			if arg == "-s" || arg == "--signal" || arg == "-k" || arg == "--kill-after" {
+				args = args[2:]
+				continue
+			}
+		case "nice", "ionice":
+			if arg == "-n" || arg == "--adjustment" || arg == "-c" || arg == "-p" {
+				args = args[2:]
+				continue
+			}
+		case "env":
+			if arg == "-u" || arg == "--unset" {
+				args = args[2:]
+				continue
+			}
+		case "stdbuf":
+			if arg == "-i" || arg == "-o" || arg == "-e" {
+				args = args[2:]
+				continue
+			}
+		case "taskset", "setarch":
+			args = args[1:]
+			continue
+		}
+		args = args[1:]
+	}
+	// env allows VAR=val pairs after its flags and before the command.
+	if runner == "env" {
+		for len(args) > 0 && isEnvAssignment(args[0]) {
+			args = args[1:]
+		}
+	}
+	// timeout's first non-flag operand is the DURATION, not the command.
+	if runner == "timeout" && len(args) > 0 {
+		args = args[1:]
+	}
+	return args
+}
+
+func isEnvAssignment(word string) bool {
+	eq := strings.IndexByte(word, '=')
+	if eq <= 0 {
+		return false
+	}
+	name := word[:eq]
+	for i, r := range name {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			continue
+		}
+		if i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func isSingleCommandReadOnly(command string) bool {
 	command = strings.TrimSpace(command)
 
-	words := strings.Fields(command)
-	if len(words) == 0 {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
 		return false
 	}
 
-	cmd := strings.ToLower(filepath.Base(words[0]))
+	words, cmd, unresolved := unwrapCommandWords(fields)
+	if unresolved {
+		return false
+	}
+
 	subs, ok := normalizedReadOnlyCommands[cmd]
 	if !ok {
 		return false
@@ -359,6 +514,20 @@ func isSingleCommandReadOnly(command string) bool {
 		for _, arg := range args {
 			switch arg {
 			case "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls", "-fprint", "-fprint0", "-fprintf":
+				return false
+			}
+		}
+	case "sort":
+		// `sort -o FILE` / `sort --output=FILE` writes to FILE.
+		for _, arg := range args {
+			if arg == "-o" || arg == "--output" || strings.HasPrefix(arg, "-o") || strings.HasPrefix(arg, "--output=") {
+				return false
+			}
+		}
+	case "jq", "yq", "xq":
+		// `-i`/`--in-place` edits files in place.
+		for _, arg := range args {
+			if arg == "-i" || arg == "--in-place" || arg == "--inplace" {
 				return false
 			}
 		}
@@ -435,12 +604,17 @@ func hasUnsafeGitOptions(args []string) bool {
 }
 
 func isDangerousSingleCommand(command string) bool {
-	words := strings.Fields(strings.TrimSpace(command))
-	if len(words) == 0 {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) == 0 {
 		return false
 	}
 
-	cmd := strings.ToLower(filepath.Base(words[0]))
+	words, cmd, unresolved := unwrapCommandWords(fields)
+	if unresolved {
+		// A runner prefix (e.g. `env`, `xargs`) with no resolvable wrapped
+		// command — treat as dangerous so it can't slip past the prompt.
+		return true
+	}
 	args := words[1:]
 
 	switch cmd {

@@ -82,8 +82,8 @@ func (c *Claw) Run(ctx context.Context) error {
 }
 
 func (c *Claw) CreateAgent(name string) error {
-	if name == "" || strings.ContainsAny(name, "/\\:*?\"<>|") || name == "global" {
-		return fmt.Errorf("invalid agent name %q", name)
+	if err := validAgentName(name); err != nil {
+		return err
 	}
 
 	if c.config.Memory.AgentExists(name) {
@@ -107,6 +107,9 @@ func (c *Claw) CreateAgent(name string) error {
 }
 
 func (c *Claw) DeleteAgent(name string) error {
+	if err := validAgentName(name); err != nil {
+		return err
+	}
 	if name == "main" {
 		return fmt.Errorf("cannot delete the main agent")
 	}
@@ -114,6 +117,20 @@ func (c *Claw) DeleteAgent(name string) error {
 	c.agents.LoadAndDelete(name)
 
 	return c.config.Memory.RemoveAgent(name)
+}
+
+// validAgentName rejects names that aren't a single, safe path component.
+// Agent names are joined into filesystem paths (workspace, memory, tasks), so
+// `..`, separators, and reserved names must never reach those joins — otherwise
+// a delete/create can escape the claw data directory.
+func validAgentName(name string) error {
+	if name == "" || name == "global" {
+		return fmt.Errorf("invalid agent name %q", name)
+	}
+	if !filepath.IsLocal(name) || strings.ContainsAny(name, `/\:*?"<>|`) {
+		return fmt.Errorf("invalid agent name %q", name)
+	}
+	return nil
 }
 
 func (c *Claw) ListAgents() ([]string, error) {
