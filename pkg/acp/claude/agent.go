@@ -89,7 +89,7 @@ func (a *Agent) lookup(id acp.SessionId) *session {
 // --- acp.Agent ---
 
 func (a *Agent) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {
-	title := "Claude Code (ACP)"
+	title := "Claude (ACP)"
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		AgentInfo: &acp.Implementation{

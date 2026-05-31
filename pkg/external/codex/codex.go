@@ -21,6 +21,7 @@ func BuildArgs(cfg *CodexConfig) []string {
 		"--config", "model_providers.wingman.name=\"Wingman\"",
 		"--config", "model_providers.wingman.base_url=\"" + url + "\"",
 		"--config", "model_providers.wingman.env_key=\"WINGMAN_TOKEN\"",
+		"--config", "model_providers.wingman.wire_api=\"responses\"",
 		"--config", "model_providers.wingman.requires_openai_auth=false",
 
 		// Telemetry & data exfiltration prevention

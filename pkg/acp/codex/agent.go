@@ -293,7 +293,10 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, fmt.Errorf("thread/resume: %w", err)
 	}
 	s := a.registerSession(params.SessionId, resp.Model, derefEffort(resp.ReasoningEffort))
-	streamThreadHistory(ctx, a.conn, s.id, resp.Thread.Turns)
+	// thread/resume omits command output (aggregatedOutput=null); recover it
+	// from codex's on-disk rollout log so replayed commands show their output.
+	outputs := rolloutCommandOutputs(string(params.SessionId))
+	streamThreadHistory(ctx, a.conn, s.id, resp.Thread.Turns, outputs)
 	return acp.LoadSessionResponse{
 		Models:        buildSessionModelState(s.modelID),
 		Modes:         buildSessionModeState(s.mode),

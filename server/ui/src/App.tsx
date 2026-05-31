@@ -28,7 +28,7 @@ import { FileTree } from "./components/FileTree";
 import { ProblemsPanel } from "./components/ProblemsPanel";
 import { Sidebar } from "./components/Sidebar";
 import { useCapabilities } from "./hooks/useCapabilities";
-import { useWebSocket } from "./hooks/useWebSocket";
+import { type ChatEntry, useWebSocket } from "./hooks/useWebSocket";
 
 interface CenterTab {
 	id: string;
@@ -83,6 +83,13 @@ export default function App() {
 	const phase = activeSession?.phase ?? "idle";
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
 	const prompt = activeSession?.prompt ?? null;
+
+	// Usage is only reported when a request completes, so a long in-flight
+	// response would show a frozen count. While streaming, fold in a rough
+	// estimate of the output produced so far (rendered with ~); it snaps to the
+	// exact value the moment the turn lands.
+	const streamEstimate = phase !== "idle" ? estimateStreamingTokens(entries) : 0;
+	const outputTokens = usage.outputTokens + streamEstimate;
 
 	const handlePromptReply = useCallback(
 		(reply: { text?: string; approved?: boolean }) => {
@@ -439,7 +446,7 @@ export default function App() {
 							);
 						})}
 						<div className="flex-1" />
-						{(usage.inputTokens > 0 || usage.outputTokens > 0) && (
+						{(usage.inputTokens > 0 || outputTokens > 0) && (
 							<div className="flex items-center px-3 text-[11px] text-fg-dim tabular-nums whitespace-nowrap">
 								{"↑"}
 								{formatTokens(usage.inputTokens)}
@@ -449,8 +456,8 @@ export default function App() {
 									</span>
 								)}
 								<span className="ml-2">
-									{"↓"}
-									{formatTokens(usage.outputTokens)}
+									{streamEstimate > 0 ? "↓~" : "↓"}
+									{formatTokens(outputTokens)}
 								</span>
 							</div>
 						)}
@@ -595,6 +602,20 @@ function formatTokens(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
 	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
 	return String(n);
+}
+
+// estimateStreamingTokens approximates output tokens for the in-flight request
+// (~4 chars/token) from the trailing run of streamed reasoning/assistant text.
+// The run breaks at the last tool result — mirroring how committed usage jumps
+// per request — so it doesn't double-count earlier requests in the same turn.
+function estimateStreamingTokens(entries: ChatEntry[]): number {
+	let chars = 0;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i];
+		if (e.type !== "reasoning" && e.type !== "assistant") break;
+		chars += e.content.length;
+	}
+	return Math.floor(chars / 4);
 }
 
 function togglePanel(panel: PanelImperativeHandle | null) {

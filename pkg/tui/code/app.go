@@ -59,6 +59,7 @@ type App struct {
 	elicitMu       sync.Mutex
 	promptActive   bool
 	promptResponse chan bool
+	confirmAll     atomic.Bool
 	askActive      bool
 	askResponse    chan string
 	// 0 = summary, 1 = list, 2 = full. Ctrl+E cycles through.

@@ -13,6 +13,8 @@ import {
 	useCallback,
 	useEffect,
 	useLayoutEffect,
+	memo,
+	useMemo,
 	useRef,
 	useState,
 } from "react";
@@ -125,6 +127,11 @@ export function ChatPanel({
 	const spacerRef = useRef<HTMLDivElement>(null);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const imageInputRef = useRef<HTMLInputElement>(null);
+	const turns = useMemo(() => buildTurns(entries), [entries]);
+	const latestTurnsRef = useRef<Turn[]>([]);
+	useLayoutEffect(() => {
+		latestTurnsRef.current = turns;
+	}, [turns]);
 
 	// ── scroll handling ──────────────────────────────────────────────────────
 	//
@@ -161,13 +168,12 @@ export function ChatPanel({
 		null,
 	);
 
-	const captureAnchor = useCallback(() => {
+	const captureAnchorForTurns = useCallback((sourceTurns: Turn[]) => {
 		const c = containerRef.current;
 		const content = contentRef.current;
 		if (!c || !content) return;
-		const turns = buildTurns(entries);
 		const stable = new Set<string>();
-		for (const t of turns) {
+		for (const t of sourceTurns) {
 			if (t.user) stable.add(t.user.id);
 			if (t.final) stable.add(t.final.id);
 		}
@@ -197,7 +203,11 @@ export function ChatPanel({
 			above = { id, viewportTop };
 		}
 		pendingAnchorRef.current = visible ?? below ?? above;
-	}, [entries]);
+	}, []);
+
+	const captureAnchor = useCallback(() => {
+		captureAnchorForTurns(latestTurnsRef.current);
+	}, [captureAnchorForTurns]);
 
 	// Set an anchor *target* (rather than capturing the current position): the
 	// apply step will scroll so that `id`'s top sits at `viewportTop` after
@@ -244,7 +254,7 @@ export function ChatPanel({
 	   not have a getSnapshotBeforeUpdate hook, and a layout effect would run
 	   after the working entries have already collapsed. */
 	if (prevPhaseRef.current !== "idle" && phase === "idle") {
-		if (userScrolledRef.current) captureAnchor();
+		if (userScrolledRef.current) captureAnchorForTurns(turns);
 	}
 	prevPhaseRef.current = phase;
 	/* eslint-enable react-hooks/refs */
@@ -511,29 +521,21 @@ export function ChatPanel({
 					</div>
 				) : (
 					<div className="px-4 py-4" ref={contentRef}>
-						{(() => {
-							// Split entries into turns: each turn is a user message followed by
-							// "working" entries (reasoning, tools, intermediate assistant text)
-							// and ending with the final assistant text (or error). When a turn
-							// is finished, the working section collapses to a single line so
-							// the chat history shows: user → [Worked] → final answer.
-							const turns = buildTurns(entries);
-							return turns.map((turn, idx) => {
-								const isLastTurn = idx === turns.length - 1;
-								const isActive = isLastTurn && phase !== "idle";
-								return (
-									<TurnView
-										key={turn.key}
-										turn={turn}
-										isActive={isActive}
-										phase={phase}
-										captureAnchor={captureAnchor}
-										setAnchorTarget={setAnchorTarget}
-										applyPendingAnchor={applyPendingAnchor}
-									/>
-								);
-							});
-						})()}
+						{turns.map((turn, idx) => {
+							const isLastTurn = idx === turns.length - 1;
+							const isActive = isLastTurn && phase !== "idle";
+							return (
+								<TurnView
+									key={turn.key}
+									turn={turn}
+									isActive={isActive}
+									phase={phase}
+									captureAnchor={captureAnchor}
+									setAnchorTarget={setAnchorTarget}
+									applyPendingAnchor={applyPendingAnchor}
+								/>
+							);
+						})}
 					</div>
 				)}
 				{/* Spacer lives outside contentRef so writing its height doesn't
@@ -816,7 +818,7 @@ function PromptBar({
 	);
 }
 
-function EntryView({
+const EntryView = memo(function EntryView({
 	entry,
 	isStreaming,
 }: {
@@ -883,7 +885,7 @@ function EntryView({
 			</div>
 		</div>
 	);
-}
+});
 
 interface Turn {
 	key: string;
@@ -936,7 +938,7 @@ function findEntryElement(root: HTMLElement, id: string): HTMLElement | null {
 	return null;
 }
 
-function TurnView({
+const TurnView = memo(function TurnView({
 	turn,
 	isActive,
 	phase,
@@ -1022,11 +1024,41 @@ function TurnView({
 			)}
 		</>
 	);
+}, areTurnPropsEqual);
+
+function areTurnPropsEqual(
+	prev: {
+		turn: Turn;
+		isActive: boolean;
+		phase: Phase;
+	},
+	next: {
+		turn: Turn;
+		isActive: boolean;
+		phase: Phase;
+	},
+) {
+	if (!sameTurnEntries(prev.turn, next.turn)) return false;
+	if (prev.isActive !== next.isActive) return false;
+	if (!prev.isActive && !next.isActive) return true;
+	return (
+		prev.phase === next.phase &&
+		prev.turn.working.length === next.turn.working.length
+	);
+}
+
+function sameTurnEntries(a: Turn, b: Turn) {
+	if (a.key !== b.key || a.user !== b.user || a.final !== b.final) return false;
+	if (a.working.length !== b.working.length) return false;
+	for (let i = 0; i < a.working.length; i++) {
+		if (a.working[i] !== b.working[i]) return false;
+	}
+	return true;
 }
 
 // Renders the full working trail using the same tool-grouping pass as before,
 // plus a "collapse" affordance once the turn is finished.
-function WorkingExpanded({
+const WorkingExpanded = memo(function WorkingExpanded({
 	entries,
 	isActive,
 	phase,
@@ -1084,9 +1116,9 @@ function WorkingExpanded({
 			)}
 		</>
 	);
-}
+});
 
-function WorkingSummary({
+const WorkingSummary = memo(function WorkingSummary({
 	entries,
 	onExpand,
 }: {
@@ -1112,11 +1144,29 @@ function WorkingSummary({
 			</button>
 		</div>
 	);
-}
+});
 
 function PhaseIndicator() {
 	// Pick a verb once per mount so the label stays stable while shown.
 	const [verb] = useState(sampleSpinnerVerb);
+
+	// Sample the clock once a second so the elapsed counter advances. Reading
+	// time only inside the interval keeps render pure.
+	const [clock, setClock] = useState(() => {
+		const startedAt = Date.now();
+		return { startedAt, now: startedAt };
+	});
+	useEffect(() => {
+		const id = setInterval(() => {
+			setClock((prev) => ({ ...prev, now: Date.now() }));
+		}, 1000);
+		return () => clearInterval(id);
+	}, []);
+
+	const elapsed = Math.max(
+		0,
+		Math.floor((clock.now - clock.startedAt) / 1000),
+	);
 
 	return (
 		<div className="mb-4 pl-3">
@@ -1136,12 +1186,15 @@ function PhaseIndicator() {
 						style={{ animationDelay: "400ms", animationDuration: "1.2s" }}
 					/>
 				</span>
+				<span className="not-italic text-fg-dim/70">
+					{elapsed}s · esc to interrupt
+				</span>
 			</div>
 		</div>
 	);
 }
 
-function ToolGroupView({
+const ToolGroupView = memo(function ToolGroupView({
 	entries,
 	isTrailing,
 	phase,
@@ -1160,9 +1213,15 @@ function ToolGroupView({
 			})}
 		</div>
 	);
-}
+});
 
-function ToolRow({ entry, running }: { entry: ChatEntry; running: boolean }) {
+const ToolRow = memo(function ToolRow({
+	entry,
+	running,
+}: {
+	entry: ChatEntry;
+	running: boolean;
+}) {
 	const [expanded, setExpanded] = useState(false);
 	const displayHint = entry.toolHint ? truncate(entry.toolHint, 80) : "";
 
@@ -1197,9 +1256,9 @@ function ToolRow({ entry, running }: { entry: ChatEntry; running: boolean }) {
 			)}
 		</div>
 	);
-}
+});
 
-function ReasoningView({
+const ReasoningView = memo(function ReasoningView({
 	entry,
 	isStreaming,
 }: {
@@ -1222,7 +1281,7 @@ function ReasoningView({
 			</div>
 		</div>
 	);
-}
+});
 
 function truncate(text: string, max: number): string {
 	return text.length <= max ? text : `${text.substring(0, max)}...`;

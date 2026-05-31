@@ -27,7 +27,7 @@ func Run(ctx context.Context, args []string, options *Options) error {
 		return err
 	}
 
-	url := strings.TrimRight(cfg.BaseURL, "/") + "/v1/"
+	url := strings.TrimRight(cfg.BaseURL, "/") + "/v1"
 
 	vars := map[string]string{
 		// Auth & API routing
