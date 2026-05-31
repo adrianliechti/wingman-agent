@@ -21,19 +21,12 @@ tasks:
     cmds:
       - go run ./cmd/wingman server
 
-  wails:
-    desc: Install the Wails v2 CLI if missing
-    cmds:
-      - go install github.com/wailsapp/wails/v2/cmd/wails@latest
-    status:
-      - command -v wails >/dev/null 2>&1
-
   app:
     desc: Build and launch the Wails desktop app
-    deps: [ui, wails]
+    deps: [ui]
     dir: app
     cmds:
-      - wails build -clean
+      - go run github.com/wailsapp/wails/v2/cmd/wails@v2.12.0 build -clean
       - open -n "build/bin/Wingman Agent.app"
 
   install:
