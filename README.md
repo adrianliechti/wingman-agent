@@ -49,7 +49,7 @@ scoop install wingman
 ### From Source
 
 ```bash
-go install github.com/adrianliechti/wingman-agent@latest
+go install github.com/adrianliechti/wingman-agent/cmd/wingman@latest
 ```
 
 ### Build Locally
@@ -57,7 +57,7 @@ go install github.com/adrianliechti/wingman-agent@latest
 ```bash
 git clone https://github.com/adrianliechti/wingman-agent.git
 cd wingman-agent
-go build -o wingman .
+go build -o wingman ./cmd/wingman
 ```
 
 ## 🚀 Quick Start
