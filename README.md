@@ -26,7 +26,7 @@ A powerful AI-powered coding assistant that runs directly in your terminal. Wing
 ### Homebrew (macOS)
 
 ```bash
-brew install adrianliechti/tap/wingman
+brew install adrianliechti/tap/wingman-cli
 ```
 
 > Linux: Homebrew no longer supports formula-style binary installs from taps, so use `go install` (below) or download a binary from the [releases](https://github.com/adrianliechti/wingman-agent/releases).
@@ -36,7 +36,7 @@ brew install adrianliechti/tap/wingman
 Install the Wingman Agent desktop app into `/Applications` via Homebrew Cask:
 
 ```bash
-brew install --cask adrianliechti/tap/wingman-desktop
+brew install --cask adrianliechti/tap/wingman-app
 ```
 
 ### Scoop (Windows)

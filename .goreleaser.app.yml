@@ -6,7 +6,7 @@
 #   goreleaser release --snapshot --clean -f .goreleaser.app.yml  # dry run
 version: 2
 
-project_name: wingman-desktop
+project_name: wingman-app
 dist: dist/app
 
 before:
@@ -40,6 +40,9 @@ checksum:
 publishers:
   - name: homebrew-cask
     ids: [app]
+    # Publishers run with a scrubbed env — pass the token through explicitly.
+    env:
+      - GITHUB_TOKEN={{ .Env.GITHUB_TOKEN }}
     cmd: ./scripts/publish-cask.sh {{ .Version }}
 
 # append: land in an existing release for the tag (or create it), so the desktop

@@ -24,7 +24,7 @@ esac
 
 TAP_OWNER="adrianliechti"
 TAP_REPO="homebrew-tap"
-CASK_NAME="wingman-desktop"
+CASK_NAME="wingman-app"
 APP_NAME="Wingman Agent.app"
 BUNDLE_ID="com.wails.Wingman Agent"
 REPO_URL="https://github.com/adrianliechti/wingman-agent"
@@ -97,12 +97,13 @@ fi
 
 cd "$WORKDIR/tap"
 
-if git diff --quiet -- "Casks/${CASK_NAME}.rb"; then
+# Stage first, then diff the index — `git diff` alone ignores new/untracked files.
+git add "Casks/${CASK_NAME}.rb"
+if git diff --cached --quiet; then
   echo "publish-cask: cask already up to date, nothing to push"
   exit 0
 fi
 
-git add "Casks/${CASK_NAME}.rb"
 git \
   -c user.name="Adrian Liechti" \
   -c user.email="adrian@localhost" \

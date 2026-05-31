@@ -35,12 +35,19 @@ tasks:
     cmds:
       - dest="$(go env GOBIN)" && [ -z "$dest" ] && dest="$(go env GOPATH)/bin" && go build -o "$dest/wingman" ./cmd/wingman
 
-  release:app:
-    desc: Build & release the desktop app + Homebrew cask (macOS only; needs GITHUB_TOKEN)
+  release:cli:
+    desc: Release the CLI for all platforms + Homebrew cask + Scoop (needs GITHUB_TOKEN)
     cmds:
-      - goreleaser release --clean -f .goreleaser.app.yml
+      - goreleaser release --clean -f .goreleaser.yml
 
-  release:app:snapshot:
-    desc: Dry-run the desktop app release (builds the .app + zip, no publish)
+  release:app:
+    desc: Release the macOS desktop app + Homebrew cask (macOS only; needs GITHUB_TOKEN)
     cmds:
-      - goreleaser release --snapshot --clean -f .goreleaser.app.yml
+      # --skip=validate: `wails build` may regenerate tracked bindings, dirtying the tree.
+      - goreleaser release --clean --skip=validate -f .goreleaser.app.yml
+
+  release:
+    desc: Full release — CLI (all platforms) then the desktop app, on the current git tag
+    cmds:
+      - task: release:cli
+      - task: release:app

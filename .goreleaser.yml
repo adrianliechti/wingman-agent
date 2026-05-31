@@ -62,7 +62,9 @@ changelog:
 
 # macOS: Homebrew cask (formula `brews` was deprecated in GoReleaser v2).
 homebrew_casks:
-  - name: wingman
+  - name: wingman-cli
+    # The installed command stays `wingman` (the built binary name).
+    binaries: [wingman]
     repository:
       owner: adrianliechti
       name: homebrew-tap
