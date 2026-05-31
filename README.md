@@ -130,6 +130,8 @@ Add an `mcp.json` file to integrate with MCP servers:
 
 Remote (HTTP/SSE) servers are also supported via the `url` and optional `headers` fields.
 
+Configs are loaded from two locations and merged: `~/.wingman/mcp.json` (global, shared across all projects) and `./mcp.json` (project root). When a server name appears in both, the project config wins.
+
 ## 🛠️ Built-in Tools
 
 Wingman comes with powerful built-in tools:

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"os"
 	"os/exec"
 	"slices"
 	"sync"
@@ -29,14 +30,35 @@ func NewManager(cfg *Config) *Manager {
 	}
 }
 
-func Load(path string) (*Manager, error) {
-	cfg, err := loadConfig(path)
+func Load(paths ...string) (*Manager, error) {
+	merged := &Config{Servers: map[string]ServerConfig{}}
 
-	if err != nil {
-		return nil, err
+	var found bool
+
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+
+		cfg, err := loadConfig(path)
+
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+
+			return nil, err
+		}
+
+		found = true
+		maps.Copy(merged.Servers, cfg.Servers)
 	}
 
-	return NewManager(cfg), nil
+	if !found {
+		return nil, os.ErrNotExist
+	}
+
+	return NewManager(merged), nil
 }
 
 func (m *Manager) Connect(ctx context.Context) error {

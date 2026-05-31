@@ -105,7 +105,9 @@ func NewWorkspace(workDir string) (*Workspace, error) {
 	discovered := skill.MustDiscover(workDir)
 	mergedSkills := skill.Merge(skill.Merge(bundled, personal), discovered)
 
-	mcpManager, _ := mcp.Load(filepath.Join(workDir, "mcp.json"))
+	// Global (~/.wingman/mcp.json) first, project (./mcp.json) last so a
+	// project can override a global server of the same name.
+	mcpManager, _ := mcp.Load(globalMCPConfigPath(), filepath.Join(workDir, "mcp.json"))
 
 	return &Workspace{
 		Root:        root,
@@ -439,6 +441,18 @@ func projectKey(workingDir string) string {
 	sanitized = strings.ToLower(sanitized)
 
 	return sanitized
+}
+
+// globalMCPConfigPath is the location of the user-wide MCP config,
+// shared across all projects. Returns "" if the home dir is unknown, in
+// which case mcp.Load simply skips it.
+func globalMCPConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	return filepath.Join(home, ".wingman", "mcp.json")
 }
 
 func projectMemoryDir(workingDir string) string {

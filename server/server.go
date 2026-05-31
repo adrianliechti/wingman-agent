@@ -743,7 +743,7 @@ func (s *Server) constructBackend(name string) (code.Agent, error) {
 		// Synchronous: a freshly switched-to agent must have its model set
 		// before handleSetAgent broadcasts EvtAgentChanged, or the UI's model
 		// refetch races ahead of the pick and the selector renders empty.
-		go w.AutoSelectModel(s.ctx)
+		w.AutoSelectModel(s.ctx)
 		return w, nil
 	}
 	for _, r := range s.availableAgents() {
