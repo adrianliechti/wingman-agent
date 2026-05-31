@@ -2,27 +2,30 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
-	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
-// Plan mode is a wingman-only affordance — ACP backends have their own
-// internal mode handling. We expose it via the [*coder.Agent] type
-// assertion; non-wingman backends report mode="agent" and reject sets
-// with 405.
+// Modes are backend-advertised via the code.Agent interface; this handler is
+// backend-agnostic and the UI renders whatever the active backend returns.
+
+type modeOption struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type modeState struct {
+	Current string       `json:"current"`
+	Modes   []modeOption `json:"modes"`
+}
 
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("session")
-	if id == "" {
-		writeJSON(w, map[string]string{"mode": "agent"})
-		return
-	}
-	mode := "agent"
-	if wa, ok := s.activeAgent().(*coder.Agent); ok && wa.PlanMode(id) {
-		mode = "plan"
-	}
-	writeJSON(w, map[string]string{"mode": mode})
+	available, current := s.activeAgent().Modes(id)
+	writeJSON(w, toModeState(available, current))
 }
 
 func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
@@ -33,20 +36,30 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	if body.Mode != "agent" && body.Mode != "plan" {
-		http.Error(w, "mode must be \"agent\" or \"plan\"", http.StatusBadRequest)
-		return
-	}
 	id := r.URL.Query().Get("session")
 	if id == "" {
 		http.Error(w, "session id required", http.StatusBadRequest)
 		return
 	}
-	wa, ok := s.activeAgent().(*coder.Agent)
-	if !ok {
-		http.Error(w, "plan mode is only available with the wingman backend", http.StatusMethodNotAllowed)
+
+	agent := s.activeAgent()
+	if err := agent.SetMode(r.Context(), id, body.Mode); err != nil {
+		if errors.Is(err, errors.ErrUnsupported) {
+			http.Error(w, "this backend has no selectable modes", http.StatusMethodNotAllowed)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	wa.SetPlanMode(id, body.Mode == "plan")
-	writeJSON(w, map[string]string{"mode": body.Mode})
+
+	available, current := agent.Modes(id)
+	writeJSON(w, toModeState(available, current))
+}
+
+func toModeState(available []code.Mode, current string) modeState {
+	modes := make([]modeOption, 0, len(available))
+	for _, m := range available {
+		modes = append(modes, modeOption{ID: m.ID, Name: m.Name, Description: m.Description})
+	}
+	return modeState{Current: current, Modes: modes}
 }

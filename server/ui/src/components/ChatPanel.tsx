@@ -25,14 +25,15 @@ import type { Phase } from "../types/protocol";
 import { FilePicker } from "./FilePicker";
 import { MarkdownContent } from "./MarkdownContent";
 import { ModelPicker } from "./ModelPicker";
-import { ModePicker } from "./ModePicker";
+import { ModePicker, type ModeOption } from "./ModePicker";
 import { SkillPicker } from "./SkillPicker";
 
 interface Props {
 	entries: ChatEntry[];
 	phase: Phase;
-	mode: "agent" | "plan";
-	onSelectMode: (next: "agent" | "plan") => void;
+	modes: ModeOption[];
+	mode: string;
+	onSelectMode: (next: string) => void;
 	onSend: (text: string, files?: string[], images?: string[]) => void;
 	onCancel: () => void;
 	// loading overlays the transcript area with a spinner during slow
@@ -108,6 +109,7 @@ const PIN_TOP_GAP = 16;
 export function ChatPanel({
 	entries,
 	phase,
+	modes,
 	mode,
 	onSelectMode,
 	onSend,
@@ -657,7 +659,7 @@ export function ChatPanel({
 										e.target.value = "";
 									}}
 								/>
-								<ModePicker mode={mode} onSelect={onSelectMode} />
+								<ModePicker modes={modes} current={mode} onSelect={onSelectMode} />
 								<ModelPicker subscribe={subscribe} />
 							</div>
 

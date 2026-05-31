@@ -382,17 +382,39 @@ func (a *Agent) Close() error {
 	return nil
 }
 
-// ─── Plan mode (wingman-only affordance) ────────────────────────
+// ─── Modes (agent / plan) ───────────────────────────────────────
 
-func (a *Agent) SetPlanMode(id string, plan bool) {
-	if s := a.session(id); s != nil {
-		s.planMode = plan
-	}
+// Plan mode restricts the session to read-only tools and swaps in the
+// planning prompt.
+var wingmanModes = []code.Mode{
+	{ID: "agent", Name: "Agent", Description: "Read, edit, and run commands without asking."},
+	{ID: "plan", Name: "Plan", Description: "Read-only — proposes a plan, doesn't edit code."},
 }
 
-func (a *Agent) PlanMode(id string) bool {
-	s := a.session(id)
-	return s != nil && s.planMode
+func (a *Agent) Modes(sessionID string) ([]code.Mode, string) {
+	out := make([]code.Mode, len(wingmanModes))
+	copy(out, wingmanModes)
+	current := "agent"
+	if s := a.session(sessionID); s != nil && s.planMode {
+		current = "plan"
+	}
+	return out, current
+}
+
+func (a *Agent) SetMode(_ context.Context, sessionID, modeID string) error {
+	var plan bool
+	switch modeID {
+	case "agent":
+		plan = false
+	case "plan":
+		plan = true
+	default:
+		return fmt.Errorf("unknown mode %q", modeID)
+	}
+	if s := a.session(sessionID); s != nil {
+		s.planMode = plan
+	}
+	return nil
 }
 
 // Tools returns the snapshot tool list for a session (used by the TUI

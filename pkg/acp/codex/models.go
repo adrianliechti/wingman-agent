@@ -109,10 +109,11 @@ func titleCase(s string) string {
 
 // --- session modes ---
 
-// agentMode bundles a codex approval policy + sandbox policy under an ACP
-// session mode id. The Go SDK doesn't currently expose a typed enum for these,
-// so we send the codex shapes as untyped JSON.
-type agentMode struct {
+const defaultModeID = "agent"
+
+// sessionMode maps an ACP mode id to the codex approval + sandbox policy sent
+// on turn/start. Policies are untyped JSON; the SDK exposes no typed enum.
+type sessionMode struct {
 	id             string
 	name           string
 	description    string
@@ -120,18 +121,18 @@ type agentMode struct {
 	sandboxPolicy  any
 }
 
-var agentModes = []agentMode{
+var sessionModes = []sessionMode{
 	{
 		id:             "read-only",
 		name:           "Read-only",
-		description:    "Requires approval to edit files and run commands.",
+		description:    "Read files only. Editing or running commands needs approval.",
 		approvalPolicy: "on-request",
 		sandboxPolicy:  map[string]any{"type": "readOnly", "networkAccess": false},
 	},
 	{
 		id:             "agent",
 		name:           "Agent",
-		description:    "Read and edit files, and run commands.",
+		description:    "Read and edit files and run commands. Asks before acting outside the workspace.",
 		approvalPolicy: "on-request",
 		sandboxPolicy: map[string]any{
 			"type":                "workspaceWrite",
@@ -142,36 +143,36 @@ var agentModes = []agentMode{
 		},
 	},
 	{
-		id:             "agent-full-access",
-		name:           "Agent (full access)",
-		description:    "Edit files outside this workspace and run commands with network access.",
+		id:             "full-access",
+		name:           "Full Access",
+		description:    "Edit files anywhere and run commands with network access, without asking.",
 		approvalPolicy: "never",
 		sandboxPolicy:  map[string]any{"type": "dangerFullAccess"},
 	},
 }
 
-func findMode(id string) *agentMode {
-	for i := range agentModes {
-		if agentModes[i].id == id {
-			return &agentModes[i]
+func findMode(id string) *sessionMode {
+	for i := range sessionModes {
+		if sessionModes[i].id == id {
+			return &sessionModes[i]
 		}
 	}
 	return nil
 }
 
-func agentModeFor(id string) agentMode {
+func modeFor(id string) sessionMode {
 	if m := findMode(id); m != nil {
 		return *m
 	}
-	return *findMode("agent")
+	return *findMode(defaultModeID)
 }
 
 func buildSessionModeState(currentID string) *acp.SessionModeState {
 	if currentID == "" {
-		currentID = "agent"
+		currentID = defaultModeID
 	}
-	available := make([]acp.SessionMode, 0, len(agentModes))
-	for _, m := range agentModes {
+	available := make([]acp.SessionMode, 0, len(sessionModes))
+	for _, m := range sessionModes {
 		desc := m.description
 		available = append(available, acp.SessionMode{
 			Id:          acp.SessionModeId(m.id),

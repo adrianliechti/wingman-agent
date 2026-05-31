@@ -743,7 +743,14 @@ func (s *Server) constructBackend(name string) (code.Agent, error) {
 	}
 	for _, r := range s.availableAgents() {
 		if r.Name == name {
-			return r.Constructor(s.ctx, s.workspace)
+			a, err := r.Constructor(s.ctx, s.workspace)
+			if err != nil {
+				return nil, err
+			}
+			if us, ok := a.(interface{ SetUI(code.UI) }); ok {
+				us.SetUI(s)
+			}
+			return a, nil
 		}
 	}
 	return nil, fmt.Errorf("unknown agent %q", name)

@@ -20,13 +20,13 @@ type session struct {
 	mu            sync.Mutex
 	modelID       string
 	effort        string // "" or "default" means no effort override
-	mode          string // read-only | agent | agent-full-access
+	mode          string
 	currentTurnID string
 	cancelTurn    context.CancelFunc
 }
 
 func newSession(id acp.SessionId, model, effort string) *session {
-	return &session{id: id, modelID: model, effort: effort, mode: "agent"}
+	return &session{id: id, modelID: model, effort: effort, mode: defaultModeID}
 }
 
 // interrupt cancels the active turn. We rely on codex's turn/interrupt to
@@ -54,9 +54,9 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 
 	s.mu.Lock()
 	s.cancelTurn = cancel
-	mode := agentModeFor(s.mode)
 	model := s.modelID
 	effort := s.effort
+	mode := modeFor(s.mode)
 	s.mu.Unlock()
 
 	// Register handlers before turn/start so we cannot miss an early
@@ -67,6 +67,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 		onNotification: disp.handle,
 		onExecApproval: app.handleExec,
 		onFileApproval: app.handleFile,
+		onElicitation:  app.handleElicitation,
 	})
 	defer cc.setThreadHandlers(threadID, nil)
 

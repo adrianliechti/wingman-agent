@@ -20,6 +20,7 @@ type threadHandlers struct {
 	onNotification func(method string, params json.RawMessage)
 	onExecApproval func(params execApprovalParams) execApprovalResponse
 	onFileApproval func(params fileApprovalParams) fileApprovalResponse
+	onElicitation  func(params elicitationParams) elicitationResponse
 }
 
 func newCodexClient(rpc *rpcClient) *codexClient {
@@ -58,6 +59,9 @@ func (c *codexClient) dispatchNotification(method string, params json.RawMessage
 	}
 }
 
+// dispatchRequest answers codex's server→client approval requests. With the
+// session in a non-bypass mode, codex asks before running exec/file/MCP tools;
+// each is forwarded to the ACP client via the registered thread handler.
 func (c *codexClient) dispatchRequest(_ context.Context, method string, params json.RawMessage) (any, *rpcError) {
 	switch method {
 	case "item/commandExecution/requestApproval":
@@ -78,6 +82,15 @@ func (c *codexClient) dispatchRequest(_ context.Context, method string, params j
 			return h.onFileApproval(p), nil
 		}
 		return fileApprovalResponse{Decision: "cancel"}, nil
+	case "mcpServer/elicitation/request":
+		var p elicitationParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: -32602, Message: err.Error()}
+		}
+		if h := c.handlersFor(p.ThreadID); h != nil && h.onElicitation != nil {
+			return h.onElicitation(p), nil
+		}
+		return elicitationResponse{Action: "decline"}, nil
 	}
 	return nil, &rpcError{Code: -32601, Message: "method not found: " + method}
 }
@@ -212,6 +225,21 @@ type fileApprovalParams struct {
 
 type fileApprovalResponse struct {
 	Decision string `json:"decision"` // accept | acceptForSession | cancel
+}
+
+type elicitationParams struct {
+	ThreadID   string `json:"threadId"`
+	ServerName string `json:"serverName"`
+	Mode       string `json:"mode"` // form | url
+	Message    string `json:"message"`
+}
+
+// content/_meta are always emitted (null when absent) to match codex's
+// McpServerElicitationRequestResponse wire struct.
+type elicitationResponse struct {
+	Action  string `json:"action"` // accept | decline | cancel
+	Content any    `json:"content"`
+	Meta    any    `json:"_meta"`
 }
 
 // --- typed RPC helpers ---

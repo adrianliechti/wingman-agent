@@ -42,11 +42,16 @@ type Agent struct {
 
 	caps acpsdk.AgentCapabilities
 
+	// ui approves permission requests the ACP server raises mid-turn. nil → approve.
+	ui code.UI
+
 	configMu   sync.RWMutex
 	models     []code.Model
 	modelID    string
 	effortID   string
 	effortOpts []string
+	modes      []code.Mode
+	modeID     string
 
 	mu       sync.Mutex
 	sessions map[string]*sessionState
@@ -268,7 +273,7 @@ func (a *Agent) SetEffort(ctx context.Context, value string) error {
 	if err != nil {
 		return err
 	}
-	a.refreshConfig(nil, resp.ConfigOptions)
+	a.refreshConfig(nil, nil, resp.ConfigOptions)
 	return nil
 }
 
@@ -278,6 +283,35 @@ func (a *Agent) anySession() *sessionState {
 	for _, s := range a.sessions {
 		return s
 	}
+	return nil
+}
+
+// ─── Modes (cached from ACP SessionModeState) ────────────────────
+
+func (a *Agent) Modes(string) ([]code.Mode, string) {
+	a.configMu.RLock()
+	defer a.configMu.RUnlock()
+	out := make([]code.Mode, len(a.modes))
+	copy(out, a.modes)
+	return out, a.modeID
+}
+
+func (a *Agent) SetMode(ctx context.Context, sessionID, modeID string) error {
+	a.configMu.RLock()
+	hasModes := len(a.modes) > 0
+	a.configMu.RUnlock()
+	if !hasModes {
+		return errors.ErrUnsupported
+	}
+	if _, err := a.conn.SetSessionMode(ctx, acpsdk.SetSessionModeRequest{
+		SessionId: acpsdk.SessionId(sessionID),
+		ModeId:    acpsdk.SessionModeId(modeID),
+	}); err != nil {
+		return err
+	}
+	a.configMu.Lock()
+	a.modeID = modeID
+	a.configMu.Unlock()
 	return nil
 }
 
@@ -316,7 +350,7 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	a.refreshConfig(resp.Models, resp.ConfigOptions)
+	a.refreshConfig(resp.Models, resp.Modes, resp.ConfigOptions)
 
 	id := string(resp.SessionId)
 	a.mu.Lock()
@@ -381,7 +415,7 @@ func (a *Agent) LoadSession(ctx context.Context, id string) error {
 			McpServers: []acpsdk.McpServer{},
 		})
 		if err == nil {
-			a.refreshConfig(resp.Models, resp.ConfigOptions)
+			a.refreshConfig(resp.Models, resp.Modes, resp.ConfigOptions)
 		}
 		loadErrCh <- err
 	}()
@@ -593,7 +627,14 @@ func (a *Agent) shutdown() {
 
 func (a *Agent) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) error {
 	if n.Update.ConfigOptionUpdate != nil {
-		a.refreshConfig(nil, n.Update.ConfigOptionUpdate.ConfigOptions)
+		a.refreshConfig(nil, nil, n.Update.ConfigOptionUpdate.ConfigOptions)
+		return nil
+	}
+
+	if n.Update.CurrentModeUpdate != nil {
+		a.configMu.Lock()
+		a.modeID = string(n.Update.CurrentModeUpdate.CurrentModeId)
+		a.configMu.Unlock()
 		return nil
 	}
 
@@ -708,19 +749,80 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 	return agent.Message{}, false
 }
 
-func (a *Agent) RequestPermission(_ context.Context, p acpsdk.RequestPermissionRequest) (acpsdk.RequestPermissionResponse, error) {
+// SetUI installs the UI used to approve permission requests. Set before turns.
+func (a *Agent) SetUI(ui code.UI) { a.ui = ui }
+
+func (a *Agent) RequestPermission(ctx context.Context, p acpsdk.RequestPermissionRequest) (acpsdk.RequestPermissionResponse, error) {
+	cancelled := acpsdk.RequestPermissionResponse{
+		Outcome: acpsdk.RequestPermissionOutcome{Cancelled: &acpsdk.RequestPermissionOutcomeCancelled{}},
+	}
 	if len(p.Options) == 0 {
+		return cancelled, nil
+	}
+	selected := func(id acpsdk.PermissionOptionId) acpsdk.RequestPermissionResponse {
 		return acpsdk.RequestPermissionResponse{
 			Outcome: acpsdk.RequestPermissionOutcome{
-				Cancelled: &acpsdk.RequestPermissionOutcomeCancelled{},
+				Selected: &acpsdk.RequestPermissionOutcomeSelected{OptionId: id},
 			},
-		}, nil
+		}
 	}
-	return acpsdk.RequestPermissionResponse{
-		Outcome: acpsdk.RequestPermissionOutcome{
-			Selected: &acpsdk.RequestPermissionOutcomeSelected{OptionId: p.Options[0].OptionId},
-		},
-	}, nil
+
+	// No UI wired (e.g. headless): approve, preserving prior behavior.
+	if a.ui == nil {
+		return selected(p.Options[0].OptionId), nil
+	}
+
+	ok, err := a.ui.Confirm(code.WithSessionID(ctx, string(p.SessionId)), permissionMessage(p))
+	if err != nil {
+		return cancelled, nil
+	}
+	if ok {
+		if opt := pickPermissionOption(p.Options, true); opt != nil {
+			return selected(opt.OptionId), nil
+		}
+		return selected(p.Options[0].OptionId), nil
+	}
+	if opt := pickPermissionOption(p.Options, false); opt != nil {
+		return selected(opt.OptionId), nil
+	}
+	return cancelled, nil
+}
+
+// pickPermissionOption picks by intent: allow → allow-once/always, deny →
+// reject-once/always. Returns nil when no option matches.
+func pickPermissionOption(opts []acpsdk.PermissionOption, allow bool) *acpsdk.PermissionOption {
+	want := []acpsdk.PermissionOptionKind{acpsdk.PermissionOptionKindRejectOnce, acpsdk.PermissionOptionKindRejectAlways}
+	if allow {
+		want = []acpsdk.PermissionOptionKind{acpsdk.PermissionOptionKindAllowOnce, acpsdk.PermissionOptionKindAllowAlways}
+	}
+	for _, k := range want {
+		for i := range opts {
+			if opts[i].Kind == k {
+				return &opts[i]
+			}
+		}
+	}
+	return nil
+}
+
+// permissionMessage renders a confirm prompt from the tool title, command and reason.
+func permissionMessage(p acpsdk.RequestPermissionRequest) string {
+	var parts []string
+	if p.ToolCall.Title != nil && *p.ToolCall.Title != "" {
+		parts = append(parts, *p.ToolCall.Title)
+	}
+	if m, ok := p.ToolCall.RawInput.(map[string]any); ok {
+		if cmd, ok := m["command"].(string); ok && cmd != "" {
+			parts = append(parts, "$ "+cmd)
+		}
+	}
+	if t := toolCallContentText(p.ToolCall.Content); t != "" {
+		parts = append(parts, t)
+	}
+	if len(parts) == 0 {
+		return "Allow this action?"
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func (a *Agent) WriteTextFile(_ context.Context, p acpsdk.WriteTextFileRequest) (acpsdk.WriteTextFileResponse, error) {
@@ -794,7 +896,7 @@ func (a *Agent) WaitForTerminalExit(context.Context, acpsdk.WaitForTerminalExitR
 
 // ─── Config conversion ────────────────────────────────────────────
 
-func (a *Agent) refreshConfig(models *acpsdk.SessionModelState, options []acpsdk.SessionConfigOption) {
+func (a *Agent) refreshConfig(models *acpsdk.SessionModelState, modes *acpsdk.SessionModeState, options []acpsdk.SessionConfigOption) {
 	a.configMu.Lock()
 	defer a.configMu.Unlock()
 	if models != nil {
@@ -803,6 +905,17 @@ func (a *Agent) refreshConfig(models *acpsdk.SessionModelState, options []acpsdk
 			a.models = append(a.models, code.Model{ID: string(m.ModelId), Name: m.Name})
 		}
 		a.modelID = string(models.CurrentModelId)
+	}
+	if modes != nil {
+		a.modes = a.modes[:0]
+		for _, m := range modes.AvailableModes {
+			mode := code.Mode{ID: string(m.Id), Name: m.Name}
+			if m.Description != nil {
+				mode.Description = *m.Description
+			}
+			a.modes = append(a.modes, mode)
+		}
+		a.modeID = string(modes.CurrentModeId)
 	}
 	if options != nil {
 		a.effortID = ""

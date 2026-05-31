@@ -20,6 +20,7 @@ import {
 	usePanelRef,
 } from "react-resizable-panels";
 import { ChatPanel } from "./components/ChatPanel";
+import type { ModeOption } from "./components/ModePicker";
 import { CheckpointsPanel } from "./components/CheckpointsPanel";
 import { DiffsPanel } from "./components/DiffsPanel";
 import { DiffTab } from "./components/DiffTab";
@@ -256,36 +257,42 @@ export default function App() {
 		[sendChat, ensureSessionId],
 	);
 
-	const [mode, setMode] = useState<"agent" | "plan">("agent");
+	// Modes are backend-advertised: the available set + current mode come from
+	// the server per active backend (wingman / codex / claude each differ).
+	const [modes, setModes] = useState<ModeOption[]>([]);
+	const [mode, setMode] = useState<string>("");
 
-	// Sync mode whenever sessionId changes to point at a session we didn't
-	// just mint. For just-minted ids, the server has no state yet and our
-	// optimistic local mode is the truth — fetching would clobber it.
 	useEffect(() => {
-		if (!sessionId || selectedSession.skipModeLoad) return;
-		fetch(`/api/mode?session=${encodeURIComponent(sessionId)}`)
+		const q = sessionId ? `?session=${encodeURIComponent(sessionId)}` : "";
+		fetch(`/api/mode${q}`)
 			.then((r) => r.json())
-			.then((data) => setMode(data.mode === "plan" ? "plan" : "agent"))
+			.then((data) => {
+				setModes(data.modes ?? []);
+				setMode(data.current ?? "");
+			})
 			.catch(() => {});
-	}, [sessionId, selectedSession.skipModeLoad]);
+	}, [sessionId]);
 
 	const selectMode = useCallback(
-		async (next: "agent" | "plan") => {
+		async (next: string) => {
+			const prev = mode;
 			try {
 				const sid = await ensureSessionId();
-				setMode(next);
+				setMode(next); // optimistic
 				const r = await fetch(`/api/mode?session=${encodeURIComponent(sid)}`, {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ mode: next }),
 				});
+				if (!r.ok) throw new Error(await r.text());
 				const data = await r.json();
-				setMode(data.mode === "plan" ? "plan" : "agent");
+				setModes(data.modes ?? []);
+				setMode(data.current ?? next);
 			} catch {
-				// keep optimistic mode
+				setMode(prev); // revert on failure
 			}
 		},
-		[ensureSessionId],
+		[ensureSessionId, mode],
 	);
 
 	const handleCancel = useCallback(() => {
@@ -483,6 +490,7 @@ export default function App() {
 								key={sessionId || "no-session"}
 								entries={entries}
 								phase={phase}
+								modes={modes}
 								mode={mode}
 								onSelectMode={selectMode}
 								onSend={handleSend}

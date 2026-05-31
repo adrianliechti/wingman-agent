@@ -25,6 +25,15 @@ type SessionInfo struct {
 	UpdatedAt time.Time
 }
 
+// Mode is one operating mode a backend can run a session in — typically an
+// approval/sandbox or planning level. It mirrors ACP's SessionMode, and is
+// what the UI's mode picker is populated from.
+type Mode struct {
+	ID          string
+	Name        string
+	Description string
+}
+
 // Agent is the swappable backend that drives chat turns and owns its
 // own session catalog + transcript storage. The two concrete
 // implementations live in sub-packages wingman and acp.
@@ -58,6 +67,17 @@ type Agent interface {
 	Effort() (current string, options []string)
 
 	SetEffort(ctx context.Context, value string) error
+
+	// Modes reports the operating modes the backend exposes for the given
+	// session and the currently active mode id. An empty list means the
+	// backend has no mode selector (the UI hides the picker). Cached read —
+	// no RPC.
+	Modes(sessionID string) (available []Mode, current string)
+
+	// SetMode switches the session's active operating mode. Returns
+	// [errors.ErrUnsupported] when the backend has no mode selector, or an
+	// error when modeID is not one of the advertised modes.
+	SetMode(ctx context.Context, sessionID, modeID string) error
 
 	// ListSessions returns the backend's saved session catalog scoped
 	// to the workspace.

@@ -117,7 +117,7 @@ func claudeBackend(ctx context.Context, ws *code.Workspace) (code.Agent, error) 
 	})
 	return acp.NewInProcess(ws, "Claude", srv, func(conn *acpsdk.AgentSideConnection) {
 		srv.SetAgentConnection(conn)
-	}, nil)
+	}, srv.Close)
 }
 
 // codexBackend spawns `codex app-server` (managed by codex.Spawn) and

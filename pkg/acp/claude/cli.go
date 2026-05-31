@@ -45,3 +45,40 @@ type cliInputContent struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
 }
+
+// Control protocol: with --permission-prompt-tool stdio the CLI emits a
+// control_request (subtype "can_use_tool") on stdout when a tool needs
+// approval; the client replies with a control_response on stdin.
+type controlRequest struct {
+	RequestID string `json:"request_id"`
+	Request   struct {
+		Subtype   string          `json:"subtype"`
+		ToolName  string          `json:"tool_name"`
+		ToolUseID string          `json:"tool_use_id"`
+		Input     json.RawMessage `json:"input"`
+		Description string        `json:"description"`
+	} `json:"request"`
+}
+
+type controlResponse struct {
+	Type     string              `json:"type"`
+	Response controlResponseBody `json:"response"`
+}
+
+// controlInterrupt aborts the in-flight turn while keeping the process alive.
+type controlInterrupt struct {
+	Type      string               `json:"type"`
+	RequestID string               `json:"request_id"`
+	Request   controlInterruptBody `json:"request"`
+}
+
+type controlInterruptBody struct {
+	Subtype string `json:"subtype"`
+}
+
+type controlResponseBody struct {
+	Subtype   string `json:"subtype"` // success | error
+	RequestID string `json:"request_id"`
+	Response  any    `json:"response,omitempty"`
+	Error     string `json:"error,omitempty"`
+}

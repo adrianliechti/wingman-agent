@@ -8,18 +8,21 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 )
 
-// session holds per-conversation state. A new `claude` subprocess is spawned
-// per turn (claude --print exits when the model returns) — this keeps
-// isolation simple and matches how the CLI is designed to be invoked.
+// session holds per-conversation state. A single long-lived `claude` process
+// (streaming stdio mode) serves every turn of the session: user messages are
+// written to its stdin and it keeps conversation state in memory, so turns are
+// fast and need no per-turn --resume reload. The process is (re)spawned lazily
+// and respawned (with --resume, restoring on-disk state) when the model/effort/
+// mode change or it dies.
 //
-// The ACP SessionId is reused as the `claude` CLI session UUID, so prompts
-// across turns share state: the first turn passes `--session-id <uuid>` to
-// pin it, every subsequent turn passes `--resume <uuid>` to load it.
+// The ACP SessionId is reused as the `claude` CLI session UUID.
 type session struct {
 	id  acp.SessionId
 	cwd string
@@ -29,10 +32,11 @@ type session struct {
 	effort         string   // "" or "default" means no --effort flag
 	mode           string
 	additionalDirs []string // forwarded to --add-dir
-	resumeFrom     string   // CLI session UUID to --resume from on the next turn
+	resumeFrom     string   // CLI session UUID to --resume from on first spawn
 	forkOnResume   bool     // when resumeFrom is set, also pass --fork-session
-	started        bool     // true once we've spawned a turn under this id
-	cancel         context.CancelFunc // non-nil while a turn is running
+	started        bool     // true once the process has been spawned under this id
+	cancel         context.CancelFunc // interrupts the active turn; nil when idle
+	proc           *claudeProc        // live streaming process; nil when not running
 }
 
 func newSession(id acp.SessionId, cwd, model, effort string, additionalDirs []string) *session {
@@ -41,11 +45,13 @@ func newSession(id acp.SessionId, cwd, model, effort string, additionalDirs []st
 		cwd:            cwd,
 		modelID:        model,
 		effort:         effort,
+		mode:           defaultModeID,
 		additionalDirs: append([]string(nil), additionalDirs...),
 	}
 }
 
-// cancelTurn cancels the active turn if any. Safe to call from any goroutine.
+// cancelTurn interrupts the active turn (if any) without killing the process,
+// so the session stays warm for the next turn. Safe to call from any goroutine.
 func (s *session) cancelTurn() {
 	s.mu.Lock()
 	cancel := s.cancel
@@ -55,13 +61,31 @@ func (s *session) cancelTurn() {
 	}
 }
 
+// close terminates the session's process. Used on session close/delete.
+func (s *session) close() {
+	s.mu.Lock()
+	cancel := s.cancel
+	proc := s.proc
+	s.proc = nil
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if proc != nil {
+		proc.shutdown()
+	}
+}
+
 func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, path string, env []string, prompt []acp.ContentBlock) (acp.StopReason, error) {
+	p, err := s.ensureProc(conn, path, env)
+	if err != nil {
+		return "", err
+	}
+
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
 	s.mu.Lock()
 	s.cancel = cancel
-	args := s.cliArgsLocked()
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -69,7 +93,55 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pa
 		s.mu.Unlock()
 	}()
 
-	cmd := exec.CommandContext(turnCtx, path, args...)
+	if err := p.out.writeJSON(promptMessage(prompt)); err != nil {
+		s.dropProc(p)
+		return "", fmt.Errorf("write prompt: %w", err)
+	}
+
+	select {
+	case <-turnCtx.Done():
+		// User cancelled: interrupt the turn but keep the process warm. Drain
+		// the turn's terminating result so the stream stays in sync. If the
+		// interrupt stalls, discard the process so a late result can't leak
+		// into the next turn (the next turn respawns with --resume).
+		_ = p.out.writeJSON(interruptRequest())
+		select {
+		case <-p.results:
+		case <-p.dead:
+		case <-time.After(5 * time.Second):
+			s.dropProc(p)
+		}
+		return acp.StopReasonCancelled, nil
+	case r := <-p.results:
+		if r.err != nil {
+			s.dropProc(p)
+			return "", r.err
+		}
+		return r.stop, nil
+	case <-p.dead:
+		s.dropProc(p)
+		return "", fmt.Errorf("claude process exited unexpectedly")
+	}
+}
+
+// ensureProc returns the session's live process, spawning (or respawning) it
+// when absent, dead, or started under a now-stale config (model/effort/mode).
+func (s *session) ensureProc(conn *acp.AgentSideConnection, path string, env []string) (*claudeProc, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sig := s.spawnSigLocked()
+	if s.proc != nil && s.proc.sig == sig && !s.proc.isDead() {
+		return s.proc, nil
+	}
+	if s.proc != nil {
+		s.proc.shutdown()
+		s.proc = nil
+	}
+
+	args := s.cliArgsLocked()
+	procCtx, kill := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(procCtx, path, args...)
 	cmd.Dir = s.cwd
 	if env != nil {
 		cmd.Env = env
@@ -77,44 +149,155 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pa
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return "", fmt.Errorf("stdin pipe: %w", err)
+		kill()
+		return nil, fmt.Errorf("stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", fmt.Errorf("stdout pipe: %w", err)
+		kill()
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		kill()
+		return nil, fmt.Errorf("start claude: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start claude: %w", err)
+	p := &claudeProc{
+		cmd:     cmd,
+		out:     &streamWriter{w: stdin},
+		stdin:   stdin,
+		sig:     sig,
+		kill:    kill,
+		results: make(chan turnResult, 1),
+		dead:    make(chan struct{}),
 	}
-	// Now that the CLI process owns the session id (or has forked into ours),
-	// every future turn must use --resume rather than --session-id/--resume-from.
-	s.mu.Lock()
+	go p.read(procCtx, conn, s.id, stdout)
+
+	// The process now owns the on-disk session id; future respawns resume it.
 	s.started = true
 	s.resumeFrom = ""
 	s.forkOnResume = false
+	s.proc = p
+	return p, nil
+}
+
+// dropProc tears down p and clears it from the session if still current, so the
+// next turn respawns.
+func (s *session) dropProc(p *claudeProc) {
+	p.shutdown()
+	s.mu.Lock()
+	if s.proc == p {
+		s.proc = nil
+	}
 	s.mu.Unlock()
-	// Signal the process before waiting: on error returns the parent context
-	// may still be live, but claude is no longer being read from. Without the
-	// cancel, its stdout pipe fills and Wait blocks forever.
-	defer func() {
-		cancel()
-		_ = cmd.Wait()
-	}()
+}
 
-	if err := writePrompt(stdin, prompt); err != nil {
-		return "", fmt.Errorf("write prompt: %w", err)
-	}
-	_ = stdin.Close()
+// spawnSigLocked is the config fingerprint a running process was started with;
+// a change forces a respawn. Caller must hold s.mu.
+func (s *session) spawnSigLocked() string {
+	return strings.Join(append([]string{s.modelID, s.effort, s.mode}, s.additionalDirs...), "\x00")
+}
 
-	stop, parseErr := translateStream(turnCtx, conn, s.id, stdout)
-	if turnCtx.Err() != nil {
-		return acp.StopReasonCancelled, nil
+// claudeProc is one long-lived streaming `claude` process. A single reader
+// goroutine drains its stdout for the whole lifetime, delivering each turn's
+// terminating result on results and closing dead when the process exits.
+type claudeProc struct {
+	cmd     *exec.Cmd
+	out     *streamWriter
+	stdin   io.Closer
+	sig     string
+	kill    context.CancelFunc
+	results chan turnResult
+	dead    chan struct{}
+}
+
+type turnResult struct {
+	stop acp.StopReason
+	err  error
+}
+
+func (p *claudeProc) isDead() bool {
+	select {
+	case <-p.dead:
+		return true
+	default:
+		return false
 	}
-	if parseErr != nil {
-		return "", parseErr
+}
+
+func (p *claudeProc) shutdown() {
+	p.kill()
+	_ = p.stdin.Close()
+	_ = p.cmd.Wait()
+}
+
+// read drains stdout for the process lifetime: assistant/user events become ACP
+// updates, can_use_tool control requests are bridged to permission prompts, and
+// each `result` is delivered to the waiting turn. Closing dead signals exit.
+func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, r io.Reader) {
+	defer close(p.dead)
+	app := &approver{ctx: ctx, conn: conn, sid: sid, out: p.out}
+
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var env cliEnvelope
+		if err := json.Unmarshal(line, &env); err != nil {
+			fmt.Fprintf(os.Stderr, "claude-acp: skipping non-JSON line: %s\n", line)
+			continue
+		}
+		switch env.Type {
+		case "assistant":
+			if err := emitAssistant(ctx, conn, sid, env.Message); err != nil {
+				fmt.Fprintf(os.Stderr, "claude-acp: emit assistant: %v\n", err)
+			}
+		case "user":
+			if err := emitToolResults(ctx, conn, sid, env.Message); err != nil {
+				fmt.Fprintf(os.Stderr, "claude-acp: emit tool result: %v\n", err)
+			}
+		case "control_request":
+			var req controlRequest
+			if json.Unmarshal(line, &req) == nil {
+				go app.handle(req)
+			}
+		case "result":
+			select {
+			case p.results <- turnResult{stop: acp.StopReasonEndTurn}:
+			default:
+			}
+		}
 	}
-	return stop, nil
+}
+
+func interruptRequest() controlInterrupt {
+	return controlInterrupt{
+		Type:      "control_request",
+		RequestID: newUUID(),
+		Request:   controlInterruptBody{Subtype: "interrupt"},
+	}
+}
+
+// streamWriter serializes newline-delimited JSON writes to the CLI's stdin.
+// The prompt and any control responses (from concurrent permission handlers)
+// share this writer, so writes are mutex-guarded.
+type streamWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *streamWriter) writeJSON(v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err = s.w.Write(append(b, '\n'))
+	return err
 }
 
 // cliArgsLocked returns the argv for `claude`. Caller must hold s.mu.
@@ -129,11 +312,15 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pa
 // The CLI persists the session to ~/.claude/projects/<cwd>/<uuid>.jsonl, so
 // state survives across turns even though each turn is a one-shot process.
 func (s *session) cliArgsLocked() []string {
+	// Streaming mode (no --print): the process reads user messages from stdin
+	// and stays alive until stdin closes, which lets the stdio control protocol
+	// answer tool-permission prompts mid-turn. --permission-prompt-tool stdio
+	// routes those approvals over the same channel.
 	args := []string{
-		"--print",
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
+		"--permission-prompt-tool", "stdio",
 	}
 	switch {
 	case s.started:
@@ -158,13 +345,17 @@ func (s *session) cliArgsLocked() []string {
 	if s.effort != "" && s.effort != "default" {
 		args = append(args, "--effort", s.effort)
 	}
-	if s.mode != "" {
-		args = append(args, "--permission-mode", s.mode)
+	mode := s.mode
+	if mode == "" {
+		mode = defaultModeID
 	}
+	args = append(args, "--permission-mode", mode)
 	return args
 }
 
-func writePrompt(w io.Writer, blocks []acp.ContentBlock) error {
+// promptMessage builds the stream-json user message. Image / Resource /
+// ResourceLink blocks are dropped: the CLI's input schema only documents text.
+func promptMessage(blocks []acp.ContentBlock) cliInput {
 	in := cliInput{Type: "user", Message: cliInputMessage{Role: "user"}}
 	for _, b := range blocks {
 		if b.Text != nil {
@@ -173,170 +364,6 @@ func writePrompt(w io.Writer, blocks []acp.ContentBlock) error {
 				Text: b.Text.Text,
 			})
 		}
-		// Image / Resource / ResourceLink blocks are dropped: the CLI's
-		// stream-json input schema only documents text content.
 	}
-	return json.NewEncoder(w).Encode(in)
-}
-
-// translateStream consumes claude's stdout, emitting ACP session updates and
-// returning the final StopReason. Returns early with StopReasonCancelled if
-// ctx is cancelled.
-func translateStream(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, r io.Reader) (acp.StopReason, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
-	for scanner.Scan() {
-		if ctx.Err() != nil {
-			return acp.StopReasonCancelled, nil
-		}
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var env cliEnvelope
-		if err := json.Unmarshal(line, &env); err != nil {
-			fmt.Fprintf(os.Stderr, "claude-acp: skipping non-JSON line: %s\n", line)
-			continue
-		}
-
-		switch env.Type {
-		case "assistant":
-			if err := emitAssistant(ctx, conn, sid, env.Message); err != nil {
-				return "", err
-			}
-		case "user":
-			// tool_result blocks that the CLI echoes back to itself — surface
-			// them as ToolCallUpdate completions so the client sees output.
-			if err := emitToolResults(ctx, conn, sid, env.Message); err != nil {
-				return "", err
-			}
-		case "result", "system":
-			// `result` is the turn terminator; `system` carries init metadata.
-			// Nothing actionable for us to surface.
-		}
-	}
-	if err := scanner.Err(); err != nil && ctx.Err() == nil {
-		return "", fmt.Errorf("read claude stdout: %w", err)
-	}
-	return acp.StopReasonEndTurn, nil
-}
-
-func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage) error {
-	if len(raw) == 0 {
-		return nil
-	}
-	var m cliMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return fmt.Errorf("parse assistant message: %w", err)
-	}
-	for _, b := range m.Content {
-		var update acp.SessionUpdate
-		switch b.Type {
-		case "text":
-			if b.Text == "" {
-				continue
-			}
-			update = acp.UpdateAgentMessageText(b.Text)
-		case "thinking":
-			if b.Thinking == "" {
-				continue
-			}
-			update = acp.UpdateAgentThoughtText(b.Thinking)
-		case "tool_use":
-			title := b.Name
-			if title == "" {
-				title = "Tool call"
-			}
-			var input map[string]any
-			if len(b.Input) > 0 {
-				_ = json.Unmarshal(b.Input, &input)
-			}
-			update = acp.StartToolCall(
-				acp.ToolCallId(b.ID),
-				title,
-				acp.WithStartKind(toolKindFor(b.Name)),
-				acp.WithStartStatus(acp.ToolCallStatusInProgress),
-				acp.WithStartRawInput(input),
-			)
-		default:
-			continue
-		}
-		if err := conn.SessionUpdate(ctx, acp.SessionNotification{
-			SessionId: sid,
-			Update:    update,
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage) error {
-	if len(raw) == 0 {
-		return nil
-	}
-	var m cliMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil // best-effort; user echoes can be skipped on parse error
-	}
-	for _, b := range m.Content {
-		if b.Type != "tool_result" || b.ToolUseID == "" {
-			continue
-		}
-		status := acp.ToolCallStatusCompleted
-		if b.IsError {
-			status = acp.ToolCallStatusFailed
-		}
-		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(status)}
-		if text := extractToolResultText(b.Content); text != "" {
-			opts = append(opts, acp.WithUpdateContent([]acp.ToolCallContent{
-				acp.ToolContent(acp.TextBlock(text)),
-			}))
-		}
-		if err := conn.SessionUpdate(ctx, acp.SessionNotification{
-			SessionId: sid,
-			Update:    acp.UpdateToolCall(acp.ToolCallId(b.ToolUseID), opts...),
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// extractToolResultText flattens tool_result.content (string OR
-// [{type:"text",text:...}, ...]) into a single string.
-func extractToolResultText(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
-	}
-	var blocks []cliMsgBlock
-	if err := json.Unmarshal(raw, &blocks); err == nil {
-		out := ""
-		for _, blk := range blocks {
-			if blk.Type == "text" {
-				out += blk.Text
-			}
-		}
-		return out
-	}
-	return string(raw)
-}
-
-func toolKindFor(name string) acp.ToolKind {
-	switch name {
-	case "Read", "Glob", "Grep", "WebFetch", "WebSearch":
-		return acp.ToolKindRead
-	case "Edit", "Write", "MultiEdit", "NotebookEdit":
-		return acp.ToolKindEdit
-	case "Bash", "BashOutput", "KillShell":
-		return acp.ToolKindExecute
-	case "Task":
-		return acp.ToolKindThink
-	}
-	return acp.ToolKindOther
+	return in
 }

@@ -80,6 +80,23 @@ func New(opts Options) *Agent {
 
 func (a *Agent) SetAgentConnection(conn *acp.AgentSideConnection) { a.conn = conn }
 
+// Close terminates every session's live process. Wired as the in-process
+// cleanup so swapping away from / shutting down the backend doesn't orphan
+// claude subprocesses.
+func (a *Agent) Close() error {
+	a.mu.Lock()
+	sessions := make([]*session, 0, len(a.sessions))
+	for _, s := range a.sessions {
+		sessions = append(sessions, s)
+	}
+	a.sessions = make(map[acp.SessionId]*session)
+	a.mu.Unlock()
+	for _, s := range sessions {
+		s.close()
+	}
+	return nil
+}
+
 func (a *Agent) lookup(id acp.SessionId) *session {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -128,6 +145,7 @@ func (a *Agent) NewSession(_ context.Context, params acp.NewSessionRequest) (acp
 	return acp.NewSessionResponse{
 		SessionId:     id,
 		Models:        buildSessionModelState(s.modelID),
+		Modes:         buildSessionModeState(s.mode),
 		ConfigOptions: buildConfigOptions(s.modelID, s.effort),
 	}, nil
 }
@@ -156,8 +174,12 @@ func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeReque
 	if s == nil {
 		return acp.SetSessionModeResponse{}, fmt.Errorf("session %s not found", params.SessionId)
 	}
+	id := string(params.ModeId)
+	if findMode(id) == nil {
+		return acp.SetSessionModeResponse{}, fmt.Errorf("unknown mode %q", id)
+	}
 	s.mu.Lock()
-	s.mode = string(params.ModeId)
+	s.mode = id
 	s.mu.Unlock()
 	return acp.SetSessionModeResponse{}, nil
 }
@@ -194,7 +216,7 @@ func (a *Agent) CloseSession(_ context.Context, params acp.CloseSessionRequest) 
 	delete(a.sessions, params.SessionId)
 	a.mu.Unlock()
 	if s != nil {
-		s.cancelTurn()
+		s.close()
 	}
 	return acp.CloseSessionResponse{}, nil
 }
@@ -218,6 +240,7 @@ func (a *Agent) ResumeSession(_ context.Context, params acp.ResumeSessionRequest
 	s := a.adoptSession(params.SessionId, params.Cwd, params.AdditionalDirectories, string(params.SessionId), false)
 	return acp.ResumeSessionResponse{
 		Models:        buildSessionModelState(s.modelID),
+		Modes:         buildSessionModeState(s.mode),
 		ConfigOptions: buildConfigOptions(s.modelID, s.effort),
 	}, nil
 }
@@ -232,6 +255,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	}
 	return acp.LoadSessionResponse{
 		Models:        buildSessionModelState(s.modelID),
+		Modes:         buildSessionModeState(s.mode),
 		ConfigOptions: buildConfigOptions(s.modelID, s.effort),
 	}, nil
 }

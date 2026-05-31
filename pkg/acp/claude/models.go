@@ -112,3 +112,50 @@ func titleCase(s string) string {
 	}
 	return string(out)
 }
+
+// --- session modes ---
+
+// Mode ids are passed verbatim to `claude --permission-mode`. Tool approvals in
+// default/acceptEdits are surfaced via the stdio control protocol (see approver).
+const defaultModeID = "default"
+
+type sessionMode struct {
+	id          string
+	name        string
+	description string
+}
+
+var sessionModes = []sessionMode{
+	{id: "default", name: "Agent", description: "Asks before editing files or running commands."},
+	{id: "acceptEdits", name: "Accept Edits", description: "Auto-accepts file edits; asks before running commands."},
+	{id: "plan", name: "Plan", description: "Read-only — proposes a plan, doesn't edit code."},
+	{id: "bypassPermissions", name: "Full Access", description: "Edit files and run commands without asking."},
+}
+
+func findMode(id string) *sessionMode {
+	for i := range sessionModes {
+		if sessionModes[i].id == id {
+			return &sessionModes[i]
+		}
+	}
+	return nil
+}
+
+func buildSessionModeState(currentID string) *acp.SessionModeState {
+	if currentID == "" {
+		currentID = defaultModeID
+	}
+	available := make([]acp.SessionMode, 0, len(sessionModes))
+	for _, m := range sessionModes {
+		desc := m.description
+		available = append(available, acp.SessionMode{
+			Id:          acp.SessionModeId(m.id),
+			Name:        m.name,
+			Description: &desc,
+		})
+	}
+	return &acp.SessionModeState{
+		AvailableModes: available,
+		CurrentModeId:  acp.SessionModeId(currentID),
+	}
+}

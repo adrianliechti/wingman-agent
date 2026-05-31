@@ -1,27 +1,22 @@
 import { Compass, Wrench } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-type Mode = "agent" | "plan";
+export type ModeOption = { id: string; name: string; description?: string };
 
-const options: { value: Mode; label: string; description: string }[] = [
-	{
-		value: "agent",
-		label: "Agent",
-		description: "Full read/write access — implements changes.",
-	},
-	{
-		value: "plan",
-		label: "Plan",
-		description: "Read-only — proposes a plan, doesn't edit code.",
-	},
-];
-
-interface Props {
-	mode: Mode;
-	onSelect: (next: Mode) => void;
+// Mode semantics differ per backend, so we infer an icon from the id rather
+// than hardcoding: read-only / plan style modes get the Compass, everything
+// else (the acting modes) gets the Wrench.
+function isPlanLike(id: string): boolean {
+	return /plan|read|only/i.test(id);
 }
 
-export function ModePicker({ mode, onSelect }: Props) {
+interface Props {
+	modes: ModeOption[];
+	current: string;
+	onSelect: (id: string) => void;
+}
+
+export function ModePicker({ modes, current, onSelect }: Props) {
 	const [open, setOpen] = useState(false);
 	const popRef = useRef<HTMLDivElement>(null);
 	const btnRef = useRef<HTMLButtonElement>(null);
@@ -43,8 +38,13 @@ export function ModePicker({ mode, onSelect }: Props) {
 		return () => document.removeEventListener("mousedown", handler);
 	}, [open]);
 
-	const Icon = mode === "plan" ? Compass : Wrench;
-	const label = mode === "plan" ? "Plan" : "Agent";
+	// Nothing to pick — backend exposes no modes.
+	if (modes.length === 0) return null;
+
+	const active = modes.find((m) => m.id === current);
+	const planLike = isPlanLike(current);
+	const Icon = planLike ? Compass : Wrench;
+	const label = active?.name ?? current ?? "Mode";
 
 	return (
 		<div className="relative">
@@ -53,7 +53,7 @@ export function ModePicker({ mode, onSelect }: Props) {
 				type="button"
 				onClick={() => setOpen((v) => !v)}
 				className={`flex items-center gap-1 px-2 h-7 rounded text-[11.5px] cursor-pointer transition-colors ${
-					mode === "plan"
+					planLike
 						? "text-warning hover:bg-bg-hover"
 						: "text-fg-muted hover:text-fg hover:bg-bg-hover"
 				}`}
@@ -67,32 +67,34 @@ export function ModePicker({ mode, onSelect }: Props) {
 					ref={popRef}
 					className="absolute bottom-full mb-1 left-0 w-[320px] bg-bg-elevated/95 backdrop-blur-sm border border-border rounded-md shadow-xl py-1 z-50"
 				>
-					{options.map((opt) => {
-						const active = opt.value === mode;
-						const OptIcon = opt.value === "plan" ? Compass : Wrench;
+					{modes.map((opt) => {
+						const isActive = opt.id === current;
+						const OptIcon = isPlanLike(opt.id) ? Compass : Wrench;
 						return (
 							<button
 								type="button"
-								key={opt.value}
+								key={opt.id}
 								onClick={() => {
-									onSelect(opt.value);
+									onSelect(opt.id);
 									setOpen(false);
 								}}
 								className={`w-full flex items-start gap-2 px-3 py-2 text-left cursor-pointer transition-colors ${
-									active
+									isActive
 										? "bg-bg-active text-fg"
 										: "text-fg-muted hover:bg-bg-hover hover:text-fg"
 								}`}
 							>
 								<OptIcon
 									size={13}
-									className={`mt-0.5 shrink-0 ${opt.value === "plan" ? "text-warning" : "text-fg-dim"}`}
+									className={`mt-0.5 shrink-0 ${isPlanLike(opt.id) ? "text-warning" : "text-fg-dim"}`}
 								/>
 								<div className="min-w-0 flex-1">
-									<div className="text-[12px] font-medium">{opt.label}</div>
-									<div className="text-[11px] text-fg-dim mt-0.5">
-										{opt.description}
-									</div>
+									<div className="text-[12px] font-medium">{opt.name}</div>
+									{opt.description && (
+										<div className="text-[11px] text-fg-dim mt-0.5">
+											{opt.description}
+										</div>
+									)}
 								</div>
 							</button>
 						);

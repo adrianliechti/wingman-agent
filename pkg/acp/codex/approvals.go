@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -32,14 +33,27 @@ func newApprover(ctx context.Context, conn *acp.AgentSideConnection, sid acp.Ses
 	return &approver{ctx: ctx, conn: conn, sessionID: sid}
 }
 
-func (a *approver) handleExec(p execApprovalParams) execApprovalResponse {
-	tc := acp.ToolCallUpdate{
-		ToolCallId: acp.ToolCallId(p.ItemID),
-	}
-	kind := acp.ToolKindExecute
-	tc.Kind = &kind
+func pendingToolCall(id string, kind acp.ToolKind) acp.ToolCallUpdate {
 	status := acp.ToolCallStatusPending
-	tc.Status = &status
+	return acp.ToolCallUpdate{ToolCallId: acp.ToolCallId(id), Kind: &kind, Status: &status}
+}
+
+// ask forwards a tool call to the ACP client and returns the chosen option id.
+// ok is false when the request errors or the client cancels.
+func (a *approver) ask(tc acp.ToolCallUpdate) (id acp.PermissionOptionId, ok bool) {
+	resp, err := a.conn.RequestPermission(a.ctx, acp.RequestPermissionRequest{
+		SessionId: a.sessionID,
+		ToolCall:  tc,
+		Options:   permissionOptions(),
+	})
+	if err != nil || resp.Outcome.Cancelled != nil {
+		return "", false
+	}
+	return resp.Outcome.Selected.OptionId, true
+}
+
+func (a *approver) handleExec(p execApprovalParams) execApprovalResponse {
+	tc := pendingToolCall(p.ItemID, acp.ToolKindExecute)
 	if p.Reason != "" {
 		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(p.Reason))}
 	}
@@ -47,15 +61,11 @@ func (a *approver) handleExec(p execApprovalParams) execApprovalResponse {
 		tc.RawInput = map[string]any{"command": stripShellPrefix(p.Command), "cwd": p.Cwd}
 	}
 
-	resp, err := a.conn.RequestPermission(a.ctx, acp.RequestPermissionRequest{
-		SessionId: a.sessionID,
-		ToolCall:  tc,
-		Options:   permissionOptions(),
-	})
-	if err != nil || resp.Outcome.Cancelled != nil {
+	id, ok := a.ask(tc)
+	if !ok {
 		return execApprovalResponse{Decision: "cancel"}
 	}
-	switch resp.Outcome.Selected.OptionId {
+	switch id {
 	case optionAllowOnce:
 		return execApprovalResponse{Decision: "accept"}
 	case optionAllowAlways:
@@ -66,31 +76,54 @@ func (a *approver) handleExec(p execApprovalParams) execApprovalResponse {
 }
 
 func (a *approver) handleFile(p fileApprovalParams) fileApprovalResponse {
-	tc := acp.ToolCallUpdate{
-		ToolCallId: acp.ToolCallId(p.ItemID),
-	}
-	kind := acp.ToolKindEdit
-	tc.Kind = &kind
-	status := acp.ToolCallStatusPending
-	tc.Status = &status
+	tc := pendingToolCall(p.ItemID, acp.ToolKindEdit)
 	if p.Reason != "" {
 		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(p.Reason))}
 	}
 
-	resp, err := a.conn.RequestPermission(a.ctx, acp.RequestPermissionRequest{
-		SessionId: a.sessionID,
-		ToolCall:  tc,
-		Options:   permissionOptions(),
-	})
-	if err != nil || resp.Outcome.Cancelled != nil {
+	id, ok := a.ask(tc)
+	if !ok {
 		return fileApprovalResponse{Decision: "cancel"}
 	}
-	switch resp.Outcome.Selected.OptionId {
+	switch id {
 	case optionAllowOnce:
 		return fileApprovalResponse{Decision: "accept"}
 	case optionAllowAlways:
 		return fileApprovalResponse{Decision: "acceptForSession"}
 	default:
 		return fileApprovalResponse{Decision: "cancel"}
+	}
+}
+
+// handleElicitation bridges a `form`-mode MCP elicitation (an MCP tool-call
+// approval) to ACP request_permission. `url`-mode elicitations are OAuth/auth
+// flows the user must complete out of band; a yes/no can't satisfy them, so
+// they are declined rather than falsely accepted.
+func (a *approver) handleElicitation(p elicitationParams) elicitationResponse {
+	if p.Mode != "form" {
+		return elicitationResponse{Action: "decline"}
+	}
+	title := p.Message
+	if title == "" {
+		title = "Approve MCP request"
+	}
+	if p.ServerName != "" {
+		title = fmt.Sprintf("%s: %s", p.ServerName, title)
+	}
+	tc := pendingToolCall(fmt.Sprintf("mcp-elicitation:%s", p.ServerName), acp.ToolKindOther)
+	tc.Title = &title
+	if p.Message != "" {
+		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(p.Message))}
+	}
+
+	id, ok := a.ask(tc)
+	if !ok {
+		return elicitationResponse{Action: "cancel"}
+	}
+	switch id {
+	case optionAllowOnce, optionAllowAlways:
+		return elicitationResponse{Action: "accept"}
+	default:
+		return elicitationResponse{Action: "decline"}
 	}
 }
