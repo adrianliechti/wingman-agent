@@ -1,10 +1,3 @@
-// Package agent is the in-process [code.Agent] implementation. One Agent
-// owns the workspace and all open sessions for that workspace; each
-// session has its own [*harness.Agent], transcript, and usage. The shared
-// workspace surfaces MCP/LSP/Rewind through code.Workspace.
-//
-// The pkg/agent import is aliased `harness` throughout to avoid collision
-// with this package's own name.
 package agent
 
 import (
@@ -37,10 +30,6 @@ import (
 	skillpkg "github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
-// Agent is the wingman in-process implementation of [code.Agent]. Model
-// and effort are agent-wide (mirrors the previous server.s.model/s.effort
-// design) and applied to every session's request via closures on the
-// embedded harness.Config.
 type Agent struct {
 	workspace *code.Workspace
 	cfg       *harness.Config
@@ -53,9 +42,7 @@ type Agent struct {
 	modelMu  sync.Mutex
 	modelID  string
 	effortID string
-
-	upstreamMu sync.Mutex
-	upstream   map[string]bool
+	upstream map[string]bool
 
 	mu       sync.Mutex
 	sessions map[string]*sessionState
@@ -77,7 +64,6 @@ type sessionState struct {
 	cancelGen uint64
 }
 
-// New constructs an in-process [code.Agent] rooted at the workspace.
 func New(ws *code.Workspace, cfg *harness.Config, ui code.UI) *Agent {
 	return &Agent{
 		workspace:   ws,
@@ -91,10 +77,6 @@ func New(ws *code.Workspace, cfg *harness.Config, ui code.UI) *Agent {
 func (a *Agent) Name() string               { return code.BuiltinAgentName }
 func (a *Agent) Workspace() *code.Workspace { return a.workspace }
 
-// SetUI installs the elicitation UI used by ask_user and shell-confirm
-// hooks. Without a UI the agent falls back to accepted defaults
-// (Confirm → true, Ask → ""); set one before the first turn if you want
-// the user to be prompted. Safe to call concurrently.
 func (a *Agent) SetUI(ui code.UI) {
 	a.uiMu.Lock()
 	a.ui = ui
@@ -107,46 +89,22 @@ func (a *Agent) currentUI() code.UI {
 	return a.ui
 }
 
-// ─── Models ──────────────────────────────────────────────────────
-
-// FetchUpstreamModels populates the cache of upstream model ids so
-// subsequent Models() calls can filter [code.AvailableModels] down to
-// what the configured upstream actually serves. Call once at startup.
-func (a *Agent) FetchUpstreamModels(ctx context.Context) {
-	models, err := a.cfg.Models(ctx)
-	if err != nil {
-		return
-	}
-	ids := make(map[string]bool, len(models))
-	for _, m := range models {
-		ids[m.ID] = true
-	}
-	a.upstreamMu.Lock()
-	a.upstream = ids
-	a.upstreamMu.Unlock()
-}
-
 func (a *Agent) Models() ([]code.Model, string) {
-	a.upstreamMu.Lock()
-	upstream := a.upstream
-	a.upstreamMu.Unlock()
-
 	a.modelMu.Lock()
-	current := a.modelID
-	a.modelMu.Unlock()
+	defer a.modelMu.Unlock()
 
-	if upstream == nil {
-		out := make([]code.Model, len(code.AvailableModels))
-		copy(out, code.AvailableModels)
-		return out, current
-	}
-	out := make([]code.Model, 0, len(code.AvailableModels))
+	available := make([]code.Model, 0, len(code.AvailableModels))
 	for _, m := range code.AvailableModels {
-		if upstream[m.ID] {
-			out = append(out, m)
+		if a.upstream == nil || a.upstream[m.ID] {
+			available = append(available, m)
 		}
 	}
-	return out, current
+
+	current := a.modelID
+	if len(available) > 0 && !slices.ContainsFunc(available, func(m code.Model) bool { return m.ID == current }) {
+		current = available[0].ID
+	}
+	return available, current
 }
 
 func (a *Agent) SetModel(_ context.Context, id string) error {
@@ -156,31 +114,24 @@ func (a *Agent) SetModel(_ context.Context, id string) error {
 	return nil
 }
 
-func (a *Agent) currentModel() string {
-	a.modelMu.Lock()
-	defer a.modelMu.Unlock()
-	return a.modelID
-}
-
-// AutoSelectModel picks a default model id from the upstream catalog
-// when none has been set yet.
-func (a *Agent) AutoSelectModel(ctx context.Context) {
-	if a.currentModel() != "" {
+func (a *Agent) FetchModels(ctx context.Context) {
+	models, err := a.cfg.Models(ctx)
+	if err != nil {
 		return
 	}
-	a.FetchUpstreamModels(ctx)
-	a.upstreamMu.Lock()
-	upstream := a.upstream
-	a.upstreamMu.Unlock()
-	for _, m := range code.AvailableModels {
-		if upstream == nil || upstream[m.ID] {
-			_ = a.SetModel(ctx, m.ID)
-			return
-		}
+	ids := make(map[string]bool, len(models))
+	for _, m := range models {
+		ids[m.ID] = true
 	}
+	a.modelMu.Lock()
+	a.upstream = ids
+	a.modelMu.Unlock()
 }
 
-// ─── Effort ──────────────────────────────────────────────────────
+func (a *Agent) currentModel() string {
+	_, current := a.Models()
+	return current
+}
 
 var effortValues = []string{"auto", "low", "medium", "high"}
 
@@ -216,8 +167,6 @@ func (a *Agent) currentEffort() string {
 	return a.effortID
 }
 
-// ─── Sessions ────────────────────────────────────────────────────
-
 func (a *Agent) ListSessions(_ context.Context) ([]code.SessionInfo, error) {
 	saved, err := session.List(a.sessionsDir)
 	if err != nil {
@@ -234,8 +183,6 @@ func (a *Agent) ListSessions(_ context.Context) ([]code.SessionInfo, error) {
 	return out, nil
 }
 
-// NewSession mints a UUID and lazy-builds the in-memory state. Nothing
-// is persisted to disk yet — that happens after the first Save().
 func (a *Agent) NewSession(_ context.Context) (string, error) {
 	id := uuid.NewString()
 	a.mu.Lock()
@@ -283,8 +230,6 @@ func (a *Agent) DeleteSession(_ context.Context, id string) error {
 	return nil
 }
 
-// Save persists a session's transcript. Called after each turn by
-// consumers that want chat to survive a restart. No-op if not loaded.
 func (a *Agent) Save(id string) error {
 	a.mu.Lock()
 	s, ok := a.sessions[id]
@@ -322,12 +267,7 @@ func (a *Agent) session(id string) *sessionState {
 	return a.sessions[id]
 }
 
-// HasSession reports whether the agent is tracking a session id in
-// memory. Useful for the server's lazy-create check (don't restore
-// state for a session that's already in memory).
 func (a *Agent) HasSession(id string) bool { return a.session(id) != nil }
-
-// ─── Send / Cancel ───────────────────────────────────────────────
 
 func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) iter.Seq2[harness.Message, error] {
 	a.mu.Lock()
@@ -340,16 +280,10 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) it
 	sendCtx, cancel := context.WithCancel(code.WithSessionID(ctx, id))
 	stream := s.aa.Send(sendCtx, input)
 	if stream == nil {
-		// The core agent queued this input onto the turn that is already
-		// running; that turn owns the active cancel func and will drain and
-		// stream our input itself. Leave its cancel untouched (setCancel here
-		// would abort it) and just discard the context we won't use.
 		cancel()
 		return nil
 	}
 
-	// We own a fresh turn. Register our cancel and tag it with a generation so
-	// a previously finishing turn's deferred clearCancel can't wipe ours.
 	gen := s.setCancel(cancel)
 
 	return func(yield func(harness.Message, error) bool) {
@@ -377,8 +311,6 @@ func errStream(err error) iter.Seq2[harness.Message, error] {
 	}
 }
 
-// ─── Lifecycle ───────────────────────────────────────────────────
-
 func (a *Agent) Close() error {
 	a.mu.Lock()
 	for _, s := range a.sessions {
@@ -389,10 +321,6 @@ func (a *Agent) Close() error {
 	return nil
 }
 
-// ─── Modes (agent / plan) ───────────────────────────────────────
-
-// Plan mode restricts the session to read-only tools and swaps in the
-// planning prompt.
 var wingmanModes = []code.Mode{
 	{ID: "agent", Name: "Agent", Description: "Read, edit, and run commands without asking."},
 	{ID: "plan", Name: "Plan", Description: "Read-only — proposes a plan, doesn't edit code."},
@@ -424,9 +352,6 @@ func (a *Agent) SetMode(_ context.Context, sessionID, modeID string) error {
 	return nil
 }
 
-// Tools returns the snapshot tool list for a session (used by the TUI
-// to enumerate tool names and check the Hidden flag for the help/picker
-// menus). Returns nil for unknown ids.
 func (a *Agent) Tools(id string) []tool.Tool {
 	s := a.session(id)
 	if s == nil {
@@ -434,8 +359,6 @@ func (a *Agent) Tools(id string) []tool.Tool {
 	}
 	return s.tools()
 }
-
-// ─── session-state plumbing ──────────────────────────────────────
 
 func (a *Agent) buildSession() *sessionState {
 	sessionCfg := a.cfg.Derive()
@@ -485,10 +408,6 @@ func (a *Agent) buildSession() *sessionState {
 	return s
 }
 
-// buildElicit returns elicitation hooks that delegate to the currently
-// wired UI and fall back to accepted defaults (Confirm → true, Ask →
-// "") when no UI is set. Closures re-read currentUI() at call time so a
-// SetUI swap is picked up by sessions built afterwards.
 func (a *Agent) buildElicit() *tool.Elicitation {
 	return &tool.Elicitation{
 		Ask: func(ctx context.Context, msg string) (string, error) {
@@ -508,10 +427,6 @@ func (a *Agent) buildElicit() *tool.Elicitation {
 	}
 }
 
-// setCancel registers the cancel func for a newly started turn and returns its
-// generation. It cancels any previous func defensively; under the core agent's
-// one-turn-at-a-time guarantee the previous turn has already cleared its func,
-// so prev is normally nil.
 func (s *sessionState) setCancel(fn context.CancelFunc) uint64 {
 	s.cancelMu.Lock()
 	prev := s.cancelFn
@@ -525,9 +440,6 @@ func (s *sessionState) setCancel(fn context.CancelFunc) uint64 {
 	return gen
 }
 
-// clearCancel drops the registered func only if it is still the one tagged with
-// gen, so a finishing turn cannot wipe a newer turn's cancel func when turns
-// chain quickly (e.g. a queued follow-up starting as the prior turn ends).
 func (s *sessionState) clearCancel(gen uint64) {
 	s.cancelMu.Lock()
 	if s.cancelGen == gen {
@@ -583,14 +495,10 @@ func planModeEffectExecute(t tool.Tool) func(context.Context, map[string]any) (s
 	}
 }
 
-// ─── Instructions / project context ─────────────────────────────
-
 func (s *sessionState) instructions() string {
 	return BuildInstructions(s.instructionsData())
 }
 
-// BuildInstructions composes the system prompt from a section-data
-// snapshot.
 func BuildInstructions(data prompt.SectionData) string {
 	base := prompt.Instructions
 	if data.PlanMode {
@@ -692,8 +600,6 @@ func (s *sessionState) projectInstructions() string {
 	return result
 }
 
-// ReadProjectInstructions is an uncached read for callers (TUI status
-// bar, /init flows) that need the assembled block without a session.
 func ReadProjectInstructions(wd string) string {
 	result, _ := renderProjectInstructions(findProjectInstructions(wd))
 	return result

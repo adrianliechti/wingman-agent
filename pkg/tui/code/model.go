@@ -4,10 +4,6 @@ import (
 	"context"
 )
 
-func (a *App) autoSelectModel() {
-	a.agent.AutoSelectModel(a.ctx)
-}
-
 func (a *App) showModelPicker() {
 	available, current := a.agent.Models()
 	var items []PickerItem

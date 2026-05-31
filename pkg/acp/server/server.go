@@ -166,7 +166,7 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string) (*workspaceEn
 		if err := ws.InitMCP(ctx); err != nil {
 			slog.Warn("workspace mcp init failed", "cwd", cwd, "err", err)
 		}
-		wa.AutoSelectModel(ctx)
+		wa.FetchModels(ctx)
 		w.initted = true
 	}
 	return w, nil

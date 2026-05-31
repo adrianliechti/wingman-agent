@@ -58,13 +58,15 @@ export function ModelPicker({ subscribe }: Props) {
 		loadModels();
 	}, [loadCurrent, loadModels]);
 
-	// External agents publish their own model + effort options through
-	// the same /api/* endpoints (the server dispatches). Refetch when
-	// agent_changed fires so the picker reflects the new catalog.
+	// Refetch the catalog when the backend signals it changed:
+	//   • agent_changed — a different backend with its own model/effort set.
+	//   • model_changed — the upstream catalog finished loading (startup) or
+	//     narrowed, which can move the default selection.
+	// Both publish through the same /api/* endpoints (the server dispatches).
 	useEffect(() => {
 		if (!subscribe) return;
 		return subscribe((msg) => {
-			if (msg.type === "agent_changed") {
+			if (msg.type === "agent_changed" || msg.type === "model_changed") {
 				loadCurrent();
 				loadModels();
 				// Re-derive available effort options from the latest /api/effort

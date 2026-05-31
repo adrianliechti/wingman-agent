@@ -181,7 +181,9 @@ func (a *App) stop() {
 func (a *App) Run() error {
 	a.setupUI()
 
-	a.autoSelectModel()
+	// Narrow the model catalog to what the upstream serves; Models() reports
+	// a sane default until (and if) this lands.
+	a.agent.FetchModels(a.ctx)
 
 	mainLayout := a.buildLayout()
 	a.spinner = NewSpinner(a.app, a.inputHint)

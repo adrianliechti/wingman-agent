@@ -114,10 +114,14 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 		}
 	}()
 
-	// Populate the wingman agent's upstream model cache + pick a default.
+	// Narrow the model catalog to what the upstream serves, then nudge any
+	// already-connected UI to refresh its selector. Async so a slow or
+	// unreachable upstream never delays startup — Models() reports a sane
+	// default until this lands, so the selector renders either way.
 	go func() {
 		if w, ok := s.agent.(*coder.Agent); ok {
-			w.AutoSelectModel(ctx)
+			w.FetchModels(ctx)
+			s.broadcast(Frame{Type: EvtModelChanged})
 		}
 	}()
 
@@ -740,10 +744,11 @@ func (s *Server) constructBackend(name string) (code.Agent, error) {
 	if name == "" || name == code.BuiltinAgentName {
 		w := coder.New(s.workspace, s.config, nil)
 		w.SetUI(s)
-		// Synchronous: a freshly switched-to agent must have its model set
-		// before handleSetAgent broadcasts EvtAgentChanged, or the UI's model
-		// refetch races ahead of the pick and the selector renders empty.
-		w.AutoSelectModel(s.ctx)
+		// Synchronous so the catalog is narrowed before handleSetAgent
+		// broadcasts EvtAgentChanged and the UI refetches. The selector no
+		// longer depends on this — Models() always reports a default — but
+		// fetching here means the refetch already sees the served set.
+		w.FetchModels(s.ctx)
 		return w, nil
 	}
 	for _, r := range s.availableAgents() {

@@ -142,6 +142,12 @@ interface AgentChangedMessage {
 	type: "agent_changed";
 }
 
+// The active agent's model catalog changed (e.g. the upstream model list
+// finished loading at startup). Subscribers refetch their selectors.
+interface ModelChangedMessage {
+	type: "model_changed";
+}
+
 export type ServerMessage =
 	| SessionStateMessage
 	| TextDeltaMessage
@@ -159,7 +165,8 @@ export type ServerMessage =
 	| FilesChangedMessage
 	| DiagnosticsChangedMessage
 	| CapabilitiesChangedMessage
-	| AgentChangedMessage;
+	| AgentChangedMessage
+	| ModelChangedMessage;
 
 export type Phase = "idle" | "thinking" | "streaming" | "tool_running";
 
