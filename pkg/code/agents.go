@@ -45,6 +45,19 @@ func agentsConfigPath() (string, error) {
 	return filepath.Join(home, ".wingman", "agents.json"), nil
 }
 
+// HasAgentsConfig reports whether ~/.wingman/agents.json exists. When it
+// does it is treated as the authoritative agent list, so built-in CLI
+// auto-detection is skipped and only the wingman backend plus the file's
+// own entries are offered.
+func HasAgentsConfig() bool {
+	path, err := agentsConfigPath()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(path)
+	return err == nil
+}
+
 // LoadAgents reads ~/.wingman/agents.json and returns the configured
 // external coder backends. A missing or unreadable file means "only the
 // built-in wingman backend is available." Entries without a Name or

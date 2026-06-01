@@ -24,26 +24,30 @@ type agentRegistration struct {
 	Constructor func(ctx context.Context, ws *code.Workspace) (code.Agent, error)
 }
 
-// availableAgents merges built-in detection with the user's
-// ~/.wingman/agents.json. User-defined entries override detected entries
-// on Name collision so users can opt out of a baked-in wiring just by
-// declaring their own.
+// availableAgents builds the selectable agent list. When
+// ~/.wingman/agents.json exists it is authoritative: built-in CLI
+// auto-detection is skipped entirely, leaving only the wingman backend
+// (added by the caller) and the file's own entries. Without the file we
+// fall back to auto-detecting installed CLIs, with user-defined entries
+// overriding detected ones on Name collision.
 func (s *Server) availableAgents() []agentRegistration {
-	detected := detectAgents()
-
 	userDefs := code.LoadAgents()
-	override := make(map[string]bool, len(userDefs))
-	for _, d := range userDefs {
-		override[d.Name] = true
+
+	out := make([]agentRegistration, 0, len(userDefs)+4)
+
+	if !code.HasAgentsConfig() {
+		override := make(map[string]bool, len(userDefs))
+		for _, d := range userDefs {
+			override[d.Name] = true
+		}
+		for _, r := range detectAgents() {
+			if override[r.Name] {
+				continue
+			}
+			out = append(out, r)
+		}
 	}
 
-	out := make([]agentRegistration, 0, len(detected)+len(userDefs))
-	for _, r := range detected {
-		if override[r.Name] {
-			continue
-		}
-		out = append(out, r)
-	}
 	for _, d := range userDefs {
 		def := d
 		out = append(out, agentRegistration{
