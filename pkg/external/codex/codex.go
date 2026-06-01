@@ -5,7 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/adrianliechti/wingman-agent/pkg/external"
 )
+
+func BinPath() string {
+	return external.LookupPath("codex", "codex")
+}
 
 // BuildArgs returns the `--config` flag pairs that point codex at the
 // configured Wingman server and lock down telemetry / non-essential
@@ -61,7 +67,7 @@ func Run(ctx context.Context, args []string, options *Options) error {
 	}
 
 	if options.Path == "" {
-		options.Path = "codex"
+		options.Path = BinPath()
 	}
 
 	if options.Env == nil {

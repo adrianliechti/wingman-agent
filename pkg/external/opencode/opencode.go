@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"os/exec"
+
+	"github.com/adrianliechti/wingman-agent/pkg/external"
 )
 
 func Run(ctx context.Context, args []string, options *Options) error {
@@ -12,7 +14,7 @@ func Run(ctx context.Context, args []string, options *Options) error {
 	}
 
 	if options.Path == "" {
-		options.Path = "opencode"
+		options.Path = external.LookupPath("opencode", "opencode")
 	}
 
 	if options.Env == nil {

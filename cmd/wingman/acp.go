@@ -52,17 +52,11 @@ func runACPClaude(ctx context.Context) {
 		fatal(err)
 	}
 
-	path, err := claude.FindPath()
-	if err != nil {
-		fatal(err)
-	}
-
 	opts := acpclaude.Options{
 		Model:  *model,
 		Effort: *effort,
 		Cwd:    cwd,
 		Env:    claude.BuildEnv(os.Environ(), cfg),
-		Path:   path,
 	}
 
 	if err := acpclaude.Run(ctx, opts, os.Stdin, os.Stdout, acpLogger(*debug)); err != nil {
@@ -72,7 +66,6 @@ func runACPClaude(ctx context.Context) {
 
 func runACPCodex(ctx context.Context) {
 	fs := flag.NewFlagSet("acp codex", flag.ExitOnError)
-	codexPath := fs.String("codex", "codex", "path to the codex binary")
 	model := fs.String("model", "default", "default model id for new sessions")
 	effort := fs.String("effort", "", "default reasoning effort (minimal|low|medium|high|xhigh)")
 	debug := fs.Bool("debug", false, "log JSON-RPC traffic to stderr")
@@ -90,7 +83,7 @@ func runACPCodex(ctx context.Context) {
 		ExtraArgs: codex.BuildArgs(cfg),
 	}
 
-	if err := acpcodex.Run(ctx, *codexPath, opts, os.Stdin, os.Stdout, acpLogger(*debug)); err != nil {
+	if err := acpcodex.Run(ctx, opts, os.Stdin, os.Stdout, acpLogger(*debug)); err != nil {
 		fatal(err)
 	}
 }

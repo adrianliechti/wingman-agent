@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/adrianliechti/wingman-agent/pkg/external"
 )
 
 func Run(ctx context.Context, args []string, options *Options) error {
@@ -14,7 +16,7 @@ func Run(ctx context.Context, args []string, options *Options) error {
 	}
 
 	if options.Path == "" {
-		options.Path = "copilot"
+		options.Path = external.LookupPath("copilot", "copilot")
 	}
 
 	if options.Env == nil {

@@ -110,14 +110,9 @@ func claudeBackend(ctx context.Context, ws *code.Workspace) (code.Agent, error) 
 	if err != nil {
 		return nil, fmt.Errorf("claude config: %w", err)
 	}
-	path, err := claude.FindPath()
-	if err != nil {
-		return nil, fmt.Errorf("claude path: %w", err)
-	}
 	srv := acpclaude.New(acpclaude.Options{
-		Cwd:  ws.RootPath,
-		Env:  claude.BuildEnv(os.Environ(), cfg),
-		Path: path,
+		Cwd: ws.RootPath,
+		Env: claude.BuildEnv(os.Environ(), cfg),
 	})
 	return acp.NewInProcess(ws, "Claude", srv, func(conn *acpsdk.AgentSideConnection) {
 		srv.SetAgentConnection(conn)
@@ -132,7 +127,7 @@ func codexBackend(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("codex config: %w", err)
 	}
-	srv, err := acpcodex.Spawn(ctx, "codex", acpcodex.Options{
+	srv, err := acpcodex.Spawn(ctx, acpcodex.Options{
 		Env:       codex.BuildEnv(os.Environ(), cfg),
 		ExtraArgs: codex.BuildArgs(cfg),
 	})
