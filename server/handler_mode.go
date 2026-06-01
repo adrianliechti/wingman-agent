@@ -23,8 +23,13 @@ type modeState struct {
 }
 
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
+	a := s.activeAgent()
+	if a == nil {
+		writeJSON(w, toModeState(nil, ""))
+		return
+	}
 	id := r.URL.Query().Get("session")
-	available, current := s.activeAgent().Modes(id)
+	available, current := a.Modes(id)
 	writeJSON(w, toModeState(available, current))
 }
 
@@ -43,6 +48,10 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agent := s.activeAgent()
+	if agent == nil {
+		http.Error(w, "no active agent", http.StatusInternalServerError)
+		return
+	}
 	if err := agent.SetMode(r.Context(), id, body.Mode); err != nil {
 		if errors.Is(err, errors.ErrUnsupported) {
 			http.Error(w, "this backend has no selectable modes", http.StatusMethodNotAllowed)

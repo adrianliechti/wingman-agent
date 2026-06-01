@@ -30,6 +30,9 @@ type Agent struct {
 
 	defaultModel  string
 	defaultEffort string
+
+	modelsOnce sync.Once
+	models     []modelEntry
 }
 
 var _ acp.Agent = (*Agent)(nil)
@@ -55,6 +58,28 @@ func (a *Agent) lookup(id acp.SessionId) *session {
 	return a.sessions[id]
 }
 
+// ensureModels populates the model picker from codex's `model/list` exactly
+// once. Failure is non-fatal: the selector is simply omitted (empty list) and
+// codex still runs on its configured default.
+func (a *Agent) ensureModels(ctx context.Context) {
+	a.modelsOnce.Do(func() {
+		var all []codexModel
+		var cursor *string
+		for {
+			resp, err := a.codex.modelList(ctx, modelListParams{Cursor: cursor})
+			if err != nil {
+				return
+			}
+			all = append(all, resp.Data...)
+			if resp.NextCursor == nil || *resp.NextCursor == "" {
+				break
+			}
+			cursor = resp.NextCursor
+		}
+		a.models = modelsFromCodex(all)
+	})
+}
+
 // --- acp.Agent ---
 
 func (a *Agent) Initialize(ctx context.Context, _ acp.InitializeRequest) (acp.InitializeResponse, error) {
@@ -63,6 +88,8 @@ func (a *Agent) Initialize(ctx context.Context, _ acp.InitializeRequest) (acp.In
 	}); err != nil {
 		return acp.InitializeResponse{}, fmt.Errorf("codex initialize: %w", err)
 	}
+	a.ensureModels(ctx)
+
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		AgentInfo: &acp.Implementation{
@@ -106,9 +133,9 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	s := a.registerSession(acp.SessionId(resp.Thread.ID), resp.Model, derefEffort(resp.ReasoningEffort))
 	return acp.NewSessionResponse{
 		SessionId:     s.id,
-		Models:        buildSessionModelState(s.modelID),
+		Models:        buildSessionModelState(a.models, s.modelID),
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(s.modelID, s.effort),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
 
@@ -196,13 +223,13 @@ func (a *Agent) SetSessionConfigOption(_ context.Context, params acp.SetSessionC
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m := findModel(s.modelID)
+	m := findModel(a.models, s.modelID)
 	if m == nil || !isValidEffort(m, level) {
 		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("effort %q invalid for model %s", level, s.modelID)
 	}
 	s.effort = level
 	return acp.SetSessionConfigOptionResponse{
-		ConfigOptions: buildConfigOptions(s.modelID, s.effort),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
 
@@ -277,9 +304,9 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}
 	s := a.registerSession(params.SessionId, resp.Model, derefEffort(resp.ReasoningEffort))
 	return acp.ResumeSessionResponse{
-		Models:        buildSessionModelState(s.modelID),
+		Models:        buildSessionModelState(a.models, s.modelID),
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(s.modelID, s.effort),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
 
@@ -298,9 +325,9 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	outputs := rolloutCommandOutputs(string(params.SessionId))
 	streamThreadHistory(ctx, a.conn, s.id, resp.Thread.Turns, outputs)
 	return acp.LoadSessionResponse{
-		Models:        buildSessionModelState(s.modelID),
+		Models:        buildSessionModelState(a.models, s.modelID),
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(s.modelID, s.effort),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
 
@@ -312,7 +339,7 @@ func (a *Agent) UnstableSetSessionModel(ctx context.Context, params acp.Unstable
 		return acp.UnstableSetSessionModelResponse{}, fmt.Errorf("session %s not found", params.SessionId)
 	}
 	id := string(params.ModelId)
-	m := findModel(id)
+	m := findModel(a.models, id)
 	if m == nil {
 		return acp.UnstableSetSessionModelResponse{}, fmt.Errorf("unknown model %q", id)
 	}
@@ -322,7 +349,7 @@ func (a *Agent) UnstableSetSessionModel(ctx context.Context, params acp.Unstable
 	if !isValidEffort(m, s.effort) {
 		s.effort = "default"
 	}
-	opts := buildConfigOptions(s.modelID, s.effort)
+	opts := buildConfigOptions(a.models, s.modelID, s.effort)
 	s.mu.Unlock()
 
 	_ = a.conn.SessionUpdate(ctx, acp.SessionNotification{

@@ -10,7 +10,7 @@ import {
 	Plus,
 	X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	Group,
 	Panel,
@@ -40,10 +40,6 @@ interface CenterTab {
 }
 
 type RightTab = "changes" | "files";
-interface SelectedSession {
-	id: string;
-	skipModeLoad: boolean;
-}
 
 const EMPTY_ENTRIES: never[] = [];
 const EMPTY_USAGE = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
@@ -63,11 +59,8 @@ export default function App() {
 	const showChanges = capabilities?.diffs ?? false;
 	const showProblems = capabilities?.lsp ?? false;
 	const firstSessionId = Object.keys(sessions)[0] ?? "";
-	const [selectedSession, setSelectedSession] = useState<SelectedSession>({
-		id: "",
-		skipModeLoad: false,
-	});
-	const sessionId = selectedSession.id || firstSessionId;
+	const [selectedSessionId, setSelectedSessionId] = useState("");
+	const sessionId = selectedSessionId || firstSessionId;
 	const [requestedRightTab, setRequestedRightTab] =
 		useState<RightTab>("changes");
 	const rightTab = showChanges ? requestedRightTab : "files";
@@ -109,14 +102,14 @@ export default function App() {
 		if (!subscribe) return;
 		return subscribe(async (msg) => {
 			if (msg.type !== "agent_changed") return;
-			setSelectedSession({ id: "", skipModeLoad: false });
+			setSelectedSessionId("");
 			clearSessions();
 			try {
 				const res = await fetch("/api/sessions", { method: "POST" });
 				if (!res.ok) return;
 				const data = (await res.json()) as { id?: string };
 				if (!data.id) return;
-				setSelectedSession({ id: data.id, skipModeLoad: true });
+				setSelectedSessionId(data.id);
 			} catch {
 				// leave empty; user can click +
 			}
@@ -197,7 +190,7 @@ export default function App() {
 			if (!res.ok) return;
 			const data = (await res.json()) as { id?: string };
 			if (!data.id) return;
-			setSelectedSession({ id: data.id, skipModeLoad: true });
+			setSelectedSessionId(data.id);
 			setActiveTabId("chat");
 		} catch {
 			// leave session alone
@@ -208,29 +201,40 @@ export default function App() {
 		(id: string) => {
 			removeSession(id);
 			if (id === sessionId) {
-				setSelectedSession({ id: "", skipModeLoad: false });
+				setSelectedSessionId("");
 			}
 		},
 		[removeSession, sessionId],
 	);
 
 	const [loadingSession, setLoadingSession] = useState(false);
+	const [loadError, setLoadError] = useState<string | null>(null);
+	// Monotonic token: clicking session B while A is still loading must not let
+	// A's (faster) completion clear B's loader or post a stale error.
+	const loadReqRef = useRef(0);
 
 	const handleSessionSelect = useCallback(
 		async (id: string) => {
-			if (sessions[id]) {
-				setSelectedSession({ id, skipModeLoad: false });
-				setActiveTabId("chat");
-				return;
-			}
-			setSelectedSession({ id, skipModeLoad: false });
+			setLoadError(null);
+			setSelectedSessionId(id);
 			setActiveTabId("chat");
+			// Already in client state (live or previously loaded) — no fetch needed.
+			if (sessions[id]) return;
+			const req = ++loadReqRef.current;
 			setLoadingSession(true);
+			let error: string | null = null;
 			try {
-				await fetch(`/api/sessions/${id}/load`, { method: "POST" });
-			} finally {
-				setLoadingSession(false);
+				const res = await fetch(`/api/sessions/${id}/load`, { method: "POST" });
+				if (!res.ok) {
+					error = (await res.text()).trim() || `Failed to load session (${res.status}).`;
+				}
+			} catch {
+				error = "Failed to load session.";
 			}
+			// A newer selection superseded this one — let it own the loader/error.
+			if (loadReqRef.current !== req) return;
+			setLoadingSession(false);
+			setLoadError(error);
 		},
 		[sessions],
 	);
@@ -241,7 +245,7 @@ export default function App() {
 		if (!res.ok) throw new Error("failed to allocate session");
 		const data = (await res.json()) as { id?: string };
 		if (!data.id) throw new Error("session id missing in response");
-		setSelectedSession({ id: data.id, skipModeLoad: true });
+		setSelectedSessionId(data.id);
 		return data.id;
 	}, [sessionId]);
 
@@ -496,6 +500,7 @@ export default function App() {
 								onSend={handleSend}
 								onCancel={handleCancel}
 								loading={loadingSession}
+								loadError={loadError}
 								subscribe={subscribe}
 								prompt={prompt}
 								onPromptReply={handlePromptReply}

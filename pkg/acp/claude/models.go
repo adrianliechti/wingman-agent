@@ -11,23 +11,13 @@ type ModelEntry struct {
 	EffortLevels []string // empty == effort selector hidden
 }
 
-// defaultEffortLevels are the values `claude --effort <level>` accepts.
-var defaultEffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
+// The model list is fetched at runtime from the `claude` CLI's stdio control
+// protocol (see fetchModels); there is no static fallback table.
 
-// builtinModels is the static list surfaced to the client. The CLI accepts
-// these aliases (and date-pinned IDs) via --model.
-var builtinModels = []ModelEntry{
-	{ID: "default", Name: "Default", Description: "Use the CLI's configured default model"},
-	{ID: "opus", Name: "Claude Opus", Description: "Most capable; best for complex reasoning", EffortLevels: defaultEffortLevels},
-	{ID: "sonnet", Name: "Claude Sonnet", Description: "Balanced speed and capability", EffortLevels: defaultEffortLevels},
-	{ID: "haiku", Name: "Claude Haiku", Description: "Fastest, lowest cost", EffortLevels: defaultEffortLevels},
-	{ID: "opusplan", Name: "Opus (Plan)", Description: "Opus while planning, Sonnet for execution", EffortLevels: defaultEffortLevels},
-}
-
-func findModel(id string) *ModelEntry {
-	for i := range builtinModels {
-		if builtinModels[i].ID == id {
-			return &builtinModels[i]
+func findModel(models []ModelEntry, id string) *ModelEntry {
+	for i := range models {
+		if models[i].ID == id {
+			return &models[i]
 		}
 	}
 	return nil
@@ -35,9 +25,9 @@ func findModel(id string) *ModelEntry {
 
 // buildSessionModelState returns the model selector state advertised in
 // NewSessionResponse.Models.
-func buildSessionModelState(currentID string) *acp.SessionModelState {
-	infos := make([]acp.ModelInfo, 0, len(builtinModels))
-	for _, m := range builtinModels {
+func buildSessionModelState(models []ModelEntry, currentID string) *acp.SessionModelState {
+	infos := make([]acp.ModelInfo, 0, len(models))
+	for _, m := range models {
 		desc := m.Description
 		infos = append(infos, acp.ModelInfo{
 			ModelId:     acp.ModelId(m.ID),
@@ -45,8 +35,11 @@ func buildSessionModelState(currentID string) *acp.SessionModelState {
 			Description: &desc,
 		})
 	}
-	if findModel(currentID) == nil {
-		currentID = "default"
+	// Keep the advertised current id within the available list: the CLI's first
+	// entry ("default") is the natural fallback when the session's pinned model
+	// isn't in the fetched set.
+	if findModel(models, currentID) == nil && len(models) > 0 {
+		currentID = models[0].ID
 	}
 	return &acp.SessionModelState{
 		AvailableModels: infos,
@@ -57,8 +50,8 @@ func buildSessionModelState(currentID string) *acp.SessionModelState {
 // buildConfigOptions returns the effort selector for the active model.
 // The model and mode selectors live in their own SessionModelState /
 // SessionModeState fields, so the only config option we emit is "effort".
-func buildConfigOptions(currentModelID, currentEffort string) []acp.SessionConfigOption {
-	m := findModel(currentModelID)
+func buildConfigOptions(models []ModelEntry, currentModelID, currentEffort string) []acp.SessionConfigOption {
+	m := findModel(models, currentModelID)
 	if m == nil || len(m.EffortLevels) == 0 {
 		return nil
 	}
@@ -73,8 +66,10 @@ func buildConfigOptions(currentModelID, currentEffort string) []acp.SessionConfi
 		})
 	}
 
+	// Report "default" (a real option) rather than "" when no effort is pinned,
+	// so the client highlights the Default entry instead of showing no selection.
 	current := currentEffort
-	if !isValidEffort(m, current) {
+	if current == "" || !isValidEffort(m, current) {
 		current = "default"
 	}
 	opt := acp.NewSessionConfigOptionSelect(
