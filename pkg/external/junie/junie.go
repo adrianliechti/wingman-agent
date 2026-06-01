@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/adrianliechti/wingman-agent/pkg/external"
 )
 
 const profileName = "wingman"
@@ -17,7 +19,7 @@ func Run(ctx context.Context, args []string, options *Options) error {
 	}
 
 	if options.Path == "" {
-		options.Path = "junie"
+		options.Path = external.LookupPath("junie", "junie")
 	}
 
 	if options.Env == nil {

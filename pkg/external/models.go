@@ -2,16 +2,12 @@ package external
 
 import (
 	"context"
-	"errors"
 	"os"
-	"slices"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 )
-
-var ErrNoMatchingModel = errors.New("no matching model available")
 
 type ModelKind int
 
@@ -128,45 +124,6 @@ func Models(ctx context.Context, options *Options, modelOpts *ModelOptions) ([]s
 	}
 
 	return out, nil
-}
-
-// Pick returns the first available model ID matching predicate. The
-// available set is scanned in descending lexicographic order so that
-// higher version suffixes (e.g. "claude-opus-4-8" over "claude-opus-4-5")
-// are preferred. Returns "" if no model matches.
-func Pick(available map[string]bool, predicate func(id string) bool) string {
-	ids := make([]string, 0, len(available))
-
-	for id := range available {
-		ids = append(ids, id)
-	}
-
-	slices.Sort(ids)
-	slices.Reverse(ids)
-
-	for _, id := range ids {
-		if predicate(id) {
-			return id
-		}
-	}
-
-	return ""
-}
-
-// Model returns the highest-preference available model matching modelOpts,
-// or ErrNoMatchingModel if none are available.
-func Model(ctx context.Context, options *Options, modelOpts *ModelOptions) (string, error) {
-	models, err := Models(ctx, options, modelOpts)
-
-	if err != nil {
-		return "", err
-	}
-
-	if len(models) == 0 {
-		return "", ErrNoMatchingModel
-	}
-
-	return models[0], nil
 }
 
 var (

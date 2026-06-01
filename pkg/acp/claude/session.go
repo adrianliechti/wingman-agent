@@ -226,8 +226,17 @@ func (p *claudeProc) isDead() bool {
 }
 
 func (p *claudeProc) shutdown() {
-	p.kill()
+	// Close stdin first: streaming mode exits on EOF and flushes its on-disk
+	// session before doing so. Killing first (context cancel = SIGKILL / Windows
+	// TerminateProcess) skips that flush, which on Windows drops every turn and
+	// leaves a session file with only its title.
 	_ = p.stdin.Close()
+	select {
+	case <-p.dead:
+	case <-time.After(5 * time.Second):
+		p.kill()
+		<-p.dead
+	}
 	_ = p.cmd.Wait()
 }
 

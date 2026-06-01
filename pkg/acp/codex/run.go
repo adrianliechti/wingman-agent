@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	extcodex "github.com/adrianliechti/wingman-agent/pkg/external/codex"
 )
 
 // Options configures the codex subprocess and the [Agent]'s defaults for
@@ -39,13 +41,8 @@ type Options struct {
 // talks to it. Use [Agent.Close] (or rely on ctx cancellation) to
 // terminate the subprocess. The agent is ready to be wired into an
 // [acp.AgentSideConnection] via [Agent.SetAgentConnection].
-//
-// codexPath is the path to (or PATH name of) the `codex` binary; empty
-// defaults to "codex".
-func Spawn(ctx context.Context, codexPath string, opts Options) (*Agent, error) {
-	if codexPath == "" {
-		codexPath = "codex"
-	}
+func Spawn(ctx context.Context, opts Options) (*Agent, error) {
+	codexPath := extcodex.BinPath()
 
 	args := append(append([]string{}, opts.ExtraArgs...), "app-server")
 	cmd := exec.CommandContext(ctx, codexPath, args...)
@@ -113,8 +110,8 @@ func (a *Agent) Close() error {
 // Run is the convenience entry point for standalone usage: spawn codex,
 // serve ACP over in/out until the connection ends, codex exits, or ctx is
 // cancelled.
-func Run(ctx context.Context, codexPath string, opts Options, in io.Reader, out io.Writer, logger *slog.Logger) error {
-	a, err := Spawn(ctx, codexPath, opts)
+func Run(ctx context.Context, opts Options, in io.Reader, out io.Writer, logger *slog.Logger) error {
+	a, err := Spawn(ctx, opts)
 	if err != nil {
 		return err
 	}

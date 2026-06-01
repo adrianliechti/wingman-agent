@@ -7,7 +7,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+
+	"github.com/adrianliechti/wingman-agent/pkg/external"
 )
+
+func BinPath() (string, error) {
+	if path := external.LookupPath("claude", ""); path != "" {
+		return path, nil
+	}
+
+	return FindPath()
+}
 
 // BuildVars returns the env-var name→value pairs that route the Claude
 // Code CLI to the configured Wingman server and lock down telemetry /
@@ -132,7 +142,7 @@ func Run(ctx context.Context, args []string, options *Options) error {
 	}
 
 	if options.Path == "" {
-		path, err := FindPath()
+		path, err := BinPath()
 		if err != nil {
 			return err
 		}

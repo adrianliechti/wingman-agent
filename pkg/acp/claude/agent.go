@@ -8,7 +8,16 @@ import (
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
+
+	extclaude "github.com/adrianliechti/wingman-agent/pkg/external/claude"
 )
+
+func binPath() string {
+	if path, err := extclaude.BinPath(); err == nil {
+		return path
+	}
+	return "claude"
+}
 
 // Options configures an [Agent].
 type Options struct {
@@ -31,9 +40,8 @@ type Options struct {
 	// `pkg/external/claude.BuildEnv(os.Environ(), cfg)`.
 	Env []string
 
-	// Path is the `claude` binary path. Empty means "claude" looked up on
-	// PATH. Use `pkg/external/claude.FindPath` to honour the same lookup the
-	// TUI launcher uses.
+	// Path is the `claude` binary path. Empty resolves it from the
+	// WINGMAN_CLAUDE_PATH override, then the usual PATH / installer lookup.
 	Path string
 }
 
@@ -66,7 +74,7 @@ func New(opts Options) *Agent {
 	}
 	path := opts.Path
 	if path == "" {
-		path = "claude"
+		path = binPath()
 	}
 	return &Agent{
 		sessions:      make(map[acp.SessionId]*session),
