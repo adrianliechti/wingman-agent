@@ -1,6 +1,10 @@
 package claude
 
-import "github.com/coder/acp-go-sdk"
+import (
+	"strings"
+
+	"github.com/coder/acp-go-sdk"
+)
 
 // ModelEntry describes a Claude model we expose to ACP clients along with
 // the effort levels the CLI accepts when that model is selected.
@@ -17,6 +21,31 @@ type ModelEntry struct {
 func findModel(models []ModelEntry, id string) *ModelEntry {
 	for i := range models {
 		if models[i].ID == id {
+			return &models[i]
+		}
+	}
+	return nil
+}
+
+// resolveModel maps a client-supplied id to a known model, tolerating friendly
+// aliases ("opus", "opus[1m]") via case-insensitive id/name substring matching
+// after the exact-id lookup fails. Returns nil when nothing plausibly matches.
+func resolveModel(models []ModelEntry, id string) *ModelEntry {
+	if m := findModel(models, id); m != nil {
+		return m
+	}
+	want := strings.ToLower(strings.TrimSpace(id))
+	if want == "" {
+		return nil
+	}
+	for i := range models {
+		if strings.EqualFold(models[i].Name, id) {
+			return &models[i]
+		}
+	}
+	for i := range models {
+		lid, lname := strings.ToLower(models[i].ID), strings.ToLower(models[i].Name)
+		if strings.Contains(lid, want) || strings.Contains(lname, want) {
 			return &models[i]
 		}
 	}

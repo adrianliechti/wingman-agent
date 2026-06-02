@@ -551,10 +551,24 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter
 	sess.mu.Unlock()
 
 	go func() {
-		_, err := a.conn.Prompt(sendCtx, acpsdk.PromptRequest{
+		resp, err := a.conn.Prompt(sendCtx, acpsdk.PromptRequest{
 			SessionId: sess.id,
 			Prompt:    contentToBlocks(input),
 		})
+		// The PromptResponse carries the turn's authoritative token breakdown;
+		// the per-chunk usage_update notifications can't express it (they only
+		// have a total + context size), so commit it here for Usage(id).
+		if err == nil && resp.Usage != nil {
+			sess.mu.Lock()
+			sess.usage = agent.Usage{
+				InputTokens:  int64(resp.Usage.InputTokens),
+				OutputTokens: int64(resp.Usage.OutputTokens),
+			}
+			if resp.Usage.CachedReadTokens != nil {
+				sess.usage.CachedTokens = int64(*resp.Usage.CachedReadTokens)
+			}
+			sess.mu.Unlock()
+		}
 		select {
 		case t.events <- event{done: true, err: err}:
 		case <-t.done:

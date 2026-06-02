@@ -177,7 +177,7 @@ var sessionModes = []sessionMode{
 		},
 	},
 	{
-		id:             "full-access",
+		id:             "agent-full-access",
 		name:           "Full Access",
 		description:    "Edit files anywhere and run commands with network access, without asking.",
 		approvalPolicy: "never",

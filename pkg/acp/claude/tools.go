@@ -212,7 +212,13 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		if title == "" {
 			title = "Tool call"
 		}
-		return toolInfo{title: title, kind: toolKindFor(name)}
+		var content []acp.ToolCallContent
+		if len(rawInput) > 0 {
+			if pretty, err := json.MarshalIndent(json.RawMessage(rawInput), "", "  "); err == nil {
+				content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock("```json\n" + string(pretty) + "\n```"))}
+			}
+		}
+		return toolInfo{title: title, kind: toolKindFor(name), content: content}
 	}
 }
 

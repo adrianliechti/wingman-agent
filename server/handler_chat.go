@@ -177,6 +177,17 @@ func (s *Server) handleSend(msg ClientMessage) {
 		})
 	}
 
+	// The authoritative per-turn usage is committed at turn completion (after
+	// the last streamed chunk), so push a final frame once the stream drains.
+	if u := a.Usage(sid); u != (agent.Usage{}) {
+		s.sendSession(sid, Frame{
+			Type:         EvtUsage,
+			InputTokens:  u.InputTokens,
+			CachedTokens: u.CachedTokens,
+			OutputTokens: u.OutputTokens,
+		})
+	}
+
 	ws := s.workspace
 	s.broadcast(Frame{Type: EvtFilesChanged})
 

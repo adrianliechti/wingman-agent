@@ -64,6 +64,7 @@ type Agent struct {
 	modelsMu     sync.Mutex
 	modelsLoaded bool
 	models       []ModelEntry
+	commands     []acp.AvailableCommand
 }
 
 var _ acp.Agent = (*Agent)(nil)
@@ -124,12 +125,36 @@ func (a *Agent) ensureModels(ctx context.Context) {
 	if a.modelsLoaded {
 		return
 	}
-	models, err := fetchModels(ctx, a.path, a.env)
+	models, commands, err := fetchModels(ctx, a.path, a.env)
 	if err != nil {
 		return // retry on the next call rather than caching the failure
 	}
 	a.models = models
+	a.commands = commands
 	a.modelsLoaded = true
+}
+
+// sendAvailableCommands publishes the cached slash-command catalog for a
+// session. Best-effort: skipped when the catalog is empty.
+func (a *Agent) sendAvailableCommands(id acp.SessionId) {
+	a.modelsMu.Lock()
+	cmds := a.commands
+	a.modelsMu.Unlock()
+	if len(cmds) == 0 {
+		return
+	}
+	// Emit asynchronously so the notification lands after the session response
+	// (the SDK writes the response when the handler returns); a client keying
+	// notifications on a known session id would otherwise drop it.
+	go func() {
+		_ = a.conn.SessionUpdate(context.Background(), acp.SessionNotification{
+			SessionId: id,
+			Update: acp.SessionUpdate{AvailableCommandsUpdate: &acp.SessionAvailableCommandsUpdate{
+				SessionUpdate:     "available_commands_update",
+				AvailableCommands: cmds,
+			}},
+		})
+	}()
 }
 
 // --- acp.Agent ---
@@ -145,6 +170,14 @@ func (a *Agent) Initialize(context.Context, acp.InitializeRequest) (acp.Initiali
 		},
 		AgentCapabilities: acp.AgentCapabilities{
 			LoadSession: true,
+			McpCapabilities: acp.McpCapabilities{
+				Http: true,
+				Sse:  true,
+			},
+			PromptCapabilities: acp.PromptCapabilities{
+				Image:           true,
+				EmbeddedContext: true,
+			},
 			SessionCapabilities: acp.SessionCapabilities{
 				AdditionalDirectories: &acp.SessionAdditionalDirectoriesCapabilities{},
 				Close:                 &acp.SessionCloseCapabilities{},
@@ -173,9 +206,11 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		cwd = a.defaultCwd
 	}
 	s := newSession(id, cwd, a.defaultModel, a.defaultEffort, params.AdditionalDirectories)
+	s.mcpServers = params.McpServers
 	a.mu.Lock()
 	a.sessions[id] = s
 	a.mu.Unlock()
+	a.sendAvailableCommands(id)
 
 	return acp.NewSessionResponse{
 		SessionId:     id,
@@ -189,11 +224,11 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	if s == nil {
 		return acp.PromptResponse{}, fmt.Errorf("session %s not found", params.SessionId)
 	}
-	stop, err := s.runTurn(ctx, a.conn, a.path, a.env, params.Prompt)
+	stop, usage, err := s.runTurn(ctx, a.conn, a.path, a.env, params.Prompt)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-	return acp.PromptResponse{StopReason: stop}, nil
+	return acp.PromptResponse{StopReason: stop, Usage: usage}, nil
 }
 
 func (a *Agent) Cancel(_ context.Context, params acp.CancelNotification) error {
@@ -233,11 +268,11 @@ func (a *Agent) SetSessionConfigOption(_ context.Context, params acp.SetSessionC
 	defer s.mu.Unlock()
 	switch string(v.ConfigId) {
 	case modelConfigID:
-		m := findModel(a.models, value)
+		m := resolveModel(a.models, value)
 		if m == nil {
 			return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown model %q", value)
 		}
-		s.modelID = value
+		s.modelID = m.ID
 		if !isValidEffort(m, s.effort) {
 			s.effort = "default"
 		}
@@ -300,7 +335,8 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, params.Cwd)
 	}
 	a.ensureModels(ctx)
-	s := a.adoptSession(params.SessionId, params.Cwd, params.AdditionalDirectories, string(params.SessionId), false)
+	s := a.adoptSession(params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, string(params.SessionId), false)
+	a.sendAvailableCommands(params.SessionId)
 	return acp.ResumeSessionResponse{
 		Modes:         buildSessionModeState(s.mode),
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
@@ -312,10 +348,11 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, params.Cwd)
 	}
 	a.ensureModels(ctx)
-	s := a.adoptSession(params.SessionId, params.Cwd, params.AdditionalDirectories, string(params.SessionId), false)
+	s := a.adoptSession(params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, string(params.SessionId), false)
 	if err := replayHistory(ctx, a.conn, params.SessionId, params.Cwd); err != nil {
 		return acp.LoadSessionResponse{}, fmt.Errorf("replay history: %w", err)
 	}
+	a.sendAvailableCommands(params.SessionId)
 	return acp.LoadSessionResponse{
 		Modes:         buildSessionModeState(s.mode),
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
@@ -324,7 +361,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 
 func (a *Agent) UnstableForkSession(_ context.Context, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
 	newID := acp.SessionId(newUUID())
-	a.adoptSession(newID, params.Cwd, params.AdditionalDirectories, string(params.SessionId), true)
+	a.adoptSession(newID, params.Cwd, params.AdditionalDirectories, nil, string(params.SessionId), true)
 	// Models / ConfigOptions are intentionally omitted: the fork variant uses
 	// `Unstable*` shapes that diverge from the stable selectors we build for
 	// new/resume/load. Clients that need the model picker after forking can
@@ -335,11 +372,12 @@ func (a *Agent) UnstableForkSession(_ context.Context, params acp.UnstableForkSe
 // adoptSession installs a session record in the agent map for resume / load /
 // fork. The first turn's argv is determined by cliArgsLocked from the
 // resumeFrom / forkOnResume fields.
-func (a *Agent) adoptSession(id acp.SessionId, cwd string, additionalDirs []string, resumeFrom string, fork bool) *session {
+func (a *Agent) adoptSession(id acp.SessionId, cwd string, additionalDirs []string, mcpServers []acp.McpServer, resumeFrom string, fork bool) *session {
 	if cwd == "" {
 		cwd = a.defaultCwd
 	}
 	s := newSession(id, cwd, a.defaultModel, a.defaultEffort, additionalDirs)
+	s.mcpServers = mcpServers
 	s.resumeFrom = resumeFrom
 	s.forkOnResume = fork
 	a.mu.Lock()

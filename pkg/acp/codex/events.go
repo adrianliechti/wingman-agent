@@ -20,8 +20,15 @@ type eventDispatcher struct {
 	sessionID acp.SessionId
 	done      chan turnCompleted
 
+	// cmdOut accumulates streamed command stdout per item id. ACP tool-call
+	// content replaces (not appends), so we resend the full accumulated text on
+	// each delta and skip re-emitting aggregatedOutput at completion (avoiding a
+	// double render). Only touched from the single notification-dispatch goroutine.
+	cmdOut map[string]*strings.Builder
+
 	mu      sync.Mutex
 	failure error
+	usage   *acp.Usage // last token usage seen this turn, for PromptResponse.Usage
 }
 
 func newEventDispatcher(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId) *eventDispatcher {
@@ -30,6 +37,7 @@ func newEventDispatcher(ctx context.Context, conn *acp.AgentSideConnection, sid 
 		conn:      conn,
 		sessionID: sid,
 		done:      make(chan turnCompleted, 1),
+		cmdOut:    map[string]*strings.Builder{},
 	}
 }
 
@@ -39,6 +47,18 @@ func (d *eventDispatcher) setFailure(err error) {
 	if d.failure == nil {
 		d.failure = err
 	}
+}
+
+func (d *eventDispatcher) setUsage(u *acp.Usage) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.usage = u
+}
+
+func (d *eventDispatcher) getUsage() *acp.Usage {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.usage
 }
 
 func (d *eventDispatcher) getFailure() error {
@@ -135,16 +155,71 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		}
 
 	case "item/commandExecution/outputDelta":
-		// Stream stdout chunks as plain content; the SDK's tool-call helpers
-		// don't yet expose a terminal_output_delta meta block.
+		// Stream stdout live. ACP content replaces, so accumulate and resend the
+		// full text each delta; item/completed then skips aggregatedOutput.
 		var p struct {
 			ItemID string `json:"itemId"`
 			Delta  string `json:"delta"`
 		}
-		if json.Unmarshal(params, &p) == nil && p.Delta != "" {
+		if json.Unmarshal(params, &p) == nil && p.Delta != "" && p.ItemID != "" {
+			b := d.cmdOut[p.ItemID]
+			if b == nil {
+				b = &strings.Builder{}
+				d.cmdOut[p.ItemID] = b
+			}
+			b.WriteString(p.Delta)
 			d.update(acp.UpdateToolCall(acp.ToolCallId(p.ItemID), acp.WithUpdateContent([]acp.ToolCallContent{
-				acp.ToolContent(acp.TextBlock(p.Delta)),
+				acp.ToolContent(acp.TextBlock(b.String())),
 			})))
+		}
+
+	case "thread/tokenUsage/updated":
+		d.handleTokenUsage(params)
+
+	case "thread/compacted":
+		d.update(acp.UpdateAgentMessageText("*Context compacted to fit the model's context window.*\n\n"))
+
+	case "thread/name/updated":
+		var p struct {
+			ThreadName string `json:"threadName"`
+		}
+		if json.Unmarshal(params, &p) == nil && p.ThreadName != "" {
+			name := p.ThreadName
+			d.update(acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{
+				SessionUpdate: "session_info_update",
+				Title:         &name,
+			}})
+		}
+
+	case "configWarning":
+		var p struct {
+			Summary string `json:"summary"`
+			Details string `json:"details"`
+		}
+		if json.Unmarshal(params, &p) == nil && p.Summary != "" {
+			text := "Config warning: " + p.Summary
+			if p.Details != "" {
+				text += "\n\n" + p.Details
+			}
+			d.update(acp.UpdateAgentMessageText(text + "\n\n"))
+		}
+
+	case "guardianWarning":
+		var p struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(params, &p) == nil && p.Message != "" {
+			d.update(acp.UpdateAgentMessageText("Guardian warning: " + p.Message + "\n\n"))
+		}
+
+	case "model/rerouted":
+		var p struct {
+			FromModel string `json:"fromModel"`
+			ToModel   string `json:"toModel"`
+			Reason    string `json:"reason"`
+		}
+		if json.Unmarshal(params, &p) == nil && p.ToModel != "" {
+			d.update(acp.UpdateAgentThoughtText(fmt.Sprintf("Model rerouted from %s to %s (%s).\n\n", p.FromModel, p.ToModel, p.Reason)))
 		}
 
 	case "turn/completed":
@@ -274,11 +349,14 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		}
 		_ = json.Unmarshal(env.Item, &it)
 		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(toolStatusFor(it.Status))}
-		if it.AggregatedOutput != nil && *it.AggregatedOutput != "" {
+		// Only attach aggregatedOutput when nothing was streamed live; otherwise
+		// the streamed content already holds the full output (avoid re-render).
+		if _, streamed := d.cmdOut[id]; !streamed && it.AggregatedOutput != nil && *it.AggregatedOutput != "" {
 			opts = append(opts, acp.WithUpdateContent([]acp.ToolCallContent{
 				acp.ToolContent(acp.TextBlock(*it.AggregatedOutput)),
 			}))
 		}
+		delete(d.cmdOut, id)
 		d.update(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
 
 	case "fileChange":
@@ -311,6 +389,44 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		if len(it.Summary) > 0 && it.Summary[0] != "" {
 			d.update(acp.UpdateAgentThoughtText(it.Summary[0]))
 		}
+	}
+}
+
+// handleTokenUsage maps a thread/tokenUsage/updated notification to a
+// usage_update (used/size) and records the turn's usage for PromptResponse.
+// Codex folds cached tokens into inputTokens, so we subtract them out.
+func (d *eventDispatcher) handleTokenUsage(params json.RawMessage) {
+	var p struct {
+		TokenUsage struct {
+			Last struct {
+				TotalTokens           int `json:"totalTokens"`
+				InputTokens           int `json:"inputTokens"`
+				CachedInputTokens     int `json:"cachedInputTokens"`
+				OutputTokens          int `json:"outputTokens"`
+				ReasoningOutputTokens int `json:"reasoningOutputTokens"`
+			} `json:"last"`
+			ModelContextWindow int `json:"modelContextWindow"`
+		} `json:"tokenUsage"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return
+	}
+	last := p.TokenUsage.Last
+	cachedRead := last.CachedInputTokens
+	reasoning := last.ReasoningOutputTokens
+	d.setUsage(&acp.Usage{
+		TotalTokens:      last.TotalTokens,
+		InputTokens:      last.InputTokens - last.CachedInputTokens,
+		OutputTokens:     last.OutputTokens,
+		CachedReadTokens: &cachedRead,
+		ThoughtTokens:    &reasoning,
+	})
+	if size := p.TokenUsage.ModelContextWindow; size > 0 {
+		d.update(acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{
+			SessionUpdate: "usage_update",
+			Used:          last.TotalTokens,
+			Size:          size,
+		}})
 	}
 }
 

@@ -31,7 +31,8 @@ type session struct {
 	modelID        string
 	effort         string   // "" or "default" means no --effort flag
 	mode           string
-	additionalDirs []string // forwarded to --add-dir
+	mcpServers     []acp.McpServer // forwarded via --mcp-config
+	additionalDirs []string        // forwarded to --add-dir
 	resumeFrom     string   // CLI session UUID to --resume from on first spawn
 	forkOnResume   bool     // when resumeFrom is set, also pass --fork-session
 	started        bool     // true once the process has been spawned under this id
@@ -76,10 +77,10 @@ func (s *session) close() {
 	}
 }
 
-func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, path string, env []string, prompt []acp.ContentBlock) (acp.StopReason, error) {
+func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, path string, env []string, prompt []acp.ContentBlock) (acp.StopReason, *acp.Usage, error) {
 	p, err := s.ensureProc(conn, path, env)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	turnCtx, cancel := context.WithCancel(ctx)
@@ -95,7 +96,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pa
 
 	if err := p.out.writeJSON(promptMessage(prompt)); err != nil {
 		s.dropProc(p)
-		return "", fmt.Errorf("write prompt: %w", err)
+		return "", nil, fmt.Errorf("write prompt: %w", err)
 	}
 
 	select {
@@ -111,16 +112,16 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pa
 		case <-time.After(5 * time.Second):
 			s.dropProc(p)
 		}
-		return acp.StopReasonCancelled, nil
+		return acp.StopReasonCancelled, nil, nil
 	case r := <-p.results:
 		if r.err != nil {
 			s.dropProc(p)
-			return "", r.err
+			return "", nil, r.err
 		}
-		return r.stop, nil
+		return r.stop, r.usage, nil
 	case <-p.dead:
 		s.dropProc(p)
-		return "", fmt.Errorf("claude process exited unexpectedly")
+		return "", nil, fmt.Errorf("claude process exited unexpectedly")
 	}
 }
 
@@ -216,8 +217,9 @@ type claudeProc struct {
 }
 
 type turnResult struct {
-	stop acp.StopReason
-	err  error
+	stop  acp.StopReason
+	err   error
+	usage *acp.Usage
 }
 
 func (p *claudeProc) isDead() bool {
@@ -282,8 +284,12 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 				go app.handle(req)
 			}
 		case "result":
+			tr, usageUpd := resultToTurn(line)
+			if usageUpd != nil {
+				_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: *usageUpd})
+			}
 			select {
-			case p.results <- resultToTurn(line):
+			case p.results <- tr:
 			default:
 			}
 		}
@@ -291,15 +297,22 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 }
 
 // resultToTurn maps a `result` line to a turn outcome: recoverable
-// terminations become a StopReason, failures become a *RequestError.
-func resultToTurn(line []byte) turnResult {
+// terminations become a StopReason, failures become a *RequestError. It also
+// derives the turn's token usage and, when a context window is known, a
+// usage_update for the caller to emit.
+func resultToTurn(line []byte) (turnResult, *acp.SessionUpdate) {
 	var r cliResult
 	_ = json.Unmarshal(line, &r)
 
+	tr := resultOutcome(r)
+	tr.usage = resultUsage(r)
+	return tr, usageUpdate(r, tr.usage)
+}
+
+func resultOutcome(r cliResult) turnResult {
 	if strings.Contains(r.Result, "Please run /login") {
 		return turnResult{err: acp.NewAuthRequired(nil)}
 	}
-
 	switch r.Subtype {
 	case "success", "error_during_execution":
 		if r.StopReason == "max_tokens" {
@@ -320,6 +333,45 @@ func resultToTurn(line []byte) turnResult {
 		}
 		return turnResult{stop: acp.StopReasonEndTurn}
 	}
+}
+
+// resultUsage builds the ACP Usage from the result line's token counts.
+func resultUsage(r cliResult) *acp.Usage {
+	if r.Usage == nil {
+		return nil
+	}
+	u := *r.Usage
+	cacheRead, cacheWrite := u.CacheReadInputTokens, u.CacheCreationInputTokens
+	return &acp.Usage{
+		InputTokens:       u.InputTokens,
+		OutputTokens:      u.OutputTokens,
+		CachedReadTokens:  &cacheRead,
+		CachedWriteTokens: &cacheWrite,
+		TotalTokens:       u.InputTokens + u.OutputTokens + cacheRead + cacheWrite,
+	}
+}
+
+// usageUpdate builds a usage_update session update: `used` is the turn's total
+// token footprint, `size` the active model's context window (the widest one
+// the result reports, so the main model dominates over any subagent's).
+func usageUpdate(r cliResult, usage *acp.Usage) *acp.SessionUpdate {
+	if usage == nil {
+		return nil
+	}
+	size := 0
+	for _, mu := range r.ModelUsage {
+		if mu.ContextWindow > size {
+			size = mu.ContextWindow
+		}
+	}
+	if size == 0 {
+		return nil
+	}
+	upd := &acp.SessionUsageUpdate{SessionUpdate: "usage_update", Used: usage.TotalTokens, Size: size}
+	if r.TotalCostUSD > 0 {
+		upd.Cost = &acp.Cost{Amount: r.TotalCostUSD, Currency: "USD"}
+	}
+	return &acp.SessionUpdate{UsageUpdate: upd}
 }
 
 func resultErrMessage(r cliResult) string {
@@ -381,6 +433,9 @@ func (s *session) cliArgsLocked() []string {
 		"--verbose",
 		"--include-partial-messages",
 		"--permission-prompt-tool", "stdio",
+		// AskUserQuestion has no ACP representation; disable it (matches the
+		// reference) so it doesn't surface as an unanswerable generic tool.
+		"--disallowed-tools", "AskUserQuestion",
 	}
 	switch {
 	case s.started:
@@ -399,6 +454,9 @@ func (s *session) cliArgsLocked() []string {
 	for _, d := range s.additionalDirs {
 		args = append(args, "--add-dir", d)
 	}
+	if cfg := mcpConfigJSON(s.mcpServers); cfg != "" {
+		args = append(args, "--mcp-config", cfg)
+	}
 	if s.modelID != "" && s.modelID != "default" {
 		args = append(args, "--model", s.modelID)
 	}
@@ -413,16 +471,28 @@ func (s *session) cliArgsLocked() []string {
 	return args
 }
 
-// promptMessage builds the stream-json user message. Image / Resource /
-// ResourceLink blocks are dropped: the CLI's input schema only documents text.
+// promptMessage builds the stream-json user message from ACP content blocks:
+// text verbatim, base64 images as image source blocks, resource_links as
+// markdown links, and embedded text resources wrapped in a <context> block
+// (mirroring the reference's promptToClaude).
 func promptMessage(blocks []acp.ContentBlock) cliInput {
 	in := cliInput{Type: "user", Message: cliInputMessage{Role: "user"}}
+	add := func(c cliInputContent) { in.Message.Content = append(in.Message.Content, c) }
 	for _, b := range blocks {
-		if b.Text != nil {
-			in.Message.Content = append(in.Message.Content, cliInputContent{
-				Type: "text",
-				Text: b.Text.Text,
-			})
+		switch {
+		case b.Text != nil:
+			add(cliInputContent{Type: "text", Text: b.Text.Text})
+		case b.Image != nil && b.Image.Data != "":
+			add(cliInputContent{Type: "image", Source: &cliImageSource{
+				Type:      "base64",
+				MediaType: b.Image.MimeType,
+				Data:      b.Image.Data,
+			}})
+		case b.ResourceLink != nil:
+			add(cliInputContent{Type: "text", Text: fmt.Sprintf("[@%s](%s)", b.ResourceLink.Name, b.ResourceLink.Uri)})
+		case b.Resource != nil && b.Resource.Resource.TextResourceContents != nil:
+			r := b.Resource.Resource.TextResourceContents
+			add(cliInputContent{Type: "text", Text: fmt.Sprintf("\n<context ref=%q>\n%s\n</context>", r.Uri, r.Text)})
 		}
 	}
 	return in

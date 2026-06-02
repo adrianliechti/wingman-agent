@@ -46,7 +46,7 @@ func (s *session) interrupt(ctx context.Context, cc *codexClient) {
 	}
 }
 
-func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc *codexClient, prompt []acp.ContentBlock) (acp.StopReason, error) {
+func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc *codexClient, prompt []acp.ContentBlock) (acp.StopReason, *acp.Usage, error) {
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -87,9 +87,9 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 	resp, err := cc.turnStart(turnCtx, params)
 	if err != nil {
 		if turnCtx.Err() != nil {
-			return acp.StopReasonCancelled, nil
+			return acp.StopReasonCancelled, nil, nil
 		}
-		return "", fmt.Errorf("turn/start: %w", err)
+		return "", nil, fmt.Errorf("turn/start: %w", err)
 	}
 
 	s.mu.Lock()
@@ -107,12 +107,15 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 	// select below.
 	select {
 	case <-turnCtx.Done():
-		return acp.StopReasonCancelled, nil
+		return acp.StopReasonCancelled, disp.getUsage(), nil
 	case tc := <-disp.done:
 		if err := disp.getFailure(); err != nil {
-			return "", err
+			return "", nil, err
 		}
-		return stopReasonFor(tc.Turn.Status), nil
+		if tc.Turn.Status == "interrupted" {
+			disp.update(acp.UpdateAgentMessageText("*Conversation interrupted*"))
+		}
+		return stopReasonFor(tc.Turn.Status), disp.getUsage(), nil
 	}
 }
 

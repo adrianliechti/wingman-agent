@@ -1,6 +1,50 @@
 package claude
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/coder/acp-go-sdk"
+)
+
+// mcpConfigJSON renders ACP MCP servers as the inline JSON the CLI's
+// --mcp-config flag accepts ({"mcpServers":{name:{...}}}). Returns "" when
+// there are none. stdio/http/sse transports are supported.
+func mcpConfigJSON(servers []acp.McpServer) string {
+	if len(servers) == 0 {
+		return ""
+	}
+	out := map[string]map[string]any{}
+	for _, s := range servers {
+		switch {
+		case s.Stdio != nil:
+			env := map[string]string{}
+			for _, e := range s.Stdio.Env {
+				env[e.Name] = e.Value
+			}
+			out[s.Stdio.Name] = map[string]any{"type": "stdio", "command": s.Stdio.Command, "args": s.Stdio.Args, "env": env}
+		case s.Http != nil:
+			out[s.Http.Name] = map[string]any{"type": "http", "url": s.Http.Url, "headers": headerMap(s.Http.Headers)}
+		case s.Sse != nil:
+			out[s.Sse.Name] = map[string]any{"type": "sse", "url": s.Sse.Url, "headers": headerMap(s.Sse.Headers)}
+		}
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(map[string]any{"mcpServers": out})
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func headerMap(headers []acp.HttpHeader) map[string]string {
+	m := map[string]string{}
+	for _, h := range headers {
+		m[h.Name] = h.Value
+	}
+	return m
+}
 
 // Wire types for `claude --output-format=stream-json` / `--input-format=stream-json`.
 // Each line of output is one JSON object; `type` discriminates. We only model
@@ -46,11 +90,25 @@ type cliMsgBlock struct {
 
 // cliResult is the terminating `result` line of a turn.
 type cliResult struct {
-	Subtype    string   `json:"subtype"`
-	StopReason string   `json:"stop_reason"`
-	IsError    bool     `json:"is_error"`
-	Result     string   `json:"result"`
-	Errors     []string `json:"errors"`
+	Subtype      string                   `json:"subtype"`
+	StopReason   string                   `json:"stop_reason"`
+	IsError      bool                     `json:"is_error"`
+	Result       string                   `json:"result"`
+	Errors       []string                 `json:"errors"`
+	Usage        *cliUsage                `json:"usage,omitempty"`
+	ModelUsage   map[string]cliModelUsage `json:"modelUsage,omitempty"`
+	TotalCostUSD float64                  `json:"total_cost_usd,omitempty"`
+}
+
+type cliUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+}
+
+type cliModelUsage struct {
+	ContextWindow int `json:"contextWindow"`
 }
 
 // cliInput is the shape we write to claude's stdin when --input-format=stream-json.
@@ -65,8 +123,15 @@ type cliInputMessage struct {
 }
 
 type cliInputContent struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type   string          `json:"type"`
+	Text   string          `json:"text,omitempty"`
+	Source *cliImageSource `json:"source,omitempty"`
+}
+
+type cliImageSource struct {
+	Type      string `json:"type"` // "base64"
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
 }
 
 // Control protocol: with --permission-prompt-tool stdio the CLI emits a

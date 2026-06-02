@@ -104,6 +104,9 @@ func (a *Agent) Initialize(ctx context.Context, _ acp.InitializeRequest) (acp.In
 		},
 		AgentCapabilities: acp.AgentCapabilities{
 			LoadSession: true,
+			McpCapabilities: acp.McpCapabilities{
+				Http: true,
+			},
 			PromptCapabilities: acp.PromptCapabilities{
 				Image:           true,
 				EmbeddedContext: true,
@@ -127,7 +130,7 @@ func (a *Agent) Logout(context.Context, acp.LogoutRequest) (acp.LogoutResponse, 
 }
 
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
-	startParams := threadStartParams{Cwd: params.Cwd, Config: trustedCwdConfig(params.Cwd)}
+	startParams := threadStartParams{Cwd: params.Cwd, Config: sessionConfig(params.Cwd, params.McpServers)}
 	if a.defaultModel != "" && a.defaultModel != "default" {
 		startParams.Model = a.defaultModel
 	}
@@ -171,15 +174,42 @@ func derefEffort(p *string) string {
 	return *p
 }
 
-func trustedCwdConfig(cwd string) map[string]any {
-	if cwd == "" {
+// sessionConfig builds the codex thread config: the cwd trust grant plus any
+// client-requested MCP servers (stdio/http; codex rejects sse/acp transports,
+// which we omit).
+func sessionConfig(cwd string, servers []acp.McpServer) map[string]any {
+	cfg := map[string]any{}
+	if cwd != "" {
+		cfg["projects"] = map[string]any{cwd: map[string]any{"trust_level": "trusted"}}
+	}
+	if mcp := mcpServersConfig(servers); len(mcp) > 0 {
+		cfg["mcp_servers"] = mcp
+	}
+	if len(cfg) == 0 {
 		return nil
 	}
-	return map[string]any{
-		"projects": map[string]any{
-			cwd: map[string]any{"trust_level": "trusted"},
-		},
+	return cfg
+}
+
+func mcpServersConfig(servers []acp.McpServer) map[string]any {
+	out := map[string]any{}
+	for _, s := range servers {
+		switch {
+		case s.Stdio != nil:
+			env := map[string]string{}
+			for _, e := range s.Stdio.Env {
+				env[e.Name] = e.Value
+			}
+			out[s.Stdio.Name] = map[string]any{"command": s.Stdio.Command, "args": s.Stdio.Args, "env": env}
+		case s.Http != nil:
+			headers := map[string]string{}
+			for _, h := range s.Http.Headers {
+				headers[h.Name] = h.Value
+			}
+			out[s.Http.Name] = map[string]any{"url": s.Http.Url, "http_headers": headers}
+		}
 	}
+	return out
 }
 
 func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
@@ -187,11 +217,11 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	if s == nil {
 		return acp.PromptResponse{}, fmt.Errorf("session %s not found", params.SessionId)
 	}
-	stop, err := s.runTurn(ctx, a.conn, a.codex, params.Prompt)
+	stop, usage, err := s.runTurn(ctx, a.conn, a.codex, params.Prompt)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-	return acp.PromptResponse{StopReason: stop}, nil
+	return acp.PromptResponse{StopReason: stop, Usage: usage}, nil
 }
 
 func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error {
@@ -333,7 +363,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	resp, err := a.codex.threadResume(ctx, threadResumeParams{
 		ThreadID:     string(params.SessionId),
 		Cwd:          params.Cwd,
-		Config:       trustedCwdConfig(params.Cwd),
+		Config:       sessionConfig(params.Cwd, params.McpServers),
 		ExcludeTurns: true,
 	})
 	if err != nil {
@@ -350,7 +380,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	resp, err := a.codex.threadResume(ctx, threadResumeParams{
 		ThreadID: string(params.SessionId),
 		Cwd:      params.Cwd,
-		Config:   trustedCwdConfig(params.Cwd),
+		Config:   sessionConfig(params.Cwd, params.McpServers),
 	})
 	if err != nil {
 		return acp.LoadSessionResponse{}, fmt.Errorf("thread/resume: %w", err)

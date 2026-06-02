@@ -25,7 +25,7 @@ func TestResultToTurn(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resultToTurn([]byte(tt.line))
+			got, _ := resultToTurn([]byte(tt.line))
 			if tt.wantErr {
 				if got.err == nil {
 					t.Fatalf("expected error, got stop=%q", got.stop)
@@ -43,7 +43,7 @@ func TestResultToTurn(t *testing.T) {
 }
 
 func TestResultLoginIsAuthRequired(t *testing.T) {
-	got := resultToTurn([]byte(`{"type":"result","subtype":"success","result":"Please run /login"}`))
+	got, _ := resultToTurn([]byte(`{"type":"result","subtype":"success","result":"Please run /login"}`))
 	re, ok := got.err.(*acp.RequestError)
 	if !ok {
 		t.Fatalf("want *acp.RequestError, got %T", got.err)
@@ -118,5 +118,69 @@ func TestMarkdownEscapeLengthensFence(t *testing.T) {
 	got := markdownEscape("````\ncode\n````")
 	if want := "`````\n````\ncode\n````\n`````"; got != want {
 		t.Errorf("markdownEscape = %q, want %q", got, want)
+	}
+}
+
+func TestResultUsageAndUpdate(t *testing.T) {
+	line := `{"type":"result","subtype":"success","total_cost_usd":0.05,` +
+		`"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":300,"cache_creation_input_tokens":40},` +
+		`"modelUsage":{"claude-haiku":{"contextWindow":200000},"claude-opus":{"contextWindow":1000000}}}`
+	tr, upd := resultToTurn([]byte(line))
+	if tr.usage == nil {
+		t.Fatal("expected usage")
+	}
+	if tr.usage.TotalTokens != 460 || tr.usage.InputTokens != 100 || tr.usage.OutputTokens != 20 {
+		t.Errorf("usage = %+v", tr.usage)
+	}
+	if tr.usage.CachedReadTokens == nil || *tr.usage.CachedReadTokens != 300 {
+		t.Errorf("cachedRead = %v", tr.usage.CachedReadTokens)
+	}
+	if upd == nil || upd.UsageUpdate == nil {
+		t.Fatal("expected usage_update")
+	}
+	if upd.UsageUpdate.Used != 460 || upd.UsageUpdate.Size != 1000000 {
+		t.Errorf("usage_update used=%d size=%d", upd.UsageUpdate.Used, upd.UsageUpdate.Size)
+	}
+	if upd.UsageUpdate.Cost == nil || upd.UsageUpdate.Cost.Amount != 0.05 {
+		t.Errorf("cost = %+v", upd.UsageUpdate.Cost)
+	}
+}
+
+func TestMCPConfigJSON(t *testing.T) {
+	if got := mcpConfigJSON(nil); got != "" {
+		t.Errorf("empty servers should yield empty string, got %q", got)
+	}
+	servers := []acp.McpServer{
+		{Stdio: &acp.McpServerStdio{Name: "fs", Command: "srv", Args: []string{"-x"}, Env: []acp.EnvVariable{{Name: "K", Value: "V"}}}},
+		{Http: &acp.McpServerHttpInline{Name: "web", Url: "https://x", Headers: []acp.HttpHeader{{Name: "A", Value: "B"}}}},
+	}
+	got := mcpConfigJSON(servers)
+	var parsed struct {
+		McpServers map[string]map[string]any `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("invalid json: %v (%s)", err, got)
+	}
+	if parsed.McpServers["fs"]["command"] != "srv" || parsed.McpServers["fs"]["type"] != "stdio" {
+		t.Errorf("fs config = %+v", parsed.McpServers["fs"])
+	}
+	if parsed.McpServers["web"]["url"] != "https://x" || parsed.McpServers["web"]["type"] != "http" {
+		t.Errorf("web config = %+v", parsed.McpServers["web"])
+	}
+}
+
+func TestResolveModelAlias(t *testing.T) {
+	models := []ModelEntry{{ID: "claude-opus-4-8", Name: "Opus"}, {ID: "claude-haiku-4-5", Name: "Haiku"}}
+	if m := resolveModel(models, "claude-opus-4-8"); m == nil || m.ID != "claude-opus-4-8" {
+		t.Errorf("exact id failed: %v", m)
+	}
+	if m := resolveModel(models, "opus"); m == nil || m.ID != "claude-opus-4-8" {
+		t.Errorf("alias 'opus' failed: %v", m)
+	}
+	if m := resolveModel(models, "Haiku"); m == nil || m.ID != "claude-haiku-4-5" {
+		t.Errorf("name match failed: %v", m)
+	}
+	if m := resolveModel(models, "gpt-5"); m != nil {
+		t.Errorf("unrelated should be nil, got %v", m)
 	}
 }

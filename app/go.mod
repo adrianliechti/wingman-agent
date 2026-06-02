@@ -3,7 +3,7 @@ module github.com/adrianliechti/wingman-agent/app
 go 1.25.0
 
 require (
-	github.com/adrianliechti/wingman-agent v0.6.9
+	github.com/adrianliechti/wingman-agent v0.8.5
 	github.com/wailsapp/wails/v2 v2.12.0
 )
 
@@ -38,10 +38,10 @@ require (
 	github.com/leaanthony/gosod v1.0.4 // indirect
 	github.com/leaanthony/slicer v1.6.0 // indirect
 	github.com/leaanthony/u v1.1.1 // indirect
-	github.com/mattn/go-colorable v0.1.14 // indirect
+	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/modelcontextprotocol/go-sdk v1.6.1 // indirect
-	github.com/openai/openai-go/v3 v3.37.0 // indirect
+	github.com/openai/openai-go/v3 v3.38.0 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
