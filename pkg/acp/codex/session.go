@@ -109,6 +109,9 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 	case <-turnCtx.Done():
 		return acp.StopReasonCancelled, nil
 	case tc := <-disp.done:
+		if err := disp.getFailure(); err != nil {
+			return "", err
+		}
 		return stopReasonFor(tc.Turn.Status), nil
 	}
 }
@@ -356,8 +359,6 @@ func stopReasonFor(status string) acp.StopReason {
 	switch status {
 	case "interrupted":
 		return acp.StopReasonCancelled
-	case "failed":
-		return acp.StopReasonRefusal
 	default:
 		return acp.StopReasonEndTurn
 	}

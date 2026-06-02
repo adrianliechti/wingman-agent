@@ -283,10 +283,11 @@ func replayHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 		return err
 	}
 	defer f.Close()
-	return streamHistory(ctx, conn, sid, f)
+	return streamHistory(ctx, conn, sid, cwd, f)
 }
 
-func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, r io.Reader) error {
+func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, cwd string, r io.Reader) error {
+	cache := toolUseCache{}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
@@ -303,11 +304,11 @@ func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 		}
 		switch env.Type {
 		case "user":
-			if err := replayUserMessage(ctx, conn, sid, env.Message); err != nil {
+			if err := replayUserMessage(ctx, conn, sid, env.Message, cache); err != nil {
 				return err
 			}
 		case "assistant":
-			if err := emitAssistant(ctx, conn, sid, env.Message); err != nil {
+			if err := emitAssistant(ctx, conn, sid, env.Message, cwd, cache); err != nil {
 				return err
 			}
 		}
@@ -339,7 +340,7 @@ func stripMarkerTags(text string) (string, bool) {
 // replayUserMessage emits either a user_message_chunk (for plain text turns)
 // or one or more tool_call_update completions (for the user-role tool_result
 // echoes the CLI writes after each tool returns).
-func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage) error {
+func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -386,15 +387,17 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 			if b.ToolUseID == "" {
 				continue
 			}
+			name := cache[b.ToolUseID]
+			if isPlanTool(name) {
+				continue
+			}
 			status := acp.ToolCallStatusCompleted
 			if b.IsError {
 				status = acp.ToolCallStatusFailed
 			}
 			opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(status)}
-			if text := extractToolResultText(b.Content); text != "" {
-				opts = append(opts, acp.WithUpdateContent([]acp.ToolCallContent{
-					acp.ToolContent(acp.TextBlock(text)),
-				}))
+			if content := toolResultContent(name, b); len(content) > 0 {
+				opts = append(opts, acp.WithUpdateContent(content))
 			}
 			if err := conn.SessionUpdate(ctx, acp.SessionNotification{
 				SessionId: sid,

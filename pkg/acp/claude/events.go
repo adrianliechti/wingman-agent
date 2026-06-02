@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/coder/acp-go-sdk"
 )
 
 // emitAssistant translates an assistant message (text / thinking / tool_use)
 // into ACP session updates.
-func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage) error {
+func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cwd string, cache toolUseCache) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -32,21 +33,34 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 			}
 			update = acp.UpdateAgentThoughtText(b.Thinking)
 		case "tool_use":
-			title := b.Name
-			if title == "" {
-				title = "Tool call"
+			if cache != nil && b.ID != "" {
+				cache[b.ID] = b.Name
 			}
-			var input map[string]any
+			if isPlanTool(b.Name) {
+				entries, ok := planEntriesFromTodoWrite(b.Input)
+				if !ok {
+					continue
+				}
+				update = acp.UpdatePlan(entries...)
+				break
+			}
+			info := toolInfoFromToolUse(b.Name, b.Input, cwd)
+			var input any
 			if len(b.Input) > 0 {
 				_ = json.Unmarshal(b.Input, &input)
 			}
-			update = acp.StartToolCall(
-				acp.ToolCallId(b.ID),
-				title,
-				acp.WithStartKind(toolKindFor(b.Name)),
+			opts := []acp.ToolCallStartOpt{
+				acp.WithStartKind(info.kind),
 				acp.WithStartStatus(acp.ToolCallStatusInProgress),
 				acp.WithStartRawInput(input),
-			)
+			}
+			if len(info.content) > 0 {
+				opts = append(opts, acp.WithStartContent(info.content))
+			}
+			if len(info.locations) > 0 {
+				opts = append(opts, acp.WithStartLocations(info.locations))
+			}
+			update = acp.StartToolCall(acp.ToolCallId(b.ID), info.title, opts...)
 		default:
 			continue
 		}
@@ -62,7 +76,7 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 
 // emitToolResults surfaces the tool_result blocks the CLI echoes back as
 // ToolCallUpdate completions so the client sees tool output.
-func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage) error {
+func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -74,15 +88,23 @@ func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 		if b.Type != "tool_result" || b.ToolUseID == "" {
 			continue
 		}
+		name := cache[b.ToolUseID]
+		if isPlanTool(name) {
+			continue
+		}
 		status := acp.ToolCallStatusCompleted
 		if b.IsError {
 			status = acp.ToolCallStatusFailed
 		}
 		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(status)}
-		if text := extractToolResultText(b.Content); text != "" {
-			opts = append(opts, acp.WithUpdateContent([]acp.ToolCallContent{
-				acp.ToolContent(acp.TextBlock(text)),
-			}))
+		if content := toolResultContent(name, b); len(content) > 0 {
+			opts = append(opts, acp.WithUpdateContent(content))
+		}
+		if len(b.Content) > 0 {
+			var rawOutput any
+			if json.Unmarshal(b.Content, &rawOutput) == nil {
+				opts = append(opts, acp.WithUpdateRawOutput(rawOutput))
+			}
 		}
 		if err := conn.SessionUpdate(ctx, acp.SessionNotification{
 			SessionId: sid,
@@ -92,6 +114,39 @@ func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 		}
 	}
 	return nil
+}
+
+func toolResultContent(name string, b cliMsgBlock) []acp.ToolCallContent {
+	text := extractToolResultText(b.Content)
+	if b.IsError {
+		if text == "" {
+			return nil
+		}
+		return []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(codeFence(text)))}
+	}
+	switch name {
+	case "Read":
+		if text == "" {
+			return nil
+		}
+		return []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(markdownEscape(text)))}
+	case "Bash":
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		return []acp.ToolCallContent{acp.ToolContent(acp.TextBlock("```console\n" + strings.TrimRight(text, "\n") + "\n```"))}
+	case "Edit", "Write", "MultiEdit":
+		return nil
+	default:
+		if text == "" {
+			return nil
+		}
+		return []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(text))}
+	}
+}
+
+func codeFence(text string) string {
+	return "```\n" + text + "\n```"
 }
 
 // extractToolResultText flattens tool_result.content (string OR

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -18,6 +19,9 @@ type eventDispatcher struct {
 	conn      *acp.AgentSideConnection
 	sessionID acp.SessionId
 	done      chan turnCompleted
+
+	mu      sync.Mutex
+	failure error
 }
 
 func newEventDispatcher(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId) *eventDispatcher {
@@ -27,6 +31,47 @@ func newEventDispatcher(ctx context.Context, conn *acp.AgentSideConnection, sid 
 		sessionID: sid,
 		done:      make(chan turnCompleted, 1),
 	}
+}
+
+func (d *eventDispatcher) setFailure(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.failure == nil {
+		d.failure = err
+	}
+}
+
+func (d *eventDispatcher) getFailure() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.failure
+}
+
+func isAuthError(info json.RawMessage) bool {
+	if len(info) == 0 {
+		return false
+	}
+	var s string
+	if json.Unmarshal(info, &s) == nil {
+		return s == "unauthorized" || s == "usageLimitExceeded"
+	}
+	var obj map[string]struct {
+		HTTPStatusCode int `json:"httpStatusCode"`
+	}
+	if json.Unmarshal(info, &obj) != nil {
+		return false
+	}
+	for _, key := range []string{
+		"httpConnectionFailed",
+		"responseStreamConnectionFailed",
+		"responseStreamDisconnected",
+		"responseTooManyFailedAttempts",
+	} {
+		if v, ok := obj[key]; ok && v.HTTPStatusCode == 401 {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *eventDispatcher) update(u acp.SessionUpdate) {
@@ -61,10 +106,17 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 	case "error":
 		var p struct {
 			Error struct {
-				Message string `json:"message"`
+				Message        string          `json:"message"`
+				CodexErrorInfo json.RawMessage `json:"codexErrorInfo"`
 			} `json:"error"`
 		}
-		if json.Unmarshal(params, &p) == nil && p.Error.Message != "" {
+		if json.Unmarshal(params, &p) != nil {
+			return
+		}
+		if isAuthError(p.Error.CodexErrorInfo) {
+			d.setFailure(acp.NewAuthRequired(nil))
+		}
+		if p.Error.Message != "" {
 			d.update(acp.UpdateAgentMessageText(p.Error.Message + "\n\n"))
 		}
 

@@ -129,3 +129,27 @@ func TestFileChangeContentDeleteMeta(t *testing.T) {
 		t.Errorf("delete oldText = %v", d.OldText)
 	}
 }
+
+func TestIsAuthError(t *testing.T) {
+	cases := []struct {
+		name string
+		info string
+		want bool
+	}{
+		{"unauthorized string", `"unauthorized"`, true},
+		{"usage limit string", `"usageLimitExceeded"`, true},
+		{"other string", `"somethingElse"`, false},
+		{"http 401 object", `{"httpConnectionFailed":{"httpStatusCode":401}}`, true},
+		{"stream disconnected 401", `{"responseStreamDisconnected":{"httpStatusCode":401}}`, true},
+		{"http 500 object", `{"httpConnectionFailed":{"httpStatusCode":500}}`, false},
+		{"empty", ``, false},
+		{"null", `null`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isAuthError([]byte(c.info)); got != c.want {
+				t.Errorf("isAuthError(%s) = %v, want %v", c.info, got, c.want)
+			}
+		})
+	}
+}

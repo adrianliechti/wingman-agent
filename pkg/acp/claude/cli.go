@@ -30,6 +30,15 @@ type cliMsgBlock struct {
 	IsError   bool            `json:"is_error,omitempty"`
 }
 
+// cliResult is the terminating `result` line of a turn.
+type cliResult struct {
+	Subtype    string   `json:"subtype"`
+	StopReason string   `json:"stop_reason"`
+	IsError    bool     `json:"is_error"`
+	Result     string   `json:"result"`
+	Errors     []string `json:"errors"`
+}
+
 // cliInput is the shape we write to claude's stdin when --input-format=stream-json.
 type cliInput struct {
 	Type    string          `json:"type"`

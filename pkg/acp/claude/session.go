@@ -168,6 +168,8 @@ func (s *session) ensureProc(conn *acp.AgentSideConnection, path string, env []s
 		stdin:   stdin,
 		sig:     sig,
 		kill:    kill,
+		cwd:     s.cwd,
+		tools:   toolUseCache{},
 		results: make(chan turnResult, 1),
 		dead:    make(chan struct{}),
 	}
@@ -207,6 +209,8 @@ type claudeProc struct {
 	stdin   io.Closer
 	sig     string
 	kill    context.CancelFunc
+	cwd     string
+	tools   toolUseCache
 	results chan turnResult
 	dead    chan struct{}
 }
@@ -261,11 +265,11 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 		}
 		switch env.Type {
 		case "assistant":
-			if err := emitAssistant(ctx, conn, sid, env.Message); err != nil {
+			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools); err != nil {
 				fmt.Fprintf(os.Stderr, "claude-acp: emit assistant: %v\n", err)
 			}
 		case "user":
-			if err := emitToolResults(ctx, conn, sid, env.Message); err != nil {
+			if err := emitToolResults(ctx, conn, sid, env.Message, p.tools); err != nil {
 				fmt.Fprintf(os.Stderr, "claude-acp: emit tool result: %v\n", err)
 			}
 		case "control_request":
@@ -275,11 +279,53 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 			}
 		case "result":
 			select {
-			case p.results <- turnResult{stop: acp.StopReasonEndTurn}:
+			case p.results <- resultToTurn(line):
 			default:
 			}
 		}
 	}
+}
+
+// resultToTurn maps a `result` line to a turn outcome: recoverable
+// terminations become a StopReason, failures become a *RequestError.
+func resultToTurn(line []byte) turnResult {
+	var r cliResult
+	_ = json.Unmarshal(line, &r)
+
+	if strings.Contains(r.Result, "Please run /login") {
+		return turnResult{err: acp.NewAuthRequired(nil)}
+	}
+
+	switch r.Subtype {
+	case "success", "error_during_execution":
+		if r.StopReason == "max_tokens" {
+			return turnResult{stop: acp.StopReasonMaxTokens}
+		}
+		if r.IsError {
+			return turnResult{err: acp.NewInternalError(resultErrMessage(r))}
+		}
+		return turnResult{stop: acp.StopReasonEndTurn}
+	case "error_max_budget_usd", "error_max_turns", "error_max_structured_output_retries":
+		if r.IsError {
+			return turnResult{err: acp.NewInternalError(resultErrMessage(r))}
+		}
+		return turnResult{stop: acp.StopReasonMaxTurnRequests}
+	default:
+		if r.IsError {
+			return turnResult{err: acp.NewInternalError(resultErrMessage(r))}
+		}
+		return turnResult{stop: acp.StopReasonEndTurn}
+	}
+}
+
+func resultErrMessage(r cliResult) string {
+	if msg := strings.Join(r.Errors, ", "); msg != "" {
+		return msg
+	}
+	if r.Result != "" {
+		return r.Result
+	}
+	return r.Subtype
 }
 
 func interruptRequest() controlInterrupt {
