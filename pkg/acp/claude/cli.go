@@ -10,6 +10,20 @@ import "encoding/json"
 type cliEnvelope struct {
 	Type    string          `json:"type"`
 	Message json.RawMessage `json:"message,omitempty"`
+	Event   json.RawMessage `json:"event,omitempty"` // stream_event payload (partial messages)
+}
+
+// streamEvent is one partial-message event emitted under --include-partial-messages.
+// We act only on content_block_delta text/thinking deltas to stream the
+// assistant's reply token-by-token; the other event types are no-ops here
+// (tool_use still arrives via the full assistant message).
+type streamEvent struct {
+	Type  string `json:"type"`
+	Delta struct {
+		Type     string `json:"type"`
+		Text     string `json:"text,omitempty"`
+		Thinking string `json:"thinking,omitempty"`
+	} `json:"delta"`
 }
 
 type cliMessage struct {

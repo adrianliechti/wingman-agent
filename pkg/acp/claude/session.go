@@ -264,8 +264,12 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 			continue
 		}
 		switch env.Type {
+		case "stream_event":
+			if err := emitStreamEvent(ctx, conn, sid, env.Event); err != nil {
+				fmt.Fprintf(os.Stderr, "claude-acp: emit stream event: %v\n", err)
+			}
 		case "assistant":
-			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools); err != nil {
+			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools, true); err != nil {
 				fmt.Fprintf(os.Stderr, "claude-acp: emit assistant: %v\n", err)
 			}
 		case "user":
@@ -375,6 +379,7 @@ func (s *session) cliArgsLocked() []string {
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
+		"--include-partial-messages",
 		"--permission-prompt-tool", "stdio",
 	}
 	switch {

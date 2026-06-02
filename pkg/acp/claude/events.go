@@ -9,9 +9,41 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+// emitStreamEvent streams a partial-message delta (text / thinking) as an ACP
+// chunk so the reply renders token-by-token. Other event types are ignored;
+// tool_use still arrives via the full assistant message.
+func emitStreamEvent(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var e streamEvent
+	if err := json.Unmarshal(raw, &e); err != nil || e.Type != "content_block_delta" {
+		return nil
+	}
+	var update acp.SessionUpdate
+	switch e.Delta.Type {
+	case "text_delta":
+		if e.Delta.Text == "" {
+			return nil
+		}
+		update = acp.UpdateAgentMessageText(e.Delta.Text)
+	case "thinking_delta":
+		if e.Delta.Thinking == "" {
+			return nil
+		}
+		update = acp.UpdateAgentThoughtText(e.Delta.Thinking)
+	default:
+		return nil
+	}
+	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: update})
+}
+
 // emitAssistant translates an assistant message (text / thinking / tool_use)
-// into ACP session updates.
-func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cwd string, cache toolUseCache) error {
+// into ACP session updates. When streamed is true, text/thinking blocks are
+// skipped because they were already delivered incrementally via stream_event
+// deltas; tool_use is always emitted. Replay passes streamed=false (the on-disk
+// transcript carries no deltas).
+func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cwd string, cache toolUseCache, streamed bool) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -23,12 +55,12 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 		var update acp.SessionUpdate
 		switch b.Type {
 		case "text":
-			if b.Text == "" {
+			if b.Text == "" || streamed {
 				continue
 			}
 			update = acp.UpdateAgentMessageText(b.Text)
 		case "thinking":
-			if b.Thinking == "" {
+			if b.Thinking == "" || streamed {
 				continue
 			}
 			update = acp.UpdateAgentThoughtText(b.Thinking)

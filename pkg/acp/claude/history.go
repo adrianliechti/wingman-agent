@@ -324,7 +324,7 @@ func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 				return err
 			}
 		case "assistant":
-			if err := emitAssistant(ctx, conn, sid, env.Message, cwd, cache); err != nil {
+			if err := emitAssistant(ctx, conn, sid, env.Message, cwd, cache, false); err != nil {
 				return err
 			}
 		}
