@@ -144,6 +144,11 @@ func (a *App) OpenWorkspace(path string) (string, error) {
 }
 
 func main() {
+	// Repair PATH before anything detects agents via exec.LookPath: GUI
+	// launches (Finder/Dock) inherit a minimal PATH that hides Homebrew /
+	// ~/.local/bin CLIs like codex and copilot.
+	ensureShellPath()
+
 	app := &App{}
 
 	startFS, _ := fs.Sub(publicFS, "public")

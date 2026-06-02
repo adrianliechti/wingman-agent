@@ -31,7 +31,6 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
-	github.com/dlclark/regexp2 v1.12.0 // indirect
 	github.com/dlclark/regexp2/v2 v2.1.1 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/gdamore/encoding v1.0.1 // indirect
