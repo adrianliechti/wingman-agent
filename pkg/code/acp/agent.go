@@ -45,13 +45,15 @@ type Agent struct {
 	// ui approves permission requests the ACP server raises mid-turn. nil → approve.
 	ui code.UI
 
+	// configMu guards the model + effort catalog. These are global to the
+	// connection because the code.Agent interface exposes Models()/Effort()
+	// without a session id. Modes, which the interface does scope per session,
+	// live on sessionState instead.
 	configMu   sync.RWMutex
 	models     []code.Model
 	modelID    string
 	effortID   string
 	effortOpts []string
-	modes      []code.Mode
-	modeID     string
 
 	mu       sync.Mutex
 	sessions map[string]*sessionState
@@ -68,6 +70,12 @@ type sessionState struct {
 
 	toolCallsMu sync.Mutex
 	toolCalls   map[string]toolCall
+
+	// modes are per-session in ACP (session/new + session/load report them per
+	// session, set_mode and current_mode_update are session-scoped). Guarded by
+	// mu above so concurrent sessions don't clobber each other's current mode.
+	modes  []code.Mode
+	modeID string
 }
 
 type toolCall struct {
@@ -273,7 +281,7 @@ func (a *Agent) SetEffort(ctx context.Context, value string) error {
 	if err != nil {
 		return err
 	}
-	a.refreshConfig(nil, nil, resp.ConfigOptions)
+	a.refreshConfig(nil, resp.ConfigOptions)
 	return nil
 }
 
@@ -288,31 +296,58 @@ func (a *Agent) anySession() *sessionState {
 
 // ─── Modes (cached from ACP SessionModeState) ────────────────────
 
-func (a *Agent) Modes(string) ([]code.Mode, string) {
-	a.configMu.RLock()
-	defer a.configMu.RUnlock()
-	out := make([]code.Mode, len(a.modes))
-	copy(out, a.modes)
-	return out, a.modeID
+func (a *Agent) Modes(sessionID string) ([]code.Mode, string) {
+	sess := a.session(sessionID)
+	if sess == nil {
+		return nil, ""
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	out := make([]code.Mode, len(sess.modes))
+	copy(out, sess.modes)
+	return out, sess.modeID
 }
 
 func (a *Agent) SetMode(ctx context.Context, sessionID, modeID string) error {
-	a.configMu.RLock()
-	hasModes := len(a.modes) > 0
-	a.configMu.RUnlock()
+	sess := a.session(sessionID)
+	if sess == nil {
+		return errors.ErrUnsupported
+	}
+	sess.mu.Lock()
+	hasModes := len(sess.modes) > 0
+	sess.mu.Unlock()
 	if !hasModes {
 		return errors.ErrUnsupported
 	}
 	if _, err := a.conn.SetSessionMode(ctx, acpsdk.SetSessionModeRequest{
-		SessionId: acpsdk.SessionId(sessionID),
+		SessionId: sess.id,
 		ModeId:    acpsdk.SessionModeId(modeID),
 	}); err != nil {
 		return err
 	}
-	a.configMu.Lock()
-	a.modeID = modeID
-	a.configMu.Unlock()
+	sess.mu.Lock()
+	sess.modeID = modeID
+	sess.mu.Unlock()
 	return nil
+}
+
+// applyModes stores the per-session mode catalog from a session/new or
+// session/load response. A nil state leaves the existing modes untouched.
+func (s *sessionState) applyModes(modes *acpsdk.SessionModeState) {
+	if modes == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modes = s.modes[:0]
+	for _, m := range modes.AvailableModes {
+		mode := code.Mode{ID: string(m.Id), Name: m.Name}
+		if m.Description != nil {
+			mode.Description = *m.Description
+		}
+		s.modes = append(s.modes, mode)
+	}
+	s.modeID = string(modes.CurrentModeId)
 }
 
 // ─── Sessions ─────────────────────────────────────────────────────
@@ -350,15 +385,17 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	a.refreshConfig(resp.Models, resp.Modes, resp.ConfigOptions)
+	a.refreshConfig(resp.Models, resp.ConfigOptions)
 
 	id := string(resp.SessionId)
-	a.mu.Lock()
-	a.sessions[id] = &sessionState{
+	sess := &sessionState{
 		parent:    a,
 		id:        resp.SessionId,
 		toolCalls: map[string]toolCall{},
 	}
+	sess.applyModes(resp.Modes)
+	a.mu.Lock()
+	a.sessions[id] = sess
 	a.mu.Unlock()
 	return id, nil
 }
@@ -415,7 +452,8 @@ func (a *Agent) LoadSession(ctx context.Context, id string) error {
 			McpServers: []acpsdk.McpServer{},
 		})
 		if err == nil {
-			a.refreshConfig(resp.Models, resp.Modes, resp.ConfigOptions)
+			a.refreshConfig(resp.Models, resp.ConfigOptions)
+			sess.applyModes(resp.Modes)
 		}
 		loadErrCh <- err
 	}()
@@ -627,14 +665,16 @@ func (a *Agent) shutdown() {
 
 func (a *Agent) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) error {
 	if n.Update.ConfigOptionUpdate != nil {
-		a.refreshConfig(nil, nil, n.Update.ConfigOptionUpdate.ConfigOptions)
+		a.refreshConfig(nil, n.Update.ConfigOptionUpdate.ConfigOptions)
 		return nil
 	}
 
 	if n.Update.CurrentModeUpdate != nil {
-		a.configMu.Lock()
-		a.modeID = string(n.Update.CurrentModeUpdate.CurrentModeId)
-		a.configMu.Unlock()
+		if sess := a.session(string(n.SessionId)); sess != nil {
+			sess.mu.Lock()
+			sess.modeID = string(n.Update.CurrentModeUpdate.CurrentModeId)
+			sess.mu.Unlock()
+		}
 		return nil
 	}
 
@@ -896,7 +936,9 @@ func (a *Agent) WaitForTerminalExit(context.Context, acpsdk.WaitForTerminalExitR
 
 // ─── Config conversion ────────────────────────────────────────────
 
-func (a *Agent) refreshConfig(models *acpsdk.SessionModelState, modes *acpsdk.SessionModeState, options []acpsdk.SessionConfigOption) {
+// refreshConfig updates the connection-global model + effort catalog. Modes
+// are per-session — see [sessionState.applyModes].
+func (a *Agent) refreshConfig(models *acpsdk.SessionModelState, options []acpsdk.SessionConfigOption) {
 	a.configMu.Lock()
 	defer a.configMu.Unlock()
 	if models != nil {
@@ -905,17 +947,6 @@ func (a *Agent) refreshConfig(models *acpsdk.SessionModelState, modes *acpsdk.Se
 			a.models = append(a.models, code.Model{ID: string(m.ModelId), Name: m.Name})
 		}
 		a.modelID = string(models.CurrentModelId)
-	}
-	if modes != nil {
-		a.modes = a.modes[:0]
-		for _, m := range modes.AvailableModes {
-			mode := code.Mode{ID: string(m.Id), Name: m.Name}
-			if m.Description != nil {
-				mode.Description = *m.Description
-			}
-			a.modes = append(a.modes, mode)
-		}
-		a.modeID = string(modes.CurrentModeId)
 	}
 	if options != nil {
 		a.effortID = ""

@@ -7,9 +7,6 @@ interface ModelInfo {
 	name: string;
 }
 
-const EFFORTS = ["auto", "low", "medium", "high"] as const;
-type Effort = (typeof EFFORTS)[number];
-
 interface Props {
 	// subscribe lets the picker refetch its catalog when the active
 	// agent changes (the new backend's model/effort options differ).
@@ -20,9 +17,10 @@ interface Props {
 export function ModelPicker({ subscribe }: Props) {
 	const [model, setModel] = useState("");
 	const [models, setModels] = useState<ModelInfo[]>([]);
-	const [effort, setEffort] = useState<Effort | string>("auto");
-	const [effortOptions, setEffortOptions] =
-		useState<readonly string[]>(EFFORTS);
+	const [effort, setEffort] = useState("auto");
+	// Empty until /api/effort reports the active backend's set; the effort row
+	// stays hidden until then, so we never flash a guessed list.
+	const [effortOptions, setEffortOptions] = useState<string[]>([]);
 	const [open, setOpen] = useState(false);
 	const popRef = useRef<HTMLDivElement>(null);
 	const btnRef = useRef<HTMLButtonElement>(null);
@@ -49,7 +47,12 @@ export function ModelPicker({ subscribe }: Props) {
 			.catch(() => {});
 		fetch("/api/effort")
 			.then((r) => r.json())
-			.then((data) => applyEffort(data.effort))
+			.then((data) => {
+				applyEffort(data.effort);
+				// The backend advertises its own effort set (empty = no effort
+				// selector). Drive the buttons from it rather than a hard-coded list.
+				setEffortOptions(Array.isArray(data.options) ? data.options : []);
+			})
 			.catch(() => {});
 	}, [applyEffort]);
 
@@ -67,15 +70,11 @@ export function ModelPicker({ subscribe }: Props) {
 		if (!subscribe) return;
 		return subscribe((msg) => {
 			if (msg.type === "agent_changed" || msg.type === "model_changed") {
+				// loadCurrent refetches /api/effort, which now carries the active
+				// backend's effort options too — ACP backends may use a different
+				// set than wingman's auto/low/medium/high, or none at all.
 				loadCurrent();
 				loadModels();
-				// Re-derive available effort options from the latest /api/effort
-				// response shape — ACP backends may use a different set than
-				// wingman's hard-coded auto/low/medium/high. The /api/effort
-				// endpoint only returns the current value, so the picker
-				// falls back to the static EFFORTS list when nothing else
-				// hints at a wider set.
-				setEffortOptions(EFFORTS);
 			}
 		});
 	}, [subscribe, loadCurrent, loadModels]);
@@ -144,7 +143,7 @@ export function ModelPicker({ subscribe }: Props) {
 			>
 				<Brain size={12} className="shrink-0" />
 				<span className="truncate">{currentName}</span>
-				{effort !== "auto" && (
+				{effort !== "auto" && effort !== "default" && (
 					<>
 						<span className="text-fg-dim">·</span>
 						<span className="capitalize text-fg-dim">{effort}</span>
@@ -176,6 +175,7 @@ export function ModelPicker({ subscribe }: Props) {
 							))
 						)}
 					</div>
+					{effortOptions.length > 0 && (
 					<div className="border-t border-border px-2 py-1.5">
 						<div className="flex rounded bg-bg overflow-hidden">
 							{effortOptions.map((v) => (
@@ -194,6 +194,7 @@ export function ModelPicker({ subscribe }: Props) {
 							))}
 						</div>
 					</div>
+					)}
 				</div>
 			)}
 		</div>

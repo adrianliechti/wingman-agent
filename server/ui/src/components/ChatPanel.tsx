@@ -39,6 +39,9 @@ interface Props {
 	// loading overlays the transcript area with a spinner during slow
 	// session loads (clicking a session in the sidebar).
 	loading?: boolean;
+	// loadError surfaces a failed session load (server returned non-OK) instead
+	// of leaving the user staring at an empty transcript.
+	loadError?: string | null;
 	// subscribe lets the ModelPicker react to agent_changed broadcasts.
 	subscribe?: (
 		handler: (msg: import("../types/protocol").ServerMessage) => void,
@@ -115,6 +118,7 @@ export function ChatPanel({
 	onSend,
 	onCancel,
 	loading,
+	loadError,
 	subscribe,
 	prompt,
 	onPromptReply,
@@ -507,6 +511,12 @@ export function ChatPanel({
 				{loading ? (
 					<div className="h-full flex items-center justify-center">
 						<Loader2 size={16} className="text-fg-dim animate-spin" />
+					</div>
+				) : loadError ? (
+					<div className="h-full flex items-center justify-center">
+						<div className="max-w-sm px-4 text-center text-[13px] text-danger break-words">
+							{loadError}
+						</div>
 					</div>
 				) : entries.length === 0 && phase === "idle" ? (
 					<div className="h-full flex items-center justify-center">

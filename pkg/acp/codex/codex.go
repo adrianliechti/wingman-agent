@@ -164,6 +164,35 @@ type threadListResponse struct {
 	NextCursor *string         `json:"nextCursor,omitempty"`
 }
 
+// modelListParams mirrors codex's `model/list` request. Cursor paginates;
+// IncludeHidden is left false so we surface only the picker-visible models.
+type modelListParams struct {
+	Cursor        *string `json:"cursor,omitempty"`
+	Limit         *int    `json:"limit,omitempty"`
+	IncludeHidden *bool   `json:"includeHidden,omitempty"`
+}
+
+type modelListResponse struct {
+	Data       []codexModel `json:"data"`
+	NextCursor *string      `json:"nextCursor,omitempty"`
+}
+
+// codexModel is one entry from `model/list`. Only the fields the picker needs
+// are modeled; codex emits many more (upgrade info, modalities, service tiers).
+type codexModel struct {
+	ID                        string                  `json:"id"`
+	DisplayName               string                  `json:"displayName"`
+	Description               string                  `json:"description"`
+	Hidden                    bool                    `json:"hidden"`
+	SupportedReasoningEfforts []reasoningEffortOption `json:"supportedReasoningEfforts"`
+	IsDefault                 bool                    `json:"isDefault"`
+}
+
+type reasoningEffortOption struct {
+	ReasoningEffort string `json:"reasoningEffort"`
+	Description     string `json:"description"`
+}
+
 type threadSummary struct {
 	ID        string  `json:"id"`
 	Cwd       string  `json:"cwd"`
@@ -273,5 +302,11 @@ func (c *codexClient) threadResume(ctx context.Context, p threadResumeParams) (t
 func (c *codexClient) threadList(ctx context.Context, p threadListParams) (threadListResponse, error) {
 	var out threadListResponse
 	err := c.rpc.call(ctx, "thread/list", p, &out)
+	return out, err
+}
+
+func (c *codexClient) modelList(ctx context.Context, p modelListParams) (modelListResponse, error) {
+	var out modelListResponse
+	err := c.rpc.call(ctx, "model/list", p, &out)
 	return out, err
 }

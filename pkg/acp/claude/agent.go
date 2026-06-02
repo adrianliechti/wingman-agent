@@ -60,6 +60,9 @@ type Agent struct {
 	defaultCwd    string
 	env           []string
 	path          string
+
+	modelsOnce sync.Once
+	models     []ModelEntry
 }
 
 var _ acp.Agent = (*Agent)(nil)
@@ -111,6 +114,19 @@ func (a *Agent) lookup(id acp.SessionId) *session {
 	return a.sessions[id]
 }
 
+// ensureModels populates the model picker from the `claude` CLI exactly once.
+// Failure is non-fatal: the selector is simply omitted (empty list) and the CLI
+// still runs on its configured default model.
+func (a *Agent) ensureModels(ctx context.Context) {
+	a.modelsOnce.Do(func() {
+		models, err := fetchModels(ctx, a.path, a.env)
+		if err != nil {
+			return
+		}
+		a.models = models
+	})
+}
+
 // --- acp.Agent ---
 
 func (a *Agent) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {
@@ -139,7 +155,8 @@ func (a *Agent) Authenticate(context.Context, acp.AuthenticateRequest) (acp.Auth
 	return acp.AuthenticateResponse{}, nil
 }
 
-func (a *Agent) NewSession(_ context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
+func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
+	a.ensureModels(ctx)
 	id := acp.SessionId(newUUID())
 	cwd := params.Cwd
 	if cwd == "" {
@@ -152,9 +169,9 @@ func (a *Agent) NewSession(_ context.Context, params acp.NewSessionRequest) (acp
 
 	return acp.NewSessionResponse{
 		SessionId:     id,
-		Models:        buildSessionModelState(s.modelID),
+		Models:        buildSessionModelState(a.models, s.modelID),
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(s.modelID, s.effort),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
 
@@ -208,13 +225,13 @@ func (a *Agent) SetSessionConfigOption(_ context.Context, params acp.SetSessionC
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m := findModel(s.modelID)
+	m := findModel(a.models, s.modelID)
 	if m == nil || !isValidEffort(m, level) {
 		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("effort %q invalid for model %s", level, s.modelID)
 	}
 	s.effort = level
 	return acp.SetSessionConfigOptionResponse{
-		ConfigOptions: buildConfigOptions(s.modelID, s.effort),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
 
@@ -241,15 +258,16 @@ func (a *Agent) ListSessions(_ context.Context, params acp.ListSessionsRequest) 
 	return acp.ListSessionsResponse{Sessions: sessions}, nil
 }
 
-func (a *Agent) ResumeSession(_ context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
+func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
 	if !sessionExists(params.Cwd, params.SessionId) {
 		return acp.ResumeSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, params.Cwd)
 	}
+	a.ensureModels(ctx)
 	s := a.adoptSession(params.SessionId, params.Cwd, params.AdditionalDirectories, string(params.SessionId), false)
 	return acp.ResumeSessionResponse{
-		Models:        buildSessionModelState(s.modelID),
+		Models:        buildSessionModelState(a.models, s.modelID),
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(s.modelID, s.effort),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
 
@@ -257,14 +275,15 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if !sessionExists(params.Cwd, params.SessionId) {
 		return acp.LoadSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, params.Cwd)
 	}
+	a.ensureModels(ctx)
 	s := a.adoptSession(params.SessionId, params.Cwd, params.AdditionalDirectories, string(params.SessionId), false)
 	if err := replayHistory(ctx, a.conn, params.SessionId, params.Cwd); err != nil {
 		return acp.LoadSessionResponse{}, fmt.Errorf("replay history: %w", err)
 	}
 	return acp.LoadSessionResponse{
-		Models:        buildSessionModelState(s.modelID),
+		Models:        buildSessionModelState(a.models, s.modelID),
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(s.modelID, s.effort),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
 
@@ -303,7 +322,7 @@ func (a *Agent) UnstableSetSessionModel(ctx context.Context, params acp.Unstable
 		return acp.UnstableSetSessionModelResponse{}, fmt.Errorf("session %s not found", params.SessionId)
 	}
 	id := string(params.ModelId)
-	m := findModel(id)
+	m := findModel(a.models, id)
 	if m == nil {
 		return acp.UnstableSetSessionModelResponse{}, fmt.Errorf("unknown model %q", id)
 	}
@@ -313,7 +332,7 @@ func (a *Agent) UnstableSetSessionModel(ctx context.Context, params acp.Unstable
 	if !isValidEffort(m, s.effort) {
 		s.effort = "default"
 	}
-	opts := buildConfigOptions(s.modelID, s.effort)
+	opts := buildConfigOptions(a.models, s.modelID, s.effort)
 	s.mu.Unlock()
 
 	// The effort selector depends on the active model — push a refresh so the

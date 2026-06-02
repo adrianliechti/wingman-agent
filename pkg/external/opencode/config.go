@@ -3,11 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
-
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
 
 	"github.com/adrianliechti/wingman-agent/pkg/external"
 )
@@ -15,44 +11,11 @@ import (
 type Options = external.Options
 
 func NewConfig(ctx context.Context, options *Options) (string, error) {
-	if options == nil {
-		options = new(Options)
-	}
+	options = external.WithDefaults(options)
 
-	if options.WingmanURL == "" {
-		val := os.Getenv("WINGMAN_URL")
+	available, err := external.AvailableModels(ctx, options)
 
-		if val == "" {
-			val = "http://localhost:4242"
-		}
-
-		options.WingmanURL = val
-	}
-
-	if options.WingmanToken == "" {
-		val := os.Getenv("WINGMAN_TOKEN")
-
-		if val == "" {
-			val = "-"
-		}
-
-		options.WingmanToken = val
-	}
-
-	client := openai.NewClient(
-		option.WithBaseURL(strings.TrimRight(options.WingmanURL, "/")+"/v1"),
-		option.WithAPIKey(options.WingmanToken),
-	)
-
-	iter := client.Models.ListAutoPaging(ctx)
-
-	available := make(map[string]bool)
-
-	for iter.Next() {
-		available[iter.Current().ID] = true
-	}
-
-	if err := iter.Err(); err != nil {
+	if err != nil {
 		return "", err
 	}
 

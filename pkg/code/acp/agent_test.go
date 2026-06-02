@@ -55,3 +55,38 @@ func TestToolCallContentTextPlainText(t *testing.T) {
 		t.Errorf("plain text = %q", got)
 	}
 }
+
+// modeState builds a SessionModeState whose current mode is the first listed.
+func modeState(modes ...string) *acpsdk.SessionModeState {
+	avail := make([]acpsdk.SessionMode, 0, len(modes))
+	for _, m := range modes {
+		avail = append(avail, acpsdk.SessionMode{Id: acpsdk.SessionModeId(m), Name: m})
+	}
+	return &acpsdk.SessionModeState{
+		AvailableModes: avail,
+		CurrentModeId:  acpsdk.SessionModeId(modes[0]),
+	}
+}
+
+// Modes are per-session in ACP: two sessions on the same connection must report
+// their own current mode independently, and an unknown id reports none.
+func TestModesPerSession(t *testing.T) {
+	a := &Agent{sessions: map[string]*sessionState{}}
+	add := func(id string, modes ...string) {
+		s := &sessionState{id: acpsdk.SessionId(id)}
+		s.applyModes(modeState(modes...))
+		a.sessions[id] = s
+	}
+	add("a", "plan", "code")
+	add("b", "code", "plan")
+
+	if modes, cur := a.Modes("a"); cur != "plan" || len(modes) != 2 {
+		t.Fatalf("session a = (%v, %q), want 2 modes current plan", modes, cur)
+	}
+	if _, cur := a.Modes("b"); cur != "code" {
+		t.Fatalf("session b current = %q, want code", cur)
+	}
+	if modes, cur := a.Modes("missing"); modes != nil || cur != "" {
+		t.Fatalf("unknown session = (%v, %q), want (nil, \"\")", modes, cur)
+	}
+}

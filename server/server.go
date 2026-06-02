@@ -449,6 +449,10 @@ func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// ACP only populates its model/effort catalog from the session/new response,
+	// so nudge UIs to refetch now that it's available (the picker would otherwise
+	// stay empty after an agent swap). No-op for wingman's static catalog.
+	s.broadcast(Frame{Type: EvtModelChanged})
 	writeJSON(w, map[string]string{"id": id})
 }
 
@@ -548,14 +552,16 @@ func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"model": body.Model})
 }
 
+// handleEffort reports the current effort and the options the active backend
+// supports — empty for backends with no effort selector (the picker hides it).
 func (s *Server) handleEffort(w http.ResponseWriter, _ *http.Request) {
 	a := s.activeAgent()
 	if a == nil {
-		writeJSON(w, map[string]string{"effort": ""})
+		writeJSON(w, map[string]any{"effort": "", "options": []string{}})
 		return
 	}
-	current, _ := a.Effort()
-	writeJSON(w, map[string]string{"effort": current})
+	current, options := a.Effort()
+	writeJSON(w, map[string]any{"effort": current, "options": options})
 }
 
 func (s *Server) handleSetEffort(w http.ResponseWriter, r *http.Request) {

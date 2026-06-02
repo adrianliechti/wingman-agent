@@ -3,8 +3,8 @@ package codex
 import "github.com/coder/acp-go-sdk"
 
 // modelEntry describes one codex model + its supported reasoning effort levels.
-// Codex's `model/list` returns this dynamically, but a static table keeps the
-// agent functional without that round-trip.
+// The list is fetched at runtime from codex's `model/list` RPC (see
+// Agent.ensureModels); there is no static fallback table.
 type modelEntry struct {
 	ID           string
 	Name         string
@@ -12,29 +12,44 @@ type modelEntry struct {
 	EffortLevels []string
 }
 
-// codex's ReasoningEffort enum.
-var defaultEffortLevels = []string{"minimal", "low", "medium", "high", "xhigh"}
-
-var builtinModels = []modelEntry{
-	{ID: "default", Name: "Default", Description: "Use the configured default model"},
-	{ID: "gpt-5", Name: "GPT-5", Description: "OpenAI GPT-5", EffortLevels: defaultEffortLevels},
-	{ID: "gpt-5-codex", Name: "GPT-5 Codex", Description: "Codex tuning of GPT-5", EffortLevels: defaultEffortLevels},
-	{ID: "o3", Name: "o3", Description: "OpenAI o3 reasoning model", EffortLevels: defaultEffortLevels},
-	{ID: "o4-mini", Name: "o4-mini", Description: "OpenAI o4-mini reasoning model", EffortLevels: defaultEffortLevels},
+// modelsFromCodex converts a `model/list` response into the picker entries we
+// advertise over ACP, dropping models codex marks hidden.
+func modelsFromCodex(list []codexModel) []modelEntry {
+	out := make([]modelEntry, 0, len(list))
+	for _, m := range list {
+		if m.Hidden {
+			continue
+		}
+		efforts := make([]string, 0, len(m.SupportedReasoningEfforts))
+		for _, e := range m.SupportedReasoningEfforts {
+			efforts = append(efforts, e.ReasoningEffort)
+		}
+		name := m.DisplayName
+		if name == "" {
+			name = m.ID
+		}
+		out = append(out, modelEntry{
+			ID:           m.ID,
+			Name:         name,
+			Description:  m.Description,
+			EffortLevels: efforts,
+		})
+	}
+	return out
 }
 
-func findModel(id string) *modelEntry {
-	for i := range builtinModels {
-		if builtinModels[i].ID == id {
-			return &builtinModels[i]
+func findModel(models []modelEntry, id string) *modelEntry {
+	for i := range models {
+		if models[i].ID == id {
+			return &models[i]
 		}
 	}
 	return nil
 }
 
-func buildSessionModelState(currentID string) *acp.SessionModelState {
-	infos := make([]acp.ModelInfo, 0, len(builtinModels))
-	for _, m := range builtinModels {
+func buildSessionModelState(models []modelEntry, currentID string) *acp.SessionModelState {
+	infos := make([]acp.ModelInfo, 0, len(models))
+	for _, m := range models {
 		desc := m.Description
 		infos = append(infos, acp.ModelInfo{
 			ModelId:     acp.ModelId(m.ID),
@@ -42,8 +57,11 @@ func buildSessionModelState(currentID string) *acp.SessionModelState {
 			Description: &desc,
 		})
 	}
-	if findModel(currentID) == nil {
-		currentID = "default"
+	// Keep the advertised current id consistent with the available list: when
+	// codex reports a model we didn't surface (or the list is empty), fall back
+	// to the first entry rather than dangling an unknown id.
+	if findModel(models, currentID) == nil && len(models) > 0 {
+		currentID = models[0].ID
 	}
 	return &acp.SessionModelState{
 		AvailableModels: infos,
@@ -51,8 +69,8 @@ func buildSessionModelState(currentID string) *acp.SessionModelState {
 	}
 }
 
-func buildConfigOptions(currentModelID, currentEffort string) []acp.SessionConfigOption {
-	m := findModel(currentModelID)
+func buildConfigOptions(models []modelEntry, currentModelID, currentEffort string) []acp.SessionConfigOption {
+	m := findModel(models, currentModelID)
 	if m == nil || len(m.EffortLevels) == 0 {
 		return nil
 	}
@@ -67,8 +85,10 @@ func buildConfigOptions(currentModelID, currentEffort string) []acp.SessionConfi
 		})
 	}
 
+	// Report "default" (a real option) rather than "" when no effort is pinned,
+	// so the client highlights the Default entry instead of showing no selection.
 	current := currentEffort
-	if !isValidEffort(m, current) {
+	if current == "" || !isValidEffort(m, current) {
 		current = "default"
 	}
 	opt := acp.NewSessionConfigOptionSelect(
