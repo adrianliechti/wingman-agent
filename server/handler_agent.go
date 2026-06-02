@@ -28,10 +28,23 @@ func (s *Server) handleAgents(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleAgent(w http.ResponseWriter, _ *http.Request) {
 	a := s.activeAgent()
 	name := code.BuiltinAgentName
+	canDelete := false
 	if a != nil {
 		name = a.Name()
+		canDelete = supportsDelete(a)
 	}
-	writeJSON(w, map[string]string{"agent": name})
+	writeJSON(w, map[string]any{"agent": name, "canDelete": canDelete})
+}
+
+// supportsDelete reports whether the active backend can delete sessions.
+// Backends may expose an optional SupportsDelete method (the ACP backend gates
+// on the server's advertised capability); those that don't are assumed capable
+// (the built-in wingman agent always is).
+func supportsDelete(a code.Agent) bool {
+	if d, ok := a.(interface{ SupportsDelete() bool }); ok {
+		return d.SupportsDelete()
+	}
+	return true
 }
 
 func (s *Server) handleSetAgent(w http.ResponseWriter, r *http.Request) {

@@ -23,34 +23,48 @@ func findModel(models []ModelEntry, id string) *ModelEntry {
 	return nil
 }
 
-// buildSessionModelState returns the model selector state advertised in
-// NewSessionResponse.Models.
-func buildSessionModelState(models []ModelEntry, currentID string) *acp.SessionModelState {
-	infos := make([]acp.ModelInfo, 0, len(models))
+const (
+	modelConfigID  = "model"
+	effortConfigID = "effort"
+)
+
+// buildConfigOptions returns the model selector plus, when the active model
+// supports it, the effort selector. Since v0.13.5 model selection flows through
+// config options rather than a dedicated SessionModelState.
+func buildConfigOptions(models []ModelEntry, currentModelID, currentEffort string) []acp.SessionConfigOption {
+	opts := []acp.SessionConfigOption{modelConfigOption(models, currentModelID)}
+	if effort := effortConfigOption(models, currentModelID, currentEffort); effort != nil {
+		opts = append(opts, *effort)
+	}
+	return opts
+}
+
+func modelConfigOption(models []ModelEntry, currentID string) acp.SessionConfigOption {
+	ungrouped := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(models))
 	for _, m := range models {
 		desc := m.Description
-		infos = append(infos, acp.ModelInfo{
-			ModelId:     acp.ModelId(m.ID),
-			Name:        m.Name,
-			Description: &desc,
-		})
+		opt := acp.SessionConfigSelectOption{
+			Value: acp.SessionConfigValueId(m.ID),
+			Name:  m.Name,
+		}
+		if desc != "" {
+			opt.Description = &desc
+		}
+		ungrouped = append(ungrouped, opt)
 	}
-	// Keep the advertised current id within the available list: the CLI's first
-	// entry ("default") is the natural fallback when the session's pinned model
-	// isn't in the fetched set.
 	if findModel(models, currentID) == nil && len(models) > 0 {
 		currentID = models[0].ID
 	}
-	return &acp.SessionModelState{
-		AvailableModels: infos,
-		CurrentModelId:  acp.ModelId(currentID),
-	}
+	opt := acp.NewSessionConfigOptionSelect(
+		acp.SessionConfigValueId(currentID),
+		acp.SessionConfigSelectOptions{Ungrouped: &ungrouped},
+	)
+	opt.Select.Id = modelConfigID
+	opt.Select.Name = "Model"
+	return opt
 }
 
-// buildConfigOptions returns the effort selector for the active model.
-// The model and mode selectors live in their own SessionModelState /
-// SessionModeState fields, so the only config option we emit is "effort".
-func buildConfigOptions(models []ModelEntry, currentModelID, currentEffort string) []acp.SessionConfigOption {
+func effortConfigOption(models []ModelEntry, currentModelID, currentEffort string) *acp.SessionConfigOption {
 	m := findModel(models, currentModelID)
 	if m == nil || len(m.EffortLevels) == 0 {
 		return nil
@@ -66,8 +80,6 @@ func buildConfigOptions(models []ModelEntry, currentModelID, currentEffort strin
 		})
 	}
 
-	// Report "default" (a real option) rather than "" when no effort is pinned,
-	// so the client highlights the Default entry instead of showing no selection.
 	current := currentEffort
 	if current == "" || !isValidEffort(m, current) {
 		current = "default"
@@ -78,11 +90,11 @@ func buildConfigOptions(models []ModelEntry, currentModelID, currentEffort strin
 	)
 	desc := "Reasoning effort for the selected model"
 	cat := acp.SessionConfigOptionCategoryThoughtLevel
-	opt.Select.Id = "effort"
+	opt.Select.Id = effortConfigID
 	opt.Select.Name = "Effort"
 	opt.Select.Description = &desc
 	opt.Select.Category = &cat
-	return []acp.SessionConfigOption{opt}
+	return &opt
 }
 
 func isValidEffort(m *ModelEntry, level string) bool {

@@ -130,6 +130,17 @@ export function ModelPicker({ subscribe }: Props) {
 		return match?.name || model;
 	}, [models, model]);
 
+	// The backend's "default"/"auto" sentinel is the deselected state — hide it
+	// as an explicit button. Deselecting the active level falls back to it.
+	const defaultEffort = useMemo(
+		() => effortOptions.find((v) => v === "default" || v === "auto") ?? "default",
+		[effortOptions],
+	);
+	const efforts = useMemo(
+		() => effortOptions.filter((v) => v !== defaultEffort),
+		[effortOptions, defaultEffort],
+	);
+
 	if (!model) return null;
 
 	return (
@@ -175,10 +186,10 @@ export function ModelPicker({ subscribe }: Props) {
 							))
 						)}
 					</div>
-					{effortOptions.length > 0 && (
+					{efforts.length > 0 && (
 					<div className="border-t border-border px-2 py-1.5">
 						<div className="flex rounded bg-bg overflow-hidden">
-							{effortOptions.map((v) => (
+							{efforts.map((v) => (
 								<button
 									type="button"
 									key={v}
@@ -187,7 +198,7 @@ export function ModelPicker({ subscribe }: Props) {
 											? "text-fg bg-bg-active"
 											: "text-fg-muted hover:text-fg hover:bg-bg-hover"
 									}`}
-									onClick={() => selectEffort(v)}
+									onClick={() => selectEffort(v === effort ? defaultEffort : v)}
 								>
 									{v}
 								</button>

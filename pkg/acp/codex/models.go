@@ -47,29 +47,45 @@ func findModel(models []modelEntry, id string) *modelEntry {
 	return nil
 }
 
-func buildSessionModelState(models []modelEntry, currentID string) *acp.SessionModelState {
-	infos := make([]acp.ModelInfo, 0, len(models))
+const (
+	modelConfigID  = "model"
+	effortConfigID = "effort"
+)
+
+func buildConfigOptions(models []modelEntry, currentModelID, currentEffort string) []acp.SessionConfigOption {
+	opts := []acp.SessionConfigOption{modelConfigOption(models, currentModelID)}
+	if effort := effortConfigOption(models, currentModelID, currentEffort); effort != nil {
+		opts = append(opts, *effort)
+	}
+	return opts
+}
+
+func modelConfigOption(models []modelEntry, currentID string) acp.SessionConfigOption {
+	ungrouped := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(models))
 	for _, m := range models {
 		desc := m.Description
-		infos = append(infos, acp.ModelInfo{
-			ModelId:     acp.ModelId(m.ID),
-			Name:        m.Name,
-			Description: &desc,
-		})
+		opt := acp.SessionConfigSelectOption{
+			Value: acp.SessionConfigValueId(m.ID),
+			Name:  m.Name,
+		}
+		if desc != "" {
+			opt.Description = &desc
+		}
+		ungrouped = append(ungrouped, opt)
 	}
-	// Keep the advertised current id consistent with the available list: when
-	// codex reports a model we didn't surface (or the list is empty), fall back
-	// to the first entry rather than dangling an unknown id.
 	if findModel(models, currentID) == nil && len(models) > 0 {
 		currentID = models[0].ID
 	}
-	return &acp.SessionModelState{
-		AvailableModels: infos,
-		CurrentModelId:  acp.ModelId(currentID),
-	}
+	opt := acp.NewSessionConfigOptionSelect(
+		acp.SessionConfigValueId(currentID),
+		acp.SessionConfigSelectOptions{Ungrouped: &ungrouped},
+	)
+	opt.Select.Id = modelConfigID
+	opt.Select.Name = "Model"
+	return opt
 }
 
-func buildConfigOptions(models []modelEntry, currentModelID, currentEffort string) []acp.SessionConfigOption {
+func effortConfigOption(models []modelEntry, currentModelID, currentEffort string) *acp.SessionConfigOption {
 	m := findModel(models, currentModelID)
 	if m == nil || len(m.EffortLevels) == 0 {
 		return nil
@@ -85,8 +101,6 @@ func buildConfigOptions(models []modelEntry, currentModelID, currentEffort strin
 		})
 	}
 
-	// Report "default" (a real option) rather than "" when no effort is pinned,
-	// so the client highlights the Default entry instead of showing no selection.
 	current := currentEffort
 	if current == "" || !isValidEffort(m, current) {
 		current = "default"
@@ -97,11 +111,11 @@ func buildConfigOptions(models []modelEntry, currentModelID, currentEffort strin
 	)
 	desc := "Reasoning effort for the selected model"
 	cat := acp.SessionConfigOptionCategoryThoughtLevel
-	opt.Select.Id = "effort"
+	opt.Select.Id = effortConfigID
 	opt.Select.Name = "Effort"
 	opt.Select.Description = &desc
 	opt.Select.Category = &cat
-	return []acp.SessionConfigOption{opt}
+	return &opt
 }
 
 func isValidEffort(m *modelEntry, level string) bool {

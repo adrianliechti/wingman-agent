@@ -37,7 +37,6 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 		"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":      "1",
 		"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB":         "1",
 		"CLAUDE_CODE_MCP_ALLOWLIST_ENV":            "1",
-		"CLAUDE_CODE_SKIP_PROMPT_HISTORY":          "1",
 		"CLAUDE_CODE_ATTRIBUTION_HEADER":           "0",
 		"CLAUDE_CODE_HIDE_CWD":                     "1",
 		"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":     "1",

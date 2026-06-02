@@ -99,6 +99,7 @@ type event struct {
 }
 
 const (
+	modelConfigID  = "model"
 	effortConfigID = "effort"
 	initTimeout    = 30 * time.Second
 )
@@ -243,15 +244,17 @@ func (a *Agent) SetModel(ctx context.Context, id string) error {
 		a.configMu.Unlock()
 		return nil
 	}
-	if _, err := a.conn.UnstableSetSessionModel(ctx, acpsdk.UnstableSetSessionModelRequest{
-		SessionId: sess.id,
-		ModelId:   acpsdk.UnstableModelId(id),
-	}); err != nil {
+	resp, err := a.conn.SetSessionConfigOption(ctx, acpsdk.SetSessionConfigOptionRequest{
+		ValueId: &acpsdk.SetSessionConfigOptionValueId{
+			SessionId: sess.id,
+			ConfigId:  modelConfigID,
+			Value:     acpsdk.SessionConfigValueId(id),
+		},
+	})
+	if err != nil {
 		return err
 	}
-	a.configMu.Lock()
-	a.modelID = id
-	a.configMu.Unlock()
+	a.refreshConfig(resp.ConfigOptions)
 	return nil
 }
 
@@ -281,7 +284,7 @@ func (a *Agent) SetEffort(ctx context.Context, value string) error {
 	if err != nil {
 		return err
 	}
-	a.refreshConfig(nil, resp.ConfigOptions)
+	a.refreshConfig(resp.ConfigOptions)
 	return nil
 }
 
@@ -385,7 +388,7 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	a.refreshConfig(resp.Models, resp.ConfigOptions)
+	a.refreshConfig(resp.ConfigOptions)
 
 	id := string(resp.SessionId)
 	sess := &sessionState{
@@ -452,7 +455,7 @@ func (a *Agent) LoadSession(ctx context.Context, id string) error {
 			McpServers: []acpsdk.McpServer{},
 		})
 		if err == nil {
-			a.refreshConfig(resp.Models, resp.ConfigOptions)
+			a.refreshConfig(resp.ConfigOptions)
 			sess.applyModes(resp.Modes)
 		}
 		loadErrCh <- err
@@ -473,8 +476,21 @@ func (a *Agent) LoadSession(ctx context.Context, id string) error {
 	}
 }
 
-func (a *Agent) DeleteSession(_ context.Context, _ string) error {
-	return errors.ErrUnsupported
+func (a *Agent) SupportsDelete() bool {
+	return a.caps.SessionCapabilities.Delete != nil
+}
+
+func (a *Agent) DeleteSession(ctx context.Context, id string) error {
+	if !a.SupportsDelete() {
+		return errors.ErrUnsupported
+	}
+	a.mu.Lock()
+	delete(a.sessions, id)
+	a.mu.Unlock()
+	_, err := a.conn.UnstableDeleteSession(ctx, acpsdk.UnstableDeleteSessionRequest{
+		SessionId: acpsdk.SessionId(id),
+	})
+	return err
 }
 
 func (a *Agent) Messages(id string) []agent.Message {
@@ -665,7 +681,7 @@ func (a *Agent) shutdown() {
 
 func (a *Agent) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) error {
 	if n.Update.ConfigOptionUpdate != nil {
-		a.refreshConfig(nil, n.Update.ConfigOptionUpdate.ConfigOptions)
+		a.refreshConfig(n.Update.ConfigOptionUpdate.ConfigOptions)
 		return nil
 	}
 
@@ -936,32 +952,36 @@ func (a *Agent) WaitForTerminalExit(context.Context, acpsdk.WaitForTerminalExitR
 
 // ─── Config conversion ────────────────────────────────────────────
 
-// refreshConfig updates the connection-global model + effort catalog. Modes
-// are per-session — see [sessionState.applyModes].
-func (a *Agent) refreshConfig(models *acpsdk.SessionModelState, options []acpsdk.SessionConfigOption) {
+// refreshConfig updates the connection-global model + effort catalog from the
+// session's config options. Modes are per-session — see [sessionState.applyModes].
+func (a *Agent) refreshConfig(options []acpsdk.SessionConfigOption) {
+	if options == nil {
+		return
+	}
 	a.configMu.Lock()
 	defer a.configMu.Unlock()
-	if models != nil {
-		a.models = a.models[:0]
-		for _, m := range models.AvailableModels {
-			a.models = append(a.models, code.Model{ID: string(m.ModelId), Name: m.Name})
+	a.effortID = ""
+	a.effortOpts = nil
+	for _, opt := range options {
+		if opt.Select == nil {
+			continue
 		}
-		a.modelID = string(models.CurrentModelId)
-	}
-	if options != nil {
-		a.effortID = ""
-		a.effortOpts = nil
-		for _, opt := range options {
-			if opt.Select == nil || string(opt.Select.Id) != effortConfigID {
-				continue
+		switch string(opt.Select.Id) {
+		case modelConfigID:
+			a.models = a.models[:0]
+			if u := opt.Select.Options.Ungrouped; u != nil {
+				for _, v := range *u {
+					a.models = append(a.models, code.Model{ID: string(v.Value), Name: v.Name})
+				}
 			}
+			a.modelID = string(opt.Select.CurrentValue)
+		case effortConfigID:
 			a.effortID = string(opt.Select.CurrentValue)
 			if u := opt.Select.Options.Ungrouped; u != nil {
 				for _, v := range *u {
 					a.effortOpts = append(a.effortOpts, string(v.Value))
 				}
 			}
-			break
 		}
 	}
 }

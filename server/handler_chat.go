@@ -196,12 +196,16 @@ func (s *Server) handleSend(msg ClientMessage) {
 		s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 	}
 
-	// Wingman persists per-session transcripts to disk; ACP servers
-	// store their own state. Only wingman needs an explicit save here.
+	// Wingman persists per-session transcripts to disk; ACP servers store
+	// their own state. Only wingman needs an explicit save here, but both
+	// may have created/updated the on-disk session, so refresh the sidebar
+	// for either backend once the turn produced messages.
+	saved := true
 	if w, ok := a.(*coder.Agent); ok {
-		if err := w.Save(sid); err == nil && len(a.Messages(sid)) > 0 {
-			s.broadcast(Frame{Type: EvtSessionsChanged})
-		}
+		saved = w.Save(sid) == nil
+	}
+	if saved && len(a.Messages(sid)) > 0 {
+		s.broadcast(Frame{Type: EvtSessionsChanged})
 	}
 
 	s.setSessionPhase(sid, "idle")

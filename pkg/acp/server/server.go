@@ -102,6 +102,10 @@ func (s *Server) Authenticate(_ context.Context, _ acpsdk.AuthenticateRequest) (
 	return acpsdk.AuthenticateResponse{}, nil
 }
 
+func (s *Server) Logout(_ context.Context, _ acpsdk.LogoutRequest) (acpsdk.LogoutResponse, error) {
+	return acpsdk.LogoutResponse{}, nil
+}
+
 func (s *Server) NewSession(ctx context.Context, params acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
 	cwd, err := normalizeCwd(params.Cwd)
 	if err != nil {
@@ -122,7 +126,7 @@ func (s *Server) NewSession(ctx context.Context, params acpsdk.NewSessionRequest
 
 	return acpsdk.NewSessionResponse{
 		SessionId:     acpSid,
-		Models:        modelState(w.agent),
+		Modes:         modeState(w.agent, sid),
 		ConfigOptions: sessionConfigOptions(w.agent),
 	}, nil
 }
@@ -188,8 +192,16 @@ func (s *Server) releaseWorkspace(w *workspaceEntry) {
 
 func (s *Server) registerSession(id acpsdk.SessionId, w *workspaceEntry) {
 	s.mu.Lock()
-	s.sessions[id] = &sessionEntry{id: id, agent: w.agent, workspace: w}
+	_, exists := s.sessions[id]
+	if !exists {
+		s.sessions[id] = &sessionEntry{id: id, agent: w.agent, workspace: w}
+	}
 	s.mu.Unlock()
+	// Re-registering an already-known session (e.g. a second load/resume of the
+	// same id) would otherwise orphan the workspace ref acquired for this call.
+	if exists {
+		s.releaseWorkspace(w)
+	}
 }
 
 func normalizeCwd(cwd string) (string, error) {
@@ -200,17 +212,6 @@ func normalizeCwd(cwd string) (string, error) {
 		return "", fmt.Errorf("cwd must be an absolute path (got %q)", cwd)
 	}
 	return filepath.Clean(cwd), nil
-}
-
-func (s *Server) UnstableSetSessionModel(ctx context.Context, params acpsdk.UnstableSetSessionModelRequest) (acpsdk.UnstableSetSessionModelResponse, error) {
-	sess := s.lookupSession(params.SessionId)
-	if sess == nil {
-		return acpsdk.UnstableSetSessionModelResponse{}, fmt.Errorf("session %s not found", params.SessionId)
-	}
-	if err := sess.agent.SetModel(ctx, string(params.ModelId)); err != nil {
-		return acpsdk.UnstableSetSessionModelResponse{}, err
-	}
-	return acpsdk.UnstableSetSessionModelResponse{}, nil
 }
 
 func (s *Server) CloseSession(_ context.Context, params acpsdk.CloseSessionRequest) (acpsdk.CloseSessionResponse, error) {
@@ -382,7 +383,7 @@ func (s *Server) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionR
 		return acpsdk.ResumeSessionResponse{}, nil
 	}
 	return acpsdk.ResumeSessionResponse{
-		Models:        modelState(w.agent),
+		Modes:         modeState(w.agent, string(params.SessionId)),
 		ConfigOptions: sessionConfigOptions(w.agent),
 	}, nil
 }
@@ -397,7 +398,7 @@ func (s *Server) LoadSession(ctx context.Context, params acpsdk.LoadSessionReque
 	}
 	s.replayMessages(ctx, params.SessionId, messages)
 	return acpsdk.LoadSessionResponse{
-		Models:        modelState(w.agent),
+		Modes:         modeState(w.agent, string(params.SessionId)),
 		ConfigOptions: sessionConfigOptions(w.agent),
 	}, nil
 }
@@ -507,8 +508,37 @@ func (s *Server) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSe
 	}, nil
 }
 
-func (s *Server) SetSessionMode(_ context.Context, _ acpsdk.SetSessionModeRequest) (acpsdk.SetSessionModeResponse, error) {
+func (s *Server) SetSessionMode(ctx context.Context, params acpsdk.SetSessionModeRequest) (acpsdk.SetSessionModeResponse, error) {
+	sess := s.lookupSession(params.SessionId)
+	if sess == nil {
+		return acpsdk.SetSessionModeResponse{}, fmt.Errorf("session %s not found", params.SessionId)
+	}
+	if err := sess.agent.SetMode(ctx, string(params.SessionId), string(params.ModeId)); err != nil {
+		return acpsdk.SetSessionModeResponse{}, err
+	}
 	return acpsdk.SetSessionModeResponse{}, nil
+}
+
+// modeState builds the SessionModeState for sid, or nil when the agent exposes
+// no modes (the client then hides the picker).
+func modeState(a *coder.Agent, sid string) *acpsdk.SessionModeState {
+	modes, current := a.Modes(sid)
+	if len(modes) == 0 {
+		return nil
+	}
+	out := make([]acpsdk.SessionMode, 0, len(modes))
+	for _, m := range modes {
+		mode := acpsdk.SessionMode{Id: acpsdk.SessionModeId(m.ID), Name: m.Name}
+		if m.Description != "" {
+			desc := m.Description
+			mode.Description = &desc
+		}
+		out = append(out, mode)
+	}
+	return &acpsdk.SessionModeState{
+		AvailableModes: out,
+		CurrentModeId:  acpsdk.SessionModeId(current),
+	}
 }
 
 func promptToContent(blocks []acpsdk.ContentBlock) []agent.Content {
@@ -533,30 +563,6 @@ func parseRawInput(args string) any {
 		return v
 	}
 	return args
-}
-
-// modelState returns the [acpsdk.SessionModelState] derived from the
-// agent's currently visible catalog. Returns nil when the agent has no
-// models (the spec allows missing Models).
-func modelState(a *coder.Agent) *acpsdk.SessionModelState {
-	available, current := a.Models()
-	if len(available) == 0 {
-		return nil
-	}
-	models := make([]acpsdk.ModelInfo, 0, len(available))
-	for _, m := range available {
-		models = append(models, acpsdk.ModelInfo{
-			ModelId: acpsdk.ModelId(m.ID),
-			Name:    m.Name,
-		})
-	}
-	if current == "" {
-		current = string(models[0].ModelId)
-	}
-	return &acpsdk.SessionModelState{
-		AvailableModels: models,
-		CurrentModelId:  acpsdk.ModelId(current),
-	}
 }
 
 // sessionConfigOptions composes the "model" + "effort" select options

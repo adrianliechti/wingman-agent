@@ -122,8 +122,8 @@ type threadStartResponse struct {
 }
 
 type threadInfo struct {
-	ID    string   `json:"id"`
-	Cwd   string   `json:"cwd"`
+	ID    string    `json:"id"`
+	Cwd   string    `json:"cwd"`
 	Turns []rawTurn `json:"turns,omitempty"`
 }
 
@@ -232,6 +232,10 @@ type turnInterruptParams struct {
 	TurnID   string `json:"turnId"`
 }
 
+type threadArchiveParams struct {
+	ThreadID string `json:"threadId"`
+}
+
 type execApprovalParams struct {
 	ThreadID string `json:"threadId"`
 	TurnID   string `json:"turnId"`
@@ -297,6 +301,10 @@ func (c *codexClient) threadResume(ctx context.Context, p threadResumeParams) (t
 	var out threadResumeResponse
 	err := c.rpc.call(ctx, "thread/resume", p, &out)
 	return out, err
+}
+
+func (c *codexClient) threadArchive(ctx context.Context, p threadArchiveParams) error {
+	return c.rpc.call(ctx, "thread/archive", p, nil)
 }
 
 func (c *codexClient) threadList(ctx context.Context, p threadListParams) (threadListResponse, error) {

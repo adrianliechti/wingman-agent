@@ -61,8 +61,9 @@ type Agent struct {
 	env           []string
 	path          string
 
-	modelsOnce sync.Once
-	models     []ModelEntry
+	modelsMu     sync.Mutex
+	modelsLoaded bool
+	models       []ModelEntry
 }
 
 var _ acp.Agent = (*Agent)(nil)
@@ -118,13 +119,17 @@ func (a *Agent) lookup(id acp.SessionId) *session {
 // Failure is non-fatal: the selector is simply omitted (empty list) and the CLI
 // still runs on its configured default model.
 func (a *Agent) ensureModels(ctx context.Context) {
-	a.modelsOnce.Do(func() {
-		models, err := fetchModels(ctx, a.path, a.env)
-		if err != nil {
-			return
-		}
-		a.models = models
-	})
+	a.modelsMu.Lock()
+	defer a.modelsMu.Unlock()
+	if a.modelsLoaded {
+		return
+	}
+	models, err := fetchModels(ctx, a.path, a.env)
+	if err != nil {
+		return // retry on the next call rather than caching the failure
+	}
+	a.models = models
+	a.modelsLoaded = true
 }
 
 // --- acp.Agent ---
@@ -146,6 +151,7 @@ func (a *Agent) Initialize(context.Context, acp.InitializeRequest) (acp.Initiali
 				List:                  &acp.SessionListCapabilities{},
 				Resume:                &acp.SessionResumeCapabilities{},
 				Fork:                  &acp.SessionForkCapabilities{},
+				Delete:                &acp.SessionDeleteCapabilities{},
 			},
 		},
 	}, nil
@@ -153,6 +159,10 @@ func (a *Agent) Initialize(context.Context, acp.InitializeRequest) (acp.Initiali
 
 func (a *Agent) Authenticate(context.Context, acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
 	return acp.AuthenticateResponse{}, nil
+}
+
+func (a *Agent) Logout(context.Context, acp.LogoutRequest) (acp.LogoutResponse, error) {
+	return acp.LogoutResponse{}, nil
 }
 
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
@@ -169,7 +179,6 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 
 	return acp.NewSessionResponse{
 		SessionId:     id,
-		Models:        buildSessionModelState(a.models, s.modelID),
 		Modes:         buildSessionModeState(s.mode),
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
@@ -214,22 +223,33 @@ func (a *Agent) SetSessionConfigOption(_ context.Context, params acp.SetSessionC
 		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("only value-id config options supported")
 	}
 	v := params.ValueId
-	if string(v.ConfigId) != "effort" {
-		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown configId %q", v.ConfigId)
-	}
 	s := a.lookup(v.SessionId)
 	if s == nil {
 		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("session %s not found", v.SessionId)
 	}
-	level := string(v.Value)
+	value := string(v.Value)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m := findModel(a.models, s.modelID)
-	if m == nil || !isValidEffort(m, level) {
-		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("effort %q invalid for model %s", level, s.modelID)
+	switch string(v.ConfigId) {
+	case modelConfigID:
+		m := findModel(a.models, value)
+		if m == nil {
+			return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown model %q", value)
+		}
+		s.modelID = value
+		if !isValidEffort(m, s.effort) {
+			s.effort = "default"
+		}
+	case effortConfigID:
+		m := findModel(a.models, s.modelID)
+		if m == nil || !isValidEffort(m, value) {
+			return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("effort %q invalid for model %s", value, s.modelID)
+		}
+		s.effort = value
+	default:
+		return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown configId %q", v.ConfigId)
 	}
-	s.effort = level
 	return acp.SetSessionConfigOptionResponse{
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
@@ -244,6 +264,23 @@ func (a *Agent) CloseSession(_ context.Context, params acp.CloseSessionRequest) 
 		s.close()
 	}
 	return acp.CloseSessionResponse{}, nil
+}
+
+// UnstableDeleteSession tears down any live process for the session, then
+// removes its on-disk transcript. Tearing down first stops the process from
+// rewriting the file after deletion.
+func (a *Agent) UnstableDeleteSession(_ context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {
+	a.mu.Lock()
+	s := a.sessions[params.SessionId]
+	delete(a.sessions, params.SessionId)
+	a.mu.Unlock()
+	if s != nil {
+		s.close()
+	}
+	if err := deleteProjectSession(params.SessionId); err != nil {
+		return acp.UnstableDeleteSessionResponse{}, err
+	}
+	return acp.UnstableDeleteSessionResponse{}, nil
 }
 
 func (a *Agent) ListSessions(_ context.Context, params acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
@@ -265,7 +302,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	a.ensureModels(ctx)
 	s := a.adoptSession(params.SessionId, params.Cwd, params.AdditionalDirectories, string(params.SessionId), false)
 	return acp.ResumeSessionResponse{
-		Models:        buildSessionModelState(a.models, s.modelID),
 		Modes:         buildSessionModeState(s.mode),
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
@@ -281,7 +317,6 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, fmt.Errorf("replay history: %w", err)
 	}
 	return acp.LoadSessionResponse{
-		Models:        buildSessionModelState(a.models, s.modelID),
 		Modes:         buildSessionModeState(s.mode),
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
@@ -311,40 +346,6 @@ func (a *Agent) adoptSession(id acp.SessionId, cwd string, additionalDirs []stri
 	a.sessions[id] = s
 	a.mu.Unlock()
 	return s
-}
-
-// UnstableSetSessionModel is the only experimental method we implement; the
-// SDK dispatches each Unstable* via a per-method type assertion and returns
-// MethodNotFound automatically for the ones we don't.
-func (a *Agent) UnstableSetSessionModel(ctx context.Context, params acp.UnstableSetSessionModelRequest) (acp.UnstableSetSessionModelResponse, error) {
-	s := a.lookup(params.SessionId)
-	if s == nil {
-		return acp.UnstableSetSessionModelResponse{}, fmt.Errorf("session %s not found", params.SessionId)
-	}
-	id := string(params.ModelId)
-	m := findModel(a.models, id)
-	if m == nil {
-		return acp.UnstableSetSessionModelResponse{}, fmt.Errorf("unknown model %q", id)
-	}
-
-	s.mu.Lock()
-	s.modelID = id
-	if !isValidEffort(m, s.effort) {
-		s.effort = "default"
-	}
-	opts := buildConfigOptions(a.models, s.modelID, s.effort)
-	s.mu.Unlock()
-
-	// The effort selector depends on the active model — push a refresh so the
-	// client doesn't have to re-call session/new.
-	_ = a.conn.SessionUpdate(ctx, acp.SessionNotification{
-		SessionId: params.SessionId,
-		Update: acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
-			SessionUpdate: "config_option_update",
-			ConfigOptions: opts,
-		}},
-	})
-	return acp.UnstableSetSessionModelResponse{}, nil
 }
 
 // newUUID returns a random RFC 4122 v4 UUID. The Claude CLI's --session-id

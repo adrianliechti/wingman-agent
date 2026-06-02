@@ -115,6 +115,12 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		}
 		if isAuthError(p.Error.CodexErrorInfo) {
 			d.setFailure(acp.NewAuthRequired(nil))
+			// A fatal auth error may not be followed by turn/completed; unblock
+			// runTurn so it surfaces the failure instead of hanging.
+			select {
+			case d.done <- turnCompleted{}:
+			default:
+			}
 		}
 		if p.Error.Message != "" {
 			d.update(acp.UpdateAgentMessageText(p.Error.Message + "\n\n"))

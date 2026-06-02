@@ -1,9 +1,7 @@
-import { Loader2, MessageSquare, Plus, X } from "lucide-react";
+import { Loader2, MessageSquare, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { ServerMessage } from "../types/protocol";
 import { AgentPicker } from "./AgentPicker";
-
-const BUILTIN_AGENT_ID = "wingman";
 
 interface SessionInfo {
 	id: string;
@@ -39,7 +37,7 @@ export function Sidebar({
 	subscribe,
 }: Props) {
 	const [sessions, setSessions] = useState<SessionInfo[]>([]);
-	const [agentId, setAgentId] = useState(BUILTIN_AGENT_ID);
+	const [canDelete, setCanDelete] = useState(true);
 
 	const loadSessions = useCallback(async () => {
 		try {
@@ -54,7 +52,7 @@ export function Sidebar({
 	const loadAgent = useCallback(() => {
 		fetch("/api/agent")
 			.then((r) => r.json())
-			.then((data) => setAgentId(data.agent || BUILTIN_AGENT_ID))
+			.then((data) => setCanDelete(data.canDelete ?? false))
 			.catch(() => {});
 	}, []);
 
@@ -79,15 +77,35 @@ export function Sidebar({
 	}, [subscribe, loadSessions, loadAgent]);
 
 	const [switchingAgent, setSwitchingAgent] = useState<string | null>(null);
+	const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(
+		null,
+	);
 
-	const canDelete = agentId === BUILTIN_AGENT_ID;
+	const doDelete = useCallback(
+		async (id: string) => {
+			await fetch(`/api/sessions/${id}`, { method: "DELETE" });
+			onSessionDeleted?.(id);
+			loadSessions();
+		},
+		[onSessionDeleted, loadSessions],
+	);
 
-	const handleDelete = async (e: React.MouseEvent, id: string) => {
-		e.stopPropagation();
-		await fetch(`/api/sessions/${id}`, { method: "DELETE" });
-		onSessionDeleted?.(id);
-		loadSessions();
-	};
+	// Dismiss the context menu on any outside interaction.
+	useEffect(() => {
+		if (!menu) return;
+		const close = () => setMenu(null);
+		const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+		window.addEventListener("click", close);
+		window.addEventListener("scroll", close, true);
+		window.addEventListener("resize", close);
+		window.addEventListener("keydown", onKey);
+		return () => {
+			window.removeEventListener("click", close);
+			window.removeEventListener("scroll", close, true);
+			window.removeEventListener("resize", close);
+			window.removeEventListener("keydown", onKey);
+		};
+	}, [menu]);
 
 	const groups = groupSessions(sessions);
 
@@ -138,12 +156,17 @@ export function Sidebar({
 								return (
 									<div
 										key={s.id}
-										className={`group relative flex items-center gap-2 px-2.5 py-1.5 mx-1.5 rounded-md cursor-pointer text-[12px] transition-colors ${
+										className={`group flex items-center gap-2 px-2.5 py-1.5 mx-1.5 rounded-md cursor-pointer text-[12px] transition-colors ${
 											active
 												? "bg-bg-active text-fg"
 												: "text-fg-muted hover:bg-bg-hover hover:text-fg"
 										}`}
 										onClick={() => onSessionSelect(s.id)}
+										onContextMenu={(e) => {
+											if (!canDelete) return;
+											e.preventDefault();
+											setMenu({ id: s.id, x: e.clientX, y: e.clientY });
+										}}
 										title={s.title || s.id}
 									>
 										{runningSessionIds?.has(s.id) ? (
@@ -165,22 +188,31 @@ export function Sidebar({
 												{relativeTime(s.updated_at)}
 											</div>
 										</div>
-										{canDelete && (
-											<button
-												type="button"
-												onClick={(e) => handleDelete(e, s.id)}
-												className="w-5 h-5 flex items-center justify-center rounded text-fg-dim hover:text-danger opacity-0 group-hover:opacity-100 shrink-0 transition-all"
-												title="Delete session"
-											>
-												<X size={11} />
-											</button>
-										)}
 									</div>
 								);
 							})}
 						</div>
 					))}
 			</div>
+			{menu && (
+				<div
+					className="fixed z-50 min-w-[140px] py-1 bg-bg-elevated border border-border rounded-md shadow-xl"
+					style={{ top: menu.y, left: menu.x }}
+					onClick={(e) => e.stopPropagation()}
+				>
+					<button
+						type="button"
+						onClick={() => {
+							doDelete(menu.id);
+							setMenu(null);
+						}}
+						className="flex w-full items-center gap-2 px-3 py-1.5 text-[12px] text-fg-muted hover:text-danger hover:bg-bg-hover cursor-pointer transition-colors"
+					>
+						<Trash2 size={12} className="shrink-0" />
+						Delete session
+					</button>
+				</div>
+			)}
 		</div>
 	);
 }

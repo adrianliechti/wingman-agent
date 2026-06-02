@@ -181,6 +181,22 @@ func projectDirs(cwd string) ([]string, error) {
 	return out, nil
 }
 
+// deleteProjectSession removes the on-disk session file for id. The delete
+// request carries no cwd, so every project dir is scanned; a missing file is
+// not an error (delete is idempotent).
+func deleteProjectSession(id acp.SessionId) error {
+	dirs, err := projectDirs("")
+	if err != nil {
+		return err
+	}
+	for _, dir := range dirs {
+		if err := os.Remove(filepath.Join(dir, string(id)+".jsonl")); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // sessionExists reports whether ~/.claude/projects/<cwd>/<id>.jsonl is on disk.
 func sessionExists(cwd string, id acp.SessionId) bool {
 	dir := projectDirFor(cwd)
