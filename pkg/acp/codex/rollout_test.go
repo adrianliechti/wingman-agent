@@ -9,8 +9,7 @@ import (
 )
 
 func TestParseRolloutOutputs(t *testing.T) {
-	// Mirrors the real rollout shape: session_meta header, a function_call,
-	// its function_call_output, plus unrelated lines that must be ignored.
+
 	lines := []string{
 		`{"type":"session_meta","payload":{"id":"019e7aeb","cwd":"/x"}}`,
 		`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"call_A"}}`,
@@ -35,7 +34,7 @@ func TestDecodeRolloutOutput(t *testing.T) {
 	if got := decodeRolloutOutput([]byte(`"plain string"`)); got != "plain string" {
 		t.Errorf("string = %q", got)
 	}
-	// Non-string payloads fall back to raw bytes.
+
 	if got := decodeRolloutOutput([]byte(`{"x":1}`)); got != `{"x":1}` {
 		t.Errorf("object = %q", got)
 	}
@@ -43,13 +42,11 @@ func TestDecodeRolloutOutput(t *testing.T) {
 		t.Errorf("empty = %q", got)
 	}
 
-	// Shell output: strip the exec envelope, keep the payload.
 	shell := mustJSONString(t, "Chunk ID: bd92ed\nWall time: 0.05 seconds\nProcess exited with code 0\nOutput:\nfile_a.go\nfile_b.go")
 	if got := decodeRolloutOutput(shell); got != "file_a.go\nfile_b.go" {
 		t.Errorf("shell = %q", got)
 	}
 
-	// MCP output: strip envelope and flatten the content-block array to text.
 	mcp := mustJSONString(t, "Wall time: 0.26 seconds\nOutput:\n[{\"type\":\"text\",\"text\":\"Found 5 results\"},{\"type\":\"text\",\"text\":\"line two\"}]")
 	if got := decodeRolloutOutput(mcp); got != "Found 5 results\nline two" {
 		t.Errorf("mcp = %q", got)
@@ -76,7 +73,7 @@ func TestFindRolloutFile(t *testing.T) {
 	if err := os.WriteFile(want, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A decoy that should not match.
+
 	_ = os.WriteFile(filepath.Join(dir, "rollout-other.jsonl"), []byte("{}"), 0o644)
 
 	if got := findRolloutFile(root, id); got != want {

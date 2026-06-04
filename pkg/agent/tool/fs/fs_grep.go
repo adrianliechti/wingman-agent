@@ -31,7 +31,6 @@ const (
 	MaxLineDisplayLength = 500
 )
 
-// grepArgs is the parsed/validated form of the grep tool's input map.
 type grepArgs struct {
 	searchPath      string
 	globPatterns    []string
@@ -84,8 +83,6 @@ func parseGrepArgs(args map[string]any) (*grepArgs, error) {
 		showLineNumbers = n
 	}
 
-	// context / -C set both sides; -B / -A then override one side.
-	// Later key in each list wins (so -C overrides context, -A overrides -A).
 	beforeContext, afterContext := 0, 0
 	for _, key := range []string{"context", "-C"} {
 		if v, present, err := tool.NonNegIntArg(args, key); present {
@@ -400,7 +397,7 @@ func GrepTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 				if len(fileMatches) == 0 {
 					return "No files found", nil
 				}
-				// Newest mtime first; lexical path as a stable tiebreaker.
+
 				slices.SortFunc(fileMatches, func(a, b fileMatch) int {
 					return cmp.Or(b.modTime.Compare(a.modTime), cmp.Compare(a.path, b.path))
 				})
@@ -538,15 +535,8 @@ func matchesSingleGrepGlob(pattern, path, relPath string) bool {
 	return matched
 }
 
-// binaryPeekSize is the prefix length sniffed for null bytes when deciding
-// whether a file is binary. 512 bytes is enough to catch common formats
-// (executables, images, compressed archives) without paying for a full read.
 const binaryPeekSize = 512
 
-// openTextFile opens path and returns a reader over the full contents.
-// If the prefix contains a null byte the file is treated as binary,
-// isBinary is set, the file is closed, and the reader is nil.
-// Caller closes the returned io.ReadCloser on the non-binary path.
 func openTextFile(fsys fs.FS, path string) (io.ReadCloser, bool, error) {
 	f, err := fsys.Open(path)
 	if err != nil {
@@ -565,7 +555,6 @@ func openTextFile(fsys fs.FS, path string) (io.ReadCloser, bool, error) {
 		return nil, true, nil
 	}
 
-	// Re-front the peeked bytes onto the file so the caller can scan from byte 0.
 	return struct {
 		io.Reader
 		io.Closer
@@ -582,8 +571,6 @@ func countFileMatches(fsys fs.FS, path string, re *regexp.Regexp, multiline bool
 	scanner := bufio.NewScanner(rc)
 	scanner.Buffer(make([]byte, 0, DefaultScanBufSize), MaxScanBufSize)
 
-	// Multiline mode needs the joined buffer so the regex can span newlines;
-	// keep a single builder rather than materializing each line into a slice.
 	if multiline {
 		var b strings.Builder
 		first := true
@@ -694,8 +681,6 @@ func formatGrepPaginationNotice(limitReached bool, limit, offset int) string {
 	return "Showing results with pagination = " + info
 }
 
-// lineContaining returns the index of the line whose start offset is the
-// largest value <= offset, clamped to >= 0. lineStarts must be sorted.
 func lineContaining(lineStarts []int, offset int) int {
 	i, found := slices.BinarySearch(lineStarts, offset)
 	if !found {
@@ -704,8 +689,6 @@ func lineContaining(lineStarts []int, offset int) int {
 	return max(0, i)
 }
 
-// entryModTime returns the directory entry's modification time, or zero if
-// the underlying filesystem cannot report it.
 func entryModTime(d fs.DirEntry) time.Time {
 	info, err := d.Info()
 	if err != nil {
@@ -750,11 +733,9 @@ func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, onFile func(pat
 	})
 }
 
-// gitignoreCache memoizes per-directory pattern lists so each directory's
-// .gitignore is read at most once during a walk, instead of once per file.
 type gitignoreCache struct {
 	fsys     fs.FS
-	patterns map[string][]gitignore.Pattern // key: directory fs path ("." or "a/b")
+	patterns map[string][]gitignore.Pattern
 }
 
 func newGitignoreCache(fsys fs.FS) *gitignoreCache {
@@ -820,15 +801,10 @@ func searchFileWithContext(fsys fs.FS, path, displayPath string, re *regexp.Rege
 		lines = append(lines, scanner.Text())
 	}
 
-	// Preserve `lines` collected before the error. A line longer than
-	// MaxScanBufSize (1MB) — common in minified bundles or generated JSON —
-	// otherwise drops the entire file from results, masking real matches in
-	// the preceding lines. Emit a sentinel `match` for the file so callers
-	// (and the model) can tell scanning stopped early.
 	var scanCutoff string
 	if err := scanner.Err(); err != nil {
 		if !errors.Is(err, bufio.ErrTooLong) {
-			// Other scanner errors (I/O) — bail like before.
+
 			return nil
 		}
 		scanCutoff = formatGrepLine(displayPath, len(lines)+1, true, fmt.Sprintf("line exceeds %dKB scan limit; remainder of file skipped", MaxScanBufSize/1024), showLineNumbers)
@@ -839,13 +815,9 @@ func searchFileWithContext(fsys fs.FS, path, displayPath string, re *regexp.Rege
 	anyMatch := false
 
 	if multiline {
-		// In multiline mode the regex may span newlines, so we must run it
-		// against the joined file content rather than line-by-line. Each match
-		// is then mapped back to the line range it covers, and every line in
-		// that range is marked as matched so context formatting still works.
+
 		full := strings.Join(lines, "\n")
 
-		// lineStarts[i] = byte offset of the start of line i in `full`.
 		lineStarts := make([]int, len(lines))
 		offset := 0
 		for i, line := range lines {
@@ -856,7 +828,7 @@ func searchFileWithContext(fsys fs.FS, path, displayPath string, re *regexp.Rege
 		for _, m := range re.FindAllStringIndex(full, -1) {
 			start, end := m[0], m[1]
 			startLine := lineContaining(lineStarts, start)
-			// For zero-width matches, end equals start; clamp so we still mark the starting line.
+
 			endProbe := end
 			if endProbe > start {
 				endProbe = end - 1

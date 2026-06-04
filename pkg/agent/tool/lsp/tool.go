@@ -182,9 +182,6 @@ func resolveExistingFile(workingDir, path string) (string, error) {
 	return path, nil
 }
 
-// pathInsideWorkspace reports whether path is workingDir or a descendant.
-// Comparison is case-insensitive on macOS/Windows so a workspace path with
-// non-matching casing still resolves.
 func pathInsideWorkspace(path, workingDir string) bool {
 	cp, cw := path, workingDir
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
@@ -197,8 +194,6 @@ func pathInsideWorkspace(path, workingDir string) bool {
 	return strings.HasPrefix(cp, cw+string(filepath.Separator))
 }
 
-// expandHome resolves a leading `~` to the user's home dir; mirrors the
-// behaviour of the fs tools so the model can use the same path form.
 func expandHome(path string) string {
 	if path == "~" {
 		if home, err := os.UserHomeDir(); err == nil {

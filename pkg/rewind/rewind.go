@@ -27,8 +27,6 @@ import (
 	"github.com/go-git/go-git/v5/utils/merkletrie"
 )
 
-// ErrClosed is returned after Cleanup; callers should treat it as a
-// transient no-op (RestartRewind installs a fresh Manager).
 var ErrClosed = errors.New("rewind manager closed")
 
 type Checkpoint struct {
@@ -37,8 +35,6 @@ type Checkpoint struct {
 	Time    time.Time
 }
 
-// Manager runs a shadow git repo in /tmp that snapshots the working dir on
-// each user turn. Init is async; methods block on initDone until ready.
 type Manager struct {
 	workingDir string
 
@@ -52,17 +48,11 @@ type Manager struct {
 	baselineHash plumbing.Hash
 	closed       bool
 
-	// Exclude patterns are cached for the session; RestartRewind creates a
-	// fresh Manager so gitignore edits take effect across sessions.
 	excludesOnce    sync.Once
 	excludesPattern []gitignore.Pattern
 	excludesMatcher gitignore.Matcher
 }
 
-// readThroughStorage delegates writes to a primary store and falls back to a
-// read-only secondary object store on misses. Lets us reference objects from
-// the user's .git/objects without copying them — avoids an O(repo-size) walk
-// at startup.
 type readThroughStorage struct {
 	storage.Storer
 	secondary storer.EncodedObjectStorer
@@ -111,8 +101,6 @@ func New(workingDir string) *Manager {
 	return m
 }
 
-// CleanupOrphans removes leftover shadow repos from prior crashed sessions.
-// Only deletes dirs older than the cutoff so concurrent sessions are safe.
 func CleanupOrphans() {
 	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), "wingman-rewind-*"))
 	cutoff := time.Now().Add(-24 * time.Hour)
@@ -139,8 +127,6 @@ func (m *Manager) init() {
 	}
 	m.gitDir = gitDir
 
-	// Read through to the user repo's object store when present so we can
-	// baseline against HEAD's tree without copying objects.
 	var userStorer storer.EncodedObjectStorer
 	var userHead *object.Commit
 	if userRepo, err := git.PlainOpen(m.workingDir); err == nil {
@@ -209,9 +195,6 @@ func (m *Manager) ready() error {
 	return m.initErr
 }
 
-// baselineFromHEAD writes a baseline commit pointing at the user repo's HEAD
-// tree; the tree itself stays in the user's .git/objects reachable through
-// readThroughStorage. O(1) regardless of repo size.
 func (m *Manager) baselineFromHEAD(headCommit *object.Commit) error {
 	sig := object.Signature{Name: "wingman", Email: "wingman@local", When: time.Now()}
 	baselineCommit := &object.Commit{
@@ -262,8 +245,6 @@ func (m *Manager) baselineFromWorkingTree() error {
 	return nil
 }
 
-// setHead points master at hash and makes HEAD a symbolic ref to master so
-// subsequent commits attach via HEAD→master rather than landing detached.
 func (m *Manager) setHead(hash plumbing.Hash) error {
 	branch := plumbing.NewBranchReferenceName("master")
 	if err := m.repo.Storer.SetReference(plumbing.NewHashReference(branch, hash)); err != nil {
@@ -288,8 +269,6 @@ func (m *Manager) excludeMatcher() gitignore.Matcher {
 func (m *Manager) computeExcludes() {
 	patterns, _ := gitignore.ReadPatterns(m.worktree.Filesystem, nil)
 
-	// go-git's global/system helpers expect a filesystem rooted at "/"
-	// so absolute paths in core.excludesfile resolve.
 	rootFS := osfs.New("/")
 	if global, err := gitignore.LoadGlobalPatterns(rootFS); err == nil {
 		patterns = append(patterns, global...)
@@ -298,8 +277,6 @@ func (m *Manager) computeExcludes() {
 		patterns = append(patterns, system...)
 	}
 
-	// Git honors $XDG_CONFIG_HOME/git/ignore even when core.excludesfile is
-	// unset; go-git does not, so we read it ourselves.
 	patterns = append(patterns, readXDGIgnore()...)
 
 	m.excludesPattern = patterns
@@ -413,9 +390,6 @@ func (m *Manager) List() ([]Checkpoint, error) {
 	return checkpoints, nil
 }
 
-// Restore rolls the working tree back to a checkpoint and re-baselines.
-// Excludes MUST be loaded before Clean — otherwise Clean silently nukes
-// gitignored files (node_modules, .env, build artifacts) on rollback.
 func (m *Manager) Restore(hash string) error {
 	if hash == "" {
 		return errors.New("empty hash")
@@ -456,12 +430,6 @@ func (m *Manager) Restore(hash string) error {
 	return nil
 }
 
-// Cleanup wipes the shadow repo. It waits for init and any in-flight
-// DiffFromBaseline / Commit / List / Restore (wiping gitDir mid-snapshot
-// surfaces "entry not found" from go-git), but only up to a bound — a
-// minutes-long snapshot on a big repo must not hang app shutdown. On
-// timeout the wipe completes in the background once the op finishes, or
-// CleanupOrphans removes the dir on a later start.
 func (m *Manager) Cleanup() {
 	done := make(chan struct{})
 	go func() {
@@ -484,11 +452,6 @@ func (m *Manager) Cleanup() {
 
 var cleanupTimeout = 5 * time.Second
 
-// Fingerprint returns a 64-bit digest of the worktree's visible state
-// (relative path, mtime, size for every non-ignored file). Doesn't hash
-// content, so a `touch` will fire a refetch even when no diff changed.
-// Per-file digests combine via XOR, so the scan parallelizes across
-// subdirectories without ordering concerns.
 func (m *Manager) Fingerprint() uint64 {
 	if err := m.ready(); err != nil {
 		return 0
@@ -512,7 +475,6 @@ func (s *fpScanner) scanDir(dir string, components []string) uint64 {
 		return 0
 	}
 
-	// sum is only touched by this frame; goroutines merge into asyncSum.
 	var sum, asyncSum uint64
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -532,8 +494,7 @@ func (s *fpScanner) scanDir(dir string, components []string) uint64 {
 			sub := filepath.Join(dir, name)
 			select {
 			case s.sem <- struct{}{}:
-				// child aliases components' backing array, which the next
-				// iteration overwrites — the goroutine needs its own copy.
+
 				comps := slices.Clone(child)
 				wg.Add(1)
 				go func() {
@@ -596,10 +557,6 @@ type FileDiff struct {
 	Modified string
 }
 
-// snapshotTree captures the working tree as a tree object without polluting
-// the user-visible checkpoint history: it writes a transient commit then
-// resets the branch ref. The orphaned commit/tree objects are GC'd by the
-// /tmp repo lifecycle.
 func (m *Manager) snapshotTree() (*object.Tree, error) {
 	prevHead, err := m.repo.Head()
 	if err != nil {
@@ -621,7 +578,6 @@ func (m *Manager) snapshotTree() (*object.Tree, error) {
 		AllowEmptyCommits: true,
 	})
 
-	// Roll the branch ref back even if the commit failed.
 	if rollbackErr := m.repo.Storer.SetReference(plumbing.NewHashReference(prevHead.Name(), prevHead.Hash())); rollbackErr != nil {
 		if err == nil {
 			err = fmt.Errorf("failed to reset HEAD after snapshot: %w", rollbackErr)
@@ -645,10 +601,6 @@ func (m *Manager) snapshotTree() (*object.Tree, error) {
 	return tree, nil
 }
 
-// DiffFromBaseline diffs the baseline against the live working tree (not
-// HEAD), so changes from any source — agent tools, terminal, external
-// editor — are reflected. Returns (nil, nil) when there's no diff; errors
-// are reserved for actual git failures.
 func (m *Manager) DiffFromBaseline() ([]FileDiff, error) {
 	if err := m.ready(); err != nil {
 		return nil, err

@@ -132,7 +132,6 @@ func (s *Session) Close() {
 	s.cancelFunc()
 }
 
-// CallAndAwait retries transient LSP errors (e.g. rust-analyzer's "content modified") with exponential backoff.
 func (s *Session) CallAndAwait(ctx context.Context, method string, params any, result any) error {
 	var err error
 
@@ -165,11 +164,11 @@ func isTransientError(err error) bool {
 	}
 
 	switch wireErr.Code {
-	case -32801: // ContentModified
+	case -32801:
 		return true
-	case -32800: // RequestCancelled
+	case -32800:
 		return true
-	case -32802: // ServerCancelled
+	case -32802:
 		return true
 	default:
 		return false
@@ -201,7 +200,6 @@ func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, er
 			return "", fmt.Errorf("didChange: %w", err)
 		}
 
-		// many LSP servers only trigger full diagnostics on save
 		s.conn.Notify(ctx, "textDocument/didSave", DidSaveTextDocumentParams{
 			TextDocument: TextDocumentIdentifier{URI: uri},
 		})
@@ -242,8 +240,6 @@ func (s *Session) ClearPushDiagnostics(uri string) {
 	s.pushDiagsMu.Unlock()
 }
 
-// CollectDiagnostics prefers push-based diagnostics (publishDiagnostics notifications) and
-// falls back to pull-based (textDocument/diagnostic).
 func (s *Session) CollectDiagnostics(ctx context.Context, uri string) []Diagnostic {
 	if diags := s.PushDiagnostics(uri); len(diags) > 0 {
 		return diags
@@ -372,7 +368,6 @@ func (s *Session) DocumentSymbols(ctx context.Context, uri string, filePath stri
 		return "No symbols found", nil
 	}
 
-	// SymbolInformation[] is identifiable by location.uri
 	var symInfos []SymbolInformation
 	if err := json.Unmarshal(result, &symInfos); err == nil && len(symInfos) > 0 && symInfos[0].Location.URI != "" {
 		return formatSymbolInformations(symInfos, s.workingDir), nil

@@ -12,19 +12,19 @@ func visibleLen(s string) int {
 
 	for i := 0; i < len(runes); {
 		if runes[i] == '[' {
-			// Escaped literal '[' => "[[]"
+
 			if i+2 < len(runes) && runes[i+1] == '[' && runes[i+2] == ']' {
 				count += runewidth.RuneWidth('[')
 				i += 3
 				continue
 			}
-			// Escaped literal ']' => "[]]"
+
 			if i+2 < len(runes) && runes[i+1] == ']' && runes[i+2] == ']' {
 				count += runewidth.RuneWidth(']')
 				i += 3
 				continue
 			}
-			// Tview tag => "[... ]" with no nested '['
+
 			j := i + 1
 
 			for j < len(runes) && runes[j] != ']' && runes[j] != '[' {
@@ -81,21 +81,21 @@ func WrapLine(line string, width int) []string {
 		r := runes[i]
 
 		if r == '[' {
-			// Escaped literal '[' => "[[]"
+
 			if i+2 < len(runes) && runes[i+1] == '[' && runes[i+2] == ']' {
 				currentWord.WriteString("[[]")
 				currentWordLen += runewidth.RuneWidth('[')
 				i += 3
 				continue
 			}
-			// Escaped literal ']' => "[]]"
+
 			if i+2 < len(runes) && runes[i+1] == ']' && runes[i+2] == ']' {
 				currentWord.WriteString("[]]")
 				currentWordLen += runewidth.RuneWidth(']')
 				i += 3
 				continue
 			}
-			// Tview tag => "[... ]" with no nested '['
+
 			j := i + 1
 
 			for j < len(runes) && runes[j] != ']' && runes[j] != '[' {

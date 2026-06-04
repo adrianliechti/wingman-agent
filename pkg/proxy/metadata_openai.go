@@ -2,8 +2,6 @@ package proxy
 
 import "encoding/json"
 
-// OpenAI: /v1/chat/completions, /v1/responses, /v1/embeddings
-
 func metadataFromOpenAI(reqBody, respBody []byte) metadata {
 	var m metadata
 
@@ -48,7 +46,6 @@ func metadataFromOpenAISSE(reqBody, sseBody []byte) metadata {
 
 	for _, data := range sseData(sseBody) {
 		var obj struct {
-			// /v1/chat/completions streaming (final chunk with include_usage)
 			Usage struct {
 				PromptTokens        int `json:"prompt_tokens"`
 				CompletionTokens    int `json:"completion_tokens"`
@@ -61,7 +58,7 @@ func metadataFromOpenAISSE(reqBody, sseBody []byte) metadata {
 					CachedTokens int `json:"cached_tokens"`
 				} `json:"input_tokens_details"`
 			} `json:"usage"`
-			// /v1/responses streaming (response.completed / response.done events)
+
 			Response struct {
 				Usage struct {
 					InputTokens        int `json:"input_tokens"`

@@ -10,7 +10,7 @@ func openBrowser(url string) {
 
 	switch runtime.GOOS {
 	case "windows":
-		// rundll32 avoids cmd.exe argument quoting — URLs with `&` would break.
+
 		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	case "darwin":
 		cmd = exec.Command("open", url)

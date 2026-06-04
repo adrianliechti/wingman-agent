@@ -42,8 +42,6 @@ func (m *Manager) detect() []projectRoot {
 	return m.roots
 }
 
-// FindServer returns the most-nested project root's server that handles
-// the given file's extension, or nil if none.
 func (m *Manager) FindServer(filePath string) *Server {
 	ext := strings.TrimPrefix(filepath.Ext(filePath), ".")
 	if ext == "" {
@@ -96,8 +94,6 @@ func (m *Manager) GetSession(ctx context.Context, filePath string) (*Session, er
 	return m.GetSessionByServer(ctx, *server)
 }
 
-// GetSessionByServer returns a cached session or creates a new one. If the server crashed,
-// it restarts and re-opens previously opened documents.
 func (m *Manager) GetSessionByServer(ctx context.Context, server Server) (*Session, error) {
 	key := server.Command
 
@@ -123,7 +119,7 @@ func (m *Manager) GetSessionByServer(ctx context.Context, server Server) (*Sessi
 		}
 
 		m.mu.Lock()
-		// concurrent restart race
+
 		if existing, ok := m.sessions[key]; ok && existing.IsAlive() {
 			m.mu.Unlock()
 			newSession.Close()
@@ -150,7 +146,7 @@ func (m *Manager) GetSessionByServer(ctx context.Context, server Server) (*Sessi
 	}
 
 	m.mu.Lock()
-	// concurrent connection race
+
 	if existing, ok := m.sessions[key]; ok && existing.IsAlive() {
 		m.mu.Unlock()
 		session.Close()
@@ -259,7 +255,6 @@ func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) (string, e
 			continue
 		}
 
-		// SymbolInformation[] has location.uri with range; WorkspaceSymbol[] may omit range.
 		var symInfos []SymbolInformation
 		if err := unmarshalResult(result, &symInfos); err == nil && len(symInfos) > 0 && symInfos[0].Location.URI != "" {
 			allSymInfos = append(allSymInfos, symInfos...)
@@ -283,8 +278,6 @@ func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) (string, e
 	return "No symbols found", nil
 }
 
-// skippedDiscoveryDirs are noisy/build/vendored directory names omitted from
-// LSP source file discovery. (Distinct from VCS dirs handled elsewhere.)
 var skippedDiscoveryDirs = map[string]bool{
 	"node_modules": true,
 	"vendor":       true,

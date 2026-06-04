@@ -38,8 +38,6 @@ type App struct {
 
 	seenRequests int
 
-	// runCtx is cancelled when the app stops, so the auto-refresh ticker
-	// goroutine in Run can exit cleanly instead of polling forever.
 	runCtx    context.Context
 	runCancel context.CancelFunc
 }

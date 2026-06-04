@@ -13,14 +13,11 @@ func relPath(workingDir, path string) string {
 	return path
 }
 
-// pathGroup is the generic result type for groupByPath.
 type pathGroup[T any] struct {
 	Path  string
 	Items []T
 }
 
-// groupByPath groups items by the file path returned by pathOf, preserving
-// first-seen order so output is deterministic for a given input slice.
 func groupByPath[T any](items []T, pathOf func(T) string) []pathGroup[T] {
 	indexes := make(map[string]int)
 	var groups []pathGroup[T]

@@ -31,7 +31,7 @@ type managedAgent struct {
 
 type Claw struct {
 	config *Config
-	agents sync.Map // name -> *managedAgent
+	agents sync.Map
 	runCtx context.Context
 }
 
@@ -39,7 +39,6 @@ func New(config *Config) *Claw {
 	return &Claw{config: config}
 }
 
-// Init must be called before Run.
 func (c *Claw) Init() error {
 	names, err := c.config.Memory.ListAgents()
 	if err != nil {
@@ -119,10 +118,6 @@ func (c *Claw) DeleteAgent(name string) error {
 	return c.config.Memory.RemoveAgent(name)
 }
 
-// validAgentName rejects names that aren't a single, safe path component.
-// Agent names are joined into filesystem paths (workspace, memory, tasks), so
-// `..`, separators, and reserved names must never reach those joins — otherwise
-// a delete/create can escape the claw data directory.
 func validAgentName(name string) error {
 	if name == "" || name == "global" {
 		return fmt.Errorf("invalid agent name %q", name)
@@ -155,8 +150,6 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 	cfg := c.config.AgentConfig.Derive()
 	cfg.Instructions = func() string { return c.buildInstructions(name) }
 
-	// Cap large tool outputs at the wire layer; the hook saves the full text under .scratch
-	// so the model can `read` the path to retrieve the elided middle.
 	scratchDir := filepath.Join(workDir, ".scratch")
 	_ = os.MkdirAll(scratchDir, 0755)
 	cfg.Hooks.PostToolUse = append(cfg.Hooks.PostToolUse,
@@ -182,7 +175,6 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 		agentTools = append(agentTools, manage.Tools(c, c.config.Memory)...)
 	}
 
-	// subagent filters itself out via name check
 	agentTools = append(agentTools, subagent.Tools(cfg)...)
 
 	cfg.Tools = func() []tool.Tool { return agentTools }
@@ -248,9 +240,6 @@ func (c *Claw) handleMessage(ctx context.Context, msg channel.Message) {
 	input := []agent.Content{{Text: msg.Content}}
 	name := nameFromChatID(msg.ChatID)
 
-	// Send returns nil if this agent already has a turn in flight — the
-	// input was queued onto it. The active loop owns the response stream;
-	// nothing for this handler to do.
 	turn := ma.agent.Send(ctx, input)
 	if turn == nil {
 		return
@@ -305,7 +294,6 @@ func (c *Claw) buildInstructions(name string) string {
 
 	var b strings.Builder
 
-	// SOUL.md is immutable identity, outside workspace so the agent cannot modify it
 	if soul := c.config.Memory.SoulContent(name); soul != "" {
 		b.WriteString(soul)
 		b.WriteString("\n\n")
@@ -328,7 +316,6 @@ func (c *Claw) buildInstructions(name string) string {
 		b.WriteString(c.config.Instructions)
 	}
 
-	// AGENTS.md is mutable instructions the agent can modify
 	if content := c.config.Memory.Content(name); content != "" {
 		b.WriteString("\n\n")
 		b.WriteString(content)

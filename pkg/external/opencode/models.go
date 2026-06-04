@@ -14,7 +14,7 @@ type modelGroup struct {
 }
 
 var candidates = []modelGroup{
-	// Claude models
+
 	{
 		name: "Wingman Claude Opus",
 
@@ -42,7 +42,6 @@ var candidates = []modelGroup{
 		},
 	},
 
-	// OpenAI models
 	{
 		name: "Wingman Codex",
 
@@ -81,7 +80,6 @@ var candidates = []modelGroup{
 		},
 	},
 
-	// Gemini models
 	{
 		name: "Wingman Gemini Pro",
 
@@ -100,7 +98,6 @@ var candidates = []modelGroup{
 		},
 	},
 
-	// Devstral models
 	{
 		name: "Wingman Devstral",
 
@@ -119,7 +116,6 @@ var candidates = []modelGroup{
 		},
 	},
 
-	// GLM models
 	{
 		name: "Wingman GLM",
 
@@ -136,7 +132,6 @@ var candidates = []modelGroup{
 		},
 	},
 
-	// Qwen models
 	{
 		name: "Wingman Qwen Coder",
 

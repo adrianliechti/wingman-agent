@@ -16,17 +16,12 @@ const (
 	ModelFast
 )
 
-// ModelFilter narrows a candidate model list by ID. A nil filter matches
-// every model.
 type ModelFilter func(id string) bool
 
-// IsAnthropic matches Anthropic Claude model IDs.
 func IsAnthropic(id string) bool { return strings.HasPrefix(id, "claude-") }
 
-// IsOpenAI matches OpenAI GPT model IDs.
 func IsOpenAI(id string) bool { return strings.HasPrefix(id, "gpt-") }
 
-// IsGoogle matches Google Gemini model IDs.
 func IsGoogle(id string) bool { return strings.HasPrefix(id, "gemini-") }
 
 type ModelOptions struct {
@@ -34,9 +29,6 @@ type ModelOptions struct {
 	Filter ModelFilter
 }
 
-// WithDefaults fills in any missing Options fields from environment variables.
-// The same pointer is returned for chaining; a new zero-value Options is
-// allocated if nil is passed.
 func WithDefaults(options *Options) *Options {
 	if options == nil {
 		options = new(Options)
@@ -65,8 +57,6 @@ func WithDefaults(options *Options) *Options {
 	return options
 }
 
-// AvailableModels returns the set of model IDs advertised by the Wingman
-// server addressed by options.
 func AvailableModels(ctx context.Context, options *Options) (map[string]bool, error) {
 	options = WithDefaults(options)
 
@@ -90,8 +80,6 @@ func AvailableModels(ctx context.Context, options *Options) (map[string]bool, er
 	return available, nil
 }
 
-// Models returns the IDs of available models matching modelOpts, in
-// preference order. Returns nil if nothing matches.
 func Models(ctx context.Context, options *Options, modelOpts *ModelOptions) ([]string, error) {
 	available, err := AvailableModels(ctx, options)
 
@@ -128,7 +116,7 @@ func Models(ctx context.Context, options *Options, modelOpts *ModelOptions) ([]s
 
 var (
 	defaultModels = []string{
-		// Anthropic
+
 		"claude-sonnet-4-6",
 		"claude-sonnet-4-5",
 		"claude-opus-4-8",
@@ -136,7 +124,6 @@ var (
 		"claude-opus-4-6",
 		"claude-opus-4-5",
 
-		// OpenAI
 		"gpt-5.5",
 		"gpt-5.4",
 		"gpt-5.3-codex",
@@ -148,23 +135,20 @@ var (
 		"gpt-5.1",
 		"gpt-5",
 
-		// Google
 		"gemini-3.1-pro-preview",
 		"gemini-3-pro-preview",
 		"gemini-2.5-pro",
 	}
 
 	fastModels = []string{
-		// Anthropic
+
 		"claude-haiku-4-6",
 		"claude-haiku-4-5",
 
-		// OpenAI
 		"gpt-5.3-codex-spark",
 		"gpt-5.1-codex-mini",
 		"gpt-5-mini",
 
-		// Google
 		"gemini-3-flash-preview",
 		"gemini-2.5-flash",
 	}

@@ -17,7 +17,7 @@ type projectType struct {
 }
 
 var knownProjects = []projectType{
-	// Deno (must be before TypeScript so it takes priority when deno.json is present)
+
 	{
 		Name:    "deno",
 		Markers: []string{"deno.json", "deno.jsonc"},

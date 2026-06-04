@@ -1,7 +1,3 @@
-// Package watch coalesces workspace change-check requests. Instead of
-// polling on a fixed interval, callers Notify the monitor when something may
-// have changed (a tool finished, a turn ended, the UI regained focus); a
-// slow fallback tick covers changes no signal announces.
 package watch
 
 import (
@@ -15,16 +11,13 @@ const (
 )
 
 type Options struct {
-	// MinInterval throttles Notify-driven checks (default 2s).
 	MinInterval time.Duration
-	// Fallback is the idle re-check interval (default 30s).
+
 	Fallback time.Duration
-	// Active gates checks; when it returns false, signals are dropped.
+
 	Active func() bool
 }
 
-// Monitor runs checks in a single goroutine, so checks never overlap and
-// queued signals coalesce into one run.
 type Monitor struct {
 	check func()
 	opts  Options
@@ -48,7 +41,6 @@ func New(opts Options, check func()) *Monitor {
 	}
 }
 
-// Notify requests a check soon, throttled to at most one per MinInterval.
 func (m *Monitor) Notify() {
 	select {
 	case m.notifies <- struct{}{}:
@@ -56,7 +48,6 @@ func (m *Monitor) Notify() {
 	}
 }
 
-// Flush requests an immediate check, bypassing the throttle.
 func (m *Monitor) Flush() {
 	select {
 	case m.urgent <- struct{}{}:
@@ -89,8 +80,6 @@ func (m *Monitor) Run(ctx context.Context) {
 		case <-ticker.C:
 		}
 
-		// Drain signals (and a stale fallback tick) queued behind the one
-		// we're acting on, so they coalesce instead of double-checking.
 		select {
 		case <-m.notifies:
 		default:

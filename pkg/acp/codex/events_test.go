@@ -25,7 +25,7 @@ func TestFileChangeContentAddUnifiedDiff(t *testing.T) {
 }
 
 func TestFileChangeContentAddRawContent(t *testing.T) {
-	// New files may carry raw contents instead of a unified diff.
+
 	raw := []byte(`{"changes":[{"path":"/p/Raw.kt","kind":{"type":"add"},"diff":"fun main() {}\n"}]}`)
 	content := fileChangeContent(raw)
 	if len(content) != 1 || content[0].Diff == nil {

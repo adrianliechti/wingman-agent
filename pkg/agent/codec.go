@@ -157,9 +157,6 @@ func reasoningToInput(r *Reasoning) *responses.ResponseReasoningItemParam {
 		},
 	}
 
-	// Responses stateless replay can reject preserved reasoning ids unless the
-	// exact paired following item is also present. Keep the reasoning payload but
-	// omit the id on the wire.
 	p.SetExtraFields(map[string]any{"id": param.Omit})
 
 	return p

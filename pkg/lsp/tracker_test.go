@@ -126,8 +126,6 @@ func TestDiagnosticTracker_SetBaseline_ClearsDelivered(t *testing.T) {
 		t.Fatalf("expected 0 after delivery, got %d", len(result))
 	}
 
-	// SetBaseline clears delivered, so previously-delivered diagnostics come back through
-	// (when they're not in the baseline).
 	tracker.SetBaseline(uri, nil)
 
 	result = tracker.FilterNew(uri, diags)

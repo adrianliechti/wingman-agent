@@ -7,10 +7,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-// ClassifyEffect maps a shell-tool invocation to one of three effect tiers:
-// - EffectDangerous → prompts the user before running
-// - EffectReadOnly  → runs in plan mode (no prompt)
-// - EffectMutates   → runs in normal mode without prompt, blocked in plan mode
 func ClassifyEffect(args map[string]any) tool.Effect {
 	if args == nil {
 		return tool.EffectDynamic
@@ -27,11 +23,6 @@ func ClassifyEffect(args map[string]any) tool.Effect {
 	return tool.EffectMutates
 }
 
-// IsDangerousCommand reports whether the command requires user confirmation
-// before running. Kept narrow on purpose: only commands that are hard to
-// reverse or that escalate privileges. Routine mutations (chmod, kill,
-// find -delete, ...) are not dangerous — they fall through to EffectMutates
-// and run automatically.
 func IsDangerousCommand(command string) bool {
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -54,8 +45,6 @@ func IsDangerousCommand(command string) bool {
 	return false
 }
 
-// IsReadOnlyCommand reports whether every segment in the command is on the
-// read-only allowlist and the command contains no mutation syntax (>, <, sed -i).
 func IsReadOnlyCommand(command string) bool {
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -266,8 +255,6 @@ func readBacktickSubstitution(command string, start int) (string, int, bool) {
 	return "", 0, false
 }
 
-// splitCommandSegments splits a command string on |, &&, ||, ;, and newline
-// boundaries. It respects single- and double-quoted strings.
 func splitCommandSegments(command string) []string {
 	var segments []string
 	var current strings.Builder
@@ -321,11 +308,6 @@ func splitCommandSegments(command string) []string {
 			continue
 		}
 
-		// A lone `&` backgrounds the preceding command and starts a new one;
-		// treat it as a separator so a destructive command after it isn't
-		// hidden inside the previous segment. Redirections like `>&`/`<&`/`&>`
-		// are handled by the redirection check, but here a bare `&` not part
-		// of `&&` (already handled above) is a command separator.
 		if ch == '&' {
 			var prev byte
 			if i > 0 {
@@ -357,10 +339,6 @@ func splitCommandSegments(command string) []string {
 	return segments
 }
 
-// commandRunners are commands that take another command as their operands
-// (e.g. `env rm -rf x`, `timeout 5 rm -rf x`). The classifier must look past
-// the runner to the wrapped command, otherwise a destructive command can be
-// hidden behind a benign-looking runner and skip the confirmation prompt.
 var commandRunners = map[string]bool{
 	"env":     true,
 	"xargs":   true,
@@ -376,15 +354,9 @@ var commandRunners = map[string]bool{
 	"setarch": true,
 }
 
-// unwrapCommandWords peels leading VAR=val assignments, a leading backslash on
-// the command name, and known runner prefixes (with their own flags/operands)
-// so classification inspects the real command rather than the wrapper. It
-// returns the resolved words, the lower-cased base command name, and whether a
-// runner prefix consumed the entire input without revealing a real command
-// (unresolved, which callers must treat conservatively).
 func unwrapCommandWords(words []string) (resolved []string, cmd string, unresolved bool) {
 	for {
-		// Strip leading VAR=value environment assignments.
+
 		for len(words) > 0 && isEnvAssignment(words[0]) {
 			words = words[1:]
 		}
@@ -392,8 +364,6 @@ func unwrapCommandWords(words []string) (resolved []string, cmd string, unresolv
 			return nil, "", true
 		}
 
-		// A leading backslash bypasses alias/function lookup in the shell but
-		// still runs the underlying command (e.g. `\rm`).
 		name := strings.TrimPrefix(words[0], `\`)
 		base := strings.ToLower(filepath.Base(name))
 
@@ -401,9 +371,6 @@ func unwrapCommandWords(words []string) (resolved []string, cmd string, unresolv
 			return words, base, false
 		}
 
-		// Skip the runner's own flags and operands to reach the wrapped
-		// command. For env/nice/timeout/etc. this means skipping leading
-		// `-flag`/`-flag value` tokens (and, for env, further VAR=val pairs).
 		rest := words[1:]
 		rest = skipRunnerFlags(base, rest)
 		if len(rest) == 0 {
@@ -413,24 +380,20 @@ func unwrapCommandWords(words []string) (resolved []string, cmd string, unresolv
 	}
 }
 
-// skipRunnerFlags advances past a runner's own flag arguments so the next
-// token is the wrapped command. It is deliberately conservative: an unknown
-// flag that consumes a value would mis-align, so when in doubt we stop at the
-// first non-flag token and let the caller classify it.
 func skipRunnerFlags(runner string, args []string) []string {
 	for len(args) > 0 {
 		arg := args[0]
 		if !strings.HasPrefix(arg, "-") {
 			break
 		}
-		// `--` ends option parsing; the wrapped command follows.
+
 		if arg == "--" {
 			return args[1:]
 		}
-		// Flags that take a separate value for common runners.
+
 		switch runner {
 		case "timeout":
-			// timeout [OPTION] DURATION COMMAND — `-s SIG`/`-k DURATION` take a value.
+
 			if arg == "-s" || arg == "--signal" || arg == "-k" || arg == "--kill-after" {
 				args = args[2:]
 				continue
@@ -456,13 +419,13 @@ func skipRunnerFlags(runner string, args []string) []string {
 		}
 		args = args[1:]
 	}
-	// env allows VAR=val pairs after its flags and before the command.
+
 	if runner == "env" {
 		for len(args) > 0 && isEnvAssignment(args[0]) {
 			args = args[1:]
 		}
 	}
-	// timeout's first non-flag operand is the DURATION, not the command.
+
 	if runner == "timeout" && len(args) > 0 {
 		args = args[1:]
 	}
@@ -507,8 +470,6 @@ func isSingleCommandReadOnly(command string) bool {
 
 	args := words[1:]
 
-	// Per-command argument blocklist for tools that are read-only by default
-	// but have specific flags that escape the sandbox.
 	switch cmd {
 	case "find":
 		for _, arg := range args {
@@ -518,14 +479,14 @@ func isSingleCommandReadOnly(command string) bool {
 			}
 		}
 	case "sort":
-		// `sort -o FILE` / `sort --output=FILE` writes to FILE.
+
 		for _, arg := range args {
 			if arg == "-o" || arg == "--output" || strings.HasPrefix(arg, "-o") || strings.HasPrefix(arg, "--output=") {
 				return false
 			}
 		}
 	case "jq", "yq", "xq":
-		// `-i`/`--in-place` edits files in place.
+
 		for _, arg := range args {
 			if arg == "-i" || arg == "--in-place" || arg == "--inplace" {
 				return false
@@ -573,8 +534,6 @@ func hasSubcommandPrefix(command, prefix string) bool {
 	return command[len(prefix)] == ' '
 }
 
-// hasUnsafeGitOptions blocks global git options that can redirect config
-// or repo lookup (and thus run arbitrary code via hooks/aliases).
 func hasUnsafeGitOptions(args []string) bool {
 	for _, arg := range args {
 		switch arg {
@@ -611,8 +570,7 @@ func isDangerousSingleCommand(command string) bool {
 
 	words, cmd, unresolved := unwrapCommandWords(fields)
 	if unresolved {
-		// A runner prefix (e.g. `env`, `xargs`) with no resolvable wrapped
-		// command — treat as dangerous so it can't slip past the prompt.
+
 		return true
 	}
 	args := words[1:]

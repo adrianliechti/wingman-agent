@@ -33,7 +33,6 @@ func NewSpinner(app *tview.Application, view *tview.TextView) *Spinner {
 	}
 }
 
-// Must be called from the UI goroutine (e.g. inside QueueUpdateDraw).
 func (s *Spinner) Start(phase AppPhase) {
 	s.mu.Lock()
 
@@ -57,7 +56,6 @@ func (s *Spinner) Start(phase AppPhase) {
 	go s.run()
 }
 
-// Must be called from the UI goroutine (e.g. inside QueueUpdateDraw).
 func (s *Spinner) Stop() {
 	s.mu.Lock()
 
@@ -100,7 +98,6 @@ func (s *Spinner) queueRender() {
 	})
 }
 
-// Caller must hold s.mu.
 func (s *Spinner) render() {
 	config := GetPhaseConfig(s.phase)
 	if config.Message == "" {
@@ -109,8 +106,6 @@ func (s *Spinner) render() {
 	}
 	frame := spinnerFrames[s.frame]
 
-	// Preparing is a fixed startup warmup with nothing to interrupt; every
-	// other phase shows elapsed time and how to bail out.
 	if s.phase == PhasePreparing {
 		s.view.SetText(fmt.Sprintf("[%s]%s %s[-]", config.Color, frame, config.Message))
 		return

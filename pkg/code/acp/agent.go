@@ -1,8 +1,3 @@
-// Package acp is the ACP-subprocess [code.Agent] implementation. One
-// Agent spawns and owns a single ACP server subprocess; that connection
-// hosts every wingman session for the chosen backend (codex / claude /
-// ...). The session ids the interface deals in are the ACP server's
-// own session ids — no wingman-side translation.
 package acp
 
 import (
@@ -36,19 +31,13 @@ type Agent struct {
 	conn      *acpsdk.ClientSideConnection
 	closeOnce sync.Once
 
-	// inProcess wiring (NewInProcess only). nil for the subprocess path.
 	serverDone <-chan struct{}
 	cleanup    func() error
 
 	caps acpsdk.AgentCapabilities
 
-	// ui approves permission requests the ACP server raises mid-turn. nil → approve.
 	ui code.UI
 
-	// configMu guards the model + effort catalog. These are global to the
-	// connection because the code.Agent interface exposes Models()/Effort()
-	// without a session id. Modes, which the interface does scope per session,
-	// live on sessionState instead.
 	configMu   sync.RWMutex
 	models     []code.Model
 	modelID    string
@@ -72,11 +61,11 @@ type sessionState struct {
 	toolCallsMu sync.Mutex
 	toolCalls   map[string]toolCall
 
-	// modes are per-session in ACP (session/new + session/load report them per
-	// session, set_mode and current_mode_update are session-scoped). Guarded by
-	// mu above so concurrent sessions don't clobber each other's current mode.
 	modes  []code.Mode
 	modeID string
+
+	modelID  string
+	effortID string
 }
 
 type toolCall struct {
@@ -90,7 +79,7 @@ type turn struct {
 	cancel context.CancelFunc
 
 	mu      sync.Mutex
-	emitted []agent.Message // role-sliced; committed to session.messages on close
+	emitted []agent.Message
 }
 
 type event struct {
@@ -105,7 +94,6 @@ const (
 	initTimeout    = 30 * time.Second
 )
 
-// New spawns the configured subprocess and runs the ACP handshake.
 func New(ws *code.Workspace, def code.AgentDef) (*Agent, error) {
 	if def.Command == "" {
 		return nil, fmt.Errorf("agent %q: empty command", def.Name)
@@ -143,8 +131,7 @@ func New(ws *code.Workspace, def code.AgentDef) (*Agent, error) {
 		sessions:  map[string]*sessionState{},
 	}
 	a.conn = acpsdk.NewClientSideConnection(a, stdin, stdout)
-	// SDK logs every connection teardown at INFO. Each agent swap +
-	// shutdown produces one; keep warnings and errors, drop the trace.
+
 	a.conn.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	})))
@@ -168,14 +155,6 @@ func New(ws *code.Workspace, def code.AgentDef) (*Agent, error) {
 	return a, nil
 }
 
-// NewInProcess wires an in-memory ACP-server agent (e.g. *claude.Agent,
-// *codex.Agent) into a code.Agent backend using io.Pipe pairs — no
-// subprocess for the protocol itself. setupServer is invoked with the
-// server-side AgentSideConnection so libraries that need it (claude,
-// codex) can call SetAgentConnection before the initialize handshake.
-// cleanup runs during Close after the connection is torn down; pass nil
-// for libraries with no resources to release (codex.Spawn returns a
-// closer via *codex.Agent.Close — pass that here).
 func NewInProcess(
 	ws *code.Workspace,
 	name string,
@@ -189,7 +168,7 @@ func NewInProcess(
 	a := &Agent{
 		workspace: ws,
 		def:       code.AgentDef{Name: name},
-		stdin:     clientW, // closing this signals EOF to the server side
+		stdin:     clientW,
 		sessions:  map[string]*sessionState{},
 		cleanup:   cleanup,
 	}
@@ -227,78 +206,69 @@ func NewInProcess(
 func (a *Agent) Name() string               { return a.def.Name }
 func (a *Agent) Workspace() *code.Workspace { return a.workspace }
 
-// ─── Models / Effort (cached from ACP responses) ─────────────────
-
-func (a *Agent) Models() ([]code.Model, string) {
+func (a *Agent) Models(sessionID string) ([]code.Model, string) {
+	override := ""
+	if sess := a.session(sessionID); sess != nil {
+		sess.mu.Lock()
+		override = sess.modelID
+		sess.mu.Unlock()
+	}
 	a.configMu.RLock()
 	defer a.configMu.RUnlock()
 	out := make([]code.Model, len(a.models))
 	copy(out, a.models)
+	if override != "" {
+		return out, override
+	}
 	return out, a.modelID
 }
 
-func (a *Agent) SetModel(ctx context.Context, id string) error {
-	sess := a.anySession()
-	if sess == nil {
-		a.configMu.Lock()
-		a.modelID = id
-		a.configMu.Unlock()
-		return nil
-	}
-	resp, err := a.conn.SetSessionConfigOption(ctx, acpsdk.SetSessionConfigOptionRequest{
-		ValueId: &acpsdk.SetSessionConfigOptionValueId{
-			SessionId: sess.id,
-			ConfigId:  modelConfigID,
-			Value:     acpsdk.SessionConfigValueId(id),
-		},
-	})
-	if err != nil {
-		return err
-	}
-	a.refreshConfig(resp.ConfigOptions)
-	return nil
+func (a *Agent) SetModel(ctx context.Context, sessionID, id string) error {
+	return a.setConfig(ctx, sessionID, modelConfigID, id, &a.modelID)
 }
 
-func (a *Agent) Effort() (string, []string) {
+func (a *Agent) Effort(sessionID string) (string, []string) {
+	override := ""
+	if sess := a.session(sessionID); sess != nil {
+		sess.mu.Lock()
+		override = sess.effortID
+		sess.mu.Unlock()
+	}
 	a.configMu.RLock()
 	defer a.configMu.RUnlock()
 	opts := make([]string, len(a.effortOpts))
 	copy(opts, a.effortOpts)
+	if override != "" {
+		return override, opts
+	}
 	return a.effortID, opts
 }
 
-func (a *Agent) SetEffort(ctx context.Context, value string) error {
-	sess := a.anySession()
+func (a *Agent) SetEffort(ctx context.Context, sessionID, value string) error {
+	return a.setConfig(ctx, sessionID, effortConfigID, value, &a.effortID)
+}
+
+func (a *Agent) setConfig(ctx context.Context, sessionID, configID, value string, defaultField *string) error {
+	sess := a.session(sessionID)
 	if sess == nil {
 		a.configMu.Lock()
-		a.effortID = value
+		*defaultField = value
 		a.configMu.Unlock()
 		return nil
 	}
 	resp, err := a.conn.SetSessionConfigOption(ctx, acpsdk.SetSessionConfigOptionRequest{
 		ValueId: &acpsdk.SetSessionConfigOptionValueId{
 			SessionId: sess.id,
-			ConfigId:  effortConfigID,
+			ConfigId:  acpsdk.SessionConfigId(configID),
 			Value:     acpsdk.SessionConfigValueId(value),
 		},
 	})
 	if err != nil {
 		return err
 	}
-	a.refreshConfig(resp.ConfigOptions)
+	a.refreshConfig(sess, resp.ConfigOptions)
 	return nil
 }
-
-func (a *Agent) anySession() *sessionState {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for _, s := range a.sessions {
-		return s
-	}
-	return nil
-}
-
-// ─── Modes (cached from ACP SessionModeState) ────────────────────
 
 func (a *Agent) Modes(sessionID string) ([]code.Mode, string) {
 	sess := a.session(sessionID)
@@ -335,8 +305,6 @@ func (a *Agent) SetMode(ctx context.Context, sessionID, modeID string) error {
 	return nil
 }
 
-// applyModes stores the per-session mode catalog from a session/new or
-// session/load response. A nil state leaves the existing modes untouched.
 func (s *sessionState) applyModes(modes *acpsdk.SessionModeState) {
 	if modes == nil {
 		return
@@ -353,8 +321,6 @@ func (s *sessionState) applyModes(modes *acpsdk.SessionModeState) {
 	}
 	s.modeID = string(modes.CurrentModeId)
 }
-
-// ─── Sessions ─────────────────────────────────────────────────────
 
 func (a *Agent) ListSessions(ctx context.Context) ([]code.SessionInfo, error) {
 	if a.caps.SessionCapabilities.List == nil {
@@ -389,7 +355,6 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	a.refreshConfig(resp.ConfigOptions)
 
 	id := string(resp.SessionId)
 	sess := &sessionState{
@@ -397,6 +362,7 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 		id:        resp.SessionId,
 		toolCalls: map[string]toolCall{},
 	}
+	a.refreshConfig(sess, resp.ConfigOptions)
 	sess.applyModes(resp.Modes)
 	sess.loaded = true
 	a.mu.Lock()
@@ -490,7 +456,7 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 				McpServers: []acpsdk.McpServer{},
 			})
 			if err == nil {
-				a.refreshConfig(resp.ConfigOptions)
+				a.refreshConfig(sess, resp.ConfigOptions)
 				sess.applyModes(resp.Modes)
 			}
 			loadErrCh <- err
@@ -570,8 +536,6 @@ func (a *Agent) session(id string) *sessionState {
 	return a.sessions[id]
 }
 
-// ─── Send / Cancel ────────────────────────────────────────────────
-
 func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter.Seq2[agent.Message, error] {
 	a.mu.Lock()
 	sess, ok := a.sessions[id]
@@ -604,9 +568,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter
 			SessionId: sess.id,
 			Prompt:    contentToBlocks(input),
 		})
-		// The PromptResponse carries the turn's authoritative token breakdown;
-		// the per-chunk usage_update notifications can't express it (they only
-		// have a total + context size), so commit it here for Usage(id).
+
 		if err == nil && resp.Usage != nil {
 			sess.mu.Lock()
 			sess.usage = agent.Usage{
@@ -677,8 +639,6 @@ func errStream(err error) iter.Seq2[agent.Message, error] {
 	}
 }
 
-// ─── Lifecycle ────────────────────────────────────────────────────
-
 func (a *Agent) Close() error {
 	a.shutdown()
 	return nil
@@ -698,7 +658,6 @@ func (a *Agent) shutdown() {
 		}
 		a.mu.Unlock()
 
-		// Protocol: clients MUST NOT call session/close without the cap.
 		if a.caps.SessionCapabilities.Close != nil && len(sessions) > 0 {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			for _, sess := range sessions {
@@ -711,8 +670,6 @@ func (a *Agent) shutdown() {
 			_ = a.stdin.Close()
 		}
 
-		// In-process path: wait briefly for the server side to drain, then
-		// run the caller's cleanup (e.g. codex.Spawn shutdown).
 		if a.serverDone != nil {
 			select {
 			case <-a.serverDone:
@@ -740,11 +697,9 @@ func (a *Agent) shutdown() {
 	})
 }
 
-// ─── ACP Client interface ─────────────────────────────────────────
-
 func (a *Agent) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) error {
 	if n.Update.ConfigOptionUpdate != nil {
-		a.refreshConfig(n.Update.ConfigOptionUpdate.ConfigOptions)
+		a.refreshConfig(a.session(string(n.SessionId)), n.Update.ConfigOptionUpdate.ConfigOptions)
 		return nil
 	}
 
@@ -819,8 +774,7 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 	case u.ToolCall != nil:
 		tc := u.ToolCall
 		args := rawValueToString(tc.RawInput)
-		// Prefer the descriptive title (e.g. "Bash", "mcp.wingman.web_search",
-		// "Read file '...'") over the generic kind ("execute"/"read"/"edit").
+
 		name := tc.Title
 		if name == "" {
 			name = string(tc.Kind)
@@ -868,7 +822,6 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 	return agent.Message{}, false
 }
 
-// SetUI installs the UI used to approve permission requests. Set before turns.
 func (a *Agent) SetUI(ui code.UI) { a.ui = ui }
 
 func (a *Agent) RequestPermission(ctx context.Context, p acpsdk.RequestPermissionRequest) (acpsdk.RequestPermissionResponse, error) {
@@ -886,7 +839,6 @@ func (a *Agent) RequestPermission(ctx context.Context, p acpsdk.RequestPermissio
 		}
 	}
 
-	// No UI wired (e.g. headless): approve, preserving prior behavior.
 	if a.ui == nil {
 		return selected(p.Options[0].OptionId), nil
 	}
@@ -907,8 +859,6 @@ func (a *Agent) RequestPermission(ctx context.Context, p acpsdk.RequestPermissio
 	return cancelled, nil
 }
 
-// pickPermissionOption picks by intent: allow → allow-once/always, deny →
-// reject-once/always. Returns nil when no option matches.
 func pickPermissionOption(opts []acpsdk.PermissionOption, allow bool) *acpsdk.PermissionOption {
 	want := []acpsdk.PermissionOptionKind{acpsdk.PermissionOptionKindRejectOnce, acpsdk.PermissionOptionKindRejectAlways}
 	if allow {
@@ -924,7 +874,6 @@ func pickPermissionOption(opts []acpsdk.PermissionOption, allow bool) *acpsdk.Pe
 	return nil
 }
 
-// permissionMessage renders a confirm prompt from the tool title, command and reason.
 func permissionMessage(p acpsdk.RequestPermissionRequest) string {
 	var parts []string
 	if p.ToolCall.Title != nil && *p.ToolCall.Title != "" {
@@ -1013,16 +962,12 @@ func (a *Agent) WaitForTerminalExit(context.Context, acpsdk.WaitForTerminalExitR
 	return acpsdk.WaitForTerminalExitResponse{}, nil
 }
 
-// ─── Config conversion ────────────────────────────────────────────
-
-// refreshConfig updates the connection-global model + effort catalog from the
-// session's config options. Modes are per-session — see [sessionState.applyModes].
-func (a *Agent) refreshConfig(options []acpsdk.SessionConfigOption) {
+func (a *Agent) refreshConfig(sess *sessionState, options []acpsdk.SessionConfigOption) {
 	if options == nil {
 		return
 	}
+	modelID, effortID := "", ""
 	a.configMu.Lock()
-	defer a.configMu.Unlock()
 	a.effortID = ""
 	a.effortOpts = nil
 	for _, opt := range options {
@@ -1038,6 +983,7 @@ func (a *Agent) refreshConfig(options []acpsdk.SessionConfigOption) {
 				}
 			}
 			a.modelID = string(opt.Select.CurrentValue)
+			modelID = a.modelID
 		case effortConfigID:
 			a.effortID = string(opt.Select.CurrentValue)
 			if u := opt.Select.Options.Ungrouped; u != nil {
@@ -1045,11 +991,22 @@ func (a *Agent) refreshConfig(options []acpsdk.SessionConfigOption) {
 					a.effortOpts = append(a.effortOpts, string(v.Value))
 				}
 			}
+			effortID = a.effortID
 		}
 	}
-}
+	a.configMu.Unlock()
 
-// ─── Content helpers ──────────────────────────────────────────────
+	if sess != nil {
+		sess.mu.Lock()
+		if modelID != "" {
+			sess.modelID = modelID
+		}
+		if effortID != "" {
+			sess.effortID = effortID
+		}
+		sess.mu.Unlock()
+	}
+}
 
 func contentToBlocks(input []agent.Content) []acpsdk.ContentBlock {
 	out := make([]acpsdk.ContentBlock, 0, len(input))
@@ -1082,9 +1039,7 @@ func toolCallContentText(items []acpsdk.ToolCallContent) string {
 				parts = append(parts, t)
 			}
 		case item.Diff != nil:
-			// File edits arrive as diff blocks (old/new text). Render them as
-			// a unified-style diff so the change is visible in the tool output
-			// instead of showing nothing.
+
 			if t := diffBlockText(item.Diff); t != "" {
 				parts = append(parts, t)
 			}
@@ -1093,8 +1048,6 @@ func toolCallContentText(items []acpsdk.ToolCallContent) string {
 	return strings.Join(parts, "\n")
 }
 
-// diffBlockText renders an ACP diff content block as a line-prefixed diff
-// (" " context, "-" removed, "+" added), preceded by the file path.
 func diffBlockText(d *acpsdk.ToolCallContentDiff) string {
 	old := ""
 	if d.OldText != nil {

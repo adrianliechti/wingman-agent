@@ -2,8 +2,6 @@ package proxy
 
 import "encoding/json"
 
-// Anthropic: /v1/messages
-
 func metadataFromAnthropic(reqBody, respBody []byte) metadata {
 	var m metadata
 
@@ -37,8 +35,6 @@ func metadataFromAnthropicSSE(reqBody, sseBody []byte) metadata {
 
 	m.Model = extractJSONField(reqBody, "model")
 
-	// message_start contains model + input tokens
-	// message_delta contains output tokens
 	for _, data := range sseData(sseBody) {
 		var msg struct {
 			Type    string `json:"type"`

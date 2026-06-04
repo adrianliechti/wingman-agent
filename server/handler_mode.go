@@ -8,9 +8,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
-// Modes are backend-advertised via the code.Agent interface; this handler is
-// backend-agnostic and the UI renders whatever the active backend returns.
-
 type modeOption struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -28,8 +25,7 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, toModeState(nil, ""))
 		return
 	}
-	id := r.URL.Query().Get("session")
-	available, current := a.Modes(id)
+	available, current := a.Modes(r.PathValue("id"))
 	writeJSON(w, toModeState(available, current))
 }
 
@@ -41,11 +37,7 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	id := r.URL.Query().Get("session")
-	if id == "" {
-		http.Error(w, "session id required", http.StatusBadRequest)
-		return
-	}
+	id := r.PathValue("id")
 
 	agent := s.activeAgent()
 	if agent == nil {

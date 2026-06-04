@@ -58,7 +58,7 @@ func TestAskExecuteRejectsMissingOrEmptyQuestion(t *testing.T) {
 	cases := []map[string]any{
 		{},
 		{"question": ""},
-		{"question": 42}, // wrong type
+		{"question": 42},
 	}
 	for _, args := range cases {
 		_, err := askTool.Execute(context.Background(), args)

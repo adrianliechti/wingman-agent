@@ -10,8 +10,6 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 )
 
-// Each (dir, server-command) pair gets its own root — multiple project types
-// at the same dir produce separate entries.
 type projectRoot struct {
 	Dir    string
 	Server Server
@@ -33,8 +31,6 @@ var ignoredDirs = map[string]bool{
 	".nuxt":        true,
 }
 
-// projectBinDirs are per-ecosystem subdirectories probed in order at each level of the walk;
-// first match wins.
 var projectBinDirs = []string{
 	filepath.Join("node_modules", ".bin"),
 	filepath.Join(".venv", "bin"),
@@ -56,8 +52,6 @@ func hasFileMatching(fsys fs.FS, relDir string, patterns []string) bool {
 	return false
 }
 
-// resolveCommand returns the absolute path of command if it lives under one of projectBinDirs
-// between dir and workingDir (inclusive); empty string means caller falls back to exec.LookPath.
 func resolveCommand(dir, workingDir, command string) string {
 	cur := filepath.Clean(dir)
 	root := filepath.Clean(workingDir)
@@ -151,7 +145,6 @@ func excluded(dir string, excludes []string) bool {
 	return false
 }
 
-// filteredFS wraps os.DirFS but skips ignoredDirs and dot-directories.
 type filteredFS struct {
 	root string
 }

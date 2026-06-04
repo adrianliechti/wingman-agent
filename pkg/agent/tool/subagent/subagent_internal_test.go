@@ -135,8 +135,7 @@ func TestExploreWrapsDynamicToolsAsReadOnly(t *testing.T) {
 	dynamic := tool.Tool{
 		Name: "shell",
 		Effect: func(args map[string]any) tool.Effect {
-			// nil args → classify as Dynamic so allowReadOnlyTool accepts the
-			// tool for wrapping (matches the real shell tool's behavior).
+
 			if args == nil {
 				return tool.EffectDynamic
 			}
@@ -157,7 +156,6 @@ func TestExploreWrapsDynamicToolsAsReadOnly(t *testing.T) {
 	}
 	wrapped := filtered[0]
 
-	// Read-only path: original executor runs.
 	out, err := wrapped.Execute(context.Background(), map[string]any{"safe": true})
 	if err != nil || out != "ran" {
 		t.Fatalf("read-only call: got (%q, %v), want (ran, nil)", out, err)
@@ -166,7 +164,6 @@ func TestExploreWrapsDynamicToolsAsReadOnly(t *testing.T) {
 		t.Error("original executor must have run on read-only path")
 	}
 
-	// Mutating path: blocked.
 	called = false
 	_, err = wrapped.Execute(context.Background(), map[string]any{"safe": false})
 	if err == nil || !strings.Contains(err.Error(), "read-only") {

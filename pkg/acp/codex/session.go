@@ -11,15 +11,12 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// session holds per-conversation state. Each ACP session maps 1:1 to a codex
-// thread (sessionId == threadId); a single long-lived `codex app-server`
-// process serves every session.
 type session struct {
 	id acp.SessionId
 
 	mu            sync.Mutex
 	modelID       string
-	effort        string // "" or "default" means no effort override
+	effort        string
 	mode          string
 	currentTurnID string
 	cancelTurn    context.CancelFunc
@@ -29,9 +26,6 @@ func newSession(id acp.SessionId, model, effort string) *session {
 	return &session{id: id, modelID: model, effort: effort, mode: defaultModeID}
 }
 
-// interrupt cancels the active turn. We rely on codex's turn/interrupt to
-// trigger the natural turn/completed event that unblocks runTurn; the local
-// cancel is a fallback if codex never responds (e.g., turn/start still pending).
 func (s *session) interrupt(ctx context.Context, cc *codexClient) {
 	s.mu.Lock()
 	turnID := s.currentTurnID
@@ -59,8 +53,6 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 	mode := modeFor(s.mode)
 	s.mu.Unlock()
 
-	// Register handlers before turn/start so we cannot miss an early
-	// turn/completed notification.
 	disp := newEventDispatcher(turnCtx, conn, s.id)
 	app := newApprover(turnCtx, conn, s.id)
 	cc.setThreadHandlers(threadID, &threadHandlers{
@@ -102,9 +94,6 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 		s.mu.Unlock()
 	}()
 
-	// A turn that completes synchronously inside turn/start (or whose
-	// completion event already raced into disp.done) is handled by the same
-	// select below.
 	select {
 	case <-turnCtx.Done():
 		return acp.StopReasonCancelled, disp.getUsage(), nil
@@ -119,11 +108,6 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 	}
 }
 
-// streamThreadHistory replays a resumed thread as a sequence of session
-// updates so the client can rehydrate UI state. Only the item types that carry
-// useful display content are emitted; ephemeral runtime details (mcp startup,
-// review-mode transitions, image generation, etc.) are skipped because they
-// don't round-trip cleanly through ACP's update vocabulary.
 func streamThreadHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, turns []rawTurn, toolOutputs map[string]string) {
 	send := func(u acp.SessionUpdate) {
 		if ctx.Err() != nil {
@@ -138,10 +122,6 @@ func streamThreadHistory(ctx context.Context, conn *acp.AgentSideConnection, sid
 	}
 }
 
-// replayToolResult emits a completion update after a replayed StartToolCall so
-// the client surfaces the tool's output. A start call on its own only yields
-// the tool invocation; the client produces a tool result from a terminal-status
-// update.
 func replayToolResult(send func(acp.SessionUpdate), id, status string, content []acp.ToolCallContent) {
 	st := toolStatusFor(status)
 	if st != acp.ToolCallStatusCompleted && st != acp.ToolCallStatusFailed {
@@ -154,9 +134,6 @@ func replayToolResult(send func(acp.SessionUpdate), id, status string, content [
 	send(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
 }
 
-// replayToolText surfaces a tool's recovered output (from the rollout log) as a
-// completed tool result. thread/resume omits tool output, so the rollout is the
-// only source on replay; tool ids match the rollout's call_id.
 func replayToolText(send func(acp.SessionUpdate), id, status string, outputs map[string]string) {
 	out := outputs[id]
 	if out == "" {
@@ -312,8 +289,6 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 	}
 }
 
-// userInputToBlock reverses promptToInput for replay of historical user
-// messages. Unsupported variants (audio, unknown skill payloads) are dropped.
 func userInputToBlock(raw json.RawMessage) (acp.ContentBlock, bool) {
 	var probe struct {
 		Type string `json:"type"`
@@ -397,14 +372,10 @@ func promptToInput(blocks []acp.ContentBlock) []any {
 	return out
 }
 
-// textInput builds a codex `userInput` variant. text_elements must be present
-// (and non-null) per the codex schema even when empty.
 func textInput(text string) map[string]any {
 	return map[string]any{"type": "text", "text": text, "text_elements": []any{}}
 }
 
-// resourceContents extracts a (text, uri) pair from an embedded resource. The
-// SDK encodes the resource as a tagged union, so we marshal + re-parse.
 func resourceContents(res any) (text, uri string) {
 	b, err := json.Marshal(res)
 	if err != nil {

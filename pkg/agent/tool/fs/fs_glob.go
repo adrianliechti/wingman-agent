@@ -84,8 +84,6 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			}
 			var results []fileResult
 
-			// GlobWalk traverses fsys rooted at fs.FS root, so the pattern
-			// must include the SearchDirFS prefix when not at the root.
 			fullPattern := pattern
 			if target.SearchDirFS != "." && target.SearchDirFS != "" {
 				fullPattern = target.SearchDirFS + "/" + pattern
@@ -111,7 +109,6 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 				return "No files found", nil
 			}
 
-			// Oldest mtime first; lexical path as a stable tiebreaker.
 			slices.SortFunc(results, func(a, b fileResult) int {
 				return cmp.Or(a.modTime.Compare(b.modTime), cmp.Compare(a.path, b.path))
 			})
@@ -143,8 +140,6 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 func resolveGlobSearch(searchDir, pattern, workingDir string, workspaceRoot *os.Root, allowedReadRoots []string) (*searchTarget, string, error) {
 	pattern = filepath.ToSlash(strings.TrimSpace(pattern))
 
-	// An absolute pattern overrides searchDir: split it into (dir, glob) and
-	// route the dir through the same allow-list as a `path` argument.
 	if filepath.IsAbs(pattern) {
 		dir, rest := doublestar.SplitPattern(pattern)
 		target, err := resolveSearchTarget(filepath.FromSlash(dir), workingDir, workspaceRoot, allowedReadRoots, "search")
@@ -161,9 +156,6 @@ func resolveGlobSearch(searchDir, pattern, workingDir string, workspaceRoot *os.
 	return target, normalizeGlobPattern(pattern), nil
 }
 
-// vcsFilteredFS is a fs.FS wrapper that hides version-control directories
-// (.git, .svn, …) from doublestar.GlobWalk. Mirrors claude's
-// `--glob !.git` exclusions without disabling general dotfile matching.
 type vcsFilteredFS struct{ fs.FS }
 
 func (f vcsFilteredFS) ReadDir(name string) ([]fs.DirEntry, error) {

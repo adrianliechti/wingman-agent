@@ -8,10 +8,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
-// pendingPrompt is the server-side bookkeeping for an outstanding
-// Ask/Confirm. The full details are kept (not just the reply channel)
-// so a client that just reloaded the page can be brought up to speed
-// via [Server.sendSessionState].
 type pendingPrompt struct {
 	sid     string
 	kind    string
@@ -24,9 +20,6 @@ type promptReply struct {
 	approved bool
 }
 
-// Ask implements [code.UI]: broadcast a prompt frame addressed to the
-// triggering session and block until the WebUI replies (or the ctx
-// cancels).
 func (s *Server) Ask(ctx context.Context, message string) (string, error) {
 	reply, err := s.elicit(ctx, PromptKindAsk, message)
 	if err != nil {
@@ -35,9 +28,6 @@ func (s *Server) Ask(ctx context.Context, message string) (string, error) {
 	return reply.text, nil
 }
 
-// Confirm implements [code.UI]. Falls back to "deny" on ctx cancel so
-// pending destructive operations don't accidentally proceed when the
-// turn is being torn down.
 func (s *Server) Confirm(ctx context.Context, message string) (bool, error) {
 	reply, err := s.elicit(ctx, PromptKindConfirm, message)
 	if err != nil {
@@ -60,9 +50,6 @@ func (s *Server) elicit(ctx context.Context, kind, message string) (promptReply,
 	s.pendingPrompts[id] = p
 	s.promptsMu.Unlock()
 
-	// Always tell clients the prompt is closed when this returns —
-	// covers both ctx cancel and the multi-tab case where a different
-	// tab answered (the tab that answered already cleared optimistically).
 	defer func() {
 		s.promptsMu.Lock()
 		delete(s.pendingPrompts, id)
@@ -85,9 +72,6 @@ func (s *Server) elicit(ctx context.Context, kind, message string) (promptReply,
 	}
 }
 
-// resolvePrompt is called from the WS read loop when a prompt_response
-// arrives. No-op for unknown ids (stale answer for a prompt that
-// already timed out or was answered by another tab).
 func (s *Server) resolvePrompt(msg ClientMessage) {
 	s.promptsMu.Lock()
 	p, ok := s.pendingPrompts[msg.PromptID]
@@ -101,10 +85,6 @@ func (s *Server) resolvePrompt(msg ClientMessage) {
 	}
 }
 
-// pendingPromptFramesFor returns a snapshot of prompts still awaiting a
-// reply for sid, as ready-to-send frames. Used by sendSessionState to
-// replay them so a client reloading mid-elicit isn't stuck staring at a
-// frozen turn.
 func (s *Server) pendingPromptFramesFor(sid string) []Frame {
 	s.promptsMu.Lock()
 	defer s.promptsMu.Unlock()

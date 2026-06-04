@@ -5,8 +5,6 @@ import (
 	"strings"
 )
 
-// Gemini: /v1beta/models/{model}:generateContent, /v1beta/models/{model}:streamGenerateContent
-
 func metadataFromGemini(respBody []byte, path string) metadata {
 	var m metadata
 
@@ -41,7 +39,6 @@ func metadataFromGeminiSSE(sseBody []byte, path string) metadata {
 
 	m.Model = extractGeminiModel(path)
 
-	// last SSE chunk has cumulative usageMetadata
 	for _, data := range sseData(sseBody) {
 		var obj struct {
 			ModelVersion  string `json:"modelVersion"`
@@ -71,8 +68,6 @@ func metadataFromGeminiSSE(sseBody []byte, path string) metadata {
 	return m
 }
 
-// extractGeminiModel extracts the model name from a Gemini API path.
-// e.g. /v1beta/models/gemini-pro:generateContent -> gemini-pro
 func extractGeminiModel(path string) string {
 	for _, prefix := range []string{"/v1/models/", "/v1beta/models/"} {
 		rest, ok := strings.CutPrefix(path, prefix)

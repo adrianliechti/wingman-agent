@@ -13,17 +13,6 @@ const (
 	maxContentBytes  = 25 * 1024
 )
 
-// Store manages per-agent and global AGENTS.md instructions for claw.
-//
-// Directory layout under ~/.wingman/claw/agents/:
-//
-//	{dir}/
-//	  global/
-//	    AGENTS.md              -- shared instructions across all agents
-//	  {agent}/
-//	    AGENTS.md              -- agent-specific instructions
-//	    workspace/             -- agent's working directory (files, data)
-//	    tasks/                 -- agent's scheduled tasks
 type Store struct {
 	dir string
 }
@@ -77,9 +66,7 @@ I treat the user's time as the scarcest resource, and their trust as the most va
 `
 
 func (s *Store) RemoveAgent(name string) error {
-	// Backstop against path traversal: `name` is joined into a path below and
-	// os.RemoveAll is destructive, so refuse anything that isn't a single safe
-	// path component even if an upstream caller skipped validation.
+
 	if !filepath.IsLocal(name) || name == "global" || strings.ContainsAny(name, `/\`) {
 		return fmt.Errorf("invalid agent name %q", name)
 	}
@@ -114,7 +101,6 @@ func (s *Store) AgentContent(name string) string {
 	return readFileTruncated(filepath.Join(s.WorkspaceDir(name), instructionsFile))
 }
 
-// Content concatenates global and agent-specific instructions.
 func (s *Store) Content(name string) string {
 	global := s.GlobalContent()
 	local := s.AgentContent(name)
@@ -134,7 +120,6 @@ func (s *Store) WriteGlobal(content string) error {
 	return os.WriteFile(filepath.Join(s.GlobalDir(), instructionsFile), []byte(content), 0644)
 }
 
-// SoulContent reads SOUL.md from outside the workspace, where the agent cannot modify it.
 func (s *Store) SoulContent(name string) string {
 	return readFileTruncated(filepath.Join(s.AgentDir(name), soulFile))
 }

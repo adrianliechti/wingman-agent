@@ -88,9 +88,7 @@ func TestReadTool(t *testing.T) {
 	})
 
 	t.Run("read honors limit larger than DefaultMaxLines", func(t *testing.T) {
-		// Short-line file (~3K lines) where the 30KB byte cap doesn't kick in
-		// for the first few thousand. The explicit limit must not be silently
-		// clipped to DefaultMaxLines.
+
 		var b strings.Builder
 		for i := 1; i <= 3000; i++ {
 			fmt.Fprintf(&b, "L%d\n", i)
@@ -261,7 +259,6 @@ func TestReadAllowedReadRoots(t *testing.T) {
 	root, _, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	// Build an "outside" directory and authorize it via allowedReadRoots.
 	outside, err := os.MkdirTemp("", "fs_outside_*")
 	if err != nil {
 		t.Fatalf("mkdir outside: %v", err)

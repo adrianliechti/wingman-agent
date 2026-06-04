@@ -30,7 +30,7 @@ func TestToolCallContentTextRendersDiff(t *testing.T) {
 }
 
 func TestToolCallContentTextAddedFile(t *testing.T) {
-	// New file: no old text, every line added.
+
 	items := []acpsdk.ToolCallContent{
 		{Diff: &acpsdk.ToolCallContentDiff{
 			Type:    "diff",
@@ -56,7 +56,6 @@ func TestToolCallContentTextPlainText(t *testing.T) {
 	}
 }
 
-// modeState builds a SessionModeState whose current mode is the first listed.
 func modeState(modes ...string) *acpsdk.SessionModeState {
 	avail := make([]acpsdk.SessionMode, 0, len(modes))
 	for _, m := range modes {
@@ -68,8 +67,6 @@ func modeState(modes ...string) *acpsdk.SessionModeState {
 	}
 }
 
-// Modes are per-session in ACP: two sessions on the same connection must report
-// their own current mode independently, and an unknown id reports none.
 func TestModesPerSession(t *testing.T) {
 	a := &Agent{sessions: map[string]*sessionState{}}
 	add := func(id string, modes ...string) {

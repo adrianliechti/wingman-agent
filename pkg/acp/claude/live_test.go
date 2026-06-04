@@ -14,8 +14,6 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// testClient is a minimal ACP client for the live integration test. It
-// auto-allows permission requests and collects streamed agent text.
 type testClient struct {
 	mu        sync.Mutex
 	text      strings.Builder
@@ -65,8 +63,6 @@ func (c *testClient) WaitForTerminalExit(context.Context, acp.WaitForTerminalExi
 	return acp.WaitForTerminalExitResponse{}, errors.ErrUnsupported
 }
 
-// TestLiveSession drives a real `claude` process end-to-end through a paired
-// ACP connection. Gated on CLAUDE_ACP_LIVE so normal `go test` skips it.
 func TestLiveSession(t *testing.T) {
 	if os.Getenv("CLAUDE_ACP_LIVE") == "" {
 		t.Skip("set CLAUDE_ACP_LIVE=1 to run the live claude integration test")
@@ -97,8 +93,6 @@ func TestLiveSession(t *testing.T) {
 		t.Fatalf("new session: %v", err)
 	}
 
-	// Turn 1: a Write tool → must round-trip through the control protocol and
-	// our auto-allow client.
 	r1, err := cc.Prompt(ctx, acp.PromptRequest{
 		SessionId: ns.SessionId,
 		Prompt:    []acp.ContentBlock{acp.TextBlock("Create a file named live.txt containing the word PINEAPPLE using the Write tool, then stop.")},
@@ -119,7 +113,6 @@ func TestLiveSession(t *testing.T) {
 		t.Fatalf("live.txt not created (permission round-trip failed): %v", err)
 	}
 
-	// Turn 2: same process should retain in-memory context.
 	client.mu.Lock()
 	client.text.Reset()
 	client.mu.Unlock()

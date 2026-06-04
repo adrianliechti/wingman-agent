@@ -14,9 +14,7 @@ import (
 )
 
 func runACP(ctx context.Context) {
-	// stdout is reserved for the ACP JSON-RPC stream — redirect any default
-	// slog writers (used by transitive deps like the openai and mcp SDKs)
-	// to stderr so a stray log line can't corrupt the protocol.
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	if len(os.Args) >= 3 {

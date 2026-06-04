@@ -80,7 +80,6 @@ func extractJSONField(data []byte, field string) string {
 	return ""
 }
 
-// sseData returns SSE data payloads in order, skipping [DONE].
 func sseData(body []byte) []string {
 	lines := strings.Split(string(body), "\n")
 

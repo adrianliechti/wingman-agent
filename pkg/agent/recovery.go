@@ -98,8 +98,6 @@ func splitMessagesForRecoverySummary(messages []Message) ([]Message, []Message) 
 		return nil, nil
 	}
 
-	// Preserve the active turn verbatim. This mirrors the handoff/compaction
-	// pattern of summarizing prior history while forwarding the newest items.
 	split := -1
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == RoleUser && !messages[i].Hidden {
@@ -202,9 +200,7 @@ func recoverySummaryTranscript(messages []Message) string {
 		if mb.Len() == 0 {
 			continue
 		}
-		// Always include at least the newest non-empty message so a single
-		// oversized item (e.g. a giant tool result) doesn't collapse the
-		// transcript to empty and trigger the recovery fallback.
+
 		if len(chunks) > 0 && total+mb.Len() > maxSummarizeBytes {
 			break
 		}

@@ -9,10 +9,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-// WriteTool returns the file-write tool. allowedWriteRoots are absolute
-// paths outside the workspace that this tool is additionally permitted to
-// write to (e.g. the project's memory directory). Anything outside both
-// the workspace and the allow-list is rejected.
 func WriteTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 	return tool.Tool{
 		Name:   "write",

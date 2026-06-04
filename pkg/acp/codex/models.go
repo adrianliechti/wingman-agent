@@ -2,9 +2,6 @@ package codex
 
 import "github.com/coder/acp-go-sdk"
 
-// modelEntry describes one codex model + its supported reasoning effort levels.
-// The list is fetched at runtime from codex's `model/list` RPC (see
-// Agent.ensureModels); there is no static fallback table.
 type modelEntry struct {
 	ID           string
 	Name         string
@@ -12,8 +9,6 @@ type modelEntry struct {
 	EffortLevels []string
 }
 
-// modelsFromCodex converts a `model/list` response into the picker entries we
-// advertise over ACP, dropping models codex marks hidden.
 func modelsFromCodex(list []codexModel) []modelEntry {
 	out := make([]modelEntry, 0, len(list))
 	for _, m := range list {
@@ -141,12 +136,8 @@ func titleCase(s string) string {
 	return string(out)
 }
 
-// --- session modes ---
-
 const defaultModeID = "agent"
 
-// sessionMode maps an ACP mode id to the codex approval + sandbox policy sent
-// on turn/start. Policies are untyped JSON; the SDK exposes no typed enum.
 type sessionMode struct {
 	id             string
 	name           string

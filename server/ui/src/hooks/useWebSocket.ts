@@ -31,8 +31,6 @@ export function messagesToEntries(
 ): ChatEntry[] {
 	const entries: ChatEntry[] = [];
 	messages.forEach((m, mi) => {
-		// Collect images in this message so we can attach them to the user
-		// entry alongside its text (or stand them up as an image-only entry).
 		const isUser = m.role === "user";
 		const msgImages: string[] = isUser
 			? m.content.flatMap((c) => (c.image?.data ? [c.image.data] : []))
@@ -61,9 +59,6 @@ export function messagesToEntries(
 				});
 			}
 			if (c.tool_call) {
-				// Restore the call: this matches the entry the live stream
-				// would have produced (tool_call event), with the same toolId
-				// the result will later match against.
 				entries.push({
 					id: c.tool_call.id || `tc-${mi}-${ci}`,
 					type: "tool",
@@ -75,8 +70,6 @@ export function messagesToEntries(
 				});
 			}
 			if (c.tool_result) {
-				// Attach to the call entry by id; fall back to a standalone
-				// entry if the call wasn't in the message list (defensive).
 				const existing =
 					c.tool_result.id !== undefined
 						? entries.findLast(
@@ -98,7 +91,6 @@ export function messagesToEntries(
 				}
 			}
 		});
-		// User message with image(s) but no text — render an image-only entry.
 		if (!imagesAttached) {
 			entries.push({
 				id: `img-${mi}`,
@@ -117,9 +109,6 @@ interface Usage {
 	outputTokens: number;
 }
 
-// SessionState is everything the UI needs to render one session view. The
-// hook stores a map keyed by session id; concurrent sends in different
-// sessions update their own slots without cross-contamination.
 export interface SessionState {
 	id: string;
 	entries: ChatEntry[];
@@ -134,9 +123,6 @@ function emptySession(id: string): SessionState {
 	return { id, entries: [], phase: "idle", usage: EMPTY_USAGE, prompt: null };
 }
 
-// Per-session streaming refs (which assistant entry is currently growing,
-// which reasoning block, etc.). Kept off React state so streaming deltas
-// don't re-render every consumer of useWebSocket.
 interface StreamRefs {
 	streamingId: string;
 	streamingContent: string;
@@ -160,12 +146,19 @@ export function useWebSocket() {
 	const [connected, setConnected] = useState(false);
 	const [sessions, setSessions] = useState<Record<string, SessionState>>({});
 
+	const sessionsSnapshotRef = useRef(sessions);
+	useEffect(() => {
+		sessionsSnapshotRef.current = sessions;
+	}, [sessions]);
+	const hasSession = useCallback(
+		(id: string) => id in sessionsSnapshotRef.current,
+		[],
+	);
+
 	const streamRefs = useRef<Record<string, StreamRefs>>({});
 	const pendingFlushSessions = useRef<Set<string>>(new Set());
 	const flushFrameRef = useRef<number | null>(null);
 
-	// Panels (FileTree, DiffsPanel, …) subscribe to raw frames so they can
-	// refetch on workspace-level events without going through React state.
 	const subscribersRef = useRef<Set<(msg: ServerMessage) => void>>(new Set());
 
 	const subscribe = useCallback((handler: (msg: ServerMessage) => void) => {
@@ -186,9 +179,6 @@ export function useWebSocket() {
 		return s;
 	};
 
-	// updateSession applies a transformation to one session's slot, creating
-	// it if missing. The reducer pattern lets handlers compose ("set phase
-	// AND append entry") without separate setter calls.
 	const updateSession = useCallback(
 		(id: string, fn: (s: SessionState) => SessionState) => {
 			setSessions((prev) => {
@@ -318,17 +308,11 @@ export function useWebSocket() {
 			sub(msg);
 		}
 
-		// Workspace-level events (no session) propagate through subscribers
-		// only — they don't touch per-session state.
 		const sid = "session" in msg ? msg.session : undefined;
 		if (!sid) return;
 
 		switch (msg.type) {
 			case "session_state": {
-				// Authoritative snapshot for this session. Preserve any
-				// existing prompt — the server replays pending prompts as
-				// separate frames right after, and clobbering here would
-				// cause a flicker.
 				pendingFlushSessions.current.delete(sid);
 				streamRefs.current[sid] = emptyStreamRefs();
 				setSessions((prev) => ({
@@ -370,7 +354,6 @@ export function useWebSocket() {
 				}
 				finalizeStreaming(sid);
 				const s = getStream(sid);
-				// New reasoning block (different upstream id) — start fresh.
 				if (s.reasoningEntryId && s.reasoningId !== msg.id) {
 					flushStreamSession(sid);
 					finalizeReasoning(sid);
@@ -423,8 +406,6 @@ export function useWebSocket() {
 			}
 
 			case "phase":
-				// phase=idle is the turn-end signal — clear streaming refs so
-				// the next turn starts a fresh assistant/reasoning entry.
 				if (msg.phase === "idle") {
 					flushActiveStream(sid);
 					finalizeStreaming(sid);
@@ -471,9 +452,7 @@ export function useWebSocket() {
 
 			case "prompt_cancel":
 				updateSession(sid, (sess) =>
-					sess.prompt?.id === msg.prompt_id
-						? { ...sess, prompt: null }
-						: sess,
+					sess.prompt?.id === msg.prompt_id ? { ...sess, prompt: null } : sess,
 				);
 				break;
 		}
@@ -511,18 +490,12 @@ export function useWebSocket() {
 		[send],
 	);
 
-	// Nudge the server to re-check the workspace when the window regains
-	// focus — picks up edits made in external editors without polling.
 	useEffect(() => {
 		const onFocus = () => send({ type: "focus" });
 		window.addEventListener("focus", onFocus);
 		return () => window.removeEventListener("focus", onFocus);
 	}, [send]);
 
-	// Reply to a server prompt. Clears the local pending state
-	// optimistically — the server's Ask/Confirm goroutine will return
-	// once the response lands, then the rest of the turn streams as
-	// normal.
 	const respondPrompt = useCallback(
 		(
 			sessionId: string,
@@ -585,9 +558,7 @@ export function useWebSocket() {
 						return cachedURL;
 					}
 				}
-			} catch {
-				// fall through to default
-			}
+			} catch {}
 			const proto = location.protocol === "https:" ? "wss:" : "ws:";
 			cachedURL = `${proto}//${location.host}/ws`;
 			return cachedURL;
@@ -603,9 +574,6 @@ export function useWebSocket() {
 
 			ws.onopen = () => {
 				setConnected(true);
-				// Trigger panels to refetch in case state changed while
-				// disconnected — change events aren't replayed across
-				// reconnects, so this is the only safety net.
 				for (const sub of subscribersRef.current) {
 					sub({ type: "diffs_changed" });
 					sub({ type: "checkpoints_changed" });
@@ -646,6 +614,7 @@ export function useWebSocket() {
 	return {
 		connected,
 		sessions,
+		hasSession,
 		sendChat,
 		cancel,
 		respondPrompt,

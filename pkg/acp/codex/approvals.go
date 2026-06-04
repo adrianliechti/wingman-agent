@@ -21,8 +21,6 @@ func permissionOptions() []acp.PermissionOption {
 	}
 }
 
-// approver bridges codex's approval RPC requests to ACP's session/request_permission.
-// It's instantiated per turn so cancellation can propagate via the turn context.
 type approver struct {
 	ctx       context.Context
 	conn      *acp.AgentSideConnection
@@ -38,8 +36,6 @@ func pendingToolCall(id string, kind acp.ToolKind) acp.ToolCallUpdate {
 	return acp.ToolCallUpdate{ToolCallId: acp.ToolCallId(id), Kind: &kind, Status: &status}
 }
 
-// ask forwards a tool call to the ACP client and returns the chosen option id.
-// ok is false when the request errors or the client cancels.
 func (a *approver) ask(tc acp.ToolCallUpdate) (id acp.PermissionOptionId, ok bool) {
 	resp, err := a.conn.RequestPermission(a.ctx, acp.RequestPermissionRequest{
 		SessionId: a.sessionID,
@@ -95,10 +91,6 @@ func (a *approver) handleFile(p fileApprovalParams) fileApprovalResponse {
 	}
 }
 
-// handleElicitation bridges a `form`-mode MCP elicitation (an MCP tool-call
-// approval) to ACP request_permission. `url`-mode elicitations are OAuth/auth
-// flows the user must complete out of band; a yes/no can't satisfy them, so
-// they are declined rather than falsely accepted.
 func (a *approver) handleElicitation(p elicitationParams) elicitationResponse {
 	if p.Mode != "form" {
 		return elicitationResponse{Action: "decline"}

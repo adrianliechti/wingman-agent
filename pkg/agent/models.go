@@ -33,7 +33,7 @@ type Content struct {
 
 type File struct {
 	Name string `json:"name,omitempty"`
-	Data string `json:"data,omitempty"` // base64 data URL, e.g. "data:image/png;base64,..."
+	Data string `json:"data,omitempty"`
 }
 
 type Usage struct {

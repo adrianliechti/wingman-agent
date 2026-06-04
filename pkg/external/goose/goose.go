@@ -35,7 +35,7 @@ func Run(ctx context.Context, args []string, options *Options) error {
 	host := strings.TrimRight(cfg.BaseURL, "/")
 
 	vars := map[string]string{
-		// Auth & API routing (OpenAI-compatible provider against Wingman)
+
 		"GOOSE_PROVIDER":          "openai",
 		"GOOSE_PROVIDER__TYPE":    "openai",
 		"GOOSE_PROVIDER__HOST":    host,
@@ -44,19 +44,14 @@ func Run(ctx context.Context, args []string, options *Options) error {
 		"OPENAI_BASE_PATH":        "v1/chat/completions",
 		"OPENAI_API_KEY":          cfg.AuthToken,
 
-		// Model configuration
 		"GOOSE_MODEL":      cfg.Model,
 		"GOOSE_FAST_MODEL": cfg.FastModel,
 
-		// Telemetry & data exfiltration prevention
-		// GOOSE_TELEMETRY_ENABLED is persisted to config.yaml below — see
-		// ensureTelemetryDisabled — which also suppresses the first-run prompt.
 		"OTEL_SDK_DISABLED":     "true",
 		"OTEL_TRACES_EXPORTER":  "none",
 		"OTEL_METRICS_EXPORTER": "none",
 		"OTEL_LOGS_EXPORTER":    "none",
 
-		// Disabled features (security & cost control)
 		"GOOSE_DISABLE_KEYRING":           "1",
 		"GOOSE_DISABLE_SESSION_NAMING":    "true",
 		"GOOSE_DISABLE_TOOL_CALL_SUMMARY": "true",
@@ -67,10 +62,6 @@ func Run(ctx context.Context, args []string, options *Options) error {
 		vars["GOOSE_CONTEXT_LIMIT"] = strconv.Itoa(cfg.ContextLimit)
 	}
 
-	// Persist the telemetry opt-out into the user's config.yaml so the
-	// first-run consent dialog ("Share anonymous usage data...") is not
-	// shown. The env var alone is not enough — Goose only suppresses the
-	// prompt once the key is present in the file.
 	_ = ensureTelemetryDisabled()
 
 	env := options.Env

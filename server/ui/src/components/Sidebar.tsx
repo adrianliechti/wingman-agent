@@ -15,14 +15,7 @@ interface Props {
 	onSessionSelect: (id: string) => void;
 	onNewSession: () => void;
 	onSessionDeleted?: (id: string) => void;
-	// Set of session ids with an active phase (thinking/streaming/tool_running).
-	// Renders a spinner so the user sees which background sessions are busy
-	// even while another one is on screen.
 	runningSessionIds?: Set<string>;
-	// canCreateNew controls whether the "+" button is shown. False when
-	// clicking would be a no-op (no active session, or the active one is
-	// already empty — in both cases the user starts a session by typing,
-	// not by clicking).
 	canCreateNew?: boolean;
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
 }
@@ -68,8 +61,6 @@ export function Sidebar({
 			if (msg.type === "sessions_changed") {
 				loadSessions();
 			} else if (msg.type === "agent_changed") {
-				// The active agent flipping changes the session catalog
-				// source (wingman on-disk vs. ACP backend's list) — refetch.
 				loadAgent();
 				loadSessions();
 			}
@@ -90,7 +81,6 @@ export function Sidebar({
 		[onSessionDeleted, loadSessions],
 	);
 
-	// Dismiss the context menu on any outside interaction.
 	useEffect(() => {
 		if (!menu) return;
 		const close = () => setMenu(null);
@@ -111,7 +101,6 @@ export function Sidebar({
 
 	return (
 		<div className="w-full h-full flex flex-col bg-bg">
-			{/* Header */}
 			<div className="h-10 px-1.5 flex items-center gap-2 shrink-0">
 				<AgentPicker
 					subscribe={subscribe}
@@ -130,7 +119,6 @@ export function Sidebar({
 				)}
 			</div>
 
-			{/* Session List */}
 			<div className="flex-1 overflow-y-auto pb-2">
 				{switchingAgent && (
 					<div className="h-full flex items-center justify-center">

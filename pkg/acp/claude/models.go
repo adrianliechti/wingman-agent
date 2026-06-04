@@ -6,17 +6,12 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// ModelEntry describes a Claude model we expose to ACP clients along with
-// the effort levels the CLI accepts when that model is selected.
 type ModelEntry struct {
 	ID           string
 	Name         string
 	Description  string
-	EffortLevels []string // empty == effort selector hidden
+	EffortLevels []string
 }
-
-// The model list is fetched at runtime from the `claude` CLI's stdio control
-// protocol (see fetchModels); there is no static fallback table.
 
 func findModel(models []ModelEntry, id string) *ModelEntry {
 	for i := range models {
@@ -27,9 +22,6 @@ func findModel(models []ModelEntry, id string) *ModelEntry {
 	return nil
 }
 
-// resolveModel maps a client-supplied id to a known model, tolerating friendly
-// aliases ("opus", "opus[1m]") via case-insensitive id/name substring matching
-// after the exact-id lookup fails. Returns nil when nothing plausibly matches.
 func resolveModel(models []ModelEntry, id string) *ModelEntry {
 	if m := findModel(models, id); m != nil {
 		return m
@@ -57,9 +49,6 @@ const (
 	effortConfigID = "effort"
 )
 
-// buildConfigOptions returns the model selector plus, when the active model
-// supports it, the effort selector. Since v0.13.5 model selection flows through
-// config options rather than a dedicated SessionModelState.
 func buildConfigOptions(models []ModelEntry, currentModelID, currentEffort string) []acp.SessionConfigOption {
 	opts := []acp.SessionConfigOption{modelConfigOption(models, currentModelID)}
 	if effort := effortConfigOption(models, currentModelID, currentEffort); effort != nil {
@@ -149,10 +138,6 @@ func titleCase(s string) string {
 	return string(out)
 }
 
-// --- session modes ---
-
-// Mode ids are passed verbatim to `claude --permission-mode`. Tool approvals in
-// default/acceptEdits are surfaced via the stdio control protocol (see approver).
 const defaultModeID = "default"
 
 type sessionMode struct {

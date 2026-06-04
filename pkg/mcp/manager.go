@@ -18,6 +18,8 @@ import (
 type Manager struct {
 	*Config
 
+	Dir string
+
 	mu       sync.RWMutex
 	sessions map[string]*mcp.ClientSession
 }
@@ -73,7 +75,6 @@ func (m *Manager) Connect(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// AddServer registers an additional MCP server and connects it.
 func (m *Manager) AddServer(ctx context.Context, name string, server ServerConfig) error {
 	if m.Servers == nil {
 		m.Servers = make(map[string]ServerConfig)
@@ -83,7 +84,6 @@ func (m *Manager) AddServer(ctx context.Context, name string, server ServerConfi
 	return m.connect(ctx, name, server)
 }
 
-// AddSession registers an externally-created session under the given name.
 func (m *Manager) AddSession(name string, session *mcp.ClientSession) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -100,7 +100,6 @@ func (m *Manager) Close() {
 	}
 }
 
-// Sessions returns a snapshot copy of all sessions.
 func (m *Manager) Sessions() map[string]*mcp.ClientSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -116,7 +115,7 @@ func (m *Manager) connect(ctx context.Context, name string, server ServerConfig)
 		Version: "1.0.0",
 	}, nil)
 
-	transport, err := createTransport(server)
+	transport, err := createTransport(server, m.Dir)
 
 	if err != nil {
 		return fmt.Errorf("MCP server %s: %w", name, err)
@@ -138,9 +137,10 @@ func (m *Manager) connect(ctx context.Context, name string, server ServerConfig)
 	return nil
 }
 
-func createTransport(server ServerConfig) (mcp.Transport, error) {
+func createTransport(server ServerConfig, dir string) (mcp.Transport, error) {
 	if server.Command != "" {
 		cmd := exec.Command(server.Command, server.Args...)
+		cmd.Dir = dir
 
 		return &mcp.CommandTransport{
 			Command: cmd,

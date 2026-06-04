@@ -82,8 +82,6 @@ func stringSliceArg(args map[string]any, key string) ([]string, error) {
 		return nil, nil
 	}
 
-	// Already a []string (rare — only when the caller bypassed JSON
-	// unmarshaling). Filter and return.
 	if direct, ok := raw.([]string); ok {
 		return trimNonEmpty(direct), nil
 	}

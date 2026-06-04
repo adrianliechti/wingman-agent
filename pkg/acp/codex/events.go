@@ -11,24 +11,17 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// eventDispatcher converts a stream of codex notifications into ACP session
-// updates for one in-flight turn. The `done` channel fires on `turn/completed`
-// so runTurn can unblock without a separate routing layer.
 type eventDispatcher struct {
 	ctx       context.Context
 	conn      *acp.AgentSideConnection
 	sessionID acp.SessionId
 	done      chan turnCompleted
 
-	// cmdOut accumulates streamed command stdout per item id. ACP tool-call
-	// content replaces (not appends), so we resend the full accumulated text on
-	// each delta and skip re-emitting aggregatedOutput at completion (avoiding a
-	// double render). Only touched from the single notification-dispatch goroutine.
 	cmdOut map[string]*strings.Builder
 
 	mu      sync.Mutex
 	failure error
-	usage   *acp.Usage // last token usage seen this turn, for PromptResponse.Usage
+	usage   *acp.Usage
 }
 
 func newEventDispatcher(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId) *eventDispatcher {
@@ -135,8 +128,7 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		}
 		if isAuthError(p.Error.CodexErrorInfo) {
 			d.setFailure(acp.NewAuthRequired(nil))
-			// A fatal auth error may not be followed by turn/completed; unblock
-			// runTurn so it surfaces the failure instead of hanging.
+
 			select {
 			case d.done <- turnCompleted{}:
 			default:
@@ -155,8 +147,7 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		}
 
 	case "item/commandExecution/outputDelta":
-		// Stream stdout live. ACP content replaces, so accumulate and resend the
-		// full text each delta; item/completed then skips aggregatedOutput.
+
 		var p struct {
 			ItemID string `json:"itemId"`
 			Delta  string `json:"delta"`
@@ -349,8 +340,7 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		}
 		_ = json.Unmarshal(env.Item, &it)
 		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(toolStatusFor(it.Status))}
-		// Only attach aggregatedOutput when nothing was streamed live; otherwise
-		// the streamed content already holds the full output (avoid re-render).
+
 		if _, streamed := d.cmdOut[id]; !streamed && it.AggregatedOutput != nil && *it.AggregatedOutput != "" {
 			opts = append(opts, acp.WithUpdateContent([]acp.ToolCallContent{
 				acp.ToolContent(acp.TextBlock(*it.AggregatedOutput)),
@@ -392,9 +382,6 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 	}
 }
 
-// handleTokenUsage maps a thread/tokenUsage/updated notification to a
-// usage_update (used/size) and records the turn's usage for PromptResponse.
-// Codex folds cached tokens into inputTokens, so we subtract them out.
 func (d *eventDispatcher) handleTokenUsage(params json.RawMessage) {
 	var p struct {
 		TokenUsage struct {
@@ -480,20 +467,12 @@ func toolStatusFor(s string) acp.ToolCallStatus {
 	}
 }
 
-// commandAction describes a structured interpretation of a commandExecution
-// item (read/search/listFiles) that codex attaches alongside the raw shell
-// command.
 type commandAction struct {
 	Type  string `json:"type"`
 	Path  string `json:"path"`
 	Query string `json:"query"`
 }
 
-// commandActionToolCall maps a commandExecution that resolves to a single
-// structured action onto a descriptive title, tool kind, and locations, so the
-// call renders as e.g. "Read file '...'" or "Search for '...'" instead of the
-// raw shell command. ok is false when there is no single mappable action and
-// the caller should fall back to the plain command title.
 func commandActionToolCall(actions []commandAction) (title string, kind acp.ToolKind, locations []acp.ToolCallLocation, ok bool) {
 	if len(actions) != 1 {
 		return "", "", nil, false
@@ -529,7 +508,6 @@ func searchTitle(query, path string) string {
 	}
 }
 
-// fileChange describes one file modification carried by a fileChange item.
 type fileChange struct {
 	Path string `json:"path"`
 	Kind struct {
@@ -538,11 +516,6 @@ type fileChange struct {
 	Diff string `json:"diff"`
 }
 
-// fileChangeContent converts the changes of a fileChange item into ACP diff
-// content blocks so the edit renders as a before/after diff in the client
-// instead of an empty tool call. Old and new text are reconstructed directly
-// from the unified diff each change carries, which avoids depending on the file
-// contents on disk or on the timing of codex's apply step.
 func fileChangeContent(raw json.RawMessage) []acp.ToolCallContent {
 	var it struct {
 		Changes []fileChange `json:"changes"`
@@ -558,7 +531,7 @@ func fileChangeContent(raw json.RawMessage) []acp.ToolCallContent {
 		var oldText *string
 		var newText string
 		if ch.Kind.Type == "add" && !isUnifiedDiff(ch.Diff) {
-			// New files may carry raw contents instead of a patch.
+
 			newText = ch.Diff
 		} else {
 			old, nw := splitUnifiedDiff(ch.Diff)
@@ -573,8 +546,7 @@ func fileChangeContent(raw json.RawMessage) []acp.ToolCallContent {
 				Path:    ch.Path,
 				OldText: oldText,
 				NewText: newText,
-				// Surface the change kind so the client can distinguish a
-				// deletion (newText must be nulled) from an edit-to-empty.
+
 				Meta: map[string]any{"kind": ch.Kind.Type},
 			},
 		})
@@ -586,9 +558,6 @@ func isUnifiedDiff(s string) bool {
 	return strings.HasPrefix(s, "--- ") || strings.Contains(s, "\n--- ")
 }
 
-// splitUnifiedDiff reconstructs the old and new text from a unified diff by
-// walking its hunks: context lines belong to both sides, "-" lines to the old
-// text only, and "+" lines to the new text only.
 func splitUnifiedDiff(diff string) (oldText, newText string) {
 	var oldLines, newLines []string
 	inHunk := false
@@ -597,15 +566,15 @@ func splitUnifiedDiff(diff string) (oldText, newText string) {
 		case strings.HasPrefix(line, "@@"):
 			inHunk = true
 		case !inHunk:
-			// skip file headers (--- / +++) and any preamble
+
 		case strings.HasPrefix(line, "\\"):
-			// "\ No newline at end of file" marker
+
 		case strings.HasPrefix(line, "-"):
 			oldLines = append(oldLines, line[1:])
 		case strings.HasPrefix(line, "+"):
 			newLines = append(newLines, line[1:])
 		default:
-			// context line (" prefix") or a bare empty context line
+
 			text := line
 			if strings.HasPrefix(line, " ") {
 				text = line[1:]
@@ -617,17 +586,12 @@ func splitUnifiedDiff(diff string) (oldText, newText string) {
 	return strings.Join(oldLines, "\n"), strings.Join(newLines, "\n")
 }
 
-// shellPrefixRe matches a leading shell invocation such as
-// "bash -lc ", "/bin/zsh -c ", or "sh ", so the underlying command can be
-// shown on its own.
 var shellPrefixRe = regexp.MustCompile(`^(?:/bin/)?(?:bash|zsh|sh)\s+(?:-[lc]+\s+)?`)
 
-// stripShellPrefix trims a leading shell invocation so tool-call titles show
-// the actual command. Mirrors the TS reference's CommandUtils.
 func stripShellPrefix(cmd string) string {
 	c := strings.TrimSpace(cmd)
 	c = shellPrefixRe.ReplaceAllString(c, "")
-	// Strip a single pair of surrounding single quotes, if present.
+
 	if len(c) >= 2 && strings.HasPrefix(c, "'") && strings.HasSuffix(c, "'") {
 		c = c[1 : len(c)-1]
 	}

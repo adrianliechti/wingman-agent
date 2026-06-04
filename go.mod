@@ -8,6 +8,7 @@ require (
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/coder/websocket v1.8.14
 	github.com/gdamore/tcell/v2 v2.13.10
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-git/go-billy/v5 v5.9.0
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/google/uuid v1.6.0

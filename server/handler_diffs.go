@@ -14,8 +14,7 @@ import (
 func (s *Server) handleDiffs(w http.ResponseWriter, r *http.Request) {
 	diffs, err := s.workspace.Diffs()
 	if err != nil {
-		// ErrClosed means the manager was torn down while this poll was in
-		// flight. Silently return empty; the next poll lands on a fresh one.
+
 		if !errors.Is(err, rewind.ErrClosed) {
 			fmt.Fprintf(os.Stderr, "diffs: %v\n", err)
 		}
@@ -52,7 +51,7 @@ func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
-	// Diff.Path is slash-separated; rel may use OS separators.
+
 	canonical := filepath.ToSlash(rel)
 
 	diffs, err := s.workspace.Diffs()

@@ -414,7 +414,6 @@ func TestGrepTool(t *testing.T) {
 	t.Run("grep multiline pattern spanning lines", func(t *testing.T) {
 		os.WriteFile(filepath.Join(tmpDir, "multi.go"), []byte("type Foo struct {\n\tname string\n\tfield int\n}\n"), 0644)
 
-		// Without multiline this can't match across newlines.
 		result, err := grepTool.Execute(context.Background(), map[string]any{
 			"pattern":     `struct \{[\s\S]*?field`,
 			"path":        "multi.go",
@@ -430,7 +429,6 @@ func TestGrepTool(t *testing.T) {
 			t.Errorf("expected multi.go and matched 'field' line, got: %s", result)
 		}
 
-		// Sanity: same pattern without multiline must NOT match.
 		nonMulti, err := grepTool.Execute(context.Background(), map[string]any{
 			"pattern": `struct \{[\s\S]*?field`,
 			"path":    "multi.go",
@@ -543,7 +541,6 @@ func TestGrepTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// "return" lives on line 4 of file1.go; -B=2 should include lines 2 and 3.
 		if !strings.Contains(result, "file1.go-2-") {
 			t.Errorf("expected file1.go line 2 as before-context, got: %s", result)
 		}
@@ -591,10 +588,6 @@ func TestGrepTool(t *testing.T) {
 	})
 }
 
-// Regression: a file with a line longer than the bufio scan buffer used to
-// silently drop the entire file from results. Matches in lines before the
-// long line should still be returned, and the model should see a sentinel
-// telling it the file's tail was skipped.
 func TestGrepHandlesLongLines(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
@@ -647,23 +640,16 @@ func TestGrepLongLineWithoutMatchDoesNotCreateFalsePositive(t *testing.T) {
 	}
 }
 
-// TestGrepSkipsExtensionlessBinaryFiles ensures the null-byte sniff catches
-// binary files that slip past the extension-based filter (e.g. compiled
-// executables or data blobs with no extension). Previously these were opened
-// and the bufio scanner returned ErrTooLong, producing a noisy sentinel.
 func TestGrepSkipsExtensionlessBinaryFiles(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	// Mix a null byte into payload that also contains the needle, so a naive
-	// scanner would report a match.
 	payload := append([]byte("prefix needle line\n"), 0x00, 0x01, 0x02, 0x03)
 	payload = append(payload, []byte("\nmore needle data")...)
 	if err := os.WriteFile(filepath.Join(tmpDir, "blob"), payload, 0644); err != nil {
 		t.Fatalf("write blob: %v", err)
 	}
 
-	// A neighbor text file to confirm the walk still produces real results.
 	if err := os.WriteFile(filepath.Join(tmpDir, "neighbor.txt"), []byte("needle here\n"), 0644); err != nil {
 		t.Fatalf("write neighbor: %v", err)
 	}
@@ -684,9 +670,6 @@ func TestGrepSkipsExtensionlessBinaryFiles(t *testing.T) {
 	}
 }
 
-// TestGrepBinaryDetectionDoesNotMisfireOnSmallFiles guards the io.ReadFull
-// path: files shorter than the peek window must still be scanned, not
-// treated as binary because of the short-read error.
 func TestGrepBinaryDetectionDoesNotMisfireOnSmallFiles(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()

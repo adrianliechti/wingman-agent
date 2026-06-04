@@ -8,10 +8,6 @@ import (
 	"time"
 )
 
-// initRepo creates a minimal bare-bones non-bare repo by writing a `.git`
-// directory with the smallest set of entries needed for findCanonicalGitRoot
-// to classify it. The walker only checks for `.git` presence + type, so a
-// stub layout is enough — no need to invoke `git init`.
 func initRepo(t *testing.T, dir string) {
 	t.Helper()
 	gitDir := filepath.Join(dir, ".git")
@@ -20,10 +16,6 @@ func initRepo(t *testing.T, dir string) {
 	}
 }
 
-// initWorktree creates a worktree pointing back at mainRoot, mirroring the
-// layout `git worktree add` produces: a `.git` file at the worktree's root
-// containing "gitdir: <main>/.git/worktrees/<name>", plus a `commondir`
-// file inside the worktree gitdir pointing relatively back to <main>/.git.
 func initWorktree(t *testing.T, mainRoot, worktreeRoot, name string) {
 	t.Helper()
 	if err := os.MkdirAll(worktreeRoot, 0755); err != nil {
@@ -36,7 +28,7 @@ func initWorktree(t *testing.T, mainRoot, worktreeRoot, name string) {
 	if err := os.WriteFile(filepath.Join(worktreeRoot, ".git"), []byte("gitdir: "+worktreeGitdir+"\n"), 0644); err != nil {
 		t.Fatalf("write .git file: %v", err)
 	}
-	// commondir relative to worktreeGitdir is "../.." → <main>/.git
+
 	if err := os.WriteFile(filepath.Join(worktreeGitdir, "commondir"), []byte("../..\n"), 0644); err != nil {
 		t.Fatalf("write commondir: %v", err)
 	}
@@ -99,7 +91,6 @@ func TestFindCanonicalGitRoot_WorktreeFallbackWithoutCommondir(t *testing.T) {
 	initRepo(t, mainRoot)
 	initWorktree(t, mainRoot, worktree, "feature")
 
-	// Remove the commondir file so the fallback (parent walk) is exercised.
 	if err := os.Remove(filepath.Join(mainRoot, ".git", "worktrees", "feature", "commondir")); err != nil {
 		t.Fatalf("remove commondir: %v", err)
 	}
@@ -129,9 +120,7 @@ func TestProjectKey_WorktreesShareKey(t *testing.T) {
 		t.Errorf("main and worktree should share key: main=%q worktree=%q", mainKey, worktreeKey)
 	}
 	if mainKey != subKey {
-		// Also verifies subdirs of the main repo collapse to the main key.
-		// Note: the subdir doesn't have to exist for the walker — but it should
-		// produce the same key as long as the walk finds the same .git.
+
 		if _, err := os.Stat(filepath.Join(mainRoot, "src")); err == nil {
 			t.Errorf("subdir should share key with main: main=%q sub=%q", mainKey, subKey)
 		}
@@ -141,7 +130,6 @@ func TestProjectKey_WorktreesShareKey(t *testing.T) {
 func TestMemoryContent_AutoIndex(t *testing.T) {
 	dir := t.TempDir()
 
-	// Frontmatter description — should become the hook.
 	mustWrite(t, filepath.Join(dir, "feedback_testing.md"), `---
 name: feedback_testing
 description: no DB mocks; real DB only
@@ -151,13 +139,10 @@ type: feedback
 Integration tests must hit a real database.
 `)
 
-	// Plain markdown — falls back to first H1.
 	mustWrite(t, filepath.Join(dir, "preferences.md"), "# User Preferences\n\n- Likes pi\n")
 
-	// No frontmatter, no heading — falls back to first non-empty line.
 	mustWrite(t, filepath.Join(dir, "note.md"), "Just a one-liner about something.\n")
 
-	// Frontmatter without description — falls back to body.
 	mustWrite(t, filepath.Join(dir, "typed_only.md"), `---
 name: typed_only
 type: project
@@ -166,10 +151,8 @@ type: project
 # Migrate auth middleware
 `)
 
-	// Non-md files must be ignored.
 	mustWrite(t, filepath.Join(dir, "notes.txt"), "ignore me\n")
 
-	// Subdir entries must be ignored.
 	if err := os.MkdirAll(filepath.Join(dir, "subdir"), 0755); err != nil {
 		t.Fatalf("mkdir subdir: %v", err)
 	}
@@ -211,8 +194,6 @@ func TestMemoryContent_CacheInvalidatesOnFileChange(t *testing.T) {
 		t.Errorf("expected new file picked up, got %q", got)
 	}
 
-	// Bump mtime forward so the fingerprint reliably changes even on
-	// coarse-grained filesystems.
 	future := time.Now().Add(2 * time.Second)
 	mustWrite(t, filepath.Join(dir, "a.md"), "---\ndescription: second\n---\n\nbody\n")
 	if err := os.Chtimes(filepath.Join(dir, "a.md"), future, future); err != nil {
@@ -273,7 +254,7 @@ func mustWrite(t *testing.T, path, content string) {
 func TestProjectKey_NonGitDirUsesRawPath(t *testing.T) {
 	dir := t.TempDir()
 	key := projectKey(dir)
-	// Sanity: the key should derive from dir, not be empty, not contain separators.
+
 	if key == "" {
 		t.Fatal("expected non-empty key")
 	}

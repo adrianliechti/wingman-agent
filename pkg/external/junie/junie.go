@@ -83,8 +83,6 @@ func writeProfile(dir string, cfg *JunieConfig) error {
 	return os.WriteFile(filepath.Join(dir, profileName+".json"), data, 0644)
 }
 
-// seedState writes ~/.junie state files to skip first-run prompts.
-// Only adds missing fields — existing user values are never overwritten.
 func seedState() {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -126,8 +124,6 @@ func seedState() {
 	})
 }
 
-// mergeJSON loads a JSON object, lets fn mutate it, and writes it back
-// only if fn returns true. Best-effort: errors are swallowed.
 func mergeJSON(path string, fn func(map[string]any) bool) {
 	state := map[string]any{}
 

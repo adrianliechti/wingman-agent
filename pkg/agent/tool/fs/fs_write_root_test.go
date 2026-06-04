@@ -10,9 +10,6 @@ import (
 	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 )
 
-// createWriteRootSetup returns (workspaceRoot, workspaceDir, allowedDir, cleanup).
-// allowedDir is a sibling of workspaceDir intended to be passed as an
-// allowedWriteRoot — i.e. outside the workspace.
 func createWriteRootSetup(t *testing.T) (*os.Root, string, string, func()) {
 	t.Helper()
 
@@ -142,8 +139,7 @@ func TestEditToolRejectsEditsOutsideAllowedRoots(t *testing.T) {
 }
 
 func TestExpandHomeAcrossTools(t *testing.T) {
-	// Place an allowed root inside $HOME so `~/`-prefixed paths can resolve
-	// to it. Picks a unique subdir name to avoid clobbering anything real.
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skipf("no home dir: %v", err)
@@ -232,7 +228,6 @@ func TestWriteToolWithoutAllowedRootsStillRespectsWorkspace(t *testing.T) {
 	root, workspaceDir, _, cleanup := createWriteRootSetup(t)
 	defer cleanup()
 
-	// No allowed write roots passed — should behave like the old API.
 	writeTool := WriteTool(root)
 
 	rel := "in_workspace.txt"
@@ -247,7 +242,6 @@ func TestWriteToolWithoutAllowedRootsStillRespectsWorkspace(t *testing.T) {
 		t.Errorf("workspace write did not land: %q", data)
 	}
 
-	// Sibling dir must still be rejected when no write roots are configured.
 	sibling, err := os.MkdirTemp("", "fs_sib_*")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)

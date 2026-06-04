@@ -12,7 +12,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 )
 
-// Session represents a saved conversation session.
 type Session struct {
 	ID        string      `json:"id"`
 	Title     string      `json:"title,omitempty"`
@@ -21,8 +20,6 @@ type Session struct {
 	State     agent.State `json:"state"`
 }
 
-// Save writes the session to disk. It is a no-op if there are no messages, so
-// brand-new (empty) sessions don't leave orphan files. Returns nil in that case.
 func Save(sessionsDir string, id string, state agent.State) error {
 	if sessionsDir == "" {
 		return fmt.Errorf("no sessions directory available")
@@ -103,7 +100,6 @@ func List(sessionsDir string) ([]Session, error) {
 		sessions = append(sessions, s)
 	}
 
-	// Newest first.
 	slices.SortFunc(sessions, func(a, b Session) int {
 		return b.UpdatedAt.Compare(a.UpdatedAt)
 	})
@@ -134,7 +130,7 @@ func extractTitle(messages []agent.Message) string {
 				continue
 			}
 			title := c.Text
-			// Take first line only
+
 			if idx := strings.IndexAny(title, "\n\r"); idx >= 0 {
 				title = title[:idx]
 			}

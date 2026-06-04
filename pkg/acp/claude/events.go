@@ -9,9 +9,6 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// emitStreamEvent streams a partial-message delta (text / thinking) as an ACP
-// chunk so the reply renders token-by-token. Other event types are ignored;
-// tool_use still arrives via the full assistant message.
 func emitStreamEvent(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage) error {
 	if len(raw) == 0 {
 		return nil
@@ -38,11 +35,6 @@ func emitStreamEvent(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: update})
 }
 
-// emitAssistant translates an assistant message (text / thinking / tool_use)
-// into ACP session updates. When streamed is true, text/thinking blocks are
-// skipped because they were already delivered incrementally via stream_event
-// deltas; tool_use is always emitted. Replay passes streamed=false (the on-disk
-// transcript carries no deltas).
 func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cwd string, cache toolUseCache, streamed bool) error {
 	if len(raw) == 0 {
 		return nil
@@ -106,15 +98,13 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 	return nil
 }
 
-// emitToolResults surfaces the tool_result blocks the CLI echoes back as
-// ToolCallUpdate completions so the client sees tool output.
 func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache) error {
 	if len(raw) == 0 {
 		return nil
 	}
 	var m cliMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil // best-effort; user echoes can be skipped on parse error
+		return nil
 	}
 	for _, b := range m.Content {
 		if b.Type != "tool_result" || b.ToolUseID == "" {
@@ -181,8 +171,6 @@ func codeFence(text string) string {
 	return "```\n" + text + "\n```"
 }
 
-// extractToolResultText flattens tool_result.content (string OR
-// [{type:"text",text:...}, ...]) into a single string.
 func extractToolResultText(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""

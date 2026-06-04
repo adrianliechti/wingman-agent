@@ -285,9 +285,6 @@ func SaveTasks(agentDir string, tasks []Task) error {
 
 var cronParser = cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 
-// parsedSchedule is the union of supported schedule forms. Exactly one field
-// is set on a successful parse. Parsing once at validation/run time keeps
-// NextRun, IsDue, and ValidateSchedule from re-implementing format detection.
 type parsedSchedule struct {
 	interval time.Duration
 	once     time.Time
@@ -352,8 +349,6 @@ func IsDue(t Task, now time.Time) bool {
 	return !next.IsZero() && !next.After(now)
 }
 
-// IsOneTime reports whether a schedule represents a single fire-and-done run
-// (RFC3339 timestamp). Recurring schedules (interval, cron) return false.
 func IsOneTime(sched string) bool {
 	p, err := parseSchedule(sched)
 	return err == nil && !p.once.IsZero()
@@ -398,8 +393,6 @@ func newID() string {
 	return uuid.NewString()
 }
 
-// NewTask builds a validated, active task. Returns the task or an error if
-// either field is empty or the schedule expression is invalid.
 func NewTask(prompt, sched string) (Task, error) {
 	prompt = strings.TrimSpace(prompt)
 	sched = strings.TrimSpace(sched)

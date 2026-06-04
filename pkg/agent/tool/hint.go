@@ -5,23 +5,15 @@ import (
 	"strings"
 )
 
-// fsTools' path args are workspace-relative; we render them with a leading "/" so they're
-// visually distinct as a workspace path rather than a loose identifier.
 var fsTools = map[string]bool{
 	"read": true, "write": true, "edit": true,
 	"grep": true, "glob": true,
 }
 
-// workingDirTools default to the workspace root when their path arg is empty or ".".
 var workingDirTools = map[string]bool{
 	"grep": true, "glob": true,
 }
 
-// ExtractHint returns a short, human-readable summary of a tool call's input,
-// suitable as a one-line UI label (e.g. "edit: /foo.go", "grep: pattern",
-// "shell: build description"). The result is the bare value — callers usually
-// prefix it with the tool name. Used by every UI surface (TUI, web UI live
-// stream, web UI replay) so the same call renders identically everywhere.
 func ExtractHint(argsJSON, toolName string) string {
 	var args map[string]any
 
@@ -32,8 +24,7 @@ func ExtractHint(argsJSON, toolName string) string {
 	if desc, ok := args["description"]; ok {
 		if str, ok := desc.(string); ok && str != "" {
 			label := strings.Join(strings.Fields(str), " ")
-			// The agent tool fans out: several concurrent calls often share the
-			// same description, so append the agent_type to disambiguate them.
+
 			if toolName == "agent" {
 				if at, ok := args["agent_type"].(string); ok && at != "" {
 					label += " (" + strings.TrimSpace(at) + ")"
@@ -75,8 +66,6 @@ func ExtractHint(argsJSON, toolName string) string {
 	return wdFallback(toolName)
 }
 
-// normalizeWorkspacePath rewrites a workspace-relative path so that it always starts with "/".
-// The cwd literals "." and "./" become "/". Already-absolute paths pass through unchanged.
 func normalizeWorkspacePath(p string) string {
 	if p == "" || p == "." || p == "./" {
 		return "/"

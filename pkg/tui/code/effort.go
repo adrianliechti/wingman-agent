@@ -1,7 +1,7 @@
 package code
 
 func (a *App) showEffortPicker() {
-	current, options := a.agent.Effort()
+	current, options := a.agent.Effort(a.sessionID)
 	if len(options) == 0 {
 		return
 	}
@@ -16,7 +16,7 @@ func (a *App) showEffortPicker() {
 }
 
 func (a *App) setEffort(effort string) {
-	_ = a.agent.SetEffort(a.ctx, effort)
+	_ = a.agent.SetEffort(a.ctx, a.sessionID, effort)
 }
 
 func titleCase(s string) string {

@@ -145,7 +145,7 @@ func (a *App) showDiffView() {
 	fmt.Fprintf(statusBar, "[%s]%d file(s)[-] %s  [%s]+%d[-] [%s]-%d[-]",
 		t.BrBlack, len(diffs), strings.Join(statParts, " "), t.Green, totalInsertions, t.Red, totalDeletions)
 
-	focusedPanel := 0 // 0 = fileList, 1 = diffContent
+	focusedPanel := 0
 
 	updateHintBar := func() {
 		hintBar.Clear()

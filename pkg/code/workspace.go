@@ -31,10 +31,6 @@ var bundledFS embed.FS
 
 const memoryMaxBytes = 25 * 1024
 
-// UI is the elicitation hook a frontend provides for tool ask/confirm
-// prompts. Pass nil to NewAgent for safe defaults (Confirm → true, Ask → "").
-// The session id that triggered the prompt is on ctx via
-// [SessionIDFromContext] for UIs that route prompts per session.
 type UI interface {
 	Ask(ctx context.Context, message string) (string, error)
 	Confirm(ctx context.Context, message string) (bool, error)
@@ -42,15 +38,10 @@ type UI interface {
 
 type sessionCtxKey struct{}
 
-// WithSessionID stamps sid onto ctx so downstream tool calls can recover
-// it via [SessionIDFromContext]. The coder agent does this in Send so
-// elicitation UIs can route prompts back to the right session.
 func WithSessionID(ctx context.Context, sid string) context.Context {
 	return context.WithValue(ctx, sessionCtxKey{}, sid)
 }
 
-// SessionIDFromContext returns the session id set by [WithSessionID],
-// or "" when none is present.
 func SessionIDFromContext(ctx context.Context) string {
 	sid, _ := ctx.Value(sessionCtxKey{}).(string)
 	return sid
@@ -65,7 +56,7 @@ type Workspace struct {
 	Skills []skill.Skill
 
 	MCP *mcp.Manager
-	// LSP and Rewind are set by WarmUp; nil for unsupported workspaces.
+
 	LSP    *lsp.Manager
 	Rewind *rewind.Manager
 
@@ -99,15 +90,15 @@ func NewWorkspace(workDir string) (*Workspace, error) {
 		return nil, fmt.Errorf("create memory directory: %w", err)
 	}
 
-	// Skill precedence (later overrides earlier): bundled → personal → project.
 	bundled := loadBundledSkills()
 	personal := skill.MustDiscoverPersonal()
 	discovered := skill.MustDiscover(workDir)
 	mergedSkills := skill.Merge(skill.Merge(bundled, personal), discovered)
 
-	// Global (~/.wingman/mcp.json) first, project (./mcp.json) last so a
-	// project can override a global server of the same name.
 	mcpManager, _ := mcp.Load(globalMCPConfigPath(), filepath.Join(workDir, "mcp.json"))
+	if mcpManager != nil {
+		mcpManager.Dir = workDir
+	}
 
 	return &Workspace{
 		Root:        root,
@@ -119,11 +110,6 @@ func NewWorkspace(workDir string) (*Workspace, error) {
 	}, nil
 }
 
-// WarmUp probes the workspace and initializes Rewind/LSP. Idempotent.
-// Resulting modes:
-//   - supported git repo  → Rewind set, LSP set, lspTools set
-//   - supported scratch   → Rewind set, LSP nil, lspTools nil
-//   - unsupported (huge)  → Rewind nil, LSP nil
 func (w *Workspace) WarmUp() {
 	w.warmupOnce.Do(func() {
 		if !isSupportedWorkspace(w.RootPath) {
@@ -187,12 +173,8 @@ func (w *Workspace) Close() {
 	}
 }
 
-// IsGitRepo is re-evaluated each call so callers can react to mid-session
-// `git init` / `rm -rf .git`.
 func (w *Workspace) IsGitRepo() bool { return isGitRepo(w.RootPath) }
 
-// SyncProjectMode rebuilds LSP when the working dir's git status flips.
-// No-op on unsupported workspaces.
 func (w *Workspace) SyncProjectMode() {
 	if w.Rewind == nil {
 		return
@@ -222,10 +204,6 @@ func (w *Workspace) Diagnostics(ctx context.Context) map[string][]lsp.Diagnostic
 	return w.LSP.CollectAllDiagnostics(ctx)
 }
 
-// Checkpoint operations no-op when Rewind isn't running so call sites
-// don't need to nil-check. Use w.Rewind directly for non-user-facing
-// change-detection primitives like Fingerprint.
-
 func (w *Workspace) Commit(msg string) error {
 	if w.Rewind == nil {
 		return nil
@@ -254,11 +232,6 @@ func (w *Workspace) Restore(hash string) error {
 	return w.Rewind.Restore(hash)
 }
 
-// MemoryContent renders an index of the memory dir for injection into the
-// system prompt: one line per `*.md` file with a short hook. The hook is
-// the file's frontmatter `description`, falling back to the first non-empty
-// line of the body (heading markers stripped). Cached by per-file mtime so
-// repeat turns don't re-read.
 func (w *Workspace) MemoryContent() string {
 	w.memoryMu.Lock()
 	defer w.memoryMu.Unlock()
@@ -323,9 +296,6 @@ func listMemoryFiles(dir string) []memoryFile {
 	return files
 }
 
-// extractMemoryHook returns a one-line hook for the index: the frontmatter
-// `description` when set, otherwise the first non-empty line of the body
-// with leading `#`s stripped.
 func extractMemoryHook(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -353,8 +323,6 @@ func extractMemoryHook(path string) string {
 	return ""
 }
 
-// splitFrontmatter returns the YAML frontmatter body and the post-fence
-// body when text begins with a `---`-fenced block.
 func splitFrontmatter(text string) (fm, body string, ok bool) {
 	rest, found := strings.CutPrefix(text, "---\n")
 	if !found {
@@ -371,10 +339,6 @@ func splitFrontmatter(text string) (fm, body string, ok bool) {
 	return rest[:end], body, true
 }
 
-// ManagedTools snapshots MCP + LSP tools under the workspace mutex so a
-// concurrent WarmUp / InitMCP can't race the per-turn tool() callback.
-// Exported for use by the wingman sub-package, which builds each
-// session's tool set from baseTools + ManagedTools().
 func (w *Workspace) ManagedTools() (mcpTools, lspTools []tool.Tool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -388,9 +352,6 @@ func isGitRepo(dir string) bool {
 	return err == nil
 }
 
-// isSupportedWorkspace returns true for git repos, or non-repos whose tree
-// walk completes within a wall-clock budget (huge dirs like $HOME bail
-// out so the UI falls back to chat + file browsing).
 func isSupportedWorkspace(dir string) bool {
 	if isGitRepo(dir) {
 		return true
@@ -419,11 +380,6 @@ func isSupportedWorkspace(dir string) bool {
 	}
 }
 
-// projectKey returns the canonical project identifier used in the
-// ~/.wingman/projects/{key}/ path. When workingDir is inside a git
-// worktree, the key derives from the canonical (main) repo root so all
-// worktrees of one repo share memory and sessions. Outside git, the raw
-// workingDir is used.
 func projectKey(workingDir string) string {
 	root := findCanonicalGitRoot(workingDir)
 	if root == "" {
@@ -443,9 +399,6 @@ func projectKey(workingDir string) string {
 	return sanitized
 }
 
-// globalMCPConfigPath is the location of the user-wide MCP config,
-// shared across all projects. Returns "" if the home dir is unknown, in
-// which case mcp.Load simply skips it.
 func globalMCPConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -468,12 +421,6 @@ func SessionsDir(workingDir string) string {
 	return filepath.Join(filepath.Dir(projectMemoryDir(workingDir)), "sessions")
 }
 
-// findCanonicalGitRoot walks up from dir looking for a `.git` entry.
-// If `.git` is a directory, the containing dir is the canonical root.
-// If `.git` is a file (worktree pointer), it follows the gitdir reference
-// and reads the worktree's `commondir` to locate the main repo's .git;
-// the canonical root is the parent of that. Returns "" when no git
-// metadata is found or the pointer chain is malformed.
 func findCanonicalGitRoot(dir string) string {
 	cur := filepath.Clean(dir)
 	for {
@@ -511,8 +458,6 @@ func resolveWorktreeRoot(worktreeDir, gitFile string) string {
 	}
 	gitdir = filepath.Clean(gitdir)
 
-	// Standard worktree layout writes commondir next to HEAD; it points
-	// (usually relatively) at the main repo's .git directory.
 	if data, err := os.ReadFile(filepath.Join(gitdir, "commondir")); err == nil {
 		common := strings.TrimSpace(string(data))
 		if !filepath.IsAbs(common) {
@@ -521,8 +466,6 @@ func resolveWorktreeRoot(worktreeDir, gitFile string) string {
 		return filepath.Dir(filepath.Clean(common))
 	}
 
-	// Fallback: assume <main>/.git/worktrees/<name>. Walk up two parents
-	// (worktrees → .git) and verify the last hop is `.git`.
 	parent := filepath.Dir(filepath.Dir(gitdir))
 	if filepath.Base(parent) == ".git" {
 		return filepath.Dir(parent)

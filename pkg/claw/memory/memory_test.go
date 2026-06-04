@@ -15,8 +15,6 @@ func TestRemoveAgentRejectsTraversal(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 
-	// A sentinel directory one level above the agents dir; a traversal name
-	// must not delete it.
 	sentinel := filepath.Join(root, "keep")
 	if err := os.MkdirAll(sentinel, 0755); err != nil {
 		t.Fatalf("mkdir sentinel: %v", err)

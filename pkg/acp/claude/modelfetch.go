@@ -12,13 +12,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// fetchModels asks the `claude` CLI for its real model list via the stdio
-// control protocol. We spawn the CLI in streaming mode (the same transport a
-// turn uses), send a single `initialize` control request, read the matching
-// control response, and close stdin so the process exits. This replaces any
-// hardcoded model table: the list always reflects what the installed CLI and
-// the authenticated account actually offer.
-func fetchModels(ctx context.Context, path string, env []string) ([]ModelEntry, []acp.AvailableCommand, error) {
+func fetchModels(ctx context.Context, path, dir string, env []string) ([]ModelEntry, []acp.AvailableCommand, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -27,6 +21,7 @@ func fetchModels(ctx context.Context, path string, env []string) ([]ModelEntry, 
 		"--input-format", "stream-json",
 		"--verbose",
 	)
+	cmd.Dir = dir
 	if env != nil {
 		cmd.Env = env
 	}
@@ -45,8 +40,7 @@ func fetchModels(ctx context.Context, path string, env []string) ([]ModelEntry, 
 		_ = stdin.Close()
 		return nil, nil, fmt.Errorf("start claude: %w", err)
 	}
-	// Closing stdin makes the CLI exit once it has answered the control
-	// request, so the subprocess never lingers. cancel() is the hard backstop.
+
 	defer func() {
 		_ = stdin.Close()
 		_ = cmd.Wait()
@@ -88,9 +82,6 @@ func fetchModels(ctx context.Context, path string, env []string) ([]ModelEntry, 
 	return nil, nil, fmt.Errorf("claude closed without an initialize response")
 }
 
-// modelsFromCLI maps the CLI's reported models to picker entries. Effort levels
-// are surfaced only for models that support them, so the effort selector is
-// hidden (e.g. Haiku) where the CLI reports none.
 func modelsFromCLI(list []cliModel) []ModelEntry {
 	out := make([]ModelEntry, 0, len(list))
 	for _, m := range list {
@@ -112,10 +103,6 @@ func modelsFromCLI(list []cliModel) []ModelEntry {
 	return out
 }
 
-// commandsFromCLI maps the CLI's reported slash commands to ACP available
-// commands. The argument hint, when present, becomes an unstructured input hint.
-// hiddenCommands are CLI slash commands with no useful ACP behavior; the
-// reference filters the same set (getAvailableSlashCommands).
 var hiddenCommands = map[string]bool{
 	"clear": true, "cost": true, "keybindings-help": true, "login": true,
 	"logout": true, "output-style:new": true, "release-notes": true, "todos": true,
@@ -136,9 +123,6 @@ func commandsFromCLI(list []cliCommand) []acp.AvailableCommand {
 	return out
 }
 
-// Control-protocol wire types for the `initialize` request/response. Only the
-// fields we consume are modeled; the CLI emits many more (agents, account,
-// output styles).
 type initControlRequest struct {
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`

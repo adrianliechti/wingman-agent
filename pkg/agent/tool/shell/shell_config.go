@@ -2,16 +2,8 @@ package shell
 
 import "strings"
 
-// readOnlyCommands maps a command base name to the safe ways to invoke it.
-//
-//   - nil  = the entire command is read-only with any args
-//   - []   = same as nil (no subcommand restrictions)
-//   - non-empty = only invocations that start with one of these subcommand
-//     prefixes are read-only (e.g. `git status`, `git log`)
-//
-// Lookup is case-insensitive (see normalizedReadOnlyCommands).
 var readOnlyCommands = map[string][]string{
-	// Unix: search & find
+
 	"rg":      nil,
 	"grep":    nil,
 	"egrep":   nil,
@@ -23,7 +15,6 @@ var readOnlyCommands = map[string][]string{
 	"whereis": nil,
 	"type":    nil,
 
-	// Unix: list & view
 	"ls":   nil,
 	"cat":  nil,
 	"head": nil,
@@ -36,7 +27,6 @@ var readOnlyCommands = map[string][]string{
 	"stat": nil,
 	"wc":   nil,
 
-	// Unix: text processing
 	"cut":    nil,
 	"sort":   nil,
 	"uniq":   nil,
@@ -49,14 +39,12 @@ var readOnlyCommands = map[string][]string{
 	"yq":     nil,
 	"xq":     nil,
 
-	// Unix: path utilities
 	"pwd":      nil,
 	"realpath": nil,
 	"dirname":  nil,
 	"basename": nil,
 	"readlink": nil,
 
-	// Unix: system info
 	"echo":     nil,
 	"printenv": nil,
 	"whoami":   nil,
@@ -71,18 +59,15 @@ var readOnlyCommands = map[string][]string{
 	"id":       nil,
 	"groups":   nil,
 
-	// Unix: help & docs
 	"man":  nil,
 	"help": nil,
 
-	// Windows cmd.exe: list & view
 	"dir":     nil,
 	"findstr": nil,
 	"where":   nil,
 	"cd":      nil,
 	"set":     nil,
 
-	// PowerShell: common read-only cmdlets
 	"get-content":      nil,
 	"get-childitem":    nil,
 	"get-location":     nil,
@@ -115,22 +100,19 @@ var readOnlyCommands = map[string][]string{
 	"split-path":       nil,
 	"join-path":        nil,
 
-	// PowerShell aliases (not duplicating ones already covered by Unix names above)
-	"gc":  nil, // Get-Content
-	"gci": nil, // Get-ChildItem
-	"gl":  nil, // Get-Location
-	"gi":  nil, // Get-Item
-	"gps": nil, // Get-Process
-	"gsv": nil, // Get-Service
-	"gcm": nil, // Get-Command
-	"gal": nil, // Get-Alias
-	"gv":  nil, // Get-Variable
-	"sls": nil, // Select-String
-	"ft":  nil, // Format-Table
-	"fl":  nil, // Format-List
-	"oh":  nil, // Out-Host
-
-	// Subcommand-restricted tools
+	"gc":  nil,
+	"gci": nil,
+	"gl":  nil,
+	"gi":  nil,
+	"gps": nil,
+	"gsv": nil,
+	"gcm": nil,
+	"gal": nil,
+	"gv":  nil,
+	"sls": nil,
+	"ft":  nil,
+	"fl":  nil,
+	"oh":  nil,
 
 	"go": {"doc", "list", "version", "help"},
 
@@ -180,8 +162,6 @@ var readOnlyCommands = map[string][]string{
 	"tofu":      {"version", "providers", "state list", "state show", "output", "graph", "show", "validate", "help", "-version", "-help"},
 }
 
-// normalizedReadOnlyCommands holds the same data lower-cased once at startup,
-// so per-command lookup is a single map access.
 var normalizedReadOnlyCommands = map[string][]string{}
 
 func init() {

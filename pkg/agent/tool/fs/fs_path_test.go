@@ -73,7 +73,6 @@ func TestMacOSCaseInsensitivePaths(t *testing.T) {
 	upperPath := strings.ToUpper(tmpDir) + "/TESTFILE.TXT"
 	lowerPath := strings.ToLower(tmpDir) + "/testfile.txt"
 
-	// Both should resolve within the workspace (not "outside workspace" error)
 	_, err := readTool.Execute(context.Background(), map[string]any{
 		"file_path": upperPath,
 	})

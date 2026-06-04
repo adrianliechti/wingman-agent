@@ -21,10 +21,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow()
 
-	// Default is 32KB — too small for image data URLs. Allow up to 32MB
-	// so pasted/attached screenshots don't trip the read limit and tear
-	// the WS down (which the client then auto-reconnects, looking like
-	// a page reload).
 	conn.SetReadLimit(32 << 20)
 
 	client := newWSClient(conn)
@@ -46,8 +42,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		<-writerDone
 	}()
 
-	// Request ctx is used only for the conn.Read loop. Agent turns must
-	// not inherit from r.Context() — see Server.ctx.
 	for {
 		_, data, err := conn.Read(r.Context())
 		if err != nil {
@@ -81,7 +75,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			s.resolvePrompt(msg)
 
 		case MsgFocus:
-			// UI regained focus — catch edits made in external editors.
+
 			s.files.Notify()
 		}
 	}
@@ -105,9 +99,6 @@ func (s *Server) buildInput(msg ClientMessage) []agent.Content {
 	return input
 }
 
-// handleSend runs one turn through the active agent and streams events
-// to all WS clients. Server-lifetime ctx (not the WS request ctx) so a
-// tab refresh or WS reconnect doesn't abort an in-flight agent turn.
 func (s *Server) handleSend(msg ClientMessage) {
 	a := s.activeAgent()
 	if a == nil {
@@ -121,8 +112,7 @@ func (s *Server) handleSend(msg ClientMessage) {
 
 	stream := a.Send(streamCtx, sid, input)
 	if stream == nil {
-		// Turn already in flight for this session — input was queued
-		// (wingman) or dropped (acp single-session contract).
+
 		return
 	}
 
@@ -157,7 +147,7 @@ func (s *Server) handleSend(msg ClientMessage) {
 					Name:    c.ToolResult.Name,
 					Content: c.ToolResult.Content,
 				})
-				// Any tool (shell included) may have written files.
+
 				s.files.Notify()
 
 			case c.Reasoning != nil && c.Reasoning.Summary != "":
@@ -183,8 +173,6 @@ func (s *Server) handleSend(msg ClientMessage) {
 		})
 	}
 
-	// The authoritative per-turn usage is committed at turn completion (after
-	// the last streamed chunk), so push a final frame once the stream drains.
 	if u := a.Usage(sid); u != (agent.Usage{}) {
 		s.sendSession(sid, Frame{
 			Type:         EvtUsage,
@@ -212,10 +200,6 @@ func (s *Server) handleSend(msg ClientMessage) {
 		s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 	}
 
-	// Wingman persists per-session transcripts to disk; ACP servers store
-	// their own state. Only wingman needs an explicit save here, but both
-	// may have created/updated the on-disk session, so refresh the sidebar
-	// for either backend once the turn produced messages.
 	saved := true
 	if w, ok := a.(*coder.Agent); ok {
 		saved = w.Save(sid) == nil

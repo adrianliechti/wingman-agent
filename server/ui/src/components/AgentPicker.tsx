@@ -15,13 +15,10 @@ interface AgentInfo {
 	name: string;
 }
 
-const BUILTIN_AGENT_ID = "wingman";
+export const BUILTIN_AGENT_ID = "wingman";
 
 interface Props {
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
-	// onSwitchingChange reports the id of an in-flight agent swap (or
-	// null when idle). Parent uses it to render a separate loader
-	// (e.g. in the session list).
 	onSwitchingChange?: (target: string | null) => void;
 }
 
@@ -82,8 +79,6 @@ export function AgentPicker({ subscribe, onSwitchingChange }: Props) {
 		return () => document.removeEventListener("mousedown", handler);
 	}, [open]);
 
-	// Position the portal-rendered popup under the button. Recompute on
-	// scroll/resize so it stays anchored when the surrounding layout shifts.
 	const placePopup = useCallback(() => {
 		const r = btnRef.current?.getBoundingClientRect();
 		if (!r) return;

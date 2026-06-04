@@ -81,7 +81,6 @@ func TestApplyArguments(t *testing.T) {
 
 	content := "Search for ${ARGUMENTS}. Use ${query} in ${file}."
 
-	// Last argument gets everything remaining
 	result := s.ApplyArguments(content, "foo bar.go baz", "")
 
 	if result != "Search for foo bar.go baz. Use foo in bar.go baz." {
@@ -96,7 +95,6 @@ func TestApplyArguments_LastArgGetsRemainder(t *testing.T) {
 
 	content := "Commit: ${message}"
 
-	// Single argument gets the full string including spaces
 	result := s.ApplyArguments(content, "fix the login bug", "")
 
 	if result != "Commit: fix the login bug" {
@@ -193,7 +191,7 @@ func TestMerge(t *testing.T) {
 		{Name: "commit", Bundled: true, Content: "bundled commit"},
 	}
 	discovered := []Skill{
-		{Name: "Simplify", Location: ".skills/simplify"}, // overrides bundled (case-insensitive)
+		{Name: "Simplify", Location: ".skills/simplify"},
 		{Name: "custom", Location: ".skills/custom"},
 	}
 
@@ -203,15 +201,14 @@ func TestMerge(t *testing.T) {
 		t.Fatalf("expected 3 skills, got %d", len(result))
 	}
 
-	// commit (bundled, not overridden)
 	if result[0].Name != "commit" || !result[0].Bundled {
 		t.Errorf("expected bundled commit first, got %q bundled=%v", result[0].Name, result[0].Bundled)
 	}
-	// Simplify (discovered, overrides bundled)
+
 	if result[1].Name != "Simplify" || result[1].Bundled {
 		t.Errorf("expected discovered Simplify, got %q bundled=%v", result[1].Name, result[1].Bundled)
 	}
-	// custom (discovered, new)
+
 	if result[2].Name != "custom" {
 		t.Errorf("expected custom, got %q", result[2].Name)
 	}
@@ -234,7 +231,7 @@ func TestFormatForPrompt(t *testing.T) {
 	if !contains(result, "<location>.skills/test/SKILL.md</location>") {
 		t.Error("expected location for file-based skill")
 	}
-	// Bundled skill should NOT have a location tag
+
 	if contains(result, "<location>builtin") {
 		t.Error("bundled skill should not have location tag")
 	}

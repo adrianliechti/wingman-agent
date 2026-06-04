@@ -52,6 +52,9 @@ func DefaultConfig() (*Config, func(), error) {
 
 	mainWorkspace := memoryStore.WorkspaceDir("main")
 	mcpManager, _ := mcp.Load(filepath.Join(mainWorkspace, "mcp.json"))
+	if mcpManager != nil {
+		mcpManager.Dir = mainWorkspace
+	}
 
 	cfg := &Config{
 		AssistantName: envOrDefault("ASSISTANT_NAME", "Claw"),
