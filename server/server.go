@@ -391,8 +391,13 @@ func (s *Server) sendSessionState(sid string) {
 	if a == nil {
 		return
 	}
-	messages := a.Messages(sid)
-	u := a.Usage(sid)
+	s.sendSessionSnapshot(sid, a.Messages(sid), a.Usage(sid))
+	for _, f := range s.pendingPromptFramesFor(sid) {
+		s.send(f)
+	}
+}
+
+func (s *Server) sendSessionSnapshot(sid string, messages []agent.Message, u agent.Usage) {
 	s.sendSession(sid, Frame{
 		Type:         EvtSessionState,
 		Phase:        s.sessionPhase(sid),
@@ -401,9 +406,6 @@ func (s *Server) sendSessionState(sid string) {
 		CachedTokens: u.CachedTokens,
 		OutputTokens: u.OutputTokens,
 	})
-	for _, f := range s.pendingPromptFramesFor(sid) {
-		s.send(f)
-	}
 }
 
 // ─── Session endpoints ────────────────────────────────────────────
@@ -468,7 +470,13 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// s.ctx (not r.Context()) so a WS reconnect mid-load doesn't abort.
-	if err := a.LoadSession(s.ctx, id); err != nil {
+	var err error
+	if loader, ok := a.(code.SessionLoadStreamer); ok {
+		err = s.streamLoad(loader, id)
+	} else {
+		err = a.LoadSession(s.ctx, id)
+	}
+	if err != nil {
 		if errors.Is(err, errors.ErrUnsupported) {
 			http.Error(w, "load not supported for this agent", http.StatusMethodNotAllowed)
 			return
@@ -478,6 +486,24 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.sendSessionState(id)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) streamLoad(loader code.SessionLoadStreamer, id string) error {
+	a := s.activeAgent()
+	const minInterval = 150 * time.Millisecond
+	var last time.Time
+	for msgs, err := range loader.LoadSessionStream(s.ctx, id) {
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		if !last.IsZero() && now.Sub(last) < minInterval {
+			continue
+		}
+		last = now
+		s.sendSessionSnapshot(id, msgs, a.Usage(id))
+	}
+	return nil
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {

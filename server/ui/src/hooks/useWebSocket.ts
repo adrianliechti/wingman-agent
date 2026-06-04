@@ -30,7 +30,7 @@ export function messagesToEntries(
 	messages: ConversationMessage[],
 ): ChatEntry[] {
 	const entries: ChatEntry[] = [];
-	for (const m of messages) {
+	messages.forEach((m, mi) => {
 		// Collect images in this message so we can attach them to the user
 		// entry alongside its text (or stand them up as an image-only entry).
 		const isUser = m.role === "user";
@@ -39,10 +39,10 @@ export function messagesToEntries(
 			: [];
 		let imagesAttached = msgImages.length === 0;
 
-		for (const c of m.content) {
+		m.content.forEach((c, ci) => {
 			if (c.text) {
 				const entry: ChatEntry = {
-					id: crypto.randomUUID(),
+					id: `t-${mi}-${ci}`,
 					type: isUser ? "user" : "assistant",
 					content: c.text,
 				};
@@ -54,7 +54,7 @@ export function messagesToEntries(
 			}
 			if (c.reasoning?.summary) {
 				entries.push({
-					id: crypto.randomUUID(),
+					id: `r-${mi}-${ci}`,
 					type: "reasoning",
 					content: c.reasoning.summary,
 					reasoningId: c.reasoning.id,
@@ -65,7 +65,7 @@ export function messagesToEntries(
 				// would have produced (tool_call event), with the same toolId
 				// the result will later match against.
 				entries.push({
-					id: c.tool_call.id || crypto.randomUUID(),
+					id: c.tool_call.id || `tc-${mi}-${ci}`,
 					type: "tool",
 					content: "",
 					toolId: c.tool_call.id,
@@ -87,7 +87,7 @@ export function messagesToEntries(
 					existing.toolResult = c.tool_result.content;
 				} else {
 					entries.push({
-						id: c.tool_result.id || crypto.randomUUID(),
+						id: c.tool_result.id || `tr-${mi}-${ci}`,
 						type: "tool",
 						content: "",
 						toolId: c.tool_result.id,
@@ -97,17 +97,17 @@ export function messagesToEntries(
 					});
 				}
 			}
-		}
+		});
 		// User message with image(s) but no text — render an image-only entry.
 		if (!imagesAttached) {
 			entries.push({
-				id: crypto.randomUUID(),
+				id: `img-${mi}`,
 				type: "user",
 				content: "",
 				images: msgImages,
 			});
 		}
-	}
+	});
 	return entries;
 }
 

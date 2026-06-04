@@ -508,7 +508,7 @@ export function ChatPanel({
 				className="h-full overflow-y-auto pb-24 [overflow-anchor:none]"
 				ref={containerRef}
 			>
-				{loading ? (
+				{loading && entries.length === 0 ? (
 					<div className="h-full flex items-center justify-center">
 						<Loader2 size={16} className="text-fg-dim animate-spin" />
 					</div>

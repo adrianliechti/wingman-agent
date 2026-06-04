@@ -67,6 +67,7 @@ type sessionState struct {
 	messages []agent.Message
 	usage    agent.Usage
 	inflight *turn
+	loaded   bool
 
 	toolCallsMu sync.Mutex
 	toolCalls   map[string]toolCall
@@ -397,18 +398,30 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 		toolCalls: map[string]toolCall{},
 	}
 	sess.applyModes(resp.Modes)
+	sess.loaded = true
 	a.mu.Lock()
 	a.sessions[id] = sess
 	a.mu.Unlock()
 	return id, nil
 }
 
-// LoadSession drains replay synchronously: Messages(id) reflects the
-// loaded transcript by the time it returns nil.
 func (a *Agent) LoadSession(ctx context.Context, id string) error {
-	if !a.caps.LoadSession {
-		return errors.ErrUnsupported
+	var ferr error
+	for _, err := range a.LoadSessionStream(ctx, id) {
+		if err != nil {
+			ferr = err
+		}
 	}
+	return ferr
+}
+
+func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]agent.Message, error] {
+	if !a.caps.LoadSession {
+		return func(yield func([]agent.Message, error) bool) {
+			yield(nil, errors.ErrUnsupported)
+		}
+	}
+
 	a.mu.Lock()
 	sess, exists := a.sessions[id]
 	if !exists {
@@ -421,57 +434,93 @@ func (a *Agent) LoadSession(ctx context.Context, id string) error {
 	}
 	a.mu.Unlock()
 
-	loadCtx, cancel := context.WithCancel(ctx)
-	t := &turn{
-		events: make(chan event, 256),
-		done:   make(chan struct{}),
-		cancel: cancel,
-	}
 	sess.mu.Lock()
-	if sess.inflight != nil {
+	if sess.loaded {
+		snap := append([]agent.Message(nil), sess.messages...)
 		sess.mu.Unlock()
-		cancel()
-		return fmt.Errorf("session %s is busy", id)
+		return func(yield func([]agent.Message, error) bool) {
+			yield(snap, nil)
+		}
 	}
-	sess.inflight = t
 	sess.mu.Unlock()
 
-	defer func() {
-		close(t.done)
-		cancel()
+	return func(yield func([]agent.Message, error) bool) {
+		loadCtx, cancel := context.WithCancel(ctx)
+		t := &turn{
+			events: make(chan event, 256),
+			done:   make(chan struct{}),
+			cancel: cancel,
+		}
 		sess.mu.Lock()
-		sess.inflight = nil
-		if len(t.emitted) > 0 {
-			sess.messages = append(sess.messages, t.emitted...)
+		if sess.inflight != nil {
+			sess.mu.Unlock()
+			cancel()
+			yield(nil, fmt.Errorf("session %s is busy", id))
+			return
 		}
+		sess.inflight = t
 		sess.mu.Unlock()
-	}()
 
-	loadErrCh := make(chan error, 1)
-	go func() {
-		resp, err := a.conn.LoadSession(loadCtx, acpsdk.LoadSessionRequest{
-			SessionId:  acpsdk.SessionId(id),
-			Cwd:        a.workspace.RootPath,
-			McpServers: []acpsdk.McpServer{},
-		})
-		if err == nil {
-			a.refreshConfig(resp.ConfigOptions)
-			sess.applyModes(resp.Modes)
-		}
-		loadErrCh <- err
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case err := <-loadErrCh:
-			return err
-		case ev := <-t.events:
-			if ev.done {
-				return ev.err
+		ok := false
+		defer func() {
+			close(t.done)
+			cancel()
+			sess.mu.Lock()
+			sess.inflight = nil
+			if ok {
+				if len(t.emitted) > 0 {
+					sess.messages = append(sess.messages, t.emitted...)
+				}
+				sess.loaded = true
 			}
-			// Drained — already in t.emitted via translateUpdate.
+			sess.mu.Unlock()
+		}()
+
+		snapshot := func() []agent.Message {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			return append([]agent.Message(nil), t.emitted...)
+		}
+
+		loadErrCh := make(chan error, 1)
+		go func() {
+			resp, err := a.conn.LoadSession(loadCtx, acpsdk.LoadSessionRequest{
+				SessionId:  acpsdk.SessionId(id),
+				Cwd:        a.workspace.RootPath,
+				McpServers: []acpsdk.McpServer{},
+			})
+			if err == nil {
+				a.refreshConfig(resp.ConfigOptions)
+				sess.applyModes(resp.Modes)
+			}
+			loadErrCh <- err
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				yield(nil, ctx.Err())
+				return
+			case err := <-loadErrCh:
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				ok = true
+				yield(snapshot(), nil)
+				return
+			case ev := <-t.events:
+				if ev.done {
+					if ev.err != nil {
+						yield(nil, ev.err)
+						return
+					}
+					continue
+				}
+				if !yield(snapshot(), nil) {
+					return
+				}
+			}
 		}
 	}
 }

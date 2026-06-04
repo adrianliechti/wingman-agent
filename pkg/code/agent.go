@@ -117,3 +117,7 @@ type Agent interface {
 	// Idempotent.
 	Close() error
 }
+
+type SessionLoadStreamer interface {
+	LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]agent.Message, error]
+}
