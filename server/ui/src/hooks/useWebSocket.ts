@@ -511,6 +511,14 @@ export function useWebSocket() {
 		[send],
 	);
 
+	// Nudge the server to re-check the workspace when the window regains
+	// focus — picks up edits made in external editors without polling.
+	useEffect(() => {
+		const onFocus = () => send({ type: "focus" });
+		window.addEventListener("focus", onFocus);
+		return () => window.removeEventListener("focus", onFocus);
+	}, [send]);
+
 	// Reply to a server prompt. Clears the local pending state
 	// optimistically — the server's Ask/Confirm goroutine will return
 	// once the response lands, then the rest of the turn streams as
@@ -596,7 +604,7 @@ export function useWebSocket() {
 			ws.onopen = () => {
 				setConnected(true);
 				// Trigger panels to refetch in case state changed while
-				// disconnected — fsnotify events don't get replayed across
+				// disconnected — change events aren't replayed across
 				// reconnects, so this is the only safety net.
 				for (const sub of subscribersRef.current) {
 					sub({ type: "diffs_changed" });

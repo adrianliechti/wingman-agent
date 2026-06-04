@@ -94,8 +94,7 @@ func (s *Server) handleDiffRevert(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.broadcast(Frame{Type: EvtDiffsChanged})
-	s.broadcast(Frame{Type: EvtFilesChanged})
+	s.flushFiles()
 
 	w.WriteHeader(http.StatusNoContent)
 }

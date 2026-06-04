@@ -25,10 +25,15 @@ interface PromptResponseMessage {
 	approved?: boolean;
 }
 
+interface FocusMessage {
+	type: "focus";
+}
+
 export type ClientMessage =
 	| SendMessage
 	| CancelMessage
-	| PromptResponseMessage;
+	| PromptResponseMessage
+	| FocusMessage;
 
 // Server → Client. Per-session events carry `session`; workspace-level
 // events leave it unset. The hook routes per-session events into the

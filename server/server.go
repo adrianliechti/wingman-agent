@@ -25,6 +25,7 @@ import (
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/system"
+	"github.com/adrianliechti/wingman-agent/pkg/watch"
 )
 
 // Compile-time check: the HTTP server is the [code.UI] that any
@@ -74,6 +75,14 @@ type Server struct {
 	// replays the rest on reconnect.
 	promptsMu      sync.Mutex
 	pendingPrompts map[string]pendingPrompt
+
+	// files coalesces workspace change checks: kicked on tool results,
+	// turn end, UI focus, and file mutations from the UI, with a slow
+	// fallback tick for changes nothing announces. State below is owned
+	// by the monitor goroutine (see checkWorkspace).
+	files           *watch.Monitor
+	prevGit         bool
+	prevFingerprint uint64
 }
 
 func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, error) {
@@ -108,6 +117,13 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	s.agent = wa
 
 	ws.WarmUp()
+
+	// Started here (not in Run) because the desktop app serves the handler
+	// directly and never calls Run.
+	s.prevGit = ws.IsGitRepo()
+	s.files = watch.New(watch.Options{Active: s.hasClients}, s.checkWorkspace)
+	go s.files.Run(ctx)
+
 	go func() {
 		if err := ws.InitMCP(context.Background()); err != nil {
 			fmt.Fprintf(os.Stderr, "MCP init warning: %v\n", err)
@@ -184,15 +200,10 @@ func (s *Server) handleWebSocketURL(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Run(ctx context.Context) error {
 	// Adopt the caller-supplied ctx as the server-lifetime ctx so the
 	// signal handler below tears down everything that lives off s.ctx
-	// (pollFiles, agent turns started during HTTP handlers, etc.).
-	// Previously these two were independent — pollFiles would outlive
-	// Run if only the local derived ctx was cancelled.
+	// (agent turns started during HTTP handlers, etc.).
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.ctx = ctx
-
-	// Started here (not in New) so SIGTERM via the handler below stops it.
-	go s.pollFiles(ctx)
 
 	port, err := system.FreePort(s.port)
 	if err != nil {
@@ -678,47 +689,46 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, caps)
 }
 
-func (s *Server) pollFiles(ctx context.Context) {
-	const interval = 2 * time.Second
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+func (s *Server) hasClients() bool {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	return len(s.wsConns) > 0
+}
 
+// flushFiles requests an immediate workspace check after a known mutation.
+// Without Rewind there is no fingerprint to compare, so broadcast directly.
+func (s *Server) flushFiles() {
+	if s.workspace.Rewind == nil {
+		s.broadcast(Frame{Type: EvtFilesChanged})
+		return
+	}
+	s.files.Flush()
+}
+
+// checkWorkspace is the files Monitor's check callback. It runs only on
+// the monitor goroutine, so prevGit/prevFingerprint need no locking.
+func (s *Server) checkWorkspace() {
 	ws := s.workspace
-	prevGit := ws.IsGitRepo()
-	var prevFingerprint uint64
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.wsMu.Lock()
-			hasClient := len(s.wsConns) > 0
-			s.wsMu.Unlock()
-			if !hasClient {
-				continue
-			}
-
-			gitNow := ws.IsGitRepo()
-			if gitNow != prevGit {
-				ws.SyncProjectMode()
-				s.broadcast(Frame{Type: EvtCapabilitiesChanged})
-				if ws.LSP != nil {
-					s.broadcast(Frame{Type: EvtDiagnosticsChanged})
-				}
-				prevGit = gitNow
-			}
-			// No Rewind = no cheap change signal; the UI re-fetches on user action.
-			if ws.Rewind == nil {
-				continue
-			}
-			fp := ws.Rewind.Fingerprint()
-			if fp != prevFingerprint {
-				s.broadcast(Frame{Type: EvtFilesChanged})
-				s.broadcast(Frame{Type: EvtDiffsChanged})
-				prevFingerprint = fp
-			}
+	gitNow := ws.IsGitRepo()
+	if gitNow != s.prevGit {
+		ws.SyncProjectMode()
+		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+		if ws.LSP != nil {
+			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 		}
+		s.prevGit = gitNow
+	}
+
+	// No Rewind = no cheap change signal; the UI re-fetches on user action.
+	if ws.Rewind == nil {
+		return
+	}
+	fp := ws.Rewind.Fingerprint()
+	if fp != s.prevFingerprint {
+		s.prevFingerprint = fp
+		s.broadcast(Frame{Type: EvtFilesChanged})
+		s.broadcast(Frame{Type: EvtDiffsChanged})
 	}
 }
 

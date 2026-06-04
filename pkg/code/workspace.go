@@ -224,7 +224,7 @@ func (w *Workspace) Diagnostics(ctx context.Context) map[string][]lsp.Diagnostic
 
 // Checkpoint operations no-op when Rewind isn't running so call sites
 // don't need to nil-check. Use w.Rewind directly for non-user-facing
-// poll-loop primitives like Fingerprint.
+// change-detection primitives like Fingerprint.
 
 func (w *Workspace) Commit(msg string) error {
 	if w.Rewind == nil {

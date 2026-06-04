@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -454,72 +456,126 @@ func (m *Manager) Restore(hash string) error {
 	return nil
 }
 
+// Cleanup wipes the shadow repo. It waits for init and any in-flight
+// DiffFromBaseline / Commit / List / Restore (wiping gitDir mid-snapshot
+// surfaces "entry not found" from go-git), but only up to a bound — a
+// minutes-long snapshot on a big repo must not hang app shutdown. On
+// timeout the wipe completes in the background once the op finishes, or
+// CleanupOrphans removes the dir on a later start.
 func (m *Manager) Cleanup() {
-	// Wait for init so we don't race the goroutine writing into gitDir, then
-	// take the mutex so any in-flight DiffFromBaseline / Commit / List /
-	// Restore finishes before we wipe gitDir — otherwise go-git surfaces
-	// "entry not found" / "reference not found" mid-snapshot.
-	<-m.initDone
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.closed = true
-	if m.gitDir != "" {
-		os.RemoveAll(m.gitDir)
-		m.gitDir = ""
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-m.initDone
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.closed = true
+		if m.gitDir != "" {
+			os.RemoveAll(m.gitDir)
+			m.gitDir = ""
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(cleanupTimeout):
 	}
 }
+
+var cleanupTimeout = 5 * time.Second
 
 // Fingerprint returns a 64-bit digest of the worktree's visible state
 // (relative path, mtime, size for every non-ignored file). Doesn't hash
 // content, so a `touch` will fire a refetch even when no diff changed.
+// Per-file digests combine via XOR, so the scan parallelizes across
+// subdirectories without ordering concerns.
 func (m *Manager) Fingerprint() uint64 {
 	if err := m.ready(); err != nil {
 		return 0
 	}
 
+	s := &fpScanner{
+		matcher: m.excludeMatcher(),
+		sem:     make(chan struct{}, runtime.NumCPU()),
+	}
+	return s.scanDir(m.workingDir, nil)
+}
+
+type fpScanner struct {
+	matcher gitignore.Matcher
+	sem     chan struct{}
+}
+
+func (s *fpScanner) scanDir(dir string, components []string) uint64 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+
+	// sum is only touched by this frame; goroutines merge into asyncSum.
+	var sum, asyncSum uint64
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, e := range entries {
+		name := e.Name()
+		if len(components) == 0 && name == ".git" {
+			continue
+		}
+
+		child := append(components, name)
+
+		if e.IsDir() {
+			if s.matcher.Match(child, true) {
+				continue
+			}
+			sub := filepath.Join(dir, name)
+			select {
+			case s.sem <- struct{}{}:
+				// child aliases components' backing array, which the next
+				// iteration overwrites — the goroutine needs its own copy.
+				comps := slices.Clone(child)
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					v := s.scanDir(sub, comps)
+					<-s.sem
+					mu.Lock()
+					asyncSum ^= v
+					mu.Unlock()
+				}()
+			default:
+				sum ^= s.scanDir(sub, child)
+			}
+			continue
+		}
+
+		if s.matcher.Match(child, false) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		sum ^= hashEntry(child, info)
+	}
+
+	wg.Wait()
+	return sum ^ asyncSum
+}
+
+func hashEntry(components []string, info fs.FileInfo) uint64 {
 	h := fnv.New64a()
-	matcher := m.excludeMatcher()
-
-	filepath.WalkDir(m.workingDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	for i, c := range components {
+		if i > 0 {
+			h.Write([]byte{filepath.Separator})
 		}
-
-		rel, err := filepath.Rel(m.workingDir, path)
-		if err != nil || rel == "." {
-			return nil
-		}
-
-		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		components := strings.Split(rel, string(filepath.Separator))
-		if matcher.Match(components, d.IsDir()) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		if d.IsDir() {
-			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-
-		h.Write([]byte(rel))
-		binary.Write(h, binary.LittleEndian, info.ModTime().UnixNano())
-		binary.Write(h, binary.LittleEndian, info.Size())
-		return nil
-	})
-
+		h.Write([]byte(c))
+	}
+	var buf [16]byte
+	binary.LittleEndian.PutUint64(buf[:8], uint64(info.ModTime().UnixNano()))
+	binary.LittleEndian.PutUint64(buf[8:], uint64(info.Size()))
+	h.Write(buf[:])
 	return h.Sum64()
 }
 

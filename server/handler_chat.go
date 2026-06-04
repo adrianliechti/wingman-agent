@@ -79,6 +79,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			s.resolvePrompt(msg)
+
+		case MsgFocus:
+			// UI regained focus — catch edits made in external editors.
+			s.files.Notify()
 		}
 	}
 }
@@ -153,6 +157,8 @@ func (s *Server) handleSend(msg ClientMessage) {
 					Name:    c.ToolResult.Name,
 					Content: c.ToolResult.Content,
 				})
+				// Any tool (shell included) may have written files.
+				s.files.Notify()
 
 			case c.Reasoning != nil && c.Reasoning.Summary != "":
 				s.setSessionPhase(sid, "thinking")
@@ -189,7 +195,7 @@ func (s *Server) handleSend(msg ClientMessage) {
 	}
 
 	ws := s.workspace
-	s.broadcast(Frame{Type: EvtFilesChanged})
+	s.flushFiles()
 
 	if ws.Rewind != nil {
 		commitMsg := msg.Text
@@ -201,7 +207,6 @@ func (s *Server) handleSend(msg ClientMessage) {
 				s.broadcast(Frame{Type: EvtCheckpointsChanged})
 			}
 		}()
-		s.broadcast(Frame{Type: EvtDiffsChanged})
 	}
 	if ws.LSP != nil {
 		s.broadcast(Frame{Type: EvtDiagnosticsChanged})

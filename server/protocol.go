@@ -4,6 +4,7 @@ const (
 	MsgSend           = "send"
 	MsgCancel         = "cancel"
 	MsgPromptResponse = "prompt_response"
+	MsgFocus          = "focus"
 )
 
 type ClientMessage struct {

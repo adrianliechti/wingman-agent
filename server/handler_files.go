@@ -277,10 +277,7 @@ func (s *Server) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.broadcast(Frame{Type: EvtFilesChanged})
-	if s.workspace.Rewind != nil {
-		s.broadcast(Frame{Type: EvtDiffsChanged})
-	}
+	s.flushFiles()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -344,7 +341,7 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.broadcast(Frame{Type: EvtFilesChanged})
+	s.flushFiles()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -379,7 +376,7 @@ func (s *Server) handleFileRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.broadcast(Frame{Type: EvtFilesChanged})
+	s.flushFiles()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -422,7 +419,7 @@ func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.broadcast(Frame{Type: EvtFilesChanged})
+	s.flushFiles()
 	w.WriteHeader(http.StatusNoContent)
 }
 

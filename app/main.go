@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -83,13 +84,29 @@ func (a *App) RemoveWorkspace(path string) ([]string, error) {
 	return s.Workspaces, nil
 }
 
+// shutdown bounds the teardown so a slow component (LSP shutdown
+// handshakes, MCP subprocesses) can't hang app quit. Kill signals are
+// issued before the waits we abandon, and orphaned rewind dirs are
+// reclaimed by CleanupOrphans on the next start.
 func (a *App) shutdown(ctx context.Context) {
 	a.mu.Lock()
 	srv := a.server
 	a.mu.Unlock()
 
-	if srv != nil {
+	if srv == nil {
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
 		srv.Close()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		log.Println("shutdown timed out, exiting anyway")
 	}
 }
 

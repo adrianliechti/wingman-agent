@@ -36,8 +36,7 @@ func (s *Server) handleCheckpointRestore(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	s.broadcast(Frame{Type: EvtDiffsChanged})
-	s.broadcast(Frame{Type: EvtFilesChanged})
+	s.flushFiles()
 
 	w.WriteHeader(http.StatusNoContent)
 }
