@@ -121,21 +121,18 @@ type HoverResponse struct {
 	Range    *Range        `json:"range,omitempty"`
 }
 
-// HoverContents handles the multiple formats that LSP servers may return:
-// MarkupContent { kind, value }, a plain string, or MarkedString { language, value }.
 type HoverContents struct {
 	Value string
 }
 
 func (h *HoverContents) UnmarshalJSON(data []byte) error {
-	// Try plain string first (some servers like clangd)
+
 	var s string
 	if err := json.Unmarshal(data, &s); err == nil {
 		h.Value = s
 		return nil
 	}
 
-	// Try MarkupContent / MarkedString { kind/language, value }
 	var obj struct {
 		Value string `json:"value"`
 	}
@@ -144,7 +141,6 @@ func (h *HoverContents) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 
-	// Try MarkedString[] array
 	var arr []json.RawMessage
 	if err := json.Unmarshal(data, &arr); err == nil {
 		var parts []string
@@ -216,8 +212,6 @@ type WorkspaceSymbolParams struct {
 	Query string `json:"query"`
 }
 
-// WorkspaceSymbol is the newer response type for workspace/symbol (since 3.17).
-// Unlike SymbolInformation, its location range may be omitted.
 type WorkspaceSymbol struct {
 	Name     string `json:"name"`
 	Kind     int    `json:"kind"`

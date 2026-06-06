@@ -19,14 +19,9 @@ const (
 	DefaultMaxLines = 2000
 	DefaultMaxBytes = 30 * 1024
 
-	// MaxEditFileBytes caps the file size that `edit` will operate on.
-	// Larger files should be rewritten with `write` rather than patched.
 	MaxEditFileBytes = 10 * 1024 * 1024
 )
 
-// normalizePath converts an absolute path to a relative path if it starts with the working directory.
-// This is needed because os.Root expects relative paths, but the LLM may provide absolute paths.
-// Always returns paths with OS-native separators (backslash on Windows, forward slash on Unix).
 func normalizePath(path, workingDir string) string {
 	if !filepath.IsAbs(path) {
 		return filepath.FromSlash(path)
@@ -43,8 +38,6 @@ func normalizePathFS(path, workingDir string) string {
 	return pathpkg.Clean(filepath.ToSlash(normalizePath(path, workingDir)))
 }
 
-// expandHome resolves a leading `~` to the user's home dir. Accepts both
-// `~/...` (forward slash) and `~\...` (Windows backslash) forms.
 func expandHome(path string) string {
 	if path == "~" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -68,10 +61,6 @@ func ensurePathInWorkspaceFS(pathArg, workingDir, action string) (string, error)
 	return normalizePathFS(pathArg, workingDir), nil
 }
 
-// matchAllowedRoot reports whether absPath falls inside any allowedRoots
-// entry. On match it returns the cleaned root path and the path relative
-// to that root in OS-native form ("" when absPath equals the root itself).
-// Comparison is case-insensitive on macOS/Windows.
 func matchAllowedRoot(absPath string, allowedRoots []string) (rootClean, sub string, ok bool) {
 	cleaned := cleanPath(absPath)
 	cmpPath := normalizePathForComparison(cleaned)
@@ -84,24 +73,19 @@ func matchAllowedRoot(absPath string, allowedRoots []string) (rootClean, sub str
 			return allowedClean, "", true
 		}
 		if strings.HasPrefix(cmpPath, cmpAllowed+sep) {
-			// Case-folding preserves byte length, so slicing the input by
-			// the allowed-root's byte length yields the original-case tail.
+
 			return allowedClean, cleaned[len(allowedClean)+1:], true
 		}
 	}
 	return "", "", false
 }
 
-// fileTarget classifies a read/write/edit path. When InWorkspace is true,
-// RelPath holds the root-relative path for os.Root ops. Otherwise AbsPath
-// holds an absolute path inside an allowed root for raw os.* ops.
 type fileTarget struct {
 	InWorkspace bool
 	RelPath     string
 	AbsPath     string
 }
 
-// statFileTarget routes to root.Stat or os.Stat based on the target.
 func statFileTarget(root *os.Root, target fileTarget) (os.FileInfo, error) {
 	if target.InWorkspace {
 		return root.Stat(target.RelPath)
@@ -109,7 +93,6 @@ func statFileTarget(root *os.Root, target fileTarget) (os.FileInfo, error) {
 	return os.Stat(target.AbsPath)
 }
 
-// readFileTarget routes to root.ReadFile or os.ReadFile.
 func readFileTarget(root *os.Root, target fileTarget) ([]byte, error) {
 	if target.InWorkspace {
 		return root.ReadFile(target.RelPath)
@@ -117,8 +100,6 @@ func readFileTarget(root *os.Root, target fileTarget) ([]byte, error) {
 	return os.ReadFile(target.AbsPath)
 }
 
-// writeFileTarget routes to the workspace-sandboxed writer or to raw
-// os.MkdirAll + os.WriteFile for allowed roots.
 func writeFileTarget(root *os.Root, target fileTarget, content string) error {
 	if target.InWorkspace {
 		return writeRootFile(root, target.RelPath, content)
@@ -129,10 +110,6 @@ func writeFileTarget(root *os.Root, target fileTarget, content string) error {
 	return os.WriteFile(target.AbsPath, []byte(content), 0644)
 }
 
-// resolveFileTarget classifies pathArg for read/write/edit. Paths inside
-// workingDir resolve to root-relative form. Absolute paths inside any
-// allowedRoot resolve to absolute form for raw os.* ops. Anything else is
-// rejected.
 func resolveFileTarget(pathArg, workingDir string, allowedRoots []string, action string) (fileTarget, error) {
 	pathArg = expandHome(pathArg)
 
@@ -155,12 +132,6 @@ func resolveFileTarget(pathArg, workingDir string, allowedRoots []string, action
 	return fileTarget{}, fmt.Errorf("cannot %s: path %q is outside workspace %q and not in any allowed root", action, pathArg, workingDir)
 }
 
-// searchTarget locates a resolved search root for grep/glob. Workspace
-// paths reuse the workspace root; absolute paths inside an allowed read
-// root open a fresh os.Root scoped to that root. Callers must invoke
-// Close when done. ReportPath formats result paths so workspace results
-// remain workspace-relative while allowed-root results are absolute and
-// remain recognizable to the model.
 type searchTarget struct {
 	Root        *os.Root
 	SearchDirFS string
@@ -182,9 +153,6 @@ func (st *searchTarget) ReportPath(fsPath string) string {
 	return filepath.Join(st.reportPrefix, filepath.FromSlash(fsPath))
 }
 
-// resolveSearchTarget classifies pathArg for grep/glob. Paths inside
-// workingDir reuse workspaceRoot. Absolute paths inside any allowedReadRoot
-// open a fresh os.Root that the caller must Close. Anything else is rejected.
 func resolveSearchTarget(pathArg, workingDir string, workspaceRoot *os.Root, allowedReadRoots []string, action string) (*searchTarget, error) {
 	pathArg = expandHome(pathArg)
 
@@ -233,8 +201,6 @@ func isOutsideWorkspace(path, workingDir string) bool {
 	return !ok
 }
 
-// relPathWithinWorkspace returns the relative path from workingDir to absPath
-// if absPath is within workingDir. It preserves the original casing where possible.
 func relPathWithinWorkspace(absPath, workingDir string) (string, bool) {
 	if !filepath.IsAbs(absPath) {
 		return filepath.FromSlash(absPath), true
@@ -299,9 +265,6 @@ func cleanPath(path string) string {
 	return filepath.Clean(filepath.FromSlash(path))
 }
 
-// normalizePathForComparison normalizes paths for case-insensitive comparison.
-// Windows paths are fully case-insensitive, and macOS (APFS) is case-insensitive by default.
-// We treat both as case-insensitive for path comparison.
 func normalizePathForComparison(path string) string {
 	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		return strings.ToLower(path)

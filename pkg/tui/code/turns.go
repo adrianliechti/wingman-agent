@@ -44,8 +44,7 @@ func buildTurns(messages []agent.Message) []turn {
 			}
 		}
 		if hasText {
-			// Only the latest text-bearing assistant message counts as "the
-			// answer"; demote any prior final into working.
+
 			if cur.final != nil {
 				cur.working = append(cur.working, *cur.final)
 			}

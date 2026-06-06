@@ -76,7 +76,6 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// Matches claude/ripgrep: `*` includes dotfiles and gitignored files.
 		if !strings.Contains(result, "debug.log") {
 			t.Errorf("expected gitignored file in result, got: %s", result)
 		}

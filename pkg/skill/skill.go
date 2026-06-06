@@ -111,8 +111,6 @@ func (s *Skill) ApplyArguments(content, args, skillDir string) string {
 		return m
 	})
 
-	// $KEY is word-bounded; the trailing boundary char (or end-of-input)
-	// is captured and re-emitted so we don't chew it.
 	content = barePattern.ReplaceAllStringFunc(content, func(m string) string {
 		sub := barePattern.FindStringSubmatch(m)
 		name, boundary := sub[1], sub[2]
@@ -137,8 +135,7 @@ func (s *Skill) ApplyArguments(content, args, skillDir string) string {
 var (
 	indexedPattern = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)\[(\d+)\]\}?`)
 	bracedPattern  = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*|\d+)\}`)
-	// Trailing boundary capture prevents chewing the next char and avoids
-	// re-matching the indexed form already handled by indexedPattern.
+
 	barePattern = regexp.MustCompile(`\$([A-Za-z_][A-Za-z0-9_]*|\d+)([^A-Za-z0-9_\[]|$)`)
 )
 
@@ -192,7 +189,6 @@ func discover(root string, dirs []string, relativeLocation bool) []Skill {
 			continue
 		}
 
-		// doublestar.Glob doesn't guarantee ordering; sort for determinism.
 		slices.Sort(matches)
 
 		for _, match := range matches {
@@ -270,7 +266,6 @@ func MaterializeBundled(s *Skill) (string, error) {
 	dir := filepath.Join(home, ".wingman", "skills", s.Name)
 	file := filepath.Join(dir, "SKILL.md")
 
-	// Don't overwrite user customizations.
 	if _, err := os.Stat(file); err == nil {
 		s.Location = dir
 		return dir, nil
@@ -329,9 +324,6 @@ func Merge(bundled, discovered []Skill) []Skill {
 	return result
 }
 
-// FormatForPrompt only includes skills with an on-disk Location; bundled
-// skills appear only after the user has invoked one (which materializes it).
-// The slash-command picker UI lists everything regardless.
 func FormatForPrompt(skills []Skill) string {
 	var sb strings.Builder
 	count := 0
@@ -365,9 +357,6 @@ func FormatForPrompt(skills []Skill) string {
 	return sb.String()
 }
 
-// displayLocation abbreviates home-relative paths with `~` (avoids leaking
-// the username) and always emits forward slashes so the model gets one
-// canonical form to round-trip back to the read tool.
 func displayLocation(loc string) string {
 	if filepath.IsAbs(loc) {
 		if home, err := os.UserHomeDir(); err == nil {

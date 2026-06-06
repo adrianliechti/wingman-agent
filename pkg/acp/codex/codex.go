@@ -6,9 +6,6 @@ import (
 	"sync"
 )
 
-// codexClient is a thin typed wrapper around rpcClient that exposes the subset
-// of `codex app-server` methods this agent uses. Notifications and inbound
-// approval requests are routed by `threadId` to per-session handlers.
 type codexClient struct {
 	rpc *rpcClient
 
@@ -59,9 +56,6 @@ func (c *codexClient) dispatchNotification(method string, params json.RawMessage
 	}
 }
 
-// dispatchRequest answers codex's server→client approval requests. With the
-// session in a non-bypass mode, codex asks before running exec/file/MCP tools;
-// each is forwarded to the ACP client via the registered thread handler.
 func (c *codexClient) dispatchRequest(_ context.Context, method string, params json.RawMessage) (any, *rpcError) {
 	switch method {
 	case "item/commandExecution/requestApproval":
@@ -95,8 +89,6 @@ func (c *codexClient) dispatchRequest(_ context.Context, method string, params j
 	return nil, &rpcError{Code: -32601, Message: "method not found: " + method}
 }
 
-// --- typed wire types (only what we use) ---
-
 type clientInfo struct {
 	Name    string `json:"name"`
 	Title   string `json:"title,omitempty"`
@@ -127,8 +119,6 @@ type threadInfo struct {
 	Turns []rawTurn `json:"turns,omitempty"`
 }
 
-// rawTurn keeps item bodies as opaque JSON; LoadSession replays them through
-// the same shape the live event dispatcher already understands.
 type rawTurn struct {
 	ID    string            `json:"id"`
 	Items []json.RawMessage `json:"items"`
@@ -140,8 +130,7 @@ type threadResumeParams struct {
 	Model         string         `json:"model,omitempty"`
 	ModelProvider string         `json:"modelProvider,omitempty"`
 	Config        map[string]any `json:"config,omitempty"`
-	// ExcludeTurns skips populating thread.turns. Use for resume without
-	// replaying history.
+
 	ExcludeTurns bool `json:"excludeTurns,omitempty"`
 }
 
@@ -154,7 +143,7 @@ type threadResumeResponse struct {
 type threadListParams struct {
 	Cursor         *string  `json:"cursor,omitempty"`
 	Limit          *int     `json:"limit,omitempty"`
-	Cwd            any      `json:"cwd,omitempty"` // string | []string
+	Cwd            any      `json:"cwd,omitempty"`
 	SourceKinds    []string `json:"sourceKinds,omitempty"`
 	ModelProviders []string `json:"modelProviders,omitempty"`
 }
@@ -164,8 +153,6 @@ type threadListResponse struct {
 	NextCursor *string         `json:"nextCursor,omitempty"`
 }
 
-// modelListParams mirrors codex's `model/list` request. Cursor paginates;
-// IncludeHidden is left false so we surface only the picker-visible models.
 type modelListParams struct {
 	Cursor        *string `json:"cursor,omitempty"`
 	Limit         *int    `json:"limit,omitempty"`
@@ -177,8 +164,6 @@ type modelListResponse struct {
 	NextCursor *string      `json:"nextCursor,omitempty"`
 }
 
-// codexModel is one entry from `model/list`. Only the fields the picker needs
-// are modeled; codex emits many more (upgrade info, modalities, service tiers).
 type codexModel struct {
 	ID                        string                  `json:"id"`
 	DisplayName               string                  `json:"displayName"`
@@ -201,9 +186,6 @@ type threadSummary struct {
 	UpdatedAt int64   `json:"updatedAt"`
 }
 
-// userInput uses `any` payloads because the variants have disjoint required
-// fields; encoding as a tagged struct would force `text_elements` to be
-// omitempty (and thus dropped, breaking the codex schema for text inputs).
 type turnStartParams struct {
 	ThreadID       string `json:"threadId"`
 	Input          []any  `json:"input"`
@@ -246,7 +228,7 @@ type execApprovalParams struct {
 }
 
 type execApprovalResponse struct {
-	Decision string `json:"decision"` // accept | acceptForSession | decline | cancel
+	Decision string `json:"decision"`
 }
 
 type fileApprovalParams struct {
@@ -257,25 +239,21 @@ type fileApprovalParams struct {
 }
 
 type fileApprovalResponse struct {
-	Decision string `json:"decision"` // accept | acceptForSession | cancel
+	Decision string `json:"decision"`
 }
 
 type elicitationParams struct {
 	ThreadID   string `json:"threadId"`
 	ServerName string `json:"serverName"`
-	Mode       string `json:"mode"` // form | url
+	Mode       string `json:"mode"`
 	Message    string `json:"message"`
 }
 
-// content/_meta are always emitted (null when absent) to match codex's
-// McpServerElicitationRequestResponse wire struct.
 type elicitationResponse struct {
-	Action  string `json:"action"` // accept | decline | cancel
+	Action  string `json:"action"`
 	Content any    `json:"content"`
 	Meta    any    `json:"_meta"`
 }
-
-// --- typed RPC helpers ---
 
 func (c *codexClient) initialize(ctx context.Context, p initializeParams) error {
 	return c.rpc.call(ctx, "initialize", p, nil)

@@ -60,9 +60,6 @@ export function FileTree({ onFileSelect, subscribe }: Props) {
 		loadDir("").then(setNodes);
 	}, [loadDir]);
 
-	// Refresh the tree while preserving expansion state. Walks every previously
-	// loaded directory, refetches its contents, and recursively rebuilds the
-	// children of expanded folders. New entries appear, removed ones disappear.
 	const refresh = useCallback(async () => {
 		const refreshLevel = async (
 			path: string,
@@ -124,8 +121,6 @@ export function FileTree({ onFileSelect, subscribe }: Props) {
 		[nodes, loadDir],
 	);
 
-	// Close the context menu on any click/scroll/Escape outside it. The menu
-	// sets stopPropagation on its own clicks so they don't bubble here.
 	useEffect(() => {
 		if (!menu) return;
 		const close = () => setMenu(null);
@@ -191,9 +186,6 @@ export function FileTree({ onFileSelect, subscribe }: Props) {
 			? node.path.slice(0, node.path.lastIndexOf("/"))
 			: "";
 
-		// Probe candidate names client-side until the server accepts one. The
-		// backend rejects collisions with 409; cap retries so a pathological
-		// directory can't lock the UI in a loop.
 		for (let i = 1; i <= 50; i++) {
 			const suffix = i === 1 ? " copy" : ` copy ${i}`;
 			const candidate = `${stem}${suffix}${ext}`;
@@ -214,11 +206,6 @@ export function FileTree({ onFileSelect, subscribe }: Props) {
 
 	const handleCopy = async (node: TreeNode) => {
 		setMenu(null);
-		// The fetch resolves inside the ClipboardItem's promise rather than
-		// before navigator.clipboard.write — Safari/Firefox revoke the user
-		// gesture while we await, throwing "not allowed by user agent". The
-		// promise-valued ClipboardItem form lets the browser track the gesture
-		// through the async work.
 		try {
 			await navigator.clipboard.write([
 				new ClipboardItem({
@@ -287,13 +274,15 @@ export function FileTree({ onFileSelect, subscribe }: Props) {
 								) : (
 									<Folder size={14} />
 								)
-							) : (() => {
-								const cls = getDeviconClass(node.name);
-								if (cls) {
-									return <i className={`${cls} text-[14px] leading-none`} />;
-								}
-								return <File size={13} />;
-							})()}
+							) : (
+								(() => {
+									const cls = getDeviconClass(node.name);
+									if (cls) {
+										return <i className={`${cls} text-[14px] leading-none`} />;
+									}
+									return <File size={13} />;
+								})()
+							)}
 						</span>
 						{isRenaming ? (
 							<input

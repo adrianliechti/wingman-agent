@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -14,7 +15,6 @@ func (a *App) getPhase() AppPhase {
 	return AppPhase(a.phase.Load())
 }
 
-// UI goroutine only — Spinner mutates tview state.
 func (a *App) applySpinnerForPhase(phase AppPhase) {
 	if a.spinner == nil {
 		return
@@ -27,15 +27,11 @@ func (a *App) applySpinnerForPhase(phase AppPhase) {
 	}
 }
 
-// UI goroutine only.
 func (a *App) setPhase(phase AppPhase) {
 	a.phase.Store(int32(phase))
 	a.applySpinnerForPhase(phase)
 }
 
-// queuePhase stores the phase synchronously (visible to cancel/command
-// guards immediately) and queues the spinner update. The closure
-// re-reads the phase so a later change supersedes a stale spinner update.
 func (a *App) queuePhase(phase AppPhase) {
 	a.phase.Store(int32(phase))
 	a.app.QueueUpdateDraw(func() {
@@ -46,16 +42,35 @@ func (a *App) queuePhase(phase AppPhase) {
 	})
 }
 
-// Messages is captured before the closure to avoid a race with
-// a.agent.Messages(sid) being mutated mid-flight.
+const renderInterval = 40 * time.Millisecond
+
 func (a *App) render() {
-	if a.promptActive || a.askActive {
+	if !a.renderPending.CompareAndSwap(false, true) {
 		return
 	}
 
-	messages := a.agent.Messages(a.sessionID)
-	a.app.QueueUpdateDraw(func() {
-		a.renderChat(messages)
+	delay := renderInterval - time.Duration(time.Now().UnixNano()-a.renderLast.Load())
+	if delay < 0 {
+		delay = 0
+	}
+
+	time.AfterFunc(delay, func() {
+		a.app.QueueUpdateDraw(func() {
+			a.renderPending.Store(false)
+			a.renderLast.Store(time.Now().UnixNano())
+
+			if a.promptActive || a.askActive {
+				return
+			}
+
+			a.renderChat(a.agent.Messages(a.sessionID))
+
+			usage := a.agent.Usage(a.sessionID)
+			a.inputTokens = usage.InputTokens
+			a.cachedTokens = usage.CachedTokens
+			a.outputTokens = usage.OutputTokens
+			a.updateStatusBar()
+		})
 	})
 }
 
@@ -68,8 +83,6 @@ func (a *App) clearStreamingState() {
 	a.streamStateMu.Unlock()
 }
 
-// snapshotStreamState returns a consistent copy of the four streaming
-// display fields for the UI goroutine to render against.
 func (a *App) snapshotStreamState() (toolName, toolHint, text, reasoning string) {
 	a.streamStateMu.Lock()
 	defer a.streamStateMu.Unlock()
@@ -81,10 +94,6 @@ func (a *App) streamResponse(input []agent.Content) {
 
 	streamCtx, cancel := context.WithCancel(a.ctx)
 
-	// Send returns nil if a turn is already running for this agent — the
-	// input was queued onto it and the in-flight loop will pick it up at
-	// its next safe boundary. Bail out without touching streamCancel /
-	// phase / commit, since the active stream owns those.
 	stream := a.agent.Send(streamCtx, a.sessionID, input)
 	if stream == nil {
 		cancel()
@@ -142,15 +151,13 @@ func (a *App) streamResponse(input []agent.Content) {
 				a.currentToolHint = ""
 				a.streamingText = ""
 				a.streamStateMu.Unlock()
-				// Skip render: rapid tool call/result pairs would flash empty state.
 
 			case c.Reasoning != nil && c.Reasoning.Summary != "":
 				if a.getPhase() != PhaseThinking {
 					a.queuePhase(PhaseThinking)
 				}
 				a.streamStateMu.Lock()
-				// New reasoning item id: drop the prior in-progress block — it'll
-				// reappear from agent.Messages once the request completes.
+
 				if reasoningID != "" && c.Reasoning.ID != reasoningID {
 					a.streamingReasoning = ""
 				}
@@ -171,19 +178,16 @@ func (a *App) streamResponse(input []agent.Content) {
 				a.render()
 			}
 		}
-
-		usage := a.agent.Usage(a.sessionID)
-		a.app.QueueUpdateDraw(func() {
-			a.inputTokens = usage.InputTokens
-			a.cachedTokens = usage.CachedTokens
-			a.outputTokens = usage.OutputTokens
-			a.updateStatusBar()
-		})
 	}
 
 	a.queuePhase(PhaseIdle)
 
+	usage := a.agent.Usage(a.sessionID)
 	a.app.QueueUpdateDraw(func() {
+		a.inputTokens = usage.InputTokens
+		a.cachedTokens = usage.CachedTokens
+		a.outputTokens = usage.OutputTokens
+
 		if streamErr != nil {
 			a.clearStreamingState()
 			if errors.Is(streamErr, context.Canceled) {

@@ -1,9 +1,3 @@
-// Maps a filename or extension to a Devicon CSS class. Returns null if no
-// devicon matches — callers should fall back to a generic file icon.
-//
-// Verified against devicon@latest's devicon.min.css. Adding entries is cheap;
-// just confirm the class actually exists in node_modules/devicon/devicon.min.css.
-
 const extMap: Record<string, string> = {
 	ts: "devicon-typescript-plain",
 	tsx: "devicon-typescript-plain",
@@ -71,9 +65,6 @@ const nameMap: Record<string, string> = {
 	"cmakelists.txt": "devicon-cmake-plain",
 };
 
-// getDeviconClass returns the devicon class for a given file name, or null
-// if no mapping exists. By default the icon inherits the surrounding text
-// color (`currentColor`); pass `colored: true` to use the icon's brand color.
 export function getDeviconClass(
 	filename: string,
 	colored = false,

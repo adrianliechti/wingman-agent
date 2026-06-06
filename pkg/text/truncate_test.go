@@ -40,14 +40,14 @@ func TestTruncateHeadOverCap(t *testing.T) {
 }
 
 func TestTruncateHeadUTF8Boundary(t *testing.T) {
-	// ☃ is 3 bytes; cap of 4 falls inside the rune and must walk back to 3.
+
 	in := "ABC☃X"
 	got := TruncateHead(in, 4)
 
 	if !strings.HasPrefix(got, "ABC") {
 		t.Errorf("expected 'ABC' prefix, got %q", got)
 	}
-	// The kept prefix must be exactly "ABC" — including ☃ would be 6 bytes (over cap).
+
 	if strings.HasPrefix(got, "ABC☃") {
 		t.Errorf("kept partial multibyte rune; got %q", got)
 	}
@@ -66,7 +66,7 @@ func TestTruncateHeadZeroBudget(t *testing.T) {
 }
 
 func TestTruncateHeadRemovedCharsCount(t *testing.T) {
-	// 100 chars × 3 bytes = 300 bytes; cap 30 keeps ~10 chars, drops ~90.
+
 	in := strings.Repeat("☃", 100)
 	got := TruncateHead(in, 30)
 

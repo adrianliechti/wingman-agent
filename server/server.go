@@ -11,13 +11,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/go-chi/chi/v5"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -28,8 +31,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/watch"
 )
 
-// Compile-time check: the HTTP server is the [code.UI] that any
-// in-process coder.Agent delegates ask_user / shell-confirm to.
 var _ code.UI = (*Server)(nil)
 
 //go:embed static/*
@@ -49,37 +50,22 @@ type Server struct {
 	workspace *code.Workspace
 	config    *agent.Config
 
-	// ctx lives for the lifetime of the server. Agent turns and background
-	// goroutines tie their cancellation to this — NOT to any HTTP request
-	// ctx. Tying a Send to r.Context() would cancel the agent mid-turn on
-	// a WS disconnect/reconnect.
 	ctx     context.Context
-	mux     *http.ServeMux
+	mux     chi.Router
 	handler http.Handler
 
 	mu    sync.Mutex
-	agent code.Agent // active backend (wingman by default; swapped on /api/agent)
+	agent code.Agent
 
-	// phases tracks per-session UI phase (idle/thinking/streaming/tool_running).
-	// Lives at the server because phase is computed from streamed events —
-	// the agent only knows about messages.
 	phasesMu sync.Mutex
 	phases   map[string]string
 
 	wsMu    sync.Mutex
 	wsConns map[*websocket.Conn]*wsClient
 
-	// pendingPrompts maps prompt id → server-side bookkeeping for an
-	// outstanding Ask/Confirm. The WS read loop drains
-	// prompt_response messages into the right channel; sendSessionState
-	// replays the rest on reconnect.
 	promptsMu      sync.Mutex
 	pendingPrompts map[string]pendingPrompt
 
-	// files coalesces workspace change checks: kicked on tool results,
-	// turn end, UI focus, and file mutations from the UI, with a slow
-	// fallback tick for changes nothing announces. State below is owned
-	// by the monitor goroutine (see checkWorkspace).
 	files           *watch.Monitor
 	prevGit         bool
 	prevFingerprint uint64
@@ -110,16 +96,12 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 		pendingPrompts: map[string]pendingPrompt{},
 	}
 
-	// Default to the wingman in-process agent; user can swap via
-	// POST /api/agent.
 	wa := coder.New(ws, cfg, nil)
 	wa.SetUI(s)
 	s.agent = wa
 
 	ws.WarmUp()
 
-	// Started here (not in Run) because the desktop app serves the handler
-	// directly and never calls Run.
 	s.prevGit = ws.IsGitRepo()
 	s.files = watch.New(watch.Options{Active: s.hasClients}, s.checkWorkspace)
 	go s.files.Run(ctx)
@@ -130,10 +112,6 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 		}
 	}()
 
-	// Narrow the model catalog to what the upstream serves, then nudge any
-	// already-connected UI to refresh its selector. Async so a slow or
-	// unreachable upstream never delays startup — Models() reports a sane
-	// default until this lands, so the selector renders either way.
 	go func() {
 		if w, ok := s.agent.(*coder.Agent); ok {
 			w.FetchModels(ctx)
@@ -141,7 +119,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 		}
 	}()
 
-	s.mux = http.NewServeMux()
+	s.mux = chi.NewRouter()
 	s.registerRoutes(s.mux)
 
 	csrf := http.NewCrossOriginProtection()
@@ -151,8 +129,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 }
 
 func (s *Server) Close() {
-	// Tear down the active backend (kills ACP subprocess if any), then
-	// the shared workspace.
+
 	s.mu.Lock()
 	a := s.agent
 	s.agent = nil
@@ -167,18 +144,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }
 
-// activeAgent returns the currently selected backend under the agent mu.
-// Callers should not hold the mu while doing IO with the agent (the
-// agent's own internal locks already protect it; we just need a stable
-// snapshot of the pointer).
 func (s *Server) activeAgent() code.Agent {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.agent
 }
 
-// swapAgent atomically replaces the active backend. Closes the prior
-// one outside the lock to avoid holding mu across IO.
 func (s *Server) swapAgent(next code.Agent) {
 	s.mu.Lock()
 	prev := s.agent
@@ -198,9 +169,7 @@ func (s *Server) handleWebSocketURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	// Adopt the caller-supplied ctx as the server-lifetime ctx so the
-	// signal handler below tears down everything that lives off s.ctx
-	// (agent turns started during HTTP handlers, etc.).
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.ctx = ctx
@@ -237,46 +206,73 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/files", s.handleFiles)
-	mux.HandleFunc("GET /api/files/read", s.handleFileRead)
-	mux.HandleFunc("GET /api/files/search", s.handleFilesSearch)
-	mux.HandleFunc("GET /api/files/download", s.handleFileDownload)
-	mux.HandleFunc("DELETE /api/files", s.handleFileDelete)
-	mux.HandleFunc("POST /api/files/rename", s.handleFileRename)
-	mux.HandleFunc("POST /api/files/copy", s.handleFileCopy)
-	mux.HandleFunc("POST /api/files/write", s.handleFileWrite)
-	mux.HandleFunc("GET /api/diffs", s.handleDiffs)
-	mux.HandleFunc("POST /api/diffs/revert", s.handleDiffRevert)
-	mux.HandleFunc("GET /api/checkpoints", s.handleCheckpoints)
-	mux.HandleFunc("POST /api/checkpoints/{hash}/restore", s.handleCheckpointRestore)
-	mux.HandleFunc("GET /api/sessions", s.handleSessions)
-	mux.HandleFunc("POST /api/sessions", s.handleNewSession)
-	mux.HandleFunc("POST /api/sessions/{id}/load", s.handleLoadSession)
-	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
-	mux.HandleFunc("GET /api/model", s.handleModel)
-	mux.HandleFunc("GET /api/models", s.handleModels)
-	mux.HandleFunc("POST /api/model", s.handleSetModel)
-	mux.HandleFunc("GET /api/effort", s.handleEffort)
-	mux.HandleFunc("POST /api/effort", s.handleSetEffort)
-	mux.HandleFunc("GET /api/agents", s.handleAgents)
-	mux.HandleFunc("GET /api/agent", s.handleAgent)
-	mux.HandleFunc("POST /api/agent", s.handleSetAgent)
-	mux.HandleFunc("GET /api/mode", s.handleMode)
-	mux.HandleFunc("POST /api/mode", s.handleSetMode)
-	mux.HandleFunc("GET /api/diagnostics", s.handleDiagnostics)
-	mux.HandleFunc("GET /api/skills", s.handleSkills)
-	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
-	mux.HandleFunc("GET /api/ws", s.handleWebSocketURL)
+func (s *Server) registerRoutes(r chi.Router) {
+	r.Route("/api", func(r chi.Router) {
+		r.Route("/files", func(r chi.Router) {
+			r.Get("/", s.handleFiles)
+			r.Delete("/", s.handleFileDelete)
+			r.Get("/read", s.handleFileRead)
+			r.Get("/search", s.handleFilesSearch)
+			r.Get("/download", s.handleFileDownload)
+			r.Post("/rename", s.handleFileRename)
+			r.Post("/copy", s.handleFileCopy)
+			r.Post("/write", s.handleFileWrite)
+		})
 
-	mux.HandleFunc("/ws", s.handleWebSocket)
+		r.Route("/diffs", func(r chi.Router) {
+			r.Get("/", s.handleDiffs)
+			r.Post("/revert", s.handleDiffRevert)
+		})
 
-	staticFS, _ := fs.Sub(staticFiles, "static")
-	fileServer := http.FileServer(http.FS(staticFS))
-	mux.Handle("/", fileServer)
+		r.Route("/checkpoints", func(r chi.Router) {
+			r.Get("/", s.handleCheckpoints)
+			r.Post("/{hash}/restore", s.handleCheckpointRestore)
+		})
+
+		r.Route("/sessions", func(r chi.Router) {
+			r.Get("/", s.handleSessions)
+			r.Post("/", s.handleNewSession)
+			r.Route("/{id}", func(r chi.Router) {
+				r.Delete("/", s.handleDeleteSession)
+				r.Post("/load", s.handleLoadSession)
+				r.Get("/model", s.handleModel)
+				r.Post("/model", s.handleSetModel)
+				r.Get("/effort", s.handleEffort)
+				r.Post("/effort", s.handleSetEffort)
+				r.Get("/mode", s.handleMode)
+				r.Post("/mode", s.handleSetMode)
+			})
+		})
+
+		r.Get("/models", s.handleModels)
+		r.Get("/model", s.handleModel)
+		r.Post("/model", s.handleSetModel)
+		r.Get("/effort", s.handleEffort)
+		r.Post("/effort", s.handleSetEffort)
+		r.Get("/mode", s.handleMode)
+
+		r.Get("/agents", s.handleAgents)
+		r.Get("/agent", s.handleAgent)
+		r.Post("/agent", s.handleSetAgent)
+
+		r.Get("/diagnostics", s.handleDiagnostics)
+		r.Get("/skills", s.handleSkills)
+		r.Get("/capabilities", s.handleCapabilities)
+		r.Get("/ws", s.handleWebSocketURL)
+	})
+
+	r.HandleFunc("/ws", s.handleWebSocket)
+
+	fileServer := http.FileServer(http.FS(StaticFS))
+	r.Handle("/*", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if p := strings.Trim(path.Clean(req.URL.Path), "/"); p != "" {
+			if _, err := fs.Stat(StaticFS, p); err != nil {
+				req.URL.Path = "/"
+			}
+		}
+		fileServer.ServeHTTP(w, req)
+	}))
 }
-
-// ─── Phase tracking ───────────────────────────────────────────────
 
 func (s *Server) sessionPhase(id string) string {
 	s.phasesMu.Lock()
@@ -302,8 +298,6 @@ func (s *Server) setSessionPhase(id, phase string) {
 	s.sendSession(id, Frame{Type: EvtPhase, Phase: phase})
 }
 
-// ─── Frame send helpers ───────────────────────────────────────────
-
 func (s *Server) sendSession(sid string, f Frame) {
 	f.Session = sid
 	s.send(f)
@@ -319,8 +313,6 @@ const (
 	wsOutboxBuffer = 256
 )
 
-// wsClient serializes writes for a single connection so frame order is
-// preserved (phase → text_delta → usage → phase, tool_call → tool_result).
 type wsClient struct {
 	conn   *websocket.Conn
 	outbox chan []byte
@@ -367,7 +359,7 @@ func (c *wsClient) run() {
 		cancel()
 		if err != nil {
 			_ = c.conn.CloseNow()
-			// Drain so enqueue stays non-blocking until close() runs.
+
 			for range c.outbox {
 			}
 			return
@@ -393,10 +385,6 @@ func (s *Server) send(f Frame) {
 	}
 }
 
-// sendSessionState pushes the full transcript snapshot for a session,
-// used after LoadSession. Any prompts the agent is still waiting on are
-// replayed so a load mid-elicit doesn't leave the user staring at a
-// frozen turn.
 func (s *Server) sendSessionState(sid string) {
 	a := s.activeAgent()
 	if a == nil {
@@ -419,8 +407,6 @@ func (s *Server) sendSessionSnapshot(sid string, messages []agent.Message, u age
 	})
 }
 
-// ─── Session endpoints ────────────────────────────────────────────
-
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	a := s.activeAgent()
 	if a == nil {
@@ -429,9 +415,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	infos, err := a.ListSessions(r.Context())
 	if err != nil {
-		// Surface to the parent log — sidebar still shows "No sessions
-		// yet", but the developer can see whether the ACP server
-		// rejected the call vs genuinely returned empty.
+
 		fmt.Fprintf(os.Stderr, "list sessions (%s): %v\n", a.Name(), err)
 		writeJSON(w, []SessionEntry{})
 		return
@@ -462,9 +446,7 @@ func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// ACP only populates its model/effort catalog from the session/new response,
-	// so nudge UIs to refetch now that it's available (the picker would otherwise
-	// stay empty after an agent swap). No-op for wingman's static catalog.
+
 	s.broadcast(Frame{Type: EvtModelChanged})
 	writeJSON(w, map[string]string{"id": id})
 }
@@ -480,7 +462,7 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no active agent", http.StatusInternalServerError)
 		return
 	}
-	// s.ctx (not r.Context()) so a WS reconnect mid-load doesn't abort.
+
 	var err error
 	if loader, ok := a.(code.SessionLoadStreamer); ok {
 		err = s.streamLoad(loader, id)
@@ -543,15 +525,13 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ─── Model / Effort endpoints ─────────────────────────────────────
-
-func (s *Server) handleModel(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 	a := s.activeAgent()
 	if a == nil {
 		writeJSON(w, map[string]string{"model": ""})
 		return
 	}
-	_, current := a.Models()
+	_, current := a.Models(r.PathValue("id"))
 	writeJSON(w, map[string]string{"model": current})
 }
 
@@ -561,7 +541,7 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, []map[string]string{})
 		return
 	}
-	available, _ := a.Models()
+	available, _ := a.Models("")
 	result := make([]map[string]string, 0, len(available))
 	for _, m := range available {
 		result = append(result, map[string]string{"id": m.ID, "name": m.Name})
@@ -582,22 +562,20 @@ func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no active agent", http.StatusInternalServerError)
 		return
 	}
-	if err := a.SetModel(r.Context(), body.Model); err != nil {
+	if err := a.SetModel(r.Context(), r.PathValue("id"), body.Model); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, map[string]string{"model": body.Model})
 }
 
-// handleEffort reports the current effort and the options the active backend
-// supports — empty for backends with no effort selector (the picker hides it).
-func (s *Server) handleEffort(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleEffort(w http.ResponseWriter, r *http.Request) {
 	a := s.activeAgent()
 	if a == nil {
 		writeJSON(w, map[string]any{"effort": "", "options": []string{}})
 		return
 	}
-	current, options := a.Effort()
+	current, options := a.Effort(r.PathValue("id"))
 	writeJSON(w, map[string]any{"effort": current, "options": options})
 }
 
@@ -614,14 +592,12 @@ func (s *Server) handleSetEffort(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no active agent", http.StatusInternalServerError)
 		return
 	}
-	if err := a.SetEffort(r.Context(), body.Effort); err != nil {
+	if err := a.SetEffort(r.Context(), r.PathValue("id"), body.Effort); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, map[string]string{"effort": body.Effort})
 }
-
-// ─── Diagnostics + Capabilities (workspace-scoped) ────────────────
 
 func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	allDiags := s.workspace.Diagnostics(r.Context())
@@ -695,8 +671,6 @@ func (s *Server) hasClients() bool {
 	return len(s.wsConns) > 0
 }
 
-// flushFiles requests an immediate workspace check after a known mutation.
-// Without Rewind there is no fingerprint to compare, so broadcast directly.
 func (s *Server) flushFiles() {
 	if s.workspace.Rewind == nil {
 		s.broadcast(Frame{Type: EvtFilesChanged})
@@ -705,8 +679,6 @@ func (s *Server) flushFiles() {
 	s.files.Flush()
 }
 
-// checkWorkspace is the files Monitor's check callback. It runs only on
-// the monitor goroutine, so prevGit/prevFingerprint need no locking.
 func (s *Server) checkWorkspace() {
 	ws := s.workspace
 
@@ -720,7 +692,6 @@ func (s *Server) checkWorkspace() {
 		s.prevGit = gitNow
 	}
 
-	// No Rewind = no cheap change signal; the UI re-fetches on user action.
 	if ws.Rewind == nil {
 		return
 	}
@@ -778,23 +749,16 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// constructBackend instantiates an agent by name. "" or BuiltinAgentName
-// returns a fresh wingman; otherwise looks up the registration produced by
-// availableAgents (auto-detected CLIs + ~/.wingman/agents.json entries)
-// and invokes its constructor.
 func (s *Server) constructBackend(name string) (code.Agent, error) {
 	if name == "" || name == code.BuiltinAgentName {
 		w := coder.New(s.workspace, s.config, nil)
 		w.SetUI(s)
-		// Synchronous so the catalog is narrowed before handleSetAgent
-		// broadcasts EvtAgentChanged and the UI refetches. The selector no
-		// longer depends on this — Models() always reports a default — but
-		// fetching here means the refetch already sees the served set.
+
 		w.FetchModels(s.ctx)
 		return w, nil
 	}
 	for _, r := range s.availableAgents() {
-		if r.Name == name {
+		if r.ID == name {
 			a, err := r.Constructor(s.ctx, s.workspace)
 			if err != nil {
 				return nil, err

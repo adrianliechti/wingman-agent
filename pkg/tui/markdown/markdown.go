@@ -16,7 +16,6 @@ import (
 func Render(text string) string {
 	t := theme.Default
 
-	// Handle incomplete code blocks during streaming (odd count of ``` markers).
 	completeText := text
 	incompleteCode := ""
 	incompleteLang := ""
@@ -34,7 +33,6 @@ func Render(text string) string {
 		}
 	}
 
-	// Priority 100 ensures our renderer takes precedence over the default HTML renderer (1000).
 	md := goldmark.New(
 		goldmark.WithExtensions(extension.GFM),
 		goldmark.WithRenderer(

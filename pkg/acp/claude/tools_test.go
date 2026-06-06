@@ -114,7 +114,7 @@ func TestPlanEntriesFromTodoWrite(t *testing.T) {
 }
 
 func TestMarkdownEscapeLengthensFence(t *testing.T) {
-	// Text containing a 4-backtick fence must be wrapped in a 5-backtick fence.
+
 	got := markdownEscape("````\ncode\n````")
 	if want := "`````\n````\ncode\n````\n`````"; got != want {
 		t.Errorf("markdownEscape = %q, want %q", got, want)

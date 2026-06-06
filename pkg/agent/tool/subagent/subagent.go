@@ -192,11 +192,6 @@ func Tools(cfg *agent.Config) []tool.Tool {
 
 			sub := &agent.Agent{Config: subcfg}
 
-			// Drive the turn to completion. We ignore the streamed deltas and
-			// read the answer from sub.Messages afterwards: complete() always
-			// appends the finalized assistant message there, whereas text
-			// deltas may not arrive at all when the upstream returns a buffered
-			// (non-streamed) response — which otherwise left the result empty.
 			for _, err := range sub.Send(ctx, []agent.Content{{Text: prompt}}) {
 				if err != nil {
 					return "", fmt.Errorf("agent error: %w", err)
@@ -212,11 +207,6 @@ func Tools(cfg *agent.Config) []tool.Tool {
 	}}
 }
 
-// finalText returns the agent's answer: the assistant text emitted after the
-// last tool call/result. Interim narration before the final tool round and the
-// user prompt itself are excluded; reasoning blocks carry no Text and are
-// skipped. Reads the authoritative transcript rather than streamed deltas, so
-// it is correct even when the upstream returns a non-streamed response.
 func finalText(messages []agent.Message) string {
 	lastTool := -1
 	for i, m := range messages {

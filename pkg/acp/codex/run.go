@@ -14,38 +14,24 @@ import (
 	extcodex "github.com/adrianliechti/wingman-agent/pkg/external/codex"
 )
 
-// Options configures the codex subprocess and the [Agent]'s defaults for
-// new sessions.
 type Options struct {
-	// Model is the default model id used for new sessions. Empty / "default"
-	// defers to codex's configured default.
 	Model string
 
-	// Effort is the default reasoning effort applied to new sessions.
-	// Empty / "default" disables the override.
 	Effort string
 
-	// Env is the environment for the `codex app-server` subprocess. nil
-	// means inherit the parent process env. To layer Wingman routing on
-	// top, callers can pass
-	// `pkg/external/codex.BuildEnv(os.Environ(), cfg)`.
+	Dir string
+
 	Env []string
 
-	// ExtraArgs are extra CLI args prefixed before `app-server`. Use this
-	// for top-level codex flags such as the `--config` pairs returned by
-	// `pkg/external/codex.BuildArgs`.
 	ExtraArgs []string
 }
 
-// Spawn starts a `codex app-server` subprocess and returns an Agent that
-// talks to it. Use [Agent.Close] (or rely on ctx cancellation) to
-// terminate the subprocess. The agent is ready to be wired into an
-// [acp.AgentSideConnection] via [Agent.SetAgentConnection].
 func Spawn(ctx context.Context, opts Options) (*Agent, error) {
 	codexPath := extcodex.BinPath()
 
 	args := append(append([]string{}, opts.ExtraArgs...), "app-server")
 	cmd := exec.CommandContext(ctx, codexPath, args...)
+	cmd.Dir = opts.Dir
 	cmd.Stderr = os.Stderr
 	if opts.Env != nil {
 		cmd.Env = opts.Env
@@ -75,7 +61,6 @@ func Spawn(ctx context.Context, opts Options) (*Agent, error) {
 	return a, nil
 }
 
-// Done returns a channel closed when the codex subprocess exits.
 func (a *Agent) Done() <-chan struct{} {
 	if a.codex == nil || a.codex.rpc == nil {
 		return a.closed
@@ -83,7 +68,6 @@ func (a *Agent) Done() <-chan struct{} {
 	return a.codex.rpc.done
 }
 
-// Close terminates the codex subprocess. Idempotent.
 func (a *Agent) Close() error {
 	a.closeOnce.Do(func() {
 		if a.stdin != nil {
@@ -107,9 +91,6 @@ func (a *Agent) Close() error {
 	return nil
 }
 
-// Run is the convenience entry point for standalone usage: spawn codex,
-// serve ACP over in/out until the connection ends, codex exits, or ctx is
-// cancelled.
 func Run(ctx context.Context, opts Options, in io.Reader, out io.Writer, logger *slog.Logger) error {
 	a, err := Spawn(ctx, opts)
 	if err != nil {

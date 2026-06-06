@@ -103,8 +103,6 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 
-	// On ctx cancellation, exec wraps up the command via cmd.Cancel (set in
-	// buildCommand) which kills the whole process group, not just the leader.
 	runErr := cmd.Run()
 
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -127,7 +125,7 @@ func buildCommand(ctx context.Context, command, workingDir string) *exec.Cmd {
 
 	if runtime.GOOS == "windows" {
 		ps := findPowerShell()
-		// Force UTF-8 output to avoid PowerShell 5.1's UTF-16 default
+
 		wrapped := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + command
 		cmd = exec.CommandContext(ctx, ps, "-NoProfile", "-NoLogo", "-NonInteractive", "-Command", wrapped)
 	} else {
@@ -140,21 +138,17 @@ func buildCommand(ctx context.Context, command, workingDir string) *exec.Cmd {
 
 	cmd.Dir = workingDir
 	cmd.Env = append(os.Environ(),
-		"GIT_EDITOR=true", // Prevent git from opening interactive editors
-		"WINGMAN=1",       // Marker so scripts can detect agent context
+		"GIT_EDITOR=true",
+		"WINGMAN=1",
 	)
 
 	setupProcessGroup(cmd)
 
-	// Override CommandContext's default Process.Kill so timeouts/cancellation
-	// tear down the entire process group, not just the leader.
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 
 	return cmd
 }
 
-// findPowerShell prefers pwsh (PowerShell 7+, supports && and ||) and falls
-// back to powershell (5.1).
 func findPowerShell() string {
 	if ps, err := exec.LookPath("pwsh"); err == nil {
 		return ps
@@ -170,10 +164,6 @@ func truncateOutput(output string) string {
 		return output
 	}
 
-	// Head + tail elision: preserve diagnostic output at the start (e.g. the
-	// first failing test, the first compiler error) and the trailing summary,
-	// drop the middle. Tail-only truncation loses errors that print at the
-	// start of long output.
 	lines := strings.Split(output, "\n")
 	if len(lines) > maxLines {
 		head := maxLines / 2
@@ -197,7 +187,6 @@ func truncateOutput(output string) string {
 	return notice + truncated
 }
 
-// utf8BoundaryDown returns the largest valid UTF-8 boundary <= i.
 func utf8BoundaryDown(s string, i int) int {
 	if i >= len(s) {
 		return len(s)
@@ -208,7 +197,6 @@ func utf8BoundaryDown(s string, i int) int {
 	return i
 }
 
-// utf8BoundaryUp returns the smallest valid UTF-8 boundary >= i.
 func utf8BoundaryUp(s string, i int) int {
 	if i <= 0 {
 		return 0

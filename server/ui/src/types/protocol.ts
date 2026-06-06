@@ -1,6 +1,3 @@
-// Client → Server. `session` routes the message to one of the server's
-// in-memory sessions; concurrent sessions stream independently.
-
 interface SendMessage {
 	type: "send";
 	session: string;
@@ -14,9 +11,6 @@ interface CancelMessage {
 	session: string;
 }
 
-// Reply to a server-issued `prompt` frame. `text` carries the user's
-// answer for ask prompts; `approved` carries the y/n decision for
-// confirm prompts.
 interface PromptResponseMessage {
 	type: "prompt_response";
 	session: string;
@@ -34,11 +28,6 @@ export type ClientMessage =
 	| CancelMessage
 	| PromptResponseMessage
 	| FocusMessage;
-
-// Server → Client. Per-session events carry `session`; workspace-level
-// events leave it unset. The hook routes per-session events into the
-// sessions map; subscribers see every frame (used by panels that refetch
-// on workspace-level signals).
 
 interface SessionStateMessage {
 	type: "session_state";
@@ -100,8 +89,6 @@ interface ErrorMessage {
 	message: string;
 }
 
-// The agent is blocked on an elicitation; the user must reply with
-// `prompt_response` (or the server cancels with a `prompt_cancel`).
 export type PromptKind = "ask" | "confirm";
 
 interface PromptMessage {
@@ -147,8 +134,6 @@ interface AgentChangedMessage {
 	type: "agent_changed";
 }
 
-// The active agent's model catalog changed (e.g. the upstream model list
-// finished loading at startup). Subscribers refetch their selectors.
 interface ModelChangedMessage {
 	type: "model_changed";
 }

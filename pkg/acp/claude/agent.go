@@ -19,36 +19,18 @@ func binPath() string {
 	return "claude"
 }
 
-// Options configures an [Agent].
 type Options struct {
-	// Model is the default model id used for new sessions. Empty / "default"
-	// defers to the CLI's configured default.
 	Model string
 
-	// Effort is the default reasoning effort applied to new sessions.
-	// Empty / "default" disables the `--effort` flag.
 	Effort string
 
-	// Cwd is the fallback working directory used when an ACP NewSession
-	// request omits one (or for the per-turn `claude` CLI spawn). The
-	// per-session cwd from the ACP request still wins when present.
 	Cwd string
 
-	// Env is the environment applied to each `claude` CLI subprocess
-	// spawned per turn. nil means inherit the parent process env. To layer
-	// Wingman routing on top, callers can pass
-	// `pkg/external/claude.BuildEnv(os.Environ(), cfg)`.
 	Env []string
 
-	// Path is the `claude` binary path. Empty resolves it from the
-	// WINGMAN_CLAUDE_PATH override, then the usual PATH / installer lookup.
 	Path string
 }
 
-// Agent implements [acp.Agent] for the Claude CLI. It spawns the `claude`
-// CLI as a one-shot subprocess per turn (see session.runTurn); the Agent
-// itself holds only in-memory session state and may be embedded directly
-// into a host process — no separate ACP server binary is required.
 type Agent struct {
 	conn *acp.AgentSideConnection
 
@@ -69,9 +51,6 @@ type Agent struct {
 
 var _ acp.Agent = (*Agent)(nil)
 
-// New constructs an Agent from opts. Pass the result to
-// [acp.NewAgentSideConnection] and then call [Agent.SetAgentConnection]
-// with the returned connection.
 func New(opts Options) *Agent {
 	model := opts.Model
 	if model == "" {
@@ -93,9 +72,6 @@ func New(opts Options) *Agent {
 
 func (a *Agent) SetAgentConnection(conn *acp.AgentSideConnection) { a.conn = conn }
 
-// Close terminates every session's live process. Wired as the in-process
-// cleanup so swapping away from / shutting down the backend doesn't orphan
-// claude subprocesses.
 func (a *Agent) Close() error {
 	a.mu.Lock()
 	sessions := make([]*session, 0, len(a.sessions))
@@ -116,26 +92,21 @@ func (a *Agent) lookup(id acp.SessionId) *session {
 	return a.sessions[id]
 }
 
-// ensureModels populates the model picker from the `claude` CLI exactly once.
-// Failure is non-fatal: the selector is simply omitted (empty list) and the CLI
-// still runs on its configured default model.
 func (a *Agent) ensureModels(ctx context.Context) {
 	a.modelsMu.Lock()
 	defer a.modelsMu.Unlock()
 	if a.modelsLoaded {
 		return
 	}
-	models, commands, err := fetchModels(ctx, a.path, a.env)
+	models, commands, err := fetchModels(ctx, a.path, a.defaultCwd, a.env)
 	if err != nil {
-		return // retry on the next call rather than caching the failure
+		return
 	}
 	a.models = models
 	a.commands = commands
 	a.modelsLoaded = true
 }
 
-// sendAvailableCommands publishes the cached slash-command catalog for a
-// session. Best-effort: skipped when the catalog is empty.
 func (a *Agent) sendAvailableCommands(id acp.SessionId) {
 	a.modelsMu.Lock()
 	cmds := a.commands
@@ -143,9 +114,7 @@ func (a *Agent) sendAvailableCommands(id acp.SessionId) {
 	if len(cmds) == 0 {
 		return
 	}
-	// Emit asynchronously so the notification lands after the session response
-	// (the SDK writes the response when the handler returns); a client keying
-	// notifications on a known session id would otherwise drop it.
+
 	go func() {
 		_ = a.conn.SessionUpdate(context.Background(), acp.SessionNotification{
 			SessionId: id,
@@ -156,8 +125,6 @@ func (a *Agent) sendAvailableCommands(id acp.SessionId) {
 		})
 	}()
 }
-
-// --- acp.Agent ---
 
 func (a *Agent) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {
 	title := "Claude (ACP)"
@@ -301,9 +268,6 @@ func (a *Agent) CloseSession(_ context.Context, params acp.CloseSessionRequest) 
 	return acp.CloseSessionResponse{}, nil
 }
 
-// UnstableDeleteSession tears down any live process for the session, then
-// removes its on-disk transcript. Tearing down first stops the process from
-// rewriting the file after deletion.
 func (a *Agent) UnstableDeleteSession(_ context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {
 	a.mu.Lock()
 	s := a.sessions[params.SessionId]
@@ -362,16 +326,10 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 func (a *Agent) UnstableForkSession(_ context.Context, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
 	newID := acp.SessionId(newUUID())
 	a.adoptSession(newID, params.Cwd, params.AdditionalDirectories, nil, string(params.SessionId), true)
-	// Models / ConfigOptions are intentionally omitted: the fork variant uses
-	// `Unstable*` shapes that diverge from the stable selectors we build for
-	// new/resume/load. Clients that need the model picker after forking can
-	// query via the regular session lifecycle.
+
 	return acp.UnstableForkSessionResponse{SessionId: newID}, nil
 }
 
-// adoptSession installs a session record in the agent map for resume / load /
-// fork. The first turn's argv is determined by cliArgsLocked from the
-// resumeFrom / forkOnResume fields.
 func (a *Agent) adoptSession(id acp.SessionId, cwd string, additionalDirs []string, mcpServers []acp.McpServer, resumeFrom string, fork bool) *session {
 	if cwd == "" {
 		cwd = a.defaultCwd
@@ -386,17 +344,14 @@ func (a *Agent) adoptSession(id acp.SessionId, cwd string, additionalDirs []stri
 	return s
 }
 
-// newUUID returns a random RFC 4122 v4 UUID. The Claude CLI's --session-id
-// flag rejects anything that doesn't match this shape.
 func newUUID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failing is fatal in practice; fall back to a fixed value
-		// so we surface a clear error from the CLI rather than crash.
+
 		return "00000000-0000-4000-8000-000000000000"
 	}
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%s-%s-%s-%s-%s",
 		hex.EncodeToString(b[0:4]),
 		hex.EncodeToString(b[4:6]),

@@ -34,7 +34,6 @@ func (p *Proxy) Start(ctx context.Context) error {
 				req.Header.Set("Authorization", "Bearer "+p.Token)
 			}
 
-			// Disable compressed responses so captured bodies are readable.
 			req.Header.Del("Accept-Encoding")
 
 			if p.User != nil {

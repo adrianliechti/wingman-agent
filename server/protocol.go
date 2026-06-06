@@ -12,11 +12,8 @@ type ClientMessage struct {
 	SessionID string   `json:"session,omitempty"`
 	Text      string   `json:"text,omitempty"`
 	Files     []string `json:"files,omitempty"`
-	Images    []string `json:"images,omitempty"` // base64 data URLs, e.g. "data:image/png;base64,..."
+	Images    []string `json:"images,omitempty"`
 
-	// Prompt-response fields. PromptID identifies the prompt the user is
-	// answering; Approved is set for confirm prompts, Text reuses the
-	// field above for ask prompts.
 	PromptID string `json:"prompt_id,omitempty"`
 	Approved bool   `json:"approved,omitempty"`
 }
@@ -60,9 +57,8 @@ type Frame struct {
 	Phase   string `json:"phase,omitempty"`
 	Message string `json:"message,omitempty"`
 
-	// Prompt fields (EvtPrompt / EvtPromptCancel).
 	PromptID   string `json:"prompt_id,omitempty"`
-	PromptKind string `json:"prompt_kind,omitempty"` // "ask" | "confirm"
+	PromptKind string `json:"prompt_kind,omitempty"`
 
 	InputTokens  int64 `json:"input_tokens,omitempty"`
 	CachedTokens int64 `json:"cached_tokens,omitempty"`
@@ -85,7 +81,7 @@ type ConversationContent struct {
 }
 
 type ConversationImage struct {
-	Data string `json:"data"` // base64 data URL
+	Data string `json:"data"`
 	Name string `json:"name,omitempty"`
 }
 

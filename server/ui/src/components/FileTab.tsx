@@ -13,7 +13,13 @@ interface Props {
 	onDirtyChange?: (dirty: boolean) => void;
 }
 
-export function FileTab({ path, line, subscribe, onDeleted, onDirtyChange }: Props) {
+export function FileTab({
+	path,
+	line,
+	subscribe,
+	onDeleted,
+	onDirtyChange,
+}: Props) {
 	const [file, setFile] = useState<FileContent | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [value, setValue] = useState("");
@@ -103,7 +109,6 @@ export function FileTab({ path, line, subscribe, onDeleted, onDirtyChange }: Pro
 				setFile({ ...f, content });
 			}
 		} catch {
-			/* swallow */
 		} finally {
 			setSaving(false);
 		}
@@ -144,12 +149,9 @@ export function FileTab({ path, line, subscribe, onDeleted, onDirtyChange }: Pro
 					editor.revealLineInCenter(line);
 					editor.setPosition({ lineNumber: line, column: 1 });
 				}
-				editor.addCommand(
-					monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
-					() => {
-						void save();
-					},
-				);
+				editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+					void save();
+				});
 			}}
 			onChange={(v) => setValue(v ?? "")}
 			options={{
@@ -191,11 +193,7 @@ function PreviewBody({ mime, src }: { mime: string; src: string }) {
 	if (mime.startsWith("video/")) {
 		return (
 			<div className="h-full w-full flex items-center justify-center p-6 bg-black/40">
-				<video
-					src={src}
-					controls
-					className="max-h-full max-w-full"
-				>
+				<video src={src} controls className="max-h-full max-w-full">
 					<track kind="captions" />
 				</video>
 			</div>

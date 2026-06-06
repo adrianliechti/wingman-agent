@@ -21,9 +21,6 @@ func permissionOptions() []acp.PermissionOption {
 	}
 }
 
-// approver bridges the claude CLI's stdio control protocol (`can_use_tool`) to
-// ACP's session/request_permission. The decision is written back as a
-// control_response on the CLI's stdin via out.
 type approver struct {
 	ctx  context.Context
 	conn *acp.AgentSideConnection

@@ -193,9 +193,6 @@ func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
 
 	size := int64(len(data))
 
-	// SVG is XML, so the NUL-byte sniff classifies it as text — but visually
-	// it's far more useful as a rendered image than as raw markup. Route it
-	// to the binary preview path so the browser renders it via <img>.
 	if strings.EqualFold(filepath.Ext(filePath), ".svg") {
 		writeJSON(w, FileContent{
 			Path:   filePath,
@@ -206,9 +203,6 @@ func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sniff for binary content. NUL bytes are the cleanest signal — any file
-	// without them in the first 8KB is treated as text and opens in the
-	// editor. JSON/XML stay editable; PNG/PDF/zip/etc. don't.
 	if isBinary(data) {
 		head := data
 		if len(head) > 512 {
@@ -281,10 +275,6 @@ func (s *Server) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// workspaceRel returns the workspace-relative form of p for use with
-// s.workspace.Root.* — traversal safety comes from those methods (they
-// reject components that resolve outside the root), not from this
-// lexical check alone.
 func (s *Server) workspaceRel(p string) (string, bool) {
 	if p == "" {
 		return "", false
@@ -303,10 +293,6 @@ func (s *Server) workspaceDirRel(p string) (string, bool) {
 	return s.workspaceRel(p)
 }
 
-// resolveExistingRegularFile returns the rel path of an existing
-// regular file (not dir, not symlink, not device), or writes an HTTP
-// error to w. The IsRegular check is what blocks symlinks from
-// redirecting reads/writes outside the workspace.
 func (s *Server) resolveExistingRegularFile(w http.ResponseWriter, p string) (string, bool) {
 	rel, ok := s.workspaceRel(p)
 	if !ok {
@@ -423,8 +409,6 @@ func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// All IO goes through root so a path component can't escape the
-// workspace. Symlinks are skipped (never followed or copied).
 func copyPathInRoot(root *os.Root, src, dst string, info os.FileInfo) error {
 	if info.IsDir() {
 		if err := root.MkdirAll(dst, info.Mode().Perm()); err != nil {

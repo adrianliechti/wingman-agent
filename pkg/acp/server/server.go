@@ -1,13 +1,3 @@
-// Package server exposes wingman as an ACP server. External clients
-// (Zed, other IDEs) speak the ACP protocol over the subprocess stdio;
-// this adapter translates each ACP RPC into a call on a
-// [*coder.Agent].
-//
-// One coder.Agent is held per cwd (workspace) and refcounted by
-// session. Inside a workspace, all sessions share model + effort —
-// wingman's design — even though ACP clients expect per-session
-// selection. The wider design picks "shared" over per-session because
-// the wingman UX has always been agent-wide.
 package server
 
 import (
@@ -81,7 +71,7 @@ type workspaceEntry struct {
 	agent   *coder.Agent
 	key     string
 	refs    int
-	initted bool // WarmUp / InitMCP run lazily once per workspace
+	initted bool
 }
 
 func (s *Server) Initialize(_ context.Context, _ acpsdk.InitializeRequest) (acpsdk.InitializeResponse, error) {
@@ -127,13 +117,10 @@ func (s *Server) NewSession(ctx context.Context, params acpsdk.NewSessionRequest
 	return acpsdk.NewSessionResponse{
 		SessionId:     acpSid,
 		Modes:         modeState(w.agent, sid),
-		ConfigOptions: sessionConfigOptions(w.agent),
+		ConfigOptions: sessionConfigOptions(w.agent, sid),
 	}, nil
 }
 
-// acquireWorkspace returns the (refcounted) workspaceEntry for cwd,
-// lazily constructing it the first time. The workspace and its
-// coder.Agent live for as long as any session refers to them.
 func (s *Server) acquireWorkspace(ctx context.Context, cwd string) (*workspaceEntry, error) {
 	s.mu.Lock()
 	if w, ok := s.workspaces[cwd]; ok {
@@ -151,7 +138,7 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string) (*workspaceEn
 
 	s.mu.Lock()
 	if existing, ok := s.workspaces[cwd]; ok {
-		// Concurrent acquire — discard our build, reuse the winner.
+
 		existing.refs++
 		s.mu.Unlock()
 		_ = wa.Close()
@@ -162,9 +149,6 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string) (*workspaceEn
 	s.workspaces[cwd] = w
 	s.mu.Unlock()
 
-	// Warm-up runs outside the lock — it's slow (LSP / git probe) and
-	// other acquireWorkspace calls in the meantime get the entry as-is
-	// and skip the init thanks to initted.
 	if !w.initted {
 		ws.WarmUp()
 		if err := ws.InitMCP(ctx); err != nil {
@@ -176,7 +160,6 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string) (*workspaceEn
 	return w, nil
 }
 
-// Caller must not hold s.mu.
 func (s *Server) releaseWorkspace(w *workspaceEntry) {
 	s.mu.Lock()
 	w.refs--
@@ -197,8 +180,7 @@ func (s *Server) registerSession(id acpsdk.SessionId, w *workspaceEntry) {
 		s.sessions[id] = &sessionEntry{id: id, agent: w.agent, workspace: w}
 	}
 	s.mu.Unlock()
-	// Re-registering an already-known session (e.g. a second load/resume of the
-	// same id) would otherwise orphan the workspace ref acquired for this call.
+
 	if exists {
 		s.releaseWorkspace(w)
 	}
@@ -242,9 +224,6 @@ func (s *Server) lookupSession(id acpsdk.SessionId) *sessionEntry {
 	return s.sessions[id]
 }
 
-// retainSession registers a per-prompt cancel function on the session,
-// bumps the workspace refcount so a concurrent CloseSession doesn't
-// tear it down mid-prompt, and returns an unregister function.
 func (s *Server) retainSession(id acpsdk.SessionId, cancel context.CancelFunc) (*sessionEntry, func(), error) {
 	s.mu.Lock()
 	sess := s.sessions[id]
@@ -336,14 +315,12 @@ func (s *Server) ListSessions(ctx context.Context, params acpsdk.ListSessionsReq
 	if err != nil {
 		return acpsdk.ListSessionsResponse{}, err
 	}
-	// ListSessions is cheap (filesystem scan), so we don't need to
-	// retain the workspace — peek without spawning anything new.
+
 	s.mu.Lock()
 	w := s.workspaces[cwd]
 	s.mu.Unlock()
 	if w == nil {
-		// Workspace not yet referenced — build a transient one purely to
-		// enumerate its on-disk sessions, then drop it.
+
 		ws, err := code.NewWorkspace(cwd)
 		if err != nil {
 			return acpsdk.ListSessionsResponse{}, err
@@ -384,7 +361,7 @@ func (s *Server) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionR
 	}
 	return acpsdk.ResumeSessionResponse{
 		Modes:         modeState(w.agent, string(params.SessionId)),
-		ConfigOptions: sessionConfigOptions(w.agent),
+		ConfigOptions: sessionConfigOptions(w.agent, string(params.SessionId)),
 	}, nil
 }
 
@@ -399,14 +376,10 @@ func (s *Server) LoadSession(ctx context.Context, params acpsdk.LoadSessionReque
 	s.replayMessages(ctx, params.SessionId, messages)
 	return acpsdk.LoadSessionResponse{
 		Modes:         modeState(w.agent, string(params.SessionId)),
-		ConfigOptions: sessionConfigOptions(w.agent),
+		ConfigOptions: sessionConfigOptions(w.agent, string(params.SessionId)),
 	}, nil
 }
 
-// loadAndAttach acquires the workspace and loads the session by id. When the
-// on-disk session file is missing (e.g. stale id cached in an ACP client
-// from a previous run), it returns (nil, nil, nil) so callers can respond
-// with an empty session payload instead of a noisy internal error.
 func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.SessionId) (*workspaceEntry, []agent.Message, error) {
 	cwd, err := normalizeCwd(cwdParam)
 	if err != nil {
@@ -491,20 +464,19 @@ func (s *Server) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSe
 	}
 	switch string(p.ConfigId) {
 	case "model":
-		if err := sess.agent.SetModel(ctx, string(p.Value)); err != nil {
+		if err := sess.agent.SetModel(ctx, string(p.SessionId), string(p.Value)); err != nil {
 			return acpsdk.SetSessionConfigOptionResponse{}, err
 		}
 	case "effort":
-		if err := sess.agent.SetEffort(ctx, string(p.Value)); err != nil {
+		if err := sess.agent.SetEffort(ctx, string(p.SessionId), string(p.Value)); err != nil {
 			return acpsdk.SetSessionConfigOptionResponse{}, err
 		}
 	default:
 		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown config id: %s", p.ConfigId)
 	}
-	// Strict clients (Zed) treat a missing/null configOptions as "session
-	// has no options" and wipe the entire picker UI — return the full list.
+
 	return acpsdk.SetSessionConfigOptionResponse{
-		ConfigOptions: sessionConfigOptions(sess.agent),
+		ConfigOptions: sessionConfigOptions(sess.agent, string(p.SessionId)),
 	}, nil
 }
 
@@ -519,8 +491,6 @@ func (s *Server) SetSessionMode(ctx context.Context, params acpsdk.SetSessionMod
 	return acpsdk.SetSessionModeResponse{}, nil
 }
 
-// modeState builds the SessionModeState for sid, or nil when the agent exposes
-// no modes (the client then hides the picker).
 func modeState(a *coder.Agent, sid string) *acpsdk.SessionModeState {
 	modes, current := a.Modes(sid)
 	if len(modes) == 0 {
@@ -565,18 +535,15 @@ func parseRawInput(args string) any {
 	return args
 }
 
-// sessionConfigOptions composes the "model" + "effort" select options
-// from the agent's catalog. Strict clients (Zed) treat a non-empty
-// config_options as canonical, so both selectors must live here.
-func sessionConfigOptions(a *coder.Agent) []acpsdk.SessionConfigOption {
+func sessionConfigOptions(a *coder.Agent, sid string) []acpsdk.SessionConfigOption {
 	return []acpsdk.SessionConfigOption{
-		modelConfigOption(a),
-		effortConfigOption(a),
+		modelConfigOption(a, sid),
+		effortConfigOption(a, sid),
 	}
 }
 
-func modelConfigOption(a *coder.Agent) acpsdk.SessionConfigOption {
-	available, current := a.Models()
+func modelConfigOption(a *coder.Agent, sid string) acpsdk.SessionConfigOption {
+	available, current := a.Models(sid)
 	opts := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(available))
 	for _, m := range available {
 		opts = append(opts, acpsdk.SessionConfigSelectOption{
@@ -594,8 +561,8 @@ func modelConfigOption(a *coder.Agent) acpsdk.SessionConfigOption {
 	}
 }
 
-func effortConfigOption(a *coder.Agent) acpsdk.SessionConfigOption {
-	current, values := a.Effort()
+func effortConfigOption(a *coder.Agent, sid string) acpsdk.SessionConfigOption {
+	current, values := a.Effort(sid)
 	opts := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(values))
 	for _, v := range values {
 		opts = append(opts, acpsdk.SessionConfigSelectOption{
@@ -620,9 +587,6 @@ func titleCase(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-// ─── tool-call shape helpers (unchanged from the previous version) ──
-
-// toolTitle returns a human-readable title for a tool call.
 func toolTitle(name string, raw any) string {
 	args, _ := raw.(map[string]any)
 	str := func(key string) string {
@@ -654,8 +618,7 @@ func toolTitle(name string, raw any) string {
 	var detail string
 	switch name {
 	case "read", "write", "edit":
-		// Prefer file_path (current schema); fall back to legacy path key so
-		// replayed sessions emitted before the rename still render usefully.
+
 		detail = str("file_path")
 		if detail == "" {
 			detail = str("path")
@@ -702,8 +665,7 @@ func toolTitle(name string, raw any) string {
 	case "ask_user":
 		detail = truncate(str("question"), 60)
 	case "agent":
-		// Prefix with agent_type so explore/verification/general-purpose are
-		// distinguishable at a glance without expanding the call.
+
 		prompt := str("prompt")
 		if agentType := str("agent_type"); agentType != "" && prompt != "" {
 			detail = truncate(agentType+": "+prompt, 80)
@@ -727,7 +689,7 @@ func toolLocations(name string, raw any) []acpsdk.ToolCallLocation {
 	case "read", "write", "edit":
 		path, _ = args["file_path"].(string)
 		if path == "" {
-			// Legacy sessions emitted before the file_path rename.
+
 			path, _ = args["path"].(string)
 		}
 	case "lsp":

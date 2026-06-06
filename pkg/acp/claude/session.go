@@ -15,29 +15,21 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// session holds per-conversation state. A single long-lived `claude` process
-// (streaming stdio mode) serves every turn of the session: user messages are
-// written to its stdin and it keeps conversation state in memory, so turns are
-// fast and need no per-turn --resume reload. The process is (re)spawned lazily
-// and respawned (with --resume, restoring on-disk state) when the model/effort/
-// mode change or it dies.
-//
-// The ACP SessionId is reused as the `claude` CLI session UUID.
 type session struct {
 	id  acp.SessionId
 	cwd string
 
 	mu             sync.Mutex
 	modelID        string
-	effort         string   // "" or "default" means no --effort flag
+	effort         string
 	mode           string
-	mcpServers     []acp.McpServer // forwarded via --mcp-config
-	additionalDirs []string        // forwarded to --add-dir
-	resumeFrom     string   // CLI session UUID to --resume from on first spawn
-	forkOnResume   bool     // when resumeFrom is set, also pass --fork-session
-	started        bool     // true once the process has been spawned under this id
-	cancel         context.CancelFunc // interrupts the active turn; nil when idle
-	proc           *claudeProc        // live streaming process; nil when not running
+	mcpServers     []acp.McpServer
+	additionalDirs []string
+	resumeFrom     string
+	forkOnResume   bool
+	started        bool
+	cancel         context.CancelFunc
+	proc           *claudeProc
 }
 
 func newSession(id acp.SessionId, cwd, model, effort string, additionalDirs []string) *session {
@@ -51,8 +43,6 @@ func newSession(id acp.SessionId, cwd, model, effort string, additionalDirs []st
 	}
 }
 
-// cancelTurn interrupts the active turn (if any) without killing the process,
-// so the session stays warm for the next turn. Safe to call from any goroutine.
 func (s *session) cancelTurn() {
 	s.mu.Lock()
 	cancel := s.cancel
@@ -62,7 +52,6 @@ func (s *session) cancelTurn() {
 	}
 }
 
-// close terminates the session's process. Used on session close/delete.
 func (s *session) close() {
 	s.mu.Lock()
 	cancel := s.cancel
@@ -101,10 +90,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pa
 
 	select {
 	case <-turnCtx.Done():
-		// User cancelled: interrupt the turn but keep the process warm. Drain
-		// the turn's terminating result so the stream stays in sync. If the
-		// interrupt stalls, discard the process so a late result can't leak
-		// into the next turn (the next turn respawns with --resume).
+
 		_ = p.out.writeJSON(interruptRequest())
 		select {
 		case <-p.results:
@@ -125,8 +111,6 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pa
 	}
 }
 
-// ensureProc returns the session's live process, spawning (or respawning) it
-// when absent, dead, or started under a now-stale config (model/effort/mode).
 func (s *session) ensureProc(conn *acp.AgentSideConnection, path string, env []string) (*claudeProc, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -176,7 +160,6 @@ func (s *session) ensureProc(conn *acp.AgentSideConnection, path string, env []s
 	}
 	go p.read(procCtx, conn, s.id, stdout)
 
-	// The process now owns the on-disk session id; future respawns resume it.
 	s.started = true
 	s.resumeFrom = ""
 	s.forkOnResume = false
@@ -184,8 +167,6 @@ func (s *session) ensureProc(conn *acp.AgentSideConnection, path string, env []s
 	return p, nil
 }
 
-// dropProc tears down p and clears it from the session if still current, so the
-// next turn respawns.
 func (s *session) dropProc(p *claudeProc) {
 	p.shutdown()
 	s.mu.Lock()
@@ -195,15 +176,10 @@ func (s *session) dropProc(p *claudeProc) {
 	s.mu.Unlock()
 }
 
-// spawnSigLocked is the config fingerprint a running process was started with;
-// a change forces a respawn. Caller must hold s.mu.
 func (s *session) spawnSigLocked() string {
 	return strings.Join(append([]string{s.modelID, s.effort, s.mode}, s.additionalDirs...), "\x00")
 }
 
-// claudeProc is one long-lived streaming `claude` process. A single reader
-// goroutine drains its stdout for the whole lifetime, delivering each turn's
-// terminating result on results and closing dead when the process exits.
 type claudeProc struct {
 	cmd     *exec.Cmd
 	out     *streamWriter
@@ -232,10 +208,7 @@ func (p *claudeProc) isDead() bool {
 }
 
 func (p *claudeProc) shutdown() {
-	// Close stdin first: streaming mode exits on EOF and flushes its on-disk
-	// session before doing so. Killing first (context cancel = SIGKILL / Windows
-	// TerminateProcess) skips that flush, which on Windows drops every turn and
-	// leaves a session file with only its title.
+
 	_ = p.stdin.Close()
 	select {
 	case <-p.dead:
@@ -246,9 +219,6 @@ func (p *claudeProc) shutdown() {
 	_ = p.cmd.Wait()
 }
 
-// read drains stdout for the process lifetime: assistant/user events become ACP
-// updates, can_use_tool control requests are bridged to permission prompts, and
-// each `result` is delivered to the waiting turn. Closing dead signals exit.
 func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, r io.Reader) {
 	defer close(p.dead)
 	app := &approver{ctx: ctx, conn: conn, sid: sid, out: p.out}
@@ -296,10 +266,6 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 	}
 }
 
-// resultToTurn maps a `result` line to a turn outcome: recoverable
-// terminations become a StopReason, failures become a *RequestError. It also
-// derives the turn's token usage and, when a context window is known, a
-// usage_update for the caller to emit.
 func resultToTurn(line []byte) (turnResult, *acp.SessionUpdate) {
 	var r cliResult
 	_ = json.Unmarshal(line, &r)
@@ -335,7 +301,6 @@ func resultOutcome(r cliResult) turnResult {
 	}
 }
 
-// resultUsage builds the ACP Usage from the result line's token counts.
 func resultUsage(r cliResult) *acp.Usage {
 	if r.Usage == nil {
 		return nil
@@ -351,9 +316,6 @@ func resultUsage(r cliResult) *acp.Usage {
 	}
 }
 
-// usageUpdate builds a usage_update session update: `used` is the turn's total
-// token footprint, `size` the active model's context window (the widest one
-// the result reports, so the main model dominates over any subagent's).
 func usageUpdate(r cliResult, usage *acp.Usage) *acp.SessionUpdate {
 	if usage == nil {
 		return nil
@@ -392,9 +354,6 @@ func interruptRequest() controlInterrupt {
 	}
 }
 
-// streamWriter serializes newline-delimited JSON writes to the CLI's stdin.
-// The prompt and any control responses (from concurrent permission handlers)
-// share this writer, so writes are mutex-guarded.
 type streamWriter struct {
 	mu sync.Mutex
 	w  io.Writer
@@ -411,30 +370,15 @@ func (s *streamWriter) writeJSON(v any) error {
 	return err
 }
 
-// cliArgsLocked returns the argv for `claude`. Caller must hold s.mu.
-//
-// Session-pinning rules:
-//   - subsequent turn (started): --resume <our-uuid>
-//   - first turn, fork: --resume <src> --session-id <our-uuid> --fork-session
-//     (pins the forked transcript to the UUID we already handed back to the client)
-//   - first turn, resume/load (resumeFrom == our-uuid): --resume <our-uuid>
-//   - first turn, fresh: --session-id <our-uuid>
-//
-// The CLI persists the session to ~/.claude/projects/<cwd>/<uuid>.jsonl, so
-// state survives across turns even though each turn is a one-shot process.
 func (s *session) cliArgsLocked() []string {
-	// Streaming mode (no --print): the process reads user messages from stdin
-	// and stays alive until stdin closes, which lets the stdio control protocol
-	// answer tool-permission prompts mid-turn. --permission-prompt-tool stdio
-	// routes those approvals over the same channel.
+
 	args := []string{
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
 		"--permission-prompt-tool", "stdio",
-		// AskUserQuestion has no ACP representation; disable it (matches the
-		// reference) so it doesn't surface as an unanswerable generic tool.
+
 		"--disallowed-tools", "AskUserQuestion",
 	}
 	switch {
@@ -471,10 +415,6 @@ func (s *session) cliArgsLocked() []string {
 	return args
 }
 
-// promptMessage builds the stream-json user message from ACP content blocks:
-// text verbatim, base64 images as image source blocks, resource_links as
-// markdown links, and embedded text resources wrapped in a <context> block
-// (mirroring the reference's promptToClaude).
 func promptMessage(blocks []acp.ContentBlock) cliInput {
 	in := cliInput{Type: "user", Message: cliInputMessage{Role: "user"}}
 	add := func(c cliInputContent) { in.Message.Content = append(in.Message.Content, c) }

@@ -5,8 +5,6 @@ type Model struct {
 	Name string
 }
 
-// AvailableModels lives here (not pkg/agent) so the agent runtime stays
-// provider-agnostic.
 var AvailableModels = []Model{
 	{ID: "claude-sonnet-4-6", Name: "Claude Sonnet 4.6"},
 	{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5"},

@@ -13,15 +13,11 @@ func BinPath() string {
 	return external.LookupPath("codex", "codex")
 }
 
-// BuildArgs returns the `--config` flag pairs that point codex at the
-// configured Wingman server and lock down telemetry / non-essential
-// features. Callers prefix them to whatever subcommand args they want to
-// run, e.g. `append(BuildArgs(cfg), "app-server")`.
 func BuildArgs(cfg *CodexConfig) []string {
 	url := strings.TrimRight(cfg.BaseURL, "/") + "/v1"
 
 	return []string{
-		// Model configuration
+
 		"--config", "model=\"" + cfg.Model + "\"",
 		"--config", "model_provider=\"wingman\"",
 		"--config", "model_providers.wingman.name=\"Wingman\"",
@@ -30,27 +26,21 @@ func BuildArgs(cfg *CodexConfig) []string {
 		"--config", "model_providers.wingman.wire_api=\"responses\"",
 		"--config", "model_providers.wingman.requires_openai_auth=false",
 
-		// Telemetry & data exfiltration prevention
 		"--config", "feedback.enabled=false",
 		"--config", "analytics.enabled=false",
 		"--config", "history.persistence=\"none\"",
 		"--config", "otel.exporter=\"none\"",
 		"--config", "otel.log_user_prompt=false",
 
-		// Disabled features (security & cost control)
 		"--config", "web_search=\"disabled\"",
 		"--config", "features.apps=false",
 		"--config", "features.fast_mode=false",
 
-		// UI
 		"--config", "tui.show_tooltips=false",
 		"--config", "check_for_update_on_startup=false",
 	}
 }
 
-// BuildEnv returns parent with WINGMAN_TOKEN appended so the codex CLI
-// can authenticate against the Wingman server referenced from
-// [BuildArgs]. If parent is nil, os.Environ() is used.
 func BuildEnv(parent []string, cfg *CodexConfig) []string {
 	if parent == nil {
 		parent = os.Environ()

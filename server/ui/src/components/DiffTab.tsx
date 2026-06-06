@@ -17,15 +17,10 @@ export function DiffTab({ path, sessionId, subscribe, onDeleted }: Props) {
 	const [error, setError] = useState<string | null>(null);
 	const scheme = useColorScheme();
 
-	// Ref so `load` stays stable across renders and the WebSocket subscription
-	// doesn't tear down/re-subscribe each time.
 	const onDeletedRef = useRef(onDeleted);
 	useEffect(() => {
 		onDeletedRef.current = onDeleted;
 	});
-	// Track whether we've ever found a diff for this path. Closing the tab on a
-	// missing entry only makes sense after we've shown one — opening directly
-	// from a stale link should still render the "No changes" state.
 	const hadDiffRef = useRef(false);
 
 	const load = useCallback(async () => {
@@ -92,16 +87,9 @@ export function DiffTab({ path, sessionId, subscribe, onDeleted }: Props) {
 		);
 	}
 
-	// Prefer Monaco's diff editor whenever at least one side has content.
-	// The backend strips empty strings from JSON, so for an added file
-	// `original` is undefined (not "") and for a deleted file `modified` is
-	// undefined; treat undefined as empty so those still hit DiffEditor.
 	const original = diff.original ?? "";
 	const modified = diff.modified ?? "";
 	if (original !== "" || modified !== "") {
-		// Side-by-side only makes sense for modified files. For added or deleted
-		// files inline mode renders a single column with green/red line backgrounds,
-		// which avoids a giant empty pane on one side.
 		const inline = diff.status === "added" || diff.status === "deleted";
 		return (
 			<DiffEditor

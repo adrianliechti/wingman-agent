@@ -18,13 +18,8 @@ import (
 )
 
 const (
-	// listToolsTimeout bounds the initial ListTools handshake. MCP servers
-	// that hang here block agent startup, so this is intentionally short.
 	listToolsTimeout = 30 * time.Second
 
-	// callToolTimeout caps a single MCP tool invocation. Long enough for
-	// legitimate slow tools (web fetches, builds, queries) without letting a
-	// hung server stall the agent indefinitely.
 	callToolTimeout = 5 * time.Minute
 )
 
@@ -68,10 +63,6 @@ func convertTool(serverName string, session *sdkmcp.ClientSession, mcpTool sdkmc
 	}
 }
 
-// schemaToParams coerces an MCP tool's InputSchema to a JSONSchema-style
-// map[string]any. The SDK may hand us either a map directly or a typed
-// struct; in the latter case we round-trip through JSON. Falls back to an
-// empty object schema (and logs) when conversion fails.
 func schemaToParams(serverName string, mcpTool sdkmcp.Tool) map[string]any {
 	empty := map[string]any{"type": "object", "properties": map[string]any{}}
 

@@ -29,6 +29,7 @@ import { ModePicker, type ModeOption } from "./ModePicker";
 import { SkillPicker } from "./SkillPicker";
 
 interface Props {
+	sessionId?: string;
 	entries: ChatEntry[];
 	phase: Phase;
 	modes: ModeOption[];
@@ -36,18 +37,11 @@ interface Props {
 	onSelectMode: (next: string) => void;
 	onSend: (text: string, files?: string[], images?: string[]) => void;
 	onCancel: () => void;
-	// loading overlays the transcript area with a spinner during slow
-	// session loads (clicking a session in the sidebar).
 	loading?: boolean;
-	// loadError surfaces a failed session load (server returned non-OK) instead
-	// of leaving the user staring at an empty transcript.
 	loadError?: string | null;
-	// subscribe lets the ModelPicker react to agent_changed broadcasts.
 	subscribe?: (
 		handler: (msg: import("../types/protocol").ServerMessage) => void,
 	) => () => void;
-	// Outstanding agent prompt for this session, if any. While present
-	// the input area swaps to a prompt reply control.
 	prompt?: PendingPrompt | null;
 	onPromptReply?: (reply: { text?: string; approved?: boolean }) => void;
 }
@@ -67,10 +61,6 @@ function readImageAsDataUrl(file: File): Promise<string> {
 	});
 }
 
-// Vision models clamp inputs anyway (~1568px longest edge for Claude), so a
-// 12MP screenshot is wasted bytes on the wire and in the token bill. Downscale
-// to MAX_EDGE and re-encode as JPEG. GIFs pass through to preserve animation;
-// small images skip the canvas round-trip.
 const MAX_EDGE = 2048;
 const JPEG_QUALITY = 0.9;
 const PASSTHROUGH_MAX_BYTES = 512 * 1024;
@@ -105,11 +95,10 @@ async function processImage(file: File): Promise<string> {
 	}
 }
 
-// Visual gap left above a pinned user message — matches the contentRef's
-// py-4 padding so the first message and subsequent submissions look the same.
 const PIN_TOP_GAP = 16;
 
 export function ChatPanel({
+	sessionId,
 	entries,
 	phase,
 	modes,
@@ -139,20 +128,10 @@ export function ChatPanel({
 		latestTurnsRef.current = turns;
 	}, [turns]);
 
-	// ── scroll handling ──────────────────────────────────────────────────────
-	//
-	// On submit: pin the new user message to the viewport top and reserve a
-	// full viewport of empty room below it via the spacer. While the response
-	// streams, re-assert scrollTop = pin.top on every render so layout shifts
-	// (PhaseIndicator toggling, reasoning growing, etc.) can't drift it.
-	// User scroll yields the hold. On phase=idle: release the pin and trim
-	// the spacer to its minimum.
 	const submitPendingRef = useRef(false);
 	const pinRef = useRef<{ id: string; top: number } | null>(null);
 	const userScrolledRef = useRef(false);
-	// Scroll events fired before this timestamp are treated as our own writes.
 	const programmaticUntilRef = useRef(0);
-	// True after the first non-empty paint has been handled (session restore).
 	const restoredRef = useRef(false);
 
 	const writeScrollTop = useCallback((el: HTMLElement, top: number) => {
@@ -160,16 +139,6 @@ export function ChatPanel({
 		el.scrollTop = top;
 	}, []);
 
-	// ── collapse anchor ──────────────────────────────────────────────────────
-	//
-	// Collapsing or expanding a turn's working area shifts everything below
-	// (and sometimes above) the affected node. Because the container has
-	// `overflow-anchor: none` to keep the streaming pin authoritative, the
-	// browser won't compensate — the visible content jumps. To stop that, the
-	// trigger sites snapshot a stable anchor element's screen position before
-	// the state change, and a layout effect after the commit re-applies that
-	// position by adjusting scrollTop. User and final-answer entries are the
-	// stable choices — they survive collapse/expand transitions.
 	const pendingAnchorRef = useRef<{ id: string; viewportTop: number } | null>(
 		null,
 	);
@@ -184,10 +153,6 @@ export function ChatPanel({
 			if (t.final) stable.add(t.final.id);
 		}
 		const cRect = c.getBoundingClientRect();
-		// Prefer a stable entry that intersects the viewport. If the viewport is
-		// currently filled by working entries that are about to disappear, fall
-		// back to the nearest stable entry below the viewport so content after
-		// the collapse does not jump upward.
 		let visible: { id: string; viewportTop: number } | null = null;
 		let below: { id: string; viewportTop: number } | null = null;
 		let above: { id: string; viewportTop: number } | null = null;
@@ -215,9 +180,6 @@ export function ChatPanel({
 		captureAnchorForTurns(latestTurnsRef.current);
 	}, [captureAnchorForTurns]);
 
-	// Set an anchor *target* (rather than capturing the current position): the
-	// apply step will scroll so that `id`'s top sits at `viewportTop` after
-	// commit. Used to bring the first working entry to the top on expand.
 	const setAnchorTarget = useCallback((id: string, viewportTop: number) => {
 		pendingAnchorRef.current = { id, viewportTop };
 	}, []);
@@ -241,19 +203,10 @@ export function ChatPanel({
 
 	const isActive = phase !== "idle";
 
-	// Return focus to the input when the agent finishes so the user can
-	// keep typing without clicking back.
 	useEffect(() => {
 		if (!isActive) textareaRef.current?.focus();
 	}, [isActive]);
 
-	// Phase non-idle -> idle triggers the active turn's auto-collapse. If the
-	// user scrolled away from the pinned message during streaming, the working
-	// area is partly above the viewport and shrinking it would jump the visible
-	// content. Snapshot an anchor here (during render, before React commits the
-	// collapsed DOM) so the apply step can preserve it. When the user did not
-	// scroll, the pin keeps the user message at the top through the collapse
-	// and the natural layout is what we want — skip the capture in that case.
 	const prevPhaseRef = useRef(phase);
 	/* eslint-disable react-hooks/refs -- This is intentionally a pre-commit
 	   DOM snapshot for the phase-driven auto-collapse. Function components do
@@ -263,16 +216,11 @@ export function ChatPanel({
 		if (userScrolledRef.current) captureAnchorForTurns(turns);
 	}
 	prevPhaseRef.current = phase;
-	/* eslint-enable react-hooks/refs */
 
-	// Show the skill picker while the user is still typing the slash command
-	// (no whitespace yet — once they add a space we treat the rest as args).
 	const skillMatch = input.match(/^\/(\S*)$/);
 	const showSkills = !!skillMatch;
 	const skillQuery = skillMatch ? skillMatch[1] : "";
 
-	// One-shot: jump to bottom on the first paint with restored history (not
-	// on a fresh user submission — that's handled by the pin logic below).
 	useLayoutEffect(() => {
 		if (restoredRef.current || entries.length === 0) return;
 		restoredRef.current = true;
@@ -281,15 +229,12 @@ export function ChatPanel({
 		if (el) writeScrollTop(el, el.scrollHeight);
 	}, [entries, writeScrollTop]);
 
-	// Pin / hold / release — single state machine driven by entries + phase.
 	useLayoutEffect(() => {
 		const container = containerRef.current;
 		const content = contentRef.current;
 		const spacer = spacerRef.current;
 		if (!container || !content || !spacer) return;
 
-		// (1) Pin: a fresh submission is in flight and the user message just
-		// landed in the DOM.
 		if (submitPendingRef.current) {
 			const last = entries[entries.length - 1];
 			if (last?.type !== "user") return;
@@ -299,14 +244,9 @@ export function ChatPanel({
 			submitPendingRef.current = false;
 			userScrolledRef.current = false;
 
-			// Reserve viewport-height of room so the message can reach the top
-			// regardless of what's below.
 			spacer.style.height = `${container.clientHeight}px`;
 			const cRect = container.getBoundingClientRect();
 			const uRect = userEl.getBoundingClientRect();
-			// Leave a small gap above the pinned message so it doesn't sit
-			// flush with the top edge — matches the natural py-4 padding the
-			// first message has.
 			const top = Math.max(
 				0,
 				uRect.top - cRect.top + container.scrollTop - PIN_TOP_GAP,
@@ -319,10 +259,6 @@ export function ChatPanel({
 		const pin = pinRef.current;
 		if (!pin) return;
 
-		// (3) Release: response settled — trim the spacer to its minimum.
-		// Never shrink below what's needed to keep the current scrollTop
-		// reachable, otherwise a user who scrolled down past the pin during
-		// streaming gets yanked up when the spacer collapses.
 		if (phase === "idle") {
 			pinRef.current = null;
 			const belowUser = container.scrollHeight - pin.top - spacer.offsetHeight;
@@ -337,18 +273,12 @@ export function ChatPanel({
 			return;
 		}
 
-		// (2) Hold: re-assert scrollTop while streaming, unless the user took
-		// over. Browser scroll-anchoring and other layout-shift compensations
-		// can otherwise drift the pinned message off the top.
 		if (userScrolledRef.current) return;
 		if (Math.abs(container.scrollTop - pin.top) > 2) {
 			writeScrollTop(container, pin.top);
 		}
 	}, [entries, phase, writeScrollTop]);
 
-	// Window resize during streaming: content above the pinned message may
-	// rewrap at the new width, shifting its scroll-coordinate top. Recompute
-	// and re-snap so the message stays anchored.
 	useEffect(() => {
 		if (phase === "idle") return;
 		const container = containerRef.current;
@@ -377,8 +307,6 @@ export function ChatPanel({
 		return () => window.removeEventListener("resize", onResize);
 	}, [phase, writeScrollTop]);
 
-	// Detect intentional user scroll. programmaticUntilRef gates out the
-	// scroll events fired by our own writes.
 	useEffect(() => {
 		const container = containerRef.current;
 		if (!container) return;
@@ -393,9 +321,6 @@ export function ChatPanel({
 	const handleSubmit = useCallback(() => {
 		const text = input.trim();
 		if (!text && images.length === 0) return;
-		// While a turn is in flight, this submit queues onto the server side.
-		// The agent will pick it up at its next safe boundary and respond as
-		// part of the same Send loop — visually it lands as a new turn.
 		submitPendingRef.current = true;
 		onSend(
 			text,
@@ -410,7 +335,6 @@ export function ChatPanel({
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
-			// Let SkillPicker handle Enter / Tab / arrows / Escape while it's open.
 			if (
 				showSkills &&
 				(e.key === "Enter" ||
@@ -449,9 +373,7 @@ export function ChatPanel({
 			try {
 				const dataUrl = await processImage(f);
 				next.push({ id: crypto.randomUUID(), dataUrl, name: f.name });
-			} catch {
-				/* skip unreadable files */
-			}
+			} catch {}
 		}
 		if (next.length > 0) setImages((prev) => [...prev, ...next]);
 	}, []);
@@ -482,13 +404,10 @@ export function ChatPanel({
 		(s: { name: string; arguments?: string[] }) => {
 			const hasArgs = !!s.arguments && s.arguments.length > 0;
 			if (hasArgs) {
-				// Pre-fill the slash command and let the user type arguments.
 				setInput(`/${s.name} `);
 				textareaRef.current?.focus();
 				return;
 			}
-			// No args — fire the skill immediately. The server queues onto an
-			// in-flight turn when one is running.
 			submitPendingRef.current = true;
 			onSend(
 				`/${s.name}`,
@@ -550,188 +469,182 @@ export function ChatPanel({
 						})}
 					</div>
 				)}
-				{/* Spacer lives outside contentRef so writing its height doesn't
-				    resize the observed element and avoids the ResizeObserver loop
-				    warning. */}
 				<div ref={spacerRef} aria-hidden style={{ height: 0 }} />
 			</div>
 
-			{/* Floating input */}
 			<div className="absolute bottom-0 left-0 right-0">
 				<div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none" />
 				<div className="bg-bg px-4 pb-3">
 					{prompt && onPromptReply ? (
 						<PromptBar prompt={prompt} onReply={onPromptReply} />
 					) : (
-					<div className="relative rounded-lg border border-border-subtle bg-bg-surface/60 hover:border-border focus-within:border-border transition-colors">
-						{showSkills && (
-							<SkillPicker
-								query={skillQuery}
-								onSelect={selectSkill}
-								onClose={() => {
-									/* picker closes naturally when input no longer matches */
-								}}
-							/>
-						)}
-						{files.length > 0 && (
-							<div className="flex flex-wrap gap-1 px-2.5 pt-2">
-								{files.map((p) => {
-									const name = p.split("/").pop() || p;
-									return (
+						<div className="relative rounded-lg border border-border-subtle bg-bg-surface/60 hover:border-border focus-within:border-border transition-colors">
+							{showSkills && (
+								<SkillPicker
+									query={skillQuery}
+									onSelect={selectSkill}
+									onClose={() => {}}
+								/>
+							)}
+							{files.length > 0 && (
+								<div className="flex flex-wrap gap-1 px-2.5 pt-2">
+									{files.map((p) => {
+										const name = p.split("/").pop() || p;
+										return (
+											<span
+												key={p}
+												className="group flex items-center gap-1 px-1.5 py-0.5 rounded bg-bg-active text-[11px] text-fg-muted font-mono"
+												title={p}
+											>
+												<span className="truncate max-w-[180px]">{name}</span>
+												<button
+													type="button"
+													className="text-fg-dim hover:text-fg cursor-pointer"
+													onClick={() => removeFile(p)}
+													aria-label="Remove file"
+												>
+													<X size={10} />
+												</button>
+											</span>
+										);
+									})}
+								</div>
+							)}
+
+							{images.length > 0 && (
+								<div className="flex flex-wrap gap-1.5 px-2.5 pt-2">
+									{images.map((img) => (
 										<span
-											key={p}
-											className="group flex items-center gap-1 px-1.5 py-0.5 rounded bg-bg-active text-[11px] text-fg-muted font-mono"
-											title={p}
+											key={img.id}
+											className="group relative inline-flex items-center rounded overflow-hidden bg-bg-active"
+											title={img.name || "image"}
 										>
-											<span className="truncate max-w-[180px]">{name}</span>
+											<img
+												src={img.dataUrl}
+												alt={img.name || "image"}
+												className="block w-12 h-12 object-cover"
+											/>
 											<button
 												type="button"
-												className="text-fg-dim hover:text-fg cursor-pointer"
-												onClick={() => removeFile(p)}
-												aria-label="Remove file"
+												className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center rounded-full bg-bg/80 text-fg-dim hover:text-fg cursor-pointer"
+												onClick={() => removeImage(img.id)}
+												aria-label="Remove image"
 											>
 												<X size={10} />
 											</button>
 										</span>
-									);
-								})}
-							</div>
-						)}
+									))}
+								</div>
+							)}
 
-						{images.length > 0 && (
-							<div className="flex flex-wrap gap-1.5 px-2.5 pt-2">
-								{images.map((img) => (
-									<span
-										key={img.id}
-										className="group relative inline-flex items-center rounded overflow-hidden bg-bg-active"
-										title={img.name || "image"}
-									>
-										<img
-											src={img.dataUrl}
-											alt={img.name || "image"}
-											className="block w-12 h-12 object-cover"
-										/>
+							<div className="px-3 pt-2">
+								<textarea
+									ref={textareaRef}
+									// biome-ignore lint/a11y/noAutofocus: chat input is the primary control
+									autoFocus
+									className="w-full bg-transparent text-fg text-[12px] font-mono resize-none outline-none leading-[1.7] placeholder:text-fg-dim"
+									style={{ fieldSizing: "content" } as React.CSSProperties}
+									value={input}
+									onChange={(e) => setInput(e.target.value)}
+									onKeyDown={handleKeyDown}
+									onPaste={handlePaste}
+									placeholder="Message Wingman…"
+									rows={1}
+								/>
+							</div>
+
+							<div className="flex items-center justify-between px-1.5 pb-1.5 pt-1 gap-1">
+								<div className="flex items-center gap-0 min-w-0">
+									<div className="relative flex items-center">
 										<button
 											type="button"
-											className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center rounded-full bg-bg/80 text-fg-dim hover:text-fg cursor-pointer"
-											onClick={() => removeImage(img.id)}
-											aria-label="Remove image"
+											className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
+											onClick={() => setShowPicker((s) => !s)}
+											title="Add file context"
 										>
-											<X size={10} />
+											<Plus size={14} />
 										</button>
-									</span>
-								))}
-							</div>
-						)}
+										{showPicker && (
+											<FilePicker
+												onSelect={addFile}
+												onClose={() => setShowPicker(false)}
+											/>
+										)}
+									</div>
+									<input
+										ref={imageInputRef}
+										type="file"
+										accept="image/*"
+										multiple
+										className="hidden"
+										onChange={(e) => {
+											if (e.target.files) void addImageFiles(e.target.files);
+											e.target.value = "";
+										}}
+									/>
+									<ModePicker
+										modes={modes}
+										current={mode}
+										onSelect={onSelectMode}
+									/>
+									<ModelPicker sessionId={sessionId} subscribe={subscribe} />
+								</div>
 
-						<div className="px-3 pt-2">
-							<textarea
-								ref={textareaRef}
-								// biome-ignore lint/a11y/noAutofocus: chat input is the primary control
-								autoFocus
-								className="w-full bg-transparent text-fg text-[12px] font-mono resize-none outline-none leading-[1.7] placeholder:text-fg-dim"
-								style={{ fieldSizing: "content" } as React.CSSProperties}
-								value={input}
-								onChange={(e) => setInput(e.target.value)}
-								onKeyDown={handleKeyDown}
-								onPaste={handlePaste}
-								placeholder="Message Wingman…"
-								rows={1}
-							/>
-						</div>
-
-						<div className="flex items-center justify-between px-1.5 pb-1.5 pt-1 gap-1">
-							<div className="flex items-center gap-0 min-w-0">
-								<div className="relative flex items-center">
+								<div className="flex items-center gap-0">
 									<button
 										type="button"
 										className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-										onClick={() => setShowPicker((s) => !s)}
-										title="Add file context"
+										onClick={() => imageInputRef.current?.click()}
+										title="Attach image"
 									>
-										<Plus size={14} />
+										<Paperclip size={14} />
 									</button>
-									{showPicker && (
-										<FilePicker
-											onSelect={addFile}
-											onClose={() => setShowPicker(false)}
-										/>
-									)}
+									{(() => {
+										const hasInput = input.trim() !== "" || images.length > 0;
+										const mode: "send" | "stop" | "disabled" = hasInput
+											? "send"
+											: isActive
+												? "stop"
+												: "disabled";
+										return (
+											<button
+												type="button"
+												className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
+													mode === "disabled"
+														? "text-fg-dim opacity-40 cursor-not-allowed"
+														: "text-fg-muted hover:text-fg hover:bg-bg-hover"
+												}`}
+												onClick={mode === "stop" ? onCancel : handleSubmit}
+												disabled={mode === "disabled"}
+												title={
+													mode === "stop"
+														? "Stop (Esc)"
+														: mode === "send" && isActive
+															? "Queue (Enter)"
+															: "Send (Enter)"
+												}
+											>
+												{mode === "stop" ? (
+													<>
+														<LoaderCircle
+															size={14}
+															className="animate-spin group-hover:hidden"
+														/>
+														<Square
+															size={10}
+															fill="currentColor"
+															className="hidden group-hover:block"
+														/>
+													</>
+												) : (
+													<ArrowUp size={14} />
+												)}
+											</button>
+										);
+									})()}
 								</div>
-								<input
-									ref={imageInputRef}
-									type="file"
-									accept="image/*"
-									multiple
-									className="hidden"
-									onChange={(e) => {
-										if (e.target.files) void addImageFiles(e.target.files);
-										e.target.value = "";
-									}}
-								/>
-								<ModePicker modes={modes} current={mode} onSelect={onSelectMode} />
-								<ModelPicker subscribe={subscribe} />
-							</div>
-
-							<div className="flex items-center gap-0">
-								<button
-									type="button"
-									className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-									onClick={() => imageInputRef.current?.click()}
-									title="Attach image"
-								>
-									<Paperclip size={14} />
-								</button>
-								{(() => {
-									// Button modes: if the input has content, the primary
-									// action is Send — which queues onto an in-flight turn
-									// when one is running. Otherwise, while a turn is
-									// active, the button stops it. Idle + empty = disabled.
-									const hasInput = input.trim() !== "" || images.length > 0;
-									const mode: "send" | "stop" | "disabled" = hasInput
-										? "send"
-										: isActive
-											? "stop"
-											: "disabled";
-									return (
-										<button
-											type="button"
-											className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
-												mode === "disabled"
-													? "text-fg-dim opacity-40 cursor-not-allowed"
-													: "text-fg-muted hover:text-fg hover:bg-bg-hover"
-											}`}
-											onClick={mode === "stop" ? onCancel : handleSubmit}
-											disabled={mode === "disabled"}
-											title={
-												mode === "stop"
-													? "Stop (Esc)"
-													: mode === "send" && isActive
-														? "Queue (Enter)"
-														: "Send (Enter)"
-											}
-										>
-											{mode === "stop" ? (
-												<>
-													<LoaderCircle
-														size={14}
-														className="animate-spin group-hover:hidden"
-													/>
-													<Square
-														size={10}
-														fill="currentColor"
-														className="hidden group-hover:block"
-													/>
-												</>
-											) : (
-												<ArrowUp size={14} />
-											)}
-										</button>
-									);
-								})()}
 							</div>
 						</div>
-					</div>
 					)}
 				</div>
 			</div>
@@ -906,19 +819,11 @@ interface Turn {
 	final: ChatEntry | null;
 }
 
-// Split flat entries into turns: each turn is one user message + everything
-// the agent did before its next final answer. Reasoning, tool calls, and
-// intermediate assistant text all go into `working`; the last assistant or
-// error entry of the turn becomes `final`. This lets us render finished turns
-// as `user → [Worked] → final answer` and only blow open the working section
-// while a turn is in flight.
 function buildTurns(entries: ChatEntry[]): Turn[] {
 	const turns: Turn[] = [];
 	let counter = 0;
 
 	for (const e of entries) {
-		// Start a new turn on a user message, or on the first entry if history
-		// resumes mid-turn (no preceding user).
 		if (e.type === "user" || turns.length === 0) {
 			turns.push({
 				key: e.type === "user" ? e.id : `turn-${counter++}`,
@@ -965,18 +870,11 @@ const TurnView = memo(function TurnView({
 	setAnchorTarget: (id: string, viewportTop: number) => void;
 	applyPendingAnchor: () => void;
 }) {
-	// Collapsed when: turn is finished AND has a final answer AND has working
-	// entries to hide. While the agent is still working (no final yet, or
-	// phase !== idle), the working section stays open so the user can watch.
-	// User clicks pin an override.
 	const canCollapse =
 		!isActive && turn.final !== null && turn.working.length > 0;
 	const [override, setOverride] = useState<boolean | null>(null);
 	const expanded = override ?? !canCollapse;
 	const setExpanded = (value: boolean) => {
-		// On expand, target the first working entry to the top of the viewport
-		// (matches the pinned-user-message gap). On collapse, snapshot the
-		// current viewport position so surrounding content stays stable.
 		if (value && turn.working[0]) {
 			setAnchorTarget(turn.working[0].id, PIN_TOP_GAP);
 		} else {
@@ -985,9 +883,6 @@ const TurnView = memo(function TurnView({
 		setOverride(value);
 	};
 
-	// After the working area's commit lands (auto-collapse or manual click),
-	// restore any pending anchor. Child effects run before the parent's, so
-	// this fires before ChatPanel's spacer-trim sees the new scrollTop.
 	const prevExpandedRef = useRef(expanded);
 	useLayoutEffect(() => {
 		if (prevExpandedRef.current === expanded) return;
@@ -1028,9 +923,6 @@ const TurnView = memo(function TurnView({
 					}
 				/>
 			)}
-			{/* Active turn with no final yet and no working: still show indicator.
-			    Persist through the brief gap between phase=streaming and the
-			    first text delta materializing turn.final. */}
 			{isActive && turn.working.length === 0 && !turn.final && (
 				<PhaseIndicator />
 			)}
@@ -1068,8 +960,6 @@ function sameTurnEntries(a: Turn, b: Turn) {
 	return true;
 }
 
-// Renders the full working trail using the same tool-grouping pass as before,
-// plus a "collapse" affordance once the turn is finished.
 const WorkingExpanded = memo(function WorkingExpanded({
 	entries,
 	isActive,
@@ -1159,11 +1049,8 @@ const WorkingSummary = memo(function WorkingSummary({
 });
 
 function PhaseIndicator() {
-	// Pick a verb once per mount so the label stays stable while shown.
 	const [verb] = useState(sampleSpinnerVerb);
 
-	// Sample the clock once a second so the elapsed counter advances. Reading
-	// time only inside the interval keeps render pure.
 	const [clock, setClock] = useState(() => {
 		const startedAt = Date.now();
 		return { startedAt, now: startedAt };
@@ -1175,10 +1062,7 @@ function PhaseIndicator() {
 		return () => clearInterval(id);
 	}, []);
 
-	const elapsed = Math.max(
-		0,
-		Math.floor((clock.now - clock.startedAt) / 1000),
-	);
+	const elapsed = Math.max(0, Math.floor((clock.now - clock.startedAt) / 1000));
 
 	return (
 		<div className="mb-4 pl-3">

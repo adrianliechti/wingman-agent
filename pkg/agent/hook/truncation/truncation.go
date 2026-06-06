@@ -10,17 +10,12 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-// MaxBytes is the default per-tool cap on inline output. Outputs above this
-// size are persisted to a scratch file and replaced with a preview envelope.
 const MaxBytes = 100 * 1024
 
-// grepMaxBytes is a tighter cap for grep, whose results compound across
-// turns more than other tools.
 const grepMaxBytes = 20 * 1024
 
 const previewBytes = 2 * 1024
 
-// budgetFor returns the per-tool inline output cap.
 func budgetFor(name string) int {
 	if name == "grep" {
 		return grepMaxBytes
@@ -28,9 +23,6 @@ func budgetFor(name string) int {
 	return MaxBytes
 }
 
-// New returns a PostToolUse hook that persists oversized tool output and
-// substitutes a preview envelope. Tools that self-cap below their budget
-// pass through untouched.
 func New(scratchDir string) hook.PostToolUse {
 	return func(_ context.Context, call tool.ToolCall, result string) (string, error) {
 		budget := budgetFor(call.Name)
@@ -46,7 +38,7 @@ func writeScratch(scratchDir, toolName, content string) string {
 	if scratchDir == "" {
 		return ""
 	}
-	// os.CreateTemp avoids timestamp collisions under concurrent tool calls.
+
 	f, err := os.CreateTemp(scratchDir, "result-"+sanitizeName(toolName)+"-*.txt")
 	if err != nil {
 		return ""

@@ -16,17 +16,8 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// The Claude CLI persists each conversation to
-//   ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl
-// where <encoded-cwd> is the absolute cwd with every non-alphanumeric
-// character replaced by '-' (truncated to 200 chars + suffix when longer,
-// which we don't replicate here — that suffix is a hash we can't compute).
-// The file is a newline-delimited stream of mixed event types; we only care
-// about a few of them for listing/replay.
-
 const maxProjectKeyLen = 200
 
-// projectsRoot returns ~/.claude/projects, or "" if HOME is not resolvable.
 func projectsRoot() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -35,8 +26,6 @@ func projectsRoot() string {
 	return filepath.Join(home, ".claude", "projects")
 }
 
-// encodeCwd replaces every non-alphanumeric byte with '-', matching the
-// CLI's project-key encoding. Returns "" for an empty input.
 func encodeCwd(cwd string) string {
 	if cwd == "" {
 		return ""
@@ -52,17 +41,12 @@ func encodeCwd(cwd string) string {
 		}
 	}
 	if len(b) > maxProjectKeyLen {
-		// The CLI appends a hash for over-long paths; we don't reproduce it.
-		// Returning the truncated prefix still matches whatever bucket the
-		// CLI created when cwd was under the limit, which is the common case.
+
 		b = b[:maxProjectKeyLen]
 	}
 	return string(b)
 }
 
-// projectDirFor returns the on-disk directory the CLI uses for cwd, or ""
-// if cwd / HOME is missing. Symlinks are resolved so that callers that pass
-// `/tmp/x` line up with the CLI's `/private/tmp/x` on macOS.
 func projectDirFor(cwd string) string {
 	if cwd == "" {
 		return ""
@@ -78,9 +62,6 @@ func projectDirFor(cwd string) string {
 	return filepath.Join(root, encodeCwd(resolved))
 }
 
-// historyHeader is the subset of fields we read while scanning a session file
-// to build SessionInfo. The CLI writes one of these per line; unknown lines
-// are ignored.
 type historyHeader struct {
 	Type    string               `json:"type"`
 	AITitle string               `json:"aiTitle,omitempty"`
@@ -93,10 +74,6 @@ type historyHeaderMessage struct {
 	Content json.RawMessage `json:"content,omitempty"`
 }
 
-// listProjectSessions returns SessionInfo for every .jsonl session file the
-// CLI has written. If cwd is non-empty, results are scoped to that project's
-// directory; if cwd is empty, every project under ~/.claude/projects is
-// scanned. Newer sessions come first.
 func listProjectSessions(cwd string) ([]acp.SessionInfo, error) {
 	dirs, err := projectDirs(cwd)
 	if err != nil {
@@ -127,8 +104,7 @@ func listProjectSessions(cwd string) ([]acp.SessionInfo, error) {
 				sessCwd = cwd
 			}
 			if sessCwd == "" {
-				// Cwd is required on SessionInfo; skip orphans where we have
-				// neither a request cwd nor a recorded one.
+
 				continue
 			}
 			ts := info.ModTime().UTC().Format(time.RFC3339)
@@ -144,14 +120,12 @@ func listProjectSessions(cwd string) ([]acp.SessionInfo, error) {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		// Both updatedAt values are populated above; newest first.
+
 		return *out[i].UpdatedAt > *out[j].UpdatedAt
 	})
 	return out, nil
 }
 
-// projectDirs returns the on-disk dirs to scan for cwd. When cwd is empty,
-// every project under ~/.claude/projects is enumerated.
 func projectDirs(cwd string) ([]string, error) {
 	if cwd != "" {
 		d := projectDirFor(cwd)
@@ -181,9 +155,6 @@ func projectDirs(cwd string) ([]string, error) {
 	return out, nil
 }
 
-// deleteProjectSession removes the on-disk session file for id. The delete
-// request carries no cwd, so every project dir is scanned; a missing file is
-// not an error (delete is idempotent).
 func deleteProjectSession(id acp.SessionId) error {
 	dirs, err := projectDirs("")
 	if err != nil {
@@ -197,7 +168,6 @@ func deleteProjectSession(id acp.SessionId) error {
 	return nil
 }
 
-// sessionExists reports whether ~/.claude/projects/<cwd>/<id>.jsonl is on disk.
 func sessionExists(cwd string, id acp.SessionId) bool {
 	dir := projectDirFor(cwd)
 	if dir == "" {
@@ -207,9 +177,6 @@ func sessionExists(cwd string, id acp.SessionId) bool {
 	return err == nil
 }
 
-// scanSessionMetadata reads a session file looking for an `ai-title` event
-// (preferred) and falls back to the first user message. It also returns the
-// recorded cwd from the first message that carries one.
 func scanSessionMetadata(path string) (title, cwd string) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -251,9 +218,6 @@ func scanSessionMetadata(path string) (title, cwd string) {
 	return "", cwd
 }
 
-// firstTextFromContent extracts the first non-empty text payload from a
-// message.content value, which may be either a bare string or an array of
-// content blocks.
 func firstTextFromContent(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -282,9 +246,6 @@ func truncateTitle(s string) string {
 	return s[:max-1] + "…"
 }
 
-// replayHistory streams the contents of an existing session file out as ACP
-// session updates so the client can rebuild the transcript before the user
-// sends their first new prompt. Best-effort: malformed lines are skipped.
 func replayHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, cwd string) error {
 	dir := projectDirFor(cwd)
 	if dir == "" {
@@ -335,16 +296,8 @@ func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 	return nil
 }
 
-// localCommandTagPattern matches the marker tags the CLI wraps around
-// slash-command invocations and their captured output. The live prompt loop
-// never surfaces these; replay must strip them too or the raw XML leaks into
-// the client on session load.
-// Go's RE2 engine has no backreferences, so each tag pair is spelled out.
 var localCommandTagPattern = regexp.MustCompile(`(?s)<command-name>.*?</command-name>|<command-message>.*?</command-message>|<command-args>.*?</command-args>|<local-command-stdout>.*?</local-command-stdout>|<local-command-stderr>.*?</local-command-stderr>`)
 
-// stripMarkerTags removes local-command marker tags, returning the remaining
-// prose. ok is false when nothing renderable is left (e.g. a message that was
-// purely a slash-command marker), signalling the caller to skip it.
 func stripMarkerTags(text string) (string, bool) {
 	stripped := localCommandTagPattern.ReplaceAllString(text, "")
 	if strings.TrimSpace(stripped) == "" {
@@ -353,9 +306,6 @@ func stripMarkerTags(text string) (string, bool) {
 	return stripped, true
 }
 
-// replayUserMessage emits either a user_message_chunk (for plain text turns)
-// or one or more tool_call_update completions (for the user-role tool_result
-// echoes the CLI writes after each tool returns).
 func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache) error {
 	if len(raw) == 0 {
 		return nil
@@ -367,7 +317,6 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 		return nil
 	}
 
-	// Plain-string content: a real user-typed prompt.
 	var s string
 	if err := json.Unmarshal(msg.Content, &s); err == nil {
 		text, ok := stripMarkerTags(s)
@@ -380,8 +329,6 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 		})
 	}
 
-	// Array content: text blocks become user message chunks; tool_result blocks
-	// become tool_call completions. Everything else is dropped.
 	var blocks []cliMsgBlock
 	if err := json.Unmarshal(msg.Content, &blocks); err != nil {
 		return nil

@@ -3,7 +3,7 @@ package claude
 import "testing"
 
 func TestStripMarkerTags(t *testing.T) {
-	// Pure marker content should be dropped entirely.
+
 	for _, in := range []string{
 		"<command-name>/model</command-name>",
 		"<local-command-stdout>out</local-command-stdout>",
@@ -15,7 +15,6 @@ func TestStripMarkerTags(t *testing.T) {
 		}
 	}
 
-	// Real prose is preserved; markers around it are removed.
 	mixed := "<command-name>/model</command-name>" +
 		"<local-command-stdout>Set model to opus</local-command-stdout>" +
 		"please continue"
@@ -27,7 +26,6 @@ func TestStripMarkerTags(t *testing.T) {
 		t.Errorf("stripMarkerTags mixed = %q, want %q", got, want)
 	}
 
-	// Plain text is returned unchanged.
 	if got, ok := stripMarkerTags("hello"); !ok || got != "hello" {
 		t.Errorf("plain text = %q %v", got, ok)
 	}

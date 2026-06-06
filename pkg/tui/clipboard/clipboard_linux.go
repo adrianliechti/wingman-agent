@@ -53,7 +53,7 @@ func readImage() (string, error) {
 }
 
 func WriteText(text string) error {
-	// wl-copy (Wayland), then xclip (X11)
+
 	cmd := exec.Command("wl-copy")
 	cmd.Stdin = strings.NewReader(text)
 

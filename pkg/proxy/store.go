@@ -34,10 +34,6 @@ func (s *Store) Add(entry RequestEntry) string {
 	s.totalInput += entry.InputTokens
 	s.totalOutput += entry.OutputTokens
 
-	// Plain re-slicing (s.entries = s.entries[k:]) would leave the dropped
-	// entries pinned in the underlying array, preventing GC of their
-	// RequestBody/ResponseBody buffers until the slice next grows.
-	// slices.Delete zeros the freed slots so the byte buffers can be reclaimed.
 	if excess := len(s.entries) - s.maxEntries; excess > 0 {
 		s.entries = slices.Delete(s.entries, 0, excess)
 	}

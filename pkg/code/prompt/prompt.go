@@ -28,16 +28,8 @@ var sectionSkills string
 //go:embed section_project.txt
 var sectionProject string
 
-// BoundaryMarker separates the static cacheable prefix from the dynamic
-// per-turn suffix. Plain text (no markdown) so it serves as a deterministic
-// prefix terminator for any caching layer.
 const BoundaryMarker = "--- session context ---"
 
-// Static sections live in the cacheable prefix. They change only when the
-// session's on-disk state changes (AGENTS.md / skill (un)install / memory
-// file add/edit/delete). The caller is responsible for mtime-tracking these
-// so the rendered string is byte-stable across turns when the source files
-// haven't changed.
 var staticTemplates = []struct {
 	title string
 	tmpl  *template.Template
@@ -47,8 +39,6 @@ var staticTemplates = []struct {
 	{"Memory", template.Must(template.New("memory").Parse(sectionMemory))},
 }
 
-// Dynamic sections sit after the boundary. They change per turn — Date rolls
-// daily; Plan is mode-gated.
 var dynamicTemplates = []struct {
 	title string
 	tmpl  *template.Template
@@ -95,14 +85,10 @@ func renderSections(templates []struct {
 	return sections
 }
 
-// RenderSections returns every renderable section regardless of static/dynamic
-// classification. Retained for tests and callers that need a flat list.
 func RenderSections(data SectionData) []Section {
 	return append(renderSections(staticTemplates, data), renderSections(dynamicTemplates, data)...)
 }
 
-// BuildInstructions assembles the system prompt with a cacheable static prefix
-// followed by a boundary marker and a dynamic suffix.
 func BuildInstructions(base string, data SectionData) string {
 	var staticParts []Section
 	staticParts = append(staticParts, Section{Content: base})

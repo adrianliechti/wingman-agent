@@ -19,9 +19,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
-// Compile-time check: the TUI App is the [code.UI] that coder.Agent's
-// ask_user / shell-confirm hooks delegate to. If code.UI grows, the
-// build breaks here so the wiring stays in lockstep with the interface.
 var _ code.UI = (*App)(nil)
 
 type App struct {
@@ -46,23 +43,18 @@ type App struct {
 
 	sessionID string
 
-	// Atomic so cancel/command guards on the UI goroutine see writes
-	// from the stream goroutine immediately. Spinner side-effects stay
-	// on the UI goroutine — see setPhase / queuePhase.
-	phase       atomic.Int32 // AppPhase
+	phase       atomic.Int32
 	currentMode Mode
 	showWelcome bool
 	activeModal Modal
 
-	// elicitMu serializes Ask / Confirm so two concurrent tool calls
-	// can't fight over the input area.
 	elicitMu       sync.Mutex
 	promptActive   bool
 	promptResponse chan bool
 	confirmAll     atomic.Bool
 	askActive      bool
 	askResponse    chan string
-	// 0 = summary, 1 = list, 2 = full. Ctrl+E cycles through.
+
 	expandLevel    int
 	inputTokens    int64
 	cachedTokens   int64
@@ -75,9 +67,9 @@ type App struct {
 	streamCancel context.CancelFunc
 	streamMu     sync.Mutex
 
-	// Written by the stream goroutine, read by the UI goroutine inside
-	// renderChat. Guarded by streamStateMu — eventual consistency is
-	// fine (the next render call will pick up the latest values).
+	renderPending atomic.Bool
+	renderLast    atomic.Int64
+
 	streamStateMu      sync.Mutex
 	currentToolName    string
 	currentToolHint    string
@@ -89,10 +81,6 @@ type App struct {
 	mouseEnabled bool
 }
 
-// New constructs the App. sessionID may be empty when the caller plans
-// to create a new session after wiring the App as the agent's UI (so
-// the new session's tool list includes ask_user); use [App.SetSessionID]
-// to attach the freshly-minted id before [App.Run].
 func New(ctx context.Context, agent *coder.Agent, sessionID string) *App {
 	saveExecutablePath()
 
@@ -114,8 +102,6 @@ func New(ctx context.Context, agent *coder.Agent, sessionID string) *App {
 	return a
 }
 
-// SetSessionID binds the active session id once it's known. Call once,
-// before [App.Run], after the agent has created or loaded the session.
 func (a *App) SetSessionID(id string) {
 	a.sessionID = id
 }
@@ -160,9 +146,6 @@ func (a *App) stop() {
 	a.app.EnableMouse(false)
 	a.app.Stop()
 
-	// Disable mouse tracking modes. tview's screen.Fini() should handle this,
-	// but a race between terminal restore and pending mouse events can leak
-	// escape sequences to the shell.
 	fmt.Fprint(os.Stdout, "\033[?1000l\033[?1002l\033[?1003l\033[?1006l")
 
 	if len(a.agent.Messages(a.sessionID)) > 0 {
@@ -181,8 +164,6 @@ func (a *App) stop() {
 func (a *App) Run() error {
 	a.setupUI()
 
-	// Narrow the model catalog to what the upstream serves; Models() reports
-	// a sane default until (and if) this lands.
 	a.agent.FetchModels(a.ctx)
 
 	mainLayout := a.buildLayout()
@@ -215,7 +196,6 @@ func (a *App) Run() error {
 		})
 	}()
 
-	// Mutation before app.Run() is safe.
 	if messages := a.agent.Messages(a.sessionID); len(messages) > 0 {
 		a.switchToChat()
 		a.renderChat(messages)

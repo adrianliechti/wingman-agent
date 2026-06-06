@@ -10,17 +10,6 @@ import (
 	"strings"
 )
 
-// rolloutCommandOutputs recovers per-command output for a resumed thread.
-//
-// codex's `thread/resume` returns historical commandExecution items with
-// aggregatedOutput=null, so replayed command tool calls would otherwise show
-// no output. The output is still on disk in codex's rollout log
-// (~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<threadID>.jsonl) as
-// function_call_output entries keyed by call_id, which matches the resumed
-// commandExecution item id. This reads that log and maps call_id -> output.
-//
-// Returns nil when the rollout can't be found or read; replay then falls back
-// to showing no output, which is the prior behaviour.
 func rolloutCommandOutputs(sessionID string) map[string]string {
 	if sessionID == "" {
 		return nil
@@ -47,8 +36,6 @@ func rolloutCommandOutputs(sessionID string) map[string]string {
 	return out
 }
 
-// parseRolloutOutputs reads a codex rollout log and maps each
-// function_call_output's call_id to its output text.
 func parseRolloutOutputs(r io.Reader) map[string]string {
 	out := map[string]string{}
 	scanner := bufio.NewScanner(r)
@@ -75,8 +62,6 @@ func parseRolloutOutputs(r io.Reader) map[string]string {
 	return out
 }
 
-// findRolloutFile locates the rollout log whose file name ends with the thread
-// id (rollout files are named rollout-<timestamp>-<threadID>.jsonl).
 func findRolloutFile(root, sessionID string) string {
 	suffix := sessionID + ".jsonl"
 	var found string
@@ -93,11 +78,6 @@ func findRolloutFile(root, sessionID string) string {
 	return found
 }
 
-// decodeRolloutOutput renders a function_call_output payload into displayable
-// text. codex writes it as a JSON string wrapped in an exec envelope
-// ("Wall time: …\nOutput:\n<payload>"); MCP tool results carry their payload as
-// a JSON array of content blocks. This unwraps both so the result reads as
-// plain text instead of raw JSON.
 func decodeRolloutOutput(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -108,22 +88,18 @@ func decodeRolloutOutput(raw json.RawMessage) string {
 	}
 	s = strings.TrimSpace(s)
 
-	// Drop codex's exec envelope (metadata lines before "Output:").
 	if strings.HasPrefix(s, "Chunk ID:") || strings.HasPrefix(s, "Wall time:") {
 		if i := strings.Index(s, "\nOutput:\n"); i >= 0 {
 			s = s[i+len("\nOutput:\n"):]
 		}
 	}
 
-	// MCP results are a JSON array of content blocks; flatten to their text.
 	if text, ok := flattenContentBlocks(s); ok {
 		return text
 	}
 	return s
 }
 
-// flattenContentBlocks joins the text of a JSON array of {type,text} content
-// blocks. ok is false when s isn't such an array.
 func flattenContentBlocks(s string) (string, bool) {
 	t := strings.TrimSpace(s)
 	if !strings.HasPrefix(t, "[") {

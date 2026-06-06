@@ -13,7 +13,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
-// TviewRenderer renders goldmark AST to tview dynamic color format.
 type TviewRenderer struct {
 	theme theme.Theme
 }
@@ -405,7 +404,6 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 	return ast.WalkSkipChildren, nil
 }
 
-// renderTableHeader, renderTableRow, renderTableCell are no-ops; renderTable handles tables.
 func (r *TviewRenderer) renderTableHeader(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	return ast.WalkContinue, nil
 }

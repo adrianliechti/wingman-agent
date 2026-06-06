@@ -19,18 +19,13 @@ func BinPath() (string, error) {
 	return FindPath()
 }
 
-// BuildVars returns the env-var name→value pairs that route the Claude
-// Code CLI to the configured Wingman server and lock down telemetry /
-// non-essential traffic. The host merges them onto whatever parent env is
-// being passed to the subprocess (see [BuildEnv]).
 func BuildVars(cfg *ClaudeConfig) map[string]string {
 	vars := map[string]string{
-		// Auth & API routing
+
 		"ANTHROPIC_BASE_URL":   cfg.BaseURL,
 		"ANTHROPIC_API_KEY":    "",
 		"ANTHROPIC_AUTH_TOKEN": cfg.AuthToken,
 
-		// Telemetry & data exfiltration prevention
 		"DISABLE_TELEMETRY":                        "1",
 		"DISABLE_ERROR_REPORTING":                  "1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -41,7 +36,6 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 		"CLAUDE_CODE_HIDE_CWD":                     "1",
 		"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":     "1",
 
-		// Disabled commands (not applicable in managed environment)
 		"DISABLE_AUTOUPDATER":                "1",
 		"DISABLE_FEEDBACK_COMMAND":           "1",
 		"DISABLE_INSTALLATION_CHECKS":        "1",
@@ -52,7 +46,6 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 		"DISABLE_LOGIN_COMMAND":              "1",
 		"DISABLE_LOGOUT_COMMAND":             "1",
 
-		// Disabled features (security & cost control)
 		"CLAUDE_CODE_DISABLE_FAST_MODE":             "1",
 		"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":      "1",
 		"CLAUDE_CODE_DISABLE_CRON":                  "1",
@@ -61,7 +54,6 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 		"CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
 		"CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP":    "1",
 
-		// UI & integration lockdown
 		"CLAUDE_CODE_HIDE_ACCOUNT_INFO":     "1",
 		"CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL": "1",
 
@@ -89,9 +81,6 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 	return vars
 }
 
-// BuildEnv returns parent appended with [BuildVars]. If parent is nil,
-// os.Environ() is used as the baseline. The result is a KEY=value slice
-// suitable for assignment to exec.Cmd.Env.
 func BuildEnv(parent []string, cfg *ClaudeConfig) []string {
 	if parent == nil {
 		parent = os.Environ()
@@ -104,9 +93,6 @@ func BuildEnv(parent []string, cfg *ClaudeConfig) []string {
 	return env
 }
 
-// FindPath locates the `claude` binary, preferring $PATH and falling back
-// to the native installer's default locations (~/.local/bin on all
-// platforms, plus the legacy ~/.claude/local).
 func FindPath() (string, error) {
 	if path, err := exec.LookPath("claude"); err == nil {
 		return path, nil

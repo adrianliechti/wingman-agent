@@ -11,11 +11,6 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// Agent implements [acp.Agent] for the codex app-server. It manages the
-// long-lived `codex app-server` subprocess transparently (see [Spawn]) and
-// exposes only ACP session-scoped operations to the host. Embed it in a
-// host process via [Spawn] or [Run] — no separate ACP server binary is
-// required.
 type Agent struct {
 	conn  *acp.AgentSideConnection
 	codex *codexClient
@@ -38,9 +33,6 @@ type Agent struct {
 
 var _ acp.Agent = (*Agent)(nil)
 
-// newAgent wires the in-memory pieces together; subprocess setup lives
-// in [Spawn] so callers that supply their own codex transport (tests,
-// alternate IPCs) can construct an Agent without forking.
 func newAgent(codex *codexClient, model, effort string) *Agent {
 	return &Agent{
 		codex:         codex,
@@ -59,9 +51,6 @@ func (a *Agent) lookup(id acp.SessionId) *session {
 	return a.sessions[id]
 }
 
-// ensureModels populates the model picker from codex's `model/list` exactly
-// once. Failure is non-fatal: the selector is simply omitted (empty list) and
-// codex still runs on its configured default.
 func (a *Agent) ensureModels(ctx context.Context) {
 	a.modelsMu.Lock()
 	defer a.modelsMu.Unlock()
@@ -73,7 +62,7 @@ func (a *Agent) ensureModels(ctx context.Context) {
 	for {
 		resp, err := a.codex.modelList(ctx, modelListParams{Cursor: cursor})
 		if err != nil {
-			return // retry on the next call rather than caching the failure
+			return
 		}
 		all = append(all, resp.Data...)
 		if resp.NextCursor == nil || *resp.NextCursor == "" {
@@ -84,8 +73,6 @@ func (a *Agent) ensureModels(ctx context.Context) {
 	a.models = modelsFromCodex(all)
 	a.modelsLoaded = true
 }
-
-// --- acp.Agent ---
 
 func (a *Agent) Initialize(ctx context.Context, _ acp.InitializeRequest) (acp.InitializeResponse, error) {
 	if err := a.codex.initialize(ctx, initializeParams{
@@ -151,8 +138,6 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	}, nil
 }
 
-// registerSession installs a session record under the given id, falling back to
-// the agent-level defaults when codex didn't supply a model/effort.
 func (a *Agent) registerSession(id acp.SessionId, model, effort string) *session {
 	if model == "" {
 		model = a.defaultModel
@@ -174,9 +159,6 @@ func derefEffort(p *string) string {
 	return *p
 }
 
-// sessionConfig builds the codex thread config: the cwd trust grant plus any
-// client-requested MCP servers (stdio/http; codex rejects sse/acp transports,
-// which we omit).
 func sessionConfig(cwd string, servers []acp.McpServer) map[string]any {
 	cfg := map[string]any{}
 	if cwd != "" {
@@ -294,9 +276,6 @@ func (a *Agent) CloseSession(_ context.Context, params acp.CloseSessionRequest) 
 	return acp.CloseSessionResponse{}, nil
 }
 
-// UnstableDeleteSession interrupts any in-flight turn, drops the session, and
-// archives the codex thread. The app-server has no hard-delete RPC, so archive
-// is the closest equivalent — it removes the thread from thread/list.
 func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {
 	a.mu.Lock()
 	s := a.sessions[params.SessionId]
@@ -386,8 +365,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, fmt.Errorf("thread/resume: %w", err)
 	}
 	s := a.registerSession(params.SessionId, resp.Model, derefEffort(resp.ReasoningEffort))
-	// thread/resume omits command output (aggregatedOutput=null); recover it
-	// from codex's on-disk rollout log so replayed commands show their output.
+
 	outputs := rolloutCommandOutputs(string(params.SessionId))
 	streamThreadHistory(ctx, a.conn, s.id, resp.Thread.Turns, outputs)
 	return acp.LoadSessionResponse{

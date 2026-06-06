@@ -8,18 +8,14 @@ interface ModelInfo {
 }
 
 interface Props {
-	// subscribe lets the picker refetch its catalog when the active
-	// agent changes (the new backend's model/effort options differ).
-	// Optional so non-WebSocket callers can still render the component.
+	sessionId?: string;
 	subscribe?: (handler: (msg: ServerMessage) => void) => () => void;
 }
 
-export function ModelPicker({ subscribe }: Props) {
+export function ModelPicker({ sessionId, subscribe }: Props) {
 	const [model, setModel] = useState("");
 	const [models, setModels] = useState<ModelInfo[]>([]);
 	const [effort, setEffort] = useState("auto");
-	// Empty until /api/effort reports the active backend's set; the effort row
-	// stays hidden until then, so we never flash a guessed list.
 	const [effortOptions, setEffortOptions] = useState<string[]>([]);
 	const [open, setOpen] = useState(false);
 	const popRef = useRef<HTMLDivElement>(null);
@@ -40,39 +36,33 @@ export function ModelPicker({ subscribe }: Props) {
 			.catch(() => setModels([]));
 	}, []);
 
+	const apiBase = sessionId
+		? `/api/sessions/${encodeURIComponent(sessionId)}`
+		: "/api";
+
 	const loadCurrent = useCallback(() => {
-		fetch("/api/model")
+		fetch(`${apiBase}/model`)
 			.then((r) => r.json())
 			.then((data) => setModel(data.model || ""))
 			.catch(() => {});
-		fetch("/api/effort")
+		fetch(`${apiBase}/effort`)
 			.then((r) => r.json())
 			.then((data) => {
 				applyEffort(data.effort);
-				// The backend advertises its own effort set (empty = no effort
-				// selector). Drive the buttons from it rather than a hard-coded list.
 				setEffortOptions(Array.isArray(data.options) ? data.options : []);
 			})
 			.catch(() => {});
-	}, [applyEffort]);
+	}, [applyEffort, apiBase]);
 
 	useEffect(() => {
 		loadCurrent();
 		loadModels();
 	}, [loadCurrent, loadModels]);
 
-	// Refetch the catalog when the backend signals it changed:
-	//   • agent_changed — a different backend with its own model/effort set.
-	//   • model_changed — the upstream catalog finished loading (startup) or
-	//     narrowed, which can move the default selection.
-	// Both publish through the same /api/* endpoints (the server dispatches).
 	useEffect(() => {
 		if (!subscribe) return;
 		return subscribe((msg) => {
 			if (msg.type === "agent_changed" || msg.type === "model_changed") {
-				// loadCurrent refetches /api/effort, which now carries the active
-				// backend's effort options too — ACP backends may use a different
-				// set than wingman's auto/low/medium/high, or none at all.
 				loadCurrent();
 				loadModels();
 			}
@@ -83,20 +73,23 @@ export function ModelPicker({ subscribe }: Props) {
 		setOpen((v) => !v);
 	}, []);
 
-	const selectModel = useCallback((id: string) => {
-		fetch("/api/model", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ model: id }),
-		})
-			.then((r) => r.json())
-			.then((data) => setModel(data.model || id))
-			.catch(() => {});
-	}, []);
+	const selectModel = useCallback(
+		(id: string) => {
+			fetch(`${apiBase}/model`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ model: id }),
+			})
+				.then((r) => r.json())
+				.then((data) => setModel(data.model || id))
+				.catch(() => {});
+		},
+		[apiBase],
+	);
 
 	const selectEffort = useCallback(
 		(value: string) => {
-			fetch("/api/effort", {
+			fetch(`${apiBase}/effort`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ effort: value }),
@@ -105,7 +98,7 @@ export function ModelPicker({ subscribe }: Props) {
 				.then((data) => applyEffort(data.effort))
 				.catch(() => {});
 		},
-		[applyEffort],
+		[applyEffort, apiBase],
 	);
 
 	useEffect(() => {
@@ -130,10 +123,9 @@ export function ModelPicker({ subscribe }: Props) {
 		return match?.name || model;
 	}, [models, model]);
 
-	// The backend's "default"/"auto" sentinel is the deselected state — hide it
-	// as an explicit button. Deselecting the active level falls back to it.
 	const defaultEffort = useMemo(
-		() => effortOptions.find((v) => v === "default" || v === "auto") ?? "default",
+		() =>
+			effortOptions.find((v) => v === "default" || v === "auto") ?? "default",
 		[effortOptions],
 	);
 	const efforts = useMemo(
@@ -187,24 +179,26 @@ export function ModelPicker({ subscribe }: Props) {
 						)}
 					</div>
 					{efforts.length > 0 && (
-					<div className="border-t border-border px-2 py-1.5">
-						<div className="flex rounded bg-bg overflow-hidden">
-							{efforts.map((v) => (
-								<button
-									type="button"
-									key={v}
-									className={`flex-1 px-2 py-1 text-[11px] capitalize cursor-pointer transition-colors ${
-										v === effort
-											? "text-fg bg-bg-active"
-											: "text-fg-muted hover:text-fg hover:bg-bg-hover"
-									}`}
-									onClick={() => selectEffort(v === effort ? defaultEffort : v)}
-								>
-									{v}
-								</button>
-							))}
+						<div className="border-t border-border px-2 py-1.5">
+							<div className="flex rounded bg-bg overflow-hidden">
+								{efforts.map((v) => (
+									<button
+										type="button"
+										key={v}
+										className={`flex-1 px-2 py-1 text-[11px] capitalize cursor-pointer transition-colors ${
+											v === effort
+												? "text-fg bg-bg-active"
+												: "text-fg-muted hover:text-fg hover:bg-bg-hover"
+										}`}
+										onClick={() =>
+											selectEffort(v === effort ? defaultEffort : v)
+										}
+									>
+										{v}
+									</button>
+								))}
+							</div>
 						</div>
-					</div>
 					)}
 				</div>
 			)}

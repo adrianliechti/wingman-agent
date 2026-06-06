@@ -10,6 +10,7 @@ import (
 type State struct {
 	Usage    Usage     `json:"usage"`
 	Messages []Message `json:"messages,omitempty"`
+	Revision uint64    `json:"-"`
 }
 
 func (s *State) Save(path string) error {

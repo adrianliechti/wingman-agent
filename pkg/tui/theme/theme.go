@@ -55,8 +55,6 @@ func applyTviewStyles() {
 	}
 }
 
-// SetDark sets the Iceberg dark theme.
-// https://github.com/cocopon/iceberg.vim
 func SetDark() {
 	Default = Theme{
 		IsLight:    false,
@@ -85,8 +83,6 @@ func SetDark() {
 	applyTviewStyles()
 }
 
-// SetLight sets the Iceberg light theme.
-// https://github.com/cocopon/iceberg.vim
 func SetLight() {
 	Default = Theme{
 		IsLight:    true,

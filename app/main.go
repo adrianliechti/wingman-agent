@@ -170,11 +170,18 @@ func main() {
 
 	startFS, _ := fs.Sub(publicFS, "public")
 
+	background := &options.RGBA{R: 255, G: 255, B: 255, A: 255}
+	if isDarkMode() {
+		background = &options.RGBA{R: 10, G: 10, B: 10, A: 255}
+	}
+
 	opts := &options.App{
 		Title: "Wingman Agent",
 
 		Width:  1280,
 		Height: 768,
+
+		BackgroundColour: background,
 
 		OnStartup:  app.startup,
 		OnShutdown: app.shutdown,

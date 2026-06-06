@@ -29,7 +29,6 @@ func Run(ctx context.Context, args []string, options *Options) error {
 		return err
 	}
 
-	// Create managed system settings file
 	dir, err := os.MkdirTemp("", "gemini-config-*")
 
 	if err != nil {
@@ -39,7 +38,7 @@ func Run(ctx context.Context, args []string, options *Options) error {
 	defer os.RemoveAll(dir)
 
 	settings := map[string]any{
-		// Telemetry & data exfiltration prevention
+
 		"telemetry": map[string]any{
 			"enabled":    false,
 			"logPrompts": false,
@@ -48,13 +47,11 @@ func Run(ctx context.Context, args []string, options *Options) error {
 			"usageStatisticsEnabled": false,
 		},
 
-		// Updates & lifecycle
 		"general": map[string]any{
 			"enableAutoUpdate":             false,
 			"enableAutoUpdateNotification": false,
 		},
 
-		// Disabled features
 		"experimental": map[string]any{
 			"extensionRegistry": false,
 		},
@@ -78,16 +75,14 @@ func Run(ctx context.Context, args []string, options *Options) error {
 	}
 
 	vars := map[string]string{
-		// Auth & API routing
+
 		"GOOGLE_GEMINI_BASE_URL":        cfg.BaseURL,
 		"GEMINI_DEFAULT_AUTH_TYPE":      "gemini-api-key",
 		"GEMINI_API_KEY":                cfg.AuthToken,
 		"GEMINI_API_KEY_AUTH_MECHANISM": "bearer",
 
-		// Model configuration
 		"GEMINI_MODEL": cfg.Model,
 
-		// Managed system settings
 		"GEMINI_CLI_SYSTEM_SETTINGS_PATH": settingsFile,
 	}
 

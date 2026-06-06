@@ -10,10 +10,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-// ReadTool returns the file-read tool. allowedReadRoots are absolute paths
-// outside the workspace that this tool is additionally permitted to read
-// (e.g. discovered personal skill directories). Anything outside both the
-// workspace and the allow-list is rejected.
 func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 	return tool.Tool{
 		Name:   "read",

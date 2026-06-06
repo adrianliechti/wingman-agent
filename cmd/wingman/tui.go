@@ -28,15 +28,11 @@ func runTUI(ctx context.Context, sessionID string) {
 	if err != nil {
 		fatal(err)
 	}
-	// The coder.Agent's Close() doesn't tear down the workspace
-	// (server shares the workspace across sessions); the TUI owns it
-	// here so closing happens in the right order on shutdown.
+
 	defer ws.Close()
 
 	wa := coder.New(ws, cfg, nil)
 
-	// Resolve "latest" without building a session — that has to wait
-	// until after the App is wired as the agent's UI.
 	if sessionID == "latest" {
 		sessions, err := wa.ListSessions(ctx)
 		if err != nil {
@@ -50,7 +46,7 @@ func runTUI(ctx context.Context, sessionID string) {
 	}
 
 	app := codetui.New(ctx, wa, sessionID)
-	// Wire the App as the agent's elicitation UI before any turn runs.
+
 	wa.SetUI(app)
 
 	if sessionID != "" {

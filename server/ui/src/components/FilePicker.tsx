@@ -112,9 +112,7 @@ export function FilePicker({ onSelect, onClose }: Props) {
 								}`}
 							>
 								<File size={12} className="text-fg-dim shrink-0" />
-								<span className="truncate font-mono text-[12px]">
-									{h.name}
-								</span>
+								<span className="truncate font-mono text-[12px]">{h.name}</span>
 								{dir && (
 									<span className="ml-auto truncate text-fg-dim font-mono text-[10.5px]">
 										{dir}

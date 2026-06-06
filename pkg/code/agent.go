@@ -1,12 +1,3 @@
-// Package code defines the [Agent] interface implemented by the
-// in-process wingman backend (sub-package wingman) and the external ACP
-// subprocess backend (sub-package acp). Higher layers (server, TUI) hold
-// one active Agent and swap it on user selection.
-//
-// The interface is session-id-explicit: every per-conversation operation
-// takes a session id allocated via [Agent.NewSession]. Backends own the
-// session catalog (wingman: on-disk; acp: the external server). Switching
-// the active agent closes the prior one.
 package code
 
 import (
@@ -17,104 +8,51 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 )
 
-// SessionInfo is one row in the backend's session catalog (wingman's
-// on-disk list or the ACP server's ListSessions response).
 type SessionInfo struct {
 	ID        string
 	Title     string
 	UpdatedAt time.Time
 }
 
-// Mode is one operating mode a backend can run a session in — typically an
-// approval/sandbox or planning level. It mirrors ACP's SessionMode, and is
-// what the UI's mode picker is populated from.
 type Mode struct {
 	ID          string
 	Name        string
 	Description string
 }
 
-// Agent is the swappable backend that drives chat turns and owns its
-// own session catalog + transcript storage. The two concrete
-// implementations live in sub-packages wingman and acp.
-//
-// All methods are safe for concurrent use across distinct session ids.
-// Concurrent calls on the SAME session id are NOT supported — callers
-// must ensure only one Send is in flight per session at a time.
 type Agent interface {
-	// Name returns a stable identifier for this backend. For wingman
-	// it's [BuiltinAgentName]; for ACP backends it's the [AgentDef.Name]
-	// that constructed them.
 	Name() string
 
-	// Workspace returns the shared workspace the agent is rooted at.
-	// Same instance regardless of which backend is active — its
-	// Rewind / LSP / MCP subsystems are wingman-only side-effects but
-	// the workspace itself (RootPath, Skills, MemoryPath) is shared.
 	Workspace() *Workspace
 
-	// Models reports the available model catalog and the currently
-	// selected id. Cached read — no RPC. Empty list = the backend
-	// doesn't expose a model selector.
-	Models() (available []Model, current string)
+	Models(sessionID string) (available []Model, current string)
 
-	// SetModel switches the active model. Returns [errors.ErrUnsupported]
-	// when the backend has no model selector.
-	SetModel(ctx context.Context, id string) error
+	SetModel(ctx context.Context, sessionID, id string) error
 
-	// Effort reports the current effort id and the available values.
-	// Empty options = effort selector not supported.
-	Effort() (current string, options []string)
+	Effort(sessionID string) (current string, options []string)
 
-	SetEffort(ctx context.Context, value string) error
+	SetEffort(ctx context.Context, sessionID, value string) error
 
-	// Modes reports the operating modes the backend exposes for the given
-	// session and the currently active mode id. An empty list means the
-	// backend has no mode selector (the UI hides the picker). Cached read —
-	// no RPC.
 	Modes(sessionID string) (available []Mode, current string)
 
-	// SetMode switches the session's active operating mode. Returns
-	// [errors.ErrUnsupported] when the backend has no mode selector, or an
-	// error when modeID is not one of the advertised modes.
 	SetMode(ctx context.Context, sessionID, modeID string) error
 
-	// ListSessions returns the backend's saved session catalog scoped
-	// to the workspace.
 	ListSessions(ctx context.Context) ([]SessionInfo, error)
 
-	// NewSession allocates a fresh session and returns its id. For
-	// wingman this is a locally minted UUID; for ACP it's the id
-	// returned by the ACP server's session/new.
 	NewSession(ctx context.Context) (string, error)
 
-	// LoadSession restores an existing session into memory so
-	// [Messages] / [Usage] reflect its transcript and subsequent
-	// [Send] calls continue it.
 	LoadSession(ctx context.Context, id string) error
 
-	// DeleteSession removes a session from the catalog. Returns
-	// [errors.ErrUnsupported] when the backend can't delete (ACP).
 	DeleteSession(ctx context.Context, id string) error
 
-	// Messages returns the transcript for a session id. Returns nil
-	// for sessions the backend hasn't loaded.
 	Messages(sessionID string) []agent.Message
 
 	Usage(sessionID string) agent.Usage
 
-	// Send drives a turn. Returns nil when a turn is already running
-	// for this session id. The iterator yields per-update chunks; the
-	// implementation commits the assembled message(s) into the
-	// session's transcript by end-of-turn.
 	Send(ctx context.Context, sessionID string, input []agent.Content) iter.Seq2[agent.Message, error]
 
-	// Cancel aborts an in-flight Send for the session id. No-op when
-	// no turn is in flight or the id is unknown.
 	Cancel(sessionID string)
 
-	// Close releases all resources (subprocess, IO, file handles).
-	// Idempotent.
 	Close() error
 }
 

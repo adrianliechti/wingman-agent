@@ -52,6 +52,9 @@ type sessionState struct {
 	parent *Agent
 	aa     *harness.Agent
 
+	modelID  string
+	effortID string
+
 	planMode  bool
 	baseTools []tool.Tool
 
@@ -89,7 +92,11 @@ func (a *Agent) currentUI() code.UI {
 	return a.ui
 }
 
-func (a *Agent) Models() ([]code.Model, string) {
+func (a *Agent) Models(sessionID string) ([]code.Model, string) {
+	return a.modelsFor(a.session(sessionID))
+}
+
+func (a *Agent) modelsFor(s *sessionState) ([]code.Model, string) {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 
@@ -101,15 +108,22 @@ func (a *Agent) Models() ([]code.Model, string) {
 	}
 
 	current := a.modelID
+	if s != nil && s.modelID != "" {
+		current = s.modelID
+	}
 	if len(available) > 0 && !slices.ContainsFunc(available, func(m code.Model) bool { return m.ID == current }) {
 		current = available[0].ID
 	}
 	return available, current
 }
 
-func (a *Agent) SetModel(_ context.Context, id string) error {
+func (a *Agent) SetModel(_ context.Context, sessionID, id string) error {
+	s := a.session(sessionID)
 	a.modelMu.Lock()
 	a.modelID = id
+	if s != nil {
+		s.modelID = id
+	}
 	a.modelMu.Unlock()
 	return nil
 }
@@ -128,43 +142,41 @@ func (a *Agent) FetchModels(ctx context.Context) {
 	a.modelMu.Unlock()
 }
 
-func (a *Agent) currentModel() string {
-	_, current := a.Models()
-	return current
-}
-
 var effortValues = []string{"auto", "low", "medium", "high"}
 
-func (a *Agent) Effort() (string, []string) {
-	a.modelMu.Lock()
-	current := a.effortID
-	a.modelMu.Unlock()
+func (a *Agent) Effort(sessionID string) (string, []string) {
+	current := a.effortFor(a.session(sessionID))
 	if current == "" {
 		current = "auto"
 	}
 	return current, effortValues
 }
 
-func (a *Agent) SetEffort(_ context.Context, value string) error {
+func (a *Agent) effortFor(s *sessionState) string {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	if s != nil && s.effortID != "" {
+		return s.effortID
+	}
+	return a.effortID
+}
+
+func (a *Agent) SetEffort(_ context.Context, sessionID, value string) error {
 	switch value {
 	case "", "auto":
-		a.modelMu.Lock()
-		a.effortID = ""
-		a.modelMu.Unlock()
+		value = ""
 	case "low", "medium", "high":
-		a.modelMu.Lock()
-		a.effortID = value
-		a.modelMu.Unlock()
 	default:
 		return fmt.Errorf("effort must be auto, low, medium, or high (got %q)", value)
 	}
-	return nil
-}
-
-func (a *Agent) currentEffort() string {
+	s := a.session(sessionID)
 	a.modelMu.Lock()
-	defer a.modelMu.Unlock()
-	return a.effortID
+	a.effortID = value
+	if s != nil {
+		s.effortID = value
+	}
+	a.modelMu.Unlock()
+	return nil
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]code.SessionInfo, error) {
@@ -240,6 +252,7 @@ func (a *Agent) Save(id string) error {
 	return session.Save(a.sessionsDir, id, harness.State{
 		Messages: s.aa.Messages,
 		Usage:    s.aa.Usage,
+		Revision: s.aa.Revision,
 	})
 }
 
@@ -368,8 +381,13 @@ func (a *Agent) buildSession() *sessionState {
 	}
 	sessionCfg.Tools = s.tools
 	sessionCfg.Instructions = s.instructions
-	sessionCfg.Model = a.currentModel
-	sessionCfg.Effort = a.currentEffort
+	sessionCfg.Model = func() string {
+		_, current := a.modelsFor(s)
+		return current
+	}
+	sessionCfg.Effort = func() string {
+		return a.effortFor(s)
+	}
 	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,
 		truncation.New(a.workspace.ScratchPath),
 	)

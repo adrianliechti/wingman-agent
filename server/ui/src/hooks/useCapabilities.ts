@@ -10,10 +10,6 @@ interface Capabilities {
 
 type Subscribe = (handler: (msg: ServerMessage) => void) => () => void;
 
-// useCapabilities fetches the server's feature gate on mount and refetches
-// whenever the server emits capabilities_changed (e.g. agent ran `git init`
-// in a scratch dir, flipping the right-panel tabs on). Returns null while
-// the first fetch is pending so panels don't flash.
 export function useCapabilities(subscribe?: Subscribe): Capabilities | null {
 	const [caps, setCaps] = useState<Capabilities | null>(null);
 
@@ -23,9 +19,7 @@ export function useCapabilities(subscribe?: Subscribe): Capabilities | null {
 			if (!res.ok) return;
 			const data: Capabilities = await res.json();
 			setCaps(data);
-		} catch {
-			// network blip — keep last known caps, next event will refetch
-		}
+		} catch {}
 	}, []);
 
 	useEffect(() => {

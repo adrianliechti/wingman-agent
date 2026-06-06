@@ -27,6 +27,7 @@ import { DiffTab } from "./components/DiffTab";
 import { FileTab } from "./components/FileTab";
 import { FileTree } from "./components/FileTree";
 import { ProblemsPanel } from "./components/ProblemsPanel";
+import { BUILTIN_AGENT_ID } from "./components/AgentPicker";
 import { Sidebar } from "./components/Sidebar";
 import { useCapabilities } from "./hooks/useCapabilities";
 import { type ChatEntry, useWebSocket } from "./hooks/useWebSocket";
@@ -37,6 +38,7 @@ interface CenterTab {
 	label: string;
 	path?: string;
 	line?: number;
+	sessionId?: string;
 }
 
 type RightTab = "changes" | "files";
@@ -44,10 +46,22 @@ type RightTab = "changes" | "files";
 const EMPTY_ENTRIES: never[] = [];
 const EMPTY_USAGE = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
 
+const chatTabId = (sessionId: string) => `chat:${sessionId}`;
+
+function draftChatTab(): CenterTab {
+	return {
+		id: chatTabId(""),
+		type: "chat",
+		label: "New Session",
+		sessionId: "",
+	};
+}
+
 export default function App() {
 	const {
 		connected,
 		sessions,
+		hasSession,
 		sendChat,
 		cancel,
 		respondPrompt,
@@ -58,9 +72,6 @@ export default function App() {
 	const capabilities = useCapabilities(subscribe);
 	const showChanges = capabilities?.diffs ?? false;
 	const showProblems = capabilities?.lsp ?? false;
-	const firstSessionId = Object.keys(sessions)[0] ?? "";
-	const [selectedSessionId, setSelectedSessionId] = useState("");
-	const sessionId = selectedSessionId || firstSessionId;
 	const [requestedRightTab, setRequestedRightTab] =
 		useState<RightTab>("changes");
 	const rightTab = showChanges ? requestedRightTab : "files";
@@ -72,18 +83,79 @@ export default function App() {
 		id: "wingman-layout",
 	});
 
+	const [tabs, setTabs] = useState<CenterTab[]>([draftChatTab()]);
+	const [activeTabId, setActiveTabId] = useState(chatTabId(""));
+	const [currentSessionId, setCurrentSessionId] = useState("");
+
+	const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
+	const sessionId =
+		activeTab.type === "chat" ? (activeTab.sessionId ?? "") : currentSessionId;
+
 	const activeSession = sessionId ? sessions[sessionId] : undefined;
 	const entries = activeSession?.entries ?? EMPTY_ENTRIES;
 	const phase = activeSession?.phase ?? "idle";
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
 	const prompt = activeSession?.prompt ?? null;
 
-	// Usage is only reported when a request completes, so a long in-flight
-	// response would show a frozen count. While streaming, fold in a rough
-	// estimate of the output produced so far (rendered with ~); it snaps to the
-	// exact value the moment the turn lands.
-	const streamEstimate = phase !== "idle" ? estimateStreamingTokens(entries) : 0;
+	const [agentId, setAgentId] = useState("");
+	const loadAgent = useCallback(async (): Promise<string> => {
+		try {
+			const r = await fetch("/api/agent");
+			const data = (await r.json()) as { agent?: string };
+			const id = data.agent || BUILTIN_AGENT_ID;
+			setAgentId(id);
+			return id;
+		} catch {
+			return "";
+		}
+	}, []);
+
+	const deepLinkRef = useRef<string | null>(null);
+
+	useEffect(() => {
+		if (!agentId) return;
+		if (!sessionId && deepLinkRef.current) return;
+		const path = sessionId
+			? `/${encodeURIComponent(agentId)}/${encodeURIComponent(sessionId)}`
+			: "/";
+		if (window.location.pathname !== path) {
+			window.history.replaceState(null, "", path);
+		}
+	}, [agentId, sessionId]);
+
+	const streamEstimate =
+		phase !== "idle" ? estimateStreamingTokens(entries) : 0;
 	const outputTokens = usage.outputTokens + streamEstimate;
+
+	const activateTab = useCallback((tab: CenterTab) => {
+		setActiveTabId(tab.id);
+		if (tab.type === "chat") setCurrentSessionId(tab.sessionId ?? "");
+	}, []);
+
+	const openChatTab = useCallback(
+		(sid: string) => {
+			const tab: CenterTab = {
+				id: chatTabId(sid),
+				type: "chat",
+				label: "Session",
+				sessionId: sid,
+			};
+			setTabs((prev) => {
+				if (prev.some((t) => t.type === "chat" && t.sessionId === sid)) {
+					return prev;
+				}
+				const draft = prev.findIndex((t) => t.type === "chat" && !t.sessionId);
+				if (draft >= 0) {
+					const next = [...prev];
+					next[draft] = tab;
+					return next;
+				}
+				return [...prev, tab];
+			});
+			activateTab(tab);
+		},
+		[activateTab],
+	);
 
 	const handlePromptReply = useCallback(
 		(reply: { text?: string; approved?: boolean }) => {
@@ -93,33 +165,6 @@ export default function App() {
 		},
 		[respondPrompt, sessionId, prompt],
 	);
-
-	// On agent swap the prior backend's sessions are stale; drop the
-	// cache and immediately allocate a fresh session against the new
-	// agent so the chat tab is ready (and the ModelPicker has a
-	// populated catalog for ACP backends).
-	useEffect(() => {
-		if (!subscribe) return;
-		return subscribe(async (msg) => {
-			if (msg.type !== "agent_changed") return;
-			setSelectedSessionId("");
-			clearSessions();
-			try {
-				const res = await fetch("/api/sessions", { method: "POST" });
-				if (!res.ok) return;
-				const data = (await res.json()) as { id?: string };
-				if (!data.id) return;
-				setSelectedSessionId(data.id);
-			} catch {
-				// leave empty; user can click +
-			}
-		});
-	}, [subscribe, clearSessions]);
-
-	const [tabs, setTabs] = useState<CenterTab[]>([
-		{ id: "chat", type: "chat", label: "Session" },
-	]);
-	const [activeTabId, setActiveTabId] = useState("chat");
 
 	const openFile = useCallback(
 		(path: string, line?: number) => {
@@ -164,14 +209,32 @@ export default function App() {
 
 	const closeTab = useCallback(
 		(id: string) => {
-			if (id === "chat") return;
-			setTabs((prev) => prev.filter((t) => t.id !== id));
-			if (activeTabId === id) setActiveTabId("chat");
+			const idx = tabs.findIndex((t) => t.id === id);
+			if (idx < 0) return;
+			setTabs((prev) => {
+				let next = prev.filter((t) => t.id !== id);
+				if (!next.some((t) => t.type === "chat")) {
+					next = [draftChatTab(), ...next];
+				}
+				return next;
+			});
+			if (activeTabId === id) {
+				const remaining = tabs.filter((t) => t.id !== id);
+				const fallback = remaining.some((t) => t.type === "chat")
+					? (remaining[Math.min(idx, remaining.length - 1)] ?? draftChatTab())
+					: draftChatTab();
+				activateTab(fallback);
+			}
 		},
-		[activeTabId],
+		[tabs, activeTabId, activateTab],
 	);
 
-	// Track unsaved-edit state per tab id so we can show a dirty indicator.
+	useEffect(() => {
+		if (tabs.some((t) => t.id === activeTabId)) return;
+		// eslint-disable-next-line react-hooks/set-state-in-effect -- settles in one pass
+		activateTab(tabs[0] ?? draftChatTab());
+	}, [tabs, activeTabId, activateTab]);
+
 	const [dirtyTabs, setDirtyTabs] = useState<Set<string>>(() => new Set());
 	const setTabDirty = useCallback((id: string, dirty: boolean) => {
 		setDirtyTabs((prev) => {
@@ -190,54 +253,112 @@ export default function App() {
 			if (!res.ok) return;
 			const data = (await res.json()) as { id?: string };
 			if (!data.id) return;
-			setSelectedSessionId(data.id);
-			setActiveTabId("chat");
-		} catch {
-			// leave session alone
-		}
-	}, []);
+			openChatTab(data.id);
+		} catch {}
+	}, [openChatTab]);
 
 	const handleSessionDeleted = useCallback(
 		(id: string) => {
 			removeSession(id);
-			if (id === sessionId) {
-				setSelectedSessionId("");
-			}
+			setCurrentSessionId((prev) => (prev === id ? "" : prev));
+			const tab = tabs.find((t) => t.type === "chat" && t.sessionId === id);
+			if (tab) closeTab(tab.id);
 		},
-		[removeSession, sessionId],
+		[removeSession, tabs, closeTab],
 	);
 
-	const [loadingSession, setLoadingSession] = useState(false);
-	const [loadError, setLoadError] = useState<string | null>(null);
-	// Monotonic token: clicking session B while A is still loading must not let
-	// A's (faster) completion clear B's loader or post a stale error.
+	const [sessionLoad, setSessionLoad] = useState<{
+		id: string;
+		loading: boolean;
+		error: string | null;
+	}>({ id: "", loading: false, error: null });
 	const loadReqRef = useRef(0);
 
 	const handleSessionSelect = useCallback(
 		async (id: string) => {
-			setLoadError(null);
-			setSelectedSessionId(id);
-			setActiveTabId("chat");
-			// Already in client state (live or previously loaded) — no fetch needed.
-			if (sessions[id]) return;
+			openChatTab(id);
+			if (hasSession(id)) return;
 			const req = ++loadReqRef.current;
-			setLoadingSession(true);
+			setSessionLoad({ id, loading: true, error: null });
 			let error: string | null = null;
 			try {
 				const res = await fetch(`/api/sessions/${id}/load`, { method: "POST" });
 				if (!res.ok) {
-					error = (await res.text()).trim() || `Failed to load session (${res.status}).`;
+					error =
+						(await res.text()).trim() ||
+						`Failed to load session (${res.status}).`;
 				}
 			} catch {
 				error = "Failed to load session.";
 			}
-			// A newer selection superseded this one — let it own the loader/error.
 			if (loadReqRef.current !== req) return;
-			setLoadingSession(false);
-			setLoadError(error);
+			setSessionLoad({ id, loading: false, error });
 		},
-		[sessions],
+		[openChatTab, hasSession],
 	);
+
+	useEffect(() => {
+		if (!subscribe) return;
+		return subscribe((msg) => {
+			if (msg.type !== "agent_changed") return;
+			void loadAgent();
+			clearSessions();
+			setTabs((prev) => [
+				draftChatTab(),
+				...prev.filter((t) => t.type !== "chat"),
+			]);
+			setActiveTabId(chatTabId(""));
+			setCurrentSessionId("");
+			const target = deepLinkRef.current;
+			deepLinkRef.current = null;
+			if (target) {
+				void handleSessionSelect(target);
+			} else {
+				void handleNewSession();
+			}
+		});
+	}, [
+		subscribe,
+		clearSessions,
+		loadAgent,
+		handleSessionSelect,
+		handleNewSession,
+	]);
+
+	useEffect(() => {
+		const [agent, sid] = window.location.pathname
+			.split("/")
+			.filter(Boolean)
+			.map(decodeURIComponent);
+		(async () => {
+			deepLinkRef.current = sid ?? null;
+			const current = await loadAgent();
+			if (!current) {
+				deepLinkRef.current = null;
+				return;
+			}
+			if (!agent || agent === current) {
+				if (sid) void handleSessionSelect(sid);
+				deepLinkRef.current = null;
+				return;
+			}
+			try {
+				const res = await fetch("/api/agent", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ agent }),
+				});
+				if (!res.ok) {
+					deepLinkRef.current = null;
+					return;
+				}
+				setAgentId(agent);
+			} catch {
+				deepLinkRef.current = null;
+			}
+		})();
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- initial URL only
+	}, []);
 
 	const ensureSessionId = useCallback(async (): Promise<string> => {
 		if (sessionId) return sessionId;
@@ -245,30 +366,28 @@ export default function App() {
 		if (!res.ok) throw new Error("failed to allocate session");
 		const data = (await res.json()) as { id?: string };
 		if (!data.id) throw new Error("session id missing in response");
-		setSelectedSessionId(data.id);
+		openChatTab(data.id);
 		return data.id;
-	}, [sessionId]);
+	}, [sessionId, openChatTab]);
 
 	const handleSend = useCallback(
 		async (text: string, files?: string[], images?: string[]) => {
 			try {
 				const sid = await ensureSessionId();
 				sendChat(sid, text, files, images);
-			} catch {
-				// allocation failed; user can retry
-			}
+			} catch {}
 		},
 		[sendChat, ensureSessionId],
 	);
 
-	// Modes are backend-advertised: the available set + current mode come from
-	// the server per active backend (wingman / codex / claude each differ).
 	const [modes, setModes] = useState<ModeOption[]>([]);
 	const [mode, setMode] = useState<string>("");
 
 	useEffect(() => {
-		const q = sessionId ? `?session=${encodeURIComponent(sessionId)}` : "";
-		fetch(`/api/mode${q}`)
+		const url = sessionId
+			? `/api/sessions/${encodeURIComponent(sessionId)}/mode`
+			: "/api/mode";
+		fetch(url)
 			.then((r) => r.json())
 			.then((data) => {
 				setModes(data.modes ?? []);
@@ -282,8 +401,8 @@ export default function App() {
 			const prev = mode;
 			try {
 				const sid = await ensureSessionId();
-				setMode(next); // optimistic
-				const r = await fetch(`/api/mode?session=${encodeURIComponent(sid)}`, {
+				setMode(next);
+				const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/mode`, {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ mode: next }),
@@ -293,7 +412,7 @@ export default function App() {
 				setModes(data.modes ?? []);
 				setMode(data.current ?? next);
 			} catch {
-				setMode(prev); // revert on failure
+				setMode(prev);
 			}
 		},
 		[ensureSessionId, mode],
@@ -303,23 +422,26 @@ export default function App() {
 		if (sessionId) cancel(sessionId);
 	}, [cancel, sessionId]);
 
-	const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
-
 	const [noticeDismissed, setNoticeDismissed] = useState(false);
 	const showNotice = !!capabilities?.notice && !noticeDismissed;
 
-	// Sessions whose phase indicates an in-flight turn — drives the sidebar's
-	// running badge so the user sees which background conversations are busy.
 	const runningSessionIds = new Set(
 		Object.values(sessions)
 			.filter((s) => s.phase !== "idle")
 			.map((s) => s.id),
 	);
 
-	// "+" only makes sense when the active session has real content. Without
-	// it, clicking either reuses the current empty session or has nothing
-	// meaningful to do — so we hide it. The user creates the first session
-	// by typing (lazy-create on send) or by picking one from the sidebar.
+	const chatTabLabel = (tab: CenterTab): string => {
+		if (!tab.sessionId) return tab.label;
+		const sess = sessions[tab.sessionId];
+		const firstUser = sess?.entries.find(
+			(e) => e.type === "user" && e.content.trim(),
+		);
+		if (!firstUser) return "Session";
+		const text = firstUser.content.trim().replace(/\s+/g, " ");
+		return text.length > 24 ? `${text.slice(0, 24)}…` : text;
+	};
+
 	const canCreateNew = !!(
 		sessionId && (sessions[sessionId]?.entries.length ?? 0) > 0
 	);
@@ -346,7 +468,6 @@ export default function App() {
 				onLayoutChanged={onLayoutChanged}
 				className="flex-1 overflow-hidden"
 			>
-				{/* Left Sidebar */}
 				<Panel
 					panelRef={leftPanelRef}
 					id="sidebar"
@@ -370,7 +491,6 @@ export default function App() {
 				</Panel>
 				<ResizeHandle />
 
-				{/* Center Panel */}
 				<Panel
 					id="center"
 					minSize="320px"
@@ -402,57 +522,58 @@ export default function App() {
 						{tabs.map((tab) => {
 							const active = tab.id === activeTabId;
 							const isDirty = dirtyTabs.has(tab.id);
+							const running =
+								tab.type === "chat" && tab.sessionId
+									? (sessions[tab.sessionId]?.phase ?? "idle") !== "idle"
+									: false;
 							const Icon =
 								tab.type === "chat"
 									? MessageSquare
 									: tab.type === "diff"
 										? GitCompare
 										: FileText;
+							const label = tab.type === "chat" ? chatTabLabel(tab) : tab.label;
 							return (
 								<div
 									key={tab.id}
 									className={`group relative flex items-center gap-1.5 px-3 cursor-pointer text-[12px] shrink-0 select-none transition-colors ${
 										active ? "text-fg" : "text-fg-dim hover:text-fg-muted"
 									}`}
-									onClick={() => setActiveTabId(tab.id)}
+									onClick={() => activateTab(tab)}
 								>
 									{active && (
 										<span className="absolute bottom-0 left-2 right-2 h-[2px] bg-accent rounded-full" />
 									)}
 									<span className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
-										{tab.type === "chat" ? (
-											<Icon
+										{running ? (
+											<Loader2
 												size={13}
-												className={active ? "text-fg-muted" : "text-fg-dim"}
+												className="group-hover:hidden text-accent animate-spin"
+											/>
+										) : isDirty ? (
+											<span
+												className={`group-hover:hidden w-2 h-2 rounded-full ${active ? "bg-fg-muted" : "bg-fg-dim"}`}
+												aria-label="Unsaved changes"
 											/>
 										) : (
-											<>
-												{isDirty ? (
-													<span
-														className={`group-hover:hidden w-2 h-2 rounded-full ${active ? "bg-fg-muted" : "bg-fg-dim"}`}
-														aria-label="Unsaved changes"
-													/>
-												) : (
-													<Icon
-														size={13}
-														className={`group-hover:hidden ${active ? "text-fg-muted" : "text-fg-dim"}`}
-													/>
-												)}
-												<button
-													type="button"
-													className="hidden group-hover:flex w-3.5 h-3.5 items-center justify-center text-fg-dim hover:text-fg rounded transition-colors"
-													onClick={(e) => {
-														e.stopPropagation();
-														closeTab(tab.id);
-													}}
-													aria-label="Close tab"
-												>
-													<X size={11} />
-												</button>
-											</>
+											<Icon
+												size={13}
+												className={`group-hover:hidden ${active ? "text-fg-muted" : "text-fg-dim"}`}
+											/>
 										)}
+										<button
+											type="button"
+											className="hidden group-hover:flex w-3.5 h-3.5 items-center justify-center text-fg-dim hover:text-fg rounded transition-colors"
+											onClick={(e) => {
+												e.stopPropagation();
+												closeTab(tab.id);
+											}}
+											aria-label="Close tab"
+										>
+											<X size={11} />
+										</button>
 									</span>
-									<span className="truncate max-w-[200px]">{tab.label}</span>
+									<span className="truncate max-w-[200px]">{label}</span>
 								</div>
 							);
 						})}
@@ -491,7 +612,8 @@ export default function App() {
 					<div className="flex-1 overflow-hidden">
 						{activeTab.type === "chat" ? (
 							<ChatPanel
-								key={sessionId || "no-session"}
+								key={activeTab.id}
+								sessionId={activeTab.sessionId ?? ""}
 								entries={entries}
 								phase={phase}
 								modes={modes}
@@ -499,8 +621,10 @@ export default function App() {
 								onSelectMode={selectMode}
 								onSend={handleSend}
 								onCancel={handleCancel}
-								loading={loadingSession}
-								loadError={loadError}
+								loading={sessionLoad.loading && sessionLoad.id === sessionId}
+								loadError={
+									sessionLoad.id === sessionId ? sessionLoad.error : null
+								}
 								subscribe={subscribe}
 								prompt={prompt}
 								onPromptReply={handlePromptReply}
@@ -526,7 +650,6 @@ export default function App() {
 				</Panel>
 				<ResizeHandle />
 
-				{/* Right Panel */}
 				<Panel
 					panelRef={rightPanelRef}
 					id="right"
@@ -617,10 +740,6 @@ function formatTokens(n: number): string {
 	return String(n);
 }
 
-// estimateStreamingTokens approximates output tokens for the in-flight request
-// (~4 chars/token) from the trailing run of streamed reasoning/assistant text.
-// The run breaks at the last tool result — mirroring how committed usage jumps
-// per request — so it doesn't double-count earlier requests in the same turn.
 function estimateStreamingTokens(entries: ChatEntry[]): number {
 	let chars = 0;
 	for (let i = entries.length - 1; i >= 0; i--) {

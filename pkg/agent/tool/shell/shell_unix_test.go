@@ -128,8 +128,7 @@ func TestClassifyEffect(t *testing.T) {
 }
 
 func TestClassifyEffect_WrapperBypass(t *testing.T) {
-	// Destructive commands hidden behind a runner/prefix must still be
-	// classified EffectDangerous so the confirmation prompt fires.
+
 	dangerous := []string{
 		"env rm -rf tmp",
 		"timeout 5 rm -rf tmp",
@@ -153,7 +152,6 @@ func TestClassifyEffect_WrapperBypass(t *testing.T) {
 		})
 	}
 
-	// A runner that still wraps a benign read-only command stays read-only.
 	readOnly := []string{
 		"env ls",
 		"nice cat foo.txt",
@@ -169,8 +167,7 @@ func TestClassifyEffect_WrapperBypass(t *testing.T) {
 }
 
 func TestClassifyEffect_LoneAmpersandSeparator(t *testing.T) {
-	// A lone `&` backgrounds the first command and starts a new one; a
-	// destructive command after it must not be hidden in the prior segment.
+
 	cases := []struct {
 		command string
 		want    tool.Effect
@@ -178,7 +175,7 @@ func TestClassifyEffect_LoneAmpersandSeparator(t *testing.T) {
 		{"sleep 0 & rm -rf tmp", tool.EffectDangerous},
 		{"echo hi & rm -rf tmp", tool.EffectDangerous},
 		{"true & git push --force", tool.EffectDangerous},
-		// `&>` and `>&` are redirections, not separators.
+
 		{"echo hi &> out.txt", tool.EffectMutates},
 	}
 	for _, tt := range cases {
@@ -191,8 +188,7 @@ func TestClassifyEffect_LoneAmpersandSeparator(t *testing.T) {
 }
 
 func TestIsReadOnlyCommand_WriteCapableAllowlistedTools(t *testing.T) {
-	// Allowlisted tools that can write files via flags (not redirection) must
-	// not classify as read-only.
+
 	notReadOnly := []string{
 		"sort -o victim.txt input.txt",
 		"sort --output=victim.txt input.txt",
@@ -209,7 +205,6 @@ func TestIsReadOnlyCommand_WriteCapableAllowlistedTools(t *testing.T) {
 		})
 	}
 
-	// The same tools without the write flag remain read-only.
 	readOnly := []string{
 		"sort input.txt",
 		"yq '.a' config.yaml",

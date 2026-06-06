@@ -3,9 +3,6 @@ import { useEffect, useRef, useState } from "react";
 
 export type ModeOption = { id: string; name: string; description?: string };
 
-// Mode semantics differ per backend, so we infer an icon from the id rather
-// than hardcoding: read-only / plan style modes get the Compass, everything
-// else (the acting modes) gets the Wrench.
 function isPlanLike(id: string): boolean {
 	return /plan|read|only/i.test(id);
 }
@@ -38,7 +35,6 @@ export function ModePicker({ modes, current, onSelect }: Props) {
 		return () => document.removeEventListener("mousedown", handler);
 	}, [open]);
 
-	// Nothing to pick — backend exposes no modes.
 	if (modes.length === 0) return null;
 
 	const active = modes.find((m) => m.id === current);

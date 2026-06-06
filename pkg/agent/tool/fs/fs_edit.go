@@ -206,10 +206,6 @@ func writeRootFile(root *os.Root, path, content string) (err error) {
 	return nil
 }
 
-// findActualEditString returns the slice of `content` that matches `oldText`
-// up to curly/ASCII quote normalization. When the curly form differs from the
-// caller-supplied straight form, the original-content slice is returned so
-// preserveEditQuoteStyle can mirror the file's quote style back into newText.
 func findActualEditString(content, oldText string) string {
 	if strings.Contains(content, oldText) {
 		return oldText
@@ -227,18 +223,14 @@ func findActualEditString(content, oldText string) string {
 }
 
 var editQuoteReplacer = strings.NewReplacer(
-	"‘", "'", "’", "'", // ‘ ’
-	"“", "\"", "”", "\"", // “ ”
+	"‘", "'", "’", "'",
+	"“", "\"", "”", "\"",
 )
 
 func normalizeEditQuotes(text string) string {
 	return editQuoteReplacer.Replace(text)
 }
 
-// normalizeEditQuotesWithMap returns the quote-normalized text alongside a
-// byte-offset map: offsets[i] is the byte index in the original text that
-// corresponds to byte index i in the normalized text. Length is
-// len(normalized)+1 so callers can take the end offset of a match.
 func normalizeEditQuotesWithMap(text string) (string, []int) {
 	var b strings.Builder
 	b.Grow(len(text))

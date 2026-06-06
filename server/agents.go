@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
@@ -16,42 +17,42 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/external/codex"
 )
 
-// agentRegistration is a single named code.Agent backend selectable from
-// the Web UI. The Constructor is lazy: nothing is spawned until the user
-// actually selects this entry.
 type agentRegistration struct {
+	ID          string
 	Name        string
 	Constructor func(ctx context.Context, ws *code.Workspace) (code.Agent, error)
 }
 
-// availableAgents builds the selectable agent list. When
-// ~/.wingman/agents.json exists it is authoritative: built-in CLI
-// auto-detection is skipped entirely, leaving only the wingman backend
-// (added by the caller) and the file's own entries. Without the file we
-// fall back to auto-detecting installed CLIs, with user-defined entries
-// overriding detected ones on Name collision.
-func (s *Server) availableAgents() []agentRegistration {
-	userDefs := code.LoadAgents()
+func agentID(name string) string {
+	return strings.ReplaceAll(strings.ToLower(name), " ", "-")
+}
 
-	out := make([]agentRegistration, 0, len(userDefs)+4)
+func (s *Server) availableAgents() []agentRegistration {
+	seen := map[string]bool{code.BuiltinAgentName: true}
+	out := make([]agentRegistration, 0, 4)
 
 	if !code.HasAgentsConfig() {
-		override := make(map[string]bool, len(userDefs))
-		for _, d := range userDefs {
-			override[d.Name] = true
-		}
 		for _, r := range detectAgents() {
-			if override[r.Name] {
+			if seen[r.ID] {
 				continue
 			}
+			seen[r.ID] = true
 			out = append(out, r)
 		}
+		return out
 	}
 
-	for _, d := range userDefs {
-		def := d
+	for _, def := range code.LoadAgents() {
+		id := agentID(def.Name)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		name := def.Name
+		def.Name = id
 		out = append(out, agentRegistration{
-			Name: def.Name,
+			ID:   id,
+			Name: name,
 			Constructor: func(_ context.Context, ws *code.Workspace) (code.Agent, error) {
 				return acp.New(ws, def)
 			},
@@ -60,30 +61,30 @@ func (s *Server) availableAgents() []agentRegistration {
 	return out
 }
 
-// detectAgents enumerates the built-in CLI wrappers the host can run
-// today: claude / codex via in-process ACP, copilot via its own native
-// ACP stdio. Missing CLIs are silently skipped.
 func detectAgents() []agentRegistration {
 	var out []agentRegistration
 
 	if _, err := claude.FindPath(); err == nil {
 		out = append(out, agentRegistration{
+			ID:          "claude",
 			Name:        "Claude",
 			Constructor: claudeBackend,
 		})
 	}
 	if _, err := exec.LookPath("codex"); err == nil {
 		out = append(out, agentRegistration{
+			ID:          "codex",
 			Name:        "Codex",
 			Constructor: codexBackend,
 		})
 	}
 	if path, err := exec.LookPath("copilot"); err == nil {
 		out = append(out, agentRegistration{
+			ID:   "copilot",
 			Name: "Copilot",
 			Constructor: func(_ context.Context, ws *code.Workspace) (code.Agent, error) {
 				return acp.New(ws, code.AgentDef{
-					Name:    "Copilot",
+					Name:    "copilot",
 					Command: path,
 					Args:    []string{"--acp", "--stdio"},
 				})
@@ -92,10 +93,11 @@ func detectAgents() []agentRegistration {
 	}
 	if path, err := exec.LookPath("opencode"); err == nil {
 		out = append(out, agentRegistration{
+			ID:   "opencode",
 			Name: "OpenCode",
 			Constructor: func(_ context.Context, ws *code.Workspace) (code.Agent, error) {
 				return acp.New(ws, code.AgentDef{
-					Name:    "OpenCode",
+					Name:    "opencode",
 					Command: path,
 					Args:    []string{"acp"},
 				})
@@ -114,27 +116,25 @@ func claudeBackend(ctx context.Context, ws *code.Workspace) (code.Agent, error) 
 		Cwd: ws.RootPath,
 		Env: claude.BuildEnv(os.Environ(), cfg),
 	})
-	return acp.NewInProcess(ws, "Claude", srv, func(conn *acpsdk.AgentSideConnection) {
+	return acp.NewInProcess(ws, "claude", srv, func(conn *acpsdk.AgentSideConnection) {
 		srv.SetAgentConnection(conn)
 	}, srv.Close)
 }
 
-// codexBackend spawns `codex app-server` (managed by codex.Spawn) and
-// wires it in-process. The returned code.Agent's Close terminates the
-// codex subprocess via the cleanup callback.
 func codexBackend(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
 	cfg, err := codex.NewConfig(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("codex config: %w", err)
 	}
 	srv, err := acpcodex.Spawn(ctx, acpcodex.Options{
+		Dir:       ws.RootPath,
 		Env:       codex.BuildEnv(os.Environ(), cfg),
 		ExtraArgs: codex.BuildArgs(cfg),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("codex spawn: %w", err)
 	}
-	return acp.NewInProcess(ws, "Codex", srv, func(conn *acpsdk.AgentSideConnection) {
+	return acp.NewInProcess(ws, "codex", srv, func(conn *acpsdk.AgentSideConnection) {
 		srv.SetAgentConnection(conn)
 	}, srv.Close)
 }

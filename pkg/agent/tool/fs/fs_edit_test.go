@@ -300,7 +300,7 @@ func TestEditTool(t *testing.T) {
 
 	t.Run("edit rejects file exceeding MaxEditFileBytes", func(t *testing.T) {
 		testFile := filepath.Join(tmpDir, "huge.txt")
-		// 1 byte over the cap. Write a sparse-friendly pattern.
+
 		huge := strings.Repeat("a", MaxEditFileBytes+1)
 		os.WriteFile(testFile, []byte(huge), 0644)
 

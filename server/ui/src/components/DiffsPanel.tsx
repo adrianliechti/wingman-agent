@@ -1,8 +1,4 @@
-import {
-	ClipboardCopy,
-	FileText,
-	RotateCcw,
-} from "lucide-react";
+import { ClipboardCopy, FileText, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { DiffEntry, ServerMessage } from "../types/protocol";
 
@@ -19,7 +15,12 @@ interface MenuState {
 	diff: DiffEntry;
 }
 
-export function DiffsPanel({ sessionId, onOpenDiff, onOpenFile, subscribe }: Props) {
+export function DiffsPanel({
+	sessionId,
+	onOpenDiff,
+	onOpenFile,
+	subscribe,
+}: Props) {
 	const [diffs, setDiffs] = useState<DiffEntry[]>([]);
 	const [menu, setMenu] = useState<MenuState | null>(null);
 
@@ -76,15 +77,15 @@ export function DiffsPanel({ sessionId, onOpenDiff, onOpenFile, subscribe }: Pro
 
 	const handleCopy = (diff: DiffEntry) => {
 		setMenu(null);
-		// The patch is already in memory — no fetch — so we can pass a resolved
-		// blob to ClipboardItem without losing the user gesture.
 		navigator.clipboard
 			.write([
 				new ClipboardItem({
 					"text/plain": new Blob([diff.patch], { type: "text/plain" }),
 				}),
 			])
-			.catch((e) => alert(`Copy failed: ${e instanceof Error ? e.message : String(e)}`));
+			.catch((e) =>
+				alert(`Copy failed: ${e instanceof Error ? e.message : String(e)}`),
+			);
 	};
 
 	const handleRevert = async (diff: DiffEntry) => {
@@ -98,10 +99,9 @@ export function DiffsPanel({ sessionId, onOpenDiff, onOpenFile, subscribe }: Pro
 		if (!confirm(`${verb} "${diff.path}"?`)) return;
 		const params = new URLSearchParams({ path: diff.path });
 		if (sessionId) params.set("session", sessionId);
-		const res = await fetch(
-			`/api/diffs/revert?${params.toString()}`,
-			{ method: "POST" },
-		);
+		const res = await fetch(`/api/diffs/revert?${params.toString()}`, {
+			method: "POST",
+		});
 		if (!res.ok) {
 			alert(`Revert failed: ${await res.text()}`);
 		}
