@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -41,14 +42,35 @@ func (a *App) queuePhase(phase AppPhase) {
 	})
 }
 
+const renderInterval = 40 * time.Millisecond
+
 func (a *App) render() {
-	if a.promptActive || a.askActive {
+	if !a.renderPending.CompareAndSwap(false, true) {
 		return
 	}
 
-	messages := a.agent.Messages(a.sessionID)
-	a.app.QueueUpdateDraw(func() {
-		a.renderChat(messages)
+	delay := renderInterval - time.Duration(time.Now().UnixNano()-a.renderLast.Load())
+	if delay < 0 {
+		delay = 0
+	}
+
+	time.AfterFunc(delay, func() {
+		a.app.QueueUpdateDraw(func() {
+			a.renderPending.Store(false)
+			a.renderLast.Store(time.Now().UnixNano())
+
+			if a.promptActive || a.askActive {
+				return
+			}
+
+			a.renderChat(a.agent.Messages(a.sessionID))
+
+			usage := a.agent.Usage(a.sessionID)
+			a.inputTokens = usage.InputTokens
+			a.cachedTokens = usage.CachedTokens
+			a.outputTokens = usage.OutputTokens
+			a.updateStatusBar()
+		})
 	})
 }
 
@@ -156,19 +178,16 @@ func (a *App) streamResponse(input []agent.Content) {
 				a.render()
 			}
 		}
-
-		usage := a.agent.Usage(a.sessionID)
-		a.app.QueueUpdateDraw(func() {
-			a.inputTokens = usage.InputTokens
-			a.cachedTokens = usage.CachedTokens
-			a.outputTokens = usage.OutputTokens
-			a.updateStatusBar()
-		})
 	}
 
 	a.queuePhase(PhaseIdle)
 
+	usage := a.agent.Usage(a.sessionID)
 	a.app.QueueUpdateDraw(func() {
+		a.inputTokens = usage.InputTokens
+		a.cachedTokens = usage.CachedTokens
+		a.outputTokens = usage.OutputTokens
+
 		if streamErr != nil {
 			a.clearStreamingState()
 			if errors.Is(streamErr, context.Canceled) {

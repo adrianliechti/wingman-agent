@@ -67,6 +67,9 @@ type App struct {
 	streamCancel context.CancelFunc
 	streamMu     sync.Mutex
 
+	renderPending atomic.Bool
+	renderLast    atomic.Int64
+
 	streamStateMu      sync.Mutex
 	currentToolName    string
 	currentToolHint    string
