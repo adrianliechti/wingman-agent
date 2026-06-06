@@ -352,29 +352,57 @@ func isGitRepo(dir string) bool {
 	return err == nil
 }
 
+var (
+	workspaceMaxEntries = 200_000
+	workspaceMaxBytes   = int64(2 << 30)
+	workspaceWalkBudget = 4 * time.Second
+)
+
 func isSupportedWorkspace(dir string) bool {
 	if isGitRepo(dir) {
 		return true
 	}
 
-	const budget = 4 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := context.WithTimeout(context.Background(), workspaceWalkBudget)
 	defer cancel()
 
-	done := make(chan struct{})
+	tooLarge := errors.New("workspace too large")
+
+	result := make(chan bool, 1)
 	go func() {
-		defer close(done)
-		filepath.WalkDir(dir, func(_ string, _ fs.DirEntry, _ error) error {
+		var entries int
+		var size int64
+
+		err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if err != nil {
+				return nil
+			}
+
+			entries++
+			if entries > workspaceMaxEntries {
+				return tooLarge
+			}
+
+			if !d.IsDir() {
+				if info, err := d.Info(); err == nil {
+					size += info.Size()
+					if size > workspaceMaxBytes {
+						return tooLarge
+					}
+				}
+			}
+
 			return nil
 		})
+		result <- err == nil
 	}()
 
 	select {
-	case <-done:
-		return ctx.Err() == nil
+	case ok := <-result:
+		return ok
 	case <-ctx.Done():
 		return false
 	}

@@ -1,11 +1,14 @@
 package code
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-git/go-git/v5"
 )
 
 func initRepo(t *testing.T, dir string) {
@@ -263,5 +266,58 @@ func TestProjectKey_NonGitDirUsesRawPath(t *testing.T) {
 	}
 	if key != strings.ToLower(key) {
 		t.Errorf("expected lowercased key, got %q", key)
+	}
+}
+
+func TestIsSupportedWorkspace_SmallDir(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "a.txt"), "hello")
+
+	if !isSupportedWorkspace(dir) {
+		t.Fatal("small dir should be supported")
+	}
+}
+
+func TestIsSupportedWorkspace_TooManyEntries(t *testing.T) {
+	dir := t.TempDir()
+	for i := range 20 {
+		mustWrite(t, filepath.Join(dir, fmt.Sprintf("f%d.txt", i)), "x")
+	}
+
+	prev := workspaceMaxEntries
+	workspaceMaxEntries = 10
+	defer func() { workspaceMaxEntries = prev }()
+
+	if isSupportedWorkspace(dir) {
+		t.Fatal("dir over entry limit should be unsupported")
+	}
+}
+
+func TestIsSupportedWorkspace_TooManyBytes(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "big.bin"), strings.Repeat("x", 1024))
+
+	prev := workspaceMaxBytes
+	workspaceMaxBytes = 512
+	defer func() { workspaceMaxBytes = prev }()
+
+	if isSupportedWorkspace(dir) {
+		t.Fatal("dir over byte limit should be unsupported")
+	}
+}
+
+func TestIsSupportedWorkspace_GitRepoAlwaysSupported(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := git.PlainInit(dir, false); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(dir, "big.bin"), strings.Repeat("x", 1024))
+
+	prev := workspaceMaxBytes
+	workspaceMaxBytes = 512
+	defer func() { workspaceMaxBytes = prev }()
+
+	if !isSupportedWorkspace(dir) {
+		t.Fatal("git repo should always be supported")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"os/exec"
@@ -26,7 +27,7 @@ type Session struct {
 
 	docVersion int64
 
-	openedDocs map[string]struct{}
+	openedDocs map[string]uint64
 	mu         sync.Mutex
 
 	pushDiags   map[string][]Diagnostic
@@ -68,7 +69,7 @@ func connect(ctx context.Context, workingDir string, server Server) (*Session, e
 		rootURI:    FileURI(workingDir),
 		workingDir: workingDir,
 		cancelFunc: cancel,
-		openedDocs: make(map[string]struct{}),
+		openedDocs: make(map[string]uint64),
 		pushDiags:  make(map[string][]Diagnostic),
 	}
 
@@ -183,11 +184,19 @@ func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, er
 		return "", fmt.Errorf("read file: %w", err)
 	}
 
+	h := fnv.New64a()
+	h.Write(content)
+	sum := h.Sum64()
+
 	s.mu.Lock()
-	_, alreadyOpen := s.openedDocs[uri]
+	prev, alreadyOpen := s.openedDocs[uri]
 	s.mu.Unlock()
 
 	if alreadyOpen {
+		if prev == sum {
+			return uri, nil
+		}
+
 		changeParams := DidChangeTextDocumentParams{
 			TextDocument: VersionedTextDocumentIdentifier{
 				URI:     uri,
@@ -203,6 +212,10 @@ func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, er
 		s.conn.Notify(ctx, "textDocument/didSave", DidSaveTextDocumentParams{
 			TextDocument: TextDocumentIdentifier{URI: uri},
 		})
+
+		s.mu.Lock()
+		s.openedDocs[uri] = sum
+		s.mu.Unlock()
 
 		return uri, nil
 	}
@@ -221,7 +234,7 @@ func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, er
 	}
 
 	s.mu.Lock()
-	s.openedDocs[uri] = struct{}{}
+	s.openedDocs[uri] = sum
 	s.mu.Unlock()
 
 	return uri, nil
