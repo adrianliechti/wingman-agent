@@ -18,6 +18,7 @@ type Agent struct {
 
 	Messages []Message
 	Usage    Usage
+	Revision uint64
 
 	queueMu      sync.Mutex
 	running      bool

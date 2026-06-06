@@ -252,6 +252,7 @@ func (a *Agent) Save(id string) error {
 	return session.Save(a.sessionsDir, id, harness.State{
 		Messages: s.aa.Messages,
 		Usage:    s.aa.Usage,
+		Revision: s.aa.Revision,
 	})
 }
 

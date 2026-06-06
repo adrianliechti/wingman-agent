@@ -71,6 +71,7 @@ func (a *Agent) removeOrphanedToolMessages() {
 	}
 
 	a.Messages = cleaned
+	a.Revision++
 }
 
 func (a *Agent) compactMessages(ctx context.Context) {
@@ -87,6 +88,7 @@ func (a *Agent) compactMessages(ctx context.Context) {
 		Hidden:  true,
 		Content: []Content{{Text: summary}},
 	}}, recentMessages...)
+	a.Revision++
 	a.removeOrphanedToolMessages()
 }
 
@@ -220,6 +222,7 @@ func recoverySummaryTranscript(messages []Message) string {
 func (a *Agent) truncateMessagesForRecovery() {
 	if len(a.Messages) > minRecoveryMessagesToPreserve {
 		a.Messages = a.Messages[len(a.Messages)-minRecoveryMessagesToPreserve:]
+		a.Revision++
 	}
 	a.removeOrphanedToolMessages()
 }
