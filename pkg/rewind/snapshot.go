@@ -1,6 +1,7 @@
 package rewind
 
 import (
+	"bytes"
 	"os"
 	"path"
 	"runtime"
@@ -138,6 +139,15 @@ func (m *Manager) hashPending(resolved map[string]manifestEntry, pending []scanE
 	wg.Wait()
 }
 
+// isText reports whether data looks like text, using git's heuristic: content
+// with a NUL byte in the first 8000 bytes is treated as binary.
+func isText(data []byte) bool {
+	if len(data) > 8000 {
+		data = data[:8000]
+	}
+	return bytes.IndexByte(data, 0) < 0
+}
+
 func (m *Manager) writeBlob(e scanEntry) (plumbing.Hash, error) {
 	abs := m.absPath(e.path)
 
@@ -153,6 +163,9 @@ func (m *Manager) writeBlob(e scanEntry) (plumbing.Hash, error) {
 		var err error
 		if data, err = os.ReadFile(abs); err != nil {
 			return plumbing.ZeroHash, err
+		}
+		if m.crlf && isText(data) {
+			data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
 		}
 	}
 

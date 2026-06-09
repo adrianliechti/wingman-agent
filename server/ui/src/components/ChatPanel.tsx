@@ -176,14 +176,6 @@ export function ChatPanel({
 		pendingAnchorRef.current = visible ?? below ?? above;
 	}, []);
 
-	const captureAnchor = useCallback(() => {
-		captureAnchorForTurns(latestTurnsRef.current);
-	}, [captureAnchorForTurns]);
-
-	const setAnchorTarget = useCallback((id: string, viewportTop: number) => {
-		pendingAnchorRef.current = { id, viewportTop };
-	}, []);
-
 	const applyPendingAnchor = useCallback(() => {
 		const c = containerRef.current;
 		const content = contentRef.current;
@@ -461,8 +453,6 @@ export function ChatPanel({
 									turn={turn}
 									isActive={isActive}
 									phase={phase}
-									captureAnchor={captureAnchor}
-									setAnchorTarget={setAnchorTarget}
 									applyPendingAnchor={applyPendingAnchor}
 								/>
 							);
@@ -542,7 +532,7 @@ export function ChatPanel({
 									ref={textareaRef}
 									// biome-ignore lint/a11y/noAutofocus: chat input is the primary control
 									autoFocus
-									className="w-full bg-transparent text-fg text-[12px] font-mono resize-none outline-none leading-[1.7] placeholder:text-fg-dim"
+									className="w-full bg-transparent text-fg text-[12px] font-mono resize-none outline-none leading-[1.7] placeholder:text-fg-dim max-h-[40vh] overflow-y-auto"
 									style={{ fieldSizing: "content" } as React.CSSProperties}
 									value={input}
 									onChange={(e) => setInput(e.target.value)}
@@ -700,7 +690,7 @@ function PromptBar({
 							ref={inputRef}
 							// biome-ignore lint/a11y/noAutofocus: prompt is the primary control while open
 							autoFocus
-							className="w-full bg-transparent text-fg text-[12px] font-mono resize-none outline-none leading-[1.7] placeholder:text-fg-dim"
+							className="w-full bg-transparent text-fg text-[12px] font-mono resize-none outline-none leading-[1.7] placeholder:text-fg-dim max-h-[40vh] overflow-y-auto"
 							style={{ fieldSizing: "content" } as React.CSSProperties}
 							value={text}
 							onChange={(e) => setText(e.target.value)}
@@ -750,6 +740,8 @@ const EntryView = memo(function EntryView({
 	entry: ChatEntry;
 	isStreaming: boolean;
 }) {
+	const [hovered, setHovered] = useState(false);
+
 	if (entry.type === "error") {
 		return (
 			<div
@@ -772,9 +764,13 @@ const EntryView = memo(function EntryView({
 	return (
 		<div
 			data-entry-id={entry.id}
-			className={`mb-4 border-l-2 ${isUser ? "border-success" : "border-purple"} pl-3`}
+			className="mb-4"
+			onMouseEnter={() => setHovered(true)}
+			onMouseLeave={() => setHovered(false)}
 		>
-			<div className="text-[12px] leading-[1.7] break-words min-w-0 font-mono">
+			<div
+				className={`border-l-2 ${isUser ? "border-success" : "border-purple"} pl-3 text-[12px] leading-[1.7] break-words min-w-0 font-mono`}
+			>
 				{isUser ? (
 					<>
 						{entry.content && (
@@ -808,6 +804,11 @@ const EntryView = memo(function EntryView({
 					<MarkdownContent text={entry.content} />
 				)}
 			</div>
+			{!isStreaming && entry.content && (
+				<div className="pl-3 h-4 mt-0.5 flex items-center">
+					{hovered && <CopyTextButton text={entry.content} label="Copy" />}
+				</div>
+			)}
 		</div>
 	);
 });
@@ -859,27 +860,22 @@ const TurnView = memo(function TurnView({
 	turn,
 	isActive,
 	phase,
-	captureAnchor,
-	setAnchorTarget,
 	applyPendingAnchor,
 }: {
 	turn: Turn;
 	isActive: boolean;
 	phase: Phase;
-	captureAnchor: () => void;
-	setAnchorTarget: (id: string, viewportTop: number) => void;
 	applyPendingAnchor: () => void;
 }) {
 	const canCollapse =
 		!isActive && turn.final !== null && turn.working.length > 0;
 	const [override, setOverride] = useState<boolean | null>(null);
 	const expanded = override ?? !canCollapse;
+	// Manual toggle keeps scrollTop unchanged: the disclosure header sits above
+	// the content that grows/shrinks, so it stays visually fixed and the steps
+	// reveal/hide below it — no scroll jump. (applyPendingAnchor still runs in
+	// the effect to preserve position on auto-collapse when a turn finishes.)
 	const setExpanded = (value: boolean) => {
-		if (value && turn.working[0]) {
-			setAnchorTarget(turn.working[0].id, PIN_TOP_GAP);
-		} else {
-			captureAnchor();
-		}
 		setOverride(value);
 	};
 
@@ -892,7 +888,9 @@ const TurnView = memo(function TurnView({
 
 	return (
 		<>
-			{turn.user && <EntryView entry={turn.user} isStreaming={false} />}
+			{turn.user && (
+				<EntryView entry={turn.user} isStreaming={false} />
+			)}
 			{turn.working.length > 0 &&
 				(expanded ? (
 					<>
@@ -910,9 +908,11 @@ const TurnView = memo(function TurnView({
 							)}
 					</>
 				) : (
-					<WorkingSummary
+					<WorkingHeader
 						entries={turn.working}
-						onExpand={() => setExpanded(true)}
+						expanded={false}
+						onToggle={() => setExpanded(true)}
+						className="mb-4"
 					/>
 				))}
 			{turn.final && (
@@ -1006,45 +1006,54 @@ const WorkingExpanded = memo(function WorkingExpanded({
 
 	return (
 		<>
-			{nodes}
 			{canCollapse && (
-				<button
-					type="button"
-					onClick={onCollapse}
-					className="mb-4 -mt-2 ml-3 text-[11px] text-fg-dim hover:text-fg font-mono cursor-pointer"
-				>
-					collapse
-				</button>
+				<WorkingHeader
+					entries={entries}
+					expanded
+					onToggle={onCollapse}
+					className="mb-1"
+				/>
 			)}
+			{nodes}
 		</>
 	);
 });
 
-const WorkingSummary = memo(function WorkingSummary({
-	entries,
-	onExpand,
-}: {
-	entries: ChatEntry[];
-	onExpand: () => void;
-}) {
+function workingSummaryText(entries: ChatEntry[]): string {
 	const tools = entries.filter((e) => e.type === "tool").length;
 	const thoughts = entries.filter((e) => e.type === "reasoning").length;
 	const parts: string[] = [];
 	if (thoughts) parts.push(`${thoughts} thought${thoughts === 1 ? "" : "s"}`);
 	if (tools) parts.push(`${tools} tool${tools === 1 ? "" : "s"}`);
-	const summary = parts.length > 0 ? parts.join(", ") : "Worked";
+	return parts.length > 0 ? parts.join(", ") : "Worked";
+}
 
+// Disclosure header for the working steps. Same row toggles both ways:
+// down-chevron when expanded (steps shown below), right-chevron when collapsed.
+const WorkingHeader = memo(function WorkingHeader({
+	entries,
+	expanded,
+	onToggle,
+	className = "",
+}: {
+	entries: ChatEntry[];
+	expanded: boolean;
+	onToggle: () => void;
+	className?: string;
+}) {
 	return (
-		<div className="mb-4 border-l-2 border-purple pl-3">
-			<button
-				type="button"
-				onClick={onExpand}
-				className="flex items-center gap-2 py-0.5 cursor-pointer text-[12px]"
-			>
-				<ChevronRight size={12} className="text-fg-dim shrink-0" />
-				<span className="text-fg-dim font-mono text-[11px]">{summary}</span>
-			</button>
-		</div>
+		<button
+			type="button"
+			onClick={onToggle}
+			className={`flex items-center gap-2 py-0.5 cursor-pointer text-[11px] text-fg-dim hover:text-fg transition-colors ${className}`}
+		>
+			{expanded ? (
+				<ChevronDown size={12} className="shrink-0" />
+			) : (
+				<ChevronRight size={12} className="shrink-0" />
+			)}
+			<span className="font-mono">{workingSummaryText(entries)}</span>
+		</button>
 	);
 });
 
@@ -1100,7 +1109,7 @@ const ToolGroupView = memo(function ToolGroupView({
 	phase: Phase;
 }) {
 	return (
-		<div className="mb-4 border-l-2 border-purple pl-3">
+		<div className="mb-4">
 			{entries.map((entry) => {
 				const running = isTrailing && phase !== "idle" && !entry.toolResult;
 				return <ToolRow key={entry.id} entry={entry} running={running} />;
@@ -1117,35 +1126,47 @@ const ToolRow = memo(function ToolRow({
 	running: boolean;
 }) {
 	const [expanded, setExpanded] = useState(false);
+	const [hovered, setHovered] = useState(false);
 	const displayHint = entry.toolHint ? truncate(entry.toolHint, 80) : "";
 
 	return (
-		<div data-entry-id={entry.id}>
-			<div
-				className="flex items-center gap-2 py-0.5 cursor-pointer text-[12px] transition-colors"
-				onClick={() => setExpanded(!expanded)}
-			>
-				<span className="text-fg-dim shrink-0 flex items-center">
-					{running ? (
-						<LoaderCircle size={11} className="animate-spin" />
-					) : expanded ? (
-						<ChevronDown size={12} />
-					) : (
-						<ChevronRight size={12} />
-					)}
-				</span>
-				<span className="text-purple font-mono text-[11px] shrink-0">
-					{entry.toolName}
-				</span>
-				{displayHint && (
-					<span className="text-fg-dim font-mono text-[11px] overflow-hidden text-ellipsis whitespace-nowrap flex-1">
-						{displayHint}
+		<div
+			data-entry-id={entry.id}
+			onMouseEnter={() => setHovered(true)}
+			onMouseLeave={() => setHovered(false)}
+		>
+			<div className="border-l-2 border-purple pl-3">
+				<div
+					className="flex items-center gap-2 py-0.5 cursor-pointer text-[12px] transition-colors"
+					onClick={() => setExpanded(!expanded)}
+				>
+					<span className="text-fg-dim shrink-0 flex items-center">
+						{running ? (
+							<LoaderCircle size={11} className="animate-spin" />
+						) : expanded ? (
+							<ChevronDown size={12} />
+						) : (
+							<ChevronRight size={12} />
+						)}
 					</span>
+					<span className="text-purple font-mono text-[11px] shrink-0">
+						{entry.toolName}
+					</span>
+					{displayHint && (
+						<span className="text-fg-dim font-mono text-[11px] overflow-hidden text-ellipsis whitespace-nowrap flex-1">
+							{displayHint}
+						</span>
+					)}
+				</div>
+				{expanded && (
+					<div className="mt-1 px-3 py-2 text-[11px] whitespace-pre-wrap break-all text-fg-dim bg-bg-surface rounded-md font-mono leading-relaxed">
+						{truncate(entry.toolResult || "(no output)", 2000)}
+					</div>
 				)}
 			</div>
-			{expanded && (
-				<div className="mt-1 mb-1 px-3 py-2 text-[11px] whitespace-pre-wrap break-all text-fg-dim bg-bg-surface rounded-md font-mono leading-relaxed">
-					{truncate(entry.toolResult || "(no output)", 2000)}
+			{expanded && entry.toolResult && (
+				<div className="pl-3 h-4 mt-0.5 flex items-center">
+					{hovered && <CopyTextButton text={entry.toolResult} label="Copy" />}
 				</div>
 			)}
 		</div>
@@ -1179,4 +1200,49 @@ const ReasoningView = memo(function ReasoningView({
 
 function truncate(text: string, max: number): string {
 	return text.length <= max ? text : `${text.substring(0, max)}...`;
+}
+
+function CopyTextButton({
+	text,
+	label = "Copy",
+	className = "",
+}: {
+	text: string;
+	label?: string;
+	className?: string;
+}) {
+	const [copied, setCopied] = useState(false);
+	const timer = useRef<number | null>(null);
+
+	useEffect(
+		() => () => {
+			if (timer.current) window.clearTimeout(timer.current);
+		},
+		[],
+	);
+
+	const handleClick = useCallback(
+		(e: React.MouseEvent<HTMLButtonElement>) => {
+			e.stopPropagation();
+			navigator.clipboard
+				.writeText(text)
+				.then(() => {
+					setCopied(true);
+					if (timer.current) window.clearTimeout(timer.current);
+					timer.current = window.setTimeout(() => setCopied(false), 1200);
+				})
+				.catch(() => {});
+		},
+		[text],
+	);
+
+	return (
+		<button
+			type="button"
+			onClick={handleClick}
+			className={`text-[10px] text-fg-dim hover:text-fg transition-colors cursor-pointer ${className}`}
+		>
+			{copied ? "Copied" : label}
+		</button>
+	);
 }

@@ -254,6 +254,63 @@ func TestGitRepoBaseline(t *testing.T) {
 	}
 }
 
+func TestAutoCRLFNoPhantomDiff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "tracked.txt", "line1\nline2\n")
+
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("tracked.txt"); err != nil {
+		t.Fatal(err)
+	}
+	sig := &object.Signature{Name: "test", Email: "test@local", When: time.Now()}
+	if _, err := wt.Commit("init", &git.CommitOptions{Author: sig}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Enable autocrlf, then rewrite the working tree as CRLF the way git's
+	// checkout would on Windows. The committed blob stays LF.
+	cfg, err := repo.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Raw.Section("core").SetOption("autocrlf", "true")
+	if err := repo.SetConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "tracked.txt", "line1\r\nline2\r\n")
+
+	m := New(dir)
+	defer m.Cleanup()
+
+	diffs, err := m.DiffFromBaseline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diffs) != 0 {
+		t.Fatalf("CRLF-only working tree produced phantom diffs: %+v", diffs)
+	}
+
+	// A genuine edit still shows up, with a clean LF patch (no \r noise).
+	writeFile(t, dir, "tracked.txt", "line1\r\nCHANGED\r\n")
+	diffs, err = m.DiffFromBaseline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diffs) != 1 || diffs[0].Status != StatusModified {
+		t.Fatalf("expected one modified diff, got: %+v", diffs)
+	}
+	if strings.Contains(diffs[0].Patch, "\r") {
+		t.Fatalf("patch still contains CR; EOL not normalized: %q", diffs[0].Patch)
+	}
+}
+
 func TestTrackedButIgnoredFile(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "config.json", "{}")

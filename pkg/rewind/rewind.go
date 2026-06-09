@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
@@ -44,6 +45,7 @@ type Manager struct {
 	manifest     map[string]manifestEntry
 	floor        int64
 	closed       bool
+	crlf         bool
 
 	excludesMu      sync.Mutex
 	excludesMatcher gitignore.Matcher
@@ -96,6 +98,15 @@ func (m *Manager) init() {
 		}
 		if idx, err := userRepo.Storer.Index(); err == nil {
 			userIndex = idx
+		}
+		// Mirror git's clean filter: when core.autocrlf is true/input, git
+		// normalizes CRLF→LF before hashing, so the working tree (CRLF on
+		// Windows) hashes to the same blob as HEAD (LF). Without this the
+		// snapshot would report every text file as modified. Merged scope
+		// catches autocrlf set globally (Git for Windows default).
+		if cfg, err := userRepo.ConfigScoped(config.SystemScope); err == nil {
+			v := strings.ToLower(cfg.Raw.Section("core").Option("autocrlf"))
+			m.crlf = v == "true" || v == "input"
 		}
 	}
 
