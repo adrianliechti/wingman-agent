@@ -96,9 +96,11 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 
 			if err != nil {
 				if !errors.Is(err, errYieldStopped) && !errors.Is(err, context.Canceled) && isRecoverableError(err) {
-					a.compactMessages(ctx)
+					if isContextOverflowError(err) {
+						a.compactMessages(ctx, true)
+						req.messages = a.Messages
+					}
 
-					req.messages = a.Messages
 					resp, err = complete(ctx, a.client, req, yield)
 				}
 
@@ -143,7 +145,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 			}
 
 			if a.shouldCompactProactively(resp.usage.InputTokens) {
-				a.compactMessages(ctx)
+				a.compactMessages(ctx, false)
 			}
 		}
 	}

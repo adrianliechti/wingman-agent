@@ -18,6 +18,7 @@ func WriteTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 			"Writes a file to the local filesystem. Creates parent directories as needed and overwrites any existing file at the same path.",
 			"- For existing files, `read` first so you do not discard content.",
 			"- Prefer `edit` for existing files: it sends only the diff. Use `write` for new files or complete rewrites.",
+			"- Overwrites return a line diff against the previous content; treat it as authoritative instead of re-reading the file.",
 		}, "\n"),
 
 		Parameters: map[string]any{
@@ -60,15 +61,30 @@ func WriteTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 				return "", fmt.Errorf("stat file %q: %w", pathArg, err)
 			}
 
+			var oldContent []byte
+			if !isNew && info.Size() <= MaxEditFileBytes {
+				oldContent, _ = readFileTarget(root, target)
+			}
+
 			if err := writeFileTarget(root, target, content); err != nil {
 				return "", fmt.Errorf("write file %q: %w", pathArg, err)
 			}
 
-			action := "Updated"
 			if isNew {
-				action = "Created"
+				return fmt.Sprintf("Created %s (%d bytes written)", pathArg, len(content)), nil
 			}
-			return fmt.Sprintf("%s %s (%d bytes written)", action, pathArg, len(content)), nil
+
+			result := fmt.Sprintf("Updated %s (%d bytes written)", pathArg, len(content))
+
+			if oldContent != nil {
+				_, oldText := stripBom(string(oldContent))
+				_, newText := stripBom(content)
+				if diff := generateDiffString(normalizeToLF(oldText), normalizeToLF(newText)); diff != "" {
+					result += "\n\n" + diff
+				}
+			}
+
+			return result, nil
 		},
 	}
 }

@@ -174,9 +174,9 @@ func GrepTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			"A powerful search tool built on ripgrep.",
-			"- Supports full regex syntax (e.g. `log.*Error`, `function\\s+\\w+`).",
-			"- Pattern syntax is ripgrep (not POSIX grep). Escape literal braces (use `interface\\{\\}` to find `interface{}`).",
+			"A powerful content search tool with ripgrep-style options.",
+			"- Supports regex syntax (e.g. `log.*Error`, `function\\s+\\w+`).",
+			"- Pattern syntax is Go RE2 (not POSIX grep or PCRE): no lookaheads/lookbehinds or backreferences. Escape literal braces (use `interface\\{\\}` to find `interface{}`).",
 			"- Filter files with `glob` (e.g. `*.js`, `*.{ts,tsx}`) or `type` (e.g. `js`, `py`, `rust`). Use `path` to scope to a subtree or single file.",
 			"- Output modes: `files_with_matches` (default) shows file paths, `content` shows matching lines (supports `-A`/`-B`/`-C` context and `-n`), `count` shows match counts.",
 			"- Multiline matching: by default patterns match within single lines only. For cross-line patterns like `struct \\{[\\s\\S]*?field`, set `multiline=true`.",

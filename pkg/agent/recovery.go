@@ -26,6 +26,41 @@ func isRecoverableError(err error) bool {
 	}
 }
 
+var contextOverflowMarkers = []string{
+	"context length",
+	"context_length",
+	"context window",
+	"maximum context",
+	"too many tokens",
+	"token limit",
+	"prompt is too long",
+	"input is too long",
+	"exceeds the maximum",
+}
+
+func isContextOverflowError(err error) bool {
+	var apiErr *openai.Error
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+
+	switch apiErr.StatusCode {
+	case 400, 413:
+	default:
+		return false
+	}
+
+	msg := strings.ToLower(apiErr.Code + " " + apiErr.Message)
+
+	for _, marker := range contextOverflowMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (a *Agent) removeOrphanedToolMessages() {
 
 	callIDs := make(map[string]bool)
@@ -74,12 +109,14 @@ func (a *Agent) removeOrphanedToolMessages() {
 	a.Revision++
 }
 
-func (a *Agent) compactMessages(ctx context.Context) {
+func (a *Agent) compactMessages(ctx context.Context, truncateOnFailure bool) {
 	summaryMessages, recentMessages := splitMessagesForRecoverySummary(a.Messages)
 
 	summary, err := a.summarizeMessages(ctx, summaryMessages)
 	if err != nil || summary == "" {
-		a.truncateMessagesForRecovery()
+		if truncateOnFailure {
+			a.truncateMessagesForRecovery()
+		}
 		return
 	}
 

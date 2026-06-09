@@ -22,7 +22,7 @@ func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 			"- Preserve indentation exactly as it appears after the `read` line-number prefix (`42\\t...`). Never include the prefix in old_string/new_string.",
 			"- The edit will FAIL if `old_string` is not unique in the file. Provide more surrounding context to make it unique, or set `replace_all=true` to change every instance.",
 			"- Use the smallest old_string that's clearly unique — usually 2-4 adjacent lines is sufficient.",
-			"- To create a new file (or replace an empty file), use empty `old_string`. Non-empty files reject empty `old_string`.",
+			"- Prefer `write` for new files. An empty `old_string` also creates a new file (or replaces an empty one); non-empty files reject empty `old_string`.",
 			"- Use `replace_all` for renaming a symbol across a file or other intentional file-wide replacements.",
 		}, "\n"),
 

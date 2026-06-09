@@ -3,6 +3,7 @@ package webfetch
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 
@@ -19,7 +20,7 @@ func Tools() []tool.Tool {
 	description := strings.Join([]string{
 		"Fetch a fully formed URL, convert HTML to markdown, and process it with the supplied prompt.",
 		"- Fails for authenticated/private URLs (Google Docs, Confluence, Jira, GitHub private pages); prefer an authenticated MCP tool when available.",
-		"- HTTP URLs are upgraded to HTTPS.",
+		"- HTTP URLs are upgraded to HTTPS (loopback hosts like localhost keep HTTP).",
 		"- The prompt should say exactly what to extract from the page.",
 		"- Results may be summarized if content is large; repeated fetches use a 15-minute cache.",
 		"- If redirected to a different host, call `web_fetch` again with the provided redirect URL.",
@@ -84,9 +85,21 @@ func normalizeFetchURL(raw string) (string, error) {
 	case "https":
 		return parsed.String(), nil
 	case "http":
-		parsed.Scheme = "https"
+		if !isLoopbackHost(parsed.Hostname()) {
+			parsed.Scheme = "https"
+		}
 		return parsed.String(), nil
 	default:
 		return "", fmt.Errorf("url must use http or https")
 	}
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }

@@ -111,12 +111,12 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 
 	truncated := truncateOutput(output.String())
 	if runErr != nil {
-		exitCode := -1
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
-			exitCode = exitErr.ExitCode()
+			truncated += fmt.Sprintf("\n\nCommand exited with code %d", exitErr.ExitCode())
+		} else {
+			truncated += fmt.Sprintf("\n\nCommand failed to run: %v", runErr)
 		}
-		truncated += fmt.Sprintf("\n\nCommand exited with code %d", exitCode)
 	}
 	return truncated, nil
 }
