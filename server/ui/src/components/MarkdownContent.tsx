@@ -1,177 +1,105 @@
-import { loader } from "@monaco-editor/react";
-import type * as Monaco from "monaco-editor";
-import { useEffect, useRef } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { useColorScheme } from "../hooks/useColorScheme";
-import { defineWingmanThemes, wingmanThemeName } from "../monacoThemes";
+import { code } from "@streamdown/code";
+import { math } from "@streamdown/math";
+import { mermaid } from "@streamdown/mermaid";
+import { memo } from "react";
+import { type BundledTheme, Streamdown } from "streamdown";
+import "katex/dist/katex.min.css";
 
-export function MarkdownContent({ text }: { text: string }) {
+// Light/dark Shiki themes; Streamdown swaps them with the dark variant, which
+// follows prefers-color-scheme — matching the app's theme switching.
+const SHIKI_THEME: [BundledTheme, BundledTheme] = ["github-light", "github-dark"];
+
+// Code highlighting (Shiki), mermaid diagrams, and KaTeX math. Built-in copy/
+// download controls come on by default and are suppressed while streaming.
+const PLUGINS = { code, mermaid, math };
+
+// Prose elements styled to match the app's compact terminal theme. Code blocks,
+// tables, mermaid and math are left to Streamdown's own (interactive) renderers.
+const components = {
+	a({ href, children }: { href?: string; children?: React.ReactNode }) {
+		return (
+			<a
+				href={href}
+				target="_blank"
+				rel="noopener noreferrer"
+				className="text-accent hover:text-accent-hover"
+			>
+				{children}
+			</a>
+		);
+	},
+	h1({ children }: { children?: React.ReactNode }) {
+		return (
+			<h1 className="mt-4 mb-2 font-semibold text-[15px] text-fg">{children}</h1>
+		);
+	},
+	h2({ children }: { children?: React.ReactNode }) {
+		return (
+			<h2 className="mt-3.5 mb-1.5 font-semibold text-[14px] text-fg">
+				{children}
+			</h2>
+		);
+	},
+	h3({ children }: { children?: React.ReactNode }) {
+		return (
+			<h3 className="mt-3 mb-1.5 font-semibold text-[13px] text-fg">
+				{children}
+			</h3>
+		);
+	},
+	p({ children }: { children?: React.ReactNode }) {
+		return (
+			<p className="mb-2 last:mb-0 empty:hidden text-fg-muted">{children}</p>
+		);
+	},
+	ul({ children }: { children?: React.ReactNode }) {
+		return <ul className="my-1.5 pl-5 list-disc text-fg-muted">{children}</ul>;
+	},
+	ol({ children }: { children?: React.ReactNode }) {
+		return (
+			<ol className="my-1.5 pl-5 list-decimal text-fg-muted">{children}</ol>
+		);
+	},
+	li({ children }: { children?: React.ReactNode }) {
+		return <li className="mb-0.5">{children}</li>;
+	},
+	blockquote({ children }: { children?: React.ReactNode }) {
+		return (
+			<blockquote className="border-l-2 border-border pl-2.5 my-1.5 text-fg-dim">
+				{children}
+			</blockquote>
+		);
+	},
+	strong({ children }: { children?: React.ReactNode }) {
+		return <strong className="font-semibold text-fg">{children}</strong>;
+	},
+	em({ children }: { children?: React.ReactNode }) {
+		return <em className="text-fg-muted">{children}</em>;
+	},
+	del({ children }: { children?: React.ReactNode }) {
+		return <del className="text-fg-dim">{children}</del>;
+	},
+};
+
+export const MarkdownContent = memo(function MarkdownContent({
+	text,
+	streaming = false,
+}: {
+	text: string;
+	streaming?: boolean;
+}) {
 	const trimmed = text?.replace(/\s+$/, "");
 	if (!trimmed) return null;
 
 	return (
-		<Markdown
-			remarkPlugins={[remarkGfm]}
-			components={{
-				code({ className, children }) {
-					const match = /language-(\w+)/.exec(className || "");
-					if (match) {
-						return (
-							<CodeBlock
-								code={String(children).replace(/\n$/, "")}
-								language={match[1]}
-							/>
-						);
-					}
-					return (
-						<code className="bg-bg-surface px-1.5 py-0.5 rounded text-[11.5px]">
-							{children}
-						</code>
-					);
-				},
-				pre({ children }) {
-					return <>{children}</>;
-				},
-				a({ href, children }) {
-					return (
-						<a
-							href={href}
-							target="_blank"
-							rel="noopener"
-							className="text-accent hover:text-accent-hover"
-						>
-							{children}
-						</a>
-					);
-				},
-				h1({ children }) {
-					return (
-						<h1 className="mt-4 mb-2 font-semibold text-[15px] text-fg">
-							{children}
-						</h1>
-					);
-				},
-				h2({ children }) {
-					return (
-						<h2 className="mt-3.5 mb-1.5 font-semibold text-[14px] text-fg">
-							{children}
-						</h2>
-					);
-				},
-				h3({ children }) {
-					return (
-						<h3 className="mt-3 mb-1.5 font-semibold text-[13px] text-fg">
-							{children}
-						</h3>
-					);
-				},
-				p({ children }) {
-					return (
-						<p className="mb-2 last:mb-0 empty:hidden text-fg-muted">
-							{children}
-						</p>
-					);
-				},
-				ul({ children }) {
-					return (
-						<ul className="my-1.5 pl-5 list-disc text-fg-muted">{children}</ul>
-					);
-				},
-				ol({ children }) {
-					return (
-						<ol className="my-1.5 pl-5 list-decimal text-fg-muted">
-							{children}
-						</ol>
-					);
-				},
-				li({ children }) {
-					return <li className="mb-0.5">{children}</li>;
-				},
-				blockquote({ children }) {
-					return (
-						<blockquote className="border-l-2 border-border pl-2.5 my-1.5 text-fg-dim">
-							{children}
-						</blockquote>
-					);
-				},
-				strong({ children }) {
-					return <strong className="font-semibold text-fg">{children}</strong>;
-				},
-				em({ children }) {
-					return <em className="text-fg-muted">{children}</em>;
-				},
-				table({ children }) {
-					return (
-						<div className="my-2 overflow-x-auto">
-							<table className="border-collapse text-[12px] text-fg-muted">
-								{children}
-							</table>
-						</div>
-					);
-				},
-				thead({ children }) {
-					return <thead className="text-fg">{children}</thead>;
-				},
-				tr({ children }) {
-					return (
-						<tr className="border-b border-border-subtle last:border-0">
-							{children}
-						</tr>
-					);
-				},
-				th({ children }) {
-					return (
-						<th className="px-2 py-1 text-left font-semibold align-top">
-							{children}
-						</th>
-					);
-				},
-				td({ children }) {
-					return <td className="px-2 py-1 align-top">{children}</td>;
-				},
-				del({ children }) {
-					return <del className="text-fg-dim">{children}</del>;
-				},
-			}}
+		<Streamdown
+			shikiTheme={SHIKI_THEME}
+			plugins={PLUGINS}
+			isAnimating={streaming}
+			lineNumbers={false}
+			components={components}
 		>
 			{trimmed}
-		</Markdown>
+		</Streamdown>
 	);
-}
-
-function CodeBlock({ code, language }: { code: string; language: string }) {
-	const ref = useRef<HTMLPreElement>(null);
-	const scheme = useColorScheme();
-
-	useEffect(() => {
-		let cancelled = false;
-		loader.init().then((monaco: typeof Monaco) => {
-			if (cancelled || !ref.current) return;
-
-			defineWingmanThemes(monaco);
-			monaco.editor.setTheme(wingmanThemeName(scheme));
-
-			monaco.editor
-				.colorize(code, language || "plaintext", {})
-				.then((html) => {
-					if (!cancelled && ref.current) {
-						ref.current.innerHTML = html;
-					}
-				})
-				.catch(() => {});
-		});
-		return () => {
-			cancelled = true;
-		};
-	}, [code, language, scheme]);
-
-	return (
-		<pre
-			ref={ref}
-			className="bg-bg-surface rounded-md my-2 px-3 py-2.5 overflow-x-auto text-[12px] leading-[1.55] font-mono text-fg-muted"
-		>
-			{code}
-		</pre>
-	);
-}
+});

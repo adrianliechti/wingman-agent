@@ -17,10 +17,13 @@ export default defineConfig({
             ? 'assets/lang/[name].js'
             : 'assets/[name].js',
         assetFileNames: 'assets/[name].[ext]',
-        manualChunks(id) {
-          if (!id.includes('node_modules/monaco-editor/')) return
-          if (monacoLang.test(id)) return
-          return 'editor'
+        advancedChunks: {
+          groups: [
+            {
+              name: 'editor',
+              test: /node_modules[/\\]monaco-editor[/\\]esm[/\\]vs[/\\](?!basic-languages|language)/,
+            },
+          ],
         },
       },
     },

@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* Generate the Tailwind classes used inside Streamdown's compiled components. */
+@source "../node_modules/streamdown/dist/*.js";
+@source "../node_modules/@streamdown/*/dist/*.js";
+
 @theme {
 	--color-bg: #0a0a0a;
 	--color-bg-surface: #141414;
@@ -127,5 +131,54 @@ pre {
 	50% {
 		opacity: 0.4;
 	}
+}
+
+/* Streamdown blocks (tagged with data-streamdown). Flatten the chunky default
+   frames to match the app's terminal surfaces. */
+
+/* Streamdown blocks (tagged with data-streamdown): strip the boxed frame —
+   rounded corners, border, bg-sidebar fill and p-2 padding — for a flat look.
+   The my-4 block margin is kept for vertical rhythm. */
+[data-streamdown="code-block"],
+[data-streamdown="code-block-header"],
+[data-streamdown="mermaid-block"],
+[data-streamdown="table-wrapper"] {
+	border: 0;
+	border-radius: 0;
+	background: transparent;
+	padding: 0;
+}
+
+/* Flatten every inner element of a code/mermaid block — body, header, diagram
+   surface, and any transient loading skeleton — so the default boxed border
+   can't flash while the mermaid engine loads. Targets divs/pre only, leaving
+   the rendered mermaid SVG's own styling intact. */
+[data-streamdown="table-wrapper"] > div,
+[data-streamdown="table-wrapper"] table,
+[data-streamdown="mermaid-block"] div,
+[data-streamdown="mermaid-block"] pre,
+[data-streamdown="code-block"] div,
+[data-streamdown="code-block"] pre {
+	border: 0;
+	border-radius: 0;
+	background: transparent;
+}
+[data-streamdown="code-block-body"],
+[data-streamdown="code-block-body"] pre {
+	padding: 0;
+}
+
+/* Tables: keep only light horizontal row separators for readability. */
+[data-streamdown="table-header-cell"],
+[data-streamdown="table-row"],
+[data-streamdown="table-cell"] {
+	border-color: var(--color-border-subtle);
+}
+
+/* Action buttons float instead of sitting in a bordered pill. */
+[data-streamdown="code-block-actions"],
+[data-streamdown="mermaid-block-actions"] {
+	border: 0;
+	background-color: transparent;
 }
 

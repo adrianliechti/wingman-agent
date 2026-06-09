@@ -123,10 +123,6 @@ export function ChatPanel({
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const imageInputRef = useRef<HTMLInputElement>(null);
 	const turns = useMemo(() => buildTurns(entries), [entries]);
-	const latestTurnsRef = useRef<Turn[]>([]);
-	useLayoutEffect(() => {
-		latestTurnsRef.current = turns;
-	}, [turns]);
 
 	const submitPendingRef = useRef(false);
 	const pinRef = useRef<{ id: string; top: number } | null>(null);
@@ -462,7 +458,7 @@ export function ChatPanel({
 				<div ref={spacerRef} aria-hidden style={{ height: 0 }} />
 			</div>
 
-			<div className="absolute bottom-0 left-0 right-0">
+			<div className="absolute bottom-0 left-0 right-0 z-20">
 				<div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none" />
 				<div className="bg-bg px-4 pb-3">
 					{prompt && onPromptReply ? (
@@ -740,8 +736,6 @@ const EntryView = memo(function EntryView({
 	entry: ChatEntry;
 	isStreaming: boolean;
 }) {
-	const [hovered, setHovered] = useState(false);
-
 	if (entry.type === "error") {
 		return (
 			<div
@@ -762,12 +756,7 @@ const EntryView = memo(function EntryView({
 	const isUser = entry.type === "user";
 
 	return (
-		<div
-			data-entry-id={entry.id}
-			className="mb-4"
-			onMouseEnter={() => setHovered(true)}
-			onMouseLeave={() => setHovered(false)}
-		>
+		<div data-entry-id={entry.id} className="mb-4">
 			<div
 				className={`border-l-2 ${isUser ? "border-success" : "border-purple"} pl-3 text-[12px] leading-[1.7] break-words min-w-0 font-mono`}
 			>
@@ -801,14 +790,9 @@ const EntryView = memo(function EntryView({
 						)}
 					</>
 				) : (
-					<MarkdownContent text={entry.content} />
+					<MarkdownContent text={entry.content} streaming={isStreaming} />
 				)}
 			</div>
-			{!isStreaming && entry.content && (
-				<div className="pl-3 h-4 mt-0.5 flex items-center">
-					{hovered && <CopyTextButton text={entry.content} label="Copy" />}
-				</div>
-			)}
 		</div>
 	);
 });
