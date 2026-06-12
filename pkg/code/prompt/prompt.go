@@ -30,22 +30,22 @@ var sectionProject string
 
 const BoundaryMarker = "--- session context ---"
 
-var staticTemplates = []struct {
+type namedTemplate struct {
 	title string
 	tmpl  *template.Template
-}{
-	{"Project Guidelines", template.Must(template.New("project").Parse(sectionProject))},
-	{"Skills", template.Must(template.New("skills").Parse(sectionSkills))},
-	{"Memory", template.Must(template.New("memory").Parse(sectionMemory))},
 }
 
-var dynamicTemplates = []struct {
-	title string
-	tmpl  *template.Template
-}{
-	{"Session Plan", template.Must(template.New("plan").Parse(sectionPlan))},
-	{"Environment", template.Must(template.New("environment").Parse(sectionEnvironment))},
-}
+var (
+	tmplProject     = namedTemplate{"Project Guidelines", template.Must(template.New("project").Parse(sectionProject))}
+	tmplSkills      = namedTemplate{"Skills", template.Must(template.New("skills").Parse(sectionSkills))}
+	tmplMemory      = namedTemplate{"Memory", template.Must(template.New("memory").Parse(sectionMemory))}
+	tmplPlan        = namedTemplate{"Session Plan", template.Must(template.New("plan").Parse(sectionPlan))}
+	tmplEnvironment = namedTemplate{"Environment", template.Must(template.New("environment").Parse(sectionEnvironment))}
+)
+
+var staticTemplates = []namedTemplate{tmplProject, tmplSkills, tmplMemory}
+
+var dynamicTemplates = []namedTemplate{tmplPlan, tmplEnvironment}
 
 type SectionData struct {
 	PlanMode            bool
@@ -64,10 +64,7 @@ type Section struct {
 	Content string
 }
 
-func renderSections(templates []struct {
-	title string
-	tmpl  *template.Template
-}, data SectionData) []Section {
+func renderSections(templates []namedTemplate, data SectionData) []Section {
 	var sections []Section
 
 	for _, st := range templates {
@@ -85,8 +82,8 @@ func renderSections(templates []struct {
 	return sections
 }
 
-func RenderSections(data SectionData) []Section {
-	return append(renderSections(staticTemplates, data), renderSections(dynamicTemplates, data)...)
+func BuildAgentContext(data SectionData) string {
+	return composeSections(renderSections([]namedTemplate{tmplProject, tmplEnvironment}, data))
 }
 
 func BuildInstructions(base string, data SectionData) string {
@@ -106,10 +103,6 @@ func BuildInstructions(base string, data SectionData) string {
 		return dynamicBlock
 	}
 	return staticBlock + "\n\n" + BoundaryMarker + "\n\n" + dynamicBlock
-}
-
-func ComposeSections(sections ...Section) string {
-	return composeSections(sections)
 }
 
 func composeSections(sections []Section) string {

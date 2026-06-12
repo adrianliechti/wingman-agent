@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,7 +33,10 @@ type Config struct {
 
 	Hooks hook.Hooks
 
-	MaxTurns    int
+	MaxTurns int
+
+	// ToolTimeout is a hard ceiling on every tool call. When zero, tools may
+	// extend the default via tool.Tool.Timeout; negative disables deadlines.
 	ToolTimeout time.Duration
 
 	ContextWindow int
@@ -45,6 +49,17 @@ func (c *Config) Derive() *Config {
 		client: c.client,
 		Model:  c.Model,
 		Effort: c.Effort,
+
+		Hooks: hook.Hooks{
+			PreToolUse:  slices.Clone(c.Hooks.PreToolUse),
+			PostToolUse: slices.Clone(c.Hooks.PostToolUse),
+		},
+
+		MaxTurns:    c.MaxTurns,
+		ToolTimeout: c.ToolTimeout,
+
+		ContextWindow: c.ContextWindow,
+		ReserveTokens: c.ReserveTokens,
 	}
 }
 

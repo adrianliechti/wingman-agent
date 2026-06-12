@@ -371,13 +371,13 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		for _, want := range []string{"f000.tmp", "f001.tmp", "f002.tmp"} {
+		for _, want := range []string{"f119.tmp", "f118.tmp", "f117.tmp"} {
 			if !strings.Contains(result, want) {
-				t.Errorf("expected oldest file %s in result, got: %s", want, result)
+				t.Errorf("expected newest file %s in result, got: %s", want, result)
 			}
 		}
-		if strings.Contains(result, "f118.tmp") || strings.Contains(result, "f119.tmp") {
-			t.Errorf("newest files leaked in despite limit, got: %s", result)
+		if strings.Contains(result, "f000.tmp") || strings.Contains(result, "f001.tmp") {
+			t.Errorf("oldest files leaked in despite limit, got: %s", result)
 		}
 		if !strings.Contains(result, "(Results are truncated. Consider using a more specific path or pattern.)") {
 			t.Errorf("expected truncation notice, got: %s", result)

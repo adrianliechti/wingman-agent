@@ -53,9 +53,8 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 			}
 		}()
 
-		turns := 0
+		turns := 1
 		for {
-			turns++
 			if maxTurns > 0 && turns > maxTurns {
 				yield(Message{}, ErrMaxTurnsExceeded)
 				a.endRun()
@@ -143,6 +142,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 			for _, in := range queued {
 				a.Messages = append(a.Messages, userMessage(in))
 			}
+			turns += len(queued)
 
 			if a.shouldCompactProactively(resp.usage.InputTokens) {
 				a.compactMessages(ctx, false)
@@ -280,7 +280,12 @@ func toolResultMessage(tc ToolCall, result string) Message {
 }
 
 func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool.Tool) string {
+	t := findTool(tc.Name, tools)
+
 	timeout := a.ToolTimeout
+	if timeout == 0 && t != nil {
+		timeout = t.Timeout
+	}
 	if timeout == 0 {
 		timeout = DefaultToolTimeout
 	}
@@ -309,7 +314,7 @@ func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool
 	}
 
 	if result == "" {
-		result = a.executeTool(ctx, tc, tools)
+		result = a.executeTool(ctx, tc, t)
 	}
 
 	for _, h := range a.Hooks.PostToolUse {
@@ -326,9 +331,7 @@ func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool
 	return result
 }
 
-func (a *Agent) executeTool(ctx context.Context, tc ToolCall, tools []tool.Tool) string {
-	t := findTool(tc.Name, tools)
-
+func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool) string {
 	if t == nil {
 		return fmt.Sprintf("error: unknown tool %s", tc.Name)
 	}

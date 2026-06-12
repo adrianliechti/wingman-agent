@@ -10,16 +10,40 @@ import (
 	"runtime"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
 const (
 	defaultTimeout = 120
-	maxLines       = 2000
-	maxBytes       = 50 * 1024
+	maxOutputBytes = 16 * 1024 * 1024
 )
+
+var errCommandTimeout = errors.New("command timeout")
+
+type cappedBuffer struct {
+	buf     bytes.Buffer
+	dropped int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if remaining := maxOutputBytes - b.buf.Len(); remaining > 0 {
+		n := min(len(p), remaining)
+		b.buf.Write(p[:n])
+		b.dropped += len(p) - n
+	} else {
+		b.dropped += len(p)
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) result() string {
+	out := b.buf.String()
+	if b.dropped > 0 {
+		out += fmt.Sprintf("\n\n[output capped at %dMB; %d further bytes dropped]", maxOutputBytes/(1024*1024), b.dropped)
+	}
+	return out
+}
 
 func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 	description := strings.Join([]string{
@@ -40,6 +64,7 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 		Name:        "shell",
 		Description: description,
 		Effect:      ClassifyEffect,
+		Timeout:     15 * time.Minute,
 
 		Parameters: map[string]any{
 			"type": "object",
@@ -94,31 +119,38 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	ctx, cancel := context.WithTimeoutCause(ctx, time.Duration(timeout)*time.Second, errCommandTimeout)
 	defer cancel()
 
 	cmd := buildCommand(ctx, command, workDir)
 
-	var output bytes.Buffer
+	var output cappedBuffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 
 	runErr := cmd.Run()
+	result := output.result()
 
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("command timed out after %d seconds", timeout)
+		notice := fmt.Sprintf("Command timed out after %d seconds", timeout)
+		if !errors.Is(context.Cause(ctx), errCommandTimeout) {
+			notice = "Command aborted: the tool call deadline expired before the command finished"
+		}
+		if result == "" {
+			return notice, nil
+		}
+		return result + "\n\n" + notice, nil
 	}
 
-	truncated := truncateOutput(output.String())
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
-			truncated += fmt.Sprintf("\n\nCommand exited with code %d", exitErr.ExitCode())
+			result += fmt.Sprintf("\n\nCommand exited with code %d", exitErr.ExitCode())
 		} else {
-			truncated += fmt.Sprintf("\n\nCommand failed to run: %v", runErr)
+			result += fmt.Sprintf("\n\nCommand failed to run: %v", runErr)
 		}
 	}
-	return truncated, nil
+	return result, nil
 }
 func buildCommand(ctx context.Context, command, workingDir string) *exec.Cmd {
 	var cmd *exec.Cmd
@@ -154,55 +186,4 @@ func findPowerShell() string {
 		return ps
 	}
 	return "powershell"
-}
-
-func truncateOutput(output string) string {
-	totalLines := strings.Count(output, "\n") + 1
-	totalBytes := len(output)
-
-	if totalLines <= maxLines && totalBytes <= maxBytes {
-		return output
-	}
-
-	lines := strings.Split(output, "\n")
-	if len(lines) > maxLines {
-		head := maxLines / 2
-		tail := maxLines - head
-		elided := len(lines) - head - tail
-		lines = append(append(append([]string{}, lines[:head]...),
-			fmt.Sprintf("... [%d lines elided] ...", elided)),
-			lines[len(lines)-tail:]...)
-	}
-
-	truncated := strings.Join(lines, "\n")
-	if len(truncated) > maxBytes {
-		half := maxBytes / 2
-		head := truncated[:utf8BoundaryDown(truncated, half)]
-		tail := truncated[utf8BoundaryUp(truncated, len(truncated)-half):]
-		truncated = head + "\n... [bytes elided] ...\n" + tail
-	}
-
-	notice := fmt.Sprintf("[truncated %d→%d lines, %dKB→%dKB; head+tail elided]\n", totalLines, strings.Count(truncated, "\n")+1, totalBytes/1024, len(truncated)/1024)
-
-	return notice + truncated
-}
-
-func utf8BoundaryDown(s string, i int) int {
-	if i >= len(s) {
-		return len(s)
-	}
-	for i > 0 && !utf8.RuneStart(s[i]) {
-		i--
-	}
-	return i
-}
-
-func utf8BoundaryUp(s string, i int) int {
-	if i <= 0 {
-		return 0
-	}
-	for i < len(s) && !utf8.RuneStart(s[i]) {
-		i++
-	}
-	return i
 }

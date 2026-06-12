@@ -8,6 +8,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 const MaxBytes = 100 * 1024
@@ -30,7 +31,7 @@ func New(scratchDir string) hook.PostToolUse {
 			return result, nil
 		}
 		path := writeScratch(scratchDir, call.Name, result)
-		return formatPersisted(len(result), path, result[:previewBytes]), nil
+		return formatPersisted(result, path), nil
 	}
 }
 
@@ -51,14 +52,18 @@ func writeScratch(scratchDir, toolName, content string) string {
 	return f.Name()
 }
 
-func formatPersisted(totalBytes int, scratchPath, preview string) string {
+func formatPersisted(result, scratchPath string) string {
+	head := text.HeadBytes(result, previewBytes)
+	tail := text.TailBytes(result, previewBytes)
+
 	var b strings.Builder
 	b.WriteString("<persisted-output>\n")
-	fmt.Fprintf(&b, "Output was %d bytes — too large for inline.", totalBytes)
+	fmt.Fprintf(&b, "Output was %d bytes — too large for inline.", len(result))
 	if scratchPath != "" {
 		fmt.Fprintf(&b, " Full output saved to: %s", scratchPath)
 	}
-	fmt.Fprintf(&b, "\n\nPreview (first %d bytes):\n\n%s", len(preview), preview)
+	fmt.Fprintf(&b, "\n\nPreview (first %d bytes):\n\n%s", len(head), head)
+	fmt.Fprintf(&b, "\n\n[...]\n\nPreview (last %d bytes):\n\n%s", len(tail), tail)
 	if scratchPath != "" {
 		b.WriteString("\n\nUse `read` on the path above to retrieve specific ranges.")
 	}

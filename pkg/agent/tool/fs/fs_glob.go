@@ -26,7 +26,7 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 		Description: strings.Join([]string{
 			"- Fast file pattern matching tool that works with any codebase size.",
 			"- Supports glob patterns like `**/*.js` or `src/**/*.ts`.",
-			"- Returns matching file paths sorted by modification time (oldest first).",
+			"- Returns matching file paths sorted by modification time (newest first).",
 			"- Use this tool when you need to find files by name patterns. Use `grep` for content/symbols.",
 			"- Symlinks and version-control directories (`.git`, `.svn`, …) are skipped. All other files (including dotfiles) are listed; exclude them with a more specific pattern.",
 			"- For open-ended searches requiring multiple rounds, use the `agent` tool.",
@@ -110,7 +110,7 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			}
 
 			slices.SortFunc(results, func(a, b fileResult) int {
-				return cmp.Or(a.modTime.Compare(b.modTime), cmp.Compare(a.path, b.path))
+				return cmp.Or(b.modTime.Compare(a.modTime), cmp.Compare(a.path, b.path))
 			})
 
 			end := totalMatches

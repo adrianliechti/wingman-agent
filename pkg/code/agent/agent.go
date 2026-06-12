@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -55,7 +56,7 @@ type sessionState struct {
 	modelID  string
 	effortID string
 
-	planMode  bool
+	planMode  atomic.Bool
 	baseTools []tool.Tool
 
 	projectInstructionsMu     sync.Mutex
@@ -343,7 +344,7 @@ func (a *Agent) Modes(sessionID string) ([]code.Mode, string) {
 	out := make([]code.Mode, len(wingmanModes))
 	copy(out, wingmanModes)
 	current := "agent"
-	if s := a.session(sessionID); s != nil && s.planMode {
+	if s := a.session(sessionID); s != nil && s.planMode.Load() {
 		current = "plan"
 	}
 	return out, current
@@ -360,7 +361,7 @@ func (a *Agent) SetMode(_ context.Context, sessionID, modeID string) error {
 		return fmt.Errorf("unknown mode %q", modeID)
 	}
 	if s := a.session(sessionID); s != nil {
-		s.planMode = plan
+		s.planMode.Store(plan)
 	}
 	return nil
 }
@@ -421,7 +422,7 @@ func (a *Agent) buildSession() *sessionState {
 		webfetch.Tools(),
 		websearch.Tools(),
 		ask.Tools(elicit),
-		subagent.Tools(sessionCfg),
+		subagent.Tools(sessionCfg, s.subagentContext),
 	)
 	return s
 }
@@ -480,7 +481,7 @@ func (s *sessionState) tools() []tool.Tool {
 	mcpTools, lspTools := s.parent.workspace.ManagedTools()
 	tools = append(tools, mcpTools...)
 	tools = append(tools, lspTools...)
-	if s.planMode {
+	if s.planMode.Load() {
 		tools = planModeTools(tools)
 	}
 	slices.SortStableFunc(tools, func(a, b tool.Tool) int { return cmp.Compare(a.Name, b.Name) })
@@ -517,6 +518,10 @@ func (s *sessionState) instructions() string {
 	return BuildInstructions(s.instructionsData())
 }
 
+func (s *sessionState) subagentContext() string {
+	return prompt.BuildAgentContext(s.instructionsData())
+}
+
 func BuildInstructions(data prompt.SectionData) string {
 	base := prompt.Instructions
 	if data.PlanMode {
@@ -528,7 +533,7 @@ func BuildInstructions(data prompt.SectionData) string {
 func (s *sessionState) instructionsData() prompt.SectionData {
 	ws := s.parent.workspace
 	return prompt.SectionData{
-		PlanMode:            s.planMode,
+		PlanMode:            s.planMode.Load(),
 		Date:                time.Now().Format("January 2, 2006"),
 		OS:                  runtime.GOOS,
 		Arch:                runtime.GOARCH,

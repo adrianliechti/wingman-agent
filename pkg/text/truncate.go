@@ -26,3 +26,24 @@ func TruncateHead(s string, maxBytes int) string {
 func marker(removed int) string {
 	return fmt.Sprintf("…%d chars truncated…", removed)
 }
+
+func HeadBytes(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+func TailBytes(s string, n int) string {
+	i := len(s) - n
+	if i <= 0 {
+		return s
+	}
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return s[i:]
+}

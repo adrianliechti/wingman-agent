@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"time"
 )
 
 type Effect string
@@ -28,6 +29,11 @@ type Tool struct {
 	Execute     func(ctx context.Context, args map[string]any) (string, error)
 	Hidden      bool
 	Effect      func(args map[string]any) Effect
+
+	// Timeout replaces the harness default tool timeout for this tool.
+	// An explicitly configured Config.ToolTimeout takes precedence; negative
+	// values disable the deadline.
+	Timeout time.Duration
 }
 
 type ToolCall struct {

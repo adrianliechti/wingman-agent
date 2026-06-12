@@ -150,14 +150,16 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 	cfg := c.config.AgentConfig.Derive()
 	cfg.Instructions = func() string { return c.buildInstructions(name) }
 
-	scratchDir := filepath.Join(workDir, ".scratch")
-	_ = os.MkdirAll(scratchDir, 0755)
+	scratchDir, err := os.MkdirTemp("", "claw-scratch-")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create scratch directory for agent %q: %w", name, err)
+	}
 	cfg.Hooks.PostToolUse = append(cfg.Hooks.PostToolUse,
 		truncation.New(scratchDir),
 	)
 
 	agentTools := slices.Concat(
-		fs.Tools(root, nil),
+		fs.Tools(root, &fs.Options{AllowedReadRoots: []string{scratchDir}}),
 		shell.Tools(workDir, nil),
 		c.config.Tools,
 		schedule.Tools(c.config.Memory.AgentDir(name)),
@@ -175,7 +177,7 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 		agentTools = append(agentTools, manage.Tools(c, c.config.Memory)...)
 	}
 
-	agentTools = append(agentTools, subagent.Tools(cfg)...)
+	agentTools = append(agentTools, subagent.Tools(cfg, nil)...)
 
 	cfg.Tools = func() []tool.Tool { return agentTools }
 

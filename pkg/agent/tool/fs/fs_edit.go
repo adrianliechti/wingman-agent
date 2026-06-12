@@ -24,17 +24,32 @@ func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 			"- Use the smallest old_string that's clearly unique — usually 2-4 adjacent lines is sufficient.",
 			"- Prefer `write` for new files. An empty `old_string` also creates a new file (or replaces an empty one); non-empty files reject empty `old_string`.",
 			"- Use `replace_all` for renaming a symbol across a file or other intentional file-wide replacements.",
+			"- For several independent changes to the same file, pass `edits` (an array of {old_string, new_string, replace_all}) instead of making one call per change. Edits apply in order — later edits see the result of earlier ones — and the call is atomic: if any edit fails, nothing is written.",
 		}, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"file_path":   map[string]any{"type": "string", "description": "The absolute path to the file to modify."},
-				"old_string":  map[string]any{"type": "string", "description": "The text to replace. Must be unique unless replace_all=true. Use an empty string only to create a new file or replace an empty file."},
-				"new_string":  map[string]any{"type": "string", "description": "The text to replace it with (must be different from old_string)."},
+				"old_string":  map[string]any{"type": "string", "description": "The text to replace. Must be unique unless replace_all=true. Use an empty string only to create a new file or replace an empty file. Omit when using edits."},
+				"new_string":  map[string]any{"type": "string", "description": "The text to replace it with (must be different from old_string). Omit when using edits."},
 				"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences of old_string (default false).", "default": false},
+				"edits": map[string]any{
+					"type":        "array",
+					"description": "Multiple replacements applied in order in a single atomic call. Use instead of old_string/new_string.",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"old_string":  map[string]any{"type": "string", "description": "The text to replace. Must be unique unless replace_all=true."},
+							"new_string":  map[string]any{"type": "string", "description": "The text to replace it with (must be different from old_string)."},
+							"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences of old_string (default false).", "default": false},
+						},
+						"required":             []string{"old_string", "new_string"},
+						"additionalProperties": false,
+					},
+				},
 			},
-			"required":             []string{"file_path", "old_string", "new_string"},
+			"required":             []string{"file_path"},
 			"additionalProperties": false,
 		},
 
@@ -51,20 +66,9 @@ func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 				return "", err
 			}
 
-			oldText, ok := args["old_string"].(string)
-
-			if !ok {
-				return "", fmt.Errorf("old_string is required")
-			}
-
-			newText, ok := args["new_string"].(string)
-
-			if !ok {
-				return "", fmt.Errorf("new_string is required")
-			}
-
-			if oldText == newText {
-				return "", fmt.Errorf("no changes made to %s. old_string and new_string are identical", pathArg)
+			ops, err := parseEditOps(args)
+			if err != nil {
+				return "", err
 			}
 
 			info, err := statFileTarget(root, target)
@@ -76,7 +80,7 @@ func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 				}
 			case !os.IsNotExist(err):
 				return "", fmt.Errorf("stat file %q: %w", pathArg, err)
-			case oldText != "":
+			case ops[0].oldText != "":
 				return "", fmt.Errorf("cannot edit %s: file does not exist", pathArg)
 			}
 
@@ -95,77 +99,16 @@ func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 			bom, content := stripBom(string(contentBytes))
 			originalEnding := detectLineEnding(content)
 			normalizedContent := normalizeToLF(content)
-			normalizedOldText := normalizeToLF(oldText)
-			normalizedNewText := normalizeToLF(newText)
 
-			if oldText == "" {
-				if strings.TrimSpace(normalizedContent) != "" {
-					return "", fmt.Errorf("cannot create or replace empty file %s: file already has content", pathArg)
-				}
-
-				finalContent := bom + restoreLineEndings(normalizedNewText, originalEnding)
-				if err := writeFileTarget(root, target, finalContent); err != nil {
-					return "", fmt.Errorf("write file %q: %w", pathArg, err)
-				}
-
-				diff := generateDiffString("", normalizedNewText)
-				return fmt.Sprintf("Successfully replaced text in %s.\n\n%s", pathArg, diff), nil
-			}
-
-			replaceAll := false
-			if ra, ok := args["replace_all"].(bool); ok {
-				replaceAll = ra
-			}
-
-			actualOldText := findActualEditString(normalizedContent, normalizedOldText)
-			actualNewText := preserveEditQuoteStyle(normalizedOldText, actualOldText, normalizedNewText)
-
-			matchResult := fuzzyFindText(normalizedContent, actualOldText)
-
-			if !matchResult.found {
-				preview := normalizedContent
-				if len(preview) > 200 {
-					preview = preview[:200] + "..."
-				}
-				return "", fmt.Errorf("could not find old_string in %s. Make sure it matches exactly (including whitespace and newlines). File starts with:\n%s", pathArg, preview)
-			}
-
-			fuzzyContent := normalizeForFuzzyMatch(normalizedContent)
-			fuzzyOldText := normalizeForFuzzyMatch(actualOldText)
-			occurrences := strings.Count(fuzzyContent, fuzzyOldText)
-
-			if occurrences > 1 && !replaceAll {
-				return "", fmt.Errorf("found %d occurrences of the text in %s. The text must be unique — provide more context to make it unique, or set replace_all=true to replace all occurrences", occurrences, pathArg)
-			}
-
-			var newContent string
-
-			if replaceAll {
-				if matchResult.usedFuzzyMatch {
-					if strings.Contains(normalizeForFuzzyMatch(actualNewText), fuzzyOldText) {
-						return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
+			newContent := normalizedContent
+			for i, op := range ops {
+				newContent, err = applyEditOp(newContent, op, pathArg)
+				if err != nil {
+					if len(ops) > 1 {
+						return "", fmt.Errorf("edits[%d]: %w (no edits were applied)", i, err)
 					}
-					newContent = normalizedContent
-					for {
-						mr := fuzzyFindText(newContent, actualOldText)
-						if !mr.found {
-							break
-						}
-						next := newContent[:mr.index] + actualNewText + newContent[mr.index+mr.matchLength:]
-						if next == newContent {
-							return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
-						}
-						newContent = next
-					}
-				} else {
-					newContent = strings.ReplaceAll(normalizedContent, actualOldText, actualNewText)
+					return "", err
 				}
-			} else {
-				newContent = normalizedContent[:matchResult.index] + actualNewText + normalizedContent[matchResult.index+matchResult.matchLength:]
-			}
-
-			if normalizedContent == newContent {
-				return "", fmt.Errorf("no changes made to %s. The replacement produced identical content", pathArg)
 			}
 
 			finalContent := bom + restoreLineEndings(newContent, originalEnding)
@@ -176,9 +119,145 @@ func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 
 			diff := generateDiffString(normalizedContent, newContent)
 
+			if len(ops) > 1 {
+				return fmt.Sprintf("Successfully applied %d edits to %s.\n\n%s", len(ops), pathArg, diff), nil
+			}
 			return fmt.Sprintf("Successfully replaced text in %s.\n\n%s", pathArg, diff), nil
 		},
 	}
+}
+
+type editOp struct {
+	oldText    string
+	newText    string
+	replaceAll bool
+}
+
+func parseEditOps(args map[string]any) ([]editOp, error) {
+	rawEdits := args["edits"]
+
+	if rawEdits == nil {
+		op, err := newEditOp(args)
+		if err != nil {
+			return nil, err
+		}
+		return []editOp{op}, nil
+	}
+
+	_, hasOld := args["old_string"].(string)
+	_, hasNew := args["new_string"].(string)
+	if hasOld || hasNew {
+		return nil, fmt.Errorf("provide either edits or old_string/new_string, not both")
+	}
+	if replaceAll, _ := args["replace_all"].(bool); replaceAll {
+		return nil, fmt.Errorf("replace_all cannot be combined with edits; set it per edit entry instead")
+	}
+
+	list, ok := rawEdits.([]any)
+	if !ok || len(list) == 0 {
+		return nil, fmt.Errorf("edits must be a non-empty array of {old_string, new_string} objects")
+	}
+
+	ops := make([]editOp, 0, len(list))
+	for i, item := range list {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("edits[%d] must be an object with old_string and new_string", i)
+		}
+		op, err := newEditOp(entry)
+		if err != nil {
+			return nil, fmt.Errorf("edits[%d]: %w", i, err)
+		}
+		ops = append(ops, op)
+	}
+	return ops, nil
+}
+
+func newEditOp(entry map[string]any) (editOp, error) {
+	oldText, ok := entry["old_string"].(string)
+	if !ok {
+		return editOp{}, fmt.Errorf("old_string is required")
+	}
+
+	newText, ok := entry["new_string"].(string)
+	if !ok {
+		return editOp{}, fmt.Errorf("new_string is required")
+	}
+
+	if oldText == newText {
+		return editOp{}, fmt.Errorf("old_string and new_string are identical")
+	}
+
+	replaceAll, _ := entry["replace_all"].(bool)
+
+	return editOp{
+		oldText:    normalizeToLF(oldText),
+		newText:    normalizeToLF(newText),
+		replaceAll: replaceAll,
+	}, nil
+}
+
+func applyEditOp(content string, op editOp, pathArg string) (string, error) {
+	if op.oldText == "" {
+		if strings.TrimSpace(content) != "" {
+			return "", fmt.Errorf("cannot create or replace empty file %s: file already has content", pathArg)
+		}
+		return op.newText, nil
+	}
+
+	actualOldText := findActualEditString(content, op.oldText)
+	actualNewText := preserveEditQuoteStyle(op.oldText, actualOldText, op.newText)
+
+	matchResult := fuzzyFindText(content, actualOldText)
+
+	if !matchResult.found {
+		preview := content
+		if len(preview) > 200 {
+			preview = preview[:200] + "..."
+		}
+		return "", fmt.Errorf("could not find old_string in %s. Make sure it matches exactly (including whitespace and newlines). File starts with:\n%s", pathArg, preview)
+	}
+
+	occurrences := strings.Count(content, actualOldText)
+	if matchResult.usedFuzzyMatch {
+		occurrences = strings.Count(normalizeForFuzzyMatch(content), normalizeForFuzzyMatch(actualOldText))
+	}
+
+	if occurrences > 1 && !op.replaceAll {
+		return "", fmt.Errorf("found %d occurrences of the text in %s. The text must be unique — provide more context to make it unique, or set replace_all=true to replace all occurrences", occurrences, pathArg)
+	}
+
+	var newContent string
+
+	if op.replaceAll {
+		if matchResult.usedFuzzyMatch {
+			if strings.Contains(normalizeForFuzzyMatch(actualNewText), normalizeForFuzzyMatch(actualOldText)) {
+				return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
+			}
+			newContent = content
+			for {
+				mr := fuzzyFindText(newContent, actualOldText)
+				if !mr.found {
+					break
+				}
+				next := newContent[:mr.index] + actualNewText + newContent[mr.index+mr.matchLength:]
+				if next == newContent {
+					return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
+				}
+				newContent = next
+			}
+		} else {
+			newContent = strings.ReplaceAll(content, actualOldText, actualNewText)
+		}
+	} else {
+		newContent = content[:matchResult.index] + actualNewText + content[matchResult.index+matchResult.matchLength:]
+	}
+
+	if content == newContent {
+		return "", fmt.Errorf("no changes made to %s. The replacement produced identical content", pathArg)
+	}
+
+	return newContent, nil
 }
 
 func writeRootFile(root *os.Root, path, content string) (err error) {

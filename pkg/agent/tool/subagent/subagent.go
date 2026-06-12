@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -97,7 +98,7 @@ var availableTypes = []string{
 	"legacy-analyst",
 }
 
-func Tools(cfg *agent.Config) []tool.Tool {
+func Tools(cfg *agent.Config, sharedContext func() string) []tool.Tool {
 	description := strings.Join([]string{
 		"Launch a new agent to handle complex, multi-step tasks autonomously. The agent runs in a separate context and returns one final message.",
 		"",
@@ -135,6 +136,7 @@ func Tools(cfg *agent.Config) []tool.Tool {
 		Name:        "agent",
 		Description: description,
 		Effect:      classifyEffect,
+		Timeout:     20 * time.Minute,
 
 		Parameters: map[string]any{
 			"type": "object",
@@ -177,10 +179,15 @@ func Tools(cfg *agent.Config) []tool.Tool {
 				return "", fmt.Errorf("unknown agent_type %q (available: %s)", subagentName, strings.Join(availableTypes, ", "))
 			}
 
-			subcfg := cfg.Derive()
-			subcfg.Instructions = func() string { return typ.Instructions }
+			instructions := typ.Instructions
+			if sharedContext != nil {
+				if c := strings.TrimSpace(sharedContext()); c != "" {
+					instructions += "\n\n" + c
+				}
+			}
 
-			subcfg.Hooks.PostToolUse = cfg.Hooks.PostToolUse
+			subcfg := cfg.Derive()
+			subcfg.Instructions = func() string { return instructions }
 
 			subcfg.Tools = func() []tool.Tool {
 				if cfg.Tools == nil {

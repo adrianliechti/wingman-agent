@@ -112,6 +112,13 @@ func (a *Agent) removeOrphanedToolMessages() {
 func (a *Agent) compactMessages(ctx context.Context, truncateOnFailure bool) {
 	summaryMessages, recentMessages := splitMessagesForRecoverySummary(a.Messages)
 
+	if len(summaryMessages) == 0 && truncateOnFailure {
+		summaryMessages, recentMessages = a.Messages, nil
+		if idx := lastVisibleUserIndex(a.Messages); idx >= 0 {
+			recentMessages = []Message{a.Messages[idx]}
+		}
+	}
+
 	summary, err := a.summarizeMessages(ctx, summaryMessages)
 	if err != nil || summary == "" {
 		if truncateOnFailure {
@@ -130,6 +137,7 @@ func (a *Agent) compactMessages(ctx context.Context, truncateOnFailure bool) {
 }
 
 const maxSummarizeBytes = 100 * 1024
+const maxRecentBytes = 64 * 1024
 const minRecoveryMessagesToPreserve = 12
 
 func splitMessagesForRecoverySummary(messages []Message) ([]Message, []Message) {
@@ -137,22 +145,53 @@ func splitMessagesForRecoverySummary(messages []Message) ([]Message, []Message) 
 		return nil, nil
 	}
 
-	split := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == RoleUser && !messages[i].Hidden {
-			split = i
+	userIdx := lastVisibleUserIndex(messages)
+
+	split := max(userIdx, 0)
+	total := 0
+	for i := len(messages) - 1; i > userIdx; i-- {
+		total += messageBytes(messages[i])
+		if total > maxRecentBytes && len(messages)-i > minRecoveryMessagesToPreserve {
+			split = i + 1
 			break
 		}
 	}
 
-	if split < 0 {
-		split = len(messages) - minRecoveryMessagesToPreserve
-		if split <= 0 {
-			return messages, nil
-		}
+	recent := messages[split:]
+	if userIdx >= 0 && split > userIdx {
+		recent = append([]Message{messages[userIdx]}, recent...)
 	}
 
-	return messages[:split], messages[split:]
+	return messages[:split], recent
+}
+
+func lastVisibleUserIndex(messages []Message) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == RoleUser && !messages[i].Hidden {
+			return i
+		}
+	}
+	return -1
+}
+
+func messageBytes(m Message) int {
+	total := 0
+	for _, c := range m.Content {
+		total += len(c.Text) + len(c.Refusal)
+		if c.File != nil {
+			total += len(c.File.Data)
+		}
+		if c.ToolCall != nil {
+			total += len(c.ToolCall.Args)
+		}
+		if c.ToolResult != nil {
+			total += len(c.ToolResult.Content)
+		}
+		if c.Reasoning != nil {
+			total += len(c.Reasoning.Summary)
+		}
+	}
+	return total
 }
 
 func (a *Agent) summarizeMessages(ctx context.Context, messages []Message) (string, error) {
@@ -225,6 +264,10 @@ func recoverySummaryTranscript(messages []Message) string {
 
 			if c.Refusal != "" {
 				fmt.Fprintf(&mb, "[%s]: %s\n\n", m.Role, text.TruncateHead(c.Refusal, 2000))
+			}
+
+			if c.File != nil {
+				fmt.Fprintf(&mb, "[%s]: [file attachment, %d bytes]\n\n", m.Role, len(c.File.Data))
 			}
 
 			if c.ToolCall != nil {

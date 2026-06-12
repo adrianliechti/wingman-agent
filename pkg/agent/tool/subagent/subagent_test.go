@@ -11,7 +11,7 @@ import (
 )
 
 func TestAgentToolSchemaIncludesTypedSubagentParameters(t *testing.T) {
-	agentTool := Tools(&agent.Config{})[0]
+	agentTool := Tools(&agent.Config{}, nil)[0]
 
 	required, ok := agentTool.Parameters["required"].([]string)
 	if !ok {
@@ -54,7 +54,7 @@ func TestAgentToolSchemaIncludesTypedSubagentParameters(t *testing.T) {
 }
 
 func TestAgentToolRejectsInvalidExecuteInputs(t *testing.T) {
-	agentTool := Tools(&agent.Config{})[0]
+	agentTool := Tools(&agent.Config{}, nil)[0]
 
 	cases := []struct {
 		name    string
@@ -80,7 +80,7 @@ func TestAgentToolRejectsInvalidExecuteInputs(t *testing.T) {
 }
 
 func TestAgentToolClassifiesEffectByAgentType(t *testing.T) {
-	agentTool := Tools(&agent.Config{})[0]
+	agentTool := Tools(&agent.Config{}, nil)[0]
 
 	tests := []struct {
 		name string

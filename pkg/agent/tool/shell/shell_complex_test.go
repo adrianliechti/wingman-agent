@@ -164,30 +164,30 @@ EOF`)
 	}
 }
 
-func TestComplex_LargeOutputTruncation(t *testing.T) {
-	result := runShell(t, `for i in $(seq 1 3000); do echo "line $i"; done`)
-	if !strings.Contains(result, "truncated") || !strings.Contains(result, "head+tail elided") {
-		t.Errorf("expected head+tail truncation notice, got length: %d", len(result))
+func TestComplex_LargeOutputPassedThrough(t *testing.T) {
+	result := runShell(t, `seq 1 25000 | sed 's/^/line /'`)
+	if !strings.Contains(result, "line 1\n") || !strings.Contains(result, "line 12500\n") || !strings.Contains(result, "line 25000") {
+		t.Errorf("expected complete output, got length: %d", len(result))
 	}
-	if !strings.Contains(result, "line 3000") {
-		t.Errorf("expected last lines preserved, got tail: %q", result[len(result)-100:])
-	}
-	if !strings.Contains(result, "line 1\n") {
-		t.Errorf("expected first lines preserved (head), got head: %q", result[:200])
+	if strings.Contains(result, "elided") {
+		t.Errorf("expected no truncation, got truncation markers")
 	}
 }
 
 func TestComplex_Timeout(t *testing.T) {
 	tmpDir := t.TempDir()
-	_, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
-		"command": "sleep 30",
+	result, err := Tools(tmpDir, nil)[0].Execute(context.Background(), map[string]any{
+		"command": "echo partial; sleep 30",
 		"timeout": float64(1),
 	})
-	if err == nil {
-		t.Fatal("expected timeout error")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Errorf("expected timeout message, got: %v", err)
+	if !strings.Contains(result, "timed out") {
+		t.Errorf("expected timeout message, got: %q", result)
+	}
+	if !strings.Contains(result, "partial") {
+		t.Errorf("expected partial output preserved, got: %q", result)
 	}
 }
 

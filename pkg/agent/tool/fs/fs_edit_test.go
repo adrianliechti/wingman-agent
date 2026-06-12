@@ -354,4 +354,70 @@ func TestEditTool(t *testing.T) {
 		}
 	})
 
+	t.Run("batched edits apply in order", func(t *testing.T) {
+		testFile := filepath.Join(tmpDir, "batched.txt")
+		os.WriteFile(testFile, []byte("alpha\nbeta\ngamma\n"), 0644)
+
+		result, err := editTool.Execute(context.Background(), map[string]any{
+			"file_path": "batched.txt",
+			"edits": []any{
+				map[string]any{"old_string": "alpha", "new_string": "one"},
+				map[string]any{"old_string": "beta", "new_string": "two"},
+				map[string]any{"old_string": "one\ntwo", "new_string": "one\ntwo\nthree"},
+			},
+		})
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(result, "3 edits") {
+			t.Errorf("expected batched success message, got: %s", result)
+		}
+
+		content, _ := os.ReadFile(testFile)
+		if string(content) != "one\ntwo\nthree\ngamma\n" {
+			t.Errorf("unexpected content: %q", content)
+		}
+	})
+
+	t.Run("batched edits are atomic on failure", func(t *testing.T) {
+		testFile := filepath.Join(tmpDir, "batched_atomic.txt")
+		os.WriteFile(testFile, []byte("alpha\nbeta\n"), 0644)
+
+		_, err := editTool.Execute(context.Background(), map[string]any{
+			"file_path": "batched_atomic.txt",
+			"edits": []any{
+				map[string]any{"old_string": "alpha", "new_string": "one"},
+				map[string]any{"old_string": "missing", "new_string": "x"},
+			},
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "edits[1]") {
+			t.Fatalf("expected indexed error, got: %v", err)
+		}
+
+		content, _ := os.ReadFile(testFile)
+		if string(content) != "alpha\nbeta\n" {
+			t.Errorf("file modified despite failed batch: %q", content)
+		}
+	})
+
+	t.Run("batched edits reject mixing with old_string", func(t *testing.T) {
+		testFile := filepath.Join(tmpDir, "batched_mixed.txt")
+		os.WriteFile(testFile, []byte("alpha\n"), 0644)
+
+		_, err := editTool.Execute(context.Background(), map[string]any{
+			"file_path":  "batched_mixed.txt",
+			"old_string": "alpha",
+			"new_string": "one",
+			"edits": []any{
+				map[string]any{"old_string": "alpha", "new_string": "one"},
+			},
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "not both") {
+			t.Fatalf("expected mixing error, got: %v", err)
+		}
+	})
+
 }
