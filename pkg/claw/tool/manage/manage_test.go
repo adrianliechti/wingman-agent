@@ -89,8 +89,8 @@ func TestCreateAgentSavesTrimmedTasks(t *testing.T) {
 		t.Fatalf("create_agent failed: %v", err)
 	}
 
-	tasks := schedule.LoadTasks(store.AgentDir("worker"))
-	if len(tasks) != 1 || tasks[0].Prompt != "run" || tasks[0].Schedule != "every 1h" {
-		t.Fatalf("tasks = %#v, want one trimmed task", tasks)
+	tasks, err := schedule.List(store.AgentDir("worker"))
+	if err != nil || len(tasks) != 1 || tasks[0].Prompt != "run" || tasks[0].Schedule != "every 1h" {
+		t.Fatalf("tasks = %#v, %v, want one trimmed task", tasks, err)
 	}
 }

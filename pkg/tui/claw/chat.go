@@ -26,6 +26,10 @@ func (t *TUI) contentWidth() int {
 
 func (t *TUI) renderMessages(messages []agent.Message) {
 	for _, msg := range messages {
+		if msg.Hidden {
+			continue
+		}
+
 		for _, c := range msg.Content {
 			switch {
 			case c.Text != "":

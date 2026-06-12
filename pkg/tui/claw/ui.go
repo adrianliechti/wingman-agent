@@ -2,7 +2,6 @@ package claw
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -21,8 +20,11 @@ func (t *TUI) buildUI() {
 	t.agentList.SetMainTextColor(th.Foreground)
 	t.agentList.SetSelectedTextColor(th.Cyan)
 	t.agentList.SetSelectedBackgroundColor(th.Selection)
-	t.agentList.SetSelectedFunc(func(index int, name string, _ string, _ rune) {
-		t.selectAgent(strings.TrimSpace(name))
+	t.agentList.SetSelectedFunc(func(index int, _ string, _ string, _ rune) {
+		if name := t.agentAt(index); name != "" {
+			t.selectAgent(name)
+		}
+
 		t.app.SetFocus(t.input)
 	})
 

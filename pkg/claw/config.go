@@ -11,7 +11,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/webfetch"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/channel"
-	"github.com/adrianliechti/wingman-agent/pkg/claw/channel/cli"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/memory"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 )
@@ -28,9 +27,16 @@ type Config struct {
 
 	Memory   *memory.Store
 	Channels []channel.Channel
+
+	// Authorize gates inbound messages; nil allows everything.
+	Authorize func(msg channel.Message) bool
 }
 
 func DefaultConfig() (*Config, func(), error) {
+	if os.Getenv("WINGMAN_URL") == "" && os.Getenv("OPENAI_API_KEY") == "" {
+		fmt.Fprintln(os.Stderr, "warning: neither WINGMAN_URL nor OPENAI_API_KEY is set; falling back to http://localhost:8080/v1")
+	}
+
 	agentCfg, err := agent.DefaultConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create config: %w", err)
@@ -62,7 +68,6 @@ func DefaultConfig() (*Config, func(), error) {
 		MCP:           mcpManager,
 		Tools:         tools,
 		Memory:        memoryStore,
-		Channels:      []channel.Channel{cli.New()},
 	}
 
 	cleanup := func() {

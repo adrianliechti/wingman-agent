@@ -2,10 +2,11 @@ package claw
 
 import (
 	"context"
+	"fmt"
 	"strings"
-	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/claw/channel"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
 func (t *TUI) submitInput() {
@@ -16,32 +17,60 @@ func (t *TUI) submitInput() {
 		return
 	}
 
+	if text == "/help" {
+		t.writeHelp()
+		return
+	}
+
 	name := t.selected()
 
 	t.writeFormatted(text, false)
 	t.chatView.ScrollToEnd()
 
 	msg := channel.Message{
-		ChatID:    "cli:" + name,
-		Sender:    "user",
-		Content:   text,
-		Timestamp: time.Now(),
+		Channel:      t.Name(),
+		Conversation: name,
+		Sender:       "user",
+		Agent:        name,
+		Content:      text,
 	}
+
+	t.setBusy(name, 1)
+	t.refreshAgents()
+	t.updateStatusBar()
 
 	go func() {
 		ctx := context.Background()
 		t.handler(ctx, msg)
 
 		t.app.QueueUpdateDraw(func() {
+			t.rerenderChat(name)
+			t.setBusy(name, -1)
+
+			if messages, _, ok := t.claw.AgentState(name); ok && name == t.selected() {
+				t.renderedCount = len(messages)
+			}
+
+			t.refreshAgents()
 			t.updateStatusBar()
 		})
 	}()
 }
 
-func nameFromChatID(chatID string) string {
-	if _, name, ok := strings.Cut(chatID, ":"); ok {
-		return name
+func (t *TUI) writeHelp() {
+	th := theme.Default
+
+	lines := []string{
+		"enter   send message",
+		"tab     cycle focus (input / agents)",
+		"ctrl+c  quit",
+		"/help   show this help",
 	}
 
-	return chatID
+	for _, line := range lines {
+		fmt.Fprintf(t.chatView, "%s[%s]\u2503[-] [%s]%s[-]\n", indent, th.BrBlack, th.BrBlack, line)
+	}
+
+	fmt.Fprintln(t.chatView)
+	t.chatView.ScrollToEnd()
 }

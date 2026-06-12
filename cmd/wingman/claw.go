@@ -20,6 +20,7 @@ func runClaw(ctx context.Context) {
 	if err := c.Init(); err != nil {
 		fatal(err)
 	}
+	defer c.Close()
 
 	cfg.Channels = []channel.Channel{clawtui.New(c)}
 

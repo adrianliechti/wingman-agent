@@ -47,34 +47,63 @@ func TestScheduleToolsExposeEffects(t *testing.T) {
 	}
 }
 
-func TestSaveTasksCreatesAgentDir(t *testing.T) {
+func TestMutateCreatesAgentDir(t *testing.T) {
 	agentDir := filepath.Join(t.TempDir(), "missing", "agent")
 
-	err := SaveTasks(agentDir, []Task{{
-		ID:        "task-1",
-		Prompt:    "run",
-		Schedule:  "every 1h",
-		Status:    "active",
-		CreatedAt: time.Now().UTC(),
-	}})
+	err := Mutate(agentDir, func(tasks []Task) ([]Task, error) {
+		return append(tasks, Task{
+			ID:        "task-1",
+			Prompt:    "run",
+			Schedule:  "every 1h",
+			Status:    "active",
+			CreatedAt: time.Now().UTC(),
+		}), nil
+	})
 	if err != nil {
-		t.Fatalf("SaveTasks failed: %v", err)
+		t.Fatalf("Mutate failed: %v", err)
 	}
 
-	if got := LoadTasks(agentDir); len(got) != 1 || got[0].ID != "task-1" {
-		t.Fatalf("LoadTasks = %#v, want task-1", got)
+	got, err := List(agentDir)
+	if err != nil || len(got) != 1 || got[0].ID != "task-1" {
+		t.Fatalf("List = %#v, %v, want task-1", got, err)
 	}
 }
 
-func TestLoadTasksErrorReportsMalformedYAML(t *testing.T) {
+func TestListReportsMalformedYAML(t *testing.T) {
 	agentDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(agentDir, tasksFile), []byte("tasks: ["), 0644); err != nil {
 		t.Fatalf("write tasks file: %v", err)
 	}
 
-	_, err := LoadTasksError(agentDir)
-	if err == nil {
+	if _, err := List(agentDir); err == nil {
 		t.Fatal("expected malformed YAML error")
+	}
+}
+
+func TestCronTaskFiresWithoutLastRun(t *testing.T) {
+	created := time.Date(2026, 6, 12, 8, 0, 0, 0, time.UTC)
+	task := Task{
+		ID:        "cron-1",
+		Prompt:    "daily standup",
+		Schedule:  "0 9 * * *",
+		Status:    "active",
+		CreatedAt: created,
+	}
+
+	if IsDue(task, created.Add(30*time.Minute)) {
+		t.Fatal("task should not be due before its first cron slot")
+	}
+	if !IsDue(task, created.Add(2*time.Hour)) {
+		t.Fatal("task should be due after its first cron slot passed")
+	}
+
+	lastRun := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+	task.LastRun = &lastRun
+	if IsDue(task, lastRun.Add(2*time.Hour)) {
+		t.Fatal("task should not be due again before the next cron slot")
+	}
+	if !IsDue(task, lastRun.Add(25*time.Hour)) {
+		t.Fatal("task should be due after the next cron slot passed")
 	}
 }
 

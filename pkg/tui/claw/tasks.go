@@ -13,7 +13,7 @@ func (t *TUI) refreshTasks() {
 	th := theme.Default
 	name := t.selected()
 	agentDir := t.claw.AgentDir(name)
-	tasks := schedule.LoadTasks(agentDir)
+	tasks, _ := schedule.List(agentDir)
 
 	t.taskView.Clear()
 	now := time.Now()
@@ -25,8 +25,16 @@ func (t *TUI) refreshTasks() {
 
 	for _, task := range tasks {
 		icon := "[green]\u25cf[-]"
+		if task.Failures > 0 {
+			icon = fmt.Sprintf("[%s]\u25cf[-]", th.Red)
+		}
 		if task.Status == "paused" {
 			icon = fmt.Sprintf("[%s]\u25cb[-]", th.BrBlack)
+		}
+
+		failStr := ""
+		if task.Failures > 0 {
+			failStr = fmt.Sprintf(" [%s]failing x%d[-]", th.Red, task.Failures)
 		}
 
 		next := schedule.NextRun(task, now)
@@ -48,7 +56,7 @@ func (t *TUI) refreshTasks() {
 			prompt = prompt[:77] + "..."
 		}
 
-		fmt.Fprintf(t.taskView, "  %s [%s]%s[-]%s  [%s]%s[-]\n", icon, th.Foreground, humanSchedule(task.Schedule), nextStr, th.BrBlack, prompt)
+		fmt.Fprintf(t.taskView, "  %s [%s]%s[-]%s%s  [%s]%s[-]\n", icon, th.Foreground, humanSchedule(task.Schedule), nextStr, failStr, th.BrBlack, prompt)
 	}
 }
 

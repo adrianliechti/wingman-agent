@@ -24,7 +24,23 @@ func (s *State) Save(path string) error {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("failed to write state: %w", err)
+	}
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return fmt.Errorf("failed to write state: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return fmt.Errorf("failed to write state: %w", err)
+	}
+
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
 		return fmt.Errorf("failed to write state: %w", err)
 	}
 

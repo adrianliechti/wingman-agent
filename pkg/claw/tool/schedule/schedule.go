@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,10 +25,34 @@ type Task struct {
 	Status    string     `yaml:"status"`
 	CreatedAt time.Time  `yaml:"created_at"`
 	LastRun   *time.Time `yaml:"last_run,omitempty"`
+
+	Failures    int        `yaml:"failures,omitempty"`
+	LastAttempt *time.Time `yaml:"last_attempt,omitempty"`
 }
 
 type taskFile struct {
 	Tasks []Task `yaml:"tasks"`
+}
+
+var idParams = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"id": map[string]any{
+			"type":        "string",
+			"description": "Task ID.",
+		},
+	},
+	"required":             []string{"id"},
+	"additionalProperties": false,
+}
+
+func taskID(args map[string]any) (string, error) {
+	id, _ := args["id"].(string)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", fmt.Errorf("id is required")
+	}
+	return id, nil
 }
 
 func Tools(agentDir string) []tool.Tool {
@@ -67,13 +92,10 @@ func Tools(agentDir string) []tool.Tool {
 					return "", err
 				}
 
-				tasks, err := LoadTasksError(agentDir)
+				err = Mutate(agentDir, func(tasks []Task) ([]Task, error) {
+					return append(tasks, task), nil
+				})
 				if err != nil {
-					return "", err
-				}
-				tasks = append(tasks, task)
-
-				if err := SaveTasks(agentDir, tasks); err != nil {
 					return "", err
 				}
 
@@ -90,7 +112,7 @@ func Tools(agentDir string) []tool.Tool {
 				"additionalProperties": false,
 			},
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
-				tasks, err := LoadTasksError(agentDir)
+				tasks, err := List(agentDir)
 				if err != nil {
 					return "", err
 				}
@@ -109,8 +131,15 @@ func Tools(agentDir string) []tool.Tool {
 						nextStr = next.Format(time.RFC3339)
 					}
 
-					fmt.Fprintf(&b, "- [%s] %s (schedule: %s, status: %s, next: %s)\n",
+					fmt.Fprintf(&b, "- [%s] %s (schedule: %s, status: %s, next: %s",
 						t.ID, t.Prompt, t.Schedule, t.Status, nextStr)
+					if t.LastRun != nil {
+						fmt.Fprintf(&b, ", last run: %s", t.LastRun.Format(time.RFC3339))
+					}
+					if t.Failures > 0 {
+						fmt.Fprintf(&b, ", consecutive failures: %d (retrying with backoff)", t.Failures)
+					}
+					b.WriteString(")\n")
 				}
 
 				return b.String(), nil
@@ -120,83 +149,44 @@ func Tools(agentDir string) []tool.Tool {
 			Name:        "pause_task",
 			Description: "Pause a scheduled task by ID.",
 			Effect:      tool.StaticEffect(tool.EffectMutates),
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"id": map[string]any{
-						"type":        "string",
-						"description": "Task ID to pause.",
-					},
-				},
-				"required":             []string{"id"},
-				"additionalProperties": false,
-			},
+			Parameters:  idParams,
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
-				id, _ := args["id"].(string)
-				id = strings.TrimSpace(id)
-				return updateStatus(agentDir, id, "paused")
+				return updateStatus(agentDir, args, "paused")
 			},
 		},
 		{
 			Name:        "resume_task",
 			Description: "Resume a paused task by ID.",
 			Effect:      tool.StaticEffect(tool.EffectMutates),
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"id": map[string]any{
-						"type":        "string",
-						"description": "Task ID to resume.",
-					},
-				},
-				"required":             []string{"id"},
-				"additionalProperties": false,
-			},
+			Parameters:  idParams,
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
-				id, _ := args["id"].(string)
-				id = strings.TrimSpace(id)
-				return updateStatus(agentDir, id, "active")
+				return updateStatus(agentDir, args, "active")
 			},
 		},
 		{
 			Name:        "remove_task",
 			Description: "Remove a scheduled task by ID.",
 			Effect:      tool.StaticEffect(tool.EffectMutates),
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"id": map[string]any{
-						"type":        "string",
-						"description": "Task ID to remove.",
-					},
-				},
-				"required":             []string{"id"},
-				"additionalProperties": false,
-			},
+			Parameters:  idParams,
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
-				id, _ := args["id"].(string)
-				id = strings.TrimSpace(id)
-				if id == "" {
-					return "", fmt.Errorf("id is required")
-				}
-
-				tasks, err := LoadTasksError(agentDir)
+				id, err := taskID(args)
 				if err != nil {
 					return "", err
 				}
-				var kept []Task
 
-				for _, t := range tasks {
-					if t.ID != id {
-						kept = append(kept, t)
+				err = Mutate(agentDir, func(tasks []Task) ([]Task, error) {
+					var kept []Task
+					for _, t := range tasks {
+						if t.ID != id {
+							kept = append(kept, t)
+						}
 					}
-				}
-
-				if len(kept) == len(tasks) {
-					return "", fmt.Errorf("task %s not found", id)
-				}
-
-				if err := SaveTasks(agentDir, kept); err != nil {
+					if len(kept) == len(tasks) {
+						return nil, fmt.Errorf("task %s not found", id)
+					}
+					return kept, nil
+				})
+				if err != nil {
 					return "", err
 				}
 
@@ -207,53 +197,73 @@ func Tools(agentDir string) []tool.Tool {
 			Name:        "run_task",
 			Description: "Run a scheduled task immediately, regardless of its schedule. Useful for testing.",
 			Effect:      tool.StaticEffect(tool.EffectMutates),
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"id": map[string]any{
-						"type":        "string",
-						"description": "Task ID to run now.",
-					},
-				},
-				"required":             []string{"id"},
-				"additionalProperties": false,
-			},
+			Parameters:  idParams,
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
-				id, _ := args["id"].(string)
-				id = strings.TrimSpace(id)
-				if id == "" {
-					return "", fmt.Errorf("id is required")
-				}
-
-				tasks, err := LoadTasksError(agentDir)
+				id, err := taskID(args)
 				if err != nil {
 					return "", err
 				}
 
-				for i := range tasks {
-					if tasks[i].ID == id {
-						now := time.Now()
-						tasks[i].LastRun = &now
-						if err := SaveTasks(agentDir, tasks); err != nil {
-							return "", err
+				var prompt string
+				err = Mutate(agentDir, func(tasks []Task) ([]Task, error) {
+					for i := range tasks {
+						if tasks[i].ID == id {
+							now := time.Now()
+							tasks[i].LastRun = &now
+							prompt = tasks[i].Prompt
+							return tasks, nil
 						}
-
-						return fmt.Sprintf("Task triggered. Execute now:\n\n%s", tasks[i].Prompt), nil
 					}
+					return nil, fmt.Errorf("task %s not found", id)
+				})
+				if err != nil {
+					return "", err
 				}
 
-				return "", fmt.Errorf("task %s not found", id)
+				return fmt.Sprintf("Task triggered. Execute now:\n\n%s", prompt), nil
 			},
 		},
 	}
 }
 
-func LoadTasks(agentDir string) []Task {
-	tasks, _ := LoadTasksError(agentDir)
-	return tasks
+var dirLocks sync.Map
+
+func dirLock(agentDir string) *sync.Mutex {
+	mu, _ := dirLocks.LoadOrStore(filepath.Clean(agentDir), &sync.Mutex{})
+	return mu.(*sync.Mutex)
 }
 
-func LoadTasksError(agentDir string) ([]Task, error) {
+func HasTaskFile(agentDir string) bool {
+	_, err := os.Stat(filepath.Join(agentDir, tasksFile))
+	return err == nil
+}
+
+func List(agentDir string) ([]Task, error) {
+	mu := dirLock(agentDir)
+	mu.Lock()
+	defer mu.Unlock()
+	return loadTasks(agentDir)
+}
+
+func Mutate(agentDir string, fn func([]Task) ([]Task, error)) error {
+	mu := dirLock(agentDir)
+	mu.Lock()
+	defer mu.Unlock()
+
+	tasks, err := loadTasks(agentDir)
+	if err != nil {
+		return err
+	}
+
+	updated, err := fn(tasks)
+	if err != nil {
+		return err
+	}
+
+	return saveTasks(agentDir, updated)
+}
+
+func loadTasks(agentDir string) ([]Task, error) {
 	data, err := os.ReadFile(filepath.Join(agentDir, tasksFile))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -270,7 +280,7 @@ func LoadTasksError(agentDir string) ([]Task, error) {
 	return f.Tasks, nil
 }
 
-func SaveTasks(agentDir string, tasks []Task) error {
+func saveTasks(agentDir string, tasks []Task) error {
 	out, err := yaml.Marshal(taskFile{Tasks: tasks})
 	if err != nil {
 		return err
@@ -280,7 +290,23 @@ func SaveTasks(agentDir string, tasks []Task) error {
 		return err
 	}
 
-	return os.WriteFile(filepath.Join(agentDir, tasksFile), out, 0644)
+	path := filepath.Join(agentDir, tasksFile)
+	tmp, err := os.CreateTemp(agentDir, tasksFile+".tmp-")
+	if err != nil {
+		return err
+	}
+
+	if _, err := tmp.Write(out); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+
+	return os.Rename(tmp.Name(), path)
 }
 
 var cronParser = cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
@@ -336,7 +362,7 @@ func NextRun(t Task, now time.Time) time.Time {
 		}
 		return p.once
 	default:
-		anchor := now
+		anchor := t.CreatedAt
 		if t.LastRun != nil {
 			anchor = *t.LastRun
 		}
@@ -345,6 +371,13 @@ func NextRun(t Task, now time.Time) time.Time {
 }
 
 func IsDue(t Task, now time.Time) bool {
+	if t.Failures > 0 && t.LastAttempt != nil {
+		backoff := min(time.Hour, time.Duration(1<<min(t.Failures, 6))*time.Minute)
+		if now.Before(t.LastAttempt.Add(backoff)) {
+			return false
+		}
+	}
+
 	next := NextRun(t, now)
 	return !next.IsZero() && !next.After(now)
 }
@@ -352,45 +385,6 @@ func IsDue(t Task, now time.Time) bool {
 func IsOneTime(sched string) bool {
 	p, err := parseSchedule(sched)
 	return err == nil && !p.once.IsZero()
-}
-
-func ValidateSchedule(sched string) error {
-	_, err := parseSchedule(sched)
-	return err
-}
-
-func updateStatus(agentDir, id, status string) (string, error) {
-	if id == "" {
-		return "", fmt.Errorf("id is required")
-	}
-
-	tasks, err := LoadTasksError(agentDir)
-	if err != nil {
-		return "", err
-	}
-	found := false
-
-	for i := range tasks {
-		if tasks[i].ID == id {
-			tasks[i].Status = status
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		return "", fmt.Errorf("task %s not found", id)
-	}
-
-	if err := SaveTasks(agentDir, tasks); err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("Task %s %s.", id, status), nil
-}
-
-func newID() string {
-	return uuid.NewString()
 }
 
 func NewTask(prompt, sched string) (Task, error) {
@@ -403,15 +397,37 @@ func NewTask(prompt, sched string) (Task, error) {
 	if sched == "" {
 		return Task{}, fmt.Errorf("schedule is required")
 	}
-	if err := ValidateSchedule(sched); err != nil {
+	if _, err := parseSchedule(sched); err != nil {
 		return Task{}, err
 	}
 
 	return Task{
-		ID:        newID(),
+		ID:        uuid.NewString(),
 		Prompt:    prompt,
 		Schedule:  sched,
 		Status:    "active",
 		CreatedAt: time.Now().UTC(),
 	}, nil
+}
+
+func updateStatus(agentDir string, args map[string]any, status string) (string, error) {
+	id, err := taskID(args)
+	if err != nil {
+		return "", err
+	}
+
+	err = Mutate(agentDir, func(tasks []Task) ([]Task, error) {
+		for i := range tasks {
+			if tasks[i].ID == id {
+				tasks[i].Status = status
+				return tasks, nil
+			}
+		}
+		return nil, fmt.Errorf("task %s not found", id)
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("Task %s %s.", id, status), nil
 }

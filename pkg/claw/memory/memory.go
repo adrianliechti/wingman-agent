@@ -27,7 +27,7 @@ func NewStore(dir string) (*Store, error) {
 
 func (s *Store) Dir() string { return s.dir }
 
-func (s *Store) GlobalDir() string {
+func (s *Store) globalDir() string {
 	return filepath.Join(s.dir, "global")
 }
 
@@ -39,8 +39,14 @@ func (s *Store) WorkspaceDir(name string) string {
 	return filepath.Join(s.dir, name, "workspace")
 }
 
-func (s *Store) TasksDir(name string) string {
-	return filepath.Join(s.dir, name, "tasks")
+func ValidName(name string) error {
+	if name == "" || name == "global" {
+		return fmt.Errorf("invalid agent name %q", name)
+	}
+	if !filepath.IsLocal(name) || strings.ContainsAny(name, `/\:*?"<>|`) {
+		return fmt.Errorf("invalid agent name %q", name)
+	}
+	return nil
 }
 
 func (s *Store) EnsureAgent(name string) error {
@@ -66,9 +72,8 @@ I treat the user's time as the scarcest resource, and their trust as the most va
 `
 
 func (s *Store) RemoveAgent(name string) error {
-
-	if !filepath.IsLocal(name) || name == "global" || strings.ContainsAny(name, `/\`) {
-		return fmt.Errorf("invalid agent name %q", name)
+	if err := ValidName(name); err != nil {
+		return err
 	}
 	return os.RemoveAll(s.AgentDir(name))
 }
@@ -81,7 +86,7 @@ func (s *Store) ListAgents() ([]string, error) {
 
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() && e.Name() != "global" {
+		if e.IsDir() && ValidName(e.Name()) == nil {
 			names = append(names, e.Name())
 		}
 	}
@@ -93,17 +98,17 @@ func (s *Store) AgentExists(name string) bool {
 	return err == nil && info.IsDir()
 }
 
-func (s *Store) GlobalContent() string {
-	return readFileTruncated(filepath.Join(s.GlobalDir(), instructionsFile))
+func (s *Store) globalContent() string {
+	return readFileTruncated(filepath.Join(s.globalDir(), instructionsFile))
 }
 
-func (s *Store) AgentContent(name string) string {
+func (s *Store) agentContent(name string) string {
 	return readFileTruncated(filepath.Join(s.WorkspaceDir(name), instructionsFile))
 }
 
 func (s *Store) Content(name string) string {
-	global := s.GlobalContent()
-	local := s.AgentContent(name)
+	global := s.globalContent()
+	local := s.agentContent(name)
 
 	if global == "" {
 		return local
@@ -114,10 +119,6 @@ func (s *Store) Content(name string) string {
 	}
 
 	return global + "\n\n---\n\n" + local
-}
-
-func (s *Store) WriteGlobal(content string) error {
-	return os.WriteFile(filepath.Join(s.GlobalDir(), instructionsFile), []byte(content), 0644)
 }
 
 func (s *Store) SoulContent(name string) string {

@@ -7,19 +7,16 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/claw/channel"
 )
 
 type Channel struct {
-	chatID string
+	agent string
 }
 
 func New() *Channel {
-	return &Channel{
-		chatID: "cli:main",
-	}
+	return &Channel{agent: "main"}
 }
 
 func (c *Channel) Name() string { return "cli" }
@@ -61,9 +58,8 @@ func (c *Channel) Start(ctx context.Context, handler channel.MessageHandler) err
 			}
 
 			if rest, ok := strings.CutPrefix(text, "/agent "); ok {
-				name := strings.TrimSpace(rest)
-				if name != "" {
-					c.chatID = "cli:" + name
+				if name := strings.TrimSpace(rest); name != "" {
+					c.agent = name
 					fmt.Printf("Switched to agent: %s\n", name)
 				}
 
@@ -72,43 +68,34 @@ func (c *Channel) Start(ctx context.Context, handler channel.MessageHandler) err
 			}
 
 			if text == "/agent" {
-				fmt.Printf("Current agent: %s\n", c.agentName())
+				fmt.Printf("Current agent: %s\n", c.agent)
 				c.printPrompt()
 				continue
 			}
 
-			msg := channel.Message{
-				ChatID:    c.chatID,
-				Sender:    "user",
-				Content:   text,
-				Timestamp: time.Now(),
-			}
-
-			handler(ctx, msg)
+			handler(ctx, channel.Message{
+				Channel:      c.Name(),
+				Conversation: c.agent,
+				Sender:       "user",
+				Agent:        c.agent,
+				Content:      text,
+			})
 			c.printPrompt()
 		}
 	}
 }
 
-func (c *Channel) Send(ctx context.Context, chatID string, text string) error {
+func (c *Channel) Send(ctx context.Context, conversation string, text string) error {
 	fmt.Println(text)
 	return nil
 }
 
-func (c *Channel) SendStream(ctx context.Context, chatID string) (io.WriteCloser, error) {
+func (c *Channel) SendStream(ctx context.Context, conversation string) (io.WriteCloser, error) {
 	return &streamWriter{}, nil
 }
 
-func (c *Channel) agentName() string {
-	if _, name, ok := strings.Cut(c.chatID, ":"); ok {
-		return name
-	}
-
-	return c.chatID
-}
-
 func (c *Channel) printPrompt() {
-	fmt.Printf("[%s] > ", c.agentName())
+	fmt.Printf("[%s] > ", c.agent)
 }
 
 type streamWriter struct{}

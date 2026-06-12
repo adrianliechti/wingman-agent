@@ -46,6 +46,11 @@ func (b *cappedBuffer) result() string {
 }
 
 func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
+	safetyGuard := "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first."
+	if elicit == nil || elicit.Confirm == nil {
+		safetyGuard = "- There is NO confirmation gate: commands run immediately. Never run destructive or privilege-escalating commands (recursive deletes, sudo, force-push) unless the user explicitly asked for that exact action."
+	}
+
 	description := strings.Join([]string{
 		fmt.Sprintf("Execute a command in the host shell. On Unix/macOS this uses the user's shell (`$SHELL`, falling back to `/bin/sh`); on Windows this uses PowerShell. Default timeout %ds, max 600s.", defaultTimeout),
 		"- Use for build, test, run, package-manager, git, GitHub CLI (`gh`), Docker/Kubernetes, project scripts, diagnostics, and other terminal operations.",
@@ -57,7 +62,7 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 		"- Quote paths with spaces. Chain dependent commands with `&&` on Unix or PowerShell 7+, and with `; if ($?) { ... }` on Windows PowerShell 5.1. Use separate tool calls for independent commands.",
 		"- Once a check has passed (tests, build, lint), trust it — don't re-run to be sure.",
 		"- Increase timeout for long-running commands. Avoid unnecessary `sleep` / `Start-Sleep`; if polling is needed, run a check command instead of sleeping first.",
-		"- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first.",
+		safetyGuard,
 	}, "\n")
 
 	return []tool.Tool{{

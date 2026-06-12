@@ -53,12 +53,10 @@ const components = {
 		);
 	},
 	ul({ children }: { children?: React.ReactNode }) {
-		return <ul className="my-1.5 pl-5 list-disc text-fg-muted">{children}</ul>;
+		return <ul className="md-list md-ul text-fg-muted">{children}</ul>;
 	},
 	ol({ children }: { children?: React.ReactNode }) {
-		return (
-			<ol className="my-1.5 pl-5 list-decimal text-fg-muted">{children}</ol>
-		);
+		return <ol className="md-list md-ol text-fg-muted">{children}</ol>;
 	},
 	li({ children }: { children?: React.ReactNode }) {
 		return <li className="mb-0.5">{children}</li>;

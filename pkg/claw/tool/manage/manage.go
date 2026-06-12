@@ -87,8 +87,10 @@ func Tools(mgr AgentManager, store *memory.Store) []tool.Tool {
 				}
 
 				if len(tasks) > 0 {
-					agentDir := store.AgentDir(name)
-					if err := schedule.SaveTasks(agentDir, tasks); err != nil {
+					err := schedule.Mutate(store.AgentDir(name), func(existing []schedule.Task) ([]schedule.Task, error) {
+						return append(existing, tasks...), nil
+					})
+					if err != nil {
 						return "", fmt.Errorf("agent created but failed to save tasks: %w", err)
 					}
 				}
