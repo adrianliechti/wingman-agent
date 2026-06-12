@@ -123,6 +123,8 @@ var (
 		"claude-opus-4-7",
 		"claude-opus-4-6",
 		"claude-opus-4-5",
+		"claude-fable-5",
+		"claude-mythos-5",
 
 		"gpt-5.5",
 		"gpt-5.4",

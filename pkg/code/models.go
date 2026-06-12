@@ -19,6 +19,9 @@ var AvailableModels = []Model{
 	{ID: "claude-opus-4-7", Name: "Claude Opus 4.7"},
 	{ID: "claude-opus-4-6", Name: "Claude Opus 4.6"},
 	{ID: "claude-opus-4-5", Name: "Claude Opus 4.5"},
+
+	{ID: "claude-fable-5", Name: "Claude Fable 5"},
+	{ID: "claude-mythos-5", Name: "Claude Mythos 5"},
 }
 
 func ModelName(id string) string {

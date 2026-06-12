@@ -16,6 +16,15 @@ type modelGroup struct {
 var candidates = []modelGroup{
 
 	{
+		name: "Wingman Claude Sonnet",
+
+		models: []modelEntry{
+			{id: "claude-sonnet-4-6", inputTokens: 200000, outputTokens: 64000},
+			{id: "claude-sonnet-4-5", inputTokens: 200000, outputTokens: 64000},
+		},
+	},
+
+	{
 		name: "Wingman Claude Opus",
 
 		models: []modelEntry{
@@ -26,11 +35,17 @@ var candidates = []modelGroup{
 		},
 	},
 	{
-		name: "Wingman Claude Sonnet",
+		name: "Wingman Claude Fable",
 
 		models: []modelEntry{
-			{id: "claude-sonnet-4-6", inputTokens: 200000, outputTokens: 64000},
-			{id: "claude-sonnet-4-5", inputTokens: 200000, outputTokens: 64000},
+			{id: "claude-fable-5", inputTokens: 1000000, outputTokens: 128000},
+		},
+	},
+	{
+		name: "Wingman Claude Mythos",
+
+		models: []modelEntry{
+			{id: "claude-mythos-5", inputTokens: 1000000, outputTokens: 128000},
 		},
 	},
 	{
