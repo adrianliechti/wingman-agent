@@ -7,8 +7,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	ts "github.com/odvcencio/gotreesitter"
@@ -18,6 +21,14 @@ import (
 const maxResolves = 2000
 
 const maxFileBytes = 2 << 20
+
+// maxAmbiguousFanout caps how many candidate targets a single name-resolved
+// reference may fan out to. Names with more candidates than this (String,
+// Error, Read, ...) are too common for a name guess to carry signal, so the
+// reference is dropped rather than exploding the graph with noise edges.
+// On the Go stdlib the median ambiguous name has ~9 candidates, so this keeps
+// the genuinely narrow guesses and discards the long noise tail.
+const maxAmbiguousFanout = 8
 
 var skipDirs = map[string]bool{
 	"node_modules": true,
@@ -45,173 +56,42 @@ type indexStats struct {
 	Edges int
 }
 
+type indexRef struct {
+	fromID string
+	name   string
+	file   string
+	line   int
+	col    int
+	kind   EdgeKind
+	lang   string
+}
+
+type fileResult struct {
+	rel     string
+	meta    fileMeta
+	nodes   []*Node
+	refs    []indexRef
+	imports []rawImport
+}
+
 func indexRepo(ctx context.Context, root string, resolver CallResolver) (*Graph, map[string]fileMeta, indexStats, error) {
-	taggers := map[string]*ts.Tagger{}
-	files := map[string]fileMeta{}
+	paths, err := collectFiles(ctx, root)
+	if err != nil {
+		return nil, nil, indexStats{}, err
+	}
 
-	ax := newAuxExtractor()
+	results, err := parseFiles(ctx, root, paths)
+	if err != nil {
+		return nil, nil, indexStats{}, err
+	}
 
+	files := make(map[string]fileMeta, len(results))
 	var nodes []*Node
-	type ref struct {
-		fromID string
-		name   string
-		file   string
-		line   int
-		col    int
-		kind   EdgeKind
-		lang   string
-	}
-	var refs []ref
-
-	type fileImport struct {
-		fromFile string
-		norm     string
-		rel      bool
-	}
-	var rawImports []fileImport
-
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		name := d.Name()
-		if d.IsDir() {
-			if path != root && (strings.HasPrefix(name, ".") || skipDirs[name]) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-
-		entry := grammars.DetectLanguage(name)
-		if entry == nil {
-			return nil
-		}
-		tagsQuery := grammars.ResolveTagsQuery(*entry)
-		if tagsQuery == "" {
-			return nil
-		}
-		if aug := tagsAugment[entry.Name]; aug != "" {
-			tagsQuery += "\n" + aug
-		}
-
-		info, err := d.Info()
-		if err != nil || info.Size() == 0 || info.Size() > maxFileBytes {
-			return nil
-		}
-
-		src, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		if looksMinified(src) {
-			return nil
-		}
-
-		tagger := taggers[entry.Name]
-		if tagger == nil {
-			t, err := ts.NewTagger(entry.Language(), tagsQuery)
-			if err != nil {
-				return nil
-			}
-			tagger = t
-			taggers[entry.Name] = t
-		}
-
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			rel = path
-		}
-		rel = filepath.ToSlash(rel)
-
-		files[rel] = fileMeta{MTime: info.ModTime().UnixNano(), Size: info.Size()}
-
-		li := newLineIndex(src)
-		tags := tagger.Tag(src)
-
-		type defSpan struct {
-			id    string
-			start uint32
-			end   uint32
-			kind  Kind
-		}
-		var defs []defSpan
-
-		for _, t := range tags {
-			kind, ok := kindFromTag(t.Kind)
-			if !ok {
-				continue
-			}
-			id := fmt.Sprintf("%s#%s@%d", rel, t.Name, t.Range.StartByte)
-			nodes = append(nodes, &Node{
-				ID:        id,
-				Kind:      kind,
-				Name:      t.Name,
-				File:      rel,
-				StartLine: li.line(t.Range.StartByte),
-				EndLine:   li.line(t.Range.EndByte),
-				Lang:      entry.Name,
-			})
-			defs = append(defs, defSpan{id: id, start: t.Range.StartByte, end: t.Range.EndByte, kind: kind})
-		}
-
-		sort.Slice(defs, func(i, j int) bool {
-			return (defs[i].end - defs[i].start) < (defs[j].end - defs[j].start)
-		})
-
-		enclosing := func(b uint32, typesOnly bool) string {
-			for _, ds := range defs {
-				if b < ds.start || b >= ds.end {
-					continue
-				}
-				if typesOnly && !isTypeKind(ds.kind) {
-					continue
-				}
-				return ds.id
-			}
-			return ""
-		}
-
-		for _, t := range tags {
-			if !isCallTag(t.Kind) {
-				continue
-			}
-			fromID := enclosing(t.Range.StartByte, false)
-			if fromID == "" {
-				continue
-			}
-			pos := t.NameRange.StartByte
-			if t.NameRange.EndByte == 0 {
-				pos = t.Range.StartByte
-			}
-			line, col := li.lspPos(pos)
-			refs = append(refs, ref{fromID: fromID, name: t.Name, file: rel, line: line, col: col, kind: EdgeCalls, lang: entry.Name})
-		}
-
-		imps, hiers := ax.extract(entry.Name, entry.Language(), src)
-		for _, im := range imps {
-			rawImports = append(rawImports, fileImport{fromFile: rel, norm: im.norm, rel: im.rel})
-		}
-		for _, hr := range hiers {
-			fromID := enclosing(hr.startByte, true)
-			if fromID == "" {
-				continue
-			}
-			line, col := li.lspPos(hr.startByte)
-			refs = append(refs, ref{fromID: fromID, name: hr.name, file: rel, line: line, col: col, kind: hr.kind, lang: entry.Name})
-		}
-
-		return nil
-	})
-
-	if walkErr != nil {
-		return nil, nil, indexStats{}, walkErr
+	var refs []indexRef
+	for _, r := range results {
+		files[r.rel] = r.meta
+		nodes = append(nodes, r.nodes...)
+		refs = append(refs, r.refs...)
 	}
 
 	g := &Graph{Nodes: nodes}
@@ -260,6 +140,9 @@ func indexRepo(ctx context.Context, root string, resolver CallResolver) (*Graph,
 					}
 				}
 			}
+			if len(cands) > maxAmbiguousFanout {
+				continue
+			}
 			for _, cand := range cands {
 				addEdge(r.fromID, cand.ID, r.kind, ViaAmbiguous)
 			}
@@ -270,18 +153,246 @@ func indexRepo(ctx context.Context, root string, resolver CallResolver) (*Graph,
 	for f := range files {
 		localDirs[path.Dir(f)] = true
 	}
-	for _, ri := range rawImports {
-		g.Imports = append(g.Imports, &Import{
-			FromFile: ri.fromFile,
-			Path:     ri.norm,
-			ToModule: resolveImport(ri.fromFile, ri.norm, ri.rel, localDirs),
-		})
+	for _, r := range results {
+		for _, im := range r.imports {
+			g.Imports = append(g.Imports, &Import{
+				FromFile: r.rel,
+				Path:     im.norm,
+				ToModule: resolveImport(r.rel, im.norm, im.rel, localDirs),
+			})
+		}
 	}
 
 	g.build()
 
 	stats := indexStats{Files: len(files), Nodes: len(g.Nodes), Edges: len(g.Edges)}
 	return g, files, stats, nil
+}
+
+func collectFiles(ctx context.Context, root string) ([]string, error) {
+	var paths []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if p != root && (strings.HasPrefix(name, ".") || skipDirs[name]) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		if grammars.DetectLanguage(name) == nil {
+			return nil
+		}
+		paths = append(paths, p)
+		return nil
+	})
+	return paths, err
+}
+
+func parseFiles(ctx context.Context, root string, paths []string) ([]*fileResult, error) {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(paths) {
+		workers = len(paths)
+	}
+	if workers < 1 {
+		return nil, nil
+	}
+
+	results := make([]*fileResult, len(paths))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ex := newExtractor()
+			for ctx.Err() == nil {
+				i := int(next.Add(1) - 1)
+				if i >= len(paths) {
+					return
+				}
+				results[i] = ex.processFile(root, paths[i])
+			}
+		}()
+	}
+	wg.Wait()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	out := results[:0]
+	for _, r := range results {
+		if r != nil {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// extractor holds the per-worker tree-sitter state. Taggers, parsers and
+// compiled queries are not safe for concurrent use, so each worker owns one.
+type extractor struct {
+	taggers map[string]*ts.Tagger
+	parsers map[string]*ts.Parser
+	ax      *auxExtractor
+}
+
+func newExtractor() *extractor {
+	return &extractor{
+		taggers: map[string]*ts.Tagger{},
+		parsers: map[string]*ts.Parser{},
+		ax:      newAuxExtractor(),
+	}
+}
+
+func (ex *extractor) parser(entry *grammars.LangEntry) *ts.Parser {
+	p := ex.parsers[entry.Name]
+	if p == nil {
+		p = ts.NewParser(entry.Language())
+		ex.parsers[entry.Name] = p
+	}
+	return p
+}
+
+func (ex *extractor) tagger(entry *grammars.LangEntry) *ts.Tagger {
+	if t, ok := ex.taggers[entry.Name]; ok {
+		return t
+	}
+	var t *ts.Tagger
+	if q := grammars.ResolveTagsQuery(*entry); q != "" {
+		if aug := tagsAugment[entry.Name]; aug != "" {
+			q += "\n" + aug
+		}
+		t, _ = ts.NewTagger(entry.Language(), q)
+	}
+	ex.taggers[entry.Name] = t
+	return t
+}
+
+func (ex *extractor) processFile(root, absPath string) *fileResult {
+	entry := grammars.DetectLanguage(filepath.Base(absPath))
+	if entry == nil {
+		return nil
+	}
+	tagger := ex.tagger(entry)
+	if tagger == nil {
+		return nil
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil || info.Size() == 0 || info.Size() > maxFileBytes {
+		return nil
+	}
+	src, err := os.ReadFile(absPath)
+	if err != nil || looksMinified(src) {
+		return nil
+	}
+
+	tree, err := ex.parser(entry).Parse(src)
+	if err != nil {
+		return nil
+	}
+	defer tree.Release()
+	rn := tree.RootNode()
+	if rn == nil {
+		return nil
+	}
+
+	rel, err := filepath.Rel(root, absPath)
+	if err != nil {
+		rel = absPath
+	}
+	rel = filepath.ToSlash(rel)
+
+	li := newLineIndex(src)
+	tags := tagger.TagTree(tree)
+
+	res := &fileResult{
+		rel:  rel,
+		meta: fileMeta{MTime: info.ModTime().UnixNano(), Size: info.Size()},
+	}
+
+	type defSpan struct {
+		id    string
+		start uint32
+		end   uint32
+		kind  Kind
+	}
+	var defs []defSpan
+
+	for _, t := range tags {
+		kind, ok := kindFromTag(t.Kind)
+		if !ok {
+			continue
+		}
+		id := fmt.Sprintf("%s#%s@%d", rel, t.Name, t.Range.StartByte)
+		res.nodes = append(res.nodes, &Node{
+			ID:        id,
+			Kind:      kind,
+			Name:      t.Name,
+			File:      rel,
+			StartLine: li.line(t.Range.StartByte),
+			EndLine:   li.line(t.Range.EndByte),
+			Lang:      entry.Name,
+		})
+		defs = append(defs, defSpan{id: id, start: t.Range.StartByte, end: t.Range.EndByte, kind: kind})
+	}
+
+	sort.Slice(defs, func(i, j int) bool {
+		return (defs[i].end - defs[i].start) < (defs[j].end - defs[j].start)
+	})
+
+	enclosing := func(b uint32, typesOnly bool) string {
+		for _, ds := range defs {
+			if b < ds.start || b >= ds.end {
+				continue
+			}
+			if typesOnly && !isTypeKind(ds.kind) {
+				continue
+			}
+			return ds.id
+		}
+		return ""
+	}
+
+	for _, t := range tags {
+		if !isCallTag(t.Kind) {
+			continue
+		}
+		fromID := enclosing(t.Range.StartByte, false)
+		if fromID == "" {
+			continue
+		}
+		pos := t.NameRange.StartByte
+		if t.NameRange.EndByte == 0 {
+			pos = t.Range.StartByte
+		}
+		line, col := li.lspPos(pos)
+		res.refs = append(res.refs, indexRef{fromID: fromID, name: t.Name, file: rel, line: line, col: col, kind: EdgeCalls, lang: entry.Name})
+	}
+
+	imps, hiers := ex.ax.extractFromTree(entry.Name, entry.Language(), rn, src)
+	res.imports = imps
+	for _, hr := range hiers {
+		fromID := enclosing(hr.startByte, true)
+		if fromID == "" {
+			continue
+		}
+		line, col := li.lspPos(hr.startByte)
+		res.refs = append(res.refs, indexRef{fromID: fromID, name: hr.name, file: rel, line: line, col: col, kind: hr.kind, lang: entry.Name})
+	}
+
+	return res
 }
 
 func looksMinified(src []byte) bool {

@@ -63,14 +63,12 @@ type rawHierRef struct {
 }
 
 type auxExtractor struct {
-	parsers map[string]*ts.Parser
 	importQ map[string]*ts.Query
 	hierQ   map[string]*ts.Query
 }
 
 func newAuxExtractor() *auxExtractor {
 	return &auxExtractor{
-		parsers: map[string]*ts.Parser{},
 		importQ: map[string]*ts.Query{},
 		hierQ:   map[string]*ts.Query{},
 	}
@@ -90,23 +88,14 @@ func (ax *auxExtractor) query(lang string, langObj *ts.Language, srcs map[string
 	return q
 }
 
-func (ax *auxExtractor) extract(lang string, langObj *ts.Language, src []byte) ([]rawImport, []rawHierRef) {
+// extractFromTree runs the import and hierarchy queries against an
+// already-parsed tree, so the caller can share a single parse with the tagger.
+func (ax *auxExtractor) extractFromTree(lang string, langObj *ts.Language, root *ts.Node, src []byte) ([]rawImport, []rawHierRef) {
 	iq := ax.query(lang, langObj, importQueries, ax.importQ)
 	hq := ax.query(lang, langObj, hierarchyQueries, ax.hierQ)
 	if iq == nil && hq == nil {
 		return nil, nil
 	}
-
-	parser := ax.parsers[lang]
-	if parser == nil {
-		parser = ts.NewParser(langObj)
-		ax.parsers[lang] = parser
-	}
-	tree, err := parser.Parse(src)
-	if err != nil {
-		return nil, nil
-	}
-	root := tree.RootNode()
 
 	var imps []rawImport
 	if iq != nil {

@@ -7,16 +7,27 @@ import (
 	"time"
 )
 
+// snapshot persists the graph. Edges reference nodes by their index in Nodes
+// rather than by their full string ID, so the on-disk size is dominated by the
+// nodes instead of by ID strings repeated twice per edge — on large repos the
+// edge list otherwise dwarfs everything else.
 type snapshot struct {
 	Version   int                 `json:"version"`
 	IndexedAt time.Time           `json:"indexed_at"`
 	Files     map[string]fileMeta `json:"files"`
 	Nodes     []*Node             `json:"nodes"`
-	Edges     []*Edge             `json:"edges"`
+	Edges     []edgeRec           `json:"edges"`
 	Imports   []*Import           `json:"imports,omitempty"`
 }
 
-const snapshotVersion = 2
+type edgeRec struct {
+	From int32      `json:"f"`
+	To   int32      `json:"t"`
+	Kind EdgeKind   `json:"k"`
+	Via  Provenance `json:"v,omitempty"`
+}
+
+const snapshotVersion = 3
 
 func loadSnapshot(path string) (*Graph, map[string]fileMeta, time.Time, error) {
 	data, err := os.ReadFile(path)
@@ -32,7 +43,19 @@ func loadSnapshot(path string) (*Graph, map[string]fileMeta, time.Time, error) {
 		return nil, nil, time.Time{}, os.ErrNotExist
 	}
 
-	g := &Graph{Nodes: snap.Nodes, Edges: snap.Edges, Imports: snap.Imports}
+	g := &Graph{Nodes: snap.Nodes, Imports: snap.Imports}
+	g.Edges = make([]*Edge, 0, len(snap.Edges))
+	for _, e := range snap.Edges {
+		if int(e.From) >= len(snap.Nodes) || int(e.To) >= len(snap.Nodes) || e.From < 0 || e.To < 0 {
+			continue
+		}
+		g.Edges = append(g.Edges, &Edge{
+			From: snap.Nodes[e.From].ID,
+			To:   snap.Nodes[e.To].ID,
+			Kind: e.Kind,
+			Via:  e.Via,
+		})
+	}
 	g.build()
 	return g, snap.Files, snap.IndexedAt, nil
 }
@@ -42,12 +65,27 @@ func saveSnapshot(path string, g *Graph, files map[string]fileMeta, indexedAt ti
 		return err
 	}
 
+	idx := make(map[string]int32, len(g.Nodes))
+	for i, n := range g.Nodes {
+		idx[n.ID] = int32(i)
+	}
+
+	edges := make([]edgeRec, 0, len(g.Edges))
+	for _, e := range g.Edges {
+		from, ok1 := idx[e.From]
+		to, ok2 := idx[e.To]
+		if !ok1 || !ok2 {
+			continue
+		}
+		edges = append(edges, edgeRec{From: from, To: to, Kind: e.Kind, Via: e.Via})
+	}
+
 	snap := snapshot{
 		Version:   snapshotVersion,
 		IndexedAt: indexedAt,
 		Files:     files,
 		Nodes:     g.Nodes,
-		Edges:     g.Edges,
+		Edges:     edges,
 		Imports:   g.Imports,
 	}
 
