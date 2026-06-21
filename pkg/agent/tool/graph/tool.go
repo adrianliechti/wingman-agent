@@ -35,6 +35,8 @@ func graphTool(engine *graph.Engine) tool.Tool {
 			"- `deps`: module dependency graph for a `file`/dir — what it imports (depends on), what imports it (depended by), external packages, and with `depth`>1 transitive deps.",
 			"- `hierarchy`: type relationships for `symbol` — what it extends/implements, plus its subtypes/implementers. Structural (extends/implements/bases/embedding); Go's implicit interface satisfaction is not captured — use `lsp` goToImplementation for that.",
 			"- `snippet`: return the source of a definition by `symbol` (optionally disambiguated by `file`).",
+			"- `tests`: for a production `symbol`, the test functions that exercise it; for a test `symbol`, the production symbols it covers. Derived from call edges into/out of test files — direct calls only.",
+			"- `co_changes`: files that historically change together with `file`, from git history (commit co-occurrence). Surfaces coupling the call graph misses (config, docs, sibling implementations).",
 			"The graph auto-builds on first use if not yet indexed.",
 		}, "\n"),
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
@@ -43,7 +45,7 @@ func graphTool(engine *graph.Engine) tool.Tool {
 			"properties": map[string]any{
 				"operation": map[string]any{
 					"type":        "string",
-					"enum":        []string{"index", "status", "search", "trace", "architecture", "dead_code", "changes", "deps", "hierarchy", "snippet"},
+					"enum":        []string{"index", "status", "search", "trace", "architecture", "dead_code", "changes", "deps", "hierarchy", "snippet", "tests", "co_changes"},
 					"description": "The graph operation to perform.",
 				},
 				"query": map[string]any{
@@ -52,7 +54,7 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				},
 				"symbol": map[string]any{
 					"type":        "string",
-					"description": "trace/snippet: the symbol name to start from or fetch.",
+					"description": "trace/snippet/hierarchy/tests: the symbol name to start from or fetch.",
 				},
 				"target": map[string]any{
 					"type":        "string",
@@ -70,7 +72,7 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				},
 				"file": map[string]any{
 					"type":        "string",
-					"description": "search/snippet: restrict to files whose path contains this substring. deps: the module/dir or file path to query.",
+					"description": "search/snippet/tests: restrict to files whose path contains this substring. deps: the module/dir or file path to query. co_changes: the file path to analyze.",
 				},
 				"depth": map[string]any{
 					"type":        "integer",
@@ -194,8 +196,31 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				}
 				return fmt.Sprintf("%s\n%s", nodeLabel(snip.Node), snip.Code), nil
 
+			case "tests":
+				symbol := strings.TrimSpace(stringArg(args, "symbol"))
+				if symbol == "" {
+					return "", fmt.Errorf("symbol is required for tests")
+				}
+				res, err := engine.Tests(ctx, symbol, stringArg(args, "file"))
+				if err != nil {
+					return "", err
+				}
+				return formatTests(res), nil
+
+			case "co_changes":
+				file := strings.TrimSpace(stringArg(args, "file"))
+				if file == "" {
+					return "", fmt.Errorf("file is required for co_changes")
+				}
+				limit, _ := tool.IntArg(args, "limit")
+				res, err := engine.CoChanges(ctx, file, limit)
+				if err != nil {
+					return "", err
+				}
+				return formatCoChanges(res), nil
+
 			default:
-				return "", fmt.Errorf("operation must be one of: index, status, search, trace, architecture, dead_code, changes, deps, hierarchy, snippet")
+				return "", fmt.Errorf("operation must be one of: index, status, search, trace, architecture, dead_code, changes, deps, hierarchy, snippet, tests, co_changes")
 			}
 		},
 	}
@@ -315,6 +340,35 @@ func writeNodeList(b *strings.Builder, title string, nodes []*graph.Node) {
 	for _, n := range nodes {
 		fmt.Fprintf(b, "- %s\n", nodeLabel(n))
 	}
+}
+
+func formatTests(res graph.TestsResult) string {
+	if res.Symbol == nil {
+		return "Symbol not found."
+	}
+	if len(res.TestedBy) == 0 && len(res.Covers) == 0 {
+		return fmt.Sprintf("%s\n(no test relationships detected — direct calls into/out of test files only)", nodeLabel(res.Symbol))
+	}
+	var b strings.Builder
+	fmt.Fprint(&b, nodeLabel(res.Symbol))
+	writeNodeList(&b, "Tested by", res.TestedBy)
+	writeNodeList(&b, "Covers", res.Covers)
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func formatCoChanges(res graph.CoChangesResult) string {
+	if res.Commits == 0 {
+		return fmt.Sprintf("No git history found touching %q (or not a git repo).", res.File)
+	}
+	if len(res.Related) == 0 {
+		return fmt.Sprintf("%s changed in %d commit(s), always alone.", res.File, res.Commits)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Files changing with %s (across %d commit(s)):\n", res.File, res.Commits)
+	for _, c := range res.Related {
+		fmt.Fprintf(&b, "- %s (%d×)\n", c.File, c.Count)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func formatChanges(changes graph.Changes) string {

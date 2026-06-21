@@ -279,6 +279,34 @@ func isTypeKind(k Kind) bool {
 	return k == KindClass || k == KindInterface || k == KindType
 }
 
+func (e *Engine) Tests(ctx context.Context, name, file string) (TestsResult, error) {
+	g, err := e.ensureIndexed(ctx)
+	if err != nil {
+		return TestsResult{}, err
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	var node *Node
+	for _, c := range g.lookup(name) {
+		if file == "" || strings.Contains(c.File, file) {
+			node = c
+			break
+		}
+	}
+	if node == nil {
+		return TestsResult{}, fmt.Errorf("no symbol named %q in the graph", name)
+	}
+	return g.testsFor(node), nil
+}
+
+func (e *Engine) CoChanges(ctx context.Context, file string, limit int) (CoChangesResult, error) {
+	if limit <= 0 {
+		limit = 15
+	}
+	return coChanges(e.root, filepath.ToSlash(file), limit)
+}
+
 type Snippet struct {
 	Node *Node
 	Code string
