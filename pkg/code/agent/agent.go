@@ -478,9 +478,10 @@ func (s *sessionState) cancel() {
 
 func (s *sessionState) tools() []tool.Tool {
 	tools := append([]tool.Tool{}, s.baseTools...)
-	mcpTools, lspTools := s.parent.workspace.ManagedTools()
+	mcpTools, lspTools, graphTools := s.parent.workspace.ManagedTools()
 	tools = append(tools, mcpTools...)
 	tools = append(tools, lspTools...)
+	tools = append(tools, graphTools...)
 	if s.planMode.Load() {
 		tools = planModeTools(tools)
 	}

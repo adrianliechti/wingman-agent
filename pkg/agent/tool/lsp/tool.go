@@ -22,6 +22,7 @@ func lspTool(manager *lsp.Manager) tool.Tool {
 		Description: strings.Join([]string{
 			"Use Language Server Protocol servers for semantic code intelligence.",
 			"Use `grep`/`glob` first to discover candidate files or symbols; use `lsp` when semantic accuracy matters.",
+			"For whole-repo structure, cross-language symbol search, or call/dependency graphs — or when no server is installed — use `code_graph` instead. `lsp` is the precise, live layer (exact binding, types, diagnostics); `code_graph` is the always-on structural layer.",
 			"Operations: diagnostics, workspaceDiagnostics, goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls.",
 			"Position operations require `path`, `line`, and `column`; lines/columns are 1-based, matching editors and `read`/`grep` output.",
 			"`documentSymbol` requires `path`; `workspaceSymbol` uses optional `query`; `diagnostics` uses optional `path`; `workspaceDiagnostics` ignores `path` and may be slower.",
