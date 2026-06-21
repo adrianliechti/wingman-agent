@@ -61,3 +61,5 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
+
+replace github.com/odvcencio/gotreesitter => github.com/adrianliechti/gotreesitter v0.0.0-20260621172548-9056b01e8ce3
