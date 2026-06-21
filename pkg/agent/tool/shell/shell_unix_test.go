@@ -156,6 +156,9 @@ func TestClassifyEffect_WrapperBypass(t *testing.T) {
 		"env ls",
 		"nice cat foo.txt",
 		"command -v ls",
+		"env git status",
+		"timeout 5 git log",
+		"nice docker ps",
 	}
 	for _, cmd := range readOnly {
 		t.Run("readonly/"+cmd, func(t *testing.T) {
@@ -180,6 +183,43 @@ func TestClassifyEffect_LoneAmpersandSeparator(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.command, func(t *testing.T) {
+			if got := ClassifyEffect(map[string]any{"command": tt.command}); got != tt.want {
+				t.Fatalf("ClassifyEffect(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassifyEffect_StandaloneAssignments(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    tool.Effect
+	}{
+		{"bare assignment", `D="/tmp/x"`, tool.EffectReadOnly},
+		{"assignment then read", `D="/tmp"; ls "$D"`, tool.EffectReadOnly},
+		{"assignment then grep glob", `D="/pkg/mod/foo@v1.2.3"; grep -rn "type Foo struct" $D/*.go`, tool.EffectReadOnly},
+		{
+			"cd assign echo greps",
+			`cd /tmp && D="/pkg/mod/foo@v1.2.3"; echo "=== Foo ==="; grep -rn "type Foo struct" $D/*.go; grep -rn "type Bar struct" $D/sub/*.go`,
+			tool.EffectReadOnly,
+		},
+		{
+			"assignment then awk read is mutates not dangerous",
+			`F="/pkg/mod/foo@v1.2.3/types.go"; awk '/type X struct/{f=1} f{print} f&&/^}/{exit}' "$F"`,
+			tool.EffectMutates,
+		},
+		{
+			"readonly substitution path is mutates not dangerous",
+			`cd /tmp && BV=$(grep 'foo' go.mod | awk '{print $2}'); echo "ver $BV"; F="/pkg/mod/foo@$BV/types.go"; awk '/type X struct/{print}' "$F"`,
+			tool.EffectMutates,
+		},
+		{"assignment prefix before dangerous stays dangerous", `FOO=1 rm -rf tmp`, tool.EffectDangerous},
+		{"assignment with dangerous substitution stays dangerous", `D=$(rm -rf tmp)`, tool.EffectDangerous},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			if got := ClassifyEffect(map[string]any{"command": tt.command}); got != tt.want {
 				t.Fatalf("ClassifyEffect(%q) = %q, want %q", tt.command, got, tt.want)
 			}

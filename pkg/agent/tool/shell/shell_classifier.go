@@ -460,7 +460,7 @@ func isSingleCommandReadOnly(command string) bool {
 
 	words, cmd, unresolved := unwrapCommandWords(fields)
 	if unresolved {
-		return false
+		return cmd == ""
 	}
 
 	subs, ok := normalizedReadOnlyCommands[cmd]
@@ -514,7 +514,7 @@ func isSingleCommandReadOnly(command string) bool {
 		return false
 	}
 
-	rest := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(command, words[0])))
+	rest := strings.ToLower(strings.Join(args, " "))
 	for _, sub := range subs {
 		if hasSubcommandPrefix(rest, sub) {
 			return true
@@ -570,8 +570,7 @@ func isDangerousSingleCommand(command string) bool {
 
 	words, cmd, unresolved := unwrapCommandWords(fields)
 	if unresolved {
-
-		return true
+		return cmd != ""
 	}
 	args := words[1:]
 
