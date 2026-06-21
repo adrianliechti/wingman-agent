@@ -300,6 +300,39 @@ func (e *Engine) Tests(ctx context.Context, name, file string) (TestsResult, err
 	return g.testsFor(node), nil
 }
 
+func (e *Engine) Similar(ctx context.Context, name, file string, limit int) (SimilarResult, error) {
+	if limit <= 0 {
+		limit = 15
+	}
+	g, err := e.ensureIndexed(ctx)
+	if err != nil {
+		return SimilarResult{}, err
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	var node *Node
+	for _, c := range g.lookup(name) {
+		if file != "" && !strings.Contains(c.File, file) {
+			continue
+		}
+		if isCallable(c.Kind) {
+			node = c
+			break
+		}
+		if node == nil {
+			node = c
+		}
+	}
+	if node == nil {
+		return SimilarResult{}, fmt.Errorf("no symbol named %q in the graph", name)
+	}
+	if !isCallable(node.Kind) {
+		return SimilarResult{}, fmt.Errorf("find_similar works on functions/methods/constructors, but %q is a %s", node.Name, node.Kind)
+	}
+	return SimilarResult{Target: node, Matches: g.similar(node, limit)}, nil
+}
+
 func (e *Engine) CoChanges(ctx context.Context, file string, limit int) (CoChangesResult, error) {
 	if limit <= 0 {
 		limit = 15

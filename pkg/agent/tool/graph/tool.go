@@ -21,23 +21,20 @@ func graphTool(engine *graph.Engine) tool.Tool {
 	return tool.Tool{
 		Name: "code_graph",
 		Description: strings.Join([]string{
-			"Query a tree-sitter knowledge graph of the codebase: functions, methods, classes, and their call relationships across many languages.",
-			"Prefer this over repeated grep/read cycles to understand structure, find symbols, or follow call chains.",
-			"Works with no language server installed. When one is available, prefer the `lsp` tool for precise go-to-definition/references, type info (hover), and diagnostics; use `code_graph` for whole-repo structure, cross-language search, and multi-hop call/dependency traversal.",
-			"Operations:",
-			"- `index`: build or rebuild the graph. Run once per session, or again after large changes.",
-			"- `status`: report whether the graph is indexed and its size.",
-			"- `search`: find definitions by name (case-insensitive regex). Optional `kind` and `file` filters.",
-			"- `trace`: follow call paths from `symbol`. `direction=callees` (what it calls) or `callers` (what calls it). Optional `target` to find a path to a specific symbol. Hops marked `⇢` are ambiguous name-based guesses; `→` are precise.",
-			"- `architecture`: high-level overview — languages, layers, modules, entry points, and call hotspots.",
-			"- `dead_code`: functions/methods with no detected callers (excluding entry points). Treat as candidates — callers via reflection, exported API, or another language (e.g. JS↔Go bindings) are not visible.",
-			"- `changes`: uncommitted git changes mapped to the affected definitions.",
-			"- `deps`: module dependency graph for a `file`/dir — what it imports (depends on), what imports it (depended by), external packages, and with `depth`>1 transitive deps.",
-			"- `hierarchy`: type relationships for `symbol` — what it extends/implements, plus its subtypes/implementers. Structural (extends/implements/bases/embedding); Go's implicit interface satisfaction is not captured — use `lsp` goToImplementation for that.",
-			"- `snippet`: return the source of a definition by `symbol` (optionally disambiguated by `file`).",
-			"- `tests`: for a production `symbol`, the test functions that exercise it; for a test `symbol`, the production symbols it covers. Derived from call edges into/out of test files — direct calls only.",
-			"- `co_changes`: files that historically change together with `file`, from git history (commit co-occurrence). Surfaces coupling the call graph misses (config, docs, sibling implementations).",
-			"The graph auto-builds on first use if not yet indexed.",
+			"Code knowledge graph (tree-sitter, many languages): definitions and their call/type/import links. Use instead of grep/read loops to find symbols and follow relationships; auto-builds on first use. With a language server, prefer `lsp` for precise definitions/references/types.",
+			"Operations (each uses the field in backticks):",
+			"- search `query`: definitions by name regex; optional `kind`, `file`.",
+			"- trace `symbol`: call paths; `direction` callees (default) or callers; optional `target`.",
+			"- find_similar `symbol`: functions resembling it (shared callees + name).",
+			"- hierarchy `symbol`: super/sub types and implementers.",
+			"- tests `symbol`: tests covering it, or what a test covers.",
+			"- snippet `symbol`: its source code.",
+			"- deps `file`: module imports/importers; `depth`>1 for transitive.",
+			"- co_changes `file`: files historically committed together with it.",
+			"- changes: current uncommitted edits mapped to definitions.",
+			"- architecture: overview of languages, modules, entry points, hotspots.",
+			"- dead_code: callables with no known caller (candidates; misses reflection/exported/cross-language).",
+			"- index / status: rebuild the graph / report its state.",
 		}, "\n"),
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 		Parameters: map[string]any{
@@ -45,25 +42,25 @@ func graphTool(engine *graph.Engine) tool.Tool {
 			"properties": map[string]any{
 				"operation": map[string]any{
 					"type":        "string",
-					"enum":        []string{"index", "status", "search", "trace", "architecture", "dead_code", "changes", "deps", "hierarchy", "snippet", "tests", "co_changes"},
-					"description": "The graph operation to perform.",
+					"enum":        []string{"index", "status", "search", "trace", "architecture", "dead_code", "changes", "deps", "hierarchy", "snippet", "tests", "co_changes", "find_similar"},
+					"description": "Which operation to run.",
 				},
 				"query": map[string]any{
 					"type":        "string",
-					"description": "search: case-insensitive regex matched against symbol names.",
+					"description": "search: name regex (case-insensitive).",
 				},
 				"symbol": map[string]any{
 					"type":        "string",
-					"description": "trace/snippet/hierarchy/tests: the symbol name to start from or fetch.",
+					"description": "trace/find_similar/hierarchy/tests/snippet: one exact symbol name.",
 				},
 				"target": map[string]any{
 					"type":        "string",
-					"description": "trace: optional destination symbol name; returns call paths reaching it.",
+					"description": "trace: optional destination symbol to reach.",
 				},
 				"direction": map[string]any{
 					"type":        "string",
 					"enum":        []string{"callees", "callers"},
-					"description": "trace: callees (outgoing, default) or callers (incoming).",
+					"description": "trace: callees (default) or callers.",
 				},
 				"kind": map[string]any{
 					"type":        "string",
@@ -72,15 +69,15 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				},
 				"file": map[string]any{
 					"type":        "string",
-					"description": "search/snippet/tests: restrict to files whose path contains this substring. deps: the module/dir or file path to query. co_changes: the file path to analyze.",
+					"description": "deps: target module/dir/file. co_changes: exact repo-relative path. search/snippet/tests/find_similar: optional path-substring filter.",
 				},
 				"depth": map[string]any{
 					"type":        "integer",
-					"description": "trace: maximum path depth (default 8). deps: transitive depth — >1 includes indirect dependencies.",
+					"description": "trace path depth (default 8); deps transitive depth (default 1).",
 				},
 				"limit": map[string]any{
 					"type":        "integer",
-					"description": "search: maximum results (default 50).",
+					"description": "max results — search (default 50), dead_code (100), co_changes/find_similar (15).",
 				},
 			},
 			"required":             []string{"operation"},
@@ -219,8 +216,20 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				}
 				return formatCoChanges(res), nil
 
+			case "find_similar":
+				symbol := strings.TrimSpace(stringArg(args, "symbol"))
+				if symbol == "" {
+					return "", fmt.Errorf("symbol is required for find_similar")
+				}
+				limit, _ := tool.IntArg(args, "limit")
+				res, err := engine.Similar(ctx, symbol, stringArg(args, "file"), limit)
+				if err != nil {
+					return "", err
+				}
+				return formatSimilar(res), nil
+
 			default:
-				return "", fmt.Errorf("operation must be one of: index, status, search, trace, architecture, dead_code, changes, deps, hierarchy, snippet, tests, co_changes")
+				return "", fmt.Errorf("operation must be one of: index, status, search, trace, architecture, dead_code, changes, deps, hierarchy, snippet, tests, co_changes, find_similar")
 			}
 		},
 	}
@@ -240,6 +249,11 @@ func edgeBreakdown(stats map[graph.Provenance]int) string {
 	}
 	return fmt.Sprintf(" (%d precise, %d name, %d ambiguous)", lsp, name, amb)
 }
+
+// maxListItems caps how many entries any single rendered list shows, so a
+// high-degree symbol (a popular interface, a widely-imported package) can't
+// flood the agent's context. The full count is always reported in the header.
+const maxListItems = 40
 
 func nodeLabel(n *graph.Node) string {
 	return fmt.Sprintf("%s (%s) — %s:%d", n.Name, n.Kind, n.File, n.StartLine)
@@ -270,7 +284,11 @@ func formatTrace(res graph.TraceResult, callers bool) string {
 	ambiguous := false
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d path(s) (%s):\n", len(res.Paths), verb)
-	for _, p := range res.Paths {
+	paths := res.Paths
+	if len(paths) > maxListItems {
+		paths = paths[:maxListItems]
+	}
+	for _, p := range paths {
 		var line strings.Builder
 		for i, n := range p.Nodes {
 			if i > 0 {
@@ -285,6 +303,9 @@ func formatTrace(res graph.TraceResult, callers bool) string {
 		}
 		last := p.Nodes[len(p.Nodes)-1]
 		fmt.Fprintf(&b, "- %s   [%s:%d]\n", line.String(), last.File, last.StartLine)
+	}
+	if len(res.Paths) > len(paths) {
+		fmt.Fprintf(&b, "  … and %d more path(s); narrow with `target` or a smaller `depth`\n", len(res.Paths)-len(paths))
 	}
 	if ambiguous {
 		b.WriteString("\n⇢ = ambiguous name-based hop (install a language server to resolve precisely)")
@@ -310,8 +331,15 @@ func writeDepList(b *strings.Builder, title string, items []string) {
 		return
 	}
 	fmt.Fprintf(b, "\n\n%s (%d):\n", title, len(items))
-	for _, it := range items {
+	shown := items
+	if len(shown) > maxListItems {
+		shown = shown[:maxListItems]
+	}
+	for _, it := range shown {
 		fmt.Fprintf(b, "- %s\n", it)
+	}
+	if len(items) > len(shown) {
+		fmt.Fprintf(b, "  … and %d more\n", len(items)-len(shown))
 	}
 }
 
@@ -337,8 +365,15 @@ func writeNodeList(b *strings.Builder, title string, nodes []*graph.Node) {
 		return
 	}
 	fmt.Fprintf(b, "\n\n%s (%d):\n", title, len(nodes))
-	for _, n := range nodes {
+	shown := nodes
+	if len(shown) > maxListItems {
+		shown = shown[:maxListItems]
+	}
+	for _, n := range shown {
 		fmt.Fprintf(b, "- %s\n", nodeLabel(n))
+	}
+	if len(nodes) > len(shown) {
+		fmt.Fprintf(b, "  … and %d more\n", len(nodes)-len(shown))
 	}
 }
 
@@ -356,9 +391,24 @@ func formatTests(res graph.TestsResult) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func formatSimilar(res graph.SimilarResult) string {
+	if res.Target == nil {
+		return "Symbol not found."
+	}
+	if len(res.Matches) == 0 {
+		return fmt.Sprintf("%s\n(no similar functions found)", nodeLabel(res.Target))
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Similar to %s:\n", nodeLabel(res.Target))
+	for _, m := range res.Matches {
+		fmt.Fprintf(&b, "- %s  (%.2f)\n", nodeLabel(m.Node), m.Score)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func formatCoChanges(res graph.CoChangesResult) string {
 	if res.Commits == 0 {
-		return fmt.Sprintf("No git history found touching %q (or not a git repo).", res.File)
+		return fmt.Sprintf("No git history found touching %q. Pass an exact repo-relative path (not a substring), and check this is a git repo.", res.File)
 	}
 	if len(res.Related) == 0 {
 		return fmt.Sprintf("%s changed in %d commit(s), always alone.", res.File, res.Commits)
