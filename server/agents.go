@@ -11,10 +11,12 @@ import (
 
 	acpclaude "github.com/adrianliechti/wingman-agent/pkg/acp/claude"
 	acpcodex "github.com/adrianliechti/wingman-agent/pkg/acp/codex"
+	acppi "github.com/adrianliechti/wingman-agent/pkg/acp/pi"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/external/claude"
 	"github.com/adrianliechti/wingman-agent/pkg/external/codex"
+	extpi "github.com/adrianliechti/wingman-agent/pkg/external/pi"
 )
 
 type agentRegistration struct {
@@ -104,6 +106,13 @@ func detectAgents() []agentRegistration {
 			},
 		})
 	}
+	if _, err := exec.LookPath(extpi.BinPath()); err == nil {
+		out = append(out, agentRegistration{
+			ID:          "pi",
+			Name:        "Pi",
+			Constructor: piBackend,
+		})
+	}
 	return out
 }
 
@@ -117,6 +126,33 @@ func claudeBackend(ctx context.Context, ws *code.Workspace) (code.Agent, error) 
 		Env: claude.BuildEnv(os.Environ(), cfg),
 	})
 	return acp.NewInProcess(ws, "claude", srv, func(conn *acpsdk.AgentSideConnection) {
+		srv.SetAgentConnection(conn)
+	}, srv.Close)
+}
+
+func piBackend(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
+	cfg, err := extpi.NewConfig(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("pi config: %w", err)
+	}
+
+	dir, err := extpi.ConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("pi config dir: %w", err)
+	}
+	if err := extpi.WriteModels(dir, cfg); err != nil {
+		return nil, err
+	}
+
+	srv := acppi.New(acppi.Options{
+		Path:        extpi.BinPath(),
+		Dir:         ws.RootPath,
+		Env:         extpi.BuildEnv(os.Environ(), dir),
+		Args:        extpi.BuildArgs(cfg),
+		SessionsDir: extpi.SessionsDir(dir),
+	})
+
+	return acp.NewInProcess(ws, "pi", srv, func(conn *acpsdk.AgentSideConnection) {
 		srv.SetAgentConnection(conn)
 	}, srv.Close)
 }

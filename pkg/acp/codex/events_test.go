@@ -130,7 +130,7 @@ func TestFileChangeContentDeleteMeta(t *testing.T) {
 	}
 }
 
-func TestIsAuthError(t *testing.T) {
+func TestIsFatalTurnError(t *testing.T) {
 	cases := []struct {
 		name string
 		info string
@@ -147,8 +147,8 @@ func TestIsAuthError(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := isAuthError([]byte(c.info)); got != c.want {
-				t.Errorf("isAuthError(%s) = %v, want %v", c.info, got, c.want)
+			if got := isFatalTurnError([]byte(c.info)); got != c.want {
+				t.Errorf("isFatalTurnError(%s) = %v, want %v", c.info, got, c.want)
 			}
 		})
 	}

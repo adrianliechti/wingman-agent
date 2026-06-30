@@ -177,14 +177,8 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 			Content []string `json:"content"`
 		}
 		_ = json.Unmarshal(raw, &it)
-		parts := it.Summary
-		if len(parts) == 0 {
-			parts = it.Content
-		}
-		for _, p := range parts {
-			if p != "" {
-				send(acp.UpdateAgentThoughtText(p))
-			}
+		if text := joinReasoning(it.Summary, it.Content); text != "" {
+			send(acp.UpdateAgentThoughtText(text))
 		}
 
 	case "plan":
@@ -273,19 +267,23 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 		replayToolText(send, probe.ID, it.Status, toolOutputs)
 
 	case "webSearch":
-		var it struct {
-			Query string `json:"query"`
-		}
-		_ = json.Unmarshal(raw, &it)
-		title := "Web search"
-		if it.Query != "" {
-			title = "Web search: " + it.Query
-		}
-		send(acp.StartToolCall(acp.ToolCallId(probe.ID), title,
-			acp.WithStartKind(acp.ToolKindSearch),
-			acp.WithStartStatus(acp.ToolCallStatusCompleted),
-		))
+		send(webSearchStartToolCall(raw, acp.ToolCallStatusCompleted))
 		replayToolText(send, probe.ID, "completed", toolOutputs)
+
+	case "imageView":
+		if u, ok := imageViewToolCall(raw); ok {
+			send(u)
+		}
+
+	case "imageGeneration":
+		if u, ok := imageGenToolCall(raw); ok {
+			send(u)
+		}
+
+	case "collabAgentToolCall":
+		if u, ok := collabStartToolCall(raw); ok {
+			send(u)
+		}
 	}
 }
 

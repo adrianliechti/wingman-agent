@@ -186,7 +186,7 @@ func scanSessionMetadata(path string) (title, cwd string) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
-	var firstUserText string
+	var firstUserText, latestAITitle string
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -201,8 +201,11 @@ func scanSessionMetadata(path string) (title, cwd string) {
 		}
 		switch h.Type {
 		case "ai-title":
+			// The CLI appends a fresh ai-title line as the conversation
+			// evolves rather than rewriting the old one, so keep scanning
+			// and remember the latest rather than returning the first.
 			if h.AITitle != "" {
-				return h.AITitle, cwd
+				latestAITitle = h.AITitle
 			}
 		case "user":
 			if firstUserText == "" {
@@ -211,6 +214,9 @@ func scanSessionMetadata(path string) (title, cwd string) {
 				}
 			}
 		}
+	}
+	if latestAITitle != "" {
+		return latestAITitle, cwd
 	}
 	if firstUserText != "" {
 		return truncateTitle(firstUserText), cwd
@@ -285,7 +291,7 @@ func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 				return err
 			}
 		case "assistant":
-			if err := emitAssistant(ctx, conn, sid, env.Message, cwd, cache, false); err != nil {
+			if err := emitAssistant(ctx, conn, sid, env.Message, cwd, cache, nil, false); err != nil {
 				return err
 			}
 		}

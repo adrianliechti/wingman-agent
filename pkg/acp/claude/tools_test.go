@@ -169,6 +169,74 @@ func TestMCPConfigJSON(t *testing.T) {
 	}
 }
 
+func TestToolCallTrackerEmitsStartOnceThenRefines(t *testing.T) {
+	tracker := newToolCallTracker()
+
+	var calls []string
+	start := func() error { calls = append(calls, "start"); return nil }
+	refine := func() error { calls = append(calls, "refine"); return nil }
+
+	if err := tracker.emit("tool-1", start, refine); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.emit("tool-1", start, refine); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.emit("tool-2", start, refine); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"start", "refine", "start"}
+	if len(calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Errorf("calls[%d] = %q, want %q", i, calls[i], want[i])
+		}
+	}
+}
+
+func TestShouldEmitToolCall(t *testing.T) {
+	cases := map[string]bool{
+		"Bash":      true,
+		"Write":     true,
+		"TodoWrite": false,
+		"Task":      false,
+		"Agent":     false,
+	}
+	for name, want := range cases {
+		if got := shouldEmitToolCall(name); got != want {
+			t.Errorf("shouldEmitToolCall(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestBashImageResultBlocksSurfacesImage(t *testing.T) {
+	raw := []byte(`[{"type":"text","text":"saved"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]`)
+	blocks, ok := bashImageResultBlocks(raw)
+	if !ok {
+		t.Fatal("expected mixed content to be detected")
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks, got %d: %+v", len(blocks), blocks)
+	}
+	if blocks[0].Content == nil || blocks[0].Content.Content.Text == nil || blocks[0].Content.Content.Text.Text != "saved" {
+		t.Errorf("text block = %+v", blocks[0])
+	}
+	if blocks[1].Content == nil || blocks[1].Content.Content.Image == nil || blocks[1].Content.Content.Image.Data != "AAAA" {
+		t.Errorf("image block = %+v", blocks[1])
+	}
+
+	if _, ok := bashImageResultBlocks([]byte(`[{"type":"text","text":"plain output"}]`)); ok {
+		t.Error("text-only array should fall back to normal extraction (ok=false)")
+	}
+
+	if blocks, ok := bashImageResultBlocks([]byte(`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":""}}]`)); ok {
+		t.Errorf("non-text content with no extractable data should fall back (ok=false), got blocks=%+v", blocks)
+	}
+}
+
 func TestResolveModelAlias(t *testing.T) {
 	models := []ModelEntry{{ID: "claude-opus-4-8", Name: "Opus"}, {ID: "claude-haiku-4-5", Name: "Haiku"}}
 	if m := resolveModel(models, "claude-opus-4-8"); m == nil || m.ID != "claude-opus-4-8" {

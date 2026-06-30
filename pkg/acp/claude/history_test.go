@@ -1,6 +1,31 @@
 package claude
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestScanSessionMetadataPrefersLatestAITitle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	lines := `{"type":"user","cwd":"/proj","message":{"role":"user","content":"hello"}}
+{"type":"ai-title","aiTitle":"First title"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}
+{"type":"ai-title","aiTitle":"Second, more accurate title"}
+`
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	title, cwd := scanSessionMetadata(path)
+	if title != "Second, more accurate title" {
+		t.Errorf("title = %q, want the latest ai-title line", title)
+	}
+	if cwd != "/proj" {
+		t.Errorf("cwd = %q, want /proj", cwd)
+	}
+}
 
 func TestStripMarkerTags(t *testing.T) {
 

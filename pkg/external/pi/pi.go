@@ -17,6 +17,25 @@ func BinPath() string {
 	return external.LookupPath("pi", "pi")
 }
 
+// ConfigDir returns a stable, wingman-owned pi config directory (PI_CODING_AGENT_DIR).
+// Unlike the launcher's ephemeral temp dir, this persists so pi sessions written
+// under <dir>/sessions survive across runs and can be listed/loaded.
+func ConfigDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".wingman", "pi")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func SessionsDir(configDir string) string {
+	return filepath.Join(configDir, "sessions")
+}
+
 func Run(ctx context.Context, args []string, options *Options) error {
 	if options == nil {
 		options = new(Options)
@@ -44,8 +63,25 @@ func Run(ctx context.Context, args []string, options *Options) error {
 
 	defer os.RemoveAll(dir)
 
-	if err := writeModels(dir, cfg); err != nil {
+	if err := WriteModels(dir, cfg); err != nil {
 		return err
+	}
+
+	args = append(BuildArgs(cfg), args...)
+
+	cmd := exec.CommandContext(ctx, options.Path, args...)
+	cmd.Env = BuildEnv(options.Env, dir)
+
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
+}
+
+func BuildEnv(parent []string, dir string) []string {
+	if parent == nil {
+		parent = os.Environ()
 	}
 
 	vars := map[string]string{
@@ -55,25 +91,17 @@ func Run(ctx context.Context, args []string, options *Options) error {
 		"PI_SKIP_VERSION_CHECK": "1",
 	}
 
-	env := options.Env
+	env := make([]string, 0, len(parent)+len(vars))
+	env = append(env, parent...)
 
 	for k, v := range vars {
 		env = append(env, k+"="+v)
 	}
 
-	args = append(buildArgs(cfg), args...)
-
-	cmd := exec.CommandContext(ctx, options.Path, args...)
-	cmd.Env = env
-
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
+	return env
 }
 
-func buildArgs(cfg *PiConfig) []string {
+func BuildArgs(cfg *PiConfig) []string {
 	args := []string{"--provider", providerName}
 
 	if cfg.Model != "" {
@@ -83,7 +111,7 @@ func buildArgs(cfg *PiConfig) []string {
 	return args
 }
 
-func writeModels(dir string, cfg *PiConfig) error {
+func WriteModels(dir string, cfg *PiConfig) error {
 	type model struct {
 		ID string `json:"id"`
 	}

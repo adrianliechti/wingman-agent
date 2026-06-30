@@ -19,6 +19,61 @@ type toolInfo struct {
 	content   []acp.ToolCallContent
 }
 
+// toolCallStartUpdate builds the tool_call notification for a tool_use. It's
+// shared by the two sites that can be first to surface one — the streamed
+// tool_use block (events.go) and the eager permission-request path
+// (approvals.go) — so they can't drift apart.
+func toolCallStartUpdate(id, name string, rawInput json.RawMessage, cwd string, status acp.ToolCallStatus) acp.SessionUpdate {
+	info := toolInfoFromToolUse(name, rawInput, cwd)
+	opts := []acp.ToolCallStartOpt{
+		acp.WithStartKind(info.kind),
+		acp.WithStartStatus(status),
+	}
+	if input, ok := unmarshalAny(rawInput); ok {
+		opts = append(opts, acp.WithStartRawInput(input))
+	}
+	if len(info.content) > 0 {
+		opts = append(opts, acp.WithStartContent(info.content))
+	}
+	if len(info.locations) > 0 {
+		opts = append(opts, acp.WithStartLocations(info.locations))
+	}
+	return acp.StartToolCall(acp.ToolCallId(id), info.title, opts...)
+}
+
+// toolCallRefineUpdate builds the tool_call_update that refines a tool_call
+// already emitted by the other path with the now-complete info, instead of
+// duplicating it. See toolCallTracker.
+func toolCallRefineUpdate(id, name string, rawInput json.RawMessage, cwd string, status acp.ToolCallStatus) acp.SessionUpdate {
+	info := toolInfoFromToolUse(name, rawInput, cwd)
+	opts := []acp.ToolCallUpdateOpt{
+		acp.WithUpdateTitle(info.title),
+		acp.WithUpdateKind(info.kind),
+		acp.WithUpdateStatus(status),
+	}
+	if input, ok := unmarshalAny(rawInput); ok {
+		opts = append(opts, acp.WithUpdateRawInput(input))
+	}
+	if len(info.content) > 0 {
+		opts = append(opts, acp.WithUpdateContent(info.content))
+	}
+	if len(info.locations) > 0 {
+		opts = append(opts, acp.WithUpdateLocations(info.locations))
+	}
+	return acp.UpdateToolCall(acp.ToolCallId(id), opts...)
+}
+
+func unmarshalAny(raw json.RawMessage) (any, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, false
+	}
+	return v, true
+}
+
 func toDisplayPath(filePath, cwd string) string {
 	if cwd == "" || filePath == "" {
 		return filePath
@@ -283,6 +338,15 @@ func grepLabel(rawInput json.RawMessage) string {
 }
 
 func isPlanTool(name string) bool { return name == "TodoWrite" }
+
+// shouldEmitToolCall reports whether a tool_use should surface as its own
+// ACP tool_call. TodoWrite renders as a plan update instead, and Task/Agent
+// (subagent launches) are excluded so a permission prompt for one never
+// surfaces a stray tool_call ahead of however the subagent's own activity
+// is rendered.
+func shouldEmitToolCall(name string) bool {
+	return !isPlanTool(name) && name != "Agent" && name != "Task"
+}
 
 func planEntriesFromTodoWrite(rawInput json.RawMessage) (entries []acp.PlanEntry, ok bool) {
 	var in struct {

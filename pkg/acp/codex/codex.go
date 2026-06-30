@@ -116,6 +116,7 @@ type threadStartResponse struct {
 type threadInfo struct {
 	ID    string    `json:"id"`
 	Cwd   string    `json:"cwd"`
+	Path  *string   `json:"path,omitempty"`
 	Turns []rawTurn `json:"turns,omitempty"`
 }
 
@@ -130,14 +131,33 @@ type threadResumeParams struct {
 	Model         string         `json:"model,omitempty"`
 	ModelProvider string         `json:"modelProvider,omitempty"`
 	Config        map[string]any `json:"config,omitempty"`
-
-	ExcludeTurns bool `json:"excludeTurns,omitempty"`
 }
 
 type threadResumeResponse struct {
 	Thread          threadInfo `json:"thread"`
 	Model           string     `json:"model"`
 	ReasoningEffort *string    `json:"reasoningEffort"`
+}
+
+type threadReadParams struct {
+	ThreadID     string `json:"threadId"`
+	IncludeTurns bool   `json:"includeTurns,omitempty"`
+}
+
+type threadReadResponse struct {
+	Thread threadInfo `json:"thread"`
+}
+
+type threadUnsubscribeParams struct {
+	ThreadID string `json:"threadId"`
+}
+
+type configReadParams struct {
+	IncludeLayers bool `json:"includeLayers"`
+}
+
+type configReadResponse struct {
+	Config map[string]any `json:"config"`
 }
 
 type threadListParams struct {
@@ -278,6 +298,22 @@ func (c *codexClient) turnInterrupt(ctx context.Context, p turnInterruptParams) 
 func (c *codexClient) threadResume(ctx context.Context, p threadResumeParams) (threadResumeResponse, error) {
 	var out threadResumeResponse
 	err := c.rpc.call(ctx, "thread/resume", p, &out)
+	return out, err
+}
+
+func (c *codexClient) threadRead(ctx context.Context, p threadReadParams) (threadReadResponse, error) {
+	var out threadReadResponse
+	err := c.rpc.call(ctx, "thread/read", p, &out)
+	return out, err
+}
+
+func (c *codexClient) threadUnsubscribe(ctx context.Context, p threadUnsubscribeParams) error {
+	return c.rpc.call(ctx, "thread/unsubscribe", p, nil)
+}
+
+func (c *codexClient) configRead(ctx context.Context, p configReadParams) (configReadResponse, error) {
+	var out configReadResponse
+	err := c.rpc.call(ctx, "config/read", p, &out)
 	return out, err
 }
 

@@ -14,7 +14,35 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
+// stubClient implements the acp.Client methods that the live test clients in
+// this package don't care about, so each one only needs to define the
+// methods its assertions actually exercise.
+type stubClient struct{}
+
+func (stubClient) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	return acp.ReadTextFileResponse{}, errors.ErrUnsupported
+}
+func (stubClient) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	return acp.WriteTextFileResponse{}, nil
+}
+func (stubClient) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+	return acp.CreateTerminalResponse{}, errors.ErrUnsupported
+}
+func (stubClient) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+	return acp.KillTerminalResponse{}, errors.ErrUnsupported
+}
+func (stubClient) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+	return acp.TerminalOutputResponse{}, errors.ErrUnsupported
+}
+func (stubClient) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	return acp.ReleaseTerminalResponse{}, errors.ErrUnsupported
+}
+func (stubClient) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+	return acp.WaitForTerminalExitResponse{}, errors.ErrUnsupported
+}
+
 type testClient struct {
+	stubClient
 	mu        sync.Mutex
 	text      strings.Builder
 	permCalls int
@@ -39,28 +67,6 @@ func (c *testClient) SessionUpdate(_ context.Context, n acp.SessionNotification)
 		c.mu.Unlock()
 	}
 	return nil
-}
-
-func (c *testClient) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	return acp.ReadTextFileResponse{}, errors.ErrUnsupported
-}
-func (c *testClient) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
-	return acp.WriteTextFileResponse{}, nil
-}
-func (c *testClient) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
-	return acp.CreateTerminalResponse{}, errors.ErrUnsupported
-}
-func (c *testClient) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
-	return acp.KillTerminalResponse{}, errors.ErrUnsupported
-}
-func (c *testClient) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
-	return acp.TerminalOutputResponse{}, errors.ErrUnsupported
-}
-func (c *testClient) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
-	return acp.ReleaseTerminalResponse{}, errors.ErrUnsupported
-}
-func (c *testClient) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
-	return acp.WaitForTerminalExitResponse{}, errors.ErrUnsupported
 }
 
 func TestLiveSession(t *testing.T) {
