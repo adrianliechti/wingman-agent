@@ -6,6 +6,7 @@ type Model struct {
 }
 
 var AvailableModels = []Model{
+	{ID: "claude-sonnet-5", Name: "Claude Sonnet 5"},
 	{ID: "claude-sonnet-4-6", Name: "Claude Sonnet 4.6"},
 	{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5"},
 

@@ -19,6 +19,7 @@ var candidates = []modelGroup{
 		name: "Wingman Claude Sonnet",
 
 		models: []modelEntry{
+			{id: "claude-sonnet-5", inputTokens: 1000000, outputTokens: 128000},
 			{id: "claude-sonnet-4-6", inputTokens: 200000, outputTokens: 64000},
 			{id: "claude-sonnet-4-5", inputTokens: 200000, outputTokens: 64000},
 		},
@@ -28,8 +29,8 @@ var candidates = []modelGroup{
 		name: "Wingman Claude Opus",
 
 		models: []modelEntry{
-			{id: "claude-opus-4-8", inputTokens: 200000, outputTokens: 128000},
-			{id: "claude-opus-4-7", inputTokens: 200000, outputTokens: 128000},
+			{id: "claude-opus-4-8", inputTokens: 1000000, outputTokens: 128000},
+			{id: "claude-opus-4-7", inputTokens: 1000000, outputTokens: 128000},
 			{id: "claude-opus-4-6", inputTokens: 200000, outputTokens: 128000},
 			{id: "claude-opus-4-5", inputTokens: 200000, outputTokens: 64000},
 		},
