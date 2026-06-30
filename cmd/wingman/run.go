@@ -13,6 +13,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/external/goose"
 	"github.com/adrianliechti/wingman-agent/pkg/external/junie"
 	"github.com/adrianliechti/wingman-agent/pkg/external/opencode"
+	"github.com/adrianliechti/wingman-agent/pkg/external/pi"
 )
 
 func runRun(ctx context.Context) {
@@ -42,6 +43,8 @@ func runRun(ctx context.Context) {
 		err = junie.Run(ctx, os.Args[3:], nil)
 	case "opencode":
 		err = opencode.Run(ctx, os.Args[3:], nil)
+	case "pi":
+		err = pi.Run(ctx, os.Args[3:], nil)
 	default:
 		fmt.Fprintln(os.Stderr, "Error: missing or unknown run target")
 		fmt.Fprintln(os.Stderr)

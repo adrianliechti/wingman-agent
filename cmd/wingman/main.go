@@ -67,7 +67,7 @@ Usage:
   wingman run <target> [args]  Run an external agent through wingman
 
 Run targets:
-  claude, claude-desktop, codex, copilot, gemini, goose, junie, opencode
+  claude, claude-desktop, codex, copilot, gemini, goose, junie, opencode, pi
 
 Flags:
   --resume [id]   Resume the latest (or specified) saved session
