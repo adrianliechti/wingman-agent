@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ type session struct {
 	resumeFrom     string
 	forkOnResume   bool
 	started        bool
+	lastTitle      string
 	cancel         context.CancelFunc
 	proc           *claudeProc
 }
@@ -104,11 +106,49 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pa
 			s.dropProc(p)
 			return "", nil, r.err
 		}
+		s.pushTitleUpdate(ctx, conn)
 		return r.stop, r.usage, nil
 	case <-p.dead:
 		s.dropProc(p)
 		return "", nil, fmt.Errorf("claude process exited unexpectedly")
 	}
+}
+
+// pushTitleUpdate notifies the client when the CLI's auto-generated session
+// title has changed since the last time we looked. The CLI has no push event
+// for it — it's regenerated in the background and persisted to the session's
+// JSONL file — so we read it back at turn end, the same point a new title
+// would have landed, and only notify when it actually changed.
+func (s *session) pushTitleUpdate(ctx context.Context, conn *acp.AgentSideConnection) {
+	dir := projectDirFor(s.cwd)
+	if dir == "" {
+		return
+	}
+	title, _ := scanSessionMetadata(filepath.Join(dir, string(s.id)+".jsonl"))
+	if title == "" {
+		return
+	}
+
+	s.mu.Lock()
+	changed := title != s.lastTitle
+	if changed {
+		s.lastTitle = title
+	}
+	s.mu.Unlock()
+	if !changed {
+		return
+	}
+
+	t := title
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	_ = conn.SessionUpdate(ctx, acp.SessionNotification{
+		SessionId: s.id,
+		Update: acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{
+			SessionUpdate: "session_info_update",
+			Title:         &t,
+			UpdatedAt:     &updatedAt,
+		}},
+	})
 }
 
 func (s *session) ensureProc(conn *acp.AgentSideConnection, path string, env []string) (*claudeProc, error) {
@@ -155,6 +195,7 @@ func (s *session) ensureProc(conn *acp.AgentSideConnection, path string, env []s
 		kill:    kill,
 		cwd:     s.cwd,
 		tools:   toolUseCache{},
+		emitted: newToolCallTracker(),
 		results: make(chan turnResult, 1),
 		dead:    make(chan struct{}),
 	}
@@ -188,6 +229,7 @@ type claudeProc struct {
 	kill    context.CancelFunc
 	cwd     string
 	tools   toolUseCache
+	emitted *toolCallTracker
 	results chan turnResult
 	dead    chan struct{}
 }
@@ -221,7 +263,7 @@ func (p *claudeProc) shutdown() {
 
 func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, r io.Reader) {
 	defer close(p.dead)
-	app := &approver{ctx: ctx, conn: conn, sid: sid, out: p.out}
+	app := &approver{ctx: ctx, conn: conn, sid: sid, out: p.out, cwd: p.cwd, emitted: p.emitted}
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -241,7 +283,7 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 				fmt.Fprintf(os.Stderr, "claude-acp: emit stream event: %v\n", err)
 			}
 		case "assistant":
-			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools, true); err != nil {
+			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools, p.emitted, true); err != nil {
 				fmt.Fprintf(os.Stderr, "claude-acp: emit assistant: %v\n", err)
 			}
 		case "user":

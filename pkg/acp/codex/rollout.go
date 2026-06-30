@@ -10,7 +10,10 @@ import (
 	"strings"
 )
 
-func rolloutCommandOutputs(sessionID string) map[string]string {
+func rolloutCommandOutputs(sessionID, explicitPath string) map[string]string {
+	if out := readRolloutFile(explicitPath); out != nil {
+		return out
+	}
 	if sessionID == "" {
 		return nil
 	}
@@ -18,11 +21,13 @@ func rolloutCommandOutputs(sessionID string) map[string]string {
 	if err != nil {
 		return nil
 	}
-	path := findRolloutFile(filepath.Join(home, ".codex", "sessions"), sessionID)
+	return readRolloutFile(findRolloutFile(filepath.Join(home, ".codex", "sessions"), sessionID))
+}
+
+func readRolloutFile(path string) map[string]string {
 	if path == "" {
 		return nil
 	}
-
 	f, err := os.Open(path)
 	if err != nil {
 		return nil

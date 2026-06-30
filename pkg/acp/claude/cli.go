@@ -72,6 +72,7 @@ type cliMsgBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
+	Source    *cliImageSource `json:"source,omitempty"`
 }
 
 type cliResult struct {

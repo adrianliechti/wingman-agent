@@ -68,8 +68,13 @@ func modelConfigOption(models []modelEntry, currentID string) acp.SessionConfigO
 		}
 		ungrouped = append(ungrouped, opt)
 	}
-	if findModel(models, currentID) == nil && len(models) > 0 {
+	if currentID == "" && len(models) > 0 {
 		currentID = models[0].ID
+	}
+	if currentID != "" && findModel(models, currentID) == nil {
+		ungrouped = append(acp.SessionConfigSelectOptionsUngrouped{
+			{Value: acp.SessionConfigValueId(currentID), Name: currentID},
+		}, ungrouped...)
 	}
 	opt := acp.NewSessionConfigOptionSelect(
 		acp.SessionConfigValueId(currentID),

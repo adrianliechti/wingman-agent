@@ -35,7 +35,7 @@ func emitStreamEvent(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: update})
 }
 
-func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cwd string, cache toolUseCache, streamed bool) error {
+func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cwd string, cache toolUseCache, tracker *toolCallTracker, streamed bool) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -68,23 +68,10 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 				update = acp.UpdatePlan(entries...)
 				break
 			}
-			info := toolInfoFromToolUse(b.Name, b.Input, cwd)
-			var input any
-			if len(b.Input) > 0 {
-				_ = json.Unmarshal(b.Input, &input)
+			if err := emitToolUseCall(ctx, conn, sid, b, cwd, tracker); err != nil {
+				return err
 			}
-			opts := []acp.ToolCallStartOpt{
-				acp.WithStartKind(info.kind),
-				acp.WithStartStatus(acp.ToolCallStatusInProgress),
-				acp.WithStartRawInput(input),
-			}
-			if len(info.content) > 0 {
-				opts = append(opts, acp.WithStartContent(info.content))
-			}
-			if len(info.locations) > 0 {
-				opts = append(opts, acp.WithStartLocations(info.locations))
-			}
-			update = acp.StartToolCall(acp.ToolCallId(b.ID), info.title, opts...)
+			continue
 		default:
 			continue
 		}
@@ -96,6 +83,29 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 		}
 	}
 	return nil
+}
+
+// emitToolUseCall surfaces a streamed tool_use block as a tool_call, unless a
+// concurrent permission request for the same id already claimed it (see
+// toolCallTracker), in which case it sends a tool_call_update that refines
+// the eagerly-emitted call with the now-complete info instead of duplicating
+// it.
+func emitToolUseCall(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, b cliMsgBlock, cwd string, tracker *toolCallTracker) error {
+	send := func(u acp.SessionUpdate) error {
+		return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: u})
+	}
+	start := func() error {
+		return send(toolCallStartUpdate(b.ID, b.Name, b.Input, cwd, acp.ToolCallStatusInProgress))
+	}
+
+	if b.ID == "" || tracker == nil || !shouldEmitToolCall(b.Name) {
+		return start()
+	}
+
+	refine := func() error {
+		return send(toolCallRefineUpdate(b.ID, b.Name, b.Input, cwd, acp.ToolCallStatusInProgress))
+	}
+	return tracker.emit(b.ID, start, refine)
 }
 
 func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache) error {
@@ -139,6 +149,11 @@ func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 }
 
 func toolResultContent(name string, b cliMsgBlock) []acp.ToolCallContent {
+	if name == "Bash" && !b.IsError {
+		if blocks, ok := bashImageResultBlocks(b.Content); ok {
+			return blocks
+		}
+	}
 	text := extractToolResultText(b.Content)
 	if b.IsError {
 		if text == "" {
@@ -165,6 +180,52 @@ func toolResultContent(name string, b cliMsgBlock) []acp.ToolCallContent {
 		}
 		return []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(text))}
 	}
+}
+
+// bashImageResultBlocks handles a Bash tool_result whose content array
+// contains a non-text block (e.g. an image from a command piping a base64
+// data URI). extractToolResultText only collects "text" blocks, so without
+// this, image output is silently dropped. ok is false for text-only or
+// non-array content, telling the caller to fall back to the normal
+// text-extraction path (which keeps the existing console code-fence
+// formatting for plain Bash output).
+func bashImageResultBlocks(raw json.RawMessage) ([]acp.ToolCallContent, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var parts []cliMsgBlock
+	if err := json.Unmarshal(raw, &parts); err != nil || len(parts) == 0 {
+		return nil, false
+	}
+
+	textOnly := true
+	for _, p := range parts {
+		if p.Type != "text" {
+			textOnly = false
+			break
+		}
+	}
+	if textOnly {
+		return nil, false
+	}
+
+	var blocks []acp.ToolCallContent
+	for _, p := range parts {
+		switch p.Type {
+		case "text":
+			if p.Text != "" {
+				blocks = append(blocks, acp.ToolContent(acp.TextBlock(p.Text)))
+			}
+		case "image":
+			if p.Source != nil && p.Source.Data != "" {
+				blocks = append(blocks, acp.ToolContent(acp.ImageBlock(p.Source.Data, p.Source.MediaType)))
+			}
+		}
+	}
+	if len(blocks) == 0 {
+		return nil, false
+	}
+	return blocks, true
 }
 
 func codeFence(text string) string {

@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -17,7 +18,10 @@ type eventDispatcher struct {
 	sessionID acp.SessionId
 	done      chan turnCompleted
 
-	cmdOut map[string]*strings.Builder
+	cmdOut          map[string]*strings.Builder
+	seenReasoning   map[string]bool
+	guardianStarted map[string]bool
+	lastGoal        string
 
 	mu      sync.Mutex
 	failure error
@@ -26,11 +30,13 @@ type eventDispatcher struct {
 
 func newEventDispatcher(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId) *eventDispatcher {
 	return &eventDispatcher{
-		ctx:       ctx,
-		conn:      conn,
-		sessionID: sid,
-		done:      make(chan turnCompleted, 1),
-		cmdOut:    map[string]*strings.Builder{},
+		ctx:             ctx,
+		conn:            conn,
+		sessionID:       sid,
+		done:            make(chan turnCompleted, 1),
+		cmdOut:          map[string]*strings.Builder{},
+		seenReasoning:   map[string]bool{},
+		guardianStarted: map[string]bool{},
 	}
 }
 
@@ -60,7 +66,12 @@ func (d *eventDispatcher) getFailure() error {
 	return d.failure
 }
 
-func isAuthError(info json.RawMessage) bool {
+// isFatalTurnError reports whether a codex `error` notification represents an
+// unrecoverable turn failure (auth/usage-limit/connection 401). The codex
+// app-server is always launched with a configured provider + token, so these
+// surface as a turn error rather than an ACP auth-required prompt (matching the
+// reference's authConfigured=internalError path).
+func isFatalTurnError(info json.RawMessage) bool {
 	if len(info) == 0 {
 		return false
 	}
@@ -107,11 +118,63 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			d.update(acp.UpdateAgentMessageText(p.Delta))
 		}
 
+	case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
+		var p struct {
+			ItemID string `json:"itemId"`
+			Delta  string `json:"delta"`
+		}
+		if json.Unmarshal(params, &p) == nil && p.ItemID != "" {
+			d.seenReasoning[p.ItemID] = true
+			if p.Delta != "" {
+				d.update(acp.UpdateAgentThoughtText(p.Delta))
+			}
+		}
+
+	case "item/reasoning/summaryPartAdded":
+		var p struct {
+			ItemID string `json:"itemId"`
+		}
+		if json.Unmarshal(params, &p) == nil && p.ItemID != "" {
+			d.seenReasoning[p.ItemID] = true
+			d.update(acp.UpdateAgentThoughtText("\n\n"))
+		}
+
 	case "item/started":
 		d.handleItemStarted(params)
 
 	case "item/completed":
 		d.handleItemCompleted(params)
+
+	case "item/autoApprovalReview/started":
+		var g guardianNotif
+		if json.Unmarshal(params, &g) == nil && g.ReviewID != "" {
+			if d.guardianStarted[g.ReviewID] {
+				d.update(guardianUpdateToolCall(g, params))
+			} else {
+				d.guardianStarted[g.ReviewID] = true
+				d.update(guardianStartToolCall(g, params))
+			}
+		}
+
+	case "item/autoApprovalReview/completed":
+		var g guardianNotif
+		if json.Unmarshal(params, &g) == nil && g.ReviewID != "" {
+			if d.guardianStarted[g.ReviewID] {
+				delete(d.guardianStarted, g.ReviewID)
+				d.update(guardianUpdateToolCall(g, params))
+			} else {
+				d.update(guardianStartToolCall(g, params))
+			}
+		}
+
+	case "thread/goal/updated":
+		d.handleGoalUpdated(params)
+
+	case "thread/goal/cleared":
+		if d.lastGoal != "" {
+			d.lastGoal = ""
+			d.update(acp.UpdateAgentMessageText("\n\nGoal cleared.\n\n"))
+		}
 
 	case "turn/plan/updated":
 		d.handlePlanUpdated(params)
@@ -126,16 +189,20 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		if json.Unmarshal(params, &p) != nil {
 			return
 		}
-		if isAuthError(p.Error.CodexErrorInfo) {
-			d.setFailure(acp.NewAuthRequired(nil))
+		if p.Error.Message != "" {
+			d.update(acp.UpdateAgentMessageText(p.Error.Message + "\n\n"))
+		}
+		if isFatalTurnError(p.Error.CodexErrorInfo) {
+			msg := p.Error.Message
+			if msg == "" {
+				msg = "codex turn failed"
+			}
+			d.setFailure(errors.New(msg))
 
 			select {
 			case d.done <- turnCompleted{}:
 			default:
 			}
-		}
-		if p.Error.Message != "" {
-			d.update(acp.UpdateAgentMessageText(p.Error.Message + "\n\n"))
 		}
 
 	case "warning":
@@ -195,14 +262,6 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			d.update(acp.UpdateAgentMessageText(text + "\n\n"))
 		}
 
-	case "guardianWarning":
-		var p struct {
-			Message string `json:"message"`
-		}
-		if json.Unmarshal(params, &p) == nil && p.Message != "" {
-			d.update(acp.UpdateAgentMessageText("Guardian warning: " + p.Message + "\n\n"))
-		}
-
 	case "model/rerouted":
 		var p struct {
 			FromModel string `json:"fromModel"`
@@ -222,6 +281,33 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			}
 		}
 	}
+}
+
+func (d *eventDispatcher) handleGoalUpdated(params json.RawMessage) {
+	var p struct {
+		Goal struct {
+			Objective string `json:"objective"`
+			Status    string `json:"status"`
+		} `json:"goal"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return
+	}
+	objective := strings.TrimSpace(p.Goal.Objective)
+	snapshot := p.Goal.Status + "\x00" + objective
+	if snapshot == d.lastGoal {
+		return
+	}
+	d.lastGoal = snapshot
+
+	status := goalStatusLabel(p.Goal.Status)
+	var text string
+	if strings.Contains(objective, "\n") {
+		text = fmt.Sprintf("Goal updated (%s):\n%s", status, objective)
+	} else {
+		text = fmt.Sprintf("Goal updated (%s): %s", status, objective)
+	}
+	d.update(acp.UpdateAgentMessageText("\n\n" + text + "\n\n"))
 }
 
 func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
@@ -305,18 +391,20 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 		))
 
 	case "webSearch":
-		var it struct {
-			Query string `json:"query"`
+		d.update(webSearchStartToolCall(env.Item, acp.ToolCallStatusInProgress))
+
+	case "imageView":
+		if u, ok := imageViewToolCall(env.Item); ok {
+			d.update(u)
 		}
-		_ = json.Unmarshal(env.Item, &it)
-		title := "Web search"
-		if it.Query != "" {
-			title = "Web search: " + it.Query
+
+	case "imageGeneration":
+		d.update(imageGenStartToolCall(id))
+
+	case "collabAgentToolCall":
+		if u, ok := collabStartToolCall(env.Item); ok {
+			d.update(u)
 		}
-		d.update(acp.StartToolCall(acp.ToolCallId(id), title,
-			acp.WithStartKind(acp.ToolKindSearch),
-			acp.WithStartStatus(acp.ToolCallStatusInProgress),
-		))
 	}
 }
 
@@ -360,26 +448,89 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		}
 		d.update(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
 
-	case "dynamicToolCall", "mcpToolCall", "webSearch":
+	case "dynamicToolCall":
 		var it struct {
 			Status string `json:"status"`
 		}
 		_ = json.Unmarshal(env.Item, &it)
-		status := toolStatusFor(it.Status)
-		if kind == "webSearch" {
-			status = acp.ToolCallStatusCompleted
-		}
-		d.update(acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(status)))
+		d.update(acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(toolStatusFor(it.Status))))
 
-	case "reasoning":
+	case "mcpToolCall":
 		var it struct {
-			Summary []string `json:"summary"`
+			Server string          `json:"server"`
+			Tool   string          `json:"tool"`
+			Args   json.RawMessage `json:"arguments"`
+			Status string          `json:"status"`
+			Result json.RawMessage `json:"result"`
+			Error  json.RawMessage `json:"error"`
 		}
 		_ = json.Unmarshal(env.Item, &it)
-		if len(it.Summary) > 0 && it.Summary[0] != "" {
-			d.update(acp.UpdateAgentThoughtText(it.Summary[0]))
+		var args any
+		_ = json.Unmarshal(it.Args, &args)
+		opts := []acp.ToolCallUpdateOpt{
+			acp.WithUpdateStatus(toolStatusFor(it.Status)),
+			acp.WithUpdateRawInput(map[string]any{"server": it.Server, "tool": it.Tool, "arguments": args}),
+		}
+		if out := mcpRawOutput(it.Result, it.Error); out != nil {
+			opts = append(opts, acp.WithUpdateRawOutput(out))
+		}
+		d.update(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
+
+	case "webSearch":
+		d.update(webSearchCompleteToolCall(env.Item))
+
+	// imageView is emitted once on item/started, so it has no completed case.
+
+	case "imageGeneration":
+		if u, ok := imageGenCompleteToolCall(env.Item); ok {
+			d.update(u)
+		}
+
+	case "collabAgentToolCall":
+		if u, ok := collabCompleteToolCall(env.Item); ok {
+			d.update(u)
+		}
+
+	case "reasoning":
+		if d.seenReasoning[id] {
+			delete(d.seenReasoning, id)
+			return
+		}
+		var it struct {
+			Summary []string `json:"summary"`
+			Content []string `json:"content"`
+		}
+		_ = json.Unmarshal(env.Item, &it)
+		if text := joinReasoning(it.Summary, it.Content); text != "" {
+			d.update(acp.UpdateAgentThoughtText(text))
 		}
 	}
+}
+
+func mcpRawOutput(result, mcpErr json.RawMessage) map[string]any {
+	hasResult := len(result) > 0 && string(result) != "null"
+	hasErr := len(mcpErr) > 0 && string(mcpErr) != "null"
+	if !hasResult && !hasErr {
+		return nil
+	}
+	var res, e any
+	_ = json.Unmarshal(result, &res)
+	_ = json.Unmarshal(mcpErr, &e)
+	return map[string]any{"result": res, "error": e}
+}
+
+func joinReasoning(summary, content []string) string {
+	parts := summary
+	if len(parts) == 0 {
+		parts = content
+	}
+	var nonEmpty []string
+	for _, p := range parts {
+		if p != "" {
+			nonEmpty = append(nonEmpty, p)
+		}
+	}
+	return strings.Join(nonEmpty, "\n\n")
 }
 
 func (d *eventDispatcher) handleTokenUsage(params json.RawMessage) {

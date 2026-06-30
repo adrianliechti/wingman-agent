@@ -29,6 +29,10 @@ type Agent struct {
 	modelsMu     sync.Mutex
 	modelsLoaded bool
 	models       []modelEntry
+
+	providerMu     sync.Mutex
+	providerLoaded bool
+	modelProvider  string
 }
 
 var _ acp.Agent = (*Agent)(nil)
@@ -72,6 +76,26 @@ func (a *Agent) ensureModels(ctx context.Context) {
 	}
 	a.models = modelsFromCodex(all)
 	a.modelsLoaded = true
+}
+
+// resumeModelProvider returns the provider to pin onto resumed threads so they
+// keep using the configured (e.g. Wingman) provider instead of whatever the
+// rollout persisted. Read once from the codex config and cached.
+func (a *Agent) resumeModelProvider(ctx context.Context) string {
+	a.providerMu.Lock()
+	defer a.providerMu.Unlock()
+	if a.providerLoaded {
+		return a.modelProvider
+	}
+	resp, err := a.codex.configRead(ctx, configReadParams{})
+	if err != nil {
+		return ""
+	}
+	if mp, ok := resp.Config["model_provider"].(string); ok {
+		a.modelProvider = mp
+	}
+	a.providerLoaded = true
+	return a.modelProvider
 }
 
 func (a *Agent) Initialize(ctx context.Context, _ acp.InitializeRequest) (acp.InitializeResponse, error) {
@@ -265,7 +289,7 @@ func (a *Agent) SetSessionConfigOption(_ context.Context, params acp.SetSessionC
 	}, nil
 }
 
-func (a *Agent) CloseSession(_ context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
+func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
 	a.mu.Lock()
 	s := a.sessions[params.SessionId]
 	delete(a.sessions, params.SessionId)
@@ -273,6 +297,7 @@ func (a *Agent) CloseSession(_ context.Context, params acp.CloseSessionRequest) 
 	if s != nil {
 		s.interrupt(context.Background(), a.codex)
 	}
+	_ = a.codex.threadUnsubscribe(ctx, threadUnsubscribeParams{ThreadID: string(params.SessionId)})
 	return acp.CloseSessionResponse{}, nil
 }
 
@@ -284,6 +309,7 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	if s != nil {
 		s.interrupt(ctx, a.codex)
 	}
+	_ = a.codex.threadUnsubscribe(ctx, threadUnsubscribeParams{ThreadID: string(params.SessionId)})
 	if err := a.codex.threadArchive(ctx, threadArchiveParams{ThreadID: string(params.SessionId)}); err != nil {
 		return acp.UnstableDeleteSessionResponse{}, fmt.Errorf("thread/archive: %w", err)
 	}
@@ -340,10 +366,10 @@ func sessionUpdatedAt(unix int64) *string {
 
 func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
 	resp, err := a.codex.threadResume(ctx, threadResumeParams{
-		ThreadID:     string(params.SessionId),
-		Cwd:          params.Cwd,
-		Config:       sessionConfig(params.Cwd, params.McpServers),
-		ExcludeTurns: true,
+		ThreadID:      string(params.SessionId),
+		Cwd:           params.Cwd,
+		ModelProvider: a.resumeModelProvider(ctx),
+		Config:        sessionConfig(params.Cwd, params.McpServers),
 	})
 	if err != nil {
 		return acp.ResumeSessionResponse{}, fmt.Errorf("thread/resume: %w", err)
@@ -357,19 +383,32 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
 	resp, err := a.codex.threadResume(ctx, threadResumeParams{
-		ThreadID: string(params.SessionId),
-		Cwd:      params.Cwd,
-		Config:   sessionConfig(params.Cwd, params.McpServers),
+		ThreadID:      string(params.SessionId),
+		Cwd:           params.Cwd,
+		ModelProvider: a.resumeModelProvider(ctx),
+		Config:        sessionConfig(params.Cwd, params.McpServers),
 	})
 	if err != nil {
 		return acp.LoadSessionResponse{}, fmt.Errorf("thread/resume: %w", err)
 	}
 	s := a.registerSession(params.SessionId, resp.Model, derefEffort(resp.ReasoningEffort))
 
-	outputs := rolloutCommandOutputs(string(params.SessionId))
-	streamThreadHistory(ctx, a.conn, s.id, resp.Thread.Turns, outputs)
+	thread := resp.Thread
+	if read, err := a.codex.threadRead(ctx, threadReadParams{ThreadID: string(params.SessionId), IncludeTurns: true}); err == nil {
+		thread = read.Thread
+	}
+
+	outputs := rolloutCommandOutputs(string(params.SessionId), threadPath(thread))
+	streamThreadHistory(ctx, a.conn, s.id, thread.Turns, outputs)
 	return acp.LoadSessionResponse{
 		Modes:         buildSessionModeState(s.mode),
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
+}
+
+func threadPath(t threadInfo) string {
+	if t.Path != nil {
+		return *t.Path
+	}
+	return ""
 }

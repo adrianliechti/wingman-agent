@@ -61,13 +61,13 @@ func printHelp(w io.Writer) {
 Usage:
   wingman [--resume [id]]      Launch the agent TUI
   wingman server [-port N] [-no-browser]  Run the web UI server
-  wingman acp [target]         Run as an ACP stdio server (wingman | claude | codex)
+  wingman acp [target]         Run as an ACP stdio server (wingman | claude | codex | pi)
   wingman claw                 Run the claw multi-agent runner
   wingman proxy [-port N]      Run the API proxy + dashboard (requires WINGMAN_URL)
   wingman run <target> [args]  Run an external agent through wingman
 
 Run targets:
-  claude, claude-desktop, codex, copilot, gemini, goose, junie, opencode
+  claude, claude-desktop, codex, copilot, gemini, goose, junie, opencode, pi
 
 Flags:
   --resume [id]   Resume the latest (or specified) saved session
