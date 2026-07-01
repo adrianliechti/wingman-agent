@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"sync"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
@@ -68,6 +69,8 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 				model = a.Model()
 			}
 
+			a.dropForeignReasoning(model)
+
 			effort := ""
 			if a.Config.Effort != nil {
 				effort = a.Effort()
@@ -98,6 +101,13 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 					if isContextOverflowError(err) {
 						a.compactMessages(ctx, true)
 						req.messages = a.Messages
+					} else {
+						// The SDK already retried transport errors with backoff;
+						// this covers mid-stream failures, so wait before resending.
+						select {
+						case <-time.After(2 * time.Second):
+						case <-ctx.Done():
+						}
 					}
 
 					resp, err = complete(ctx, a.client, req, yield)
@@ -144,7 +154,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 			}
 			turns += len(queued)
 
-			if a.shouldCompactProactively(resp.usage.InputTokens) {
+			if a.shouldCompactProactively(model, resp.usage.InputTokens) {
 				a.compactMessages(ctx, false)
 			}
 		}
@@ -158,7 +168,7 @@ func (a *Agent) endRun() {
 	a.queueMu.Unlock()
 }
 
-func (a *Agent) shouldCompactProactively(lastInputTokens int64) bool {
+func (a *Agent) shouldCompactProactively(model string, lastInputTokens int64) bool {
 	if lastInputTokens <= 0 {
 		return false
 	}
@@ -168,7 +178,7 @@ func (a *Agent) shouldCompactProactively(lastInputTokens int64) bool {
 		return false
 	}
 	if window == 0 {
-		window = DefaultContextWindow
+		window = ContextWindowFor(model, a.Config.LargeContext)
 	}
 
 	reserve := a.Config.ReserveTokens

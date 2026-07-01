@@ -23,6 +23,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/todo"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/webfetch"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -419,6 +420,7 @@ func (a *Agent) buildSession() *sessionState {
 			AllowedWriteRoots: allowedWriteRoots,
 		}),
 		shell.Tools(ws.RootPath, elicit),
+		todo.Tools(),
 		webfetch.Tools(),
 		websearch.Tools(),
 		ask.Tools(elicit),
@@ -478,9 +480,10 @@ func (s *sessionState) cancel() {
 
 func (s *sessionState) tools() []tool.Tool {
 	tools := append([]tool.Tool{}, s.baseTools...)
-	mcpTools, lspTools := s.parent.workspace.ManagedTools()
+	mcpTools, lspTools, graphTools := s.parent.workspace.ManagedTools()
 	tools = append(tools, mcpTools...)
 	tools = append(tools, lspTools...)
+	tools = append(tools, graphTools...)
 	if s.planMode.Load() {
 		tools = planModeTools(tools)
 	}

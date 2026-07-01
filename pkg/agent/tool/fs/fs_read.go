@@ -19,7 +19,7 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			fmt.Sprintf("Reads a file from the local filesystem. Results use cat -n format with 1-based line numbers. By default reads the first %d lines; output is capped at %dKB, with a trailing notice telling you which offset to continue from.", DefaultMaxLines, DefaultMaxBytes/1024),
 			"- Use `offset` and `limit` for long files or known ranges. `offset` is a 1-based start line, not a result skip count.",
 			"- Reads files only, not directories. Use `glob` to list files in a directory.",
-			"- Binary files (PDF, images, archives) are rejected.",
+			"- Binary files (PDF, images, archives) are rejected. SVG files are treated as text.",
 		}, "\n"),
 
 		Parameters: map[string]any{

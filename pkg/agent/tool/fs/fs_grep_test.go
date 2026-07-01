@@ -282,11 +282,11 @@ func TestGrepTool(t *testing.T) {
 		}
 	})
 
-	t.Run("grep single file applies files offset", func(t *testing.T) {
+	t.Run("grep single file applies files skip", func(t *testing.T) {
 		result, err := grepTool.Execute(context.Background(), map[string]any{
 			"pattern": "Hello",
 			"path":    "readme.md",
-			"offset":  1,
+			"skip":    1,
 		})
 
 		if err != nil {
@@ -298,22 +298,22 @@ func TestGrepTool(t *testing.T) {
 		}
 	})
 
-	t.Run("grep content offset notice points to next page", func(t *testing.T) {
+	t.Run("grep content skip notice points to next page", func(t *testing.T) {
 		os.WriteFile(filepath.Join(tmpDir, "file3.go"), []byte("package extra\n\nfunc Third() {\n\treturn\n}"), 0644)
 
 		result, err := grepTool.Execute(context.Background(), map[string]any{
 			"pattern":     "func",
 			"output_mode": "content",
 			"head_limit":  1,
-			"offset":      1,
+			"skip":        1,
 		})
 
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result, "pagination = limit: 1, offset: 1") {
-			t.Errorf("expected next offset notice, got: %s", result)
+		if !strings.Contains(result, "pagination = limit: 1, skip: 1") {
+			t.Errorf("expected next skip notice, got: %s", result)
 		}
 	})
 

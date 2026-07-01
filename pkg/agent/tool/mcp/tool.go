@@ -15,12 +15,17 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
+	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 const (
 	listToolsTimeout = 30 * time.Second
 
 	callToolTimeout = 5 * time.Minute
+
+	// maxDescriptionBytes bounds what a single MCP tool can permanently add to
+	// every request; verbose servers otherwise inflate the prompt unbounded.
+	maxDescriptionBytes = 2 * 1024
 )
 
 func Tools(ctx context.Context, m *mcp.Manager) ([]tool.Tool, error) {
@@ -52,10 +57,15 @@ func Tools(ctx context.Context, m *mcp.Manager) ([]tool.Tool, error) {
 }
 
 func convertTool(serverName string, session *sdkmcp.ClientSession, mcpTool sdkmcp.Tool) tool.Tool {
+	effect := tool.EffectMutates
+	if mcpTool.Annotations != nil && mcpTool.Annotations.ReadOnlyHint {
+		effect = tool.EffectReadOnly
+	}
+
 	return tool.Tool{
 		Name:        fmt.Sprintf("%s_%s", serverName, mcpTool.Name),
-		Description: mcpTool.Description,
-		Effect:      tool.StaticEffect(tool.EffectMutates),
+		Description: text.TruncateHead(mcpTool.Description, maxDescriptionBytes),
+		Effect:      tool.StaticEffect(effect),
 		Parameters:  schemaToParams(serverName, mcpTool),
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
 			return callTool(ctx, session, mcpTool.Name, args)

@@ -35,8 +35,14 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		Tools:             toTools(r.tools),
 		ParallelToolCalls: openai.Bool(true),
 
-		Store:      openai.Bool(false),
-		Truncation: responses.ResponseNewParamsTruncationAuto,
+		// Encrypted reasoning lets the model resume its chain of thought across
+		// tool rounds instead of re-reasoning after every result.
+		Include: []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
+
+		Store: openai.Bool(false),
+		// Overflow must surface as an error so compactMessages owns recovery;
+		// "auto" would silently drop mid-conversation context server-side.
+		Truncation: responses.ResponseNewParamsTruncationDisabled,
 	}
 
 	if r.effort != "" {
@@ -110,6 +116,20 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 
 		case responses.ResponseCompletedEvent:
 			usageDelta = responseToUsage(e.Response)
+
+		case responses.ResponseIncompleteEvent:
+			// Output was cut short (e.g. max output tokens); completed items
+			// and usage still count.
+			usageDelta = responseToUsage(e.Response)
+
+		case responses.ResponseFailedEvent:
+			if msg := e.Response.Error.Message; msg != "" {
+				return nil, fmt.Errorf("response failed: %s", msg)
+			}
+			return nil, fmt.Errorf("response failed")
+
+		case responses.ResponseErrorEvent:
+			return nil, fmt.Errorf("response error: %s", e.Message)
 		}
 	}
 
@@ -117,8 +137,18 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		return nil, err
 	}
 
+	messages := toMessages(outputItems)
+
+	for _, m := range messages {
+		for _, c := range m.Content {
+			if c.Reasoning != nil {
+				c.Reasoning.Model = r.model
+			}
+		}
+	}
+
 	return &response{
-		messages: toMessages(outputItems),
+		messages: messages,
 		usage:    usageDelta,
 	}, nil
 }
