@@ -397,7 +397,22 @@ export function useWebSocket() {
 					const idx = sess.entries.findLastIndex(
 						(e) => e.type === "tool" && e.toolId === msg.id,
 					);
-					if (idx < 0) return sess;
+					if (idx < 0) {
+						return {
+							...sess,
+							entries: [
+								...sess.entries,
+								{
+									id: msg.id || nextId(),
+									type: "tool",
+									content: "",
+									toolId: msg.id,
+									toolName: msg.name,
+									toolResult: msg.content,
+								},
+							],
+						};
+					}
 					const updated = [...sess.entries];
 					updated[idx] = { ...updated[idx], toolResult: msg.content };
 					return { ...sess, entries: updated };

@@ -329,9 +329,6 @@ func FormatForPrompt(skills []Skill) string {
 	count := 0
 
 	for _, s := range skills {
-		if s.Location == "" {
-			continue
-		}
 		if count == 0 {
 			fmt.Fprint(&sb, "<available_skills>\n")
 		}
@@ -345,7 +342,9 @@ func FormatForPrompt(skills []Skill) string {
 			fmt.Fprintf(&sb, "    <when-to-use>%s</when-to-use>\n", s.WhenToUse)
 		}
 
-		fmt.Fprintf(&sb, "    <location>%s/SKILL.md</location>\n", displayLocation(s.Location))
+		if s.Location != "" {
+			fmt.Fprintf(&sb, "    <location>%s/SKILL.md</location>\n", displayLocation(s.Location))
+		}
 
 		fmt.Fprint(&sb, "  </skill>\n")
 	}

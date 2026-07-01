@@ -22,6 +22,7 @@ type Similar struct {
 type SimilarResult struct {
 	Target  *Node     `json:"target"`
 	Matches []Similar `json:"matches"`
+	Others  []*Node   `json:"others,omitempty"`
 }
 
 func isCallable(k Kind) bool {

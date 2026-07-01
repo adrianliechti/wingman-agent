@@ -3,6 +3,7 @@ export namespace main {
 	export class Settings {
 	    url: string;
 	    token: string;
+	    large_context?: boolean;
 	    workspaces?: string[];
 	
 	    static createFrom(source: any = {}) {
@@ -13,6 +14,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.url = source["url"];
 	        this.token = source["token"];
+	        this.large_context = source["large_context"];
 	        this.workspaces = source["workspaces"];
 	    }
 	}

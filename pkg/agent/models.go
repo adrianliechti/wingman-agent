@@ -62,4 +62,10 @@ type Reasoning struct {
 	ID string `json:"id,omitempty"`
 
 	Summary string `json:"summary,omitempty"`
+
+	// Content is the provider's opaque (encrypted) reasoning payload, only
+	// replayable to the model that produced it. Model tags the producer so the
+	// agent loop can purge stale payloads when the session model changes.
+	Content string `json:"content,omitempty"`
+	Model   string `json:"model,omitempty"`
 }

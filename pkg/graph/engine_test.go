@@ -92,7 +92,7 @@ func TestTraceCallPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := e.Trace(ctx, "main", "format", false, 8)
+	res, err := e.Trace(ctx, "main", "format", "", false, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestTraceCallPath(t *testing.T) {
 		t.Fatalf("unexpected path: %+v", last)
 	}
 
-	callers, err := e.Trace(ctx, "format", "", true, 8)
+	callers, err := e.Trace(ctx, "format", "", "", true, 8)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/wingman"
@@ -16,14 +15,12 @@ func Tools() []tool.Tool {
 		return nil
 	}
 
-	currentMonthYear := time.Now().Format("January 2006")
-
 	description := strings.Join([]string{
 		"Search the web for current or post-cutoff information.",
 		"- Returns search result blocks with markdown links.",
 		"- After using this tool, include a `Sources:` section listing relevant result URLs as markdown links.",
 		"- Domain filters can include or block specific websites; web search is US-only.",
-		fmt.Sprintf("- Current month: %s. Use this year for recent information, documentation, or current events.", currentMonthYear),
+		"- Use the current date from your environment section when searching for recent information.",
 	}, "\n")
 
 	return []tool.Tool{{
@@ -134,8 +131,6 @@ func searchWingman(ctx context.Context, client *wingman.Client, query string, al
 
 			fmt.Fprintf(&sb, "%s\n\n", r.Content)
 		}
-
-		fmt.Fprintf(&sb, "REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.\n")
 
 		return sb.String(), nil
 	}

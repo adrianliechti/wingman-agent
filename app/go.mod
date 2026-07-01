@@ -42,7 +42,7 @@ require (
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/modelcontextprotocol/go-sdk v1.6.1 // indirect
-	github.com/odvcencio/gotreesitter v0.20.2 // indirect
+	github.com/odvcencio/gotreesitter v0.20.8 // indirect
 	github.com/openai/openai-go/v3 v3.41.0 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect

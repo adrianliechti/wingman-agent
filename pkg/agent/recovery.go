@@ -94,19 +94,113 @@ func (a *Agent) removeOrphanedToolMessages() {
 		}
 	}
 
-	if len(dropped) == 0 {
-		return
+	cleaned := a.Messages
+	changed := false
+
+	if len(dropped) > 0 {
+		cleaned = nil
+		for i, m := range a.Messages {
+			if !dropped[i] {
+				cleaned = append(cleaned, m)
+			}
+		}
+		changed = true
 	}
 
-	var cleaned []Message
-	for i, m := range a.Messages {
-		if !dropped[i] {
-			cleaned = append(cleaned, m)
-		}
+	if pruned, ok := dropDanglingReasoning(cleaned); ok {
+		cleaned = pruned
+		changed = true
+	}
+
+	if !changed {
+		return
 	}
 
 	a.Messages = cleaned
 	a.Revision++
+}
+
+// dropForeignReasoning strips encrypted reasoning payloads that the current
+// model cannot decrypt (produced by a different model, e.g. after switching
+// from GPT to Claude mid-session or reloading a session under a new model).
+// Summaries stay for display; only the opaque payload and its tag are removed.
+func (a *Agent) dropForeignReasoning(model string) {
+	changed := false
+
+	for _, m := range a.Messages {
+		for _, c := range m.Content {
+			r := c.Reasoning
+			if r == nil || r.Content == "" || r.Model == model {
+				continue
+			}
+
+			r.Content = ""
+			r.Model = ""
+			changed = true
+		}
+	}
+
+	if changed {
+		a.Revision++
+	}
+}
+
+// dropDanglingReasoning removes reasoning-only messages that are not followed
+// by assistant output (text or a tool call) from the same turn. Providers
+// reject replayed reasoning items whose required following item is missing —
+// which happens when a broken stream or orphaned-tool-call cleanup strands one.
+func dropDanglingReasoning(messages []Message) ([]Message, bool) {
+	isReasoningOnly := func(m Message) bool {
+		if m.Role != RoleAssistant || len(m.Content) == 0 {
+			return false
+		}
+		for _, c := range m.Content {
+			if c.Reasoning == nil {
+				return false
+			}
+		}
+		return true
+	}
+
+	followedByOutput := func(i int) bool {
+		for j := i + 1; j < len(messages); j++ {
+			if isReasoningOnly(messages[j]) {
+				continue
+			}
+			if messages[j].Role != RoleAssistant {
+				return false
+			}
+			for _, c := range messages[j].Content {
+				if c.ToolCall != nil || c.Text != "" || c.Refusal != "" {
+					return true
+				}
+			}
+			return false
+		}
+		return false
+	}
+
+	var drop map[int]bool
+	for i, m := range messages {
+		if isReasoningOnly(m) && !followedByOutput(i) {
+			if drop == nil {
+				drop = make(map[int]bool)
+			}
+			drop[i] = true
+		}
+	}
+
+	if len(drop) == 0 {
+		return messages, false
+	}
+
+	var out []Message
+	for i, m := range messages {
+		if !drop[i] {
+			out = append(out, m)
+		}
+	}
+	return out, true
 }
 
 func (a *Agent) compactMessages(ctx context.Context, truncateOnFailure bool) {
@@ -188,7 +282,7 @@ func messageBytes(m Message) int {
 			total += len(c.ToolResult.Content)
 		}
 		if c.Reasoning != nil {
-			total += len(c.Reasoning.Summary)
+			total += len(c.Reasoning.Summary) + len(c.Reasoning.Content)
 		}
 	}
 	return total

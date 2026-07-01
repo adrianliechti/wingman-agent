@@ -19,9 +19,6 @@ var sectionEnvironment string
 //go:embed section_memory.txt
 var sectionMemory string
 
-//go:embed section_plan.txt
-var sectionPlan string
-
 //go:embed section_skills.txt
 var sectionSkills string
 
@@ -39,13 +36,12 @@ var (
 	tmplProject     = namedTemplate{"Project Guidelines", template.Must(template.New("project").Parse(sectionProject))}
 	tmplSkills      = namedTemplate{"Skills", template.Must(template.New("skills").Parse(sectionSkills))}
 	tmplMemory      = namedTemplate{"Memory", template.Must(template.New("memory").Parse(sectionMemory))}
-	tmplPlan        = namedTemplate{"Session Plan", template.Must(template.New("plan").Parse(sectionPlan))}
 	tmplEnvironment = namedTemplate{"Environment", template.Must(template.New("environment").Parse(sectionEnvironment))}
 )
 
 var staticTemplates = []namedTemplate{tmplProject, tmplSkills, tmplMemory}
 
-var dynamicTemplates = []namedTemplate{tmplPlan, tmplEnvironment}
+var dynamicTemplates = []namedTemplate{tmplEnvironment}
 
 type SectionData struct {
 	PlanMode            bool

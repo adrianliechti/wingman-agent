@@ -51,7 +51,7 @@ func TestAmbiguousResolutionFallback(t *testing.T) {
 	if _, err := e.Index(ctx); err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.Trace(ctx, "run", "target", false, 8)
+	res, err := e.Trace(ctx, "run", "target", "", false, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestResolverDisambiguates(t *testing.T) {
 	if _, err := e.Index(ctx); err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.Trace(ctx, "run", "target", false, 8)
+	res, err := e.Trace(ctx, "run", "target", "", false, 8)
 	if err != nil {
 		t.Fatal(err)
 	}

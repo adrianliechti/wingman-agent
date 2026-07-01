@@ -23,15 +23,15 @@ func graphTool(engine *graph.Engine) tool.Tool {
 		Description: strings.Join([]string{
 			"Code knowledge graph (tree-sitter, many languages): definitions and their call/type/import links. Use instead of grep/read loops to find symbols and follow relationships; auto-builds on first use. With a language server, prefer `lsp` for precise definitions/references/types.",
 			"Operations (each uses the field in backticks):",
-			"- search `query`: definitions by name regex; optional `kind`, `file`.",
-			"- trace `symbol`: call paths; `direction` callees (default) or callers; optional `target`.",
+			"- search `query`: definitions by name, word tokens (\"update client\" finds UpdateCloudClient), or regex — ranked by relevance; optional `kind`, `file`.",
+			"- trace `symbol`: call paths; `direction` callees (default) or callers; optional `target`, `file`.",
 			"- find_similar `symbol`: functions resembling it (shared callees + name).",
 			"- hierarchy `symbol`: super/sub types and implementers.",
 			"- tests `symbol`: tests covering it, or what a test covers.",
 			"- snippet `symbol`: its source code.",
 			"- deps `file`: module imports/importers; `depth`>1 for transitive.",
 			"- co_changes `file`: files historically committed together with it.",
-			"- changes: current uncommitted edits mapped to definitions.",
+			"- changes: uncommitted edits (or everything since a git ref via `since`) mapped to definitions, plus their unchanged callers (impact).",
 			"- architecture: overview of languages, modules, entry points, hotspots.",
 			"- dead_code: callables with no known caller (candidates; misses reflection/exported/cross-language).",
 			"- index / status: rebuild the graph / report its state.",
@@ -47,11 +47,11 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				},
 				"query": map[string]any{
 					"type":        "string",
-					"description": "search: name regex (case-insensitive).",
+					"description": "search: symbol name, space-separated word tokens, or regex (case-insensitive); results ranked by match quality, kind, and callers.",
 				},
 				"symbol": map[string]any{
 					"type":        "string",
-					"description": "trace/find_similar/hierarchy/tests/snippet: one exact symbol name.",
+					"description": "trace/find_similar/hierarchy/tests/snippet: one exact symbol name; qualify as `pkg.Name` or `path:Name` (path substring) when several definitions share the name.",
 				},
 				"target": map[string]any{
 					"type":        "string",
@@ -69,7 +69,11 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				},
 				"file": map[string]any{
 					"type":        "string",
-					"description": "deps: target module/dir/file. co_changes: exact repo-relative path. search/snippet/tests/find_similar: optional path-substring filter.",
+					"description": "deps: target module/dir/file. co_changes: exact repo-relative path. search/trace/snippet/hierarchy/tests/find_similar: optional path-substring filter.",
+				},
+				"since": map[string]any{
+					"type":        "string",
+					"description": "changes: git ref to diff from (e.g. main, HEAD~5); default compares only uncommitted edits against HEAD.",
 				},
 				"depth": map[string]any{
 					"type":        "integer",
@@ -125,7 +129,7 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				}
 				callers := stringArg(args, "direction") == "callers"
 				depth, _ := tool.IntArg(args, "depth")
-				res, err := engine.Trace(ctx, symbol, strings.TrimSpace(stringArg(args, "target")), callers, depth)
+				res, err := engine.Trace(ctx, symbol, strings.TrimSpace(stringArg(args, "target")), stringArg(args, "file"), callers, depth)
 				if err != nil {
 					return "", err
 				}
@@ -150,7 +154,7 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				return formatNodes(nodes), nil
 
 			case "changes":
-				changes, err := engine.DetectChanges(ctx)
+				changes, err := engine.DetectChanges(ctx, strings.TrimSpace(stringArg(args, "since")))
 				if err != nil {
 					return "", err
 				}
@@ -191,7 +195,7 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				if err != nil {
 					return "", err
 				}
-				return fmt.Sprintf("%s\n%s", nodeLabel(snip.Node), snip.Code), nil
+				return fmt.Sprintf("%s\n%s", nodeLabel(snip.Node), snip.Code) + othersNote(snip.Others), nil
 
 			case "tests":
 				symbol := strings.TrimSpace(stringArg(args, "symbol"))
@@ -283,6 +287,13 @@ func formatTrace(res graph.TraceResult, callers bool) string {
 
 	ambiguous := false
 	var b strings.Builder
+	if len(res.Roots) > 1 {
+		fmt.Fprintf(&b, "%d definitions share this name — paths merge all of them (pass `file` to pick one):\n", len(res.Roots))
+		for _, r := range res.Roots {
+			fmt.Fprintf(&b, "- %s\n", nodeLabel(r))
+		}
+		b.WriteString("\n")
+	}
 	fmt.Fprintf(&b, "%d path(s) (%s):\n", len(res.Paths), verb)
 	paths := res.Paths
 	if len(paths) > maxListItems {
@@ -357,7 +368,7 @@ func formatHierarchy(h graph.HierarchyResult) string {
 	writeNodeList(&b, "Subtypes (extended/embedded by)", h.Subtypes)
 	writeNodeList(&b, "Implements", h.Implements)
 	writeNodeList(&b, "Implemented by", h.Implementers)
-	return strings.TrimRight(b.String(), "\n")
+	return strings.TrimRight(b.String(), "\n") + othersNote(h.Others)
 }
 
 func writeNodeList(b *strings.Builder, title string, nodes []*graph.Node) {
@@ -388,7 +399,7 @@ func formatTests(res graph.TestsResult) string {
 	fmt.Fprint(&b, nodeLabel(res.Symbol))
 	writeNodeList(&b, "Tested by", res.TestedBy)
 	writeNodeList(&b, "Covers", res.Covers)
-	return strings.TrimRight(b.String(), "\n")
+	return strings.TrimRight(b.String(), "\n") + othersNote(res.Others)
 }
 
 func formatSimilar(res graph.SimilarResult) string {
@@ -403,7 +414,7 @@ func formatSimilar(res graph.SimilarResult) string {
 	for _, m := range res.Matches {
 		fmt.Fprintf(&b, "- %s  (%.2f)\n", nodeLabel(m.Node), m.Score)
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return strings.TrimRight(b.String(), "\n") + othersNote(res.Others)
 }
 
 func formatCoChanges(res graph.CoChangesResult) string {
@@ -423,7 +434,7 @@ func formatCoChanges(res graph.CoChangesResult) string {
 
 func formatChanges(changes graph.Changes) string {
 	if len(changes.Files) == 0 {
-		return "No uncommitted changes."
+		return "No changes detected."
 	}
 	var b strings.Builder
 	for _, f := range changes.Files {
@@ -435,6 +446,43 @@ func formatChanges(changes graph.Changes) string {
 		for _, n := range f.Nodes {
 			fmt.Fprintf(&b, "  - %s\n", nodeLabel(n))
 		}
+	}
+
+	if len(changes.Impact) > 0 {
+		fmt.Fprintf(&b, "\nImpact — unchanged callers of changed definitions (%d):\n", len(changes.Impact))
+		shown := changes.Impact
+		if len(shown) > maxListItems {
+			shown = shown[:maxListItems]
+		}
+		for _, imp := range shown {
+			names := make([]string, len(imp.Calls))
+			for i, c := range imp.Calls {
+				names[i] = c.Name
+			}
+			fmt.Fprintf(&b, "- %s — calls %s\n", nodeLabel(imp.Caller), strings.Join(names, ", "))
+		}
+		if len(changes.Impact) > len(shown) {
+			fmt.Fprintf(&b, "  … and %d more caller(s)\n", len(changes.Impact)-len(shown))
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func othersNote(others []*graph.Node) string {
+	if len(others) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n\n%d other definition(s) share this name (pass `file` or qualify the symbol to select):\n", len(others))
+	shown := others
+	if len(shown) > 5 {
+		shown = shown[:5]
+	}
+	for _, n := range shown {
+		fmt.Fprintf(&b, "- %s\n", nodeLabel(n))
+	}
+	if len(others) > len(shown) {
+		fmt.Fprintf(&b, "  … and %d more\n", len(others)-len(shown))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

@@ -120,13 +120,13 @@ func (e *Engine) DeadCode(ctx context.Context, limit int) ([]*Node, error) {
 	return g.deadCode(limit), nil
 }
 
-func (e *Engine) DetectChanges(ctx context.Context) (Changes, error) {
+func (e *Engine) DetectChanges(ctx context.Context, since string) (Changes, error) {
 	g, err := e.ensureIndexed(ctx)
 	if err != nil {
 		return Changes{}, err
 	}
 
-	changed, err := gitChanges(e.root)
+	changed, err := gitChanges(e.root, since)
 	if err != nil {
 		return Changes{}, err
 	}
@@ -203,7 +203,7 @@ type TraceResult struct {
 	Paths []Path
 }
 
-func (e *Engine) Trace(ctx context.Context, from, to string, callers bool, maxDepth int) (TraceResult, error) {
+func (e *Engine) Trace(ctx context.Context, from, to, file string, callers bool, maxDepth int) (TraceResult, error) {
 	g, err := e.ensureIndexed(ctx)
 	if err != nil {
 		return TraceResult{}, err
@@ -211,9 +211,9 @@ func (e *Engine) Trace(ctx context.Context, from, to string, callers bool, maxDe
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	roots := g.lookup(from)
+	roots := g.resolve(from, file)
 	if len(roots) == 0 {
-		return TraceResult{}, fmt.Errorf("no symbol named %q in the graph", from)
+		return TraceResult{}, notFoundErr(from, file)
 	}
 
 	var paths []Path
@@ -251,28 +251,38 @@ func (e *Engine) Hierarchy(ctx context.Context, name, file string) (HierarchyRes
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	cands := g.lookup(name)
+	cands := g.resolve(name, file)
 	if len(cands) == 0 {
-		return HierarchyResult{}, fmt.Errorf("no symbol named %q in the graph", name)
+		return HierarchyResult{}, notFoundErr(name, file)
 	}
 
-	var node *Node
+	node := cands[0]
 	for _, c := range cands {
-		if file != "" && !strings.Contains(c.File, file) {
-			continue
-		}
 		if isTypeKind(c.Kind) {
 			node = c
 			break
 		}
-		if node == nil {
-			node = c
+	}
+	res := g.hierarchy(node.ID)
+	res.Others = othersOf(cands, node)
+	return res, nil
+}
+
+func notFoundErr(name, file string) error {
+	if file != "" {
+		return fmt.Errorf("no symbol named %q in file matching %q", name, file)
+	}
+	return fmt.Errorf("no symbol named %q in the graph", name)
+}
+
+func othersOf(cands []*Node, chosen *Node) []*Node {
+	var out []*Node
+	for _, c := range cands {
+		if c != chosen {
+			out = append(out, c)
 		}
 	}
-	if node == nil {
-		return HierarchyResult{}, fmt.Errorf("no symbol named %q in file matching %q", name, file)
-	}
-	return g.hierarchy(node.ID), nil
+	return out
 }
 
 func isTypeKind(k Kind) bool {
@@ -287,17 +297,13 @@ func (e *Engine) Tests(ctx context.Context, name, file string) (TestsResult, err
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	var node *Node
-	for _, c := range g.lookup(name) {
-		if file == "" || strings.Contains(c.File, file) {
-			node = c
-			break
-		}
+	cands := g.resolve(name, file)
+	if len(cands) == 0 {
+		return TestsResult{}, notFoundErr(name, file)
 	}
-	if node == nil {
-		return TestsResult{}, fmt.Errorf("no symbol named %q in the graph", name)
-	}
-	return g.testsFor(node), nil
+	res := g.testsFor(cands[0])
+	res.Others = othersOf(cands, cands[0])
+	return res, nil
 }
 
 func (e *Engine) Similar(ctx context.Context, name, file string, limit int) (SimilarResult, error) {
@@ -311,26 +317,21 @@ func (e *Engine) Similar(ctx context.Context, name, file string, limit int) (Sim
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	var node *Node
-	for _, c := range g.lookup(name) {
-		if file != "" && !strings.Contains(c.File, file) {
-			continue
-		}
+	cands := g.resolve(name, file)
+	if len(cands) == 0 {
+		return SimilarResult{}, notFoundErr(name, file)
+	}
+	node := cands[0]
+	for _, c := range cands {
 		if isCallable(c.Kind) {
 			node = c
 			break
 		}
-		if node == nil {
-			node = c
-		}
-	}
-	if node == nil {
-		return SimilarResult{}, fmt.Errorf("no symbol named %q in the graph", name)
 	}
 	if !isCallable(node.Kind) {
 		return SimilarResult{}, fmt.Errorf("find_similar works on functions/methods/constructors, but %q is a %s", node.Name, node.Kind)
 	}
-	return SimilarResult{Target: node, Matches: g.similar(node, limit)}, nil
+	return SimilarResult{Target: node, Matches: g.similar(node, limit), Others: othersOf(cands, node)}, nil
 }
 
 func (e *Engine) CoChanges(ctx context.Context, file string, limit int) (CoChangesResult, error) {
@@ -341,8 +342,9 @@ func (e *Engine) CoChanges(ctx context.Context, file string, limit int) (CoChang
 }
 
 type Snippet struct {
-	Node *Node
-	Code string
+	Node   *Node
+	Code   string
+	Others []*Node
 }
 
 func (e *Engine) Snippet(ctx context.Context, name, file string) (Snippet, error) {
@@ -352,29 +354,19 @@ func (e *Engine) Snippet(ctx context.Context, name, file string) (Snippet, error
 	}
 
 	e.mu.RLock()
-	candidates := g.lookup(name)
+	cands := g.resolve(name, file)
 	e.mu.RUnlock()
 
-	if len(candidates) == 0 {
-		return Snippet{}, fmt.Errorf("no symbol named %q in the graph", name)
+	if len(cands) == 0 {
+		return Snippet{}, notFoundErr(name, file)
 	}
 
-	var node *Node
-	for _, c := range candidates {
-		if file == "" || strings.Contains(c.File, file) {
-			node = c
-			break
-		}
-	}
-	if node == nil {
-		return Snippet{}, fmt.Errorf("no symbol named %q in file matching %q", name, file)
-	}
-
+	node := cands[0]
 	code, err := e.readLines(node.File, node.StartLine, node.EndLine)
 	if err != nil {
 		return Snippet{}, err
 	}
-	return Snippet{Node: node, Code: code}, nil
+	return Snippet{Node: node, Code: code, Others: othersOf(cands, node)}, nil
 }
 
 func (e *Engine) readLines(rel string, start, end int) (string, error) {

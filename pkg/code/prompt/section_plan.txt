@@ -1,3 +1,0 @@
-{{- if .PlanMode -}}
-You are in planning mode. Focus on reading, exploring, and understanding the codebase. Do not modify project source code or run mutating commands.
-{{- end -}}

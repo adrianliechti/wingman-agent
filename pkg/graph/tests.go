@@ -33,6 +33,7 @@ type TestsResult struct {
 	Symbol   *Node   `json:"symbol"`
 	TestedBy []*Node `json:"tested_by"`
 	Covers   []*Node `json:"covers"`
+	Others   []*Node `json:"others,omitempty"`
 }
 
 // testsFor derives the test relationship from CALLS edges: for a production

@@ -1,8 +1,9 @@
 package agent
 
 import (
+	"strings"
+
 	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -95,6 +96,15 @@ func assistantToInput(m Message) []responses.ResponseInputItemUnionParam {
 	var items []responses.ResponseInputItemUnionParam
 	output := &responses.ResponseOutputMessageParam{}
 
+	// Reasoning items must precede the output they belong to on the wire.
+	for _, c := range m.Content {
+		if c.Reasoning != nil {
+			if p := reasoningToInput(c.Reasoning); p != nil {
+				items = append(items, responses.ResponseInputItemUnionParam{OfReasoning: p})
+			}
+		}
+	}
+
 	for _, c := range m.Content {
 		if c.Text != "" {
 			output.Content = append(output.Content, responses.ResponseOutputMessageContentUnionParam{
@@ -114,12 +124,6 @@ func assistantToInput(m Message) []responses.ResponseInputItemUnionParam {
 	}
 
 	for _, c := range m.Content {
-		if c.Reasoning != nil {
-			if p := reasoningToInput(c.Reasoning); p != nil {
-				items = append(items, responses.ResponseInputItemUnionParam{OfReasoning: p})
-			}
-		}
-
 		if c.ToolCall != nil && c.ToolCall.ID != "" {
 			items = append(items, responses.ResponseInputItemUnionParam{
 				OfFunctionCall: &responses.ResponseFunctionToolCallParam{
@@ -145,19 +149,25 @@ func assistantToInput(m Message) []responses.ResponseInputItemUnionParam {
 	return items
 }
 
+// reasoningToInput replays a reasoning item only when its opaque payload can
+// actually be used: the provider requires the original item ID plus encrypted
+// content. Payloads from other models never reach this point — the agent loop
+// purges them from the transcript when the session model changes.
 func reasoningToInput(r *Reasoning) *responses.ResponseReasoningItemParam {
-	if r == nil || r.Summary == "" {
+	if r == nil || r.Content == "" || r.ID == "" {
 		return nil
 	}
 
 	p := &responses.ResponseReasoningItemParam{
-		ID: r.ID,
-		Summary: []responses.ResponseReasoningItemSummaryParam{
-			{Text: r.Summary},
-		},
+		ID:               r.ID,
+		EncryptedContent: openai.String(r.Content),
 	}
 
-	p.SetExtraFields(map[string]any{"id": param.Omit})
+	if r.Summary != "" {
+		p.Summary = []responses.ResponseReasoningItemSummaryParam{
+			{Text: r.Summary},
+		}
+	}
 
 	return p
 }
@@ -320,11 +330,19 @@ func fromReasoning(r *responses.ResponseReasoningItemParam) (Message, bool) {
 
 	c := Content{Reasoning: &Reasoning{ID: r.ID}}
 
-	if len(r.Summary) > 0 {
-		c.Reasoning.Summary = r.Summary[0].Text
+	var parts []string
+	for _, s := range r.Summary {
+		if s.Text != "" {
+			parts = append(parts, s.Text)
+		}
+	}
+	c.Reasoning.Summary = strings.Join(parts, "\n\n")
+
+	if r.EncryptedContent.Valid() {
+		c.Reasoning.Content = r.EncryptedContent.Value
 	}
 
-	if c.Reasoning.Summary == "" {
+	if c.Reasoning.Summary == "" && c.Reasoning.Content == "" {
 		return Message{}, false
 	}
 

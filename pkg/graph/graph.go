@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 type Graph struct {
@@ -15,6 +16,7 @@ type Graph struct {
 	byID    map[string]*Node
 	byName  map[string][]*Node
 	byFile  map[string][]*Node
+	tokens  map[string][]string
 	out     map[string][]string
 	in      map[string][]string
 	edgeVia map[string]Provenance
@@ -42,10 +44,13 @@ func (g *Graph) build() {
 	g.implOut = make(map[string][]string)
 	g.implIn = make(map[string][]string)
 
+	g.tokens = make(map[string][]string, len(g.Nodes))
+
 	for _, n := range g.Nodes {
 		g.byID[n.ID] = n
 		g.byName[n.Name] = append(g.byName[n.Name], n)
 		g.byFile[n.File] = append(g.byFile[n.File], n)
+		g.tokens[n.ID] = tokenize(n.Name)
 	}
 
 	for _, e := range g.Edges {
@@ -122,8 +127,14 @@ func (g *Graph) search(opts SearchOpts) []*Node {
 			rx = r
 		}
 	}
+	qLower := strings.ToLower(strings.TrimSpace(opts.Query))
+	qTokens := tokenize(opts.Query)
 
-	var out []*Node
+	type scored struct {
+		node  *Node
+		score int
+	}
+	var out []scored
 	for _, n := range g.Nodes {
 		if opts.Kind != "" && n.Kind != opts.Kind {
 			continue
@@ -131,27 +142,156 @@ func (g *Graph) search(opts SearchOpts) []*Node {
 		if opts.File != "" && !strings.Contains(n.File, opts.File) {
 			continue
 		}
-		if rx != nil && !rx.MatchString(n.Name) {
+		score := g.matchScore(n, qLower, qTokens, rx)
+		if score == 0 {
 			continue
 		}
-		out = append(out, n)
+		out = append(out, scored{n, score + kindBoost(n.Kind) + degreeBoost(len(g.in[n.ID]))})
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
+		if out[i].score != out[j].score {
+			return out[i].score > out[j].score
 		}
-		return out[i].File < out[j].File
+		if out[i].node.Name != out[j].node.Name {
+			return out[i].node.Name < out[j].node.Name
+		}
+		return out[i].node.File < out[j].node.File
 	})
 
 	if len(out) > limit {
 		out = out[:limit]
 	}
-	return out
+	nodes := make([]*Node, len(out))
+	for i, s := range out {
+		nodes[i] = s.node
+	}
+	return nodes
 }
 
-func (g *Graph) lookup(name string) []*Node {
-	return g.byName[name]
+func (g *Graph) matchScore(n *Node, qLower string, qTokens []string, rx *regexp.Regexp) int {
+	if qLower == "" {
+		return 1
+	}
+	nameLower := strings.ToLower(n.Name)
+	switch {
+	case nameLower == qLower:
+		return 100
+	case strings.HasPrefix(nameLower, qLower):
+		return 70
+	case containsAllTokens(g.tokens[n.ID], qTokens):
+		return 55
+	case strings.Contains(nameLower, qLower):
+		return 45
+	case rx != nil && rx.MatchString(n.Name):
+		return 40
+	}
+	return 0
+}
+
+func kindBoost(k Kind) int {
+	switch k {
+	case KindFunction, KindMethod, KindConstructor:
+		return 12
+	case KindClass, KindInterface:
+		return 10
+	case KindType, KindModule:
+		return 6
+	}
+	return 0
+}
+
+func degreeBoost(callers int) int {
+	switch {
+	case callers >= 25:
+		return 8
+	case callers >= 10:
+		return 6
+	case callers >= 3:
+		return 4
+	case callers >= 1:
+		return 2
+	}
+	return 0
+}
+
+func tokenize(s string) []string {
+	var tokens []string
+	var cur []rune
+	flush := func() {
+		if len(cur) > 0 {
+			tokens = append(tokens, strings.ToLower(string(cur)))
+			cur = cur[:0]
+		}
+	}
+	runes := []rune(s)
+	for i, r := range runes {
+		switch {
+		case unicode.IsLetter(r):
+			if unicode.IsUpper(r) && i > 0 {
+				prevLower := unicode.IsLower(runes[i-1])
+				acronymEnd := unicode.IsUpper(runes[i-1]) && i+1 < len(runes) && unicode.IsLower(runes[i+1])
+				if prevLower || acronymEnd {
+					flush()
+				}
+			}
+			cur = append(cur, r)
+		case unicode.IsDigit(r):
+			cur = append(cur, r)
+		default:
+			flush()
+		}
+	}
+	flush()
+	return tokens
+}
+
+func containsAllTokens(have, want []string) bool {
+	if len(want) == 0 {
+		return false
+	}
+	for _, w := range want {
+		found := false
+		for _, h := range have {
+			if strings.HasPrefix(h, w) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// resolve finds definitions for a symbol reference. Besides a bare name it
+// accepts qualified forms: `path:Name` (path substring before a colon) and,
+// when the bare name has no match, `pkg.Name` or `dir/Name` where the prefix
+// filters by file path.
+func (g *Graph) resolve(symbol, file string) []*Node {
+	name := symbol
+	var prefix string
+
+	if i := strings.LastIndex(symbol, ":"); i > 0 {
+		prefix, name = symbol[:i], symbol[i+1:]
+	} else if len(g.byName[symbol]) == 0 {
+		if i := strings.LastIndexAny(symbol, "./"); i > 0 {
+			prefix, name = symbol[:i], symbol[i+1:]
+		}
+	}
+
+	var out []*Node
+	for _, n := range g.byName[name] {
+		if file != "" && !strings.Contains(n.File, file) {
+			continue
+		}
+		if prefix != "" && !strings.Contains(n.File, prefix) && !strings.Contains(n.File, strings.ReplaceAll(prefix, ".", "/")) {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 func (g *Graph) nodesFor(ids []string) []*Node {
@@ -181,6 +321,7 @@ type HierarchyResult struct {
 	Subtypes     []*Node `json:"subtypes"`
 	Implements   []*Node `json:"implements"`
 	Implementers []*Node `json:"implementers"`
+	Others       []*Node `json:"others,omitempty"`
 }
 
 func (g *Graph) hierarchy(id string) HierarchyResult {

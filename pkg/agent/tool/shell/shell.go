@@ -58,9 +58,8 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 		"- Match command syntax to the host OS shown in your environment section. Examples: list dir -> `ls` on Unix, `Get-ChildItem` on PowerShell.",
 		"- Each call starts in the workspace directory. Shell state (env vars, aliases, `cd` from a prior call) does not persist between calls. Use absolute paths or chain dependent commands in one call.",
 		"- For GitHub URLs or PR/issue/release data, prefer `gh` commands (`gh pr view`, `gh issue view`, `gh api`) over `web_fetch`; they return structured authenticated data.",
-		"- For commits: only commit when asked, inspect `git status`, `git diff`, and recent `git log` first, stage specific files by name, never skip hooks, and create a new commit instead of amending unless explicitly requested.",
+		"- Only commit when the user explicitly asked; stage specific files by name; never skip hooks.",
 		"- Quote paths with spaces. Chain dependent commands with `&&` on Unix or PowerShell 7+, and with `; if ($?) { ... }` on Windows PowerShell 5.1. Use separate tool calls for independent commands.",
-		"- Once a check has passed (tests, build, lint), trust it — don't re-run to be sure.",
 		"- Increase timeout for long-running commands. Avoid unnecessary `sleep` / `Start-Sleep`; if polling is needed, run a check command instead of sleeping first.",
 		safetyGuard,
 	}, "\n")

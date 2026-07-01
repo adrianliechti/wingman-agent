@@ -14,7 +14,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-runewidth v0.0.24
 	github.com/modelcontextprotocol/go-sdk v1.6.1
-	github.com/odvcencio/gotreesitter v0.20.2
+	github.com/odvcencio/gotreesitter v0.20.8
 	github.com/openai/openai-go/v3 v3.41.0
 	github.com/rivo/tview v0.42.0
 	github.com/robfig/cron/v3 v3.0.1
@@ -61,5 +61,3 @@ require (
 	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
-
-replace github.com/odvcencio/gotreesitter => github.com/adrianliechti/gotreesitter v0.0.0-20260621172548-9056b01e8ce3
