@@ -136,6 +136,8 @@ var candidates = []modelGroup{
 		name: "Wingman GLM",
 
 		models: []modelEntry{
+			{id: "glm-5.2", inputTokens: 1000000, outputTokens: 131072},
+			{id: "glm-5.1", inputTokens: 202752, outputTokens: 128000},
 			{id: "glm-5", inputTokens: 200000, outputTokens: 128000},
 			{id: "glm-4.7", inputTokens: 200000, outputTokens: 128000},
 		},
@@ -145,6 +147,21 @@ var candidates = []modelGroup{
 
 		models: []modelEntry{
 			{id: "glm-4.7-flash", inputTokens: 200000, outputTokens: 128000},
+		},
+	},
+
+	{
+		name: "Wingman DeepSeek",
+
+		models: []modelEntry{
+			{id: "deepseek-v4-pro", inputTokens: 1000000, outputTokens: 384000},
+		},
+	},
+	{
+		name: "Wingman DeepSeek Flash",
+
+		models: []modelEntry{
+			{id: "deepseek-v4-flash", inputTokens: 1000000, outputTokens: 384000},
 		},
 	},
 
