@@ -28,7 +28,7 @@ func Tools(mgr AgentManager, store *memory.Store) []tool.Tool {
 				"- instructions: written to the agent's AGENTS.md (its identity and behavior)",
 				"- tasks: list of scheduled tasks",
 				"",
-				"Task format: {\"prompt\": \"...\", \"schedule\": \"every 15m\"} or {\"prompt\": \"...\", \"schedule\": \"0 9 * * 1\"}",
+				"Task format: {\"prompt\": \"...\", \"schedule\": \"every 15m\"} with an optional \"script\" pre-check (print {\"wake\": false} to skip a run)",
 			}, "\n"),
 			Parameters: map[string]any{
 				"type": "object",
@@ -52,7 +52,11 @@ func Tools(mgr AgentManager, store *memory.Store) []tool.Tool {
 								},
 								"schedule": map[string]any{
 									"type":        "string",
-									"description": "Schedule: \"every 15m\", cron expression, or ISO 8601 timestamp.",
+									"description": "Schedule: \"every 15m\", cron expression, or timestamp.",
+								},
+								"script": map[string]any{
+									"type":        "string",
+									"description": "Optional pre-check script (same interpreter as the shell tool); print {\"wake\": false} to skip a run silently.",
 								},
 							},
 							"required":             []string{"prompt", "schedule"},
@@ -162,11 +166,14 @@ func parseTasksArg(args map[string]any) ([]schedule.Task, error) {
 
 		prompt, _ := m["prompt"].(string)
 		sched, _ := m["schedule"].(string)
+		script, _ := m["script"].(string)
 
 		task, err := schedule.NewTask(prompt, sched)
 		if err != nil {
 			return nil, fmt.Errorf("tasks[%d]: %w", i, err)
 		}
+
+		task.Script = strings.TrimSpace(script)
 
 		tasks = append(tasks, task)
 	}

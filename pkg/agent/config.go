@@ -137,10 +137,26 @@ func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {
 func DefaultConfig() (*Config, error) {
 	client := createClient()
 
-	return &Config{
+	cfg := &Config{
 		client:       &client,
 		LargeContext: envBool("WINGMAN_LARGE_CONTEXT"),
-	}, nil
+	}
+
+	if model := DefaultModel(); model != "" {
+		cfg.Model = func() string { return model }
+	}
+
+	return cfg, nil
+}
+
+// DefaultModel returns the model requested via environment; WINGMAN_MODEL
+// takes priority over the OpenAI-standard OPENAI_DEFAULT_MODEL.
+func DefaultModel() string {
+	if v := os.Getenv("WINGMAN_MODEL"); v != "" {
+		return v
+	}
+
+	return os.Getenv("OPENAI_DEFAULT_MODEL")
 }
 
 func envBool(name string) bool {

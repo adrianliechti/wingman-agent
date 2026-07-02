@@ -107,6 +107,40 @@ func TestCronTaskFiresWithoutLastRun(t *testing.T) {
 	}
 }
 
+func TestParseScheduleAcceptsLocalTimestamp(t *testing.T) {
+	for _, sched := range []string{"2026-04-15T09:00", "2026-04-15T09:00:00"} {
+		p, err := parseSchedule(sched)
+		if err != nil {
+			t.Fatalf("parseSchedule(%q): %v", sched, err)
+		}
+		want := time.Date(2026, 4, 15, 9, 0, 0, 0, time.Local)
+		if !p.once.Equal(want) {
+			t.Fatalf("parseSchedule(%q) = %v, want %v", sched, p.once, want)
+		}
+	}
+}
+
+func TestRunGate(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	if wake, _ := RunGate(ctx, dir, `echo '{"wake": false}'`); wake {
+		t.Fatal("wake=false output should skip the run")
+	}
+	if wake, _ := RunGate(ctx, dir, `echo '{"wake": true, "data": [1]}'`); !wake {
+		t.Fatal("wake=true output should wake the agent")
+	}
+	if wake, out := RunGate(ctx, dir, `echo checking; echo '{"wake": false}'`); wake || !strings.Contains(out, "checking") {
+		t.Fatalf("trailing JSON line should be honored, got wake=%v out=%q", wake, out)
+	}
+	if wake, _ := RunGate(ctx, dir, `echo not-json`); !wake {
+		t.Fatal("non-JSON output should fail open")
+	}
+	if wake, out := RunGate(ctx, dir, `exit 3`); !wake || !strings.Contains(out, "failed") {
+		t.Fatalf("script failure should fail open with a note, got wake=%v out=%q", wake, out)
+	}
+}
+
 func findTool(t *testing.T, name string) tool.Tool {
 	t.Helper()
 	for _, tl := range Tools(t.TempDir()) {

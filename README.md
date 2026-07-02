@@ -99,7 +99,7 @@ wingman --resume <session-id> # resume a specific session
 |----------|-------------|
 | `OPENAI_API_KEY` | OpenAI API key (required) |
 | `OPENAI_BASE_URL` | Custom OpenAI-compatible API endpoint |
-| `OPENAI_MODEL` | Model to use (auto-selected if not specified) |
+| `OPENAI_DEFAULT_MODEL` | Model to use (auto-selected if not specified) |
 
 **Alternative: Wingman Server**
 
@@ -107,7 +107,7 @@ wingman --resume <session-id> # resume a specific session
 |----------|-------------|
 | `WINGMAN_URL` | Wingman server URL (takes priority over OpenAI vars) |
 | `WINGMAN_TOKEN` | Wingman authentication token |
-| `WINGMAN_MODEL` | Model to use |
+| `WINGMAN_MODEL` | Model to use (takes priority over `OPENAI_DEFAULT_MODEL`) |
 
 > **Note:** The `web_fetch` (URL fetching) and `web_search` (web search) tools require `WINGMAN_URL` to be set, as they delegate to the Wingman server's extract and search APIs.
 

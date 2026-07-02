@@ -98,27 +98,12 @@ func (s *Store) AgentExists(name string) bool {
 	return err == nil && info.IsDir()
 }
 
-func (s *Store) globalContent() string {
+func (s *Store) GlobalContent() string {
 	return readFileTruncated(filepath.Join(s.globalDir(), instructionsFile))
 }
 
-func (s *Store) agentContent(name string) string {
+func (s *Store) AgentContent(name string) string {
 	return readFileTruncated(filepath.Join(s.WorkspaceDir(name), instructionsFile))
-}
-
-func (s *Store) Content(name string) string {
-	global := s.globalContent()
-	local := s.agentContent(name)
-
-	if global == "" {
-		return local
-	}
-
-	if local == "" {
-		return global
-	}
-
-	return global + "\n\n---\n\n" + local
 }
 
 func (s *Store) SoulContent(name string) string {

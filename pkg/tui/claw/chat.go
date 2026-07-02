@@ -6,17 +6,18 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/claw"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
 const (
-	indent   = "    "
+	indent   = "  "
 	barWidth = 4
 )
 
 func (t *TUI) contentWidth() int {
-	w := t.chatWidth - len(indent) - barWidth - 4
+	w := t.chatWidth - len(indent) - barWidth
 	if w < 40 {
 		return 40
 	}
@@ -35,7 +36,7 @@ func (t *TUI) renderMessages(messages []agent.Message) {
 			case c.Text != "":
 				switch msg.Role {
 				case agent.RoleUser:
-					t.writeFormatted(c.Text, false)
+					t.writeFormatted(claw.Unframe(c.Text), false)
 				case agent.RoleAssistant:
 					t.writeFormatted(c.Text, true)
 				}

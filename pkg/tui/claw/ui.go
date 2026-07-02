@@ -39,7 +39,16 @@ func (t *TUI) buildUI() {
 	t.chatView.SetWordWrap(false)
 	t.chatView.SetScrollable(true)
 	t.chatView.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		t.chatWidth = width
+		if width != t.chatWidth {
+			t.chatWidth = width
+
+			if !t.isBusy(t.selected()) {
+				go t.app.QueueUpdateDraw(func() {
+					t.rerenderChat(t.selected())
+				})
+			}
+		}
+
 		return x, y, width, height
 	})
 	t.chatView.SetChangedFunc(func() {

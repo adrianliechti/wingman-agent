@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log"
 	"os"
 	"path/filepath"
@@ -45,7 +46,11 @@ type managedAgent struct {
 	snapUsage    agent.Usage
 
 	cancel  context.CancelFunc
+	root    *os.Root
 	scratch string
+
+	// lastPrune is only touched by this agent's scheduler goroutine
+	lastPrune time.Time
 }
 
 func (ma *managedAgent) updateSnapshot() {
@@ -149,6 +154,10 @@ func (c *Claw) unloadAgent(ma *managedAgent) {
 
 	if ma.scratch != "" {
 		os.RemoveAll(ma.scratch)
+	}
+
+	if ma.root != nil {
+		ma.root.Close()
 	}
 }
 
@@ -268,6 +277,7 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 
 	ma := &managedAgent{
 		agent:   a,
+		root:    root,
 		scratch: scratchDir,
 	}
 	ma.updateSnapshot()
@@ -296,6 +306,72 @@ func (c *Claw) AgentDir(name string) string {
 	return c.config.Memory.AgentDir(name)
 }
 
+// Send routes a message to its target agent and returns the turn stream.
+// It frames the message, serializes the run, and persists the session when
+// the stream ends. Returns nil if the agent does not exist.
+func (c *Claw) Send(ctx context.Context, msg channel.Message) iter.Seq2[agent.Message, error] {
+	ma := c.getAgent(msg.Agent)
+	if ma == nil {
+		return nil
+	}
+
+	return func(yield func(agent.Message, error) bool) {
+		ma.mu.Lock()
+		defer ma.mu.Unlock()
+
+		if ma.notifyRoute == (channel.Route{}) && msg.Channel != "" {
+			ma.notifyRoute = channel.Route{Channel: msg.Channel, Conversation: msg.Conversation}
+		}
+
+		ctx, cancel := context.WithTimeout(ctx, runTimeout)
+		defer cancel()
+
+		turn := ma.agent.Send(ctx, []agent.Content{{Text: frameMessage(msg)}})
+		if turn == nil {
+			return
+		}
+
+		for m, err := range turn {
+			if !yield(m, err) {
+				break
+			}
+		}
+
+		c.saveSession(msg.Agent, ma)
+		ma.updateSnapshot()
+	}
+}
+
+// turnText assembles the text of a turn from streamed deltas. Deltas
+// concatenate as-is; a blank line separates the text of consecutive
+// assistant messages (split by reasoning or tool rounds).
+type turnText struct {
+	sink     func(string)
+	wrote    bool
+	boundary bool
+}
+
+func (t *turnText) add(m agent.Message) {
+	for _, c := range m.Content {
+		switch {
+		case c.Text != "":
+			t.text(c.Text)
+		case c.Reasoning != nil, c.ToolCall != nil, c.ToolResult != nil:
+			t.boundary = true
+		}
+	}
+}
+
+func (t *turnText) text(text string) {
+	if t.wrote && t.boundary {
+		t.sink("\n\n")
+	}
+
+	t.wrote = true
+	t.boundary = false
+	t.sink(text)
+}
+
 func (c *Claw) handleMessage(ctx context.Context, msg channel.Message) {
 	ch := c.findChannel(msg.Channel)
 	if ch == nil {
@@ -308,17 +384,10 @@ func (c *Claw) handleMessage(ctx context.Context, msg channel.Message) {
 		return
 	}
 
-	ma := c.getAgent(msg.Agent)
-	if ma == nil {
-		ch.Send(ctx, msg.Conversation, fmt.Sprintf("Agent %q is not registered. Use create_agent to create it.", msg.Agent))
+	turn := c.Send(ctx, msg)
+	if turn == nil {
+		ch.Send(ctx, msg.Conversation, fmt.Sprintf("Agent %q does not exist. Ask the main agent to create it.", msg.Agent))
 		return
-	}
-
-	ma.mu.Lock()
-	defer ma.mu.Unlock()
-
-	if ma.notifyRoute == (channel.Route{}) {
-		ma.notifyRoute = channel.Route{Channel: msg.Channel, Conversation: msg.Conversation}
 	}
 
 	var stream io.WriteCloser
@@ -333,33 +402,25 @@ func (c *Claw) handleMessage(ctx context.Context, msg channel.Message) {
 	}
 
 	var buf strings.Builder
-	write := func(text string) {
-		if stream != nil {
-			stream.Write([]byte(text))
-			return
-		}
-		buf.WriteString(text)
-	}
 
-	ctx, cancel := context.WithTimeout(ctx, runTimeout)
-	defer cancel()
-
-	turn := ma.agent.Send(ctx, []agent.Content{{Text: msg.Content}})
-	if turn == nil {
-		return
+	tw := &turnText{
+		sink: func(text string) {
+			if stream != nil {
+				stream.Write([]byte(text))
+				return
+			}
+			buf.WriteString(text)
+		},
 	}
 
 	for m, err := range turn {
 		if err != nil {
-			write(fmt.Sprintf("\nerror: %v", err))
+			tw.boundary = true
+			tw.text(fmt.Sprintf("error: %v", err))
 			break
 		}
 
-		for _, content := range m.Content {
-			if content.Text != "" {
-				write(content.Text)
-			}
-		}
+		tw.add(m)
 	}
 
 	if stream == nil && buf.Len() > 0 {
@@ -367,9 +428,6 @@ func (c *Claw) handleMessage(ctx context.Context, msg channel.Message) {
 			log.Printf("agent %s: failed to deliver reply: %v", msg.Agent, err)
 		}
 	}
-
-	c.saveSession(msg.Agent, ma)
-	ma.updateSnapshot()
 }
 
 func (c *Claw) sessionPath(name string) string {
@@ -400,13 +458,16 @@ func (c *Claw) findChannel(name string) channel.Channel {
 	return nil
 }
 
+const (
+	promptTimeFormat  = "Monday, January 2, 2006 15:04 -07:00 (MST)"
+	messageTimeFormat = "Mon, 2 Jan 2006 15:04 -07:00"
+)
+
 func (c *Claw) buildInstructions(name string) string {
 	assistantName := c.config.AssistantName
 	if assistantName == "" {
 		assistantName = "Claw"
 	}
-
-	now := time.Now().Format("Monday, January 2, 2006 15:04 MST")
 
 	var b strings.Builder
 
@@ -416,20 +477,32 @@ func (c *Claw) buildInstructions(name string) string {
 	}
 
 	fmt.Fprintf(&b, "You are %s (agent: %s).\n", assistantName, name)
-	fmt.Fprintf(&b, "Current date and time: %s. Scheduled tasks (cron) run in this timezone.\n", now)
+	fmt.Fprintf(&b, "Current date and time: %s. Schedules run in this timezone.\n", time.Now().Format(promptTimeFormat))
 	fmt.Fprintf(&b, "Working directory: %s\n", c.agentWorkDir(name))
 
 	b.WriteString("\n")
 	b.WriteString(prompt.Instructions)
+
+	b.WriteString("\n")
+	if name == "main" {
+		b.WriteString(prompt.Main)
+	} else {
+		b.WriteString(prompt.Agent)
+	}
 
 	if c.config.Instructions != "" {
 		b.WriteString("\n\n")
 		b.WriteString(c.config.Instructions)
 	}
 
-	if content := c.config.Memory.Content(name); content != "" {
-		b.WriteString("\n\n")
-		b.WriteString(content)
+	if global := c.config.Memory.GlobalContent(); global != "" {
+		b.WriteString("\n\n# Shared Guidelines (global/AGENTS.md)\n\n")
+		b.WriteString(global)
+	}
+
+	if local := c.config.Memory.AgentContent(name); local != "" {
+		b.WriteString("\n\n# Your AGENTS.md\n\n")
+		b.WriteString(local)
 	}
 
 	return b.String()
@@ -439,16 +512,55 @@ func (c *Claw) buildAgentContext(name string) string {
 	var b strings.Builder
 
 	b.WriteString("## Environment\n\n")
-	fmt.Fprintf(&b, "- Current Date and Time: %s\n", time.Now().Format("Monday, January 2, 2006 15:04 MST"))
+	fmt.Fprintf(&b, "- Current Date and Time: %s\n", time.Now().Format(promptTimeFormat))
 	fmt.Fprintf(&b, "- Working Directory: %s\n", c.agentWorkDir(name))
-	b.WriteString("\nUse relative paths with the file tools; paths outside the working directory are rejected.")
+	b.WriteString("\nThe file tools are rooted at the working directory: use relative paths with them. The shell runs on the host from the same directory.")
 
-	if content := c.config.Memory.Content(name); content != "" {
-		b.WriteString("\n\n## Guidelines\n\n")
-		b.WriteString(content)
+	if global := c.config.Memory.GlobalContent(); global != "" {
+		b.WriteString("\n\n## Shared Guidelines\n\n")
+		b.WriteString(global)
+	}
+
+	if local := c.config.Memory.AgentContent(name); local != "" {
+		b.WriteString("\n\n## Guidelines (AGENTS.md)\n\n")
+		b.WriteString(local)
 	}
 
 	return b.String()
+}
+
+func frameMessage(msg channel.Message) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "<message channel=%q", msg.Channel)
+
+	if msg.Conversation != "" && msg.Conversation != msg.Agent {
+		fmt.Fprintf(&b, " conversation=%q", msg.Conversation)
+	}
+
+	if msg.Sender != "" {
+		fmt.Fprintf(&b, " sender=%q", msg.Sender)
+	}
+
+	fmt.Fprintf(&b, " time=%q>\n", time.Now().Format(messageTimeFormat))
+	b.WriteString(msg.Content)
+	b.WriteString("\n</message>")
+
+	return b.String()
+}
+
+// Unframe strips the envelope frameMessage added, for display purposes.
+func Unframe(text string) string {
+	body, ok := strings.CutSuffix(text, "\n</message>")
+	if !ok || !strings.HasPrefix(body, "<message ") {
+		return text
+	}
+
+	if _, rest, ok := strings.Cut(body, "\n"); ok {
+		return rest
+	}
+
+	return text
 }
 
 func (c *Claw) ensureDefaultTasks(name string) {
@@ -460,8 +572,8 @@ func (c *Claw) ensureDefaultTasks(name string) {
 
 	err := schedule.Mutate(agentDir, func(tasks []schedule.Task) ([]schedule.Task, error) {
 		task, err := schedule.NewTask(
-			"Check if there is anything you should proactively do. Review your workspace, check pending items, and report anything that needs attention.",
-			"every 30m",
+			"Review your workspace for pending follow-ups: check README.md and your notes for items that are due, stale, or promised to the user, and handle or report anything that needs attention.",
+			"every 1h",
 		)
 		if err != nil {
 			return nil, err

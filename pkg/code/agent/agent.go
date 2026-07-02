@@ -74,6 +74,7 @@ func New(ws *code.Workspace, cfg *harness.Config, ui code.UI) *Agent {
 		workspace:   ws,
 		cfg:         cfg,
 		ui:          ui,
+		modelID:     harness.DefaultModel(),
 		sessionsDir: filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
 		sessions:    map[string]*sessionState{},
 	}

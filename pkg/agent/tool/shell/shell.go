@@ -156,6 +156,13 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 	}
 	return result, nil
 }
+
+// Command builds an *exec.Cmd that runs a script with the same
+// interpreter the shell tool uses on this platform.
+func Command(ctx context.Context, command, workingDir string) *exec.Cmd {
+	return buildCommand(ctx, command, workingDir)
+}
+
 func buildCommand(ctx context.Context, command, workingDir string) *exec.Cmd {
 	var cmd *exec.Cmd
 
