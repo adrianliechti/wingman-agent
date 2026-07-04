@@ -33,7 +33,7 @@ func TestLoadMergesConfigs(t *testing.T) {
 func TestPreHookBlocksOnFailure(t *testing.T) {
 	cfg := &Config{PreToolUse: []Rule{{Matcher: "shell", Command: "echo not allowed; exit 1"}}}
 
-	hooks := cfg.PreHooks(t.TempDir())
+	hooks := cfg.PreHooks(t.TempDir(), nil)
 	if len(hooks) != 1 {
 		t.Fatalf("expected 1 hook, got %d", len(hooks))
 	}
@@ -55,7 +55,7 @@ func TestPreHookBlocksOnFailure(t *testing.T) {
 func TestPreHookAllowsOnSuccess(t *testing.T) {
 	cfg := &Config{PreToolUse: []Rule{{Command: "exit 0"}}}
 
-	result, err := cfg.PreHooks(t.TempDir())[0](context.Background(), tool.ToolCall{Name: "shell"})
+	result, err := cfg.PreHooks(t.TempDir(), nil)[0](context.Background(), tool.ToolCall{Name: "shell"})
 	if err != nil || result != "" {
 		t.Fatalf("passing hook blocked: %q, %v", result, err)
 	}
@@ -64,7 +64,7 @@ func TestPreHookAllowsOnSuccess(t *testing.T) {
 func TestPostHookAppendsOutput(t *testing.T) {
 	cfg := &Config{PostToolUse: []Rule{{Command: "echo reviewed"}}}
 
-	result, err := cfg.PostHooks(t.TempDir())[0](context.Background(), tool.ToolCall{Name: "shell"}, "original")
+	result, err := cfg.PostHooks(t.TempDir(), nil)[0](context.Background(), tool.ToolCall{Name: "shell"}, "original")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestPostHookAppendsOutput(t *testing.T) {
 func TestPostHookKeepsResultOnFailure(t *testing.T) {
 	cfg := &Config{PostToolUse: []Rule{{Command: "echo broken; exit 1"}}}
 
-	result, err := cfg.PostHooks(t.TempDir())[0](context.Background(), tool.ToolCall{Name: "shell"}, "original")
+	result, err := cfg.PostHooks(t.TempDir(), nil)[0](context.Background(), tool.ToolCall{Name: "shell"}, "original")
 	if err != nil || result != "original" {
 		t.Fatalf("result = %q, %v", result, err)
 	}
@@ -85,7 +85,7 @@ func TestPostHookKeepsResultOnFailure(t *testing.T) {
 func TestPostHookReceivesPayload(t *testing.T) {
 	cfg := &Config{PostToolUse: []Rule{{Command: "cat"}}}
 
-	result, err := cfg.PostHooks(t.TempDir())[0](context.Background(), tool.ToolCall{Name: "shell", Args: `{"command":"ls"}`}, "out")
+	result, err := cfg.PostHooks(t.TempDir(), nil)[0](context.Background(), tool.ToolCall{Name: "shell", Args: `{"command":"ls"}`}, "out")
 	if err != nil {
 		t.Fatal(err)
 	}

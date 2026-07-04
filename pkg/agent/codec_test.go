@@ -81,3 +81,45 @@ func TestFromReasoningDropsEmptyItems(t *testing.T) {
 		t.Fatal("expected item without summary or content to be dropped")
 	}
 }
+
+func TestToInputFlushesImagesAfterToolResultRun(t *testing.T) {
+	messages := []Message{
+		{Role: RoleAssistant, Content: []Content{
+			{ToolCall: &ToolCall{ID: "c1", Name: "view_image"}},
+			{ToolCall: &ToolCall{ID: "c2", Name: "read"}},
+		}},
+		{Role: RoleAssistant, Content: []Content{
+			{ToolResult: &ToolResult{ID: "c1", Name: "view_image", Content: "[image attached below]"}},
+			{File: &File{Data: "data:image/png;base64,AAAA"}},
+		}},
+		{Role: RoleAssistant, Content: []Content{
+			{ToolResult: &ToolResult{ID: "c2", Name: "read", Content: "file contents"}},
+		}},
+	}
+
+	items := toInput(messages)
+
+	var kinds []string
+	for _, item := range items {
+		switch {
+		case item.OfFunctionCall != nil:
+			kinds = append(kinds, "call")
+		case item.OfFunctionCallOutput != nil:
+			kinds = append(kinds, "output")
+		case item.OfInputMessage != nil:
+			kinds = append(kinds, "image")
+		default:
+			kinds = append(kinds, "other")
+		}
+	}
+
+	want := []string{"call", "call", "output", "output", "image"}
+	if len(kinds) != len(want) {
+		t.Fatalf("items = %v", kinds)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("items = %v, want %v", kinds, want)
+		}
+	}
+}

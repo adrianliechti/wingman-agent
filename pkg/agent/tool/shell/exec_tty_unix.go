@@ -14,8 +14,6 @@ func startTTY(cmd *exec.Cmd) (*os.File, error) {
 	// pty needs Setsid/Setctty instead of Setpgid; the session leader's pgid
 	// equals its pid, so killProcessGroup keeps working.
 	cmd.SysProcAttr = &syscall.SysProcAttr{}
-	if os.Getenv("TERM") == "" {
-		cmd.Env = append(cmd.Env, "TERM=xterm-256color")
-	}
+	cmd.Env = append(cmd.Env, "TERM=dumb")
 	return pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 120})
 }

@@ -9,22 +9,28 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-type approvals struct {
+type Approvals struct {
 	mu   sync.Mutex
 	seen map[string]bool
 }
 
-func newApprovals() *approvals {
-	return &approvals{seen: map[string]bool{}}
+func NewApprovals() *Approvals {
+	return &Approvals{seen: map[string]bool{}}
 }
 
-func confirmDangerous(ctx context.Context, elicit *tool.Elicitation, appr *approvals, args map[string]any) error {
-	if elicit == nil || elicit.Confirm == nil || ClassifyEffect(args) != tool.EffectDangerous {
+func confirmDangerous(ctx context.Context, elicit *tool.Elicitation, appr *Approvals, args map[string]any) error {
+	command, _ := args["command"].(string)
+	return confirmIfDangerous(ctx, elicit, appr, command, ClassifyEffect(args) == tool.EffectDangerous)
+}
+
+func confirmIfDangerous(ctx context.Context, elicit *tool.Elicitation, appr *Approvals, text string, dangerous bool) error {
+	if !dangerous || elicit == nil || elicit.Confirm == nil {
 		return nil
 	}
 
-	command, _ := args["command"].(string)
-	key := strings.Join(strings.Fields(command), " ")
+	// Exact-match key (modulo surrounding whitespace): normalizing inner
+	// whitespace would conflate distinct quoted arguments.
+	key := strings.TrimSpace(text)
 
 	appr.mu.Lock()
 	seen := appr.seen[key]
@@ -34,7 +40,7 @@ func confirmDangerous(ctx context.Context, elicit *tool.Elicitation, appr *appro
 		return nil
 	}
 
-	approved, err := elicit.Confirm(ctx, "❯ "+command)
+	approved, err := elicit.Confirm(ctx, "❯ "+text)
 
 	if err != nil {
 		return fmt.Errorf("failed to get user approval: %w", err)

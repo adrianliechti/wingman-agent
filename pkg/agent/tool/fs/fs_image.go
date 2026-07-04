@@ -6,20 +6,20 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-const maxImageBytes = 10 * 1024 * 1024
+// Anthropic-family backends cap images at 5MB, the strictest of the
+// supported providers.
+const maxImageBytes = 5 * 1024 * 1024
 
-var imageMimeTypes = map[string]string{
-	".png":  "image/png",
-	".jpg":  "image/jpeg",
-	".jpeg": "image/jpeg",
-	".gif":  "image/gif",
-	".webp": "image/webp",
+var imageMimeTypes = map[string]bool{
+	"image/png":  true,
+	"image/jpeg": true,
+	"image/gif":  true,
+	"image/webp": true,
 }
 
 func ImageTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
@@ -62,7 +62,7 @@ func ImageTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 				return "", fmt.Errorf("cannot view image: path %q is a directory", pathArg)
 			}
 			if info.Size() > maxImageBytes {
-				return "", fmt.Errorf("cannot view image: %q is %dMB (max %dMB)", pathArg, info.Size()/(1024*1024), maxImageBytes/(1024*1024))
+				return "", fmt.Errorf("cannot view image: %q is %.1fMB (max %dMB)", pathArg, float64(info.Size())/(1024*1024), maxImageBytes/(1024*1024))
 			}
 
 			content, err := readFileTarget(root, target)
@@ -70,11 +70,8 @@ func ImageTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 				return "", fmt.Errorf("read file %q: %w", pathArg, err)
 			}
 
-			mime := imageMimeTypes[strings.ToLower(filepath.Ext(pathArg))]
-			if mime == "" {
-				mime = http.DetectContentType(content)
-			}
-			if !strings.HasPrefix(mime, "image/") || mime == "image/svg+xml" {
+			mime := http.DetectContentType(content)
+			if !imageMimeTypes[mime] {
 				return "", fmt.Errorf("cannot view image: %q is not a supported image format (detected %s)", pathArg, mime)
 			}
 

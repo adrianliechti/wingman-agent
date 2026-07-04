@@ -3,6 +3,7 @@ package agent
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -398,12 +399,36 @@ func (a *Agent) buildSession() *sessionState {
 	elicit := a.buildElicit()
 	ws := a.workspace
 
-	userHooks, _ := external.Load(userHooksConfigPath(), filepath.Join(ws.RootPath, "hooks.json"))
-	sessionCfg.Hooks.PreToolUse = append(sessionCfg.Hooks.PreToolUse, userHooks.PreHooks(ws.RootPath)...)
-	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse, userHooks.PostHooks(ws.RootPath)...)
+	globalHooks, globalErr := external.Load(userHooksConfigPath())
+	workspaceHooksPath := filepath.Join(ws.RootPath, "hooks.json")
+	workspaceHooks, workspaceErr := external.Load(workspaceHooksPath)
+
+	// Fail closed: a hook config the user wrote but that no longer parses must
+	// not silently disable the guards it configures.
+	if err := errors.Join(globalErr, workspaceErr); err != nil {
+		message := fmt.Sprintf("hook configuration is invalid; fix or remove it to unblock tools: %v", err)
+		sessionCfg.Hooks.PreToolUse = append(sessionCfg.Hooks.PreToolUse,
+			func(context.Context, tool.ToolCall) (string, error) { return message, nil },
+		)
+	}
+
+	// Workspace hooks come with the repo, not the user — gate them behind a
+	// one-time confirmation so a cloned project cannot run commands unprompted.
+	var workspaceGate *external.Gate
+	if rules := len(workspaceHooks.PreToolUse) + len(workspaceHooks.PostToolUse); rules > 0 {
+		workspaceGate = &external.Gate{
+			Confirm: elicit.Confirm,
+			Message: fmt.Sprintf("Run %d workspace hook rule(s) from %s?", rules, workspaceHooksPath),
+		}
+	}
+
+	sessionCfg.Hooks.PreToolUse = append(sessionCfg.Hooks.PreToolUse, globalHooks.PreHooks(ws.RootPath, nil)...)
+	sessionCfg.Hooks.PreToolUse = append(sessionCfg.Hooks.PreToolUse, workspaceHooks.PreHooks(ws.RootPath, workspaceGate)...)
 	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,
 		truncation.New(ws.ScratchPath),
 	)
+	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse, globalHooks.PostHooks(ws.RootPath, nil)...)
+	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse, workspaceHooks.PostHooks(ws.RootPath, workspaceGate)...)
 
 	var allowedReadRoots []string
 	for _, sk := range ws.Skills {
@@ -423,14 +448,15 @@ func (a *Agent) buildSession() *sessionState {
 	}
 
 	s.execManager = shell.NewExecManager()
+	approvals := shell.NewApprovals()
 
 	s.baseTools = slices.Concat(
 		fs.Tools(ws.Root, &fs.Options{
 			AllowedReadRoots:  allowedReadRoots,
 			AllowedWriteRoots: allowedWriteRoots,
 		}),
-		shell.Tools(ws.RootPath, elicit),
-		shell.ExecTools(s.execManager, ws.RootPath, elicit),
+		shell.Tools(ws.RootPath, elicit, approvals),
+		shell.ExecTools(s.execManager, ws.RootPath, elicit, approvals),
 		todo.Tools(),
 		webfetch.Tools(),
 		websearch.Tools(),

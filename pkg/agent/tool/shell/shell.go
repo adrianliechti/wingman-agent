@@ -52,7 +52,11 @@ func safetyGuardLine(elicit *tool.Elicitation) string {
 	return "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first. An approved command re-runs without re-asking for the rest of the session."
 }
 
-func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
+func Tools(workDir string, elicit *tool.Elicitation, appr *Approvals) []tool.Tool {
+	if appr == nil {
+		appr = NewApprovals()
+	}
+
 	description := strings.Join([]string{
 		fmt.Sprintf("Execute a command in the host shell. On Unix/macOS this uses the user's shell (`$SHELL`, falling back to `/bin/sh`); on Windows this uses PowerShell. Default timeout %ds, max 600s.", defaultTimeout),
 		"- Use for build, test, run, package-manager, git, GitHub CLI (`gh`), Docker/Kubernetes, project scripts, diagnostics, and other terminal operations.",
@@ -66,8 +70,6 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 		"- For processes that should keep running (dev servers, watch tasks) or need interactive stdin, use `exec_command` instead.",
 		safetyGuardLine(elicit),
 	}, "\n")
-
-	appr := newApprovals()
 
 	return []tool.Tool{{
 		Name:        "shell",
@@ -94,7 +96,7 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 	}}
 }
 
-func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation, appr *approvals, args map[string]any) (string, error) {
+func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation, appr *Approvals, args map[string]any) (string, error) {
 	command, ok := args["command"].(string)
 
 	if !ok || command == "" {

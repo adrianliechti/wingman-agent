@@ -38,16 +38,48 @@ func toTools(tools []tool.Tool) []responses.ToolUnionParam {
 func toInput(messages []Message) []responses.ResponseInputItemUnionParam {
 	var items []responses.ResponseInputItemUnionParam
 
+	// Images attached to tool results travel as a user input message, since
+	// function call outputs are string-only on the wire. They are flushed
+	// only after a contiguous run of tool-result messages so strict backends
+	// never see a user message between function call outputs.
+	var images []responses.ResponseInputContentUnionParam
+
+	flushImages := func() {
+		if len(images) == 0 {
+			return
+		}
+		items = append(items, responses.ResponseInputItemUnionParam{
+			OfInputMessage: &responses.ResponseInputItemMessageParam{Role: "user", Content: images},
+		})
+		images = nil
+	}
+
 	for _, m := range messages {
 		switch m.Role {
 		case RoleAssistant:
-			items = append(items, assistantToInput(m)...)
+			if !hasToolResult(m) {
+				flushImages()
+			}
+			msgItems, msgImages := assistantToInput(m)
+			items = append(items, msgItems...)
+			images = append(images, msgImages...)
 		case RoleSystem, RoleUser:
+			flushImages()
 			items = append(items, userToInput(m)...)
 		}
 	}
+	flushImages()
 
 	return items
+}
+
+func hasToolResult(m Message) bool {
+	for _, c := range m.Content {
+		if c.ToolResult != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func userToInput(m Message) []responses.ResponseInputItemUnionParam {
@@ -92,7 +124,7 @@ func userToInput(m Message) []responses.ResponseInputItemUnionParam {
 	return items
 }
 
-func assistantToInput(m Message) []responses.ResponseInputItemUnionParam {
+func assistantToInput(m Message) ([]responses.ResponseInputItemUnionParam, []responses.ResponseInputContentUnionParam) {
 	var items []responses.ResponseInputItemUnionParam
 	output := &responses.ResponseOutputMessageParam{}
 
@@ -146,12 +178,10 @@ func assistantToInput(m Message) []responses.ResponseInputItemUnionParam {
 		}
 	}
 
-	// Images attached to tool results travel as a user input message, since
-	// function call outputs are string-only on the wire.
-	attachments := &responses.ResponseInputItemMessageParam{Role: "user"}
+	var images []responses.ResponseInputContentUnionParam
 	for _, c := range m.Content {
 		if c.File != nil && c.File.Data != "" {
-			attachments.Content = append(attachments.Content, responses.ResponseInputContentUnionParam{
+			images = append(images, responses.ResponseInputContentUnionParam{
 				OfInputImage: &responses.ResponseInputImageParam{
 					ImageURL: openai.String(c.File.Data),
 					Detail:   responses.ResponseInputImageDetailAuto,
@@ -159,11 +189,8 @@ func assistantToInput(m Message) []responses.ResponseInputItemUnionParam {
 			})
 		}
 	}
-	if len(attachments.Content) > 0 {
-		items = append(items, responses.ResponseInputItemUnionParam{OfInputMessage: attachments})
-	}
 
-	return items
+	return items, images
 }
 
 // reasoningToInput replays a reasoning item only when its opaque payload can

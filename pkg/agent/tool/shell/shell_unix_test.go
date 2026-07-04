@@ -270,7 +270,7 @@ func TestShellElicitationOnlyPromptsForDangerousCommands(t *testing.T) {
 			return false, nil
 		},
 	}
-	shellTool := Tools(workDir, elicit)[0]
+	shellTool := Tools(workDir, elicit, nil)[0]
 
 	if _, err := shellTool.Execute(ctx, map[string]any{"command": "printf hi > out.txt"}); err != nil {
 		t.Fatalf("benign mutating command failed: %v", err)
@@ -303,7 +303,7 @@ func TestShellApprovalRememberedForSession(t *testing.T) {
 			return true, nil
 		},
 	}
-	shellTool := Tools(workDir, elicit)[0]
+	shellTool := Tools(workDir, elicit, nil)[0]
 
 	for range 2 {
 		if _, err := shellTool.Execute(ctx, map[string]any{"command": "rm -rf missing-dir"}); err != nil {
@@ -319,5 +319,25 @@ func TestShellApprovalRememberedForSession(t *testing.T) {
 	}
 	if confirmCalls != 2 {
 		t.Fatalf("different dangerous command prompted %d times total, want 2", confirmCalls)
+	}
+}
+
+func TestShellApprovalDistinguishesQuotedWhitespace(t *testing.T) {
+	ctx := context.Background()
+	confirmCalls := 0
+
+	elicit := &tool.Elicitation{
+		Confirm: func(ctx context.Context, message string) (bool, error) {
+			confirmCalls++
+			return true, nil
+		},
+	}
+	shellTool := Tools(t.TempDir(), elicit, nil)[0]
+
+	shellTool.Execute(ctx, map[string]any{"command": `rm -rf "missing a  b"`})
+	shellTool.Execute(ctx, map[string]any{"command": `rm -rf "missing a b"`})
+
+	if confirmCalls != 2 {
+		t.Fatalf("whitespace-distinct commands prompted %d times, want 2", confirmCalls)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
@@ -15,7 +16,44 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 )
 
-const defaultTimeout = 30
+const (
+	defaultTimeout = 30
+	maxHookOutput  = 16 * 1024
+)
+
+// Gate defers a yes/no decision (e.g. "trust this workspace's hooks?") until
+// the first hook actually fires, then remembers it for the session.
+type Gate struct {
+	Confirm func(ctx context.Context, message string) (bool, error)
+	Message string
+
+	mu      sync.Mutex
+	decided bool
+	allowed bool
+}
+
+func (g *Gate) Allowed(ctx context.Context) bool {
+	if g == nil {
+		return true
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.decided {
+		return g.allowed
+	}
+	g.decided = true
+
+	if g.Confirm == nil {
+		g.allowed = true
+		return true
+	}
+
+	ok, err := g.Confirm(ctx, g.Message)
+	g.allowed = ok && err == nil
+	return g.allowed
+}
 
 type Config struct {
 	PreToolUse  []Rule `json:"preToolUse,omitempty"`
@@ -55,7 +93,7 @@ func Load(paths ...string) (*Config, error) {
 	return cfg, errors.Join(errs...)
 }
 
-func (c *Config) PreHooks(workDir string) []hook.PreToolUse {
+func (c *Config) PreHooks(workDir string, gate *Gate) []hook.PreToolUse {
 	var hooks []hook.PreToolUse
 
 	for _, rule := range c.PreToolUse {
@@ -64,7 +102,7 @@ func (c *Config) PreHooks(workDir string) []hook.PreToolUse {
 		}
 
 		hooks = append(hooks, func(ctx context.Context, call tool.ToolCall) (string, error) {
-			if !rule.matches(call.Name) {
+			if !rule.matches(call.Name) || !gate.Allowed(ctx) {
 				return "", nil
 			}
 
@@ -83,7 +121,7 @@ func (c *Config) PreHooks(workDir string) []hook.PreToolUse {
 	return hooks
 }
 
-func (c *Config) PostHooks(workDir string) []hook.PostToolUse {
+func (c *Config) PostHooks(workDir string, gate *Gate) []hook.PostToolUse {
 	var hooks []hook.PostToolUse
 
 	for _, rule := range c.PostToolUse {
@@ -92,7 +130,7 @@ func (c *Config) PostHooks(workDir string) []hook.PostToolUse {
 		}
 
 		hooks = append(hooks, func(ctx context.Context, call tool.ToolCall, result string) (string, error) {
-			if !rule.matches(call.Name) || strings.HasPrefix(result, "data:image/") {
+			if !rule.matches(call.Name) || tool.IsImageResult(result) || !gate.Allowed(ctx) {
 				return result, nil
 			}
 
@@ -101,6 +139,9 @@ func (c *Config) PostHooks(workDir string) []hook.PostToolUse {
 				return result, nil
 			}
 
+			if len(out) > maxHookOutput {
+				out = out[:maxHookOutput] + "\n[hook output truncated]"
+			}
 			return result + "\n\n<hook-output>\n" + out + "\n</hook-output>", nil
 		})
 	}

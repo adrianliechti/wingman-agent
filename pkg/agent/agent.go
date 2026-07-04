@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"strings"
 	"sync"
 	"time"
 
@@ -279,7 +278,7 @@ func toolCallMessage(tc ToolCall) Message {
 }
 
 func toolResultMessage(tc ToolCall, result string) Message {
-	if isImageDataURL(result) {
+	if tool.IsImageResult(result) {
 		return Message{
 			Role: RoleAssistant,
 			Content: []Content{
@@ -303,12 +302,6 @@ func toolResultMessage(tc ToolCall, result string) Message {
 			Content: result,
 		}}},
 	}
-}
-
-// isImageDataURL reports whether a tool returned a bare image payload that
-// should reach the model as an image attachment instead of tool-result text.
-func isImageDataURL(s string) bool {
-	return strings.HasPrefix(s, "data:image/") && !strings.ContainsAny(s, " \n")
 }
 
 func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool.Tool) string {
