@@ -146,6 +146,23 @@ func assistantToInput(m Message) []responses.ResponseInputItemUnionParam {
 		}
 	}
 
+	// Images attached to tool results travel as a user input message, since
+	// function call outputs are string-only on the wire.
+	attachments := &responses.ResponseInputItemMessageParam{Role: "user"}
+	for _, c := range m.Content {
+		if c.File != nil && c.File.Data != "" {
+			attachments.Content = append(attachments.Content, responses.ResponseInputContentUnionParam{
+				OfInputImage: &responses.ResponseInputImageParam{
+					ImageURL: openai.String(c.File.Data),
+					Detail:   responses.ResponseInputImageDetailAuto,
+				},
+			})
+		}
+	}
+	if len(attachments.Content) > 0 {
+		items = append(items, responses.ResponseInputItemUnionParam{OfInputMessage: attachments})
+	}
+
 	return items
 }
 

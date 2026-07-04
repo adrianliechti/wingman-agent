@@ -34,6 +34,9 @@ func budgetFor(name string) int {
 
 func New(scratchDir string) hook.PostToolUse {
 	return func(_ context.Context, call tool.ToolCall, result string) (string, error) {
+		if strings.HasPrefix(result, "data:image/") {
+			return result, nil
+		}
 		budget := budgetFor(call.Name)
 		if len(result) <= budget {
 			return result, nil

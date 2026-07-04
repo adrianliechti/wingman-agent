@@ -291,3 +291,33 @@ func TestShellElicitationOnlyPromptsForDangerousCommands(t *testing.T) {
 		t.Fatalf("dangerous command prompted %d times, want 1", confirmCalls)
 	}
 }
+
+func TestShellApprovalRememberedForSession(t *testing.T) {
+	ctx := context.Background()
+	workDir := t.TempDir()
+	confirmCalls := 0
+
+	elicit := &tool.Elicitation{
+		Confirm: func(ctx context.Context, message string) (bool, error) {
+			confirmCalls++
+			return true, nil
+		},
+	}
+	shellTool := Tools(workDir, elicit)[0]
+
+	for range 2 {
+		if _, err := shellTool.Execute(ctx, map[string]any{"command": "rm -rf missing-dir"}); err != nil {
+			t.Fatalf("approved dangerous command failed: %v", err)
+		}
+	}
+	if confirmCalls != 1 {
+		t.Fatalf("identical approved command prompted %d times, want 1", confirmCalls)
+	}
+
+	if _, err := shellTool.Execute(ctx, map[string]any{"command": "rm -rf other-dir"}); err != nil {
+		t.Fatalf("approved dangerous command failed: %v", err)
+	}
+	if confirmCalls != 2 {
+		t.Fatalf("different dangerous command prompted %d times total, want 2", confirmCalls)
+	}
+}

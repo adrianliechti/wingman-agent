@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/external"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/ask"
@@ -57,8 +58,9 @@ type sessionState struct {
 	modelID  string
 	effortID string
 
-	planMode  atomic.Bool
-	baseTools []tool.Tool
+	planMode    atomic.Bool
+	baseTools   []tool.Tool
+	execManager *shell.ExecManager
 
 	projectInstructionsMu     sync.Mutex
 	projectInstructionsCache  string
@@ -238,6 +240,7 @@ func (a *Agent) DeleteSession(_ context.Context, id string) error {
 
 	if inMem {
 		s.cancel()
+		s.execManager.Close()
 	}
 	if err := session.Delete(a.sessionsDir, id); err != nil && !os.IsNotExist(err) {
 		return err
@@ -331,6 +334,7 @@ func (a *Agent) Close() error {
 	a.mu.Lock()
 	for _, s := range a.sessions {
 		s.cancel()
+		s.execManager.Close()
 	}
 	a.sessions = map[string]*sessionState{}
 	a.mu.Unlock()
@@ -391,12 +395,15 @@ func (a *Agent) buildSession() *sessionState {
 	sessionCfg.Effort = func() string {
 		return a.effortFor(s)
 	}
-	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,
-		truncation.New(a.workspace.ScratchPath),
-	)
-
 	elicit := a.buildElicit()
 	ws := a.workspace
+
+	userHooks, _ := external.Load(userHooksConfigPath(), filepath.Join(ws.RootPath, "hooks.json"))
+	sessionCfg.Hooks.PreToolUse = append(sessionCfg.Hooks.PreToolUse, userHooks.PreHooks(ws.RootPath)...)
+	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse, userHooks.PostHooks(ws.RootPath)...)
+	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,
+		truncation.New(ws.ScratchPath),
+	)
 
 	var allowedReadRoots []string
 	for _, sk := range ws.Skills {
@@ -415,12 +422,15 @@ func (a *Agent) buildSession() *sessionState {
 		allowedWriteRoots = append(allowedWriteRoots, ws.MemoryPath)
 	}
 
+	s.execManager = shell.NewExecManager()
+
 	s.baseTools = slices.Concat(
 		fs.Tools(ws.Root, &fs.Options{
 			AllowedReadRoots:  allowedReadRoots,
 			AllowedWriteRoots: allowedWriteRoots,
 		}),
 		shell.Tools(ws.RootPath, elicit),
+		shell.ExecTools(s.execManager, ws.RootPath, elicit),
 		todo.Tools(),
 		webfetch.Tools(),
 		websearch.Tools(),
@@ -428,6 +438,14 @@ func (a *Agent) buildSession() *sessionState {
 		subagent.Tools(sessionCfg, s.subagentContext),
 	)
 	return s
+}
+
+func userHooksConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".wingman", "hooks.json")
 }
 
 func (a *Agent) buildElicit() *tool.Elicitation {

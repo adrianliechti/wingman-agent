@@ -21,5 +21,6 @@ func Tools(root *os.Root, opts *Options) []tool.Tool {
 		EditTool(root, opts.AllowedWriteRoots...),
 		GrepTool(root, opts.AllowedReadRoots...),
 		GlobTool(root, opts.AllowedReadRoots...),
+		ImageTool(root, opts.AllowedReadRoots...),
 	}
 }

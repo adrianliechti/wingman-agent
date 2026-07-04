@@ -45,12 +45,14 @@ func (b *cappedBuffer) result() string {
 	return out
 }
 
-func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
-	safetyGuard := "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first."
+func safetyGuardLine(elicit *tool.Elicitation) string {
 	if elicit == nil || elicit.Confirm == nil {
-		safetyGuard = "- There is NO confirmation gate: commands run immediately. Never run destructive or privilege-escalating commands (recursive deletes, sudo, force-push) unless the user explicitly asked for that exact action."
+		return "- There is NO confirmation gate: commands run immediately. Never run destructive or privilege-escalating commands (recursive deletes, sudo, force-push) unless the user explicitly asked for that exact action."
 	}
+	return "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first. An approved command re-runs without re-asking for the rest of the session."
+}
 
+func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 	description := strings.Join([]string{
 		fmt.Sprintf("Execute a command in the host shell. On Unix/macOS this uses the user's shell (`$SHELL`, falling back to `/bin/sh`); on Windows this uses PowerShell. Default timeout %ds, max 600s.", defaultTimeout),
 		"- Use for build, test, run, package-manager, git, GitHub CLI (`gh`), Docker/Kubernetes, project scripts, diagnostics, and other terminal operations.",
@@ -61,8 +63,11 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 		"- Only commit when the user explicitly asked; stage specific files by name; never skip hooks.",
 		"- Quote paths with spaces. Chain dependent commands with `&&` on Unix or PowerShell 7+, and with `; if ($?) { ... }` on Windows PowerShell 5.1. Use separate tool calls for independent commands.",
 		"- Increase timeout for long-running commands. Avoid unnecessary `sleep` / `Start-Sleep`; if polling is needed, run a check command instead of sleeping first.",
-		safetyGuard,
+		"- For processes that should keep running (dev servers, watch tasks) or need interactive stdin, use `exec_command` instead.",
+		safetyGuardLine(elicit),
 	}, "\n")
+
+	appr := newApprovals()
 
 	return []tool.Tool{{
 		Name:        "shell",
@@ -84,12 +89,12 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
-			return executeShell(ctx, workDir, elicit, args)
+			return executeShell(ctx, workDir, elicit, appr, args)
 		},
 	}}
 }
 
-func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation, args map[string]any) (string, error) {
+func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation, appr *approvals, args map[string]any) (string, error) {
 	command, ok := args["command"].(string)
 
 	if !ok || command == "" {
@@ -111,16 +116,8 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 		timeout = 600
 	}
 
-	if elicit != nil && elicit.Confirm != nil && ClassifyEffect(args) == tool.EffectDangerous {
-		approved, err := elicit.Confirm(ctx, "❯ "+command)
-
-		if err != nil {
-			return "", fmt.Errorf("failed to get user approval: %w", err)
-		}
-
-		if !approved {
-			return "", fmt.Errorf("command execution denied by user")
-		}
+	if err := confirmDangerous(ctx, elicit, appr, args); err != nil {
+		return "", err
 	}
 
 	ctx, cancel := context.WithTimeoutCause(ctx, time.Duration(timeout)*time.Second, errCommandTimeout)
