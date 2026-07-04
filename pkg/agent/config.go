@@ -81,6 +81,10 @@ type Config struct {
 	Tools        func() []tool.Tool
 	Instructions func() string
 
+	// CacheKey routes provider-side prompt caching; keep it stable per
+	// conversation (e.g. the session ID) to maximize prefix-cache hits.
+	CacheKey string
+
 	Hooks hook.Hooks
 
 	MaxTurns int
@@ -104,6 +108,8 @@ func (c *Config) Derive() *Config {
 		client: c.client,
 		Model:  c.Model,
 		Effort: c.Effort,
+
+		CacheKey: c.CacheKey,
 
 		Hooks: hook.Hooks{
 			PreToolUse:  slices.Clone(c.Hooks.PreToolUse),

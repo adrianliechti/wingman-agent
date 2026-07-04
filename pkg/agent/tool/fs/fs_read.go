@@ -11,6 +11,10 @@ import (
 )
 
 func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
+	return readTool(root, nil, allowedReadRoots...)
+}
+
+func readTool(root *os.Root, tracker *contentTracker, allowedReadRoots ...string) tool.Tool {
 	return tool.Tool{
 		Name:   "read",
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
@@ -79,6 +83,8 @@ func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			if err != nil {
 				return "", fmt.Errorf("read file %q: %w", pathArg, err)
 			}
+
+			tracker.record(content)
 
 			return formatRead(content, startLine, limit)
 		},

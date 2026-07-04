@@ -16,6 +16,7 @@ type request struct {
 	model        string
 	effort       string
 	instructions string
+	cacheKey     string
 	messages     []Message
 	tools        []tool.Tool
 }
@@ -43,6 +44,10 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		// Overflow must surface as an error so compactMessages owns recovery;
 		// "auto" would silently drop mid-conversation context server-side.
 		Truncation: responses.ResponseNewParamsTruncationDisabled,
+	}
+
+	if r.cacheKey != "" {
+		params.PromptCacheKey = openai.String(r.cacheKey)
 	}
 
 	if r.effort != "" {

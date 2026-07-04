@@ -203,8 +203,10 @@ func (a *Agent) ListSessions(_ context.Context) ([]code.SessionInfo, error) {
 
 func (a *Agent) NewSession(_ context.Context) (string, error) {
 	id := uuid.NewString()
+	s := a.buildSession()
+	s.aa.CacheKey = id
 	a.mu.Lock()
-	a.sessions[id] = a.buildSession()
+	a.sessions[id] = s
 	a.mu.Unlock()
 	return id, nil
 }
@@ -222,6 +224,7 @@ func (a *Agent) LoadSession(_ context.Context, id string) error {
 		return err
 	}
 	s := a.buildSession()
+	s.aa.CacheKey = id
 	s.aa.Messages = saved.State.Messages
 	s.aa.Usage = saved.State.Usage
 

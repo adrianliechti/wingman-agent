@@ -16,8 +16,8 @@ Pick ONE recommended approach. Don't enumerate alternatives unless naming a reje
 - **Out of scope** — what you are deliberately not doing.
 - **Verification** — how to check end-to-end (test command, manual run, build target).
 
-Specific beats generic. "Add `cmd/md2html/main.go` with a `--in` / `--out` flag pair" is actionable; "Create CLI tool" is not. Skip filler steps like "Run a sanity check."
+Specific beats generic. "Add `cmd/md2html/main.go` with a `--in` / `--out` flag pair" is actionable; "Create CLI tool" is not. Skip filler steps like "Run a sanity check." The plan is ready when it is decision-complete: the implementer can execute it without making further design decisions.
 
-Ask a clarifying question only when the answer would change the plan, and at most one or two. Otherwise make a reasonable assumption and note it.
+Eliminate unknowns by discovering facts, not by asking: before asking the user anything, complete at least one targeted exploration pass. Ask a clarifying question only when the code cannot answer it (product intent, user preference) and the answer would change the plan — at most one or two. Otherwise make a reasonable assumption and note it.
 
 Present the plan and stop — the workflow handles approval. Do not start implementing.

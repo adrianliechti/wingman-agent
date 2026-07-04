@@ -14,6 +14,8 @@ import (
 
 var errYieldStopped = errors.New("yield stopped")
 
+const maxStreamRetries = 3
+
 type Agent struct {
 	*Config
 
@@ -90,36 +92,39 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 				model:        model,
 				effort:       effort,
 				instructions: instructions,
+				cacheKey:     a.CacheKey,
 				messages:     a.Messages,
 				tools:        tools,
 			}
 
 			resp, err := complete(ctx, a.client, req, yield)
 
+			for attempt := 1; err != nil && attempt <= maxStreamRetries; attempt++ {
+				if errors.Is(err, errYieldStopped) || errors.Is(err, context.Canceled) || !isRecoverableError(err) {
+					break
+				}
+
+				if isContextOverflowError(err) {
+					a.compactMessages(ctx, true)
+					req.messages = a.Messages
+				} else {
+					// The SDK already retried transport errors with backoff; this
+					// covers mid-stream failures, so back off before resending.
+					select {
+					case <-time.After(time.Duration(attempt) * 2 * time.Second):
+					case <-ctx.Done():
+					}
+				}
+
+				resp, err = complete(ctx, a.client, req, yield)
+			}
+
 			if err != nil {
-				if !errors.Is(err, errYieldStopped) && !errors.Is(err, context.Canceled) && isRecoverableError(err) {
-					if isContextOverflowError(err) {
-						a.compactMessages(ctx, true)
-						req.messages = a.Messages
-					} else {
-						// The SDK already retried transport errors with backoff;
-						// this covers mid-stream failures, so wait before resending.
-						select {
-						case <-time.After(2 * time.Second):
-						case <-ctx.Done():
-						}
-					}
-
-					resp, err = complete(ctx, a.client, req, yield)
+				a.endRun()
+				if err != errYieldStopped {
+					yield(Message{}, err)
 				}
-
-				if err != nil {
-					a.endRun()
-					if err != errYieldStopped {
-						yield(Message{}, err)
-					}
-					return
-				}
+				return
 			}
 
 			a.Usage.InputTokens += resp.usage.InputTokens
@@ -204,11 +209,31 @@ func extractToolCalls(messages []Message) []ToolCall {
 }
 
 func (a *Agent) processToolCalls(ctx context.Context, calls []ToolCall, tools []tool.Tool, yield func(Message, error) bool) error {
-	if len(calls) > 1 && a.allReadOnly(calls, tools) {
-		return a.processToolCallsParallel(ctx, calls, tools, yield)
+	for start := 0; start < len(calls); {
+		end := start + 1
+
+		if a.isReadOnly(calls[start], tools) {
+			for end < len(calls) && a.isReadOnly(calls[end], tools) {
+				end++
+			}
+		}
+
+		var err error
+
+		if end-start > 1 {
+			err = a.processToolCallsParallel(ctx, calls[start:end], tools, yield)
+		} else {
+			err = a.processToolCallsSequential(ctx, calls[start:end], tools, yield)
+		}
+
+		if err != nil {
+			return err
+		}
+
+		start = end
 	}
 
-	return a.processToolCallsSequential(ctx, calls, tools, yield)
+	return nil
 }
 
 func (a *Agent) processToolCallsSequential(ctx context.Context, calls []ToolCall, tools []tool.Tool, yield func(Message, error) bool) error {
@@ -378,26 +403,20 @@ func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool) stri
 	return result
 }
 
-func (a *Agent) allReadOnly(calls []ToolCall, tools []tool.Tool) bool {
-	for _, tc := range calls {
-		t := findTool(tc.Name, tools)
-		if t == nil || t.Effect == nil {
-			return false
-		}
+func (a *Agent) isReadOnly(tc ToolCall, tools []tool.Tool) bool {
+	t := findTool(tc.Name, tools)
+	if t == nil || t.Effect == nil {
+		return false
+	}
 
-		var args map[string]any
-		if tc.Args != "" {
-			if err := json.Unmarshal([]byte(tc.Args), &args); err != nil {
-				return false
-			}
-		}
-
-		if t.Effect(args) != tool.EffectReadOnly {
+	var args map[string]any
+	if tc.Args != "" {
+		if err := json.Unmarshal([]byte(tc.Args), &args); err != nil {
 			return false
 		}
 	}
 
-	return true
+	return t.Effect(args) == tool.EffectReadOnly
 }
 
 func findTool(name string, tools []tool.Tool) *tool.Tool {
