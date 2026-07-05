@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -188,8 +189,8 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 	sessionDescription := strings.Join([]string{
 		"Interact with a session started by `exec_command`: poll new output (no input), write to its stdin (`input`), close stdin (`eof`), or terminate it (`kill`).",
 		"- Waits up to `wait` seconds for output (or exit) before returning.",
-		"- `input` is written verbatim; include a trailing newline to submit a line to interactive programs. Destructive or privilege-escalating input lines require the same user confirmation as shell commands.",
-		"- Sending \"\\u0003\" (Ctrl-C) as `input` interrupts the process: on tty sessions via the terminal, otherwise via SIGINT to the process group (Unix only).",
+		"- `input` supports C-style escapes (\\n Enter, \\e Esc, \\t, \\uHHHH; \\\\ for a literal backslash); anything else is sent verbatim with nothing appended. Include \\n to submit a line to an interactive program, else it is typed but not entered (e.g. save in vi with \"\\e:w file\\n\"). Destructive or privilege-escalating input lines require the same user confirmation as shell commands.",
+		"- \\u0003 (Ctrl-C) interrupts the process: on tty sessions via the terminal, otherwise via SIGINT to the process group (Unix only).",
 		"- On tty sessions, `eof` sends Ctrl-D instead of closing stdin.",
 		"- Sessions end when the process exits, is killed, or the agent session closes.",
 	}, "\n")
@@ -392,6 +393,7 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 	}
 
 	input, _ := args["input"].(string)
+	input = decodeInput(input)
 
 	if input == "\u0003" && !s.tty {
 		if err := s.interrupt(); err != nil {
@@ -461,4 +463,48 @@ func sessionResult(output, notice string) string {
 		return notice
 	}
 	return output + "\n\n" + notice
+}
+
+// decodeInput turns C-style escape sequences in interactive input into their
+// real bytes, so models that emit escape TEXT like \u001b or \n instead of the
+// actual control bytes still drive interactive programs. strconv.UnquoteChar
+// handles the standard escapes; \e (Esc) is the only common alias it lacks.
+// Unrecognized escapes keep their backslash so regexes and paths survive.
+func decodeInput(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+
+	var b strings.Builder
+	b.Grow(len(s))
+
+	for i := 0; i < len(s); {
+		if s[i] != '\\' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+
+		if i+1 < len(s) && s[i+1] == 'e' {
+			b.WriteByte(0x1b)
+			i += 2
+			continue
+		}
+
+		r, multibyte, tail, err := strconv.UnquoteChar(s[i:], 0)
+		if err != nil {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+
+		if multibyte {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte(byte(r))
+		}
+		i = len(s) - len(tail)
+	}
+
+	return b.String()
 }
