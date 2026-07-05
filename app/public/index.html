@@ -604,14 +604,30 @@
     </dialog>
 
     <script type="module">
-      import {
-        GetSettings,
-        GetWorkspaces,
-        OpenWorkspace,
-        RemoveWorkspace,
-        SaveSettings,
-        SelectFolder,
-      } from "/wailsjs/go/main/App.js";
+      async function api(path, body) {
+        const response = await fetch(
+          path,
+          body !== undefined
+            ? {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+              }
+            : undefined,
+        );
+        if (!response.ok) {
+          throw new Error((await response.text()).trim() || response.statusText);
+        }
+        const text = await response.text();
+        return text ? JSON.parse(text) : null;
+      }
+
+      const GetSettings = () => api("/app/settings");
+      const SaveSettings = (settings) => api("/app/settings", settings);
+      const GetWorkspaces = () => api("/app/workspaces");
+      const RemoveWorkspace = (path) => api("/app/workspaces/remove", { path });
+      const OpenWorkspace = (path) => api("/app/workspaces/open", { path });
+      const SelectFolder = async () => (await api("/app/folder", {}))?.path || "";
 
       const layoutEl = document.getElementById("layout");
       const errEl = document.getElementById("error");
@@ -781,8 +797,8 @@
         setOpenDisabled(true);
         errEl.textContent = "";
         try {
-          const url = await OpenWorkspace(path);
-          window.location.replace(url);
+          await OpenWorkspace(path);
+          window.location.replace("/");
         } catch (e) {
           errEl.textContent = String(e);
           setOpenDisabled(false);
@@ -802,8 +818,8 @@
             isOpening = false;
             return;
           }
-          const url = await OpenWorkspace(path);
-          window.location.replace(url);
+          await OpenWorkspace(path);
+          window.location.replace("/");
         } catch (e) {
           errEl.textContent = String(e);
           setOpenDisabled(false);

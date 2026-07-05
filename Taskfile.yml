@@ -26,12 +26,18 @@ tasks:
     cmds:
       - go run ./cmd/wingman server
 
-  run:app:
-    desc: Build and launch the Wails desktop app
+  build:app:
+    desc: Build the desktop app for this platform; all resources are generated from app/appicon.png
     deps: [ui]
     dir: app
     cmds:
-      - go run github.com/wailsapp/wails/v2/cmd/wails@v2.12.0 build -clean
+      - go tool appbundle -name "Wingman Agent" -id com.adrianliechti.wingman-agent -description "Wingman Agent" -company "Adrian Liechti" -copyright "© Adrian Liechti" -package .
+
+  run:app:
+    desc: Build and launch the desktop app
+    deps: [build:app]
+    dir: app
+    cmds:
       - open -n "build/bin/Wingman Agent.app"
 
   install:cli:
@@ -42,10 +48,9 @@ tasks:
 
   install:app:
     desc: Build and install the desktop app to /Applications (macOS)
-    deps: [ui]
+    deps: [build:app]
     dir: app
     cmds:
-      - go run github.com/wailsapp/wails/v2/cmd/wails@v2.12.0 build -clean
       - rm -rf "/Applications/Wingman Agent.app"
       - cp -R "build/bin/Wingman Agent.app" "/Applications/Wingman Agent.app"
 
@@ -63,7 +68,7 @@ tasks:
   release:app:
     desc: Release the macOS desktop app + Homebrew cask (macOS only; needs GITHUB_TOKEN)
     cmds:
-      # --skip=validate: `wails build` may regenerate tracked bindings, dirtying the tree.
+      # --skip=validate: skip git-state checks so snapshot/dry runs work from a dirty tree.
       - goreleaser release --clean --skip=validate -f .goreleaser.app.yml
 
   release:
