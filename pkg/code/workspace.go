@@ -15,7 +15,7 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	graphtool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/graph"
@@ -316,7 +316,7 @@ func extractMemoryHook(path string) string {
 		var fm struct {
 			Description string `yaml:"description"`
 		}
-		if err := yaml.Unmarshal([]byte(fmBody), &fm); err == nil {
+		if err := yaml.Load([]byte(fmBody), &fm); err == nil {
 			if d, _, _ := strings.Cut(strings.TrimSpace(fm.Description), "\n"); d != "" {
 				return strings.TrimSpace(d)
 			}

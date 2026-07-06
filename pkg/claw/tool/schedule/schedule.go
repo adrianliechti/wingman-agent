@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
@@ -288,7 +288,7 @@ func loadTasks(agentDir string) ([]Task, error) {
 	}
 
 	var f taskFile
-	if err := yaml.Unmarshal(data, &f); err != nil {
+	if err := yaml.Load(data, &f); err != nil {
 		return nil, err
 	}
 
@@ -296,7 +296,7 @@ func loadTasks(agentDir string) ([]Task, error) {
 }
 
 func saveTasks(agentDir string, tasks []Task) error {
-	out, err := yaml.Marshal(taskFile{Tasks: tasks})
+	out, err := yaml.Dump(taskFile{Tasks: tasks})
 	if err != nil {
 		return err
 	}

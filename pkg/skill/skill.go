@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 )
 
 type Skill struct {
@@ -415,7 +415,7 @@ func parseSkillData(data string) (Skill, string, error) {
 
 	var skill Skill
 
-	if err := yaml.Unmarshal([]byte(frontmatter.String()), &skill); err != nil {
+	if err := yaml.Load([]byte(frontmatter.String()), &skill); err != nil {
 		return Skill{}, "", fmt.Errorf("failed to parse frontmatter: %w", err)
 	}
 

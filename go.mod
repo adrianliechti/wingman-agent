@@ -22,8 +22,8 @@ require (
 	github.com/sahilm/fuzzy v0.1.3
 	github.com/sergi/go-diff v1.4.0
 	github.com/yuin/goldmark v1.8.2
+	go.yaml.in/yaml/v4 v4.0.0-rc.6
 	golang.org/x/term v0.44.0
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
