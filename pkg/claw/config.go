@@ -4,12 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/webfetch"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/channel"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/memory"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
@@ -54,7 +51,7 @@ func DefaultConfig() (*Config, func(), error) {
 		return nil, nil, fmt.Errorf("failed to create main agent: %w", err)
 	}
 
-	tools := slices.Concat(webfetch.Tools(), websearch.Tools())
+	tools := []tool.Tool{}
 
 	mainWorkspace := memoryStore.WorkspaceDir("main")
 	mcpManager, _ := mcp.Load(filepath.Join(mainWorkspace, "mcp.json"))

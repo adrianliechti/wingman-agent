@@ -23,8 +23,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/webfetch"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
@@ -419,8 +417,6 @@ func (a *Agent) buildSession() *sessionState {
 			AllowedWriteRoots: allowedWriteRoots,
 		}),
 		shell.Tools(ws.RootPath, elicit),
-		webfetch.Tools(),
-		websearch.Tools(),
 		ask.Tools(elicit),
 		subagent.Tools(sessionCfg, s.subagentContext),
 	)
