@@ -15,11 +15,13 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	graphtool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/graph"
 	lsptool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/lsp"
 	toolmcp "github.com/adrianliechti/wingman-agent/pkg/agent/tool/mcp"
+	"github.com/adrianliechti/wingman-agent/pkg/graph"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/rewind"
@@ -59,12 +61,14 @@ type Workspace struct {
 
 	LSP    *lsp.Manager
 	Rewind *rewind.Manager
+	Graph  *graph.Engine
 
 	warmupOnce sync.Once
 
-	mu       sync.Mutex
-	mcpTools []tool.Tool
-	lspTools []tool.Tool
+	mu         sync.Mutex
+	mcpTools   []tool.Tool
+	lspTools   []tool.Tool
+	graphTools []tool.Tool
 
 	memoryMu          sync.Mutex
 	memoryCache       string
@@ -126,10 +130,15 @@ func (w *Workspace) WarmUp() {
 			lspTools = lsptool.NewTools(lspManager)
 		}
 
+		graphEngine := graph.New(w.RootPath, filepath.Join(projectGraphDir(w.RootPath), "graph.json"), graph.WithResolver(&lspResolver{ws: w}))
+		graphTools := graphtool.NewTools(graphEngine)
+
 		w.mu.Lock()
 		w.Rewind = rewindManager
 		w.LSP = lspManager
 		w.lspTools = lspTools
+		w.Graph = graphEngine
+		w.graphTools = graphTools
 		w.mu.Unlock()
 	})
 }
@@ -307,7 +316,7 @@ func extractMemoryHook(path string) string {
 		var fm struct {
 			Description string `yaml:"description"`
 		}
-		if err := yaml.Unmarshal([]byte(fmBody), &fm); err == nil {
+		if err := yaml.Load([]byte(fmBody), &fm); err == nil {
 			if d, _, _ := strings.Cut(strings.TrimSpace(fm.Description), "\n"); d != "" {
 				return strings.TrimSpace(d)
 			}
@@ -339,11 +348,12 @@ func splitFrontmatter(text string) (fm, body string, ok bool) {
 	return rest[:end], body, true
 }
 
-func (w *Workspace) ManagedTools() (mcpTools, lspTools []tool.Tool) {
+func (w *Workspace) ManagedTools() (mcpTools, lspTools, graphTools []tool.Tool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	mcpTools = append([]tool.Tool(nil), w.mcpTools...)
 	lspTools = append([]tool.Tool(nil), w.lspTools...)
+	graphTools = append([]tool.Tool(nil), w.graphTools...)
 	return
 }
 
@@ -443,6 +453,10 @@ func projectMemoryDir(workingDir string) string {
 	}
 
 	return filepath.Join(home, ".wingman", "projects", projectKey(workingDir), "memory")
+}
+
+func projectGraphDir(workingDir string) string {
+	return filepath.Join(filepath.Dir(projectMemoryDir(workingDir)), "graph")
 }
 
 func SessionsDir(workingDir string) string {

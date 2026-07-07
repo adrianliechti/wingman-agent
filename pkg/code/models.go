@@ -23,6 +23,12 @@ var AvailableModels = []Model{
 
 	{ID: "claude-fable-5", Name: "Claude Fable 5"},
 	{ID: "claude-mythos-5", Name: "Claude Mythos 5"},
+
+	{ID: "glm-5.2", Name: "GLM 5.2"},
+	{ID: "glm-5.1", Name: "GLM 5.1"},
+
+	{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro"},
+	{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash"},
 }
 
 func ModelName(id string) string {

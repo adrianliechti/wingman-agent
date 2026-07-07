@@ -91,7 +91,8 @@ func humanSchedule(sched string) string {
 		return fmt.Sprintf("every %s", d)
 	}
 
-	if ts, err := time.Parse(time.RFC3339, sched); err == nil {
+	if ts, ok := schedule.OnceTime(sched); ok {
+		ts = ts.Local()
 		now := time.Now()
 
 		if ts.Year() == now.Year() && ts.YearDay() == now.YearDay() {

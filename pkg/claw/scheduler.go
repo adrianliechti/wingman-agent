@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -51,6 +53,8 @@ func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent)
 
 	now := time.Now()
 
+	ma.pruneScratch(now)
+
 	for _, t := range tasks {
 		if ctx.Err() != nil {
 			return
@@ -61,15 +65,57 @@ func (c *Claw) tickScheduler(ctx context.Context, name string, ma *managedAgent)
 	}
 }
 
-func (c *Claw) runTask(ctx context.Context, name string, ma *managedAgent, agentDir string, t schedule.Task) {
-	prompt := fmt.Sprintf(
-		"Scheduled task is due:\n\n%s\n\nExecute the task. If nothing needs attention, reply with exactly: SCHEDULER_OK",
-		t.Prompt,
-	)
+func (ma *managedAgent) pruneScratch(now time.Time) {
+	if ma.scratch == "" || now.Sub(ma.lastPrune) < time.Hour {
+		return
+	}
+	ma.lastPrune = now
 
-	ok := c.runScheduledTask(ctx, name, ma, prompt)
-	if !ok {
-		log.Printf("scheduler %s: task %s failed; retrying with backoff", name, t.ID)
+	entries, err := os.ReadDir(ma.scratch)
+	if err != nil {
+		return
+	}
+
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) > 24*time.Hour {
+			os.Remove(filepath.Join(ma.scratch, e.Name()))
+		}
+	}
+}
+
+func (c *Claw) runTask(ctx context.Context, name string, ma *managedAgent, agentDir string, t schedule.Task) {
+	ok := true
+	wake := true
+
+	var gateOutput string
+
+	if t.Script != "" {
+		wake, gateOutput = schedule.RunGate(ctx, c.agentWorkDir(name), t.Script)
+	}
+
+	if wake {
+		prompt := fmt.Sprintf("Scheduled task %s is due:\n\n%s", t.ID, t.Prompt)
+
+		if gateOutput != "" {
+			prompt += fmt.Sprintf("\n\nPre-check script output:\n\n%s", gateOutput)
+		}
+
+		prompt += "\n\nExecute the task. If nothing needs the user's attention, reply with exactly: SCHEDULER_OK"
+
+		ok = c.runScheduledTask(ctx, name, ma, prompt)
+		if !ok {
+			log.Printf("scheduler %s: task %s failed; retrying with backoff", name, t.ID)
+		}
+	}
+
+	// a canceled scheduler means shutdown or agent deletion; writing
+	// tasks.yaml now could resurrect a removed agent directory
+	if ctx.Err() != nil {
+		return
 	}
 
 	now := time.Now()
@@ -121,7 +167,9 @@ func (c *Claw) runScheduledTask(ctx context.Context, name string, ma *managedAge
 		}
 	}
 
-	var result strings.Builder
+	var buf strings.Builder
+
+	tw := &turnText{sink: func(s string) { buf.WriteString(s) }}
 
 	for msg, err := range stream {
 		if err != nil {
@@ -130,15 +178,12 @@ func (c *Claw) runScheduledTask(ctx context.Context, name string, ma *managedAge
 			return false
 		}
 
-		for _, content := range msg.Content {
-			if content.Text != "" {
-				result.WriteString(content.Text)
-			}
-		}
+		tw.add(msg)
 	}
 
-	text := strings.TrimSpace(result.String())
+	text := strings.TrimSpace(buf.String())
 	text = strings.TrimSpace(strings.TrimPrefix(text, schedulerOK))
+	text = strings.TrimSpace(strings.TrimSuffix(text, schedulerOK))
 
 	if text == "" {
 		rollback()

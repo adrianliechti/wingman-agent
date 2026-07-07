@@ -45,10 +45,16 @@ func (b *cappedBuffer) result() string {
 	return out
 }
 
-func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
-	safetyGuard := "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first."
+func safetyGuardLine(elicit *tool.Elicitation) string {
 	if elicit == nil || elicit.Confirm == nil {
-		safetyGuard = "- There is NO confirmation gate: commands run immediately. Never run destructive or privilege-escalating commands (recursive deletes, sudo, force-push) unless the user explicitly asked for that exact action."
+		return "- There is NO confirmation gate: commands run immediately. Never run destructive or privilege-escalating commands (recursive deletes, sudo, force-push) unless the user explicitly asked for that exact action."
+	}
+	return "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first. An approved command re-runs without re-asking for the rest of the session."
+}
+
+func Tools(workDir string, elicit *tool.Elicitation, appr *Approvals) []tool.Tool {
+	if appr == nil {
+		appr = NewApprovals()
 	}
 
 	description := strings.Join([]string{
@@ -58,11 +64,11 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 		"- Match command syntax to the host OS shown in your environment section. Examples: list dir -> `ls` on Unix, `Get-ChildItem` on PowerShell.",
 		"- Each call starts in the workspace directory. Shell state (env vars, aliases, `cd` from a prior call) does not persist between calls. Use absolute paths or chain dependent commands in one call.",
 		"- For GitHub URLs or PR/issue/release data, prefer `gh` commands (`gh pr view`, `gh issue view`, `gh api`) over `web_fetch`; they return structured authenticated data.",
-		"- For commits: only commit when asked, inspect `git status`, `git diff`, and recent `git log` first, stage specific files by name, never skip hooks, and create a new commit instead of amending unless explicitly requested.",
+		"- Only commit when the user explicitly asked; stage specific files by name; never skip hooks.",
 		"- Quote paths with spaces. Chain dependent commands with `&&` on Unix or PowerShell 7+, and with `; if ($?) { ... }` on Windows PowerShell 5.1. Use separate tool calls for independent commands.",
-		"- Once a check has passed (tests, build, lint), trust it — don't re-run to be sure.",
 		"- Increase timeout for long-running commands. Avoid unnecessary `sleep` / `Start-Sleep`; if polling is needed, run a check command instead of sleeping first.",
-		safetyGuard,
+		"- For processes that should keep running (dev servers, watch tasks) or need interactive stdin, use `exec_command` instead.",
+		safetyGuardLine(elicit),
 	}, "\n")
 
 	return []tool.Tool{{
@@ -85,12 +91,12 @@ func Tools(workDir string, elicit *tool.Elicitation) []tool.Tool {
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (string, error) {
-			return executeShell(ctx, workDir, elicit, args)
+			return executeShell(ctx, workDir, elicit, appr, args)
 		},
 	}}
 }
 
-func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation, args map[string]any) (string, error) {
+func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation, appr *Approvals, args map[string]any) (string, error) {
 	command, ok := args["command"].(string)
 
 	if !ok || command == "" {
@@ -112,16 +118,8 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 		timeout = 600
 	}
 
-	if elicit != nil && elicit.Confirm != nil && ClassifyEffect(args) == tool.EffectDangerous {
-		approved, err := elicit.Confirm(ctx, "❯ "+command)
-
-		if err != nil {
-			return "", fmt.Errorf("failed to get user approval: %w", err)
-		}
-
-		if !approved {
-			return "", fmt.Errorf("command execution denied by user")
-		}
+	if err := confirmDangerous(ctx, elicit, appr, args); err != nil {
+		return "", err
 	}
 
 	ctx, cancel := context.WithTimeoutCause(ctx, time.Duration(timeout)*time.Second, errCommandTimeout)
@@ -157,6 +155,13 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 	}
 	return result, nil
 }
+
+// Command builds an *exec.Cmd that runs a script with the same
+// interpreter the shell tool uses on this platform.
+func Command(ctx context.Context, command, workingDir string) *exec.Cmd {
+	return buildCommand(ctx, command, workingDir)
+}
+
 func buildCommand(ctx context.Context, command, workingDir string) *exec.Cmd {
 	var cmd *exec.Cmd
 

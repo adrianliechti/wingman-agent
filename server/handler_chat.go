@@ -118,6 +118,8 @@ func (s *Server) handleSend(msg ClientMessage) {
 
 	s.setSessionPhase(sid, "thinking")
 
+	var lastUsage agent.Usage
+
 	for evMsg, err := range stream {
 		if err != nil {
 			text := err.Error()
@@ -164,16 +166,18 @@ func (s *Server) handleSend(msg ClientMessage) {
 			}
 		}
 
-		u := a.Usage(sid)
-		s.sendSession(sid, Frame{
-			Type:         EvtUsage,
-			InputTokens:  u.InputTokens,
-			CachedTokens: u.CachedTokens,
-			OutputTokens: u.OutputTokens,
-		})
+		if u := a.Usage(sid); u != lastUsage {
+			lastUsage = u
+			s.sendSession(sid, Frame{
+				Type:         EvtUsage,
+				InputTokens:  u.InputTokens,
+				CachedTokens: u.CachedTokens,
+				OutputTokens: u.OutputTokens,
+			})
+		}
 	}
 
-	if u := a.Usage(sid); u != (agent.Usage{}) {
+	if u := a.Usage(sid); u != (agent.Usage{}) && u != lastUsage {
 		s.sendSession(sid, Frame{
 			Type:         EvtUsage,
 			InputTokens:  u.InputTokens,

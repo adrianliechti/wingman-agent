@@ -316,6 +316,35 @@ func (s *Session) Definition(ctx context.Context, uri string, line, column int) 
 	return s.locationOp(ctx, "textDocument/definition", "Definition", uri, line, column)
 }
 
+type DefLocation struct {
+	Path   string
+	Line   int
+	Column int
+}
+
+func (s *Session) DefinitionLocations(ctx context.Context, uri string, line, column int) ([]DefLocation, error) {
+	params := TextDocumentPositionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri},
+		Position:     Position{Line: line, Character: column},
+	}
+
+	var result json.RawMessage
+	if err := s.CallAndAwait(ctx, "textDocument/definition", params, &result); err != nil {
+		return nil, err
+	}
+
+	locations, err := parseLocationResponse(result)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]DefLocation, 0, len(locations))
+	for _, l := range locations {
+		out = append(out, DefLocation{Path: uriToPath(l.URI), Line: l.Range.Start.Line, Column: l.Range.Start.Character})
+	}
+	return out, nil
+}
+
 func (s *Session) References(ctx context.Context, uri string, line, column int) (string, error) {
 	params := ReferenceParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},

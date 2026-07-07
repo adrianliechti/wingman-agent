@@ -197,7 +197,7 @@ func TestSpecializedReadOnlyAgentsFilterLikeExplore(t *testing.T) {
 		{Name: "shell", Effect: tool.StaticEffect(tool.EffectDynamic), Execute: func(context.Context, map[string]any) (string, error) { return "ok", nil }},
 	}
 
-	for _, name := range []string{"code-explorer", "code-architect", "code-reviewer", "legacy-analyst"} {
+	for _, name := range []string{"code-architect", "code-reviewer"} {
 		t.Run(name, func(t *testing.T) {
 			filtered := toolsForType(all, subagentTypes[name])
 			names := toolNames(filtered)

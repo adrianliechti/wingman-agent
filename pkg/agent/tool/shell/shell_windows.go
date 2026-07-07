@@ -20,3 +20,7 @@ func killProcessGroup(cmd *exec.Cmd) error {
 	}
 	return exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprintf("%d", cmd.Process.Pid)).Run()
 }
+
+func interruptProcessGroup(cmd *exec.Cmd) error {
+	return fmt.Errorf("not supported on windows")
+}

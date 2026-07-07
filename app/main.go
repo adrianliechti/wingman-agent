@@ -3,19 +3,17 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
-	"fmt"
+	"io"
 	"io/fs"
 	"log"
-	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
-	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	shell "github.com/adrianliechti/go-shell"
 
 	"github.com/adrianliechti/wingman-agent/server"
 )
@@ -24,71 +22,209 @@ import (
 var publicFS embed.FS
 
 type App struct {
-	ctx context.Context
-
 	mu     sync.Mutex
 	server *server.Server
+
+	launcher http.Handler
 }
 
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
+func main() {
+	// Repair PATH before anything detects agents via exec.LookPath: GUI
+	// launches (Finder/Dock) inherit a minimal PATH that hides Homebrew /
+	// ~/.local/bin CLIs like codex and copilot.
+	ensureShellPath()
 
 	if s, err := loadSettings(); err == nil {
 		s.Apply()
 	}
+
+	app := &App{}
+	app.launcher = app.newLauncher()
+
+	err := shell.Run(shell.Options{
+		Title:   "Wingman Agent",
+		Handler: app,
+
+		Width:  1280,
+		Height: 768,
+
+		MinWidth:  640,
+		MinHeight: 400,
+
+		Debug: os.Getenv("WINGMAN_DEBUG") != "",
+	})
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	app.shutdown()
 }
 
-func (a *App) GetSettings() (Settings, error) {
-	return loadSettings()
+// ServeHTTP hands everything to the workspace server once one is open;
+// until then the launcher (start page + its API) answers. Both share the
+// window's origin — go-shell opens any other origin in the default browser,
+// and staying behind its session cookie keeps the workspace server
+// unreachable for other local processes.
+func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	srv := a.server
+	a.mu.Unlock()
+
+	if srv != nil {
+		srv.ServeHTTP(w, r)
+		return
+	}
+
+	a.launcher.ServeHTTP(w, r)
 }
 
-func (a *App) SaveSettings(s Settings) error {
-	current, err := loadSettings()
-	if err == nil {
+func (a *App) newLauncher() http.Handler {
+	public, _ := fs.Sub(publicFS, "public")
+
+	mux := http.NewServeMux()
+	mux.Handle("/", http.FileServer(http.FS(public)))
+
+	mux.HandleFunc("GET /app/settings", a.handleSettings)
+	mux.HandleFunc("POST /app/settings", a.handleSaveSettings)
+	mux.HandleFunc("GET /app/workspaces", a.handleWorkspaces)
+	mux.HandleFunc("POST /app/workspaces/remove", a.handleRemoveWorkspace)
+	mux.HandleFunc("POST /app/workspaces/open", a.handleOpenWorkspace)
+	mux.HandleFunc("POST /app/folder", a.handleSelectFolder)
+
+	return mux
+}
+
+func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
+	s, err := loadSettings()
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, s)
+}
+
+func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
+	var s Settings
+
+	if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if current, err := loadSettings(); err == nil {
 		s.Workspaces = current.Workspaces
 	}
 
 	if err := saveSettings(s); err != nil {
-		return err
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	s.Apply()
-	return nil
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *App) GetWorkspaces() ([]string, error) {
+func (a *App) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	s, err := loadSettings()
+
 	if err != nil {
-		return nil, err
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
-	if len(s.Workspaces) > maxWorkspaces {
-		return s.Workspaces[:maxWorkspaces], nil
+	workspaces := s.Workspaces
+
+	if len(workspaces) > maxWorkspaces {
+		workspaces = workspaces[:maxWorkspaces]
 	}
 
-	return s.Workspaces, nil
+	writeJSON(w, workspaces)
 }
 
-func (a *App) RemoveWorkspace(path string) ([]string, error) {
+func (a *App) handleRemoveWorkspace(w http.ResponseWriter, r *http.Request) {
+	path, ok := readPath(w, r)
+
+	if !ok {
+		return
+	}
+
 	s, err := loadSettings()
+
 	if err != nil {
-		return nil, err
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	s.RemoveWorkspace(path)
 
 	if err := saveSettings(s); err != nil {
-		return nil, err
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
-	return s.Workspaces, nil
+	writeJSON(w, s.Workspaces)
+}
+
+func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
+	path, ok := readPath(w, r)
+
+	if !ok {
+		return
+	}
+
+	a.mu.Lock()
+	if a.server != nil {
+		a.mu.Unlock()
+		http.Error(w, "workspace already open", http.StatusConflict)
+		return
+	}
+	a.mu.Unlock()
+
+	srv, err := server.New(context.Background(), path, nil)
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	a.mu.Lock()
+	if a.server != nil {
+		a.mu.Unlock()
+		srv.Close()
+		http.Error(w, "workspace already open", http.StatusConflict)
+		return
+	}
+	a.server = srv
+	a.mu.Unlock()
+
+	if s, err := loadSettings(); err == nil {
+		s.AddWorkspace(path)
+		_ = saveSettings(s)
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleSelectFolder(w http.ResponseWriter, r *http.Request) {
+	path, err := shell.PickFolder("Open Workspace")
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]string{"path": path})
 }
 
 // shutdown bounds the teardown so a slow component (LSP shutdown
 // handshakes, MCP subprocesses) can't hang app quit. Kill signals are
 // issued before the waits we abandon, and orphaned rewind dirs are
 // reclaimed by CleanupOrphans on the next start.
-func (a *App) shutdown(ctx context.Context) {
+func (a *App) shutdown() {
 	a.mu.Lock()
 	srv := a.server
 	a.mu.Unlock()
@@ -110,90 +246,25 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 }
 
-func (a *App) SelectFolder() (string, error) {
-	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
-		Title: "Open Workspace",
-	})
+func readPath(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var req struct {
+		Path string `json:"path"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return "", false
+	}
+
+	if req.Path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return "", false
+	}
+
+	return req.Path, true
 }
 
-// OpenWorkspace boots the embedded server on a localhost TCP listener and
-// returns its URL. The frontend navigates the webview to that URL, leaving
-// the Wails AssetServer (which can't proxy WebSocket upgrades) out of the
-// hot path entirely.
-func (a *App) OpenWorkspace(path string) (string, error) {
-	if path == "" {
-		return "", errors.New("path is required")
-	}
-
-	a.mu.Lock()
-	if a.server != nil {
-		a.mu.Unlock()
-		return "", errors.New("workspace already open")
-	}
-	a.mu.Unlock()
-
-	srv, err := server.New(a.ctx, path, nil)
-	if err != nil {
-		return "", err
-	}
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		srv.Close()
-		return "", err
-	}
-	go func() {
-		if err := http.Serve(listener, srv); err != nil && !errors.Is(err, net.ErrClosed) {
-			log.Printf("server listener: %v", err)
-		}
-	}()
-
-	a.mu.Lock()
-	a.server = srv
-	a.mu.Unlock()
-
-	if s, err := loadSettings(); err == nil {
-		s.AddWorkspace(path)
-		_ = saveSettings(s)
-	}
-
-	return fmt.Sprintf("http://%s", listener.Addr().String()), nil
-}
-
-func main() {
-	// Repair PATH before anything detects agents via exec.LookPath: GUI
-	// launches (Finder/Dock) inherit a minimal PATH that hides Homebrew /
-	// ~/.local/bin CLIs like codex and copilot.
-	ensureShellPath()
-
-	app := &App{}
-
-	startFS, _ := fs.Sub(publicFS, "public")
-
-	background := &options.RGBA{R: 255, G: 255, B: 255, A: 255}
-	if isDarkMode() {
-		background = &options.RGBA{R: 10, G: 10, B: 10, A: 255}
-	}
-
-	opts := &options.App{
-		Title: "Wingman Agent",
-
-		Width:  1280,
-		Height: 768,
-
-		BackgroundColour: background,
-
-		OnStartup:  app.startup,
-		OnShutdown: app.shutdown,
-
-		Bind: []any{app},
-
-		AssetServer: &assetserver.Options{
-			Handler: http.FileServer(http.FS(startFS)),
-		},
-	}
-
-	if err := wails.Run(opts); err != nil {
-		panic(err)
-	}
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
 }

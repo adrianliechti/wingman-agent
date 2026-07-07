@@ -15,17 +15,28 @@ const MaxBytes = 100 * 1024
 
 const grepMaxBytes = 20 * 1024
 
-const previewBytes = 2 * 1024
+const shellMaxBytes = 48 * 1024
+
+const headPreviewBytes = 2 * 1024
+
+const tailPreviewBytes = 4 * 1024
 
 func budgetFor(name string) int {
-	if name == "grep" {
+	switch name {
+	case "grep":
 		return grepMaxBytes
+	case "shell":
+		return shellMaxBytes
+	default:
+		return MaxBytes
 	}
-	return MaxBytes
 }
 
 func New(scratchDir string) hook.PostToolUse {
 	return func(_ context.Context, call tool.ToolCall, result string) (string, error) {
+		if tool.IsImageResult(result) {
+			return result, nil
+		}
 		budget := budgetFor(call.Name)
 		if len(result) <= budget {
 			return result, nil
@@ -53,8 +64,8 @@ func writeScratch(scratchDir, toolName, content string) string {
 }
 
 func formatPersisted(result, scratchPath string) string {
-	head := text.HeadBytes(result, previewBytes)
-	tail := text.TailBytes(result, previewBytes)
+	head := text.HeadBytes(result, headPreviewBytes)
+	tail := text.TailBytes(result, tailPreviewBytes)
 
 	var b strings.Builder
 	b.WriteString("<persisted-output>\n")

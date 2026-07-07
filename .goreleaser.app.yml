@@ -1,9 +1,10 @@
-# Desktop app (Wails) release — separate from the CLI (.goreleaser.yml) because
-# the macOS .app bundle must be built natively on macOS (no cross-compile) and
-# ships as a Homebrew cask (into /Applications), not a formula.
+# Desktop app release — separate from the CLI (.goreleaser.yml) because the
+# macOS .app bundle must be built natively on macOS (cgo/Cocoa, no
+# cross-compile) and ships as a Homebrew cask (into /Applications), not a
+# formula.
 #
-#   goreleaser release --clean -f .goreleaser.app.yml             # release
-#   goreleaser release --snapshot --clean -f .goreleaser.app.yml  # dry run
+#   goreleaser release --clean --skip=validate -f .goreleaser.app.yml             # release
+#   goreleaser release --snapshot --clean --skip=validate -f .goreleaser.app.yml  # dry run
 version: 2
 
 project_name: wingman-app
@@ -12,10 +13,9 @@ dist: dist/app
 before:
   hooks:
     - sh -c 'cd server/ui && npm ci && npm run build'             # UI -> server/static
-    # Pinned wails CLI (keep in sync with the Taskfile `app` task / app/go.mod).
-    - sh -c 'cd app && go run github.com/wailsapp/wails/v2/cmd/wails@v2.12.0 build -platform darwin/arm64 -clean -trimpath'
+    - sh -c 'cd app && go tool appbundle -name "Wingman Agent" -id com.adrianliechti.wingman-agent -description "Wingman Agent" -company "Adrian Liechti" -copyright "© Adrian Liechti" -package . -version {{ .Version }}'
 
-# Wails builds the .app in the hooks above; GoReleaser builds no binaries.
+# The hook above assembles the .app; GoReleaser builds no binaries.
 builds:
   - id: app
     skip: true

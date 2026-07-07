@@ -71,10 +71,10 @@ func toolDisplay(name string) (string, string) {
 	switch {
 	case name == "agent":
 		return "▸", ""
-	case name == "shell":
+	case name == "shell", name == "exec_command", name == "exec_session":
 		return "$", name
 	case name == "read", name == "write", name == "edit",
-		name == "glob", name == "grep":
+		name == "glob", name == "grep", name == "view_image":
 		return "⟡", name
 	case name == "web_fetch", name == "web_search":
 		return "⊕", name

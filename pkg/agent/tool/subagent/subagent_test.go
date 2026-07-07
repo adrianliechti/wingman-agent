@@ -40,12 +40,10 @@ func TestAgentToolSchemaIncludesTypedSubagentParameters(t *testing.T) {
 		"explore",
 		"verification",
 		"security",
-		"code-explorer",
 		"code-architect",
 		"code-reviewer",
 		"code-simplifier",
 		"test-engineer",
-		"legacy-analyst",
 	} {
 		if !contains(enum, name) {
 			t.Fatalf("agent_type enum = %#v, missing %q", enum, name)
@@ -94,12 +92,10 @@ func TestAgentToolClassifiesEffectByAgentType(t *testing.T) {
 		{"explore trims case", map[string]any{"agent_type": " Explore "}, tool.EffectReadOnly},
 		{"verification", map[string]any{"agent_type": "verification"}, tool.EffectMutates},
 		{"security", map[string]any{"agent_type": "security"}, tool.EffectReadOnly},
-		{"code explorer", map[string]any{"agent_type": "code-explorer"}, tool.EffectReadOnly},
 		{"code architect", map[string]any{"agent_type": "code-architect"}, tool.EffectReadOnly},
 		{"code reviewer", map[string]any{"agent_type": "code-reviewer"}, tool.EffectReadOnly},
 		{"code simplifier", map[string]any{"agent_type": "code-simplifier"}, tool.EffectMutates},
 		{"test engineer", map[string]any{"agent_type": "test-engineer"}, tool.EffectMutates},
-		{"legacy analyst", map[string]any{"agent_type": "legacy-analyst"}, tool.EffectReadOnly},
 	}
 
 	for _, tt := range tests {

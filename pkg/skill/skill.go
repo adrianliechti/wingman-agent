@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 )
 
 type Skill struct {
@@ -329,9 +329,6 @@ func FormatForPrompt(skills []Skill) string {
 	count := 0
 
 	for _, s := range skills {
-		if s.Location == "" {
-			continue
-		}
 		if count == 0 {
 			fmt.Fprint(&sb, "<available_skills>\n")
 		}
@@ -345,7 +342,9 @@ func FormatForPrompt(skills []Skill) string {
 			fmt.Fprintf(&sb, "    <when-to-use>%s</when-to-use>\n", s.WhenToUse)
 		}
 
-		fmt.Fprintf(&sb, "    <location>%s/SKILL.md</location>\n", displayLocation(s.Location))
+		if s.Location != "" {
+			fmt.Fprintf(&sb, "    <location>%s/SKILL.md</location>\n", displayLocation(s.Location))
+		}
 
 		fmt.Fprint(&sb, "  </skill>\n")
 	}
@@ -416,7 +415,7 @@ func parseSkillData(data string) (Skill, string, error) {
 
 	var skill Skill
 
-	if err := yaml.Unmarshal([]byte(frontmatter.String()), &skill); err != nil {
+	if err := yaml.Load([]byte(frontmatter.String()), &skill); err != nil {
 		return Skill{}, "", fmt.Errorf("failed to parse frontmatter: %w", err)
 	}
 

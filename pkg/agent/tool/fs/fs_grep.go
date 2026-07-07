@@ -114,11 +114,14 @@ func parseGrepArgs(args map[string]any) (*grepArgs, error) {
 	}
 
 	resultOffset := 0
-	if v, present, err := tool.NonNegIntArg(args, "offset"); present {
-		if err != nil {
-			return nil, err
+	for _, key := range []string{"skip", "offset"} {
+		if v, present, err := tool.NonNegIntArg(args, key); present {
+			if err != nil {
+				return nil, err
+			}
+			resultOffset = v
+			break
 		}
-		resultOffset = v
 	}
 
 	outputMode := "files_with_matches"
@@ -195,18 +198,17 @@ func GrepTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 					"enum":        []string{"content", "files_with_matches", "count"},
 					"default":     "files_with_matches",
 				},
-				"-B":      map[string]any{"type": "integer", "description": "Number of lines to show before each match (rg -B). Requires output_mode=content."},
-				"-A":      map[string]any{"type": "integer", "description": "Number of lines to show after each match (rg -A). Requires output_mode=content."},
-				"-C":      map[string]any{"type": "integer", "description": "Alias for context."},
-				"context": map[string]any{"type": "integer", "description": "Number of lines to show before and after each match (rg -C). Requires output_mode=content."},
-				"-n":      map[string]any{"type": "boolean", "description": "Show line numbers in output (rg -n). Requires output_mode=content. Defaults to true.", "default": true},
-				"-i":      map[string]any{"type": "boolean", "description": "Case-insensitive search (rg -i).", "default": false},
+				"-B": map[string]any{"type": "integer", "description": "Number of lines to show before each match (rg -B). Requires output_mode=content."},
+				"-A": map[string]any{"type": "integer", "description": "Number of lines to show after each match (rg -A). Requires output_mode=content."},
+				"-C": map[string]any{"type": "integer", "description": "Number of lines to show before and after each match (rg -C). Requires output_mode=content."},
+				"-n": map[string]any{"type": "boolean", "description": "Show line numbers in output (rg -n). Requires output_mode=content. Defaults to true.", "default": true},
+				"-i": map[string]any{"type": "boolean", "description": "Case-insensitive search (rg -i).", "default": false},
 				"head_limit": map[string]any{
 					"type":        "integer",
 					"description": fmt.Sprintf("Limit output to first N entries. Works across all output modes. Defaults to %d. Pass 0 for unlimited (use sparingly — large result sets waste context).", DefaultGrepLimit),
 					"default":     DefaultGrepLimit,
 				},
-				"offset":    map[string]any{"type": "integer", "description": "Skip first N entries before applying head_limit. Defaults to 0.", "default": 0},
+				"skip":      map[string]any{"type": "integer", "description": "Skip the first N result entries before applying head_limit (result pagination, not a line number). Defaults to 0.", "default": 0},
 				"multiline": map[string]any{"type": "boolean", "description": "Enable multiline mode where `.` matches newlines and patterns can span lines.", "default": false},
 			},
 			"required":             []string{"pattern"},
@@ -665,7 +667,7 @@ func formatGrepLimitInfo(limitReached bool, limit, offset int) string {
 		parts = append(parts, fmt.Sprintf("limit: %d", limit))
 	}
 	if offset > 0 {
-		parts = append(parts, fmt.Sprintf("offset: %d", offset))
+		parts = append(parts, fmt.Sprintf("skip: %d", offset))
 	}
 	if len(parts) == 0 {
 		return ""

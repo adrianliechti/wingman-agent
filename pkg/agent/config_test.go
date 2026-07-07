@@ -1,0 +1,41 @@
+package agent
+
+import "testing"
+
+func TestContextWindowFor(t *testing.T) {
+	cases := []struct {
+		model string
+		large bool
+		want  int
+	}{
+		{"claude-sonnet-5", false, 1_000_000},
+		{"claude-opus-4-8", false, 1_000_000},
+		{"claude-fable-5", false, 1_000_000},
+		{"claude-haiku-4-5", false, 200_000},
+		{"claude-opus-4-5", false, 200_000},
+		{"claude-sonnet-4-5", false, 200_000},
+		{"claude-sonnet-4-5", true, 200_000},
+		{"gpt-5.5", false, 272_000},
+		{"gpt-5.5", true, 1_000_000},
+		{"gpt-5.4", false, 272_000},
+		{"gpt-5.4", true, 1_000_000},
+		{"gpt-5.3-codex", false, 400_000},
+		{"gpt-5.3-codex", true, 400_000},
+		{"gpt-5.2-codex", false, 400_000},
+		{"gpt-4.1-mini", false, 1_000_000},
+		{"gpt-4o-mini", false, 128_000},
+		{"o3-mini", false, 200_000},
+		{"gemini-2.5-pro", false, 200_000},
+		{"gemini-2.5-pro", true, 1_000_000},
+		{"GPT-5.5", false, 272_000},
+		{"some-unknown-model", false, DefaultContextWindow},
+		{"some-unknown-model", true, DefaultContextWindow},
+		{"", false, DefaultContextWindow},
+	}
+
+	for _, tc := range cases {
+		if got := ContextWindowFor(tc.model, tc.large); got != tc.want {
+			t.Errorf("ContextWindowFor(%q, large=%v) = %d, want %d", tc.model, tc.large, got, tc.want)
+		}
+	}
+}

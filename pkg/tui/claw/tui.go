@@ -20,6 +20,7 @@ import (
 type TUI struct {
 	claw    *claw.Claw
 	app     *tview.Application
+	ctx     context.Context
 	handler channel.MessageHandler
 
 	agentList *tview.List
@@ -47,6 +48,7 @@ func New(c *claw.Claw) *TUI {
 func (t *TUI) Name() string { return "cli" }
 
 func (t *TUI) Start(ctx context.Context, handler channel.MessageHandler) error {
+	t.ctx = ctx
 	t.handler = handler
 
 	theme.Auto()

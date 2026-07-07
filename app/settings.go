@@ -13,6 +13,7 @@ const maxWorkspaces = 3
 type Settings struct {
 	WingmanURL   string   `json:"url"`
 	WingmanToken string   `json:"token"`
+	LargeContext bool     `json:"large_context,omitempty"`
 	Workspaces   []string `json:"workspaces,omitempty"`
 }
 
@@ -109,4 +110,8 @@ func saveSettings(s Settings) error {
 func (s Settings) Apply() {
 	os.Setenv("WINGMAN_URL", s.WingmanURL)
 	os.Setenv("WINGMAN_TOKEN", s.WingmanToken)
+
+	if s.LargeContext {
+		os.Setenv("WINGMAN_LARGE_CONTEXT", "1")
+	}
 }

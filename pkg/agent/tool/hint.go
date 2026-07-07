@@ -2,6 +2,7 @@ package tool
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -31,6 +32,19 @@ func ExtractHint(argsJSON, toolName string) string {
 				}
 			}
 			return label
+		}
+	}
+
+	if toolName == "exec_session" {
+		if id, ok := IntArg(args, "session_id"); ok {
+			hint := fmt.Sprintf("session %d", id)
+			if kill, _ := args["kill"].(bool); kill {
+				return hint + " (kill)"
+			}
+			if input, _ := args["input"].(string); input != "" {
+				return hint + ": " + strings.Join(strings.Fields(input), " ")
+			}
+			return hint
 		}
 	}
 

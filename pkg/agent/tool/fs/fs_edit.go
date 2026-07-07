@@ -12,6 +12,10 @@ import (
 )
 
 func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
+	return editTool(root, nil, allowedWriteRoots...)
+}
+
+func editTool(root *os.Root, tracker *contentTracker, allowedWriteRoots ...string) tool.Tool {
 	return tool.Tool{
 		Name:   "edit",
 		Effect: tool.StaticEffect(tool.EffectMutates),
@@ -116,6 +120,8 @@ func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 			if err := writeFileTarget(root, target, finalContent); err != nil {
 				return "", fmt.Errorf("write file %q: %w", pathArg, err)
 			}
+
+			tracker.record([]byte(finalContent))
 
 			diff := generateDiffString(normalizedContent, newContent)
 

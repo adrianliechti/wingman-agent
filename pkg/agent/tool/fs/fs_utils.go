@@ -406,6 +406,10 @@ func fuzzyFindText(content, oldText string) fuzzyMatchResult {
 	}
 }
 
+// maxDiffLines caps the diff echoed back to the model after edit/write: the
+// model just produced the content, so a huge rewrite doesn't need repeating.
+const maxDiffLines = 200
+
 func generateDiffString(oldContent, newContent string) string {
 	dmp := diffmatchpatch.New()
 
@@ -442,7 +446,24 @@ func generateDiffString(oldContent, newContent string) string {
 		}
 	}
 
-	return output.String()
+	return capDiffLines(output.String())
+}
+
+func capDiffLines(diff string) string {
+	trimmed := strings.TrimRight(diff, "\n")
+	if trimmed == "" {
+		return diff
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) <= maxDiffLines {
+		return diff
+	}
+
+	omitted := len(lines) - maxDiffLines
+	lines = lines[:maxDiffLines]
+
+	return strings.Join(lines, "\n") + fmt.Sprintf("\n… diff truncated: %d more changed lines (the file was written in full)\n", omitted)
 }
 
 var vcsDirs = map[string]bool{

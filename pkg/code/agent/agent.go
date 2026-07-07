@@ -3,6 +3,7 @@ package agent
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -17,12 +18,14 @@ import (
 	"github.com/google/uuid"
 
 	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/external"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/ask"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/todo"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
@@ -54,8 +57,9 @@ type sessionState struct {
 	modelID  string
 	effortID string
 
-	planMode  atomic.Bool
-	baseTools []tool.Tool
+	planMode    atomic.Bool
+	baseTools   []tool.Tool
+	execManager *shell.ExecManager
 
 	projectInstructionsMu     sync.Mutex
 	projectInstructionsCache  string
@@ -71,6 +75,7 @@ func New(ws *code.Workspace, cfg *harness.Config, ui code.UI) *Agent {
 		workspace:   ws,
 		cfg:         cfg,
 		ui:          ui,
+		modelID:     harness.DefaultModel(),
 		sessionsDir: filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
 		sessions:    map[string]*sessionState{},
 	}
@@ -196,8 +201,10 @@ func (a *Agent) ListSessions(_ context.Context) ([]code.SessionInfo, error) {
 
 func (a *Agent) NewSession(_ context.Context) (string, error) {
 	id := uuid.NewString()
+	s := a.buildSession()
+	s.aa.CacheKey = id
 	a.mu.Lock()
-	a.sessions[id] = a.buildSession()
+	a.sessions[id] = s
 	a.mu.Unlock()
 	return id, nil
 }
@@ -215,6 +222,7 @@ func (a *Agent) LoadSession(_ context.Context, id string) error {
 		return err
 	}
 	s := a.buildSession()
+	s.aa.CacheKey = id
 	s.aa.Messages = saved.State.Messages
 	s.aa.Usage = saved.State.Usage
 
@@ -234,6 +242,7 @@ func (a *Agent) DeleteSession(_ context.Context, id string) error {
 
 	if inMem {
 		s.cancel()
+		s.execManager.Close()
 	}
 	if err := session.Delete(a.sessionsDir, id); err != nil && !os.IsNotExist(err) {
 		return err
@@ -327,6 +336,7 @@ func (a *Agent) Close() error {
 	a.mu.Lock()
 	for _, s := range a.sessions {
 		s.cancel()
+		s.execManager.Close()
 	}
 	a.sessions = map[string]*sessionState{}
 	a.mu.Unlock()
@@ -387,12 +397,39 @@ func (a *Agent) buildSession() *sessionState {
 	sessionCfg.Effort = func() string {
 		return a.effortFor(s)
 	}
-	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,
-		truncation.New(a.workspace.ScratchPath),
-	)
-
 	elicit := a.buildElicit()
 	ws := a.workspace
+
+	globalHooks, globalErr := external.Load(userHooksConfigPath())
+	workspaceHooksPath := filepath.Join(ws.RootPath, "hooks.json")
+	workspaceHooks, workspaceErr := external.Load(workspaceHooksPath)
+
+	// Fail closed: a hook config the user wrote but that no longer parses must
+	// not silently disable the guards it configures.
+	if err := errors.Join(globalErr, workspaceErr); err != nil {
+		message := fmt.Sprintf("hook configuration is invalid; fix or remove it to unblock tools: %v", err)
+		sessionCfg.Hooks.PreToolUse = append(sessionCfg.Hooks.PreToolUse,
+			func(context.Context, tool.ToolCall) (string, error) { return message, nil },
+		)
+	}
+
+	// Workspace hooks come with the repo, not the user — gate them behind a
+	// one-time confirmation so a cloned project cannot run commands unprompted.
+	var workspaceGate *external.Gate
+	if rules := len(workspaceHooks.PreToolUse) + len(workspaceHooks.PostToolUse); rules > 0 {
+		workspaceGate = &external.Gate{
+			Confirm: elicit.Confirm,
+			Message: fmt.Sprintf("Run %d workspace hook rule(s) from %s?", rules, workspaceHooksPath),
+		}
+	}
+
+	sessionCfg.Hooks.PreToolUse = append(sessionCfg.Hooks.PreToolUse, globalHooks.PreHooks(ws.RootPath, nil)...)
+	sessionCfg.Hooks.PreToolUse = append(sessionCfg.Hooks.PreToolUse, workspaceHooks.PreHooks(ws.RootPath, workspaceGate)...)
+	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,
+		truncation.New(ws.ScratchPath),
+	)
+	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse, globalHooks.PostHooks(ws.RootPath, nil)...)
+	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse, workspaceHooks.PostHooks(ws.RootPath, workspaceGate)...)
 
 	var allowedReadRoots []string
 	for _, sk := range ws.Skills {
@@ -411,16 +448,29 @@ func (a *Agent) buildSession() *sessionState {
 		allowedWriteRoots = append(allowedWriteRoots, ws.MemoryPath)
 	}
 
+	s.execManager = shell.NewExecManager()
+	approvals := shell.NewApprovals()
+
 	s.baseTools = slices.Concat(
 		fs.Tools(ws.Root, &fs.Options{
 			AllowedReadRoots:  allowedReadRoots,
 			AllowedWriteRoots: allowedWriteRoots,
 		}),
-		shell.Tools(ws.RootPath, elicit),
+		shell.Tools(ws.RootPath, elicit, approvals),
+		shell.ExecTools(s.execManager, ws.RootPath, elicit, approvals),
+		todo.Tools(),
 		ask.Tools(elicit),
 		subagent.Tools(sessionCfg, s.subagentContext),
 	)
 	return s
+}
+
+func userHooksConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".wingman", "hooks.json")
 }
 
 func (a *Agent) buildElicit() *tool.Elicitation {
@@ -474,9 +524,10 @@ func (s *sessionState) cancel() {
 
 func (s *sessionState) tools() []tool.Tool {
 	tools := append([]tool.Tool{}, s.baseTools...)
-	mcpTools, lspTools := s.parent.workspace.ManagedTools()
+	mcpTools, lspTools, graphTools := s.parent.workspace.ManagedTools()
 	tools = append(tools, mcpTools...)
 	tools = append(tools, lspTools...)
+	tools = append(tools, graphTools...)
 	if s.planMode.Load() {
 		tools = planModeTools(tools)
 	}

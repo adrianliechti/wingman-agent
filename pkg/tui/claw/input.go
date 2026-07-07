@@ -40,7 +40,10 @@ func (t *TUI) submitInput() {
 	t.updateStatusBar()
 
 	go func() {
-		ctx := context.Background()
+		ctx := t.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
 		t.handler(ctx, msg)
 
 		t.app.QueueUpdateDraw(func() {

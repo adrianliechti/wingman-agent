@@ -10,16 +10,25 @@ import (
 )
 
 func WriteTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
+	return writeTool(root, nil, allowedWriteRoots...)
+}
+
+func writeTool(root *os.Root, tracker *contentTracker, allowedWriteRoots ...string) tool.Tool {
+	lines := []string{
+		"Writes a file to the local filesystem. Creates parent directories as needed and overwrites any existing file at the same path.",
+		"- For existing files, `read` first so you do not discard content.",
+		"- Prefer `edit` for existing files: it sends only the diff. Use `write` for new files or complete rewrites.",
+		"- Overwrites return a line diff against the previous content; treat it as authoritative instead of re-reading the file.",
+	}
+	if tracker != nil {
+		lines[1] = "- Overwriting an existing text file requires `read`ing it first in this session — the call fails if the file's current content has never been shown to you."
+	}
+
 	return tool.Tool{
 		Name:   "write",
 		Effect: tool.StaticEffect(tool.EffectMutates),
 
-		Description: strings.Join([]string{
-			"Writes a file to the local filesystem. Creates parent directories as needed and overwrites any existing file at the same path.",
-			"- For existing files, `read` first so you do not discard content.",
-			"- Prefer `edit` for existing files: it sends only the diff. Use `write` for new files or complete rewrites.",
-			"- Overwrites return a line diff against the previous content; treat it as authoritative instead of re-reading the file.",
-		}, "\n"),
+		Description: strings.Join(lines, "\n"),
 
 		Parameters: map[string]any{
 			"type": "object",
@@ -66,9 +75,15 @@ func WriteTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
 				oldContent, _ = readFileTarget(root, target)
 			}
 
+			if len(oldContent) > 0 && !isBinaryFile(pathArg) && !tracker.knows(oldContent) {
+				return "", fmt.Errorf("cannot overwrite %s: its current content has not been read in this session — `read` it first", pathArg)
+			}
+
 			if err := writeFileTarget(root, target, content); err != nil {
 				return "", fmt.Errorf("write file %q: %w", pathArg, err)
 			}
+
+			tracker.record([]byte(content))
 
 			if isNew {
 				return fmt.Sprintf("Created %s (%d bytes written)", pathArg, len(content)), nil

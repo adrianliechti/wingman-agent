@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,9 +12,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 )
 
 const tasksFile = "tasks.yaml"
@@ -22,6 +24,7 @@ type Task struct {
 	ID        string     `yaml:"id"`
 	Prompt    string     `yaml:"prompt"`
 	Schedule  string     `yaml:"schedule"`
+	Script    string     `yaml:"script,omitempty"`
 	Status    string     `yaml:"status"`
 	CreatedAt time.Time  `yaml:"created_at"`
 	LastRun   *time.Time `yaml:"last_run,omitempty"`
@@ -66,7 +69,9 @@ func Tools(agentDir string) []tool.Tool {
 				"Schedule formats:",
 				"- Interval: \"every 15m\", \"every 2h\", \"every 24h\"",
 				"- Cron: \"0 9 * * 1-5\" (weekdays at 9am), \"*/15 * * * *\" (every 15 min)",
-				"- One-time: ISO 8601 timestamp (e.g. \"2026-04-15T09:00:00Z\")",
+				"- One-time: a timestamp, local (\"2026-04-15T09:00\") or RFC 3339 with offset",
+				"",
+				"For frequent monitoring tasks, add a pre-check script so you are only woken when something changed.",
 			}, "\n"),
 			Parameters: map[string]any{
 				"type": "object",
@@ -77,7 +82,11 @@ func Tools(agentDir string) []tool.Tool {
 					},
 					"schedule": map[string]any{
 						"type":        "string",
-						"description": "Schedule expression: \"every 15m\", cron expression, or ISO 8601 timestamp.",
+						"description": "Schedule expression: \"every 15m\", cron expression, or timestamp.",
+					},
+					"script": map[string]any{
+						"type":        "string",
+						"description": "Optional pre-check script that runs before each invocation, using the same interpreter as the shell tool. Print {\"wake\": false} to skip the run silently; any other output (or a failure) wakes you with the output attached. Test it with the shell tool first.",
 					},
 				},
 				"required":             []string{"prompt", "schedule"},
@@ -86,11 +95,14 @@ func Tools(agentDir string) []tool.Tool {
 			Execute: func(ctx context.Context, args map[string]any) (string, error) {
 				prompt, _ := args["prompt"].(string)
 				sched, _ := args["schedule"].(string)
+				script, _ := args["script"].(string)
 
 				task, err := NewTask(prompt, sched)
 				if err != nil {
 					return "", err
 				}
+
+				task.Script = strings.TrimSpace(script)
 
 				err = Mutate(agentDir, func(tasks []Task) ([]Task, error) {
 					return append(tasks, task), nil
@@ -133,6 +145,9 @@ func Tools(agentDir string) []tool.Tool {
 
 					fmt.Fprintf(&b, "- [%s] %s (schedule: %s, status: %s, next: %s",
 						t.ID, t.Prompt, t.Schedule, t.Status, nextStr)
+					if t.Script != "" {
+						b.WriteString(", pre-check script")
+					}
 					if t.LastRun != nil {
 						fmt.Fprintf(&b, ", last run: %s", t.LastRun.Format(time.RFC3339))
 					}
@@ -273,7 +288,7 @@ func loadTasks(agentDir string) ([]Task, error) {
 	}
 
 	var f taskFile
-	if err := yaml.Unmarshal(data, &f); err != nil {
+	if err := yaml.Load(data, &f); err != nil {
 		return nil, err
 	}
 
@@ -281,7 +296,7 @@ func loadTasks(agentDir string) ([]Task, error) {
 }
 
 func saveTasks(agentDir string, tasks []Task) error {
-	out, err := yaml.Marshal(taskFile{Tasks: tasks})
+	out, err := yaml.Dump(taskFile{Tasks: tasks})
 	if err != nil {
 		return err
 	}
@@ -329,15 +344,17 @@ func parseSchedule(sched string) (parsedSchedule, error) {
 		return parsedSchedule{interval: d}, nil
 	}
 
-	if ts, err := time.Parse(time.RFC3339, sched); err == nil {
-		return parsedSchedule{once: ts}, nil
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04"} {
+		if ts, err := time.ParseInLocation(layout, sched, time.Local); err == nil {
+			return parsedSchedule{once: ts}, nil
+		}
 	}
 
 	if s, err := cronParser.Parse(sched); err == nil {
 		return parsedSchedule{cron: s}, nil
 	}
 
-	return parsedSchedule{}, fmt.Errorf("invalid schedule %q: must be \"every <duration>\", a cron expression, or an ISO 8601 timestamp", sched)
+	return parsedSchedule{}, fmt.Errorf("invalid schedule %q: must be \"every <duration>\", a cron expression, or a timestamp (\"2026-04-15T09:00\" local or RFC 3339)", sched)
 }
 
 func NextRun(t Task, now time.Time) time.Time {
@@ -382,9 +399,63 @@ func IsDue(t Task, now time.Time) bool {
 	return !next.IsZero() && !next.After(now)
 }
 
-func IsOneTime(sched string) bool {
+func OnceTime(sched string) (time.Time, bool) {
 	p, err := parseSchedule(sched)
-	return err == nil && !p.once.IsZero()
+	if err != nil || p.once.IsZero() {
+		return time.Time{}, false
+	}
+	return p.once, true
+}
+
+func IsOneTime(sched string) bool {
+	_, ok := OnceTime(sched)
+	return ok
+}
+
+const (
+	gateTimeout   = 2 * time.Minute
+	gateMaxOutput = 16 * 1024
+)
+
+// RunGate executes a task's pre-check script. It reports whether the agent
+// should be woken; on script failure it fails open so the agent can fix it.
+func RunGate(ctx context.Context, dir, script string) (bool, string) {
+	ctx, cancel := context.WithTimeout(ctx, gateTimeout)
+	defer cancel()
+
+	out, err := shell.Command(ctx, script, dir).CombinedOutput()
+
+	output := strings.TrimSpace(string(out))
+	if len(output) > gateMaxOutput {
+		output = output[:gateMaxOutput] + "\n[output truncated]"
+	}
+
+	if err != nil {
+		return true, fmt.Sprintf("pre-check script failed (%v); fix the script or remove it from the task.\n%s", err, output)
+	}
+
+	if wake, ok := parseGateOutput(output); ok {
+		return wake, output
+	}
+
+	lines := strings.Split(output, "\n")
+	if wake, ok := parseGateOutput(lines[len(lines)-1]); ok {
+		return wake, output
+	}
+
+	return true, output
+}
+
+func parseGateOutput(s string) (bool, bool) {
+	var result struct {
+		Wake *bool `json:"wake"`
+	}
+
+	if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &result); err != nil || result.Wake == nil {
+		return false, false
+	}
+
+	return *result.Wake, true
 }
 
 func NewTask(prompt, sched string) (Task, error) {

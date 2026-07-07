@@ -15,11 +15,13 @@ func Tools(root *os.Root, opts *Options) []tool.Tool {
 	if opts == nil {
 		opts = &Options{}
 	}
+	tracker := newContentTracker()
 	return []tool.Tool{
-		ReadTool(root, opts.AllowedReadRoots...),
-		WriteTool(root, opts.AllowedWriteRoots...),
-		EditTool(root, opts.AllowedWriteRoots...),
+		readTool(root, tracker, opts.AllowedReadRoots...),
+		writeTool(root, tracker, opts.AllowedWriteRoots...),
+		editTool(root, tracker, opts.AllowedWriteRoots...),
 		GrepTool(root, opts.AllowedReadRoots...),
 		GlobTool(root, opts.AllowedReadRoots...),
+		ImageTool(root, opts.AllowedReadRoots...),
 	}
 }
