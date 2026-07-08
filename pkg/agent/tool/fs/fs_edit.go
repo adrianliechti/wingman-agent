@@ -23,12 +23,10 @@ func editTool(root *os.Root, tracker *contentTracker, allowedWriteRoots ...strin
 		Description: strings.Join([]string{
 			"Performs exact string replacements in files.",
 			"- You must `read` the file at least once in this conversation before editing it.",
-			"- Preserve indentation exactly as it appears after the `read` line-number prefix (`42\\t...`). Never include the prefix in old_string/new_string.",
-			"- The edit will FAIL if `old_string` is not unique in the file. Provide more surrounding context to make it unique, or set `replace_all=true` to change every instance.",
-			"- Use the smallest old_string that's clearly unique — usually 2-4 adjacent lines is sufficient.",
-			"- Prefer `write` for new files. An empty `old_string` also creates a new file (or replaces an empty one); non-empty files reject empty `old_string`.",
-			"- Use `replace_all` for renaming a symbol across a file or other intentional file-wide replacements.",
-			"- For several independent changes to the same file, pass `edits` (an array of {old_string, new_string, replace_all}) instead of making one call per change. Edits apply in order — later edits see the result of earlier ones — and the call is atomic: if any edit fails, nothing is written.",
+			"- Preserve indentation exactly as it appears after the `read` line-number prefix (`42\\t...`); never include the prefix itself.",
+			"- The edit FAILS if `old_string` is not unique in the file: add surrounding context (2-4 adjacent lines usually suffice) or set `replace_all` for intentional file-wide replacements like symbol renames.",
+			"- Prefer `write` for new files.",
+			"- For several changes to one file, pass `edits` (array of {old_string, new_string, replace_all}) in a single call. Edits apply in order — later ones see earlier results — and the call is atomic: if any edit fails, nothing is written.",
 		}, "\n"),
 
 		Parameters: map[string]any{

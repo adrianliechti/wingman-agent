@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -253,7 +254,7 @@ func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
 	hint := fmt.Sprintf("[%s]Press [-][%s::b]y[-::-][%s] approve · [-][%s::b]n[-::-][%s] deny · [-][%s::b]a[-::-][%s] always[-]", t.BrBlack, t.Green, t.BrBlack, t.Red, t.BrBlack, t.Cyan, t.BrBlack)
 
 	a.app.QueueUpdateDraw(func() {
-		fmt.Fprint(a.chatView, a.formatPrompt("Confirm Command", message, hint))
+		fmt.Fprint(a.chatView, a.formatPrompt("Confirm Command", tview.Escape(message), hint))
 		a.input.SetPlaceholder("y/n/a")
 		a.app.SetFocus(a.input)
 	})
@@ -268,10 +269,73 @@ func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
 	}
 }
 
-func (a *App) Ask(ctx context.Context, question string) (string, error) {
+func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
+	// One lock across the whole request: a concurrent elicitation (parallel
+	// tool calls, an MCP server) must not splice its prompt between the
+	// fields of this one.
 	a.elicitMu.Lock()
 	defer a.elicitMu.Unlock()
 
+	fields := req.Fields
+
+	// A bare message (MCP confirmation-style elicitation) still needs an
+	// accept/decline decision; model it as a yes/no pseudo-field whose value
+	// stays out of the returned content.
+	bare := len(fields) == 0
+	if bare {
+		fields = []tool.ElicitField{{Name: "confirmed", Type: "boolean", Required: true}}
+	}
+
+	content := map[string]any{}
+
+	for i, field := range fields {
+		message := ""
+		if i == 0 {
+			message = req.Message
+		}
+
+		prompt := formatElicitField(message, field, len(fields) > 1 && !bare)
+
+		for {
+			text, err := a.askLineLocked(ctx, prompt, elicitPlaceholder(field))
+			if err != nil {
+				return tool.ElicitResult{}, err
+			}
+
+			if strings.EqualFold(strings.TrimSpace(text), "/decline") {
+				return tool.ElicitResult{Action: tool.ElicitDecline}, nil
+			}
+
+			value, ok := parseElicitValue(field, text)
+			if !ok {
+				prompt = fmt.Sprintf("Invalid %s — try again.", fieldKind(field))
+				continue
+			}
+
+			if !bare {
+				content[field.Name] = value
+			} else if accepted, _ := value.(bool); !accepted {
+				return tool.ElicitResult{Action: tool.ElicitDecline}, nil
+			}
+			break
+		}
+	}
+
+	return tool.ElicitResult{Action: tool.ElicitAccept, Content: content}, nil
+}
+
+func fieldKind(field tool.ElicitField) string {
+	if len(field.Enum) > 0 {
+		return "choice — pick one of the listed options"
+	}
+	if field.Type == "" {
+		return "value"
+	}
+	return field.Type
+}
+
+// askLineLocked expects a.elicitMu to be held by the caller.
+func (a *App) askLineLocked(ctx context.Context, prompt, placeholder string) (string, error) {
 	a.askResponse = make(chan string, 1)
 	a.askActive = true
 	defer func() {
@@ -280,8 +344,8 @@ func (a *App) Ask(ctx context.Context, question string) (string, error) {
 	}()
 
 	a.app.QueueUpdateDraw(func() {
-		fmt.Fprint(a.chatView, a.formatPrompt("Question", question, ""))
-		a.input.SetPlaceholder("Type your answer and press Enter...")
+		fmt.Fprint(a.chatView, a.formatPrompt("Question", tview.Escape(prompt), ""))
+		a.input.SetPlaceholder(placeholder)
 		a.app.SetFocus(a.input)
 	})
 
@@ -293,6 +357,143 @@ func (a *App) Ask(ctx context.Context, question string) (string, error) {
 	case <-a.ctx.Done():
 		return "", a.ctx.Err()
 	}
+}
+
+func formatElicitField(message string, field tool.ElicitField, showLabel bool) string {
+	var b strings.Builder
+
+	if message != "" {
+		b.WriteString(message)
+	}
+
+	if showLabel || field.Title != "" || field.Description != "" {
+		label := field.Title
+		if label == "" {
+			label = field.Name
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(label)
+		if field.Description != "" {
+			b.WriteString(" — " + field.Description)
+		}
+	}
+
+	for i, option := range field.Enum {
+		if i == 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "\n  [%d] %s", i+1, option)
+		if i < len(field.EnumDescriptions) && field.EnumDescriptions[i] != "" {
+			b.WriteString(" — " + field.EnumDescriptions[i])
+		}
+		if i < len(field.EnumPreviews) && field.EnumPreviews[i] != "" {
+			for _, line := range previewLines(field.EnumPreviews[i]) {
+				b.WriteString("\n      " + line)
+			}
+		}
+	}
+
+	if field.Default != nil {
+		fmt.Fprintf(&b, "\n(default: %v)", field.Default)
+	}
+
+	return b.String()
+}
+
+const maxPreviewLines = 12
+
+func previewLines(preview string) []string {
+	lines := strings.Split(strings.TrimRight(preview, "\n"), "\n")
+	if len(lines) > maxPreviewLines {
+		lines = append(lines[:maxPreviewLines], "…")
+	}
+	return lines
+}
+
+func elicitPlaceholder(field tool.ElicitField) string {
+	switch {
+	case field.Multiple && len(field.Enum) > 0:
+		if field.Strict {
+			return fmt.Sprintf("Pick options like 1,3 (1-%d) · /decline", len(field.Enum))
+		}
+		return fmt.Sprintf("Pick options like 1,3 (1-%d), or type your own answer · /decline", len(field.Enum))
+	case len(field.Enum) > 0:
+		if field.Strict {
+			return fmt.Sprintf("1-%d picks an option · /decline", len(field.Enum))
+		}
+		return fmt.Sprintf("1-%d picks an option, or type your own answer · /decline", len(field.Enum))
+	case field.Type == "boolean":
+		return "y/n · /decline"
+	case field.Type == "number" || field.Type == "integer":
+		return "Enter a number · /decline"
+	default:
+		return "Type your answer and press Enter · /decline"
+	}
+}
+
+func parseElicitValue(field tool.ElicitField, text string) (any, bool) {
+	text = strings.TrimSpace(text)
+
+	if field.Multiple && len(field.Enum) > 0 {
+		picks := make([]string, 0, 4)
+		for _, part := range strings.Split(text, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			value, ok := resolveEnumToken(field, part)
+			if !ok {
+				return nil, false
+			}
+			picks = append(picks, value)
+		}
+		if len(picks) == 0 {
+			return nil, false
+		}
+		return picks, true
+	}
+
+	if len(field.Enum) > 0 {
+		return resolveEnumToken(field, text)
+	}
+
+	switch field.Type {
+	case "boolean":
+		switch strings.ToLower(text) {
+		case "y", "yes", "true", "1":
+			return true, true
+		case "n", "no", "false", "0":
+			return false, true
+		}
+		return nil, false
+	case "integer":
+		n, err := strconv.ParseInt(text, 10, 64)
+		return n, err == nil
+	case "number":
+		f, err := strconv.ParseFloat(text, 64)
+		return f, err == nil
+	default:
+		return text, true
+	}
+}
+
+// resolveEnumToken maps a typed token to an enum value: an option number, an
+// exact enum member, or — for advisory (non-strict) options — any free text.
+func resolveEnumToken(field tool.ElicitField, token string) (string, bool) {
+	if n, err := strconv.Atoi(token); err == nil && n >= 1 && n <= len(field.Enum) {
+		return field.Enum[n-1], true
+	}
+	for _, value := range field.Enum {
+		if strings.EqualFold(value, token) {
+			return value, true
+		}
+	}
+	if field.Strict {
+		return "", false
+	}
+	return token, true
 }
 
 func (a *App) copyTextToClipboard(text string) {
@@ -901,6 +1102,21 @@ func (a *App) updateStatusBar() {
 	}
 
 	_, currentModel := a.agent.Models(a.sessionID)
+
+	if a.lastInputTokens > 0 {
+		if window := int64(agent.ContextWindowFor(currentModel, false)); window > 0 {
+			left := max(0, (window-a.lastInputTokens)*100/window)
+			color := t.BrBlack
+			switch {
+			case left <= 10:
+				color = t.Red
+			case left <= 30:
+				color = t.Yellow
+			}
+			parts = append(parts, fmt.Sprintf("[%s]%d%% left[-]", color, left))
+		}
+	}
+
 	parts = append(parts, fmt.Sprintf("[%s]%s[-]", t.Cyan, code.ModelName(currentModel)))
 
 	if effort, _ := a.agent.Effort(a.sessionID); effort != "" && effort != "auto" {
@@ -1147,10 +1363,15 @@ func (a *App) renderMessage(msg agent.Message) {
 				continue
 			}
 
+			if c.ToolResult.Name == "todo" {
+				fmt.Fprint(a.chatView, a.formatTodoCell(c.ToolResult.Args))
+				continue
+			}
+
 			hint := tool.ExtractHint(c.ToolResult.Args, c.ToolResult.Name)
 
 			if a.expandLevel >= 2 {
-				output := c.ToolResult.Content
+				output := headTailPreview(c.ToolResult.Content, 4, 8)
 				if len(output) > maxToolOutputLen {
 					output = output[:maxToolOutputLen] + "..."
 				}

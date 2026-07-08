@@ -42,8 +42,53 @@ type ToolCall struct {
 	Args string `json:"args,omitempty"`
 }
 
+type ElicitAction string
+
+const (
+	ElicitAccept  ElicitAction = "accept"
+	ElicitDecline ElicitAction = "decline"
+	ElicitCancel  ElicitAction = "cancel"
+)
+
+// ElicitField mirrors the MCP elicitation primitive schema: a flat, typed
+// value request (string, number, integer, or boolean; optionally enum-
+// constrained). EnumDescriptions extends the MCP shape with per-option help
+// text; bridges to MCP drop it.
+type ElicitField struct {
+	Name        string `json:"name"`
+	Type        string `json:"type,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+
+	Enum             []string `json:"enum,omitempty"`
+	EnumDescriptions []string `json:"enum_descriptions,omitempty"`
+	EnumPreviews     []string `json:"enum_previews,omitempty"`
+
+	// Strict marks enum values as a closed set (MCP requestedSchema contract):
+	// UIs must not offer a free-text alternative. The elicit tool's options
+	// are advisory and stay non-strict.
+	Strict bool `json:"strict,omitempty"`
+
+	// Multiple allows selecting several enum values; the content value is then
+	// a []string instead of a string. Never produced by the MCP bridge.
+	Multiple bool `json:"multiple,omitempty"`
+
+	Default any `json:"default,omitempty"`
+}
+
+type ElicitRequest struct {
+	Message string        `json:"message"`
+	Fields  []ElicitField `json:"fields,omitempty"`
+}
+
+type ElicitResult struct {
+	Action  ElicitAction   `json:"action"`
+	Content map[string]any `json:"content,omitempty"`
+}
+
 type Elicitation struct {
-	Ask     func(ctx context.Context, message string) (string, error)
+	Elicit  func(ctx context.Context, req ElicitRequest) (ElicitResult, error)
 	Confirm func(ctx context.Context, message string) (bool, error)
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 )
 
@@ -168,22 +169,12 @@ func (s *Server) handleSend(msg ClientMessage) {
 
 		if u := a.Usage(sid); u != lastUsage {
 			lastUsage = u
-			s.sendSession(sid, Frame{
-				Type:         EvtUsage,
-				InputTokens:  u.InputTokens,
-				CachedTokens: u.CachedTokens,
-				OutputTokens: u.OutputTokens,
-			})
+			s.sendSession(sid, s.usageFrame(a, sid, u))
 		}
 	}
 
 	if u := a.Usage(sid); u != (agent.Usage{}) && u != lastUsage {
-		s.sendSession(sid, Frame{
-			Type:         EvtUsage,
-			InputTokens:  u.InputTokens,
-			CachedTokens: u.CachedTokens,
-			OutputTokens: u.OutputTokens,
-		})
+		s.sendSession(sid, s.usageFrame(a, sid, u))
 	}
 
 	ws := s.workspace
@@ -213,4 +204,22 @@ func (s *Server) handleSend(msg ClientMessage) {
 	}
 
 	s.setSessionPhase(sid, "idle")
+}
+
+func (s *Server) usageFrame(a code.Agent, sid string, u agent.Usage) Frame {
+	f := Frame{
+		Type:         EvtUsage,
+		InputTokens:  u.InputTokens,
+		CachedTokens: u.CachedTokens,
+		OutputTokens: u.OutputTokens,
+
+		LastInputTokens: u.LastInputTokens,
+	}
+
+	if u.LastInputTokens > 0 {
+		_, model := a.Models(sid)
+		f.ContextWindow = int64(agent.ContextWindowFor(model, false))
+	}
+
+	return f
 }

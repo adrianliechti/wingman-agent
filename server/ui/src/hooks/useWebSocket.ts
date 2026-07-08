@@ -3,6 +3,8 @@ import type {
 	ClientMessage,
 	ConversationMessage,
 	Phase,
+	PromptAction,
+	PromptField,
 	PromptKind,
 	ServerMessage,
 } from "../types/protocol";
@@ -11,6 +13,14 @@ export interface PendingPrompt {
 	id: string;
 	kind: PromptKind;
 	message: string;
+	fields?: PromptField[];
+}
+
+export interface PromptReply {
+	text?: string;
+	approved?: boolean;
+	action?: PromptAction;
+	content?: Record<string, unknown>;
 }
 
 export interface ChatEntry {
@@ -107,6 +117,8 @@ interface Usage {
 	inputTokens: number;
 	cachedTokens: number;
 	outputTokens: number;
+	lastInputTokens: number;
+	contextWindow: number;
 }
 
 export interface SessionState {
@@ -117,7 +129,13 @@ export interface SessionState {
 	prompt: PendingPrompt | null;
 }
 
-const EMPTY_USAGE: Usage = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+const EMPTY_USAGE: Usage = {
+	inputTokens: 0,
+	cachedTokens: 0,
+	outputTokens: 0,
+	lastInputTokens: 0,
+	contextWindow: 0,
+};
 
 function emptySession(id: string): SessionState {
 	return { id, entries: [], phase: "idle", usage: EMPTY_USAGE, prompt: null };
@@ -325,6 +343,8 @@ export function useWebSocket() {
 							inputTokens: msg.input_tokens ?? 0,
 							cachedTokens: msg.cached_tokens ?? 0,
 							outputTokens: msg.output_tokens ?? 0,
+							lastInputTokens: msg.last_input_tokens ?? 0,
+							contextWindow: msg.context_window ?? 0,
 						},
 						prompt: prev[sid]?.prompt ?? null,
 					},
@@ -450,6 +470,8 @@ export function useWebSocket() {
 						inputTokens: msg.input_tokens ?? 0,
 						cachedTokens: msg.cached_tokens ?? 0,
 						outputTokens: msg.output_tokens ?? 0,
+						lastInputTokens: msg.last_input_tokens ?? 0,
+						contextWindow: msg.context_window ?? 0,
 					},
 				}));
 				break;
@@ -461,6 +483,7 @@ export function useWebSocket() {
 						id: msg.prompt_id,
 						kind: msg.prompt_kind,
 						message: msg.message,
+						fields: msg.prompt_fields,
 					},
 				}));
 				break;
@@ -512,17 +535,15 @@ export function useWebSocket() {
 	}, [send]);
 
 	const respondPrompt = useCallback(
-		(
-			sessionId: string,
-			promptId: string,
-			reply: { text?: string; approved?: boolean },
-		) => {
+		(sessionId: string, promptId: string, reply: PromptReply) => {
 			const sent = send({
 				type: "prompt_response",
 				session: sessionId,
 				prompt_id: promptId,
 				text: reply.text,
 				approved: reply.approved,
+				action: reply.action,
+				content: reply.content,
 			});
 			if (!sent) return;
 			updateSession(sessionId, (sess) =>

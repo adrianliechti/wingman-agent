@@ -15,7 +15,7 @@ A threat model answers "what could go wrong with this system, who would do it, a
 ## Step 1 — Pick a mode
 
 - **bootstrap** (default): derive the model from the code itself. Best for inherited/third-party code, or when no system owner is in the session.
-- **interview**: if the user is the system owner and present, walk the four questions below with the `ask_user` tool, then ground their answers in the code. Best for new systems where the risk lives in business logic the code doesn't show.
+- **interview**: if the user is the system owner and present, walk the four questions below with the `elicit` tool, then ground their answers in the code. Best for new systems where the risk lives in business logic the code doesn't show.
 - **bootstrap-then-interview**: bootstrap a draft first, then walk it with the owner. Use when both code and owner are available — the owner refines a code-grounded draft instead of starting cold.
 
 The four interview questions: (1) What are we working on? (2) What can go wrong? (3) What are we going to do about it? (4) Did we do a good job?

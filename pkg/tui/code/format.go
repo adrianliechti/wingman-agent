@@ -7,6 +7,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -78,7 +79,7 @@ func toolDisplay(name string) (string, string) {
 		return "⟡", name
 	case name == "web_fetch", name == "web_search":
 		return "⊕", name
-	case name == "ask_user":
+	case name == "elicit":
 		return "?", name
 	case name == "lsp":
 		return "◇", name
@@ -138,14 +139,80 @@ func (a *App) formatToolCall(name string, hint string, output string) string {
 	t := theme.Default
 	icon, label := toolDisplay(name)
 
+	// The line diffs edit/write return read far better colored.
+	colorizeDiff := name == "edit" || name == "write"
+
 	var result strings.Builder
 
 	title := a.formatToolTitle(icon, label, hint, t.Yellow.String(), true)
 	fmt.Fprintf(&result, "%s[%s]┃[-] %s\n", chatIndent, t.Yellow, title)
 
 	for line := range strings.SplitSeq(strings.TrimRight(output, "\n"), "\n") {
+		lineColor := t.BrBlack
+		if colorizeDiff {
+			switch {
+			case strings.HasPrefix(line, "+"):
+				lineColor = t.Green
+			case strings.HasPrefix(line, "-"):
+				lineColor = t.Red
+			}
+		}
 		for _, wl := range markdown.WrapLine(line, a.contentWidth()) {
-			fmt.Fprintf(&result, "%s[%s]┃[-] [%s]%s[-]\n", chatIndent, t.Yellow, t.BrBlack, tview.Escape(wl))
+			fmt.Fprintf(&result, "%s[%s]┃[-] [%s]%s[-]\n", chatIndent, t.Yellow, lineColor, tview.Escape(wl))
+		}
+	}
+
+	result.WriteString("\n")
+
+	return result.String()
+}
+
+// headTailPreview keeps the first and last lines of a long output — command
+// results carry their verdicts at the end, so the tail matters most.
+func headTailPreview(s string, head, tail int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) <= head+tail+1 {
+		return s
+	}
+
+	preview := make([]string, 0, head+tail+1)
+	preview = append(preview, lines[:head]...)
+	preview = append(preview, fmt.Sprintf("… +%d lines", len(lines)-head-tail))
+	preview = append(preview, lines[len(lines)-tail:]...)
+	return strings.Join(preview, "\n")
+}
+
+func (a *App) formatTodoCell(argsJSON string) string {
+	items := tool.ParseTodoItems(argsJSON)
+	if len(items) == 0 {
+		return a.formatToolCallCollapsed("todo", "")
+	}
+
+	t := theme.Default
+
+	completed := 0
+	for _, item := range items {
+		if item.Status == "completed" {
+			completed++
+		}
+	}
+
+	var result strings.Builder
+	fmt.Fprintf(&result, "%s[%s]┃[-] [%s::b]☰ plan[-::-] [%s]%d/%d[-]\n", chatIndent, t.BrBlack, t.Yellow, t.BrBlack, completed, len(items))
+
+	for _, item := range items {
+		var line string
+		content := tview.Escape(item.Content)
+		switch item.Status {
+		case "completed":
+			line = fmt.Sprintf("[%s]✔[-] [%s::s]%s[-::-]", t.Green, t.BrBlack, content)
+		case "in_progress":
+			line = fmt.Sprintf("[%s::b]□ %s[-::-]", t.Cyan, content)
+		default:
+			line = fmt.Sprintf("[%s]□ %s[-]", t.BrBlack, content)
+		}
+		for _, wl := range markdown.WrapLine(line, a.contentWidth()) {
+			fmt.Fprintf(&result, "%s[%s]┃[-] %s\n", chatIndent, t.BrBlack, wl)
 		}
 	}
 

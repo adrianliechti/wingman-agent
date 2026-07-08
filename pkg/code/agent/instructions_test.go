@@ -47,3 +47,27 @@ func TestProjectInstructionsRootFirstAndDeduped(t *testing.T) {
 		t.Fatalf("root guidance should precede the more specific file:\n%s", rendered)
 	}
 }
+
+func TestProjectInstructionsBudgetKeepsMostSpecific(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	huge := strings.Repeat("general guidance line\n", projectInstructionsMaxBytes/20)
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(huge), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "AGENTS.md"), []byte("subproject-specific rule"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rendered, _ := renderProjectInstructions(findProjectInstructions(sub))
+	if !strings.Contains(rendered, "subproject-specific rule") {
+		t.Fatal("the most specific instruction file must survive the budget cut")
+	}
+	if !strings.Contains(rendered, "omitted") {
+		t.Fatalf("expected an omission notice, got:\n%.200s", rendered)
+	}
+}

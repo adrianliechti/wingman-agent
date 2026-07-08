@@ -265,12 +265,12 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		wait = maxExecWait
 	}
 
-	if err := confirmDangerous(ctx, elicit, appr, args); err != nil {
+	dir, err := resolveWorkdir(workDir, args)
+	if err != nil {
 		return "", err
 	}
 
-	dir, err := resolveWorkdir(workDir, args)
-	if err != nil {
+	if err := confirmDangerous(ctx, elicit, appr, args, approvalWorkdir(workDir, dir)); err != nil {
 		return "", err
 	}
 

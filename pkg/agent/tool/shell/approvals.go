@@ -18,8 +18,14 @@ func NewApprovals() *Approvals {
 	return &Approvals{seen: map[string]bool{}}
 }
 
-func confirmDangerous(ctx context.Context, elicit *tool.Elicitation, appr *Approvals, args map[string]any) error {
+func confirmDangerous(ctx context.Context, elicit *tool.Elicitation, appr *Approvals, args map[string]any, workdir string) error {
 	command, _ := args["command"].(string)
+	// The prompt (and the remembered approval key) must state where the
+	// command runs — approving `git clean -fdx` for the workspace is not
+	// approving it for an arbitrary other directory.
+	if workdir != "" {
+		command = command + "  [in " + workdir + "]"
+	}
 	return confirmIfDangerous(ctx, elicit, appr, command, ClassifyEffect(args) == tool.EffectDangerous)
 }
 

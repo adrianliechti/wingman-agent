@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -19,6 +20,8 @@ type Manager struct {
 	*Config
 
 	Dir string
+
+	elicit atomic.Pointer[ElicitFunc]
 
 	mu       sync.RWMutex
 	sessions map[string]*mcp.ClientSession
@@ -113,7 +116,9 @@ func (m *Manager) connect(ctx context.Context, name string, server ServerConfig)
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    "wingman",
 		Version: "1.0.0",
-	}, nil)
+	}, &mcp.ClientOptions{
+		ElicitationHandler: m.handleElicitation,
+	})
 
 	transport, err := createTransport(server, m.Dir)
 

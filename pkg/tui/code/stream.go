@@ -69,6 +69,7 @@ func (a *App) render() {
 			a.inputTokens = usage.InputTokens
 			a.cachedTokens = usage.CachedTokens
 			a.outputTokens = usage.OutputTokens
+			a.lastInputTokens = usage.LastInputTokens
 			a.updateStatusBar()
 		})
 	})
@@ -187,6 +188,7 @@ func (a *App) streamResponse(input []agent.Content) {
 		a.inputTokens = usage.InputTokens
 		a.cachedTokens = usage.CachedTokens
 		a.outputTokens = usage.OutputTokens
+		a.lastInputTokens = usage.LastInputTokens
 
 		if streamErr != nil {
 			a.clearStreamingState()

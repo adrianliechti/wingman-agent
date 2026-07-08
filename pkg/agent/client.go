@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
@@ -11,6 +12,10 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+// streamIdleTimeout bounds the wait for the next stream event; reasoning
+// models can be quiet for minutes between items, so it is generous.
+const streamIdleTimeout = 5 * time.Minute
 
 type request struct {
 	model        string
@@ -60,7 +65,15 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		params.Reasoning = rp
 	}
 
-	stream := client.Responses.NewStreaming(ctx, params)
+	// A stalled stream (no events at all) would otherwise hang the turn
+	// forever; cancel it after a quiet period and let the retry loop resend.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	idle := time.AfterFunc(streamIdleTimeout, cancelStream)
+	defer idle.Stop()
+
+	stream := client.Responses.NewStreaming(streamCtx, params)
 
 	var outputItems []responses.ResponseInputItemUnionParam
 	var usageDelta Usage
@@ -69,6 +82,7 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 	incompleteReason := ""
 
 	for stream.Next() {
+		idle.Reset(streamIdleTimeout)
 		event := stream.Current()
 
 		switch e := event.AsAny().(type) {
@@ -129,11 +143,16 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 			usageDelta = responseToUsage(e.Response)
 
 		case responses.ResponseIncompleteEvent:
-			// Output was cut short (e.g. max output tokens); completed items
-			// and usage still count.
+			// Output was cut short (e.g. max output tokens). The final response
+			// carries the partial items — including a message that never got an
+			// output_item.done — so prefer it over the accumulated stream items,
+			// or the resume round would regenerate everything already streamed.
 			usageDelta = responseToUsage(e.Response)
 			incomplete = true
 			incompleteReason = e.Response.IncompleteDetails.Reason
+			if items := outputItemsFromResponse(e.Response); len(items) > 0 {
+				outputItems = items
+			}
 
 		case responses.ResponseFailedEvent:
 			if msg := e.Response.Error.Message; msg != "" {
@@ -147,6 +166,9 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 	}
 
 	if err := stream.Err(); err != nil {
+		if streamCtx.Err() != nil && ctx.Err() == nil {
+			return nil, fmt.Errorf("stream stalled: no events for %s", streamIdleTimeout)
+		}
 		return nil, err
 	}
 
@@ -167,4 +189,42 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		incomplete:       incomplete,
 		incompleteReason: incompleteReason,
 	}, nil
+}
+
+// outputItemsFromResponse converts a final Response's output into replayable
+// input items. Function calls and reasoning are only usable when completed
+// (truncated arguments or missing encrypted payloads are rejected on replay);
+// partial message text is kept — preserving it is the point.
+func outputItemsFromResponse(r responses.Response) []responses.ResponseInputItemUnionParam {
+	var items []responses.ResponseInputItemUnionParam
+
+	for _, item := range r.Output {
+		switch it := item.AsAny().(type) {
+		case responses.ResponseOutputMessage:
+			var p responses.ResponseOutputMessageParam
+			if err := json.Unmarshal([]byte(it.RawJSON()), &p); err == nil {
+				items = append(items, responses.ResponseInputItemUnionParam{OfOutputMessage: &p})
+			}
+
+		case responses.ResponseReasoningItem:
+			if it.Status != "completed" {
+				continue
+			}
+			var p responses.ResponseReasoningItemParam
+			if err := json.Unmarshal([]byte(it.RawJSON()), &p); err == nil {
+				items = append(items, responses.ResponseInputItemUnionParam{OfReasoning: &p})
+			}
+
+		case responses.ResponseFunctionToolCall:
+			if it.Status != "completed" {
+				continue
+			}
+			var p responses.ResponseFunctionToolCallParam
+			if err := json.Unmarshal([]byte(it.RawJSON()), &p); err == nil {
+				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: &p})
+			}
+		}
+	}
+
+	return items
 }

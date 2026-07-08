@@ -34,7 +34,7 @@ var bundledFS embed.FS
 const memoryMaxBytes = 25 * 1024
 
 type UI interface {
-	Ask(ctx context.Context, message string) (string, error)
+	Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error)
 	Confirm(ctx context.Context, message string) (bool, error)
 }
 

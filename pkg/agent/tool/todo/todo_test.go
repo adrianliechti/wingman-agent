@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestTodoRendersChecklist(t *testing.T) {
+func TestTodoReturnsSummaryNotEcho(t *testing.T) {
 	tl := Tools()[0]
 
 	result, err := tl.Execute(context.Background(), map[string]any{
@@ -20,10 +20,11 @@ func TestTodoRendersChecklist(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"[x] read the code", "[>] apply the fix", "[ ] run the tests", "(1/3 completed)"} {
-		if !strings.Contains(result, want) {
-			t.Errorf("result missing %q:\n%s", want, result)
-		}
+	if !strings.Contains(result, "1/3") {
+		t.Errorf("result missing progress summary:\n%s", result)
+	}
+	if strings.Contains(result, "read the code") {
+		t.Errorf("result must not echo the list back (it is already in the call args):\n%s", result)
 	}
 }
 

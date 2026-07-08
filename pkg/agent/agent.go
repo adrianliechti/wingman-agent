@@ -131,6 +131,9 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 			a.Usage.InputTokens += resp.usage.InputTokens
 			a.Usage.CachedTokens += resp.usage.CachedTokens
 			a.Usage.OutputTokens += resp.usage.OutputTokens
+			if resp.usage.InputTokens > 0 {
+				a.Usage.LastInputTokens = resp.usage.InputTokens
+			}
 			a.Messages = append(a.Messages, resp.messages...)
 
 			calls := extractToolCalls(resp.messages)
@@ -145,11 +148,20 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 				}
 			}
 
-			// A cut-off response (max output tokens) silently drops in-flight
-			// items; nudge the model once to resume. A second consecutive
-			// cutoff ends the turn so this cannot loop unbounded.
-			resumeAfterCutoff := resp.incomplete && !cutoffNotified
-			cutoffNotified = resp.incomplete
+			// A cut-off response (max output tokens) drops in-flight items. When
+			// tool calls survived, their results already drive the next round;
+			// otherwise nudge the model once to resume. Only one consecutive
+			// nudge — cutoff rounds don't count against maxTurns, so a model
+			// that keeps truncating must not loop unbounded. Content-filter
+			// stops are final; a continue nudge would just re-trigger them.
+			resumeAfterCutoff := resp.incomplete &&
+				resp.incompleteReason != "content_filter" &&
+				len(calls) == 0 &&
+				!cutoffNotified
+
+			if !resp.incomplete {
+				cutoffNotified = false
+			}
 
 			a.queueMu.Lock()
 			queued := a.pendingInput
@@ -162,6 +174,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 			a.queueMu.Unlock()
 
 			if resumeAfterCutoff {
+				cutoffNotified = true
 				a.Messages = append(a.Messages, cutoffNotice(resp.incompleteReason))
 			}
 
@@ -200,6 +213,14 @@ func (a *Agent) shouldCompactProactively(model string, lastInputTokens int64) bo
 	reserve := a.Config.ReserveTokens
 	if reserve <= 0 {
 		reserve = DefaultReserveTokens
+		// A fixed default reserve is too thin a margin on large (1M) windows —
+		// it would defer compaction to ~97% of the window and lean on the
+		// reactive overflow path. Keep at least a 10% headroom, matching the
+		// ~90% trigger other Responses-API agents use. An explicit
+		// Config.ReserveTokens is honored as-is.
+		if frac := window / 10; frac > reserve {
+			reserve = frac
+		}
 	}
 
 	return lastInputTokens > int64(window-reserve)
@@ -375,7 +396,7 @@ func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool
 	}
 
 	if result == "" {
-		result = a.executeTool(ctx, tc, t, timeout)
+		result = a.executeTool(ctx, tc, t, timeout, time.Now())
 	}
 
 	for _, h := range a.Hooks.PostToolUse {
@@ -392,7 +413,7 @@ func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool
 	return result
 }
 
-func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool, timeout time.Duration) string {
+func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool, timeout time.Duration, started time.Time) string {
 	if t == nil {
 		return fmt.Sprintf("error: unknown tool %s", tc.Name)
 	}
@@ -408,13 +429,16 @@ func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool, time
 	result, err := t.Execute(ctx, args)
 
 	if err != nil {
+		// Rewrite only errors the context caused; a tool's own failure that
+		// races a cancellation must stay visible as-is.
 		switch {
-		case errors.Is(ctx.Err(), context.Canceled):
+		case errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled):
 			return "error: interrupted — the request was canceled before this tool call finished"
-		case errors.Is(ctx.Err(), context.DeadlineExceeded) && timeout > 0:
-			return fmt.Sprintf("error: tool call aborted after exceeding its %s time limit", timeout)
-		case errors.Is(ctx.Err(), context.DeadlineExceeded):
-			return "error: tool call aborted — deadline exceeded"
+		case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
+			if timeout > 0 && time.Since(started) >= timeout {
+				return fmt.Sprintf("error: tool call aborted after exceeding its %s time limit", timeout)
+			}
+			return "error: tool call aborted — the request deadline expired before it finished"
 		}
 		return fmt.Sprintf("error: %v", err)
 	}

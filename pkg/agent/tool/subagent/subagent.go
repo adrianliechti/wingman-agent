@@ -84,34 +84,19 @@ var availableTypes = []string{
 
 func Tools(cfg *agent.Config, sharedContext func() string) []tool.Tool {
 	description := strings.Join([]string{
-		"Launch a new agent to handle complex, multi-step tasks autonomously. The agent runs in a separate context and returns one final message.",
+		"Launch a subagent for a bounded task. It runs in a separate context with a filtered toolset and returns one final report; it does not see your conversation.",
 		"",
-		"Available agent types:",
-		"- general-purpose: Research complex questions, search code, and execute scoped multi-step tasks.",
-		"- explore: Read-only codebase research. Use for broad searches, subsystem mapping, feature tracing, and legacy-code analysis.",
-		"- verification: Run checks to verify an implementation. Use after non-trivial changes when direct testing is useful.",
-		"- security: Read-only security auditor. Use to scan code for exploitable vulnerabilities or to adversarially verify a suspected finding.",
-		"- code-architect: Read-only architecture planning. Use before larger features to produce a concrete implementation blueprint.",
-		"- code-reviewer: Read-only high-precision code review. Use to find high-confidence bugs, security issues, and guideline violations.",
-		"- code-simplifier: Behavior-preserving cleanup. Use to improve recently changed code for clarity, reuse, and maintainability.",
-		"- test-engineer: Test design and implementation. Use to add or plan characterization, regression, contract, and edge-case tests.",
+		"Agent types:",
+		"- general-purpose: scoped multi-step research or implementation.",
+		"- explore: read-only codebase research — broad searches, subsystem mapping, feature tracing.",
+		"- verification: runs builds/tests/executions to verify an implementation.",
+		"- security: read-only audit for exploitable vulnerabilities.",
+		"- code-architect: read-only implementation blueprint for a larger feature.",
+		"- code-reviewer: read-only high-precision review — bugs, security, guideline violations.",
+		"- code-simplifier: behavior-preserving cleanup of recently changed code.",
+		"- test-engineer: designs and adds tests using the project's conventions.",
 		"",
-		"When to use:",
-		"- Open-ended searches where you are not confident that one or two direct tool calls will find the answer.",
-		"- Independent research or verification whose intermediate tool output would clutter your context.",
-		"- Scoped implementation or investigation work that can proceed without blocking your next step.",
-		"",
-		"When NOT to use:",
-		"- Reading a specific known file path: use `read` instead.",
-		"- Finding files by a known pattern: use `glob` instead.",
-		"- Searching for a known symbol or string: use `grep` or LSP instead.",
-		"- Synthesis across multiple results: do the synthesis yourself after agents return.",
-		"",
-		"Usage notes:",
-		"- Provide a self-contained prompt; the agent does not have your conversation history.",
-		"- Include relevant paths, symbols, constraints, allowed edit scope, and expected output shape.",
-		"- The `agent_type` parameter is required; choose the narrowest fitting agent type.",
-		"- Agent outputs should generally be trusted; verify only when the task requires direct proof.",
+		"Write a self-contained prompt: goal, relevant paths/symbols, allowed edit scope, expected output shape. Pick the narrowest fitting type. Don't delegate a single known lookup (use `read`/`grep`/`glob` directly) or synthesis of results you already hold.",
 	}, "\n")
 
 	return []tool.Tool{{
@@ -290,7 +275,7 @@ func allowNonAgentTool(t tool.Tool) bool {
 }
 
 func allowReadOnlyTool(t tool.Tool) bool {
-	if t.Name == "ask_user" {
+	if t.Name == "elicit" {
 		return false
 	}
 
@@ -323,7 +308,7 @@ func allowVerificationTool(t tool.Tool) bool {
 	}
 
 	switch t.Name {
-	case "write", "edit", "ask_user":
+	case "write", "edit", "elicit":
 		return false
 	case "shell":
 		return true

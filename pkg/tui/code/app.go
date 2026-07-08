@@ -55,10 +55,11 @@ type App struct {
 	askActive      bool
 	askResponse    chan string
 
-	expandLevel    int
-	inputTokens    int64
-	cachedTokens   int64
-	outputTokens   int64
+	expandLevel     int
+	inputTokens     int64
+	cachedTokens    int64
+	outputTokens    int64
+	lastInputTokens int64
 	chatWidth      int
 	lastCompact    bool
 	pendingContent []agent.Content
@@ -204,6 +205,7 @@ func (a *App) Run() error {
 		a.inputTokens = usage.InputTokens
 		a.cachedTokens = usage.CachedTokens
 		a.outputTokens = usage.OutputTokens
+		a.lastInputTokens = usage.LastInputTokens
 		a.updateStatusBar()
 	}
 

@@ -40,6 +40,10 @@ type Usage struct {
 	InputTokens  int64 `json:"input_tokens"`
 	CachedTokens int64 `json:"cached_tokens"`
 	OutputTokens int64 `json:"output_tokens"`
+
+	// LastInputTokens is the input size of the most recent request — the
+	// current context occupancy, unlike the cumulative counters above.
+	LastInputTokens int64 `json:"last_input_tokens,omitempty"`
 }
 
 type ToolCall struct {

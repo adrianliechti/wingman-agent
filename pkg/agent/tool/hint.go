@@ -48,6 +48,18 @@ func ExtractHint(argsJSON, toolName string) string {
 		}
 	}
 
+	if toolName == "elicit" {
+		if hint := ElicitHint(args); hint != "" {
+			return hint
+		}
+	}
+
+	if toolName == "todo" {
+		if hint := TodoHint(argsJSON); hint != "" {
+			return hint
+		}
+	}
+
 	hintKeys := []string{
 		"query",
 		"pattern",
@@ -78,6 +90,73 @@ func ExtractHint(argsJSON, toolName string) string {
 	}
 
 	return wdFallback(toolName)
+}
+
+type TodoItem struct {
+	Content string `json:"content"`
+	Status  string `json:"status"`
+}
+
+// ParseTodoItems extracts the checklist from a todo tool call's arguments so
+// UIs can render it richly instead of showing the raw JSON.
+func ParseTodoItems(argsJSON string) []TodoItem {
+	var args struct {
+		Items []TodoItem `json:"items"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) != nil {
+		return nil
+	}
+	return args.Items
+}
+
+// TodoHint summarizes a todo call as progress plus the active step.
+func TodoHint(argsJSON string) string {
+	items := ParseTodoItems(argsJSON)
+	if len(items) == 0 {
+		return ""
+	}
+
+	completed := 0
+	current := ""
+	for _, item := range items {
+		if item.Status == "completed" {
+			completed++
+		}
+		if item.Status == "in_progress" && current == "" {
+			current = strings.Join(strings.Fields(item.Content), " ")
+		}
+	}
+
+	hint := fmt.Sprintf("%d/%d", completed, len(items))
+	if current != "" {
+		hint += " · " + current
+	}
+	return hint
+}
+
+// ElicitHint summarizes an elicit tool call as its first question plus a
+// count of the rest; shared by every surface that labels tool calls.
+func ElicitHint(args map[string]any) string {
+	questions, ok := args["questions"].([]any)
+	if !ok || len(questions) == 0 {
+		return ""
+	}
+
+	entry, ok := questions[0].(map[string]any)
+	if !ok {
+		return ""
+	}
+
+	text, _ := entry["question"].(string)
+	if text == "" {
+		return ""
+	}
+
+	label := strings.Join(strings.Fields(text), " ")
+	if len(questions) > 1 {
+		label += fmt.Sprintf(" (+%d more)", len(questions)-1)
+	}
+	return label
 }
 
 func normalizeWorkspacePath(p string) string {

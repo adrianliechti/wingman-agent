@@ -8,10 +8,10 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-var statusMarkers = map[string]string{
-	"pending":     "[ ]",
-	"in_progress": "[>]",
-	"completed":   "[x]",
+var validStatuses = map[string]bool{
+	"pending":     true,
+	"in_progress": true,
+	"completed":   true,
 }
 
 func Tools() []tool.Tool {
@@ -61,7 +61,6 @@ func Tools() []tool.Tool {
 				return "Todo list cleared.", nil
 			}
 
-			var b strings.Builder
 			completed := 0
 
 			for i, item := range raw {
@@ -76,20 +75,17 @@ func Tools() []tool.Tool {
 				}
 
 				status, _ := entry["status"].(string)
-				marker, ok := statusMarkers[status]
-				if !ok {
+				if !validStatuses[status] {
 					return "", fmt.Errorf("items[%d].status must be pending, in_progress, or completed", i)
 				}
 				if status == "completed" {
 					completed++
 				}
-
-				fmt.Fprintf(&b, "%s %s\n", marker, strings.TrimSpace(content))
 			}
 
-			fmt.Fprintf(&b, "(%d/%d completed)", completed, len(raw))
-
-			return b.String(), nil
+			// The model just wrote the list (it is in the call args); echoing
+			// it back would only bloat the transcript.
+			return fmt.Sprintf("Todo list updated (%d/%d completed).", completed, len(raw)), nil
 		},
 	}}
 }

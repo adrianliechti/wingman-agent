@@ -18,6 +18,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 )
@@ -662,8 +663,8 @@ func toolTitle(name string, raw any) string {
 		detail = str("url")
 	case "web_search":
 		detail = str("query")
-	case "ask_user":
-		detail = truncate(str("question"), 60)
+	case "elicit":
+		detail = truncate(tool.ElicitHint(args), 80)
 	case "agent":
 
 		prompt := str("prompt")

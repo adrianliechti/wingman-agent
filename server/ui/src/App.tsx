@@ -30,7 +30,11 @@ import { ProblemsPanel } from "./components/ProblemsPanel";
 import { BUILTIN_AGENT_ID } from "./components/AgentPicker";
 import { Sidebar } from "./components/Sidebar";
 import { useCapabilities } from "./hooks/useCapabilities";
-import { type ChatEntry, useWebSocket } from "./hooks/useWebSocket";
+import {
+	type ChatEntry,
+	type PromptReply,
+	useWebSocket,
+} from "./hooks/useWebSocket";
 
 interface CenterTab {
 	id: string;
@@ -44,7 +48,13 @@ interface CenterTab {
 type RightTab = "changes" | "files";
 
 const EMPTY_ENTRIES: never[] = [];
-const EMPTY_USAGE = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+const EMPTY_USAGE = {
+	inputTokens: 0,
+	cachedTokens: 0,
+	outputTokens: 0,
+	lastInputTokens: 0,
+	contextWindow: 0,
+};
 
 const chatTabId = (sessionId: string) => `chat:${sessionId}`;
 
@@ -158,7 +168,7 @@ export default function App() {
 	);
 
 	const handlePromptReply = useCallback(
-		(reply: { text?: string; approved?: boolean }) => {
+		(reply: PromptReply) => {
 			if (sessionId && prompt) {
 				respondPrompt(sessionId, prompt.id, reply);
 			}
@@ -591,6 +601,12 @@ export default function App() {
 									{streamEstimate > 0 ? "↓~" : "↓"}
 									{formatTokens(outputTokens)}
 								</span>
+								{usage.contextWindow > 0 && usage.lastInputTokens > 0 && (
+									<ContextLeft
+										used={usage.lastInputTokens}
+										window={usage.contextWindow}
+									/>
+								)}
 							</div>
 						)}
 						<button
@@ -784,5 +800,16 @@ function RightTabButton({
 				<span className="absolute left-3 right-3 bottom-0 h-[2px] bg-accent rounded-full" />
 			)}
 		</button>
+	);
+}
+
+function ContextLeft({ used, window }: { used: number; window: number }) {
+	const left = Math.max(0, Math.round(((window - used) / window) * 100));
+	const tone =
+		left <= 10 ? "text-danger" : left <= 30 ? "text-warning" : "text-fg-dim";
+	return (
+		<span className={`ml-2 ${tone}`} title={`${formatTokens(used)} of ${formatTokens(window)} context used`}>
+			{left}% left
+		</span>
 	);
 }

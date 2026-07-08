@@ -21,7 +21,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/external"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/ask"
+	elicittool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/elicit"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
@@ -38,6 +38,8 @@ type Agent struct {
 
 	uiMu sync.RWMutex
 	ui   code.UI
+
+	lastActive atomic.Value
 
 	sessionsDir string
 
@@ -71,7 +73,7 @@ type sessionState struct {
 }
 
 func New(ws *code.Workspace, cfg *harness.Config, ui code.UI) *Agent {
-	return &Agent{
+	a := &Agent{
 		workspace:   ws,
 		cfg:         cfg,
 		ui:          ui,
@@ -79,6 +81,37 @@ func New(ws *code.Workspace, cfg *harness.Config, ui code.UI) *Agent {
 		sessionsDir: filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
 		sessions:    map[string]*sessionState{},
 	}
+
+	// MCP servers elicit through the same UI surface as the elicit tool. Their
+	// requests arrive on the transport context, which carries no session, so
+	// route them to the most recently active session (or any live one before
+	// the first turn) for display.
+	if ws.MCP != nil {
+		el := a.buildElicit()
+		ws.MCP.SetElicit(func(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
+			if code.SessionIDFromContext(ctx) == "" {
+				sid, _ := a.lastActive.Load().(string)
+				if sid == "" {
+					sid = a.anySessionID()
+				}
+				if sid != "" {
+					ctx = code.WithSessionID(ctx, sid)
+				}
+			}
+			return el.Elicit(ctx, req)
+		})
+	}
+
+	return a
+}
+
+func (a *Agent) anySessionID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for id := range a.sessions {
+		return id
+	}
+	return ""
 }
 
 func (a *Agent) Name() string               { return code.BuiltinAgentName }
@@ -298,6 +331,8 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) it
 		return errStream(fmt.Errorf("session %s not found; call NewSession first", id))
 	}
 
+	a.lastActive.Store(id)
+
 	sendCtx, cancel := context.WithCancel(code.WithSessionID(ctx, id))
 	stream := s.aa.Send(sendCtx, input)
 	if stream == nil {
@@ -459,7 +494,7 @@ func (a *Agent) buildSession() *sessionState {
 		shell.Tools(ws.RootPath, elicit, approvals),
 		shell.ExecTools(s.execManager, ws.RootPath, elicit, approvals),
 		todo.Tools(),
-		ask.Tools(elicit),
+		elicittool.Tools(elicit),
 		subagent.Tools(sessionCfg, s.subagentContext),
 	)
 	return s
@@ -475,12 +510,12 @@ func userHooksConfigPath() string {
 
 func (a *Agent) buildElicit() *tool.Elicitation {
 	return &tool.Elicitation{
-		Ask: func(ctx context.Context, msg string) (string, error) {
+		Elicit: func(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
 			ui := a.currentUI()
 			if ui == nil {
-				return "", nil
+				return tool.ElicitResult{Action: tool.ElicitCancel}, nil
 			}
-			return ui.Ask(ctx, msg)
+			return ui.Elicit(ctx, req)
 		},
 		Confirm: func(ctx context.Context, msg string) (bool, error) {
 			ui := a.currentUI()
@@ -653,7 +688,24 @@ func renderProjectInstructions(entries []projectInstructionsEntry) (string, map[
 		seen[content] = true
 		parts = append(parts, fmt.Sprintf("From %s:\n\n%s", e.rel, content))
 	}
+
+	// Over budget, drop the broadest guidance (front of the list) first — the
+	// file closest to the working directory must survive.
+	total := 0
+	for _, p := range parts {
+		total += len(p)
+	}
+	omitted := 0
+	for len(parts) > 1 && total > projectInstructionsMaxBytes {
+		total -= len(parts[0])
+		parts = parts[1:]
+		omitted++
+	}
+
 	result := strings.Join(parts, "\n\n---\n\n")
+	if omitted > 0 {
+		result = fmt.Sprintf("[%d broader instruction file(s) omitted — over the %dKB budget]\n\n%s", omitted, projectInstructionsMaxBytes/1024, result)
+	}
 	if len(result) > projectInstructionsMaxBytes {
 		result = result[:projectInstructionsMaxBytes] + "\n\n[truncated]"
 	}

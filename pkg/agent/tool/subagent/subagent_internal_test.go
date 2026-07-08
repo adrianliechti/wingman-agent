@@ -59,7 +59,7 @@ func TestAllowReadOnlyTool(t *testing.T) {
 		{"read-only allowed", tool.Tool{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly)}, true},
 		{"dynamic allowed (will be wrapped)", tool.Tool{Name: "shell", Effect: tool.StaticEffect(tool.EffectDynamic)}, true},
 		{"mutating rejected", tool.Tool{Name: "write", Effect: tool.StaticEffect(tool.EffectMutates)}, false},
-		{"ask_user rejected by name", tool.Tool{Name: "ask_user", Effect: tool.StaticEffect(tool.EffectReadOnly)}, false},
+		{"elicit rejected by name", tool.Tool{Name: "elicit", Effect: tool.StaticEffect(tool.EffectReadOnly)}, false},
 		{"agent rejected by name", tool.Tool{Name: "agent", Effect: tool.StaticEffect(tool.EffectReadOnly)}, false},
 		{"hidden rejected", tool.Tool{Name: "x", Hidden: true, Effect: tool.StaticEffect(tool.EffectReadOnly)}, false},
 		{"missing effect rejected", tool.Tool{Name: "x"}, false},
@@ -113,7 +113,7 @@ func TestToolsForTypeFiltersExplore(t *testing.T) {
 		{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly)},
 		{Name: "write", Effect: tool.StaticEffect(tool.EffectMutates)},
 		{Name: "shell", Effect: tool.StaticEffect(tool.EffectDynamic), Execute: func(context.Context, map[string]any) (string, error) { return "ok", nil }},
-		{Name: "ask_user", Hidden: true, Effect: tool.StaticEffect(tool.EffectReadOnly)},
+		{Name: "elicit", Hidden: true, Effect: tool.StaticEffect(tool.EffectReadOnly)},
 	}
 
 	filtered := toolsForType(all, subagentTypes["explore"])
@@ -125,8 +125,8 @@ func TestToolsForTypeFiltersExplore(t *testing.T) {
 	if containsName(names, "write") {
 		t.Errorf("explore must reject mutating tools, got %v", names)
 	}
-	if containsName(names, "ask_user") {
-		t.Errorf("explore must reject ask_user, got %v", names)
+	if containsName(names, "elicit") {
+		t.Errorf("explore must reject elicit, got %v", names)
 	}
 }
 

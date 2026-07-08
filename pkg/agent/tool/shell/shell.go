@@ -59,16 +59,11 @@ func Tools(workDir string, elicit *tool.Elicitation, appr *Approvals) []tool.Too
 	}
 
 	description := strings.Join([]string{
-		fmt.Sprintf("Execute a command in the host shell. On Unix/macOS this uses the user's shell (`$SHELL`, falling back to `/bin/sh`); on Windows this uses PowerShell. Default timeout %ds, max 600s.", defaultTimeout),
-		"- Use for build, test, run, package-manager, git, GitHub CLI (`gh`), Docker/Kubernetes, project scripts, diagnostics, and other terminal operations.",
-		"- Prefer dedicated tools when they are clearly better for the job: `grep`/`glob`/LSP for code search, `read` for targeted file reads, `edit`/`write` for reviewable file changes. Shell is fine when a command is the natural interface or combines several process-level steps.",
-		"- Match command syntax to the host OS shown in your environment section. Examples: list dir -> `ls` on Unix, `Get-ChildItem` on PowerShell.",
-		"- Each call starts in the workspace directory; pass `workdir` to run elsewhere instead of a leading `cd`. Shell state (env vars, aliases, `cd`) does not persist between calls. Use absolute paths or chain dependent commands in one call.",
-		"- For GitHub URLs or PR/issue/release data, prefer `gh` commands (`gh pr view`, `gh issue view`, `gh api`) over `web_fetch`; they return structured authenticated data.",
-		"- Only commit when the user explicitly asked; stage specific files by name; never skip hooks.",
-		"- Quote paths with spaces. Chain dependent commands with `&&` on Unix or PowerShell 7+, and with `; if ($?) { ... }` on Windows PowerShell 5.1. Use separate tool calls for independent commands.",
-		"- Increase timeout for long-running commands. Avoid unnecessary `sleep` / `Start-Sleep`; if polling is needed, run a check command instead of sleeping first.",
-		"- For processes that should keep running (dev servers, watch tasks) or need interactive stdin, use `exec_command` instead.",
+		fmt.Sprintf("Execute a command in the host shell (the user's `$SHELL`/`/bin/sh` on Unix/macOS, PowerShell on Windows). Default timeout %ds, max 600s.", defaultTimeout),
+		"- Each call starts in the workspace directory; pass `workdir` to run elsewhere instead of a leading `cd`. Shell state (env vars, aliases) does not persist between calls.",
+		"- Quote paths with spaces. Chain dependent commands with `&&` (Unix, PowerShell 7+) or `; if ($?) { ... }` (Windows PowerShell 5.1); issue independent commands as separate calls.",
+		"- Increase `timeout` for long-running commands; poll with a check command instead of leading sleeps.",
+		"- For processes that should keep running or need interactive stdin, use `exec_command` instead.",
 		safetyGuardLine(elicit),
 	}, "\n")
 
@@ -120,12 +115,12 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 		timeout = 600
 	}
 
-	if err := confirmDangerous(ctx, elicit, appr, args); err != nil {
+	dir, err := resolveWorkdir(workDir, args)
+	if err != nil {
 		return "", err
 	}
 
-	dir, err := resolveWorkdir(workDir, args)
-	if err != nil {
+	if err := confirmDangerous(ctx, elicit, appr, args, approvalWorkdir(workDir, dir)); err != nil {
 		return "", err
 	}
 
@@ -138,7 +133,9 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 
+	started := time.Now()
 	runErr := cmd.Run()
+	elapsed := time.Since(started)
 	result := output.result()
 
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -154,19 +151,46 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 
 	if runErr != nil {
 		var exitErr *exec.ExitError
+		notice := ""
 		if errors.As(runErr, &exitErr) {
-			result += fmt.Sprintf("\n\nCommand exited with code %d", exitErr.ExitCode())
+			notice = fmt.Sprintf("Command exited with code %d%s", exitErr.ExitCode(), wallTimeNote(elapsed))
 		} else {
-			result += fmt.Sprintf("\n\nCommand failed to run: %v", runErr)
+			notice = fmt.Sprintf("Command failed to run: %v", runErr)
 		}
+		if result == "" {
+			result = notice
+		} else {
+			result += "\n\n" + notice
+		}
+		return result, nil
 	}
-
-	result = strings.TrimLeft(result, "\n")
 
 	if result == "" {
-		return "(command completed with no output)", nil
+		return fmt.Sprintf("(command completed with no output%s)", wallTimeNote(elapsed)), nil
+	}
+	if note := wallTimeNote(elapsed); note != "" {
+		result += fmt.Sprintf("\n\n(completed%s)", note)
 	}
 	return result, nil
+}
+
+// wallTimeNote reports the runtime for slow commands only — it helps the
+// model calibrate timeouts and spot near-hangs without taxing the common
+// fast case.
+func wallTimeNote(elapsed time.Duration) string {
+	if elapsed < 10*time.Second {
+		return ""
+	}
+	return fmt.Sprintf(" after %.0fs", elapsed.Seconds())
+}
+
+// approvalWorkdir returns the directory to surface in approval prompts: empty
+// for the workspace default, the effective directory otherwise.
+func approvalWorkdir(workDir, dir string) string {
+	if dir == workDir {
+		return ""
+	}
+	return dir
 }
 
 func resolveWorkdir(workDir string, args map[string]any) (string, error) {

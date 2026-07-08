@@ -1,5 +1,7 @@
 package server
 
+import "github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+
 const (
 	MsgSend           = "send"
 	MsgCancel         = "cancel"
@@ -14,8 +16,10 @@ type ClientMessage struct {
 	Files     []string `json:"files,omitempty"`
 	Images    []string `json:"images,omitempty"`
 
-	PromptID string `json:"prompt_id,omitempty"`
-	Approved bool   `json:"approved,omitempty"`
+	PromptID string         `json:"prompt_id,omitempty"`
+	Approved bool           `json:"approved,omitempty"`
+	Action   string         `json:"action,omitempty"`
+	Content  map[string]any `json:"content,omitempty"`
 }
 
 const (
@@ -57,12 +61,16 @@ type Frame struct {
 	Phase   string `json:"phase,omitempty"`
 	Message string `json:"message,omitempty"`
 
-	PromptID   string `json:"prompt_id,omitempty"`
-	PromptKind string `json:"prompt_kind,omitempty"`
+	PromptID     string             `json:"prompt_id,omitempty"`
+	PromptKind   string             `json:"prompt_kind,omitempty"`
+	PromptFields []tool.ElicitField `json:"prompt_fields,omitempty"`
 
 	InputTokens  int64 `json:"input_tokens,omitempty"`
 	CachedTokens int64 `json:"cached_tokens,omitempty"`
 	OutputTokens int64 `json:"output_tokens,omitempty"`
+
+	LastInputTokens int64 `json:"last_input_tokens,omitempty"`
+	ContextWindow   int64 `json:"context_window,omitempty"`
 
 	Messages []ConversationMessage `json:"messages,omitempty"`
 }

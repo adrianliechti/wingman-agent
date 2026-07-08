@@ -11,12 +11,16 @@ interface CancelMessage {
 	session: string;
 }
 
+export type PromptAction = "accept" | "decline" | "cancel";
+
 interface PromptResponseMessage {
 	type: "prompt_response";
 	session: string;
 	prompt_id: string;
 	text?: string;
 	approved?: boolean;
+	action?: PromptAction;
+	content?: Record<string, unknown>;
 }
 
 interface FocusMessage {
@@ -37,6 +41,8 @@ interface SessionStateMessage {
 	input_tokens?: number;
 	cached_tokens?: number;
 	output_tokens?: number;
+	last_input_tokens?: number;
+	context_window?: number;
 }
 
 interface TextDeltaMessage {
@@ -81,6 +87,8 @@ interface UsageMessage {
 	input_tokens: number;
 	cached_tokens: number;
 	output_tokens: number;
+	last_input_tokens?: number;
+	context_window?: number;
 }
 
 interface ErrorMessage {
@@ -91,12 +99,27 @@ interface ErrorMessage {
 
 export type PromptKind = "ask" | "confirm";
 
+export interface PromptField {
+	name: string;
+	type?: "string" | "number" | "integer" | "boolean";
+	title?: string;
+	description?: string;
+	required?: boolean;
+	enum?: string[];
+	enum_descriptions?: string[];
+	enum_previews?: string[];
+	strict?: boolean;
+	multiple?: boolean;
+	default?: unknown;
+}
+
 interface PromptMessage {
 	type: "prompt";
 	session: string;
 	prompt_id: string;
 	prompt_kind: PromptKind;
 	message: string;
+	prompt_fields?: PromptField[];
 }
 
 interface PromptCancelMessage {

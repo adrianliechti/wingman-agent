@@ -397,14 +397,21 @@ func (s *Server) sendSessionState(sid string) {
 }
 
 func (s *Server) sendSessionSnapshot(sid string, messages []agent.Message, u agent.Usage) {
-	s.sendSession(sid, Frame{
+	frame := Frame{
 		Type:         EvtSessionState,
 		Phase:        s.sessionPhase(sid),
 		Messages:     convertMessages(messages),
 		InputTokens:  u.InputTokens,
 		CachedTokens: u.CachedTokens,
 		OutputTokens: u.OutputTokens,
-	})
+
+		LastInputTokens: u.LastInputTokens,
+	}
+	if a := s.activeAgent(); a != nil && u.LastInputTokens > 0 {
+		_, model := a.Models(sid)
+		frame.ContextWindow = int64(agent.ContextWindowFor(model, false))
+	}
+	s.sendSession(sid, frame)
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
