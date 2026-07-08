@@ -181,13 +181,23 @@ func Tools(cfg *agent.Config, sharedContext func() string) []tool.Tool {
 
 			sub := &agent.Agent{Config: subcfg}
 
+			var runErr error
 			for _, err := range sub.Send(ctx, []agent.Content{{Text: prompt}}) {
 				if err != nil {
-					return "", fmt.Errorf("agent error: %w", err)
+					runErr = err
+					break
 				}
 			}
 
 			text := strings.TrimSpace(finalText(sub.Messages))
+
+			if runErr != nil {
+				if text == "" {
+					return "", fmt.Errorf("agent error: %w", runErr)
+				}
+				return fmt.Sprintf("Agent aborted before finishing (%v). Last output before the abort — treat as incomplete:\n\n%s", runErr, text), nil
+			}
+
 			if text == "" {
 				return "Sub-agent completed but produced no output.", nil
 			}

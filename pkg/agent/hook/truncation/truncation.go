@@ -17,9 +17,9 @@ const grepMaxBytes = 20 * 1024
 
 const shellMaxBytes = 48 * 1024
 
-const headPreviewBytes = 2 * 1024
+const headPreviewBytes = 4 * 1024
 
-const tailPreviewBytes = 4 * 1024
+const tailPreviewBytes = 8 * 1024
 
 func budgetFor(name string) int {
 	switch name {

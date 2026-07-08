@@ -24,6 +24,9 @@ type request struct {
 type response struct {
 	messages []Message
 	usage    Usage
+
+	incomplete       bool
+	incompleteReason string
 }
 
 func complete(ctx context.Context, client *openai.Client, r *request, yield func(Message, error) bool) (*response, error) {
@@ -61,6 +64,9 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 
 	var outputItems []responses.ResponseInputItemUnionParam
 	var usageDelta Usage
+
+	incomplete := false
+	incompleteReason := ""
 
 	for stream.Next() {
 		event := stream.Current()
@@ -126,6 +132,8 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 			// Output was cut short (e.g. max output tokens); completed items
 			// and usage still count.
 			usageDelta = responseToUsage(e.Response)
+			incomplete = true
+			incompleteReason = e.Response.IncompleteDetails.Reason
 
 		case responses.ResponseFailedEvent:
 			if msg := e.Response.Error.Message; msg != "" {
@@ -155,5 +163,8 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 	return &response{
 		messages: messages,
 		usage:    usageDelta,
+
+		incomplete:       incomplete,
+		incompleteReason: incompleteReason,
 	}, nil
 }

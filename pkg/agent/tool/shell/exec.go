@@ -181,7 +181,7 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 		fmt.Sprintf("Start a command for long-running or interactive work. Waits up to `wait` seconds (default %d) for it to finish; if still running, the command keeps running in the background and a session_id is returned.", defaultExecWait),
 		"- Use for dev servers, watch tasks, log tails, and interactive programs (REPLs, CLIs that prompt for input). Use `shell` for commands expected to finish promptly.",
 		"- Set `tty` for programs that need a terminal (REPLs, prompts, programs that buffer output when piped). Unix only — ignored on Windows. Written input is echoed back in the output.",
-		"- Runs in the same host shell as `shell` and starts in the workspace directory. stdout and stderr are merged. Output between reads is buffered (oldest dropped past 1MB); poll with `exec_session` to collect it.",
+		"- Runs in the same host shell as `shell` and starts in the workspace directory (override with `workdir`). stdout and stderr are merged. Output between reads is buffered (oldest dropped past 1MB); poll with `exec_session` to collect it.",
 		"- The process is NOT killed when the wait elapses. Kill sessions you no longer need via `exec_session`.",
 		safetyGuardLine(elicit),
 	}, "\n")
@@ -207,6 +207,7 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 				"properties": map[string]any{
 					"command":     map[string]any{"type": "string", "description": "Command to run."},
 					"description": map[string]any{"type": "string", "description": "Short label (e.g. \"Start dev server\")."},
+					"workdir":     map[string]any{"type": "string", "description": "Directory to run the command in (absolute, or relative to the workspace). Defaults to the workspace root."},
 					"tty":         map[string]any{"type": "boolean", "description": "Run in a pseudo-terminal (Unix only)."},
 					"wait":        map[string]any{"type": "integer", "description": fmt.Sprintf("Seconds to wait before backgrounding (default %d, max %d; 0 backgrounds immediately).", defaultExecWait, maxExecWait)},
 				},
@@ -268,6 +269,11 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		return "", err
 	}
 
+	dir, err := resolveWorkdir(workDir, args)
+	if err != nil {
+		return "", err
+	}
+
 	tty, _ := args["tty"].(bool)
 	if runtime.GOOS == "windows" {
 		tty = false
@@ -275,7 +281,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 
 	sctx, cancel := context.WithCancel(context.Background())
 
-	cmd := buildCommand(sctx, command, workDir)
+	cmd := buildCommand(sctx, command, dir)
 	cmd.Env = append(cmd.Env, "NO_COLOR=1", "PAGER=cat", "GIT_PAGER=cat")
 
 	s := &execSession{

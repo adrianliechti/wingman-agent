@@ -57,6 +57,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 		}()
 
 		turns := 1
+		cutoffNotified := false
 		for {
 			if maxTurns > 0 && turns > maxTurns {
 				yield(Message{}, ErrMaxTurnsExceeded)
@@ -100,7 +101,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 			resp, err := complete(ctx, a.client, req, yield)
 
 			for attempt := 1; err != nil && attempt <= maxStreamRetries; attempt++ {
-				if errors.Is(err, errYieldStopped) || errors.Is(err, context.Canceled) || !isRecoverableError(err) {
+				if errors.Is(err, errYieldStopped) || ctx.Err() != nil || !isRecoverableError(err) {
 					break
 				}
 
@@ -144,15 +145,25 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 				}
 			}
 
+			// A cut-off response (max output tokens) silently drops in-flight
+			// items; nudge the model once to resume. A second consecutive
+			// cutoff ends the turn so this cannot loop unbounded.
+			resumeAfterCutoff := resp.incomplete && !cutoffNotified
+			cutoffNotified = resp.incomplete
+
 			a.queueMu.Lock()
 			queued := a.pendingInput
 			a.pendingInput = nil
-			if len(queued) == 0 && len(calls) == 0 {
+			if len(queued) == 0 && len(calls) == 0 && !resumeAfterCutoff {
 				a.running = false
 				a.queueMu.Unlock()
 				return
 			}
 			a.queueMu.Unlock()
+
+			if resumeAfterCutoff {
+				a.Messages = append(a.Messages, cutoffNotice(resp.incompleteReason))
+			}
 
 			for _, in := range queued {
 				a.Messages = append(a.Messages, userMessage(in))
@@ -364,7 +375,7 @@ func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool
 	}
 
 	if result == "" {
-		result = a.executeTool(ctx, tc, t)
+		result = a.executeTool(ctx, tc, t, timeout)
 	}
 
 	for _, h := range a.Hooks.PostToolUse {
@@ -381,7 +392,7 @@ func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool
 	return result
 }
 
-func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool) string {
+func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool, timeout time.Duration) string {
 	if t == nil {
 		return fmt.Sprintf("error: unknown tool %s", tc.Name)
 	}
@@ -397,6 +408,14 @@ func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool) stri
 	result, err := t.Execute(ctx, args)
 
 	if err != nil {
+		switch {
+		case errors.Is(ctx.Err(), context.Canceled):
+			return "error: interrupted — the request was canceled before this tool call finished"
+		case errors.Is(ctx.Err(), context.DeadlineExceeded) && timeout > 0:
+			return fmt.Sprintf("error: tool call aborted after exceeding its %s time limit", timeout)
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			return "error: tool call aborted — deadline exceeded"
+		}
 		return fmt.Sprintf("error: %v", err)
 	}
 
@@ -433,5 +452,19 @@ func userMessage(input []Content) Message {
 	return Message{
 		Role:    RoleUser,
 		Content: input,
+	}
+}
+
+func cutoffNotice(reason string) Message {
+	if reason == "" {
+		reason = "max_output_tokens"
+	}
+
+	text := fmt.Sprintf("<system-reminder>Your previous response was cut off before completing (%s); anything past the cutoff, including further tool calls, was dropped. Continue from where it stopped without repeating completed work.</system-reminder>", reason)
+
+	return Message{
+		Role:    RoleUser,
+		Hidden:  true,
+		Content: []Content{{Text: text}},
 	}
 }

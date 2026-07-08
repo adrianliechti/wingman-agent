@@ -17,7 +17,7 @@ import (
 
 const (
 	DefaultMaxLines = 2000
-	DefaultMaxBytes = 30 * 1024
+	DefaultMaxBytes = 48 * 1024
 
 	MaxEditFileBytes = 10 * 1024 * 1024
 )

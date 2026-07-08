@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -62,7 +63,7 @@ func Tools(workDir string, elicit *tool.Elicitation, appr *Approvals) []tool.Too
 		"- Use for build, test, run, package-manager, git, GitHub CLI (`gh`), Docker/Kubernetes, project scripts, diagnostics, and other terminal operations.",
 		"- Prefer dedicated tools when they are clearly better for the job: `grep`/`glob`/LSP for code search, `read` for targeted file reads, `edit`/`write` for reviewable file changes. Shell is fine when a command is the natural interface or combines several process-level steps.",
 		"- Match command syntax to the host OS shown in your environment section. Examples: list dir -> `ls` on Unix, `Get-ChildItem` on PowerShell.",
-		"- Each call starts in the workspace directory. Shell state (env vars, aliases, `cd` from a prior call) does not persist between calls. Use absolute paths or chain dependent commands in one call.",
+		"- Each call starts in the workspace directory; pass `workdir` to run elsewhere instead of a leading `cd`. Shell state (env vars, aliases, `cd`) does not persist between calls. Use absolute paths or chain dependent commands in one call.",
 		"- For GitHub URLs or PR/issue/release data, prefer `gh` commands (`gh pr view`, `gh issue view`, `gh api`) over `web_fetch`; they return structured authenticated data.",
 		"- Only commit when the user explicitly asked; stage specific files by name; never skip hooks.",
 		"- Quote paths with spaces. Chain dependent commands with `&&` on Unix or PowerShell 7+, and with `; if ($?) { ... }` on Windows PowerShell 5.1. Use separate tool calls for independent commands.",
@@ -83,6 +84,7 @@ func Tools(workDir string, elicit *tool.Elicitation, appr *Approvals) []tool.Too
 			"properties": map[string]any{
 				"command":     map[string]any{"type": "string", "description": "Command to run."},
 				"description": map[string]any{"type": "string", "description": "Short label (e.g. \"Run unit tests\")."},
+				"workdir":     map[string]any{"type": "string", "description": "Directory to run the command in (absolute, or relative to the workspace). Defaults to the workspace root."},
 				"timeout":     map[string]any{"type": "integer", "description": fmt.Sprintf("Seconds (default %d, max 600).", defaultTimeout)},
 			},
 
@@ -122,10 +124,15 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 		return "", err
 	}
 
+	dir, err := resolveWorkdir(workDir, args)
+	if err != nil {
+		return "", err
+	}
+
 	ctx, cancel := context.WithTimeoutCause(ctx, time.Duration(timeout)*time.Second, errCommandTimeout)
 	defer cancel()
 
-	cmd := buildCommand(ctx, command, workDir)
+	cmd := buildCommand(ctx, command, dir)
 
 	var output cappedBuffer
 	cmd.Stdout = &output
@@ -153,7 +160,33 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 			result += fmt.Sprintf("\n\nCommand failed to run: %v", runErr)
 		}
 	}
+
+	result = strings.TrimLeft(result, "\n")
+
+	if result == "" {
+		return "(command completed with no output)", nil
+	}
 	return result, nil
+}
+
+func resolveWorkdir(workDir string, args map[string]any) (string, error) {
+	value, _ := args["workdir"].(string)
+	value = strings.TrimSpace(value)
+
+	if value == "" {
+		return workDir, nil
+	}
+
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(workDir, value)
+	}
+
+	info, err := os.Stat(value)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("workdir %q is not an accessible directory", value)
+	}
+
+	return value, nil
 }
 
 // Command builds an *exec.Cmd that runs a script with the same

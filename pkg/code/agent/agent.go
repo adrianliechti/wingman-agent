@@ -606,8 +606,9 @@ type projectInstructionsEntry struct {
 
 func findProjectInstructions(wd string) []projectInstructionsEntry {
 	wd = filepath.Clean(wd)
-	var found []projectInstructionsEntry
+	var groups [][]projectInstructionsEntry
 	for dir := wd; ; {
+		var group []projectInstructionsEntry
 		for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
 			p := filepath.Join(dir, name)
 			info, err := os.Stat(p)
@@ -618,7 +619,10 @@ func findProjectInstructions(wd string) []projectInstructionsEntry {
 			if rel == "" {
 				rel = name
 			}
-			found = append(found, projectInstructionsEntry{path: p, rel: rel, mtime: info.ModTime()})
+			group = append(group, projectInstructionsEntry{path: p, rel: rel, mtime: info.ModTime()})
+		}
+		if len(group) > 0 {
+			groups = append(groups, group)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -626,23 +630,32 @@ func findProjectInstructions(wd string) []projectInstructionsEntry {
 		}
 		dir = parent
 	}
+
+	// Root-level guidance first, most-specific (closest to wd) last, so the
+	// deeper file reads as overriding the general one.
+	var found []projectInstructionsEntry
+	for i := len(groups) - 1; i >= 0; i-- {
+		found = append(found, groups[i]...)
+	}
 	return found
 }
 
 func renderProjectInstructions(entries []projectInstructionsEntry) (string, map[string]time.Time) {
 	parts := make([]string, 0, len(entries))
 	mtimes := make(map[string]time.Time, len(entries))
+	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		data, err := os.ReadFile(e.path)
 		if err != nil {
 			continue
 		}
+		mtimes[e.path] = e.mtime
 		content := strings.TrimSpace(string(data))
-		if content == "" {
+		if content == "" || seen[content] {
 			continue
 		}
+		seen[content] = true
 		parts = append(parts, fmt.Sprintf("From %s:\n\n%s", e.rel, content))
-		mtimes[e.path] = e.mtime
 	}
 	result := strings.Join(parts, "\n\n---\n\n")
 	if len(result) > projectInstructionsMaxBytes {
