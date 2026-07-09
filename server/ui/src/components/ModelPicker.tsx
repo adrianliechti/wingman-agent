@@ -132,6 +132,12 @@ export function ModelPicker({ sessionId, subscribe }: Props) {
 		() => effortOptions.filter((v) => v !== defaultEffort),
 		[effortOptions, defaultEffort],
 	);
+	const steps = useMemo(
+		() => [defaultEffort, ...efforts],
+		[defaultEffort, efforts],
+	);
+	const stepIndex = Math.max(0, steps.indexOf(effort));
+	const effortLabel = stepIndex === 0 ? "Auto" : effort;
 
 	if (!model) return null;
 
@@ -179,25 +185,34 @@ export function ModelPicker({ sessionId, subscribe }: Props) {
 						)}
 					</div>
 					{efforts.length > 0 && (
-						<div className="border-t border-border px-2 py-1.5">
-							<div className="flex rounded bg-bg overflow-hidden">
-								{efforts.map((v) => (
-									<button
-										type="button"
-										key={v}
-										className={`flex-1 px-2 py-1 text-[11px] capitalize cursor-pointer transition-colors ${
-											v === effort
-												? "text-fg bg-bg-active"
-												: "text-fg-muted hover:text-fg hover:bg-bg-hover"
-										}`}
-										onClick={() =>
-											selectEffort(v === effort ? defaultEffort : v)
-										}
-									>
-										{v}
-									</button>
-								))}
+						<div
+							className="flex items-center gap-2.5 border-t border-border px-3 h-8"
+							title="Reasoning effort"
+						>
+							<div className="relative flex items-center flex-1 h-4">
+								<div className="absolute inset-x-[5px] flex justify-between pointer-events-none">
+									{steps.map((v) => (
+										<span
+											key={v}
+											className="w-[3px] h-[3px] rounded-full bg-fg-dim/50"
+										/>
+									))}
+								</div>
+								<input
+									type="range"
+									min={0}
+									max={steps.length - 1}
+									step={1}
+									value={stepIndex}
+									onChange={(e) =>
+										selectEffort(steps[Number(e.target.value)])
+									}
+									className="effort-slider relative w-full"
+								/>
 							</div>
+							<span className="text-[11px] text-fg-muted capitalize min-w-[42px] text-right">
+								{effortLabel}
+							</span>
 						</div>
 					)}
 				</div>

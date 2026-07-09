@@ -10,6 +10,10 @@ var AvailableModels = []Model{
 	{ID: "claude-sonnet-4-6", Name: "Claude Sonnet 4.6"},
 	{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5"},
 
+	{ID: "gpt-5.6-sol", Name: "GPT 5.6 Sol"},
+	{ID: "gpt-5.6-terra", Name: "GPT 5.6 Terra"},
+	{ID: "gpt-5.6-luna", Name: "GPT 5.6 Luna"},
+
 	{ID: "gpt-5.5", Name: "GPT 5.5"},
 	{ID: "gpt-5.4", Name: "GPT 5.4"},
 

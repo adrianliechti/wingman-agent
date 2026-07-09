@@ -126,6 +126,8 @@ var (
 		"claude-fable-5",
 		"claude-mythos-5",
 
+		"gpt-5.6-sol",
+		"gpt-5.6-terra",
 		"gpt-5.5",
 		"gpt-5.4",
 		"gpt-5.3-codex",
@@ -147,6 +149,7 @@ var (
 		"claude-haiku-4-6",
 		"claude-haiku-4-5",
 
+		"gpt-5.6-luna",
 		"gpt-5.3-codex-spark",
 		"gpt-5.1-codex-mini",
 		"gpt-5-mini",

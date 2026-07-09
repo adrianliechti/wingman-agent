@@ -62,6 +62,8 @@ var candidates = []modelGroup{
 		name: "Wingman Codex",
 
 		models: []modelEntry{
+			{id: "gpt-5.6-sol", inputTokens: 400000, outputTokens: 128000},
+			{id: "gpt-5.6-terra", inputTokens: 400000, outputTokens: 128000},
 			{id: "gpt-5.4", inputTokens: 400000, outputTokens: 128000},
 			{id: "gpt-5.3-codex", inputTokens: 400000, outputTokens: 128000},
 			{id: "gpt-5.2-codex", inputTokens: 400000, outputTokens: 128000},
@@ -82,6 +84,9 @@ var candidates = []modelGroup{
 		name: "Wingman ChatGPT",
 
 		models: []modelEntry{
+			{id: "gpt-5.6-sol", inputTokens: 400000, outputTokens: 128000},
+			{id: "gpt-5.6-terra", inputTokens: 400000, outputTokens: 128000},
+			{id: "gpt-5.6-luna", inputTokens: 400000, outputTokens: 128000},
 			{id: "gpt-5.4", inputTokens: 400000, outputTokens: 128000},
 			{id: "gpt-5.2", inputTokens: 400000, outputTokens: 128000},
 			{id: "gpt-5.1", inputTokens: 400000, outputTokens: 128000},

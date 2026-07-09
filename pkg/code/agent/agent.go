@@ -179,7 +179,7 @@ func (a *Agent) FetchModels(ctx context.Context) {
 	a.modelMu.Unlock()
 }
 
-var effortValues = []string{"auto", "low", "medium", "high"}
+var effortValues = []string{"auto", "none", "low", "medium", "high", "xhigh", "max"}
 
 func (a *Agent) Effort(sessionID string) (string, []string) {
 	current := a.effortFor(a.session(sessionID))
@@ -202,9 +202,9 @@ func (a *Agent) SetEffort(_ context.Context, sessionID, value string) error {
 	switch value {
 	case "", "auto":
 		value = ""
-	case "low", "medium", "high":
+	case "none", "low", "medium", "high", "xhigh", "max":
 	default:
-		return fmt.Errorf("effort must be auto, low, medium, or high (got %q)", value)
+		return fmt.Errorf("effort must be auto, none, low, medium, high, xhigh, or max (got %q)", value)
 	}
 	s := a.session(sessionID)
 	a.modelMu.Lock()
