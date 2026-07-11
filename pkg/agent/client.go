@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -16,6 +17,18 @@ import (
 // streamIdleTimeout bounds the wait for the next stream event; reasoning
 // models can be quiet for minutes between items, so it is generous.
 const streamIdleTimeout = 5 * time.Minute
+
+// streamFailure records whether a streamed request produced model output
+// before its transport failed. Replaying after output begins would duplicate
+// visible deltas and can duplicate completed tool-call items, so only a
+// pre-output failure is safe for the agent-level retry loop to resend.
+type streamFailure struct {
+	err           error
+	outputStarted bool
+}
+
+func (e *streamFailure) Error() string { return e.err.Error() }
+func (e *streamFailure) Unwrap() error { return e.err }
 
 type request struct {
 	model        string
@@ -80,10 +93,17 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 
 	incomplete := false
 	incompleteReason := ""
+	outputStarted := false
+	terminalEvent := false
 
 	for stream.Next() {
 		idle.Reset(streamIdleTimeout)
 		event := stream.Current()
+		switch event.Type {
+		case "response.created", "response.in_progress", "response.queued":
+		default:
+			outputStarted = true
+		}
 
 		switch e := event.AsAny().(type) {
 		case responses.ResponseTextDeltaEvent:
@@ -141,6 +161,10 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 
 		case responses.ResponseCompletedEvent:
 			usageDelta = responseToUsage(e.Response)
+			terminalEvent = true
+			if len(outputItems) == 0 {
+				outputItems = outputItemsFromResponse(e.Response)
+			}
 
 		case responses.ResponseIncompleteEvent:
 			// Output was cut short (e.g. max output tokens). The final response
@@ -150,6 +174,7 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 			usageDelta = responseToUsage(e.Response)
 			incomplete = true
 			incompleteReason = e.Response.IncompleteDetails.Reason
+			terminalEvent = true
 			if items := outputItemsFromResponse(e.Response); len(items) > 0 {
 				outputItems = items
 			}
@@ -163,13 +188,25 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		case responses.ResponseErrorEvent:
 			return nil, fmt.Errorf("response error: %s", e.Message)
 		}
+
+		// completed and incomplete carry the authoritative final response.
+		// Do not wait for a redundant [DONE] marker or connection close.
+		if terminalEvent {
+			break
+		}
 	}
 
 	if err := stream.Err(); err != nil {
 		if streamCtx.Err() != nil && ctx.Err() == nil {
-			return nil, fmt.Errorf("stream stalled: no events for %s", streamIdleTimeout)
+			err = fmt.Errorf("stream stalled: no events for %s", streamIdleTimeout)
 		}
-		return nil, err
+		return nil, &streamFailure{err: err, outputStarted: outputStarted}
+	}
+	if !terminalEvent {
+		return nil, &streamFailure{
+			err:           io.ErrUnexpectedEOF,
+			outputStarted: outputStarted,
+		}
 	}
 
 	messages := toMessages(outputItems)

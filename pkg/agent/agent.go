@@ -23,6 +23,7 @@ type Agent struct {
 	Usage    Usage
 	Revision uint64
 
+	stateMu      sync.RWMutex
 	queueMu      sync.Mutex
 	running      bool
 	pendingInput [][]Content
@@ -40,7 +41,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 	a.running = true
 	a.queueMu.Unlock()
 
-	a.Messages = append(a.Messages, userMessage(input))
+	a.appendMessages(userMessage(input))
 
 	maxTurns := a.MaxTurns
 	if maxTurns == 0 {
@@ -56,10 +57,10 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 			}
 		}()
 
-		turns := 1
+		turns := 0
 		cutoffNotified := false
 		for {
-			if maxTurns > 0 && turns > maxTurns {
+			if maxTurns > 0 && turns >= maxTurns {
 				yield(Message{}, ErrMaxTurnsExceeded)
 				a.endRun()
 				return
@@ -94,7 +95,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 				effort:       effort,
 				instructions: instructions,
 				cacheKey:     a.CacheKey,
-				messages:     a.Messages,
+				messages:     a.requestMessages(),
 				tools:        tools,
 			}
 
@@ -107,14 +108,20 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 
 				if isContextOverflowError(err) {
 					a.compactMessages(ctx, true)
-					req.messages = a.Messages
+					req.messages = a.requestMessages()
 				} else {
 					// The SDK already retried transport errors with backoff; this
-					// covers mid-stream failures, so back off before resending.
-					select {
-					case <-time.After(time.Duration(attempt) * 2 * time.Second):
-					case <-ctx.Done():
+					// covers failures before streamed output begins, so back off
+					// before resending.
+					if !waitForRetry(ctx, time.Duration(attempt)*2*time.Second) {
+						err = ctx.Err()
+						break
 					}
+				}
+
+				if ctx.Err() != nil {
+					err = ctx.Err()
+					break
 				}
 
 				resp, err = complete(ctx, a.client, req, yield)
@@ -127,7 +134,9 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 				}
 				return
 			}
+			turns++
 
+			a.stateMu.Lock()
 			a.Usage.InputTokens += resp.usage.InputTokens
 			a.Usage.CachedTokens += resp.usage.CachedTokens
 			a.Usage.OutputTokens += resp.usage.OutputTokens
@@ -135,6 +144,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 				a.Usage.LastInputTokens = resp.usage.InputTokens
 			}
 			a.Messages = append(a.Messages, resp.messages...)
+			a.stateMu.Unlock()
 
 			calls := extractToolCalls(resp.messages)
 
@@ -151,9 +161,8 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 			// A cut-off response (max output tokens) drops in-flight items. When
 			// tool calls survived, their results already drive the next round;
 			// otherwise nudge the model once to resume. Only one consecutive
-			// nudge — cutoff rounds don't count against maxTurns, so a model
-			// that keeps truncating must not loop unbounded. Content-filter
-			// stops are final; a continue nudge would just re-trigger them.
+			// nudge. Content-filter stops are final; a continue nudge would just
+			// re-trigger them.
 			resumeAfterCutoff := resp.incomplete &&
 				resp.incompleteReason != "content_filter" &&
 				len(calls) == 0 &&
@@ -175,13 +184,14 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 
 			if resumeAfterCutoff {
 				cutoffNotified = true
-				a.Messages = append(a.Messages, cutoffNotice(resp.incompleteReason))
+				a.appendMessages(cutoffNotice(resp.incompleteReason))
 			}
 
+			queuedMessages := make([]Message, 0, len(queued))
 			for _, in := range queued {
-				a.Messages = append(a.Messages, userMessage(in))
+				queuedMessages = append(queuedMessages, userMessage(in))
 			}
-			turns += len(queued)
+			a.appendMessages(queuedMessages...)
 
 			if a.shouldCompactProactively(model, resp.usage.InputTokens) {
 				a.compactMessages(ctx, false)
@@ -190,8 +200,25 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 	}
 }
 
+func waitForRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (a *Agent) endRun() {
 	a.queueMu.Lock()
+	queuedMessages := make([]Message, 0, len(a.pendingInput))
+	for _, input := range a.pendingInput {
+		queuedMessages = append(queuedMessages, userMessage(input))
+	}
+	a.appendMessages(queuedMessages...)
 	a.running = false
 	a.pendingInput = nil
 	a.queueMu.Unlock()
@@ -275,7 +302,7 @@ func (a *Agent) processToolCallsSequential(ctx context.Context, calls []ToolCall
 		}
 
 		resultMsg := toolResultMessage(tc, a.runSingleToolCall(ctx, tc, tools))
-		a.Messages = append(a.Messages, resultMsg)
+		a.appendMessages(resultMsg)
 
 		if !yield(resultMsg, nil) {
 			return errYieldStopped
@@ -317,7 +344,7 @@ func (a *Agent) processToolCallsParallel(ctx context.Context, calls []ToolCall, 
 	}
 
 	for i, tc := range calls {
-		a.Messages = append(a.Messages, toolResultMessage(tc, results[i]))
+		a.appendMessages(toolResultMessage(tc, results[i]))
 	}
 
 	if stopped {

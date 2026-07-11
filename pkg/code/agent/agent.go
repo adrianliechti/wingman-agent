@@ -36,8 +36,9 @@ type Agent struct {
 	workspace *code.Workspace
 	cfg       *harness.Config
 
-	uiMu sync.RWMutex
-	ui   code.UI
+	uiMu    sync.RWMutex
+	ui      code.UI
+	prompts *tool.Elicitation
 
 	lastActive atomic.Value
 
@@ -81,25 +82,14 @@ func New(ws *code.Workspace, cfg *harness.Config, ui code.UI) *Agent {
 		sessionsDir: filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
 		sessions:    map[string]*sessionState{},
 	}
+	a.prompts = &tool.Elicitation{Elicit: a.elicit, Confirm: a.confirm}
 
 	// MCP servers elicit through the same UI surface as the elicit tool. Their
 	// requests arrive on the transport context, which carries no session, so
 	// route them to the most recently active session (or any live one before
 	// the first turn) for display.
 	if ws.MCP != nil {
-		el := a.buildElicit()
-		ws.MCP.SetElicit(func(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
-			if code.SessionIDFromContext(ctx) == "" {
-				sid, _ := a.lastActive.Load().(string)
-				if sid == "" {
-					sid = a.anySessionID()
-				}
-				if sid != "" {
-					ctx = code.WithSessionID(ctx, sid)
-				}
-			}
-			return el.Elicit(ctx, req)
-		})
+		ws.MCP.SetElicit(a.elicit)
 	}
 
 	return a
@@ -290,11 +280,7 @@ func (a *Agent) Save(id string) error {
 	if !ok {
 		return nil
 	}
-	return session.Save(a.sessionsDir, id, harness.State{
-		Messages: s.aa.Messages,
-		Usage:    s.aa.Usage,
-		Revision: s.aa.Revision,
-	})
+	return session.Save(a.sessionsDir, id, s.aa.StateSnapshot())
 }
 
 func (a *Agent) SessionsDir() string { return a.sessionsDir }
@@ -304,7 +290,7 @@ func (a *Agent) Messages(id string) []harness.Message {
 	if s == nil {
 		return nil
 	}
-	return s.aa.Messages
+	return s.aa.MessagesSnapshot()
 }
 
 func (a *Agent) Usage(id string) harness.Usage {
@@ -312,7 +298,7 @@ func (a *Agent) Usage(id string) harness.Usage {
 	if s == nil {
 		return harness.Usage{}
 	}
-	return s.aa.Usage
+	return s.aa.UsageSnapshot()
 }
 
 func (a *Agent) session(id string) *sessionState {
@@ -432,7 +418,7 @@ func (a *Agent) buildSession() *sessionState {
 	sessionCfg.Effort = func() string {
 		return a.effortFor(s)
 	}
-	elicit := a.buildElicit()
+	elicit := a.prompts
 	ws := a.workspace
 
 	globalHooks, globalErr := external.Load(userHooksConfigPath())
@@ -508,23 +494,38 @@ func userHooksConfigPath() string {
 	return filepath.Join(home, ".wingman", "hooks.json")
 }
 
-func (a *Agent) buildElicit() *tool.Elicitation {
-	return &tool.Elicitation{
-		Elicit: func(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
-			ui := a.currentUI()
-			if ui == nil {
-				return tool.ElicitResult{Action: tool.ElicitCancel}, nil
-			}
-			return ui.Elicit(ctx, req)
-		},
-		Confirm: func(ctx context.Context, msg string) (bool, error) {
-			ui := a.currentUI()
-			if ui == nil {
-				return true, nil
-			}
-			return ui.Confirm(ctx, msg)
-		},
+func (a *Agent) promptContext(ctx context.Context) context.Context {
+	if code.SessionIDFromContext(ctx) != "" {
+		return ctx
 	}
+
+	sid, _ := a.lastActive.Load().(string)
+	if sid != "" && a.session(sid) == nil {
+		sid = ""
+	}
+	if sid == "" {
+		sid = a.anySessionID()
+	}
+	if sid == "" {
+		return ctx
+	}
+	return code.WithSessionID(ctx, sid)
+}
+
+func (a *Agent) elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
+	ui := a.currentUI()
+	if ui == nil {
+		return tool.ElicitResult{Action: tool.ElicitCancel}, nil
+	}
+	return ui.Elicit(a.promptContext(ctx), req)
+}
+
+func (a *Agent) confirm(ctx context.Context, message string) (bool, error) {
+	ui := a.currentUI()
+	if ui == nil {
+		return true, nil
+	}
+	return ui.Confirm(a.promptContext(ctx), message)
 }
 
 func (s *sessionState) setCancel(fn context.CancelFunc) uint64 {

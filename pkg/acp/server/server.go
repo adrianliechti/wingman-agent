@@ -17,6 +17,7 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	acpcontent "github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -79,7 +80,8 @@ func (s *Server) Initialize(_ context.Context, _ acpsdk.InitializeRequest) (acps
 	return acpsdk.InitializeResponse{
 		ProtocolVersion: acpsdk.ProtocolVersionNumber,
 		AgentCapabilities: acpsdk.AgentCapabilities{
-			LoadSession: true,
+			LoadSession:        true,
+			PromptCapabilities: acpsdk.PromptCapabilities{Image: true},
 			SessionCapabilities: acpsdk.SessionCapabilities{
 				List:   &acpsdk.SessionListCapabilities{},
 				Resume: &acpsdk.SessionResumeCapabilities{},
@@ -293,7 +295,7 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		})
 	}
 
-	for msg, err := range sess.agent.Send(ctx, string(sess.id), promptToContent(params.Prompt)) {
+	for msg, err := range sess.agent.Send(ctx, string(sess.id), acpcontent.ContentFromBlocks(params.Prompt)) {
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
@@ -510,19 +512,6 @@ func modeState(a *coder.Agent, sid string) *acpsdk.SessionModeState {
 		AvailableModes: out,
 		CurrentModeId:  acpsdk.SessionModeId(current),
 	}
-}
-
-func promptToContent(blocks []acpsdk.ContentBlock) []agent.Content {
-	out := make([]agent.Content, 0, len(blocks))
-	for _, b := range blocks {
-		switch {
-		case b.Text != nil:
-			out = append(out, agent.Content{Text: b.Text.Text})
-		case b.ResourceLink != nil:
-			out = append(out, agent.Content{Text: fmt.Sprintf("[Resource: %s]", b.ResourceLink.Uri)})
-		}
-	}
-	return out
 }
 
 func parseRawInput(args string) any {

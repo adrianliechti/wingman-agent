@@ -14,14 +14,7 @@ type pendingPrompt struct {
 	kind    string
 	message string
 	fields  []tool.ElicitField
-	reply   chan promptReply
-}
-
-type promptReply struct {
-	text     string
-	approved bool
-	action   string
-	content  map[string]any
+	reply   chan ClientMessage
 }
 
 func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
@@ -30,9 +23,9 @@ func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elici
 		return tool.ElicitResult{}, err
 	}
 
-	switch tool.ElicitAction(reply.action) {
+	switch tool.ElicitAction(reply.Action) {
 	case tool.ElicitAccept:
-		return tool.ElicitResult{Action: tool.ElicitAccept, Content: reply.content}, nil
+		return tool.ElicitResult{Action: tool.ElicitAccept, Content: reply.Content}, nil
 	case tool.ElicitDecline:
 		return tool.ElicitResult{Action: tool.ElicitDecline}, nil
 	case tool.ElicitCancel:
@@ -40,10 +33,10 @@ func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elici
 	}
 
 	// Plain-text reply (no structured action): map onto a single-field request.
-	if reply.text != "" && len(req.Fields) == 1 {
+	if reply.Text != "" && len(req.Fields) == 1 {
 		return tool.ElicitResult{
 			Action:  tool.ElicitAccept,
-			Content: map[string]any{req.Fields[0].Name: reply.text},
+			Content: map[string]any{req.Fields[0].Name: reply.Text},
 		}, nil
 	}
 
@@ -55,10 +48,10 @@ func (s *Server) Confirm(ctx context.Context, message string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return reply.approved, nil
+	return reply.Approved, nil
 }
 
-func (s *Server) prompt(ctx context.Context, kind, message string, fields []tool.ElicitField) (promptReply, error) {
+func (s *Server) prompt(ctx context.Context, kind, message string, fields []tool.ElicitField) (ClientMessage, error) {
 	sid := code.SessionIDFromContext(ctx)
 	id := uuid.NewString()
 	p := pendingPrompt{
@@ -66,7 +59,7 @@ func (s *Server) prompt(ctx context.Context, kind, message string, fields []tool
 		kind:    kind,
 		message: message,
 		fields:  fields,
-		reply:   make(chan promptReply, 1),
+		reply:   make(chan ClientMessage, 1),
 	}
 
 	s.promptsMu.Lock()
@@ -92,7 +85,7 @@ func (s *Server) prompt(ctx context.Context, kind, message string, fields []tool
 	case reply := <-p.reply:
 		return reply, nil
 	case <-ctx.Done():
-		return promptReply{}, ctx.Err()
+		return ClientMessage{}, ctx.Err()
 	}
 }
 
@@ -104,7 +97,7 @@ func (s *Server) resolvePrompt(msg ClientMessage) {
 		return
 	}
 	select {
-	case p.reply <- promptReply{text: msg.Text, approved: msg.Approved, action: msg.Action, content: msg.Content}:
+	case p.reply <- msg:
 	default:
 	}
 }

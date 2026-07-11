@@ -13,17 +13,29 @@ import (
 )
 
 func isRecoverableError(err error) bool {
-	var apiErr *openai.Error
-	if !errors.As(err, &apiErr) {
+	if isContextOverflowError(err) {
 		return true
 	}
 
-	switch apiErr.StatusCode {
-	case 401, 403:
+	var streamErr *streamFailure
+	if errors.As(err, &streamErr) && streamErr.outputStarted {
 		return false
-	default:
-		return true
 	}
+
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case 408, 409, 429:
+			return true
+		default:
+			return apiErr.StatusCode >= 500
+		}
+	}
+
+	// Non-API failures are retryable only when complete marked them as a
+	// pre-output stream transport failure. Parse errors and terminal error
+	// events are deterministic and should surface immediately.
+	return streamErr != nil
 }
 
 var contextOverflowMarkers = []string{
@@ -62,6 +74,12 @@ func isContextOverflowError(err error) bool {
 }
 
 func (a *Agent) removeOrphanedToolMessages() {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	a.removeOrphanedToolMessagesLocked()
+}
+
+func (a *Agent) removeOrphanedToolMessagesLocked() {
 
 	callIDs := make(map[string]bool)
 	outputIDs := make(map[string]bool)
@@ -125,6 +143,9 @@ func (a *Agent) removeOrphanedToolMessages() {
 // from GPT to Claude mid-session or reloading a session under a new model).
 // Summaries stay for display; only the opaque payload and its tag are removed.
 func (a *Agent) dropForeignReasoning(model string) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+
 	changed := false
 
 	for _, m := range a.Messages {
@@ -204,12 +225,13 @@ func dropDanglingReasoning(messages []Message) ([]Message, bool) {
 }
 
 func (a *Agent) compactMessages(ctx context.Context, truncateOnFailure bool) {
-	summaryMessages, recentMessages := splitMessagesForRecoverySummary(a.Messages)
+	messages := a.requestMessages()
+	summaryMessages, recentMessages := splitMessagesForRecoverySummary(messages)
 
 	if len(summaryMessages) == 0 && truncateOnFailure {
-		summaryMessages, recentMessages = a.Messages, nil
-		if idx := lastVisibleUserIndex(a.Messages); idx >= 0 {
-			recentMessages = []Message{a.Messages[idx]}
+		summaryMessages, recentMessages = messages, nil
+		if idx := lastVisibleUserIndex(messages); idx >= 0 {
+			recentMessages = []Message{messages[idx]}
 		}
 	}
 
@@ -221,12 +243,15 @@ func (a *Agent) compactMessages(ctx context.Context, truncateOnFailure bool) {
 		return
 	}
 
-	a.Messages = append([]Message{{
+	compacted := append([]Message{{
 		Role:    RoleUser,
 		Hidden:  true,
 		Content: []Content{{Text: summary}},
 	}}, recentMessages...)
+	a.stateMu.Lock()
+	a.Messages = compacted
 	a.Revision++
+	a.stateMu.Unlock()
 	a.removeOrphanedToolMessages()
 }
 
@@ -328,9 +353,15 @@ func (a *Agent) summarizeMessages(ctx context.Context, messages []Message) (stri
 		return "", err
 	}
 
-	var result strings.Builder
-	result.WriteString("[Previous conversation summary]\n\n")
+	summary := recoverySummaryOutput(resp)
+	if summary == "" {
+		return "", nil
+	}
+	return "[Previous conversation summary]\n\n" + summary, nil
+}
 
+func recoverySummaryOutput(resp *responses.Response) string {
+	var result strings.Builder
 	for _, item := range resp.Output {
 		msg := item.AsMessage()
 		for _, part := range msg.Content {
@@ -341,7 +372,7 @@ func (a *Agent) summarizeMessages(ctx context.Context, messages []Message) (stri
 		}
 	}
 
-	return result.String(), nil
+	return result.String()
 }
 
 func recoverySummaryTranscript(messages []Message) string {
@@ -394,9 +425,11 @@ func recoverySummaryTranscript(messages []Message) string {
 }
 
 func (a *Agent) truncateMessagesForRecovery() {
+	a.stateMu.Lock()
 	if len(a.Messages) > minRecoveryMessagesToPreserve {
-		a.Messages = a.Messages[len(a.Messages)-minRecoveryMessagesToPreserve:]
+		a.Messages = cloneMessages(a.Messages[len(a.Messages)-minRecoveryMessagesToPreserve:])
 		a.Revision++
 	}
+	a.stateMu.Unlock()
 	a.removeOrphanedToolMessages()
 }

@@ -1,9 +1,62 @@
 package agent
 
 import (
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
 )
+
+func TestIsRecoverableError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"pre-output stream failure", &streamFailure{err: errors.New("connection reset")}, true},
+		{"post-output stream failure", &streamFailure{err: errors.New("connection reset"), outputStarted: true}, false},
+		{"plain protocol failure", errors.New("invalid response item"), false},
+		{"bad request", &openai.Error{StatusCode: 400}, false},
+		{"request timeout", &openai.Error{StatusCode: 408}, true},
+		{"conflict", &openai.Error{StatusCode: 409}, true},
+		{"rate limit", &openai.Error{StatusCode: 429}, true},
+		{"server error", &openai.Error{StatusCode: 500}, true},
+		{"context overflow", &openai.Error{StatusCode: 400, Code: "context_length_exceeded"}, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRecoverableError(tc.err); got != tc.want {
+				t.Fatalf("isRecoverableError() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRecoverySummaryOutputRequiresActualText(t *testing.T) {
+	if got := recoverySummaryOutput(&responses.Response{}); got != "" {
+		t.Fatalf("empty response summary = %q", got)
+	}
+
+	var resp responses.Response
+	err := json.Unmarshal([]byte(`{
+		"output": [{
+			"type": "message",
+			"role": "assistant",
+			"status": "completed",
+			"content": [{"type": "output_text", "text": "briefing", "annotations": []}]
+		}]
+	}`), &resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := recoverySummaryOutput(&resp); got != "briefing" {
+		t.Fatalf("summary output = %q, want briefing", got)
+	}
+}
 
 func toolRoundMessages(n, resultBytes int) []Message {
 	var messages []Message

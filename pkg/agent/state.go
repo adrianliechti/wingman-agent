@@ -13,6 +13,74 @@ type State struct {
 	Revision uint64    `json:"-"`
 }
 
+func (a *Agent) appendMessages(messages ...Message) {
+	if len(messages) == 0 {
+		return
+	}
+	a.stateMu.Lock()
+	a.Messages = append(a.Messages, messages...)
+	a.stateMu.Unlock()
+}
+
+func (a *Agent) MessagesSnapshot() []Message {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return cloneMessages(a.Messages)
+}
+
+// requestMessages takes a cheap, shallow snapshot for synchronous request
+// encoding. The loop is the only state writer and does not mutate messages
+// while complete is consuming this slice.
+func (a *Agent) requestMessages() []Message {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return append([]Message(nil), a.Messages...)
+}
+
+func (a *Agent) UsageSnapshot() Usage {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return a.Usage
+}
+
+func (a *Agent) StateSnapshot() State {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return State{
+		Messages: cloneMessages(a.Messages),
+		Usage:    a.Usage,
+		Revision: a.Revision,
+	}
+}
+
+func cloneMessages(messages []Message) []Message {
+	out := make([]Message, len(messages))
+	for i, message := range messages {
+		out[i] = message
+		out[i].Content = make([]Content, len(message.Content))
+		for j, content := range message.Content {
+			out[i].Content[j] = content
+			if content.File != nil {
+				file := *content.File
+				out[i].Content[j].File = &file
+			}
+			if content.Reasoning != nil {
+				reasoning := *content.Reasoning
+				out[i].Content[j].Reasoning = &reasoning
+			}
+			if content.ToolCall != nil {
+				call := *content.ToolCall
+				out[i].Content[j].ToolCall = &call
+			}
+			if content.ToolResult != nil {
+				result := *content.ToolResult
+				out[i].Content[j].ToolResult = &result
+			}
+		}
+	}
+	return out
+}
+
 func (s *State) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)

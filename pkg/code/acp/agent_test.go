@@ -87,3 +87,49 @@ func TestModesPerSession(t *testing.T) {
 		t.Fatalf("unknown session = (%v, %q), want (nil, \"\")", modes, cur)
 	}
 }
+
+func TestTranslateUpdateSuppressesPromptUserEcho(t *testing.T) {
+	a := &Agent{}
+	sess := &sessionState{}
+	turn := &turn{ignoreUserUpdates: true}
+
+	if msg, ok := a.translateUpdate(sess, turn, acpsdk.UpdateUserMessageText("echo")); ok {
+		t.Fatalf("prompt user echo was emitted: %+v", msg)
+	}
+	if len(turn.emitted) != 0 {
+		t.Fatalf("prompt user echo was persisted: %+v", turn.emitted)
+	}
+
+	turn.ignoreUserUpdates = false
+	if _, ok := a.translateUpdate(sess, turn, acpsdk.UpdateUserMessageText("history")); !ok {
+		t.Fatal("load-session user message was suppressed")
+	}
+}
+
+func TestTranslateUpdateReleasesCompletedToolCall(t *testing.T) {
+	a := &Agent{}
+	sess := &sessionState{toolCalls: map[string]toolCall{}}
+	turn := &turn{}
+	id := acpsdk.ToolCallId("call-1")
+
+	if _, ok := a.translateUpdate(sess, turn, acpsdk.StartToolCall(id, "shell")); !ok {
+		t.Fatal("tool call start was not translated")
+	}
+	if len(sess.toolCalls) != 1 {
+		t.Fatalf("in-flight tool calls = %d, want 1", len(sess.toolCalls))
+	}
+
+	update := acpsdk.UpdateToolCall(
+		id,
+		acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusCompleted),
+		acpsdk.WithUpdateContent([]acpsdk.ToolCallContent{
+			acpsdk.ToolContent(acpsdk.TextBlock("done")),
+		}),
+	)
+	if _, ok := a.translateUpdate(sess, turn, update); !ok {
+		t.Fatal("tool call completion was not translated")
+	}
+	if len(sess.toolCalls) != 0 {
+		t.Fatalf("completed tool call was retained: %+v", sess.toolCalls)
+	}
+}

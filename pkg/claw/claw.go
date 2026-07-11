@@ -54,9 +54,10 @@ type managedAgent struct {
 }
 
 func (ma *managedAgent) updateSnapshot() {
+	state := ma.agent.StateSnapshot()
 	ma.snapMu.Lock()
-	ma.snapMessages = slices.Clone(ma.agent.Messages)
-	ma.snapUsage = ma.agent.Usage
+	ma.snapMessages = state.Messages
+	ma.snapUsage = state.Usage
 	ma.snapMu.Unlock()
 }
 
@@ -439,10 +440,7 @@ func (c *Claw) saveSession(name string, ma *managedAgent) {
 		return
 	}
 
-	state := agent.State{
-		Messages: ma.agent.Messages,
-		Usage:    ma.agent.Usage,
-	}
+	state := ma.agent.StateSnapshot()
 
 	if err := state.Save(c.sessionPath(name)); err != nil {
 		log.Printf("agent %s: failed to save session: %v", name, err)

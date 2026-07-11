@@ -18,6 +18,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/sergi/go-diff/diffmatchpatch"
 
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
@@ -36,7 +37,8 @@ type Agent struct {
 
 	caps acpsdk.AgentCapabilities
 
-	ui code.UI
+	uiMu sync.RWMutex
+	ui   code.UI
 
 	configMu   sync.RWMutex
 	models     []code.Model
@@ -78,8 +80,9 @@ type turn struct {
 	done   chan struct{}
 	cancel context.CancelFunc
 
-	mu      sync.Mutex
-	emitted []agent.Message
+	mu                sync.Mutex
+	emitted           []agent.Message
+	ignoreUserUpdates bool
 }
 
 type event struct {
@@ -431,6 +434,9 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 		defer func() {
 			close(t.done)
 			cancel()
+			sess.toolCallsMu.Lock()
+			clear(sess.toolCalls)
+			sess.toolCallsMu.Unlock()
 			sess.mu.Lock()
 			sess.inflight = nil
 			if ok {
@@ -546,9 +552,10 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter
 
 	sendCtx, cancel := context.WithCancel(ctx)
 	t := &turn{
-		events: make(chan event, 256),
-		done:   make(chan struct{}),
-		cancel: cancel,
+		events:            make(chan event, 256),
+		done:              make(chan struct{}),
+		cancel:            cancel,
+		ignoreUserUpdates: true,
 	}
 	sess.mu.Lock()
 	if sess.inflight != nil {
@@ -566,7 +573,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter
 	go func() {
 		resp, err := a.conn.Prompt(sendCtx, acpsdk.PromptRequest{
 			SessionId: sess.id,
-			Prompt:    contentToBlocks(input),
+			Prompt:    acp.ContentToBlocks(input),
 		})
 
 		if err == nil && resp.Usage != nil {
@@ -587,26 +594,37 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter
 	}()
 
 	return func(yield func(agent.Message, error) bool) {
+		completed := false
 		defer func() {
 			cancel()
 			close(t.done)
+			if !completed {
+				a.cancelPrompt(sess.id)
+			}
+			sess.toolCallsMu.Lock()
+			clear(sess.toolCalls)
+			sess.toolCallsMu.Unlock()
+
+			t.mu.Lock()
+			emitted := append([]agent.Message(nil), t.emitted...)
+			t.mu.Unlock()
+
 			sess.mu.Lock()
 			sess.inflight = nil
-			if len(t.emitted) > 0 {
-				sess.messages = append(sess.messages, t.emitted...)
+			if len(emitted) > 0 {
+				sess.messages = append(sess.messages, emitted...)
 			}
 			sess.mu.Unlock()
 		}()
 		for {
 			select {
 			case <-ctx.Done():
-				_ = a.conn.Cancel(context.Background(), acpsdk.CancelNotification{
-					SessionId: sess.id,
-				})
 				yield(agent.Message{}, ctx.Err())
 				return
 			case ev := <-t.events:
 				if ev.done {
+					completed = ev.err == nil ||
+						(!errors.Is(ev.err, context.Canceled) && !errors.Is(ev.err, context.DeadlineExceeded))
 					if ev.err != nil {
 						yield(agent.Message{}, ev.err)
 					}
@@ -618,6 +636,12 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter
 			}
 		}
 	}
+}
+
+func (a *Agent) cancelPrompt(id acpsdk.SessionId) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = a.conn.Cancel(ctx, acpsdk.CancelNotification{SessionId: id})
 }
 
 func (a *Agent) Cancel(id string) {
@@ -747,6 +771,9 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 
 	switch {
 	case u.UserMessageChunk != nil:
+		if t.ignoreUserUpdates {
+			return agent.Message{}, false
+		}
 		text := blockText(u.UserMessageChunk.Content)
 		if text == "" {
 			return agent.Message{}, false
@@ -799,6 +826,7 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		}
 		sess.toolCallsMu.Lock()
 		prior := sess.toolCalls[string(tu.ToolCallId)]
+		delete(sess.toolCalls, string(tu.ToolCallId))
 		sess.toolCallsMu.Unlock()
 		body := toolCallContentText(tu.Content)
 		if body == "" && tu.RawOutput != nil {
@@ -822,7 +850,17 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 	return agent.Message{}, false
 }
 
-func (a *Agent) SetUI(ui code.UI) { a.ui = ui }
+func (a *Agent) SetUI(ui code.UI) {
+	a.uiMu.Lock()
+	a.ui = ui
+	a.uiMu.Unlock()
+}
+
+func (a *Agent) currentUI() code.UI {
+	a.uiMu.RLock()
+	defer a.uiMu.RUnlock()
+	return a.ui
+}
 
 func (a *Agent) RequestPermission(ctx context.Context, p acpsdk.RequestPermissionRequest) (acpsdk.RequestPermissionResponse, error) {
 	cancelled := acpsdk.RequestPermissionResponse{
@@ -839,11 +877,12 @@ func (a *Agent) RequestPermission(ctx context.Context, p acpsdk.RequestPermissio
 		}
 	}
 
-	if a.ui == nil {
+	ui := a.currentUI()
+	if ui == nil {
 		return selected(p.Options[0].OptionId), nil
 	}
 
-	ok, err := a.ui.Confirm(code.WithSessionID(ctx, string(p.SessionId)), permissionMessage(p))
+	ok, err := ui.Confirm(code.WithSessionID(ctx, string(p.SessionId)), permissionMessage(p))
 	if err != nil {
 		return cancelled, nil
 	}
@@ -1008,21 +1047,6 @@ func (a *Agent) refreshConfig(sess *sessionState, options []acpsdk.SessionConfig
 	}
 }
 
-func contentToBlocks(input []agent.Content) []acpsdk.ContentBlock {
-	out := make([]acpsdk.ContentBlock, 0, len(input))
-	for _, c := range input {
-		switch {
-		case c.Text != "":
-			out = append(out, acpsdk.TextBlock(c.Text))
-		case c.File != nil && c.File.Data != "":
-			if mime, data, ok := splitDataURL(c.File.Data); ok {
-				out = append(out, acpsdk.ImageBlock(data, mime))
-			}
-		}
-	}
-	return out
-}
-
 func blockText(b acpsdk.ContentBlock) string {
 	if b.Text != nil {
 		return b.Text.Text
@@ -1091,13 +1115,4 @@ func rawValueToString(v any) string {
 		return string(data)
 	}
 	return fmt.Sprintf("%v", v)
-}
-
-func splitDataURL(s string) (mime, data string, ok bool) {
-	rest, found := strings.CutPrefix(s, "data:")
-	if !found {
-		return "", "", false
-	}
-	mime, data, ok = strings.Cut(rest, ";base64,")
-	return mime, data, ok
 }
