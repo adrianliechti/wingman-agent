@@ -7,6 +7,7 @@ vars:
   AGENT_TIMEOUT_MULTIPLIER: '{{default "1" .AGENT_TIMEOUT_MULTIPLIER}}'
   INCLUDE: '{{default "" .INCLUDE}}'
   LIMIT: '{{default "" .LIMIT}}'
+  EFFORT: '{{default "" .EFFORT}}'
 
 tasks:
   setup:
@@ -59,6 +60,10 @@ tasks:
           )
 
           args+=(--ae "WINGMAN_ELICITATION=accept")
+
+          if [[ -n "{{.EFFORT}}" ]]; then
+            args+=(--ae "WINGMAN_EFFORT={{.EFFORT}}")
+          fi
 
           if [[ -n "{{.INCLUDE}}" ]]; then
             args+=(--include-task-name "{{.INCLUDE}}")
