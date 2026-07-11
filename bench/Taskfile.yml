@@ -4,6 +4,7 @@ vars:
   MODEL: '{{default "openai/gpt-5.4" .MODEL}}'
   WINGMAN_MODEL: '{{default "gpt-5.4" .WINGMAN_MODEL}}'
   CONCURRENCY: '{{default "1" .CONCURRENCY}}'
+  AGENT_TIMEOUT_MULTIPLIER: '{{default "1" .AGENT_TIMEOUT_MULTIPLIER}}'
   INCLUDE: '{{default "" .INCLUDE}}'
   LIMIT: '{{default "" .LIMIT}}'
 
@@ -52,6 +53,7 @@ tasks:
             --agent bench.tbench.agent:WingmanAgent
             --model "{{.MODEL}}"
             --n-concurrent "{{.CONCURRENCY}}"
+            --agent-timeout-multiplier "{{.AGENT_TIMEOUT_MULTIPLIER}}"
             --jobs-dir bench/jobs
             --yes
           )

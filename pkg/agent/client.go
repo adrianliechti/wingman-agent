@@ -18,10 +18,10 @@ import (
 // models can be quiet for minutes between items, so it is generous.
 const streamIdleTimeout = 5 * time.Minute
 
-// streamFailure records whether a streamed request produced model output
-// before its transport failed. Replaying after output begins would duplicate
-// visible deltas and can duplicate completed tool-call items, so only a
-// pre-output failure is safe for the agent-level retry loop to resend.
+// streamFailure records whether a streamed request produced visible output
+// before its transport failed. The response is not committed and tool calls
+// are not executed until a terminal event arrives, so retrying remains safe;
+// outputStarted only explains why a client may have seen repeated deltas.
 type streamFailure struct {
 	err           error
 	outputStarted bool

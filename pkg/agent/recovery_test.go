@@ -17,11 +17,11 @@ func TestIsRecoverableError(t *testing.T) {
 		want bool
 	}{
 		{"pre-output stream failure", &streamFailure{err: errors.New("connection reset")}, true},
-		{"post-output stream failure", &streamFailure{err: errors.New("connection reset"), outputStarted: true}, false},
+		{"post-output stream failure", &streamFailure{err: errors.New("connection reset"), outputStarted: true}, true},
 		{"in-band server error", &responseFailure{code: "server_error"}, true},
 		{"in-band rate limit", &responseFailure{code: "rate_limit_exceeded"}, true},
 		{"in-band vector timeout", &responseFailure{code: "vector_store_timeout"}, true},
-		{"in-band error after output", &responseFailure{code: "server_error", outputStarted: true}, false},
+		{"in-band error after output", &responseFailure{code: "server_error", outputStarted: true}, true},
 		{"in-band invalid prompt", &responseFailure{code: "invalid_prompt"}, false},
 		{"plain protocol failure", errors.New("invalid response item"), false},
 		{"bad request", &openai.Error{StatusCode: 400}, false},

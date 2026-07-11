@@ -44,6 +44,10 @@ with configurable concurrency using:
 task -t bench/Taskfile.yml tbench CONCURRENCY=4
 ```
 
+For a bounded exploratory run, reduce only the agent execution budget (for
+example, `AGENT_TIMEOUT_MULTIPLIER=0.25`). Keep the default `1` for comparable
+benchmark results.
+
 Harbor captures ACP events and creates an ATIF `trajectory.json` alongside the
 normal task reward and verifier logs. `auth_policy` is disabled because Wingman
 uses environment credentials; `permission_mode` is set to `allow` because each

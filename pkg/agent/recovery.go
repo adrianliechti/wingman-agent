@@ -18,15 +18,10 @@ func isRecoverableError(err error) bool {
 	}
 
 	var streamErr *streamFailure
-	if errors.As(err, &streamErr) && streamErr.outputStarted {
-		return false
-	}
+	errors.As(err, &streamErr)
 
 	var responseErr *responseFailure
 	if errors.As(err, &responseErr) {
-		if responseErr.outputStarted {
-			return false
-		}
 		switch responseErr.code {
 		case string(responses.ResponseErrorCodeServerError),
 			string(responses.ResponseErrorCodeRateLimitExceeded),
@@ -48,7 +43,8 @@ func isRecoverableError(err error) bool {
 	}
 
 	// Other non-API failures are retryable only when complete marked them as a
-	// pre-output stream transport failure. Parse and protocol errors surface.
+	// stream transport failure. Partial responses are not committed and their
+	// tool calls are not executed, so a replay cannot duplicate side effects.
 	return streamErr != nil
 }
 
