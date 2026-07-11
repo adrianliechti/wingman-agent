@@ -30,6 +30,25 @@ type streamFailure struct {
 func (e *streamFailure) Error() string { return e.err.Error() }
 func (e *streamFailure) Unwrap() error { return e.err }
 
+// responseFailure preserves the machine-readable code from a terminal
+// Responses API error event. Some providers report transient failures in-band
+// instead of as an HTTP error, so recovery needs more than the display string.
+type responseFailure struct {
+	code          string
+	message       string
+	outputStarted bool
+}
+
+func (e *responseFailure) Error() string {
+	if e.message != "" {
+		return fmt.Sprintf("response failed (%s): %s", e.code, e.message)
+	}
+	if e.code != "" {
+		return fmt.Sprintf("response failed (%s)", e.code)
+	}
+	return "response failed"
+}
+
 type request struct {
 	model        string
 	effort       string
@@ -99,8 +118,11 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 	for stream.Next() {
 		idle.Reset(streamIdleTimeout)
 		event := stream.Current()
+		// Error events are terminal metadata, not user-visible output. Preserve
+		// the replay-safety state from before the event so a transient failure
+		// can be retried when no output item or delta preceded it.
 		switch event.Type {
-		case "response.created", "response.in_progress", "response.queued":
+		case "response.created", "response.in_progress", "response.queued", "response.failed", "error":
 		default:
 			outputStarted = true
 		}
@@ -180,13 +202,18 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 			}
 
 		case responses.ResponseFailedEvent:
-			if msg := e.Response.Error.Message; msg != "" {
-				return nil, fmt.Errorf("response failed: %s", msg)
+			return nil, &responseFailure{
+				code:          string(e.Response.Error.Code),
+				message:       e.Response.Error.Message,
+				outputStarted: outputStarted,
 			}
-			return nil, fmt.Errorf("response failed")
 
 		case responses.ResponseErrorEvent:
-			return nil, fmt.Errorf("response error: %s", e.Message)
+			return nil, &responseFailure{
+				code:          e.Code,
+				message:       e.Message,
+				outputStarted: outputStarted,
+			}
 		}
 
 		// completed and incomplete carry the authoritative final response.

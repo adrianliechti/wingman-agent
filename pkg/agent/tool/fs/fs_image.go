@@ -30,7 +30,7 @@ func ImageTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 		Description: strings.Join([]string{
 			"View an image file: it is attached to the conversation so you can actually see it.",
 			"- Use for screenshots, UI mockups, diagrams, and other visual assets — e.g. take a screenshot via shell, then view it to verify a UI change.",
-			fmt.Sprintf("- Supported: PNG, JPEG, GIF, WebP. Max %dMB.", maxImageBytes/(1024*1024)),
+			fmt.Sprintf("- Supported: PNG, JPEG, GIF, WebP. Max %dMB and %dpx per dimension.", maxImageBytes/(1024*1024), tool.MaxImageDimension),
 		}, "\n"),
 
 		Parameters: map[string]any{
@@ -73,6 +73,13 @@ func ImageTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			mime := http.DetectContentType(content)
 			if !imageMimeTypes[mime] {
 				return "", fmt.Errorf("cannot view image: %q is not a supported image format (detected %s)", pathArg, mime)
+			}
+			width, height, err := tool.ImageDimensions(content, mime)
+			if err != nil {
+				return "", fmt.Errorf("cannot view image %q: %w", pathArg, err)
+			}
+			if width > tool.MaxImageDimension || height > tool.MaxImageDimension {
+				return "", fmt.Errorf("cannot view image: %q is %dx%d (max %dpx per dimension); resize or crop it first", pathArg, width, height, tool.MaxImageDimension)
 			}
 
 			return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(content), nil

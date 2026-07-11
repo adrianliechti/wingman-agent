@@ -18,15 +18,24 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
 type recordingClient struct {
 	mu            sync.Mutex
 	toolStarts    int
 	toolCompletes int
+	startIDs      []acpsdk.ToolCallId
+	completeIDs   []acpsdk.ToolCallId
+	permissionIDs []acpsdk.ToolCallId
+	updates       chan struct{}
 }
 
 func (c *recordingClient) RequestPermission(_ context.Context, p acpsdk.RequestPermissionRequest) (acpsdk.RequestPermissionResponse, error) {
+	c.mu.Lock()
+	c.permissionIDs = append(c.permissionIDs, p.ToolCall.ToolCallId)
+	c.mu.Unlock()
 	if len(p.Options) == 0 {
 		return acpsdk.RequestPermissionResponse{Outcome: acpsdk.RequestPermissionOutcome{
 			Cancelled: &acpsdk.RequestPermissionOutcomeCancelled{},
@@ -39,14 +48,80 @@ func (c *recordingClient) RequestPermission(_ context.Context, p acpsdk.RequestP
 
 func (c *recordingClient) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if n.Update.ToolCall != nil {
 		c.toolStarts++
+		c.startIDs = append(c.startIDs, n.Update.ToolCall.ToolCallId)
 	}
 	if u := n.Update.ToolCallUpdate; u != nil && u.Status != nil && *u.Status == acpsdk.ToolCallStatusCompleted {
 		c.toolCompletes++
+		c.completeIDs = append(c.completeIDs, u.ToolCallId)
+	}
+	c.mu.Unlock()
+	if c.updates != nil {
+		c.updates <- struct{}{}
 	}
 	return nil
+}
+
+func TestACPConfirmAnnouncesPermissionLifecycle(t *testing.T) {
+	agentSide, clientSide := net.Pipe()
+	defer agentSide.Close()
+	defer clientSide.Close()
+
+	s := &Server{}
+	s.conn = acpsdk.NewAgentSideConnection(s, agentSide, agentSide)
+	client := &recordingClient{updates: make(chan struct{}, 2)}
+	_ = acpsdk.NewClientSideConnection(client, clientSide, clientSide)
+
+	ctx, cancel := context.WithTimeout(code.WithSessionID(context.Background(), "session-1"), 2*time.Second)
+	defer cancel()
+	allowed, err := s.Confirm(ctx, "Run command?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("permission was not allowed")
+	}
+	for range 2 {
+		select {
+		case <-client.updates:
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for permission lifecycle updates")
+		}
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.startIDs) != 1 || len(client.permissionIDs) != 1 || len(client.completeIDs) != 1 {
+		t.Fatalf("permission lifecycle = starts:%v requests:%v completes:%v", client.startIDs, client.permissionIDs, client.completeIDs)
+	}
+	if client.startIDs[0] != client.permissionIDs[0] || client.startIDs[0] != client.completeIDs[0] {
+		t.Fatalf("permission lifecycle IDs differ: starts:%v requests:%v completes:%v", client.startIDs, client.permissionIDs, client.completeIDs)
+	}
+}
+
+func TestACPAdvertisedElicitationFailureCancelsInsteadOfAcceptingDefaults(t *testing.T) {
+	agentSide, clientSide := net.Pipe()
+	defer agentSide.Close()
+	defer clientSide.Close()
+
+	s := &Server{}
+	s.conn = acpsdk.NewAgentSideConnection(s, agentSide, agentSide)
+	s.formElicitation.Store(true)
+	_ = acpsdk.NewClientSideConnection(&recordingClient{}, clientSide, clientSide)
+
+	ctx, cancel := context.WithTimeout(code.WithSessionID(context.Background(), "session-1"), 2*time.Second)
+	defer cancel()
+	result, err := s.Elicit(ctx, tool.ElicitRequest{Fields: []tool.ElicitField{{
+		Name:    "answer",
+		Default: "fabricated",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != tool.ElicitCancel {
+		t.Fatalf("elicitation action = %q, want cancel", result.Action)
+	}
 }
 
 func (*recordingClient) ReadTextFile(context.Context, acpsdk.ReadTextFileRequest) (acpsdk.ReadTextFileResponse, error) {

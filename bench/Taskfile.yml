@@ -1,0 +1,96 @@
+version: "3"
+
+vars:
+  MODEL: '{{default "openai/gpt-5.4" .MODEL}}'
+  WINGMAN_MODEL: '{{default "gpt-5.4" .WINGMAN_MODEL}}'
+  CONCURRENCY: '{{default "1" .CONCURRENCY}}'
+  INCLUDE: '{{default "" .INCLUDE}}'
+  LIMIT: '{{default "" .LIMIT}}'
+
+tasks:
+  setup:
+    desc: Create the benchmark virtual environment and install pinned Harbor
+    dir: '{{.TASKFILE_DIR}}'
+    sources:
+      - pyproject.toml
+      - uv.lock
+    generates:
+      - .venv/bin/harbor
+    env:
+      UV_CACHE_DIR: '{{.TASKFILE_DIR}}/.uv-cache'
+      UV_PYTHON_INSTALL_DIR: '{{.TASKFILE_DIR}}/.uv-python'
+    cmds:
+      - uv sync --locked --python 3.12
+
+  check:
+    desc: Verify Harbor, Docker, credentials, and the Wingman agent descriptor
+    deps: [setup]
+    dir: '{{.TASKFILE_DIR}}/..'
+    cmds:
+      - bench/.venv/bin/harbor --version
+      - docker info --format 'Docker {{`{{.ServerVersion}}`}}'
+      - python3 -m json.tool bench/tbench/agent.json >/dev/null
+      - |
+        if [ -z "${WINGMAN_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+          echo "Set WINGMAN_URL/WINGMAN_TOKEN or OPENAI_API_KEY before running a benchmark" >&2
+          exit 1
+        fi
+
+  tbench:
+    desc: Run Terminal-Bench 2 with configurable concurrency
+    deps: [check]
+    dir: '{{.TASKFILE_DIR}}/..'
+    env:
+      PYTHONPATH: '{{.TASKFILE_DIR}}/..'
+    cmds:
+      - |
+        bash -euo pipefail -c '
+          args=(
+            bench/.venv/bin/harbor run
+            --dataset terminal-bench/terminal-bench-2
+            --extra-instruction-path bench/tbench/instructions.md
+            --agent bench.tbench.agent:WingmanAgent
+            --model "{{.MODEL}}"
+            --n-concurrent "{{.CONCURRENCY}}"
+            --jobs-dir bench/jobs
+            --yes
+          )
+
+          args+=(--ae "WINGMAN_ELICITATION=accept")
+
+          if [[ -n "{{.INCLUDE}}" ]]; then
+            args+=(--include-task-name "{{.INCLUDE}}")
+          fi
+          if [[ -n "{{.LIMIT}}" ]]; then
+            args+=(--n-tasks "{{.LIMIT}}")
+          fi
+
+          if [[ -n "${WINGMAN_URL:-}" ]]; then
+            args+=(--ae "WINGMAN_URL=${WINGMAN_URL}")
+            args+=(--ae "WINGMAN_TOKEN=${WINGMAN_TOKEN:-}")
+            args+=(--ae "WINGMAN_MODEL={{.WINGMAN_MODEL}}")
+          else
+            args+=(--ae "OPENAI_API_KEY=${OPENAI_API_KEY}")
+            if [[ -n "${OPENAI_BASE_URL:-}" ]]; then
+              args+=(--ae "OPENAI_BASE_URL=${OPENAI_BASE_URL}")
+            fi
+            args+=(--ae "OPENAI_DEFAULT_MODEL={{.WINGMAN_MODEL}}")
+          fi
+
+          exec "${args[@]}"
+        '
+
+  quick:
+    desc: Run one representative task from the official Terminal-Bench 2 dataset
+    cmds:
+      - task: tbench
+        vars:
+          CONCURRENCY: "1"
+          INCLUDE: terminal-bench/openssl-selfsigned-cert
+          LIMIT: "1"
+
+  clean:
+    desc: Remove the local benchmark environment and Harbor job outputs
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - rm -rf .venv .uv-cache .uv-python jobs

@@ -81,6 +81,57 @@ func TestSendLimitsRunawayToolCallRounds(t *testing.T) {
 	}
 }
 
+func TestSendAllowsFinalResponseAtMaxTurns(t *testing.T) {
+	var requests atomic.Int64
+	client := streamingTestClient(func(*http.Request) string {
+		requests.Add(1)
+		return "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":1}}}\n\n"
+	})
+
+	a := &Agent{Config: &Config{client: &client, MaxTurns: 1}}
+	var runErr error
+	for _, err := range a.Send(context.Background(), []Content{{Text: "start"}}) {
+		if err != nil {
+			runErr = err
+		}
+	}
+
+	if runErr != nil {
+		t.Fatalf("run error = %v, want nil", runErr)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("model requests = %d, want 1", got)
+	}
+}
+
+func TestCompleteClassifiesTransientTerminalFailureBeforeOutput(t *testing.T) {
+	client := streamingTestClient(func(*http.Request) string {
+		return "data: {\"type\":\"response.failed\",\"sequence_number\":1,\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"try again\"}}}\n\n"
+	})
+
+	_, err := complete(context.Background(), &client, &request{}, yieldAll)
+	if err == nil {
+		t.Fatal("complete error = nil, want response failure")
+	}
+	if !isRecoverableError(err) {
+		t.Fatalf("error = %v, want recoverable", err)
+	}
+}
+
+func TestCompleteDoesNotRetryTerminalFailureAfterOutput(t *testing.T) {
+	client := streamingTestClient(func(*http.Request) string {
+		return "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.failed\",\"sequence_number\":2,\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"try again\"}}}\n\n"
+	})
+
+	_, err := complete(context.Background(), &client, &request{}, yieldAll)
+	if err == nil {
+		t.Fatal("complete error = nil, want response failure")
+	}
+	if isRecoverableError(err) {
+		t.Fatalf("error = %v, want non-recoverable after output", err)
+	}
+}
+
 func TestEndRunPreservesQueuedUserInput(t *testing.T) {
 	a := &Agent{
 		Config:       &Config{},

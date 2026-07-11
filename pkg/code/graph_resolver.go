@@ -10,9 +10,11 @@ type lspResolver struct {
 }
 
 func (r *lspResolver) ResolveCall(ctx context.Context, file string, line, column int) (string, int, bool) {
+	r.ws.lspLifeMu.RLock()
+	defer r.ws.lspLifeMu.RUnlock()
 	r.ws.mu.RLock()
-	defer r.ws.mu.RUnlock()
 	mgr := r.ws.LSP
+	r.ws.mu.RUnlock()
 	if mgr == nil {
 		return "", 0, false
 	}

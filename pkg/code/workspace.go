@@ -67,9 +67,18 @@ type Workspace struct {
 	warmupOnce sync.Once
 
 	mu         sync.RWMutex
+	closed     bool
 	mcpTools   []tool.Tool
 	lspTools   []tool.Tool
 	graphTools []tool.Tool
+
+	// LSP calls may include server startup and network round-trips. Keep their
+	// lifetime lock separate from workspace state so a pending manager swap or
+	// close does not block unrelated workspace readers. Replaced managers stay
+	// alive for tools captured before a project-mode change and close with the
+	// workspace.
+	lspLifeMu  sync.RWMutex
+	retiredLSP []*lsp.Manager
 
 	memoryMu          sync.Mutex
 	memoryCache       string
@@ -134,13 +143,26 @@ func (w *Workspace) WarmUp() {
 		graphEngine := graph.New(w.RootPath, filepath.Join(projectGraphDir(w.RootPath), "graph.json"), graph.WithResolver(&lspResolver{ws: w}))
 		graphTools := graphtool.NewTools(graphEngine)
 
+		lspTools = w.protectLSPTools(lspTools)
+
+		w.lspLifeMu.Lock()
 		w.mu.Lock()
+		if w.closed {
+			w.mu.Unlock()
+			w.lspLifeMu.Unlock()
+			if lspManager != nil {
+				lspManager.Close()
+			}
+			rewindManager.Cleanup()
+			return
+		}
 		w.Rewind = rewindManager
 		w.LSP = lspManager
 		w.lspTools = lspTools
 		w.Graph = graphEngine
 		w.graphTools = graphTools
 		w.mu.Unlock()
+		w.lspLifeMu.Unlock()
 	})
 }
 
@@ -166,13 +188,23 @@ func (w *Workspace) InitMCP(ctx context.Context) error {
 }
 
 func (w *Workspace) Close() {
-	if w.MCP != nil {
-		w.MCP.Close()
-	}
+	w.lspLifeMu.Lock()
 	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		w.lspLifeMu.Unlock()
+		return
+	}
+	w.closed = true
+	mcpManager := w.MCP
 	lspManager := w.LSP
+	retiredLSP := w.retiredLSP
 	rewindManager := w.Rewind
+	root := w.Root
+	scratchPath := w.ScratchPath
+	w.MCP = nil
 	w.LSP = nil
+	w.retiredLSP = nil
 	w.Rewind = nil
 	w.Graph = nil
 	w.mcpTools = nil
@@ -182,47 +214,87 @@ func (w *Workspace) Close() {
 	if lspManager != nil {
 		lspManager.Close()
 	}
+	for _, manager := range retiredLSP {
+		manager.Close()
+	}
+	w.lspLifeMu.Unlock()
+
+	if mcpManager != nil {
+		mcpManager.Close()
+	}
 	if rewindManager != nil {
 		rewindManager.Cleanup()
 	}
-	if w.ScratchPath != "" {
-		os.RemoveAll(w.ScratchPath)
+	if scratchPath != "" {
+		os.RemoveAll(scratchPath)
 	}
-	if w.Root != nil {
-		w.Root.Close()
+	if root != nil {
+		root.Close()
 	}
 }
 
 func (w *Workspace) IsGitRepo() bool { return isGitRepo(w.RootPath) }
 
 func (w *Workspace) SyncProjectMode() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.Rewind == nil {
+	w.mu.RLock()
+	available := !w.closed && w.Rewind != nil
+	w.mu.RUnlock()
+	if !available {
 		return
 	}
 
-	oldLSP := w.LSP
+	var nextLSP *lsp.Manager
+	var nextTools []tool.Tool
 	if isGitRepo(w.RootPath) {
-		w.LSP = lsp.NewManager(w.RootPath)
-		w.lspTools = lsptool.NewTools(w.LSP)
-	} else {
-		w.LSP = nil
-		w.lspTools = nil
+		nextLSP = lsp.NewManager(w.RootPath)
+		nextTools = w.protectLSPTools(lsptool.NewTools(nextLSP))
 	}
 
-	if oldLSP != nil {
-		oldLSP.Close()
+	w.lspLifeMu.Lock()
+	w.mu.Lock()
+	if w.closed || w.Rewind == nil {
+		w.mu.Unlock()
+		w.lspLifeMu.Unlock()
+		if nextLSP != nil {
+			nextLSP.Close()
+		}
+		return
 	}
+	if w.LSP != nil {
+		w.retiredLSP = append(w.retiredLSP, w.LSP)
+	}
+	w.LSP = nextLSP
+	w.lspTools = nextTools
+	w.mu.Unlock()
+	w.lspLifeMu.Unlock()
 }
 
 func (w *Workspace) Diagnostics(ctx context.Context) map[string][]lsp.Diagnostic {
+	w.lspLifeMu.RLock()
+	defer w.lspLifeMu.RUnlock()
 	w.mu.RLock()
-	defer w.mu.RUnlock()
-	if w.LSP == nil {
+	manager := w.LSP
+	w.mu.RUnlock()
+	if manager == nil {
 		return nil
 	}
-	return w.LSP.CollectAllDiagnostics(ctx)
+	return manager.CollectAllDiagnostics(ctx)
+}
+
+func (w *Workspace) protectLSPTools(tools []tool.Tool) []tool.Tool {
+	protected := append([]tool.Tool(nil), tools...)
+	for i := range protected {
+		execute := protected[i].Execute
+		if execute == nil {
+			continue
+		}
+		protected[i].Execute = func(ctx context.Context, args map[string]any) (string, error) {
+			w.lspLifeMu.RLock()
+			defer w.lspLifeMu.RUnlock()
+			return execute(ctx, args)
+		}
+	}
+	return protected
 }
 
 func (w *Workspace) Commit(msg string) error {

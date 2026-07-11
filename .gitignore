@@ -1,5 +1,6 @@
 dist/
 node_modules/
+__pycache__/
 
 .vscode/
 .idea/
@@ -8,3 +9,9 @@ node_modules/
 .env
 .env.*
 mcp.json
+
+bench/.venv/
+bench/.uv-cache/
+bench/.uv-python/
+bench/.task/
+bench/jobs/

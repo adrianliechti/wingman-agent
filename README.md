@@ -352,4 +352,4 @@ Wingman can run Terminal-Bench tasks through Harbor's generic ACP agent runner.
 The integration installs the released Wingman binary inside each task container,
 preserving the task's own Docker environment and verifier. See the
 [Terminal-Bench compatibility guide](bench/tbench/README.md) for the pinned
-agent descriptor and smoke-test commands.
+agent descriptor and benchmark commands.

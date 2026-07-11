@@ -1,0 +1,11 @@
+[project]
+name = "wingman-bench"
+version = "0.1.0"
+description = "Reproducible benchmark environment for Wingman"
+requires-python = ">=3.12"
+dependencies = [
+  "harbor==0.18.0",
+]
+
+[tool.uv]
+package = false

@@ -1,7 +1,7 @@
 {
   "id": "wingman",
   "name": "Wingman",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "description": "AI coding and terminal agent with an ACP stdio interface",
   "repository": "https://github.com/adrianliechti/wingman-agent",
   "website": "https://github.com/adrianliechti/wingman-agent",
@@ -10,14 +10,16 @@
   "distribution": {
     "binary": {
       "linux-x86_64": {
-        "archive": "https://github.com/adrianliechti/wingman-agent/releases/download/v0.10.2/wingman-agent_0.10.2_linux_amd64.tar.gz",
+        "archive": "https://github.com/adrianliechti/wingman-agent/releases/download/v0.10.3/wingman-agent_0.10.3_linux_amd64.tar.gz",
         "cmd": "./wingman",
-        "args": ["acp"]
+        "args": ["acp"],
+        "checksum": "ad3f38a8f3a6d11970ce1cc9ae157cc8bbdec563f6106f7048f385f9bb8922b3"
       },
       "linux-aarch64": {
-        "archive": "https://github.com/adrianliechti/wingman-agent/releases/download/v0.10.2/wingman-agent_0.10.2_linux_arm64.tar.gz",
+        "archive": "https://github.com/adrianliechti/wingman-agent/releases/download/v0.10.3/wingman-agent_0.10.3_linux_arm64.tar.gz",
         "cmd": "./wingman",
-        "args": ["acp"]
+        "args": ["acp"],
+        "checksum": "9b1544e8b84b296560bdf126c48b29af801bd75e0e0b9e5d25544d2463ee9dac"
       }
     }
   }

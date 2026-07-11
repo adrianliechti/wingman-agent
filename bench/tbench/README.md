@@ -12,55 +12,52 @@ Terminal-Bench tasks provide their own images, files, tools, and services.
 ## Prerequisites
 
 - Docker is installed and running.
-- Harbor is installed (`uv tool install harbor`).
+- `uv` and Task are installed. The benchmark Taskfile creates an isolated
+  Python 3.12 environment and installs the pinned Harbor version.
 - The selected model is reachable through Wingman's OpenResponses-compatible
   endpoint configuration.
 
 The descriptor is pinned to a released binary for reproducibility. Update its
 `version` and archive URLs together when benchmarking a newer Wingman release.
 
-## Smoke test
+## Quick benchmark
 
-Run from the repository root so Harbor can import `bench.tbench.agent`:
+Run from the repository root. The default target uses the available Wingman
+server credentials, falling back to `OPENAI_API_KEY` when `WINGMAN_URL` is not
+set:
 
 ```bash
-export OPENAI_API_KEY="..."
-
-harbor run \
-  --path /path/to/a/harbor-task \
-  --agent bench.tbench.agent:WingmanAgent \
-  --model openai/gpt-5.4 \
-  --ae OPENAI_API_KEY="$OPENAI_API_KEY" \
-  --ae OPENAI_DEFAULT_MODEL="gpt-5.4"
+task -t bench/Taskfile.yml quick
 ```
 
-For a Wingman server or another OpenResponses-compatible gateway, pass the
-corresponding variables instead:
+Override the model when needed:
 
 ```bash
-harbor run \
-  --path /path/to/a/harbor-task \
-  --agent bench.tbench.agent:WingmanAgent \
-  --model openai/gpt-5.4 \
-  --ae WINGMAN_URL="$WINGMAN_URL" \
-  --ae WINGMAN_TOKEN="$WINGMAN_TOKEN" \
-  --ae WINGMAN_MODEL="gpt-5.4"
+task -t bench/Taskfile.yml quick MODEL=openai/gpt-5.4 WINGMAN_MODEL=gpt-5.4
 ```
 
-After a single task succeeds, run the official dataset with the same agent and
-environment arguments:
+The quick target runs only Terminal-Bench's
+`terminal-bench/openssl-selfsigned-cert` task. Run the full official dataset
+with configurable concurrency using:
 
 ```bash
-harbor run \
-  --dataset terminal-bench/terminal-bench-2 \
-  --agent bench.tbench.agent:WingmanAgent \
-  --model openai/gpt-5.4 \
-  --ae OPENAI_API_KEY="$OPENAI_API_KEY" \
-  --ae OPENAI_DEFAULT_MODEL="gpt-5.4" \
-  --n-concurrent 4
+task -t bench/Taskfile.yml tbench CONCURRENCY=4
 ```
 
 Harbor captures ACP events and creates an ATIF `trajectory.json` alongside the
 normal task reward and verifier logs. `auth_policy` is disabled because Wingman
 uses environment credentials; `permission_mode` is set to `allow` because each
 run is already isolated in a disposable benchmark container.
+
+`instructions.md` adds brief generic unattended-run guidance: it authorizes use
+of network access already exposed by the task and asks the agent to keep
+self-tests within the container's resource limits. It contains no task-specific
+hints and is appended to every benchmark task.
+The Taskfile also sets `WINGMAN_ELICITATION=accept`. Compatible Wingman releases
+automatically answer boolean yes/no fields affirmatively and use explicit
+defaults; required free-text questions are cancelled rather than fabricated.
+
+The adapter pins the container-side `agent-client-protocol` package to 0.10.1.
+Harbor 0.18's ACP runner still uses that SDK's `set_session_model` API, which was
+removed in ACP Python SDK 0.11. The pin can be removed once Harbor migrates its
+runner to `session/set_config_option`.

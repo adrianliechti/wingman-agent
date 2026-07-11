@@ -22,6 +22,21 @@ func isRecoverableError(err error) bool {
 		return false
 	}
 
+	var responseErr *responseFailure
+	if errors.As(err, &responseErr) {
+		if responseErr.outputStarted {
+			return false
+		}
+		switch responseErr.code {
+		case string(responses.ResponseErrorCodeServerError),
+			string(responses.ResponseErrorCodeRateLimitExceeded),
+			string(responses.ResponseErrorCodeVectorStoreTimeout):
+			return true
+		default:
+			return false
+		}
+	}
+
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
 		switch apiErr.StatusCode {
@@ -32,9 +47,8 @@ func isRecoverableError(err error) bool {
 		}
 	}
 
-	// Non-API failures are retryable only when complete marked them as a
-	// pre-output stream transport failure. Parse errors and terminal error
-	// events are deterministic and should surface immediately.
+	// Other non-API failures are retryable only when complete marked them as a
+	// pre-output stream transport failure. Parse and protocol errors surface.
 	return streamErr != nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
 func Run(ctx context.Context, in io.Reader, out io.Writer) error {
@@ -106,6 +108,9 @@ func (s *Server) Logout(_ context.Context, _ acpsdk.LogoutRequest) (acpsdk.Logou
 }
 
 func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
+	if result, handled := environmentElicitation(req); handled {
+		return result, nil
+	}
 	if s.conn == nil || !s.formElicitation.Load() || code.SessionIDFromContext(ctx) == "" {
 		return elicitationFallback(req), nil
 	}
@@ -117,8 +122,14 @@ func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elici
 	}
 	response, err := s.conn.UnstableCreateElicitation(ctx, params)
 	if err != nil {
-		slog.Debug("ACP form elicitation unavailable; using fallback", "err", err)
-		return elicitationFallback(req), nil
+		// The client advertised form support, so an RPC failure is not evidence
+		// that the user accepted the schema defaults. Treat it as cancellation;
+		// only clients without the capability use the compatibility fallback.
+		slog.Debug("ACP form elicitation failed; cancelling", "err", err)
+		if ctx.Err() != nil {
+			return tool.ElicitResult{Action: tool.ElicitCancel}, ctx.Err()
+		}
+		return tool.ElicitResult{Action: tool.ElicitCancel}, nil
 	}
 	switch {
 	case response.Accept != nil:
@@ -127,6 +138,28 @@ func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elici
 		return tool.ElicitResult{Action: tool.ElicitDecline}, nil
 	default:
 		return tool.ElicitResult{Action: tool.ElicitCancel}, nil
+	}
+}
+
+func environmentElicitation(req tool.ElicitRequest) (tool.ElicitResult, bool) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WINGMAN_ELICITATION"))) {
+	case "cancel":
+		return tool.ElicitResult{Action: tool.ElicitCancel}, true
+	case "accept":
+		content := make(map[string]any)
+		for _, field := range req.Fields {
+			switch {
+			case field.Default != nil:
+				content[field.Name] = field.Default
+			case field.Type == "boolean" && !field.Multiple:
+				content[field.Name] = true
+			case field.Required:
+				return tool.ElicitResult{Action: tool.ElicitCancel}, true
+			}
+		}
+		return tool.ElicitResult{Action: tool.ElicitAccept, Content: content}, true
+	default:
+		return tool.ElicitResult{}, false
 	}
 }
 
@@ -215,10 +248,24 @@ func (s *Server) Confirm(ctx context.Context, message string) (bool, error) {
 	}
 
 	const allow = acpsdk.PermissionOptionId("allow")
+	toolCallID := acpsdk.ToolCallId("permission-" + uuid.NewString())
+	start := acpsdk.StartToolCall(
+		toolCallID,
+		message,
+		acpsdk.WithStartKind(acpsdk.ToolKindOther),
+		acpsdk.WithStartStatus(acpsdk.ToolCallStatusPending),
+	)
+	if err := s.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+		SessionId: acpsdk.SessionId(sid),
+		Update:    start,
+	}); err != nil {
+		return false, err
+	}
+
 	response, err := s.conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
 		SessionId: acpsdk.SessionId(sid),
 		ToolCall: acpsdk.ToolCallUpdate{
-			ToolCallId: acpsdk.ToolCallId("permission-" + uuid.NewString()),
+			ToolCallId: toolCallID,
 			Title:      acpsdk.Ptr(message),
 			Kind:       acpsdk.Ptr(acpsdk.ToolKindOther),
 			Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
@@ -229,9 +276,29 @@ func (s *Server) Confirm(ctx context.Context, message string) (bool, error) {
 		},
 	})
 	if err != nil {
+		s.finishPermissionToolCall(ctx, acpsdk.SessionId(sid), toolCallID, acpsdk.ToolCallStatusFailed)
 		return false, err
 	}
-	return response.Outcome.Selected != nil && response.Outcome.Selected.OptionId == allow, nil
+	allowed := response.Outcome.Selected != nil && response.Outcome.Selected.OptionId == allow
+	status := acpsdk.ToolCallStatusFailed
+	if allowed {
+		status = acpsdk.ToolCallStatusCompleted
+	}
+	if err := s.finishPermissionToolCall(ctx, acpsdk.SessionId(sid), toolCallID, status); err != nil {
+		return false, err
+	}
+	return allowed, nil
+}
+
+func (s *Server) finishPermissionToolCall(ctx context.Context, sid acpsdk.SessionId, id acpsdk.ToolCallId, status acpsdk.ToolCallStatus) error {
+	// Finish an announced lifecycle even if the permission request consumed the
+	// caller's deadline. Keep this cleanup bounded in case the client is gone.
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	return s.conn.SessionUpdate(finishCtx, acpsdk.SessionNotification{
+		SessionId: sid,
+		Update:    acpsdk.UpdateToolCall(id, acpsdk.WithUpdateStatus(status)),
+	})
 }
 
 func (s *Server) NewSession(ctx context.Context, params acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
@@ -489,7 +556,7 @@ func addTokenCounts(a, b int) int {
 	return a + b
 }
 
-func (s *Server) ListSessions(ctx context.Context, params acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
+func (s *Server) ListSessions(_ context.Context, params acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
 	if params.Cwd == nil || *params.Cwd == "" {
 		return acpsdk.ListSessionsResponse{Sessions: []acpsdk.SessionInfo{}}, nil
 	}
@@ -498,14 +565,7 @@ func (s *Server) ListSessions(ctx context.Context, params acpsdk.ListSessionsReq
 		return acpsdk.ListSessionsResponse{}, err
 	}
 
-	ws, err := code.NewWorkspace(cwd)
-	if err != nil {
-		return acpsdk.ListSessionsResponse{}, err
-	}
-	defer ws.Close()
-	wa := coder.New(ws, s.config, nil)
-	defer wa.Close()
-	infos, err := wa.ListSessions(ctx)
+	infos, err := session.List(code.SessionsDir(cwd))
 	if err != nil {
 		return acpsdk.ListSessionsResponse{}, err
 	}

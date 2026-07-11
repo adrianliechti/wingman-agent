@@ -1,6 +1,7 @@
 package code
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,7 +10,67 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v5"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+func TestProtectedLSPCallDoesNotHoldWorkspaceStateLock(t *testing.T) {
+	w := &Workspace{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	tools := w.protectLSPTools([]tool.Tool{{
+		Name: "lsp",
+		Execute: func(context.Context, map[string]any) (string, error) {
+			close(started)
+			<-release
+			return "ok", nil
+		},
+	}})
+
+	executed := make(chan struct{})
+	go func() {
+		_, _ = tools[0].Execute(context.Background(), nil)
+		close(executed)
+	}()
+	<-started
+
+	closed := make(chan struct{})
+	go func() {
+		w.Close()
+		close(closed)
+	}()
+
+	// Close waits for the LSP call, but it waits on the dedicated lifecycle
+	// lock. Unrelated workspace readers must remain available meanwhile.
+	read := make(chan struct{})
+	go func() {
+		w.mu.RLock()
+		w.mu.RUnlock()
+		close(read)
+	}()
+	select {
+	case <-read:
+	case <-time.After(time.Second):
+		t.Fatal("workspace state read blocked behind LSP shutdown")
+	}
+	select {
+	case <-closed:
+		t.Fatal("workspace closed while an LSP call was active")
+	default:
+	}
+
+	close(release)
+	select {
+	case <-executed:
+	case <-time.After(time.Second):
+		t.Fatal("LSP call did not finish")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("workspace close did not resume")
+	}
+}
 
 func initRepo(t *testing.T, dir string) {
 	t.Helper()

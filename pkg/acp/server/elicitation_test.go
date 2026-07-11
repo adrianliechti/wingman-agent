@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -66,5 +67,49 @@ func TestElicitationFallbackUsesDefaults(t *testing.T) {
 	result = elicitationFallback(tool.ElicitRequest{Fields: []tool.ElicitField{{Name: "name", Required: true}}})
 	if result.Action != tool.ElicitCancel {
 		t.Fatalf("missing required value should cancel, got %#v", result)
+	}
+}
+
+func TestElicitationCancelModeBypassesDefaults(t *testing.T) {
+	t.Setenv("WINGMAN_ELICITATION", "cancel")
+
+	result, err := (&Server{}).Elicit(context.Background(), tool.ElicitRequest{Fields: []tool.ElicitField{{
+		Name:    "mode",
+		Default: "unsafe-default",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != tool.ElicitCancel {
+		t.Fatalf("elicitation action = %q, want cancel", result.Action)
+	}
+}
+
+func TestElicitationAcceptModeAnswersBooleanAndUsesDefaults(t *testing.T) {
+	t.Setenv("WINGMAN_ELICITATION", "accept")
+
+	result, err := (&Server{}).Elicit(context.Background(), tool.ElicitRequest{Fields: []tool.ElicitField{
+		{Name: "proceed", Type: "boolean", Required: true},
+		{Name: "mode", Type: "string", Required: true, Default: "safe"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != tool.ElicitAccept || result.Content["proceed"] != true || result.Content["mode"] != "safe" {
+		t.Fatalf("elicitation result = %#v", result)
+	}
+}
+
+func TestElicitationAcceptModeDoesNotInventRequiredText(t *testing.T) {
+	t.Setenv("WINGMAN_ELICITATION", "accept")
+
+	result, err := (&Server{}).Elicit(context.Background(), tool.ElicitRequest{Fields: []tool.ElicitField{{
+		Name: "url", Type: "string", Required: true,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != tool.ElicitCancel {
+		t.Fatalf("elicitation action = %q, want cancel", result.Action)
 	}
 }
