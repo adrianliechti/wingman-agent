@@ -3,8 +3,6 @@ package code
 import (
 	"context"
 	"path/filepath"
-
-	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
 type lspResolver struct {
@@ -12,7 +10,9 @@ type lspResolver struct {
 }
 
 func (r *lspResolver) ResolveCall(ctx context.Context, file string, line, column int) (string, int, bool) {
-	mgr := r.currentLSP()
+	r.ws.mu.RLock()
+	defer r.ws.mu.RUnlock()
+	mgr := r.ws.LSP
 	if mgr == nil {
 		return "", 0, false
 	}
@@ -42,10 +42,4 @@ func (r *lspResolver) ResolveCall(ctx context.Context, file string, line, column
 		return "", 0, false
 	}
 	return filepath.ToSlash(rel), defs[0].Line + 1, true
-}
-
-func (r *lspResolver) currentLSP() *lsp.Manager {
-	r.ws.mu.Lock()
-	defer r.ws.mu.Unlock()
-	return r.ws.LSP
 }

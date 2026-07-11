@@ -14,7 +14,7 @@ import (
 
 var errYieldStopped = errors.New("yield stopped")
 
-const maxStreamRetries = 3
+const maxStreamRetries = 2
 
 type Agent struct {
 	*Config
@@ -326,12 +326,27 @@ func (a *Agent) processToolCallsParallel(ctx context.Context, calls []ToolCall, 
 
 	results := make([]string, len(calls))
 	ch := make(chan completion, len(calls))
+	jobs := make(chan int, len(calls))
 
-	for i, tc := range calls {
-		go func(i int, tc ToolCall) {
-			ch <- completion{i, a.runSingleToolCall(ctx, tc, tools)}
-		}(i, tc)
+	parallelism := a.MaxParallelTools
+	if parallelism == 0 {
+		parallelism = DefaultMaxParallelTools
 	}
+	if parallelism < 0 || parallelism > len(calls) {
+		parallelism = len(calls)
+	}
+
+	for range parallelism {
+		go func() {
+			for i := range jobs {
+				ch <- completion{i, a.runSingleToolCall(ctx, calls[i], tools)}
+			}
+		}()
+	}
+	for i := range calls {
+		jobs <- i
+	}
+	close(jobs)
 
 	stopped := false
 	for range calls {
@@ -389,6 +404,7 @@ func toolResultMessage(tc ToolCall, result string) Message {
 }
 
 func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool.Tool) string {
+	started := time.Now()
 	t := findTool(tc.Name, tools)
 
 	timeout := a.ToolTimeout
@@ -423,7 +439,7 @@ func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool
 	}
 
 	if result == "" {
-		result = a.executeTool(ctx, tc, t, timeout, time.Now())
+		result = a.executeTool(ctx, tc, t, timeout, started)
 	}
 
 	for _, h := range a.Hooks.PostToolUse {
@@ -443,6 +459,9 @@ func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool
 func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool, timeout time.Duration, started time.Time) string {
 	if t == nil {
 		return fmt.Sprintf("error: unknown tool %s", tc.Name)
+	}
+	if t.Execute == nil {
+		return fmt.Sprintf("error: tool %s has no executor", tc.Name)
 	}
 
 	args := make(map[string]any)

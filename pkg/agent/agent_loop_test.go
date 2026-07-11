@@ -7,12 +7,15 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
@@ -106,6 +109,93 @@ func TestCompleteBackfillsOutputFromTerminalEvent(t *testing.T) {
 	}
 	if len(resp.messages) != 1 || len(resp.messages[0].Content) != 1 || resp.messages[0].Content[0].Text != "done" {
 		t.Fatalf("terminal output was not backfilled: %+v", resp.messages)
+	}
+}
+
+func TestCompleteBackfillsItemsMissingFromDoneEvents(t *testing.T) {
+	client := streamingTestClient(func(*http.Request) string {
+		return "data: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"first\",\"annotations\":[]}]}}\n\ndata: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"first\",\"annotations\":[]}]},{\"type\":\"message\",\"id\":\"msg_2\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"second\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":2}}}\n\n"
+	})
+
+	resp, err := complete(context.Background(), &client, &request{}, yieldAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.messages) != 2 || resp.messages[1].Content[0].Text != "second" {
+		t.Fatalf("terminal output did not fill missing item: %+v", resp.messages)
+	}
+}
+
+func TestParallelToolCallsRespectConcurrencyLimit(t *testing.T) {
+	var active atomic.Int64
+	var peak atomic.Int64
+	var mu sync.Mutex
+	var completed []string
+
+	execute := func(context.Context, map[string]any) (string, error) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			old := peak.Load()
+			if current <= old || peak.CompareAndSwap(old, current) {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+		return "ok", nil
+	}
+
+	a := &Agent{Config: &Config{MaxParallelTools: 3, ToolTimeout: -1}}
+	tools := []tool.Tool{{Name: "read", Execute: execute}}
+	calls := make([]ToolCall, 20)
+	for i := range calls {
+		calls[i] = ToolCall{ID: fmt.Sprintf("call-%d", i), Name: "read"}
+	}
+	err := a.processToolCallsParallel(context.Background(), calls, tools, func(m Message, err error) bool {
+		if err == nil && len(m.Content) > 0 && m.Content[0].ToolResult != nil {
+			mu.Lock()
+			completed = append(completed, m.Content[0].ToolResult.ID)
+			mu.Unlock()
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := peak.Load(); got != 3 {
+		t.Fatalf("peak concurrency = %d, want 3", got)
+	}
+	if len(completed) != len(calls) {
+		t.Fatalf("completed results = %d, want %d", len(completed), len(calls))
+	}
+}
+
+func TestToolWithoutExecutorReturnsError(t *testing.T) {
+	a := &Agent{Config: &Config{ToolTimeout: -1}}
+	got := a.runSingleToolCall(context.Background(), ToolCall{Name: "broken"}, []tool.Tool{{Name: "broken"}})
+	if !strings.Contains(got, "no executor") {
+		t.Fatalf("result = %q", got)
+	}
+}
+
+func TestToolTimeoutIncludesPreHooks(t *testing.T) {
+	a := &Agent{Config: &Config{
+		ToolTimeout: 10 * time.Millisecond,
+		Hooks: hook.Hooks{PreToolUse: []hook.PreToolUse{
+			func(ctx context.Context, _ tool.ToolCall) (string, error) {
+				<-ctx.Done()
+				return "", nil
+			},
+		}},
+	}}
+	got := a.runSingleToolCall(context.Background(), ToolCall{Name: "slow"}, []tool.Tool{{
+		Name: "slow",
+		Execute: func(ctx context.Context, _ map[string]any) (string, error) {
+			return "", ctx.Err()
+		},
+	}})
+	if !strings.Contains(got, "10ms time limit") {
+		t.Fatalf("result = %q", got)
 	}
 }
 

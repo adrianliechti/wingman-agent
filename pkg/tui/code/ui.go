@@ -1148,7 +1148,7 @@ func (a *App) builtinCommands() []slashCommand {
 		{"/problems", "Show problems"},
 	}
 
-	if a.agent.Workspace().Rewind != nil {
+	if a.agent.Workspace().HasRewind() {
 		cmds = append(cmds,
 			slashCommand{"/diff", "Show changes from baseline"},
 			slashCommand{"/rewind", "Restore to previous checkpoint"},

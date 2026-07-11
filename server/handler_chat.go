@@ -180,7 +180,7 @@ func (s *Server) handleSend(msg ClientMessage) {
 	ws := s.workspace
 	s.flushFiles()
 
-	if ws.Rewind != nil {
+	if ws.HasRewind() {
 		commitMsg := msg.Text
 		if commitMsg == "" {
 			commitMsg = "<unknown>"
@@ -191,7 +191,7 @@ func (s *Server) handleSend(msg ClientMessage) {
 			}
 		}()
 	}
-	if ws.LSP != nil {
+	if ws.HasLSP() {
 		s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 	}
 

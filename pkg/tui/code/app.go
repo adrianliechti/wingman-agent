@@ -60,10 +60,10 @@ type App struct {
 	cachedTokens    int64
 	outputTokens    int64
 	lastInputTokens int64
-	chatWidth      int
-	lastCompact    bool
-	pendingContent []agent.Content
-	pendingFiles   []string
+	chatWidth       int
+	lastCompact     bool
+	pendingContent  []agent.Content
+	pendingFiles    []string
 
 	streamCancel context.CancelFunc
 	streamMu     sync.Mutex
@@ -186,7 +186,7 @@ func (a *App) Run() error {
 
 		a.app.QueueUpdateDraw(func() {
 			a.setPhase(PhaseIdle)
-			if a.agent.Workspace().Rewind == nil {
+			if !a.agent.Workspace().HasRewind() {
 				t := theme.Default
 				fmt.Fprint(a.chatView, a.formatNotice(
 					"Limited mode: working dir is too large for full features. Diffs, checkpoints, and code intelligence are disabled.",

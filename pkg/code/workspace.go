@@ -26,6 +26,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/rewind"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
+	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 //go:embed skills/*/SKILL.md
@@ -65,7 +66,7 @@ type Workspace struct {
 
 	warmupOnce sync.Once
 
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	mcpTools   []tool.Tool
 	lspTools   []tool.Tool
 	graphTools []tool.Tool
@@ -168,11 +169,21 @@ func (w *Workspace) Close() {
 	if w.MCP != nil {
 		w.MCP.Close()
 	}
-	if w.LSP != nil {
-		w.LSP.Close()
+	w.mu.Lock()
+	lspManager := w.LSP
+	rewindManager := w.Rewind
+	w.LSP = nil
+	w.Rewind = nil
+	w.Graph = nil
+	w.mcpTools = nil
+	w.lspTools = nil
+	w.graphTools = nil
+	w.mu.Unlock()
+	if lspManager != nil {
+		lspManager.Close()
 	}
-	if w.Rewind != nil {
-		w.Rewind.Cleanup()
+	if rewindManager != nil {
+		rewindManager.Cleanup()
 	}
 	if w.ScratchPath != "" {
 		os.RemoveAll(w.ScratchPath)
@@ -185,12 +196,11 @@ func (w *Workspace) Close() {
 func (w *Workspace) IsGitRepo() bool { return isGitRepo(w.RootPath) }
 
 func (w *Workspace) SyncProjectMode() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.Rewind == nil {
 		return
 	}
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
 
 	oldLSP := w.LSP
 	if isGitRepo(w.RootPath) {
@@ -207,6 +217,8 @@ func (w *Workspace) SyncProjectMode() {
 }
 
 func (w *Workspace) Diagnostics(ctx context.Context) map[string][]lsp.Diagnostic {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	if w.LSP == nil {
 		return nil
 	}
@@ -214,6 +226,8 @@ func (w *Workspace) Diagnostics(ctx context.Context) map[string][]lsp.Diagnostic
 }
 
 func (w *Workspace) Commit(msg string) error {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	if w.Rewind == nil {
 		return nil
 	}
@@ -221,6 +235,8 @@ func (w *Workspace) Commit(msg string) error {
 }
 
 func (w *Workspace) Diffs() ([]rewind.FileDiff, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	if w.Rewind == nil {
 		return nil, nil
 	}
@@ -228,6 +244,8 @@ func (w *Workspace) Diffs() ([]rewind.FileDiff, error) {
 }
 
 func (w *Workspace) Checkpoints() ([]rewind.Checkpoint, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	if w.Rewind == nil {
 		return nil, nil
 	}
@@ -235,6 +253,8 @@ func (w *Workspace) Checkpoints() ([]rewind.Checkpoint, error) {
 }
 
 func (w *Workspace) Restore(hash string) error {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	if w.Rewind == nil {
 		return errors.New("checkpoint tracking is not available for this workspace")
 	}
@@ -266,7 +286,7 @@ func (w *Workspace) MemoryContent() string {
 
 	content := strings.Join(lines, "\n")
 	if len(content) > memoryMaxBytes {
-		content = content[:memoryMaxBytes]
+		content = text.HeadBytes(content, memoryMaxBytes)
 		if idx := strings.LastIndex(content, "\n"); idx > 0 {
 			content = content[:idx]
 		}
@@ -349,12 +369,33 @@ func splitFrontmatter(text string) (fm, body string, ok bool) {
 }
 
 func (w *Workspace) ManagedTools() (mcpTools, lspTools, graphTools []tool.Tool) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	mcpTools = append([]tool.Tool(nil), w.mcpTools...)
 	lspTools = append([]tool.Tool(nil), w.lspTools...)
 	graphTools = append([]tool.Tool(nil), w.graphTools...)
 	return
+}
+
+func (w *Workspace) HasLSP() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.LSP != nil
+}
+
+func (w *Workspace) HasRewind() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.Rewind != nil
+}
+
+func (w *Workspace) RewindFingerprint() uint64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.Rewind == nil {
+		return 0
+	}
+	return w.Rewind.Fingerprint()
 }
 
 func isGitRepo(dir string) bool {

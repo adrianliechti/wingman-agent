@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	DefaultMaxTurns    = 200
-	DefaultToolTimeout = 10 * time.Minute
+	DefaultMaxTurns         = 100
+	DefaultMaxParallelTools = 8
+	DefaultToolTimeout      = 10 * time.Minute
 
 	DefaultContextWindow = 400_000
 
@@ -90,7 +91,14 @@ type Config struct {
 
 	Hooks hook.Hooks
 
+	// MaxTurns caps successful model invocations in one Send run. Stream
+	// retries and tool calls do not consume turns. Zero uses the default;
+	// negative disables the safety bound.
 	MaxTurns int
+
+	// MaxParallelTools bounds concurrently executing read-only tool calls.
+	// Zero uses the default; negative allows the whole emitted batch.
+	MaxParallelTools int
 
 	// ToolTimeout is a hard ceiling on every tool call. When zero, tools may
 	// extend the default via tool.Tool.Timeout; negative disables deadlines.
@@ -108,9 +116,11 @@ type Config struct {
 
 func (c *Config) Derive() *Config {
 	return &Config{
-		client: c.client,
-		Model:  c.Model,
-		Effort: c.Effort,
+		client:       c.client,
+		Model:        c.Model,
+		Effort:       c.Effort,
+		Tools:        c.Tools,
+		Instructions: c.Instructions,
 
 		CacheKey: c.CacheKey,
 
@@ -119,8 +129,9 @@ func (c *Config) Derive() *Config {
 			PostToolUse: slices.Clone(c.Hooks.PostToolUse),
 		},
 
-		MaxTurns:    c.MaxTurns,
-		ToolTimeout: c.ToolTimeout,
+		MaxTurns:         c.MaxTurns,
+		MaxParallelTools: c.MaxParallelTools,
+		ToolTimeout:      c.ToolTimeout,
 
 		ContextWindow: c.ContextWindow,
 		LargeContext:  c.LargeContext,

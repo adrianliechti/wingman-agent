@@ -663,10 +663,10 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	ws := s.workspace
 	caps := map[string]any{
 		"git":   ws.IsGitRepo(),
-		"lsp":   ws.LSP != nil,
-		"diffs": ws.Rewind != nil,
+		"lsp":   ws.HasLSP(),
+		"diffs": ws.HasRewind(),
 	}
-	if ws.Rewind == nil {
+	if !ws.HasRewind() {
 		caps["notice"] = "This directory is too large for full features. Diffs, checkpoints, and code intelligence are disabled — chat and file browsing still work."
 	}
 	writeJSON(w, caps)
@@ -679,7 +679,7 @@ func (s *Server) hasClients() bool {
 }
 
 func (s *Server) flushFiles() {
-	if s.workspace.Rewind == nil {
+	if !s.workspace.HasRewind() {
 		s.broadcast(Frame{Type: EvtFilesChanged})
 		return
 	}
@@ -693,16 +693,16 @@ func (s *Server) checkWorkspace() {
 	if gitNow != s.prevGit {
 		ws.SyncProjectMode()
 		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
-		if ws.LSP != nil {
+		if ws.HasLSP() {
 			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 		}
 		s.prevGit = gitNow
 	}
 
-	if ws.Rewind == nil {
+	if !ws.HasRewind() {
 		return
 	}
-	fp := ws.Rewind.Fingerprint()
+	fp := ws.RewindFingerprint()
 	if fp != s.prevFingerprint {
 		s.prevFingerprint = fp
 		s.broadcast(Frame{Type: EvtFilesChanged})

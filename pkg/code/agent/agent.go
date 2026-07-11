@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -51,6 +52,7 @@ type Agent struct {
 
 	mu       sync.Mutex
 	sessions map[string]*sessionState
+	closed   bool
 }
 
 type sessionState struct {
@@ -71,6 +73,7 @@ type sessionState struct {
 	cancelMu  sync.Mutex
 	cancelFn  context.CancelFunc
 	cancelGen uint64
+	closed    bool
 }
 
 func New(ws *code.Workspace, cfg *harness.Config, ui code.UI) *Agent {
@@ -176,7 +179,7 @@ func (a *Agent) Effort(sessionID string) (string, []string) {
 	if current == "" {
 		current = "auto"
 	}
-	return current, effortValues
+	return current, slices.Clone(effortValues)
 }
 
 func (a *Agent) effortFor(s *sessionState) string {
@@ -223,10 +226,22 @@ func (a *Agent) ListSessions(_ context.Context) ([]code.SessionInfo, error) {
 }
 
 func (a *Agent) NewSession(_ context.Context) (string, error) {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return "", errors.New("agent is closed")
+	}
+	a.mu.Unlock()
+
 	id := uuid.NewString()
 	s := a.buildSession()
 	s.aa.CacheKey = id
 	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		s.close()
+		return "", errors.New("agent is closed")
+	}
 	a.sessions[id] = s
 	a.mu.Unlock()
 	return id, nil
@@ -234,6 +249,10 @@ func (a *Agent) NewSession(_ context.Context) (string, error) {
 
 func (a *Agent) LoadSession(_ context.Context, id string) error {
 	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return errors.New("agent is closed")
+	}
 	if _, ok := a.sessions[id]; ok {
 		a.mu.Unlock()
 		return nil
@@ -250,6 +269,16 @@ func (a *Agent) LoadSession(_ context.Context, id string) error {
 	s.aa.Usage = saved.State.Usage
 
 	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		s.close()
+		return errors.New("agent is closed")
+	}
+	if _, loaded := a.sessions[id]; loaded {
+		a.mu.Unlock()
+		s.close()
+		return nil
+	}
 	a.sessions[id] = s
 	a.mu.Unlock()
 	return nil
@@ -264,8 +293,7 @@ func (a *Agent) DeleteSession(_ context.Context, id string) error {
 	a.mu.Unlock()
 
 	if inMem {
-		s.cancel()
-		s.execManager.Close()
+		s.close()
 	}
 	if err := session.Delete(a.sessionsDir, id); err != nil && !os.IsNotExist(err) {
 		return err
@@ -320,13 +348,15 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) it
 	a.lastActive.Store(id)
 
 	sendCtx, cancel := context.WithCancel(code.WithSessionID(ctx, id))
-	stream := s.aa.Send(sendCtx, input)
+	stream, gen, err := s.beginSend(sendCtx, input, cancel)
+	if err != nil {
+		cancel()
+		return errStream(err)
+	}
 	if stream == nil {
 		cancel()
 		return nil
 	}
-
-	gen := s.setCancel(cancel)
 
 	return func(yield func(harness.Message, error) bool) {
 		defer func() {
@@ -355,12 +385,17 @@ func errStream(err error) iter.Seq2[harness.Message, error] {
 
 func (a *Agent) Close() error {
 	a.mu.Lock()
-	for _, s := range a.sessions {
-		s.cancel()
-		s.execManager.Close()
+	if a.closed {
+		a.mu.Unlock()
+		return nil
 	}
+	a.closed = true
+	sessions := slices.Collect(maps.Values(a.sessions))
 	a.sessions = map[string]*sessionState{}
 	a.mu.Unlock()
+	for _, s := range sessions {
+		s.close()
+	}
 	return nil
 }
 
@@ -523,22 +558,31 @@ func (a *Agent) elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elicit
 func (a *Agent) confirm(ctx context.Context, message string) (bool, error) {
 	ui := a.currentUI()
 	if ui == nil {
-		return true, nil
+		return false, nil
 	}
 	return ui.Confirm(a.promptContext(ctx), message)
 }
 
-func (s *sessionState) setCancel(fn context.CancelFunc) uint64 {
+func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, cancel context.CancelFunc) (iter.Seq2[harness.Message, error], uint64, error) {
 	s.cancelMu.Lock()
+	if s.closed {
+		s.cancelMu.Unlock()
+		return nil, 0, errors.New("session is closed")
+	}
+	stream := s.aa.Send(ctx, input)
+	if stream == nil {
+		s.cancelMu.Unlock()
+		return nil, 0, nil
+	}
 	prev := s.cancelFn
 	s.cancelGen++
 	gen := s.cancelGen
-	s.cancelFn = fn
+	s.cancelFn = cancel
 	s.cancelMu.Unlock()
 	if prev != nil {
 		prev()
 	}
-	return gen
+	return stream, gen, nil
 }
 
 func (s *sessionState) clearCancel(gen uint64) {
@@ -556,6 +600,23 @@ func (s *sessionState) cancel() {
 	if fn != nil {
 		fn()
 	}
+}
+
+func (s *sessionState) close() {
+	s.cancelMu.Lock()
+	if s.closed {
+		s.cancelMu.Unlock()
+		return
+	}
+	s.closed = true
+	s.cancelGen++
+	fn := s.cancelFn
+	s.cancelFn = nil
+	s.cancelMu.Unlock()
+	if fn != nil {
+		fn()
+	}
+	s.execManager.Close()
 }
 
 func (s *sessionState) tools() []tool.Tool {

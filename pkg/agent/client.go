@@ -162,8 +162,8 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		case responses.ResponseCompletedEvent:
 			usageDelta = responseToUsage(e.Response)
 			terminalEvent = true
-			if len(outputItems) == 0 {
-				outputItems = outputItemsFromResponse(e.Response)
+			if items := outputItemsFromResponse(e.Response); len(items) >= len(outputItems) && len(items) > 0 {
+				outputItems = items
 			}
 
 		case responses.ResponseIncompleteEvent:

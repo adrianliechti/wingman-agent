@@ -345,3 +345,11 @@ wingman claw
 ```
 
 Claw manages a pool of named agents with persistent memory, scheduled tasks, and a TUI interface. Each agent has its own sandboxed workspace and can spawn sub-agents. Agents persist their sessions across restarts and support proactive check-in schedules.
+
+## 📊 Terminal-Bench
+
+Wingman can run Terminal-Bench tasks through Harbor's generic ACP agent runner.
+The integration installs the released Wingman binary inside each task container,
+preserving the task's own Docker environment and verifier. See the
+[Terminal-Bench compatibility guide](bench/tbench/README.md) for the pinned
+agent descriptor and smoke-test commands.

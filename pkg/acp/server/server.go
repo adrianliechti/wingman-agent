@@ -13,9 +13,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 
 	acpcontent "github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
@@ -58,6 +60,8 @@ type Server struct {
 	mu         sync.Mutex
 	sessions   map[acpsdk.SessionId]*sessionEntry
 	workspaces map[string]*workspaceEntry
+
+	formElicitation atomic.Bool
 }
 
 type sessionEntry struct {
@@ -69,14 +73,16 @@ type sessionEntry struct {
 }
 
 type workspaceEntry struct {
-	ws      *code.Workspace
-	agent   *coder.Agent
-	key     string
-	refs    int
-	initted bool
+	ws    *code.Workspace
+	agent *coder.Agent
+	key   string
+	refs  int
+	ready chan struct{}
 }
 
-func (s *Server) Initialize(_ context.Context, _ acpsdk.InitializeRequest) (acpsdk.InitializeResponse, error) {
+func (s *Server) Initialize(_ context.Context, params acpsdk.InitializeRequest) (acpsdk.InitializeResponse, error) {
+	capabilities := params.ClientCapabilities.Elicitation
+	s.formElicitation.Store(capabilities != nil && capabilities.Form != nil)
 	return acpsdk.InitializeResponse{
 		ProtocolVersion: acpsdk.ProtocolVersionNumber,
 		AgentCapabilities: acpsdk.AgentCapabilities{
@@ -97,6 +103,135 @@ func (s *Server) Authenticate(_ context.Context, _ acpsdk.AuthenticateRequest) (
 
 func (s *Server) Logout(_ context.Context, _ acpsdk.LogoutRequest) (acpsdk.LogoutResponse, error) {
 	return acpsdk.LogoutResponse{}, nil
+}
+
+func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
+	if s.conn == nil || !s.formElicitation.Load() || code.SessionIDFromContext(ctx) == "" {
+		return elicitationFallback(req), nil
+	}
+
+	params := acpsdk.NewUnstableCreateElicitationRequestForm(elicitationSchema(req))
+	params.Form.Message = req.Message
+	if params.Form.Message == "" {
+		params.Form.Message = "Additional input is needed."
+	}
+	response, err := s.conn.UnstableCreateElicitation(ctx, params)
+	if err != nil {
+		slog.Debug("ACP form elicitation unavailable; using fallback", "err", err)
+		return elicitationFallback(req), nil
+	}
+	switch {
+	case response.Accept != nil:
+		return tool.ElicitResult{Action: tool.ElicitAccept, Content: response.Accept.Content}, nil
+	case response.Decline != nil:
+		return tool.ElicitResult{Action: tool.ElicitDecline}, nil
+	default:
+		return tool.ElicitResult{Action: tool.ElicitCancel}, nil
+	}
+}
+
+func elicitationFallback(req tool.ElicitRequest) tool.ElicitResult {
+	content := make(map[string]any)
+	for _, field := range req.Fields {
+		if field.Default != nil {
+			content[field.Name] = field.Default
+			continue
+		}
+		if field.Required {
+			return tool.ElicitResult{Action: tool.ElicitCancel}
+		}
+	}
+	return tool.ElicitResult{Action: tool.ElicitAccept, Content: content}
+}
+
+func elicitationSchema(req tool.ElicitRequest) acpsdk.UnstableElicitationSchema {
+	properties := make(map[string]any, len(req.Fields))
+	var required []string
+	for _, field := range req.Fields {
+		property := map[string]any{}
+		fieldType := field.Type
+		if fieldType == "" {
+			fieldType = "string"
+		}
+		if field.Multiple {
+			property["type"] = "array"
+			items := map[string]any{"type": fieldType}
+			addElicitationEnum(items, "anyOf", field)
+			property["items"] = items
+		} else {
+			property["type"] = fieldType
+			addElicitationEnum(property, "oneOf", field)
+		}
+		if field.Title != "" {
+			property["title"] = field.Title
+		}
+		if field.Description != "" {
+			property["description"] = field.Description
+		}
+		if field.Default != nil {
+			property["default"] = field.Default
+		}
+		properties[field.Name] = property
+		if field.Required {
+			required = append(required, field.Name)
+		}
+	}
+
+	return acpsdk.UnstableElicitationSchema{
+		Type:       acpsdk.UnstableElicitationSchemaTypeObject,
+		Properties: properties,
+		Required:   required,
+	}
+}
+
+func addElicitationEnum(schema map[string]any, describedKey string, field tool.ElicitField) {
+	if len(field.Enum) == 0 {
+		return
+	}
+	described := false
+	choices := make([]map[string]any, 0, len(field.Enum))
+	for i, value := range field.Enum {
+		choice := map[string]any{"const": value, "title": value}
+		if i < len(field.EnumDescriptions) && field.EnumDescriptions[i] != "" {
+			choice["description"] = field.EnumDescriptions[i]
+			described = true
+		}
+		choices = append(choices, choice)
+	}
+	if described {
+		schema[describedKey] = choices
+	} else {
+		schema["enum"] = slices.Clone(field.Enum)
+	}
+}
+
+func (s *Server) Confirm(ctx context.Context, message string) (bool, error) {
+	if s.conn == nil {
+		return false, nil
+	}
+	sid := code.SessionIDFromContext(ctx)
+	if sid == "" {
+		return false, nil
+	}
+
+	const allow = acpsdk.PermissionOptionId("allow")
+	response, err := s.conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
+		SessionId: acpsdk.SessionId(sid),
+		ToolCall: acpsdk.ToolCallUpdate{
+			ToolCallId: acpsdk.ToolCallId("permission-" + uuid.NewString()),
+			Title:      acpsdk.Ptr(message),
+			Kind:       acpsdk.Ptr(acpsdk.ToolKindOther),
+			Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
+		},
+		Options: []acpsdk.PermissionOption{
+			{Kind: acpsdk.PermissionOptionKindAllowOnce, Name: "Allow", OptionId: allow},
+			{Kind: acpsdk.PermissionOptionKindRejectOnce, Name: "Reject", OptionId: "reject"},
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	return response.Outcome.Selected != nil && response.Outcome.Selected.OptionId == allow, nil
 }
 
 func (s *Server) NewSession(ctx context.Context, params acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
@@ -129,7 +264,7 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string) (*workspaceEn
 	if w, ok := s.workspaces[cwd]; ok {
 		w.refs++
 		s.mu.Unlock()
-		return w, nil
+		return s.awaitWorkspace(ctx, w)
 	}
 	s.mu.Unlock()
 
@@ -137,7 +272,7 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string) (*workspaceEn
 	if err != nil {
 		return nil, err
 	}
-	wa := coder.New(ws, s.config, nil)
+	wa := coder.New(ws, s.config, s)
 
 	s.mu.Lock()
 	if existing, ok := s.workspaces[cwd]; ok {
@@ -146,21 +281,31 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string) (*workspaceEn
 		s.mu.Unlock()
 		_ = wa.Close()
 		ws.Close()
-		return existing, nil
+		return s.awaitWorkspace(ctx, existing)
 	}
-	w := &workspaceEntry{ws: ws, agent: wa, key: cwd, refs: 1}
+	w := &workspaceEntry{ws: ws, agent: wa, key: cwd, refs: 1, ready: make(chan struct{})}
 	s.workspaces[cwd] = w
 	s.mu.Unlock()
 
-	if !w.initted {
-		ws.WarmUp()
-		if err := ws.InitMCP(ctx); err != nil {
-			slog.Warn("workspace mcp init failed", "cwd", cwd, "err", err)
-		}
-		wa.FetchModels(ctx)
-		w.initted = true
+	ws.WarmUp()
+	initCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	if err := ws.InitMCP(initCtx); err != nil {
+		slog.Warn("workspace mcp init failed", "cwd", cwd, "err", err)
 	}
-	return w, nil
+	wa.FetchModels(initCtx)
+	cancel()
+	close(w.ready)
+	return s.awaitWorkspace(ctx, w)
+}
+
+func (s *Server) awaitWorkspace(ctx context.Context, w *workspaceEntry) (*workspaceEntry, error) {
+	select {
+	case <-w.ready:
+		return w, nil
+	case <-ctx.Done():
+		s.releaseWorkspace(w)
+		return nil, ctx.Err()
+	}
 }
 
 func (s *Server) releaseWorkspace(w *workspaceEntry) {
@@ -298,16 +443,50 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	for msg, err := range sess.agent.Send(ctx, string(sess.id), acpcontent.ContentFromBlocks(params.Prompt)) {
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
+				return promptResponse(sess, acpsdk.StopReasonCancelled), nil
 			}
 			notify(acpsdk.UpdateAgentMessageText("error: " + err.Error()))
-			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
+			return promptResponse(sess, acpsdk.StopReasonEndTurn), nil
 		}
 		for _, c := range msg.Content {
 			notifyContent(notify, agent.RoleAssistant, c)
 		}
 	}
-	return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
+	return promptResponse(sess, acpsdk.StopReasonEndTurn), nil
+}
+
+func promptResponse(sess *sessionEntry, reason acpsdk.StopReason) acpsdk.PromptResponse {
+	u := sess.agent.Usage(string(sess.id))
+	input := tokenCount(u.InputTokens)
+	output := tokenCount(u.OutputTokens)
+	usage := &acpsdk.Usage{
+		InputTokens:  input,
+		OutputTokens: output,
+		TotalTokens:  addTokenCounts(input, output),
+	}
+	if cached := tokenCount(u.CachedTokens); cached > 0 {
+		usage.CachedReadTokens = &cached
+	}
+	return acpsdk.PromptResponse{StopReason: reason, Usage: usage}
+}
+
+func tokenCount(n int64) int {
+	if n <= 0 {
+		return 0
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if n > maxInt {
+		return int(maxInt)
+	}
+	return int(n)
+}
+
+func addTokenCounts(a, b int) int {
+	maxInt := int(^uint(0) >> 1)
+	if b > maxInt-a {
+		return maxInt
+	}
+	return a + b
 }
 
 func (s *Server) ListSessions(ctx context.Context, params acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
@@ -319,19 +498,14 @@ func (s *Server) ListSessions(ctx context.Context, params acpsdk.ListSessionsReq
 		return acpsdk.ListSessionsResponse{}, err
 	}
 
-	s.mu.Lock()
-	w := s.workspaces[cwd]
-	s.mu.Unlock()
-	if w == nil {
-
-		ws, err := code.NewWorkspace(cwd)
-		if err != nil {
-			return acpsdk.ListSessionsResponse{}, err
-		}
-		defer ws.Close()
-		w = &workspaceEntry{ws: ws, agent: coder.New(ws, s.config, nil), key: cwd}
+	ws, err := code.NewWorkspace(cwd)
+	if err != nil {
+		return acpsdk.ListSessionsResponse{}, err
 	}
-	infos, err := w.agent.ListSessions(ctx)
+	defer ws.Close()
+	wa := coder.New(ws, s.config, nil)
+	defer wa.Close()
+	infos, err := wa.ListSessions(ctx)
 	if err != nil {
 		return acpsdk.ListSessionsResponse{}, err
 	}

@@ -222,3 +222,17 @@ func TestSplitRecoverySummarySmallConversation(t *testing.T) {
 		t.Fatalf("expected all messages on recent side")
 	}
 }
+
+func TestFallbackTruncationPreservesActiveUserRequest(t *testing.T) {
+	a := &Agent{Config: &Config{}}
+	a.Messages = append(
+		[]Message{{Role: RoleUser, Content: []Content{{Text: "finish the active task"}}}},
+		toolRoundMessages(20, 128)...,
+	)
+
+	a.truncateMessagesForRecovery()
+
+	if len(a.Messages) == 0 || a.Messages[0].Role != RoleUser || a.Messages[0].Content[0].Text != "finish the active task" {
+		t.Fatalf("active user request was lost: %+v", a.Messages)
+	}
+}
