@@ -2,6 +2,7 @@ package fs
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -647,25 +648,19 @@ var vcsDirs = map[string]bool{
 	".sl":  true,
 }
 
-var binaryExtensions = map[string]bool{
-	".exe": true, ".dll": true, ".so": true, ".dylib": true,
-	".bin": true, ".dat": true, ".db": true, ".sqlite": true,
-	".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
-	".bmp": true, ".ico": true, ".webp": true,
-	".pdf": true, ".doc": true, ".docx": true, ".xls": true,
-	".xlsx": true, ".ppt": true, ".pptx": true,
-	".zip": true, ".tar": true, ".gz": true, ".rar": true,
-	".7z": true, ".bz2": true, ".xz": true,
-	".mp3": true, ".mp4": true, ".avi": true, ".mov": true,
-	".wav": true, ".flac": true, ".ogg": true, ".webm": true,
-	".woff": true, ".woff2": true, ".ttf": true, ".otf": true, ".eot": true,
-	".pyc": true, ".pyo": true, ".class": true, ".o": true, ".a": true,
-}
+// binarySniffLen bounds how many leading bytes are inspected when classifying
+// a file as binary.
+const binarySniffLen = 8000
 
-func isBinaryFile(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-
-	return binaryExtensions[ext]
+// isBinaryContent reports whether data looks like binary (non-text) content.
+// It uses the same NUL-byte heuristic as git and grep: a NUL within the first
+// several KB reliably marks binary content, while text files — including UTF-8
+// sources, SVG, JSON, and extension-less docs — never contain one.
+func isBinaryContent(data []byte) bool {
+	if len(data) > binarySniffLen {
+		data = data[:binarySniffLen]
+	}
+	return bytes.IndexByte(data, 0) >= 0
 }
 
 func relPathSlash(base, target string) string {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -46,10 +45,6 @@ func readTool(root *os.Root, tracker *contentTracker, allowedReadRoots ...string
 
 			workingDir := root.Name()
 
-			if isBinaryFile(pathArg) {
-				return "", fmt.Errorf("cannot read %s: file appears to be binary (extension %q). Use the shell tool with an appropriate viewer if you really need to inspect it", pathArg, filepath.Ext(pathArg))
-			}
-
 			limit := 0
 			if v, present, err := tool.PositiveIntArg(args, "limit"); present {
 				if err != nil {
@@ -82,6 +77,10 @@ func readTool(root *os.Root, tracker *contentTracker, allowedReadRoots ...string
 			content, err := readFileTarget(root, target)
 			if err != nil {
 				return "", fmt.Errorf("read file %q: %w", pathArg, err)
+			}
+
+			if isBinaryContent(content) {
+				return "", fmt.Errorf("cannot read %s: file appears to be binary. Use the shell tool with an appropriate viewer if you really need to inspect it", pathArg)
 			}
 
 			tracker.record(content)

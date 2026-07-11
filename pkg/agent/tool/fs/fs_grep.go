@@ -335,10 +335,6 @@ func GrepTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 					return nil
 				}
 
-				if isBinaryFile(path) {
-					return nil
-				}
-
 				display := target.ReportPath(path)
 
 				if outputMode == "files_with_matches" {
@@ -552,7 +548,7 @@ func openTextFile(fsys fs.FS, path string) (io.ReadCloser, bool, error) {
 		return nil, false, err
 	}
 
-	if bytes.IndexByte(peek[:n], 0) != -1 {
+	if isBinaryContent(peek[:n]) {
 		f.Close()
 		return nil, true, nil
 	}

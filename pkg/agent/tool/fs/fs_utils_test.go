@@ -53,17 +53,25 @@ func TestWorkspaceBoundaryViaTools(t *testing.T) {
 	}
 }
 
-func TestReadRejectsBinaryExtensions(t *testing.T) {
+func TestReadBinaryDetectionByContent(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	if err := os.WriteFile(filepath.Join(tmpDir, "image.PNG"), []byte("data"), 0644); err != nil {
+	// Text content stays readable regardless of a "binary" extension.
+	if err := os.WriteFile(filepath.Join(tmpDir, "unix.doc"), []byte("plain text documentation"), 0644); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
+	if _, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": "unix.doc"}); err != nil {
+		t.Fatalf("expected text .doc to be readable, got: %v", err)
+	}
 
-	_, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": "image.PNG"})
+	// A NUL byte marks binary content even under a text extension.
+	if err := os.WriteFile(filepath.Join(tmpDir, "data.txt"), []byte("head\x00\x00tail"), 0644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	_, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": "data.txt"})
 	if err == nil || !strings.Contains(err.Error(), "binary") {
-		t.Fatalf("expected binary-file rejection, got: %v", err)
+		t.Fatalf("expected binary-content rejection, got: %v", err)
 	}
 }
 

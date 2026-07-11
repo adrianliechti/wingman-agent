@@ -138,7 +138,7 @@ func TestWriteGuardExemptions(t *testing.T) {
 	}
 
 	binary := filepath.Join(tmpDir, "image.png")
-	if err := os.WriteFile(binary, []byte{0x89, 0x50, 0x4E, 0x47}, 0644); err != nil {
+	if err := os.WriteFile(binary, []byte{0x89, 0x50, 0x4E, 0x47, 0x00, 0x00}, 0644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tools["write"].Execute(context.Background(), map[string]any{

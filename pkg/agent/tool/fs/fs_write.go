@@ -75,7 +75,7 @@ func writeTool(root *os.Root, tracker *contentTracker, allowedWriteRoots ...stri
 				oldContent, _ = readFileTarget(root, target)
 			}
 
-			if len(oldContent) > 0 && !isBinaryFile(pathArg) && !tracker.knows(oldContent) {
+			if len(oldContent) > 0 && !isBinaryContent(oldContent) && !tracker.knows(oldContent) {
 				return "", fmt.Errorf("cannot overwrite %s: its current content has not been read in this session — `read` it first", pathArg)
 			}
 

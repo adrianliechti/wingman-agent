@@ -504,6 +504,13 @@ func (a *Agent) buildSession() *sessionState {
 		allowedWriteRoots = append(allowedWriteRoots, ws.MemoryPath)
 	}
 
+	// Agents stage scratch files (downscaled images, montages, compile helpers,
+	// intermediate outputs) under the OS temp dir. Allow the file tools to both
+	// read and write it — the shell tool can already write there, so restricting
+	// only the dedicated tools just pushes work onto shell.
+	allowedReadRoots = append(allowedReadRoots, os.TempDir())
+	allowedWriteRoots = append(allowedWriteRoots, os.TempDir())
+
 	s.execManager = shell.NewExecManager()
 	approvals := shell.NewApprovals()
 

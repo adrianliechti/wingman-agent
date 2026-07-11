@@ -208,7 +208,7 @@ func TestReadTool(t *testing.T) {
 	})
 
 	t.Run("read rejects binary files", func(t *testing.T) {
-		os.WriteFile(filepath.Join(tmpDir, "logo.png"), []byte("\x89PNG\r\n\x1a\n"), 0644)
+		os.WriteFile(filepath.Join(tmpDir, "logo.png"), []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), 0644)
 
 		_, err := readTool.Execute(context.Background(), map[string]any{
 			"file_path": "logo.png",
