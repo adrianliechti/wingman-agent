@@ -6,7 +6,23 @@ vars:
   CONCURRENCY: '{{default "1" .CONCURRENCY}}'
   AGENT_TIMEOUT_MULTIPLIER: '{{default "1" .AGENT_TIMEOUT_MULTIPLIER}}'
   INCLUDE: '{{default "" .INCLUDE}}'
+  EXCLUDE: '{{default "" .EXCLUDE}}'
   LIMIT: '{{default "" .LIMIT}}'
+  EFFORT: '{{default "" .EFFORT}}'
+
+  # Lightweight default set: the full dataset minus tasks that cannot provision
+  # on macOS/Docker (Windows containers) or are too slow under x86 emulation on
+  # Apple Silicon (heavy ML/R/Coq/data-build installs). Override with your own
+  # EXCLUDE to adjust.
+  DEFAULT_EXCLUDE: >-
+    gpt2-codegolf install-windows-3-11
+    build-cython-ext caffe-cifar-10 crack-7z-hash custom-memory-heap-crash
+    fix-git mteb-leaderboard mteb-retrieve
+    bn-fit-modify compile-compcert prove-plus-comm
+    hf-model-inference mcmc-sampling-stan rstan-to-pystan
+    pytorch-model-cli pytorch-model-recovery
+    torch-pipeline-parallelism torch-tensor-parallelism
+    sam-cell-seg train-fasttext reshard-c4-data
 
 tasks:
   setup:
@@ -60,9 +76,21 @@ tasks:
 
           args+=(--ae "WINGMAN_ELICITATION=accept")
 
+          # Disposable task container: let the file tools reach the whole
+          # filesystem (e.g. /etc configs) like the shell tool already can,
+          # instead of forcing a shell fallback on system-admin tasks.
+          args+=(--ae "WINGMAN_SANDBOX=off")
+
+          if [[ -n "{{.EFFORT}}" ]]; then
+            args+=(--ae "WINGMAN_EFFORT={{.EFFORT}}")
+          fi
+
           if [[ -n "{{.INCLUDE}}" ]]; then
             args+=(--include-task-name "{{.INCLUDE}}")
           fi
+          for x in {{.EXCLUDE}}; do
+            args+=(--exclude-task-name "terminal-bench/$x")
+          done
           if [[ -n "{{.LIMIT}}" ]]; then
             args+=(--n-tasks "{{.LIMIT}}")
           fi
@@ -87,6 +115,13 @@ tasks:
           fi
           exec "${args[@]}"
         '
+
+  default:
+    desc: Run the lightweight default set (skips Windows/heavy-ML tasks that can't provision or are too slow on macOS)
+    cmds:
+      - task: tbench
+        vars:
+          EXCLUDE: '{{.DEFAULT_EXCLUDE}}'
 
   quick:
     desc: Run one representative task from the official Terminal-Bench 2 dataset

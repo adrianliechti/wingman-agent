@@ -63,6 +63,12 @@ func ensurePathInWorkspaceFS(pathArg, workingDir, action string) (string, error)
 }
 
 func matchAllowedRoot(absPath string, allowedRoots []string) (rootClean, sub string, ok bool) {
+	for _, r := range allowedRoots {
+		if r == "*" {
+			return cleanPath(absPath), "", true
+		}
+	}
+
 	if rootClean, sub, ok = matchAllowedRootLiteral(cleanPath(absPath), allowedRoots); ok {
 		return rootClean, sub, true
 	}

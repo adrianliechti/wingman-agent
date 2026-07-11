@@ -82,6 +82,7 @@ func New(ws *code.Workspace, cfg *harness.Config, ui code.UI) *Agent {
 		cfg:         cfg,
 		ui:          ui,
 		modelID:     harness.DefaultModel(),
+		effortID:    harness.DefaultEffort(),
 		sessionsDir: filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
 		sessions:    map[string]*sessionState{},
 	}
@@ -510,6 +511,16 @@ func (a *Agent) buildSession() *sessionState {
 	// only the dedicated tools just pushes work onto shell.
 	allowedReadRoots = append(allowedReadRoots, os.TempDir())
 	allowedWriteRoots = append(allowedWriteRoots, os.TempDir())
+
+	// WINGMAN_SANDBOX=off lifts the workspace path restriction entirely so the
+	// file tools reach the whole filesystem like the shell tool already does —
+	// e.g. reading and editing /etc configs on system-administration tasks. "*"
+	// is the wildcard root the fs matcher treats as "any absolute path": a
+	// platform-agnostic marker, avoiding a fragile per-OS filesystem-root path.
+	if harness.SandboxDisabled() {
+		allowedReadRoots = append(allowedReadRoots, "*")
+		allowedWriteRoots = append(allowedWriteRoots, "*")
+	}
 
 	s.execManager = shell.NewExecManager()
 	approvals := shell.NewApprovals()
