@@ -1,25 +1,31 @@
 {
   "id": "wingman",
   "name": "Wingman",
-  "version": "0.10.4",
+  "version": "0.10.6",
   "description": "AI coding and terminal agent with an ACP stdio interface",
   "repository": "https://github.com/adrianliechti/wingman-agent",
   "website": "https://github.com/adrianliechti/wingman-agent",
-  "authors": ["Adrian Liechti"],
+  "authors": [
+    "Adrian Liechti"
+  ],
   "license": "MIT",
   "distribution": {
     "binary": {
       "linux-x86_64": {
-        "archive": "https://github.com/adrianliechti/wingman-agent/releases/download/v0.10.4/wingman-agent_0.10.4_linux_amd64.tar.gz",
+        "archive": "https://github.com/adrianliechti/wingman-agent/releases/download/v0.10.6/wingman-agent_0.10.6_linux_amd64.tar.gz",
         "cmd": "./wingman",
-        "args": ["acp"],
-        "checksum": "0fbe58274b6bd8f76f95f0e5db2ca7283e83c57c3f6cf9f2378db23f23ba17e4"
+        "args": [
+          "acp"
+        ],
+        "checksum": "bcbe66c560dda384461b3f550ce76b08fcf5df8ebf223988959f007bf81bcd14"
       },
       "linux-aarch64": {
-        "archive": "https://github.com/adrianliechti/wingman-agent/releases/download/v0.10.4/wingman-agent_0.10.4_linux_arm64.tar.gz",
+        "archive": "https://github.com/adrianliechti/wingman-agent/releases/download/v0.10.6/wingman-agent_0.10.6_linux_arm64.tar.gz",
         "cmd": "./wingman",
-        "args": ["acp"],
-        "checksum": "7b492332ac3d72ab828a32a99d37bf1d424392cc30e47579c5b7f399a0ddf4ec"
+        "args": [
+          "acp"
+        ],
+        "checksum": "b266b1370f8a1dd3afe411e6de83847a29ea70221924bade729d6778a8bd2a2a"
       }
     }
   }

@@ -6,7 +6,23 @@ vars:
   CONCURRENCY: '{{default "1" .CONCURRENCY}}'
   AGENT_TIMEOUT_MULTIPLIER: '{{default "1" .AGENT_TIMEOUT_MULTIPLIER}}'
   INCLUDE: '{{default "" .INCLUDE}}'
+  EXCLUDE: '{{default "" .EXCLUDE}}'
   LIMIT: '{{default "" .LIMIT}}'
+  EFFORT: '{{default "" .EFFORT}}'
+  RETRIES: '{{default "2" .RETRIES}}'
+
+  # Lightweight default set: the full dataset minus tasks that genuinely cannot
+  # run on this host — Windows/nested-virt containers, and heavy ML/R/Coq/physics
+  # installs that time out under x86 emulation on Apple Silicon. Transient Docker
+  # image-pull failures (network EOF) are NOT excluded here; RETRIES recovers
+  # those. Override with your own EXCLUDE to adjust.
+  DEFAULT_EXCLUDE: >-
+    install-windows-3-11 gpt2-codegolf qemu-alpine-ssh qemu-startup
+    compile-compcert fix-ocaml-gc prove-plus-comm
+    bn-fit-modify mcmc-sampling-stan rstan-to-pystan
+    caffe-cifar-10 hf-model-inference pytorch-model-cli pytorch-model-recovery
+    torch-pipeline-parallelism torch-tensor-parallelism train-fasttext
+    mteb-leaderboard mteb-retrieve sam-cell-seg reshard-c4-data tune-mjcf
 
 tasks:
   setup:
@@ -54,15 +70,28 @@ tasks:
             --model "{{.MODEL}}"
             --n-concurrent "{{.CONCURRENCY}}"
             --agent-timeout-multiplier "{{.AGENT_TIMEOUT_MULTIPLIER}}"
+            --max-retries "{{.RETRIES}}"
             --jobs-dir bench/jobs
             --yes
           )
 
           args+=(--ae "WINGMAN_ELICITATION=accept")
 
-          if [[ -n "{{.INCLUDE}}" ]]; then
-            args+=(--include-task-name "{{.INCLUDE}}")
+          # Disposable task container: let the file tools reach the whole
+          # filesystem (e.g. /etc configs) like the shell tool already can,
+          # instead of forcing a shell fallback on system-admin tasks.
+          args+=(--ae "WINGMAN_SANDBOX=off")
+
+          if [[ -n "{{.EFFORT}}" ]]; then
+            args+=(--ae "WINGMAN_EFFORT={{.EFFORT}}")
           fi
+
+          for i in {{.INCLUDE}}; do
+            args+=(--include-task-name "terminal-bench/$i")
+          done
+          for x in {{.EXCLUDE}}; do
+            args+=(--exclude-task-name "terminal-bench/$x")
+          done
           if [[ -n "{{.LIMIT}}" ]]; then
             args+=(--n-tasks "{{.LIMIT}}")
           fi
@@ -88,13 +117,20 @@ tasks:
           exec "${args[@]}"
         '
 
+  default:
+    desc: Run the lightweight default set (skips Windows/heavy-ML tasks that can't provision or are too slow on macOS)
+    cmds:
+      - task: tbench
+        vars:
+          EXCLUDE: '{{.DEFAULT_EXCLUDE}}'
+
   quick:
     desc: Run one representative task from the official Terminal-Bench 2 dataset
     cmds:
       - task: tbench
         vars:
           CONCURRENCY: "1"
-          INCLUDE: terminal-bench/openssl-selfsigned-cert
+          INCLUDE: openssl-selfsigned-cert
           LIMIT: "1"
 
   clean:

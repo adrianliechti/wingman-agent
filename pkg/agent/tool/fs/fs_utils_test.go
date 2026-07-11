@@ -75,6 +75,29 @@ func TestReadBinaryDetectionByContent(t *testing.T) {
 	}
 }
 
+func TestSandboxWildcardRoot(t *testing.T) {
+	root, _, cleanup := createTestRoot(t)
+	defer cleanup()
+
+	outside := filepath.Join(os.TempDir(), "wingman-wildcard-root-test.txt")
+	if err := os.WriteFile(outside, []byte("system config"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(outside)
+
+	if _, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": outside}); err == nil {
+		t.Fatal("expected outside-workspace rejection without a wildcard root")
+	}
+
+	out, err := ReadTool(root, "*").Execute(context.Background(), map[string]any{"file_path": outside})
+	if err != nil {
+		t.Fatalf("wildcard root read failed: %v", err)
+	}
+	if !strings.Contains(out, "system config") {
+		t.Errorf("expected file content, got: %s", out)
+	}
+}
+
 func TestEditPreservesBOMAndLineEndings(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()

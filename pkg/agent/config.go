@@ -179,9 +179,30 @@ func DefaultModel() string {
 	return os.Getenv("OPENAI_DEFAULT_MODEL")
 }
 
+// DefaultEffort returns the reasoning effort requested via WINGMAN_EFFORT.
+// Empty (or "auto") leaves the provider default in place. Unrecognized values
+// are ignored so a typo cannot silently pin an unexpected effort.
+func DefaultEffort() string {
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("WINGMAN_EFFORT"))); v {
+	case "none", "low", "medium", "high", "xhigh", "max":
+		return v
+	default:
+		return ""
+	}
+}
+
 func envBool(name string) bool {
 	switch strings.ToLower(os.Getenv(name)) {
 	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func SandboxDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WINGMAN_SANDBOX"))) {
+	case "off", "false", "0", "no", "disabled":
 		return true
 	default:
 		return false
