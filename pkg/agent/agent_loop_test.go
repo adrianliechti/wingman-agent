@@ -118,7 +118,7 @@ func TestCompleteClassifiesTransientTerminalFailureBeforeOutput(t *testing.T) {
 	}
 }
 
-func TestCompleteDoesNotRetryTerminalFailureAfterOutput(t *testing.T) {
+func TestCompleteRetriesTransientTerminalFailureAfterOutput(t *testing.T) {
 	client := streamingTestClient(func(*http.Request) string {
 		return "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.failed\",\"sequence_number\":2,\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"try again\"}}}\n\n"
 	})
@@ -127,8 +127,8 @@ func TestCompleteDoesNotRetryTerminalFailureAfterOutput(t *testing.T) {
 	if err == nil {
 		t.Fatal("complete error = nil, want response failure")
 	}
-	if isRecoverableError(err) {
-		t.Fatalf("error = %v, want non-recoverable after output", err)
+	if !isRecoverableError(err) {
+		t.Fatalf("error = %v, want recoverable transient failure", err)
 	}
 }
 
@@ -264,7 +264,7 @@ func TestCompleteRejectsStreamWithoutTerminalEvent(t *testing.T) {
 	}
 }
 
-func TestCompleteDoesNotRetryStreamWithoutTerminalAfterOutput(t *testing.T) {
+func TestCompleteRetriesStreamWithoutTerminalAfterOutput(t *testing.T) {
 	client := streamingTestClient(func(*http.Request) string {
 		return "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"partial\"}\n\ndata: [DONE]\n\n"
 	})
@@ -273,7 +273,7 @@ func TestCompleteDoesNotRetryStreamWithoutTerminalAfterOutput(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an incomplete stream error")
 	}
-	if isRecoverableError(err) {
-		t.Fatalf("post-output incomplete stream must not be replayed: %v", err)
+	if !isRecoverableError(err) {
+		t.Fatalf("post-output incomplete stream should be retryable: %v", err)
 	}
 }

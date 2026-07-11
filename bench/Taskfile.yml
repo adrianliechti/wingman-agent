@@ -4,6 +4,7 @@ vars:
   MODEL: '{{default "openai/gpt-5.4" .MODEL}}'
   WINGMAN_MODEL: '{{default "gpt-5.4" .WINGMAN_MODEL}}'
   CONCURRENCY: '{{default "1" .CONCURRENCY}}'
+  AGENT_TIMEOUT_MULTIPLIER: '{{default "1" .AGENT_TIMEOUT_MULTIPLIER}}'
   INCLUDE: '{{default "" .INCLUDE}}'
   LIMIT: '{{default "" .LIMIT}}'
 
@@ -52,6 +53,7 @@ tasks:
             --agent bench.tbench.agent:WingmanAgent
             --model "{{.MODEL}}"
             --n-concurrent "{{.CONCURRENCY}}"
+            --agent-timeout-multiplier "{{.AGENT_TIMEOUT_MULTIPLIER}}"
             --jobs-dir bench/jobs
             --yes
           )
@@ -77,6 +79,12 @@ tasks:
             args+=(--ae "OPENAI_DEFAULT_MODEL={{.WINGMAN_MODEL}}")
           fi
 
+          # Keep the host awake for the whole run; a sleeping laptop suspends
+          # the long-lived streaming connections and fails trials mid-turn.
+          # caffeinate is macOS-only, so fall back to a plain exec elsewhere.
+          if command -v caffeinate >/dev/null 2>&1; then
+            exec caffeinate -is "${args[@]}"
+          fi
           exec "${args[@]}"
         '
 
