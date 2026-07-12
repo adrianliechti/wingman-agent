@@ -10,6 +10,24 @@ tasks:
       - npm install
       - npm run build
 
+  test:cli:
+    desc: Run terminal UI end-to-end tests
+    cmds:
+      - go test -tags=e2e -run TestTUIE2E -count=1 -v ./pkg/tui/code
+
+  test:web:
+    desc: Build and run browser end-to-end tests
+    deps: [ui]
+    dir: server/ui
+    cmds:
+      - npm run test:web
+
+  test:e2e:
+    desc: Run all terminal and browser end-to-end tests
+    cmds:
+      - task: test:cli
+      - task: test:web
+
   run:cli:
     desc: Run the agent TUI
     cmds:

@@ -678,6 +678,9 @@ export function useWebSocket() {
 				images,
 			});
 			if (!sent) return false;
+			if (intent === "steer") {
+				streamRefs.current[sessionId] = emptyStreamRefs();
+			}
 			updateSession(sessionId, (sess) => ({
 				...sess,
 				pendingInputs: upsertPending(sess.pendingInputs, {

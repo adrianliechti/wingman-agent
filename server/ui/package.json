@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e": "npm run test:cli && npm run test:web",
+    "test:cli": "go test -tags=e2e -run TestTUIE2E -count=1 -v ../../pkg/tui/code",
+    "test:web": "go test -tags=e2e -run TestWebUIE2E -count=1 -v .."
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -28,6 +31,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@playwright/test": "^1.61.1",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
