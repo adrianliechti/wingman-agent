@@ -22,6 +22,7 @@ type session struct {
 
 	mu             sync.Mutex
 	modelID        string
+	modelOverride  bool
 	effort         string
 	mode           string
 	mcpServers     []acp.McpServer
@@ -39,6 +40,7 @@ func newSession(id acp.SessionId, cwd, model, effort string, additionalDirs []st
 		id:             id,
 		cwd:            cwd,
 		modelID:        model,
+		modelOverride:  model != "" && model != "default",
 		effort:         effort,
 		mode:           defaultModeID,
 		additionalDirs: append([]string(nil), additionalDirs...),
@@ -68,8 +70,8 @@ func (s *session) close() {
 	}
 }
 
-func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, path string, env []string, prompt []acp.ContentBlock) (acp.StopReason, *acp.Usage, error) {
-	p, err := s.ensureProc(conn, path, env)
+func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, path string, env []string, models []ModelEntry, prompt []acp.ContentBlock) (acp.StopReason, *acp.Usage, error) {
+	p, err := s.ensureProc(conn, path, env, models)
 	if err != nil {
 		return "", nil, err
 	}
@@ -85,7 +87,9 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pa
 		s.mu.Unlock()
 	}()
 
+	p.beginTurn()
 	if err := p.out.writeJSON(promptMessage(prompt)); err != nil {
+		p.finishTurn()
 		s.dropProc(p)
 		return "", nil, fmt.Errorf("write prompt: %w", err)
 	}
@@ -95,7 +99,8 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pa
 
 		_ = p.out.writeJSON(interruptRequest())
 		select {
-		case <-p.results:
+		case r := <-p.results:
+			return acp.StopReasonCancelled, r.usage, nil
 		case <-p.dead:
 		case <-time.After(5 * time.Second):
 			s.dropProc(p)
@@ -151,7 +156,7 @@ func (s *session) pushTitleUpdate(ctx context.Context, conn *acp.AgentSideConnec
 	})
 }
 
-func (s *session) ensureProc(conn *acp.AgentSideConnection, path string, env []string) (*claudeProc, error) {
+func (s *session) ensureProc(conn *acp.AgentSideConnection, path string, env []string, models []ModelEntry) (*claudeProc, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -188,16 +193,19 @@ func (s *session) ensureProc(conn *acp.AgentSideConnection, path string, env []s
 	}
 
 	p := &claudeProc{
-		cmd:     cmd,
-		out:     &streamWriter{w: stdin},
-		stdin:   stdin,
-		sig:     sig,
-		kill:    kill,
-		cwd:     s.cwd,
-		tools:   toolUseCache{},
-		emitted: newToolCallTracker(),
-		results: make(chan turnResult, 1),
-		dead:    make(chan struct{}),
+		cmd:             cmd,
+		out:             &streamWriter{w: stdin},
+		stdin:           stdin,
+		sig:             sig,
+		kill:            kill,
+		cwd:             s.cwd,
+		session:         s,
+		models:          append([]ModelEntry(nil), models...),
+		tools:           toolUseCache{},
+		emitted:         newToolCallTracker(),
+		subagentParents: make(map[string]string),
+		results:         make(chan turnResult, 1),
+		dead:            make(chan struct{}),
 	}
 	go p.read(procCtx, conn, s.id, stdout)
 
@@ -228,10 +236,40 @@ type claudeProc struct {
 	sig     string
 	kill    context.CancelFunc
 	cwd     string
+	session *session
+	models  []ModelEntry
 	tools   toolUseCache
 	emitted *toolCallTracker
-	results chan turnResult
-	dead    chan struct{}
+
+	turnMu          sync.Mutex
+	turnActive      bool
+	subagentMu      sync.Mutex
+	subagentParents map[string]string
+	results         chan turnResult
+	dead            chan struct{}
+}
+
+func (p *claudeProc) beginTurn() {
+	p.turnMu.Lock()
+	p.turnActive = true
+	p.turnMu.Unlock()
+}
+
+func (p *claudeProc) finishTurn() bool {
+	p.turnMu.Lock()
+	defer p.turnMu.Unlock()
+	wasActive := p.turnActive
+	p.turnActive = false
+	return wasActive
+}
+
+func (p *claudeProc) parentForAgent(agentID string) string {
+	if agentID == "" {
+		return ""
+	}
+	p.subagentMu.Lock()
+	defer p.subagentMu.Unlock()
+	return p.subagentParents[agentID]
 }
 
 type turnResult struct {
@@ -263,7 +301,7 @@ func (p *claudeProc) shutdown() {
 
 func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, r io.Reader) {
 	defer close(p.dead)
-	app := &approver{ctx: ctx, conn: conn, sid: sid, out: p.out, cwd: p.cwd, emitted: p.emitted}
+	app := &approver{ctx: ctx, conn: conn, sid: sid, out: p.out, cwd: p.cwd, emitted: p.emitted, parentForAgent: p.parentForAgent}
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -283,11 +321,11 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 				fmt.Fprintf(os.Stderr, "claude-acp: emit stream event: %v\n", err)
 			}
 		case "assistant":
-			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools, p.emitted, true); err != nil {
+			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools, p.emitted, true, env.ParentToolUseID); err != nil {
 				fmt.Fprintf(os.Stderr, "claude-acp: emit assistant: %v\n", err)
 			}
 		case "user":
-			if err := emitToolResults(ctx, conn, sid, env.Message, p.tools); err != nil {
+			if err := emitToolResults(ctx, conn, sid, env.Message, p.tools, env.ParentToolUseID); err != nil {
 				fmt.Fprintf(os.Stderr, "claude-acp: emit tool result: %v\n", err)
 			}
 		case "control_request":
@@ -297,6 +335,7 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 			}
 		case "result":
 			tr, usageUpd := resultToTurn(line)
+			p.finishTurn()
 			if usageUpd != nil {
 				_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: *usageUpd})
 			}
@@ -304,8 +343,85 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 			case p.results <- tr:
 			default:
 			}
+		case "system":
+			p.handleSystem(ctx, conn, sid, env)
 		}
 	}
+}
+
+func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) {
+	switch env.Subtype {
+	case "session_state_changed":
+		if env.State == "idle" && p.finishTurn() {
+			select {
+			case p.results <- turnResult{err: acp.NewInternalError("claude went idle without producing a result; partial output may be incomplete")}:
+			default:
+			}
+		}
+
+	case "model_refusal_fallback":
+		if env.OriginalModel == "" || env.FallbackModel == "" {
+			return
+		}
+		category := ""
+		if env.RefusalCategory != "" {
+			category = " (" + env.RefusalCategory + ")"
+		}
+		outcome := "The session will continue on " + env.FallbackModel + "."
+		if env.Direction == "revert" {
+			outcome = "The session stays on " + env.OriginalModel + "."
+		}
+		message := fmt.Sprintf("**Model fallback:** %s declined this request%s; retried with %s. %s", env.OriginalModel, category, env.FallbackModel, outcome)
+		if env.RefusalExplanation != "" {
+			message += "\n\n" + env.RefusalExplanation
+		}
+		_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdateAgentMessageText(message)})
+		if env.Direction != "revert" {
+			p.applyFallbackModel(ctx, conn, sid, env.FallbackModel)
+		}
+
+	case "task_started":
+		if env.TaskID != "" && env.ToolUseID != "" {
+			p.subagentMu.Lock()
+			p.subagentParents[env.TaskID] = env.ToolUseID
+			p.subagentMu.Unlock()
+		}
+	case "task_notification":
+		p.subagentMu.Lock()
+		delete(p.subagentParents, env.TaskID)
+		p.subagentMu.Unlock()
+	case "task_updated":
+		if env.Patch.Status == "completed" || env.Patch.Status == "failed" || env.Patch.Status == "killed" {
+			p.subagentMu.Lock()
+			delete(p.subagentParents, env.TaskID)
+			p.subagentMu.Unlock()
+		}
+	}
+}
+
+func (p *claudeProc) applyFallbackModel(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, fallback string) {
+	modelID := fallback
+	if m := resolveModel(p.models, fallback); m != nil {
+		modelID = m.ID
+	}
+
+	p.session.mu.Lock()
+	p.session.modelID = modelID
+	p.session.modelOverride = false
+	if m := findModel(p.models, modelID); m != nil && !isValidEffort(m, p.session.effort) {
+		p.session.effort = "default"
+	}
+	p.sig = p.session.spawnSigLocked()
+	effort := p.session.effort
+	p.session.mu.Unlock()
+
+	_ = conn.SessionUpdate(ctx, acp.SessionNotification{
+		SessionId: sid,
+		Update: acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
+			SessionUpdate: "config_option_update",
+			ConfigOptions: buildConfigOptions(p.models, modelID, effort),
+		}},
+	})
 }
 
 func resultToTurn(line []byte) (turnResult, *acp.SessionUpdate) {
@@ -325,6 +441,9 @@ func resultOutcome(r cliResult) turnResult {
 	case "success", "error_during_execution":
 		if r.StopReason == "max_tokens" {
 			return turnResult{stop: acp.StopReasonMaxTokens}
+		}
+		if r.StopReason == "refusal" {
+			return turnResult{stop: acp.StopReasonRefusal}
 		}
 		if r.IsError {
 			return turnResult{err: acp.NewInternalError(resultErrMessage(r))}
@@ -443,7 +562,7 @@ func (s *session) cliArgsLocked() []string {
 	if cfg := mcpConfigJSON(s.mcpServers); cfg != "" {
 		args = append(args, "--mcp-config", cfg)
 	}
-	if s.modelID != "" && s.modelID != "default" {
+	if s.modelID != "" && s.modelID != "default" && (s.resumeFrom == "" || s.modelOverride) {
 		args = append(args, "--model", s.modelID)
 	}
 	if s.effort != "" && s.effort != "default" {

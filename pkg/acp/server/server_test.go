@@ -248,8 +248,8 @@ func TestACPTaskTurnWritesFileAndReportsUsage(t *testing.T) {
 	if response.Usage == nil {
 		t.Fatal("prompt response did not include usage")
 	}
-	if response.Usage.InputTokens != 24 || response.Usage.OutputTokens != 8 || response.Usage.TotalTokens != 32 {
-		t.Fatalf("usage = %+v, want input=24 output=8 total=32", *response.Usage)
+	if response.Usage.InputTokens != 18 || response.Usage.OutputTokens != 8 || response.Usage.TotalTokens != 32 {
+		t.Fatalf("usage = %+v, want input=18 cached=6 output=8 total=32", *response.Usage)
 	}
 	if response.Usage.CachedReadTokens == nil || *response.Usage.CachedReadTokens != 6 {
 		t.Fatalf("cached usage = %v, want 6", response.Usage.CachedReadTokens)

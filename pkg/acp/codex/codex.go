@@ -263,10 +263,14 @@ type fileApprovalResponse struct {
 }
 
 type elicitationParams struct {
-	ThreadID   string `json:"threadId"`
-	ServerName string `json:"serverName"`
-	Mode       string `json:"mode"`
-	Message    string `json:"message"`
+	ThreadID        string          `json:"threadId"`
+	ServerName      string          `json:"serverName"`
+	Mode            string          `json:"mode"`
+	Message         string          `json:"message"`
+	RequestedSchema json.RawMessage `json:"requestedSchema"`
+	URL             string          `json:"url"`
+	ElicitationID   string          `json:"elicitationId"`
+	Meta            map[string]any  `json:"_meta"`
 }
 
 type elicitationResponse struct {

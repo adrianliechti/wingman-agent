@@ -72,6 +72,26 @@ type historyHeader struct {
 type historyHeaderMessage struct {
 	Role    string          `json:"role,omitempty"`
 	Content json.RawMessage `json:"content,omitempty"`
+	Model   string          `json:"model,omitempty"`
+}
+
+func scanSessionModel(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var model string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for scanner.Scan() {
+		var h historyHeader
+		if json.Unmarshal(scanner.Bytes(), &h) == nil && h.Type == "assistant" && h.Message.Model != "" {
+			model = h.Message.Model
+		}
+	}
+	return model
 }
 
 func listProjectSessions(cwd string) ([]acp.SessionInfo, error) {
@@ -287,11 +307,11 @@ func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 		}
 		switch env.Type {
 		case "user":
-			if err := replayUserMessage(ctx, conn, sid, env.Message, cache); err != nil {
+			if err := replayUserMessage(ctx, conn, sid, env.Message, cache, env.ParentToolUseID); err != nil {
 				return err
 			}
 		case "assistant":
-			if err := emitAssistant(ctx, conn, sid, env.Message, cwd, cache, nil, false); err != nil {
+			if err := emitAssistant(ctx, conn, sid, env.Message, cwd, cache, nil, false, env.ParentToolUseID); err != nil {
 				return err
 			}
 		}
@@ -312,7 +332,7 @@ func stripMarkerTags(text string) (string, bool) {
 	return stripped, true
 }
 
-func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache) error {
+func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache, parentToolUseID string) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -368,9 +388,11 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 			if content := toolResultContent(name, b); len(content) > 0 {
 				opts = append(opts, acp.WithUpdateContent(content))
 			}
+			u := acp.UpdateToolCall(acp.ToolCallId(b.ToolUseID), opts...)
+			withClaudeToolMeta(&u, name, parentToolUseID)
 			if err := conn.SessionUpdate(ctx, acp.SessionNotification{
 				SessionId: sid,
-				Update:    acp.UpdateToolCall(acp.ToolCallId(b.ToolUseID), opts...),
+				Update:    u,
 			}); err != nil {
 				return err
 			}

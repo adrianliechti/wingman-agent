@@ -94,10 +94,11 @@ func modelsFromCLI(list []cliModel) []ModelEntry {
 			efforts = m.SupportedEffortLevels
 		}
 		out = append(out, ModelEntry{
-			ID:           m.Value,
-			Name:         name,
-			Description:  m.Description,
-			EffortLevels: efforts,
+			ID:            m.Value,
+			Name:          name,
+			Description:   m.Description,
+			ResolvedModel: m.ResolvedModel,
+			EffortLevels:  efforts,
 		})
 	}
 	return out
@@ -153,6 +154,7 @@ type cliModel struct {
 	Value                 string   `json:"value"`
 	DisplayName           string   `json:"displayName"`
 	Description           string   `json:"description"`
+	ResolvedModel         string   `json:"resolvedModel"`
 	SupportsEffort        bool     `json:"supportsEffort"`
 	SupportedEffortLevels []string `json:"supportedEffortLevels"`
 }

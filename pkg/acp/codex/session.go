@@ -14,16 +14,20 @@ import (
 type session struct {
 	id acp.SessionId
 
-	mu            sync.Mutex
-	modelID       string
-	effort        string
-	mode          string
-	currentTurnID string
-	cancelTurn    context.CancelFunc
+	mu                    sync.Mutex
+	modelID               string
+	effort                string
+	mode                  string
+	additionalDirectories []string
+	currentTurnID         string
+	cancelTurn            context.CancelFunc
 }
 
-func newSession(id acp.SessionId, model, effort string) *session {
-	return &session{id: id, modelID: model, effort: effort, mode: defaultModeID}
+func newSession(id acp.SessionId, model, effort string, additionalDirectories []string) *session {
+	return &session{
+		id: id, modelID: model, effort: effort, mode: defaultModeID,
+		additionalDirectories: append([]string(nil), additionalDirectories...),
+	}
 }
 
 func (s *session) interrupt(ctx context.Context, cc *codexClient) {
@@ -40,7 +44,7 @@ func (s *session) interrupt(ctx context.Context, cc *codexClient) {
 	}
 }
 
-func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc *codexClient, prompt []acp.ContentBlock) (acp.StopReason, *acp.Usage, error) {
+func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc *codexClient, clientCapabilities acp.ClientCapabilities, prompt []acp.ContentBlock) (acp.StopReason, *acp.Usage, error) {
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -51,12 +55,16 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 	model := s.modelID
 	effort := s.effort
 	mode := modeFor(s.mode)
+	additionalDirectories := append([]string(nil), s.additionalDirectories...)
 	s.mu.Unlock()
 
 	disp := newEventDispatcher(turnCtx, conn, s.id)
-	app := newApprover(turnCtx, conn, s.id)
+	app := newApprover(turnCtx, conn, s.id, clientCapabilities)
 	cc.setThreadHandlers(threadID, &threadHandlers{
-		onNotification: disp.handle,
+		onNotification: func(method string, params json.RawMessage) {
+			app.handleNotification(method)
+			disp.handle(method, params)
+		},
 		onExecApproval: app.handleExec,
 		onFileApproval: app.handleFile,
 		onElicitation:  app.handleElicitation,
@@ -67,7 +75,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 		ThreadID:       threadID,
 		Input:          promptToInput(prompt),
 		ApprovalPolicy: mode.approvalPolicy,
-		SandboxPolicy:  mode.sandboxPolicy,
+		SandboxPolicy:  sandboxPolicyWithRoots(mode.sandboxPolicy, additionalDirectories),
 	}
 	if model != "" && model != "default" {
 		params.Model = model
@@ -106,6 +114,22 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 		}
 		return stopReasonFor(tc.Turn.Status), disp.getUsage(), nil
 	}
+}
+
+func sandboxPolicyWithRoots(policy any, roots []string) any {
+	if len(roots) == 0 {
+		return policy
+	}
+	original, ok := policy.(map[string]any)
+	if !ok || original["type"] != "workspaceWrite" {
+		return policy
+	}
+	copy := make(map[string]any, len(original))
+	for key, value := range original {
+		copy[key] = value
+	}
+	copy["writableRoots"] = append([]string(nil), roots...)
+	return copy
 }
 
 func streamThreadHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, turns []rawTurn, toolOutputs map[string]string) {
@@ -158,17 +182,18 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 		_ = json.Unmarshal(raw, &it)
 		for _, input := range it.Content {
 			if block, ok := userInputToBlock(input); ok {
-				send(acp.UpdateUserMessage(block))
+				send(userMessageUpdate(block, probe.ID))
 			}
 		}
 
 	case "agentMessage":
 		var it struct {
-			Text string `json:"text"`
+			Text  string `json:"text"`
+			Phase string `json:"phase"`
 		}
 		_ = json.Unmarshal(raw, &it)
 		if it.Text != "" {
-			send(acp.UpdateAgentMessageText(it.Text))
+			send(agentMessageUpdate(it.Text, probe.ID, it.Phase))
 		}
 
 	case "reasoning":
@@ -178,7 +203,7 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 		}
 		_ = json.Unmarshal(raw, &it)
 		if text := joinReasoning(it.Summary, it.Content); text != "" {
-			send(acp.UpdateAgentThoughtText(text))
+			send(agentThoughtUpdate(text, probe.ID))
 		}
 
 	case "plan":

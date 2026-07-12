@@ -2,7 +2,9 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -25,10 +27,17 @@ type approver struct {
 	ctx       context.Context
 	conn      *acp.AgentSideConnection
 	sessionID acp.SessionId
+	client    acp.ClientCapabilities
+
+	mu          sync.Mutex
+	pendingURLs map[acp.UnstableElicitationId]struct{}
 }
 
-func newApprover(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId) *approver {
-	return &approver{ctx: ctx, conn: conn, sessionID: sid}
+func newApprover(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, client acp.ClientCapabilities) *approver {
+	return &approver{
+		ctx: ctx, conn: conn, sessionID: sid, client: client,
+		pendingURLs: make(map[acp.UnstableElicitationId]struct{}),
+	}
 }
 
 func pendingToolCall(id string, kind acp.ToolKind) acp.ToolCallUpdate {
@@ -92,8 +101,16 @@ func (a *approver) handleFile(p fileApprovalParams) fileApprovalResponse {
 }
 
 func (a *approver) handleElicitation(p elicitationParams) elicitationResponse {
-	if p.Mode != "form" {
-		return elicitationResponse{Action: "decline"}
+	if a.client.Elicitation != nil {
+		switch {
+		case p.Mode == "form" && a.client.Elicitation.Form != nil:
+			return a.handleFormElicitation(p)
+		case p.Mode == "url" && a.client.Elicitation.Url != nil:
+			return a.handleURLElicitation(p)
+		}
+	}
+	if p.Mode != "form" && p.Mode != "openai/form" {
+		return elicitationResponse{Action: "decline", Content: nil, Meta: nil}
 	}
 	title := p.Message
 	if title == "" {
@@ -117,5 +134,95 @@ func (a *approver) handleElicitation(p elicitationParams) elicitationResponse {
 		return elicitationResponse{Action: "accept"}
 	default:
 		return elicitationResponse{Action: "decline"}
+	}
+}
+
+func (a *approver) elicitationMeta(meta map[string]any) map[string]any {
+	out := make(map[string]any, len(meta)+1)
+	for key, value := range meta {
+		out[key] = value
+	}
+	// acp-go-sdk v0.13.5 does not yet expose the request's top-level session
+	// scope. Preserve it in metadata until the generated type catches up.
+	out["sessionId"] = string(a.sessionID)
+	return out
+}
+
+func (a *approver) handleFormElicitation(p elicitationParams) elicitationResponse {
+	var schema acp.UnstableElicitationSchema
+	if len(p.RequestedSchema) > 0 {
+		if err := json.Unmarshal(p.RequestedSchema, &schema); err != nil {
+			return elicitationResponse{Action: "cancel", Content: nil, Meta: nil}
+		}
+	}
+	if schema.Type == "" {
+		schema.Type = acp.UnstableElicitationSchemaTypeObject
+	}
+	if schema.Properties == nil {
+		schema.Properties = map[string]any{}
+	}
+
+	resp, err := a.conn.UnstableCreateElicitation(a.ctx, acp.UnstableCreateElicitationRequest{
+		Form: &acp.UnstableCreateElicitationForm{
+			Meta:            a.elicitationMeta(p.Meta),
+			Message:         p.Message,
+			Mode:            "form",
+			RequestedSchema: schema,
+		},
+	})
+	if err != nil || resp.Cancel != nil {
+		return elicitationResponse{Action: "cancel", Content: nil, Meta: nil}
+	}
+	if resp.Decline != nil {
+		return elicitationResponse{Action: "decline", Content: nil, Meta: resp.Decline.Meta}
+	}
+	if resp.Accept != nil {
+		return elicitationResponse{Action: "accept", Content: resp.Accept.Content, Meta: resp.Accept.Meta}
+	}
+	return elicitationResponse{Action: "cancel", Content: nil, Meta: nil}
+}
+
+func (a *approver) handleURLElicitation(p elicitationParams) elicitationResponse {
+	id := acp.UnstableElicitationId(p.ElicitationID)
+	if id == "" || p.URL == "" {
+		return elicitationResponse{Action: "cancel", Content: nil, Meta: nil}
+	}
+	resp, err := a.conn.UnstableCreateElicitation(a.ctx, acp.UnstableCreateElicitationRequest{
+		Url: &acp.UnstableCreateElicitationUrl{
+			Meta:          a.elicitationMeta(p.Meta),
+			ElicitationId: id,
+			Message:       p.Message,
+			Mode:          "url",
+			Url:           p.URL,
+		},
+	})
+	if err != nil || resp.Cancel != nil {
+		return elicitationResponse{Action: "cancel", Content: nil, Meta: nil}
+	}
+	if resp.Decline != nil {
+		return elicitationResponse{Action: "decline", Content: nil, Meta: resp.Decline.Meta}
+	}
+	if resp.Accept != nil {
+		a.mu.Lock()
+		a.pendingURLs[id] = struct{}{}
+		a.mu.Unlock()
+		return elicitationResponse{Action: "accept", Content: resp.Accept.Content, Meta: resp.Accept.Meta}
+	}
+	return elicitationResponse{Action: "cancel", Content: nil, Meta: nil}
+}
+
+func (a *approver) handleNotification(method string) {
+	if method != "serverRequest/resolved" {
+		return
+	}
+	a.mu.Lock()
+	ids := make([]acp.UnstableElicitationId, 0, len(a.pendingURLs))
+	for id := range a.pendingURLs {
+		ids = append(ids, id)
+	}
+	clear(a.pendingURLs)
+	a.mu.Unlock()
+	for _, id := range ids {
+		_ = a.conn.UnstableCompleteElicitation(a.ctx, acp.UnstableCompleteElicitationNotification{ElicitationId: id})
 	}
 }

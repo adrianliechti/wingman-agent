@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type Agent struct {
@@ -26,13 +28,9 @@ type Agent struct {
 	defaultModel  string
 	defaultEffort string
 
-	modelsMu     sync.Mutex
-	modelsLoaded bool
-	models       []modelEntry
+	models []modelEntry
 
-	providerMu     sync.Mutex
-	providerLoaded bool
-	modelProvider  string
+	clientCapabilities acp.ClientCapabilities
 }
 
 var _ acp.Agent = (*Agent)(nil)
@@ -55,12 +53,7 @@ func (a *Agent) lookup(id acp.SessionId) *session {
 	return a.sessions[id]
 }
 
-func (a *Agent) ensureModels(ctx context.Context) {
-	a.modelsMu.Lock()
-	defer a.modelsMu.Unlock()
-	if a.modelsLoaded {
-		return
-	}
+func (a *Agent) loadModels(ctx context.Context) {
 	var all []codexModel
 	var cursor *string
 	for {
@@ -75,36 +68,29 @@ func (a *Agent) ensureModels(ctx context.Context) {
 		cursor = resp.NextCursor
 	}
 	a.models = modelsFromCodex(all)
-	a.modelsLoaded = true
 }
 
-// resumeModelProvider returns the provider to pin onto resumed threads so they
-// keep using the configured (e.g. Wingman) provider instead of whatever the
-// rollout persisted. Read once from the codex config and cached.
+// resumeModelProvider returns the currently configured provider so resumed
+// threads do not silently switch to the provider persisted in their rollout.
 func (a *Agent) resumeModelProvider(ctx context.Context) string {
-	a.providerMu.Lock()
-	defer a.providerMu.Unlock()
-	if a.providerLoaded {
-		return a.modelProvider
-	}
 	resp, err := a.codex.configRead(ctx, configReadParams{})
 	if err != nil {
 		return ""
 	}
 	if mp, ok := resp.Config["model_provider"].(string); ok {
-		a.modelProvider = mp
+		return mp
 	}
-	a.providerLoaded = true
-	return a.modelProvider
+	return ""
 }
 
-func (a *Agent) Initialize(ctx context.Context, _ acp.InitializeRequest) (acp.InitializeResponse, error) {
+func (a *Agent) Initialize(ctx context.Context, req acp.InitializeRequest) (acp.InitializeResponse, error) {
+	a.clientCapabilities = req.ClientCapabilities
 	if err := a.codex.initialize(ctx, initializeParams{
 		ClientInfo: clientInfo{Name: "codex-acp", Title: "Codex (ACP)", Version: "0.1.0"},
 	}); err != nil {
 		return acp.InitializeResponse{}, fmt.Errorf("codex initialize: %w", err)
 	}
-	a.ensureModels(ctx)
+	a.loadModels(ctx)
 
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
@@ -123,10 +109,11 @@ func (a *Agent) Initialize(ctx context.Context, _ acp.InitializeRequest) (acp.In
 				EmbeddedContext: true,
 			},
 			SessionCapabilities: acp.SessionCapabilities{
-				Close:  &acp.SessionCloseCapabilities{},
-				List:   &acp.SessionListCapabilities{},
-				Resume: &acp.SessionResumeCapabilities{},
-				Delete: &acp.SessionDeleteCapabilities{},
+				AdditionalDirectories: &acp.SessionAdditionalDirectoriesCapabilities{},
+				Close:                 &acp.SessionCloseCapabilities{},
+				List:                  &acp.SessionListCapabilities{},
+				Resume:                &acp.SessionResumeCapabilities{},
+				Delete:                &acp.SessionDeleteCapabilities{},
 			},
 		},
 	}, nil
@@ -141,7 +128,11 @@ func (a *Agent) Logout(context.Context, acp.LogoutRequest) (acp.LogoutResponse, 
 }
 
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
-	startParams := threadStartParams{Cwd: params.Cwd, Config: sessionConfig(params.Cwd, params.McpServers)}
+	cwd, additional, err := acpcommon.NormalizeSessionRoots(params.Cwd, params.AdditionalDirectories)
+	if err != nil {
+		return acp.NewSessionResponse{}, err
+	}
+	startParams := threadStartParams{Cwd: cwd, Config: sessionConfig(cwd, additional, params.McpServers)}
 	if a.defaultModel != "" && a.defaultModel != "default" {
 		startParams.Model = a.defaultModel
 	}
@@ -154,7 +145,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, fmt.Errorf("codex returned empty thread id")
 	}
 
-	s := a.registerSession(acp.SessionId(resp.Thread.ID), resp.Model, derefEffort(resp.ReasoningEffort))
+	s := a.registerSession(acp.SessionId(resp.Thread.ID), resp.Model, derefEffort(resp.ReasoningEffort), additional)
 	return acp.NewSessionResponse{
 		SessionId:     s.id,
 		Modes:         buildSessionModeState(s.mode),
@@ -162,14 +153,14 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	}, nil
 }
 
-func (a *Agent) registerSession(id acp.SessionId, model, effort string) *session {
+func (a *Agent) registerSession(id acp.SessionId, model, effort string, additionalDirectories []string) *session {
 	if model == "" {
 		model = a.defaultModel
 	}
 	if effort == "" {
 		effort = a.defaultEffort
 	}
-	s := newSession(id, model, effort)
+	s := newSession(id, model, effort, additionalDirectories)
 	a.mu.Lock()
 	a.sessions[id] = s
 	a.mu.Unlock()
@@ -183,10 +174,19 @@ func derefEffort(p *string) string {
 	return *p
 }
 
-func sessionConfig(cwd string, servers []acp.McpServer) map[string]any {
+func sessionConfig(cwd string, additionalDirectories []string, servers []acp.McpServer) map[string]any {
 	cfg := map[string]any{}
-	if cwd != "" {
-		cfg["projects"] = map[string]any{cwd: map[string]any{"trust_level": "trusted"}}
+	projects := map[string]any{}
+	for _, root := range append([]string{cwd}, additionalDirectories...) {
+		if root != "" {
+			projects[root] = map[string]any{"trust_level": "trusted"}
+		}
+	}
+	if len(projects) > 0 {
+		cfg["projects"] = projects
+	}
+	if len(additionalDirectories) > 0 {
+		cfg["sandbox_workspace_write"] = map[string]any{"writable_roots": additionalDirectories}
 	}
 	if mcp := mcpServersConfig(servers); len(mcp) > 0 {
 		cfg["mcp_servers"] = mcp
@@ -223,11 +223,11 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	if s == nil {
 		return acp.PromptResponse{}, fmt.Errorf("session %s not found", params.SessionId)
 	}
-	stop, usage, err := s.runTurn(ctx, a.conn, a.codex, params.Prompt)
+	stop, usage, err := s.runTurn(ctx, a.conn, a.codex, a.clientCapabilities, params.Prompt)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-	return acp.PromptResponse{StopReason: stop, Usage: usage}, nil
+	return acp.PromptResponse{StopReason: stop, Usage: usage, UserMessageId: params.MessageId}, nil
 }
 
 func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error {
@@ -365,16 +365,20 @@ func sessionUpdatedAt(unix int64) *string {
 }
 
 func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
+	cwd, additional, err := acpcommon.NormalizeSessionRoots(params.Cwd, params.AdditionalDirectories)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
 	resp, err := a.codex.threadResume(ctx, threadResumeParams{
 		ThreadID:      string(params.SessionId),
-		Cwd:           params.Cwd,
+		Cwd:           cwd,
 		ModelProvider: a.resumeModelProvider(ctx),
-		Config:        sessionConfig(params.Cwd, params.McpServers),
+		Config:        sessionConfig(cwd, additional, params.McpServers),
 	})
 	if err != nil {
 		return acp.ResumeSessionResponse{}, fmt.Errorf("thread/resume: %w", err)
 	}
-	s := a.registerSession(params.SessionId, resp.Model, derefEffort(resp.ReasoningEffort))
+	s := a.registerSession(params.SessionId, resp.Model, derefEffort(resp.ReasoningEffort), additional)
 	return acp.ResumeSessionResponse{
 		Modes:         buildSessionModeState(s.mode),
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
@@ -382,16 +386,20 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 }
 
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+	cwd, additional, err := acpcommon.NormalizeSessionRoots(params.Cwd, params.AdditionalDirectories)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
 	resp, err := a.codex.threadResume(ctx, threadResumeParams{
 		ThreadID:      string(params.SessionId),
-		Cwd:           params.Cwd,
+		Cwd:           cwd,
 		ModelProvider: a.resumeModelProvider(ctx),
-		Config:        sessionConfig(params.Cwd, params.McpServers),
+		Config:        sessionConfig(cwd, additional, params.McpServers),
 	})
 	if err != nil {
 		return acp.LoadSessionResponse{}, fmt.Errorf("thread/resume: %w", err)
 	}
-	s := a.registerSession(params.SessionId, resp.Model, derefEffort(resp.ReasoningEffort))
+	s := a.registerSession(params.SessionId, resp.Model, derefEffort(resp.ReasoningEffort), additional)
 
 	thread := resp.Thread
 	if read, err := a.codex.threadRead(ctx, threadReadParams{ThreadID: string(params.SessionId), IncludeTurns: true}); err == nil {

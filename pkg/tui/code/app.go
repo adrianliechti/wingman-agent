@@ -14,7 +14,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -77,8 +76,6 @@ type App struct {
 	streamingText      string
 	streamingReasoning string
 
-	lspTracker *lsp.DiagnosticTracker
-
 	mouseEnabled bool
 }
 
@@ -94,8 +91,6 @@ func New(ctx context.Context, agent *coder.Agent, sessionID string) *App {
 
 		sessionID:   sessionID,
 		showWelcome: !hasMessages && os.Getenv("WINGMAN_CALLER") != "vscode",
-
-		lspTracker: lsp.NewDiagnosticTracker(),
 
 		mouseEnabled: true,
 	}

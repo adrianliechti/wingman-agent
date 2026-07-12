@@ -27,11 +27,9 @@ type Session struct {
 
 	docVersion int64
 
-	openedDocs map[string]uint64
 	mu         sync.Mutex
-
-	pushDiags   map[string][]Diagnostic
-	pushDiagsMu sync.Mutex
+	openedDocs map[string]uint64
+	pushDiags  map[string][]Diagnostic
 }
 
 const startupTimeout = 30 * time.Second
@@ -83,9 +81,9 @@ func connect(ctx context.Context, workingDir string, server Server) (*Session, e
 				if req.Method == "textDocument/publishDiagnostics" {
 					var params PublishDiagnosticsParams
 					if err := json.Unmarshal(req.Params, &params); err == nil {
-						session.pushDiagsMu.Lock()
+						session.mu.Lock()
 						session.pushDiags[params.URI] = params.Diagnostics
-						session.pushDiagsMu.Unlock()
+						session.mu.Unlock()
 					}
 					return nil, nil
 				}
@@ -241,16 +239,10 @@ func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, er
 }
 
 func (s *Session) PushDiagnostics(uri string) []Diagnostic {
-	s.pushDiagsMu.Lock()
+	s.mu.Lock()
 	diags := s.pushDiags[uri]
-	s.pushDiagsMu.Unlock()
+	s.mu.Unlock()
 	return diags
-}
-
-func (s *Session) ClearPushDiagnostics(uri string) {
-	s.pushDiagsMu.Lock()
-	delete(s.pushDiags, uri)
-	s.pushDiagsMu.Unlock()
 }
 
 func (s *Session) CollectDiagnostics(ctx context.Context, uri string) []Diagnostic {

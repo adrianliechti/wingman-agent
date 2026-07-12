@@ -36,7 +36,3 @@ func (a *App) cycleModel() {
 		})
 	}()
 }
-
-func (a *App) setModel(model string) {
-	_ = a.agent.SetModel(a.ctx, a.sessionID, model)
-}

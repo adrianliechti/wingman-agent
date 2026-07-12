@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -89,7 +90,9 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pr
 
 	select {
 	case <-turnCtx.Done():
-		_ = s.proc.abort(context.Background())
+		abortCtx, abortCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = s.proc.abort(abortCtx)
+		abortCancel()
 		return acp.StopReasonCancelled, nil
 	case <-s.proc.done:
 		return "", errors.New("pi process exited unexpectedly")
@@ -104,10 +107,8 @@ type turn struct {
 	sess *session
 
 	done chan turnResult
-	once sync.Once
 
-	toolsMu sync.Mutex
-	tools   map[string]bool
+	tools map[string]bool
 }
 
 func (t *turn) emit(u acp.SessionUpdate) {
@@ -118,7 +119,10 @@ func (t *turn) emit(u acp.SessionUpdate) {
 }
 
 func (t *turn) resolve(stop acp.StopReason, err error) {
-	t.once.Do(func() { t.done <- turnResult{stop: stop, err: err} })
+	select {
+	case t.done <- turnResult{stop: stop, err: err}:
+	default:
+	}
 }
 
 func (t *turn) onPromptResult(err error) {
@@ -222,12 +226,10 @@ func (t *turn) handleMessageUpdate(raw json.RawMessage) {
 		if tc == nil || tc.ID == "" {
 			return
 		}
-		t.toolsMu.Lock()
 		seen := t.tools[tc.ID]
 		if !seen {
 			t.tools[tc.ID] = true
 		}
-		t.toolsMu.Unlock()
 		if seen {
 			return
 		}
@@ -260,10 +262,8 @@ func (t *turn) handleToolStart(raw json.RawMessage) {
 	_ = json.Unmarshal(p.Args, &args)
 	locs := toolLocations(args, t.sess.cwd)
 
-	t.toolsMu.Lock()
 	seen := t.tools[p.ToolCallID]
 	t.tools[p.ToolCallID] = true
-	t.toolsMu.Unlock()
 
 	if !seen {
 		opts := []acp.ToolCallStartOpt{
@@ -298,6 +298,7 @@ func (t *turn) handleToolUpdate(raw json.RawMessage) {
 	if json.Unmarshal(raw, &p) != nil || p.ToolCallID == "" {
 		return
 	}
+	t.ensureToolStarted(p.ToolCallID)
 
 	opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(acp.ToolCallStatusInProgress)}
 	if text := toolResultToText(p.PartialResult); text != "" {
@@ -315,6 +316,7 @@ func (t *turn) handleToolEnd(raw json.RawMessage) {
 	if json.Unmarshal(raw, &p) != nil || p.ToolCallID == "" {
 		return
 	}
+	t.ensureToolStarted(p.ToolCallID)
 
 	status := acp.ToolCallStatusCompleted
 	if p.IsError {
@@ -327,9 +329,20 @@ func (t *turn) handleToolEnd(raw json.RawMessage) {
 	}
 	t.emit(acp.UpdateToolCall(acp.ToolCallId(p.ToolCallID), opts...))
 
-	t.toolsMu.Lock()
 	delete(t.tools, p.ToolCallID)
-	t.toolsMu.Unlock()
+}
+
+func (t *turn) ensureToolStarted(id string) {
+	seen := t.tools[id]
+	if !seen {
+		t.tools[id] = true
+	}
+	if !seen {
+		t.emit(acp.StartToolCall(acp.ToolCallId(id), "tool",
+			acp.WithStartKind(acp.ToolKindOther),
+			acp.WithStartStatus(acp.ToolCallStatusInProgress),
+		))
+	}
 }
 
 func (t *turn) handleExtensionUI(raw json.RawMessage) {

@@ -7,10 +7,11 @@ import (
 )
 
 type ModelEntry struct {
-	ID           string
-	Name         string
-	Description  string
-	EffortLevels []string
+	ID            string
+	Name          string
+	Description   string
+	ResolvedModel string
+	EffortLevels  []string
 }
 
 func findModel(models []ModelEntry, id string) *ModelEntry {
@@ -35,13 +36,56 @@ func resolveModel(models []ModelEntry, id string) *ModelEntry {
 			return &models[i]
 		}
 	}
+	canonical := canonicalModelID(id)
+	for i := range models {
+		if canonicalModelID(models[i].ID) == canonical {
+			return &models[i]
+		}
+	}
+	for i := range models {
+		if models[i].ID != "default" && models[i].ResolvedModel != "" && canonicalModelID(models[i].ResolvedModel) == canonical {
+			return &models[i]
+		}
+	}
+	for i := range models {
+		if models[i].ResolvedModel != "" && canonicalModelID(models[i].ResolvedModel) == canonical {
+			return &models[i]
+		}
+	}
 	for i := range models {
 		lid, lname := strings.ToLower(models[i].ID), strings.ToLower(models[i].Name)
-		if strings.Contains(lid, want) || strings.Contains(lname, want) {
+		if modelContextHint(models[i].ID) == modelContextHint(id) &&
+			(strings.Contains(lid, want) || strings.Contains(lname, want) || strings.Contains(want, lid)) {
 			return &models[i]
 		}
 	}
 	return nil
+}
+
+func resolveResumedModel(models []ModelEntry, live string) *ModelEntry {
+	canonical := canonicalModelID(live)
+	for i := range models {
+		if models[i].ID == "default" && models[i].ResolvedModel != "" && canonicalModelID(models[i].ResolvedModel) == canonical {
+			return &models[i]
+		}
+	}
+	return resolveModel(models, live)
+}
+
+func canonicalModelID(id string) string {
+	s := strings.ToLower(strings.TrimSpace(id))
+	if strings.HasSuffix(s, "-1m") {
+		s = strings.TrimSuffix(s, "-1m") + "[1m]"
+	}
+	return s
+}
+
+func modelContextHint(id string) string {
+	s := canonicalModelID(id)
+	if i := strings.LastIndex(s, "["); i >= 0 && strings.HasSuffix(s, "]") {
+		return s[i:]
+	}
+	return ""
 }
 
 const (
@@ -70,8 +114,13 @@ func modelConfigOption(models []ModelEntry, currentID string) acp.SessionConfigO
 		}
 		ungrouped = append(ungrouped, opt)
 	}
-	if findModel(models, currentID) == nil && len(models) > 0 {
+	if currentID == "" && len(models) > 0 {
 		currentID = models[0].ID
+	}
+	if currentID != "" && findModel(models, currentID) == nil {
+		ungrouped = append(acp.SessionConfigSelectOptionsUngrouped{
+			{Value: acp.SessionConfigValueId(currentID), Name: currentID},
+		}, ungrouped...)
 	}
 	opt := acp.NewSessionConfigOptionSelect(
 		acp.SessionConfigValueId(currentID),

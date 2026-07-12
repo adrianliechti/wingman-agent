@@ -51,12 +51,13 @@ func permissionOptions() []acp.PermissionOption {
 }
 
 type approver struct {
-	ctx     context.Context
-	conn    *acp.AgentSideConnection
-	sid     acp.SessionId
-	out     *streamWriter
-	cwd     string
-	emitted *toolCallTracker
+	ctx            context.Context
+	conn           *acp.AgentSideConnection
+	sid            acp.SessionId
+	out            *streamWriter
+	cwd            string
+	emitted        *toolCallTracker
+	parentForAgent func(string) string
 }
 
 func pendingToolCall(id string, kind acp.ToolKind) acp.ToolCallUpdate {
@@ -72,6 +73,14 @@ func (a *approver) handle(req controlRequest) {
 
 	name := req.Request.ToolName
 	id := req.Request.ToolUseID
+	agentID := req.Request.AgentID
+	if agentID == "" {
+		agentID = req.AgentID
+	}
+	parentToolUseID := ""
+	if a.parentForAgent != nil {
+		parentToolUseID = a.parentForAgent(agentID)
+	}
 
 	// The CLI can invoke can_use_tool before the assistant message's tool_use
 	// block streams to us, so a permission request can reference a tool_call
@@ -79,13 +88,18 @@ func (a *approver) handle(req controlRequest) {
 	// can always associate the prompt below with a known tool call.
 	if id != "" && shouldEmitToolCall(name) && a.emitted != nil {
 		_ = a.emitted.emit(id, func() error {
-			return a.emitToolCallStart(id, name, req.Request.Input)
+			return a.emitToolCallStart(id, name, req.Request.Input, parentToolUseID)
 		}, func() error {
 			return nil
 		})
 	}
 
 	tc := pendingToolCall(id, toolKindFor(name))
+	claudeMeta := map[string]any{"toolName": name}
+	if parentToolUseID != "" {
+		claudeMeta["parentToolUseId"] = parentToolUseID
+	}
+	tc.Meta = map[string]any{"claudeCode": claudeMeta}
 	title := name
 	if title == "" {
 		title = "Tool call"
@@ -111,10 +125,12 @@ func (a *approver) handle(req controlRequest) {
 	a.respond(req.RequestID, allow, req.Request.Input)
 }
 
-func (a *approver) emitToolCallStart(id, name string, rawInput json.RawMessage) error {
+func (a *approver) emitToolCallStart(id, name string, rawInput json.RawMessage, parentToolUseID string) error {
+	u := toolCallStartUpdate(id, name, rawInput, a.cwd, acp.ToolCallStatusPending)
+	withClaudeToolMeta(&u, name, parentToolUseID)
 	return a.conn.SessionUpdate(a.ctx, acp.SessionNotification{
 		SessionId: a.sid,
-		Update:    toolCallStartUpdate(id, name, rawInput, a.cwd, acp.ToolCallStatusPending),
+		Update:    u,
 	})
 }
 

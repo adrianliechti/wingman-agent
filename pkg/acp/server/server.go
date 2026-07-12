@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -87,6 +86,11 @@ func (s *Server) Initialize(_ context.Context, params acpsdk.InitializeRequest) 
 	s.formElicitation.Store(capabilities != nil && capabilities.Form != nil)
 	return acpsdk.InitializeResponse{
 		ProtocolVersion: acpsdk.ProtocolVersionNumber,
+		AgentInfo: &acpsdk.Implementation{
+			Name:    "wingman-agent",
+			Title:   acpsdk.Ptr("Wingman Agent"),
+			Version: "0.1.0",
+		},
 		AgentCapabilities: acpsdk.AgentCapabilities{
 			LoadSession:        true,
 			PromptCapabilities: acpsdk.PromptCapabilities{Image: true},
@@ -402,13 +406,8 @@ func (s *Server) registerSession(id acpsdk.SessionId, w *workspaceEntry) {
 }
 
 func normalizeCwd(cwd string) (string, error) {
-	if cwd == "" {
-		return "", fmt.Errorf("cwd is required")
-	}
-	if !filepath.IsAbs(cwd) {
-		return "", fmt.Errorf("cwd must be an absolute path (got %q)", cwd)
-	}
-	return filepath.Clean(cwd), nil
+	cwd, _, err := acpcontent.NormalizeSessionRoots(cwd, nil)
+	return cwd, err
 }
 
 func (s *Server) CloseSession(_ context.Context, params acpsdk.CloseSessionRequest) (acpsdk.CloseSessionResponse, error) {
@@ -510,31 +509,32 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	for msg, err := range sess.agent.Send(ctx, string(sess.id), acpcontent.ContentFromBlocks(params.Prompt)) {
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				return promptResponse(sess, acpsdk.StopReasonCancelled), nil
+				return promptResponse(sess, acpsdk.StopReasonCancelled, params.MessageId), nil
 			}
 			notify(acpsdk.UpdateAgentMessageText("error: " + err.Error()))
-			return promptResponse(sess, acpsdk.StopReasonEndTurn), nil
+			return promptResponse(sess, acpsdk.StopReasonEndTurn, params.MessageId), nil
 		}
 		for _, c := range msg.Content {
 			notifyContent(notify, agent.RoleAssistant, c)
 		}
 	}
-	return promptResponse(sess, acpsdk.StopReasonEndTurn), nil
+	return promptResponse(sess, acpsdk.StopReasonEndTurn, params.MessageId), nil
 }
 
-func promptResponse(sess *sessionEntry, reason acpsdk.StopReason) acpsdk.PromptResponse {
+func promptResponse(sess *sessionEntry, reason acpsdk.StopReason, messageID *string) acpsdk.PromptResponse {
 	u := sess.agent.Usage(string(sess.id))
 	input := tokenCount(u.InputTokens)
+	cached := min(tokenCount(u.CachedTokens), input)
 	output := tokenCount(u.OutputTokens)
 	usage := &acpsdk.Usage{
-		InputTokens:  input,
+		InputTokens:  input - cached,
 		OutputTokens: output,
 		TotalTokens:  addTokenCounts(input, output),
 	}
-	if cached := tokenCount(u.CachedTokens); cached > 0 {
+	if cached > 0 {
 		usage.CachedReadTokens = &cached
 	}
-	return acpsdk.PromptResponse{StopReason: reason, Usage: usage}
+	return acpsdk.PromptResponse{StopReason: reason, Usage: usage, UserMessageId: messageID}
 }
 
 func tokenCount(n int64) int {
@@ -769,10 +769,20 @@ func sessionConfigOptions(a *coder.Agent, sid string) []acpsdk.SessionConfigOpti
 func modelConfigOption(a *coder.Agent, sid string) acpsdk.SessionConfigOption {
 	available, current := a.Models(sid)
 	opts := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(available))
+	foundCurrent := false
 	for _, m := range available {
+		foundCurrent = foundCurrent || m.ID == current
 		opts = append(opts, acpsdk.SessionConfigSelectOption{
 			Value: acpsdk.SessionConfigValueId(m.ID),
 			Name:  m.Name,
+		})
+	}
+	// Custom gateways can return a model that is not in Wingman's built-in
+	// catalog. ACP requires a select's current value to be one of its options.
+	if current != "" && !foundCurrent {
+		opts = append(opts, acpsdk.SessionConfigSelectOption{
+			Value: acpsdk.SessionConfigValueId(current),
+			Name:  current,
 		})
 	}
 	return acpsdk.SessionConfigOption{

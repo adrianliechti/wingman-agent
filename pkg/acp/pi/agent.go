@@ -2,7 +2,6 @@ package pi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -11,6 +10,8 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
+
+	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type Options struct {
@@ -28,8 +29,6 @@ type Agent struct {
 
 	mu       sync.Mutex
 	sessions map[acp.SessionId]*session
-
-	closeOnce sync.Once
 }
 
 var _ acp.Agent = (*Agent)(nil)
@@ -50,15 +49,13 @@ func (a *Agent) lookup(id acp.SessionId) *session {
 }
 
 func (a *Agent) Close() error {
-	a.closeOnce.Do(func() {
-		a.mu.Lock()
-		sessions := a.sessions
-		a.sessions = map[acp.SessionId]*session{}
-		a.mu.Unlock()
-		for _, s := range sessions {
-			s.proc.dispose()
-		}
-	})
+	a.mu.Lock()
+	sessions := a.sessions
+	a.sessions = map[acp.SessionId]*session{}
+	a.mu.Unlock()
+	for _, s := range sessions {
+		s.proc.dispose()
+	}
 	return nil
 }
 
@@ -73,10 +70,12 @@ func (a *Agent) Initialize(context.Context, acp.InitializeRequest) (acp.Initiali
 		AgentCapabilities: acp.AgentCapabilities{
 			LoadSession: a.opts.SessionsDir != "",
 			PromptCapabilities: acp.PromptCapabilities{
-				Image: true,
+				Image:           true,
+				EmbeddedContext: true,
 			},
 			SessionCapabilities: acp.SessionCapabilities{
-				List: a.listCapability(),
+				Close: &acp.SessionCloseCapabilities{},
+				List:  a.listCapability(),
 			},
 		},
 	}, nil
@@ -98,9 +97,9 @@ func (a *Agent) Logout(context.Context, acp.LogoutRequest) (acp.LogoutResponse, 
 }
 
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
-	cwd := params.Cwd
-	if cwd == "" {
-		cwd = a.opts.Dir
+	cwd, _, err := acpcommon.NormalizeSessionRoots(params.Cwd, nil)
+	if err != nil {
+		return acp.NewSessionResponse{}, err
 	}
 
 	proc, err := spawn(spawnOptions{
@@ -124,7 +123,12 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, acp.NewAuthRequired(nil)
 	}
 
-	state := parseState(mustData(proc.getState(ctx)))
+	stateData, err := proc.getState(ctx)
+	if err != nil {
+		proc.dispose()
+		return acp.NewSessionResponse{}, err
+	}
+	state := parseState(stateData)
 
 	id := acp.SessionId(state.SessionID)
 	if id == "" {
@@ -146,8 +150,6 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	}, nil
 }
 
-func mustData(data json.RawMessage, _ error) json.RawMessage { return data }
-
 func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
 	s := a.lookup(params.SessionId)
 	if s == nil {
@@ -157,7 +159,7 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-	return acp.PromptResponse{StopReason: stop}, nil
+	return acp.PromptResponse{StopReason: stop, UserMessageId: params.MessageId}, nil
 }
 
 func (a *Agent) Cancel(_ context.Context, params acp.CancelNotification) error {
@@ -216,11 +218,6 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 func (a *Agent) CloseSession(_ context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
 	a.disposeSession(params.SessionId)
 	return acp.CloseSessionResponse{}, nil
-}
-
-func (a *Agent) UnstableDeleteSession(_ context.Context, params acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error) {
-	a.disposeSession(params.SessionId)
-	return acp.UnstableDeleteSessionResponse{}, nil
 }
 
 func (a *Agent) disposeSession(id acp.SessionId) {
@@ -303,12 +300,9 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, fmt.Errorf("unknown session %s", params.SessionId)
 	}
 
-	cwd := params.Cwd
-	if cwd == "" {
-		cwd = file.Cwd
-	}
-	if cwd == "" {
-		cwd = a.opts.Dir
+	cwd, _, err := acpcommon.NormalizeSessionRoots(params.Cwd, nil)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
 	}
 
 	a.disposeSession(params.SessionId)
@@ -323,8 +317,22 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, err
 	}
 
-	state := parseState(mustData(proc.getState(ctx)))
-	models := parseAvailableModels(mustData(proc.getAvailableModels(ctx)))
+	stateData, err := proc.getState(ctx)
+	if err != nil {
+		proc.dispose()
+		return acp.LoadSessionResponse{}, err
+	}
+	modelsData, err := proc.getAvailableModels(ctx)
+	if err != nil {
+		proc.dispose()
+		return acp.LoadSessionResponse{}, err
+	}
+	state := parseState(stateData)
+	models := parseAvailableModels(modelsData)
+	if len(models) == 0 {
+		proc.dispose()
+		return acp.LoadSessionResponse{}, acp.NewAuthRequired(nil)
+	}
 
 	s := newSession(params.SessionId, cwd, proc)
 	s.models = models

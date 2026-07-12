@@ -814,8 +814,3 @@ func (s *sessionState) projectInstructions() string {
 	s.projectInstructionsMtimes = mtimes
 	return result
 }
-
-func ReadProjectInstructions(wd string) string {
-	result, _ := renderProjectInstructions(findProjectInstructions(wd))
-	return result
-}

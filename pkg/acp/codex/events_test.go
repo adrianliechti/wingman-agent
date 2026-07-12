@@ -1,6 +1,8 @@
 package codex
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -21,6 +23,42 @@ func TestFileChangeContentAddUnifiedDiff(t *testing.T) {
 	}
 	if want := "package test\n\nclass NewFile {}"; d.NewText != want {
 		t.Errorf("newText = %q, want %q", d.NewText, want)
+	}
+}
+
+func TestMessageUpdatesCarryIDsAndPhase(t *testing.T) {
+	user := userMessageUpdate(acp.TextBlock("hello"), "user-id")
+	if user.UserMessageChunk == nil || user.UserMessageChunk.MessageId == nil || *user.UserMessageChunk.MessageId != "user-id" {
+		t.Fatalf("user update = %#v", user)
+	}
+
+	agent := agentMessageUpdate("answer", "agent-id", "final_answer")
+	if agent.AgentMessageChunk == nil || agent.AgentMessageChunk.MessageId == nil || *agent.AgentMessageChunk.MessageId != "agent-id" {
+		t.Fatalf("agent update = %#v", agent)
+	}
+	b, err := json.Marshal(agent.AgentMessageChunk.Meta)
+	if err != nil || string(b) != `{"codex":{"phase":"final_answer"}}` {
+		t.Fatalf("agent meta = %s, err=%v", b, err)
+	}
+
+	thought := agentThoughtUpdate("thinking", "thought-id")
+	if thought.AgentThoughtChunk == nil || thought.AgentThoughtChunk.MessageId == nil || *thought.AgentThoughtChunk.MessageId != "thought-id" {
+		t.Fatalf("thought update = %#v", thought)
+	}
+}
+
+func TestElicitationParamsPreserveSchemaAndURLFields(t *testing.T) {
+	var p elicitationParams
+	err := json.Unmarshal([]byte(`{"threadId":"t","serverName":"mcp","mode":"form","message":"Choose","requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}}},"url":"https://example.com","elicitationId":"e-1","_meta":{"persist":"session"}}`), &p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.URL != "https://example.com" || p.ElicitationID != "e-1" || p.Meta["persist"] != "session" {
+		t.Fatalf("params = %#v", p)
+	}
+	var schema acp.UnstableElicitationSchema
+	if err := json.Unmarshal(p.RequestedSchema, &schema); err != nil || schema.Properties["answer"] == nil {
+		t.Fatalf("schema = %#v, err=%v", schema, err)
 	}
 }
 
@@ -151,5 +189,17 @@ func TestIsFatalTurnError(t *testing.T) {
 				t.Errorf("isFatalTurnError(%s) = %v, want %v", c.info, got, c.want)
 			}
 		})
+	}
+}
+
+func TestTokenUsageComponentsMatchTotal(t *testing.T) {
+	d := newEventDispatcher(context.Background(), nil, "session")
+	d.handleTokenUsage([]byte(`{"tokenUsage":{"last":{"totalTokens":20,"inputTokens":15,"cachedInputTokens":5,"outputTokens":4,"reasoningOutputTokens":1}}}`))
+	u := d.getUsage()
+	if u == nil || u.CachedReadTokens == nil || u.ThoughtTokens == nil {
+		t.Fatalf("usage = %#v", u)
+	}
+	if got := u.InputTokens + *u.CachedReadTokens + u.OutputTokens + *u.ThoughtTokens; got != u.TotalTokens {
+		t.Fatalf("component sum = %d, total = %d", got, u.TotalTokens)
 	}
 }

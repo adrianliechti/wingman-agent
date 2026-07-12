@@ -5,9 +5,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
+
+	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
 
 	extclaude "github.com/adrianliechti/wingman-agent/pkg/external/claude"
 )
@@ -166,13 +169,13 @@ func (a *Agent) Logout(context.Context, acp.LogoutRequest) (acp.LogoutResponse, 
 }
 
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
+	cwd, additional, err := acpcommon.NormalizeSessionRoots(params.Cwd, params.AdditionalDirectories)
+	if err != nil {
+		return acp.NewSessionResponse{}, err
+	}
 	a.ensureModels(ctx)
 	id := acp.SessionId(newUUID())
-	cwd := params.Cwd
-	if cwd == "" {
-		cwd = a.defaultCwd
-	}
-	s := newSession(id, cwd, a.defaultModel, a.defaultEffort, params.AdditionalDirectories)
+	s := newSession(id, cwd, a.defaultModel, a.defaultEffort, additional)
 	s.mcpServers = params.McpServers
 	a.mu.Lock()
 	a.sessions[id] = s
@@ -191,11 +194,11 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	if s == nil {
 		return acp.PromptResponse{}, fmt.Errorf("session %s not found", params.SessionId)
 	}
-	stop, usage, err := s.runTurn(ctx, a.conn, a.path, a.env, params.Prompt)
+	stop, usage, err := s.runTurn(ctx, a.conn, a.path, a.env, a.models, params.Prompt)
 	if err != nil {
 		return acp.PromptResponse{}, err
 	}
-	return acp.PromptResponse{StopReason: stop, Usage: usage}, nil
+	return acp.PromptResponse{StopReason: stop, Usage: usage, UserMessageId: params.MessageId}, nil
 }
 
 func (a *Agent) Cancel(_ context.Context, params acp.CancelNotification) error {
@@ -236,11 +239,14 @@ func (a *Agent) SetSessionConfigOption(_ context.Context, params acp.SetSessionC
 	switch string(v.ConfigId) {
 	case modelConfigID:
 		m := resolveModel(a.models, value)
-		if m == nil {
+		if m == nil && value != s.modelID {
 			return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown model %q", value)
 		}
-		s.modelID = m.ID
-		if !isValidEffort(m, s.effort) {
+		if m != nil {
+			s.modelID = m.ID
+		}
+		s.modelOverride = true
+		if m != nil && !isValidEffort(m, s.effort) {
 			s.effort = "default"
 		}
 	case effortConfigID:
@@ -295,11 +301,15 @@ func (a *Agent) ListSessions(_ context.Context, params acp.ListSessionsRequest) 
 }
 
 func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
-	if !sessionExists(params.Cwd, params.SessionId) {
-		return acp.ResumeSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, params.Cwd)
+	cwd, additional, err := acpcommon.NormalizeSessionRoots(params.Cwd, params.AdditionalDirectories)
+	if err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+	if !sessionExists(cwd, params.SessionId) {
+		return acp.ResumeSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, cwd)
 	}
 	a.ensureModels(ctx)
-	s := a.adoptSession(params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, string(params.SessionId), false)
+	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, string(params.SessionId), false)
 	a.sendAvailableCommands(params.SessionId)
 	return acp.ResumeSessionResponse{
 		Modes:         buildSessionModeState(s.mode),
@@ -308,12 +318,16 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 }
 
 func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
-	if !sessionExists(params.Cwd, params.SessionId) {
-		return acp.LoadSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, params.Cwd)
+	cwd, additional, err := acpcommon.NormalizeSessionRoots(params.Cwd, params.AdditionalDirectories)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+	if !sessionExists(cwd, params.SessionId) {
+		return acp.LoadSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, cwd)
 	}
 	a.ensureModels(ctx)
-	s := a.adoptSession(params.SessionId, params.Cwd, params.AdditionalDirectories, params.McpServers, string(params.SessionId), false)
-	if err := replayHistory(ctx, a.conn, params.SessionId, params.Cwd); err != nil {
+	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, string(params.SessionId), false)
+	if err := replayHistory(ctx, a.conn, params.SessionId, cwd); err != nil {
 		return acp.LoadSessionResponse{}, fmt.Errorf("replay history: %w", err)
 	}
 	a.sendAvailableCommands(params.SessionId)
@@ -324,17 +338,29 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 }
 
 func (a *Agent) UnstableForkSession(_ context.Context, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
+	cwd, additional, err := acpcommon.NormalizeSessionRoots(params.Cwd, params.AdditionalDirectories)
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
 	newID := acp.SessionId(newUUID())
-	a.adoptSession(newID, params.Cwd, params.AdditionalDirectories, nil, string(params.SessionId), true)
+	a.adoptSession(newID, cwd, additional, nil, string(params.SessionId), true)
 
 	return acp.UnstableForkSessionResponse{SessionId: newID}, nil
 }
 
 func (a *Agent) adoptSession(id acp.SessionId, cwd string, additionalDirs []string, mcpServers []acp.McpServer, resumeFrom string, fork bool) *session {
-	if cwd == "" {
-		cwd = a.defaultCwd
-	}
 	s := newSession(id, cwd, a.defaultModel, a.defaultEffort, additionalDirs)
+	if resumeFrom != "" && (a.defaultModel == "" || a.defaultModel == "default") {
+		path := filepath.Join(projectDirFor(cwd), resumeFrom+".jsonl")
+		if live := scanSessionModel(path); live != "" {
+			if m := resolveResumedModel(a.models, live); m != nil {
+				s.modelID = m.ID
+			} else {
+				s.modelID = live
+			}
+			s.modelOverride = false
+		}
+	}
 	s.mcpServers = mcpServers
 	s.resumeFrom = resumeFrom
 	s.forkOnResume = fork

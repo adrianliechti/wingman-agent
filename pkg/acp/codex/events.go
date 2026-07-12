@@ -21,6 +21,7 @@ type eventDispatcher struct {
 	cmdOut          map[string]*strings.Builder
 	seenReasoning   map[string]bool
 	guardianStarted map[string]bool
+	agentPhases     map[string]string
 	lastGoal        string
 
 	mu      sync.Mutex
@@ -37,6 +38,7 @@ func newEventDispatcher(ctx context.Context, conn *acp.AgentSideConnection, sid 
 		cmdOut:          map[string]*strings.Builder{},
 		seenReasoning:   map[string]bool{},
 		guardianStarted: map[string]bool{},
+		agentPhases:     map[string]string{},
 	}
 }
 
@@ -112,10 +114,11 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 	switch method {
 	case "item/agentMessage/delta":
 		var p struct {
-			Delta string `json:"delta"`
+			ItemID string `json:"itemId"`
+			Delta  string `json:"delta"`
 		}
 		if json.Unmarshal(params, &p) == nil && p.Delta != "" {
-			d.update(acp.UpdateAgentMessageText(p.Delta))
+			d.update(agentMessageUpdate(p.Delta, p.ItemID, d.agentPhases[p.ItemID]))
 		}
 
 	case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
@@ -126,7 +129,7 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		if json.Unmarshal(params, &p) == nil && p.ItemID != "" {
 			d.seenReasoning[p.ItemID] = true
 			if p.Delta != "" {
-				d.update(acp.UpdateAgentThoughtText(p.Delta))
+				d.update(agentThoughtUpdate(p.Delta, p.ItemID))
 			}
 		}
 
@@ -136,7 +139,7 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		}
 		if json.Unmarshal(params, &p) == nil && p.ItemID != "" {
 			d.seenReasoning[p.ItemID] = true
-			d.update(acp.UpdateAgentThoughtText("\n\n"))
+			d.update(agentThoughtUpdate("\n\n", p.ItemID))
 		}
 
 	case "item/started":
@@ -323,6 +326,13 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 	}
 
 	switch kind {
+	case "agentMessage":
+		var it struct {
+			Phase string `json:"phase"`
+		}
+		_ = json.Unmarshal(env.Item, &it)
+		d.agentPhases[id] = it.Phase
+
 	case "commandExecution":
 		var it struct {
 			Command        string          `json:"command"`
@@ -421,6 +431,13 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 	}
 
 	switch kind {
+	case "agentMessage":
+		var it struct {
+			Phase string `json:"phase"`
+		}
+		_ = json.Unmarshal(env.Item, &it)
+		d.agentPhases[id] = it.Phase
+
 	case "commandExecution":
 		var it struct {
 			Status           string  `json:"status"`
@@ -554,7 +571,7 @@ func (d *eventDispatcher) handleTokenUsage(params json.RawMessage) {
 	reasoning := last.ReasoningOutputTokens
 	d.setUsage(&acp.Usage{
 		TotalTokens:      last.TotalTokens,
-		InputTokens:      last.InputTokens - last.CachedInputTokens,
+		InputTokens:      max(0, last.InputTokens-last.CachedInputTokens),
 		OutputTokens:     last.OutputTokens,
 		CachedReadTokens: &cachedRead,
 		ThoughtTokens:    &reasoning,

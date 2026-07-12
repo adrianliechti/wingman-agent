@@ -44,9 +44,23 @@ func headerMap(headers []acp.HttpHeader) map[string]string {
 }
 
 type cliEnvelope struct {
-	Type    string          `json:"type"`
-	Message json.RawMessage `json:"message,omitempty"`
-	Event   json.RawMessage `json:"event,omitempty"`
+	Type               string          `json:"type"`
+	Subtype            string          `json:"subtype,omitempty"`
+	Message            json.RawMessage `json:"message,omitempty"`
+	Event              json.RawMessage `json:"event,omitempty"`
+	State              string          `json:"state,omitempty"`
+	SessionID          string          `json:"session_id,omitempty"`
+	OriginalModel      string          `json:"original_model,omitempty"`
+	FallbackModel      string          `json:"fallback_model,omitempty"`
+	Direction          string          `json:"direction,omitempty"`
+	RefusalCategory    string          `json:"api_refusal_category,omitempty"`
+	RefusalExplanation string          `json:"api_refusal_explanation,omitempty"`
+	ParentToolUseID    string          `json:"parent_tool_use_id,omitempty"`
+	TaskID             string          `json:"task_id,omitempty"`
+	ToolUseID          string          `json:"tool_use_id,omitempty"`
+	Patch              struct {
+		Status string `json:"status,omitempty"`
+	} `json:"patch,omitempty"`
 }
 
 type streamEvent struct {
@@ -121,10 +135,12 @@ type cliImageSource struct {
 
 type controlRequest struct {
 	RequestID string `json:"request_id"`
+	AgentID   string `json:"agent_id,omitempty"`
 	Request   struct {
 		Subtype     string          `json:"subtype"`
 		ToolName    string          `json:"tool_name"`
 		ToolUseID   string          `json:"tool_use_id"`
+		AgentID     string          `json:"agent_id,omitempty"`
 		Input       json.RawMessage `json:"input"`
 		Description string          `json:"description"`
 	} `json:"request"`

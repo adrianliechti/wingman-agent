@@ -27,6 +27,21 @@ func TestScanSessionMetadataPrefersLatestAITitle(t *testing.T) {
 	}
 }
 
+func TestScanSessionModelUsesLatestAssistantModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	lines := `{"type":"assistant","message":{"model":"claude-sonnet-5","content":[]}}
+{"type":"user","message":{"content":"continue"}}
+{"type":"assistant","message":{"model":"claude-opus-4-8","content":[]}}
+`
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := scanSessionModel(path); got != "claude-opus-4-8" {
+		t.Fatalf("model = %q", got)
+	}
+}
+
 func TestStripMarkerTags(t *testing.T) {
 
 	for _, in := range []string{

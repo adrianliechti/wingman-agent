@@ -252,11 +252,6 @@ func (a *App) Run() error {
 	return err
 }
 
-func (a *App) Stop() {
-	a.app.Stop()
-	a.runCancel()
-}
-
 func (a *App) startPageContent() string {
 	th := theme.Default
 

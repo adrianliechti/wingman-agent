@@ -64,27 +64,3 @@ func LoadAgents() []AgentDef {
 	}
 	return out
 }
-
-func SaveAgents(defs []AgentDef) error {
-	path, err := agentsConfigPath()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(defs, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
-}
-
-func findAgentDef(defs []AgentDef, name string) (AgentDef, bool) {
-	for _, d := range defs {
-		if d.Name == name {
-			return d, true
-		}
-	}
-	return AgentDef{}, false
-}

@@ -27,7 +27,6 @@ type spawnOptions struct {
 type rpcResponse struct {
 	Type    string          `json:"type"`
 	ID      string          `json:"id"`
-	Command string          `json:"command"`
 	Success bool            `json:"success"`
 	Data    json.RawMessage `json:"data"`
 	Error   string          `json:"error"`
@@ -43,8 +42,7 @@ type process struct {
 	pending map[string]chan rpcResponse
 	handler func(json.RawMessage)
 
-	done      chan struct{}
-	closeOnce sync.Once
+	done chan struct{}
 }
 
 func spawn(opts spawnOptions) (*process, error) {
@@ -131,7 +129,7 @@ func (p *process) readLoop(stdout io.Reader) {
 }
 
 func (p *process) failPending() {
-	p.closeOnce.Do(func() { close(p.done) })
+	close(p.done)
 
 	p.mu.Lock()
 	pending := p.pending

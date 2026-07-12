@@ -294,7 +294,7 @@ func fromEasyInput(m *responses.EasyInputMessageParam) (Message, bool) {
 		return Message{}, false
 	}
 
-	role := MessageRole(m.Role)
+	var role MessageRole
 	switch m.Role {
 	case responses.EasyInputMessageRoleAssistant:
 		role = RoleAssistant

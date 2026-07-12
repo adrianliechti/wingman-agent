@@ -35,7 +35,7 @@ func emitStreamEvent(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 	return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: update})
 }
 
-func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cwd string, cache toolUseCache, tracker *toolCallTracker, streamed bool) error {
+func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cwd string, cache toolUseCache, tracker *toolCallTracker, streamed bool, parentToolUseID string) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -68,7 +68,7 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 				update = acp.UpdatePlan(entries...)
 				break
 			}
-			if err := emitToolUseCall(ctx, conn, sid, b, cwd, tracker); err != nil {
+			if err := emitToolUseCall(ctx, conn, sid, b, cwd, tracker, parentToolUseID); err != nil {
 				return err
 			}
 			continue
@@ -90,12 +90,14 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 // toolCallTracker), in which case it sends a tool_call_update that refines
 // the eagerly-emitted call with the now-complete info instead of duplicating
 // it.
-func emitToolUseCall(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, b cliMsgBlock, cwd string, tracker *toolCallTracker) error {
+func emitToolUseCall(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, b cliMsgBlock, cwd string, tracker *toolCallTracker, parentToolUseID string) error {
 	send := func(u acp.SessionUpdate) error {
 		return conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: u})
 	}
 	start := func() error {
-		return send(toolCallStartUpdate(b.ID, b.Name, b.Input, cwd, acp.ToolCallStatusInProgress))
+		u := toolCallStartUpdate(b.ID, b.Name, b.Input, cwd, acp.ToolCallStatusInProgress)
+		withClaudeToolMeta(&u, b.Name, parentToolUseID)
+		return send(u)
 	}
 
 	if b.ID == "" || tracker == nil || !shouldEmitToolCall(b.Name) {
@@ -103,12 +105,14 @@ func emitToolUseCall(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 	}
 
 	refine := func() error {
-		return send(toolCallRefineUpdate(b.ID, b.Name, b.Input, cwd, acp.ToolCallStatusInProgress))
+		u := toolCallRefineUpdate(b.ID, b.Name, b.Input, cwd, acp.ToolCallStatusInProgress)
+		withClaudeToolMeta(&u, b.Name, parentToolUseID)
+		return send(u)
 	}
 	return tracker.emit(b.ID, start, refine)
 }
 
-func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache) error {
+func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache, parentToolUseID string) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -138,14 +142,30 @@ func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 				opts = append(opts, acp.WithUpdateRawOutput(rawOutput))
 			}
 		}
+		u := acp.UpdateToolCall(acp.ToolCallId(b.ToolUseID), opts...)
+		withClaudeToolMeta(&u, name, parentToolUseID)
 		if err := conn.SessionUpdate(ctx, acp.SessionNotification{
 			SessionId: sid,
-			Update:    acp.UpdateToolCall(acp.ToolCallId(b.ToolUseID), opts...),
+			Update:    u,
 		}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func withClaudeToolMeta(update *acp.SessionUpdate, toolName, parentToolUseID string) {
+	meta := map[string]any{"toolName": toolName}
+	if parentToolUseID != "" {
+		meta["parentToolUseId"] = parentToolUseID
+	}
+	root := map[string]any{"claudeCode": meta}
+	switch {
+	case update.ToolCall != nil:
+		update.ToolCall.Meta = root
+	case update.ToolCallUpdate != nil:
+		update.ToolCallUpdate.Meta = root
+	}
 }
 
 func toolResultContent(name string, b cliMsgBlock) []acp.ToolCallContent {

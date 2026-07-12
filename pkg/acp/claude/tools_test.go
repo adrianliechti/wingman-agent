@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -16,6 +17,7 @@ func TestResultToTurn(t *testing.T) {
 	}{
 		{"success end_turn", `{"type":"result","subtype":"success","result":"done"}`, acp.StopReasonEndTurn, false},
 		{"success max_tokens", `{"type":"result","subtype":"success","stop_reason":"max_tokens"}`, acp.StopReasonMaxTokens, false},
+		{"success refusal", `{"type":"result","subtype":"success","stop_reason":"refusal"}`, acp.StopReasonRefusal, false},
 		{"success is_error", `{"type":"result","subtype":"success","is_error":true,"result":"boom"}`, "", true},
 		{"login required", `{"type":"result","subtype":"success","result":"Please run /login first"}`, "", true},
 		{"error_during_execution", `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["x","y"]}`, "", true},
@@ -39,6 +41,68 @@ func TestResultToTurn(t *testing.T) {
 				t.Errorf("stop = %q, want %q", got.stop, tt.wantStop)
 			}
 		})
+	}
+}
+
+func TestResolveModelCanonicalizesContextHints(t *testing.T) {
+	models := []ModelEntry{
+		{ID: "default", Name: "Default", ResolvedModel: "claude-opus-4-8"},
+		{ID: "opus", Name: "Opus", ResolvedModel: "claude-opus-4-8"},
+		{ID: "opus[1m]", Name: "Opus [1m]", ResolvedModel: "claude-opus-4-8[1m]"},
+	}
+	if got := resolveModel(models, "opus-1m"); got == nil || got.ID != "opus[1m]" {
+		t.Fatalf("opus-1m resolved to %#v", got)
+	}
+	if got := resolveModel(models, "claude-opus-4-8-1m"); got == nil || got.ID != "opus[1m]" {
+		t.Fatalf("concrete 1m model resolved to %#v", got)
+	}
+	if got := resolveModel(models, "opus"); got == nil || got.ID != "opus" {
+		t.Fatalf("bare opus resolved to %#v", got)
+	}
+	if got := resolveModel(models, "claude-opus-4-8"); got == nil || got.ID != "opus" {
+		t.Fatalf("explicit concrete model resolved to %#v", got)
+	}
+	if got := resolveResumedModel(models, "claude-opus-4-8"); got == nil || got.ID != "default" {
+		t.Fatalf("resumed default model resolved to %#v", got)
+	}
+}
+
+func TestClaudeToolMetadataIncludesParent(t *testing.T) {
+	u := toolCallStartUpdate("tool", "Bash", json.RawMessage(`{"command":"pwd"}`), "/tmp", acp.ToolCallStatusInProgress)
+	withClaudeToolMeta(&u, "Bash", "parent-tool")
+	claudeMeta, ok := u.ToolCall.Meta["claudeCode"].(map[string]any)
+	if !ok || claudeMeta["toolName"] != "Bash" || claudeMeta["parentToolUseId"] != "parent-tool" {
+		t.Fatalf("meta = %#v", u.ToolCall.Meta)
+	}
+}
+
+func TestClaudeSystemIdleFailsOnlyActiveTurn(t *testing.T) {
+	p := &claudeProc{results: make(chan turnResult, 1), subagentParents: map[string]string{}}
+	p.beginTurn()
+	p.handleSystem(context.Background(), nil, "s", cliEnvelope{Type: "system", Subtype: "session_state_changed", State: "idle"})
+	r := <-p.results
+	if r.err == nil {
+		t.Fatal("expected idle-without-result error")
+	}
+	p.handleSystem(context.Background(), nil, "s", cliEnvelope{Type: "system", Subtype: "session_state_changed", State: "idle"})
+	select {
+	case extra := <-p.results:
+		t.Fatalf("unexpected trailing-idle result: %#v", extra)
+	default:
+	}
+}
+
+func TestClaudeSystemTracksSubagentParents(t *testing.T) {
+	p := &claudeProc{results: make(chan turnResult, 1), subagentParents: map[string]string{}}
+	p.handleSystem(context.Background(), nil, "s", cliEnvelope{Type: "system", Subtype: "task_started", TaskID: "agent-1", ToolUseID: "parent-1"})
+	if got := p.parentForAgent("agent-1"); got != "parent-1" {
+		t.Fatalf("parent = %q", got)
+	}
+	p.handleSystem(context.Background(), nil, "s", cliEnvelope{Type: "system", Subtype: "task_updated", TaskID: "agent-1", Patch: struct {
+		Status string `json:"status,omitempty"`
+	}{Status: "completed"}})
+	if got := p.parentForAgent("agent-1"); got != "" {
+		t.Fatalf("parent after completion = %q", got)
 	}
 }
 
