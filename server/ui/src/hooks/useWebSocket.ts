@@ -627,23 +627,15 @@ export function useWebSocket() {
 							entries = ensureUserEntry(entries, input, true);
 						}
 					}
-					const terminal = sess.pendingInputs
-						.filter((input) => input.state === "cancelled" || input.state === "failed")
-						.filter((input) => !liveIDs.has(input.id));
-					const unconfirmed = sess.pendingInputs
-						.filter((input) => input.state === "sending" && !liveIDs.has(input.id))
-						.map((input) => ({
-							...input,
-							state: "failed" as const,
-							error: "Delivery was not confirmed after reconnecting.",
-						}));
+					const local = sess.pendingInputs.filter(
+						(input) => !liveIDs.has(input.id) && input.state !== "queued",
+					);
 					return {
 						...sess,
 						entries,
 						pendingInputs: [
 							...live.filter((input) => input.state === "queued"),
-							...terminal,
-							...unconfirmed,
+							...local,
 						],
 						queuePaused: msg.paused ?? false,
 						canSteer: msg.can_steer ?? false,
@@ -855,6 +847,24 @@ export function useWebSocket() {
 			ws.onclose = () => {
 				setConnected(false);
 				wsRef.current = null;
+				setSessions((prev) => {
+					const next: Record<string, SessionState> = {};
+					for (const [id, sess] of Object.entries(prev)) {
+						next[id] = {
+							...sess,
+							pendingInputs: sess.pendingInputs.map((input) =>
+								input.state === "sending"
+									? {
+											...input,
+											state: "failed",
+											error: "Connection was lost before delivery was confirmed.",
+										}
+									: input,
+							),
+						};
+					}
+					return next;
+				});
 				if (alive) {
 					reconnectTimer = setTimeout(connect, 2000);
 				}

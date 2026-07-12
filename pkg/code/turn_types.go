@@ -3,7 +3,6 @@ package code
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 )
@@ -110,11 +109,4 @@ func cloneContent(in []agent.Content) []agent.Content {
 		}
 	}
 	return out
-}
-
-func (s TurnInputSnapshot) String() string {
-	if s.Position > 0 {
-		return fmt.Sprintf("%s (%d)", s.State, s.Position)
-	}
-	return string(s.State)
 }

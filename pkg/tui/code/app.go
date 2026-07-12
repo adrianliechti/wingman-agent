@@ -64,8 +64,10 @@ type App struct {
 	pendingContent  []agent.Content
 	pendingFiles    []string
 
-	streamCancel context.CancelFunc
-	streamMu     sync.Mutex
+	turns *code.TurnManager
+
+	turnMu      sync.Mutex
+	turnCommits map[string]string
 
 	renderPending atomic.Bool
 	renderLast    atomic.Int64
@@ -75,25 +77,28 @@ type App struct {
 	currentToolHint    string
 	streamingText      string
 	streamingReasoning string
+	reasoningID        string
 
 	mouseEnabled bool
 }
 
-func New(ctx context.Context, agent *coder.Agent, sessionID string) *App {
+func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
 	saveExecutablePath()
 
-	hasMessages := sessionID != "" && len(agent.Messages(sessionID)) > 0
+	hasMessages := sessionID != "" && len(coderAgent.Messages(sessionID)) > 0
 
 	a := &App{
 		ctx:   ctx,
 		app:   tview.NewApplication(),
-		agent: agent,
+		agent: coderAgent,
 
 		sessionID:   sessionID,
 		showWelcome: !hasMessages && os.Getenv("WINGMAN_CALLER") != "vscode",
 
 		mouseEnabled: true,
 	}
+	a.turnCommits = make(map[string]string)
+	a.turns = code.NewTurnManager(ctx, coderAgent, a.handleTurnEvent)
 
 	return a
 }
@@ -136,6 +141,7 @@ func (a *App) saveSession() {
 func (a *App) stop() {
 	a.saveSession()
 
+	a.turns.Close()
 	a.agent.Close()
 	a.agent.Workspace().Close()
 

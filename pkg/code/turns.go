@@ -121,9 +121,7 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 		s.mu.Unlock()
 		if hasActive {
 			if steerer, ok := m.agent.(TurnSteerer); ok {
-				steerInput := input
-				steerInput.Content = cloneContent(input.Content)
-				err := steerer.Steer(ctx, sessionID, steerInput)
+				err := steerer.Steer(ctx, sessionID, input)
 				if err == nil {
 					item := &managedTurnInput{input: input}
 					s.mu.Lock()

@@ -3,7 +3,6 @@ package code
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -567,11 +566,7 @@ func (a *App) pasteFromClipboard() {
 }
 
 func (a *App) cancelStream() {
-	a.streamMu.Lock()
-	if a.streamCancel != nil {
-		a.streamCancel()
-	}
-	a.streamMu.Unlock()
+	a.turns.CancelAll(a.sessionID)
 
 	if a.askActive {
 		a.input.SetText("", true)
@@ -884,24 +879,17 @@ func (a *App) invokeSkill(s *skill.Skill, args string) {
 }
 
 func (a *App) submitAgentInput(input []agent.Content) {
-	if !a.isStreaming() {
-		go a.streamResponse(input)
-		return
-	}
-	go func() {
-		err := a.agent.Steer(a.ctx, a.sessionID, code.TurnInput{
-			ID: uuid.NewString(), Content: input, Intent: code.TurnInputSteer,
+	id := uuid.NewString()
+	a.rememberTurn(id, input)
+	_, err := a.turns.Submit(a.ctx, a.sessionID, code.TurnInput{
+		ID: id, Content: input, Intent: code.TurnInputSteer,
+	})
+	if err != nil {
+		a.takeTurnCommit(id)
+		a.app.QueueUpdateDraw(func() {
+			fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Could not submit turn: %v", err), theme.Default.Red))
 		})
-		if errors.Is(err, code.ErrNoActiveTurn) {
-			a.streamResponseAfterCurrent(input)
-			return
-		}
-		if err != nil {
-			a.app.QueueUpdateDraw(func() {
-				fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Could not steer turn: %v", err), theme.Default.Red))
-			})
-		}
-	}()
+	}
 }
 
 func (a *App) switchToChat() {

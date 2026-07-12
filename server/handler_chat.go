@@ -243,7 +243,8 @@ func (s *Server) finalizeTurn(sid, inputID string) {
 	s.flushFiles()
 
 	if ws.HasRewind() {
-		commitMsg := s.turnMetaMessage(sid, inputID).Text
+		meta, _ := s.getTurnMeta(sid, inputID)
+		commitMsg := meta.Text
 		if commitMsg == "" {
 			commitMsg = "<unknown>"
 		}
@@ -375,11 +376,6 @@ func (s *Server) getTurnMeta(sessionID, inputID string) (ClientMessage, bool) {
 	defer s.turnMetaMu.Unlock()
 	msg, ok := s.turnMeta[sessionID][inputID]
 	return msg, ok
-}
-
-func (s *Server) turnMetaMessage(sessionID, inputID string) ClientMessage {
-	msg, _ := s.getTurnMeta(sessionID, inputID)
-	return msg
 }
 
 func (s *Server) updateTurnIntent(sessionID, inputID string, intent code.TurnInputIntent) {

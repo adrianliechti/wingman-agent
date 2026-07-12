@@ -148,6 +148,37 @@ func TestTurnManagerQueuesFIFO(t *testing.T) {
 	}
 }
 
+func TestTurnManagerTerminalHandlerCanInspectPromotedFollowUp(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	snapshots := make(chan TurnSnapshot, 1)
+	var m *TurnManager
+	m = NewTurnManager(context.Background(), a, func(ev TurnEvent) {
+		if ev.InputID == "1" && ev.State == TurnInputCompleted {
+			snapshots <- m.Snapshot(ev.SessionID)
+		}
+	})
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	_, _ = m.Submit(context.Background(), "s", turnInput("2", "two", TurnInputFollowUp))
+	_ = waitValue(t, a.starts)
+	a.releases <- struct{}{}
+
+	select {
+	case snapshot := <-snapshots:
+		if len(snapshot.Inputs) != 1 || snapshot.Inputs[0].ID != "2" || snapshot.Inputs[0].State != TurnInputActive {
+			t.Fatalf("terminal snapshot = %+v", snapshot)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal handler did not receive a snapshot")
+	}
+
+	if got := waitValue(t, a.starts); got != "two" {
+		t.Fatalf("promoted start = %q", got)
+	}
+	a.releases <- struct{}{}
+}
+
 func TestTurnManagerCancelPausesAndResumesQueue(t *testing.T) {
 	a := newTurnManagerTestAgent()
 	events := make(chan TurnEvent, 32)
