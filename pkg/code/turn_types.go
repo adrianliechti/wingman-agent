@@ -38,7 +38,8 @@ type TurnFeatureProvider interface {
 
 // TurnSteerer injects input into the currently active turn. ErrNoActiveTurn and
 // ErrTurnNotSteerable ask TurnManager to preserve the input as a FIFO follow-up;
-// other errors are returned to the caller.
+// other errors are returned to the caller. Implementations must not mutate
+// input and must copy its content if they retain it after Steer returns.
 type TurnSteerer interface {
 	Steer(ctx context.Context, sessionID string, input TurnInput) error
 }
@@ -52,6 +53,8 @@ var (
 	ErrInputNotQueued = errors.New("turn input is not queued")
 	// ErrDuplicateInput means an input ID is already live in the session.
 	ErrDuplicateInput = errors.New("turn input id already exists")
+	// ErrInvalidIntent means the input requested an unsupported routing mode.
+	ErrInvalidIntent = errors.New("invalid turn input intent")
 )
 
 type TurnInput struct {
@@ -79,34 +82,12 @@ type TurnEvent struct {
 	State     TurnInputState
 	Intent    TurnInputIntent
 	Position  int
-	Message   *agent.Message
-	Err       error
+	// Message is only valid for the duration of the synchronous event handler.
+	// Handlers that retain it must copy its content.
+	Message *agent.Message
+	Err     error
 	// Executed is true only for the primary input whose Agent.Send call ended.
 	// Steered and removed queued inputs also receive terminal states but must not
 	// trigger turn-finalization side effects such as checkpoints.
 	Executed bool
-}
-
-func cloneContent(in []agent.Content) []agent.Content {
-	out := make([]agent.Content, len(in))
-	for i, c := range in {
-		out[i] = c
-		if c.File != nil {
-			file := *c.File
-			out[i].File = &file
-		}
-		if c.Reasoning != nil {
-			reasoning := *c.Reasoning
-			out[i].Reasoning = &reasoning
-		}
-		if c.ToolCall != nil {
-			call := *c.ToolCall
-			out[i].ToolCall = &call
-		}
-		if c.ToolResult != nil {
-			result := *c.ToolResult
-			out[i].ToolResult = &result
-		}
-	}
-	return out
 }

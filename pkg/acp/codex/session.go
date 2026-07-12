@@ -69,6 +69,10 @@ func classifySteerError(err error) error {
 	switch {
 	case rpcErr.Message == "no active turn to steer":
 		return code.ErrNoActiveTurn
+	case strings.HasPrefix(rpcErr.Message, "expected active turn id "):
+		// The backend advanced to another turn before it processed this steer.
+		// Nothing was accepted, so preserve the input as a normal follow-up.
+		return code.ErrNoActiveTurn
 	case strings.HasPrefix(rpcErr.Message, "cannot steer a "):
 		return fmt.Errorf("%w: %s", code.ErrTurnNotSteerable, rpcErr.Message)
 	default:

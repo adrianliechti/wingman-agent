@@ -166,16 +166,38 @@ func TestQueueInputOnlyAcceptsDuringRunAndOwnsItsSlice(t *testing.T) {
 	a.queueMu.Lock()
 	a.running = true
 	a.queueMu.Unlock()
-	input := []Content{{Text: "guidance"}}
+	input := []Content{{Text: "guidance", File: &File{Name: "before.txt"}}}
 	if !a.QueueInput(input) {
 		t.Fatal("QueueInput rejected an active run")
 	}
 	input[0].Text = "mutated"
+	input[0].File.Name = "after.txt"
 
 	a.queueMu.Lock()
 	defer a.queueMu.Unlock()
-	if len(a.pendingInput) != 1 || a.pendingInput[0][0].Text != "guidance" {
+	if len(a.pendingInput) != 1 || a.pendingInput[0][0].Text != "guidance" || a.pendingInput[0][0].File.Name != "before.txt" {
 		t.Fatalf("pending input = %#v", a.pendingInput)
+	}
+}
+
+func TestSendOwnsAcceptedInput(t *testing.T) {
+	client := streamingTestClient(func(*http.Request) string {
+		return "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":0}}}\n\n"
+	})
+	a := &Agent{Config: &Config{client: &client}}
+	input := []Content{{Text: "before", File: &File{Name: "before.txt"}}}
+	stream, err := a.Send(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input[0].Text = "after"
+	input[0].File.Name = "after.txt"
+	for range stream {
+	}
+
+	messages := a.MessagesSnapshot()
+	if len(messages) == 0 || messages[0].Content[0].Text != "before" || messages[0].Content[0].File.Name != "before.txt" {
+		t.Fatalf("accepted input was mutated: %+v", messages)
 	}
 }
 

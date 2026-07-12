@@ -14,12 +14,32 @@ import (
 type turnManagerTestAgent struct {
 	mu sync.Mutex
 
-	starts   chan string
-	releases chan struct{}
-	cancels  int
-	steers   []string
-	steerErr error
-	steer    bool
+	starts     chan string
+	releases   chan struct{}
+	cancels    int
+	steers     []string
+	steerErr   error
+	steerPanic bool
+	steer      bool
+}
+
+type blockingSteerAgent struct {
+	*turnManagerTestAgent
+	started chan struct{}
+	release chan struct{}
+}
+
+func (a *blockingSteerAgent) Steer(ctx context.Context, sessionID string, input TurnInput) error {
+	if err := a.turnManagerTestAgent.Steer(ctx, sessionID, input); err != nil {
+		return err
+	}
+	close(a.started)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.release:
+		return nil
+	}
 }
 
 func newTurnManagerTestAgent() *turnManagerTestAgent {
@@ -74,6 +94,9 @@ func (a *turnManagerTestAgent) TurnFeatures(string) TurnFeatures {
 func (a *turnManagerTestAgent) Steer(_ context.Context, _ string, input TurnInput) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.steerPanic {
+		panic("test steer panic")
+	}
 	if a.steerErr != nil {
 		return a.steerErr
 	}
@@ -239,6 +262,84 @@ func TestTurnManagerSteersAndFallsBackToQueue(t *testing.T) {
 	waitForState(t, events, "3", TurnInputCompleted)
 }
 
+func TestTurnManagerSteeredInputFollowsCancellation(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	a.steer = true
+	events := make(chan TurnEvent, 32)
+	m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	_ = waitValue(t, a.starts)
+	steered, err := m.Submit(context.Background(), "s", turnInput("2", "guide", TurnInputSteer))
+	if err != nil || steered.State != TurnInputSteered {
+		t.Fatalf("steer = %+v, %v", steered, err)
+	}
+	m.CancelAll("s")
+	waitForState(t, events, "1", TurnInputCancelled)
+	waitForState(t, events, "2", TurnInputCancelled)
+	if snapshot := m.Snapshot("s"); len(snapshot.Inputs) != 0 {
+		t.Fatalf("cancelled steering remained live: %+v", snapshot)
+	}
+
+	if _, err := m.Submit(context.Background(), "s", turnInput("2", "reused", TurnInputFollowUp)); err != nil {
+		t.Fatalf("cancelled steer id was not released: %v", err)
+	}
+	_ = waitValue(t, a.starts)
+	a.releases <- struct{}{}
+	waitForState(t, events, "2", TurnInputCompleted)
+}
+
+func TestTurnManagerDoesNotAttachLateSteerToPromotedTurn(t *testing.T) {
+	base := newTurnManagerTestAgent()
+	base.steer = true
+	a := &blockingSteerAgent{
+		turnManagerTestAgent: base,
+		started:              make(chan struct{}),
+		release:              make(chan struct{}),
+	}
+	events := make(chan TurnEvent, 32)
+	m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	_ = waitValue(t, a.starts)
+	_, _ = m.Submit(context.Background(), "s", turnInput("2", "two", TurnInputFollowUp))
+
+	type submitResult struct {
+		snapshot TurnInputSnapshot
+		err      error
+	}
+	result := make(chan submitResult, 1)
+	go func() {
+		snapshot, err := m.Submit(context.Background(), "s", turnInput("steer", "guide", TurnInputSteer))
+		result <- submitResult{snapshot: snapshot, err: err}
+	}()
+	select {
+	case <-a.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("steer did not start")
+	}
+
+	a.releases <- struct{}{}
+	waitForState(t, events, "1", TurnInputCompleted)
+	if got := waitValue(t, a.starts); got != "two" {
+		t.Fatalf("promoted start = %q", got)
+	}
+	close(a.release)
+
+	got := waitValue(t, result)
+	if got.err != nil || got.snapshot.State != TurnInputCompleted {
+		t.Fatalf("late steer = %+v, %v", got.snapshot, got.err)
+	}
+	if snapshot := m.Snapshot("s"); len(snapshot.Inputs) != 1 || snapshot.Inputs[0].ID != "2" {
+		t.Fatalf("late steer attached to promoted turn: %+v", snapshot)
+	}
+
+	a.releases <- struct{}{}
+	waitForState(t, events, "2", TurnInputCompleted)
+}
+
 func TestTurnManagerSurfacesUnexpectedSteerFailure(t *testing.T) {
 	a := newTurnManagerTestAgent()
 	a.steer = true
@@ -255,6 +356,25 @@ func TestTurnManagerSurfacesUnexpectedSteerFailure(t *testing.T) {
 	}
 	if snap := m.Snapshot("s"); len(snap.Inputs) != 1 || snap.Inputs[0].ID != "1" {
 		t.Fatalf("unexpected steer was queued: %+v", snap)
+	}
+	a.releases <- struct{}{}
+}
+
+func TestTurnManagerContainsSteerPanic(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	a.steer = true
+	a.steerPanic = true
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	_ = waitValue(t, a.starts)
+	_, err := m.Submit(context.Background(), "s", turnInput("2", "guide", TurnInputSteer))
+	if err == nil || err.Error() != "steer active turn: agent steer panicked: test steer panic" {
+		t.Fatalf("steer panic error = %v", err)
+	}
+	if snapshot := m.Snapshot("s"); len(snapshot.Inputs) != 1 || snapshot.Inputs[0].ID != "1" {
+		t.Fatalf("steer panic changed queue: %+v", snapshot)
 	}
 	a.releases <- struct{}{}
 }
@@ -276,6 +396,20 @@ func TestTurnManagerNormalizesSteerWithoutActiveTurn(t *testing.T) {
 		t.Fatalf("start = %q", got)
 	}
 	a.releases <- struct{}{}
+}
+
+func TestTurnManagerRejectsInvalidIntent(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+
+	input := turnInput("1", "one", TurnInputIntent("later"))
+	if _, err := m.Submit(context.Background(), "s", input); !errors.Is(err, ErrInvalidIntent) {
+		t.Fatalf("invalid intent error = %v", err)
+	}
+	if snapshot := m.Snapshot("s"); len(snapshot.Inputs) != 0 {
+		t.Fatalf("invalid input was accepted: %+v", snapshot)
+	}
 }
 
 func TestTurnManagerRemoveAndReplaceQueued(t *testing.T) {

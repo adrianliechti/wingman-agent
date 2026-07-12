@@ -82,7 +82,7 @@ func TestClassifySteerError(t *testing.T) {
 		t.Fatalf("non-steerable error = %v", err)
 	}
 	original := &rpcError{Code: -32600, Message: "expected active turn id `old` but found `new`"}
-	if err := classifySteerError(original); err != original {
-		t.Fatalf("unexpected error was rewritten: %v", err)
+	if err := classifySteerError(original); !errors.Is(err, code.ErrNoActiveTurn) {
+		t.Fatalf("turn mismatch error = %v", err)
 	}
 }

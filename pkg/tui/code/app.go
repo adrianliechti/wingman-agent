@@ -40,7 +40,9 @@ type App struct {
 
 	spinner *Spinner
 
-	sessionID string
+	sessionMu    sync.Mutex
+	sessionID    string
+	sessionEpoch uint64
 
 	phase       atomic.Int32
 	currentMode Mode
@@ -92,8 +94,9 @@ func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
 		app:   tview.NewApplication(),
 		agent: coderAgent,
 
-		sessionID:   sessionID,
-		showWelcome: !hasMessages && os.Getenv("WINGMAN_CALLER") != "vscode",
+		sessionID:    sessionID,
+		sessionEpoch: 1,
+		showWelcome:  !hasMessages && os.Getenv("WINGMAN_CALLER") != "vscode",
 
 		mouseEnabled: true,
 	}
@@ -104,7 +107,30 @@ func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
 }
 
 func (a *App) SetSessionID(id string) {
+	a.sessionMu.Lock()
 	a.sessionID = id
+	a.sessionEpoch++
+	a.sessionMu.Unlock()
+}
+
+// activateSession changes the session and resets all state that belongs to the
+// previous turn. The epoch prevents already-queued UI callbacks from an older
+// activation of the same session from rendering later.
+func (a *App) activateSession(id string) {
+	a.sessionMu.Lock()
+	a.sessionID = id
+	a.sessionEpoch++
+	a.clearStreamingState()
+	a.setPhase(PhaseIdle)
+	a.sessionMu.Unlock()
+}
+
+func (a *App) withCurrentSession(id string, fn func()) {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	if a.sessionID == id {
+		fn()
+	}
 }
 
 func saveExecutablePath() {
@@ -141,6 +167,7 @@ func (a *App) saveSession() {
 func (a *App) stop() {
 	a.saveSession()
 
+	a.turns.SetHandler(nil)
 	a.turns.Close()
 	a.agent.Close()
 	a.agent.Workspace().Close()

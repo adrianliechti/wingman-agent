@@ -310,20 +310,22 @@ func (s *Server) handleQueueUpdate(msg ClientMessage) {
 
 func (s *Server) sendTurnInputStatus(ev code.TurnEvent) {
 	meta, _ := s.getTurnMeta(ev.SessionID, ev.InputID)
-	s.sendSession(ev.SessionID, Frame{
-		Type: EvtTurnInput, ID: ev.InputID, State: string(ev.State),
-		Intent: meta.Intent, Position: ev.Position, Message: errorText(ev.Err),
-		Text: meta.Text, Queue: []TurnQueueEntry{turnQueueEntry(meta, ev.State, ev.Position)},
-	})
+	s.sendSession(ev.SessionID, turnInputFrame(ev.InputID, meta, ev.State, ev.Position, ev.Err))
 }
 
 func (s *Server) sendTurnInputError(sessionID, inputID string, err error) {
 	meta, _ := s.getTurnMeta(sessionID, inputID)
-	s.sendSession(sessionID, Frame{
-		Type: EvtTurnInput, ID: inputID, State: string(code.TurnInputFailed),
-		Intent: meta.Intent, Message: errorText(err), Text: meta.Text,
-		Queue: []TurnQueueEntry{turnQueueEntry(meta, code.TurnInputFailed, 0)},
-	})
+	s.sendSession(sessionID, turnInputFrame(inputID, meta, code.TurnInputFailed, 0, err))
+}
+
+func turnInputFrame(inputID string, meta ClientMessage, state code.TurnInputState, position int, err error) Frame {
+	meta.ID = inputID
+	entry := turnQueueEntry(meta, state, position)
+	return Frame{
+		Type: EvtTurnInput, ID: entry.ID, State: entry.State,
+		Intent: entry.Intent, Position: entry.Position, Text: entry.Text,
+		Message: errorText(err), Queue: []TurnQueueEntry{entry},
+	}
 }
 
 func (s *Server) sendTurnSnapshot(sessionID string) {

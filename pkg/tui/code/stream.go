@@ -35,11 +35,13 @@ func (a *App) setPhase(phase AppPhase) {
 
 func (a *App) queuePhase(phase AppPhase) {
 	a.phase.Store(int32(phase))
-	a.app.QueueUpdateDraw(func() {
-		if a.getPhase() != phase {
-			return
+	// Active events may be emitted synchronously from Submit on the tview event
+	// loop. QueueUpdateDraw blocks until that loop executes the callback, so it
+	// must be scheduled from another goroutine here.
+	go a.app.QueueUpdateDraw(func() {
+		if a.getPhase() == phase {
+			a.applySpinnerForPhase(phase)
 		}
-		a.applySpinnerForPhase(phase)
 	})
 }
 
@@ -95,27 +97,44 @@ func (a *App) snapshotStreamState() (toolName, toolHint, text, reasoning string)
 func (a *App) handleTurnEvent(ev code.TurnEvent) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.clearStreamingState()
-			a.queuePhase(PhaseIdle)
-			a.app.QueueUpdateDraw(func() {
-				fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Internal error: %v", recovered), theme.Default.Red))
-				a.updateStatusBar()
-			})
+			visible := false
+			var epoch uint64
+			a.sessionMu.Lock()
+			if a.sessionID == ev.SessionID {
+				epoch = a.sessionEpoch
+				a.clearStreamingState()
+				a.queuePhase(PhaseIdle)
+				visible = true
+			}
+			a.sessionMu.Unlock()
+			if visible {
+				a.app.QueueUpdateDraw(func() {
+					if a.sessionID != ev.SessionID || a.sessionEpoch != epoch {
+						return
+					}
+					fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Internal error: %v", recovered), theme.Default.Red))
+					a.updateStatusBar()
+				})
+			}
 		}
 	}()
 
 	if ev.Message != nil {
-		a.handleStreamMessage(*ev.Message)
+		a.withCurrentSession(ev.SessionID, func() {
+			a.handleStreamMessage(*ev.Message)
+		})
 		return
 	}
 
 	switch ev.State {
 	case code.TurnInputActive:
-		a.queuePhase(PhaseThinking)
+		a.withCurrentSession(ev.SessionID, func() {
+			a.queuePhase(PhaseThinking)
+		})
 	case code.TurnInputCompleted, code.TurnInputCancelled, code.TurnInputFailed:
 		commit := a.takeTurnCommit(ev.InputID)
 		if ev.Executed {
-			a.finishTurn(commit, ev.State, ev.Err)
+			a.finishTurn(ev.SessionID, commit, ev.State, ev.Err)
 		}
 	}
 }
@@ -124,9 +143,10 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 	for _, c := range msg.Content {
 		switch {
 		case c.ToolCall != nil:
+			hint := tool.ExtractHint(c.ToolCall.Args, c.ToolCall.Name)
 			a.streamStateMu.Lock()
 			a.currentToolName = c.ToolCall.Name
-			a.currentToolHint = tool.ExtractHint(c.ToolCall.Args, c.ToolCall.Name)
+			a.currentToolHint = hint
 			a.streamingText = ""
 			a.streamingReasoning = ""
 			a.reasoningID = ""
@@ -168,41 +188,57 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 	}
 }
 
-func (a *App) finishTurn(commit string, state code.TurnInputState, turnErr error) {
+func (a *App) finishTurn(sessionID, commit string, state code.TurnInputState, turnErr error) {
 	t := theme.Default
-	nextPhase := PhaseIdle
-	for _, input := range a.turns.Snapshot(a.sessionID).Inputs {
-		if input.State == code.TurnInputActive {
-			nextPhase = PhaseThinking
-			break
+	var (
+		epoch   uint64
+		usage   agent.Usage
+		visible bool
+	)
+	a.sessionMu.Lock()
+	if a.sessionID == sessionID {
+		epoch = a.sessionEpoch
+		nextPhase := PhaseIdle
+		for _, input := range a.turns.Snapshot(sessionID).Inputs {
+			if input.State == code.TurnInputActive {
+				nextPhase = PhaseThinking
+				break
+			}
 		}
+		a.queuePhase(nextPhase)
+		usage = a.agent.Usage(sessionID)
+		visible = true
 	}
-	a.queuePhase(nextPhase)
-	usage := a.agent.Usage(a.sessionID)
-	a.app.QueueUpdateDraw(func() {
-		a.inputTokens = usage.InputTokens
-		a.cachedTokens = usage.CachedTokens
-		a.outputTokens = usage.OutputTokens
-		a.lastInputTokens = usage.LastInputTokens
+	a.sessionMu.Unlock()
+	if visible {
+		a.app.QueueUpdateDraw(func() {
+			// Session changes and queued UI callbacks both run on the tview event
+			// loop, so this generation check is race-free and cannot go stale
+			// between the check and the render below.
+			if a.sessionID != sessionID || a.sessionEpoch != epoch {
+				return
+			}
+			a.inputTokens = usage.InputTokens
+			a.cachedTokens = usage.CachedTokens
+			a.outputTokens = usage.OutputTokens
+			a.lastInputTokens = usage.LastInputTokens
 
-		if state != code.TurnInputCompleted {
 			a.clearStreamingState()
-			if state == code.TurnInputCancelled || errors.Is(turnErr, context.Canceled) {
+			if state == code.TurnInputCompleted {
+				a.renderChat(a.agent.Messages(sessionID))
+			} else if state == code.TurnInputCancelled || errors.Is(turnErr, context.Canceled) {
 				fmt.Fprint(a.chatView, a.formatNotice("Cancelled", t.Yellow))
 			} else {
 				fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Error: %v", turnErr), t.Red))
 			}
-		} else {
-			a.clearStreamingState()
-			a.renderChat(a.agent.Messages(a.sessionID))
-		}
 
-		a.updateStatusBar()
-	})
+			a.updateStatusBar()
+		})
+	}
 
 	if state == code.TurnInputCompleted {
 		a.commitRewind(commit)
-		a.saveSession()
+		_ = a.agent.Save(sessionID)
 	}
 }
 

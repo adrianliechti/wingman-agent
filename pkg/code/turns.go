@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
 )
 
 type managedTurnInput struct {
@@ -99,10 +101,14 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 	if len(input.Content) == 0 {
 		return TurnInputSnapshot{}, errors.New("input content required")
 	}
-	if input.Intent == "" {
+	switch input.Intent {
+	case "":
 		input.Intent = TurnInputFollowUp
+	case TurnInputFollowUp, TurnInputSteer:
+	default:
+		return TurnInputSnapshot{}, fmt.Errorf("%w: %q", ErrInvalidIntent, input.Intent)
 	}
-	input.Content = cloneContent(input.Content)
+	input.Content = agent.CloneContent(input.Content)
 
 	s := m.session(sessionID)
 	s.mu.Lock()
@@ -117,15 +123,16 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 	s.mu.Unlock()
 	if input.Intent == TurnInputSteer && m.Features(sessionID).Steer {
 		s.mu.Lock()
-		hasActive := s.active != nil && !s.cancelRequested
+		target := s.active
+		hasActive := target != nil && !s.cancelRequested
 		s.mu.Unlock()
 		if hasActive {
 			if steerer, ok := m.agent.(TurnSteerer); ok {
-				err := steerer.Steer(ctx, sessionID, input)
+				err := callSteer(ctx, steerer, sessionID, input)
 				if err == nil {
 					item := &managedTurnInput{input: input}
 					s.mu.Lock()
-					if s.active != nil && !s.cancelRequested {
+					if s.active == target {
 						s.steered = append(s.steered, item)
 						s.mu.Unlock()
 						snap := TurnInputSnapshot{ID: input.ID, State: TurnInputSteered, Intent: input.Intent}
@@ -174,6 +181,15 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 	s.mu.Unlock()
 	m.emit(TurnEvent{SessionID: sessionID, InputID: input.ID, State: TurnInputQueued, Intent: input.Intent, Position: position})
 	return TurnInputSnapshot{ID: input.ID, State: TurnInputQueued, Intent: input.Intent, Position: position}, nil
+}
+
+func callSteer(ctx context.Context, steerer TurnSteerer, sessionID string, input TurnInput) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("agent steer panicked: %v", recovered)
+		}
+	}()
+	return steerer.Steer(ctx, sessionID, input)
 }
 
 func (m *TurnManager) runSession(sessionID string, s *managedTurnSession) {
@@ -246,7 +262,7 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 			err = fmt.Errorf("agent turn panicked: %v", recovered)
 		}
 	}()
-	stream, err := m.agent.Send(ctx, sessionID, cloneContent(item.input.Content))
+	stream, err := m.agent.Send(ctx, sessionID, item.input.Content)
 	if err != nil {
 		return err
 	}
@@ -302,7 +318,7 @@ func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnI
 		if replacement.Intent == "" {
 			replacement.Intent = item.input.Intent
 		}
-		replacement.Content = cloneContent(replacement.Content)
+		replacement.Content = agent.CloneContent(replacement.Content)
 		item.input = replacement
 		position = i + 1
 		break

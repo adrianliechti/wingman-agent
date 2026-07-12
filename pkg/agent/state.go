@@ -57,25 +57,32 @@ func cloneMessages(messages []Message) []Message {
 	out := make([]Message, len(messages))
 	for i, message := range messages {
 		out[i] = message
-		out[i].Content = make([]Content, len(message.Content))
-		for j, content := range message.Content {
-			out[i].Content[j] = content
-			if content.File != nil {
-				file := *content.File
-				out[i].Content[j].File = &file
-			}
-			if content.Reasoning != nil {
-				reasoning := *content.Reasoning
-				out[i].Content[j].Reasoning = &reasoning
-			}
-			if content.ToolCall != nil {
-				call := *content.ToolCall
-				out[i].Content[j].ToolCall = &call
-			}
-			if content.ToolResult != nil {
-				result := *content.ToolResult
-				out[i].Content[j].ToolResult = &result
-			}
+		out[i].Content = CloneContent(message.Content)
+	}
+	return out
+}
+
+// CloneContent returns an independent copy suitable for retaining after an API
+// call. Content only contains value fields and one level of pointer fields.
+func CloneContent(in []Content) []Content {
+	out := make([]Content, len(in))
+	for i, content := range in {
+		out[i] = content
+		if content.File != nil {
+			file := *content.File
+			out[i].File = &file
+		}
+		if content.Reasoning != nil {
+			reasoning := *content.Reasoning
+			out[i].Reasoning = &reasoning
+		}
+		if content.ToolCall != nil {
+			call := *content.ToolCall
+			out[i].ToolCall = &call
+		}
+		if content.ToolResult != nil {
+			result := *content.ToolResult
+			out[i].ToolResult = &result
 		}
 	}
 	return out

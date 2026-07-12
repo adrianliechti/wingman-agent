@@ -42,12 +42,13 @@ func (a *Agent) QueueInput(input []Content) bool {
 	if len(input) == 0 {
 		return false
 	}
+	input = CloneContent(input)
 	a.queueMu.Lock()
 	defer a.queueMu.Unlock()
 	if !a.running {
 		return false
 	}
-	a.pendingInput = append(a.pendingInput, append([]Content(nil), input...))
+	a.pendingInput = append(a.pendingInput, input)
 	return true
 }
 
@@ -59,6 +60,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	if len(input) == 0 {
 		return nil, ErrEmptyInput
 	}
+	input = CloneContent(input)
 	a.queueMu.Lock()
 	if a.running {
 		a.queueMu.Unlock()

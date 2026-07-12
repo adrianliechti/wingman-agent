@@ -86,6 +86,24 @@ type turn struct {
 	ignoreUserUpdates bool
 }
 
+func (t *turn) messages() []agent.Message {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]agent.Message(nil), t.emitted...)
+}
+
+func (s *sessionState) finalizeTurn(t *turn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	emitted := t.messages()
+	if s.inflight == t {
+		s.inflight = nil
+	}
+	if len(emitted) > 0 {
+		s.messages = append(s.messages, emitted...)
+	}
+}
+
 type event struct {
 	msg  agent.Message
 	err  error
@@ -446,8 +464,8 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 			sess.mu.Lock()
 			sess.inflight = nil
 			if ok {
-				if len(t.emitted) > 0 {
-					sess.messages = append(sess.messages, t.emitted...)
+				if emitted := t.messages(); len(emitted) > 0 {
+					sess.messages = append(sess.messages, emitted...)
 				}
 				sess.loaded = true
 			}
@@ -455,9 +473,7 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 		}()
 
 		snapshot := func() []agent.Message {
-			t.mu.Lock()
-			defer t.mu.Unlock()
-			return append([]agent.Message(nil), t.emitted...)
+			return t.messages()
 		}
 
 		loadErrCh := make(chan error, 1)
@@ -552,6 +568,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (ite
 	if len(input) == 0 {
 		return nil, code.ErrEmptyInput
 	}
+	input = agent.CloneContent(input)
 	a.mu.Lock()
 	sess, ok := a.sessions[id]
 	a.mu.Unlock()
@@ -614,16 +631,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (ite
 			clear(sess.toolCalls)
 			sess.toolCallsMu.Unlock()
 
-			t.mu.Lock()
-			emitted := append([]agent.Message(nil), t.emitted...)
-			t.mu.Unlock()
-
-			sess.mu.Lock()
-			sess.inflight = nil
-			if len(emitted) > 0 {
-				sess.messages = append(sess.messages, emitted...)
-			}
-			sess.mu.Unlock()
+			sess.finalizeTurn(t)
 		}()
 		for {
 			select {
@@ -671,6 +679,7 @@ func (a *Agent) Steer(ctx context.Context, id string, input code.TurnInput) erro
 	if t == nil {
 		return code.ErrNoActiveTurn
 	}
+	input.Content = agent.CloneContent(input.Content)
 	if err := a.steer(ctx, sess.id, acp.ContentToBlocks(input.Content), input.ID); err != nil {
 		return err
 	}

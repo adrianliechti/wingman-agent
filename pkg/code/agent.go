@@ -52,6 +52,8 @@ type Agent interface {
 	// Send starts one turn and returns its event stream. Immediate validation
 	// and busy-session failures are returned directly; errors that happen after
 	// the turn starts are yielded by the stream. Send never queues implicitly.
+	// Once Send returns successfully, the agent owns input and callers may reuse
+	// or mutate their slice.
 	Send(ctx context.Context, sessionID string, input []agent.Content) (iter.Seq2[agent.Message, error], error)
 
 	Cancel(sessionID string)
