@@ -1,0 +1,215 @@
+//go:build e2e
+
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+type webE2EModel struct {
+	filePath string
+
+	requests      atomic.Int32
+	toolRequests  atomic.Int32
+	steerRequests atomic.Int32
+
+	steerStarted chan struct{}
+	steerRelease chan struct{}
+	steerOnce    sync.Once
+
+	cancelObserved chan struct{}
+	cancelOnce     sync.Once
+}
+
+func emitE2EEvent(w http.ResponseWriter, event any) {
+	data, _ := json.Marshal(event)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+}
+
+func emitE2ETextResponse(w http.ResponseWriter, id, text string) {
+	emitE2EEvent(w, map[string]any{
+		"type": "response.output_text.delta", "sequence_number": 1,
+		"item_id": id, "output_index": 0, "content_index": 0, "delta": text,
+	})
+	emitE2EEvent(w, map[string]any{
+		"type": "response.completed", "sequence_number": 2,
+		"response": map[string]any{
+			"output": []any{map[string]any{
+				"type": "message", "id": id, "role": "assistant", "status": "completed",
+				"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
+			}},
+			"usage": map[string]any{
+				"input_tokens": 4, "input_tokens_details": map[string]any{"cached_tokens": 0}, "output_tokens": 2,
+			},
+		},
+	})
+	fmt.Fprint(w, "data: [DONE]\n\n")
+}
+
+func (m *webE2EModel) handleTool(w http.ResponseWriter) {
+	if m.toolRequests.Add(1) == 1 {
+		args, _ := json.Marshal(map[string]any{
+			"file_path": m.filePath,
+			"content":   "created by the browser e2e test\n",
+		})
+		emitE2EEvent(w, map[string]any{
+			"type": "response.output_item.done", "sequence_number": 1, "output_index": 0,
+			"item": map[string]any{
+				"type": "function_call", "id": "fc_write", "call_id": "call_write",
+				"name": "write", "arguments": string(args), "status": "completed",
+			},
+		})
+		emitE2EEvent(w, map[string]any{
+			"type": "response.completed", "sequence_number": 2,
+			"response": map[string]any{
+				"usage": map[string]any{
+					"input_tokens": 3, "input_tokens_details": map[string]any{"cached_tokens": 0}, "output_tokens": 1,
+				},
+			},
+		})
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		return
+	}
+	emitE2ETextResponse(w, "msg_tool", "Created the requested file")
+}
+
+func (m *webE2EModel) handleSteer(w http.ResponseWriter, r *http.Request) {
+	if m.steerRequests.Add(1) == 1 {
+		emitE2EEvent(w, map[string]any{
+			"type": "response.output_text.delta", "sequence_number": 1,
+			"item_id": "msg_steer_1", "output_index": 0, "content_index": 0, "delta": "Working",
+		})
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		m.steerOnce.Do(func() { close(m.steerStarted) })
+		select {
+		case <-m.steerRelease:
+		case <-r.Context().Done():
+			return
+		}
+		emitE2EEvent(w, map[string]any{
+			"type": "response.completed", "sequence_number": 2,
+			"response": map[string]any{
+				"output": []any{map[string]any{
+					"type": "message", "id": "msg_steer_1", "role": "assistant", "status": "completed",
+					"content": []any{map[string]any{"type": "output_text", "text": "Working", "annotations": []any{}}},
+				}},
+				"usage": map[string]any{
+					"input_tokens": 2, "input_tokens_details": map[string]any{"cached_tokens": 0}, "output_tokens": 1,
+				},
+			},
+		})
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		return
+	}
+	emitE2ETextResponse(w, "msg_steer_2", "Steering applied")
+}
+
+func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/v1/models":
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"object":"list","data":[{"id":"gpt-5.4","object":"model"}]}`)
+	case "/v1/responses":
+		m.requests.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch {
+		case strings.Contains(string(body), "create e2e-result.txt"):
+			m.handleTool(w)
+		case strings.Contains(string(body), "cancel this request"):
+			emitE2EEvent(w, map[string]any{
+				"type": "response.output_text.delta", "sequence_number": 1,
+				"item_id": "msg_cancel", "output_index": 0, "content_index": 0, "delta": "Long-running work",
+			})
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+			m.cancelOnce.Do(func() { close(m.cancelObserved) })
+		case strings.Contains(string(body), "initial request"):
+			m.handleSteer(w, r)
+		default:
+			http.Error(w, "unknown e2e prompt", http.StatusBadRequest)
+		}
+	case "/release-steer":
+		select {
+		case <-m.steerStarted:
+		case <-time.After(10 * time.Second):
+			http.Error(w, "steering turn did not start", http.StatusGatewayTimeout)
+			return
+		}
+		select {
+		case <-m.steerRelease:
+		default:
+			close(m.steerRelease)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case "/cancelled":
+		select {
+		case <-m.cancelObserved:
+			w.WriteHeader(http.StatusNoContent)
+		case <-time.After(10 * time.Second):
+			http.Error(w, "model request was not cancelled", http.StatusGatewayTimeout)
+		}
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
+	workDir := t.TempDir()
+	model := &webE2EModel{
+		filePath:       filepath.Join(workDir, "e2e-result.txt"),
+		steerStarted:   make(chan struct{}),
+		steerRelease:   make(chan struct{}),
+		cancelObserved: make(chan struct{}),
+	}
+	modelServer := httptest.NewServer(http.HandlerFunc(model.handler))
+	defer modelServer.Close()
+	t.Setenv("WINGMAN_URL", modelServer.URL)
+	t.Setenv("WINGMAN_MODEL", "gpt-5.4")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	app, err := New(ctx, workDir, &ServerOptions{NoBrowser: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	web := httptest.NewServer(app)
+	defer web.Close()
+
+	cmd := exec.CommandContext(ctx, "npx", "playwright", "test", "e2e/web.spec.ts", "--config", "playwright.config.ts")
+	cmd.Dir = filepath.Join("ui")
+	cmd.Env = append(os.Environ(),
+		"E2E_BASE_URL="+web.URL,
+		"E2E_CONTROL_URL="+modelServer.URL,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("playwright after %d model requests: %v\n%s", model.requests.Load(), err, output)
+	}
+
+	content, err := os.ReadFile(model.filePath)
+	if err != nil {
+		t.Fatalf("coding tool did not create file: %v", err)
+	}
+	if string(content) != "created by the browser e2e test\n" {
+		t.Fatalf("created file = %q", content)
+	}
+}

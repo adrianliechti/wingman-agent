@@ -64,7 +64,11 @@ func TestSendLimitsRunawayToolCallRounds(t *testing.T) {
 	}}
 
 	var runErr error
-	for _, err := range a.Send(context.Background(), []Content{{Text: "start"}}) {
+	stream, err := a.Send(context.Background(), []Content{{Text: "start"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range stream {
 		if err != nil {
 			runErr = err
 		}
@@ -90,7 +94,11 @@ func TestSendAllowsFinalResponseAtMaxTurns(t *testing.T) {
 
 	a := &Agent{Config: &Config{client: &client, MaxTurns: 1}}
 	var runErr error
-	for _, err := range a.Send(context.Background(), []Content{{Text: "start"}}) {
+	stream, err := a.Send(context.Background(), []Content{{Text: "start"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range stream {
 		if err != nil {
 			runErr = err
 		}
@@ -146,6 +154,64 @@ func TestEndRunPreservesQueuedUserInput(t *testing.T) {
 	}
 	if len(a.Messages) != 1 || a.Messages[0].Role != RoleUser || a.Messages[0].Content[0].Text != "queued" {
 		t.Fatalf("queued input was not preserved: %+v", a.Messages)
+	}
+}
+
+func TestQueueInputOnlyAcceptsDuringRunAndOwnsItsSlice(t *testing.T) {
+	a := &Agent{}
+	if a.QueueInput([]Content{{Text: "too early"}}) {
+		t.Fatal("QueueInput accepted without an active run")
+	}
+
+	a.queueMu.Lock()
+	a.running = true
+	a.queueMu.Unlock()
+	input := []Content{{Text: "guidance", File: &File{Name: "before.txt"}}}
+	if !a.QueueInput(input) {
+		t.Fatal("QueueInput rejected an active run")
+	}
+	input[0].Text = "mutated"
+	input[0].File.Name = "after.txt"
+
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+	if len(a.pendingInput) != 1 || a.pendingInput[0][0].Text != "guidance" || a.pendingInput[0][0].File.Name != "before.txt" {
+		t.Fatalf("pending input = %#v", a.pendingInput)
+	}
+}
+
+func TestSendOwnsAcceptedInput(t *testing.T) {
+	client := streamingTestClient(func(*http.Request) string {
+		return "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":0}}}\n\n"
+	})
+	a := &Agent{Config: &Config{client: &client}}
+	input := []Content{{Text: "before", File: &File{Name: "before.txt"}}}
+	stream, err := a.Send(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input[0].Text = "after"
+	input[0].File.Name = "after.txt"
+	for range stream {
+	}
+
+	messages := a.MessagesSnapshot()
+	if len(messages) == 0 || messages[0].Content[0].Text != "before" || messages[0].Content[0].File.Name != "before.txt" {
+		t.Fatalf("accepted input was mutated: %+v", messages)
+	}
+}
+
+func TestSendReportsImmediateUsageErrors(t *testing.T) {
+	a := &Agent{}
+	if _, err := a.Send(context.Background(), nil); !errors.Is(err, ErrEmptyInput) {
+		t.Fatalf("empty input error = %v", err)
+	}
+	a.running = true
+	if _, err := a.Send(context.Background(), []Content{{Text: "another turn"}}); !errors.Is(err, ErrTurnInProgress) {
+		t.Fatalf("busy error = %v", err)
+	}
+	if len(a.pendingInput) != 0 {
+		t.Fatalf("Send queued implicitly: %#v", a.pendingInput)
 	}
 }
 

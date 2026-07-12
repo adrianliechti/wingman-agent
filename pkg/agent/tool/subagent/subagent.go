@@ -167,10 +167,15 @@ func Tools(cfg *agent.Config, sharedContext func() string) []tool.Tool {
 			sub := &agent.Agent{Config: subcfg}
 
 			var runErr error
-			for _, err := range sub.Send(ctx, []agent.Content{{Text: prompt}}) {
-				if err != nil {
-					runErr = err
-					break
+			stream, err := sub.Send(ctx, []agent.Content{{Text: prompt}})
+			if err != nil {
+				runErr = err
+			} else {
+				for _, err := range stream {
+					if err != nil {
+						runErr = err
+						break
+					}
 				}
 			}
 

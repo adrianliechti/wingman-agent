@@ -234,6 +234,17 @@ type turnInterruptParams struct {
 	TurnID   string `json:"turnId"`
 }
 
+type turnSteerParams struct {
+	ThreadID            string `json:"threadId"`
+	ExpectedTurnID      string `json:"expectedTurnId"`
+	ClientUserMessageID string `json:"clientUserMessageId,omitempty"`
+	Input               []any  `json:"input"`
+}
+
+type turnSteerResponse struct {
+	TurnID string `json:"turnId"`
+}
+
 type threadArchiveParams struct {
 	ThreadID string `json:"threadId"`
 }
@@ -297,6 +308,11 @@ func (c *codexClient) turnStart(ctx context.Context, p turnStartParams) (turnSta
 
 func (c *codexClient) turnInterrupt(ctx context.Context, p turnInterruptParams) error {
 	return c.rpc.call(ctx, "turn/interrupt", p, nil)
+}
+
+func (c *codexClient) turnSteer(ctx context.Context, p turnSteerParams) error {
+	var out turnSteerResponse
+	return c.rpc.call(ctx, "turn/steer", p, &out)
 }
 
 func (c *codexClient) threadResume(ctx context.Context, p threadResumeParams) (threadResumeResponse, error) {

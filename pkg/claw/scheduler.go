@@ -155,9 +155,9 @@ func (c *Claw) runScheduledTask(ctx context.Context, name string, ma *managedAge
 	ctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 
-	stream := ma.agent.Send(ctx, []agent.Content{{Text: prompt}})
-	if stream == nil {
-		log.Printf("scheduler %s: agent busy, skipping run", name)
+	stream, err := ma.agent.Send(ctx, []agent.Content{{Text: prompt}})
+	if err != nil {
+		log.Printf("scheduler %s: could not start turn: %v", name, err)
 		return false
 	}
 

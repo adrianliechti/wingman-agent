@@ -9,7 +9,7 @@ export default defineConfig({
   build: {
     outDir: '../static',
     emptyOutDir: true,
-    rollupOptions: {
+    rolldownOptions: {
       output: {
         entryFileNames: 'assets/[name].js',
         chunkFileNames: (chunk) =>
@@ -17,7 +17,7 @@ export default defineConfig({
             ? 'assets/lang/[name].js'
             : 'assets/[name].js',
         assetFileNames: 'assets/[name].[ext]',
-        advancedChunks: {
+        codeSplitting: {
           groups: [
             {
               name: 'editor',
@@ -29,7 +29,7 @@ export default defineConfig({
     },
   },
   worker: {
-    rollupOptions: {
+    rolldownOptions: {
       output: {
         entryFileNames: 'assets/workers/[name].js',
         chunkFileNames: 'assets/workers/[name].js',

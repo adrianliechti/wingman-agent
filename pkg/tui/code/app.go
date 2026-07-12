@@ -40,7 +40,9 @@ type App struct {
 
 	spinner *Spinner
 
-	sessionID string
+	sessionMu    sync.Mutex
+	sessionID    string
+	sessionEpoch uint64
 
 	phase       atomic.Int32
 	currentMode Mode
@@ -64,8 +66,10 @@ type App struct {
 	pendingContent  []agent.Content
 	pendingFiles    []string
 
-	streamCancel context.CancelFunc
-	streamMu     sync.Mutex
+	turns *code.TurnManager
+
+	turnMu      sync.Mutex
+	turnCommits map[string]string
 
 	renderPending atomic.Bool
 	renderLast    atomic.Int64
@@ -75,31 +79,58 @@ type App struct {
 	currentToolHint    string
 	streamingText      string
 	streamingReasoning string
+	reasoningID        string
 
 	mouseEnabled bool
 }
 
-func New(ctx context.Context, agent *coder.Agent, sessionID string) *App {
+func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
 	saveExecutablePath()
 
-	hasMessages := sessionID != "" && len(agent.Messages(sessionID)) > 0
+	hasMessages := sessionID != "" && len(coderAgent.Messages(sessionID)) > 0
 
 	a := &App{
 		ctx:   ctx,
 		app:   tview.NewApplication(),
-		agent: agent,
+		agent: coderAgent,
 
-		sessionID:   sessionID,
-		showWelcome: !hasMessages && os.Getenv("WINGMAN_CALLER") != "vscode",
+		sessionID:    sessionID,
+		sessionEpoch: 1,
+		showWelcome:  !hasMessages && os.Getenv("WINGMAN_CALLER") != "vscode",
 
 		mouseEnabled: true,
 	}
+	a.turnCommits = make(map[string]string)
+	a.turns = code.NewTurnManager(ctx, coderAgent, a.handleTurnEvent)
 
 	return a
 }
 
 func (a *App) SetSessionID(id string) {
+	a.sessionMu.Lock()
 	a.sessionID = id
+	a.sessionEpoch++
+	a.sessionMu.Unlock()
+}
+
+// activateSession changes the session and resets all state that belongs to the
+// previous turn. The epoch prevents already-queued UI callbacks from an older
+// activation of the same session from rendering later.
+func (a *App) activateSession(id string) {
+	a.sessionMu.Lock()
+	a.sessionID = id
+	a.sessionEpoch++
+	a.clearStreamingState()
+	a.setPhase(PhaseIdle)
+	a.sessionMu.Unlock()
+}
+
+func (a *App) withCurrentSession(id string, fn func()) {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	if a.sessionID == id {
+		fn()
+	}
 }
 
 func saveExecutablePath() {
@@ -136,6 +167,8 @@ func (a *App) saveSession() {
 func (a *App) stop() {
 	a.saveSession()
 
+	a.turns.SetHandler(nil)
+	a.turns.Close()
 	a.agent.Close()
 	a.agent.Workspace().Close()
 

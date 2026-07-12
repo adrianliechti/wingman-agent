@@ -32,7 +32,7 @@ require (
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/modelcontextprotocol/go-sdk v1.6.1 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
-	github.com/odvcencio/gotreesitter v0.26.1 // indirect
+	github.com/odvcencio/gotreesitter v0.28.0 // indirect
 	github.com/openai/openai-go/v3 v3.42.0 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect

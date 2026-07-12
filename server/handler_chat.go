@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/coder/websocket"
+	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -59,14 +60,49 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if msg.SessionID == "" {
 				continue
 			}
-			go s.handleSend(msg)
+			s.handleSend(r.Context(), msg)
 
 		case MsgCancel:
 			if msg.SessionID == "" {
 				continue
 			}
-			if a := s.activeAgent(); a != nil {
-				a.Cancel(msg.SessionID)
+			if _, turns := s.activeRuntime(); turns != nil {
+				if msg.ClearQueue {
+					turns.CancelAll(msg.SessionID)
+				} else {
+					turns.CancelCurrent(msg.SessionID)
+				}
+				s.sendTurnSnapshot(msg.SessionID)
+			}
+
+		case MsgQueueRemove:
+			if _, turns := s.activeRuntime(); turns != nil && msg.SessionID != "" && msg.ID != "" {
+				if err := turns.RemoveQueued(msg.SessionID, msg.ID); err != nil {
+					s.sendTurnInputError(msg.SessionID, msg.ID, err)
+				}
+			}
+
+		case MsgQueueUpdate:
+			s.handleQueueUpdate(msg)
+
+		case MsgQueueResume:
+			if _, turns := s.activeRuntime(); turns != nil && msg.SessionID != "" {
+				turns.Resume(msg.SessionID)
+				s.sendTurnSnapshot(msg.SessionID)
+			}
+
+		case MsgQueueClear:
+			if _, turns := s.activeRuntime(); turns != nil && msg.SessionID != "" {
+				turns.ClearQueue(msg.SessionID)
+				s.sendTurnSnapshot(msg.SessionID)
+			}
+
+		case MsgSync:
+			for _, sid := range msg.Sessions {
+				if sid == "" {
+					continue
+				}
+				s.sendSessionState(sid)
 			}
 
 		case MsgPromptResponse:
@@ -100,51 +136,47 @@ func (s *Server) buildInput(msg ClientMessage) []agent.Content {
 	return input
 }
 
-func (s *Server) handleSend(msg ClientMessage) {
-	a := s.activeAgent()
-	if a == nil {
+func (s *Server) handleSend(ctx context.Context, msg ClientMessage) {
+	_, turns := s.activeRuntime()
+	if turns == nil {
 		return
 	}
-	sid := msg.SessionID
-	input := s.buildInput(msg)
-
-	streamCtx, cancel := context.WithCancel(s.ctx)
-	defer cancel()
-
-	stream := a.Send(streamCtx, sid, input)
-	if stream == nil {
-
+	if msg.ID == "" {
+		msg.ID = uuid.NewString()
+	}
+	intent := code.TurnInputIntent(msg.Intent)
+	if intent != code.TurnInputSteer {
+		intent = code.TurnInputFollowUp
+	}
+	msg.Intent = string(intent)
+	s.storeTurnMeta(msg)
+	_, err := turns.Submit(ctx, msg.SessionID, code.TurnInput{
+		ID: msg.ID, Content: s.buildInput(msg), Intent: intent,
+	})
+	if err != nil {
+		s.sendTurnInputError(msg.SessionID, msg.ID, err)
+		s.deleteTurnMeta(msg.SessionID, msg.ID)
 		return
 	}
+	s.sendTurnSnapshot(msg.SessionID)
+}
 
-	s.setSessionPhase(sid, "thinking")
-
-	var lastUsage agent.Usage
-
-	for evMsg, err := range stream {
-		if err != nil {
-			text := err.Error()
-			if errors.Is(err, context.Canceled) {
-				text = "Cancelled"
-			}
-			s.sendSession(sid, Frame{Type: EvtError, Message: text})
-			break
-		}
-
-		for _, c := range evMsg.Content {
+func (s *Server) handleTurnEvent(ev code.TurnEvent) {
+	if ev.Message != nil {
+		for _, c := range ev.Message.Content {
 			switch {
 			case c.ToolCall != nil:
-				s.sendSession(sid, Frame{
+				s.sendSession(ev.SessionID, Frame{
 					Type: EvtToolCall,
 					ID:   c.ToolCall.ID,
 					Name: c.ToolCall.Name,
 					Args: c.ToolCall.Args,
 					Hint: tool.ExtractHint(c.ToolCall.Args, c.ToolCall.Name),
 				})
-				s.setSessionPhase(sid, "tool_running")
+				s.setSessionPhase(ev.SessionID, "tool_running")
 
 			case c.ToolResult != nil:
-				s.sendSession(sid, Frame{
+				s.sendSession(ev.SessionID, Frame{
 					Type:    EvtToolResult,
 					ID:      c.ToolResult.ID,
 					Name:    c.ToolResult.Name,
@@ -154,34 +186,65 @@ func (s *Server) handleSend(msg ClientMessage) {
 				s.files.Notify()
 
 			case c.Reasoning != nil && c.Reasoning.Summary != "":
-				s.setSessionPhase(sid, "thinking")
-				s.sendSession(sid, Frame{
+				s.setSessionPhase(ev.SessionID, "thinking")
+				s.sendSession(ev.SessionID, Frame{
 					Type: EvtReasoningDelta,
 					ID:   c.Reasoning.ID,
 					Text: c.Reasoning.Summary,
 				})
 
 			case c.Text != "":
-				s.setSessionPhase(sid, "streaming")
-				s.sendSession(sid, Frame{Type: EvtTextDelta, Text: c.Text})
+				s.setSessionPhase(ev.SessionID, "streaming")
+				s.sendSession(ev.SessionID, Frame{Type: EvtTextDelta, Text: c.Text})
 			}
 		}
+		s.sendUsageIfChanged(ev.SessionID)
+		return
+	}
 
-		if u := a.Usage(sid); u != lastUsage {
-			lastUsage = u
-			s.sendSession(sid, s.usageFrame(a, sid, u))
+	if ev.State == "" {
+		return
+	}
+	if ev.Intent != "" {
+		s.updateTurnIntent(ev.SessionID, ev.InputID, ev.Intent)
+	}
+	s.sendTurnInputStatus(ev)
+
+	switch ev.State {
+	case code.TurnInputActive:
+		s.setSessionPhase(ev.SessionID, "thinking")
+	case code.TurnInputFailed:
+		if ev.Err != nil && !errors.Is(ev.Err, context.Canceled) {
+			s.sendSession(ev.SessionID, Frame{Type: EvtError, Message: ev.Err.Error()})
+		}
+	case code.TurnInputCancelled:
+		if ev.Executed {
+			s.sendSession(ev.SessionID, Frame{Type: EvtError, Message: "Cancelled"})
 		}
 	}
 
-	if u := a.Usage(sid); u != (agent.Usage{}) && u != lastUsage {
-		s.sendSession(sid, s.usageFrame(a, sid, u))
+	if ev.Executed {
+		s.finalizeTurn(ev.SessionID, ev.InputID)
 	}
+	if ev.State == code.TurnInputCompleted || ev.State == code.TurnInputCancelled || ev.State == code.TurnInputFailed {
+		s.deleteTurnMeta(ev.SessionID, ev.InputID)
+	}
+	s.sendTurnSnapshot(ev.SessionID)
+}
+
+func (s *Server) finalizeTurn(sid, inputID string) {
+	a := s.activeAgent()
+	if a == nil {
+		return
+	}
+	s.sendUsageIfChanged(sid)
 
 	ws := s.workspace
 	s.flushFiles()
 
 	if ws.HasRewind() {
-		commitMsg := msg.Text
+		meta, _ := s.getTurnMeta(sid, inputID)
+		commitMsg := meta.Text
 		if commitMsg == "" {
 			commitMsg = "<unknown>"
 		}
@@ -203,7 +266,156 @@ func (s *Server) handleSend(msg ClientMessage) {
 		s.broadcast(Frame{Type: EvtSessionsChanged})
 	}
 
-	s.setSessionPhase(sid, "idle")
+	_, turns := s.activeRuntime()
+	if turns == nil || !snapshotHasActive(turns.Snapshot(sid)) {
+		s.setSessionPhase(sid, "idle")
+	}
+}
+
+func snapshotHasActive(snapshot code.TurnSnapshot) bool {
+	for _, input := range snapshot.Inputs {
+		if input.State == code.TurnInputActive || input.State == code.TurnInputSteered {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) handleQueueUpdate(msg ClientMessage) {
+	if msg.SessionID == "" || msg.ID == "" {
+		return
+	}
+	_, turns := s.activeRuntime()
+	if turns == nil {
+		return
+	}
+	previous, ok := s.getTurnMeta(msg.SessionID, msg.ID)
+	if !ok {
+		s.sendTurnInputError(msg.SessionID, msg.ID, code.ErrInputNotQueued)
+		return
+	}
+	msg.Type = MsgSend
+	msg.Intent = string(code.TurnInputFollowUp)
+	s.storeTurnMeta(msg)
+	err := turns.ReplaceQueued(msg.SessionID, msg.ID, code.TurnInput{
+		ID: msg.ID, Content: s.buildInput(msg), Intent: code.TurnInputFollowUp,
+	})
+	if err != nil {
+		s.storeTurnMeta(previous)
+		s.sendTurnInputError(msg.SessionID, msg.ID, err)
+		return
+	}
+	s.sendTurnSnapshot(msg.SessionID)
+}
+
+func (s *Server) sendTurnInputStatus(ev code.TurnEvent) {
+	meta, _ := s.getTurnMeta(ev.SessionID, ev.InputID)
+	s.sendSession(ev.SessionID, turnInputFrame(ev.InputID, meta, ev.State, ev.Position, ev.Err))
+}
+
+func (s *Server) sendTurnInputError(sessionID, inputID string, err error) {
+	meta, _ := s.getTurnMeta(sessionID, inputID)
+	s.sendSession(sessionID, turnInputFrame(inputID, meta, code.TurnInputFailed, 0, err))
+}
+
+func turnInputFrame(inputID string, meta ClientMessage, state code.TurnInputState, position int, err error) Frame {
+	meta.ID = inputID
+	entry := turnQueueEntry(meta, state, position)
+	return Frame{
+		Type: EvtTurnInput, ID: entry.ID, State: entry.State,
+		Intent: entry.Intent, Position: entry.Position, Text: entry.Text,
+		Message: errorText(err), Queue: []TurnQueueEntry{entry},
+	}
+}
+
+func (s *Server) sendTurnSnapshot(sessionID string) {
+	_, turns := s.activeRuntime()
+	if turns == nil {
+		return
+	}
+	snapshot := turns.Snapshot(sessionID)
+	queue := make([]TurnQueueEntry, 0, len(snapshot.Inputs))
+	for _, input := range snapshot.Inputs {
+		meta, _ := s.getTurnMeta(sessionID, input.ID)
+		queue = append(queue, turnQueueEntry(meta, input.State, input.Position))
+	}
+	s.sendSession(sessionID, Frame{
+		Type: EvtTurnQueue, Queue: queue, Paused: snapshot.Paused,
+		CanSteer: snapshot.Features.Steer,
+	})
+}
+
+func turnQueueEntry(meta ClientMessage, state code.TurnInputState, position int) TurnQueueEntry {
+	return TurnQueueEntry{
+		ID: meta.ID, State: string(state), Intent: meta.Intent, Position: position,
+		Text: meta.Text, Files: append([]string(nil), meta.Files...),
+		Images: append([]string(nil), meta.Images...), ImageCount: len(meta.Images),
+	}
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func (s *Server) storeTurnMeta(msg ClientMessage) {
+	msg.Files = append([]string(nil), msg.Files...)
+	msg.Images = append([]string(nil), msg.Images...)
+	s.turnMetaMu.Lock()
+	byID := s.turnMeta[msg.SessionID]
+	if byID == nil {
+		byID = map[string]ClientMessage{}
+		s.turnMeta[msg.SessionID] = byID
+	}
+	byID[msg.ID] = msg
+	s.turnMetaMu.Unlock()
+}
+
+func (s *Server) getTurnMeta(sessionID, inputID string) (ClientMessage, bool) {
+	s.turnMetaMu.Lock()
+	defer s.turnMetaMu.Unlock()
+	msg, ok := s.turnMeta[sessionID][inputID]
+	return msg, ok
+}
+
+func (s *Server) updateTurnIntent(sessionID, inputID string, intent code.TurnInputIntent) {
+	s.turnMetaMu.Lock()
+	if byID := s.turnMeta[sessionID]; byID != nil {
+		msg := byID[inputID]
+		msg.Intent = string(intent)
+		byID[inputID] = msg
+	}
+	s.turnMetaMu.Unlock()
+}
+
+func (s *Server) deleteTurnMeta(sessionID, inputID string) {
+	s.turnMetaMu.Lock()
+	if byID := s.turnMeta[sessionID]; byID != nil {
+		delete(byID, inputID)
+		if len(byID) == 0 {
+			delete(s.turnMeta, sessionID)
+		}
+	}
+	s.turnMetaMu.Unlock()
+}
+
+func (s *Server) sendUsageIfChanged(sessionID string) {
+	a := s.activeAgent()
+	if a == nil {
+		return
+	}
+	u := a.Usage(sessionID)
+	s.turnMetaMu.Lock()
+	previous := s.turnUsage[sessionID]
+	if u == previous {
+		s.turnMetaMu.Unlock()
+		return
+	}
+	s.turnUsage[sessionID] = u
+	s.turnMetaMu.Unlock()
+	s.sendSession(sessionID, s.usageFrame(a, sessionID, u))
 }
 
 func (s *Server) usageFrame(a code.Agent, sid string, u agent.Usage) Frame {

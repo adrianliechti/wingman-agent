@@ -506,7 +506,11 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		})
 	}
 
-	for msg, err := range sess.agent.Send(ctx, string(sess.id), acpcontent.ContentFromBlocks(params.Prompt)) {
+	stream, err := sess.agent.Send(ctx, string(sess.id), acpcontent.ContentFromBlocks(params.Prompt))
+	if err != nil {
+		return acpsdk.PromptResponse{}, err
+	}
+	for msg, err := range stream {
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return promptResponse(sess, acpsdk.StopReasonCancelled, params.MessageId), nil

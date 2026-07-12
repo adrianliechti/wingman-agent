@@ -83,8 +83,8 @@ github.com/lucasb-eyer/go-colorful v1.4.0 h1:UtrWVfLdarDgc44HcS7pYloGHJUjHV/4FwW
 github.com/lucasb-eyer/go-colorful v1.4.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
 github.com/modelcontextprotocol/go-sdk v1.6.1 h1:0zOSupjKUxPKSocPT1Wtago+mUHU2/uZ4xSOY0FGReU=
 github.com/modelcontextprotocol/go-sdk v1.6.1/go.mod h1:kzm3kzFL1/+AziGOE0nUs3gvPoNxMCvkxokMkuFapXQ=
-github.com/odvcencio/gotreesitter v0.26.1 h1:ONE6O7ugu85psQ624wc629qWC8NbEOlvzzpcLl/Db6U=
-github.com/odvcencio/gotreesitter v0.26.1/go.mod h1:hBVkghd0paaYAVwd2087vfwdeU984bQbMo9LvpE0moo=
+github.com/odvcencio/gotreesitter v0.28.0 h1:NNxNEwSfTaWGfVZ3ermv0e+xXbmNphYgk2Jm3A0/oHU=
+github.com/odvcencio/gotreesitter v0.28.0/go.mod h1:hBVkghd0paaYAVwd2087vfwdeU984bQbMo9LvpE0moo=
 github.com/onsi/gomega v1.34.1 h1:EUMJIKUjM8sKjYbtxQI9A4z2o+rruxnzNvpknOXie6k=
 github.com/onsi/gomega v1.34.1/go.mod h1:kU1QgUvBDLXBJq618Xvm2LUX6rSAfRaFRTcdOeDLwwY=
 github.com/openai/openai-go/v3 v3.42.0 h1:16Skv1hpEhSm3imZpPGSeEBDUgVJJA9cHryKGGsVYI8=

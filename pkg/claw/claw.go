@@ -327,8 +327,9 @@ func (c *Claw) Send(ctx context.Context, msg channel.Message) iter.Seq2[agent.Me
 		ctx, cancel := context.WithTimeout(ctx, runTimeout)
 		defer cancel()
 
-		turn := ma.agent.Send(ctx, []agent.Content{{Text: frameMessage(msg)}})
-		if turn == nil {
+		turn, err := ma.agent.Send(ctx, []agent.Content{{Text: frameMessage(msg)}})
+		if err != nil {
+			yield(agent.Message{}, err)
 			return
 		}
 

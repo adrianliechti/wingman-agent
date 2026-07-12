@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/google/uuid"
 	"github.com/rivo/tview"
 	"golang.org/x/term"
 
@@ -565,11 +566,7 @@ func (a *App) pasteFromClipboard() {
 }
 
 func (a *App) cancelStream() {
-	a.streamMu.Lock()
-	if a.streamCancel != nil {
-		a.streamCancel()
-	}
-	a.streamMu.Unlock()
+	a.turns.CancelAll(a.sessionID)
 
 	if a.askActive {
 		a.input.SetText("", true)
@@ -595,15 +592,20 @@ func (a *App) clearPendingContent() {
 }
 
 func (a *App) clearChat() {
-	a.chatView.Clear()
-
+	previousID := a.sessionID
 	id, err := a.agent.NewSession(a.ctx)
-	if err == nil {
-		a.sessionID = id
+	if err != nil {
+		fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Could not create session: %v", err), theme.Default.Red))
+		return
 	}
+	a.turns.CancelAll(previousID)
+	a.activateSession(id)
+	a.chatView.Clear()
+	a.clearPendingContent()
 	a.inputTokens = 0
 	a.cachedTokens = 0
 	a.outputTokens = 0
+	a.lastInputTokens = 0
 	a.updateStatusBar()
 }
 
@@ -622,12 +624,15 @@ func (a *App) resumeSession() {
 		return
 	}
 
-	a.sessionID = last.ID
+	a.turns.CancelAll(a.sessionID)
+	a.activateSession(last.ID)
+	a.clearPendingContent()
 
 	usage := a.agent.Usage(a.sessionID)
 	a.inputTokens = usage.InputTokens
 	a.cachedTokens = usage.CachedTokens
 	a.outputTokens = usage.OutputTokens
+	a.lastInputTokens = usage.LastInputTokens
 
 	a.switchToChat()
 	a.renderChat(a.agent.Messages(a.sessionID))
@@ -848,7 +853,7 @@ func (a *App) submitInput() {
 
 	a.clearPendingContent()
 
-	go a.streamResponse(input)
+	a.submitAgentInput(input)
 }
 
 func (a *App) invokeSkill(s *skill.Skill, args string) {
@@ -878,7 +883,19 @@ func (a *App) invokeSkill(s *skill.Skill, args string) {
 	input = append(input, a.pendingContent...)
 	a.clearPendingContent()
 
-	go a.streamResponse(input)
+	a.submitAgentInput(input)
+}
+
+func (a *App) submitAgentInput(input []agent.Content) {
+	id := uuid.NewString()
+	a.rememberTurn(id, input)
+	_, err := a.turns.Submit(a.ctx, a.sessionID, code.TurnInput{
+		ID: id, Content: input, Intent: code.TurnInputSteer,
+	})
+	if err != nil {
+		a.takeTurnCommit(id)
+		fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Could not submit turn: %v", err), theme.Default.Red))
+	}
 }
 
 func (a *App) switchToChat() {

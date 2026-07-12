@@ -14,6 +14,12 @@ import (
 
 var errYieldStopped = errors.New("yield stopped")
 
+// ErrTurnInProgress means Send was called while another turn was active.
+var ErrTurnInProgress = errors.New("agent turn already in progress")
+
+// ErrEmptyInput means Send was called without any content.
+var ErrEmptyInput = errors.New("agent input is empty")
+
 const maxStreamRetries = 2
 
 type Agent struct {
@@ -29,14 +35,36 @@ type Agent struct {
 	pendingInput [][]Content
 }
 
-func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, error] {
+// QueueInput adds guidance to the active run. The agent consumes queued input
+// at the next safe model boundary. It returns false when no run is active so
+// callers can preserve the input as a normal follow-up instead.
+func (a *Agent) QueueInput(input []Content) bool {
+	if len(input) == 0 {
+		return false
+	}
+	input = CloneContent(input)
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+	if !a.running {
+		return false
+	}
+	a.pendingInput = append(a.pendingInput, input)
+	return true
+}
+
+// Send starts exactly one turn. It never queues implicitly: callers that want
+// to guide the active turn must use QueueInput, while FIFO follow-ups belong in
+// a caller-owned session orchestrator. Setup errors are returned immediately;
+// failures after the turn starts are yielded by the returned stream.
+func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, error], error) {
+	if len(input) == 0 {
+		return nil, ErrEmptyInput
+	}
+	input = CloneContent(input)
 	a.queueMu.Lock()
 	if a.running {
-		if len(input) > 0 {
-			a.pendingInput = append(a.pendingInput, input)
-		}
 		a.queueMu.Unlock()
-		return nil
+		return nil, ErrTurnInProgress
 	}
 	a.running = true
 	a.queueMu.Unlock()
@@ -197,7 +225,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) iter.Seq2[Message, er
 				a.compactMessages(ctx, false)
 			}
 		}
-	}
+	}, nil
 }
 
 func waitForRetry(ctx context.Context, delay time.Duration) bool {

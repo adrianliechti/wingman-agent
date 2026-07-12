@@ -3,12 +3,15 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
 type session struct {
@@ -41,6 +44,39 @@ func (s *session) interrupt(ctx context.Context, cc *codexClient) {
 	}
 	if cancel != nil {
 		cancel()
+	}
+}
+
+func (s *session) steer(ctx context.Context, cc *codexClient, prompt []acp.ContentBlock, messageID string) error {
+	s.mu.Lock()
+	turnID := s.currentTurnID
+	s.mu.Unlock()
+	if turnID == "" {
+		return code.ErrNoActiveTurn
+	}
+	err := cc.turnSteer(ctx, turnSteerParams{
+		ThreadID: string(s.id), ExpectedTurnID: turnID,
+		ClientUserMessageID: messageID, Input: promptToInput(prompt),
+	})
+	return classifySteerError(err)
+}
+
+func classifySteerError(err error) error {
+	var rpcErr *rpcError
+	if err == nil || !errors.As(err, &rpcErr) {
+		return err
+	}
+	switch {
+	case rpcErr.Message == "no active turn to steer":
+		return code.ErrNoActiveTurn
+	case strings.HasPrefix(rpcErr.Message, "expected active turn id "):
+		// The backend advanced to another turn before it processed this steer.
+		// Nothing was accepted, so preserve the input as a normal follow-up.
+		return code.ErrNoActiveTurn
+	case strings.HasPrefix(rpcErr.Message, "cannot steer a "):
+		return fmt.Errorf("%w: %s", code.ErrTurnNotSteerable, rpcErr.Message)
+	default:
+		return err
 	}
 }
 

@@ -56,6 +56,11 @@ type Server struct {
 
 	mu    sync.Mutex
 	agent code.Agent
+	turns *code.TurnManager
+
+	turnMetaMu sync.Mutex
+	turnMeta   map[string]map[string]ClientMessage
+	turnUsage  map[string]agent.Usage
 
 	phasesMu sync.Mutex
 	phases   map[string]string
@@ -94,11 +99,14 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 		phases:         map[string]string{},
 		wsConns:        map[*websocket.Conn]*wsClient{},
 		pendingPrompts: map[string]pendingPrompt{},
+		turnMeta:       map[string]map[string]ClientMessage{},
+		turnUsage:      map[string]agent.Usage{},
 	}
 
 	wa := coder.New(ws, cfg, nil)
 	wa.SetUI(s)
 	s.agent = wa
+	s.turns = code.NewTurnManager(ctx, wa, s.handleTurnEvent)
 
 	ws.WarmUp()
 
@@ -132,8 +140,14 @@ func (s *Server) Close() {
 
 	s.mu.Lock()
 	a := s.agent
+	turns := s.turns
 	s.agent = nil
+	s.turns = nil
 	s.mu.Unlock()
+	if turns != nil {
+		turns.SetHandler(nil)
+		turns.Close()
+	}
 	if a != nil {
 		_ = a.Close()
 	}
@@ -153,11 +167,27 @@ func (s *Server) activeAgent() code.Agent {
 func (s *Server) swapAgent(next code.Agent) {
 	s.mu.Lock()
 	prev := s.agent
+	prevTurns := s.turns
 	s.agent = next
+	s.turns = code.NewTurnManager(s.ctx, next, s.handleTurnEvent)
 	s.mu.Unlock()
+	if prevTurns != nil {
+		prevTurns.SetHandler(nil)
+		prevTurns.Close()
+	}
+	s.turnMetaMu.Lock()
+	s.turnMeta = map[string]map[string]ClientMessage{}
+	s.turnUsage = map[string]agent.Usage{}
+	s.turnMetaMu.Unlock()
 	if prev != nil && prev != next {
 		_ = prev.Close()
 	}
+}
+
+func (s *Server) activeRuntime() (code.Agent, *code.TurnManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.agent, s.turns
 }
 
 func (s *Server) handleWebSocketURL(w http.ResponseWriter, r *http.Request) {
@@ -394,6 +424,7 @@ func (s *Server) sendSessionState(sid string) {
 	for _, f := range s.pendingPromptFramesFor(sid) {
 		s.send(f)
 	}
+	s.sendTurnSnapshot(sid)
 }
 
 func (s *Server) sendSessionSnapshot(sid string, messages []agent.Message, u agent.Usage) {
@@ -455,6 +486,7 @@ func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.broadcast(Frame{Type: EvtModelChanged})
+	s.sendTurnSnapshot(id)
 	writeJSON(w, map[string]string{"id": id})
 }
 
@@ -516,6 +548,9 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		http.Error(w, "no active agent", http.StatusInternalServerError)
 		return
+	}
+	if _, turns := s.activeRuntime(); turns != nil {
+		turns.CancelAll(id)
 	}
 	if err := a.DeleteSession(r.Context(), id); err != nil {
 		if errors.Is(err, errors.ErrUnsupported) {

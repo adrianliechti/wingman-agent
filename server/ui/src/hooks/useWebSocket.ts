@@ -7,6 +7,9 @@ import type {
 	PromptField,
 	PromptKind,
 	ServerMessage,
+	TurnInputIntent,
+	TurnInputState,
+	TurnQueueEntry,
 } from "../types/protocol";
 
 export interface PendingPrompt {
@@ -28,6 +31,8 @@ export interface ChatEntry {
 	type: "user" | "assistant" | "tool" | "reasoning" | "error";
 	content: string;
 	images?: string[];
+	files?: string[];
+	inputId?: string;
 	toolName?: string;
 	toolArgs?: string;
 	toolHint?: string;
@@ -42,23 +47,37 @@ export function messagesToEntries(
 	const entries: ChatEntry[] = [];
 	messages.forEach((m, mi) => {
 		const isUser = m.role === "user";
-		const msgImages: string[] = isUser
-			? m.content.flatMap((c) => (c.image?.data ? [c.image.data] : []))
-			: [];
-		let imagesAttached = msgImages.length === 0;
+		if (isUser) {
+			const text: string[] = [];
+			const files: string[] = [];
+			const images: string[] = [];
+			for (const c of m.content) {
+				if (c.text) {
+					const file = c.text.match(/^\[File: (.+)\]$/s);
+					if (file) files.push(file[1]);
+					else text.push(c.text);
+				}
+				if (c.image?.data) images.push(c.image.data);
+			}
+			if (text.length > 0 || files.length > 0 || images.length > 0) {
+				entries.push({
+					id: `u-${mi}`,
+					type: "user",
+					content: text.join("\n"),
+					files,
+					images,
+				});
+			}
+			return;
+		}
 
 		m.content.forEach((c, ci) => {
 			if (c.text) {
-				const entry: ChatEntry = {
+				entries.push({
 					id: `t-${mi}-${ci}`,
-					type: isUser ? "user" : "assistant",
+					type: "assistant",
 					content: c.text,
-				};
-				if (!imagesAttached) {
-					entry.images = msgImages;
-					imagesAttached = true;
-				}
-				entries.push(entry);
+				});
 			}
 			if (c.reasoning?.summary) {
 				entries.push({
@@ -101,14 +120,6 @@ export function messagesToEntries(
 				}
 			}
 		});
-		if (!imagesAttached) {
-			entries.push({
-				id: `img-${mi}`,
-				type: "user",
-				content: "",
-				images: msgImages,
-			});
-		}
 	});
 	return entries;
 }
@@ -127,6 +138,20 @@ export interface SessionState {
 	phase: Phase;
 	usage: Usage;
 	prompt: PendingPrompt | null;
+	pendingInputs: PendingTurnInput[];
+	queuePaused: boolean;
+	canSteer: boolean;
+}
+
+export interface PendingTurnInput {
+	id: string;
+	state: TurnInputState;
+	intent: TurnInputIntent;
+	position: number;
+	text: string;
+	files: string[];
+	images: string[];
+	error?: string;
 }
 
 const EMPTY_USAGE: Usage = {
@@ -138,7 +163,72 @@ const EMPTY_USAGE: Usage = {
 };
 
 function emptySession(id: string): SessionState {
-	return { id, entries: [], phase: "idle", usage: EMPTY_USAGE, prompt: null };
+	return {
+		id,
+		entries: [],
+		phase: "idle",
+		usage: EMPTY_USAGE,
+		prompt: null,
+		pendingInputs: [],
+		queuePaused: false,
+		canSteer: false,
+	};
+}
+
+function pendingInputFromEntry(
+	entry: TurnQueueEntry,
+	error?: string,
+): PendingTurnInput {
+	return {
+		id: entry.id,
+		state: entry.state,
+		intent: entry.intent ?? "follow_up",
+		position: entry.position ?? 0,
+		text: entry.text ?? "",
+		files: entry.files ?? [],
+		images: entry.images ?? [],
+		error,
+	};
+}
+
+function upsertPending(
+	inputs: PendingTurnInput[],
+	input: PendingTurnInput,
+): PendingTurnInput[] {
+	const idx = inputs.findIndex((item) => item.id === input.id);
+	if (idx < 0) return [...inputs, input];
+	const next = [...inputs];
+	next[idx] = input;
+	return next;
+}
+
+function ensureUserEntry(
+	entries: ChatEntry[],
+	input: PendingTurnInput,
+	allowContentMatch = false,
+): ChatEntry[] {
+	if (entries.some((entry) => entry.inputId === input.id)) return entries;
+	if (allowContentMatch) {
+		const matching = entries.findLast(
+			(entry) =>
+				entry.type === "user" &&
+				entry.content === input.text &&
+				(entry.images?.length ?? 0) === input.images.length &&
+				(entry.files?.length ?? 0) === input.files.length,
+		);
+		if (matching) return entries;
+	}
+	return [
+		...entries,
+		{
+			id: `input-${input.id}`,
+			type: "user",
+			content: input.text,
+			images: input.images,
+			files: input.files,
+			inputId: input.id,
+		},
+	];
 }
 
 interface StreamRefs {
@@ -347,6 +437,9 @@ export function useWebSocket() {
 							contextWindow: msg.context_window ?? 0,
 						},
 						prompt: prev[sid]?.prompt ?? null,
+						pendingInputs: prev[sid]?.pendingInputs ?? [],
+						queuePaused: prev[sid]?.queuePaused ?? false,
+						canSteer: prev[sid]?.canSteer ?? false,
 					},
 				}));
 				break;
@@ -493,6 +586,63 @@ export function useWebSocket() {
 					sess.prompt?.id === msg.prompt_id ? { ...sess, prompt: null } : sess,
 				);
 				break;
+
+			case "turn_input": {
+				const raw: TurnQueueEntry = msg.queue?.[0] ?? {
+					id: msg.id,
+					state: msg.state,
+					intent: msg.intent,
+					position: msg.position,
+					text: msg.text,
+				};
+				const input = pendingInputFromEntry(raw, msg.message);
+				updateSession(sid, (sess) => {
+					let entries = sess.entries;
+					let pendingInputs = sess.pendingInputs;
+					if (msg.state === "active" || msg.state === "steered") {
+						entries = ensureUserEntry(entries, input);
+						pendingInputs = pendingInputs.filter((item) => item.id !== msg.id);
+					} else if (msg.state === "queued" || msg.state === "sending") {
+						pendingInputs = upsertPending(pendingInputs, input);
+					} else if (msg.state === "cancelled" || msg.state === "failed") {
+						const wasVisible = entries.some((entry) => entry.inputId === msg.id);
+						pendingInputs = wasVisible
+							? pendingInputs.filter((item) => item.id !== msg.id)
+							: upsertPending(pendingInputs, input);
+					} else {
+						pendingInputs = pendingInputs.filter((item) => item.id !== msg.id);
+					}
+					return { ...sess, entries, pendingInputs };
+				});
+				break;
+			}
+
+			case "turn_queue": {
+				const live = (msg.queue ?? []).map((entry) => pendingInputFromEntry(entry));
+				const liveIDs = new Set(live.map((entry) => entry.id));
+				updateSession(sid, (sess) => {
+					let entries = sess.entries;
+					for (const input of live) {
+						if (input.state === "active" || input.state === "steered") {
+							entries = ensureUserEntry(entries, input, true);
+						}
+					}
+					const local = sess.pendingInputs.filter(
+						(input) => !liveIDs.has(input.id) && input.state !== "queued",
+					);
+					return {
+						...sess,
+						entries,
+						pendingInputs: [
+							...live.filter((input) => input.state === "queued"),
+							...local,
+						],
+						queuePaused: msg.paused ?? false,
+						canSteer: msg.can_steer ?? false,
+					};
+				});
+				break;
+			}
 		}
 	};
 
@@ -509,24 +659,95 @@ export function useWebSocket() {
 	}, []);
 
 	const sendChat = useCallback(
-		(sessionId: string, text: string, files?: string[], images?: string[]) => {
+		(
+			sessionId: string,
+			text: string,
+			files?: string[],
+			images?: string[],
+			intent: TurnInputIntent = "follow_up",
+		): boolean => {
 			flushActiveStream(sessionId);
 			const id = nextId();
+			const sent = send({
+				type: "send",
+				session: sessionId,
+				id,
+				intent,
+				text,
+				files,
+				images,
+			});
+			if (!sent) return false;
+			if (intent === "steer") {
+				streamRefs.current[sessionId] = emptyStreamRefs();
+			}
 			updateSession(sessionId, (sess) => ({
 				...sess,
-				entries: [...sess.entries, { id, type: "user", content: text, images }],
+				pendingInputs: upsertPending(sess.pendingInputs, {
+					id,
+					state: "sending",
+					intent,
+					position: 0,
+					text,
+					files: files ?? [],
+					images: images ?? [],
+				}),
 			}));
-			send({ type: "send", session: sessionId, text, files, images });
+			return true;
 		},
 		[flushActiveStream, send, updateSession],
 	);
 
 	const cancel = useCallback(
-		(sessionId: string) => {
-			send({ type: "cancel", session: sessionId });
+		(sessionId: string, clearQueue = false) => {
+			send({ type: "cancel", session: sessionId, clear_queue: clearQueue });
 		},
 		[send],
 	);
+
+	const removeQueued = useCallback(
+		(sessionId: string, id: string) =>
+			send({ type: "queue_remove", session: sessionId, id }),
+		[send],
+	);
+
+	const updateQueued = useCallback(
+		(
+			sessionId: string,
+			id: string,
+			text: string,
+			files?: string[],
+			images?: string[],
+			intent: TurnInputIntent = "follow_up",
+		) =>
+			send({
+				type: "queue_update",
+				session: sessionId,
+				id,
+				text,
+				files,
+				images,
+				intent,
+			}),
+		[send],
+	);
+
+	const resumeQueue = useCallback(
+		(sessionId: string) => send({ type: "queue_resume", session: sessionId }),
+		[send],
+	);
+
+	const clearQueue = useCallback(
+		(sessionId: string) => send({ type: "queue_clear", session: sessionId }),
+		[send],
+	);
+
+	const dismissPending = useCallback((sessionId: string, id: string) => {
+		updateSession(sessionId, (sess) => ({
+			...sess,
+			pendingInputs: sess.pendingInputs.filter((input) => input.id !== id),
+		}));
+	}, [updateSession]);
 
 	useEffect(() => {
 		const onFocus = () => send({ type: "focus" });
@@ -610,6 +831,12 @@ export function useWebSocket() {
 
 			ws.onopen = () => {
 				setConnected(true);
+				ws.send(
+					JSON.stringify({
+						type: "sync",
+						sessions: Object.keys(sessionsSnapshotRef.current),
+					}),
+				);
 				for (const sub of subscribersRef.current) {
 					sub({ type: "diffs_changed" });
 					sub({ type: "checkpoints_changed" });
@@ -623,6 +850,24 @@ export function useWebSocket() {
 			ws.onclose = () => {
 				setConnected(false);
 				wsRef.current = null;
+				setSessions((prev) => {
+					const next: Record<string, SessionState> = {};
+					for (const [id, sess] of Object.entries(prev)) {
+						next[id] = {
+							...sess,
+							pendingInputs: sess.pendingInputs.map((input) =>
+								input.state === "sending"
+									? {
+											...input,
+											state: "failed",
+											error: "Connection was lost before delivery was confirmed.",
+										}
+									: input,
+							),
+						};
+					}
+					return next;
+				});
 				if (alive) {
 					reconnectTimer = setTimeout(connect, 2000);
 				}
@@ -653,6 +898,11 @@ export function useWebSocket() {
 		hasSession,
 		sendChat,
 		cancel,
+		removeQueued,
+		updateQueued,
+		resumeQueue,
+		clearQueue,
+		dismissPending,
 		respondPrompt,
 		removeSession,
 		clearSessions,
