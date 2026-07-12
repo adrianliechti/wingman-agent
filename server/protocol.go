@@ -5,16 +5,25 @@ import "github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 const (
 	MsgSend           = "send"
 	MsgCancel         = "cancel"
+	MsgQueueRemove    = "queue_remove"
+	MsgQueueUpdate    = "queue_update"
+	MsgQueueResume    = "queue_resume"
+	MsgQueueClear     = "queue_clear"
+	MsgSync           = "sync"
 	MsgPromptResponse = "prompt_response"
 	MsgFocus          = "focus"
 )
 
 type ClientMessage struct {
-	Type      string   `json:"type"`
-	SessionID string   `json:"session,omitempty"`
-	Text      string   `json:"text,omitempty"`
-	Files     []string `json:"files,omitempty"`
-	Images    []string `json:"images,omitempty"`
+	Type       string   `json:"type"`
+	SessionID  string   `json:"session,omitempty"`
+	Text       string   `json:"text,omitempty"`
+	Files      []string `json:"files,omitempty"`
+	Images     []string `json:"images,omitempty"`
+	ID         string   `json:"id,omitempty"`
+	Intent     string   `json:"intent,omitempty"`
+	ClearQueue bool     `json:"clear_queue,omitempty"`
+	Sessions   []string `json:"sessions,omitempty"`
 
 	PromptID string         `json:"prompt_id,omitempty"`
 	Approved bool           `json:"approved,omitempty"`
@@ -41,6 +50,8 @@ const (
 	EvtCapabilitiesChanged = "capabilities_changed"
 	EvtAgentChanged        = "agent_changed"
 	EvtModelChanged        = "model_changed"
+	EvtTurnInput           = "turn_input"
+	EvtTurnQueue           = "turn_queue"
 )
 
 const (
@@ -52,14 +63,20 @@ type Frame struct {
 	Type    string `json:"type"`
 	Session string `json:"session,omitempty"`
 
-	Text    string `json:"text,omitempty"`
-	ID      string `json:"id,omitempty"`
-	Name    string `json:"name,omitempty"`
-	Args    string `json:"args,omitempty"`
-	Hint    string `json:"hint,omitempty"`
-	Content string `json:"content,omitempty"`
-	Phase   string `json:"phase,omitempty"`
-	Message string `json:"message,omitempty"`
+	Text     string           `json:"text,omitempty"`
+	ID       string           `json:"id,omitempty"`
+	Name     string           `json:"name,omitempty"`
+	Args     string           `json:"args,omitempty"`
+	Hint     string           `json:"hint,omitempty"`
+	Content  string           `json:"content,omitempty"`
+	Phase    string           `json:"phase,omitempty"`
+	Message  string           `json:"message,omitempty"`
+	State    string           `json:"state,omitempty"`
+	Intent   string           `json:"intent,omitempty"`
+	Position int              `json:"position,omitempty"`
+	Paused   bool             `json:"paused,omitempty"`
+	CanSteer bool             `json:"can_steer,omitempty"`
+	Queue    []TurnQueueEntry `json:"queue,omitempty"`
 
 	PromptID     string             `json:"prompt_id,omitempty"`
 	PromptKind   string             `json:"prompt_kind,omitempty"`
@@ -73,6 +90,17 @@ type Frame struct {
 	ContextWindow   int64 `json:"context_window,omitempty"`
 
 	Messages []ConversationMessage `json:"messages,omitempty"`
+}
+
+type TurnQueueEntry struct {
+	ID         string   `json:"id"`
+	State      string   `json:"state"`
+	Intent     string   `json:"intent"`
+	Position   int      `json:"position,omitempty"`
+	Text       string   `json:"text,omitempty"`
+	Files      []string `json:"files,omitempty"`
+	Images     []string `json:"images,omitempty"`
+	ImageCount int      `json:"image_count,omitempty"`
 }
 
 type ConversationMessage struct {

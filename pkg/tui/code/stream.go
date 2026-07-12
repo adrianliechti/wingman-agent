@@ -95,9 +95,12 @@ func (a *App) streamResponse(input []agent.Content) {
 
 	streamCtx, cancel := context.WithCancel(a.ctx)
 
-	stream := a.agent.Send(streamCtx, a.sessionID, input)
-	if stream == nil {
+	stream, err := a.agent.Send(streamCtx, a.sessionID, input)
+	if err != nil {
 		cancel()
+		a.app.QueueUpdateDraw(func() {
+			fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Could not start turn: %v", err), t.Red))
+		})
 		return
 	}
 
@@ -221,5 +224,24 @@ func (a *App) streamResponse(input []agent.Content) {
 
 		a.commitRewind(commit)
 		a.saveSession()
+	}
+}
+
+func (a *App) streamResponseAfterCurrent(input []agent.Content) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		a.streamMu.Lock()
+		streamOwned := a.streamCancel != nil
+		a.streamMu.Unlock()
+		if !a.isStreaming() && !streamOwned {
+			a.streamResponse(input)
+			return
+		}
+		select {
+		case <-a.ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }

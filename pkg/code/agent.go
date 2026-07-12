@@ -49,12 +49,20 @@ type Agent interface {
 
 	Usage(sessionID string) agent.Usage
 
-	Send(ctx context.Context, sessionID string, input []agent.Content) iter.Seq2[agent.Message, error]
+	// Send starts one turn and returns its event stream. Immediate validation
+	// and busy-session failures are returned directly; errors that happen after
+	// the turn starts are yielded by the stream. Send never queues implicitly.
+	Send(ctx context.Context, sessionID string, input []agent.Content) (iter.Seq2[agent.Message, error], error)
 
 	Cancel(sessionID string)
 
 	Close() error
 }
+
+var (
+	ErrTurnInProgress = agent.ErrTurnInProgress
+	ErrEmptyInput     = agent.ErrEmptyInput
+)
 
 type SessionLoadStreamer interface {
 	LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]agent.Message, error]

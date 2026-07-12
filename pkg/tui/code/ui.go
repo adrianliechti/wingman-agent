@@ -3,6 +3,7 @@ package code
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/google/uuid"
 	"github.com/rivo/tview"
 	"golang.org/x/term"
 
@@ -848,7 +850,7 @@ func (a *App) submitInput() {
 
 	a.clearPendingContent()
 
-	go a.streamResponse(input)
+	a.submitAgentInput(input)
 }
 
 func (a *App) invokeSkill(s *skill.Skill, args string) {
@@ -878,7 +880,28 @@ func (a *App) invokeSkill(s *skill.Skill, args string) {
 	input = append(input, a.pendingContent...)
 	a.clearPendingContent()
 
-	go a.streamResponse(input)
+	a.submitAgentInput(input)
+}
+
+func (a *App) submitAgentInput(input []agent.Content) {
+	if !a.isStreaming() {
+		go a.streamResponse(input)
+		return
+	}
+	go func() {
+		err := a.agent.Steer(a.ctx, a.sessionID, code.TurnInput{
+			ID: uuid.NewString(), Content: input, Intent: code.TurnInputSteer,
+		})
+		if errors.Is(err, code.ErrNoActiveTurn) {
+			a.streamResponseAfterCurrent(input)
+			return
+		}
+		if err != nil {
+			a.app.QueueUpdateDraw(func() {
+				fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Could not steer turn: %v", err), theme.Default.Red))
+			})
+		}
+	}()
 }
 
 func (a *App) switchToChat() {

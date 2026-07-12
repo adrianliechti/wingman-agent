@@ -230,6 +230,14 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	return acp.PromptResponse{StopReason: stop, Usage: usage, UserMessageId: params.MessageId}, nil
 }
 
+func (a *Agent) Steer(ctx context.Context, sessionID acp.SessionId, prompt []acp.ContentBlock, messageID string) error {
+	s := a.lookup(sessionID)
+	if s == nil {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	return s.steer(ctx, a.codex, prompt, messageID)
+}
+
 func (a *Agent) Cancel(ctx context.Context, params acp.CancelNotification) error {
 	if s := a.lookup(params.SessionId); s != nil {
 		s.interrupt(ctx, a.codex)

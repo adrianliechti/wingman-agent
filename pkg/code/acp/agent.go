@@ -34,6 +34,7 @@ type Agent struct {
 
 	serverDone <-chan struct{}
 	cleanup    func() error
+	steer      func(context.Context, acpsdk.SessionId, []acpsdk.ContentBlock, string) error
 
 	caps acpsdk.AgentCapabilities
 
@@ -174,6 +175,11 @@ func NewInProcess(
 		stdin:     clientW,
 		sessions:  map[string]*sessionState{},
 		cleanup:   cleanup,
+	}
+	if s, ok := serverAgent.(interface {
+		Steer(context.Context, acpsdk.SessionId, []acpsdk.ContentBlock, string) error
+	}); ok {
+		a.steer = s.Steer
 	}
 
 	srvConn := acpsdk.NewAgentSideConnection(serverAgent, serverW, serverR)
@@ -542,12 +548,15 @@ func (a *Agent) session(id string) *sessionState {
 	return a.sessions[id]
 }
 
-func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter.Seq2[agent.Message, error] {
+func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (iter.Seq2[agent.Message, error], error) {
+	if len(input) == 0 {
+		return nil, code.ErrEmptyInput
+	}
 	a.mu.Lock()
 	sess, ok := a.sessions[id]
 	a.mu.Unlock()
 	if !ok {
-		return errStream(fmt.Errorf("session %s not found; call NewSession first", id))
+		return nil, fmt.Errorf("session %s not found; call NewSession first", id)
 	}
 
 	sendCtx, cancel := context.WithCancel(ctx)
@@ -561,7 +570,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter
 	if sess.inflight != nil {
 		sess.mu.Unlock()
 		cancel()
-		return nil
+		return nil, code.ErrTurnInProgress
 	}
 	sess.inflight = t
 	sess.messages = append(sess.messages, agent.Message{
@@ -635,13 +644,49 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) iter
 				}
 			}
 		}
-	}
+	}, nil
 }
 
 func (a *Agent) cancelPrompt(id acpsdk.SessionId) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = a.conn.Cancel(ctx, acpsdk.CancelNotification{SessionId: id})
+}
+
+func (a *Agent) TurnFeatures(string) code.TurnFeatures {
+	return code.TurnFeatures{Steer: a.steer != nil}
+}
+
+func (a *Agent) Steer(ctx context.Context, id string, input code.TurnInput) error {
+	if a.steer == nil {
+		return code.ErrNoActiveTurn
+	}
+	sess := a.session(id)
+	if sess == nil {
+		return fmt.Errorf("session %s not found", id)
+	}
+	sess.mu.Lock()
+	t := sess.inflight
+	sess.mu.Unlock()
+	if t == nil {
+		return code.ErrNoActiveTurn
+	}
+	if err := a.steer(ctx, sess.id, acp.ContentToBlocks(input.Content), input.ID); err != nil {
+		return err
+	}
+	sess.mu.Lock()
+	steered := agent.Message{Role: agent.RoleUser, Content: input.Content}
+	if sess.inflight == t {
+		t.mu.Lock()
+		t.emitted = append(t.emitted, steered)
+		t.mu.Unlock()
+	} else {
+		// The backend accepted the steer at the turn boundary, after our stream
+		// finalized. Keep the accepted user input visible without retrying it.
+		sess.messages = append(sess.messages, steered)
+	}
+	sess.mu.Unlock()
+	return nil
 }
 
 func (a *Agent) Cancel(id string) {
@@ -654,12 +699,6 @@ func (a *Agent) Cancel(id string) {
 	sess.mu.Unlock()
 	if t != nil {
 		t.cancel()
-	}
-}
-
-func errStream(err error) iter.Seq2[agent.Message, error] {
-	return func(yield func(agent.Message, error) bool) {
-		yield(agent.Message{}, err)
 	}
 }
 

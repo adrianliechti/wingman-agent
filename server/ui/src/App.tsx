@@ -35,6 +35,7 @@ import {
 	type PromptReply,
 	useWebSocket,
 } from "./hooks/useWebSocket";
+import type { TurnInputIntent } from "./types/protocol";
 
 interface CenterTab {
 	id: string;
@@ -74,6 +75,11 @@ export default function App() {
 		hasSession,
 		sendChat,
 		cancel,
+		removeQueued,
+		updateQueued,
+		resumeQueue,
+		clearQueue,
+		dismissPending,
 		respondPrompt,
 		removeSession,
 		clearSessions,
@@ -106,6 +112,9 @@ export default function App() {
 	const phase = activeSession?.phase ?? "idle";
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
 	const prompt = activeSession?.prompt ?? null;
+	const pendingInputs = activeSession?.pendingInputs ?? EMPTY_ENTRIES;
+	const queuePaused = activeSession?.queuePaused ?? false;
+	const canSteer = activeSession?.canSteer ?? false;
 
 	const [agentId, setAgentId] = useState("");
 	const loadAgent = useCallback(async (): Promise<string> => {
@@ -381,11 +390,18 @@ export default function App() {
 	}, [sessionId, openChatTab]);
 
 	const handleSend = useCallback(
-		async (text: string, files?: string[], images?: string[]) => {
+		async (
+			text: string,
+			files?: string[],
+			images?: string[],
+			intent: TurnInputIntent = "follow_up",
+		): Promise<boolean> => {
 			try {
 				const sid = await ensureSessionId();
-				sendChat(sid, text, files, images);
-			} catch {}
+				return sendChat(sid, text, files, images, intent);
+			} catch {
+				return false;
+			}
 		},
 		[sendChat, ensureSessionId],
 	);
@@ -428,8 +444,8 @@ export default function App() {
 		[ensureSessionId, mode],
 	);
 
-	const handleCancel = useCallback(() => {
-		if (sessionId) cancel(sessionId);
+	const handleCancel = useCallback((clear = false) => {
+		if (sessionId) cancel(sessionId, clear);
 	}, [cancel, sessionId]);
 
 	const [noticeDismissed, setNoticeDismissed] = useState(false);
@@ -637,6 +653,28 @@ export default function App() {
 								onSelectMode={selectMode}
 								onSend={handleSend}
 								onCancel={handleCancel}
+								pendingInputs={pendingInputs}
+								queuePaused={queuePaused}
+								canSteer={canSteer}
+								onRemoveQueued={(id, state) => {
+									if (!sessionId) return;
+									if (state === "queued" || state === "sending") {
+										removeQueued(sessionId, id);
+									} else {
+										dismissPending(sessionId, id);
+									}
+								}}
+								onUpdateQueued={(id, text, files, images) =>
+									sessionId
+										? updateQueued(sessionId, id, text, files, images)
+										: false
+								}
+								onResumeQueue={() => {
+									if (sessionId) resumeQueue(sessionId);
+								}}
+								onClearQueue={() => {
+									if (sessionId) clearQueue(sessionId);
+								}}
 								loading={sessionLoad.loading && sessionLoad.id === sessionId}
 								loadError={
 									sessionLoad.id === sessionId ? sessionLoad.error : null

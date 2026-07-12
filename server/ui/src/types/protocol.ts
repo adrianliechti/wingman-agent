@@ -1,6 +1,8 @@
 interface SendMessage {
 	type: "send";
 	session: string;
+	id: string;
+	intent?: TurnInputIntent;
 	text: string;
 	files?: string[];
 	images?: string[];
@@ -9,6 +11,33 @@ interface SendMessage {
 interface CancelMessage {
 	type: "cancel";
 	session: string;
+	clear_queue?: boolean;
+}
+
+interface QueueRemoveMessage {
+	type: "queue_remove";
+	session: string;
+	id: string;
+}
+
+interface QueueUpdateMessage {
+	type: "queue_update";
+	session: string;
+	id: string;
+	intent?: TurnInputIntent;
+	text: string;
+	files?: string[];
+	images?: string[];
+}
+
+interface QueueSessionMessage {
+	type: "queue_resume" | "queue_clear";
+	session: string;
+}
+
+interface SyncMessage {
+	type: "sync";
+	sessions: string[];
 }
 
 export type PromptAction = "accept" | "decline" | "cancel";
@@ -30,6 +59,10 @@ interface FocusMessage {
 export type ClientMessage =
 	| SendMessage
 	| CancelMessage
+	| QueueRemoveMessage
+	| QueueUpdateMessage
+	| QueueSessionMessage
+	| SyncMessage
 	| PromptResponseMessage
 	| FocusMessage;
 
@@ -157,6 +190,48 @@ interface AgentChangedMessage {
 	type: "agent_changed";
 }
 
+export type TurnInputIntent = "follow_up" | "steer";
+export type TurnInputState =
+	| "sending"
+	| "queued"
+	| "active"
+	| "steered"
+	| "completed"
+	| "cancelled"
+	| "failed";
+
+export interface TurnQueueEntry {
+	id: string;
+	state: TurnInputState;
+	intent?: TurnInputIntent;
+	position?: number;
+	text?: string;
+	files?: string[];
+	images?: string[];
+	image_count?: number;
+	error?: string;
+}
+
+interface TurnInputMessage {
+	type: "turn_input";
+	session: string;
+	id: string;
+	state: TurnInputState;
+	intent?: TurnInputIntent;
+	position?: number;
+	text?: string;
+	message?: string;
+	queue?: TurnQueueEntry[];
+}
+
+interface TurnQueueMessage {
+	type: "turn_queue";
+	session: string;
+	queue?: TurnQueueEntry[];
+	paused?: boolean;
+	can_steer?: boolean;
+}
+
 interface ModelChangedMessage {
 	type: "model_changed";
 }
@@ -179,7 +254,9 @@ export type ServerMessage =
 	| DiagnosticsChangedMessage
 	| CapabilitiesChangedMessage
 	| AgentChangedMessage
-	| ModelChangedMessage;
+	| ModelChangedMessage
+	| TurnInputMessage
+	| TurnQueueMessage;
 
 export type Phase = "idle" | "thinking" | "streaming" | "tool_running";
 

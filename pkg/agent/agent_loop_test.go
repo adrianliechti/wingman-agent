@@ -64,7 +64,11 @@ func TestSendLimitsRunawayToolCallRounds(t *testing.T) {
 	}}
 
 	var runErr error
-	for _, err := range a.Send(context.Background(), []Content{{Text: "start"}}) {
+	stream, err := a.Send(context.Background(), []Content{{Text: "start"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range stream {
 		if err != nil {
 			runErr = err
 		}
@@ -90,7 +94,11 @@ func TestSendAllowsFinalResponseAtMaxTurns(t *testing.T) {
 
 	a := &Agent{Config: &Config{client: &client, MaxTurns: 1}}
 	var runErr error
-	for _, err := range a.Send(context.Background(), []Content{{Text: "start"}}) {
+	stream, err := a.Send(context.Background(), []Content{{Text: "start"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range stream {
 		if err != nil {
 			runErr = err
 		}
@@ -146,6 +154,42 @@ func TestEndRunPreservesQueuedUserInput(t *testing.T) {
 	}
 	if len(a.Messages) != 1 || a.Messages[0].Role != RoleUser || a.Messages[0].Content[0].Text != "queued" {
 		t.Fatalf("queued input was not preserved: %+v", a.Messages)
+	}
+}
+
+func TestQueueInputOnlyAcceptsDuringRunAndOwnsItsSlice(t *testing.T) {
+	a := &Agent{}
+	if a.QueueInput([]Content{{Text: "too early"}}) {
+		t.Fatal("QueueInput accepted without an active run")
+	}
+
+	a.queueMu.Lock()
+	a.running = true
+	a.queueMu.Unlock()
+	input := []Content{{Text: "guidance"}}
+	if !a.QueueInput(input) {
+		t.Fatal("QueueInput rejected an active run")
+	}
+	input[0].Text = "mutated"
+
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+	if len(a.pendingInput) != 1 || a.pendingInput[0][0].Text != "guidance" {
+		t.Fatalf("pending input = %#v", a.pendingInput)
+	}
+}
+
+func TestSendReportsImmediateUsageErrors(t *testing.T) {
+	a := &Agent{}
+	if _, err := a.Send(context.Background(), nil); !errors.Is(err, ErrEmptyInput) {
+		t.Fatalf("empty input error = %v", err)
+	}
+	a.running = true
+	if _, err := a.Send(context.Background(), []Content{{Text: "another turn"}}); !errors.Is(err, ErrTurnInProgress) {
+		t.Fatalf("busy error = %v", err)
+	}
+	if len(a.pendingInput) != 0 {
+		t.Fatalf("Send queued implicitly: %#v", a.pendingInput)
 	}
 }
 

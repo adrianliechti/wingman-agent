@@ -4,6 +4,7 @@ import {
 	ChevronRight,
 	Loader2,
 	LoaderCircle,
+	ListPlus,
 	Paperclip,
 	Plus,
 	Square,
@@ -22,9 +23,11 @@ import { useColorScheme } from "../hooks/useColorScheme";
 import type {
 	ChatEntry,
 	PendingPrompt,
+	PendingTurnInput,
 	PromptReply,
 } from "../hooks/useWebSocket";
 import type { PromptField } from "../types/protocol";
+import type { TurnInputIntent, TurnInputState } from "../types/protocol";
 import { sampleSpinnerVerb } from "../spinnerVerbs";
 import type { Phase } from "../types/protocol";
 import { FilePicker } from "./FilePicker";
@@ -32,6 +35,7 @@ import { MarkdownContent } from "./MarkdownContent";
 import { ModelPicker } from "./ModelPicker";
 import { ModePicker, type ModeOption } from "./ModePicker";
 import { SkillPicker } from "./SkillPicker";
+import { TurnQueue } from "./TurnQueue";
 
 interface Props {
 	sessionId?: string;
@@ -40,8 +44,25 @@ interface Props {
 	modes: ModeOption[];
 	mode: string;
 	onSelectMode: (next: string) => void;
-	onSend: (text: string, files?: string[], images?: string[]) => void;
-	onCancel: () => void;
+	onSend: (
+		text: string,
+		files?: string[],
+		images?: string[],
+		intent?: TurnInputIntent,
+	) => boolean | Promise<boolean>;
+	onCancel: (clearQueue?: boolean) => void;
+	pendingInputs?: PendingTurnInput[];
+	queuePaused?: boolean;
+	canSteer?: boolean;
+	onRemoveQueued?: (id: string, state: TurnInputState) => void;
+	onUpdateQueued?: (
+		id: string,
+		text: string,
+		files?: string[],
+		images?: string[],
+	) => boolean;
+	onResumeQueue?: () => void;
+	onClearQueue?: () => void;
 	loading?: boolean;
 	loadError?: string | null;
 	subscribe?: (
@@ -111,6 +132,13 @@ export function ChatPanel({
 	onSelectMode,
 	onSend,
 	onCancel,
+	pendingInputs = [],
+	queuePaused = false,
+	canSteer = false,
+	onRemoveQueued,
+	onUpdateQueued,
+	onResumeQueue,
+	onClearQueue,
 	loading,
 	loadError,
 	subscribe,
@@ -122,6 +150,9 @@ export function ChatPanel({
 	const [files, setFiles] = useState<string[]>([]);
 	const [images, setImages] = useState<PendingImage[]>([]);
 	const [showPicker, setShowPicker] = useState(false);
+	const [submitting, setSubmitting] = useState(false);
+	const [sendError, setSendError] = useState<string | null>(null);
+	const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
 	const containerRef = useRef<HTMLDivElement>(null);
 	const contentRef = useRef<HTMLDivElement>(null);
 	const spacerRef = useRef<HTMLDivElement>(null);
@@ -311,20 +342,63 @@ export function ChatPanel({
 		return () => container.removeEventListener("scroll", onScroll);
 	}, []);
 
-	const handleSubmit = useCallback(() => {
-		const text = input.trim();
-		if (!text && images.length === 0) return;
+	const handleSubmit = useCallback(async (
+		intent?: TurnInputIntent,
+		overrideText?: string,
+	): Promise<boolean> => {
+		const text = (overrideText ?? input).trim();
+		if ((!text && images.length === 0 && files.length === 0) || submitting) {
+			return false;
+		}
 		submitPendingRef.current = true;
-		onSend(
-			text,
-			files.length > 0 ? files : undefined,
-			images.length > 0 ? images.map((i) => i.dataUrl) : undefined,
-		);
+		setSubmitting(true);
+		setSendError(null);
+		const imageData = images.length > 0 ? images.map((i) => i.dataUrl) : undefined;
+		let sent = false;
+		try {
+			if (editingQueueId && onUpdateQueued) {
+				sent = onUpdateQueued(
+					editingQueueId,
+					text,
+					files.length > 0 ? files : undefined,
+					imageData,
+				);
+			} else {
+				const nextIntent = intent ?? (isActive && canSteer ? "steer" : "follow_up");
+				sent = await onSend(
+					text,
+					files.length > 0 ? files : undefined,
+					imageData,
+					nextIntent,
+				);
+			}
+		} catch {
+			sent = false;
+		} finally {
+			setSubmitting(false);
+		}
+		if (!sent) {
+			submitPendingRef.current = false;
+			setSendError("Message was not accepted. Your draft has been kept.");
+			return false;
+		}
 		setInput("");
 		setFiles([]);
 		setImages([]);
+		setEditingQueueId(null);
 		textareaRef.current?.focus();
-	}, [input, onSend, files, images]);
+		return true;
+	}, [
+		input,
+		submitting,
+		images,
+		editingQueueId,
+		onUpdateQueued,
+		isActive,
+		canSteer,
+		onSend,
+		files,
+	]);
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
@@ -340,7 +414,7 @@ export function ChatPanel({
 			}
 			if (e.key === "Enter" && !e.shiftKey) {
 				e.preventDefault();
-				handleSubmit();
+				void handleSubmit(e.altKey ? "follow_up" : undefined);
 			}
 			if (e.key === "Escape" && isActive) {
 				onCancel();
@@ -348,6 +422,17 @@ export function ChatPanel({
 		},
 		[handleSubmit, isActive, onCancel, showSkills],
 	);
+
+	const editPendingInput = useCallback((item: PendingTurnInput) => {
+		setInput(item.text);
+		setFiles(item.files);
+		setImages(
+			item.images.map((dataUrl) => ({ id: crypto.randomUUID(), dataUrl })),
+		);
+		setEditingQueueId(item.state === "queued" ? item.id : null);
+		setSendError(null);
+		textareaRef.current?.focus();
+	}, []);
 
 	const addFile = useCallback((path: string) => {
 		setFiles((prev) => (prev.includes(path) ? prev : [...prev, path]));
@@ -401,23 +486,15 @@ export function ChatPanel({
 				textareaRef.current?.focus();
 				return;
 			}
-			submitPendingRef.current = true;
-			onSend(
-				`/${s.name}`,
-				files.length > 0 ? files : undefined,
-				images.length > 0 ? images.map((i) => i.dataUrl) : undefined,
-			);
-			setInput("");
-			setFiles([]);
-			setImages([]);
+			void handleSubmit(undefined, `/${s.name}`);
 		},
-		[onSend, files, images],
+		[handleSubmit],
 	);
 
 	return (
 		<div className="h-full relative overflow-hidden bg-bg">
 			<div
-				className="h-full overflow-y-auto pb-24 [overflow-anchor:none]"
+				className={`h-full overflow-y-auto [overflow-anchor:none] ${pendingInputs.length > 0 ? "pb-56" : "pb-24"}`}
 				ref={containerRef}
 			>
 				{loading && entries.length === 0 ? (
@@ -466,10 +543,37 @@ export function ChatPanel({
 			<div className="absolute bottom-0 left-0 right-0 z-20">
 				<div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none" />
 				<div className="bg-bg px-4 pb-3">
+					{pendingInputs.length > 0 && (
+						<TurnQueue
+							items={pendingInputs}
+							paused={queuePaused}
+							onEdit={editPendingInput}
+							onRemove={onRemoveQueued}
+							onResume={onResumeQueue}
+							onClear={onClearQueue}
+						/>
+					)}
+					{sendError && (
+						<div className="mb-1.5 px-2 py-1 rounded border border-danger/40 bg-danger/5 text-[11px] text-danger">
+							{sendError}
+						</div>
+					)}
 					{prompt && onPromptReply ? (
 						<PromptBar key={prompt.id} prompt={prompt} onReply={onPromptReply} />
 					) : (
 						<div className="relative rounded-lg border border-border-subtle bg-bg-surface/60 hover:border-border focus-within:border-border transition-colors">
+							{editingQueueId && (
+								<div className="flex items-center justify-between px-2.5 pt-2 text-[10px] text-warning font-mono">
+									<span>Editing queued message</span>
+									<button
+										type="button"
+										className="text-fg-dim hover:text-fg"
+										onClick={() => setEditingQueueId(null)}
+									>
+										Cancel
+									</button>
+								</div>
+							)}
 							{showSkills && (
 								<SkillPicker
 									query={skillQuery}
@@ -591,27 +695,33 @@ export function ChatPanel({
 										<Paperclip size={14} />
 									</button>
 									{(() => {
-										const hasInput = input.trim() !== "" || images.length > 0;
+									const hasInput =
+										input.trim() !== "" || images.length > 0 || files.length > 0;
 										const mode: "send" | "stop" | "disabled" = hasInput
 											? "send"
 											: isActive
 												? "stop"
 												: "disabled";
 										return (
-											<button
+											<>
+												<button
 												type="button"
 												className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
 													mode === "disabled"
 														? "text-fg-dim opacity-40 cursor-not-allowed"
 														: "text-fg-muted hover:text-fg hover:bg-bg-hover"
 												}`}
-												onClick={mode === "stop" ? onCancel : handleSubmit}
-												disabled={mode === "disabled"}
+												onClick={mode === "stop" ? () => onCancel(false) : () => void handleSubmit()}
+												disabled={mode === "disabled" || submitting}
 												title={
 													mode === "stop"
 														? "Stop (Esc)"
-														: mode === "send" && isActive
-															? "Queue (Enter)"
+														: editingQueueId
+															? "Update queued message (Enter)"
+															: mode === "send" && isActive && canSteer
+																? "Steer current turn (Enter) · Queue with Alt+Enter"
+																: mode === "send" && isActive
+																	? "Queue follow-up (Enter)"
 															: "Send (Enter)"
 												}
 											>
@@ -630,7 +740,18 @@ export function ChatPanel({
 												) : (
 													<ArrowUp size={14} />
 												)}
-											</button>
+												</button>
+												{hasInput && isActive && canSteer && !editingQueueId && (
+												<button
+													type="button"
+													className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
+													onClick={() => void handleSubmit("follow_up")}
+													title="Queue after current turn (Alt+Enter)"
+												>
+													<ListPlus size={14} />
+												</button>
+												)}
+											</>
 										);
 									})()}
 								</div>
@@ -663,7 +784,10 @@ function PromptBar({
 	prompt: PendingPrompt;
 	onReply: (reply: PromptReply) => void;
 }) {
-	const fields = prompt.kind === "ask" ? (prompt.fields ?? []) : [];
+	const fields = useMemo(
+		() => (prompt.kind === "ask" ? (prompt.fields ?? []) : []),
+		[prompt.kind, prompt.fields],
+	);
 	const [selections, setSelections] = useState<Record<string, string[]>>(
 		() => {
 			const init: Record<string, string[]> = {};
@@ -1086,9 +1210,24 @@ const EntryView = memo(function EntryView({
 								{entry.content}
 							</span>
 						)}
+						{entry.files && entry.files.length > 0 && (
+							<div
+								className={`flex flex-wrap gap-1 ${entry.content ? "mt-2" : ""}`}
+							>
+								{entry.files.map((path) => (
+									<span
+										key={path}
+										className="max-w-[240px] truncate rounded bg-bg-active px-1.5 py-0.5 text-[10px] text-fg-muted"
+										title={path}
+									>
+										{path.split("/").pop() || path}
+									</span>
+								))}
+							</div>
+						)}
 						{entry.images && entry.images.length > 0 && (
 							<div
-								className={`flex flex-wrap gap-1.5 ${entry.content ? "mt-2" : ""}`}
+								className={`flex flex-wrap gap-1.5 ${entry.content || (entry.files?.length ?? 0) > 0 ? "mt-2" : ""}`}
 							>
 								{entry.images.map((src, i) => (
 									<a

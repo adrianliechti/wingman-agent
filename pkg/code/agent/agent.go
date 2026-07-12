@@ -338,12 +338,15 @@ func (a *Agent) session(id string) *sessionState {
 
 func (a *Agent) HasSession(id string) bool { return a.session(id) != nil }
 
-func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) iter.Seq2[harness.Message, error] {
+func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
+	if len(input) == 0 {
+		return nil, code.ErrEmptyInput
+	}
 	a.mu.Lock()
 	s, ok := a.sessions[id]
 	a.mu.Unlock()
 	if !ok {
-		return errStream(fmt.Errorf("session %s not found; call NewSession first", id))
+		return nil, fmt.Errorf("session %s not found; call NewSession first", id)
 	}
 
 	a.lastActive.Store(id)
@@ -352,11 +355,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) it
 	stream, gen, err := s.beginSend(sendCtx, input, cancel)
 	if err != nil {
 		cancel()
-		return errStream(err)
-	}
-	if stream == nil {
-		cancel()
-		return nil
+		return nil, err
 	}
 
 	return func(yield func(harness.Message, error) bool) {
@@ -369,18 +368,27 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) it
 				return
 			}
 		}
+	}, nil
+}
+
+func (a *Agent) TurnFeatures(string) code.TurnFeatures {
+	return code.TurnFeatures{Steer: true}
+}
+
+func (a *Agent) Steer(_ context.Context, id string, input code.TurnInput) error {
+	s := a.session(id)
+	if s == nil {
+		return fmt.Errorf("session %s not found", id)
 	}
+	if !s.aa.QueueInput(input.Content) {
+		return code.ErrNoActiveTurn
+	}
+	return nil
 }
 
 func (a *Agent) Cancel(id string) {
 	if s := a.session(id); s != nil {
 		s.cancel()
-	}
-}
-
-func errStream(err error) iter.Seq2[harness.Message, error] {
-	return func(yield func(harness.Message, error) bool) {
-		yield(harness.Message{}, err)
 	}
 }
 
@@ -587,10 +595,14 @@ func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, c
 		s.cancelMu.Unlock()
 		return nil, 0, errors.New("session is closed")
 	}
-	stream := s.aa.Send(ctx, input)
+	stream, err := s.aa.Send(ctx, input)
+	if err != nil {
+		s.cancelMu.Unlock()
+		return nil, 0, err
+	}
 	if stream == nil {
 		s.cancelMu.Unlock()
-		return nil, 0, nil
+		return nil, 0, errors.New("agent returned a nil turn stream")
 	}
 	prev := s.cancelFn
 	s.cancelGen++
