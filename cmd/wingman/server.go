@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 
 	"github.com/adrianliechti/wingman-agent/server"
@@ -10,7 +11,7 @@ import (
 
 func runServer(ctx context.Context) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
-	port := fs.Int("port", 9000, "port to listen on")
+	port := fs.Int("port", 0, fmt.Sprintf("port to listen on (default: %d, falls back to random if taken)", server.DefaultPort))
 	noBrowser := fs.Bool("no-browser", false, "do not open browser on startup")
 	fs.Parse(os.Args[2:])
 
@@ -20,7 +21,6 @@ func runServer(ctx context.Context) {
 	}
 
 	srv, err := server.New(ctx, wd, &server.ServerOptions{
-		Port:      *port,
 		NoBrowser: *noBrowser,
 	})
 	if err != nil {
@@ -28,7 +28,7 @@ func runServer(ctx context.Context) {
 	}
 	defer srv.Close()
 
-	if err := srv.Run(ctx); err != nil {
+	if err := srv.Run(ctx, *port); err != nil {
 		fatal(err)
 	}
 }
