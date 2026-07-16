@@ -38,13 +38,14 @@ var staticFiles embed.FS
 
 var StaticFS, _ = fs.Sub(staticFiles, "static")
 
+// DefaultPort is the preferred port used when no explicit port is requested.
+const DefaultPort = 9000
+
 type ServerOptions struct {
-	Port      int
 	NoBrowser bool
 }
 
 type Server struct {
-	port      int
 	noBrowser bool
 
 	workspace *code.Workspace
@@ -91,7 +92,6 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	}
 
 	s := &Server{
-		port:           opts.Port,
 		noBrowser:      opts.NoBrowser,
 		workspace:      ws,
 		config:         cfg,
@@ -198,20 +198,18 @@ func (s *Server) handleWebSocketURL(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"url": fmt.Sprintf("%s://%s/ws", proto, r.Host)})
 }
 
-func (s *Server) Run(ctx context.Context) error {
-
+func (s *Server) Run(ctx context.Context, port int) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.ctx = ctx
 
-	port, err := system.FreePort(s.port)
+	resolvedPort, err := resolvePort(port)
 	if err != nil {
 		return err
 	}
-	s.port = port
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf("localhost:%d", s.port),
+		Addr:    fmt.Sprintf("localhost:%d", resolvedPort),
 		Handler: s,
 	}
 
@@ -223,7 +221,7 @@ func (s *Server) Run(ctx context.Context) error {
 		srv.Close()
 	}()
 
-	url := fmt.Sprintf("http://localhost:%d", s.port)
+	url := fmt.Sprintf("http://localhost:%d", resolvedPort)
 	fmt.Fprintf(os.Stderr, "Wingman running at %s\n", url)
 
 	if !s.noBrowser {
@@ -789,6 +787,13 @@ func convertMessages(messages []agent.Message) []ConversationMessage {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+func resolvePort(port int) (int, error) {
+	if port != 0 {
+		return port, nil
+	}
+	return system.FreePort(DefaultPort)
 }
 
 func (s *Server) constructBackend(name string) (code.Agent, error) {
