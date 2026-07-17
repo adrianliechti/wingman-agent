@@ -14,8 +14,8 @@ require (
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
-	github.com/odvcencio/gotreesitter v0.28.0
-	github.com/openai/openai-go/v3 v3.42.0
+	github.com/odvcencio/gotreesitter v0.39.0
+	github.com/openai/openai-go/v3 v3.43.0
 	github.com/rivo/tview v0.42.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/rs/cors v1.11.1
