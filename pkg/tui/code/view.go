@@ -68,7 +68,7 @@ func (a *App) streamCells(width int) []string {
 	}
 
 	if streamingReasoning != "" {
-		lines = append(lines, cellReasoning(streamingReasoning, width, a.detail, false)...)
+		lines = append(lines, cellReasoning(streamingReasoning, width, false)...)
 	}
 
 	if streamingText != "" {

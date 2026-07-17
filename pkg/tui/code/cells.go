@@ -71,18 +71,11 @@ func cellAssistant(text string, width int, circle ansi.Color) []string {
 	return lines
 }
 
-// Detail levels for chat rendering, cycled with ctrl+e.
-const (
-	detailCompact = iota
-	detailExpanded
-	detailFull
-)
-
-func cellReasoning(summary string, width int, detail int, live bool) []string {
+func cellReasoning(summary string, width int, full bool) []string {
 	t := theme.Default
 	style := fg(t.BrBlack) + ansi.Italic
 
-	if detail == detailCompact && !live {
+	if !full {
 		tail := lastNonEmptyLine(markdown.Sanitize(summary))
 		line := style + "• " + tail
 		return []string{cellIndent + ansi.Truncate(line, width-len(cellIndent), "…") + ansi.Reset}
@@ -149,25 +142,25 @@ func toolTitleLine(name, hint string, width int, running bool) string {
 	return cellIndent + ansi.Truncate(line, width-len(cellIndent), "…") + ansi.Reset
 }
 
-// headTailLines keeps head and tail of long output, reporting the omission
-// inline.
-func headTailLines(lines []string, head, tail int, hint string) []string {
-	if len(lines) <= head+tail+1 {
+// tailPreview keeps the last n lines — command verdicts live at the end.
+func tailPreview(lines []string, n int) []string {
+	if len(lines) <= n+1 {
 		return lines
 	}
-
-	out := make([]string, 0, head+tail+1)
-	out = append(out, lines[:head]...)
-	omitted := fmt.Sprintf("… +%d lines", len(lines)-head-tail)
-	if hint != "" {
-		omitted += " " + hint
-	}
-	out = append(out, omitted)
-	out = append(out, lines[len(lines)-tail:]...)
-	return out
+	out := []string{fmt.Sprintf("… %d earlier lines (ctrl+o transcript)", len(lines)-n)}
+	return append(out, lines[len(lines)-n:]...)
 }
 
-func cellTool(result *agent.ToolResult, width int, detail int) []string {
+// headPreview keeps the first n lines — diffs read from the top.
+func headPreview(lines []string, n int) []string {
+	if len(lines) <= n+1 {
+		return lines
+	}
+	out := append([]string(nil), lines[:n]...)
+	return append(out, fmt.Sprintf("… +%d more (ctrl+o transcript)", len(lines)-n))
+}
+
+func cellTool(result *agent.ToolResult, width int, full bool) []string {
 	name := result.Name
 
 	if name == "todo" {
@@ -178,15 +171,19 @@ func cellTool(result *agent.ToolResult, width int, detail int) []string {
 	lines := []string{toolTitleLine(name, hint, width, false)}
 
 	output := strings.TrimRight(result.Content, "\n")
+	if output == "" {
+		return lines
+	}
 
-	showOutput := false
 	colorize := func(s string) string { return dim(markdown.Sanitize(s)) }
+	preview := strings.Split(output, "\n")
 
 	switch {
 	case isShellTool(name):
-		showOutput = output != ""
+		if !full {
+			preview = tailPreview(preview, 3)
+		}
 	case isMutationTool(name):
-		showOutput = output != ""
 		t := theme.Default
 		colorize = func(s string) string {
 			switch {
@@ -197,22 +194,16 @@ func cellTool(result *agent.ToolResult, width int, detail int) []string {
 			}
 			return dim(markdown.Sanitize(s))
 		}
+		if !full {
+			preview = headPreview(preview, 5)
+		}
 	default:
-		showOutput = detail > detailCompact && output != ""
+		if !full {
+			return lines
+		}
 	}
 
-	if showOutput {
-		preview := output
-		if detail < detailFull {
-			head, tail, omitHint := 2, 3, "(ctrl+e expand)"
-			if detail == detailExpanded {
-				head, tail, omitHint = 6, 12, "(ctrl+e show all)"
-			}
-			raw := strings.Split(output, "\n")
-			preview = strings.Join(headTailLines(raw, head, tail, omitHint), "\n")
-		}
-		lines = append(lines, continuationWrap(preview, width, colorize)...)
-	}
+	lines = append(lines, continuationWrap(strings.Join(preview, "\n"), width, colorize)...)
 
 	return lines
 }

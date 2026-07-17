@@ -41,7 +41,6 @@ type App struct {
 	spinnerFrame int
 
 	currentMode Mode
-	detail      int
 	showWelcome bool
 
 	editor  *Editor
@@ -488,9 +487,14 @@ func (a *App) handleEvent(ev inline.Event) {
 		a.rebuildChat()
 
 	case inline.MouseEvent:
-		if a.overlay == nil {
-			a.handleMouse(ev)
+		if a.overlay != nil {
+			if m, ok := a.overlay.(interface{ HandleMouse(inline.MouseEvent) }); ok {
+				m.HandleMouse(ev)
+				a.invalidate()
+			}
+			return
 		}
+		a.handleMouse(ev)
 
 	case inline.PasteEvent:
 		a.handlePaste(ev.Text)
@@ -553,9 +557,8 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 			}
 			a.stop()
 			return
-		case 'e':
-			a.detail = (a.detail + 1) % 3
-			a.rebuildChat()
+		case 'o':
+			a.showTranscript()
 			return
 		case 'y':
 			a.copyLastResponse()

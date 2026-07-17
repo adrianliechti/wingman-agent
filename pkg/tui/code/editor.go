@@ -202,7 +202,9 @@ func (e *Editor) HandleKey(ev inline.KeyEvent) bool {
 			e.cursor = start
 			return true
 		case 'e':
-			return false
+			_, end := e.lineBounds()
+			e.cursor = end
+			return true
 		case 'b':
 			if e.cursor > 0 {
 				e.cursor--
