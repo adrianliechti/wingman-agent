@@ -207,7 +207,7 @@ func (a *App) render() {
 		lines = append(lines, a.statusLine(width))
 	}
 
-	a.term.RenderAlt(lines)
+	a.term.RenderAlt(lines, nil)
 }
 
 func (a *App) startLines(width int) []string {

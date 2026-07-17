@@ -42,10 +42,17 @@ type App struct {
 	currentMode Mode
 	verbose     bool
 	showWelcome bool
+	selectMode  bool
 
 	editor  *Editor
 	popup   *Popup
 	overlay Overlay
+
+	chat          []string
+	chatScroll    int
+	follow        bool
+	lastChatRows  int
+	lastMaxScroll int
 
 	printed     int
 	prevWasTool bool
@@ -107,6 +114,7 @@ func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
 		editor:      NewEditor(),
 		pendingEcho: map[string]string{},
 		turnCommits: map[string]string{},
+		follow:      true,
 	}
 
 	a.turns = code.NewTurnManager(ctx, coderAgent, a.handleTurnEvent)
@@ -205,6 +213,9 @@ func (a *App) Run() error {
 		return err
 	}
 
+	a.term.EnterAlt()
+	a.term.EnableMouse(true)
+
 	a.agent.FetchModels(a.ctx)
 
 	a.setPhase(PhasePreparing)
@@ -214,14 +225,14 @@ func (a *App) Run() error {
 
 		if err := a.agent.Workspace().InitMCP(a.ctx); err != nil {
 			a.post(func() {
-				a.flushCells(cellError("MCP initialization failed", err.Error(), a.width()))
+				a.appendChat(cellError("MCP initialization failed", err.Error(), a.width()))
 			})
 		}
 
 		a.post(func() {
 			a.setPhase(PhaseIdle)
 			if !a.agent.Workspace().HasRewind() {
-				a.flushCells(cellNotice(
+				a.appendChat(cellNotice(
 					"Limited mode: working dir is too large for full features. Diffs, checkpoints, and code intelligence are disabled.",
 					theme.Default.Yellow, a.width(),
 				))
@@ -318,8 +329,40 @@ func (a *App) width() int {
 	return w
 }
 
-func (a *App) flushCells(lines []string) {
-	a.term.Flush(lines)
+// appendChat adds finalized cells to the scrollable chat buffer.
+func (a *App) appendChat(lines []string) {
+	a.chat = append(a.chat, lines...)
+	if len(lines) > 0 {
+		a.showWelcome = false
+	}
+	a.invalidate()
+}
+
+// rebuildChat re-renders the whole chat buffer from the message history, used
+// on resize and when toggling verbose rendering. Turn counters are preserved.
+func (a *App) rebuildChat() {
+	tools, thoughts := a.turnTools, a.turnThoughts
+
+	a.chat = nil
+	a.printed = 0
+	a.prevWasTool = false
+	a.syncMessages()
+
+	a.turnTools, a.turnThoughts = tools, thoughts
+	a.invalidate()
+}
+
+// scrollChat adjusts the chat viewport; render() clamps and re-engages
+// follow mode when the bottom is reached.
+func (a *App) scrollChat(delta int) {
+	if delta < 0 && a.follow {
+		a.chatScroll = a.lastMaxScroll
+	}
+	a.follow = false
+	a.chatScroll += delta
+	if a.chatScroll < 0 {
+		a.chatScroll = 0
+	}
 	a.invalidate()
 }
 
@@ -331,7 +374,12 @@ func (a *App) handleEvent(ev inline.Event) {
 	switch ev := ev.(type) {
 	case inline.ResizeEvent:
 		a.term.Resized(ev.Width, ev.Height)
-		a.invalidate()
+		a.rebuildChat()
+
+	case inline.MouseEvent:
+		if a.overlay == nil {
+			a.scrollChat(ev.WheelDelta * 3)
+		}
 
 	case inline.PasteEvent:
 		a.handlePaste(ev.Text)
@@ -396,8 +444,13 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 			return
 		case 'e':
 			a.verbose = !a.verbose
+			a.rebuildChat()
 			return
 		case 't':
+			a.selectMode = !a.selectMode
+			a.term.EnableMouse(!a.selectMode)
+			return
+		case 'r':
 			a.showTranscript()
 			return
 		case 'y':
@@ -443,6 +496,14 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 			return
 		}
 		a.editor.HistoryNext()
+		return
+
+	case inline.KeyPgUp:
+		a.scrollChat(-max(1, a.lastChatRows-1))
+		return
+
+	case inline.KeyPgDn:
+		a.scrollChat(max(1, a.lastChatRows-1))
 		return
 	}
 
@@ -508,7 +569,7 @@ func (a *App) answerPrompt() {
 			return
 		}
 		a.editor.SetText("")
-		a.flushCells(cellUser(text, a.width()))
+		a.appendChat(cellUser(text, a.width()))
 		a.setPhase(PhaseThinking)
 		a.askResponse <- text
 	}
@@ -521,19 +582,19 @@ func (a *App) handlePromptKey(ev inline.KeyEvent) {
 
 	switch ev.Rune {
 	case 'y', 'Y':
-		a.flushCells(cellUser("Yes", a.width()))
+		a.appendChat(cellUser("Yes", a.width()))
 		a.setPhase(PhaseThinking)
 		a.promptResponse <- true
 
 	case 'n', 'N':
-		a.flushCells(cellUser("No", a.width()))
+		a.appendChat(cellUser("No", a.width()))
 		a.setPhase(PhaseThinking)
 		a.promptResponse <- false
 
 	case 'a', 'A':
 		a.confirmAll.Store(true)
-		a.flushCells(cellUser("Always", a.width()))
-		a.flushCells(cellNotice("Auto-approving commands for this session", theme.Default.BrBlack, a.width()))
+		a.appendChat(cellUser("Always", a.width()))
+		a.appendChat(cellNotice("Auto-approving commands for this session", theme.Default.BrBlack, a.width()))
 		a.setPhase(PhaseThinking)
 		a.promptResponse <- true
 	}
@@ -580,7 +641,7 @@ func (a *App) clearChat() {
 	previousID := a.sessionID
 	id, err := a.agent.NewSession(a.ctx)
 	if err != nil {
-		a.flushCells(cellNotice(fmt.Sprintf("Could not create session: %v", err), theme.Default.Red, a.width()))
+		a.appendChat(cellNotice(fmt.Sprintf("Could not create session: %v", err), theme.Default.Red, a.width()))
 		return
 	}
 	a.turns.CancelAll(previousID)
@@ -590,7 +651,9 @@ func (a *App) clearChat() {
 	a.cachedTokens = 0
 	a.outputTokens = 0
 	a.lastInputTokens = 0
-	a.flushCells(cellTurnSeparator("", 0, 0, a.width()))
+	a.chat = nil
+	a.chatScroll = 0
+	a.follow = true
 	a.invalidate()
 }
 
@@ -599,13 +662,13 @@ func (a *App) resumeSession() {
 
 	sessions, err := a.agent.ListSessions(a.ctx)
 	if err != nil || len(sessions) == 0 {
-		a.flushCells(cellNotice("No sessions to resume", t.Yellow, a.width()))
+		a.appendChat(cellNotice("No sessions to resume", t.Yellow, a.width()))
 		return
 	}
 
 	last := sessions[0]
 	if err := a.agent.LoadSession(a.ctx, last.ID); err != nil {
-		a.flushCells(cellNotice(fmt.Sprintf("Failed to load session: %v", err), t.Red, a.width()))
+		a.appendChat(cellNotice(fmt.Sprintf("Failed to load session: %v", err), t.Red, a.width()))
 		return
 	}
 
@@ -620,8 +683,11 @@ func (a *App) resumeSession() {
 	a.lastInputTokens = usage.LastInputTokens
 
 	a.showWelcome = false
+	a.chat = nil
+	a.chatScroll = 0
+	a.follow = true
 	a.syncMessages()
-	a.flushCells(cellNotice(fmt.Sprintf("Resumed session from %s", last.UpdatedAt.Format("Jan 2 15:04")), t.Green, a.width()))
+	a.appendChat(cellNotice(fmt.Sprintf("Resumed session from %s", last.UpdatedAt.Format("Jan 2 15:04")), t.Green, a.width()))
 }
 
 func (a *App) copyTextToClipboard(text string) {
@@ -637,7 +703,7 @@ func (a *App) copyTextToClipboard(text string) {
 				color = theme.Default.Red
 			}
 
-			a.flushCells(cellNotice(message, color, a.width()))
+			a.appendChat(cellNotice(message, color, a.width()))
 		})
 	}()
 }
@@ -693,7 +759,7 @@ func (a *App) pasteFromClipboard() {
 }
 
 func (a *App) showError(title string, err error) {
-	a.flushCells(cellError(title, err.Error(), a.width()))
+	a.appendChat(cellError(title, err.Error(), a.width()))
 }
 
 func (a *App) isToolHidden(name string) bool {

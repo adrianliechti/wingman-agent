@@ -244,7 +244,7 @@ func (t *TUI) render() {
 		frame[i] = ansi.Pad(l, sidebarWidth) + sep + ansi.Truncate(r, rightWidth, "…")
 	}
 
-	t.term.RenderAlt(frame)
+	t.term.RenderAlt(frame, nil)
 }
 
 func (t *TUI) statusLine(width int) string {

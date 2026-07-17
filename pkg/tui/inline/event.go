@@ -33,6 +33,12 @@ type PasteEvent struct {
 	Text string
 }
 
+type MouseEvent struct {
+	WheelDelta int
+	X          int
+	Y          int
+}
+
 type ResizeEvent struct {
 	Width  int
 	Height int

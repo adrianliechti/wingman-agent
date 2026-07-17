@@ -12,16 +12,16 @@ import (
 )
 
 // cellUser renders the user's prompt echo: a `›` prefix on a subtle
-// background band.
+// background band, text starting at the shared 2-column gutter.
 func cellUser(text string, width int) []string {
 	t := theme.Default
 	band := ansi.Bg(t.Selection)
 
-	bandWidth := width - len(cellIndent) - 2
+	bandWidth := width - len(cellIndent)
 	if bandWidth < 14 {
 		bandWidth = 14
 	}
-	inner := bandWidth - 4
+	inner := bandWidth - 3
 
 	var lines []string
 	first := true
@@ -37,7 +37,7 @@ func cellUser(text string, width int) []string {
 			if pad < 0 {
 				pad = 0
 			}
-			lines = append(lines, cellIndent+band+" "+fg(t.BrBlack)+prefix+fg(t.Foreground)+wl+strings.Repeat(" ", pad+1)+ansi.Reset)
+			lines = append(lines, cellIndent+band+fg(t.BrBlack)+prefix+fg(t.Foreground)+wl+strings.Repeat(" ", pad+1)+ansi.Reset)
 		}
 	}
 
@@ -45,8 +45,28 @@ func cellUser(text string, width int) []string {
 	return lines
 }
 
-func cellAssistant(text string, width int) []string {
-	lines := indentWrap(markdown.Render(text), width)
+// cellAssistant renders assistant markdown behind a status circle: dim while
+// streaming, green when committed, red on failure.
+func cellAssistant(text string, width int, circle ansi.Color) []string {
+	inner := width - len(cellIndent) - 2
+	if inner < 10 {
+		inner = 10
+	}
+
+	var lines []string
+	first := true
+
+	for _, line := range strings.Split(strings.TrimRight(markdown.Render(text), "\n"), "\n") {
+		for _, wl := range ansi.Wrap(line, inner) {
+			prefix := "  "
+			if first {
+				prefix = colored(circle, "● ")
+				first = false
+			}
+			lines = append(lines, cellIndent+prefix+wl)
+		}
+	}
+
 	lines = append(lines, "")
 	return lines
 }
@@ -176,11 +196,13 @@ func cellTool(result *agent.ToolResult, width int, verbose bool) []string {
 
 	if showOutput {
 		head, tail := 2, 3
+		omitHint := "(ctrl+e expand)"
 		if verbose {
 			head, tail = 6, 12
+			omitHint = "(ctrl+r transcript)"
 		}
 		raw := strings.Split(output, "\n")
-		preview := headTailLines(raw, head, tail, "(ctrl+t transcript)")
+		preview := headTailLines(raw, head, tail, omitHint)
 		lines = append(lines, continuationWrap(strings.Join(preview, "\n"), width, colorize)...)
 	}
 
@@ -263,13 +285,30 @@ func cellNotice(message string, color ansi.Color, width int) []string {
 func cellError(title, message string, width int) []string {
 	t := theme.Default
 
-	lines := indentWrap(fg(t.Red)+ansi.Bold+"■ "+markdown.Sanitize(title), width)
+	inner := width - len(cellIndent) - 2
+	if inner < 10 {
+		inner = 10
+	}
+
+	var lines []string
+	first := true
+
+	for _, wl := range ansi.Wrap(fg(t.Red)+ansi.Bold+markdown.Sanitize(title), inner) {
+		prefix := "  "
+		if first {
+			prefix = colored(t.Red, "● ")
+			first = false
+		}
+		lines = append(lines, cellIndent+prefix+wl+ansi.Reset)
+	}
 
 	for _, line := range strings.Split(strings.TrimRight(message, "\n"), "\n") {
 		if line == "" {
 			continue
 		}
-		lines = append(lines, indentWrap(dim(markdown.Sanitize(line)), width)...)
+		for _, wl := range ansi.Wrap(dim(markdown.Sanitize(line)), inner) {
+			lines = append(lines, cellIndent+"  "+wl)
+		}
 	}
 
 	lines = append(lines, "")

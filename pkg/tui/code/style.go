@@ -7,7 +7,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
-const cellIndent = "  "
+const cellIndent = ""
 
 func fg(c ansi.Color) string {
 	return ansi.Fg(c)

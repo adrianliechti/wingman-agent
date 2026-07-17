@@ -210,7 +210,7 @@ func (a *App) submitInput() {
 		}
 
 		a.editor.SetText("")
-		a.flushCells(cellNotice(fmt.Sprintf("Unknown command: /%s", skillName), theme.Default.Yellow, a.width()))
+		a.appendChat(cellNotice(fmt.Sprintf("Unknown command: /%s", skillName), theme.Default.Yellow, a.width()))
 		return
 	}
 
@@ -255,7 +255,7 @@ func (a *App) submitInput() {
 func (a *App) invokeSkill(s *skill.Skill, args string) {
 	content, err := s.GetContent(a.agent.Workspace().RootPath)
 	if err != nil {
-		a.flushCells(cellNotice(fmt.Sprintf("Failed to load skill %q: %v", s.Name, err), theme.Default.Red, a.width()))
+		a.appendChat(cellNotice(fmt.Sprintf("Failed to load skill %q: %v", s.Name, err), theme.Default.Red, a.width()))
 		return
 	}
 
@@ -270,7 +270,7 @@ func (a *App) invokeSkill(s *skill.Skill, args string) {
 		displayText += " " + args
 	}
 
-	a.flushCells(cellUser(displayText, a.width()))
+	a.appendChat(cellUser(displayText, a.width()))
 	a.showWelcome = false
 
 	input := []agent.Content{{Text: content}}
@@ -294,7 +294,7 @@ func (a *App) submitAgentInput(input []agent.Content, echo string) {
 	if err != nil {
 		a.takeTurnCommit(id)
 		delete(a.pendingEcho, id)
-		a.flushCells(cellNotice(fmt.Sprintf("Could not submit turn: %v", err), theme.Default.Red, a.width()))
+		a.appendChat(cellNotice(fmt.Sprintf("Could not submit turn: %v", err), theme.Default.Red, a.width()))
 		return
 	}
 
@@ -333,7 +333,7 @@ func (a *App) showHelp() {
 
 	lines = append(lines, "")
 
-	a.flushCells(lines)
+	a.appendChat(lines)
 }
 
 func (a *App) showModelPicker() {
@@ -395,11 +395,11 @@ func (a *App) showRewindPicker() {
 
 	checkpoints, err := a.agent.Workspace().Checkpoints()
 	if err != nil {
-		a.flushCells(cellNotice("Rewind unavailable in this workspace", t.Yellow, a.width()))
+		a.appendChat(cellNotice("Rewind unavailable in this workspace", t.Yellow, a.width()))
 		return
 	}
 	if len(checkpoints) == 0 {
-		a.flushCells(cellNotice("No checkpoints available", t.Yellow, a.width()))
+		a.appendChat(cellNotice("No checkpoints available", t.Yellow, a.width()))
 		return
 	}
 
@@ -420,10 +420,10 @@ func (a *App) showRewindPicker() {
 			}
 		}
 		if err := a.agent.Workspace().Restore(ids[0]); err != nil {
-			a.flushCells(cellNotice(fmt.Sprintf("Failed to restore: %v", err), t.Red, a.width()))
+			a.appendChat(cellNotice(fmt.Sprintf("Failed to restore: %v", err), t.Red, a.width()))
 			return
 		}
-		a.flushCells(cellNotice(fmt.Sprintf("Restored to: %s", label), t.Green, a.width()))
+		a.appendChat(cellNotice(fmt.Sprintf("Restored to: %s", label), t.Green, a.width()))
 	})
 }
 

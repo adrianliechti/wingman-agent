@@ -35,6 +35,8 @@ type Terminal struct {
 	alt      bool
 	altFrame []string
 
+	mouse bool
+
 	oldState *term.State
 	sizeFn   func() (int, int)
 }
@@ -100,8 +102,28 @@ func (t *Terminal) Start() error {
 	return nil
 }
 
+// EnableMouse turns SGR mouse reporting on or off; off restores the
+// terminal's native text selection.
+func (t *Terminal) EnableMouse(on bool) {
+	if t.mouse == on {
+		return
+	}
+	t.mouse = on
+	if on {
+		fmt.Fprint(t.out, "\x1b[?1000;1006h")
+	} else {
+		fmt.Fprint(t.out, "\x1b[?1000;1006l")
+	}
+}
+
+func (t *Terminal) MouseEnabled() bool {
+	return t.mouse
+}
+
 func (t *Terminal) Stop() {
 	close(t.done)
+
+	t.EnableMouse(false)
 
 	if t.alt {
 		fmt.Fprint(t.out, "\x1b[?1049l")
@@ -295,13 +317,14 @@ func (t *Terminal) ExitAlt() {
 	t.paint(prev, nil)
 }
 
-// RenderAlt draws a full-screen frame in the alternate buffer.
-func (t *Terminal) RenderAlt(lines []string) {
+// RenderAlt draws a full-screen frame in the alternate buffer. cursor, when
+// non-nil, positions and shows the hardware cursor (row is a frame index).
+func (t *Terminal) RenderAlt(lines []string, cursor *Pos) {
 	if !t.alt {
 		return
 	}
 
-	fmt.Fprint(t.out, "\x1b[?2026h")
+	fmt.Fprint(t.out, "\x1b[?2026h\x1b[?25l")
 
 	for i := 0; i < t.height; i++ {
 		line := ""
@@ -315,6 +338,10 @@ func (t *Terminal) RenderAlt(lines []string) {
 	}
 
 	t.altFrame = append(t.altFrame[:0], lines...)
+
+	if cursor != nil {
+		fmt.Fprintf(t.out, "\x1b[%d;%dH\x1b[?25h", cursor.Row+1, cursor.Col+1)
+	}
 
 	fmt.Fprint(t.out, "\x1b[?2026l")
 }

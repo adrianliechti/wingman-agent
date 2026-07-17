@@ -14,12 +14,12 @@ func (a *App) showDiffView() {
 
 	diffs, err := a.agent.Workspace().Diffs()
 	if err != nil {
-		a.flushCells(cellNotice(fmt.Sprintf("%v", err), t.Yellow, a.width()))
+		a.appendChat(cellNotice(fmt.Sprintf("%v", err), t.Yellow, a.width()))
 		return
 	}
 
 	if len(diffs) == 0 {
-		a.flushCells(cellNotice("No changes", t.BrBlack, a.width()))
+		a.appendChat(cellNotice("No changes", t.BrBlack, a.width()))
 		return
 	}
 

@@ -54,12 +54,8 @@ func (a *App) syncMessages() {
 	}
 	a.printed = len(messages)
 
-	if a.showWelcome && len(lines) > 0 {
-		a.showWelcome = false
-	}
-
 	if len(lines) > 0 {
-		a.term.Flush(lines)
+		a.appendChat(lines)
 	}
 
 	usage := a.agent.Usage(a.sessionID)
@@ -109,7 +105,7 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 				delete(a.pendingEcho, findPendingEcho(a.pendingEcho, c.Text))
 				lines = append(lines, cellUser(c.Text, width)...)
 			case agent.RoleAssistant:
-				lines = append(lines, cellAssistant(c.Text, width)...)
+				lines = append(lines, cellAssistant(c.Text, width, theme.Default.Green)...)
 			}
 		}
 	}
@@ -176,7 +172,7 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 			if visible {
 				a.queuePhase(PhaseIdle)
 				a.post(func() {
-					a.flushCells(cellNotice(fmt.Sprintf("Internal error: %v", recovered), theme.Default.Red, a.width()))
+					a.appendChat(cellNotice(fmt.Sprintf("Internal error: %v", recovered), theme.Default.Red, a.width()))
 				})
 			}
 		}
@@ -289,10 +285,10 @@ func (a *App) finishTurn(sessionID, commit string, state code.TurnInputState, tu
 					a.flushTurnSeparator()
 				}
 			case state == code.TurnInputCancelled || errors.Is(turnErr, context.Canceled):
-				a.flushCells(cellNotice("Cancelled", t.Yellow, a.width()))
+				a.appendChat(cellNotice("Cancelled", t.Yellow, a.width()))
 				a.resetTurnStats()
 			default:
-				a.flushCells(cellNotice(fmt.Sprintf("Error: %v", turnErr), t.Red, a.width()))
+				a.appendChat(cellNotice(fmt.Sprintf("Error: %v", turnErr), t.Red, a.width()))
 				a.resetTurnStats()
 			}
 
@@ -323,7 +319,7 @@ func (a *App) flushTurnSeparator() {
 		elapsed = formatElapsed(time.Since(a.turnStart))
 	}
 
-	a.flushCells(cellTurnSeparator(elapsed, a.turnTools, a.turnThoughts, a.width()))
+	a.appendChat(cellTurnSeparator(elapsed, a.turnTools, a.turnThoughts, a.width()))
 	a.resetTurnStats()
 }
 

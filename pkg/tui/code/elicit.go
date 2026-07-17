@@ -26,7 +26,7 @@ func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
 
 	a.post(func() {
 		a.promptActive = true
-		a.flushCells(cellPrompt("Confirm command", message, hint, a.width()))
+		a.appendChat(cellPrompt("Confirm command", message, hint, a.width()))
 		a.editor.SetPlaceholder("y/n/a")
 		a.invalidate()
 	})
@@ -118,7 +118,7 @@ func (a *App) askLineLocked(ctx context.Context, prompt, placeholder string) (st
 
 	a.post(func() {
 		a.askActive = true
-		a.flushCells(cellPrompt("Question", prompt, "", a.width()))
+		a.appendChat(cellPrompt("Question", prompt, "", a.width()))
 		a.editor.SetPlaceholder(placeholder)
 		a.invalidate()
 	})

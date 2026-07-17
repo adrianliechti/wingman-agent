@@ -36,11 +36,11 @@ func (a *App) showDiagnosticsOverlay(files []fileDiagnostics, collectErr error) 
 	t := theme.Default
 
 	if collectErr != nil {
-		a.flushCells(cellError("Diagnostics failed", collectErr.Error(), a.width()))
+		a.appendChat(cellError("Diagnostics failed", collectErr.Error(), a.width()))
 	}
 
 	if len(files) == 0 {
-		a.flushCells(cellNotice("No diagnostics found", t.BrBlack, a.width()))
+		a.appendChat(cellNotice("No diagnostics found", t.BrBlack, a.width()))
 		a.invalidate()
 		return
 	}

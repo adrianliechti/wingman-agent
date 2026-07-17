@@ -1,6 +1,7 @@
 package code
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -49,53 +50,62 @@ func (a *App) welcomeLines(width int) []string {
 	}
 	lines = append(lines, center(dim(cwd)))
 	lines = append(lines, "")
-	lines = append(lines, center(colored(theme.Default.Foreground, "/")+dim(" commands   ")+colored(theme.Default.Foreground, "@")+dim(" add files   ")+colored(theme.Default.Foreground, "tab")+dim(" plan mode")))
-	lines = append(lines, "")
+	lines = append(lines, center(colored(t.Foreground, "/")+dim(" commands   ")+colored(t.Foreground, "@")+dim(" add files   ")+colored(t.Foreground, "tab")+dim(" plan mode")))
 
 	return lines
 }
 
-// render paints the live region: welcome (until first message), the
-// in-flight streaming cell, status row, composer, and popup or footer.
-func (a *App) render() {
-	width, height := a.term.Size()
-	if width <= 0 {
-		width = 80
-	}
-
-	if a.overlay != nil {
-		a.term.RenderAlt(a.overlay.Render(width, height))
-		return
-	}
+// streamCells renders the in-flight turn tail shown below the committed chat.
+// The same blank line committed cells get after a tool run is inserted here so
+// spacing doesn't change when the turn finalizes.
+func (a *App) streamCells(width int) []string {
+	toolName, toolHint, streamingText, streamingReasoning := a.snapshotStreamState()
 
 	var lines []string
 
-	if a.showWelcome && height > 16 {
-		lines = append(lines, a.welcomeLines(width)...)
+	if a.prevWasTool && (streamingReasoning != "" || streamingText != "") {
+		lines = append(lines, "")
 	}
-
-	toolName, toolHint, streamingText, streamingReasoning := a.snapshotStreamState()
 
 	if streamingReasoning != "" {
 		lines = append(lines, cellReasoning(streamingReasoning, width, a.verbose, false)...)
 	}
 
 	if streamingText != "" {
-		lines = append(lines, cellAssistant(streamingText, width)...)
+		lines = append(lines, cellAssistant(streamingText, width, theme.Default.BrBlack)...)
 	}
 
 	if toolName != "" && !a.isToolHidden(toolName) {
 		lines = append(lines, cellToolProgress(toolName, toolHint, width)...)
 	}
 
-	for _, echo := range a.pendingEcho {
-		lines = append(lines, cellIndent+dim("queued: ")+dim(ansi.Truncate(echo, width-12, "…")))
+	return lines
+}
+
+// render paints the full-screen frame: scrollable chat on top, then queued
+// echoes, status row, composer, and popup or footer pinned at the bottom.
+func (a *App) render() {
+	width, height := a.term.Size()
+	if width <= 0 || height <= 0 {
+		return
 	}
 
-	lines = append(lines, a.statusLine(width))
-	lines = append(lines, "")
+	if a.overlay != nil {
+		a.term.RenderAlt(a.overlay.Render(width, height), nil)
+		return
+	}
 
 	t := theme.Default
+
+	// Bottom section, built first so the chat viewport gets the remainder.
+	var bottom []string
+
+	for _, echo := range a.pendingEcho {
+		bottom = append(bottom, cellIndent+dim("queued: ")+dim(ansi.Truncate(echo, width-12, "…")))
+	}
+
+	bottom = append(bottom, a.statusLine(width))
+
 	switch {
 	case a.promptActive || a.askActive:
 		a.editor.SetRuleColor(t.Red)
@@ -111,19 +121,73 @@ func (a *App) render() {
 	}
 
 	editorLines, cursor := a.editor.Render(width, maxEditorRows)
-	cursor.Row += len(lines)
-	lines = append(lines, editorLines...)
+	editorStart := len(bottom)
+	bottom = append(bottom, editorLines...)
 
 	if a.popup != nil {
-		lines = append(lines, a.popup.Render(width)...)
+		bottom = append(bottom, a.popup.Render(width)...)
 	} else {
-		lines = append(lines, a.footerLine(width))
+		bottom = append(bottom, a.footerLine(width))
 	}
 
-	cursorPtr := &cursor
-	if a.overlay != nil {
-		cursorPtr = nil
+	chatRows := height - len(bottom)
+	if chatRows < 0 {
+		chatRows = 0
+	}
+	a.lastChatRows = chatRows
+
+	// Chat viewport: committed cells plus the live streaming tail.
+	view := a.chat
+	if stream := a.streamCells(width); len(stream) > 0 {
+		view = append(append([]string(nil), a.chat...), stream...)
 	}
 
-	a.term.Render(lines, cursorPtr)
+	if a.showWelcome && len(view) == 0 {
+		welcome := a.welcomeLines(width)
+		pad := (chatRows - len(welcome)) / 2
+		for i := 0; i < pad; i++ {
+			view = append(view, "")
+		}
+		view = append(view, welcome...)
+	}
+
+	maxScroll := len(view) - chatRows
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	a.lastMaxScroll = maxScroll
+
+	if a.follow || a.chatScroll >= maxScroll {
+		a.chatScroll = maxScroll
+		a.follow = true
+	}
+
+	frame := make([]string, 0, height)
+
+	for i := 0; i < chatRows; i++ {
+		idx := a.chatScroll + i
+		if idx < len(view) {
+			frame = append(frame, view[idx])
+		} else {
+			frame = append(frame, "")
+		}
+	}
+
+	frame = append(frame, bottom...)
+
+	// Scroll indicator on the status row when the newest content is
+	// off-screen.
+	if hidden := maxScroll - a.chatScroll; !a.follow && hidden > 0 {
+		idx := chatRows + editorStart - 1
+		if idx >= 0 && idx < len(frame) {
+			indicator := dim(fmt.Sprintf("↓ %d more", hidden))
+			pad := width - ansi.Width(frame[idx]) - ansi.Width(indicator) - len(cellIndent)
+			if pad > 0 {
+				frame[idx] += strings.Repeat(" ", pad) + indicator
+			}
+		}
+	}
+
+	cursor.Row += chatRows + editorStart
+	a.term.RenderAlt(frame, &cursor)
 }

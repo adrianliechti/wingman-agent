@@ -135,15 +135,19 @@ func (a *App) footerLine(width int) string {
 		hint("@", "files"),
 		hint("tab", "plan"),
 		hint("shift+tab", "model"),
-		hint("ctrl+t", "transcript"),
-		hint("ctrl+e", "verbose"),
+		hint("ctrl+e", "expand"),
+		hint("ctrl+t", "select"),
+		hint("ctrl+r", "transcript"),
 	}
 
 	if a.currentMode == ModePlan {
 		hints[2] = hint("tab", "agent")
 	}
 	if a.verbose {
-		hints[5] = hint("ctrl+e", "compact")
+		hints[4] = hint("ctrl+e", "collapse")
+	}
+	if a.selectMode {
+		left = append(left, colored(t.Yellow, "select mode"))
 	}
 
 	sep := dim("  ")

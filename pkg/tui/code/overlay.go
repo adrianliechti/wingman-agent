@@ -19,13 +19,11 @@ type Overlay interface {
 
 func (a *App) openOverlay(o Overlay) {
 	a.overlay = o
-	a.term.EnterAlt()
 	a.invalidate()
 }
 
 func (a *App) closeOverlay() {
 	a.overlay = nil
-	a.term.ExitAlt()
 	a.invalidate()
 }
 
@@ -159,7 +157,7 @@ func (a *App) showTranscript() {
 				case agent.RoleUser:
 					lines = append(lines, cellUser(c.Text, width)...)
 				case agent.RoleAssistant:
-					lines = append(lines, cellAssistant(c.Text, width)...)
+					lines = append(lines, cellAssistant(c.Text, width, theme.Default.Green)...)
 				}
 			}
 		}
@@ -170,7 +168,7 @@ func (a *App) showTranscript() {
 		lines = append(lines, cellReasoning(streamingReasoning, width, true, false)...)
 	}
 	if streamingText != "" {
-		lines = append(lines, cellAssistant(streamingText, width)...)
+		lines = append(lines, cellAssistant(streamingText, width, theme.Default.BrBlack)...)
 	}
 
 	o := &transcriptOverlay{
@@ -186,7 +184,7 @@ func (a *App) showTranscript() {
 }
 
 func (o *transcriptOverlay) HandleKey(ev inline.KeyEvent) bool {
-	if ev.Key == inline.KeyCtrl && ev.Rune == 't' {
+	if ev.Key == inline.KeyCtrl && ev.Rune == 'r' {
 		return true
 	}
 	return o.pager.HandleKey(ev, o.height)

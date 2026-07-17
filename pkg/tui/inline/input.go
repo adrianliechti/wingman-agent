@@ -210,6 +210,11 @@ func (in *inputReader) consumeEscape() {
 	seq := string(buf[2 : end+1])
 	in.buf = buf[end+1:]
 
+	if strings.HasPrefix(seq, "<") {
+		in.consumeMouse(seq)
+		return
+	}
+
 	switch seq {
 	case "A":
 		in.emit(KeyEvent{Key: KeyUp})
@@ -248,5 +253,40 @@ func (in *inputReader) consumeEscape() {
 			in.events <- PasteEvent{Text: in.paste.String()}
 			in.paste.Reset()
 		}
+	}
+}
+
+// consumeMouse handles SGR mouse reports ("<b;x;yM" / "<b;x;ym"); only wheel
+// motion is surfaced.
+func (in *inputReader) consumeMouse(seq string) {
+	body := seq[1 : len(seq)-1]
+	release := seq[len(seq)-1] == 'm'
+
+	parts := strings.Split(body, ";")
+	if len(parts) != 3 || release {
+		return
+	}
+
+	num := func(s string) int {
+		n := 0
+		for i := 0; i < len(s); i++ {
+			if s[i] < '0' || s[i] > '9' {
+				return -1
+			}
+			n = n*10 + int(s[i]-'0')
+		}
+		return n
+	}
+
+	button, x, y := num(parts[0]), num(parts[1]), num(parts[2])
+	if button < 0 {
+		return
+	}
+
+	switch button {
+	case 64:
+		in.emit(MouseEvent{WheelDelta: -1, X: x, Y: y})
+	case 65:
+		in.emit(MouseEvent{WheelDelta: 1, X: x, Y: y})
 	}
 }
