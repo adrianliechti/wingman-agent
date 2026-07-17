@@ -49,8 +49,6 @@ func (a *App) welcomeLines(width int) []string {
 		cwd = "~" + strings.TrimPrefix(cwd, home)
 	}
 	lines = append(lines, center(dim(cwd)))
-	lines = append(lines, "")
-	lines = append(lines, center(colored(t.Foreground, "/")+dim(" commands   ")+colored(t.Foreground, "@")+dim(" add files   ")+colored(t.Foreground, "tab")+dim(" plan mode")))
 
 	return lines
 }
@@ -99,10 +97,6 @@ func (a *App) render() {
 
 	// Bottom section, built first so the chat viewport gets the remainder.
 	var bottom []string
-
-	for _, echo := range a.pendingEcho {
-		bottom = append(bottom, cellIndent+dim("queued: ")+dim(ansi.Truncate(echo, width-12, "…")))
-	}
 
 	bottom = append(bottom, a.statusLine(width))
 
@@ -158,15 +152,22 @@ func (a *App) render() {
 		a.follow = true
 	}
 
+	// Bottom-anchor short conversations so content hugs the composer.
+	topPad := 0
+	if !a.showWelcome && len(view) < chatRows {
+		topPad = chatRows - len(view)
+	}
+	a.lastTopPad = topPad
+
 	selStart, selEnd := a.orderedSelection()
 	showSelection := a.selActive || a.selecting
 
 	frame := make([]string, 0, height)
 
 	for i := 0; i < chatRows; i++ {
-		idx := a.chatScroll + i
+		idx := a.chatScroll + i - topPad
 		line := ""
-		if idx < len(view) {
+		if idx >= 0 && idx < len(view) {
 			line = view[idx]
 		}
 

@@ -133,7 +133,11 @@ func (r *ANSIRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte, no
 }
 
 func (r *ANSIRenderer) renderParagraph(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
-	if !entering {
+	if entering {
+		if node.PreviousSibling() != nil {
+			w.WriteString("\n")
+		}
+	} else {
 		w.WriteString("\n")
 	}
 

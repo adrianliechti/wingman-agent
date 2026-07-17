@@ -1,6 +1,34 @@
 package code
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
+)
+
+func TestReleaseToolCellKeepsLiveCellUntilMatchingResult(t *testing.T) {
+	a := &App{}
+	a.currentToolID = "call-1"
+	a.currentToolName = "shell"
+	a.currentToolHint = "ls"
+
+	a.releaseToolCell(&agent.ToolResult{ID: "call-2", Name: "shell"})
+	if a.currentToolName == "" {
+		t.Fatal("live cell released by a different call's result")
+	}
+
+	a.releaseToolCell(&agent.ToolResult{ID: "call-1", Name: "shell"})
+	if a.currentToolName != "" || a.currentToolID != "" {
+		t.Fatal("live cell not released by matching result")
+	}
+
+	a.currentToolID = ""
+	a.currentToolName = "read"
+	a.releaseToolCell(&agent.ToolResult{Name: "read"})
+	if a.currentToolName != "" {
+		t.Fatal("live cell not released by name fallback")
+	}
+}
 
 func TestActivateSessionResetsTurnState(t *testing.T) {
 	a := &App{sessionID: "old", sessionEpoch: 3}

@@ -82,6 +82,7 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 	for _, c := range msg.Content {
 		switch {
 		case c.ToolResult != nil:
+			a.releaseToolCell(c.ToolResult)
 			if a.isToolHidden(c.ToolResult.Name) {
 				continue
 			}
@@ -102,7 +103,7 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 			blankBeforeText()
 			switch msg.Role {
 			case agent.RoleUser:
-				delete(a.pendingEcho, findPendingEcho(a.pendingEcho, c.Text))
+				a.removePendingEchoText(c.Text)
 				lines = append(lines, cellUser(c.Text, width)...)
 			case agent.RoleAssistant:
 				lines = append(lines, cellAssistant(c.Text, width, theme.Default.Green)...)
@@ -113,19 +114,35 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 	return lines
 }
 
-func findPendingEcho(pending map[string]string, text string) string {
-	for id, echo := range pending {
-		if echo == text {
-			return id
+func (a *App) removePendingEchoText(text string) {
+	for i, item := range a.pendingEcho {
+		if item.Text == text {
+			a.pendingEcho = append(a.pendingEcho[:i], a.pendingEcho[i+1:]...)
+			return
 		}
 	}
-	return ""
+}
+
+// releaseToolCell drops the live tool cell once its committed result reaches
+// the chat.
+func (a *App) releaseToolCell(result *agent.ToolResult) {
+	a.streamStateMu.Lock()
+	match := a.currentToolName != "" &&
+		((result.ID != "" && result.ID == a.currentToolID) ||
+			(a.currentToolID == "" && result.Name == a.currentToolName))
+	if match {
+		a.currentToolID = ""
+		a.currentToolName = ""
+		a.currentToolHint = ""
+	}
+	a.streamStateMu.Unlock()
 }
 
 func (a *App) clearStreamingState() {
 	a.streamStateMu.Lock()
 	a.streamingText = ""
 	a.streamingReasoning = ""
+	a.currentToolID = ""
 	a.currentToolName = ""
 	a.currentToolHint = ""
 	a.reasoningID = ""
@@ -193,7 +210,7 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 	case code.TurnInputCompleted, code.TurnInputCancelled, code.TurnInputFailed:
 		commit := a.takeTurnCommit(ev.InputID)
 		a.post(func() {
-			delete(a.pendingEcho, ev.InputID)
+			a.removePendingEcho(ev.InputID)
 		})
 		if ev.Executed {
 			a.finishTurn(ev.SessionID, commit, ev.State, ev.Err)
@@ -207,6 +224,7 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 		case c.ToolCall != nil:
 			hint := tool.ExtractHint(c.ToolCall.Args, c.ToolCall.Name)
 			a.streamStateMu.Lock()
+			a.currentToolID = c.ToolCall.ID
 			a.currentToolName = c.ToolCall.Name
 			a.currentToolHint = hint
 			a.streamingText = ""
@@ -217,9 +235,10 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 			a.requestRender()
 
 		case c.ToolResult != nil:
+			// Keep the live tool cell visible; it is released when the
+			// committed result flushes into the chat, so it never blinks out
+			// between the stream event and the commit.
 			a.streamStateMu.Lock()
-			a.currentToolName = ""
-			a.currentToolHint = ""
 			a.streamingText = ""
 			a.streamStateMu.Unlock()
 			a.requestRender()

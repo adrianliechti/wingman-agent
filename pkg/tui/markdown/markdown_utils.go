@@ -10,25 +10,33 @@ func hexColor(hex string) ansi.Color {
 	return ansi.Hex(hex)
 }
 
-// sanitize strips control characters (except tab) from untrusted text so it
-// cannot inject escape sequences into the rendered output.
+// sanitize strips control characters from untrusted text so it cannot inject
+// escape sequences, and expands tabs (terminals expand them; the width math
+// cannot).
 func sanitize(s string) string {
-	if !strings.ContainsFunc(s, isControl) {
+	if !strings.ContainsFunc(s, needsSanitize) {
 		return s
 	}
 
 	var sb strings.Builder
 	for _, r := range s {
-		if isControl(r) {
-			continue
+		switch {
+		case r == '\t':
+			sb.WriteString("  ")
+		case isControl(r):
+		default:
+			sb.WriteRune(r)
 		}
-		sb.WriteRune(r)
 	}
 	return sb.String()
 }
 
+func needsSanitize(r rune) bool {
+	return r == '\t' || isControl(r)
+}
+
 func isControl(r rune) bool {
-	return (r < 0x20 && r != '\t' && r != '\n') || r == 0x7f
+	return (r < 0x20 && r != '\n') || r == 0x7f
 }
 
 func visibleLen(s string) int {

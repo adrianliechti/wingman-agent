@@ -284,18 +284,19 @@ func (a *App) submitAgentInput(input []agent.Content, echo string) {
 	id := uuid.NewString()
 	a.rememberTurn(id, input)
 
-	if echo != "" {
-		a.pendingEcho[id] = echo
-	}
-
-	_, err := a.turns.Submit(a.ctx, a.sessionID, code.TurnInput{
+	snap, err := a.turns.Submit(a.ctx, a.sessionID, code.TurnInput{
 		ID: id, Content: input, Intent: code.TurnInputSteer,
 	})
 	if err != nil {
 		a.takeTurnCommit(id)
-		delete(a.pendingEcho, id)
 		a.appendChat(cellNotice(fmt.Sprintf("Could not submit turn: %v", err), theme.Default.Red, a.width()))
 		return
+	}
+
+	// Only inputs waiting behind an active turn get a preview; an input that
+	// starts immediately commits within a frame and a preview would flicker.
+	if echo != "" && (snap.State == code.TurnInputQueued || snap.State == code.TurnInputSteered) {
+		a.pendingEcho = append(a.pendingEcho, pendingEchoItem{ID: id, Text: echo})
 	}
 
 	a.syncMessages()

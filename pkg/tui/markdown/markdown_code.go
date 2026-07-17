@@ -116,14 +116,12 @@ func formatCodeBlock(code, lang string, t theme.Theme) string {
 
 	var result strings.Builder
 
-	result.WriteString("\n")
-
 	if lang != "" {
-		fmt.Fprintf(&result, "  %s%s%s\n", dim, sanitize(lang), ansi.Reset)
+		fmt.Fprintf(&result, "%s%s%s\n", dim, sanitize(lang), ansi.Reset)
 	}
 
 	for i, line := range lines {
-		fmt.Fprintf(&result, "  %s%3d│%s %s\n", dim, i+1, ansi.Reset, line)
+		fmt.Fprintf(&result, "%s%3d│%s %s\n", dim, i+1, ansi.Reset, line)
 	}
 
 	return result.String()

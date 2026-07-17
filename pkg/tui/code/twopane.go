@@ -124,6 +124,21 @@ func (o *twoPaneOverlay) HandleKey(ev inline.KeyEvent) bool {
 	return false
 }
 
+func (o *twoPaneOverlay) HandleMouse(ev inline.MouseEvent) {
+	if ev.Kind != inline.MouseWheel {
+		return
+	}
+
+	rows := o.height - 3
+	o.detailOffset += ev.WheelDelta * 3
+	if o.detailOffset > len(o.detail)-rows {
+		o.detailOffset = len(o.detail) - rows
+	}
+	if o.detailOffset < 0 {
+		o.detailOffset = 0
+	}
+}
+
 func (o *twoPaneOverlay) Render(width, height int) []string {
 	t := theme.Default
 	o.height = height

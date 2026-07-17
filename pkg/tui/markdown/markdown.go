@@ -55,6 +55,9 @@ func Render(text string) string {
 	result := buf.String()
 
 	if incompleteCode != "" {
+		if result != "" && !strings.HasSuffix(result, "\n\n") {
+			result += "\n"
+		}
 		result += formatCodeBlock(incompleteCode, incompleteLang, t)
 	}
 

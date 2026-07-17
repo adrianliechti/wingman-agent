@@ -57,6 +57,7 @@ type App struct {
 	follow        bool
 	lastChatRows  int
 	lastMaxScroll int
+	lastTopPad    int
 
 	printed     int
 	prevWasTool bool
@@ -65,7 +66,7 @@ type App struct {
 	turnThoughts int
 	turnStart    time.Time
 
-	pendingEcho map[string]string
+	pendingEcho []pendingEchoItem
 
 	elicitMu       sync.Mutex
 	promptActive   bool
@@ -91,11 +92,17 @@ type App struct {
 	dirty         bool
 
 	streamStateMu      sync.Mutex
+	currentToolID      string
 	currentToolName    string
 	currentToolHint    string
 	streamingText      string
 	streamingReasoning string
 	reasoningID        string
+}
+
+type pendingEchoItem struct {
+	ID   string
+	Text string
 }
 
 func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
@@ -116,7 +123,6 @@ func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
 		showWelcome:  !hasMessages && os.Getenv("WINGMAN_CALLER") != "vscode",
 
 		editor:      NewEditor(),
-		pendingEcho: map[string]string{},
 		turnCommits: map[string]string{},
 		follow:      true,
 	}
@@ -376,9 +382,10 @@ func (a *App) handleMouse(ev inline.MouseEvent) {
 	case inline.MousePress:
 		a.clearSelection()
 		row := ev.Y - 1
-		if row >= 0 && row < a.lastChatRows && !a.showWelcome {
+		line := a.chatScroll + row - a.lastTopPad
+		if row >= 0 && row < a.lastChatRows && line >= 0 && !a.showWelcome {
 			a.selecting = true
-			a.selAnchor = selPos{Line: a.chatScroll + row, Col: ev.X - 1}
+			a.selAnchor = selPos{Line: line, Col: ev.X - 1}
 			a.selHead = a.selAnchor
 		}
 		a.invalidate()
@@ -394,7 +401,11 @@ func (a *App) handleMouse(ev inline.MouseEvent) {
 		if row >= a.lastChatRows {
 			row = a.lastChatRows - 1
 		}
-		a.selHead = selPos{Line: a.chatScroll + row, Col: ev.X - 1}
+		line := a.chatScroll + row - a.lastTopPad
+		if line < 0 {
+			line = 0
+		}
+		a.selHead = selPos{Line: line, Col: ev.X - 1}
 		a.selActive = true
 		a.invalidate()
 
@@ -420,13 +431,31 @@ func (a *App) orderedSelection() (selPos, selPos) {
 	return a.selAnchor, a.selHead
 }
 
-// chatViewLines composes the scrollable chat content: committed cells plus
-// the live streaming tail.
+// removePendingEcho drops the queued-input preview for id.
+func (a *App) removePendingEcho(id string) {
+	for i, item := range a.pendingEcho {
+		if item.ID == id {
+			a.pendingEcho = append(a.pendingEcho[:i], a.pendingEcho[i+1:]...)
+			return
+		}
+	}
+}
+
+// chatViewLines composes the scrollable chat content: committed cells, the
+// live streaming tail, and previews of inputs still queued behind the active
+// turn.
 func (a *App) chatViewLines(width int) []string {
 	view := a.chat
-	if stream := a.streamCells(width); len(stream) > 0 {
+
+	stream := a.streamCells(width)
+
+	if len(stream) > 0 || len(a.pendingEcho) > 0 {
 		view = append(append([]string(nil), a.chat...), stream...)
+		for _, item := range a.pendingEcho {
+			view = append(view, cellIndent+dim(ansi.Truncate("› "+item.Text, width-10, "…")+" (queued)"))
+		}
 	}
+
 	return view
 }
 
@@ -794,6 +823,7 @@ func (a *App) resumeSession() {
 	a.chat = nil
 	a.chatScroll = 0
 	a.follow = true
+	a.clearSelection()
 	a.syncMessages()
 	a.appendChat(cellNotice(fmt.Sprintf("Resumed session from %s", last.UpdatedAt.Format("Jan 2 15:04")), t.Green, a.width()))
 }
