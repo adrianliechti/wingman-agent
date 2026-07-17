@@ -1,8 +1,7 @@
 package theme
 
 import (
-	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
 
 var Default Theme
@@ -17,96 +16,76 @@ func Auto() {
 
 type Theme struct {
 	IsLight    bool
-	Background tcell.Color
-	Foreground tcell.Color
-	Selection  tcell.Color
-	Cursor     tcell.Color
-	Black      tcell.Color
-	Red        tcell.Color
-	Green      tcell.Color
-	Yellow     tcell.Color
-	Blue       tcell.Color
-	Magenta    tcell.Color
-	Cyan       tcell.Color
-	White      tcell.Color
-	BrBlack    tcell.Color
-	BrRed      tcell.Color
-	BrGreen    tcell.Color
-	BrYellow   tcell.Color
-	BrBlue     tcell.Color
-	BrMagenta  tcell.Color
-	BrCyan     tcell.Color
-	BrWhite    tcell.Color
-}
-
-func applyTviewStyles() {
-	tview.Styles = tview.Theme{
-		PrimitiveBackgroundColor:    Default.Background,
-		ContrastBackgroundColor:     Default.Selection,
-		MoreContrastBackgroundColor: Default.Black,
-		BorderColor:                 Default.BrBlack,
-		TitleColor:                  Default.Foreground,
-		GraphicsColor:               Default.BrBlack,
-		PrimaryTextColor:            Default.Foreground,
-		SecondaryTextColor:          Default.Yellow,
-		TertiaryTextColor:           Default.BrBlack,
-		InverseTextColor:            Default.Background,
-		ContrastSecondaryTextColor:  Default.Cyan,
-	}
+	Background ansi.Color
+	Foreground ansi.Color
+	Selection  ansi.Color
+	Cursor     ansi.Color
+	Black      ansi.Color
+	Red        ansi.Color
+	Green      ansi.Color
+	Yellow     ansi.Color
+	Blue       ansi.Color
+	Magenta    ansi.Color
+	Cyan       ansi.Color
+	White      ansi.Color
+	BrBlack    ansi.Color
+	BrRed      ansi.Color
+	BrGreen    ansi.Color
+	BrYellow   ansi.Color
+	BrBlue     ansi.Color
+	BrMagenta  ansi.Color
+	BrCyan     ansi.Color
+	BrWhite    ansi.Color
 }
 
 func SetDark() {
 	Default = Theme{
 		IsLight:    false,
-		Background: tcell.GetColor("#161821"),
-		Foreground: tcell.GetColor("#c6c8d1"),
-		Selection:  tcell.GetColor("#272c42"),
-		Cursor:     tcell.GetColor("#c6c8d1"),
-		Black:      tcell.GetColor("#1e2132"),
-		Red:        tcell.GetColor("#e27878"),
-		Green:      tcell.GetColor("#b4be82"),
-		Yellow:     tcell.GetColor("#e2a478"),
-		Blue:       tcell.GetColor("#84a0c6"),
-		Magenta:    tcell.GetColor("#a093c7"),
-		Cyan:       tcell.GetColor("#89b8c2"),
-		White:      tcell.GetColor("#c6c8d1"),
-		BrBlack:    tcell.GetColor("#6b7089"),
-		BrRed:      tcell.GetColor("#e98989"),
-		BrGreen:    tcell.GetColor("#c0ca8e"),
-		BrYellow:   tcell.GetColor("#e9b189"),
-		BrBlue:     tcell.GetColor("#91acd1"),
-		BrMagenta:  tcell.GetColor("#ada0d3"),
-		BrCyan:     tcell.GetColor("#95c4ce"),
-		BrWhite:    tcell.GetColor("#d2d4de"),
+		Background: ansi.Hex("#161821"),
+		Foreground: ansi.Hex("#c6c8d1"),
+		Selection:  ansi.Hex("#272c42"),
+		Cursor:     ansi.Hex("#c6c8d1"),
+		Black:      ansi.Hex("#1e2132"),
+		Red:        ansi.Hex("#e27878"),
+		Green:      ansi.Hex("#b4be82"),
+		Yellow:     ansi.Hex("#e2a478"),
+		Blue:       ansi.Hex("#84a0c6"),
+		Magenta:    ansi.Hex("#a093c7"),
+		Cyan:       ansi.Hex("#89b8c2"),
+		White:      ansi.Hex("#c6c8d1"),
+		BrBlack:    ansi.Hex("#6b7089"),
+		BrRed:      ansi.Hex("#e98989"),
+		BrGreen:    ansi.Hex("#c0ca8e"),
+		BrYellow:   ansi.Hex("#e9b189"),
+		BrBlue:     ansi.Hex("#91acd1"),
+		BrMagenta:  ansi.Hex("#ada0d3"),
+		BrCyan:     ansi.Hex("#95c4ce"),
+		BrWhite:    ansi.Hex("#d2d4de"),
 	}
-
-	applyTviewStyles()
 }
 
 func SetLight() {
 	Default = Theme{
 		IsLight:    true,
-		Background: tcell.GetColor("#e8e9ec"),
-		Foreground: tcell.GetColor("#33374c"),
-		Selection:  tcell.GetColor("#c9cdd7"),
-		Cursor:     tcell.GetColor("#33374c"),
-		Black:      tcell.GetColor("#dcdfe7"),
-		Red:        tcell.GetColor("#cc517a"),
-		Green:      tcell.GetColor("#668e3d"),
-		Yellow:     tcell.GetColor("#c57339"),
-		Blue:       tcell.GetColor("#2d539e"),
-		Magenta:    tcell.GetColor("#7759b4"),
-		Cyan:       tcell.GetColor("#3f83a6"),
-		White:      tcell.GetColor("#33374c"),
-		BrBlack:    tcell.GetColor("#8389a3"),
-		BrRed:      tcell.GetColor("#cc3768"),
-		BrGreen:    tcell.GetColor("#598030"),
-		BrYellow:   tcell.GetColor("#b6662d"),
-		BrBlue:     tcell.GetColor("#22478e"),
-		BrMagenta:  tcell.GetColor("#6845ad"),
-		BrCyan:     tcell.GetColor("#327698"),
-		BrWhite:    tcell.GetColor("#262a3f"),
+		Background: ansi.Hex("#e8e9ec"),
+		Foreground: ansi.Hex("#33374c"),
+		Selection:  ansi.Hex("#c9cdd7"),
+		Cursor:     ansi.Hex("#33374c"),
+		Black:      ansi.Hex("#dcdfe7"),
+		Red:        ansi.Hex("#cc517a"),
+		Green:      ansi.Hex("#668e3d"),
+		Yellow:     ansi.Hex("#c57339"),
+		Blue:       ansi.Hex("#2d539e"),
+		Magenta:    ansi.Hex("#7759b4"),
+		Cyan:       ansi.Hex("#3f83a6"),
+		White:      ansi.Hex("#33374c"),
+		BrBlack:    ansi.Hex("#8389a3"),
+		BrRed:      ansi.Hex("#cc3768"),
+		BrGreen:    ansi.Hex("#598030"),
+		BrYellow:   ansi.Hex("#b6662d"),
+		BrBlue:     ansi.Hex("#22478e"),
+		BrMagenta:  ansi.Hex("#6845ad"),
+		BrCyan:     ansi.Hex("#327698"),
+		BrWhite:    ansi.Hex("#262a3f"),
 	}
-
-	applyTviewStyles()
 }

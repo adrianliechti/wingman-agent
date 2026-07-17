@@ -5,16 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
-
-	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/tui"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/clipboard"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
@@ -22,32 +22,39 @@ var _ code.UI = (*App)(nil)
 
 type App struct {
 	ctx   context.Context
-	app   *tview.Application
 	agent *coder.Agent
+	term  *inline.Terminal
 
-	pages       *tview.Pages
-	chatView    *tview.TextView
-	welcomeView *tview.TextView
-	input       *tview.TextArea
-	statusBar   *tview.TextView
-	inputHint   *tview.TextView
-
-	contentPages  *tview.Flex
-	chatContainer *tview.Flex
-	inputSection  *tview.Flex
-	inputFrame    *tview.Frame
-	mainLayout    *tview.Flex
-
-	spinner *Spinner
+	queue    chan func()
+	quit     chan struct{}
+	quitOnce sync.Once
+	runErr   error
 
 	sessionMu    sync.Mutex
 	sessionID    string
 	sessionEpoch uint64
 
-	phase       atomic.Int32
+	phase      atomic.Int32
+	phaseStart time.Time
+
+	spinnerFrame int
+
 	currentMode Mode
+	verbose     bool
 	showWelcome bool
-	activeModal Modal
+
+	editor  *Editor
+	popup   *Popup
+	overlay Overlay
+
+	printed     int
+	prevWasTool bool
+
+	turnTools    int
+	turnThoughts int
+	turnStart    time.Time
+
+	pendingEcho map[string]string
 
 	elicitMu       sync.Mutex
 	promptActive   bool
@@ -56,23 +63,21 @@ type App struct {
 	askActive      bool
 	askResponse    chan string
 
-	expandLevel     int
 	inputTokens     int64
 	cachedTokens    int64
 	outputTokens    int64
 	lastInputTokens int64
-	chatWidth       int
-	lastCompact     bool
-	pendingContent  []agent.Content
-	pendingFiles    []string
 
-	turns *code.TurnManager
+	pendingContent []agent.Content
+	pendingFiles   []string
 
+	turns       *code.TurnManager
 	turnMu      sync.Mutex
 	turnCommits map[string]string
 
 	renderPending atomic.Bool
 	renderLast    atomic.Int64
+	dirty         bool
 
 	streamStateMu      sync.Mutex
 	currentToolName    string
@@ -80,8 +85,6 @@ type App struct {
 	streamingText      string
 	streamingReasoning string
 	reasoningID        string
-
-	mouseEnabled bool
 }
 
 func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
@@ -91,19 +94,29 @@ func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
 
 	a := &App{
 		ctx:   ctx,
-		app:   tview.NewApplication(),
 		agent: coderAgent,
+		term:  inline.NewTerminal(),
+
+		queue: make(chan func(), 64),
+		quit:  make(chan struct{}),
 
 		sessionID:    sessionID,
 		sessionEpoch: 1,
 		showWelcome:  !hasMessages && os.Getenv("WINGMAN_CALLER") != "vscode",
 
-		mouseEnabled: true,
+		editor:      NewEditor(),
+		pendingEcho: map[string]string{},
+		turnCommits: map[string]string{},
 	}
-	a.turnCommits = make(map[string]string)
+
 	a.turns = code.NewTurnManager(ctx, coderAgent, a.handleTurnEvent)
 
 	return a
+}
+
+// WithTerminal replaces the terminal, used by tests.
+func (a *App) WithTerminal(t *inline.Terminal) {
+	a.term = t
 }
 
 func (a *App) SetSessionID(id string) {
@@ -113,9 +126,9 @@ func (a *App) SetSessionID(id string) {
 	a.sessionMu.Unlock()
 }
 
-// activateSession changes the session and resets all state that belongs to the
-// previous turn. The epoch prevents already-queued UI callbacks from an older
-// activation of the same session from rendering later.
+// activateSession changes the session and resets all state that belongs to
+// the previous turn. The epoch prevents already-queued UI callbacks from an
+// older activation of the same session from rendering later.
 func (a *App) activateSession(id string) {
 	a.sessionMu.Lock()
 	a.sessionID = id
@@ -123,6 +136,11 @@ func (a *App) activateSession(id string) {
 	a.clearStreamingState()
 	a.setPhase(PhaseIdle)
 	a.sessionMu.Unlock()
+
+	a.printed = 0
+	a.prevWasTool = false
+	a.turnTools = 0
+	a.turnThoughts = 0
 }
 
 func (a *App) withCurrentSession(id string, fn func()) {
@@ -160,46 +178,34 @@ func saveExecutablePath() {
 	os.WriteFile(filepath.Join(dir, "path"), []byte(path), 0644)
 }
 
+// post schedules fn on the UI loop from any goroutine.
+func (a *App) post(fn func()) {
+	select {
+	case a.queue <- fn:
+	case <-a.quit:
+	}
+}
+
+func (a *App) invalidate() {
+	a.dirty = true
+}
+
+func (a *App) stop() {
+	a.quitOnce.Do(func() {
+		close(a.quit)
+	})
+}
+
 func (a *App) saveSession() {
 	_ = a.agent.Save(a.sessionID)
 }
 
-func (a *App) stop() {
-	a.saveSession()
-
-	a.turns.SetHandler(nil)
-	a.turns.Close()
-	a.agent.Close()
-	a.agent.Workspace().Close()
-
-	a.app.EnableMouse(false)
-	a.app.Stop()
-
-	fmt.Fprint(os.Stdout, "\033[?1000l\033[?1002l\033[?1003l\033[?1006l")
-
-	if len(a.agent.Messages(a.sessionID)) > 0 {
-		usage := a.agent.Usage(a.sessionID)
-		fmt.Fprintf(os.Stderr, "\n")
-		if usage.CachedTokens > 0 {
-			fmt.Fprintf(os.Stderr, "  Tokens: \u2191%s (%s cached) \u2193%s\n", tui.FormatTokens(usage.InputTokens), tui.FormatTokens(usage.CachedTokens), tui.FormatTokens(usage.OutputTokens))
-		} else {
-			fmt.Fprintf(os.Stderr, "  Tokens: \u2191%s \u2193%s\n", tui.FormatTokens(usage.InputTokens), tui.FormatTokens(usage.OutputTokens))
-		}
-		fmt.Fprintf(os.Stderr, "  Resume: wingman --resume %s\n", a.sessionID)
-		fmt.Fprintf(os.Stderr, "\n")
-	}
-}
-
 func (a *App) Run() error {
-	a.setupUI()
+	if err := a.term.Start(); err != nil {
+		return err
+	}
 
 	a.agent.FetchModels(a.ctx)
-
-	mainLayout := a.buildLayout()
-	a.spinner = NewSpinner(a.app, a.inputHint)
-	a.pages = tview.NewPages()
-	a.pages.SetBackgroundColor(tcell.ColorDefault)
-	a.pages.AddPage("main", mainLayout, true, true)
 
 	a.setPhase(PhasePreparing)
 
@@ -207,57 +213,497 @@ func (a *App) Run() error {
 		a.agent.Workspace().WarmUp()
 
 		if err := a.agent.Workspace().InitMCP(a.ctx); err != nil {
-			a.app.QueueUpdateDraw(func() {
-				a.showError("MCP initialization failed", err)
+			a.post(func() {
+				a.flushCells(cellError("MCP initialization failed", err.Error(), a.width()))
 			})
 		}
 
-		a.app.QueueUpdateDraw(func() {
+		a.post(func() {
 			a.setPhase(PhaseIdle)
 			if !a.agent.Workspace().HasRewind() {
-				t := theme.Default
-				fmt.Fprint(a.chatView, a.formatNotice(
+				a.flushCells(cellNotice(
 					"Limited mode: working dir is too large for full features. Diffs, checkpoints, and code intelligence are disabled.",
-					t.Yellow,
+					theme.Default.Yellow, a.width(),
 				))
 			}
-			a.updateStatusBar()
+			a.invalidate()
 		})
 	}()
 
 	if messages := a.agent.Messages(a.sessionID); len(messages) > 0 {
-		a.switchToChat()
-		a.renderChat(messages)
-
 		usage := a.agent.Usage(a.sessionID)
 		a.inputTokens = usage.InputTokens
 		a.cachedTokens = usage.CachedTokens
 		a.outputTokens = usage.OutputTokens
 		a.lastInputTokens = usage.LastInputTokens
-		a.updateStatusBar()
+		a.syncMessages()
 	}
 
-	root := &pasteInterceptRoot{
-		Primitive: a.pages,
+	a.invalidate()
+	a.render()
 
-		intercept: func(text string) bool {
-			paths := detectFilePaths(text, a.agent.Workspace().RootPath)
+	ticker := time.NewTicker(spinnerInterval)
+	defer ticker.Stop()
 
-			if len(paths) == 0 {
-				return false
+	for {
+		select {
+		case <-a.quit:
+			a.shutdown()
+			return a.runErr
+
+		case <-a.ctx.Done():
+			a.shutdown()
+			return a.runErr
+
+		case ev := <-a.term.Events():
+			a.handleEvent(ev)
+
+		case fn := <-a.queue:
+			fn()
+
+		case <-ticker.C:
+			if a.getPhase() != PhaseIdle {
+				a.spinnerFrame++
+				a.invalidate()
 			}
+		}
 
-			for _, p := range paths {
-				a.addFileToContext(normalizeFilePath(p, a.agent.Workspace().RootPath))
+		// Drain whatever queued up before painting once.
+		for {
+			select {
+			case fn := <-a.queue:
+				fn()
+				continue
+			default:
 			}
+			break
+		}
 
-			a.updateInputHint()
+		if a.dirty {
+			a.dirty = false
+			a.syncMessages()
+			a.render()
+		}
+	}
+}
 
+func (a *App) shutdown() {
+	a.saveSession()
+
+	a.turns.SetHandler(nil)
+	a.turns.Close()
+	a.agent.Close()
+	a.agent.Workspace().Close()
+
+	a.term.Stop()
+
+	if len(a.agent.Messages(a.sessionID)) > 0 {
+		usage := a.agent.Usage(a.sessionID)
+		fmt.Fprintf(os.Stderr, "\n")
+		if usage.CachedTokens > 0 {
+			fmt.Fprintf(os.Stderr, "  Tokens: ↑%s (%s cached) ↓%s\n", formatTokens(usage.InputTokens), formatTokens(usage.CachedTokens), formatTokens(usage.OutputTokens))
+		} else {
+			fmt.Fprintf(os.Stderr, "  Tokens: ↑%s ↓%s\n", formatTokens(usage.InputTokens), formatTokens(usage.OutputTokens))
+		}
+		fmt.Fprintf(os.Stderr, "  Resume: wingman --resume %s\n", a.sessionID)
+		fmt.Fprintf(os.Stderr, "\n")
+	}
+}
+
+func (a *App) width() int {
+	w, _ := a.term.Size()
+	if w <= 0 {
+		return 80
+	}
+	return w
+}
+
+func (a *App) flushCells(lines []string) {
+	a.term.Flush(lines)
+	a.invalidate()
+}
+
+func (a *App) isStreaming() bool {
+	return a.getPhase() != PhaseIdle
+}
+
+func (a *App) handleEvent(ev inline.Event) {
+	switch ev := ev.(type) {
+	case inline.ResizeEvent:
+		a.term.Resized(ev.Width, ev.Height)
+		a.invalidate()
+
+	case inline.PasteEvent:
+		a.handlePaste(ev.Text)
+		a.invalidate()
+
+	case inline.KeyEvent:
+		a.handleKey(ev)
+		a.invalidate()
+	}
+}
+
+func (a *App) handlePaste(text string) {
+	if a.overlay != nil {
+		return
+	}
+
+	paths := detectFilePaths(text, a.agent.Workspace().RootPath)
+	if len(paths) > 0 {
+		for _, p := range paths {
+			a.addFileToContext(normalizeFilePath(p, a.agent.Workspace().RootPath))
+		}
+		return
+	}
+
+	a.editor.Insert(strings.ReplaceAll(text, "\r\n", "\n"))
+	a.syncCommandPopup()
+}
+
+func (a *App) handleKey(ev inline.KeyEvent) {
+	if a.overlay != nil {
+		if a.overlay.HandleKey(ev) {
+			a.closeOverlay()
+		}
+		return
+	}
+
+	if a.popup != nil {
+		if a.handlePopupKey(ev) {
+			return
+		}
+	}
+
+	switch ev.Key {
+	case inline.KeyEsc:
+		if a.isStreaming() {
+			a.cancelStream()
+			return
+		}
+		a.editor.SetText("")
+		a.clearPendingContent()
+		a.syncCommandPopup()
+		return
+
+	case inline.KeyCtrl:
+		switch ev.Rune {
+		case 'c':
+			if a.isStreaming() {
+				a.cancelStream()
+				return
+			}
+			a.stop()
+			return
+		case 'e':
+			a.verbose = !a.verbose
+			return
+		case 't':
+			a.showTranscript()
+			return
+		case 'y':
+			a.copyLastResponse()
+			return
+		case 'l':
+			a.clearChat()
+			return
+		case 'v':
+			a.pasteFromClipboard()
+			return
+		}
+
+	case inline.KeyTab:
+		if !a.isStreaming() && a.popup == nil {
+			a.toggleMode()
+			return
+		}
+
+	case inline.KeyBacktab:
+		if !a.isStreaming() {
+			a.cycleModel()
+			return
+		}
+
+	case inline.KeyEnter:
+		if a.promptActive || a.askActive {
+			a.answerPrompt()
+			return
+		}
+		a.submitInput()
+		return
+
+	case inline.KeyUp:
+		if a.editor.HandleKey(ev) {
+			return
+		}
+		a.editor.HistoryPrev()
+		return
+
+	case inline.KeyDown:
+		if a.editor.HandleKey(ev) {
+			return
+		}
+		a.editor.HistoryNext()
+		return
+	}
+
+	if a.promptActive {
+		a.handlePromptKey(ev)
+		return
+	}
+
+	if ev.Key == inline.KeyRune && ev.Rune == '@' && !ev.Alt && a.popup == nil && !a.isStreaming() {
+		a.showFilePicker()
+		return
+	}
+
+	if a.editor.HandleKey(ev) {
+		a.syncCommandPopup()
+	}
+}
+
+// handlePopupKey routes keys to the active popup; returns true when consumed.
+func (a *App) handlePopupKey(ev inline.KeyEvent) bool {
+	popup := a.popup
+
+	if popup.kind == popupCommands {
+		switch ev.Key {
+		case inline.KeyTab:
+			if item, ok := popup.Current(); ok {
+				a.editor.SetText(item.ID)
+				a.syncCommandPopup()
+			}
 			return true
-		},
+		case inline.KeyEnter:
+			if item, ok := popup.Current(); ok && a.editor.Text() != item.ID && !strings.HasPrefix(a.editor.Text(), item.ID+" ") {
+				a.editor.SetText(item.ID)
+			}
+			a.closePopup()
+			a.submitInput()
+			return true
+		case inline.KeyEsc:
+			a.closePopup()
+			return true
+		case inline.KeyUp, inline.KeyDown, inline.KeyPgUp, inline.KeyPgDn:
+			consumed, _ := popup.HandleKey(ev)
+			return consumed
+		}
+		return false
 	}
 
-	return a.app.SetRoot(root, true).EnableMouse(a.mouseEnabled).EnablePaste(true).Run()
+	consumed, closed := popup.HandleKey(ev)
+	if closed {
+		a.closePopup()
+	}
+	return consumed
+}
+
+func (a *App) closePopup() {
+	a.popup = nil
+}
+
+func (a *App) answerPrompt() {
+	if a.askActive {
+		text := strings.TrimSpace(a.editor.Text())
+		if text == "" {
+			return
+		}
+		a.editor.SetText("")
+		a.flushCells(cellUser(text, a.width()))
+		a.setPhase(PhaseThinking)
+		a.askResponse <- text
+	}
+}
+
+func (a *App) handlePromptKey(ev inline.KeyEvent) {
+	if ev.Key != inline.KeyRune {
+		return
+	}
+
+	switch ev.Rune {
+	case 'y', 'Y':
+		a.flushCells(cellUser("Yes", a.width()))
+		a.setPhase(PhaseThinking)
+		a.promptResponse <- true
+
+	case 'n', 'N':
+		a.flushCells(cellUser("No", a.width()))
+		a.setPhase(PhaseThinking)
+		a.promptResponse <- false
+
+	case 'a', 'A':
+		a.confirmAll.Store(true)
+		a.flushCells(cellUser("Always", a.width()))
+		a.flushCells(cellNotice("Auto-approving commands for this session", theme.Default.BrBlack, a.width()))
+		a.setPhase(PhaseThinking)
+		a.promptResponse <- true
+	}
+}
+
+func (a *App) cancelStream() {
+	a.turns.CancelAll(a.sessionID)
+
+	if a.askActive {
+		a.editor.SetText("")
+
+		select {
+		case a.askResponse <- "":
+		default:
+		}
+	}
+
+	if a.promptActive {
+		select {
+		case a.promptResponse <- false:
+		default:
+		}
+	}
+}
+
+func (a *App) clearPendingContent() {
+	a.pendingContent = nil
+	a.pendingFiles = nil
+}
+
+func (a *App) countPendingImages() int {
+	count := 0
+
+	for _, c := range a.pendingContent {
+		if c.File != nil {
+			count++
+		}
+	}
+
+	return count
+}
+
+func (a *App) clearChat() {
+	previousID := a.sessionID
+	id, err := a.agent.NewSession(a.ctx)
+	if err != nil {
+		a.flushCells(cellNotice(fmt.Sprintf("Could not create session: %v", err), theme.Default.Red, a.width()))
+		return
+	}
+	a.turns.CancelAll(previousID)
+	a.activateSession(id)
+	a.clearPendingContent()
+	a.inputTokens = 0
+	a.cachedTokens = 0
+	a.outputTokens = 0
+	a.lastInputTokens = 0
+	a.flushCells(cellTurnSeparator("", 0, 0, a.width()))
+	a.invalidate()
+}
+
+func (a *App) resumeSession() {
+	t := theme.Default
+
+	sessions, err := a.agent.ListSessions(a.ctx)
+	if err != nil || len(sessions) == 0 {
+		a.flushCells(cellNotice("No sessions to resume", t.Yellow, a.width()))
+		return
+	}
+
+	last := sessions[0]
+	if err := a.agent.LoadSession(a.ctx, last.ID); err != nil {
+		a.flushCells(cellNotice(fmt.Sprintf("Failed to load session: %v", err), t.Red, a.width()))
+		return
+	}
+
+	a.turns.CancelAll(a.sessionID)
+	a.activateSession(last.ID)
+	a.clearPendingContent()
+
+	usage := a.agent.Usage(a.sessionID)
+	a.inputTokens = usage.InputTokens
+	a.cachedTokens = usage.CachedTokens
+	a.outputTokens = usage.OutputTokens
+	a.lastInputTokens = usage.LastInputTokens
+
+	a.showWelcome = false
+	a.syncMessages()
+	a.flushCells(cellNotice(fmt.Sprintf("Resumed session from %s", last.UpdatedAt.Format("Jan 2 15:04")), t.Green, a.width()))
+}
+
+func (a *App) copyTextToClipboard(text string) {
+	go func() {
+		err := clipboard.WriteText(text)
+
+		a.post(func() {
+			message := "Copied to clipboard"
+			color := theme.Default.BrBlack
+
+			if err != nil {
+				message = fmt.Sprintf("Clipboard copy failed: %v", err)
+				color = theme.Default.Red
+			}
+
+			a.flushCells(cellNotice(message, color, a.width()))
+		})
+	}()
+}
+
+func (a *App) copyLastResponse() {
+	messages := a.agent.Messages(a.sessionID)
+
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == agent.RoleAssistant {
+			for _, c := range messages[i].Content {
+				if c.Text != "" {
+					a.copyTextToClipboard(c.Text)
+
+					return
+				}
+			}
+		}
+	}
+}
+
+func (a *App) pasteFromClipboard() {
+	go func() {
+		contents, err := clipboard.Read()
+
+		if err != nil || len(contents) == 0 {
+			return
+		}
+
+		a.post(func() {
+			for _, c := range contents {
+				if c.Image != nil {
+					a.pendingContent = append(a.pendingContent, agent.Content{File: &agent.File{Data: *c.Image}})
+				}
+
+				if c.Text != "" {
+					paths := detectFilePaths(c.Text, a.agent.Workspace().RootPath)
+					if len(paths) > 0 {
+						for _, p := range paths {
+							a.addFileToContext(normalizeFilePath(p, a.agent.Workspace().RootPath))
+						}
+
+						continue
+					}
+
+					a.editor.Insert(c.Text)
+					a.syncCommandPopup()
+				}
+			}
+
+			a.invalidate()
+		})
+	}()
+}
+
+func (a *App) showError(title string, err error) {
+	a.flushCells(cellError(title, err.Error(), a.width()))
+}
+
+func (a *App) isToolHidden(name string) bool {
+	for _, t := range a.agent.Tools(a.sessionID) {
+		if t.Name == name {
+			return t.Hidden
+		}
+	}
+
+	return false
 }
 
 func (a *App) toggleMode() {
@@ -269,29 +715,32 @@ func (a *App) toggleMode() {
 	a.exitPlanMode()
 }
 
-func (a *App) hasActiveModal() bool {
-	return a.activeModal != ModalNone
-}
-
-func (a *App) closeActiveModal() {
-	switch a.activeModal {
-	case ModalPicker:
-		a.closePicker()
-	case ModalFilePicker:
-		a.closeFilePicker()
-	case ModalDiff:
-		a.closeDiffView()
-	case ModalDiagnostics:
-		a.closeDiagnosticsView()
-	}
-}
-
-func (a *App) isToolHidden(name string) bool {
-	for _, t := range a.agent.Tools(a.sessionID) {
-		if t.Name == name {
-			return t.Hidden
-		}
+func (a *App) enterPlanMode() {
+	if a.currentMode == ModePlan {
+		return
 	}
 
-	return false
+	_ = a.agent.SetMode(a.ctx, a.sessionID, "plan")
+	a.currentMode = ModePlan
+}
+
+func (a *App) exitPlanMode() {
+	if a.currentMode == ModeAgent {
+		return
+	}
+
+	_ = a.agent.SetMode(a.ctx, a.sessionID, "agent")
+	a.currentMode = ModeAgent
+}
+
+func formatTokens(n int64) string {
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+
+	if n >= 1_000 {
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	}
+
+	return fmt.Sprintf("%d", n)
 }

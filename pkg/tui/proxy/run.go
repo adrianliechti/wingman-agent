@@ -53,8 +53,8 @@ func Run(ctx context.Context, opts Options) error {
 
 	go func() {
 		if err := <-errCh; err != nil {
-			ui.app.QueueUpdateDraw(func() {
-				ui.statusBar.SetText(fmt.Sprintf("[red]Server error: %v[-]", err))
+			ui.post(func() {
+				ui.statusText = fmt.Sprintf("Server error: %v", err)
 			})
 		}
 	}()

@@ -6,11 +6,57 @@ import (
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
-	"github.com/alecthomas/chroma/v2/styles"
-	"github.com/rivo/tview"
 
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
+
+var (
+	chromaStyle      *chroma.Style
+	chromaStyleLight bool
+)
+
+// codeStyle builds a chroma style from the active theme palette so code
+// blocks match the rest of the UI.
+func codeStyle() *chroma.Style {
+	t := theme.Default
+
+	if chromaStyle != nil && chromaStyleLight == t.IsLight {
+		return chromaStyle
+	}
+
+	hex := func(c interface{ Hex() int32 }) string {
+		return fmt.Sprintf("#%06x", c.Hex())
+	}
+
+	builder := chroma.NewStyleBuilder("wingman")
+	builder.Add(chroma.Comment, "italic "+hex(t.BrBlack))
+	builder.Add(chroma.Keyword, hex(t.Blue))
+	builder.Add(chroma.KeywordType, hex(t.Cyan))
+	builder.Add(chroma.Operator, hex(t.Foreground))
+	builder.Add(chroma.Punctuation, hex(t.Foreground))
+	builder.Add(chroma.Name, hex(t.Foreground))
+	builder.Add(chroma.NameFunction, hex(t.Cyan))
+	builder.Add(chroma.NameClass, hex(t.Yellow))
+	builder.Add(chroma.NameBuiltin, hex(t.Cyan))
+	builder.Add(chroma.NameTag, hex(t.Blue))
+	builder.Add(chroma.NameAttribute, hex(t.Cyan))
+	builder.Add(chroma.NameDecorator, hex(t.Magenta))
+	builder.Add(chroma.LiteralString, hex(t.Green))
+	builder.Add(chroma.LiteralNumber, hex(t.Magenta))
+	builder.Add(chroma.GenericDeleted, hex(t.Red))
+	builder.Add(chroma.GenericInserted, hex(t.Green))
+
+	style, err := builder.Build()
+	if err != nil {
+		return nil
+	}
+
+	chromaStyle = style
+	chromaStyleLight = t.IsLight
+
+	return style
+}
 
 func highlightCode(code, lang string) string {
 	lexer := lexers.Get(lang)
@@ -21,32 +67,39 @@ func highlightCode(code, lang string) string {
 
 	lexer = chroma.Coalesce(lexer)
 
-	styleName := "github-dark"
-
-	if theme.Default.IsLight {
-		styleName = "github"
-	}
-
-	style := styles.Get(styleName)
+	style := codeStyle()
 
 	if style == nil {
-		return tview.Escape(code)
+		return sanitize(code)
 	}
 
 	iterator, err := lexer.Tokenise(nil, code)
 
 	if err != nil {
-		return tview.Escape(code)
+		return sanitize(code)
 	}
 
 	var result strings.Builder
 
 	for _, token := range iterator.Tokens() {
 		entry := style.Get(token.Type)
-		text := tview.Escape(token.Value)
+		text := sanitize(token.Value)
 
+		var sgr strings.Builder
 		if entry.Colour.IsSet() {
-			fmt.Fprintf(&result, "[%s]%s[-]", entry.Colour.String(), text)
+			sgr.WriteString(ansi.Fg(hexColor(entry.Colour.String())))
+		}
+		if entry.Italic == chroma.Yes {
+			sgr.WriteString(ansi.Italic)
+		}
+		if entry.Bold == chroma.Yes {
+			sgr.WriteString(ansi.Bold)
+		}
+
+		if sgr.Len() > 0 {
+			result.WriteString(sgr.String())
+			result.WriteString(text)
+			result.WriteString(ansi.Reset)
 		} else {
 			result.WriteString(text)
 		}
@@ -59,16 +112,18 @@ func formatCodeBlock(code, lang string, t theme.Theme) string {
 	highlighted := highlightCode(code, lang)
 	lines := strings.Split(strings.TrimSuffix(highlighted, "\n"), "\n")
 
+	dim := ansi.Fg(t.BrBlack)
+
 	var result strings.Builder
 
 	result.WriteString("\n")
 
 	if lang != "" {
-		fmt.Fprintf(&result, "  [%s]%s[-]\n", t.BrBlack, tview.Escape(lang))
+		fmt.Fprintf(&result, "  %s%s%s\n", dim, sanitize(lang), ansi.Reset)
 	}
 
 	for i, line := range lines {
-		fmt.Fprintf(&result, "  [%s]%3d[%s]│[-] %s\n", t.BrBlack, i+1, t.BrBlack, line)
+		fmt.Fprintf(&result, "  %s%3d│%s %s\n", dim, i+1, ansi.Reset, line)
 	}
 
 	return result.String()
@@ -76,31 +131,32 @@ func formatCodeBlock(code, lang string, t theme.Theme) string {
 
 func HighlightDiff(diff string) string {
 	t := theme.Default
+	dim := ansi.Fg(t.BrBlack)
 	lines := strings.Split(diff, "\n")
 
 	var result strings.Builder
 
 	for i, line := range lines {
-		lineNum := fmt.Sprintf("[%s]%3d[-] ", t.BrBlack, i+1)
+		lineNum := fmt.Sprintf("%s%3d%s ", dim, i+1, ansi.Reset)
 
 		if len(line) == 0 {
 			result.WriteString(lineNum + "\n")
 			continue
 		}
 
-		escaped := tview.Escape(line)
+		escaped := sanitize(line)
 
 		switch {
 		case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
-			fmt.Fprintf(&result, "%s[%s::b]%s[-::-]\n", lineNum, t.Foreground, escaped)
+			fmt.Fprintf(&result, "%s%s%s%s\n", lineNum, ansi.Bold, escaped, ansi.Reset)
 		case strings.HasPrefix(line, "@@"):
-			fmt.Fprintf(&result, "%s[%s]%s[-]\n", lineNum, t.Cyan, escaped)
+			fmt.Fprintf(&result, "%s%s%s%s\n", lineNum, ansi.Fg(t.Cyan), escaped, ansi.Reset)
 		case strings.HasPrefix(line, "+"):
-			fmt.Fprintf(&result, "%s[%s]%s[-]\n", lineNum, t.Green, escaped)
+			fmt.Fprintf(&result, "%s%s%s%s\n", lineNum, ansi.Fg(t.Green), escaped, ansi.Reset)
 		case strings.HasPrefix(line, "-"):
-			fmt.Fprintf(&result, "%s[%s]%s[-]\n", lineNum, t.Red, escaped)
+			fmt.Fprintf(&result, "%s%s%s%s\n", lineNum, ansi.Fg(t.Red), escaped, ansi.Reset)
 		case strings.HasPrefix(line, "diff "), strings.HasPrefix(line, "index "):
-			fmt.Fprintf(&result, "%s[%s]%s[-]\n", lineNum, t.BrBlack, escaped)
+			fmt.Fprintf(&result, "%s%s%s%s\n", lineNum, dim, escaped, ansi.Reset)
 		default:
 			fmt.Fprintf(&result, "%s%s\n", lineNum, escaped)
 		}

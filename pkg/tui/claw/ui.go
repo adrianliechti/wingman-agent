@@ -1,134 +1,279 @@
 package claw
 
 import (
-	"fmt"
+	"strings"
 
-	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
-
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
-func (t *TUI) buildUI() {
-	th := theme.Default
-	t.app = tview.NewApplication()
+const (
+	indent       = "  "
+	sidebarWidth = 24
+)
 
-	t.agentList = tview.NewList()
-	t.agentList.SetBorder(false)
-	t.agentList.SetHighlightFullLine(true)
-	t.agentList.ShowSecondaryText(false)
-	t.agentList.SetMainTextColor(th.Foreground)
-	t.agentList.SetSelectedTextColor(th.Cyan)
-	t.agentList.SetSelectedBackgroundColor(th.Selection)
-	t.agentList.SetSelectedFunc(func(index int, _ string, _ string, _ rune) {
-		if name := t.agentAt(index); name != "" {
-			t.selectAgent(name)
+func dim(text string) string {
+	return ansi.Fg(theme.Default.BrBlack) + text + ansi.Reset
+}
+
+func (t *TUI) chatWidth() int {
+	w, _ := t.term.Size()
+	cw := w - sidebarWidth - 1 - len(indent)
+	if cw < 40 {
+		return 40
+	}
+	return cw
+}
+
+func (t *TUI) handleKey(ev inline.KeyEvent) bool {
+	switch ev.Key {
+	case inline.KeyCtrl:
+		if ev.Rune == 'c' {
+			return true
 		}
 
-		t.app.SetFocus(t.input)
-	})
+	case inline.KeyTab:
+		if t.focus == focusInput {
+			t.focus = focusAgents
+		} else {
+			t.focus = focusInput
+		}
+		return false
 
-	t.taskView = tview.NewTextView()
-	t.taskView.SetBorder(false)
-	t.taskView.SetDynamicColors(true)
-	t.taskView.SetWordWrap(true)
-
-	t.chatView = tview.NewTextView()
-	t.chatView.SetBorder(false)
-	t.chatView.SetDynamicColors(true)
-	t.chatView.SetWordWrap(false)
-	t.chatView.SetScrollable(true)
-	t.chatView.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		if width != t.chatWidth {
-			t.chatWidth = width
-
-			if !t.isBusy(t.selected()) {
-				go t.app.QueueUpdateDraw(func() {
-					t.rerenderChat(t.selected())
-				})
+	case inline.KeyUp:
+		if t.focus == focusAgents {
+			if t.agentIndex > 0 {
+				t.agentIndex--
 			}
 		}
+		return false
 
-		return x, y, width, height
-	})
-	t.chatView.SetChangedFunc(func() {
-		t.app.Draw()
-	})
-
-	t.input = tview.NewInputField()
-	t.input.SetLabel("  \u276f ")
-	t.input.SetLabelColor(th.Cyan)
-	t.input.SetFieldBackgroundColor(th.Selection)
-	t.input.SetFieldTextColor(th.Foreground)
-	t.input.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEnter {
-			t.submitInput()
+	case inline.KeyDown:
+		if t.focus == focusAgents {
+			if t.agentIndex < len(t.agentNames)-1 {
+				t.agentIndex++
+			}
 		}
-	})
+		return false
 
-	t.statusBar = tview.NewTextView()
-	t.statusBar.SetDynamicColors(true)
-	t.statusBar.SetTextAlign(tview.AlignRight)
-
-	sidebarTitle := tview.NewTextView()
-	sidebarTitle.SetDynamicColors(true)
-	sidebarTitle.SetText(fmt.Sprintf("\n  [%s::b]Agents[-::-]\n", th.Cyan))
-
-	taskTitle := tview.NewTextView()
-	taskTitle.SetDynamicColors(true)
-	taskTitle.SetText(fmt.Sprintf("\n  [%s::b]Tasks[-::-]\n", th.Yellow))
-
-	sidebar := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(sidebarTitle, 3, 0, false).
-		AddItem(t.agentList, 0, 1, true)
-
-	vSep := tview.NewBox().SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		for row := y; row < y+height; row++ {
-			screen.SetContent(x, row, '\u2502', nil, tcell.StyleDefault.Foreground(th.BrBlack))
+	case inline.KeyPgUp:
+		t.follow = false
+		t.chatScroll -= 10
+		if t.chatScroll < 0 {
+			t.chatScroll = 0
 		}
-		return x + 1, y, width - 1, height
-	})
+		return false
 
-	hSep := tview.NewBox().SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		for col := x; col < x+width; col++ {
-			screen.SetContent(col, y, '\u2500', nil, tcell.StyleDefault.Foreground(th.BrBlack))
+	case inline.KeyPgDn:
+		t.chatScroll += 10
+		if t.chatScroll >= len(t.chatLines) {
+			t.chatScroll = len(t.chatLines)
+			t.follow = true
 		}
-		return x, y + 1, width, height - 1
-	})
+		return false
 
-	bottom := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(t.input, 1, 0, false).
-		AddItem(t.statusBar, 1, 0, false)
-
-	taskPanel := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(taskTitle, 3, 0, false).
-		AddItem(t.taskView, 0, 1, false)
-
-	rightSide := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(taskPanel, 0, 1, false).
-		AddItem(hSep, 1, 0, false).
-		AddItem(t.chatView, 0, 2, false).
-		AddItem(bottom, 2, 0, false)
-
-	root := tview.NewFlex().SetDirection(tview.FlexColumn).
-		AddItem(sidebar, 24, 0, true).
-		AddItem(vSep, 1, 0, false).
-		AddItem(rightSide, 0, 1, false)
-
-	t.app.SetRoot(root, true)
-	t.app.SetFocus(t.input)
-	t.app.EnableMouse(true)
-
-	t.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
-		case tcell.KeyTab:
-			t.cycleFocus()
-			return nil
-		case tcell.KeyCtrlC:
-			t.app.Stop()
-			return nil
+	case inline.KeyEnter:
+		if t.focus == focusAgents {
+			if t.agentIndex >= 0 && t.agentIndex < len(t.agentNames) {
+				t.selectAgent(t.agentNames[t.agentIndex])
+			}
+			t.focus = focusInput
+			return false
 		}
+		t.submitInput()
+		return false
 
-		return event
-	})
+	case inline.KeyBackspace:
+		if t.focus == focusInput && t.inputCursor > 0 {
+			t.input = append(t.input[:t.inputCursor-1], t.input[t.inputCursor:]...)
+			t.inputCursor--
+		}
+		return false
+
+	case inline.KeyDelete:
+		if t.focus == focusInput && t.inputCursor < len(t.input) {
+			t.input = append(t.input[:t.inputCursor], t.input[t.inputCursor+1:]...)
+		}
+		return false
+
+	case inline.KeyLeft:
+		if t.focus == focusInput && t.inputCursor > 0 {
+			t.inputCursor--
+		}
+		return false
+
+	case inline.KeyRight:
+		if t.focus == focusInput && t.inputCursor < len(t.input) {
+			t.inputCursor++
+		}
+		return false
+
+	case inline.KeyHome:
+		t.inputCursor = 0
+		return false
+
+	case inline.KeyEnd:
+		t.inputCursor = len(t.input)
+		return false
+
+	case inline.KeyRune:
+		if t.focus == focusInput && !ev.Alt {
+			t.input = append(t.input[:t.inputCursor], append([]rune{ev.Rune}, t.input[t.inputCursor:]...)...)
+			t.inputCursor++
+		}
+		return false
+	}
+
+	return false
+}
+
+func (t *TUI) insertInput(text string) {
+	runes := []rune(text)
+	t.input = append(t.input[:t.inputCursor], append(runes, t.input[t.inputCursor:]...)...)
+	t.inputCursor += len(runes)
+}
+
+// render composes the full-screen dashboard frame.
+func (t *TUI) render() {
+	th := theme.Default
+	width, height := t.term.Size()
+	if width <= 0 || height <= 0 {
+		return
+	}
+
+	sep := ansi.Fg(th.BrBlack) + "│" + ansi.Reset
+
+	taskRows := len(t.taskLines) + 2
+	if max := height / 3; taskRows > max {
+		taskRows = max
+	}
+	if taskRows < 3 {
+		taskRows = 3
+	}
+
+	chatRows := height - taskRows - 1 - 2
+	if chatRows < 3 {
+		chatRows = 3
+	}
+
+	// Left column: agents list.
+	left := make([]string, height)
+	left[0] = ""
+	left[1] = indent + ansi.Fg(th.Cyan) + ansi.Bold + "Agents" + ansi.Reset
+	left[2] = ""
+
+	for i, name := range t.agentNames {
+		row := 3 + i
+		if row >= height {
+			break
+		}
+		label := name
+		if t.isBusy(name) {
+			label += " " + ansi.Fg(th.Yellow) + "…" + ansi.Reset
+		}
+		switch {
+		case i == t.agentIndex && t.focus == focusAgents:
+			left[row] = indent + ansi.Fg(th.Cyan) + "→ " + label + ansi.Reset
+		case name == t.selected():
+			left[row] = indent + ansi.Fg(th.Cyan) + "● " + ansi.Reset + label
+		default:
+			left[row] = indent + "  " + label
+		}
+	}
+
+	// Right column: tasks, rule, chat, input, status.
+	var right []string
+
+	right = append(right, "")
+	right = append(right, indent+ansi.Fg(th.Yellow)+ansi.Bold+"Tasks"+ansi.Reset)
+	right = append(right, "")
+
+	taskBudget := taskRows - 3
+	for i := 0; i < taskBudget && i < len(t.taskLines); i++ {
+		right = append(right, t.taskLines[i])
+	}
+	for len(right) < taskRows {
+		right = append(right, "")
+	}
+
+	rightWidth := width - sidebarWidth - 1
+	right = append(right, ansi.Fg(th.BrBlack)+strings.Repeat("─", max(1, rightWidth))+ansi.Reset)
+
+	start := t.chatScroll - chatRows
+	if start > len(t.chatLines)-chatRows {
+		start = len(t.chatLines) - chatRows
+	}
+	if start < 0 {
+		start = 0
+	}
+	for i := 0; i < chatRows; i++ {
+		if start+i < len(t.chatLines) {
+			right = append(right, t.chatLines[start+i])
+		} else {
+			right = append(right, "")
+		}
+	}
+
+	inputText := string(t.input)
+	if t.focus == focusInput {
+		runes := t.input
+		before := string(runes[:t.inputCursor])
+		at := " "
+		after := ""
+		if t.inputCursor < len(runes) {
+			at = string(runes[t.inputCursor])
+			after = string(runes[t.inputCursor+1:])
+		}
+		inputText = before + ansi.Reverse + at + ansi.Reset + after
+	}
+	right = append(right, indent+ansi.Fg(th.Cyan)+"❯ "+ansi.Reset+inputText)
+	right = append(right, t.statusLine(rightWidth))
+
+	// Merge columns.
+	frame := make([]string, height)
+	for i := 0; i < height; i++ {
+		l := ""
+		if i < len(left) {
+			l = left[i]
+		}
+		r := ""
+		if i < len(right) {
+			r = right[i]
+		}
+		frame[i] = ansi.Pad(l, sidebarWidth) + sep + ansi.Truncate(r, rightWidth, "…")
+	}
+
+	t.term.RenderAlt(frame)
+}
+
+func (t *TUI) statusLine(width int) string {
+	th := theme.Default
+	name := t.selected()
+	_, usage, ok := t.claw.AgentState(name)
+
+	var parts []string
+
+	if t.isBusy(name) {
+		parts = append(parts, ansi.Fg(th.Yellow)+"working…"+ansi.Reset)
+	}
+
+	if ok {
+		tokens := "↑" + formatTokens(usage.InputTokens)
+		if usage.CachedTokens > 0 {
+			tokens += " (" + formatTokens(usage.CachedTokens) + " cached)"
+		}
+		tokens += " ↓" + formatTokens(usage.OutputTokens)
+		parts = append(parts, dim(tokens))
+	}
+
+	parts = append(parts, ansi.Fg(th.Cyan)+name+ansi.Reset)
+
+	text := strings.Join(parts, dim(" · "))
+	gap := width - ansi.Width(text) - 2
+	if gap < 0 {
+		gap = 0
+	}
+
+	return strings.Repeat(" ", gap) + text
 }

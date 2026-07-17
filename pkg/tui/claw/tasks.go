@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/claw/tool/schedule"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
@@ -15,26 +16,26 @@ func (t *TUI) refreshTasks() {
 	agentDir := t.claw.AgentDir(name)
 	tasks, _ := schedule.List(agentDir)
 
-	t.taskView.Clear()
+	t.taskLines = nil
 	now := time.Now()
 
 	if len(tasks) == 0 {
-		fmt.Fprintf(t.taskView, "  [%s]no tasks[-]", th.BrBlack)
+		t.taskLines = append(t.taskLines, indent+dim("no tasks"))
 		return
 	}
 
 	for _, task := range tasks {
-		icon := "[green]\u25cf[-]"
+		icon := ansi.Fg(th.Green) + "●" + ansi.Reset
 		if task.Failures > 0 {
-			icon = fmt.Sprintf("[%s]\u25cf[-]", th.Red)
+			icon = ansi.Fg(th.Red) + "●" + ansi.Reset
 		}
 		if task.Status == "paused" {
-			icon = fmt.Sprintf("[%s]\u25cb[-]", th.BrBlack)
+			icon = ansi.Fg(th.BrBlack) + "○" + ansi.Reset
 		}
 
 		failStr := ""
 		if task.Failures > 0 {
-			failStr = fmt.Sprintf(" [%s]failing x%d[-]", th.Red, task.Failures)
+			failStr = " " + ansi.Fg(th.Red) + fmt.Sprintf("failing x%d", task.Failures) + ansi.Reset
 		}
 
 		next := schedule.NextRun(task, now)
@@ -43,11 +44,11 @@ func (t *TUI) refreshTasks() {
 		if !next.IsZero() {
 			dur := next.Sub(now)
 			if dur < 0 {
-				nextStr = fmt.Sprintf(" [%s]overdue[-]", th.Red)
+				nextStr = " " + ansi.Fg(th.Red) + "overdue" + ansi.Reset
 			} else if dur < time.Hour {
-				nextStr = fmt.Sprintf(" [%s]%dm[-]", th.Green, int(dur.Minutes())+1)
+				nextStr = " " + ansi.Fg(th.Green) + fmt.Sprintf("%dm", int(dur.Minutes())+1) + ansi.Reset
 			} else {
-				nextStr = fmt.Sprintf(" [%s]%s[-]", th.BrBlack, next.Format("15:04"))
+				nextStr = " " + dim(next.Format("15:04"))
 			}
 		}
 
@@ -56,7 +57,8 @@ func (t *TUI) refreshTasks() {
 			prompt = prompt[:77] + "..."
 		}
 
-		fmt.Fprintf(t.taskView, "  %s [%s]%s[-]%s%s  [%s]%s[-]\n", icon, th.Foreground, humanSchedule(task.Schedule), nextStr, failStr, th.BrBlack, prompt)
+		t.taskLines = append(t.taskLines, fmt.Sprintf("%s%s %s%s%s  %s",
+			indent, icon, humanSchedule(task.Schedule), nextStr, failStr, dim(prompt)))
 	}
 }
 

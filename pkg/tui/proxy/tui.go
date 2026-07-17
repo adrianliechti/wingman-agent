@@ -2,19 +2,18 @@ package proxy
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/proxy"
-	"github.com/adrianliechti/wingman-agent/pkg/tui"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
-	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 )
 
 const (
@@ -24,307 +23,261 @@ const (
 )
 
 type App struct {
-	app   *tview.Application
-	pages *tview.Pages
-	p     *proxy.Proxy
+	p    *proxy.Proxy
+	term *inline.Terminal
 
-	statusBar *tview.TextView
-	table     *tview.Table
-	detail    *tview.TextView
-	startView *tview.TextView
+	queue chan func()
+	quit  chan struct{}
+	once  sync.Once
 
-	selectedID string
 	activePage string
+	selected   int
+	selectedID string
 
+	detailLines  []string
+	detailScroll int
+
+	statusText   string
 	seenRequests int
-
-	runCtx    context.Context
-	runCancel context.CancelFunc
 }
 
 func newApp(p *proxy.Proxy) *App {
-	ctx, cancel := context.WithCancel(context.Background())
-	a := &App{
-		app:        tview.NewApplication(),
+	return &App{
 		p:          p,
+		term:       inline.NewTerminal(),
+		queue:      make(chan func(), 16),
+		quit:       make(chan struct{}),
 		activePage: pageStart,
-		runCtx:     ctx,
-		runCancel:  cancel,
 	}
-
-	a.build()
-	return a
 }
 
-func (a *App) build() {
-	th := theme.Default
-
-	a.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
-		screen.Clear()
-		return false
-	})
-
-	a.statusBar = tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
-	a.statusBar.SetBackgroundColor(tcell.ColorDefault)
-	a.updateStatusBar()
-
-	a.startView = tview.NewTextView().
-		SetDynamicColors(true).
-		SetWordWrap(true)
-	a.startView.SetBackgroundColor(tcell.ColorDefault)
-	a.startView.SetText(a.startPageContent())
-
-	a.table = tview.NewTable().
-		SetSelectable(true, false).
-		SetFixed(1, 0)
-	a.table.SetBackgroundColor(tcell.ColorDefault)
-	a.table.SetSelectedStyle(tcell.StyleDefault.
-		Background(th.Selection).
-		Foreground(th.Foreground))
-	a.renderTable()
-
-	a.detail = tview.NewTextView().
-		SetDynamicColors(true).
-		SetWordWrap(true).
-		SetScrollable(true)
-	a.detail.SetBackgroundColor(tcell.ColorDefault)
-
-	a.pages = tview.NewPages()
-	a.pages.SetBackgroundColor(tcell.ColorDefault)
-
-	startLayout := tview.NewFlex().SetDirection(tview.FlexRow)
-	startLayout.SetBackgroundColor(tcell.ColorDefault)
-	startLayout.AddItem(a.startView, 0, 1, true)
-
-	listLayout := tview.NewFlex().SetDirection(tview.FlexRow)
-	listLayout.SetBackgroundColor(tcell.ColorDefault)
-	listLayout.AddItem(a.table, 0, 1, true)
-	listLayout.AddItem(a.statusBar, 1, 0, false)
-
-	detailLayout := tview.NewFlex().SetDirection(tview.FlexRow)
-	detailLayout.SetBackgroundColor(tcell.ColorDefault)
-	detailLayout.AddItem(a.detail, 0, 1, true)
-	detailLayout.AddItem(a.statusBar, 1, 0, false)
-
-	a.pages.AddPage(pageStart, startLayout, true, true)
-	a.pages.AddPage(pageList, listLayout, true, false)
-	a.pages.AddPage(pageDetail, detailLayout, true, false)
-
-	a.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch a.activePage {
-		case pageStart:
-			switch event.Key() {
-			case tcell.KeyEnter:
-				a.switchTo(pageList)
-				return nil
-			case tcell.KeyEscape, tcell.KeyCtrlC:
-				a.app.Stop()
-				return nil
-			case tcell.KeyRune:
-				if event.Rune() == 'l' || event.Rune() == 'q' {
-					if event.Rune() == 'q' {
-						a.app.Stop()
-						return nil
-					}
-					a.switchTo(pageList)
-					return nil
-				}
-			}
-
-		case pageList:
-			switch event.Key() {
-			case tcell.KeyEnter:
-				row, _ := a.table.GetSelection()
-				if row > 0 {
-					entries := a.p.Store.List()
-					idx := len(entries) - row
-					if idx >= 0 && idx < len(entries) {
-						a.selectedID = entries[idx].ID
-						a.renderDetail()
-						a.switchTo(pageDetail)
-					}
-				}
-				return nil
-			case tcell.KeyCtrlC:
-				a.app.Stop()
-				return nil
-			case tcell.KeyRune:
-				if event.Rune() == 'q' {
-					a.app.Stop()
-					return nil
-				}
-				if event.Rune() == 's' {
-					row, _ := a.table.GetSelection()
-					if row > 0 {
-						entries := a.p.Store.List()
-						idx := len(entries) - row
-						if idx >= 0 && idx < len(entries) {
-							a.saveEntry(entries[idx])
-						}
-					}
-					return nil
-				}
-			}
-
-		case pageDetail:
-			switch event.Key() {
-			case tcell.KeyEscape:
-				a.switchTo(pageList)
-				return nil
-			case tcell.KeyCtrlC:
-				a.app.Stop()
-				return nil
-			case tcell.KeyRune:
-				if event.Rune() == 'q' {
-					a.app.Stop()
-					return nil
-				}
-				if event.Rune() == 's' {
-					if entry, ok := a.p.Store.Get(a.selectedID); ok {
-						a.saveEntry(entry)
-					}
-					return nil
-				}
-				if event.Rune() == ' ' {
-					row, col := a.detail.GetScrollOffset()
-					_, _, _, height := a.detail.GetInnerRect()
-					a.detail.ScrollTo(row+height, col)
-					return nil
-				}
-			}
-		}
-
-		return event
-	})
-
-	a.app.SetRoot(a.pages, true)
+func (a *App) post(fn func()) {
+	select {
+	case a.queue <- fn:
+	case <-a.quit:
+	}
 }
 
-func (a *App) switchTo(page string) {
-	a.activePage = page
-	a.pages.SwitchToPage(page)
-
-	switch page {
-	case pageStart:
-		a.app.SetFocus(a.startView)
-	case pageList:
-		a.renderTable()
-		a.app.SetFocus(a.table)
-	case pageDetail:
-		a.app.SetFocus(a.detail)
-	}
+func (a *App) stop() {
+	a.once.Do(func() { close(a.quit) })
 }
 
 func (a *App) Run() error {
-	go func() {
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
+	if err := a.term.Start(); err != nil {
+		return err
+	}
+	a.term.EnterAlt()
 
-		for {
-			select {
-			case <-a.runCtx.Done():
-				return
-			case <-ticker.C:
-				a.app.QueueUpdateDraw(func() {
-					entries := a.p.Store.List()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
 
-					if a.activePage == pageStart && len(entries) > 0 && a.seenRequests == 0 {
-						a.seenRequests = len(entries)
-						a.switchTo(pageList)
-					} else {
-						a.seenRequests = len(entries)
-					}
+	a.render()
 
-					if a.activePage == pageList {
-						a.renderTable()
-					}
+	for {
+		select {
+		case <-a.quit:
+			a.term.Stop()
+			return nil
 
-					a.updateStatusBar()
-				})
+		case fn := <-a.queue:
+			fn()
+
+		case <-ticker.C:
+			entries := a.p.Store.List()
+
+			if a.activePage == pageStart && len(entries) > 0 && a.seenRequests == 0 {
+				a.activePage = pageList
+			}
+			a.seenRequests = len(entries)
+
+		case ev := <-a.term.Events():
+			switch ev := ev.(type) {
+			case inline.ResizeEvent:
+				a.term.Resized(ev.Width, ev.Height)
+			case inline.KeyEvent:
+				if a.handleKey(ev) {
+					a.term.Stop()
+					return nil
+				}
 			}
 		}
-	}()
 
-	err := a.app.Run()
-	a.runCancel()
-	return err
-}
-
-func (a *App) startPageContent() string {
-	th := theme.Default
-
-	var b strings.Builder
-
-	fmt.Fprint(&b, strings.ReplaceAll(tui.Logo, "\n", "\n  "))
-	fmt.Fprint(&b, "\n")
-
-	fmt.Fprintf(&b, "  [%s::b]Listening[-::-]  [%s]http://%s[-]\n\n", th.Yellow, th.Foreground, a.p.Addr)
-
-	fmt.Fprintf(&b, "  [%s::b]Usage[-::-]\n", th.Cyan)
-	fmt.Fprintf(&b, "  [%s]Point your OpenAI client to the proxy:[-]\n\n", th.BrBlack)
-	fmt.Fprintf(&b, "  [%s]export OPENAI_BASE_URL=http://%s/v1[-]\n", th.Green, a.p.Addr)
-	fmt.Fprintf(&b, "  [%s]export OPENAI_API_KEY=any-value[-]\n\n", th.Green)
-
-	return b.String()
-}
-
-func (a *App) updateStatusBar() {
-	th := theme.Default
-
-	entries := a.p.Store.List()
-	inputTotal, outputTotal := a.p.Store.TotalTokens()
-
-	var parts []string
-
-	parts = append(parts, fmt.Sprintf("[%s::b] ⇆ %s[-::-]", th.Blue, a.p.Addr))
-	parts = append(parts, fmt.Sprintf("[%s]%d requests[-]", th.Foreground, len(entries)))
-
-	if inputTotal > 0 || outputTotal > 0 {
-		parts = append(parts, fmt.Sprintf("[%s]%s in / %s out[-]",
-			th.Cyan, tui.FormatTokens(int64(inputTotal)), tui.FormatTokens(int64(outputTotal))))
+		a.render()
 	}
-
-	a.statusBar.SetText(strings.Join(parts, fmt.Sprintf(" [%s]•[-] ", th.BrBlack)))
 }
 
-func (a *App) renderTable() {
-	th := theme.Default
+func (a *App) handleKey(ev inline.KeyEvent) bool {
+	_, height := a.term.Size()
+	entries := a.p.Store.List()
 
-	a.table.Clear()
+	quitKey := ev.Key == inline.KeyCtrl && ev.Rune == 'c' ||
+		ev.Key == inline.KeyRune && ev.Rune == 'q'
 
-	headers := []string{"Time", "Method", "Path", "Status", "Duration", "Model", "In", "Out"}
-	for i, h := range headers {
-		cell := tview.NewTableCell(fmt.Sprintf("[%s::b]%s[-::-]", th.BrBlack, h)).
-			SetSelectable(false).
-			SetExpansion(1)
-
-		if i == 2 {
-			cell.SetExpansion(3)
+	switch a.activePage {
+	case pageStart:
+		switch {
+		case quitKey, ev.Key == inline.KeyEsc:
+			return true
+		case ev.Key == inline.KeyEnter, ev.Key == inline.KeyRune && ev.Rune == 'l':
+			a.activePage = pageList
 		}
 
-		a.table.SetCell(0, i, cell)
+	case pageList:
+		switch {
+		case quitKey:
+			return true
+		case ev.Key == inline.KeyUp:
+			if a.selected > 0 {
+				a.selected--
+			}
+		case ev.Key == inline.KeyDown:
+			if a.selected < len(entries)-1 {
+				a.selected++
+			}
+		case ev.Key == inline.KeyEnter:
+			if idx := len(entries) - 1 - a.selected; idx >= 0 && idx < len(entries) {
+				a.selectedID = entries[idx].ID
+				a.renderDetail()
+				a.activePage = pageDetail
+			}
+		case ev.Key == inline.KeyRune && ev.Rune == 's':
+			if idx := len(entries) - 1 - a.selected; idx >= 0 && idx < len(entries) {
+				a.saveEntry(entries[idx])
+			}
+		}
+
+	case pageDetail:
+		switch {
+		case quitKey:
+			return true
+		case ev.Key == inline.KeyEsc:
+			a.activePage = pageList
+		case ev.Key == inline.KeyUp:
+			a.detailScroll--
+		case ev.Key == inline.KeyDown:
+			a.detailScroll++
+		case ev.Key == inline.KeyPgUp:
+			a.detailScroll -= height - 2
+		case ev.Key == inline.KeyPgDn, ev.Key == inline.KeyRune && ev.Rune == ' ':
+			a.detailScroll += height - 2
+		case ev.Key == inline.KeyRune && ev.Rune == 's':
+			if entry, ok := a.p.Store.Get(a.selectedID); ok {
+				a.saveEntry(entry)
+			}
+		}
+
+		if maxScroll := len(a.detailLines) - (height - 2); a.detailScroll > maxScroll {
+			a.detailScroll = maxScroll
+		}
+		if a.detailScroll < 0 {
+			a.detailScroll = 0
+		}
 	}
 
+	return false
+}
+
+func (a *App) render() {
+	width, height := a.term.Size()
+	if width <= 0 || height <= 0 {
+		return
+	}
+
+	var lines []string
+
+	switch a.activePage {
+	case pageStart:
+		lines = a.startLines(width)
+	case pageList:
+		lines = a.listLines(width, height-1)
+		lines = append(lines, a.statusLine(width))
+	case pageDetail:
+		end := a.detailScroll + height - 1
+		if end > len(a.detailLines) {
+			end = len(a.detailLines)
+		}
+		start := a.detailScroll
+		if start > end {
+			start = end
+		}
+		lines = append(lines, a.detailLines[start:end]...)
+		for len(lines) < height-1 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, a.statusLine(width))
+	}
+
+	a.term.RenderAlt(lines)
+}
+
+func (a *App) startLines(width int) []string {
+	th := theme.Default
+
+	var lines []string
+	lines = append(lines, "")
+	lines = append(lines, "  "+ansi.Bold+"wingman proxy"+ansi.Reset)
+	lines = append(lines, "")
+	lines = append(lines, "  "+ansi.Fg(th.Yellow)+ansi.Bold+"Listening"+ansi.Reset+"  http://"+a.p.Addr)
+	lines = append(lines, "")
+	lines = append(lines, "  "+ansi.Fg(th.Cyan)+ansi.Bold+"Usage"+ansi.Reset)
+	lines = append(lines, "  "+dim("Point your OpenAI client to the proxy:"))
+	lines = append(lines, "")
+	lines = append(lines, "  "+ansi.Fg(th.Green)+"export OPENAI_BASE_URL=http://"+a.p.Addr+"/v1"+ansi.Reset)
+	lines = append(lines, "  "+ansi.Fg(th.Green)+"export OPENAI_API_KEY=any-value"+ansi.Reset)
+	lines = append(lines, "")
+	lines = append(lines, "  "+dim("enter/l requests · q quit"))
+
+	return lines
+}
+
+func dim(text string) string {
+	return ansi.Fg(theme.Default.BrBlack) + text + ansi.Reset
+}
+
+func (a *App) listLines(width, height int) []string {
+	th := theme.Default
 	entries := a.p.Store.List()
 
-	for i := len(entries) - 1; i >= 0; i-- {
-		e := entries[i]
-		row := len(entries) - i
+	pathWidth := width - 8 - 7 - 5 - 7 - 22 - 7 - 7 - 9*2
+	if pathWidth < 12 {
+		pathWidth = 12
+	}
+
+	format := func(time_, method, path, status, dur, model, in, out string) string {
+		return "  " + ansi.Pad(time_, 8) + " " + ansi.Pad(method, 6) + " " +
+			ansi.Pad(path, pathWidth) + " " + ansi.Pad(status, 4) + " " +
+			ansi.Pad(dur, 6) + " " + ansi.Pad(model, 20) + " " +
+			ansi.Pad(in, 6) + " " + ansi.Pad(out, 6)
+	}
+
+	lines := []string{
+		"",
+		dim(format("Time", "Method", "Path", "St", "Dur", "Model", "In", "Out")),
+	}
+
+	if a.selected >= len(entries) {
+		a.selected = max(0, len(entries)-1)
+	}
+
+	rows := height - 2
+
+	start := 0
+	if a.selected >= rows {
+		start = a.selected - rows + 1
+	}
+
+	for i := start; i < len(entries) && i < start+rows; i++ {
+		e := entries[len(entries)-1-i]
 
 		statusColor := th.Green
-		if e.Status >= 400 && e.Status < 500 {
-			statusColor = th.Yellow
-		} else if e.Status >= 500 {
-			statusColor = th.Red
-		} else if e.Status == 0 {
-			statusColor = th.Red
-		}
-
 		statusText := fmt.Sprintf("%d", e.Status)
-		if e.Status == 0 {
-			statusText = "ERR"
+		switch {
+		case e.Status == 0:
+			statusColor, statusText = th.Red, "ERR"
+		case e.Status >= 500:
+			statusColor = th.Red
+		case e.Status >= 400:
+			statusColor = th.Yellow
 		}
 
 		dur := fmt.Sprintf("%dms", e.Duration.Milliseconds())
@@ -332,50 +285,68 @@ func (a *App) renderTable() {
 			dur = fmt.Sprintf("%.1fs", e.Duration.Seconds())
 		}
 
-		cells := []struct {
-			text  string
-			color tcell.Color
-		}{
-			{e.Timestamp.Format("15:04:05"), th.BrBlack},
-			{e.Method, th.Magenta},
-			{requestURLPathText(e.URL), th.Foreground},
-			{statusText, statusColor},
-			{dur, th.BrBlack},
-			{e.Model, th.Cyan},
-			{tui.FormatTokens(int64(e.InputTokens)), th.BrBlack},
-			{tui.FormatTokens(int64(e.OutputTokens)), th.BrBlack},
+		row := "  " + dim(ansi.Pad(e.Timestamp.Format("15:04:05"), 8)) + " " +
+			ansi.Fg(th.Magenta) + ansi.Pad(e.Method, 6) + ansi.Reset + " " +
+			ansi.Pad(requestURLPathText(e.URL), pathWidth) + " " +
+			ansi.Fg(statusColor) + ansi.Pad(statusText, 4) + ansi.Reset + " " +
+			dim(ansi.Pad(dur, 6)) + " " +
+			ansi.Fg(th.Cyan) + ansi.Pad(e.Model, 20) + ansi.Reset + " " +
+			dim(ansi.Pad(formatTokens(int64(e.InputTokens)), 6)) + " " +
+			dim(ansi.Pad(formatTokens(int64(e.OutputTokens)), 6))
+
+		if i == a.selected {
+			row = ansi.Bg(th.Selection) + row + ansi.Reset
 		}
 
-		for col, c := range cells {
-			cell := tview.NewTableCell(fmt.Sprintf("[%s]%s[-]", c.color, c.text)).
-				SetExpansion(1)
-
-			if col == 2 {
-				cell.SetExpansion(3)
-			}
-
-			a.table.SetCell(row, col, cell)
-		}
+		lines = append(lines, row)
 	}
 
-	if rowCount := a.table.GetRowCount(); rowCount > 1 {
-		row, _ := a.table.GetSelection()
-		if row < 1 {
-			a.table.Select(1, 0)
-		}
+	return lines
+}
+
+func (a *App) statusLine(width int) string {
+	th := theme.Default
+
+	if a.statusText != "" {
+		return "  " + ansi.Fg(th.Red) + a.statusText + ansi.Reset
 	}
+
+	entries := a.p.Store.List()
+	inputTotal, outputTotal := a.p.Store.TotalTokens()
+
+	parts := []string{
+		ansi.Fg(th.Blue) + ansi.Bold + "⇆ " + a.p.Addr + ansi.Reset,
+		fmt.Sprintf("%d requests", len(entries)),
+	}
+
+	if inputTotal > 0 || outputTotal > 0 {
+		parts = append(parts, ansi.Fg(th.Cyan)+formatTokens(int64(inputTotal))+" in / "+formatTokens(int64(outputTotal))+" out"+ansi.Reset)
+	}
+
+	parts = append(parts, dim("enter detail · s save · q quit"))
+
+	return "  " + strings.Join(parts, dim(" · "))
+}
+
+func formatTokens(n int64) string {
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+	if n >= 1_000 {
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 func (a *App) renderDetail() {
 	th := theme.Default
+	a.detailScroll = 0
 
 	entry, ok := a.p.Store.Get(a.selectedID)
 	if !ok {
-		a.detail.SetText("[red]Request not found[-]")
+		a.detailLines = []string{"", "  " + ansi.Fg(th.Red) + "Request not found" + ansi.Reset}
 		return
 	}
-
-	var b strings.Builder
 
 	statusColor := th.Green
 	if entry.Status >= 400 {
@@ -385,45 +356,55 @@ func (a *App) renderDetail() {
 		statusColor = th.Red
 	}
 
-	fmt.Fprintf(&b, "\n  [%s::b]Request Detail[-::-]\n\n", th.Blue)
+	var lines []string
 
-	fmt.Fprintf(&b, "  [%s]Method[-]    [%s]%s[-]\n", th.BrBlack, th.Magenta, entry.Method)
-	fmt.Fprintf(&b, "  [%s]URL[-]       [%s]%s[-]\n", th.BrBlack, th.Foreground, requestURLText(entry.URL))
-	fmt.Fprintf(&b, "  [%s]Status[-]    [%s]%d[-]\n", th.BrBlack, statusColor, entry.Status)
-	fmt.Fprintf(&b, "  [%s]Duration[-]  [%s]%s[-]\n", th.BrBlack, th.Foreground, entry.Duration.Round(time.Millisecond))
-	fmt.Fprintf(&b, "  [%s]Model[-]     [%s]%s[-]\n", th.BrBlack, th.Cyan, entry.Model)
+	field := func(label string, value string) {
+		lines = append(lines, "  "+dim(ansi.Pad(label, 9))+" "+value)
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, "  "+ansi.Bold+"Request Detail"+ansi.Reset)
+	lines = append(lines, "")
+
+	field("Method", ansi.Fg(th.Magenta)+entry.Method+ansi.Reset)
+	field("URL", requestURLText(entry.URL))
+	field("Status", ansi.Fg(statusColor)+fmt.Sprintf("%d", entry.Status)+ansi.Reset)
+	field("Duration", entry.Duration.Round(time.Millisecond).String())
+	field("Model", ansi.Fg(th.Cyan)+entry.Model+ansi.Reset)
 
 	if entry.InputTokens > 0 || entry.OutputTokens > 0 {
+		tokens := formatTokens(int64(entry.InputTokens)) + " in"
 		if entry.CachedTokens > 0 {
-			fmt.Fprintf(&b, "  [%s]Tokens[-]    [%s]%s in (%s cached) / %s out[-]\n",
-				th.BrBlack, th.Cyan, tui.FormatTokens(int64(entry.InputTokens)), tui.FormatTokens(int64(entry.CachedTokens)), tui.FormatTokens(int64(entry.OutputTokens)))
-		} else {
-			fmt.Fprintf(&b, "  [%s]Tokens[-]    [%s]%s in / %s out[-]\n",
-				th.BrBlack, th.Cyan, tui.FormatTokens(int64(entry.InputTokens)), tui.FormatTokens(int64(entry.OutputTokens)))
+			tokens += " (" + formatTokens(int64(entry.CachedTokens)) + " cached)"
 		}
+		tokens += " / " + formatTokens(int64(entry.OutputTokens)) + " out"
+		field("Tokens", ansi.Fg(th.Cyan)+tokens+ansi.Reset)
 	}
 
 	if entry.Error != "" {
-		fmt.Fprintf(&b, "  [%s]Error[-]     [%s]%s[-]\n", th.BrBlack, th.Red, entry.Error)
+		field("Error", ansi.Fg(th.Red)+entry.Error+ansi.Reset)
 	}
 
 	if len(entry.RequestBody) > 0 {
-		fmt.Fprintf(&b, "\n  [%s::b]─── Request Body ───[-::-]\n\n", th.Yellow)
-		fmt.Fprint(&b, formatJSON(entry.RequestBody, th))
+		lines = append(lines, "")
+		lines = append(lines, "  "+ansi.Fg(th.Yellow)+ansi.Bold+"─── Request Body ───"+ansi.Reset)
+		lines = append(lines, "")
+		lines = append(lines, formatJSON(entry.RequestBody)...)
 	}
 
 	if len(entry.ResponseBody) > 0 {
-		fmt.Fprintf(&b, "\n  [%s::b]─── Response Body ───[-::-]\n\n", th.Yellow)
+		lines = append(lines, "")
+		lines = append(lines, "  "+ansi.Fg(th.Yellow)+ansi.Bold+"─── Response Body ───"+ansi.Reset)
+		lines = append(lines, "")
 
 		if !looksLikeJSON(entry.ResponseBody) {
-			fmt.Fprint(&b, formatSSEBody(entry.ResponseBody, th))
+			lines = append(lines, formatSSEBody(entry.ResponseBody)...)
 		} else {
-			fmt.Fprint(&b, formatJSON(entry.ResponseBody, th))
+			lines = append(lines, formatJSON(entry.ResponseBody)...)
 		}
 	}
 
-	a.detail.SetText(b.String())
-	a.detail.ScrollToBeginning()
+	a.detailLines = lines
 }
 
 func requestURLText(u *url.URL) string {
@@ -442,21 +423,28 @@ func requestURLPathText(u *url.URL) string {
 	return u.Path
 }
 
-func formatJSON(data []byte, th theme.Theme) string {
-	var pretty bytes.Buffer
-
-	if json.Indent(&pretty, data, "  ", "  ") == nil {
-		return fmt.Sprintf("  [%s]%s[-]\n", th.Foreground, tview.Escape(pretty.String()))
+func bodyLines(text string) []string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		lines = append(lines, "  "+strings.ReplaceAll(line, "\t", "  "))
 	}
-
-	return fmt.Sprintf("  [%s]%s[-]\n", th.Foreground, tview.Escape(string(data)))
+	return lines
 }
 
-func formatSSEBody(data []byte, th theme.Theme) string {
-	var b strings.Builder
+func formatJSON(data []byte) []string {
+	var pretty bytes.Buffer
 
-	lines := strings.SplitSeq(string(data), "\n")
-	for line := range lines {
+	if json.Indent(&pretty, data, "", "  ") == nil {
+		return bodyLines(pretty.String())
+	}
+
+	return bodyLines(string(data))
+}
+
+func formatSSEBody(data []byte) []string {
+	var lines []string
+
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -465,29 +453,29 @@ func formatSSEBody(data []byte, th theme.Theme) string {
 		if after, ok := strings.CutPrefix(line, "data: "); ok {
 			payload := after
 			if payload == "[DONE]" {
-				fmt.Fprintf(&b, "  [%s]data: [DONE][-]\n", th.BrBlack)
+				lines = append(lines, "  "+dim("data: [DONE]"))
 				continue
 			}
 
 			var pretty bytes.Buffer
-			if json.Indent(&pretty, []byte(payload), "  ", "  ") == nil {
-				fmt.Fprintf(&b, "  [%s]data: %s[-]\n", th.Foreground, tview.Escape(pretty.String()))
+			if json.Indent(&pretty, []byte(payload), "", "  ") == nil {
+				lines = append(lines, bodyLines("data: "+pretty.String())...)
 			} else {
-				fmt.Fprintf(&b, "  [%s]%s[-]\n", th.Foreground, tview.Escape(line))
+				lines = append(lines, bodyLines(line)...)
 			}
 		} else {
-			fmt.Fprintf(&b, "  [%s]%s[-]\n", th.BrBlack, tview.Escape(line))
+			lines = append(lines, "  "+dim(line))
 		}
 	}
 
-	return b.String()
+	return lines
 }
 
 func (a *App) saveEntry(entry proxy.RequestEntry) {
 	name := fmt.Sprintf("%s.jsonl", entry.Timestamp.Format("20060102_150405"))
 
 	if err := os.WriteFile(name, buildSavedEntry(entry), 0644); err != nil {
-		a.statusBar.SetText(fmt.Sprintf("[red]Save failed: %v[-]", err))
+		a.statusText = fmt.Sprintf("Save failed: %v", err)
 	}
 }
 

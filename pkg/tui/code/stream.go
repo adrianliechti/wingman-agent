@@ -16,66 +16,114 @@ func (a *App) getPhase() AppPhase {
 	return AppPhase(a.phase.Load())
 }
 
-func (a *App) applySpinnerForPhase(phase AppPhase) {
-	if a.spinner == nil {
-		return
-	}
-	if phase == PhaseIdle {
-		a.spinner.Stop()
-		a.updateInputHint()
-	} else {
-		a.spinner.Start(phase)
-	}
-}
-
 func (a *App) setPhase(phase AppPhase) {
-	a.phase.Store(int32(phase))
-	a.applySpinnerForPhase(phase)
+	prev := AppPhase(a.phase.Swap(int32(phase)))
+
+	if phase != PhaseIdle && (prev == PhaseIdle || a.phaseStart.IsZero()) {
+		a.phaseStart = time.Now()
+	}
+	if phase != PhaseIdle && a.turnStart.IsZero() {
+		a.turnStart = time.Now()
+	}
 }
 
+// queuePhase updates the phase from agent goroutines and schedules a repaint.
 func (a *App) queuePhase(phase AppPhase) {
-	a.phase.Store(int32(phase))
-	// Active events may be emitted synchronously from Submit on the tview event
-	// loop. QueueUpdateDraw blocks until that loop executes the callback, so it
-	// must be scheduled from another goroutine here.
-	go a.app.QueueUpdateDraw(func() {
-		if a.getPhase() == phase {
-			a.applySpinnerForPhase(phase)
-		}
+	a.post(func() {
+		a.setPhase(phase)
+		a.invalidate()
 	})
 }
 
-const renderInterval = 40 * time.Millisecond
+// syncMessages flushes newly committed messages to scrollback.
+func (a *App) syncMessages() {
+	messages := a.agent.Messages(a.sessionID)
 
-func (a *App) render() {
-	if !a.renderPending.CompareAndSwap(false, true) {
+	if a.printed > len(messages) {
+		a.printed = 0
+	}
+	if a.printed == len(messages) {
 		return
 	}
 
-	delay := renderInterval - time.Duration(time.Now().UnixNano()-a.renderLast.Load())
-	if delay < 0 {
-		delay = 0
+	width := a.width()
+	var lines []string
+
+	for i := a.printed; i < len(messages); i++ {
+		lines = append(lines, a.formatMessageCells(messages[i], width)...)
+	}
+	a.printed = len(messages)
+
+	if a.showWelcome && len(lines) > 0 {
+		a.showWelcome = false
 	}
 
-	time.AfterFunc(delay, func() {
-		a.app.QueueUpdateDraw(func() {
-			a.renderPending.Store(false)
-			a.renderLast.Store(time.Now().UnixNano())
+	if len(lines) > 0 {
+		a.term.Flush(lines)
+	}
 
-			if a.promptActive || a.askActive {
-				return
+	usage := a.agent.Usage(a.sessionID)
+	a.inputTokens = usage.InputTokens
+	a.cachedTokens = usage.CachedTokens
+	a.outputTokens = usage.OutputTokens
+	a.lastInputTokens = usage.LastInputTokens
+}
+
+func (a *App) formatMessageCells(msg agent.Message, width int) []string {
+	if msg.Hidden || msg.Role == agent.RoleSystem {
+		return nil
+	}
+
+	var lines []string
+
+	blankBeforeText := func() {
+		if a.prevWasTool {
+			lines = append(lines, "")
+			a.prevWasTool = false
+		}
+	}
+
+	for _, c := range msg.Content {
+		switch {
+		case c.ToolResult != nil:
+			if a.isToolHidden(c.ToolResult.Name) {
+				continue
 			}
+			a.turnTools++
+			lines = append(lines, cellTool(c.ToolResult, width, a.verbose)...)
+			a.prevWasTool = true
 
-			a.renderChat(a.agent.Messages(a.sessionID))
+		case c.ToolCall != nil:
+			continue
 
-			usage := a.agent.Usage(a.sessionID)
-			a.inputTokens = usage.InputTokens
-			a.cachedTokens = usage.CachedTokens
-			a.outputTokens = usage.OutputTokens
-			a.lastInputTokens = usage.LastInputTokens
-			a.updateStatusBar()
-		})
-	})
+		case c.Reasoning != nil && c.Reasoning.Summary != "":
+			a.turnThoughts++
+			blankBeforeText()
+			lines = append(lines, cellReasoning(c.Reasoning.Summary, width, a.verbose, false)...)
+			a.prevWasTool = true
+
+		case c.Text != "":
+			blankBeforeText()
+			switch msg.Role {
+			case agent.RoleUser:
+				delete(a.pendingEcho, findPendingEcho(a.pendingEcho, c.Text))
+				lines = append(lines, cellUser(c.Text, width)...)
+			case agent.RoleAssistant:
+				lines = append(lines, cellAssistant(c.Text, width)...)
+			}
+		}
+	}
+
+	return lines
+}
+
+func findPendingEcho(pending map[string]string, text string) string {
+	for id, echo := range pending {
+		if echo == text {
+			return id
+		}
+	}
+	return ""
 }
 
 func (a *App) clearStreamingState() {
@@ -94,26 +142,41 @@ func (a *App) snapshotStreamState() (toolName, toolHint, text, reasoning string)
 	return a.currentToolName, a.currentToolHint, a.streamingText, a.streamingReasoning
 }
 
+const renderInterval = 40 * time.Millisecond
+
+// requestRender coalesces repaints from streaming goroutines.
+func (a *App) requestRender() {
+	if !a.renderPending.CompareAndSwap(false, true) {
+		return
+	}
+
+	delay := renderInterval - time.Duration(time.Now().UnixNano()-a.renderLast.Load())
+	if delay < 0 {
+		delay = 0
+	}
+
+	time.AfterFunc(delay, func() {
+		a.post(func() {
+			a.renderPending.Store(false)
+			a.renderLast.Store(time.Now().UnixNano())
+			a.invalidate()
+		})
+	})
+}
+
 func (a *App) handleTurnEvent(ev code.TurnEvent) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			visible := false
-			var epoch uint64
 			a.sessionMu.Lock()
-			if a.sessionID == ev.SessionID {
-				epoch = a.sessionEpoch
+			visible := a.sessionID == ev.SessionID
+			if visible {
 				a.clearStreamingState()
-				a.queuePhase(PhaseIdle)
-				visible = true
 			}
 			a.sessionMu.Unlock()
 			if visible {
-				a.app.QueueUpdateDraw(func() {
-					if a.sessionID != ev.SessionID || a.sessionEpoch != epoch {
-						return
-					}
-					fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Internal error: %v", recovered), theme.Default.Red))
-					a.updateStatusBar()
+				a.queuePhase(PhaseIdle)
+				a.post(func() {
+					a.flushCells(cellNotice(fmt.Sprintf("Internal error: %v", recovered), theme.Default.Red, a.width()))
 				})
 			}
 		}
@@ -133,6 +196,9 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 		})
 	case code.TurnInputCompleted, code.TurnInputCancelled, code.TurnInputFailed:
 		commit := a.takeTurnCommit(ev.InputID)
+		a.post(func() {
+			delete(a.pendingEcho, ev.InputID)
+		})
 		if ev.Executed {
 			a.finishTurn(ev.SessionID, commit, ev.State, ev.Err)
 		}
@@ -152,7 +218,7 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 			a.reasoningID = ""
 			a.streamStateMu.Unlock()
 			a.queuePhase(PhaseToolRunning)
-			a.render()
+			a.requestRender()
 
 		case c.ToolResult != nil:
 			a.streamStateMu.Lock()
@@ -160,6 +226,7 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 			a.currentToolHint = ""
 			a.streamingText = ""
 			a.streamStateMu.Unlock()
+			a.requestRender()
 
 		case c.Reasoning != nil && c.Reasoning.Summary != "":
 			if a.getPhase() != PhaseThinking {
@@ -172,7 +239,7 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 			a.streamingReasoning += c.Reasoning.Summary
 			a.reasoningID = c.Reasoning.ID
 			a.streamStateMu.Unlock()
-			a.render()
+			a.requestRender()
 
 		case c.Text != "":
 			if a.getPhase() != PhaseStreaming {
@@ -183,56 +250,53 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 			a.streamingText += c.Text
 			a.reasoningID = ""
 			a.streamStateMu.Unlock()
-			a.render()
+			a.requestRender()
 		}
 	}
 }
 
 func (a *App) finishTurn(sessionID, commit string, state code.TurnInputState, turnErr error) {
 	t := theme.Default
-	var (
-		epoch   uint64
-		usage   agent.Usage
-		visible bool
-	)
+
 	a.sessionMu.Lock()
-	if a.sessionID == sessionID {
-		epoch = a.sessionEpoch
-		nextPhase := PhaseIdle
+	visible := a.sessionID == sessionID
+	var nextPhase AppPhase
+	if visible {
+		nextPhase = PhaseIdle
 		for _, input := range a.turns.Snapshot(sessionID).Inputs {
 			if input.State == code.TurnInputActive {
 				nextPhase = PhaseThinking
 				break
 			}
 		}
-		a.queuePhase(nextPhase)
-		usage = a.agent.Usage(sessionID)
-		visible = true
 	}
 	a.sessionMu.Unlock()
+
 	if visible {
-		a.app.QueueUpdateDraw(func() {
-			// Session changes and queued UI callbacks both run on the tview event
-			// loop, so this generation check is race-free and cannot go stale
-			// between the check and the render below.
+		epoch := a.currentEpoch()
+		a.post(func() {
 			if a.sessionID != sessionID || a.sessionEpoch != epoch {
 				return
 			}
-			a.inputTokens = usage.InputTokens
-			a.cachedTokens = usage.CachedTokens
-			a.outputTokens = usage.OutputTokens
-			a.lastInputTokens = usage.LastInputTokens
 
 			a.clearStreamingState()
-			if state == code.TurnInputCompleted {
-				a.renderChat(a.agent.Messages(sessionID))
-			} else if state == code.TurnInputCancelled || errors.Is(turnErr, context.Canceled) {
-				fmt.Fprint(a.chatView, a.formatNotice("Cancelled", t.Yellow))
-			} else {
-				fmt.Fprint(a.chatView, a.formatNotice(fmt.Sprintf("Error: %v", turnErr), t.Red))
+			a.setPhase(nextPhase)
+			a.syncMessages()
+
+			switch {
+			case state == code.TurnInputCompleted:
+				if nextPhase == PhaseIdle {
+					a.flushTurnSeparator()
+				}
+			case state == code.TurnInputCancelled || errors.Is(turnErr, context.Canceled):
+				a.flushCells(cellNotice("Cancelled", t.Yellow, a.width()))
+				a.resetTurnStats()
+			default:
+				a.flushCells(cellNotice(fmt.Sprintf("Error: %v", turnErr), t.Red, a.width()))
+				a.resetTurnStats()
 			}
 
-			a.updateStatusBar()
+			a.invalidate()
 		})
 	}
 
@@ -240,6 +304,34 @@ func (a *App) finishTurn(sessionID, commit string, state code.TurnInputState, tu
 		a.commitRewind(commit)
 		_ = a.agent.Save(sessionID)
 	}
+}
+
+func (a *App) currentEpoch() uint64 {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	return a.sessionEpoch
+}
+
+func (a *App) flushTurnSeparator() {
+	if a.turnTools == 0 && a.turnThoughts == 0 {
+		a.resetTurnStats()
+		return
+	}
+
+	elapsed := ""
+	if !a.turnStart.IsZero() {
+		elapsed = formatElapsed(time.Since(a.turnStart))
+	}
+
+	a.flushCells(cellTurnSeparator(elapsed, a.turnTools, a.turnThoughts, a.width()))
+	a.resetTurnStats()
+}
+
+func (a *App) resetTurnStats() {
+	a.turnTools = 0
+	a.turnThoughts = 0
+	a.turnStart = time.Time{}
+	a.phaseStart = time.Time{}
 }
 
 func (a *App) rememberTurn(id string, input []agent.Content) {
@@ -261,4 +353,14 @@ func (a *App) takeTurnCommit(id string) string {
 	delete(a.turnCommits, id)
 	a.turnMu.Unlock()
 	return commit
+}
+
+func (a *App) commitRewind(message string) {
+	if len(message) > 50 {
+		message = message[:50]
+	}
+
+	go func() {
+		_ = a.agent.Workspace().Commit(message)
+	}()
 }

@@ -5,18 +5,20 @@ package code
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/gdamore/tcell/v2"
-
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
 func tuiModelServer(t *testing.T) *httptest.Server {
@@ -47,48 +49,36 @@ func waitForTUI(t *testing.T, condition func() bool) {
 	t.Fatal("timed out waiting for TUI state")
 }
 
-func simulationText(screen tcell.SimulationScreen) string {
-	cells, width, height := screen.GetContents()
-	var out strings.Builder
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			cell := cells[y*width+x]
-			if len(cell.Runes) == 0 {
-				out.WriteByte(' ')
-			} else {
-				out.WriteRune(cell.Runes[0])
-			}
-		}
-		out.WriteByte('\n')
-	}
-	return out.String()
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
 }
 
-func postText(t *testing.T, screen tcell.SimulationScreen, value string) {
-	t.Helper()
-	post := func(event *tcell.EventKey) {
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			err := screen.PostEvent(event)
-			if err == nil {
-				return
-			}
-			if err != tcell.ErrEventQFull || time.Now().After(deadline) {
-				t.Fatal(err)
-			}
-			time.Sleep(time.Millisecond)
-		}
-	}
-	for _, r := range value {
-		post(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
-	}
-	post(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) Text() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return ansi.Strip(b.buf.String())
 }
 
 type tuiE2EHarness struct {
 	agent     *coder.Agent
+	app       *App
 	sessionID string
-	screen    tcell.SimulationScreen
+	input     io.Writer
+	output    *syncBuffer
+}
+
+func (h *tuiE2EHarness) postText(t *testing.T, value string) {
+	t.Helper()
+	if _, err := io.WriteString(h.input, value+"\r"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newTUIE2EHarness(t *testing.T) *tuiE2EHarness {
@@ -107,19 +97,21 @@ func newTUIE2EHarness(t *testing.T) *tuiE2EHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	app := New(ctx, codeAgent, sessionID)
 	codeAgent.SetUI(app)
-	screen := tcell.NewSimulationScreen("UTF-8")
-	app.app.SetScreen(screen)
-	screen.SetSize(100, 35)
+
+	inR, inW := io.Pipe()
+	out := &syncBuffer{}
+
+	term := inline.NewTerminal(inline.WithIO(inR, out, func() (int, int) { return 100, 35 }))
+	app.WithTerminal(term)
 
 	runDone := make(chan error, 1)
 	go func() { runDone <- app.Run() }()
+
 	t.Cleanup(func() {
-		app.turns.SetHandler(nil)
-		app.turns.Close()
-		_ = codeAgent.Close()
-		app.app.Stop()
+		app.stop()
 		select {
 		case err := <-runDone:
 			if err != nil {
@@ -128,12 +120,13 @@ func newTUIE2EHarness(t *testing.T) *tuiE2EHarness {
 		case <-time.After(5 * time.Second):
 			t.Error("TUI did not stop")
 		}
+		inW.Close()
 		workspace.Close()
 		cancel()
 	})
 
-	waitForTUI(t, func() bool { return app.getPhase() == PhaseIdle && app.input != nil })
-	return &tuiE2EHarness{agent: codeAgent, sessionID: sessionID, screen: screen}
+	waitForTUI(t, func() bool { return app.getPhase() == PhaseIdle })
+	return &tuiE2EHarness{agent: codeAgent, app: app, sessionID: sessionID, input: inW, output: out}
 }
 
 func TestTUIE2ESendsAndRendersTurn(t *testing.T) {
@@ -144,13 +137,13 @@ func TestTUIE2ESendsAndRendersTurn(t *testing.T) {
 	t.Setenv("WINGMAN_CALLER", "e2e")
 
 	h := newTUIE2EHarness(t)
-	postText(t, h.screen, "hello e2e")
+	h.postText(t, "hello e2e")
 
 	waitForTUI(t, func() bool {
 		messages := h.agent.Messages(h.sessionID)
 		return len(messages) >= 2 && messages[len(messages)-1].Role == agent.RoleAssistant
 	})
-	waitForTUI(t, func() bool { return strings.Contains(simulationText(h.screen), "E2E reply") })
+	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "E2E reply") })
 
 	messages := h.agent.Messages(h.sessionID)
 	if messages[0].Role != agent.RoleUser || messages[0].Content[0].Text != "hello e2e" {
@@ -198,18 +191,18 @@ func TestTUIE2ESteersActiveTurn(t *testing.T) {
 	t.Setenv("WINGMAN_CALLER", "e2e")
 
 	h := newTUIE2EHarness(t)
-	postText(t, h.screen, "initial request")
-	waitForTUI(t, func() bool { return strings.Contains(simulationText(h.screen), "Working") })
+	h.postText(t, "initial request")
+	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "Working") })
 
-	postText(t, h.screen, "steer this turn")
-	waitForTUI(t, func() bool { return strings.Contains(simulationText(h.screen), "steer this turn") })
+	h.postText(t, "steer this turn")
+	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "steer this turn") })
 	close(model.release)
 
 	waitForTUI(t, func() bool {
 		messages := h.agent.Messages(h.sessionID)
 		return len(messages) >= 4 && messages[len(messages)-1].Role == agent.RoleAssistant
 	})
-	waitForTUI(t, func() bool { return strings.Contains(simulationText(h.screen), "Steering applied") })
+	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "Steering applied") })
 
 	messages := h.agent.Messages(h.sessionID)
 	want := []struct {

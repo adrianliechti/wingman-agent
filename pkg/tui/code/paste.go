@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/rivo/tview"
 )
 
 func detectFilePaths(text, workingDir string) []string {
@@ -99,23 +97,4 @@ func normalizeFilePath(absPath, workingDir string) string {
 	}
 
 	return rel
-}
-
-type pasteInterceptRoot struct {
-	tview.Primitive
-	intercept func(text string) bool
-}
-
-func (p *pasteInterceptRoot) PasteHandler() func(string, func(tview.Primitive)) {
-	inner := p.Primitive.PasteHandler()
-
-	return func(text string, setFocus func(tview.Primitive)) {
-		if p.intercept != nil && p.intercept(text) {
-			return
-		}
-
-		if inner != nil {
-			inner(text, setFocus)
-		}
-	}
 }
