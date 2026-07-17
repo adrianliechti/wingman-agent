@@ -86,7 +86,7 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 				continue
 			}
 			a.turnTools++
-			lines = append(lines, cellTool(c.ToolResult, width, a.verbose)...)
+			lines = append(lines, cellTool(c.ToolResult, width, a.detail)...)
 			a.prevWasTool = true
 
 		case c.ToolCall != nil:
@@ -95,7 +95,7 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 		case c.Reasoning != nil && c.Reasoning.Summary != "":
 			a.turnThoughts++
 			blankBeforeText()
-			lines = append(lines, cellReasoning(c.Reasoning.Summary, width, a.verbose, false)...)
+			lines = append(lines, cellReasoning(c.Reasoning.Summary, width, a.detail, false)...)
 			a.prevWasTool = true
 
 		case c.Text != "":

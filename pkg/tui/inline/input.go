@@ -256,14 +256,14 @@ func (in *inputReader) consumeEscape() {
 	}
 }
 
-// consumeMouse handles SGR mouse reports ("<b;x;yM" / "<b;x;ym"); only wheel
-// motion is surfaced.
+// consumeMouse handles SGR mouse reports ("<b;x;yM" / "<b;x;ym"): wheel
+// motion, plus left-button press/drag/release for selection.
 func (in *inputReader) consumeMouse(seq string) {
 	body := seq[1 : len(seq)-1]
 	release := seq[len(seq)-1] == 'm'
 
 	parts := strings.Split(body, ";")
-	if len(parts) != 3 || release {
+	if len(parts) != 3 {
 		return
 	}
 
@@ -283,10 +283,16 @@ func (in *inputReader) consumeMouse(seq string) {
 		return
 	}
 
-	switch button {
-	case 64:
-		in.emit(MouseEvent{WheelDelta: -1, X: x, Y: y})
-	case 65:
-		in.emit(MouseEvent{WheelDelta: 1, X: x, Y: y})
+	switch {
+	case button == 64:
+		in.emit(MouseEvent{Kind: MouseWheel, WheelDelta: -1, X: x, Y: y})
+	case button == 65:
+		in.emit(MouseEvent{Kind: MouseWheel, WheelDelta: 1, X: x, Y: y})
+	case button&3 == 0 && release:
+		in.emit(MouseEvent{Kind: MouseRelease, X: x, Y: y})
+	case button&3 == 0 && button&32 != 0:
+		in.emit(MouseEvent{Kind: MouseDrag, X: x, Y: y})
+	case button&3 == 0:
+		in.emit(MouseEvent{Kind: MousePress, X: x, Y: y})
 	}
 }

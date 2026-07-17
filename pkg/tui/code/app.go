@@ -13,6 +13,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/clipboard"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -40,13 +41,17 @@ type App struct {
 	spinnerFrame int
 
 	currentMode Mode
-	verbose     bool
+	detail      int
 	showWelcome bool
-	selectMode  bool
 
 	editor  *Editor
 	popup   *Popup
 	overlay Overlay
+
+	selecting bool
+	selAnchor selPos
+	selHead   selPos
+	selActive bool
 
 	chat          []string
 	chatScroll    int
@@ -346,10 +351,116 @@ func (a *App) rebuildChat() {
 	a.chat = nil
 	a.printed = 0
 	a.prevWasTool = false
+	a.clearSelection()
 	a.syncMessages()
 
 	a.turnTools, a.turnThoughts = tools, thoughts
 	a.invalidate()
+}
+
+type selPos struct {
+	Line int
+	Col  int
+}
+
+func (p selPos) before(q selPos) bool {
+	return p.Line < q.Line || (p.Line == q.Line && p.Col < q.Col)
+}
+
+// handleMouse routes wheel to chat scrolling and left-button drags to
+// text selection; the two coexist without a mode switch.
+func (a *App) handleMouse(ev inline.MouseEvent) {
+	switch ev.Kind {
+	case inline.MouseWheel:
+		a.scrollChat(ev.WheelDelta * 3)
+
+	case inline.MousePress:
+		a.clearSelection()
+		row := ev.Y - 1
+		if row >= 0 && row < a.lastChatRows && !a.showWelcome {
+			a.selecting = true
+			a.selAnchor = selPos{Line: a.chatScroll + row, Col: ev.X - 1}
+			a.selHead = a.selAnchor
+		}
+		a.invalidate()
+
+	case inline.MouseDrag:
+		if !a.selecting {
+			return
+		}
+		row := ev.Y - 1
+		if row < 0 {
+			row = 0
+		}
+		if row >= a.lastChatRows {
+			row = a.lastChatRows - 1
+		}
+		a.selHead = selPos{Line: a.chatScroll + row, Col: ev.X - 1}
+		a.selActive = true
+		a.invalidate()
+
+	case inline.MouseRelease:
+		if a.selecting {
+			a.selecting = false
+			if a.selActive {
+				a.copySelection()
+			}
+		}
+	}
+}
+
+func (a *App) clearSelection() {
+	a.selecting = false
+	a.selActive = false
+}
+
+func (a *App) orderedSelection() (selPos, selPos) {
+	if a.selHead.before(a.selAnchor) {
+		return a.selHead, a.selAnchor
+	}
+	return a.selAnchor, a.selHead
+}
+
+// chatViewLines composes the scrollable chat content: committed cells plus
+// the live streaming tail.
+func (a *App) chatViewLines(width int) []string {
+	view := a.chat
+	if stream := a.streamCells(width); len(stream) > 0 {
+		view = append(append([]string(nil), a.chat...), stream...)
+	}
+	return view
+}
+
+// copySelection extracts the selected plain text and puts it on the
+// clipboard, silently.
+func (a *App) copySelection() {
+	start, end := a.orderedSelection()
+	view := a.chatViewLines(a.width())
+
+	var parts []string
+	for l := start.Line; l <= end.Line && l < len(view); l++ {
+		from, to := 0, int(^uint(0)>>1)
+		if l == start.Line {
+			from = start.Col
+		}
+		if l == end.Line {
+			to = end.Col + 1
+		}
+		parts = append(parts, strings.TrimRight(ansi.CutPlain(view[l], from, to), " "))
+	}
+
+	text := strings.Join(parts, "\n")
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+
+	go func() {
+		if err := clipboard.WriteText(text); err != nil {
+			a.post(func() {
+				a.appendChat(cellNotice(fmt.Sprintf("Clipboard copy failed: %v", err), theme.Default.Red, a.width()))
+			})
+		}
+	}()
 }
 
 // scrollChat adjusts the chat viewport; render() clamps and re-engages
@@ -378,7 +489,7 @@ func (a *App) handleEvent(ev inline.Event) {
 
 	case inline.MouseEvent:
 		if a.overlay == nil {
-			a.scrollChat(ev.WheelDelta * 3)
+			a.handleMouse(ev)
 		}
 
 	case inline.PasteEvent:
@@ -443,15 +554,8 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 			a.stop()
 			return
 		case 'e':
-			a.verbose = !a.verbose
+			a.detail = (a.detail + 1) % 3
 			a.rebuildChat()
-			return
-		case 't':
-			a.selectMode = !a.selectMode
-			a.term.EnableMouse(!a.selectMode)
-			return
-		case 'r':
-			a.showTranscript()
 			return
 		case 'y':
 			a.copyLastResponse()
@@ -654,6 +758,7 @@ func (a *App) clearChat() {
 	a.chat = nil
 	a.chatScroll = 0
 	a.follow = true
+	a.clearSelection()
 	a.invalidate()
 }
 

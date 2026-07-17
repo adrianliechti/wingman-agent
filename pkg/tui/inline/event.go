@@ -33,7 +33,17 @@ type PasteEvent struct {
 	Text string
 }
 
+type MouseKind int
+
+const (
+	MouseWheel MouseKind = iota
+	MousePress
+	MouseDrag
+	MouseRelease
+)
+
 type MouseEvent struct {
+	Kind       MouseKind
 	WheelDelta int
 	X          int
 	Y          int

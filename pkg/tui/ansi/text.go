@@ -257,3 +257,83 @@ func Pad(text string, width int) string {
 	}
 	return text + strings.Repeat(" ", width-w)
 }
+
+// Highlight applies style (an SGR prefix, e.g. Reverse) to the display
+// columns [from, to) of styled text, preserving the text's own styling.
+func Highlight(text string, from, to int, style string) string {
+	if to <= from {
+		return text
+	}
+
+	p := &parser{}
+	p.feed(text)
+
+	var sb strings.Builder
+	col := 0
+	prevState := ""
+	inRegion := false
+
+	setState := func(state string, region bool) {
+		sb.WriteString(Reset)
+		if state != "" {
+			sb.WriteString(state)
+		}
+		if region {
+			sb.WriteString(style)
+		}
+	}
+
+	for _, seg := range p.segments {
+		region := col >= from && col < to
+
+		if region != inRegion || seg.state != prevState {
+			setState(seg.state, region)
+			inRegion = region
+			prevState = seg.state
+		}
+
+		sb.WriteString(seg.text)
+		col += seg.width
+	}
+
+	// Extend the highlight over trailing padding when the selection reaches
+	// past the end of the line.
+	if col < to && from <= col {
+		if !inRegion {
+			setState(prevState, true)
+			inRegion = true
+		}
+		pad := to - col
+		if pad > 0 {
+			sb.WriteString(strings.Repeat(" ", pad))
+		}
+	}
+
+	if inRegion {
+		sb.WriteString(Reset)
+	}
+
+	return sb.String()
+}
+
+// CutPlain returns the plain-text content of styled text between display
+// columns [from, to).
+func CutPlain(text string, from, to int) string {
+	p := &parser{}
+	p.feed(text)
+
+	var sb strings.Builder
+	col := 0
+
+	for _, seg := range p.segments {
+		if col >= to {
+			break
+		}
+		if col >= from {
+			sb.WriteString(seg.text)
+		}
+		col += seg.width
+	}
+
+	return sb.String()
+}

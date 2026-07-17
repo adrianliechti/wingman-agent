@@ -110,9 +110,9 @@ func (t *Terminal) EnableMouse(on bool) {
 	}
 	t.mouse = on
 	if on {
-		fmt.Fprint(t.out, "\x1b[?1000;1006h")
+		fmt.Fprint(t.out, "\x1b[?1000;1002;1006h")
 	} else {
-		fmt.Fprint(t.out, "\x1b[?1000;1006l")
+		fmt.Fprint(t.out, "\x1b[?1000;1002;1006l")
 	}
 }
 

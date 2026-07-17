@@ -68,7 +68,7 @@ func (a *App) streamCells(width int) []string {
 	}
 
 	if streamingReasoning != "" {
-		lines = append(lines, cellReasoning(streamingReasoning, width, a.verbose, false)...)
+		lines = append(lines, cellReasoning(streamingReasoning, width, a.detail, false)...)
 	}
 
 	if streamingText != "" {
@@ -136,11 +136,7 @@ func (a *App) render() {
 	}
 	a.lastChatRows = chatRows
 
-	// Chat viewport: committed cells plus the live streaming tail.
-	view := a.chat
-	if stream := a.streamCells(width); len(stream) > 0 {
-		view = append(append([]string(nil), a.chat...), stream...)
-	}
+	view := a.chatViewLines(width)
 
 	if a.showWelcome && len(view) == 0 {
 		welcome := a.welcomeLines(width)
@@ -162,15 +158,30 @@ func (a *App) render() {
 		a.follow = true
 	}
 
+	selStart, selEnd := a.orderedSelection()
+	showSelection := a.selActive || a.selecting
+
 	frame := make([]string, 0, height)
 
 	for i := 0; i < chatRows; i++ {
 		idx := a.chatScroll + i
+		line := ""
 		if idx < len(view) {
-			frame = append(frame, view[idx])
-		} else {
-			frame = append(frame, "")
+			line = view[idx]
 		}
+
+		if showSelection && idx >= selStart.Line && idx <= selEnd.Line {
+			from, to := 0, ansi.Width(line)
+			if idx == selStart.Line {
+				from = selStart.Col
+			}
+			if idx == selEnd.Line && selEnd.Col+1 < to {
+				to = selEnd.Col + 1
+			}
+			line = ansi.Highlight(line, from, to, ansi.Reverse)
+		}
+
+		frame = append(frame, line)
 	}
 
 	frame = append(frame, bottom...)

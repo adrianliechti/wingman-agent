@@ -71,11 +71,18 @@ func cellAssistant(text string, width int, circle ansi.Color) []string {
 	return lines
 }
 
-func cellReasoning(summary string, width int, verbose, live bool) []string {
+// Detail levels for chat rendering, cycled with ctrl+e.
+const (
+	detailCompact = iota
+	detailExpanded
+	detailFull
+)
+
+func cellReasoning(summary string, width int, detail int, live bool) []string {
 	t := theme.Default
 	style := fg(t.BrBlack) + ansi.Italic
 
-	if !verbose && !live {
+	if detail == detailCompact && !live {
 		tail := lastNonEmptyLine(markdown.Sanitize(summary))
 		line := style + "• " + tail
 		return []string{cellIndent + ansi.Truncate(line, width-len(cellIndent), "…") + ansi.Reset}
@@ -160,7 +167,7 @@ func headTailLines(lines []string, head, tail int, hint string) []string {
 	return out
 }
 
-func cellTool(result *agent.ToolResult, width int, verbose bool) []string {
+func cellTool(result *agent.ToolResult, width int, detail int) []string {
 	name := result.Name
 
 	if name == "todo" {
@@ -191,37 +198,20 @@ func cellTool(result *agent.ToolResult, width int, verbose bool) []string {
 			return dim(markdown.Sanitize(s))
 		}
 	default:
-		showOutput = verbose && output != ""
+		showOutput = detail > detailCompact && output != ""
 	}
 
 	if showOutput {
-		head, tail := 2, 3
-		omitHint := "(ctrl+e expand)"
-		if verbose {
-			head, tail = 6, 12
-			omitHint = "(ctrl+r transcript)"
+		preview := output
+		if detail < detailFull {
+			head, tail, omitHint := 2, 3, "(ctrl+e expand)"
+			if detail == detailExpanded {
+				head, tail, omitHint = 6, 12, "(ctrl+e show all)"
+			}
+			raw := strings.Split(output, "\n")
+			preview = strings.Join(headTailLines(raw, head, tail, omitHint), "\n")
 		}
-		raw := strings.Split(output, "\n")
-		preview := headTailLines(raw, head, tail, omitHint)
-		lines = append(lines, continuationWrap(strings.Join(preview, "\n"), width, colorize)...)
-	}
-
-	return lines
-}
-
-// cellToolTranscript renders a tool call fully expanded for the transcript
-// pager.
-func cellToolTranscript(result *agent.ToolResult, width int) []string {
-	if result.Name == "todo" {
-		return cellTodo(result.Args, width)
-	}
-
-	hint := tool.ExtractHint(result.Args, result.Name)
-	lines := []string{toolTitleLine(result.Name, hint, width, false)}
-
-	if output := strings.TrimRight(result.Content, "\n"); output != "" {
-		colorize := func(s string) string { return dim(markdown.Sanitize(s)) }
-		lines = append(lines, continuationWrap(output, width, colorize)...)
+		lines = append(lines, continuationWrap(preview, width, colorize)...)
 	}
 
 	return lines

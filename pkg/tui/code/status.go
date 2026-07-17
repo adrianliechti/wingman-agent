@@ -130,24 +130,24 @@ func (a *App) footerLine(width int) string {
 		return dim(key) + " " + colored(t.Foreground, label)
 	}
 
+	detailLabel := "expand"
+	switch a.detail {
+	case detailExpanded:
+		detailLabel = "show all"
+	case detailFull:
+		detailLabel = "collapse"
+	}
+
 	hints := []string{
 		hint("/", "commands"),
 		hint("@", "files"),
 		hint("tab", "plan"),
 		hint("shift+tab", "model"),
-		hint("ctrl+e", "expand"),
-		hint("ctrl+t", "select"),
-		hint("ctrl+r", "transcript"),
+		hint("ctrl+e", detailLabel),
 	}
 
 	if a.currentMode == ModePlan {
 		hints[2] = hint("tab", "agent")
-	}
-	if a.verbose {
-		hints[4] = hint("ctrl+e", "collapse")
-	}
-	if a.selectMode {
-		left = append(left, colored(t.Yellow, "select mode"))
 	}
 
 	sep := dim("  ")
