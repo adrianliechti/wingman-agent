@@ -51,7 +51,7 @@ func cellContextStats(stats agent.ContextStats, width int) []string {
 
 	categories := []contextCategory{
 		{"System prompt", int64(stats.InstructionsTokens), t.Blue},
-		{fmt.Sprintf("Tools (%d)", len(stats.ToolStats)), int64(stats.ToolTokens), t.Yellow},
+		{fmt.Sprintf("Tools (%d)", len(stats.ToolStats)), int64(stats.ToolsTokens), t.Yellow},
 		{fmt.Sprintf("Messages (%d)", stats.MessageCount), int64(stats.MessagesTokens), t.Magenta},
 	}
 

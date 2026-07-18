@@ -95,21 +95,33 @@ wingman --resume <session-id> # resume a specific session
 
 ### Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | OpenAI API key (required) |
-| `OPENAI_BASE_URL` | Custom OpenAI-compatible API endpoint |
-| `OPENAI_DEFAULT_MODEL` | Model to use (auto-selected if not specified) |
-
-**Alternative: Wingman Server**
+**Backend** — connect to a Wingman server, or any OpenAI-compatible API:
 
 | Variable | Description |
 |----------|-------------|
-| `WINGMAN_URL` | Wingman server URL (takes priority over OpenAI vars) |
-| `WINGMAN_TOKEN` | Wingman authentication token |
-| `WINGMAN_MODEL` | Model to use (takes priority over `OPENAI_DEFAULT_MODEL`) |
+| `WINGMAN_URL` | Wingman server URL (takes priority over the OpenAI variables) |
+| `WINGMAN_TOKEN` | Wingman server authentication token |
+| `OPENAI_API_KEY` | API key for an OpenAI-compatible backend |
+| `OPENAI_BASE_URL` | OpenAI-compatible API endpoint (default: `https://api.openai.com/v1`) |
 
-> **Note:** The `web_fetch` (URL fetching) and `web_search` (web search) tools require `WINGMAN_URL` to be set, as they delegate to the Wingman server's extract and search APIs.
+**Models & Reasoning** — every value is optional; unset values are chosen automatically by role (plan → largest available model, code → medium, utilities → smallest):
+
+| Variable | Description |
+|----------|-------------|
+| `WINGMAN_MODEL` | Coding model; takes priority over `OPENAI_DEFAULT_MODEL` |
+| `WINGMAN_MODEL_PLAN` | Plan-mode model (default: largest available, e.g. Opus/Sol) |
+| `WINGMAN_MODEL_UTILITY` | Model for recaps and compaction summaries (default: smallest available, e.g. Haiku/Luna) |
+| `WINGMAN_EFFORT` | Coding reasoning effort: `none`/`low`/`medium`/`high`/`xhigh`/`max` (default: `high`) |
+| `WINGMAN_EFFORT_PLAN` | Plan-mode reasoning effort (default: `xhigh` on large models, else `high`) |
+| `WINGMAN_LARGE_CONTEXT` | `1` compacts against the model's full context window instead of stopping at the provider's long-context price threshold |
+
+**Behavior**
+
+| Variable | Description |
+|----------|-------------|
+| `WINGMAN_SANDBOX` | `off` lifts the workspace path restriction from the file tools |
+| `WINGMAN_ELICITATION` | Headless (ACP) sessions: `accept` or `cancel` answers elicitation prompts automatically |
+| `WINGMAN_<AGENT>_PATH` | Path override for an external agent binary (e.g. `WINGMAN_CODEX_PATH`) |
 
 ### Project Configuration
 
@@ -154,8 +166,6 @@ Wingman comes with powerful built-in tools:
 | `glob` | Find files using glob patterns |
 | `grep` | Search file contents using regex patterns |
 | `shell` | Execute shell commands |
-| `web_fetch` | Fetch and analyze content from a URL (requires `WINGMAN_URL`) |
-| `web_search` | Search the web for up-to-date information (requires `WINGMAN_URL`) |
 | `agent` | Launch a sub-agent to handle independent tasks in a separate context |
 | `lsp` | Code intelligence (definitions, references, diagnostics, symbols, call hierarchy) |
 

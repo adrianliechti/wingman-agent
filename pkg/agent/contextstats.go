@@ -18,7 +18,7 @@ type ContextStats struct {
 	Window int
 
 	InstructionsTokens int
-	ToolTokens         int
+	ToolsTokens        int
 	ToolStats          []ToolStat
 	MessagesTokens     int
 	MessageCount       int
@@ -27,7 +27,7 @@ type ContextStats struct {
 }
 
 func (s ContextStats) EstimatedTotal() int {
-	return s.InstructionsTokens + s.ToolTokens + s.MessagesTokens
+	return s.InstructionsTokens + s.ToolsTokens + s.MessagesTokens
 }
 
 func (a *Agent) ContextStats() ContextStats {
@@ -57,7 +57,7 @@ func (a *Agent) ContextStats() ContextStats {
 					size += len(params)
 				}
 				tokens := estimateTokens(size)
-				stats.ToolTokens += tokens
+				stats.ToolsTokens += tokens
 				stats.ToolStats = append(stats.ToolStats, ToolStat{Name: t.Name, Tokens: tokens})
 			}
 			sort.Slice(stats.ToolStats, func(i, j int) bool {

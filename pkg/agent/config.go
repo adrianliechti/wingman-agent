@@ -85,6 +85,10 @@ type Config struct {
 	Tools        func() []tool.Tool
 	Instructions func() string
 
+	// UtilityModel, when set and non-empty, handles internal utility calls
+	// (compaction summaries, recaps) instead of the main model.
+	UtilityModel func() string
+
 	// CacheKey routes provider-side prompt caching; keep it stable per
 	// conversation (e.g. the session ID) to maximize prefix-cache hits.
 	CacheKey string
@@ -121,6 +125,7 @@ func (c *Config) Derive() *Config {
 		Effort:       c.Effort,
 		Tools:        c.Tools,
 		Instructions: c.Instructions,
+		UtilityModel: c.UtilityModel,
 
 		CacheKey: c.CacheKey,
 
@@ -183,11 +188,33 @@ func DefaultModel() string {
 	return os.Getenv("OPENAI_DEFAULT_MODEL")
 }
 
+// DefaultPlanModel returns the model for plan mode; empty selects the largest
+// available model automatically.
+func DefaultPlanModel() string {
+	return os.Getenv("WINGMAN_MODEL_PLAN")
+}
+
+// DefaultUtilityModel returns the model for internal utility calls (recaps,
+// compaction summaries); empty selects the smallest available automatically.
+func DefaultUtilityModel() string {
+	return os.Getenv("WINGMAN_MODEL_UTILITY")
+}
+
 // DefaultEffort returns the reasoning effort requested via WINGMAN_EFFORT.
-// Empty (or "auto") leaves the provider default in place. Unrecognized values
-// are ignored so a typo cannot silently pin an unexpected effort.
+// Empty (or "auto") leaves the role-based default in place. Unrecognized
+// values are ignored so a typo cannot silently pin an unexpected effort.
 func DefaultEffort() string {
-	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("WINGMAN_EFFORT"))); v {
+	return effortFromEnv("WINGMAN_EFFORT")
+}
+
+// DefaultPlanEffort returns the reasoning effort for plan mode requested via
+// WINGMAN_EFFORT_PLAN; empty uses the role-based default.
+func DefaultPlanEffort() string {
+	return effortFromEnv("WINGMAN_EFFORT_PLAN")
+}
+
+func effortFromEnv(name string) string {
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(name))); v {
 	case "none", "low", "medium", "high", "xhigh", "max":
 		return v
 	default:

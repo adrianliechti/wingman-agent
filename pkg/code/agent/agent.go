@@ -45,10 +45,13 @@ type Agent struct {
 
 	sessionsDir string
 
-	modelMu  sync.Mutex
-	modelID  string
-	effortID string
-	upstream map[string]bool
+	modelMu        sync.Mutex
+	modelID        string
+	planModelID    string
+	utilityModelID string
+	effortID       string
+	planEffortID   string
+	upstreamModels map[string]bool
 
 	mu       sync.Mutex
 	sessions map[string]*sessionState
@@ -59,8 +62,10 @@ type sessionState struct {
 	parent *Agent
 	aa     *harness.Agent
 
-	modelID  string
-	effortID string
+	modelID      string
+	planModelID  string
+	effortID     string
+	planEffortID string
 
 	planMode    atomic.Bool
 	baseTools   []tool.Tool
@@ -78,13 +83,16 @@ type sessionState struct {
 
 func New(ws *code.Workspace, cfg *harness.Config, ui code.UI) *Agent {
 	a := &Agent{
-		workspace:   ws,
-		cfg:         cfg,
-		ui:          ui,
-		modelID:     harness.DefaultModel(),
-		effortID:    harness.DefaultEffort(),
-		sessionsDir: filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
-		sessions:    map[string]*sessionState{},
+		workspace:      ws,
+		cfg:            cfg,
+		ui:             ui,
+		modelID:        harness.DefaultModel(),
+		planModelID:    harness.DefaultPlanModel(),
+		utilityModelID: harness.DefaultUtilityModel(),
+		effortID:       harness.DefaultEffort(),
+		planEffortID:   harness.DefaultPlanEffort(),
+		sessionsDir:    filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
+		sessions:       map[string]*sessionState{},
 	}
 	a.prompts = &tool.Elicitation{Elicit: a.elicit, Confirm: a.confirm}
 
@@ -130,30 +138,103 @@ func (a *Agent) Models(sessionID string) ([]code.Model, string) {
 func (a *Agent) modelsFor(s *sessionState) ([]code.Model, string) {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
+	return a.modelsLocked(s)
+}
 
+func (a *Agent) modelsLocked(s *sessionState) ([]code.Model, string) {
 	available := make([]code.Model, 0, len(code.AvailableModels))
 	for _, m := range code.AvailableModels {
-		if a.upstream == nil || a.upstream[m.ID] {
+		if a.upstreamModels == nil || a.upstreamModels[m.ID] {
 			available = append(available, m)
 		}
 	}
 
-	current := a.modelID
-	if s != nil && s.modelID != "" {
-		current = s.modelID
+	planMode := s != nil && s.planMode.Load()
+
+	// Model choices are role-scoped: plan mode never inherits the coding
+	// model — an unset plan model selects a large one automatically.
+	current := ""
+	if planMode {
+		current = a.planModelID
+		if s.planModelID != "" {
+			current = s.planModelID
+		}
+	} else {
+		current = a.modelID
+		if s != nil && s.modelID != "" {
+			current = s.modelID
+		}
 	}
+
+	if current == "" {
+		class := code.ModelClassMedium
+		if planMode {
+			class = code.ModelClassLarge
+		}
+		current = a.classModelLocked(class)
+	}
+
 	if len(available) > 0 && !slices.ContainsFunc(available, func(m code.Model) bool { return m.ID == current }) {
 		current = available[0].ID
 	}
 	return available, current
 }
 
+// classModelLocked returns the first available model of the wanted class,
+// preferring the family of the medium (coding) pick so plan/code switches
+// keep encrypted reasoning replayable.
+func (a *Agent) classModelLocked(class code.ModelClass) string {
+	pick := func(class code.ModelClass, family string) string {
+		for _, m := range code.AvailableModels {
+			if a.upstreamModels != nil && !a.upstreamModels[m.ID] {
+				continue
+			}
+			if code.ModelClassOf(m.ID) != class {
+				continue
+			}
+			if family != "" && code.ModelFamilyOf(m.ID) != family {
+				continue
+			}
+			return m.ID
+		}
+		return ""
+	}
+
+	family := ""
+	if anchor := pick(code.ModelClassMedium, ""); anchor != "" {
+		family = code.ModelFamilyOf(anchor)
+	}
+
+	if id := pick(class, family); id != "" {
+		return id
+	}
+	return pick(class, "")
+}
+
+// utilityModel returns the model for internal utility calls (recaps,
+// compaction summaries): the smallest available, or empty for the main model.
+func (a *Agent) utilityModel() string {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	if a.utilityModelID != "" {
+		return a.utilityModelID
+	}
+	return a.classModelLocked(code.ModelClassSmall)
+}
+
+// SetModel applies to the session's current role: picking a model while in
+// plan mode configures planning, otherwise coding.
 func (a *Agent) SetModel(_ context.Context, sessionID, id string) error {
 	s := a.session(sessionID)
 	a.modelMu.Lock()
-	a.modelID = id
-	if s != nil {
-		s.modelID = id
+	if s != nil && s.planMode.Load() {
+		a.planModelID = id
+		s.planModelID = id
+	} else {
+		a.modelID = id
+		if s != nil {
+			s.modelID = id
+		}
 	}
 	a.modelMu.Unlock()
 	return nil
@@ -169,7 +250,7 @@ func (a *Agent) FetchModels(ctx context.Context) {
 		ids[m.ID] = true
 	}
 	a.modelMu.Lock()
-	a.upstream = ids
+	a.upstreamModels = ids
 	a.modelMu.Unlock()
 }
 
@@ -186,10 +267,29 @@ func (a *Agent) Effort(sessionID string) (string, []string) {
 func (a *Agent) effortFor(s *sessionState) string {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
+	// Effort choices are role-scoped like models: plan mode never inherits
+	// the coding effort.
+	if s != nil && s.planMode.Load() {
+		if s.planEffortID != "" {
+			return s.planEffortID
+		}
+		if a.planEffortID != "" {
+			return a.planEffortID
+		}
+		// xhigh only where a large model backs it.
+		if _, current := a.modelsLocked(s); code.ModelClassOf(current) == code.ModelClassLarge {
+			return "xhigh"
+		}
+		return "high"
+	}
+
 	if s != nil && s.effortID != "" {
 		return s.effortID
 	}
-	return a.effortID
+	if a.effortID != "" {
+		return a.effortID
+	}
+	return "high"
 }
 
 func (a *Agent) SetEffort(_ context.Context, sessionID, value string) error {
@@ -202,9 +302,14 @@ func (a *Agent) SetEffort(_ context.Context, sessionID, value string) error {
 	}
 	s := a.session(sessionID)
 	a.modelMu.Lock()
-	a.effortID = value
-	if s != nil {
-		s.effortID = value
+	if s != nil && s.planMode.Load() {
+		a.planEffortID = value
+		s.planEffortID = value
+	} else {
+		a.effortID = value
+		if s != nil {
+			s.effortID = value
+		}
 	}
 	a.modelMu.Unlock()
 	return nil
@@ -478,6 +583,7 @@ func (a *Agent) buildSession() *sessionState {
 	sessionCfg.Effort = func() string {
 		return a.effortFor(s)
 	}
+	sessionCfg.UtilityModel = a.utilityModel
 	elicit := a.prompts
 	ws := a.workspace
 

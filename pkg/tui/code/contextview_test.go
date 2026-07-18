@@ -12,7 +12,7 @@ func TestCellContextStatsAlignment(t *testing.T) {
 		Model:              "claude-fable-5",
 		Window:             1_000_000,
 		InstructionsTokens: 4200,
-		ToolTokens:         17_600,
+		ToolsTokens:        17_600,
 		ToolStats:          []agent.ToolStat{{Name: "shell", Tokens: 1400}, {Name: "agent", Tokens: 1100}},
 		MessagesTokens:     18_700,
 		MessageCount:       58,

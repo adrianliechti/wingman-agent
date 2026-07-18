@@ -8,9 +8,9 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-// maxClassifiableLength bounds what the classifier will reason about; anything
+// maxClassifiableBytes bounds what the classifier will reason about; anything
 // longer fails closed to a confirmation prompt.
-const maxClassifiableLength = 10_000
+const maxClassifiableBytes = 10_000
 
 func ClassifyEffect(args map[string]any) tool.Effect {
 	if args == nil {
@@ -33,7 +33,7 @@ func IsDangerousCommand(command string) bool {
 	if command == "" {
 		return false
 	}
-	if len(command) > maxClassifiableLength {
+	if len(command) > maxClassifiableBytes {
 		return true
 	}
 	// Heredoc bodies are data, not commands; substitutions inside unquoted
@@ -742,7 +742,7 @@ func isSingleCommandReadOnly(command string) bool {
 		}
 	case "sed":
 		// Only the plain print form is read-only: sed -n '1,50p' file.
-		if len(args) < 2 || len(args) > 3 || args[0] != "-n" || !sedPrintPattern(strings.Trim(args[1], `"'`)) {
+		if len(args) < 2 || len(args) > 3 || args[0] != "-n" || !isSedPrintScript(strings.Trim(args[1], `"'`)) {
 			return false
 		}
 	case "base64":
@@ -872,8 +872,8 @@ func firstNonFlagWord(args []string) string {
 	return ""
 }
 
-// sedPrintPattern matches `N p` or `N,M p` line-print scripts.
-func sedPrintPattern(script string) bool {
+// isSedPrintScript matches `N p` or `N,M p` line-print scripts.
+func isSedPrintScript(script string) bool {
 	core, ok := strings.CutSuffix(script, "p")
 	if !ok || core == "" {
 		return false
@@ -974,7 +974,7 @@ func isDangerousSingleCommand(command string) bool {
 	case "trap":
 		return IsDangerousCommand(trapAction(strings.Join(args, " ")))
 	case "sh", "bash", "zsh", "fish", "dash", "ksh":
-		return IsDangerousCommand(extractShellScriptArg(args))
+		return IsDangerousCommand(extractShellScript(args))
 	case "find":
 		return findHasDangerousAction(args)
 	case "fd":
@@ -1080,10 +1080,10 @@ func isUnresolvableCommandWord(word string) bool {
 	return true
 }
 
-// extractShellScriptArg returns the script passed to a shell via -c (also in
+// extractShellScript returns the script passed to a shell via -c (also in
 // clusters like -lc); positional script files are left to normal
 // classification.
-func extractShellScriptArg(args []string) string {
+func extractShellScript(args []string) string {
 	for i, arg := range args {
 		if arg == "--" || !strings.HasPrefix(arg, "-") {
 			return ""

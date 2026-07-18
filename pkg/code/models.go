@@ -1,14 +1,55 @@
 package code
 
+import "strings"
+
 type Model struct {
 	ID   string
 	Name string
+}
+
+// ModelClass buckets models by capability for automatic per-role selection:
+// large drives planning, medium drives coding, small drives utility calls
+// (recaps, compaction summaries).
+type ModelClass int
+
+const (
+	ModelClassMedium ModelClass = iota
+	ModelClassLarge
+	ModelClassSmall
+)
+
+func ModelClassOf(id string) ModelClass {
+	id = strings.ToLower(id)
+
+	for _, marker := range []string{"haiku", "luna", "flash", "mini", "nano"} {
+		if strings.Contains(id, marker) {
+			return ModelClassSmall
+		}
+	}
+	for _, marker := range []string{"opus", "-sol", "fable", "mythos", "-pro"} {
+		if strings.Contains(id, marker) {
+			return ModelClassLarge
+		}
+	}
+	return ModelClassMedium
+}
+
+// ModelFamilyOf groups models by vendor line (claude, gpt, glm, …) so automatic
+// selection stays within one family when possible: switching families
+// mid-session drops encrypted reasoning state.
+func ModelFamilyOf(id string) string {
+	id = strings.ToLower(id)
+	if i := strings.IndexAny(id, "-."); i > 0 {
+		return id[:i]
+	}
+	return id
 }
 
 var AvailableModels = []Model{
 	{ID: "claude-sonnet-5", Name: "Claude Sonnet 5"},
 	{ID: "claude-sonnet-4-6", Name: "Claude Sonnet 4.6"},
 	{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5"},
+	{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5"},
 
 	{ID: "gpt-5.6-sol", Name: "GPT 5.6 Sol"},
 	{ID: "gpt-5.6-terra", Name: "GPT 5.6 Terra"},

@@ -83,6 +83,18 @@ func isContextOverflowError(err error) bool {
 	return false
 }
 
+func (a *Agent) utilityModel() string {
+	if a.Config.UtilityModel != nil {
+		if model := a.UtilityModel(); model != "" {
+			return model
+		}
+	}
+	if a.Config.Model != nil {
+		return a.Model()
+	}
+	return ""
+}
+
 func (a *Agent) removeOrphanedToolMessages() {
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
@@ -330,10 +342,7 @@ func (a *Agent) summarizeMessages(ctx context.Context, messages []Message) (stri
 		return "", nil
 	}
 
-	model := ""
-	if a.Config.Model != nil {
-		model = a.Model()
-	}
+	model := a.utilityModel()
 
 	resp, err := a.client.Responses.New(ctx, responses.ResponseNewParams{
 		Model: model,
@@ -378,13 +387,8 @@ func (a *Agent) Recap(ctx context.Context) (string, error) {
 		return "", nil
 	}
 
-	model := ""
-	if a.Config.Model != nil {
-		model = a.Model()
-	}
-
 	resp, err := a.client.Responses.New(ctx, responses.ResponseNewParams{
-		Model: model,
+		Model: a.utilityModel(),
 		Instructions: openai.String(
 			"The user is returning to a coding session after time away. " +
 				"From the transcript, write a brief recap in Markdown: 2-5 bullets covering what was being worked on, " +

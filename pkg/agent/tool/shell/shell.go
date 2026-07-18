@@ -48,8 +48,8 @@ func (b *cappedBuffer) result() string {
 
 const (
 	progressInterval = 500 * time.Millisecond
-	progressTailMax  = 4096
-	progressLineMax  = 160
+	maxProgressTail  = 4096
+	maxProgressLine  = 160
 )
 
 // progressBuffer captures command output and reports the newest complete
@@ -71,7 +71,7 @@ func (b *progressBuffer) Write(p []byte) (int, error) {
 	}
 
 	b.partial = append(b.partial, p...)
-	if over := len(b.partial) - progressTailMax; over > 0 {
+	if over := len(b.partial) - maxProgressTail; over > 0 {
 		b.partial = b.partial[over:]
 	}
 
@@ -94,8 +94,8 @@ func lastNonBlankLine(data []byte) string {
 		idx := bytes.LastIndexByte(data, '\n')
 		line := strings.TrimSpace(string(data[idx+1:]))
 		if line != "" {
-			if runes := []rune(line); len(runes) > progressLineMax {
-				line = string(runes[:progressLineMax])
+			if runes := []rune(line); len(runes) > maxProgressLine {
+				line = string(runes[:maxProgressLine])
 			}
 			return line
 		}
