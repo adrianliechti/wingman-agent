@@ -177,7 +177,7 @@ func (a *App) showTranscript() {
 		}
 	}
 
-	_, _, streamingText, streamingReasoning := a.snapshotStreamState()
+	_, _, _, streamingText, streamingReasoning := a.snapshotStreamState()
 	if streamingReasoning != "" {
 		lines = append(lines, cellReasoning(streamingReasoning, width, true)...)
 	}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
@@ -69,28 +71,6 @@ func TestAllowReadOnlyTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := allowReadOnlyTool(tt.tool); got != tt.want {
 				t.Fatalf("allowReadOnlyTool() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestAllowStaticSecurityToolRejectsNetworkTools(t *testing.T) {
-	tests := []struct {
-		name string
-		tool tool.Tool
-		want bool
-	}{
-		{"read-only allowed", tool.Tool{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly)}, true},
-		{"shell dynamic allowed for wrapping", tool.Tool{Name: "shell", Effect: tool.StaticEffect(tool.EffectDynamic)}, true},
-		{"web fetch rejected", tool.Tool{Name: "web_fetch", Effect: tool.StaticEffect(tool.EffectReadOnly)}, false},
-		{"web search rejected", tool.Tool{Name: "web_search", Effect: tool.StaticEffect(tool.EffectReadOnly)}, false},
-		{"write rejected", tool.Tool{Name: "write", Effect: tool.StaticEffect(tool.EffectMutates)}, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := allowStaticSecurityTool(tt.tool); got != tt.want {
-				t.Fatalf("allowStaticSecurityTool() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -226,4 +206,54 @@ func containsName(names []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestReportCollectorValidatesSchema(t *testing.T) {
+	collector, err := newReportCollector(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"count": map[string]any{"type": "integer"},
+		},
+		"required":             []any{"count"},
+		"additionalProperties": false,
+	})
+	if err != nil {
+		t.Fatalf("newReportCollector: %v", err)
+	}
+
+	report := collector.tool()
+
+	if _, err := report.Execute(context.Background(), map[string]any{"result": map[string]any{"wrong": true}}); err == nil {
+		t.Fatal("expected validation error for non-matching result")
+	}
+	if collector.payload() != "" {
+		t.Fatalf("payload recorded after failed validation: %q", collector.payload())
+	}
+
+	if _, err := report.Execute(context.Background(), map[string]any{"result": map[string]any{"count": float64(3)}}); err != nil {
+		t.Fatalf("valid result rejected: %v", err)
+	}
+	if got := collector.payload(); got != `{"count":3}` {
+		t.Fatalf("payload = %q", got)
+	}
+}
+
+func TestReportCollectorRejectsInvalidSchema(t *testing.T) {
+	if _, err := newReportCollector(map[string]any{"type": 42}); err == nil {
+		t.Fatal("expected error for malformed schema")
+	}
+}
+
+func TestRunTrailer(t *testing.T) {
+	messages := []agent.Message{
+		{Role: agent.RoleAssistant, Content: []agent.Content{{ToolCall: &agent.ToolCall{ID: "1", Name: "read"}}}},
+		{Role: agent.RoleAssistant, Content: []agent.Content{{ToolResult: &agent.ToolResult{ID: "1"}}}},
+	}
+
+	got := runTrailer(messages, agent.Usage{InputTokens: 45_200, OutputTokens: 900}, 100*time.Second)
+
+	want := "\n\n(agent: 1 tool call · 45.2k in / 900 out tokens · 1m40s)"
+	if got != want {
+		t.Fatalf("runTrailer = %q, want %q", got, want)
+	}
 }

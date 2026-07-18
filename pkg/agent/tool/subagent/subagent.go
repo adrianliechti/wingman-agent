@@ -2,9 +2,13 @@ package subagent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -48,7 +52,7 @@ var subagentTypes = map[string]subagentType{
 	},
 	"security": {
 		Instructions:        securityInstructions,
-		AllowTool:           allowStaticSecurityTool,
+		AllowTool:           allowReadOnlyTool,
 		WrapDynamicReadOnly: true,
 	},
 	"code-architect": {
@@ -116,6 +120,10 @@ func Tools(cfg *agent.Config, sharedContext func() string) []tool.Tool {
 					"description": "Agent type to use. Must be one of the available agent types.",
 					"enum":        availableTypes,
 				},
+				"schema": map[string]any{
+					"type":        "object",
+					"description": "Optional JSON Schema for the agent's final result. When set, the agent must deliver its result as validated JSON matching this schema, returned verbatim as the tool result.",
+				},
 			},
 
 			"required":             []string{"description", "prompt", "agent_type"},
@@ -153,18 +161,36 @@ func Tools(cfg *agent.Config, sharedContext func() string) []tool.Tool {
 				}
 			}
 
+			var collector *reportCollector
+			if raw, present := args["schema"]; present {
+				schemaMap, ok := raw.(map[string]any)
+				if !ok {
+					return "", fmt.Errorf("schema must be a JSON Schema object")
+				}
+				var err error
+				if collector, err = newReportCollector(schemaMap); err != nil {
+					return "", fmt.Errorf("invalid schema: %w", err)
+				}
+				instructions += "\n\nDeliver your final result by calling the `report` tool exactly once; its `result` argument must match the provided JSON schema. Prose output outside `report` is not the deliverable."
+			}
+
 			subcfg := cfg.Derive()
 			subcfg.Instructions = func() string { return instructions }
 
 			subcfg.Tools = func() []tool.Tool {
-				if cfg.Tools == nil {
-					return nil
+				var tools []tool.Tool
+				if cfg.Tools != nil {
+					tools = toolsForType(cfg.Tools(), typ)
 				}
-
-				return toolsForType(cfg.Tools(), typ)
+				if collector != nil {
+					tools = append(tools, collector.tool())
+				}
+				return tools
 			}
 
 			sub := &agent.Agent{Config: subcfg}
+
+			started := time.Now()
 
 			var runErr error
 			stream, err := sub.Send(ctx, []agent.Content{{Text: prompt}})
@@ -179,21 +205,146 @@ func Tools(cfg *agent.Config, sharedContext func() string) []tool.Tool {
 				}
 			}
 
+			usage := sub.UsageSnapshot()
+			tool.ReportUsage(ctx, tool.UsageDelta{
+				InputTokens:  usage.InputTokens,
+				CachedTokens: usage.CachedTokens,
+				OutputTokens: usage.OutputTokens,
+			})
+
+			trailer := runTrailer(sub.Messages, usage, time.Since(started))
+
 			text := strings.TrimSpace(finalText(sub.Messages))
 
 			if runErr != nil {
 				if text == "" {
 					return "", fmt.Errorf("agent error: %w", runErr)
 				}
-				return fmt.Sprintf("Agent aborted before finishing (%v). Last output before the abort — treat as incomplete:\n\n%s", runErr, text), nil
+				return fmt.Sprintf("Agent aborted before finishing (%v). Last output before the abort — treat as incomplete:\n\n%s%s", runErr, text, trailer), nil
+			}
+
+			if collector != nil {
+				if payload := collector.payload(); payload != "" {
+					return payload + trailer, nil
+				}
+				if text == "" {
+					return "Sub-agent completed without calling report and produced no output." + trailer, nil
+				}
+				return "Sub-agent completed without calling report; unstructured output follows:\n\n" + text + trailer, nil
 			}
 
 			if text == "" {
-				return "Sub-agent completed but produced no output.", nil
+				return "Sub-agent completed but produced no output." + trailer, nil
 			}
-			return text, nil
+			return text + trailer, nil
 		},
 	}}
+}
+
+type reportCollector struct {
+	schema   map[string]any
+	resolved *jsonschema.Resolved
+
+	mu     sync.Mutex
+	result string
+}
+
+func newReportCollector(schemaMap map[string]any) (*reportCollector, error) {
+	data, err := json.Marshal(schemaMap)
+	if err != nil {
+		return nil, err
+	}
+
+	var schema jsonschema.Schema
+	if err := json.Unmarshal(data, &schema); err != nil {
+		return nil, err
+	}
+
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return &reportCollector{schema: schemaMap, resolved: resolved}, nil
+}
+
+func (c *reportCollector) payload() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.result
+}
+
+func (c *reportCollector) tool() tool.Tool {
+	return tool.Tool{
+		Name:        "report",
+		Description: "Deliver your final result. Call exactly once when your task is complete; `result` must match the caller-provided JSON schema. Your text output is not the deliverable.",
+		Effect:      tool.StaticEffect(tool.EffectReadOnly),
+
+		Parameters: map[string]any{
+			"type": "object",
+
+			"properties": map[string]any{
+				"result": c.schema,
+			},
+
+			"required":             []string{"result"},
+			"additionalProperties": false,
+		},
+
+		Execute: func(_ context.Context, args map[string]any) (string, error) {
+			value, present := args["result"]
+			if !present {
+				return "", fmt.Errorf("result is required")
+			}
+
+			if err := c.resolved.Validate(value); err != nil {
+				return "", fmt.Errorf("result does not match the schema: %v", err)
+			}
+
+			data, err := json.Marshal(value)
+			if err != nil {
+				return "", err
+			}
+
+			c.mu.Lock()
+			c.result = string(data)
+			c.mu.Unlock()
+
+			return "Result recorded. End your turn.", nil
+		},
+	}
+}
+
+func runTrailer(messages []agent.Message, usage agent.Usage, elapsed time.Duration) string {
+	calls := 0
+	for _, m := range messages {
+		for _, c := range m.Content {
+			if c.ToolCall != nil {
+				calls++
+			}
+		}
+	}
+
+	unit := "tool calls"
+	if calls == 1 {
+		unit = "tool call"
+	}
+
+	return fmt.Sprintf("\n\n(agent: %d %s · %s in / %s out tokens · %s)",
+		calls, unit,
+		formatTokens(usage.InputTokens), formatTokens(usage.OutputTokens),
+		elapsed.Round(time.Second))
+}
+
+func formatTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 func finalText(messages []agent.Message) string {
@@ -295,15 +446,6 @@ func allowReadOnlyTool(t tool.Tool) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func allowStaticSecurityTool(t tool.Tool) bool {
-	switch t.Name {
-	case "web_fetch", "web_search":
-		return false
-	default:
-		return allowReadOnlyTool(t)
 	}
 }
 

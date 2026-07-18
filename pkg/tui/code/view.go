@@ -50,7 +50,7 @@ func (a *App) welcomeLines(width int) []string {
 // The same blank line committed cells get after a tool run is inserted here so
 // spacing doesn't change when the turn finalizes.
 func (a *App) streamCells(width int) []string {
-	toolName, toolHint, streamingText, streamingReasoning := a.snapshotStreamState()
+	toolName, toolHint, toolProgress, streamingText, streamingReasoning := a.snapshotStreamState()
 
 	var lines []string
 
@@ -67,7 +67,7 @@ func (a *App) streamCells(width int) []string {
 	}
 
 	if toolName != "" && !a.isToolHidden(toolName) {
-		lines = append(lines, cellToolProgress(toolName, toolHint, width)...)
+		lines = append(lines, cellToolProgress(toolName, toolHint, toolProgress, width)...)
 	}
 
 	// While the spinner is visible the tail always ends blank, so tool and

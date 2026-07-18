@@ -133,6 +133,7 @@ func (a *App) releaseToolCell(result *agent.ToolResult) {
 		a.currentToolID = ""
 		a.currentToolName = ""
 		a.currentToolHint = ""
+		a.currentToolProgress = ""
 	}
 	a.streamStateMu.Unlock()
 }
@@ -144,14 +145,15 @@ func (a *App) clearStreamingState() {
 	a.currentToolID = ""
 	a.currentToolName = ""
 	a.currentToolHint = ""
+	a.currentToolProgress = ""
 	a.reasoningID = ""
 	a.streamStateMu.Unlock()
 }
 
-func (a *App) snapshotStreamState() (toolName, toolHint, text, reasoning string) {
+func (a *App) snapshotStreamState() (toolName, toolHint, toolProgress, text, reasoning string) {
 	a.streamStateMu.Lock()
 	defer a.streamStateMu.Unlock()
-	return a.currentToolName, a.currentToolHint, a.streamingText, a.streamingReasoning
+	return a.currentToolName, a.currentToolHint, a.currentToolProgress, a.streamingText, a.streamingReasoning
 }
 
 const renderInterval = 40 * time.Millisecond
@@ -226,6 +228,7 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 			a.currentToolID = c.ToolCall.ID
 			a.currentToolName = c.ToolCall.Name
 			a.currentToolHint = hint
+			a.currentToolProgress = ""
 			a.streamingText = ""
 			a.streamingReasoning = ""
 			a.reasoningID = ""

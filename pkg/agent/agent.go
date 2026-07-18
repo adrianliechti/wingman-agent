@@ -448,6 +448,15 @@ func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool
 		defer cancel()
 	}
 
+	ctx = tool.WithProgressCall(ctx, tc.ID)
+	ctx = tool.WithUsageSink(ctx, func(d tool.UsageDelta) {
+		a.stateMu.Lock()
+		a.Usage.InputTokens += d.InputTokens
+		a.Usage.CachedTokens += d.CachedTokens
+		a.Usage.OutputTokens += d.OutputTokens
+		a.stateMu.Unlock()
+	})
+
 	hc := tool.ToolCall{ID: tc.ID, Name: tc.Name, Args: tc.Args}
 
 	var result string

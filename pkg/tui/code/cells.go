@@ -208,8 +208,19 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 	return lines
 }
 
-func cellToolProgress(name, hint string, width int) []string {
-	return []string{toolTitleLine(name, hint, width, true)}
+func cellToolProgress(name, hint, progress string, width int) []string {
+	lines := []string{toolTitleLine(name, hint, width, true)}
+
+	if progress != "" {
+		inner := width - len(cellIndent) - 2
+		if inner < 10 {
+			inner = 10
+		}
+		text := markdown.Sanitize(strings.ReplaceAll(progress, "\n", " "))
+		lines = append(lines, cellIndent+"  "+dim(ansi.Truncate(text, inner, "…")))
+	}
+
+	return lines
 }
 
 func cellTodo(argsJSON string, width int) []string {

@@ -896,10 +896,6 @@ func toolTitle(name string, raw any) string {
 				detail = truncate(cmd, 60)
 			}
 		}
-	case "web_fetch":
-		detail = str("url")
-	case "web_search":
-		detail = str("query")
 	case "elicit":
 		detail = truncate(tool.ElicitHint(args), 80)
 	case "agent":
@@ -945,10 +941,8 @@ func mapKind(name string) acpsdk.ToolKind {
 	switch name {
 	case "read", "lsp":
 		return acpsdk.ToolKindRead
-	case "grep", "glob", "web_search":
+	case "grep", "glob":
 		return acpsdk.ToolKindSearch
-	case "web_fetch":
-		return acpsdk.ToolKindFetch
 	case "write", "edit":
 		return acpsdk.ToolKindEdit
 	case "shell":

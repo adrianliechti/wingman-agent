@@ -588,7 +588,7 @@ func (c *Claw) ensureDefaultTasks(name string) {
 func auditHook(agentName string) hook.PreToolUse {
 	return func(_ context.Context, call tool.ToolCall) (string, error) {
 		switch call.Name {
-		case "shell", "web_fetch", "write", "edit":
+		case "shell", "write", "edit":
 			log.Printf("audit %s: %s %s", agentName, call.Name, tool.ExtractHint(call.Args, call.Name))
 		}
 		return "", nil

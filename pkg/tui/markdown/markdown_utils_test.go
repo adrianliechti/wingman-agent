@@ -42,3 +42,27 @@ func TestSanitizeStripsEscapes(t *testing.T) {
 		t.Fatalf("Sanitize = %q", got)
 	}
 }
+
+func TestSanitizeStripsInvisibleFormatting(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bidi override", "rm /tmp/x\U0000202Egnihtemos\U0000202C", "rm /tmp/xgnihtemos"},
+		{"bidi isolate", "a\U00002066hidden\U00002069b", "ahiddenb"},
+		{"zero width space", "safe\U0000200B-command", "safe-command"},
+		{"zero width joiner", "a\U0000200Db", "ab"},
+		{"byte order mark", "\U0000FEFFls -la", "ls -la"},
+		{"c1 control", "a\U0000009Bb", "ab"},
+		{"tag characters", "cmd\U000E0041\U000E007F", "cmd"},
+		{"newline kept", "line1\nline2", "line1\nline2"},
+		{"plain text untouched", "echo 'héllo wörld'", "echo 'héllo wörld'"},
+	}
+
+	for _, tt := range tests {
+		if got := Sanitize(tt.in); got != tt.want {
+			t.Errorf("%s: Sanitize(%q) = %q, want %q", tt.name, tt.in, got, tt.want)
+		}
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
@@ -93,13 +94,14 @@ type App struct {
 	renderLast    atomic.Int64
 	dirty         bool
 
-	streamStateMu      sync.Mutex
-	currentToolID      string
-	currentToolName    string
-	currentToolHint    string
-	streamingText      string
-	streamingReasoning string
-	reasoningID        string
+	streamStateMu       sync.Mutex
+	currentToolID       string
+	currentToolName     string
+	currentToolHint     string
+	currentToolProgress string
+	streamingText       string
+	streamingReasoning  string
+	reasoningID         string
 }
 
 type pendingEchoItem struct {
@@ -129,9 +131,22 @@ func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
 		follow:      true,
 	}
 
-	a.turns = code.NewTurnManager(ctx, coderAgent, a.handleTurnEvent)
+	a.turns = code.NewTurnManager(tool.WithProgressSink(ctx, a.onToolProgress), coderAgent, a.handleTurnEvent)
 
 	return a
+}
+
+// onToolProgress receives live status text from a running tool call; text for
+// anything but the currently displayed call is dropped.
+func (a *App) onToolProgress(callID, text string) {
+	a.streamStateMu.Lock()
+	if callID != a.currentToolID {
+		a.streamStateMu.Unlock()
+		return
+	}
+	a.currentToolProgress = text
+	a.streamStateMu.Unlock()
+	a.requestRender()
 }
 
 // WithTerminal replaces the terminal, used by tests.

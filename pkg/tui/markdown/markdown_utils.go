@@ -2,6 +2,7 @@ package markdown
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
@@ -12,7 +13,9 @@ func hexColor(hex string) ansi.Color {
 
 // sanitize strips control characters from untrusted text so it cannot inject
 // escape sequences, and expands tabs (terminals expand them; the width math
-// cannot).
+// cannot). Bidirectional and zero-width formatting characters are stripped
+// too: they can visually reorder or hide text, letting tool input alter what
+// a confirmation prompt appears to say.
 func sanitize(s string) string {
 	if !strings.ContainsFunc(s, needsSanitize) {
 		return s
@@ -35,8 +38,13 @@ func needsSanitize(r rune) bool {
 	return r == '\t' || isControl(r)
 }
 
+// isControl reports control characters (Cc) and invisible formatting
+// characters (Cf: bidi overrides, zero-width characters, tag characters).
 func isControl(r rune) bool {
-	return (r < 0x20 && r != '\n') || r == 0x7f
+	if r == '\n' {
+		return false
+	}
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
 }
 
 func visibleLen(s string) int {

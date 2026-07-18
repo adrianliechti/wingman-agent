@@ -46,6 +46,67 @@ func (b *cappedBuffer) result() string {
 	return out
 }
 
+const (
+	progressInterval = 500 * time.Millisecond
+	progressTailMax  = 4096
+	progressLineMax  = 160
+)
+
+// progressBuffer captures command output and reports the newest complete
+// non-blank line as display-only progress. os/exec serializes Write calls when
+// stdout and stderr share one writer, so no locking is needed.
+type progressBuffer struct {
+	cappedBuffer
+	report func(string)
+
+	partial []byte
+	lastAt  time.Time
+}
+
+func (b *progressBuffer) Write(p []byte) (int, error) {
+	b.cappedBuffer.Write(p)
+
+	if b.report == nil {
+		return len(p), nil
+	}
+
+	b.partial = append(b.partial, p...)
+	if over := len(b.partial) - progressTailMax; over > 0 {
+		b.partial = b.partial[over:]
+	}
+
+	idx := bytes.LastIndexByte(b.partial, '\n')
+	if idx < 0 || time.Since(b.lastAt) < progressInterval {
+		return len(p), nil
+	}
+
+	if line := lastNonBlankLine(b.partial[:idx]); line != "" {
+		b.lastAt = time.Now()
+		b.report(line)
+	}
+	b.partial = b.partial[idx+1:]
+
+	return len(p), nil
+}
+
+func lastNonBlankLine(data []byte) string {
+	for len(data) > 0 {
+		idx := bytes.LastIndexByte(data, '\n')
+		line := strings.TrimSpace(string(data[idx+1:]))
+		if line != "" {
+			if runes := []rune(line); len(runes) > progressLineMax {
+				line = string(runes[:progressLineMax])
+			}
+			return line
+		}
+		if idx < 0 {
+			break
+		}
+		data = data[:idx]
+	}
+	return ""
+}
+
 func safetyGuardLine(elicit *tool.Elicitation) string {
 	if elicit == nil || elicit.Confirm == nil {
 		return "- There is NO confirmation gate: commands run immediately. Never run destructive or privilege-escalating commands (recursive deletes, sudo, force-push) unless the user explicitly asked for that exact action."
@@ -129,9 +190,9 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 
 	cmd := buildCommand(ctx, command, dir)
 
-	var output cappedBuffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	output := &progressBuffer{report: tool.Progress(ctx)}
+	cmd.Stdout = output
+	cmd.Stderr = output
 
 	started := time.Now()
 	runErr := cmd.Run()

@@ -36,3 +36,42 @@ func TestCappedBufferSmallOutputUntouched(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestProgressBufferReportsLastCompleteLine(t *testing.T) {
+	var reported []string
+	b := &progressBuffer{report: func(line string) { reported = append(reported, line) }}
+
+	b.Write([]byte("compiling foo.go\ncompiling ba"))
+	b.Write([]byte("r.go\n"))
+
+	if len(reported) == 0 {
+		t.Fatal("expected a progress report")
+	}
+	if got := reported[0]; got != "compiling foo.go" {
+		t.Fatalf("first report = %q", got)
+	}
+
+	if got := b.result(); got != "compiling foo.go\ncompiling bar.go\n" {
+		t.Fatalf("result = %q", got)
+	}
+}
+
+func TestProgressBufferSkipsBlankLines(t *testing.T) {
+	var reported []string
+	b := &progressBuffer{report: func(line string) { reported = append(reported, line) }}
+
+	b.Write([]byte("real output\n\n   \n"))
+
+	if len(reported) != 1 || reported[0] != "real output" {
+		t.Fatalf("reported = %v", reported)
+	}
+}
+
+func TestProgressBufferNilReport(t *testing.T) {
+	b := &progressBuffer{}
+	b.Write([]byte("output\n"))
+
+	if got := b.result(); got != "output\n" {
+		t.Fatalf("result = %q", got)
+	}
+}
