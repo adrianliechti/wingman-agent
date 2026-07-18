@@ -3,9 +3,14 @@ package shell
 import (
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+// maxClassifiableLength bounds what the classifier will reason about; anything
+// longer fails closed to a confirmation prompt.
+const maxClassifiableLength = 10_000
 
 func ClassifyEffect(args map[string]any) tool.Effect {
 	if args == nil {
@@ -28,6 +33,18 @@ func IsDangerousCommand(command string) bool {
 	if command == "" {
 		return false
 	}
+	if len(command) > maxClassifiableLength {
+		return true
+	}
+	// Heredoc bodies are data, not commands; substitutions inside unquoted
+	// heredocs still execute and are kept for classification.
+	command = stripHeredocBodies(command)
+	if hasObfuscatingCharacters(command) {
+		return true
+	}
+	if hasDangerousRedirectTarget(command) {
+		return true
+	}
 	if hasDangerousCommandSubstitution(command) {
 		return true
 	}
@@ -37,9 +54,218 @@ func IsDangerousCommand(command string) bool {
 		if isDangerousSingleCommand(seg) {
 			return true
 		}
-		if i > 0 && isShellInterpreter(seg) && isDownloadCommand(segments[i-1]) {
+		if isShellInterpreter(seg) {
+			if i > 0 && isDownloadCommand(segments[i-1]) {
+				return true
+			}
+			for _, sub := range extractCommandSubstitutions(seg) {
+				if isDownloadCommand(sub) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// hasObfuscatingCharacters flags control and invisible formatting characters
+// (except newline and tab): they can make the executed command differ from
+// what any prompt or transcript displays.
+func hasObfuscatingCharacters(command string) bool {
+	for _, r := range command {
+		if r == '\n' || r == '\t' {
+			continue
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return true
 		}
+	}
+	return false
+}
+
+func stripHeredocBodies(command string) string {
+	if !strings.Contains(command, "<<") {
+		return command
+	}
+
+	lines := strings.Split(command, "\n")
+	var out []string
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		out = append(out, line)
+
+		delim, quoted, ok := heredocDelimiter(line)
+		if !ok {
+			continue
+		}
+
+		j := i + 1
+		for ; j < len(lines) && strings.TrimSpace(lines[j]) != delim; j++ {
+			if !quoted {
+				out = append(out, extractCommandSubstitutions(lines[j])...)
+			}
+		}
+		i = j
+	}
+
+	return strings.Join(out, "\n")
+}
+
+// heredocDelimiter finds an unquoted `<<` (not `<<<`) redirect on the line
+// and returns its delimiter word and whether it was quoted (a quoted
+// delimiter makes the body fully inert).
+func heredocDelimiter(line string) (string, bool, bool) {
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' && !inSingle {
+			escaped = true
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if inSingle || inDouble || ch != '<' || i+1 >= len(line) || line[i+1] != '<' {
+			continue
+		}
+
+		j := i + 2
+		if j < len(line) && line[j] == '<' {
+			i = j
+			continue
+		}
+		if j < len(line) && line[j] == '-' {
+			j++
+		}
+		for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
+			j++
+		}
+
+		if j < len(line) && (line[j] == '\'' || line[j] == '"') {
+			quote := line[j]
+			j++
+			start := j
+			for j < len(line) && line[j] != quote {
+				j++
+			}
+			if word := line[start:j]; word != "" {
+				return word, true, true
+			}
+			continue
+		}
+
+		start := j
+		for j < len(line) && !strings.ContainsRune(" \t;|&<>()", rune(line[j])) {
+			j++
+		}
+		if word := line[start:j]; word != "" {
+			return word, false, true
+		}
+	}
+
+	return "", false, false
+}
+
+func hasDangerousRedirectTarget(command string) bool {
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' && !inSingle {
+			escaped = true
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if inSingle || inDouble || ch != '>' {
+			continue
+		}
+
+		j := i + 1
+		for j < len(command) && (command[j] == '>' || command[j] == '|') {
+			j++
+		}
+		if j < len(command) && command[j] == '(' {
+			continue
+		}
+		// >&N and >&- duplicate or close descriptors; >&file writes the file.
+		if j < len(command) && command[j] == '&' {
+			j++
+			if j < len(command) && ((command[j] >= '0' && command[j] <= '9') || command[j] == '-') {
+				continue
+			}
+		}
+		for j < len(command) && (command[j] == ' ' || command[j] == '\t') {
+			j++
+		}
+		start := j
+		for j < len(command) && !strings.ContainsRune(" \t\n;|&<>()`", rune(command[j])) {
+			j++
+		}
+		if isProtectedRedirectTarget(command[start:j]) {
+			return true
+		}
+		i = j - 1
+	}
+
+	return false
+}
+
+// isProtectedRedirectTarget flags redirect destinations whose overwrite is
+// destructive or leads to later command execution: devices, system config,
+// and shell/git startup files.
+func isProtectedRedirectTarget(path string) bool {
+	path = strings.ToLower(strings.Trim(path, `"'`))
+	if path == "" {
+		return false
+	}
+
+	if strings.HasPrefix(path, "/dev/") {
+		switch path {
+		case "/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/zero":
+			return false
+		}
+		return !strings.HasPrefix(path, "/dev/fd/")
+	}
+
+	if strings.HasPrefix(path, "/etc/") || strings.HasPrefix(path, "/boot/") ||
+		strings.HasPrefix(path, "/sys/") || strings.HasPrefix(path, "/proc/sys/") {
+		return true
+	}
+
+	if strings.Contains(path, "/.config/git/") {
+		return true
+	}
+
+	switch path[strings.LastIndexByte(path, '/')+1:] {
+	case ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".gitconfig":
+		return true
 	}
 
 	return false
@@ -163,7 +389,7 @@ func extractCommandSubstitutions(command string) []string {
 			continue
 		}
 
-		if ch == '$' && i+1 < len(command) && command[i+1] == '(' {
+		if (ch == '$' || ch == '<' || ch == '>') && i+1 < len(command) && command[i+1] == '(' {
 			if sub, end, ok := readParenSubstitution(command, i+2); ok {
 				substitutions = append(substitutions, sub)
 				i = end
@@ -341,6 +567,7 @@ func splitCommandSegments(command string) []string {
 
 var commandRunners = map[string]bool{
 	"env":     true,
+	"exec":    true,
 	"xargs":   true,
 	"timeout": true,
 	"nice":    true,
@@ -364,7 +591,7 @@ func unwrapCommandWords(words []string) (resolved []string, cmd string, unresolv
 			return nil, "", true
 		}
 
-		name := strings.TrimPrefix(words[0], `\`)
+		name := strings.TrimPrefix(strings.Trim(words[0], `"'`), `\`)
 		base := strings.ToLower(filepath.Base(name))
 
 		if !commandRunners[base] {
@@ -500,6 +727,65 @@ func isSingleCommandReadOnly(command string) bool {
 				return false
 			}
 		}
+	case "fd":
+		for _, arg := range args {
+			switch arg {
+			case "-x", "--exec", "-X", "--exec-batch":
+				return false
+			}
+		}
+	case "sed":
+		// Only the plain print form is read-only: sed -n '1,50p' file.
+		if len(args) < 2 || len(args) > 3 || args[0] != "-n" || !sedPrintPattern(strings.Trim(args[1], `"'`)) {
+			return false
+		}
+	case "base64":
+		for _, arg := range args {
+			if arg == "-o" || arg == "--output" || strings.HasPrefix(arg, "--output=") ||
+				(strings.HasPrefix(arg, "-o") && arg != "-o") {
+				return false
+			}
+		}
+	case "date":
+		for _, arg := range args {
+			if arg == "-s" || arg == "--set" || strings.HasPrefix(arg, "--set=") {
+				return false
+			}
+		}
+	case "xxd":
+		for _, arg := range args {
+			if arg == "-r" || arg == "-revert" {
+				return false
+			}
+		}
+	case "file":
+		for _, arg := range args {
+			if arg == "-m" || arg == "-M" || arg == "-f" ||
+				arg == "--magic-file" || strings.HasPrefix(arg, "--magic-file=") ||
+				arg == "--files-from" || strings.HasPrefix(arg, "--files-from=") {
+				return false
+			}
+		}
+	case "man":
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-P") || strings.HasPrefix(arg, "-H") ||
+				arg == "--pager" || strings.HasPrefix(arg, "--pager=") ||
+				arg == "--html" || strings.HasPrefix(arg, "--html=") {
+				return false
+			}
+		}
+	case "docker", "docker-compose":
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-H") || arg == "-c" ||
+				arg == "--host" || strings.HasPrefix(arg, "--host=") ||
+				arg == "--context" || strings.HasPrefix(arg, "--context=") ||
+				arg == "--config" || strings.HasPrefix(arg, "--config=") ||
+				arg == "--url" || strings.HasPrefix(arg, "--url=") ||
+				arg == "--connection" || strings.HasPrefix(arg, "--connection=") ||
+				arg == "--identity" || strings.HasPrefix(arg, "--identity=") {
+				return false
+			}
+		}
 	case "git":
 		if hasUnsafeGitOptions(args) {
 			return false
@@ -517,11 +803,86 @@ func isSingleCommandReadOnly(command string) bool {
 	rest := strings.ToLower(strings.Join(args, " "))
 	for _, sub := range subs {
 		if hasSubcommandPrefix(rest, sub) {
+			if cmd == "git" {
+				return gitSubcommandReadOnly(sub, strings.Fields(rest[len(sub):]))
+			}
 			return true
 		}
 	}
 
 	return false
+}
+
+// gitSubcommandReadOnly gates git subcommands that both list and mutate:
+// `git branch` lists but `git branch name` creates.
+func gitSubcommandReadOnly(sub string, args []string) bool {
+	switch sub {
+	case "branch":
+		for _, arg := range args {
+			switch arg {
+			case "--list", "-l", "--show-current", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose":
+			default:
+				if !strings.HasPrefix(arg, "--format=") && !strings.HasPrefix(arg, "--sort=") {
+					return false
+				}
+			}
+		}
+		return true
+	case "tag":
+		listing := false
+		positional := false
+		for _, arg := range args {
+			switch {
+			case arg == "-l" || arg == "--list":
+				listing = true
+			case strings.HasPrefix(arg, "-"):
+			default:
+				positional = true
+			}
+		}
+		return !positional || listing
+	case "remote":
+		switch firstNonFlagWord(args) {
+		case "", "show", "get-url":
+			return true
+		}
+		return false
+	case "reflog":
+		switch firstNonFlagWord(args) {
+		case "", "show", "list":
+			return true
+		}
+		return false
+	}
+	return true
+}
+
+func firstNonFlagWord(args []string) string {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			return arg
+		}
+	}
+	return ""
+}
+
+// sedPrintPattern matches `N p` or `N,M p` line-print scripts.
+func sedPrintPattern(script string) bool {
+	core, ok := strings.CutSuffix(script, "p")
+	if !ok || core == "" {
+		return false
+	}
+	for _, part := range strings.SplitN(core, ",", 3) {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return strings.Count(core, ",") <= 1
 }
 
 func hasSubcommandPrefix(command, prefix string) bool {
@@ -535,6 +896,17 @@ func hasSubcommandPrefix(command, prefix string) bool {
 }
 
 func hasUnsafeGitOptions(args []string) bool {
+	// -p/--paginate spawn a pager only in the global-option position; after
+	// the subcommand -p means patch output (git log -p).
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			break
+		}
+		if arg == "-p" || arg == "--paginate" {
+			return true
+		}
+	}
+
 	for _, arg := range args {
 		switch arg {
 		case "-C", "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree",
@@ -564,6 +936,17 @@ func hasUnsafeGitOptions(args []string) bool {
 
 func isDangerousSingleCommand(command string) bool {
 	fields := strings.Fields(strings.TrimSpace(command))
+
+	// Subshell, group, negation, and control-flow tokens must not mask the
+	// command word: segment splitting turns `if x; then rm -rf y; fi` into a
+	// segment led by `then`.
+	for len(fields) > 0 && (fields[0] == "(" || fields[0] == "{" || fields[0] == "!" || shellKeywords[fields[0]]) {
+		fields = fields[1:]
+	}
+	if len(fields) > 0 {
+		fields = append([]string{strings.TrimLeft(fields[0], "({!")}, fields[1:]...)
+	}
+
 	if len(fields) == 0 {
 		return false
 	}
@@ -572,11 +955,24 @@ func isDangerousSingleCommand(command string) bool {
 	if unresolved {
 		return cmd != ""
 	}
+	if isUnresolvableCommandWord(words[0]) {
+		return true
+	}
 	args := words[1:]
 
 	switch cmd {
 	case "sudo", "su", "doas":
 		return true
+	case "eval":
+		return true
+	case "trap":
+		return IsDangerousCommand(trapAction(strings.Join(args, " ")))
+	case "sh", "bash", "zsh", "fish", "dash", "ksh":
+		return IsDangerousCommand(extractShellScriptArg(args))
+	case "find":
+		return findHasDangerousAction(args)
+	case "fd":
+		return fdHasDangerousExec(args)
 	case "dd", "mkfs", "mount", "umount", "diskutil", "launchctl", "systemctl", "service":
 		return true
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
@@ -599,10 +995,131 @@ func isDangerousSingleCommand(command string) bool {
 		return argsHaveURL(args) && containsArgFold(args, "url.dll,fileprotocolhandler")
 	case "rm":
 		return hasRecursiveRemoveArg(args)
+	case "tee":
+		for _, arg := range args {
+			if !strings.HasPrefix(arg, "-") && isProtectedRedirectTarget(arg) {
+				return true
+			}
+		}
+		return false
+	case "cp", "mv", "install":
+		for i := len(args) - 1; i >= 0; i-- {
+			if strings.HasPrefix(args[i], "-") {
+				continue
+			}
+			return isProtectedRedirectTarget(args[i])
+		}
+		return false
 	case "git":
 		return isDangerousGitCommand(args)
 	}
 
+	return false
+}
+
+var shellKeywords = map[string]bool{
+	"if": true, "then": true, "elif": true, "else": true, "fi": true,
+	"while": true, "until": true, "do": true, "done": true, "esac": true,
+}
+
+// trapAction returns the trap's action operand: the first quoted string, or
+// the first word when unquoted.
+func trapAction(rest string) string {
+	rest = strings.TrimSpace(rest)
+	for strings.HasPrefix(rest, "-") {
+		i := strings.IndexByte(rest, ' ')
+		if i < 0 {
+			return ""
+		}
+		rest = strings.TrimSpace(rest[i+1:])
+	}
+	if rest == "" {
+		return ""
+	}
+	if rest[0] == '\'' || rest[0] == '"' {
+		if end := strings.IndexByte(rest[1:], rest[0]); end >= 0 {
+			return rest[1 : 1+end]
+		}
+		return rest[1:]
+	}
+	if i := strings.IndexByte(rest, ' '); i >= 0 {
+		return rest[:i]
+	}
+	return rest
+}
+
+// isUnresolvableCommandWord flags command words whose target cannot be read
+// from the text: a bare variable, or a substitution executed as the command.
+// Variable-prefixed paths ($HOME/bin/tool) stay classifiable and are allowed.
+func isUnresolvableCommandWord(word string) bool {
+	word = strings.Trim(word, `"'`)
+
+	if strings.HasPrefix(word, "$(") || strings.HasPrefix(word, "`") {
+		return true
+	}
+	if !strings.HasPrefix(word, "$") {
+		return false
+	}
+
+	name := strings.TrimSuffix(strings.TrimPrefix(word[1:], "{"), "}")
+	if name == "" {
+		return true
+	}
+	for i, r := range name {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// extractShellScriptArg returns the script passed to a shell via -c (also in
+// clusters like -lc); positional script files are left to normal
+// classification.
+func extractShellScriptArg(args []string) string {
+	for i, arg := range args {
+		if arg == "--" || !strings.HasPrefix(arg, "-") {
+			return ""
+		}
+		if strings.ContainsRune(strings.TrimLeft(arg, "-"), 'c') {
+			if i+1 < len(args) {
+				return trimOuterQuotes(strings.Join(args[i+1:], " "))
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+// findHasDangerousAction classifies -exec payloads; -delete stays benign like
+// a plain non-recursive rm — it is scoped by find's own filters.
+func findHasDangerousAction(args []string) bool {
+	for i, arg := range args {
+		switch arg {
+		case "-exec", "-execdir", "-ok", "-okdir":
+			var payload []string
+			for _, a := range args[i+1:] {
+				if trimmed := strings.Trim(a, `"'`); trimmed == ";" || trimmed == `\;` || trimmed == "+" {
+					break
+				}
+				payload = append(payload, a)
+			}
+			if isDangerousSingleCommand(strings.Join(payload, " ")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func fdHasDangerousExec(args []string) bool {
+	for i, arg := range args {
+		switch arg {
+		case "-x", "--exec", "-X", "--exec-batch":
+			return isDangerousSingleCommand(strings.Join(args[i+1:], " "))
+		}
+	}
 	return false
 }
 
@@ -804,7 +1321,7 @@ func isShellInterpreter(command string) bool {
 		return false
 	}
 	switch strings.ToLower(filepath.Base(words[0])) {
-	case "sh", "bash", "zsh", "fish":
+	case "sh", "bash", "zsh", "fish", "dash", "ksh":
 		return true
 	}
 	return false
