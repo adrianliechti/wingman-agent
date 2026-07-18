@@ -70,6 +70,12 @@ func (a *App) streamCells(width int) []string {
 		lines = append(lines, cellToolProgress(toolName, toolHint, width)...)
 	}
 
+	// While the spinner is visible the tail always ends blank, so tool and
+	// reasoning cells never sit tight against the status row.
+	if a.isStreaming() && (a.prevWasTool || len(lines) > 0) && (len(lines) == 0 || lines[len(lines)-1] != "") {
+		lines = append(lines, "")
+	}
+
 	return lines
 }
 

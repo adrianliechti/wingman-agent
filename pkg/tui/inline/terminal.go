@@ -145,6 +145,13 @@ func (t *Terminal) querySize() (int, int) {
 	if t.sizeFn != nil {
 		return t.sizeFn()
 	}
+	// Windows can only report the size on the output handle
+	// (GetConsoleScreenBufferInfo); stdin works everywhere else.
+	if f, ok := t.out.(*os.File); ok {
+		if w, h, err := term.GetSize(int(f.Fd())); err == nil && w > 0 {
+			return w, h
+		}
+	}
 	if t.in != nil {
 		if w, h, err := term.GetSize(int(t.in.Fd())); err == nil && w > 0 {
 			return w, h
