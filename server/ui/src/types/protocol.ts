@@ -48,6 +48,7 @@ interface PromptResponseMessage {
 	prompt_id: string;
 	text?: string;
 	approved?: boolean;
+	always?: boolean;
 	action?: PromptAction;
 	content?: Record<string, unknown>;
 }
@@ -106,6 +107,12 @@ interface ToolResultMessage {
 	id: string;
 	name: string;
 	content: string;
+}
+
+interface ToolProgressMessage {
+	type: "tool_progress";
+	id: string;
+	text?: string;
 }
 
 interface PhaseMessage {
@@ -242,6 +249,7 @@ export type ServerMessage =
 	| ReasoningDeltaMessage
 	| ToolCallMessage
 	| ToolResultMessage
+	| ToolProgressMessage
 	| PhaseMessage
 	| UsageMessage
 	| ErrorMessage

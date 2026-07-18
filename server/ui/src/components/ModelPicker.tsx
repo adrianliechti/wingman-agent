@@ -204,9 +204,7 @@ export function ModelPicker({ sessionId, subscribe }: Props) {
 									max={steps.length - 1}
 									step={1}
 									value={stepIndex}
-									onChange={(e) =>
-										selectEffort(steps[Number(e.target.value)])
-									}
+									onChange={(e) => selectEffort(steps[Number(e.target.value)])}
 									className="effort-slider relative w-full"
 								/>
 							</div>

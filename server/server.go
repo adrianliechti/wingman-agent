@@ -71,6 +71,7 @@ type Server struct {
 
 	promptsMu      sync.Mutex
 	pendingPrompts map[string]pendingPrompt
+	confirmAll     map[string]bool
 
 	files           *watch.Monitor
 	prevGit         bool
@@ -99,6 +100,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 		phases:         map[string]string{},
 		wsConns:        map[*websocket.Conn]*wsClient{},
 		pendingPrompts: map[string]pendingPrompt{},
+		confirmAll:     map[string]bool{},
 		turnMeta:       map[string]map[string]ClientMessage{},
 		turnUsage:      map[string]agent.Usage{},
 	}
@@ -106,7 +108,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	wa := coder.New(ws, cfg, nil)
 	wa.SetUI(s)
 	s.agent = wa
-	s.turns = code.NewTurnManager(ctx, wa, s.handleTurnEvent)
+	s.turns = code.NewTurnManager(tool.WithProgressSink(ctx, s.onToolProgress), wa, s.handleTurnEvent)
 
 	ws.WarmUp()
 
@@ -169,7 +171,7 @@ func (s *Server) swapAgent(next code.Agent) {
 	prev := s.agent
 	prevTurns := s.turns
 	s.agent = next
-	s.turns = code.NewTurnManager(s.ctx, next, s.handleTurnEvent)
+	s.turns = code.NewTurnManager(tool.WithProgressSink(s.ctx, s.onToolProgress), next, s.handleTurnEvent)
 	s.mu.Unlock()
 	if prevTurns != nil {
 		prevTurns.SetHandler(nil)
@@ -179,9 +181,16 @@ func (s *Server) swapAgent(next code.Agent) {
 	s.turnMeta = map[string]map[string]ClientMessage{}
 	s.turnUsage = map[string]agent.Usage{}
 	s.turnMetaMu.Unlock()
+	s.promptsMu.Lock()
+	s.confirmAll = map[string]bool{}
+	s.promptsMu.Unlock()
 	if prev != nil && prev != next {
 		_ = prev.Close()
 	}
+}
+
+func (s *Server) onToolProgress(callID, text string) {
+	s.broadcast(Frame{Type: EvtToolProgress, ID: callID, Text: text})
 }
 
 func (s *Server) activeRuntime() (code.Agent, *code.TurnManager) {
@@ -606,6 +615,7 @@ func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.broadcast(Frame{Type: EvtModelChanged})
 	writeJSON(w, map[string]string{"model": body.Model})
 }
 

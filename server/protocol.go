@@ -27,6 +27,7 @@ type ClientMessage struct {
 
 	PromptID string         `json:"prompt_id,omitempty"`
 	Approved bool           `json:"approved,omitempty"`
+	Always   bool           `json:"always,omitempty"`
 	Action   string         `json:"action,omitempty"`
 	Content  map[string]any `json:"content,omitempty"`
 }
@@ -37,6 +38,7 @@ const (
 	EvtReasoningDelta      = "reasoning_delta"
 	EvtToolCall            = "tool_call"
 	EvtToolResult          = "tool_result"
+	EvtToolProgress        = "tool_progress"
 	EvtPhase               = "phase"
 	EvtUsage               = "usage"
 	EvtError               = "error"

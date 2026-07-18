@@ -44,10 +44,26 @@ func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elici
 }
 
 func (s *Server) Confirm(ctx context.Context, message string) (bool, error) {
+	sid := code.SessionIDFromContext(ctx)
+
+	s.promptsMu.Lock()
+	all := s.confirmAll[sid]
+	s.promptsMu.Unlock()
+	if all {
+		return true, nil
+	}
+
 	reply, err := s.prompt(ctx, PromptKindConfirm, message, nil)
 	if err != nil {
 		return false, err
 	}
+
+	if reply.Approved && reply.Always {
+		s.promptsMu.Lock()
+		s.confirmAll[sid] = true
+		s.promptsMu.Unlock()
+	}
+
 	return reply.Approved, nil
 }
 

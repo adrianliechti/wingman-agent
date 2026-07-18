@@ -23,7 +23,6 @@ export function useCapabilities(subscribe?: Subscribe): Capabilities | null {
 	}, []);
 
 	useEffect(() => {
-		// eslint-disable-next-line react-hooks/set-state-in-effect -- standard data-load on mount
 		load();
 	}, [load]);
 

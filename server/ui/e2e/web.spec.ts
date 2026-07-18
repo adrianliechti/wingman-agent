@@ -32,7 +32,9 @@ test("cancels an active coding turn", async ({ page, request }) => {
 	const input = await composer(page);
 	await input.fill("cancel this request");
 	await input.press("Enter");
-	await expect(page.getByText("Long-running work", { exact: true })).toBeVisible();
+	await expect(
+		page.getByText("Long-running work", { exact: true }),
+	).toBeVisible();
 
 	await page.getByTitle("Stop (Esc)").click();
 	await expect(page.getByText("Cancelled", { exact: true })).toBeVisible();
@@ -51,11 +53,17 @@ test("steers an active turn without merging response boundaries", async ({
 
 	await input.fill("steer this turn");
 	await input.press("Enter");
-	await expect(page.getByText("steer this turn", { exact: true })).toBeVisible();
+	await expect(
+		page.getByText("steer this turn", { exact: true }),
+	).toBeVisible();
 
 	const release = await request.post(`${controlURL()}/release-steer`);
 	expect(release.ok()).toBeTruthy();
-	await expect(page.getByText("Steering applied", { exact: true })).toBeVisible();
-	await expect(page.getByText("WorkingSteering applied", { exact: true })).toHaveCount(0);
+	await expect(
+		page.getByText("Steering applied", { exact: true }),
+	).toBeVisible();
+	await expect(
+		page.getByText("WorkingSteering applied", { exact: true }),
+	).toHaveCount(0);
 	await expect(page.getByText("Queue paused", { exact: true })).toHaveCount(0);
 });

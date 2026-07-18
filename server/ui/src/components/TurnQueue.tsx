@@ -26,7 +26,14 @@ function statusLabel(item: PendingTurnInput): string {
 	}
 }
 
-export function TurnQueue({ items, paused, onEdit, onRemove, onResume, onClear }: Props) {
+export function TurnQueue({
+	items,
+	paused,
+	onEdit,
+	onRemove,
+	onResume,
+	onClear,
+}: Props) {
 	const queued = items.filter(
 		(item) => item.state === "queued" || item.state === "sending",
 	);
@@ -63,7 +70,9 @@ export function TurnQueue({ items, paused, onEdit, onRemove, onResume, onClear }
 				{items.map((item) => {
 					const attachments = item.files.length + item.images.length;
 					const editable =
-						item.state === "queued" || item.state === "failed" || item.state === "cancelled";
+						item.state === "queued" ||
+						item.state === "failed" ||
+						item.state === "cancelled";
 					return (
 						<div
 							key={item.id}
@@ -90,14 +99,20 @@ export function TurnQueue({ items, paused, onEdit, onRemove, onResume, onClear }
 											: "Empty message")}
 							</span>
 							{attachments > 0 && (
-								<span className="shrink-0 text-[9px] font-mono text-fg-dim">+{attachments}</span>
+								<span className="shrink-0 text-[9px] font-mono text-fg-dim">
+									+{attachments}
+								</span>
 							)}
 							{editable && (
 								<button
 									type="button"
 									className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-fg-dim hover:bg-bg-active hover:text-fg"
 									onClick={() => onEdit(item)}
-									title={item.state === "queued" ? "Edit queued message" : "Restore as draft"}
+									title={
+										item.state === "queued"
+											? "Edit queued message"
+											: "Restore as draft"
+									}
 								>
 									<Pencil size={10} />
 								</button>
@@ -106,7 +121,11 @@ export function TurnQueue({ items, paused, onEdit, onRemove, onResume, onClear }
 								type="button"
 								className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-fg-dim hover:bg-bg-active hover:text-danger"
 								onClick={() => onRemove?.(item.id, item.state)}
-								title={item.state === "queued" || item.state === "sending" ? "Remove from queue" : "Dismiss"}
+								title={
+									item.state === "queued" || item.state === "sending"
+										? "Remove from queue"
+										: "Dismiss"
+								}
 							>
 								<X size={11} />
 							</button>

@@ -22,6 +22,7 @@ export interface PendingPrompt {
 export interface PromptReply {
 	text?: string;
 	approved?: boolean;
+	always?: boolean;
 	action?: PromptAction;
 	content?: Record<string, unknown>;
 }
@@ -253,6 +254,7 @@ export function useWebSocket() {
 	const wsRef = useRef<WebSocket | null>(null);
 	const [connected, setConnected] = useState(false);
 	const [sessions, setSessions] = useState<Record<string, SessionState>>({});
+	const [toolProgress, setToolProgress] = useState<Record<string, string>>({});
 
 	const sessionsSnapshotRef = useRef(sessions);
 	useEffect(() => {
@@ -416,6 +418,17 @@ export function useWebSocket() {
 			sub(msg);
 		}
 
+		if (msg.type === "tool_progress") {
+			setToolProgress((prev) => {
+				if (msg.text) return { ...prev, [msg.id]: msg.text };
+				if (!(msg.id in prev)) return prev;
+				const rest = { ...prev };
+				delete rest[msg.id];
+				return rest;
+			});
+			return;
+		}
+
 		const sid = "session" in msg ? msg.session : undefined;
 		if (!sid) return;
 
@@ -506,6 +519,12 @@ export function useWebSocket() {
 			}
 
 			case "tool_result": {
+				setToolProgress((prev) => {
+					if (!(msg.id in prev)) return prev;
+					const rest = { ...prev };
+					delete rest[msg.id];
+					return rest;
+				});
 				updateSession(sid, (sess) => {
 					const idx = sess.entries.findLastIndex(
 						(e) => e.type === "tool" && e.toolId === msg.id,
@@ -605,7 +624,9 @@ export function useWebSocket() {
 					} else if (msg.state === "queued" || msg.state === "sending") {
 						pendingInputs = upsertPending(pendingInputs, input);
 					} else if (msg.state === "cancelled" || msg.state === "failed") {
-						const wasVisible = entries.some((entry) => entry.inputId === msg.id);
+						const wasVisible = entries.some(
+							(entry) => entry.inputId === msg.id,
+						);
 						pendingInputs = wasVisible
 							? pendingInputs.filter((item) => item.id !== msg.id)
 							: upsertPending(pendingInputs, input);
@@ -618,7 +639,9 @@ export function useWebSocket() {
 			}
 
 			case "turn_queue": {
-				const live = (msg.queue ?? []).map((entry) => pendingInputFromEntry(entry));
+				const live = (msg.queue ?? []).map((entry) =>
+					pendingInputFromEntry(entry),
+				);
 				const liveIDs = new Set(live.map((entry) => entry.id));
 				updateSession(sid, (sess) => {
 					let entries = sess.entries;
@@ -742,12 +765,15 @@ export function useWebSocket() {
 		[send],
 	);
 
-	const dismissPending = useCallback((sessionId: string, id: string) => {
-		updateSession(sessionId, (sess) => ({
-			...sess,
-			pendingInputs: sess.pendingInputs.filter((input) => input.id !== id),
-		}));
-	}, [updateSession]);
+	const dismissPending = useCallback(
+		(sessionId: string, id: string) => {
+			updateSession(sessionId, (sess) => ({
+				...sess,
+				pendingInputs: sess.pendingInputs.filter((input) => input.id !== id),
+			}));
+		},
+		[updateSession],
+	);
 
 	useEffect(() => {
 		const onFocus = () => send({ type: "focus" });
@@ -763,6 +789,7 @@ export function useWebSocket() {
 				prompt_id: promptId,
 				text: reply.text,
 				approved: reply.approved,
+				always: reply.always,
 				action: reply.action,
 				content: reply.content,
 			});
@@ -860,7 +887,8 @@ export function useWebSocket() {
 									? {
 											...input,
 											state: "failed",
-											error: "Connection was lost before delivery was confirmed.",
+											error:
+												"Connection was lost before delivery was confirmed.",
 										}
 									: input,
 							),
@@ -895,6 +923,7 @@ export function useWebSocket() {
 	return {
 		connected,
 		sessions,
+		toolProgress,
 		hasSession,
 		sendChat,
 		cancel,

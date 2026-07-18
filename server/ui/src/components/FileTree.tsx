@@ -241,6 +241,12 @@ export function FileTree({ onFileSelect, subscribe }: Props) {
 					<div
 						className="flex items-center gap-1 py-[3px] pr-2 cursor-pointer text-fg-muted whitespace-nowrap text-[12px] leading-snug select-none hover:bg-bg-hover hover:text-fg transition-colors"
 						style={{ paddingLeft: 12 + depth * 12 }}
+						draggable={!node.is_dir && !isRenaming}
+						onDragStart={(e) => {
+							e.dataTransfer.setData("application/x-wingman-file", node.path);
+							e.dataTransfer.setData("text/plain", node.path);
+							e.dataTransfer.effectAllowed = "copy";
+						}}
 						onClick={() => {
 							if (isRenaming) return;
 							if (node.is_dir) {

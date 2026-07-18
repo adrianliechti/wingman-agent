@@ -7,7 +7,10 @@ import "katex/dist/katex.min.css";
 
 // Light/dark Shiki themes; Streamdown swaps them with the dark variant, which
 // follows prefers-color-scheme — matching the app's theme switching.
-const SHIKI_THEME: [BundledTheme, BundledTheme] = ["github-light", "github-dark"];
+const SHIKI_THEME: [BundledTheme, BundledTheme] = [
+	"github-light",
+	"github-dark",
+];
 
 // Code highlighting (Shiki), mermaid diagrams, and KaTeX math. Built-in copy/
 // download controls come on by default and are suppressed while streaming.
@@ -30,7 +33,9 @@ const components = {
 	},
 	h1({ children }: { children?: React.ReactNode }) {
 		return (
-			<h1 className="mt-4 mb-2 font-semibold text-[15px] text-fg">{children}</h1>
+			<h1 className="mt-4 mb-2 font-semibold text-[15px] text-fg">
+				{children}
+			</h1>
 		);
 	},
 	h2({ children }: { children?: React.ReactNode }) {

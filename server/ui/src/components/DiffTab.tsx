@@ -50,7 +50,6 @@ export function DiffTab({ path, sessionId, subscribe, onDeleted }: Props) {
 
 	useEffect(() => {
 		hadDiffRef.current = false;
-		// eslint-disable-next-line react-hooks/set-state-in-effect -- standard data-load on mount/path change
 		setLoading(true);
 		setError(null);
 		load();

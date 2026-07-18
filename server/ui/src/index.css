@@ -246,8 +246,10 @@ body {
 
 /* The floating action row defaults to h-8/-mt-10 to cover the stock h-8
    header + gap-2; resize it to the 20px header + 4px gap above. */
-[data-streamdown="code-block"] > div:has([data-streamdown="code-block-actions"]),
-[data-streamdown="mermaid-block"] > div:has([data-streamdown="mermaid-block-actions"]) {
+[data-streamdown="code-block"]
+	> div:has([data-streamdown="code-block-actions"]),
+[data-streamdown="mermaid-block"]
+	> div:has([data-streamdown="mermaid-block-actions"]) {
 	height: 20px;
 	margin-top: -24px;
 }
@@ -279,4 +281,3 @@ body {
 [data-streamdown="table-cell"] {
 	border-color: var(--color-border-subtle);
 }
-

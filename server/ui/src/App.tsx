@@ -1,4 +1,5 @@
 import {
+	Compass,
 	FileText,
 	GitCompare,
 	Loader2,
@@ -8,9 +9,10 @@ import {
 	PanelRightClose,
 	PanelRightOpen,
 	Plus,
+	Wrench,
 	X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	Group,
 	Panel,
@@ -20,6 +22,11 @@ import {
 	usePanelRef,
 } from "react-resizable-panels";
 import { ChatPanel } from "./components/ChatPanel";
+import {
+	CommandPalette,
+	type PaletteAction,
+	type PaletteSkill,
+} from "./components/CommandPalette";
 import type { ModeOption } from "./components/ModePicker";
 import { CheckpointsPanel } from "./components/CheckpointsPanel";
 import { DiffsPanel } from "./components/DiffsPanel";
@@ -72,6 +79,7 @@ export default function App() {
 	const {
 		connected,
 		sessions,
+		toolProgress,
 		hasSession,
 		sendChat,
 		cancel,
@@ -102,6 +110,22 @@ export default function App() {
 	const [tabs, setTabs] = useState<CenterTab[]>([draftChatTab()]);
 	const [activeTabId, setActiveTabId] = useState(chatTabId(""));
 	const [currentSessionId, setCurrentSessionId] = useState("");
+	const [paletteOpen, setPaletteOpen] = useState(false);
+	const [composerSeed, setComposerSeed] = useState<{
+		text: string;
+		nonce: number;
+	} | null>(null);
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+				e.preventDefault();
+				setPaletteOpen((o) => !o);
+			}
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, []);
 
 	const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
 	const sessionId =
@@ -250,7 +274,6 @@ export default function App() {
 
 	useEffect(() => {
 		if (tabs.some((t) => t.id === activeTabId)) return;
-		// eslint-disable-next-line react-hooks/set-state-in-effect -- settles in one pass
 		activateTab(tabs[0] ?? draftChatTab());
 	}, [tabs, activeTabId, activateTab]);
 
@@ -406,6 +429,25 @@ export default function App() {
 		[sendChat, ensureSessionId],
 	);
 
+	const focusChat = useCallback(() => {
+		const tab =
+			tabs.find((t) => t.type === "chat" && t.sessionId === currentSessionId) ??
+			tabs.find((t) => t.type === "chat");
+		if (tab) activateTab(tab);
+	}, [tabs, currentSessionId, activateTab]);
+
+	const runSkill = useCallback(
+		(skill: PaletteSkill) => {
+			focusChat();
+			if (skill.arguments && skill.arguments.length > 0) {
+				setComposerSeed({ text: `/${skill.name} `, nonce: Date.now() });
+				return;
+			}
+			void handleSend(`/${skill.name}`);
+		},
+		[focusChat, handleSend],
+	);
+
 	const [modes, setModes] = useState<ModeOption[]>([]);
 	const [mode, setMode] = useState<string>("");
 
@@ -444,12 +486,78 @@ export default function App() {
 		[ensureSessionId, mode],
 	);
 
-	const handleCancel = useCallback((clear = false) => {
-		if (sessionId) cancel(sessionId, clear);
-	}, [cancel, sessionId]);
+	const handleCancel = useCallback(
+		(clear = false) => {
+			if (sessionId) cancel(sessionId, clear);
+		},
+		[cancel, sessionId],
+	);
 
 	const [noticeDismissed, setNoticeDismissed] = useState(false);
 	const showNotice = !!capabilities?.notice && !noticeDismissed;
+
+	const paletteActions = useMemo<PaletteAction[]>(() => {
+		const actions: PaletteAction[] = [
+			{
+				id: "new-session",
+				label: "New session",
+				icon: <Plus size={12} className="text-fg-dim shrink-0" />,
+				run: () => void handleNewSession(),
+			},
+			{
+				id: "toggle-sidebar",
+				label: "Toggle sidebar",
+				icon: <PanelLeftOpen size={12} className="text-fg-dim shrink-0" />,
+				run: () => togglePanel(leftPanelRef.current),
+			},
+			{
+				id: "toggle-panel",
+				label: "Toggle side panel",
+				icon: <PanelRightOpen size={12} className="text-fg-dim shrink-0" />,
+				run: () => togglePanel(rightPanelRef.current),
+			},
+		];
+		if (showChanges) {
+			actions.push({
+				id: "show-changes",
+				label: "Show changes",
+				icon: <GitCompare size={12} className="text-fg-dim shrink-0" />,
+				run: () => {
+					setRequestedRightTab("changes");
+					expandPanel(rightPanelRef.current);
+				},
+			});
+		}
+		actions.push({
+			id: "show-files",
+			label: "Show files",
+			icon: <FileText size={12} className="text-fg-dim shrink-0" />,
+			run: () => {
+				setRequestedRightTab("files");
+				expandPanel(rightPanelRef.current);
+			},
+		});
+		for (const m of modes) {
+			if (m.id === mode) continue;
+			const Icon = /plan|read|only/i.test(m.id) ? Compass : Wrench;
+			actions.push({
+				id: `mode-${m.id}`,
+				label: `Switch to ${m.name} mode`,
+				hint: m.description,
+				icon: <Icon size={12} className="text-fg-dim shrink-0" />,
+				run: () => void selectMode(m.id),
+			});
+		}
+		return actions;
+	}, [
+		handleNewSession,
+		showChanges,
+		leftPanelRef,
+		rightPanelRef,
+		modes,
+		mode,
+		selectMode,
+	]);
 
 	const runningSessionIds = new Set(
 		Object.values(sessions)
@@ -682,6 +790,8 @@ export default function App() {
 								subscribe={subscribe}
 								prompt={prompt}
 								onPromptReply={handlePromptReply}
+								seed={composerSeed}
+								toolProgress={toolProgress}
 							/>
 						) : activeTab.type === "diff" && activeTab.path ? (
 							<DiffTab
@@ -776,6 +886,17 @@ export default function App() {
 				</Panel>
 			</Group>
 
+			{paletteOpen && (
+				<CommandPalette
+					sessionId={sessionId}
+					onClose={() => setPaletteOpen(false)}
+					actions={paletteActions}
+					onRunSkill={runSkill}
+					onSelectSession={(id) => void handleSessionSelect(id)}
+					onOpenFile={openFile}
+				/>
+			)}
+
 			{!connected && (
 				<div className="absolute inset-0 z-50 flex items-center justify-center backdrop-blur-md bg-bg/60">
 					<div className="flex flex-col items-center gap-3 text-fg-muted">
@@ -808,6 +929,10 @@ function togglePanel(panel: PanelImperativeHandle | null) {
 	if (!panel) return;
 	if (panel.isCollapsed()) panel.expand();
 	else panel.collapse();
+}
+
+function expandPanel(panel: PanelImperativeHandle | null) {
+	panel?.expand();
 }
 
 function ResizeHandle() {
@@ -846,7 +971,10 @@ function ContextLeft({ used, window }: { used: number; window: number }) {
 	const tone =
 		left <= 10 ? "text-danger" : left <= 30 ? "text-warning" : "text-fg-dim";
 	return (
-		<span className={`ml-2 ${tone}`} title={`${formatTokens(used)} of ${formatTokens(window)} context used`}>
+		<span
+			className={`ml-2 ${tone}`}
+			title={`${formatTokens(used)} of ${formatTokens(window)} context used`}
+		>
 			{left}% left
 		</span>
 	);
