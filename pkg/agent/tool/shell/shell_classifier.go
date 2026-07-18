@@ -242,8 +242,13 @@ func hasDangerousRedirectTarget(command string) bool {
 // and shell/git startup files.
 func isProtectedRedirectTarget(path string) bool {
 	path = strings.ToLower(strings.Trim(path, `"'`))
+	path = strings.ReplaceAll(path, `\`, "/")
 	if path == "" {
 		return false
+	}
+
+	if len(path) > 2 && path[1] == ':' && strings.HasPrefix(path[2:], "/windows/") {
+		return true
 	}
 
 	if strings.HasPrefix(path, "/dev/") {
@@ -264,7 +269,8 @@ func isProtectedRedirectTarget(path string) bool {
 	}
 
 	switch path[strings.LastIndexByte(path, '/')+1:] {
-	case ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".gitconfig":
+	case ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".gitconfig",
+		"profile.ps1", "microsoft.powershell_profile.ps1", "microsoft.vscode_profile.ps1":
 		return true
 	}
 
