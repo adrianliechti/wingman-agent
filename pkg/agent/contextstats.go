@@ -49,9 +49,6 @@ func (a *Agent) ContextStats() ContextStats {
 
 		if a.Tools != nil {
 			for _, t := range a.Tools() {
-				if t.Hidden {
-					continue
-				}
 				size := len(t.Name) + len(t.Description)
 				if params, err := json.Marshal(t.Parameters); err == nil {
 					size += len(params)

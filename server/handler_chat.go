@@ -159,6 +159,7 @@ func (s *Server) handleSend(ctx context.Context, msg ClientMessage) {
 		return
 	}
 	s.sendTurnSnapshot(msg.SessionID)
+	s.ensureTaskPump(msg.SessionID)
 }
 
 func (s *Server) handleTurnEvent(ev code.TurnEvent) {

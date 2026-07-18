@@ -5,6 +5,7 @@ interface Capabilities {
 	git: boolean;
 	lsp: boolean;
 	diffs: boolean;
+	tasks?: boolean;
 	notice?: string;
 }
 
@@ -29,7 +30,7 @@ export function useCapabilities(subscribe?: Subscribe): Capabilities | null {
 	useEffect(() => {
 		if (!subscribe) return;
 		return subscribe((msg) => {
-			if (msg.type === "capabilities_changed") {
+			if (msg.type === "capabilities_changed" || msg.type === "agent_changed") {
 				load();
 			}
 		});

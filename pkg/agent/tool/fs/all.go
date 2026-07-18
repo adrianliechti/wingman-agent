@@ -9,6 +9,7 @@ import (
 type Options struct {
 	AllowedReadRoots  []string
 	AllowedWriteRoots []string
+	Freshness         *Freshness
 }
 
 func Tools(root *os.Root, opts *Options) []tool.Tool {
@@ -17,9 +18,9 @@ func Tools(root *os.Root, opts *Options) []tool.Tool {
 	}
 	tracker := newContentTracker()
 	return []tool.Tool{
-		readTool(root, tracker, opts.AllowedReadRoots...),
-		writeTool(root, tracker, opts.AllowedWriteRoots...),
-		editTool(root, tracker, opts.AllowedWriteRoots...),
+		readTool(root, tracker, opts.Freshness, opts.AllowedReadRoots...),
+		writeTool(root, tracker, opts.Freshness, opts.AllowedWriteRoots...),
+		editTool(root, tracker, opts.Freshness, opts.AllowedWriteRoots...),
 		GrepTool(root, opts.AllowedReadRoots...),
 		GlobTool(root, opts.AllowedReadRoots...),
 		ImageTool(root, opts.AllowedReadRoots...),

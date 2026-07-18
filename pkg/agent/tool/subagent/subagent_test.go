@@ -134,11 +134,24 @@ func TestAgentToolBackgroundValidation(t *testing.T) {
 	}
 
 	withTasks := Tools(&agent.Config{}, nil, reg)[0]
-	_, err = withTasks.Execute(t.Context(), map[string]any{
+	out, err := withTasks.Execute(t.Context(), map[string]any{
 		"description": "d", "prompt": "p", "agent_type": "general-purpose", "background": true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "cannot run in the background") {
-		t.Fatalf("err = %v, want editing-type rejection", err)
+	if err != nil {
+		t.Fatalf("editing types must be backgroundable, got %v", err)
+	}
+	if !strings.Contains(out, "Launched background agent") {
+		t.Fatalf("launch result = %q", out)
+	}
+	// The empty config has no model client, so the run dies — the registry
+	// must contain that as a failed task instead of crashing the process.
+	select {
+	case done := <-reg.Events():
+		if done.Status != task.StatusFailed {
+			t.Fatalf("status = %s, want failed", done.Status)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no completion event for background general-purpose agent")
 	}
 }
 
@@ -200,20 +213,20 @@ func TestAgentToolBackgroundRunsDetached(t *testing.T) {
 		t.Fatalf("launch result = %q", out)
 	}
 
-	var done *task.Task
+	var done task.Event
 	select {
 	case done = <-reg.Events():
 	case <-time.After(10 * time.Second):
 		t.Fatal("no completion event")
 	}
 
-	if done.Status() != task.StatusDone {
-		t.Fatalf("status = %s, result = %q", done.Status(), done.Result())
+	if done.Status != task.StatusDone {
+		t.Fatalf("status = %s, result = %q", done.Status, done.Result)
 	}
-	if !strings.Contains(done.Result(), "background report") {
-		t.Fatalf("result = %q", done.Result())
+	if !strings.Contains(done.Result, "background report") {
+		t.Fatalf("result = %q", done.Result)
 	}
-	messages := done.PeekMessages()
+	messages := done.Task.PeekMessages()
 	if len(messages) == 0 {
 		t.Fatal("peek returned no transcript")
 	}
@@ -230,7 +243,7 @@ func TestAgentToolBackgroundRunsDetached(t *testing.T) {
 	}
 
 	out, err = byName["task_send"].Execute(t.Context(), map[string]any{
-		"id": done.ID, "message": "and one more thing",
+		"id": done.Task.ID, "message": "and one more thing",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -241,14 +254,17 @@ func TestAgentToolBackgroundRunsDetached(t *testing.T) {
 
 	select {
 	case reply := <-reg.Events():
-		if reply != done {
+		if reply.Task != done.Task {
 			t.Fatal("follow-up completed as a different task")
 		}
-		if reply.Seq() != 2 || reply.Status() != task.StatusDone {
-			t.Fatalf("seq = %d, status = %s", reply.Seq(), reply.Status())
+		if reply.Seq != 2 || reply.Status != task.StatusDone {
+			t.Fatalf("seq = %d, status = %s", reply.Seq, reply.Status)
 		}
-		if !strings.Contains(reply.Result(), "background report") {
-			t.Fatalf("reply result = %q", reply.Result())
+		if !strings.Contains(reply.Result, "background report") {
+			t.Fatalf("reply result = %q", reply.Result)
+		}
+		if strings.Count(reply.Result, "background report") != 1 {
+			t.Fatalf("reply duplicates prior run output: %q", reply.Result)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("no reply event")

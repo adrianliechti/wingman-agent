@@ -10,10 +10,10 @@ import (
 )
 
 func WriteTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
-	return writeTool(root, nil, allowedWriteRoots...)
+	return writeTool(root, nil, nil, allowedWriteRoots...)
 }
 
-func writeTool(root *os.Root, tracker *contentTracker, allowedWriteRoots ...string) tool.Tool {
+func writeTool(root *os.Root, tracker *contentTracker, freshness *Freshness, allowedWriteRoots ...string) tool.Tool {
 	lines := []string{
 		"Writes a file to the local filesystem. Creates parent directories as needed and overwrites any existing file at the same path.",
 		"- For existing files, `read` first so you do not discard content.",
@@ -84,6 +84,7 @@ func writeTool(root *os.Root, tracker *contentTracker, allowedWriteRoots ...stri
 			}
 
 			tracker.record([]byte(content))
+			freshness.record(ctx, target)
 
 			if isNew {
 				return fmt.Sprintf("Created %s (%d bytes written)", pathArg, len(content)), nil

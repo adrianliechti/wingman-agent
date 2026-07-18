@@ -16,6 +16,7 @@ func taskTools(tasks *task.Registry) []tool.Tool {
 			Name:        "task_output",
 			Description: "Check on background agents. Without `id`, lists all background agents of this session with their status. With `id`, returns that agent's status and, once finished, its full result. Results also arrive automatically as task notifications — use this to peek early or to re-read a result.",
 			Effect:      tool.StaticEffect(tool.EffectReadOnly),
+			Hidden:      true,
 
 			Parameters: map[string]any{
 				"type": "object",

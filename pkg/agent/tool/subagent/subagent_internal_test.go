@@ -226,14 +226,14 @@ func TestReportCollectorValidatesSchema(t *testing.T) {
 	if _, err := report.Execute(context.Background(), map[string]any{"result": map[string]any{"wrong": true}}); err == nil {
 		t.Fatal("expected validation error for non-matching result")
 	}
-	if collector.payload() != "" {
-		t.Fatalf("payload recorded after failed validation: %q", collector.payload())
+	if collector.take() != "" {
+		t.Fatalf("payload recorded after failed validation: %q", collector.take())
 	}
 
 	if _, err := report.Execute(context.Background(), map[string]any{"result": map[string]any{"count": float64(3)}}); err != nil {
 		t.Fatalf("valid result rejected: %v", err)
 	}
-	if got := collector.payload(); got != `{"count":3}` {
+	if got := collector.take(); got != `{"count":3}` {
 		t.Fatalf("payload = %q", got)
 	}
 }

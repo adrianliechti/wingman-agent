@@ -34,6 +34,7 @@ import { DiffTab } from "./components/DiffTab";
 import { FileTab } from "./components/FileTab";
 import { FileTree } from "./components/FileTree";
 import { ProblemsPanel } from "./components/ProblemsPanel";
+import { TasksPanel } from "./components/TasksPanel";
 import { BUILTIN_AGENT_ID } from "./components/AgentPicker";
 import { Sidebar } from "./components/Sidebar";
 import { useCapabilities } from "./hooks/useCapabilities";
@@ -53,7 +54,7 @@ interface CenterTab {
 	sessionId?: string;
 }
 
-type RightTab = "changes" | "files";
+type RightTab = "changes" | "files" | "agents";
 
 const EMPTY_ENTRIES: never[] = [];
 const EMPTY_USAGE = {
@@ -96,9 +97,14 @@ export default function App() {
 	const capabilities = useCapabilities(subscribe);
 	const showChanges = capabilities?.diffs ?? false;
 	const showProblems = capabilities?.lsp ?? false;
+	const showAgents = capabilities?.tasks ?? false;
 	const [requestedRightTab, setRequestedRightTab] =
 		useState<RightTab>("changes");
-	const rightTab = showChanges ? requestedRightTab : "files";
+	const rightTab =
+		(requestedRightTab === "changes" && !showChanges) ||
+		(requestedRightTab === "agents" && !showAgents)
+			? "files"
+			: requestedRightTab;
 	const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 	const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
 	const leftPanelRef = usePanelRef();
@@ -841,11 +847,21 @@ export default function App() {
 							>
 								Files
 							</RightTabButton>
+							{showAgents && (
+								<RightTabButton
+									active={rightTab === "agents"}
+									onClick={() => setRequestedRightTab("agents")}
+								>
+									Agents
+								</RightTabButton>
+							)}
 							<div className="flex-1" />
 						</div>
 						<div className="h-px bg-border-subtle shrink-0" />
 						<div className="flex-1 overflow-hidden">
-							{rightTab === "changes" && showChanges ? (
+							{rightTab === "agents" && showAgents ? (
+								<TasksPanel sessionId={sessionId} subscribe={subscribe} />
+							) : rightTab === "changes" && showChanges ? (
 								<div className="flex flex-col h-full">
 									<div className="flex-[3] min-h-0 overflow-hidden">
 										<DiffsPanel

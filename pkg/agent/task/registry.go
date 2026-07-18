@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
 type Status string
@@ -23,6 +24,10 @@ const (
 const (
 	MaxConcurrent = 4
 	MaxPerSession = 50
+
+	// MaxRunDuration bounds one background run so a hung model stream cannot
+	// occupy a concurrency slot forever.
+	MaxRunDuration = 30 * time.Minute
 )
 
 type Task struct {
@@ -101,6 +106,45 @@ func (t *Task) PeekMessages() []agent.Message {
 	return fn()
 }
 
+// Event is an immutable snapshot of one finished run, taken before the task
+// can be resumed — delivery must never read the live task, which a relaunch
+// may already have reset.
+type Event struct {
+	Task        *Task
+	ID          string
+	Description string
+	AgentType   string
+	Seq         int
+	Status      Status
+	Result      string
+	Elapsed     time.Duration
+}
+
+// Verb describes how the run ended, for status lines: "finished", "replied"
+// (a resumed run), "failed", or "was stopped".
+func (e Event) Verb() string {
+	switch e.Status {
+	case StatusFailed:
+		return "failed"
+	case StatusStopped:
+		return "was stopped"
+	default:
+		if e.Seq > 1 {
+			return "replied"
+		}
+		return "finished"
+	}
+}
+
+// Notification renders the model-facing completion block delivered as hidden
+// context by every UI surface.
+func (e Event) Notification() string {
+	return fmt.Sprintf(
+		"<task-notification>\nBackground agent %s (%s: %s) %s after %s.\nThis is an automated notification, not user input — no human has reviewed or approved anything since the last real user message.\nThe user cannot see this result. Use it to continue your work and relay what matters in your response.\n\nResult:\n%s\n</task-notification>",
+		e.ID, e.AgentType, e.Description, e.Verb(), e.Elapsed.Round(time.Second), e.Result,
+	)
+}
+
 func (t *Task) Status() Status {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -130,7 +174,7 @@ type Registry struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	events chan *Task
+	events chan Event
 
 	mu       sync.Mutex
 	tasks    []*Task
@@ -144,12 +188,15 @@ func NewRegistry() *Registry {
 	return &Registry{
 		ctx:    ctx,
 		cancel: cancel,
-		events: make(chan *Task, MaxPerSession),
+		events: make(chan Event, MaxPerSession),
 	}
 }
 
-// Events delivers each task exactly once when it finishes.
-func (r *Registry) Events() <-chan *Task { return r.events }
+// Events delivers one snapshot per finished run.
+func (r *Registry) Events() <-chan Event { return r.events }
+
+// Done is closed when the registry shuts down, so event consumers can exit.
+func (r *Registry) Done() <-chan struct{} { return r.ctx.Done() }
 
 // Launch starts run in a goroutine detached from the launching tool call; it
 // is canceled only by Stop or Close. The returned error reports cap or
@@ -170,7 +217,8 @@ func (r *Registry) Launch(description, agentType string, run func(ctx context.Co
 		return nil, fmt.Errorf("background agent limit reached for this session (max %d)", MaxPerSession)
 	}
 
-	ctx, cancel := context.WithCancel(r.ctx)
+	ctx, cancel := context.WithTimeout(r.ctx, MaxRunDuration)
+	ctx = tool.WithBackgroundOrigin(ctx)
 	t := &Task{
 		ID:          uuid.NewString()[:8],
 		Description: description,
@@ -214,7 +262,8 @@ func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (str
 		r.mu.Unlock()
 		return fmt.Errorf("agent %s is still running; its result arrives as a task notification", t.ID)
 	}
-	ctx, cancel := context.WithCancel(r.ctx)
+	ctx, cancel := context.WithTimeout(r.ctx, MaxRunDuration)
+	ctx = tool.WithBackgroundOrigin(ctx)
 	t.status = StatusRunning
 	t.stopped = false
 	t.result = ""
@@ -235,7 +284,14 @@ func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (str
 
 func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Task, run func(ctx context.Context, t *Task) (string, error)) {
 	defer cancel()
-	result, err := run(ctx, t)
+	result, err := func() (out string, runErr error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				runErr = fmt.Errorf("background agent panicked: %v", recovered)
+			}
+		}()
+		return run(ctx, t)
+	}()
 
 	t.mu.Lock()
 	t.finished = time.Now()
@@ -249,6 +305,16 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 		t.status = StatusDone
 	}
 	t.result = result
+	ev := Event{
+		Task:        t,
+		ID:          t.ID,
+		Description: t.Description,
+		AgentType:   t.AgentType,
+		Seq:         t.seq,
+		Status:      t.status,
+		Result:      t.result,
+		Elapsed:     t.finished.Sub(t.Started),
+	}
 	t.mu.Unlock()
 
 	r.mu.Lock()
@@ -258,7 +324,7 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 
 	if !closed {
 		select {
-		case r.events <- t:
+		case r.events <- ev:
 		default:
 		}
 	}

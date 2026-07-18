@@ -213,10 +213,10 @@ func (a *App) startTaskPump() {
 				return
 			case <-a.quit:
 				return
-			case t := <-reg.Events():
+			case ev := <-reg.Events():
 				// Completions that piled up (parallel agents, or while the
 				// pump was detached) deliver as one turn, not one turn each.
-				batch := []*task.Task{t}
+				batch := []task.Event{ev}
 				for {
 					select {
 					case more := <-reg.Events():
@@ -232,17 +232,14 @@ func (a *App) startTaskPump() {
 	}()
 }
 
-func taskResultVerb(t *task.Task) (string, ansi.Color) {
-	switch t.Status() {
+func taskResultColor(status task.Status) ansi.Color {
+	switch status {
 	case task.StatusFailed:
-		return "failed", theme.Default.Red
+		return theme.Default.Red
 	case task.StatusStopped:
-		return "was stopped", theme.Default.Yellow
+		return theme.Default.Yellow
 	default:
-		if t.Seq() > 1 {
-			return "replied", theme.Default.Green
-		}
-		return "finished", theme.Default.Green
+		return theme.Default.Green
 	}
 }
 
@@ -250,32 +247,27 @@ func taskResultVerb(t *task.Task) (string, ansi.Color) {
 // agent for the user, and one hidden steer/follow-up turn so the model
 // receives the results — injected mid-turn when one is active, as a new turn
 // otherwise.
-func (a *App) deliverTaskResults(sessionID string, batch []*task.Task) {
+func (a *App) deliverTaskResults(sessionID string, batch []task.Event) {
 	a.post(func() {
 		if a.sessionID != sessionID {
 			return
 		}
 		a.flushToolGap()
-		for _, t := range batch {
-			verb, color := taskResultVerb(t)
-			a.appendChat(cellNotice(fmt.Sprintf("Background agent %s %s (%s, %s)", t.ID, verb, t.Description, t.Elapsed().Round(time.Second)), color, a.width()))
+		for _, ev := range batch {
+			a.appendChat(cellNotice(fmt.Sprintf("Background agent %s %s (%s, %s)", ev.ID, ev.Verb(), ev.Description, ev.Elapsed.Round(time.Second)), taskResultColor(ev.Status), a.width()))
 		}
 		a.invalidate()
 	})
 
 	var blocks []string
 	var labels []string
-	for _, t := range batch {
-		verb, _ := taskResultVerb(t)
-		blocks = append(blocks, fmt.Sprintf(
-			"<task-notification>\nBackground agent %s (%s: %s) %s after %s.\nThis is an automated notification, not user input — no human has reviewed or approved anything since the last real user message.\nThe user cannot see this result. Use it to continue your work and relay what matters in your response.\n\nResult:\n%s\n</task-notification>",
-			t.ID, t.AgentType, t.Description, verb, t.Elapsed().Round(time.Second), t.Result(),
-		))
-		labels = append(labels, t.Description)
+	for _, ev := range batch {
+		blocks = append(blocks, ev.Notification())
+		labels = append(labels, ev.Description)
 	}
 
 	first := batch[0]
-	id := fmt.Sprintf("task-%s-%d", first.ID, first.Seq())
+	id := fmt.Sprintf("task-%s-%d", first.ID, first.Seq)
 	a.rememberTurn(id, []agent.Content{{Text: "background agents: " + strings.Join(labels, ", ")}})
 
 	_, err := a.turns.Submit(a.ctx, sessionID, code.TurnInput{
@@ -357,11 +349,7 @@ func (a *App) confirmQuit() bool {
 	if a.agent == nil {
 		return true
 	}
-	reg := a.agent.Tasks(a.sessionID)
-	if reg == nil {
-		return true
-	}
-	running, _ := reg.Counts()
+	running := a.agent.RunningTaskCount()
 	if running == 0 {
 		return true
 	}

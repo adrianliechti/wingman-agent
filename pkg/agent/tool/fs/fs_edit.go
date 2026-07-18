@@ -12,10 +12,10 @@ import (
 )
 
 func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
-	return editTool(root, nil, allowedWriteRoots...)
+	return editTool(root, nil, nil, allowedWriteRoots...)
 }
 
-func editTool(root *os.Root, tracker *contentTracker, allowedWriteRoots ...string) tool.Tool {
+func editTool(root *os.Root, tracker *contentTracker, freshness *Freshness, allowedWriteRoots ...string) tool.Tool {
 	return tool.Tool{
 		Name:   "edit",
 		Effect: tool.StaticEffect(tool.EffectMutates),
@@ -87,6 +87,10 @@ func editTool(root *os.Root, tracker *contentTracker, allowedWriteRoots ...strin
 				return "", fmt.Errorf("cannot edit %s: file does not exist", pathArg)
 			}
 
+			if exists && freshness.stale(ctx, target, info) {
+				return "", fmt.Errorf("cannot edit %s: the file changed on disk after you last read it (edited externally or by another agent) — `read` it again first and take the changes into account", pathArg)
+			}
+
 			var contentBytes []byte
 			if exists {
 				contentBytes, err = readFileTarget(root, target)
@@ -121,6 +125,7 @@ func editTool(root *os.Root, tracker *contentTracker, allowedWriteRoots ...strin
 			}
 
 			tracker.record([]byte(finalContent))
+			freshness.record(ctx, target)
 
 			diff := generateDiffString(normalizedContent, newContent)
 

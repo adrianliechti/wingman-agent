@@ -10,10 +10,10 @@ import (
 )
 
 func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
-	return readTool(root, nil, allowedReadRoots...)
+	return readTool(root, nil, nil, allowedReadRoots...)
 }
 
-func readTool(root *os.Root, tracker *contentTracker, allowedReadRoots ...string) tool.Tool {
+func readTool(root *os.Root, tracker *contentTracker, freshness *Freshness, allowedReadRoots ...string) tool.Tool {
 	return tool.Tool{
 		Name:   "read",
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
@@ -84,6 +84,7 @@ func readTool(root *os.Root, tracker *contentTracker, allowedReadRoots ...string
 			}
 
 			tracker.record(content)
+			freshness.record(ctx, target)
 
 			return formatRead(content, startLine, limit)
 		},

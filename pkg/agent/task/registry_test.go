@@ -9,14 +9,14 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 )
 
-func waitEvent(t *testing.T, r *task.Registry) *task.Task {
+func waitEvent(t *testing.T, r *task.Registry) task.Event {
 	t.Helper()
 	select {
-	case tk := <-r.Events():
-		return tk
+	case ev := <-r.Events():
+		return ev
 	case <-time.After(5 * time.Second):
 		t.Fatal("no completion event")
-		return nil
+		return task.Event{}
 	}
 }
 
@@ -35,11 +35,11 @@ func TestLaunchDeliversCompletionEvent(t *testing.T) {
 	}
 
 	done := waitEvent(t, r)
-	if done != launched {
+	if done.Task != launched {
 		t.Fatal("event delivered a different task")
 	}
-	if done.Status() != task.StatusDone || done.Result() != "the report" {
-		t.Fatalf("status = %s, result = %q", done.Status(), done.Result())
+	if done.Status != task.StatusDone || done.Result != "the report" {
+		t.Fatalf("status = %s, result = %q", done.Status, done.Result)
 	}
 }
 
@@ -54,11 +54,11 @@ func TestLaunchErrorMarksFailed(t *testing.T) {
 	}
 
 	done := waitEvent(t, r)
-	if done.Status() != task.StatusFailed {
-		t.Fatalf("status = %s, want failed", done.Status())
+	if done.Status != task.StatusFailed {
+		t.Fatalf("status = %s, want failed", done.Status)
 	}
-	if done.Result() != "error: boom" {
-		t.Fatalf("result = %q", done.Result())
+	if done.Result != "error: boom" {
+		t.Fatalf("result = %q", done.Result)
 	}
 }
 
@@ -79,8 +79,8 @@ func TestStopCancelsRun(t *testing.T) {
 	}
 
 	done := waitEvent(t, r)
-	if done.Status() != task.StatusStopped {
-		t.Fatalf("status = %s, want stopped", done.Status())
+	if done.Status != task.StatusStopped {
+		t.Fatalf("status = %s, want stopped", done.Status)
 	}
 
 	if err := r.Stop(launched.ID); err == nil {
@@ -154,7 +154,7 @@ func TestRelaunchRunsAgainAndKeepsIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if waitEvent(t, r).Result() != "first" {
+	if waitEvent(t, r).Result != "first" {
 		t.Fatal("first run result missing")
 	}
 	if launched.Seq() != 1 {
@@ -168,11 +168,11 @@ func TestRelaunchRunsAgainAndKeepsIdentity(t *testing.T) {
 	}
 
 	done := waitEvent(t, r)
-	if done != launched {
+	if done.Task != launched {
 		t.Fatal("relaunch created a different task")
 	}
-	if done.Status() != task.StatusDone || done.Result() != "second" || done.Seq() != 2 {
-		t.Fatalf("status = %s, result = %q, seq = %d", done.Status(), done.Result(), done.Seq())
+	if done.Status != task.StatusDone || done.Result != "second" || done.Seq != 2 {
+		t.Fatalf("status = %s, result = %q, seq = %d", done.Status, done.Result, done.Seq)
 	}
 
 	if _, total := r.Counts(); total != 1 {
