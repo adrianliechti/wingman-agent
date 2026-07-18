@@ -5,19 +5,11 @@ import (
 	"os"
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
-
-var logoLines = []string{
-	"██╗    ██╗██╗███╗   ██╗ ██████╗ ███╗   ███╗ █████╗ ███╗   ██╗",
-	"██║    ██║██║████╗  ██║██╔════╝ ████╗ ████║██╔══██╗████╗  ██║",
-	"██║ █╗ ██║██║██╔██╗ ██║██║  ███╗██╔████╔██║███████║██╔██╗ ██║",
-	"██║███╗██║██║██║╚██╗██║██║   ██║██║╚██╔╝██║██╔══██║██║╚██╗██║",
-	"╚███╔███╔╝██║██║ ╚████║╚██████╔╝██║ ╚═╝ ██║██║  ██║██║ ╚████║",
-	" ╚══╝╚══╝ ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝",
-}
 
 func (a *App) welcomeLines(width int) []string {
 	t := theme.Default
@@ -36,7 +28,7 @@ func (a *App) welcomeLines(width int) []string {
 		colors := []string{
 			fg(t.Blue), fg(t.Cyan), fg(t.Green), fg(t.Yellow), fg(t.Red), fg(t.Magenta),
 		}
-		for i, l := range logoLines {
+		for i, l := range tui.LogoLines {
 			lines = append(lines, center(colors[i%len(colors)]+l+ansi.Reset))
 		}
 	} else {
@@ -110,6 +102,12 @@ func (a *App) render() {
 		bottom = append(bottom, "")
 		bottom = append(bottom, a.popup.Render(width)...)
 		bottom = append(bottom, "")
+
+		// A long question must not push the options off-screen: keep the
+		// tail, which holds the items.
+		if len(bottom) > height {
+			bottom = append([]string{dim("…")}, bottom[len(bottom)-height+1:]...)
+		}
 	} else {
 		bottom = append(bottom, a.statusLine(width))
 
@@ -198,6 +196,9 @@ func (a *App) render() {
 			}
 			if idx == selEnd.Line && selEnd.Col+1 < to {
 				to = selEnd.Col + 1
+			}
+			if to <= from {
+				to = from + 1
 			}
 			line = ansi.Highlight(line, from, to, ansi.Reverse)
 		}

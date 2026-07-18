@@ -15,6 +15,10 @@ import (
 
 type ANSIRenderer struct {
 	theme theme.Theme
+
+	// blockStyle is re-applied after inline elements close so a codespan or
+	// emphasis inside a heading doesn't strip the heading's bold.
+	blockStyle string
 }
 
 func NewANSIRenderer() *ANSIRenderer {
@@ -56,6 +60,13 @@ func (r *ANSIRenderer) dim() string {
 	return ansi.Fg(r.theme.BrBlack)
 }
 
+func (r *ANSIRenderer) closeInline(w util.BufWriter) {
+	w.WriteString(ansi.Reset)
+	if r.blockStyle != "" {
+		w.WriteString(r.blockStyle)
+	}
+}
+
 func (r *ANSIRenderer) renderDocument(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	return ast.WalkContinue, nil
 }
@@ -68,7 +79,9 @@ func (r *ANSIRenderer) renderHeading(w util.BufWriter, source []byte, node ast.N
 			w.WriteString("\n")
 		}
 		fmt.Fprintf(w, "%s%s%s ", r.dim(), strings.Repeat("#", n.Level), ansi.Reset+ansi.Bold)
+		r.blockStyle = ansi.Bold
 	} else {
+		r.blockStyle = ""
 		w.WriteString(ansi.Reset + "\n")
 	}
 
@@ -241,7 +254,7 @@ func (r *ANSIRenderer) renderCodeSpan(w util.BufWriter, source []byte, node ast.
 	if entering {
 		w.WriteString(ansi.Fg(r.theme.Cyan))
 	} else {
-		w.WriteString(ansi.Reset)
+		r.closeInline(w)
 	}
 
 	return ast.WalkContinue, nil
@@ -257,7 +270,7 @@ func (r *ANSIRenderer) renderEmphasis(w util.BufWriter, source []byte, node ast.
 			w.WriteString(ansi.Italic)
 		}
 	} else {
-		w.WriteString(ansi.Reset)
+		r.closeInline(w)
 	}
 
 	return ast.WalkContinue, nil
@@ -269,7 +282,8 @@ func (r *ANSIRenderer) renderLink(w util.BufWriter, source []byte, node ast.Node
 	if entering {
 		w.WriteString(ansi.Fg(r.theme.Cyan))
 	} else {
-		fmt.Fprintf(w, "%s %s(%s)%s", ansi.Reset, r.dim(), sanitize(string(n.Destination)), ansi.Reset)
+		fmt.Fprintf(w, "%s %s(%s)", ansi.Reset, r.dim(), sanitize(string(n.Destination)))
+		r.closeInline(w)
 	}
 
 	return ast.WalkContinue, nil
@@ -347,7 +361,7 @@ func (r *ANSIRenderer) renderTable(w util.BufWriter, source []byte, node ast.Nod
 					}
 				}
 			}
-			cells = append(cells, cellText.String())
+			cells = append(cells, sanitize(cellText.String()))
 		}
 		rows = append(rows, cells)
 	}
@@ -422,7 +436,7 @@ func (r *ANSIRenderer) renderStrikethrough(w util.BufWriter, source []byte, node
 	if entering {
 		w.WriteString(ansi.Strike)
 	} else {
-		w.WriteString(ansi.Reset)
+		r.closeInline(w)
 	}
 
 	return ast.WalkContinue, nil

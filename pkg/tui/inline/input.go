@@ -12,6 +12,7 @@ const escTimeout = 30 * time.Millisecond
 type inputReader struct {
 	chunks chan []byte
 	events chan<- Event
+	done   <-chan struct{}
 
 	buf     []byte
 	pasting bool
@@ -22,6 +23,7 @@ func startInput(r io.Reader, events chan<- Event, done <-chan struct{}) {
 	in := &inputReader{
 		chunks: make(chan []byte, 8),
 		events: events,
+		done:   done,
 	}
 
 	go func() {
@@ -67,7 +69,17 @@ func (in *inputReader) run(done <-chan struct{}) {
 			}
 			in.buf = append(in.buf, chunk...)
 		case <-timeout:
-			in.processBareEsc()
+			// The continuation may have arrived at the same instant the timer
+			// fired; prefer it over misreading the sequence as a bare Esc.
+			select {
+			case chunk, ok := <-in.chunks:
+				if !ok {
+					return
+				}
+				in.buf = append(in.buf, chunk...)
+			default:
+				in.processBareEsc()
+			}
 		case <-done:
 			return
 		}
@@ -110,7 +122,10 @@ func (in *inputReader) emit(ev Event) {
 		}
 		return
 	}
-	in.events <- ev
+	select {
+	case in.events <- ev:
+	case <-in.done:
+	}
 }
 
 func (in *inputReader) processBareEsc() {
@@ -250,7 +265,7 @@ func (in *inputReader) consumeEscape() {
 	case "201~":
 		if in.pasting {
 			in.pasting = false
-			in.events <- PasteEvent{Text: in.paste.String()}
+			in.emit(PasteEvent{Text: in.paste.String()})
 			in.paste.Reset()
 		}
 	}

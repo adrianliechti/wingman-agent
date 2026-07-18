@@ -38,7 +38,8 @@ type App struct {
 	phase      atomic.Int32
 	phaseStart time.Time
 
-	spinnerFrame int
+	spinnerFrame  int
+	lastInterrupt time.Time
 
 	currentMode Mode
 	showWelcome bool
@@ -579,7 +580,18 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 	case inline.KeyCtrl:
 		switch ev.Rune {
 		case 'c':
+			// Never trap the user: during startup, or on a second press
+			// while a turn refuses to die, ctrl+c always exits.
+			if a.getPhase() == PhasePreparing {
+				a.stop()
+				return
+			}
 			if a.isStreaming() {
+				if time.Since(a.lastInterrupt) < 2*time.Second {
+					a.stop()
+					return
+				}
+				a.lastInterrupt = time.Now()
 				a.cancelStream()
 				return
 			}
@@ -707,7 +719,10 @@ func (a *App) answerPrompt() {
 		a.appendChat(cellPrompt("", a.askMessage, "", a.width()))
 		a.appendChat(cellUser(text, a.width()))
 		a.setPhase(PhaseThinking)
-		a.askResponse <- text
+		select {
+		case a.askResponse <- text:
+		default:
+		}
 	}
 }
 

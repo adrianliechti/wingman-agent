@@ -370,8 +370,8 @@ func (a *App) takeTurnCommit(id string) string {
 }
 
 func (a *App) commitRewind(message string) {
-	if len(message) > 50 {
-		message = message[:50]
+	if runes := []rune(message); len(runes) > 50 {
+		message = string(runes[:50])
 	}
 
 	go func() {

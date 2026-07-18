@@ -6,6 +6,9 @@ import (
 	"strings"
 )
 
+// detectFilePaths returns the file paths in text, but only when the entire
+// paste is paths — a paste mixing prose and paths must stay text, not
+// silently become attachments.
 func detectFilePaths(text, workingDir string) []string {
 	lines := strings.Split(strings.TrimSpace(text), "\n")
 
@@ -25,17 +28,17 @@ func detectFilePaths(text, workingDir string) []string {
 		}
 
 		if !isLikelyFilePath(line) {
-			continue
+			return nil
 		}
 
 		resolved := resolveFilePath(line, workingDir)
 		if resolved == "" {
-			continue
+			return nil
 		}
 
 		info, err := os.Stat(resolved)
 		if err != nil || info.IsDir() {
-			continue
+			return nil
 		}
 
 		paths = append(paths, resolved)

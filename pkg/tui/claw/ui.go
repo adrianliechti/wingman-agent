@@ -160,9 +160,9 @@ func (t *TUI) render() {
 
 	// Left column: agents list.
 	left := make([]string, height)
-	left[0] = ""
-	left[1] = indent + ansi.Fg(th.Cyan) + ansi.Bold + "Agents" + ansi.Reset
-	left[2] = ""
+	if height > 2 {
+		left[1] = indent + ansi.Fg(th.Cyan) + ansi.Bold + "Agents" + ansi.Reset
+	}
 
 	for i, name := range t.agentNames {
 		row := 3 + i
@@ -200,6 +200,10 @@ func (t *TUI) render() {
 
 	rightWidth := width - sidebarWidth - 1
 	right = append(right, ansi.Fg(th.BrBlack)+strings.Repeat("─", max(1, rightWidth))+ansi.Reset)
+
+	if t.chatScroll > len(t.chatLines) {
+		t.chatScroll = len(t.chatLines)
+	}
 
 	start := t.chatScroll - chatRows
 	if start > len(t.chatLines)-chatRows {

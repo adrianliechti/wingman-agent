@@ -87,6 +87,11 @@ func (t *TUI) Start(ctx context.Context, handler channel.MessageHandler) error {
 	if err := t.term.Start(); err != nil {
 		return err
 	}
+
+	// Closing quit turns t.post into a no-op so a still-streaming agent can
+	// never wedge against a stopped UI (and with it, session teardown).
+	defer t.stop()
+
 	t.term.EnterAlt()
 
 	t.refreshAgents()

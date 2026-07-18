@@ -7,6 +7,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/claw/tool/schedule"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
@@ -52,10 +53,8 @@ func (t *TUI) refreshTasks() {
 			}
 		}
 
-		prompt := task.Prompt
-		if len(prompt) > 80 {
-			prompt = prompt[:77] + "..."
-		}
+		prompt := strings.ReplaceAll(markdown.Sanitize(task.Prompt), "\n", " ")
+		prompt = ansi.Truncate(prompt, 80, "...")
 
 		t.taskLines = append(t.taskLines, fmt.Sprintf("%s%s %s%s%s  %s",
 			indent, icon, humanSchedule(task.Schedule), nextStr, failStr, dim(prompt)))

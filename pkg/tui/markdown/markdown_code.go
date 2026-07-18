@@ -3,6 +3,7 @@ package markdown
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -12,6 +13,7 @@ import (
 )
 
 var (
+	chromaMu         sync.Mutex
 	chromaStyle      *chroma.Style
 	chromaStyleLight bool
 )
@@ -20,6 +22,9 @@ var (
 // blocks match the rest of the UI.
 func codeStyle() *chroma.Style {
 	t := theme.Default
+
+	chromaMu.Lock()
+	defer chromaMu.Unlock()
 
 	if chromaStyle != nil && chromaStyleLight == t.IsLight {
 		return chromaStyle
@@ -56,6 +61,12 @@ func codeStyle() *chroma.Style {
 	chromaStyleLight = t.IsLight
 
 	return style
+}
+
+// Highlight returns ANSI syntax-highlighted source for lang, themed like
+// chat code blocks.
+func Highlight(code, lang string) string {
+	return highlightCode(code, lang)
 }
 
 func highlightCode(code, lang string) string {

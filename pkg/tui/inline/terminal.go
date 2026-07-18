@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"golang.org/x/term"
 )
@@ -24,6 +25,9 @@ type Terminal struct {
 	events chan Event
 	done   chan struct{}
 
+	// sizeMu guards width/height: the resize watcher goroutine compares them
+	// against fresh queries while the app goroutine updates them.
+	sizeMu sync.Mutex
 	width  int
 	height int
 
@@ -70,6 +74,8 @@ func (t *Terminal) Events() <-chan Event {
 }
 
 func (t *Terminal) Size() (int, int) {
+	t.sizeMu.Lock()
+	defer t.sizeMu.Unlock()
 	return t.width, t.height
 }
 
@@ -87,7 +93,10 @@ func (t *Terminal) Start() error {
 		}
 	}
 
-	t.width, t.height = t.querySize()
+	w, h := t.querySize()
+	t.sizeMu.Lock()
+	t.width, t.height = w, h
+	t.sizeMu.Unlock()
 
 	fmt.Fprint(t.out, "\x1b[?2004h")
 
@@ -148,7 +157,12 @@ func (t *Terminal) querySize() (int, int) {
 // changed; called from the platform resize watcher.
 func (t *Terminal) checkResize() {
 	w, h := t.querySize()
-	if w != t.width || h != t.height {
+
+	t.sizeMu.Lock()
+	changed := w != t.width || h != t.height
+	t.sizeMu.Unlock()
+
+	if changed {
 		select {
 		case t.events <- ResizeEvent{Width: w, Height: h}:
 		case <-t.done:
@@ -159,8 +173,11 @@ func (t *Terminal) checkResize() {
 // Resized must be called by the app when it receives a ResizeEvent, before
 // re-rendering.
 func (t *Terminal) Resized(w, h int) {
+	t.sizeMu.Lock()
 	t.width = w
 	t.height = h
+	t.sizeMu.Unlock()
+
 	t.altFrame = nil
 }
 

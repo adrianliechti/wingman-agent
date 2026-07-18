@@ -121,7 +121,7 @@ func (a *App) submitInput() {
 		return
 	}
 
-	if a.getPhase() != PhaseIdle && isBuiltinCommand(query) {
+	if a.getPhase() != PhaseIdle && isBuiltinCommand(query) && query != "/quit" {
 		return
 	}
 
@@ -356,14 +356,16 @@ func (a *App) showModelPicker() {
 }
 
 func (a *App) cycleModel() {
+	sessionID := a.sessionID
+
 	go func() {
-		available, current := a.agent.Models(a.sessionID)
+		available, current := a.agent.Models(sessionID)
 		if len(available) <= 1 {
 			return
 		}
 		for i, m := range available {
 			if m.ID == current {
-				_ = a.agent.SetModel(context.Background(), a.sessionID, available[(i+1)%len(available)].ID)
+				_ = a.agent.SetModel(context.Background(), sessionID, available[(i+1)%len(available)].ID)
 				break
 			}
 		}

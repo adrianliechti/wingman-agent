@@ -121,7 +121,11 @@ func (p *pager) Render(width, height int) []string {
 		end = len(p.lines)
 	}
 
-	lines = append(lines, p.lines[p.offset:end]...)
+	// Lines were wrapped at open time; a narrower terminal since then must
+	// not leak over-wide lines into the renderer.
+	for _, line := range p.lines[p.offset:end] {
+		lines = append(lines, ansi.Truncate(line, width, "…"))
+	}
 
 	for len(lines) < height-1 {
 		lines = append(lines, "")

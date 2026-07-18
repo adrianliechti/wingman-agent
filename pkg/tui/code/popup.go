@@ -255,7 +255,9 @@ func (p *Popup) Render(width int) []string {
 
 	var lines []string
 
-	lines = append(lines, p.header...)
+	for _, line := range p.header {
+		lines = append(lines, ansi.Truncate(line, width, "…"))
+	}
 
 	if p.title != "" {
 		title := p.title

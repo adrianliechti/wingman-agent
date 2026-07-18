@@ -56,7 +56,7 @@ func (a *App) statusLine(width int) string {
 
 	line := colored(color, frame+" "+label)
 
-	if phase != PhasePreparing {
+	if phase != PhasePreparing && !a.phaseStart.IsZero() {
 		line += " " + dim(fmt.Sprintf("(%s · esc to interrupt)", formatElapsed(time.Since(a.phaseStart))))
 	}
 
