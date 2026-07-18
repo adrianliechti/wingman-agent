@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
@@ -148,6 +149,59 @@ func TestTUIE2ESendsAndRendersTurn(t *testing.T) {
 	messages := h.agent.Messages(h.sessionID)
 	if messages[0].Role != agent.RoleUser || messages[0].Content[0].Text != "hello e2e" {
 		t.Fatalf("user message = %+v", messages[0])
+	}
+}
+
+func TestTUIE2EConfirmAndElicitPopups(t *testing.T) {
+	model := tuiModelServer(t)
+	defer model.Close()
+	t.Setenv("WINGMAN_URL", model.URL)
+	t.Setenv("WINGMAN_MODEL", "gpt-5.4")
+	t.Setenv("WINGMAN_CALLER", "e2e")
+
+	h := newTUIE2EHarness(t)
+
+	confirmed := make(chan bool, 1)
+	go func() {
+		ok, _ := h.app.Confirm(context.Background(), "run ls?")
+		confirmed <- ok
+	}()
+
+	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "Confirm command") })
+	if _, err := io.WriteString(h.input, "y"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ok := <-confirmed:
+		if !ok {
+			t.Fatal("confirm hotkey y returned false")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("confirm did not resolve")
+	}
+
+	elicited := make(chan tool.ElicitResult, 1)
+	go func() {
+		res, _ := h.app.Elicit(context.Background(), tool.ElicitRequest{
+			Message: "pick a color",
+			Fields:  []tool.ElicitField{{Name: "color", Enum: []string{"red", "green", "blue"}, Strict: true}},
+		})
+		elicited <- res
+	}()
+
+	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "pick a color") })
+	if _, err := io.WriteString(h.input, "\x1b[B\r"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case res := <-elicited:
+		if res.Action != tool.ElicitAccept || res.Content["color"] != "green" {
+			t.Fatalf("elicit result = %+v", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("elicit did not resolve")
 	}
 }
 

@@ -18,33 +18,106 @@ func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
 	a.elicitMu.Lock()
 	defer a.elicitMu.Unlock()
 
-	a.promptResponse = make(chan bool, 1)
+	items := []PopupItem{
+		{ID: "yes", Label: "yes", Detail: "approve this command"},
+		{ID: "no", Label: "no", Detail: "deny"},
+		{ID: "always", Label: "always", Detail: "auto-approve for this session"},
+	}
 
-	t := theme.Default
-	hint := fmt.Sprintf("%s approve · %s deny · %s always",
-		colored(t.Green, "y"), colored(t.Red, "n"), colored(t.Cyan, "a"))
+	hotkeys := map[rune]string{'y': "yes", 'n': "no", 'a': "always"}
+
+	ids, err := a.askOptionsLocked(ctx, "Confirm command", message, items, false, hotkeys)
+	if err != nil {
+		return false, err
+	}
+
+	choice := ""
+	if len(ids) > 0 {
+		choice = ids[0]
+	}
+
+	switch choice {
+	case "yes":
+		a.recordPrompt("Confirm command", message, "Yes")
+		return true, nil
+	case "always":
+		a.confirmAll.Store(true)
+		a.recordPrompt("Confirm command", message, "Always")
+		a.post(func() {
+			a.appendChat(cellNotice("Auto-approving commands for this session", theme.Default.BrBlack, a.width()))
+		})
+		return true, nil
+	default:
+		a.recordPrompt("Confirm command", message, "No")
+		return false, nil
+	}
+}
+
+// recordPrompt writes the resolved question and its answer into the chat —
+// the question is only shown at the bottom while it is being asked.
+func (a *App) recordPrompt(title, message, answer string) {
+	a.post(func() {
+		a.appendChat(cellPrompt(title, message, "", a.width()))
+		a.appendChat(cellUser(answer, a.width()))
+		a.setPhase(PhaseThinking)
+		a.invalidate()
+	})
+}
+
+// askOptionsLocked presents an interactive selection popup and returns the
+// chosen ids (nil when declined or dismissed). Expects a.elicitMu held.
+func (a *App) askOptionsLocked(ctx context.Context, title, message string, items []PopupItem, multi bool, hotkeys map[rune]string) ([]string, error) {
+	response := make(chan []string, 1)
 
 	a.post(func() {
 		a.promptActive = true
-		a.appendChat(cellPrompt("Confirm command", message, hint, a.width()))
-		a.editor.SetPlaceholder("y/n/a")
+
+		popup := newPopup(popupList, popupHint("", multi), items, func(ids []string) {
+			select {
+			case response <- ids:
+			default:
+			}
+		})
+		popup.header = cellPrompt(title, message, "", a.width())
+		popup.multi = multi
+		popup.hotkeys = hotkeys
+		popup.onCancel = func() {
+			select {
+			case response <- nil:
+			default:
+			}
+		}
+		a.popup = popup
 		a.invalidate()
 	})
 
 	defer a.post(func() {
 		a.promptActive = false
-		a.editor.SetPlaceholder("Ask anything...")
+		if a.popup != nil && a.popup.kind == popupList {
+			a.closePopup()
+		}
 		a.invalidate()
 	})
 
 	select {
-	case result := <-a.promptResponse:
-		return result, nil
+	case ids := <-response:
+		return ids, nil
 	case <-ctx.Done():
-		return false, ctx.Err()
+		return nil, ctx.Err()
 	case <-a.ctx.Done():
-		return false, a.ctx.Err()
+		return nil, a.ctx.Err()
 	}
+}
+
+func popupHint(title string, multi bool) string {
+	if !multi {
+		return title
+	}
+	hint := "space to mark, enter to accept"
+	if title == "" {
+		return hint
+	}
+	return title + " (" + hint + ")"
 }
 
 func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
@@ -70,6 +143,32 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 		message := ""
 		if i == 0 {
 			message = req.Message
+		}
+
+		freeText := len(field.Enum) == 0 && field.Type != "boolean"
+
+		if !freeText {
+			value, action, err := a.elicitOptionsField(ctx, message, field, len(fields) > 1 && !bare)
+			if err != nil {
+				return tool.ElicitResult{}, err
+			}
+
+			switch action {
+			case "decline":
+				return tool.ElicitResult{Action: tool.ElicitDecline}, nil
+			case "other":
+				freeText = true
+			default:
+				if !bare {
+					content[field.Name] = value
+				} else if accepted, _ := value.(bool); !accepted {
+					return tool.ElicitResult{Action: tool.ElicitDecline}, nil
+				}
+			}
+		}
+
+		if !freeText {
+			continue
 		}
 
 		prompt := formatElicitField(message, field, len(fields) > 1 && !bare)
@@ -102,6 +201,91 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 	return tool.ElicitResult{Action: tool.ElicitAccept, Content: content}, nil
 }
 
+// elicitOptionsField collects an enum or boolean answer through a selection
+// popup. action is "", "decline", or "other" (free-text fallback for
+// advisory enums).
+func (a *App) elicitOptionsField(ctx context.Context, message string, field tool.ElicitField, showLabel bool) (any, string, error) {
+	label := field.Title
+	if label == "" {
+		label = field.Name
+	}
+
+	if showLabel || field.Description != "" {
+		if message != "" {
+			message += "\n\n"
+		}
+		message += label
+		if field.Description != "" {
+			message += " — " + field.Description
+		}
+	}
+
+	if field.Type == "boolean" && len(field.Enum) == 0 {
+		items := []PopupItem{
+			{ID: "yes", Label: "yes"},
+			{ID: "no", Label: "no"},
+		}
+
+		ids, err := a.askOptionsLocked(ctx, "", message, items, false, map[rune]string{'y': "yes", 'n': "no"})
+		if err != nil {
+			return nil, "", err
+		}
+		if len(ids) == 0 {
+			a.recordPrompt("", message, "decline")
+			return nil, "decline", nil
+		}
+
+		value := ids[0] == "yes"
+		a.recordPrompt("", message, ids[0])
+		return value, "", nil
+	}
+
+	items := make([]PopupItem, 0, len(field.Enum)+2)
+	for i, option := range field.Enum {
+		item := PopupItem{ID: option, Label: option}
+		if i < len(field.EnumDescriptions) {
+			item.Detail = field.EnumDescriptions[i]
+		}
+		items = append(items, item)
+	}
+
+	if !field.Strict {
+		items = append(items, PopupItem{ID: "__other", Label: "other…", Detail: "type your own answer"})
+	}
+	items = append(items, PopupItem{ID: "__decline", Label: "decline"})
+
+	ids, err := a.askOptionsLocked(ctx, "", message, items, field.Multiple, nil)
+	if err != nil {
+		return nil, "", err
+	}
+
+	var picks []string
+	for _, id := range ids {
+		switch id {
+		case "__decline":
+			picks = nil
+		case "__other":
+			return nil, "other", nil
+		default:
+			picks = append(picks, id)
+			continue
+		}
+		break
+	}
+
+	if len(picks) == 0 {
+		a.recordPrompt("", message, "decline")
+		return nil, "decline", nil
+	}
+
+	a.recordPrompt("", message, strings.Join(picks, ", "))
+
+	if field.Multiple {
+		return picks, "", nil
+	}
+	return picks[0], "", nil
+}
+
 func fieldKind(field tool.ElicitField) string {
 	if len(field.Enum) > 0 {
 		return "choice — pick one of the listed options"
@@ -118,13 +302,16 @@ func (a *App) askLineLocked(ctx context.Context, prompt, placeholder string) (st
 
 	a.post(func() {
 		a.askActive = true
-		a.appendChat(cellPrompt("Question", prompt, "", a.width()))
+		a.askMessage = prompt
+		a.askHeader = cellPrompt("", prompt, "", a.width())
 		a.editor.SetPlaceholder(placeholder)
 		a.invalidate()
 	})
 
 	defer a.post(func() {
 		a.askActive = false
+		a.askMessage = ""
+		a.askHeader = nil
 		a.editor.SetPlaceholder("Ask anything...")
 		a.invalidate()
 	})
@@ -146,7 +333,9 @@ func formatElicitField(message string, field tool.ElicitField, showLabel bool) s
 		b.WriteString(message)
 	}
 
-	if showLabel || field.Title != "" || field.Description != "" {
+	// The field label is only informative on multi-field forms or when a
+	// description adds context; for a single question the message says it all.
+	if showLabel || field.Description != "" {
 		label := field.Title
 		if label == "" {
 			label = field.Name
@@ -193,23 +382,11 @@ func previewLines(preview string) []string {
 }
 
 func elicitPlaceholder(field tool.ElicitField) string {
-	switch {
-	case field.Multiple && len(field.Enum) > 0:
-		if field.Strict {
-			return fmt.Sprintf("Pick options like 1,3 (1-%d) · /decline", len(field.Enum))
-		}
-		return fmt.Sprintf("Pick options like 1,3 (1-%d), or type your own answer · /decline", len(field.Enum))
-	case len(field.Enum) > 0:
-		if field.Strict {
-			return fmt.Sprintf("1-%d picks an option · /decline", len(field.Enum))
-		}
-		return fmt.Sprintf("1-%d picks an option, or type your own answer · /decline", len(field.Enum))
-	case field.Type == "boolean":
-		return "y/n · /decline"
-	case field.Type == "number" || field.Type == "integer":
-		return "Enter a number · /decline"
+	switch field.Type {
+	case "number", "integer":
+		return "number · /decline"
 	default:
-		return "Type your answer and press Enter · /decline"
+		return "answer · /decline"
 	}
 }
 

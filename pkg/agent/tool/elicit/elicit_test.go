@@ -66,6 +66,28 @@ func TestToolsReturnsHiddenElicitTool(t *testing.T) {
 	}
 }
 
+func TestExecuteAllowsHeaderlessSingleQuestion(t *testing.T) {
+	var captured tool.ElicitRequest
+	et := Tools(answering(map[string]any{"q_1": "blue"}, &captured))[0]
+
+	answer, err := et.Execute(context.Background(), map[string]any{
+		"questions": []any{map[string]any{"question": "Favorite color?"}},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if answer != "blue" {
+		t.Fatalf("answer = %q, want blue", answer)
+	}
+
+	if len(captured.Fields) != 1 || captured.Fields[0].Name != "q_1" {
+		t.Fatalf("fields = %+v, want single q_1", captured.Fields)
+	}
+	if captured.Message != "Favorite color?" {
+		t.Fatalf("message = %q", captured.Message)
+	}
+}
+
 func TestExecuteValidatesQuestions(t *testing.T) {
 	et := Tools(answering(nil, nil))[0]
 
@@ -75,7 +97,6 @@ func TestExecuteValidatesQuestions(t *testing.T) {
 	}{
 		{"missing", map[string]any{}},
 		{"empty", map[string]any{"questions": []any{}}},
-		{"no header", map[string]any{"questions": []any{map[string]any{"question": "?"}}}},
 		{"no question", map[string]any{"questions": []any{map[string]any{"header": "X"}}}},
 		{"option without label", map[string]any{"questions": []any{
 			question("Which?", "Pick", map[string]any{"description": "no label"}),

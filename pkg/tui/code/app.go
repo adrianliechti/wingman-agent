@@ -68,12 +68,13 @@ type App struct {
 
 	pendingEcho []pendingEchoItem
 
-	elicitMu       sync.Mutex
-	promptActive   bool
-	promptResponse chan bool
-	confirmAll     atomic.Bool
-	askActive      bool
-	askResponse    chan string
+	elicitMu     sync.Mutex
+	promptActive bool
+	confirmAll   atomic.Bool
+	askActive    bool
+	askMessage   string
+	askHeader    []string
+	askResponse  chan string
 
 	inputTokens     int64
 	cachedTokens    int64
@@ -613,7 +614,7 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 		}
 
 	case inline.KeyEnter:
-		if a.promptActive || a.askActive {
+		if a.askActive {
 			a.answerPrompt()
 			return
 		}
@@ -640,11 +641,6 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 
 	case inline.KeyPgDn:
 		a.scrollChat(max(1, a.lastChatRows-1))
-		return
-	}
-
-	if a.promptActive {
-		a.handlePromptKey(ev)
 		return
 	}
 
@@ -695,7 +691,12 @@ func (a *App) handlePopupKey(ev inline.KeyEvent) bool {
 }
 
 func (a *App) closePopup() {
+	popup := a.popup
 	a.popup = nil
+
+	if popup != nil && !popup.accepted && popup.onCancel != nil {
+		popup.onCancel()
+	}
 }
 
 func (a *App) answerPrompt() {
@@ -705,34 +706,10 @@ func (a *App) answerPrompt() {
 			return
 		}
 		a.editor.SetText("")
+		a.appendChat(cellPrompt("", a.askMessage, "", a.width()))
 		a.appendChat(cellUser(text, a.width()))
 		a.setPhase(PhaseThinking)
 		a.askResponse <- text
-	}
-}
-
-func (a *App) handlePromptKey(ev inline.KeyEvent) {
-	if ev.Key != inline.KeyRune {
-		return
-	}
-
-	switch ev.Rune {
-	case 'y', 'Y':
-		a.appendChat(cellUser("Yes", a.width()))
-		a.setPhase(PhaseThinking)
-		a.promptResponse <- true
-
-	case 'n', 'N':
-		a.appendChat(cellUser("No", a.width()))
-		a.setPhase(PhaseThinking)
-		a.promptResponse <- false
-
-	case 'a', 'A':
-		a.confirmAll.Store(true)
-		a.appendChat(cellUser("Always", a.width()))
-		a.appendChat(cellNotice("Auto-approving commands for this session", theme.Default.BrBlack, a.width()))
-		a.setPhase(PhaseThinking)
-		a.promptResponse <- true
 	}
 }
 
@@ -744,13 +721,6 @@ func (a *App) cancelStream() {
 
 		select {
 		case a.askResponse <- "":
-		default:
-		}
-	}
-
-	if a.promptActive {
-		select {
-		case a.promptResponse <- false:
 		default:
 		}
 	}

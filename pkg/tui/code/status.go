@@ -34,7 +34,9 @@ func (a *App) statusLine(width int) string {
 	t := theme.Default
 	phase := a.getPhase()
 
-	if phase == PhaseIdle {
+	// While a question is pending the agent is waiting on the user; a
+	// spinner would be misleading.
+	if phase == PhaseIdle || a.promptActive || a.askActive {
 		return ""
 	}
 

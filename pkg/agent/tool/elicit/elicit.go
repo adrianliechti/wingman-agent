@@ -18,7 +18,7 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 	description := strings.Join([]string{
 		"Ask the user one or more questions and wait for their answers. Blocks until they reply.",
 		"- Use only when blocked on a decision that is genuinely the user's — product intent, ambiguous requirements, a preference the workspace cannot answer. If being wrong is cheap to correct, assume and proceed instead.",
-		"- 1-4 questions per call, each with a short `header` chip (max ~12 chars) and usually 2-4 mutually exclusive `options` with one-line tradeoff descriptions. Put a recommended option first, labeled \"(Recommended)\".",
+		"- 1-4 questions per call, usually with 2-4 mutually exclusive `options` with one-line tradeoff descriptions. Put a recommended option first, labeled \"(Recommended)\". When asking several questions, give each a short `header` chip (max ~12 chars) so answers stay attributable; omit `header` for a single question.",
 		"- The UI always adds a free-text \"Other\" reply — never add such an option; options are shortcuts, not constraints. Omit `options` entirely for open-ended questions.",
 		"- `multi_select` allows several picks (the answer becomes a list); `preview` (single-select only) renders code/mockups while the user compares options.",
 		"- Not for tool-execution confirmations (handled by the harness).",
@@ -40,7 +40,7 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 						"type": "object",
 						"properties": map[string]any{
 							"question": map[string]any{"type": "string", "description": "The full question text."},
-							"header":   map[string]any{"type": "string", "description": "Chip label, e.g. \"Auth method\"."},
+							"header":   map[string]any{"type": "string", "description": "Chip label, e.g. \"Auth method\"; used to attribute answers when asking several questions. Omit for a single question."},
 							"options": map[string]any{
 								"type":        "array",
 								"description": "The choices (2-4). Omit for a free-form question.",
@@ -57,7 +57,7 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 							},
 							"multi_select": map[string]any{"type": "boolean", "description": "Allow selecting multiple options.", "default": false},
 						},
-						"required":             []string{"question", "header"},
+						"required":             []string{"question"},
 						"additionalProperties": false,
 					},
 				},
@@ -126,12 +126,17 @@ func parseQuestions(raw []any) ([]tool.ElicitField, error) {
 
 		header, _ := entry["header"].(string)
 		header = strings.TrimSpace(header)
-		if header == "" {
-			return nil, fmt.Errorf("questions[%d].header is required", i)
+
+		title := header
+		if title == "" {
+			title = truncateQuestion(question, 40)
 		}
 
 		name := slugify(header)
-		if name == "" || seen[name] {
+		if name == "" {
+			name = fmt.Sprintf("q_%d", i+1)
+		}
+		if seen[name] {
 			name = fmt.Sprintf("%s_%d", name, i+1)
 		}
 		seen[name] = true
@@ -141,7 +146,7 @@ func parseQuestions(raw []any) ([]tool.ElicitField, error) {
 		field := tool.ElicitField{
 			Name:        name,
 			Type:        "string",
-			Title:       header,
+			Title:       title,
 			Description: strings.TrimSpace(question),
 			Required:    true,
 			Multiple:    multiple,
@@ -210,6 +215,15 @@ func answerText(value any) string {
 	default:
 		return strings.TrimSpace(fmt.Sprintf("%v", v))
 	}
+}
+
+func truncateQuestion(s string, max int) string {
+	s = strings.TrimSpace(s)
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return strings.TrimSpace(string(runes[:max])) + "…"
 }
 
 func slugify(s string) string {

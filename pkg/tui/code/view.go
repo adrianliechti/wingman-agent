@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
@@ -95,33 +96,52 @@ func (a *App) render() {
 
 	t := theme.Default
 
+	// Selection mode: the popup is the only live element — the status
+	// spinner, composer, and footer would just be noise around it.
+	listPopup := a.popup != nil && a.popup.kind == popupList
+
 	// Bottom section, built first so the chat viewport gets the remainder.
 	var bottom []string
+	editorStart := 0
+	var cursor inline.Pos
+	hasCursor := false
 
-	bottom = append(bottom, a.statusLine(width))
-
-	switch {
-	case a.promptActive || a.askActive:
-		a.editor.SetRuleColor(t.Red)
-	case a.currentMode == ModePlan:
-		a.editor.SetRuleColor(t.Yellow)
-	default:
-		a.editor.SetRuleColor(t.BrBlack)
-	}
-
-	maxEditorRows := height / 3
-	if maxEditorRows < 5 {
-		maxEditorRows = 5
-	}
-
-	editorLines, cursor := a.editor.Render(width, maxEditorRows)
-	editorStart := len(bottom)
-	bottom = append(bottom, editorLines...)
-
-	if a.popup != nil {
+	if listPopup {
+		bottom = append(bottom, "")
 		bottom = append(bottom, a.popup.Render(width)...)
+		bottom = append(bottom, "")
 	} else {
-		bottom = append(bottom, a.footerLine(width))
+		bottom = append(bottom, a.statusLine(width))
+
+		if a.askActive && len(a.askHeader) > 0 {
+			bottom = append(bottom, a.askHeader...)
+		}
+
+		switch {
+		case a.promptActive || a.askActive:
+			a.editor.SetRuleColor(t.Red)
+		case a.currentMode == ModePlan:
+			a.editor.SetRuleColor(t.Yellow)
+		default:
+			a.editor.SetRuleColor(t.BrBlack)
+		}
+
+		maxEditorRows := height / 3
+		if maxEditorRows < 5 {
+			maxEditorRows = 5
+		}
+
+		var editorLines []string
+		editorLines, cursor = a.editor.Render(width, maxEditorRows)
+		hasCursor = true
+		editorStart = len(bottom)
+		bottom = append(bottom, editorLines...)
+
+		if a.popup != nil {
+			bottom = append(bottom, a.popup.Render(width)...)
+		} else {
+			bottom = append(bottom, a.footerLine(width))
+		}
 	}
 
 	chatRows := height - len(bottom)
@@ -189,7 +209,7 @@ func (a *App) render() {
 
 	// Scroll indicator on the status row when the newest content is
 	// off-screen.
-	if hidden := maxScroll - a.chatScroll; !a.follow && hidden > 0 {
+	if hidden := maxScroll - a.chatScroll; !listPopup && !a.follow && hidden > 0 {
 		idx := chatRows + editorStart - 1
 		if idx >= 0 && idx < len(frame) {
 			indicator := dim(fmt.Sprintf("↓ %d more", hidden))
@@ -200,6 +220,11 @@ func (a *App) render() {
 		}
 	}
 
-	cursor.Row += chatRows + editorStart
-	a.term.RenderAlt(frame, &cursor)
+	var cursorPtr *inline.Pos
+	if hasCursor {
+		cursor.Row += chatRows + editorStart
+		cursorPtr = &cursor
+	}
+
+	a.term.RenderAlt(frame, cursorPtr)
 }

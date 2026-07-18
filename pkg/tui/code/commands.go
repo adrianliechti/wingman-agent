@@ -442,7 +442,7 @@ func (a *App) showFilePicker() {
 				items[i] = PopupItem{ID: f.Path, Label: f.Path}
 			}
 
-			popup := newPopup(popupList, "@ add files (tab to mark, enter to add)", items, func(ids []string) {
+			popup := newPopup(popupList, "@ add files (space to mark, enter to add)", items, func(ids []string) {
 				for _, p := range ids {
 					a.addFileToContext(p)
 				}

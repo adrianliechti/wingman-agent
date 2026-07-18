@@ -308,10 +308,13 @@ func cellPrompt(title, message, hint string, width int) []string {
 	}
 
 	var lines []string
-	for _, wl := range ansi.Wrap(ansi.Bold+markdown.Sanitize(title), inner) {
-		lines = append(lines, cellIndent+bar+wl+ansi.Reset)
+
+	if title != "" {
+		for _, wl := range ansi.Wrap(ansi.Bold+markdown.Sanitize(title), inner) {
+			lines = append(lines, cellIndent+bar+wl+ansi.Reset)
+		}
+		lines = append(lines, cellIndent+strings.TrimRight(bar, " "))
 	}
-	lines = append(lines, cellIndent+strings.TrimRight(bar, " "))
 
 	for _, line := range strings.Split(strings.TrimRight(message, "\n"), "\n") {
 		for _, wl := range ansi.Wrap(markdown.Sanitize(line), inner) {

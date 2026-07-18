@@ -32,8 +32,9 @@ const (
 // composer. Standalone pickers (popupList) capture all input; the other kinds
 // filter as the user types in the editor.
 type Popup struct {
-	kind  popupKind
-	title string
+	kind   popupKind
+	title  string
+	header []string
 
 	items    []PopupItem
 	filtered []int
@@ -43,9 +44,12 @@ type Popup struct {
 	multi    bool
 	selected map[string]bool
 
-	query string
+	query    string
+	accepted bool
 
+	hotkeys  map[rune]string
 	onAccept func(ids []string)
+	onCancel func()
 }
 
 func newPopup(kind popupKind, title string, items []PopupItem, onAccept func(ids []string)) *Popup {
@@ -151,8 +155,18 @@ func (p *Popup) accept() {
 		ids = []string{item.ID}
 	}
 
-	if len(ids) > 0 && p.onAccept != nil {
-		p.onAccept(ids)
+	if len(ids) > 0 {
+		p.accepted = true
+		if p.onAccept != nil {
+			p.onAccept(ids)
+		}
+	}
+}
+
+func (p *Popup) acceptID(id string) {
+	p.accepted = true
+	if p.onAccept != nil {
+		p.onAccept([]string{id})
 	}
 }
 
@@ -218,6 +232,16 @@ func (p *Popup) HandleKey(ev inline.KeyEvent) (bool, bool) {
 					p.SetQuery(string(r[:len(r)-1]))
 				}
 			} else if !ev.Alt {
+				if id, ok := p.hotkeys[ev.Rune]; ok {
+					p.acceptID(id)
+					return true, true
+				}
+				if p.multi && ev.Rune == ' ' {
+					if item, ok := p.Current(); ok {
+						p.SetSelected(item.ID, !p.selected[item.ID])
+					}
+					return true, false
+				}
 				p.SetQuery(p.query + string(ev.Rune))
 			}
 			return true, false
@@ -236,6 +260,8 @@ func (p *Popup) Render(width int) []string {
 	t := theme.Default
 
 	var lines []string
+
+	lines = append(lines, p.header...)
 
 	if p.title != "" {
 		title := p.title
@@ -272,8 +298,11 @@ func (p *Popup) Render(width int) []string {
 		item := p.items[p.filtered[i]]
 
 		marker := "  "
-		if p.multi && p.selected[item.ID] {
-			marker = colored(t.Cyan, "● ")
+		if p.multi {
+			marker = dim("□ ")
+			if p.selected[item.ID] {
+				marker = colored(t.Cyan, "■ ")
+			}
 		}
 
 		var line string
