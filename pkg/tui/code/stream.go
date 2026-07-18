@@ -60,7 +60,6 @@ func (a *App) syncMessages() {
 
 	usage := a.agent.Usage(a.sessionID)
 	a.inputTokens = usage.InputTokens
-	a.cachedTokens = usage.CachedTokens
 	a.outputTokens = usage.OutputTokens
 	a.lastInputTokens = usage.LastInputTokens
 }

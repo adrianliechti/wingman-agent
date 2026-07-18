@@ -3,6 +3,7 @@ package claw
 import (
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -259,11 +260,11 @@ func (t *TUI) statusLine(width int) string {
 	}
 
 	if ok {
-		tokens := "↑" + formatTokens(usage.InputTokens)
+		tokens := "↑" + tui.FormatTokens(usage.InputTokens)
 		if usage.CachedTokens > 0 {
-			tokens += " (" + formatTokens(usage.CachedTokens) + " cached)"
+			tokens += " (" + tui.FormatTokens(usage.CachedTokens) + " cached)"
 		}
-		tokens += " ↓" + formatTokens(usage.OutputTokens)
+		tokens += " ↓" + tui.FormatTokens(usage.OutputTokens)
 		parts = append(parts, dim(tokens))
 	}
 

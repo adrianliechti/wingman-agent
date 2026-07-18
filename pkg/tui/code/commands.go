@@ -216,7 +216,6 @@ func (a *App) submitInput() {
 
 	a.editor.AddHistory(query)
 	a.editor.SetText("")
-	a.editor.ResetHistoryCursor()
 
 	displayText := query
 

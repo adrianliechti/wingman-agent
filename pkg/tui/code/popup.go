@@ -104,12 +104,6 @@ func (p *Popup) SetSelected(id string, on bool) {
 	}
 }
 
-func (p *Popup) Select(index int) {
-	if index >= 0 && index < len(p.filtered) {
-		p.index = index
-	}
-}
-
 func (p *Popup) SelectID(id string) {
 	for i, idx := range p.filtered {
 		if p.items[idx].ID == id {

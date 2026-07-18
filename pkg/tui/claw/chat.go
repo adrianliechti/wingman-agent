@@ -1,7 +1,6 @@
 package claw
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
@@ -11,16 +10,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
-
-func formatTokens(n int64) string {
-	if n >= 1_000_000 {
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
-	}
-	if n >= 1_000 {
-		return fmt.Sprintf("%.1fK", float64(n)/1_000)
-	}
-	return fmt.Sprintf("%d", n)
-}
 
 func formatMessages(messages []agent.Message, width int) []string {
 	var lines []string

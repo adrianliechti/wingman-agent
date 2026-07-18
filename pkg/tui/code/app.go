@@ -13,6 +13,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/clipboard"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
@@ -29,7 +30,6 @@ type App struct {
 	queue    chan func()
 	quit     chan struct{}
 	quitOnce sync.Once
-	runErr   error
 
 	sessionMu    sync.Mutex
 	sessionID    string
@@ -77,7 +77,6 @@ type App struct {
 	askResponse  chan string
 
 	inputTokens     int64
-	cachedTokens    int64
 	outputTokens    int64
 	lastInputTokens int64
 
@@ -255,7 +254,6 @@ func (a *App) Run() error {
 	if messages := a.agent.Messages(a.sessionID); len(messages) > 0 {
 		usage := a.agent.Usage(a.sessionID)
 		a.inputTokens = usage.InputTokens
-		a.cachedTokens = usage.CachedTokens
 		a.outputTokens = usage.OutputTokens
 		a.lastInputTokens = usage.LastInputTokens
 		a.syncMessages()
@@ -271,11 +269,11 @@ func (a *App) Run() error {
 		select {
 		case <-a.quit:
 			a.shutdown()
-			return a.runErr
+			return nil
 
 		case <-a.ctx.Done():
 			a.shutdown()
-			return a.runErr
+			return nil
 
 		case ev := <-a.term.Events():
 			a.handleEvent(ev)
@@ -323,9 +321,9 @@ func (a *App) shutdown() {
 		usage := a.agent.Usage(a.sessionID)
 		fmt.Fprintf(os.Stderr, "\n")
 		if usage.CachedTokens > 0 {
-			fmt.Fprintf(os.Stderr, "  Tokens: ↑%s (%s cached) ↓%s\n", formatTokens(usage.InputTokens), formatTokens(usage.CachedTokens), formatTokens(usage.OutputTokens))
+			fmt.Fprintf(os.Stderr, "  Tokens: ↑%s (%s cached) ↓%s\n", tui.FormatTokens(usage.InputTokens), tui.FormatTokens(usage.CachedTokens), tui.FormatTokens(usage.OutputTokens))
 		} else {
-			fmt.Fprintf(os.Stderr, "  Tokens: ↑%s ↓%s\n", formatTokens(usage.InputTokens), formatTokens(usage.OutputTokens))
+			fmt.Fprintf(os.Stderr, "  Tokens: ↑%s ↓%s\n", tui.FormatTokens(usage.InputTokens), tui.FormatTokens(usage.OutputTokens))
 		}
 		fmt.Fprintf(os.Stderr, "  Resume: wingman --resume %s\n", a.sessionID)
 		fmt.Fprintf(os.Stderr, "\n")
@@ -754,7 +752,6 @@ func (a *App) clearChat() {
 	a.activateSession(id)
 	a.clearPendingContent()
 	a.inputTokens = 0
-	a.cachedTokens = 0
 	a.outputTokens = 0
 	a.lastInputTokens = 0
 	a.chat = nil
@@ -785,7 +782,6 @@ func (a *App) resumeSession() {
 
 	usage := a.agent.Usage(a.sessionID)
 	a.inputTokens = usage.InputTokens
-	a.cachedTokens = usage.CachedTokens
 	a.outputTokens = usage.OutputTokens
 	a.lastInputTokens = usage.LastInputTokens
 
@@ -905,16 +901,4 @@ func (a *App) exitPlanMode() {
 
 	_ = a.agent.SetMode(a.ctx, a.sessionID, "agent")
 	a.currentMode = ModeAgent
-}
-
-func formatTokens(n int64) string {
-	if n >= 1_000_000 {
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
-	}
-
-	if n >= 1_000 {
-		return fmt.Sprintf("%.1fK", float64(n)/1_000)
-	}
-
-	return fmt.Sprintf("%d", n)
 }

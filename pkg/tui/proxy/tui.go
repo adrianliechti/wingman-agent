@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/proxy"
+	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -291,8 +292,8 @@ func (a *App) listLines(width, height int) []string {
 			ansi.Fg(statusColor) + ansi.Pad(statusText, 4) + ansi.Reset + " " +
 			dim(ansi.Pad(dur, 6)) + " " +
 			ansi.Fg(th.Cyan) + ansi.Pad(e.Model, 20) + ansi.Reset + " " +
-			dim(ansi.Pad(formatTokens(int64(e.InputTokens)), 6)) + " " +
-			dim(ansi.Pad(formatTokens(int64(e.OutputTokens)), 6))
+			dim(ansi.Pad(tui.FormatTokens(int64(e.InputTokens)), 6)) + " " +
+			dim(ansi.Pad(tui.FormatTokens(int64(e.OutputTokens)), 6))
 
 		if i == a.selected {
 			row = ansi.Bg(th.Selection) + row + ansi.Reset
@@ -320,22 +321,12 @@ func (a *App) statusLine(width int) string {
 	}
 
 	if inputTotal > 0 || outputTotal > 0 {
-		parts = append(parts, ansi.Fg(th.Cyan)+formatTokens(int64(inputTotal))+" in / "+formatTokens(int64(outputTotal))+" out"+ansi.Reset)
+		parts = append(parts, ansi.Fg(th.Cyan)+tui.FormatTokens(int64(inputTotal))+" in / "+tui.FormatTokens(int64(outputTotal))+" out"+ansi.Reset)
 	}
 
 	parts = append(parts, dim("enter detail · s save · q quit"))
 
 	return "  " + strings.Join(parts, dim(" · "))
-}
-
-func formatTokens(n int64) string {
-	if n >= 1_000_000 {
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
-	}
-	if n >= 1_000 {
-		return fmt.Sprintf("%.1fK", float64(n)/1_000)
-	}
-	return fmt.Sprintf("%d", n)
 }
 
 func (a *App) renderDetail() {
@@ -373,11 +364,11 @@ func (a *App) renderDetail() {
 	field("Model", ansi.Fg(th.Cyan)+entry.Model+ansi.Reset)
 
 	if entry.InputTokens > 0 || entry.OutputTokens > 0 {
-		tokens := formatTokens(int64(entry.InputTokens)) + " in"
+		tokens := tui.FormatTokens(int64(entry.InputTokens)) + " in"
 		if entry.CachedTokens > 0 {
-			tokens += " (" + formatTokens(int64(entry.CachedTokens)) + " cached)"
+			tokens += " (" + tui.FormatTokens(int64(entry.CachedTokens)) + " cached)"
 		}
-		tokens += " / " + formatTokens(int64(entry.OutputTokens)) + " out"
+		tokens += " / " + tui.FormatTokens(int64(entry.OutputTokens)) + " out"
 		field("Tokens", ansi.Fg(th.Cyan)+tokens+ansi.Reset)
 	}
 

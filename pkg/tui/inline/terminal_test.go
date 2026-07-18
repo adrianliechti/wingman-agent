@@ -6,15 +6,16 @@ import (
 )
 
 // vtScreen is a minimal terminal emulator covering the sequences the
-// renderer emits: CUP, EL, ED, LF-scrolling.
+// renderer emits: CUP, EL, ED.
 type vtScreen struct {
-	rows []string
-	row  int
-	h    int
+	rows   []string
+	row    int
+	h      int
+	writes int
 }
 
 func newVTScreen(h int) *vtScreen {
-	return &vtScreen{rows: make([]string, h), row: 0, h: h}
+	return &vtScreen{rows: make([]string, h), h: h}
 }
 
 func (s *vtScreen) Write(p []byte) (int, error) {
@@ -29,15 +30,7 @@ func (s *vtScreen) Write(p []byte) (int, error) {
 		}
 
 		switch text[0] {
-		case '\n':
-			if s.row >= s.h-1 {
-				s.rows = append(s.rows[1:], "")
-				s.row = s.h - 1
-			} else {
-				s.row++
-			}
-			text = text[1:]
-		case '\r':
+		case '\n', '\r':
 			text = text[1:]
 		default:
 			idx := strings.IndexAny(text, "\x1b\n\r")
@@ -45,6 +38,7 @@ func (s *vtScreen) Write(p []byte) (int, error) {
 				idx = len(text)
 			}
 			s.rows[s.row] += text[:idx]
+			s.writes++
 			text = text[idx:]
 		}
 	}
@@ -57,15 +51,17 @@ func (s *vtScreen) apply(seq string) {
 		return
 	}
 	body := seq[2 : len(seq)-1]
-	final := seq[len(seq)-1]
 
-	switch final {
+	switch seq[len(seq)-1] {
 	case 'H':
 		row := 1
-		if body != "" {
+		if body != "" && body[0] != '?' {
 			parts := strings.SplitN(body, ";", 2)
-			for i, r := 0, 0; i < len(parts[0]); i++ {
+			r := 0
+			for i := 0; i < len(parts[0]); i++ {
 				r = r*10 + int(parts[0][i]-'0')
+			}
+			if r > 0 {
 				row = r
 			}
 		}
@@ -98,81 +94,57 @@ func newTestTerminal(h int) (*Terminal, *vtScreen) {
 	screen := newVTScreen(h)
 	t := NewTerminal(WithIO(strings.NewReader(""), screen, func() (int, int) { return 40, h }))
 	t.width, t.height = 40, h
+	t.alt = true
 	return t, screen
 }
 
-func TestRenderPinsToBottom(t *testing.T) {
-	term, screen := newTestTerminal(10)
+func TestRenderAltFillsFrame(t *testing.T) {
+	term, screen := newTestTerminal(4)
 
-	term.Render([]string{"one", "two", "three"}, nil)
+	term.RenderAlt([]string{"one", "two"}, nil)
 
-	if screen.rows[7] != "one" || screen.rows[8] != "two" || screen.rows[9] != "three" {
+	if screen.rows[0] != "one" || screen.rows[1] != "two" || screen.rows[2] != "" || screen.rows[3] != "" {
 		t.Fatalf("rows = %q", screen.rows)
 	}
-	for i := 0; i < 7; i++ {
-		if screen.rows[i] != "" {
-			t.Fatalf("row %d not empty: %q", i, screen.rows[i])
-		}
+}
+
+func TestRenderAltRewritesOnlyChangedRows(t *testing.T) {
+	term, screen := newTestTerminal(4)
+
+	term.RenderAlt([]string{"a", "b", "c"}, nil)
+	screen.writes = 0
+
+	term.RenderAlt([]string{"a", "B", "c"}, nil)
+
+	if screen.writes != 1 {
+		t.Fatalf("writes = %d, want 1 (only the changed row)", screen.writes)
+	}
+	if screen.rows[1] != "B" {
+		t.Fatalf("rows = %q", screen.rows)
 	}
 }
 
-func TestRenderGrowAndShrinkStaysPinned(t *testing.T) {
-	term, screen := newTestTerminal(10)
+func TestRenderAltClearsRemovedRows(t *testing.T) {
+	term, screen := newTestTerminal(4)
 
-	term.Render([]string{"a", "b"}, nil)
-	term.Render([]string{"a", "b", "c", "d"}, nil)
+	term.RenderAlt([]string{"a", "b", "c"}, nil)
+	term.RenderAlt([]string{"a"}, nil)
 
-	if screen.rows[6] != "a" || screen.rows[9] != "d" {
-		t.Fatalf("after grow: %q", screen.rows)
-	}
-
-	term.Render([]string{"x", "y"}, nil)
-
-	if screen.rows[8] != "x" || screen.rows[9] != "y" {
-		t.Fatalf("after shrink: %q", screen.rows)
-	}
-	if screen.rows[6] != "" || screen.rows[7] != "" {
-		t.Fatalf("stale rows after shrink: %q", screen.rows)
+	if screen.rows[0] != "a" || screen.rows[1] != "" || screen.rows[2] != "" {
+		t.Fatalf("rows = %q", screen.rows)
 	}
 }
 
-func TestFlushInsertsAboveLiveRegion(t *testing.T) {
-	term, screen := newTestTerminal(6)
+func TestResizedForcesFullRepaint(t *testing.T) {
+	term, screen := newTestTerminal(4)
 
-	term.Render([]string{"live1", "live2"}, nil)
-	term.Flush([]string{"hist1", "hist2", "hist3"})
+	term.RenderAlt([]string{"a", "b"}, nil)
+	term.Resized(40, 4)
+	screen.writes = 0
 
-	if screen.rows[4] != "live1" || screen.rows[5] != "live2" {
-		t.Fatalf("live region not at bottom: %q", screen.rows)
-	}
+	term.RenderAlt([]string{"a", "b"}, nil)
 
-	joined := strings.Join(screen.rows, "\n")
-	h1 := strings.Index(joined, "hist1")
-	h3 := strings.Index(joined, "hist3")
-	l1 := strings.Index(joined, "live1")
-
-	if h1 < 0 || h3 < 0 || h1 > h3 || h3 > l1 {
-		t.Fatalf("history misordered: %q", screen.rows)
-	}
-}
-
-func TestFlushScrollsHistoryIntoScrollback(t *testing.T) {
-	term, screen := newTestTerminal(5)
-
-	term.Render([]string{"live"}, nil)
-
-	var hist []string
-	for _, s := range []string{"h1", "h2", "h3", "h4", "h5", "h6"} {
-		hist = append(hist, s)
-	}
-	term.Flush(hist)
-
-	if screen.rows[4] != "live" {
-		t.Fatalf("live region lost: %q", screen.rows)
-	}
-
-	joined := strings.Join(screen.rows, "\n")
-	if !strings.Contains(joined, "h6") {
-		t.Fatalf("latest history not visible: %q", screen.rows)
+	if screen.writes != 2 {
+		t.Fatalf("writes = %d, want full repaint of content rows", screen.writes)
 	}
 }
