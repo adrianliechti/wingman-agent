@@ -824,6 +824,45 @@ func (a *App) resumeSession() {
 	a.clearSelection()
 	a.syncMessages()
 	a.appendChat(cellNotice(fmt.Sprintf("Resumed session from %s", last.UpdatedAt.Format("Jan 2 15:04")), t.Green, a.width()))
+
+	if len(a.agent.Messages(a.sessionID)) > 0 {
+		a.showRecap()
+	}
+}
+
+// showRecap asynchronously summarizes the session and posts the result as a
+// notice-style cell; the session may keep working meanwhile.
+func (a *App) showRecap() {
+	id := a.sessionID
+
+	if len(a.agent.Messages(id)) == 0 {
+		a.appendChat(cellNotice("Nothing to recap yet", theme.Default.Yellow, a.width()))
+		return
+	}
+
+	a.appendChat(cellNotice("Generating recap…", theme.Default.BrBlack, a.width()))
+
+	go func() {
+		recap, err := a.agent.Recap(a.ctx, id)
+
+		a.post(func() {
+			if a.sessionID != id {
+				return
+			}
+
+			switch {
+			case err != nil:
+				a.appendChat(cellNotice(fmt.Sprintf("Recap failed: %v", err), theme.Default.Yellow, a.width()))
+			case recap == "":
+				a.appendChat(cellNotice("Nothing to recap yet", theme.Default.Yellow, a.width()))
+			default:
+				a.flushToolGap()
+				a.appendChat(cellAssistant(recap, a.width(), theme.Default.Cyan))
+				a.appendChat([]string{""})
+			}
+			a.invalidate()
+		})
+	}()
 }
 
 func (a *App) copyTextToClipboard(text string) {

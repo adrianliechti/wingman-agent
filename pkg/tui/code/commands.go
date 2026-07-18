@@ -28,6 +28,8 @@ func (a *App) builtinCommands() []slashCommand {
 		{"/plan", "Enter planning mode"},
 		{"/agent", "Return to execution mode"},
 		{"/problems", "Show problems"},
+		{"/context", "Show context window usage"},
+		{"/recap", "Summarize the session so far"},
 	}
 
 	if a.agent.Workspace().HasRewind() {
@@ -74,7 +76,7 @@ func isBuiltinCommand(query string) bool {
 	case "/quit", "/clear", "/resume", "/help",
 		"/models", "/model", "/effort",
 		"/plan", "/agent",
-		"/rewind", "/diff", "/problems",
+		"/rewind", "/diff", "/problems", "/context", "/recap",
 		"/copy", "/paste":
 		return true
 	}
@@ -182,6 +184,16 @@ func (a *App) submitInput() {
 	case "/problems":
 		a.editor.SetText("")
 		a.showDiagnosticsView()
+		return
+
+	case "/context":
+		a.editor.SetText("")
+		a.showContextStats()
+		return
+
+	case "/recap":
+		a.editor.SetText("")
+		a.showRecap()
 		return
 
 	case "/copy":

@@ -124,9 +124,13 @@ func (c *Config) Derive() *Config {
 
 		CacheKey: c.CacheKey,
 
+		// Prompt and session lifecycle hooks stay with the top-level session;
+		// subagent prompts are agent-generated, not user prompts.
 		Hooks: hook.Hooks{
-			PreToolUse:  slices.Clone(c.Hooks.PreToolUse),
-			PostToolUse: slices.Clone(c.Hooks.PostToolUse),
+			PreToolUse:   slices.Clone(c.Hooks.PreToolUse),
+			PostToolUse:  slices.Clone(c.Hooks.PostToolUse),
+			SubagentStop: slices.Clone(c.Hooks.SubagentStop),
+			PreCompact:   slices.Clone(c.Hooks.PreCompact),
 		},
 
 		MaxTurns:         c.MaxTurns,

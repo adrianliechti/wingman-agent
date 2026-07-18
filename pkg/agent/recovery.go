@@ -370,6 +370,40 @@ func (a *Agent) summarizeMessages(ctx context.Context, messages []Message) (stri
 	return "[Previous conversation summary]\n\n" + summary, nil
 }
 
+// Recap produces a short user-facing briefing of the conversation so far,
+// for returning to a resumed session.
+func (a *Agent) Recap(ctx context.Context) (string, error) {
+	transcript := recoverySummaryTranscript(a.requestMessages())
+	if transcript == "" {
+		return "", nil
+	}
+
+	model := ""
+	if a.Config.Model != nil {
+		model = a.Model()
+	}
+
+	resp, err := a.client.Responses.New(ctx, responses.ResponseNewParams{
+		Model: model,
+		Instructions: openai.String(
+			"The user is returning to a coding session after time away. " +
+				"From the transcript, write a brief recap in Markdown: 2-5 bullets covering what was being worked on, " +
+				"what was accomplished or changed, and any open items or agreed next step. " +
+				"Address the user directly. No preamble, no heading, no questions.",
+		),
+		Input: responses.ResponseNewParamsInputUnion{
+			OfString: openai.String(transcript),
+		},
+		Store: openai.Bool(false),
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(recoverySummaryOutput(resp)), nil
+}
+
 func recoverySummaryOutput(resp *responses.Response) string {
 	var result strings.Builder
 	for _, item := range resp.Output {

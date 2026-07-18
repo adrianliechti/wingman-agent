@@ -322,6 +322,22 @@ func (a *Agent) Messages(id string) []harness.Message {
 	return s.aa.MessagesSnapshot()
 }
 
+func (a *Agent) Recap(ctx context.Context, id string) (string, error) {
+	s := a.session(id)
+	if s == nil {
+		return "", fmt.Errorf("session %s not found", id)
+	}
+	return s.aa.Recap(ctx)
+}
+
+func (a *Agent) ContextStats(id string) (harness.ContextStats, bool) {
+	s := a.session(id)
+	if s == nil {
+		return harness.ContextStats{}, false
+	}
+	return s.aa.ContextStats(), true
+}
+
 func (a *Agent) Usage(id string) harness.Usage {
 	s := a.session(id)
 	if s == nil {
@@ -481,7 +497,7 @@ func (a *Agent) buildSession() *sessionState {
 	// Workspace hooks come with the repo, not the user — gate them behind a
 	// one-time confirmation so a cloned project cannot run commands unprompted.
 	var workspaceGate *external.Gate
-	if rules := len(workspaceHooks.PreToolUse) + len(workspaceHooks.PostToolUse); rules > 0 {
+	if rules := workspaceHooks.RuleCount(); rules > 0 {
 		workspaceGate = &external.Gate{
 			Confirm: elicit.Confirm,
 			Message: fmt.Sprintf("Run %d workspace hook rule(s) from %s?", rules, workspaceHooksPath),
@@ -495,6 +511,17 @@ func (a *Agent) buildSession() *sessionState {
 	)
 	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse, globalHooks.PostHooks(ws.RootPath, nil)...)
 	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse, workspaceHooks.PostHooks(ws.RootPath, workspaceGate)...)
+
+	for _, cfg := range []struct {
+		hooks *external.Config
+		gate  *external.Gate
+	}{{globalHooks, nil}, {workspaceHooks, workspaceGate}} {
+		sessionCfg.Hooks.UserPromptSubmit = append(sessionCfg.Hooks.UserPromptSubmit, cfg.hooks.PromptHooks(ws.RootPath, cfg.gate)...)
+		sessionCfg.Hooks.SessionStart = append(sessionCfg.Hooks.SessionStart, cfg.hooks.StartHooks(ws.RootPath, cfg.gate)...)
+		sessionCfg.Hooks.SessionEnd = append(sessionCfg.Hooks.SessionEnd, cfg.hooks.EndHooks(ws.RootPath, cfg.gate)...)
+		sessionCfg.Hooks.SubagentStop = append(sessionCfg.Hooks.SubagentStop, cfg.hooks.SubagentHooks(ws.RootPath, cfg.gate)...)
+		sessionCfg.Hooks.PreCompact = append(sessionCfg.Hooks.PreCompact, cfg.hooks.CompactHooks(ws.RootPath, cfg.gate)...)
+	}
 
 	var allowedReadRoots []string
 	for _, sk := range ws.Skills {
@@ -647,6 +674,14 @@ func (s *sessionState) close() {
 		fn()
 	}
 	s.execManager.Close()
+
+	if hooks := s.aa.Hooks.SessionEnd; len(hooks) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		for _, h := range hooks {
+			h(ctx)
+		}
+	}
 }
 
 func (s *sessionState) tools() []tool.Tool {

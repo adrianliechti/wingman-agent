@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,7 @@ type Agent struct {
 	queueMu      sync.Mutex
 	running      bool
 	pendingInput [][]Content
+	startOnce    sync.Once
 }
 
 // QueueInput adds guidance to the active run. The agent consumes queued input
@@ -61,6 +63,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 		return nil, ErrEmptyInput
 	}
 	input = CloneContent(input)
+
 	a.queueMu.Lock()
 	if a.running {
 		a.queueMu.Unlock()
@@ -69,7 +72,38 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	a.running = true
 	a.queueMu.Unlock()
 
+	var hookContext []string
+
+	for _, h := range a.Hooks.UserPromptSubmit {
+		out, err := h(ctx, contentText(input))
+		if err != nil {
+			a.queueMu.Lock()
+			a.running = false
+			a.queueMu.Unlock()
+			return nil, err
+		}
+		if out != "" {
+			hookContext = append(hookContext, out)
+		}
+	}
+
+	a.startOnce.Do(func() {
+		var parts []string
+		for _, h := range a.Hooks.SessionStart {
+			if out, err := h(ctx); err == nil && out != "" {
+				parts = append(parts, out)
+			}
+		}
+		if len(parts) > 0 {
+			a.appendMessages(hiddenContextMessage(strings.Join(parts, "\n\n")))
+		}
+	})
+
 	a.appendMessages(userMessage(input))
+
+	if len(hookContext) > 0 {
+		a.appendMessages(hiddenContextMessage(strings.Join(hookContext, "\n\n")))
+	}
 
 	maxTurns := a.MaxTurns
 	if maxTurns == 0 {
@@ -221,11 +255,38 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			}
 			a.appendMessages(queuedMessages...)
 
-			if a.shouldCompactProactively(model, resp.usage.InputTokens) {
+			if a.shouldCompactProactively(model, resp.usage.InputTokens) && a.preCompactAllowed(ctx) {
 				a.compactMessages(ctx, false)
 			}
 		}
 	}, nil
+}
+
+func (a *Agent) preCompactAllowed(ctx context.Context) bool {
+	for _, h := range a.Hooks.PreCompact {
+		if err := h(ctx); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func contentText(input []Content) string {
+	var parts []string
+	for _, c := range input {
+		if c.Text != "" {
+			parts = append(parts, c.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func hiddenContextMessage(text string) Message {
+	return Message{
+		Role:    RoleUser,
+		Hidden:  true,
+		Content: []Content{{Text: text}},
+	}
 }
 
 func waitForRetry(ctx context.Context, delay time.Duration) bool {

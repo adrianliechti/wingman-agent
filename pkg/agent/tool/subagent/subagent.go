@@ -216,27 +216,34 @@ func Tools(cfg *agent.Config, sharedContext func() string) []tool.Tool {
 
 			text := strings.TrimSpace(finalText(sub.Messages))
 
+			finish := func(out string) (string, error) {
+				for _, h := range cfg.Hooks.SubagentStop {
+					h(ctx, subagentName, out)
+				}
+				return out, nil
+			}
+
 			if runErr != nil {
 				if text == "" {
 					return "", fmt.Errorf("agent error: %w", runErr)
 				}
-				return fmt.Sprintf("Agent aborted before finishing (%v). Last output before the abort — treat as incomplete:\n\n%s%s", runErr, text, trailer), nil
+				return finish(fmt.Sprintf("Agent aborted before finishing (%v). Last output before the abort — treat as incomplete:\n\n%s%s", runErr, text, trailer))
 			}
 
 			if collector != nil {
 				if payload := collector.payload(); payload != "" {
-					return payload + trailer, nil
+					return finish(payload + trailer)
 				}
 				if text == "" {
-					return "Sub-agent completed without calling report and produced no output." + trailer, nil
+					return finish("Sub-agent completed without calling report and produced no output." + trailer)
 				}
-				return "Sub-agent completed without calling report; unstructured output follows:\n\n" + text + trailer, nil
+				return finish("Sub-agent completed without calling report; unstructured output follows:\n\n" + text + trailer)
 			}
 
 			if text == "" {
-				return "Sub-agent completed but produced no output." + trailer, nil
+				return finish("Sub-agent completed but produced no output." + trailer)
 			}
-			return text + trailer, nil
+			return finish(text + trailer)
 		},
 	}}
 }
