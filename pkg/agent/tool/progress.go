@@ -5,6 +5,19 @@ import "context"
 type progressSinkKey struct{}
 type progressCallKey struct{}
 type usageSinkKey struct{}
+type backgroundOriginKey struct{}
+
+// WithBackgroundOrigin marks ctx as belonging to a detached background agent
+// run, so session-scoped state (e.g. file freshness) can tell its tool calls
+// apart from the main agent's.
+func WithBackgroundOrigin(ctx context.Context) context.Context {
+	return context.WithValue(ctx, backgroundOriginKey{}, true)
+}
+
+func IsBackgroundOrigin(ctx context.Context) bool {
+	v, _ := ctx.Value(backgroundOriginKey{}).(bool)
+	return v
+}
 
 // WithProgressSink installs a UI callback that receives transient status text
 // from running tool calls, keyed by tool-call ID.

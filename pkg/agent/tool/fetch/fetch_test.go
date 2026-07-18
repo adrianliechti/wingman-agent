@@ -1,15 +1,18 @@
 package fetch
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
 func fetchTool(t *testing.T) func(map[string]any) (string, error) {
 	t.Helper()
-	tl := Tools()[0]
+	tl := Tools(nil)[0]
 	return func(args map[string]any) (string, error) {
 		return tl.Execute(t.Context(), args)
 	}
@@ -102,5 +105,36 @@ func TestFetchTruncatesLongOutput(t *testing.T) {
 	}
 	if !strings.Contains(out, "[truncated at 48KB]") {
 		t.Fatal("missing truncation notice")
+	}
+}
+
+func TestFetchHostApprovalGate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	var prompts int
+	allow := false
+	elicit := &tool.Elicitation{Confirm: func(_ context.Context, _ string) (bool, error) {
+		prompts++
+		return allow, nil
+	}}
+	tl := Tools(elicit)[0]
+
+	if _, err := tl.Execute(t.Context(), map[string]any{"url": server.URL}); err == nil || !strings.Contains(err.Error(), "declined") {
+		t.Fatalf("declined fetch err = %v", err)
+	}
+
+	allow = true
+	if out, err := tl.Execute(t.Context(), map[string]any{"url": server.URL}); err != nil || out != "ok" {
+		t.Fatalf("approved fetch = %q, %v", out, err)
+	}
+	if _, err := tl.Execute(t.Context(), map[string]any{"url": server.URL + "/again"}); err != nil {
+		t.Fatalf("remembered approval fetch err = %v", err)
+	}
+	if prompts != 2 {
+		t.Fatalf("prompts = %d, want 2 (decline + approve, then remembered)", prompts)
 	}
 }

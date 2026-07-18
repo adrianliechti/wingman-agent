@@ -189,6 +189,11 @@ interface DiagnosticsChangedMessage {
 	type: "diagnostics_changed";
 }
 
+interface TasksChangedMessage {
+	type: "tasks_changed";
+	session?: string;
+}
+
 interface CapabilitiesChangedMessage {
 	type: "capabilities_changed";
 }
@@ -264,7 +269,8 @@ export type ServerMessage =
 	| AgentChangedMessage
 	| ModelChangedMessage
 	| TurnInputMessage
-	| TurnQueueMessage;
+	| TurnQueueMessage
+	| TasksChangedMessage;
 
 export type Phase = "idle" | "thinking" | "streaming" | "tool_running";
 
@@ -326,6 +332,21 @@ export interface CheckpointEntry {
 	hash: string;
 	message: string;
 	time: string;
+}
+
+export interface TaskEntry {
+	id: string;
+	description: string;
+	agent_type: string;
+	status: "running" | "done" | "failed" | "stopped";
+	activity?: string;
+	elapsed_seconds: number;
+	seq: number;
+}
+
+export interface TaskDetail extends TaskEntry {
+	result?: string;
+	transcript: ConversationMessage[];
 }
 
 export interface DiagnosticEntry {

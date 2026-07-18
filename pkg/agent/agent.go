@@ -37,6 +37,13 @@ type Agent struct {
 	startOnce    sync.Once
 }
 
+// Running reports whether a turn is currently active.
+func (a *Agent) Running() bool {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+	return a.running
+}
+
 // QueueInput adds guidance to the active run. The agent consumes queued input
 // at the next safe model boundary. It returns false when no run is active so
 // callers can preserve the input as a normal follow-up instead.

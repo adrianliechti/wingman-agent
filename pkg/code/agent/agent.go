@@ -74,6 +74,12 @@ type sessionState struct {
 	execManager *shell.ExecManager
 	tasks       *task.Registry
 
+	freshness *fs.Freshness
+	watchStop chan struct{}
+
+	changedMu    sync.Mutex
+	changedPaths []string
+
 	projectInstructionsMu     sync.Mutex
 	projectInstructionsCache  string
 	projectInstructionsMtimes map[string]time.Time
@@ -472,6 +478,19 @@ func (a *Agent) Tasks(id string) *task.Registry {
 	return s.tasks
 }
 
+// RunningTaskCount sums running background agents across every live session,
+// so quitting warns about agents outside the currently viewed session too.
+func (a *Agent) RunningTaskCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	total := 0
+	for _, s := range a.sessions {
+		running, _ := s.tasks.Counts()
+		total += running
+	}
+	return total
+}
+
 func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	if len(input) == 0 {
 		return nil, code.ErrEmptyInput
@@ -678,18 +697,30 @@ func (a *Agent) buildSession() *sessionState {
 
 	s.execManager = shell.NewExecManager()
 	s.tasks = task.NewRegistry()
+	s.freshness = fs.NewFreshness(ws.Root)
+	s.watchStop = make(chan struct{})
 	approvals := shell.NewApprovals()
+
+	sessionCfg.Hooks.UserPromptSubmit = append(sessionCfg.Hooks.UserPromptSubmit,
+		func(context.Context, string) (string, error) {
+			s.sweepFileChanges()
+			return formatFileChangeNotice(s.takeFileChanges()), nil
+		},
+	)
+
+	go s.watchFileChanges()
 
 	s.baseTools = slices.Concat(
 		fs.Tools(ws.Root, &fs.Options{
 			AllowedReadRoots:  allowedReadRoots,
 			AllowedWriteRoots: allowedWriteRoots,
+			Freshness:         s.freshness,
 		}),
 		shell.Tools(ws.RootPath, elicit, approvals),
 		shell.ExecTools(s.execManager, ws.RootPath, elicit, approvals),
 		todo.Tools(),
 		elicittool.Tools(elicit),
-		fetch.Tools(),
+		fetch.Tools(elicit),
 		subagent.Tools(sessionCfg, s.subagentContext, s.tasks),
 	)
 	return s
@@ -794,6 +825,7 @@ func (s *sessionState) close() {
 	if fn != nil {
 		fn()
 	}
+	close(s.watchStop)
 	s.tasks.Close()
 	s.execManager.Close()
 
@@ -804,6 +836,75 @@ func (s *sessionState) close() {
 			h(ctx)
 		}
 	}
+}
+
+// watchFileChanges announces external file modifications mid-turn: while a
+// turn runs, tracked files that changed outside the session's file tools are
+// reported to the model as hidden context at the next model boundary. Idle
+// periods are swept lazily by the UserPromptSubmit hook instead.
+func (s *sessionState) watchFileChanges() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.watchStop:
+			return
+		case <-ticker.C:
+			if !s.aa.Running() {
+				continue
+			}
+			s.sweepFileChanges()
+			paths := s.takeFileChanges()
+			if len(paths) == 0 {
+				continue
+			}
+			notice := formatFileChangeNotice(paths)
+			if !s.aa.QueueInput([]harness.Content{{Text: notice, Hidden: true}}) {
+				s.stashFileChanges(paths)
+			}
+		}
+	}
+}
+
+func (s *sessionState) sweepFileChanges() {
+	if changed := s.freshness.Changed(); len(changed) > 0 {
+		s.stashFileChanges(changed)
+	}
+}
+
+func (s *sessionState) stashFileChanges(paths []string) {
+	s.changedMu.Lock()
+	for _, p := range paths {
+		if !slices.Contains(s.changedPaths, p) {
+			s.changedPaths = append(s.changedPaths, p)
+		}
+	}
+	s.changedMu.Unlock()
+}
+
+const fileChangeNoticeMax = 20
+
+func (s *sessionState) takeFileChanges() []string {
+	s.changedMu.Lock()
+	paths := s.changedPaths
+	s.changedPaths = nil
+	s.changedMu.Unlock()
+	return paths
+}
+
+func formatFileChangeNotice(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+
+	listed := paths
+	suffix := ""
+	if len(listed) > fileChangeNoticeMax {
+		suffix = fmt.Sprintf(" (and %d more)", len(listed)-fileChangeNoticeMax)
+		listed = listed[:fileChangeNoticeMax]
+	}
+
+	return fmt.Sprintf("<system-reminder>These files changed on disk outside this session's file tools (edited by the user, a linter, or a shell command): %s%s. Your memory of their content is stale — re-read them before editing, take the external changes into account, and never revert them.</system-reminder>", strings.Join(listed, ", "), suffix)
 }
 
 func (s *sessionState) tools() []tool.Tool {

@@ -23,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
@@ -72,6 +73,9 @@ type Server struct {
 	promptsMu      sync.Mutex
 	pendingPrompts map[string]pendingPrompt
 	confirmAll     map[string]bool
+
+	taskPumpMu sync.Mutex
+	taskPumps  map[*task.Registry]bool
 
 	files           *watch.Monitor
 	prevGit         bool
@@ -278,6 +282,9 @@ func (s *Server) registerRoutes(r chi.Router) {
 				r.Post("/effort", s.handleSetEffort)
 				r.Get("/mode", s.handleMode)
 				r.Post("/mode", s.handleSetMode)
+				r.Get("/tasks", s.handleTasks)
+				r.Get("/tasks/{taskID}", s.handleTask)
+				r.Post("/tasks/{taskID}/stop", s.handleTaskStop)
 			})
 		})
 
@@ -494,6 +501,7 @@ func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
 
 	s.broadcast(Frame{Type: EvtModelChanged})
 	s.sendTurnSnapshot(id)
+	s.ensureTaskPump(id)
 	writeJSON(w, map[string]string{"id": id})
 }
 
@@ -524,6 +532,7 @@ func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sendSessionState(id)
+	s.ensureTaskPump(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -704,10 +713,12 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	ws := s.workspace
+	_, isCoder := s.activeAgent().(*coder.Agent)
 	caps := map[string]any{
 		"git":   ws.IsGitRepo(),
 		"lsp":   ws.HasLSP(),
 		"diffs": ws.HasRewind(),
+		"tasks": isCoder,
 	}
 	if !ws.HasRewind() {
 		caps["notice"] = "This directory is too large for full features. Diffs, checkpoints, and code intelligence are disabled — chat and file browsing still work."

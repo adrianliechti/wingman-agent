@@ -19,7 +19,6 @@ type subagentType struct {
 	Instructions        string
 	AllowTool           func(tool.Tool) bool
 	WrapDynamicReadOnly bool
-	Background          bool
 }
 
 const generalPurposeInstructions = `You are an agent performing a specific delegated task. Complete only the assigned scope. Unless the task explicitly asks you to edit files, stay read-only. Search broadly when you do not know where something lives, then narrow down. Prefer editing existing files over creating new files, and never create documentation files unless explicitly requested. Lead with findings or changes made, grouped by file when relevant, using file:line references. State assumptions and verification gaps at the end, not at the start. Reply in <=200 words unless the task explicitly asks for more. Do not explain your process.`
@@ -38,8 +37,6 @@ const codeSimplifierInstructions = `You are a code simplification specialist. Pr
 
 const testEngineerInstructions = `You are a test engineer focused on executable characterization, regression, contract, and equivalence tests. Use the existing test framework and project conventions. Read branches and boundaries before writing tests. Prefer concrete inputs and expected outputs over vague assertions. Cover failure paths, edge cases, and behavior recently changed. If editing is allowed, add focused tests that run today; if behavior is not implemented yet, mark pending tests using the local convention rather than deleting coverage. Report the exact test command and result.`
 
-// Background marks types safe to run detached: they never write project
-// files, so they cannot race edits the main agent makes meanwhile.
 var subagentTypes = map[string]subagentType{
 	"general-purpose": {
 		Instructions: generalPurposeInstructions,
@@ -49,30 +46,25 @@ var subagentTypes = map[string]subagentType{
 		Instructions:        exploreInstructions,
 		AllowTool:           allowReadOnlyTool,
 		WrapDynamicReadOnly: true,
-		Background:          true,
 	},
 	"verification": {
 		Instructions: verificationInstructions,
 		AllowTool:    allowVerificationTool,
-		Background:   true,
 	},
 	"security": {
 		Instructions:        securityInstructions,
 		AllowTool:           allowReadOnlyTool,
 		WrapDynamicReadOnly: true,
-		Background:          true,
 	},
 	"code-architect": {
 		Instructions:        codeArchitectInstructions,
 		AllowTool:           allowReadOnlyTool,
 		WrapDynamicReadOnly: true,
-		Background:          true,
 	},
 	"code-reviewer": {
 		Instructions:        codeReviewerInstructions,
 		AllowTool:           allowReadOnlyTool,
 		WrapDynamicReadOnly: true,
-		Background:          true,
 	},
 	"code-simplifier": {
 		Instructions: codeSimplifierInstructions,
@@ -115,7 +107,8 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry)
 	if tasks != nil {
 		lines = append(lines,
 			"",
-			"Set `background: true` to launch the agent in the background and keep working: the call returns immediately with a task id, and the result arrives later as a task notification. Only non-editing types support this (explore, verification, security, code-architect, code-reviewer). Prefer background for research or verification you can overlap with other work, and launch several to cover independent areas in parallel. While one runs, never invent or assume its result and don't start work that overlaps its scope. Use `task_output` to check on tasks, `task_stop` to cancel one, and `task_send` to ask a finished agent follow-ups with its context intact.",
+			"Set `background: true` to launch the agent in the background and keep working: the call returns immediately with a task id, and the result arrives later as a task notification. Prefer background for research or verification you can overlap with other work, and launch several to cover independent areas in parallel. While one runs, never invent or assume its result and don't start work that overlaps its scope. Use `task_output` to check on tasks, `task_stop` to cancel one, and `task_send` to ask a finished agent follow-ups with its context intact.",
+			"Editing agent types may also run in the background, but give them a file scope disjoint from files you plan to touch: concurrent edits to the same file fail and force a re-read, and prefer `edit` over `write` for any file a background agent might change.",
 		)
 	}
 
@@ -138,7 +131,7 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry)
 	if tasks != nil {
 		properties["background"] = map[string]any{
 			"type":        "boolean",
-			"description": "Run in the background and return immediately with a task id; the result arrives later as a task notification. Only supported for non-editing agent types.",
+			"description": "Run in the background and return immediately with a task id; the result arrives later as a task notification. For editing types, only with a file scope disjoint from your own work.",
 		}
 	}
 
@@ -225,9 +218,10 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry)
 			// runTurn is one turn on the shared sub-agent: the initial task and
 			// each task_send follow-up. Usage is reported as this turn's delta —
 			// the cumulative snapshot would double-bill resumed agents.
-			runTurn := func(execCtx context.Context, tk *task.Task, input string, collector *reportCollector) (string, error) {
+			runTurn := func(execCtx context.Context, tk *task.Task, input string) (string, error) {
 				started := time.Now()
 				before := sub.UsageSnapshot()
+				startIdx := len(sub.MessagesSnapshot())
 
 				var runErr error
 				stream, err := sub.Send(execCtx, []agent.Content{{Text: input}})
@@ -246,15 +240,24 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry)
 				}
 
 				usage := sub.UsageSnapshot()
-				tool.ReportUsage(reportCtx, tool.UsageDelta{
+				delta := tool.UsageDelta{
 					InputTokens:  usage.InputTokens - before.InputTokens,
 					CachedTokens: usage.CachedTokens - before.CachedTokens,
 					OutputTokens: usage.OutputTokens - before.OutputTokens,
-				})
+				}
+				tool.ReportUsage(reportCtx, delta)
 
-				trailer := runTrailer(sub.Messages, usage, time.Since(started))
+				// Only this run's messages: a resumed agent's history still holds
+				// every earlier run, and finalText over the full history would
+				// re-deliver the previous run's answer.
+				runMessages := sub.MessagesSnapshot()
+				if startIdx <= len(runMessages) {
+					runMessages = runMessages[startIdx:]
+				}
 
-				text := strings.TrimSpace(finalText(sub.Messages))
+				trailer := runTrailer(runMessages, agent.Usage{InputTokens: delta.InputTokens, CachedTokens: delta.CachedTokens, OutputTokens: delta.OutputTokens}, time.Since(started))
+
+				text := strings.TrimSpace(finalText(runMessages))
 
 				finish := func(out string) (string, error) {
 					for _, h := range cfg.Hooks.SubagentStop {
@@ -271,7 +274,7 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry)
 				}
 
 				if collector != nil {
-					if payload := collector.payload(); payload != "" {
+					if payload := collector.take(); payload != "" {
 						return finish(payload + trailer)
 					}
 					if text == "" {
@@ -290,11 +293,8 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry)
 				if tasks == nil {
 					return "", fmt.Errorf("background agents are not available in this session; run the agent synchronously")
 				}
-				if !typ.Background {
-					return "", fmt.Errorf("agent_type %q cannot run in the background because it may edit files (backgroundable: %s); run it synchronously", subagentName, strings.Join(backgroundTypeNames(), ", "))
-				}
 				t, err := tasks.Launch(description, subagentName, func(execCtx context.Context, tk *task.Task) (string, error) {
-					return runTurn(execCtx, tk, prompt, collector)
+					return runTurn(execCtx, tk, prompt)
 				})
 				if err != nil {
 					return "", err
@@ -302,13 +302,13 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry)
 				t.SetPeek(sub.MessagesSnapshot)
 				t.SetResume(func(followUp string) error {
 					return tasks.Relaunch(t, func(execCtx context.Context, tk *task.Task) (string, error) {
-						return runTurn(execCtx, tk, followUp, nil)
+						return runTurn(execCtx, tk, followUp)
 					})
 				})
 				return fmt.Sprintf("Launched background agent %s (%s: %s). Continue with other work — the result arrives as a task notification when it finishes. Never assume or invent its result, and don't start work that overlaps its scope. Check on it with task_output, cancel it with task_stop, or ask it follow-ups later with task_send.", t.ID, subagentName, description), nil
 			}
 
-			return runTurn(ctx, nil, prompt, collector)
+			return runTurn(ctx, nil, prompt)
 		},
 	}}
 
@@ -330,16 +330,6 @@ func updateTaskActivity(tk *task.Task, msg agent.Message) {
 		}
 		tk.SetActivity(activity)
 	}
-}
-
-func backgroundTypeNames() []string {
-	var names []string
-	for _, name := range availableTypes {
-		if subagentTypes[name].Background {
-			names = append(names, name)
-		}
-	}
-	return names
 }
 
 type reportCollector struct {
@@ -369,10 +359,14 @@ func newReportCollector(schemaMap map[string]any) (*reportCollector, error) {
 	return &reportCollector{schema: schemaMap, resolved: resolved}, nil
 }
 
-func (c *reportCollector) payload() string {
+// take returns and clears the recorded result, so each run of a resumed agent
+// delivers its own report instead of replaying the previous one.
+func (c *reportCollector) take() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.result
+	out := c.result
+	c.result = ""
+	return out
 }
 
 func (c *reportCollector) tool() tool.Tool {
