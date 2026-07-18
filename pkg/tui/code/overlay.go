@@ -3,8 +3,10 @@ package code
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -147,19 +149,19 @@ type transcriptOverlay struct {
 	height int
 }
 
-func (a *App) showTranscript() {
-	width := a.width()
-
+// transcriptLines renders committed messages with nothing truncated. A nil
+// isToolHidden shows every tool result.
+func transcriptLines(messages []agent.Message, width int, isToolHidden func(string) bool) []string {
 	var lines []string
 
-	for _, msg := range a.agent.Messages(a.sessionID) {
+	for _, msg := range messages {
 		if msg.Hidden {
 			continue
 		}
 		for _, c := range msg.Content {
 			switch {
 			case c.ToolResult != nil:
-				if a.isToolHidden(c.ToolResult.Name) {
+				if isToolHidden != nil && isToolHidden(c.ToolResult.Name) {
 					continue
 				}
 				lines = append(lines, cellTool(c.ToolResult, width, true)...)
@@ -176,6 +178,14 @@ func (a *App) showTranscript() {
 			}
 		}
 	}
+
+	return lines
+}
+
+func (a *App) showTranscript() {
+	width := a.width()
+
+	lines := transcriptLines(a.agent.Messages(a.sessionID), width, a.isToolHidden)
 
 	_, _, _, streamingText, streamingReasoning := a.snapshotStreamState()
 	if streamingReasoning != "" {
@@ -211,4 +221,81 @@ func (o *transcriptOverlay) HandleMouse(ev inline.MouseEvent) {
 func (o *transcriptOverlay) Render(width, height int) []string {
 	o.height = height
 	return o.pager.Render(width, height)
+}
+
+// taskOverlay is a live window onto a background agent's transcript: while
+// the task runs it re-snapshots the messages (throttled) and follows the
+// bottom until the user scrolls away.
+type taskOverlay struct {
+	task   *task.Task
+	pager  pager
+	height int
+	follow bool
+
+	builtAt     time.Time
+	builtWidth  int
+	builtStatus task.Status
+}
+
+func (a *App) showTaskPeek(t *task.Task) {
+	o := &taskOverlay{
+		task:   t,
+		follow: true,
+	}
+	o.pager.hints = dim("↑↓/jk/wheel scroll · g/G top/bottom · esc close")
+	a.openOverlay(o)
+}
+
+func (o *taskOverlay) rebuild(width int, status task.Status) {
+	title := fmt.Sprintf("agent %s · %s · %s · %s", o.task.ID, o.task.AgentType, status, o.task.Elapsed().Round(time.Second))
+	if status == task.StatusRunning {
+		if activity := o.task.Activity(); activity != "" {
+			title += " · " + activity
+		}
+	}
+	o.pager.title = title
+
+	lines := transcriptLines(o.task.PeekMessages(), width, nil)
+	if len(lines) == 0 {
+		lines = []string{cellIndent + dim("No output yet…")}
+	}
+	o.pager.lines = lines
+	if o.follow {
+		o.pager.offset = len(lines)
+	}
+}
+
+const taskPeekRefresh = 500 * time.Millisecond
+
+func (o *taskOverlay) Render(width, height int) []string {
+	o.height = height
+
+	status := o.task.Status()
+	if o.pager.lines == nil || width != o.builtWidth || status != o.builtStatus ||
+		(status == task.StatusRunning && time.Since(o.builtAt) > taskPeekRefresh) {
+		o.rebuild(width, status)
+		o.builtAt = time.Now()
+		o.builtWidth = width
+		o.builtStatus = status
+	}
+
+	return o.pager.Render(width, height)
+}
+
+func (o *taskOverlay) HandleKey(ev inline.KeyEvent) bool {
+	switch {
+	case ev.Key == inline.KeyEnd, ev.Key == inline.KeyRune && ev.Rune == 'G':
+		o.follow = true
+	case ev.Key == inline.KeyUp, ev.Key == inline.KeyPgUp, ev.Key == inline.KeyHome,
+		ev.Key == inline.KeyRune && (ev.Rune == 'k' || ev.Rune == 'g'):
+		o.follow = false
+	}
+	return o.pager.HandleKey(ev, o.height)
+}
+
+func (o *taskOverlay) HandleMouse(ev inline.MouseEvent) {
+	if ev.Kind == inline.MouseWheel && ev.WheelDelta < 0 {
+		o.follow = false
+	}
+	o.pager.HandleMouse(ev, o.height)
 }

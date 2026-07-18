@@ -85,6 +85,14 @@ func (a *App) footerLine(width int) string {
 
 	var right []string
 
+	if reg := a.agent.Tasks(a.sessionID); reg != nil {
+		if running, _ := reg.Counts(); running == 1 {
+			right = append(right, colored(t.Cyan, "1 agent"))
+		} else if running > 1 {
+			right = append(right, colored(t.Cyan, fmt.Sprintf("%d agents", running)))
+		}
+	}
+
 	if a.inputTokens > 0 || a.outputTokens > 0 {
 		tokens := fmt.Sprintf("↑%s ↓%s", tui.FormatTokens(a.inputTokens), tui.FormatTokens(a.outputTokens))
 		right = append(right, dim(tokens))

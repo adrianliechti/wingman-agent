@@ -257,7 +257,7 @@ func (c *Claw) loadAgent(name string) (*managedAgent, error) {
 		agentTools = append(agentTools, manage.Tools(c, c.config.Memory)...)
 	}
 
-	agentTools = append(agentTools, subagent.Tools(cfg, func() string { return c.buildAgentContext(name) })...)
+	agentTools = append(agentTools, subagent.Tools(cfg, func() string { return c.buildAgentContext(name) }, nil)...)
 
 	cfg.Tools = func() []tool.Tool { return agentTools }
 

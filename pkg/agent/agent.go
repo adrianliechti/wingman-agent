@@ -617,8 +617,16 @@ func findTool(name string, tools []tool.Tool) *tool.Tool {
 }
 
 func userMessage(input []Content) Message {
+	hidden := len(input) > 0
+	for _, c := range input {
+		if !c.Hidden {
+			hidden = false
+			break
+		}
+	}
 	return Message{
 		Role:    RoleUser,
+		Hidden:  hidden,
 		Content: input,
 	}
 }

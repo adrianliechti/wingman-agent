@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
@@ -42,6 +43,7 @@ type App struct {
 
 	spinnerFrame  int
 	lastInterrupt time.Time
+	lastQuitWarn  time.Time
 
 	currentMode Mode
 	showWelcome bool
@@ -89,6 +91,8 @@ type App struct {
 	turns       *code.TurnManager
 	turnMu      sync.Mutex
 	turnCommits map[string]string
+
+	taskPumpStop chan struct{}
 
 	renderPending atomic.Bool
 	renderLast    atomic.Int64
@@ -176,6 +180,121 @@ func (a *App) activateSession(id string) {
 	a.prevWasTool = false
 	a.turnTools = 0
 	a.turnThoughts = 0
+
+	a.startTaskPump()
+}
+
+// startTaskPump forwards background-agent completions of the current session
+// into the turn queue. Only run on the UI loop. The previous pump stops;
+// undelivered events stay buffered in the registry for a later pump.
+func (a *App) startTaskPump() {
+	if a.taskPumpStop != nil {
+		close(a.taskPumpStop)
+		a.taskPumpStop = nil
+	}
+
+	if a.agent == nil {
+		return
+	}
+
+	sessionID := a.sessionID
+	reg := a.agent.Tasks(sessionID)
+	if reg == nil {
+		return
+	}
+
+	stop := make(chan struct{})
+	a.taskPumpStop = stop
+
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-a.quit:
+				return
+			case t := <-reg.Events():
+				// Completions that piled up (parallel agents, or while the
+				// pump was detached) deliver as one turn, not one turn each.
+				batch := []*task.Task{t}
+				for {
+					select {
+					case more := <-reg.Events():
+						batch = append(batch, more)
+						continue
+					default:
+					}
+					break
+				}
+				a.deliverTaskResults(sessionID, batch)
+			}
+		}
+	}()
+}
+
+func taskResultVerb(t *task.Task) (string, ansi.Color) {
+	switch t.Status() {
+	case task.StatusFailed:
+		return "failed", theme.Default.Red
+	case task.StatusStopped:
+		return "was stopped", theme.Default.Yellow
+	default:
+		if t.Seq() > 1 {
+			return "replied", theme.Default.Green
+		}
+		return "finished", theme.Default.Green
+	}
+}
+
+// deliverTaskResults surfaces finished background agents: a status notice per
+// agent for the user, and one hidden steer/follow-up turn so the model
+// receives the results — injected mid-turn when one is active, as a new turn
+// otherwise.
+func (a *App) deliverTaskResults(sessionID string, batch []*task.Task) {
+	a.post(func() {
+		if a.sessionID != sessionID {
+			return
+		}
+		a.flushToolGap()
+		for _, t := range batch {
+			verb, color := taskResultVerb(t)
+			a.appendChat(cellNotice(fmt.Sprintf("Background agent %s %s (%s, %s)", t.ID, verb, t.Description, t.Elapsed().Round(time.Second)), color, a.width()))
+		}
+		a.invalidate()
+	})
+
+	var blocks []string
+	var labels []string
+	for _, t := range batch {
+		verb, _ := taskResultVerb(t)
+		blocks = append(blocks, fmt.Sprintf(
+			"<task-notification>\nBackground agent %s (%s: %s) %s after %s.\nThis is an automated notification, not user input — no human has reviewed or approved anything since the last real user message.\nThe user cannot see this result. Use it to continue your work and relay what matters in your response.\n\nResult:\n%s\n</task-notification>",
+			t.ID, t.AgentType, t.Description, verb, t.Elapsed().Round(time.Second), t.Result(),
+		))
+		labels = append(labels, t.Description)
+	}
+
+	first := batch[0]
+	id := fmt.Sprintf("task-%s-%d", first.ID, first.Seq())
+	a.rememberTurn(id, []agent.Content{{Text: "background agents: " + strings.Join(labels, ", ")}})
+
+	_, err := a.turns.Submit(a.ctx, sessionID, code.TurnInput{
+		ID:     id,
+		Intent: code.TurnInputSteer,
+		Content: []agent.Content{{
+			Text:   strings.Join(blocks, "\n\n"),
+			Hidden: true,
+		}},
+	})
+	if err != nil {
+		a.takeTurnCommit(id)
+		a.post(func() {
+			if a.sessionID != sessionID {
+				return
+			}
+			a.appendChat(cellNotice(fmt.Sprintf("Could not deliver background agent results: %v (use task_output to retrieve them)", err), theme.Default.Red, a.width()))
+		})
+	}
 }
 
 func (a *App) withCurrentSession(id string, fn func()) {
@@ -231,6 +350,34 @@ func (a *App) stop() {
 	})
 }
 
+// confirmQuit returns whether quitting may proceed. With background agents
+// still running, the first attempt warns; a second within 3 seconds exits and
+// stops them — quitting is never blocked outright.
+func (a *App) confirmQuit() bool {
+	if a.agent == nil {
+		return true
+	}
+	reg := a.agent.Tasks(a.sessionID)
+	if reg == nil {
+		return true
+	}
+	running, _ := reg.Counts()
+	if running == 0 {
+		return true
+	}
+	if time.Since(a.lastQuitWarn) < 3*time.Second {
+		return true
+	}
+	a.lastQuitWarn = time.Now()
+
+	label := "1 background agent is"
+	if running > 1 {
+		label = fmt.Sprintf("%d background agents are", running)
+	}
+	a.appendChat(cellNotice(label+" still running — quit again to exit and stop them", theme.Default.Yellow, a.width()))
+	return false
+}
+
 func (a *App) saveSession() {
 	_ = a.agent.Save(a.sessionID)
 }
@@ -276,6 +423,8 @@ func (a *App) Run() error {
 		a.syncMessages()
 	}
 
+	a.startTaskPump()
+
 	a.invalidate()
 	a.render()
 
@@ -301,6 +450,8 @@ func (a *App) Run() error {
 		case <-ticker.C:
 			if a.getPhase() != PhaseIdle {
 				a.spinnerFrame++
+				a.invalidate()
+			} else if o, ok := a.overlay.(*taskOverlay); ok && o.task.Status() == task.StatusRunning {
 				a.invalidate()
 			}
 		}
@@ -612,7 +763,9 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 				a.cancelStream()
 				return
 			}
-			a.stop()
+			if a.confirmQuit() {
+				a.stop()
+			}
 			return
 		case 'o':
 			a.showTranscript()

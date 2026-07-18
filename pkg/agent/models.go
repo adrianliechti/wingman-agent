@@ -23,6 +23,11 @@ type Content struct {
 	Text    string `json:"text,omitempty"`
 	Refusal string `json:"refusal,omitempty"`
 
+	// Hidden marks injected context (e.g. background-task notifications) that
+	// the model must see but UIs must not render as user input. A user message
+	// whose content is entirely hidden becomes a hidden message.
+	Hidden bool `json:"hidden,omitempty"`
+
 	File *File `json:"file,omitempty"`
 
 	Reasoning *Reasoning `json:"reasoning,omitempty"`

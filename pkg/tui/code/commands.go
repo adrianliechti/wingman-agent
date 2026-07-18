@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -29,6 +31,7 @@ func (a *App) builtinCommands() []slashCommand {
 		{"/agent", "Return to execution mode"},
 		{"/problems", "Show problems"},
 		{"/context", "Show context window usage"},
+		{"/tasks", "Show background agents"},
 		{"/recap", "Summarize the session so far"},
 	}
 
@@ -76,7 +79,7 @@ func isBuiltinCommand(query string) bool {
 	case "/quit", "/clear", "/resume", "/help",
 		"/models", "/model", "/effort",
 		"/plan", "/agent",
-		"/rewind", "/diff", "/problems", "/context", "/recap",
+		"/rewind", "/diff", "/problems", "/context", "/tasks", "/recap",
 		"/copy", "/paste":
 		return true
 	}
@@ -123,7 +126,7 @@ func (a *App) submitInput() {
 		return
 	}
 
-	if a.getPhase() != PhaseIdle && isBuiltinCommand(query) && query != "/quit" {
+	if a.getPhase() != PhaseIdle && isBuiltinCommand(query) && query != "/quit" && query != "/tasks" {
 		return
 	}
 
@@ -133,7 +136,10 @@ func (a *App) submitInput() {
 
 	switch query {
 	case "/quit":
-		a.stop()
+		a.editor.SetText("")
+		if a.confirmQuit() {
+			a.stop()
+		}
 		return
 
 	case "/clear":
@@ -189,6 +195,11 @@ func (a *App) submitInput() {
 	case "/context":
 		a.editor.SetText("")
 		a.showContextStats()
+		return
+
+	case "/tasks":
+		a.editor.SetText("")
+		a.showTasks()
 		return
 
 	case "/recap":
@@ -346,6 +357,43 @@ func (a *App) showHelp() {
 	lines = append(lines, "")
 
 	a.appendChat(lines)
+}
+
+func (a *App) showTasks() {
+	t := theme.Default
+
+	reg := a.agent.Tasks(a.sessionID)
+	if reg == nil {
+		a.appendChat(cellNotice("No background agents in this session", t.Yellow, a.width()))
+		return
+	}
+
+	tasks := reg.List()
+	if len(tasks) == 0 {
+		a.appendChat(cellNotice("No background agents in this session", t.Yellow, a.width()))
+		return
+	}
+
+	items := make([]PopupItem, len(tasks))
+	for i, tk := range tasks {
+		detail := tk.Description
+		if tk.Status() == task.StatusRunning {
+			if activity := tk.Activity(); activity != "" {
+				detail += " — " + activity
+			}
+		}
+		items[i] = PopupItem{
+			ID:     tk.ID,
+			Label:  fmt.Sprintf("%s  %-7s  %-14s  %s", tk.ID, tk.Status(), tk.AgentType, tk.Elapsed().Round(time.Second)),
+			Detail: detail,
+		}
+	}
+
+	a.popup = newPopup(popupList, "background agents (enter to watch)", items, func(ids []string) {
+		if tk := reg.Get(ids[0]); tk != nil {
+			a.showTaskPeek(tk)
+		}
+	})
 }
 
 func (a *App) showModelPicker() {

@@ -21,6 +21,7 @@ import (
 	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/external"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	elicittool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/elicit"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
@@ -70,6 +71,7 @@ type sessionState struct {
 	planMode    atomic.Bool
 	baseTools   []tool.Tool
 	execManager *shell.ExecManager
+	tasks       *task.Registry
 
 	projectInstructionsMu     sync.Mutex
 	projectInstructionsCache  string
@@ -459,6 +461,16 @@ func (a *Agent) session(id string) *sessionState {
 
 func (a *Agent) HasSession(id string) bool { return a.session(id) != nil }
 
+// Tasks exposes the session's background-agent registry so UI surfaces can
+// list running agents and deliver completion notifications.
+func (a *Agent) Tasks(id string) *task.Registry {
+	s := a.session(id)
+	if s == nil {
+		return nil
+	}
+	return s.tasks
+}
+
 func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	if len(input) == 0 {
 		return nil, code.ErrEmptyInput
@@ -664,6 +676,7 @@ func (a *Agent) buildSession() *sessionState {
 	}
 
 	s.execManager = shell.NewExecManager()
+	s.tasks = task.NewRegistry()
 	approvals := shell.NewApprovals()
 
 	s.baseTools = slices.Concat(
@@ -675,7 +688,7 @@ func (a *Agent) buildSession() *sessionState {
 		shell.ExecTools(s.execManager, ws.RootPath, elicit, approvals),
 		todo.Tools(),
 		elicittool.Tools(elicit),
-		subagent.Tools(sessionCfg, s.subagentContext),
+		subagent.Tools(sessionCfg, s.subagentContext, s.tasks),
 	)
 	return s
 }
@@ -779,6 +792,7 @@ func (s *sessionState) close() {
 	if fn != nil {
 		fn()
 	}
+	s.tasks.Close()
 	s.execManager.Close()
 
 	if hooks := s.aa.Hooks.SessionEnd; len(hooks) > 0 {
