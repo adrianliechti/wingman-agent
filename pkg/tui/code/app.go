@@ -17,6 +17,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/clipboard"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
@@ -452,7 +453,8 @@ func (a *App) chatViewLines(width int) []string {
 	if len(stream) > 0 || len(a.pendingEcho) > 0 {
 		view = append(append([]string(nil), a.chat...), stream...)
 		for _, item := range a.pendingEcho {
-			view = append(view, cellIndent+dim(ansi.Truncate("› "+item.Text, width-10, "…")+" (queued)"))
+			text := markdown.Sanitize(strings.ReplaceAll(item.Text, "\n", " "))
+			view = append(view, cellIndent+dim(ansi.Truncate("› "+text, width-10, "…")+" (queued)"))
 		}
 	}
 

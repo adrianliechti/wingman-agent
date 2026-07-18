@@ -148,6 +148,14 @@ func (a *App) render() {
 		}
 	}
 
+	// A too-short window drops rows from the top of the bottom section — the
+	// editor and footer at its tail must stay visible.
+	if len(bottom) > height {
+		drop := len(bottom) - height
+		bottom = bottom[drop:]
+		editorStart -= drop
+	}
+
 	chatRows := height - len(bottom)
 	if chatRows < 0 {
 		chatRows = 0
@@ -230,7 +238,9 @@ func (a *App) render() {
 	var cursorPtr *inline.Pos
 	if hasCursor {
 		cursor.Row += chatRows + editorStart
-		cursorPtr = &cursor
+		if cursor.Row >= 0 && cursor.Row < height {
+			cursorPtr = &cursor
+		}
 	}
 
 	a.term.RenderAlt(frame, cursorPtr)

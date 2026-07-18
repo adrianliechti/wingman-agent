@@ -176,7 +176,12 @@ func wrapLine(text string, width int) []string {
 		if curWidth+seg.width > width && curWidth > 0 {
 			if lastBreak >= start {
 				emit(start, lastBreak)
+				// Consume the whole space run at the break so a continuation
+				// line neither starts with one nor wraps into a blank line.
 				start = lastBreak + 1
+				for start < len(segments) && segments[start].text == " " {
+					start++
+				}
 			} else {
 				emit(start, i)
 				start = i
@@ -186,6 +191,9 @@ func wrapLine(text string, width int) []string {
 				curWidth += segments[j].width
 			}
 			lastBreak = -1
+			if start > i {
+				i = start - 1
+			}
 			continue
 		}
 

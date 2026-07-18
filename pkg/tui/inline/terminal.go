@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"golang.org/x/term"
@@ -213,7 +214,8 @@ func (t *Terminal) RenderAlt(lines []string, cursor *Pos) {
 		return
 	}
 
-	fmt.Fprint(t.out, "\x1b[?2026h\x1b[?25l")
+	var frame strings.Builder
+	frame.WriteString("\x1b[?2026h\x1b[?25l")
 
 	for i := 0; i < t.height; i++ {
 		line := ""
@@ -223,14 +225,15 @@ func (t *Terminal) RenderAlt(lines []string, cursor *Pos) {
 		if i < len(t.altFrame) && t.altFrame[i] == line {
 			continue
 		}
-		fmt.Fprintf(t.out, "\x1b[%d;1H\x1b[2K%s\x1b[0m", i+1, line)
+		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[2K%s\x1b[0m", i+1, line)
 	}
 
 	t.altFrame = append(t.altFrame[:0], lines...)
 
 	if cursor != nil {
-		fmt.Fprintf(t.out, "\x1b[%d;%dH\x1b[?25h", cursor.Row+1, cursor.Col+1)
+		fmt.Fprintf(&frame, "\x1b[%d;%dH\x1b[?25h", cursor.Row+1, cursor.Col+1)
 	}
 
-	fmt.Fprint(t.out, "\x1b[?2026l")
+	frame.WriteString("\x1b[?2026l")
+	io.WriteString(t.out, frame.String())
 }

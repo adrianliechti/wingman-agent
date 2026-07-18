@@ -152,13 +152,10 @@ func (a *App) footerLine(width int) string {
 		leftText := strings.Join(parts, sep)
 		gap := width - 2*len(cellIndent) - ansi.Width(leftText) - rightWidth
 
-		if gap >= 2 || n == 0 {
-			if gap < 1 {
-				gap = 1
-			}
+		if gap >= 2 {
 			return cellIndent + leftText + strings.Repeat(" ", gap) + rightText
 		}
 	}
 
-	return cellIndent + rightText
+	return cellIndent + ansi.Truncate(rightText, width-len(cellIndent), "…")
 }

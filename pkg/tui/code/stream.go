@@ -303,9 +303,11 @@ func (a *App) finishTurn(sessionID, commit string, state code.TurnInputState, tu
 					a.flushTurnSeparator()
 				}
 			case state == code.TurnInputCancelled || errors.Is(turnErr, context.Canceled):
+				a.flushToolGap()
 				a.appendChat(cellNotice("Cancelled", t.Yellow, a.width()))
 				a.resetTurnStats()
 			default:
+				a.flushToolGap()
 				a.appendChat(cellNotice(fmt.Sprintf("Error: %v", turnErr), t.Red, a.width()))
 				a.resetTurnStats()
 			}
@@ -326,11 +328,21 @@ func (a *App) currentEpoch() uint64 {
 	return a.sessionEpoch
 }
 
+// flushToolGap commits the blank line a trailing tool cell is still owed, so
+// separators and notices never sit tight against tool output.
+func (a *App) flushToolGap() {
+	if a.prevWasTool {
+		a.appendChat([]string{""})
+		a.prevWasTool = false
+	}
+}
+
 func (a *App) flushTurnSeparator() {
 	if a.turnTools == 0 && a.turnThoughts == 0 {
 		a.resetTurnStats()
 		return
 	}
+	a.flushToolGap()
 
 	elapsed := ""
 	if !a.turnStart.IsZero() {

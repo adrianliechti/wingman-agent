@@ -37,7 +37,11 @@ type pager struct {
 }
 
 func (p *pager) contentRows(height int) int {
-	return height - 3
+	rows := height - 3
+	if rows < 0 {
+		rows = 0
+	}
+	return rows
 }
 
 func (p *pager) clamp(height int) {
