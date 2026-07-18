@@ -24,6 +24,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	elicittool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/elicit"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fetch"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
@@ -688,6 +689,7 @@ func (a *Agent) buildSession() *sessionState {
 		shell.ExecTools(s.execManager, ws.RootPath, elicit, approvals),
 		todo.Tools(),
 		elicittool.Tools(elicit),
+		fetch.Tools(),
 		subagent.Tools(sessionCfg, s.subagentContext, s.tasks),
 	)
 	return s

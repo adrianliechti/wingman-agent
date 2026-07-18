@@ -19,6 +19,7 @@ func Tools() []tool.Tool {
 		"Update your task list for the current session. Each call replaces the whole list.",
 		"- Use for multi-step work (3+ distinct steps) or when the user gives several tasks. Skip it for single straightforward tasks — writing the list would cost more than it guides.",
 		"- Keep exactly one item in_progress at a time. Mark items completed immediately when they are done; don't batch completions.",
+		"- Only mark an item completed when it truly succeeded — tests pass, errors resolved. If blocked or partially done, keep it in_progress and add a new item for what's blocking.",
 		"- Add newly discovered steps as they come up, and remove items that became irrelevant instead of leaving them pending.",
 	}, "\n")
 

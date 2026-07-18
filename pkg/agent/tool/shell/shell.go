@@ -125,6 +125,7 @@ func Tools(workDir string, elicit *tool.Elicitation, appr *Approvals) []tool.Too
 		"- Quote paths with spaces. Chain dependent commands with `&&` (Unix, PowerShell 7+) or `; if ($?) { ... }` (Windows PowerShell 5.1); issue independent commands as separate calls.",
 		"- Increase `timeout` for long-running commands; poll with a check command instead of leading sleeps.",
 		"- For processes that should keep running or need interactive stdin, use `exec_command` instead.",
+		"- Not for file content work: use `read`/`edit`/`write`/`grep`/`glob` instead of cat, head, tail, sed, awk, echo-redirects, or find. Files viewed through shell do not count as read for `edit`'s read-before-edit requirement.",
 		safetyGuardLine(elicit),
 	}, "\n")
 

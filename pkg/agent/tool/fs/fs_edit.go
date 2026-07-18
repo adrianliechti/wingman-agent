@@ -27,6 +27,7 @@ func editTool(root *os.Root, tracker *contentTracker, allowedWriteRoots ...strin
 			"- The edit FAILS if `old_string` is not unique in the file: add surrounding context (2-4 adjacent lines usually suffice) or set `replace_all` for intentional file-wide replacements like symbol renames.",
 			"- Prefer `write` for new files.",
 			"- For several changes to one file, pass `edits` (array of {old_string, new_string, replace_all}) in a single call. Edits apply in order — later ones see earlier results — and the call is atomic: if any edit fails, nothing is written.",
+			"- The returned diff is authoritative — do not re-read the file to verify an edit; a failed edit writes nothing.",
 		}, "\n"),
 
 		Parameters: map[string]any{
