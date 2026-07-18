@@ -1,31 +1,19 @@
 package claw
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/claw"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
-const (
-	indent   = "  "
-	barWidth = 4
-)
+func formatMessages(messages []agent.Message, width int) []string {
+	var lines []string
 
-func (t *TUI) contentWidth() int {
-	w := t.chatWidth - len(indent) - barWidth
-	if w < 40 {
-		return 40
-	}
-
-	return w
-}
-
-func (t *TUI) renderMessages(messages []agent.Message) {
 	for _, msg := range messages {
 		if msg.Hidden {
 			continue
@@ -36,47 +24,69 @@ func (t *TUI) renderMessages(messages []agent.Message) {
 			case c.Text != "":
 				switch msg.Role {
 				case agent.RoleUser:
-					t.writeFormatted(claw.Unframe(c.Text), false)
+					lines = append(lines, formatChatMessage(claw.Unframe(c.Text), false, width)...)
 				case agent.RoleAssistant:
-					t.writeFormatted(c.Text, true)
+					lines = append(lines, formatChatMessage(c.Text, true, width)...)
 				}
 			case c.ToolCall != nil:
-				t.writeToolCall(c.ToolCall)
+				lines = append(lines, formatToolCall(c.ToolCall, width))
 			}
 		}
 	}
 
-	t.chatView.ScrollToEnd()
+	return lines
 }
 
-func (t *TUI) writeFormatted(text string, isAssistant bool) {
+func formatChatMessage(text string, isAssistant bool, width int) []string {
 	th := theme.Default
 
-	barColor := th.Cyan
 	content := strings.TrimRight(text, "\n")
 
-	if isAssistant {
-		barColor = th.Blue
-		content = strings.TrimRight(markdown.Render(content), "\n")
-	}
+	var lines []string
 
-	for line := range strings.SplitSeq(content, "\n") {
-		for _, wl := range markdown.WrapLine(line, t.contentWidth()) {
-			fmt.Fprintf(t.chatView, "%s[%s]\u2503[-] %s\n", indent, barColor, wl)
+	if isAssistant {
+		content = strings.TrimRight(markdown.Render(content), "\n")
+		for _, line := range strings.Split(content, "\n") {
+			for _, wl := range markdown.WrapLine(line, width-len(indent)) {
+				lines = append(lines, indent+wl)
+			}
+		}
+	} else {
+		for i, line := range strings.Split(markdown.Sanitize(content), "\n") {
+			prefix := "  "
+			if i == 0 {
+				prefix = ansi.Fg(th.BrBlack) + "› " + ansi.Reset
+			}
+			for j, wl := range markdown.WrapLine(line, width-len(indent)-2) {
+				p := prefix
+				if j > 0 {
+					p = "  "
+				}
+				lines = append(lines, indent+p+ansi.Fg(th.Cyan)+wl+ansi.Reset)
+			}
 		}
 	}
 
-	fmt.Fprintln(t.chatView)
+	lines = append(lines, "")
+	return lines
 }
 
-func (t *TUI) writeToolCall(tc *agent.ToolCall) {
+func formatStreamLine(line string, width int) []string {
+	var lines []string
+	for _, wl := range markdown.WrapLine(markdown.Sanitize(line), width-len(indent)) {
+		lines = append(lines, indent+wl)
+	}
+	return lines
+}
+
+func formatToolCall(tc *agent.ToolCall, width int) string {
 	th := theme.Default
 	hint := tool.ExtractHint(tc.Args, tc.Name)
 
+	line := indent + ansi.Fg(th.BrBlack) + "• " + ansi.Reset + ansi.Bold + tc.Name + ansi.Reset
 	if hint != "" {
-		hint = " " + hint
+		line += " " + ansi.Fg(th.BrBlack) + markdown.Sanitize(hint) + ansi.Reset
 	}
 
-	fmt.Fprintf(t.chatView, "%s[%s]\u2503[-] [%s::b]\u25c8 %s[-::-][%s]%s[-]\n",
-		indent, th.BrBlack, th.Yellow, tc.Name, th.BrBlack, hint)
+	return ansi.Truncate(line, width, "…")
 }

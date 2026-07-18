@@ -13,6 +13,8 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
+// Render converts markdown to ANSI-styled terminal text. An unterminated
+// trailing code fence (mid-stream) is still highlighted live.
 func Render(text string) string {
 	t := theme.Default
 
@@ -38,7 +40,7 @@ func Render(text string) string {
 		goldmark.WithRenderer(
 			renderer.NewRenderer(
 				renderer.WithNodeRenderers(
-					util.Prioritized(NewTviewRenderer(), 100),
+					util.Prioritized(NewANSIRenderer(), 100),
 				),
 			),
 		),
@@ -53,6 +55,9 @@ func Render(text string) string {
 	result := buf.String()
 
 	if incompleteCode != "" {
+		if result != "" && !strings.HasSuffix(result, "\n\n") {
+			result += "\n"
+		}
 		result += formatCodeBlock(incompleteCode, incompleteLang, t)
 	}
 

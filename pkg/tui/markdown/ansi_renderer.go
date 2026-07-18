@@ -4,26 +4,30 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rivo/tview"
 	"github.com/yuin/goldmark/ast"
 	east "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/renderer"
 	"github.com/yuin/goldmark/util"
 
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
-type TviewRenderer struct {
+type ANSIRenderer struct {
 	theme theme.Theme
+
+	// blockStyle is re-applied after inline elements close so a codespan or
+	// emphasis inside a heading doesn't strip the heading's bold.
+	blockStyle string
 }
 
-func NewTviewRenderer() *TviewRenderer {
-	return &TviewRenderer{
+func NewANSIRenderer() *ANSIRenderer {
+	return &ANSIRenderer{
 		theme: theme.Default,
 	}
 }
 
-func (r *TviewRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
+func (r *ANSIRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 	reg.Register(ast.KindDocument, r.renderDocument)
 	reg.Register(ast.KindHeading, r.renderHeading)
 	reg.Register(ast.KindBlockquote, r.renderBlockquote)
@@ -52,42 +56,50 @@ func (r *TviewRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 	reg.Register(east.KindTaskCheckBox, r.renderTaskCheckBox)
 }
 
-func (r *TviewRenderer) renderDocument(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) dim() string {
+	return ansi.Fg(r.theme.BrBlack)
+}
+
+func (r *ANSIRenderer) closeInline(w util.BufWriter) {
+	w.WriteString(ansi.Reset)
+	if r.blockStyle != "" {
+		w.WriteString(r.blockStyle)
+	}
+}
+
+func (r *ANSIRenderer) renderDocument(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderHeading(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderHeading(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.Heading)
 
 	if entering {
 		if node.PreviousSibling() != nil {
 			w.WriteString("\n")
 		}
-		color := r.theme.Blue
-
-		if n.Level >= 2 {
-			color = r.theme.Magenta
-		}
-		fmt.Fprintf(w, "[%s::b]", color)
+		fmt.Fprintf(w, "%s%s%s ", r.dim(), strings.Repeat("#", n.Level), ansi.Reset+ansi.Bold)
+		r.blockStyle = ansi.Bold
 	} else {
-		w.WriteString("[-]\n")
+		r.blockStyle = ""
+		w.WriteString(ansi.Reset + "\n")
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderBlockquote(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderBlockquote(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		if node.PreviousSibling() != nil {
 			w.WriteString("\n")
 		}
-		fmt.Fprintf(w, "[%s]> [-]", r.theme.BrBlack)
+		fmt.Fprintf(w, "%s> %s", r.dim(), ansi.Reset)
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderCodeBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderCodeBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		if node.PreviousSibling() != nil {
 			w.WriteString("\n")
@@ -106,7 +118,7 @@ func (r *TviewRenderer) renderCodeBlock(w util.BufWriter, source []byte, node as
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		if node.PreviousSibling() != nil {
 			w.WriteString("\n")
@@ -133,15 +145,19 @@ func (r *TviewRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte, n
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderParagraph(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
-	if !entering {
+func (r *ANSIRenderer) renderParagraph(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+	if entering {
+		if node.PreviousSibling() != nil {
+			w.WriteString("\n")
+		}
+	} else {
 		w.WriteString("\n")
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderList(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderList(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		if node.PreviousSibling() != nil {
 			if _, isListItem := node.Parent().(*ast.ListItem); !isListItem {
@@ -153,7 +169,7 @@ func (r *TviewRenderer) renderList(w util.BufWriter, source []byte, node ast.Nod
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderListItem(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderListItem(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		n := node.(*ast.ListItem)
 		parent := n.Parent().(*ast.List)
@@ -175,9 +191,9 @@ func (r *TviewRenderer) renderListItem(w util.BufWriter, source []byte, node ast
 				}
 				idx++
 			}
-			fmt.Fprintf(w, "%s[%s]%d.[-] ", indent.String(), r.theme.Yellow, parent.Start+idx-1)
+			fmt.Fprintf(w, "%s%s%d.%s ", indent.String(), r.dim(), parent.Start+idx-1, ansi.Reset)
 		} else {
-			fmt.Fprintf(w, "%s[%s]•[-] ", indent.String(), r.theme.Yellow)
+			fmt.Fprintf(w, "%s%s•%s ", indent.String(), r.dim(), ansi.Reset)
 		}
 	} else {
 		w.WriteString("\n")
@@ -186,36 +202,36 @@ func (r *TviewRenderer) renderListItem(w util.BufWriter, source []byte, node ast
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderThematicBreak(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderThematicBreak(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		if node.PreviousSibling() != nil {
 			w.WriteString("\n")
 		}
-		fmt.Fprintf(w, "[%s]────────────────────────────────────────[-]\n", r.theme.BrBlack)
+		fmt.Fprintf(w, "%s%s%s\n", r.dim(), strings.Repeat("─", 40), ansi.Reset)
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderHTMLBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderHTMLBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		n := node.(*ast.HTMLBlock)
 		lines := n.Lines()
 
 		for i := 0; i < lines.Len(); i++ {
 			line := lines.At(i)
-			w.WriteString(tview.Escape(string(line.Value(source))))
+			w.WriteString(sanitize(string(line.Value(source))))
 		}
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderText(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderText(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		n := node.(*ast.Text)
 		segment := n.Segment
-		w.WriteString(tview.Escape(string(segment.Value(source))))
+		w.WriteString(sanitize(string(segment.Value(source))))
 
 		if n.HardLineBreak() || n.SoftLineBreak() {
 			w.WriteString("\n")
@@ -225,91 +241,91 @@ func (r *TviewRenderer) renderText(w util.BufWriter, source []byte, node ast.Nod
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderString(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderString(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		n := node.(*ast.String)
-		w.WriteString(tview.Escape(string(n.Value)))
+		w.WriteString(sanitize(string(n.Value)))
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderCodeSpan(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderCodeSpan(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		fmt.Fprintf(w, "[%s]", r.theme.Cyan)
+		w.WriteString(ansi.Fg(r.theme.Cyan))
 	} else {
-		w.WriteString("[-]")
+		r.closeInline(w)
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderEmphasis(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderEmphasis(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.Emphasis)
 
 	if entering {
 		if n.Level == 2 {
-			w.WriteString("[::b]")
+			w.WriteString(ansi.Bold)
 		} else {
-			w.WriteString("[::i]")
+			w.WriteString(ansi.Italic)
 		}
 	} else {
-		w.WriteString("[::-]")
+		r.closeInline(w)
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderLink(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderLink(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.Link)
 
 	if entering {
-		fmt.Fprintf(w, "[%s]", r.theme.Cyan)
+		w.WriteString(ansi.Fg(r.theme.Cyan))
 	} else {
-		fmt.Fprintf(w, "[-] [%s](%s)[-]", r.theme.BrBlack, tview.Escape(string(n.Destination)))
+		fmt.Fprintf(w, "%s %s(%s)", ansi.Reset, r.dim(), sanitize(string(n.Destination)))
+		r.closeInline(w)
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderAutoLink(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderAutoLink(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.AutoLink)
 
 	if entering {
-		url := n.URL(source)
-		fmt.Fprintf(w, "[%s]%s[-]", r.theme.Cyan, tview.Escape(string(url)))
+		fmt.Fprintf(w, "%s%s%s", ansi.Fg(r.theme.Cyan), sanitize(string(n.URL(source))), ansi.Reset)
 	}
 
 	return ast.WalkSkipChildren, nil
 }
 
-func (r *TviewRenderer) renderImage(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderImage(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.Image)
 
 	if entering {
-		fmt.Fprintf(w, "[%s]🖼 [-]", r.theme.Yellow)
+		fmt.Fprintf(w, "%s[image] ", r.dim())
 	} else {
-		fmt.Fprintf(w, "[%s](%s)[-]", r.theme.BrBlack, tview.Escape(string(n.Destination)))
+		fmt.Fprintf(w, "(%s)%s", sanitize(string(n.Destination)), ansi.Reset)
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderRawHTML(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderRawHTML(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		n := node.(*ast.RawHTML)
 		segments := n.Segments
 
 		for i := 0; i < segments.Len(); i++ {
 			segment := segments.At(i)
-			w.WriteString(tview.Escape(string(segment.Value(source))))
+			w.WriteString(sanitize(string(segment.Value(source))))
 		}
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderTable(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if !entering {
 		w.WriteString("\n")
 
@@ -345,7 +361,7 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 					}
 				}
 			}
-			cells = append(cells, cellText.String())
+			cells = append(cells, sanitize(cellText.String()))
 		}
 		rows = append(rows, cells)
 	}
@@ -365,14 +381,14 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 	for rowIdx, row := range rows {
 		for i, cell := range row {
 			if i > 0 {
-				fmt.Fprintf(w, "[%s]│[-]", r.theme.BrBlack)
+				fmt.Fprintf(w, "%s│%s", r.dim(), ansi.Reset)
 			}
 
-			escaped := tview.Escape(cell)
+			escaped := sanitize(cell)
 			w.WriteString(" ")
 
 			if isHeader[rowIdx] {
-				fmt.Fprintf(w, "[::b]%s[::-]", escaped)
+				fmt.Fprintf(w, "%s%s%s", ansi.Bold, escaped, ansi.Reset)
 			} else {
 				w.WriteString(escaped)
 			}
@@ -391,10 +407,10 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 		if isHeader[rowIdx] {
 			for i, width := range colWidths {
 				if i > 0 {
-					fmt.Fprintf(w, "[%s]┼[-]", r.theme.BrBlack)
+					fmt.Fprintf(w, "%s┼%s", r.dim(), ansi.Reset)
 				}
 
-				fmt.Fprintf(w, "[%s]%s[-]", r.theme.BrBlack, strings.Repeat("─", width+2))
+				fmt.Fprintf(w, "%s%s%s", r.dim(), strings.Repeat("─", width+2), ansi.Reset)
 			}
 
 			w.WriteString("\n")
@@ -404,36 +420,36 @@ func (r *TviewRenderer) renderTable(w util.BufWriter, source []byte, node ast.No
 	return ast.WalkSkipChildren, nil
 }
 
-func (r *TviewRenderer) renderTableHeader(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderTableHeader(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderTableRow(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderTableRow(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderTableCell(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderTableCell(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderStrikethrough(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderStrikethrough(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		fmt.Fprintf(w, "[%s]~~", r.theme.BrBlack)
+		w.WriteString(ansi.Strike)
 	} else {
-		w.WriteString("~~[-]")
+		r.closeInline(w)
 	}
 
 	return ast.WalkContinue, nil
 }
 
-func (r *TviewRenderer) renderTaskCheckBox(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *ANSIRenderer) renderTaskCheckBox(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		n := node.(*east.TaskCheckBox)
 
 		if n.IsChecked {
-			fmt.Fprintf(w, "[%s]☑[-] ", r.theme.Green)
+			fmt.Fprintf(w, "%s✔%s ", ansi.Fg(r.theme.Green), ansi.Reset)
 		} else {
-			fmt.Fprintf(w, "[%s]☐[-] ", r.theme.BrBlack)
+			fmt.Fprintf(w, "%s□%s ", r.dim(), ansi.Reset)
 		}
 	}
 

@@ -2,39 +2,53 @@ package claw
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/rivo/tview"
-
 	"github.com/adrianliechti/wingman-agent/pkg/claw"
 	"github.com/adrianliechti/wingman-agent/pkg/claw/channel"
-	"github.com/adrianliechti/wingman-agent/pkg/tui"
-	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
+)
+
+type focusArea int
+
+const (
+	focusInput focusArea = iota
+	focusAgents
 )
 
 type TUI struct {
 	claw    *claw.Claw
-	app     *tview.Application
 	ctx     context.Context
 	handler channel.MessageHandler
 
-	agentList *tview.List
-	taskView  *tview.TextView
-	chatView  *tview.TextView
-	input     *tview.InputField
-	statusBar *tview.TextView
+	term  *inline.Terminal
+	queue chan func()
+	quit  chan struct{}
+	once  sync.Once
+
+	focus focusArea
+
+	input       []rune
+	inputCursor int
 
 	selectedAgent string
 	agentNames    []string
+	agentIndex    int
+
+	chatLines  []string
+	chatScroll int
+	follow     bool
+
+	taskLines []string
+
 	busy          map[string]int
 	renderedCount int
-	chatWidth     int
-	mu            sync.Mutex
+
+	mu sync.Mutex
 }
 
 func New(c *claw.Claw) *TUI {
@@ -42,45 +56,101 @@ func New(c *claw.Claw) *TUI {
 		claw:          c,
 		selectedAgent: "main",
 		busy:          map[string]int{},
+		follow:        true,
+		queue:         make(chan func(), 64),
+		quit:          make(chan struct{}),
 	}
 }
 
 func (t *TUI) Name() string { return "cli" }
+
+func (t *TUI) post(fn func()) {
+	select {
+	case t.queue <- fn:
+	case <-t.quit:
+	}
+}
+
+func (t *TUI) stop() {
+	t.once.Do(func() {
+		close(t.quit)
+	})
+}
 
 func (t *TUI) Start(ctx context.Context, handler channel.MessageHandler) error {
 	t.ctx = ctx
 	t.handler = handler
 
 	theme.Auto()
-	t.buildUI()
+
+	t.term = inline.NewTerminal()
+	if err := t.term.Start(); err != nil {
+		return err
+	}
+
+	// Closing quit turns t.post into a no-op so a still-streaming agent can
+	// never wedge against a stopped UI (and with it, session teardown).
+	defer t.stop()
+
+	t.term.EnterAlt()
+
 	t.refreshAgents()
 	t.selectAgent("main")
 
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				t.app.QueueUpdateDraw(func() {
-					t.refreshTasks()
-					t.syncChat()
-				})
+	t.render()
+
+	for {
+		select {
+		case <-ctx.Done():
+			t.term.Stop()
+			return nil
+
+		case <-t.quit:
+			t.term.Stop()
+			return nil
+
+		case <-ticker.C:
+			t.refreshTasks()
+			t.syncChat()
+
+		case fn := <-t.queue:
+			fn()
+			for {
+				select {
+				case fn := <-t.queue:
+					fn()
+					continue
+				default:
+				}
+				break
+			}
+
+		case ev := <-t.term.Events():
+			switch ev := ev.(type) {
+			case inline.ResizeEvent:
+				t.term.Resized(ev.Width, ev.Height)
+				t.rerenderChat(t.selected())
+			case inline.PasteEvent:
+				t.insertInput(strings.ReplaceAll(ev.Text, "\n", " "))
+			case inline.KeyEvent:
+				if quit := t.handleKey(ev); quit {
+					t.term.Stop()
+					return nil
+				}
 			}
 		}
-	}()
 
-	return t.app.Run()
+		t.render()
+	}
 }
 
 func (t *TUI) Send(ctx context.Context, conversation string, text string) error {
-	t.app.QueueUpdateDraw(func() {
+	t.post(func() {
 		if conversation == t.selected() {
-			t.writeFormatted(text, true)
-			t.chatView.ScrollToEnd()
+			t.appendChat(formatChatMessage(text, true, t.chatWidth()))
 		}
 	})
 
@@ -94,29 +164,10 @@ func (t *TUI) SendStream(ctx context.Context, conversation string) (io.WriteClos
 	}, nil
 }
 
-func (t *TUI) cycleFocus() {
-	switch t.app.GetFocus() {
-	case t.input:
-		t.app.SetFocus(t.agentList)
-	case t.agentList:
-		t.app.SetFocus(t.input)
-	default:
-		t.app.SetFocus(t.input)
-	}
-}
-
-func (t *TUI) rerenderChat(name string) {
-	if name != t.selected() {
-		return
-	}
-
-	t.chatView.Clear()
-	t.renderedCount = 0
-
-	if messages, _, ok := t.claw.AgentState(name); ok {
-		t.renderMessages(messages)
-		t.renderedCount = len(messages)
-	}
+func (t *TUI) selected() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.selectedAgent
 }
 
 func (t *TUI) setBusy(name string, delta int) {
@@ -136,6 +187,27 @@ func (t *TUI) isBusy(name string) bool {
 	return t.busy[name] > 0
 }
 
+func (t *TUI) appendChat(lines []string) {
+	t.chatLines = append(t.chatLines, lines...)
+	if t.follow {
+		t.chatScroll = len(t.chatLines)
+	}
+}
+
+func (t *TUI) rerenderChat(name string) {
+	if name != t.selected() {
+		return
+	}
+
+	t.chatLines = nil
+	t.renderedCount = 0
+
+	if messages, _, ok := t.claw.AgentState(name); ok {
+		t.appendChat(formatMessages(messages, t.chatWidth()))
+		t.renderedCount = len(messages)
+	}
+}
+
 func (t *TUI) syncChat() {
 	name := t.selected()
 
@@ -150,48 +222,18 @@ func (t *TUI) syncChat() {
 	}
 
 	t.renderedCount = len(messages)
-	t.chatView.Clear()
-	t.renderMessages(messages)
-	t.updateStatusBar()
+	t.chatLines = nil
+	t.appendChat(formatMessages(messages, t.chatWidth()))
 }
 
-func (t *TUI) updateStatusBar() {
-	th := theme.Default
-	name := t.selected()
-	_, usage, ok := t.claw.AgentState(name)
+func (t *TUI) selectAgent(name string) {
+	t.mu.Lock()
+	t.selectedAgent = name
+	t.mu.Unlock()
 
-	t.statusBar.Clear()
-
-	if t.isBusy(name) {
-		fmt.Fprintf(t.statusBar, "  [%s]working\u2026[-] [%s]\u2503[-]", th.Yellow, th.BrBlack)
-	}
-
-	if !ok {
-		fmt.Fprintf(t.statusBar, "  [%s]%s[-] ", th.Cyan, name)
-		return
-	}
-
-	if usage.CachedTokens > 0 {
-		fmt.Fprintf(t.statusBar, "  [%s]\u2191%s (%s cached) \u2193%s[-] [%s]\u2503[-] [%s]%s[-] ",
-			th.BrBlack,
-			tui.FormatTokens(usage.InputTokens),
-			tui.FormatTokens(usage.CachedTokens),
-			tui.FormatTokens(usage.OutputTokens),
-			th.BrBlack,
-			th.Cyan,
-			name,
-		)
-		return
-	}
-
-	fmt.Fprintf(t.statusBar, "  [%s]\u2191%s \u2193%s[-] [%s]\u2503[-] [%s]%s[-] ",
-		th.BrBlack,
-		tui.FormatTokens(usage.InputTokens),
-		tui.FormatTokens(usage.OutputTokens),
-		th.BrBlack,
-		th.Cyan,
-		name,
-	)
+	t.follow = true
+	t.rerenderChat(name)
+	t.refreshTasks()
 }
 
 type streamWriter struct {
@@ -221,20 +263,14 @@ func (w *streamWriter) Write(p []byte) (int, error) {
 }
 
 func (w *streamWriter) writeLines(lines []string) {
-	th := theme.Default
-
-	w.tui.app.QueueUpdateDraw(func() {
+	w.tui.post(func() {
 		if w.name != w.tui.selected() {
 			return
 		}
 
 		for _, line := range lines {
-			for _, wl := range markdown.WrapLine(tview.Escape(line), w.tui.contentWidth()) {
-				fmt.Fprintf(w.tui.chatView, "%s[%s]\u2503[-] %s\n", indent, th.Blue, wl)
-			}
+			w.tui.appendChat(formatStreamLine(line, w.tui.chatWidth()))
 		}
-
-		w.tui.chatView.ScrollToEnd()
 	})
 }
 
@@ -244,9 +280,9 @@ func (w *streamWriter) Close() error {
 		w.buf = ""
 	}
 
-	w.tui.app.QueueUpdateDraw(func() {
+	w.tui.post(func() {
 		if w.name == w.tui.selected() {
-			fmt.Fprintln(w.tui.chatView)
+			w.tui.appendChat([]string{""})
 		}
 	})
 

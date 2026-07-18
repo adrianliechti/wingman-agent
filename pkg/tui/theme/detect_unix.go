@@ -25,23 +25,23 @@ func queryTerminalBackground() bool {
 		return false
 	}
 
+	// A deadline read, not a goroutine: an abandoned blocking Read would
+	// swallow the user's first keystrokes on terminals that never answer
+	// the OSC query.
+	if err := os.Stdin.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+		term.Restore(fd, oldState)
+		return false
+	}
+
 	os.Stdout.WriteString("\x1b]11;?\x07")
 
 	buf := make([]byte, 64)
-	done := make(chan int, 1)
+	n, _ := os.Stdin.Read(buf)
+	os.Stdin.SetReadDeadline(time.Time{})
 
-	go func() {
-		n, _ := os.Stdin.Read(buf)
-		done <- n
-	}()
-
-	var result bool
-
-	select {
-	case n := <-done:
+	result := false
+	if n > 0 {
 		result = parseLuma(string(buf[:n])) > 0.5
-	case <-time.After(100 * time.Millisecond):
-		result = false
 	}
 
 	syscall.SetNonblock(fd, true)

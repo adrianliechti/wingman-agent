@@ -2,19 +2,12 @@ package code
 
 import (
 	"bufio"
-	"fmt"
 	"io/fs"
 	pathpkg "path"
 	"path/filepath"
-	"slices"
 	"strings"
 
-	"github.com/gdamore/tcell/v2"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
-	"github.com/rivo/tview"
-	"github.com/sahilm/fuzzy"
-
-	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
 var defaultIgnoreDirs = map[string]bool{
@@ -28,20 +21,10 @@ var defaultIgnoreDirs = map[string]bool{
 	"build":        true,
 }
 
-const (
-	maxFileResults   = 50
-	filePickerPageID = "file-picker"
-)
-
 type fileMatch struct {
 	Path string
 	Name string
 }
-
-type fileMatches []fileMatch
-
-func (f fileMatches) String(i int) string { return f[i].Path }
-func (f fileMatches) Len() int            { return len(f) }
 
 func (a *App) collectFiles() []fileMatch {
 	var files []fileMatch
@@ -137,233 +120,8 @@ func loadGitignore(fsys fs.FS, domain []string) []gitignore.Pattern {
 	return patterns
 }
 
-func fuzzyFilterFiles(files []fileMatch, query string) []fileMatch {
-	if query == "" {
-		if len(files) > maxFileResults {
-			return files[:maxFileResults]
-		}
-
-		return files
-	}
-
-	results := fuzzy.FindFrom(query, fileMatches(files))
-
-	var matches []fileMatch
-
-	for _, r := range results {
-		matches = append(matches, files[r.Index])
-
-		if len(matches) >= maxFileResults {
-			break
-		}
-	}
-
-	return matches
-}
-
-func (a *App) showFilePicker(initialQuery string, onSelect func(paths []string)) {
-	go func() {
-		files := a.collectFiles()
-
-		a.app.QueueUpdateDraw(func() {
-			if a.hasActiveModal() {
-				return
-			}
-
-			a.activeModal = ModalFilePicker
-			t := theme.Default
-			filtered := fuzzyFilterFiles(files, initialQuery)
-			selected := make(map[string]bool)
-
-			list := tview.NewList().
-				ShowSecondaryText(false)
-			list.SetBackgroundColor(tview.Styles.PrimitiveBackgroundColor)
-			list.SetMainTextColor(t.Foreground)
-			list.SetSelectedTextColor(t.Cyan)
-			list.SetSelectedBackgroundColor(tview.Styles.PrimitiveBackgroundColor)
-
-			searchInput := tview.NewInputField()
-			searchInput.SetLabel("@ ")
-			searchInput.SetLabelColor(t.Cyan)
-			searchInput.SetFieldBackgroundColor(tview.Styles.PrimitiveBackgroundColor)
-			searchInput.SetFieldTextColor(t.Foreground)
-			searchInput.SetText(initialQuery)
-
-			itemText := func(f fileMatch) string {
-				if selected[f.Path] {
-					return fmt.Sprintf("  [%s]●[-] %s", t.Cyan, f.Path)
-				}
-
-				return "  " + f.Path
-			}
-
-			updateList := func(query string) {
-				list.Clear()
-				filtered = fuzzyFilterFiles(files, query)
-
-				for _, f := range filtered {
-					list.AddItem(itemText(f), "", 0, nil)
-				}
-
-				if len(filtered) > 0 {
-					list.SetCurrentItem(0)
-				}
-			}
-
-			refreshList := func() {
-				for i, f := range filtered {
-					list.SetItemText(i, itemText(f), "")
-				}
-			}
-
-			toggleCurrent := func() {
-				idx := list.GetCurrentItem()
-				if idx >= 0 && idx < len(filtered) {
-					path := filtered[idx].Path
-					selected[path] = !selected[path]
-
-					if !selected[path] {
-						delete(selected, path)
-					}
-
-					refreshList()
-				}
-			}
-
-			updateList(initialQuery)
-
-			searchInput.SetChangedFunc(func(text string) {
-				updateList(text)
-			})
-
-			selectFiles := func() {
-				var paths []string
-
-				for path := range selected {
-					paths = append(paths, path)
-				}
-				slices.Sort(paths)
-
-				if len(paths) == 0 {
-					idx := list.GetCurrentItem()
-					if idx >= 0 && idx < len(filtered) {
-						paths = []string{filtered[idx].Path}
-					}
-				}
-
-				a.closeFilePicker()
-
-				if onSelect != nil && len(paths) > 0 {
-					onSelect(paths)
-				}
-			}
-
-			list.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
-				selectFiles()
-			})
-
-			searchInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-				switch event.Key() {
-				case tcell.KeyCtrlC, tcell.KeyEscape:
-					a.closeFilePicker()
-
-					return nil
-				case tcell.KeyEnter:
-					selectFiles()
-
-					return nil
-				case tcell.KeyTab:
-					toggleCurrent()
-
-					return nil
-				case tcell.KeyDown:
-
-					if idx := list.GetCurrentItem(); idx < list.GetItemCount()-1 {
-						list.SetCurrentItem(idx + 1)
-					}
-
-					return nil
-				case tcell.KeyUp:
-
-					if idx := list.GetCurrentItem(); idx > 0 {
-						list.SetCurrentItem(idx - 1)
-					}
-
-					return nil
-				}
-
-				return event
-			})
-
-			list.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-				if event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyCtrlC {
-					a.closeFilePicker()
-
-					return nil
-				}
-
-				if event.Key() == tcell.KeyRune {
-					searchInput.SetText(searchInput.GetText() + string(event.Rune()))
-
-					return nil
-				}
-
-				if event.Key() == tcell.KeyBackspace || event.Key() == tcell.KeyBackspace2 {
-					if t := searchInput.GetText(); len(t) > 0 {
-						searchInput.SetText(t[:len(t)-1])
-					}
-
-					return nil
-				}
-
-				return event
-			})
-
-			boxWidth := 60
-			boxHeight := min(len(filtered)+6, 20)
-
-			content := tview.NewFlex().SetDirection(tview.FlexRow)
-			content.AddItem(searchInput, 1, 0, true)
-			content.AddItem(list, 0, 1, false)
-
-			box := tview.NewFlex().SetDirection(tview.FlexRow)
-			box.Box = tview.NewBox()
-			box.AddItem(content, 0, 1, true)
-			box.SetBorder(true)
-			box.SetBorderColor(t.Cyan)
-			box.SetTitle(" Select File ")
-			box.SetTitleColor(t.Cyan)
-			box.SetTitleAlign(tview.AlignCenter)
-			box.SetBackgroundColor(tview.Styles.PrimitiveBackgroundColor)
-			box.SetBorderPadding(1, 1, 2, 2)
-
-			modal := tview.NewFlex().
-				AddItem(nil, 0, 1, false).
-				AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
-					AddItem(nil, 0, 1, false).
-					AddItem(box, boxHeight, 0, true).
-					AddItem(nil, 0, 1, false), boxWidth, 0, true).
-				AddItem(nil, 0, 1, false)
-			modal.SetBackgroundColor(tcell.ColorDefault)
-
-			a.pages.AddPage(filePickerPageID, modal, true, true)
-			a.app.SetFocus(searchInput)
-		})
-	}()
-}
-
-func (a *App) closeFilePicker() {
-	a.activeModal = ModalNone
-
-	if a.pages != nil {
-		a.pages.RemovePage(filePickerPageID)
-		a.app.SetFocus(a.input)
-	}
-}
-
 func (a *App) addFileToContext(path string) error {
 	a.pendingFiles = append(a.pendingFiles, path)
-	a.updateInputHint()
 
 	return nil
 }
