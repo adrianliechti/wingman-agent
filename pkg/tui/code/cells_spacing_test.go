@@ -76,6 +76,58 @@ func TestThoughtCellsGetSurroundingBlankLines(t *testing.T) {
 	}
 }
 
+func TestStreamTailFollowsWorkOrder(t *testing.T) {
+	ws, err := code.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := &App{agent: coder.New(ws, &agent.Config{}, nil), queue: make(chan func(), 64), quit: make(chan struct{})}
+
+	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
+		{Text: "streamed answer"},
+	}})
+	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
+		{Reasoning: &agent.Reasoning{ID: "rs_1", Summary: "planning the next step"}},
+	}})
+
+	tail := a.streamCells(80)
+
+	textIdx, thoughtIdx := -1, -1
+	for i, l := range tail {
+		if strings.Contains(l, "streamed answer") {
+			textIdx = i
+		}
+		if strings.Contains(l, "planning the next step") {
+			thoughtIdx = i
+		}
+	}
+
+	if textIdx < 0 || thoughtIdx < 0 {
+		t.Fatalf("tail missing cells: %q", tail)
+	}
+	if thoughtIdx < textIdx {
+		t.Errorf("thought rendered above older streamed text: %q", tail)
+	}
+	if thoughtIdx != textIdx+2 || tail[textIdx+1] != "" {
+		t.Errorf("no single blank line between text and thought: %q", tail)
+	}
+}
+
+func TestWhitespaceOnlyTextRendersNothing(t *testing.T) {
+	ws, err := code.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := &App{agent: coder.New(ws, &agent.Config{}, nil)}
+
+	msg := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "\n\n"}}}
+	if lines := a.formatMessageCells(msg, 80); len(lines) != 0 {
+		t.Fatalf("whitespace-only text rendered cells: %q", lines)
+	}
+}
+
 func TestAnnotationsSurviveChatRebuild(t *testing.T) {
 	ws, err := code.NewWorkspace(t.TempDir())
 	if err != nil {

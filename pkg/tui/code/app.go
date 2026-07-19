@@ -64,16 +64,15 @@ type App struct {
 	lastMaxScroll int
 	lastTopPad    int
 
-	printed           int
-	prevWasTool          bool
-	prevToolMultiline    bool
-	prevWasThought       bool
-	prevThoughtMultiline bool
-	annotations          []chatAnnotation
+	printed     int
+	flow        cellFlow
+	annotations []chatAnnotation
 
-	turnTools    int
-	turnThoughts int
-	turnStart    time.Time
+	// turnBase is the message count already covered by earlier separators;
+	// turn work is derived from the history beyond it, so replaying the chat
+	// (resume, rebuild) cannot skew the numbers.
+	turnBase  int
+	turnStart time.Time
 
 	pendingEcho []pendingEchoItem
 
@@ -141,6 +140,7 @@ func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
 
 		sessionID:    sessionID,
 		sessionEpoch: 1,
+		turnBase:     len(coderAgent.Messages(sessionID)),
 		showWelcome:  !hasMessages && os.Getenv("WINGMAN_CALLER") != "vscode",
 
 		editor:      NewEditor(),
@@ -190,13 +190,9 @@ func (a *App) activateSession(id string) {
 	a.sessionMu.Unlock()
 
 	a.printed = 0
-	a.prevWasTool = false
-	a.prevToolMultiline = false
-	a.prevWasThought = false
-	a.prevThoughtMultiline = false
+	a.flow = cellFlow{}
 	a.annotations = nil
-	a.turnTools = 0
-	a.turnThoughts = 0
+	a.resetTurnStats()
 
 	a.startTaskPump()
 }
@@ -536,11 +532,8 @@ func (a *App) restoreChatLines(width int) []string {
 	var lines []string
 
 	emit := func(ann chatAnnotation) {
-		if a.prevWasTool {
+		if a.flow.gap() {
 			lines = append(lines, "")
-			a.prevWasTool = false
-			a.prevToolMultiline = false
-			a.prevWasThought = false
 		}
 		lines = append(lines, ann.render(width)...)
 	}
@@ -566,23 +559,17 @@ func (a *App) restoreChatLines(width int) []string {
 }
 
 // rebuildChat re-renders the whole chat buffer from the message history, used
-// on resize and when toggling verbose rendering. Turn counters are preserved.
+// on resize and when toggling verbose rendering.
 func (a *App) rebuildChat() {
-	tools, thoughts := a.turnTools, a.turnThoughts
-
 	a.chat = nil
 	a.printed = 0
-	a.prevWasTool = false
-	a.prevToolMultiline = false
-	a.prevWasThought = false
-	a.prevThoughtMultiline = false
+	a.flow = cellFlow{}
 	a.clearSelection()
 
 	if lines := a.restoreChatLines(a.width()); len(lines) > 0 {
 		a.appendChat(lines)
 	}
 
-	a.turnTools, a.turnThoughts = tools, thoughts
 	a.invalidate()
 }
 

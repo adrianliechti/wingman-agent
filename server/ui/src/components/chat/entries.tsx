@@ -216,7 +216,7 @@ const ToolRow = memo(function ToolRow({
 	const isDiff = entry.toolName === "edit" || entry.toolName === "write";
 	const isShell =
 		entry.toolName === "shell" || entry.toolName === "exec_command";
-	const result = entry.toolResult || "";
+	const result = (entry.toolResult || "").replace(/\n+$/, "");
 	const limit = isDiff ? 4000 : 2000;
 	const overflows = result.length > limit;
 	const shown = showAll ? result : truncate(result, limit);

@@ -46,36 +46,44 @@ func (a *App) welcomeLines(width int) []string {
 	return lines
 }
 
-// streamCells renders the in-flight turn tail shown below the committed chat.
-// The same blank line committed cells get after a tool run is inserted here so
-// spacing doesn't change when the turn finalizes.
+// streamCells renders the in-flight turn tail shown below the committed chat,
+// in the order the work happened: the live tool cell, then streamed text,
+// then the newest thought — a tool call clears both text and reasoning, and a
+// text delta clears reasoning, so whatever coexists arrived in that order.
+// Spacing follows the same cellFlow rules as committed cells (on a copy of
+// the state), so nothing shifts when the turn finalizes.
 func (a *App) streamCells(width int) []string {
 	toolName, toolHint, toolProgress, streamingText, streamingReasoning := a.snapshotStreamState()
 
+	flow := a.flow
 	var lines []string
 
-	if a.prevWasTool && (streamingText != "" || (streamingReasoning != "" && (!a.prevWasThought || a.prevThoughtMultiline))) {
-		lines = append(lines, "")
+	if toolName != "" && !a.isToolHidden(toolName) {
+		cell := cellToolProgress(toolName, toolHint, toolProgress, width)
+		if flow.beforeTool(len(cell) > 1) {
+			lines = append(lines, "")
+		}
+		lines = append(lines, cell...)
 	}
 
-	if streamingReasoning != "" {
-		lines = append(lines, cellReasoning(streamingReasoning, width, false)...)
-	}
-
-	if streamingText != "" {
+	if strings.TrimSpace(streamingText) != "" {
+		if flow.gap() {
+			lines = append(lines, "")
+		}
 		lines = append(lines, cellAssistant(streamingText, width, theme.Default.BrBlack)...)
 	}
 
-	if toolName != "" && !a.isToolHidden(toolName) {
-		if len(lines) == 0 && a.prevWasTool && a.prevToolMultiline {
+	if streamingReasoning != "" {
+		cell := cellReasoning(streamingReasoning, width, false)
+		if flow.beforeThought(len(cell) > 1) {
 			lines = append(lines, "")
 		}
-		lines = append(lines, cellToolProgress(toolName, toolHint, toolProgress, width)...)
+		lines = append(lines, cell...)
 	}
 
 	// While the spinner or a pinned prompt is visible the tail always ends
 	// blank, so tool and reasoning cells never sit tight against it.
-	if (a.isStreaming() || a.promptActive || a.askActive) && (a.prevWasTool || len(lines) > 0) && (len(lines) == 0 || lines[len(lines)-1] != "") {
+	if (a.isStreaming() || a.promptActive || a.askActive) && (a.flow.tool || len(lines) > 0) && (len(lines) == 0 || lines[len(lines)-1] != "") {
 		lines = append(lines, "")
 	}
 

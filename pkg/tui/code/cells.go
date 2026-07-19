@@ -11,6 +11,42 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
+// cellFlow carries the spacing state between chat cells and applies the
+// rules in one place: one-line tool cells stack tight, a blank line separates
+// a cell from its neighbor as soon as either side is multi-line, thought
+// cells stay tight only between consecutive one-line thoughts, and text
+// always sits apart from tool output. The committed chat and the live
+// streaming tail share it, so spacing does not change when a cell finalizes.
+type cellFlow struct {
+	tool         bool // previous cell was a tool or thought
+	multiline    bool
+	thought      bool // previous cell was a thought
+	thoughtMulti bool
+}
+
+// beforeTool reports whether a blank line belongs before a tool cell and
+// advances the state.
+func (f *cellFlow) beforeTool(multiline bool) bool {
+	gap := f.tool && (f.multiline || multiline)
+	*f = cellFlow{tool: true, multiline: multiline}
+	return gap
+}
+
+func (f *cellFlow) beforeThought(multiline bool) bool {
+	gap := f.tool && (!f.thought || f.thoughtMulti)
+	*f = cellFlow{tool: true, multiline: true, thought: true, thoughtMulti: multiline}
+	return gap
+}
+
+// gap ends a run of tool and thought cells: it reports whether the run is
+// still owed its trailing blank line and resets the state. Text cells,
+// notices, and separators call it before rendering.
+func (f *cellFlow) gap() bool {
+	owed := f.tool
+	*f = cellFlow{}
+	return owed
+}
+
 // cellUser renders the user's prompt echo: a `›` prefix on a subtle
 // background band, text starting at the shared 2-column gutter.
 func cellUser(text string, width int) []string {

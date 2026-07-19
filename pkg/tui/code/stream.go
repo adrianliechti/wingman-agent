@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
@@ -71,24 +72,6 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 
 	var lines []string
 
-	blankBeforeText := func() {
-		if a.prevWasTool {
-			lines = append(lines, "")
-			a.prevWasTool = false
-			a.prevToolMultiline = false
-			a.prevWasThought = false
-		}
-	}
-
-	// One-line tool cells stack tight; a blank line separates a cell from its
-	// neighbor as soon as either side is multi-line. Thought cells get a blank
-	// line on both sides, except between consecutive one-line thoughts.
-	blankBeforeCell := func(multiline bool) {
-		if a.prevWasTool && (a.prevToolMultiline || multiline) {
-			lines = append(lines, "")
-		}
-	}
-
 	for _, c := range msg.Content {
 		switch {
 		case c.ToolResult != nil:
@@ -96,31 +79,26 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 			if a.isToolHidden(c.ToolResult.Name) {
 				continue
 			}
-			a.turnTools++
 			cell := cellTool(c.ToolResult, width, false)
-			blankBeforeCell(len(cell) > 1)
+			if a.flow.beforeTool(len(cell) > 1) {
+				lines = append(lines, "")
+			}
 			lines = append(lines, cell...)
-			a.prevWasTool = true
-			a.prevToolMultiline = len(cell) > 1
-			a.prevWasThought = false
 
 		case c.ToolCall != nil:
 			continue
 
 		case c.Reasoning != nil && c.Reasoning.Summary != "":
-			a.turnThoughts++
-			if !a.prevWasThought || a.prevThoughtMultiline {
-				blankBeforeCell(true)
-			}
 			cell := cellReasoning(c.Reasoning.Summary, width, true)
+			if a.flow.beforeThought(len(cell) > 1) {
+				lines = append(lines, "")
+			}
 			lines = append(lines, cell...)
-			a.prevWasTool = true
-			a.prevToolMultiline = true
-			a.prevWasThought = true
-			a.prevThoughtMultiline = len(cell) > 1
 
-		case c.Text != "":
-			blankBeforeText()
+		case strings.TrimSpace(c.Text) != "":
+			if a.flow.gap() {
+				lines = append(lines, "")
+			}
 			switch msg.Role {
 			case agent.RoleUser:
 				a.removePendingEchoText(c.Text)
@@ -362,16 +340,41 @@ func (a *App) currentEpoch() uint64 {
 // flushToolGap commits the blank line a trailing tool cell is still owed, so
 // separators and notices never sit tight against tool output.
 func (a *App) flushToolGap() {
-	if a.prevWasTool {
+	if a.flow.gap() {
 		a.appendChat([]string{""})
-		a.prevWasTool = false
-		a.prevToolMultiline = false
-		a.prevWasThought = false
 	}
 }
 
+// turnWork counts the visible tool and thought cells the current turn has
+// committed since the last separator.
+func (a *App) turnWork() (tools, thoughts int) {
+	messages := a.agent.Messages(a.sessionID)
+	if a.turnBase > len(messages) {
+		return 0, 0
+	}
+
+	for _, m := range messages[a.turnBase:] {
+		if m.Hidden || m.Role == agent.RoleSystem {
+			continue
+		}
+		for _, c := range m.Content {
+			switch {
+			case c.ToolResult != nil:
+				if !a.isToolHidden(c.ToolResult.Name) {
+					tools++
+				}
+			case c.Reasoning != nil && c.Reasoning.Summary != "":
+				thoughts++
+			}
+		}
+	}
+
+	return tools, thoughts
+}
+
 func (a *App) flushTurnSeparator() {
-	if a.turnTools == 0 && a.turnThoughts == 0 {
+	tools, thoughts := a.turnWork()
+	if tools == 0 && thoughts == 0 {
 		a.resetTurnStats()
 		return
 	}
@@ -382,13 +385,12 @@ func (a *App) flushTurnSeparator() {
 		elapsed = formatElapsed(time.Since(a.turnStart))
 	}
 
-	a.appendChat(cellTurnSeparator(elapsed, a.turnTools, a.turnThoughts, a.width()))
+	a.appendChat(cellTurnSeparator(elapsed, tools, thoughts, a.width()))
 	a.resetTurnStats()
 }
 
 func (a *App) resetTurnStats() {
-	a.turnTools = 0
-	a.turnThoughts = 0
+	a.turnBase = len(a.agent.Messages(a.sessionID))
 	a.turnStart = time.Time{}
 	a.phaseStart = time.Time{}
 }

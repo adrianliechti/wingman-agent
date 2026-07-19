@@ -54,7 +54,7 @@ export function messagesToEntries(
 			const images: string[] = [];
 			for (const c of m.content) {
 				if (c.text) {
-					const file = c.text.match(/^\[File: (.+)\]$/s);
+					const file = c.text.match(/^\[File: ([^\n]+)\]$/);
 					if (file) files.push(file[1]);
 					else text.push(c.text);
 				}
@@ -73,7 +73,7 @@ export function messagesToEntries(
 		}
 
 		m.content.forEach((c, ci) => {
-			if (c.text) {
+			if (c.text?.trim()) {
 				entries.push({
 					id: `t-${mi}-${ci}`,
 					type: "assistant",
@@ -90,7 +90,7 @@ export function messagesToEntries(
 			}
 			if (c.tool_call) {
 				entries.push({
-					id: c.tool_call.id || `tc-${mi}-${ci}`,
+					id: `tc-${mi}-${ci}`,
 					type: "tool",
 					content: "",
 					toolId: c.tool_call.id,
@@ -100,23 +100,26 @@ export function messagesToEntries(
 				});
 			}
 			if (c.tool_result) {
-				const existing =
-					c.tool_result.id !== undefined
-						? entries.findLast(
-								(e) => e.type === "tool" && e.toolId === c.tool_result?.id,
-							)
-						: undefined;
+				const r = c.tool_result;
+				const existing = r.id
+					? entries.findLast((e) => e.type === "tool" && e.toolId === r.id)
+					: entries.findLast(
+							(e) =>
+								e.type === "tool" &&
+								e.toolName === r.name &&
+								e.toolResult === undefined,
+						);
 				if (existing) {
-					existing.toolResult = c.tool_result.content;
+					existing.toolResult = r.content;
 				} else {
 					entries.push({
-						id: c.tool_result.id || `tr-${mi}-${ci}`,
+						id: `tr-${mi}-${ci}`,
 						type: "tool",
 						content: "",
-						toolId: c.tool_result.id,
-						toolName: c.tool_result.name,
-						toolArgs: c.tool_result.args,
-						toolResult: c.tool_result.content,
+						toolId: r.id,
+						toolName: r.name,
+						toolArgs: r.args,
+						toolResult: r.content,
 					});
 				}
 			}
@@ -507,13 +510,12 @@ export function useWebSocket() {
 				flushActiveStream(sid);
 				finalizeStreaming(sid);
 				finalizeReasoning(sid);
-				const entryId = msg.id || nextId();
 				updateSession(sid, (sess) => ({
 					...sess,
 					entries: [
 						...sess.entries,
 						{
-							id: entryId,
+							id: nextId(),
 							type: "tool",
 							content: "",
 							toolId: msg.id,
@@ -534,16 +536,23 @@ export function useWebSocket() {
 					return rest;
 				});
 				updateSession(sid, (sess) => {
-					const idx = sess.entries.findLastIndex(
-						(e) => e.type === "tool" && e.toolId === msg.id,
-					);
+					const idx = msg.id
+						? sess.entries.findLastIndex(
+								(e) => e.type === "tool" && e.toolId === msg.id,
+							)
+						: sess.entries.findLastIndex(
+								(e) =>
+									e.type === "tool" &&
+									e.toolName === msg.name &&
+									e.toolResult === undefined,
+							);
 					if (idx < 0) {
 						return {
 							...sess,
 							entries: [
 								...sess.entries,
 								{
-									id: msg.id || nextId(),
+									id: nextId(),
 									type: "tool",
 									content: "",
 									toolId: msg.id,
