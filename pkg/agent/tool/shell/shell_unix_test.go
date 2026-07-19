@@ -116,6 +116,11 @@ func TestClassifyEffect(t *testing.T) {
 		{"kill is benign", map[string]any{"command": "kill 1234"}, tool.EffectMutates},
 		{"find delete is benign", map[string]any{"command": "find . -name '*.pyc' -delete"}, tool.EffectMutates},
 		{"missing command", map[string]any{}, tool.EffectMutates},
+		{"xargs replace-string recursive delete", map[string]any{"command": "echo target | xargs -I {} rm -rf {}"}, tool.EffectDangerous},
+		{"xargs long replace-string recursive delete", map[string]any{"command": "echo target | xargs --replace={} rm -rf {}"}, tool.EffectDangerous},
+		{"redirect into ssh authorized_keys", map[string]any{"command": "echo key >> ~/.ssh/authorized_keys"}, tool.EffectDangerous},
+		{"redirect into cron spool", map[string]any{"command": "echo job > /var/spool/cron/crontabs/root"}, tool.EffectDangerous},
+		{"redirect into systemd user unit", map[string]any{"command": "echo unit > ~/.config/systemd/user/evil.service"}, tool.EffectDangerous},
 	}
 
 	for _, tt := range tests {
@@ -236,6 +241,10 @@ func TestIsReadOnlyCommand_WriteCapableAllowlistedTools(t *testing.T) {
 		"yq --in-place '.a=1' config.yaml",
 		"jq -i '.a=1' config.json",
 		"xq -i '.a=1' config.xml",
+		"npm audit fix",
+		"npm audit --fix",
+		"pnpm audit --fix",
+		"bun pm cache rm",
 	}
 	for _, cmd := range notReadOnly {
 		t.Run("write/"+cmd, func(t *testing.T) {
@@ -249,6 +258,9 @@ func TestIsReadOnlyCommand_WriteCapableAllowlistedTools(t *testing.T) {
 		"sort input.txt",
 		"yq '.a' config.yaml",
 		"jq '.a' config.json",
+		"npm audit",
+		"pnpm audit",
+		"bun pm cache",
 	}
 	for _, cmd := range readOnly {
 		t.Run("read/"+cmd, func(t *testing.T) {

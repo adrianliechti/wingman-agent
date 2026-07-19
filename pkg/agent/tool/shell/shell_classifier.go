@@ -268,9 +268,15 @@ func isProtectedRedirectTarget(path string) bool {
 		return true
 	}
 
+	if strings.Contains(path, "/.ssh/") || strings.Contains(path, "/spool/cron/") ||
+		strings.Contains(path, "/cron.d/") || strings.Contains(path, "/.config/systemd/user/") {
+		return true
+	}
+
 	switch path[strings.LastIndexByte(path, '/')+1:] {
 	case ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".gitconfig",
-		"profile.ps1", "microsoft.powershell_profile.ps1", "microsoft.vscode_profile.ps1":
+		"profile.ps1", "microsoft.powershell_profile.ps1", "microsoft.vscode_profile.ps1",
+		"authorized_keys", "authorized_keys2", "crontab":
 		return true
 	}
 
@@ -649,6 +655,16 @@ func skipRunnerFlags(runner string, args []string) []string {
 		case "taskset", "setarch":
 			args = args[1:]
 			continue
+		case "xargs":
+			switch arg {
+			case "-I", "-i", "-n", "-P", "-L", "-s", "-a", "-d", "-E",
+				"--replace", "--max-args", "--max-procs", "--max-lines",
+				"--max-chars", "--arg-file", "--delimiter", "--eof":
+				if len(args) >= 2 {
+					args = args[2:]
+					continue
+				}
+			}
 		}
 		args = args[1:]
 	}
@@ -809,13 +825,40 @@ func isSingleCommandReadOnly(command string) bool {
 	rest := strings.ToLower(strings.Join(args, " "))
 	for _, sub := range subs {
 		if hasSubcommandPrefix(rest, sub) {
-			if cmd == "git" {
+			switch {
+			case cmd == "git":
 				return gitSubcommandReadOnly(sub, strings.Fields(rest[len(sub):]))
+			case (cmd == "npm" || cmd == "pnpm" || cmd == "yarn") && sub == "audit":
+				return npmAuditReadOnly(strings.Fields(rest[len(sub):]))
+			case cmd == "bun" && sub == "pm cache":
+				return bunPmCacheReadOnly(strings.Fields(rest[len(sub):]))
 			}
 			return true
 		}
 	}
 
+	return false
+}
+
+// npmAuditReadOnly gates `npm/pnpm/yarn audit`, which lists vulnerabilities
+// but `audit fix`/`--fix` mutates package.json and the lockfile, and can run
+// install scripts.
+func npmAuditReadOnly(args []string) bool {
+	for _, arg := range args {
+		if arg == "fix" || arg == "--fix" || strings.HasPrefix(arg, "--fix=") {
+			return false
+		}
+	}
+	return true
+}
+
+// bunPmCacheReadOnly gates `bun pm cache`, which prints the cache path but
+// `bun pm cache rm` deletes it.
+func bunPmCacheReadOnly(args []string) bool {
+	switch firstNonFlagWord(args) {
+	case "", "dir":
+		return true
+	}
 	return false
 }
 
