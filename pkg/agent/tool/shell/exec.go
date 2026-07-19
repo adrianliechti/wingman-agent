@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
 
 const (
@@ -140,13 +141,44 @@ func (s *execSession) Write(p []byte) (int, error) {
 func (s *execSession) drain() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := s.unread.String()
+	out := sanitizeOutput(s.unread.String())
 	s.unread.Reset()
 	if s.dropped > 0 {
 		out = fmt.Sprintf("[%d bytes of earlier output dropped]\n", s.dropped) + out
 		s.dropped = 0
 	}
 	return out
+}
+
+// sanitizeOutput resolves captured terminal control flow into plain text:
+// escape sequences are stripped and a carriage-return overwritten line keeps
+// its final content. TUI programs on a PTY otherwise fill results with cursor
+// noise that neither the model nor any UI can read.
+func sanitizeOutput(s string) string {
+	if !strings.ContainsAny(s, "\x1b\r") {
+		return s
+	}
+
+	s = ansi.Strip(s)
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+
+	if !strings.ContainsRune(s, '\r') {
+		return s
+	}
+
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if !strings.ContainsRune(line, '\r') {
+			continue
+		}
+		segments := strings.Split(line, "\r")
+		keep := segments[len(segments)-1]
+		if keep == "" {
+			keep = segments[len(segments)-2]
+		}
+		lines[i] = keep
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (s *execSession) exited() bool {

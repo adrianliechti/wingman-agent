@@ -21,6 +21,12 @@ func sanitize(s string) string {
 		return s
 	}
 
+	// Drop whole escape sequences first; removing just the ESC byte would
+	// leave their printable payload ("[?25l") behind as garbage text.
+	if strings.ContainsRune(s, 0x1b) {
+		s = ansi.Strip(s)
+	}
+
 	var sb strings.Builder
 	for _, r := range s {
 		switch {

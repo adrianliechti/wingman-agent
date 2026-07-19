@@ -75,3 +75,25 @@ func TestProgressBufferNilReport(t *testing.T) {
 		t.Fatalf("result = %q", got)
 	}
 }
+
+func TestSanitizeOutputStripsEscapes(t *testing.T) {
+	in := "\x1b[?2026h\x1b[?25l\x1b[22;1H\x1b[2KRun these\x1b[0m\nplain"
+	if got := sanitizeOutput(in); got != "Run these\nplain" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestSanitizeOutputResolvesCarriageReturns(t *testing.T) {
+	if got := sanitizeOutput("progress 50%\rprogress 100%\ndone\r\n"); got != "progress 100%\ndone\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := sanitizeOutput("spinner |\r"); got != "spinner |" {
+		t.Fatalf("trailing CR: got %q", got)
+	}
+}
+
+func TestSanitizeOutputPlainPassthrough(t *testing.T) {
+	if got := sanitizeOutput("ok\ttabs kept\nsecond"); got != "ok\ttabs kept\nsecond" {
+		t.Fatalf("got %q", got)
+	}
+}

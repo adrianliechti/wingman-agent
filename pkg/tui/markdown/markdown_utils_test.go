@@ -38,7 +38,10 @@ func TestRenderProducesANSI(t *testing.T) {
 }
 
 func TestSanitizeStripsEscapes(t *testing.T) {
-	if got := Sanitize("a\x1b[31mred\x07b"); got != "a[31mredb" {
+	if got := Sanitize("a\x1b[31mred\x07b"); got != "aredb" {
+		t.Fatalf("Sanitize = %q", got)
+	}
+	if got := Sanitize("x\x1b[?2026h\x1b[22;1H\x1b[2Ky"); got != "xy" {
 		t.Fatalf("Sanitize = %q", got)
 	}
 }

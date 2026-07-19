@@ -64,8 +64,9 @@ type App struct {
 	lastMaxScroll int
 	lastTopPad    int
 
-	printed     int
-	prevWasTool bool
+	printed           int
+	prevWasTool       bool
+	prevToolMultiline bool
 
 	turnTools    int
 	turnThoughts int
@@ -178,6 +179,7 @@ func (a *App) activateSession(id string) {
 
 	a.printed = 0
 	a.prevWasTool = false
+	a.prevToolMultiline = false
 	a.turnTools = 0
 	a.turnThoughts = 0
 
@@ -511,6 +513,7 @@ func (a *App) rebuildChat() {
 	a.chat = nil
 	a.printed = 0
 	a.prevWasTool = false
+	a.prevToolMultiline = false
 	a.clearSelection()
 	a.syncMessages()
 

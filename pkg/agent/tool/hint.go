@@ -60,6 +60,19 @@ func ExtractHint(argsJSON, toolName string) string {
 		}
 	}
 
+	if toolName == "task_send" || toolName == "task_stop" || toolName == "task_output" {
+		id, _ := args["id"].(string)
+		id = strings.TrimSpace(id)
+		if message, _ := args["message"].(string); message != "" {
+			message = strings.Join(strings.Fields(message), " ")
+			if id != "" {
+				return id + ": " + message
+			}
+			return message
+		}
+		return id
+	}
+
 	hintKeys := []string{
 		"query",
 		"pattern",

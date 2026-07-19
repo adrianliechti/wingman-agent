@@ -198,7 +198,7 @@ func executeShell(ctx context.Context, workDir string, elicit *tool.Elicitation,
 	started := time.Now()
 	runErr := cmd.Run()
 	elapsed := time.Since(started)
-	result := output.result()
+	result := sanitizeOutput(output.result())
 
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		notice := fmt.Sprintf("Command timed out after %d seconds", timeout)

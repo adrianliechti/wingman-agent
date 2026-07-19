@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	DefaultMaxTurns         = 100
+	DefaultMaxTurns         = 400
 	DefaultMaxParallelTools = 8
 	DefaultToolTimeout      = 10 * time.Minute
 

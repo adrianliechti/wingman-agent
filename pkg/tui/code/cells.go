@@ -112,27 +112,58 @@ func isShellTool(name string) bool {
 	return name == "shell" || name == "exec_command" || name == "exec_session"
 }
 
+// toolLabel maps internal tool names to friendlier display titles.
+func toolLabel(name string) string {
+	switch name {
+	case "task_send":
+		return "agent follow-up"
+	case "task_stop":
+		return "agent stop"
+	}
+	return name
+}
+
+// isTaskCommand reports task tools whose success result is model-directed
+// boilerplate the chat should not echo.
+func isTaskCommand(name string) bool {
+	return name == "task_send" || name == "task_stop"
+}
+
 func isMutationTool(name string) bool {
 	return name == "edit" || name == "write"
 }
 
-// toolTitleLine renders the header line for a tool call.
-func toolTitleLine(name, hint string, width int, running bool) string {
+// toolTitleLine renders the header line for a tool call. info carries a
+// one-line result summary appended dimly after the hint; errored switches the
+// marker to red.
+func toolTitleLine(name, hint, info string, width int, running, errored bool) string {
 	t := theme.Default
 	hint = markdown.Sanitize(strings.ReplaceAll(hint, "\n", " "))
+
+	marker := t.BrBlack
+	if errored {
+		marker = t.Red
+	}
 
 	var line string
 	switch {
 	case isShellTool(name):
-		line = colored(t.Magenta, "$ ") + bold(hint)
+		prompt := t.Magenta
+		if errored {
+			prompt = t.Red
+		}
+		line = colored(prompt, "$ ") + bold(hint)
 	case name == "agent":
-		line = dim("• ") + bold("agent") + " " + dim(hint)
+		line = colored(marker, "• ") + bold("agent") + " " + dim(hint)
 	default:
-		label := name
-		line = dim("• ") + bold(label)
+		line = colored(marker, "• ") + bold(toolLabel(name))
 		if hint != "" {
 			line += " " + dim(hint)
 		}
+	}
+
+	if info != "" {
+		line += dim(" · " + markdown.Sanitize(strings.ReplaceAll(info, "\n", " ")))
 	}
 
 	if running {
@@ -168,20 +199,19 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 	}
 
 	hint := tool.ExtractHint(result.Args, result.Name)
-	lines := []string{toolTitleLine(name, hint, width, false)}
-
 	output := strings.TrimRight(result.Content, "\n")
-	if output == "" {
-		return lines
-	}
+	errored := strings.HasPrefix(output, "error:")
 
 	colorize := func(s string) string { return dim(markdown.Sanitize(s)) }
 	preview := strings.Split(output, "\n")
 
+	info := ""
+	body := preview
+
 	switch {
 	case isShellTool(name):
 		if !full {
-			preview = tailPreview(preview, 3)
+			body = tailPreview(preview, 3)
 		}
 	case isMutationTool(name):
 		t := theme.Default
@@ -195,21 +225,34 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 			return dim(markdown.Sanitize(s))
 		}
 		if !full {
-			preview = headPreview(preview, 5)
+			body = headPreview(preview, 5)
 		}
 	default:
 		if !full {
-			return lines
+			body = nil
+			if isTaskCommand(name) && !errored {
+				break
+			}
+			if len(preview) == 1 {
+				info = preview[0]
+			} else if output != "" {
+				info = fmt.Sprintf("%d lines", len(preview))
+			}
 		}
 	}
 
-	lines = append(lines, continuationWrap(strings.Join(preview, "\n"), width, colorize)...)
+	lines := []string{toolTitleLine(name, hint, info, width, false, errored)}
+	if output == "" || len(body) == 0 {
+		return lines
+	}
+
+	lines = append(lines, continuationWrap(strings.Join(body, "\n"), width, colorize)...)
 
 	return lines
 }
 
 func cellToolProgress(name, hint, progress string, width int) []string {
-	lines := []string{toolTitleLine(name, hint, width, true)}
+	lines := []string{toolTitleLine(name, hint, "", width, true, false)}
 
 	if progress != "" {
 		inner := width - len(cellIndent) - 2
@@ -226,7 +269,7 @@ func cellToolProgress(name, hint, progress string, width int) []string {
 func cellTodo(argsJSON string, width int) []string {
 	items := tool.ParseTodoItems(argsJSON)
 	if len(items) == 0 {
-		return []string{toolTitleLine("todo", "", width, false)}
+		return []string{toolTitleLine("todo", "", "", width, false, false)}
 	}
 
 	t := theme.Default

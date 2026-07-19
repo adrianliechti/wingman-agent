@@ -54,7 +54,7 @@ func (a *App) streamCells(width int) []string {
 
 	var lines []string
 
-	if a.prevWasTool && (streamingReasoning != "" || streamingText != "") {
+	if a.prevWasTool && (streamingText != "" || (streamingReasoning != "" && a.prevToolMultiline)) {
 		lines = append(lines, "")
 	}
 
@@ -67,6 +67,9 @@ func (a *App) streamCells(width int) []string {
 	}
 
 	if toolName != "" && !a.isToolHidden(toolName) {
+		if len(lines) == 0 && a.prevWasTool && a.prevToolMultiline {
+			lines = append(lines, "")
+		}
 		lines = append(lines, cellToolProgress(toolName, toolHint, toolProgress, width)...)
 	}
 

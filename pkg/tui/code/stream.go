@@ -75,6 +75,15 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 		if a.prevWasTool {
 			lines = append(lines, "")
 			a.prevWasTool = false
+			a.prevToolMultiline = false
+		}
+	}
+
+	// One-line tool and thought cells stack tight; a blank line separates a
+	// cell from its neighbor as soon as either side is multi-line.
+	blankBeforeCell := func(multiline bool) {
+		if a.prevWasTool && (a.prevToolMultiline || multiline) {
+			lines = append(lines, "")
 		}
 	}
 
@@ -86,17 +95,21 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 				continue
 			}
 			a.turnTools++
-			lines = append(lines, cellTool(c.ToolResult, width, false)...)
+			cell := cellTool(c.ToolResult, width, false)
+			blankBeforeCell(len(cell) > 1)
+			lines = append(lines, cell...)
 			a.prevWasTool = true
+			a.prevToolMultiline = len(cell) > 1
 
 		case c.ToolCall != nil:
 			continue
 
 		case c.Reasoning != nil && c.Reasoning.Summary != "":
 			a.turnThoughts++
-			blankBeforeText()
+			blankBeforeCell(false)
 			lines = append(lines, cellReasoning(c.Reasoning.Summary, width, false)...)
 			a.prevWasTool = true
+			a.prevToolMultiline = false
 
 		case c.Text != "":
 			blankBeforeText()
@@ -337,6 +350,7 @@ func (a *App) flushToolGap() {
 	if a.prevWasTool {
 		a.appendChat([]string{""})
 		a.prevWasTool = false
+		a.prevToolMultiline = false
 	}
 }
 
