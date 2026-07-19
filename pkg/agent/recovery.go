@@ -83,18 +83,6 @@ func isContextOverflowError(err error) bool {
 	return false
 }
 
-func (a *Agent) utilityModel() string {
-	if a.Config.UtilityModel != nil {
-		if model := a.UtilityModel(); model != "" {
-			return model
-		}
-	}
-	if a.Config.Model != nil {
-		return a.Model()
-	}
-	return ""
-}
-
 func (a *Agent) removeOrphanedToolMessages() {
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
@@ -246,6 +234,86 @@ func dropDanglingReasoning(messages []Message) ([]Message, bool) {
 	return out, true
 }
 
+const (
+	trimProtectBytes    = 96 * 1024
+	trimProtectMessages = 12
+	trimResultThreshold = 1024
+	trimResultKeepBytes = 256
+)
+
+const trimMarker = "\n[earlier tool output trimmed to reclaim context — rerun the tool if it is needed again]"
+const trimImageMarker = "[image result trimmed to reclaim context — rerun the tool if it is needed again]"
+
+// trimStaleToolResults rewrites old tool-result payloads down to a short stub
+// and drops old image results, reclaiming context without an LLM summarization
+// pass and without disturbing the conversation spine. The newest messages stay
+// untouched so the working set survives. Returns the number of bytes freed.
+func (a *Agent) trimStaleToolResults() int {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+
+	cut := 0
+	total := 0
+	for i := len(a.Messages) - 1; i >= 0; i-- {
+		if total > trimProtectBytes && len(a.Messages)-i > trimProtectMessages {
+			cut = i + 1
+			break
+		}
+		total += messageBytes(a.Messages[i])
+	}
+
+	freed := 0
+
+	for i := range a.Messages[:cut] {
+		m := a.Messages[i]
+		if m.Role != RoleAssistant {
+			continue
+		}
+
+		var content []Content
+		changed := false
+		imageDropped := false
+
+		for _, c := range m.Content {
+			if c.File != nil {
+				freed += len(c.File.Data)
+				changed = true
+				imageDropped = true
+				continue
+			}
+			if c.ToolResult != nil && len(c.ToolResult.Content) > trimResultThreshold {
+				result := *c.ToolResult
+				result.Content = text.HeadBytes(result.Content, trimResultKeepBytes) + trimMarker
+				freed += len(c.ToolResult.Content) - len(result.Content)
+				c.ToolResult = &result
+				changed = true
+			}
+			content = append(content, c)
+		}
+
+		if !changed {
+			continue
+		}
+
+		if imageDropped {
+			for j := range content {
+				if content[j].ToolResult != nil {
+					result := *content[j].ToolResult
+					result.Content = trimImageMarker
+					content[j].ToolResult = &result
+				}
+			}
+		}
+
+		a.Messages[i].Content = content
+	}
+
+	if freed > 0 {
+		a.Revision++
+	}
+	return freed
+}
+
 func (a *Agent) compactMessages(ctx context.Context, truncateOnFailure bool) {
 	messages := a.requestMessages()
 	summaryMessages, recentMessages := splitMessagesForRecoverySummary(messages)
@@ -342,10 +410,8 @@ func (a *Agent) summarizeMessages(ctx context.Context, messages []Message) (stri
 		return "", nil
 	}
 
-	model := a.utilityModel()
-
 	resp, err := a.client.Responses.New(ctx, responses.ResponseNewParams{
-		Model: model,
+		Model: a.utilityModelName(),
 		Instructions: openai.String(
 			"An LLM context limit was reached during an active working session between a user and you (the assistant). " +
 				"Produce a continuation briefing for yourself so the session can resume seamlessly. " +
@@ -388,7 +454,7 @@ func (a *Agent) Recap(ctx context.Context) (string, error) {
 	}
 
 	resp, err := a.client.Responses.New(ctx, responses.ResponseNewParams{
-		Model: a.utilityModel(),
+		Model: a.utilityModelName(),
 		Instructions: openai.String(
 			"The user is returning to a coding session after time away. " +
 				"From the transcript, write a brief recap in Markdown: 2-5 bullets covering what was being worked on, " +

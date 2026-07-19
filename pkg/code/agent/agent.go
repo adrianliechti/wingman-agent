@@ -29,10 +29,12 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/todo"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 	skillpkg "github.com/adrianliechti/wingman-agent/pkg/skill"
+	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 type Agent struct {
@@ -229,6 +231,37 @@ func (a *Agent) utilityModel() string {
 		return a.utilityModelID
 	}
 	return a.classModelLocked(code.ModelClassSmall)
+}
+
+// subagentRoleModel resolves the model roles the agent tool may launch
+// subagents on: "plan" and "utility" follow the same explicit-override-else-
+// class-pick logic as the session roles, "" names the currently inherited
+// model so effort overrides clamp against its bounds.
+func (a *Agent) subagentRoleModel(s *sessionState, role string) (harness.ModelOption, bool) {
+	id := ""
+	switch role {
+	case "plan":
+		a.modelMu.Lock()
+		id = a.planModelID
+		if s.planModelID != "" {
+			id = s.planModelID
+		}
+		if id == "" {
+			id = a.classModelLocked(code.ModelClassLarge)
+		}
+		a.modelMu.Unlock()
+	case "utility":
+		id = a.utilityModel()
+	case "":
+		_, id = a.modelsFor(s)
+	}
+
+	if id == "" {
+		return harness.ModelOption{}, false
+	}
+
+	lowest, highest := code.ModelEffortBounds(id)
+	return harness.ModelOption{ID: id, MinEffort: lowest, MaxEffort: highest}, true
 }
 
 // SetModel applies to the session's current role: picking a model while in
@@ -616,6 +649,9 @@ func (a *Agent) buildSession() *sessionState {
 		return a.effortFor(s)
 	}
 	sessionCfg.UtilityModel = a.utilityModel
+	sessionCfg.SubagentModel = func(role string) (harness.ModelOption, bool) {
+		return a.subagentRoleModel(s, role)
+	}
 	elicit := a.prompts
 	ws := a.workspace
 
@@ -695,8 +731,10 @@ func (a *Agent) buildSession() *sessionState {
 		allowedWriteRoots = append(allowedWriteRoots, "*")
 	}
 
-	s.execManager = shell.NewExecManager()
 	s.tasks = task.NewRegistry()
+	s.execManager = shell.NewExecManager(func(e shell.ExecExit) {
+		s.tasks.Publish(execExitEvent(e))
+	})
 	s.freshness = fs.NewFreshness(ws.Root)
 	s.watchStop = make(chan struct{})
 	approvals := shell.NewApprovals()
@@ -720,10 +758,46 @@ func (a *Agent) buildSession() *sessionState {
 		shell.ExecTools(s.execManager, ws.RootPath, elicit, approvals),
 		todo.Tools(),
 		elicittool.Tools(elicit),
-		fetch.Tools(elicit),
+		fetch.Tools(elicit, sessionCfg.Utility),
+		websearch.Tools(elicit),
 		subagent.Tools(sessionCfg, s.subagentContext, s.tasks),
 	)
 	return s
+}
+
+// execExitNotifyLimit caps how much trailing output of a backgrounded command
+// an exit notification injects into the conversation.
+const execExitNotifyLimit = 16 * 1024
+
+func execExitEvent(e shell.ExecExit) task.Event {
+	description := e.Description
+	if description == "" {
+		description = text.TruncateHead(e.Command, 80)
+	}
+
+	status := task.StatusDone
+	if e.Failed {
+		status = task.StatusFailed
+	}
+
+	result := e.Notice
+	if out := strings.TrimSpace(e.Output); out != "" {
+		if len(out) > execExitNotifyLimit {
+			out = "[earlier output truncated]\n" + text.TailBytes(out, execExitNotifyLimit)
+		}
+		result += "\n\nOutput:\n" + out
+	}
+
+	return task.Event{
+		ID:          fmt.Sprintf("exec-%d", e.SessionID),
+		Kind:        task.KindCommand,
+		AgentType:   "exec",
+		Description: description,
+		Seq:         1,
+		Status:      status,
+		Result:      result,
+		Elapsed:     e.Elapsed,
+	}
 }
 
 func userHooksConfigPath() string {

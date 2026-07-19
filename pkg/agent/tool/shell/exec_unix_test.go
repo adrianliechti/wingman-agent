@@ -12,7 +12,7 @@ import (
 )
 
 func TestExecCommandCompletes(t *testing.T) {
-	m := NewExecManager()
+	m := NewExecManager(nil)
 	defer m.Close()
 
 	out, err := executeExecCommand(context.Background(), m, t.TempDir(), nil, NewApprovals(), map[string]any{
@@ -33,7 +33,7 @@ func TestExecCommandCompletes(t *testing.T) {
 }
 
 func TestExecCommandExitCode(t *testing.T) {
-	m := NewExecManager()
+	m := NewExecManager(nil)
 	defer m.Close()
 
 	out, err := executeExecCommand(context.Background(), m, t.TempDir(), nil, NewApprovals(), map[string]any{
@@ -48,7 +48,7 @@ func TestExecCommandExitCode(t *testing.T) {
 }
 
 func TestExecCommandBackgroundPollKill(t *testing.T) {
-	m := NewExecManager()
+	m := NewExecManager(nil)
 	defer m.Close()
 
 	ctx := context.Background()
@@ -86,7 +86,7 @@ func TestExecCommandBackgroundPollKill(t *testing.T) {
 }
 
 func TestExecSessionStdin(t *testing.T) {
-	m := NewExecManager()
+	m := NewExecManager(nil)
 	defer m.Close()
 
 	ctx := context.Background()
@@ -120,7 +120,7 @@ func TestExecSessionStdin(t *testing.T) {
 }
 
 func TestExecCommandTTY(t *testing.T) {
-	m := NewExecManager()
+	m := NewExecManager(nil)
 	defer m.Close()
 
 	ctx := context.Background()
@@ -148,7 +148,7 @@ func TestExecCommandTTY(t *testing.T) {
 }
 
 func TestExecSessionTTYStdinEOF(t *testing.T) {
-	m := NewExecManager()
+	m := NewExecManager(nil)
 	defer m.Close()
 
 	ctx := context.Background()
@@ -183,7 +183,7 @@ func TestExecSessionTTYStdinEOF(t *testing.T) {
 }
 
 func TestExecSessionDangerousInputConfirmed(t *testing.T) {
-	m := NewExecManager()
+	m := NewExecManager(nil)
 	defer m.Close()
 
 	ctx := context.Background()
@@ -225,7 +225,7 @@ func TestExecSessionDangerousInputConfirmed(t *testing.T) {
 }
 
 func TestExecSessionCtrlCInterruptsPipeSession(t *testing.T) {
-	m := NewExecManager()
+	m := NewExecManager(nil)
 	defer m.Close()
 
 	ctx := context.Background()

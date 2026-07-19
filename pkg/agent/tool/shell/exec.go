@@ -26,15 +26,30 @@ const (
 	maxUnreadBytes     = 1 << 20
 )
 
+// ExecExit reports the exit of a backgrounded exec_command session that no
+// tool call was waiting on, so the host can deliver it as a notification
+// instead of leaving the model to poll.
+type ExecExit struct {
+	SessionID   int
+	Command     string
+	Description string
+	Output      string
+	Notice      string
+	Failed      bool
+	Elapsed     time.Duration
+}
+
 type ExecManager struct {
+	onExit func(ExecExit)
+
 	mu       sync.Mutex
 	closed   bool
 	nextID   int
 	sessions map[int]*execSession
 }
 
-func NewExecManager() *ExecManager {
-	return &ExecManager{sessions: map[int]*execSession{}}
+func NewExecManager(onExit func(ExecExit)) *ExecManager {
+	return &ExecManager{onExit: onExit, sessions: map[int]*execSession{}}
 }
 
 func (m *ExecManager) Close() {
@@ -111,16 +126,73 @@ func (m *ExecManager) remove(id int) {
 	m.mu.Unlock()
 }
 
+func (m *ExecManager) markBackgrounded(s *execSession) {
+	m.mu.Lock()
+	s.backgrounded = true
+	m.mu.Unlock()
+	if s.exited() {
+		m.notifyExit(s)
+	}
+}
+
+func (m *ExecManager) beginWait(s *execSession) {
+	m.mu.Lock()
+	s.waiters++
+	m.mu.Unlock()
+}
+
+func (m *ExecManager) endWait(s *execSession) {
+	m.mu.Lock()
+	s.waiters--
+	m.mu.Unlock()
+	if s.exited() {
+		m.notifyExit(s)
+	}
+}
+
+// notifyExit delivers a backgrounded session's exit as a background event.
+// Removal from the session map is the exactly-once delivery claim; a waiting
+// tool call suppresses the notification and reports the exit inline instead
+// (endWait re-runs this check for a waiter that woke on its timeout while the
+// process exited).
+func (m *ExecManager) notifyExit(s *execSession) {
+	m.mu.Lock()
+	if m.closed || m.onExit == nil || !s.backgrounded || s.waiters > 0 || m.sessions[s.id] != s {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.sessions, s.id)
+	m.mu.Unlock()
+
+	m.onExit(ExecExit{
+		SessionID:   s.id,
+		Command:     s.command,
+		Description: s.description,
+		Output:      s.drain(),
+		Notice:      s.exitNotice(),
+		Failed:      s.exitErr != nil,
+		Elapsed:     time.Since(s.started),
+	})
+}
+
 type execSession struct {
-	id        int
-	command   string
-	tty       bool
-	cancel    context.CancelFunc
-	interrupt func() error
-	stdin     io.WriteCloser
+	id          int
+	command     string
+	description string
+	started     time.Time
+	tty         bool
+	cancel      context.CancelFunc
+	interrupt   func() error
+	stdin       io.WriteCloser
 
 	done    chan struct{}
 	exitErr error
+
+	// backgrounded and waiters are lifecycle state guarded by the manager mutex:
+	// exit notifications fire only for backgrounded sessions no tool call is
+	// currently waiting on.
+	backgrounded bool
+	waiters      int
 
 	mu      sync.Mutex
 	unread  bytes.Buffer
@@ -209,14 +281,22 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 		appr = NewApprovals()
 	}
 
-	commandDescription := strings.Join([]string{
+	commandLines := []string{
 		fmt.Sprintf("Start a command for long-running or interactive work. Waits up to `wait` seconds (default %d) for it to finish; if still running, the command keeps running in the background and a session_id is returned.", defaultExecWait),
 		"- Use for dev servers, watch tasks, log tails, and interactive programs (REPLs, CLIs that prompt for input). Use `shell` for commands expected to finish promptly.",
 		"- Set `tty` for programs that need a terminal (REPLs, prompts, programs that buffer output when piped). Unix only — ignored on Windows. Written input is echoed back in the output.",
 		"- Runs in the same host shell as `shell` and starts in the workspace directory (override with `workdir`). stdout and stderr are merged. Output between reads is buffered (oldest dropped past 1MB); poll with `exec_session` to collect it.",
 		"- The process is NOT killed when the wait elapses. Kill sessions you no longer need via `exec_session`.",
-		safetyGuardLine(elicit),
-	}, "\n")
+	}
+
+	if manager.onExit != nil {
+		commandLines = append(commandLines,
+			"- When a backgrounded command exits on its own, its remaining output arrives automatically as a background notification — keep working instead of polling `exec_session` just to watch for the exit.",
+		)
+	}
+
+	commandLines = append(commandLines, safetyGuardLine(elicit))
+	commandDescription := strings.Join(commandLines, "\n")
 
 	sessionDescription := strings.Join([]string{
 		"Interact with a session started by `exec_command`: poll new output (no input), write to its stdin (`input`), close stdin (`eof`), or terminate it (`kill`).",
@@ -316,12 +396,16 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	cmd := buildCommand(sctx, command, dir)
 	cmd.Env = append(cmd.Env, "NO_COLOR=1", "PAGER=cat", "GIT_PAGER=cat")
 
+	description, _ := args["description"].(string)
+
 	s := &execSession{
-		command:   command,
-		tty:       tty,
-		cancel:    cancel,
-		interrupt: func() error { return interruptProcessGroup(cmd) },
-		done:      make(chan struct{}),
+		command:     command,
+		description: strings.TrimSpace(description),
+		started:     time.Now(),
+		tty:         tty,
+		cancel:      cancel,
+		interrupt:   func() error { return interruptProcessGroup(cmd) },
+		done:        make(chan struct{}),
 	}
 
 	if tty {
@@ -346,6 +430,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 			master.Close()
 			s.exitErr = err
 			close(s.done)
+			m.notifyExit(s)
 		}()
 	} else {
 		stdin, err := cmd.StdinPipe()
@@ -365,6 +450,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		go func() {
 			s.exitErr = cmd.Wait()
 			close(s.done)
+			m.notifyExit(s)
 		}()
 	}
 
@@ -384,6 +470,8 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	case <-ctx.Done():
 	}
 
+	m.markBackgrounded(s)
+
 	notice := fmt.Sprintf("Still running with session_id %d — use exec_session to poll output, send input, or kill it", id)
 	return sessionResult(s.drain(), notice), nil
 }
@@ -398,6 +486,9 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 	if s == nil {
 		return "", fmt.Errorf("no session with id %d (it may have exited and been cleaned up)", id)
 	}
+
+	m.beginWait(s)
+	defer m.endWait(s)
 
 	wait := defaultSessionWait
 	if value, present, err := tool.NonNegIntArg(args, "wait"); present {

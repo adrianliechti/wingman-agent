@@ -76,6 +76,16 @@ var AvailableModels = []Model{
 	{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash"},
 }
 
+// ModelEffortBounds returns the reasoning-effort range a model supports;
+// empty means unbounded on that side. Callers clamp out-of-range requests to
+// the nearest bound instead of failing. Only known constraints are listed.
+func ModelEffortBounds(id string) (lowest, highest string) {
+	if ModelFamilyOf(id) == "gpt" {
+		return "", "xhigh"
+	}
+	return "", ""
+}
+
 func ModelName(id string) string {
 	for _, m := range AvailableModels {
 		if m.ID == id {

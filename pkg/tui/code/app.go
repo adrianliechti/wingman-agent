@@ -256,7 +256,7 @@ func (a *App) deliverTaskResults(sessionID string, batch []task.Event) {
 		}
 		a.flushToolGap()
 		for _, ev := range batch {
-			a.appendChat(cellNotice(fmt.Sprintf("Background agent %s %s (%s, %s)", ev.ID, ev.Verb(), ev.Description, ev.Elapsed.Round(time.Second)), taskResultColor(ev.Status), a.width()))
+			a.appendChat(cellNotice(fmt.Sprintf("%s %s %s (%s, %s)", ev.Label(), ev.ID, ev.Verb(), ev.Description, ev.Elapsed.Round(time.Second)), taskResultColor(ev.Status), a.width()))
 		}
 		a.invalidate()
 	})

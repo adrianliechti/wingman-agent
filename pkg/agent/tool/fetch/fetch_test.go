@@ -12,7 +12,7 @@ import (
 
 func fetchTool(t *testing.T) func(map[string]any) (string, error) {
 	t.Helper()
-	tl := Tools(nil)[0]
+	tl := Tools(nil, nil)[0]
 	return func(args map[string]any) (string, error) {
 		return tl.Execute(t.Context(), args)
 	}
@@ -108,6 +108,46 @@ func TestFetchTruncatesLongOutput(t *testing.T) {
 	}
 }
 
+func TestFetchExtractsWithPrompt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`<html><body><p>The latest release is v2.7.1</p></body></html>`))
+	}))
+	defer server.Close()
+
+	var gotInput string
+	extract := func(_ context.Context, instructions, input string) (string, error) {
+		gotInput = input
+		return "v2.7.1", nil
+	}
+	tl := Tools(nil, extract)[0]
+
+	out, err := tl.Execute(t.Context(), map[string]any{"url": server.URL, "prompt": "latest version?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "v2.7.1" {
+		t.Fatalf("output = %q, want extracted answer", out)
+	}
+	for _, want := range []string{"latest version?", "The latest release is v2.7.1"} {
+		if !strings.Contains(gotInput, want) {
+			t.Fatalf("extract input missing %q:\n%s", want, gotInput)
+		}
+	}
+
+	failing := func(_ context.Context, _, _ string) (string, error) {
+		return "", context.DeadlineExceeded
+	}
+	tl = Tools(nil, failing)[0]
+	out, err = tl.Execute(t.Context(), map[string]any{"url": server.URL, "prompt": "latest version?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "The latest release is v2.7.1") {
+		t.Fatalf("failed extraction should fall back to page text, got %q", out)
+	}
+}
+
 func TestFetchHostApprovalGate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -121,7 +161,7 @@ func TestFetchHostApprovalGate(t *testing.T) {
 		prompts++
 		return allow, nil
 	}}
-	tl := Tools(elicit)[0]
+	tl := Tools(elicit, nil)[0]
 
 	if _, err := tl.Execute(t.Context(), map[string]any{"url": server.URL}); err == nil || !strings.Contains(err.Error(), "declined") {
 		t.Fatalf("declined fetch err = %v", err)

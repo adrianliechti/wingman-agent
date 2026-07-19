@@ -262,8 +262,14 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			}
 			a.appendMessages(queuedMessages...)
 
-			if a.shouldCompactProactively(model, resp.usage.InputTokens) && a.preCompactAllowed(ctx) {
-				a.compactMessages(ctx, false)
+			// Past the compaction threshold, trim stale tool results first; LLM
+			// summarization only runs when the estimated reclaim (~4 bytes per
+			// token) cannot cover the overshoot. The reserve leaves headroom to
+			// re-measure real usage next turn.
+			if overshoot := a.compactionOvershoot(model, resp.usage.InputTokens); overshoot > 0 {
+				if int64(a.trimStaleToolResults()/4) < overshoot && a.preCompactAllowed(ctx) {
+					a.compactMessages(ctx, false)
+				}
 			}
 		}
 	}, nil
@@ -320,14 +326,16 @@ func (a *Agent) endRun() {
 	a.queueMu.Unlock()
 }
 
-func (a *Agent) shouldCompactProactively(model string, lastInputTokens int64) bool {
+// compactionOvershoot returns how many tokens the last request exceeded the
+// compaction threshold by; zero or negative means no compaction is due.
+func (a *Agent) compactionOvershoot(model string, lastInputTokens int64) int64 {
 	if lastInputTokens <= 0 {
-		return false
+		return 0
 	}
 
 	window := a.Config.ContextWindow
 	if window < 0 {
-		return false
+		return 0
 	}
 	if window == 0 {
 		window = ContextWindowFor(model, a.Config.LargeContext)
@@ -346,7 +354,7 @@ func (a *Agent) shouldCompactProactively(model string, lastInputTokens int64) bo
 		}
 	}
 
-	return lastInputTokens > int64(window-reserve)
+	return lastInputTokens - int64(window-reserve)
 }
 
 func extractToolCalls(messages []Message) []ToolCall {

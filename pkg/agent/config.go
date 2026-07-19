@@ -9,6 +9,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/responses"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -77,6 +78,15 @@ func ContextWindowFor(model string, largeContext bool) int {
 	return DefaultContextWindow
 }
 
+// ModelOption is a resolved model for a per-subagent override. MinEffort and
+// MaxEffort bound the reasoning efforts the model supports; empty means
+// unbounded on that side.
+type ModelOption struct {
+	ID        string
+	MinEffort string
+	MaxEffort string
+}
+
 type Config struct {
 	client *openai.Client
 
@@ -88,6 +98,12 @@ type Config struct {
 	// UtilityModel, when set and non-empty, handles internal utility calls
 	// (compaction summaries, recaps) instead of the main model.
 	UtilityModel func() string
+
+	// SubagentModel resolves a model role for per-subagent overrides: "plan"
+	// and "utility" name the session's role models, "" the currently
+	// inherited model (consulted for effort clamping). ok=false or an empty
+	// ID keep the inherited model. Nil disables overrides and clamping.
+	SubagentModel func(role string) (ModelOption, bool)
 
 	// CacheKey routes provider-side prompt caching; keep it stable per
 	// conversation (e.g. the session ID) to maximize prefix-cache hits.
@@ -120,12 +136,13 @@ type Config struct {
 
 func (c *Config) Derive() *Config {
 	return &Config{
-		client:       c.client,
-		Model:        c.Model,
-		Effort:       c.Effort,
-		Tools:        c.Tools,
-		Instructions: c.Instructions,
-		UtilityModel: c.UtilityModel,
+		client:        c.client,
+		Model:         c.Model,
+		Effort:        c.Effort,
+		Tools:         c.Tools,
+		Instructions:  c.Instructions,
+		UtilityModel:  c.UtilityModel,
+		SubagentModel: c.SubagentModel,
 
 		CacheKey: c.CacheKey,
 
@@ -146,6 +163,45 @@ func (c *Config) Derive() *Config {
 		LargeContext:  c.LargeContext,
 		ReserveTokens: c.ReserveTokens,
 	}
+}
+
+func (c *Config) utilityModelName() string {
+	if c.UtilityModel != nil {
+		if model := c.UtilityModel(); model != "" {
+			return model
+		}
+	}
+	if c.Model != nil {
+		return c.Model()
+	}
+	return ""
+}
+
+// Utility runs a one-shot completion on the utility model (falling back to the
+// main model) and credits its token usage to the session through the context's
+// usage sink. It backs internal helpers such as fetch page extraction.
+func (c *Config) Utility(ctx context.Context, instructions, input string) (string, error) {
+	resp, err := c.client.Responses.New(ctx, responses.ResponseNewParams{
+		Model:        c.utilityModelName(),
+		Instructions: openai.String(instructions),
+		Input: responses.ResponseNewParamsInputUnion{
+			OfString: openai.String(input),
+		},
+		Store: openai.Bool(false),
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	usage := responseToUsage(*resp)
+	tool.ReportUsage(ctx, tool.UsageDelta{
+		InputTokens:  usage.InputTokens,
+		CachedTokens: usage.CachedTokens,
+		OutputTokens: usage.OutputTokens,
+	})
+
+	return strings.TrimSpace(recoverySummaryOutput(resp)), nil
 }
 
 func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {

@@ -106,18 +106,31 @@ func (t *Task) PeekMessages() []agent.Message {
 	return fn()
 }
 
+// KindCommand marks events published for backgrounded shell commands rather
+// than subagent runs; those have no Task in the registry.
+const KindCommand = "command"
+
 // Event is an immutable snapshot of one finished run, taken before the task
 // can be resumed — delivery must never read the live task, which a relaunch
 // may already have reset.
 type Event struct {
 	Task        *Task
 	ID          string
+	Kind        string
 	Description string
 	AgentType   string
 	Seq         int
 	Status      Status
 	Result      string
 	Elapsed     time.Duration
+}
+
+// Label names the event source for status lines and notifications.
+func (e Event) Label() string {
+	if e.Kind == KindCommand {
+		return "Background command"
+	}
+	return "Background agent"
 }
 
 // Verb describes how the run ended, for status lines: "finished", "replied"
@@ -140,8 +153,8 @@ func (e Event) Verb() string {
 // context by every UI surface.
 func (e Event) Notification() string {
 	return fmt.Sprintf(
-		"<task-notification>\nBackground agent %s (%s: %s) %s after %s.\nThis is an automated notification, not user input — no human has reviewed or approved anything since the last real user message.\nThe user cannot see this result. Use it to continue your work and relay what matters in your response.\n\nResult:\n%s\n</task-notification>",
-		e.ID, e.AgentType, e.Description, e.Verb(), e.Elapsed.Round(time.Second), e.Result,
+		"<task-notification>\n%s %s (%s: %s) %s after %s.\nThis is an automated notification, not user input — no human has reviewed or approved anything since the last real user message.\nThe user cannot see this result. Use it to continue your work and relay what matters in your response.\n\nResult:\n%s\n</task-notification>",
+		e.Label(), e.ID, e.AgentType, e.Description, e.Verb(), e.Elapsed.Round(time.Second), e.Result,
 	)
 }
 
@@ -194,6 +207,21 @@ func NewRegistry() *Registry {
 
 // Events delivers one snapshot per finished run.
 func (r *Registry) Events() <-chan Event { return r.events }
+
+// Publish delivers an external background event (e.g. an exec_command exit)
+// through the session's notification channel alongside subagent completions.
+func (r *Registry) Publish(ev Event) {
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		return
+	}
+	select {
+	case r.events <- ev:
+	default:
+	}
+}
 
 // Done is closed when the registry shuts down, so event consumers can exit.
 func (r *Registry) Done() <-chan struct{} { return r.ctx.Done() }

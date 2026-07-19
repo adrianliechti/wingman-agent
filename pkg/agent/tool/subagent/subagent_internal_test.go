@@ -257,3 +257,87 @@ func TestRunTrailer(t *testing.T) {
 		t.Fatalf("runTrailer = %q, want %q", got, want)
 	}
 }
+
+func TestApplyModelOverrides(t *testing.T) {
+	roles := map[string]agent.ModelOption{
+		"plan":    {ID: "large-model"},
+		"utility": {ID: "gpt-small", MaxEffort: "xhigh"},
+		"":        {ID: "gpt-session", MaxEffort: "xhigh"},
+	}
+	cfg := &agent.Config{
+		Model:  func() string { return "session-model" },
+		Effort: func() string { return "medium" },
+		SubagentModel: func(role string) (agent.ModelOption, bool) {
+			opt, ok := roles[role]
+			return opt, ok
+		},
+	}
+
+	if err := applyModelOverrides(cfg, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model() != "session-model" || cfg.Effort() != "medium" {
+		t.Fatal("empty args must inherit session model and effort")
+	}
+
+	if err := applyModelOverrides(cfg, map[string]any{"model": "utility", "effort": "LOW"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model() != "gpt-small" {
+		t.Fatalf("model = %q", cfg.Model())
+	}
+	if cfg.Effort() != "low" {
+		t.Fatalf("effort = %q", cfg.Effort())
+	}
+
+	if err := applyModelOverrides(cfg, map[string]any{"model": "utility", "effort": "max"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Effort() != "xhigh" {
+		t.Fatalf("effort = %q, want max clamped to the model ceiling", cfg.Effort())
+	}
+
+	if err := applyModelOverrides(cfg, map[string]any{"model": "plan", "effort": "max"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model() != "large-model" {
+		t.Fatalf("model = %q", cfg.Model())
+	}
+	if cfg.Effort() != "max" {
+		t.Fatalf("effort = %q, want unclamped on unbounded model", cfg.Effort())
+	}
+
+	if err := applyModelOverrides(cfg, map[string]any{"model": "claude-haiku-4-5"}); err == nil {
+		t.Fatal("concrete model ids must be rejected")
+	}
+	if err := applyModelOverrides(cfg, map[string]any{"effort": "extreme"}); err == nil {
+		t.Fatal("unknown effort must error")
+	}
+
+	if err := applyModelOverrides(cfg, map[string]any{"effort": "max"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Effort() != "xhigh" {
+		t.Fatalf("effort = %q, want clamp against the inherited model", cfg.Effort())
+	}
+
+	cfg.Effort = func() string { return "max" }
+	if err := applyModelOverrides(cfg, map[string]any{"model": "utility"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Effort() != "xhigh" {
+		t.Fatalf("effort = %q, want inherited effort clamped to the overridden model", cfg.Effort())
+	}
+
+	cfg.Model = func() string { return "session-model" }
+	cfg.SubagentModel = nil
+	if err := applyModelOverrides(cfg, map[string]any{"model": "plan", "effort": "max"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model() != "session-model" {
+		t.Fatal("unresolvable role must keep the inherited model")
+	}
+	if cfg.Effort() != "max" {
+		t.Fatal("nil resolver must leave effort unclamped")
+	}
+}

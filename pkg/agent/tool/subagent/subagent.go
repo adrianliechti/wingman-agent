@@ -102,6 +102,8 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry)
 		"- test-engineer: designs and adds tests using the project's conventions.",
 		"",
 		"Write a self-contained prompt: goal, relevant paths/symbols, allowed edit scope, expected output shape. Pick the narrowest fitting type. Don't delegate a single known lookup (use `read`/`grep`/`glob` directly) or synthesis of results you already hold.",
+		"",
+		"By default the agent inherits your model and reasoning effort — almost always correct. Override `model` or `effort` only when a different tier clearly fits: `utility` (or lower effort) for mechanical, low-risk sweeps; `plan` (or higher effort) for the hardest verification, review, or architecture work.",
 	}
 
 	if tasks != nil {
@@ -125,6 +127,16 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry)
 		"schema": map[string]any{
 			"type":        "object",
 			"description": "Optional JSON Schema for the agent's final result. When set, the agent must deliver its result as validated JSON matching this schema, returned verbatim as the tool result.",
+		},
+		"model": map[string]any{
+			"type":        "string",
+			"description": "Optional model role for the new agent: `plan` runs the session's planning model (most capable available), `utility` its utility model (smallest and fastest). Omit to inherit the session model (the default and preferred).",
+			"enum":        []string{"plan", "utility"},
+		},
+		"effort": map[string]any{
+			"type":        "string",
+			"description": "Optional reasoning-effort override for this agent, clamped to what the chosen model supports. Omit to inherit.",
+			"enum":        []string{"none", "low", "medium", "high", "xhigh", "max"},
 		},
 	}
 
@@ -196,6 +208,10 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry)
 
 			subcfg := cfg.Derive()
 			subcfg.Instructions = func() string { return instructions }
+
+			if err := applyModelOverrides(subcfg, args); err != nil {
+				return "", err
+			}
 
 			subcfg.Tools = func() []tool.Tool {
 				var tools []tool.Tool
@@ -317,6 +333,68 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry)
 	}
 
 	return agentTools
+}
+
+var effortRank = map[string]int{"none": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4, "max": 5}
+
+func clampEffort(level string, target agent.ModelOption) string {
+	if target.MaxEffort != "" && effortRank[level] > effortRank[target.MaxEffort] {
+		return target.MaxEffort
+	}
+	if target.MinEffort != "" && effortRank[level] < effortRank[target.MinEffort] {
+		return target.MinEffort
+	}
+	return level
+}
+
+func applyModelOverrides(cfg *agent.Config, args map[string]any) error {
+	resolve := cfg.SubagentModel
+
+	var target agent.ModelOption
+
+	if model, _ := args["model"].(string); strings.TrimSpace(model) != "" {
+		role := strings.ToLower(strings.TrimSpace(model))
+		switch role {
+		case "plan", "utility":
+		default:
+			return fmt.Errorf("unknown model role %q (use plan or utility, or omit to inherit)", role)
+		}
+
+		// An unresolvable role keeps the inherited model: the role is a
+		// preference, not a contract, and the session model always works.
+		if resolve != nil {
+			if opt, ok := resolve(role); ok && opt.ID != "" {
+				target = opt
+				cfg.Model = func() string { return opt.ID }
+			}
+		}
+	}
+
+	level := ""
+	if effort, _ := args["effort"].(string); strings.TrimSpace(effort) != "" {
+		level = strings.ToLower(strings.TrimSpace(effort))
+		if _, ok := effortRank[level]; !ok {
+			return fmt.Errorf("unknown effort %q (use none, low, medium, high, xhigh, or max)", level)
+		}
+		if target.ID == "" && resolve != nil {
+			if opt, ok := resolve(""); ok {
+				target = opt
+			}
+		}
+	} else if target.ID != "" && cfg.Effort != nil {
+		// A model override also clamps the inherited effort: the session may
+		// run at a level the smaller model does not support.
+		if inherited := cfg.Effort(); inherited != clampEffort(inherited, target) {
+			level = inherited
+		}
+	}
+
+	if level != "" {
+		clamped := clampEffort(level, target)
+		cfg.Effort = func() string { return clamped }
+	}
+
+	return nil
 }
 
 func updateTaskActivity(tk *task.Task, msg agent.Message) {
