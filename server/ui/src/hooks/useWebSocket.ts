@@ -237,6 +237,7 @@ interface StreamRefs {
 	streamingContent: string;
 	reasoningEntryId: string;
 	reasoningId: string;
+	reasoningPart: number;
 	reasoningContent: string;
 }
 
@@ -246,6 +247,7 @@ function emptyStreamRefs(): StreamRefs {
 		streamingContent: "",
 		reasoningEntryId: "",
 		reasoningId: "",
+		reasoningPart: 0,
 		reasoningContent: "",
 	};
 }
@@ -408,6 +410,7 @@ export function useWebSocket() {
 		const s = getStream(id);
 		s.reasoningEntryId = "";
 		s.reasoningId = "";
+		s.reasoningPart = 0;
 		s.reasoningContent = "";
 	};
 
@@ -490,6 +493,11 @@ export function useWebSocket() {
 					s.reasoningEntryId = entryId;
 					s.reasoningId = msg.id;
 				}
+				const part = msg.part ?? 0;
+				if (s.reasoningContent && part !== s.reasoningPart) {
+					s.reasoningContent += "\n\n";
+				}
+				s.reasoningPart = part;
 				s.reasoningContent += msg.text;
 				scheduleStreamFlush(sid);
 				break;

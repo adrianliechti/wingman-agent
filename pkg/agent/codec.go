@@ -205,6 +205,7 @@ func reasoningToInput(r *Reasoning) *responses.ResponseReasoningItemParam {
 	p := &responses.ResponseReasoningItemParam{
 		ID:               r.ID,
 		EncryptedContent: openai.String(r.Content),
+		Summary:          []responses.ResponseReasoningItemSummaryParam{},
 	}
 
 	if r.Summary != "" {

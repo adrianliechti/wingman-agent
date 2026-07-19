@@ -54,7 +54,7 @@ func (a *App) streamCells(width int) []string {
 
 	var lines []string
 
-	if a.prevWasTool && (streamingText != "" || (streamingReasoning != "" && a.prevToolMultiline)) {
+	if a.prevWasTool && (streamingText != "" || (streamingReasoning != "" && (!a.prevWasThought || a.prevThoughtMultiline))) {
 		lines = append(lines, "")
 	}
 
@@ -73,9 +73,9 @@ func (a *App) streamCells(width int) []string {
 		lines = append(lines, cellToolProgress(toolName, toolHint, toolProgress, width)...)
 	}
 
-	// While the spinner is visible the tail always ends blank, so tool and
-	// reasoning cells never sit tight against the status row.
-	if a.isStreaming() && (a.prevWasTool || len(lines) > 0) && (len(lines) == 0 || lines[len(lines)-1] != "") {
+	// While the spinner or a pinned prompt is visible the tail always ends
+	// blank, so tool and reasoning cells never sit tight against it.
+	if (a.isStreaming() || a.promptActive || a.askActive) && (a.prevWasTool || len(lines) > 0) && (len(lines) == 0 || lines[len(lines)-1] != "") {
 		lines = append(lines, "")
 	}
 

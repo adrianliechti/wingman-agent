@@ -65,8 +65,11 @@ type App struct {
 	lastTopPad    int
 
 	printed           int
-	prevWasTool       bool
-	prevToolMultiline bool
+	prevWasTool          bool
+	prevToolMultiline    bool
+	prevWasThought       bool
+	prevThoughtMultiline bool
+	annotations          []chatAnnotation
 
 	turnTools    int
 	turnThoughts int
@@ -107,11 +110,20 @@ type App struct {
 	streamingText       string
 	streamingReasoning  string
 	reasoningID         string
+	reasoningPart       int
 }
 
 type pendingEchoItem struct {
 	ID   string
 	Text string
+}
+
+// chatAnnotation is a chat cell that is not derived from the message history
+// (recap, resume banner); rebuilds re-render it at its recorded position
+// instead of silently dropping it.
+type chatAnnotation struct {
+	afterMessages int
+	render        func(width int) []string
 }
 
 func New(ctx context.Context, coderAgent *coder.Agent, sessionID string) *App {
@@ -180,6 +192,9 @@ func (a *App) activateSession(id string) {
 	a.printed = 0
 	a.prevWasTool = false
 	a.prevToolMultiline = false
+	a.prevWasThought = false
+	a.prevThoughtMultiline = false
+	a.annotations = nil
 	a.turnTools = 0
 	a.turnThoughts = 0
 
@@ -505,6 +520,51 @@ func (a *App) appendChat(lines []string) {
 	a.invalidate()
 }
 
+// appendAnnotation adds a chat cell that is not derived from the message
+// history and records it so rebuildChat restores it at the same position.
+func (a *App) appendAnnotation(render func(width int) []string) {
+	a.flushToolGap()
+	a.annotations = append(a.annotations, chatAnnotation{afterMessages: a.printed, render: render})
+	a.appendChat(render(a.width()))
+}
+
+// restoreChatLines renders the full message history with annotations
+// interleaved at their recorded positions.
+func (a *App) restoreChatLines(width int) []string {
+	messages := a.agent.Messages(a.sessionID)
+
+	var lines []string
+
+	emit := func(ann chatAnnotation) {
+		if a.prevWasTool {
+			lines = append(lines, "")
+			a.prevWasTool = false
+			a.prevToolMultiline = false
+			a.prevWasThought = false
+		}
+		lines = append(lines, ann.render(width)...)
+	}
+
+	for i, m := range messages {
+		for _, ann := range a.annotations {
+			if ann.afterMessages == i {
+				emit(ann)
+			}
+		}
+		lines = append(lines, a.formatMessageCells(m, width)...)
+	}
+
+	for _, ann := range a.annotations {
+		if ann.afterMessages >= len(messages) {
+			emit(ann)
+		}
+	}
+
+	a.printed = len(messages)
+
+	return lines
+}
+
 // rebuildChat re-renders the whole chat buffer from the message history, used
 // on resize and when toggling verbose rendering. Turn counters are preserved.
 func (a *App) rebuildChat() {
@@ -514,8 +574,13 @@ func (a *App) rebuildChat() {
 	a.printed = 0
 	a.prevWasTool = false
 	a.prevToolMultiline = false
+	a.prevWasThought = false
+	a.prevThoughtMultiline = false
 	a.clearSelection()
-	a.syncMessages()
+
+	if lines := a.restoreChatLines(a.width()); len(lines) > 0 {
+		a.appendChat(lines)
+	}
 
 	a.turnTools, a.turnThoughts = tools, thoughts
 	a.invalidate()
@@ -877,6 +942,7 @@ func (a *App) answerPrompt() {
 			return
 		}
 		a.editor.SetText("")
+		a.flushToolGap()
 		a.appendChat(cellPrompt("", a.askMessage, "", a.width()))
 		a.appendChat(cellUser(text, a.width()))
 		a.setPhase(PhaseThinking)
@@ -967,7 +1033,11 @@ func (a *App) resumeSession() {
 	a.follow = true
 	a.clearSelection()
 	a.syncMessages()
-	a.appendChat(cellNotice(fmt.Sprintf("Resumed session from %s", last.UpdatedAt.Format("Jan 2 15:04")), t.Green, a.width()))
+
+	banner := fmt.Sprintf("Resumed session from %s", last.UpdatedAt.Format("Jan 2 15:04"))
+	a.appendAnnotation(func(width int) []string {
+		return cellNotice(banner, t.Green, width)
+	})
 
 	if len(a.agent.Messages(a.sessionID)) > 0 {
 		a.showRecap()
@@ -1000,9 +1070,9 @@ func (a *App) showRecap() {
 			case recap == "":
 				a.appendChat(cellNotice("Nothing to recap yet", theme.Default.Yellow, a.width()))
 			default:
-				a.flushToolGap()
-				a.appendChat(cellAssistant(recap, a.width(), theme.Default.Cyan))
-				a.appendChat([]string{""})
+				a.appendAnnotation(func(width int) []string {
+					return cellAssistant(recap, width, theme.Default.Cyan)
+				})
 			}
 			a.invalidate()
 		})

@@ -57,6 +57,7 @@ func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
 // the question is only shown at the bottom while it is being asked.
 func (a *App) recordPrompt(title, message, answer string) {
 	a.post(func() {
+		a.flushToolGap()
 		a.appendChat(cellPrompt(title, message, "", a.width()))
 		a.appendChat(cellUser(answer, a.width()))
 		a.setPhase(PhaseThinking)

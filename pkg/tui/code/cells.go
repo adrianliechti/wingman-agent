@@ -81,16 +81,26 @@ func cellReasoning(summary string, width int, full bool) []string {
 		return []string{cellIndent + ansi.Truncate(line, width-len(cellIndent), "…") + ansi.Reset}
 	}
 
-	lines := []string{cellIndent + style + "• thinking" + ansi.Reset}
-
 	inner := width - len(cellIndent) - 2
 	if inner < 10 {
 		inner = 10
 	}
 
-	for _, line := range strings.Split(strings.TrimRight(markdown.Sanitize(summary), "\n"), "\n") {
+	// Markdown accents survive, but every reset falls back to the dim italic
+	// base so the whole thought keeps its muted look.
+	rendered := strings.ReplaceAll(markdown.Render(summary), ansi.Reset, ansi.Reset+style)
+
+	var lines []string
+	first := true
+
+	for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
 		for _, wl := range ansi.Wrap(style+line, inner) {
-			lines = append(lines, cellIndent+"  "+wl+ansi.Reset)
+			prefix := "  "
+			if first {
+				prefix = style + "• "
+				first = false
+			}
+			lines = append(lines, cellIndent+prefix+wl+ansi.Reset)
 		}
 	}
 

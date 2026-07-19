@@ -76,11 +76,13 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 			lines = append(lines, "")
 			a.prevWasTool = false
 			a.prevToolMultiline = false
+			a.prevWasThought = false
 		}
 	}
 
-	// One-line tool and thought cells stack tight; a blank line separates a
-	// cell from its neighbor as soon as either side is multi-line.
+	// One-line tool cells stack tight; a blank line separates a cell from its
+	// neighbor as soon as either side is multi-line. Thought cells get a blank
+	// line on both sides, except between consecutive one-line thoughts.
 	blankBeforeCell := func(multiline bool) {
 		if a.prevWasTool && (a.prevToolMultiline || multiline) {
 			lines = append(lines, "")
@@ -100,16 +102,22 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 			lines = append(lines, cell...)
 			a.prevWasTool = true
 			a.prevToolMultiline = len(cell) > 1
+			a.prevWasThought = false
 
 		case c.ToolCall != nil:
 			continue
 
 		case c.Reasoning != nil && c.Reasoning.Summary != "":
 			a.turnThoughts++
-			blankBeforeCell(false)
-			lines = append(lines, cellReasoning(c.Reasoning.Summary, width, false)...)
+			if !a.prevWasThought || a.prevThoughtMultiline {
+				blankBeforeCell(true)
+			}
+			cell := cellReasoning(c.Reasoning.Summary, width, true)
+			lines = append(lines, cell...)
 			a.prevWasTool = true
-			a.prevToolMultiline = false
+			a.prevToolMultiline = true
+			a.prevWasThought = true
+			a.prevThoughtMultiline = len(cell) > 1
 
 		case c.Text != "":
 			blankBeforeText()
@@ -160,6 +168,7 @@ func (a *App) clearStreamingState() {
 	a.currentToolHint = ""
 	a.currentToolProgress = ""
 	a.reasoningID = ""
+	a.reasoningPart = 0
 	a.streamStateMu.Unlock()
 }
 
@@ -245,6 +254,7 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 			a.streamingText = ""
 			a.streamingReasoning = ""
 			a.reasoningID = ""
+			a.reasoningPart = 0
 			a.streamStateMu.Unlock()
 			a.queuePhase(PhaseToolRunning)
 			a.requestRender()
@@ -266,8 +276,12 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 			if a.reasoningID != "" && c.Reasoning.ID != a.reasoningID {
 				a.streamingReasoning = ""
 			}
+			if a.streamingReasoning != "" && c.Reasoning.Part != a.reasoningPart {
+				a.streamingReasoning += "\n\n"
+			}
 			a.streamingReasoning += c.Reasoning.Summary
 			a.reasoningID = c.Reasoning.ID
+			a.reasoningPart = c.Reasoning.Part
 			a.streamStateMu.Unlock()
 			a.requestRender()
 
@@ -279,6 +293,7 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 			a.streamingReasoning = ""
 			a.streamingText += c.Text
 			a.reasoningID = ""
+			a.reasoningPart = 0
 			a.streamStateMu.Unlock()
 			a.requestRender()
 		}
@@ -351,6 +366,7 @@ func (a *App) flushToolGap() {
 		a.appendChat([]string{""})
 		a.prevWasTool = false
 		a.prevToolMultiline = false
+		a.prevWasThought = false
 	}
 }
 

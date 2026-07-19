@@ -72,6 +72,10 @@ type Reasoning struct {
 
 	Summary string `json:"summary,omitempty"`
 
+	// Part indexes the summary part a streamed delta belongs to; renderers
+	// separate parts however suits their medium.
+	Part int `json:"part,omitempty"`
+
 	// Content is the provider's opaque (encrypted) reasoning payload, only
 	// replayable to the model that produced it. Model tags the producer so the
 	// agent loop can purge stale payloads when the session model changes.

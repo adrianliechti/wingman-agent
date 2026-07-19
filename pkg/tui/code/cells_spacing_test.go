@@ -1,0 +1,99 @@
+package code
+
+import (
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
+	coder "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+)
+
+func TestThoughtCellsGetSurroundingBlankLines(t *testing.T) {
+	ws, err := code.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := &App{agent: coder.New(ws, &agent.Config{}, nil)}
+
+	toolMsg := func(id string) agent.Message {
+		return agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
+			{ToolResult: &agent.ToolResult{ID: id, Name: "read", Content: "ok"}},
+		}}
+	}
+	thoughtMsg := func(id, summary string) agent.Message {
+		return agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
+			{Reasoning: &agent.Reasoning{ID: id, Summary: summary}},
+		}}
+	}
+
+	long := strings.Repeat("weighing the tradeoffs carefully ", 6)
+
+	var lines []string
+	for _, m := range []agent.Message{
+		toolMsg("call_1"),
+		thoughtMsg("rs_1", "considering the options"),
+		thoughtMsg("rs_2", long),
+		thoughtMsg("rs_3", "settling on a plan"),
+		toolMsg("call_2"),
+	} {
+		lines = append(lines, a.formatMessageCells(m, 80)...)
+	}
+
+	find := func(needle string) int {
+		for i, l := range lines {
+			if strings.Contains(l, needle) {
+				return i
+			}
+		}
+		t.Fatalf("%q missing from %q", needle, lines)
+		return -1
+	}
+
+	first := find("considering the options")
+	second := find("weighing the tradeoffs")
+	third := find("settling on a plan")
+
+	if first == 0 || lines[first-1] != "" {
+		t.Errorf("no blank line between tool and thought: %q", lines)
+	}
+	if second != first+1 {
+		t.Errorf("one-line thoughts not tight: %q", lines)
+	}
+	if lines[third-1] != "" {
+		t.Errorf("no blank line after multi-line thought: %q", lines)
+	}
+	if third == len(lines)-1 || lines[third+1] != "" {
+		t.Errorf("no blank line between thought and tool: %q", lines)
+	}
+
+	for i := 1; i < len(lines); i++ {
+		if lines[i] == "" && lines[i-1] == "" {
+			t.Errorf("double blank line at %d: %q", i, lines)
+		}
+	}
+}
+
+func TestAnnotationsSurviveChatRebuild(t *testing.T) {
+	ws, err := code.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := &App{agent: coder.New(ws, &agent.Config{}, nil)}
+
+	a.annotations = append(a.annotations, chatAnnotation{
+		afterMessages: 0,
+		render: func(width int) []string {
+			return []string{"resumed banner"}
+		},
+	})
+
+	lines := a.restoreChatLines(80)
+
+	if !slices.ContainsFunc(lines, func(l string) bool { return strings.Contains(l, "resumed banner") }) {
+		t.Fatalf("annotation dropped on rebuild: %q", lines)
+	}
+}

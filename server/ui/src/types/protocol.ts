@@ -89,6 +89,7 @@ interface ReasoningDeltaMessage {
 	type: "reasoning_delta";
 	session: string;
 	id: string;
+	part?: number;
 	text: string;
 }
 

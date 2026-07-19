@@ -94,6 +94,13 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		rp := responses.ReasoningParam{}
 
 		rp.Effort = shared.ReasoningEffort(r.effort)
+
+		// "auto" yields the richest summary the model supports; skipped for
+		// "none" since no reasoning happens that could be summarized.
+		if r.effort != "none" {
+			rp.Summary = shared.ReasoningSummaryAuto
+		}
+
 		params.Reasoning = rp
 	}
 
@@ -141,7 +148,7 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		case responses.ResponseReasoningSummaryTextDeltaEvent:
 			msg := Message{
 				Role:    RoleAssistant,
-				Content: []Content{{Reasoning: &Reasoning{ID: e.ItemID, Summary: e.Delta}}},
+				Content: []Content{{Reasoning: &Reasoning{ID: e.ItemID, Part: int(e.SummaryIndex), Summary: e.Delta}}},
 			}
 
 			if !yield(msg, nil) {

@@ -191,6 +191,7 @@ func (s *Server) handleTurnEvent(ev code.TurnEvent) {
 				s.sendSession(ev.SessionID, Frame{
 					Type: EvtReasoningDelta,
 					ID:   c.Reasoning.ID,
+					Part: c.Reasoning.Part,
 					Text: c.Reasoning.Summary,
 				})
 

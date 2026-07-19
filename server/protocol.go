@@ -76,6 +76,7 @@ type Frame struct {
 	Message  string           `json:"message,omitempty"`
 	State    string           `json:"state,omitempty"`
 	Intent   string           `json:"intent,omitempty"`
+	Part     int              `json:"part,omitempty"`
 	Position int              `json:"position,omitempty"`
 	Paused   bool             `json:"paused,omitempty"`
 	CanSteer bool             `json:"can_steer,omitempty"`
