@@ -233,12 +233,11 @@ Toggle between modes using `Tab` or the explicit `/plan` and `/agent` commands.
 | `Shift+Tab` | Cycle through available models |
 | `@` | Open fuzzy file picker to add file context |
 | `Ctrl+V` / `Cmd+V` | Paste image or text from clipboard |
-| `Ctrl+E` | Toggle tool output expansion |
-| `Ctrl+T` | Toggle mouse capture (enables native text selection) |
+| `Ctrl+O` | Open the full transcript |
 | `Ctrl+Y` | Copy last assistant response to clipboard |
 | `Ctrl+L` | Clear chat history |
 | `Escape` | Cancel stream, close modal, or clear input |
-| `Ctrl+C` | Copy selected text, close modal, cancel stream, or exit |
+| `Ctrl+C` | Cancel stream or clear input; press twice to exit |
 
 ## 📝 Commands
 

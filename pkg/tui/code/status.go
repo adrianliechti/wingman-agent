@@ -122,6 +122,15 @@ func (a *App) footerLine(width int) string {
 
 	rightText := strings.Join(right, dim(" · "))
 
+	if a.footerHint != "" {
+		hint := colored(t.Yellow, a.footerHint)
+		gap := width - 2*len(cellIndent) - ansi.Width(hint) - ansi.Width(rightText)
+		if gap >= 2 {
+			return cellIndent + hint + strings.Repeat(" ", gap) + rightText
+		}
+		return cellIndent + ansi.Truncate(hint, width-len(cellIndent), "…")
+	}
+
 	var left []string
 
 	if n := a.countPendingImages(); n == 1 {

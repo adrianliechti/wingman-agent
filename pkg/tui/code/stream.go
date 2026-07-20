@@ -20,6 +20,11 @@ func (a *App) getPhase() AppPhase {
 func (a *App) setPhase(phase AppPhase) {
 	prev := AppPhase(a.phase.Swap(int32(phase)))
 
+	if phase == PhaseIdle {
+		// A quit confirmation armed while cancelling a turn must not carry
+		// over once that turn has died.
+		a.disarmQuitGate()
+	}
 	if phase != PhaseIdle && (prev == PhaseIdle || a.phaseStart.IsZero()) {
 		a.phaseStart = time.Now()
 	}

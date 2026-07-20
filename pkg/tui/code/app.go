@@ -41,9 +41,12 @@ type App struct {
 	phase      atomic.Int32
 	phaseStart time.Time
 
-	spinnerFrame  int
-	lastInterrupt time.Time
-	lastQuitWarn  time.Time
+	spinnerFrame int
+	quitDeadline time.Time
+
+	// footerHint is a transient warning shown in the footer instead of the
+	// key hints; it clears on the next input action or when it expires.
+	footerHint string
 
 	currentMode Mode
 	showWelcome bool
@@ -360,28 +363,75 @@ func (a *App) stop() {
 	})
 }
 
-// confirmQuit returns whether quitting may proceed. With background agents
-// still running, the first attempt warns; a second within 3 seconds exits and
-// stops them — quitting is never blocked outright.
-func (a *App) confirmQuit() bool {
-	if a.agent == nil {
+func (a *App) setFooterHint(hint string) {
+	a.footerHint = hint
+	a.invalidate()
+}
+
+func (a *App) runningTaskCount() int {
+	if a.agent != nil {
+		return a.agent.RunningTaskCount()
+	}
+	return 0
+}
+
+func backgroundQuitHint(running int, retry string) string {
+	if running == 1 {
+		return "1 background agent is still running — " + retry + " to exit and stop it"
+	}
+	return fmt.Sprintf("%d background agents are still running — %s to exit and stop them", running, retry)
+}
+
+func (a *App) ctrlCQuitHint() string {
+	if running := a.runningTaskCount(); running > 0 {
+		return backgroundQuitHint(running, "press ctrl+c again")
+	}
+	return "Press ctrl+c again to exit"
+}
+
+const quitConfirmWindow = 3 * time.Second
+
+// gateQuit arms the quit confirmation on the first attempt and admits the
+// next attempt within the confirmation window.
+func (a *App) gateQuit(warning string) bool {
+	now := time.Now()
+	if now.Before(a.quitDeadline) {
+		a.disarmQuitGate()
 		return true
 	}
-	running := a.agent.RunningTaskCount()
+
+	a.quitDeadline = now.Add(quitConfirmWindow)
+	a.setFooterHint(warning)
+	return false
+}
+
+// disarmQuitGate retires the confirmation window and its footer hint as one
+// state, so the hint on screen is always truthful about what the next quit
+// attempt does.
+func (a *App) disarmQuitGate() {
+	if a.quitDeadline.IsZero() && a.footerHint == "" {
+		return
+	}
+	a.quitDeadline = time.Time{}
+	a.setFooterHint("")
+}
+
+func (a *App) expireQuitGate(now time.Time) {
+	if a.quitDeadline.IsZero() || now.Before(a.quitDeadline) {
+		return
+	}
+	a.disarmQuitGate()
+}
+
+// confirmQuit returns whether quitting may proceed. With background agents
+// still running it warns and defers to ctrl+c for confirmation — the one quit
+// gesture that involves no typing, so it cannot disarm the gate on the way in.
+func (a *App) confirmQuit() bool {
+	running := a.runningTaskCount()
 	if running == 0 {
 		return true
 	}
-	if time.Since(a.lastQuitWarn) < 3*time.Second {
-		return true
-	}
-	a.lastQuitWarn = time.Now()
-
-	label := "1 background agent is"
-	if running > 1 {
-		label = fmt.Sprintf("%d background agents are", running)
-	}
-	a.appendChat(cellNotice(label+" still running — quit again to exit and stop them", theme.Default.Yellow, a.width()))
-	return false
+	return a.gateQuit(backgroundQuitHint(running, "press ctrl+c"))
 }
 
 func (a *App) saveSession() {
@@ -453,7 +503,8 @@ func (a *App) Run() error {
 		case fn := <-a.queue:
 			fn()
 
-		case <-ticker.C:
+		case now := <-ticker.C:
+			a.expireQuitGate(now)
 			if a.getPhase() != PhaseIdle {
 				a.spinnerFrame++
 				a.invalidate()
@@ -756,6 +807,8 @@ func (a *App) handlePaste(text string) {
 		return
 	}
 
+	a.disarmQuitGate()
+
 	paths := detectFilePaths(text, a.agent.Workspace().RootPath)
 	if len(paths) > 0 {
 		for _, p := range paths {
@@ -769,6 +822,10 @@ func (a *App) handlePaste(text string) {
 }
 
 func (a *App) handleKey(ev inline.KeyEvent) {
+	if ev.Key != inline.KeyCtrl || ev.Rune != 'c' {
+		a.disarmQuitGate()
+	}
+
 	if a.overlay != nil {
 		if a.overlay.HandleKey(ev) {
 			a.closeOverlay()
@@ -803,15 +860,21 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 				return
 			}
 			if a.isStreaming() {
-				if time.Since(a.lastInterrupt) < 2*time.Second {
+				if a.gateQuit(a.ctrlCQuitHint()) {
 					a.stop()
 					return
 				}
-				a.lastInterrupt = time.Now()
 				a.cancelStream()
 				return
 			}
-			if a.confirmQuit() {
+			if a.editor.Text() != "" || len(a.pendingContent) > 0 || len(a.pendingFiles) > 0 {
+				a.disarmQuitGate()
+				a.editor.SetText("")
+				a.clearPendingContent()
+				a.syncCommandPopup()
+				return
+			}
+			if a.gateQuit(a.ctrlCQuitHint()) {
 				a.stop()
 			}
 			return
