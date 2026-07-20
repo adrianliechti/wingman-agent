@@ -252,8 +252,6 @@ Toggle between modes using `Tab` or the explicit `/plan` and `/agent` commands.
 | `/problems` | Show LSP diagnostics for the workspace |
 | `/diff` | Show changes from session baseline (requires git) |
 | `/rewind` | Restore to a previous checkpoint (requires git) |
-| `/copy` | Copy last assistant response to clipboard |
-| `/paste` | Paste from clipboard |
 | `/resume` | Resume the most recent saved session |
 | `/clear` | Clear chat history |
 | `/quit` | Exit application |

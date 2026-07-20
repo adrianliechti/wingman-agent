@@ -52,6 +52,11 @@ type App struct {
 	popup   *Popup
 	overlay Overlay
 
+	// cmdTokenStart is the rune index of the slash token driving the command
+	// popup; cmdPopupInline tracks which command set the popup was built for.
+	cmdTokenStart  int
+	cmdPopupInline bool
+
 	selecting bool
 	selAnchor selPos
 	selHead   selPos
@@ -885,11 +890,18 @@ func (a *App) handlePopupKey(ev inline.KeyEvent) bool {
 		switch ev.Key {
 		case inline.KeyTab:
 			if item, ok := popup.Current(); ok {
-				a.editor.SetText(item.ID)
-				a.syncCommandPopup()
+				a.completeCommand(item.ID)
 			}
 			return true
 		case inline.KeyEnter:
+			// Mid-prompt (or with text after the cursor) Enter completes the
+			// token; only a lone leading command submits directly.
+			if a.cmdTokenStart > 0 || a.editor.cursor < len(a.editor.value) {
+				if item, ok := popup.Current(); ok {
+					a.completeCommand(item.ID)
+				}
+				return true
+			}
 			if item, ok := popup.Current(); ok && a.editor.Text() != item.ID && !strings.HasPrefix(a.editor.Text(), item.ID+" ") {
 				a.editor.SetText(item.ID)
 			}

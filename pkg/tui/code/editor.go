@@ -68,6 +68,23 @@ func (e *Editor) Insert(text string) {
 	e.cursor += len(runes)
 }
 
+// ReplaceRange substitutes the rune range [from, to) with text and leaves the
+// cursor after the inserted text.
+func (e *Editor) ReplaceRange(from, to int, text string) {
+	if from < 0 {
+		from = 0
+	}
+	if to > len(e.value) {
+		to = len(e.value)
+	}
+	if from > to {
+		return
+	}
+	runes := []rune(text)
+	e.value = append(e.value[:from], append(runes, e.value[to:]...)...)
+	e.cursor = from + len(runes)
+}
+
 func (e *Editor) lineBounds() (start, end int) {
 	start = e.cursor
 	for start > 0 && e.value[start-1] != '\n' {

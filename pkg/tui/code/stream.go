@@ -73,6 +73,9 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 	var lines []string
 
 	for _, c := range msg.Content {
+		if c.Hidden {
+			continue
+		}
 		switch {
 		case c.ToolResult != nil:
 			a.releaseToolCell(c.ToolResult)
@@ -102,7 +105,11 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 			switch msg.Role {
 			case agent.RoleUser:
 				a.removePendingEchoText(c.Text)
-				lines = append(lines, cellUser(c.Text, width)...)
+				if isCommandEcho(c.Text) {
+					lines = append(lines, cellCommand(c.Text, width)...)
+				} else {
+					lines = append(lines, cellUser(c.Text, width)...)
+				}
 			case agent.RoleAssistant:
 				lines = append(lines, cellAssistant(c.Text, width, theme.Default.Green)...)
 			}

@@ -74,6 +74,34 @@ interface Props {
 
 const PIN_TOP_GAP = 16;
 
+// slashTokenAt returns the /command token the caret sits in: the index of its
+// leading slash and the typed query behind it. A token starts at the beginning
+// of the text or after whitespace and contains no whitespace, so paths and
+// URLs never form one.
+function slashTokenAt(
+	text: string,
+	caret: number,
+): { start: number; query: string } | null {
+	const pos = Math.min(caret, text.length);
+	for (let i = pos; i > 0; i--) {
+		const ch = text[i - 1];
+		if (ch === " " || ch === "\t" || ch === "\n") return null;
+		if (ch !== "/") continue;
+		if (i >= 2) {
+			const prev = text[i - 2];
+			if (prev !== " " && prev !== "\t" && prev !== "\n") return null;
+		}
+		return { start: i - 1, query: text.slice(i, pos) };
+	}
+	return null;
+}
+
+function wordEndAt(text: string, caret: number): number {
+	let end = Math.min(caret, text.length);
+	while (end < text.length && !" \t\n".includes(text[end])) end++;
+	return end;
+}
+
 export function ChatPanel({
 	sessionId,
 	entries,
@@ -100,6 +128,8 @@ export function ChatPanel({
 }: Props) {
 	const scheme = useColorScheme();
 	const [input, setInput] = useState("");
+	const [caret, setCaret] = useState(0);
+	const [dismissedToken, setDismissedToken] = useState<string | null>(null);
 	const [files, setFiles] = useState<string[]>([]);
 	const [images, setImages] = useState<PendingImage[]>([]);
 	const [showPicker, setShowPicker] = useState(false);
@@ -190,6 +220,7 @@ export function ChatPanel({
 	if (seed && seed !== prevSeed) {
 		setPrevSeed(seed);
 		setInput(seed.text);
+		setCaret(seed.text.length);
 	}
 
 	useEffect(() => {
@@ -208,9 +239,10 @@ export function ChatPanel({
 	}
 	prevPhaseRef.current = phase;
 
-	const skillMatch = input.match(/^\/(\S*)$/);
-	const showSkills = !!skillMatch;
-	const skillQuery = skillMatch ? skillMatch[1] : "";
+	const skillToken = slashTokenAt(input, caret);
+	const tokenKey = skillToken ? `${skillToken.start}:${skillToken.query}` : null;
+	const showSkills = !!skillToken && tokenKey !== dismissedToken;
+	const skillQuery = skillToken?.query ?? "";
 
 	const history = useMemo(() => {
 		const out: string[] = [];
@@ -223,6 +255,7 @@ export function ChatPanel({
 
 	const recallHistory = useCallback((text: string) => {
 		setInput(text);
+		setCaret(text.length);
 		requestAnimationFrame(() => {
 			const ta = textareaRef.current;
 			if (ta) ta.setSelectionRange(ta.value.length, ta.value.length);
@@ -370,6 +403,7 @@ export function ChatPanel({
 				return false;
 			}
 			setInput("");
+			setCaret(0);
 			setFiles([]);
 			setImages([]);
 			setEditingQueueId(null);
@@ -456,6 +490,7 @@ export function ChatPanel({
 
 	const editPendingInput = useCallback((item: PendingTurnInput) => {
 		setInput(item.text);
+		setCaret(item.text.length);
 		setFiles(item.files);
 		setImages(
 			item.images.map((dataUrl) => ({ id: crypto.randomUUID(), dataUrl })),
@@ -559,15 +594,31 @@ export function ChatPanel({
 
 	const selectSkill = useCallback(
 		(s: { name: string; arguments?: string[] }) => {
+			const tok = slashTokenAt(input, caret);
+			if (!tok) return;
+
+			const end = wordEndAt(input, caret);
+			const whole = tok.start === 0 && end === input.length;
 			const hasArgs = !!s.arguments && s.arguments.length > 0;
-			if (hasArgs) {
-				setInput(`/${s.name} `);
-				textareaRef.current?.focus();
+
+			if (whole && !hasArgs) {
+				void handleSubmit(undefined, `/${s.name}`);
 				return;
 			}
-			void handleSubmit(undefined, `/${s.name}`);
+
+			const insert = `/${s.name} `;
+			setInput(input.slice(0, tok.start) + insert + input.slice(end));
+			const pos = tok.start + insert.length;
+			setCaret(pos);
+			requestAnimationFrame(() => {
+				const ta = textareaRef.current;
+				if (ta) {
+					ta.focus();
+					ta.setSelectionRange(pos, pos);
+				}
+			});
 		},
-		[handleSubmit],
+		[input, caret, handleSubmit],
 	);
 
 	return (
@@ -676,7 +727,7 @@ export function ChatPanel({
 								<SkillPicker
 									query={skillQuery}
 									onSelect={selectSkill}
-									onClose={() => {}}
+									onClose={() => setDismissedToken(tokenKey)}
 								/>
 							)}
 							{files.length > 0 && (
@@ -740,7 +791,11 @@ export function ChatPanel({
 									onChange={(e) => {
 										historyIdxRef.current = null;
 										setInput(e.target.value);
+										setCaret(e.target.selectionStart);
 									}}
+									onSelect={(e) =>
+										setCaret((e.target as HTMLTextAreaElement).selectionStart)
+									}
 									onKeyDown={handleKeyDown}
 									onPaste={handlePaste}
 									placeholder="Message Wingman…"

@@ -81,6 +81,26 @@ func cellUser(text string, width int) []string {
 	return lines
 }
 
+// isCommandEcho reports user text that echoes a slash invocation; the full
+// prompt behind it travels as hidden content.
+func isCommandEcho(text string) bool {
+	return strings.HasPrefix(text, "/") && !strings.Contains(text, "\n")
+}
+
+// cellCommand renders a slash invocation echo as a single accent line instead
+// of a full user prompt band.
+func cellCommand(text string, width int) []string {
+	t := theme.Default
+
+	name, args, _ := strings.Cut(markdown.Sanitize(text), " ")
+	line := colored(t.Cyan, "› "+name)
+	if args != "" {
+		line += " " + dim(args)
+	}
+
+	return []string{cellIndent + ansi.Truncate(line, width-len(cellIndent), "…") + ansi.Reset, ""}
+}
+
 // cellAssistant renders assistant markdown behind a status circle: dim while
 // streaming, green when committed, red on failure.
 func cellAssistant(text string, width int, circle ansi.Color) []string {

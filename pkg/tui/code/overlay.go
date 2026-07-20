@@ -159,6 +159,9 @@ func transcriptLines(messages []agent.Message, width int, isToolHidden func(stri
 			continue
 		}
 		for _, c := range msg.Content {
+			if c.Hidden {
+				continue
+			}
 			switch {
 			case c.ToolResult != nil:
 				if isToolHidden != nil && isToolHidden(c.ToolResult.Name) {
@@ -171,7 +174,11 @@ func transcriptLines(messages []agent.Message, width int, isToolHidden func(stri
 			case c.Text != "":
 				switch msg.Role {
 				case agent.RoleUser:
-					lines = append(lines, cellUser(c.Text, width)...)
+					if isCommandEcho(c.Text) {
+						lines = append(lines, cellCommand(c.Text, width)...)
+					} else {
+						lines = append(lines, cellUser(c.Text, width)...)
+					}
 				case agent.RoleAssistant:
 					lines = append(lines, cellAssistant(c.Text, width, theme.Default.Green)...)
 				}

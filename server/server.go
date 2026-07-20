@@ -772,6 +772,9 @@ func convertMessages(messages []agent.Message) []ConversationMessage {
 		}
 		cm := ConversationMessage{Role: string(m.Role)}
 		for _, c := range m.Content {
+			if c.Hidden {
+				continue
+			}
 			cc := ConversationContent{}
 			if c.Text != "" {
 				cc.Text = c.Text

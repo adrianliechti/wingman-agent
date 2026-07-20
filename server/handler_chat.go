@@ -121,8 +121,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 func (s *Server) buildInput(msg ClientMessage) []agent.Content {
 	var input []agent.Content
 	if msg.Text != "" {
-		text := s.resolveSkill(msg.Text)
-		input = append(input, agent.Content{Text: text})
+		input = append(input, agent.Content{Text: msg.Text})
+		for _, block := range s.skillBlocks(msg.Text) {
+			input = append(input, agent.Content{Text: block, Hidden: true})
+		}
 	}
 	for _, f := range msg.Files {
 		input = append(input, agent.Content{Text: fmt.Sprintf("[File: %s]", f)})

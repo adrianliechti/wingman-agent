@@ -20,43 +20,59 @@ import (
 type slashCommand struct {
 	Name string
 	Desc string
+
+	// Busy marks commands that stay usable while a turn is running.
+	Busy bool
+	Run  func(a *App)
 }
 
 func (a *App) builtinCommands() []slashCommand {
 	cmds := []slashCommand{
-		{"/help", "Show help"},
-		{"/model", "Select AI model"},
-		{"/effort", "Set reasoning effort"},
-		{"/plan", "Enter planning mode"},
-		{"/agent", "Return to execution mode"},
-		{"/problems", "Show problems"},
-		{"/context", "Show context window usage"},
-		{"/tasks", "Show background agents"},
-		{"/recap", "Summarize the session so far"},
+		{Name: "/help", Desc: "Show help", Run: (*App).showHelp},
+		{Name: "/model", Desc: "Select AI model", Run: (*App).showModelPicker},
+		{Name: "/effort", Desc: "Set reasoning effort", Run: (*App).showEffortPicker},
+		{Name: "/plan", Desc: "Enter planning mode", Run: (*App).enterPlanMode},
+		{Name: "/agent", Desc: "Return to execution mode", Run: (*App).exitPlanMode},
+		{Name: "/problems", Desc: "Show problems", Run: (*App).showDiagnosticsView},
+		{Name: "/context", Desc: "Show context window usage", Run: (*App).showContextStats},
+		{Name: "/tasks", Desc: "Show background agents", Busy: true, Run: (*App).showTasks},
+		{Name: "/recap", Desc: "Summarize the session so far", Run: (*App).showRecap},
 	}
 
 	if a.agent.Workspace().HasRewind() {
 		cmds = append(cmds,
-			slashCommand{"/diff", "Show changes from baseline"},
-			slashCommand{"/rewind", "Restore to previous checkpoint"},
+			slashCommand{Name: "/diff", Desc: "Show changes from baseline", Run: (*App).showDiffView},
+			slashCommand{Name: "/rewind", Desc: "Restore to previous checkpoint", Run: (*App).showRewindPicker},
 		)
 	}
 
 	cmds = append(cmds,
-		slashCommand{"/copy", "Copy last response to clipboard"},
-		slashCommand{"/paste", "Paste from clipboard"},
-		slashCommand{"/resume", "Resume last session"},
-		slashCommand{"/clear", "Clear chat history"},
-		slashCommand{"/quit", "Exit application"},
+		slashCommand{Name: "/resume", Desc: "Resume last session", Run: (*App).resumeSession},
+		slashCommand{Name: "/clear", Desc: "Clear chat history", Run: (*App).clearChat},
+		slashCommand{Name: "/quit", Desc: "Exit application", Busy: true, Run: func(a *App) {
+			if a.confirmQuit() {
+				a.stop()
+			}
+		}},
 	)
 
 	return cmds
 }
 
+func (a *App) findBuiltin(query string) *slashCommand {
+	cmds := a.builtinCommands()
+	for i := range cmds {
+		if cmds[i].Name == query {
+			return &cmds[i]
+		}
+	}
+	return nil
+}
+
 func (a *App) skillCommands() []slashCommand {
 	var cmds []slashCommand
 	for _, s := range a.agent.Workspace().Skills {
-		cmds = append(cmds, slashCommand{"/" + s.Name, s.Description})
+		cmds = append(cmds, slashCommand{Name: "/" + s.Name, Desc: s.Description})
 	}
 	slices.SortStableFunc(cmds, func(a, b slashCommand) int {
 		if a.Name == "/init" {
@@ -74,26 +90,37 @@ func (a *App) availableCommands() []slashCommand {
 	return append(a.builtinCommands(), a.skillCommands()...)
 }
 
-func isBuiltinCommand(query string) bool {
-	switch query {
-	case "/quit", "/clear", "/resume", "/help",
-		"/models", "/model", "/effort",
-		"/plan", "/agent",
-		"/rewind", "/diff", "/problems", "/context", "/tasks", "/recap",
-		"/copy", "/paste":
-		return true
+// slashToken returns the /command token the cursor sits in: the rune index
+// of its leading slash and the token text up to the cursor. A token starts at
+// the beginning of the buffer or after whitespace and contains no whitespace,
+// so paths and URLs never form one.
+func slashToken(value []rune, cursor int) (int, string, bool) {
+	for i := cursor; i > 0; i-- {
+		r := value[i-1]
+		if r == ' ' || r == '\t' || r == '\n' {
+			return 0, "", false
+		}
+		if r != '/' {
+			continue
+		}
+		if i >= 2 {
+			prev := value[i-2]
+			if prev != ' ' && prev != '\t' && prev != '\n' {
+				return 0, "", false
+			}
+		}
+		return i - 1, string(value[i-1 : cursor]), true
 	}
-	return false
+	return 0, "", false
 }
 
 // syncCommandPopup opens/updates/closes the slash-command popup based on the
-// editor content.
+// token at the cursor. At the start of the buffer it completes commands and
+// skills; mid-prompt it completes skills only.
 func (a *App) syncCommandPopup() {
-	text := a.editor.Text()
+	start, token, ok := slashToken(a.editor.value, a.editor.cursor)
 
-	isCommand := strings.HasPrefix(text, "/") && !strings.Contains(text, " ") && !strings.Contains(text, "\n")
-
-	if !isCommand || a.promptActive || a.askActive {
+	if !ok || a.promptActive || a.askActive {
 		if a.popup != nil && a.popup.kind == popupCommands {
 			a.closePopup()
 		}
@@ -104,19 +131,52 @@ func (a *App) syncCommandPopup() {
 		return
 	}
 
-	if a.popup == nil {
+	inline := start > 0
+	if a.popup == nil || a.cmdPopupInline != inline {
+		a.closePopup()
+
+		cmds := a.availableCommands()
+		if inline {
+			cmds = a.skillCommands()
+		}
+
 		var items []PopupItem
-		for _, cmd := range a.availableCommands() {
+		for _, cmd := range cmds {
 			items = append(items, PopupItem{ID: cmd.Name, Label: cmd.Name, Detail: cmd.Desc})
 		}
 		a.popup = newPopup(popupCommands, "", items, nil)
+		a.cmdPopupInline = inline
 	}
 
-	a.popup.SetQuery(text)
+	a.cmdTokenStart = start
+	a.popup.SetQuery(token)
 
 	if a.popup.Empty() {
 		a.closePopup()
 	}
+}
+
+// completeCommand replaces the slash token at the cursor with the selected
+// command; mid-prompt completions gain a trailing space so typing continues
+// naturally. The replacement spans the whole word so completing with the
+// cursor mid-token leaves no tail behind.
+func (a *App) completeCommand(id string) {
+	start, end := a.cmdTokenStart, a.editor.cursor
+	for end < len(a.editor.value) {
+		r := a.editor.value[end]
+		if r == ' ' || r == '\t' || r == '\n' {
+			break
+		}
+		end++
+	}
+
+	insert := id
+	if start > 0 && (end >= len(a.editor.value) || a.editor.value[end] != ' ') {
+		insert += " "
+	}
+
+	a.editor.ReplaceRange(start, end, insert)
+	a.syncCommandPopup()
 }
 
 func (a *App) submitInput() {
@@ -126,7 +186,12 @@ func (a *App) submitInput() {
 		return
 	}
 
-	if a.getPhase() != PhaseIdle && isBuiltinCommand(query) && query != "/quit" && query != "/tasks" {
+	if query == "/models" {
+		query = "/model"
+	}
+
+	cmd := a.findBuiltin(query)
+	if cmd != nil && a.getPhase() != PhaseIdle && !cmd.Busy {
 		return
 	}
 
@@ -134,106 +199,17 @@ func (a *App) submitInput() {
 		a.closePopup()
 	}
 
-	switch query {
-	case "/quit":
+	if cmd != nil {
 		a.editor.SetText("")
-		if a.confirmQuit() {
-			a.stop()
-		}
-		return
-
-	case "/clear":
-		a.clearChat()
-		a.editor.SetText("")
-		return
-
-	case "/resume":
-		a.resumeSession()
-		a.editor.SetText("")
-		return
-
-	case "/help":
-		a.editor.SetText("")
-		a.showHelp()
-		return
-
-	case "/models", "/model":
-		a.editor.SetText("")
-		a.showModelPicker()
-		return
-
-	case "/effort":
-		a.editor.SetText("")
-		a.showEffortPicker()
-		return
-
-	case "/plan":
-		a.editor.SetText("")
-		a.enterPlanMode()
-		return
-
-	case "/agent":
-		a.editor.SetText("")
-		a.exitPlanMode()
-		return
-
-	case "/rewind":
-		a.editor.SetText("")
-		a.showRewindPicker()
-		return
-
-	case "/diff":
-		a.editor.SetText("")
-		a.showDiffView()
-		return
-
-	case "/problems":
-		a.editor.SetText("")
-		a.showDiagnosticsView()
-		return
-
-	case "/context":
-		a.editor.SetText("")
-		a.showContextStats()
-		return
-
-	case "/tasks":
-		a.editor.SetText("")
-		a.showTasks()
-		return
-
-	case "/recap":
-		a.editor.SetText("")
-		a.showRecap()
-		return
-
-	case "/copy":
-		a.editor.SetText("")
-		a.copyLastResponse()
-		return
-
-	case "/paste":
-		a.editor.SetText("")
-		a.pasteFromClipboard()
+		cmd.Run(a)
 		return
 	}
 
-	if strings.HasPrefix(query, "/") {
-		parts := strings.SplitN(query[1:], " ", 2)
-		skillName := parts[0]
-		skillArgs := ""
-		if len(parts) > 1 {
-			skillArgs = parts[1]
-		}
+	skills := a.agent.Workspace().Skills
 
-		if s := skill.FindSkill(skillName, a.agent.Workspace().Skills); s != nil {
-			a.editor.SetText("")
-			a.invokeSkill(s, skillArgs)
-			return
-		}
-
+	if name, _, ok := skill.ParseCommand(query); ok && skill.FindSkill(name, skills) == nil {
 		a.editor.SetText("")
-		a.appendChat(cellNotice(fmt.Sprintf("Unknown command: /%s", skillName), theme.Default.Yellow, a.width()))
+		a.appendChat(cellNotice(fmt.Sprintf("Unknown command: /%s", name), theme.Default.Yellow, a.width()))
 		return
 	}
 
@@ -268,38 +244,19 @@ func (a *App) submitInput() {
 		input = append(input, agent.Content{Text: sb.String()})
 	}
 
+	for _, inv := range skill.Invocations(query, skills) {
+		block, err := inv.Instructions(a.agent.Workspace().RootPath)
+		if err != nil {
+			a.appendChat(cellNotice(fmt.Sprintf("Failed to load skill %q: %v", inv.Skill.Name, err), theme.Default.Red, a.width()))
+			continue
+		}
+		input = append(input, agent.Content{Text: block, Hidden: true})
+	}
+
 	a.clearPendingContent()
 	a.showWelcome = false
 
 	a.submitAgentInput(input, displayText)
-}
-
-func (a *App) invokeSkill(s *skill.Skill, args string) {
-	content, err := s.GetContent(a.agent.Workspace().RootPath)
-	if err != nil {
-		a.appendChat(cellNotice(fmt.Sprintf("Failed to load skill %q: %v", s.Name, err), theme.Default.Red, a.width()))
-		return
-	}
-
-	if s.Bundled {
-		_, _ = skill.MaterializeBundled(s)
-	}
-
-	content = s.ApplyArguments(content, args, s.AbsoluteDir(a.agent.Workspace().RootPath))
-
-	displayText := fmt.Sprintf("/%s", s.Name)
-	if args != "" {
-		displayText += " " + args
-	}
-
-	a.appendChat(cellUser(displayText, a.width()))
-	a.showWelcome = false
-
-	input := []agent.Content{{Text: content}}
-	input = append(input, a.pendingContent...)
-	a.clearPendingContent()
-
-	a.submitAgentInput(input, "")
 }
 
 func (a *App) submitAgentInput(input []agent.Content, echo string) {
