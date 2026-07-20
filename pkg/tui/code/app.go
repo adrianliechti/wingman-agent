@@ -894,19 +894,21 @@ func (a *App) handlePopupKey(ev inline.KeyEvent) bool {
 			}
 			return true
 		case inline.KeyEnter:
-			// Mid-prompt (or with text after the cursor) Enter completes the
-			// token; only a lone leading command submits directly.
-			if a.cmdTokenStart > 0 || a.editor.cursor < len(a.editor.value) {
-				if item, ok := popup.Current(); ok {
-					a.completeCommand(item.ID)
+			// A lone leading command completes and submits in one press;
+			// elsewhere Enter completes the token, and submits once there is
+			// nothing left to complete.
+			if a.cmdTokenStart == 0 && a.editor.cursor == len(a.editor.value) {
+				if item, ok := popup.Current(); ok && a.editor.Text() != item.ID {
+					a.editor.SetText(item.ID)
 				}
+				a.closePopup()
+				a.submitInput()
 				return true
 			}
-			if item, ok := popup.Current(); ok && a.editor.Text() != item.ID && !strings.HasPrefix(a.editor.Text(), item.ID+" ") {
-				a.editor.SetText(item.ID)
+			if item, ok := popup.Current(); ok && !a.completeCommand(item.ID) {
+				a.closePopup()
+				a.submitInput()
 			}
-			a.closePopup()
-			a.submitInput()
 			return true
 		case inline.KeyEsc:
 			a.closePopup()

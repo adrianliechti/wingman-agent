@@ -157,10 +157,11 @@ func (a *App) syncCommandPopup() {
 }
 
 // completeCommand replaces the slash token at the cursor with the selected
-// command; mid-prompt completions gain a trailing space so typing continues
-// naturally. The replacement spans the whole word so completing with the
-// cursor mid-token leaves no tail behind.
-func (a *App) completeCommand(id string) {
+// command and reports whether anything changed. The replacement spans the
+// whole word so completing with the cursor mid-token leaves no tail behind;
+// mid-prompt completions end past a trailing space so typing continues
+// naturally.
+func (a *App) completeCommand(id string) bool {
 	start, end := a.cmdTokenStart, a.editor.cursor
 	for end < len(a.editor.value) {
 		r := a.editor.value[end]
@@ -171,12 +172,20 @@ func (a *App) completeCommand(id string) {
 	}
 
 	insert := id
-	if start > 0 && (end >= len(a.editor.value) || a.editor.value[end] != ' ') {
-		insert += " "
+	advance := 0
+	if start > 0 {
+		if end < len(a.editor.value) && a.editor.value[end] == ' ' {
+			advance = 1
+		} else {
+			insert += " "
+		}
 	}
 
+	changed := advance > 0 || insert != string(a.editor.value[start:end])
 	a.editor.ReplaceRange(start, end, insert)
+	a.editor.cursor += advance
 	a.syncCommandPopup()
+	return changed
 }
 
 func (a *App) submitInput() {

@@ -32,7 +32,7 @@ import { buildTurns, findEntryElement, type Turn } from "./chat/turns";
 import { FilePicker } from "./FilePicker";
 import { ModelPicker } from "./ModelPicker";
 import { ModePicker, type ModeOption } from "./ModePicker";
-import { SkillPicker } from "./SkillPicker";
+import { SkillPicker, type Skill } from "./SkillPicker";
 import { TurnQueue } from "./TurnQueue";
 
 interface Props {
@@ -129,6 +129,8 @@ export function ChatPanel({
 	const scheme = useColorScheme();
 	const [input, setInput] = useState("");
 	const [caret, setCaret] = useState(0);
+	const [skills, setSkills] = useState<Skill[]>([]);
+	const [skillActive, setSkillActive] = useState(0);
 	const [dismissedToken, setDismissedToken] = useState<string | null>(null);
 	const [files, setFiles] = useState<string[]>([]);
 	const [images, setImages] = useState<PendingImage[]>([]);
@@ -216,11 +218,17 @@ export function ChatPanel({
 		if (!isActive) textareaRef.current?.focus();
 	}, [isActive]);
 
+	// setDraft replaces the composer text and keeps the tracked caret in sync;
+	// every programmatic text change must go through it (or set both).
+	const setDraft = useCallback((text: string) => {
+		setInput(text);
+		setCaret(text.length);
+	}, []);
+
 	const [prevSeed, setPrevSeed] = useState(seed);
 	if (seed && seed !== prevSeed) {
 		setPrevSeed(seed);
-		setInput(seed.text);
-		setCaret(seed.text.length);
+		setDraft(seed.text);
 	}
 
 	useEffect(() => {
@@ -241,8 +249,43 @@ export function ChatPanel({
 
 	const skillToken = slashTokenAt(input, caret);
 	const tokenKey = skillToken ? `${skillToken.start}:${skillToken.query}` : null;
-	const showSkills = !!skillToken && tokenKey !== dismissedToken;
-	const skillQuery = skillToken?.query ?? "";
+
+	const tokenOpen = !!skillToken;
+	useEffect(() => {
+		if (!tokenOpen) return;
+		let cancelled = false;
+		fetch("/api/skills")
+			.then((r) => (r.ok ? r.json() : []))
+			.then((data: Skill[]) => {
+				if (!cancelled) setSkills(data);
+			})
+			.catch(() => {
+				if (!cancelled) setSkills([]);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [tokenOpen]);
+
+	const skillQuery = skillToken ? skillToken.query.toLowerCase() : null;
+	const skillMatches = useMemo(() => {
+		if (skillQuery === null) return [];
+		if (!skillQuery) return skills;
+		return skills.filter(
+			(s) =>
+				s.name.toLowerCase().includes(skillQuery) ||
+				(s.description ?? "").toLowerCase().includes(skillQuery),
+		);
+	}, [skills, skillQuery]);
+
+	const [prevTokenKey, setPrevTokenKey] = useState(tokenKey);
+	if (prevTokenKey !== tokenKey) {
+		setPrevTokenKey(tokenKey);
+		setSkillActive(0);
+	}
+	const activeSkill = Math.min(skillActive, Math.max(0, skillMatches.length - 1));
+
+	const showSkills = skillMatches.length > 0 && tokenKey !== dismissedToken;
 
 	const history = useMemo(() => {
 		const out: string[] = [];
@@ -253,14 +296,16 @@ export function ChatPanel({
 		return out;
 	}, [entries]);
 
-	const recallHistory = useCallback((text: string) => {
-		setInput(text);
-		setCaret(text.length);
-		requestAnimationFrame(() => {
-			const ta = textareaRef.current;
-			if (ta) ta.setSelectionRange(ta.value.length, ta.value.length);
-		});
-	}, []);
+	const recallHistory = useCallback(
+		(text: string) => {
+			setDraft(text);
+			requestAnimationFrame(() => {
+				const ta = textareaRef.current;
+				if (ta) ta.setSelectionRange(ta.value.length, ta.value.length);
+			});
+		},
+		[setDraft],
+	);
 
 	useLayoutEffect(() => {
 		if (restoredRef.current || entries.length === 0) return;
@@ -402,8 +447,7 @@ export function ChatPanel({
 				setSendError("Message was not accepted. Your draft has been kept.");
 				return false;
 			}
-			setInput("");
-			setCaret(0);
+			setDraft("");
 			setFiles([]);
 			setImages([]);
 			setEditingQueueId(null);
@@ -422,20 +466,67 @@ export function ChatPanel({
 			canSteer,
 			onSend,
 			files,
+			setDraft,
 		],
+	);
+
+	// selectSkill completes the slash token at the caret in place; only a lone
+	// leading command without declared arguments submits directly.
+	const selectSkill = useCallback(
+		(s: Skill) => {
+			const tok = slashTokenAt(input, caret);
+			if (!tok) return;
+
+			const end = wordEndAt(input, caret);
+			const whole = tok.start === 0 && end === input.length;
+			const hasArgs = !!s.arguments && s.arguments.length > 0;
+
+			if (whole && !hasArgs) {
+				void handleSubmit(undefined, `/${s.name}`);
+				return;
+			}
+
+			const insert = `/${s.name}`;
+			const trailing = input.slice(end);
+			const glue = trailing.startsWith(" ") ? "" : " ";
+			setInput(input.slice(0, tok.start) + insert + glue + trailing);
+			const pos = tok.start + insert.length + 1;
+			setCaret(pos);
+			requestAnimationFrame(() => {
+				const ta = textareaRef.current;
+				if (ta) {
+					ta.focus();
+					ta.setSelectionRange(pos, pos);
+				}
+			});
+		},
+		[input, caret, handleSubmit],
 	);
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
-			if (
-				showSkills &&
-				(e.key === "Enter" ||
-					e.key === "Tab" ||
-					e.key === "ArrowDown" ||
-					e.key === "ArrowUp" ||
-					e.key === "Escape")
-			) {
-				return;
+			if (showSkills) {
+				switch (e.key) {
+					case "ArrowDown":
+						e.preventDefault();
+						setSkillActive(Math.min(activeSkill + 1, skillMatches.length - 1));
+						return;
+					case "ArrowUp":
+						e.preventDefault();
+						setSkillActive(Math.max(activeSkill - 1, 0));
+						return;
+					case "Enter":
+					case "Tab": {
+						e.preventDefault();
+						const s = skillMatches[activeSkill];
+						if (s) selectSkill(s);
+						return;
+					}
+					case "Escape":
+						e.preventDefault();
+						setDismissedToken(tokenKey);
+						return;
+				}
 			}
 			if (e.key === "Enter" && !e.shiftKey) {
 				e.preventDefault();
@@ -481,6 +572,10 @@ export function ChatPanel({
 			isActive,
 			onCancel,
 			showSkills,
+			skillMatches,
+			activeSkill,
+			selectSkill,
+			tokenKey,
 			editingQueueId,
 			history,
 			input,
@@ -489,8 +584,7 @@ export function ChatPanel({
 	);
 
 	const editPendingInput = useCallback((item: PendingTurnInput) => {
-		setInput(item.text);
-		setCaret(item.text.length);
+		setDraft(item.text);
 		setFiles(item.files);
 		setImages(
 			item.images.map((dataUrl) => ({ id: crypto.randomUUID(), dataUrl })),
@@ -498,7 +592,7 @@ export function ChatPanel({
 		setEditingQueueId(item.state === "queued" ? item.id : null);
 		setSendError(null);
 		textareaRef.current?.focus();
-	}, []);
+	}, [setDraft]);
 
 	const addFile = useCallback((path: string) => {
 		setFiles((prev) => (prev.includes(path) ? prev : [...prev, path]));
@@ -590,35 +684,6 @@ export function ChatPanel({
 			void addImageFiles(pasted);
 		},
 		[addImageFiles],
-	);
-
-	const selectSkill = useCallback(
-		(s: { name: string; arguments?: string[] }) => {
-			const tok = slashTokenAt(input, caret);
-			if (!tok) return;
-
-			const end = wordEndAt(input, caret);
-			const whole = tok.start === 0 && end === input.length;
-			const hasArgs = !!s.arguments && s.arguments.length > 0;
-
-			if (whole && !hasArgs) {
-				void handleSubmit(undefined, `/${s.name}`);
-				return;
-			}
-
-			const insert = `/${s.name} `;
-			setInput(input.slice(0, tok.start) + insert + input.slice(end));
-			const pos = tok.start + insert.length;
-			setCaret(pos);
-			requestAnimationFrame(() => {
-				const ta = textareaRef.current;
-				if (ta) {
-					ta.focus();
-					ta.setSelectionRange(pos, pos);
-				}
-			});
-		},
-		[input, caret, handleSubmit],
 	);
 
 	return (
@@ -725,8 +790,10 @@ export function ChatPanel({
 							)}
 							{showSkills && (
 								<SkillPicker
-									query={skillQuery}
+									skills={skillMatches}
+									active={activeSkill}
 									onSelect={selectSkill}
+									onHover={setSkillActive}
 									onClose={() => setDismissedToken(tokenKey)}
 								/>
 							)}
