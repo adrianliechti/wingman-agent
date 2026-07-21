@@ -65,7 +65,9 @@ func (m *Manager) Restore(hash string) error {
 			return fmt.Errorf("failed to resolve change: %w", err)
 		}
 		if action == merkletrie.Delete {
-			m.removePath(change.From.Name)
+			if err := m.removePath(change.From.Name); err != nil {
+				return fmt.Errorf("failed to remove %s: %w", change.From.Name, err)
+			}
 		} else {
 			upserts = append(upserts, change)
 		}
@@ -85,18 +87,18 @@ func (m *Manager) Restore(hash string) error {
 	return nil
 }
 
-func (m *Manager) removePath(name string) {
-	delete(m.manifest, name)
-
-	if err := os.Remove(m.absPath(name)); err != nil {
-		return
+func (m *Manager) removePath(name string) error {
+	if err := os.Remove(m.absPath(name)); err != nil && !os.IsNotExist(err) {
+		return err
 	}
+	delete(m.manifest, name)
 
 	for dir := path.Dir(name); dir != "." && dir != "/"; dir = path.Dir(dir) {
 		if os.Remove(m.absPath(dir)) != nil {
 			break
 		}
 	}
+	return nil
 }
 
 func (m *Manager) materialize(name string, entry object.TreeEntry) error {
