@@ -22,7 +22,9 @@ const (
 )
 
 const (
-	MaxConcurrent = 4
+	// MaxConcurrent guards provider rate limits, not local resources — the
+	// runs are IO-bound model streams, so CPU count is irrelevant.
+	MaxConcurrent = 16
 	MaxPerSession = 50
 
 	// MaxRunDuration bounds one background run so a hung model stream cannot
