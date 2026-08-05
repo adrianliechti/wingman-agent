@@ -2,12 +2,16 @@ package code
 
 import (
 	"bufio"
+	"fmt"
 	"io/fs"
 	pathpkg "path"
 	"path/filepath"
 	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
+
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
 var defaultIgnoreDirs = map[string]bool{
@@ -121,7 +125,61 @@ func loadGitignore(fsys fs.FS, domain []string) []gitignore.Pattern {
 }
 
 func (a *App) addFileToContext(path string) error {
+	for _, existing := range a.pendingFiles {
+		if existing == path {
+			return nil
+		}
+	}
 	a.pendingFiles = append(a.pendingFiles, path)
 
 	return nil
+}
+
+func (a *App) attachmentLines(width int) []string {
+	images := a.countPendingImages()
+	total := images + len(a.pendingFiles)
+	if total == 0 {
+		return nil
+	}
+
+	t := theme.Default
+	chip := func(label string) string {
+		return ansi.Bg(t.Selection) + fg(t.Cyan) + " " + label + " " + ansi.Reset
+	}
+
+	var labels []string
+	for i := 0; i < images; i++ {
+		labels = append(labels, fmt.Sprintf("image %d", i+1))
+	}
+	for _, path := range a.pendingFiles {
+		labels = append(labels, filepath.Base(path))
+	}
+
+	prefix := cellIndent + " "
+	line := prefix
+	shown := 0
+	for i, label := range labels {
+		remaining := len(labels) - i - 1
+		candidate := chip(ansi.Truncate(label, 24, "…"))
+		extra := ""
+		if line != prefix {
+			extra = " "
+		}
+		more := ""
+		if remaining > 0 {
+			more = " " + dim(fmt.Sprintf("+%d", remaining))
+		}
+		if ansi.Width(line+extra+candidate+more) > width {
+			break
+		}
+		line += extra + candidate
+		shown++
+	}
+	if shown < len(labels) {
+		count := dim(fmt.Sprintf("+%d more", len(labels)-shown))
+		if ansi.Width(line+" "+count) <= width {
+			line += " " + count
+		}
+	}
+	return []string{ansi.Truncate(line, width, "…")}
 }

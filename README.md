@@ -18,7 +18,7 @@ A powerful AI-powered coding assistant that runs directly in your terminal. Wing
 - **Skills** — Define custom workflows using [Agent Skills](https://agentskills.io) format
 - **Image Support** — Paste images from clipboard for vision-capable models
 - **File Context** — Add files to context with `@` or drag-and-drop file paths
-- **Theme Detection** — Automatic light/dark theme based on terminal settings
+- **Automatic Colors** — Adapts the built-in palette to light or dark terminal backgrounds
 - **Session Management** — Conversations are saved automatically and can be resumed
 
 ## 📦 Installation
@@ -277,12 +277,12 @@ Toggle between modes using `Tab` or the explicit `/plan` and `/agent` commands.
 |----------|--------|
 | `Enter` | Send message |
 | `Ctrl+J` | Insert a new line |
+| `Ctrl+P` | Open the searchable command center |
 | `Tab` | Toggle Agent/Plan mode (or autocomplete slash commands) |
-| `Shift+Tab` | Cycle through available models |
 | `@` | Open fuzzy file picker to add file context |
 | `Ctrl+V` | Paste image or text directly from the system clipboard |
 | `Cmd+V` / `Ctrl+Shift+V` | Paste text using the terminal's native shortcut |
-| `Ctrl+O` | Open the full transcript |
+| `Ctrl+O` | Open the searchable transcript inspector |
 | `Ctrl+Y` | Copy last assistant response to clipboard |
 | `Ctrl+L` | Clear chat history |
 | `Escape` | Cancel stream, close modal, or clear input |
