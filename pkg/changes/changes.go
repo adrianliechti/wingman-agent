@@ -445,7 +445,7 @@ func treeFile(repo *git.Repository, tree *object.Tree, path string) ([]byte, fil
 		return nil, filemode.Empty, false, nil
 	}
 	entry, err := tree.FindEntry(path)
-	if errors.Is(err, object.ErrEntryNotFound) {
+	if errors.Is(err, object.ErrEntryNotFound) || errors.Is(err, object.ErrDirectoryNotFound) {
 		return nil, filemode.Empty, false, nil
 	}
 	if err != nil {

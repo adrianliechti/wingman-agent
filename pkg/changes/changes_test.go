@@ -263,6 +263,36 @@ func TestNativeRepositoryCompareAndHistory(t *testing.T) {
 	}
 }
 
+func TestNativeRepositoryCompareWorktreeWithFileInNewDirectory(t *testing.T) {
+	dir := t.TempDir()
+	repo := initRepository(t, dir)
+	writeFile(t, dir, "README.md", "base\n")
+	stage(t, repo, "README.md")
+	commit(t, repo, "initial")
+	base, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, dir, "examples/coding-router.yaml", "router: coding\n")
+	stage(t, repo, "examples/coding-router.yaml")
+	commit(t, repo, "add coding router")
+
+	m := New(dir)
+	defer m.Close()
+	comparison, err := m.Compare(context.Background(), base.Hash().String(), WorktreeRevision, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comparison.Diffs) != 1 {
+		t.Fatalf("working tree comparison = %+v", comparison)
+	}
+	diff := comparison.Diffs[0]
+	if diff.Path != "examples/coding-router.yaml" || diff.Status != StatusAdded || diff.Modified != "router: coding\n" {
+		t.Fatalf("nested added file diff = %+v", diff)
+	}
+}
+
 func writeFile(t *testing.T, dir, rel, content string) {
 	t.Helper()
 	path := filepath.Join(dir, rel)
