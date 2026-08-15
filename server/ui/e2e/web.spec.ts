@@ -777,6 +777,17 @@ test("compares branches and commits in a main content tab", async ({
 	await expect
 		.poll(() => page.locator("[data-compare-file]").count())
 		.toBeLessThan(10);
+	await expect(virtualList.locator(".monaco-diff-editor")).toHaveCount(0);
+	for (let index = 0; index < 20; index++) {
+		await virtualList.evaluate(
+			(element, scrollToEnd) => {
+				element.scrollTop = scrollToEnd ? element.scrollHeight : 0;
+				element.dispatchEvent(new Event("scroll"));
+			},
+			index % 2 === 0,
+		);
+		await page.waitForTimeout(10);
+	}
 	await virtualList.evaluate((element) => {
 		element.scrollTop = 500;
 		element.dispatchEvent(new Event("scroll"));
@@ -937,8 +948,7 @@ test("compares branches and commits in a main content tab", async ({
 			middleHash,
 			baseHash,
 		]);
-	// Monaco reports worker teardown failures asynchronously. Leave time for a
-	// rejected diff computation to reach the page before checking the listener.
+	// Leave time for delayed browser errors to reach the listeners.
 	await page.waitForTimeout(500);
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);

@@ -1,4 +1,3 @@
-import { DiffEditor, type DiffOnMount } from "@monaco-editor/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
 	ChevronDown,
@@ -8,8 +7,6 @@ import {
 	Loader2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useColorScheme } from "../hooks/useColorScheme";
-import { defineWingmanThemes, wingmanThemeName } from "../monacoThemes";
 import type {
 	CompareMode,
 	DiffEntry,
@@ -30,7 +27,6 @@ export function CompareTab({ base, head, mode, subscribe }: Props) {
 	const [loading, setLoading] = useState(true);
 	const [failure, setFailure] = useState<Error | null>(null);
 	const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-	const scheme = useColorScheme();
 
 	const load = useCallback(async () => {
 		setLoading(true);
@@ -140,7 +136,6 @@ export function CompareTab({ base, head, mode, subscribe }: Props) {
 					<VirtualCompareFiles
 						files={comparison.files}
 						collapsed={collapsed}
-						scheme={scheme}
 						onToggle={(path) =>
 							setCollapsed((current) => togglePath(current, path))
 						}
@@ -154,12 +149,10 @@ export function CompareTab({ base, head, mode, subscribe }: Props) {
 function VirtualCompareFiles({
 	files,
 	collapsed,
-	scheme,
 	onToggle,
 }: {
 	files: DiffEntry[];
 	collapsed: Set<string>;
-	scheme: "light" | "dark";
 	onToggle: (path: string) => void;
 }) {
 	const scrollRef = useRef<HTMLDivElement>(null);
@@ -231,7 +224,9 @@ function VirtualCompareFiles({
 							>
 								<FileHeader file={file} closed={closed} onToggle={onToggle} />
 								{!summaryOnly && !closed && (
-									<CompareFile file={file} scheme={scheme} />
+									<div className="overflow-x-auto bg-bg">
+										<DiffView patch={file.patch} />
+									</div>
 								)}
 							</section>
 						</div>
@@ -297,89 +292,6 @@ function FilePath({ file }: { file: DiffEntry }) {
 	);
 }
 
-function CompareFile({
-	file,
-	scheme,
-}: {
-	file: DiffEntry;
-	scheme: "light" | "dark";
-}) {
-	const [editorHeight, setEditorHeight] = useState(96);
-	const editorCleanup = useRef<Array<{ dispose: () => void }>>([]);
-	const resizeFrame = useRef<number | null>(null);
-	useEffect(
-		() => () => {
-			for (const disposable of editorCleanup.current) disposable.dispose();
-			if (resizeFrame.current !== null)
-				cancelAnimationFrame(resizeFrame.current);
-		},
-		[],
-	);
-	const mountEditor: DiffOnMount = (editor) => {
-		for (const disposable of editorCleanup.current) disposable.dispose();
-		const resize = () => {
-			resizeFrame.current = null;
-			const height = Math.max(
-				96,
-				Math.ceil(
-					Math.max(
-						editor.getOriginalEditor().getContentHeight(),
-						editor.getModifiedEditor().getContentHeight(),
-					),
-				),
-			);
-			setEditorHeight(height);
-		};
-		const scheduleResize = () => {
-			if (resizeFrame.current !== null)
-				cancelAnimationFrame(resizeFrame.current);
-			resizeFrame.current = requestAnimationFrame(resize);
-		};
-		editorCleanup.current = [editor.onDidUpdateDiff(scheduleResize)];
-		scheduleResize();
-	};
-	const hasText = file.original !== undefined || file.modified !== undefined;
-	if (!hasText) {
-		return (
-			<div className="bg-bg">
-				<DiffView patch={file.patch} />
-			</div>
-		);
-	}
-	return (
-		<DiffEditor
-			className="wingman-static-diff"
-			height={editorHeight}
-			language={isLargeChange(file) ? "plaintext" : file.language || undefined}
-			original={file.original ?? ""}
-			modified={file.modified ?? ""}
-			theme={wingmanThemeName(scheme)}
-			beforeMount={defineWingmanThemes}
-			onMount={mountEditor}
-			options={{
-				readOnly: true,
-				renderSideBySide: true,
-				renderOverviewRuler: false,
-				overviewRulerLanes: 0,
-				overviewRulerBorder: false,
-				minimap: { enabled: false },
-				fontSize: 12,
-				lineNumbers: "on",
-				scrollBeyondLastLine: false,
-				renderWhitespace: "none",
-				padding: { top: 8 },
-				hideUnchangedRegions: { enabled: true },
-				scrollbar: {
-					vertical: "hidden",
-					horizontal: "auto",
-					handleMouseWheel: false,
-					alwaysConsumeMouseWheel: false,
-				},
-			}}
-		/>
-	);
-}
-
 function RevisionLabel({ label, hash }: { label: string; hash: string }) {
 	const displayLabel =
 		label === ":worktree"
@@ -425,17 +337,9 @@ function togglePath(current: Set<string>, path: string) {
 	return next;
 }
 
-function diffEditorHeight(file: DiffEntry) {
-	return Math.max(180, file.patch.split("\n").length * 19 + 48);
-}
-
 function compareRowHeight(file: DiffEntry, collapsed: boolean) {
 	if (collapsed || isSummaryOnlyChange(file)) return 48;
-	const contentHeight =
-		file.original !== undefined || file.modified !== undefined
-			? diffEditorHeight(file)
-			: file.patch.split("\n").length * 19 + 16;
-	return 48 + contentHeight;
+	return 64 + file.patch.split("\n").length * 19;
 }
 
 function isLargeChange(file: DiffEntry) {
@@ -446,9 +350,7 @@ function isLargeChange(file: DiffEntry) {
 			path,
 		);
 	const patchLines = file.patch.split("\n").length;
-	const contentSize =
-		(file.original?.length ?? 0) + (file.modified?.length ?? 0);
-	return generated || patchLines > 750 || contentSize > 250_000;
+	return generated || patchLines > 750 || file.patch.length > 250_000;
 }
 
 function isSummaryOnlyChange(file: DiffEntry) {
