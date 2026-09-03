@@ -13,7 +13,7 @@ dist: dist/app
 before:
   hooks:
     - sh -c 'cd server/ui && npm ci && npm run build'             # UI -> server/static
-    - sh -c 'cd app && go tool appbundle -name "Wingman Agent" -id com.adrianliechti.wingman-agent -description "Wingman Agent" -company "Adrian Liechti" -copyright "© Adrian Liechti" -package . -version {{ .Version }}'
+    - sh -c 'cd app && go tool appbundle -name "Wingman Agent" -id com.adrianliechti.wingman-agent -description "Wingman Agent" -company "Adrian Liechti" -copyright "© Adrian Liechti" -package . -version {{ .Version }} && ../scripts/configure-macos-app.sh "build/bin/Wingman Agent.app"'
     - sh -c 'cd app && go tool appbundle -os windows -arch amd64 -name "Wingman Agent" -id com.adrianliechti.wingman-agent -description "Wingman Agent" -company "Adrian Liechti" -package . -version {{ .Version }}'
 
 # The hooks above assemble both app artifacts; GoReleaser builds no binaries.

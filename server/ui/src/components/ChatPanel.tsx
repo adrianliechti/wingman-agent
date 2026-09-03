@@ -1022,35 +1022,42 @@ export function ChatPanel({
 								</div>
 
 								<div className="flex items-center gap-0">
-									{voice && voiceSupported && (
+									{voice && (
 										<button
 											type="button"
 											className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
-												voiceState === "recording"
-													? "text-danger bg-danger/10 hover:bg-danger/20 cursor-pointer"
-													: voiceState === "idle"
-														? "text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer"
-														: "text-fg-dim opacity-60 cursor-wait"
+												!voiceSupported
+													? "text-fg-dim opacity-40 cursor-not-allowed"
+													: voiceState === "recording"
+														? "text-danger bg-danger/10 hover:bg-danger/20 cursor-pointer"
+														: voiceState === "idle"
+															? "text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer"
+															: "text-fg-dim opacity-60 cursor-wait"
 											}`}
 											onClick={toggleVoiceInput}
 											disabled={
+												!voiceSupported ||
 												voiceState === "requesting" ||
 												voiceState === "transcribing"
 											}
 											aria-pressed={voiceState === "recording"}
 											aria-label={
-												voiceState === "recording"
-													? "Stop voice recording"
-													: "Start voice recording"
+												!voiceSupported
+													? "Voice recording unavailable"
+													: voiceState === "recording"
+														? "Stop voice recording"
+														: "Start voice recording"
 											}
 											title={
-												voiceState === "recording"
-													? "Stop recording and transcribe (Ctrl+G)"
-													: voiceState === "transcribing"
-														? `Transcribing with ${voice.model}…`
-														: voiceState === "requesting"
-															? "Requesting microphone access…"
-															: `Voice input with ${voice.model} (Ctrl+G)`
+												!voiceSupported
+													? "Voice input is unavailable because this client does not provide microphone recording"
+													: voiceState === "recording"
+														? "Stop recording and transcribe (Ctrl+G)"
+														: voiceState === "transcribing"
+															? `Transcribing with ${voice.model}…`
+															: voiceState === "requesting"
+																? "Requesting microphone access…"
+																: `Voice input with ${voice.model} (Ctrl+G)`
 											}
 										>
 											{voiceState === "requesting" ||
