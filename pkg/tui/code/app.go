@@ -22,6 +22,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
+	"github.com/adrianliechti/wingman-agent/pkg/voice"
 )
 
 var _ code.UI = (*App)(nil)
@@ -55,6 +56,17 @@ type App struct {
 	backgroundStatus  string
 	backgroundWarning bool
 	backgroundExpiry  time.Time
+
+	voice               *voice.Service
+	voiceRecorder       voice.Recorder
+	voiceModel          string
+	voiceChecked        bool
+	voiceRecording      voice.Recording
+	voiceRecordingSeq   uint64
+	voiceRecordingTimer *time.Timer
+	voiceTranscribing   bool
+	voiceInsertPosition int
+	voiceCancel         context.CancelFunc
 
 	showWelcome bool
 
@@ -229,6 +241,13 @@ func (a *App) onToolProgress(_ context.Context, callID, text string) {
 // WithTerminal replaces the terminal, used by tests.
 func (a *App) WithTerminal(t *inline.Terminal) {
 	a.term = t
+}
+
+// SetVoice configures optional voice transcription. Availability is discovered
+// asynchronously when the TUI starts.
+func (a *App) SetVoice(service *voice.Service, recorder voice.Recorder) {
+	a.voice = service
+	a.voiceRecorder = recorder
 }
 
 // activateSession changes the session and resets all state that belongs to
@@ -565,6 +584,7 @@ func (a *App) Run() error {
 	a.term.EnterAlt()
 	a.term.SetTitle(a.terminalTitle())
 	a.term.EnableMouse(true)
+	a.discoverVoice()
 
 	if fetcher, ok := a.agent.(modelFetcher); ok {
 		fetcher.FetchModels(a.ctx)
@@ -658,6 +678,18 @@ func (a *App) Run() error {
 }
 
 func (a *App) shutdown() {
+	if a.voiceCancel != nil {
+		a.voiceCancel()
+		a.voiceCancel = nil
+	}
+	if a.voiceRecordingTimer != nil {
+		a.voiceRecordingTimer.Stop()
+		a.voiceRecordingTimer = nil
+	}
+	if a.voiceRecording != nil {
+		_ = a.voiceRecording.Cancel()
+		a.voiceRecording = nil
+	}
 	a.saveSession()
 
 	a.turns.SetHandler(nil)
@@ -1036,6 +1068,10 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 
 	switch ev.Key {
 	case inline.KeyEsc:
+		if a.voiceRecording != nil {
+			a.cancelVoiceRecording()
+			return
+		}
 		if a.isStreaming() {
 			a.cancelStream()
 			return
@@ -1087,6 +1123,9 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 			return
 		case 'p':
 			a.showCommandCenter()
+			return
+		case 'g':
+			a.toggleVoice()
 			return
 		}
 

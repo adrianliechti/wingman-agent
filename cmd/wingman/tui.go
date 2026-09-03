@@ -7,11 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agents"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	codetui "github.com/adrianliechti/wingman-agent/pkg/tui/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
+	"github.com/adrianliechti/wingman-agent/pkg/voice"
 )
 
 type tuiOptions struct {
@@ -79,6 +81,7 @@ func runTUI(ctx context.Context, opts tuiOptions) {
 	}
 
 	app := codetui.New(ctx, wa, sessionID)
+	app.SetVoice(voice.New(agent.NewProviderClient()), voice.DetectRecorder())
 	app.SetBackgroundStatus("Checking development tools…", false)
 	toolUpdate := ws.StartManagedToolsUpdate(ctx, code.ManagedLSPTools, func(progress devtools.Progress) {
 		label := progress.Label

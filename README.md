@@ -569,6 +569,7 @@ Toggle between modes using `Tab` or the explicit `/plan` and `/agent` commands.
 | `Enter` | Send message |
 | `Ctrl+J` | Insert a new line |
 | `Ctrl+P` | Open the searchable command center |
+| `Ctrl+G` | Start or stop voice input when transcription is available |
 | `Tab` | Toggle Agent/Plan mode (or autocomplete slash commands) |
 | `@` | Open fuzzy file picker to add file context |
 | `Ctrl+V` | Paste image or text directly from the system clipboard |
@@ -585,6 +586,7 @@ Toggle between modes using `Tab` or the explicit `/plan` and `/agent` commands.
 |---------|-------------|
 | `/help` | Show available commands and skills |
 | `/model` | Select AI model and reasoning effort from available options |
+| `/voice` | Start or stop voice input when transcription is available |
 | `/plan` | Enter planning mode |
 | `/agent` | Return to execution mode |
 | `/problems` | Show LSP diagnostics for the workspace |
@@ -594,6 +596,14 @@ Toggle between modes using `Tab` or the explicit `/plan` and `/agent` commands.
 | `/quit` | Exit application |
 
 Skill slash commands (e.g. `/commit`, `/code-review`) also appear here — see **Skills** below.
+
+Voice input is enabled automatically when the configured provider advertises a
+compatible model from `/v1/models`. Wingman prefers `gpt-transcribe`, then
+`gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, and `whisper-1`. The web UI uses
+the browser microphone; on macOS and Linux, the TUI uses the first available
+system recorder from `ffmpeg`, SoX `rec`, or Linux `arecord`. Stop recording to
+insert the transcript at the cursor, review or edit it, then press Enter to
+send. Recordings are temporary and are removed after transcription.
 
 ## 🔧 Skills
 
@@ -793,7 +803,9 @@ port) with a React UI featuring a chat panel, file browser, diff viewer,
 diagnostics panel, a terminal (multiple
 xterm.js sessions, shell of your choice, `Ctrl+Alt+T`), and session management.
 `Ctrl+P` opens the command palette — same shortcut as the TUI command center
-(`Cmd/Ctrl+K` works too). The server uses WebSockets for real-time streaming.
+(`Cmd/Ctrl+K` works too). When voice transcription is available, use the mic
+button or `Ctrl+G` in the chat composer. The server uses WebSockets for
+real-time streaming.
 
 ## 🧩 CLI Wrappers
 

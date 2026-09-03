@@ -14,6 +14,11 @@ export interface Capabilities {
 	platform: string;
 	workspace_name: string;
 	managed_tools?: ManagedToolsStatus;
+	voice?: VoiceCapability;
+}
+
+export interface VoiceCapability {
+	model: string;
 }
 
 export interface ManagedToolsStatus {

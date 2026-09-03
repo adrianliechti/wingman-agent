@@ -2257,6 +2257,7 @@ export default function App() {
 					seed={tab.id === activeTabId ? composerSeed : null}
 					onSeedConsumed={consumeComposerSeed}
 					toolProgress={toolProgress}
+					voice={capabilities?.voice}
 				/>
 			);
 		}

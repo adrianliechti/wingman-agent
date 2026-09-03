@@ -35,6 +35,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/settings"
 	"github.com/adrianliechti/wingman-agent/pkg/system"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
+	"github.com/adrianliechti/wingman-agent/pkg/voice"
 	"github.com/adrianliechti/wingman-agent/pkg/watch"
 )
 
@@ -58,6 +59,7 @@ type Server struct {
 
 	workspace *code.Workspace
 	config    *agent.Config
+	voice     *voice.Service
 
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -145,6 +147,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 		noBrowser:      opts.NoBrowser,
 		workspace:      ws,
 		config:         cfg,
+		voice:          voice.New(cfg),
 		ctx:            serverCtx,
 		cancel:         cancel,
 		phases:         map[string]string{},
@@ -247,6 +250,16 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 			return
 		}
 		s.broadcast(Frame{Type: EvtModelChanged})
+	})
+
+	s.background.Go(func() {
+		discoveryCtx, cancelDiscovery := context.WithTimeout(serverCtx, 15*time.Second)
+		capability, err := s.voice.Discover(discoveryCtx)
+		cancelDiscovery()
+		if err != nil || serverCtx.Err() != nil || capability.Model == "" {
+			return
+		}
+		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
 	})
 
 	s.mux = chi.NewRouter()
@@ -512,6 +525,7 @@ func (s *Server) registerRoutes(r chi.Router) {
 		r.Post("/editor/tab", s.handleEditorTab)
 		r.Post("/editor/transform", s.handleEditorTransform)
 		r.Post("/settings/editor.tab.completion", s.handleEditorTabSettings)
+		r.Post("/voice/transcriptions", s.handleVoiceTranscription)
 		r.Get("/skills", s.handleSkills)
 		r.Get("/capabilities", s.handleCapabilities)
 	})
@@ -889,6 +903,7 @@ type capabilitiesResponse struct {
 	Platform      string              `json:"platform"`
 	WorkspaceName string              `json:"workspace_name"`
 	ManagedTools  *managedToolsStatus `json:"managed_tools,omitempty"`
+	Voice         *voice.Capability   `json:"voice,omitempty"`
 }
 
 type managedToolsStatus struct {
@@ -933,6 +948,11 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	if status := s.managedToolsStatus(); status.State != "" {
 		caps.ManagedTools = &status
+	}
+	if s.voice != nil {
+		if capability := s.voice.Capability(); capability.Model != "" {
+			caps.Voice = &capability
+		}
 	}
 	writeJSON(w, caps)
 }

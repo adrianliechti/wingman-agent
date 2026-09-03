@@ -78,6 +78,13 @@ func (a *App) composerChrome(width int) EditorChrome {
 		topLabel = modeLabel
 		bottomLeft = ""
 	}
+	if a.voiceRecording != nil {
+		color = t.Red
+		topLabel = colored(t.Red, "● VOICE")
+	} else if a.voiceTranscribing {
+		color = t.Cyan
+		topLabel = colored(t.Cyan, "TRANSCRIBING")
+	}
 
 	identityLabel := strings.Join(identity, " · ")
 	identityStyle := ""

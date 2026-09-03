@@ -183,15 +183,14 @@ func (c *Config) Utility(ctx context.Context, instructions, input string) (strin
 }
 
 func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {
-	resp, err := c.client.Models.List(ctx)
+	ids, err := c.AvailableModelIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var models []ModelInfo
-
-	for _, m := range resp.Data {
-		models = append(models, ModelInfo{ID: m.ID})
+	models := make([]ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		models = append(models, ModelInfo{ID: id})
 	}
 
 	return models, nil

@@ -3,6 +3,7 @@ import {
 	Loader2,
 	LoaderCircle,
 	ListPlus,
+	Mic,
 	Paperclip,
 	Plus,
 	Square,
@@ -16,8 +17,11 @@ import {
 	useRef,
 	useState,
 } from "react";
+import type { VoiceCapability } from "../api/capabilities.ts";
+import { insertVoiceTranscript } from "../api/voice.ts";
 import { useColorScheme } from "../hooks/useColorScheme";
 import { type Skill, useSkills } from "../hooks/useSkills";
+import { useVoiceInput } from "../hooks/useVoiceInput.ts";
 import type {
 	ChatEntry,
 	PendingPrompt,
@@ -77,6 +81,7 @@ interface Props {
 	} | null;
 	onSeedConsumed?: (nonce: number) => void;
 	toolProgress?: Record<string, string>;
+	voice?: VoiceCapability;
 }
 
 const PIN_TOP_GAP = 16;
@@ -139,6 +144,7 @@ export function ChatPanel({
 	seed,
 	onSeedConsumed,
 	toolProgress,
+	voice,
 }: Props) {
 	const scheme = useColorScheme();
 	const [input, setInput] = useState("");
@@ -254,6 +260,48 @@ export function ChatPanel({
 		setInput(text);
 		setCaret(text.length);
 	}, []);
+
+	const voiceSelectionRef = useRef({ start: 0, end: 0 });
+	const insertTranscript = useCallback(
+		(transcript: string) => {
+			const result = insertVoiceTranscript(
+				input,
+				voiceSelectionRef.current.start,
+				voiceSelectionRef.current.end,
+				transcript,
+			);
+			setInput(result.text);
+			setCaret(result.caret);
+			requestAnimationFrame(() => {
+				const textarea = textareaRef.current;
+				if (textarea) {
+					textarea.focus();
+					textarea.setSelectionRange(result.caret, result.caret);
+				}
+			});
+		},
+		[input],
+	);
+	const {
+		state: voiceState,
+		supported: voiceSupported,
+		toggle: toggleVoice,
+	} = useVoiceInput(!!voice, insertTranscript, (message) =>
+		setSendError(message),
+	);
+	const toggleVoiceInput = useCallback(() => {
+		if (voiceState === "idle" || voiceState === "recording") {
+			const textarea = textareaRef.current;
+			voiceSelectionRef.current = {
+				start: textarea?.selectionStart ?? caret,
+				end: textarea?.selectionEnd ?? caret,
+			};
+		}
+		if (voiceState === "idle") {
+			setSendError(null);
+		}
+		toggleVoice();
+	}, [caret, toggleVoice, voiceState]);
 
 	// Start empty so a seed delivered while switching from an editor is applied
 	// by the newly mounted chat panel, not mistaken for one it already consumed.
@@ -535,6 +583,18 @@ export function ChatPanel({
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
+			if (
+				e.ctrlKey &&
+				!e.altKey &&
+				!e.metaKey &&
+				e.key.toLowerCase() === "g" &&
+				voice &&
+				voiceSupported
+			) {
+				e.preventDefault();
+				toggleVoiceInput();
+				return;
+			}
 			if (showSkills) {
 				switch (e.key) {
 					case "ArrowDown":
@@ -610,6 +670,9 @@ export function ChatPanel({
 			history,
 			input,
 			recallHistory,
+			voice,
+			voiceSupported,
+			toggleVoiceInput,
 		],
 	);
 
@@ -959,6 +1022,50 @@ export function ChatPanel({
 								</div>
 
 								<div className="flex items-center gap-0">
+									{voice && voiceSupported && (
+										<button
+											type="button"
+											className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
+												voiceState === "recording"
+													? "text-danger bg-danger/10 hover:bg-danger/20 cursor-pointer"
+													: voiceState === "idle"
+														? "text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer"
+														: "text-fg-dim opacity-60 cursor-wait"
+											}`}
+											onClick={toggleVoiceInput}
+											disabled={
+												voiceState === "requesting" ||
+												voiceState === "transcribing"
+											}
+											aria-pressed={voiceState === "recording"}
+											aria-label={
+												voiceState === "recording"
+													? "Stop voice recording"
+													: "Start voice recording"
+											}
+											title={
+												voiceState === "recording"
+													? "Stop recording and transcribe (Ctrl+G)"
+													: voiceState === "transcribing"
+														? `Transcribing with ${voice.model}…`
+														: voiceState === "requesting"
+															? "Requesting microphone access…"
+															: `Voice input with ${voice.model} (Ctrl+G)`
+											}
+										>
+											{voiceState === "requesting" ||
+											voiceState === "transcribing" ? (
+												<LoaderCircle size={14} className="animate-spin" />
+											) : (
+												<Mic
+													size={14}
+													className={
+														voiceState === "recording" ? "animate-pulse" : ""
+													}
+												/>
+											)}
+										</button>
+									)}
 									<button
 										type="button"
 										className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"

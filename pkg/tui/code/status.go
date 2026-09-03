@@ -163,8 +163,11 @@ func (a *App) footerLine(width int) string {
 		hint("ctrl+p", "commands"),
 		hint("@", "files"),
 		hint("tab", "plan"),
-		hint("ctrl+o", "transcript"),
 	}
+	if a.voiceReady() {
+		hints = append(hints, hint("ctrl+g", "voice"))
+	}
+	hints = append(hints, hint("ctrl+o", "transcript"))
 
 	_, current := a.agent.Modes(a.sessionID)
 	if current == code.PlanModeID {

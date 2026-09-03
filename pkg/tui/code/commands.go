@@ -39,6 +39,9 @@ func (a *App) builtinCommands() []slashCommand {
 		{Name: "/help", Desc: "Open command center", Busy: true, Run: (*App).showHelp},
 		{Name: "/model", Desc: "Select AI model and effort", Run: (*App).showModelPicker},
 	}
+	if a.voiceReady() {
+		cmds = append(cmds, slashCommand{Name: "/voice", Desc: "Start or stop voice input", Busy: true, Run: (*App).toggleVoice})
+	}
 	modes, _ := a.agent.Modes(a.sessionID)
 	for _, mode := range modes {
 		cmds = append(cmds, slashCommand{
