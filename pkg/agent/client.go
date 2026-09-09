@@ -106,6 +106,7 @@ type response struct {
 
 	finishReasons []string
 
+	endTurn          *bool
 	incomplete       bool
 	incompleteReason string
 }
@@ -180,6 +181,7 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 
 	incomplete := false
 	incompleteReason := ""
+	var endTurn *bool
 	responseID := ""
 	responseModel := ""
 	outputStarted := false
@@ -304,6 +306,13 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 			}
 
 		case responses.ResponseCompletedEvent:
+			// Codex-compatible providers can complete a response while asking
+			// the agent to continue. The SDK does not yet expose this field.
+			if raw := e.Response.JSON.ExtraFields["end_turn"].Raw(); raw != "" {
+				if err := json.Unmarshal([]byte(raw), &endTurn); err != nil {
+					return nil, fmt.Errorf("failed to parse response end_turn: %w", err)
+				}
+			}
 			usageDelta = responseToUsage(e.Response)
 			responseID = e.Response.ID
 			responseModel = e.Response.Model
@@ -385,6 +394,7 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 
 		finishReasons: finishReasons,
 
+		endTurn:          endTurn,
 		incomplete:       incomplete,
 		incompleteReason: incompleteReason,
 	}, nil

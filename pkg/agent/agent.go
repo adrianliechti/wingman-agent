@@ -229,6 +229,10 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 		cutoffNotified := false
 		stopHookActive := false
 		for {
+			if err := ctx.Err(); err != nil {
+				stop(err)
+				return
+			}
 			if maxTurns > 0 && turns >= maxTurns {
 				stop(ErrMaxTurnsExceeded)
 				return
@@ -400,10 +404,22 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				cutoffNotified = false
 			}
 
+			// Response completion is not necessarily turn completion. Honor an
+			// explicit end_turn flag, falling back to the last message's phase
+			// for providers that omit it. Incomplete responses use cutoff rules.
+			resumeAfterResponse := false
+			if !resp.incomplete {
+				if resp.endTurn != nil {
+					resumeAfterResponse = !*resp.endTurn
+				} else {
+					resumeAfterResponse = endsWithCommentary(resp.messages)
+				}
+			}
+
 			a.queueMu.Lock()
 			queued := a.pendingInput
 			a.pendingInput = nil
-			if len(queued) == 0 && len(calls) == 0 && !resumeAfterCutoff {
+			if len(queued) == 0 && len(calls) == 0 && !resumeAfterCutoff && !resumeAfterResponse {
 				a.queueMu.Unlock()
 				outcome := a.runStopHooks(ctx, assistantText(resp.messages), stopHookActive)
 				if outcome.Block && !outcome.Stop {
@@ -565,6 +581,24 @@ func assistantText(messages []Message) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func endsWithCommentary(messages []Message) bool {
+	commentary := false
+	for _, message := range messages {
+		if message.Role != RoleAssistant {
+			continue
+		}
+		for _, content := range message.Content {
+			if content.Refusal != "" {
+				return false
+			}
+			if content.Text != "" {
+				commentary = message.Phase == PhaseCommentary
+			}
+		}
+	}
+	return commentary
 }
 
 func hiddenContextMessage(text string) Message {

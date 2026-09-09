@@ -126,7 +126,7 @@ func userToInput(m Message) []responses.ResponseInputItemUnionParam {
 
 func assistantToInput(m Message) ([]responses.ResponseInputItemUnionParam, []responses.ResponseInputContentUnionParam) {
 	var items []responses.ResponseInputItemUnionParam
-	output := &responses.ResponseOutputMessageParam{}
+	output := &responses.ResponseOutputMessageParam{Phase: responses.ResponseOutputMessagePhase(m.Phase)}
 
 	// Reasoning items must precede the output they belong to on the wire.
 	for _, c := range m.Content {
@@ -307,7 +307,11 @@ func fromEasyInput(m *responses.EasyInputMessageParam) (Message, bool) {
 		role = RoleUser
 	}
 
-	return Message{Role: role, Content: contents}, true
+	message := Message{Role: role, Content: contents}
+	if role == RoleAssistant {
+		message.Phase = MessagePhase(m.Phase)
+	}
+	return message, true
 }
 
 func fromInput(m *responses.ResponseInputItemMessageParam) (Message, bool) {
@@ -351,7 +355,7 @@ func fromOutput(m *responses.ResponseOutputMessageParam) (Message, bool) {
 		return Message{}, false
 	}
 
-	return Message{Role: RoleAssistant, Content: contents}, true
+	return Message{Role: RoleAssistant, Phase: MessagePhase(m.Phase), Content: contents}, true
 }
 
 func inputContentToContents(contentList responses.ResponseInputMessageContentListParam) []Content {

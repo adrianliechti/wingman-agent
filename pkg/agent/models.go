@@ -12,9 +12,20 @@ const (
 	RoleSystem    MessageRole = "system"
 )
 
+type MessagePhase string
+
+const (
+	PhaseCommentary  MessagePhase = "commentary"
+	PhaseFinalAnswer MessagePhase = "final_answer"
+)
+
 type Message struct {
 	InputID string      `json:"input_id,omitempty"`
 	Role    MessageRole `json:"role"`
+
+	// Phase distinguishes assistant progress updates from final answers and
+	// must survive persistence and replay in subsequent provider requests.
+	Phase MessagePhase `json:"phase,omitempty"`
 
 	Content []Content `json:"content"`
 	Hidden  bool      `json:"hidden,omitempty"`

@@ -102,6 +102,29 @@ func TestOutputMessageTextPreservesStableID(t *testing.T) {
 	}
 }
 
+func TestEasyInputPreservesOnlyAssistantPhase(t *testing.T) {
+	for _, role := range []responses.EasyInputMessageRole{
+		responses.EasyInputMessageRoleAssistant,
+		responses.EasyInputMessageRoleUser,
+	} {
+		t.Run(string(role), func(t *testing.T) {
+			item := responses.ResponseInputItemParamOfMessage("text", role)
+			item.OfMessage.Phase = responses.EasyInputMessagePhaseCommentary
+			messages := toMessages([]responses.ResponseInputItemUnionParam{item})
+			if len(messages) != 1 {
+				t.Fatalf("messages = %+v", messages)
+			}
+			want := MessagePhase("")
+			if role == responses.EasyInputMessageRoleAssistant {
+				want = PhaseCommentary
+			}
+			if messages[0].Phase != want {
+				t.Fatalf("phase = %q, want %q", messages[0].Phase, want)
+			}
+		})
+	}
+}
+
 func TestToInputFlushesImagesAfterToolResultRun(t *testing.T) {
 	messages := []Message{
 		{Role: RoleAssistant, Content: []Content{
