@@ -131,7 +131,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	}
 
 	failSetup := func(err error) (iter.Seq2[Message, error], error) {
-		terminalErr := a.finishTurn(runtime.TurnID, RuntimeFailed, err, turnUsageBefore)
+		terminalErr := a.finishTurn(ctx, runtime.TurnID, RuntimeFailed, err, turnUsageBefore)
 		telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(err, terminalErr)})
 		return nil, errors.Join(err, terminalErr)
 	}
@@ -155,29 +155,9 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 		return failSetup(errors.New(sessionStartOutcome.Reason))
 	}
 
-	var hookContext []string
-
-	for _, h := range a.Hooks.UserPromptSubmit {
-		out, err := h(ctx, contentText(input))
-		if err != nil {
-			return failSetup(err)
-		}
-		if out.Block || out.Stop {
-			if out.Reason == "" {
-				out.Reason = "prompt blocked by hook"
-			}
-			return failSetup(errors.New(out.Reason))
-		}
-		hookContext = append(hookContext, out.AdditionalContext...)
-	}
-
 	message := userMessage(input)
 	message.InputID = InputIDFromContext(ctx)
-	messages := []Message{message}
-	if len(hookContext) > 0 {
-		messages = append(messages, hiddenContextMessage(strings.Join(hookContext, "\n\n")))
-	}
-	if err := a.appendMessages(messages...); err != nil {
+	if err := a.appendInputs(ctx, message); err != nil {
 		return failSetup(err)
 	}
 
@@ -194,11 +174,11 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			if r := recover(); r != nil {
 				status = RuntimeFailed
 				outcomeErr = fmt.Errorf("agent turn panicked: %v", r)
-				finishErr := a.finishTurn(runtime.TurnID, status, outcomeErr, turnUsageBefore)
+				finishErr := a.finishTurn(ctx, runtime.TurnID, status, outcomeErr, turnUsageBefore)
 				telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(outcomeErr, finishErr)})
 				panic(r)
 			}
-			finishErr := a.finishTurn(runtime.TurnID, status, outcomeErr, turnUsageBefore)
+			finishErr := a.finishTurn(ctx, runtime.TurnID, status, outcomeErr, turnUsageBefore)
 			telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(outcomeErr, finishErr)})
 			if finishErr != nil && consumerOpen {
 				yield(Message{}, finishErr)
@@ -207,7 +187,8 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 
 		stop := func(err error) {
 			outcomeErr = err
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errYieldStopped) {
+			_, hookStopped := errors.AsType[hookStopError](err)
+			if hookStopped || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errYieldStopped) {
 				status = RuntimeInterrupted
 			} else {
 				status = RuntimeFailed
@@ -216,13 +197,12 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				consumerOpen = false
 				return
 			}
+			if hookStopped {
+				return
+			}
 			if !yield(Message{}, err) {
 				consumerOpen = false
 			}
-		}
-		interrupt := func(reason string) {
-			status = RuntimeInterrupted
-			outcomeErr = errors.New(reason)
 		}
 
 		turns := 0
@@ -233,9 +213,13 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				stop(err)
 				return
 			}
-			if maxTurns > 0 && turns >= maxTurns {
-				stop(ErrMaxTurnsExceeded)
-				return
+			// Give the original prompt its own first request. Later requests
+			// consume steering, including input received during Stop hooks.
+			if turns > 0 {
+				if err := a.appendInputs(ctx, a.takePendingInput()...); err != nil {
+					stop(err)
+					return
+				}
 			}
 
 			if err := a.removeOrphanedToolMessages(); err != nil {
@@ -296,82 +280,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				outputSchema: outputSchema,
 			}
 
-			captureContent := a.Telemetry.CapturesMessageContent()
-			inferenceRequest := telemetry.InferenceRequest{
-				Model:          req.model,
-				ConversationID: conversationID(ctx, a.CacheKey),
-				Streaming:      true,
-				ReasoningLevel: req.effort,
-			}
-			if captureContent {
-				inferenceRequest.Content = telemetryInferenceContent(req.messages, req.instructions, req.tools)
-			}
-			inferenceCtx, inference := a.Telemetry.StartInference(ctx, inferenceRequest)
-			resp, err := a.completeRun(inferenceCtx, runtime.TurnID, req, yield)
-
-			for attempt := 1; err != nil && attempt <= maxStreamRetries; attempt++ {
-				if errors.Is(err, errYieldStopped) || ctx.Err() != nil || !isRecoverableError(err) {
-					break
-				}
-				if streamOutputStarted(err) && !EmitStreamEvent(ctx, StreamEventReset) {
-					// Retrying would duplicate already-visible deltas for consumers
-					// whose stream protocol cannot retract a failed attempt.
-					break
-				}
-
-				if isContextOverflowError(err) {
-					if outcome := a.runPreCompact(ctx, "auto"); outcome.Stop {
-						interruptErr := errors.New("compaction stopped by hook")
-						inference.End(streamingInferenceResult(resp, interruptErr, captureContent))
-						interrupt(interruptErr.Error())
-						return
-					}
-					compacted, compactErr := a.compactMessages(ctx, true)
-					if compactErr != nil {
-						err = compactErr
-						break
-					}
-					if compacted {
-						if outcome := a.runPostCompact(ctx, "auto"); outcome.Stop {
-							interruptErr := errors.New("post-compaction hook stopped the turn")
-							inference.End(streamingInferenceResult(resp, interruptErr, captureContent))
-							interrupt(interruptErr.Error())
-							return
-						}
-						outcome, hookErr := a.runSessionStartHooks(ctx, "compact")
-						if hookErr != nil {
-							err = hookErr
-							break
-						}
-						if outcome.Stop {
-							interruptErr := errors.New("session-start hook stopped the compacted turn")
-							inference.End(streamingInferenceResult(resp, interruptErr, captureContent))
-							interrupt(interruptErr.Error())
-							return
-						}
-					}
-					req.messages = a.requestMessages()
-					if captureContent {
-						inference.SetContent(telemetryInferenceContent(req.messages, req.instructions, req.tools))
-					}
-				} else {
-					// The SDK already retried transport errors with backoff; this
-					// covers failures before streamed output begins, so back off
-					// before resending.
-					if !waitForRetry(ctx, time.Duration(attempt)*2*time.Second) {
-						err = ctx.Err()
-						break
-					}
-				}
-
-				if ctx.Err() != nil {
-					err = ctx.Err()
-					break
-				}
-
-				resp, err = a.completeRun(inferenceCtx, runtime.TurnID, req, yield)
-			}
-			inference.End(streamingInferenceResult(resp, err, captureContent))
+			resp, err := a.completeWithRetry(ctx, runtime.TurnID, req, yield)
 
 			if err != nil {
 				stop(err)
@@ -380,50 +289,55 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			turns++
 
 			EmitStreamEvent(ctx, StreamEventCommit)
+			if err := ctx.Err(); err != nil {
+				stop(err)
+				return
+			}
 
-			calls := extractToolCalls(resp.messages)
-
-			if len(calls) > 0 {
+			// Filtered responses cannot drive tool execution or automatic
+			// continuation. Fresh user input can still start another request.
+			needsFollowUp := false
+			filtered := resp.incomplete && resp.incompleteReason == "content_filter"
+			if !filtered {
+				calls := extractToolCalls(resp.messages)
 				if err := a.processToolCalls(ctx, calls, tools, yield); err != nil {
 					stop(err)
 					return
 				}
-			}
-
-			// A cut-off response (max output tokens) drops in-flight items. When
-			// tool calls survived, their results already drive the next round;
-			// otherwise nudge the model once to resume. Only one consecutive
-			// nudge. Content-filter stops are final; a continue nudge would just
-			// re-trigger them.
-			resumeAfterCutoff := resp.incomplete &&
-				resp.incompleteReason != "content_filter" &&
-				len(calls) == 0 &&
-				!cutoffNotified
-
-			if !resp.incomplete {
-				cutoffNotified = false
-			}
-
-			// Response completion is not necessarily turn completion. Honor an
-			// explicit end_turn flag, falling back to the last message's phase
-			// for providers that omit it. Incomplete responses use cutoff rules.
-			resumeAfterResponse := false
-			if !resp.incomplete {
-				if resp.endTurn != nil {
-					resumeAfterResponse = !*resp.endTurn
-				} else {
-					resumeAfterResponse = endsWithCommentary(resp.messages)
+				needsFollowUp = len(calls) > 0
+				if !resp.incomplete {
+					cutoffNotified = false
+					// Phase is documented message metadata. Continuing after
+					// commentary is our policy for avoiding premature stops.
+					needsFollowUp = needsFollowUp || endsWithCommentary(resp.messages)
+				} else if !needsFollowUp && !cutoffNotified {
+					// Completed calls already drive a follow-up. Otherwise nudge
+					// once after a cutoff, preserving the partial text in history.
+					cutoffNotified = true
+					needsFollowUp = true
+					if err := a.appendMessages(cutoffNotice(resp.incompleteReason)); err != nil {
+						stop(err)
+						return
+					}
 				}
 			}
 
 			a.queueMu.Lock()
-			queued := a.pendingInput
-			a.pendingInput = nil
-			if len(queued) == 0 && len(calls) == 0 && !resumeAfterCutoff && !resumeAfterResponse {
-				a.queueMu.Unlock()
-				outcome := a.runStopHooks(ctx, assistantText(resp.messages), stopHookActive)
-				if outcome.Block && !outcome.Stop {
+			hasPendingInput := len(a.pendingInput) > 0
+			a.queueMu.Unlock()
+			if !needsFollowUp && !hasPendingInput && !resp.incomplete {
+				outcome := a.runStopHooks(ctx, lastAssistantText(resp.messages), stopHookActive)
+				if outcome.Stop {
+					reason := outcome.Reason
+					if reason == "" {
+						reason = "turn stopped by hook"
+					}
+					stop(hookStopError(reason))
+					return
+				}
+				if outcome.Block {
 					stopHookActive = true
+					needsFollowUp = true
 					reason := outcome.Reason
 					if reason == "" {
 						reason = "A Stop hook requested another pass."
@@ -432,64 +346,39 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 						stop(err)
 						return
 					}
-					continue
-				}
-				return
-			}
-			a.queueMu.Unlock()
-
-			if resumeAfterCutoff {
-				cutoffNotified = true
-				if err := a.appendMessages(cutoffNotice(resp.incompleteReason)); err != nil {
-					stop(err)
-					return
 				}
 			}
-
-			queuedMessages := make([]Message, 0, len(queued))
-			for _, in := range queued {
-				queuedMessages = append(queuedMessages, in)
-			}
-			if err := a.appendMessages(queuedMessages...); err != nil {
+			if err := ctx.Err(); err != nil {
 				stop(err)
 				return
 			}
 
-			// Past the compaction threshold, trim stale tool results first; LLM
-			// summarization only runs when the estimated reclaim (~4 bytes per
-			// token) cannot cover the overshoot. The reserve leaves headroom to
-			// re-measure real usage next turn.
+			// Stop hooks run without queueMu. Recheck for newly accepted input
+			// and close admission under the same lock before ending the turn.
+			a.queueMu.Lock()
+			finished := !needsFollowUp && len(a.pendingInput) == 0
+			if finished {
+				a.finishing = true
+			}
+			a.queueMu.Unlock()
+			if finished {
+				return
+			}
+			if maxTurns > 0 && turns >= maxTurns {
+				stop(ErrMaxTurnsExceeded)
+				return
+			}
+
+			// Trim before summarizing; estimated reclaimed bytes can cover the
+			// overshoot without an extra inference request.
 			if overshoot := a.compactionOvershoot(modelID, resp.usage.InputTokens); overshoot > 0 {
-				freed, trimErr := a.trimStaleToolResults()
-				if trimErr != nil {
-					stop(trimErr)
-					return
+				freed, err := a.trimStaleToolResults()
+				if err == nil && int64(freed/4) < overshoot {
+					err = a.compactWithHooks(ctx, false)
 				}
-				if int64(freed/4) < overshoot {
-					if outcome := a.runPreCompact(ctx, "auto"); outcome.Stop {
-						interrupt("compaction stopped by hook")
-						return
-					}
-					compacted, compactErr := a.compactMessages(ctx, false)
-					if compactErr != nil {
-						stop(compactErr)
-						return
-					}
-					if compacted {
-						if outcome := a.runPostCompact(ctx, "auto"); outcome.Stop {
-							interrupt("post-compaction hook stopped the turn")
-							return
-						}
-						outcome, hookErr := a.runSessionStartHooks(ctx, "compact")
-						if hookErr != nil {
-							stop(hookErr)
-							return
-						}
-						if outcome.Stop {
-							interrupt("session-start hook stopped the compacted turn")
-							return
-						}
-					}
+				if err != nil {
+					stop(err)
+					return
 				}
 			}
 		}
@@ -561,26 +450,22 @@ func (a *Agent) runStopHooks(ctx context.Context, lastAssistantMessage string, a
 func contentText(input []Content) string {
 	var parts []string
 	for _, c := range input {
-		if c.Text != "" {
-			parts = append(parts, c.Text)
+		if text := c.AsText(); text != "" {
+			parts = append(parts, text)
 		}
 	}
 	return strings.Join(parts, "\n")
 }
 
-func assistantText(messages []Message) string {
-	var parts []string
-	for _, message := range messages {
-		if message.Role != RoleAssistant {
-			continue
-		}
-		for _, content := range message.Content {
-			if content.Text != "" {
-				parts = append(parts, content.Text)
+func lastAssistantText(messages []Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == RoleAssistant {
+			if text := contentText(messages[i].Content); text != "" {
+				return text
 			}
 		}
 	}
-	return strings.Join(parts, "\n")
+	return ""
 }
 
 func endsWithCommentary(messages []Message) bool {
@@ -678,17 +563,14 @@ func (a *Agent) setRunning(running bool) {
 	a.queueMu.Unlock()
 }
 
-func (a *Agent) finishTurn(turnID string, status RuntimeStatus, outcomeErr error, before Usage) error {
+func (a *Agent) finishTurn(ctx context.Context, turnID string, status RuntimeStatus, outcomeErr error, before Usage) error {
 	a.queueMu.Lock()
 	a.finishing = true
-	queuedMessages := make([]Message, 0, len(a.pendingInput))
-	for _, input := range a.pendingInput {
-		queuedMessages = append(queuedMessages, input)
-	}
+	queuedMessages := a.pendingInput
 	a.pendingInput = nil
 	a.queueMu.Unlock()
 
-	appendErr := a.appendMessages(queuedMessages...)
+	appendErr := a.appendInputs(ctx, queuedMessages...)
 	if appendErr != nil && outcomeErr == nil {
 		status = RuntimeFailed
 		outcomeErr = appendErr
@@ -761,6 +643,9 @@ func (a *Agent) processToolCalls(ctx context.Context, calls []ToolCall, tools []
 	a.beginToolRound()
 
 	for start := 0; start < len(calls); {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		end := start + 1
 
 		if a.isReadOnly(calls[start], tools) {
@@ -784,11 +669,14 @@ func (a *Agent) processToolCalls(ctx context.Context, calls []ToolCall, tools []
 		start = end
 	}
 
-	return nil
+	return ctx.Err()
 }
 
 func (a *Agent) processToolCallsSequential(ctx context.Context, calls []ToolCall, tools []tool.Tool, yield func(Message, error) bool) error {
 	for _, tc := range calls {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !yield(toolCallMessage(tc), nil) {
 			return errYieldStopped
 		}
@@ -1182,6 +1070,9 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	if err := ctx.Err(); err != nil {
+		return toolExecutionError(ctx, err, timeout, started)
+	}
 
 	ctx = tool.WithProgressCall(ctx, tc.ID)
 	var usageMu sync.Mutex
@@ -1302,24 +1193,34 @@ func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool, time
 		}
 	}
 
-	result, err := t.Execute(ctx, args)
+	// Hooks and streamed call notifications can cancel the request after
+	// dispatch. Executors such as filesystem writes need this final check.
+	var result tool.Result
+	err := ctx.Err()
+	if err == nil {
+		result, err = t.Execute(ctx, args)
+	}
 
 	if err != nil {
-		// Rewrite only errors the context caused; a tool's own failure that
-		// races a cancellation must stay visible as-is.
-		switch {
-		case errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled):
-			return tool.Error(interruptedToolResult)
-		case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
-			if timeout > 0 && time.Since(started) >= timeout {
-				return tool.Error(fmt.Sprintf("error: tool call aborted after exceeding its %s time limit", timeout))
-			}
-			return tool.Error("error: tool call aborted — the request deadline expired before it finished")
-		}
-		return tool.Error(fmt.Sprintf("error: %v", err))
+		return toolExecutionError(ctx, err, timeout, started)
 	}
 
 	return result
+}
+
+func toolExecutionError(ctx context.Context, err error, timeout time.Duration, started time.Time) tool.Result {
+	// Rewrite only errors the context caused; a tool's own failure that
+	// races a cancellation must stay visible as-is.
+	switch {
+	case errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled):
+		return tool.Error(interruptedToolResult)
+	case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
+		if timeout > 0 && time.Since(started) >= timeout {
+			return tool.Error(fmt.Sprintf("error: tool call aborted after exceeding its %s time limit", timeout))
+		}
+		return tool.Error("error: tool call aborted — the request deadline expired before it finished")
+	}
+	return tool.Error(fmt.Sprintf("error: %v", err))
 }
 
 func (a *Agent) isReadOnly(tc ToolCall, tools []tool.Tool) bool {

@@ -753,8 +753,8 @@ func finalText(messages []agent.Message) string {
 			continue
 		}
 		for _, c := range m.Content {
-			if c.Text != "" {
-				b.WriteString(c.Text)
+			if c.AsText() != "" {
+				b.WriteString(c.AsText())
 			}
 		}
 	}

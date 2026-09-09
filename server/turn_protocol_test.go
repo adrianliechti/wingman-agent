@@ -48,19 +48,17 @@ func TestSnapshotHasActive(t *testing.T) {
 }
 
 func TestConvertMessagesPreservesAssistantTextIdentity(t *testing.T) {
-	messages := convertMessages([]agent.Message{{
-		Role: agent.RoleAssistant,
-		Content: []agent.Content{{
-			Text:   "answer",
-			TextID: "message-1",
-		}},
-	}})
-
-	if len(messages) != 1 || len(messages[0].Content) != 1 {
-		t.Fatalf("messages = %+v", messages)
-	}
-	if got := messages[0].Content[0]; got.Text != "answer" || got.TextID != "message-1" {
-		t.Fatalf("content = %+v", got)
+	for _, content := range []agent.Content{
+		{Text: "answer", TextID: "message-1"},
+		{Refusal: "answer", TextID: "message-1"},
+	} {
+		messages := convertMessages([]agent.Message{{Role: agent.RoleAssistant, Content: []agent.Content{content}}})
+		if len(messages) != 1 || len(messages[0].Content) != 1 {
+			t.Fatalf("messages = %+v", messages)
+		}
+		if got := messages[0].Content[0]; got.Text != "answer" || got.TextID != "message-1" {
+			t.Fatalf("content = %+v", got)
+		}
 	}
 }
 

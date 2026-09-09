@@ -52,6 +52,15 @@ type Content struct {
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
 }
 
+// AsText returns Text if present, otherwise Refusal.
+// Refusal remains separate in retained history for faithful provider replay.
+func (c Content) AsText() string {
+	if c.Text != "" {
+		return c.Text
+	}
+	return c.Refusal
+}
+
 type File struct {
 	Name string `json:"name,omitempty"`
 	Data string `json:"data,omitempty"`

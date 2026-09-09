@@ -100,9 +100,9 @@ func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
 					Text: c.Reasoning.Summary,
 				})
 
-			case c.Text != "":
+			case c.AsText() != "":
 				s.setSessionPhase(ev.SessionID, "streaming")
-				s.sendSession(ev.SessionID, Frame{Type: EvtTextDelta, ID: c.TextID, Text: c.Text})
+				s.sendSession(ev.SessionID, Frame{Type: EvtTextDelta, ID: c.TextID, Text: c.AsText()})
 			}
 		}
 		s.sendUsageIfChanged(ev.SessionID)

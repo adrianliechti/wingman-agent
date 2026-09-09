@@ -147,6 +147,19 @@ func TestScriptTextCollectorDiscardsFailedAttempt(t *testing.T) {
 	}
 }
 
+func TestScriptRefusalIsVisibleInStreamAndHistory(t *testing.T) {
+	message := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Refusal: "I cannot help with that."}}}
+	collector := &scriptTextCollector{}
+	collector.Add(message)
+	collector.Commit()
+	if got := collector.Text(); got != "I cannot help with that." {
+		t.Fatalf("streamed refusal = %q", got)
+	}
+	if got := finalAssistantText([]agent.Message{message}); got != "I cannot help with that." {
+		t.Fatalf("retained refusal = %q", got)
+	}
+}
+
 func TestScriptReporterShowsToolProgressOnlyInDebugMode(t *testing.T) {
 	args := "{\n  \"file_path\": \"pkg/agent/models.go\",\n  \"offset\": 10\n}"
 	toolCall := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{ToolCall: &agent.ToolCall{

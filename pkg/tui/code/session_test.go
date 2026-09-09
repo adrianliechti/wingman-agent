@@ -217,6 +217,30 @@ func TestCommittedTextReconcilesByMessageID(t *testing.T) {
 	}
 }
 
+func TestRefusalRendersOnceAfterCommit(t *testing.T) {
+	a, testAgent := newStreamTestApp(nil)
+	message := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
+		Refusal: "I cannot help with that.", TextID: "refusal-1",
+	}}}
+	a.handleStreamMessage(message)
+	if got := a.streamCurrent.text; got != "I cannot help with that." {
+		t.Fatalf("live refusal = %q", got)
+	}
+	testAgent.messages = append(testAgent.messages, message)
+	a.syncMessages()
+	if out := ansi.Strip(strings.Join(a.chatViewLines(100), "\n")); strings.Count(out, "I cannot help with that.") != 1 {
+		t.Fatalf("committed refusal should replace the live text: %q", out)
+	}
+	inspector := &transcriptOverlay{app: a, selected: -1, expanded: map[string]bool{}, cache: map[string]transcriptCache{}}
+	inspector.buildEntries()
+	if len(inspector.entries) != 1 {
+		t.Fatalf("refusal produced %d transcript entries", len(inspector.entries))
+	}
+	if out := ansi.Strip(strings.Join(inspector.entryLines(inspector.entries[0], 100, false), "\n")); !strings.Contains(out, "I cannot help with that.") {
+		t.Fatalf("transcript omitted refusal: %q", out)
+	}
+}
+
 func TestReleaseToolCellKeepsLiveCellUntilMatchingResult(t *testing.T) {
 	a := &App{}
 	a.streamCurrent = streamSnapshot{toolID: "call-1", toolName: "shell", toolHint: "ls"}

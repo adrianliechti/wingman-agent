@@ -347,7 +347,7 @@ func fromOutput(m *responses.ResponseOutputMessageParam) (Message, bool) {
 		}
 
 		if refusal := part.OfRefusal; refusal != nil && refusal.Refusal != "" {
-			contents = append(contents, Content{Refusal: refusal.Refusal})
+			contents = append(contents, Content{Refusal: refusal.Refusal, TextID: m.ID})
 		}
 	}
 

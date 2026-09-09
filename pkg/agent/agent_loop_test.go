@@ -600,7 +600,7 @@ func TestEndRunPreservesQueuedUserInput(t *testing.T) {
 	if err := a.recordEvents(RuntimeEvent{Type: EventTurnStarted, TurnID: "turn"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.finishTurn("turn", RuntimeInterrupted, context.Canceled, Usage{}); err != nil {
+	if err := a.finishTurn(t.Context(), "turn", RuntimeInterrupted, context.Canceled, Usage{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -763,7 +763,8 @@ func TestToolTimeoutIncludesPreHooks(t *testing.T) {
 	got := a.runSingleToolCall(context.Background(), ToolCall{Name: "slow"}, []tool.Tool{{
 		Name: "slow",
 		Execute: func(ctx context.Context, _ map[string]any) (tool.Result, error) {
-			return tool.Result{}, ctx.Err()
+			t.Error("executor started after the pre-hook exhausted its timeout")
+			return tool.Text("side effect"), nil
 		},
 	}})
 	if !strings.Contains(got.Content, "10ms time limit") {

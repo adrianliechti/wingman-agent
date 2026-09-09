@@ -146,8 +146,8 @@ func (o *transcriptOverlay) buildEntries() {
 						return cellReasoning(reasoning.Summary, width, true)
 					},
 				})
-			case strings.TrimSpace(content.Text) != "":
-				text := content.Text
+			case strings.TrimSpace(content.AsText()) != "":
+				text := content.AsText()
 				if message.Role == agent.RoleUser {
 					entries = append(entries, transcriptEntry{
 						key: baseKey + ":user", kind: transcriptUser, raw: text, selectable: true,

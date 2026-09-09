@@ -106,7 +106,6 @@ type response struct {
 
 	finishReasons []string
 
-	endTurn          *bool
 	incomplete       bool
 	incompleteReason string
 }
@@ -173,15 +172,20 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 	defer idle.Stop()
 
 	stream := client.Responses.NewStreaming(streamCtx, params)
+	defer stream.Close()
 
 	var outputItems []responses.ResponseInputItemUnionParam
 	var usageDelta Usage
 
 	pendingCalls := map[int64]*pendingToolCall{}
+	type refusalPart struct {
+		itemID string
+		index  int64
+	}
+	streamedRefusals := map[refusalPart]int{}
 
 	incomplete := false
 	incompleteReason := ""
-	var endTurn *bool
 	responseID := ""
 	responseModel := ""
 	outputStarted := false
@@ -211,6 +215,16 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 			if !yield(msg, nil) {
 				return nil, errYieldStopped
 			}
+
+		case responses.ResponseRefusalDeltaEvent:
+			telemetry.ObserveOutputChunk(ctx)
+			if !yield(Message{
+				Role:    RoleAssistant,
+				Content: []Content{{Refusal: e.Delta, TextID: e.ItemID}},
+			}, nil) {
+				return nil, errYieldStopped
+			}
+			streamedRefusals[refusalPart{e.ItemID, e.ContentIndex}] += len(e.Delta)
 
 		case responses.ResponseReasoningSummaryTextDeltaEvent:
 			telemetry.ObserveOutputChunk(ctx)
@@ -306,13 +320,6 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 			}
 
 		case responses.ResponseCompletedEvent:
-			// Codex-compatible providers can complete a response while asking
-			// the agent to continue. The SDK does not yet expose this field.
-			if raw := e.Response.JSON.ExtraFields["end_turn"].Raw(); raw != "" {
-				if err := json.Unmarshal([]byte(raw), &endTurn); err != nil {
-					return nil, fmt.Errorf("failed to parse response end_turn: %w", err)
-				}
-			}
 			usageDelta = responseToUsage(e.Response)
 			responseID = e.Response.ID
 			responseModel = e.Response.Model
@@ -371,6 +378,27 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		}
 	}
 
+	// Some providers only include refusal text in the final output. Emit any
+	// missing suffix without duplicating text already delivered as deltas.
+	for _, item := range outputItems {
+		m := item.OfOutputMessage
+		if m == nil {
+			continue
+		}
+		for i, part := range m.Content {
+			refusal := part.OfRefusal
+			if refusal == nil {
+				continue
+			}
+			seen := streamedRefusals[refusalPart{m.ID, int64(i)}]
+			if seen < len(refusal.Refusal) && !yield(Message{
+				Role: RoleAssistant, Phase: MessagePhase(m.Phase),
+				Content: []Content{{Refusal: refusal.Refusal[seen:], TextID: m.ID}},
+			}, nil) {
+				return nil, errYieldStopped
+			}
+		}
+	}
 	messages := toMessages(outputItems)
 
 	for _, m := range messages {
@@ -394,7 +422,6 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 
 		finishReasons: finishReasons,
 
-		endTurn:          endTurn,
 		incomplete:       incomplete,
 		incompleteReason: incompleteReason,
 	}, nil

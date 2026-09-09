@@ -603,7 +603,7 @@ func (c *scriptTextCollector) Add(message agent.Message) {
 	}
 	for _, content := range message.Content {
 		if !content.Hidden {
-			c.current.WriteString(content.Text)
+			c.current.WriteString(content.AsText())
 		}
 	}
 }
@@ -633,7 +633,7 @@ func finalAssistantText(messages []agent.Message) string {
 		var result strings.Builder
 		for _, content := range message.Content {
 			if !content.Hidden {
-				result.WriteString(content.Text)
+				result.WriteString(content.AsText())
 			}
 		}
 		if result.Len() > 0 {

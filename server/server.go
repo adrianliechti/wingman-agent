@@ -726,8 +726,8 @@ func convertMessages(messages []agent.Message) []ConversationMessage {
 				continue
 			}
 			cc := ConversationContent{}
-			if c.Text != "" {
-				cc.Text = c.Text
+			if c.AsText() != "" {
+				cc.Text = c.AsText()
 				cc.TextID = c.TextID
 			}
 			if c.File != nil && c.File.Data != "" {

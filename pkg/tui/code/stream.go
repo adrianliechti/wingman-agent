@@ -150,20 +150,20 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 			}
 			lines = append(lines, cell...)
 
-		case strings.TrimSpace(c.Text) != "":
+		case strings.TrimSpace(c.AsText()) != "":
 			if a.flow.gap() {
 				lines = append(lines, "")
 			}
 			switch msg.Role {
 			case agent.RoleUser:
-				a.removePendingEchoText(c.Text)
-				if isCommandEcho(c.Text) {
-					lines = append(lines, cellCommand(c.Text, width)...)
+				a.removePendingEchoText(c.AsText())
+				if isCommandEcho(c.AsText()) {
+					lines = append(lines, cellCommand(c.AsText(), width)...)
 				} else {
-					lines = append(lines, cellUser(c.Text, width)...)
+					lines = append(lines, cellUser(c.AsText(), width)...)
 				}
 			case agent.RoleAssistant:
-				lines = append(lines, cellAssistant(c.Text, width, theme.Default.Green)...)
+				lines = append(lines, cellAssistant(c.AsText(), width, theme.Default.Green)...)
 			}
 		}
 	}
@@ -230,11 +230,11 @@ func (a *App) reconcileCommittedMessage(msg agent.Message) {
 			a.releaseToolCellLocked(content.ToolResult)
 		case content.Reasoning != nil && content.Reasoning.Summary != "":
 			a.releaseReasoningLocked(content.Reasoning)
-		case strings.TrimSpace(content.Text) != "":
+		case strings.TrimSpace(content.AsText()) != "":
 			if msg.Role == agent.RoleUser {
-				a.releaseUserTextLocked(content.Text)
+				a.releaseUserTextLocked(content.AsText())
 			} else if msg.Role == agent.RoleAssistant {
-				assistantText = append(assistantText, assistantPart{content.TextID, content.Text})
+				assistantText = append(assistantText, assistantPart{content.TextID, content.AsText()})
 			}
 		}
 	}
@@ -653,14 +653,14 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 			a.streamCurrent.retryAttempt = true
 			a.streamStateMu.Unlock()
 
-		case c.Text != "":
+		case c.AsText() != "":
 			a.queuePhase(PhaseStreaming)
 			a.streamStateMu.Lock()
 			if a.streamCurrent.reasoning != "" ||
 				(a.streamCurrent.text != "" && c.TextID != "" && a.streamCurrent.textID != "" && c.TextID != a.streamCurrent.textID) {
 				a.archiveStreamStateLocked()
 			}
-			a.streamCurrent.text += c.Text
+			a.streamCurrent.text += c.AsText()
 			a.streamCurrent.textID = c.TextID
 			a.streamCurrent.retryAttempt = true
 			a.streamStateMu.Unlock()
