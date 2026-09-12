@@ -190,7 +190,7 @@ func (a *App) attachmentLines(width int) []string {
 
 	t := theme.Default
 	chip := func(label string) string {
-		return ansi.Bg(t.Selection) + fg(t.Cyan) + " " + label + " " + ansi.Reset
+		return surfaceLine(colored(t.Cyan, " "+label+" "), ansi.Width(label)+2, t.Surface)
 	}
 
 	var labels []string

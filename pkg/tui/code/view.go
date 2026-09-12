@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -15,8 +16,6 @@ import (
 )
 
 func (a *App) welcomeLines(width int) []string {
-	t := theme.Default
-
 	center := func(text string) string {
 		pad := max((width-ansi.Width(text))/2, 0)
 		return strings.Repeat(" ", pad) + text
@@ -25,11 +24,8 @@ func (a *App) welcomeLines(width int) []string {
 	var lines []string
 
 	if width > 66 {
-		colors := []string{
-			fg(t.Blue), fg(t.Cyan), fg(t.Green), fg(t.Yellow), fg(t.Red), fg(t.Magenta),
-		}
 		for i, l := range tui.LogoLines {
-			lines = append(lines, center(colors[i%len(colors)]+l+ansi.Reset))
+			lines = append(lines, center(colored(theme.LogoColors[i%len(theme.LogoColors)], l)))
 		}
 	} else {
 		lines = append(lines, center(bold("wingman")))
@@ -48,7 +44,7 @@ func (a *App) welcomeLines(width int) []string {
 
 func (a *App) composerChrome(width int) EditorChrome {
 	t := theme.Default
-	color := t.BrBlack
+	color := t.Border
 	modeLabel := ""
 	currentMode := a.currentMode()
 	planMode := currentMode == code.PlanModeID
@@ -121,6 +117,7 @@ type streamCellKey struct {
 	hidden                                                 bool
 	user, text, headings, toolName, toolHint, toolProgress string
 	toolResult                                             *agent.ToolResult
+	directory                                              string
 	width                                                  int
 	theme                                                  theme.Theme
 }
@@ -130,11 +127,11 @@ type streamCellCache struct {
 	user, tool, assistant, reasoning []string
 }
 
-func (c *streamCellCache) update(snapshot streamSnapshot, width int, hidden bool) {
+func (c *streamCellCache) update(snapshot streamSnapshot, width int, hidden bool, directory string) {
 	key := streamCellKey{
 		user: snapshot.userText, text: snapshot.text, headings: snapshot.reasoningHeadings,
 		toolName: snapshot.toolName, toolHint: snapshot.toolHint, toolProgress: snapshot.toolProgress,
-		toolResult: snapshot.toolResult, width: width, hidden: hidden, theme: theme.Default,
+		toolResult: snapshot.toolResult, width: width, hidden: hidden, theme: theme.Default, directory: directory,
 	}
 	if c.key == key {
 		return
@@ -151,7 +148,7 @@ func (c *streamCellCache) update(snapshot streamSnapshot, width int, hidden bool
 		c.tool = snapshot.toolLines(width, false)
 	}
 	if strings.TrimSpace(key.text) != "" {
-		c.assistant = cellAssistant(key.text, width, key.theme.BrBlack)
+		c.assistant = cellAssistant(key.text, width, key.theme.BrBlack, key.directory)
 	}
 	if key.headings != "" {
 		c.reasoning = cellReasoningHeadings(key.headings, width)
@@ -167,6 +164,10 @@ func (c *streamCellCache) update(snapshot streamSnapshot, width int, hidden bool
 // copy of the state).
 func (a *App) streamCells(width int) []string {
 	snapshots := a.snapshotStreamState()
+	directory := ""
+	if a.agent != nil {
+		directory = a.agent.Workspace().RootPath
+	}
 	if len(a.streamCellCache) > len(snapshots) {
 		clear(a.streamCellCache[len(snapshots):])
 		a.streamCellCache = a.streamCellCache[:len(snapshots)]
@@ -181,7 +182,7 @@ func (a *App) streamCells(width int) []string {
 	for i, snapshot := range snapshots {
 		cached := &a.streamCellCache[i]
 		hidden := snapshot.toolName != "" && a.isToolHidden(snapshot.toolName)
-		cached.update(snapshot, width, hidden)
+		cached.update(snapshot, width, hidden, directory)
 		if snapshot.userText != "" {
 			if flow.gap() {
 				lines = append(lines, "")
@@ -226,6 +227,7 @@ func (a *App) streamCells(width int) []string {
 // status-rich composer and popup or footer pinned at the bottom. Queued input
 // previews live at the tail of the scrollable chat until their turns start.
 func (a *App) render() {
+	a.motion.nextFrame = 0
 	termWidth, height := a.term.Size()
 	if termWidth <= 0 || height <= 0 {
 		return
@@ -259,13 +261,17 @@ func (a *App) render() {
 
 	if listPopup {
 		if a.popup.kind == popupPalette {
-			a.popup.maxRows = max(3, min(10, height/3))
+			a.popup.maxRows = max(1, min(10, height/3))
 		} else {
 			a.popup.maxRows = max(5, min(14, height/2))
 		}
-		bottom = append(bottom, "")
+		if height >= 5 {
+			bottom = append(bottom, "")
+		}
 		bottom = append(bottom, a.popup.Render(width)...)
-		bottom = append(bottom, "")
+		if height >= 5 {
+			bottom = append(bottom, "")
+		}
 
 		// A long question must not push the options off-screen: keep the
 		// tail, which holds the items.
@@ -281,11 +287,15 @@ func (a *App) render() {
 
 		var editorLines []string
 		editorLines, cursor = a.editor.Render(width, maxEditorRows, a.composerChrome(width))
+		a.renderComposerSparkle(editorLines, cursor, width, time.Now())
 		hasCursor = true
 		editorStart = len(bottom)
 		bottom = append(bottom, editorLines...)
 
 		if a.popup != nil {
+			if a.popup.kind == popupCommands {
+				a.popup.maxRows = max(1, min(popupMaxRows, height-len(bottom)-1))
+			}
 			bottom = append(bottom, a.popup.Render(width)...)
 		} else {
 			bottom = append(bottom, a.footerLine(width))
@@ -352,7 +362,7 @@ func (a *App) render() {
 			if to <= from {
 				to = from + 1
 			}
-			line = ansi.Highlight(line, from, to, ansi.Reverse)
+			line = ansi.Highlight(line, from, to, fg(theme.Default.Foreground)+ansi.Bg(theme.Default.Selection))
 		}
 
 		frame = append(frame, line)
@@ -374,13 +384,13 @@ func (a *App) render() {
 	}
 
 	if panelWidth > 0 {
-		divider := colored(theme.Default.BrBlack, "│")
+		padding := ansi.Reset + " " + panelLine(" ", 1)
 		panel := a.diffPanel.render(panelWidth, height)
 		for len(frame) < height {
 			frame = append(frame, "")
 		}
 		for i := range height {
-			frame[i] = ansi.Pad(ansi.Truncate(frame[i], width, "…"), width) + " " + divider + panel[i]
+			frame[i] = ansi.Pad(ansi.Truncate(frame[i], width, "…"), width) + padding + panel[i]
 		}
 	}
 

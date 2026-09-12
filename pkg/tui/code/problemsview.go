@@ -89,7 +89,7 @@ func (a *App) showDiagnosticsOverlay(files []fileDiagnostics, report language.Wo
 		}
 
 		if selected {
-			return colored(t.Cyan, "→ ") + colored(iconColor, "●") + " " + colored(t.Cyan, f.Path) + " " + stats
+			return colored(t.Cyan, "› ") + colored(iconColor, "●") + " " + colored(t.Foreground, f.Path) + " " + stats
 		}
 		return "  " + colored(iconColor, "●") + " " + f.Path + " " + stats
 	}

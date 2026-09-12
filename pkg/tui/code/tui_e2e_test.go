@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -196,6 +198,43 @@ func TestTUIE2EPasteWaitsForExplicitSubmit(t *testing.T) {
 				t.Fatalf("submitted paste = %q", text)
 			}
 		})
+	}
+}
+
+func TestTUIE2EMultilineCollapsedPasteAndExport(t *testing.T) {
+	model := tuiModelServer(t)
+	defer model.Close()
+	t.Setenv("WINGMAN_URL", model.URL)
+	t.Setenv("WINGMAN_MODEL", "gpt-5.4")
+	t.Setenv("WINGMAN_CALLER", "e2e")
+	h := newTUIE2EHarness(t)
+	pasted := strings.Repeat("日本語 and exact paste content\n", 50)
+	input := "first\x1b[13;2usecond\x1b\rthird\x1b[13;3ufourth\x1b[27;2;13~fifth\x1b[106;5u"
+	input += "\x1b[200~" + pasted + "\x1b[201~tail"
+	if _, err := io.WriteString(h.input, input); err != nil {
+		t.Fatal(err)
+	}
+	waitForTUI(t, func() bool {
+		return strings.Contains(h.output.Text(), "[Paste 1") && strings.Contains(h.output.Text(), "tail")
+	})
+	if messages := h.agent.Messages(h.sessionID); len(messages) != 0 {
+		t.Fatalf("modified Enter or paste submitted prematurely: %+v", messages)
+	}
+	h.postText(t, "")
+	waitForTUI(t, func() bool { return len(h.agent.Messages(h.sessionID)) >= 2 && h.app.getPhase() == PhaseIdle })
+	want := "first\nsecond\nthird\nfourth\nfifth\n" + pasted + "tail"
+	if got := h.agent.Messages(h.sessionID)[0].Content[0].Text; got != want {
+		t.Fatalf("submitted text lost multiline input or collapsed payload: %q", got)
+	}
+	path := filepath.Join(t.TempDir(), "conversation with spaces.md")
+	h.postText(t, "/export \""+path+"\"")
+	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "Saved ") })
+	document, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(document), want) || !strings.Contains(string(document), "E2E reply") {
+		t.Fatalf("export did not save the conversation source: %v, %q", err, document)
+	}
+	if len(h.agent.Messages(h.sessionID)) != 2 {
+		t.Fatal("export was sent to the model as a prompt")
 	}
 }
 

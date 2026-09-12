@@ -30,7 +30,7 @@ func formatElapsed(d time.Duration) string {
 
 // activityStatus renders transient model/tool state for the existing footer
 // row, keeping the composer rails stable while a turn runs.
-func (a *App) activityStatus() string {
+func (a *App) activityStatus(width int) string {
 	t := theme.Default
 	phase := a.getPhase()
 
@@ -41,6 +41,9 @@ func (a *App) activityStatus() string {
 	}
 
 	frame := spinnerFrames[a.spinnerFrame%len(spinnerFrames)]
+	if !a.motion.enabled || !a.termFocused {
+		frame = "•"
+	}
 
 	var label string
 	var color = t.Cyan
@@ -50,17 +53,24 @@ func (a *App) activityStatus() string {
 		label, color = "Preparing", t.BrBlack
 	case PhaseThinking, PhaseStreaming:
 		label, color = "Thinking", t.Cyan
+		if summary := a.reasoningStatus(); summary != "" {
+			label = summary
+		}
 	case PhaseToolRunning:
 		label, color = "Running", t.Yellow
 	}
 
-	line := colored(color, frame+" "+label)
-
+	suffix := ""
 	if phase != PhasePreparing && !a.phaseStart.IsZero() {
-		line += dim(" " + formatElapsed(time.Since(a.phaseStart)) + " · esc interrupt")
+		suffix = " " + formatElapsed(time.Since(a.phaseStart)) + " · esc interrupt"
 	}
-
-	return line
+	label = ansi.Truncate(label, max(width-ansi.Width(suffix)-2, 1), "…")
+	styled := colored(color, label)
+	if a.motion.enabled && a.termFocused && !a.selecting && !a.selActive {
+		styled = shimmerStatus(label, time.Since(a.phaseStart), color)
+		a.motion.schedule(50 * time.Millisecond)
+	}
+	return colored(color, frame+" ") + styled + dim(suffix)
 }
 
 func (a *App) contextLeftPercent() (int, bool) {
@@ -141,7 +151,7 @@ func (a *App) footerLine(width int) string {
 		return withRight(colored(a.toast.color, a.toast.message))
 	}
 
-	if activity := a.activityStatus(); activity != "" {
+	if activity := a.activityStatus(width - 2*len(cellIndent) - ansi.Width(rightText)); activity != "" {
 		return withRight(activity)
 	}
 
@@ -165,13 +175,12 @@ func (a *App) footerLine(width int) string {
 		hint("tab", "plan"),
 		hint("ctrl+o", "transcript"),
 	}
-
 	_, current := a.agent.Modes(a.sessionID)
 	if current == code.PlanModeID {
 		hints[2] = hint("tab", "agent")
 	}
-	if a.diffPanelShowing {
-		hints = append(hints, hint("/diff", "hide diff"))
+	if a.editor != nil && len(a.editor.pastes) > 0 {
+		hints = append([]string{hint("alt+e", "expand paste")}, hints...)
 	}
 
 	sep := dim("  ")

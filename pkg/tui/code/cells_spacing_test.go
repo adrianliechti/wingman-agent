@@ -105,8 +105,8 @@ func TestStreamingReasoningUsesStableChatHeading(t *testing.T) {
 		t.Fatalf("tail did not isolate the stable reasoning heading: %q", tail)
 	}
 	footer := ansi.Strip(a.footerLine(80))
-	if !strings.Contains(footer, "Thinking") || strings.Contains(footer, "Planning the next step") {
-		t.Fatalf("footer did not remain generic activity: %q", footer)
+	if !strings.Contains(footer, "Planning the next step") || strings.Contains(footer, "more detail") {
+		t.Fatalf("footer did not use the stable reasoning heading: %q", footer)
 	}
 }
 

@@ -157,7 +157,7 @@ func (p *diffPanel) render(width, height int) []string {
 		}
 	}
 	if sticky != "" && rows > 2 {
-		out = append(out, pin(bold(sticky)), pin(colored(theme.Default.BrBlack, strings.Repeat("─", width))))
+		out = append(out, pin(bold(sticky)), pin(colored(theme.Default.Border, strings.Repeat("─", width))))
 		rows -= 2
 	}
 
@@ -168,6 +168,9 @@ func (p *diffPanel) render(width, height int) []string {
 		}
 		marker := scrollMarker(row, rows, p.offset, len(p.lines))
 		out = append(out, ansi.Pad(ansi.Truncate(line, content, "…"), content)+marker)
+	}
+	for i := range out {
+		out[i] = panelLine(out[i], width)
 	}
 	return out[:min(len(out), height)]
 }
@@ -204,7 +207,7 @@ func renderDiffPanelLines(diffs []changes.FileDiff, err error, width int) (heade
 	}
 
 	for _, diff := range diffs {
-		rule := colored(t.BrBlack, strings.Repeat("─", width))
+		rule := colored(t.Border, strings.Repeat("─", width))
 		lines = append(lines, "", rule)
 		sections = append(sections, diffSection{path: diff.Path, nameRow: len(lines)})
 		lines = append(lines, bold(ansi.Truncate(diff.Path, width, "…")), "")

@@ -163,7 +163,7 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 					lines = append(lines, cellUser(c.AsText(), width)...)
 				}
 			case agent.RoleAssistant:
-				lines = append(lines, cellAssistant(c.AsText(), width, theme.Default.Green)...)
+				lines = append(lines, cellAssistant(c.AsText(), width, theme.Default.Green, a.agent.Workspace().RootPath)...)
 			}
 		}
 	}

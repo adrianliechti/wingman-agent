@@ -254,6 +254,10 @@ func (in *inputReader) consumeEscape() {
 			in.emit(key)
 			return
 		}
+		if key, ok := extendedKey(seq); ok {
+			in.emit(key)
+			return
+		}
 	}
 	switch seq {
 	case "I":
