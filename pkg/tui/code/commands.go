@@ -23,8 +23,9 @@ type slashCommand struct {
 	Hint string
 
 	// Busy marks commands that stay usable while a turn is running.
-	Busy bool
-	Run  func(a *App)
+	Busy    bool
+	Run     func(a *App)
+	RunArgs func(a *App, args string)
 }
 
 func (c slashCommand) Label() string {
@@ -38,6 +39,8 @@ func (a *App) builtinCommands() []slashCommand {
 	cmds := []slashCommand{
 		{Name: "/help", Desc: "Open command center", Busy: true, Run: (*App).showHelp},
 		{Name: "/model", Desc: "Select AI model and effort", Run: (*App).showModelPicker},
+		{Name: "/copy", Desc: "Copy a response, code block, or blockquote", Busy: true, Run: (*App).showCopyPicker},
+		{Name: "/export", Desc: "Export conversation as Markdown (optional file path)", Busy: true, Run: (*App).showExportPicker, RunArgs: (*App).exportTranscript},
 	}
 	modes, _ := a.agent.Modes(a.sessionID)
 	for _, mode := range modes {
@@ -77,8 +80,9 @@ func (a *App) builtinCommands() []slashCommand {
 
 func (a *App) findBuiltin(query string) *slashCommand {
 	cmds := a.builtinCommands()
+	name, _, _ := strings.Cut(query, " ")
 	for i := range cmds {
-		if cmds[i].Name == query {
+		if cmds[i].Name == query || cmds[i].RunArgs != nil && cmds[i].Name == name {
 			return &cmds[i]
 		}
 	}
@@ -217,10 +221,6 @@ func (a *App) syncCommandPopup() {
 
 	a.cmdTokenStart = start
 	a.popup.SetQuery(token)
-
-	if a.popup.Empty() {
-		a.closePopup()
-	}
 }
 
 // completeCommand replaces the slash token at the cursor with the selected
@@ -279,7 +279,11 @@ func (a *App) submitInput() {
 
 	if cmd != nil {
 		a.editor.SetText("")
-		cmd.Run(a)
+		if cmd.RunArgs != nil {
+			cmd.RunArgs(a, strings.TrimSpace(strings.TrimPrefix(query, cmd.Name)))
+		} else {
+			cmd.Run(a)
+		}
 		return
 	}
 

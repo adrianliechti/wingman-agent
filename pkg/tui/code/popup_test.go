@@ -23,7 +23,7 @@ func TestPopupArrowsKeepSelectionVisibleAndStopAtBoundaries(t *testing.T) {
 			if !ok || item.ID != items[want].ID {
 				t.Fatalf("selected %+v, want %s", item, items[want].ID)
 			}
-			if output := ansi.Strip(strings.Join(popup.Render(80), "\n")); !strings.Contains(output, "→   "+items[want].Label) {
+			if output := ansi.Strip(strings.Join(popup.Render(80), "\n")); !strings.Contains(output, "›   "+items[want].Label) {
 				t.Fatalf("selected command was not visible: %s", output)
 			}
 		}
@@ -63,7 +63,7 @@ func TestPopupRecoversAfterEmptySearchAndCanAcceptEmptyMulti(t *testing.T) {
 	}
 }
 
-func TestPaletteFilterKeepsGroupsContiguousWithSingleHeaders(t *testing.T) {
+func TestPaletteFilterKeepsGroupsContiguousWithoutAddingHeadingRows(t *testing.T) {
 	items := []PopupItem{
 		{ID: "a", Label: "/diff", Detail: "Show changes from baseline", Group: "Workspace", Keywords: "diff"},
 		{ID: "b", Label: "/problems", Detail: "Show problems", Group: "Workspace", Keywords: "problems"},
@@ -90,20 +90,119 @@ func TestPaletteFilterKeepsGroupsContiguousWithSingleHeaders(t *testing.T) {
 		last = group
 	}
 
-	headers := map[string]int{}
-	for _, line := range p.Render(120) {
-		switch text := strings.TrimSpace(ansi.Strip(line)); text {
-		case "WORKSPACE", "SESSION", "AGENT", "APPLICATION":
-			headers[text]++
+	lines := p.Render(120)
+	if len(lines) != len(items)+2 {
+		t.Fatalf("group headers changed the viewport height: %q", lines)
+	}
+	if footer := ansi.Strip(lines[len(lines)-1]); !strings.Contains(footer, p.items[p.filtered[p.index]].Group) {
+		t.Fatalf("selected category missing from footer: %q", footer)
+	}
+}
+
+func TestCommandListKeepsGeometryAcrossFilteringAndScrolling(t *testing.T) {
+	items := make([]PopupItem, 20)
+	for i := range items {
+		items[i] = PopupItem{ID: fmt.Sprint(i), Label: fmt.Sprintf("/command-%02d", i), Detail: "A description", Group: fmt.Sprintf("group %d", i/3)}
+	}
+	for _, kind := range []popupKind{popupCommands, popupPalette} {
+		p := newPopup(kind, "commands", items, nil)
+		p.maxRows = 5
+		height := len(p.Render(80))
+		for _, query := range []string{"/command", "/command-01", "/missing", "", "/command-1"} {
+			p.SetQuery(query)
+			for _, width := range []int{8, 30, 80, 120} {
+				lines := p.Render(width)
+				if len(lines) != height {
+					t.Fatalf("kind %d query %q moved the composer: %d rows, want %d", kind, query, len(lines), height)
+				}
+				for _, line := range lines {
+					if ansi.Width(line) > width {
+						t.Fatalf("command row overflowed width %d: %q", width, line)
+					}
+				}
+			}
+		}
+		p.SetQuery("")
+		for range len(items) {
+			p.HandleKey(inline.KeyEvent{Key: inline.KeyDown})
+			if len(p.Render(80)) != height {
+				t.Fatal("crossing a group boundary moved the composer")
+			}
 		}
 	}
-	if len(headers) == 0 {
-		t.Fatal("no group headers rendered")
+}
+
+func TestCommandSearchPreservesSelectionAndColumnPositions(t *testing.T) {
+	p := newPopup(popupPalette, "commands", []PopupItem{
+		{ID: "one", Label: "/alpha", Detail: "first description", Group: "Workspace"},
+		{ID: "two", Label: "/alphabet-long", Detail: "second description", Group: "Workspace", Checked: true, Shortcut: "ctrl+a"},
+		{ID: "three", Label: "/beta", Detail: "third description", Group: "Agent"},
+	}, nil)
+	p.SelectID("two")
+	before := p.Render(100)
+	p.SetQuery("alphabet")
+	after := p.Render(100)
+	if item, ok := p.Current(); !ok || item.ID != "two" {
+		t.Fatalf("search changed the selected command: %+v", item)
 	}
-	for header, count := range headers {
-		if count > 1 {
-			t.Fatalf("header %s rendered %d times", header, count)
+	if !strings.Contains(ansi.Strip(after[0]), "alphabet") {
+		t.Fatalf("search query was not visible: %q", after[0])
+	}
+	var labelColumn, detailColumn, shortcutColumn int
+	for _, lines := range [][]string{before, after} {
+		for _, line := range lines {
+			plain := ansi.Strip(line)
+			if !strings.Contains(plain, "/alphabet-long") {
+				continue
+			}
+			label, detail, shortcut := strings.Index(plain, "/alphabet-long"), strings.Index(plain, "second description"), strings.Index(plain, "ctrl+a")
+			if labelColumn != 0 && (label != labelColumn || detail != detailColumn || shortcut != shortcutColumn) {
+				t.Fatalf("search moved columns: %q", plain)
+			}
+			labelColumn, detailColumn, shortcutColumn = label, detail, shortcut
 		}
+	}
+	if labelColumn < 0 || detailColumn <= labelColumn || shortcutColumn <= detailColumn {
+		t.Fatal("command columns were not rendered")
+	}
+}
+
+func TestCommandSearchKeepsScrollPositionWhenQueryIsUnchanged(t *testing.T) {
+	items := make([]PopupItem, 12)
+	for i := range items {
+		items[i] = PopupItem{ID: fmt.Sprint(i), Label: fmt.Sprintf("/command-%d", i)}
+	}
+	p := newPopup(popupCommands, "", items, nil)
+	p.maxRows = 4
+	p.SelectID("7")
+	before := strings.Join(p.Render(80), "\n")
+	p.SetQuery(p.query)
+	if after := strings.Join(p.Render(80), "\n"); after != before {
+		t.Fatal("unchanged command query reset the scroll position")
+	}
+}
+
+func TestCommandSearchSelectsNameMatchesBeforeDescriptionMatches(t *testing.T) {
+	p := newPopup(popupPalette, "commands", []PopupItem{
+		{ID: "context", Label: "Manage context", Detail: "Attach or remove images and workspace files", Group: "Workspace"},
+		{ID: "model", Label: "/model", Detail: "Select AI model and effort", Group: "Agent"},
+		{ID: "models", Label: "/model-tools", Detail: "Other model commands", Group: "Agent"},
+	}, nil)
+	for _, query := range []string{"m", "mo", "mod", "model"} {
+		p.SetQuery(query)
+	}
+	if item, _ := p.Current(); item.ID != "model" {
+		t.Fatalf("model search selected a description match: %+v", item)
+	}
+	p.SetQuery("mo")
+	p.SelectID("models")
+	p.SetQuery("mod")
+	if item, _ := p.Current(); item.ID != "models" {
+		t.Fatalf("search reset a matching manual selection: %+v", item)
+	}
+	p.SetQuery("model")
+	if item, _ := p.Current(); item.ID != "model" {
+		t.Fatalf("exact command did not take precedence: %+v", item)
 	}
 }
 

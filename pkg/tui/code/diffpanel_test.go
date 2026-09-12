@@ -117,8 +117,8 @@ func TestRenderSplitsWideTerminalForDiffPanel(t *testing.T) {
 		t.Fatal("render did not mark the panel as showing")
 	}
 	text := ansi.Strip(out.String())
-	if !strings.Contains(text, "2 files changed") || !strings.Contains(text, "hide diff") {
-		t.Fatalf("frame lacks the panel or its footer hint:\n%s", text)
+	if !strings.Contains(text, "2 files changed") || strings.Contains(text, "hide diff") {
+		t.Fatalf("frame lacks the panel or restored the removed footer hint:\n%s", text)
 	}
 
 	// Hiding the panel hands the full width back to the chat.

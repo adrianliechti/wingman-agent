@@ -609,13 +609,14 @@ Toggle between modes using `Tab` or the explicit `/plan` and `/agent` commands.
 | Shortcut | Action |
 |----------|--------|
 | `Enter` | Send message |
-| `Ctrl+J` | Insert a new line |
+| `Alt+Enter` / `Shift+Enter` / `Ctrl+J` | Insert a new line (Shift+Enter requires terminal support) |
 | `Ctrl+P` | Open the searchable command center |
 | `Tab` | Toggle Agent/Plan mode (or autocomplete slash commands) |
 | `@` | Open fuzzy file picker to add file context |
 | `Ctrl+V` / `Ctrl+Alt+V` | Paste image or text directly from the system clipboard on macOS and Windows (including WSL) |
 | `Shift+Insert` | Paste using the terminal, or Wingman's clipboard action when the key is forwarded |
 | `Cmd+V` / `Ctrl+Shift+V` | Paste text using the terminal's native shortcut |
+| `Alt+E` | Expand collapsed pastes for editing |
 | `Ctrl+O` | Open the searchable transcript inspector |
 | `Ctrl+Y` | Copy the complete last assistant response to clipboard |
 | `Ctrl+L` | Clear chat history |
@@ -628,6 +629,30 @@ captures `Ctrl+V`, use `Ctrl+Alt+V` to invoke Wingman's clipboard reader. Under 
 Wingman falls back to the Windows clipboard when the Linux clipboard is unavailable
 or empty. In a remote SSH session, use the terminal's native text paste.
 
+Wingman requests extended keyboard reporting to distinguish `Shift+Enter` from
+`Enter`. Terminals that send the same bytes for both require `Alt+Enter` or
+`Ctrl+J` instead. On macOS, Option must act as Alt/Esc for `Alt+Enter` and `Alt+E`.
+
+Pastes of at least 1,000 characters or nine lines collapse into compact labels.
+The full text is sent when you submit; arrows and deletion treat each label as
+one unit. Use `Alt+E` to expand the text before editing it.
+
+File references in assistant Markdown links, and existing paths in inline code,
+are clickable in terminals supporting OSC 8 hyperlinks. References such as
+`src/main.go:42` retain the line number in the destination; opening at that line
+depends on the terminal and file handler. Tables wrap to the available chat
+width and switch to labeled records on narrow screens.
+
+The empty composer sparkles while Wingman is idle, including between turns,
+and active status text shimmers. Sparkle pauses during input, work, menus,
+and when the terminal loses focus. Set
+`WINGMAN_ANIMATIONS=0` to disable both effects; `NO_COLOR` and `TERM=dumb` also
+disable animation.
+
+The TUI detects the terminal's light or dark background at startup. Set
+`WINGMAN_THEME=light` or `WINGMAN_THEME=dark` to choose explicitly, including
+when the terminal does not report its background color.
+
 ## 📝 Commands
 
 | Command | Description |
@@ -638,6 +663,8 @@ or empty. In a remote SSH session, use the terminal's native text paste.
 | `/agent` | Return to execution mode |
 | `/problems` | Show LSP diagnostics for the workspace |
 | `/diff` | Show working tree changes; on wide terminals toggles a live diff pane beside the chat |
+| `/copy` | Copy the last response, an individual code block, or a blockquote |
+| `/export [path]` | Copy a Markdown transcript or save it to a new file; relative paths use the workspace directory |
 | `/resume` | Resume the most recent saved session |
 | `/clear` | Clear chat history |
 | `/quit` | Exit application |

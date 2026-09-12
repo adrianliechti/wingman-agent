@@ -112,9 +112,9 @@ func (p *pager) Render(width, height int) []string {
 	head := cellIndent + bold(p.title)
 	ruleWidth := max(width-2*len(cellIndent), 10)
 	pct := fmt.Sprintf(" %d%% ", percent)
-	rule := strings.Repeat("─", ruleWidth-ansi.Width(pct)-2) + pct + "──"
+	rule := colored(t.Border, strings.Repeat("─", ruleWidth-ansi.Width(pct)-2)) + dim(pct) + colored(t.Border, "──")
 
-	lines := []string{head, cellIndent + colored(t.BrBlack, rule)}
+	lines := []string{head, cellIndent + rule}
 
 	end := min(p.offset+rows, len(p.lines))
 

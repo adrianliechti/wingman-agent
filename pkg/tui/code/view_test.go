@@ -2,6 +2,7 @@ package code
 
 import (
 	"context"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -148,6 +149,35 @@ func TestSurfacesFitResponsiveWidths(t *testing.T) {
 		a.popup.maxRows = 8
 		check("command center", width, a.popup.Render(width))
 		a.popup = nil
+	}
+}
+
+func TestCommandFilteringKeepsComposerAndChatAnchored(t *testing.T) {
+	for _, height := range []int{8, 24} {
+		term := inline.NewTerminal(inline.WithIO(strings.NewReader(""), io.Discard, func() (int, int) { return 80, height }))
+		term.Resized(80, height)
+		term.EnterAlt()
+		a := &App{ctx: context.Background(), agent: newUITestAgent(nil), editor: NewEditor()}
+		a.WithTerminal(term)
+		a.editor.SetText("/")
+		a.syncCommandPopup()
+		a.render()
+		chatRows := a.lastChatRows
+		for _, query := range []string{"/co", "/copy", "/no-such-command", "/"} {
+			a.editor.SetText(query)
+			a.syncCommandPopup()
+			if a.popup == nil {
+				t.Fatalf("filter %q closed and moved the list", query)
+			}
+			a.render()
+			if a.lastChatRows != chatRows {
+				t.Fatalf("height %d, filter %q changed chat rows from %d to %d", height, query, chatRows, a.lastChatRows)
+			}
+			editorLines, _ := a.editor.Render(80, 5, a.composerChrome(80))
+			if len(editorLines)+len(a.popup.Render(80)) > height {
+				t.Fatal("command list pushed the composer off-screen")
+			}
+		}
 	}
 }
 

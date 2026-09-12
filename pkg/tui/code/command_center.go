@@ -12,7 +12,7 @@ func builtinGroup(name string) string {
 	switch name {
 	case "/diff", "/problems", "/context":
 		return "Workspace"
-	case "/resume", "/recap", "/clear":
+	case "/resume", "/recap", "/clear", "/copy", "/export":
 		return "Session"
 	case "/model", "/agent", "/plan", "/unattended", "/tasks":
 		return "Agent"
@@ -133,9 +133,11 @@ func (a *App) refreshCommandCenter() {
 	}
 
 	a.showCommandCenter()
+	a.popup.maxRows = previous.maxRows
 	a.popup.SetQuery(previous.query)
 	if item, ok := previous.Current(); ok {
 		a.popup.SelectID(item.ID)
+		a.popup.offset = max(a.popup.index-(previous.index-previous.offset), 0)
 	}
 }
 

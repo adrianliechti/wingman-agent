@@ -92,6 +92,8 @@ func (s popupSource) String(i int) string {
 func (s popupSource) Len() int { return len(s.items) }
 
 func (p *Popup) SetQuery(query string) {
+	previous, hadPrevious := p.Current()
+	previousRow := p.index - p.offset
 	changed := query != p.query
 	p.query = query
 	p.filtered = p.filtered[:0]
@@ -112,8 +114,8 @@ func (p *Popup) SetQuery(query string) {
 			p.filtered = append(p.filtered, m.Index)
 		}
 		if p.kind == popupPalette {
-			// Fuzzy results arrive in score order; regrouping keeps each
-			// group header rendering once while scores order items within.
+			// Search filters the catalog in place, keeping familiar commands
+			// in their original order as the query grows.
 			rank := make(map[string]int, len(p.items))
 			for i, item := range p.items {
 				if _, ok := rank[item.Group]; !ok {
@@ -121,11 +123,43 @@ func (p *Popup) SetQuery(query string) {
 				}
 			}
 			slices.SortStableFunc(p.filtered, func(left, right int) int {
-				return cmp.Compare(rank[p.items[left].Group], rank[p.items[right].Group])
+				if order := cmp.Compare(rank[p.items[left].Group], rank[p.items[right].Group]); order != 0 {
+					return order
+				}
+				return cmp.Compare(left, right)
 			})
 		}
 	}
 
+	if changed && p.commandList() {
+		best, bestRank := -1, 3
+		for i, idx := range p.filtered {
+			item := p.items[idx]
+			if item.Disabled {
+				continue
+			}
+			rank := commandMatchRank(item.Label, query)
+			if rank < bestRank || rank == bestRank && hadPrevious && item.ID == previous.ID {
+				best, bestRank = i, rank
+			}
+		}
+		if best >= 0 {
+			p.index, p.offset = best, 0
+			if hadPrevious && p.items[p.filtered[best]].ID == previous.ID {
+				p.offset = max(best-previousRow, 0)
+			}
+			return
+		}
+	}
+	if hadPrevious && !changed {
+		for i, idx := range p.filtered {
+			if p.items[idx].ID == previous.ID {
+				p.index = i
+				p.offset = max(i-previousRow, 0)
+				return
+			}
+		}
+	}
 	if changed || p.index < 0 || p.index >= len(p.filtered) {
 		p.index = 0
 		for i, idx := range p.filtered {
@@ -294,6 +328,9 @@ func (p *Popup) HandleKey(ev inline.KeyEvent) (bool, bool) {
 }
 
 func (p *Popup) Render(width int) []string {
+	if p.commandList() {
+		return p.renderCommands(width)
+	}
 	t := theme.Default
 
 	var lines []string
@@ -328,38 +365,25 @@ func (p *Popup) Render(width int) []string {
 
 	end := min(p.offset+visible, len(p.filtered))
 
-	inner := max(width-len(cellIndent), 20)
+	inner := max(width-len(cellIndent), 1)
 
 	for i := p.offset; i < end; i++ {
 		item := p.items[p.filtered[i]]
-		if p.kind == popupPalette && item.Group != "" {
-			previousGroup := ""
-			if i > p.offset {
-				previousGroup = p.items[p.filtered[i-1]].Group
-			}
-			if i == p.offset || item.Group != previousGroup {
-				lines = append(lines, cellIndent+dim("  "+strings.ToUpper(item.Group)))
-			}
-		}
-
 		marker := "  "
 		if p.multi {
 			marker = dim("□ ")
 			if p.selected[item.ID] {
 				marker = colored(t.Cyan, "■ ")
 			}
-		}
-
-		check := ""
-		if item.Checked {
-			check = colored(t.Green, "✓ ")
+		} else if item.Checked {
+			marker = colored(t.Cyan, "✓ ")
 		}
 
 		var line string
 		if i == p.index {
-			line = colored(t.Cyan, "→ ") + marker + check + fg(t.Cyan) + item.Label + ansi.Reset
+			line = colored(t.Cyan, "› ") + marker + colored(t.Foreground, item.Label)
 		} else {
-			line = "  " + marker + check + item.Label
+			line = "  " + marker + colored(t.Foreground, item.Label)
 		}
 
 		detail := item.Detail
@@ -375,6 +399,9 @@ func (p *Popup) Render(width int) []string {
 		if item.Disabled {
 			line = dim(ansi.Strip(line))
 		}
+		if i == p.index {
+			line = selectionLine(line, inner)
+		}
 
 		lines = append(lines, cellIndent+ansi.Truncate(line, inner, "…")+ansi.Reset)
 	}
@@ -382,9 +409,5 @@ func (p *Popup) Render(width int) []string {
 	if len(p.filtered) > visible {
 		lines = append(lines, cellIndent+dim(fmt.Sprintf("  (%d/%d)", p.index+1, len(p.filtered))))
 	}
-	if p.kind == popupPalette {
-		lines = append(lines, cellIndent+ansi.Truncate(dim("  ↑↓ navigate · enter open · esc back/close"), inner, "…"))
-	}
-
 	return lines
 }

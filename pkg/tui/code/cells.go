@@ -52,7 +52,7 @@ func (f *cellFlow) gap() bool {
 // background band, text starting at the shared 2-column gutter.
 func cellUser(text string, width int) []string {
 	t := theme.Default
-	band := ansi.Bg(t.Selection)
+	band := ansi.Bg(t.Surface)
 
 	bandWidth := max(width-len(cellIndent), 14)
 	inner := bandWidth - 3
@@ -98,13 +98,17 @@ func cellCommand(text string, width int) []string {
 
 // cellAssistant renders assistant markdown behind a status circle: dim while
 // streaming, green when committed, red on failure.
-func cellAssistant(text string, width int, circle ansi.Color) []string {
-	inner := max(width-len(cellIndent)-2, 10)
+func cellAssistant(text string, width int, circle ansi.Color, directory ...string) []string {
+	inner := max(width-len(cellIndent)-2, 1)
+	options := markdown.Options{Width: inner}
+	if len(directory) > 0 {
+		options.Directory = directory[0]
+	}
 
 	var lines []string
 	first := true
 
-	for line := range strings.SplitSeq(strings.TrimRight(markdown.Render(text), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(markdown.Render(text, options), "\n"), "\n") {
 		for _, wl := range ansi.Wrap(line, inner) {
 			prefix := "  "
 			if first {
@@ -133,7 +137,7 @@ func cellReasoning(summary string, width int, full bool) []string {
 
 	// Markdown accents survive, but every reset falls back to the dim italic
 	// base so the whole thought keeps its muted look.
-	rendered := strings.ReplaceAll(markdown.Render(summary), ansi.Reset, ansi.Reset+style)
+	rendered := strings.ReplaceAll(markdown.Render(summary, markdown.Options{Width: inner}), ansi.Reset, ansi.Reset+style)
 
 	var lines []string
 	first := true
@@ -458,11 +462,11 @@ func cellTurnSeparator(elapsed string, tools, thoughts int, width int) []string 
 
 	var line string
 	if label == "" || ansi.Width(label)+8 > inner {
-		line = strings.Repeat("─", inner)
+		line = colored(theme.Default.Border, strings.Repeat("─", inner))
 	} else {
 		rest := inner - ansi.Width(label) - 5
-		line = "── " + label + " " + strings.Repeat("─", rest)
+		line = colored(theme.Default.Border, "── ") + dim(label) + colored(theme.Default.Border, " "+strings.Repeat("─", rest))
 	}
 
-	return []string{cellIndent + dim(line), ""}
+	return []string{cellIndent + line, ""}
 }

@@ -162,7 +162,7 @@ func (o *transcriptOverlay) buildEntries() {
 					entries = append(entries, transcriptEntry{
 						key: baseKey + ":assistant", kind: transcriptAssistant, raw: text, selectable: true,
 						render: func(width int, _ bool) []string {
-							return cellAssistant(text, width, theme.Default.Green)
+							return cellAssistant(text, width, theme.Default.Green, o.app.agent.Workspace().RootPath)
 						},
 					})
 				}
@@ -204,7 +204,7 @@ func (o *transcriptOverlay) buildEntries() {
 			entries = append(entries, transcriptEntry{
 				key: prefix + ":text", kind: transcriptAssistant, raw: streamingText, selectable: true,
 				render: func(width int, _ bool) []string {
-					return cellAssistant(streamingText, width, theme.Default.BrBlack)
+					return cellAssistant(streamingText, width, theme.Default.BrBlack, o.app.agent.Workspace().RootPath)
 				},
 			})
 		}

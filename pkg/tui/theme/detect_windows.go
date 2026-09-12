@@ -2,6 +2,6 @@
 
 package theme
 
-func queryTerminalBackground() bool {
-	return false
+func queryTerminalBackground() (light, known bool) {
+	return false, false
 }

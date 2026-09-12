@@ -12,8 +12,10 @@ import (
 // Editor is a multiline input bounded by horizontal rules. The rule color is
 // a status channel (mode, activity) set by the app.
 type Editor struct {
-	value  []rune
-	cursor int
+	value   []rune
+	cursor  int
+	pastes  []editorPaste
+	pasteID int
 
 	placeholder string
 	ruleColor   ansi.Color
@@ -41,14 +43,22 @@ const editorInset = 2
 func NewEditor() *Editor {
 	return &Editor{
 		placeholder:    "Ask anything...",
-		ruleColor:      theme.Default.BrBlack,
+		ruleColor:      theme.Default.Border,
 		histIdx:        -1,
 		verticalColumn: -1,
 	}
 }
 
 func (e *Editor) Text() string {
-	return string(e.value)
+	var text strings.Builder
+	start := 0
+	for _, paste := range e.pastes {
+		text.WriteString(string(e.value[start:paste.start]))
+		text.WriteString(paste.text)
+		start = paste.end
+	}
+	text.WriteString(string(e.value[start:]))
+	return text.String()
 }
 
 func (e *Editor) SetText(text string) {
@@ -58,6 +68,7 @@ func (e *Editor) SetText(text string) {
 
 func (e *Editor) setText(text string) {
 	e.value = []rune(text)
+	e.pastes = nil
 	e.cursor = len(e.value)
 	e.wrappedRows = nil
 	e.verticalColumn = -1
@@ -87,11 +98,7 @@ func (e *Editor) Insert(text string) {
 	if text == "" {
 		return
 	}
-	e.ResetHistoryCursor()
-	e.wrappedRows = nil
-	runes := []rune(text)
-	e.value = append(e.value[:e.cursor], append(runes, e.value[e.cursor:]...)...)
-	e.cursor += len(runes)
+	e.ReplaceRange(e.cursor, e.cursor, text)
 }
 
 // ReplaceRange substitutes the rune range [from, to) with text and leaves the
@@ -106,9 +113,11 @@ func (e *Editor) ReplaceRange(from, to int, text string) {
 	if from > to {
 		return
 	}
+	from, to = e.pasteRange(from, to)
 	e.ResetHistoryCursor()
 	e.wrappedRows = nil
 	runes := []rune(text)
+	e.shiftPastes(from, to, len(runes))
 	e.value = append(e.value[:from], append(runes, e.value[to:]...)...)
 	e.cursor = from + len(runes)
 }
@@ -135,8 +144,10 @@ func (e *Editor) deleteRange(from, to int) {
 	if from >= to {
 		return
 	}
+	from, to = e.pasteRange(from, to)
 	e.ResetHistoryCursor()
 	e.wrappedRows = nil
+	e.shiftPastes(from, to, 0)
 	e.value = append(e.value[:from], e.value[to:]...)
 	if e.cursor > to {
 		e.cursor -= to - from
@@ -174,10 +185,19 @@ func (e *Editor) nextWord() int {
 // HandleKey processes an input event. It reports whether the event was
 // consumed; unconsumed navigation (history recall) is handled by the caller.
 func (e *Editor) HandleKey(ev inline.KeyEvent) bool {
+	previousCursor := e.cursor
+	defer func() { e.snapPasteCursor(e.cursor < previousCursor) }()
 	if ev.Key != inline.KeyUp && ev.Key != inline.KeyDown {
 		e.verticalColumn = -1
 	}
 	switch ev.Key {
+	case inline.KeyEnter:
+		if ev.Alt || ev.Shift {
+			e.Insert("\n")
+			return true
+		}
+		return false
+
 	case inline.KeyRune:
 		if ev.Alt {
 			switch ev.Rune {
@@ -187,6 +207,8 @@ func (e *Editor) HandleKey(ev inline.KeyEvent) bool {
 			case 'f':
 				e.cursor = e.nextWord()
 				return true
+			case 'e':
+				return e.expandPastes()
 			}
 			return false
 		}
@@ -544,7 +566,7 @@ func (e *Editor) Render(width, maxRows int, chrome EditorChrome) ([]string, inli
 			if e.scroll+i == 0 {
 				prefix = promptPrefix
 			}
-			lines = append(lines, prefix+row.text)
+			lines = append(lines, prefix+e.renderPasteRow(row))
 		}
 	}
 	if attachmentGap > 0 {

@@ -10,12 +10,14 @@ type segment struct {
 	text  string
 	width int
 	state string
+	link  string
 }
 
 // parse splits styled text into grapheme segments, tracking the accumulated
-// SGR state active before each one. Non-SGR escape sequences are dropped.
+// SGR and hyperlink state active before each one. Other escapes are dropped.
 type parser struct {
 	state    string
+	link     string
 	segments []segment
 }
 
@@ -33,6 +35,8 @@ func (p *parser) feed(text string) {
 				} else {
 					p.state += seq
 				}
+			} else if link, ok := parseHyperlink(seq); ok {
+				p.link = link
 			}
 			text = rest
 			continue
@@ -48,6 +52,7 @@ func (p *parser) feed(text string) {
 			text:  cluster,
 			width: gr.Width(),
 			state: p.state,
+			link:  p.link,
 		})
 		text = text[len(cluster):]
 	}
@@ -117,25 +122,22 @@ func Wrap(text string, width int) []string {
 	}
 
 	var lines []string
-
+	p := &parser{}
 	for raw := range strings.SplitSeq(text, "\n") {
-		lines = append(lines, wrapLine(raw, width)...)
+		p.segments = nil
+		p.feed(raw)
+		lines = append(lines, wrapSegments(p.segments, width)...)
 	}
 
 	return lines
 }
 
-func wrapLine(text string, width int) []string {
-	p := &parser{}
-	p.feed(text)
-
-	if len(p.segments) == 0 {
-		return []string{text}
+func wrapSegments(segments []segment, width int) []string {
+	if len(segments) == 0 {
+		return []string{""}
 	}
 
 	var lines []string
-	segments := p.segments
-
 	start := 0
 	curWidth := 0
 	lastBreak := -1
@@ -148,10 +150,12 @@ func wrapLine(text string, width int) []string {
 			}
 		}
 		prevState := ""
+		prevLink := ""
 		if from < len(segments) {
 			prevState = segments[from].state
 		}
 		for i := from; i < to; i++ {
+			changeHyperlink(&sb, &prevLink, segments[i].link)
 			if segments[i].state != prevState {
 				if segments[i].state == "" {
 					sb.WriteString(Reset)
@@ -163,6 +167,7 @@ func wrapLine(text string, width int) []string {
 			}
 			sb.WriteString(segments[i].text)
 		}
+		changeHyperlink(&sb, &prevLink, "")
 		lines = append(lines, strings.TrimRight(sb.String(), " "))
 	}
 
@@ -227,11 +232,13 @@ func Truncate(text string, width int, tail string) string {
 	var sb strings.Builder
 	used := 0
 	prevState := ""
+	prevLink := ""
 
 	for _, seg := range p.segments {
 		if used+seg.width > budget {
 			break
 		}
+		changeHyperlink(&sb, &prevLink, seg.link)
 		if seg.state != prevState {
 			if seg.state == "" {
 				sb.WriteString(Reset)
@@ -244,6 +251,7 @@ func Truncate(text string, width int, tail string) string {
 		sb.WriteString(seg.text)
 		used += seg.width
 	}
+	changeHyperlink(&sb, &prevLink, "")
 
 	if prevState != "" {
 		sb.WriteString(Reset)
@@ -276,6 +284,7 @@ func Highlight(text string, from, to int, style string) string {
 	var sb strings.Builder
 	col := 0
 	prevState := ""
+	prevLink := ""
 	inRegion := false
 
 	setState := func(state string, region bool) {
@@ -289,6 +298,7 @@ func Highlight(text string, from, to int, style string) string {
 	}
 
 	for _, seg := range p.segments {
+		changeHyperlink(&sb, &prevLink, seg.link)
 		region := col >= from && col < to
 
 		if region != inRegion || seg.state != prevState {
@@ -300,6 +310,7 @@ func Highlight(text string, from, to int, style string) string {
 		sb.WriteString(seg.text)
 		col += seg.width
 	}
+	changeHyperlink(&sb, &prevLink, "")
 
 	// Extend the highlight over trailing padding when the selection reaches
 	// past the end of the line.

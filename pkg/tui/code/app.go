@@ -48,6 +48,7 @@ type App struct {
 	quitDeadline time.Time
 	termFocused  bool
 	wasStreaming bool
+	motion       tuiMotion
 
 	// footerHint is a transient warning shown in the footer instead of the
 	// key hints; it clears on the next input action or when it expires.
@@ -201,6 +202,7 @@ func New(ctx context.Context, coderAgent code.Agent, sessionID string) *App {
 		editor:      NewEditor(),
 		follow:      true,
 		termFocused: true,
+		motion:      newTUIMotion(),
 	}
 
 	a.turns = code.NewTurnManager(tool.WithProgressSink(ctx, a.onToolProgress), coderAgent, a.handleTurnEvent)
@@ -272,6 +274,7 @@ func (a *App) activateSession(id string) {
 	if a.editor != nil {
 		a.editor.SetText("")
 	}
+	a.motion = tuiMotion{enabled: a.motion.enabled}
 	a.refreshUsage()
 
 	a.startTaskPump()
@@ -646,6 +649,12 @@ func (a *App) Run() error {
 
 	ticker := time.NewTicker(spinnerInterval)
 	defer ticker.Stop()
+	motionTimer := time.NewTimer(time.Hour)
+	motionTimer.Stop()
+	defer motionTimer.Stop()
+	if a.motion.nextFrame > 0 {
+		motionTimer.Reset(a.motion.nextFrame)
+	}
 
 	for {
 		select {
@@ -662,6 +671,9 @@ func (a *App) Run() error {
 
 		case fn := <-a.queue:
 			fn()
+
+		case <-motionTimer.C:
+			a.invalidate()
 
 		case now := <-ticker.C:
 			a.expireQuitGate(now)
@@ -697,6 +709,11 @@ func (a *App) Run() error {
 			a.dirty = false
 			a.syncMessages()
 			a.render()
+			if a.motion.nextFrame > 0 {
+				motionTimer.Reset(a.motion.nextFrame)
+			} else {
+				motionTimer.Stop()
+			}
 		}
 	}
 }
@@ -995,6 +1012,7 @@ func (a *App) handleEvent(ev inline.Event) {
 	switch ev := ev.(type) {
 	case inline.FocusEvent:
 		a.termFocused = ev.Focused
+		a.invalidate()
 
 	case inline.ResizeEvent:
 		a.term.Resized(ev.Width, ev.Height)
@@ -1055,7 +1073,7 @@ func (a *App) handlePaste(text string) {
 		return
 	}
 	if a.askActive {
-		a.editor.Insert(text)
+		a.editor.InsertPaste(text)
 		return
 	}
 
@@ -1071,7 +1089,7 @@ func (a *App) handlePaste(text string) {
 		return
 	}
 
-	a.editor.Insert(text)
+	a.editor.InsertPaste(text)
 	a.syncCommandPopup()
 }
 
@@ -1089,6 +1107,14 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 	if a.overlay != nil {
 		if a.overlay.HandleKey(ev) {
 			a.closeOverlay()
+		}
+		return
+	}
+
+	if ev.Key == inline.KeyEnter && (ev.Alt || ev.Shift) {
+		if a.popup == nil || a.popup.kind == popupCommands || a.popup.kind == popupFiles {
+			a.editor.HandleKey(ev)
+			a.syncCommandPopup()
 		}
 		return
 	}
@@ -1381,7 +1407,7 @@ func (a *App) showRecap() {
 				a.appendChat(cellNotice("Nothing to recap yet", theme.Default.Yellow, a.width()))
 			default:
 				a.appendAnnotation(func(width int) []string {
-					return cellAssistant(recap, width, theme.Default.Cyan)
+					return cellAssistant(recap, width, theme.Default.Cyan, a.agent.Workspace().RootPath)
 				})
 			}
 			a.invalidate()
@@ -1485,8 +1511,8 @@ func lastAssistantText(messages []agent.Message) string {
 		}
 		var text strings.Builder
 		for _, content := range message.Content {
-			if !content.Hidden && content.Text != "" {
-				text.WriteString(content.Text)
+			if !content.Hidden && content.AsText() != "" {
+				text.WriteString(content.AsText())
 			}
 		}
 		if result := text.String(); strings.TrimSpace(result) != "" {

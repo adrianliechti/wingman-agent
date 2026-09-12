@@ -77,8 +77,10 @@ func TestInputReaderDoesNotPasteForUnrelatedExtendedKeys(t *testing.T) {
 			in, events := testInputReader()
 			in.buf = []byte(sequence)
 			in.process()
-			if len(events) != 0 {
-				t.Fatalf("unexpected shortcut: %#v", <-events)
+			for len(events) > 0 {
+				if key, ok := (<-events).(KeyEvent); ok && key.Key == KeyCtrl && key.Rune == 'v' {
+					t.Fatalf("unexpected paste shortcut: %#v", key)
+				}
 			}
 		})
 	}

@@ -24,9 +24,10 @@ const (
 type Event any
 
 type KeyEvent struct {
-	Key  Key
-	Rune rune
-	Alt  bool
+	Key   Key
+	Rune  rune
+	Alt   bool
+	Shift bool
 }
 
 type PasteEvent struct {

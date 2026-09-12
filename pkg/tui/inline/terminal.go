@@ -51,6 +51,8 @@ const (
 	disableFocusReporting = "\x1b[?1004l"
 	saveWindowTitle       = "\x1b[22;0t"
 	restoreWindowTitle    = "\x1b[23;0t"
+	pushKeyboardMode      = "\x1b[>1u"
+	popKeyboardMode       = "\x1b[<u"
 )
 
 // WithIO replaces the terminal's reader/writer, disabling raw-mode handling —
@@ -207,6 +209,9 @@ func (t *Terminal) EnterAlt() {
 	t.alt = true
 	t.altFrame = nil
 	fmt.Fprint(t.out, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H")
+	// Supporting terminals distinguish Shift+Enter and ambiguous Ctrl/Alt
+	// chords. The mode stack belongs to this screen and is restored on exit.
+	fmt.Fprint(t.out, pushKeyboardMode)
 }
 
 func (t *Terminal) ExitAlt() {
@@ -214,6 +219,7 @@ func (t *Terminal) ExitAlt() {
 		return
 	}
 	t.alt = false
+	fmt.Fprint(t.out, popKeyboardMode)
 	fmt.Fprint(t.out, "\x1b[?1049l")
 }
 
