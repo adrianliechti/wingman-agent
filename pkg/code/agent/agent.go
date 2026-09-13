@@ -842,6 +842,7 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	s.setMode(modeAgent)
 	sessionCfg.Tools = s.tools
 	sessionCfg.Instructions = s.instructions
+	sessionCfg.ContextInstructions = s.contextInstructions
 	sessionCfg.Model = func() string {
 		option, _ := a.roleModel(s, "")
 		return option.ID
@@ -1346,7 +1347,15 @@ func planModeEffectExecute(t tool.Tool) func(context.Context, map[string]any) (t
 
 func (s *sessionState) instructions() string {
 	option, _ := s.parent.roleModel(s, "")
-	return BuildInstructions(option.ID, s.instructionsData())
+	base, data := instructionTemplate(option.ID, prompt.SectionData{
+		PlanMode:       s.currentMode() == modePlan,
+		UnattendedMode: s.currentMode() == modeUnattended,
+	})
+	return prompt.BuildBaseInstructions(base, data)
+}
+
+func (s *sessionState) contextInstructions() string {
+	return prompt.BuildSessionContext(s.instructionsData())
 }
 
 func (s *sessionState) subagentContext() string {
@@ -1354,6 +1363,11 @@ func (s *sessionState) subagentContext() string {
 }
 
 func BuildInstructions(modelID string, data prompt.SectionData) string {
+	base, data := instructionTemplate(modelID, data)
+	return prompt.BuildInstructions(base, data)
+}
+
+func instructionTemplate(modelID string, data prompt.SectionData) (string, prompt.SectionData) {
 	variant := prompt.VariantFor(modelID)
 	selected, ok := model.Find(modelID)
 	if !ok {
@@ -1368,7 +1382,7 @@ func BuildInstructions(modelID string, data prompt.SectionData) string {
 	} else if data.UnattendedMode {
 		base += "\n\n" + variant.Unattended
 	}
-	return prompt.BuildInstructions(base, data)
+	return base, data
 }
 
 func (s *sessionState) instructionsData() prompt.SectionData {

@@ -146,4 +146,7 @@ type Reasoning struct {
 	// agent loop can purge stale payloads when the session model changes.
 	Content string `json:"content,omitempty"`
 	Model   string `json:"model,omitempty"`
+	// Prefix binds replay to the instructions and tools used for generation.
+	// Persist it so a resumed chat can detect settings edits too.
+	Prefix string `json:"prefix,omitempty"`
 }

@@ -84,7 +84,7 @@ func (c *Config) Generate(ctx context.Context, opts GenerateOptions) (GenerateRe
 	}
 	usage := responseToUsage(*resp)
 	operation.End(inferenceResult(resp, usage, nil, captureContent))
-	text := strings.TrimSpace(recoverySummaryOutput(resp))
+	text := strings.TrimSpace(resp.OutputText())
 	if opts.OutputSchema != nil && text != "" {
 		var value any
 		if err := json.Unmarshal([]byte(text), &value); err != nil {

@@ -2,8 +2,10 @@ package changes
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,61 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+func TestDiffsIfChangedTracksWorktreeIndexAndHead(t *testing.T) {
+	dir := t.TempDir()
+	repo := initRepository(t, dir)
+	writeFile(t, dir, "file.txt", "one\n")
+	stage(t, repo, "file.txt")
+	commit(t, repo, "initial")
+	m := New(dir)
+	defer m.Close()
+	ctx := context.Background()
+	var previous uint64
+	for _, step := range []struct {
+		name   string
+		change func()
+		files  int
+	}{
+		{name: "clean", change: func() {}},
+		{name: "modified", change: func() { writeFile(t, dir, "file.txt", "two\n") }, files: 1},
+		{name: "staged", change: func() { stage(t, repo, "file.txt") }, files: 1},
+		{name: "committed", change: func() { commit(t, repo, "second") }},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			step.change()
+			diffs, fingerprint, err := m.DiffsIfChanged(ctx, previous)
+			if err != nil || fingerprint == 0 || fingerprint == previous || len(diffs) != step.files {
+				t.Fatalf("snapshot = %d files, fingerprint %d (previous %d), error %v", len(diffs), fingerprint, previous, err)
+			}
+			if fingerprint != m.Fingerprint(ctx) {
+				t.Fatal("snapshot and standalone fingerprints differ")
+			}
+			if len(diffs) > 0 && (diffs[0].Original != "one\n" || diffs[0].Modified != "two\n") {
+				t.Fatalf("unexpected diff contents: %+v", diffs[0])
+			}
+			unchanged, same, err := m.DiffsIfChanged(ctx, fingerprint)
+			if err != nil || unchanged != nil || same != fingerprint {
+				t.Fatalf("unchanged snapshot = %+v, %d, %v", unchanged, same, err)
+			}
+			forced, same, err := m.DiffsIfChanged(ctx, 0)
+			if err != nil || same != fingerprint || !reflect.DeepEqual(forced, diffs) {
+				t.Fatalf("forced snapshot = %+v, %d, %v", forced, same, err)
+			}
+			previous = fingerprint
+		})
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, _, err := m.DiffsIfChanged(cancelled, previous); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled snapshot error = %v", err)
+	}
+	m.Close()
+	if _, _, err := m.DiffsIfChanged(ctx, previous); !errors.Is(err, ErrClosed) {
+		t.Fatalf("closed snapshot error = %v", err)
+	}
+}
 
 func TestNativeRepositoryFingerprintIncludesIndexAndHead(t *testing.T) {
 	dir := t.TempDir()

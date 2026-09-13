@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/responses"
 )
 
 func TestIsRecoverableError(t *testing.T) {
@@ -30,6 +29,12 @@ func TestIsRecoverableError(t *testing.T) {
 		{"rate limit", &openai.Error{StatusCode: 429}, true},
 		{"server error", &openai.Error{StatusCode: 500}, true},
 		{"context overflow", &openai.Error{StatusCode: 400, Code: "context_length_exceeded"}, true},
+		{"in-band context overflow", &responseFailure{code: "context_length_exceeded"}, true},
+		{"in-band Anthropic overflow", &responseFailure{code: "invalid_request_error", message: "prompt is too long"}, true},
+		{"encrypted content rejected", &openai.Error{StatusCode: 400, Code: "invalid_encrypted_content"}, true},
+		{"thinking signature rejected", &responseFailure{code: "invalid_request_error", message: "Invalid `signature` in `thinking` block"}, true},
+		{"unrelated signature", &openai.Error{StatusCode: 400, Message: "invalid signature on request"}, false},
+		{"output limit configuration", &openai.Error{StatusCode: 400, Message: "max_output_tokens exceeds the maximum allowed"}, false},
 	}
 
 	for _, tc := range tests {
@@ -41,25 +46,53 @@ func TestIsRecoverableError(t *testing.T) {
 	}
 }
 
-func TestRecoverySummaryOutputRequiresActualText(t *testing.T) {
-	if got := recoverySummaryOutput(&responses.Response{}); got != "" {
-		t.Fatalf("empty response summary = %q", got)
-	}
-
-	var resp responses.Response
-	err := json.Unmarshal([]byte(`{
-		"output": [{
-			"type": "message",
-			"role": "assistant",
-			"status": "completed",
-			"content": [{"type": "output_text", "text": "briefing", "annotations": []}]
-		}]
-	}`), &resp)
-	if err != nil {
+func TestRepairToolHistoryPreservesParallelCallsAndKnownResults(t *testing.T) {
+	a := &Agent{Config: &Config{}, Messages: []Message{
+		{Role: RoleUser, Content: []Content{{Text: "update and verify"}}},
+		reasoningMessage("r", "m", "opaque"),
+		{Role: RoleAssistant, Content: []Content{
+			{Text: "Updating two files"},
+			{ToolCall: &ToolCall{ID: "known", Name: "write"}},
+			{ToolCall: &ToolCall{ID: "missing", Name: "write"}},
+		}},
+		{Role: RoleAssistant, Content: []Content{
+			{ToolResult: &ToolResult{ID: "known", Content: "file A updated"}},
+			{ToolResult: &ToolResult{ID: "orphan", Content: "unmatched"}},
+			{Text: "Independent observed evidence"},
+		}},
+		{Role: RoleUser, Content: []Content{{Text: "continue after interruption"}}},
+	}}
+	if err := a.repairToolHistory(); err != nil {
 		t.Fatal(err)
 	}
-	if got := recoverySummaryOutput(&resp); got != "briefing" {
-		t.Fatalf("summary output = %q, want briefing", got)
+	items := toInput(a.requestMessages())
+	var calls, outputs []string
+	for _, item := range items {
+		if item.OfReasoning != nil {
+			t.Fatal("rewrite retained bound reasoning")
+		}
+		if call := item.OfFunctionCall; call != nil {
+			calls = append(calls, call.CallID)
+			if len(outputs) != 0 {
+				t.Fatal("inserted a result between parallel calls")
+			}
+		}
+		if result := item.OfFunctionCallOutput; result != nil {
+			outputs = append(outputs, result.CallID.Value)
+			if result.CallID.Value == "missing" && !strings.Contains(result.Output.OfString.Value, "side effects are unknown") {
+				t.Fatal("missing result was presented as proof of non-execution")
+			}
+		}
+	}
+	encoded, _ := json.Marshal(items)
+	if len(calls) != 2 || len(outputs) != 2 || strings.Contains(string(encoded), "unmatched") || !strings.Contains(string(encoded), "file A updated") || !strings.Contains(string(encoded), "Independent observed evidence") {
+		t.Fatalf("repair lost evidence or left invalid pairs: %s", encoded)
+	}
+	if err := a.repairToolHistory(); err != nil || a.ContextRevision != 1 {
+		t.Fatalf("repair is not idempotent: revision=%d err=%v", a.ContextRevision, err)
+	}
+	if len(a.MessagesSnapshot()) != 5 || a.MessagesSnapshot()[1].Content[0].Reasoning.Content != "opaque" {
+		t.Fatal("repair changed canonical history")
 	}
 }
 
@@ -72,64 +105,6 @@ func toolRoundMessages(n, resultBytes int) []Message {
 		)
 	}
 	return messages
-}
-
-func TestSplitRecoverySummaryLongSingleTask(t *testing.T) {
-	messages := append(
-		[]Message{{Role: RoleUser, Content: []Content{{Text: "do the task"}}}},
-		toolRoundMessages(200, 2048)...,
-	)
-
-	summary, recent := splitMessagesForRecoverySummary(messages)
-
-	if len(summary) == 0 {
-		t.Fatal("expected non-empty summary side for long single-task session")
-	}
-	if len(recent) < minRecoveryMessagesToPreserve {
-		t.Fatalf("expected at least %d recent messages, got %d", minRecoveryMessagesToPreserve, len(recent))
-	}
-	if recent[0].Role != RoleUser || recent[0].Content[0].Text != "do the task" {
-		t.Fatal("expected the last user message to be preserved verbatim at the start of the recent side")
-	}
-
-	total := 0
-	for _, m := range recent[1:] {
-		total += messageBytes(m)
-	}
-	if total > maxRecentBytes {
-		t.Fatalf("recent side is %d bytes, exceeds budget %d", total, maxRecentBytes)
-	}
-}
-
-func TestSplitRecoverySummarySmallTailUsesLastUserMessage(t *testing.T) {
-	messages := append(
-		[]Message{{Role: RoleUser, Content: []Content{{Text: "first task"}}}},
-		toolRoundMessages(20, 512)...,
-	)
-	messages = append(messages, Message{Role: RoleUser, Content: []Content{{Text: "second task"}}})
-	messages = append(messages, toolRoundMessages(3, 512)...)
-
-	summary, recent := splitMessagesForRecoverySummary(messages)
-
-	if len(recent) == 0 || recent[0].Role != RoleUser || recent[0].Content[0].Text != "second task" {
-		t.Fatalf("expected recent side to start at the last user message, got %d recent messages", len(recent))
-	}
-	if len(summary) != len(messages)-len(recent) {
-		t.Fatalf("split lost messages")
-	}
-}
-
-func TestSplitRecoverySummaryCountsFileContent(t *testing.T) {
-	messages := []Message{{Role: RoleUser, Content: []Content{{Text: "task"}}}}
-	for range 20 {
-		messages = append(messages, Message{Role: RoleAssistant, Content: []Content{{File: &File{Data: strings.Repeat("a", 8*1024)}}}})
-	}
-
-	summary, _ := splitMessagesForRecoverySummary(messages)
-
-	if len(summary) == 0 {
-		t.Fatal("expected file content to count toward the recent-side budget")
-	}
 }
 
 func reasoningMessage(id, model, content string) Message {
@@ -146,7 +121,7 @@ func TestDropForeignReasoningPurgesAllPayloadsAfterCrossProviderRewrite(t *testi
 		{Role: RoleAssistant, Content: []Content{{Text: "done"}}},
 	}
 
-	if err := a.dropForeignReasoning("claude-sonnet-5"); err != nil {
+	if err := a.dropIncompatibleReasoning(&request{model: "claude-sonnet-5", messages: a.requestMessages()}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -177,7 +152,7 @@ func TestDropForeignReasoningPurgesAllPayloadsAfterCrossProviderRewrite(t *testi
 		t.Fatal("native reasoning was removed from canonical history")
 	}
 
-	if err := a.dropForeignReasoning("claude-sonnet-5"); err != nil {
+	if err := a.dropIncompatibleReasoning(&request{model: "claude-sonnet-5", messages: a.requestMessages()}); err != nil {
 		t.Fatal(err)
 	}
 	if a.ContextRevision != 1 {
@@ -248,37 +223,5 @@ func TestDropDanglingReasoning(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestSplitRecoverySummarySmallConversation(t *testing.T) {
-	messages := append(
-		[]Message{{Role: RoleUser, Content: []Content{{Text: "task"}}}},
-		toolRoundMessages(2, 128)...,
-	)
-
-	summary, recent := splitMessagesForRecoverySummary(messages)
-
-	if len(summary) != 0 {
-		t.Fatalf("expected empty summary side for small conversation, got %d messages", len(summary))
-	}
-	if len(recent) != len(messages) {
-		t.Fatalf("expected all messages on recent side")
-	}
-}
-
-func TestFallbackTruncationPreservesActiveUserRequest(t *testing.T) {
-	a := &Agent{Config: &Config{}}
-	a.Messages = append(
-		[]Message{{Role: RoleUser, Content: []Content{{Text: "finish the active task"}}}},
-		toolRoundMessages(20, 128)...,
-	)
-
-	if err := a.truncateMessagesForRecovery(); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(a.Messages) == 0 || a.Messages[0].Role != RoleUser || a.Messages[0].Content[0].Text != "finish the active task" {
-		t.Fatalf("active user request was lost: %+v", a.Messages)
 	}
 }

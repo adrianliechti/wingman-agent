@@ -98,18 +98,20 @@ func (a *App) pollDiffPanel(force bool) {
 	p.loading = true
 	p.checkedAt = time.Now()
 	previous := p.fingerprint
+	if force {
+		previous = 0
+	}
 	ctx := a.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
 	go func() {
-		fingerprint := workspace.ChangesFingerprint(ctx)
-		if !force && fingerprint == previous {
+		diffs, fingerprint, err := workspace.DiffsIfChanged(ctx, previous)
+		if err == nil && !force && fingerprint == previous {
 			a.post(func() { p.loading = false })
 			return
 		}
-		diffs, err := workspace.Diffs(ctx)
 		a.post(func() {
 			p.loading = false
 			p.fingerprint = fingerprint

@@ -67,6 +67,11 @@ type Config struct {
 	Tools        func() []tool.Tool
 	Instructions func() string
 
+	// ContextInstructions supplies mutable session guidance (environment,
+	// project instructions, memory, skills). Changes append a replacement
+	// snapshot to history instead of rewriting the cached Instructions prefix.
+	ContextInstructions func() string
+
 	// RoleModel resolves "main", "plan", and "utility" role models. An empty
 	// role names the currently inherited model and is used for effort clamping.
 	// ok=false or an empty ID keeps the inherited model. Nil disables role
@@ -99,13 +104,14 @@ type Config struct {
 
 func (c *Config) Derive() *Config {
 	return &Config{
-		client:       c.client,
-		Telemetry:    c.Telemetry,
-		Model:        c.Model,
-		Effort:       c.Effort,
-		Tools:        c.Tools,
-		Instructions: c.Instructions,
-		RoleModel:    c.RoleModel,
+		client:              c.client,
+		Telemetry:           c.Telemetry,
+		Model:               c.Model,
+		Effort:              c.Effort,
+		Tools:               c.Tools,
+		Instructions:        c.Instructions,
+		ContextInstructions: c.ContextInstructions,
+		RoleModel:           c.RoleModel,
 
 		CacheKey: c.CacheKey,
 
@@ -185,7 +191,7 @@ func (c *Config) Utility(ctx context.Context, instructions, input string) (strin
 		CacheCreationInputTokens: usage.CacheCreationInputTokens,
 	})
 
-	return strings.TrimSpace(recoverySummaryOutput(resp)), nil
+	return strings.TrimSpace(resp.OutputText()), nil
 }
 
 func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {

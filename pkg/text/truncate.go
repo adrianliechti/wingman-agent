@@ -2,6 +2,7 @@ package text
 
 import (
 	"fmt"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -46,4 +47,16 @@ func TailBytes(s string, n int) string {
 		i++
 	}
 	return s[i:]
+}
+
+// LineCount counts logical lines, excluding the empty suffix after a final newline.
+func LineCount(value string) int {
+	if value == "" {
+		return 0
+	}
+	lines := strings.Count(value, "\n")
+	if !strings.HasSuffix(value, "\n") {
+		lines++
+	}
+	return lines
 }

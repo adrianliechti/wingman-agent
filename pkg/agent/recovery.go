@@ -1,21 +1,16 @@
 package agent
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
-
-	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
-	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 func isRecoverableError(err error) bool {
-	if isContextOverflowError(err) {
+	if isContextOverflowError(err) || isReasoningReplayError(err) {
 		return true
 	}
 
@@ -62,28 +57,31 @@ var contextOverflowMarkers = []string{
 	"context length",
 	"context_length",
 	"context window",
+	"context_window",
 	"maximum context",
 	"too many tokens",
-	"token limit",
 	"prompt is too long",
 	"input is too long",
-	"exceeds the maximum",
+}
+
+// Providers can reject input either as HTTP errors or terminal SSE events.
+// Only inspect structured input errors; unrelated transport failures retry
+// without destructively rewriting history.
+func providerInputError(err error) string {
+	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
+		switch apiErr.StatusCode {
+		case 400, 413, 422:
+			return strings.ToLower(apiErr.Code + " " + apiErr.Message)
+		}
+	}
+	if responseErr, ok := errors.AsType[*responseFailure](err); ok {
+		return strings.ToLower(responseErr.code + " " + responseErr.message)
+	}
+	return ""
 }
 
 func isContextOverflowError(err error) bool {
-	var apiErr *openai.Error
-	if !errors.As(err, &apiErr) {
-		return false
-	}
-
-	switch apiErr.StatusCode {
-	case 400, 413:
-	default:
-		return false
-	}
-
-	msg := strings.ToLower(apiErr.Code + " " + apiErr.Message)
-
+	msg := providerInputError(err)
 	for _, marker := range contextOverflowMarkers {
 		if strings.Contains(msg, marker) {
 			return true
@@ -93,7 +91,17 @@ func isContextOverflowError(err error) bool {
 	return false
 }
 
-func (a *Agent) removeOrphanedToolMessages() error {
+func isReasoningReplayError(err error) bool {
+	msg := strings.ReplaceAll(providerInputError(err), "`", "")
+	return strings.Contains(msg, "invalid_encrypted_content") ||
+		strings.Contains(msg, "encrypted content could not be verified") ||
+		(strings.Contains(msg, "thinking") && (strings.Contains(msg, "invalid signature") || strings.Contains(msg, "signature verification failed")))
+}
+
+// As in Codex normalization, missing results get a stable interruption notice.
+// Keep the attempted call so the next model cannot mistake it for unstarted
+// work. A result without a call is removed at content granularity.
+func (a *Agent) repairToolHistory() error {
 	messages := a.contextSnapshot()
 
 	callIDs := make(map[string]bool)
@@ -111,34 +119,41 @@ func (a *Agent) removeOrphanedToolMessages() error {
 		}
 	}
 
-	dropped := make(map[int]bool)
-
-	for i, m := range messages {
-		for _, c := range m.Content {
-			if c.ToolCall != nil && !outputIDs[c.ToolCall.ID] {
-				dropped[i] = true
-				break
-			}
-
-			if c.ToolResult != nil && !callIDs[c.ToolResult.ID] {
-				dropped[i] = true
-				break
-			}
-		}
-	}
-
-	cleaned := messages
+	var cleaned, missing []Message
 	changed := false
-
-	if len(dropped) > 0 {
-		cleaned = nil
-		for i, m := range messages {
-			if !dropped[i] {
-				cleaned = append(cleaned, m)
+	for _, m := range messages {
+		hasCall := false
+		for _, c := range m.Content {
+			hasCall = hasCall || c.ToolCall != nil
+		}
+		// Flush after the whole call group, before its tool results. This
+		// keeps parallel calls legal on strict Anthropic-compatible backends.
+		if !hasCall {
+			cleaned = append(cleaned, missing...)
+			missing = nil
+		}
+		m.Content = slices.DeleteFunc(m.Content, func(c Content) bool {
+			if c.ToolResult != nil && !callIDs[c.ToolResult.ID] {
+				changed = true
+				return true
+			}
+			return false
+		})
+		for _, c := range m.Content {
+			if call := c.ToolCall; call != nil && call.ID != "" && !outputIDs[call.ID] {
+				missing = append(missing, Message{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{
+					ID: call.ID, Name: call.Name, Args: call.Args, IsError: true,
+					Content: "No recorded result is available for this tool call. It may have been interrupted; execution and side effects are unknown. Check the current state before retrying.",
+				}}}})
+				outputIDs[call.ID] = true
+				changed = true
 			}
 		}
-		changed = true
+		if len(m.Content) > 0 {
+			cleaned = append(cleaned, m)
+		}
 	}
+	cleaned = append(cleaned, missing...)
 
 	if pruned, ok := dropDanglingReasoning(cleaned); ok {
 		cleaned = pruned
@@ -148,448 +163,5 @@ func (a *Agent) removeOrphanedToolMessages() error {
 	if !changed {
 		return nil
 	}
-	return a.replaceContext("remove orphaned tool or reasoning items", cleaned)
-}
-
-// dropForeignReasoning detects encrypted reasoning that the current model
-// cannot decrypt (for example after switching from GPT to Claude). Creating
-// the checkpoint removes every opaque reasoning payload: deleting the foreign
-// block changes the prefix that later same-model blocks were bound to as well.
-// Summaries stay available in the recovery context and canonical history.
-func (a *Agent) dropForeignReasoning(model string) error {
-	messages := a.contextSnapshot()
-
-	changed := false
-
-	for i := range messages {
-		m := &messages[i]
-		for j := range m.Content {
-			c := &m.Content[j]
-			r := c.Reasoning
-			if r == nil || r.Content == "" || r.Model == model {
-				continue
-			}
-
-			r.Content = ""
-			r.Model = ""
-			changed = true
-		}
-	}
-
-	if !changed {
-		return nil
-	}
-	return a.replaceContext("drop reasoning encrypted for another model", messages)
-}
-
-// dropDanglingReasoning removes reasoning-only messages that are not followed
-// by assistant output (text or a tool call) from the same turn. Providers
-// reject replayed reasoning items whose required following item is missing —
-// which happens when a broken stream or orphaned-tool-call cleanup strands one.
-func dropDanglingReasoning(messages []Message) ([]Message, bool) {
-	isReasoningOnly := func(m Message) bool {
-		if m.Role != RoleAssistant || len(m.Content) == 0 {
-			return false
-		}
-		for _, c := range m.Content {
-			if c.Reasoning == nil {
-				return false
-			}
-		}
-		return true
-	}
-
-	followedByOutput := func(i int) bool {
-		for j := i + 1; j < len(messages); j++ {
-			if isReasoningOnly(messages[j]) {
-				continue
-			}
-			if messages[j].Role != RoleAssistant {
-				return false
-			}
-			for _, c := range messages[j].Content {
-				if c.ToolCall != nil || c.Text != "" || c.Refusal != "" {
-					return true
-				}
-			}
-			return false
-		}
-		return false
-	}
-
-	var drop map[int]bool
-	for i, m := range messages {
-		if isReasoningOnly(m) && !followedByOutput(i) {
-			if drop == nil {
-				drop = make(map[int]bool)
-			}
-			drop[i] = true
-		}
-	}
-
-	if len(drop) == 0 {
-		return messages, false
-	}
-
-	var out []Message
-	for i, m := range messages {
-		if !drop[i] {
-			out = append(out, m)
-		}
-	}
-	return out, true
-}
-
-const (
-	trimProtectBytes    = 96 * 1024
-	trimProtectMessages = 12
-	trimResultThreshold = 1024
-	trimResultKeepBytes = 256
-)
-
-const trimMarker = "\n[earlier tool output trimmed to reclaim context — rerun the tool if it is needed again]"
-const trimImageMarker = "[image result trimmed to reclaim context — rerun the tool if it is needed again]"
-
-// trimStaleToolResults rewrites old tool-result payloads down to a short stub
-// and drops old image results, reclaiming context without an LLM summarization
-// pass and without disturbing the conversation spine. The newest messages stay
-// untouched so the working set survives. Returns the number of bytes freed.
-func (a *Agent) trimStaleToolResults() (int, error) {
-	messages := a.contextSnapshot()
-
-	cut := 0
-	total := 0
-	for i, v := range slices.Backward(messages) {
-		if total > trimProtectBytes && len(messages)-i > trimProtectMessages {
-			cut = i + 1
-			break
-		}
-		total += messageBytes(v)
-	}
-
-	freed := 0
-	rewritten := false
-
-	for i := range messages[:cut] {
-		m := messages[i]
-		if m.Role != RoleAssistant {
-			continue
-		}
-
-		var content []Content
-		changed := false
-		imageDropped := false
-
-		for _, c := range m.Content {
-			if c.File != nil {
-				freed += len(c.File.Data)
-				changed = true
-				imageDropped = true
-				continue
-			}
-			if c.ToolResult != nil && len(c.ToolResult.Content) > trimResultThreshold {
-				result := *c.ToolResult
-				result.Content = text.HeadBytes(result.Content, trimResultKeepBytes) + trimMarker
-				freed += len(c.ToolResult.Content) - len(result.Content)
-				c.ToolResult = &result
-				changed = true
-			}
-			content = append(content, c)
-		}
-
-		if !changed {
-			continue
-		}
-		rewritten = true
-
-		if imageDropped {
-			for j := range content {
-				if content[j].ToolResult != nil {
-					result := *content[j].ToolResult
-					result.Content = trimImageMarker
-					content[j].ToolResult = &result
-				}
-			}
-		}
-
-		messages[i].Content = content
-	}
-
-	if rewritten {
-		if err := a.replaceContext("trim stale tool results", messages); err != nil {
-			return 0, err
-		}
-	}
-	return freed, nil
-}
-
-func (a *Agent) compactMessages(ctx context.Context, truncateOnFailure bool) (bool, error) {
-	messages := a.requestMessages()
-	summaryMessages, recentMessages := splitMessagesForRecoverySummary(messages)
-
-	if len(summaryMessages) == 0 && truncateOnFailure {
-		summaryMessages, recentMessages = messages, nil
-		if idx := lastVisibleUserIndex(messages); idx >= 0 {
-			recentMessages = []Message{messages[idx]}
-		}
-	}
-
-	summary, err := a.summarizeMessages(ctx, summaryMessages)
-	if err != nil || summary == "" {
-		if truncateOnFailure {
-			if truncateErr := a.truncateMessagesForRecovery(); truncateErr != nil {
-				return false, truncateErr
-			}
-		}
-		return false, nil
-	}
-
-	compacted := append([]Message{{
-		Role:    RoleUser,
-		Hidden:  true,
-		Content: []Content{{Text: summary}},
-	}}, recentMessages...)
-	if err := a.replaceContext("compact model context", compacted); err != nil {
-		return false, err
-	}
-	if err := a.removeOrphanedToolMessages(); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-const maxSummarizeBytes = 100 * 1024
-const maxRecentBytes = 64 * 1024
-const minRecoveryMessagesToPreserve = 12
-
-func splitMessagesForRecoverySummary(messages []Message) ([]Message, []Message) {
-	if len(messages) == 0 {
-		return nil, nil
-	}
-
-	userIdx := lastVisibleUserIndex(messages)
-
-	split := max(userIdx, 0)
-	total := 0
-	for i := len(messages) - 1; i > userIdx; i-- {
-		total += messageBytes(messages[i])
-		if total > maxRecentBytes && len(messages)-i > minRecoveryMessagesToPreserve {
-			split = i + 1
-			break
-		}
-	}
-
-	recent := messages[split:]
-	if userIdx >= 0 && split > userIdx {
-		recent = append([]Message{messages[userIdx]}, recent...)
-	}
-
-	return messages[:split], recent
-}
-
-func lastVisibleUserIndex(messages []Message) int {
-	for i, message := range slices.Backward(messages) {
-		if message.Role == RoleUser && !message.Hidden {
-			return i
-		}
-	}
-	return -1
-}
-
-func messageBytes(m Message) int {
-	total := 0
-	for _, c := range m.Content {
-		total += len(c.Text) + len(c.Refusal)
-		if c.File != nil {
-			total += len(c.File.Data)
-		}
-		if c.ToolCall != nil {
-			total += len(c.ToolCall.Args)
-		}
-		if c.ToolResult != nil {
-			total += len(c.ToolResult.Content)
-		}
-		if c.Reasoning != nil {
-			total += len(c.Reasoning.Summary) + len(c.Reasoning.Content)
-		}
-	}
-	return total
-}
-
-func (a *Agent) summarizeMessages(ctx context.Context, messages []Message) (string, error) {
-	transcript := recoverySummaryTranscript(messages)
-
-	if transcript == "" {
-		return "", nil
-	}
-
-	modelID := a.utilityModelName()
-	instructions := "An LLM context limit was reached during an active working session between a user and you (the assistant). " +
-		"Produce a continuation briefing for yourself so the session can resume seamlessly. " +
-		"Frame and tone for an agent reader (you), not a human — completeness matters more than brevity. " +
-		"Do not answer the user's latest request; only summarize the prior context. " +
-		"Do not introduce new ideas unless the user already confirmed them.\n\n" +
-		"Include these sections:\n" +
-		"1. User Intent — all goals and requests\n" +
-		"2. Technical Concepts — tools, methods, libraries discussed\n" +
-		"3. Files + Code — viewed/edited files with key code and why changes were made\n" +
-		"4. Errors + Fixes — bugs encountered, resolutions, user corrections\n" +
-		"5. Problem Solving — issues solved or still in progress\n" +
-		"6. Pending Tasks — unresolved user requests\n" +
-		"7. Current Work — what was active when the limit hit: file names, code, alignment to the latest instruction\n" +
-		"8. Next Step — only if it directly continues an explicit user instruction"
-	captureContent := a.Telemetry.CapturesMessageContent()
-	inferenceRequest := telemetry.InferenceRequest{
-		Model:          modelID,
-		ConversationID: conversationID(ctx, a.CacheKey),
-	}
-	if captureContent {
-		inferenceRequest.Content = telemetry.InferenceContent{
-			InputMessages:      telemetryStringInput(transcript),
-			SystemInstructions: telemetrySystemInstructions(instructions),
-		}
-	}
-	ctx, operation := a.Telemetry.StartInference(ctx, inferenceRequest)
-	resp, err := a.client.Responses.New(ctx, responses.ResponseNewParams{
-		Model:        modelID,
-		Instructions: openai.String(instructions),
-		Input: responses.ResponseNewParamsInputUnion{
-			OfString: openai.String(transcript),
-		},
-		Store: openai.Bool(false),
-	})
-
-	if err != nil {
-		operation.End(telemetry.InferenceResult{Outcome: telemetryOutcome(err)})
-		return "", err
-	}
-	operation.End(inferenceResult(resp, responseToUsage(*resp), nil, captureContent))
-
-	summary := recoverySummaryOutput(resp)
-	if summary == "" {
-		return "", nil
-	}
-	return "[Previous conversation summary]\n\n" + summary, nil
-}
-
-// Recap produces a short user-facing briefing of the conversation so far,
-// for returning to a resumed session.
-func (a *Agent) Recap(ctx context.Context) (string, error) {
-	transcript := recoverySummaryTranscript(a.MessagesSnapshot())
-	if transcript == "" {
-		return "", nil
-	}
-
-	modelID := a.utilityModelName()
-	instructions := "The user is returning to a coding session after time away. " +
-		"From the transcript, write a brief recap in Markdown: 2-5 bullets covering what was being worked on, " +
-		"what was accomplished or changed, and any open items or agreed next step. " +
-		"Address the user directly. No preamble, no heading, no questions."
-	captureContent := a.Telemetry.CapturesMessageContent()
-	inferenceRequest := telemetry.InferenceRequest{
-		Model:          modelID,
-		ConversationID: conversationID(ctx, a.CacheKey),
-	}
-	if captureContent {
-		inferenceRequest.Content = telemetry.InferenceContent{
-			InputMessages:      telemetryStringInput(transcript),
-			SystemInstructions: telemetrySystemInstructions(instructions),
-		}
-	}
-	ctx, operation := a.Telemetry.StartInference(ctx, inferenceRequest)
-	resp, err := a.client.Responses.New(ctx, responses.ResponseNewParams{
-		Model:        modelID,
-		Instructions: openai.String(instructions),
-		Input: responses.ResponseNewParamsInputUnion{
-			OfString: openai.String(transcript),
-		},
-		Store: openai.Bool(false),
-	})
-
-	if err != nil {
-		operation.End(telemetry.InferenceResult{Outcome: telemetryOutcome(err)})
-		return "", err
-	}
-	operation.End(inferenceResult(resp, responseToUsage(*resp), nil, captureContent))
-
-	return strings.TrimSpace(recoverySummaryOutput(resp)), nil
-}
-
-func recoverySummaryOutput(resp *responses.Response) string {
-	var result strings.Builder
-	for _, item := range resp.Output {
-		msg := item.AsMessage()
-		for _, part := range msg.Content {
-			text := part.AsOutputText()
-			if text.Text != "" {
-				result.WriteString(text.Text)
-			}
-		}
-	}
-
-	return result.String()
-}
-
-func recoverySummaryTranscript(messages []Message) string {
-	var chunks []string
-	total := 0
-
-	for _, m := range slices.Backward(messages) {
-		var mb strings.Builder
-
-		for _, c := range m.Content {
-			if c.Text != "" {
-				fmt.Fprintf(&mb, "[%s]: %s\n\n", m.Role, text.TruncateHead(c.Text, 2000))
-			}
-
-			if c.Refusal != "" {
-				fmt.Fprintf(&mb, "[%s]: %s\n\n", m.Role, text.TruncateHead(c.Refusal, 2000))
-			}
-
-			if c.File != nil {
-				fmt.Fprintf(&mb, "[%s]: [file attachment, %d bytes]\n\n", m.Role, len(c.File.Data))
-			}
-
-			if c.ToolCall != nil {
-				fmt.Fprintf(&mb, "[tool call]: %s(%s)\n\n", c.ToolCall.Name, text.TruncateHead(c.ToolCall.Args, 200))
-			}
-
-			if c.ToolResult != nil {
-				fmt.Fprintf(&mb, "[tool result]: %s\n\n", text.TruncateHead(c.ToolResult.Content, 500))
-			}
-		}
-
-		if mb.Len() == 0 {
-			continue
-		}
-
-		if len(chunks) > 0 && total+mb.Len() > maxSummarizeBytes {
-			break
-		}
-
-		chunks = append(chunks, mb.String())
-		total += mb.Len()
-	}
-
-	var sb strings.Builder
-	for _, chunk := range slices.Backward(chunks) {
-		sb.WriteString(chunk)
-	}
-
-	return sb.String()
-}
-
-func (a *Agent) truncateMessagesForRecovery() error {
-	messages := a.contextSnapshot()
-	if len(messages) > minRecoveryMessagesToPreserve {
-		start := len(messages) - minRecoveryMessagesToPreserve
-		trimmed := CloneMessages(messages[start:])
-		if userIdx := lastVisibleUserIndex(messages); userIdx >= 0 && userIdx < start {
-			trimmed = append(CloneMessages(messages[userIdx:userIdx+1]), trimmed...)
-		}
-		if err := a.replaceContext("truncate context after failed compaction", trimmed); err != nil {
-			return err
-		}
-	}
-	return a.removeOrphanedToolMessages()
+	return a.replaceContext("repair interrupted tool or reasoning history", cleaned)
 }

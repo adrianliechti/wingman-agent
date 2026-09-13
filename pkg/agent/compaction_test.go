@@ -44,7 +44,7 @@ func TestSendCompactionHookLifecycle(t *testing.T) {
 									status, contentType = http.StatusBadRequest, "application/json"
 									body = `{"error":{"code":"context_length_exceeded","message":"context limit reached"}}`
 								} else {
-									body = strings.ReplaceAll(body, `"input_tokens":1`, `"input_tokens":10`)
+									body = strings.ReplaceAll(body, `"input_tokens":1`, `"input_tokens":6000`)
 								}
 							} else if !strings.Contains(string(request.Input), "summary of earlier work") || !strings.Contains(string(request.Input), "compacted session guidance") {
 								t.Errorf("next request omitted the summary or compact-session hook context: %s", request.Input)
@@ -55,7 +55,7 @@ func TestSendCompactionHookLifecycle(t *testing.T) {
 				}))
 				var order []string
 				a := &Agent{Config: &Config{
-					client: &client, MaxTurns: 3, ContextWindow: 10, ReserveTokens: 1,
+					client: &client, MaxTurns: 3, ContextWindow: 6000, ReserveTokens: 500,
 					Hooks: hook.Hooks{
 						SessionStart: []hook.SessionStart{func(_ context.Context, source string) (hook.Outcome, error) {
 							order = append(order, source)
@@ -76,7 +76,10 @@ func TestSendCompactionHookLifecycle(t *testing.T) {
 							return hook.Outcome{Block: requests == 1}, nil
 						}},
 					},
-				}, Messages: []Message{{Role: RoleUser, Content: []Content{{Text: "earlier work"}}}}}
+				}, Messages: []Message{
+					{Role: RoleUser, Content: []Content{{Text: "earlier work"}}},
+					{Role: RoleAssistant, Content: []Content{{Text: strings.Repeat("earlier progress ", 1000)}}},
+				}}
 				stream, err := a.Send(t.Context(), []Content{{Text: "continue the work"}})
 				if err != nil {
 					t.Fatal(err)
@@ -143,5 +146,75 @@ func TestShouldCompactProactivelyDisabled(t *testing.T) {
 	}
 	if (&Agent{Config: &Config{}}).compactionOvershoot("claude-opus-4-8", 0) > 0 {
 		t.Error("zero measured tokens must not trigger compaction")
+	}
+}
+
+func TestRetainedUsersNewestFirstAndVerbatim(t *testing.T) {
+	first := Message{Role: RoleUser, InputID: "first", Content: []Content{{Text: strings.Repeat("old", 1000)}}}
+	second := Message{Role: RoleUser, InputID: "second", Content: []Content{{Text: "keep 日本語 and exact whitespace \n "}}}
+	third := Message{Role: RoleUser, InputID: "third", Content: []Content{{Text: "use this image"}, {File: &File{Data: "data:image/png;base64,AAAA"}}}}
+	messages := []Message{first, hiddenContextMessage(summaryPrefix + "\nold checkpoint"), second, {Role: RoleAssistant, Content: []Content{{Text: "done"}}}, third}
+	retained := retainedUserMessages(messages, messageTokens(second)+messageTokens(third))
+	if len(retained) != 2 || retained[0].InputID != "second" || retained[1].InputID != "third" {
+		t.Fatalf("retained messages = %+v", retained)
+	}
+	if retained[0].Content[0].Text != second.Content[0].Text || retained[1].Content[1].File.Data != third.Content[1].File.Data {
+		t.Fatal("user input was changed")
+	}
+}
+
+func TestCompactionRejectsOversizedLatestInputWithoutChangingIt(t *testing.T) {
+	input := Message{Role: RoleUser, Content: []Content{{Text: strings.Repeat("request ", 1000)}}}
+	_, err := compactionUserMessages([]Message{input}, 100)
+	if err == nil || !strings.Contains(err.Error(), "conversation preserved") {
+		t.Fatalf("oversized input result=%v", err)
+	}
+	if len(input.Content[0].Text) != 8000 {
+		t.Fatal("latest input was shortened")
+	}
+}
+
+func TestCompactionReportsOversizedCheckpointBeforeUserInput(t *testing.T) {
+	_, err := compactionUserMessages([]Message{{Role: RoleUser, Content: []Content{{Text: "hi"}}}}, -1)
+	if err == nil || !strings.Contains(err.Error(), "summary or session context") {
+		t.Fatalf("misleading compaction error: %v", err)
+	}
+}
+
+func TestCompactionWithoutReductionStopsBeforeSendingOrSummarizingAgain(t *testing.T) {
+	requests := 0
+	client := openai.NewClient(option.WithAPIKey("test"), option.WithHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Stream {
+			t.Fatal("sent main request after ineffective compaction")
+		}
+		body := `{"status":"completed","output":[` + strings.ReplaceAll(finalAnswerOutput, "Checked and fixed.", strings.Repeat("larger briefing ", 100)) + `]}`
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Request: r, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}))
+	a := &Agent{Config: &Config{client: &client, ContextWindow: 6000, ReserveTokens: 500}, Messages: []Message{
+		{Role: RoleUser, Content: []Content{{Text: "original task"}}},
+		{Role: RoleAssistant, Content: []Content{{Text: "recorded progress"}}},
+	}}
+	// A measured input can be much larger than a text estimate on some
+	// providers. Exercise proactive pressure without a huge fake transcript.
+	a.anchorContextUsage(&request{messages: a.requestMessages()}, &response{usage: Usage{InputTokens: 6000}})
+	stream, err := a.Send(t.Context(), []Content{{Text: "continue"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var turnErr error
+	for _, err := range stream {
+		if err != nil {
+			turnErr = err
+		}
+	}
+	if requests != 1 || turnErr == nil || !strings.Contains(turnErr.Error(), "did not reduce") || a.ContextRevision != 0 || len(a.MessagesSnapshot()) != 3 {
+		t.Fatalf("requests=%d err=%v revision=%d", requests, turnErr, a.ContextRevision)
 	}
 }

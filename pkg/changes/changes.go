@@ -141,6 +141,29 @@ func (m *Manager) Diffs(ctx context.Context) ([]FileDiff, error) {
 	return m.DiffsLayer(ctx, DiffCombined)
 }
 
+// DiffsIfChanged returns combined diffs and their fingerprint from one status
+// scan. An unchanged fingerprint returns nil diffs. Pass zero to force a load.
+func (m *Manager) DiffsIfChanged(ctx context.Context, previous uint64) ([]FileDiff, uint64, error) {
+	if err := m.lock(ctx); err != nil {
+		return nil, 0, err
+	}
+	defer m.mu.Unlock()
+
+	entries, err := m.status()
+	if err != nil {
+		return nil, 0, err
+	}
+	fingerprint := m.fingerprintLocked(entries)
+	if previous != 0 && fingerprint == previous {
+		return nil, fingerprint, nil
+	}
+	diffs, err := m.diffsLocked(ctx, entries, DiffCombined)
+	if err != nil {
+		return nil, 0, err
+	}
+	return diffs, fingerprint, nil
+}
+
 // DiffsLayer returns a consistent snapshot of every change in one Git layer.
 // The manager lock stays held while the status, HEAD tree, and file contents
 // are read so callers such as commit-message generation never mix snapshots.
@@ -165,6 +188,10 @@ func (m *Manager) DiffsLayer(ctx context.Context, layer DiffLayer) ([]FileDiff, 
 	if err != nil {
 		return nil, err
 	}
+	return m.diffsLocked(ctx, entries, layer)
+}
+
+func (m *Manager) diffsLocked(ctx context.Context, entries []statusEntry, layer DiffLayer) ([]FileDiff, error) {
 	head, err := m.headTree()
 	if err != nil {
 		return nil, err
@@ -278,6 +305,10 @@ func (m *Manager) Fingerprint(ctx context.Context) uint64 {
 	if err != nil {
 		return 0
 	}
+	return m.fingerprintLocked(entries)
+}
+
+func (m *Manager) fingerprintLocked(entries []statusEntry) uint64 {
 	h := fnv.New64a()
 	if head, err := m.repo.Head(); err == nil {
 		_, _ = fmt.Fprintf(h, "head\x00%s\x00%s\n", head.Name(), head.Hash())

@@ -66,16 +66,17 @@ func writeScratch(scratchDir, toolName, content string) string {
 
 func formatPersisted(result, scratchPath string) string {
 	head := text.HeadBytes(result, headPreviewBytes)
-	tail := text.TailBytes(result, tailPreviewBytes)
+	tail := text.TailBytes(result[len(head):], tailPreviewBytes)
+	omitted := len(result) - len(head) - len(tail)
 
 	var b strings.Builder
 	b.WriteString("<persisted-output>\n")
-	fmt.Fprintf(&b, "Output was %d bytes — too large for inline.", len(result))
+	fmt.Fprintf(&b, "Output was %d bytes (%d lines); %d bytes omitted from this preview.", len(result), text.LineCount(result), omitted)
 	if scratchPath != "" {
 		fmt.Fprintf(&b, " Full output saved to: %s", scratchPath)
 	}
 	fmt.Fprintf(&b, "\n\nPreview (first %d bytes):\n\n%s", len(head), head)
-	fmt.Fprintf(&b, "\n\n[...]\n\nPreview (last %d bytes):\n\n%s", len(tail), tail)
+	fmt.Fprintf(&b, "\n\n[... %d bytes omitted ...]\n\nPreview (last %d bytes):\n\n%s", omitted, len(tail), tail)
 	if scratchPath != "" {
 		b.WriteString("\n\nUse `read` on the path above to retrieve specific ranges.")
 	}

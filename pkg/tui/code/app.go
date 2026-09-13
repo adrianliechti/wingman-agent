@@ -614,16 +614,24 @@ func (a *App) Run() error {
 	a.term.SetTitle(a.terminalTitle())
 	a.term.EnableMouse(true)
 
-	if fetcher, ok := a.agent.(modelFetcher); ok {
-		fetcher.FetchModels(a.ctx)
-	}
-
+	startupCtx, cancelStartup := context.WithCancel(a.ctx)
+	defer cancelStartup()
 	a.setPhase(PhasePreparing)
+
+	if fetcher, ok := a.agent.(modelFetcher); ok {
+		go func() {
+			fetcher.FetchModels(startupCtx)
+			if startupCtx.Err() == nil {
+				a.post(a.invalidate)
+			}
+		}()
+	}
 
 	go func() {
 		a.agent.Workspace().WarmUp()
+		a.post(func() { a.pollDiffPanel(false) })
 
-		if err := a.agent.Workspace().InitMCP(a.ctx); err != nil {
+		if err := a.agent.Workspace().InitMCP(startupCtx); err != nil && startupCtx.Err() == nil {
 			a.post(func() {
 				a.appendChat(cellError("MCP initialization failed", err.Error(), a.width()))
 			})
@@ -659,10 +667,12 @@ func (a *App) Run() error {
 	for {
 		select {
 		case <-a.quit:
+			cancelStartup()
 			a.shutdown()
 			return nil
 
 		case <-a.ctx.Done():
+			cancelStartup()
 			a.shutdown()
 			return nil
 

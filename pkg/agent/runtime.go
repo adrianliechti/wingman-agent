@@ -366,27 +366,13 @@ func (a *Agent) replaceContext(reason string, messages []Message) error {
 	// later same-model blocks whose prefix included it. Keep summaries in the
 	// recovery projection for continuity, but leave the canonical event history
 	// untouched for display and audit.
-	messages = withoutReplayableReasoning(messages)
+	messages = CloneMessages(messages)
+	clearReplayableReasoning(messages)
 	return a.recordEvents(RuntimeEvent{
 		Type:          EventContextCheckpoint,
-		Context:       CloneMessages(messages),
+		Context:       messages,
 		ContextReason: reason,
 	})
-}
-
-func withoutReplayableReasoning(messages []Message) []Message {
-	cleaned := CloneMessages(messages)
-	for i := range cleaned {
-		for j := range cleaned[i].Content {
-			reasoning := cleaned[i].Content[j].Reasoning
-			if reasoning == nil {
-				continue
-			}
-			reasoning.Content = ""
-			reasoning.Model = ""
-		}
-	}
-	return cleaned
 }
 
 // ReconcileInterrupted closes lifecycle entities that were open when the

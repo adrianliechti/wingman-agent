@@ -181,7 +181,6 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 		s.files.Run(serverCtx)
 	})
 	if !opts.disableManagedTools {
-		s.setManagedToolsStatus(managedToolsStatus{State: "installing"})
 		update := ws.StartManagedToolsUpdate(serverCtx, code.ManagedLSPTools, func(progress devtools.Progress) {
 			s.setManagedToolsStatus(managedToolsStatus{
 				State: "installing", Tool: progress.Tool, Label: progress.Label, Phase: progress.Phase,

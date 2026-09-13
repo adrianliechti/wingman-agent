@@ -1103,6 +1103,16 @@ func (w *Workspace) Diffs(ctx context.Context) ([]changes.FileDiff, error) {
 	return w.Changes.Diffs(ctx)
 }
 
+// DiffsIfChanged checks for changes and loads their diffs in one Git scan.
+func (w *Workspace) DiffsIfChanged(ctx context.Context, previous uint64) ([]changes.FileDiff, uint64, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.Changes == nil {
+		return nil, 0, nil
+	}
+	return w.Changes.DiffsIfChanged(ctx, previous)
+}
+
 func (w *Workspace) DiffsLayer(ctx context.Context, layer changes.DiffLayer) ([]changes.FileDiff, error) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
