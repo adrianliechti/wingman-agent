@@ -27,6 +27,9 @@ type Manager struct {
 
 	Dir string
 
+	// TrustRequired records configuration sources that must be approved before connecting.
+	TrustRequired map[string]string
+
 	// Credentials holds OAuth state for remote servers.
 	Credentials *CredentialStore
 
@@ -84,10 +87,26 @@ func Load(paths ...string) (*Manager, error) {
 	return NewManager(merged), nil
 }
 
-func (m *Manager) Connect(ctx context.Context) error {
+func (m *Manager) Connect(ctx context.Context, authorize ...func(context.Context, string, ServerConfig) error) error {
 	var errs []error
 
 	for _, name := range slices.Sorted(maps.Keys(m.Servers)) {
+		m.mu.RLock()
+		connected := m.sessions[name] != nil
+		m.mu.RUnlock()
+		if connected {
+			continue
+		}
+		if m.TrustRequired[name] != "" {
+			if len(authorize) == 0 || authorize[0] == nil {
+				errs = append(errs, fmt.Errorf("MCP server %s requires approval of %s", name, m.TrustRequired[name]))
+				continue
+			}
+			if err := authorize[0](ctx, name, m.Servers[name]); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		}
 		if err := m.connect(ctx, name, m.Servers[name]); err != nil {
 			errs = append(errs, err)
 		}

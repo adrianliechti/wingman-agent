@@ -96,6 +96,10 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 			// Retry only when the consumer can retract the failed attempt.
 			return resp, err
 		}
+		reason, delay := retryPolicy(err, attempt, time.Now())
+		if handlers, ok := ctx.Value(streamEventHandlersKey{}).(StreamEventHandlers); ok && handlers.Retry != nil {
+			handlers.Retry(RetryInfo{Attempt: attempt + 1, Reason: reason, DelayMillis: delay.Milliseconds()})
+		}
 
 		if isContextOverflowError(err) {
 			if err := a.compactWithHooks(ctx, req); err != nil {
@@ -109,7 +113,7 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 			if !dropped {
 				return resp, err
 			}
-		} else if !waitForRetry(ctx, time.Duration(attempt+1)*2*time.Second) {
+		} else if !waitForRetry(ctx, delay) {
 			return resp, ctx.Err()
 		}
 		if isContextOverflowError(err) || isReasoningReplayError(err) {

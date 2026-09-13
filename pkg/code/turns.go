@@ -392,6 +392,9 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 	}()
 	ctx = agent.WithInputID(ctx, item.input.ID)
 	ctx = agent.WithStreamEventHandlers(ctx, agent.StreamEventHandlers{
+		Retry: func(info agent.RetryInfo) {
+			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, Retry: &info})
+		},
 		Reset: func() {
 			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, StreamEvent: agent.StreamEventReset})
 		},

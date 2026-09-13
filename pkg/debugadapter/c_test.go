@@ -50,8 +50,18 @@ func copyNativeExample(t *testing.T, language string) (string, Target) {
 	root = filepath.Join(root, language+" project")
 	mainPath := "main.c"
 	if language == "C" {
-		if err := os.CopyFS(root, os.DirFS(filepath.Join("..", "..", "examples", "c"))); err != nil {
+		// Copy sources only: a developer may already have built the example.
+		if err := os.MkdirAll(root, 0755); err != nil {
 			t.Fatal(err)
+		}
+		for _, name := range []string{"main.c", "arithmetic.c", "arithmetic.h", "compile_flags.txt"} {
+			data, err := os.ReadFile(filepath.Join("..", "..", "examples", "c", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, name), data, 0644); err != nil {
+				t.Fatal(err)
+			}
 		}
 	} else {
 		mainPath = "main.cpp"

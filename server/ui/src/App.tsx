@@ -6,7 +6,7 @@ import {
 	useSessionSettings,
 	draftSettingsKey,
 } from "./state/workspaceContext.ts";
-import { ComposerDraft } from "./state/composerDraft.ts";
+import { composerDrafts as getComposerDrafts } from "./state/composerDrafts.ts";
 import { isDraft, sessionKey, splitSessionKey } from "./state/sessionStore.ts";
 import { workspaceClient } from "./state/workspaceClient.ts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -54,6 +54,9 @@ import {
 	useEffect,
 	useRef,
 	useState,
+	useSyncExternalStore,
+	lazy,
+	Suspense,
 } from "react";
 import {
 	Group,
@@ -85,7 +88,7 @@ import {
 	terminalQueries,
 } from "./api/terminals";
 import { chooseWorkspaceFolder, replaceWorkspace } from "./api/workspaces";
-import { ChatPanel } from "./components/ChatPanel";
+import { SessionChatPanel } from "./components/SessionChatPanel";
 import {
 	PaneDropZones,
 	type PaneZone,
@@ -116,14 +119,12 @@ import {
 import { DebugTab } from "./components/DebugTab";
 import { DebugOutputTab } from "./components/DebugOutputTab";
 import { DebugToolbar, type DebugOperation } from "./components/DebugToolbar";
-import { DiffTab } from "./components/DiffTab";
-import { CompareTab } from "./components/CompareTab";
+
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ErrorPanel } from "./components/ErrorScreen";
-import {
-	FileTab,
-	type EditorSelectionContext,
-	type FileTabHandle,
+import type {
+	EditorSelectionContext,
+	FileTabHandle,
 } from "./components/FileTab";
 import { InsightsTab } from "./components/insights/InsightsTab";
 import { ProblemsPanel } from "./components/ProblemsPanel";
@@ -144,7 +145,7 @@ import { useCapabilities } from "./hooks/useCapabilities";
 import { useAutoHidingScrollbars } from "./hooks/useAutoHidingScrollbars";
 import { type OpenDocument, useOpenDocuments } from "./hooks/useOpenDocuments";
 import { useServerQueryInvalidation } from "./hooks/useServerQueryInvalidation";
-import { type ChatEntry, useWebSocket } from "./hooks/useWebSocket";
+import { useWebSocket } from "./hooks/useWebSocket";
 import type {
 	CompareMode,
 	DiffLayer,
@@ -168,6 +169,18 @@ import {
 	contextRemainingPercent,
 	shouldShowContextIndicator,
 } from "./utils/usage";
+const FileTab = lazy(async () => {
+	await import("./monacoRuntime");
+	return { default: (await import("./components/FileTab")).FileTab };
+});
+const DiffTab = lazy(async () => {
+	await import("./monacoRuntime");
+	return { default: (await import("./components/DiffTab")).DiffTab };
+});
+const CompareTab = lazy(async () => {
+	await import("./monacoRuntime");
+	return { default: (await import("./components/CompareTab")).CompareTab };
+});
 type WorkspaceTab = "changes" | "files" | "inspect";
 type ChatAuxiliaryView = "sessions" | "agents";
 type DebugContentView = "output" | "terminal";
@@ -203,7 +216,6 @@ const DEBUG_DETAILS_MAX_SIZE = 480;
 // Width per workspace tab below which the label is replaced by its icon.
 const WORKSPACE_TAB_LABEL_MIN_WIDTH = 58;
 
-const EMPTY_ENTRIES: never[] = [];
 const EMPTY_SHELLS: ShellEntry[] = [];
 const EMPTY_CENTER_TAB = {
 	id: "",
@@ -292,6 +304,12 @@ export default function App() {
 	const mobile = useMobileLayout();
 	const { backend: agentId, selectBackend, drafts } = useWorkspace();
 	const client = workspaceClient();
+	const [composerDrafts] = useState(getComposerDrafts);
+	const draftStorageError = useSyncExternalStore(
+		composerDrafts.subscribe,
+		composerDrafts.getError,
+	);
+	const [recoveredTabs] = useState(() => composerDrafts.openTabs());
 	const [initialTab] = useState<CenterTab>(() => {
 		const sid = decodeURIComponent(
 			location.pathname.split("/").filter(Boolean)[1] ?? "",
@@ -306,7 +324,7 @@ export default function App() {
 				label: "Session",
 			};
 		}
-		return draftChatTab(agentId);
+		return recoveredTabs[0] ?? draftChatTab(agentId);
 	});
 
 	const {
@@ -461,7 +479,14 @@ export default function App() {
 		setRightActiveId,
 		setCurrentSessionId,
 	} = useMainLayout({
-		tabs: [initialTab],
+		tabs: [
+			initialTab,
+			...recoveredTabs.filter(
+				(tab) =>
+					tab.id !== initialTab.id &&
+					(!tab.sessionId || tab.sessionId !== initialTab.sessionId),
+			),
+		],
 		activeTabId: initialTab.id,
 		leftActiveId: initialTab.id,
 		rightActiveId: "",
@@ -839,7 +864,7 @@ export default function App() {
 			: requestedWorkspaceTab;
 
 	const activeSession = sessionId ? sessions[sessionId] : undefined;
-	const entries = activeSession?.entries ?? EMPTY_ENTRIES;
+
 	const phase = activeSession?.phase ?? "idle";
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
 
@@ -857,8 +882,7 @@ export default function App() {
 	);
 	useEffect(() => observe(JSON.parse(observedKeys)), [observe, observedKeys]);
 
-	const streamEstimate =
-		phase !== "idle" ? estimateStreamingTokens(entries) : 0;
+	const streamEstimate = 0; // Only provider-reported usage is shown; streaming text is not token accounting.
 	const outputTokens = usage.outputTokens + streamEstimate;
 
 	const activateTab = useCallback(
@@ -945,8 +969,11 @@ export default function App() {
 				return;
 			}
 
+			const recovered = composerDrafts
+				.closedTabs()
+				.find(({ tab }) => tab.sessionId === sid)?.tab;
 			const tab: CenterTab = {
-				id: chatTabId(sid),
+				id: recovered?.id ?? chatTabId(sid),
 				type: "chat",
 				backendId: splitSessionKey(sid).backendId,
 				label: "Session",
@@ -954,7 +981,7 @@ export default function App() {
 			};
 			showCenterTab(tab, disposition);
 		},
-		[showCenterTab, tabs],
+		[showCenterTab, tabs, composerDrafts],
 	);
 
 	const openFile = useCallback(
@@ -1609,6 +1636,14 @@ export default function App() {
 				}
 				return false;
 			}
+			if (tab.type === "chat" && !(await composerDrafts.flush())) {
+				toast({
+					title: "Draft could not be saved",
+					description: composerDrafts.getError() ?? undefined,
+					tone: "error",
+				});
+				return false;
+			}
 			closeTabNow(id);
 			return true;
 		},
@@ -1617,6 +1652,7 @@ export default function App() {
 			closeTabNow,
 			closeTerminal,
 			closeRequest,
+			composerDrafts,
 			saveConflict,
 			filePathRequest,
 			dirtyPaths,
@@ -1924,13 +1960,7 @@ export default function App() {
 		[selectBackend, openChatTab],
 	);
 	const draftCreations = useRef(new Map<string, Promise<string>>());
-	const [composerDrafts] = useState(() => new Map<string, ComposerDraft>());
-	useEffect(() => {
-		const open = new Set(tabs.map((tab) => tab.id));
-		for (const id of composerDrafts.keys()) {
-			if (!open.has(id)) composerDrafts.delete(id);
-		}
-	}, [composerDrafts, tabs]);
+	useEffect(() => composerDrafts.syncTabs(tabs), [composerDrafts, tabs]);
 	const [draftErrors, setDraftErrors] = useState<
 		Record<string, string | undefined>
 	>({});
@@ -2335,6 +2365,12 @@ export default function App() {
 	}, [showWorkspaceSearch]);
 
 	const paletteActions: PaletteAction[] = [
+		...composerDrafts.closedTabs().map(({ tab, preview }) => ({
+			id: `recover-draft:${tab.id}`,
+			label: `Recover draft: ${preview}`,
+			icon: <History size={12} />,
+			run: () => showCenterTab(tab, "keep"),
+		})),
 		...(paletteEditorActions
 			? [
 					{
@@ -2498,14 +2534,22 @@ export default function App() {
 			return formatAgentName(backend, definition?.name);
 		}
 		const sess = sessions[tab.sessionId];
-		const firstUser = sess?.entries.find(
-			(e) => e.type === "user" && e.content.trim(),
-		);
+		const firstUser = sess?.firstUser;
 		if (!firstUser) return "Session";
-		const text = firstUser.content.trim().replace(/\s+/g, " ");
+		const text = firstUser.trim().replace(/\s+/g, " ");
 		return text.length > 24 ? `${text.slice(0, 24)}…` : text;
 	};
 
+	const [seenCompletions, setSeenCompletions] = useState<
+		Record<string, string>
+	>({});
+	const activeCompletion = sessions[sessionId]?.completed ?? "";
+	if (
+		activeTab.type === "chat" &&
+		activeCompletion &&
+		seenCompletions[sessionId] !== activeCompletion
+	)
+		setSeenCompletions({ ...seenCompletions, [sessionId]: activeCompletion });
 	const stripItem = (tab: CenterTab): TabStripItem => ({
 		tab,
 		label: tab.type === "chat" ? chatTabLabel(tab) : tab.label,
@@ -2514,6 +2558,15 @@ export default function App() {
 			tab.type === "chat" && tab.sessionId
 				? (sessions[tab.sessionId]?.phase ?? "idle") !== "idle"
 				: false,
+		status:
+			tab.sessionId && sessions[tab.sessionId]?.needsInput
+				? "Needs input"
+				: tab.sessionId &&
+					  sessions[tab.sessionId]?.completed &&
+					  seenCompletions[tab.sessionId] !==
+							sessions[tab.sessionId]?.completed
+					? "Completed"
+					: undefined,
 		closable: true,
 	});
 	const leftStripItems: TabStripItem[] = leftPool.map(stripItem);
@@ -2527,11 +2580,7 @@ export default function App() {
 				(candidate) => candidate.id === backendId,
 			);
 			const sess = key ? sessions[key] : undefined;
-			let composerDraft = composerDrafts.get(tab.id);
-			if (!composerDraft) {
-				composerDraft = new ComposerDraft();
-				composerDrafts.set(tab.id, composerDraft);
-			}
+			const composerDraft = composerDrafts.get(tab);
 			const draftError = !tab.sessionId
 				? draftErrors[JSON.stringify([backendId, tab.id])]
 				: undefined;
@@ -2549,23 +2598,19 @@ export default function App() {
 					onSessionDelete={(id, title) => setSessionDelete({ id, title })}
 					onOpenTask={openTask}
 				>
-					<ChatPanel
+					<SessionChatPanel
 						key={tab.id}
 						draftId={tab.id}
 						draft={composerDraft}
+						available={connected && (isDraft(key) || !!sess?.synchronized)}
 						sessionId={key}
 						placeholder={`Message ${formatAgentName(backendId, backend?.name)}…`}
-						entries={sess?.entries ?? EMPTY_ENTRIES}
-						phase={sess?.phase ?? "idle"}
 						onSend={(text, files, images, intent) =>
 							sendForSession(key, text, files, images, intent, tab.id)
 						}
 						onCancel={(clear) => {
 							if (key) cancel(key, clear ?? false);
 						}}
-						pendingInputs={sess?.pendingInputs ?? EMPTY_ENTRIES}
-						queuePaused={sess?.queuePaused ?? false}
-						canSteer={sess?.canSteer ?? false}
 						onRemoveQueued={(id, state) => {
 							if (!key) return;
 							if (state === "queued" || state === "sending") {
@@ -2593,14 +2638,12 @@ export default function App() {
 						onDismissError={() => {
 							if (key) dismissError(key);
 						}}
-						prompts={sess?.prompts ?? []}
 						onPromptReply={(id, reply) => {
 							void respondPrompt(key, id, reply);
 						}}
 						onOpenFile={openFile}
 						seed={tab.id === activeTabId ? composerSeed : null}
 						onSeedConsumed={consumeComposerSeed}
-						toolProgress={sess?.toolProgress ?? {}}
 					/>
 				</ChatTabLayout>
 			);
@@ -2784,7 +2827,15 @@ export default function App() {
 					<TabCrashed error={error} errorInfo={errorInfo} />
 				)}
 			>
-				{tab ? renderTabContent(tab) : <EmptyWorkspace />}
+				<Suspense
+					fallback={
+						<div role="status" className="p-4 text-fg-dim">
+							Loading editor…
+						</div>
+					}
+				>
+					{tab ? renderTabContent(tab) : <EmptyWorkspace />}
+				</Suspense>
 			</ErrorBoundary>
 		</div>
 	);
@@ -3773,12 +3824,30 @@ export default function App() {
 				</button>
 			</Dialog>
 
+			{draftStorageError && (
+				<div
+					role="alert"
+					className="absolute top-12 right-3 z-140 max-w-sm rounded border border-warning bg-bg p-3 text-[12px]"
+				>
+					{draftStorageError}{" "}
+					<button
+						className="underline"
+						onClick={() => void composerDrafts.flush()}
+					>
+						Retry saving
+					</button>
+				</div>
+			)}
 			{!connected && (
-				<div className="absolute inset-0 z-140 flex items-center justify-center backdrop-blur-md bg-bg/60">
-					<div className="flex flex-col items-center gap-3 text-fg-muted">
-						<Loader2 size={28} className="animate-spin" />
-						<div className="text-[13px]">Reconnecting…</div>
-					</div>
+				<div
+					role="status"
+					className="absolute top-2 right-3 z-140 flex items-center gap-2 rounded border border-border bg-bg px-3 py-2 text-[12px] text-fg-muted shadow"
+				>
+					<Loader2 size={14} className="animate-spin" /> Reconnecting · drafts
+					stay available
+					<button className="underline" onClick={() => client.focus()}>
+						Retry
+					</button>
 				</div>
 			)}
 		</div>
@@ -4101,16 +4170,6 @@ function ResizeHandle({
 			)}
 		</Separator>
 	);
-}
-
-function estimateStreamingTokens(entries: ChatEntry[]): number {
-	let chars = 0;
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const e = entries[i];
-		if (e.type !== "reasoning" && e.type !== "assistant") break;
-		chars += e.content.length;
-	}
-	return Math.floor(chars / 4);
 }
 
 function TabCrashed({

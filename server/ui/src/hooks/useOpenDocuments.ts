@@ -1,3 +1,7 @@
+import {
+	closeDocumentModel,
+	moveDocumentModels,
+} from "../state/documentModels";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readWorkspaceFile, writeWorkspaceFile } from "../api/files";
 import { runEditorSaveParticipants } from "../editorSaveParticipants";
@@ -555,6 +559,7 @@ export function useOpenDocuments(subscribe?: Subscribe) {
 
 	const closeDocument = useCallback(
 		(path: string) => {
+			closeDocumentModel(path);
 			const document = documentsRef.current[path];
 			cancelPendingLSPChange(path);
 			if (
@@ -578,6 +583,7 @@ export function useOpenDocuments(subscribe?: Subscribe) {
 
 	const moveDocuments = useCallback(
 		(from: string, to: string) => {
+			moveDocumentModels(from, to);
 			for (const [path, document] of Object.entries(documentsRef.current)) {
 				if (path !== from && !path.startsWith(`${from}/`)) continue;
 				if (document.external || document.file?.binary) continue;

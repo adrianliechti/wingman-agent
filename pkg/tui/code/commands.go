@@ -2,6 +2,7 @@ package code
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -37,6 +38,14 @@ func (c slashCommand) Label() string {
 
 func (a *App) builtinCommands() []slashCommand {
 	cmds := []slashCommand{
+		{Name: "/queue", Desc: "Resume, edit or remove queued inputs", Busy: true, Run: (*App).showTurnQueue, RunArgs: (*App).runQueueCommand},
+		{Name: "/discard", Desc: "Discard the current draft", Busy: true, Run: func(a *App) {
+			a.editor.SetText("")
+			a.clearPendingContent()
+			a.editingQueueID = ""
+			a.beforeQueueEdit = nil
+			a.saveCurrentDraft()
+		}},
 		{Name: "/help", Desc: "Open command center", Busy: true, Run: (*App).showHelp},
 		{Name: "/model", Desc: "Select AI model and effort", Run: (*App).showModelPicker},
 		{Name: "/copy", Desc: "Copy a response, code block, or blockquote", Busy: true, Run: (*App).showCopyPicker},
@@ -92,7 +101,7 @@ func (a *App) findBuiltin(query string) *slashCommand {
 func (a *App) skillCommands() []slashCommand {
 	var cmds []slashCommand
 	workspace := a.agent.Workspace()
-	workspace.RefreshSkills()
+	a.requestSkillRefresh()
 	skills := workspace.Skills()
 	for i := range skills {
 		s := &skills[i]
@@ -257,7 +266,13 @@ func (a *App) completeCommand(id string) bool {
 	return changed
 }
 
-func (a *App) submitInput() {
+func (a *App) submitInput() { a.submitInputIntent(code.TurnInputSteer) }
+
+func (a *App) submitInputIntent(intent code.TurnInputIntent) {
+	if a.operationPending {
+		a.showToast("Wait for the current operation or press Esc to cancel", theme.Default.Yellow)
+		return
+	}
 	query := strings.TrimSpace(a.editor.Text())
 
 	if query == "" {
@@ -288,11 +303,10 @@ func (a *App) submitInput() {
 	}
 
 	workspace := a.agent.Workspace()
-	workspace.RefreshSkills()
+	a.requestSkillRefresh()
 	skills := workspace.Skills()
 
 	if name, ok := skill.ParseSlashCommand(query); ok && skill.FindSkill(name, skills) == nil && !a.hasAgentCommand(name) {
-		a.editor.SetText("")
 		a.appendChat(cellNotice(fmt.Sprintf("Unknown command: /%s", name), theme.Default.Yellow, a.width()))
 		return
 	}
@@ -334,11 +348,16 @@ func (a *App) submitInput() {
 		input = append(input, agent.Content{Text: block, Hidden: true})
 	}
 
-	if a.submitAgentInput(input, displayText) {
+	editing := a.editingQueueID != ""
+	if a.submitAgentInputIntent(input, displayText, intent) {
 		a.editor.AddHistory(query)
 		a.editor.SetText("")
 		a.clearPendingContent()
 		a.showWelcome = false
+		if editing {
+			a.endQueueEdit()
+		}
+		a.saveCurrentDraft()
 	}
 }
 
@@ -352,6 +371,24 @@ func (a *App) hasAgentCommand(name string) bool {
 }
 
 func (a *App) submitAgentInput(input []agent.Content, echo string) bool {
+	return a.submitAgentInputIntent(input, echo, code.TurnInputSteer)
+}
+
+func (a *App) submitAgentInputIntent(input []agent.Content, echo string, intent code.TurnInputIntent) bool {
+	a.syncQueuedInputs()
+	displayText := echo
+	if a.editor != nil && strings.TrimSpace(a.editor.Text()) != "" {
+		displayText = strings.TrimSpace(a.editor.Text())
+	}
+	display := &code.TurnInputDisplay{Text: displayText, Files: slices.Clone(a.pendingFiles)}
+	if a.editingQueueID != "" {
+		if err := a.turns.ReplaceQueued(a.sessionID, a.editingQueueID, code.TurnInput{Content: input, Intent: code.TurnInputFollowUp, Display: display}); err != nil {
+			a.showToast("Could not update queued input: "+err.Error(), theme.Default.Red)
+			return false
+		}
+		a.syncQueuedInputs()
+		return true
+	}
 	id := uuid.NewString()
 	// Active and Steered can arrive before Submit returns. Install the preview
 	// first so those events move it ahead of the turn's first streamed output.
@@ -362,7 +399,7 @@ func (a *App) submitAgentInput(input []agent.Content, echo string) bool {
 	}
 
 	_, err := a.turns.Submit(a.ctx, a.sessionID, code.TurnInput{
-		ID: id, Content: input, Intent: code.TurnInputSteer,
+		ID: id, Content: input, Intent: intent, Display: display,
 	})
 	if err != nil {
 		a.removePendingEcho(id)
@@ -370,6 +407,7 @@ func (a *App) submitAgentInput(input []agent.Content, echo string) bool {
 		return false
 	}
 
+	a.syncQueuedInputs()
 	a.syncMessages()
 	a.invalidate()
 	return true
@@ -452,6 +490,14 @@ func (a *App) showTasks() {
 const schedulePopupPrefix = "schedule:"
 
 func (a *App) activeScheduleCount() int {
+	if a.scheduleCountSession != a.sessionID {
+		a.scheduleCountSession = a.sessionID
+		a.scheduleCount = 0
+		a.scheduleCountAt = time.Time{}
+	}
+	if time.Since(a.scheduleCountAt) < time.Second || a.scheduleCountPending.Load() {
+		return a.scheduleCount
+	}
 	sp, ok := a.agent.(scheduleProvider)
 	if !ok {
 		return 0
@@ -461,18 +507,29 @@ func (a *App) activeScheduleCount() int {
 		return 0
 	}
 
-	jobs, err := store.List()
-	if err != nil {
-		return 0
-	}
-
-	count := 0
-	for _, job := range jobs {
-		if job.Status == schedule.StatusActive {
-			count++
+	a.scheduleCountAt = time.Now()
+	a.scheduleCountPending.Store(true)
+	id, epoch := a.sessionID, a.sessionEpoch
+	go func() {
+		defer a.scheduleCountPending.Store(false)
+		jobs, err := store.List()
+		if err != nil {
+			return
 		}
-	}
-	return count
+		count := 0
+		for _, job := range jobs {
+			if job.Status == schedule.StatusActive {
+				count++
+			}
+		}
+		a.post(func() {
+			if a.sessionID == id && a.sessionEpoch == epoch && a.scheduleCount != count {
+				a.scheduleCount = count
+				a.invalidate()
+			}
+		})
+	}()
+	return a.scheduleCount
 }
 
 func (a *App) showSchedule(id string) {
@@ -536,12 +593,7 @@ func (a *App) showModelPickerLevel(back bool) {
 	}
 	popup := newPopup(kind, title, items, func(ids []string) {
 		modelID := ids[0]
-		if err := a.agent.SetModel(a.ctx, a.sessionID, modelID); err != nil {
-			a.showToast("Could not change model: "+err.Error(), theme.Default.Red)
-			return
-		}
-		a.invalidate()
-		a.showEffortPickerLevel(back)
+		a.runSessionOperation("Could not change model", func(ctx context.Context, id string) error { return a.agent.SetModel(ctx, id, modelID) }, func() { a.showEffortPickerLevel(back) })
 	})
 	if back {
 		popup.onCancel = a.showCommandCenter
@@ -581,11 +633,8 @@ func (a *App) showEffortPickerLevel(back bool) {
 		title = "commands › model › effort"
 	}
 	popup := newPopup(kind, title, items, func(ids []string) {
-		if err := a.agent.SetEffort(a.ctx, a.sessionID, ids[0]); err != nil {
-			a.showToast("Could not change effort: "+err.Error(), theme.Default.Red)
-			return
-		}
-		a.invalidate()
+		effort := ids[0]
+		a.runSessionOperation("Could not change effort", func(ctx context.Context, id string) error { return a.agent.SetEffort(ctx, id, effort) }, nil)
 	})
 	popup.onCancel = func() { a.showModelPickerLevel(back) }
 	for i := range popup.items {

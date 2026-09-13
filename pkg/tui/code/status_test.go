@@ -17,7 +17,7 @@ func TestTurnActivityUsesFooterNotComposer(t *testing.T) {
 		t.Fatalf("activity leaked into composer chrome: %q", chrome.TopLabel)
 	}
 	footer := ansi.Strip(a.footerLine(64))
-	if !strings.Contains(footer, "Thinking") || !strings.Contains(footer, "esc interrupt") {
+	if !strings.Contains(footer, "Thinking") || !strings.Contains(footer, "esc stop") {
 		t.Fatalf("footer missing turn activity: %q", footer)
 	}
 }

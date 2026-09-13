@@ -277,17 +277,20 @@ type claudeProc struct {
 	tools           toolUseCache
 	emitted         *toolCallTracker
 	streamedContent *streamedBlockTracker
+	contextUsage    contextUsage
 
-	turnMu          sync.Mutex
-	turnActive      bool
-	turnID          string
-	turnCtx         context.Context
-	turnCancel      context.CancelFunc
-	subagentMu      sync.Mutex
-	subagentParents map[string]string
-	results         chan turnResult
-	dead            chan struct{}
-	shutdownOnce    sync.Once
+	turnMu              sync.Mutex
+	turnActive          bool
+	turnID              string
+	turnCtx             context.Context
+	turnCancel          context.CancelFunc
+	deliveredText       bool
+	deliveredCompaction bool
+	subagentMu          sync.Mutex
+	subagentParents     map[string]string
+	results             chan turnResult
+	dead                chan struct{}
+	shutdownOnce        sync.Once
 }
 
 func (p *claudeProc) beginTurn(ctx context.Context) {
@@ -298,7 +301,18 @@ func (p *claudeProc) beginTurn(ctx context.Context) {
 	p.turnCtx, p.turnCancel = context.WithCancel(ctx)
 	p.turnID = uuid.NewString()
 	p.turnActive = true
+	p.deliveredText = false
+	p.deliveredCompaction = false
 	p.turnMu.Unlock()
+}
+
+func (p *claudeProc) markTurnOutput(text, compaction bool) {
+	p.turnMu.Lock()
+	defer p.turnMu.Unlock()
+	if p.turnActive {
+		p.deliveredText = p.deliveredText || text
+		p.deliveredCompaction = p.deliveredCompaction || compaction
+	}
 }
 
 func (p *claudeProc) finishTurn() bool {
@@ -358,6 +372,9 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 	defer close(p.dead)
 	defer p.finishTurn()
 	stderr := p.session.agent.stderr
+	p.session.mu.Lock()
+	p.contextUsage.setModel(p.session.modelID)
+	p.session.mu.Unlock()
 	app := &approver{ctx: ctx, conn: conn, sid: sid, out: p.out, cwd: p.cwd, emitted: p.emitted, parentForAgent: p.parentForAgent,
 		askForm:   p.session.agent.supportsFormElicitation(),
 		applyMode: func(modeID string) { p.applyMode(ctx, conn, sid, modeID) }}
@@ -375,15 +392,33 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 		}
 		switch env.Type {
 		case "stream_event":
-			if env.ParentToolUseID != "" {
+			if env.ParentToolUseID != "" || env.ParentAgentID != "" {
 				continue
 			}
+			var event streamEvent
+			if json.Unmarshal(env.Event, &event) != nil {
+				continue
+			}
+			p.contextUsage.observeStream(event)
 			if err := emitStreamEvent(ctx, conn, sid, env.Event, p.streamedContent); err != nil {
 				fmt.Fprintf(stderr, "claude-acp: emit stream event: %v\n", err)
+			} else {
+				p.markTurnOutput(event.Type == "content_block_delta" && event.Delta.Type == "text_delta" && event.Delta.Text != "",
+					event.ContentBlock.Type == "compaction" || event.Delta.Type == "compaction_delta")
 			}
 		case "assistant":
+			root := env.ParentToolUseID == "" && env.ParentAgentID == ""
+			var message cliMessage
+			if root && json.Unmarshal(env.Message, &message) == nil {
+				p.contextUsage.observeAssistant(message)
+			}
 			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools, p.emitted, p.streamedContent, env.ParentToolUseID); err != nil {
 				fmt.Fprintf(stderr, "claude-acp: emit assistant: %v\n", err)
+			} else if root {
+				for _, block := range message.Content {
+					_, visible := stripMarkerTags(block.Text)
+					p.markTurnOutput(block.Type == "text" && visible, block.Type == "compaction")
+				}
 			}
 		case "user":
 			if err := emitToolResults(ctx, conn, sid, env.Message, p.tools, p.emitted, env.ParentToolUseID); err != nil {
@@ -412,16 +447,26 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 				continue
 			}
 			p.turnMu.Lock()
-			matches := result.UserMessageUUID == "" || result.UserMessageUUID == p.turnID
+			matches := p.turnActive && (result.UserMessageUUID == "" || result.UserMessageUUID == p.turnID)
+			fallback := matches && p.turnCtx != nil && p.turnCtx.Err() == nil && !p.deliveredText && !p.deliveredCompaction
 			p.turnMu.Unlock()
 			if !matches {
 				continue
 			}
-			tr, usageUpd := resultToTurn(line)
+			tr := resultToTurn(line)
 			if !p.finishTurn() {
 				continue
 			}
-			if usageUpd != nil {
+			// Cached answers may arrive only in result, with no generated tokens.
+			if fallback && result.Subtype == "success" && tr.err == nil && tr.stop == acp.StopReasonEndTurn &&
+				(result.Usage == nil || result.Usage.OutputTokens == 0) {
+				if text, ok := stripMarkerTags(result.Result); ok {
+					if err := acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(text)); err != nil {
+						tr.err = fmt.Errorf("send result text: %w", err)
+					}
+				}
+			}
+			if usageUpd := p.contextUsage.resultUpdate(result, p.models); usageUpd != nil {
 				_ = acpcommon.Notify(ctx, conn, sid, *usageUpd)
 			}
 			select {
@@ -518,6 +563,7 @@ func reportLoadErrors(ctx context.Context, conn *acp.AgentSideConnection, sid ac
 func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) {
 	switch env.Subtype {
 	case "init":
+		p.contextUsage.setModel(env.Model)
 		reportLoadErrors(ctx, conn, sid, env)
 	case "session_state_changed":
 		if env.State == "idle" && p.finishTurn() {
@@ -549,6 +595,9 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		}
 
 	case "status":
+		if env.ParentToolUseID != "" || env.ParentAgentID != "" {
+			return
+		}
 		var text string
 		switch {
 		case env.Status == "compacting":
@@ -559,12 +608,28 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 			text = "Compacting failed.\n\n"
 		}
 		if text != "" {
+			p.markTurnOutput(false, true)
 			_ = acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(text))
+		}
+
+	case "compact_boundary":
+		if env.ParentToolUseID != "" || env.ParentAgentID != "" {
+			return
+		}
+		p.markTurnOutput(false, true)
+		var postTokens *int
+		if env.CompactMetadata != nil {
+			postTokens = env.CompactMetadata.PostTokens
+		}
+		p.contextUsage.compact(postTokens)
+		if update := p.contextUsage.update(0); update != nil {
+			_ = acpcommon.Notify(ctx, conn, sid, *update)
 		}
 
 	case "local_command_output":
 		var out string
 		if json.Unmarshal(env.Content, &out) == nil && strings.TrimSpace(out) != "" {
+			p.markTurnOutput(true, false)
 			_ = acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(out))
 		}
 
@@ -684,13 +749,13 @@ func (p *claudeProc) applyMode(ctx context.Context, conn *acp.AgentSideConnectio
 	}})
 }
 
-func resultToTurn(line []byte) (turnResult, *acp.SessionUpdate) {
+func resultToTurn(line []byte) turnResult {
 	var r cliResult
 	_ = json.Unmarshal(line, &r)
 
 	tr := resultOutcome(r)
 	tr.usage = resultUsage(r)
-	return tr, usageUpdate(r, tr.usage)
+	return tr
 }
 
 func resultOutcome(r cliResult) turnResult {
@@ -735,26 +800,6 @@ func resultUsage(r cliResult) *acp.Usage {
 		CachedWriteTokens: &cacheWrite,
 		TotalTokens:       u.InputTokens + u.OutputTokens + cacheRead + cacheWrite,
 	}
-}
-
-func usageUpdate(r cliResult, usage *acp.Usage) *acp.SessionUpdate {
-	if usage == nil {
-		return nil
-	}
-	size := 0
-	for _, mu := range r.ModelUsage {
-		if mu.ContextWindow > size {
-			size = mu.ContextWindow
-		}
-	}
-	if size == 0 {
-		return nil
-	}
-	upd := &acp.SessionUsageUpdate{SessionUpdate: "usage_update", Used: usage.TotalTokens, Size: size}
-	if r.TotalCostUSD > 0 {
-		upd.Cost = &acp.Cost{Amount: r.TotalCostUSD, Currency: "USD"}
-	}
-	return &acp.SessionUpdate{UsageUpdate: upd}
 }
 
 func resultErrMessage(r cliResult) string {

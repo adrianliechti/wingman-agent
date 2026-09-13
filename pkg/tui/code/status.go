@@ -36,7 +36,13 @@ func (a *App) activityStatus(width int) string {
 
 	// While a question is pending the agent is waiting on the user; a
 	// spinner would be misleading.
-	if phase == PhaseIdle || a.promptActive || a.askActive {
+	if a.promptActive || a.askActive {
+		return colored(t.Yellow, "Waiting for your response")
+	}
+	if a.queuePaused && phase == PhaseIdle {
+		return colored(t.Yellow, "Queue paused · ctrl+q to resume")
+	}
+	if phase == PhaseIdle {
 		return ""
 	}
 
@@ -58,11 +64,18 @@ func (a *App) activityStatus(width int) string {
 		}
 	case PhaseToolRunning:
 		label, color = "Running", t.Yellow
+	case PhaseRetrying:
+		label, color = "Retrying", t.Yellow
+	case PhaseStopping:
+		label, color = "Stopping", t.Yellow
 	}
 
 	suffix := ""
 	if phase != PhasePreparing && !a.phaseStart.IsZero() {
-		suffix = " " + formatElapsed(time.Since(a.phaseStart)) + " · esc interrupt"
+		suffix = " " + formatElapsed(time.Since(a.phaseStart)) + " · esc stop"
+		if phase != PhaseStopping {
+			suffix += " · enter steer · alt+enter queue"
+		}
 	}
 	label = ansi.Truncate(label, max(width-ansi.Width(suffix)-2, 1), "…")
 	styled := colored(color, label)
@@ -97,6 +110,12 @@ func (a *App) footerLine(width int) string {
 	t := theme.Default
 
 	var right []string
+	if a.queueCount > 0 {
+		right = append(right, dim(fmt.Sprintf("%d queued", a.queueCount)))
+	}
+	if a.currentMode() == code.UnattendedModeID {
+		right = append(right, colored(t.Yellow, "Unattended"))
+	}
 
 	var reg *task.Registry
 	if provider, ok := a.agent.(taskProvider); ok {
@@ -151,6 +170,9 @@ func (a *App) footerLine(width int) string {
 		return withRight(colored(a.toast.color, a.toast.message))
 	}
 
+	if a.operationPending {
+		return withRight(colored(t.Cyan, "Updating session · Esc cancels"))
+	}
 	if activity := a.activityStatus(width - 2*len(cellIndent) - ansi.Width(rightText)); activity != "" {
 		return withRight(activity)
 	}

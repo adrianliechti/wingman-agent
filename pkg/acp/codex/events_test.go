@@ -242,13 +242,40 @@ func TestToolStatusFor(t *testing.T) {
 
 func TestTokenUsageComponentsMatchTotal(t *testing.T) {
 	d := newEventDispatcher(context.Background(), nil, "session")
-	d.handleTokenUsage([]byte(`{"tokenUsage":{"last":{"totalTokens":20,"inputTokens":15,"cachedInputTokens":5,"outputTokens":4,"reasoningOutputTokens":1}}}`))
+	d.handleTokenUsage([]byte(`{"tokenUsage":{"last":{"totalTokens":110,"inputTokens":100,"cachedInputTokens":40,"outputTokens":10,"reasoningOutputTokens":5}}}`))
 	u := d.getUsage()
 	if u == nil || u.CachedReadTokens == nil || u.ThoughtTokens == nil {
 		t.Fatalf("usage = %#v", u)
 	}
 	if got := u.InputTokens + *u.CachedReadTokens + u.OutputTokens + *u.ThoughtTokens; got != u.TotalTokens {
 		t.Fatalf("component sum = %d, total = %d", got, u.TotalTokens)
+	}
+	if u.InputTokens != 60 || *u.CachedReadTokens != 40 || u.OutputTokens != 5 || *u.ThoughtTokens != 5 {
+		t.Fatalf("usage = %+v", u)
+	}
+}
+
+func TestCodexReasoningUsageStaysWithinOutput(t *testing.T) {
+	for _, tt := range []struct {
+		name                                         string
+		output, reasoning, wantOutput, wantReasoning int
+	}{
+		{"no reasoning", 10, 0, 10, 0},
+		{"all reasoning", 10, 10, 0, 10},
+		{"excess reasoning", 10, 20, 0, 10},
+		{"negative reasoning", 10, -5, 10, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newEventDispatcher(context.Background(), nil, "s")
+			payload, _ := json.Marshal(map[string]any{"tokenUsage": map[string]any{"last": map[string]any{
+				"totalTokens": tt.output, "outputTokens": tt.output, "reasoningOutputTokens": tt.reasoning,
+			}}})
+			d.handleTokenUsage(payload)
+			u := d.getUsage()
+			if u.OutputTokens != tt.wantOutput || *u.ThoughtTokens != tt.wantReasoning {
+				t.Fatalf("output=%d reasoning=%d, want %d/%d", u.OutputTokens, *u.ThoughtTokens, tt.wantOutput, tt.wantReasoning)
+			}
+		})
 	}
 }
 

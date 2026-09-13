@@ -6,6 +6,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
 const (
@@ -87,7 +88,7 @@ func (s *sessionState) fireSchedule(ctx context.Context, t schedule.Task) {
 	var gateErr error
 
 	if t.Script != "" {
-		wake, gateOutput, gateErr = schedule.RunGate(ctx, s.parent.workspace.RootPath, t.Script)
+		wake, gateOutput, gateErr = schedule.RunTaskGate(code.WithSessionID(ctx, s.id), s.parent.workspace.RootPath, t, s.scriptOptions)
 	}
 
 	if ctx.Err() != nil {

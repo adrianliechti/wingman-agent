@@ -24,6 +24,7 @@ export function Tab({
 	id,
 	kind,
 	label,
+	status,
 	active,
 	preview,
 	closable,
@@ -41,6 +42,7 @@ export function Tab({
 	id: string;
 	kind: TabKind;
 	label: string;
+	status?: "Needs input" | "Completed";
 	active: boolean;
 	preview: boolean;
 	closable: boolean;
@@ -111,7 +113,7 @@ export function Tab({
 			}}
 			onDoubleClick={onKeepOpen}
 			title={label}
-			aria-label={`${label}${preview ? ", preview" : ""}${dirty ? ", unsaved changes" : ""}${closable ? ". Press Delete to close." : ""}`}
+			aria-label={`${label}${status ? `, ${status}` : ""}${preview ? ", preview" : ""}${dirty ? ", unsaved changes" : ""}${closable ? ". Press Delete to close." : ""}`}
 		>
 			{active && (
 				<span className="absolute inset-x-2 bottom-0 h-[2px] rounded-full bg-accent" />
@@ -144,6 +146,14 @@ export function Tab({
 				)}
 			</span>
 			<span className="max-w-[200px] truncate">{label}</span>
+			{status && (
+				<span
+					data-tab-status={status}
+					className={`text-[10px] ${status === "Needs input" ? "text-warning" : "text-success"}`}
+				>
+					{status === "Needs input" ? "Needs input" : "✓"}
+				</span>
+			)}
 		</button>
 	);
 }

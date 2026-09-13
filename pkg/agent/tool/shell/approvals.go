@@ -86,3 +86,11 @@ func approvalDisplayText(text string) string {
 	}
 	return out.String()
 }
+
+// ConfirmCommand checks a script with the interactive shell classifier and gate.
+func ConfirmCommand(ctx context.Context, command, workdir string, elicit *tool.Elicitation, approvals *Approvals) error {
+	if approvals == nil {
+		approvals = NewApprovals()
+	}
+	return confirmDangerous(ctx, elicit, approvals, map[string]any{"command": command}, workdir)
+}

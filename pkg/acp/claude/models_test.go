@@ -1,8 +1,11 @@
 package claude
 
 import (
+	"context"
 	"slices"
 	"testing"
+
+	"github.com/coder/acp-go-sdk"
 )
 
 func TestNormalizeSessionConfig(t *testing.T) {
@@ -19,6 +22,51 @@ func TestNormalizeSessionConfig(t *testing.T) {
 	model, effort = normalizeSessionConfig(models, "claude-sonnet", "high")
 	if model != "claude-sonnet" || effort != "high" {
 		t.Fatalf("normalizeSessionConfig() = %q, %q", model, effort)
+	}
+}
+
+func TestConfiguredModelDoesNotChangeGeneration(t *testing.T) {
+	for _, model := range []string{"claude-sonnet-4-6", "claude-sonnet-6", "claude-sonnet-5-20260901", "claude-sonnet-5[1m]"} {
+		t.Run(model, func(t *testing.T) {
+			a := New(Options{Model: model})
+			a.models = []ModelEntry{{ID: "sonnet", Name: "Sonnet", ResolvedModel: "claude-sonnet-5"}}
+			a.modelsLoaded = true
+			response, err := a.NewSession(context.Background(), acp.NewSessionRequest{Cwd: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := a.lookup(response.SessionId)
+			args := s.cliArgsLocked()
+			i := slices.Index(args, "--model")
+			if i < 0 || args[i+1] != model {
+				t.Fatalf("model %q produced CLI args %v", model, args)
+			}
+			if got := resolveResumedModel(a.models, model); got != nil {
+				t.Fatalf("resumed model mapped to %+v", got)
+			}
+			if response.ConfigOptions[0].Select.CurrentValue != acp.SessionConfigValueId(model) {
+				t.Fatalf("current model = %q", response.ConfigOptions[0].Select.CurrentValue)
+			}
+		})
+	}
+}
+
+func TestModelPickerRejectsDifferentGeneration(t *testing.T) {
+	a := New(Options{Model: "sonnet"})
+	a.models = []ModelEntry{{ID: "sonnet", Name: "Sonnet", ResolvedModel: "claude-sonnet-5"}}
+	a.modelsLoaded = true
+	response, err := a.NewSession(context.Background(), acp.NewSessionRequest{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = a.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{ValueId: &acp.SetSessionConfigOptionValueId{
+		SessionId: response.SessionId, ConfigId: modelConfigID, Value: "claude-sonnet-4-6",
+	}})
+	if err == nil {
+		t.Fatal("picker accepted a different generation as sonnet")
+	}
+	if a.lookup(response.SessionId).modelID != "sonnet" {
+		t.Fatal("rejected selection changed the session model")
 	}
 }
 

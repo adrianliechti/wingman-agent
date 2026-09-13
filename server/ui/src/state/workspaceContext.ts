@@ -1,6 +1,7 @@
 import {
 	createContext,
 	useContext,
+	useCallback,
 	useEffect,
 	useSyncExternalStore,
 } from "react";
@@ -53,9 +54,12 @@ export function useSessionSettings(key = "", draftId = key) {
 		...backendSettingsQuery(owner),
 		enabled: draft && hasDefaults,
 	});
-	const views = useSyncExternalStore(
-		client.store.subscribe,
-		client.store.getSnapshot,
+	const sessionSettings = useSyncExternalStore(
+		client.store.subscribeRender,
+		useCallback(
+			() => client.store.getSnapshot()[key]?.settings ?? EMPTY_SETTINGS,
+			[client, key],
+		),
 	);
 	useEffect(() => client.watch(key), [client, key]);
 	const settings = draft
@@ -63,7 +67,7 @@ export function useSessionSettings(key = "", draftId = key) {
 				...((hasDefaults && catalogs.data) || EMPTY_SETTINGS),
 				...drafts[settingsKey],
 			}
-		: (views[key]?.settings ?? EMPTY_SETTINGS);
+		: sessionSettings;
 	const setSettings = async (patch: SettingsPatch) => {
 		if (draft) setDraft(settingsKey, patch);
 		else await client.command(key, { type: "settings", ...patch });

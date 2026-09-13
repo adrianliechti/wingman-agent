@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
@@ -103,7 +104,7 @@ const (
 	// The code harness installs a more specific PostToolUse hook that persists
 	// oversized output before replacing it with a preview. This is the final
 	// safety net for every other Agent embedding and for context added by hooks.
-	maxInlineToolResultBytes = 48 * 1024
+	maxInlineToolResultBytes = tool.MaxInlineResultBytes
 	toolResultHeadBytes      = 4 * 1024
 	toolResultTailBytes      = 8 * 1024
 )

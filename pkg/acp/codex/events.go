@@ -635,11 +635,13 @@ func (d *eventDispatcher) handleTokenUsage(params json.RawMessage) {
 	}
 	last := p.TokenUsage.Last
 	cachedRead := last.CachedInputTokens
-	reasoning := last.ReasoningOutputTokens
+	output := max(0, last.OutputTokens)
+	reasoning := min(max(0, last.ReasoningOutputTokens), output)
 	d.setUsage(&acp.Usage{
-		TotalTokens:      last.TotalTokens,
-		InputTokens:      max(0, last.InputTokens-last.CachedInputTokens),
-		OutputTokens:     last.OutputTokens,
+		TotalTokens: last.TotalTokens,
+		InputTokens: max(0, last.InputTokens-last.CachedInputTokens),
+		// Codex output includes reasoning; Wingman's ACP fields are separate.
+		OutputTokens:     output - reasoning,
 		CachedReadTokens: &cachedRead,
 		ThoughtTokens:    &reasoning,
 	})

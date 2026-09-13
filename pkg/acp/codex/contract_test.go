@@ -147,7 +147,7 @@ func usageParams(threadID string) map[string]any {
 		"tokenUsage": map[string]any{
 			"last": map[string]any{
 				"totalTokens": 20, "inputTokens": 15, "cachedInputTokens": 5,
-				"outputTokens": 4, "reasoningOutputTokens": 1,
+				"outputTokens": 5, "reasoningOutputTokens": 1,
 			},
 			"modelContextWindow": 1000,
 		},

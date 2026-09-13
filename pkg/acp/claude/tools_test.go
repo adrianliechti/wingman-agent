@@ -30,7 +30,7 @@ func TestResultToTurn(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, _ := resultToTurn([]byte(tt.line))
+			got := resultToTurn([]byte(tt.line))
 			if tt.wantErr {
 				if got.err == nil {
 					t.Fatalf("expected error, got stop=%q", got.stop)
@@ -110,7 +110,7 @@ func TestClaudeSystemTracksSubagentParents(t *testing.T) {
 }
 
 func TestResultLoginIsAuthRequired(t *testing.T) {
-	got, _ := resultToTurn([]byte(`{"type":"result","subtype":"success","result":"Please run /login"}`))
+	got := resultToTurn([]byte(`{"type":"result","subtype":"success","result":"Please run /login"}`))
 	re, ok := got.err.(*acp.RequestError)
 	if !ok {
 		t.Fatalf("want *acp.RequestError, got %T", got.err)
@@ -228,11 +228,11 @@ func TestMarkdownEscapeLengthensFence(t *testing.T) {
 	}
 }
 
-func TestResultUsageAndUpdate(t *testing.T) {
+func TestResultUsage(t *testing.T) {
 	line := `{"type":"result","subtype":"success","total_cost_usd":0.05,` +
 		`"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":300,"cache_creation_input_tokens":40},` +
 		`"modelUsage":{"claude-haiku":{"contextWindow":200000},"claude-opus":{"contextWindow":1000000}}}`
-	tr, upd := resultToTurn([]byte(line))
+	tr := resultToTurn([]byte(line))
 	if tr.usage == nil {
 		t.Fatal("expected usage")
 	}
@@ -241,15 +241,6 @@ func TestResultUsageAndUpdate(t *testing.T) {
 	}
 	if tr.usage.CachedReadTokens == nil || *tr.usage.CachedReadTokens != 300 {
 		t.Errorf("cachedRead = %v", tr.usage.CachedReadTokens)
-	}
-	if upd == nil || upd.UsageUpdate == nil {
-		t.Fatal("expected usage_update")
-	}
-	if upd.UsageUpdate.Used != 460 || upd.UsageUpdate.Size != 1000000 {
-		t.Errorf("usage_update used=%d size=%d", upd.UsageUpdate.Used, upd.UsageUpdate.Size)
-	}
-	if upd.UsageUpdate.Cost == nil || upd.UsageUpdate.Cost.Amount != 0.05 {
-		t.Errorf("cost = %+v", upd.UsageUpdate.Cost)
 	}
 }
 

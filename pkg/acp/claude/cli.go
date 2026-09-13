@@ -63,12 +63,14 @@ type cliEnvelope struct {
 	Status             string          `json:"status,omitempty"`
 	CompactResult      string          `json:"compact_result,omitempty"`
 	SessionID          string          `json:"session_id,omitempty"`
+	Model              string          `json:"model,omitempty"`
 	OriginalModel      string          `json:"original_model,omitempty"`
 	FallbackModel      string          `json:"fallback_model,omitempty"`
 	Direction          string          `json:"direction,omitempty"`
 	RefusalCategory    string          `json:"api_refusal_category,omitempty"`
 	RefusalExplanation string          `json:"api_refusal_explanation,omitempty"`
 	ParentToolUseID    string          `json:"parent_tool_use_id,omitempty"`
+	ParentAgentID      string          `json:"parent_agent_id,omitempty"`
 	TaskID             string          `json:"task_id,omitempty"`
 	ToolUseID          string          `json:"tool_use_id,omitempty"`
 	ToolName           string          `json:"tool_name,omitempty"`
@@ -78,6 +80,9 @@ type cliEnvelope struct {
 	Description        string          `json:"description,omitempty"`
 	LastToolName       string          `json:"last_tool_name,omitempty"`
 	Summary            string          `json:"summary,omitempty"`
+	CompactMetadata    *struct {
+		PostTokens *int `json:"post_tokens,omitempty"`
+	} `json:"compact_metadata,omitempty"`
 
 	// The only signal a misconfigured server or plugin produces; stderr stays empty when captured.
 	MCPServers      []cliNamedStatus `json:"mcp_servers,omitempty"`
@@ -113,11 +118,13 @@ func (e cliLoadError) label() string {
 }
 
 type streamEvent struct {
-	Type    string `json:"type"`
-	Index   int    `json:"index"`
-	Message struct {
-		ID string `json:"id"`
-	} `json:"message"`
+	Type         string          `json:"type"`
+	Index        int             `json:"index"`
+	Message      cliMessage      `json:"message"`
+	Usage        json.RawMessage `json:"usage,omitempty"`
+	ContentBlock struct {
+		Type string `json:"type"`
+	} `json:"content_block"`
 	Delta struct {
 		Type     string `json:"type"`
 		Text     string `json:"text,omitempty"`
@@ -127,6 +134,8 @@ type streamEvent struct {
 
 type cliMessage struct {
 	ID      string        `json:"id"`
+	Model   string        `json:"model,omitempty"`
+	Usage   *cliUsage     `json:"usage,omitempty"`
 	Content []cliMsgBlock `json:"content"`
 }
 

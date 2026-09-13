@@ -6,6 +6,7 @@ import type {
 import type { Phase } from "../types/protocol.ts";
 import type { ModelInfo } from "../api/models.ts";
 import type { ModeOption } from "../api/sessions.ts";
+import { summarizeSession, type SessionSummary } from "./sessionSummary.ts";
 
 export type WorkspaceScope = { workspaceId: string; instanceId: string };
 export type SessionRef = {
@@ -25,6 +26,7 @@ export type SessionSettings = {
 export type SessionFields = {
 	status: "loading" | "ready" | "error" | "deleted";
 	phase: Phase;
+	retry?: { attempt: number; reason: string; delayMillis: number };
 	error: string | null;
 	usage: {
 		inputTokens: number;
@@ -120,6 +122,7 @@ function normalize(fields: SessionFields): SessionFields {
 		// The event envelope alone owns identity, revision, and transcript.
 		status: fields.status,
 		phase: fields.phase,
+		retry: fields.retry,
 		error: fields.error,
 		usage: fields.usage,
 		prompts: fields.prompts,
@@ -143,6 +146,16 @@ function normalize(fields: SessionFields): SessionFields {
 // changes and validates ordering; it never reconstructs provider history.
 export class SessionStore {
 	private views: Record<string, SessionView> = {};
+	private summaries: Record<string, SessionSummary> = {};
+	readonly getSummaries = () => this.summaries;
+	private renderListeners = new Set<() => void>();
+	private frame: ReturnType<typeof setTimeout> | undefined;
+	readonly subscribeRender = (listener: () => void) => {
+		this.renderListeners.add(listener);
+		return () => {
+			this.renderListeners.delete(listener);
+		};
+	};
 	private subscriptions = new Map<string, string>();
 	private listeners = new Set<() => void>();
 	readonly getSnapshot = () => this.views;
@@ -152,8 +165,18 @@ export class SessionStore {
 			this.listeners.delete(listener);
 		};
 	};
-	private emit() {
+	private emit(key?: string) {
+		for (const id of key ? [key] : Object.keys(this.views)) {
+			const summary = summarizeSession(this.views[id]);
+			if (JSON.stringify(summary) !== JSON.stringify(this.summaries[id]))
+				this.summaries = { ...this.summaries, [id]: summary };
+		}
 		for (const listener of this.listeners) listener();
+		if (!this.frame && this.renderListeners.size)
+			this.frame = setTimeout(() => {
+				this.frame = undefined;
+				for (const listener of this.renderListeners) listener();
+			}, 16);
 	}
 	expect(key: string, subscriptionId: string) {
 		this.subscriptions.set(key, subscriptionId);
@@ -168,10 +191,24 @@ export class SessionStore {
 					: {}),
 			},
 		};
-		this.emit();
+		this.emit(key);
 	}
 	forget(key: string) {
 		this.subscriptions.delete(key);
+		// Closed tabs can reload a snapshot. Bound cached histories separately
+		// from draft ownership, while retaining active background sessions.
+		const inactive = Object.keys(this.views).filter(
+			(id) => !this.subscriptions.has(id) && this.views[id].phase === "idle",
+		);
+		if (inactive.length > 20) {
+			this.views = { ...this.views };
+			this.summaries = { ...this.summaries };
+			for (const id of inactive.slice(0, inactive.length - 20)) {
+				delete this.views[id];
+				delete this.summaries[id];
+			}
+			this.emit();
+		}
 	}
 	disconnect() {
 		this.views = Object.fromEntries(
@@ -254,7 +291,7 @@ export class SessionStore {
 			}
 		}
 		this.views = { ...this.views, [key]: next };
-		this.emit();
+		this.emit(key);
 		return "applied";
 	}
 }

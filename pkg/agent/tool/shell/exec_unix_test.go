@@ -5,11 +5,46 @@ package shell
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+func TestExecValidationMetadataKeepsWorkdirThroughPolling(t *testing.T) {
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "package")
+	if err := os.Mkdir(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	m := NewExecManager(nil)
+	defer m.Close()
+	command := `read input; test "$input" = done`
+	started, err := executeExecCommand(t.Context(), m, dir, nil, nil, nil, map[string]any{
+		"command": command, "workdir": "package", "validation": true, "wait": 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := executeExecSession(t.Context(), m, nil, nil, map[string]any{"session_id": 1, "wait": 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := executeExecSession(t.Context(), m, nil, nil, map[string]any{"session_id": 1, "input": "done\n", "wait": 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range []tool.Result{started, pending, completed} {
+		if result.Metadata["session_id"] != 1 || result.Metadata["command"] != command || result.Metadata["workdir"] != subdir || result.Metadata["validation"] != true {
+			t.Fatalf("lost validation attribution: %+v", result)
+		}
+	}
+	if started.Metadata["exit_code"] != nil || pending.Metadata["exit_code"] != nil || completed.Metadata["exit_code"] != 0 {
+		t.Fatalf("exit codes: started=%v, pending=%v, completed=%v", started.Metadata, pending.Metadata, completed.Metadata)
+	}
+}
 
 func TestExecCommandCompletes(t *testing.T) {
 	m := NewExecManager(nil)

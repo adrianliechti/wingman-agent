@@ -42,6 +42,32 @@ func TestScanSessionModelUsesLatestAssistantModel(t *testing.T) {
 	}
 }
 
+func TestScanSessionModelIgnoresSyntheticAndNestedResponses(t *testing.T) {
+	for _, tt := range []struct{ name, tail string }{
+		{"synthetic", `{"type":"assistant","message":{"model":"<synthetic>"}}`},
+		{"placeholder", `{"type":"assistant","message":{"model":"  <unknown>  "}}`},
+		{"nested tool", `{"type":"assistant","parent_tool_use_id":"task-1","message":{"model":"claude-haiku-4-5"}}`},
+		{"nested agent", `{"type":"assistant","parent_agent_id":"child-1","message":{"model":"claude-haiku-4-5"}}`},
+		{"empty model", `{"type":"assistant","message":{"model":"  "}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			for _, prefix := range []string{"", "{\"type\":\"assistant\",\"message\":{\"model\":\" claude-opus-5 \"}}\n"} {
+				if err := os.WriteFile(path, []byte(prefix+tt.tail+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				want := ""
+				if prefix != "" {
+					want = "claude-opus-5"
+				}
+				if got := scanSessionModel(path); got != want {
+					t.Fatalf("model=%q, want %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestStripMarkerTags(t *testing.T) {
 
 	for _, in := range []string{

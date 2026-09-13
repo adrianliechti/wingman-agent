@@ -1,3 +1,4 @@
+import { VirtualOutput } from "./VirtualOutput";
 import {
 	ChevronDown,
 	ChevronRight,
@@ -304,7 +305,17 @@ const ToolRow = memo(function ToolRow({
 						{hasInputDetails && result && (
 							<div className="my-1.5 h-px bg-border-subtle" />
 						)}
-						{result && (isDiff ? <DiffText text={shown} /> : shown)}
+						{result &&
+							(showAll && result.length > 12000 ? (
+								<VirtualOutput
+									text={result}
+									lineClass={isDiff ? diffLineClass : undefined}
+								/>
+							) : isDiff ? (
+								<DiffText text={shown} />
+							) : (
+								shown
+							))}
 					</div>
 				)}
 			</div>

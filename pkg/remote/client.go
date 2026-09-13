@@ -109,7 +109,7 @@ func serveOnce(ctx context.Context, endpoint string, header http.Header, handler
 		onStatus(true, nil)
 	}
 
-	sessionCtx, sessionCancel := context.WithCancel(ctx)
+	sessionCtx, sessionCancel := context.WithCancel(context.WithValue(ctx, authenticatedTransportKey{}, true))
 	defer sessionCancel()
 	srv := &http.Server{
 		Handler:           handler,

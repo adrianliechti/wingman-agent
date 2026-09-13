@@ -10,13 +10,14 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 const (
 	DefaultMaxLines = 2000
-	DefaultMaxBytes = 48 * 1024
+	DefaultMaxBytes = tool.MaxInlineResultBytes
 
 	MaxReadFileBytes = 10 * 1024 * 1024
 	MaxEditFileBytes = 10 * 1024 * 1024

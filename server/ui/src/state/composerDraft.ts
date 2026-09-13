@@ -5,6 +5,7 @@ export type ComposerContent = {
 	files: string[];
 	images: PendingImage[];
 	editingQueueId: string | null;
+	previousDraft?: { text: string; files: string[]; images: PendingImage[] };
 };
 type ComposerSnapshot = ComposerContent & {
 	submitting: boolean;
@@ -26,6 +27,14 @@ export class ComposerDraft {
 		error: null,
 	};
 	private revision = 0;
+	constructor(content?: ComposerContent) {
+		if (content)
+			this.value = {
+				...structuredClone(content),
+				submitting: false,
+				error: null,
+			};
+	}
 	private listeners = new Set<() => void>();
 	readonly getSnapshot = () => this.value;
 	readonly subscribe = (listener: () => void) => {
@@ -36,12 +45,27 @@ export class ComposerDraft {
 	};
 	private publish(patch: Partial<ComposerSnapshot>) {
 		this.value = { ...this.value, ...patch };
+		if (!this.value.previousDraft) delete this.value.previousDraft;
 		for (const listener of this.listeners) listener();
 	}
 	readonly update = (patch: Partial<ComposerContent>) => {
 		this.revision++;
 		this.publish({ ...patch, error: null });
 	};
+	beginQueueEdit(content: ComposerContent) {
+		const { text, files, images, previousDraft } = this.value;
+		this.update({
+			...content,
+			previousDraft: previousDraft ?? { text, files, images },
+		});
+	}
+	cancelQueueEdit() {
+		this.update({
+			...this.value.previousDraft,
+			editingQueueId: null,
+			previousDraft: undefined,
+		});
+	}
 	dismissError() {
 		this.publish({ error: null });
 	}
@@ -59,7 +83,13 @@ export class ComposerDraft {
 			/* Keep the draft for retry. */
 		}
 		this.publish({
-			...(sent && this.revision === revision ? emptyContent() : {}),
+			...(sent && this.revision === revision
+				? {
+						...emptyContent(),
+						...content.previousDraft,
+						previousDraft: undefined,
+					}
+				: {}),
 			submitting: false,
 			error: sent
 				? null

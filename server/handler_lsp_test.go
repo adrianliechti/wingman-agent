@@ -305,7 +305,7 @@ func TestLSPStatusReturnsAnEmptyActivityList(t *testing.T) {
 	}
 	defer app.Close()
 
-	request := httptest.NewRequest(http.MethodGet, "/api/lsp/status", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/lsp/status", nil)
 	response := httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
 	if response.Code != http.StatusOK {

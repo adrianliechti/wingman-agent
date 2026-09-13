@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PendingPrompt, PromptReply } from "../../hooks/useWebSocket";
 import type { PromptField } from "../../types/protocol";
 
@@ -27,10 +27,34 @@ function coercePromptValue(field: PromptField, value: string): unknown {
 export function PromptBar({
 	prompt,
 	onReply,
+	available = true,
 }: {
 	prompt: PendingPrompt;
 	onReply: (reply: PromptReply) => void;
+	available?: boolean;
 }) {
+	const root = useRef<HTMLFieldSetElement>(null);
+	useEffect(() => {
+		const previous = document.activeElement as HTMLElement | null;
+		const element = root.current;
+		const focus = (event: KeyboardEvent) => {
+			if (
+				event.altKey &&
+				!event.ctrlKey &&
+				!event.metaKey &&
+				event.key.toLowerCase() === "a"
+			) {
+				event.preventDefault();
+				element?.focus();
+			}
+		};
+		window.addEventListener("keydown", focus);
+		return () => {
+			window.removeEventListener("keydown", focus);
+			if (element?.contains(document.activeElement) && previous?.isConnected)
+				previous.focus();
+		};
+	}, []);
 	const allFields = useMemo(
 		() => (prompt.kind === "ask" ? (prompt.fields ?? []) : []),
 		[prompt.kind, prompt.fields],
@@ -182,7 +206,37 @@ export function PromptBar({
 	const visibleFields = tabbed ? [fields[activeIdx]] : fields;
 
 	return (
-		<div className="relative rounded-lg border border-warning bg-bg-surface/60 flex flex-col">
+		<fieldset
+			ref={root}
+			disabled={!available}
+			data-prompt
+			role="group"
+			aria-label={
+				prompt.kind === "ask"
+					? "Question · Alt+A to focus"
+					: "Approval required · Alt+A to focus"
+			}
+			tabIndex={-1}
+			onKeyDown={(event) => {
+				if (
+					!available ||
+					prompt.kind === "ask" ||
+					event.altKey ||
+					event.ctrlKey ||
+					event.metaKey ||
+					(event.target as Element).closest(
+						"input, textarea, [contenteditable]",
+					)
+				)
+					return;
+				const key = event.key.toLowerCase();
+				if (key !== "y" && key !== "n") return;
+				event.preventDefault();
+				event.stopPropagation();
+				onReply({ action: key === "y" ? "accept" : "decline" });
+			}}
+			className="relative mb-2 min-w-0 rounded-lg border border-warning bg-bg-surface/60 flex flex-col focus-visible:outline-2 focus-visible:outline-warning"
+		>
 			{tabbed ? (
 				<div className="flex items-center gap-1 flex-wrap px-2 pt-2">
 					{fields.map((f, i) => {
@@ -258,13 +312,14 @@ export function PromptBar({
 						type="button"
 						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
 						onClick={() => onReply({ action: "accept", scope: "session" })}
-						title="Approve and don't ask again in this session"
+						title="Approve this action for this session"
 					>
-						Always allow
+						Allow for session
 					</button>
 					<button
 						type="button"
 						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-bg bg-success hover:opacity-90 cursor-pointer transition-opacity"
+						title="Approve once (Y when approval has focus)"
 						onClick={() => onReply({ action: "accept" })}
 					>
 						Approve
@@ -306,7 +361,7 @@ export function PromptBar({
 					)}
 				</div>
 			)}
-		</div>
+		</fieldset>
 	);
 }
 

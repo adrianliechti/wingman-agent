@@ -8,7 +8,6 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
 func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
@@ -39,17 +38,14 @@ func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
 
 	switch choice {
 	case "yes":
-		a.recordPrompt("Confirm command", message, "Yes")
+		a.recordPrompt(ctx, "Confirm command", message, "Yes")
 		return true, nil
 	case "always":
 		a.rememberConfirmAll(ctx)
-		a.recordPrompt("Confirm command", message, "Always")
-		a.post(func() {
-			a.appendChat(cellNotice("Auto-approving commands for this session", theme.Default.BrBlack, a.width()))
-		})
+		a.recordPrompt(ctx, "Confirm command", message, "Always (auto-approve commands for this session)")
 		return true, nil
 	default:
-		a.recordPrompt("Confirm command", message, "No")
+		a.recordPrompt(ctx, "Confirm command", message, "No")
 		return false, nil
 	}
 }
@@ -74,14 +70,62 @@ func (a *App) rememberConfirmAll(ctx context.Context) {
 
 // recordPrompt writes the resolved question and its answer into the chat —
 // the question is only shown at the bottom while it is being asked.
-func (a *App) recordPrompt(title, message, answer string) {
+func (a *App) recordPrompt(ctx context.Context, title, message, answer string) {
+	a.sessionMu.Lock()
+	epoch := a.sessionEpoch
+	a.sessionMu.Unlock()
 	a.post(func() {
+		id := corecode.SessionIDFromContext(ctx)
+		if a.sessionEpoch != epoch || (id != "" && id != a.sessionID) {
+			return
+		}
 		a.flushToolGap()
 		a.appendChat(cellPrompt(title, message, "", a.width()))
 		a.appendChat(cellUser(answer, a.width()))
-		a.setPhase(PhaseThinking)
 		a.invalidate()
 	})
+}
+
+// beginPrompt gives a prompt ownership of its UI until it finishes or the
+// session changes. Setup and cleanup both run on the input loop.
+func (a *App) beginPrompt(ctx context.Context, show func() func()) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	a.sessionMu.Lock()
+	epoch := a.sessionEpoch
+	a.sessionMu.Unlock()
+	var closePrompt func()
+
+	a.post(func() {
+		id := corecode.SessionIDFromContext(ctx)
+		if ctx.Err() != nil || a.sessionEpoch != epoch || (id != "" && id != a.sessionID) {
+			cancel()
+			return
+		}
+		cleanup := show()
+		closed := false
+		closePrompt = func() {
+			if closed {
+				return
+			}
+			closed = true
+			cleanup()
+			a.dismissPrompt = nil
+			a.invalidate()
+		}
+		a.dismissPrompt = func() {
+			cancel()
+			closePrompt()
+		}
+		a.invalidate()
+	})
+	return ctx, func() {
+		cancel()
+		a.post(func() {
+			if closePrompt != nil {
+				closePrompt()
+			}
+		})
+	}
 }
 
 // askOptionsLocked presents an interactive selection popup and returns the
@@ -89,7 +133,7 @@ func (a *App) recordPrompt(title, message, answer string) {
 func (a *App) askOptionsLocked(ctx context.Context, title, message string, items []PopupItem, multi bool, hotkeys map[rune]string) ([]string, error) {
 	response := make(chan []string, 1)
 
-	a.post(func() {
+	ctx, finish := a.beginPrompt(ctx, func() func() {
 		a.promptActive = true
 
 		popup := newPopup(popupList, popupHint("", multi), items, func(ids []string) {
@@ -108,20 +152,18 @@ func (a *App) askOptionsLocked(ctx context.Context, title, message string, items
 			}
 		}
 		a.popup = popup
-		a.invalidate()
-	})
-
-	defer a.post(func() {
-		a.promptActive = false
-		if a.popup != nil && a.popup.kind == popupList {
-			a.closePopup()
+		return func() {
+			a.promptActive = false
+			if a.popup == popup {
+				a.closePopup()
+			}
 		}
-		a.invalidate()
 	})
+	defer finish()
 
 	select {
 	case ids := <-response:
-		return ids, nil
+		return ids, ctx.Err()
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-a.ctx.Done():
@@ -273,12 +315,12 @@ func (a *App) elicitOptionsField(ctx context.Context, message string, field tool
 			return nil, "", err
 		}
 		if len(ids) == 0 {
-			a.recordPrompt("", message, "decline")
+			a.recordPrompt(ctx, "", message, "decline")
 			return nil, "decline", nil
 		}
 
 		value := ids[0] == "yes"
-		a.recordPrompt("", message, ids[0])
+		a.recordPrompt(ctx, "", message, ids[0])
 		return value, "", nil
 	}
 
@@ -316,11 +358,11 @@ func (a *App) elicitOptionsField(ctx context.Context, message string, field tool
 	}
 
 	if len(picks) == 0 {
-		a.recordPrompt("", message, "decline")
+		a.recordPrompt(ctx, "", message, "decline")
 		return nil, "decline", nil
 	}
 
-	a.recordPrompt("", message, strings.Join(picks, ", "))
+	a.recordPrompt(ctx, "", message, strings.Join(picks, ", "))
 
 	if field.Multiple {
 		return picks, "", nil
@@ -340,27 +382,31 @@ func fieldKind(field tool.ElicitField) string {
 
 // askLineLocked expects a.elicitMu to be held by the caller.
 func (a *App) askLineLocked(ctx context.Context, prompt, placeholder string) (string, error) {
-	a.askResponse = make(chan string, 1)
+	response := make(chan string, 1)
 
-	a.post(func() {
+	ctx, finish := a.beginPrompt(ctx, func() func() {
+		draft := a.currentDraft()
+		a.saveCurrentDraft()
+		a.restoreDraft(composerState{})
 		a.askActive = true
+		a.askResponse = response
 		a.askMessage = prompt
 		a.askHeader = cellPrompt("", prompt, "", a.width())
 		a.editor.SetPlaceholder(placeholder)
-		a.invalidate()
+		return func() {
+			a.askActive = false
+			a.askResponse = nil
+			a.askMessage = ""
+			a.askHeader = nil
+			a.editor.SetPlaceholder("Ask anything...")
+			a.restoreDraft(draft)
+		}
 	})
-
-	defer a.post(func() {
-		a.askActive = false
-		a.askMessage = ""
-		a.askHeader = nil
-		a.editor.SetPlaceholder("Ask anything...")
-		a.invalidate()
-	})
+	defer finish()
 
 	select {
-	case result := <-a.askResponse:
-		return result, nil
+	case result := <-response:
+		return result, ctx.Err()
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case <-a.ctx.Done():

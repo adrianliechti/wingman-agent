@@ -69,6 +69,7 @@ type UsageView struct {
 type SessionState struct {
 	Status        string            `json:"status"`
 	Phase         string            `json:"phase"`
+	Retry         *agent.RetryInfo  `json:"retry,omitempty"`
 	Error         *string           `json:"error"`
 	Usage         UsageView         `json:"usage"`
 	Prompts       []PromptView      `json:"prompts"`
@@ -260,6 +261,9 @@ func (c *sessionController) apply(f Frame) {
 			return
 		}
 		c.state.Phase = f.Phase
+		if f.Phase != "retrying" {
+			c.state.Retry = nil
+		}
 	case EvtError:
 		c.state.Error = &f.Message
 	case EvtToolProgress:

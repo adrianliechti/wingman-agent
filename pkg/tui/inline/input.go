@@ -14,10 +14,12 @@ type inputReader struct {
 	events chan<- Event
 	done   <-chan struct{}
 
-	buf     []byte
-	pasting bool
-	paste   strings.Builder
-	pasteCR bool
+	buf           []byte
+	pasting       bool
+	paste         strings.Builder
+	pasteCR       bool
+	controlString byte
+	controlEscape bool
 }
 
 func startInput(r io.Reader, events chan<- Event, done <-chan struct{}) {
@@ -54,7 +56,7 @@ func (in *inputReader) run(done <-chan struct{}) {
 
 		// A buffer holding a bare ESC (or an incomplete sequence) is ambiguous:
 		// wait briefly for the rest before treating it as an Esc keypress.
-		if len(in.buf) > 0 && in.buf[0] == 0x1b && !in.complete() {
+		if in.controlString == 0 && len(in.buf) > 0 && in.buf[0] == 0x1b && !in.complete() {
 			timeout = time.After(escTimeout)
 		}
 
@@ -140,6 +142,14 @@ func (in *inputReader) processBareEsc() {
 func (in *inputReader) process() {
 	for len(in.buf) > 0 {
 		b := in.buf[0]
+		if in.controlString != 0 {
+			in.buf = in.buf[1:]
+			if (in.controlString == ']' && b == '\a') || (in.controlEscape && b == '\\') {
+				in.controlString = 0
+			}
+			in.controlEscape = b == 0x1b
+			continue
+		}
 
 		if b == 0x1b {
 			if !in.complete() {
@@ -217,6 +227,14 @@ func (in *inputReader) consumeRune(first byte) {
 
 func (in *inputReader) consumeEscape() {
 	buf := in.buf
+	if len(buf) >= 2 && strings.ContainsRune("]P_^X", rune(buf[1])) {
+		// Late OSC/DCS replies are terminal protocol, not composer input.
+		// Consume incrementally so an unterminated reply cannot grow a buffer.
+		in.controlString = buf[1]
+		in.controlEscape = false
+		in.buf = buf[2:]
+		return
+	}
 
 	if len(buf) >= 2 && buf[1] != '[' && buf[1] != 'O' {
 		in.buf = buf[2:]

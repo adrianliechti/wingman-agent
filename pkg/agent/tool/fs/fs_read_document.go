@@ -82,8 +82,9 @@ func readDocument(
 		metadata["attachment_count"] = len(doc.Attachments)
 	}
 
-	content := formatRead([]byte(doc.Markdown), startLine, limit)
-	if warning := documentExtractionWarning(doc); warning != "" {
+	warning := documentExtractionWarning(doc)
+	content := formatReadWithin([]byte(doc.Markdown), startLine, limit, DefaultMaxBytes-len(warning)-2)
+	if warning != "" {
 		content += "\n\n" + warning
 	}
 	return tool.Result{Content: content, Metadata: metadata}, true, nil

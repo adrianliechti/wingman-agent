@@ -266,6 +266,11 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
+	if dir := os.Getenv("E2E_STATIC_DIR"); dir != "" {
+		previous := StaticFS
+		StaticFS = os.DirFS(dir)
+		t.Cleanup(func() { StaticFS = previous })
+	}
 	copyTestGopls(t, testenv.WingmanHome(t))
 	workDir := t.TempDir()
 	if err := os.WriteFile(

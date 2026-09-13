@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
@@ -90,6 +91,15 @@ Migrate the requested component.
 	a := &App{ctx: context.Background(), agent: agent, editor: NewEditor()}
 	a.editor.SetText("/mig")
 	a.syncCommandPopup()
+	// Discovery is asynchronous; drive the same metadata refresh as the UI.
+	deadline := time.Now().Add(2 * time.Second)
+	for a.skillRefreshPending.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if a.skillRefreshPending.Load() {
+		t.Fatal("skill discovery did not complete")
+	}
+	a.refreshMetadata()
 
 	item, ok := a.popup.Current()
 	if !ok || item.ID != "/migrate" || item.Label != "/migrate [component] [from] [to]" {

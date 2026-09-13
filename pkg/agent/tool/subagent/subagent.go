@@ -30,7 +30,7 @@ const generalPurposeInstructions = `You are an agent performing a specific deleg
 
 const exploreInstructions = `You are a read-only codebase research specialist covering broad searches, feature tracing, and analysis of unfamiliar or legacy code. You may search, read, inspect git state, fetch URLs, and use read-only LSP or shell commands. You must not create, modify, delete, move, or copy files, install dependencies, or run mutating git commands. Use grep/glob/LSP before broad reads, read only the line windows that matter, and use parallel tool calls when searches or reads are independent. When tracing how a feature works, find the entry points, follow the call chain, and map the data flow and key components. When analyzing legacy or under-documented code, find the data structures first, then trace the procedures that read and write them, and call out magic values and risky coupling. Cite every concrete claim with file:line references and distinguish confirmed facts from inference. Lead with the answer; end with assumptions or gaps only if they matter. Reply in <=200 words unless the task explicitly asks for more.`
 
-const verificationInstructions = `You are a verification specialist. Your job is to test whether the implementation actually works, not to confirm by reading code. You must not modify project files, install dependencies, or run git write operations. You may run read-only inspection commands and normal build, test, lint, type-check, or local execution commands. For UI, API, CLI, migration, and integration changes, exercise the behavior directly when possible. Probe for failure, not confirmation: try at least one realistic way to break the change (edge input, error path) before declaring PASS. Include the exact commands you ran, the relevant output, and a verdict. End with exactly one line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL.`
+const verificationInstructions = `You are a verification specialist. Your job is to test whether the implementation actually works, not to confirm by reading code. You must not modify project files, install dependencies, or run git write operations. You may run read-only inspection commands and normal build, test, lint, type-check, or local execution commands. For UI, API, CLI, migration, and integration changes, exercise the behavior directly when possible. Probe for failure, not confirmation: try at least one realistic way to break the change (edge input, error path) before declaring PASS. Set validation=true on exec_command when running an actual test, build, lint, or validation command so its exit status is recorded; leave it false for ordinary inspection. Include the exact commands you ran, the relevant output, and a verdict. End with exactly one line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL.`
 
 const securityInstructions = `You are a security auditor reviewing code for genuinely exploitable vulnerabilities. You are read-only: you may search, read, inspect git state, and run read-only commands, but you must not create, modify, or delete files, build, run, or install anything, or make network requests against the target. Reason from the source. Default to skepticism: re-read the cited code yourself instead of trusting any summary, trace whether attacker-controlled input can actually reach the sink, and hunt for existing protections (input validation, parameterized queries, framework auto-escaping, type/length bounds, auth gates, dead/test code) before concluding a finding is real. Prefer a few high-confidence, exploitable findings over a long list of theoretical ones. For each finding give file:line, the data flow from entry point to sink, a concrete exploit scenario, and a specific fix; call out false positives as such. Reply concisely with file:line references.`
 
@@ -525,19 +525,19 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 			started := time.Now()
 			out, err := runner.runTurn(ctx, ctx, nil, prompt)
 			if err != nil || tasks == nil {
-				return tool.Text(out), err
+				return runner.reviewResult(out), err
 			}
 			t, adoptErr := tasks.AdoptAgent(agentID, description, subagentName, out, time.Since(started), func(tk *task.Task) error {
 				return tk.SetDurableAgent(agentID, runner.sub.StateSnapshot(), rawSpec)
 			})
 			if adoptErr != nil {
-				return tool.Result{}, adoptErr
+				return runner.reviewResult(out), adoptErr
 			}
 			if t != nil {
 				bindTaskRunner(tasks, t, runner)
 				out += fmt.Sprintf("\n(id %s — task_send continues this agent with its context intact)", t.ID)
 			}
-			return tool.Text(out), nil
+			return runner.reviewResult(out), nil
 		},
 	}}
 
@@ -853,9 +853,17 @@ func allowVerificationTool(t tool.Tool) bool {
 	switch t.Name {
 	case "write", "edit", "elicit":
 		return false
-	case "shell":
+	case "shell", "exec_command", "exec_session":
 		return true
 	default:
 		return t.Effect != nil && t.Effect(nil) == tool.EffectReadOnly
 	}
+}
+
+// The inline child has its own ledger, but its edits and checks belong in the
+// calling turn's review. Background tasks retain independent attribution.
+func (r *subagentRunner) reviewResult(out string) tool.Result {
+	result := tool.Text(out)
+	result.Metadata = map[string]any{agent.ChildReviewsMetadata: r.sub.TurnReviews()}
+	return result
 }

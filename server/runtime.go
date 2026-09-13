@@ -247,6 +247,9 @@ func (s *Server) registerSessionRoutes(r chi.Router) {
 			r.Get("/sessions", s.backendOperation((*backendRuntime).handleSessions))
 			r.Post("/sessions", s.backendHandler((*backendRuntime).handleNewSession))
 			r.Route("/sessions/{id}", func(r chi.Router) {
+				r.Get("/reviews", s.backendOperation((*backendRuntime).handleTurnReviews))
+				r.Get("/reviews/{turnID}", s.backendOperation((*backendRuntime).handleTurnReviews))
+				r.Post("/reviews/{turnID}/undo", s.backendOperation((*backendRuntime).handleTurnUndo))
 				r.Post("/commands", s.backendHandler((*backendRuntime).handleCommand))
 				r.Get("/tasks", s.backendOperation((*backendRuntime).handleTasks))
 				r.Get("/tasks/{taskID}", s.backendOperation((*backendRuntime).handleTask))

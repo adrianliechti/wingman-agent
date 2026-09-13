@@ -10,13 +10,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
 const (
 	maxReadBytes    = 2 * 1024 * 1024
-	maxOutputBytes  = 48 * 1024
+	maxOutputBytes  = tool.MaxInlineResultBytes - 512
 	maxExtractBytes = 192 * 1024
 	fetchTimeout    = 30 * time.Second
 )
@@ -202,6 +203,9 @@ func execute(ctx context.Context, args map[string]any, elicit *tool.Elicitation,
 			if cut <= 0 {
 				cut = maxOutputBytes
 			}
+			for cut > 0 && !utf8.RuneStart(text[cut]) {
+				cut--
+			}
 			text = text[:cut]
 		}
 		text += fmt.Sprintf("\n\n[truncated at %dKB]", maxOutputBytes/1024)
@@ -223,6 +227,9 @@ func extractAnswer(ctx context.Context, extract Extract, rawURL, prompt, text st
 		cut := strings.LastIndex(text[:maxExtractBytes], "\n")
 		if cut <= 0 {
 			cut = maxExtractBytes
+		}
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
 		}
 		text = text[:cut]
 		truncated = "\n\n[page truncated for extraction]"

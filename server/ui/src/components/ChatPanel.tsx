@@ -1,7 +1,7 @@
+import { VirtualTurns } from "./chat/VirtualTurns";
 import {
 	ArrowUp,
 	Loader2,
-	LoaderCircle,
 	ListPlus,
 	Paperclip,
 	Plus,
@@ -42,13 +42,15 @@ import { ModePicker } from "./ModePicker";
 import { SkillPicker } from "./SkillPicker";
 import { TurnQueue } from "./TurnQueue";
 
-interface Props {
+export interface ChatPanelProps {
 	draft: ComposerDraft;
 	draftId: string;
 	sessionId?: string;
 	placeholder?: string;
 	entries: ChatEntry[];
 	phase: Phase;
+	retry?: { attempt: number; reason: string; delayMillis: number };
+	available?: boolean;
 	onSend: (
 		text: string,
 		files?: string[],
@@ -126,6 +128,8 @@ export function ChatPanel({
 	placeholder = "Message Wingman…",
 	entries,
 	phase,
+	retry,
+	available = true,
 	onSend,
 	onCancel,
 	pendingInputs = [],
@@ -145,7 +149,7 @@ export function ChatPanel({
 	seed,
 	onSeedConsumed,
 	toolProgress,
-}: Props) {
+}: ChatPanelProps) {
 	const scheme = useColorScheme();
 	const toast = useToast();
 	const { settings, setSettings } = useSessionSettings(sessionId, draftId);
@@ -253,10 +257,18 @@ export function ChatPanel({
 	}, [writeScrollTop]);
 
 	const isActive = phase !== "idle";
+	const [awayFromLatest, setAwayFromLatest] = useState(false);
+	const latestOutput = entries.at(-1);
+	const [seenOutput, setSeenOutput] = useState(latestOutput);
+	const unreadOutput = seenOutput !== latestOutput;
 
 	useEffect(() => {
-		if (!isActive) textareaRef.current?.focus();
-	}, [isActive]);
+		if (
+			document.activeElement === document.body &&
+			!matchMedia("(pointer: coarse)").matches
+		)
+			textareaRef.current?.focus();
+	}, []);
 
 	// setDraft replaces the composer text and keeps the tracked caret in sync;
 	// every programmatic text change must go through it (or set both).
@@ -433,18 +445,24 @@ export function ChatPanel({
 		const container = containerRef.current;
 		if (!container) return;
 		const onScroll = () => {
-			if (performance.now() < programmaticUntilRef.current) return;
-			userScrolledRef.current = true;
+			if (performance.now() >= programmaticUntilRef.current)
+				userScrolledRef.current = true;
+			const away =
+				container.scrollHeight - container.scrollTop - container.clientHeight >
+				160;
+			setAwayFromLatest(away);
+			if (!away) setSeenOutput(latestOutput);
 		};
 		container.addEventListener("scroll", onScroll, { passive: true });
 		return () => container.removeEventListener("scroll", onScroll);
-	}, []);
+	}, [latestOutput]);
 
 	const handleSubmit = useCallback(
 		async (
 			intent?: TurnInputIntent,
 			overrideText?: string,
 		): Promise<boolean> => {
+			if (!available || prompts.length) return false;
 			const current = draft.getSnapshot();
 			const text = (overrideText ?? current.text).trim();
 			if (
@@ -454,6 +472,7 @@ export function ChatPanel({
 				return false;
 			}
 			submitPendingRef.current = true;
+			const focused = document.activeElement;
 			const sent = await draft.submit(({ images, files, editingQueueId }) => {
 				const imageData =
 					images.length > 0 ? images.map((i) => i.dataUrl) : undefined;
@@ -481,10 +500,22 @@ export function ChatPanel({
 			}
 			historyIdxRef.current = null;
 			historyDraftRef.current = "";
-			textareaRef.current?.focus();
+			if (
+				document.activeElement === focused &&
+				focused?.closest("[data-chat-composer]")
+			)
+				textareaRef.current?.focus();
 			return true;
 		},
-		[draft, onUpdateQueued, isActive, canSteer, onSend],
+		[
+			draft,
+			onUpdateQueued,
+			isActive,
+			canSteer,
+			onSend,
+			available,
+			prompts.length,
+		],
 	);
 
 	// selectSkill completes the slash token at the caret in place; only a lone
@@ -607,18 +638,21 @@ export function ChatPanel({
 
 	const editPendingInput = useCallback(
 		(item: PendingTurnInput) => {
-			setDraft(item.text);
-			draft.update({
+			const next = {
+				text: item.text,
 				files: item.files,
 				images: item.images.map((dataUrl) => ({
 					id: crypto.randomUUID(),
 					dataUrl,
 				})),
 				editingQueueId: item.state === "queued" ? item.id : null,
-			});
+			};
+			if (next.editingQueueId) draft.beginQueueEdit(next);
+			else draft.update(next);
+			setCaret(item.text.length);
 			textareaRef.current?.focus();
 		},
-		[draft, setDraft],
+		[draft],
 	);
 
 	const addFile = useCallback(
@@ -784,20 +818,30 @@ export function ChatPanel({
 				) : (
 					<div className="mx-auto w-full max-w-4xl px-4 py-4" ref={contentRef}>
 						<ToolProgressContext.Provider value={toolProgress ?? {}}>
-							{turns.map((turn, idx) => {
-								const isLastTurn = idx === turns.length - 1;
-								const isActive = isLastTurn && phase !== "idle";
-								return (
-									<TurnView
-										key={turn.key}
-										turn={turn}
-										isActive={isActive}
-										phase={phase}
-										applyPendingAnchor={applyPendingAnchor}
-										onOpenFile={onOpenFile}
-									/>
-								);
-							})}
+							{turns.length > 80 ? (
+								<VirtualTurns
+									turns={turns}
+									phase={phase}
+									scroll={containerRef}
+									onOpenFile={onOpenFile}
+									applyPendingAnchor={applyPendingAnchor}
+								/>
+							) : (
+								turns.map((turn, idx) => {
+									const isLastTurn = idx === turns.length - 1;
+									const isActive = isLastTurn && phase !== "idle";
+									return (
+										<TurnView
+											key={turn.key}
+											turn={turn}
+											isActive={isActive}
+											phase={phase}
+											applyPendingAnchor={applyPendingAnchor}
+											onOpenFile={onOpenFile}
+										/>
+									);
+								})
+							)}
 						</ToolProgressContext.Provider>
 					</div>
 				)}
@@ -807,6 +851,35 @@ export function ChatPanel({
 			<div className="absolute bottom-0 left-0 right-0 z-20">
 				<div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none" />
 				<div className="mx-auto w-full max-w-4xl bg-bg px-4 pb-3">
+					{phase === "retrying" && (
+						<div role="status" className="mb-2 text-[12px] text-warning">
+							Retrying
+							{retry
+								? ` · ${retry.reason} · attempt ${retry.attempt} in ${(retry.delayMillis / 1000).toFixed(1)}s`
+								: "…"}
+						</div>
+					)}
+					{awayFromLatest && (
+						<div className="flex justify-center pb-2">
+							<button
+								type="button"
+								className="rounded-full border border-border bg-bg-surface px-3 py-2 text-[12px] text-fg-muted shadow"
+								onClick={() => {
+									const container = containerRef.current;
+									if (container)
+										writeScrollTop(container, container.scrollHeight);
+									userScrolledRef.current = true;
+									setAwayFromLatest(false);
+									setSeenOutput(latestOutput);
+								}}
+							>
+								{unreadOutput
+									? "New output · Jump to latest"
+									: "Jump to latest"}{" "}
+								↓
+							</button>
+						</div>
+					)}
 					{showQueue && (
 						<TurnQueue
 							items={pendingInputs}
@@ -833,17 +906,19 @@ export function ChatPanel({
 							</button>
 						</div>
 					)}
-					{prompts.length > 0 && onPromptReply ? (
+					{prompts.length > 0 && onPromptReply && (
 						<>
 							{prompts.map((prompt) => (
 								<PromptBar
 									key={prompt.id}
 									prompt={prompt}
+									available={available}
 									onReply={(reply) => onPromptReply(prompt.id, reply)}
 								/>
 							))}
 						</>
-					) : (
+					)}
+					{
 						<div
 							ref={setComposer}
 							data-chat-composer
@@ -855,7 +930,7 @@ export function ChatPanel({
 									<button
 										type="button"
 										className="text-fg-dim hover:text-fg"
-										onClick={() => draft.update({ editingQueueId: null })}
+										onClick={() => draft.cancelQueueEdit()}
 									>
 										Cancel
 									</button>
@@ -999,79 +1074,60 @@ export function ChatPanel({
 									>
 										<Paperclip size={14} />
 									</button>
-									{(() => {
-										const hasInput =
-											input.trim() !== "" ||
-											images.length > 0 ||
-											files.length > 0;
-										const mode: "send" | "stop" | "disabled" = hasInput
-											? "send"
-											: isActive
-												? "stop"
-												: "disabled";
-										return (
-											<>
-												<button
-													type="button"
-													className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
-														mode === "disabled"
-															? "text-fg-dim opacity-40 cursor-not-allowed"
-															: "text-fg-muted hover:text-fg hover:bg-bg-hover"
-													}`}
-													onClick={
-														mode === "stop"
-															? () => onCancel(false)
-															: () => void handleSubmit()
-													}
-													disabled={mode === "disabled" || submitting}
-													title={
-														mode === "stop"
-															? "Stop (Esc)"
-															: editingQueueId
-																? "Update queued message (Enter)"
-																: mode === "send" && isActive && canSteer
-																	? "Steer current turn (Enter) · Queue with Alt+Enter"
-																	: mode === "send" && isActive
-																		? "Queue follow-up (Enter)"
-																		: "Send (Enter)"
-													}
-												>
-													{mode === "stop" ? (
-														<>
-															<LoaderCircle
-																size={14}
-																className="animate-spin group-hover:hidden"
-															/>
-															<Square
-																size={10}
-																fill="currentColor"
-																className="hidden group-hover:block"
-															/>
-														</>
-													) : (
-														<ArrowUp size={14} />
-													)}
-												</button>
-												{hasInput &&
-													isActive &&
-													canSteer &&
-													!editingQueueId && (
-														<button
-															type="button"
-															className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-															onClick={() => void handleSubmit("follow_up")}
-															title="Queue after current turn (Alt+Enter)"
-														>
-															<ListPlus size={14} />
-														</button>
-													)}
-											</>
-										);
-									})()}
+									{isActive && (
+										<button
+											type="button"
+											className="w-8 h-8 flex items-center justify-center rounded text-danger hover:bg-bg-hover"
+											title="Stop (Esc)"
+											aria-label="Stop (Esc)"
+											disabled={!available}
+											onClick={() => onCancel(false)}
+										>
+											<Square size={12} fill="currentColor" />
+										</button>
+									)}
+									<button
+										type="button"
+										className="w-8 h-8 flex items-center justify-center rounded text-fg-muted hover:bg-bg-hover disabled:opacity-40"
+										onClick={() => void handleSubmit()}
+										disabled={
+											!available ||
+											submitting ||
+											prompts.length > 0 ||
+											(!input.trim() && !images.length && !files.length)
+										}
+										title={
+											editingQueueId
+												? "Update queued message (Enter)"
+												: isActive && canSteer
+													? "Steer current turn (Enter) · Queue with Alt+Enter"
+													: isActive
+														? "Queue follow-up (Enter)"
+														: "Send (Enter)"
+										}
+									>
+										<ArrowUp size={14} />
+									</button>
+									{isActive && canSteer && !editingQueueId && (
+										<button
+											type="button"
+											className="w-8 h-8 flex items-center justify-center rounded text-fg-muted hover:bg-bg-hover disabled:opacity-40"
+											disabled={
+												!available ||
+												submitting ||
+												prompts.length > 0 ||
+												(!input.trim() && !images.length && !files.length)
+											}
+											onClick={() => void handleSubmit("follow_up")}
+											title="Queue after current turn (Alt+Enter)"
+										>
+											<ListPlus size={14} />
+										</button>
+									)}
 								</div>
 							</div>
 						</div>
-					)}
+					}
 				</div>
 			</div>
 		</div>

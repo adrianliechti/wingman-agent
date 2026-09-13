@@ -2,11 +2,38 @@ package fs
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestCancelledBatchEditDoesNotWriteAfterWaitingForTransaction(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	fileTransactionMu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := batchEditTool(root, nil).Execute(ctx, map[string]any{
+			"file_path": "cancelled.txt", "old_string": "", "new_string": "must not be written",
+		})
+		done <- err
+	}()
+	cancel()
+	fileTransactionMu.Unlock()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled edit returned %v", err)
+	}
+	if entries, err := os.ReadDir(root.Name()); err != nil || len(entries) != 0 {
+		t.Fatalf("cancelled transaction left files: %v, %v", entries, err)
+	}
+}
 
 func TestBatchEditToolSchemaIsProviderNeutral(t *testing.T) {
 	directory := t.TempDir()

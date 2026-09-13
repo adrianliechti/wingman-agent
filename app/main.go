@@ -115,7 +115,7 @@ func (a *App) newLauncher() http.Handler {
 	mux.HandleFunc("POST /app/workspaces/open", a.handleOpenWorkspace)
 	mux.HandleFunc("POST /app/folder", a.handleSelectFolder)
 
-	return mux
+	return server.LocalHostOnly(http.NewCrossOriginProtection().Handler(mux))
 }
 
 func (a *App) handleWorkspaces(w http.ResponseWriter, r *http.Request) {

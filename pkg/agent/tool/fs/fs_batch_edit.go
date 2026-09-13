@@ -53,6 +53,11 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 			"additionalProperties": false,
 		},
 		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+			fileEditMu.Lock()
+			defer fileEditMu.Unlock()
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 			files, editCount, err := parseBatchEdits(root, args, allowedWriteRoots)
 			if err != nil {
 				return tool.Result{}, err
@@ -120,13 +125,17 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 				})
 			}
 
-			if err := commitFileTransaction(root, tx); err != nil {
+			if err := commitFileTransaction(ctx, root, tx); err != nil {
 				return tool.Result{}, err
 			}
 			for _, change := range tx.changes {
 				freshness.record(ctx, change.target)
 			}
-			return tool.Text(fmt.Sprintf("Applied %d edits across %d files atomically.\n%s", editCount, len(files), strings.Join(summaries, "\n"))), nil
+			changes := make([]tool.FileChange, 0, len(tx.changes))
+			for _, change := range tx.changes {
+				changes = append(changes, tool.FileChange{Path: change.displayPath, Before: string(change.before), After: string(change.after), BeforeExists: change.beforePresent, AfterExists: change.afterPresent, Mode: uint32(change.beforeMode.Perm())})
+			}
+			return tool.Result{Content: fmt.Sprintf("Applied %d edits across %d files atomically.\n%s", editCount, len(files), strings.Join(summaries, "\n")), Metadata: map[string]any{tool.FileChangesMetadata: changes}}, nil
 		},
 	}
 }

@@ -583,3 +583,13 @@ html[data-window-chrome="windows-overlay"] .window-app-menu {
 		font-size: 14px;
 	}
 }
+
+@media (pointer: coarse) {
+	[data-prompt] button,
+	[data-prompt] input {
+		min-height: 44px;
+	}
+	[data-prompt] button {
+		min-width: 44px;
+	}
+}

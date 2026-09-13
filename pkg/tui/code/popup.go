@@ -381,20 +381,20 @@ func (p *Popup) Render(width int) []string {
 
 		var line string
 		if i == p.index {
-			line = colored(t.Cyan, "› ") + marker + colored(t.Foreground, item.Label)
+			line = colored(t.Cyan, "› ") + marker + colored(t.Foreground, commandLine(item.Label))
 		} else {
-			line = "  " + marker + colored(t.Foreground, item.Label)
+			line = "  " + marker + colored(t.Foreground, commandLine(item.Label))
 		}
 
-		detail := item.Detail
+		detail := commandLine(item.Detail)
 		if item.Disabled && item.DisabledReason != "" {
-			detail = item.DisabledReason
+			detail = commandLine(item.DisabledReason)
 		}
 		if detail != "" {
 			line += "  " + dim(detail)
 		}
 		if item.Shortcut != "" {
-			line += "  " + dim(item.Shortcut)
+			line += "  " + dim(commandLine(item.Shortcut))
 		}
 		if item.Disabled {
 			line = dim(ansi.Strip(line))

@@ -15,7 +15,7 @@ func TestAgentAPIContract(t *testing.T) {
 	}
 	defer app.Close()
 	rec := httptest.NewRecorder()
-	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v2/bootstrap", nil))
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://localhost/api/v2/bootstrap", nil))
 	if rec.Code != 200 {
 		t.Fatalf("bootstrap: %d %s", rec.Code, rec.Body)
 	}
@@ -31,7 +31,7 @@ func TestAgentAPIContract(t *testing.T) {
 		t.Fatalf("bootstrap: %#v", boot)
 	}
 	for _, instance := range []string{"", "old-instance"} {
-		req := httptest.NewRequest(http.MethodPost, "/api/files", nil)
+		req := httptest.NewRequest(http.MethodPost, "http://localhost/api/files", nil)
 		req.Header.Set(instanceHeader, instance)
 		rec := httptest.NewRecorder()
 		app.ServeHTTP(rec, req)

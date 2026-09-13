@@ -365,22 +365,27 @@ func (a *approver) handleElicitation(p elicitationParams) elicitationResponse {
 	if p.ServerName != "" {
 		title = fmt.Sprintf("%s: %s", p.ServerName, title)
 	}
-	tc := pendingToolCall(fmt.Sprintf("mcp-elicitation:%s", p.ServerName), acp.ToolKindOther)
+	tc := pendingToolCall("mcp-elicitation:"+uuid.NewString(), acp.ToolKindOther)
 	tc.Title = &title
 	if p.Message != "" {
 		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(p.Message))}
 	}
 
-	id, ok := a.ask(tc)
-	if !ok {
-		return elicitationResponse{Action: "cancel"}
+	response := elicitationResponse{Action: "cancel"}
+	if id, ok := a.ask(tc); ok {
+		switch id {
+		case optionAllowOnce, optionAllowAlways:
+			response.Action = "accept"
+		default:
+			response.Action = "decline"
+		}
 	}
-	switch id {
-	case optionAllowOnce, optionAllowAlways:
-		return elicitationResponse{Action: "accept"}
-	default:
-		return elicitationResponse{Action: "decline"}
-	}
+	// Synthetic permission cards have no backend completion event.
+	_ = notifyClient(a.ctx, a.conn, a.sessionID, acp.UpdateToolCall(tc.ToolCallId,
+		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
+		acp.WithUpdateRawOutput(map[string]any{"action": response.Action}),
+	))
+	return response
 }
 
 func isMessageOnlyElicitation(p elicitationParams) bool {

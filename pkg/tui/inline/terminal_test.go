@@ -160,3 +160,40 @@ func TestTerminalTitleAndBell(t *testing.T) {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
+
+func TestStopRestoresTerminalExactlyOnce(t *testing.T) {
+	var output strings.Builder
+	terminal := NewTerminal(WithIO(strings.NewReader(""), &output, func() (int, int) { return 80, 24 }))
+	if err := terminal.Start(); err != nil {
+		t.Fatal(err)
+	}
+	restored := 0
+	terminal.restoreConsole = func() { restored++ }
+	terminal.EnterAlt()
+	terminal.EnableMouse(true)
+	terminal.Stop()
+	first := output.String()
+	terminal.Stop()
+	if restored != 1 {
+		t.Fatalf("console restored %d times", restored)
+	}
+	if output.String() != first {
+		t.Fatal("repeated cleanup emitted terminal controls")
+	}
+	for _, seq := range []string{disableBracketedPaste, disableFocusReporting, restoreWindowTitle, popKeyboardMode, "\x1b[?1049l", "\x1b[?1000;1002;1006l"} {
+		if strings.Count(first, seq) != 1 {
+			t.Fatalf("restore sequence %q missing or duplicated", seq)
+		}
+	}
+}
+
+func TestRenderClipsRowsAndCursorToTerminalBounds(t *testing.T) {
+	screen := newVTScreen(2)
+	terminal := NewTerminal(WithIO(strings.NewReader(""), screen, func() (int, int) { return 5, 2 }))
+	terminal.Resized(5, 2)
+	terminal.EnterAlt()
+	terminal.RenderAlt([]string{"123456789", "abc"}, &Pos{Row: 100, Col: 100})
+	if screen.rows[0] != "12345" {
+		t.Fatalf("row exceeded terminal width: %q", screen.rows[0])
+	}
+}

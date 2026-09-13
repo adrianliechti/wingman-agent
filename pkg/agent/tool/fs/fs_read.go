@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
@@ -44,6 +45,9 @@ func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedRe
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 			pathArg, ok := args["file_path"].(string)
 
 			if !ok || pathArg == "" {
@@ -88,11 +92,11 @@ func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedRe
 				return tool.Result{}, fmt.Errorf("cannot read document: %q is %.1fMB (max %dMB)", pathArg, float64(info.Size())/(1024*1024), MaxDocumentBytes/(1024*1024))
 			}
 			if !documentHint && maxFileBytes > 0 && info.Size() > maxFileBytes {
-				output, err := readFileWindow(root, target, pathArg, info.Size(), startLine, limit)
+				output, err := readFileWindow(ctx, root, target, pathArg, info.Size(), startLine, limit)
 				if err != nil {
 					return tool.Result{}, err
 				}
-				freshness.record(ctx, target)
+				freshness.recordInfo(ctx, target, info)
 				return tool.Text(output), nil
 			}
 
@@ -100,12 +104,18 @@ func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedRe
 			if err != nil {
 				return tool.Result{}, fmt.Errorf("read file %q: %w", pathArg, err)
 			}
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 
 			if len(content) > MaxDocumentBytes && (documentHint || documentData(content)) {
 				return tool.Result{}, fmt.Errorf("cannot read document: %q grew beyond the %dMB limit while being read", pathArg, MaxDocumentBytes/(1024*1024))
 			}
 
-			if result, handled, err := readDocument(ctx, target, pathArg, content, startLine, limit, freshness); handled {
+			if result, handled, err := readDocument(ctx, target, pathArg, content, startLine, limit, nil); handled {
+				if err == nil {
+					freshness.recordInfo(ctx, target, info)
+				}
 				return result, err
 			}
 
@@ -113,7 +123,7 @@ func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedRe
 				return tool.Result{}, fmt.Errorf("cannot read %s: file appears to be binary. Use the shell tool with an appropriate viewer if you really need to inspect it", pathArg)
 			}
 
-			freshness.record(ctx, target)
+			freshness.recordInfo(ctx, target, info)
 
 			return tool.Text(formatRead(content, startLine, limit)), nil
 		},
@@ -121,6 +131,10 @@ func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedRe
 }
 
 func formatRead(content []byte, startLine, limit int) string {
+	return formatReadWithin(content, startLine, limit, DefaultMaxBytes)
+}
+
+func formatReadWithin(content []byte, startLine, limit, budget int) string {
 	if len(content) == 0 {
 		return "<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>"
 	}
@@ -139,7 +153,7 @@ func formatRead(content []byte, startLine, limit int) string {
 		maxLines = limit
 	}
 
-	end := min(total, offset+maxLines)
+	end := offset + min(total-offset, maxLines)
 
 	var numbered []string
 
@@ -149,7 +163,7 @@ func formatRead(content []byte, startLine, limit int) string {
 	}
 
 	selected := strings.Join(numbered, "\n")
-	output, bytesTruncated := truncateReadOutput(selected)
+	output, bytesTruncated := truncateReadOutput(selected, budget)
 
 	outputLines := 0
 	if output != "" {
@@ -161,6 +175,9 @@ func formatRead(content []byte, startLine, limit int) string {
 		notice := fmt.Sprintf("Showing lines %d-%d of %d", startLine, endLine, total)
 		if bytesTruncated {
 			notice += fmt.Sprintf("; %dKB cap reached", DefaultMaxBytes/1024)
+			if !strings.Contains(output, "\n") {
+				notice += "; this line may be incomplete; use grep or exec_command to inspect its remainder"
+			}
 		}
 		if endLine < total {
 			notice += fmt.Sprintf("; use offset=%d to continue", endLine+1)
@@ -175,14 +192,21 @@ const maxReadLineBytes = 512 * 1024
 
 // readFileWindow serves files too large to load whole: it streams the file and
 // keeps only the requested line window in memory.
-func readFileWindow(root *os.Root, target fileTarget, pathArg string, fileSize int64, startLine, limit int) (string, error) {
+func readFileWindow(ctx context.Context, root *os.Root, target fileTarget, pathArg string, fileSize int64, startLine, limit int) (string, error) {
 	f, err := openFileTarget(root, target)
 	if err != nil {
 		return "", fmt.Errorf("read file %q: %w", pathArg, err)
 	}
 	defer f.Close()
 
-	reader := bufio.NewReaderSize(f, 64*1024)
+	return readTextWindow(ctx, f, pathArg, fileSize, startLine, limit)
+}
+
+func readTextWindow(ctx context.Context, source io.Reader, pathArg string, fileSize int64, startLine, limit int) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	reader := bufio.NewReaderSize(source, 64*1024)
 
 	if head, err := reader.Peek(512); err == nil && isBinaryContent(head) {
 		return "", fmt.Errorf("cannot read %s: file appears to be binary. Use the shell tool with an appropriate viewer if you really need to inspect it", pathArg)
@@ -199,6 +223,9 @@ func readFileWindow(root *os.Root, target fileTarget, pathArg string, fileSize i
 	sawEOF := false
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		line, tooLong, err := readLimitedLine(reader)
 		if tooLong {
 			return "", fmt.Errorf("cannot read %s: line %d is longer than %dKB; use grep or the shell tool to inspect this file", pathArg, lineNum+1, maxReadLineBytes/1024)
@@ -224,19 +251,25 @@ func readFileWindow(root *os.Root, target fileTarget, pathArg string, fileSize i
 			break
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 
 	if len(numbered) == 0 {
 		return fmt.Sprintf("<system-reminder>Warning: the file exists but is shorter than the provided offset (%d). The file has %d lines.</system-reminder>", startLine, lineNum), nil
 	}
 
-	output, bytesTruncated := truncateReadOutput(strings.Join(numbered, "\n"))
+	output, bytesTruncated := truncateReadOutput(strings.Join(numbered, "\n"), DefaultMaxBytes)
 	outputLines := strings.Count(output, "\n") + 1
 	endLine := startLine + outputLines - 1
 	notice := fmt.Sprintf("Showing lines %d-%d of a %.1fMB file (too large to read fully)", startLine, endLine, float64(fileSize)/(1024*1024))
 	if bytesTruncated {
 		notice += fmt.Sprintf("; %dKB cap reached", DefaultMaxBytes/1024)
+		if !strings.Contains(output, "\n") {
+			notice += "; this line may be incomplete; use grep or exec_command to inspect its remainder"
+		}
 	}
-	if !sawEOF {
+	if !sawEOF || bytesTruncated {
 		notice += fmt.Sprintf("; use offset=%d to continue", endLine+1)
 	}
 	return fmt.Sprintf("%s\n\n[%s]", output, notice), nil
@@ -259,14 +292,18 @@ func readLimitedLine(r *bufio.Reader) (string, bool, error) {
 	}
 }
 
-func truncateReadOutput(content string) (string, bool) {
-	if len(content) <= DefaultMaxBytes {
+// Reserve enough room for line numbers, continuation and partial-line notices.
+const readNoticeBytes = 512
+
+func truncateReadOutput(content string, budget int) (string, bool) {
+	limit := max(0, budget-readNoticeBytes)
+	if len(content) <= limit {
 		return content, false
 	}
 
-	cut := strings.LastIndex(content[:DefaultMaxBytes], "\n")
+	cut := strings.LastIndex(content[:limit], "\n")
 	if cut <= 0 {
-		return content[:DefaultMaxBytes], true
+		return text.HeadBytes(content, limit), true
 	}
 
 	return content[:cut], true

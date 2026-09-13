@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/changes"
+	"github.com/adrianliechti/wingman-agent/pkg/settings"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -27,7 +28,8 @@ const (
 // on wide terminals. Diffs load off the UI loop and refresh when the
 // workspace change fingerprint moves.
 type diffPanel struct {
-	hidden bool
+	hidden    bool
+	requested bool
 
 	diffs   []changes.FileDiff
 	err     error
@@ -52,7 +54,10 @@ type diffSection struct {
 }
 
 func (a *App) diffPanelWidth(termWidth int) int {
-	if a.diffPanel.hidden || termWidth < diffPanelBreakpoint || len(a.diffPanel.diffs) == 0 {
+	if a.diffPanel.hidden || termWidth < diffPanelBreakpoint || (len(a.diffPanel.diffs) == 0 && !(a.diffPanelShowing && a.isStreaming())) {
+		return 0
+	}
+	if a.isStreaming() && !a.diffPanelShowing && !a.diffPanel.requested {
 		return 0
 	}
 	return min(diffPanelMaxWidth, max(diffPanelMinWidth, termWidth*42/100))
@@ -66,6 +71,15 @@ func (a *App) toggleDiffPanel() bool {
 		return false
 	}
 	a.diffPanel.hidden = !a.diffPanel.hidden
+	a.diffPanel.requested = !a.diffPanel.hidden
+	if a.agent.Workspace().MemoryPath != "" {
+		hidden := a.diffPanel.hidden
+		go func() {
+			if _, err := settings.Update(func(s *settings.Settings) { s.TUIDiffPanelHidden = hidden }); err != nil {
+				a.post(func() { a.showToast("Could not save diff preference: "+err.Error(), theme.Default.Red) })
+			}
+		}()
+	}
 	if a.diffPanel.hidden {
 		a.showToast("Diff panel hidden", theme.Default.BrBlack)
 	} else if a.agent.Workspace().HasChanges() {

@@ -1,5 +1,9 @@
 import { emptySession, sessionKey } from "../src/state/sessionStore.ts";
-import type { ChatEntry } from "../src/types/session.ts";
+import type {
+	ChatEntry,
+	PendingPrompt,
+	PendingTurnInput,
+} from "../src/types/session.ts";
 import {
 	expect,
 	test,
@@ -5668,4 +5672,647 @@ test.describe("remote access", () => {
 		).json();
 		expect(after.requests - before.requests).toBe(1);
 	});
+});
+
+async function reviewActive(
+	page: Page,
+	entries: ChatEntry[] = [
+		{
+			id: "review-user",
+			inputId: "review-input",
+			type: "user",
+			content: "Review and update the application",
+		},
+		{
+			id: "review-reply",
+			type: "assistant",
+			content: "Working through the application.",
+		},
+	],
+	prompts: PendingPrompt[] = [],
+	pendingInputs: PendingTurnInput[] = [],
+) {
+	const id = "review-active";
+	let offline = false;
+	let closeSocket = () => {};
+	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
+	let finish = () => {
+		throw new Error("not subscribed");
+	};
+	await page.route(/\/api\/v2\/backends\/wingman\/sessions$/, (route) =>
+		route.fulfill({
+			json: [
+				{ id, title: "Review active turn", updated_at: "2026-09-13T00:00:00Z" },
+			],
+		}),
+	);
+	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
+		if (offline) {
+			socket.close();
+			return;
+		}
+		closeSocket = () => socket.close();
+		const server = socket.connectToServer();
+		socket.onMessage((message) => {
+			const command = JSON.parse(String(message));
+			if (command.type !== "subscribe" || command.ref.sessionId !== id) {
+				server.send(message);
+				return;
+			}
+			const send = (phase: string, revision: number) =>
+				socket.send(
+					JSON.stringify({
+						type: "session.snapshot",
+						subscriptionId: command.subscriptionId,
+						ref: {
+							workspaceId: scope.workspaceId,
+							backendId: "wingman",
+							sessionId: id,
+						},
+						epoch: "review-epoch",
+						revision,
+						entries,
+						state: {
+							...emptySession(sessionKey("wingman", id)),
+							status: "ready",
+							phase,
+							canSteer: true,
+							prompts,
+							pendingInputs,
+						},
+					}),
+				);
+			send("streaming", 0);
+			finish = () => send("idle", 1);
+		});
+	});
+	const input = await composer(page);
+	if (await page.locator("[data-mobile-navigation]").isVisible()) {
+		await page
+			.getByRole("button", { name: "Show sessions", exact: true })
+			.click();
+		await page
+			.getByRole("dialog", { name: "Sessions", exact: true })
+			.getByRole("button", { name: /^Review active turn/ })
+			.click();
+	} else {
+		await openSessions(page);
+		await sessionRow(page, id).click();
+	}
+	await expect(
+		page.getByRole("button", { name: "Stop (Esc)", exact: true }),
+	).toBeVisible();
+	return {
+		input,
+		finish: () => finish(),
+		disconnect: () => {
+			offline = true;
+			closeSocket();
+		},
+	};
+}
+
+test("recovery: typing keeps the visible stop action", async ({ page }) => {
+	const { input } = await reviewActive(page);
+	await input.fill("Additional instructions");
+	await expect(
+		page.getByRole("button", { name: "Stop (Esc)", exact: true }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("button", { name: /Steer current turn/ }),
+	).toBeVisible();
+	await page.screenshot({
+		path: test.info().outputPath("running-desktop.png"),
+	});
+});
+
+test("recovery: finishing a turn preserves editor focus", async ({ page }) => {
+	const { input, finish } = await reviewActive(page);
+	await sessionTab(page, "review-active").dblclick();
+	await page.getByRole("treeitem", { name: /editable\.txt/ }).click();
+	const fileTab = page.locator('[data-center-tab="file:editable.txt"]');
+	await fileTab.click({ button: "right" });
+	await page.getByRole("menuitem", { name: "Move Right", exact: true }).click();
+	await sessionTab(page, "review-active").click();
+	await expect(
+		page.getByText("Working through the application.", { exact: true }),
+	).toBeVisible();
+	await expect(input).toBeVisible();
+	await page
+		.locator(".monaco-editor .view-line", { hasText: "original" })
+		.first()
+		.click();
+	await expect
+		.poll(() =>
+			page.evaluate(() =>
+				Boolean(document.activeElement?.closest(".monaco-editor")),
+			),
+		)
+		.toBe(true);
+	finish();
+	await expect
+		.poll(() =>
+			page.evaluate(() =>
+				Boolean(document.activeElement?.closest(".monaco-editor")),
+			),
+		)
+		.toBe(true);
+});
+
+test.describe("recovery: phone", () => {
+	test.use({
+		viewport: { width: 390, height: 700 },
+		hasTouch: true,
+		isMobile: true,
+	});
+	test("shows the mobile running controls", async ({ page }) => {
+		const { input } = await reviewActive(page);
+		await input.fill("Additional instructions");
+		await expect(
+			page.getByRole("button", { name: "Stop (Esc)", exact: true }),
+		).toBeVisible();
+		await page.screenshot({
+			path: test.info().outputPath("running-mobile.png"),
+		});
+	});
+});
+
+test("recovery: switching files preserves undo history", async ({ page }) => {
+	await composer(page);
+	await page.getByRole("treeitem", { name: /editable\.txt/ }).dblclick();
+	await page
+		.locator(".monaco-editor .view-line", { hasText: "original" })
+		.first()
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.insertText(" review-edit");
+	await expect(page.locator(".monaco-editor .view-lines")).toContainText(
+		"review-edit",
+	);
+	await page.keyboard.press("ControlOrMeta+z");
+	await expect(page.locator(".monaco-editor .view-lines")).not.toContainText(
+		"review-edit",
+	);
+	await page.keyboard.press("ControlOrMeta+Shift+z");
+	await expect(page.locator(".monaco-editor .view-lines")).toContainText(
+		"review-edit",
+	);
+	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
+	await page.locator('[data-center-tab="file:editable.txt"]').click();
+	await page
+		.locator(".monaco-editor .view-line", { hasText: "review-edit" })
+		.first()
+		.click();
+	await page.keyboard.press("ControlOrMeta+z");
+	await expect(page.locator(".monaco-editor .view-lines")).not.toContainText(
+		"review-edit",
+	);
+});
+
+test("recovery: reusing a renamed file's path keeps editor contents and undo separate", async ({
+	page,
+	request,
+}) => {
+	await writeFile(workspacePath("review-model-old.txt"), "first document\n");
+	await composer(page);
+	const file = page.getByRole("treeitem", { name: "review-model-old.txt" });
+	await file.dblclick();
+	const lines = page.locator(".monaco-editor .view-lines");
+	await expect(lines).toContainText("first document");
+	await page.locator(".monaco-editor .view-line").first().click();
+	await page.keyboard.press("End");
+	await page.keyboard.insertText(" unsaved edit");
+	await expect(lines).toContainText("first document unsaved edit");
+
+	await file.click({ button: "right" });
+	await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+	const name = page.getByRole("textbox", {
+		name: "Rename review-model-old.txt",
+	});
+	await name.fill("review-model-new.txt");
+	await name.press("Enter");
+	await expect(
+		page.getByRole("tab", { name: /review-model-new.txt/ }),
+	).toBeVisible();
+	await expect(lines).toContainText("first document unsaved edit");
+
+	const created = await request.post("/api/files", {
+		data: { path: "review-model-old.txt", content: "second document\n" },
+	});
+	expect(created.ok()).toBeTruthy();
+	await file.dblclick();
+	await expect(lines).toContainText("second document");
+	await page.locator(".monaco-editor .view-line").first().click();
+	await page.keyboard.press("End");
+	await page.keyboard.insertText(" separate edit");
+	await expect(lines).toContainText("second document separate edit");
+	await page.keyboard.press("ControlOrMeta+z");
+	await expect(lines).toContainText("second document");
+	await expect(lines).not.toContainText("separate edit");
+
+	await page.locator('[data-center-tab="file:review-model-new.txt"]').click();
+	await expect(lines).toContainText("first document unsaved edit");
+	await page.locator(".monaco-editor .view-line").first().click();
+	await page.keyboard.press("ControlOrMeta+z");
+	await expect(lines).toContainText("first document");
+	await expect(lines).not.toContainText("unsaved edit");
+
+	await page.locator('[data-center-tab="file:review-model-old.txt"]').click();
+	await expect(lines).toContainText("second document");
+	await page.locator(".monaco-editor .view-line").first().click();
+	await page.keyboard.press("ControlOrMeta+Shift+z");
+	await expect(lines).toContainText("second document separate edit");
+});
+
+test("recovery: drafts survive reload with attachments and recover after closing", async ({
+	page,
+}) => {
+	const input = await composer(page);
+	await input.fill("Draft before reload");
+	await page.locator('[data-chat-composer] input[type="file"]').setInputFiles({
+		name: "diagram.png",
+		mimeType: "image/png",
+		buffer: Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=",
+			"base64",
+		),
+	});
+	await expect(page.locator("[data-chat-composer] img")).toHaveCount(1);
+	await page.reload();
+	await expect(input).toHaveValue("Draft before reload");
+	await expect(page.locator("[data-chat-composer] img")).toHaveCount(1);
+	const tab = page.locator('[data-center-tab^="draft:"]').first();
+	await tab.hover();
+	await tab.locator("[data-tab-close]").click();
+	await expect(tab).toHaveCount(0);
+	await page.keyboard.press("Control+k");
+	await page
+		.getByRole("combobox", { name: "Search commands" })
+		.fill("Recover draft");
+	await page
+		.getByRole("option", { name: /Recover draft: Draft before reload/ })
+		.click();
+	await expect(input).toHaveValue("Draft before reload");
+	await expect(page.locator("[data-chat-composer] img")).toHaveCount(1);
+});
+
+test("recovery: chat startup defers the editor until a file opens", async ({
+	page,
+}) => {
+	const editors: string[] = [];
+	page.on("request", (request) => {
+		if (/\/assets\/editor\.js/.test(request.url())) editors.push(request.url());
+	});
+	await composer(page);
+	// Network idleness proves preload did not just lag behind the first paint.
+	await page.waitForLoadState("networkidle");
+	expect(editors).toHaveLength(0);
+	await page.getByRole("treeitem", { name: /editable\.txt/ }).click();
+	await expect(page.locator(".monaco-editor").first()).toBeVisible();
+	expect(editors).toHaveLength(1);
+});
+
+for (const unavailable of [false, true]) {
+	test(`recovery: backup journals tolerate damaged data with IndexedDB ${unavailable ? "unavailable" : "available"}`, async ({
+		page,
+	}) => {
+		const scope = await (await page.request.get("/api/v2/bootstrap")).json();
+		await page.addInitScript(
+			({ workspace, unavailable }) => {
+				const prefix = `wingman-pending-drafts:${workspace}:`;
+				localStorage.setItem(prefix + "damaged", "invalid JSON");
+				localStorage.setItem(
+					prefix + "valid",
+					JSON.stringify([
+						null,
+						{
+							tab: {
+								id: "draft:wingman:backup",
+								type: "chat",
+								label: "Agent",
+								backendId: "wingman",
+								sessionId: "",
+							},
+							content: {
+								text: "Recovered from backup",
+								files: [],
+								images: [],
+								editingQueueId: null,
+							},
+							open: true,
+							updated: 1,
+						},
+					]),
+				);
+				if (unavailable)
+					Object.defineProperty(window, "indexedDB", {
+						get() {
+							throw new Error("Draft storage unavailable");
+						},
+					});
+			},
+			{ workspace: scope.workspaceId, unavailable },
+		);
+		const input = await composer(page);
+		await expect(input).toHaveValue("Recovered from backup");
+		await input.fill("Newer work survives another reload");
+		await page.reload();
+		await expect(input).toHaveValue("Newer work survives another reload");
+	});
+}
+
+test("recovery: long transcripts render a bounded window and jump to latest", async ({
+	page,
+}) => {
+	const entries: ChatEntry[] = Array.from({ length: 1000 }, (_, index) => [
+		{
+			id: `u-${index}`,
+			inputId: `input-${index}`,
+			type: "user" as const,
+			content: `Request number ${index}`,
+		},
+		{
+			id: `a-${index}`,
+			type: "assistant" as const,
+			content: `Response number ${index}: ` + "Completed work. ".repeat(20),
+		},
+	]).flat();
+	const { input } = await reviewActive(page, entries);
+	const virtual = page.locator("[data-virtual-transcript]");
+	await expect(virtual).toBeVisible();
+	expect(await virtual.locator(":scope > [data-index]").count()).toBeLessThan(
+		30,
+	);
+	const history = page.locator("[data-chat-history]");
+	await history.evaluate((element) => {
+		element.scrollTop = 0;
+		element.dispatchEvent(new Event("scroll"));
+	});
+	await expect(
+		page.getByRole("button", { name: /Jump to latest/ }),
+	).toBeVisible();
+	await input.fill("Drafting while reading old output");
+	await page.getByRole("button", { name: /Jump to latest/ }).click();
+	await expect(page.getByText(/Response number 999:/)).toBeVisible();
+	await expect(input).toHaveValue("Drafting while reading old output");
+	expect(await virtual.locator(":scope > [data-index]").count()).toBeLessThan(
+		30,
+	);
+});
+
+test("recovery: turn review previews attributed edits and refuses a conflicting undo", async ({
+	page,
+}) => {
+	let attempts = 0,
+		undone = false;
+	const review = () => ({
+		id: "review-turn",
+		inputId: "review-input",
+		started: "2026-09-13T00:00:00Z",
+		outcome: "completed",
+		validation: "passed",
+		untracked: true,
+		uncertain: false,
+		undone,
+		files: [
+			{
+				path: "editable.txt",
+				before: "original user work\n",
+				after: "original user work plus agent change\n",
+				beforeExists: true,
+				afterExists: true,
+			},
+		],
+		checks: [
+			{
+				command: "go test ./...",
+				workdir: "packages/frontend",
+				outcome: "passed",
+				exitCode: 0,
+			},
+		],
+	});
+	await page.route(
+		/\/sessions\/review-active\/reviews(?:\/review-turn(?:\/undo)?)?$/,
+		async (route) => {
+			if (route.request().method() === "POST") {
+				attempts++;
+				if (attempts === 1)
+					await route.fulfill({
+						status: 409,
+						body: "editable.txt changed after this turn; no files were changed",
+					});
+				else {
+					undone = true;
+					await route.fulfill({ status: 204 });
+				}
+			} else
+				await route.fulfill({
+					json: route.request().url().endsWith("/reviews")
+						? [review()]
+						: review(),
+				});
+		},
+	);
+	const { finish } = await reviewActive(page);
+	finish();
+	const card = page.locator("[data-turn-review]");
+	await expect(card).toContainText("1 file changed · Validation passed");
+	await card.getByRole("button", { name: /Review changes/ }).click();
+	await expect(card).toContainText("exit 0");
+	await expect(card).toContainText("packages/frontend");
+	await card.locator("summary").click();
+	await expect(card.locator(".monaco-diff-editor")).toBeVisible();
+	await card
+		.getByRole("button", { name: "Undo tracked edits", exact: true })
+		.click();
+	await expect(
+		page.getByText("Could not undo this turn", { exact: true }),
+	).toBeVisible();
+	await expect(
+		card.getByRole("button", { name: "Undo tracked edits", exact: true }),
+	).toBeEnabled();
+	await card
+		.getByRole("button", { name: "Undo tracked edits", exact: true })
+		.click();
+	await expect(
+		card.getByRole("button", { name: "Edits undone", exact: true }),
+	).toBeDisabled();
+	expect(attempts).toBe(2);
+});
+
+test("recovery: disconnected workspace keeps drafting and loaded files usable", async ({
+	page,
+}) => {
+	const { input, disconnect } = await reviewActive(page);
+	await input.fill("Keep this draft");
+	await sessionTab(page, "review-active").dblclick();
+	await page.getByRole("treeitem", { name: /editable\.txt/ }).dblclick();
+	await expect(page.locator(".monaco-editor").first()).toBeVisible();
+	disconnect();
+	await expect(
+		page.getByText(/Reconnecting · drafts stay available/),
+	).toBeVisible();
+	await page
+		.locator(".monaco-editor .view-line", { hasText: "original" })
+		.first()
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.insertText(" offline edit");
+	await expect(page.locator(".monaco-editor .view-lines")).toContainText(
+		"offline edit",
+	);
+	await sessionTab(page, "review-active").click();
+	await expect(input).toHaveValue("Keep this draft");
+	await input.fill("Continue drafting while disconnected");
+	await expect(
+		page.getByRole("button", { name: /Steer current turn/ }),
+	).toBeDisabled();
+	await expect(input).toHaveValue("Continue drafting while disconnected");
+});
+
+test("recovery: approval shortcuts require deliberate focus and preserve the composer", async ({
+	page,
+}) => {
+	const replies: unknown[] = [];
+	await page.route(/\/sessions\/review-active\/commands$/, async (route) => {
+		const body = route.request().postDataJSON();
+		replies.push(body);
+		await route.fulfill({
+			json: { requestId: body.requestId, accepted: true },
+		});
+	});
+	const { input } = await reviewActive(page, undefined, [
+		{
+			id: "approval",
+			kind: "confirm",
+			message: "Run the requested command in this workspace?",
+		},
+	]);
+	const approval = page.getByRole("group", {
+		name: "Approval required · Alt+A to focus",
+	});
+	await expect(approval).toBeVisible();
+	await input.fill("My separate draft");
+	await input.press("y");
+	await expect(input).toHaveValue("My separate drafty");
+	expect(replies).toHaveLength(0);
+	await page.keyboard.press("Alt+a");
+	await expect(approval).toBeFocused();
+	await page.keyboard.press("y");
+	await expect.poll(() => replies.length).toBe(1);
+	expect(replies[0]).toMatchObject({
+		type: "prompt_response",
+		action: "accept",
+		promptId: "approval",
+	});
+	await expect(input).toHaveValue("My separate drafty");
+});
+
+test.describe("recovery: touch approvals", () => {
+	test.use({
+		viewport: { width: 390, height: 700 },
+		hasTouch: true,
+		isMobile: true,
+	});
+	test("keep approval targets at least 44 pixels tall", async ({ page }) => {
+		await reviewActive(page, undefined, [
+			{ id: "approval", kind: "confirm", message: "Run command?" },
+		]);
+		const buttons = page.locator("[data-prompt] button");
+		expect(await buttons.count()).toBeGreaterThan(1);
+		for (const button of await buttons.all()) {
+			const bounds = await button.boundingBox();
+			expect(bounds?.height).toBeGreaterThanOrEqual(44);
+		}
+	});
+});
+
+test("recovery: queue edits retain the separate composer draft through reload", async ({
+	page,
+}) => {
+	const updates: unknown[] = [];
+	await page.route(/\/sessions\/review-active\/commands$/, async (route) => {
+		const body = route.request().postDataJSON();
+		updates.push(body);
+		await route.fulfill({
+			json: { requestId: body.requestId, accepted: true },
+		});
+	});
+	const { input } = await reviewActive(
+		page,
+		undefined,
+		[],
+		[
+			{
+				id: "queued",
+				state: "queued",
+				intent: "follow_up",
+				position: 1,
+				text: "Queued task",
+				files: [],
+				images: [],
+			},
+		],
+	);
+	await input.fill("My separate unsent draft");
+	await page
+		.getByRole("button", { name: "Edit queued message", exact: true })
+		.click();
+	await expect(input).toHaveValue("Queued task");
+	await input.fill("Updated queued task");
+
+	await page.reload();
+	await expect(input).toHaveValue("Updated queued task");
+	await page
+		.getByText("Editing queued message", { exact: true })
+		.locator("..")
+		.getByRole("button", { name: "Cancel", exact: true })
+		.click();
+	await expect(input).toHaveValue("My separate unsent draft");
+	await page
+		.getByRole("button", { name: "Edit queued message", exact: true })
+		.click();
+	await input.fill("Updated queued task");
+	await input.press("Enter");
+	await expect(input).toHaveValue("My separate unsent draft");
+	expect(updates).toHaveLength(1);
+	expect(updates[0]).toMatchObject({
+		type: "queue_update",
+		inputId: "queued",
+		text: "Updated queued task",
+	});
+});
+
+test("recovery: expanded tool output renders a bounded window", async ({
+	page,
+}) => {
+	const output = Array.from(
+		{ length: 5000 },
+		(_, index) => `Output line ${index}: details`,
+	).join("\n");
+	await reviewActive(page, [
+		{ id: "user", type: "user", content: "Inspect output" },
+		{
+			id: "large-tool",
+			type: "tool",
+			content: "",
+			toolName: "exec_command",
+			toolArgs: '{"command":"go test ./..."}',
+			toolResult: output,
+		},
+	]);
+	const entry = page.locator('[data-entry-id="large-tool"]');
+	await entry.getByRole("button", { expanded: false }).click();
+	await entry.getByRole("button", { name: /Show all/ }).click();
+	const virtual = entry.locator("[data-virtual-output]");
+	await expect(virtual).toBeVisible();
+	expect(await virtual.locator("[data-index]").count()).toBeLessThan(100);
+	await virtual.evaluate((element) => {
+		element.scrollTop = element.scrollHeight;
+	});
+	await expect(
+		virtual.getByText("Output line 4999: details", { exact: true }),
+	).toBeVisible();
+	expect(await virtual.locator("[data-index]").count()).toBeLessThan(100);
 });

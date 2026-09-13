@@ -14,8 +14,8 @@ export type { PromptReply } from "../types/protocol.ts";
 export function useWebSocket() {
 	const client = workspaceClient();
 	const views = useSyncExternalStore(
-		client.store.subscribe,
-		client.store.getSnapshot,
+		client.store.subscribeRender,
+		client.store.getSummaries,
 	);
 	const connected = useSyncExternalStore(
 		client.subscribeConnection,

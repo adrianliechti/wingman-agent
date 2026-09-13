@@ -22,7 +22,7 @@ func TestLauncherSmoke(t *testing.T) {
 
 	get := func(path string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", path, nil)
+		req := httptest.NewRequest("GET", "http://localhost"+path, nil)
 		if app.server != nil {
 			req.Header.Set("X-Wingman-Instance", app.server.InstanceID())
 		}
@@ -31,7 +31,7 @@ func TestLauncherSmoke(t *testing.T) {
 	}
 
 	post := func(path, body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("POST", path, strings.NewReader(body))
+		req := httptest.NewRequest("POST", "http://localhost"+path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		if app.server != nil {
 			req.Header.Set("X-Wingman-Instance", app.server.InstanceID())
@@ -90,7 +90,7 @@ func TestLauncherSmoke(t *testing.T) {
 		t.Fatalf("second open should fail")
 	}
 
-	stale := httptest.NewRequest("POST", "/app/workspaces/open", strings.NewReader(`{"path":"`+workspace+`","replace":true}`))
+	stale := httptest.NewRequest("POST", "http://localhost/app/workspaces/open", strings.NewReader(`{"path":"`+workspace+`","replace":true}`))
 	stale.Header.Set("X-Wingman-Instance", "old-instance")
 	rejected := httptest.NewRecorder()
 	app.ServeHTTP(rejected, stale)
@@ -103,4 +103,25 @@ func TestLauncherSmoke(t *testing.T) {
 	}
 
 	app.shutdown()
+}
+
+func TestLauncherRejectsRebindingAndCrossOriginCommands(t *testing.T) {
+	app := &App{}
+	handler := app.newLauncher()
+	for _, path := range []string{"/", "/app/workspaces", "/app/workspaces/open"} {
+		request := httptest.NewRequest("POST", "http://attacker.example"+path, nil)
+		request.Header.Set("Origin", "http://attacker.example")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("host check allowed %s: %d", path, response.Code)
+		}
+	}
+	request := httptest.NewRequest("POST", "http://localhost/app/workspaces/open", nil)
+	request.Header.Set("Origin", "https://attacker.example")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin command allowed: %d", response.Code)
+	}
 }

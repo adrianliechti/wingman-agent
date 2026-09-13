@@ -5,6 +5,7 @@ import { sampleSpinnerVerb } from "../../spinnerVerbs";
 import type { Phase } from "../../types/protocol";
 import { EntryView, ToolGroupView } from "./entries";
 import type { Turn } from "./turns";
+import { TurnReviewCard } from "./TurnReviews";
 
 interface TurnViewProps {
 	turn: Turn;
@@ -79,6 +80,7 @@ export const TurnView = memo(function TurnView({
 			{isActive && turn.working.length === 0 && !turn.final && (
 				<PhaseIndicator />
 			)}
+			<TurnReviewCard inputId={turn.user?.inputId} onOpenFile={onOpenFile} />
 		</>
 	);
 }, areTurnPropsEqual);

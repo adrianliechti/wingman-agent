@@ -234,7 +234,9 @@ func (m *ExecManager) notifyExit(s *execSession) {
 
 type execSession struct {
 	id          int
+	validation  bool
 	command     string
+	workdir     string
 	description string
 	started     time.Time
 	tty         bool
@@ -419,6 +421,7 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 
 				"properties": map[string]any{
 					"command":     map[string]any{"type": "string", "description": "Command to run."},
+					"validation":  map[string]any{"type": "boolean", "description": "Set true for a test, build, lint or other check of the changes. The review records its actual exit status; use false for ordinary commands."},
 					"description": map[string]any{"type": "string", "description": "Short label (e.g. \"Start dev server\")."},
 					"workdir":     map[string]any{"type": "string", "description": "Directory to run the command in (absolute, or relative to the workspace). Defaults to the workspace root."},
 					"tty":         map[string]any{"type": "boolean", "description": "Run in a pseudo-terminal (Unix only)."},
@@ -509,9 +512,12 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	cmd.Env = setEnvironment(cmd.Env, "GIT_PAGER", "cat")
 
 	description, _ := args["description"].(string)
+	validation, _ := args["validation"].(bool)
 
 	s := &execSession{
+		validation:  validation,
 		command:     command,
+		workdir:     dir,
 		description: strings.TrimSpace(description),
 		started:     time.Now(),
 		tty:         tty,
@@ -626,7 +632,7 @@ waiting:
 	if idled {
 		notice = fmt.Sprintf("Started and idle (no new output for %s), running with session_id %d — use exec_session to poll output, send input, or kill it", grace, id)
 	}
-	return tool.Text(sessionResult(s.drain(), notice)), nil
+	return s.result(sessionResult(s.drain(), notice)), nil
 }
 
 func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicitation, appr *Approvals, args map[string]any) (tool.Result, error) {
@@ -671,7 +677,7 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 		}
 
 		m.remove(id)
-		return tool.Text(sessionResult(s.drain(), notice)), nil
+		return s.result(sessionResult(s.drain(), notice)), nil
 	}
 
 	input, _ := args["input"].(string)
@@ -730,9 +736,9 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 
 	output := s.drain()
 	if output == "" {
-		return tool.Text(fmt.Sprintf("(no new output; session %d still running)", id)), nil
+		return s.result(fmt.Sprintf("(no new output; session %d still running)", id)), nil
 	}
-	return tool.Text(sessionResult(output, fmt.Sprintf("Session %d still running", id))), nil
+	return s.result(sessionResult(output, fmt.Sprintf("Session %d still running", id))), nil
 }
 
 func writeSessionInput(ctx context.Context, m *ExecManager, id int, s *execSession, elicit *tool.Elicitation, appr *Approvals, input string) (*tool.Result, error) {
@@ -869,18 +875,26 @@ func splitSubmittedInput(input string) (submitted, remainder string) {
 	return input[:last+1], input[last+1:]
 }
 
+func (s *execSession) result(content string) tool.Result {
+	return tool.Result{
+		Content: content,
+		Metadata: map[string]any{
+			"session_id": s.id,
+			"validation": s.validation,
+			"command":    s.command,
+			"workdir":    s.workdir,
+		},
+	}
+}
+
 func completedSessionResult(s *execSession) tool.Result {
 	duration := s.exitedAt.Sub(s.started)
 	if s.exitedAt.IsZero() {
 		duration = time.Since(s.started)
 	}
-	result := tool.Result{
-		Content: sessionResult(s.drain(), s.exitNotice()),
-		IsError: s.exitErr != nil,
-		Metadata: map[string]any{
-			"duration_ms": duration.Milliseconds(),
-		},
-	}
+	result := s.result(sessionResult(s.drain(), s.exitNotice()))
+	result.IsError = s.exitErr != nil
+	result.Metadata["duration_ms"] = duration.Milliseconds()
 	if exitErr, ok := errors.AsType[*exec.ExitError](s.exitErr); ok {
 		result.Metadata["exit_code"] = exitErr.ExitCode()
 	} else if s.exitErr == nil {

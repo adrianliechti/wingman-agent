@@ -27,13 +27,13 @@ A powerful AI-powered coding assistant that runs directly in your terminal. Wing
 
 ## 📦 Installation
 
-### Homebrew (macOS)
+### Homebrew (macOS and Linux)
 
 ```bash
-brew install adrianliechti/tap/wingman-cli
+brew install --cask adrianliechti/tap/wingman-cli
 ```
 
-> Linux: Homebrew no longer supports formula-style binary installs from taps, so use `go install` (below) or download a binary from the [releases](https://github.com/adrianliechti/wingman-agent/releases).
+Requires a current Homebrew version. The CLI cask supports Apple Silicon and Intel macOS, plus ARM64 and x86-64 Linux.
 
 ### Desktop App
 
@@ -261,6 +261,8 @@ backend at `http://localhost:4242/v1`.
 
 | Variable | Description |
 |----------|-------------|
+| `WINGMAN_TASK_MAX_TOKENS` | Built-in agent token allowance per turn, including inline helpers and in-turn utility calls; `0` or unset disables the limit |
+| `WINGMAN_TASK_TIMEOUT` | Built-in agent time allowance per turn, e.g. `20m`; `0s` or unset disables the limit |
 | `WINGMAN_SANDBOX` | `off` lifts the workspace path restriction from the file tools |
 | `WINGMAN_DISABLE_SHELL` | `1`, `true`, `yes`, or `on` disables `exec_command` and `exec_session` for the built-in agent (the variable name is retained for compatibility) |
 | `WINGMAN_DISABLE_WEBSEARCH` | `1`, `true`, `yes`, or `on` disables `web_search` for the built-in agent |
@@ -268,6 +270,16 @@ backend at `http://localhost:4242/v1`.
 | `WINGMAN_ELICITATION` | Headless (ACP) sessions: `accept` or `cancel` answers elicitation prompts automatically |
 | `WINGMAN_HOME` | Overrides the `~/.wingman` directory for all Wingman-owned user data |
 | `WINGMAN_<AGENT>_PATH` | Path override for an external agent binary (e.g. `WINGMAN_CODEX_PATH`) |
+
+Task tokens count provider-reported input plus output tokens. Cache and reasoning
+subtotals are not counted twice. The allowance stops subsequent work once a
+response reaches it; an in-flight response can exceed the remaining allowance.
+This is a token allowance, not a dollar billing cap. Inline helpers share their
+parent's allowance; detached tasks start separate allowances. Native external
+agents use their own limits.
+
+For queue controls, draft recovery, per-turn review, and the regression test
+commands, see [Review improvements](docs/review-improvements.md).
 
 ### OpenTelemetry GenAI telemetry
 

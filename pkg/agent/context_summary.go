@@ -103,6 +103,7 @@ func (a *Agent) generateBriefing(ctx context.Context, instructions string, messa
 		var usage Usage
 		if resp != nil {
 			usage = responseToUsage(*resp)
+			chargeTaskUsage(ctx, usage)
 			if err == nil && resp.Status != "" && resp.Status != responses.ResponseStatusCompleted {
 				err = fmt.Errorf("briefing response was %s; conversation preserved", resp.Status)
 				if resp.Status == responses.ResponseStatusFailed {

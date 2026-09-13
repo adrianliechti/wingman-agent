@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"slices"
 	"strings"
 	"testing"
@@ -369,5 +370,17 @@ func TestApplyModelOverrides(t *testing.T) {
 	}
 	if cfg.Effort() != "max" {
 		t.Fatal("nil resolver must leave effort unclamped")
+	}
+}
+
+func TestVerificationRetainsRealExecutionTools(t *testing.T) {
+	tools := shell.ExecTools(&shell.ExecManager{}, t.TempDir(), nil, nil, nil)
+	if len(tools) != 2 {
+		t.Fatalf("unexpected execution toolset: %d", len(tools))
+	}
+	for _, tl := range tools {
+		if !allowVerificationTool(tl) {
+			t.Errorf("verification cannot execute %s", tl.Name)
+		}
 	}
 }

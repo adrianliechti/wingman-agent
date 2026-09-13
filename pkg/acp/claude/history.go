@@ -65,10 +65,12 @@ func projectDirFor(cwd string) string {
 }
 
 type historyHeader struct {
-	Type    string               `json:"type"`
-	AITitle string               `json:"aiTitle,omitempty"`
-	Cwd     string               `json:"cwd,omitempty"`
-	Message historyHeaderMessage `json:"message"`
+	Type            string               `json:"type"`
+	AITitle         string               `json:"aiTitle,omitempty"`
+	Cwd             string               `json:"cwd,omitempty"`
+	ParentToolUseID string               `json:"parent_tool_use_id,omitempty"`
+	ParentAgentID   string               `json:"parent_agent_id,omitempty"`
+	Message         historyHeaderMessage `json:"message"`
 }
 
 type historyHeaderMessage struct {
@@ -88,8 +90,10 @@ func scanSessionModel(path string) string {
 	scanner := newCLIScanner(f)
 	for scanner.Scan() {
 		var h historyHeader
-		if json.Unmarshal(scanner.Bytes(), &h) == nil && h.Type == "assistant" && h.Message.Model != "" {
-			model = h.Message.Model
+		if json.Unmarshal(scanner.Bytes(), &h) == nil && h.Type == "assistant" && h.ParentToolUseID == "" && h.ParentAgentID == "" {
+			if current := realModelID(h.Message.Model); current != "" {
+				model = current
+			}
 		}
 	}
 	_ = scanner.Err()

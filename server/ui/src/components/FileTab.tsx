@@ -1,3 +1,4 @@
+import { documentModelURI, retainDocumentModel } from "../state/documentModels";
 import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
 import { AlertTriangle, FileDigit, Loader2 } from "lucide-react";
 import {
@@ -194,6 +195,9 @@ export const FileTab = forwardRef<FileTabHandle, Props>(function FileTab(
 	},
 	ref,
 ) {
+	const retainedModelRef = useRef<ReturnType<
+		typeof retainDocumentModel
+	> | null>(null);
 	const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
 	const monacoRef = useRef<Monaco | null>(null);
 	const contextMenuListenerRef = useRef<{ dispose(): void } | null>(null);
@@ -248,6 +252,12 @@ export const FileTab = forwardRef<FileTabHandle, Props>(function FileTab(
 		transformBridgeRef.current = null;
 		tabBridgeRef.current?.dispose();
 		tabBridgeRef.current = null;
+		if (retainedModelRef.current) {
+			retainedModelRef.current.release(
+				editorRef.current?.saveViewState() ?? null,
+			);
+			retainedModelRef.current = null;
+		}
 		editorRef.current = null;
 		monacoRef.current = null;
 	}, [disposeLSPIntegration]);
@@ -554,7 +564,9 @@ export const FileTab = forwardRef<FileTabHandle, Props>(function FileTab(
 				) : (
 					<Editor
 						height="100%"
-						path={`/${file.path}`}
+						path={documentModelURI(document.path)}
+						keepCurrentModel
+						saveViewState={false}
 						language={file.language || undefined}
 						defaultValue={document.draft}
 						theme={wingmanThemeName(scheme)}
@@ -564,6 +576,12 @@ export const FileTab = forwardRef<FileTabHandle, Props>(function FileTab(
 							setContextMenu(null);
 							editorRef.current = editor;
 							monacoRef.current = monaco;
+							const model = editor.getModel();
+							if (model) {
+								const retained = retainDocumentModel(document.path, model);
+								retainedModelRef.current = retained;
+								if (retained.view) editor.restoreViewState(retained.view);
+							}
 							syncingEditorRef.current = true;
 							try {
 								synchronizeEditorDraft(editor, document.draft);

@@ -28,7 +28,7 @@ func startManagedToolUpdate(ctx context.Context, workspace *code.Workspace) func
 }
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), shutdownSignals()...)
 	defer cancel()
 
 	args := os.Args[1:]

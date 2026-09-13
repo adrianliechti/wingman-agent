@@ -8,7 +8,7 @@ import (
 )
 
 func TestCtrlPOpensGroupedCommandCenterAndCtrlKStillEdits(t *testing.T) {
-	a := &App{ctx: context.Background(), agent: newUITestAgent(nil), editor: NewEditor()}
+	a := &App{ctx: context.Background(), queue: make(chan func(), 64), agent: newUITestAgent(nil), editor: NewEditor()}
 	a.editor.SetText("keep remove")
 	a.editor.cursor = 4
 	a.handleKey(inline.KeyEvent{Key: inline.KeyCtrl, Rune: 'k'})
@@ -35,7 +35,7 @@ func TestCtrlPOpensGroupedCommandCenterAndCtrlKStillEdits(t *testing.T) {
 }
 
 func TestCommandCenterRefreshesWhenBusyStateFlips(t *testing.T) {
-	a := &App{ctx: context.Background(), agent: newUITestAgent(nil), editor: NewEditor()}
+	a := &App{ctx: context.Background(), queue: make(chan func(), 64), agent: newUITestAgent(nil), editor: NewEditor()}
 	a.phase.Store(int32(PhaseThinking))
 
 	a.showCommandCenter()
@@ -68,7 +68,7 @@ func TestCommandCenterRefreshesWhenBusyStateFlips(t *testing.T) {
 
 func TestModelCommandSelectsModelThenEffort(t *testing.T) {
 	agent := newUITestAgent(nil)
-	a := &App{ctx: context.Background(), agent: agent, editor: NewEditor()}
+	a := &App{ctx: context.Background(), queue: make(chan func(), 64), agent: agent, editor: NewEditor()}
 
 	a.showModelPicker()
 	if item, ok := a.popup.Current(); !ok || item.ID != agent.model || !item.Checked {
@@ -76,6 +76,7 @@ func TestModelCommandSelectsModelThenEffort(t *testing.T) {
 	}
 
 	a.handlePopupKey(inline.KeyEvent{Key: inline.KeyEnter})
+	waitForSessionOperation(t, a)
 	if a.popup == nil || a.popup.title != "effort" {
 		t.Fatalf("model selection did not open effort step: %+v", a.popup)
 	}
@@ -85,6 +86,7 @@ func TestModelCommandSelectsModelThenEffort(t *testing.T) {
 
 	a.popup.SelectID("high")
 	a.handlePopupKey(inline.KeyEvent{Key: inline.KeyEnter})
+	waitForSessionOperation(t, a)
 	if a.popup != nil {
 		t.Fatal("effort selection did not close the picker")
 	}
@@ -100,10 +102,11 @@ func TestModelCommandUsesDefaultEffortFallback(t *testing.T) {
 	agent := newUITestAgent(nil)
 	agent.effort = ""
 	agent.efforts = []string{"low", "default", "high"}
-	a := &App{ctx: context.Background(), agent: agent, editor: NewEditor()}
+	a := &App{ctx: context.Background(), queue: make(chan func(), 64), agent: agent, editor: NewEditor()}
 
 	a.showModelPicker()
 	a.handlePopupKey(inline.KeyEvent{Key: inline.KeyEnter})
+	waitForSessionOperation(t, a)
 
 	if item, ok := a.popup.Current(); !ok || item.ID != "default" || !item.Checked {
 		t.Fatalf("fallback effort selection = %+v, %v", item, ok)
@@ -111,7 +114,7 @@ func TestModelCommandUsesDefaultEffortFallback(t *testing.T) {
 }
 
 func TestEffortIsNotAStandaloneBuiltinCommand(t *testing.T) {
-	a := &App{ctx: context.Background(), agent: newUITestAgent(nil), editor: NewEditor()}
+	a := &App{ctx: context.Background(), queue: make(chan func(), 64), agent: newUITestAgent(nil), editor: NewEditor()}
 	if command := a.findBuiltin("/effort"); command != nil {
 		t.Fatalf("found removed command: %+v", command)
 	}
@@ -122,7 +125,7 @@ func TestEffortIsNotAStandaloneBuiltinCommand(t *testing.T) {
 }
 
 func TestCommandCenterShowsAgentModes(t *testing.T) {
-	a := &App{ctx: context.Background(), agent: newUITestAgent(nil), editor: NewEditor()}
+	a := &App{ctx: context.Background(), queue: make(chan func(), 64), agent: newUITestAgent(nil), editor: NewEditor()}
 	a.showCommandCenter()
 	if item := findPopupItem(a.popup, "builtin:/unattended"); item == nil || item.Group != "Agent" || item.Shortcut != "shift+tab" || item.Checked {
 		t.Fatalf("unattended mode command = %+v", item)

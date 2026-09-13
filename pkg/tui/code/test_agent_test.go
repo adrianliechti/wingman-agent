@@ -3,6 +3,8 @@ package code
 import (
 	"context"
 	"iter"
+	"testing"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
@@ -83,3 +85,17 @@ func (a *uiTestAgent) Send(context.Context, string, []agent.Content) (iter.Seq2[
 }
 func (a *uiTestAgent) Cancel(string) {}
 func (a *uiTestAgent) Close() error  { return nil }
+
+func waitForSessionOperation(t *testing.T, a *App) {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for a.operationPending {
+		select {
+		case fn := <-a.queue:
+			fn()
+		case <-deadline.C:
+			t.Fatal("session operation did not finish")
+		}
+	}
+}

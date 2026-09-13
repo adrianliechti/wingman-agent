@@ -174,11 +174,9 @@ func (t *Task) SupportsResume() bool {
 func (t *Task) SetActivity(text string) {
 	t.mu.Lock()
 	t.activity = text
-	registry := t.registry
 	t.mu.Unlock()
-	if registry != nil {
-		_ = registry.persist()
-	}
+	// Transient activity is read live and included in the next durable task
+	// transition. A status update must not rewrite/fsync the whole registry.
 }
 
 func (t *Task) Activity() string {
@@ -414,10 +412,10 @@ func (r *Registry) LaunchAgent(agentID, description, agentType string, prepare f
 	}
 
 	ctx, cancel := context.WithTimeout(r.ctx, MaxRunDuration)
-	ctx = tool.WithBackgroundOrigin(ctx)
 	if agentID == "" {
 		agentID = uuid.NewString()
 	}
+	ctx = tool.WithBackgroundOrigin(ctx, agentID)
 	if r.hasAgentIDLocked(agentID) {
 		r.mu.Unlock()
 		cancel()
@@ -608,7 +606,7 @@ func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (str
 		return fmt.Errorf("agent %s is still running; its result arrives as a task notification", t.ID)
 	}
 	ctx, cancel := context.WithTimeout(r.ctx, MaxRunDuration)
-	ctx = tool.WithBackgroundOrigin(ctx)
+	ctx = tool.WithBackgroundOrigin(ctx, t.AgentID)
 	t.status = StatusRunning
 	t.stopped = false
 	t.result = ""

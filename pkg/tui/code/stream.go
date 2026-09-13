@@ -18,6 +18,11 @@ func (a *App) getPhase() AppPhase {
 }
 
 func (a *App) setPhase(phase AppPhase) {
+	if phase == PhaseIdle {
+		a.stopRequested.Store(false)
+	} else if a.stopRequested.Load() {
+		phase = PhaseStopping
+	}
 	prev := AppPhase(a.phase.Swap(int32(phase)))
 
 	if phase == PhaseIdle {
@@ -516,6 +521,20 @@ func (a *App) requestRender() {
 }
 
 func (a *App) handleTurnEvent(ev code.TurnEvent) {
+	if ev.Retry != nil {
+		info := *ev.Retry
+		a.withCurrentSession(ev.SessionID, func() {
+			a.queuePhase(PhaseRetrying)
+			epoch := a.sessionEpoch
+			a.post(func() {
+				if a.sessionID != ev.SessionID || a.sessionEpoch != epoch {
+					return
+				}
+				a.showToast(fmt.Sprintf("Retry %d: %s (%.1fs)", info.Attempt, info.Reason, float64(info.DelayMillis)/1000), theme.Default.Yellow)
+			})
+		})
+		return
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.sessionMu.Lock()
@@ -542,7 +561,7 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 			switch ev.StreamEvent {
 			case agent.StreamEventReset:
 				a.resetFailedStreamAttempt()
-				a.queuePhase(PhaseThinking)
+				a.queuePhase(PhaseRetrying)
 				a.requestRender()
 			case agent.StreamEventCommit:
 				a.commitStreamAttempt()
@@ -559,6 +578,10 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 		return
 	}
 
+	if ev.State != "" {
+		a.queueDirty.Store(true)
+		a.requestRender()
+	}
 	switch ev.State {
 	case code.TurnInputActive:
 		a.withCurrentSession(ev.SessionID, func() {
@@ -573,9 +596,7 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 			a.requestRender()
 		})
 	case code.TurnInputCompleted, code.TurnInputCancelled, code.TurnInputFailed:
-		a.post(func() {
-			a.removePendingEcho(ev.InputID)
-		})
+		a.removePendingEcho(ev.InputID)
 		if ev.Executed {
 			a.finishTurn(ev.SessionID, ev.State, ev.Err)
 		}

@@ -88,9 +88,10 @@ type Workspace struct {
 	lspTools         []tool.Tool
 	graphTools       []tool.Tool
 
-	mcpCatalogMu     sync.Mutex
-	mcpRefreshCancel context.CancelFunc
-	managedUpdates   map[*ManagedToolsUpdate]struct{}
+	mcpCatalogMu      sync.Mutex
+	mcpTrustDecisions map[string]bool
+	mcpRefreshCancel  context.CancelFunc
+	managedUpdates    map[*ManagedToolsUpdate]struct{}
 
 	// LSP calls may include server startup and network round-trips. Keep their
 	// lifetime lock separate from workspace state so close does not block
@@ -233,6 +234,13 @@ func loadMCP(workDir string, plugins []plugin.Plugin) *mcp.Manager {
 		manager = mcp.NewManager(&mcp.Config{Servers: map[string]mcp.ServerConfig{}})
 	}
 
+	manager.TrustRequired = map[string]string{}
+	projectConfig := filepath.Join(workDir, "mcp.json")
+	if cfg, err := mcp.LoadConfig(projectConfig); err == nil {
+		for name := range cfg.Servers {
+			manager.TrustRequired[name] = projectConfig
+		}
+	}
 	configured := slices.Sorted(maps.Keys(manager.Servers))
 
 	for _, name := range slices.Sorted(maps.Keys(servers)) {
@@ -242,6 +250,7 @@ func loadMCP(workDir string, plugins []plugin.Plugin) *mcp.Manager {
 		}
 
 		manager.Servers[name] = servers[name]
+		manager.TrustRequired[name] = "plugin configuration at " + servers[name].Dir
 	}
 
 	for _, note := range mcp.Dedup(manager.Servers, configured) {
@@ -551,7 +560,7 @@ func (w *Workspace) DebugRegistry() *debugadapter.Registry {
 	return debugadapter.NewRegistry(manager)
 }
 
-func (w *Workspace) InitMCP(ctx context.Context) error {
+func (w *Workspace) InitMCP(ctx context.Context, ui ...UI) error {
 	w.mu.RLock()
 	manager := w.MCP
 	closed := w.closed
@@ -563,7 +572,13 @@ func (w *Workspace) InitMCP(ctx context.Context) error {
 	w.mcpCatalogMu.Lock()
 	defer w.mcpCatalogMu.Unlock()
 	w.startMCPToolRefreshes(manager)
-	connectErr := manager.Connect(ctx)
+	var confirm UI
+	if len(ui) > 0 {
+		confirm = ui[0]
+	}
+	connectErr := manager.Connect(ctx, func(ctx context.Context, name string, server mcp.ServerConfig) error {
+		return w.approveMCP(ctx, confirm, name, server)
+	})
 
 	sessions := manager.Sessions()
 	toolsByServer := make(map[string][]tool.Tool)

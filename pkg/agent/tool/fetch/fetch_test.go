@@ -104,7 +104,7 @@ func TestFetchTruncatesLongOutput(t *testing.T) {
 	if len(out) > maxOutputBytes+100 {
 		t.Fatalf("output len = %d, want <= %d", len(out), maxOutputBytes+100)
 	}
-	if !strings.Contains(out, "[truncated at 48KB]") {
+	if !strings.Contains(out, "[truncated at 47KB]") {
 		t.Fatal("missing truncation notice")
 	}
 }

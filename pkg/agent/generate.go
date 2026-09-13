@@ -83,6 +83,7 @@ func (c *Config) Generate(ctx context.Context, opts GenerateOptions) (GenerateRe
 		return GenerateResult{}, err
 	}
 	usage := responseToUsage(*resp)
+	chargeTaskUsage(ctx, usage)
 	operation.End(inferenceResult(resp, usage, nil, captureContent))
 	text := strings.TrimSpace(resp.OutputText())
 	if opts.OutputSchema != nil && text != "" {

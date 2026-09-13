@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
@@ -58,6 +59,11 @@ func buildCommand(ctx context.Context, command, workingDir string) *exec.Cmd {
 	return buildCommandWithEnvironment(ctx, command, workingDir, os.Environ())
 }
 
+// ToolCommand applies the environment policy for model-generated scripts.
+func ToolCommand(ctx context.Context, command, workingDir string, opts *Options) *exec.Cmd {
+	return buildToolCommand(ctx, command, workingDir, opts)
+}
+
 func buildToolCommand(ctx context.Context, command, workingDir string, opts *Options) *exec.Cmd {
 	return buildCommandWithEnvironment(ctx, command, workingDir, environmentForTools(opts))
 }
@@ -78,6 +84,7 @@ func buildCommandWithEnvironment(ctx context.Context, command, workingDir string
 		cmd = exec.CommandContext(ctx, shell, "-c", command)
 	}
 
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = workingDir
 	cmd.Env = setEnvironment(environment, "GIT_EDITOR", "true")
 	cmd.Env = setEnvironment(cmd.Env, "WINGMAN", "1")

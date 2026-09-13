@@ -111,3 +111,31 @@ test("delivery in one tab does not change another tab's draft", async () => {
 	assert.equal(second.getSnapshot().text, "Keep the other draft");
 	assert.equal(second.getSnapshot().submitting, false);
 });
+
+test("editing the queue restores the separate draft on cancel, accepted update, and reload", async () => {
+	for (const accept of [false, true]) {
+		const draft = new ComposerDraft();
+		draft.update({ ...content, editingQueueId: null });
+		draft.beginQueueEdit({
+			text: "first queue edit",
+			files: [],
+			images: [],
+			editingQueueId: "first",
+		});
+		draft.beginQueueEdit({
+			text: "second queue edit",
+			files: [],
+			images: [],
+			editingQueueId: "second",
+		});
+		const recovered = new ComposerDraft(
+			JSON.parse(JSON.stringify(draft.getSnapshot())),
+		);
+		if (accept) assert.equal(await recovered.submit(() => true), true);
+		else recovered.cancelQueueEdit();
+		assert.equal(recovered.getSnapshot().text, content.text);
+		assert.deepEqual(recovered.getSnapshot().images, content.images);
+		assert.equal(recovered.getSnapshot().editingQueueId, null);
+		assert.equal(recovered.getSnapshot().previousDraft, undefined);
+	}
+});

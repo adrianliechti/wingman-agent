@@ -36,7 +36,13 @@ export type ServerMessage = {
 	backend?: string;
 };
 
-export type Phase = "idle" | "thinking" | "streaming" | "tool_running";
+export type Phase =
+	| "idle"
+	| "thinking"
+	| "streaming"
+	| "tool_running"
+	| "retrying"
+	| "stopping";
 
 export interface ToolLocation {
 	path: string;

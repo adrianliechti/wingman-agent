@@ -23,6 +23,7 @@ const (
 type StreamEventHandlers struct {
 	Reset  func()
 	Commit func()
+	Retry  func(RetryInfo)
 }
 
 type streamEventHandlersKey struct{}
@@ -30,7 +31,7 @@ type streamEventHandlersKey struct{}
 // WithStreamEventHandlers installs synchronous lifecycle operations for an
 // Agent.Send consumer. Handlers must return quickly.
 func WithStreamEventHandlers(ctx context.Context, handlers StreamEventHandlers) context.Context {
-	if handlers.Reset == nil && handlers.Commit == nil {
+	if handlers.Reset == nil && handlers.Commit == nil && handlers.Retry == nil {
 		return ctx
 	}
 	return context.WithValue(ctx, streamEventHandlersKey{}, handlers)

@@ -1,6 +1,9 @@
 package tool
 
-import "context"
+import (
+	"context"
+	"github.com/google/uuid"
+)
 
 type progressSinkKey struct{}
 type progressCallKey struct{}
@@ -10,14 +13,23 @@ type backgroundOriginKey struct{}
 // WithBackgroundOrigin marks ctx as belonging to a detached background agent
 // run, so session-scoped state (e.g. file freshness) can tell its tool calls
 // apart from the main agent's.
-func WithBackgroundOrigin(ctx context.Context) context.Context {
-	return context.WithValue(ctx, backgroundOriginKey{}, true)
+func WithBackgroundOrigin(ctx context.Context, identity ...string) context.Context {
+	id := ""
+	if len(identity) > 0 {
+		id = identity[0]
+	}
+	if id == "" {
+		id = uuid.NewString()
+	}
+	return context.WithValue(ctx, backgroundOriginKey{}, id)
 }
 
-func IsBackgroundOrigin(ctx context.Context) bool {
-	v, _ := ctx.Value(backgroundOriginKey{}).(bool)
+func BackgroundOrigin(ctx context.Context) string {
+	v, _ := ctx.Value(backgroundOriginKey{}).(string)
 	return v
 }
+
+func IsBackgroundOrigin(ctx context.Context) bool { return BackgroundOrigin(ctx) != "" }
 
 // WithProgressSink installs a UI callback that receives transient status text
 // from running tool calls, keyed by tool-call ID. The reporting context carries

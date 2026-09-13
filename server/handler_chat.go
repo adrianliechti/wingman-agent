@@ -30,6 +30,14 @@ func (s *backendRuntime) buildInput(msg Command) []agent.Content {
 }
 
 func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
+	if ev.Retry != nil {
+		c := s.session(ev.SessionID)
+		c.mu.Lock()
+		c.state.Phase, c.state.Retry = "retrying", ev.Retry
+		c.publishStateLocked()
+		c.mu.Unlock()
+		return
+	}
 	if ev.StreamEvent != 0 {
 		switch ev.StreamEvent {
 		case agent.StreamEventReset:

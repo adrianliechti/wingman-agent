@@ -25,6 +25,7 @@ const (
 	EventRunTerminal       RuntimeEventType = "run_terminal"
 	EventToolStarted       RuntimeEventType = "tool_started"
 	EventToolTerminal      RuntimeEventType = "tool_terminal"
+	EventTurnUndo          RuntimeEventType = "turn_undo"
 )
 
 type RuntimeStatus string
@@ -204,6 +205,10 @@ func validateRuntimeBatch(events []RuntimeEvent, index runtimeEventIndex) error 
 		}
 		eventIDs[event.ID] = struct{}{}
 		switch event.Type {
+		case EventTurnUndo:
+			if event.TurnID == "" {
+				return fmt.Errorf("turn undo requires a turn id")
+			}
 		case EventMessage:
 			if event.Message == nil {
 				return fmt.Errorf("message event %d has no message", event.Sequence)

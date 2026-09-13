@@ -112,6 +112,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	a.finishing = false
 	a.queueMu.Unlock()
 
+	ctx, cancelBudget := a.Config.withTaskBudget(ctx)
 	runtime := hook.RuntimeFromContext(ctx)
 	runtime.TurnID = uuid.NewString()
 	if runtime.Model == "" && a.Config.Model != nil {
@@ -125,12 +126,14 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	if err := a.recordEvents(RuntimeEvent{
 		Type: EventTurnStarted, TurnID: runtime.TurnID, Model: runtime.Model,
 	}); err != nil {
+		cancelBudget()
 		a.setRunning(false)
 		telemetryInvocation.End(telemetry.Outcome{Err: err})
 		return nil, err
 	}
 
 	failSetup := func(err error) (iter.Seq2[Message, error], error) {
+		defer cancelBudget()
 		terminalErr := a.finishTurn(ctx, runtime.TurnID, RuntimeFailed, err, turnUsageBefore)
 		telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(err, terminalErr)})
 		return nil, errors.Join(err, terminalErr)
@@ -167,6 +170,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	}
 
 	return func(yield func(Message, error) bool) {
+		defer cancelBudget()
 		status := RuntimeCompleted
 		var outcomeErr error
 		consumerOpen := true
@@ -186,6 +190,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 		}()
 
 		stop := func(err error) {
+			err = taskOutcomeError(ctx, err)
 			outcomeErr = err
 			_, hookStopped := errors.AsType[hookStopError](err)
 			if hookStopped || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errYieldStopped) {
@@ -501,6 +506,9 @@ func (a *Agent) completeRun(ctx context.Context, turnID string, req *request, yi
 	}
 
 	resp, runErr := complete(ctx, a.client, req, yield)
+	if resp != nil {
+		chargeTaskUsage(ctx, resp.usage)
+	}
 	status := RuntimeCompleted
 	if runErr != nil {
 		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, errYieldStopped) {
@@ -530,7 +538,7 @@ func (a *Agent) completeRun(ctx context.Context, turnID string, req *request, yi
 	events = append(events, event)
 	if err := a.recordEvents(events...); err != nil {
 		if runErr != nil {
-			return nil, fmt.Errorf("record terminal fact after provider error %q: %w", runErr, err)
+			return nil, errors.Join(runErr, fmt.Errorf("record terminal fact: %w", err))
 		}
 		return nil, err
 	}
@@ -1078,7 +1086,7 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 		outcome, err := h(ctx, hc, result.Content)
 
 		if err != nil {
-			result = tool.Error(fmt.Sprintf("error: %v", err))
+			result.Content, result.IsError = fmt.Sprintf("error: %v", err), true
 			break
 		}
 		if outcome.UpdatedResult != nil {
@@ -1107,7 +1115,7 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 	deferredUsageErr := usageErr
 	usageMu.Unlock()
 	if deferredUsageErr != nil {
-		return tool.Error(fmt.Sprintf("error: tool usage could not be persisted: %v", deferredUsageErr))
+		result.Content, result.IsError = fmt.Sprintf("error: tool usage could not be persisted: %v", deferredUsageErr), true
 	}
 
 	return result
@@ -1138,7 +1146,9 @@ func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool, time
 	}
 
 	if err != nil {
-		return toolExecutionError(ctx, err, timeout, started)
+		failure := toolExecutionError(ctx, err, timeout, started)
+		failure.Metadata = result.Metadata
+		return failure
 	}
 
 	return result

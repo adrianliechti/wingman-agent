@@ -2,6 +2,7 @@ package code
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"slices"
 
@@ -84,29 +85,18 @@ func shortSessionID(id string) string {
 }
 
 func (a *App) loadSessionInfo(info corecode.SessionInfo) {
-	t := theme.Default
 	previousID := a.sessionID
-	if err := a.agent.LoadSession(a.ctx, info.ID); err != nil {
-		a.showToast(fmt.Sprintf("Failed to load session: %v", err), t.Red)
-		return
-	}
-
-	a.turns.CancelAll(previousID)
-	a.activateSession(info.ID)
-
-	a.showWelcome = false
-	a.chat = nil
-	a.chatScroll = 0
-	a.follow = true
-	a.clearSelection()
-	a.syncMessages()
-
-	banner := fmt.Sprintf("Resumed session from %s", info.UpdatedAt.Format("Jan 2 15:04"))
-	a.appendAnnotation(func(width int) []string {
-		return cellNotice(banner, t.Green, width)
+	a.runSessionOperation("Failed to load session", func(ctx context.Context, _ string) error { return a.agent.LoadSession(ctx, info.ID) }, func() {
+		a.turns.CancelCurrent(previousID)
+		a.activateSession(info.ID)
+		a.showWelcome = false
+		a.chat = nil
+		a.chatScroll = 0
+		a.follow = true
+		a.clearSelection()
+		a.syncMessages()
+		banner := fmt.Sprintf("Resumed session from %s", info.UpdatedAt.Format("Jan 2 15:04"))
+		a.appendAnnotation(func(width int) []string { return cellNotice(banner, theme.Default.Green, width) })
+		a.invalidate()
 	})
-
-	if _, ok := a.agent.(recapProvider); ok && len(a.agent.Messages(a.sessionID)) > 0 {
-		a.showRecap()
-	}
 }

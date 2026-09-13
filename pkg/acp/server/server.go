@@ -398,6 +398,9 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 			ws.MCP.Dir = cwd
 		}
 		maps.Copy(ws.MCP.Servers, requested)
+		for name := range requested {
+			delete(ws.MCP.TrustRequired, name)
+		}
 	}
 	wa := codeagent.New(ws, s.config, s)
 

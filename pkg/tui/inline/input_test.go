@@ -130,3 +130,49 @@ func TestInputReaderBracketedPasteNormalizesNewlines(t *testing.T) {
 		})
 	}
 }
+
+func TestTerminalControlRepliesNeverBecomeComposerInput(t *testing.T) {
+	for _, sequence := range []string{"\x1b]52;c;clipboard text\a", "\x1bPprivate response\x1b\\", "\x1b]10;rgb:ffff/eeee/dddd\x1b\\"} {
+		for split := 1; split < len(sequence); split++ {
+			events := make(chan Event, 100)
+			in := &inputReader{events: events, done: make(chan struct{})}
+			in.buf = []byte(sequence[:split])
+			in.process()
+			in.buf = append(in.buf, []byte(sequence[split:]+"x")...)
+			in.process()
+			if len(events) != 1 {
+				t.Fatalf("%q split %d emitted %d events", sequence, split, len(events))
+			}
+			if event := (<-events).(KeyEvent); event.Key != KeyRune || event.Rune != 'x' {
+				t.Fatalf("terminal reply leaked: %+v", event)
+			}
+		}
+	}
+}
+
+func FuzzTerminalControlReply(f *testing.F) {
+	f.Add([]byte("response"))
+	f.Add([]byte("\x1b\x1bmore text"))
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		if len(payload) > 8192 {
+			t.Skip()
+		}
+		// Exclude terminators, then feed a reply in one-byte chunks.
+		for i := range payload {
+			if payload[i] == '\a' || payload[i] == '\\' {
+				payload[i] = ' '
+			}
+		}
+		events := make(chan Event, len(payload)+20)
+		in := &inputReader{events: events, done: make(chan struct{})}
+		sequence := append([]byte("\x1b]52;c;"), payload...)
+		sequence = append(sequence, '\a')
+		for _, b := range sequence {
+			in.buf = append(in.buf, b)
+			in.process()
+		}
+		if len(events) != 0 || len(in.buf) != 0 {
+			t.Fatalf("control reply leaked events=%d buffered=%d", len(events), len(in.buf))
+		}
+	})
+}

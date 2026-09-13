@@ -5,7 +5,7 @@ import {
 	type MarkdownComponents,
 } from "@tanstack/markdown/react";
 import { Check, Code2, Copy, Image } from "lucide-react";
-import * as monaco from "monaco-editor";
+let monaco: typeof import("monaco-editor") | undefined;
 import {
 	Children,
 	createContext,
@@ -51,7 +51,7 @@ function resolveMonacoLanguage(language: string) {
 	if (!normalized || normalized === "plaintext") return null;
 
 	return (
-		monaco.languages.getLanguages().find((candidate) => {
+		monaco?.languages.getLanguages().find((candidate) => {
 			if (candidate.id.toLowerCase() === normalized) return true;
 			if (
 				candidate.aliases?.some((alias) => alias.toLowerCase() === normalized)
@@ -64,7 +64,9 @@ function resolveMonacoLanguage(language: string) {
 	);
 }
 
-function loadMonacoLanguage(language: string) {
+async function loadMonacoLanguage(language: string) {
+	if (!language || language === "plaintext") return null;
+	monaco ??= (await import("../monacoRuntime")).monaco;
 	const languageId = resolveMonacoLanguage(language);
 	if (!languageId) return Promise.resolve(null);
 
@@ -100,7 +102,7 @@ function tokenClass(type: string) {
 
 function highlightedCode(code: string, languageId: string): ReactNode[] {
 	const lines = code.split("\n");
-	const tokenLines = monaco.editor.tokenize(code, languageId);
+	const tokenLines = monaco?.editor.tokenize(code, languageId) ?? [];
 
 	return lines.flatMap((line, lineIndex) => {
 		const tokens = tokenLines[lineIndex] ?? [];

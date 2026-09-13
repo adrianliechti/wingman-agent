@@ -65,6 +65,7 @@ type Agent struct {
 var _ code.Agent = (*Agent)(nil)
 
 type sessionState struct {
+	id      string
 	parent  *Agent
 	aa      *harness.Agent
 	journal *session.Journal
@@ -80,7 +81,8 @@ type sessionState struct {
 	execManager *shell.ExecManager
 	tasks       *task.Registry
 
-	schedules schedule.ObservableStore
+	schedules     schedule.ObservableStore
+	scriptOptions *schedule.Options
 
 	freshness *fs.Freshness
 	watchStop chan struct{}
@@ -709,6 +711,17 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 	a.lastActive.Store(id)
 
 	sendCtx, cancel := context.WithCancel(code.WithSessionID(ctx, id))
+	// Startup cannot ask a web client without session correlation. Defer local
+	// configuration approval until this turn, where prompts have an owner.
+	if a.workspace.MCP != nil && len(a.workspace.MCP.TrustRequired) > 0 {
+		if err := a.workspace.InitMCP(sendCtx, a.currentUI()); err != nil {
+			if sendCtx.Err() != nil {
+				cancel()
+				return nil, sendCtx.Err()
+			}
+			input = append(slices.Clone(input), harness.Content{Text: "Some MCP servers are unavailable: " + err.Error(), Hidden: true})
+		}
+	}
 	stream, gen, err := s.beginSend(sendCtx, input, cancel)
 	if err != nil {
 		cancel()
@@ -832,6 +845,7 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 		sessionCfg.Telemetry = a.options.Telemetry
 	}
 	s := &sessionState{
+		id:           id,
 		parent:       a,
 		aa:           &harness.Agent{Config: sessionCfg, Recorder: journal},
 		journal:      journal,
@@ -933,10 +947,10 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 		},
 	)
 
+	shellOpts := &shell.Options{ScratchDir: ws.ScratchPath}
+	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.options.DisableShell, Elicitation: elicit, Approvals: approvals, Shell: shellOpts}
 	go s.watchFileChanges()
 	go s.runSchedules()
-
-	shellOpts := &shell.Options{ScratchDir: ws.ScratchPath}
 
 	var shellTools []tool.Tool
 	if !a.options.DisableShell {
@@ -958,7 +972,7 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 			Freshness:         s.freshness,
 		})),
 		shellTools,
-		schedule.Tools(s.schedules),
+		schedule.Tools(s.schedules, s.scriptOptions),
 		elicittool.Tools(elicit),
 		webFetchTools,
 		webSearchTools,

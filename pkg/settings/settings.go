@@ -37,6 +37,7 @@ func (position WindowSidebarPosition) Valid() bool {
 }
 
 type Settings struct {
+	TUIDiffPanelHidden     bool                   `json:"tui.diffPanel.hidden,omitempty"`
 	EditorTabCompletion    bool                   `json:"editor.tab.completion"`
 	WindowTerminalPosition WindowTerminalPosition `json:"window.terminal.position"`
 	WindowSidebarPosition  WindowSidebarPosition  `json:"window.sidebar.position"`

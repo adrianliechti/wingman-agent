@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 
@@ -171,7 +172,8 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 	idle := time.AfterFunc(streamIdleTimeout, cancelStream)
 	defer idle.Stop()
 
-	stream := client.Responses.NewStreaming(streamCtx, params)
+	// The harness owns retries and their visible recovery boundaries.
+	stream := client.Responses.NewStreaming(streamCtx, params, option.WithMaxRetries(0))
 	defer stream.Close()
 
 	var outputItems []responses.ResponseInputItemUnionParam

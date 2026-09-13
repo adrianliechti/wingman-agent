@@ -24,13 +24,14 @@ const (
 )
 
 type Task struct {
-	ID        string     `yaml:"id"`
-	Prompt    string     `yaml:"prompt"`
-	Schedule  string     `yaml:"schedule"`
-	Script    string     `yaml:"script,omitempty"`
-	Status    string     `yaml:"status"`
-	CreatedAt time.Time  `yaml:"created_at"`
-	LastRun   *time.Time `yaml:"last_run,omitempty"`
+	ID             string     `yaml:"id"`
+	Prompt         string     `yaml:"prompt"`
+	Schedule       string     `yaml:"schedule"`
+	Script         string     `yaml:"script,omitempty"`
+	ScriptApproval string     `yaml:"script_approval,omitempty"`
+	Status         string     `yaml:"status"`
+	CreatedAt      time.Time  `yaml:"created_at"`
+	LastRun        *time.Time `yaml:"last_run,omitempty"`
 
 	Failures    int        `yaml:"failures,omitempty"`
 	LastAttempt *time.Time `yaml:"last_attempt,omitempty"`

@@ -21,7 +21,11 @@ var idParams = map[string]any{
 	"additionalProperties": false,
 }
 
-func Tools(store Store) []tool.Tool {
+func Tools(store Store, options ...*Options) []tool.Tool {
+	var opts *Options
+	if len(options) > 0 {
+		opts = options[0]
+	}
 	return []tool.Tool{
 		{
 			Name:   "schedule_task",
@@ -68,6 +72,16 @@ func Tools(store Store) []tool.Tool {
 				}
 
 				task.Script = strings.TrimSpace(script)
+				dir := ""
+				if opts != nil {
+					dir = opts.WorkDir
+				}
+				if err := approveScript(ctx, dir, task.Script, opts); err != nil {
+					return tool.Result{}, err
+				}
+				if task.Script != "" {
+					task.ScriptApproval = scriptApproval(dir, task.Script)
+				}
 
 				err = store.Mutate(func(tasks []Task) ([]Task, error) {
 					return append(tasks, task), nil

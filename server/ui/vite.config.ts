@@ -19,6 +19,8 @@ export default defineConfig({
 				assetFileNames: "assets/[name].[ext]",
 				codeSplitting: {
 					groups: [
+						// The shared preload helper must not pull Monaco into startup.
+						{ name: "preload", test: /vite[/\\]preload-helper/, priority: 100 },
 						{
 							name: "editor",
 							test: /node_modules[/\\]monaco-editor[/\\]esm[/\\]vs[/\\](?!basic-languages|language)/,

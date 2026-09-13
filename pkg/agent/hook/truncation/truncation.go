@@ -11,11 +11,11 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
-const MaxBytes = 100 * 1024
+const MaxBytes = tool.MaxInlineResultBytes
 
 const grepMaxBytes = 20 * 1024
 
-const shellMaxBytes = 48 * 1024
+const shellMaxBytes = tool.MaxInlineResultBytes
 
 const headPreviewBytes = 4 * 1024
 

@@ -8,4 +8,6 @@ const (
 	PhaseThinking
 	PhaseStreaming
 	PhaseToolRunning
+	PhaseRetrying
+	PhaseStopping
 )

@@ -246,7 +246,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	s.registerRoutes(s.mux)
 
 	csrf := http.NewCrossOriginProtection()
-	s.handler = csrf.Handler(s.checkInstance(s.mux))
+	s.handler = LocalHostOnly(csrf.Handler(s.checkInstance(s.mux)))
 	if opts.RemoteURL != "" {
 		if err := s.startRemote(remote.ClientOptions{Relay: opts.RemoteURL, Token: opts.RemoteToken}); err != nil {
 			s.Close()

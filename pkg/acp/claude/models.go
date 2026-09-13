@@ -54,6 +54,11 @@ func resolveModel(models []ModelEntry, id string) *ModelEntry {
 			return &models[i]
 		}
 	}
+	// Do not substitute a family alias for a versioned or date-pinned model.
+	base := strings.TrimSuffix(canonical, modelContextHint(id))
+	if strings.ContainsAny(base, "0123456789") {
+		return nil
+	}
 	for i := range models {
 		lid, lname := strings.ToLower(models[i].ID), strings.ToLower(models[i].Name)
 		if modelContextHint(models[i].ID) == modelContextHint(id) &&
@@ -62,6 +67,14 @@ func resolveModel(models []ModelEntry, id string) *ModelEntry {
 		}
 	}
 	return nil
+}
+
+func realModelID(model string) string {
+	model = strings.TrimSpace(model)
+	if strings.HasPrefix(model, "<") && strings.HasSuffix(model, ">") {
+		return ""
+	}
+	return model
 }
 
 func resolveResumedModel(models []ModelEntry, live string) *ModelEntry {

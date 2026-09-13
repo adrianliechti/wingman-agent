@@ -124,6 +124,7 @@ type TurnEvent struct {
 	// StreamEvent carries a transport lifecycle boundary separately from
 	// conversational messages.
 	StreamEvent agent.StreamEvent
+	Retry       *agent.RetryInfo
 	// Message is only valid for the duration of the synchronous event handler.
 	// Handlers that retain it must copy its content.
 	Message *agent.Message

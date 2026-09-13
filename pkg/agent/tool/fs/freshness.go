@@ -15,6 +15,7 @@ type fileState struct {
 	target  fileTarget
 	modTime time.Time
 	size    int64
+	missing bool
 }
 
 // Freshness tracks the on-disk state of files the session's file tools
@@ -23,65 +24,84 @@ type fileState struct {
 type Freshness struct {
 	root *os.Root
 
-	mu     sync.Mutex
-	states map[string]fileState
+	mu         sync.Mutex
+	states     map[string]fileState
+	announced  map[string]fileState
+	background map[string]map[string]fileState
 }
 
 func NewFreshness(root *os.Root) *Freshness {
-	return &Freshness{root: root, states: map[string]fileState{}}
+	return &Freshness{root: root, states: map[string]fileState{}, announced: map[string]fileState{}, background: map[string]map[string]fileState{}}
 }
 
-// record is skipped for background-agent tool calls: their modifications must
-// stay visible as "changed on disk" to the main agent, and their reads must
-// not add baseline entries the main agent never saw.
+// Each agent has its own read baseline. Change notifications never advance it.
 func (f *Freshness) record(ctx context.Context, target fileTarget) {
-	if f == nil || tool.IsBackgroundOrigin(ctx) {
+	if f == nil {
 		return
 	}
 	info, err := statFileTarget(f.root, target)
-	if err != nil || info.IsDir() {
+	if err == nil {
+		f.recordInfo(ctx, target, info)
+	}
+}
+
+func (f *Freshness) recordInfo(ctx context.Context, target fileTarget, info os.FileInfo) {
+	if f == nil || info == nil || info.IsDir() {
 		return
 	}
-	key := target.AbsPath
+	st := fileState{target: target, modTime: info.ModTime(), size: info.Size()}
 	f.mu.Lock()
-	f.states[key] = fileState{target: target, modTime: info.ModTime(), size: info.Size()}
-	f.mu.Unlock()
+	defer f.mu.Unlock()
+	if origin := tool.BackgroundOrigin(ctx); origin != "" {
+		if f.background[origin] == nil {
+			f.background[origin] = map[string]fileState{}
+		}
+		f.background[origin][target.AbsPath] = st
+		return
+	}
+	f.states[target.AbsPath] = st
+	f.announced[target.AbsPath] = st
 }
 
 func (f *Freshness) forget(ctx context.Context, target fileTarget) {
-	if f == nil || tool.IsBackgroundOrigin(ctx) {
+	if f == nil {
 		return
 	}
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if origin := tool.BackgroundOrigin(ctx); origin != "" {
+		delete(f.background[origin], target.AbsPath)
+		return
+	}
 	delete(f.states, target.AbsPath)
-	f.mu.Unlock()
+	delete(f.announced, target.AbsPath)
 }
 
-// stale reports whether the file's on-disk state no longer matches what the
-// main agent's tools last saw — an external change it has not re-read yet.
 func (f *Freshness) stale(ctx context.Context, target fileTarget, info os.FileInfo) bool {
-	if f == nil || tool.IsBackgroundOrigin(ctx) {
+	if f == nil {
 		return false
 	}
-	key := target.AbsPath
 	f.mu.Lock()
-	st, ok := f.states[key]
-	f.mu.Unlock()
+	defer f.mu.Unlock()
+	states := f.states
+	if origin := tool.BackgroundOrigin(ctx); origin != "" {
+		states = f.background[origin]
+	}
+	st, ok := states[target.AbsPath]
 	return ok && (!info.ModTime().Equal(st.modTime) || info.Size() != st.size)
 }
 
 // Changed stats every tracked file and returns the paths whose on-disk state
-// no longer matches what the session's tools last saw. Each change reports
-// once: the record is updated (or dropped, for deleted files) so repeated
-// sweeps stay quiet until the next external modification.
+// changed since its last notification. Read baselines remain unchanged until
+// the agent reads the file again. Deleted paths remain tracked for recreation.
 func (f *Freshness) Changed() []string {
 	if f == nil {
 		return nil
 	}
 
 	f.mu.Lock()
-	states := make(map[string]fileState, len(f.states))
-	maps.Copy(states, f.states)
+	states := make(map[string]fileState, len(f.announced))
+	maps.Copy(states, f.announced)
 	f.mu.Unlock()
 
 	var changed []string
@@ -89,19 +109,24 @@ func (f *Freshness) Changed() []string {
 		info, err := statFileTarget(f.root, st.target)
 
 		f.mu.Lock()
-		current, ok := f.states[key]
-		if !ok || current.modTime != st.modTime || current.size != st.size {
+		current, ok := f.announced[key]
+		if !ok || current.modTime != st.modTime || current.size != st.size || current.missing != st.missing {
 			// A tool updated the record while we were sweeping — that change
 			// is the session's own.
 			f.mu.Unlock()
 			continue
 		}
 		switch {
+		case os.IsNotExist(err):
+			if !st.missing {
+				st.missing = true
+				f.announced[key] = st
+				changed = append(changed, key+" (deleted)")
+			}
 		case err != nil:
-			delete(f.states, key)
-			changed = append(changed, key+" (deleted)")
-		case !info.ModTime().Equal(st.modTime) || info.Size() != st.size:
-			f.states[key] = fileState{target: st.target, modTime: info.ModTime(), size: info.Size()}
+			// A transient stat error is not a deletion; retry on the next sweep.
+		case st.missing || !info.ModTime().Equal(st.modTime) || info.Size() != st.size:
+			f.announced[key] = fileState{target: st.target, modTime: info.ModTime(), size: info.Size()}
 			changed = append(changed, key)
 		}
 		f.mu.Unlock()

@@ -89,6 +89,13 @@ type Config struct {
 	// negative disables the safety bound.
 	MaxTurns int
 
+	// MaxTaskTokens limits cumulative reported input + output tokens per task,
+	// including inline agents, retries and utility calls. Zero is unlimited.
+	MaxTaskTokens int64
+	// MaxTaskDuration includes inference, tools, retries and approval waits.
+	// Zero is unlimited. ToolTimeout remains an independent per-tool limit.
+	MaxTaskDuration time.Duration
+
 	// MaxParallelTools bounds concurrently executing read-only tool calls.
 	// Zero uses the default; negative allows the whole emitted batch.
 	MaxParallelTools int
@@ -130,6 +137,8 @@ func (c *Config) Derive() *Config {
 		},
 
 		MaxTurns:         c.MaxTurns,
+		MaxTaskTokens:    c.MaxTaskTokens,
+		MaxTaskDuration:  c.MaxTaskDuration,
 		MaxParallelTools: c.MaxParallelTools,
 		ToolTimeout:      c.ToolTimeout,
 
@@ -182,6 +191,7 @@ func (c *Config) Utility(ctx context.Context, instructions, input string) (strin
 	}
 
 	usage := responseToUsage(*resp)
+	chargeTaskUsage(ctx, usage)
 	operation.End(inferenceResult(resp, usage, nil, captureContent))
 	tool.ReportUsage(ctx, tool.UsageDelta{
 		InputTokens:              usage.InputTokens,
@@ -211,12 +221,16 @@ func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {
 
 func DefaultConfig() (*Config, error) {
 	client := createClient()
+	cfg := &Config{client: &client}
+	if err := cfg.loadTaskLimits(); err != nil {
+		return nil, err
+	}
 	tel, err := telemetry.NewFromEnvironment(context.Background(), defaultTelemetryOptions())
 	if err != nil {
 		return nil, fmt.Errorf("configure OpenTelemetry: %w", err)
 	}
 
-	cfg := &Config{client: &client, Telemetry: tel}
+	cfg.Telemetry = tel
 
 	if model := DefaultModel(); model != "" {
 		cfg.Model = func() string { return model }
