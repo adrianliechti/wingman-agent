@@ -16,7 +16,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
-	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 var errYieldStopped = errors.New("yield stopped")
@@ -48,6 +47,7 @@ type Agent struct {
 	contextMessages []Message
 	contextSet      bool
 	ContextRevision uint64
+	contextUsage    contextUsageAnchor
 	runtimeIndex    runtimeEventIndex
 	runtimeIndexSet bool
 	queueMu         sync.Mutex
@@ -222,14 +222,11 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				}
 			}
 
-			if err := a.removeOrphanedToolMessages(); err != nil {
+			if err := a.repairToolHistory(); err != nil {
 				stop(err)
 				return
 			}
-			// Keep the active working set intact while compacting superseded large
-			// tool results before every provider request. This usually avoids an
-			// expensive LLM compaction pass later in long coding sessions.
-			if _, err := a.trimStaleToolResults(); err != nil {
+			if err := a.syncContextInstructions(); err != nil {
 				stop(err)
 				return
 			}
@@ -238,11 +235,6 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			if a.Config.Model != nil {
 				modelID = a.Model()
 			}
-			if err := a.dropForeignReasoning(modelID); err != nil {
-				stop(err)
-				return
-			}
-
 			effort := ""
 			if a.Config.Effort != nil {
 				effort = a.Effort()
@@ -278,6 +270,10 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				messages:     a.requestMessages(),
 				tools:        tools,
 				outputSchema: outputSchema,
+			}
+			if err := a.prepareRequest(ctx, req); err != nil {
+				stop(err)
+				return
 			}
 
 			resp, err := a.completeWithRetry(ctx, runtime.TurnID, req, yield)
@@ -367,19 +363,6 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			if maxTurns > 0 && turns >= maxTurns {
 				stop(ErrMaxTurnsExceeded)
 				return
-			}
-
-			// Trim before summarizing; estimated reclaimed bytes can cover the
-			// overshoot without an extra inference request.
-			if overshoot := a.compactionOvershoot(modelID, resp.usage.InputTokens); overshoot > 0 {
-				freed, err := a.trimStaleToolResults()
-				if err == nil && int64(freed/4) < overshoot {
-					err = a.compactWithHooks(ctx, false)
-				}
-				if err != nil {
-					stop(err)
-					return
-				}
 			}
 		}
 	}, nil
@@ -551,6 +534,9 @@ func (a *Agent) completeRun(ctx context.Context, turnID string, req *request, yi
 		}
 		return nil, err
 	}
+	if runErr == nil && resp != nil {
+		a.anchorContextUsage(req, resp)
+	}
 	return resp, runErr
 }
 
@@ -592,37 +578,6 @@ func (a *Agent) finishTurn(ctx context.Context, turnID string, status RuntimeSta
 	})
 	a.setRunning(false)
 	return errors.Join(appendErr, recordErr)
-}
-
-// compactionOvershoot returns how many tokens the last request exceeded the
-// compaction threshold by; zero or negative means no compaction is due.
-func (a *Agent) compactionOvershoot(model string, lastInputTokens int64) int64 {
-	if lastInputTokens <= 0 {
-		return 0
-	}
-
-	window := a.Config.ContextWindow
-	if window < 0 {
-		return 0
-	}
-	if window == 0 {
-		window = ContextWindowFor(model)
-	}
-
-	reserve := a.Config.ReserveTokens
-	if reserve <= 0 {
-		reserve = DefaultReserveTokens
-		// A fixed default reserve is too thin a margin on large (1M) windows —
-		// it would defer compaction to ~97% of the window and lean on the
-		// reactive overflow path. Keep at least a 10% headroom, matching the
-		// ~90% trigger other Responses-API agents use. An explicit
-		// Config.ReserveTokens is honored as-is.
-		if frac := window / 10; frac > reserve {
-			reserve = frac
-		}
-	}
-
-	return lastInputTokens - int64(window-reserve)
 }
 
 func extractToolCalls(messages []Message) []ToolCall {
@@ -789,13 +744,6 @@ const imageResultPlaceholder = "[image attached below]"
 const (
 	interruptedToolResult = "error: interrupted — the request was canceled before this tool call finished"
 	interruptedWaitResult = "error: interrupted while waiting for the original tool call to finish"
-
-	// The code harness installs a more specific PostToolUse hook that persists
-	// oversized output before replacing it with a preview. This is the final
-	// safety net for every other Agent embedding and for context added by hooks.
-	maxInlineToolResultBytes = 48 * 1024
-	toolResultHeadBytes      = 4 * 1024
-	toolResultTailBytes      = 8 * 1024
 )
 
 func toolResultMessage(tc ToolCall, result tool.Result) Message {
@@ -1163,18 +1111,6 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 	}
 
 	return result
-}
-
-func boundToolResult(content string) string {
-	if len(content) <= maxInlineToolResultBytes {
-		return content
-	}
-	head := text.HeadBytes(content, toolResultHeadBytes)
-	tail := text.TailBytes(content, toolResultTailBytes)
-	return fmt.Sprintf(
-		"<truncated-output>\nOutput was %d bytes — too large for inline and was truncated by the agent harness.\n\nPreview (first %d bytes):\n\n%s\n\n[...]\n\nPreview (last %d bytes):\n\n%s\n</truncated-output>",
-		len(content), len(head), head, len(tail), tail,
-	)
 }
 
 func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool, timeout time.Duration, started time.Time) tool.Result {

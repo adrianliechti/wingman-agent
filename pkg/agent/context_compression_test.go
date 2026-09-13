@@ -26,7 +26,7 @@ func TestTrimStaleToolResults(t *testing.T) {
 	}
 
 	a := trimTestAgent(messages)
-	freed, err := a.trimStaleToolResults()
+	freed, err := a.compressContext(0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestTrimStaleToolResults(t *testing.T) {
 		t.Fatalf("newest tool result was trimmed (len %d)", len(got))
 	}
 
-	if freed, err := a.trimStaleToolResults(); err != nil || freed != 0 {
+	if freed, err := a.compressContext(0); err != nil || freed != 0 {
 		t.Fatal("second trim should be a no-op")
 	}
 	if strings.Contains(a.Messages[2].Content[0].ToolResult.Content, "trimmed to reclaim context") {
@@ -84,7 +84,7 @@ func TestTrimStaleToolResultsDropsImages(t *testing.T) {
 	}
 
 	a := trimTestAgent(messages)
-	if freed, err := a.trimStaleToolResults(); err != nil || freed == 0 {
+	if freed, err := a.compressContext(0); err != nil || freed == 0 {
 		t.Fatal("expected bytes freed")
 	}
 
@@ -113,7 +113,7 @@ func TestTrimStaleToolResultsCheckpointsEmptyImage(t *testing.T) {
 	}
 
 	a := trimTestAgent(messages)
-	if freed, err := a.trimStaleToolResults(); err != nil || freed != 0 {
+	if freed, err := a.compressContext(0); err != nil || freed != 0 {
 		t.Fatalf("freed = %d, want 0 for an empty image", freed)
 	}
 	if a.ContextRevision != 1 {
@@ -124,10 +124,10 @@ func TestTrimStaleToolResultsCheckpointsEmptyImage(t *testing.T) {
 	if len(first.Content) != 1 || first.Content[0].File != nil {
 		t.Fatalf("empty image was not dropped: %#v", first.Content)
 	}
-	if got := first.Content[0].ToolResult.Content; got != trimImageMarker {
+	if got := first.Content[0].ToolResult.Content; !strings.Contains(got, trimImageMarker) {
 		t.Fatalf("tool result = %q, want %q", got, trimImageMarker)
 	}
-	if freed, err := a.trimStaleToolResults(); err != nil || freed != 0 {
+	if freed, err := a.compressContext(0); err != nil || freed != 0 {
 		t.Fatalf("second trim freed %d bytes, want 0", freed)
 	}
 	if a.ContextRevision != 1 {
@@ -137,7 +137,57 @@ func TestTrimStaleToolResultsCheckpointsEmptyImage(t *testing.T) {
 
 func TestTrimStaleToolResultsProtectsSmallSessions(t *testing.T) {
 	a := trimTestAgent(toolExchange("call", strings.Repeat("x", 8*1024)))
-	if freed, err := a.trimStaleToolResults(); err != nil || freed != 0 {
+	if freed, err := a.compressContext(0); err != nil || freed != 0 {
 		t.Fatalf("freed %d bytes from a small session", freed)
+	}
+}
+
+func TestCompressionPreservesEvidenceWhenInsufficient(t *testing.T) {
+	var messages []Message
+	for range 20 {
+		messages = append(messages, toolExchange("call", strings.Repeat("evidence ", 1000))...)
+	}
+	a := trimTestAgent(messages)
+	if freed, err := a.compressContext(1_000_000); err != nil || freed != 0 {
+		t.Fatalf("compression=%d,%v", freed, err)
+	}
+	if a.StateSnapshot().ContextRevision != 0 || a.requestMessages()[1].Content[0].ToolResult.Content != messages[1].Content[0].ToolResult.Content {
+		t.Fatal("insufficient compression rewrote the summary source")
+	}
+}
+
+func TestCompressionReclaimsOnlySupersededHostContextWhenEnough(t *testing.T) {
+	old := hiddenContextMessage(sessionContextPrefix + strings.Repeat("obsolete settings ", 2000))
+	current := hiddenContextMessage(sessionContextPrefix + "current settings")
+	result := strings.Repeat("observed tool evidence ", 1500)
+	messages := append([]Message{old}, toolExchange("c", result)...)
+	messages = append(messages, current, Message{Role: RoleUser, Content: []Content{{Text: "continue"}}})
+	a := trimTestAgent(messages)
+	if freed, err := a.compressContext(1000); err != nil || freed < 1000 {
+		t.Fatalf("compression=%d,%v", freed, err)
+	}
+	got := a.requestMessages()
+	if len(got) != len(messages)-1 || got[1].Content[0].ToolResult.Content != result || contentText(got[2].Content) != contentText(current.Content) {
+		t.Fatal("snapshot reclamation changed the current context or tool evidence")
+	}
+	if contentText(a.MessagesSnapshot()[0].Content) != contentText(old.Content) {
+		t.Fatal("canonical snapshot changed")
+	}
+}
+
+func TestCompressionKeepsImageResultTextAndFullOutputReference(t *testing.T) {
+	result := "Important observation. Full output saved to: /tmp/evidence.txt\n" + strings.Repeat("evidence ", 1000)
+	messages := toolExchange("image", result)
+	messages[1].Content = append(messages[1].Content, Content{File: &File{Data: "data:image/png;base64,AAAA"}})
+	messages = append(messages, toolRoundMessages(20, 8000)...)
+	a := trimTestAgent(messages)
+	if _, err := a.compressContext(1000); err != nil {
+		t.Fatal(err)
+	}
+	got := a.requestMessages()[1].Content[0].ToolResult.Content
+	for _, expected := range []string{"Important observation", "Full output saved to: /tmp/evidence.txt", trimImageMarker} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("compressed image output lost %q: %q", expected, got)
+		}
 	}
 }

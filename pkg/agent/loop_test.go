@@ -255,10 +255,10 @@ func TestSendDoesNotCompactAfterReachingTurnLimit(t *testing.T) {
 	requests, compactions := 0, 0
 	client := streamingTestClient(func(*http.Request) string {
 		requests++
-		return strings.ReplaceAll(phaseTestResponse(false, finalAnswerOutput), `"input_tokens":1`, `"input_tokens":10`)
+		return strings.ReplaceAll(phaseTestResponse(false, finalAnswerOutput), `"input_tokens":1`, `"input_tokens":95`)
 	})
 	a := &Agent{Config: &Config{
-		client: &client, MaxTurns: 1, ContextWindow: 10, ReserveTokens: 1,
+		client: &client, MaxTurns: 1, ContextWindow: 100, ReserveTokens: 10,
 		Hooks: hook.Hooks{
 			Stop: []hook.Stop{func(context.Context, string, bool) (hook.Outcome, error) {
 				return hook.Outcome{Block: true}, nil
@@ -276,6 +276,9 @@ func TestSendDoesNotCompactAfterReachingTurnLimit(t *testing.T) {
 	var turnErr error
 	for _, err := range stream {
 		turnErr = errors.Join(turnErr, err)
+	}
+	if a.compactionOvershoot("", a.ContextStats().CurrentTokens) <= 0 {
+		t.Fatal("test never reached compaction pressure")
 	}
 	if !errors.Is(turnErr, ErrMaxTurnsExceeded) || requests != 1 || compactions != 0 {
 		t.Fatalf("error=%v requests=%d compactions=%d", turnErr, requests, compactions)

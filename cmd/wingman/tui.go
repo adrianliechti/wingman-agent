@@ -79,13 +79,15 @@ func runTUI(ctx context.Context, opts tuiOptions) {
 	}
 
 	app := codetui.New(ctx, wa, sessionID)
-	app.SetBackgroundStatus("Checking development tools…", false)
 	toolUpdate := ws.StartManagedToolsUpdate(ctx, code.ManagedLSPTools, func(progress devtools.Progress) {
 		label := progress.Label
 		if label == "" {
 			label = progress.Tool
 		}
-		message := "Setting up " + label
+		message := "Installing " + label
+		if progress.Phase == devtools.ProgressUpdating {
+			message = "Updating " + label
+		}
 		if progress.Total > 0 {
 			message = fmt.Sprintf("%s (%d/%d)", message, progress.Current, progress.Total)
 		}

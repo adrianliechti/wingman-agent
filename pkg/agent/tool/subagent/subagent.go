@@ -171,6 +171,8 @@ func newSubagentRunner(parent *agent.Config, typ subagentType, spec durableSpec,
 	subcfg := parent.Derive()
 	subcfg.CacheKey = spec.AgentID
 	subcfg.Instructions = func() string { return spec.Instructions }
+	// The durable specification already contains the child's scoped context.
+	subcfg.ContextInstructions = nil
 	if spec.Model != "" {
 		subcfg.Model = func() string { return spec.Model }
 	}

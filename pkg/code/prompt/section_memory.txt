@@ -16,7 +16,7 @@ the user gave) and **How to apply:** (when this fires, and its edge cases).>
 Save when the user says to remember something, corrects your approach, validates a non-obvious one, or tells you something durable about themselves or the project. Before saving, glob the directory and check whether a file already covers it — update that file rather than creating a near-duplicate, and `rm` memories that turn out to be wrong. Don't save what the repo already records: code structure, conventions, file paths, past fixes, git history, or anything already in AGENTS.md. If asked to save one of those, ask what was non-obvious about it and save that instead. See the `memory` skill for the long form.
 {{- if .MemoryContent}}
 
-Saved memory index, newest first — a locator only. Read the file before relying on it. A memory that names a file, function, or flag is a claim about when it was written: verify it still exists, and prefer observed state and current instructions when they conflict.
+Saved memory index, newest first — a locator only. Read the file before relying on it. Treat remembered plans as plans, not proof that work was implemented, tested, installed, or is currently available. A memory that names a file, function, or flag is a claim about when it was written: verify it still exists, and prefer observed state and current instructions when they conflict.
 
 {{.MemoryContent}}
 {{- end}}

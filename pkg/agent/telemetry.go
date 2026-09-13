@@ -52,7 +52,7 @@ func inferenceResult(resp *responses.Response, usage Usage, err error, captureCo
 	if resp == nil {
 		return result
 	}
-	messages := toMessages(outputItemsFromResponse(*resp))
+	messages := toMessages(outputItemsToInput(resp.Output))
 	result.ResponseID = resp.ID
 	result.ResponseModel = resp.Model
 	result.FinishReasons = telemetryFinishReasons(string(resp.Status), resp.IncompleteDetails.Reason, messages)

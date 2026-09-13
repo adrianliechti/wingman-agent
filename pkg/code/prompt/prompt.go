@@ -183,6 +183,18 @@ func BuildAgentContext(data SectionData) string {
 	return composeSections(renderSections([]namedTemplate{tmplProject, tmplEnvironment}, data))
 }
 
+// BuildBaseInstructions contains only model and mode guidance. Session data
+// changes independently and is appended to conversation history by the harness.
+func BuildBaseInstructions(base string, data SectionData) string {
+	return strings.TrimSpace(renderBase(base, data))
+}
+
+func BuildSessionContext(data SectionData) string {
+	sections := renderSections(staticTemplates, data)
+	sections = append(sections, renderSections(dynamicTemplates, data)...)
+	return composeSections(sections)
+}
+
 func BuildInstructions(base string, data SectionData) string {
 	var staticParts []Section
 	staticParts = append(staticParts, Section{Content: renderBase(base, data)})

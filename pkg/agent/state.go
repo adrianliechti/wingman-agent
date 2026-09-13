@@ -98,6 +98,7 @@ func (a *Agent) Restore(state State) error {
 	a.Usage = Usage{}
 	a.Revision = state.Revision
 	a.ContextRevision = 0
+	a.contextUsage = contextUsageAnchor{}
 	a.runtimeIndex = runtimeEventIndex{}
 	a.runtimeIndexSet = false
 

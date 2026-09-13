@@ -55,9 +55,9 @@ type Requirement struct {
 	MinimumMajorVersions map[string]int
 }
 
-// ProgressPhase describes what the managed-tool updater is doing. Checking is
-// intentionally distinct from installation so status surfaces do not imply
-// that a fresh installation is being replaced on every startup.
+// ProgressPhase describes what the managed-tool updater is doing. Automatic
+// updates only report installation and update progress; explicit on-demand
+// requests also report checks.
 type ProgressPhase string
 
 const (
@@ -358,7 +358,8 @@ func (requirement Requirement) installed(ctx context.Context, resolve func(strin
 // Update installs the latest release for every selected requirement. A fresh
 // installation is checked at most once per day; failed checks are retried
 // after a short backoff. Successful updates replace the prior directory and
-// remove it rather than accumulating versions.
+// remove it rather than accumulating versions. Progress is only reported when
+// an installation or update is attempted.
 func (m *Manager) Update(ctx context.Context, requirements []Requirement, progress ...func(Progress)) (bool, error) {
 	return m.update(ctx, requirements, true, false, progress...)
 }
@@ -423,7 +424,9 @@ func (m *Manager) update(ctx context.Context, requirements []Requirement, allowI
 			break
 		}
 		item := selected[id]
-		reportProgress(progress, item.recipe, ProgressChecking, index+1, len(ids))
+		if onDemand {
+			reportProgress(progress, item.recipe, ProgressChecking, index+1, len(ids))
+		}
 		if err := recoverInterruptedUpdate(m.root, item.ID); err != nil {
 			updateErrors = append(updateErrors, fmt.Errorf("recover %s: %w", item.ID, err))
 			continue

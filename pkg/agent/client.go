@@ -286,45 +286,14 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 			}
 
 		case responses.ResponseOutputItemDoneEvent:
-			switch item := e.Item.AsAny().(type) {
-			case responses.ResponseOutputMessage:
-				var p responses.ResponseOutputMessageParam
-				if err := json.Unmarshal([]byte(item.RawJSON()), &p); err != nil {
-					return nil, fmt.Errorf("failed to parse output message: %w", err)
-				}
-
-				outputItems = append(outputItems, responses.ResponseInputItemUnionParam{
-					OfOutputMessage: &p,
-				})
-
-			case responses.ResponseReasoningItem:
-				var p responses.ResponseReasoningItemParam
-				if err := json.Unmarshal([]byte(item.RawJSON()), &p); err != nil {
-					return nil, fmt.Errorf("failed to parse reasoning item: %w", err)
-				}
-
-				outputItems = append(outputItems, responses.ResponseInputItemUnionParam{
-					OfReasoning: &p,
-				})
-
-			case responses.ResponseFunctionToolCall:
-				var p responses.ResponseFunctionToolCallParam
-				if err := json.Unmarshal([]byte(item.RawJSON()), &p); err != nil {
-					return nil, fmt.Errorf("failed to parse function call: %w", err)
-				}
-
-				outputItems = append(outputItems, responses.ResponseInputItemUnionParam{
-					OfFunctionCall: &p,
-				})
-
-			}
+			outputItems = append(outputItems, outputItemsToInput([]responses.ResponseOutputItemUnion{e.Item})...)
 
 		case responses.ResponseCompletedEvent:
 			usageDelta = responseToUsage(e.Response)
 			responseID = e.Response.ID
 			responseModel = e.Response.Model
 			terminalEvent = true
-			if items := outputItemsFromResponse(e.Response); len(items) >= len(outputItems) && len(items) > 0 {
+			if items := outputItemsToInput(e.Response.Output); len(items) >= len(outputItems) && len(items) > 0 {
 				outputItems = items
 			}
 
@@ -339,7 +308,7 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 			incomplete = true
 			incompleteReason = e.Response.IncompleteDetails.Reason
 			terminalEvent = true
-			if items := outputItemsFromResponse(e.Response); len(items) > 0 {
+			if items := outputItemsToInput(e.Response.Output); len(items) > 0 {
 				outputItems = items
 			}
 
@@ -400,11 +369,13 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		}
 	}
 	messages := toMessages(outputItems)
+	prefix := reasoningPrefix(r)
 
 	for _, m := range messages {
 		for _, c := range m.Content {
 			if c.Reasoning != nil {
 				c.Reasoning.Model = r.model
+				c.Reasoning.Prefix = prefix
 			}
 		}
 	}
@@ -427,14 +398,13 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 	}, nil
 }
 
-// outputItemsFromResponse converts a final Response's output into replayable
-// input items. Function calls and reasoning are only usable when completed
-// (truncated arguments or missing encrypted payloads are rejected on replay);
-// partial message text is kept — preserving it is the point.
-func outputItemsFromResponse(r responses.Response) []responses.ResponseInputItemUnionParam {
+// outputItemsToInput applies the same replay checks to item-done events and
+// final responses. Unfinished tool calls/reasoning cannot be replayed; partial
+// assistant text is retained for continuity after a cutoff.
+func outputItemsToInput(output []responses.ResponseOutputItemUnion) []responses.ResponseInputItemUnionParam {
 	var items []responses.ResponseInputItemUnionParam
 
-	for _, item := range r.Output {
+	for _, item := range output {
 		switch it := item.AsAny().(type) {
 		case responses.ResponseOutputMessage:
 			var p responses.ResponseOutputMessageParam
@@ -443,7 +413,8 @@ func outputItemsFromResponse(r responses.Response) []responses.ResponseInputItem
 			}
 
 		case responses.ResponseReasoningItem:
-			if it.Status != "completed" {
+			// Status is optional for reasoning; reject explicit unfinished items.
+			if it.Status != "" && it.Status != "completed" {
 				continue
 			}
 			var p responses.ResponseReasoningItemParam

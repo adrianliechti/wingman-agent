@@ -66,10 +66,10 @@ func TestUpdateSelectsPreferredManagedAlternativeAndRemovesOld(t *testing.T) {
 	if len(installed) != 1 || installed[0] != "typescript-language-server" {
 		t.Fatalf("installed = %v", installed)
 	}
-	if len(progress) != 2 || progress[0].Tool != "typescript-language-server" || progress[0].Label != "TypeScript language tools" {
+	if len(progress) != 1 || progress[0].Tool != "typescript-language-server" || progress[0].Label != "TypeScript language tools" {
 		t.Fatalf("progress = %#v", progress)
 	}
-	if progress[0].Phase != ProgressChecking || progress[1].Phase != ProgressInstalling {
+	if progress[0].Phase != ProgressInstalling {
 		t.Fatalf("progress phases = %#v", progress)
 	}
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
@@ -118,15 +118,15 @@ func TestUpdateSkipsFreshInstallation(t *testing.T) {
 	if changed, err := manager.Update(context.Background(), requirements, report); err != nil || !changed {
 		t.Fatalf("first Update = %v, %v", changed, err)
 	}
-	if want := []ProgressPhase{ProgressChecking, ProgressInstalling}; !reflect.DeepEqual(phases, want) {
+	if want := []ProgressPhase{ProgressInstalling}; !reflect.DeepEqual(phases, want) {
 		t.Fatalf("install phases = %v, want %v", phases, want)
 	}
 	phases = nil
 	if changed, err := manager.Update(context.Background(), requirements, report); err != nil || changed {
 		t.Fatalf("fresh Update = %v, %v", changed, err)
 	}
-	if want := []ProgressPhase{ProgressChecking}; !reflect.DeepEqual(phases, want) {
-		t.Fatalf("fresh phases = %v, want %v", phases, want)
+	if len(phases) != 0 {
+		t.Fatalf("fresh installation reported progress: %v", phases)
 	}
 	if installCount != 1 {
 		t.Fatalf("install count = %d", installCount)
@@ -137,7 +137,7 @@ func TestUpdateSkipsFreshInstallation(t *testing.T) {
 	if changed, err := manager.Update(context.Background(), requirements, report); err != nil || !changed {
 		t.Fatalf("stale Update = %v, %v", changed, err)
 	}
-	if want := []ProgressPhase{ProgressChecking, ProgressUpdating}; !reflect.DeepEqual(phases, want) {
+	if want := []ProgressPhase{ProgressUpdating}; !reflect.DeepEqual(phases, want) {
 		t.Fatalf("update phases = %v, want %v", phases, want)
 	}
 	if installCount != 2 {

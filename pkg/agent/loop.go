@@ -49,6 +49,13 @@ func (a *Agent) appendInputs(ctx context.Context, inputs ...Message) error {
 			messages = append(messages, hiddenContextMessage(strings.Join(hookContext, "\n\n")))
 		}
 	}
+	if len(messages) > 0 {
+		// Commit current host guidance before the accepted input, together in
+		// one batch. Later tool-driven changes still sync at request boundaries.
+		if update, changed := a.contextInstructionsUpdate(a.requestMessages()); changed {
+			messages = append([]Message{update}, messages...)
+		}
+	}
 	return errors.Join(inputErrors, a.appendMessages(messages...))
 }
 
@@ -91,15 +98,25 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 		}
 
 		if isContextOverflowError(err) {
-			if err := a.compactWithHooks(ctx, true); err != nil {
+			if err := a.compactWithHooks(ctx, req); err != nil {
 				return resp, err
 			}
+		} else if isReasoningReplayError(err) {
+			dropped, dropErr := a.dropRejectedReasoning()
+			if dropErr != nil {
+				return resp, dropErr
+			}
+			if !dropped {
+				return resp, err
+			}
+		} else if !waitForRetry(ctx, time.Duration(attempt+1)*2*time.Second) {
+			return resp, ctx.Err()
+		}
+		if isContextOverflowError(err) || isReasoningReplayError(err) {
 			req.messages = a.requestMessages()
 			if captureContent {
 				inference.SetContent(telemetryInferenceContent(req.messages, req.instructions, req.tools))
 			}
-		} else if !waitForRetry(ctx, time.Duration(attempt+1)*2*time.Second) {
-			return resp, ctx.Err()
 		}
 		if ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -108,12 +125,11 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 }
 
 // Both proactive compaction and overflow recovery run the same hook lifecycle.
-func (a *Agent) compactWithHooks(ctx context.Context, truncateOnFailure bool) error {
+func (a *Agent) compactWithHooks(ctx context.Context, req *request) error {
 	if outcome := a.runPreCompact(ctx, "auto"); outcome.Stop {
 		return hookStopError("compaction stopped by hook")
 	}
-	compacted, err := a.compactMessages(ctx, truncateOnFailure)
-	if err != nil || !compacted {
+	if err := a.compactMessages(ctx, req); err != nil {
 		return err
 	}
 	if outcome := a.runPostCompact(ctx, "auto"); outcome.Stop {
@@ -126,5 +142,29 @@ func (a *Agent) compactWithHooks(ctx context.Context, truncateOnFailure bool) er
 	if outcome.Stop {
 		return hookStopError("session-start hook stopped the compacted turn")
 	}
+	return nil
+}
+
+// Check before every request, including the first request of a follow-up turn.
+// Rewriting historical results has a cache cost, so do it only under pressure.
+func (a *Agent) prepareRequest(ctx context.Context, req *request) error {
+	if err := a.dropIncompatibleReasoning(req); err != nil {
+		return err
+	}
+	req.messages = a.requestMessages()
+	overshoot := a.compactionOvershoot(req.model, a.requestTokens(req))
+	if overshoot <= 0 {
+		return nil
+	}
+	freed, err := a.compressContext(overshoot)
+	if err != nil {
+		return err
+	}
+	if int64(freed) < overshoot {
+		if err := a.compactWithHooks(ctx, req); err != nil {
+			return err
+		}
+	}
+	req.messages = a.requestMessages()
 	return nil
 }
