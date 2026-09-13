@@ -1883,9 +1883,9 @@ export default function App() {
 					? current
 					: [...current, tab],
 			);
-			setActiveTabId(tab.id);
+			activateTab(tab);
 		},
-		[tabs, setActiveTabId, setTabs],
+		[tabs, activateTab, setTabs],
 	);
 	const handleNewSession = useCallback(
 		(requestedBackend?: string) => {
@@ -1907,19 +1907,49 @@ export default function App() {
 		[activateTab, activeTab, agentId, currentSessionId, selectBackend, setTabs],
 	);
 	const handleBackendSelect = useCallback(
-		(backend: string) => {
-			selectBackend(backend);
-			if (activeTab.type === "chat" && !activeTab.sessionId) {
-				setTabs((current) =>
-					current.map((tab) =>
-						tab.id === activeTab.id ? { ...tab, backendId: backend } : tab,
-					),
+		(backend: string, source = activeTab) => {
+			const currentBackend = source.sessionId
+				? splitSessionKey(source.sessionId).backendId
+				: (source.backendId ?? agentId);
+			if (backend === currentBackend) return;
+			const session = client.store.getSnapshot()[source.sessionId ?? ""];
+			const empty =
+				!source.sessionId ||
+				(session?.synchronized &&
+					session.status === "ready" &&
+					session.phase === "idle" &&
+					session.entries.length === 0 &&
+					session.pendingInputs.length === 0 &&
+					session.prompts.length === 0);
+			if (
+				source.type === "chat" &&
+				composerDrafts.get(source).getSnapshot().submitting
+			)
+				return;
+			if (source.type === "chat" && empty) {
+				// ACP allocates a session before the first message. Keep its composer
+				// when switching, and allow a previously visited harness to initialize again.
+				draftInitializationAttempts.current.delete(
+					JSON.stringify([backend, source.id]),
 				);
+				const next = { ...source, backendId: backend, sessionId: "" };
+				setTabs((current) =>
+					current.map((tab) => (tab.id === source.id ? next : tab)),
+				);
+				activateTab(next);
 				return;
 			}
 			openDraft(backend);
 		},
-		[activeTab, openDraft, selectBackend, setTabs],
+		[
+			activeTab,
+			agentId,
+			client,
+			composerDrafts,
+			activateTab,
+			openDraft,
+			setTabs,
+		],
 	);
 
 	const handleSessionDeleted = useCallback(
@@ -2604,6 +2634,7 @@ export default function App() {
 						draft={composerDraft}
 						available={connected && (isDraft(key) || !!sess?.synchronized)}
 						sessionId={key}
+						onSelectBackend={(id) => handleBackendSelect(id, tab)}
 						placeholder={`Message ${formatAgentName(backendId, backend?.name)}…`}
 						onSend={(text, files, images, intent) =>
 							sendForSession(key, text, files, images, intent, tab.id)

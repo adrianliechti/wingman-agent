@@ -116,7 +116,11 @@ async function openNewChat(page: Page) {
 	await menu.getByRole("menuitem", { name: "Chat", exact: true }).click();
 }
 
-async function mockACPBackend(page: Page, backend = "codex") {
+async function mockACPBackend(
+	page: Page,
+	backend = "codex",
+	entries: ChatEntry[] = [],
+) {
 	await page.route(new RegExp(`/api/v2/backends/${backend}/`), (route) =>
 		route.fulfill({ json: [] }),
 	);
@@ -201,7 +205,7 @@ async function mockACPBackend(page: Page, backend = "codex") {
 					epoch: "acp-epoch",
 					revision: revision++,
 					state: { ...emptySession(""), status: "ready", settings },
-					entries: [],
+					entries,
 				}),
 			);
 		};
@@ -982,6 +986,112 @@ test("composition keys do not submit prompts or run palette commands", async ({
 	await expect(palette).toBeVisible();
 	await search.press("Escape");
 	await expect(input).toHaveValue("未確定の入力");
+});
+
+test("composer harness selector preserves drafts when switching before the first message", async ({
+	page,
+}) => {
+	const backend = await mockACPBackend(page);
+	const input = await composer(page);
+	await input.fill("Keep this draft across harnesses");
+	await input.evaluate((element) =>
+		element.setAttribute("data-original-composer", "yes"),
+	);
+	const tabs = page
+		.getByRole("tablist", { name: "Open tabs" })
+		.getByRole("tab");
+	const picker = page.locator("[data-composer-harness] button");
+	await expect(picker).toHaveAccessibleName("Harness: Wingman");
+	await picker.click();
+	const menu = page.getByRole("menu", { name: "Harness", exact: true });
+	await expect(
+		menu.getByRole("menuitemradio", { name: "Wingman", exact: true }),
+	).toHaveAttribute("aria-checked", "true");
+	await page.screenshot({
+		path: test.info().outputPath("composer-harness-picker.png"),
+	});
+	await menu
+		.getByRole("menuitemradio", { name: "Wingman", exact: true })
+		.click();
+	await expect(tabs).toHaveCount(1);
+	expect(backend.creations).toHaveLength(0);
+	await picker.click();
+	await expect(
+		menu.getByRole("menuitemradio", { name: "Wingman", exact: true }),
+	).toBeFocused();
+	await page.keyboard.press("Home");
+	await page.keyboard.press("ArrowDown");
+	await expect(
+		menu.getByRole("menuitemradio", { name: "Codex", exact: true }),
+	).toBeFocused();
+	await page.keyboard.press("Enter");
+	await expect(page.getByTitle("codex-test · default")).toBeVisible();
+	await expect(page.getByPlaceholder("Message Codex…")).toHaveValue(
+		"Keep this draft across harnesses",
+	);
+	for (const name of ["Wingman", "Codex"]) {
+		await picker.click();
+		await menu.getByRole("menuitemradio", { name, exact: true }).click();
+		const currentInput = page.getByPlaceholder(`Message ${name}…`);
+		await expect(currentInput).toHaveValue("Keep this draft across harnesses");
+		await expect(currentInput).toHaveAttribute("data-original-composer", "yes");
+		await expect(tabs).toHaveCount(1);
+		await expect(picker).toHaveAccessibleName(`Harness: ${name}`);
+	}
+	await expect(page.getByTitle("codex-test · default")).toBeVisible();
+	expect(backend.creations).toHaveLength(1);
+	expect(backend.commands).toEqual([]);
+	const harness = await page.locator("[data-composer-harness]").boundingBox();
+	const mode = await page.locator("[data-composer-mode]").boundingBox();
+	const model = await page.locator("[data-composer-model]").boundingBox();
+	expect(harness!.x + harness!.width).toBeLessThanOrEqual(mode!.x);
+	expect(mode!.x + mode!.width).toBeLessThanOrEqual(model!.x);
+});
+
+test("composer harness switching preserves existing conversations and their drafts", async ({
+	page,
+}) => {
+	await mockACPBackend(page, "codex", [
+		{ id: "question", type: "user", content: "Keep this conversation" },
+		{ id: "answer", type: "assistant", content: "The existing answer" },
+	]);
+	await page.goto("/codex/new-session");
+	const input = page.getByPlaceholder("Message Codex…");
+	await expect(
+		page.getByText("The existing answer", { exact: true }),
+	).toBeVisible();
+	await input.fill("An unsent follow-up");
+	const tabs = page
+		.getByRole("tablist", { name: "Open tabs" })
+		.getByRole("tab");
+	const original = tabs.first();
+	const originalId = await original.getAttribute("data-center-tab");
+	await page
+		.getByRole("button", { name: "Harness: Codex", exact: true })
+		.click();
+	const menu = page.getByRole("menu", { name: "Harness", exact: true });
+	await expect(
+		menu.getByText("Switching harness opens a new chat."),
+	).toBeVisible();
+	await menu.getByRole("menuitemradio", { name: "Codex", exact: true }).click();
+	await expect(tabs).toHaveCount(1);
+	await page
+		.getByRole("button", { name: "Harness: Codex", exact: true })
+		.click();
+	await menu
+		.getByRole("menuitemradio", { name: "Wingman", exact: true })
+		.click();
+	await expect(page.getByPlaceholder("Message Wingman…")).toHaveValue("");
+	await expect(tabs).toHaveCount(2);
+	await original.click();
+	await expect(original).toHaveAttribute("data-center-tab", originalId!);
+	await expect(input).toHaveValue("An unsent follow-up");
+	await expect(
+		page.getByText("The existing answer", { exact: true }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("button", { name: "Harness: Codex", exact: true }),
+	).toBeVisible();
 });
 
 test("new ACP chats load mode and model before the first message", async ({
@@ -3779,6 +3889,7 @@ test("keeps the desktop workspace mounted across viewport sizes", async ({
 test("composer hides mode then model as session history narrows the chat", async ({
 	page,
 }) => {
+	await mockACPBackend(page);
 	await page.route(/\/api\/v2\/backends\/wingman\/settings$/, (route) =>
 		route.fulfill({
 			json: {
@@ -3803,6 +3914,10 @@ test("composer hides mode then model as session history narrows the chat", async
 	const composerBox = page.locator("[data-chat-composer]");
 	const mode = composerBox.locator("[data-composer-mode]");
 	const model = composerBox.locator("[data-composer-model]");
+	const harness = composerBox.getByRole("button", {
+		name: "Harness: Wingman",
+		exact: true,
+	});
 	await openSessions(page);
 	for (const [width, showMode, showModel] of [
 		[1280, true, true],
@@ -3816,6 +3931,7 @@ test("composer hides mode then model as session history narrows the chat", async
 			visible: showMode,
 		});
 		await expect(model).toBeVisible({ visible: showModel });
+		await expect(harness).toBeVisible();
 		await expect(input).toHaveValue("Keep this draft while resizing");
 		await expect(composerBox.getByTitle("Add file context")).toBeVisible();
 		await expect(composerBox.getByTitle("Attach image")).toBeVisible();
@@ -3847,6 +3963,12 @@ test("composer hides mode then model as session history narrows the chat", async
 			)
 			.toBe(true);
 	}
+	await harness.click();
+	await expectFloatingInViewport(
+		page,
+		page.getByRole("menu", { name: "Harness", exact: true }),
+	);
+	await page.keyboard.press("Escape");
 	// Closing history changes the available space without resizing the window.
 	await page.setViewportSize({ width: 900, height: 800 });
 	await expect(mode).toBeHidden();
@@ -5446,6 +5568,7 @@ test.describe("phone navigation", () => {
 	test("keeps the same draft mounted across phone and desktop layouts", async ({
 		page,
 	}) => {
+		await mockACPBackend(page);
 		const input = await composer(page);
 		await expect(page.locator("[data-mobile-navigation]")).toBeVisible();
 		await expect(

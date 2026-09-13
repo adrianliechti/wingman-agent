@@ -163,6 +163,15 @@ select,
 	outline-offset: -2px;
 }
 
+.picker-control:focus-visible {
+	outline: none;
+	background-color: var(--color-bg-hover);
+}
+.picker-control[aria-checked="true"]:focus-visible,
+.picker-control[aria-selected="true"]:focus-visible {
+	background-color: var(--color-bg-active);
+}
+
 /* The entire rounded composer is the input affordance. Its textarea remains
    visually transparent while focus is shown on the outer surface only. */
 [data-chat-composer] {

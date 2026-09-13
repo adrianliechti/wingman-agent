@@ -64,10 +64,6 @@ export function ModelPicker({ settings, setSettings }: Props) {
 		const match = models.find((m) => m.id === model);
 		return match?.name || model;
 	}, [models, model]);
-	const currentNamespace = useMemo(
-		() => models.find((m) => m.id === model)?.namespace,
-		[models, model],
-	);
 
 	const defaultEffort = useMemo(
 		() =>
@@ -150,16 +146,11 @@ export function ModelPicker({ settings, setSettings }: Props) {
 				ref={setButton}
 				type="button"
 				onClick={toggle}
-				className="flex items-center gap-1 px-2 h-7 rounded text-[11.5px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors max-w-full"
+				className="picker-control flex items-center gap-1 px-2 h-7 rounded text-[11.5px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors max-w-full"
 				title={`${model} · ${effort}`}
 				aria-haspopup="dialog"
 				aria-expanded={open}
 			>
-				<ModelProviderIcon
-					namespace={currentNamespace}
-					size={12}
-					className="shrink-0"
-				/>
 				<span className="truncate">{currentName}</span>
 				{effort !== "auto" && effort !== "default" && (
 					<>
@@ -191,7 +182,7 @@ export function ModelPicker({ settings, setSettings }: Props) {
 								role="option"
 								aria-selected={m.id === model}
 								key={m.id}
-								className={`flex items-center gap-2 w-full text-left px-3 py-1.5 text-[12px] cursor-pointer whitespace-nowrap transition-colors ${
+								className={`picker-control flex items-center gap-2 w-full text-left px-3 py-1.5 text-[12px] cursor-pointer whitespace-nowrap transition-colors ${
 									m.id === model
 										? "text-fg bg-bg-active"
 										: "text-fg-muted hover:text-fg hover:bg-bg-hover"

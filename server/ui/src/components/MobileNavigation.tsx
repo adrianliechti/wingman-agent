@@ -41,18 +41,24 @@ export function MobileNavigation(props: Props) {
 					>
 						<Menu size={21} />
 					</button>
-					<select
-						aria-label="Agent"
-						value={backend}
-						onChange={(event) => props.onSelectBackend(event.target.value)}
-						className="h-11 min-w-0 flex-1 rounded-lg bg-bg-surface px-3 text-base font-medium text-fg"
-					>
-						{backends.map((agent) => (
-							<option key={agent.id} value={agent.id}>
-								{formatAgentName(agent.id, agent.name)}
-							</option>
-						))}
-					</select>
+					{backends.length > 1 ? (
+						<select
+							aria-label="Agent"
+							value={backend}
+							onChange={(event) => props.onSelectBackend(event.target.value)}
+							className="h-11 min-w-0 flex-1 rounded-lg bg-bg-surface px-3 text-base font-medium text-fg"
+						>
+							{backends.map((agent) => (
+								<option key={agent.id} value={agent.id}>
+									{formatAgentName(agent.id, agent.name)}
+								</option>
+							))}
+						</select>
+					) : (
+						<span className="min-w-0 flex-1 truncate px-3 text-base font-medium text-fg">
+							{formatAgentName(backend, backends[0]?.name)}
+						</span>
+					)}
 					<button
 						type="button"
 						className="flex size-11 shrink-0 items-center justify-center rounded-lg text-fg-muted active:bg-bg-hover"

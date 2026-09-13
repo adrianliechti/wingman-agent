@@ -9,6 +9,12 @@ function isPlanLike(id: string): boolean {
 	return /plan|read|only/i.test(id);
 }
 
+function modeColor(id: string): string {
+	if (id.toLowerCase() === "unattended") return "text-danger";
+	if (isPlanLike(id)) return "text-warning";
+	return "";
+}
+
 interface Props {
 	modes: ModeOption[];
 	current: string;
@@ -22,8 +28,6 @@ export function ModePicker({ modes, current, onSelect }: Props) {
 	if (modes.length === 0) return null;
 
 	const active = modes.find((m) => m.id === current);
-	const planLike = isPlanLike(current);
-	const Icon = planLike ? Compass : Wrench;
 	const label = active?.name ?? current ?? "Mode";
 
 	return (
@@ -32,16 +36,13 @@ export function ModePicker({ modes, current, onSelect }: Props) {
 				ref={setButton}
 				type="button"
 				onClick={() => setOpen((v) => !v)}
-				className={`flex items-center gap-1 px-2 h-7 max-w-full rounded text-[11.5px] cursor-pointer transition-colors ${
-					planLike
-						? "text-warning hover:bg-bg-hover"
-						: "text-fg-muted hover:text-fg hover:bg-bg-hover"
+				className={`picker-control flex items-center gap-1 px-2 h-7 max-w-full rounded text-[11.5px] cursor-pointer transition-colors hover:bg-bg-hover ${
+					modeColor(current) || "text-fg-muted hover:text-fg"
 				}`}
 				title={`Mode: ${label}`}
 				aria-haspopup="menu"
 				aria-expanded={open}
 			>
-				<Icon size={12} className="shrink-0" />
 				<span className="truncate">{label}</span>
 			</button>
 			<FloatingMenu
@@ -65,7 +66,7 @@ export function ModePicker({ modes, current, onSelect }: Props) {
 								onSelect(opt.id);
 								setOpen(false);
 							}}
-							className={`w-full flex items-start gap-2 px-3 py-2 text-left cursor-pointer transition-colors ${
+							className={`picker-control w-full flex items-start gap-2 px-3 py-2 text-left cursor-pointer transition-colors ${
 								isActive
 									? "bg-bg-active text-fg"
 									: "text-fg-muted hover:bg-bg-hover hover:text-fg"
@@ -73,7 +74,7 @@ export function ModePicker({ modes, current, onSelect }: Props) {
 						>
 							<OptIcon
 								size={13}
-								className={`mt-0.5 shrink-0 ${isPlanLike(opt.id) ? "text-warning" : "text-fg-dim"}`}
+								className={`mt-0.5 shrink-0 ${modeColor(opt.id) || "text-fg-dim"}`}
 							/>
 							<div className="min-w-0 flex-1">
 								<div className="text-[12px] font-medium">{opt.name}</div>

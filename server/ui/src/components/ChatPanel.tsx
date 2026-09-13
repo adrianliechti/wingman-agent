@@ -18,6 +18,7 @@ import {
 	useSyncExternalStore,
 } from "react";
 import { ComposerDraft } from "../state/composerDraft.ts";
+import { splitSessionKey } from "../state/sessionStore.ts";
 import { useSessionSettings } from "../state/workspaceContext.ts";
 import { useToast } from "./ui/Feedback.tsx";
 import { atTextareaEdge } from "../utils/textareaNavigation";
@@ -37,6 +38,7 @@ import { ScrollSnapshot } from "./chat/ScrollSnapshot";
 import { TurnView } from "./chat/TurnView";
 import { buildTurns, findEntryElement, type Turn } from "./chat/turns";
 import { FilePicker } from "./FilePicker";
+import { AgentPicker } from "./AgentPicker";
 import { ModelPicker } from "./ModelPicker";
 import { ModePicker } from "./ModePicker";
 import { SkillPicker } from "./SkillPicker";
@@ -46,6 +48,7 @@ export interface ChatPanelProps {
 	draft: ComposerDraft;
 	draftId: string;
 	sessionId?: string;
+	onSelectBackend: (id: string) => void;
 	placeholder?: string;
 	entries: ChatEntry[];
 	phase: Phase;
@@ -125,6 +128,7 @@ export function ChatPanel({
 	draft,
 	draftId,
 	sessionId,
+	onSelectBackend,
 	placeholder = "Message Wingman…",
 	entries,
 	phase,
@@ -1048,6 +1052,20 @@ export function ChatPanel({
 											if (e.target.files) void addImageFiles(e.target.files);
 											e.target.value = "";
 										}}
+									/>
+									<AgentPicker
+										currentId={
+											sessionId
+												? splitSessionKey(sessionId).backendId
+												: undefined
+										}
+										onSelect={onSelectBackend}
+										newChat={
+											entries.length > 0 ||
+											phase !== "idle" ||
+											pendingInputs.length > 0
+										}
+										disabled={submitting}
 									/>
 									<ModePicker
 										modes={settings.modes}
