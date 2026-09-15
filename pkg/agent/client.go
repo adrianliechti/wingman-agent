@@ -90,13 +90,14 @@ func (e *responseFailure) Error() string {
 }
 
 type request struct {
-	model        string
-	effort       string
-	instructions string
-	cacheKey     string
-	messages     []Message
-	tools        []tool.Tool
-	outputSchema map[string]any
+	model         string
+	effort        string
+	instructions  string
+	cacheKey      string
+	messages      []Message
+	tools         []tool.Tool
+	outputSchema  map[string]any
+	requireFinish bool
 }
 
 type response struct {
@@ -242,7 +243,7 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		case responses.ResponseOutputItemAddedEvent:
 			switch item := e.Item.AsAny().(type) {
 			case responses.ResponseFunctionToolCall:
-				if item.CallID == "" {
+				if item.CallID == "" || r.requireFinish && item.Name == finishToolName {
 					break
 				}
 				pending := &pendingToolCall{
@@ -371,6 +372,13 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		}
 	}
 	messages := toMessages(outputItems)
+	if r.requireFinish {
+		for i := range messages {
+			if calls := extractToolCalls(messages[i : i+1]); len(calls) == 1 && calls[0].Name == finishToolName {
+				messages[i].Hidden = true
+			}
+		}
+	}
 	prefix := reasoningPrefix(r)
 
 	for _, m := range messages {

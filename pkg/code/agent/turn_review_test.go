@@ -24,6 +24,10 @@ func TestTurnReviewAndUndoSurviveJournalReload(t *testing.T) {
 			return
 		}
 		request++
+		var body struct{ Tools []struct{ Name string } }
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
 		var output any
 		switch request {
 		case 1:
@@ -33,7 +37,15 @@ func TestTurnReviewAndUndoSurviveJournalReload(t *testing.T) {
 		default:
 			output = map[string]any{"type": "message", "id": "final", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "Done", "annotations": []any{}}}}
 		}
-		data, _ := json.Marshal(map[string]any{"type": "response.completed", "sequence_number": 1, "response": map[string]any{"output": []any{output}, "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}}})
+		outputs := []any{output}
+		if request > 2 {
+			for _, tool := range body.Tools {
+				if tool.Name == "finish_turn" {
+					outputs = append(outputs, map[string]any{"type": "function_call", "id": "finish", "call_id": "finish", "name": "finish_turn", "arguments": "{}", "status": "completed"})
+				}
+			}
+		}
+		data, _ := json.Marshal(map[string]any{"type": "response.completed", "sequence_number": 1, "response": map[string]any{"output": outputs, "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}}})
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "data: %s\n\n", data)
 	}))

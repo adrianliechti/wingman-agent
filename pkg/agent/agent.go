@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -212,6 +213,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 
 		turns := 0
 		cutoffNotified := false
+		missingFinishes := 0
 		stopHookActive := false
 		for {
 			if err := ctx.Err(); err != nil {
@@ -266,15 +268,30 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				// text deltas instead of producing the requested final document.
 				tools = nil
 			}
+			requireFinish := outputSchema == nil && a.RequireFinish != nil && a.RequireFinish(modelID)
+			if requireFinish {
+				for _, t := range tools {
+					if t.Name == finishToolName {
+						stop(fmt.Errorf("agent: tool name %q is reserved by RequireFinish", finishToolName))
+						return
+					}
+				}
+				tools = append(slices.Clone(tools), finishTool())
+				if instructions != "" {
+					instructions += "\n\n"
+				}
+				instructions += finishInstructions
+			}
 
 			req := &request{
-				model:        modelID,
-				effort:       effort,
-				instructions: instructions,
-				cacheKey:     a.CacheKey,
-				messages:     a.requestMessages(),
-				tools:        tools,
-				outputSchema: outputSchema,
+				model:         modelID,
+				effort:        effort,
+				instructions:  instructions,
+				cacheKey:      a.CacheKey,
+				messages:      a.requestMessages(),
+				tools:         tools,
+				outputSchema:  outputSchema,
+				requireFinish: requireFinish,
 			}
 			if err := a.prepareRequest(ctx, req); err != nil {
 				stop(err)
@@ -301,25 +318,54 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			filtered := resp.incomplete && resp.incompleteReason == "content_filter"
 			if !filtered {
 				calls := extractToolCalls(resp.messages)
+				finished := false
+				if requireFinish {
+					calls, finished, err = a.resolveFinishCalls(resp, calls)
+					if err != nil {
+						stop(err)
+						return
+					}
+				}
 				if err := a.processToolCalls(ctx, calls, tools, yield); err != nil {
 					stop(err)
 					return
 				}
 				needsFollowUp = len(calls) > 0
-				if !resp.incomplete {
+				switch {
+				case resp.incomplete:
+					// A cutoff is a transport boundary, not a decision to end
+					// the turn, so it never counts as a missing finish. Completed
+					// calls already drive a follow-up. Otherwise nudge once,
+					// preserving the partial text in history.
+					if !needsFollowUp && !cutoffNotified {
+						cutoffNotified = true
+						needsFollowUp = true
+						if err := a.appendMessages(cutoffNotice(resp.incompleteReason)); err != nil {
+							stop(err)
+							return
+						}
+					}
+				case requireFinish && !hasRefusal(resp.messages):
+					cutoffNotified = false
+					needsFollowUp = needsFollowUp || !finished
+					if len(calls) > 0 || finished {
+						missingFinishes = 0
+					} else {
+						missingFinishes++
+						if missingFinishes > maxFinishReminders {
+							stop(ErrMissingFinish)
+							return
+						}
+						if err := a.appendMessages(hiddenContextMessage(finishReminder)); err != nil {
+							stop(err)
+							return
+						}
+					}
+				default:
 					cutoffNotified = false
 					// Phase is documented message metadata. Continuing after
 					// commentary is our policy for avoiding premature stops.
 					needsFollowUp = needsFollowUp || endsWithCommentary(resp.messages)
-				} else if !needsFollowUp && !cutoffNotified {
-					// Completed calls already drive a follow-up. Otherwise nudge
-					// once after a cutoff, preserving the partial text in history.
-					cutoffNotified = true
-					needsFollowUp = true
-					if err := a.appendMessages(cutoffNotice(resp.incompleteReason)); err != nil {
-						stop(err)
-						return
-					}
 				}
 			}
 

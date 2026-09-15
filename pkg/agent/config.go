@@ -67,6 +67,11 @@ type Config struct {
 	Tools        func() []tool.Tool
 	Instructions func() string
 
+	// RequireFinish enables the explicit finish_turn protocol for a model.
+	// Text-only replies cannot end Send when enabled. Structured output and
+	// native refusals use their own completion semantics.
+	RequireFinish func(model string) bool
+
 	// ContextInstructions supplies mutable session guidance (environment,
 	// project instructions, memory, skills). Changes append a replacement
 	// snapshot to history instead of rewriting the cached Instructions prefix.
@@ -117,6 +122,7 @@ func (c *Config) Derive() *Config {
 		Effort:              c.Effort,
 		Tools:               c.Tools,
 		Instructions:        c.Instructions,
+		RequireFinish:       c.RequireFinish,
 		ContextInstructions: c.ContextInstructions,
 		RoleModel:           c.RoleModel,
 

@@ -857,6 +857,9 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	sessionCfg.Tools = s.tools
 	sessionCfg.Instructions = s.instructions
 	sessionCfg.ContextInstructions = s.contextInstructions
+	if sessionCfg.RequireFinish == nil {
+		sessionCfg.RequireFinish = requiresFinish
+	}
 	sessionCfg.Model = func() string {
 		option, _ := a.roleModel(s, "")
 		return option.ID
@@ -1557,4 +1560,16 @@ func (s *sessionState) projectInstructions() string {
 	s.projectInstructionsCache = result
 	s.projectInstructionsMtimes = mtimes
 	return result
+}
+
+// requiresFinish enables the explicit finish_turn protocol for Claude models,
+// whose native stop reasons carry no message phase. Wingman model IDs are
+// deployment names chosen by the operator, so the check accepts catalog
+// matches and any ID that names the model line (Bedrock ARNs, provider
+// prefixes, aliases) rather than requiring a bare "claude-" prefix.
+func requiresFinish(id string) bool {
+	if m, ok := model.Find(id); ok && strings.EqualFold(m.Namespace, "anthropic") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(id), "claude")
 }
