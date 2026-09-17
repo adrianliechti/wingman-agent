@@ -141,20 +141,69 @@ func TestSendConsumesInputAcceptedDuringStopHook(t *testing.T) {
 	}
 }
 
-func TestSendQueuedPromptHooksAlsoApplyDuringCleanup(t *testing.T) {
-	for _, interrupt := range []bool{false, true} {
-		t.Run(fmt.Sprintf("interrupt=%t", interrupt), func(t *testing.T) {
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
+func TestSendSubagentStopSharesTurnLimits(t *testing.T) {
+	for _, child := range []bool{false, true} {
+		t.Run(fmt.Sprintf("child=%t", child), func(t *testing.T) {
 			requests := 0
 			client := streamingTestClient(func(*http.Request) string {
 				requests++
 				return phaseTestResponse(false, finalAnswerOutput)
 			})
 			a := &Agent{Config: &Config{client: &client, MaxTurns: 2}}
+			stops, childStops := 0, 0
+			a.Hooks.Stop = []hook.Stop{func(_ context.Context, _ string, active bool) (hook.Outcome, error) {
+				stops++
+				if active != (stops > 1) {
+					t.Errorf("Stop active=%t on call %d", active, stops)
+				}
+				return hook.Outcome{Block: stops == 1}, nil
+			}}
+			a.Hooks.SubagentStop = []hook.SubagentStop{func(ctx context.Context, id, typ, _ string, active bool) (hook.Outcome, error) {
+				childStops++
+				if stops != 2 || !active || id != "child" || typ != "general-purpose" || hook.RuntimeFromContext(ctx).TurnID == "" {
+					t.Errorf("SubagentStop ran outside the child's completion boundary: stops=%d active=%t id=%s type=%s", stops, active, id, typ)
+				}
+				return hook.Outcome{Block: true, Reason: "another pass"}, nil
+			}}
+			ctx := t.Context()
+			if child {
+				ctx = hook.WithRuntime(ctx, hook.Runtime{AgentID: "child", AgentType: "general-purpose"})
+			}
+			stream, err := a.Send(ctx, []Content{{Text: "work"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var runErr error
+			for _, err := range stream {
+				runErr = errors.Join(runErr, err)
+			}
+			if requests != 2 || (child && (!errors.Is(runErr, ErrMaxTurnsExceeded) || childStops != 1)) || (!child && (runErr != nil || childStops != 0)) {
+				t.Fatalf("requests=%d childStops=%d error=%v", requests, childStops, runErr)
+			}
+		})
+	}
+}
+
+func TestSendQueuedPromptHooksAlsoApplyDuringCleanup(t *testing.T) {
+	for _, interrupt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("interrupt=%t", interrupt), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			requests := 0
+			modelID := "first-model"
+			client := streamingTestClient(func(*http.Request) string {
+				requests++
+				modelID = "next-model"
+				return phaseTestResponse(false, finalAnswerOutput)
+			})
+			a := &Agent{Config: &Config{client: &client, MaxTurns: 2}}
+			a.Model = func() string { return modelID }
 			var prompts []string
-			a.Hooks.UserPromptSubmit = []hook.UserPromptSubmit{func(_ context.Context, prompt string) (hook.Outcome, error) {
+			a.Hooks.UserPromptSubmit = []hook.UserPromptSubmit{func(ctx context.Context, prompt string) (hook.Outcome, error) {
 				prompts = append(prompts, prompt)
+				if got := hook.RuntimeFromContext(ctx).Model; got != modelID {
+					t.Errorf("prompt %q used stale model %q, want %q", prompt, got, modelID)
+				}
 				if prompt == "blocked prompt" {
 					return hook.Outcome{Block: true, Reason: "blocked by test hook"}, nil
 				}

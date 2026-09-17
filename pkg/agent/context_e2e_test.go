@@ -29,6 +29,7 @@ type contextRequest struct {
 	Tools        json.RawMessage `json:"tools"`
 	Input        json.RawMessage `json:"input"`
 	CacheKey     string          `json:"prompt_cache_key"`
+	Reasoning    json.RawMessage `json:"reasoning"`
 }
 
 type contextProvider struct {

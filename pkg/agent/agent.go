@@ -114,11 +114,8 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	a.queueMu.Unlock()
 
 	ctx, cancelBudget := a.Config.withTaskBudget(ctx)
-	runtime := hook.RuntimeFromContext(ctx)
+	runtime := a.hookRuntime(ctx)
 	runtime.TurnID = uuid.NewString()
-	if runtime.Model == "" && a.Config.Model != nil {
-		runtime.Model = a.Model()
-	}
 	ctx = hook.WithRuntime(ctx, runtime)
 	ctx, telemetryInvocation := a.Telemetry.StartAgent(ctx, telemetry.AgentRequest{
 		ConversationID: conversationID(ctx, a.CacheKey),
@@ -238,14 +235,10 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				return
 			}
 
-			modelID := ""
-			if a.Config.Model != nil {
-				modelID = a.Model()
-			}
-			effort := ""
-			if a.Config.Effort != nil {
-				effort = a.Effort()
-			}
+			// Keep request settings with its hooks and tools, even if the user
+			// changes settings while the response is streaming.
+			stepRuntime := a.hookRuntime(ctx)
+			stepCtx := hook.WithRuntime(ctx, stepRuntime)
 
 			instructions := ""
 			if a.Instructions != nil {
@@ -268,7 +261,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				// text deltas instead of producing the requested final document.
 				tools = nil
 			}
-			requireFinish := outputSchema == nil && a.RequireFinish != nil && a.RequireFinish(modelID)
+			requireFinish := outputSchema == nil && a.RequireFinish != nil && a.RequireFinish(stepRuntime.Model)
 			if requireFinish {
 				for _, t := range tools {
 					if t.Name == finishToolName {
@@ -284,8 +277,8 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			}
 
 			req := &request{
-				model:         modelID,
-				effort:        effort,
+				model:         stepRuntime.Model,
+				effort:        stepRuntime.ReasoningEffort,
 				instructions:  instructions,
 				cacheKey:      a.CacheKey,
 				messages:      a.requestMessages(),
@@ -293,12 +286,12 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				outputSchema:  outputSchema,
 				requireFinish: requireFinish,
 			}
-			if err := a.prepareRequest(ctx, req); err != nil {
+			if err := a.prepareRequest(stepCtx, req); err != nil {
 				stop(err)
 				return
 			}
 
-			resp, err := a.completeWithRetry(ctx, runtime.TurnID, req, yield)
+			resp, err := a.completeWithRetry(stepCtx, runtime.TurnID, req, yield)
 
 			if err != nil {
 				stop(err)
@@ -326,7 +319,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 						return
 					}
 				}
-				if err := a.processToolCalls(ctx, calls, tools, yield); err != nil {
+				if err := a.processToolCalls(stepCtx, calls, tools, yield); err != nil {
 					stop(err)
 					return
 				}
@@ -373,7 +366,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			hasPendingInput := len(a.pendingInput) > 0
 			a.queueMu.Unlock()
 			if !needsFollowUp && !hasPendingInput && !resp.incomplete {
-				outcome := a.runStopHooks(ctx, lastAssistantText(resp.messages), stopHookActive)
+				outcome := a.runStopHooks(stepCtx, lastAssistantText(resp.messages), stopHookActive)
 				if outcome.Stop {
 					reason := outcome.Reason
 					if reason == "" {
@@ -476,6 +469,24 @@ func (a *Agent) runStopHooks(ctx context.Context, lastAssistantMessage string, a
 		if outcome.Block && !combined.Block {
 			combined.Block = true
 			combined.Reason = outcome.Reason
+		}
+	}
+	// Child completion uses the same request context and continuation limits
+	// as ordinary Stop hooks. Do not finish the child while a Stop hook blocks.
+	runtime := hook.RuntimeFromContext(ctx)
+	if runtime.AgentID == "" || combined.Stop || combined.Block {
+		return combined
+	}
+	for _, h := range a.Hooks.SubagentStop {
+		outcome, err := h(ctx, runtime.AgentID, runtime.AgentType, lastAssistantMessage, active)
+		if err != nil {
+			continue
+		}
+		if outcome.Stop {
+			return outcome
+		}
+		if outcome.Block && !combined.Block {
+			combined = outcome
 		}
 	}
 	return combined

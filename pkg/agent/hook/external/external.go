@@ -834,7 +834,7 @@ func commonPayload(ctx context.Context, event, workDir string) map[string]any {
 	if runtime.TranscriptPath != "" {
 		transcript = runtime.TranscriptPath
 	}
-	return map[string]any{
+	payload := map[string]any{
 		"session_id":      runtime.SessionID,
 		"turn_id":         runtime.TurnID,
 		"transcript_path": transcript,
@@ -843,6 +843,10 @@ func commonPayload(ctx context.Context, event, workDir string) map[string]any {
 		"model":           runtime.Model,
 		"permission_mode": runtime.PermissionMode,
 	}
+	if runtime.ReasoningEffort != "" {
+		payload["reasoning_effort"] = runtime.ReasoningEffort
+	}
+	return payload
 }
 
 func addSubagent(payload map[string]any, runtime hook.Runtime) {

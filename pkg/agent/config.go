@@ -67,6 +67,9 @@ type Config struct {
 	Tools        func() []tool.Tool
 	Instructions func() string
 
+	// PermissionMode reports the active mode for hooks at each request boundary.
+	PermissionMode func() string
+
 	// RequireFinish enables the explicit finish_turn protocol for a model.
 	// Text-only replies cannot end Send when enabled. Structured output and
 	// native refusals use their own completion semantics.
@@ -114,6 +117,21 @@ type Config struct {
 	ReserveTokens int
 }
 
+func (c *Config) hookRuntime(ctx context.Context) hook.Runtime {
+	runtime := hook.RuntimeFromContext(ctx)
+	runtime.Model, runtime.ReasoningEffort = "", ""
+	if c.Model != nil {
+		runtime.Model = c.Model()
+	}
+	if c.Effort != nil {
+		runtime.ReasoningEffort = c.Effort()
+	}
+	if c.PermissionMode != nil {
+		runtime.PermissionMode = c.PermissionMode()
+	}
+	return runtime
+}
+
 func (c *Config) Derive() *Config {
 	return &Config{
 		client:              c.client,
@@ -122,6 +140,7 @@ func (c *Config) Derive() *Config {
 		Effort:              c.Effort,
 		Tools:               c.Tools,
 		Instructions:        c.Instructions,
+		PermissionMode:      c.PermissionMode,
 		RequireFinish:       c.RequireFinish,
 		ContextInstructions: c.ContextInstructions,
 		RoleModel:           c.RoleModel,

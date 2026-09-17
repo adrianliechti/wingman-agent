@@ -11,15 +11,16 @@ import (
 // may populate only the fields they know; the external hook adapter supplies
 // Codex-compatible zero/null values for the rest.
 type Runtime struct {
-	SessionID      string
-	TurnID         string
-	TranscriptPath string
-	CWD            string
-	Model          string
-	PermissionMode string
-	StartSource    string
-	AgentID        string
-	AgentType      string
+	SessionID       string
+	TurnID          string
+	TranscriptPath  string
+	CWD             string
+	Model           string
+	ReasoningEffort string
+	PermissionMode  string
+	StartSource     string
+	AgentID         string
+	AgentType       string
 }
 
 type runtimeKey struct{}

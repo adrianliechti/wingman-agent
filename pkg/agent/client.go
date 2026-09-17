@@ -279,9 +279,6 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 			if pending := pendingCalls[e.OutputIndex]; pending != nil {
 				delete(pendingCalls, e.OutputIndex)
 				pending.args = []byte(e.Arguments)
-				if e.Name != "" {
-					pending.name = e.Name
-				}
 
 				if !yield(pending.message(), nil) {
 					return nil, errYieldStopped

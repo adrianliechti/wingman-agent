@@ -275,7 +275,7 @@ func TestCompleteStreamsPartialToolCalls(t *testing.T) {
 
 	client := streamingTestClient(func(*http.Request) string {
 		return "data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\",\"status\":\"in_progress\"}}\n\n" +
-			"data: {\"type\":\"response.function_call_arguments.done\",\"sequence_number\":3,\"output_index\":0,\"item_id\":\"fc_1\",\"name\":\"read\",\"arguments\":\"" + args + "\"}\n\n" +
+			"data: {\"type\":\"response.function_call_arguments.done\",\"sequence_number\":3,\"output_index\":0,\"item_id\":\"fc_1\",\"arguments\":\"" + args + "\"}\n\n" +
 			"data: {\"type\":\"response.output_item.done\",\"sequence_number\":4,\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"" + args + "\",\"status\":\"completed\"}}\n\n" +
 			"data: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":1}}}\n\n"
 	})
@@ -301,12 +301,12 @@ func TestCompleteStreamsPartialToolCalls(t *testing.T) {
 		t.Fatalf("announcement = %+v", first)
 	}
 	wantArgs := `{"path":"main.go","line_end":20}`
-	if !last.Partial || last.ID != "call_1" || last.Args != wantArgs {
+	if !last.Partial || last.ID != "call_1" || last.Name != "read" || last.Args != wantArgs {
 		t.Fatalf("completion snapshot = %+v", last)
 	}
 
 	calls := extractToolCalls(resp.messages)
-	if len(calls) != 1 || calls[0].Partial || calls[0].ID != "call_1" || calls[0].Args != wantArgs {
+	if len(calls) != 1 || calls[0].Partial || calls[0].ID != "call_1" || calls[0].Name != "read" || calls[0].Args != wantArgs {
 		t.Fatalf("committed calls = %+v", calls)
 	}
 }

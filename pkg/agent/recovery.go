@@ -10,6 +10,12 @@ import (
 )
 
 func isRecoverableError(err error) bool {
+	code, _ := providerErrorDetails(err)
+	switch code {
+	case "insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded":
+		return false
+	}
+
 	if isContextOverflowError(err) || isReasoningReplayError(err) {
 		return true
 	}
@@ -21,7 +27,7 @@ func isRecoverableError(err error) bool {
 		switch responseErr.code {
 		case string(responses.ResponseErrorCodeServerError),
 			string(responses.ResponseErrorCodeRateLimitExceeded),
-			string(responses.ResponseErrorCodeVectorStoreTimeout):
+			string(responses.ResponseErrorCodeVectorStoreTimeout), "slow_down":
 			return true
 		default:
 			return false
@@ -41,6 +47,16 @@ func isRecoverableError(err error) bool {
 	// stream transport failure. Partial responses are not committed and their
 	// tool calls are not executed, so a replay cannot duplicate side effects.
 	return streamErr != nil
+}
+
+func providerErrorDetails(err error) (code, message string) {
+	if responseErr, ok := errors.AsType[*responseFailure](err); ok {
+		return responseErr.code, responseErr.message
+	}
+	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
+		return apiErr.Code, apiErr.Message
+	}
+	return "", ""
 }
 
 func streamOutputStarted(err error) bool {

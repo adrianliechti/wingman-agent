@@ -670,10 +670,28 @@ func userInputToBlock(raw json.RawMessage) (acp.ContentBlock, bool) {
 		return acp.TextBlock(it.Text), true
 	case "image":
 		var it struct {
-			URL string `json:"url"`
+			URL    string `json:"url"`
+			FileID string `json:"fileId"`
+			Detail string `json:"detail"`
 		}
-		_ = json.Unmarshal(raw, &it)
-		return acp.TextBlock(formatURIAsLink("image", it.URL)), true
+		if json.Unmarshal(raw, &it) != nil {
+			return acp.ContentBlock{}, false
+		}
+		if it.FileID != "" {
+			// File IDs are opaque provider references, not downloadable URLs.
+			// Keep the attachment visible and retain its identity for clients.
+			block := acp.TextBlock("Image attachment (preview unavailable): " + it.FileID)
+			metadata := map[string]any{"fileId": it.FileID}
+			if it.Detail != "" {
+				metadata["detail"] = it.Detail
+			}
+			block.Text.Meta = map[string]any{"codex": metadata}
+			return block, true
+		}
+		if it.URL != "" {
+			return acp.TextBlock(formatURIAsLink("image", it.URL)), true
+		}
+		return acp.ContentBlock{}, false
 	case "localImage":
 		var it struct {
 			Path string `json:"path"`

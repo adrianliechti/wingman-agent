@@ -22,6 +22,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
@@ -184,6 +185,27 @@ func testLiveContext(t *testing.T, model, switchModel string) {
 		return resp, err
 	}))...)
 	cfg.client = &client
+	checkHookSettings := func(ctx context.Context) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(requests) == 0 {
+			t.Error("tool hook ran before its model request")
+			return
+		}
+		issued := requests[len(requests)-1]
+		runtime := hook.RuntimeFromContext(ctx)
+		if runtime.Model != issued.Model || runtime.ReasoningEffort != "high" {
+			t.Errorf("tool hook model=%s effort=%s, issuing request model=%s effort=high", runtime.Model, runtime.ReasoningEffort, issued.Model)
+		}
+	}
+	cfg.Hooks.PreToolUse = append(cfg.Hooks.PreToolUse, func(ctx context.Context, _ tool.ToolCall) (hook.PreToolUseOutcome, error) {
+		checkHookSettings(ctx)
+		return hook.PreToolUseOutcome{}, nil
+	})
+	cfg.Hooks.PostToolUse = append(cfg.Hooks.PostToolUse, func(ctx context.Context, _ tool.ToolCall, _ string) (hook.Outcome, error) {
+		checkHookSettings(ctx)
+		return hook.Outcome{}, nil
+	})
 	a := &Agent{Config: cfg}
 	defer func() {
 		if t.Failed() {

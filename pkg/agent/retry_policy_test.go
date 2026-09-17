@@ -3,13 +3,15 @@ package agent
 import (
 	"context"
 	"errors"
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 )
 
 func TestRetryPolicyHonorsRetryAfterAndAddsBoundedJitter(t *testing.T) {
@@ -25,6 +27,34 @@ func TestRetryPolicyHonorsRetryAfterAndAddsBoundedJitter(t *testing.T) {
 		if delay < time.Second || delay > 30*time.Second {
 			t.Fatalf("unbounded backoff %v", delay)
 		}
+	}
+}
+
+func TestRetryPolicyStreamDelayHints(t *testing.T) {
+	for _, tc := range []struct {
+		message string
+		want    time.Duration
+	}{
+		{"Please try again in 11.054s.", 11054 * time.Millisecond},
+		{"TRY AGAIN IN 12345 ms.", 12345 * time.Millisecond},
+		{"Try again in 9 seconds.", 9 * time.Second},
+		{"Try again in 9 second.", 9 * time.Second},
+		{"Try again in 1ms.", 0},
+		{"Try again in -5s.", 0},
+		{"Try again in 9m.", 0},
+		{"Try again in 999999999999999999s.", 0},
+	} {
+		for _, code := range []string{"rate_limit_exceeded", "slow_down"} {
+			err := fmt.Errorf("wrapped: %w", &responseFailure{code: code, message: tc.message})
+			reason, delay := retryPolicy(err, 0, time.Now())
+			if reason != "Provider rate limit" || (tc.want > 0 && delay != tc.want) || (tc.want == 0 && (delay < time.Second || delay > 2*time.Second)) {
+				t.Errorf("%s %q: reason=%q delay=%v", code, tc.message, reason, delay)
+			}
+		}
+	}
+	_, delay := retryPolicy(&responseFailure{code: "server_error", message: "Try again in 60s."}, 0, time.Now())
+	if delay > 2*time.Second {
+		t.Fatalf("unrelated error controlled retry delay: %v", delay)
 	}
 }
 func TestHarnessOwnsHTTPRetriesAndRetryCanBeCancelled(t *testing.T) {

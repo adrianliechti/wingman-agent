@@ -1,0 +1,248 @@
+Window 1 (initial request)
+model: "test-model"
+stream: true
+instructions: "test"
+reasoning: {
+  "effort": "high",
+  "summary": "auto"
+}
+tools: [
+  {
+    "description": "Read the repository",
+    "name": "read",
+    "strict": false,
+    "type": "function"
+  }
+]
+cache_key: "snapshot-session"
+Request 1: 0 retained, 4 shown
+[0] {
+  "content": [
+    {
+      "text": "Original task: inspect and verify",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[1] {
+  "content": [
+    {
+      "text": "\u003c16200 bytes; sha256:e436eb5b5395\u003e Earlier observed progress.\nEarlier observed progress.\nEarlier observed progress.…",
+      "type": "output_text"
+    }
+  ],
+  "role": "assistant",
+  "type": "message"
+}
+[2] {
+  "content": [
+    {
+      "text": "[Session context]\nThis is the complete current session context. It replaces all earlier session context messages; omitted sections no longer apply.\n\nInitial guidance",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[3] {
+  "content": [
+    {
+      "text": "inspect",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+Request 2: 4 retained, 3 shown
+[4] {
+  "arguments": "{}",
+  "call_id": "read-1",
+  "name": "read",
+  "type": "function_call"
+}
+[5] {
+  "call_id": "read-1",
+  "output": "observed source",
+  "type": "function_call_output"
+}
+[6] {
+  "content": [
+    {
+      "text": "[Session context]\nThis is the complete current session context. It replaces all earlier session context messages; omitted sections no longer apply.\n\nUpdated guidance",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+
+Window 2 (settings changed: reasoning, tools)
+reasoning: {
+  "effort": "low",
+  "summary": "auto"
+}
+tools: [
+  {
+    "description": "Verify the result",
+    "name": "verify",
+    "strict": false,
+    "type": "function"
+  }
+]
+Request 3: 0 retained, 9 shown
+[0] {
+  "content": [
+    {
+      "text": "Original task: inspect and verify",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[1] {
+  "content": [
+    {
+      "text": "\u003c16200 bytes; sha256:e436eb5b5395\u003e Earlier observed progress.\nEarlier observed progress.\nEarlier observed progress.…",
+      "type": "output_text"
+    }
+  ],
+  "role": "assistant",
+  "type": "message"
+}
+[2] {
+  "content": [
+    {
+      "text": "[Session context]\nThis is the complete current session context. It replaces all earlier session context messages; omitted sections no longer apply.\n\nInitial guidance",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[3] {
+  "content": [
+    {
+      "text": "inspect",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[4] {
+  "arguments": "{}",
+  "call_id": "read-1",
+  "name": "read",
+  "type": "function_call"
+}
+[5] {
+  "call_id": "read-1",
+  "output": "observed source",
+  "type": "function_call_output"
+}
+[6] {
+  "content": [
+    {
+      "text": "[Session context]\nThis is the complete current session context. It replaces all earlier session context messages; omitted sections no longer apply.\n\nUpdated guidance",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[7] {
+  "content": [
+    {
+      "text": "inspection complete",
+      "type": "output_text"
+    }
+  ],
+  "role": "assistant",
+  "type": "message"
+}
+[8] {
+  "content": [
+    {
+      "text": "prepare verification",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+
+Window 3 (settings changed: stream, instructions, reasoning, tools, cache_key; history replaced at item 0)
+stream: false
+instructions: "\u003c1759 bytes; sha256:1df044039182\u003e Produce a continuation briefing for the assistant taking over this session. Do n…"
+reasoning: null
+tools: null
+cache_key: ""
+Request 4: 0 retained, 1 shown
+[0] "\u003c2476 bytes; sha256:14e90ff291af\u003e [user]: Original task: inspect and verify\n\n[assistant]: Earlier observed progres…"
+
+Window 4 (settings changed: stream, instructions, reasoning, tools, cache_key; history replaced at item 0)
+stream: true
+instructions: "test"
+reasoning: {
+  "effort": "low",
+  "summary": "auto"
+}
+tools: [
+  {
+    "description": "Verify the result",
+    "name": "verify",
+    "strict": false,
+    "type": "function"
+  }
+]
+cache_key: "snapshot-session"
+Request 5: 0 retained, 6 shown
+[0] {
+  "content": [
+    {
+      "text": "Original task: inspect and verify",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[1] {
+  "content": [
+    {
+      "text": "inspect",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[2] {
+  "content": [
+    {
+      "text": "prepare verification",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[3] {
+  "content": [
+    {
+      "text": "[Session context]\nThis is the complete current session context. It replaces all earlier session context messages; omitted sections no longer apply.\n\nUpdated guidance",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[4] {
+  "content": [
+    {
+      "text": "continue after compaction",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[5] {
+  "content": [
+    {
+      "text": "[Previous conversation summary]\n\nInspected the repository. Continue verification using updated guidance.\n\nContinue the active task from this checkpoint. Earlier requests remain the task scope; later messages may steer it. Do not repeat completed work or treat compaction as a new user request.",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}

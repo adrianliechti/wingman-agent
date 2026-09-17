@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
 )
 
@@ -18,6 +19,10 @@ func (e hookStopError) Error() string { return string(e) }
 // Hidden harness notices do not represent a new user prompt. Process the whole
 // batch so rejecting one prompt does not discard other accepted inputs.
 func (a *Agent) appendInputs(ctx context.Context, inputs ...Message) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+	ctx = hook.WithRuntime(ctx, a.hookRuntime(ctx))
 	var messages []Message
 	var inputErrors error
 	for _, message := range inputs {

@@ -90,9 +90,8 @@ type sessionState struct {
 	changedMu    sync.Mutex
 	changedPaths []string
 
-	projectInstructionsMu     sync.Mutex
-	projectInstructionsCache  string
-	projectInstructionsMtimes map[string]time.Time
+	projectInstructionsMu   sync.Mutex
+	projectInstructionCache projectInstructionCache
 
 	cancelMu    sync.Mutex
 	cancelFn    context.CancelFunc
@@ -130,6 +129,17 @@ func (s *sessionState) currentMode() sessionMode {
 
 func (s *sessionState) setMode(mode sessionMode) {
 	s.mode.Store(mode)
+}
+
+func (s *sessionState) permissionMode() string {
+	switch s.currentMode() {
+	case modePlan:
+		return "plan"
+	case modeUnattended:
+		return "bypassPermissions"
+	default:
+		return "default"
+	}
 }
 
 // New constructs a built-in code agent. Options are optional so existing
@@ -857,6 +867,7 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	sessionCfg.Tools = s.tools
 	sessionCfg.Instructions = s.instructions
 	sessionCfg.ContextInstructions = s.contextInstructions
+	sessionCfg.PermissionMode = s.permissionMode
 	if sessionCfg.RequireFinish == nil {
 		sessionCfg.RequireFinish = requiresFinish
 	}
@@ -1151,18 +1162,11 @@ func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, c
 	}
 	s.turnTools.Store(catalog)
 
-	permissionMode := "default"
-	switch s.currentMode() {
-	case modePlan:
-		permissionMode = "plan"
-	case modeUnattended:
-		permissionMode = "bypassPermissions"
-	}
 	ctx = hook.WithRuntime(ctx, hook.Runtime{
 		SessionID:      s.aa.CacheKey,
 		CWD:            s.parent.workspace.RootPath,
 		Model:          s.aa.Model(),
-		PermissionMode: permissionMode,
+		PermissionMode: s.permissionMode(),
 		StartSource:    s.startSource,
 	})
 	stream, err := s.aa.Send(ctx, input)
@@ -1452,114 +1456,6 @@ func localTimezone(now time.Time) string {
 		offset = -offset
 	}
 	return fmt.Sprintf("%s (UTC%s%02d:%02d)", name, sign, offset/3600, offset%3600/60)
-}
-
-const projectInstructionsMaxBytes = 25 * 1024
-
-type projectInstructionsEntry struct {
-	path  string
-	rel   string
-	mtime time.Time
-}
-
-func findProjectInstructions(wd string) []projectInstructionsEntry {
-	wd = filepath.Clean(wd)
-	var groups [][]projectInstructionsEntry
-	for dir := wd; ; {
-		var group []projectInstructionsEntry
-		for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-			p := filepath.Join(dir, name)
-			info, err := os.Stat(p)
-			if err != nil {
-				continue
-			}
-			rel, _ := filepath.Rel(wd, p)
-			if rel == "" {
-				rel = name
-			}
-			group = append(group, projectInstructionsEntry{path: p, rel: rel, mtime: info.ModTime()})
-		}
-		if len(group) > 0 {
-			groups = append(groups, group)
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-
-	// Root-level guidance first, most-specific (closest to wd) last, so the
-	// deeper file reads as overriding the general one.
-	var found []projectInstructionsEntry
-	for _, group := range slices.Backward(groups) {
-		found = append(found, group...)
-	}
-	return found
-}
-
-func renderProjectInstructions(entries []projectInstructionsEntry) (string, map[string]time.Time) {
-	parts := make([]string, 0, len(entries))
-	mtimes := make(map[string]time.Time, len(entries))
-	seen := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		data, err := os.ReadFile(e.path)
-		if err != nil {
-			continue
-		}
-		mtimes[e.path] = e.mtime
-		content := strings.TrimSpace(string(data))
-		if content == "" || seen[content] {
-			continue
-		}
-		seen[content] = true
-		parts = append(parts, fmt.Sprintf("From %s:\n\n%s", e.rel, content))
-	}
-
-	// Over budget, drop the broadest guidance (front of the list) first — the
-	// file closest to the working directory must survive.
-	total := 0
-	for _, p := range parts {
-		total += len(p)
-	}
-	omitted := 0
-	for len(parts) > 1 && total > projectInstructionsMaxBytes {
-		total -= len(parts[0])
-		parts = parts[1:]
-		omitted++
-	}
-
-	result := strings.Join(parts, "\n\n---\n\n")
-	if omitted > 0 {
-		result = fmt.Sprintf("[%d broader instruction file(s) omitted — over the %dKB budget]\n\n%s", omitted, projectInstructionsMaxBytes/1024, result)
-	}
-	if len(result) > projectInstructionsMaxBytes {
-		result = result[:projectInstructionsMaxBytes] + "\n\n[truncated]"
-	}
-	return result, mtimes
-}
-
-func (s *sessionState) projectInstructions() string {
-	s.projectInstructionsMu.Lock()
-	defer s.projectInstructionsMu.Unlock()
-
-	found := findProjectInstructions(s.parent.workspace.RootPath)
-	if len(found) == len(s.projectInstructionsMtimes) {
-		unchanged := true
-		for _, e := range found {
-			if prev, ok := s.projectInstructionsMtimes[e.path]; !ok || !prev.Equal(e.mtime) {
-				unchanged = false
-				break
-			}
-		}
-		if unchanged {
-			return s.projectInstructionsCache
-		}
-	}
-	result, mtimes := renderProjectInstructions(found)
-	s.projectInstructionsCache = result
-	s.projectInstructionsMtimes = mtimes
-	return result
 }
 
 // requiresFinish enables the explicit finish_turn protocol for Claude models,

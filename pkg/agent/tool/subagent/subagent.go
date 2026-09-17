@@ -148,8 +148,6 @@ type durableSpec struct {
 }
 
 type subagentRunner struct {
-	parent    *agent.Config
-	typ       subagentType
 	spec      durableSpec
 	sub       *agent.Agent
 	collector *reportCollector
@@ -193,7 +191,7 @@ func newSubagentRunner(parent *agent.Config, typ subagentType, spec durableSpec,
 	if err := sub.Restore(state); err != nil {
 		return nil, fmt.Errorf("restore child agent %s: %w", spec.AgentID, err)
 	}
-	return &subagentRunner{parent: parent, typ: typ, spec: spec, sub: sub, collector: collector}, nil
+	return &subagentRunner{spec: spec, sub: sub, collector: collector}, nil
 }
 
 func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Task, input string) (out string, err error) {
@@ -221,53 +219,17 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 	before := r.sub.UsageSnapshot()
 	startIdx := len(r.sub.MessagesSnapshot())
 
-	runOnce := func(prompt string) error {
-		stream, err := r.sub.Send(execCtx, []agent.Content{{Text: prompt}})
-		if err != nil {
-			return err
-		}
+	stream, runErr := r.sub.Send(execCtx, []agent.Content{{Text: input}})
+	if runErr == nil {
 		for msg, err := range stream {
 			if err != nil {
-				return err
+				runErr = err
+				break
 			}
 			if tk != nil {
 				updateTaskActivity(tk, msg)
 			}
 		}
-		return nil
-	}
-
-	runErr := runOnce(input)
-	stopHookActive := false
-	for runErr == nil && len(r.parent.Hooks.SubagentStop) > 0 {
-		runMessages := r.sub.MessagesSnapshot()
-		if startIdx <= len(runMessages) {
-			runMessages = runMessages[startIdx:]
-		}
-		lastMessage := strings.TrimSpace(finalText(runMessages))
-		var stopOutcome hook.Outcome
-		for _, h := range r.parent.Hooks.SubagentStop {
-			candidate, hookErr := h(execCtx, r.spec.AgentID, r.spec.AgentType, lastMessage, stopHookActive)
-			if hookErr != nil {
-				continue
-			}
-			if candidate.Stop {
-				stopOutcome = candidate
-				break
-			}
-			if candidate.Block && !stopOutcome.Block {
-				stopOutcome = candidate
-			}
-		}
-		if stopOutcome.Stop || !stopOutcome.Block {
-			break
-		}
-		stopHookActive = true
-		reason := stopOutcome.Reason
-		if reason == "" {
-			reason = "A SubagentStop hook requested another pass."
-		}
-		runErr = runOnce(reason)
 	}
 
 	usage := r.sub.UsageSnapshot()

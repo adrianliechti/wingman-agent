@@ -19,6 +19,7 @@ func TestIsRecoverableError(t *testing.T) {
 		{"post-output stream failure", &streamFailure{err: errors.New("connection reset"), outputStarted: true}, true},
 		{"in-band server error", &responseFailure{code: "server_error"}, true},
 		{"in-band rate limit", &responseFailure{code: "rate_limit_exceeded"}, true},
+		{"in-band slow down", &responseFailure{code: "slow_down"}, true},
 		{"in-band vector timeout", &responseFailure{code: "vector_store_timeout"}, true},
 		{"in-band error after output", &responseFailure{code: "server_error", outputStarted: true}, true},
 		{"in-band invalid prompt", &responseFailure{code: "invalid_prompt"}, false},
@@ -43,6 +44,20 @@ func TestIsRecoverableError(t *testing.T) {
 				t.Fatalf("isRecoverableError() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestQuotaFailuresAreTerminalAcrossTransports(t *testing.T) {
+	for _, code := range []string{"insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded"} {
+		for _, err := range []error{
+			&responseFailure{code: code},
+			&openai.Error{StatusCode: 429, Code: code},
+			&streamFailure{err: &openai.Error{StatusCode: 503, Code: code}},
+		} {
+			if isRecoverableError(err) {
+				t.Errorf("retried quota failure %T: %s", err, code)
+			}
+		}
 	}
 }
 
