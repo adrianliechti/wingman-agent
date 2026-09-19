@@ -91,7 +91,7 @@ func TestCompleteClosesStreamOnEarlyExit(t *testing.T) {
 					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: body, Request: r}, nil
 				}),
 			}))
-			_, err := complete(t.Context(), &client, &request{}, func(Message, error) bool { return !tc.stopYield })
+			_, err := (&Config{client: &client}).complete(t.Context(), &request{}, func(Message, error) bool { return !tc.stopYield })
 			if (err != nil) != tc.wantError || (tc.stopYield && !errors.Is(err, errYieldStopped)) {
 				t.Fatalf("unexpected completion error: %v", err)
 			}

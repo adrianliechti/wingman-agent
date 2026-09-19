@@ -281,7 +281,7 @@ func TestCompleteStreamsPartialToolCalls(t *testing.T) {
 	})
 
 	var partials []ToolCall
-	resp, err := complete(context.Background(), &client, &request{}, func(m Message, err error) bool {
+	resp, err := (&Config{client: &client}).complete(context.Background(), &request{}, func(m Message, err error) bool {
 		for _, c := range m.Content {
 			if c.ToolCall != nil {
 				partials = append(partials, *c.ToolCall)
@@ -324,7 +324,7 @@ func TestCompleteTracksInterleavedPartialCallsByOutputIndex(t *testing.T) {
 	})
 
 	latest := map[string]string{}
-	resp, err := complete(context.Background(), &client, &request{}, func(m Message, _ error) bool {
+	resp, err := (&Config{client: &client}).complete(context.Background(), &request{}, func(m Message, _ error) bool {
 		for _, c := range m.Content {
 			if c.ToolCall != nil {
 				latest[c.ToolCall.ID] = c.ToolCall.Args
@@ -352,7 +352,7 @@ func TestCompleteDoesNotCommitIncompleteToolCall(t *testing.T) {
 	})
 
 	partialSeen := false
-	resp, err := complete(context.Background(), &client, &request{}, func(m Message, err error) bool {
+	resp, err := (&Config{client: &client}).complete(context.Background(), &request{}, func(m Message, err error) bool {
 		for _, c := range m.Content {
 			partialSeen = partialSeen || c.ToolCall != nil && c.ToolCall.Partial
 		}
@@ -409,7 +409,7 @@ func TestCompleteClassifiesTransientTerminalFailureBeforeOutput(t *testing.T) {
 		return "data: {\"type\":\"response.failed\",\"sequence_number\":1,\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"try again\"}}}\n\n"
 	})
 
-	_, err := complete(context.Background(), &client, &request{}, yieldAll)
+	_, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err == nil {
 		t.Fatal("complete error = nil, want response failure")
 	}
@@ -512,7 +512,7 @@ func TestCompleteRetriesTransientTerminalFailureAfterOutput(t *testing.T) {
 		return "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.failed\",\"sequence_number\":2,\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"try again\"}}}\n\n"
 	})
 
-	_, err := complete(context.Background(), &client, &request{}, yieldAll)
+	_, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err == nil {
 		t.Fatal("complete error = nil, want response failure")
 	}
@@ -675,7 +675,7 @@ func TestCompleteBackfillsOutputFromTerminalEvent(t *testing.T) {
 		return "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":1}}}\n\ndata: [DONE]\n\n"
 	})
 
-	resp, err := complete(context.Background(), &client, &request{}, yieldAll)
+	resp, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +689,7 @@ func TestCompleteBackfillsItemsMissingFromDoneEvents(t *testing.T) {
 		return "data: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"first\",\"annotations\":[]}]}}\n\ndata: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"first\",\"annotations\":[]}]},{\"type\":\"message\",\"id\":\"msg_2\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"second\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":2}}}\n\n"
 	})
 
-	resp, err := complete(context.Background(), &client, &request{}, yieldAll)
+	resp, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -848,7 +848,7 @@ func TestCompleteRejectsStreamWithoutTerminalEvent(t *testing.T) {
 		return "data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{}}\n\ndata: [DONE]\n\n"
 	})
 
-	_, err := complete(context.Background(), &client, &request{}, yieldAll)
+	_, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err == nil {
 		t.Fatal("expected an incomplete stream error")
 	}
@@ -862,7 +862,7 @@ func TestCompleteRetriesStreamWithoutTerminalAfterOutput(t *testing.T) {
 		return "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"partial\"}\n\ndata: [DONE]\n\n"
 	})
 
-	_, err := complete(context.Background(), &client, &request{}, yieldAll)
+	_, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err == nil {
 		t.Fatal("expected an incomplete stream error")
 	}

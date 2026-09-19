@@ -118,12 +118,18 @@ func TestShouldCompactProactivelyScalesReserveOnLargeWindows(t *testing.T) {
 		t.Error("should compact within 10% of a 1M window")
 	}
 
-	// 200k window: the fixed 32k default already exceeds 10% (20k), so it wins.
-	if a.compactionOvershoot("claude-opus-4-5", 167_000) > 0 {
-		t.Error("should not compact below window-reserve on a 200k window")
+	// 200k window: the 64k generation allowance exceeds the 32k baseline
+	// and 10% margin, so compaction must leave room for the full response.
+	if a.compactionOvershoot("claude-opus-4-5", 136_000) > 0 {
+		t.Error("should not compact while the full output allowance still fits")
 	}
-	if a.compactionOvershoot("claude-opus-4-5", 169_000) <= 0 {
-		t.Error("should compact past window-reserve on a 200k window")
+	if a.compactionOvershoot("claude-opus-4-5", 136_001) <= 0 {
+		t.Error("should compact when the full output allowance no longer fits")
+	}
+
+	// A model limited to 32k output needs only the existing 32k baseline.
+	if a.compactionOvershoot("gpt-5.3-codex-spark", 96_000) > 0 || a.compactionOvershoot("gpt-5.3-codex-spark", 96_001) <= 0 {
+		t.Error("should reserve 32k for a 128k model with a 32k output allowance")
 	}
 }
 
@@ -137,6 +143,23 @@ func TestShouldCompactProactivelyHonorsExplicitReserve(t *testing.T) {
 	}
 	if a.compactionOvershoot("claude-opus-4-8", 995_000) <= 0 {
 		t.Error("explicit reserve still triggers once its threshold is crossed")
+	}
+}
+
+func TestShouldCompactProactivelyUsesOutputTokenBudgetOverride(t *testing.T) {
+	for _, tc := range []struct {
+		budget     int
+		inputLimit int64
+	}{
+		{budget: 0, inputLimit: 208_000},
+		{budget: 96_000, inputLimit: 176_000},
+		{budget: 256_000, inputLimit: 144_000}, // Clamped to the model's 128k output limit.
+		{budget: 16_000, inputLimit: 240_000},  // Keep the 32k minimum context reserve.
+	} {
+		a := &Agent{Config: &Config{ContextWindow: 272_000, OutputTokenBudget: tc.budget}}
+		if a.compactionOvershoot("gpt-6-astra", tc.inputLimit) > 0 || a.compactionOvershoot("gpt-6-astra", tc.inputLimit+1) <= 0 {
+			t.Errorf("output budget %d should trigger compaction above %d input tokens", tc.budget, tc.inputLimit)
+		}
 	}
 }
 

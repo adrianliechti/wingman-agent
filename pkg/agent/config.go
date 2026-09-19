@@ -27,7 +27,8 @@ const (
 
 	DefaultContextWindow = 400_000
 
-	DefaultReserveTokens = 32_000
+	DefaultReserveTokens     = 32_000
+	DefaultOutputTokenBudget = 64_000
 )
 
 func ContextWindowFor(id string) int {
@@ -45,6 +46,21 @@ func ContextWindowFor(id string) int {
 	}
 
 	return DefaultContextWindow
+}
+
+// outputTokenBudgetFor clamps a per-response allowance, including reasoning,
+// to the model's advertised output limit. Unknown limits leave the provider
+// default in effect unless an explicit budget is supplied.
+func (c *Config) outputTokenBudgetFor(id string) int {
+	budget := c.OutputTokenBudget
+	m, ok := model.Find(id)
+	if !ok || m.OutputTokens() <= 0 {
+		return max(0, budget)
+	}
+	if budget <= 0 {
+		budget = DefaultOutputTokenBudget
+	}
+	return min(budget, m.OutputTokens())
 }
 
 // ModelOption is a resolved model role. Efforts lists the supported reasoning
@@ -96,6 +112,12 @@ type Config struct {
 	// retries and tool calls do not consume turns. Zero uses the default;
 	// negative disables the safety bound.
 	MaxTurns int
+
+	// OutputTokenBudget limits tokens generated per main-agent response,
+	// including reasoning, and is clamped to a known model output limit.
+	// Zero uses DefaultOutputTokenBudget for known limits and the provider
+	// default otherwise. Utility helpers retain their own output budgets.
+	OutputTokenBudget int
 
 	// MaxTaskTokens limits cumulative reported input + output tokens per task,
 	// including inline agents, retries and utility calls. Zero is unlimited.
@@ -161,11 +183,12 @@ func (c *Config) Derive() *Config {
 			Stop:              slices.Clone(c.Hooks.Stop),
 		},
 
-		MaxTurns:         c.MaxTurns,
-		MaxTaskTokens:    c.MaxTaskTokens,
-		MaxTaskDuration:  c.MaxTaskDuration,
-		MaxParallelTools: c.MaxParallelTools,
-		ToolTimeout:      c.ToolTimeout,
+		MaxTurns:          c.MaxTurns,
+		OutputTokenBudget: c.OutputTokenBudget,
+		MaxTaskTokens:     c.MaxTaskTokens,
+		MaxTaskDuration:   c.MaxTaskDuration,
+		MaxParallelTools:  c.MaxParallelTools,
+		ToolTimeout:       c.ToolTimeout,
 
 		ContextWindow: c.ContextWindow,
 		ReserveTokens: c.ReserveTokens,
@@ -247,6 +270,13 @@ func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {
 func DefaultConfig() (*Config, error) {
 	client := createClient()
 	cfg := &Config{client: &client}
+	if value := strings.TrimSpace(os.Getenv("WINGMAN_OUTPUT_TOKEN_BUDGET")); value != "" {
+		budget, err := strconv.Atoi(value)
+		if err != nil || budget < 0 {
+			return nil, fmt.Errorf("WINGMAN_OUTPUT_TOKEN_BUDGET must be a nonnegative integer")
+		}
+		cfg.OutputTokenBudget = budget
+	}
 	if err := cfg.loadTaskLimits(); err != nil {
 		return nil, err
 	}

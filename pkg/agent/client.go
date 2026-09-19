@@ -112,7 +112,7 @@ type response struct {
 	incompleteReason string
 }
 
-func complete(ctx context.Context, client *openai.Client, r *request, yield func(Message, error) bool) (*response, error) {
+func (c *Config) complete(ctx context.Context, r *request, yield func(Message, error) bool) (*response, error) {
 	params := responses.ResponseNewParams{
 		Model:        r.model,
 		Instructions: openai.String(r.instructions),
@@ -130,6 +130,9 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 		// Overflow must surface as an error so compactMessages owns recovery;
 		// "auto" would silently drop mid-conversation context server-side.
 		Truncation: responses.ResponseNewParamsTruncationDisabled,
+	}
+	if budget := c.outputTokenBudgetFor(r.model); budget > 0 {
+		params.MaxOutputTokens = openai.Int(int64(budget))
 	}
 	if r.cacheKey != "" {
 		params.PromptCacheKey = openai.String(r.cacheKey)
@@ -174,7 +177,7 @@ func complete(ctx context.Context, client *openai.Client, r *request, yield func
 	defer idle.Stop()
 
 	// The harness owns retries and their visible recovery boundaries.
-	stream := client.Responses.NewStreaming(streamCtx, params, option.WithMaxRetries(0))
+	stream := c.client.Responses.NewStreaming(streamCtx, params, option.WithMaxRetries(0))
 	defer stream.Close()
 
 	var outputItems []responses.ResponseInputItemUnionParam

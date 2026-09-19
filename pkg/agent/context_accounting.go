@@ -122,12 +122,10 @@ func (a *Agent) contextInputBudget(model string) int {
 
 	reserve := a.Config.ReserveTokens
 	if reserve <= 0 {
-		reserve = DefaultReserveTokens
-		// A fixed default reserve is too thin a margin on large (1M) windows —
-		// it would defer compaction to ~97% of the window and lean on the
-		// reactive overflow path. Keep at least a 10% headroom, matching the
-		// ~90% trigger other Responses-API agents use. An explicit
-		// Config.ReserveTokens is honored as-is.
+		// Leave room for generation and keep at least 10% headroom for context
+		// growth on large windows. An explicit Config.ReserveTokens is honored
+		// as-is; small effective windows retain at least half for input.
+		reserve = max(DefaultReserveTokens, a.outputTokenBudgetFor(model))
 		if frac := window / 10; frac > reserve {
 			reserve = frac
 		}

@@ -562,7 +562,7 @@ func (a *Agent) completeRun(ctx context.Context, turnID string, req *request, yi
 		return nil, err
 	}
 
-	resp, runErr := complete(ctx, a.client, req, yield)
+	resp, runErr := a.complete(ctx, req, yield)
 	if resp != nil {
 		chargeTaskUsage(ctx, resp.usage)
 	}

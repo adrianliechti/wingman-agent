@@ -261,6 +261,7 @@ backend at `http://localhost:4242/v1`.
 
 | Variable | Description |
 |----------|-------------|
+| `WINGMAN_OUTPUT_TOKEN_BUDGET` | Built-in agent output allowance per response, including reasoning; clamped to the model's known maximum. `0` or unset uses the default policy described below |
 | `WINGMAN_TASK_MAX_TOKENS` | Built-in agent token allowance per turn, including inline helpers and in-turn utility calls; `0` or unset disables the limit |
 | `WINGMAN_TASK_TIMEOUT` | Built-in agent time allowance per turn, e.g. `20m`; `0s` or unset disables the limit |
 | `WINGMAN_SANDBOX` | `off` lifts the workspace path restriction from the file tools |
@@ -277,6 +278,15 @@ response reaches it; an in-flight response can exceed the remaining allowance.
 This is a token allowance, not a dollar billing cap. Inline helpers share their
 parent's allowance; detached tasks start separate allowances. Native external
 agents use their own limits.
+
+Built-in agent responses default to `min(64,000, model output limit)` for
+`max_output_tokens`. Set `WINGMAN_OUTPUT_TOKEN_BUDGET`, for example to `128000`,
+to request a different allowance, still clamped to the model catalog's output
+limit. Unknown limits keep the provider default unless an explicit budget is
+configured. This per-response allowance includes reasoning tokens.
+Default context reserves account for the resolved allowance, while explicit
+`ReserveTokens` overrides remain in effect. Utility helpers keep their separate
+output limits.
 
 For queue controls, draft recovery, per-turn review, and the regression test
 commands, see [Review improvements](docs/review-improvements.md).

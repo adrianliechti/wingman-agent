@@ -29,7 +29,7 @@ func TestCompleteSendsModelVerbosity(t *testing.T) {
 				return "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"resp_1\",\"model\":\"" + tc.model + "\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
 			})
 
-			if _, err := complete(context.Background(), &client, &request{model: tc.model, effort: "low"}, func(Message, error) bool { return true }); err != nil {
+			if _, err := (&Config{client: &client}).complete(context.Background(), &request{model: tc.model, effort: "low"}, func(Message, error) bool { return true }); err != nil {
 				t.Fatal(err)
 			}
 

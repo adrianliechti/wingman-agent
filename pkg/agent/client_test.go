@@ -23,7 +23,7 @@ func TestCompleteRetainsOnlyReplayableOutput(t *testing.T) {
 					)
 					return strings.ReplaceAll(stream, "response.completed", "response.incomplete")
 				})
-				resp, err := complete(t.Context(), &client, &request{model: "test"}, func(Message, error) bool { return true })
+				resp, err := (&Config{client: &client}).complete(t.Context(), &request{model: "test"}, func(Message, error) bool { return true })
 				if err != nil {
 					t.Fatal(err)
 				}
