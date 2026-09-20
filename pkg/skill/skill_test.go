@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -458,7 +459,7 @@ func TestMergeDropsShadowedNonPluginSkill(t *testing.T) {
 	}
 }
 
-func TestLoadDirEnforcesAgentSkillsNameAndDirectoryRules(t *testing.T) {
+func TestLoadDirEnforcesAgentSkillsNameRulesButAllowsDirectoryMismatch(t *testing.T) {
 	root := t.TempDir()
 	writeSkill(t, filepath.Join(root, "right-name"), "other-name", "mismatch")
 	writeSkill(t, filepath.Join(root, "Bad-Name"), "Bad-Name", "uppercase")
@@ -466,8 +467,12 @@ func TestLoadDirEnforcesAgentSkillsNameAndDirectoryRules(t *testing.T) {
 	writeSkill(t, filepath.Join(root, "valid-skill"), "valid-skill", "valid")
 
 	skills := LoadDir(root)
-	if len(skills) != 1 || skills[0].Name != "valid-skill" {
-		t.Fatalf("skills = %#v, want only the Agent Skills-conformant entry", skills)
+	names := make([]string, len(skills))
+	for i, sk := range skills {
+		names[i] = sk.Name
+	}
+	if len(skills) != 2 || !slices.Contains(names, "other-name") || !slices.Contains(names, "valid-skill") {
+		t.Fatalf("skills = %#v, want the directory-mismatched and valid entries, not the malformed names", skills)
 	}
 }
 

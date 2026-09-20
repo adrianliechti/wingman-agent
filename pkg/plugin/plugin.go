@@ -223,6 +223,9 @@ func loadSkills(root, name string) ([]skill.Skill, []string) {
 			notes = append(notes, fmt.Sprintf("skipping skill %q: %v", entry.Name(), loadErr))
 			continue
 		}
+		if msg := skill.DirectoryMismatchWarning(sk.Name, entry.Name()); msg != "" {
+			notes = append(notes, msg)
+		}
 		if !sk.Portable() {
 			notes = append(notes, fmt.Sprintf("skipping skill %q: plugin skills must use portable Agent Skills frontmatter", entry.Name()))
 			continue

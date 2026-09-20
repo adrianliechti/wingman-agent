@@ -388,6 +388,11 @@ func loadDir(dir string, report bool, excludedRoot string) []Skill {
 				}
 				return
 			}
+			if report {
+				if msg := DirectoryMismatchWarning(sk.Name, filepath.Base(current)); msg != "" {
+					fmt.Fprintf(os.Stderr, "skill: %s\n", msg)
+				}
+			}
 			skills = append(skills, sk)
 			return
 		}
@@ -672,11 +677,19 @@ func parseSkillFile(path string) (Skill, error) {
 	if err != nil {
 		return Skill{}, err
 	}
-	directoryName := filepath.Base(filepath.Dir(path))
-	if skill.Name != directoryName {
-		return Skill{}, fmt.Errorf("skill name %q must match parent directory %q", skill.Name, filepath.Base(filepath.Dir(path)))
-	}
 	return skill, nil
+}
+
+// DirectoryMismatchWarning returns a human-readable warning when a skill's
+// frontmatter name differs from its containing directory name, matching the
+// Agent Skills specification's naming convention without rejecting the skill
+// the way Claude Code and other implementations tolerate the mismatch too.
+// It returns "" when the names match.
+func DirectoryMismatchWarning(name, directoryName string) string {
+	if name == directoryName {
+		return ""
+	}
+	return fmt.Sprintf("skill name %q does not match its directory %q", name, directoryName)
 }
 
 func parseSkillData(data string) (Skill, string, error) {
