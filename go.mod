@@ -4,10 +4,10 @@ go 1.26.3
 
 require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
-	github.com/adrianliechti/go-extract v0.0.0-20260906123702-488d5cedbae8
+	github.com/adrianliechti/go-extract v0.0.0-20260922092841-9e05cb92f7ad
 	github.com/adrianliechti/go-shell v0.1.7
 	github.com/alecthomas/chroma/v2 v2.27.0
-	github.com/bmatcuk/doublestar/v4 v4.10.0
+	github.com/bmatcuk/doublestar/v4 v4.10.2
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
@@ -18,8 +18,8 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/yamux v0.1.2
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/odvcencio/gotreesitter v0.52.0
-	github.com/openai/openai-go/v3 v3.61.0
+	github.com/odvcencio/gotreesitter v0.53.0
+	github.com/openai/openai-go/v3 v3.64.3
 	github.com/rivo/uniseg v0.4.7
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/sahilm/fuzzy v0.1.3
