@@ -15,6 +15,8 @@ func TestModelRuntimeFields(t *testing.T) {
 		efforts []string
 	}{
 		{"claude-sonnet-5", 1_000_000, nil},
+		{"claude-opus-5-5", 1_000_000, claudeAlwaysThinkingEfforts},
+		{"claude-opus-5", 1_000_000, nil},
 		{"claude-fable-5", 1_000_000, claudeAlwaysThinkingEfforts},
 		{"claude-fable-5-1", 1_000_000, claudeAlwaysThinkingEfforts},
 		{"claude-mythos-5", 1_000_000, claudeAlwaysThinkingEfforts},

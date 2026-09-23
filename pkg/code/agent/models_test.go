@@ -260,6 +260,7 @@ func TestSetModelResetsEffort(t *testing.T) {
 func TestModelClass(t *testing.T) {
 	tests := map[string]model.Class{
 		"gpt-6-astra":       model.ClassLarge,
+		"claude-opus-5-5":   model.ClassLarge,
 		"claude-opus-5":     model.ClassLarge,
 		"claude-opus-4-8":   model.ClassLarge,
 		"gpt-5.6-sol":       model.ClassLarge,

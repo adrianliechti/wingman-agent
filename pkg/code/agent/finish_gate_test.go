@@ -7,6 +7,7 @@ func TestRequiresFinish(t *testing.T) {
 		"claude-sonnet-5":                      true,
 		"eu.anthropic.claude-sonnet-5-v1:0":    true,
 		"anthropic/claude-opus-5":              true,
+		"anthropic/claude-opus-5-5":            true,
 		"Anthropic-Claude":                     true,
 		"bedrock/eu.anthropic.claude-opus-4-8": true,
 		"gpt-6-astra":                          false,

@@ -25,7 +25,7 @@ func TestVariantFor(t *testing.T) {
 
 	for _, id := range []string{
 		"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.1", "gpt-4o",
-		"claude-sonnet-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-6", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+		"claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-6", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
 		"gemini-3.7-flash", "gemini-3.6-flash", "glm-5.3", "glm-5.2", "kimi-k3", "minimax-m3", "grok-4.6",
 		"qwen3.8-max", "qwen3.8", "qwen3.7-plus", "qwen3.5-plus",
 	} {
@@ -69,6 +69,9 @@ func TestVariantFor(t *testing.T) {
 
 	if VariantFor("claude-opus-5").Agent == VariantFor("claude-sonnet-5").Agent {
 		t.Error("Claude Opus 5 should keep its model-specific prompt")
+	}
+	if VariantFor("claude-opus-5-5").Agent == VariantFor("claude-opus-5").Agent {
+		t.Error("Claude Opus 5.5 should keep its model-specific prompt")
 	}
 	if VariantFor("claude-opus-4-8").Agent == VariantFor("claude-opus-4-7").Agent {
 		t.Error("Claude Opus 4.8 should keep its model-specific prompt")
@@ -166,6 +169,21 @@ func TestClaudePromptFamilies(t *testing.T) {
 		}
 	}
 
+	opus55 := VariantFor("claude-opus-5-5").Agent
+	for _, want := range []string{
+		"# Communicating with the user",
+		"must be in the final text message of your turn",
+		"# Delivering work",
+		"# Corrections",
+	} {
+		if !strings.Contains(opus55, want) {
+			t.Errorf("Opus 5.5 prompt missing guidance %q", want)
+		}
+	}
+	if strings.Contains(opus55, "Fable and Mythos share the same underlying model") {
+		t.Error("Opus 5.5 prompt inherited Fable-only identity guidance")
+	}
+
 	opus48 := VariantFor("claude-opus-4-8").Agent
 	for _, unwanted := range []string{"# Communicating with the user", "# Delivering work", "# Corrections"} {
 		if strings.Contains(opus48, unwanted) {
@@ -183,7 +201,7 @@ func TestClaudePromptFamilies(t *testing.T) {
 		}
 	}
 
-	for _, id := range []string{"claude-sonnet-5", "claude-opus-5", "claude-opus-4-8", "claude-fable-5-1", "claude-mythos-5-1"} {
+	for _, id := range []string{"claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-fable-5-1", "claude-mythos-5-1"} {
 		agent := VariantFor(id).Agent
 		for _, vendorOnly := range []string{"# Environment", "<total_tokens>", "gitStatus:", "TaskCreate", "https://github.com/anthropics/claude-code"} {
 			if strings.Contains(agent, vendorOnly) {
@@ -196,6 +214,7 @@ func TestClaudePromptFamilies(t *testing.T) {
 func TestBuildInstructionsRendersModelTemplate(t *testing.T) {
 	for _, id := range []string{
 		"claude-sonnet-5",
+		"claude-opus-5-5",
 		"claude-opus-5",
 		"claude-opus-4-8",
 		"claude-fable-5-1",
@@ -323,7 +342,7 @@ func TestBuildInstructionsSharedSections(t *testing.T) {
 }
 
 func TestBuildInstructionsAlwaysExplainsProjectInstructionScope(t *testing.T) {
-	for _, id := range []string{"claude-opus-5", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.2", "gpt-5.1-codex"} {
+	for _, id := range []string{"claude-opus-5-5", "claude-opus-5", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.2", "gpt-5.1-codex"} {
 		t.Run(id, func(t *testing.T) {
 			got := BuildInstructions(VariantFor(id).Agent, SectionData{})
 			if !strings.Contains(got, "# Project Guidelines\n") || !strings.Contains(got, "check for applicable instruction files") {
@@ -340,6 +359,7 @@ func TestAgentPromptPolicy(t *testing.T) {
 	for _, id := range []string{
 		"some-unknown-model",
 		"claude-sonnet-5",
+		"claude-opus-5-5",
 		"claude-opus-5",
 		"claude-opus-4-8",
 		"claude-fable-5-1",
@@ -384,6 +404,7 @@ func TestAgentPromptsExcludeRemovedTools(t *testing.T) {
 	for _, id := range []string{
 		"some-unknown-model",
 		"claude-sonnet-5",
+		"claude-opus-5-5",
 		"claude-opus-5",
 		"claude-opus-4-8",
 		"claude-fable-5-1",

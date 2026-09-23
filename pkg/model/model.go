@@ -116,6 +116,22 @@ var Models = []Model{
 		Context: 1000000,
 	},
 	{
+		ID: "claude-opus-5-5",
+
+		Namespace: "anthropic",
+
+		Name: "Claude Opus 5.5",
+
+		Class: ClassLarge,
+
+		Output: 128000,
+
+		Context: 1000000,
+
+		// Thinking cannot be disabled on Opus 5.5, so "none" is not offered.
+		Efforts: claudeAlwaysThinkingEfforts,
+	},
+	{
 		ID: "claude-opus-5",
 
 		Namespace: "anthropic",
@@ -330,7 +346,8 @@ var Models = []Model{
 		Context:          1050000,
 		ContextThreshold: 272_000,
 
-		Efforts: gpt6SolLunaEfforts,
+		Efforts:   gpt6SolLunaEfforts,
+		Verbosity: "low",
 	},
 	{
 		ID: "gpt-6-luna",
@@ -344,7 +361,8 @@ var Models = []Model{
 		Context:          1050000,
 		ContextThreshold: 272_000,
 
-		Efforts: gpt6SolLunaEfforts,
+		Efforts:   gpt6SolLunaEfforts,
+		Verbosity: "low",
 	},
 	{
 		ID: "gpt-5.6-sol",

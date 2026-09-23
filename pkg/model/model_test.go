@@ -21,6 +21,7 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"minimax-m3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"MiniMax-M3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"grok-4.6", "Grok 4.6", ClassLarge, 500_000, 500_000},
+		{"claude-opus-5-5", "Claude Opus 5.5", ClassLarge, 1_000_000, 128_000},
 		{"claude-fable-5-1", "Claude Fable 5.1", ClassLarge, 1_000_000, 128_000},
 		{"claude-mythos-5-1", "Claude Mythos 5.1", ClassLarge, 1_000_000, 128_000},
 		{"gpt-6-astra", "GPT 6 Astra", ClassLarge, 1_050_000, 128_000},
@@ -81,7 +82,7 @@ func TestClaude51ModelAvailability(t *testing.T) {
 
 func TestAlwaysThinkingClaudeEfforts(t *testing.T) {
 	want := []string{"low", "medium", "high", "xhigh", "max"}
-	for _, id := range []string{"claude-fable-5", "claude-fable-5-1", "claude-mythos-5", "claude-mythos-5-1"} {
+	for _, id := range []string{"claude-opus-5-5", "claude-fable-5", "claude-fable-5-1", "claude-mythos-5", "claude-mythos-5-1"} {
 		t.Run(id, func(t *testing.T) {
 			got, ok := Find(id)
 			if !ok {
@@ -89,6 +90,20 @@ func TestAlwaysThinkingClaudeEfforts(t *testing.T) {
 			}
 			if !slices.Equal(got.Efforts, want) {
 				t.Fatalf("Find(%q).Efforts = %v, want %v", id, got.Efforts, want)
+			}
+		})
+	}
+}
+
+func TestGPT6Verbosity(t *testing.T) {
+	for _, id := range []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"} {
+		t.Run(id, func(t *testing.T) {
+			got, ok := Find(id)
+			if !ok {
+				t.Fatalf("Find(%q) failed", id)
+			}
+			if got.Verbosity != "low" {
+				t.Fatalf("Find(%q).Verbosity = %q, want low", id, got.Verbosity)
 			}
 		})
 	}
@@ -173,6 +188,7 @@ func TestProviderPrefixedModelMapping(t *testing.T) {
 
 	cases := map[string]string{
 		"anthropic/claude-sonnet-5":   "Claude Sonnet 5",
+		"anthropic/claude-opus-5-5":   "Claude Opus 5.5",
 		"anthropic/claude-fable-5-1":  "Claude Fable 5.1",
 		"anthropic/claude-mythos-5-1": "Claude Mythos 5.1",
 		"openai/gpt-5.6-sol":          "GPT 5.6 Sol",
@@ -216,6 +232,7 @@ func TestCurrentProviderModelClassification(t *testing.T) {
 		{"gpt-6-astra", "gpt", ClassLarge},
 		{"gpt-6-sol", "gpt", ClassMedium},
 		{"gpt-6-luna", "gpt", ClassSmall},
+		{"claude-opus-5-5", "claude", ClassLarge},
 	}
 
 	for _, tc := range cases {

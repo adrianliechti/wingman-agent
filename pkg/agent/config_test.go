@@ -18,6 +18,7 @@ func TestContextWindowFor(t *testing.T) {
 		want  int
 	}{
 		{"claude-sonnet-5", 1_000_000},
+		{"claude-opus-5-5", 1_000_000},
 		{"claude-opus-4-8", 1_000_000},
 		{"claude-fable-5-1", 1_000_000},
 		{"claude-fable-5", 1_000_000},
