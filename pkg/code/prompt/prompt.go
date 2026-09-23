@@ -20,6 +20,10 @@ var modePlan string
 //go:embed mode_unattended.txt
 var modeUnattended string
 
+// GPT-6 variants adapt each model's instructions_template from Codex's
+// codex-rs/models-manager/models.json (40eac3ce8a), using Wingman's tools and
+// shared session-context sections while retaining model-specific guidance.
+//
 //go:embed models
 var modelFS embed.FS
 

@@ -4,18 +4,24 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 )
 
-func TestBuildModelCatalogFiltersAndSynthesizesModels(t *testing.T) {
+func TestBuildModelCatalogFiltersModelsAndResolvesAliases(t *testing.T) {
 	data, err := buildModelCatalog([]string{
 		"gpt-6-astra",
+		"gpt-6-sol",
+		"gpt-6-sol",
+		"gpt-6-luna",
 		"gpt-5.6-terra",
 		"gpt-5.4",
 		"gpt-5.3-codex",
 		"gpt-5.3-codex",
+		"gpt-unknown",
+		"gpt-5.6",
 		"claude-sonnet-5",
 	})
 	if err != nil {
@@ -59,27 +65,70 @@ func TestBuildModelCatalogFiltersAndSynthesizesModels(t *testing.T) {
 		}
 	}
 
-	if want := []string{"gpt-6-astra", "gpt-5.6-terra", "gpt-5.4", "gpt-5.3-codex"}; !slices.Equal(gotIDs, want) {
+	if want := []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-terra", "gpt-5.4", "gpt-5.6"}; !slices.Equal(gotIDs, want) {
 		t.Fatalf("model ids = %q, want %q", gotIDs, want)
 	}
 
 	astra := catalog.Models[0]
-	if astra.DefaultEffort != "low" || astra.ShellType != "unified_exec" {
+	if astra.DefaultEffort != "low" || astra.ShellType != "shell_command" {
 		t.Errorf("Astra catalog metadata = effort %q, shell %q", astra.DefaultEffort, astra.ShellType)
 	}
 	if !strings.Contains(astra.ModelMessages.Instructions, "You are Codex, an agent based on GPT-6") {
 		t.Error("Astra catalog is missing its GPT-6 instructions")
 	}
+	for _, entry := range catalog.Models[1:3] {
+		if entry.DefaultEffort != "medium" || entry.ShellType != "shell_command" || entry.ContextWindow != 272_000 {
+			t.Errorf("%s catalog metadata = effort %q, shell %q, context %d", entry.Slug, entry.DefaultEffort, entry.ShellType, entry.ContextWindow)
+		}
+		if !strings.Contains(entry.ModelMessages.Instructions, "You are Codex, an agent based on GPT-6") {
+			t.Errorf("%s is missing GPT-6 instructions", entry.Slug)
+		}
+	}
 
-	synthesized := catalog.Models[3]
-	if synthesized.DisplayName != "GPT 5.3 Codex" {
-		t.Errorf("synthesized display name = %q", synthesized.DisplayName)
+	alias := catalog.Models[5]
+	if alias.DisplayName != "GPT 5.6 Sol" || alias.ContextWindow != 272_000 {
+		t.Errorf("alias metadata = name %q, context %d", alias.DisplayName, alias.ContextWindow)
 	}
-	if synthesized.Description != "OpenAI model available through Wingman." {
-		t.Errorf("synthesized description = %q", synthesized.Description)
+}
+
+func TestCatalogPreservesUpstreamConfiguration(t *testing.T) {
+	var upstream modelCatalog
+	if err := json.Unmarshal(embeddedModelCatalog, &upstream); err != nil {
+		t.Fatal(err)
 	}
-	if synthesized.ContextWindow != 400_000 {
-		t.Errorf("synthesized context window = %d, want 400000", synthesized.ContextWindow)
+	for _, id := range []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6"} {
+		t.Run(id, func(t *testing.T) {
+			upstreamID := id
+			if id == "gpt-5.6" {
+				upstreamID = "gpt-5.6-sol"
+			}
+			var original map[string]any
+			for _, entry := range upstream.Models {
+				if entry["slug"] == upstreamID {
+					original = entry
+				}
+			}
+			if original == nil {
+				t.Fatal("missing dedicated upstream entry")
+			}
+			data, err := buildModelCatalog([]string{id})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var catalog modelCatalog
+			if err := json.Unmarshal(data, &catalog); err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range original {
+				switch key {
+				case "slug", "display_name", "visibility", "priority", "availability_nux", "upgrade", "multi_agent_version":
+					continue // Intentional Wingman runtime overrides.
+				}
+				if got := catalog.Models[0][key]; !reflect.DeepEqual(got, want) {
+					t.Errorf("upstream field %q was changed", key)
+				}
+			}
+		})
 	}
 }
 
@@ -108,25 +157,11 @@ func TestPrepareModelCatalogCleansUp(t *testing.T) {
 	}
 }
 
-func TestBuildModelCatalogRequiresOpenAIModel(t *testing.T) {
-	_, err := buildModelCatalog([]string{"claude-sonnet-5"})
-	if err == nil {
-		t.Fatal("buildModelCatalog succeeded without an OpenAI model")
-	}
-}
-
-func TestEmbeddedCatalogSupportsEveryKnownOpenAIModel(t *testing.T) {
-	models := resolveModels(nil)
-	data, err := buildModelCatalog(models)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var catalog modelCatalog
-	if err := json.Unmarshal(data, &catalog); err != nil {
-		t.Fatal(err)
-	}
-	if len(catalog.Models) != len(models) {
-		t.Fatalf("catalog contains %d models, want %d", len(catalog.Models), len(models))
+func TestBuildModelCatalogRequiresMatchingModel(t *testing.T) {
+	for _, ids := range [][]string{nil, {"claude-sonnet-5"}, {"gpt-5.2", "gpt-unknown"}} {
+		_, err := buildModelCatalog(ids)
+		if err == nil || !strings.Contains(err.Error(), "no available OpenAI models match") {
+			t.Errorf("buildModelCatalog(%q) error = %v, want no matching models", ids, err)
+		}
 	}
 }

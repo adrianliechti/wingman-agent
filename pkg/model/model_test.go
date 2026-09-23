@@ -24,6 +24,8 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"claude-fable-5-1", "Claude Fable 5.1", ClassLarge, 1_000_000, 128_000},
 		{"claude-mythos-5-1", "Claude Mythos 5.1", ClassLarge, 1_000_000, 128_000},
 		{"gpt-6-astra", "GPT 6 Astra", ClassLarge, 1_050_000, 128_000},
+		{"gpt-6-sol", "GPT 6 Sol", ClassMedium, 1_050_000, 128_000},
+		{"gpt-6-luna", "GPT 6 Luna", ClassSmall, 1_050_000, 128_000},
 	}
 
 	for _, tc := range cases {
@@ -42,6 +44,8 @@ func TestCurrentProviderModels(t *testing.T) {
 func TestCurrentProviderModelAvailability(t *testing.T) {
 	available := Available(map[string]bool{
 		"gpt-6-astra":  true,
+		"gpt-6-sol":    true,
+		"gpt-6-luna":   true,
 		"gpt-5.4-nano": true,
 		"kimi-k3":      true,
 		"glm-5.3":      true,
@@ -54,7 +58,7 @@ func TestCurrentProviderModelAvailability(t *testing.T) {
 		ids = append(ids, m.ID)
 	}
 
-	if want := []string{"gpt-6-astra", "glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6"}; !slices.Equal(ids, want) {
+	if want := []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6"}; !slices.Equal(ids, want) {
 		t.Fatalf("Available() ids = %v, want %v", ids, want)
 	}
 }
@@ -173,6 +177,8 @@ func TestProviderPrefixedModelMapping(t *testing.T) {
 		"anthropic/claude-mythos-5-1": "Claude Mythos 5.1",
 		"openai/gpt-5.6-sol":          "GPT 5.6 Sol",
 		"openai/gpt-6-astra":          "GPT 6 Astra",
+		"openai/gpt-6-sol":            "GPT 6 Sol",
+		"openai/gpt-6-luna":           "GPT 6 Luna",
 		"google/gemini-3.1-pro":       "Gemini 3.1 Pro",
 		"z-ai/glm-5.3":                "GLM 5.3",
 		"deepseek/deepseek-v4-pro":    "DeepSeek V4 Pro",
@@ -208,6 +214,8 @@ func TestCurrentProviderModelClassification(t *testing.T) {
 		{"MiniMax-M3", "minimax", ClassLarge},
 		{"grok-4.6", "grok", ClassLarge},
 		{"gpt-6-astra", "gpt", ClassLarge},
+		{"gpt-6-sol", "gpt", ClassMedium},
+		{"gpt-6-luna", "gpt", ClassSmall},
 	}
 
 	for _, tc := range cases {

@@ -79,7 +79,9 @@ func buildModelCatalog(modelIDs []string) ([]byte, error) {
 		templateID := modelTemplateID(id, templates)
 		template, ok := templates[templateID]
 		if !ok {
-			return nil, fmt.Errorf("embedded Codex model catalog is missing template %q", templateID)
+			// Do not give an unrecognized model another model's instructions
+			// or tool configuration.
+			continue
 		}
 
 		entry := maps.Clone(template)
@@ -91,19 +93,11 @@ func buildModelCatalog(modelIDs []string) ([]byte, error) {
 		entry["upgrade"] = nil
 		entry["multi_agent_version"] = "v1"
 
-		if id != templateID && !(id == "gpt-5.6" && templateID == "gpt-5.6-sol") {
-			entry["description"] = "OpenAI model available through Wingman."
-			if m, ok := model.Find(id); ok {
-				entry["context_window"] = m.ContextTokens()
-				entry["max_context_window"] = m.ContextTokens()
-			}
-		}
-
 		selected = append(selected, entry)
 	}
 
 	if len(selected) == 0 {
-		return nil, fmt.Errorf("no OpenAI models are available for the Codex launcher")
+		return nil, fmt.Errorf("no available OpenAI models match the embedded Codex catalog; update Wingman or refresh the catalog with task generate:codex-models and rebuild")
 	}
 
 	return json.MarshalIndent(modelCatalog{Models: selected}, "", "  ")
@@ -117,10 +111,5 @@ func modelTemplateID(id string, templates map[string]map[string]any) string {
 	if id == "gpt-5.6" {
 		return "gpt-5.6-sol"
 	}
-
-	if strings.Contains(id, "mini") || strings.Contains(id, "spark") {
-		return "gpt-5.4-mini"
-	}
-
-	return "gpt-5.2"
+	return id
 }
