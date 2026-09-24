@@ -3997,6 +3997,42 @@ test("keeps workspace tabs in the titlebar at small viewport sizes", async ({
 	).toBe(true);
 });
 
+test("resumes an incomplete turn after reload and preserves the composer draft", async ({
+	page,
+	request,
+}) => {
+	const input = await composer(page);
+	const before = await (
+		await request.get(`${controlURL()}/model-stats`)
+	).json();
+	await input.fill("progress-only fixture");
+	await input.press("Enter");
+	const notice = page
+		.getByRole("status")
+		.filter({ hasText: "Turn incomplete. Your output is saved." });
+	await expect(notice).toBeVisible();
+	await expect(
+		page.getByText("Now I will run the tests.", { exact: true }).last(),
+	).toBeVisible();
+	const stopped = await (
+		await request.get(`${controlURL()}/model-stats`)
+	).json();
+	expect(stopped.requests - before.requests).toBe(3);
+	await page.reload();
+	await expect(notice).toBeVisible();
+	await input.fill("Keep this separate draft.");
+	await notice.getByRole("button", { name: "Continue", exact: true }).click();
+	await expect(
+		page.getByText("Resumed and completed the fixture.", { exact: true }),
+	).toBeVisible();
+	await expect(notice).toHaveCount(0);
+	await expect(input).toHaveValue("Keep this separate draft.");
+	const resumed = await (
+		await request.get(`${controlURL()}/model-stats`)
+	).json();
+	expect(resumed.requests - stopped.requests).toBe(1);
+});
+
 test("runs a coding tool and renders its result", async ({ page }) => {
 	const input = await composer(page);
 	await input.fill("create e2e-result.txt");

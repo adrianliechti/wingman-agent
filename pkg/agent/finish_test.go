@@ -31,6 +31,9 @@ func TestExplicitFinish(t *testing.T) {
 		{name: "marker with work", first: []string{bare, finishOutput("bad", "{}"), check}, tools: 1},
 		{name: "marker without answer", first: []string{finishOutput("bad", "{}")}},
 		{name: "invalid marker arguments", first: []string{bare, finishOutput("bad", `{"unexpected":true}`)}},
+		{name: "empty answer argument", first: []string{finishOutput("bad", `{"answer":" "}`)}},
+		{name: "non-text answer argument", first: []string{finishOutput("bad", `{"answer":17}`)}},
+		{name: "answer cannot bypass work", first: []string{finishOutput("bad", `{"answer":"Premature answer"}`), check}, tools: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requests, tools, stops := 0, 0, 0
@@ -115,6 +118,9 @@ func TestExplicitFinish(t *testing.T) {
 				for _, content := range message.Content {
 					if content.ToolResult != nil {
 						delete(unresolved, content.ToolResult.ID)
+						if tc.name == "marker without answer" && content.ToolResult.ID == "bad" && !strings.Contains(content.ToolResult.Content, "You have not written a user-facing answer") {
+							t.Error("bare marker rejection did not explain the missing answer")
+						}
 					}
 				}
 			}
@@ -125,7 +131,80 @@ func TestExplicitFinish(t *testing.T) {
 	}
 }
 
-func TestExplicitFinishIsBounded(t *testing.T) {
+func TestExplicitFinishCarriesAnswer(t *testing.T) {
+	progress := strings.ReplaceAll(commentaryOutput, `,"phase":"commentary"`, "")
+	finish := finishOutput("done", `{"answer":"Checked and fixed."}`)
+	for _, tc := range []struct {
+		name          string
+		responses     []string
+		wantPublished int
+		wantSaved     string
+	}{
+		{"answer in marker", []string{phaseTestResponse(false, finish)}, 1, "Checked and fixed."},
+		{"same answer is not repeated", []string{phaseTestResponse(false, finalAnswerOutput, finish)}, 0, "Checked and fixed."},
+		{"earlier answer is not repeated", []string{phaseTestResponse(false, finalAnswerOutput), phaseTestResponse(false, finish)}, 0, "Checked and fixed."},
+		{"cutoff answer is not published", []string{cutoffTestResponse(finishOutput("cut", `{"answer":"Partial answer"}`)), phaseTestResponse(false, finish)}, 1, "Checked and fixed."},
+		{"progress cannot hide answer", []string{phaseTestResponse(false, progress, finish)}, 1, "I will check that now.\nChecked and fixed."},
+		{"earlier progress cannot hide answer", []string{phaseTestResponse(false, progress), phaseTestResponse(false, finish)}, 1, "I will check that now.\nChecked and fixed."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests, stops, published := 0, 0, 0
+			client := streamingTestClient(func(*http.Request) string {
+				if requests >= len(tc.responses) {
+					t.Fatal("unexpected model request")
+				}
+				response := tc.responses[requests]
+				requests++
+				return response
+			})
+			a := &Agent{Config: &Config{client: &client, RequireFinish: func(string) bool { return true }, Hooks: hook.Hooks{Stop: []hook.Stop{func(_ context.Context, last string, _ bool) (hook.Outcome, error) {
+				stops++
+				if last != "Checked and fixed." {
+					t.Errorf("Stop hook answer=%q", last)
+				}
+				return hook.Outcome{}, nil
+			}}}}}
+			stream, err := a.Send(t.Context(), []Content{{Text: "Check it."}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for message, err := range stream {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if text := contentText(message.Content); text != "" {
+					published++
+					if text != "Checked and fixed." || message.Hidden {
+						t.Fatalf("published answer=%+v", message)
+					}
+				}
+			}
+			if requests != len(tc.responses) || stops != 1 || published != tc.wantPublished {
+				t.Fatalf("requests=%d stops=%d published=%d", requests, stops, published)
+			}
+			data, err := json.Marshal(a.StateSnapshot())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var state State
+			if err := json.Unmarshal(data, &state); err != nil {
+				t.Fatal(err)
+			}
+			var saved []string
+			for _, message := range state.Messages {
+				if message.Role == RoleAssistant && !message.Hidden && contentText(message.Content) != "" {
+					saved = append(saved, contentText(message.Content))
+				}
+			}
+			if strings.Join(saved, "\n") != tc.wantSaved {
+				t.Fatalf("saved answers=%q, want %q", saved, tc.wantSaved)
+			}
+		})
+	}
+}
+
+// Repeated progress must preserve output without reporting a completed turn.
+func TestExplicitFinishInterruptsRepeatedAnswers(t *testing.T) {
 	requests, stops := 0, 0
 	client := streamingTestClient(func(*http.Request) string { requests++; return phaseTestResponse(false, commentaryOutput) })
 	a := &Agent{Config: &Config{client: &client, RequireFinish: func(string) bool { return true }, Hooks: hook.Hooks{Stop: []hook.Stop{func(context.Context, string, bool) (hook.Outcome, error) { stops++; return hook.Outcome{}, nil }}}}}
@@ -137,8 +216,251 @@ func TestExplicitFinishIsBounded(t *testing.T) {
 	for _, err := range stream {
 		runErr = errors.Join(runErr, err)
 	}
-	if !errors.Is(runErr, ErrMissingFinish) || requests != maxFinishReminders+1 || stops != 0 || a.Running() {
+	if !errors.Is(runErr, ErrTurnIncomplete) || !errors.Is(runErr, ErrMissingFinish) || requests != maxAutomaticContinuations+1 || stops != 0 || a.Running() {
 		t.Fatalf("error=%v requests=%d stops=%d running=%t", runErr, requests, stops, a.Running())
+	}
+	assertIncompleteTurn(t, a)
+}
+
+func TestExplicitFinishFailsWithoutAnswer(t *testing.T) {
+	requests := 0
+	client := streamingTestClient(func(*http.Request) string { requests++; return phaseTestResponse(false) })
+	a := &Agent{Config: &Config{client: &client, RequireFinish: func(string) bool { return true }}}
+	stream, err := a.Send(t.Context(), []Content{{Text: "Check it."}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	for _, err := range stream {
+		runErr = errors.Join(runErr, err)
+	}
+	if !errors.Is(runErr, ErrMissingFinish) || requests != maxAutomaticContinuations+1 || a.Running() {
+		t.Fatalf("error=%v requests=%d running=%t", runErr, requests, a.Running())
+	}
+	assertIncompleteTurn(t, a)
+}
+
+func assertIncompleteTurn(t *testing.T, a *Agent) {
+	t.Helper()
+	state := a.StateSnapshot()
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored State
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	terminals := 0
+	for _, event := range restored.Events {
+		if event.Type == EventTurnTerminal {
+			terminals++
+			if event.Terminal == nil || event.Terminal.Status != RuntimeIncomplete || event.Terminal.Error == "" {
+				t.Fatalf("turn terminal = %+v", event.Terminal)
+			}
+		}
+	}
+	if terminals != 1 || len(restored.Messages) != len(state.Messages) {
+		t.Fatalf("terminals=%d messages=%d/%d", terminals, len(restored.Messages), len(state.Messages))
+	}
+}
+
+func TestCompletionLimitProcessesAcceptedSteering(t *testing.T) {
+	for _, mode := range []string{"finish", "commentary", "cutoff", "pause"} {
+		t.Run(mode, func(t *testing.T) {
+			a := &Agent{}
+			requests, consumed := 0, 0
+			limit := maxAutomaticContinuations + 1
+			if mode == "cutoff" {
+				limit = 2
+			}
+			client := streamingTestClient(func(r *http.Request) string {
+				requests++
+				if requests > limit+1 {
+					t.Fatal("unexpected extra request")
+				}
+				if requests <= limit {
+					if mode == "pause" {
+						return pausedResponse(commentaryOutput)
+					}
+					if mode == "cutoff" {
+						return cutoffTestResponse(commentaryOutput)
+					}
+					return phaseTestResponse(false, commentaryOutput)
+				}
+				var body struct{ Input json.RawMessage }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(body.Input), "Also verify the new requirement.") {
+					t.Fatal("accepted steering missing from continuation")
+				}
+				if mode == "finish" {
+					return phaseTestResponse(false, finalAnswerOutput, finishOutput("done", "{}"))
+				}
+				return phaseTestResponse(false, finalAnswerOutput)
+			})
+			a.Config = &Config{client: &client, MaxTurns: 10, RequireFinish: func(string) bool { return mode == "finish" }}
+			ctx := WithStreamEventHandlers(t.Context(), StreamEventHandlers{Commit: func() {
+				if requests == limit && !a.QueueInputWithID([]Content{{Text: "Also verify the new requirement."}}, "late-steer") {
+					t.Error("steering rejected while the response was committing")
+				}
+			}})
+			stream, err := a.Send(ctx, []Content{{Text: "Check it."}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, err := range stream {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, message := range a.MessagesSnapshot() {
+				if message.InputID == "late-steer" {
+					consumed++
+				}
+			}
+			if requests != limit+1 || consumed != 1 {
+				t.Fatalf("requests=%d steering consumed=%d", requests, consumed)
+			}
+			for _, event := range a.StateSnapshot().Events {
+				if event.Type == EventTurnTerminal && event.Terminal.Status != RuntimeCompleted {
+					t.Fatalf("terminal = %+v", event.Terminal)
+				}
+			}
+		})
+	}
+}
+
+// After a reminder, the natural reply to an already written answer is a bare
+// marker. Requiring the answer again would show it to the user twice.
+func TestExplicitFinishAcceptsBareMarkerAfterAnswer(t *testing.T) {
+	bare := strings.ReplaceAll(finalAnswerOutput, `,"phase":"final_answer"`, "")
+	check := `{"type":"function_call","id":"fc_check","call_id":"check","name":"check","arguments":"{}","status":"completed"}`
+	for _, tc := range []struct {
+		name      string
+		responses []string
+		accepted  bool
+	}{
+		{name: "answer then marker", responses: []string{bare, finishOutput("done", "{}")}, accepted: true},
+		{name: "empty cutoff preserves answer", responses: []string{bare, cutoffTestResponse(), finishOutput("done", "{}")}, accepted: true},
+		{name: "reasoning cutoff preserves answer", responses: []string{bare, cutoffTestResponse(`{"type":"reasoning","id":"rs_cutoff","status":"completed","summary":[{"type":"summary_text","text":"Ready to finish."}]}`), finishOutput("done", "{}")}, accepted: true},
+		{name: "partial replacement needs a new answer", responses: []string{bare, cutoffTestResponse(strings.ReplaceAll(bare, "Checked and fixed.", "Actually, ")), finishOutput("bare", "{}"), phaseTestResponse(false, bare, finishOutput("done", "{}"))}},
+		{name: "cutoff without answer cannot finish", responses: []string{cutoffTestResponse(), finishOutput("bare", "{}"), phaseTestResponse(false, bare, finishOutput("done", "{}"))}},
+		{name: "paused progress needs a new answer", responses: []string{pausedResponse(bare), finishOutput("bare", "{}"), phaseTestResponse(false, bare, finishOutput("done", "{}"))}},
+		{name: "work after the answer needs a new answer", responses: []string{bare, check, finishOutput("bare", "{}"), phaseTestResponse(false, bare, finishOutput("done", "{}"))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			client := streamingTestClient(func(*http.Request) string {
+				requests++
+				if requests > len(tc.responses) {
+					t.Fatal("unexpected extra model request")
+				}
+				response := tc.responses[requests-1]
+				if strings.HasPrefix(response, "data:") {
+					return response
+				}
+				return phaseTestResponse(false, response)
+			})
+			a := &Agent{Config: &Config{client: &client, MaxTurns: 10, RequireFinish: func(string) bool { return true },
+				Tools: func() []tool.Tool {
+					return []tool.Tool{{Name: "check", Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("ok"), nil }}}
+				},
+				Hooks: hook.Hooks{Stop: []hook.Stop{func(_ context.Context, last string, _ bool) (hook.Outcome, error) {
+					if last != "Checked and fixed." {
+						t.Errorf("Stop hook lost the answer: %q", last)
+					}
+					return hook.Outcome{}, nil
+				}}},
+			}}
+			stream, err := a.Send(t.Context(), []Content{{Text: "Check it."}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, err := range stream {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if requests != len(tc.responses) {
+				t.Fatalf("requests = %d, want %d", requests, len(tc.responses))
+			}
+			var results []string
+			for _, message := range a.StateSnapshot().Messages {
+				for _, content := range message.Content {
+					if content.ToolResult != nil && content.ToolResult.Name == finishToolName {
+						results = append(results, content.ToolResult.Content)
+					}
+				}
+			}
+			if accepted := len(results) > 0 && results[0] == "Turn finished."; accepted != tc.accepted {
+				t.Fatalf("finish results = %q", results)
+			}
+		})
+	}
+}
+
+func TestExplicitFinishRequiresFreshAnswerAfterContinuation(t *testing.T) {
+	answer := phaseTestResponse(false, finalAnswerOutput)
+	marker := phaseTestResponse(false, finishOutput("bare", "{}"))
+	done := phaseTestResponse(false, finalAnswerOutput, finishOutput("done", "{}"))
+	check := `{"type":"function_call","id":"fc_check","call_id":"check","name":"check","arguments":"{}","status":"completed"}`
+	for _, tc := range []struct {
+		name       string
+		responses  []string
+		steerAfter int
+		blockStop  bool
+	}{
+		{name: "queued input", responses: []string{answer, marker, done}, steerAfter: 1},
+		{name: "queued input resets reminders", responses: []string{answer, answer, answer, answer, done}, steerAfter: 2},
+		{name: "work in incomplete response", responses: []string{answer, cutoffTestResponse(check), marker, done}},
+		{name: "work in incomplete response resets reminders", responses: []string{answer, answer, cutoffTestResponse(check), marker, done}},
+		{name: "stop hook after finish", responses: []string{done, marker, done}, blockStop: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests, stops := 0, 0
+			a := &Agent{}
+			client := streamingTestClient(func(*http.Request) string {
+				requests++
+				if requests > len(tc.responses) {
+					t.Fatal("unexpected extra model request")
+				}
+				if requests == tc.steerAfter && !a.QueueInput([]Content{{Text: "Also check the new requirement."}}) {
+					t.Fatal("steering rejected")
+				}
+				return tc.responses[requests-1]
+			})
+			a.Config = &Config{
+				client: &client, MaxTurns: 10, RequireFinish: func(string) bool { return true },
+				Tools: func() []tool.Tool {
+					return []tool.Tool{{Name: "check", Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("ok"), nil }}}
+				},
+				Hooks: hook.Hooks{Stop: []hook.Stop{func(context.Context, string, bool) (hook.Outcome, error) {
+					stops++
+					return hook.Outcome{Block: tc.blockStop && stops == 1, Reason: "Address the remaining requirement."}, nil
+				}}},
+			}
+			stream, err := a.Send(t.Context(), []Content{{Text: "Check it."}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, err := range stream {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if requests != len(tc.responses) {
+				t.Fatalf("turn ended after %d requests, want %d", requests, len(tc.responses))
+			}
+			for _, message := range a.MessagesSnapshot() {
+				for _, content := range message.Content {
+					if result := content.ToolResult; result != nil && result.ID == "bare" && !result.IsError {
+						t.Error("accepted a finish marker without a fresh answer")
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -229,9 +551,9 @@ func TestExplicitFinishCutoff(t *testing.T) {
 		err                error
 	}{
 		{name: "cutoff then finish", responses: []string{cutoff, done}, cutoffs: 1, stops: 1},
-		{name: "second consecutive cutoff ends the turn", responses: []string{cutoff, cutoff, cutoff}, cutoffs: 1},
+		{name: "second consecutive cutoff leaves the turn incomplete", responses: []string{cutoff, cutoff}, cutoffs: 1, err: ErrTurnIncomplete},
 		{name: "cutoffs do not count as missing finishes", responses: []string{cutoff, answer, cutoff, answer, done}, cutoffs: 2, reminders: 2, stops: 1},
-		{name: "reminder budget still bounds unfinished answers", responses: []string{cutoff, answer, answer, answer}, cutoffs: 1, reminders: 2, err: ErrMissingFinish},
+		{name: "repeated answers leave the turn incomplete", responses: []string{cutoff, answer, answer, answer}, cutoffs: 1, reminders: 2, err: ErrMissingFinish},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requests, stops := 0, 0
@@ -256,9 +578,6 @@ func TestExplicitFinishCutoff(t *testing.T) {
 				t.Fatalf("error=%v, want %v", runErr, tc.err)
 			}
 			wantRequests := len(tc.responses)
-			if tc.name == "second consecutive cutoff ends the turn" {
-				wantRequests = 2
-			}
 			if requests != wantRequests || stops != tc.stops {
 				t.Fatalf("requests=%d stops=%d, want %d/%d", requests, stops, wantRequests, tc.stops)
 			}

@@ -217,6 +217,21 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		switch {
+		case strings.Contains(string(body), "progress-only fixture"):
+			if strings.Contains(string(body), "Continue the unfinished task from the saved conversation.") {
+				emitE2ETextResponse(w, "msg_resumed", "Resumed and completed the fixture.")
+				return
+			}
+			emitE2EEvent(w, map[string]any{
+				"type": "response.completed",
+				"response": map[string]any{
+					"status": "completed",
+					"output": []any{map[string]any{
+						"type": "message", "id": fmt.Sprintf("msg_progress_%d", m.requests.Load()), "role": "assistant", "status": "completed", "phase": "commentary",
+						"content": []any{map[string]any{"type": "output_text", "text": "Now I will run the tests."}},
+					}},
+				},
+			})
 		case strings.Contains(string(body), "create e2e-result.txt"):
 			m.handleTool(w)
 		case strings.Contains(string(body), "cancel this request"):

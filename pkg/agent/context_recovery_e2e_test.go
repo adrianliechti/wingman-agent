@@ -145,9 +145,9 @@ func TestContextReasoningE2ESwitchDuringToolRoundAndResume(t *testing.T) {
 func TestContextModelDownshiftE2ECompactsBeforeSmallerModelRequest(t *testing.T) {
 	var rounds, summaries atomic.Int64
 	p := newContextProvider(t, func(w http.ResponseWriter, req contextRequest) {
-		if !req.Stream {
+		if isCheckpointRequest(req) {
 			summaries.Add(1)
-			writeSummary(w, "Original implementation complete; tests not run.")
+			fmt.Fprint(w, completedText("Original implementation complete; tests not run."))
 			return
 		}
 		if rounds.Add(1) == 1 {
@@ -176,7 +176,7 @@ func TestContextModelDownshiftE2ECompactsBeforeSmallerModelRequest(t *testing.T)
 		t.Fatal(err)
 	}
 	requests := p.snapshot()
-	if len(requests) != 3 || requests[1].Stream || requests[2].Model != model || summaries.Load() != 1 {
+	if len(requests) != 3 || !isCheckpointRequest(requests[1]) || requests[1].Model != model || requests[2].Model != model || summaries.Load() != 1 {
 		t.Fatal("downshift did not compact before its first model request")
 	}
 }
@@ -231,9 +231,9 @@ func TestContextRecoveryE2ERejectedSignatureRetriesOnce(t *testing.T) {
 func TestContextRecoveryE2EInBandOverflow(t *testing.T) {
 	var requests, summaries atomic.Int64
 	p := newContextProvider(t, func(w http.ResponseWriter, req contextRequest) {
-		if !req.Stream {
+		if isCheckpointRequest(req) {
 			summaries.Add(1)
-			writeSummary(w, "Earlier work preserved")
+			fmt.Fprint(w, completedText("Earlier work preserved"))
 			return
 		}
 		if requests.Add(1) == 1 {

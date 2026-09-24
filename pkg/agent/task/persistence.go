@@ -167,6 +167,29 @@ func (r *Registry) persist() error {
 	return nil
 }
 
+// Retry only the save, never the task's work. Brief retries recover transient
+// filesystem failures without delaying result delivery indefinitely. Registry
+// shutdown cancels backoff and continues to exclude writes after Close.
+func (r *Registry) persistCompletion() error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			timer := time.NewTimer(time.Duration(attempt) * 100 * time.Millisecond)
+			select {
+			case <-r.ctx.Done():
+				timer.Stop()
+				return err
+			case <-timer.C:
+			}
+		}
+		err = r.persist()
+		if err == nil || errors.Is(err, errRegistryClosed) {
+			return err
+		}
+	}
+	return err
+}
+
 func (t *Task) snapshot() taskSnapshot {
 	t.mu.Lock()
 	defer t.mu.Unlock()

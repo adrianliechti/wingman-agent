@@ -503,7 +503,7 @@ Wingman comes with powerful built-in tools:
 | `exec_command` | Run a command, returning a session id when it remains active |
 | `exec_session` | Poll, interact with, or stop a running command session |
 | `agent` | Launch a sub-agent to handle independent tasks in a separate context |
-| `schedule_task` | Schedule recurring or one-time work (interval, cron, or timestamp) that wakes the agent when due |
+| `schedule` | Create, list, pause, resume, or remove recurring or one-time work (interval, cron, or timestamp) that wakes the agent when due |
 | `lsp` | Code intelligence (definitions, references, diagnostics, symbols, call hierarchy) |
 
 ### LSP and DAP installation

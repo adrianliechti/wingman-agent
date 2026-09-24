@@ -52,6 +52,8 @@ type Task struct {
 	resume   func(ctx context.Context, prompt string) error
 	registry *Registry
 
+	finishing bool // Prevent relaunch while the terminal result is being saved.
+
 	agentState agent.State
 	resumeData json.RawMessage
 }
@@ -294,6 +296,9 @@ func (e Event) Notification() string {
 func (t *Task) Status() Status {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.finishing {
+		return StatusRunning
+	}
 	return t.status
 }
 
@@ -600,7 +605,7 @@ func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (str
 	}
 
 	t.mu.Lock()
-	if t.status == StatusRunning {
+	if t.status == StatusRunning || t.finishing {
 		t.mu.Unlock()
 		r.mu.Unlock()
 		return fmt.Errorf("agent %s is still running; its result arrives as a task notification", t.ID)
@@ -666,6 +671,7 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 	}()
 
 	t.mu.Lock()
+	t.finishing = true
 	t.finished = time.Now()
 	switch {
 	case t.stopped:
@@ -677,6 +683,15 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 		t.status = StatusDone
 	}
 	t.result = result
+	t.mu.Unlock()
+
+	persistErr := r.persistCompletion()
+	t.mu.Lock()
+	if persistErr != nil && r.ctx.Err() == nil {
+		t.result = fmt.Sprintf("error: could not save background task completion: %v\nExecution status: %s. The output below remains available in this session but may be lost after restart. Do not rerun the task solely because saving failed.\n\n%s", persistErr, t.status, t.result)
+		t.status = StatusFailed
+	}
+	t.finishing = false
 	ev := Event{
 		Task:        t,
 		ID:          t.ID,
@@ -693,7 +708,6 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 	r.running--
 	closed := r.closed
 	r.mu.Unlock()
-	_ = r.persist()
 
 	if !closed {
 		r.send(ev)
@@ -737,7 +751,8 @@ func (r *Registry) Stop(id string) error {
 	t.stopped = true
 	cancel := t.cancel
 	t.mu.Unlock()
-	_ = r.persist()
+	// execute persists the stopped result after the run unwinds. The stop
+	// request itself has no durable transition until cancellation completes.
 	cancel()
 	return nil
 }

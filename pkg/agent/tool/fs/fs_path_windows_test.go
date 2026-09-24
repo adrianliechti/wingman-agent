@@ -90,7 +90,7 @@ func TestWindowsLeadingDriveSlashPreservesAccessChecks(t *testing.T) {
 		{"grep", GrepTool(root), map[string]any{"path": "/" + denied, "pattern": "Table"}},
 		{"glob", GlobTool(root), map[string]any{"path": "/" + denied, "pattern": "**/*.go"}},
 		{"glob absolute pattern", GlobTool(root), map[string]any{"pattern": "/" + filepath.Join(denied, "**", "*.go")}},
-		{"write", WriteTool(root), map[string]any{"file_path": "/" + file, "content": "type Table struct{}"}},
+		{"edit", EditTool(root), createArgs("/"+file, "type Table struct{}")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := test.tool.Execute(context.Background(), test.args)

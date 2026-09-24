@@ -388,7 +388,7 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 		"- Set `timeout` for anything that could hang (network calls, flaky suites, unfamiliar binaries) — the process is killed at that deadline. Omit it for servers and watch tasks you intend to keep running.",
 		"- Set `tty` for programs that need a terminal (REPLs, prompts, programs that buffer output when piped). Unix only — ignored on Windows. Written input is echoed back in the output.",
 		"- Starts in the workspace directory (override with `workdir`). Shell state does not carry over between calls. stdout and stderr are merged. Output between reads is buffered (oldest dropped past 1MB); poll with `exec_session` to collect it.",
-		"- Not for file content work: use `read`/`edit`/`write`/`grep`/`glob` instead of cat, head, tail, sed, awk, echo-redirects, or find. A file inspected through the shell does not count as read, so `write` will still refuse to overwrite it.",
+		"- Not for file content work: use `read`/`edit`/`grep`/`glob` instead of cat, head, tail, sed, awk, echo-redirects, or find.",
 		"- The process is NOT killed when the wait elapses. Kill sessions you no longer need via `exec_session`.",
 	}
 

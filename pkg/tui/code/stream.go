@@ -595,7 +595,7 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 			a.promotePendingEcho(ev.InputID)
 			a.requestRender()
 		})
-	case code.TurnInputCompleted, code.TurnInputCancelled, code.TurnInputFailed:
+	case code.TurnInputCompleted, code.TurnInputCancelled, code.TurnInputFailed, code.TurnInputIncomplete:
 		a.removePendingEcho(ev.InputID)
 		if ev.Executed {
 			a.finishTurn(ev.SessionID, ev.State, ev.Err)
@@ -732,6 +732,9 @@ func (a *App) finishTurn(sessionID string, state code.TurnInputState, turnErr er
 			case state == code.TurnInputCancelled || errors.Is(turnErr, context.Canceled):
 				a.flushToolGap()
 				a.appendChat(cellNotice("Cancelled", t.Yellow, a.width()))
+			case state == code.TurnInputIncomplete:
+				a.flushToolGap()
+				a.appendChat(cellNotice("Turn incomplete. Output saved. Send Continue to resume.", t.Yellow, a.width()))
 			default:
 				a.flushToolGap()
 				a.appendChat(cellNotice(fmt.Sprintf("Error: %v", turnErr), t.Red, a.width()))

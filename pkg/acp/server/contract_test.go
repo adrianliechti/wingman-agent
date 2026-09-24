@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	acpsdk "github.com/coder/acp-go-sdk"
@@ -19,6 +21,38 @@ import (
 
 func TestACPContract(t *testing.T) {
 	acptest.Run(t, newContractServer)
+}
+
+type cancelOnProgressWriter struct {
+	cancel func()
+	called atomic.Bool
+}
+
+func (w *cancelOnProgressWriter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), acptest.CancelText) && w.called.CompareAndSwap(false, true) {
+		w.cancel()
+	}
+	return len(p), nil
+}
+
+func TestPromptCancellationDuringNotification(t *testing.T) {
+	s := newContractServer(t).(*contractServer)
+	t.Cleanup(func() { _ = s.Close() })
+	reader, peer := net.Pipe()
+	t.Cleanup(func() { _ = reader.Close(); _ = peer.Close() })
+	writer := &cancelOnProgressWriter{}
+	s.SetAgentConnection(acpsdk.NewAgentSideConnection(s, writer, reader))
+	ctx := t.Context()
+	session, err := s.NewSession(ctx, acpsdk.NewSessionRequest{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.cancel = func() { _ = s.Cancel(ctx, acpsdk.CancelNotification{SessionId: session.SessionId}) }
+	id := "cancel-during-notification"
+	response, err := s.Prompt(ctx, acpsdk.PromptRequest{SessionId: session.SessionId, MessageId: &id, Prompt: []acpsdk.ContentBlock{acpsdk.TextBlock(acptest.CancelPrompt)}})
+	if !writer.called.Load() || err != nil || response.StopReason != acpsdk.StopReasonCancelled || response.UserMessageId == nil || *response.UserMessageId != id {
+		t.Fatalf("cancelled=%t response=%+v error=%v", writer.called.Load(), response, err)
+	}
 }
 
 type contractServer struct {

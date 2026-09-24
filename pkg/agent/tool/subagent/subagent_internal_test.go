@@ -94,6 +94,9 @@ func TestAllowNonAgentTool(t *testing.T) {
 	if allowNonAgentTool(tool.Tool{Name: "x", Hidden: true}) {
 		t.Error("hidden tools must be rejected")
 	}
+	if allowNonAgentTool(tool.Tool{Name: "schedule", Effect: tool.StaticEffect(tool.EffectDynamic)}) {
+		t.Error("session scheduling must be rejected")
+	}
 	if !allowNonAgentTool(tool.Tool{Name: "read"}) {
 		t.Error("ordinary tool must pass")
 	}
@@ -261,6 +264,23 @@ func TestRunTrailer(t *testing.T) {
 	want := "\n\n(agent: 1 tool call · 45.2k in / 900 out tokens · 1m40s)"
 	if got != want {
 		t.Fatalf("runTrailer = %q, want %q", got, want)
+	}
+}
+
+func TestFinalTextIgnoresHiddenFinishMarker(t *testing.T) {
+	messages := []agent.Message{
+		{Role: agent.RoleAssistant, Content: []agent.Content{{ToolCall: &agent.ToolCall{ID: "1", Name: "read"}}}},
+		{Role: agent.RoleAssistant, Content: []agent.Content{{ToolResult: &agent.ToolResult{ID: "1"}}}},
+		{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "the report"}}},
+		{Role: agent.RoleAssistant, Hidden: true, Content: []agent.Content{{ToolCall: &agent.ToolCall{ID: "2", Name: "finish_turn"}}}},
+		{Role: agent.RoleAssistant, Hidden: true, Content: []agent.Content{{ToolResult: &agent.ToolResult{ID: "2", Content: "Turn finished."}}}},
+	}
+
+	if got := finalText(messages); got != "the report" {
+		t.Fatalf("finalText = %q", got)
+	}
+	if got := runTrailer(messages, agent.Usage{}, 0); !strings.Contains(got, "1 tool call ·") {
+		t.Fatalf("runTrailer counted the hidden marker: %q", got)
 	}
 }
 

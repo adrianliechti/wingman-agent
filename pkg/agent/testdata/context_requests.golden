@@ -165,32 +165,37 @@ Request 3: 0 retained, 9 shown
   ],
   "role": "user"
 }
-
-Window 3 (settings changed: stream, instructions, reasoning, tools, cache_key; history replaced at item 0)
-stream: false
-instructions: "\u003c1759 bytes; sha256:1df044039182\u003e Produce a continuation briefing for the assistant taking over this session. Do n…"
-reasoning: null
-tools: null
-cache_key: ""
-Request 4: 0 retained, 1 shown
-[0] "\u003c2476 bytes; sha256:14e90ff291af\u003e [user]: Original task: inspect and verify\n\n[assistant]: Earlier observed progres…"
-
-Window 4 (settings changed: stream, instructions, reasoning, tools, cache_key; history replaced at item 0)
-stream: true
-instructions: "test"
-reasoning: {
-  "effort": "low",
-  "summary": "auto"
+Request 4: 9 retained, 3 shown
+[9] {
+  "content": [
+    {
+      "text": "inspection complete",
+      "type": "output_text"
+    }
+  ],
+  "role": "assistant",
+  "type": "message"
 }
-tools: [
-  {
-    "description": "Verify the result",
-    "name": "verify",
-    "strict": false,
-    "type": "function"
-  }
-]
-cache_key: "snapshot-session"
+[10] {
+  "content": [
+    {
+      "text": "continue after compaction",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[11] {
+  "content": [
+    {
+      "text": "\u003c1890 bytes; sha256:f3aec1dceef6\u003e Context checkpoint: your reply replaces the conversation above. Reply with the b…",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+
+Window 3 (history replaced at item 1)
 Request 5: 0 retained, 6 shown
 [0] {
   "content": [

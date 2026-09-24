@@ -34,6 +34,7 @@ const (
 	RuntimeCompleted   RuntimeStatus = "completed"
 	RuntimeFailed      RuntimeStatus = "failed"
 	RuntimeInterrupted RuntimeStatus = "interrupted"
+	RuntimeIncomplete  RuntimeStatus = "incomplete"
 )
 
 // RuntimeTerminal is the durable outcome of a turn, provider run, or tool
@@ -292,7 +293,7 @@ func startTypeForTerminal(t RuntimeEventType) RuntimeEventType {
 
 func validRuntimeStatus(status RuntimeStatus) bool {
 	switch status {
-	case RuntimeCompleted, RuntimeFailed, RuntimeInterrupted:
+	case RuntimeCompleted, RuntimeFailed, RuntimeInterrupted, RuntimeIncomplete:
 		return true
 	default:
 		return false

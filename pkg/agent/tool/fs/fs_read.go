@@ -36,7 +36,7 @@ func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedRe
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"file_path": map[string]any{"type": "string", "description": "The absolute path to the file to read."},
+				"file_path": map[string]any{"type": "string", "description": "Workspace-relative path, absolute workspace path, or path in an explicitly allowed read root."},
 				"offset":    map[string]any{"type": "integer", "description": "1-based line number to start reading from, including for converted documents. Only provide for large files or known ranges. Defaults to 1."},
 				"limit":     map[string]any{"type": "integer", "description": "Positive number of lines to read, including from converted documents. Only provide for large files or known ranges."},
 			},

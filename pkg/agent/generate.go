@@ -26,7 +26,8 @@ type GenerateOptions struct {
 }
 
 // GenerateResult is the visible response plus provider-reported usage for
-// independent budgeting and accounting.
+// independent budgeting and accounting. Usage is retained when a provider
+// response is rejected; Text is populated only on success.
 type GenerateResult struct {
 	Text  string
 	Usage Usage
@@ -84,13 +85,47 @@ func (c *Config) Generate(ctx context.Context, opts GenerateOptions) (GenerateRe
 	}
 	usage := responseToUsage(*resp)
 	chargeTaskUsage(ctx, usage)
-	operation.End(inferenceResult(resp, usage, nil, captureContent))
+	err = responseStatusError(resp)
+	defer func() { operation.End(inferenceResult(resp, usage, err, captureContent)) }()
+	if err != nil {
+		return GenerateResult{Usage: usage}, err
+	}
 	text := strings.TrimSpace(resp.OutputText())
 	if opts.OutputSchema != nil && text != "" {
 		var value any
-		if err := json.Unmarshal([]byte(text), &value); err != nil {
-			return GenerateResult{}, fmt.Errorf("decode structured model response: %w", err)
+		if err = json.Unmarshal([]byte(text), &value); err != nil {
+			err = fmt.Errorf("decode structured model response: %w", err)
+			return GenerateResult{Usage: usage}, err
 		}
 	}
 	return GenerateResult{Text: text, Usage: usage}, nil
+}
+
+// Some compatible providers omit status. Any explicit status must indicate a
+// completed response before helpers can use its output, even if text is present.
+func responseStatusError(resp *responses.Response) error {
+	switch resp.Status {
+	case "", responses.ResponseStatusCompleted:
+		if responseStopReason(resp) == "pause_turn" {
+			return fmt.Errorf("response paused before completion")
+		}
+		return nil
+	case responses.ResponseStatusFailed:
+		return &responseFailure{code: string(resp.Error.Code), message: resp.Error.Message}
+	case responses.ResponseStatusIncomplete:
+		if reason := resp.IncompleteDetails.Reason; reason != "" {
+			return fmt.Errorf("response incomplete: %s", reason)
+		}
+		return fmt.Errorf("response incomplete")
+	default:
+		return fmt.Errorf("response was not completed (status: %s)", resp.Status)
+	}
+}
+
+// Wingman's extension preserves native boundaries that Responses status alone
+// cannot express. Providers without the extension retain their existing behavior.
+func responseStopReason(resp *responses.Response) string {
+	var reason string
+	_ = json.Unmarshal([]byte(resp.JSON.ExtraFields["stop_reason"].Raw()), &reason)
+	return reason
 }

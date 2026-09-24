@@ -43,6 +43,7 @@ import { ModelPicker } from "./ModelPicker";
 import { ModePicker } from "./ModePicker";
 import { SkillPicker } from "./SkillPicker";
 import { TurnQueue } from "./TurnQueue";
+import { IncompleteTurnNotice } from "./chat/IncompleteTurnNotice";
 
 export interface ChatPanelProps {
 	draft: ComposerDraft;
@@ -76,6 +77,7 @@ export interface ChatPanelProps {
 	loading?: boolean;
 	loadError?: string | null;
 	error?: string | null;
+	incomplete?: boolean;
 	onDismissError?: () => void;
 	prompts?: PendingPrompt[];
 	onPromptReply?: (id: string, reply: PromptReply) => void;
@@ -146,6 +148,7 @@ export function ChatPanel({
 	loading,
 	loadError,
 	error,
+	incomplete,
 	onDismissError,
 	prompts = [],
 	onPromptReply,
@@ -892,6 +895,25 @@ export function ChatPanel({
 							onRemove={onRemoveQueued}
 							onResume={onResumeQueue}
 							onClear={onClearQueue}
+						/>
+					)}
+					{incomplete && !isActive && (
+						<IncompleteTurnNotice
+							key={sessionId}
+							disabled={
+								!available ||
+								submitting ||
+								prompts.length > 0 ||
+								pendingInputs.length > 0
+							}
+							onContinue={() =>
+								onSend(
+									"Continue the unfinished task from the saved conversation. Check what was already completed and avoid repeating it.",
+									undefined,
+									undefined,
+									"follow_up",
+								)
+							}
 						/>
 					)}
 					{inputError && (

@@ -17,12 +17,13 @@ const (
 type TurnInputState string
 
 const (
-	TurnInputQueued    TurnInputState = "queued"
-	TurnInputActive    TurnInputState = "active"
-	TurnInputSteered   TurnInputState = "steered"
-	TurnInputCompleted TurnInputState = "completed"
-	TurnInputCancelled TurnInputState = "cancelled"
-	TurnInputFailed    TurnInputState = "failed"
+	TurnInputQueued     TurnInputState = "queued"
+	TurnInputActive     TurnInputState = "active"
+	TurnInputSteered    TurnInputState = "steered"
+	TurnInputCompleted  TurnInputState = "completed"
+	TurnInputCancelled  TurnInputState = "cancelled"
+	TurnInputFailed     TurnInputState = "failed"
+	TurnInputIncomplete TurnInputState = "incomplete"
 )
 
 type TurnFeatures struct {

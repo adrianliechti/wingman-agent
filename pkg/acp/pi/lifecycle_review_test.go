@@ -85,6 +85,7 @@ func TestAbortAcknowledgementDoesNotReleaseTurnBeforeSettled(t *testing.T) {
 			result <- stop
 		}()
 		<-started
+		synctest.Wait()
 		cancel()
 		<-abortAck
 		synctest.Wait()

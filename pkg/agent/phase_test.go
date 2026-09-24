@@ -17,6 +17,83 @@ import (
 const commentaryOutput = `{"type":"message","id":"msg_progress","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"I will check that now.","annotations":[]}]}`
 const finalAnswerOutput = `{"type":"message","id":"msg_final","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"Checked and fixed.","annotations":[]}]}`
 
+func TestCommentaryRecoveryDoesNotEndOnEmptyReply(t *testing.T) {
+	for _, completes := range []bool{false, true} {
+		t.Run(fmt.Sprint(completes), func(t *testing.T) {
+			requests := 0
+			client := streamingTestClient(func(r *http.Request) string {
+				requests++
+				if requests == 1 {
+					return phaseTestResponse(false, commentaryOutput)
+				}
+				var body struct{ Input json.RawMessage }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(body.Input), continuationReminder) {
+					t.Fatal("missing continuation instruction")
+				}
+				if requests == 3 && completes {
+					return phaseTestResponse(false, finalAnswerOutput)
+				}
+				return phaseTestResponse(false)
+			})
+			a := &Agent{Config: &Config{client: &client}}
+			stream, err := a.Send(t.Context(), []Content{{Text: "Check it"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var runErr error
+			for _, err := range stream {
+				runErr = errors.Join(runErr, err)
+			}
+			if requests != 3 || completes && runErr != nil || !completes && !errors.Is(runErr, ErrTurnIncomplete) {
+				t.Fatalf("requests=%d error=%v", requests, runErr)
+			}
+		})
+	}
+}
+
+func TestCutoffRecoveryDoesNotEndOnEmptyReply(t *testing.T) {
+	for _, completes := range []bool{false, true} {
+		t.Run(fmt.Sprint(completes), func(t *testing.T) {
+			requests, stops := 0, 0
+			client := streamingTestClient(func(*http.Request) string {
+				requests++
+				if requests == 1 {
+					return cutoffTestResponse(strings.ReplaceAll(finalAnswerOutput, "Checked and fixed.", "The result is"))
+				}
+				if requests == 3 && completes {
+					return phaseTestResponse(false, finalAnswerOutput)
+				}
+				return phaseTestResponse(false)
+			})
+			a := &Agent{Config: &Config{client: &client, MaxTurns: 5, Hooks: hook.Hooks{Stop: []hook.Stop{func(context.Context, string, bool) (hook.Outcome, error) {
+				stops++
+				return hook.Outcome{}, nil
+			}}}}}
+			stream, err := a.Send(t.Context(), []Content{{Text: "Check it"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var runErr error
+			for _, err := range stream {
+				runErr = errors.Join(runErr, err)
+			}
+			if completes {
+				if requests != 3 || stops != 1 || runErr != nil {
+					t.Fatalf("requests=%d stops=%d error=%v", requests, stops, runErr)
+				}
+			} else {
+				if requests != 4 || stops != 0 || !errors.Is(runErr, ErrTurnIncomplete) {
+					t.Fatalf("requests=%d stops=%d error=%v", requests, stops, runErr)
+				}
+				assertIncompleteTurn(t, a)
+			}
+		})
+	}
+}
+
 func phaseTestResponse(itemsInDoneEvents bool, items ...string) string {
 	output := "[" + strings.Join(items, ",") + "]"
 	var stream strings.Builder
@@ -57,7 +134,7 @@ func TestSendContinuesAfterCommentary(t *testing.T) {
 						commentary++
 					}
 				}
-				if users != 1 || commentary != min(requests-1, 2) {
+				if users != 1+min(requests-1, 2) || commentary != min(requests-1, 2) {
 					t.Errorf("request %d: users=%d commentary=%d; expected original input and preserved progress phases", requests, users, commentary)
 				}
 				if stopHooks != 0 {
@@ -135,13 +212,13 @@ func TestSendContinuesAfterCommentary(t *testing.T) {
 	}
 }
 
-func TestSendCommentaryRespectsMaxTurns(t *testing.T) {
+func TestSendCommentaryContinuationIsBounded(t *testing.T) {
 	requests := 0
 	client := streamingTestClient(func(*http.Request) string {
 		requests++
 		return phaseTestResponse(false, commentaryOutput)
 	})
-	a := &Agent{Config: &Config{client: &client, MaxTurns: 3}}
+	a := &Agent{Config: &Config{client: &client, MaxTurns: 10}}
 	stream, err := a.Send(t.Context(), []Content{{Text: "Check it"}})
 	if err != nil {
 		t.Fatal(err)
@@ -150,9 +227,10 @@ func TestSendCommentaryRespectsMaxTurns(t *testing.T) {
 	for _, err := range stream {
 		turnErr = errors.Join(turnErr, err)
 	}
-	if !errors.Is(turnErr, ErrMaxTurnsExceeded) || requests != 3 || a.Running() {
-		t.Fatalf("error=%v requests=%d running=%t; expected the turn limit to stop repeated commentary", turnErr, requests, a.Running())
+	if !errors.Is(turnErr, ErrTurnIncomplete) || requests != maxAutomaticContinuations+1 || a.Running() {
+		t.Fatalf("error=%v requests=%d running=%t; expected repeated commentary to leave the turn incomplete", turnErr, requests, a.Running())
 	}
+	assertIncompleteTurn(t, a)
 }
 
 func TestSendStopsAtFinalAnswerOrUnphasedMessage(t *testing.T) {
@@ -210,10 +288,12 @@ func TestSendCommentaryPreservesIncompleteHandling(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			var runErr error
 			for _, err := range stream {
-				if err != nil {
-					t.Fatal(err)
-				}
+				runErr = errors.Join(runErr, err)
+			}
+			if (tc.reason == "max_output_tokens") != errors.Is(runErr, ErrTurnIncomplete) {
+				t.Fatalf("unexpected cutoff outcome: %v", runErr)
 			}
 			if requests != tc.wantRequests {
 				t.Fatalf("requests=%d, want %d", requests, tc.wantRequests)

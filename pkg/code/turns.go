@@ -11,7 +11,9 @@ import (
 )
 
 type managedTurnInput struct {
-	input TurnInput
+	input    TurnInput
+	terminal TurnInputState
+	err      error
 }
 
 type managedTurnSession struct {
@@ -224,14 +226,15 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 						m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(input), InputID: input.ID, State: TurnInputSteered, Intent: input.Intent})
 						return snap, nil
 					}
+					state, runErr := target.terminal, target.err
 					s.mu.Unlock()
 					// The active turn completed after the backend accepted the steer.
 					// Surface the accepted user input before completing it; re-queueing
 					// here would duplicate an input the backend already owns.
 					m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(input), InputID: input.ID, State: TurnInputSteered, Intent: input.Intent})
 					m.releaseID(s, input.ID)
-					m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(input), InputID: input.ID, State: TurnInputCompleted, Intent: input.Intent})
-					return TurnInputSnapshot{ID: input.ID, State: TurnInputCompleted, Intent: input.Intent}, nil
+					m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(input), InputID: input.ID, State: state, Intent: input.Intent, Err: runErr})
+					return TurnInputSnapshot{ID: input.ID, State: state, Intent: input.Intent}, nil
 				}
 				if errors.Is(err, ErrNoActiveTurn) || errors.Is(err, ErrTurnNotSteerable) {
 					// Turn-boundary races and explicitly non-steerable turn kinds are
@@ -337,9 +340,12 @@ func (m *TurnManager) runSession(sessionID string, s *managedTurnSession) {
 		state := TurnInputCompleted
 		if cancelled {
 			state = TurnInputCancelled
+		} else if errors.Is(runErr, agent.ErrTurnIncomplete) {
+			state = TurnInputIncomplete
 		} else if runErr != nil {
 			state = TurnInputFailed
 		}
+		item.terminal, item.err = state, runErr
 
 		var next *managedTurnInput
 		promote := func() error {

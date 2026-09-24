@@ -50,7 +50,28 @@ func (a *Agent) compressContext(requiredTokens int64) (int, error) {
 		cut = 0
 	}
 
-	for i := range messages[:cut] {
+	rewritten = trimStaleEvidence(messages[:cut]) || rewritten
+
+	if !rewritten {
+		return 0, nil
+	}
+	freed := max(0, before-messagesTokens(messages))
+	// If compression cannot avoid a summary pass, let the summarizer see
+	// the original evidence and commit only its final checkpoint.
+	if int64(freed) < requiredTokens {
+		return 0, nil
+	}
+	if err := a.replaceContext("compress stale context", messages); err != nil {
+		return 0, err
+	}
+	return freed, nil
+}
+
+// trimStaleEvidence stubs large tool results and drops result images in an
+// owned snapshot, reporting whether anything changed.
+func trimStaleEvidence(messages []Message) bool {
+	rewritten := false
+	for i := range messages {
 		m := &messages[i]
 		if m.Role != RoleAssistant {
 			continue
@@ -72,20 +93,7 @@ func (a *Agent) compressContext(requiredTokens int64) (int, error) {
 			}
 		}
 	}
-
-	if !rewritten {
-		return 0, nil
-	}
-	freed := max(0, before-messagesTokens(messages))
-	// If compression cannot avoid a summary pass, let the summarizer see
-	// the original evidence and commit only its final checkpoint.
-	if int64(freed) < requiredTokens {
-		return 0, nil
-	}
-	if err := a.replaceContext("compress stale context", messages); err != nil {
-		return 0, err
-	}
-	return freed, nil
+	return rewritten
 }
 
 func trimmedToolOutput(output string) string {

@@ -51,7 +51,7 @@ func TestSessionSwitchDiscardsPendingTurnUpdatesAndComposerContent(t *testing.T)
 
 func TestFinishingTurnDoesNotClearTheNextTurnsOutput(t *testing.T) {
 	testenv.WingmanHome(t)
-	for _, state := range []corecode.TurnInputState{corecode.TurnInputCompleted, corecode.TurnInputFailed, corecode.TurnInputCancelled} {
+	for _, state := range []corecode.TurnInputState{corecode.TurnInputCompleted, corecode.TurnInputFailed, corecode.TurnInputCancelled, corecode.TurnInputIncomplete} {
 		t.Run(string(state), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				a, coder := newStreamTestApp(nil)

@@ -33,7 +33,13 @@ export function TurnReviewCard({
 		enabled: !!review && expanded,
 		queryFn: ({ signal }) => getTurnReview(context.session, review!.id, signal),
 	});
-	if (!review || (!review.files.length && !review.checks.length)) return null;
+	if (
+		!review ||
+		(!review.files.length &&
+			!review.checks.length &&
+			review.outcome !== "incomplete")
+	)
+		return null;
 	const count = new Set(review.files.map((file) => file.path)).size;
 	const detail = query.data;
 	return (
@@ -51,6 +57,7 @@ export function TurnReviewCard({
 					{count} {count === 1 ? "file" : "files"} changed ·{" "}
 					{validationLabels[review.validation] ?? "Validation not confirmed"}
 					{review.undone ? " · Undone" : ""}
+					{review.outcome === "incomplete" ? " · Incomplete" : ""}
 				</span>
 				<span>{expanded ? "Hide" : "Review changes"}</span>
 			</button>

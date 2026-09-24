@@ -113,19 +113,6 @@ func TestNotifyContentDoesNotRepeatEditPayload(t *testing.T) {
 	}
 }
 
-func TestClassifyPromptStreamError(t *testing.T) {
-	reason, err := classifyPromptStreamError(context.Canceled)
-	if err != nil || reason != acpsdk.StopReasonCancelled {
-		t.Fatalf("cancelled stream = %q, %v", reason, err)
-	}
-
-	want := errors.New("model stream failed")
-	reason, err = classifyPromptStreamError(want)
-	if !errors.Is(err, want) || reason != "" {
-		t.Fatalf("failed stream = %q, %v", reason, err)
-	}
-}
-
 func TestRetainSessionQueuesPromptsAndHonorsWaitingContext(t *testing.T) {
 	const id = acpsdk.SessionId("session-1")
 	w := &workspaceEntry{refs: 1}

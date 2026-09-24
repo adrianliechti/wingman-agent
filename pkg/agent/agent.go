@@ -27,7 +27,7 @@ var ErrTurnInProgress = errors.New("agent turn already in progress")
 // ErrEmptyInput means Send was called without any content.
 var ErrEmptyInput = errors.New("agent input is empty")
 
-const maxStreamRetries = 2
+const maxStreamRetries = 5
 
 type Agent struct {
 	*Config
@@ -193,6 +193,8 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			_, hookStopped := errors.AsType[hookStopError](err)
 			if hookStopped || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errYieldStopped) {
 				status = RuntimeInterrupted
+			} else if errors.Is(err, ErrTurnIncomplete) {
+				status = RuntimeIncomplete
 			} else {
 				status = RuntimeFailed
 			}
@@ -209,8 +211,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 		}
 
 		turns := 0
-		cutoffNotified := false
-		missingFinishes := 0
+		var completion completionState
 		stopHookActive := false
 		for {
 			if err := ctx.Err(); err != nil {
@@ -220,7 +221,11 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			// Give the original prompt its own first request. Later requests
 			// consume steering, including input received during Stop hooks.
 			if turns > 0 {
-				if err := a.appendInputs(ctx, a.takePendingInput()...); err != nil {
+				pending := a.takePendingInput()
+				if len(pending) > 0 {
+					completion = completionState{}
+				}
+				if err := a.appendInputs(ctx, pending...); err != nil {
 					stop(err)
 					return
 				}
@@ -308,12 +313,13 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			// Filtered responses cannot drive tool execution or automatic
 			// continuation. Fresh user input can still start another request.
 			needsFollowUp := false
+			var completionErr error
 			filtered := resp.incomplete && resp.incompleteReason == "content_filter"
 			if !filtered {
 				calls := extractToolCalls(resp.messages)
 				finished := false
 				if requireFinish {
-					calls, finished, err = a.resolveFinishCalls(resp, calls)
+					calls, finished, err = a.resolveFinishCalls(resp, calls, completion.answer, yield)
 					if err != nil {
 						stop(err)
 						return
@@ -323,50 +329,25 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 					stop(err)
 					return
 				}
-				needsFollowUp = len(calls) > 0
-				switch {
-				case resp.incomplete:
-					// A cutoff is a transport boundary, not a decision to end
-					// the turn, so it never counts as a missing finish. Completed
-					// calls already drive a follow-up. Otherwise nudge once,
-					// preserving the partial text in history.
-					if !needsFollowUp && !cutoffNotified {
-						cutoffNotified = true
-						needsFollowUp = true
-						if err := a.appendMessages(cutoffNotice(resp.incompleteReason)); err != nil {
-							stop(err)
-							return
-						}
+				var notice *Message
+				needsFollowUp, notice, completionErr = completion.advance(resp, requireFinish, finished, len(calls) > 0)
+				if notice != nil {
+					if err := a.appendMessages(*notice); err != nil {
+						stop(err)
+						return
 					}
-				case requireFinish && !hasRefusal(resp.messages):
-					cutoffNotified = false
-					needsFollowUp = needsFollowUp || !finished
-					if len(calls) > 0 || finished {
-						missingFinishes = 0
-					} else {
-						missingFinishes++
-						if missingFinishes > maxFinishReminders {
-							stop(ErrMissingFinish)
-							return
-						}
-						if err := a.appendMessages(hiddenContextMessage(finishReminder)); err != nil {
-							stop(err)
-							return
-						}
-					}
-				default:
-					cutoffNotified = false
-					// Phase is documented message metadata. Continuing after
-					// commentary is our policy for avoiding premature stops.
-					needsFollowUp = needsFollowUp || endsWithCommentary(resp.messages)
 				}
 			}
 
 			a.queueMu.Lock()
 			hasPendingInput := len(a.pendingInput) > 0
 			a.queueMu.Unlock()
-			if !needsFollowUp && !hasPendingInput && !resp.incomplete {
-				outcome := a.runStopHooks(stepCtx, lastAssistantText(resp.messages), stopHookActive)
+			if completionErr == nil && !needsFollowUp && !hasPendingInput && !resp.incomplete {
+				last := lastAssistantText(resp.messages)
+				if requireFinish && last == "" {
+					last = completion.answer
+				}
+				outcome := a.runStopHooks(stepCtx, last, stopHookActive)
 				if outcome.Stop {
 					reason := outcome.Reason
 					if reason == "" {
@@ -378,6 +359,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				if outcome.Block {
 					stopHookActive = true
 					needsFollowUp = true
+					completion = completionState{}
 					reason := outcome.Reason
 					if reason == "" {
 						reason = "A Stop hook requested another pass."
@@ -396,12 +378,17 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			// Stop hooks run without queueMu. Recheck for newly accepted input
 			// and close admission under the same lock before ending the turn.
 			a.queueMu.Lock()
+			// Already accepted steering gets its own chance to finish, including
+			// input received during the last automatic continuation.
 			finished := !needsFollowUp && len(a.pendingInput) == 0
 			if finished {
 				a.finishing = true
 			}
 			a.queueMu.Unlock()
 			if finished {
+				if completionErr != nil {
+					stop(completionErr)
+				}
 				return
 			}
 			if maxTurns > 0 && turns >= maxTurns {

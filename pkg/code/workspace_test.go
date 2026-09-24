@@ -476,26 +476,43 @@ func waitForMCPToolNames(t *testing.T, w *Workspace, want ...string) {
 	}
 }
 
-func TestWithEditDiagnosticsWrapsOnlyEditAndWrite(t *testing.T) {
+func TestWithEditDiagnosticsPassesThroughWithoutLanguageService(t *testing.T) {
 	w := &Workspace{RootPath: t.TempDir()}
 
 	execute := func(ctx context.Context, args map[string]any) (tool.Result, error) {
-		return tool.Text("diff output"), nil
+		return tool.Result{Content: "diff output", Metadata: map[string]any{
+			tool.FileChangesMetadata: []tool.FileChange{{Path: "main.go", AfterExists: true}},
+		}}, nil
 	}
 	tools := w.WithEditDiagnostics([]tool.Tool{
 		{Name: "edit", Execute: execute},
-		{Name: "write", Execute: execute},
 		{Name: "read", Execute: execute},
 	})
 
 	for _, tl := range tools {
-		out, err := tl.Execute(context.Background(), map[string]any{"file_path": "main.go"})
+		out, err := tl.Execute(context.Background(), map[string]any{"edits": []any{map[string]any{"file_path": "main.go"}}})
 		if err != nil {
 			t.Fatalf("%s: %v", tl.Name, err)
 		}
 		if out.Content != "diff output" {
 			t.Fatalf("%s output = %q, want passthrough with no LSP manager", tl.Name, out.Content)
 		}
+	}
+}
+
+func TestEditedPathsCoverBatchedEdits(t *testing.T) {
+	result := tool.Result{Metadata: map[string]any{tool.FileChangesMetadata: []tool.FileChange{
+		{Path: "a.go", AfterExists: true},
+		{Path: "b/b.go", AfterExists: true},
+		{Path: "a.go", AfterExists: true},
+		{Path: "gone.go"},
+	}}}
+
+	if got := editedPaths(result); !slices.Equal(got, []string{"a.go", "b/b.go"}) {
+		t.Fatalf("editedPaths = %v", got)
+	}
+	if got := editedPaths(tool.Text("no metadata")); got != nil {
+		t.Fatalf("editedPaths without metadata = %v", got)
 	}
 }
 

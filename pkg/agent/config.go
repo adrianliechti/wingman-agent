@@ -12,7 +12,6 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/responses"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -29,6 +28,10 @@ const (
 
 	DefaultReserveTokens     = 32_000
 	DefaultOutputTokenBudget = 64_000
+
+	// Leave room for reasoning as well as extracted lists and code. This is
+	// a ceiling; utility helpers can finish well below it.
+	DefaultUtilityOutputTokenBudget = 64_000
 )
 
 func ContextWindowFor(id string) int {
@@ -212,35 +215,24 @@ func (c *Config) utilityModelName() string {
 // usage sink. It backs internal helpers such as fetch page extraction.
 func (c *Config) Utility(ctx context.Context, instructions, input string) (string, error) {
 	modelID := c.utilityModelName()
-	captureContent := c.Telemetry.CapturesMessageContent()
-	inferenceRequest := telemetry.InferenceRequest{
-		Model:          modelID,
-		ConversationID: conversationID(ctx, c.CacheKey),
-	}
-	if captureContent {
-		inferenceRequest.Content = telemetry.InferenceContent{
-			InputMessages:      telemetryStringInput(input),
-			SystemInstructions: telemetrySystemInstructions(instructions),
+	outputTokens := DefaultUtilityOutputTokenBudget
+	effort := ""
+	if m, ok := model.Find(modelID); ok {
+		if limit := m.OutputTokens(); limit > 0 {
+			outputTokens = min(outputTokens, limit)
+		}
+		if slices.Contains(m.Efforts, "low") {
+			effort = "low"
 		}
 	}
-	ctx, operation := c.Telemetry.StartInference(ctx, inferenceRequest)
-	resp, err := c.client.Responses.New(ctx, responses.ResponseNewParams{
-		Model:        modelID,
-		Instructions: openai.String(instructions),
-		Input: responses.ResponseNewParamsInputUnion{
-			OfString: openai.String(input),
-		},
-		Store: openai.Bool(false),
+	result, err := c.Generate(ctx, GenerateOptions{
+		Model:           modelID,
+		Effort:          effort,
+		Instructions:    instructions,
+		Input:           input,
+		MaxOutputTokens: int64(outputTokens),
 	})
-
-	if err != nil {
-		operation.End(telemetry.InferenceResult{Outcome: telemetryOutcome(err)})
-		return "", err
-	}
-
-	usage := responseToUsage(*resp)
-	chargeTaskUsage(ctx, usage)
-	operation.End(inferenceResult(resp, usage, nil, captureContent))
+	usage := result.Usage
 	tool.ReportUsage(ctx, tool.UsageDelta{
 		InputTokens:              usage.InputTokens,
 		OutputTokens:             usage.OutputTokens,
@@ -249,7 +241,7 @@ func (c *Config) Utility(ctx context.Context, instructions, input string) (strin
 		CacheCreationInputTokens: usage.CacheCreationInputTokens,
 	})
 
-	return strings.TrimSpace(resp.OutputText()), nil
+	return result.Text, err
 }
 
 func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {

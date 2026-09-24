@@ -3,7 +3,6 @@ package skill
 import (
 	"bytes"
 	"fmt"
-	"html"
 	"io/fs"
 	"os"
 	"path"
@@ -634,23 +633,39 @@ func renderPromptSkills(skills []Skill, descriptionLimit int) string {
 	var sb strings.Builder
 	fmt.Fprint(&sb, "<available_skills>\n")
 	for _, skill := range skills {
-		description := []rune(skill.Description)
-		if len(description) > descriptionLimit {
-			description = description[:descriptionLimit]
-		}
-		fmt.Fprint(&sb, formatPromptSkill(skill, string(description)))
+		fmt.Fprint(&sb, formatPromptSkill(skill, truncateDescription(skill.Description, descriptionLimit)))
 	}
 	fmt.Fprint(&sb, "</available_skills>")
 	return sb.String()
 }
 
+// A shortened description ends at a word boundary so it still reads as prose.
+func truncateDescription(description string, limit int) string {
+	runes := []rune(description)
+	if len(runes) <= limit {
+		return description
+	}
+	if limit <= 0 {
+		return ""
+	}
+	cut := string(runes[:limit])
+	if i := strings.LastIndexAny(cut, " \t\n"); i > 0 {
+		cut = cut[:i]
+	}
+	return strings.TrimRight(cut, " ,;:.-") + "…"
+}
+
+// Element text only needs markup characters escaped; entity-encoding quotes
+// would just cost tokens.
+var promptTextEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
 func formatPromptSkill(s Skill, description string) string {
 	var sb strings.Builder
 	fmt.Fprint(&sb, "  <skill>\n")
-	fmt.Fprintf(&sb, "    <name>%s</name>\n", html.EscapeString(s.Qualified()))
-	fmt.Fprintf(&sb, "    <description>%s</description>\n", html.EscapeString(description))
+	fmt.Fprintf(&sb, "    <name>%s</name>\n", promptTextEscaper.Replace(s.Qualified()))
+	fmt.Fprintf(&sb, "    <description>%s</description>\n", promptTextEscaper.Replace(description))
 	if s.Location != "" {
-		fmt.Fprintf(&sb, "    <location>%s/SKILL.md</location>\n", html.EscapeString(displayLocation(s.Location)))
+		fmt.Fprintf(&sb, "    <location>%s/SKILL.md</location>\n", promptTextEscaper.Replace(displayLocation(s.Location)))
 	}
 	fmt.Fprint(&sb, "  </skill>\n")
 	return sb.String()

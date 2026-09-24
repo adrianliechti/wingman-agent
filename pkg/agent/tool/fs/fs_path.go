@@ -259,31 +259,6 @@ func openFileTarget(root *os.Root, target fileTarget) (*os.File, error) {
 	return accessFileTarget(root, target, (*os.Root).Open, os.Open)
 }
 
-func writeFileTarget(root *os.Root, target fileTarget, content string) error {
-	_, err := accessFileTarget(root, target,
-		func(r *os.Root, path string) (struct{}, error) {
-			return struct{}{}, writeRootFile(r, path, content)
-		},
-		func(path string) (struct{}, error) {
-			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-				return struct{}{}, err
-			}
-			return struct{}{}, os.WriteFile(path, []byte(content), 0644)
-		})
-	return err
-}
-
-func writeRootFile(root *os.Root, path, content string) error {
-	dir := filepath.Dir(path)
-	if dir != "." && dir != "" {
-		if err := root.MkdirAll(dir, 0755); err != nil {
-			return err
-		}
-	}
-
-	return root.WriteFile(path, []byte(content), 0666)
-}
-
 // matchFileTarget selects the access grant shared by file and search tools.
 // File tools bind its identity; search tools retain its opened handle.
 func matchFileTarget(pathArg, workingDir string, allowedRoots []string, action string) (fileTarget, error) {

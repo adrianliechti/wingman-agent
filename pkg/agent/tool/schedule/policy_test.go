@@ -22,7 +22,7 @@ func TestScheduleScriptsRequireTheExecutionPolicy(t *testing.T) {
 			asked := 0
 			opts := &Options{WorkDir: t.TempDir(), Disabled: tc.disabled, Approvals: shell.NewApprovals(), Elicitation: &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) { asked++; return tc.approve, nil }}}
 			tools := Tools(store, opts)
-			_, err := tools[0].Execute(t.Context(), map[string]any{"prompt": "check", "schedule": "every 1h", "script": "git clean -fdx"})
+			_, err := tools[0].Execute(t.Context(), map[string]any{"action": "create", "prompt": "check", "schedule": "every 1h", "script": "git clean -fdx"})
 			if tc.disabled || !tc.approve {
 				if err == nil {
 					t.Fatal("unapproved script was scheduled")

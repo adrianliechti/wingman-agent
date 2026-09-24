@@ -29,6 +29,84 @@ Include:
 
 ` + briefingEvidenceRules
 
+const summaryRequest = "Context checkpoint: your reply replaces the conversation above. Reply with the briefing as plain text only and do not call tools.\n\n" + compactionInstructions
+
+// summarizeContext asks the session model to summarize its own history. The
+// request repeats the cached prefix, so only the appended request and the
+// briefing are new. An overflowing history is retried with stale evidence
+// trimmed; the bounded utility briefing remains the fallback.
+func (a *Agent) summarizeContext(ctx context.Context, req *request, messages []Message) (string, error) {
+	summary, err := a.summarizeInContext(ctx, req, messages)
+	if isContextOverflowError(err) || isReasoningReplayError(err) {
+		trimmed := CloneMessages(messages)
+		trimStaleEvidence(trimmed)
+		clearReplayableReasoning(trimmed)
+		summary, err = a.summarizeInContext(ctx, req, trimmed)
+	}
+	if err == nil && summary != "" {
+		return summary, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
+	}
+	return a.generateBriefing(ctx, compactionInstructions, messages, summaryOutputTokens)
+}
+
+func (a *Agent) summarizeInContext(ctx context.Context, req *request, messages []Message) (string, error) {
+	summaryReq := *req
+	summaryReq.outputSchema = nil
+	// Keep tool definitions in the cached prefix, but disable tool selection.
+	summaryReq.disableTools = true
+	summaryReq.messages = append(slices.Clone(messages), hiddenContextMessage(summaryRequest))
+
+	captureContent := a.Telemetry.CapturesMessageContent()
+	inferenceRequest := telemetry.InferenceRequest{
+		Model:          summaryReq.model,
+		ConversationID: conversationID(ctx, a.CacheKey),
+		Streaming:      true,
+		ReasoningLevel: summaryReq.effort,
+	}
+	if captureContent {
+		inferenceRequest.Content = telemetryInferenceContent(summaryReq.messages, summaryReq.instructions, summaryReq.tools)
+	}
+	inferenceCtx, inference := a.Telemetry.StartInference(ctx, inferenceRequest)
+	resp, err := a.complete(inferenceCtx, &summaryReq, func(Message, error) bool { return true })
+	inference.End(streamingInferenceResult(resp, err, captureContent))
+	if resp != nil {
+		chargeTaskUsage(ctx, resp.usage)
+		// Summary usage is session cost, not a measurement of the context.
+		if usage := resp.usage; usage != (Usage{}) {
+			if recordErr := a.recordEvents(RuntimeEvent{Type: EventUsage, Usage: &usage}); recordErr != nil {
+				return "", recordErr
+			}
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	if resp.incomplete {
+		return "", fmt.Errorf("summary response was incomplete (%s)", resp.incompleteReason)
+	}
+	if resp.stopReason == "pause_turn" {
+		return "", fmt.Errorf("summary response paused before completing the checkpoint")
+	}
+	if len(extractToolCalls(resp.messages)) > 0 {
+		return "", fmt.Errorf("summary response called tools instead of producing a checkpoint")
+	}
+	var parts []string
+	for _, message := range resp.messages {
+		if message.Role != RoleAssistant || message.Hidden {
+			continue
+		}
+		for _, content := range message.Content {
+			if text := strings.TrimSpace(content.Text); text != "" {
+				parts = append(parts, text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n\n"), nil
+}
+
 // Recap uses the current checkpoint as well as recent messages, preserving
 // early decisions in sessions whose original transcript no longer fits.
 func (a *Agent) Recap(ctx context.Context) (string, error) {
@@ -104,11 +182,8 @@ func (a *Agent) generateBriefing(ctx context.Context, instructions string, messa
 		if resp != nil {
 			usage = responseToUsage(*resp)
 			chargeTaskUsage(ctx, usage)
-			if err == nil && resp.Status != "" && resp.Status != responses.ResponseStatusCompleted {
-				err = fmt.Errorf("briefing response was %s; conversation preserved", resp.Status)
-				if resp.Status == responses.ResponseStatusFailed {
-					err = &responseFailure{code: string(resp.Error.Code), message: resp.Error.Message}
-				}
+			if err == nil {
+				err = responseStatusError(resp)
 			}
 		}
 		operation.End(inferenceResult(resp, usage, err, captureContent))

@@ -12,6 +12,10 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
+func createArgs(path, content string) map[string]any {
+	return map[string]any{"edits": []any{map[string]any{"file_path": path, "old_string": "", "new_string": content}}}
+}
+
 // Absolute link targets are what Windows junctions always store; os.Root
 // rejects them, so these tests exercise the resolved-containment fallback.
 func TestReadThroughAbsoluteInRootSymlink(t *testing.T) {
@@ -150,11 +154,8 @@ func TestAllowedRootFileToolsRejectEscapingSymlink(t *testing.T) {
 	}); err == nil {
 		t.Fatal("allowed-root read followed an escaping symlink")
 	}
-	if _, err := WriteTool(root, allowed).Execute(context.Background(), map[string]any{
-		"file_path": filepath.Join(allowed, "leak", "new.txt"),
-		"content":   "escaped",
-	}); err == nil {
-		t.Fatal("allowed-root write followed an escaping symlink")
+	if _, err := EditTool(root, allowed).Execute(context.Background(), createArgs(filepath.Join(allowed, "leak", "new.txt"), "escaped")); err == nil {
+		t.Fatal("allowed-root create followed an escaping symlink")
 	}
 	if _, err := EditTool(root, allowed).Execute(context.Background(), map[string]any{
 		"file_path":  filepath.Join(allowed, "leak", "secret.txt"),
@@ -169,7 +170,7 @@ func TestAllowedRootFileToolsRejectEscapingSymlink(t *testing.T) {
 		t.Fatalf("outside file changed: %v %q", err, data)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "new.txt")); !os.IsNotExist(err) {
-		t.Fatalf("escaping write created outside file: %v", err)
+		t.Fatalf("escaping create made an outside file: %v", err)
 	}
 }
 
@@ -203,10 +204,8 @@ func TestAllowedRootFileToolsAcceptAbsoluteInRootSymlink(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("edit through allowed in-root symlink: %v", err)
 	}
-	if _, err := WriteTool(root, allowed).Execute(context.Background(), map[string]any{
-		"file_path": filepath.Join(allowed, "link", "new.txt"), "content": "new",
-	}); err != nil {
-		t.Fatalf("write through allowed in-root symlink: %v", err)
+	if _, err := EditTool(root, allowed).Execute(context.Background(), createArgs(filepath.Join(allowed, "link", "new.txt"), "new")); err != nil {
+		t.Fatalf("create through allowed in-root symlink: %v", err)
 	}
 
 	data, err := os.ReadFile(filepath.Join(real, "file.txt"))
@@ -215,7 +214,7 @@ func TestAllowedRootFileToolsAcceptAbsoluteInRootSymlink(t *testing.T) {
 	}
 	data, err = os.ReadFile(filepath.Join(real, "new.txt"))
 	if err != nil || string(data) != "new" {
-		t.Fatalf("write did not reach in-root target: %v %q", err, data)
+		t.Fatalf("create did not reach in-root target: %v %q", err, data)
 	}
 }
 

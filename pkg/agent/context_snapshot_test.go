@@ -122,8 +122,8 @@ func snapshotJSON(t *testing.T, raw json.RawMessage) string {
 func TestContextRequestSnapshotE2E(t *testing.T) {
 	var rounds atomic.Int64
 	p := newContextProvider(t, func(w http.ResponseWriter, req contextRequest) {
-		if !req.Stream {
-			writeSummary(w, "Inspected the repository. Continue verification using updated guidance.")
+		if isCheckpointRequest(req) {
+			fmt.Fprint(w, completedText("Inspected the repository. Continue verification using updated guidance."))
 			return
 		}
 		if rounds.Add(1) == 1 {
@@ -158,7 +158,7 @@ func TestContextRequestSnapshotE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests := p.snapshot()
-	if len(requests) != 5 || requests[3].Stream || a.StateSnapshot().ContextRevision == 0 {
+	if len(requests) != 5 || !isCheckpointRequest(requests[3]) || a.StateSnapshot().ContextRevision == 0 {
 		t.Fatalf("expected tool continuation, settings update and compaction; requests=%d revision=%d", len(requests), a.StateSnapshot().ContextRevision)
 	}
 	got := contextSnapshot(t, requests)

@@ -14,6 +14,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
 func TestSendCompactionHookLifecycle(t *testing.T) {
@@ -30,11 +31,11 @@ func TestSendCompactionHookLifecycle(t *testing.T) {
 						if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 							t.Fatal(err)
 						}
-						status, contentType := http.StatusOK, "application/json"
+						status, contentType := http.StatusOK, "text/event-stream"
 						var body string
-						if !request.Stream {
+						if strings.Contains(string(request.Input), summaryRequest[:40]) {
 							summaries++
-							body = `{"output":[` + strings.ReplaceAll(finalAnswerOutput, "Checked and fixed.", "summary of earlier work") + `]}`
+							body = phaseTestResponse(false, strings.ReplaceAll(finalAnswerOutput, "Checked and fixed.", "summary of earlier work"))
 						} else {
 							requests++
 							contentType = "text/event-stream"
@@ -197,6 +198,32 @@ func TestCompactionRejectsOversizedLatestInputWithoutChangingIt(t *testing.T) {
 	}
 }
 
+func TestSessionFactsRestateLedgerEditsAndChecks(t *testing.T) {
+	edit := func(position uint64, path string) RuntimeEvent {
+		return reviewResult(position, "edit", "", map[string]any{tool.FileChangesMetadata: []tool.FileChange{{Path: path, AfterExists: true}}})
+	}
+	check := func(position uint64, command string, exit int) RuntimeEvent {
+		return reviewResult(position, "exec_command", fmt.Sprintf(`{"command":%q,"validation":true}`, command), map[string]any{"exit_code": exit})
+	}
+	a := &Agent{Config: &Config{}, Events: []RuntimeEvent{
+		{Type: EventTurnStarted, TurnID: "one"}, edit(2, "a.go"), check(3, "go test ./...", 0),
+		{Type: EventTurnStarted, TurnID: "two"}, edit(5, "b.go"), edit(6, "a.go"), check(7, "go vet   ./...", 1),
+		{Type: EventTurnStarted, TurnID: "three"}, edit(9, "reverted.go"),
+		{Type: EventTurnUndo, TurnID: "three"},
+	}}
+
+	want := "\n\nRecorded by the harness:" +
+		"\n- Files changed in this session: a.go, b.go" +
+		"\n- Check `go test ./...`: passed before later edits (exit 0)" +
+		"\n- Check `go vet ./...`: failed (exit 1)"
+	if got := a.sessionFacts(); got != want {
+		t.Fatalf("sessionFacts =\n%s\nwant\n%s", got, want)
+	}
+	if got := (&Agent{Config: &Config{}}).sessionFacts(); got != "" {
+		t.Fatalf("facts without ledger work = %q", got)
+	}
+}
+
 func TestCompactionReportsOversizedCheckpointBeforeUserInput(t *testing.T) {
 	_, err := compactionUserMessages([]Message{{Role: RoleUser, Content: []Content{{Text: "hi"}}}}, -1)
 	if err == nil || !strings.Contains(err.Error(), "summary or session context") {
@@ -209,16 +236,16 @@ func TestCompactionWithoutReductionStopsBeforeSendingOrSummarizingAgain(t *testi
 	client := openai.NewClient(option.WithAPIKey("test"), option.WithHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		requests++
 		var req struct {
-			Stream bool `json:"stream"`
+			Input json.RawMessage `json:"input"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
-		if req.Stream {
+		if !strings.Contains(string(req.Input), summaryRequest[:40]) {
 			t.Fatal("sent main request after ineffective compaction")
 		}
-		body := `{"status":"completed","output":[` + strings.ReplaceAll(finalAnswerOutput, "Checked and fixed.", strings.Repeat("larger briefing ", 100)) + `]}`
-		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Request: r, Body: io.NopCloser(strings.NewReader(body))}, nil
+		body := phaseTestResponse(false, strings.ReplaceAll(finalAnswerOutput, "Checked and fixed.", strings.Repeat("larger briefing ", 100)))
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Request: r, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}))
 	a := &Agent{Config: &Config{client: &client, ContextWindow: 6000, ReserveTokens: 500}, Messages: []Message{
 		{Role: RoleUser, Content: []Content{{Text: "original task"}}},

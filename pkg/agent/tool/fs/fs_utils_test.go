@@ -12,17 +12,14 @@ import (
 	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 )
 
-func TestWriteAndReadNormalizeAbsoluteWorkspacePaths(t *testing.T) {
+func TestEditAndReadNormalizeAbsoluteWorkspacePaths(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
 	absPath := filepath.Join(tmpDir, "foo", "bar.txt")
-	_, err := WriteTool(root).Execute(context.Background(), map[string]any{
-		"file_path": absPath,
-		"content":   "hello",
-	})
+	_, err := EditTool(root).Execute(context.Background(), createArgs(absPath, "hello"))
 	if err != nil {
-		t.Fatalf("write absolute workspace path: %v", err)
+		t.Fatalf("create absolute workspace path: %v", err)
 	}
 
 	result, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": absPath})
@@ -45,12 +42,9 @@ func TestWorkspaceBoundaryViaTools(t *testing.T) {
 		}
 	}
 
-	_, err = WriteTool(root).Execute(context.Background(), map[string]any{
-		"file_path": filepath.Join(os.TempDir(), "wingman-outside-test.txt"),
-		"content":   "x",
-	})
+	_, err = EditTool(root).Execute(context.Background(), createArgs(filepath.Join(os.TempDir(), "wingman-outside-test.txt"), "x"))
 	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
-		t.Fatalf("expected outside workspace write error, got: %v", err)
+		t.Fatalf("expected outside workspace create error, got: %v", err)
 	}
 }
 
@@ -90,7 +84,6 @@ func TestSandboxWildcardRoot(t *testing.T) {
 		{ReadTool, map[string]any{"file_path": outside}, "system config", "system config"},
 		{GrepTool, map[string]any{"path": outside, "pattern": "system"}, outside, "system config"},
 		{GlobTool, map[string]any{"path": filepath.Dir(outside), "pattern": "*.txt"}, outside, "system config"},
-		{WriteTool, map[string]any{"file_path": outside, "content": "written config"}, "Updated", "written config"},
 		{EditTool, map[string]any{"file_path": outside, "old_string": "system", "new_string": "edited"}, "Applied", "edited config"},
 	} {
 		t.Run(check.makeTool(root).Name, func(t *testing.T) {
@@ -189,35 +182,5 @@ func TestEditReturnsConciseFileSummary(t *testing.T) {
 	}
 	if result.Content != "Applied 1 edits across 1 files atomically.\nM diff.txt" {
 		t.Fatalf("unexpected edit summary: %q", result.Content)
-	}
-}
-
-func TestWriteTruncatesVeryLongSingleLineDiff(t *testing.T) {
-	root, tmpDir, cleanup := createTestRoot(t)
-	defer cleanup()
-
-	oldContent := strings.Repeat("a", 100_000)
-	newContent := strings.Repeat("b", 100_000)
-	path := filepath.Join(tmpDir, "minified.txt")
-	if err := os.WriteFile(path, []byte(oldContent), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := WriteTool(root).Execute(context.Background(), map[string]any{
-		"file_path": "minified.txt",
-		"content":   newContent,
-	})
-	if err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if !strings.Contains(result.Content, "diff line truncated") {
-		t.Fatalf("expected long-line truncation marker, got %d output bytes", len(result.Content))
-	}
-	if len(result.Content) > 12*1024 {
-		t.Fatalf("long-line diff output is still too large: %d bytes", len(result.Content))
-	}
-	data, err := os.ReadFile(path)
-	if err != nil || string(data) != newContent {
-		t.Fatalf("file was not written in full: %v, %d bytes", err, len(data))
 	}
 }

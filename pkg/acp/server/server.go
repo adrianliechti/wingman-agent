@@ -766,7 +766,7 @@ func (s *Server) pushSessionInfo(ctx context.Context, sess *sessionEntry) {
 	})
 }
 
-func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
+func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (response acpsdk.PromptResponse, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -776,6 +776,14 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 	}
 	defer s.releaseWorkspace(sess.workspace)
 	defer unregister()
+	defer func() {
+		// Cancellation can reach setup, a notification write, or inference.
+		// All three are the same terminal outcome for an accepted prompt.
+		if errors.Is(err, context.Canceled) {
+			response = promptResponse(sess, acpsdk.StopReasonCancelled, params.MessageId)
+			err = nil
+		}
+	}()
 
 	defer func() {
 		if err := sess.agent.Save(string(sess.id)); err != nil {
@@ -815,11 +823,7 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			return acpsdk.PromptResponse{}, notifyErr
 		}
 		if err != nil {
-			reason, streamErr := classifyPromptStreamError(err)
-			if streamErr != nil {
-				return acpsdk.PromptResponse{}, streamErr
-			}
-			return promptResponse(sess, reason, params.MessageId), nil
+			return acpsdk.PromptResponse{}, err
 		}
 		for _, c := range msg.Content {
 			notifyContent(notify, agent.RoleAssistant, c)
@@ -829,13 +833,6 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 		return acpsdk.PromptResponse{}, notifyErr
 	}
 	return promptResponse(sess, acpsdk.StopReasonEndTurn, params.MessageId), nil
-}
-
-func classifyPromptStreamError(err error) (acpsdk.StopReason, error) {
-	if errors.Is(err, context.Canceled) {
-		return acpsdk.StopReasonCancelled, nil
-	}
-	return "", err
 }
 
 func promptResponse(sess *sessionEntry, reason acpsdk.StopReason, messageID *string) acpsdk.PromptResponse {

@@ -18,6 +18,7 @@ export type TurnInputState =
 	| "steered"
 	| "completed"
 	| "cancelled"
+	| "incomplete"
 	| "failed";
 
 export type ServerMessage = {

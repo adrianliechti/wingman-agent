@@ -90,7 +90,7 @@ func TestSkillDirectoryLinks(t *testing.T) {
 							args map[string]any
 						}{
 							{ReadTool(root), map[string]any{"file_path": file}},
-							{WriteTool(root), map[string]any{"file_path": file, "content": "overwrite"}},
+							{EditTool(root), createArgs(filepath.Join(path, "references", "new.md"), "overwrite")},
 							{EditTool(root), map[string]any{"edits": []any{
 								map[string]any{"file_path": localFile, "old_string": "original", "new_string": "changed"},
 								map[string]any{"file_path": file, "old_string": "Shared", "new_string": "Changed"},

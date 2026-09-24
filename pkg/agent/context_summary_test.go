@@ -11,7 +11,53 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+func TestSummarizeContextRejectsUnfinishedResponse(t *testing.T) {
+	for _, paused := range []bool{false, true} {
+		t.Run(fmt.Sprintf("paused=%t", paused), func(t *testing.T) {
+			requests := 0
+			client := openai.NewClient(option.WithAPIKey("test"), option.WithHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				requests++
+				var body struct {
+					Stream       bool
+					Instructions string
+					ToolChoice   string `json:"tool_choice"`
+					Tools        []struct{ Name string }
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				contentType := "application/json"
+				output := `{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Recovered checkpoint."}]}]}`
+				if body.Stream {
+					if body.ToolChoice != "none" || body.Instructions != "session instructions" || len(body.Tools) != 1 || body.Tools[0].Name != "check" {
+						t.Errorf("summary must disable calls while preserving its cached prefix: %+v", body)
+					}
+					contentType = "text/event-stream"
+					// Even a provider ignoring tool_choice must not replace history
+					// with the preamble to a tool call that will never execute.
+					output = phaseTestResponse(false, commentaryOutput, `{"type":"function_call","id":"fc_check","call_id":"check","name":"check","arguments":"{}","status":"completed"}`)
+					if paused {
+						output = pausedResponse(commentaryOutput)
+					}
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Request: r, Body: io.NopCloser(strings.NewReader(output))}, nil
+			})}))
+			a := &Agent{Config: &Config{client: &client}, Messages: []Message{{Role: RoleUser, Content: []Content{{Text: "Complete the original task."}}}}}
+			req := &request{model: "m", instructions: "session instructions", messages: a.requestMessages(), tools: []tool.Tool{{Name: "check"}}}
+			summary, err := a.summarizeContext(t.Context(), req, req.messages)
+			if err != nil || summary != "Recovered checkpoint." || requests != 2 {
+				t.Fatalf("summary=%q requests=%d error=%v", summary, requests, err)
+			}
+			if a.ContextRevision != 0 || len(a.MessagesSnapshot()) != 1 {
+				t.Fatal("summary attempt changed the live conversation")
+			}
+		})
+	}
+}
 
 func TestBriefingPreservesPriorCheckpointAndBoundsTranscript(t *testing.T) {
 	prior := summaryPrefix + "\n" + strings.Repeat("important prior state. ", 1200) + " STILL_UNFINISHED"

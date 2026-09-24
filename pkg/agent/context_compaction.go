@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 const maxRetainedUserTokens = 20_000
@@ -63,9 +65,7 @@ func (a *Agent) compactMessages(ctx context.Context, req *request) error {
 		return fmt.Errorf("context limit reached with no history to compact; conversation preserved")
 	}
 
-	// Completion usage includes hidden reasoning on some models. Reserve a
-	// generation budget independently, then budget the actual briefing text.
-	summary, err := a.generateBriefing(ctx, compactionInstructions, messages, summaryOutputTokens)
+	summary, err := a.summarizeContext(ctx, req, messages)
 	if err != nil {
 		return fmt.Errorf("compact context: %w", err)
 	}
@@ -75,7 +75,7 @@ func (a *Agent) compactMessages(ctx context.Context, req *request) error {
 	if summary == "" {
 		return fmt.Errorf("compaction returned an empty summary; conversation preserved")
 	}
-	checkpoint := hiddenContextMessage(summaryPrefix + "\n\n" + summary + "\n\n" + summaryContinuation)
+	checkpoint := hiddenContextMessage(summaryPrefix + "\n\n" + summary + a.sessionFacts() + "\n\n" + summaryContinuation)
 	retained, err = compactionUserMessages(messages, available-messageTokens(checkpoint))
 	if err != nil {
 		return err
@@ -88,6 +88,79 @@ func (a *Agent) compactMessages(ctx context.Context, req *request) error {
 		return fmt.Errorf("compaction did not reduce context; conversation preserved")
 	}
 	return a.replaceContext("compact model context", compacted)
+}
+
+const (
+	maxFactFiles        = 40
+	maxFactChecks       = 10
+	maxFactCommandBytes = 160
+)
+
+// The ledger records edits and checks exactly. Restating them keeps the
+// checkpoint from depending on the summary for facts it can prove.
+func (a *Agent) sessionFacts() string {
+	type checkKey struct{ command, workdir string }
+	var files []string
+	var order []checkKey
+	checks := map[checkKey]ValidationCheck{}
+	for _, review := range a.TurnReviews() {
+		if review.Undone {
+			continue
+		}
+		if len(review.Files) > 0 {
+			for key, check := range checks {
+				if check.Outcome == "passed" {
+					check.Outcome = "outdated"
+					checks[key] = check
+				}
+			}
+		}
+		for _, change := range review.Files {
+			if !slices.Contains(files, change.Path) {
+				files = append(files, change.Path)
+			}
+		}
+		for _, check := range review.Checks {
+			key := checkKey{check.Command, check.WorkDir}
+			order = slices.DeleteFunc(order, func(k checkKey) bool { return k == key })
+			order = append(order, key)
+			checks[key] = check
+		}
+	}
+	if len(files) == 0 && len(order) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n\nRecorded by the harness:")
+	if len(files) > 0 {
+		b.WriteString("\n- Files changed in this session: " + strings.Join(files[:min(len(files), maxFactFiles)], ", "))
+		if len(files) > maxFactFiles {
+			fmt.Fprintf(&b, " (and %d more)", len(files)-maxFactFiles)
+		}
+	}
+	for _, key := range order[max(0, len(order)-maxFactChecks):] {
+		check := checks[key]
+		command := text.TruncateHead(strings.Join(strings.Fields(check.Command), " "), maxFactCommandBytes)
+		fmt.Fprintf(&b, "\n- Check `%s`: %s", command, checkOutcome(check))
+	}
+	return b.String()
+}
+
+func checkOutcome(check ValidationCheck) string {
+	outcome := "result not confirmed"
+	switch check.Outcome {
+	case "passed":
+		outcome = "passed"
+	case "failed":
+		outcome = "failed"
+	case "outdated":
+		outcome = "passed before later edits"
+	}
+	if check.ExitCode != nil {
+		outcome += fmt.Sprintf(" (exit %d)", *check.ExitCode)
+	}
+	return outcome
 }
 
 func compactionUserMessages(messages []Message, available int) ([]Message, error) {

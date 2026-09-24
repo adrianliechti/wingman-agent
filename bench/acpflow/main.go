@@ -20,7 +20,7 @@ import (
 
 const taskPrompt = `Fix the invoice-total bug reported in this repository: tax must be calculated on the discounted subtotal, not on the original subtotal. Begin by searching for the relevant symbols, inspect the implementation and focused tests, make the smallest correct code change, and run the focused test. Do not use subagents. Finish with a concise summary.`
 
-const denseTaskSuffix = ` Do not use the todo tool. Minimize model round trips: batch independent searches and reads in one response, make the edit once you have enough evidence, and combine final verification commands where safe.`
+const denseTaskSuffix = ` Minimize model round trips: batch independent searches and reads in one response, make the edit once you have enough evidence, and combine final verification commands where safe.`
 
 const dashboardCreatePrompt = `This is a freshly scaffolded Vite project with its React, TypeScript, Tailwind CSS, and Lucide dependencies already installed. Do not install or upgrade packages. Build a polished responsive personal-finance dashboard. Include a collapsible-feeling sidebar, header actions, four KPI cards, an SVG or CSS cash-flow chart, recent transactions, and budget progress. Use realistic static data, semantic accessible markup, Lucide icons, and a restrained professional visual system. Create the needed source files and run npm run build. Do not use subagents, optional skills, browser automation, screenshots, or a development server; implement directly and validate with one production build.`
 

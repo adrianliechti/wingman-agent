@@ -38,7 +38,7 @@ func Tools(elicit *tool.Elicitation, extract Extract) []tool.Tool {
 	lines := []string{
 		"Fetch a URL over HTTP(S) and return its content as readable text.",
 		"- HTML is converted to compact markdown-style text: scripts, styles, and markup are dropped; headings and list structure are kept; links become [text](url).",
-		"- Use for documentation, changelogs, issues, and API responses. Prefer it over `shell` with curl/wget — output stays readable and bounded.",
+		"- Use for documentation, changelogs, issues, and API responses. Prefer it over curl/wget in `exec_command` — output stays readable and bounded.",
 	}
 	if extract != nil {
 		lines = append(lines,

@@ -98,6 +98,7 @@ type request struct {
 	tools         []tool.Tool
 	outputSchema  map[string]any
 	requireFinish bool
+	disableTools  bool
 }
 
 type response struct {
@@ -107,6 +108,7 @@ type response struct {
 	model    string
 
 	finishReasons []string
+	stopReason    string
 
 	incomplete       bool
 	incompleteReason string
@@ -133,6 +135,9 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 	}
 	if budget := c.outputTokenBudgetFor(r.model); budget > 0 {
 		params.MaxOutputTokens = openai.Int(int64(budget))
+	}
+	if r.disableTools {
+		params.ToolChoice.OfToolChoiceMode = openai.Opt(responses.ToolChoiceOptionsNone)
 	}
 	if r.cacheKey != "" {
 		params.PromptCacheKey = openai.String(r.cacheKey)
@@ -194,6 +199,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 	incompleteReason := ""
 	responseID := ""
 	responseModel := ""
+	stopReason := ""
 	outputStarted := false
 	terminalEvent := false
 
@@ -292,6 +298,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 			outputItems = append(outputItems, outputItemsToInput([]responses.ResponseOutputItemUnion{e.Item})...)
 
 		case responses.ResponseCompletedEvent:
+			stopReason = responseStopReason(&e.Response)
 			usageDelta = responseToUsage(e.Response)
 			responseID = e.Response.ID
 			responseModel = e.Response.Model
@@ -301,6 +308,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 			}
 
 		case responses.ResponseIncompleteEvent:
+			stopReason = responseStopReason(&e.Response)
 			// Output was cut short (e.g. max output tokens). The final response
 			// carries the partial items — including a message that never got an
 			// output_item.done — so prefer it over the accumulated stream items,
@@ -402,6 +410,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 		model:    responseModel,
 
 		finishReasons: finishReasons,
+		stopReason:    stopReason,
 
 		incomplete:       incomplete,
 		incompleteReason: incompleteReason,

@@ -53,9 +53,6 @@ func TestFileTargetRejectsReplacedAllowedRoot(t *testing.T) {
 				file.Close()
 				t.Error("streaming read followed a replacement allowed root")
 			}
-			if err := writeFileTarget(root, target, "overwrite"); err == nil {
-				t.Error("write followed a replacement allowed root")
-			}
 			if _, _, closeRoot, err := transactionLocation(root, target); err == nil {
 				if closeRoot != nil {
 					closeRoot()

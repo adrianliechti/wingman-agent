@@ -318,26 +318,23 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 	}
 
 	lines := []string{
-		"Launch a subagent for a bounded task. It runs in a separate context with a filtered toolset and returns one final report; it does not see your conversation, and its intermediate output (file dumps, logs, test runs) never enters your context — only the report does. The report is delivered to you, not the user — relay what matters in your response.",
+		"Launch a subagent for a bounded task. It runs in a separate context with a filtered toolset, does not see your conversation, and returns one final report to you, not the user. Only the report enters your context.",
 		"",
 		"Agent types:",
 	}
 	lines = append(lines, blurbs...)
 	lines = append(lines,
 		"",
-		"Write a self-contained prompt: goal, relevant paths/symbols, allowed edit scope, expected output shape. Pick the narrowest fitting type. Don't delegate a single known lookup (use `read`/`grep`/`glob` directly) or synthesis of results you already hold.",
+		"Write a self-contained prompt: goal, relevant paths or symbols, allowed edit scope, and the expected report shape. Pick the narrowest fitting type. Do not delegate a single known lookup or the synthesis of results you already hold. Give a verifier only the claim to check, not the reasoning behind it.",
 		"",
-		"Keep finding and verifying separated: an agent that produced findings never checks them itself. To validate claims — another agent's or your own — launch a fresh agent per claim, prompted to refute the claim rather than confirm it, and pass it only the claim, not the reasoning behind it; the claim is verified when an honest refutation attempt fails, and an uncertain verdict counts as refuted. For a claim that can fail in more than one way, prefer a few verifiers with distinct lenses (correctness, security, does-it-reproduce) over one generalist.",
-		"",
-		"By default the agent inherits your model and reasoning effort — almost always correct. Override `model` or `effort` only when a different tier clearly fits: `utility` (or lower effort) for mechanical, low-risk sweeps; `plan` (or higher effort) for the hardest verification, review, or architecture work.",
+		"The agent inherits your model and effort. Override `model` or `effort` only when a different tier clearly fits: `utility` for mechanical sweeps, `plan` for the hardest review or architecture work.",
 	)
 
 	if tasks != nil {
 		lines = append(lines,
 			"",
-			"Set `background: true` to launch the agent in the background and keep working: the call returns immediately with a task id, and the result arrives later as a task notification. Prefer background for research or verification you can overlap with other work, and launch several to cover independent areas in parallel. Keep the critical path yourself: if your very next step depends on the result, run the agent synchronously instead of waiting idle. While one runs, never invent or assume its result and don't start work that overlaps its scope. Use `task_output` to check on tasks, `task_stop` to cancel one, and `task_send` to ask a finished agent follow-ups with its context intact.",
-			"Editing agent types may also run in the background, but give each a file scope disjoint from files you plan to touch: concurrent edits to the same file fail and force a re-read, and prefer `edit` over `write` for any file a background agent might change. Tell each editing agent it is not alone in the tree — it must leave changes outside its scope alone, even ones that look wrong.",
-			"Synchronous runs are kept too: their result ends with a task id, and `task_send` continues that agent later with its context intact.",
+			"`background: true` returns a task id immediately and delivers the result later as a task notification. Use it for work you can overlap with your own; if your next step depends on the result, run synchronously. Never assume a running agent's result or start work that overlaps its scope. Give background editing agents a file scope disjoint from yours, and tell them to leave changes outside their scope alone.",
+			"Every result carries a task id: `task_output` checks status, `task_stop` cancels, and `task_send` continues a finished agent with its context intact.",
 		)
 	}
 
@@ -672,6 +669,9 @@ func (c *reportCollector) tool() tool.Tool {
 func runTrailer(messages []agent.Message, usage agent.Usage, elapsed time.Duration) string {
 	calls := 0
 	for _, m := range messages {
+		if m.Hidden {
+			continue
+		}
 		for _, c := range m.Content {
 			if c.ToolCall != nil {
 				calls++
@@ -701,9 +701,14 @@ func formatTokens(n int64) string {
 	}
 }
 
+// Hidden harness markers such as finish_turn follow the report; they must not
+// hide it.
 func finalText(messages []agent.Message) string {
 	lastTool := -1
 	for i, m := range messages {
+		if m.Hidden {
+			continue
+		}
 		for _, c := range m.Content {
 			if c.ToolCall != nil || c.ToolResult != nil {
 				lastTool = i
@@ -780,9 +785,10 @@ func readOnlyDynamicTool(t tool.Tool) tool.Tool {
 	return t
 }
 
+// Scheduling belongs to the session: a delegated task must not wake it later.
 func allowNonAgentTool(t tool.Tool) bool {
 	switch t.Name {
-	case "agent", "task_output", "task_stop", "task_send":
+	case "agent", "task_output", "task_stop", "task_send", "schedule":
 		return false
 	}
 	return !t.Hidden

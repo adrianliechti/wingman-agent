@@ -51,7 +51,7 @@ func TestFileToolsKeepOpenedWorkspaceBoundary(t *testing.T) {
 				{ReadTool(root), map[string]any{"file_path": "private/secret.txt"}},
 				{GrepTool(root), map[string]any{"path": "private", "pattern": "secret"}},
 				{GlobTool(root), map[string]any{"path": "private", "pattern": "**/*.txt"}},
-				{WriteTool(root), map[string]any{"file_path": "linked/file.txt", "content": "overwrite"}},
+				{EditTool(root), createArgs("linked/new.txt", "overwrite")},
 				{EditTool(root), map[string]any{"file_path": "linked/file.txt", "old_string": "outside", "new_string": "overwrite"}},
 			} {
 				if result, err := check.tool.Execute(context.Background(), check.args); err == nil {
@@ -60,6 +60,9 @@ func TestFileToolsKeepOpenedWorkspaceBoundary(t *testing.T) {
 			}
 			if data, err := os.ReadFile(filepath.Join(outside, "real", "file.txt")); err != nil || string(data) != "outside" {
 				t.Fatalf("replacement workspace was modified: %q, %v", data, err)
+			}
+			if _, err := os.Stat(filepath.Join(outside, "real", "new.txt")); !os.IsNotExist(err) {
+				t.Fatalf("replacement workspace gained a file: %v", err)
 			}
 			result, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": "real/file.txt"})
 			if err != nil || !strings.Contains(result.Content, "original") {
@@ -95,13 +98,11 @@ func TestFileToolsDirectoryLinkPaths(t *testing.T) {
 				}
 				defer root.Close()
 				file := filepath.Join(link, "note.txt")
-				if _, err := WriteTool(root, allowed...).Execute(context.Background(), map[string]any{
-					"file_path": filepath.Join(link, "missing", "nested", "output.txt"), "content": "linked output",
-				}); err != nil {
-					t.Errorf("write through link with missing parents: %v", err)
+				if _, err := EditTool(root, allowed...).Execute(context.Background(), createArgs(filepath.Join(link, "missing", "nested", "output.txt"), "linked output")); err != nil {
+					t.Errorf("create through link with missing parents: %v", err)
 				}
 				if data, err := os.ReadFile(filepath.Join(real, "missing", "nested", "output.txt")); err != nil || string(data) != "linked output" {
-					t.Errorf("write did not reach the contained directory: %q, %v", data, err)
+					t.Errorf("create did not reach the contained directory: %q, %v", data, err)
 				}
 				for _, check := range []struct {
 					tool tool.Tool
@@ -135,14 +136,14 @@ func TestFileToolsDirectoryLinkPaths(t *testing.T) {
 					{ReadTool(root, allowed...), map[string]any{"file_path": filepath.Join(escape, "secret.txt")}},
 					{GrepTool(root, allowed...), map[string]any{"path": escape, "pattern": "secret"}},
 					{GlobTool(root, allowed...), map[string]any{"path": escape, "pattern": "**/*.txt"}},
-					{WriteTool(root, allowed...), map[string]any{"file_path": filepath.Join(escape, "missing", "output.txt"), "content": "overwrite"}},
+					{EditTool(root, allowed...), createArgs(filepath.Join(escape, "missing", "output.txt"), "overwrite")},
 				} {
 					if result, err := check.tool.Execute(context.Background(), check.args); err == nil {
 						t.Errorf("%s followed an escaping directory link: %q", check.tool.Name, result.Content)
 					}
 				}
 				if _, err := os.Stat(filepath.Join(outside, "missing")); !os.IsNotExist(err) {
-					t.Errorf("escaping write created a directory: %v", err)
+					t.Errorf("escaping create made a directory: %v", err)
 				}
 			})
 		}

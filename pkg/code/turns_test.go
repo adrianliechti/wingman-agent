@@ -112,6 +112,10 @@ func (a *turnManagerTestAgent) Send(ctx context.Context, _ string, input []agent
 			return
 		case <-a.releases:
 		}
+		if text == "incomplete" {
+			yield(agent.Message{}, agent.ErrTurnIncomplete)
+			return
+		}
 		yield(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "done " + text}}}, nil)
 	}, nil
 }
@@ -406,53 +410,60 @@ func TestTurnManagerSteeredInputFollowsCancellation(t *testing.T) {
 }
 
 func TestTurnManagerDoesNotAttachLateSteerToPromotedTurn(t *testing.T) {
-	base := newTurnManagerTestAgent()
-	base.steer = true
-	a := &blockingSteerAgent{
-		turnManagerTestAgent: base,
-		started:              make(chan struct{}),
-		release:              make(chan struct{}),
-	}
-	events := make(chan TurnEvent, 32)
-	m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
-	defer m.Close()
+	for _, tc := range []struct {
+		text  string
+		state TurnInputState
+	}{{"one", TurnInputCompleted}, {"incomplete", TurnInputIncomplete}} {
+		t.Run(tc.text, func(t *testing.T) {
+			base := newTurnManagerTestAgent()
+			base.steer = true
+			a := &blockingSteerAgent{
+				turnManagerTestAgent: base,
+				started:              make(chan struct{}),
+				release:              make(chan struct{}),
+			}
+			events := make(chan TurnEvent, 32)
+			m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+			defer m.Close()
 
-	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
-	_ = waitValue(t, a.starts)
-	_, _ = m.Submit(context.Background(), "s", turnInput("2", "two", TurnInputFollowUp))
+			_, _ = m.Submit(context.Background(), "s", turnInput("1", tc.text, TurnInputFollowUp))
+			_ = waitValue(t, a.starts)
+			_, _ = m.Submit(context.Background(), "s", turnInput("2", "two", TurnInputFollowUp))
 
-	type submitResult struct {
-		snapshot TurnInputSnapshot
-		err      error
-	}
-	result := make(chan submitResult, 1)
-	go func() {
-		snapshot, err := m.Submit(context.Background(), "s", turnInput("steer", "guide", TurnInputSteer))
-		result <- submitResult{snapshot: snapshot, err: err}
-	}()
-	select {
-	case <-a.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("steer did not start")
-	}
+			type submitResult struct {
+				snapshot TurnInputSnapshot
+				err      error
+			}
+			result := make(chan submitResult, 1)
+			go func() {
+				snapshot, err := m.Submit(context.Background(), "s", turnInput("steer", "guide", TurnInputSteer))
+				result <- submitResult{snapshot: snapshot, err: err}
+			}()
+			select {
+			case <-a.started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("steer did not start")
+			}
 
-	a.releases <- struct{}{}
-	waitForState(t, events, "1", TurnInputCompleted)
-	if got := waitValue(t, a.starts); got != "two" {
-		t.Fatalf("promoted start = %q", got)
-	}
-	close(a.release)
+			a.releases <- struct{}{}
+			waitForState(t, events, "1", tc.state)
+			if got := waitValue(t, a.starts); got != "two" {
+				t.Fatalf("promoted start = %q", got)
+			}
+			close(a.release)
 
-	got := waitValue(t, result)
-	if got.err != nil || got.snapshot.State != TurnInputCompleted {
-		t.Fatalf("late steer = %+v, %v", got.snapshot, got.err)
-	}
-	if snapshot := m.Snapshot("s"); len(snapshot.Inputs) != 1 || snapshot.Inputs[0].ID != "2" {
-		t.Fatalf("late steer attached to promoted turn: %+v", snapshot)
-	}
+			got := waitValue(t, result)
+			if got.err != nil || got.snapshot.State != tc.state {
+				t.Fatalf("late steer = %+v, %v", got.snapshot, got.err)
+			}
+			if snapshot := m.Snapshot("s"); len(snapshot.Inputs) != 1 || snapshot.Inputs[0].ID != "2" {
+				t.Fatalf("late steer attached to promoted turn: %+v", snapshot)
+			}
 
-	a.releases <- struct{}{}
-	waitForState(t, events, "2", TurnInputCompleted)
+			a.releases <- struct{}{}
+			waitForState(t, events, "2", TurnInputCompleted)
+		})
+	}
 }
 
 func TestTurnManagerSurfacesUnexpectedSteerFailure(t *testing.T) {

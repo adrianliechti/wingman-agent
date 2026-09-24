@@ -3,7 +3,6 @@ package fs
 import (
 	"bufio"
 	"bytes"
-	"fmt"
 	"io/fs"
 	pathpkg "path"
 	"path/filepath"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
-	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 const (
@@ -155,81 +153,6 @@ func fuzzyFindText(content, oldText string) fuzzyMatchResult {
 		matchLength:    originalEnd - originalIndex,
 		usedFuzzyMatch: true,
 	}
-}
-
-// The model just produced edited content, so echo only a bounded diff. Both
-// dimensions matter: a line cap alone still permits a minified or encoded line
-// to flood the context and UI.
-const (
-	maxDiffLines     = 200
-	maxDiffLineBytes = 4 * 1024
-)
-
-func generateDiffString(oldContent, newContent string) string {
-	dmp := diffmatchpatch.New()
-
-	oldLines, newLines, lineArray := dmp.DiffLinesToChars(oldContent, newContent)
-	diffs := dmp.DiffMain(oldLines, newLines, false)
-	diffs = dmp.DiffCharsToLines(diffs, lineArray)
-	diffs = dmp.DiffCleanupSemantic(diffs)
-
-	var output strings.Builder
-	oldLineNum := 1
-	newLineNum := 1
-
-	for _, diff := range diffs {
-		lines := strings.Split(diff.Text, "\n")
-
-		if len(lines) > 0 && lines[len(lines)-1] == "" {
-			lines = lines[:len(lines)-1]
-		}
-
-		switch diff.Type {
-		case diffmatchpatch.DiffEqual:
-			oldLineNum += len(lines)
-			newLineNum += len(lines)
-		case diffmatchpatch.DiffDelete:
-			for _, line := range lines {
-				fmt.Fprintf(&output, "-%d %s\n", oldLineNum, truncateDiffLine(line))
-				oldLineNum++
-			}
-		case diffmatchpatch.DiffInsert:
-			for _, line := range lines {
-				fmt.Fprintf(&output, "+%d %s\n", newLineNum, truncateDiffLine(line))
-				newLineNum++
-			}
-		}
-	}
-
-	return capDiffLines(output.String())
-}
-
-func truncateDiffLine(line string) string {
-	if len(line) <= maxDiffLineBytes {
-		return line
-	}
-	prefix := line[:maxDiffLineBytes]
-	for !utf8.ValidString(prefix) {
-		prefix = prefix[:len(prefix)-1]
-	}
-	return prefix + fmt.Sprintf("… [diff line truncated: %d bytes omitted]", len(line)-len(prefix))
-}
-
-func capDiffLines(diff string) string {
-	trimmed := strings.TrimRight(diff, "\n")
-	if trimmed == "" {
-		return diff
-	}
-
-	lines := strings.Split(trimmed, "\n")
-	if len(lines) <= maxDiffLines {
-		return diff
-	}
-
-	omitted := len(lines) - maxDiffLines
-	lines = lines[:maxDiffLines]
-
-	return strings.Join(lines, "\n") + fmt.Sprintf("\n… diff truncated: %d more changed lines (the file was written in full)\n", omitted)
 }
 
 var vcsDirs = map[string]bool{

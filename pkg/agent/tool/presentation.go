@@ -153,6 +153,10 @@ var presentationSpecs = indexPresentationSpecs([]presentationSpec{
 		primary: []string{"skill", "name"},
 	},
 	{
+		names: []string{"schedule", "Scheduled tasks"},
+		title: "Scheduled tasks", primary: []string{"prompt", "id", "action"},
+	},
+	{
 		names: []string{"schedule_task", "Schedule task"},
 		title: "Schedule task", primary: []string{"name", "prompt"},
 	},

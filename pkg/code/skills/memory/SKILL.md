@@ -4,9 +4,9 @@ description: Save, revise, or remove durable facts in persistent per-project mem
 ---
 # Memory
 
-You have a persistent, file-based memory at the path shown in the Memory section of the system prompt (typically `~/.wingman/projects/{cwd}/memory/`). Memory survives across conversations: an index of every `*.md` file in that directory is auto-generated and injected into the system prompt of every future session, newest first, as `- [Title](file.md) — hook` with the title derived from the filename and the hook taken from the frontmatter `description`. So anything you `write` there is automatically available next time.
+You have a persistent, file-based memory at the path shown in the Memory section of the session context (typically `~/.wingman/projects/{cwd}/memory/`). Memory survives across conversations: an index of every `*.md` file in that directory is auto-generated and injected into the session context of every future session, newest first, as `- [Title](file.md) — hook` with the title derived from the filename and the hook taken from the frontmatter `description`. So anything you save there is automatically available next time.
 
-You manage memory with the **normal file tools** — `write`, `edit`, `read`, `glob`. The memory directory is an allowed write root, so workspace-relative path rules don't apply: pass the absolute path inside the memory directory.
+You manage memory with the **normal file tools** — `edit`, `read`, `glob`. The memory directory is an allowed write root, so workspace-relative path rules don't apply: pass the absolute path inside the memory directory.
 
 If the user asks you to remember something, save it. If they ask you to forget something, find and delete it.
 
@@ -55,13 +55,13 @@ The filename is the memory's identifier — lowercase letters, digits, underscor
 
 ## Workflow recipes
 
-**Save a new memory.** Single call: `write` to `{memory_dir}/feedback_testing.md` with frontmatter + body. The framework picks up the new file on the next turn — no separate index to maintain.
+**Save a new memory.** Single call: `edit` with an empty `old_string` and the frontmatter + body as `new_string` for `{memory_dir}/feedback_testing.md`. The framework picks up the new file on the next turn — no separate index to maintain.
 
 **Update an existing memory.** Use `edit` on the file for surgical changes. If the rule has changed, update the `description` in the frontmatter too so the index reflects the new gist.
 
-**Forget a memory.** Use `shell` `rm` on the file. The index updates automatically on the next turn. If you only need to revise the fact, edit the file instead of deleting.
+**Forget a memory.** Run `rm` on the file with `exec_command`. The index updates automatically on the next turn. If you only need to revise the fact, edit the file instead of deleting.
 
-**List what's remembered.** `glob` `*.md` inside the memory dir; or just consult the index already injected at the top of the system prompt.
+**List what's remembered.** `glob` `*.md` inside the memory dir; or just consult the index already injected into the session context.
 
 **Inspect a specific memory.** `read` with the absolute path inside the memory dir.
 
@@ -73,6 +73,6 @@ A memory that summarizes repo state is frozen in time. If the user asks about *r
 
 ## Memory vs. other persistence
 
-- Use **tasks** (not memory) for in-conversation progress tracking.
+- Keep in-conversation progress in the conversation, not in memory.
 - Use a **plan** (not memory) to align on approach for the current task.
 - Use **memory** only for things that should outlive this conversation.

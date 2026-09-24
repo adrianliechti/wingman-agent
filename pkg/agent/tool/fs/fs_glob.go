@@ -29,7 +29,6 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			"- Returns matching file paths sorted by modification time (newest first).",
 			"- Use this tool when you need to find files by name patterns. Use `grep` for content/symbols.",
 			"- Symlinks and version-control directories (`.git`, `.svn`, …) are skipped. All other files (including dotfiles) are listed; exclude them with a more specific pattern.",
-			"- For open-ended searches requiring multiple rounds, use the `agent` tool.",
 		}, "\n"),
 
 		Parameters: map[string]any{

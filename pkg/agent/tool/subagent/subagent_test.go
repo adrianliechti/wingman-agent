@@ -354,6 +354,34 @@ func TestAgentToolSyncRunAdoptedForFollowUps(t *testing.T) {
 	}
 }
 
+func TestAgentToolReportSurvivesExplicitFinish(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"output\":["+
+			"{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"finished report\",\"annotations\":[]}]},"+
+			"{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_finish\",\"name\":\"finish_turn\",\"arguments\":\"{}\",\"status\":\"completed\"}"+
+			"],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+	}))
+	defer server.Close()
+
+	t.Setenv("WINGMAN_URL", server.URL)
+	cfg, err := agent.DefaultConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.RequireFinish = func(string) bool { return true }
+
+	out, err := Tools(cfg, nil, nil)[0].Execute(t.Context(), map[string]any{
+		"description": "d", "prompt": "p", "agent_type": "explore",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.Content, "finished report") || !strings.Contains(out.Content, "0 tool calls") {
+		t.Fatalf("result = %q", out.Content)
+	}
+}
+
 func TestAgentToolSyncRunWithoutRegistryOmitsFollowUpID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

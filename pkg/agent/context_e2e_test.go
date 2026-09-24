@@ -93,6 +93,17 @@ func assertRequestPrefix(t *testing.T, before, after contextRequest) {
 	}
 }
 
+// Compaction asks the session model for a checkpoint over the full history.
+const checkpointRequest = "Context checkpoint: your reply replaces the conversation above."
+
+func isCheckpointRequest(req contextRequest) bool {
+	return req.Stream && bytes.Contains(req.Input, []byte(checkpointRequest))
+}
+
+func incompleteText(text string) string {
+	return fmt.Sprintf("data: {\"type\":\"response.incomplete\",\"sequence_number\":1,\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"incomplete\",\"content\":[{\"type\":\"output_text\",\"text\":%q,\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n", text)
+}
+
 func writeSummary(w http.ResponseWriter, summary string) {
 	encoded, _ := json.Marshal(summary)
 	fmt.Fprintf(w, `{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%s}]}]}`, encoded)
@@ -189,9 +200,10 @@ func TestContextCompactionE2ERepeatedOverflowAndDiskResume(t *testing.T) {
 	var modelRequests, summaryRequests atomic.Int64
 	priorCheckpoint := "Implemented parser; tests passed. " + strings.Repeat("Keep the original constraint. ", 80) + " CHECKPOINT_TAIL_MUST_SURVIVE"
 	p := newContextProvider(t, func(w http.ResponseWriter, req contextRequest) {
-		if !req.Stream {
+		if isCheckpointRequest(req) {
 			n := summaryRequests.Add(1)
 			if n == 2 {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				fmt.Fprint(w, `{"error":{"code":"context_length_exceeded","message":"summarizer context too long"}}`)
 				return
@@ -199,6 +211,11 @@ func TestContextCompactionE2ERepeatedOverflowAndDiskResume(t *testing.T) {
 			if n > 1 && !strings.Contains(string(req.Input), "CHECKPOINT_TAIL_MUST_SURVIVE") {
 				t.Error("prior checkpoint tail lost")
 			}
+			fmt.Fprint(w, completedText(priorCheckpoint))
+			return
+		}
+		if !req.Stream {
+			t.Error("fell back to the utility summary")
 			writeSummary(w, priorCheckpoint)
 			return
 		}
@@ -258,7 +275,7 @@ func TestContextCompactionE2ERepeatedOverflowAndDiskResume(t *testing.T) {
 	requests := p.snapshot()
 	var streams []contextRequest
 	for _, req := range requests {
-		if req.Stream {
+		if req.Stream && !isCheckpointRequest(req) {
 			streams = append(streams, req)
 		}
 	}
@@ -352,18 +369,28 @@ func TestCompactionFailureE2EPreservesAcceptedInput(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
+			// The session-model checkpoint fails first, then the utility fallback.
 			newContextProvider(t, func(w http.ResponseWriter, req contextRequest) {
-				if req.Stream {
+				if req.Stream && !isCheckpointRequest(req) {
 					t.Error("sent the oversized main request after failed compaction")
 					fmt.Fprint(w, completedText("unexpected"))
 					return
 				}
 				switch failure {
 				case "empty":
-					writeSummary(w, " \n ")
+					if req.Stream {
+						fmt.Fprint(w, completedText(" \n "))
+					} else {
+						writeSummary(w, " \n ")
+					}
 				case "incomplete":
-					fmt.Fprint(w, `{"status":"incomplete","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}]}`)
+					if req.Stream {
+						fmt.Fprint(w, incompleteText("partial"))
+					} else {
+						fmt.Fprint(w, `{"status":"incomplete","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}]}`)
+					}
 				case "error":
+					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusBadRequest)
 					fmt.Fprint(w, `{"error":{"code":"invalid_request_error","message":"summary failed"}}`)
 				case "canceled":

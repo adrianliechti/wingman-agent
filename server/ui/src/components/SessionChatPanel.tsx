@@ -29,9 +29,11 @@ export function SessionChatPanel(
 		queryFn: ({ signal }) => listTurnReviews(session, signal),
 	});
 	useEffect(() => {
+		// A fast turn can enter and leave its active phase between renders.
+		// Refresh for the settled revision even when React only observed idle.
 		if (view?.phase === "idle")
 			void client.invalidateQueries({ queryKey: turnReviewKey(session) });
-	}, [client, session, view?.phase]);
+	}, [client, session, view?.phase, view?.revision]);
 	const context = useMemo(
 		() => ({
 			session,
@@ -55,6 +57,9 @@ export function SessionChatPanel(
 				canSteer={view?.canSteer ?? false}
 				prompts={view?.prompts ?? EMPTY}
 				toolProgress={view?.toolProgress}
+				incomplete={
+					!query.isFetching && query.data?.at(-1)?.outcome === "incomplete"
+				}
 			/>
 		</TurnReviewsContext.Provider>
 	);

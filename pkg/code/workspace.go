@@ -1051,10 +1051,12 @@ func (w *Workspace) SemanticTokens(ctx context.Context, filePath string, content
 	return service.SemanticTokens(ctx, filePath, content)
 }
 
+const maxEditDiagnosticFiles = 8
+
 func (w *Workspace) WithEditDiagnostics(tools []tool.Tool) []tool.Tool {
 	wrapped := append([]tool.Tool(nil), tools...)
 	for i := range wrapped {
-		if wrapped[i].Name != "edit" && wrapped[i].Name != "write" {
+		if wrapped[i].Name != "edit" {
 			continue
 		}
 		execute := wrapped[i].Execute
@@ -1066,8 +1068,7 @@ func (w *Workspace) WithEditDiagnostics(tools []tool.Tool) []tool.Tool {
 			if err != nil {
 				return out, err
 			}
-			path, _ := args["file_path"].(string)
-			if note := w.postEditDiagnostics(ctx, path); note != "" {
+			if note := w.postEditDiagnostics(ctx, editedPaths(out)); note != "" {
 				out.Content += "\n\n" + note
 			}
 			return out, nil
@@ -1076,21 +1077,40 @@ func (w *Workspace) WithEditDiagnostics(tools []tool.Tool) []tool.Tool {
 	return wrapped
 }
 
-func (w *Workspace) postEditDiagnostics(ctx context.Context, path string) string {
-	if strings.TrimSpace(path) == "" {
-		return ""
+// The result metadata names every file of a batched edit, resolved the same
+// way the edit itself resolved them.
+func editedPaths(result tool.Result) []string {
+	changes, _ := tool.ResultFileChanges(result.Metadata)
+	var paths []string
+	for _, change := range changes {
+		if change.AfterExists && strings.TrimSpace(change.Path) != "" && !slices.Contains(paths, change.Path) {
+			paths = append(paths, change.Path)
+		}
 	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(w.RootPath, path)
-	}
+	return paths
+}
 
+// Each file may wait up to two seconds for its server, so files are checked
+// concurrently.
+func (w *Workspace) postEditDiagnostics(ctx context.Context, paths []string) string {
 	w.mu.RLock()
 	service := w.Language
 	w.mu.RUnlock()
-	if service == nil {
+	if service == nil || len(paths) == 0 {
 		return ""
 	}
-	return service.PostEditDiagnostics(ctx, path)
+
+	paths = paths[:min(len(paths), maxEditDiagnosticFiles)]
+	notes := make([]string, len(paths))
+	var wg sync.WaitGroup
+	for i, path := range paths {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(w.RootPath, path)
+		}
+		wg.Go(func() { notes[i] = service.PostEditDiagnostics(ctx, path) })
+	}
+	wg.Wait()
+	return strings.Join(slices.DeleteFunc(notes, func(note string) bool { return note == "" }), "\n\n")
 }
 
 func (w *Workspace) protectLSPTools(tools []tool.Tool) []tool.Tool {

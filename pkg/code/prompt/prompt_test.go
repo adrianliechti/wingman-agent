@@ -162,7 +162,6 @@ func TestClaudePromptFamilies(t *testing.T) {
 		"# Delivering work",
 		"# Corrections",
 		"Do not call the `agent` tool unless the user requested it.",
-		"Do not start a deep-research workflow unless the user explicitly requested deep research.",
 	} {
 		if !strings.Contains(opus5, want) {
 			t.Errorf("Opus 5 prompt missing captured guidance %q", want)

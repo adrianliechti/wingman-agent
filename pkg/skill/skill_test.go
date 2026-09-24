@@ -1,6 +1,7 @@
 package skill_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -347,6 +348,34 @@ func TestFormatForPromptEscapesXMLAndStaysWithinBudget(t *testing.T) {
 	}
 	if len(result) > 8000 || !strings.HasSuffix(result, "</available_skills>") {
 		t.Fatalf("prompt length = %d or document is incomplete", len(result))
+	}
+}
+
+func TestFormatForPromptShortensDescriptionsAtWords(t *testing.T) {
+	var skills []Skill
+	for i := range 30 {
+		skills = append(skills, Skill{
+			Name:        fmt.Sprintf("skill-%d", i),
+			Description: strings.Repeat("Review the user's changes carefully. ", 12),
+		})
+	}
+	result := FormatForPrompt(skills)
+	if len(result) > 8000 || strings.Contains(result, "&#39;") {
+		t.Fatalf("prompt length = %d or escaped apostrophes: %q", len(result), result)
+	}
+	for _, line := range strings.Split(result, "\n") {
+		description, ok := strings.CutPrefix(strings.TrimSpace(line), "<description>")
+		if !ok {
+			continue
+		}
+		description = strings.TrimSuffix(description, "</description>")
+		if !strings.HasSuffix(description, "…") || strings.HasSuffix(strings.TrimSuffix(description, "…"), " ") {
+			t.Fatalf("description not shortened at a word boundary: %q", description)
+		}
+		words := strings.Fields(strings.TrimSuffix(description, "…"))
+		if last := strings.TrimRight(words[len(words)-1], "."); !slices.Contains([]string{"Review", "the", "user's", "changes", "carefully"}, last) {
+			t.Fatalf("description ends mid-word: %q", description)
+		}
 	}
 }
 
