@@ -316,6 +316,10 @@ func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 				return err
 			}
 		case "assistant":
+			var message cliMessage
+			if env.ParentToolUseID == "" && json.Unmarshal(env.Message, &message) == nil && isSyntheticLoginMessage(message) {
+				continue
+			}
 			if err := emitAssistant(ctx, conn, sid, env.Message, cwd, cache, nil, nil, env.ParentToolUseID); err != nil {
 				return err
 			}
@@ -329,7 +333,18 @@ func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 
 var localCommandStdoutPattern = regexp.MustCompile(`(?s)<local-command-stdout>(.*?)</local-command-stdout>`)
 
-var localCommandTagPattern = regexp.MustCompile(`(?s)<command-name>.*?</command-name>|<command-message>.*?</command-message>|<command-args>.*?</command-args>|<local-command-stderr>.*?</local-command-stderr>`)
+var localCommandTagPattern = regexp.MustCompile(`(?s)<command-name>.*?</command-name>|<command-message>.*?</command-message>|<command-args>.*?</command-args>|<local-command-stderr>.*?</local-command-stderr>|<system-reminder>.*?</system-reminder>`)
+
+var (
+	commandNamePattern = regexp.MustCompile(`(?s)<command-name>(.*?)</command-name>`)
+	commandArgsPattern = regexp.MustCompile(`(?s)<command-args>(.*?)</command-args>`)
+)
+
+// replayHiddenCommands are client-local commands whose marker-only records are UI noise, not prompts.
+var replayHiddenCommands = map[string]bool{
+	"/context": true, "/heapdump": true, "/extra-usage": true,
+	"/compact": true, "/model": true, "/status": true, "/usage": true,
+}
 
 func stripMarkerTags(text string) (string, bool) {
 	stripped := localCommandStdoutPattern.ReplaceAllString(text, "$1")
@@ -338,6 +353,28 @@ func stripMarkerTags(text string) (string, bool) {
 		return "", false
 	}
 	return stripped, true
+}
+
+// A marker-only slash skill invocation is rebuilt as the command the user typed.
+func replayUserText(text string) (string, bool) {
+	if stripped, ok := stripMarkerTags(text); ok {
+		return stripped, true
+	}
+	if strings.Contains(text, "<local-command-stdout>") || strings.Contains(text, "<local-command-stderr>") {
+		return "", false
+	}
+	m := commandNamePattern.FindStringSubmatch(text)
+	if m == nil {
+		return "", false
+	}
+	name := strings.TrimSpace(m[1])
+	if !strings.HasPrefix(name, "/") || replayHiddenCommands[strings.SplitN(name, " ", 2)[0]] {
+		return "", false
+	}
+	if args := commandArgsPattern.FindStringSubmatch(text); args != nil && strings.TrimSpace(args[1]) != "" {
+		return name + " " + strings.TrimSpace(args[1]), true
+	}
+	return name, true
 }
 
 func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache, parentToolUseID string) error {
@@ -356,7 +393,7 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 		if parentToolUseID != "" {
 			return nil
 		}
-		text, ok := stripMarkerTags(s)
+		text, ok := replayUserText(s)
 		if !ok {
 			return nil
 		}
@@ -373,7 +410,7 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 			if parentToolUseID != "" {
 				continue
 			}
-			text, ok := stripMarkerTags(b.Text)
+			text, ok := replayUserText(b.Text)
 			if !ok {
 				continue
 			}

@@ -46,7 +46,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 		[backend, drafts, setDraft],
 	);
 	return (
-		<WorkspaceContext.Provider value={value}>
+		<WorkspaceContext value={value}>
 			{children}
 			{replaced && (
 				<div
@@ -66,6 +66,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 					</button>
 				</div>
 			)}
-		</WorkspaceContext.Provider>
+		</WorkspaceContext>
 	);
 }

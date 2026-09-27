@@ -16,6 +16,10 @@ const (
 	optionAllowOnce   acp.PermissionOptionId = "allow-once"
 	optionAllowAlways acp.PermissionOptionId = "allow-always"
 	optionRejectOnce  acp.PermissionOptionId = "reject-once"
+
+	optionExitPlanAuto   acp.PermissionOptionId = "exit-plan-auto"
+	optionExitPlanBypass acp.PermissionOptionId = "exit-plan-bypass"
+	optionExitPlanReject acp.PermissionOptionId = "exit-plan-reject"
 )
 
 // toolCallTracker decides, for a given tool_use id, whether the next sighting
@@ -72,12 +76,42 @@ func (t *toolCallTracker) complete(id string) bool {
 	return true
 }
 
-func permissionOptions() []acp.PermissionOption {
-	return []acp.PermissionOption{
-		{OptionId: optionAllowOnce, Name: "Allow Once", Kind: acp.PermissionOptionKindAllowOnce},
-		{OptionId: optionAllowAlways, Name: "Always Allow", Kind: acp.PermissionOptionKindAllowAlways},
-		{OptionId: optionRejectOnce, Name: "Deny", Kind: acp.PermissionOptionKindRejectOnce},
+func permissionOptions(req controlRequestBody) []acp.PermissionOption {
+	allowOnce := acp.PermissionOption{OptionId: optionAllowOnce, Name: "Allow Once", Kind: acp.PermissionOptionKindAllowOnce}
+	reject := acp.PermissionOption{OptionId: optionRejectOnce, Name: "Deny", Kind: acp.PermissionOptionKindRejectOnce}
+	options := []acp.PermissionOption{allowOnce}
+	// A rule the user's own ask forced, or one broader than this ask, must not be persisted.
+	if !req.SuppressAlwaysAllowRule && !hasJSONValue(req.MatchedAskRule) {
+		options = append(options, acp.PermissionOption{
+			OptionId: optionAllowAlways, Name: "Always Allow", Kind: acp.PermissionOptionKindAllowAlways,
+			Meta: map[string]any{"permission": permissionMetadataForAlwaysAllow(req)},
+		})
 	}
+	// ACP has no pre-selected option, so order is the only way to honor default_to_no.
+	if req.DefaultToNo {
+		return append([]acp.PermissionOption{reject}, options...)
+	}
+	return append(options, reject)
+}
+
+// Bypass leads only when the session was in bypass before it entered plan mode.
+func exitPlanOptions(allowBypass bool, prePlanMode string) []acp.PermissionOption {
+	auto := acp.PermissionOption{OptionId: optionExitPlanAuto, Name: "Yes, and use auto mode", Kind: acp.PermissionOptionKindAllowAlways}
+	bypass := acp.PermissionOption{OptionId: optionExitPlanBypass, Name: "Yes, and bypass permissions", Kind: acp.PermissionOptionKindAllowAlways}
+	options := []acp.PermissionOption{auto}
+	if allowBypass {
+		if prePlanMode == bypassModeID {
+			options = []acp.PermissionOption{bypass, auto}
+		} else {
+			options = append(options, bypass)
+		}
+	}
+	return append(options, acp.PermissionOption{OptionId: optionExitPlanReject, Name: "No, keep planning", Kind: acp.PermissionOptionKindRejectOnce})
+}
+
+func hasJSONValue(raw json.RawMessage) bool {
+	v := strings.TrimSpace(string(raw))
+	return v != "" && v != "null" && v != "false"
 }
 
 type approver struct {
@@ -90,6 +124,8 @@ type approver struct {
 	parentForAgent func(string) string
 	askForm        bool
 	applyMode      func(string)
+	allowBypass    bool
+	prePlanMode    func() string
 }
 
 func pendingToolCall(id string, kind acp.ToolKind) acp.ToolCallUpdate {
@@ -141,6 +177,10 @@ func (a *approver) handle(req controlRequest) {
 	if parentToolUseID != "" {
 		claudeMeta["parentToolUseId"] = parentToolUseID
 	}
+	// Forwarded so clients can key trust on source instead of parsing the tool-name prefix.
+	if server := req.Request.MCPServer; server != nil && server.Name != "" {
+		claudeMeta["mcpServer"] = map[string]any{"name": server.Name, "source": server.Source}
+	}
 	tc.Meta = map[string]any{"claudeCode": claudeMeta}
 	tc.Title = &info.title
 	tc.RawInput = info.rawInput
@@ -149,11 +189,15 @@ func (a *approver) handle(req controlRequest) {
 		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(req.Request.Description))}
 	}
 
-	options := permissionOptions()
-	for i := range options {
-		if options[i].OptionId == optionAllowAlways {
-			options[i].Meta = map[string]any{"permission": permissionMetadataForAlwaysAllow(req.Request)}
+	var options []acp.PermissionOption
+	if name == "ExitPlanMode" {
+		prePlan := ""
+		if a.prePlanMode != nil {
+			prePlan = a.prePlanMode()
 		}
+		options = exitPlanOptions(a.allowBypass, prePlan)
+	} else {
+		options = permissionOptions(req.Request)
 	}
 	resp, err := acpcommon.Call(a.ctx, func() (acp.RequestPermissionResponse, error) {
 		return a.conn.RequestPermission(a.ctx, acp.RequestPermissionRequest{
@@ -162,28 +206,40 @@ func (a *approver) handle(req controlRequest) {
 			Options:   options,
 		})
 	})
-	allow, always := false, false
+	var selected acp.PermissionOptionId
 	if err == nil && resp.Outcome.Cancelled == nil && resp.Outcome.Selected != nil {
-		always = resp.Outcome.Selected.OptionId == optionAllowAlways
-		allow = always || resp.Outcome.Selected.OptionId == optionAllowOnce
+		selected = resp.Outcome.Selected.OptionId
 	}
 
-	if !allow {
-		a.respondDeny(req.RequestID)
+	if name == "ExitPlanMode" {
+		modeID := ""
+		switch selected {
+		case optionExitPlanAuto:
+			modeID = defaultModeID
+		case optionExitPlanBypass:
+			if a.allowBypass {
+				modeID = bypassModeID
+			}
+		}
+		if modeID == "" {
+			a.respondDeny(req.RequestID)
+			return
+		}
+		perms := []any{map[string]any{"type": "setMode", "mode": findMode(modeID).permissionMode, "destination": "session"}}
+		a.respondAllow(req.RequestID, req.Request.Input, perms)
+		if a.applyMode != nil && a.ctx.Err() == nil {
+			a.applyMode(modeID)
+		}
 		return
 	}
 
-	var perms any
-	switch {
-	case name == "ExitPlanMode":
-		perms = []any{map[string]any{"type": "setMode", "mode": exitPlanPermissionMode, "destination": "session"}}
-	case always:
-		perms = alwaysAllowPermissions(req.Request)
-	}
-	a.respondAllow(req.RequestID, req.Request.Input, perms)
-
-	if name == "ExitPlanMode" && a.applyMode != nil && a.ctx.Err() == nil {
-		a.applyMode(defaultModeID)
+	switch selected {
+	case optionAllowOnce:
+		a.respondAllow(req.RequestID, req.Request.Input, nil)
+	case optionAllowAlways:
+		a.respondAllow(req.RequestID, req.Request.Input, alwaysAllowPermissions(req.Request))
+	default:
+		a.respondDeny(req.RequestID)
 	}
 }
 
@@ -414,10 +470,14 @@ func askElicitationSchema(questions []askQuestion) acp.UnstableElicitationSchema
 			field["oneOf"] = options
 		}
 		props[askFieldKey(i)] = field
+		customDescription := "Type your own answer, or add a note to the option you chose above (optional)."
+		if q.MultiSelect {
+			customDescription = "Type your own answer to add to your selection above (optional)."
+		}
 		props[askCustomKey(i)] = map[string]any{
 			"type":        "string",
 			"title":       "Other",
-			"description": "Type your own answer instead of choosing an option above (optional).",
+			"description": customDescription,
 			"_meta": map[string]any{
 				"_askUserQuestionCustomAnswer": map[string]any{
 					"questionId":     askFieldKey(i),
@@ -429,31 +489,59 @@ func askElicitationSchema(questions []askQuestion) acp.UnstableElicitationSchema
 	return acp.UnstableElicitationSchema{Type: acp.UnstableElicitationSchemaTypeObject, Properties: props}
 }
 
-func askAnswersFromContent(questions []askQuestion, content map[string]any) map[string]any {
-	answers := map[string]any{}
+// A single-select's custom text rides along as notes when an option was also picked.
+func askAnswersFromContent(questions []askQuestion, content map[string]any) (map[string]any, map[string]any) {
+	answers, annotations := map[string]any{}, map[string]any{}
 	for i, q := range questions {
-		if custom, ok := content[askCustomKey(i)].(string); ok && strings.TrimSpace(custom) != "" {
-			answers[q.Question] = strings.TrimSpace(custom)
-			continue
-		}
+		custom, _ := content[askCustomKey(i)].(string)
+		custom = strings.TrimSpace(custom)
+		var picks []string
 		switch v := content[askFieldKey(i)].(type) {
 		case string:
 			if v != "" {
-				answers[q.Question] = v
+				picks = append(picks, v)
 			}
 		case []any:
-			var parts []string
 			for _, item := range v {
 				if s, ok := item.(string); ok && s != "" {
-					parts = append(parts, s)
+					picks = append(picks, s)
 				}
 			}
-			if len(parts) > 0 {
-				answers[q.Question] = strings.Join(parts, ", ")
+		}
+		if q.MultiSelect {
+			if custom != "" {
+				picks = append(picks, custom)
+			}
+			if len(picks) > 0 {
+				answers[q.Question] = joinMultiSelectAnswer(picks)
+			}
+			continue
+		}
+		picked := strings.Join(picks, ", ")
+		switch {
+		case picked == "" && custom != "":
+			answers[q.Question] = custom
+		case picked != "":
+			answers[q.Question] = picked
+			if custom != "" {
+				annotations[q.Question] = map[string]any{"notes": custom}
 			}
 		}
 	}
-	return answers
+	return answers, annotations
+}
+
+// Quoted like the CLI's own UI so the tool splits a typed "a, b" back into one item.
+func joinMultiSelectAnswer(items []string) string {
+	quoted := make([]string, len(items))
+	for i, item := range items {
+		if strings.Contains(item, ", ") || strings.Contains(item, `"`) {
+			b, _ := json.Marshal(item)
+			item = string(b)
+		}
+		quoted[i] = item
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // handleAskUserQuestion renders the CLI's AskUserQuestion tool over ACP.
@@ -516,7 +604,7 @@ func (a *approver) handleAskUserQuestion(req controlRequest, parentToolUseID str
 		a.writeResponse(req.RequestID, map[string]any{"behavior": "deny", "message": "Could not present the question to the user."})
 		return
 	}
-	a.respondAskAnswers(req, answers)
+	a.respondAskAnswers(req, answers, nil)
 }
 
 // askViaElicitation reports whether the request was fully handled; a false
@@ -542,21 +630,25 @@ func (a *approver) askViaElicitation(req controlRequest, questions []askQuestion
 	}
 	switch {
 	case resp.Accept != nil:
-		a.respondAskAnswers(req, askAnswersFromContent(questions, resp.Accept.Content))
+		answers, annotations := askAnswersFromContent(questions, resp.Accept.Content)
+		a.respondAskAnswers(req, answers, annotations)
 	case resp.Decline != nil:
-		a.respondAskAnswers(req, map[string]any{})
+		a.respondAskAnswers(req, map[string]any{}, nil)
 	default:
 		a.writeResponse(req.RequestID, map[string]any{"behavior": "deny", "message": "Question cancelled by user."})
 	}
 	return true
 }
 
-func (a *approver) respondAskAnswers(req controlRequest, answers map[string]any) {
+func (a *approver) respondAskAnswers(req controlRequest, answers, annotations map[string]any) {
 	var input map[string]any
 	if json.Unmarshal(req.Request.Input, &input) != nil || input == nil {
 		input = map[string]any{}
 	}
 	input["answers"] = answers
+	if len(annotations) > 0 {
+		input["annotations"] = annotations
+	}
 	merged, err := json.Marshal(input)
 	if err != nil {
 		merged = req.Request.Input

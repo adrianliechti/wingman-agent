@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os/exec"
 	"slices"
 	"strings"
@@ -161,6 +162,7 @@ func (a *Agent) Initialize(ctx context.Context, req acp.InitializeRequest) (acp.
 	a.loadModels(ctx)
 
 	return acp.InitializeResponse{
+		Meta: airCapabilitiesMeta(),
 		// v2 changes the prompt lifecycle, permissions, and replay. Negotiate
 		// the SDK's implemented version even when the client requests a newer one.
 		ProtocolVersion: acp.ProtocolVersionNumber,
@@ -190,6 +192,10 @@ func (a *Agent) Initialize(ctx context.Context, req acp.InitializeRequest) (acp.
 	}, nil
 }
 
+func (a *Agent) recommendsConfigValues() bool {
+	return clientSupportsAirCapability(a.clientCapabilities, recommendedValueCapability)
+}
+
 func (a *Agent) Authenticate(context.Context, acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
 	return acp.AuthenticateResponse{}, nil
 }
@@ -211,6 +217,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		startParams.Model = a.defaultModel
 	}
 
+	mcpVersion := a.codex.currentMCPStartupVersion()
 	resp, err := a.codex.threadStart(ctx, startParams)
 	if err != nil {
 		return acp.NewSessionResponse{}, fmt.Errorf("thread/start: %w", err)
@@ -218,19 +225,47 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	if resp.Thread.ID == "" {
 		return acp.NewSessionResponse{}, fmt.Errorf("codex returned empty thread id")
 	}
+	if err := a.awaitMCPStartup(ctx, resp.Thread.ID, params.Meta, params.McpServers, mcpVersion); err != nil {
+		return acp.NewSessionResponse{}, err
+	}
 
-	s := a.registerSession(acp.SessionId(resp.Thread.ID), resp.Model, derefEffort(resp.ReasoningEffort), additional)
+	s := a.registerSession(acp.SessionId(resp.Thread.ID), resp.Model, derefEffort(resp.ReasoningEffort), defaultCollaborationMode, additional)
 	if err := a.sendAvailableCommands(ctx, s.id); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
 	return acp.NewSessionResponse{
 		SessionId:     s.id,
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode, a.recommendsConfigValues()),
 	}, nil
 }
 
-func (a *Agent) registerSession(id acp.SessionId, model, effort string, additionalDirectories []string) *session {
+// awaitMCPStartup honors the experimental _meta.mcpStartupAwaitTimeoutMs: a
+// positive value waits up to that long for requested MCP servers to finish
+// starting. Without it, sessions are returned immediately.
+func (a *Agent) awaitMCPStartup(ctx context.Context, threadID string, meta map[string]any, servers []acp.McpServer, after uint64) error {
+	var ms float64
+	switch v := meta["mcpStartupAwaitTimeoutMs"].(type) {
+	case float64:
+		ms = v
+	case int:
+		ms = float64(v)
+	}
+	names := slices.Collect(maps.Keys(mcpServersConfig(servers)))
+	if !(ms > 0) || len(names) == 0 {
+		return nil
+	}
+	timeout := time.Duration(math.MaxInt64)
+	if ms < float64(math.MaxInt64/int64(time.Millisecond)) {
+		timeout = time.Duration(ms * float64(time.Millisecond))
+	}
+	if err := a.codex.awaitMCPStartup(ctx, threadID, names, after, timeout); err != nil {
+		return fmt.Errorf("await MCP server startup: %w", err)
+	}
+	return nil
+}
+
+func (a *Agent) registerSession(id acp.SessionId, model, effort, collaborationMode string, additionalDirectories []string) *session {
 	if model == "" {
 		model = a.defaultModel
 	}
@@ -239,6 +274,7 @@ func (a *Agent) registerSession(id acp.SessionId, model, effort string, addition
 	}
 	model, effort = normalizeSessionConfig(a.models, model, effort)
 	s := newSession(id, model, effort, additionalDirectories)
+	s.collaborationMode = collaborationMode
 	a.mu.Lock()
 	old := a.sessions[id]
 	if old != nil && old != s {
@@ -247,6 +283,20 @@ func (a *Agent) registerSession(id acp.SessionId, model, effort string, addition
 	a.sessions[id] = s
 	a.mu.Unlock()
 	return s
+}
+
+func (a *Agent) registerResumedSession(id acp.SessionId, resp threadResumeResponse, materialized bool, additionalDirectories []string) *session {
+	mode := resumedCollaborationMode(resp.CollaborationMode)
+	if !materialized {
+		// The thread/read fallback reuses the running thread, but its response
+		// omits collaboration mode. Preserve the mode we applied to that thread.
+		if old := a.lookup(id); old != nil {
+			old.mu.Lock()
+			mode = old.collaborationMode
+			old.mu.Unlock()
+		}
+	}
+	return a.registerSession(id, resp.Model, derefEffort(resp.ReasoningEffort), mode, additionalDirectories)
 }
 
 func (a *Agent) sendAvailableCommands(ctx context.Context, id acp.SessionId) error {
@@ -427,7 +477,7 @@ func (a *Agent) togglePlanMode(ctx context.Context, s *session) error {
 	if conn := a.connection(); conn != nil {
 		if err := notifyClient(ctx, conn, s.id, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
 			SessionUpdate: "config_option_update",
-			ConfigOptions: buildConfigOptions(a.models, modelID, effort, next),
+			ConfigOptions: buildConfigOptions(a.models, modelID, effort, next, a.recommendsConfigValues()),
 		}}); err != nil {
 			return err
 		}
@@ -529,7 +579,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	s.collaborationMode = collaborationMode
 	s.mu.Unlock()
 	return acp.SetSessionConfigOptionResponse{
-		ConfigOptions: buildConfigOptions(a.models, modelID, effort, collaborationMode),
+		ConfigOptions: buildConfigOptions(a.models, modelID, effort, collaborationMode, a.recommendsConfigValues()),
 	}, nil
 }
 
@@ -574,10 +624,9 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acp.UnstableDe
 	}
 	_ = a.codex.threadUnsubscribe(ctx, threadUnsubscribeParams{ThreadID: string(params.SessionId)})
 	if err := a.codex.threadArchive(ctx, threadArchiveParams{ThreadID: string(params.SessionId)}); err != nil {
-		// ACP session/delete is idempotent: deleting an unknown or
-		// already-archived thread succeeds.
-		msg := strings.ToLower(err.Error())
-		if strings.Contains(msg, "no rollout found") || strings.Contains(msg, "not found") {
+		// ACP session/delete is idempotent: deleting an unknown, unprompted,
+		// or already-archived thread succeeds.
+		if isUnknownThreadError(err) {
 			return acp.UnstableDeleteSessionResponse{}, nil
 		}
 		return acp.UnstableDeleteSessionResponse{}, fmt.Errorf("thread/archive: %w", err)
@@ -641,7 +690,8 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
-	resp, err := a.codex.threadResume(ctx, threadResumeParams{
+	mcpVersion := a.codex.currentMCPStartupVersion()
+	resp, materialized, err := a.codex.threadResumeOrRead(ctx, threadResumeParams{
 		ThreadID:      string(params.SessionId),
 		ExcludeTurns:  true,
 		Cwd:           cwd,
@@ -651,13 +701,16 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if err != nil {
 		return acp.ResumeSessionResponse{}, fmt.Errorf("thread/resume: %w", err)
 	}
-	s := a.registerSession(params.SessionId, resp.Model, derefEffort(resp.ReasoningEffort), additional)
+	if err := a.awaitMCPStartup(ctx, string(params.SessionId), params.Meta, params.McpServers, mcpVersion); err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+	s := a.registerResumedSession(params.SessionId, resp, materialized, additional)
 	if err := a.sendAvailableCommands(ctx, s.id); err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
 	return acp.ResumeSessionResponse{
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode, a.recommendsConfigValues()),
 	}, nil
 }
 
@@ -669,7 +722,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
-	resp, err := a.codex.threadResume(ctx, threadResumeParams{
+	resp, materialized, err := a.codex.threadResumeOrRead(ctx, threadResumeParams{
 		ThreadID:      string(params.SessionId),
 		ExcludeTurns:  true,
 		Cwd:           cwd,
@@ -679,12 +732,16 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if err != nil {
 		return acp.LoadSessionResponse{}, fmt.Errorf("thread/resume: %w", err)
 	}
-	read, err := a.codex.threadReadWithHistory(ctx, string(params.SessionId))
-	if err != nil {
-		return acp.LoadSessionResponse{}, fmt.Errorf("read session history: %w", err)
+	thread := resp.Thread
+	thread.Turns = nil
+	if materialized {
+		read, err := a.codex.threadReadWithHistory(ctx, string(params.SessionId))
+		if err != nil {
+			return acp.LoadSessionResponse{}, fmt.Errorf("read session history: %w", err)
+		}
+		thread = read.Thread
 	}
-	thread := read.Thread
-	s := a.registerSession(params.SessionId, resp.Model, derefEffort(resp.ReasoningEffort), additional)
+	s := a.registerResumedSession(params.SessionId, resp, materialized, additional)
 	if err := a.sendAvailableCommands(ctx, s.id); err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
@@ -694,7 +751,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	}
 	return acp.LoadSessionResponse{
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode, a.recommendsConfigValues()),
 	}, nil
 }
 
@@ -707,6 +764,7 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acp.UnstableFork
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
+	mcpVersion := a.codex.currentMCPStartupVersion()
 	resp, err := a.codex.threadFork(ctx, threadForkParams{
 		ThreadID:      string(params.SessionId),
 		ExcludeTurns:  true,
@@ -720,15 +778,25 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acp.UnstableFork
 	if resp.Thread.ID == "" {
 		return acp.UnstableForkSessionResponse{}, fmt.Errorf("codex returned empty forked thread id")
 	}
+	if err := a.awaitMCPStartup(ctx, resp.Thread.ID, params.Meta, servers, mcpVersion); err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
 
-	s := a.registerSession(acp.SessionId(resp.Thread.ID), resp.Model, derefEffort(resp.ReasoningEffort), additional)
+	s := a.registerSession(acp.SessionId(resp.Thread.ID), resp.Model, derefEffort(resp.ReasoningEffort), defaultCollaborationMode, additional)
 	if source := a.lookup(params.SessionId); source != nil {
 		source.mu.Lock()
 		mode, collaborationMode := source.mode, source.collaborationMode
 		source.mu.Unlock()
 		s.mu.Lock()
-		s.mode, s.collaborationMode = mode, collaborationMode
+		s.mode = mode
 		s.mu.Unlock()
+		// Codex starts forks in default mode; report plan only once the fork has it.
+		if collaborationMode == planCollaborationMode &&
+			a.codex.threadSettingsUpdate(ctx, newThreadSettingsUpdate(string(s.id), s.modelID, s.effort, collaborationMode)) == nil {
+			s.mu.Lock()
+			s.collaborationMode = collaborationMode
+			s.mu.Unlock()
+		}
 	}
 	if err := a.sendAvailableCommands(ctx, s.id); err != nil {
 		return acp.UnstableForkSessionResponse{}, err
@@ -736,7 +804,7 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acp.UnstableFork
 	return acp.UnstableForkSessionResponse{
 		SessionId:     s.id,
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: acpcommon.UnstableConfigOptions(buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode)),
+		ConfigOptions: acpcommon.UnstableConfigOptions(buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode, a.recommendsConfigValues())),
 	}, nil
 }
 

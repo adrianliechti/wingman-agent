@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,8 @@ type session struct {
 	modelOverride  bool
 	effort         string
 	mode           string
+	prePlanMode    string
+	allowBypass    bool
 	mcpServers     []acp.McpServer
 	additionalDirs []string
 	resumeFrom     string
@@ -50,9 +53,27 @@ func (a *Agent) newSession(id acp.SessionId, cwd, model, effort string, addition
 		modelOverride:  model != "" && model != "default",
 		effort:         effort,
 		mode:           defaultModeID,
+		allowBypass:    true,
 		additionalDirs: append([]string(nil), additionalDirs...),
 	}
 	return s
+}
+
+// setModeLocked remembers the mode the session left when it entered plan mode.
+func (s *session) setModeLocked(modeID string) {
+	switch {
+	case modeID != planModeID:
+		s.prePlanMode = ""
+	case s.mode != planModeID:
+		s.prePlanMode = s.mode
+	}
+	s.mode = modeID
+}
+
+func (s *session) currentPrePlanMode() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prePlanMode
 }
 
 func (s *session) cancelTurn() {
@@ -374,10 +395,13 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 	stderr := p.session.agent.stderr
 	p.session.mu.Lock()
 	p.contextUsage.setModel(p.session.modelID)
+	allowBypass := p.session.allowBypass
 	p.session.mu.Unlock()
 	app := &approver{ctx: ctx, conn: conn, sid: sid, out: p.out, cwd: p.cwd, emitted: p.emitted, parentForAgent: p.parentForAgent,
-		askForm:   p.session.agent.supportsFormElicitation(),
-		applyMode: func(modeID string) { p.applyMode(ctx, conn, sid, modeID) }}
+		askForm:     p.session.agent.supportsFormElicitation(),
+		applyMode:   func(modeID string) { p.applyMode(ctx, conn, sid, modeID) },
+		allowBypass: allowBypass,
+		prePlanMode: p.session.currentPrePlanMode}
 
 	scanner := newCLIScanner(r)
 	for scanner.Scan() {
@@ -410,6 +434,16 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 			root := env.ParentToolUseID == "" && env.ParentAgentID == ""
 			var message cliMessage
 			if root && json.Unmarshal(env.Message, &message) == nil {
+				// The client owns the login UI; the CLI's TUI advice must not reach the chat.
+				if isSyntheticLoginMessage(message) {
+					if p.finishTurn() {
+						select {
+						case p.results <- turnResult{err: acp.NewAuthRequired(nil)}:
+						default:
+						}
+					}
+					continue
+				}
 				p.contextUsage.observeAssistant(message)
 			}
 			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools, p.emitted, p.streamedContent, env.ParentToolUseID); err != nil {
@@ -447,7 +481,7 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 				continue
 			}
 			p.turnMu.Lock()
-			matches := p.turnActive && (result.UserMessageUUID == "" || result.UserMessageUUID == p.turnID)
+			matches := p.turnActive && result.answers(p.turnID)
 			fallback := matches && p.turnCtx != nil && p.turnCtx.Err() == nil && !p.deliveredText && !p.deliveredCompaction
 			p.turnMu.Unlock()
 			if !matches {
@@ -626,6 +660,20 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 			_ = acpcommon.Notify(ctx, conn, sid, *update)
 		}
 
+	case "informational":
+		var content string
+		if json.Unmarshal(env.Content, &content) != nil || strings.TrimSpace(content) == "" {
+			return
+		}
+		text := content
+		if env.Level != "" && env.Level != "info" {
+			text = "**" + strings.ToUpper(env.Level[:1]) + env.Level[1:] + ":** " + content
+		}
+		update := acp.UpdateAgentMessageText(text)
+		update.AgentMessageChunk.Meta = map[string]any{"claudeCode": map[string]any{"kind": "informational", "level": env.Level}}
+		p.markTurnOutput(true, false)
+		_ = acpcommon.Notify(ctx, conn, sid, update)
+
 	case "local_command_output":
 		var out string
 		if json.Unmarshal(env.Content, &out) == nil && strings.TrimSpace(out) != "" {
@@ -737,7 +785,7 @@ func (p *claudeProc) applyMode(ctx context.Context, conn *acp.AgentSideConnectio
 	}
 	p.session.mu.Lock()
 	changed := p.session.mode != modeID
-	p.session.mode = modeID
+	p.session.setModeLocked(modeID)
 	p.sig = p.session.spawnSigLocked()
 	p.session.mu.Unlock()
 	if !changed {
@@ -747,6 +795,19 @@ func (p *claudeProc) applyMode(ctx context.Context, conn *acp.AgentSideConnectio
 		SessionUpdate: "current_mode_update",
 		CurrentModeId: acp.SessionModeId(modeID),
 	}})
+}
+
+// A reply to merged user messages lists each of them in user_message_uuids.
+func (r cliResult) answers(turnID string) bool {
+	if r.UserMessageUUID == "" && len(r.UserMessageUUIDs) == 0 {
+		return true
+	}
+	return r.UserMessageUUID == turnID || slices.Contains(r.UserMessageUUIDs, turnID)
+}
+
+func isSyntheticLoginMessage(m cliMessage) bool {
+	return m.Model == "<synthetic>" && len(m.Content) == 1 && m.Content[0].Type == "text" &&
+		strings.Contains(m.Content[0].Text, "Please run /login")
 }
 
 func resultToTurn(line []byte) turnResult {
@@ -759,7 +820,7 @@ func resultToTurn(line []byte) turnResult {
 }
 
 func resultOutcome(r cliResult) turnResult {
-	if strings.Contains(r.Result, "Please run /login") {
+	if r.IsError && strings.Contains(r.Result, "Please run /login") {
 		return turnResult{err: acp.NewAuthRequired(nil)}
 	}
 	switch r.Subtype {
@@ -846,6 +907,11 @@ func (s *session) cliArgsLocked() []string {
 		"--permission-prompt-tool", "stdio",
 
 		"--settings", `{"disableRemoteControl":true}`,
+	}
+	// ExitPlanMode can switch the running process to bypass only when the
+	// capability was enabled at startup. This does not select bypass mode.
+	if s.allowBypass {
+		args = append(args, "--allow-dangerously-skip-permissions")
 	}
 	switch {
 	case s.started:

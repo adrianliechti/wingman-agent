@@ -824,7 +824,7 @@ export function ChatPanel({
 					</div>
 				) : (
 					<div className="mx-auto w-full max-w-4xl px-4 py-4" ref={contentRef}>
-						<ToolProgressContext.Provider value={toolProgress ?? {}}>
+						<ToolProgressContext value={toolProgress ?? {}}>
 							{turns.length > 80 ? (
 								<VirtualTurns
 									turns={turns}
@@ -849,7 +849,7 @@ export function ChatPanel({
 									);
 								})
 							)}
-						</ToolProgressContext.Provider>
+						</ToolProgressContext>
 					</div>
 				)}
 				<div ref={spacerRef} aria-hidden style={{ height: 0 }} />

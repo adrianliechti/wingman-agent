@@ -27,3 +27,17 @@ plan-emitting tool: the `TodoWrite` and `TaskCreate`/`TaskUpdate`/`TaskList`
 tools that earlier versions surfaced are gone, so there is nothing to translate.
 Plan *mode* is unrelated and still supported — see the `plan` entry in
 `sessionModes` and the `ExitPlanMode` handling in `approvals.go`.
+
+## Live regression tests
+
+`TestLiveExitPlanModeEnablesBypass` drives the installed Claude CLI through ACP,
+selects bypass when approving a plan, and uses a `UserPromptSubmit` hook to check
+the CLI's actual permission mode on the next prompt. It makes two short model
+requests using the current CLI configuration and requires hooks and bypass to
+be available.
+
+Run from the repository root:
+
+```sh
+CLAUDE_ACP_LIVE=1 go test ./pkg/acp/claude -run '^TestLiveExitPlanModeEnablesBypass$' -count=1 -v -timeout=4m
+```

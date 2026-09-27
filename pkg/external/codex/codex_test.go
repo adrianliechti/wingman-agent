@@ -26,6 +26,8 @@ func TestBuildArgsDisablesUnsupportedCodexFeatures(t *testing.T) {
 		"otel.trace_exporter=\"none\"",
 		"otel.metrics_exporter=\"none\"",
 		"features.plugins=false",
+		"features.daemon_auto_start=false",
+		"features.realtime_conversation=false",
 	} {
 		if !containsConfig(args, value) {
 			t.Errorf("BuildArgs() = %q, missing %q", args, value)

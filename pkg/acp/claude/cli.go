@@ -4,6 +4,10 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -45,6 +49,55 @@ func mcpConfigJSON(servers []acp.McpServer) string {
 	return string(b)
 }
 
+// Any tier counts, project ones included: the setting can only take a permission away.
+func bypassDisabledBySettings(cwd string, env []string) bool {
+	for _, path := range settingsPaths(cwd, env) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var settings struct {
+			Permissions struct {
+				DisableBypassPermissionsMode string `json:"disableBypassPermissionsMode"`
+			} `json:"permissions"`
+		}
+		if json.Unmarshal(b, &settings) == nil && settings.Permissions.DisableBypassPermissionsMode == "disable" {
+			return true
+		}
+	}
+	return false
+}
+
+func settingsPaths(cwd string, env []string) []string {
+	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "CLAUDE_CONFIG_DIR="); ok {
+			configDir = v
+		}
+	}
+	if configDir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			configDir = filepath.Join(home, ".claude")
+		}
+	}
+	var paths []string
+	switch runtime.GOOS {
+	case "darwin":
+		paths = append(paths, "/Library/Application Support/ClaudeCode/managed-settings.json")
+	case "windows":
+		paths = append(paths, `C:\Program Files\ClaudeCode\managed-settings.json`)
+	default:
+		paths = append(paths, "/etc/claude-code/managed-settings.json")
+	}
+	if configDir != "" {
+		paths = append(paths, filepath.Join(configDir, "settings.json"))
+	}
+	if cwd != "" {
+		paths = append(paths, filepath.Join(cwd, ".claude", "settings.json"), filepath.Join(cwd, ".claude", "settings.local.json"))
+	}
+	return paths
+}
+
 func headerMap(headers []acp.HttpHeader) map[string]string {
 	m := map[string]string{}
 	for _, h := range headers {
@@ -60,6 +113,7 @@ type cliEnvelope struct {
 	Event              json.RawMessage `json:"event,omitempty"`
 	Content            json.RawMessage `json:"content,omitempty"`
 	State              string          `json:"state,omitempty"`
+	Level              string          `json:"level,omitempty"`
 	Status             string          `json:"status,omitempty"`
 	CompactResult      string          `json:"compact_result,omitempty"`
 	SessionID          string          `json:"session_id,omitempty"`
@@ -154,15 +208,16 @@ type cliMsgBlock struct {
 }
 
 type cliResult struct {
-	UserMessageUUID string                   `json:"user_message_uuid,omitempty"`
-	Subtype         string                   `json:"subtype"`
-	StopReason      string                   `json:"stop_reason"`
-	IsError         bool                     `json:"is_error"`
-	Result          string                   `json:"result"`
-	Errors          []string                 `json:"errors"`
-	Usage           *cliUsage                `json:"usage,omitempty"`
-	ModelUsage      map[string]cliModelUsage `json:"modelUsage,omitempty"`
-	TotalCostUSD    float64                  `json:"total_cost_usd,omitempty"`
+	UserMessageUUID  string                   `json:"user_message_uuid,omitempty"`
+	UserMessageUUIDs []string                 `json:"user_message_uuids,omitempty"`
+	Subtype          string                   `json:"subtype"`
+	StopReason       string                   `json:"stop_reason"`
+	IsError          bool                     `json:"is_error"`
+	Result           string                   `json:"result"`
+	Errors           []string                 `json:"errors"`
+	Usage            *cliUsage                `json:"usage,omitempty"`
+	ModelUsage       map[string]cliModelUsage `json:"modelUsage,omitempty"`
+	TotalCostUSD     float64                  `json:"total_cost_usd,omitempty"`
 }
 
 type cliUsage struct {
@@ -214,13 +269,20 @@ type controlRequest struct {
 }
 
 type controlRequestBody struct {
-	Subtype               string          `json:"subtype"`
-	ToolName              string          `json:"tool_name"`
-	ToolUseID             string          `json:"tool_use_id"`
-	AgentID               string          `json:"agent_id,omitempty"`
-	Input                 json.RawMessage `json:"input"`
-	Description           string          `json:"description"`
-	PermissionSuggestions json.RawMessage `json:"permission_suggestions,omitempty"`
+	Subtype                 string          `json:"subtype"`
+	ToolName                string          `json:"tool_name"`
+	ToolUseID               string          `json:"tool_use_id"`
+	AgentID                 string          `json:"agent_id,omitempty"`
+	Input                   json.RawMessage `json:"input"`
+	Description             string          `json:"description"`
+	PermissionSuggestions   json.RawMessage `json:"permission_suggestions,omitempty"`
+	MatchedAskRule          json.RawMessage `json:"matched_ask_rule,omitempty"`
+	SuppressAlwaysAllowRule bool            `json:"suppress_always_allow_rule,omitempty"`
+	DefaultToNo             bool            `json:"default_to_no,omitempty"`
+	MCPServer               *struct {
+		Name   string `json:"name"`
+		Source string `json:"source,omitempty"`
+	} `json:"mcp_server,omitempty"`
 }
 
 type controlResponse struct {

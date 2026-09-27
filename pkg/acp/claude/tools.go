@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"cmp"
 	"encoding/json"
 	"path/filepath"
 	"regexp"
@@ -127,7 +128,7 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		}
 		return toolInfo{title: title, kind: acp.ToolKindThink, content: content}
 
-	case "Bash":
+	case "Bash", "PowerShell":
 		var in struct {
 			Command     string `json:"command"`
 			Description string `json:"description"`
@@ -156,11 +157,17 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		}
 
 	case "Write":
+		// The CLI also accepts path and file_text/file_content spellings.
 		var in struct {
-			FilePath string `json:"file_path"`
-			Content  string `json:"content"`
+			FilePath    string `json:"file_path"`
+			Path        string `json:"path"`
+			Content     string `json:"content"`
+			FileText    string `json:"file_text"`
+			FileContent string `json:"file_content"`
 		}
 		_ = json.Unmarshal(rawInput, &in)
+		in.FilePath = cmp.Or(in.FilePath, in.Path)
+		in.Content = cmp.Or(in.Content, in.FileText, in.FileContent)
 		var content []acp.ToolCallContent
 		var locations []acp.ToolCallLocation
 		if in.FilePath != "" {

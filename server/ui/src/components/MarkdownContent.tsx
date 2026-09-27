@@ -129,12 +129,24 @@ type CodePreProps = MarkdownComponentProps<"pre"> & {
 	"data-lang"?: string;
 };
 
+function nodeText(node: ReactNode): string {
+	return Children.toArray(node)
+		.map((child) =>
+			typeof child === "string" || typeof child === "number"
+				? String(child)
+				: isValidElement<{ children?: ReactNode }>(child)
+					? nodeText(child.props.children)
+					: "",
+		)
+		.join("");
+}
+
 function MarkdownCodeBlock({ children, ...props }: CodePreProps) {
 	const codeElement = Children.toArray(children).find(
 		(child): child is ReactElement<{ children?: ReactNode }> =>
 			isValidElement<{ children?: ReactNode }>(child),
 	);
-	const code = codeElement ? String(codeElement.props.children ?? "") : "";
+	const code = codeElement ? nodeText(codeElement.props.children) : "";
 	const language = props["data-lang"] ?? "plaintext";
 	const label = props["data-filename"] ?? props["data-code-title"] ?? language;
 	const [loaded, setLoaded] = useState<{
@@ -353,7 +365,7 @@ export const MarkdownContent = memo(function MarkdownContent({
 	if (!text?.trim()) return null;
 
 	return (
-		<MarkdownStreamingContext.Provider value={streaming}>
+		<MarkdownStreamingContext value={streaming}>
 			<div data-markdown-content data-streaming={streaming || undefined}>
 				<Markdown
 					components={components}
@@ -364,6 +376,6 @@ export const MarkdownContent = memo(function MarkdownContent({
 					{text}
 				</Markdown>
 			</div>
-		</MarkdownStreamingContext.Provider>
+		</MarkdownStreamingContext>
 	);
 });

@@ -99,8 +99,9 @@ func messageBytes(m Message) int {
 		if c.ToolResult != nil {
 			total += len(c.ToolResult.Content)
 		}
-		if c.Reasoning != nil {
-			total += len(c.Reasoning.Summary) + len(c.Reasoning.Content)
+		if reasoningToInput(c.Reasoning) != nil {
+			// Encrypted payloads are base64 with fixed envelope overhead, as estimated by Codex.
+			total += len(c.Reasoning.Summary) + max(0, len(c.Reasoning.Content)*3/4-650)
 		}
 	}
 	return total

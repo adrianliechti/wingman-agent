@@ -1,9 +1,16 @@
 package claude
 
 import (
+	"bytes"
+	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/coder/acp-go-sdk"
 )
 
 func TestScanSessionMetadataPrefersLatestAITitle(t *testing.T) {
@@ -97,5 +104,51 @@ func TestStripMarkerTags(t *testing.T) {
 
 	if got, ok := stripMarkerTags("hello"); !ok || got != "hello" {
 		t.Errorf("plain text = %q %v", got, ok)
+	}
+}
+
+func TestReplayUserText(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"is that right?<system-reminder>be nice</system-reminder>", "is that right?"},
+		{"<system-reminder>do not mention this</system-reminder>", ""},
+		{"<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>pkg/acp</command-args>", "/review pkg/acp"},
+		{"<command-name>/deploy</command-name>", "/deploy"},
+		{"<command-name>/model</command-name>\n<command-args>opus</command-args>", ""},
+		{"<command-name>/context</command-name>", ""},
+		{"<command-name>/review</command-name><local-command-stdout></local-command-stdout>", ""},
+	} {
+		got, ok := replayUserText(tt.in)
+		if ok != (tt.want != "") || got != tt.want {
+			t.Errorf("replayUserText(%q) = %q %v, want %q", tt.in, got, ok, tt.want)
+		}
+	}
+}
+
+func TestReplayHidesInjectedAndLoginText(t *testing.T) {
+	reader, writer := io.Pipe()
+	t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+	wire := &bytes.Buffer{}
+	conn := acp.NewAgentSideConnection(New(Options{Stderr: io.Discard}), wire, reader)
+	history := strings.Join([]string{
+		`{"type":"user","message":{"role":"user","content":"is that right?<system-reminder>Do not mention this reminder.</system-reminder>"}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<command-name>/review</command-name><command-args>now</command-args>"}]}}`,
+		`{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not logged in · Please run /login"}]}}`,
+		`{"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"yes"}]}}`,
+	}, "\n")
+	if err := streamHistory(context.Background(), conn, "s", t.TempDir(), strings.NewReader(history)); err != nil {
+		t.Fatal(err)
+	}
+	var user []string
+	updates := readTranscriptUpdates(t, wire.Bytes())
+	for _, u := range updates {
+		if u.UserMessageChunk != nil && u.UserMessageChunk.Content.Text != nil {
+			user = append(user, u.UserMessageChunk.Content.Text.Text)
+		}
+	}
+	if !slices.Equal(user, []string{"is that right?", "/review now"}) {
+		t.Fatalf("user chunks = %q", user)
+	}
+	if got := transcriptText(updates); got != "yes" {
+		t.Fatalf("agent text = %q, want login text hidden", got)
 	}
 }

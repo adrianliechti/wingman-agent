@@ -24,15 +24,7 @@
 					theme === "dark" ? "/icon_dark.svg" : "/icon_light.svg";
 			})();
 		</script>
-		<style>
-			html {
-				color-scheme: light dark;
-				background-color: #0a0a0a;
-			}
-			html[data-theme="light"] {
-				background-color: #ffffff;
-			}
-		</style>
+		<style>html{--lightningcss-light:initial;--lightningcss-dark: ;color-scheme:light dark;background-color:#0a0a0a}@media (prefers-color-scheme:dark){html{--lightningcss-light: ;--lightningcss-dark:initial}}html[data-theme=light]{background-color:#fff}</style>
 		<title>Wingman</title>
 		<script type="module" crossorigin src="/assets/index.js"></script>
 		<link rel="modulepreload" crossorigin href="/assets/rolldown-runtime.js">

@@ -4075,7 +4075,9 @@ test("renders streaming Markdown with lazy Monaco highlighting", async ({
 	await expect(markdown.getByRole("cell", { name: "ready" })).toBeVisible();
 
 	const goBlock = markdown.locator('[data-markdown-code][data-language="go"]');
-	await expect(goBlock).toContainText("package main");
+	await expect(goBlock.locator("pre > code")).toHaveText(
+		'package main\n\nfunc main() { println("ok") }',
+	);
 	await expect(goBlock.locator(".md-token-keyword").first()).toHaveText(
 		"package",
 	);
@@ -4103,6 +4105,7 @@ test("renders streaming Markdown with lazy Monaco highlighting", async ({
 			c4Image.evaluate((image: HTMLImageElement) => image.naturalWidth),
 		)
 		.toBeGreaterThan(0);
+	await expect(c4Block.getByRole("alert")).toHaveCount(0);
 	await expect(markdown).toContainText("Math stays literal: $x^2$.");
 	await expect(
 		markdown.getByRole("link", { name: "Documentation" }),

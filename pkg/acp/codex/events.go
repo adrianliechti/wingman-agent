@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ type eventDispatcher struct {
 	lastGoal        string
 
 	mu            sync.Mutex
+	commandNames  map[string]string
 	failure       error
 	lastError     *turnError
 	usage         *acp.Usage
@@ -50,6 +52,24 @@ func newEventDispatcher(ctx context.Context, conn *acp.AgentSideConnection, sid 
 		guardianStarted: map[string]bool{},
 		startedTools:    map[string]bool{},
 		agentPhases:     map[string]string{},
+		commandNames:    map[string]string{},
+	}
+}
+
+// commandName is read by approval handlers, which run outside the event loop.
+func (d *eventDispatcher) commandName(itemID string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.commandNames[itemID]
+}
+
+func (d *eventDispatcher) setCommandName(itemID, name string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if name == "" {
+		delete(d.commandNames, itemID)
+	} else {
+		d.commandNames[itemID] = name
 	}
 }
 
@@ -93,11 +113,7 @@ func (d *eventDispatcher) setCompletedPlan(itemID, text string) {
 	d.mu.Unlock()
 }
 
-// isFatalTurnError reports whether a codex `error` notification represents an
-// unrecoverable turn failure (auth/usage-limit/connection 401). The codex
-// app-server is always launched with a configured provider + token, so these
-// surface as a turn error rather than an ACP auth-required prompt (matching the
-// reference's authConfigured=internalError path).
+// isFatalTurnError reports whether an `error` notification without willRetry ends the turn.
 func isFatalTurnError(info json.RawMessage) bool {
 	if len(info) == 0 {
 		return false
@@ -121,6 +137,23 @@ func isFatalTurnError(info json.RawMessage) bool {
 		if v, ok := obj[key]; ok && v.HTTPStatusCode == 401 {
 			return true
 		}
+	}
+	return false
+}
+
+func isAuthenticationError(info json.RawMessage) bool {
+	var s string
+	if json.Unmarshal(info, &s) == nil {
+		return s == "unauthorized"
+	}
+	var obj map[string]struct {
+		HTTPStatusCode int `json:"httpStatusCode"`
+	}
+	if json.Unmarshal(info, &obj) != nil || len(obj) != 1 {
+		return false
+	}
+	for _, v := range obj {
+		return v.HTTPStatusCode == 401
 	}
 	return false
 }
@@ -228,6 +261,17 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			return
 		}
 		d.lastError = &p.Error
+		// ACP auth_required starts the client's login flow; repeating the refusal as text adds noise.
+		if isAuthenticationError(p.Error.CodexErrorInfo) {
+			if p.WillRetry == nil || !*p.WillRetry {
+				d.setFailure(acp.NewAuthRequired(nil))
+				select {
+				case d.done <- turnCompleted{}:
+				default:
+				}
+			}
+			return
+		}
 		if p.Error.Message != "" {
 			d.update(acp.UpdateAgentMessageText(p.Error.Message + "\n\n"))
 		}
@@ -296,7 +340,11 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 				if tc.Turn.Error == nil {
 					tc.Turn.Error = &turnError{}
 				}
-				d.setFailure(tc.Turn.Error)
+				if isAuthenticationError(tc.Turn.Error.CodexErrorInfo) {
+					d.setFailure(acp.NewAuthRequired(nil))
+				} else {
+					d.setFailure(tc.Turn.Error)
+				}
 			}
 			select {
 			case d.done <- tc:
@@ -366,6 +414,9 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 
 	case "commandExecution", "mcpToolCall", "dynamicToolCall":
 		if u, ok := itemToolCallStart(env.Item, id, kind, acp.ToolCallStatusInProgress); ok {
+			if kind == "commandExecution" {
+				d.setCommandName(id, toolNameFromMeta(u.ToolCall.Meta))
+			}
 			d.update(u)
 		}
 
@@ -426,9 +477,11 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 	case "commandExecution":
 		var it struct {
 			Status           string  `json:"status"`
+			Source           string  `json:"source"`
 			AggregatedOutput *string `json:"aggregatedOutput"`
 		}
 		_ = json.Unmarshal(env.Item, &it)
+		d.setCommandName(id, "")
 		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(toolStatusFor(it.Status))}
 
 		output := ""
@@ -443,7 +496,9 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 			}))
 		}
 		delete(d.toolOut, id)
-		d.update(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
+		u := acp.UpdateToolCall(acp.ToolCallId(id), opts...)
+		u.ToolCallUpdate.Meta = toolNameMeta(commandToolName(it.Source))
+		d.update(u)
 
 	case "fileChange":
 		var it struct {
@@ -458,10 +513,14 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 
 	case "dynamicToolCall":
 		var it struct {
-			Status string `json:"status"`
+			Status    string `json:"status"`
+			Namespace string `json:"namespace"`
+			Tool      string `json:"tool"`
 		}
 		_ = json.Unmarshal(env.Item, &it)
-		d.update(acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(toolStatusFor(it.Status))))
+		u := acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(toolStatusFor(it.Status)))
+		u.ToolCallUpdate.Meta = toolNameMeta(functionToolName(it.Tool, it.Namespace))
+		d.update(u)
 
 	case "mcpToolCall":
 		var it struct {
@@ -753,15 +812,30 @@ func fileChangeContent(raw json.RawMessage) []acp.ToolCallContent {
 		}
 		var oldText *string
 		var newText string
-		if ch.Kind.Type == "add" && !isUnifiedDiff(ch.Diff) {
-
+		var added, removed int
+		stats := true
+		switch {
+		case ch.Kind.Type == "add" && !isUnifiedDiff(ch.Diff):
 			newText = ch.Diff
-		} else {
+			added = lineCount(ch.Diff)
+		case ch.Kind.Type == "delete" && !isUnifiedDiff(ch.Diff):
+			oldText = &ch.Diff
+			removed = lineCount(ch.Diff)
+		default:
 			old, nw := splitUnifiedDiff(ch.Diff)
 			newText = nw
 			if ch.Kind.Type != "add" {
 				oldText = &old
 			}
+			added, removed, stats = unifiedDiffStats(ch.Diff)
+		}
+		meta := map[string]any{"kind": ch.Kind.Type}
+		if stats {
+			// AIR diff statistics extension; needs no negotiation and clients may ignore it.
+			meta["jetbrains"] = map[string]any{"air": map[string]any{
+				"version":   1,
+				"diffStats": map[string]any{"version": 1, "added": added, "removed": removed},
+			}}
 		}
 		content = append(content, acp.ToolCallContent{
 			Diff: &acp.ToolCallContentDiff{
@@ -769,8 +843,7 @@ func fileChangeContent(raw json.RawMessage) []acp.ToolCallContent {
 				Path:    ch.Path,
 				OldText: oldText,
 				NewText: newText,
-
-				Meta: map[string]any{"kind": ch.Kind.Type},
+				Meta:    meta,
 			},
 		})
 	}
@@ -798,6 +871,87 @@ func fileChangeLocations(raw json.RawMessage) []acp.ToolCallLocation {
 
 func isUnifiedDiff(s string) bool {
 	return strings.HasPrefix(s, "--- ") || strings.Contains(s, "\n--- ")
+}
+
+var hunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
+
+// unifiedDiffStats counts patch operations and rejects hunks whose sizes or
+// coordinates are inconsistent, so clients fall back to comparing texts.
+func unifiedDiffStats(diff string) (added, removed int, ok bool) {
+	lines := strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
+	i := 0
+	for i < len(lines) && !strings.HasPrefix(lines[i], "@@") {
+		i++
+	}
+	if i == len(lines) {
+		return 0, 0, false
+	}
+	prevOldEnd, prevNewEnd := 0, 0
+	for i < len(lines) {
+		m := hunkHeaderRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			return 0, 0, false
+		}
+		oldStart, oldLines, oldOK := hunkRange(m[1], m[2])
+		newStart, newLines, newOK := hunkRange(m[3], m[4])
+		if !oldOK || !newOK || oldStart < prevOldEnd || newStart < prevNewEnd {
+			return 0, 0, false
+		}
+		i++
+		oldSeen, newSeen := 0, 0
+		content := false
+		for i < len(lines) && (oldSeen < oldLines || newSeen < newLines || strings.HasPrefix(lines[i], "\\")) {
+			line := lines[i]
+			switch {
+			case strings.HasPrefix(line, "+"):
+				added++
+				newSeen++
+				content = true
+			case strings.HasPrefix(line, "-"):
+				removed++
+				oldSeen++
+				content = true
+			case line == "" || strings.HasPrefix(line, " "):
+				oldSeen++
+				newSeen++
+				content = true
+			case strings.HasPrefix(line, "\\"):
+				if !content || strings.TrimSuffix(line, "\r") != "\\ No newline at end of file" {
+					return 0, 0, false
+				}
+				content = false
+			default:
+				return 0, 0, false
+			}
+			i++
+		}
+		if oldSeen != oldLines || newSeen != newLines {
+			return 0, 0, false
+		}
+		prevOldEnd, prevNewEnd = oldStart+oldLines, newStart+newLines
+	}
+	return added, removed, true
+}
+
+func hunkRange(start, count string) (int, int, bool) {
+	s, err := strconv.Atoi(start)
+	if err != nil || s < 0 {
+		return 0, 0, false
+	}
+	if count == "" {
+		return s, 1, true
+	}
+	n, err := strconv.Atoi(count)
+	return s, n, err == nil && n >= 0
+}
+
+// lineCount treats CRLF, CR, and LF as terminators without counting an extra line after the last one.
+func lineCount(text string) int {
+	count := strings.Count(text, "\n") + strings.Count(text, "\r") - strings.Count(text, "\r\n")
+	if text != "" && !strings.HasSuffix(text, "\n") && !strings.HasSuffix(text, "\r") {
+		count++
+	}
+	return count
 }
 
 func splitUnifiedDiff(diff string) (oldText, newText string) {

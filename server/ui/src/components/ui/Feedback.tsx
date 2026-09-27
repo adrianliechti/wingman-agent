@@ -40,7 +40,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	return (
-		<ToastContext.Provider value={showToast}>
+		<ToastContext value={showToast}>
 			{children}
 			{createPortal(
 				<div
@@ -62,7 +62,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 				</div>,
 				document.body,
 			)}
-		</ToastContext.Provider>
+		</ToastContext>
 	);
 }
 

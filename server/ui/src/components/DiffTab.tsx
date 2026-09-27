@@ -1,6 +1,6 @@
 import { DiffEditor } from "@monaco-editor/react";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import { useEffect, useEffectEvent, useRef } from "react";
 import { listDiffs } from "../api/diffs";
 import { queryKeys } from "../api/query";
 import { useColorScheme } from "../hooks/useColorScheme";
@@ -23,10 +23,7 @@ export function DiffTab({ path, layer, onDeleted }: Props) {
 	const loading = query.isPending;
 	const error = query.error ? String(query.error) : null;
 
-	const onDeletedRef = useRef(onDeleted);
-	useEffect(() => {
-		onDeletedRef.current = onDeleted;
-	});
+	const handleDeleted = useEffectEvent(() => onDeleted?.());
 	const hadDiffRef = useRef(false);
 
 	useEffect(() => {
@@ -37,7 +34,7 @@ export function DiffTab({ path, layer, onDeleted }: Props) {
 		if (diff) {
 			hadDiffRef.current = true;
 		} else if (query.data && hadDiffRef.current && !query.isFetching) {
-			onDeletedRef.current?.();
+			handleDeleted();
 		}
 	}, [diff, query.data, query.isFetching]);
 

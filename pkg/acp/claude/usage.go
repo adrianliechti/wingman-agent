@@ -9,6 +9,7 @@ import (
 // Accessed only by the process reader.
 type contextUsage struct {
 	model       string
+	lastModel   string
 	used        *int
 	window      int
 	streamUsage *cliUsage
@@ -37,6 +38,9 @@ func (c *contextUsage) observeAssistant(message cliMessage) {
 		return
 	}
 	c.setModel(message.Model)
+	if message.Model != "" {
+		c.lastModel = message.Model
+	}
 	c.streamUsage = message.Usage
 	c.used = nil
 	if message.Usage != nil {
@@ -96,6 +100,10 @@ func (c *contextUsage) update(cost float64) *acp.SessionUpdate {
 	update := &acp.SessionUsageUpdate{SessionUpdate: "usage_update", Used: max(0, *c.used), Size: c.window}
 	if cost > 0 {
 		update.Cost = &acp.Cost{Amount: cost, Currency: "USD"}
+	}
+	// ACP's usage_update has no model field.
+	if c.lastModel != "" {
+		update.Meta = map[string]any{"_claude/model": c.lastModel}
 	}
 	return &acp.SessionUpdate{UsageUpdate: update}
 }

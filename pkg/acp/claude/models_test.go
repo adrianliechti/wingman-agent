@@ -90,12 +90,16 @@ func TestDefaultModelDescriptionShowsResolvedModel(t *testing.T) {
 }
 
 func TestSessionModesExposeNormalizedModes(t *testing.T) {
-	state := buildSessionModeState("")
+	state := buildSessionModeState("", true)
 	if state.CurrentModeId != "agent" {
 		t.Fatalf("current mode = %q, want agent", state.CurrentModeId)
 	}
 	if len(state.AvailableModes) != 3 || state.AvailableModes[0].Id != "agent" || state.AvailableModes[1].Id != "plan" || state.AvailableModes[2].Id != "unattended" {
 		t.Fatalf("available modes = %#v, want agent, plan, unattended", state.AvailableModes)
+	}
+	state = buildSessionModeState("", false)
+	if len(state.AvailableModes) != 2 || state.AvailableModes[1].Id != "plan" {
+		t.Fatalf("modes without bypass = %#v, want agent, plan", state.AvailableModes)
 	}
 }
 

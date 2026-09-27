@@ -37,6 +37,25 @@ func TestContextEstimateImagesAndUsage(t *testing.T) {
 	}
 }
 
+func TestContextEstimateCountsOnlyReplayableReasoning(t *testing.T) {
+	payload := strings.Repeat("A", 40000)
+	reasoning := func(r Reasoning) Message {
+		return Message{Role: RoleAssistant, Content: []Content{{Reasoning: &r}}}
+	}
+	if got := messageBytes(reasoning(Reasoning{Summary: "thought", Content: payload})); got != 0 {
+		t.Fatalf("reasoning without ID is not sent, estimate = %d", got)
+	}
+	if got := messageBytes(reasoning(Reasoning{ID: "rs_1", Summary: "thought"})); got != 0 {
+		t.Fatalf("reasoning without payload is not sent, estimate = %d", got)
+	}
+	if got, want := messageBytes(reasoning(Reasoning{ID: "rs_1", Summary: "thought", Content: payload})), len("thought")+40000*3/4-650; got != want {
+		t.Fatalf("replayed reasoning estimate = %d, want %d", got, want)
+	}
+	if got, want := messageBytes(reasoning(Reasoning{ID: "rs_1", Content: "short"})), 0; got != want {
+		t.Fatalf("envelope overhead must not go negative, estimate = %d", got)
+	}
+}
+
 func TestContextUsageInvalidation(t *testing.T) {
 	for _, change := range []string{"model", "instructions", "tools", "schema", "checkpoint", "restore"} {
 		t.Run(change, func(t *testing.T) {

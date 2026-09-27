@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +24,8 @@ func TestResultToTurn(t *testing.T) {
 		{"success max_tokens", `{"type":"result","subtype":"success","stop_reason":"max_tokens"}`, acp.StopReasonMaxTokens, false},
 		{"success refusal", `{"type":"result","subtype":"success","stop_reason":"refusal"}`, acp.StopReasonRefusal, false},
 		{"success is_error", `{"type":"result","subtype":"success","is_error":true,"result":"boom"}`, "", true},
-		{"login required", `{"type":"result","subtype":"success","result":"Please run /login first"}`, "", true},
+		{"login required", `{"type":"result","subtype":"success","is_error":true,"result":"Please run /login first"}`, "", true},
+		{"login text in a successful answer", `{"type":"result","subtype":"success","result":"Tell them: Please run /login"}`, acp.StopReasonEndTurn, false},
 		{"error_during_execution", `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["x","y"]}`, "", true},
 		{"error_max_turns recoverable", `{"type":"result","subtype":"error_max_turns"}`, acp.StopReasonMaxTurnRequests, false},
 		{"error_max_turns is_error", `{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["limit"]}`, "", true},
@@ -110,7 +113,7 @@ func TestClaudeSystemTracksSubagentParents(t *testing.T) {
 }
 
 func TestResultLoginIsAuthRequired(t *testing.T) {
-	got := resultToTurn([]byte(`{"type":"result","subtype":"success","result":"Please run /login"}`))
+	got := resultToTurn([]byte(`{"type":"result","subtype":"success","is_error":true,"result":"Please run /login"}`))
 	re, ok := got.err.(*acp.RequestError)
 	if !ok {
 		t.Fatalf("want *acp.RequestError, got %T", got.err)
@@ -598,17 +601,77 @@ func TestAskAnswersFromContent(t *testing.T) {
 		{Question: "Q1", Options: []askOption{{Label: "a"}}},
 		{Question: "Q2", MultiSelect: true, Options: []askOption{{Label: "x"}, {Label: "y"}}},
 		{Question: "Q3", Options: []askOption{{Label: "z"}}},
+		{Question: "Q4", Options: []askOption{{Label: "w"}}},
+		{Question: "Q5", MultiSelect: true, Options: []askOption{{Label: "p"}}},
 	}
-	answers := askAnswersFromContent(questions, map[string]any{
+	answers, annotations := askAnswersFromContent(questions, map[string]any{
 		"question_0":        "a",
 		"question_1":        []any{"x", "y"},
+		"question_1_custom": "Redis, not Memcached",
 		"question_2":        "z",
-		"question_2_custom": " my own answer ",
+		"question_2_custom": " a note ",
+		"question_3_custom": " my own answer ",
+		"question_4_custom": "q",
 	})
-	if answers["Q1"] != "a" || answers["Q2"] != "x, y" || answers["Q3"] != "my own answer" {
-		t.Errorf("answers = %#v", answers)
+	want := map[string]any{"Q1": "a", "Q2": `x, y, "Redis, not Memcached"`, "Q3": "z", "Q4": "my own answer", "Q5": "q"}
+	if !reflect.DeepEqual(answers, want) {
+		t.Errorf("answers = %#v, want %#v", answers, want)
 	}
-	if got := askAnswersFromContent(questions, map[string]any{}); len(got) != 0 {
-		t.Errorf("empty content = %#v", got)
+	wantNotes := map[string]any{"Q3": map[string]any{"notes": "a note"}}
+	if !reflect.DeepEqual(annotations, wantNotes) {
+		t.Errorf("annotations = %#v, want %#v", annotations, wantNotes)
+	}
+	if got, notes := askAnswersFromContent(questions, map[string]any{}); len(got) != 0 || len(notes) != 0 {
+		t.Errorf("empty content = %#v %#v", got, notes)
+	}
+}
+
+func TestToolInfoWriteAcceptsCLIAliases(t *testing.T) {
+	for _, input := range []string{
+		`{"path":"main.go","file_text":"package main"}`,
+		`{"file_path":"main.go","file_content":"package main"}`,
+	} {
+		info := toolInfoFromToolUse("Write", json.RawMessage(input), "/proj")
+		if len(info.content) != 1 || info.content[0].Diff == nil || info.content[0].Diff.NewText != "package main" {
+			t.Fatalf("%s content = %+v", input, info.content)
+		}
+		if len(info.locations) != 1 || info.locations[0].Path != filepath.Join("/proj", "main.go") {
+			t.Fatalf("%s locations = %+v", input, info.locations)
+		}
+	}
+}
+
+func TestPowerShellRendersLikeBash(t *testing.T) {
+	info := toolInfoFromToolUse("PowerShell", json.RawMessage(`{"command":"Get-ChildItem","description":"List files"}`), "/proj")
+	if info.kind != acp.ToolKindExecute || info.title != "Run command" {
+		t.Fatalf("info = %+v", info)
+	}
+	content := toolResultContent("PowerShell", cliMsgBlock{Content: json.RawMessage(`"a.txt\n"`)})
+	if len(content) != 1 || content[0].Content.Content.Text.Text != "```console\na.txt\n```" {
+		t.Fatalf("content = %#v", content)
+	}
+}
+
+func TestSubagentHandbackFrameIsUnwrapped(t *testing.T) {
+	framed := handbackHeader + "\n  Report line one\n    indented code\n  last line"
+	for _, raw := range []string{framed, "  NOTE: this agent stopped at its 5-turn limit before finishing.\n" + framed} {
+		b, _ := json.Marshal(raw)
+		content := toolResultContent("Agent", cliMsgBlock{Content: b})
+		got := content[0].Content.Content.Text.Text
+		if strings.Contains(got, "[Subagent hand-back]") || !strings.HasSuffix(got, "Report line one\n  indented code\nlast line") {
+			t.Fatalf("unwrapped = %q", got)
+		}
+		if strings.Contains(raw, "NOTE:") && !strings.HasPrefix(got, partialOutputLabel+"\n\n") {
+			t.Fatalf("partial note not relabeled: %q", got)
+		}
+	}
+	noteOnly := "  NOTE: this agent stopped at its 5-turn limit before finishing."
+	b, _ := json.Marshal(noteOnly)
+	if got := toolResultContent("Task", cliMsgBlock{Content: b})[0].Content.Content.Text.Text; got != partialOutputLabel {
+		t.Fatalf("note-only result = %q", got)
+	}
+	quoted := "Report quoting\n" + handbackHeader + "x"
+	if got := unwrapHandbackFrame(quoted); got != quoted {
+		t.Fatalf("non-frame text changed: %q", got)
 	}
 }

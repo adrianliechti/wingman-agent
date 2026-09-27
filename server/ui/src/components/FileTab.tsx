@@ -2,7 +2,7 @@ import { documentModelURI, retainDocumentModel } from "../state/documentModels";
 import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
 import { AlertTriangle, FileDigit, Loader2 } from "lucide-react";
 import {
-	forwardRef,
+	type Ref,
 	useCallback,
 	useEffect,
 	useImperativeHandle,
@@ -49,6 +49,7 @@ import { MermaidPreview } from "./MermaidPreview";
 import { useToast } from "./ui/Feedback";
 
 interface Props {
+	ref?: Ref<FileTabHandle>;
 	document: OpenDocument;
 	line?: number;
 	column?: number;
@@ -175,26 +176,24 @@ function synchronizeEditorDraft(editor: CodeEditor, next: string) {
 	editor.setScrollPosition({ scrollTop, scrollLeft });
 }
 
-export const FileTab = forwardRef<FileTabHandle, Props>(function FileTab(
-	{
-		document,
-		line,
-		column,
-		navigationKey,
-		subscribe,
-		onChange,
-		onSave,
-		onReload,
-		onOpenFile,
-		onApplyWorkspaceEdit,
-		onLaunchDebug,
-		onAskSelection,
-		view = "code",
-		tabEnabled = false,
-		languageServicesKey = "",
-	},
+export function FileTab({
 	ref,
-) {
+	document,
+	line,
+	column,
+	navigationKey,
+	subscribe,
+	onChange,
+	onSave,
+	onReload,
+	onOpenFile,
+	onApplyWorkspaceEdit,
+	onLaunchDebug,
+	onAskSelection,
+	view = "code",
+	tabEnabled = false,
+	languageServicesKey = "",
+}: Props) {
 	const retainedModelRef = useRef<ReturnType<
 		typeof retainDocumentModel
 	> | null>(null);
@@ -741,7 +740,7 @@ export const FileTab = forwardRef<FileTabHandle, Props>(function FileTab(
 			)}
 		</div>
 	);
-});
+}
 
 function BinaryPreview({
 	file,

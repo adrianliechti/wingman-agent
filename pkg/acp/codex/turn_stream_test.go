@@ -55,7 +55,7 @@ func TestTurnQueueFailsVisiblyWhenDeliveryCannotKeepUp(t *testing.T) {
 		if _, err := stream.next(nil); err == nil {
 			t.Fatal("overflow silently dropped events")
 		}
-		if stream.bytes.Load() > maxQueuedTurnBytes || len(stream.events) > maxQueuedTurnEvents {
+		if stream.bytes.Load() > maxQueuedTurnBytes || stream.queued() > maxQueuedTurnEvents {
 			t.Fatal("delivery queue exceeded its bounds")
 		}
 	}

@@ -46,7 +46,7 @@ export function SessionChatPanel(
 		[session, query.data, props.available, view?.phase],
 	);
 	return (
-		<TurnReviewsContext.Provider value={context}>
+		<TurnReviewsContext value={context}>
 			<ChatPanel
 				{...props}
 				entries={view?.entries ?? EMPTY}
@@ -61,6 +61,6 @@ export function SessionChatPanel(
 					!query.isFetching && query.data?.at(-1)?.outcome === "incomplete"
 				}
 			/>
-		</TurnReviewsContext.Provider>
+		</TurnReviewsContext>
 	);
 }

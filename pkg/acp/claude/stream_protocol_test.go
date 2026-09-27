@@ -207,3 +207,64 @@ func TestResultFallbackResetsForNextPrompt(t *testing.T) {
 		}
 	})
 }
+
+func TestUsageUpdateCarriesAssistantModel(t *testing.T) {
+	updates, _ := captureCLITranscript(t, context.Background(), rootUsageFrame, cumulativeResultFrame)
+	var usage *acp.SessionUsageUpdate
+	for _, update := range updates {
+		if update.UsageUpdate != nil {
+			usage = update.UsageUpdate
+		}
+	}
+	if usage == nil || usage.Meta["_claude/model"] != "claude-sonnet-5" {
+		t.Fatalf("usage update = %+v, want _claude/model meta", usage)
+	}
+}
+
+func TestInformationalNoticeIsMarkedAndOwnsResultText(t *testing.T) {
+	for _, tt := range []struct{ level, want string }{
+		{"warning", "**Warning:** hook says no"},
+		{"info", "hook says no"},
+	} {
+		t.Run(tt.level, func(t *testing.T) {
+			notice, _ := json.Marshal(map[string]any{"type": "system", "subtype": "informational", "content": "hook says no", "level": tt.level})
+			updates, _ := captureCLITranscript(t, context.Background(), string(notice),
+				`{"type":"result","subtype":"success","result":"hook says no","usage":{"output_tokens":0}}`)
+			if got := transcriptText(updates); got != tt.want {
+				t.Fatalf("text = %q, want %q", got, tt.want)
+			}
+			meta, _ := updates[0].AgentMessageChunk.Meta["claudeCode"].(map[string]any)
+			if meta["kind"] != "informational" || meta["level"] != tt.level {
+				t.Fatalf("meta = %#v", updates[0].AgentMessageChunk.Meta)
+			}
+		})
+	}
+}
+
+func TestSyntheticLoginMessageRequiresAuthWithoutChatText(t *testing.T) {
+	updates, result := captureCLITranscript(t, context.Background(),
+		`{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not logged in · Please run /login"}]}}`,
+		`{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}`)
+	if got := transcriptText(updates); got != "" {
+		t.Fatalf("login text reached the chat: %q", got)
+	}
+	re, ok := result.err.(*acp.RequestError)
+	if !ok || re.Code != -32000 {
+		t.Fatalf("result = %+v, want auth required", result)
+	}
+}
+
+func TestResultMatchesMergedUserMessages(t *testing.T) {
+	p, conn, _ := newTranscriptProcess(t)
+	p.beginTurn(context.Background())
+	merged, _ := json.Marshal(map[string]any{"type": "result", "subtype": "success", "user_message_uuid": "task-notification", "user_message_uuids": []string{"task-notification", p.turnID}})
+	p.read(context.Background(), conn, "s", strings.NewReader(string(merged)+"\n"))
+	select {
+	case r := <-p.results:
+		if r.stop != acp.StopReasonEndTurn {
+			t.Fatalf("result = %+v", r)
+		}
+	default:
+		t.Fatal("a result answering merged messages did not settle the turn")
+	}
+}

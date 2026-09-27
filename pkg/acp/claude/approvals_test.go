@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -278,5 +279,154 @@ func TestPermissionMetadataForAlwaysAllow(t *testing.T) {
 	lifetime := change["lifetime"].(map[string]any)
 	if lifetime["scope"] != "persistent" || lifetime["storage"] != "project" {
 		t.Fatalf("lifetime = %#v", lifetime)
+	}
+}
+
+type recordingPermissionClient struct {
+	stubClient
+	pick acp.PermissionOptionId
+	got  acp.RequestPermissionRequest
+}
+
+func (*recordingPermissionClient) SessionUpdate(context.Context, acp.SessionNotification) error {
+	return nil
+}
+
+func (c *recordingPermissionClient) RequestPermission(_ context.Context, p acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	c.got = p
+	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{
+		Selected: &acp.RequestPermissionOutcomeSelected{OptionId: c.pick},
+	}}, nil
+}
+
+type permissionReply struct {
+	Behavior    string           `json:"behavior"`
+	Permissions []map[string]any `json:"updatedPermissions"`
+}
+
+func runPermission(t *testing.T, client *recordingPermissionClient, app *approver, body string) permissionReply {
+	t.Helper()
+	agentSide, clientSide := net.Pipe()
+	t.Cleanup(func() { _ = agentSide.Close(); _ = clientSide.Close() })
+	app.conn = acp.NewAgentSideConnection(New(Options{}), agentSide, agentSide)
+	_ = acp.NewClientSideConnection(client, clientSide, clientSide)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	app.ctx, app.sid, app.out = ctx, "test", &streamWriter{w: &out}
+	var req controlRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	app.handle(req)
+	var env struct {
+		Response struct {
+			Response permissionReply `json:"response"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("parse control response %q: %v", out.String(), err)
+	}
+	return env.Response.Response
+}
+
+func optionIDs(options []acp.PermissionOption) []acp.PermissionOptionId {
+	ids := make([]acp.PermissionOptionId, len(options))
+	for i, o := range options {
+		ids[i] = o.OptionId
+	}
+	return ids
+}
+
+func TestPermissionOptionsFollowCLIHints(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		extra string
+		want  []acp.PermissionOptionId
+	}{
+		{"plain", ``, []acp.PermissionOptionId{optionAllowOnce, optionAllowAlways, optionRejectOnce}},
+		{"default to no", `,"default_to_no":true`, []acp.PermissionOptionId{optionRejectOnce, optionAllowOnce, optionAllowAlways}},
+		{"suppressed rule", `,"suppress_always_allow_rule":true`, []acp.PermissionOptionId{optionAllowOnce, optionRejectOnce}},
+		{"matched ask rule", `,"matched_ask_rule":{"toolName":"Bash"}`, []acp.PermissionOptionId{optionAllowOnce, optionRejectOnce}},
+		{"safety ask", `,"default_to_no":true,"suppress_always_allow_rule":true`, []acp.PermissionOptionId{optionRejectOnce, optionAllowOnce}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &recordingPermissionClient{pick: optionAllowOnce}
+			reply := runPermission(t, client, &approver{}, `{"request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"tu1","input":{"command":"rm -rf build"}`+tt.extra+`}}`)
+			if got := optionIDs(client.got.Options); !slices.Equal(got, tt.want) {
+				t.Fatalf("options = %v, want %v", got, tt.want)
+			}
+			if reply.Behavior != "allow" || reply.Permissions != nil {
+				t.Fatalf("reply = %+v", reply)
+			}
+		})
+	}
+}
+
+func TestPermissionRequestCarriesMCPServer(t *testing.T) {
+	client := &recordingPermissionClient{pick: optionRejectOnce}
+	reply := runPermission(t, client, &approver{}, `{"request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"mcp__github__list_issues","tool_use_id":"tu1","input":{},"mcp_server":{"name":"github","source":"sdk"}}}`)
+	claudeMeta, _ := client.got.ToolCall.Meta["claudeCode"].(map[string]any)
+	server, _ := claudeMeta["mcpServer"].(map[string]any)
+	if server["name"] != "github" || server["source"] != "sdk" || claudeMeta["toolName"] != "mcp__github__list_issues" {
+		t.Fatalf("tool call meta = %#v", client.got.ToolCall.Meta)
+	}
+	if reply.Behavior != "deny" {
+		t.Fatalf("reply = %+v", reply)
+	}
+}
+
+func TestExitPlanModeOffersElevatedModes(t *testing.T) {
+	const exitPlan = `{"request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","tool_use_id":"tu1","input":{"plan":"do it"}}}`
+	for _, tt := range []struct {
+		name        string
+		allowBypass bool
+		prePlan     string
+		pick        acp.PermissionOptionId
+		wantOptions []acp.PermissionOptionId
+		wantMode    string
+	}{
+		{"auto leads", true, "agent", optionExitPlanAuto, []acp.PermissionOptionId{optionExitPlanAuto, optionExitPlanBypass, optionExitPlanReject}, "agent"},
+		{"bypass leads after bypass", true, "unattended", optionExitPlanBypass, []acp.PermissionOptionId{optionExitPlanBypass, optionExitPlanAuto, optionExitPlanReject}, "unattended"},
+		{"bypass unavailable", false, "unattended", optionExitPlanAuto, []acp.PermissionOptionId{optionExitPlanAuto, optionExitPlanReject}, "agent"},
+		{"keep planning", true, "", optionExitPlanReject, []acp.PermissionOptionId{optionExitPlanAuto, optionExitPlanBypass, optionExitPlanReject}, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &recordingPermissionClient{pick: tt.pick}
+			var applied string
+			app := &approver{allowBypass: tt.allowBypass, prePlanMode: func() string { return tt.prePlan }, applyMode: func(id string) { applied = id }}
+			reply := runPermission(t, client, app, exitPlan)
+			if got := optionIDs(client.got.Options); !slices.Equal(got, tt.wantOptions) {
+				t.Fatalf("options = %v, want %v", got, tt.wantOptions)
+			}
+			if applied != tt.wantMode {
+				t.Fatalf("applied mode = %q, want %q", applied, tt.wantMode)
+			}
+			if tt.wantMode == "" {
+				if reply.Behavior != "deny" {
+					t.Fatalf("reply = %+v", reply)
+				}
+				return
+			}
+			if reply.Behavior != "allow" || len(reply.Permissions) != 1 || reply.Permissions[0]["mode"] != findMode(tt.wantMode).permissionMode {
+				t.Fatalf("reply = %+v", reply)
+			}
+		})
+	}
+}
+
+func TestAskUserQuestionFormKeepsPickAndNotes(t *testing.T) {
+	client := &askClient{formContent: map[string]any{"question_0": "Blue", "question_0_custom": "navy if possible"}}
+	resp, _ := runAskUserQuestion(t, client, true)
+	var input struct {
+		Answers     map[string]any `json:"answers"`
+		Annotations map[string]any `json:"annotations"`
+	}
+	if err := json.Unmarshal(resp.Input, &input); err != nil {
+		t.Fatal(err)
+	}
+	notes, _ := input.Annotations["Which color?"].(map[string]any)
+	if input.Answers["Which color?"] != "Blue" || notes["notes"] != "navy if possible" {
+		t.Fatalf("updatedInput = %s", resp.Input)
 	}
 }

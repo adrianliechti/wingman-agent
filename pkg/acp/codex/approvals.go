@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
@@ -15,6 +17,7 @@ const (
 	optionAllowOnce   acp.PermissionOptionId = "allow-once"
 	optionAllowAlways acp.PermissionOptionId = "allow-always"
 	optionRejectOnce  acp.PermissionOptionId = "reject-once"
+	optionCancel      acp.PermissionOptionId = "cancel"
 
 	optionExecpolicyAmendment     acp.PermissionOptionId = "accept-execpolicy-amendment"
 	optionAllowPermissionsTurn    acp.PermissionOptionId = "allow-permissions-turn"
@@ -89,9 +92,23 @@ func (a *approver) askWithOptions(tc acp.ToolCallUpdate, options []acp.Permissio
 	return resp.Outcome.Selected.OptionId, true
 }
 
-func (a *approver) handleExec(p execApprovalParams) execApprovalResponse {
-	tc := pendingToolCall(p.ItemID, acp.ToolKindExecute)
-	tc.Title = new("Run command")
+func (a *approver) handleExec(p execApprovalParams, toolName string) execApprovalResponse {
+	toolCallID, title := p.ItemID, "Run command"
+	if p.Kind == "writeStdin" {
+		title, toolName = "Send input to terminal", "write_stdin"
+	}
+	// Callbacks for an already running command get their own card so the command's tool call keeps its state.
+	separate := p.Kind == "writeStdin" || (p.ApprovalID != "" && p.ApprovalID != p.ItemID)
+	if separate {
+		approvalID := p.ApprovalID
+		if approvalID == "" {
+			approvalID = uuid.NewString()
+		}
+		toolCallID = "approval:" + approvalID
+	}
+	tc := pendingToolCall(toolCallID, acp.ToolKindExecute)
+	tc.Title = &title
+	tc.Meta = toolNameMeta(toolName)
 	if p.Reason != "" {
 		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(p.Reason))}
 	}
@@ -103,17 +120,39 @@ func (a *approver) handleExec(p execApprovalParams) execApprovalResponse {
 		tc.RawInput = commandRawInput(command, p.Cwd)
 	}
 
-	choices := commandApprovalChoices(p)
-	id, ok := a.askWithOptions(tc, approvalOptions(choices))
-	if !ok {
-		return execApprovalResponse{Decision: "cancel"}
-	}
-	for _, choice := range choices {
-		if choice.option.OptionId == id {
-			return execApprovalResponse{Decision: choice.decision}
+	response := execApprovalResponse{Decision: "cancel"}
+	if choices := commandApprovalChoices(p); len(choices) > 0 {
+		if id, ok := a.askWithOptions(tc, approvalOptions(choices)); ok {
+			response.Decision = unmatchedCommandDecision(choices)
+			for _, choice := range choices {
+				if choice.option.OptionId == id {
+					response.Decision = choice.decision
+				}
+			}
 		}
 	}
-	return execApprovalResponse{Decision: "decline"}
+	if separate {
+		status := acp.ToolCallStatusCompleted
+		if response.Decision == "decline" || response.Decision == "cancel" {
+			status = acp.ToolCallStatusFailed
+		}
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(a.ctx), 2*time.Second)
+		defer cancel()
+		_ = notifyClient(finishCtx, a.conn, a.sessionID, acp.UpdateToolCall(tc.ToolCallId,
+			acp.WithUpdateStatus(status),
+			acp.WithUpdateRawOutput(map[string]any{"decision": response.Decision}),
+		))
+	}
+	return response
+}
+
+func unmatchedCommandDecision(choices []approvalChoice) any {
+	for _, choice := range choices {
+		if choice.decision == "decline" {
+			return "decline"
+		}
+	}
+	return "cancel"
 }
 
 func (a *approver) handleFile(p fileApprovalParams) fileApprovalResponse {
@@ -161,6 +200,7 @@ func (a *approver) handlePermissions(p permissionsApprovalParams) permissionsApp
 func permissionsToolCall(p permissionsApprovalParams) acp.ToolCallUpdate {
 	tc := pendingToolCall(p.ItemID, acp.ToolKindOther)
 	tc.Title = new("Permissions request")
+	tc.Meta = toolNameMeta("request_permissions")
 	if content := formatRequestedPermissions(p.Permissions); content != "" {
 		if p.Reason != "" {
 			content = p.Reason + "\n\n" + content
@@ -180,61 +220,136 @@ func approvalOptions(choices []approvalChoice) []acp.PermissionOption {
 	return options
 }
 
+type commandDecision struct {
+	name       string
+	execpolicy []string
+	network    *networkPolicyAmendment
+}
+
 func commandApprovalChoices(p execApprovalParams) []approvalChoice {
-	alwaysName := "Allow for Session"
-	var alwaysChanges []map[string]any
-	if p.NetworkApprovalContext != nil && p.NetworkApprovalContext.Host != "" {
-		alwaysName = "Allow Host for Session"
-		matcher := map[string]any{"type": "host", "host": p.NetworkApprovalContext.Host}
-		if p.NetworkApprovalContext.Protocol != "" {
-			matcher["protocol"] = p.NetworkApprovalContext.Protocol
+	decisions := defaultCommandDecisions(p)
+	if p.AvailableDecisions != nil {
+		decisions = parseCommandDecisions(p.AvailableDecisions)
+	}
+	offersDecline := slices.ContainsFunc(decisions, func(d commandDecision) bool { return d.name == "decline" })
+	choices := make([]approvalChoice, 0, len(decisions))
+	networkIndex := 0
+	for _, decision := range decisions {
+		switch {
+		case decision.execpolicy != nil:
+			choices = append(choices, execpolicyChoice(decision.execpolicy))
+		case decision.network != nil:
+			choices = append(choices, networkPolicyChoice(networkIndex, *decision.network))
+			networkIndex++
+		case decision.name == "accept":
+			choices = append(choices, approvalChoice{permissionOption(optionAllowOnce, "Allow Once", acp.PermissionOptionKindAllowOnce), "accept"})
+		case decision.name == "acceptForSession":
+			choices = append(choices, sessionCommandChoice(p.NetworkApprovalContext))
+		case decision.name == "decline":
+			choices = append(choices, approvalChoice{permissionOption(optionRejectOnce, "Reject", acp.PermissionOptionKindRejectOnce), "decline"})
+		case decision.name == "cancel":
+			name := "Reject"
+			if offersDecline {
+				name = "Reject and Stop"
+			}
+			choices = append(choices, approvalChoice{permissionOption(optionCancel, name, acp.PermissionOptionKindRejectOnce), "cancel"})
 		}
-		alwaysChanges = append(alwaysChanges, map[string]any{
+	}
+	return choices
+}
+
+// Older app-servers omit availableDecisions.
+func defaultCommandDecisions(p execApprovalParams) []commandDecision {
+	decisions := []commandDecision{{name: "accept"}, {name: "acceptForSession"}}
+	if len(p.ProposedExecpolicyAmendment) > 0 {
+		decisions = append(decisions, commandDecision{execpolicy: p.ProposedExecpolicyAmendment})
+	}
+	for _, amendment := range p.ProposedNetworkPolicyAmendments {
+		decisions = append(decisions, commandDecision{network: &amendment})
+	}
+	return append(decisions, commandDecision{name: "decline"})
+}
+
+func parseCommandDecisions(raw []json.RawMessage) []commandDecision {
+	decisions := make([]commandDecision, 0, len(raw))
+	for _, value := range raw {
+		var name string
+		if json.Unmarshal(value, &name) == nil {
+			decisions = append(decisions, commandDecision{name: name})
+			continue
+		}
+		var object struct {
+			Execpolicy *struct {
+				Amendment []string `json:"execpolicy_amendment"`
+			} `json:"acceptWithExecpolicyAmendment"`
+			Network *struct {
+				Amendment networkPolicyAmendment `json:"network_policy_amendment"`
+			} `json:"applyNetworkPolicyAmendment"`
+		}
+		if json.Unmarshal(value, &object) != nil {
+			continue
+		}
+		switch {
+		case object.Execpolicy != nil && len(object.Execpolicy.Amendment) > 0:
+			decisions = append(decisions, commandDecision{execpolicy: object.Execpolicy.Amendment})
+		case object.Network != nil && object.Network.Amendment.Host != "":
+			decisions = append(decisions, commandDecision{network: &object.Network.Amendment})
+		}
+	}
+	return decisions
+}
+
+func sessionCommandChoice(network *networkApprovalContext) approvalChoice {
+	name := "Allow for Session"
+	var changes []map[string]any
+	if network != nil && network.Host != "" {
+		name = "Allow Host for Session"
+		matcher := map[string]any{"type": "host", "host": network.Host}
+		if network.Protocol != "" {
+			matcher["protocol"] = network.Protocol
+		}
+		changes = append(changes, map[string]any{
 			"type": "grant", "operation": "grant",
-			"description": fmt.Sprintf("Allow access to %s for this session", p.NetworkApprovalContext.Host),
+			"description": fmt.Sprintf("Allow access to %s for this session", network.Host),
 			"lifetime":    map[string]any{"scope": "session"},
 			"targets":     []any{map[string]any{"type": "network", "matcher": matcher}},
 		})
 	}
-	choices := []approvalChoice{
-		{permissionOption(optionAllowOnce, "Allow Once", acp.PermissionOptionKindAllowOnce), "accept"},
-		{permissionOption(optionAllowAlways, alwaysName, acp.PermissionOptionKindAllowAlways, alwaysChanges...), "acceptForSession"},
+	return approvalChoice{permissionOption(optionAllowAlways, name, acp.PermissionOptionKindAllowAlways, changes...), "acceptForSession"}
+}
+
+func execpolicyChoice(amendment []string) approvalChoice {
+	prefix := strings.Join(amendment, " ")
+	label := "Allow and Remember Command Pattern"
+	if prefix != "" && !strings.ContainsAny(prefix, "\r\n") {
+		label = fmt.Sprintf("Allow Commands Starting With `%s`", prefix)
 	}
-	if len(p.ProposedExecpolicyAmendment) > 0 {
-		prefix := strings.Join(p.ProposedExecpolicyAmendment, " ")
-		label := "Allow and Remember Command Pattern"
-		if prefix != "" && !strings.ContainsAny(prefix, "\r\n") {
-			label = fmt.Sprintf("Allow Commands Starting With `%s`", prefix)
-		}
-		choices = append(choices, approvalChoice{
-			permissionOption(optionExecpolicyAmendment, label, acp.PermissionOptionKindAllowAlways, map[string]any{
-				"type": "policy_rule", "operation": "add", "ruleBehavior": "allow",
-				"description": "Allow commands starting with " + prefix,
-				"targets":     []any{map[string]any{"type": "command", "matcher": map[string]any{"type": "argv_prefix", "argv": p.ProposedExecpolicyAmendment}}},
-			}),
-			map[string]any{"acceptWithExecpolicyAmendment": map[string]any{"execpolicy_amendment": p.ProposedExecpolicyAmendment}},
-		})
+	return approvalChoice{
+		permissionOption(optionExecpolicyAmendment, label, acp.PermissionOptionKindAllowAlways, map[string]any{
+			"type": "policy_rule", "operation": "add", "ruleBehavior": "allow",
+			"description": "Allow commands starting with " + prefix,
+			"targets":     []any{map[string]any{"type": "command", "matcher": map[string]any{"type": "argv_prefix", "argv": amendment}}},
+		}),
+		map[string]any{"acceptWithExecpolicyAmendment": map[string]any{"execpolicy_amendment": amendment}},
 	}
-	for i, amendment := range p.ProposedNetworkPolicyAmendments {
-		kind := acp.PermissionOptionKindAllowAlways
-		verb := "Allow"
-		future := "Allow"
-		if amendment.Action == "deny" {
-			kind = acp.PermissionOptionKindRejectAlways
-			verb = "Block"
-			future = "Block"
-		}
-		id := acp.PermissionOptionId(fmt.Sprintf("apply-network-policy-amendment:%d", i))
-		choices = append(choices, approvalChoice{
-			permissionOption(id, fmt.Sprintf("%s %s in the Future", future, amendment.Host), kind, map[string]any{
-				"type": "policy_rule", "operation": "add", "ruleBehavior": amendment.Action,
-				"description": fmt.Sprintf("%s access to %s", verb, amendment.Host),
-				"targets":     []any{map[string]any{"type": "network", "matcher": map[string]any{"type": "host", "host": amendment.Host}}},
-			}),
-			map[string]any{"applyNetworkPolicyAmendment": map[string]any{"network_policy_amendment": amendment}},
-		})
+}
+
+func networkPolicyChoice(index int, amendment networkPolicyAmendment) approvalChoice {
+	kind := acp.PermissionOptionKindAllowAlways
+	verb := "Allow"
+	if amendment.Action == "deny" {
+		kind = acp.PermissionOptionKindRejectAlways
+		verb = "Block"
 	}
-	return append(choices, approvalChoice{permissionOption(optionRejectOnce, "Reject", acp.PermissionOptionKindRejectOnce), "decline"})
+	id := acp.PermissionOptionId(fmt.Sprintf("apply-network-policy-amendment:%d", index))
+	return approvalChoice{
+		permissionOption(id, fmt.Sprintf("%s %s in the Future", verb, amendment.Host), kind, map[string]any{
+			"type": "policy_rule", "operation": "add", "ruleBehavior": amendment.Action,
+			"description": fmt.Sprintf("%s access to %s", verb, amendment.Host),
+			"targets":     []any{map[string]any{"type": "network", "matcher": map[string]any{"type": "host", "host": amendment.Host}}},
+		}),
+		map[string]any{"applyNetworkPolicyAmendment": map[string]any{"network_policy_amendment": amendment}},
+	}
 }
 
 func fileApprovalChoices(p fileApprovalParams) []approvalChoice {
@@ -380,8 +495,10 @@ func (a *approver) handleElicitation(p elicitationParams) elicitationResponse {
 			response.Action = "decline"
 		}
 	}
-	// Synthetic permission cards have no backend completion event.
-	_ = notifyClient(a.ctx, a.conn, a.sessionID, acp.UpdateToolCall(tc.ToolCallId,
+	// Synthetic permission cards have no backend completion event; close them even after cancellation.
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(a.ctx), 2*time.Second)
+	defer cancel()
+	_ = notifyClient(finishCtx, a.conn, a.sessionID, acp.UpdateToolCall(tc.ToolCallId,
 		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
 		acp.WithUpdateRawOutput(map[string]any{"action": response.Action}),
 	))

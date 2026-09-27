@@ -173,9 +173,11 @@ func normalizeSessionConfig(models []ModelEntry, modelID, effort string) (string
 	return modelID, effort
 }
 
-const defaultModeID = "agent"
-
-const exitPlanPermissionMode = "auto"
+const (
+	defaultModeID = "agent"
+	planModeID    = "plan"
+	bypassModeID  = "unattended"
+)
 
 type sessionMode struct {
 	id             string
@@ -199,9 +201,12 @@ func findMode(id string) *sessionMode {
 	return nil
 }
 
-func buildSessionModeState(currentID string) *acp.SessionModeState {
+func buildSessionModeState(currentID string, allowBypass bool) *acp.SessionModeState {
 	infos := make([]acpcommon.ModeInfo, 0, len(sessionModes))
 	for _, m := range sessionModes {
+		if m.id == bypassModeID && !allowBypass {
+			continue
+		}
 		infos = append(infos, acpcommon.ModeInfo{ID: m.id, Name: m.name, Description: m.description})
 	}
 	return acpcommon.SessionModeState(infos, currentID, defaultModeID)

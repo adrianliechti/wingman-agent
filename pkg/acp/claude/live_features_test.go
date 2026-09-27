@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -68,7 +69,9 @@ func startLiveConn(t *testing.T, client acp.Client, caps ...acp.ClientCapabiliti
 	}
 
 	agentSide, clientSide := net.Pipe()
+	t.Cleanup(func() { _ = agentSide.Close(); _ = clientSide.Close() })
 	agent := New(Options{Env: os.Environ(), Path: path})
+	t.Cleanup(func() { _ = agent.Close() })
 	conn := acp.NewAgentSideConnection(agent, agentSide, agentSide)
 	agent.SetAgentConnection(conn)
 	cc := acp.NewClientSideConnection(client, clientSide, clientSide)
@@ -123,7 +126,13 @@ func TestLiveAllowAlwaysPersists(t *testing.T) {
 }
 
 func TestLiveExitPlanModeSwitchesMode(t *testing.T) {
-	client := &liveClient{}
+	var exitOptions []acp.PermissionOptionId
+	client := &liveClient{pick: func(p acp.RequestPermissionRequest) acp.PermissionOptionId {
+		if len(p.Options) > 0 && p.Options[0].OptionId == optionExitPlanAuto {
+			exitOptions = optionIDs(p.Options)
+		}
+		return p.Options[0].OptionId
+	}}
 	cc, ctx, cwd := startLiveConn(t, client)
 
 	ns, err := cc.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{}})
@@ -152,6 +161,26 @@ func TestLiveExitPlanModeSwitchesMode(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("current_mode_update notifications = %v, want one with \"agent\"", modes)
+	}
+	if want := []acp.PermissionOptionId{optionExitPlanAuto, optionExitPlanBypass, optionExitPlanReject}; !slices.Equal(exitOptions, want) {
+		t.Errorf("ExitPlanMode options = %v, want %v", exitOptions, want)
+	}
+}
+
+func TestLiveBypassOptOutRemovesMode(t *testing.T) {
+	cc, ctx, cwd := startLiveConn(t, &liveClient{})
+	ns, err := cc.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{},
+		Meta: map[string]any{"claudeCode": map[string]any{"options": map[string]any{"allowDangerouslySkipPermissions": false}}}})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	for _, m := range ns.Modes.AvailableModes {
+		if m.Id == bypassModeID {
+			t.Fatalf("modes = %+v, want no bypass mode after opt-out", ns.Modes.AvailableModes)
+		}
+	}
+	if _, err := cc.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: ns.SessionId, ModeId: bypassModeID}); err == nil {
+		t.Fatal("bypass mode accepted after opt-out")
 	}
 }
 

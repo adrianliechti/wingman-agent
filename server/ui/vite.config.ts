@@ -1,11 +1,16 @@
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
+import react, { reactCompilerPreset } from "@vitejs/plugin-react";
+import babel from "@rolldown/plugin-babel";
 import tailwindcss from "@tailwindcss/vite";
 
 const monacoLang = /monaco-editor\/esm\/vs\/(basic-languages|languages?)\//;
 
 export default defineConfig({
-	plugins: [react(), tailwindcss()],
+	plugins: [
+		react(),
+		babel({ presets: [reactCompilerPreset()] }),
+		tailwindcss(),
+	],
 	build: {
 		outDir: "../static",
 		emptyOutDir: true,

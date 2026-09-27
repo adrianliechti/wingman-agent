@@ -113,13 +113,13 @@ func TestPromptToInputPreservesBlobResources(t *testing.T) {
 
 func TestRegisterSessionClosesReplacementAndAgentCloseCancelsSessions(t *testing.T) {
 	a := newAgent(&codexClient{}, "default", "")
-	old := a.registerSession("thread-1", "default", "", nil)
+	old := a.registerSession("thread-1", "default", "", defaultCollaborationMode, nil)
 	oldCtx, cancelOld := context.WithCancel(context.Background())
 	old.mu.Lock()
 	old.cancelTurn = cancelOld
 	old.mu.Unlock()
 
-	replacement := a.registerSession("thread-1", "default", "", nil)
+	replacement := a.registerSession("thread-1", "default", "", defaultCollaborationMode, nil)
 	select {
 	case <-oldCtx.Done():
 	case <-time.After(time.Second):

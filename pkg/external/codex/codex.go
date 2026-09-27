@@ -41,6 +41,8 @@ func BuildArgs(cfg *CodexConfig) []string {
 		"--config", "features.apps=false",
 		"--config", "features.plugins=false",
 		"--config", "features.fast_mode=false",
+		"--config", "features.daemon_auto_start=false",
+		"--config", "features.realtime_conversation=false",
 
 		"--config", "tui.show_tooltips=false",
 		"--config", "check_for_update_on_startup=false",

@@ -18,7 +18,7 @@ import {
 	Undo2,
 } from "lucide-react";
 import type * as MonacoTypes from "monaco-editor";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import type { MonacoLanguageFeature } from "../monacoLsp";
 import { FloatingMenu } from "./ui/Floating";
 
@@ -209,9 +209,9 @@ export function EditorContextMenu({
 		supportsLanguageFeature,
 		altKey,
 	);
-	const supportedCodeActions = useMemo(
-		() => (readOnly ? [] : supportedActions(editor, codeActions)),
-		[editor, readOnly],
+	// Snapshot on open: Monaco drops these once focus moves into the menu.
+	const [supportedCodeActions] = useState(() =>
+		readOnly ? [] : supportedActions(editor, codeActions),
 	);
 	const commentItems = readOnly
 		? []

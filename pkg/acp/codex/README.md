@@ -57,6 +57,9 @@ events keep the turn open, and already-received completion events survive EOF.
 Process exit is also monitored independently of stdout, so a tool that inherits
 the pipe cannot keep a dead app-server session pending.
 
+Codex answers `no active turn to interrupt` until a just-started turn becomes
+interruptible, so a cancellation retries `turn/interrupt` with a short bounded
+backoff instead of letting that turn run on.
 Cancellation releases active and cancelled queued prompts. Late permission
 responses cannot approve cancelled work, and steering leaves an open permission
 request intact. These checks apply the lifecycle lessons from the reference
@@ -76,8 +79,8 @@ The pinned Go SDK still lacks top-level elicitation scope fields; session scope
 is currently carried in `_meta.sessionId`. Standard permission requests carry
 their normal top-level `sessionId`.
 
-`reliability_test.go`, `rpc_test.go`, `turn_stream_test.go`, and
-`approval_lifecycle_test.go` cover these cases with local transports and a helper
+`reliability_test.go`, `rpc_test.go`, `turn_stream_test.go`,
+`approval_lifecycle_test.go`, and `session_lifecycle_test.go` cover these cases with local transports and a helper
 process. `protocol_review_test.go` and `cancellation_order_test.go` verify protocol
 envelopes and cancellation ordering. These tests do not make model requests or
 replace an IntelliJ integration test.
@@ -92,10 +95,39 @@ Resume and fork requests omit unnecessary history hydration. These changes follo
 the current adapter's [history pagination fix](https://github.com/agentclientprotocol/codex-acp/commit/1a3c01e).
 `history_review_test.go` covers both store formats and failure cases.
 
+Codex writes a thread's rollout on its first user message. Resuming or loading a
+session that was never prompted falls back to `thread/read` and replays no
+history; deleting it, an unknown ID, or an ID Codex cannot parse succeeds.
+
 The review compared the local scratch Codex adapter at `296069e`, the local
-Claude adapter at `3e23c5b`, and the current
-[App Server adapter](https://github.com/agentclientprotocol/codex-acp) at `1a3c01e`.
+Claude adapter at `e6681d2`, and the current
+[App Server adapter](https://github.com/agentclientprotocol/codex-acp) at `bf37821`.
 The scratch Codex repository has moved development to that App Server adapter.
+Upstream session notices and `compaction_update` need session update variants
+and client capabilities that `acp-go-sdk v0.13.5` does not model, so Codex
+advisories and compactions keep their text and tool-call presentation. Terminal
+output metadata and AIR file change reports are not implemented here.
+
+## Extensions
+
+- Tool calls name Codex's model-facing tool in `_meta.codex.toolName`
+  (`exec_command`, `write_stdin`, `view_image`, `request_permissions`, or a
+  namespaced dynamic tool). ACP v1 has no tool name field.
+- File diffs carry AIR line counts in `_meta.jetbrains.air.diffStats`. Counts
+  come from the patch and are omitted when its hunks are inconsistent.
+- Clients that negotiate AIR `recommendedValue` in
+  `clientCapabilities._meta.jetbrains.air` receive the catalog default model and
+  the current model's default effort as recommendations. GPT model names are
+  shortened for pickers, for example `GPT-5.3-Codex` becomes `5.3 Codex`.
+- `_meta.mcpStartupAwaitTimeoutMs` on `session/new`, `session/resume`, and
+  `session/fork` waits up to that many milliseconds for the requested MCP
+  servers in that session to report `ready`, `failed`, or `cancelled`.
+- Codex `request_user_input` questions become one form elicitation for clients
+  with form support; other clients return no answers. An "Other" question gets
+  a "None of the above" choice and a note field whose answer is sent as
+  `user_note: …`.
+- Authentication failures (`unauthorized` or HTTP 401) end the prompt with ACP
+  `auth_required` instead of a chat message.
 
 ## Plans
 
@@ -103,3 +135,17 @@ This bridge currently does not forward `turn/plan/updated` task lists as ACP v1
 `plan` notifications. A completed Codex `plan` item is surfaced as agent text and
 offered to the client via `requestPlanImplementation`. Approving implementation
 starts a separate backend turn with its own event and approval lifecycle.
+
+## Live regression tests
+
+`live_regressions_test.go` drives the installed Codex app-server through ACP
+without making model requests. It checks that an unprompted session retains
+Plan mode on resume and load, and that an MCP startup wait only completes for
+its own session. The MCP test starts two real stdio servers with independently
+controlled handshakes and observes the CLI's startup notifications.
+
+Run from the repository root:
+
+```sh
+CODEX_ACP_LIVE=1 go test ./pkg/acp/codex -run '^TestLiveCodex(UnpromptedPlanMode|MCPStartupSessionIsolation)$' -count=1 -v -timeout=2m
+```

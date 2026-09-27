@@ -28,7 +28,9 @@ func imageViewToolCall(raw json.RawMessage) (acp.SessionUpdate, bool) {
 	if it.Path != "" {
 		opts = appendDisplayLocations(opts, []acp.ToolCallLocation{{Path: it.Path}})
 	}
-	return acp.StartToolCall(acp.ToolCallId(it.ID), "View image", opts...), true
+	u := acp.StartToolCall(acp.ToolCallId(it.ID), "View image", opts...)
+	u.ToolCall.Meta = toolNameMeta("view_image")
+	return u, true
 }
 
 // imageGeneration -------------------------------------------------------------
@@ -507,9 +509,11 @@ func itemToolCallStart(raw json.RawMessage, id string, kind string, status acp.T
 		var it struct {
 			Command        string          `json:"command"`
 			Cwd            string          `json:"cwd"`
+			Source         string          `json:"source"`
 			CommandActions []commandAction `json:"commandActions"`
 		}
 		_ = json.Unmarshal(raw, &it)
+		var u acp.SessionUpdate
 		if title, toolKind, input, locs, ok := commandActionToolCall(it.CommandActions); ok {
 			opts := []acp.ToolCallStartOpt{
 				acp.WithStartKind(toolKind),
@@ -519,17 +523,20 @@ func itemToolCallStart(raw json.RawMessage, id string, kind string, status acp.T
 			if input != nil {
 				opts = append(opts, acp.WithStartRawInput(input))
 			}
-			return acp.StartToolCall(acp.ToolCallId(id), title, opts...), true
+			u = acp.StartToolCall(acp.ToolCallId(id), title, opts...)
+		} else {
+			command := stripShellPrefix(it.Command)
+			if command == "" {
+				command = it.Command
+			}
+			u = acp.StartToolCall(acp.ToolCallId(id), "Run command",
+				acp.WithStartKind(acp.ToolKindExecute),
+				acp.WithStartStatus(status),
+				acp.WithStartRawInput(commandRawInput(command, it.Cwd)),
+			)
 		}
-		command := stripShellPrefix(it.Command)
-		if command == "" {
-			command = it.Command
-		}
-		return acp.StartToolCall(acp.ToolCallId(id), "Run command",
-			acp.WithStartKind(acp.ToolKindExecute),
-			acp.WithStartStatus(status),
-			acp.WithStartRawInput(commandRawInput(command, it.Cwd)),
-		), true
+		u.ToolCall.Meta = toolNameMeta(commandToolName(it.Source))
+		return u, true
 
 	case "mcpToolCall":
 		var it struct {
@@ -548,17 +555,53 @@ func itemToolCallStart(raw json.RawMessage, id string, kind string, status acp.T
 
 	case "dynamicToolCall":
 		var it struct {
-			Tool string          `json:"tool"`
-			Args json.RawMessage `json:"arguments"`
+			Namespace string          `json:"namespace"`
+			Tool      string          `json:"tool"`
+			Args      json.RawMessage `json:"arguments"`
 		}
 		_ = json.Unmarshal(raw, &it)
 		var args map[string]any
 		_ = json.Unmarshal(it.Args, &args)
-		return acp.StartToolCall(acp.ToolCallId(id), it.Tool,
+		u := acp.StartToolCall(acp.ToolCallId(id), it.Tool,
 			acp.WithStartKind(acp.ToolKindExecute),
 			acp.WithStartStatus(status),
 			acp.WithStartRawInput(args),
-		), true
+		)
+		u.ToolCall.Meta = toolNameMeta(functionToolName(it.Tool, it.Namespace))
+		return u, true
 	}
 	return acp.SessionUpdate{}, false
+}
+
+// ACP v1 tool calls have no name field; Codex's model-facing tool name travels in _meta.
+func toolNameMeta(name string) map[string]any {
+	if name == "" {
+		return nil
+	}
+	return map[string]any{"codex": map[string]any{"toolName": name}}
+}
+
+func functionToolName(name, namespace string) string {
+	if name == "" {
+		return ""
+	}
+	return namespace + name
+}
+
+func commandToolName(source string) string {
+	switch source {
+	case "unifiedExecStartup":
+		return "exec_command"
+	case "unifiedExecInteraction":
+		return "write_stdin"
+	default:
+		// agent and userShell commands do not identify a unique model tool.
+		return ""
+	}
+}
+
+func toolNameFromMeta(meta map[string]any) string {
+	codex, _ := meta["codex"].(map[string]any)
+	name, _ := codex["toolName"].(string)
+	return name
 }

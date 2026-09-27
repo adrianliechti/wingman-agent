@@ -169,3 +169,82 @@ func permissionDescription(option acp.PermissionOption) string {
 	description, _ := changes[0]["description"].(string)
 	return description
 }
+
+func TestCommandApprovalChoicesFollowAvailableDecisions(t *testing.T) {
+	tests := []struct {
+		name      string
+		params    string
+		wantIDs   []acp.PermissionOptionId
+		wantNames []string
+	}{
+		{
+			name:      "absent keeps legacy options",
+			params:    `{"itemId":"cmd"}`,
+			wantIDs:   []acp.PermissionOptionId{optionAllowOnce, optionAllowAlways, optionRejectOnce},
+			wantNames: []string{"Allow Once", "Allow for Session", "Reject"},
+		},
+		{
+			name:      "null keeps legacy options",
+			params:    `{"itemId":"cmd","availableDecisions":null}`,
+			wantIDs:   []acp.PermissionOptionId{optionAllowOnce, optionAllowAlways, optionRejectOnce},
+			wantNames: []string{"Allow Once", "Allow for Session", "Reject"},
+		},
+		{
+			name:      "write stdin",
+			params:    `{"kind":"writeStdin","itemId":"cmd","approvalId":"a1","availableDecisions":["accept","cancel"]}`,
+			wantIDs:   []acp.PermissionOptionId{optionAllowOnce, optionCancel},
+			wantNames: []string{"Allow Once", "Reject"},
+		},
+		{
+			name:      "execpolicy object",
+			params:    `{"itemId":"cmd","proposedExecpolicyAmendment":["npm","test"],"availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["npm","test"]}},"cancel"]}`,
+			wantIDs:   []acp.PermissionOptionId{optionAllowOnce, optionExecpolicyAmendment, optionCancel},
+			wantNames: []string{"Allow Once", "Allow Commands Starting With `npm test`", "Reject"},
+		},
+		{
+			name:      "decline and cancel",
+			params:    `{"itemId":"cmd","networkApprovalContext":{"host":"example.com"},"availableDecisions":["accept","acceptForSession",{"applyNetworkPolicyAmendment":{"network_policy_amendment":{"host":"example.com","action":"deny"}}},"decline","cancel"]}`,
+			wantIDs:   []acp.PermissionOptionId{optionAllowOnce, optionAllowAlways, "apply-network-policy-amendment:0", optionRejectOnce, optionCancel},
+			wantNames: []string{"Allow Once", "Allow Host for Session", "Block example.com in the Future", "Reject", "Reject and Stop"},
+		},
+		{
+			name:    "unknown decisions are skipped",
+			params:  `{"itemId":"cmd","availableDecisions":["accept","somethingNew",{"unknown":{}},"cancel"]}`,
+			wantIDs: []acp.PermissionOptionId{optionAllowOnce, optionCancel},
+		},
+		{
+			name:   "empty offers nothing",
+			params: `{"itemId":"cmd","availableDecisions":[]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var p execApprovalParams
+			if err := json.Unmarshal([]byte(tt.params), &p); err != nil {
+				t.Fatal(err)
+			}
+			choices := commandApprovalChoices(p)
+			if len(choices) != len(tt.wantIDs) {
+				t.Fatalf("choices = %#v, want %v", choices, tt.wantIDs)
+			}
+			for i, choice := range choices {
+				if choice.option.OptionId != tt.wantIDs[i] {
+					t.Errorf("option %d = %q, want %q", i, choice.option.OptionId, tt.wantIDs[i])
+				}
+				if tt.wantNames != nil && choice.option.Name != tt.wantNames[i] {
+					t.Errorf("option %d name = %q, want %q", i, choice.option.Name, tt.wantNames[i])
+				}
+			}
+		})
+	}
+
+	var p execApprovalParams
+	_ = json.Unmarshal([]byte(`{"itemId":"cmd","availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["npm","test"]}},"cancel"]}`), &p)
+	got, err := json.Marshal(choiceByID(t, commandApprovalChoices(p), optionExecpolicyAmendment).decision)
+	if err != nil || string(got) != `{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["npm","test"]}}` {
+		t.Fatalf("execpolicy decision = %s, err=%v", got, err)
+	}
+	if got := (&approver{}).handleExec(execApprovalParams{ItemID: "cmd", AvailableDecisions: []json.RawMessage{}}, ""); got.Decision != "cancel" {
+		t.Fatalf("approval without decisions = %+v, want cancel", got)
+	}
+}

@@ -88,7 +88,7 @@ func (s *session) interrupt(ctx context.Context, cc *codexClient) {
 	if issue {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 		defer cancel()
-		err := cc.turnInterrupt(ctx, turnInterruptParams{ThreadID: string(s.id), TurnID: turnID})
+		err := requestTurnInterrupt(ctx, cc, string(s.id), turnID)
 		retireTimedOutTurnControl(cc, "turn/interrupt", err)
 		close(done)
 	}
@@ -177,6 +177,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 		}
 		stream := newTurnStream(runCtx)
 		disp = newEventDispatcher(runCtx, conn, s.id)
+		runDisp := disp
 		app := newApprover(runCtx, conn, s.id, clientCapabilities)
 		handlers := &threadHandlers{
 			onNotification: stream.enqueue,
@@ -186,7 +187,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 				if !stream.acceptsRequest(approval.ctx, p.TurnID) {
 					return execApprovalResponse{Decision: "cancel"}
 				}
-				return approval.handleExec(p)
+				return approval.handleExec(p, runDisp.commandName(p.ItemID))
 			},
 			onFileApproval: func(ctx context.Context, p fileApprovalParams) fileApprovalResponse {
 				approval, cancel := app.forRequest(ctx)
@@ -211,6 +212,14 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 					return elicitationResponse{Action: "cancel"}
 				}
 				return approval.handleElicitation(p)
+			},
+			onUserInput: func(ctx context.Context, p userInputParams) userInputResponse {
+				approval, cancel := app.forRequest(ctx)
+				defer cancel()
+				if !stream.acceptsRequest(approval.ctx, p.TurnID) {
+					return emptyUserInputResponse()
+				}
+				return approval.handleUserInput(p)
 			},
 		}
 		cc.setThreadHandlers(threadID, handlers)
@@ -368,7 +377,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 	s.mu.Unlock()
 	if err := notifyClient(turnCtx, conn, s.id, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
 		SessionUpdate: "config_option_update",
-		ConfigOptions: buildConfigOptions(models, model, effort, defaultCollaborationMode),
+		ConfigOptions: buildConfigOptions(models, model, effort, defaultCollaborationMode, clientSupportsAirCapability(clientCapabilities, recommendedValueCapability)),
 	}}); err != nil {
 		return "", nil, err
 	}
@@ -410,8 +419,27 @@ func interruptTurnSoon(cc *codexClient, threadID, turnID string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := cc.turnInterrupt(ctx, turnInterruptParams{ThreadID: threadID, TurnID: turnID})
+	err := requestTurnInterrupt(ctx, cc, threadID, turnID)
 	retireTimedOutTurnControl(cc, "turn/interrupt", err)
+}
+
+// Codex answers "no active turn" until a just-started turn becomes interruptible.
+var noActiveTurnRetryDelays = []time.Duration{25 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+
+func requestTurnInterrupt(ctx context.Context, cc *codexClient, threadID, turnID string) error {
+	for attempt := 0; ; attempt++ {
+		err := cc.turnInterrupt(ctx, turnInterruptParams{ThreadID: threadID, TurnID: turnID})
+		var rpcErr *rpcError
+		if err == nil || attempt >= len(noActiveTurnRetryDelays) || !errors.As(err, &rpcErr) ||
+			!strings.Contains(rpcErr.Message, "no active turn to interrupt") {
+			return err
+		}
+		select {
+		case <-time.After(noActiveTurnRetryDelays[attempt]):
+		case <-ctx.Done():
+			return err
+		}
+	}
 }
 
 func requestPlanImplementation(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, plan *completedPlan) (bool, error) {

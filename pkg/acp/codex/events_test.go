@@ -3,6 +3,8 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"strings"
 	"testing"
 
@@ -297,4 +299,133 @@ func TestCodexRateLimitNoteOnlySpeaksWhenReached(t *testing.T) {
 	if got := rateLimitNote(json.RawMessage(spend)); !strings.Contains(got, "Spend limit reached") {
 		t.Fatalf("spend snapshot = %q", got)
 	}
+}
+
+func TestFileChangeDiffStats(t *testing.T) {
+	stats := func(t *testing.T, change string) (map[string]any, *acp.ToolCallContentDiff) {
+		t.Helper()
+		content := fileChangeContent(json.RawMessage(`{"changes":[` + change + `]}`))
+		if len(content) != 1 || content[0].Diff == nil {
+			t.Fatalf("content = %#v", content)
+		}
+		d := content[0].Diff
+		jetbrains, _ := d.Meta["jetbrains"].(map[string]any)
+		air, _ := jetbrains["air"].(map[string]any)
+		s, _ := air["diffStats"].(map[string]any)
+		return s, d
+	}
+	for _, tt := range []struct {
+		name, change   string
+		added, removed int
+	}{
+		{"update", `{"path":"/p/a.go","kind":{"type":"update"},"diff":"--- a/p/a.go\n+++ b/p/a.go\n@@ -1,3 +1,4 @@\n line one\n-old\n+new\n+extra\n line three\n"}`, 2, 1},
+		{"two hunks and marker", `{"path":"/p/a.go","kind":{"type":"update"},"diff":"@@ -1,2 +1,2 @@\n-a\n+b\n c\n@@ -10 +10 @@\n-x\n\\ No newline at end of file\n+y\n\\ No newline at end of file"}`, 2, 2},
+		{"add raw", `{"path":"/p/new.txt","kind":{"type":"add"},"diff":"one\r\ntwo\rthree"}`, 3, 0},
+		{"add unified", `{"path":"/p/new.txt","kind":{"type":"add"},"diff":"--- /dev/null\n+++ /p/new.txt\n@@ -0,0 +1,2 @@\n+a\n+b"}`, 2, 0},
+		{"delete raw", `{"path":"/p/old.txt","kind":{"type":"delete"},"diff":"gone\n\n"}`, 0, 2},
+		{"empty add", `{"path":"/p/empty","kind":{"type":"add"},"diff":""}`, 0, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, d := stats(t, tt.change)
+			if s == nil || s["version"] != 1 || s["added"] != tt.added || s["removed"] != tt.removed {
+				t.Fatalf("diffStats = %#v, want +%d -%d", s, tt.added, tt.removed)
+			}
+			if d.Meta["kind"] == nil {
+				t.Fatalf("diff kind was dropped: %#v", d.Meta)
+			}
+		})
+	}
+	for _, change := range []string{
+		`{"path":"/p/a.go","kind":{"type":"update"},"diff":"@@ -1,3 +1,3 @@\n-a\n+b"}`,
+		`{"path":"/p/a.go","kind":{"type":"update"},"diff":"@@ -5,1 +5,1 @@\n-a\n+b\n@@ -1,1 +1,1 @@\n-c\n+d"}`,
+		`{"path":"/p/a.go","kind":{"type":"update"},"diff":"no hunks"}`,
+		`{"path":"/p/a.go","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n\\ No newline at end of file\n-a\n+b"}`,
+	} {
+		if s, d := stats(t, change); s != nil || d.Meta["kind"] != "update" {
+			t.Errorf("invalid patch published stats %#v for %s", s, change)
+		}
+	}
+	_, d := stats(t, `{"path":"/p/old.txt","kind":{"type":"delete"},"diff":"gone\n"}`)
+	if d.OldText == nil || *d.OldText != "gone\n" || d.NewText != "" {
+		t.Fatalf("raw delete content = old %v new %q", d.OldText, d.NewText)
+	}
+}
+
+func TestToolCallsCarryCodexToolNames(t *testing.T) {
+	name := func(meta map[string]any) string { return toolNameFromMeta(meta) }
+	for source, want := range map[string]string{"unifiedExecStartup": "exec_command", "unifiedExecInteraction": "write_stdin", "agent": "", "userShell": ""} {
+		u, ok := itemToolCallStart(json.RawMessage(`{"command":"ls","source":"`+source+`"}`), "cmd", "commandExecution", acp.ToolCallStatusInProgress)
+		if !ok || name(u.ToolCall.Meta) != want {
+			t.Errorf("source %s: meta = %#v, want %q", source, u.ToolCall.Meta, want)
+		}
+	}
+	u, _ := itemToolCallStart(json.RawMessage(`{"command":"cat a","source":"unifiedExecStartup","commandActions":[{"type":"read","path":"/a"}]}`), "read", "commandExecution", acp.ToolCallStatusCompleted)
+	if name(u.ToolCall.Meta) != "exec_command" || u.ToolCall.Title != "Read file" {
+		t.Errorf("command action = %#v", u.ToolCall)
+	}
+	u, _ = itemToolCallStart(json.RawMessage(`{"tool":"lookup","namespace":"mcp__docs__","arguments":{}}`), "dyn", "dynamicToolCall", acp.ToolCallStatusInProgress)
+	if name(u.ToolCall.Meta) != "mcp__docs__lookup" {
+		t.Errorf("dynamic tool meta = %#v", u.ToolCall.Meta)
+	}
+	if u, _ := imageViewToolCall(json.RawMessage(`{"id":"img","path":"/a.png"}`)); name(u.ToolCall.Meta) != "view_image" {
+		t.Errorf("image view meta = %#v", u.ToolCall.Meta)
+	}
+	if tc := permissionsToolCall(permissionsApprovalParams{ItemID: "perm"}); name(tc.Meta) != "request_permissions" {
+		t.Errorf("permissions meta = %#v", tc.Meta)
+	}
+
+	d := newEventDispatcher(context.Background(), discardingConn(t), "session")
+	d.handle("item/started", json.RawMessage(`{"item":{"id":"cmd","type":"commandExecution","command":"ls","source":"unifiedExecStartup"}}`))
+	if d.commandName("cmd") != "exec_command" {
+		t.Fatalf("started command name = %q", d.commandName("cmd"))
+	}
+	d.handle("item/completed", json.RawMessage(`{"item":{"id":"cmd","type":"commandExecution","status":"completed","source":"unifiedExecStartup"}}`))
+	if d.commandName("cmd") != "" {
+		t.Fatal("completed command kept its approval name")
+	}
+}
+
+func TestAuthenticationErrorsUseACPLoginFlow(t *testing.T) {
+	isAuthRequired := func(err error) bool {
+		var re *acp.RequestError
+		return errors.As(err, &re) && re.Code == acp.NewAuthRequired(nil).Code
+	}
+	for _, info := range []string{`"unauthorized"`, `{"responseStreamDisconnected":{"httpStatusCode":401}}`, `{"anyFutureVariant":{"httpStatusCode":401}}`} {
+		d := newEventDispatcher(context.Background(), nil, "session")
+		d.handle("error", json.RawMessage(`{"error":{"message":"Sign in","codexErrorInfo":`+info+`},"willRetry":true}`))
+		if d.getFailure() != nil {
+			t.Fatalf("%s: retrying auth error failed the turn", info)
+		}
+		d.handle("error", json.RawMessage(`{"error":{"message":"Sign in","codexErrorInfo":`+info+`},"willRetry":false}`))
+		if err := d.getFailure(); !isAuthRequired(err) {
+			t.Fatalf("%s: failure = %v, want auth_required", info, err)
+		}
+		select {
+		case <-d.done:
+		default:
+			t.Fatalf("%s: auth failure did not end the turn", info)
+		}
+	}
+
+	d := newEventDispatcher(context.Background(), nil, "session")
+	d.handle("turn/completed", json.RawMessage(`{"turn":{"id":"t","status":"failed","error":{"message":"Sign in","codexErrorInfo":"unauthorized"}}}`))
+	if err := d.getFailure(); !isAuthRequired(err) {
+		t.Fatalf("failed turn = %v, want auth_required", err)
+	}
+	d = newEventDispatcher(context.Background(), nil, "session")
+	d.handle("turn/completed", json.RawMessage(`{"turn":{"id":"t","status":"failed","error":{"message":"boom","codexErrorInfo":{"httpConnectionFailed":{"httpStatusCode":500}}}}}`))
+	if err := d.getFailure(); err == nil || isAuthRequired(err) {
+		t.Fatalf("non-auth failure = %v", err)
+	}
+}
+
+func discardingConn(t *testing.T) *acp.AgentSideConnection {
+	t.Helper()
+	agentIO, clientIO := net.Pipe()
+	t.Cleanup(func() {
+		_ = agentIO.Close()
+		_ = clientIO.Close()
+	})
+	_ = acp.NewClientSideConnection(&liveClient{}, clientIO, clientIO)
+	return acp.NewAgentSideConnection(&Agent{}, agentIO, agentIO)
 }

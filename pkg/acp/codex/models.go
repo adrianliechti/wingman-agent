@@ -1,17 +1,22 @@
 package codex
 
 import (
+	"regexp"
+	"slices"
+	"strings"
+
 	"github.com/coder/acp-go-sdk"
 
 	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type modelEntry struct {
-	ID           string
-	Name         string
-	Description  string
-	EffortLevels []string
-	Default      bool
+	ID            string
+	Name          string
+	Description   string
+	EffortLevels  []string
+	DefaultEffort string
+	Default       bool
 }
 
 func modelsFromCodex(list []codexModel) []modelEntry {
@@ -29,14 +34,35 @@ func modelsFromCodex(list []codexModel) []modelEntry {
 			name = m.ID
 		}
 		out = append(out, modelEntry{
-			ID:           m.ID,
-			Name:         name,
-			Description:  m.Description,
-			EffortLevels: efforts,
-			Default:      m.IsDefault,
+			ID:            m.ID,
+			Name:          formatModelDisplayName(name),
+			Description:   m.Description,
+			EffortLevels:  efforts,
+			DefaultEffort: m.DefaultReasoningEffort,
+			Default:       m.IsDefault,
 		})
 	}
 	return out
+}
+
+var (
+	gptPrefixRe        = regexp.MustCompile(`(?i)^gpt-`)
+	modelNameSeparator = regexp.MustCompile(`[-/]+`)
+)
+
+// formatModelDisplayName turns Codex's GPT ids into compact picker labels
+// ("gpt-5.3-codex" -> "5.3 Codex"); other provider names keep their punctuation.
+func formatModelDisplayName(name string) string {
+	if !gptPrefixRe.MatchString(name) {
+		return name
+	}
+	var parts []string
+	for _, part := range modelNameSeparator.Split(name[len("gpt-"):], -1) {
+		if part != "" {
+			parts = append(parts, strings.ToUpper(part[:1])+part[1:])
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 func findModel(models []modelEntry, id string) *modelEntry {
@@ -69,9 +95,21 @@ const (
 	planCollaborationMode    = "plan"
 )
 
-func buildConfigOptions(models []modelEntry, currentModelID, currentEffort, collaborationMode string) []acp.SessionConfigOption {
-	opts := []acp.SessionConfigOption{modelConfigOption(models, currentModelID)}
-	if effort := effortConfigOption(models, currentModelID, currentEffort); effort != nil {
+// recommend adds the negotiated AIR recommendedValue: the catalog default
+// model and the current model's default effort, independent of the selection.
+func buildConfigOptions(models []modelEntry, currentModelID, currentEffort, collaborationMode string, recommend bool) []acp.SessionConfigOption {
+	model := modelConfigOption(models, currentModelID)
+	effort := effortConfigOption(models, currentModelID, currentEffort)
+	if recommend {
+		if m := resolveModel(models, "default"); m != nil {
+			model.Select.Meta = airMeta(recommendedValueCapability, m.ID)
+		}
+		if m := findModel(models, currentModelID); m != nil && effort != nil && slices.Contains(m.EffortLevels, m.DefaultEffort) {
+			effort.Select.Meta = airMeta(recommendedValueCapability, m.DefaultEffort)
+		}
+	}
+	opts := []acp.SessionConfigOption{model}
+	if effort != nil {
 		opts = append(opts, *effort)
 	}
 	opts = append(opts, collaborationModeConfigOption(collaborationMode))
@@ -103,6 +141,13 @@ func collaborationModeConfigOption(current string) acp.SessionConfigOption {
 	return opt
 }
 
+func resumedCollaborationMode(mode *codexCollaborationMode) string {
+	if mode != nil && mode.Mode == planCollaborationMode {
+		return planCollaborationMode
+	}
+	return defaultCollaborationMode
+}
+
 func isValidCollaborationMode(mode string) bool {
 	return mode == defaultCollaborationMode || mode == planCollaborationMode
 }
@@ -125,7 +170,7 @@ func modelConfigOption(models []modelEntry, currentID string) acp.SessionConfigO
 	}
 	if currentID != "" && findModel(models, currentID) == nil {
 		ungrouped = append(acp.SessionConfigSelectOptionsUngrouped{
-			{Value: acp.SessionConfigValueId(currentID), Name: currentID},
+			{Value: acp.SessionConfigValueId(currentID), Name: formatModelDisplayName(currentID)},
 		}, ungrouped...)
 	}
 	opt := acp.NewSessionConfigOptionSelect(
