@@ -236,21 +236,17 @@ export function SearchPanel({
 			if (matchCount === 0 || applying || loading) return;
 			const envelope = workspaceSearchEdit(targetFiles);
 			setApplying(true);
-			try {
-				const applied = await onApplyWorkspaceEdit(
-					envelope,
-					`Replace ${matchCount} ${matchCount === 1 ? "match" : "matches"}?`,
-				);
-				if (applied) {
-					toast({
-						title: "Replacement applied",
-						description: `${matchCount} ${matchCount === 1 ? "match" : "matches"} replaced.`,
-						tone: "success",
-					});
-					setRefreshKey((value) => value + 1);
-				}
-			} finally {
-				setApplying(false);
+			const applied = await onApplyWorkspaceEdit(
+				envelope,
+				`Replace ${matchCount} ${matchCount === 1 ? "match" : "matches"}?`,
+			).finally(() => setApplying(false));
+			if (applied) {
+				toast({
+					title: "Replacement applied",
+					description: `${matchCount} ${matchCount === 1 ? "match" : "matches"} replaced.`,
+					tone: "success",
+				});
+				setRefreshKey((value) => value + 1);
 			}
 		},
 		[applying, loading, onApplyWorkspaceEdit, toast],

@@ -70,9 +70,9 @@ async function mockSavedSessions(
 	});
 }
 function sessionRow(page: Page, id: string) {
-	return page.locator(
-		`[data-session-id=${JSON.stringify(sessionKey("wingman", id))}]`,
-	);
+	return page
+		.locator(`[data-session-id=${JSON.stringify(sessionKey("wingman", id))}]`)
+		.filter({ visible: true });
 }
 function sessionTab(page: Page, id: string) {
 	return page.locator(
@@ -94,7 +94,9 @@ function workspacePath(path: string): string {
 
 async function composer(page: Page) {
 	await page.goto("/");
-	const input = page.getByPlaceholder("Message Wingman…");
+	const input = page
+		.getByPlaceholder("Message Wingman…")
+		.filter({ visible: true });
 	await expect(input).toBeVisible();
 	return input;
 }
@@ -379,7 +381,7 @@ test("focuses the composer surface without outlining its textarea", async ({
 
 test("reveals scrollbars only for direct user scrolling", async ({ page }) => {
 	await composer(page);
-	const history = page.locator("[data-chat-history]");
+	const history = page.locator("[data-chat-history]").filter({ visible: true });
 	expect(
 		await history.evaluate(
 			(element) => element.scrollHeight <= element.clientHeight + 1,
@@ -468,7 +470,7 @@ test("preserves the visible reply when a finished turn collapses its working ste
 	await composer(page);
 	await openSessions(page);
 	await sessionRow(page, id).click();
-	const history = page.locator("[data-chat-history]");
+	const history = page.locator("[data-chat-history]").filter({ visible: true });
 	const reply = page.locator('[data-entry-id="visible-reply"]');
 	const working = page.locator('[data-entry-id="working-reply"]');
 	await expect(working).toBeAttached();
@@ -654,7 +656,9 @@ test("allows the last chat to close into an empty workspace", async ({
 	).toBeVisible();
 	await newMenu.getByRole("menuitem", { name: "Chat", exact: true }).click();
 	await expect(tabs).toHaveCount(1);
-	await expect(page.getByPlaceholder("Message Wingman…")).toBeVisible();
+	await expect(
+		page.getByPlaceholder("Message Wingman…").filter({ visible: true }),
+	).toBeVisible();
 });
 
 test("moves tabs between the left and right pane groups", async ({ page }) => {
@@ -1025,10 +1029,12 @@ test("composer harness selector preserves drafts when switching before the first
 		menu.getByRole("menuitemradio", { name: "Codex", exact: true }),
 	).toBeFocused();
 	await page.keyboard.press("Enter");
-	await expect(page.getByTitle("codex-test · default")).toBeVisible();
-	await expect(page.getByPlaceholder("Message Codex…")).toHaveValue(
-		"Keep this draft across harnesses",
-	);
+	await expect(
+		page.getByTitle("codex-test · default").filter({ visible: true }),
+	).toBeVisible();
+	await expect(
+		page.getByPlaceholder("Message Codex…").filter({ visible: true }),
+	).toHaveValue("Keep this draft across harnesses");
 	for (const name of ["Wingman", "Codex"]) {
 		await picker.click();
 		await menu.getByRole("menuitemradio", { name, exact: true }).click();
@@ -1038,7 +1044,9 @@ test("composer harness selector preserves drafts when switching before the first
 		await expect(tabs).toHaveCount(1);
 		await expect(picker).toHaveAccessibleName(`Harness: ${name}`);
 	}
-	await expect(page.getByTitle("codex-test · default")).toBeVisible();
+	await expect(
+		page.getByTitle("codex-test · default").filter({ visible: true }),
+	).toBeVisible();
 	expect(backend.creations).toHaveLength(1);
 	expect(backend.commands).toEqual([]);
 	const harness = await page.locator("[data-composer-harness]").boundingBox();
@@ -1056,7 +1064,9 @@ test("composer harness switching preserves existing conversations and their draf
 		{ id: "answer", type: "assistant", content: "The existing answer" },
 	]);
 	await page.goto("/codex/new-session");
-	const input = page.getByPlaceholder("Message Codex…");
+	const input = page
+		.getByPlaceholder("Message Codex…")
+		.filter({ visible: true });
 	await expect(
 		page.getByText("The existing answer", { exact: true }),
 	).toBeVisible();
@@ -1081,7 +1091,9 @@ test("composer harness switching preserves existing conversations and their draf
 	await menu
 		.getByRole("menuitemradio", { name: "Wingman", exact: true })
 		.click();
-	await expect(page.getByPlaceholder("Message Wingman…")).toHaveValue("");
+	await expect(
+		page.getByPlaceholder("Message Wingman…").filter({ visible: true }),
+	).toHaveValue("");
 	await expect(tabs).toHaveCount(2);
 	await original.click();
 	await expect(original).toHaveAttribute("data-center-tab", originalId!);
@@ -1107,20 +1119,33 @@ test("new ACP chats load mode and model before the first message", async ({
 	await palette
 		.getByRole("option", { name: "New Chat (Codex)", exact: true })
 		.click();
-	const input = page.getByPlaceholder("Message Codex…");
+	const input = page
+		.getByPlaceholder("Message Codex…")
+		.filter({ visible: true });
 	await expect(input).toBeVisible();
-	await expect(page.getByTitle("Mode: Agent")).toBeVisible();
-	await expect(page.getByTitle("codex-test · default")).toBeVisible();
+	await expect(
+		page.getByTitle("Mode: Agent").filter({ visible: true }),
+	).toBeVisible();
+	await expect(
+		page.getByTitle("codex-test · default").filter({ visible: true }),
+	).toBeVisible();
 	await expect(input).toHaveValue("");
 	expect(backend.creations).toHaveLength(1);
 	expect(backend.commands).toEqual([]);
 
-	await page.getByTitle("Mode: Agent").click();
+	await page.getByTitle("Mode: Agent").filter({ visible: true }).click();
 	await page.getByRole("menuitemradio", { name: "Plan", exact: true }).click();
-	await expect(page.getByTitle("Mode: Plan")).toBeVisible();
-	await page.getByTitle("codex-test · default").click();
+	await expect(
+		page.getByTitle("Mode: Plan").filter({ visible: true }),
+	).toBeVisible();
+	await page
+		.getByTitle("codex-test · default")
+		.filter({ visible: true })
+		.click();
 	await page.getByRole("option", { name: "Other model", exact: true }).click();
-	await expect(page.getByTitle("codex-other · default")).toBeVisible();
+	await expect(
+		page.getByTitle("codex-other · default").filter({ visible: true }),
+	).toBeVisible();
 	await input.fill("First message");
 	await input.press("Enter");
 	await expect
@@ -1151,7 +1176,9 @@ for (const action of [
 		});
 		try {
 			await page.goto("/codex");
-			const input = page.getByPlaceholder("Message Codex…");
+			const input = page
+				.getByPlaceholder("Message Codex…")
+				.filter({ visible: true });
 			await expect(input).toBeVisible();
 			await expect.poll(() => started).toBe(true);
 			const chatTab = page.locator('[data-center-tab^="draft:codex:"]');
@@ -1184,9 +1211,13 @@ for (const action of [
 					)
 					.toHaveLength(1);
 				await expect(input).toHaveValue("");
-				await expect(page.getByTitle("codex-test · default")).toBeVisible();
+				await expect(
+					page.getByTitle("codex-test · default").filter({ visible: true }),
+				).toBeVisible();
 			} else if (action === "keep composing") {
-				await expect(page.getByTitle("codex-test · default")).toBeVisible();
+				await expect(
+					page.getByTitle("codex-test · default").filter({ visible: true }),
+				).toBeVisible();
 				await expect(chatTab).toHaveAttribute("data-center-tab", tabID!);
 				await expect(input).toHaveAttribute("data-original-composer", "true");
 				await expect(input).toHaveValue("Keep this while Codex starts");
@@ -1213,7 +1244,9 @@ for (const action of [
 					await expect(chatTab).toHaveCount(0);
 				} else {
 					await chatTab.click();
-					await expect(page.getByTitle("codex-test · default")).toBeVisible();
+					await expect(
+						page.getByTitle("codex-test · default").filter({ visible: true }),
+					).toBeVisible();
 					await expect(chatTab).toHaveAttribute("data-center-tab", tabID!);
 					await expect(input).toHaveValue("Keep this while Codex starts");
 				}
@@ -1259,23 +1292,37 @@ test("chat drafts keep their own content and settings across tab switches", asyn
 			"base64",
 		),
 	});
-	await expect(page.getByTitle("context.gif")).toBeVisible();
-	await page.getByTitle("Mode: Agent").click();
+	await expect(
+		page.getByTitle("context.gif").filter({ visible: true }),
+	).toBeVisible();
+	await page.getByTitle("Mode: Agent").filter({ visible: true }).click();
 	await page.getByRole("menuitemradio", { name: "Plan", exact: true }).click();
-	await page.getByTitle("first · default").click();
+	await page.getByTitle("first · default").filter({ visible: true }).click();
 	await page.getByRole("option", { name: "Second model", exact: true }).click();
 	await page.keyboard.press("Escape");
 	await openNewChat(page);
 	await expect(input).toHaveValue("");
-	await expect(page.getByTitle("Mode: Agent")).toBeVisible();
-	await expect(page.getByTitle("first · default")).toBeVisible();
-	await expect(page.getByTitle("context.gif")).toHaveCount(0);
+	await expect(
+		page.getByTitle("Mode: Agent").filter({ visible: true }),
+	).toBeVisible();
+	await expect(
+		page.getByTitle("first · default").filter({ visible: true }),
+	).toBeVisible();
+	await expect(
+		page.getByTitle("context.gif").filter({ visible: true }),
+	).toHaveCount(0);
 	await input.fill("Draft in the second tab");
 	await firstTab.click();
 	await expect(input).toHaveValue("Draft in the first tab");
-	await expect(page.getByTitle("Mode: Plan")).toBeVisible();
-	await expect(page.getByTitle("second · default")).toBeVisible();
-	await expect(page.getByTitle("context.gif")).toBeVisible();
+	await expect(
+		page.getByTitle("Mode: Plan").filter({ visible: true }),
+	).toBeVisible();
+	await expect(
+		page.getByTitle("second · default").filter({ visible: true }),
+	).toBeVisible();
+	await expect(
+		page.getByTitle("context.gif").filter({ visible: true }),
+	).toBeVisible();
 	await page.getByRole("treeitem", { name: /editable\.txt/ }).click();
 	for (const action of ["Switch to First model", "Switch to Agent mode"]) {
 		await page.keyboard.press("Control+k");
@@ -1286,8 +1333,12 @@ test("chat drafts keep their own content and settings across tab switches", asyn
 		await palette.getByRole("option", { name: action, exact: true }).click();
 	}
 	await firstTab.click();
-	await expect(page.getByTitle("Mode: Agent")).toBeVisible();
-	await expect(page.getByTitle("first · default")).toBeVisible();
+	await expect(
+		page.getByTitle("Mode: Agent").filter({ visible: true }),
+	).toBeVisible();
+	await expect(
+		page.getByTitle("first · default").filter({ visible: true }),
+	).toBeVisible();
 	await expect(input).toHaveValue("Draft in the first tab");
 	await page.locator('[data-center-tab^="draft:wingman:"]').last().click();
 	await expect(input).toHaveValue("Draft in the second tab");
@@ -1311,8 +1362,12 @@ test("ACP chat delivery preserves newer edits and stays pending across tab switc
 	);
 	try {
 		await page.goto("/codex");
-		await expect(page.getByTitle("codex-test · default")).toBeVisible();
-		const input = page.getByPlaceholder("Message Codex…");
+		await expect(
+			page.getByTitle("codex-test · default").filter({ visible: true }),
+		).toBeVisible();
+		const input = page
+			.getByPlaceholder("Message Codex…")
+			.filter({ visible: true });
 		await input.fill("First message");
 		await input.press("Enter");
 		await expect.poll(() => attempts).toBe(1);
@@ -1362,13 +1417,17 @@ test("ACP chat initialization errors allow retrying the same session creation", 
 		page.getByText("Codex startup failed", { exact: false }),
 	).toBeVisible();
 	expect(attempts).toHaveLength(1);
-	const input = page.getByPlaceholder("Message Codex…");
+	const input = page
+		.getByPlaceholder("Message Codex…")
+		.filter({ visible: true });
 	await input.fill("Retry startup");
 	await input.press("Enter");
 	await expect
 		.poll(() => backend.commands.filter((command) => command.type === "send"))
 		.toHaveLength(1);
-	await expect(page.getByTitle("codex-test · default")).toBeVisible();
+	await expect(
+		page.getByTitle("codex-test · default").filter({ visible: true }),
+	).toBeVisible();
 	expect(attempts).toHaveLength(2);
 	expect(attempts[0].id).toBe(attempts[1].id);
 });
@@ -1406,9 +1465,15 @@ test("uses canonical product names for agents", async ({ page }) => {
 	await palette
 		.getByRole("option", { name: "New Chat (Claude)", exact: true })
 		.click();
-	await expect(page.getByPlaceholder("Message Claude…")).toBeVisible();
-	await expect(page.getByTitle("Mode: Agent")).toBeVisible();
-	await expect(page.getByTitle("claude-test · default")).toBeVisible();
+	await expect(
+		page.getByPlaceholder("Message Claude…").filter({ visible: true }),
+	).toBeVisible();
+	await expect(
+		page.getByTitle("Mode: Agent").filter({ visible: true }),
+	).toBeVisible();
+	await expect(
+		page.getByTitle("claude-test · default").filter({ visible: true }),
+	).toBeVisible();
 });
 
 test("groups diagnostics by file and opens individual problems", async ({
@@ -3653,7 +3718,9 @@ test("uses one compact right side panel with stable tab order", async ({
 		})
 		.toBe(true);
 	await page.reload();
-	await expect(page.getByPlaceholder("Message Wingman…")).toBeVisible();
+	await expect(
+		page.getByPlaceholder("Message Wingman…").filter({ visible: true }),
+	).toBeVisible();
 	await expect(sidePanel).toHaveAttribute("data-panel-side", "right");
 	expect(
 		await sideTabs
@@ -4719,7 +4786,9 @@ test("previews selection transformations and can hand the selection to chat", as
 	await palette
 		.getByRole("option", { name: "Chat about this… Selected text" })
 		.click();
-	const chatInput = page.getByPlaceholder("Message Wingman…");
+	const chatInput = page
+		.getByPlaceholder("Message Wingman…")
+		.filter({ visible: true });
 	await expect(chatInput).toBeVisible();
 	await expect(chatInput).toHaveValue(
 		/Help me with this selection from editable\.txt:1/,
@@ -5594,7 +5663,9 @@ test("closing the last session leaves empty space and new chat keeps its backend
 	await expect(
 		tabs.locator('[data-center-tab^="draft:fixture:"]'),
 	).toBeVisible();
-	await expect(page.getByPlaceholder("Message Fixture…")).toBeVisible();
+	await expect(
+		page.getByPlaceholder("Message Fixture…").filter({ visible: true }),
+	).toBeVisible();
 });
 
 test.describe("phone navigation", () => {
@@ -5704,7 +5775,9 @@ test.describe("phone navigation", () => {
 		await expect(dialog).not.toBeVisible();
 		await expect(page).toHaveURL(/\/fixture\/phone-saved$/);
 		await expect(picker).toHaveValue("fixture");
-		await expect(page.getByPlaceholder("Message Fixture…")).toBeVisible();
+		await expect(
+			page.getByPlaceholder("Message Fixture…").filter({ visible: true }),
+		).toBeVisible();
 	});
 
 	test("keeps model controls inside the viewport and above the chat", async ({
@@ -5755,7 +5828,9 @@ test.describe("remote access", () => {
 		const requestURLs: string[] = [];
 		page.on("request", (request) => requestURLs.push(request.url()));
 		await page.goto(pairURL);
-		const input = page.getByPlaceholder("Message Wingman…");
+		const input = page
+			.getByPlaceholder("Message Wingman…")
+			.filter({ visible: true });
 		await expect(input).toBeVisible();
 		await expect(page.locator("[data-mobile-navigation]")).toBeVisible();
 		const secret = new URL(pairURL).hash.split(".")[1];
@@ -5798,7 +5873,9 @@ test.describe("remote access", () => {
 		request,
 	}) => {
 		await page.goto(process.env.E2E_PAIR_URL!);
-		const input = page.getByPlaceholder("Message Wingman…");
+		const input = page
+			.getByPlaceholder("Message Wingman…")
+			.filter({ visible: true });
 		await expect(input).toBeVisible();
 		const before = await (
 			await request.get(`${controlURL()}/model-stats`)
@@ -6091,6 +6168,9 @@ test("recovery: drafts survive reload with attachments and recover after closing
 }) => {
 	const input = await composer(page);
 	await input.fill("Draft before reload");
+	const attachment = page
+		.locator("[data-chat-composer]")
+		.getByRole("img", { name: "diagram.png" });
 	await page.locator('[data-chat-composer] input[type="file"]').setInputFiles({
 		name: "diagram.png",
 		mimeType: "image/png",
@@ -6099,10 +6179,10 @@ test("recovery: drafts survive reload with attachments and recover after closing
 			"base64",
 		),
 	});
-	await expect(page.locator("[data-chat-composer] img")).toHaveCount(1);
+	await expect(attachment).toHaveCount(1);
 	await page.reload();
 	await expect(input).toHaveValue("Draft before reload");
-	await expect(page.locator("[data-chat-composer] img")).toHaveCount(1);
+	await expect(attachment).toHaveCount(1);
 	const tab = page.locator('[data-center-tab^="draft:"]').first();
 	await tab.hover();
 	await tab.locator("[data-tab-close]").click();
@@ -6115,7 +6195,7 @@ test("recovery: drafts survive reload with attachments and recover after closing
 		.getByRole("option", { name: /Recover draft: Draft before reload/ })
 		.click();
 	await expect(input).toHaveValue("Draft before reload");
-	await expect(page.locator("[data-chat-composer] img")).toHaveCount(1);
+	await expect(attachment).toHaveCount(1);
 });
 
 test("recovery: chat startup defers the editor until a file opens", async ({
@@ -6205,7 +6285,7 @@ test("recovery: long transcripts render a bounded window and jump to latest", as
 	expect(await virtual.locator(":scope > [data-index]").count()).toBeLessThan(
 		30,
 	);
-	const history = page.locator("[data-chat-history]");
+	const history = page.locator("[data-chat-history]").filter({ visible: true });
 	await history.evaluate((element) => {
 		element.scrollTop = 0;
 		element.dispatchEvent(new Event("scroll"));
@@ -6477,4 +6557,113 @@ test("recovery: expanded tool output renders a bounded window", async ({
 		virtual.getByText("Output line 4999: details", { exact: true }),
 	).toBeVisible();
 	expect(await virtual.locator("[data-index]").count()).toBeLessThan(100);
+});
+
+test("recovery: streaming output is followed until the user scrolls away", async ({
+	page,
+}) => {
+	const id = "review-active";
+	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
+	const entries: ChatEntry[] = Array.from({ length: 10 }, (_, index) => [
+		{
+			id: `u-${index}`,
+			inputId: `input-${index}`,
+			type: "user" as const,
+			content: `Request number ${index}`,
+		},
+		{
+			id: `a-${index}`,
+			type: "assistant" as const,
+			content: `Response number ${index}: ` + "Completed work. ".repeat(40),
+		},
+	]).flat();
+	await page.route(/\/api\/v2\/backends\/wingman\/sessions$/, (route) =>
+		route.fulfill({
+			json: [{ id, title: "Streaming", updated_at: "2026-09-13T00:00:00Z" }],
+		}),
+	);
+	let revision = 0;
+	let stream = () => {};
+	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
+		const server = socket.connectToServer();
+		socket.onMessage((message) => {
+			const command = JSON.parse(String(message));
+			if (command.type !== "subscribe" || command.ref.sessionId !== id) {
+				server.send(message);
+				return;
+			}
+			const base = {
+				subscriptionId: command.subscriptionId,
+				ref: {
+					workspaceId: scope.workspaceId,
+					backendId: "wingman",
+					sessionId: id,
+				},
+				epoch: "streaming-epoch",
+			};
+			socket.send(
+				JSON.stringify({
+					...base,
+					type: "session.snapshot",
+					revision,
+					entries,
+					state: {
+						...emptySession(sessionKey("wingman", id)),
+						status: "ready",
+						phase: "streaming",
+					},
+				}),
+			);
+			stream = () => {
+				revision++;
+				socket.send(
+					JSON.stringify({
+						...base,
+						type: "session.update",
+						previousRevision: revision - 1,
+						revision,
+						changes: [
+							{
+								type: "entry.upsert",
+								entry: {
+									id: "a-live",
+									type: "assistant",
+									content: "More output.\n\n".repeat(revision * 10),
+								},
+							},
+						],
+					}),
+				);
+			};
+		});
+	});
+	await composer(page);
+	await openSessions(page);
+	await sessionRow(page, id).click();
+	const history = page.locator("[data-chat-history]").filter({ visible: true });
+	const jump = page.getByRole("button", { name: /Jump to latest/ });
+	const distance = () =>
+		history.evaluate(
+			(element) =>
+				element.scrollHeight - element.scrollTop - element.clientHeight,
+		);
+	await expect(history).toContainText("Response number 9");
+
+	for (let step = 0; step < 3; step++) stream();
+	await expect(history).toContainText("More output.");
+	await expect.poll(distance).toBeLessThan(40);
+
+	await history.evaluate((element) => {
+		element.scrollTop = 0;
+	});
+	await expect(jump).toBeVisible();
+	for (let step = 0; step < 3; step++) stream();
+	await expect
+		.poll(() => history.evaluate((element) => element.scrollTop))
+		.toBe(0);
+
+	await jump.click();
+	await expect(jump).toBeHidden();
+	for (let step = 0; step < 3; step++) stream();
+	await expect.poll(distance).toBeLessThan(40);
 });

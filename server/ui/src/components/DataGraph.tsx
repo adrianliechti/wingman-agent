@@ -1,5 +1,5 @@
 import { Check, ChevronRight, Copy } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
 	collectionEntries,
 	collectionSummary,
@@ -246,11 +246,9 @@ export function DataGraph({ value }: { value: unknown }) {
 	const [selected, setSelected] = useState<string | null>(null);
 	const [copied, setCopied] = useState(false);
 
+	// Identity matters: a new graph resets collapse and selection below.
 	const graph = useMemo(() => buildGraph(value), [value]);
-	const layout = useMemo(
-		() => layoutGraph(graph.root, collapsed),
-		[graph, collapsed],
-	);
+	const layout = layoutGraph(graph.root, collapsed);
 
 	const [previousGraph, setPreviousGraph] = useState(graph);
 	if (previousGraph !== graph) {
@@ -259,14 +257,14 @@ export function DataGraph({ value }: { value: unknown }) {
 		setSelected(null);
 	}
 
-	const toggleCollapse = useCallback((id: string) => {
+	const toggleCollapse = (id: string) => {
 		setCollapsed((previous) => {
 			const next = new Set(previous);
 			if (next.has(id)) next.delete(id);
 			else next.add(id);
 			return next;
 		});
-	}, []);
+	};
 
 	const selectedNode = selected
 		? layout.placed.find((entry) => entry.node.id === selected)?.node

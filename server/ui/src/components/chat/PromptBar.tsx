@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PendingPrompt, PromptReply } from "../../hooks/useWebSocket";
 import type { PromptField } from "../../types/protocol";
 
@@ -59,10 +59,7 @@ export function PromptBar({
 		() => (prompt.kind === "ask" ? (prompt.fields ?? []) : []),
 		[prompt.kind, prompt.fields],
 	);
-	const fields = useMemo(
-		() => allFields.filter((field) => !field.custom_answer_for),
-		[allFields],
-	);
+	const fields = allFields.filter((field) => !field.custom_answer_for);
 	const customFields = useMemo(() => {
 		const result: Record<string, PromptField> = {};
 		for (const field of allFields) {
@@ -91,16 +88,13 @@ export function PromptBar({
 		return init;
 	});
 
-	const accept = useCallback(
-		(content: Record<string, unknown>) => {
-			onReply({ action: "accept", content });
-		},
-		[onReply],
-	);
+	const accept = (content: Record<string, unknown>) => {
+		onReply({ action: "accept", content });
+	};
 
-	const decline = useCallback(() => {
+	const decline = () => {
 		onReply({ action: "decline" });
-	}, [onReply]);
+	};
 
 	// A lone single-select question submits on click, like a menu.
 	const instant =
@@ -114,7 +108,7 @@ export function PromptBar({
 			(f) => !f.required || promptFieldValue(f, selections, others).length > 0,
 		);
 
-	const submit = useCallback(() => {
+	const submit = () => {
 		const content: Record<string, unknown> = {};
 		for (const f of fields) {
 			const other = (others[f.name] ?? "").trim();
@@ -128,69 +122,63 @@ export function PromptBar({
 			content[f.name] = f.multiple ? value : coercePromptValue(f, value[0]);
 		}
 		accept(content);
-	}, [fields, selections, others, customFields, accept]);
+	};
 
 	const [activeIdx, setActiveIdx] = useState(0);
 
-	const advanceFrom = useCallback(
-		(
-			fromIdx: number,
-			sel: Record<string, string[]>,
-			oth: Record<string, string>,
-		) => {
-			for (let step = 1; step < fields.length; step++) {
-				const i = (fromIdx + step) % fields.length;
-				if (promptFieldValue(fields[i], sel, oth).length === 0) {
-					setActiveIdx(i);
-					return;
-				}
-			}
-		},
-		[fields],
-	);
-
-	const toggleOption = useCallback(
-		(field: PromptField, option: string) => {
-			if (instant) {
-				accept({ [field.name]: option });
+	const advanceFrom = (
+		fromIdx: number,
+		sel: Record<string, string[]>,
+		oth: Record<string, string>,
+	) => {
+		for (let step = 1; step < fields.length; step++) {
+			const i = (fromIdx + step) % fields.length;
+			if (promptFieldValue(fields[i], sel, oth).length === 0) {
+				setActiveIdx(i);
 				return;
 			}
-			const current = selections[field.name] ?? [];
-			let next: string[];
-			let nextOthers = others;
-			if (field.multiple) {
-				next = current.includes(option)
-					? current.filter((o) => o !== option)
-					: [...current, option];
-			} else {
-				next = current[0] === option ? [] : [option];
-				// Picking an option supersedes an abandoned free-text draft;
-				// otherwise the stale draft would silently win on submit.
-				if ((others[field.name] ?? "") !== "") {
-					nextOthers = { ...others, [field.name]: "" };
-					setOthers(nextOthers);
-				}
-			}
-			const nextSelections = { ...selections, [field.name]: next };
-			setSelections(nextSelections);
+		}
+	};
 
-			if (!field.multiple && next.length > 0 && fields.length > 1) {
-				const idx = fields.findIndex((f) => f.name === field.name);
-				advanceFrom(idx, nextSelections, nextOthers);
+	const toggleOption = (field: PromptField, option: string) => {
+		if (instant) {
+			accept({ [field.name]: option });
+			return;
+		}
+		const current = selections[field.name] ?? [];
+		let next: string[];
+		let nextOthers = others;
+		if (field.multiple) {
+			next = current.includes(option)
+				? current.filter((o) => o !== option)
+				: [...current, option];
+		} else {
+			next = current[0] === option ? [] : [option];
+			// Picking an option supersedes an abandoned free-text draft;
+			// otherwise the stale draft would silently win on submit.
+			if ((others[field.name] ?? "") !== "") {
+				nextOthers = { ...others, [field.name]: "" };
+				setOthers(nextOthers);
 			}
-		},
-		[instant, accept, selections, others, fields, advanceFrom],
-	);
+		}
+		const nextSelections = { ...selections, [field.name]: next };
+		setSelections(nextSelections);
+
+		if (!field.multiple && next.length > 0 && fields.length > 1) {
+			const idx = fields.findIndex((f) => f.name === field.name);
+			advanceFrom(idx, nextSelections, nextOthers);
+		}
+	};
 
 	// Instant mode's free-text path, shared by the Enter key and the Send button.
-	const submitOther = useCallback(() => {
+	const submitOther = () => {
 		const f = fields[0];
 		if (!f) return;
 		const value = (others[f.name] ?? "").trim();
 		if (!value) return;
 		const target = customFields[f.name] ?? f;
 		accept({ [target.name]: coercePromptValue(target, value) });
-	}, [fields, others, customFields, accept]);
+	};
 
 	const declineButton = (
 		<button

@@ -5,14 +5,7 @@ import {
 	FileText,
 	LoaderCircle,
 } from "lucide-react";
-import {
-	memo,
-	useCallback,
-	useContext,
-	useEffect,
-	useRef,
-	useState,
-} from "react";
+import { memo, useContext, useEffect, useRef, useState } from "react";
 import type { ChatEntry } from "../../hooks/useWebSocket";
 import type { Phase, ToolLocation } from "../../types/protocol";
 import { MarkdownContent } from "../MarkdownContent";
@@ -421,20 +414,17 @@ function CopyTextButton({
 		[],
 	);
 
-	const handleClick = useCallback(
-		(e: React.MouseEvent<HTMLButtonElement>) => {
-			e.stopPropagation();
-			navigator.clipboard
-				.writeText(text)
-				.then(() => {
-					setCopied(true);
-					if (timer.current) window.clearTimeout(timer.current);
-					timer.current = window.setTimeout(() => setCopied(false), 1200);
-				})
-				.catch(() => {});
-		},
-		[text],
-	);
+	const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+		e.stopPropagation();
+		navigator.clipboard
+			.writeText(text)
+			.then(() => {
+				setCopied(true);
+				if (timer.current) window.clearTimeout(timer.current);
+				timer.current = window.setTimeout(() => setCopied(false), 1200);
+			})
+			.catch(() => {});
+	};
 
 	return (
 		<button

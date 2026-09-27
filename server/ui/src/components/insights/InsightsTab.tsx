@@ -8,7 +8,7 @@ import {
 	RefreshCw,
 	ShieldCheck,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
 	type GraphNode,
 	fetchGraphOverview,
@@ -112,16 +112,13 @@ export function InsightsTab({
 		memory.focus = focus;
 	}, [focus]);
 
-	const explore = useCallback(
-		(node: GraphNode) => {
-			if (focus) memory.history = [...memory.history.slice(-24), focus];
-			setFocus({ id: node.id, name: node.name, file: node.file });
-			setView("search");
-		},
-		[focus],
-	);
+	const explore = (node: GraphNode) => {
+		if (focus) memory.history = [...memory.history.slice(-24), focus];
+		setFocus({ id: node.id, name: node.name, file: node.file });
+		setView("search");
+	};
 
-	const goBack = useCallback(() => {
+	const goBack = () => {
 		const previous = memory.history[memory.history.length - 1];
 		if (previous) {
 			memory.history = memory.history.slice(0, -1);
@@ -129,19 +126,19 @@ export function InsightsTab({
 			return;
 		}
 		setFocus(null);
-	}, []);
+	};
 
-	const selectModule = useCallback((path: string) => {
+	const selectModule = (path: string) => {
 		memory.mapSelection = path;
 		setView("map");
-	}, []);
+	};
 
-	const searchModule = useCallback((path: string) => {
+	const searchModule = (path: string) => {
 		memory.searchSeed = { file: path };
 		memory.history = [];
 		setFocus(null);
 		setView("search");
-	}, []);
+	};
 
 	const status = overview?.status;
 	const refreshTitle = [

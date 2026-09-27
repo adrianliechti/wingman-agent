@@ -126,9 +126,8 @@ export function TurnReviewCard({
 										description: String(error),
 										tone: "error",
 									});
-								} finally {
-									setUndoing(false);
 								}
+								setUndoing(false);
 							}}
 						>
 							{review.undone

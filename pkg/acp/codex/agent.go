@@ -286,17 +286,20 @@ func (a *Agent) registerSession(id acp.SessionId, model, effort, collaborationMo
 }
 
 func (a *Agent) registerResumedSession(id acp.SessionId, resp threadResumeResponse, materialized bool, additionalDirectories []string) *session {
+	model, effort := resp.Model, derefEffort(resp.ReasoningEffort)
 	mode := resumedCollaborationMode(resp.CollaborationMode)
 	if !materialized {
-		// The thread/read fallback reuses the running thread, but its response
-		// omits collaboration mode. Preserve the mode we applied to that thread.
+		// The thread/read fallback reuses the running thread, but omits
+		// collaboration mode and may not reflect model/effort selections that
+		// will be applied on the next turn. Preserve the local configuration.
 		if old := a.lookup(id); old != nil {
 			old.mu.Lock()
+			model, effort = old.modelID, old.effort
 			mode = old.collaborationMode
 			old.mu.Unlock()
 		}
 	}
-	return a.registerSession(id, resp.Model, derefEffort(resp.ReasoningEffort), mode, additionalDirectories)
+	return a.registerSession(id, model, effort, mode, additionalDirectories)
 }
 
 func (a *Agent) sendAvailableCommands(ctx context.Context, id acp.SessionId) error {

@@ -33,10 +33,9 @@ export function IncompleteTurnNotice({
 							setError("Could not continue. Try again.");
 					} catch (error) {
 						setError(error instanceof Error ? error.message : String(error));
-					} finally {
-						pending.current = false;
-						setSending(false);
 					}
+					pending.current = false;
+					setSending(false);
 				}}
 			>
 				{sending ? "Continuing…" : "Continue"}

@@ -42,6 +42,30 @@ const dataColumnHelper = createColumnHelper<
 	string[]
 >();
 
+function parseData(text: string, format: DataFormat) {
+	try {
+		if (format === "csv" || format === "tsv") {
+			return {
+				value: parseDelimited(text, format === "csv" ? "," : "\t"),
+			};
+		}
+		return {
+			value:
+				format === "json"
+					? JSON.parse(text)
+					: format === "toml"
+						? parseToml(text)
+						: format === "xml"
+							? parseXml(text)
+							: parseYaml(text, { maxAliasCount: 100 }),
+		};
+	} catch (error) {
+		return {
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
 export function DataPreview({
 	text,
 	format,
@@ -52,29 +76,7 @@ export function DataPreview({
 	path: string;
 }) {
 	const [view, setView] = useState<StructuredView>("tree");
-	const result = useMemo(() => {
-		try {
-			if (format === "csv" || format === "tsv") {
-				return {
-					value: parseDelimited(text, format === "csv" ? "," : "\t"),
-				};
-			}
-			return {
-				value:
-					format === "json"
-						? JSON.parse(text)
-						: format === "toml"
-							? parseToml(text)
-							: format === "xml"
-								? parseXml(text)
-								: parseYaml(text, { maxAliasCount: 100 }),
-			};
-		} catch (error) {
-			return {
-				error: error instanceof Error ? error.message : String(error),
-			};
-		}
-	}, [format, text]);
+	const result = parseData(text, format);
 
 	if (result.error) {
 		return (
@@ -352,19 +354,15 @@ function TablePreview({
 			(_, index) => rows[0][index] || `Column ${index + 1}`,
 		);
 	}, [rows]);
-	const data = useMemo(() => rows.slice(1), [rows]);
-	const columns = useMemo(
-		() =>
-			dataColumnHelper.columns(
-				headers.map((header, index) =>
-					dataColumnHelper.accessor((row) => row[index] ?? "", {
-						id: String(index),
-						header,
-						sortFn: "alphanumeric",
-					}),
-				),
-			),
-		[headers],
+	const data = rows.slice(1);
+	const columns = dataColumnHelper.columns(
+		headers.map((header, index) =>
+			dataColumnHelper.accessor((row) => row[index] ?? "", {
+				id: String(index),
+				header,
+				sortFn: "alphanumeric",
+			}),
+		),
 	);
 	const table = useTable({
 		features: DATA_TABLE_FEATURES,

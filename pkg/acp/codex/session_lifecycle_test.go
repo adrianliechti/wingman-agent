@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -96,6 +97,105 @@ func TestCancelRetriesInterruptUntilTurnIsInterruptible(t *testing.T) {
 					t.Fatalf("turn/interrupt calls = %d, want %d", got, tt.wantCalls)
 				}
 			})
+		})
+	}
+}
+
+func TestInterruptDeadlineDuringRetryRetiresTransport(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		agent, _ := scriptedAgent(t, func(s *contractAppServer, req rpcMessage) {
+			if req.Method == "turn/interrupt" {
+				// Leave less time than the first retry delay so the deadline
+				// expires during backoff rather than during the RPC.
+				time.Sleep(1990 * time.Millisecond)
+				s.respondError(req, -32600, "no active turn to interrupt")
+			}
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err := requestTurnInterrupt(ctx, agent.codex, "thread-1", "turn-1")
+		retireTimedOutTurnControl(agent.codex, "turn/interrupt", err)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("interrupt error = %v, want context deadline exceeded", err)
+		}
+		select {
+		case <-agent.codex.rpc.done:
+		default:
+			t.Error("transport remains reusable after the interrupt deadline")
+		}
+	})
+}
+
+func TestUnpromptedResumeAndLoadPreserveSelectedModelAndEffort(t *testing.T) {
+	for _, operation := range []string{"resume", "load"} {
+		t.Run(operation, func(t *testing.T) {
+			started := make(chan turnStartParams, 1)
+			agent, _ := scriptedAgent(t, func(s *contractAppServer, req rpcMessage) {
+				switch req.Method {
+				case "thread/start":
+					s.respond(req, map[string]any{"thread": map[string]any{"id": "thread-1"}, "model": "initial-model", "reasoningEffort": "low"})
+				case "thread/resume":
+					s.respondError(req, -32600, "no rollout found for thread id thread-1")
+				case "thread/read":
+					s.respond(req, map[string]any{"thread": map[string]any{"id": "thread-1", "model": "initial-model", "reasoningEffort": "low"}})
+				case "turn/start":
+					var params turnStartParams
+					_ = json.Unmarshal(req.Params, &params)
+					started <- params
+					s.respond(req, turnStartResponse{Turn: turn{ID: "turn-1", Status: "inProgress"}})
+					s.notify("turn/completed", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "turn-1", "status": "completed"}})
+				default:
+					s.respond(req, map[string]any{})
+				}
+			})
+			agent.models = []modelEntry{
+				{ID: "initial-model", Default: true, EffortLevels: []string{"low", "high"}},
+				{ID: "selected-model", EffortLevels: []string{"low", "high"}},
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			created, err := agent.NewSession(ctx, acp.NewSessionRequest{Cwd: "/work"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, selection := range []struct{ id, value string }{{modelConfigID, "selected-model"}, {effortConfigID, "high"}} {
+				_, err := agent.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{ValueId: &acp.SetSessionConfigOptionValueId{
+					SessionId: created.SessionId, ConfigId: acp.SessionConfigId(selection.id), Value: acp.SessionConfigValueId(selection.value),
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var options []acp.SessionConfigOption
+			if operation == "resume" {
+				resumed, err := agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: created.SessionId, Cwd: "/work"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				options = resumed.ConfigOptions
+			} else {
+				loaded, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: created.SessionId, Cwd: "/work"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				options = loaded.ConfigOptions
+			}
+			values := make(map[string]string)
+			for _, option := range options {
+				if option.Select != nil {
+					values[string(option.Select.Id)] = string(option.Select.CurrentValue)
+				}
+			}
+			if values[modelConfigID] != "selected-model" || values[effortConfigID] != "high" {
+				t.Errorf("%s lost selected settings: %v", operation, values)
+			}
+			response, err := agent.Prompt(ctx, acp.PromptRequest{SessionId: created.SessionId, Prompt: []acp.ContentBlock{acp.TextBlock("hi")}})
+			if err != nil || response.StopReason != acp.StopReasonEndTurn {
+				t.Fatalf("prompt = %#v, %v", response, err)
+			}
+			if params := <-started; params.Model != "selected-model" || params.Effort != "high" {
+				t.Fatalf("first turn used model=%q effort=%q, want selected-model/high", params.Model, params.Effort)
+			}
 		})
 	}
 }

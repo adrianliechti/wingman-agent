@@ -2,7 +2,6 @@
 import {
 	createContext,
 	type ReactNode,
-	useCallback,
 	useContext,
 	useEffect,
 	useEffectEvent,
@@ -30,14 +29,14 @@ const ToastContext = createContext<((toast: ToastInput) => void) | null>(null);
 export function ToastProvider({ children }: { children: ReactNode }) {
 	const [toasts, setToasts] = useState<ToastItem[]>([]);
 	const nextId = useRef(0);
-	const showToast = useCallback((toast: ToastInput) => {
+	const showToast = (toast: ToastInput) => {
 		const id = ++nextId.current;
 		setToasts((items) => [...items.slice(-3), { ...toast, id }]);
 		window.setTimeout(
 			() => setToasts((items) => items.filter((item) => item.id !== id)),
 			toast.tone === "error" ? 7000 : 4000,
 		);
-	}, []);
+	};
 
 	return (
 		<ToastContext value={showToast}>

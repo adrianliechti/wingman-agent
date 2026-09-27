@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { isDraft } from "../state/sessionStore";
 import { listTurnReviews, turnReviewKey } from "../api/turnReviews";
@@ -34,17 +34,14 @@ export function SessionChatPanel(
 		if (view?.phase === "idle")
 			void client.invalidateQueries({ queryKey: turnReviewKey(session) });
 	}, [client, session, view?.phase, view?.revision]);
-	const context = useMemo(
-		() => ({
-			session,
-			reviews: new Map(
-				(query.data ?? []).map((review) => [review.inputId, review]),
-			),
-			available: props.available ?? false,
-			active: (view?.phase ?? "idle") !== "idle",
-		}),
-		[session, query.data, props.available, view?.phase],
-	);
+	const context = {
+		session,
+		reviews: new Map(
+			(query.data ?? []).map((review) => [review.inputId, review]),
+		),
+		available: props.available ?? false,
+		active: (view?.phase ?? "idle") !== "idle",
+	};
 	return (
 		<TurnReviewsContext value={context}>
 			<ChatPanel

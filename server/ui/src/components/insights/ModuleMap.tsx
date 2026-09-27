@@ -249,7 +249,7 @@ export function ModuleMap({
 			? modulesQuery.error.message
 			: "Load failed"
 		: null;
-	const layout = useMemo(() => (data ? layoutModules(data) : null), [data]);
+	const layout = data ? layoutModules(data) : null;
 	const [selectedValue, setSelected] = useState<string | null>(
 		initialSelection ?? null,
 	);
@@ -265,16 +265,12 @@ export function ModuleMap({
 			? null
 			: selectedValue;
 	const [hovered, setHovered] = useState<string | null>(null);
-	const summaryModules = useMemo(
-		() =>
-			data
-				? [...data.modules]
-						.sort((a, b) => b.nodes - a.nodes)
-						.slice(0, MAX_MODULES)
-						.map((module) => module.path)
-				: [],
-		[data],
-	);
+	const summaryModules = data
+		? [...data.modules]
+				.sort((a, b) => b.nodes - a.nodes)
+				.slice(0, MAX_MODULES)
+				.map((module) => module.path)
+		: [];
 	const summariesQuery = useQuery({
 		queryKey: queryKeys.insights.summaries(summaryModules, true),
 		enabled: summaryModules.length > 0,

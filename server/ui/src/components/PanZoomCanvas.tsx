@@ -1,11 +1,11 @@
 import { Maximize, ZoomIn, ZoomOut } from "lucide-react";
 import {
 	type ReactNode,
-	useCallback,
 	useEffect,
 	useLayoutEffect,
 	useRef,
 	useState,
+	useCallback,
 } from "react";
 
 const MIN_ZOOM = 0.15;
@@ -109,7 +109,7 @@ export function PanZoomCanvas({
 		return () => container.removeEventListener("wheel", onWheel);
 	}, [wheelMode]);
 
-	const zoomBy = useCallback((factor: number) => {
+	const zoomBy = (factor: number) => {
 		const container = containerRef.current;
 		if (!container) return;
 		const current = transformRef.current;
@@ -122,7 +122,7 @@ export function PanZoomCanvas({
 			x: px - (px - current.x) * scale,
 			y: py - (py - current.y) * scale,
 		});
-	}, []);
+	};
 
 	return (
 		<div

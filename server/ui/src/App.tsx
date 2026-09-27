@@ -9,7 +9,11 @@ import {
 import { composerDrafts as getComposerDrafts } from "./state/composerDrafts.ts";
 import { isDraft, sessionKey, splitSessionKey } from "./state/sessionStore.ts";
 import { workspaceClient } from "./state/workspaceClient.ts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+	type QueryClient,
+	useQuery,
+	useQueryClient,
+} from "@tanstack/react-query";
 import {
 	Bot,
 	Bug,
@@ -47,16 +51,17 @@ import {
 	Wrench,
 } from "lucide-react";
 import {
+	Activity,
 	type CSSProperties,
 	type ErrorInfo,
 	type ReactNode,
-	useCallback,
 	useEffect,
 	useRef,
 	useState,
 	useSyncExternalStore,
 	lazy,
 	Suspense,
+	useEffectEvent,
 } from "react";
 import {
 	Group,
@@ -299,11 +304,33 @@ function moveWorkspaceTab(tab: CenterTab, from: string, to: string): CenterTab {
 	};
 }
 
+async function stopActiveDebugSession(queryClient: QueryClient) {
+	const current = await queryClient.fetchQuery({
+		queryKey: queryKeys.debug.session,
+		queryFn: ({ signal }) => getDebugSession(signal),
+		staleTime: 0,
+	});
+	if (!current.session || current.session.state === "terminated") return null;
+	return controlDebug("stop", current.session.session_id);
+}
+
+async function terminalCloseState(terminalId: string) {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const terminal = await getTerminal(terminalId);
+		if (!terminal) return "gone";
+		if (!terminal.busy) return "idle";
+		if (attempt === 0) {
+			await new Promise((resolve) => window.setTimeout(resolve, 100));
+		}
+	}
+	return "busy";
+}
+
 export default function App() {
 	useAutoHidingScrollbars();
 	const mobile = useMobileLayout();
 	const { backend: agentId, selectBackend, drafts } = useWorkspace();
-	const client = workspaceClient();
+	const [client] = useState(workspaceClient);
 	const [composerDrafts] = useState(getComposerDrafts);
 	const draftStorageError = useSyncExternalStore(
 		composerDrafts.subscribe,
@@ -344,10 +371,8 @@ export default function App() {
 	useServerQueryInvalidation(subscribe, connected);
 	const queryClient = useQueryClient();
 	const toast = useToast();
-	const createSessionMutation = useCallback(
-		() => client.create(agentId, crypto.randomUUID()),
-		[client, agentId],
-	);
+	const createSessionMutation = () =>
+		client.create(agentId, crypto.randomUUID());
 	const {
 		documents,
 		dirtyPaths,
@@ -372,26 +397,27 @@ export default function App() {
 	const tabEnabled =
 		tabAvailable && (capabilities?.["editor.tab.completion"] ?? false);
 	const languageServicesKey = `${capabilities?.lsp ?? false}:${capabilities?.managed_tools?.state ?? ""}`;
-	const toggleEditorTabCompletion = useCallback(async () => {
+	const toggleEditorTabCompletion = async () => {
 		try {
 			await setEditorTabCompletion(!tabEnabled);
-			void queryClient.invalidateQueries({
-				queryKey: queryKeys.capabilities,
-			});
-			toast({
-				title: `Tab Completion ${tabEnabled ? "disabled" : "enabled"}`,
-				description: tabEnabled
-					? undefined
-					: "Completions use model requests while you type.",
-			});
 		} catch (error) {
 			toast({
 				title: "Could not change Tab Completion",
 				description: String(error),
 				tone: "error",
 			});
+			return;
 		}
-	}, [queryClient, tabEnabled, toast]);
+		void queryClient.invalidateQueries({
+			queryKey: queryKeys.capabilities,
+		});
+		toast({
+			title: `Tab Completion ${tabEnabled ? "disabled" : "enabled"}`,
+			description: tabEnabled
+				? undefined
+				: "Completions use model requests while you type.",
+		});
+	};
 	const [requestedWorkspaceTab, setRequestedWorkspaceTab] =
 		useState<WorkspaceTab>("files");
 	const terminalDocked =
@@ -509,10 +535,10 @@ export default function App() {
 	const [closeRequest, setCloseRequest] = useState<CloseRequest>(null);
 	const [pendingTabCloses, setPendingTabCloses] = useState<string[]>([]);
 	const checkingTabCloseRef = useRef<string | null>(null);
-	const cancelTabClose = useCallback(() => {
+	const cancelTabClose = () => {
 		setPendingTabCloses([]);
 		setCloseRequest(null);
-	}, []);
+	};
 	const [saveConflict, setSaveConflict] = useState<SaveConflictRequest>(null);
 	const [workspaceEditRequest, setWorkspaceEditRequest] =
 		useState<WorkspaceEditRequest>(null);
@@ -533,99 +559,96 @@ export default function App() {
 	const followedDebugStopRef = useRef("");
 	const [debugControlBusy, setDebugControlBusy] = useState(false);
 
-	const openWorkspaceEditFiles = useCallback(
-		(paths: readonly string[]) => {
-			if (paths.length === 0) return;
-			const pane = activePaneRef.current;
-			const activeFile = tabs.find(
-				(tab) => tab.id === activeTabId && tab.type === "file",
-			);
-			const keepActive = !!activeFile?.path && paths.includes(activeFile.path);
-			const firstExisting = tabs.find(
-				(tab) => tab.type === "file" && tab.path === paths[0],
-			);
-			setTabs((current) => {
-				const next = [...current];
-				for (const path of paths) {
-					const index = next.findIndex(
-						(tab) => tab.type === "file" && tab.path === path,
-					);
-					if (index >= 0) {
-						if (next[index].preview) {
-							next[index] = { ...next[index], preview: undefined };
-						}
-						continue;
+	const openWorkspaceEditFiles = (paths: readonly string[]) => {
+		if (paths.length === 0) return;
+		const pane = activePaneRef.current;
+		const activeFile = tabs.find(
+			(tab) => tab.id === activeTabId && tab.type === "file",
+		);
+		const keepActive = !!activeFile?.path && paths.includes(activeFile.path);
+		const firstExisting = tabs.find(
+			(tab) => tab.type === "file" && tab.path === paths[0],
+		);
+		setTabs((current) => {
+			const next = [...current];
+			for (const path of paths) {
+				const index = next.findIndex(
+					(tab) => tab.type === "file" && tab.path === path,
+				);
+				if (index >= 0) {
+					if (next[index].preview) {
+						next[index] = { ...next[index], preview: undefined };
 					}
-					next.push({
-						id: `file:${path}`,
-						type: "file",
-						label: path.split("/").pop() || path,
-						path,
-						pane,
-					});
+					continue;
 				}
-				return next;
+				next.push({
+					id: `file:${path}`,
+					type: "file",
+					label: path.split("/").pop() || path,
+					path,
+					pane,
+				});
+			}
+			return next;
+		});
+		// Keep the initiating editor focused. In particular, promoting a preview
+		// tab must not create and activate a second editor for the same file.
+		if (!keepActive) setActiveTabId(firstExisting?.id ?? `file:${paths[0]}`);
+	};
+
+	const runWorkspaceEdit = async (
+		envelope: WorkspaceEditEnvelope,
+		label: string,
+	) => {
+		const result = await applyWorkspaceEdit(envelope);
+		if (!result.ok) {
+			toast({
+				title: `${label} failed`,
+				description: result.error,
+				tone: "error",
 			});
-			// Keep the initiating editor focused. In particular, promoting a preview
-			// tab must not create and activate a second editor for the same file.
-			if (!keepActive) setActiveTabId(firstExisting?.id ?? `file:${paths[0]}`);
-		},
-		[activeTabId, tabs, setActiveTabId, setTabs],
-	);
+		} else {
+			openWorkspaceEditFiles(result.paths ?? []);
+		}
+		return result.ok;
+	};
 
-	const runWorkspaceEdit = useCallback(
-		async (envelope: WorkspaceEditEnvelope, label: string) => {
-			const result = await applyWorkspaceEdit(envelope);
-			if (!result.ok) {
-				toast({
-					title: `${label} failed`,
-					description: result.error,
-					tone: "error",
-				});
-			} else {
-				openWorkspaceEditFiles(result.paths ?? []);
-			}
-			return result.ok;
-		},
-		[applyWorkspaceEdit, openWorkspaceEditFiles, toast],
-	);
-
-	const requestWorkspaceEdit = useCallback(
-		(envelope: WorkspaceEditEnvelope, label: string): Promise<boolean> => {
-			let summary: WorkspaceEditSummary;
-			try {
-				summary = summarizeWorkspaceEdit(envelope);
-			} catch (error) {
-				toast({
-					title: `${label} failed`,
-					description: error instanceof Error ? error.message : String(error),
-					tone: "error",
-				});
-				return Promise.resolve(false);
-			}
-			if (!summary.requiresConfirmation) {
-				return runWorkspaceEdit(envelope, label);
-			}
-			return new Promise<boolean>((resolve) => {
-				setWorkspaceEditRequest({
-					envelope,
-					label,
-					summary,
-					resolve,
-					applying: false,
-				});
+	const requestWorkspaceEdit = (
+		envelope: WorkspaceEditEnvelope,
+		label: string,
+	): Promise<boolean> => {
+		let summary: WorkspaceEditSummary;
+		try {
+			summary = summarizeWorkspaceEdit(envelope);
+		} catch (error) {
+			toast({
+				title: `${label} failed`,
+				description: error instanceof Error ? error.message : String(error),
+				tone: "error",
 			});
-		},
-		[runWorkspaceEdit, toast],
-	);
+			return Promise.resolve(false);
+		}
+		if (!summary.requiresConfirmation) {
+			return runWorkspaceEdit(envelope, label);
+		}
+		return new Promise<boolean>((resolve) => {
+			setWorkspaceEditRequest({
+				envelope,
+				label,
+				summary,
+				resolve,
+				applying: false,
+			});
+		});
+	};
 
-	const closeWorkspaceEditPreview = useCallback(() => {
+	const closeWorkspaceEditPreview = () => {
 		if (workspaceEditRequest?.applying) return;
 		workspaceEditRequest?.resolve(false);
 		setWorkspaceEditRequest(null);
-	}, [workspaceEditRequest]);
+	};
 
-	const confirmWorkspaceEdit = useCallback(async () => {
+	const confirmWorkspaceEdit = async () => {
 		const request = workspaceEditRequest;
 		if (!request || request.applying) return;
 		setWorkspaceEditRequest({ ...request, applying: true });
@@ -634,45 +657,44 @@ export default function App() {
 		setWorkspaceEditRequest((current) =>
 			current?.resolve === request.resolve ? null : current,
 		);
-	}, [runWorkspaceEdit, workspaceEditRequest]);
+	};
 
-	const createTerminal = useCallback(
-		async (shell?: string) => {
-			if (terminalCreatingRef.current) return;
-			terminalCreatingRef.current = true;
-			try {
-				const entry = await startTerminal(shell);
-				queryClient.setQueryData<TerminalEntry[]>(
-					queryKeys.terminals.list,
-					(current = []) =>
-						current.some((terminal) => terminal.id === entry.id)
-							? current
-							: [...current, entry],
-				);
-				const tab: CenterTab = {
-					id: `terminal:${entry.id}`,
-					type: "terminal",
-					label: entry.title,
-					terminalId: entry.id,
-					pane: activePaneRef.current,
-				};
-				setTabs((prev) =>
-					prev.some((item) => item.id === tab.id) ? prev : [...prev, tab],
-				);
-				if (terminalDocked) setActiveDockedTerminalId(tab.id);
-				else setActiveTabId(tab.id);
-			} catch (error) {
-				toast({
-					title: "Could not create terminal",
-					description: error instanceof Error ? error.message : String(error),
-					tone: "error",
-				});
-			} finally {
-				terminalCreatingRef.current = false;
-			}
-		},
-		[queryClient, toast, terminalDocked, setActiveTabId, setTabs],
-	);
+	const createTerminal = async (shell?: string) => {
+		if (terminalCreatingRef.current) return;
+		terminalCreatingRef.current = true;
+		let entry: TerminalEntry;
+		try {
+			entry = await startTerminal(shell);
+		} catch (error) {
+			toast({
+				title: "Could not create terminal",
+				description: error instanceof Error ? error.message : String(error),
+				tone: "error",
+			});
+			terminalCreatingRef.current = false;
+			return;
+		}
+		terminalCreatingRef.current = false;
+		queryClient.setQueryData<TerminalEntry[]>(
+			queryKeys.terminals.list,
+			(current = []) =>
+				current.some((terminal) => terminal.id === entry.id)
+					? current
+					: [...current, entry],
+		);
+		const tab: CenterTab = {
+			id: `terminal:${entry.id}`,
+			type: "terminal",
+			label: entry.title,
+			terminalId: entry.id,
+			pane: activePaneRef.current,
+		};
+		setTabs((prev) =>
+			prev.some((item) => item.id === tab.id) ? prev : [...prev, tab],
+		);
+		if (terminalDocked) setActiveDockedTerminalId(tab.id);
+		else setActiveTabId(tab.id);
+	};
 
 	useEffect(() => {
 		if (!showTerminal || !terminalsQuery.data) return;
@@ -700,45 +722,42 @@ export default function App() {
 		});
 	}, [showTerminal, terminalsQuery.data, setTabs]);
 
+	const handleShortcutKey = useEffectEvent((e: KeyboardEvent) => {
+		// Ctrl/Cmd+P matches the TUI command center (and suppresses the
+		// browser print dialog); Cmd+K stays as the web-app convention.
+		if ((e.metaKey || e.ctrlKey) && ["k", "p"].includes(e.key.toLowerCase())) {
+			e.preventDefault();
+			e.stopPropagation();
+			if (paletteOpen) {
+				setPaletteOpen(false);
+				setPaletteEditorActions(null);
+			} else {
+				const editorActions = fileTabHandlesRef.current.get(activeTabId);
+				setPaletteEditorActions(
+					editorActions?.hasSelection() ? editorActions : null,
+				);
+				setPaletteOpen(true);
+			}
+			return;
+		}
+		// Match on e.code: with Alt held macOS reports the composed character
+		// in e.key, and Backquote sits on a dead key in several EU layouts.
+		if (
+			e.ctrlKey &&
+			!e.metaKey &&
+			((e.altKey && e.code === "KeyT") || (!e.altKey && e.code === "Backquote"))
+		) {
+			e.preventDefault();
+			void createTerminal();
+		}
+	});
 	useEffect(() => {
-		const onKey = (e: KeyboardEvent) => {
-			// Ctrl/Cmd+P matches the TUI command center (and suppresses the
-			// browser print dialog); Cmd+K stays as the web-app convention.
-			if (
-				(e.metaKey || e.ctrlKey) &&
-				["k", "p"].includes(e.key.toLowerCase())
-			) {
-				e.preventDefault();
-				e.stopPropagation();
-				if (paletteOpen) {
-					setPaletteOpen(false);
-					setPaletteEditorActions(null);
-				} else {
-					const editorActions = fileTabHandlesRef.current.get(activeTabId);
-					setPaletteEditorActions(
-						editorActions?.hasSelection() ? editorActions : null,
-					);
-					setPaletteOpen(true);
-				}
-				return;
-			}
-			// Match on e.code: with Alt held macOS reports the composed character
-			// in e.key, and Backquote sits on a dead key in several EU layouts.
-			if (
-				e.ctrlKey &&
-				!e.metaKey &&
-				((e.altKey && e.code === "KeyT") ||
-					(!e.altKey && e.code === "Backquote"))
-			) {
-				e.preventDefault();
-				void createTerminal();
-			}
-		};
+		const onKey = (e: KeyboardEvent) => handleShortcutKey(e);
 		// Capture the palette shortcut before embedded editors can consume it as
 		// the start of one of their own key chords.
 		window.addEventListener("keydown", onKey, true);
 		return () => window.removeEventListener("keydown", onKey, true);
-	}, [activeTabId, createTerminal, paletteOpen]);
+	}, []);
 
 	const terminalTabs = tabs.filter((tab) => tab.type === "terminal");
 	const centerTabs = terminalDocked
@@ -748,6 +767,7 @@ export default function App() {
 		centerTabs.find((tab) => tab.id === activeTabId) ??
 		centerTabs[0] ??
 		EMPTY_CENTER_TAB;
+	const activePane = activeTab.pane;
 	const activeTaskSessionId =
 		activeTab.type === "chat" &&
 		activeTab.sessionId &&
@@ -885,151 +905,126 @@ export default function App() {
 	const streamEstimate = 0; // Only provider-reported usage is shown; streaming text is not token accounting.
 	const outputTokens = usage.outputTokens + streamEstimate;
 
-	const activateTab = useCallback(
-		(tab: CenterTab) => {
-			setActiveTabId(tab.id);
-			if (tab.type === "chat") {
-				setCurrentSessionId(tab.sessionId ?? "");
-				selectBackend(
-					tab.backendId ??
-						(tab.sessionId
-							? splitSessionKey(tab.sessionId).backendId
-							: agentId),
+	const activateTab = (tab: CenterTab) => {
+		setActiveTabId(tab.id);
+		if (tab.type === "chat") {
+			setCurrentSessionId(tab.sessionId ?? "");
+			selectBackend(
+				tab.backendId ??
+					(tab.sessionId ? splitSessionKey(tab.sessionId).backendId : agentId),
+			);
+		}
+	};
+	const toggleChatAuxiliary = (tabId: string, view: ChatAuxiliaryView) => {
+		setChatAuxiliaryViews((current) =>
+			current[tabId] === view ? {} : { [tabId]: view },
+		);
+	};
+	const showActiveChatAuxiliary = (view: ChatAuxiliaryView) => {
+		const tab =
+			activeTab.type === "chat"
+				? activeTab
+				: (tabs.find(
+						(candidate) =>
+							candidate.type === "chat" &&
+							candidate.sessionId === currentSessionId,
+					) ?? tabs.find((candidate) => candidate.type === "chat"));
+		if (!tab) return;
+		activateTab(tab);
+		setChatAuxiliaryViews({ [tab.id]: view });
+	};
+	const keepTab = (id: string) => {
+		setTabs((current) =>
+			current.map((tab) =>
+				tab.id === id && tab.preview ? { ...tab, preview: undefined } : tab,
+			),
+		);
+	};
+	const showCenterTab = (candidate: CenterTab, disposition: TabDisposition) => {
+		const placement = placeCenterTab(
+			tabs,
+			{ ...candidate, pane: activePane },
+			disposition,
+			dirtyPaths,
+		);
+		if (placement.replaced?.type === "file" && placement.replaced.path) {
+			closeDocument(placement.replaced.path);
+		}
+		if (placement.replaced) {
+			setFileViews((current) => {
+				if (!(placement.replaced!.id in current)) return current;
+				const next = { ...current };
+				delete next[placement.replaced!.id];
+				return next;
+			});
+		}
+		setTabs(placement.tabs);
+		activateTab(candidate);
+	};
+
+	const openChatTab = (sid: string, disposition: TabDisposition = "keep") => {
+		const existing = tabs.find((t) => t.type === "chat" && t.sessionId === sid);
+		if (existing) {
+			showCenterTab(existing, disposition);
+			return;
+		}
+
+		const recovered = composerDrafts
+			.closedTabs()
+			.find(({ tab }) => tab.sessionId === sid)?.tab;
+		const tab: CenterTab = {
+			id: recovered?.id ?? chatTabId(sid),
+			type: "chat",
+			backendId: splitSessionKey(sid).backendId,
+			label: "Session",
+			sessionId: sid,
+		};
+		showCenterTab(tab, disposition);
+	};
+
+	const openFile = (
+		path: string,
+		line?: number,
+		column?: number,
+		external?: boolean,
+		disposition: TabDisposition = "preview",
+	) => {
+		openDocument(path, external ?? false);
+		const existing = tabs.find((t) => t.type === "file" && t.path === path);
+		if (existing) {
+			if (line) {
+				setTabs((prev) =>
+					prev.map((t) =>
+						t.id === existing.id
+							? {
+									...t,
+									line,
+									column,
+									navigationKey: (t.navigationKey ?? 0) + 1,
+								}
+							: t,
+					),
 				);
 			}
-		},
-		[agentId, selectBackend, setActiveTabId, setCurrentSessionId],
-	);
-	const toggleChatAuxiliary = useCallback(
-		(tabId: string, view: ChatAuxiliaryView) => {
-			setChatAuxiliaryViews((current) =>
-				current[tabId] === view ? {} : { [tabId]: view },
-			);
-		},
-		[],
-	);
-	const showActiveChatAuxiliary = useCallback(
-		(view: ChatAuxiliaryView) => {
-			const tab =
-				activeTab.type === "chat"
-					? activeTab
-					: (tabs.find(
-							(candidate) =>
-								candidate.type === "chat" &&
-								candidate.sessionId === currentSessionId,
-						) ?? tabs.find((candidate) => candidate.type === "chat"));
-			if (!tab) return;
-			activateTab(tab);
-			setChatAuxiliaryViews({ [tab.id]: view });
-		},
-		[activateTab, activeTab, currentSessionId, tabs],
-	);
-	const keepTab = useCallback(
-		(id: string) => {
-			setTabs((current) =>
-				current.map((tab) =>
-					tab.id === id && tab.preview ? { ...tab, preview: undefined } : tab,
-				),
-			);
-		},
-		[setTabs],
-	);
-	const showCenterTab = useCallback(
-		(candidate: CenterTab, disposition: TabDisposition) => {
-			const placement = placeCenterTab(
-				tabs,
-				{ ...candidate, pane: activeTab.pane },
-				disposition,
-				dirtyPaths,
-			);
-			if (placement.replaced?.type === "file" && placement.replaced.path) {
-				closeDocument(placement.replaced.path);
-			}
-			if (placement.replaced) {
-				setFileViews((current) => {
-					if (!(placement.replaced!.id in current)) return current;
-					const next = { ...current };
-					delete next[placement.replaced!.id];
-					return next;
-				});
-			}
-			setTabs(placement.tabs);
-			activateTab(candidate);
-		},
-		[activateTab, activeTab.pane, closeDocument, dirtyPaths, tabs, setTabs],
-	);
+			if (disposition === "keep") keepTab(existing.id);
+			activateTab(existing);
+			return;
+		}
+		const label = path.split("/").pop() || path;
+		const tab: CenterTab = {
+			id: `file:${path}`,
+			type: "file",
+			label,
+			path,
+			line,
+			column,
+			navigationKey: line ? 1 : undefined,
+			external: external || undefined,
+		};
+		showCenterTab(tab, disposition);
+	};
 
-	const openChatTab = useCallback(
-		(sid: string, disposition: TabDisposition = "keep") => {
-			const existing = tabs.find(
-				(t) => t.type === "chat" && t.sessionId === sid,
-			);
-			if (existing) {
-				showCenterTab(existing, disposition);
-				return;
-			}
-
-			const recovered = composerDrafts
-				.closedTabs()
-				.find(({ tab }) => tab.sessionId === sid)?.tab;
-			const tab: CenterTab = {
-				id: recovered?.id ?? chatTabId(sid),
-				type: "chat",
-				backendId: splitSessionKey(sid).backendId,
-				label: "Session",
-				sessionId: sid,
-			};
-			showCenterTab(tab, disposition);
-		},
-		[showCenterTab, tabs, composerDrafts],
-	);
-
-	const openFile = useCallback(
-		(
-			path: string,
-			line?: number,
-			column?: number,
-			external?: boolean,
-			disposition: TabDisposition = "preview",
-		) => {
-			openDocument(path, external ?? false);
-			const existing = tabs.find((t) => t.type === "file" && t.path === path);
-			if (existing) {
-				if (line) {
-					setTabs((prev) =>
-						prev.map((t) =>
-							t.id === existing.id
-								? {
-										...t,
-										line,
-										column,
-										navigationKey: (t.navigationKey ?? 0) + 1,
-									}
-								: t,
-						),
-					);
-				}
-				if (disposition === "keep") keepTab(existing.id);
-				activateTab(existing);
-				return;
-			}
-			const label = path.split("/").pop() || path;
-			const tab: CenterTab = {
-				id: `file:${path}`,
-				type: "file",
-				label,
-				path,
-				line,
-				column,
-				navigationKey: line ? 1 : undefined,
-				external: external || undefined,
-			};
-			showCenterTab(tab, disposition);
-		},
-		[activateTab, keepTab, openDocument, showCenterTab, tabs, setTabs],
-	);
-
-	const openUntitledFile = useCallback(() => {
+	const openUntitledFile = () => {
 		const usedLabels = new Set(tabs.map((tab) => tab.label));
 		let sequence = 1;
 		let label = "Untitled";
@@ -1040,129 +1035,105 @@ export default function App() {
 		const path = `untitled:${crypto.randomUUID()}`;
 		openUntitledDocument(path);
 		showCenterTab({ id: `file:${path}`, type: "file", label, path }, "keep");
-	}, [openUntitledDocument, showCenterTab, tabs]);
+	};
 
-	const handleFileMove = useCallback(
-		(from: string, to: string) => {
-			moveDocuments(from, to);
-			const movedTabs = new Map(
-				tabs.map((tab) => [tab.id, moveWorkspaceTab(tab, from, to)]),
-			);
-			setTabs((current) =>
-				current.map((tab) => moveWorkspaceTab(tab, from, to)),
-			);
-			setActiveTabId(movedTabs.get(activeTabId)?.id ?? activeTabId);
-			setLeftActiveId(movedTabs.get(leftActiveId)?.id ?? leftActiveId);
-			setRightActiveId(movedTabs.get(rightActiveId)?.id ?? rightActiveId);
-			setFileViews((current) => {
-				let changed = false;
-				const next = { ...current };
-				for (const [oldID, tab] of movedTabs) {
-					if (tab.id === oldID || !(oldID in next)) continue;
-					next[tab.id] = next[oldID];
-					delete next[oldID];
-					changed = true;
-				}
-				return changed ? next : current;
-			});
-		},
-		[
-			moveDocuments,
-			tabs,
-			setRightActiveId,
-			setLeftActiveId,
-			rightActiveId,
-			setActiveTabId,
-			activeTabId,
-			setTabs,
-			leftActiveId,
-		],
-	);
-
-	const openTask = useCallback(
-		(task: TaskEntry) => {
-			if (!sessionId) return;
-			const id = `task:${sessionId}:${task.id}`;
-			const pane = activePaneRef.current;
-			setTabs((prev) =>
-				prev.some((t) => t.id === id)
-					? prev
-					: [
-							...prev,
-							{
-								id,
-								type: "task" as const,
-								label: task.description,
-								sessionId,
-								taskId: task.id,
-								pane,
-							},
-						],
-			);
-			setActiveTabId(id);
-		},
-		[sessionId, setActiveTabId, setTabs],
-	);
-
-	const openDiff = useCallback(
-		(
-			path: string,
-			layer?: DiffLayer,
-			disposition: TabDisposition = "preview",
-		) => {
-			const existing = tabs.find(
-				(t) => t.type === "diff" && t.path === path && t.diffLayer === layer,
-			);
-			if (existing) {
-				if (disposition === "keep") keepTab(existing.id);
-				activateTab(existing);
-				return;
+	const handleFileMove = (from: string, to: string) => {
+		moveDocuments(from, to);
+		const movedTabs = new Map(
+			tabs.map((tab) => [tab.id, moveWorkspaceTab(tab, from, to)]),
+		);
+		setTabs((current) => current.map((tab) => moveWorkspaceTab(tab, from, to)));
+		setActiveTabId(movedTabs.get(activeTabId)?.id ?? activeTabId);
+		setLeftActiveId(movedTabs.get(leftActiveId)?.id ?? leftActiveId);
+		setRightActiveId(movedTabs.get(rightActiveId)?.id ?? rightActiveId);
+		setFileViews((current) => {
+			let changed = false;
+			const next = { ...current };
+			for (const [oldID, tab] of movedTabs) {
+				if (tab.id === oldID || !(oldID in next)) continue;
+				next[tab.id] = next[oldID];
+				delete next[oldID];
+				changed = true;
 			}
-			const fileName = path.split("/").pop() || path;
-			const label = layer ? `${fileName} · ${layer}` : fileName;
-			const tab: CenterTab = {
-				id: `diff:${layer ?? "combined"}:${path}`,
-				type: "diff",
+			return changed ? next : current;
+		});
+	};
+
+	const openTask = (task: TaskEntry) => {
+		if (!sessionId) return;
+		const id = `task:${sessionId}:${task.id}`;
+		const pane = activePaneRef.current;
+		setTabs((prev) =>
+			prev.some((t) => t.id === id)
+				? prev
+				: [
+						...prev,
+						{
+							id,
+							type: "task" as const,
+							label: task.description,
+							sessionId,
+							taskId: task.id,
+							pane,
+						},
+					],
+		);
+		setActiveTabId(id);
+	};
+
+	const openDiff = (
+		path: string,
+		layer?: DiffLayer,
+		disposition: TabDisposition = "preview",
+	) => {
+		const existing = tabs.find(
+			(t) => t.type === "diff" && t.path === path && t.diffLayer === layer,
+		);
+		if (existing) {
+			if (disposition === "keep") keepTab(existing.id);
+			activateTab(existing);
+			return;
+		}
+		const fileName = path.split("/").pop() || path;
+		const label = layer ? `${fileName} · ${layer}` : fileName;
+		const tab: CenterTab = {
+			id: `diff:${layer ?? "combined"}:${path}`,
+			type: "diff",
+			label,
+			path,
+			diffLayer: layer,
+		};
+		showCenterTab(tab, disposition);
+	};
+
+	const openCompare = (
+		base: string,
+		head: string,
+		mode: CompareMode,
+		disposition: TabDisposition = "keep",
+	) => {
+		const id = `compare:${mode}:${base}:${head}`;
+		const label = `${shortRevision(base)} → ${shortRevision(head)}`;
+		showCenterTab(
+			{
+				id,
+				type: "compare",
 				label,
-				path,
-				diffLayer: layer,
-			};
-			showCenterTab(tab, disposition);
-		},
-		[activateTab, keepTab, showCenterTab, tabs],
-	);
+				compareBase: base,
+				compareHead: head,
+				compareMode: mode,
+			},
+			disposition,
+		);
+	};
 
-	const openCompare = useCallback(
-		(
-			base: string,
-			head: string,
-			mode: CompareMode,
-			disposition: TabDisposition = "keep",
-		) => {
-			const id = `compare:${mode}:${base}:${head}`;
-			const label = `${shortRevision(base)} → ${shortRevision(head)}`;
-			showCenterTab(
-				{
-					id,
-					type: "compare",
-					label,
-					compareBase: base,
-					compareHead: head,
-					compareMode: mode,
-				},
-				disposition,
-			);
-		},
-		[showCenterTab],
-	);
-
-	const openInsightsTab = useCallback(() => {
+	const openInsightsTab = () => {
 		showCenterTab({ id: "graph", type: "graph", label: "Insights" }, "keep");
-	}, [showCenterTab]);
-	const openDebugLauncher = useCallback((seed: DebugLauncherSeed) => {
+	};
+	const openDebugLauncher = (seed: DebugLauncherSeed) => {
 		setDebugLauncher({ ...seed });
-	}, []);
-	const invalidateDebugDetails = useCallback(() => {
+	};
+	const invalidateDebugDetails = () => {
 		void queryClient.invalidateQueries({
 			queryKey: queryKeys.debug.inspection,
 			exact: true,
@@ -1171,35 +1142,32 @@ export default function App() {
 			queryKey: queryKeys.debug.output,
 			exact: true,
 		});
-	}, [queryClient]);
-	const applyDebugSession = useCallback(
-		(session?: DebugSession) => {
-			const current = debugSessionRef.current;
-			if (
-				session &&
-				current?.session_id === session.session_id &&
-				session.state_version < current.state_version
-			)
-				return;
-			debugSessionRef.current = session;
-			setDebugSession(session);
-			if (session?.terminal_id)
-				debugTerminalIDsRef.current.add(session.terminal_id);
-			const active = !!session && session.state !== "terminated";
-			const terminalId =
-				active &&
-				session.terminal_id &&
-				!exitedDebugTerminalIDsRef.current.has(session.terminal_id)
-					? session.terminal_id
-					: undefined;
-			const pane = activePaneRef.current;
-			setTabs((current) => syncDebugTab(current, terminalId, active, pane));
-			if (!terminalId)
-				setDebugContentView((view) => (view === "terminal" ? "output" : view));
-			queryClient.setQueryData(queryKeys.debug.session, { session });
-		},
-		[queryClient, setTabs],
-	);
+	};
+	const applyDebugSession = (session?: DebugSession) => {
+		const current = debugSessionRef.current;
+		if (
+			session &&
+			current?.session_id === session.session_id &&
+			session.state_version < current.state_version
+		)
+			return;
+		debugSessionRef.current = session;
+		setDebugSession(session);
+		if (session?.terminal_id)
+			debugTerminalIDsRef.current.add(session.terminal_id);
+		const active = !!session && session.state !== "terminated";
+		const terminalId =
+			active &&
+			session.terminal_id &&
+			!exitedDebugTerminalIDsRef.current.has(session.terminal_id)
+				? session.terminal_id
+				: undefined;
+		const pane = activePaneRef.current;
+		setTabs((current) => syncDebugTab(current, terminalId, active, pane));
+		if (!terminalId)
+			setDebugContentView((view) => (view === "terminal" ? "output" : view));
+		queryClient.setQueryData(queryKeys.debug.session, { session });
+	};
 	const debugStateQuery = useQuery({
 		queryKey: queryKeys.debug.state,
 		enabled: showDebug,
@@ -1212,18 +1180,20 @@ export default function App() {
 		},
 	});
 
+	const syncDebugSession = useEffectEvent(applyDebugSession);
 	useEffect(() => {
 		if (!showDebug) {
 			// oxlint-disable-next-line react/set-state-in-effect -- Synchronize the external debugger with tabs, terminal state, and the query cache.
-			applyDebugSession(undefined);
+			syncDebugSession(undefined);
 			return;
 		}
 		if (debugStateQuery.data) {
 			// oxlint-disable-next-line react/set-state-in-effect -- Synchronize the external debugger with tabs, terminal state, and the query cache.
-			applyDebugSession(debugStateQuery.data.session);
+			syncDebugSession(debugStateQuery.data.session);
 		}
-	}, [applyDebugSession, debugStateQuery.data, showDebug]);
+	}, [debugStateQuery.data, showDebug]);
 
+	const revealDebugStop = useEffectEvent(openFile);
 	useEffect(() => {
 		const state = debugStateQuery.data;
 		const session = state?.session;
@@ -1240,176 +1210,146 @@ export default function App() {
 		const stopKey = `${session.session_id}:${session.state_version}`;
 		if (followedDebugStopRef.current === stopKey) return;
 		followedDebugStopRef.current = stopKey;
-		openFile(frame.source.path, frame.line, Math.max(1, frame.column));
-	}, [debugSession, debugStateQuery.data, openFile]);
+		revealDebugStop(frame.source.path, frame.line, Math.max(1, frame.column));
+	}, [debugSession, debugStateQuery.data]);
 
-	const handleDebugControl = useCallback(
-		async (operation: DebugOperation) => {
-			const session = debugSession;
-			if (!session || session.state === "terminated" || debugControlBusy)
-				return;
-			setDebugControlBusy(true);
-			try {
-				const result = await controlDebug(
-					operation,
-					session.session_id,
-					session.stop?.thread_id,
-				);
-				if (result.session) {
-					applyDebugSession(result.session);
-					void queryClient.invalidateQueries({
-						queryKey: queryKeys.debug.state,
-						exact: true,
-					});
-					invalidateDebugDetails();
-				}
-			} catch (error) {
-				toast({
-					title: `Could not ${debugOperationLabel(operation)}`,
-					description: error instanceof Error ? error.message : String(error),
-					tone: "error",
-				});
-			} finally {
-				setDebugControlBusy(false);
-			}
-		},
-		[
-			applyDebugSession,
-			debugControlBusy,
-			debugSession,
-			invalidateDebugDetails,
-			queryClient,
-			toast,
-		],
-	);
-
-	const closeTabNow = useCallback(
-		(id: string) => {
-			const idx = tabs.findIndex((t) => t.id === id);
-			if (idx < 0) return;
-			const closing = tabs[idx];
-			if (closing.type === "file" && closing.path) closeDocument(closing.path);
-			setTabs((prev) => prev.filter((tab) => tab.id !== id));
-			setChatAuxiliaryViews((current) => {
-				if (!(id in current)) return current;
-				const next = { ...current };
-				delete next[id];
-				return next;
+	const handleDebugControl = async (operation: DebugOperation) => {
+		const session = debugSession;
+		if (!session || session.state === "terminated" || debugControlBusy) return;
+		setDebugControlBusy(true);
+		const threadId = session.stop?.thread_id;
+		let result: Awaited<ReturnType<typeof controlDebug>>;
+		try {
+			result = await controlDebug(operation, session.session_id, threadId);
+		} catch (error) {
+			toast({
+				title: `Could not ${debugOperationLabel(operation)}`,
+				description: error instanceof Error ? error.message : String(error),
+				tone: "error",
 			});
-			setFileViews((prev) => {
-				if (!(id in prev)) return prev;
-				const next = { ...prev };
-				delete next[id];
-				return next;
+			setDebugControlBusy(false);
+			return;
+		}
+		setDebugControlBusy(false);
+		if (result.session) {
+			applyDebugSession(result.session);
+			void queryClient.invalidateQueries({
+				queryKey: queryKeys.debug.state,
+				exact: true,
 			});
-			if (activeTabId === id) {
-				const remaining = tabs.filter((t) => t.id !== id);
-				const navigable = terminalDocked
-					? remaining.filter((tab) => tab.type !== "terminal")
-					: remaining;
-				const paneIdx = tabs
-					.filter(
-						(tab) =>
-							(!terminalDocked || tab.type !== "terminal") &&
-							paneOf(tab) === paneOf(closing),
-					)
-					.findIndex((t) => t.id === id);
-				const paneTabs = navigable.filter(
-					(tab) => paneOf(tab) === paneOf(closing),
-				);
-				const fallback =
-					paneTabs[Math.min(paneIdx, paneTabs.length - 1)] ??
-					navigable[Math.min(idx, navigable.length - 1)];
-				if (fallback) activateTab(fallback);
-				else {
-					setActiveTabId("");
-					setCurrentSessionId("");
-				}
-			}
-		},
-		[
-			tabs,
-			activeTabId,
-			activateTab,
-			closeDocument,
-			terminalDocked,
-			setActiveTabId,
-			setCurrentSessionId,
-			setTabs,
-		],
-	);
+			invalidateDebugDetails();
+		}
+	};
 
-	const closeTerminal = useCallback(
-		async (tab: CenterTab) => {
-			if (!tab.terminalId) return false;
-			try {
-				await deleteTerminal(tab.terminalId);
-				setCloseRequest((current) =>
-					current?.kind === "terminal" && current.tab.id === tab.id
-						? null
-						: current,
-				);
-				queryClient.setQueryData<TerminalEntry[]>(
-					queryKeys.terminals.list,
-					(current = []) =>
-						current.filter((entry) => entry.id !== tab.terminalId),
-				);
-				closeTabNow(tab.id);
-				return true;
-			} catch (error) {
-				toast({
-					title: "Could not close terminal",
-					description: error instanceof Error ? error.message : String(error),
-					tone: "error",
-				});
-				return false;
+	const closeTabNow = (id: string) => {
+		const idx = tabs.findIndex((t) => t.id === id);
+		if (idx < 0) return;
+		const closing = tabs[idx];
+		if (closing.type === "file" && closing.path) closeDocument(closing.path);
+		setTabs((prev) => prev.filter((tab) => tab.id !== id));
+		setChatAuxiliaryViews((current) => {
+			if (!(id in current)) return current;
+			const next = { ...current };
+			delete next[id];
+			return next;
+		});
+		setFileViews((prev) => {
+			if (!(id in prev)) return prev;
+			const next = { ...prev };
+			delete next[id];
+			return next;
+		});
+		if (activeTabId === id) {
+			const remaining = tabs.filter((t) => t.id !== id);
+			const navigable = terminalDocked
+				? remaining.filter((tab) => tab.type !== "terminal")
+				: remaining;
+			const paneIdx = tabs
+				.filter(
+					(tab) =>
+						(!terminalDocked || tab.type !== "terminal") &&
+						paneOf(tab) === paneOf(closing),
+				)
+				.findIndex((t) => t.id === id);
+			const paneTabs = navigable.filter(
+				(tab) => paneOf(tab) === paneOf(closing),
+			);
+			const fallback =
+				paneTabs[Math.min(paneIdx, paneTabs.length - 1)] ??
+				navigable[Math.min(idx, navigable.length - 1)];
+			if (fallback) activateTab(fallback);
+			else {
+				setActiveTabId("");
+				setCurrentSessionId("");
 			}
-		},
-		[closeTabNow, queryClient, toast],
-	);
+		}
+	};
 
-	const saveFile = useCallback(
-		async (path: string, closeTabId?: string) => {
-			const result = await saveDocument(path);
-			if (result.conflict) {
-				if (closeTabId) setCloseRequest(null);
-				setSaveConflict({ path, closeTabId });
-				return result;
-			}
-			if (!result.ok) {
-				toast({
-					title: "Could not save file",
-					description: result.error,
-					tone: "error",
-				});
-				return result;
-			}
-			if (closeTabId && !result.dirty) {
-				setCloseRequest(null);
-				closeTabNow(closeTabId);
-			}
+	const closeTerminal = async (tab: CenterTab) => {
+		if (!tab.terminalId) return false;
+		try {
+			await deleteTerminal(tab.terminalId);
+		} catch (error) {
+			toast({
+				title: "Could not close terminal",
+				description: error instanceof Error ? error.message : String(error),
+				tone: "error",
+			});
+			return false;
+		}
+		setCloseRequest((current) =>
+			current?.kind === "terminal" && current.tab.id === tab.id
+				? null
+				: current,
+		);
+		queryClient.setQueryData<TerminalEntry[]>(
+			queryKeys.terminals.list,
+			(current = []) => current.filter((entry) => entry.id !== tab.terminalId),
+		);
+		closeTabNow(tab.id);
+		return true;
+	};
+
+	const saveFile = async (path: string, closeTabId?: string) => {
+		const result = await saveDocument(path);
+		if (result.conflict) {
+			if (closeTabId) setCloseRequest(null);
+			setSaveConflict({ path, closeTabId });
 			return result;
-		},
-		[closeTabNow, saveDocument, toast],
-	);
-
-	const requestSaveAs = useCallback(
-		(tab: CenterTab, document: OpenDocument, closeAfterSave = false) => {
-			if (!tab.path) return;
-			setFilePathRequest({
-				path: document.untitled ? "" : tab.path,
-				sourcePath: tab.path,
-				sourceTabId: tab.id,
-				content: document.draft,
-				untitled: document.untitled,
-				closeAfterSave: closeAfterSave || undefined,
-				submitting: false,
+		}
+		if (!result.ok) {
+			toast({
+				title: "Could not save file",
+				description: result.error,
+				tone: "error",
 			});
-		},
-		[],
-	);
+			return result;
+		}
+		if (closeTabId && !result.dirty) {
+			setCloseRequest(null);
+			closeTabNow(closeTabId);
+		}
+		return result;
+	};
 
-	const submitFilePath = useCallback(async () => {
+	const requestSaveAs = (
+		tab: CenterTab,
+		document: OpenDocument,
+		closeAfterSave = false,
+	) => {
+		if (!tab.path) return;
+		setFilePathRequest({
+			path: document.untitled ? "" : tab.path,
+			sourcePath: tab.path,
+			sourceTabId: tab.id,
+			content: document.draft,
+			untitled: document.untitled,
+			closeAfterSave: closeAfterSave || undefined,
+			submitting: false,
+		});
+	};
+
+	const submitFilePath = async () => {
 		const request = filePathRequest;
 		if (!request || request.submitting) return;
 		const path = request.path.trim().replaceAll("\\", "/");
@@ -1433,72 +1373,67 @@ export default function App() {
 			submitting: true,
 			error: undefined,
 		});
+		let created: Awaited<ReturnType<typeof createWorkspaceFile>> | undefined;
+		let failure: unknown = null;
 		try {
-			const created = await createWorkspaceFile(path, {
+			created = await createWorkspaceFile(path, {
 				content: request.content,
 			});
-			if (!created) throw new Error("The created file response was empty.");
-			if (request.closeAfterSave) {
-				closeTabNow(request.sourceTabId);
-				setFilePathRequest(null);
-				return;
-			}
-
-			openCreatedDocument(created);
-			const nextId = `file:${created.path}`;
-			closeDocument(request.sourcePath);
-			setTabs((current) =>
-				current.map((tab) =>
-					tab.id === request.sourceTabId
-						? {
-								...tab,
-								id: nextId,
-								label: created.path.split("/").pop() || created.path,
-								path: created.path,
-								external: undefined,
-								preview: undefined,
-							}
-						: tab,
-				),
-			);
-			setLeftActiveId((current) =>
-				current === request.sourceTabId ? nextId : current,
-			);
-			setRightActiveId((current) =>
-				current === request.sourceTabId ? nextId : current,
-			);
-			setFileViews((current) => {
-				if (!(request.sourceTabId in current)) return current;
-				const next = { ...current, [nextId]: current[request.sourceTabId] };
-				delete next[request.sourceTabId];
-				return next;
-			});
-			setActiveTabId(nextId);
-			setFilePathRequest(null);
 		} catch (error) {
-			setFilePathRequest((current) =>
-				current
-					? {
-							...current,
-							submitting: false,
-							error: error instanceof Error ? error.message : String(error),
-						}
-					: current,
-			);
+			failure = error;
 		}
-	}, [
-		closeDocument,
-		closeTabNow,
-		filePathRequest,
-		openCreatedDocument,
-		saveFile,
-		setTabs,
-		setActiveTabId,
-		setRightActiveId,
-		setLeftActiveId,
-	]);
+		if (!created) {
+			const message =
+				failure === null
+					? "The created file response was empty."
+					: failure instanceof Error
+						? failure.message
+						: String(failure);
+			setFilePathRequest((current) =>
+				current ? { ...current, submitting: false, error: message } : current,
+			);
+			return;
+		}
+		if (request.closeAfterSave) {
+			closeTabNow(request.sourceTabId);
+			setFilePathRequest(null);
+			return;
+		}
 
-	const openFolder = useCallback(async () => {
+		openCreatedDocument(created);
+		const nextId = `file:${created.path}`;
+		closeDocument(request.sourcePath);
+		setTabs((current) =>
+			current.map((tab) =>
+				tab.id === request.sourceTabId
+					? {
+							...tab,
+							id: nextId,
+							label: created.path.split("/").pop() || created.path,
+							path: created.path,
+							external: undefined,
+							preview: undefined,
+						}
+					: tab,
+			),
+		);
+		setLeftActiveId((current) =>
+			current === request.sourceTabId ? nextId : current,
+		);
+		setRightActiveId((current) =>
+			current === request.sourceTabId ? nextId : current,
+		);
+		setFileViews((current) => {
+			if (!(request.sourceTabId in current)) return current;
+			const next = { ...current, [nextId]: current[request.sourceTabId] };
+			delete next[request.sourceTabId];
+			return next;
+		});
+		setActiveTabId(nextId);
+		setFilePathRequest(null);
+	};
+
+	const openFolder = async () => {
 		if (workspaceSwitching) return;
 		setWorkspaceSwitching(true);
 		try {
@@ -1518,7 +1453,7 @@ export default function App() {
 				tone: "error",
 			});
 		}
-	}, [toast, workspaceSwitching]);
+	};
 
 	useEffect(() => {
 		for (const [command, enabled] of [
@@ -1535,132 +1470,93 @@ export default function App() {
 		}
 	}, [canSaveFile, workspaceSwitching]);
 
-	useEffect(() => {
-		const onShellCommand = (event: Event) => {
-			const command = (event as CustomEvent<unknown>).detail;
-			switch (command) {
-				case "new-file":
-					openUntitledFile();
-					break;
-				case "open-folder":
-					if (dirtyPaths.size > 0) setOpenFolderRequest(true);
-					else void openFolder();
-					break;
-				case "save":
-					if (canSaveFile && activeTab.path && activeDocument) {
-						if (activeDocument.untitled) {
-							requestSaveAs(activeTab, activeDocument);
-						} else {
-							void saveFile(activeTab.path);
-						}
-					}
-					break;
-				case "save-as":
-					if (canSaveFile && activeTab.path && activeDocument) {
+	const handleShellCommand = useEffectEvent((event: Event) => {
+		const command = (event as CustomEvent<unknown>).detail;
+		switch (command) {
+			case "new-file":
+				openUntitledFile();
+				break;
+			case "open-folder":
+				if (dirtyPaths.size > 0) setOpenFolderRequest(true);
+				else void openFolder();
+				break;
+			case "save":
+				if (canSaveFile && activeTab.path && activeDocument) {
+					if (activeDocument.untitled) {
 						requestSaveAs(activeTab, activeDocument);
+					} else {
+						void saveFile(activeTab.path);
 					}
-					break;
-			}
-		};
+				}
+				break;
+			case "save-as":
+				if (canSaveFile && activeTab.path && activeDocument) {
+					requestSaveAs(activeTab, activeDocument);
+				}
+				break;
+		}
+	});
+	useEffect(() => {
+		const onShellCommand = (event: Event) => handleShellCommand(event);
 		window.addEventListener("shell:command", onShellCommand);
 		return () => window.removeEventListener("shell:command", onShellCommand);
-	}, [
-		activeDocument,
-		activeTab,
-		canSaveFile,
-		dirtyPaths.size,
-		openUntitledFile,
-		openFolder,
-		requestSaveAs,
-		saveFile,
-	]);
+	}, []);
 
-	const requestCloseTab = useCallback(
-		async (id: string) => {
-			if (closeRequest || saveConflict || filePathRequest) return false;
-			const tab = tabs.find((item) => item.id === id);
-			if (!tab) return true;
-			if (tab.type === "debug") {
-				try {
-					const current = await queryClient.fetchQuery({
-						queryKey: queryKeys.debug.session,
-						queryFn: ({ signal }) => getDebugSession(signal),
-						staleTime: 0,
-					});
-					if (current.session && current.session.state !== "terminated") {
-						const result = await controlDebug(
-							"stop",
-							current.session.session_id,
-						);
-						applyDebugSession(result.session);
-					}
-					setDebugContentView("output");
-					closeTabNow(tab.id);
-					return true;
-				} catch (error) {
-					toast({
-						title: "Could not stop debugger",
-						description: error instanceof Error ? error.message : String(error),
-						tone: "error",
-					});
-				}
-				return false;
-			}
-			if (tab.type === "file" && tab.path && dirtyPaths.has(tab.path)) {
-				setCloseRequest({ kind: "file", tab });
+	const requestCloseTab = async (id: string) => {
+		if (closeRequest || saveConflict || filePathRequest) return false;
+		const tab = tabs.find((item) => item.id === id);
+		if (!tab) return true;
+		if (tab.type === "debug") {
+			try {
+				const result = await stopActiveDebugSession(queryClient);
+				if (result) applyDebugSession(result.session);
+				setDebugContentView("output");
+				closeTabNow(tab.id);
 				return true;
-			}
-			if (tab.type === "terminal" && tab.terminalId) {
-				try {
-					for (let attempt = 0; attempt < 2; attempt++) {
-						const terminal = await getTerminal(tab.terminalId);
-						if (!terminal) {
-							closeTabNow(tab.id);
-							return true;
-						}
-						if (!terminal.busy) {
-							return closeTerminal(tab);
-						}
-						if (attempt === 0) {
-							await new Promise((resolve) => window.setTimeout(resolve, 100));
-						}
-					}
-					setCloseRequest({ kind: "terminal", tab });
-					return true;
-				} catch (error) {
-					toast({
-						title: "Could not check terminal",
-						description: error instanceof Error ? error.message : String(error),
-						tone: "error",
-					});
-				}
-				return false;
-			}
-			if (tab.type === "chat" && !(await composerDrafts.flush())) {
+			} catch (error) {
 				toast({
-					title: "Draft could not be saved",
-					description: composerDrafts.getError() ?? undefined,
+					title: "Could not stop debugger",
+					description: error instanceof Error ? error.message : String(error),
+					tone: "error",
+				});
+			}
+			return false;
+		}
+		if (tab.type === "file" && tab.path && dirtyPaths.has(tab.path)) {
+			setCloseRequest({ kind: "file", tab });
+			return true;
+		}
+		if (tab.type === "terminal" && tab.terminalId) {
+			let state: Awaited<ReturnType<typeof terminalCloseState>>;
+			try {
+				state = await terminalCloseState(tab.terminalId);
+			} catch (error) {
+				toast({
+					title: "Could not check terminal",
+					description: error instanceof Error ? error.message : String(error),
 					tone: "error",
 				});
 				return false;
 			}
-			closeTabNow(id);
+			if (state === "gone") {
+				closeTabNow(tab.id);
+				return true;
+			}
+			if (state === "idle") return closeTerminal(tab);
+			setCloseRequest({ kind: "terminal", tab });
 			return true;
-		},
-		[
-			applyDebugSession,
-			closeTabNow,
-			closeTerminal,
-			closeRequest,
-			composerDrafts,
-			saveConflict,
-			filePathRequest,
-			dirtyPaths,
-			queryClient,
-			tabs,
-			toast,
-		],
-	);
+		}
+		if (tab.type === "chat" && !(await composerDrafts.flush())) {
+			toast({
+				title: "Draft could not be saved",
+				description: composerDrafts.getError() ?? undefined,
+				tone: "error",
+			});
+			return false;
+		}
+		closeTabNow(id);
+		return true;
+	};
 
 	const [tabMenu, setTabMenu] = useState<{
 		x: number;
@@ -1668,80 +1564,66 @@ export default function App() {
 		tabId?: string;
 	} | null>(null);
 
-	const openTabMenu = useCallback(
-		(x: number, y: number, tabId: string | undefined) => {
-			const tab = tabs.find((item) => item.id === tabId);
-			setTabMenu({
-				x,
-				y,
-				tabId: tab?.id,
-			});
-		},
-		[tabs, setTabMenu],
-	);
+	const openTabMenu = (x: number, y: number, tabId: string | undefined) => {
+		const tab = tabs.find((item) => item.id === tabId);
+		setTabMenu({
+			x,
+			y,
+			tabId: tab?.id,
+		});
+	};
 
-	const moveTabToPane = useCallback(
-		(tabId: string, side: PaneSide, index?: number) => {
-			const tab = tabs.find((item) => item.id === tabId);
-			if (!tab || paneOf(tab) === side) return;
-			if (side === "right" && leftTabs.length < 2) return;
-			setTabs((prev) =>
-				moveTab(
-					prev.map((item) =>
-						item.id === tabId
-							? {
-									...item,
-									pane: side === "right" ? "right" : undefined,
-									preview: undefined,
-								}
-							: item,
-					),
-					tabId,
-					index ?? prev.length,
+	const moveTabToPane = (tabId: string, side: PaneSide, index?: number) => {
+		const tab = tabs.find((item) => item.id === tabId);
+		if (!tab || paneOf(tab) === side) return;
+		if (side === "right" && leftTabs.length < 2) return;
+		setTabs((prev) =>
+			moveTab(
+				prev.map((item) =>
+					item.id === tabId
+						? {
+								...item,
+								pane: side === "right" ? "right" : undefined,
+								preview: undefined,
+							}
+						: item,
 				),
-			);
-			activateTab(tab);
-		},
-		[activateTab, leftTabs, tabs, setTabs],
-	);
+				tabId,
+				index ?? prev.length,
+			),
+		);
+		activateTab(tab);
+	};
 
 	// Each strip shows only its pane's tabs; drop positions are translated
 	// back to tabs-array positions, and cross-strip drops switch the pane.
-	const handleStripDrop = useCallback(
-		(side: PaneSide, stripIndex: number) => {
-			if (!dragTabId) return;
-			setDragTabId(null);
-			const dragged = tabs.find((tab) => tab.id === dragTabId);
-			if (!dragged) return;
-			const group = tabs.filter((tab) => paneOf(tab) === side);
-			const position = Math.min(stripIndex, group.length);
-			const index =
-				position < group.length
-					? tabs.findIndex((tab) => tab.id === group[position].id)
-					: tabs.length;
-			if (paneOf(dragged) === side) {
-				setTabs((prev) => moveTab(prev, dragTabId, index));
-			} else {
-				moveTabToPane(dragTabId, side, index);
-			}
-		},
-		[dragTabId, moveTabToPane, tabs, setTabs],
-	);
+	const handleStripDrop = (side: PaneSide, stripIndex: number) => {
+		if (!dragTabId) return;
+		setDragTabId(null);
+		const dragged = tabs.find((tab) => tab.id === dragTabId);
+		if (!dragged) return;
+		const group = tabs.filter((tab) => paneOf(tab) === side);
+		const position = Math.min(stripIndex, group.length);
+		const index =
+			position < group.length
+				? tabs.findIndex((tab) => tab.id === group[position].id)
+				: tabs.length;
+		if (paneOf(dragged) === side) {
+			setTabs((prev) => moveTab(prev, dragTabId, index));
+		} else {
+			moveTabToPane(dragTabId, side, index);
+		}
+	};
 
-	const handleZoneDrop = useCallback(
-		(zone: PaneZone) => {
-			if (!dragTabId) return;
-			moveTabToPane(dragTabId, zone);
-			setDragTabId(null);
-		},
-		[dragTabId, moveTabToPane],
-	);
+	const handleZoneDrop = (zone: PaneZone) => {
+		if (!dragTabId) return;
+		moveTabToPane(dragTabId, zone);
+		setDragTabId(null);
+	};
 
-	const closeTabs = useCallback(
-		(ids: string[]) => setPendingTabCloses(ids),
-		[],
-	);
+	const closeTabs = (ids: string[]) => setPendingTabCloses(ids);
 
+	const closePendingTab = useEffectEvent(requestCloseTab);
 	useEffect(() => {
 		const id = pendingTabCloses[0];
 		if (
@@ -1753,30 +1635,25 @@ export default function App() {
 		)
 			return;
 		checkingTabCloseRef.current = id;
-		void requestCloseTab(id).then((proceed) => {
+		void closePendingTab(id).then((proceed) => {
 			checkingTabCloseRef.current = null;
 			setPendingTabCloses((current) =>
 				proceed ? current.filter((pending) => pending !== id) : [],
 			);
 		});
-	}, [
-		pendingTabCloses,
-		closeRequest,
-		saveConflict,
-		filePathRequest,
-		requestCloseTab,
-	]);
+	}, [pendingTabCloses, closeRequest, saveConflict, filePathRequest]);
 
+	const handleCloseTabKey = useEffectEvent((event: KeyboardEvent) => {
+		if (event.metaKey && !event.ctrlKey && event.key.toLowerCase() === "w") {
+			event.preventDefault();
+			void requestCloseTab(activeTabId);
+		}
+	});
 	useEffect(() => {
-		const onKey = (event: KeyboardEvent) => {
-			if (event.metaKey && !event.ctrlKey && event.key.toLowerCase() === "w") {
-				event.preventDefault();
-				void requestCloseTab(activeTabId);
-			}
-		};
+		const onKey = (event: KeyboardEvent) => handleCloseTabKey(event);
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
-	}, [requestCloseTab, activeTabId]);
+	}, []);
 
 	// Windows owns its app menu in the web title bar, so implement the same
 	// primary-modifier commands that the native macOS File menu dispatches. Use
@@ -1818,13 +1695,13 @@ export default function App() {
 		return () => window.removeEventListener("keydown", onKey, true);
 	}, [canSaveFile, workspaceSwitching]);
 
-	const terminateTerminal = useCallback(async () => {
+	const terminateTerminal = async () => {
 		const request = closeRequest;
 		if (request?.kind !== "terminal" || !request.tab.terminalId) return;
 		await closeTerminal(request.tab);
-	}, [closeRequest, closeTerminal]);
+	};
 
-	const saveAndCloseFile = useCallback(async () => {
+	const saveAndCloseFile = async () => {
 		const request = closeRequest;
 		if (request?.kind !== "file" || !request.tab.path) return;
 		const document = documents[request.tab.path];
@@ -1834,9 +1711,9 @@ export default function App() {
 			return;
 		}
 		await saveFile(request.tab.path, request.tab.id);
-	}, [closeRequest, documents, requestSaveAs, saveFile]);
+	};
 
-	const overwriteChangedFile = useCallback(async () => {
+	const overwriteChangedFile = async () => {
 		const request = saveConflict;
 		if (!request) return;
 		const result = await saveDocument(request.path, true);
@@ -1851,210 +1728,185 @@ export default function App() {
 		setSaveConflict(null);
 		if (result.dirty) setPendingTabCloses([]);
 		if (request.closeTabId && !result.dirty) closeTabNow(request.closeTabId);
-	}, [closeTabNow, saveConflict, saveDocument, toast]);
+	};
 
-	const setTerminalTitle = useCallback(
-		(id: string, title: string) => {
-			if (!title) return;
-			setTabs((prev) =>
-				prev.map((tab) =>
-					tab.type === "terminal" && tab.terminalId === id
-						? { ...tab, label: title }
-						: tab,
-				),
-			);
-		},
-		[setTabs],
-	);
+	const setTerminalTitle = (id: string, title: string) => {
+		if (!title) return;
+		setTabs((prev) =>
+			prev.map((tab) =>
+				tab.type === "terminal" && tab.terminalId === id
+					? { ...tab, label: title }
+					: tab,
+			),
+		);
+	};
 
 	useEffect(() => {
 		activePaneRef.current = activeTab.pane;
 	}, [activeTab.pane]);
 
-	const openDraft = useCallback(
-		(backend: string) => {
-			const tab =
-				tabs.find(
-					(tab) =>
-						tab.type === "chat" && !tab.sessionId && tab.backendId === backend,
-				) ?? draftChatTab(backend);
-			setTabs((current) =>
-				current.some((item) => item.id === tab.id)
-					? current
-					: [...current, tab],
+	const openDraft = (backend: string) => {
+		const tab =
+			tabs.find(
+				(tab) =>
+					tab.type === "chat" && !tab.sessionId && tab.backendId === backend,
+			) ?? draftChatTab(backend);
+		setTabs((current) =>
+			current.some((item) => item.id === tab.id) ? current : [...current, tab],
+		);
+		activateTab(tab);
+	};
+	const handleNewSession = (requestedBackend?: string) => {
+		const backend =
+			requestedBackend ??
+			(activeTab.type === "chat"
+				? (activeTab.backendId ??
+					(activeTab.sessionId
+						? splitSessionKey(activeTab.sessionId).backendId
+						: agentId))
+				: currentSessionId
+					? splitSessionKey(currentSessionId).backendId
+					: agentId);
+		const tab = draftChatTab(backend);
+		selectBackend(backend);
+		setTabs((current) => [...current, tab]);
+		activateTab(tab);
+	};
+	const handleBackendSelect = (backend: string, source = activeTab) => {
+		const currentBackend = source.sessionId
+			? splitSessionKey(source.sessionId).backendId
+			: (source.backendId ?? agentId);
+		if (backend === currentBackend) return;
+		const session = client.store.getSnapshot()[source.sessionId ?? ""];
+		const empty =
+			!source.sessionId ||
+			(session?.synchronized &&
+				session.status === "ready" &&
+				session.phase === "idle" &&
+				session.entries.length === 0 &&
+				session.pendingInputs.length === 0 &&
+				session.prompts.length === 0);
+		if (
+			source.type === "chat" &&
+			composerDrafts.get(source).getSnapshot().submitting
+		)
+			return;
+		if (source.type === "chat" && empty) {
+			// ACP allocates a session before the first message. Keep its composer
+			// when switching, and allow a previously visited harness to initialize again.
+			draftInitializationAttempts.current.delete(
+				JSON.stringify([backend, source.id]),
 			);
-			activateTab(tab);
-		},
-		[tabs, activateTab, setTabs],
-	);
-	const handleNewSession = useCallback(
-		(requestedBackend?: string) => {
-			const backend =
-				requestedBackend ??
-				(activeTab.type === "chat"
-					? (activeTab.backendId ??
-						(activeTab.sessionId
-							? splitSessionKey(activeTab.sessionId).backendId
-							: agentId))
-					: currentSessionId
-						? splitSessionKey(currentSessionId).backendId
-						: agentId);
-			const tab = draftChatTab(backend);
-			selectBackend(backend);
-			setTabs((current) => [...current, tab]);
-			activateTab(tab);
-		},
-		[activateTab, activeTab, agentId, currentSessionId, selectBackend, setTabs],
-	);
-	const handleBackendSelect = useCallback(
-		(backend: string, source = activeTab) => {
-			const currentBackend = source.sessionId
-				? splitSessionKey(source.sessionId).backendId
-				: (source.backendId ?? agentId);
-			if (backend === currentBackend) return;
-			const session = client.store.getSnapshot()[source.sessionId ?? ""];
-			const empty =
-				!source.sessionId ||
-				(session?.synchronized &&
-					session.status === "ready" &&
-					session.phase === "idle" &&
-					session.entries.length === 0 &&
-					session.pendingInputs.length === 0 &&
-					session.prompts.length === 0);
-			if (
-				source.type === "chat" &&
-				composerDrafts.get(source).getSnapshot().submitting
-			)
-				return;
-			if (source.type === "chat" && empty) {
-				// ACP allocates a session before the first message. Keep its composer
-				// when switching, and allow a previously visited harness to initialize again.
-				draftInitializationAttempts.current.delete(
-					JSON.stringify([backend, source.id]),
-				);
-				const next = { ...source, backendId: backend, sessionId: "" };
-				setTabs((current) =>
-					current.map((tab) => (tab.id === source.id ? next : tab)),
-				);
-				activateTab(next);
-				return;
-			}
-			openDraft(backend);
-		},
-		[
-			activeTab,
-			agentId,
-			client,
-			composerDrafts,
-			activateTab,
-			openDraft,
-			setTabs,
-		],
-	);
+			const next = { ...source, backendId: backend, sessionId: "" };
+			setTabs((current) =>
+				current.map((tab) => (tab.id === source.id ? next : tab)),
+			);
+			activateTab(next);
+			return;
+		}
+		openDraft(backend);
+	};
 
-	const handleSessionDeleted = useCallback(
-		(id: string) => {
-			setCurrentSessionId((prev) => (prev === id ? "" : prev));
-			const tab = tabs.find((t) => t.type === "chat" && t.sessionId === id);
-			if (tab) closeTabNow(tab.id);
-		},
-		[tabs, closeTabNow, setCurrentSessionId],
-	);
+	const handleSessionDeleted = (id: string) => {
+		setCurrentSessionId((prev) => (prev === id ? "" : prev));
+		const tab = tabs.find((t) => t.type === "chat" && t.sessionId === id);
+		if (tab) closeTabNow(tab.id);
+	};
 
-	const confirmSessionDelete = useCallback(async () => {
+	const confirmSessionDelete = async () => {
 		if (!sessionDelete) return;
 		try {
 			await deleteSession(sessionDelete.id);
-			const id = sessionDelete.id;
-			queryClient.setQueryData(
-				queryKeys.sessions.list(splitSessionKey(sessionDelete.id).backendId),
-				(current: SessionInfo[] = []) =>
-					current.filter((session) => session.id !== id),
-			);
-			setSessionDelete(null);
-			handleSessionDeleted(id);
 		} catch (error) {
 			toast({
 				title: "Session was not deleted",
 				description: error instanceof Error ? error.message : String(error),
 				tone: "error",
 			});
+			return;
 		}
-	}, [handleSessionDeleted, queryClient, sessionDelete, toast]);
+		const id = sessionDelete.id;
+		queryClient.setQueryData(
+			queryKeys.sessions.list(splitSessionKey(id).backendId),
+			(current: SessionInfo[] = []) =>
+				current.filter((session) => session.id !== id),
+		);
+		setSessionDelete(null);
+		handleSessionDeleted(id);
+	};
 
-	const handleSessionSelect = useCallback(
-		(id: string, disposition: TabDisposition = "keep") => {
-			selectBackend(splitSessionKey(id).backendId);
-			openChatTab(id, disposition);
-		},
-		[selectBackend, openChatTab],
-	);
+	const handleSessionSelect = (
+		id: string,
+		disposition: TabDisposition = "keep",
+	) => {
+		selectBackend(splitSessionKey(id).backendId);
+		openChatTab(id, disposition);
+	};
 	const draftCreations = useRef(new Map<string, Promise<string>>());
 	useEffect(() => composerDrafts.syncTabs(tabs), [composerDrafts, tabs]);
 	const [draftErrors, setDraftErrors] = useState<
 		Record<string, string | undefined>
 	>({});
-	const createSessionForDraft = useCallback(
-		(key: string, draftTabId?: string): Promise<string> => {
-			const owner = splitSessionKey(key).backendId;
-			const draft = draftTabId
-				? tabs.find(
-						(tab) =>
-							tab.id === draftTabId && tab.type === "chat" && !tab.sessionId,
-					)
-				: tabs.find(
-						(tab) =>
-							tab.type === "chat" &&
+	const createSessionForDraft = (
+		key: string,
+		draftTabId?: string,
+	): Promise<string> => {
+		const owner = splitSessionKey(key).backendId;
+		const draft = draftTabId
+			? tabs.find(
+					(tab) =>
+						tab.id === draftTabId && tab.type === "chat" && !tab.sessionId,
+				)
+			: tabs.find(
+					(tab) =>
+						tab.type === "chat" &&
+						!tab.sessionId &&
+						(tab.backendId ?? agentId) === owner,
+				);
+		const draftID = draft?.id ?? key;
+		const creationKey = JSON.stringify([owner, draftID]);
+		const previous = draftCreations.current.get(creationKey);
+		if (previous) return previous;
+		setDraftErrors((current) =>
+			current[creationKey] ? { ...current, [creationKey]: undefined } : current,
+		);
+		const request = client
+			.create(owner, draftID)
+			.then(async (id) => {
+				const settings = drafts[draftSettingsKey(key, draftID)];
+				if (settings && Object.keys(settings).length)
+					await client.command(id, { type: "settings", ...settings });
+				if (draft) {
+					// Keep the composer mounted and preserve current navigation. The
+					// draft may have moved, closed, or changed backend during startup.
+					setTabs((current) =>
+						current.map((tab) =>
+							tab.id === draftID &&
 							!tab.sessionId &&
-							(tab.backendId ?? agentId) === owner,
+							(tab.backendId ?? agentId) === owner
+								? { ...tab, sessionId: id }
+								: tab,
+						),
 					);
-			const draftID = draft?.id ?? key;
-			const creationKey = JSON.stringify([owner, draftID]);
-			const previous = draftCreations.current.get(creationKey);
-			if (previous) return previous;
-			setDraftErrors((current) =>
-				current[creationKey]
-					? { ...current, [creationKey]: undefined }
-					: current,
-			);
-			const request = client
-				.create(owner, draftID)
-				.then(async (id) => {
-					const settings = drafts[draftSettingsKey(key, draftID)];
-					if (settings && Object.keys(settings).length)
-						await client.command(id, { type: "settings", ...settings });
-					if (draft) {
-						// Keep the composer mounted and preserve current navigation. The
-						// draft may have moved, closed, or changed backend during startup.
-						setTabs((current) =>
-							current.map((tab) =>
-								tab.id === draftID &&
-								!tab.sessionId &&
-								(tab.backendId ?? agentId) === owner
-									? { ...tab, sessionId: id }
-									: tab,
-							),
-						);
-					} else openChatTab(id);
-					return id;
-				})
-				.catch((error) => {
-					setDraftErrors((current) => ({
-						...current,
-						[creationKey]: String(error),
-					}));
-					throw error;
-				});
-			draftCreations.current.set(creationKey, request);
-			void request.then(
-				() => draftCreations.current.delete(creationKey),
-				() => draftCreations.current.delete(creationKey),
-			);
-			return request;
-		},
-		[client, drafts, tabs, agentId, openChatTab, setTabs],
-	);
+				} else openChatTab(id);
+				return id;
+			})
+			.catch((error) => {
+				setDraftErrors((current) => ({
+					...current,
+					[creationKey]: String(error),
+				}));
+				throw error;
+			});
+		draftCreations.current.set(creationKey, request);
+		void request.then(
+			() => draftCreations.current.delete(creationKey),
+			() => draftCreations.current.delete(creationKey),
+		);
+		return request;
+	};
 	const draftInitializationAttempts = useRef(new Set<string>());
+	const initializeDraftSession = useEffectEvent(createSessionForDraft);
 	useEffect(() => {
 		if (!connected) return;
 		// ACP exposes model and mode settings on session/new, not initialize.
@@ -2066,11 +1918,11 @@ export default function App() {
 			const creationKey = JSON.stringify([backend, tab.id]);
 			if (draftInitializationAttempts.current.has(creationKey)) continue;
 			draftInitializationAttempts.current.add(creationKey);
-			void createSessionForDraft(sessionKey(backend, ""), tab.id).catch(() => {
+			void initializeDraftSession(sessionKey(backend, ""), tab.id).catch(() => {
 				/* The draft shows the error; sending retries the request. */
 			});
 		}
-	}, [tabs, agentId, connected, createSessionForDraft]);
+	}, [tabs, agentId, connected]);
 	useEffect(() => {
 		const deleted = new Set(
 			Object.values(sessions)
@@ -2083,99 +1935,89 @@ export default function App() {
 			);
 	}, [sessions, tabs, setTabs]);
 
-	const sendForSession = useCallback(
-		async (
-			key: string,
-			text: string,
-			files?: string[],
-			images?: string[],
-			intent: TurnInputIntent = "follow_up",
-			draftTabId?: string,
-		): Promise<boolean> => {
-			try {
-				const sid = isDraft(key)
-					? await createSessionForDraft(key, draftTabId)
-					: key;
-				return sendChat(sid, text, files, images, intent);
-			} catch {
-				return false;
-			}
-		},
-		[sendChat, createSessionForDraft],
-	);
+	const sendForSession = async (
+		key: string,
+		text: string,
+		files?: string[],
+		images?: string[],
+		intent: TurnInputIntent = "follow_up",
+		draftTabId?: string,
+	): Promise<boolean> => {
+		let sid = key;
+		try {
+			if (isDraft(key)) sid = await createSessionForDraft(key, draftTabId);
+			return sendChat(sid, text, files, images, intent);
+		} catch {
+			return false;
+		}
+	};
 
-	const handleSend = useCallback(
-		(
-			text: string,
-			files?: string[],
-			images?: string[],
-			intent: TurnInputIntent = "follow_up",
-		): Promise<boolean> =>
-			sendForSession(sessionId, text, files, images, intent),
-		[sendForSession, sessionId],
-	);
+	const handleSend = (
+		text: string,
+		files?: string[],
+		images?: string[],
+		intent: TurnInputIntent = "follow_up",
+	): Promise<boolean> => sendForSession(sessionId, text, files, images, intent);
 
-	const startInsightsAnalysis = useCallback(
-		async (command: string) => {
-			try {
-				const id = await createSessionMutation();
-				openChatTab(id, "keep");
-				if (!(await sendChat(id, command))) {
-					throw new Error("The chat connection is not ready");
-				}
-			} catch (error) {
-				toast({
-					title: "Could not start analysis",
-					description: error instanceof Error ? error.message : String(error),
-					tone: "error",
-				});
-			}
-		},
-		[createSessionMutation, openChatTab, sendChat, toast],
-	);
+	const startInsightsAnalysis = async (command: string) => {
+		let sent = false;
+		let failure: unknown = null;
+		try {
+			const id = await createSessionMutation();
+			openChatTab(id, "keep");
+			sent = await sendChat(id, command);
+		} catch (error) {
+			failure = error;
+		}
+		if (sent) return;
+		toast({
+			title: "Could not start analysis",
+			description:
+				failure === null
+					? "The chat connection is not ready"
+					: failure instanceof Error
+						? failure.message
+						: String(failure),
+			tone: "error",
+		});
+	};
 
-	const focusChat = useCallback(() => {
+	const focusChat = () => {
 		const tab =
 			tabs.find((t) => t.type === "chat" && t.sessionId === currentSessionId) ??
 			tabs.find((t) => t.type === "chat");
 		if (tab) activateTab(tab);
-	}, [tabs, currentSessionId, activateTab]);
+	};
 
-	const askAboutEditorSelection = useCallback(
-		(selection: EditorSelectionContext) => {
-			focusChat();
-			const fence = markdownFenceFor(selection.text);
-			const language = /^[a-z0-9_+.-]+$/i.test(selection.language)
-				? selection.language
-				: "";
-			const lines =
-				selection.range.start_line === selection.range.end_line
-					? `${selection.range.start_line}`
-					: `${selection.range.start_line}-${selection.range.end_line}`;
-			setComposerSeed({
-				text: `Help me with this selection from ${selection.path}:${lines}.\n\n${fence}${language}\n${selection.text}\n${fence}`,
-				files: [selection.path],
-				append: true,
-				nonce: Date.now(),
-			});
-		},
-		[focusChat],
-	);
-	const consumeComposerSeed = useCallback((nonce: number) => {
+	const askAboutEditorSelection = (selection: EditorSelectionContext) => {
+		focusChat();
+		const fence = markdownFenceFor(selection.text);
+		const language = /^[a-z0-9_+.-]+$/i.test(selection.language)
+			? selection.language
+			: "";
+		const lines =
+			selection.range.start_line === selection.range.end_line
+				? `${selection.range.start_line}`
+				: `${selection.range.start_line}-${selection.range.end_line}`;
+		setComposerSeed({
+			text: `Help me with this selection from ${selection.path}:${lines}.\n\n${fence}${language}\n${selection.text}\n${fence}`,
+			files: [selection.path],
+			append: true,
+			nonce: Date.now(),
+		});
+	};
+	const consumeComposerSeed = (nonce: number) => {
 		setComposerSeed((current) => (current?.nonce === nonce ? null : current));
-	}, []);
+	};
 
-	const runSkill = useCallback(
-		(skill: PaletteSkill) => {
-			focusChat();
-			if (skill.input_hint) {
-				setComposerSeed({ text: `/${skill.name} `, nonce: Date.now() });
-				return;
-			}
-			void handleSend(`/${skill.name}`);
-		},
-		[focusChat, handleSend],
-	);
+	const runSkill = (skill: PaletteSkill) => {
+		focusChat();
+		if (skill.input_hint) {
+			setComposerSeed({ text: `/${skill.name} `, nonce: Date.now() });
+			return;
+		}
+		void handleSend(`/${skill.name}`);
+	};
 
 	const settingsTabId =
 		activeTab.type === "chat"
@@ -2198,34 +2040,34 @@ export default function App() {
 			});
 		});
 
-	const handleSidePanelResize = useCallback(({ inPixels }: PanelSize) => {
+	const handleSidePanelResize = ({ inPixels }: PanelSize) => {
 		const collapsed = inPixels < 1;
 		setSidePanelCollapsed(collapsed);
 		if (collapsed) return;
 		const width = Math.round(inPixels);
 		sidePanelWidthRef.current = width;
 		appRef.current?.style.setProperty("--side-panel-width", `${width}px`);
-	}, []);
-	const handleRightPaneResize = useCallback(({ inPixels }: PanelSize) => {
+	};
+	const handleRightPaneResize = ({ inPixels }: PanelSize) => {
 		if (inPixels <= 0) return;
 		appRef.current?.style.setProperty(
 			"--right-pane-width",
 			`${Math.round(inPixels)}px`,
 		);
-	}, []);
-	const handleTerminalDockResize = useCallback(({ inPixels }: PanelSize) => {
+	};
+	const handleTerminalDockResize = ({ inPixels }: PanelSize) => {
 		if (inPixels <= 0) return;
 		appRef.current?.style.setProperty(
 			"--terminal-panel-height",
 			`${Math.round(inPixels)}px`,
 		);
-	}, []);
-	const handleDebugDetailsResize = useCallback(({ inPixels }: PanelSize) => {
+	};
+	const handleDebugDetailsResize = ({ inPixels }: PanelSize) => {
 		const visible = inPixels > 0;
 		setDebugDetailsVisible(visible);
 		if (visible) setDebugDetailsWidth(Math.round(inPixels));
-	}, []);
-	const toggleSidePanel = useCallback(() => {
+	};
+	const toggleSidePanel = () => {
 		const panel = sidePanelRef.current;
 		if (panel?.isCollapsed()) {
 			panel.resize(`${sidePanelWidthRef.current}px`);
@@ -2234,10 +2076,11 @@ export default function App() {
 			panel?.collapse();
 			setSidePanelCollapsed(true);
 		}
-	}, [sidePanelRef]);
+	};
 	const toggleSidebarPlacement = async () => {
+		const position = sidebarOnRight ? "left" : "right";
 		try {
-			await setWindowSidebarPosition(sidebarOnRight ? "left" : "right");
+			await setWindowSidebarPosition(position);
 			void queryClient.invalidateQueries({
 				queryKey: queryKeys.capabilities,
 			});
@@ -2251,42 +2094,41 @@ export default function App() {
 	};
 	const toggleTerminalPlacement = async () => {
 		const dockAtBottom = !terminalDocked;
+		const position = dockAtBottom ? "bottom" : "tab";
 		try {
-			await setWindowTerminalPosition(dockAtBottom ? "bottom" : "tab");
-			if (dockAtBottom) {
-				const selected = tabs.find((tab) => tab.id === activeTabId);
-				if (selected?.type === "terminal") {
-					setActiveDockedTerminalId(selected.id);
-					const fallback =
-						tabs.find((tab) => tab.id === lastCenterActiveIdRef.current) ??
-						tabs.find((tab) => tab.type !== "terminal");
-					if (fallback) setActiveTabId(fallback.id);
-				}
-			} else if (activeDockedTerminalTabId) {
-				setActiveTabId(activeDockedTerminalTabId);
-			}
-			void queryClient.invalidateQueries({
-				queryKey: queryKeys.capabilities,
-			});
+			await setWindowTerminalPosition(position);
 		} catch (error) {
 			toast({
 				title: "Could not change Terminal Position",
 				description: String(error),
 				tone: "error",
 			});
+			return;
+		}
+		if (dockAtBottom) {
+			const selected = tabs.find((tab) => tab.id === activeTabId);
+			if (selected?.type === "terminal") {
+				setActiveDockedTerminalId(selected.id);
+				const fallback =
+					tabs.find((tab) => tab.id === lastCenterActiveIdRef.current) ??
+					tabs.find((tab) => tab.type !== "terminal");
+				if (fallback) setActiveTabId(fallback.id);
+			}
+		} else if (activeDockedTerminalTabId) {
+			setActiveTabId(activeDockedTerminalTabId);
+		}
+		void queryClient.invalidateQueries({
+			queryKey: queryKeys.capabilities,
+		});
+	};
+	const showSidePanel = (tab: WorkspaceTab) => {
+		setRequestedWorkspaceTab(tab);
+		if (sidePanelRef.current?.isCollapsed()) {
+			sidePanelRef.current.resize(`${sidePanelWidthRef.current}px`);
+			setSidePanelCollapsed(false);
 		}
 	};
-	const showSidePanel = useCallback(
-		(tab: WorkspaceTab) => {
-			setRequestedWorkspaceTab(tab);
-			if (sidePanelRef.current?.isCollapsed()) {
-				sidePanelRef.current.resize(`${sidePanelWidthRef.current}px`);
-				setSidePanelCollapsed(false);
-			}
-		},
-		[sidePanelRef],
-	);
-	const toggleDebugDetails = useCallback(() => {
+	const toggleDebugDetails = () => {
 		const panel = debugDetailsPanelRef.current;
 		if (!panel) {
 			setDebugDetailsVisible((visible) => !visible);
@@ -2299,14 +2141,14 @@ export default function App() {
 			setDebugDetailsVisible(false);
 			panel.collapse();
 		}
-	}, [debugDetailsPanelRef]);
-	const showDebugDetails = useCallback(() => {
+	};
+	const showDebugDetails = () => {
 		setDebugDetailsVisible(true);
 		if (debugDetailsPanelRef.current?.isCollapsed()) {
 			debugDetailsPanelRef.current.resize(`${DEBUG_DETAILS_MIN_SIZE}px`);
 		}
-	}, [debugDetailsPanelRef]);
-	const showDebugger = useCallback(() => {
+	};
+	const showDebugger = () => {
 		const terminalId =
 			debugSession?.state !== "terminated" &&
 			debugSession?.terminal_id &&
@@ -2318,60 +2160,39 @@ export default function App() {
 		if (terminalId) setDebugContentView("terminal");
 		showDebugDetails();
 		setActiveTabId("debug");
-	}, [debugSession, showDebugDetails, setActiveTabId, setTabs]);
-	const showDebugSession = useCallback(
-		(session: DebugSession) => {
-			if (session.terminal_id)
-				exitedDebugTerminalIDsRef.current.delete(session.terminal_id);
-			applyDebugSession(session);
-			void queryClient.invalidateQueries({
-				queryKey: queryKeys.debug.state,
-				exact: true,
-			});
-			invalidateDebugDetails();
-			setDebugContentView(session.terminal_id ? "terminal" : "output");
-			showDebugDetails();
-			setActiveTabId("debug");
-		},
-		[
-			applyDebugSession,
-			invalidateDebugDetails,
-			queryClient,
-			showDebugDetails,
-			setActiveTabId,
-		],
-	);
-	const showDebugFailure = useCallback(
-		(session: DebugSession) => {
-			applyDebugSession(session);
-			invalidateDebugDetails();
-			const pane = activePaneRef.current;
-			setTabs((current) => syncDebugTab(current, undefined, true, pane));
-			setDebugContentView("output");
-			showDebugDetails();
-			setActiveTabId("debug");
-		},
-		[
-			applyDebugSession,
-			invalidateDebugDetails,
-			showDebugDetails,
-			setActiveTabId,
-			setTabs,
-		],
-	);
-	const handleDebugTerminalExit = useCallback(
-		(id: string) => {
-			exitedDebugTerminalIDsRef.current.add(id);
-			setTabs((current) => syncDebugTab(current, undefined, false));
-			setDebugContentView("output");
-		},
-		[setTabs],
-	);
-	const showWorkspaceSearch = useCallback(() => {
+	};
+	const showDebugSession = (session: DebugSession) => {
+		if (session.terminal_id)
+			exitedDebugTerminalIDsRef.current.delete(session.terminal_id);
+		applyDebugSession(session);
+		void queryClient.invalidateQueries({
+			queryKey: queryKeys.debug.state,
+			exact: true,
+		});
+		invalidateDebugDetails();
+		setDebugContentView(session.terminal_id ? "terminal" : "output");
+		showDebugDetails();
+		setActiveTabId("debug");
+	};
+	const showDebugFailure = (session: DebugSession) => {
+		applyDebugSession(session);
+		invalidateDebugDetails();
+		const pane = activePaneRef.current;
+		setTabs((current) => syncDebugTab(current, undefined, true, pane));
+		setDebugContentView("output");
+		showDebugDetails();
+		setActiveTabId("debug");
+	};
+	const handleDebugTerminalExit = (id: string) => {
+		exitedDebugTerminalIDsRef.current.add(id);
+		setTabs((current) => syncDebugTab(current, undefined, false));
+		setDebugContentView("output");
+	};
+	const showWorkspaceSearch = () => {
 		showSidePanel("files");
 		setWorkspaceSearching(true);
 		setSearchFocusKey((value) => value + 1);
-	}, [showSidePanel]);
+	};
 	// react-resizable-panels only reports collapse through onResize, which does
 	// not fire for the initial layout. Sync the panel from its real state
 	// once mounted so titlebar controls (like the reopen button) render before
@@ -2379,23 +2200,26 @@ export default function App() {
 	useEffect(() => {
 		setSidePanelCollapsed(sidePanelRef.current?.isCollapsed() ?? false);
 	}, [sidePanelRef]);
+	const handleSearchKey = useEffectEvent((event: KeyboardEvent) => {
+		if (
+			!(event.metaKey || event.ctrlKey) ||
+			!event.shiftKey ||
+			event.key.toLowerCase() !== "f"
+		)
+			return;
+		event.preventDefault();
+		showWorkspaceSearch();
+	});
 	useEffect(() => {
-		const onKey = (event: KeyboardEvent) => {
-			if (
-				!(event.metaKey || event.ctrlKey) ||
-				!event.shiftKey ||
-				event.key.toLowerCase() !== "f"
-			)
-				return;
-			event.preventDefault();
-			showWorkspaceSearch();
-		};
+		const onKey = (event: KeyboardEvent) => handleSearchKey(event);
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
-	}, [showWorkspaceSearch]);
+	}, []);
 
+	// The drafts store is not reactive; read it each time the palette opens.
+	const closedDrafts = paletteOpen ? composerDrafts.closedTabs() : [];
 	const paletteActions: PaletteAction[] = [
-		...composerDrafts.closedTabs().map(({ tab, preview }) => ({
+		...closedDrafts.map(({ tab, preview }) => ({
 			id: `recover-draft:${tab.id}`,
 			label: `Recover draft: ${preview}`,
 			icon: <History size={12} />,
@@ -2622,7 +2446,8 @@ export default function App() {
 					showAgents={showAgents}
 					runningSessionIds={runningSessionIds}
 					onSessionSelect={(id, disposition) => {
-						setChatAuxiliaryViews({ [chatTabId(id)]: "sessions" });
+						const tabId = chatTabId(id);
+						setChatAuxiliaryViews({ [tabId]: "sessions" });
 						void handleSessionSelect(id, disposition);
 					}}
 					onSessionDelete={(id, title) => setSessionDelete({ id, title })}
@@ -2838,7 +2663,29 @@ export default function App() {
 		return null;
 	};
 
-	const renderPane = (tab: CenterTab | undefined): ReactNode => (
+	const renderTabBoundary = (tab: CenterTab | undefined): ReactNode => (
+		<ErrorBoundary
+			key={tab?.id ?? "empty"}
+			fallback={(error, _reset, errorInfo) => (
+				<TabCrashed error={error} errorInfo={errorInfo} />
+			)}
+		>
+			<Suspense
+				fallback={
+					<div role="status" className="p-4 text-fg-dim">
+						Loading editor…
+					</div>
+				}
+			>
+				{tab ? renderTabContent(tab) : <EmptyWorkspace />}
+			</Suspense>
+		</ErrorBoundary>
+	);
+
+	const renderPane = (
+		tab: CenterTab | undefined,
+		pool: CenterTab[],
+	): ReactNode => (
 		<div
 			className="relative h-full min-h-0 min-w-0 overflow-hidden bg-bg"
 			onPointerDownCapture={(event) => {
@@ -2852,22 +2699,18 @@ export default function App() {
 				if (tab?.preview) keepTab(tab.id);
 			}}
 		>
-			<ErrorBoundary
-				key={tab?.id ?? "empty"}
-				fallback={(error, _reset, errorInfo) => (
-					<TabCrashed error={error} errorInfo={errorInfo} />
-				)}
-			>
-				<Suspense
-					fallback={
-						<div role="status" className="p-4 text-fg-dim">
-							Loading editor…
-						</div>
-					}
-				>
-					{tab ? renderTabContent(tab) : <EmptyWorkspace />}
-				</Suspense>
-			</ErrorBoundary>
+			{/* Chat tabs stay mounted so switching keeps scroll, composer and loaded reviews. */}
+			{pool
+				.filter((candidate) => candidate.type === "chat")
+				.map((chat) => (
+					<Activity
+						key={chat.id}
+						mode={chat.id === tab?.id ? "visible" : "hidden"}
+					>
+						{renderTabBoundary(chat)}
+					</Activity>
+				))}
+			{tab?.type !== "chat" && renderTabBoundary(tab)}
 		</div>
 	);
 
@@ -2888,7 +2731,7 @@ export default function App() {
 						minSize="160px"
 						className="min-h-0 min-w-0 overflow-hidden"
 					>
-						{renderPane(leftTab)}
+						{renderPane(leftTab, leftPool)}
 					</Panel>
 					<ResizeHandle label="Resize right pane" hidden={false} />
 					<Panel
@@ -2899,11 +2742,11 @@ export default function App() {
 						onResize={handleRightPaneResize}
 						className="min-h-0 min-w-0 overflow-hidden border-l border-border-subtle"
 					>
-						{renderPane(rightTab)}
+						{renderPane(rightTab, rightTabs)}
 					</Panel>
 				</Group>
 			) : (
-				renderPane(leftTab)
+				renderPane(leftTab, leftPool)
 			)}
 			{dragTab && (
 				<PaneDropZones

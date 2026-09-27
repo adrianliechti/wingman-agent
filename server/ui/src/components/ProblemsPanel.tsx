@@ -7,7 +7,7 @@ import {
 	Info,
 	Loader2,
 } from "lucide-react";
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 import { getWorkspaceDiagnostics } from "../api/lsp";
 import { queryKeys } from "../api/query";
 import type { DiagnosticEntry } from "../types/protocol";
@@ -82,7 +82,7 @@ export function ProblemsPanel({ onOpenFile, refreshKey = 0 }: Props) {
 	const diagnostics = coverage?.diagnostics ?? EMPTY_DIAGNOSTICS;
 	const loading = query.isPending || query.isFetching;
 	const error = query.error ? "Refresh failed" : null;
-	const groups = useMemo(() => groupDiagnostics(diagnostics), [diagnostics]);
+	const groups = groupDiagnostics(diagnostics);
 
 	useEffect(() => {
 		if (refreshKey === 0) return;

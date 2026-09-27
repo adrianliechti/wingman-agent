@@ -16,7 +16,7 @@ import {
 	Scissors,
 	Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
 	copyWorkspaceFile,
 	createWorkspaceFile,
@@ -61,6 +61,35 @@ interface FileClipboard {
 	path: string;
 	directory: boolean;
 	operation: "copy" | "cut";
+}
+
+async function pasteClipboard(
+	clipboard: FileClipboard,
+	parent: string,
+	initialTo: string,
+) {
+	const sourceName = baseName(clipboard.path);
+	let destination = initialTo;
+	for (let attempt = 0; attempt <= 50; attempt++) {
+		if (clipboard.operation === "copy" && attempt > 0) {
+			const name = copiedName(sourceName, clipboard.directory, attempt);
+			destination = parent ? `${parent}/${name}` : name;
+		}
+		try {
+			await (clipboard.operation === "cut"
+				? moveWorkspaceFile(clipboard.path, destination)
+				: copyWorkspaceFile(clipboard.path, destination));
+			return destination;
+		} catch (error) {
+			if (
+				clipboard.operation !== "copy" ||
+				!isWorkspaceFileConflict(error) ||
+				attempt >= 50
+			)
+				throw error;
+		}
+	}
+	return destination;
 }
 
 export function FileTree({ onFileSelect, onFileMove, platform }: Props) {
@@ -162,41 +191,38 @@ export function FileTree({ onFileSelect, onFileMove, platform }: Props) {
 		});
 	}, [rootQuery.error, toast]);
 
-	const refresh = useCallback(async () => {
+	const refresh = async () => {
 		await Promise.all([
 			queryClient.invalidateQueries({ queryKey: queryKeys.files.all }),
 			queryClient.invalidateQueries({
 				queryKey: queryKeys.insights.overview,
 			}),
 		]);
-	}, [queryClient]);
+	};
 
-	const toggleDir = useCallback(
-		async (path: string) => {
-			refreshRef.current++;
-			const target = findNode(nodesRef.current, path);
-			if (!target?.is_dir) return;
-			if (target.loaded) {
-				setNodes((current) =>
-					updateNode(current, path, (node) => ({
-						...node,
-						expanded: !node.expanded,
-					})),
-				);
-				return;
-			}
-
-			const children = await loadDir(path);
+	const toggleDir = async (path: string) => {
+		refreshRef.current++;
+		const target = findNode(nodesRef.current, path);
+		if (!target?.is_dir) return;
+		if (target.loaded) {
 			setNodes((current) =>
-				updateNode(current, path, (node) =>
-					node.loaded
-						? { ...node, expanded: true }
-						: { ...node, expanded: true, loaded: true, children },
-				),
+				updateNode(current, path, (node) => ({
+					...node,
+					expanded: !node.expanded,
+				})),
 			);
-		},
-		[loadDir],
-	);
+			return;
+		}
+
+		const children = await loadDir(path);
+		setNodes((current) =>
+			updateNode(current, path, (node) =>
+				node.loaded
+					? { ...node, expanded: true }
+					: { ...node, expanded: true, loaded: true, children },
+			),
+		);
+	};
 
 	const beginRename = (node: TreeNode) => {
 		setMenu(null);
@@ -231,7 +257,7 @@ export function FileTree({ onFileSelect, onFileMove, platform }: Props) {
 					? { ...current, path: movePath(current.path, node.path, to) }
 					: current,
 			);
-			onFileMove?.(node.path, to);
+			if (onFileMove) onFileMove(node.path, to);
 			await refresh();
 		} catch (error) {
 			toast({
@@ -239,19 +265,17 @@ export function FileTree({ onFileSelect, onFileMove, platform }: Props) {
 				description: error instanceof Error ? error.message : String(error),
 				tone: "error",
 			});
-		} finally {
-			renameSubmittingRef.current = false;
 		}
+		renameSubmittingRef.current = false;
 	};
 
 	const beginCreate = async (node: TreeNode | null, directory: boolean) => {
 		setMenu(null);
 		const parent = containingDirectory(node);
 
+		const expandPath = node?.is_dir && !node.expanded ? node.path : null;
 		try {
-			if (node?.is_dir && !node.expanded) {
-				await toggleDir(node.path);
-			}
+			if (expandPath !== null) await toggleDir(expandPath);
 		} catch (error) {
 			toast({
 				title: "Could not load folder",
@@ -306,9 +330,8 @@ export function FileTree({ onFileSelect, onFileMove, platform }: Props) {
 				description: error instanceof Error ? error.message : String(error),
 				tone: "error",
 			});
-		} finally {
-			createSubmittingRef.current = false;
 		}
+		createSubmittingRef.current = false;
 	};
 
 	const requestDelete = (node: TreeNode) => {
@@ -441,30 +464,9 @@ export function FileTree({ onFileSelect, onFileMove, platform }: Props) {
 		}
 
 		try {
-			let destination = initialTo;
-			for (let attempt = 0; attempt <= 50; attempt++) {
-				if (clipboard.operation === "copy" && attempt > 0) {
-					const name = copiedName(sourceName, clipboard.directory, attempt);
-					destination = parent ? `${parent}/${name}` : name;
-				}
-				try {
-					await (clipboard.operation === "cut"
-						? moveWorkspaceFile(sourcePath, destination)
-						: copyWorkspaceFile(sourcePath, destination));
-					break;
-				} catch (error) {
-					if (
-						clipboard.operation === "copy" &&
-						isWorkspaceFileConflict(error) &&
-						attempt < 50
-					) {
-						continue;
-					}
-					throw error;
-				}
-			}
+			const destination = await pasteClipboard(clipboard, parent, initialTo);
 			if (clipboard.operation === "cut") {
-				onFileMove?.(sourcePath, destination);
+				if (onFileMove) onFileMove(sourcePath, destination);
 				setFileClipboard(null);
 			}
 			await refresh();

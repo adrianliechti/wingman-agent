@@ -1,5 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { SettingsPatch } from "../state/workspaceContext.ts";
 import type { SessionSettings } from "../state/sessionStore.ts";
 import { ModelProviderIcon } from "./ModelProviderIcon";
@@ -42,42 +42,27 @@ export function ModelPicker({ settings, setSettings }: Props) {
 			}),
 	});
 
-	const toggle = useCallback(() => {
+	const toggle = () => {
 		setOpen((v) => !v);
-	}, []);
+	};
 
-	const selectModel = useCallback(
-		(id: string) => {
-			modelMutation.mutate(id);
-		},
-		[modelMutation],
-	);
+	const selectModel = (id: string) => {
+		modelMutation.mutate(id);
+	};
 
-	const selectEffort = useCallback(
-		(value: string) => {
-			effortMutation.mutate(value);
-		},
-		[effortMutation],
-	);
+	const selectEffort = (value: string) => {
+		effortMutation.mutate(value);
+	};
 
 	const currentName = useMemo(() => {
 		const match = models.find((m) => m.id === model);
 		return match?.name || model;
 	}, [models, model]);
 
-	const defaultEffort = useMemo(
-		() =>
-			effortOptions.find((v) => v === "default" || v === "auto") ?? "default",
-		[effortOptions],
-	);
-	const efforts = useMemo(
-		() => effortOptions.filter((v) => v !== defaultEffort),
-		[effortOptions, defaultEffort],
-	);
-	const steps = useMemo(
-		() => [defaultEffort, ...efforts],
-		[defaultEffort, efforts],
-	);
+	const defaultEffort =
+		effortOptions.find((v) => v === "default" || v === "auto") ?? "default";
+	const efforts = effortOptions.filter((v) => v !== defaultEffort);
+	const steps = [defaultEffort, ...efforts];
 	const stepIndex = Math.max(0, steps.indexOf(effort));
 	const pct =
 		dragPct ?? (steps.length > 1 ? (stepIndex / (steps.length - 1)) * 100 : 0);
@@ -85,58 +70,49 @@ export function ModelPicker({ settings, setSettings }: Props) {
 		steps.length > 1 ? Math.round((pct / 100) * (steps.length - 1)) : 0;
 	const knobLabel = previewIndex === 0 ? "Auto" : steps[previewIndex];
 
-	const commit = useCallback(
-		(index: number) => {
-			const value = steps[index];
-			if (value !== undefined && value !== effort) selectEffort(value);
-		},
-		[steps, effort, selectEffort],
-	);
+	const commit = (index: number) => {
+		const value = steps[index];
+		if (value !== undefined && value !== effort) selectEffort(value);
+	};
 
-	const handlePointerDown = useCallback(
-		(e: React.PointerEvent) => {
-			const track = trackRef.current;
-			if (!track || steps.length < 2) return;
-			const rect = track.getBoundingClientRect();
-			const toPct = (clientX: number) =>
-				Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100));
-			setDragging(true);
-			setDragPct(toPct(e.clientX));
-			const onMove = (ev: PointerEvent) => setDragPct(toPct(ev.clientX));
-			const onUp = (ev: PointerEvent) => {
-				window.removeEventListener("pointermove", onMove);
-				window.removeEventListener("pointerup", onUp);
-				const finalPct = toPct(ev.clientX);
-				const index = Math.round((finalPct / 100) * (steps.length - 1));
-				setDragging(false);
-				setDragPct(null);
-				commit(index);
-			};
-			window.addEventListener("pointermove", onMove);
-			window.addEventListener("pointerup", onUp);
-		},
-		[steps, commit],
-	);
-
-	const handleKeyDown = useCallback(
-		(e: React.KeyboardEvent) => {
-			let index = stepIndex;
-			if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
-				index = Math.max(0, stepIndex - 1);
-			} else if (e.key === "ArrowRight" || e.key === "ArrowUp") {
-				index = Math.min(steps.length - 1, stepIndex + 1);
-			} else if (e.key === "Home") {
-				index = 0;
-			} else if (e.key === "End") {
-				index = steps.length - 1;
-			} else {
-				return;
-			}
-			e.preventDefault();
+	const handlePointerDown = (e: React.PointerEvent) => {
+		const track = trackRef.current;
+		if (!track || steps.length < 2) return;
+		const rect = track.getBoundingClientRect();
+		const toPct = (clientX: number) =>
+			Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100));
+		setDragging(true);
+		setDragPct(toPct(e.clientX));
+		const onMove = (ev: PointerEvent) => setDragPct(toPct(ev.clientX));
+		const onUp = (ev: PointerEvent) => {
+			window.removeEventListener("pointermove", onMove);
+			window.removeEventListener("pointerup", onUp);
+			const finalPct = toPct(ev.clientX);
+			const index = Math.round((finalPct / 100) * (steps.length - 1));
+			setDragging(false);
+			setDragPct(null);
 			commit(index);
-		},
-		[stepIndex, steps, commit],
-	);
+		};
+		window.addEventListener("pointermove", onMove);
+		window.addEventListener("pointerup", onUp);
+	};
+
+	const handleKeyDown = (e: React.KeyboardEvent) => {
+		let index = stepIndex;
+		if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+			index = Math.max(0, stepIndex - 1);
+		} else if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+			index = Math.min(steps.length - 1, stepIndex + 1);
+		} else if (e.key === "Home") {
+			index = 0;
+		} else if (e.key === "End") {
+			index = steps.length - 1;
+		} else {
+			return;
+		}
+		e.preventDefault();
+		commit(index);
+	};
 
 	if (!model) return null;
 

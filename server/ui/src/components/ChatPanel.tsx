@@ -9,13 +9,14 @@ import {
 	X,
 } from "lucide-react";
 import {
-	useCallback,
 	useEffect,
+	useEffectEvent,
 	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
 	useSyncExternalStore,
+	useCallback,
 } from "react";
 import { ComposerDraft } from "../state/composerDraft.ts";
 import { splitSessionKey } from "../state/sessionStore.ts";
@@ -93,6 +94,7 @@ export interface ChatPanelProps {
 }
 
 const PIN_TOP_GAP = 16;
+const FOLLOW_SLACK = 32;
 
 // slashTokenAt returns the /command token the caret sits in: the index of its
 // leading slash and the typed query behind it. A token starts at the beginning
@@ -194,26 +196,39 @@ export function ChatPanel({
 	const [composer, setComposer] = useState<HTMLDivElement | null>(null);
 	const [filePickerButton, setFilePickerButton] =
 		useState<HTMLButtonElement | null>(null);
-	const turns = useMemo(() => buildTurns(entries), [entries]);
+	const turns = buildTurns(entries);
 
 	const submitPendingRef = useRef(false);
 	const historyIdxRef = useRef<number | null>(null);
 	const historyDraftRef = useRef("");
 	const pinRef = useRef<{ id: string; top: number } | null>(null);
 	const userScrolledRef = useRef(false);
+	// Keep the newest output in view until the user scrolls away from it.
+	const followRef = useRef(true);
+	const lastScrollTopRef = useRef(0);
 	const programmaticUntilRef = useRef(0);
 	const restoredRef = useRef(false);
 
 	const writeScrollTop = useCallback((el: HTMLElement, top: number) => {
 		programmaticUntilRef.current = performance.now() + 100;
 		el.scrollTop = top;
+		lastScrollTopRef.current = el.scrollTop;
 	}, []);
+
+	// The spacer only reserves room for pinning, so "latest" ends above it.
+	const latestScrollTop = (container: HTMLElement) =>
+		Math.max(
+			0,
+			container.scrollHeight -
+				(spacerRef.current?.offsetHeight ?? 0) -
+				container.clientHeight,
+		);
 
 	const pendingAnchorRef = useRef<{ id: string; viewportTop: number } | null>(
 		null,
 	);
 
-	const captureAnchorForTurns = useCallback((sourceTurns: Turn[]) => {
+	const captureAnchorForTurns = (sourceTurns: Turn[]) => {
 		const c = containerRef.current;
 		const content = contentRef.current;
 		if (!c || !content) return;
@@ -244,9 +259,9 @@ export function ChatPanel({
 			above = { id, viewportTop };
 		}
 		pendingAnchorRef.current = visible ?? below ?? above;
-	}, []);
+	};
 
-	const applyPendingAnchor = useCallback(() => {
+	const applyPendingAnchor = () => {
 		const c = containerRef.current;
 		const content = contentRef.current;
 		if (!c || !content) return;
@@ -261,7 +276,7 @@ export function ChatPanel({
 		if (Math.abs(delta) > 0.5) {
 			writeScrollTop(c, c.scrollTop + delta);
 		}
-	}, [writeScrollTop]);
+	};
 
 	const isActive = phase !== "idle";
 	const [awayFromLatest, setAwayFromLatest] = useState(false);
@@ -316,10 +331,8 @@ export function ChatPanel({
 	}>({ token: tokenKey, index: 0 });
 	const skillActive =
 		skillSelection.token === tokenKey ? skillSelection.index : 0;
-	const setSkillActive = useCallback(
-		(index: number) => setSkillSelection({ token: tokenKey, index }),
-		[tokenKey],
-	);
+	const setSkillActive = (index: number) =>
+		setSkillSelection({ token: tokenKey, index });
 
 	const tokenOpen = !!skillToken;
 	const skills = useSkills(sessionId, tokenOpen);
@@ -351,16 +364,13 @@ export function ChatPanel({
 		return out;
 	}, [entries]);
 
-	const recallHistory = useCallback(
-		(text: string) => {
-			setDraft(text);
-			requestAnimationFrame(() => {
-				const ta = textareaRef.current;
-				if (ta) ta.setSelectionRange(ta.value.length, ta.value.length);
-			});
-		},
-		[setDraft],
-	);
+	const recallHistory = (text: string) => {
+		setDraft(text);
+		requestAnimationFrame(() => {
+			const ta = textareaRef.current;
+			if (ta) ta.setSelectionRange(ta.value.length, ta.value.length);
+		});
+	};
 
 	useLayoutEffect(() => {
 		if (restoredRef.current || entries.length === 0) return;
@@ -384,6 +394,7 @@ export function ChatPanel({
 
 			submitPendingRef.current = false;
 			userScrolledRef.current = false;
+			followRef.current = false;
 
 			spacer.style.height = `${container.clientHeight}px`;
 			const cRect = container.getBoundingClientRect();
@@ -452,11 +463,13 @@ export function ChatPanel({
 		const container = containerRef.current;
 		if (!container) return;
 		const onScroll = () => {
+			const distance = latestScrollTop(container) - container.scrollTop;
 			if (performance.now() >= programmaticUntilRef.current)
 				userScrolledRef.current = true;
-			const away =
-				container.scrollHeight - container.scrollTop - container.clientHeight >
-				160;
+			if (Math.abs(container.scrollTop - lastScrollTopRef.current) > 1)
+				followRef.current = distance <= FOLLOW_SLACK;
+			lastScrollTopRef.current = container.scrollTop;
+			const away = distance > 160;
 			setAwayFromLatest(away);
 			if (!away) setSeenOutput(latestOutput);
 		};
@@ -464,247 +477,237 @@ export function ChatPanel({
 		return () => container.removeEventListener("scroll", onScroll);
 	}, [latestOutput]);
 
-	const handleSubmit = useCallback(
-		async (
-			intent?: TurnInputIntent,
-			overrideText?: string,
-		): Promise<boolean> => {
-			if (!available || prompts.length) return false;
-			const current = draft.getSnapshot();
-			const text = (overrideText ?? current.text).trim();
-			if (
-				(!text && current.images.length === 0 && current.files.length === 0) ||
-				current.submitting
-			) {
-				return false;
+	// Streaming output grows the transcript without firing scroll events.
+	const handleTranscriptResize = useEffectEvent(() => {
+		const container = containerRef.current;
+		if (!container) return;
+		// Resizes can land before the scroll event of a user who just moved away.
+		if (
+			Math.abs(container.scrollTop - lastScrollTopRef.current) > 1 &&
+			latestScrollTop(container) - container.scrollTop > FOLLOW_SLACK
+		)
+			followRef.current = false;
+		const pinned = pinRef.current && !userScrolledRef.current;
+		if (followRef.current && !pinned) {
+			const top = latestScrollTop(container);
+			if (Math.abs(container.scrollTop - top) > 1)
+				writeScrollTop(container, top);
+		}
+		const away = latestScrollTop(container) - container.scrollTop > 160;
+		setAwayFromLatest(away);
+		if (!away) setSeenOutput(latestOutput);
+	});
+	const transcriptView =
+		loading && entries.length === 0
+			? "loading"
+			: loadError
+				? "error"
+				: entries.length === 0 && phase === "idle"
+					? "empty"
+					: "entries";
+	useEffect(() => {
+		const content = contentRef.current;
+		if (transcriptView !== "entries" || !content) return;
+		const observer = new ResizeObserver(() => handleTranscriptResize());
+		observer.observe(content);
+		return () => observer.disconnect();
+	}, [transcriptView]);
+
+	const handleSubmit = async (
+		intent?: TurnInputIntent,
+		overrideText?: string,
+	): Promise<boolean> => {
+		if (!available || prompts.length) return false;
+		const current = draft.getSnapshot();
+		const text = (overrideText ?? current.text).trim();
+		if (
+			(!text && current.images.length === 0 && current.files.length === 0) ||
+			current.submitting
+		) {
+			return false;
+		}
+		submitPendingRef.current = true;
+		const focused = document.activeElement;
+		const sent = await draft.submit(({ images, files, editingQueueId }) => {
+			const imageData =
+				images.length > 0 ? images.map((i) => i.dataUrl) : undefined;
+			if (editingQueueId && onUpdateQueued) {
+				return onUpdateQueued(
+					editingQueueId,
+					text,
+					files.length > 0 ? files : undefined,
+					imageData,
+				);
+			} else {
+				const nextIntent =
+					intent ?? (isActive && canSteer ? "steer" : "follow_up");
+				return onSend(
+					text,
+					files.length > 0 ? files : undefined,
+					imageData,
+					nextIntent,
+				);
 			}
-			submitPendingRef.current = true;
-			const focused = document.activeElement;
-			const sent = await draft.submit(({ images, files, editingQueueId }) => {
-				const imageData =
-					images.length > 0 ? images.map((i) => i.dataUrl) : undefined;
-				if (editingQueueId && onUpdateQueued) {
-					return onUpdateQueued(
-						editingQueueId,
-						text,
-						files.length > 0 ? files : undefined,
-						imageData,
-					);
-				} else {
-					const nextIntent =
-						intent ?? (isActive && canSteer ? "steer" : "follow_up");
-					return onSend(
-						text,
-						files.length > 0 ? files : undefined,
-						imageData,
-						nextIntent,
-					);
-				}
-			});
-			if (!sent) {
-				submitPendingRef.current = false;
-				return false;
-			}
-			historyIdxRef.current = null;
-			historyDraftRef.current = "";
-			if (
-				document.activeElement === focused &&
-				focused?.closest("[data-chat-composer]")
-			)
-				textareaRef.current?.focus();
-			return true;
-		},
-		[
-			draft,
-			onUpdateQueued,
-			isActive,
-			canSteer,
-			onSend,
-			available,
-			prompts.length,
-		],
-	);
+		});
+		if (!sent) {
+			submitPendingRef.current = false;
+			return false;
+		}
+		historyIdxRef.current = null;
+		historyDraftRef.current = "";
+		if (
+			document.activeElement === focused &&
+			focused?.closest("[data-chat-composer]")
+		)
+			textareaRef.current?.focus();
+		return true;
+	};
 
 	// selectSkill completes the slash token at the caret in place; only a lone
 	// leading command without an input hint submits directly.
-	const selectSkill = useCallback(
-		(s: Skill) => {
-			const tok = slashTokenAt(input, caret);
-			if (!tok) return;
+	const selectSkill = (s: Skill) => {
+		const tok = slashTokenAt(input, caret);
+		if (!tok) return;
 
-			const end = wordEndAt(input, caret);
-			const whole = tok.start === 0 && end === input.length;
-			const needsInput = !!s.input_hint;
+		const end = wordEndAt(input, caret);
+		const whole = tok.start === 0 && end === input.length;
+		const needsInput = !!s.input_hint;
 
-			if (whole && !needsInput) {
-				void handleSubmit(undefined, `/${s.name}`);
-				return;
-			}
+		if (whole && !needsInput) {
+			void handleSubmit(undefined, `/${s.name}`);
+			return;
+		}
 
-			const insert = `/${s.name}`;
-			const trailing = input.slice(end);
-			const glue = trailing.startsWith(" ") ? "" : " ";
-			draft.update({
-				text: input.slice(0, tok.start) + insert + glue + trailing,
-			});
-			const pos = tok.start + insert.length + 1;
-			setCaret(pos);
-			requestAnimationFrame(() => {
-				const ta = textareaRef.current;
-				if (ta) {
-					ta.focus();
-					ta.setSelectionRange(pos, pos);
-				}
-			});
-		},
-		[draft, input, caret, handleSubmit],
-	);
+		const insert = `/${s.name}`;
+		const trailing = input.slice(end);
+		const glue = trailing.startsWith(" ") ? "" : " ";
+		draft.update({
+			text: input.slice(0, tok.start) + insert + glue + trailing,
+		});
+		const pos = tok.start + insert.length + 1;
+		setCaret(pos);
+		requestAnimationFrame(() => {
+			const ta = textareaRef.current;
+			if (ta) {
+				ta.focus();
+				ta.setSelectionRange(pos, pos);
+			}
+		});
+	};
 
-	const handleKeyDown = useCallback(
-		(e: React.KeyboardEvent) => {
-			if (e.nativeEvent.isComposing) return;
-			if (showSkills) {
-				switch (e.key) {
-					case "ArrowDown":
-						e.preventDefault();
-						setSkillActive(Math.min(activeSkill + 1, skillMatches.length - 1));
-						return;
-					case "ArrowUp":
-						e.preventDefault();
-						setSkillActive(Math.max(activeSkill - 1, 0));
-						return;
-					case "Enter":
-					case "Tab": {
-						e.preventDefault();
-						const s = skillMatches[activeSkill];
-						if (s) selectSkill(s);
-						return;
-					}
-					case "Escape":
-						e.preventDefault();
-						setDismissedToken(tokenKey);
-						return;
-				}
-			}
-			if (e.key === "Enter" && !e.shiftKey) {
-				e.preventDefault();
-				void handleSubmit(e.altKey ? "follow_up" : undefined);
-			}
-			if (e.key === "Escape" && isActive) {
-				onCancel();
-			}
-			if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) return;
-			if (e.key === "ArrowUp" && !editingQueueId && history.length > 0) {
-				const ta = e.currentTarget as HTMLTextAreaElement;
-				if (ta.selectionStart !== ta.selectionEnd) return;
-				const onFirstLine = atTextareaEdge(ta, "first");
-				if (onFirstLine) {
+	const handleKeyDown = (e: React.KeyboardEvent) => {
+		if (e.nativeEvent.isComposing) return;
+		if (showSkills) {
+			switch (e.key) {
+				case "ArrowDown":
 					e.preventDefault();
-					const navigating = historyIdxRef.current !== null;
-					const idx = navigating
-						? Math.max(0, (historyIdxRef.current as number) - 1)
-						: history.length - 1;
-					if (!navigating) historyDraftRef.current = input;
+					setSkillActive(Math.min(activeSkill + 1, skillMatches.length - 1));
+					return;
+				case "ArrowUp":
+					e.preventDefault();
+					setSkillActive(Math.max(activeSkill - 1, 0));
+					return;
+				case "Enter":
+				case "Tab": {
+					e.preventDefault();
+					const s = skillMatches[activeSkill];
+					if (s) selectSkill(s);
+					return;
+				}
+				case "Escape":
+					e.preventDefault();
+					setDismissedToken(tokenKey);
+					return;
+			}
+		}
+		if (e.key === "Enter" && !e.shiftKey) {
+			e.preventDefault();
+			void handleSubmit(e.altKey ? "follow_up" : undefined);
+		}
+		if (e.key === "Escape" && isActive) {
+			onCancel();
+		}
+		if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) return;
+		if (e.key === "ArrowUp" && !editingQueueId && history.length > 0) {
+			const ta = e.currentTarget as HTMLTextAreaElement;
+			if (ta.selectionStart !== ta.selectionEnd) return;
+			const onFirstLine = atTextareaEdge(ta, "first");
+			if (onFirstLine) {
+				e.preventDefault();
+				const navigating = historyIdxRef.current !== null;
+				const idx = navigating
+					? Math.max(0, (historyIdxRef.current as number) - 1)
+					: history.length - 1;
+				if (!navigating) historyDraftRef.current = input;
+				historyIdxRef.current = idx;
+				recallHistory(history[idx]);
+			}
+		}
+		if (e.key === "ArrowDown" && historyIdxRef.current !== null) {
+			const ta = e.currentTarget as HTMLTextAreaElement;
+			if (ta.selectionStart !== ta.selectionEnd) return;
+			const onLastLine = atTextareaEdge(ta, "last");
+			if (onLastLine) {
+				e.preventDefault();
+				const idx = (historyIdxRef.current as number) + 1;
+				if (idx >= history.length) {
+					historyIdxRef.current = null;
+					recallHistory(historyDraftRef.current);
+				} else {
 					historyIdxRef.current = idx;
 					recallHistory(history[idx]);
 				}
 			}
-			if (e.key === "ArrowDown" && historyIdxRef.current !== null) {
-				const ta = e.currentTarget as HTMLTextAreaElement;
-				if (ta.selectionStart !== ta.selectionEnd) return;
-				const onLastLine = atTextareaEdge(ta, "last");
-				if (onLastLine) {
-					e.preventDefault();
-					const idx = (historyIdxRef.current as number) + 1;
-					if (idx >= history.length) {
-						historyIdxRef.current = null;
-						recallHistory(historyDraftRef.current);
-					} else {
-						historyIdxRef.current = idx;
-						recallHistory(history[idx]);
-					}
-				}
-			}
-		},
-		[
-			handleSubmit,
-			isActive,
-			onCancel,
-			showSkills,
-			skillMatches,
-			activeSkill,
-			selectSkill,
-			setSkillActive,
-			tokenKey,
-			editingQueueId,
-			history,
-			input,
-			recallHistory,
-		],
-	);
+		}
+	};
 
-	const editPendingInput = useCallback(
-		(item: PendingTurnInput) => {
-			const next = {
-				text: item.text,
-				files: item.files,
-				images: item.images.map((dataUrl) => ({
-					id: crypto.randomUUID(),
-					dataUrl,
-				})),
-				editingQueueId: item.state === "queued" ? item.id : null,
-			};
-			if (next.editingQueueId) draft.beginQueueEdit(next);
-			else draft.update(next);
-			setCaret(item.text.length);
-			textareaRef.current?.focus();
-		},
-		[draft],
-	);
+	const editPendingInput = (item: PendingTurnInput) => {
+		const next = {
+			text: item.text,
+			files: item.files,
+			images: item.images.map((dataUrl) => ({
+				id: crypto.randomUUID(),
+				dataUrl,
+			})),
+			editingQueueId: item.state === "queued" ? item.id : null,
+		};
+		if (next.editingQueueId) draft.beginQueueEdit(next);
+		else draft.update(next);
+		setCaret(item.text.length);
+		textareaRef.current?.focus();
+	};
 
-	const addFile = useCallback(
-		(path: string) => {
-			const { files } = draft.getSnapshot();
-			if (!files.includes(path)) draft.update({ files: [...files, path] });
-			setShowPicker(false);
-			textareaRef.current?.focus();
-		},
-		[draft],
-	);
+	const addFile = (path: string) => {
+		const { files } = draft.getSnapshot();
+		if (!files.includes(path)) draft.update({ files: [...files, path] });
+		setShowPicker(false);
+		textareaRef.current?.focus();
+	};
 
-	const removeFile = useCallback(
-		(path: string) => {
-			draft.update({
-				files: draft.getSnapshot().files.filter((p) => p !== path),
-			});
-		},
-		[draft],
-	);
+	const removeFile = (path: string) => {
+		draft.update({
+			files: draft.getSnapshot().files.filter((p) => p !== path),
+		});
+	};
 
-	const addImageFiles = useCallback(
-		async (fileList: FileList | File[]) => {
-			const next: PendingImage[] = [];
-			for (const f of Array.from(fileList)) {
-				if (!f.type.startsWith("image/")) continue;
-				try {
-					const dataUrl = await processImage(f);
-					next.push({ id: crypto.randomUUID(), dataUrl, name: f.name });
-				} catch {}
-			}
-			if (next.length > 0)
-				draft.update({ images: [...draft.getSnapshot().images, ...next] });
-		},
-		[draft],
-	);
+	const addImageFiles = async (fileList: FileList | File[]) => {
+		const next: PendingImage[] = [];
+		for (const f of Array.from(fileList)) {
+			if (!f.type.startsWith("image/")) continue;
+			try {
+				const dataUrl = await processImage(f);
+				next.push({ id: crypto.randomUUID(), dataUrl, name: f.name });
+			} catch {}
+		}
+		if (next.length > 0)
+			draft.update({ images: [...draft.getSnapshot().images, ...next] });
+	};
 
-	const removeImage = useCallback(
-		(id: string) => {
-			draft.update({
-				images: draft.getSnapshot().images.filter((i) => i.id !== id),
-			});
-		},
-		[draft],
-	);
+	const removeImage = (id: string) => {
+		draft.update({
+			images: draft.getSnapshot().images.filter((i) => i.id !== id),
+		});
+	};
 
 	const [dragOver, setDragOver] = useState(false);
 	const dragDepthRef = useRef(0);
@@ -717,60 +720,54 @@ export function ChatPanel({
 		);
 	};
 
-	const handleDragEnter = useCallback((e: React.DragEvent) => {
+	const handleDragEnter = (e: React.DragEvent) => {
 		if (!hasDragPayload(e)) return;
 		e.preventDefault();
 		dragDepthRef.current++;
 		setDragOver(true);
-	}, []);
+	};
 
-	const handleDragOver = useCallback((e: React.DragEvent) => {
+	const handleDragOver = (e: React.DragEvent) => {
 		if (!hasDragPayload(e)) return;
 		e.preventDefault();
-	}, []);
+	};
 
-	const handleDragLeave = useCallback((e: React.DragEvent) => {
+	const handleDragLeave = (e: React.DragEvent) => {
 		if (!hasDragPayload(e)) return;
 		dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
 		if (dragDepthRef.current === 0) setDragOver(false);
-	}, []);
+	};
 
-	const handleDrop = useCallback(
-		(e: React.DragEvent) => {
-			if (!hasDragPayload(e)) return;
-			e.preventDefault();
-			dragDepthRef.current = 0;
-			setDragOver(false);
-			const path = e.dataTransfer.getData("application/x-wingman-file");
-			if (path) {
-				addFile(path);
-				return;
-			}
-			if (e.dataTransfer.files?.length) {
-				void addImageFiles(e.dataTransfer.files);
-				textareaRef.current?.focus();
-			}
-		},
-		[addFile, addImageFiles],
-	);
+	const handleDrop = (e: React.DragEvent) => {
+		if (!hasDragPayload(e)) return;
+		e.preventDefault();
+		dragDepthRef.current = 0;
+		setDragOver(false);
+		const path = e.dataTransfer.getData("application/x-wingman-file");
+		if (path) {
+			addFile(path);
+			return;
+		}
+		if (e.dataTransfer.files?.length) {
+			void addImageFiles(e.dataTransfer.files);
+			textareaRef.current?.focus();
+		}
+	};
 
-	const handlePaste = useCallback(
-		(e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-			const items = e.clipboardData?.items;
-			if (!items) return;
-			const pasted: File[] = [];
-			for (const item of items) {
-				if (item.kind !== "file") continue;
-				if (!item.type.startsWith("image/")) continue;
-				const f = item.getAsFile();
-				if (f) pasted.push(f);
-			}
-			if (pasted.length === 0) return;
-			e.preventDefault();
-			void addImageFiles(pasted);
-		},
-		[addImageFiles],
-	);
+	const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+		const items = e.clipboardData?.items;
+		if (!items) return;
+		const pasted: File[] = [];
+		for (const item of items) {
+			if (item.kind !== "file") continue;
+			if (!item.type.startsWith("image/")) continue;
+			const f = item.getAsFile();
+			if (f) pasted.push(f);
+		}
+		if (pasted.length === 0) return;
+		e.preventDefault();
+		void addImageFiles(pasted);
+	};
 
 	return (
 		<div
@@ -799,17 +796,17 @@ export function ChatPanel({
 				className={`h-full overflow-y-auto [overflow-anchor:none] ${historyPadding}`}
 				ref={containerRef}
 			>
-				{loading && entries.length === 0 ? (
+				{transcriptView === "loading" ? (
 					<div className="h-full flex items-center justify-center">
 						<Loader2 size={16} className="text-fg-dim animate-spin" />
 					</div>
-				) : loadError ? (
+				) : transcriptView === "error" ? (
 					<div className="h-full flex items-center justify-center">
 						<div className="max-w-sm px-4 text-center text-[13px] text-danger break-words">
 							{loadError}
 						</div>
 					</div>
-				) : entries.length === 0 && phase === "idle" ? (
+				) : transcriptView === "empty" ? (
 					<div className="flex h-full items-center justify-center px-4">
 						<div className="flex max-w-sm flex-col items-center text-center">
 							<img
@@ -874,8 +871,9 @@ export function ChatPanel({
 								onClick={() => {
 									const container = containerRef.current;
 									if (container)
-										writeScrollTop(container, container.scrollHeight);
+										writeScrollTop(container, latestScrollTop(container));
 									userScrolledRef.current = true;
+									followRef.current = true;
 									setAwayFromLatest(false);
 									setSeenOutput(latestOutput);
 								}}

@@ -13,7 +13,6 @@ import {
 	memo,
 	useContext,
 	useEffect,
-	useMemo,
 	useRef,
 	useState,
 	type ReactElement,
@@ -178,10 +177,9 @@ function MarkdownCodeBlock({ children, ...props }: CodePreProps) {
 		[],
 	);
 
-	const renderedCode = useMemo(
-		() => (loadedLanguage ? highlightedCode(code, loadedLanguage) : code),
-		[code, loadedLanguage],
-	);
+	const renderedCode = loadedLanguage
+		? highlightedCode(code, loadedLanguage)
+		: code;
 
 	function copyCode() {
 		void navigator.clipboard.writeText(code).then(() => {

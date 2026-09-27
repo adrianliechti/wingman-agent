@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { ManagedToolsStatus } from "../api/capabilities";
 import { getLSPActivity } from "../api/lsp";
 import { queryKeys } from "../api/query";
@@ -36,14 +36,11 @@ export function WorkspaceActivity({
 	const services = query.data?.services;
 	const toolErrorKey = managedToolErrorKey(tools);
 	const showToolError = !!toolErrorKey && dismissedError !== toolErrorKey;
-	const items = useMemo(
-		() => [
-			...activities,
-			...managedToolActivities(tools, showToolError),
-			...(services ?? []).map(languageServerActivity),
-		],
-		[activities, services, showToolError, tools],
-	);
+	const items = [
+		...activities,
+		...managedToolActivities(tools, showToolError),
+		...(services ?? []).map(languageServerActivity),
+	];
 
 	return (
 		<ActivityCenter

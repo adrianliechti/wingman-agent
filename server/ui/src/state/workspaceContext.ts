@@ -1,7 +1,6 @@
 import {
 	createContext,
 	useContext,
-	useCallback,
 	useEffect,
 	useSyncExternalStore,
 } from "react";
@@ -56,10 +55,7 @@ export function useSessionSettings(key = "", draftId = key) {
 	});
 	const sessionSettings = useSyncExternalStore(
 		client.store.subscribeRender,
-		useCallback(
-			() => client.store.getSnapshot()[key]?.settings ?? EMPTY_SETTINGS,
-			[client, key],
-		),
+		() => client.store.getSnapshot()[key]?.settings ?? EMPTY_SETTINGS,
 	);
 	useEffect(() => client.watch(key), [client, key]);
 	const settings = draft

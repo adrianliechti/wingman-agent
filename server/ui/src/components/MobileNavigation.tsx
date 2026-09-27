@@ -1,5 +1,5 @@
 import { ArrowLeft, Menu, SquarePen, X } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import { useWorkspace } from "../state/workspaceContext.ts";
 import { workspaceClient } from "../state/workspaceClient.ts";
 import { formatAgentName } from "../utils/agents";
@@ -25,7 +25,7 @@ export function MobileNavigation(props: Props) {
 	const { backend } = useWorkspace();
 	const backends = workspaceClient().scope.backends;
 	const [open, setOpen] = useState(false);
-	const close = useCallback(() => setOpen(false), []);
+	const close = () => setOpen(false);
 	return (
 		<>
 			<header

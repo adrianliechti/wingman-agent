@@ -7,13 +7,7 @@ import {
 	MonitorPlay,
 	Play,
 } from "lucide-react";
-import {
-	type ReactNode,
-	useCallback,
-	useEffect,
-	useRef,
-	useState,
-} from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
 	type DebugAction,
 	type DebugLaunchPlan,
@@ -136,12 +130,12 @@ function DebugLauncherContent({
 		};
 	}, [action, attempt, currentPath, installRequested, open, targetID]);
 
-	const close = useCallback(() => {
+	const close = () => {
 		requestRef.current?.abort();
 		onClose();
-	}, [onClose]);
+	};
 
-	const retry = useCallback(() => {
+	const retry = () => {
 		requestRef.current?.abort();
 		setPhase("planning");
 		setPlan(null);
@@ -150,9 +144,9 @@ function DebugLauncherContent({
 		setConfigurationText("{}");
 		setError("");
 		setAttempt((value) => value + 1);
-	}, []);
+	};
 
-	const start = useCallback(async () => {
+	const start = async () => {
 		if (!plan) return;
 		let configuration: unknown;
 		try {
@@ -171,18 +165,16 @@ function DebugLauncherContent({
 		requestRef.current = controller;
 		setPhase("starting");
 		setError("");
+		const request = {
+			...plan,
+			configuration,
+			breakpoints: pauseAtEntry ? plan.breakpoints : [],
+			function_breakpoints: pauseAtEntry ? plan.function_breakpoints : [],
+		};
 		try {
-			const session = await startDebugPlan(
-				{
-					...plan,
-					configuration,
-					breakpoints: pauseAtEntry ? plan.breakpoints : [],
-					function_breakpoints: pauseAtEntry ? plan.function_breakpoints : [],
-				},
-				controller.signal,
-			);
+			const session = await startDebugPlan(request, controller.signal);
 			if (controller.signal.aborted) return;
-			onStarted?.(session);
+			if (onStarted) onStarted(session);
 			close();
 		} catch (cause) {
 			if (controller.signal.aborted) return;
@@ -195,7 +187,7 @@ function DebugLauncherContent({
 			setError(message);
 			setPhase("review");
 		}
-	}, [close, configurationText, onFailed, onStarted, pauseAtEntry, plan]);
+	};
 
 	return (
 		<Dialog

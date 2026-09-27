@@ -437,7 +437,7 @@ func requestTurnInterrupt(ctx context.Context, cc *codexClient, threadID, turnID
 		select {
 		case <-time.After(noActiveTurnRetryDelays[attempt]):
 		case <-ctx.Done():
-			return err
+			return ctx.Err()
 		}
 	}
 }

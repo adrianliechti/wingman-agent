@@ -1,7 +1,5 @@
 import {
-	useCallback,
 	useEffect,
-	useMemo,
 	useState,
 	useSyncExternalStore,
 	type ReactNode,
@@ -24,14 +22,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 			: "wingman";
 	});
 	const [drafts, setDrafts] = useState<Record<string, SettingsPatch>>({});
-	const setDraft = useCallback(
-		(key: string, patch: SettingsPatch) =>
-			setDrafts((current) => ({
-				...current,
-				[key]: { ...current[key], ...patch },
-			})),
-		[],
-	);
+	const setDraft = (key: string, patch: SettingsPatch) =>
+		setDrafts((current) => ({
+			...current,
+			[key]: { ...current[key], ...patch },
+		}));
 	useEffect(() => {
 		client.start();
 		const focus = () => client.focus();
@@ -41,10 +36,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 			client.stop();
 		};
 	}, [client]);
-	const value = useMemo(
-		() => ({ backend, selectBackend, drafts, setDraft }),
-		[backend, drafts, setDraft],
-	);
+	const value = { backend, selectBackend, drafts, setDraft };
 	return (
 		<WorkspaceContext value={value}>
 			{children}

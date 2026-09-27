@@ -3,12 +3,12 @@ import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
 import { AlertTriangle, FileDigit, Loader2 } from "lucide-react";
 import {
 	type Ref,
-	useCallback,
 	useEffect,
 	useImperativeHandle,
 	useLayoutEffect,
 	useRef,
 	useState,
+	useCallback,
 } from "react";
 import type { DebugAction, DebugTarget } from "../api/debug";
 import {
@@ -174,6 +174,19 @@ function synchronizeEditorDraft(editor: CodeEditor, next: string) {
 		);
 	}
 	editor.setScrollPosition({ scrollTop, scrollLeft });
+}
+
+function synchronizeEditorDraftQuietly(
+	editor: CodeEditor,
+	next: string,
+	syncing: { current: boolean },
+) {
+	syncing.current = true;
+	try {
+		synchronizeEditorDraft(editor, next);
+	} finally {
+		syncing.current = false;
+	}
 }
 
 export function FileTab({
@@ -427,6 +440,7 @@ export function FileTab({
 		document.untitled,
 		file,
 		toast,
+		setLanguageFeaturesRevision,
 	]);
 
 	useEffect(() => {
@@ -461,12 +475,7 @@ export function FileTab({
 	useLayoutEffect(() => {
 		const editor = editorRef.current;
 		if (!editor || view !== "code") return;
-		syncingEditorRef.current = true;
-		try {
-			synchronizeEditorDraft(editor, document.draft);
-		} finally {
-			syncingEditorRef.current = false;
-		}
+		synchronizeEditorDraftQuietly(editor, document.draft, syncingEditorRef);
 	}, [document.draft, view]);
 
 	if (document.loading && !file) {
@@ -581,12 +590,11 @@ export function FileTab({
 								retainedModelRef.current = retained;
 								if (retained.view) editor.restoreViewState(retained.view);
 							}
-							syncingEditorRef.current = true;
-							try {
-								synchronizeEditorDraft(editor, document.draft);
-							} finally {
-								syncingEditorRef.current = false;
-							}
+							synchronizeEditorDraftQuietly(
+								editor,
+								document.draft,
+								syncingEditorRef,
+							);
 							transformBridgeRef.current = createMonacoTransformBridge(
 								monaco,
 								editor,

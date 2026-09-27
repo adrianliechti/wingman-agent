@@ -67,10 +67,9 @@ export function InlineTransformPrompt({
 			if (!controller.signal.aborted) {
 				setError(reason instanceof Error ? reason.message : String(reason));
 			}
-		} finally {
-			if (controllerRef.current === controller) controllerRef.current = null;
-			setBusy(false);
 		}
+		if (controllerRef.current === controller) controllerRef.current = null;
+		setBusy(false);
 	};
 
 	return (

@@ -20,12 +20,12 @@ import {
 	Sparkles,
 } from "lucide-react";
 import {
-	useCallback,
 	useEffect,
 	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
+	useCallback,
 } from "react";
 import {
 	Group,
@@ -134,48 +134,42 @@ export function DiffsPanel({
 				: "");
 	const [notice, setNotice] = useState("");
 	const [revertTarget, setRevertTarget] = useState<DiffEntry | null>(null);
-	const load = useCallback(
-		(action?: GitCommandType) => {
-			if (
-				git &&
-				(action === "stage" || action === "stage_all" || action === "unstage")
-			) {
-				return invalidateGitIndexQueries(queryClient);
-			}
-			return queryClient.invalidateQueries(
-				{
-					queryKey: git ? queryKeys.git.all : queryKeys.diffs.all,
-				},
-				{ cancelRefetch: false },
-			);
-		},
-		[git, queryClient],
-	);
+	const load = (action?: GitCommandType) => {
+		if (
+			git &&
+			(action === "stage" || action === "stage_all" || action === "unstage")
+		) {
+			return invalidateGitIndexQueries(queryClient);
+		}
+		return queryClient.invalidateQueries(
+			{
+				queryKey: git ? queryKeys.git.all : queryKeys.diffs.all,
+			},
+			{ cancelRefetch: false },
+		);
+	};
 	useEffect(() => {
 		if (!notice) return;
 		const timeout = window.setTimeout(() => setNotice(""), 3000);
 		return () => window.clearTimeout(timeout);
 	}, [notice]);
 
-	const request = useCallback(
-		async (command: GitCommand) => {
-			setBusy(command.type);
-			setError("");
-			setNotice("");
-			try {
-				const output = await runGitCommand(command);
-				if (output) setNotice(output);
-				await load(command.type);
-				return true;
-			} catch (e) {
-				setError(e instanceof Error ? e.message : String(e));
-				return false;
-			} finally {
-				setBusy("");
-			}
-		},
-		[load],
-	);
+	const request = async (command: GitCommand) => {
+		setBusy(command.type);
+		setError("");
+		setNotice("");
+		let ok = false;
+		try {
+			const output = await runGitCommand(command);
+			if (output) setNotice(output);
+			await load(command.type);
+			ok = true;
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		}
+		setBusy("");
+		return ok;
+	};
 
 	const requestRevert = (diff: DiffEntry) => {
 		setMenu(null);
@@ -203,9 +197,8 @@ export function DiffsPanel({
 			}
 		} catch (error) {
 			setError(error instanceof Error ? error.message : String(error));
-		} finally {
-			setBusy("");
 		}
+		setBusy("");
 	};
 
 	const confirmRevert = async () => {
@@ -218,9 +211,8 @@ export function DiffsPanel({
 			setRevertTarget(null);
 		} catch (e) {
 			setError(e instanceof Error ? e.message : String(e));
-		} finally {
-			setBusy("");
 		}
+		setBusy("");
 	};
 
 	if (!git && canInit) {
@@ -339,9 +331,8 @@ function GitInitPrompt() {
 			]);
 		} catch (e) {
 			setError(e instanceof Error ? e.message : String(e));
-		} finally {
-			setBusy(false);
 		}
+		setBusy(false);
 	};
 
 	return (
@@ -459,14 +450,8 @@ function GitChanges({
 	const commitBoxRef = useRef<HTMLDivElement>(null);
 	const commitMeasureRef = useRef<HTMLTextAreaElement>(null);
 	const commitButtonRef = useRef<HTMLButtonElement>(null);
-	const staged = useMemo(
-		() => status.files.filter((file) => file.staged),
-		[status.files],
-	);
-	const changed = useMemo(
-		() => status.files.filter((file) => file.changed),
-		[status.files],
-	);
+	const staged = status.files.filter((file) => file.staged);
+	const changed = status.files.filter((file) => file.changed);
 	const hasStaged = staged.length > 0;
 	const disabled = busy !== "";
 	const paths = (files: GitFileStatus[]) => [
@@ -486,7 +471,7 @@ function GitChanges({
 			staged: isStaged,
 		});
 	};
-	const toggleHistory = useCallback(() => {
+	const toggleHistory = () => {
 		const panel = historyPanelRef.current;
 		if (!panel) return;
 		if (panel.isCollapsed()) {
@@ -496,10 +481,10 @@ function GitChanges({
 			setHistoryOpen(false);
 			panel.collapse();
 		}
-	}, [historyPanelRef]);
-	const handleHistoryResize = useCallback(({ inPixels }: PanelSize) => {
+	};
+	const handleHistoryResize = ({ inPixels }: PanelSize) => {
 		setHistoryOpen(inPixels > 33);
-	}, []);
+	};
 	const measureCommitLayout = useCallback(() => {
 		const box = commitBoxRef.current;
 		const measure = commitMeasureRef.current;

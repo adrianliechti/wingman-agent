@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
-import { useCallback, useLayoutEffect, useMemo, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import { queryKeys } from "../api/query";
 import { getTask } from "../api/tasks";
 import { MarkdownContent } from "./MarkdownContent";
@@ -33,11 +33,11 @@ export function TaskTab({ sessionId, taskId }: Props) {
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const stickRef = useRef(true);
 
-	const handleScroll = useCallback(() => {
+	const handleScroll = () => {
 		const el = scrollRef.current;
 		if (!el) return;
 		stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-	}, []);
+	};
 
 	useLayoutEffect(() => {
 		if (!running || !stickRef.current) return;
