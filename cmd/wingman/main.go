@@ -55,6 +55,10 @@ func main() {
 		runRun(ctx, args[1:])
 	case "mcp":
 		runMCP(ctx, args[1:])
+	case "extract":
+		if err := runExtract(ctx, args[1:]); err != nil {
+			fatal(err)
+		}
 	default:
 		if !strings.HasPrefix(args[0], "-") {
 			fatal(fmt.Errorf("unknown command %q (run 'wingman --help' for usage)", args[0]))
@@ -103,6 +107,7 @@ Usage:
   wingman acp [target] [flags]  Run as an ACP stdio server (wingman | claude | codex | pi)
   wingman run <target> [args]   Run an external agent through wingman
   wingman mcp <command>         Manage MCP servers (list, get, add, remove, login, logout)
+  wingman extract <path>        Extract text from a document (PDF, DOCX, XLSX, PPTX, ...)
 
 Run targets:
   claude, claude-desktop, codex, copilot, gemini, goose, junie, opencode, pi
