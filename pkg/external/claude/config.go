@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/external"
+	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
 type Options = external.Options
@@ -42,7 +43,7 @@ func NewConfig(ctx context.Context, options *Options) (*ClaudeConfig, error) {
 
 	first := func(ids []string, name string) string {
 		for _, id := range ids {
-			if strings.Contains(id, name) {
+			if strings.HasPrefix(model.CanonicalID(id), "claude-"+name+"-") {
 				return id
 			}
 		}

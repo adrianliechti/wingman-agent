@@ -96,12 +96,15 @@ func TestCatalogPreservesUpstreamConfiguration(t *testing.T) {
 	if err := json.Unmarshal(embeddedModelCatalog, &upstream); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6"} {
+	for id, upstreamID := range map[string]string{
+		"gpt-6-astra":                "gpt-6-astra",
+		"gpt-6-sol":                  "gpt-6-sol",
+		"gpt-6-luna":                 "gpt-6-luna",
+		"gpt-5.6":                    "gpt-5.6-sol",
+		"openai/gpt-5.6":             "gpt-5.6-sol",
+		"~openai/GPT-6-ASTRA:latest": "gpt-6-astra",
+	} {
 		t.Run(id, func(t *testing.T) {
-			upstreamID := id
-			if id == "gpt-5.6" {
-				upstreamID = "gpt-5.6-sol"
-			}
 			var original map[string]any
 			for _, entry := range upstream.Models {
 				if entry["slug"] == upstreamID {
@@ -118,6 +121,9 @@ func TestCatalogPreservesUpstreamConfiguration(t *testing.T) {
 			var catalog modelCatalog
 			if err := json.Unmarshal(data, &catalog); err != nil {
 				t.Fatal(err)
+			}
+			if len(catalog.Models) != 1 || catalog.Models[0]["slug"] != id {
+				t.Fatalf("catalog did not preserve backend ID %q: %+v", id, catalog.Models)
 			}
 			for key, want := range original {
 				switch key {

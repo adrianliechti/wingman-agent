@@ -92,7 +92,7 @@ func TestRoleModelPreservesUtilityDiscoveryAndAvailabilityRules(t *testing.T) {
 	if _, ok := a.RoleModel("utility"); ok {
 		t.Fatal("utility role guessed a model before discovery")
 	}
-	if got := roleModelID(t, a, nil, ""); got != "claude-sonnet-5" {
+	if got := roleModelID(t, a, nil, ""); got != "claude-sonnet-5-5" {
 		t.Fatalf("main model before discovery = %q", got)
 	}
 
@@ -112,6 +112,77 @@ func TestRoleModelPreservesUtilityDiscoveryAndAvailabilityRules(t *testing.T) {
 	}
 	if got := roleModelID(t, a, nil, "utility"); got != "configured-utility" {
 		t.Fatalf("utility availability unexpectedly replaced %q", got)
+	}
+}
+
+func TestModelSelectionAcrossProviderPrefixes(t *testing.T) {
+	a := upstreamAgent("gpt-6-astra", "google/gemini-3.7-flash", "gemini-3.1-pro")
+	if got := roleModelID(t, a, nil, "main"); got != "google/gemini-3.7-flash" {
+		t.Fatalf("main model = %q", got)
+	}
+	if got := roleModelID(t, a, nil, "plan"); got != "gemini-3.1-pro" {
+		t.Fatalf("plan model = %q, want the main model's family", got)
+	}
+}
+
+func TestModelSelectionPreservesConfiguredAliases(t *testing.T) {
+	for _, tc := range []struct {
+		configured string
+		advertised []string
+		want       string
+	}{
+		{"gpt-5.6", []string{"openai/gpt-5.6-sol"}, "openai/gpt-5.6-sol"},
+		{"GPT-6-SOL", []string{"openai/gpt-6-sol"}, "openai/gpt-6-sol"},
+		{"gpt-6-sol", []string{"gpt-6-sol", "openai/gpt-6-sol"}, "gpt-6-sol"},
+		{"custom-deployment", []string{"custom-deployment"}, "custom-deployment"},
+	} {
+		t.Run(tc.configured, func(t *testing.T) {
+			a := upstreamAgent(append([]string{"claude-sonnet-5-5"}, tc.advertised...)...)
+			a.modelByRole[modelRoleMain] = tc.configured
+			if got := roleModelID(t, a, nil, "main"); got != tc.want {
+				t.Fatalf("configured %q resolved to %q, want %q", tc.configured, got, tc.want)
+			}
+			options, current := a.Models("")
+			if current != tc.want || !slices.ContainsFunc(options, func(m model.Model) bool { return m.ID == current }) {
+				t.Fatalf("picker lost selected model %q: current=%q options=%+v", tc.want, current, options)
+			}
+		})
+	}
+}
+
+func TestSessionAutoEffortOverridesGlobalSetting(t *testing.T) {
+	for _, action := range []string{"auto", "switch-model"} {
+		t.Run(action, func(t *testing.T) {
+			a := upstreamAgent("gpt-6-astra", "gpt-6-sol")
+			a.options.IsolateSessionSettings = true
+			a.modelByRole[modelRoleMain] = "gpt-6-astra"
+			a.effortByRole[modelRoleMain] = "max"
+			s := &sessionState{}
+			a.sessions["one"] = s
+			a.sessions["two"] = &sessionState{}
+			wantEffort := "low"
+			var err error
+			if action == "auto" {
+				err = a.SetEffort(context.Background(), "one", "auto")
+			} else {
+				err = a.SetModel(context.Background(), "one", "gpt-6-sol")
+				wantEffort = "high"
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := a.Effort("one"); got != "auto" {
+				t.Errorf("session effort selector = %q, want auto", got)
+			}
+			if got := a.effortFor(s); got != wantEffort {
+				t.Errorf("effective session effort = %q, want %q", got, wantEffort)
+			}
+			for _, sid := range []string{"two", ""} {
+				if got, _ := a.Effort(sid); got != "max" {
+					t.Errorf("unrelated session %q effort = %q, want max", sid, got)
+				}
+			}
+		})
 	}
 }
 
@@ -265,6 +336,7 @@ func TestModelClass(t *testing.T) {
 		"claude-opus-4-8":   model.ClassLarge,
 		"gpt-5.6-sol":       model.ClassLarge,
 		"claude-fable-5":    model.ClassLarge,
+		"claude-sonnet-5-5": model.ClassMedium,
 		"claude-sonnet-5":   model.ClassMedium,
 		"gpt-5.6-terra":     model.ClassMedium,
 		"gpt-5.3-codex":     model.ClassMedium,

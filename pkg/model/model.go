@@ -86,10 +86,6 @@ func fullContextWindowEnabled() bool {
 	}
 }
 
-func (m Model) ids() []string {
-	return append([]string{m.ID}, m.Aliases...)
-}
-
 var gptEfforts = []string{"none", "low", "medium", "high", "xhigh"}
 var gpt56Efforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
 var gpt6SolLunaEfforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
@@ -102,6 +98,22 @@ var qwen38Efforts = []string{"none", "low", "medium", "xhigh"}
 var Models = []Model{
 	// Anthropic
 
+	{
+		ID: "claude-sonnet-5-5",
+
+		Namespace: "anthropic",
+
+		Name: "Claude Sonnet 5.5",
+
+		Class: ClassMedium,
+
+		Output: 128000,
+
+		Context: 1000000,
+
+		// Thinking cannot be disabled on Sonnet 5.5, so "none" is not offered.
+		Efforts: claudeAlwaysThinkingEfforts,
+	},
 	{
 		ID: "claude-sonnet-5",
 
@@ -847,7 +859,6 @@ var Models = []Model{
 	{
 		ID: "minimax-m3",
 
-		Aliases:   []string{"MiniMax-M3"},
 		Namespace: "minimax",
 
 		Name: "MiniMax M3",
@@ -972,8 +983,7 @@ func Available(available map[string]bool) []Model {
 
 	resolved := make(map[int]string)
 	for _, id := range ids {
-		index, _, ok := find(id)
-		if ok {
+		if index := find(id); index >= 0 {
 			resolved[index] = id
 		}
 	}
@@ -990,51 +1000,47 @@ func Available(available map[string]bool) []Model {
 }
 
 func Find(id string) (Model, bool) {
-	_, m, ok := find(id)
-	if ok {
-		m.ID = id
+	index := find(id)
+	if index < 0 {
+		return Model{}, false
 	}
-	return m, ok
+	m := Models[index]
+	m.ID = id
+	return m, true
 }
 
-func find(id string) (int, Model, bool) {
-	matchID := id
-	namespace := ""
-	if prefix, suffix, ok := strings.Cut(matchID, "/"); ok {
-		namespace = strings.TrimPrefix(prefix, "~")
-		matchID = suffix
+// CanonicalID resolves known aliases, provider prefixes, and deployment tags
+// to their catalog ID. Unknown IDs are returned unchanged.
+func CanonicalID(id string) string {
+	if index := find(id); index >= 0 {
+		return Models[index].ID
 	}
+	return id
+}
 
-	matchIndex := -1
-	matchLength := 0
+func splitID(id string) (string, string) {
+	namespace := ""
+	if prefix, suffix, ok := strings.Cut(id, "/"); ok {
+		namespace = strings.TrimPrefix(prefix, "~")
+		id = suffix
+	}
+	id, _, _ = strings.Cut(id, ":")
+	return namespace, id
+}
 
+func find(id string) int {
+	namespace, name := splitID(id)
 	for index, m := range Models {
 		if namespace != "" && !strings.EqualFold(m.Namespace, namespace) {
 			continue
 		}
-		for _, candidate := range m.ids() {
-			if modelIDPrefix(matchID, candidate) && len(candidate) > matchLength {
-				matchIndex = index
-				matchLength = len(candidate)
-			}
+		if strings.EqualFold(name, m.ID) || slices.ContainsFunc(m.Aliases, func(alias string) bool {
+			return strings.EqualFold(name, alias)
+		}) {
+			return index
 		}
 	}
-
-	if matchIndex < 0 {
-		return 0, Model{}, false
-	}
-	return matchIndex, Models[matchIndex], true
-}
-
-func modelIDPrefix(id, prefix string) bool {
-	if len(id) < len(prefix) || !strings.EqualFold(id[:len(prefix)], prefix) {
-		return false
-	}
-	if len(id) == len(prefix) {
-		return true
-	}
-
-	return id[len(prefix)] == ':'
+	return -1
 }
 
 func Normalize(id string) string {
@@ -1053,6 +1059,7 @@ func Name(id string) string {
 // selection stays within one family when possible: switching families
 // mid-session drops encrypted reasoning state.
 func Family(id string) string {
+	_, id = splitID(CanonicalID(id))
 	id = strings.ToLower(id)
 
 	if i := strings.IndexAny(id, "-."); i > 0 {

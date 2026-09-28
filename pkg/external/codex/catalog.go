@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
@@ -71,13 +70,12 @@ func buildModelCatalog(modelIDs []string) ([]byte, error) {
 	seen := make(map[string]bool, len(modelIDs))
 
 	for _, id := range modelIDs {
-		if id == "" || seen[id] || !strings.HasPrefix(id, "gpt-") {
+		if id == "" || seen[id] {
 			continue
 		}
 		seen[id] = true
 
-		templateID := modelTemplateID(id, templates)
-		template, ok := templates[templateID]
+		template, ok := templates[model.CanonicalID(id)]
 		if !ok {
 			// Do not give an unrecognized model another model's instructions
 			// or tool configuration.
@@ -101,15 +99,4 @@ func buildModelCatalog(modelIDs []string) ([]byte, error) {
 	}
 
 	return json.MarshalIndent(modelCatalog{Models: selected}, "", "  ")
-}
-
-func modelTemplateID(id string, templates map[string]map[string]any) string {
-	if _, ok := templates[id]; ok {
-		return id
-	}
-
-	if id == "gpt-5.6" {
-		return "gpt-5.6-sol"
-	}
-	return id
 }

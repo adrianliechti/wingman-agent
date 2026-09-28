@@ -84,7 +84,7 @@ func loadVariants() map[string]Variant {
 }
 
 func VariantFor(id string) Variant {
-	id = model.Normalize(id)
+	id = model.Normalize(model.CanonicalID(id))
 	if _, suffix, ok := strings.Cut(id, "/"); ok {
 		id = suffix
 	}

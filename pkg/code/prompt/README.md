@@ -1,4 +1,4 @@
-# OpenAI prompt maintenance
+# Model prompt maintenance
 
 Wingman's GPT prompts adapt Codex instructions to Wingman's tools and session
 lifecycle. Compare the effective model template, not just a file named
@@ -62,3 +62,43 @@ cases when evaluating these instructions.
 This review reduced the nine GPT prompt files from 112,092 to 108,400 UTF-8 bytes
 in aggregate (3.3%). This is a text-size measurement, not a measured token,
 latency, cost, or task-success improvement.
+
+## Claude Sonnet 5.5
+
+`models/claude-sonnet-5-5/mode_agent.txt` adapts the effective Claude Code prompt
+captured on 2026-09-28 with `--model claude-sonnet-5-5`. The source is Claude Code
+2.1.284, release commit `2b8ce618c24de26410e4bdfc4e1d592accd61f61`, built on
+2026-09-28. Its temporary Darwin ARM64 binary was downloaded from Anthropic's
+[release distribution](https://downloads.claude.ai/claude-code-releases/2.1.284/darwin-arm64/claude)
+and checked against the
+[release manifest](https://downloads.claude.ai/claude-code-releases/2.1.284/manifest.json).
+SHA-256: `50a14c2f50f56668380fdda490167f1d3630d5cc18fb8aed3073c2c7ea7314fe`.
+
+Capture the first Messages API request's `system` blocks using a localhost mock
+API and a dummy API key, an empty working directory and `CLAUDE_CONFIG_DIR`,
+`--setting-sources ""`, `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`,
+`--settings '{"disableAllHooks":true,"autoMemoryEnabled":false}'`, and
+`--disable-slash-commands --no-session-persistence --max-turns 1 -p`.
+Disable nonessential traffic and automatic updates. This extracts the CLI's
+rendered instructions without asking a model to reproduce them or making an
+inference request to Anthropic. The same capture with `claude-sonnet-5` confirms
+that the two models select different prompts in this release.
+
+Sonnet 5.5 selects a lean prompt containing harness guidance, code style,
+careful actions, truthful reporting, context continuation, and acting on
+established information. Preserve this structure rather than inheriting the
+general Claude prompt's task and output sections or Opus's communication,
+delivery, and correction sections.
+
+Wingman's adaptation replaces the product identity and dedicated tool names,
+describes its appended session-context messages instead of Claude Code's
+mid-conversation system turns, and retains Wingman's existing software-security
+and explicit-request-only Git rules. Billing metadata, the Claude model/product
+catalog, token countdown, and unrelated identity guidance are omitted. Project,
+skills, memory, and environment sections still come from the shared templates.
+The existing longest-prefix router selects this variant for Sonnet 5.5,
+including normalized, provider-prefixed, and dated IDs; plan and unattended
+instructions still use the shared modes.
+
+Run `go test ./pkg/code/prompt ./pkg/code/agent` to check routing, rendering,
+and session integration. These checks do not measure Sonnet 5.5's behavior.

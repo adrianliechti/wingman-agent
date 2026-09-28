@@ -21,11 +21,17 @@ const (
 
 type ModelFilter func(id string) bool
 
-func IsAnthropic(id string) bool { return strings.HasPrefix(id, "claude-") }
+func IsAnthropic(id string) bool {
+	return strings.HasPrefix(strings.ToLower(model.CanonicalID(id)), "claude-")
+}
 
-func IsOpenAI(id string) bool { return strings.HasPrefix(id, "gpt-") }
+func IsOpenAI(id string) bool {
+	return strings.HasPrefix(strings.ToLower(model.CanonicalID(id)), "gpt-")
+}
 
-func IsGoogle(id string) bool { return strings.HasPrefix(id, "gemini-") }
+func IsGoogle(id string) bool {
+	return strings.HasPrefix(strings.ToLower(model.CanonicalID(id)), "gemini-")
+}
 
 type ModelOptions struct {
 	Kind   ModelKind

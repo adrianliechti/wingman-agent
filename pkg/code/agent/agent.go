@@ -212,6 +212,17 @@ func (a *Agent) Models(sessionID string) ([]model.Model, string) {
 	defer a.modelMu.Unlock()
 	available := model.Available(a.upstreamModels)
 	current, _ := a.roleModelLocked(s, "")
+	if current != "" {
+		canonical := model.CanonicalID(current)
+		index := slices.IndexFunc(available, func(m model.Model) bool {
+			return model.CanonicalID(m.ID) == canonical
+		})
+		if index >= 0 {
+			available[index].ID = current
+		} else {
+			available = append(available, model.Model{ID: current, Name: model.Name(current)})
+		}
+	}
 	return available, current
 }
 
@@ -248,18 +259,22 @@ func (a *Agent) roleModelLocked(s *sessionState, name string) (string, bool) {
 	if current == "" {
 		current = a.modelByRole[role]
 	}
+	available := model.Available(a.upstreamModels)
 	if current == "" {
 		if role == modelRoleUtility && a.upstreamModels == nil {
 			return "", false
 		}
-		current = a.classModelLocked(modelClassByRole[role])
+		current = classModel(available, modelClassByRole[role])
 	}
 
-	if role != modelRoleUtility && a.upstreamModels != nil {
-		available := model.Available(a.upstreamModels)
-		if len(available) > 0 && !slices.ContainsFunc(available, func(m model.Model) bool { return m.ID == current }) {
-			current = available[0].ID
+	if role != modelRoleUtility && a.upstreamModels != nil && !a.upstreamModels[current] && len(available) > 0 {
+		canonical := model.CanonicalID(current)
+		for _, candidate := range available {
+			if model.CanonicalID(candidate.ID) == canonical {
+				return candidate.ID, true
+			}
 		}
+		current = available[0].ID
 	}
 	if current == "" {
 		return "", false
@@ -285,12 +300,12 @@ func (a *Agent) RoleModel(role string) (harness.ModelOption, bool) {
 	return a.roleModel(nil, role)
 }
 
-// classModelLocked returns the first available model of the wanted class,
+// classModel returns the first available model of the wanted class,
 // preferring the family of the medium (coding) pick so plan/code switches
 // keep encrypted reasoning replayable.
-func (a *Agent) classModelLocked(class model.Class) string {
+func classModel(available []model.Model, class model.Class) string {
 	pick := func(class model.Class, family string) string {
-		for _, m := range model.Available(a.upstreamModels) {
+		for _, m := range available {
 			if m.Class != class {
 				continue
 			}
@@ -360,7 +375,7 @@ func (a *Agent) FetchModels(ctx context.Context) {
 	a.modelMu.Unlock()
 }
 
-var effortValues = []string{"auto", "none", "low", "medium", "high", "xhigh", "max"}
+var effortValues = append([]string{"auto"}, model.EffortLevels()...)
 
 func effortValuesFor(id string) []string {
 	m, _ := model.Find(id)
@@ -370,28 +385,13 @@ func effortValuesFor(id string) []string {
 	return effortValues
 }
 
-func clampEffortForModel(value string, m model.Model) string {
-	if value == "" || len(m.Efforts) == 0 || slices.Contains(m.Efforts, value) {
-		return value
-	}
-
-	rank := slices.Index(effortValues, value)
-	if rank < 0 {
-		return value
-	}
-
-	clamped := m.Efforts[0]
-	for _, supported := range m.Efforts {
-		supportedRank := slices.Index(effortValues, supported)
-		if supportedRank < 0 {
-			continue
+func (a *Agent) requestedEffortLocked(s *sessionState, role modelRole) string {
+	if s != nil {
+		if value, ok := s.effortByRole[role]; ok {
+			return value
 		}
-		if supportedRank > rank {
-			break
-		}
-		clamped = supported
 	}
-	return clamped
+	return a.effortByRole[role]
 }
 
 func (a *Agent) Effort(sessionID string) (string, []string) {
@@ -399,19 +399,13 @@ func (a *Agent) Effort(sessionID string) (string, []string) {
 	a.modelMu.Lock()
 	role := activeModelRole(s)
 	currentModel, _ := a.roleModelLocked(s, string(role))
-	current := ""
-	if s != nil {
-		current = s.effortByRole[role]
-	}
-	if current == "" {
-		current = a.effortByRole[role]
-	}
+	current := a.requestedEffortLocked(s, role)
 	a.modelMu.Unlock()
 	if current == "" {
 		current = "auto"
 	} else {
 		m, _ := model.Find(currentModel)
-		current = clampEffortForModel(current, m)
+		current = model.ClampEffort(current, m.Efforts)
 	}
 	return current, slices.Clone(effortValuesFor(currentModel))
 }
@@ -420,12 +414,7 @@ func (a *Agent) effortFor(s *sessionState) string {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	role := activeModelRole(s)
-	requested := ""
-	if s != nil && s.effortByRole[role] != "" {
-		requested = s.effortByRole[role]
-	} else if a.effortByRole[role] != "" {
-		requested = a.effortByRole[role]
-	}
+	requested := a.requestedEffortLocked(s, role)
 	current, _ := a.roleModelLocked(s, string(role))
 	m, _ := model.Find(current)
 	if requested == "" {
@@ -439,15 +428,13 @@ func (a *Agent) effortFor(s *sessionState) string {
 			requested = "high"
 		}
 	}
-	return clampEffortForModel(requested, m)
+	return model.ClampEffort(requested, m.Efforts)
 }
 
 func (a *Agent) SetEffort(_ context.Context, sessionID, value string) error {
-	switch value {
-	case "", "auto":
+	if value == "auto" {
 		value = ""
-	case "none", "low", "medium", "high", "xhigh", "max":
-	default:
+	} else if value != "" && !slices.Contains(effortValues, value) {
 		return fmt.Errorf("effort must be auto, none, low, medium, high, xhigh, or max (got %q)", value)
 	}
 	s := a.session(sessionID)

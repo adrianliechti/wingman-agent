@@ -55,6 +55,18 @@ func TestResolveModelsIncludesStandardAndFastOpenAIModels(t *testing.T) {
 	}
 }
 
+func TestResolveModelsPreservesProviderIDs(t *testing.T) {
+	models := resolveModels(map[string]bool{
+		"openai/gpt-6-astra":          true,
+		"~openai/GPT-6-LUNA:latest":   true,
+		"anthropic/claude-sonnet-5-5": true,
+	})
+	want := []string{"openai/gpt-6-astra", "~openai/GPT-6-LUNA:latest"}
+	if !slices.Equal(models, want) {
+		t.Fatalf("models = %q, want %q", models, want)
+	}
+}
+
 func containsConfig(args []string, value string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "--config" && args[i+1] == value {

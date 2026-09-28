@@ -8,6 +8,7 @@ func TestRequiresFinish(t *testing.T) {
 		"eu.anthropic.claude-sonnet-5-v1:0":    true,
 		"anthropic/claude-opus-5":              true,
 		"anthropic/claude-opus-5-5":            true,
+		"anthropic/claude-sonnet-5-5":          true,
 		"Anthropic-Claude":                     true,
 		"bedrock/eu.anthropic.claude-opus-4-8": true,
 		"bedrock-opus-5-5":                     true,

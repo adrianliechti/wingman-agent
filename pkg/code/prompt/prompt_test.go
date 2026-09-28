@@ -25,7 +25,7 @@ func TestVariantFor(t *testing.T) {
 
 	for _, id := range []string{
 		"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.1", "gpt-4o",
-		"claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-6", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+		"claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-6", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
 		"gemini-3.7-flash", "gemini-3.6-flash", "glm-5.3", "glm-5.2", "kimi-k3", "minimax-m3", "grok-4.6",
 		"qwen3.8-max", "qwen3.8", "qwen3.7-plus", "qwen3.5-plus",
 	} {
@@ -65,6 +65,23 @@ func TestVariantFor(t *testing.T) {
 
 	if VariantFor("claude-sonnet-5").Agent != VariantFor("claude-haiku-4-6").Agent {
 		t.Error("Claude Sonnet and Haiku should share the default Claude prompt")
+	}
+	sonnet55 := VariantFor("claude-sonnet-5-5")
+	if sonnet55.Agent == VariantFor("claude-sonnet-5").Agent {
+		t.Error("Claude Sonnet 5.5 should keep its model-specific prompt")
+	}
+	for _, id := range []string{
+		"CLAUDE-SONNET-5-5",
+		"claude-sonnet-5.5",
+		"anthropic/claude-sonnet-5-5",
+		"claude-sonnet-5-5-20260928",
+	} {
+		if VariantFor(id) != sonnet55 {
+			t.Errorf("VariantFor(%s) should resolve to Claude Sonnet 5.5", id)
+		}
+	}
+	if VariantFor("claude-sonnet-5-5ish") != VariantFor("claude") {
+		t.Error("Claude Sonnet 5.5 prompt should not match a partial model name")
 	}
 
 	if VariantFor("claude-opus-5").Agent == VariantFor("claude-sonnet-5").Agent {
@@ -121,6 +138,16 @@ func TestVariantFor(t *testing.T) {
 	}
 	if upper := VariantFor("QWEN3.8-MAX"); upper != VariantFor("qwen3.8-max") {
 		t.Error("Qwen prompt matching is not case-insensitive")
+	}
+}
+
+func TestTaggedModelVariants(t *testing.T) {
+	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "gpt-6-astra", "gpt-6-luna", "gpt-5.4-mini"} {
+		t.Run(id, func(t *testing.T) {
+			if got := VariantFor(id + ":latest"); got != VariantFor(id) {
+				t.Fatalf("tagged %s lost its model-specific instructions", id)
+			}
+		})
 	}
 }
 
@@ -200,7 +227,7 @@ func TestClaudePromptFamilies(t *testing.T) {
 		}
 	}
 
-	for _, id := range []string{"claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-fable-5-1", "claude-mythos-5-1"} {
+	for _, id := range []string{"claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-fable-5-1", "claude-mythos-5-1"} {
 		agent := VariantFor(id).Agent
 		for _, vendorOnly := range []string{"# Environment", "<total_tokens>", "gitStatus:", "TaskCreate", "https://github.com/anthropics/claude-code"} {
 			if strings.Contains(agent, vendorOnly) {
@@ -212,6 +239,7 @@ func TestClaudePromptFamilies(t *testing.T) {
 
 func TestBuildInstructionsRendersModelTemplate(t *testing.T) {
 	for _, id := range []string{
+		"claude-sonnet-5-5",
 		"claude-sonnet-5",
 		"claude-opus-5-5",
 		"claude-opus-5",
@@ -341,7 +369,7 @@ func TestBuildInstructionsSharedSections(t *testing.T) {
 }
 
 func TestBuildInstructionsAlwaysExplainsProjectInstructionScope(t *testing.T) {
-	for _, id := range []string{"claude-opus-5-5", "claude-opus-5", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.2", "gpt-5.1-codex"} {
+	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.2", "gpt-5.1-codex"} {
 		t.Run(id, func(t *testing.T) {
 			got := BuildInstructions(VariantFor(id).Agent, SectionData{})
 			if !strings.Contains(got, "# Project Guidelines\n") || !strings.Contains(got, "check for applicable instruction files") {
@@ -357,6 +385,7 @@ func TestBuildInstructionsAlwaysExplainsProjectInstructionScope(t *testing.T) {
 func TestAgentPromptPolicy(t *testing.T) {
 	for _, id := range []string{
 		"some-unknown-model",
+		"claude-sonnet-5-5",
 		"claude-sonnet-5",
 		"claude-opus-5-5",
 		"claude-opus-5",
@@ -402,6 +431,7 @@ func TestAgentPromptPolicy(t *testing.T) {
 func TestAgentPromptsExcludeRemovedTools(t *testing.T) {
 	for _, id := range []string{
 		"some-unknown-model",
+		"claude-sonnet-5-5",
 		"claude-sonnet-5",
 		"claude-opus-5-5",
 		"claude-opus-5",

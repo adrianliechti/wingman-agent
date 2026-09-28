@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
 type subagentType struct {
@@ -507,23 +509,6 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 	return agentTools
 }
 
-var effortRank = map[string]int{"none": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4, "max": 5}
-
-func clampEffort(level string, target agent.ModelOption) string {
-	if len(target.Efforts) == 0 {
-		return level
-	}
-
-	clamped := target.Efforts[0]
-	for _, supported := range target.Efforts {
-		if effortRank[supported] > effortRank[level] {
-			break
-		}
-		clamped = supported
-	}
-	return clamped
-}
-
 func applyModelOverrides(cfg *agent.Config, args map[string]any, defaultRole string) error {
 	resolve := cfg.RoleModel
 
@@ -551,7 +536,7 @@ func applyModelOverrides(cfg *agent.Config, args map[string]any, defaultRole str
 	level := ""
 	if effort, _ := args["effort"].(string); strings.TrimSpace(effort) != "" {
 		level = strings.ToLower(strings.TrimSpace(effort))
-		if _, ok := effortRank[level]; !ok {
+		if !slices.Contains(model.EffortLevels(), level) {
 			return fmt.Errorf("unknown effort %q (use none, low, medium, high, xhigh, or max)", level)
 		}
 		if target.ID == "" && resolve != nil {
@@ -562,13 +547,13 @@ func applyModelOverrides(cfg *agent.Config, args map[string]any, defaultRole str
 	} else if target.ID != "" && cfg.Effort != nil {
 		// A model override also clamps the inherited effort: the session may
 		// run at a level the smaller model does not support.
-		if inherited := cfg.Effort(); inherited != clampEffort(inherited, target) {
+		if inherited := cfg.Effort(); inherited != model.ClampEffort(inherited, target.Efforts) {
 			level = inherited
 		}
 	}
 
 	if level != "" {
-		clamped := clampEffort(level, target)
+		clamped := model.ClampEffort(level, target.Efforts)
 		cfg.Effort = func() string { return clamped }
 	}
 

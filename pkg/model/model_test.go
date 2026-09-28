@@ -21,6 +21,7 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"minimax-m3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"MiniMax-M3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"grok-4.6", "Grok 4.6", ClassLarge, 500_000, 500_000},
+		{"claude-sonnet-5-5", "Claude Sonnet 5.5", ClassMedium, 1_000_000, 128_000},
 		{"claude-opus-5-5", "Claude Opus 5.5", ClassLarge, 1_000_000, 128_000},
 		{"claude-fable-5-1", "Claude Fable 5.1", ClassLarge, 1_000_000, 128_000},
 		{"claude-mythos-5-1", "Claude Mythos 5.1", ClassLarge, 1_000_000, 128_000},
@@ -82,7 +83,7 @@ func TestClaude51ModelAvailability(t *testing.T) {
 
 func TestAlwaysThinkingClaudeEfforts(t *testing.T) {
 	want := []string{"low", "medium", "high", "xhigh", "max"}
-	for _, id := range []string{"claude-opus-5-5", "claude-fable-5", "claude-fable-5-1", "claude-mythos-5", "claude-mythos-5-1"} {
+	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5", "claude-fable-5-1", "claude-mythos-5", "claude-mythos-5-1"} {
 		t.Run(id, func(t *testing.T) {
 			got, ok := Find(id)
 			if !ok {
@@ -138,7 +139,7 @@ func TestDeepSeekFlash0731IsPreferred(t *testing.T) {
 	}
 }
 
-func TestOllamaModelMappingUsesLongestPrefix(t *testing.T) {
+func TestOllamaModelMapping(t *testing.T) {
 	t.Setenv("WINGMAN_CONTEXT_WINDOW_MODE", "full")
 
 	cases := []struct {
@@ -179,6 +180,27 @@ func TestOllamaModelMappingUsesLongestPrefix(t *testing.T) {
 	}
 }
 
+func TestCanonicalID(t *testing.T) {
+	for id, want := range map[string]string{
+		"openai/gpt-5.6":                     "gpt-5.6-sol",
+		"~openai/GPT-6-ASTRA:latest":         "gpt-6-astra",
+		"qwen/qwen3.8-27b:Q4_K_M":            "qwen3.8",
+		"anthropic/claude-sonnet-5-5:latest": "claude-sonnet-5-5",
+		"MiniMax-M3":                         "minimax-m3",
+		"anthropic/gpt-6-astra":              "anthropic/gpt-6-astra",
+		"unknown/deployment:tag":             "unknown/deployment:tag",
+		"gpt-5.6-sol-preview":                "gpt-5.6-sol-preview",
+		"claude-sonnet-5-5-20260928":         "claude-sonnet-5-5-20260928",
+	} {
+		if got := CanonicalID(id); got != want {
+			t.Errorf("CanonicalID(%q) = %q, want %q", id, got, want)
+		}
+		if resolved, ok := Find(id); ok && resolved.ID != id {
+			t.Errorf("Find(%q) changed the backend's ID to %q", id, resolved.ID)
+		}
+	}
+}
+
 func TestProviderPrefixedModelMapping(t *testing.T) {
 	for _, m := range Models {
 		if m.Namespace == "" {
@@ -188,6 +210,7 @@ func TestProviderPrefixedModelMapping(t *testing.T) {
 
 	cases := map[string]string{
 		"anthropic/claude-sonnet-5":   "Claude Sonnet 5",
+		"anthropic/claude-sonnet-5-5": "Claude Sonnet 5.5",
 		"anthropic/claude-opus-5-5":   "Claude Opus 5.5",
 		"anthropic/claude-fable-5-1":  "Claude Fable 5.1",
 		"anthropic/claude-mythos-5-1": "Claude Mythos 5.1",
@@ -233,6 +256,11 @@ func TestCurrentProviderModelClassification(t *testing.T) {
 		{"gpt-6-sol", "gpt", ClassMedium},
 		{"gpt-6-luna", "gpt", ClassSmall},
 		{"claude-opus-5-5", "claude", ClassLarge},
+		{"claude-sonnet-5-5", "claude", ClassMedium},
+		{"anthropic/claude-sonnet-5-5", "claude", ClassMedium},
+		{"~openai/GPT-6-ASTRA:latest", "gpt", ClassLarge},
+		{"google/gemini-3.7-flash", "gemini", ClassMedium},
+		{"qwen/qwen3.8-27b:latest", "qwen3", ClassMedium},
 	}
 
 	for _, tc := range cases {
