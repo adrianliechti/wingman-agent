@@ -48,13 +48,15 @@ func (a *App) composerChrome(width int) EditorChrome {
 	modeLabel := ""
 	currentMode := a.currentMode()
 	planMode := currentMode == code.PlanModeID
-	unattendedMode := currentMode == code.UnattendedModeID
+	unattendedMode := a.unattended()
 	if planMode {
 		color = t.Yellow
-		modeLabel = colored(t.Yellow, "PLAN")
 	}
 	if unattendedMode {
 		color = t.Red
+	}
+	if planMode {
+		modeLabel = colored(color, "PLAN")
 	}
 	if a.promptActive || a.askActive {
 		color = t.Red
@@ -80,10 +82,10 @@ func (a *App) composerChrome(width int) EditorChrome {
 	identityStyle := ""
 	if identityLabel != "" {
 		identityStyle = dim(identityLabel)
-		if planMode {
-			identityStyle = colored(t.Yellow, identityLabel)
-		} else if unattendedMode {
+		if unattendedMode {
 			identityStyle = colored(t.Red, identityLabel)
+		} else if planMode {
+			identityStyle = colored(t.Yellow, identityLabel)
 		}
 	}
 

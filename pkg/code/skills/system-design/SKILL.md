@@ -6,7 +6,7 @@ description: Design a new service, subsystem, platform capability, API, or data 
 
 Design a concrete system that fits the user's requirements and the repository's existing constraints. Stay read-only unless the user explicitly asks for a design document. Do not implement the design in this workflow.
 
-For every subagent launched in this workflow, set `model: plan` so discovery and synthesis use the configured frontier model.
+Subagents inherit the selected model and effort by default. Use `model: complex` only for a demanding subtask that warrants it, or `model: utility` for mechanical work. A specialist role alone does not require a model change.
 
 Design the following system. If no invocation argument follows, use the user's latest request:
 
@@ -25,7 +25,7 @@ Ask only for consequential missing information. Do not invent traffic numbers or
 
 ## Phase 2: Ground the design
 
-When a repository exists, launch `explore` agents with `model: plan` for disjoint questions: reusable components and conventions, current runtime and deployment model, integrations, storage, protocols, and operational controls. Require file:line evidence and read the essential files yourself.
+When a repository exists, launch `explore` agents for disjoint questions: reusable components and conventions, current runtime and deployment model, integrations, storage, protocols, and operational controls. Require file:line evidence and read the essential files yourself.
 
 Launch a `code-architect` agent with the requirements and evidence. Ask for one recommended design, credible alternatives, decisive trade-offs, and the conditions that would change the recommendation.
 

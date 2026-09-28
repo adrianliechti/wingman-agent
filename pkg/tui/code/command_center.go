@@ -78,8 +78,10 @@ func (a *App) showCommandCenter() {
 			DisabledReason: "available when the current turn finishes",
 		}
 		switch command.Name {
-		case "/agent", "/plan", "/unattended":
+		case "/agent", "/plan":
 			item.Checked = strings.TrimPrefix(command.Name, "/") == currentMode
+		case "/unattended":
+			item.Checked = a.unattended()
 		}
 
 		run := func() { command.Run(a) }

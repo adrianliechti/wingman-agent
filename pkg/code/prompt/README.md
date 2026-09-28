@@ -23,8 +23,9 @@ GPT-5.6 Sol, GPT-5.5, and GPT-5.4 catalog templates are unchanged from
 
 Model routing uses the longest normalized prefix in `VariantFor`. Preserve
 distinct variants and their model-specific guidance, including GPT-6 Luna's
-explicit-request-only testing policy. Plan mode and unattended mode use Wingman's
-shared templates.
+explicit-request-only testing policy. Plan guidance and the independent unattended
+policy append Wingman's shared templates to the selected model's instructions.
+Plan's read-only restrictions take precedence over implementation guidance.
 
 ## Intentional harness adaptations
 

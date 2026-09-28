@@ -32,7 +32,7 @@ func UnattendedMode() Mode {
 	return Mode{
 		ID:          UnattendedModeID,
 		Name:        "Unattended",
-		Description: "Auto-approves actions and makes reasonable assumptions instead of asking.",
+		Description: "Approve actions automatically and continue without questions.",
 	}
 }
 
@@ -106,6 +106,13 @@ type Agent interface {
 	Cancel(sessionID string)
 
 	Close() error
+}
+
+// UnattendedAgent exposes an interaction policy independent of Agent/Plan mode.
+// Adapters that only expose provider-defined modes may omit this interface.
+type UnattendedAgent interface {
+	Unattended(sessionID string) bool
+	SetUnattended(ctx context.Context, sessionID string, enabled bool) error
 }
 
 var (

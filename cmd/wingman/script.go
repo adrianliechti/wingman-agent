@@ -417,6 +417,12 @@ func validateJSONOutput(result string) error {
 }
 
 func setScriptMode(ctx context.Context, a code.Agent, sessionID, wanted string) error {
+	if policy, ok := a.(code.UnattendedAgent); ok && wanted == code.UnattendedModeID {
+		if err := a.SetMode(ctx, sessionID, code.AgentModeID); err != nil {
+			return err
+		}
+		return policy.SetUnattended(ctx, sessionID, true)
+	}
 	available, current := a.Modes(sessionID)
 	if current == wanted {
 		return nil

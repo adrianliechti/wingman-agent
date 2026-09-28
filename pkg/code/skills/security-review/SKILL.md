@@ -8,7 +8,7 @@ Find HIGH-CONFIDENCE, genuinely exploitable vulnerabilities — not a checklist 
 
 This is **read-only**. Spawn `security` agents for all scanning and verification. Never build, run, install, send requests, or probe the target. If `$ARGUMENTS` contains a path, scope everything to it. If the user asks for raw scanner output, backlog triage, or patch-ready artifacts, use `/vuln-scan` and `/triage` instead.
 
-For every subagent launched in this workflow, set `model: plan` so scanning and adversarial verification use the configured frontier model.
+Subagents inherit the selected model and effort by default. Use `model: complex` only for a demanding subtask that warrants it, or `model: utility` for mechanical work. A specialist role alone does not require a model change.
 
 ## Phase 1: Scope
 

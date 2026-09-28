@@ -9,8 +9,8 @@ import (
 	"strings"
 )
 
-// Class buckets models by capability for automatic per-role selection: large
-// drives planning, medium drives coding, small drives utility calls (recaps,
+// Class buckets models by capability for explicit delegation: large for complex
+// tasks, medium for the default selection, and small for utility calls (recaps,
 // compaction summaries) and the "fast" model of external agents.
 type Class int
 

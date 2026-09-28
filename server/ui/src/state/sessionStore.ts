@@ -21,8 +21,12 @@ export type SessionSettings = {
 	efforts: string[];
 	modes: ModeOption[];
 	mode: string;
+	unattended?: boolean;
 	canDelete: boolean;
 };
+export type SettingsPatch = Partial<
+	Pick<SessionSettings, "model" | "effort" | "mode" | "unattended">
+>;
 export type SessionFields = {
 	status: "loading" | "ready" | "error" | "deleted";
 	phase: Phase;

@@ -17,7 +17,7 @@ import (
 // Definition is a user-provided agent type: a markdown file whose frontmatter
 // names the agent and whose body becomes its instructions. Access is an
 // abstract tool policy ("read-only", "verify", "all"), never a tool list, and
-// Model is an optional default role ("plan", "utility").
+// Model is an optional default role ("default", "complex", "utility").
 type Definition struct {
 	Name         string
 	Description  string
@@ -126,7 +126,9 @@ func ParseDefinition(data string) (Definition, error) {
 	// Like the model tool parameter, an unusable model is a preference to
 	// drop, not an error: .claude/agents files name concrete models.
 	switch role := strings.ToLower(strings.TrimSpace(header.Model)); role {
-	case "plan", "utility":
+	case "plan":
+		def.Model = "complex"
+	case "default", "complex", "utility":
 		def.Model = role
 	}
 

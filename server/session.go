@@ -43,19 +43,21 @@ type PromptView struct {
 }
 
 type SessionSettings struct {
-	Models    []modelOption `json:"models"`
-	Model     string        `json:"model"`
-	Effort    string        `json:"effort"`
-	Efforts   []string      `json:"efforts"`
-	Mode      string        `json:"mode"`
-	Modes     []modeOption  `json:"modes"`
-	CanDelete bool          `json:"canDelete"`
+	Models     []modelOption `json:"models"`
+	Model      string        `json:"model"`
+	Effort     string        `json:"effort"`
+	Efforts    []string      `json:"efforts"`
+	Mode       string        `json:"mode"`
+	Modes      []modeOption  `json:"modes"`
+	Unattended *bool         `json:"unattended,omitempty"`
+	CanDelete  bool          `json:"canDelete"`
 }
 
 type modelOption struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Namespace string   `json:"namespace"`
+	Efforts   []string `json:"efforts,omitempty"`
 }
 
 type UsageView struct {
@@ -167,8 +169,12 @@ func (b *backendRuntime) settings(sid string) SessionSettings {
 	effort, efforts := b.agent.Effort(sid)
 	modes, mode := b.agent.Modes(sid)
 	state := SessionSettings{Model: model, Effort: effort, Efforts: append([]string{}, efforts...), Mode: mode, Modes: toModeState(modes, mode).Modes, Models: []modelOption{}, CanDelete: supportsDelete(b.agent)}
+	if policy, ok := b.agent.(code.UnattendedAgent); ok {
+		enabled := policy.Unattended(sid)
+		state.Unattended = &enabled
+	}
 	for _, m := range models {
-		state.Models = append(state.Models, modelOption{m.ID, m.Name, m.Namespace})
+		state.Models = append(state.Models, modelOption{ID: m.ID, Name: m.Name, Namespace: m.Namespace, Efforts: slices.Clone(m.Efforts)})
 	}
 	return state
 }

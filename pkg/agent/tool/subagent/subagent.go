@@ -64,7 +64,6 @@ var subagentTypes = map[string]subagentType{
 		AllowTool:           allowReadOnlyTool,
 		WrapDynamicReadOnly: true,
 		ReadOnly:            true,
-		Model:               "plan",
 	},
 	"code-architect": {
 		Instructions:        codeArchitectInstructions,
@@ -77,7 +76,6 @@ var subagentTypes = map[string]subagentType{
 		AllowTool:           allowReadOnlyTool,
 		WrapDynamicReadOnly: true,
 		ReadOnly:            true,
-		Model:               "plan",
 	},
 	"code-simplifier": {
 		Instructions: codeSimplifierInstructions,
@@ -176,9 +174,9 @@ func newSubagentRunner(parent *agent.Config, typ subagentType, spec durableSpec,
 	if spec.Model != "" {
 		subcfg.Model = func() string { return spec.Model }
 	}
-	if spec.Effort != "" {
-		subcfg.Effort = func() string { return spec.Effort }
-	}
+	// Empty effort means auto and is also part of the child's snapshot. Do not
+	// leave it bound to the parent's mutable effort callback on spawn or resume.
+	subcfg.Effort = func() string { return spec.Effort }
 	subcfg.Tools = func() []tool.Tool {
 		var tools []tool.Tool
 		if parent.Tools != nil {
@@ -329,7 +327,7 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 		"",
 		"Write a self-contained prompt: goal, relevant paths or symbols, allowed edit scope, and the expected report shape. Pick the narrowest fitting type. Do not delegate a single known lookup or the synthesis of results you already hold. Give a verifier only the claim to check, not the reasoning behind it.",
 		"",
-		"The agent inherits your model and effort. Override `model` or `effort` only when a different tier clearly fits: `utility` for mechanical sweeps, `plan` for the hardest review or architecture work.",
+		"The agent inherits your model and effort by default. Use `model: default` to explicitly inherit, including when a custom agent specifies another model. Override `model` or `effort` only when a different tier clearly fits: `utility` for mechanical sweeps, `complex` for demanding review or architecture work. These choices do not change Agent/Plan mode.",
 	)
 
 	if tasks != nil {
@@ -356,8 +354,8 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 		},
 		"model": map[string]any{
 			"type":        "string",
-			"description": "Optional model role for the new agent: `plan` runs the session's planning model (most capable available), `utility` its utility model (smallest and fastest). Omit to inherit the session model (the default and preferred).",
-			"enum":        []string{"plan", "utility"},
+			"description": "Model choice for the new agent: `default` inherits the parent's selected model, `utility` selects the configured utility model or an available small model, and `complex` selects the configured complex model or an available large model. Omit to inherit unless the custom agent definition specifies a model. `plan` is a compatibility alias for `complex`.",
+			"enum":        []string{"default", "utility", "complex", "plan"},
 		},
 		"effort": map[string]any{
 			"type":        "string",
@@ -517,11 +515,15 @@ func applyModelOverrides(cfg *agent.Config, args map[string]any, defaultRole str
 	role := defaultRole
 	if model, _ := args["model"].(string); strings.TrimSpace(model) != "" {
 		role = strings.ToLower(strings.TrimSpace(model))
-		switch role {
-		case "plan", "utility":
-		default:
-			return fmt.Errorf("unknown model role %q (use plan or utility, or omit to inherit)", role)
-		}
+	}
+	switch role {
+	case "default":
+		role = ""
+	case "plan":
+		role = "complex"
+	case "", "complex", "utility":
+	default:
+		return fmt.Errorf("unknown model role %q (use default, utility, or complex)", role)
 	}
 
 	// An unresolvable role keeps the inherited model: the role is a
@@ -545,14 +547,12 @@ func applyModelOverrides(cfg *agent.Config, args map[string]any, defaultRole str
 			}
 		}
 	} else if target.ID != "" && cfg.Effort != nil {
-		// A model override also clamps the inherited effort: the session may
-		// run at a level the smaller model does not support.
-		if inherited := cfg.Effort(); inherited != model.ClampEffort(inherited, target.Efforts) {
-			level = inherited
-		}
+		// Snapshot inherited effort once, including auto, before clamping it
+		// to the overridden model. The parent may change while the child starts.
+		level = cfg.Effort()
 	}
 
-	if level != "" {
+	if target.ID != "" || level != "" {
 		clamped := model.ClampEffort(level, target.Efforts)
 		cfg.Effort = func() string { return clamped }
 	}

@@ -243,19 +243,21 @@ Provider priority is `WINGMAN_URL`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, then
 (`OLLAMA_HOST` or `OLLAMA_API_KEY`). When none is set, Wingman connects to an OpenAI-compatible
 backend at `http://localhost:4242/v1`.
 
-**Models & Reasoning** — every value is optional; unset values are chosen automatically by role (plan → largest available model, code → medium, utilities → smallest):
+**Models & Reasoning** — Agent and Plan share the selected model and effort. The initial model defaults to an available medium model; subagents inherit the selection unless explicitly overridden. Unattended is a separate setting: approve actions automatically and continue without questions. Plan stays read-only.
 
 | Variable | Description |
 |----------|-------------|
-| `WINGMAN_MODEL` | Coding model; takes priority over `OPENAI_DEFAULT_MODEL` |
-| `WINGMAN_MODEL_PLAN` | Plan-mode model (default: largest available, e.g. Opus/Sol) |
+| `WINGMAN_MODEL` | Session model for Agent and Plan; takes priority over `OPENAI_DEFAULT_MODEL` |
+| `WINGMAN_MODEL_COMPLEX` | Model for explicit `complex` subagent tasks (default: keep a selected large model, otherwise prefer an available large model in the selected family) |
+| `WINGMAN_MODEL_PLAN` | Legacy alias for `WINGMAN_MODEL_COMPLEX`; does not switch the model in Plan mode |
 | `WINGMAN_MODEL_UTILITY` | Model for recaps, compaction summaries, selection transformations, and commit messages (default: smallest available, e.g. Haiku/Luna) |
 | `WINGMAN_MODEL_TAB` | Optional model override for web-editor Tab predictions (default: the utility role, then the current coding model) |
-| `WINGMAN_EFFORT` | Coding reasoning effort: `none`/`low`/`medium`/`high`/`xhigh`/`max` (default: `high`) |
-| `WINGMAN_EFFORT_PLAN` | Plan-mode reasoning effort (default: `xhigh` on large models, else `high`) |
+| `WINGMAN_EFFORT` | Session reasoning effort: `none`/`low`/`medium`/`high`/`xhigh`/`max`; unset or `auto` uses the model's default |
 | `WINGMAN_CONTEXT_WINDOW` | Effective context window in tokens; overrides model catalog values for compaction and usage reporting |
 | `WINGMAN_CONTEXT_WINDOW_MODE` | `full` compacts against the model's full catalog window instead of stopping at the provider's long-context price threshold |
 | `WINGMAN_LARGE_CONTEXT` | Deprecated alias for `WINGMAN_CONTEXT_WINDOW_MODE=full` |
+
+`WINGMAN_EFFORT_PLAN` is retired; use `WINGMAN_EFFORT` or a subagent's explicit `effort` argument. Switching collaboration modes preserves the model and effort. Selecting a different model resets effort to `auto`.
 
 **Behavior**
 
@@ -683,6 +685,7 @@ when the terminal does not report its background color.
 | `/model` | Select AI model and reasoning effort from available options |
 | `/plan` | Enter planning mode |
 | `/agent` | Return to execution mode |
+| `/unattended` | Toggle unattended operation: automatic approvals, no questions; keeps the selected mode |
 | `/problems` | Show LSP diagnostics for the workspace |
 | `/diff` | Show working tree changes; on wide terminals toggles a live diff pane beside the chat |
 | `/copy` | Copy the last response, an individual code block, or a blockquote |
@@ -882,7 +885,15 @@ access: read-only
 You are a PostgreSQL specialist. Inspect schemas, migrations, and queries...
 ```
 
-The body becomes the agent's system prompt. `access` selects the toolset — `read-only` (search/read only), `verify` (read plus build/test commands), or `all` (default) — and an optional `model: plan` or `model: utility` picks the session's planning or utility model instead of inheriting. A custom definition with a built-in name replaces that built-in.
+The body becomes the agent's system prompt. `access` selects the toolset — `read-only` (search/read only), `verify` (read plus build/test commands), or `all` (default). A custom definition with a built-in name replaces that built-in.
+
+Subagent model choices are independent of Agent/Plan mode:
+
+- `default`: inherit the parent's model and effort. Built-in agents, including reviewers and security auditors, use this by default.
+- `utility`: use the configured utility model or an available small model for cheaper tasks.
+- `complex`: use the configured complex model or an available large model for demanding tasks. `plan` remains a compatibility alias.
+
+An optional `model` in a custom agent's frontmatter supplies its default choice. The `agent` tool's explicit `model` argument takes precedence; `model: default` restores inheritance even for a custom agent with an override. An optional `effort` argument adjusts reasoning effort to a supported level. Without an override, effort is inherited, and a changed model clamps it to its supported levels. If a requested tier has no available model, the parent model is retained.
 
 ## 🖥️ Server Mode
 

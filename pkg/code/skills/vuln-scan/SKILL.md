@@ -6,7 +6,7 @@ description: Static source-code vulnerability scan that maps focus areas, fans o
 
 Run an authorized static scan and write raw findings for `/triage`. This is read-only with respect to target code: do not build, run, install dependencies, send requests, or probe services. You may write only `VULN-FINDINGS.json` and `VULN-FINDINGS.md` in the current workspace.
 
-For every subagent launched in this workflow, set `model: plan` so reconnaissance, scanning, and confidence calibration use the configured frontier model.
+Subagents inherit the selected model and effort by default. Use `model: complex` only for a demanding subtask that warrants it, or `model: utility` for mechanical work. A specialist role alone does not require a model change.
 
 Arguments: `$ARGUMENTS`. Parse them yourself:
 - first positional: target path (default `.`);

@@ -1,6 +1,7 @@
 package subagent_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,78 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+func TestSubagentModelChoicesReachProvider(t *testing.T) {
+	type request struct {
+		Model     string `json:"model"`
+		Reasoning struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+	}
+	requests := make(chan request, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		requests <- req
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"review complete\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":1}}}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+	t.Setenv("WINGMAN_URL", server.URL)
+	cfg, err := agent.DefaultConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Model = func() string { return "parent-model" }
+	cfg.Effort = func() string { return "medium" }
+	cfg.RoleModel = func(role string) (agent.ModelOption, bool) {
+		switch role {
+		case "complex":
+			return agent.ModelOption{ID: "complex-model"}, true
+		case "utility":
+			return agent.ModelOption{ID: "utility-model", Efforts: []string{"low"}}, true
+		default:
+			return agent.ModelOption{ID: "parent-model"}, true
+		}
+	}
+	custom := Definition{Name: "custom-reviewer", Description: "Custom review", Instructions: "Review the task.", Access: "read-only", Model: "complex"}
+	agentTool := Tools(cfg, nil, nil, custom)[0]
+	for _, tc := range []struct {
+		name, agentType, role, model, effort string
+	}{
+		{"review inherits", "code-reviewer", "", "parent-model", "medium"},
+		{"security inherits", "security", "", "parent-model", "medium"},
+		{"explicit default", "explore", "default", "parent-model", "medium"},
+		{"cheaper model", "explore", "utility", "utility-model", "low"},
+		{"complex model", "code-reviewer", "complex", "complex-model", "medium"},
+		{"legacy plan alias", "code-reviewer", "plan", "complex-model", "medium"},
+		{"custom default", "custom-reviewer", "", "complex-model", "medium"},
+		{"restore inheritance", "custom-reviewer", "default", "parent-model", "medium"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := map[string]any{"description": "Review", "prompt": "Review the code.", "agent_type": tc.agentType}
+			if tc.role != "" {
+				args["model"] = tc.role
+			}
+			result, err := agentTool.Execute(t.Context(), args)
+			if err != nil || result.IsError {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			select {
+			case got := <-requests:
+				if got.Model != tc.model || got.Reasoning.Effort != tc.effort {
+					t.Fatalf("request=%+v want model=%s effort=%s", got, tc.model, tc.effort)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("provider received no request")
+			}
+		})
+	}
+}
 
 func TestAgentToolSchemaIncludesTypedSubagentParameters(t *testing.T) {
 	agentTool := Tools(&agent.Config{}, nil, nil)[0]

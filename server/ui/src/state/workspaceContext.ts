@@ -11,12 +11,12 @@ import {
 	isDraft,
 	splitSessionKey,
 	type SessionSettings,
+	type SettingsPatch,
 } from "./sessionStore.ts";
+import { patchDraftSettings, settingsForDraft } from "./sessionSettings.ts";
 import { workspaceClient } from "./workspaceClient.ts";
 
-export type SettingsPatch = Partial<
-	Pick<SessionSettings, "model" | "effort" | "mode">
->;
+export type { SettingsPatch } from "./sessionStore.ts";
 type Navigation = {
 	backend: string;
 	selectBackend: (id: string) => void;
@@ -59,13 +59,13 @@ export function useSessionSettings(key = "", draftId = key) {
 	);
 	useEffect(() => client.watch(key), [client, key]);
 	const settings = draft
-		? {
-				...((hasDefaults && catalogs.data) || EMPTY_SETTINGS),
-				...drafts[settingsKey],
-			}
+		? settingsForDraft(
+				(hasDefaults && catalogs.data) || EMPTY_SETTINGS,
+				drafts[settingsKey],
+			)
 		: sessionSettings;
 	const setSettings = async (patch: SettingsPatch) => {
-		if (draft) setDraft(settingsKey, patch);
+		if (draft) setDraft(settingsKey, patchDraftSettings(settings, patch));
 		else await client.command(key, { type: "settings", ...patch });
 	};
 	return { settings, setSettings };

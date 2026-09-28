@@ -1090,6 +1090,16 @@ export function ChatPanel({
 									<ModePicker
 										modes={settings.modes}
 										current={settings.mode}
+										unattended={settings.unattended}
+										onUnattendedChange={(unattended) =>
+											void setSettings({ unattended }).catch((error) =>
+												toast({
+													title: "Could not change unattended setting",
+													description: String(error),
+													tone: "error",
+												}),
+											)
+										}
 										onSelect={(mode) =>
 											void setSettings({ mode }).catch((error) =>
 												toast({

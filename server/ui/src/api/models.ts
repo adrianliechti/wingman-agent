@@ -2,4 +2,5 @@ export interface ModelInfo {
 	id: string;
 	name: string;
 	namespace?: string;
+	efforts?: string[];
 }

@@ -60,6 +60,12 @@ func (a *App) builtinCommands() []slashCommand {
 			Run:  func(a *App) { a.setMode(mode.ID) },
 		})
 	}
+	if _, ok := a.agent.(code.UnattendedAgent); ok {
+		cmds = append(cmds, slashCommand{
+			Name: "/unattended", Desc: "Toggle automatic approvals and skip questions", Busy: true,
+			Run: (*App).toggleUnattendedMode,
+		})
+	}
 	cmds = append(cmds,
 		slashCommand{Name: "/problems", Desc: "Show problems", Busy: true, Run: (*App).showDiagnosticsView},
 		slashCommand{Name: "/diff", Desc: "Show or hide working tree changes", Busy: true, Run: (*App).showDiffView},

@@ -6,7 +6,7 @@ description: High-precision review of local changes, branch diffs, or pull reque
 
 Review the requested changes and report only findings independently verified as real. Optimize for a short list a senior engineer would act on, not exhaustive commentary. Do not edit files, post comments, add labels, or approve the change.
 
-For every subagent launched in this workflow, set `model: plan` so discovery and verification use the configured frontier model.
+Subagents inherit the selected model and effort by default. Use `model: complex` only for a demanding subtask that warrants it, or `model: utility` for mechanical work. A specialist role alone does not require a model change.
 
 ## Phase 1: Resolve the review scope
 

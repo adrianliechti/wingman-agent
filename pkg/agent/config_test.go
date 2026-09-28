@@ -63,6 +63,23 @@ func TestContextWindowFor(t *testing.T) {
 	}
 }
 
+func TestDefaultComplexModelAcceptsLegacyEnvironment(t *testing.T) {
+	t.Setenv("WINGMAN_MODEL_PLAN", "legacy-complex")
+	t.Setenv("WINGMAN_MODEL_COMPLEX", "")
+	if got := DefaultComplexModel(); got != "legacy-complex" {
+		t.Fatalf("legacy complex model = %q", got)
+	}
+	t.Setenv("WINGMAN_MODEL_COMPLEX", "explicit-complex")
+	if got := DefaultComplexModel(); got != "explicit-complex" {
+		t.Fatalf("complex model precedence = %q", got)
+	}
+	t.Setenv("WINGMAN_EFFORT", "medium")
+	t.Setenv("WINGMAN_EFFORT_PLAN", "max")
+	if got := DefaultEffort(); got != "medium" {
+		t.Fatalf("legacy plan effort affected session: %q", got)
+	}
+}
+
 func TestContextWindowForEnvironmentOverride(t *testing.T) {
 	t.Setenv("WINGMAN_CONTEXT_WINDOW", " 131072 ")
 	t.Setenv("WINGMAN_CONTEXT_WINDOW_MODE", "full")

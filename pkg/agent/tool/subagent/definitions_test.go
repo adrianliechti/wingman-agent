@@ -25,7 +25,7 @@ func TestParseDefinition(t *testing.T) {
 	if def.Description != "Postgres specialist" || def.Instructions != "You are a database expert." {
 		t.Fatalf("def = %+v", def)
 	}
-	if def.Access != "read-only" || def.Model != "plan" {
+	if def.Access != "read-only" || def.Model != "complex" {
 		t.Fatalf("access = %q, model = %q", def.Access, def.Model)
 	}
 }

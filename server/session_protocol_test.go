@@ -363,6 +363,50 @@ func TestSessionBackendsOwnIdenticalNativeIDsAndDeletionIsTerminal(t *testing.T)
 	}
 }
 
+type unattendedProtocolAgent struct {
+	*protocolAgent
+	unattended bool
+}
+
+func (a *unattendedProtocolAgent) Modes(string) ([]code.Mode, string) {
+	return []code.Mode{{ID: code.AgentModeID}, {ID: code.PlanModeID}}, code.PlanModeID
+}
+func (a *unattendedProtocolAgent) Unattended(string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.unattended
+}
+func (a *unattendedProtocolAgent) SetUnattended(_ context.Context, _ string, enabled bool) error {
+	a.mu.Lock()
+	a.unattended = enabled
+	a.mu.Unlock()
+	return nil
+}
+
+func TestSessionSettingsRoundTripIndependentUnattendedPolicy(t *testing.T) {
+	s, other, _ := newProtocolServer(t)
+	a := &unattendedProtocolAgent{protocolAgent: &protocolAgent{model: "selected-model"}}
+	b := s.bindBackend("policy", a)
+	s.runtimes["policy"] = b
+	c := b.session("saved")
+	c.load()
+	for _, enabled := range []bool{true, false} {
+		rec := protocolRequest(t, s, "/api/v2/backends/policy/sessions/saved/commands", Command{
+			ID: fmt.Sprintf("unattended-%t", enabled), Epoch: c.epoch, Type: "settings", Unattended: &enabled,
+		})
+		if rec.Code != 200 {
+			t.Fatalf("settings: %d %s", rec.Code, rec.Body)
+		}
+		settings := b.settings("saved")
+		if settings.Unattended == nil || *settings.Unattended != enabled || settings.Mode != code.PlanModeID || settings.Model != "selected-model" {
+			t.Fatalf("policy changed mode/model or did not round-trip: %+v", settings)
+		}
+	}
+	if other.settings("saved").Unattended != nil {
+		t.Fatal("provider without independent unattended support advertised it")
+	}
+}
+
 func TestSessionQueuePersistenceFailureDoesNotAcknowledgeClearing(t *testing.T) {
 	s, b, a := newProtocolServer(t)
 	a.queue = code.TurnQueueState{Inputs: []code.TurnInput{{ID: "queued", Content: []agent.Content{{Text: "keep me"}}}}}

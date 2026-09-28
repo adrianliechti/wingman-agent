@@ -99,7 +99,7 @@ type Config struct {
 	// snapshot to history instead of rewriting the cached Instructions prefix.
 	ContextInstructions func() string
 
-	// RoleModel resolves "main", "plan", and "utility" role models. An empty
+	// RoleModel resolves "default", "complex", and "utility" role models. An empty
 	// role names the currently inherited model and is used for effort clamping.
 	// ok=false or an empty ID keeps the inherited model. Nil disables role
 	// overrides.
@@ -335,11 +335,18 @@ func DefaultModel() string {
 	return os.Getenv("OPENAI_DEFAULT_MODEL")
 }
 
-// DefaultPlanModel returns the model for plan mode; empty selects the largest
-// available model automatically.
-func DefaultPlanModel() string {
+// DefaultComplexModel selects the model for explicit complex subagent tasks.
+// WINGMAN_MODEL_PLAN remains a legacy alias; neither setting changes Plan mode.
+func DefaultComplexModel() string {
+	if v := os.Getenv("WINGMAN_MODEL_COMPLEX"); v != "" {
+		return v
+	}
 	return os.Getenv("WINGMAN_MODEL_PLAN")
 }
+
+// DefaultPlanModel is the legacy name for DefaultComplexModel.
+// Deprecated: use DefaultComplexModel. Plan mode uses the selected model.
+func DefaultPlanModel() string { return DefaultComplexModel() }
 
 // DefaultUtilityModel returns the model for internal utility calls (recaps,
 // compaction summaries); empty selects the smallest available automatically.
@@ -348,17 +355,15 @@ func DefaultUtilityModel() string {
 }
 
 // DefaultEffort returns the reasoning effort requested via WINGMAN_EFFORT.
-// Empty (or "auto") leaves the role-based default in place. Unrecognized
+// Empty (or "auto") leaves the model's default in place. Unrecognized
 // values are ignored so a typo cannot silently pin an unexpected effort.
 func DefaultEffort() string {
 	return effortFromEnv("WINGMAN_EFFORT")
 }
 
-// DefaultPlanEffort returns the reasoning effort for plan mode requested via
-// WINGMAN_EFFORT_PLAN; empty uses the role-based default.
-func DefaultPlanEffort() string {
-	return effortFromEnv("WINGMAN_EFFORT_PLAN")
-}
+// DefaultPlanEffort is retained for source compatibility.
+// Deprecated: use DefaultEffort. Agent and Plan share their effort setting.
+func DefaultPlanEffort() string { return DefaultEffort() }
 
 func effortFromEnv(name string) string {
 	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(name))); v {

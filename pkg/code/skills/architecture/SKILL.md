@@ -6,7 +6,7 @@ description: Design, evaluate, review, or reverse-engineer a system architecture
 
 Produce a code-grounded design or architecture model, not a generic best-practices essay. Stay read-only unless the user explicitly asks you to write an ADR, design document, or diagram file. Do not implement the design in this workflow.
 
-For every subagent launched in this workflow, set `model: plan` so architecture discovery and synthesis use the configured frontier model.
+Subagents inherit the selected model and effort by default. Use `model: complex` only for a demanding subtask that warrants it, or `model: utility` for mechanical work. A specialist role alone does not require a model change.
 
 Design the following decision or system. If no invocation argument follows, use the user's latest request:
 

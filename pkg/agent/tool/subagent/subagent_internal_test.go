@@ -2,7 +2,6 @@ package subagent
 
 import (
 	"context"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"slices"
 	"strings"
 	"testing"
@@ -11,15 +10,8 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 )
-
-func TestReviewAgentsDefaultToPlanModel(t *testing.T) {
-	for _, name := range []string{"code-reviewer", "security"} {
-		if got := subagentTypes[name].Model; got != "plan" {
-			t.Errorf("%s model = %q, want plan", name, got)
-		}
-	}
-}
 
 func TestVerificationToolFilterRejectsUnknownAndMutatingTools(t *testing.T) {
 	tests := []struct {
@@ -303,7 +295,7 @@ func TestUpdateTaskActivityIgnoresPartialToolCall(t *testing.T) {
 
 func TestApplyModelOverrides(t *testing.T) {
 	roles := map[string]agent.ModelOption{
-		"plan":    {ID: "large-model"},
+		"complex": {ID: "large-model"},
 		"utility": {ID: "gpt-small", Efforts: []string{"none", "low", "medium", "high", "xhigh"}},
 		"":        {ID: "gpt-session", Efforts: []string{"none", "low", "medium", "high", "xhigh"}},
 	}
@@ -321,6 +313,18 @@ func TestApplyModelOverrides(t *testing.T) {
 	}
 	if cfg.Model() != "session-model" || cfg.Effort() != "medium" {
 		t.Fatal("empty args must inherit session model and effort")
+	}
+	if err := applyModelOverrides(cfg, map[string]any{"model": "default"}, "complex"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model() != "session-model" || cfg.Effort() != "medium" {
+		t.Fatal("explicit default must override a custom agent's complex choice")
+	}
+	if err := applyModelOverrides(cfg, map[string]any{}, "complex"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model() != "large-model" || cfg.Effort() != "medium" {
+		t.Fatal("custom complex default must apply and preserve effort")
 	}
 
 	if err := applyModelOverrides(cfg, map[string]any{"model": "utility", "effort": "LOW"}, ""); err != nil {
@@ -390,6 +394,49 @@ func TestApplyModelOverrides(t *testing.T) {
 	}
 	if cfg.Effort() != "max" {
 		t.Fatal("nil resolver must leave effort unclamped")
+	}
+}
+
+func TestModelOverridePinsInheritedEffort(t *testing.T) {
+	for _, inherited := range []string{"", "medium", "max"} {
+		t.Run("effort="+inherited, func(t *testing.T) {
+			reads := 0
+			cfg := &agent.Config{
+				Effort: func() string {
+					reads++
+					if reads == 1 {
+						return inherited
+					}
+					return "high"
+				},
+				RoleModel: func(string) (agent.ModelOption, bool) {
+					return agent.ModelOption{ID: "utility-model", Efforts: []string{"low", "medium"}}, true
+				},
+			}
+			if err := applyModelOverrides(cfg, map[string]any{"model": "utility"}, ""); err != nil {
+				t.Fatal(err)
+			}
+			want := inherited
+			if want == "max" {
+				want = "medium"
+			}
+			if got := cfg.Effort(); got != want || reads != 1 {
+				t.Fatalf("child effort = %q, want %q from one parent read; reads=%d", got, want, reads)
+			}
+		})
+	}
+}
+
+func TestRestoredChildKeepsAutoEffort(t *testing.T) {
+	parent := &agent.Config{Effort: func() string { return "max" }}
+	runner, err := newSubagentRunner(parent, subagentTypes["explore"], durableSpec{
+		Version: durableSpecVersion, AgentID: "child", AgentType: "explore", Model: "child-model", Effort: "",
+	}, agent.State{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.sub.Effort(); got != "" {
+		t.Fatalf("restored auto effort followed parent override: %q", got)
 	}
 }
 

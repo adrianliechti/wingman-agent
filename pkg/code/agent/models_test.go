@@ -15,8 +15,6 @@ func upstreamAgent(ids ...string) *Agent {
 	}
 	return &Agent{
 		upstreamModels: models,
-		modelByRole:    map[modelRole]string{},
-		effortByRole:   map[modelRole]string{modelRoleUtility: ""},
 		sessions:       map[string]*sessionState{},
 	}
 }
@@ -33,34 +31,39 @@ func roleModelID(t *testing.T, a *Agent, s *sessionState, role string) string {
 func TestModelSelectionByRole(t *testing.T) {
 	a := upstreamAgent("claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5")
 	s := &sessionState{}
-
-	if current := roleModelID(t, a, s, ""); current != "claude-sonnet-5" {
-		t.Fatalf("code model = %q, want claude-sonnet-5", current)
-	}
-
-	s.setMode(modePlan)
-	if current := roleModelID(t, a, s, ""); current != "claude-opus-4-8" {
-		t.Fatalf("plan model = %q, want claude-opus-4-8", current)
-	}
-
-	if got := roleModelID(t, a, nil, "utility"); got != "claude-haiku-4-5" {
-		t.Fatalf("utility model = %q, want claude-haiku-4-5", got)
+	for _, mode := range []sessionMode{modeAgent, modePlan} {
+		s.setMode(mode)
+		for _, role := range []string{"", "default", "main"} {
+			if got := roleModelID(t, a, s, role); got != "claude-sonnet-5" {
+				t.Fatalf("%s/%s model = %q", mode, role, got)
+			}
+		}
+		for role, want := range map[string]string{
+			"complex": "claude-opus-4-8", "plan": "claude-opus-4-8", "utility": "claude-haiku-4-5",
+		} {
+			if got := roleModelID(t, a, s, role); got != want {
+				t.Fatalf("%s/%s model = %q, want %q", mode, role, got, want)
+			}
+		}
 	}
 }
 
-func TestModelSelectionRoleScoped(t *testing.T) {
-	a := upstreamAgent("claude-sonnet-5", "claude-opus-4-8", "claude-fable-5")
-	a.modelByRole[modelRoleMain] = "claude-fable-5"
+func TestExplicitSelectionDrivesDelegationFamily(t *testing.T) {
+	a := upstreamAgent("claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "gpt-6-sol", "gpt-6-astra", "gpt-6-luna")
+	a.modelID = "gpt-6-sol"
 	s := &sessionState{}
-
-	if current := roleModelID(t, a, s, ""); current != "claude-fable-5" {
-		t.Fatalf("explicit code model overridden: %q", current)
-	}
-
-	// The coding choice must not leak into plan mode: plan picks large.
 	s.setMode(modePlan)
-	if current := roleModelID(t, a, s, ""); current != "claude-opus-4-8" {
-		t.Fatalf("plan model = %q, want claude-opus-4-8", current)
+	for role, want := range map[string]string{
+		"default": "gpt-6-sol", "complex": "gpt-6-astra", "utility": "gpt-6-luna",
+	} {
+		if got := roleModelID(t, a, s, role); got != want {
+			t.Fatalf("%s model = %q, want %q", role, got, want)
+		}
+	}
+	s.modelID = "claude-fable-5"
+	a.upstreamModels["claude-fable-5"] = true
+	if got := roleModelID(t, a, s, "complex"); got != "claude-fable-5" {
+		t.Fatalf("complex replaced selected large model: %q", got)
 	}
 }
 
@@ -78,16 +81,14 @@ func TestModelSelectionCrossFamilyFallback(t *testing.T) {
 		t.Fatalf("code model = %q, want gpt-5.6-terra", current)
 	}
 	s.setMode(modePlan)
-	if current := roleModelID(t, g, s, ""); current != "gpt-5.6-sol" {
-		t.Fatalf("plan model = %q, want gpt-5.6-sol", current)
+	if current := roleModelID(t, g, s, "complex"); current != "gpt-5.6-sol" {
+		t.Fatalf("complex model = %q, want gpt-5.6-sol", current)
 	}
 }
 
 func TestRoleModelPreservesUtilityDiscoveryAndAvailabilityRules(t *testing.T) {
 	a := &Agent{
-		modelByRole:  map[modelRole]string{},
-		effortByRole: map[modelRole]string{modelRoleUtility: ""},
-		sessions:     map[string]*sessionState{},
+		sessions: map[string]*sessionState{},
 	}
 	if _, ok := a.RoleModel("utility"); ok {
 		t.Fatal("utility role guessed a model before discovery")
@@ -96,17 +97,17 @@ func TestRoleModelPreservesUtilityDiscoveryAndAvailabilityRules(t *testing.T) {
 		t.Fatalf("main model before discovery = %q", got)
 	}
 
-	a.modelByRole[modelRoleUtility] = "configured-utility"
+	a.utilityModel = "configured-utility"
 	if got := roleModelID(t, a, nil, "utility"); got != "configured-utility" {
 		t.Fatalf("configured utility model = %q", got)
 	}
-	a.modelByRole[modelRoleMain] = "qwen3.8:27b-mlx"
+	a.modelID = "qwen3.8:27b-mlx"
 	if got := roleModelID(t, a, nil, ""); got != "qwen3.8:27b-mlx" {
 		t.Fatalf("configured main model before discovery = %q", got)
 	}
 
 	a.upstreamModels = map[string]bool{"gpt-5.6-luna": true}
-	a.modelByRole[modelRoleMain] = "missing-main"
+	a.modelID = "missing-main"
 	if got := roleModelID(t, a, nil, ""); got != "gpt-5.6-luna" {
 		t.Fatalf("main availability fallback = %q", got)
 	}
@@ -120,8 +121,8 @@ func TestModelSelectionAcrossProviderPrefixes(t *testing.T) {
 	if got := roleModelID(t, a, nil, "main"); got != "google/gemini-3.7-flash" {
 		t.Fatalf("main model = %q", got)
 	}
-	if got := roleModelID(t, a, nil, "plan"); got != "gemini-3.1-pro" {
-		t.Fatalf("plan model = %q, want the main model's family", got)
+	if got := roleModelID(t, a, nil, "complex"); got != "gemini-3.1-pro" {
+		t.Fatalf("complex model = %q, want the selected model's family", got)
 	}
 }
 
@@ -138,7 +139,7 @@ func TestModelSelectionPreservesConfiguredAliases(t *testing.T) {
 	} {
 		t.Run(tc.configured, func(t *testing.T) {
 			a := upstreamAgent(append([]string{"claude-sonnet-5-5"}, tc.advertised...)...)
-			a.modelByRole[modelRoleMain] = tc.configured
+			a.modelID = tc.configured
 			if got := roleModelID(t, a, nil, "main"); got != tc.want {
 				t.Fatalf("configured %q resolved to %q, want %q", tc.configured, got, tc.want)
 			}
@@ -155,8 +156,8 @@ func TestSessionAutoEffortOverridesGlobalSetting(t *testing.T) {
 		t.Run(action, func(t *testing.T) {
 			a := upstreamAgent("gpt-6-astra", "gpt-6-sol")
 			a.options.IsolateSessionSettings = true
-			a.modelByRole[modelRoleMain] = "gpt-6-astra"
-			a.effortByRole[modelRoleMain] = "max"
+			a.modelID = "gpt-6-astra"
+			a.effort = "max"
 			s := &sessionState{}
 			a.sessions["one"] = s
 			a.sessions["two"] = &sessionState{}
@@ -166,7 +167,7 @@ func TestSessionAutoEffortOverridesGlobalSetting(t *testing.T) {
 				err = a.SetEffort(context.Background(), "one", "auto")
 			} else {
 				err = a.SetModel(context.Background(), "one", "gpt-6-sol")
-				wantEffort = "high"
+				wantEffort = ""
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -186,28 +187,27 @@ func TestSessionAutoEffortOverridesGlobalSetting(t *testing.T) {
 	}
 }
 
-func TestEffortDefaultsByRole(t *testing.T) {
-	a := upstreamAgent("claude-sonnet-5", "claude-opus-4-8")
-	s := &sessionState{}
-
-	if got := a.effortFor(s); got != "high" {
-		t.Fatalf("code effort = %q, want high", got)
-	}
-
-	s.setMode(modePlan)
-	if got := a.effortFor(s); got != "xhigh" {
-		t.Fatalf("plan effort = %q, want xhigh", got)
-	}
-
-	// A coding effort choice must not leak into plan mode.
-	s.effortByRole = map[modelRole]string{modelRoleMain: "medium"}
-	if got := a.effortFor(s); got != "xhigh" {
-		t.Fatalf("plan effort = %q, want xhigh despite code effort", got)
-	}
-
-	s.setMode(modeAgent)
-	if got := a.effortFor(s); got != "medium" {
-		t.Fatalf("code effort = %q, want medium", got)
+func TestEffortDefaultsFollowModelAcrossModes(t *testing.T) {
+	for _, id := range []string{"claude-sonnet-5-5", "gpt-6-sol", "gpt-6-astra", "qwen3.8:27b-mlx"} {
+		t.Run(id, func(t *testing.T) {
+			a := upstreamAgent(id)
+			s := &sessionState{}
+			m, _ := model.Find(id)
+			for _, mode := range []sessionMode{modeAgent, modePlan} {
+				s.setMode(mode)
+				if got := a.effortFor(s); got != m.Effort {
+					t.Fatalf("%s auto effort = %q, want model default %q", mode, got, m.Effort)
+				}
+			}
+			effort := "medium"
+			s.effort = &effort
+			for _, mode := range []sessionMode{modePlan, modeAgent} {
+				s.setMode(mode)
+				if got := a.effortFor(s); got != effort {
+					t.Fatalf("%s lost explicit effort: %q", mode, got)
+				}
+			}
+		})
 	}
 }
 
@@ -219,7 +219,7 @@ func TestAstraEffortDefaultsAndClampsOverrides(t *testing.T) {
 		t.Fatalf("Astra effort = %q, want low", got)
 	}
 
-	a.effortByRole[modelRoleMain] = "none"
+	a.effort = "none"
 	if got := a.effortFor(s); got != "low" {
 		t.Fatalf("Astra effort for unsupported none override = %q, want low", got)
 	}
@@ -236,11 +236,11 @@ func TestQwen38EffortDefaultsAndClampsOverrides(t *testing.T) {
 	a := upstreamAgent("qwen3.8:27b-mlx")
 	s := &sessionState{}
 
-	if got := a.effortFor(s); got != "medium" {
-		t.Fatalf("Qwen 3.8 default effort = %q, want medium", got)
+	if got := a.effortFor(s); got != "" {
+		t.Fatalf("Qwen 3.8 auto effort = %q, want provider default", got)
 	}
 
-	a.effortByRole[modelRoleMain] = "max"
+	a.effort = "max"
 	if got := a.effortFor(s); got != "xhigh" {
 		t.Fatalf("Qwen 3.8 max effort = %q, want xhigh", got)
 	}
@@ -253,41 +253,32 @@ func TestQwen38EffortDefaultsAndClampsOverrides(t *testing.T) {
 	}
 }
 
-func TestSetModelAndEffortScopeToCurrentMode(t *testing.T) {
+func TestModelAndEffortSelectionSurviveModeSwitches(t *testing.T) {
 	a := upstreamAgent("claude-sonnet-5", "claude-opus-4-8", "claude-fable-5")
 	s := &sessionState{}
 	a.sessions["sid"] = s
-
 	ctx := context.Background()
-
-	if err := a.SetModel(ctx, "sid", "claude-sonnet-5"); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.SetEffort(ctx, "sid", "medium"); err != nil {
-		t.Fatal(err)
-	}
-
-	s.setMode(modePlan)
-	if err := a.SetModel(ctx, "sid", "claude-fable-5"); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.SetEffort(ctx, "sid", "max"); err != nil {
-		t.Fatal(err)
-	}
-
-	if current := roleModelID(t, a, s, ""); current != "claude-fable-5" {
-		t.Fatalf("plan model = %q, want claude-fable-5", current)
-	}
-	if got := a.effortFor(s); got != "max" {
-		t.Fatalf("plan effort = %q, want max", got)
-	}
-
-	s.setMode(modeAgent)
-	if current := roleModelID(t, a, s, ""); current != "claude-sonnet-5" {
-		t.Fatalf("code model = %q, want claude-sonnet-5", current)
-	}
-	if got := a.effortFor(s); got != "medium" {
-		t.Fatalf("code effort = %q, want medium", got)
+	for _, mode := range []string{"agent", "plan", "agent"} {
+		if err := a.SetMode(ctx, "sid", mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.SetModel(ctx, "sid", "claude-fable-5"); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.SetEffort(ctx, "sid", "max"); err != nil {
+			t.Fatal(err)
+		}
+		for _, next := range []string{"agent", "plan"} {
+			if err := a.SetMode(ctx, "sid", next); err != nil {
+				t.Fatal(err)
+			}
+			if _, got := a.Models("sid"); got != "claude-fable-5" {
+				t.Fatalf("model after %s -> %s = %q", mode, next, got)
+			}
+			if got, _ := a.Effort("sid"); got != "max" || a.effortFor(s) != "max" {
+				t.Fatalf("effort after %s -> %s = %q", mode, next, got)
+			}
+		}
 	}
 }
 
@@ -311,8 +302,7 @@ func TestSetModelResetsEffort(t *testing.T) {
 		t.Fatalf("effort after model switch = %q, want auto (model default)", got)
 	}
 
-	// Plan mode keeps its own effort: switching the plan model resets only the
-	// plan effort, back to the large-model plan default.
+	// A deliberate model change in Plan also resets the shared effort to auto.
 	s.setMode(modePlan)
 	if err := a.SetEffort(ctx, "sid", "low"); err != nil {
 		t.Fatal(err)
@@ -323,8 +313,79 @@ func TestSetModelResetsEffort(t *testing.T) {
 	if got, _ := a.Effort("sid"); got != "auto" {
 		t.Fatalf("plan effort after switch = %q, want auto", got)
 	}
-	if got := a.effortFor(s); got != "xhigh" {
-		t.Fatalf("plan effort default = %q, want xhigh", got)
+	if got := a.effortFor(s); got != "" {
+		t.Fatalf("auto effort = %q, want provider default", got)
+	}
+}
+
+func TestSelectingCurrentModelPreservesEffort(t *testing.T) {
+	for _, isolate := range []bool{false, true} {
+		t.Run(map[bool]string{false: "shared", true: "isolated"}[isolate], func(t *testing.T) {
+			a := upstreamAgent("openai/gpt-6-sol", "gpt-6-astra")
+			a.options.IsolateSessionSettings = isolate
+			a.modelID, a.effort = "gpt-6-sol", "high"
+			s := &sessionState{}
+			a.sessions["sid"] = s
+			for _, id := range []string{"gpt-6-sol", "openai/gpt-6-sol", "GPT-6-SOL"} {
+				if err := a.SetModel(t.Context(), "sid", id); err != nil {
+					t.Fatal(err)
+				}
+				if got, _ := a.Effort("sid"); got != "high" {
+					t.Fatalf("reselecting %s changed effort to %s", id, got)
+				}
+			}
+		})
+	}
+}
+
+func TestSelectingSessionModelPreservesInheritedEffortWhileUpdatingDefaults(t *testing.T) {
+	a := upstreamAgent("gpt-6-sol", "gpt-6-astra")
+	a.modelID, a.effort = "gpt-6-astra", "high"
+	a.sessions["sid"] = &sessionState{modelID: "gpt-6-sol"}
+	if err := a.SetModel(t.Context(), "sid", "gpt-6-sol"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := a.Effort("sid"); got != "high" {
+		t.Fatalf("same session model lost inherited effort: %s", got)
+	}
+	if got, _ := a.Effort(""); got != "auto" {
+		t.Fatalf("changed default model kept previous model's effort: %s", got)
+	}
+}
+
+func TestComplexWaitsForModelDiscovery(t *testing.T) {
+	a := &Agent{modelID: "local-deployment"}
+	if got := roleModelID(t, a, nil, "complex"); got != "local-deployment" {
+		t.Fatalf("undiscovered complex role guessed unavailable model %q", got)
+	}
+	a.complexModel = "explicit-complex"
+	if got := roleModelID(t, a, nil, "complex"); got != "explicit-complex" {
+		t.Fatalf("explicit complex model lost before discovery: %q", got)
+	}
+	a.complexModel = ""
+	a.upstreamModels = map[string]bool{"local-deployment": true, "gpt-6-astra": true}
+	if got := roleModelID(t, a, nil, "complex"); got != "gpt-6-astra" {
+		t.Fatalf("discovered complex model = %q", got)
+	}
+}
+
+func TestModelOptionsAdvertiseSupportedEfforts(t *testing.T) {
+	a := upstreamAgent("openai/gpt-6-astra", "claude-sonnet-5-5", "qwen3.8:27b-mlx", "local-deployment")
+	a.modelID = "local-deployment"
+	options, _ := a.Models("")
+	for _, option := range options {
+		if err := a.SetModel(t.Context(), "", option.ID); err != nil {
+			t.Fatal(err)
+		}
+		_, supported := a.Effort("")
+		if !slices.Equal(supported, append([]string{"auto"}, option.Efforts...)) {
+			t.Fatalf("%s advertised %v, picker supports %v", option.ID, option.Efforts, supported)
+		}
+		for _, effort := range option.Efforts {
+			if err := a.SetEffort(t.Context(), "", effort); err != nil {
+				t.Fatalf("%s rejected advertised effort %s: %v", option.ID, effort, err)
+			}
+		}
 	}
 }
 
@@ -355,55 +416,41 @@ func TestModelClass(t *testing.T) {
 	}
 }
 
-func TestModelEnvOverridesByRole(t *testing.T) {
+func TestExplicitDelegationModelsDoNotChangeSessionSelection(t *testing.T) {
 	a := upstreamAgent("claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5")
-	a.modelByRole[modelRolePlan] = "claude-fable-5"
-	a.modelByRole[modelRoleUtility] = "claude-sonnet-5"
-
-	s := &sessionState{}
-	if current := roleModelID(t, a, s, ""); current != "claude-sonnet-5" {
-		t.Fatalf("code model = %q, want claude-sonnet-5", current)
-	}
-
-	s.setMode(modePlan)
-	if current := roleModelID(t, a, s, ""); current != "claude-fable-5" {
-		t.Fatalf("plan model = %q, want claude-fable-5", current)
-	}
-
-	if got := roleModelID(t, a, nil, "utility"); got != "claude-sonnet-5" {
-		t.Fatalf("utility model = %q, want claude-sonnet-5", got)
-	}
-
-	s.modelByRole = map[modelRole]string{modelRolePlan: "claude-opus-4-8"}
-	if current := roleModelID(t, a, s, ""); current != "claude-opus-4-8" {
-		t.Fatalf("session plan pick overridden: %q", current)
+	a.complexModel = "claude-fable-5"
+	a.utilityModel = "claude-sonnet-5"
+	s := &sessionState{modelID: "claude-opus-4-8"}
+	for _, mode := range []sessionMode{modeAgent, modePlan} {
+		s.setMode(mode)
+		for role, want := range map[string]string{
+			"default": "claude-opus-4-8", "complex": "claude-fable-5", "plan": "claude-fable-5", "utility": "claude-sonnet-5",
+		} {
+			if got := roleModelID(t, a, s, role); got != want {
+				t.Fatalf("%s/%s model = %q, want %q", mode, role, got, want)
+			}
+		}
 	}
 }
 
-func TestPlanEffortOverride(t *testing.T) {
-	a := upstreamAgent("claude-sonnet-5", "claude-opus-4-8")
-	a.effortByRole[modelRolePlan] = "max"
-
-	s := &sessionState{}
-	if got := a.effortFor(s); got != "high" {
-		t.Fatalf("code effort = %q, want high", got)
+func TestUnavailableDelegationTierKeepsSelectedModel(t *testing.T) {
+	a := upstreamAgent("claude-sonnet-5", "gpt-6-sol")
+	a.modelID = "gpt-6-sol"
+	for _, role := range []string{"complex", "utility"} {
+		if got := roleModelID(t, a, nil, role); got != "gpt-6-sol" {
+			t.Fatalf("unavailable %s tier replaced selected model with %q", role, got)
+		}
 	}
-
-	s.setMode(modePlan)
-	if got := a.effortFor(s); got != "max" {
-		t.Fatalf("plan effort = %q, want max", got)
-	}
-
-	s.effortByRole = map[modelRole]string{modelRolePlan: "low"}
-	if got := a.effortFor(s); got != "low" {
-		t.Fatalf("session plan effort overridden: %q", got)
+	a.complexModel = "missing-model"
+	if got := roleModelID(t, a, nil, "complex"); got != "gpt-6-sol" {
+		t.Fatalf("unavailable override replaced selected model with %q", got)
 	}
 }
 
 func TestWebSessionSettingsDoNotChangeOtherSessionsOrDefaults(t *testing.T) {
 	a := upstreamAgent("gpt-5.4", "gpt-5.5")
 	a.options.IsolateSessionSettings = true
-	a.modelByRole[modelRoleMain] = "gpt-5.4"
+	a.modelID = "gpt-5.4"
 	a.sessions["one"] = &sessionState{}
 	a.sessions["two"] = &sessionState{}
 	if err := a.SetModel(context.Background(), "one", "gpt-5.5"); err != nil {

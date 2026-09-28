@@ -1079,6 +1079,13 @@ func (s *Server) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSe
 		if err := sess.agent.SetEffort(ctx, string(p.SessionId), string(p.Value)); err != nil {
 			return acpsdk.SetSessionConfigOptionResponse{}, err
 		}
+	case "unattended":
+		if p.Value != "on" && p.Value != "off" {
+			return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("unattended must be on or off")
+		}
+		if err := sess.agent.SetUnattended(ctx, string(p.SessionId), p.Value == "on"); err != nil {
+			return acpsdk.SetSessionConfigOptionResponse{}, err
+		}
 	default:
 		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown config id: %s", p.ConfigId)
 	}
@@ -1134,6 +1141,7 @@ func sessionConfigOptions(a *codeagent.Agent, sid string) []acpsdk.SessionConfig
 	return []acpsdk.SessionConfigOption{
 		modelConfigOption(a, sid),
 		effortConfigOption(a, sid),
+		unattendedConfigOption(a, sid),
 	}
 }
 
@@ -1179,6 +1187,24 @@ func effortConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOpti
 		Select: &acpsdk.SessionConfigOptionSelect{
 			Id:           "effort",
 			Name:         "Effort",
+			CurrentValue: acpsdk.SessionConfigValueId(current),
+			Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &opts},
+		},
+	}
+}
+
+func unattendedConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOption {
+	current := "off"
+	if a.Unattended(sid) {
+		current = "on"
+	}
+	opts := acpsdk.SessionConfigSelectOptionsUngrouped{
+		{Value: "off", Name: "Off"},
+		{Value: "on", Name: "On"},
+	}
+	return acpsdk.SessionConfigOption{
+		Select: &acpsdk.SessionConfigOptionSelect{
+			Id: "unattended", Name: "Unattended",
 			CurrentValue: acpsdk.SessionConfigValueId(current),
 			Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &opts},
 		},

@@ -298,6 +298,7 @@ type Command struct {
 	Model      *string              `json:"model,omitempty"`
 	Effort     *string              `json:"effort,omitempty"`
 	Mode       *string              `json:"mode,omitempty"`
+	Unattended *bool                `json:"unattended,omitempty"`
 }
 
 type Receipt struct {
@@ -509,6 +510,15 @@ func (c *sessionController) execute(command Command) error {
 		}
 		if command.Mode != nil {
 			if err := b.agent.SetMode(ctx, sid, *command.Mode); err != nil {
+				return err
+			}
+		}
+		if command.Unattended != nil {
+			policy, ok := b.agent.(code.UnattendedAgent)
+			if !ok {
+				return errors.ErrUnsupported
+			}
+			if err := policy.SetUnattended(ctx, sid, *command.Unattended); err != nil {
 				return err
 			}
 		}

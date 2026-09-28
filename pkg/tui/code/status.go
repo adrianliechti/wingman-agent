@@ -113,10 +113,6 @@ func (a *App) footerLine(width int) string {
 	if a.queueCount > 0 {
 		right = append(right, dim(fmt.Sprintf("%d queued", a.queueCount)))
 	}
-	if a.currentMode() == code.UnattendedModeID {
-		right = append(right, colored(t.Yellow, "Unattended"))
-	}
-
 	var reg *task.Registry
 	if provider, ok := a.agent.(taskProvider); ok {
 		reg = provider.Tasks(a.sessionID)

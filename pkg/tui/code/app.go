@@ -1638,11 +1638,25 @@ func (a *App) togglePlanMode() {
 }
 
 func (a *App) toggleUnattendedMode() {
-	if a.currentMode() == code.UnattendedModeID {
+	if policy, ok := a.agent.(code.UnattendedAgent); ok {
+		enabled := !policy.Unattended(a.sessionID)
+		a.runSessionOperation("Could not change unattended setting", func(ctx context.Context, id string) error {
+			return policy.SetUnattended(ctx, id, enabled)
+		}, nil)
+		return
+	}
+	if a.unattended() {
 		a.setMode(code.AgentModeID)
 	} else {
 		a.setMode(code.UnattendedModeID)
 	}
+}
+
+func (a *App) unattended() bool {
+	if policy, ok := a.agent.(code.UnattendedAgent); ok {
+		return policy.Unattended(a.sessionID)
+	}
+	return a.currentMode() == code.UnattendedModeID
 }
 
 func (a *App) setMode(modeID string) {
