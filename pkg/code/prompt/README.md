@@ -8,24 +8,41 @@ project instructions, and environment context separately.
 
 ## Comparison baseline
 
-Reviewed on 2026-09-24 against the local Codex checkout at
-`83b56bc5ad9489a47a0eb3edc3e5852f597125be`. The GPT-6 Astra/Sol/Luna,
-GPT-5.6 Sol, GPT-5.5, and GPT-5.4 catalog templates are unchanged from
-`40eac3ce8a`, the previously recorded GPT-6 adaptation source.
+Reviewed all GPT variants on 2026-09-29 against the local Codex checkout at
+`b1e72963c3b71a9265a551e54beff078384efed9`. GPT-6 Astra/Sol/Luna, all three
+GPT-5.6 models, and GPT-5.5 have unchanged base templates compared with the
+previous review at `83b56bc5ad9489a47a0eb3edc3e5852f597125be`. The historical
+GPT-5.1 and GPT-5.2 source files are also unchanged. GPT-6.1 Sol is new.
 
 | Wingman prompt | Codex reference |
 | --- | --- |
+| `models/gpt-6-1-sol` | GPT-6.1 Sol catalog template; Astra-style structure with its own writing and correction guidance |
 | `models/gpt-6-{astra,sol,luna}` | Matching catalog model's `instructions_template` |
-| `models/gpt` | GPT-5.6 Sol catalog template; shared fallback for other GPT models |
-| `models/gpt-5-5`, `models/gpt-5-4` | Matching catalog model's `instructions_template` |
+| `models/gpt` | Identical GPT-5.6 Sol/Terra/Luna catalog templates; shared fallback for other GPT models |
+| `models/gpt-5-5` | GPT-5.5 catalog template |
+| `models/gpt-5-4` | Retained GPT-5.4 template from the previous review; current upstream catalog removed this model |
 | `models/gpt-5-1`, `models/gpt-5-2` | Historical `core/gpt_5_1_prompt.md` and `core/gpt_5_2_prompt.md` |
 | `models/gpt-5-4-mini` | Retained separate adaptation; this checkout has no matching catalog entry |
+
+The review adopts GPT-6's structured multiline command-body guidance, restores
+the GPT-5.6 progress-update cadence, and restores concise GPT-5.5/GPT-5.4
+collaboration guidance omitted from the earlier adaptations. GPT-6.1 Sol keeps
+its added guidance on direct wording, avoiding unnecessary apologies, and
+acknowledging meaningful mistakes. GPT-5.1, GPT-5.2, and GPT-5.4 Mini retain
+their existing adaptations; there is no revised upstream source to adopt.
 
 Model routing uses the longest normalized prefix in `VariantFor`. Preserve
 distinct variants and their model-specific guidance, including GPT-6 Luna's
 explicit-request-only testing policy. Plan guidance and the independent unattended
 policy append Wingman's shared templates to the selected model's instructions.
 Plan's read-only restrictions take precedence over implementation guidance.
+
+GPT-6.1 Sol uses Codex's `low` effort default and `low` verbosity. Its native
+effort choices are `low`, `medium`, `high`, `xhigh`, and `max`, as supported by the
+[OpenAI API model documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol).
+Codex's `ultra` orchestration setting is not a native API reasoning effort.
+The full upstream GPT-6.1 Sol entry is copied into the embedded external Codex
+catalog; existing entries, including GPT-5.4, are retained.
 
 ## Intentional harness adaptations
 
@@ -42,6 +59,10 @@ Plan's read-only restrictions take precedence over implementation guidance.
   requested outcome is complete or a real blocker prevents further progress.
 - Send useful progress updates; avoid thought-length-based update rules. Leave
   blank lines around Markdown headings and lists for consistent rendering.
+- Keep personality guidance focused on collaboration and judgment. Omit
+  product identity, claims about an inner life, and unrelated stylistic bans.
+- Codex's optional persistent-mode prompt depends on its async messaging and
+  scheduling tools. Keep Wingman's session and unattended-mode contracts.
 
 `BuildBaseInstructions` contains model/mode guidance; `BuildSessionContext`
 contains project instructions, skills, memory, and environment data. The harness
@@ -60,9 +81,10 @@ behavior. Use matched model/effort runs of `bench/acpflow` for behavioral or
 latency comparisons, and include clarification and post-compaction continuation
 cases when evaluating these instructions.
 
-This review reduced the nine GPT prompt files from 112,092 to 108,400 UTF-8 bytes
-in aggregate (3.3%). This is a text-size measurement, not a measured token,
-latency, cost, or task-success improvement.
+For model catalog changes, also run `go test ./pkg/model ./pkg/external/codex
+./pkg/acp/codex ./pkg/agent` to cover discovery, backend IDs, Codex metadata,
+and request construction. Prompt text changes still require matched behavioral
+evaluations before claiming task-success or latency improvements.
 
 ## Claude Sonnet 5.5
 

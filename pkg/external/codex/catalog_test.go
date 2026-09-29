@@ -13,6 +13,7 @@ import (
 func TestBuildModelCatalogFiltersModelsAndResolvesAliases(t *testing.T) {
 	data, err := buildModelCatalog([]string{
 		"gpt-6-astra",
+		"gpt-6.1-sol",
 		"gpt-6-sol",
 		"gpt-6-sol",
 		"gpt-6-luna",
@@ -65,7 +66,7 @@ func TestBuildModelCatalogFiltersModelsAndResolvesAliases(t *testing.T) {
 		}
 	}
 
-	if want := []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-terra", "gpt-5.4", "gpt-5.6"}; !slices.Equal(gotIDs, want) {
+	if want := []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-terra", "gpt-5.4", "gpt-5.6"}; !slices.Equal(gotIDs, want) {
 		t.Fatalf("model ids = %q, want %q", gotIDs, want)
 	}
 
@@ -76,7 +77,7 @@ func TestBuildModelCatalogFiltersModelsAndResolvesAliases(t *testing.T) {
 	if !strings.Contains(astra.ModelMessages.Instructions, "You are Codex, an agent based on GPT-6") {
 		t.Error("Astra catalog is missing its GPT-6 instructions")
 	}
-	for _, entry := range catalog.Models[1:3] {
+	for _, entry := range catalog.Models[2:4] {
 		if entry.DefaultEffort != "medium" || entry.ShellType != "shell_command" || entry.ContextWindow != 272_000 {
 			t.Errorf("%s catalog metadata = effort %q, shell %q, context %d", entry.Slug, entry.DefaultEffort, entry.ShellType, entry.ContextWindow)
 		}
@@ -85,7 +86,7 @@ func TestBuildModelCatalogFiltersModelsAndResolvesAliases(t *testing.T) {
 		}
 	}
 
-	alias := catalog.Models[5]
+	alias := catalog.Models[6]
 	if alias.DisplayName != "GPT 5.6 Sol" || alias.ContextWindow != 272_000 {
 		t.Errorf("alias metadata = name %q, context %d", alias.DisplayName, alias.ContextWindow)
 	}
@@ -98,6 +99,8 @@ func TestCatalogPreservesUpstreamConfiguration(t *testing.T) {
 	}
 	for id, upstreamID := range map[string]string{
 		"gpt-6-astra":                "gpt-6-astra",
+		"gpt-6.1-sol":                "gpt-6.1-sol",
+		"~openai/GPT-6.1-SOL:latest": "gpt-6.1-sol",
 		"gpt-6-sol":                  "gpt-6-sol",
 		"gpt-6-luna":                 "gpt-6-luna",
 		"gpt-5.6":                    "gpt-5.6-sol",

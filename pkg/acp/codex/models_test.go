@@ -42,6 +42,7 @@ func TestSessionModesExposeNormalizedPolicies(t *testing.T) {
 func TestFormatModelDisplayName(t *testing.T) {
 	for in, want := range map[string]string{
 		"gpt-6-astra": "6 Astra", "GPT-5.6-Sol": "5.6 Sol", "gpt-5.5": "5.5",
+		"GPT-6.1-Sol":         "6.1 Sol",
 		"gpt-5.3-codex-spark": "5.3 Codex Spark", "gpt-5.3/codex-spark": "5.3 Codex Spark", "gpt-oss-120B": "Oss 120B",
 		"Claude Opus": "Claude Opus", "custom-provider/model-v2": "custom-provider/model-v2", "o3-mini": "o3-mini",
 	} {

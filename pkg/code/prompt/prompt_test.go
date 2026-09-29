@@ -24,7 +24,7 @@ func TestVariantFor(t *testing.T) {
 	}
 
 	for _, id := range []string{
-		"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.1", "gpt-4o",
+		"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.1", "gpt-4o",
 		"claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-6", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
 		"gemini-3.7-flash", "gemini-3.6-flash", "glm-5.3", "glm-5.2", "kimi-k3", "minimax-m3", "grok-4.6",
 		"qwen3.8-max", "qwen3.8", "qwen3.7-plus", "qwen3.5-plus",
@@ -43,7 +43,7 @@ func TestVariantFor(t *testing.T) {
 	if VariantFor("gpt-5.6-sol").Agent != VariantFor("gpt-5.3-codex").Agent {
 		t.Error("gpt-5.6 and GPT-5.3 models should share the default GPT prompt")
 	}
-	for _, id := range []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"} {
+	for _, id := range []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"} {
 		variant := VariantFor(id)
 		if variant.Agent == VariantFor("gpt-5.6-sol").Agent {
 			t.Errorf("%s should use its model-specific prompt", id)
@@ -52,6 +52,17 @@ func TestVariantFor(t *testing.T) {
 			if VariantFor(alias) != variant {
 				t.Errorf("VariantFor(%s) should resolve to %s", alias, id)
 			}
+		}
+	}
+
+	for _, previous := range []string{"gpt-6-astra", "gpt-6-sol"} {
+		if VariantFor("gpt-6.1-sol").Agent == VariantFor(previous).Agent {
+			t.Errorf("GPT-6.1 Sol should keep its distinct prompt from %s", previous)
+		}
+	}
+	for _, id := range []string{"gpt-5.6-terra", "gpt-5.6-luna", "openai/gpt-5.6", "gpt-5.6-sol:latest"} {
+		if VariantFor(id) != VariantFor("gpt-5.6-sol") {
+			t.Errorf("%s should share the GPT-5.6 prompt", id)
 		}
 	}
 
@@ -142,7 +153,7 @@ func TestVariantFor(t *testing.T) {
 }
 
 func TestTaggedModelVariants(t *testing.T) {
-	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "gpt-6-astra", "gpt-6-luna", "gpt-5.4-mini"} {
+	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "gpt-5.4-mini"} {
 		t.Run(id, func(t *testing.T) {
 			if got := VariantFor(id + ":latest"); got != VariantFor(id) {
 				t.Fatalf("tagged %s lost its model-specific instructions", id)
@@ -249,6 +260,7 @@ func TestBuildInstructionsRendersModelTemplate(t *testing.T) {
 		"claude-mythos-5-1",
 		"claude-mythos-5",
 		"gpt-6-astra",
+		"gpt-6.1-sol",
 		"gpt-6-sol",
 		"gpt-6-luna",
 		"gpt-5.6-sol",
@@ -369,7 +381,7 @@ func TestBuildInstructionsSharedSections(t *testing.T) {
 }
 
 func TestBuildInstructionsAlwaysExplainsProjectInstructionScope(t *testing.T) {
-	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.2", "gpt-5.1-codex"} {
+	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.2", "gpt-5.1-codex"} {
 		t.Run(id, func(t *testing.T) {
 			got := BuildInstructions(VariantFor(id).Agent, SectionData{})
 			if !strings.Contains(got, "# Project Guidelines\n") || !strings.Contains(got, "check for applicable instruction files") {
@@ -395,6 +407,7 @@ func TestAgentPromptPolicy(t *testing.T) {
 		"claude-mythos-5-1",
 		"claude-mythos-5",
 		"gpt-6-astra",
+		"gpt-6.1-sol",
 		"gpt-6-sol",
 		"gpt-6-luna",
 		"gpt-5.6-sol",
@@ -439,6 +452,7 @@ func TestAgentPromptsExcludeRemovedTools(t *testing.T) {
 		"claude-fable-5-1",
 		"claude-mythos-5-1",
 		"gpt-6-astra",
+		"gpt-6.1-sol",
 		"gpt-6-sol",
 		"gpt-6-luna",
 		"gpt-5.6-sol",
@@ -476,7 +490,7 @@ func TestReferenceSpecificCopyrightHeaderGuidance(t *testing.T) {
 		})
 	}
 
-	for _, id := range []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"} {
+	for _, id := range []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"} {
 		t.Run(id+"/absent", func(t *testing.T) {
 			if agent := strings.ToLower(VariantFor(id).Agent); strings.Contains(agent, guidance) {
 				t.Errorf("agent prompt contains guidance absent from its reference: %q", guidance)

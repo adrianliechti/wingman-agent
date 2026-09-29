@@ -14,6 +14,7 @@ func TestCompleteSendsModelVerbosity(t *testing.T) {
 		want  any
 	}{
 		{model: "gpt-6-astra", want: "low"},
+		{model: "gpt-6.1-sol", want: "low"},
 		{model: "gpt-5.6-sol", want: nil},
 	} {
 		t.Run(tc.model, func(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
-// models.json is the unmodified codex-rs/models-manager/models.json asset.
+// models.json contains unmodified entries from codex-rs/models-manager/models.json.
 // Keeping the full upstream entries preserves Codex's model-specific
 // instructions and tool metadata. Run `task generate:codex-models` to refresh
 // it; Wingman-specific fields are changed only in the temporary runtime copy.

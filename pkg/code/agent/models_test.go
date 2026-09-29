@@ -74,15 +74,27 @@ func TestModelSelectionCrossFamilyFallback(t *testing.T) {
 		t.Fatalf("utility model = %q, want gpt-5.6-luna", got)
 	}
 
-	// GPT-only gateway anchors every role in the gpt family.
-	g := upstreamAgent("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
-	s := &sessionState{}
-	if current := roleModelID(t, g, s, ""); current != "gpt-5.6-terra" {
-		t.Fatalf("code model = %q, want gpt-5.6-terra", current)
-	}
-	s.setMode(modePlan)
-	if current := roleModelID(t, g, s, "complex"); current != "gpt-5.6-sol" {
-		t.Fatalf("complex model = %q, want gpt-5.6-sol", current)
+	// GPT-only gateways anchor every role in the gpt family.
+	for _, tc := range []struct {
+		available []string
+		main      string
+		complex   string
+		utility   string
+	}{
+		{[]string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}, "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"},
+		{[]string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}, "gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"},
+		{[]string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}, "gpt-6-sol", "gpt-6-astra", "gpt-6-luna"},
+	} {
+		g := upstreamAgent(tc.available...)
+		s := &sessionState{}
+		for _, mode := range []sessionMode{modeAgent, modePlan} {
+			s.setMode(mode)
+			for role, want := range map[string]string{"default": tc.main, "complex": tc.complex, "utility": tc.utility} {
+				if got := roleModelID(t, g, s, role); got != want {
+					t.Fatalf("%s/%s model = %q, want %q", mode, role, got, want)
+				}
+			}
+		}
 	}
 }
 
@@ -211,24 +223,28 @@ func TestEffortDefaultsFollowModelAcrossModes(t *testing.T) {
 	}
 }
 
-func TestAstraEffortDefaultsAndClampsOverrides(t *testing.T) {
-	a := upstreamAgent("gpt-6-astra")
-	s := &sessionState{}
+func TestReasoningOnlyGPTEffortDefaultsAndClampsOverrides(t *testing.T) {
+	for _, id := range []string{"gpt-6-astra", "gpt-6.1-sol", "~openai/GPT-6.1-SOL:latest"} {
+		t.Run(id, func(t *testing.T) {
+			a := upstreamAgent(id)
+			s := &sessionState{}
 
-	if got := a.effortFor(s); got != "low" {
-		t.Fatalf("Astra effort = %q, want low", got)
-	}
+			if got := a.effortFor(s); got != "low" {
+				t.Fatalf("default effort = %q, want low", got)
+			}
 
-	a.effort = "none"
-	if got := a.effortFor(s); got != "low" {
-		t.Fatalf("Astra effort for unsupported none override = %q, want low", got)
-	}
-	if current, values := a.Effort(""); current != "low" || !slices.Equal(values, []string{"auto", "low", "medium", "high", "xhigh", "max"}) {
-		t.Fatalf("Astra effort selector = %q/%v", current, values)
-	}
+			a.effort = "none"
+			if got := a.effortFor(s); got != "low" {
+				t.Fatalf("effort for unsupported none override = %q, want low", got)
+			}
+			if current, values := a.Effort(""); current != "low" || !slices.Equal(values, []string{"auto", "low", "medium", "high", "xhigh", "max"}) {
+				t.Fatalf("effort selector = %q/%v", current, values)
+			}
 
-	if err := a.SetEffort(context.Background(), "", "none"); err == nil {
-		t.Fatal("SetEffort accepted unsupported Astra effort none")
+			if err := a.SetEffort(context.Background(), "", "none"); err == nil {
+				t.Fatal("SetEffort accepted unsupported effort none")
+			}
+		})
 	}
 }
 
