@@ -516,6 +516,18 @@ html[data-window-chrome="windows-overlay"] .window-app-menu {
 		color-mix(in srgb, var(--color-warning) 70%, transparent);
 }
 
+/* URLs in code keep their token color; Ctrl/Cmd+click opens them. */
+.md-code-link {
+	color: inherit;
+	text-decoration: underline dotted
+		color-mix(in srgb, currentColor 45%, transparent);
+	text-underline-offset: 2px;
+	cursor: text;
+}
+.md-code-link:hover {
+	text-decoration-style: solid;
+}
+
 .md-token-comment {
 	color: var(--color-fg-dim);
 	font-style: italic;

@@ -15,12 +15,18 @@ import {
 	useEffect,
 	useRef,
 	useState,
+	type MouseEvent,
 	type ReactElement,
 	type ReactNode,
 } from "react";
+import {
+	autolinkExtension,
+	findUrls,
+	type UrlMatch,
+} from "../utils/markdownAutolink";
 import { MermaidPreview } from "./MermaidPreview";
 
-const STREAMING_EXTENSIONS = [streamingMarkdownExtension()];
+const MARKDOWN_EXTENSIONS = [streamingMarkdownExtension(), autolinkExtension()];
 const MarkdownStreamingContext = createContext(false);
 
 const LANGUAGE_ALIASES: Record<string, string> = {
@@ -99,12 +105,53 @@ function tokenClass(type: string) {
 	return undefined;
 }
 
+// Code links only open on Ctrl/Cmd+click, like in an editor, so a plain click
+// still selects text.
+function openOnModifierClick(event: MouseEvent<HTMLAnchorElement>) {
+	if (!event.metaKey && !event.ctrlKey) event.preventDefault();
+}
+
+// Wraps the URL parts of text[start, end) in Ctrl/Cmd+click links. `urls` are
+// found on the whole line, so a URL spanning several tokens still links.
+function withCodeLinks(
+	text: string,
+	urls: UrlMatch[],
+	start = 0,
+	end = text.length,
+): ReactNode[] {
+	const parts: ReactNode[] = [];
+	let cursor = start;
+	for (const url of urls) {
+		const from = Math.max(url.start, cursor);
+		const to = Math.min(url.end, end);
+		if (from >= to) continue;
+		if (from > cursor) parts.push(text.slice(cursor, from));
+		parts.push(
+			<a
+				key={from}
+				href={url.href}
+				target="_blank"
+				rel="noopener noreferrer"
+				title="Ctrl/Cmd+click to open"
+				className="md-code-link"
+				onClick={openOnModifierClick}
+			>
+				{text.slice(from, to)}
+			</a>,
+		);
+		cursor = to;
+	}
+	if (cursor < end) parts.push(text.slice(cursor, end));
+	return parts;
+}
+
 function highlightedCode(code: string, languageId: string): ReactNode[] {
 	const lines = code.split("\n");
 	const tokenLines = monaco?.editor.tokenize(code, languageId) ?? [];
 
 	return lines.flatMap((line, lineIndex) => {
 		const tokens = tokenLines[lineIndex] ?? [];
+		const urls = findUrls(line);
 		const content: ReactNode[] = tokens.map((token, tokenIndex) => {
 			const end = tokens[tokenIndex + 1]?.offset ?? line.length;
 			return (
@@ -112,7 +159,7 @@ function highlightedCode(code: string, languageId: string): ReactNode[] {
 					key={`${lineIndex}:${token.offset}`}
 					className={tokenClass(token.type)}
 				>
-					{line.slice(token.offset, end)}
+					{withCodeLinks(line, urls, token.offset, end)}
 				</span>
 			);
 		});
@@ -179,7 +226,7 @@ function MarkdownCodeBlock({ children, ...props }: CodePreProps) {
 
 	const renderedCode = loadedLanguage
 		? highlightedCode(code, loadedLanguage)
-		: code;
+		: withCodeLinks(code, findUrls(code));
 
 	function copyCode() {
 		void navigator.clipboard.writeText(code).then(() => {
@@ -350,6 +397,15 @@ const components = {
 			</div>
 		);
 	},
+	code({ children, ...props }: MarkdownComponentProps<"code">) {
+		return (
+			<code {...props}>
+				{typeof children === "string"
+					? withCodeLinks(children, findUrls(children))
+					: children}
+			</code>
+		);
+	},
 	pre: MarkdownCodeBlock,
 } satisfies MarkdownComponents;
 
@@ -367,7 +423,7 @@ export const MarkdownContent = memo(function MarkdownContent({
 			<div data-markdown-content data-streaming={streaming || undefined}>
 				<Markdown
 					components={components}
-					extensions={STREAMING_EXTENSIONS}
+					extensions={MARKDOWN_EXTENSIONS}
 					frontmatter={false}
 					headingIds={false}
 				>
