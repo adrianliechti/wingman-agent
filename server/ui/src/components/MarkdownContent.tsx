@@ -18,9 +18,13 @@ import {
 	type ReactElement,
 	type ReactNode,
 } from "react";
+import { autolinkExtension } from "../utils/markdownAutolink";
 import { MermaidPreview } from "./MermaidPreview";
 
-const STREAMING_EXTENSIONS = [streamingMarkdownExtension()];
+const STREAMING_EXTENSIONS = [
+	streamingMarkdownExtension(),
+	autolinkExtension(),
+];
 const MarkdownStreamingContext = createContext(false);
 
 const LANGUAGE_ALIASES: Record<string, string> = {
