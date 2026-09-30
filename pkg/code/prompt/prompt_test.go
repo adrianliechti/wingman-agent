@@ -107,12 +107,25 @@ func TestVariantFor(t *testing.T) {
 	if VariantFor("claude-opus-4-7").Agent != VariantFor("claude-sonnet-5").Agent {
 		t.Error("Claude Opus 4.7 and Sonnet 5 should share the adapted general Claude prompt")
 	}
-	if VariantFor("claude-fable-5-1").Agent != VariantFor("claude-fable-5").Agent {
-		t.Error("Claude Fable 5 variants should share the Fable prompt")
+	if VariantFor("claude-fable-5-1").Agent == VariantFor("claude-fable-5").Agent {
+		t.Error("Claude Fable 5.1 should keep its distinct captured prompt")
 	}
-	if VariantFor("claude-mythos-5-1").Agent != VariantFor("claude-mythos-5").Agent {
-		t.Error("Claude Mythos 5 variants should share the Mythos prompt")
+	if VariantFor("claude-mythos-5-1").Agent == VariantFor("claude-mythos-5").Agent {
+		t.Error("Claude Mythos 5.1 should keep its distinct captured prompt")
 	}
+	for _, family := range []string{"claude-fable", "claude-mythos"} {
+		id := family + "-5-1"
+		variant := VariantFor(id)
+		for _, alias := range []string{family + "-5.1", "anthropic/" + id, id + "-20260901", id + ":latest"} {
+			if VariantFor(alias) != variant {
+				t.Errorf("VariantFor(%s) should resolve to %s", alias, id)
+			}
+		}
+		if VariantFor(id+"ish") != VariantFor(family+"-5") {
+			t.Errorf("VariantFor(%sish) should not match the 5.1 variant", id)
+		}
+	}
+
 	if VariantFor("claude-fable-5-1").Agent == VariantFor("claude-mythos-5-1").Agent {
 		t.Error("Claude Fable and Mythos should keep their distinct captured prompts")
 	}
@@ -173,25 +186,15 @@ func TestClaudePromptFamilies(t *testing.T) {
 		}
 	}
 
-	fable := VariantFor("claude-fable-5-1").Agent
-	for _, want := range []string{
-		"# Communicating with the user",
-		"Write it for a teammate who stepped away",
-		"Fable and Mythos share the same underlying model",
-		"You are operating autonomously",
-	} {
-		if !strings.Contains(fable, want) {
-			t.Errorf("Fable prompt missing captured guidance %q", want)
+	for _, id := range []string{"claude-fable-5-1", "claude-mythos-5-1"} {
+		variant := VariantFor(id)
+		for _, want := range []string{"# Delivering work", "# Writing for the user"} {
+			if !strings.Contains(variant.Agent, want) {
+				t.Errorf("%s prompt missing captured section %q", id, want)
+			}
 		}
-	}
-
-	mythos := VariantFor("claude-mythos-5-1").Agent
-	if strings.Contains(mythos, "Fable and Mythos share the same underlying model") {
-		t.Error("Mythos prompt inherited Fable-only identity guidance")
-	}
-	for _, want := range []string{"# Communicating with the user", "You are operating autonomously"} {
-		if !strings.Contains(mythos, want) {
-			t.Errorf("Mythos prompt missing captured guidance %q", want)
+		if strings.Contains(variant.Agent, "The user is not watching in real time") {
+			t.Errorf("%s base prompt must leave unattended policy to the shared mode", id)
 		}
 	}
 
@@ -207,18 +210,10 @@ func TestClaudePromptFamilies(t *testing.T) {
 	}
 
 	opus55 := VariantFor("claude-opus-5-5").Agent
-	for _, want := range []string{
-		"# Communicating with the user",
-		"must be in the final text message of your turn",
-		"# Delivering work",
-		"# Corrections",
-	} {
-		if !strings.Contains(opus55, want) {
-			t.Errorf("Opus 5.5 prompt missing guidance %q", want)
+	for _, unwanted := range []string{"# Communicating with the user", "# Delivering work", "# Corrections"} {
+		if strings.Contains(opus55, unwanted) {
+			t.Errorf("Opus 5.5 prompt contains guidance absent from its lean captured prompt %q", unwanted)
 		}
-	}
-	if strings.Contains(opus55, "Fable and Mythos share the same underlying model") {
-		t.Error("Opus 5.5 prompt inherited Fable-only identity guidance")
 	}
 
 	opus48 := VariantFor("claude-opus-4-8").Agent

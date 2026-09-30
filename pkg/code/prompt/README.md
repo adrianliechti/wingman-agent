@@ -8,11 +8,18 @@ project instructions, and environment context separately.
 
 ## Comparison baseline
 
-Reviewed all GPT variants on 2026-09-29 against the local Codex checkout at
-`b1e72963c3b71a9265a551e54beff078384efed9`. GPT-6 Astra/Sol/Luna, all three
-GPT-5.6 models, and GPT-5.5 have unchanged base templates compared with the
-previous review at `83b56bc5ad9489a47a0eb3edc3e5852f597125be`. The historical
-GPT-5.1 and GPT-5.2 source files are also unchanged. GPT-6.1 Sol is new.
+Reviewed all current GPT catalog variants on 2026-09-30 against Codex commit
+`92bc601ad60542c92bf0bb1e7a2eb70b84ac49d2` using its pinned
+[model catalog](https://github.com/openai/codex/blob/92bc601ad60542c92bf0bb1e7a2eb70b84ac49d2/codex-rs/models-manager/models.json).
+All base instruction templates match the previous 2026-09-29 baseline at
+`b1e72963c3b71a9265a551e54beff078384efed9`, including GPT-6.1 Sol. The embedded
+external catalog now preserves the full new upstream entries, including updated
+descriptions, priorities, and auto-review metadata. Historical GPT-5.4 remains
+available with its retained entry. GPT prompt text required no changes.
+
+The prior September 29 review introduced GPT-6.1 Sol and compared GPT-6,
+GPT-5.6, GPT-5.5, and historical GPT-5.1/GPT-5.2 against
+`83b56bc5ad9489a47a0eb3edc3e5852f597125be`.
 
 | Wingman prompt | Codex reference |
 | --- | --- |
@@ -125,3 +132,36 @@ instructions still use the shared modes.
 
 Run `go test ./pkg/code/prompt ./pkg/code/agent` to check routing, rendering,
 and session integration. These checks do not measure Sonnet 5.5's behavior.
+
+## Claude Code review on September 30
+
+Captured the rendered requests for Claude Sonnet 5/5.5, Opus 4.8/5/5.5,
+Fable 5/5.1, and Mythos 5/5.1 with Claude Code 2.1.285. The installed Darwin
+ARM64 binary matches the official
+[release manifest](https://downloads.claude.ai/claude-code-releases/2.1.285/manifest.json):
+commit `afb212976052ab038df25d5e871f6c049e094d3b`, built September 29,
+SHA-256 `51f09bd1e021d9fa8a1864c179799bd37cb39962a937935c5cf6823398e86db4`.
+The capture uses the isolation described above, default CLI tools, a local mock
+API, and a dummy credential. It makes no model inference requests. The source
+captures and a dated report are retained in `../wingman-ops/runs/2026-09-30`.
+
+| Prompt variant | Result |
+| --- | --- |
+| `claude-sonnet-5-5` | Retain the lean adaptation; current capture confirms the same structure. |
+| `claude-opus-5-5` | Refresh to its current lean prompt; remove the older communication, delivery, and correction sections absent from this capture. |
+| `claude-fable-5-1`, `claude-mythos-5-1` | Add separate adaptations with delivery and writing guidance; retain the distinct Fable identity guidance. |
+| `claude-fable-5`, `claude-mythos-5` | Retain their older communication structure; leave unattended assumptions in the shared mode. |
+| `claude-opus-4-8` | Retain its lean adaptation and intentional pre-mutation state check. |
+| `claude-opus-5`, general `claude` | Retain the existing model-specific and general adaptations. |
+
+Translate Claude's system-turn/reminder wording to Wingman's appended session
+context, without granting ordinary tool results instruction authority. Keep
+software-security guidance and explicit-request-only Git rules. Omit billing,
+product catalogs, token countdowns, and unrelated identity guidance. The new
+5.1 variants do not assume every session is unattended; the shared unattended
+and plan modes remain the policy owners. Longest-prefix routing distinguishes
+5.1 from 5, including provider-prefixed, normalized, dated, and tagged IDs.
+
+Validate routing, rendering, and mode composition with the existing focused
+Go suites. These checks do not establish a behavioral or latency improvement;
+matched live model evaluations were not part of this refresh.
