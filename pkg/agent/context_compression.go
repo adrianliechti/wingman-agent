@@ -97,7 +97,7 @@ func trimStaleEvidence(messages []Message) bool {
 }
 
 func trimmedToolOutput(output string) string {
-	stub := text.HeadBytes(output, trimResultKeepBytes)
+	stub := text.HeadLines(output, trimResultKeepBytes)
 	// Persisted output remains retrievable even when the preview is reclaimed.
 	if _, path, ok := strings.Cut(output, "Full output saved to: "); ok {
 		path, _, _ = strings.Cut(path, "\n")
@@ -121,8 +121,8 @@ func boundToolResult(content string) string {
 	if len(content) <= maxInlineToolResultBytes {
 		return content
 	}
-	head := text.HeadBytes(content, toolResultHeadBytes)
-	tail := text.TailBytes(content, toolResultTailBytes)
+	head := text.HeadLines(content, toolResultHeadBytes)
+	tail := text.TailLines(content[len(head):], toolResultTailBytes)
 	omitted := len(content) - len(head) - len(tail)
 	return fmt.Sprintf(
 		"<truncated-output>\nOutput was %d bytes (%d lines); %d bytes omitted. Output was truncated by the agent harness.\n\nPreview (first %d bytes):\n\n%s\n\n[... %d bytes omitted ...]\n\nPreview (last %d bytes):\n\n%s\n</truncated-output>",

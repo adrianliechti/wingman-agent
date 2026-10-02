@@ -165,38 +165,9 @@ Request 3: 0 retained, 9 shown
   ],
   "role": "user"
 }
-Request 4: 9 retained, 3 shown
-[9] {
-  "content": [
-    {
-      "text": "inspection complete",
-      "type": "output_text"
-    }
-  ],
-  "role": "assistant",
-  "type": "message"
-}
-[10] {
-  "content": [
-    {
-      "text": "continue after compaction",
-      "type": "input_text"
-    }
-  ],
-  "role": "user"
-}
-[11] {
-  "content": [
-    {
-      "text": "\u003c1890 bytes; sha256:f3aec1dceef6\u003e Context checkpoint: your reply replaces the conversation above. Reply with the b…",
-      "type": "input_text"
-    }
-  ],
-  "role": "user"
-}
 
-Window 3 (history replaced at item 1)
-Request 5: 0 retained, 6 shown
+Window 3 (history replaced at item 3)
+Request 4: 0 retained, 4 shown
 [0] {
   "content": [
     {
@@ -209,16 +180,17 @@ Request 5: 0 retained, 6 shown
 [1] {
   "content": [
     {
-      "text": "inspect",
-      "type": "input_text"
+      "text": "\u003c16200 bytes; sha256:e436eb5b5395\u003e Earlier observed progress.\nEarlier observed progress.\nEarlier observed progress.…",
+      "type": "output_text"
     }
   ],
-  "role": "user"
+  "role": "assistant",
+  "type": "message"
 }
 [2] {
   "content": [
     {
-      "text": "prepare verification",
+      "text": "[Session context]\nThis is the complete current session context. It replaces all earlier session context messages; omitted sections no longer apply.\n\nInitial guidance",
       "type": "input_text"
     }
   ],
@@ -227,25 +199,95 @@ Request 5: 0 retained, 6 shown
 [3] {
   "content": [
     {
+      "text": "\u003c1890 bytes; sha256:f3aec1dceef6\u003e Context checkpoint: your reply replaces the conversation above. Reply with the b…",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+
+Window 4 (history replaced at item 1)
+Request 5: 0 retained, 10 shown
+[0] {
+  "content": [
+    {
+      "text": "Original task: inspect and verify",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[1] {
+  "content": [
+    {
+      "text": "\u003c427 bytes; sha256:d72e427ec0cf\u003e [Previous conversation summary]\n\nInspected the repository. Continue verification…",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[2] {
+  "content": [
+    {
+      "text": "inspect",
+      "type": "input_text"
+    }
+  ],
+  "role": "user"
+}
+[3] {
+  "arguments": "{}",
+  "call_id": "read-1",
+  "name": "read",
+  "type": "function_call"
+}
+[4] {
+  "call_id": "read-1",
+  "output": "observed source",
+  "type": "function_call_output"
+}
+[5] {
+  "content": [
+    {
       "text": "[Session context]\nThis is the complete current session context. It replaces all earlier session context messages; omitted sections no longer apply.\n\nUpdated guidance",
       "type": "input_text"
     }
   ],
   "role": "user"
 }
-[4] {
+[6] {
   "content": [
     {
-      "text": "continue after compaction",
+      "text": "inspection complete",
+      "type": "output_text"
+    }
+  ],
+  "role": "assistant",
+  "type": "message"
+}
+[7] {
+  "content": [
+    {
+      "text": "prepare verification",
       "type": "input_text"
     }
   ],
   "role": "user"
 }
-[5] {
+[8] {
   "content": [
     {
-      "text": "[Previous conversation summary]\n\nInspected the repository. Continue verification using updated guidance.\n\nContinue the active task from this checkpoint. Earlier requests remain the task scope; later messages may steer it. Do not repeat completed work or treat compaction as a new user request.",
+      "text": "inspection complete",
+      "type": "output_text"
+    }
+  ],
+  "role": "assistant",
+  "type": "message"
+}
+[9] {
+  "content": [
+    {
+      "text": "continue after compaction",
       "type": "input_text"
     }
   ],

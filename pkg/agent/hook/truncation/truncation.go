@@ -65,8 +65,8 @@ func writeScratch(scratchDir, toolName, content string) string {
 }
 
 func formatPersisted(result, scratchPath string) string {
-	head := text.HeadBytes(result, headPreviewBytes)
-	tail := text.TailBytes(result[len(head):], tailPreviewBytes)
+	head := text.HeadLines(result, headPreviewBytes)
+	tail := text.TailLines(result[len(head):], tailPreviewBytes)
 	omitted := len(result) - len(head) - len(tail)
 
 	var b strings.Builder

@@ -16,8 +16,9 @@ import (
 )
 
 func TestSummarizeContextRejectsUnfinishedResponse(t *testing.T) {
-	for _, paused := range []bool{false, true} {
-		t.Run(fmt.Sprintf("paused=%t", paused), func(t *testing.T) {
+	// A length-limited summary must never be installed either (pi #7048).
+	for _, variant := range []string{"tool_call", "paused", "cutoff"} {
+		t.Run(variant, func(t *testing.T) {
 			requests := 0
 			client := openai.NewClient(option.WithAPIKey("test"), option.WithHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				requests++
@@ -40,8 +41,11 @@ func TestSummarizeContextRejectsUnfinishedResponse(t *testing.T) {
 					// Even a provider ignoring tool_choice must not replace history
 					// with the preamble to a tool call that will never execute.
 					output = phaseTestResponse(false, commentaryOutput, `{"type":"function_call","id":"fc_check","call_id":"check","name":"check","arguments":"{}","status":"completed"}`)
-					if paused {
+					switch variant {
+					case "paused":
 						output = pausedResponse(commentaryOutput)
+					case "cutoff":
+						output = cutoffTestResponse(commentaryOutput)
 					}
 				}
 				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Request: r, Body: io.NopCloser(strings.NewReader(output))}, nil

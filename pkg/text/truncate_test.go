@@ -89,3 +89,52 @@ func itoa(n int) string {
 	}
 	return string(b)
 }
+
+func TestHeadLinesEndsAtLineBoundary(t *testing.T) {
+	in := "first\nsecond\nthird\n"
+	for n, want := range map[int]string{
+		len(in):     in,
+		len(in) - 1: "first\nsecond\nthird",
+		12:          "first\nsecond",
+		11:          "first",
+		5:           "first",
+		4:           "firs", // the first line alone exceeds the budget
+		0:           "",
+	} {
+		if got := HeadLines(in, n); got != want {
+			t.Errorf("HeadLines(%d) = %q, want %q", n, got, want)
+		}
+	}
+	if got := HeadLines("日本語\n🙂", 4); got != "日" {
+		t.Errorf("HeadLines split a rune: %q", got)
+	}
+}
+
+func TestTailLinesStartsAtLineBoundary(t *testing.T) {
+	in := "first\nsecond\nthird"
+	for n, want := range map[int]string{
+		len(in):     in,
+		len(in) - 1: "second\nthird",
+		12:          "second\nthird",
+		11:          "third",
+		5:           "third",
+		4:           "hird", // the last line alone exceeds the budget
+		0:           "",
+	} {
+		if got := TailLines(in, n); got != want {
+			t.Errorf("TailLines(%d) = %q, want %q", n, got, want)
+		}
+	}
+	if got := TailLines("one\ntwo\n", 4); got != "two\n" {
+		t.Errorf("TailLines kept a partial line or dropped the tail: %q", got)
+	}
+	if got := TailLines("body\nAPI.\n\n", 5); got != "PI.\n\n" {
+		t.Errorf("TailLines returned only blank lines or dropped the tail: %q", got)
+	}
+	if got := HeadLines("\n\nbody", 3); got != "\n\nb" {
+		t.Errorf("HeadLines returned only blank lines: %q", got)
+	}
+	if got := TailLines("🙂\n日本語", 4); got != "語" {
+		t.Errorf("TailLines split a rune: %q", got)
+	}
+}

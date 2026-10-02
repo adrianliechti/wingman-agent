@@ -55,7 +55,11 @@ func Progress(ctx context.Context) func(text string) {
 		return nil
 	}
 
-	return func(text string) { sink(ctx, callID, text) }
+	return func(text string) {
+		if ctx.Err() == nil {
+			sink(ctx, callID, text)
+		}
+	}
 }
 
 type UsageDelta struct {

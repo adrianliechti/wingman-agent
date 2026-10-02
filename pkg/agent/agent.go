@@ -254,7 +254,9 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			// change mid-turn, and it decides which tools are offered.
 			var tools []tool.Tool
 			if a.Tools != nil {
-				tools = a.Tools()
+				// A catalog may reuse its backing slice when settings change.
+				// Keep the executors offered by this request until it completes.
+				tools = slices.Clone(a.Tools())
 			}
 			var outputSchema map[string]any
 			if schema, ok := OutputSchemaFromContext(ctx); ok {
@@ -1054,7 +1056,16 @@ func cloneToolResult(result tool.Result) tool.Result {
 	return result
 }
 
-func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []tool.Tool) tool.Result {
+func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []tool.Tool) (result tool.Result) {
+	// Contain executor and hook panics inside the operation so its caller can
+	// persist the result and terminal fact. Preserve metadata from any work
+	// already completed before a post-tool hook panicked.
+	defer func() {
+		if r := recover(); r != nil {
+			result.Content = fmt.Sprintf("error: tool %s panicked: %v", tc.Name, r)
+			result.IsError = true
+		}
+	}()
 	started := time.Now()
 	t := findTool(tc.Name, tools)
 
@@ -1065,11 +1076,13 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 	if timeout == 0 {
 		timeout = DefaultToolTimeout
 	}
+	var cancel context.CancelFunc
 	if timeout > 0 {
-		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
 	}
+	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return toolExecutionError(ctx, err, timeout, started)
 	}
@@ -1094,7 +1107,6 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 
 	hc := tool.ToolCall{ID: tc.ID, Name: tc.Name, Args: tc.Args}
 
-	var result tool.Result
 	execute := true
 	var hookContext []string
 

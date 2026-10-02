@@ -189,7 +189,7 @@ func TestRetainedUsersNewestFirstAndVerbatim(t *testing.T) {
 
 func TestCompactionRejectsOversizedLatestInputWithoutChangingIt(t *testing.T) {
 	input := Message{Role: RoleUser, Content: []Content{{Text: strings.Repeat("request ", 1000)}}}
-	_, err := compactionUserMessages([]Message{input}, 100)
+	_, err := compactionUserMessages([]Message{input}, 100, true)
 	if err == nil || !strings.Contains(err.Error(), "conversation preserved") {
 		t.Fatalf("oversized input result=%v", err)
 	}
@@ -225,7 +225,7 @@ func TestSessionFactsRestateLedgerEditsAndChecks(t *testing.T) {
 }
 
 func TestCompactionReportsOversizedCheckpointBeforeUserInput(t *testing.T) {
-	_, err := compactionUserMessages([]Message{{Role: RoleUser, Content: []Content{{Text: "hi"}}}}, -1)
+	_, err := compactionUserMessages([]Message{{Role: RoleUser, Content: []Content{{Text: "hi"}}}}, -1, true)
 	if err == nil || !strings.Contains(err.Error(), "summary or session context") {
 		t.Fatalf("misleading compaction error: %v", err)
 	}
@@ -267,4 +267,120 @@ func TestCompactionWithoutReductionStopsBeforeSendingOrSummarizingAgain(t *testi
 	if requests != 1 || turnErr == nil || !strings.Contains(turnErr.Error(), "did not reduce") || a.ContextRevision != 0 || len(a.MessagesSnapshot()) != 3 {
 		t.Fatalf("requests=%d err=%v revision=%d", requests, turnErr, a.ContextRevision)
 	}
+}
+
+func TestRetainedWindowStartsAtStepBoundary(t *testing.T) {
+	user := func(text string) Message { return Message{Role: RoleUser, Content: []Content{{Text: text}}} }
+	reply := func(text string) Message { return Message{Role: RoleAssistant, Content: []Content{{Text: text}}} }
+	call := func(id string) Message {
+		return toolCallMessage(ToolCall{ID: id, Name: "read", Args: `{"file_path":"a.go"}`})
+	}
+	result := func(id string) Message {
+		return toolResultMessage(ToolCall{ID: id, Name: "read"}, tool.Text("observed"))
+	}
+	messages := []Message{
+		hiddenContextMessage(summaryPrefix + "\nold checkpoint"), // 0
+		user("task"),           // 1
+		reply("plan"),          // 2
+		call("c1"), call("c2"), // 3, 4
+		result("c1"), result("c2"), // 5, 6
+		{Role: RoleUser, Hidden: true, Content: []Content{{Text: sessionContextPrefix + "guidance"}}}, // 7
+		reply("done"), // 8
+	}
+	cost := func(from, to int) int { return messagesTokens(messages[from:to]) }
+	for _, tc := range []struct {
+		name   string
+		budget int
+		want   int
+	}{
+		{"everything after the checkpoint", cost(1, 9), 1},
+		{"never the checkpoint itself", cost(0, 9) * 2, 1},
+		{"tool batch stays with its results", cost(3, 7) + cost(8, 9), 8},
+		{"a boundary before the batch", cost(2, 7) + cost(8, 9), 2},
+		{"last reply does not fit", cost(8, 9) - 1, len(messages)},
+	} {
+		if got := retainedWindowStart(messages, tc.budget); got != tc.want {
+			t.Errorf("%s: start = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	if got := recentWindow(messages[1:], 7-1); len(got) != 8 || !isSessionContext(got[6]) {
+		t.Fatalf("latest snapshot removed from window: %+v", got)
+	}
+	if got := recentWindow(messages[1:], -1); len(got) != 7 || isSessionContext(got[6]) {
+		t.Fatalf("superseded snapshot kept in window: %+v", got)
+	}
+}
+
+func TestCompactionKeepsRecentWindowVerbatim(t *testing.T) {
+	const summary = "SUMMARY_OF_OLDER_WORK"
+	requests := 0
+	client := streamingTestClient(func(r *http.Request) string {
+		requests++
+		var req struct {
+			Input json.RawMessage `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		input := string(req.Input)
+		if strings.Contains(input, summaryRequest[:40]) {
+			if !strings.Contains(input, "earlier progress") || strings.Contains(input, "next step: verify") {
+				t.Error("summarizer must see the older history and not the recent window")
+			}
+			return phaseTestResponse(false, strings.ReplaceAll(finalAnswerOutput, "Checked and fixed.", summary))
+		}
+		if !strings.Contains(input, `"function_call_output"`) || strings.Index(input, summaryPrefix) > strings.Index(input, "next step: verify") {
+			t.Error("recent tool work must follow the checkpoint verbatim")
+		}
+		return phaseTestResponse(false, finalAnswerOutput)
+	})
+	observed := strings.Repeat("observed line\n", 300)
+	a := &Agent{Config: &Config{client: &client, ContextWindow: 40_000, ReserveTokens: 2_000}, Messages: []Message{
+		{Role: RoleUser, Content: []Content{{Text: "original task"}}},
+		{Role: RoleAssistant, Content: []Content{{Text: strings.Repeat("earlier progress ", 5000)}}},
+		{Role: RoleUser, Content: []Content{{Text: "next step: verify"}}},
+		toolCallMessage(ToolCall{ID: "c1", Name: "read", Args: `{"file_path":"a.go"}`}),
+		toolResultMessage(ToolCall{ID: "c1", Name: "read"}, tool.Text(observed)),
+		{Role: RoleAssistant, Content: []Content{{Text: "recent progress"}}},
+	}}
+	a.anchorContextUsage(&request{messages: a.requestMessages()}, &response{usage: Usage{InputTokens: 40_000}})
+	stream, err := a.Send(t.Context(), []Content{{Text: "continue"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range stream {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if requests != 2 || a.ContextRevision != 1 {
+		t.Fatalf("requests=%d revision=%d", requests, a.ContextRevision)
+	}
+	got := a.requestMessages()
+	text := func(i int) string { return contentText(got[i].Content) }
+	if len(got) != 8 || text(0) != "original task" || !isCompactionSummary(got[1]) || text(2) != "next step: verify" ||
+		got[3].Content[0].ToolCall == nil || got[4].Content[0].ToolResult == nil || got[4].Content[0].ToolResult.Content != observed ||
+		text(5) != "recent progress" || text(6) != "continue" || got[7].Role != RoleAssistant {
+		for i := range got {
+			t.Logf("%d %s hidden=%t %q", i, got[i].Role, got[i].Hidden, strings.Repeat(" ", 0)+summarizeForLog(got[i]))
+		}
+		t.Fatal("compacted layout differs from [older user, checkpoint, recent window]")
+	}
+	if checkpoint := text(1); !strings.Contains(checkpoint, summary) || !strings.Contains(checkpoint, windowContinuation) || strings.Contains(checkpoint, "earlier progress") {
+		t.Fatalf("checkpoint = %q", checkpoint)
+	}
+}
+
+func summarizeForLog(m Message) string {
+	s := contentText(m.Content)
+	if len(m.Content) > 0 && m.Content[0].ToolCall != nil {
+		s = "call " + m.Content[0].ToolCall.ID
+	}
+	if len(m.Content) > 0 && m.Content[0].ToolResult != nil {
+		s = "result " + m.Content[0].ToolResult.ID
+	}
+	if len(s) > 40 {
+		s = s[:40]
+	}
+	return s
 }

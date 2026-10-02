@@ -701,7 +701,7 @@ func boundAdditionalContext(value string, configured *int) string {
 	previewBudget := max(byteBudget-len(marker), 0)
 	headBudget := previewBudget / 2
 	tailBudget := previewBudget - headBudget
-	return text.HeadBytes(value, headBudget) + marker + text.TailBytes(value, tailBudget)
+	return text.HeadLines(value, headBudget) + marker + text.TailLines(value, tailBudget)
 }
 
 // validWireOutput applies Codex's event-specific output schemas and semantic

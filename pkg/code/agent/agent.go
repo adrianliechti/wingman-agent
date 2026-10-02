@@ -797,7 +797,7 @@ func execExitEvent(e shell.ExecExit) task.Event {
 	result := e.Notice
 	if out := strings.TrimSpace(e.Output); out != "" {
 		if len(out) > execExitNotifyLimit {
-			out = "[earlier output truncated]\n" + text.TailBytes(out, execExitNotifyLimit)
+			out = "[earlier output truncated]\n" + text.TailLines(out, execExitNotifyLimit)
 		}
 		result += "\n\nOutput:\n" + out
 	}

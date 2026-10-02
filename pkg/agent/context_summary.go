@@ -312,5 +312,5 @@ func briefingExcerpt(value string, budget int) string {
 		return text.HeadBytes(marker, budget)
 	}
 	head := (budget - len(marker)) / 2
-	return text.HeadBytes(value, head) + marker + text.TailBytes(value, budget-len(marker)-head)
+	return text.HeadLines(value, head) + marker + text.TailLines(value, budget-len(marker)-head)
 }
