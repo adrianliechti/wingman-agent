@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"math/rand/v2"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/openai/openai-go/v3"
+	"golang.org/x/net/http/httpguts"
 )
 
 type RetryInfo struct {
@@ -30,26 +32,29 @@ func retryPolicy(err error, attempt int, now time.Time) (string, time.Duration) 
 	delay := min(30*time.Second, 2*time.Second<<min(attempt, 4))
 	delay = delay/2 + time.Duration(rand.Int64N(int64(delay/2)+1))
 	reason := "Connection interrupted"
+	retryAfter := ""
 	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		reason = "Provider temporarily unavailable"
 		if apiErr.StatusCode == 429 {
 			reason = "Provider rate limit"
 		}
 		if apiErr.Response != nil {
-			value := strings.TrimSpace(apiErr.Response.Header.Get("Retry-After"))
-			if seconds, parseErr := strconv.ParseInt(value, 10, 32); parseErr == nil && seconds >= 0 {
-				delay = max(delay, time.Duration(seconds)*time.Second)
-			} else if date, parseErr := http.ParseTime(value); parseErr == nil {
-				delay = max(delay, date.Sub(now))
-			}
+			retryAfter = apiErr.Response.Header.Get("Retry-After")
 		}
+	}
+	if responseErr, ok := errors.AsType[*responseFailure](err); ok {
+		retryAfter = responseErr.retryAfter
+	}
+	headerDelay, hasHeaderDelay := parseRetryAfter(retryAfter, now)
+	if hasHeaderDelay {
+		delay = max(delay, headerDelay)
 	}
 	code, message := providerErrorDetails(err)
 	if code == "rate_limit_exceeded" || code == "slow_down" {
 		reason = "Provider rate limit"
-		// SSE failures have no Retry-After header. Only interpret delay hints
-		// on known throttling errors, and keep the jittered backoff as a floor.
-		if match := retryDelayPattern.FindStringSubmatch(message); len(match) == 3 {
+		// Valid HTTP or streamed headers take precedence over message advice.
+		// Only throttling messages supply fallback hints; backoff stays a floor.
+		if match := retryDelayPattern.FindStringSubmatch(message); !hasHeaderDelay && len(match) == 3 {
 			unit := strings.ToLower(match[2])
 			if strings.HasPrefix(unit, "second") {
 				unit = "s"
@@ -60,4 +65,41 @@ func retryPolicy(err error, attempt int, now time.Time) (string, time.Duration) 
 		}
 	}
 	return reason, delay
+}
+
+func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	if !httpguts.ValidHeaderFieldValue(value) {
+		return 0, false
+	}
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 && seconds <= int64((1<<63-1)/time.Second) {
+		return time.Duration(seconds) * time.Second, true
+	}
+	if date, err := http.ParseTime(value); err == nil {
+		return max(0, date.Sub(now)), true
+	}
+	return 0, false
+}
+
+// Streamed Responses errors carry headers outside the SDK's typed schema.
+func streamedRetryAfter(raw string) string {
+	var headers map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &headers) != nil {
+		return ""
+	}
+	for name, value := range headers {
+		if !strings.EqualFold(name, "Retry-After") {
+			continue
+		}
+		var header string
+		if json.Unmarshal(value, &header) == nil {
+			return header
+		}
+		// JSON numeric header values are also accepted by Codex.
+		var number json.Number
+		if json.Unmarshal(value, &number) == nil {
+			return number.String()
+		}
+	}
+	return ""
 }

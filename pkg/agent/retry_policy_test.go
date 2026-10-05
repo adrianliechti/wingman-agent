@@ -30,6 +30,38 @@ func TestRetryPolicyHonorsRetryAfterAndAddsBoundedJitter(t *testing.T) {
 	}
 }
 
+func TestRetryAfterValidationAndHeaderPrecedence(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, tc := range []struct {
+		value string
+		want  time.Duration
+		valid bool
+	}{
+		{"12", 12 * time.Second, true},
+		{now.Add(12 * time.Second).Format(http.TimeFormat), 12 * time.Second, true},
+		{now.Add(-time.Second).Format(http.TimeFormat), 0, true},
+		{"0", 0, true},
+		{"", 0, false},
+		{"-1", 0, false},
+		{"12\r\n", 0, false},
+		{"9223372036854775807", 0, false},
+	} {
+		delay, valid := parseRetryAfter(tc.value, now)
+		if delay != tc.want || valid != tc.valid {
+			t.Errorf("parseRetryAfter(%q) = %v, %v", tc.value, delay, valid)
+		}
+	}
+	for _, err := range []error{
+		&responseFailure{code: "rate_limit_exceeded", message: "Try again in 60s.", retryAfter: "12"},
+		&openai.Error{StatusCode: 429, Code: "rate_limit_exceeded", Message: "Try again in 60s.", Response: &http.Response{Header: http.Header{"Retry-After": {"12"}}}},
+	} {
+		_, delay := retryPolicy(fmt.Errorf("wrapped: %w", err), 0, now)
+		if delay != 12*time.Second {
+			t.Fatalf("message overrode valid header: %v", delay)
+		}
+	}
+}
+
 func TestRetryPolicyStreamDelayHints(t *testing.T) {
 	for _, tc := range []struct {
 		message string

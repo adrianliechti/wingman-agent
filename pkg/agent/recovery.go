@@ -27,7 +27,7 @@ func isRecoverableError(err error) bool {
 		switch responseErr.code {
 		case string(responses.ResponseErrorCodeServerError),
 			string(responses.ResponseErrorCodeRateLimitExceeded),
-			string(responses.ResponseErrorCodeVectorStoreTimeout), "slow_down":
+			string(responses.ResponseErrorCodeVectorStoreTimeout), "slow_down", "server_is_overloaded":
 			return true
 		default:
 			return false

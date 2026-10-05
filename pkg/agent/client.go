@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -76,6 +77,7 @@ func (e *streamFailure) Unwrap() error { return e.err }
 type responseFailure struct {
 	code          string
 	message       string
+	retryAfter    string
 	outputStarted bool
 }
 
@@ -189,11 +191,18 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 	var usageDelta Usage
 
 	pendingCalls := map[int64]*pendingToolCall{}
-	type refusalPart struct {
+	type outputPart struct {
 		itemID string
 		index  int64
 	}
-	streamedRefusals := map[refusalPart]int{}
+	streamedText := map[outputPart]*strings.Builder{}
+	streamedRefusals := map[outputPart]*strings.Builder{}
+	remember := func(parts map[outputPart]*strings.Builder, key outputPart, delta string) {
+		if parts[key] == nil {
+			parts[key] = &strings.Builder{}
+		}
+		parts[key].WriteString(delta)
+	}
 
 	incomplete := false
 	incompleteReason := ""
@@ -202,50 +211,58 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 	stopReason := ""
 	outputStarted := false
 	terminalEvent := false
+	emit := func(msg Message) bool {
+		if !yield(msg, nil) {
+			return false
+		}
+		outputStarted = true
+		return true
+	}
 
 	for stream.Next() {
 		idle.Reset(streamIdleTimeout)
 		telemetry.ObserveResponseChunk(ctx)
 		event := stream.Current()
-		// Error events are terminal metadata, not user-visible output. Preserve
-		// the replay-safety state from before the event so a transient failure
-		// can be retried when no output item or delta preceded it.
-		switch event.Type {
-		case "response.created", "response.in_progress", "response.queued", "response.failed", "error":
-		default:
-			outputStarted = true
-		}
-
 		switch e := event.AsAny().(type) {
 		case responses.ResponseTextDeltaEvent:
+			if e.Delta == "" {
+				continue
+			}
+			remember(streamedText, outputPart{e.ItemID, e.ContentIndex}, e.Delta)
 			telemetry.ObserveOutputChunk(ctx)
 			msg := Message{
 				Role:    RoleAssistant,
 				Content: []Content{{Text: e.Delta, TextID: e.ItemID}},
 			}
 
-			if !yield(msg, nil) {
+			if !emit(msg) {
 				return nil, errYieldStopped
 			}
 
 		case responses.ResponseRefusalDeltaEvent:
+			if e.Delta == "" {
+				continue
+			}
+			remember(streamedRefusals, outputPart{e.ItemID, e.ContentIndex}, e.Delta)
 			telemetry.ObserveOutputChunk(ctx)
-			if !yield(Message{
+			if !emit(Message{
 				Role:    RoleAssistant,
 				Content: []Content{{Refusal: e.Delta, TextID: e.ItemID}},
-			}, nil) {
+			}) {
 				return nil, errYieldStopped
 			}
-			streamedRefusals[refusalPart{e.ItemID, e.ContentIndex}] += len(e.Delta)
 
 		case responses.ResponseReasoningSummaryTextDeltaEvent:
+			if e.Delta == "" {
+				continue
+			}
 			telemetry.ObserveOutputChunk(ctx)
 			msg := Message{
 				Role:    RoleAssistant,
 				Content: []Content{{Reasoning: &Reasoning{ID: e.ItemID, Part: int(e.SummaryIndex), Summary: e.Delta}}},
 			}
 
-			if !yield(msg, nil) {
+			if !emit(msg) {
 				return nil, errYieldStopped
 			}
 
@@ -264,7 +281,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 				}
 				pendingCalls[e.OutputIndex] = pending
 
-				if !yield(pending.message(), nil) {
+				if !emit(pending.message()) {
 					return nil, errYieldStopped
 				}
 			}
@@ -278,7 +295,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 				if pending.snapshotReady(now) {
 					pending.markSnapshot(now)
 
-					if !yield(pending.message(), nil) {
+					if !emit(pending.message()) {
 						return nil, errYieldStopped
 					}
 				}
@@ -289,7 +306,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 				delete(pendingCalls, e.OutputIndex)
 				pending.args = []byte(e.Arguments)
 
-				if !yield(pending.message(), nil) {
+				if !emit(pending.message()) {
 					return nil, errYieldStopped
 				}
 			}
@@ -327,6 +344,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 			return nil, &responseFailure{
 				code:          string(e.Response.Error.Code),
 				message:       e.Response.Error.Message,
+				retryAfter:    streamedRetryAfter(e.Response.Error.JSON.ExtraFields["headers"].Raw()),
 				outputStarted: outputStarted,
 			}
 
@@ -358,23 +376,47 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 		}
 	}
 
-	// Some providers only include refusal text in the final output. Emit any
-	// missing suffix without duplicating text already delivered as deltas.
+	// Some providers omit deltas or deliver only a prefix. Reconcile each
+	// final text/refusal part against what actually reached the consumer.
 	for _, item := range outputItems {
 		m := item.OfOutputMessage
 		if m == nil {
 			continue
 		}
 		for i, part := range m.Content {
-			refusal := part.OfRefusal
-			if refusal == nil {
+			var full string
+			var sent *strings.Builder
+			key := outputPart{m.ID, int64(i)}
+			switch {
+			case part.OfOutputText != nil:
+				full, sent = part.OfOutputText.Text, streamedText[key]
+			case part.OfRefusal != nil:
+				full, sent = part.OfRefusal.Refusal, streamedRefusals[key]
+			default:
 				continue
 			}
-			seen := streamedRefusals[refusalPart{m.ID, int64(i)}]
-			if seen < len(refusal.Refusal) && !yield(Message{
+			seen := ""
+			if sent != nil {
+				seen = sent.String()
+			}
+			if !strings.HasPrefix(full, seen) {
+				return nil, &streamFailure{err: fmt.Errorf("final response text does not match delivered deltas for %s part %d", m.ID, i), outputStarted: outputStarted}
+			}
+			remaining := strings.TrimPrefix(full, seen)
+			if remaining == "" {
+				continue
+			}
+			content := Content{TextID: m.ID}
+			if part.OfRefusal != nil {
+				content.Refusal = remaining
+			} else {
+				content.Text = remaining
+			}
+			telemetry.ObserveOutputChunk(ctx)
+			if !emit(Message{
 				Role: RoleAssistant, Phase: MessagePhase(m.Phase),
-				Content: []Content{{Refusal: refusal.Refusal[seen:], TextID: m.ID}},
-			}, nil) {
+				Content: []Content{content},
+			}) {
 				return nil, errYieldStopped
 			}
 		}

@@ -99,6 +99,9 @@ func (a *Agent) QueueInputWithID(input []Content, id string) bool {
 // a caller-owned session orchestrator. Setup errors are returned immediately;
 // failures after the turn starts are yielded by the returned stream.
 func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, error], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(input) == 0 {
 		return nil, ErrEmptyInput
 	}
@@ -132,11 +135,18 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 
 	failSetup := func(err error) (iter.Seq2[Message, error], error) {
 		defer cancelBudget()
-		terminalErr := a.finishTurn(ctx, runtime.TurnID, RuntimeFailed, err, turnUsageBefore)
+		status := RuntimeFailed
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			status = RuntimeInterrupted
+		}
+		terminalErr := a.finishTurn(ctx, runtime.TurnID, status, err, turnUsageBefore)
 		telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(err, terminalErr)})
 		return nil, errors.Join(err, terminalErr)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return failSetup(err)
+	}
 	var sessionStartOutcome hook.Outcome
 	var sessionStartErr error
 	a.startOnce.Do(func() {
@@ -148,6 +158,9 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	})
 	if sessionStartErr != nil {
 		return failSetup(sessionStartErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return failSetup(err)
 	}
 	if sessionStartOutcome.Stop {
 		if sessionStartOutcome.Reason == "" {
@@ -427,6 +440,9 @@ func (a *Agent) runSessionStartHooks(ctx context.Context, source string) (hook.O
 	var combined hook.Outcome
 	var parts []string
 	for _, h := range a.Hooks.SessionStart {
+		if err := ctx.Err(); err != nil {
+			return combined, err
+		}
 		outcome, err := h(ctx, source)
 		if err != nil {
 			continue
@@ -435,6 +451,9 @@ func (a *Agent) runSessionStartHooks(ctx context.Context, source string) (hook.O
 		if outcome.Stop && !combined.Stop {
 			combined = outcome
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return combined, err
 	}
 	if len(parts) > 0 {
 		if err := a.appendMessages(hiddenContextMessage(strings.Join(parts, "\n\n"))); err != nil {

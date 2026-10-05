@@ -141,14 +141,15 @@ func TestExplicitFinishCarriesAnswer(t *testing.T) {
 		wantSaved     string
 	}{
 		{"answer in marker", []string{phaseTestResponse(false, finish)}, 1, "Checked and fixed."},
-		{"same answer is not repeated", []string{phaseTestResponse(false, finalAnswerOutput, finish)}, 0, "Checked and fixed."},
-		{"earlier answer is not repeated", []string{phaseTestResponse(false, finalAnswerOutput), phaseTestResponse(false, finish)}, 0, "Checked and fixed."},
+		{"same answer is not repeated", []string{phaseTestResponse(false, finalAnswerOutput, finish)}, 1, "Checked and fixed."},
+		{"earlier answer is not repeated", []string{phaseTestResponse(false, finalAnswerOutput), phaseTestResponse(false, finish)}, 1, "Checked and fixed."},
 		{"cutoff answer is not published", []string{cutoffTestResponse(finishOutput("cut", `{"answer":"Partial answer"}`)), phaseTestResponse(false, finish)}, 1, "Checked and fixed."},
-		{"progress cannot hide answer", []string{phaseTestResponse(false, progress, finish)}, 1, "I will check that now.\nChecked and fixed."},
-		{"earlier progress cannot hide answer", []string{phaseTestResponse(false, progress), phaseTestResponse(false, finish)}, 1, "I will check that now.\nChecked and fixed."},
+		{"progress cannot hide answer", []string{phaseTestResponse(false, progress, finish)}, 2, "I will check that now.\nChecked and fixed."},
+		{"earlier progress cannot hide answer", []string{phaseTestResponse(false, progress), phaseTestResponse(false, finish)}, 2, "I will check that now.\nChecked and fixed."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requests, stops, published := 0, 0, 0
+			var visible []string
 			client := streamingTestClient(func(*http.Request) string {
 				if requests >= len(tc.responses) {
 					t.Fatal("unexpected model request")
@@ -174,10 +175,14 @@ func TestExplicitFinishCarriesAnswer(t *testing.T) {
 				}
 				if text := contentText(message.Content); text != "" {
 					published++
-					if text != "Checked and fixed." || message.Hidden {
+					visible = append(visible, text)
+					if message.Hidden {
 						t.Fatalf("published answer=%+v", message)
 					}
 				}
+			}
+			if strings.Join(visible, "\n") != tc.wantSaved {
+				t.Fatalf("visible answer=%q, want %q", visible, tc.wantSaved)
 			}
 			if requests != len(tc.responses) || stops != 1 || published != tc.wantPublished {
 				t.Fatalf("requests=%d stops=%d published=%d", requests, stops, published)

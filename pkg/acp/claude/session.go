@@ -176,6 +176,9 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 		// Preserve a result already read immediately before process EOF.
 		select {
 		case r := <-p.results:
+			if r.err != nil {
+				s.dropProc(p)
+			}
 			return r.stop, r.usage, r.err
 		default:
 		}
@@ -363,6 +366,15 @@ func (p *claudeProc) finishTurn() bool {
 	return wasActive
 }
 
+func (p *claudeProc) failTurn(err error) {
+	if p.finishTurn() {
+		select {
+		case p.results <- turnResult{err: err}:
+		default:
+		}
+	}
+}
+
 func (p *claudeProc) parentForAgent(agentID string) string {
 	if agentID == "" {
 		return ""
@@ -440,7 +452,8 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 			}
 			p.contextUsage.observeStream(event)
 			if err := emitStreamEvent(ctx, conn, sid, env.Event, p.streamedContent); err != nil {
-				fmt.Fprintf(stderr, "claude-acp: emit stream event: %v\n", err)
+				p.failTurn(fmt.Errorf("send stream event: %w", err))
+				return
 			} else {
 				p.markTurnOutput(event.Type == "content_block_delta" && event.Delta.Type == "text_delta" && event.Delta.Text != "",
 					event.ContentBlock.Type == "compaction" || event.Delta.Type == "compaction_delta")
@@ -462,7 +475,8 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 				p.contextUsage.observeAssistant(message)
 			}
 			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools, p.emitted, p.streamedContent, env.ParentToolUseID); err != nil {
-				fmt.Fprintf(stderr, "claude-acp: emit assistant: %v\n", err)
+				p.failTurn(fmt.Errorf("send assistant: %w", err))
+				return
 			} else if root {
 				for _, block := range message.Content {
 					_, visible := stripMarkerTags(block.Text)
@@ -471,10 +485,14 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 			}
 		case "user":
 			if err := emitToolResults(ctx, conn, sid, env.Message, p.tools, p.emitted, env.ParentToolUseID); err != nil {
-				fmt.Fprintf(stderr, "claude-acp: emit tool result: %v\n", err)
+				p.failTurn(fmt.Errorf("send tool result: %w", err))
+				return
 			}
 		case "tool_progress":
-			p.handleToolProgress(ctx, conn, sid, env)
+			if err := p.handleToolProgress(ctx, conn, sid, env); err != nil {
+				p.failTurn(fmt.Errorf("send tool progress: %w", err))
+				return
+			}
 		case "control_request":
 			var req controlRequest
 			if json.Unmarshal(line, &req) == nil {
@@ -519,7 +537,9 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 				}
 			}
 			if usageUpd := p.contextUsage.resultUpdate(result, p.models); usageUpd != nil {
-				_ = acpcommon.Notify(ctx, conn, sid, *usageUpd)
+				if err := acpcommon.Notify(ctx, conn, sid, *usageUpd); err != nil && tr.err == nil {
+					tr.err = fmt.Errorf("send usage: %w", err)
+				}
 			}
 			select {
 			case p.results <- tr:
@@ -527,7 +547,10 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 			}
 		case "rate_limit_event":
 			if note := rateLimitNote(env); note != "" {
-				_ = acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(note))
+				if err := acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(note)); err != nil {
+					p.failTurn(fmt.Errorf("send rate limit notice: %w", err))
+					return
+				}
 			}
 		case "system":
 			p.handleSystem(ctx, conn, sid, env)
@@ -756,13 +779,13 @@ func (p *claudeProc) canReportTask(toolCallID, taskType string) bool {
 	return p.emitted.has(toolCallID) && p.tools[toolCallID] != "Monitor" && taskType != "local_monitor"
 }
 
-func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) {
+func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) error {
 	toolCallID := env.ToolUseID
 	if !p.emitted.has(toolCallID) {
 		toolCallID = env.ParentToolUseID
 	}
 	if !p.emitted.has(toolCallID) {
-		return
+		return nil
 	}
 	name := env.ToolName
 	if name == "" {
@@ -779,7 +802,7 @@ func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acp.AgentSide
 	if update.ToolCallUpdate != nil {
 		update.ToolCallUpdate.Meta = map[string]any{"claudeCode": claudeMeta}
 	}
-	_ = acpcommon.Notify(ctx, conn, sid, update)
+	return acpcommon.Notify(ctx, conn, sid, update)
 }
 
 func (p *claudeProc) applyFallbackModel(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, fallback string) {

@@ -278,6 +278,9 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 func bindTaskRunner(tasks *task.Registry, tk *task.Task, runner *subagentRunner) {
 	tk.SetPeek(runner.sub.MessagesSnapshot)
 	tk.SetResumeContext(func(reportCtx context.Context, followUp string) error {
+		if err := reportCtx.Err(); err != nil {
+			return err
+		}
 		return tasks.Relaunch(tk, func(execCtx context.Context, current *task.Task) (string, error) {
 			return runner.runTurn(execCtx, reportCtx, current, followUp)
 		})
@@ -387,6 +390,9 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 			agentID := uuid.NewString()
 			description, ok := args["description"].(string)
 
@@ -419,12 +425,18 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 				}
 			}
 			for _, h := range cfg.Hooks.SubagentStart {
+				if err := ctx.Err(); err != nil {
+					return tool.Result{}, err
+				}
 				outcome, err := h(ctx, agentID, subagentName)
 				if err == nil && len(outcome.AdditionalContext) > 0 {
 					instructions.WriteString("\n\n" + strings.Join(outcome.AdditionalContext, "\n\n"))
 				}
 			}
 
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 			var schemaMap map[string]any
 			if raw, present := args["schema"]; present {
 				schemaMap, ok = raw.(map[string]any)
@@ -457,12 +469,19 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 			if err != nil {
 				return tool.Result{}, err
 			}
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 			runner, err := newSubagentRunner(cfg, typ, spec, agent.State{})
 			if err != nil {
 				return tool.Result{}, err
 			}
 
 			if background, _ := args["background"].(bool); background {
+				// Admitted background tasks detach from this tool's context.
+				if err := ctx.Err(); err != nil {
+					return tool.Result{}, err
+				}
 				if tasks == nil {
 					return tool.Result{}, fmt.Errorf("background agents are not available in this session; run the agent synchronously")
 				}

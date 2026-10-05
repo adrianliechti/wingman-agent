@@ -114,8 +114,12 @@ func TestCodexMatcherSemantics(t *testing.T) {
 		{"^Write$", []string{"Edit", "Write"}, true},
 	}
 	for _, test := range tests {
-		if got := groupMatches(test.matcher, test.input); got != test.want {
-			t.Errorf("groupMatches(%q, %q) = %v, want %v", test.matcher, test.input, got, test.want)
+		matcher, err := compileMatcher(test.matcher)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := matcher.matches(test.input); got != test.want {
+			t.Errorf("matches(%q, %q) = %v, want %v", test.matcher, test.input, got, test.want)
 		}
 	}
 }
@@ -133,7 +137,11 @@ func TestCodexApplyPatchMatcherAliases(t *testing.T) {
 			t.Errorf("toolWire(%q) name = %q", test.name, name)
 		}
 		for _, matcher := range test.want {
-			if !groupMatches("^"+matcher+"$", aliases) {
+			compiled, err := compileMatcher("^" + matcher + "$")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !compiled.matches(aliases) {
 				t.Errorf("toolWire(%q) aliases %q do not match %q", test.name, aliases, matcher)
 			}
 		}

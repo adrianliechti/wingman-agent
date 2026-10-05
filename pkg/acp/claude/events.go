@@ -109,18 +109,24 @@ func emitStreamEvent(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 		if e.Delta.Text == "" {
 			return nil
 		}
-		streamed.append(e.Index, "text", e.Delta.Text)
 		update = acp.UpdateAgentMessageText(e.Delta.Text)
 	case "thinking_delta":
 		if e.Delta.Thinking == "" {
 			return nil
 		}
-		streamed.append(e.Index, "thinking", e.Delta.Thinking)
 		update = acp.UpdateAgentThoughtText(e.Delta.Thinking)
 	default:
 		return nil
 	}
-	return acpcommon.Notify(ctx, conn, sid, update)
+	if err := acpcommon.Notify(ctx, conn, sid, update); err != nil {
+		return err
+	}
+	if e.Delta.Type == "text_delta" {
+		streamed.append(e.Index, "text", e.Delta.Text)
+	} else {
+		streamed.append(e.Index, "thinking", e.Delta.Thinking)
+	}
+	return nil
 }
 
 // emitAssistant renders a consolidated assistant message. Blocks already sent

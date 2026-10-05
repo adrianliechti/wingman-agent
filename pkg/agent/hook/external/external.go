@@ -85,6 +85,8 @@ type Events struct {
 type MatcherGroup struct {
 	Matcher string    `json:"matcher,omitempty"`
 	Hooks   []Handler `json:"hooks"`
+
+	compiled *compiledMatcher
 }
 
 type Handler struct {
@@ -109,7 +111,7 @@ type Handler struct {
 func (c *Config) RuleCount() int {
 	total := 0
 	for _, groups := range c.allEvents() {
-		for _, group := range groups.groups {
+		for _, group := range *groups.groups {
 			total += len(group.Hooks)
 		}
 	}
@@ -163,10 +165,13 @@ func Parse(name string, data []byte) (*Config, error) {
 
 func (c *Config) validate() error {
 	for _, event := range c.allEvents() {
-		for groupIndex, group := range event.groups {
-			if !validMatcher(group.Matcher) {
+		for groupIndex := range *event.groups {
+			group := &(*event.groups)[groupIndex]
+			matcher, err := compileMatcher(group.Matcher)
+			if err != nil {
 				return fmt.Errorf("%s matcher group %d has invalid regex %q", event.name, groupIndex, group.Matcher)
 			}
+			group.compiled = matcher
 			for handlerIndex, handler := range group.Hooks {
 				if handler.Timeout != nil && *handler.Timeout < 0 {
 					return fmt.Errorf("%s handler %d:%d has a negative timeout", event.name, groupIndex, handlerIndex)
@@ -226,22 +231,22 @@ func (c *Config) Merge(other *Config) {
 
 type namedGroups struct {
 	name   string
-	groups []MatcherGroup
+	groups *[]MatcherGroup
 }
 
 func (c *Config) allEvents() []namedGroups {
 	return []namedGroups{
-		{"PreToolUse", c.Hooks.PreToolUse},
-		{"PermissionRequest", c.Hooks.PermissionRequest},
-		{"PostToolUse", c.Hooks.PostToolUse},
-		{"PreCompact", c.Hooks.PreCompact},
-		{"PostCompact", c.Hooks.PostCompact},
-		{"SessionStart", c.Hooks.SessionStart},
-		{"SessionEnd", c.Hooks.SessionEnd},
-		{"UserPromptSubmit", c.Hooks.UserPromptSubmit},
-		{"SubagentStart", c.Hooks.SubagentStart},
-		{"SubagentStop", c.Hooks.SubagentStop},
-		{"Stop", c.Hooks.Stop},
+		{"PreToolUse", &c.Hooks.PreToolUse},
+		{"PermissionRequest", &c.Hooks.PermissionRequest},
+		{"PostToolUse", &c.Hooks.PostToolUse},
+		{"PreCompact", &c.Hooks.PreCompact},
+		{"PostCompact", &c.Hooks.PostCompact},
+		{"SessionStart", &c.Hooks.SessionStart},
+		{"SessionEnd", &c.Hooks.SessionEnd},
+		{"UserPromptSubmit", &c.Hooks.UserPromptSubmit},
+		{"SubagentStart", &c.Hooks.SubagentStart},
+		{"SubagentStop", &c.Hooks.SubagentStop},
+		{"Stop", &c.Hooks.Stop},
 	}
 }
 
@@ -263,6 +268,19 @@ type BuildOptions struct {
 // these values into headers unless the process environment explicitly exposes
 // them through allowedEnvVars.
 func (c *Config) BuildWithOptions(workDir string, options BuildOptions) hook.Hooks {
+	// Freeze matching rules for the built hooks, including configs constructed
+	// in Go. Parsed groups already retain their validated compiled matchers.
+	snapshot := *c
+	for _, event := range snapshot.allEvents() {
+		groups := slices.Clone(*event.groups)
+		for i := range groups {
+			if groups[i].compiled == nil || groups[i].compiled.pattern != groups[i].Matcher {
+				groups[i].compiled, _ = compileMatcher(groups[i].Matcher)
+			}
+		}
+		*event.groups = groups
+	}
+	c = &snapshot
 	var built hook.Hooks
 	if len(c.Hooks.PreToolUse) > 0 {
 		built.PreToolUse = append(built.PreToolUse, c.preToolUse(workDir, options))
@@ -320,7 +338,7 @@ func runEvent(ctx context.Context, workDir string, options BuildOptions, event s
 	order := 0
 	for _, group := range groups {
 		matcherIgnored := event == "UserPromptSubmit" || event == "Stop"
-		if !matcherIgnored && !groupMatches(group.Matcher, matcherInputs) {
+		if !matcherIgnored && !group.compiled.matches(matcherInputs) {
 			order += len(group.Hooks)
 			continue
 		}
@@ -528,31 +546,40 @@ func limit(value string) string {
 	return text.HeadBytes(value, maxHookOutput) + "\n[hook output truncated]"
 }
 
-func validMatcher(matcher string) bool {
-	if matcher == "" || matcher == "*" || exactMatcher(matcher) {
-		return true
-	}
-	_, err := regexp.Compile(matcher)
-	return err == nil
+type compiledMatcher struct {
+	pattern string
+	regex   *regexp.Regexp
 }
 
-func groupMatches(matcher string, inputs []string) bool {
-	if matcher == "" || matcher == "*" {
+func compileMatcher(pattern string) (*compiledMatcher, error) {
+	matcher := &compiledMatcher{pattern: pattern}
+	if pattern == "" || pattern == "*" || exactMatcher(pattern) {
+		return matcher, nil
+	}
+	regex, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	matcher.regex = regex
+	return matcher, nil
+}
+
+func (m *compiledMatcher) matches(inputs []string) bool {
+	if m == nil {
+		return false
+	}
+	if m.pattern == "" || m.pattern == "*" {
 		return true
 	}
-	if exactMatcher(matcher) {
-		for candidate := range strings.SplitSeq(matcher, "|") {
+	if m.regex == nil {
+		for candidate := range strings.SplitSeq(m.pattern, "|") {
 			if slices.Contains(inputs, candidate) {
 				return true
 			}
 		}
 		return false
 	}
-	re, err := regexp.Compile(matcher)
-	if err != nil {
-		return false
-	}
-	return slices.ContainsFunc(inputs, re.MatchString)
+	return slices.ContainsFunc(inputs, m.regex.MatchString)
 }
 
 func exactMatcher(matcher string) bool {

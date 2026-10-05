@@ -429,6 +429,9 @@ func (a *Agent) RunningTaskCount() int {
 }
 
 func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(input) == 0 {
 		return nil, code.ErrEmptyInput
 	}
@@ -885,6 +888,9 @@ func (a *Agent) confirm(ctx context.Context, message string) (bool, error) {
 }
 
 func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, cancel context.CancelFunc) (iter.Seq2[harness.Message, error], uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	catalog := collectManagedTools(s.parent.workspace)
 
 	s.cancelMu.Lock()
@@ -892,8 +898,18 @@ func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, c
 		s.cancelMu.Unlock()
 		return nil, 0, errors.New("session is closed")
 	}
+	if s.cancelFn != nil || s.aa.Running() {
+		s.cancelMu.Unlock()
+		return nil, 0, code.ErrTurnInProgress
+	}
 	s.turnTools.Store(catalog)
+	s.cancelGen++
+	gen := s.cancelGen
+	s.cancelFn = cancel
+	s.cancelMu.Unlock()
 
+	// Hooks can wait on UI or external processes. Cancel and Close must be
+	// able to reach this turn while its synchronous setup is still running.
 	ctx = hook.WithRuntime(ctx, hook.Runtime{
 		SessionID:      s.aa.CacheKey,
 		CWD:            s.parent.workspace.RootPath,
@@ -903,20 +919,12 @@ func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, c
 	})
 	stream, err := s.aa.Send(ctx, input)
 	if err != nil {
-		s.cancelMu.Unlock()
+		s.clearCancel(gen)
 		return nil, 0, err
 	}
 	if stream == nil {
-		s.cancelMu.Unlock()
+		s.clearCancel(gen)
 		return nil, 0, errors.New("agent returned a nil turn stream")
-	}
-	prev := s.cancelFn
-	s.cancelGen++
-	gen := s.cancelGen
-	s.cancelFn = cancel
-	s.cancelMu.Unlock()
-	if prev != nil {
-		prev()
 	}
 	return stream, gen, nil
 }
@@ -926,11 +934,9 @@ func (s *sessionState) clearCancel(gen uint64) {
 	last := s.cancelGen == gen
 	if last {
 		s.cancelFn = nil
-	}
-	s.cancelMu.Unlock()
-	if last {
 		s.turnTools.Store([]tool.Tool(nil))
 	}
+	s.cancelMu.Unlock()
 }
 
 func (s *sessionState) cancel() {
