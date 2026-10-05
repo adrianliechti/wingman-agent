@@ -2,7 +2,6 @@ package codex
 
 import (
 	"regexp"
-	"slices"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -11,12 +10,11 @@ import (
 )
 
 type modelEntry struct {
-	ID            string
-	Name          string
-	Description   string
-	EffortLevels  []string
-	DefaultEffort string
-	Default       bool
+	ID           string
+	Name         string
+	Description  string
+	EffortLevels []string
+	Default      bool
 }
 
 func modelsFromCodex(list []codexModel) []modelEntry {
@@ -34,12 +32,11 @@ func modelsFromCodex(list []codexModel) []modelEntry {
 			name = m.ID
 		}
 		out = append(out, modelEntry{
-			ID:            m.ID,
-			Name:          formatModelDisplayName(name),
-			Description:   m.Description,
-			EffortLevels:  efforts,
-			DefaultEffort: m.DefaultReasoningEffort,
-			Default:       m.IsDefault,
+			ID:           m.ID,
+			Name:         formatModelDisplayName(name),
+			Description:  m.Description,
+			EffortLevels: efforts,
+			Default:      m.IsDefault,
 		})
 	}
 	return out
@@ -95,19 +92,9 @@ const (
 	planCollaborationMode    = "plan"
 )
 
-// recommend adds the negotiated AIR recommendedValue: the catalog default
-// model and the current model's default effort, independent of the selection.
-func buildConfigOptions(models []modelEntry, currentModelID, currentEffort, collaborationMode string, recommend bool) []acp.SessionConfigOption {
+func buildConfigOptions(models []modelEntry, currentModelID, currentEffort, collaborationMode string) []acp.SessionConfigOption {
 	model := modelConfigOption(models, currentModelID)
 	effort := effortConfigOption(models, currentModelID, currentEffort)
-	if recommend {
-		if m := resolveModel(models, "default"); m != nil {
-			model.Select.Meta = airMeta(recommendedValueCapability, m.ID)
-		}
-		if m := findModel(models, currentModelID); m != nil && effort != nil && slices.Contains(m.EffortLevels, m.DefaultEffort) {
-			effort.Select.Meta = airMeta(recommendedValueCapability, m.DefaultEffort)
-		}
-	}
 	opts := []acp.SessionConfigOption{model}
 	if effort != nil {
 		opts = append(opts, *effort)

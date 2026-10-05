@@ -15,6 +15,21 @@ import (
 
 const popupMaxRows = 8
 
+// One cell of padding on either side of the content, followed by the
+// scrollbar in the outermost cell.
+func popupRow(text string, width int, selected bool, marker string) string {
+	inner := max(0, width-3)
+	line := " " + ansi.Pad(ansi.Truncate(text, inner, "…"), inner) + " "
+	if selected {
+		line = selectionLine(line, max(0, width-1))
+	}
+	return scrollbarLine(line, width, marker)
+}
+
+func popupText(text string, width int) string {
+	return ansi.Pad(ansi.Truncate(" "+text, max(0, width-1), "…"), max(0, width-1)) + " "
+}
+
 type PopupItem struct {
 	ID             string
 	Label          string
@@ -62,6 +77,10 @@ type Popup struct {
 	hotkeys  map[rune]string
 	onAccept func(ids []string)
 	onCancel func()
+	// mouseRows maps rendered rows to filtered indices; headings and padding
+	// are deliberately absent.
+	mouseRows map[int]int
+	closeRow  int
 }
 
 func newPopup(kind popupKind, title string, items []PopupItem, onAccept func(ids []string)) *Popup {
@@ -328,6 +347,11 @@ func (p *Popup) HandleKey(ev inline.KeyEvent) (bool, bool) {
 }
 
 func (p *Popup) Render(width int) []string {
+	p.mouseRows = make(map[int]int)
+	p.closeRow = -1
+	if width <= 0 {
+		return nil
+	}
 	if p.commandList() {
 		return p.renderCommands(width)
 	}
@@ -336,7 +360,7 @@ func (p *Popup) Render(width int) []string {
 	var lines []string
 
 	for _, line := range p.header {
-		lines = append(lines, ansi.Truncate(line, width, "…"))
+		lines = append(lines, popupText(line, width))
 	}
 
 	if p.title != "" {
@@ -344,11 +368,12 @@ func (p *Popup) Render(width int) []string {
 		if p.kind == popupList && p.query != "" {
 			title += "  " + p.query
 		}
-		lines = append(lines, cellIndent+dim(title))
+		p.closeRow = len(lines)
+		lines = append(lines, closeHeader(" "+cellIndent+dim(title), width))
 	}
 
 	if len(p.filtered) == 0 {
-		lines = append(lines, cellIndent+dim("  no matches"))
+		lines = append(lines, popupRow(cellIndent+dim("  no matches"), width, false, " "))
 		return lines
 	}
 
@@ -364,8 +389,6 @@ func (p *Popup) Render(width int) []string {
 	}
 
 	end := min(p.offset+visible, len(p.filtered))
-
-	inner := max(width-len(cellIndent), 1)
 
 	for i := p.offset; i < end; i++ {
 		item := p.items[p.filtered[i]]
@@ -399,15 +422,12 @@ func (p *Popup) Render(width int) []string {
 		if item.Disabled {
 			line = dim(ansi.Strip(line))
 		}
-		if i == p.index {
-			line = selectionLine(line, inner)
-		}
-
-		lines = append(lines, cellIndent+ansi.Truncate(line, inner, "…")+ansi.Reset)
+		p.mouseRows[len(lines)] = i
+		lines = append(lines, popupRow(cellIndent+line, width, i == p.index, scrollMarker(i-p.offset, end-p.offset, p.offset, len(p.filtered))))
 	}
 
 	if len(p.filtered) > visible {
-		lines = append(lines, cellIndent+dim(fmt.Sprintf("  (%d/%d)", p.index+1, len(p.filtered))))
+		lines = append(lines, popupText(cellIndent+dim(fmt.Sprintf("  (%d/%d)", p.index+1, len(p.filtered))), width))
 	}
 	return lines
 }

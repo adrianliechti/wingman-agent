@@ -532,8 +532,8 @@ func TestElicitFieldsFromSchema(t *testing.T) {
 			},
 			"question_0_custom": map[string]any{
 				"type": "string", "title": "Other",
-				"_meta": map[string]any{"_askUserQuestionCustomAnswer": map[string]any{
-					"questionId": "question_0", "isCustomAnswer": true,
+				"_meta": map[string]any{"wingman": map[string]any{
+					"customAnswerFor": "question_0",
 				}},
 			},
 			"question_1": map[string]any{

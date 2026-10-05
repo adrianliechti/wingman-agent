@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -273,7 +272,7 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			return
 		}
 		if p.Error.Message != "" {
-			d.update(acp.UpdateAgentMessageText(p.Error.Message + "\n\n"))
+			d.update(acp.UpdateAgentMessageText(readableServiceErrorMessage(p.Error.Message) + "\n\n"))
 		}
 		if (p.WillRetry != nil && !*p.WillRetry) || (p.WillRetry == nil && isFatalTurnError(p.Error.CodexErrorInfo)) {
 			d.setFailure(&p.Error)
@@ -812,31 +811,19 @@ func fileChangeContent(raw json.RawMessage) []acp.ToolCallContent {
 		}
 		var oldText *string
 		var newText string
-		var added, removed int
-		stats := true
 		switch {
 		case ch.Kind.Type == "add" && !isUnifiedDiff(ch.Diff):
 			newText = ch.Diff
-			added = lineCount(ch.Diff)
 		case ch.Kind.Type == "delete" && !isUnifiedDiff(ch.Diff):
 			oldText = &ch.Diff
-			removed = lineCount(ch.Diff)
 		default:
 			old, nw := splitUnifiedDiff(ch.Diff)
 			newText = nw
 			if ch.Kind.Type != "add" {
 				oldText = &old
 			}
-			added, removed, stats = unifiedDiffStats(ch.Diff)
 		}
 		meta := map[string]any{"kind": ch.Kind.Type}
-		if stats {
-			// AIR diff statistics extension; needs no negotiation and clients may ignore it.
-			meta["jetbrains"] = map[string]any{"air": map[string]any{
-				"version":   1,
-				"diffStats": map[string]any{"version": 1, "added": added, "removed": removed},
-			}}
-		}
 		content = append(content, acp.ToolCallContent{
 			Diff: &acp.ToolCallContentDiff{
 				Type:    "diff",
@@ -871,87 +858,6 @@ func fileChangeLocations(raw json.RawMessage) []acp.ToolCallLocation {
 
 func isUnifiedDiff(s string) bool {
 	return strings.HasPrefix(s, "--- ") || strings.Contains(s, "\n--- ")
-}
-
-var hunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
-
-// unifiedDiffStats counts patch operations and rejects hunks whose sizes or
-// coordinates are inconsistent, so clients fall back to comparing texts.
-func unifiedDiffStats(diff string) (added, removed int, ok bool) {
-	lines := strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
-	i := 0
-	for i < len(lines) && !strings.HasPrefix(lines[i], "@@") {
-		i++
-	}
-	if i == len(lines) {
-		return 0, 0, false
-	}
-	prevOldEnd, prevNewEnd := 0, 0
-	for i < len(lines) {
-		m := hunkHeaderRe.FindStringSubmatch(lines[i])
-		if m == nil {
-			return 0, 0, false
-		}
-		oldStart, oldLines, oldOK := hunkRange(m[1], m[2])
-		newStart, newLines, newOK := hunkRange(m[3], m[4])
-		if !oldOK || !newOK || oldStart < prevOldEnd || newStart < prevNewEnd {
-			return 0, 0, false
-		}
-		i++
-		oldSeen, newSeen := 0, 0
-		content := false
-		for i < len(lines) && (oldSeen < oldLines || newSeen < newLines || strings.HasPrefix(lines[i], "\\")) {
-			line := lines[i]
-			switch {
-			case strings.HasPrefix(line, "+"):
-				added++
-				newSeen++
-				content = true
-			case strings.HasPrefix(line, "-"):
-				removed++
-				oldSeen++
-				content = true
-			case line == "" || strings.HasPrefix(line, " "):
-				oldSeen++
-				newSeen++
-				content = true
-			case strings.HasPrefix(line, "\\"):
-				if !content || strings.TrimSuffix(line, "\r") != "\\ No newline at end of file" {
-					return 0, 0, false
-				}
-				content = false
-			default:
-				return 0, 0, false
-			}
-			i++
-		}
-		if oldSeen != oldLines || newSeen != newLines {
-			return 0, 0, false
-		}
-		prevOldEnd, prevNewEnd = oldStart+oldLines, newStart+newLines
-	}
-	return added, removed, true
-}
-
-func hunkRange(start, count string) (int, int, bool) {
-	s, err := strconv.Atoi(start)
-	if err != nil || s < 0 {
-		return 0, 0, false
-	}
-	if count == "" {
-		return s, 1, true
-	}
-	n, err := strconv.Atoi(count)
-	return s, n, err == nil && n >= 0
-}
-
-// lineCount treats CRLF, CR, and LF as terminators without counting an extra line after the last one.
-func lineCount(text string) int {
-	count := strings.Count(text, "\n") + strings.Count(text, "\r") - strings.Count(text, "\r\n")
-	if text != "" && !strings.HasSuffix(text, "\n") && !strings.HasSuffix(text, "\r") {
-		count++
-	}
-	return count
 }
 
 func splitUnifiedDiff(diff string) (oldText, newText string) {

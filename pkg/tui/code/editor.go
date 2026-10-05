@@ -17,8 +17,10 @@ type Editor struct {
 	pastes  []editorPaste
 	pasteID int
 
-	placeholder string
-	ruleColor   ansi.Color
+	placeholder      string
+	ruleColor        ansi.Color
+	bottomRightStart int
+	bottomRightWidth int
 
 	history []string
 	histIdx int
@@ -468,6 +470,7 @@ func runeWidth(r rune) int {
 // Render returns the editor lines (rules included) and the cursor position
 // relative to the returned block.
 func (e *Editor) Render(width, maxRows int, chrome EditorChrome) ([]string, inline.Pos) {
+	e.bottomRightStart, e.bottomRightWidth = 0, 0
 	t := theme.Default
 	inner := width - 2*len(cellIndent) - 2*editorInset
 	continuationPrefix := cellIndent + strings.Repeat(" ", editorInset)
@@ -502,6 +505,8 @@ func (e *Editor) Render(width, maxRows int, chrome EditorChrome) ([]string, inli
 				right = ansi.Truncate(right, maxRight, "…")
 				rightPart = " " + right
 				rightWidth = ansi.Width(right) + 1
+				e.bottomRightStart = len(cellIndent) + ruleWidth - ansi.Width(right)
+				e.bottomRightWidth = ansi.Width(right)
 			}
 		}
 

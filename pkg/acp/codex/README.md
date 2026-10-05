@@ -99,26 +99,27 @@ Codex writes a thread's rollout on its first user message. Resuming or loading a
 session that was never prompted falls back to `thread/read` and replays no
 history; deleting it, an unknown ID, or an ID Codex cannot parse succeeds.
 
-The review compared the local scratch Codex adapter at `296069e`, the local
-Claude adapter at `e6681d2`, and the current
-[App Server adapter](https://github.com/agentclientprotocol/codex-acp) at `bf37821`.
-The scratch Codex repository has moved development to that App Server adapter.
+The 2026-10-05 review compared scratch Codex at `7c2ce90716`, the retired scratch
+Codex adapter at `296069e`, Claude ACP at `0724b17`, and the current
+[App Server adapter](https://github.com/agentclientprotocol/codex-acp) at `ca1d971`.
+The scratch Codex adapter has moved development to that App Server adapter.
+Wingman already consumes consolidated `aggregatedOutput` and accepts developer
+input messages for base instructions. The review added readable service errors,
+an actionable `thread_active_writer` error on resume/load, and imported attachment
+replay. Desktop attachment envelopes become resource links with the original
+request text; duplicate native references are omitted, while unfamiliar envelopes
+remain verbatim. File mentions and local/remote audio also remain visible.
+`upstream_review_test.go` and `attachments_test.go` cover these fixes.
 Upstream session notices and `compaction_update` need session update variants
 and client capabilities that `acp-go-sdk v0.13.5` does not model, so Codex
 advisories and compactions keep their text and tool-call presentation. Terminal
-output metadata and AIR file change reports are not implemented here.
+output metadata is not implemented here.
 
 ## Extensions
 
 - Tool calls name Codex's model-facing tool in `_meta.codex.toolName`
   (`exec_command`, `write_stdin`, `view_image`, `request_permissions`, or a
   namespaced dynamic tool). ACP v1 has no tool name field.
-- File diffs carry AIR line counts in `_meta.jetbrains.air.diffStats`. Counts
-  come from the patch and are omitted when its hunks are inconsistent.
-- Clients that negotiate AIR `recommendedValue` in
-  `clientCapabilities._meta.jetbrains.air` receive the catalog default model and
-  the current model's default effort as recommendations. GPT model names are
-  shortened for pickers, for example `GPT-5.3-Codex` becomes `5.3 Codex`.
 - `_meta.mcpStartupAwaitTimeoutMs` on `session/new`, `session/resume`, and
   `session/fork` waits up to that many milliseconds for the requested MCP
   servers in that session to report `ready`, `failed`, or `cancelled`.

@@ -653,6 +653,15 @@ captures `Ctrl+V`, use `Ctrl+Alt+V` to invoke Wingman's clipboard reader. Under 
 Wingman falls back to the Windows clipboard when the Linux clipboard is unavailable
 or empty. In a remote SSH session, use the terminal's native text paste.
 
+Click the model label at the bottom right of the composer to choose a model,
+then click a reasoning effort. Pickers also support mouse-wheel navigation.
+On wide terminals, drag the divider beside the diff pane to resize it, or click
+`×` in its top-right corner to close it. Use `/diff` to reopen the pane.
+Overlays and picker menus also have a right-edge close button; scrollbars show
+the current position along the right edge of each scrollable pane or list.
+Click the footer's commands, files, plan/agent, transcript, or expand-paste
+hints to perform the same action as their keyboard shortcut.
+
 Wingman requests extended keyboard reporting to distinguish `Shift+Enter` from
 `Enter`. Terminals that send the same bytes for both require `Alt+Enter` or
 `Ctrl+J` instead. On macOS, Option must act as Alt/Esc for `Alt+Enter` and `Alt+E`.

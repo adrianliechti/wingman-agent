@@ -10,6 +10,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
@@ -107,6 +108,7 @@ func (a *App) contextLeftPercent() (int, bool) {
 // footerLine renders key hints left and session facts right, dropping hints
 // from the right of the hint list until everything fits.
 func (a *App) footerLine(width int) string {
+	a.mouse.footer = nil
 	t := theme.Default
 
 	var right []string
@@ -181,35 +183,45 @@ func (a *App) footerLine(width int) string {
 		return withRight(colored(color, a.backgroundStatus))
 	}
 
-	var left []string
-
-	hint := func(key, label string) string {
-		return dim(key) + " " + colored(t.Foreground, label)
+	type footerCommand struct {
+		text string
+		key  inline.KeyEvent
 	}
-
-	hints := []string{
-		hint("ctrl+p", "commands"),
-		hint("@", "files"),
-		hint("tab", "plan"),
-		hint("ctrl+o", "transcript"),
+	hint := func(key, label string, event inline.KeyEvent) footerCommand {
+		return footerCommand{text: dim(key) + " " + colored(t.Foreground, label), key: event}
+	}
+	hints := []footerCommand{
+		hint("ctrl+p", "commands", inline.KeyEvent{Key: inline.KeyCtrl, Rune: 'p'}),
+		hint("@", "files", inline.KeyEvent{Key: inline.KeyRune, Rune: '@'}),
+		hint("tab", "plan", inline.KeyEvent{Key: inline.KeyTab}),
+		hint("ctrl+o", "transcript", inline.KeyEvent{Key: inline.KeyCtrl, Rune: 'o'}),
 	}
 	_, current := a.agent.Modes(a.sessionID)
 	if current == code.PlanModeID {
-		hints[2] = hint("tab", "agent")
+		hints[2] = hint("tab", "agent", inline.KeyEvent{Key: inline.KeyTab})
 	}
 	if a.editor != nil && len(a.editor.pastes) > 0 {
-		hints = append([]string{hint("alt+e", "expand paste")}, hints...)
+		hints = append([]footerCommand{hint("alt+e", "expand paste", inline.KeyEvent{Key: inline.KeyRune, Rune: 'e', Alt: true})}, hints...)
 	}
 
 	sep := dim("  ")
 	rightWidth := ansi.Width(rightText)
 
 	for n := len(hints); n >= 0; n-- {
-		parts := append(append([]string{}, left...), hints[:n]...)
+		parts := make([]string, n)
+		for i := range n {
+			parts[i] = hints[i].text
+		}
 		leftText := strings.Join(parts, sep)
 		gap := width - 2*len(cellIndent) - ansi.Width(leftText) - rightWidth
 
 		if gap >= 2 {
+			x := ansi.Width(cellIndent)
+			for _, hint := range hints[:n] {
+				w := ansi.Width(hint.text)
+				a.mouse.footer = append(a.mouse.footer, mouseAction{bounds: mouseRect{x: x, width: w, height: 1}, key: hint.key})
+				x += w + ansi.Width(sep)
+			}
 			return cellIndent + leftText + strings.Repeat(" ", gap) + rightText
 		}
 	}

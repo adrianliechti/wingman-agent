@@ -1,10 +1,6 @@
 package codex
 
-import (
-	"testing"
-
-	"github.com/coder/acp-go-sdk"
-)
+import "testing"
 
 func TestNormalizeSessionConfig(t *testing.T) {
 	models := []modelEntry{
@@ -57,56 +53,5 @@ func TestFormatModelDisplayName(t *testing.T) {
 	option := modelConfigOption(models, "gpt-5.5-uncataloged")
 	if first := (*option.Select.Options.Ungrouped)[0]; first.Value != "gpt-5.5-uncataloged" || first.Name != "5.5 Uncataloged" {
 		t.Fatalf("uncataloged option = %#v", first)
-	}
-}
-
-func TestRecommendedConfigValuesRequireNegotiation(t *testing.T) {
-	models := []modelEntry{
-		{ID: "fast", Default: true, EffortLevels: []string{"low", "medium"}, DefaultEffort: "medium"},
-		{ID: "slow", EffortLevels: []string{"low", "medium"}, DefaultEffort: "low"},
-		{ID: "odd", EffortLevels: []string{"low"}, DefaultEffort: "xhigh"},
-	}
-	recommended := func(opts []acp.SessionConfigOption, id string) any {
-		for _, opt := range opts {
-			if opt.Select != nil && string(opt.Select.Id) == id {
-				jetbrains, _ := opt.Select.Meta["jetbrains"].(map[string]any)
-				air, _ := jetbrains["air"].(map[string]any)
-				return air["recommendedValue"]
-			}
-		}
-		t.Fatalf("option %s missing", id)
-		return nil
-	}
-	for _, opt := range buildConfigOptions(models, "slow", "medium", defaultCollaborationMode, false) {
-		if opt.Select != nil && opt.Select.Meta != nil {
-			t.Fatalf("unnegotiated option carries metadata: %#v", opt.Select)
-		}
-	}
-	opts := buildConfigOptions(models, "slow", "medium", defaultCollaborationMode, true)
-	if recommended(opts, modelConfigID) != "fast" || recommended(opts, effortConfigID) != "low" {
-		t.Fatalf("recommendations = %v / %v", recommended(opts, modelConfigID), recommended(opts, effortConfigID))
-	}
-	opts = buildConfigOptions(models, "odd", "low", defaultCollaborationMode, true)
-	if recommended(opts, effortConfigID) != nil {
-		t.Fatal("recommended an effort the model does not offer")
-	}
-	opts = buildConfigOptions(models[1:], "slow", "low", defaultCollaborationMode, true)
-	if recommended(opts, modelConfigID) != nil {
-		t.Fatal("recommended a model without a catalog default")
-	}
-
-	negotiated := acp.ClientCapabilities{Meta: map[string]any{"jetbrains": map[string]any{"air": map[string]any{"version": float64(1), "capabilities": []any{"recommendedValue"}}}}}
-	if !clientSupportsAirCapability(negotiated, recommendedValueCapability) {
-		t.Fatal("negotiated capability was not recognized")
-	}
-	for _, meta := range []map[string]any{
-		nil,
-		{"jetbrains": map[string]any{"air": map[string]any{"version": float64(1), "capabilities": []any{"diffStats"}}}},
-		{"jetbrains": map[string]any{"air": map[string]any{"version": 1.5, "capabilities": []any{"recommendedValue"}}}},
-		{"jetbrains": map[string]any{"air": map[string]any{"capabilities": []any{"recommendedValue"}}}},
-	} {
-		if clientSupportsAirCapability(acp.ClientCapabilities{Meta: meta}, recommendedValueCapability) {
-			t.Errorf("capability accepted from %#v", meta)
-		}
 	}
 }

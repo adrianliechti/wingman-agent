@@ -20,6 +20,23 @@ Note that `anthropic-sdk-typescript` documents the Anthropic **API** (Messages
 API), not this stream — it is a different layer and not a reference for this
 package.
 
+## Upstream review
+
+The 2026-10-05 review compared Claude ACP at `0724b17`, including its cancellation
+and task fixes. Session close, delete, and replacement now wait up to five seconds
+after process shutdown for cancelled prompt cleanup. Cancellation wins when a
+result or process exit arrives at the same time. Child result and idle events
+cannot settle the root turn. Task progress and summaries only update tool calls
+that are still open; Monitor tasks do not produce background-task updates.
+`upstream_review_test.go` covers these cases.
+
+Wingman emits tools from complete assistant messages or permission requests, so
+the upstream abandoned partial-tool bug does not apply. Context limits come from
+the CLI's model metadata rather than token-count probes. This ACP v1 bridge does
+not implement native subagent sessions, async-task extensions, or terminal exit
+metadata; the corresponding upstream v2 and extension fixes need no wire changes
+here.
+
 ## Plans
 
 This bridge does not emit ACP `plan_update`. Current Claude Code exposes no

@@ -109,7 +109,7 @@ func (p *pager) Render(width, height int) []string {
 		percent = (p.offset + rows) * 100 / len(p.lines)
 	}
 
-	head := cellIndent + bold(p.title)
+	head := closeHeader(cellIndent+bold(p.title), width)
 	ruleWidth := max(width-2*len(cellIndent), 10)
 	pct := fmt.Sprintf(" %d%% ", percent)
 	rule := colored(t.Border, strings.Repeat("─", ruleWidth-ansi.Width(pct)-2)) + dim(pct) + colored(t.Border, "──")
@@ -120,12 +120,12 @@ func (p *pager) Render(width, height int) []string {
 
 	// Lines were wrapped at open time; a narrower terminal since then must
 	// not leak over-wide lines into the renderer.
-	for _, line := range p.lines[p.offset:end] {
-		lines = append(lines, ansi.Truncate(line, width, "…"))
-	}
-
-	for len(lines) < height-1 {
-		lines = append(lines, "")
+	for row := range rows {
+		line := ""
+		if index := p.offset + row; index < end {
+			line = p.lines[index]
+		}
+		lines = append(lines, scrollbarLine(line, width, scrollMarker(row, rows, p.offset, len(p.lines))))
 	}
 
 	lines = append(lines, cellIndent+p.hints)

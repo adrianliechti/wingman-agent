@@ -76,6 +76,7 @@ type App struct {
 
 	diffPanel        diffPanel
 	diffPanelShowing bool
+	mouse            mouseLayout
 
 	// cmdTokenStart is the rune index of the slash token driving the command
 	// popup; cmdPopupInline tracks which command set the popup was built for.
@@ -912,6 +913,9 @@ func (p selPos) before(q selPos) bool {
 // handleMouse routes wheel to chat scrolling and left-button drags to
 // text selection; the two coexist without a mode switch.
 func (a *App) handleMouse(ev inline.MouseEvent) {
+	if a.handleMouseControls(ev) {
+		return
+	}
 	if a.diffPanelShowing && ev.X-1 > a.width() {
 		if ev.Kind == inline.MouseWheel {
 			a.scrollDiffPanel(ev.WheelDelta * 3)
@@ -1078,11 +1082,17 @@ func (a *App) handleEvent(ev inline.Event) {
 		a.invalidate()
 
 	case inline.ResizeEvent:
+		a.diffPanel.resizing = false
 		a.term.Resized(ev.Width, ev.Height)
 		a.rebuildChat()
 
 	case inline.MouseEvent:
 		if a.overlay != nil {
+			w, _ := a.term.Size()
+			if ev.Kind == inline.MousePress && ev.Y == 1 && ev.X > w-closeButtonWidth && ev.X <= w {
+				a.closeOverlay()
+				return
+			}
 			if m, ok := a.overlay.(interface{ HandleMouse(inline.MouseEvent) }); ok {
 				m.HandleMouse(ev)
 				a.invalidate()

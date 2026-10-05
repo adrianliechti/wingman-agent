@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/coder/acp-go-sdk"
 )
 
 type notificationHandler func(threadID, method string, params json.RawMessage)
@@ -419,7 +422,7 @@ type turnError struct {
 }
 
 func (e *turnError) Error() string {
-	message := e.Message
+	message := readableServiceErrorMessage(e.Message)
 	if message == "" {
 		message = "codex turn failed"
 	}
@@ -616,6 +619,13 @@ func (c *codexClient) threadRead(ctx context.Context, p threadReadParams) (threa
 // never prompted thread cannot be resumed. It is still live and readable.
 func (c *codexClient) threadResumeOrRead(ctx context.Context, p threadResumeParams) (resp threadResumeResponse, materialized bool, err error) {
 	resp, err = c.threadResume(ctx, p)
+	if err != nil && activeWriterErrorPattern.MatchString(err.Error()) {
+		return resp, true, &acp.RequestError{
+			Code:    -32600,
+			Message: "This Codex session is in use by another Codex client (the Codex app, the CLI or an IDE extension). Close the session there or quit that client, then try again.",
+			Data:    map[string]any{"reason": "thread_active_writer", "threadId": p.ThreadID, "details": err.Error()},
+		}
+	}
 	if err == nil || !isMissingRolloutError(err) {
 		return resp, true, err
 	}
@@ -625,6 +635,8 @@ func (c *codexClient) threadResumeOrRead(ctx context.Context, p threadResumePara
 	}
 	return threadResumeResponse{Thread: read.Thread, Model: read.Thread.Model, ReasoningEffort: read.Thread.ReasoningEffort}, false, nil
 }
+
+var activeWriterErrorPattern = regexp.MustCompile(`\bthread \S+ already has an active writer\b`)
 
 func isMissingRolloutError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no rollout found for thread id")

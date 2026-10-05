@@ -50,6 +50,7 @@ func newTranscriptProcess(t *testing.T) (*claudeProc, *acp.AgentSideConnection, 
 		models:  []ModelEntry{{ID: "sonnet", ResolvedModel: "claude-sonnet-5"}},
 		results: make(chan turnResult, 1), dead: make(chan struct{}),
 		emitted: newToolCallTracker(), tools: toolUseCache{},
+		subagentParents: map[string]string{},
 		streamedContent: &streamedBlockTracker{},
 	}
 	return p, conn, wire

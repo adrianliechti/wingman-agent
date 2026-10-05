@@ -377,7 +377,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 	s.mu.Unlock()
 	if err := notifyClient(turnCtx, conn, s.id, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
 		SessionUpdate: "config_option_update",
-		ConfigOptions: buildConfigOptions(models, model, effort, defaultCollaborationMode, clientSupportsAirCapability(clientCapabilities, recommendedValueCapability)),
+		ConfigOptions: buildConfigOptions(models, model, effort, defaultCollaborationMode),
 	}}); err != nil {
 		return "", nil, err
 	}
@@ -570,10 +570,8 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 			Content []json.RawMessage `json:"content"`
 		}
 		_ = json.Unmarshal(raw, &it)
-		for _, input := range it.Content {
-			if block, ok := userInputToBlock(input); ok {
-				send(userMessageUpdate(block, probe.ID))
-			}
+		for _, block := range historyUserInputs(it.Content) {
+			send(userMessageUpdate(block, probe.ID))
 		}
 
 	case "agentMessage":
@@ -720,16 +718,30 @@ func userInputToBlock(raw json.RawMessage) (acp.ContentBlock, bool) {
 			return acp.TextBlock(formatURIAsLink("image", it.URL)), true
 		}
 		return acp.ContentBlock{}, false
-	case "localImage":
+	case "localImage", "localAudio", "mention":
 		var it struct {
 			Path string `json:"path"`
+			Name string `json:"name"`
 		}
-		_ = json.Unmarshal(raw, &it)
-		uri := it.Path
-		if !strings.HasPrefix(uri, "file://") {
-			uri = "file://" + uri
+		if json.Unmarshal(raw, &it) != nil || it.Path == "" {
+			return acp.ContentBlock{}, false
 		}
-		return acp.TextBlock(formatURIAsLink("", uri)), true
+		name := path.Base(strings.ReplaceAll(it.Path, `\`, "/"))
+		if probe.Type == "mention" && strings.TrimSpace(it.Name) != "" {
+			name = it.Name
+		}
+		if uri, ok := attachmentFileURI(it.Path); ok {
+			return acp.ResourceLinkBlock(name, uri), true
+		}
+		return acp.TextBlock(formatURIAsLink(name, it.Path)), true
+	case "audio":
+		var it struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal(raw, &it) != nil || it.URL == "" {
+			return acp.ContentBlock{}, false
+		}
+		return acp.TextBlock(formatURIAsLink("audio", it.URL)), true
 	case "skill":
 		var it struct {
 			Name string `json:"name"`

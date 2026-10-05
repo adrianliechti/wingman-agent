@@ -242,9 +242,8 @@ func elicitationSchema(req tool.ElicitRequest) acpsdk.UnstableElicitationSchema 
 		}
 		if field.CustomAnswerFor != "" {
 			property["_meta"] = map[string]any{
-				"_askUserQuestionCustomAnswer": map[string]any{
-					"questionId":     field.CustomAnswerFor,
-					"isCustomAnswer": true,
+				"wingman": map[string]any{
+					"customAnswerFor": field.CustomAnswerFor,
 				},
 			}
 		}

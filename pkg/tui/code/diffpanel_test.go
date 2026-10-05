@@ -183,7 +183,7 @@ func TestDiffPanelPinsSummaryAndCurrentFile(t *testing.T) {
 	if !strings.Contains(ansi.Strip(scrolled[0]), "2 files changed") {
 		t.Fatalf("summary not pinned: %q", ansi.Strip(scrolled[0]))
 	}
-	if got := strings.TrimSpace(ansi.Strip(scrolled[1])); got != "pkg/agent/client.go" {
+	if got := strings.TrimSpace(ansi.CutPlain(scrolled[1], 0, 69)); got != "pkg/agent/client.go" {
 		t.Fatalf("pinned file = %q", got)
 	}
 	if !strings.Contains(ansi.Strip(scrolled[3]), " 135 +") {
@@ -196,7 +196,7 @@ func TestDiffPanelPinsSummaryAndCurrentFile(t *testing.T) {
 	}
 
 	p.offset = p.sections[1].nameRow + 1
-	if got := strings.TrimSpace(ansi.Strip(p.render(70, 4)[1])); got != "notes.txt" {
+	if got := strings.TrimSpace(ansi.CutPlain(p.render(70, 4)[1], 0, 69)); got != "notes.txt" {
 		t.Fatalf("pinned file after second section = %q", got)
 	}
 }

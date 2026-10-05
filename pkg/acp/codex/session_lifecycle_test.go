@@ -379,27 +379,22 @@ func TestMCPStartupWaitsForRequestedThread(t *testing.T) {
 	}
 }
 
-func TestInitializeNegotiatesRecommendedConfigValues(t *testing.T) {
-	for _, negotiate := range []bool{true, false} {
-		agent := newContractAgent(t).(*Agent)
-		caps := acp.ClientCapabilities{}
-		if negotiate {
-			caps.Meta = map[string]any{"jetbrains": map[string]any{"air": map[string]any{"version": 1, "capabilities": []string{"recommendedValue"}}}}
-		}
-		init, err := agent.Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber, ClientCapabilities: caps})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !clientSupportsAirCapability(acp.ClientCapabilities{Meta: init.Meta}, recommendedValueCapability) {
-			t.Fatalf("initialize meta = %#v", init.Meta)
-		}
-		session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/contract", McpServers: []acp.McpServer{}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		model := session.ConfigOptions[0].Select
-		if negotiate != (model.Meta != nil) {
-			t.Fatalf("negotiated=%v model meta=%#v", negotiate, model.Meta)
+func TestInitializeReturnsStandardCapabilities(t *testing.T) {
+	agent := newContractAgent(t).(*Agent)
+	init, err := agent.Initialize(context.Background(), acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersionNumber})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if init.Meta != nil {
+		t.Fatalf("unexpected initialize metadata: %#v", init.Meta)
+	}
+	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/contract", McpServers: []acp.McpServer{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, opt := range session.ConfigOptions {
+		if opt.Select != nil && opt.Select.Meta != nil {
+			t.Fatalf("unexpected config metadata: %#v", opt.Select.Meta)
 		}
 	}
 }

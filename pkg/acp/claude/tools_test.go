@@ -580,8 +580,8 @@ func TestAskElicitationSchema(t *testing.T) {
 		t.Errorf("custom field = %#v", custom)
 	} else {
 		meta, _ := custom["_meta"].(map[string]any)
-		marker, _ := meta["_askUserQuestionCustomAnswer"].(map[string]any)
-		if marker["questionId"] != "question_0" || marker["isCustomAnswer"] != true {
+		marker, _ := meta["wingman"].(map[string]any)
+		if marker["customAnswerFor"] != "question_0" {
 			t.Errorf("custom field marker = %#v", marker)
 		}
 	}

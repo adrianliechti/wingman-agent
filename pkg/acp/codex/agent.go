@@ -162,7 +162,6 @@ func (a *Agent) Initialize(ctx context.Context, req acp.InitializeRequest) (acp.
 	a.loadModels(ctx)
 
 	return acp.InitializeResponse{
-		Meta: airCapabilitiesMeta(),
 		// v2 changes the prompt lifecycle, permissions, and replay. Negotiate
 		// the SDK's implemented version even when the client requests a newer one.
 		ProtocolVersion: acp.ProtocolVersionNumber,
@@ -190,10 +189,6 @@ func (a *Agent) Initialize(ctx context.Context, req acp.InitializeRequest) (acp.
 			},
 		},
 	}, nil
-}
-
-func (a *Agent) recommendsConfigValues() bool {
-	return clientSupportsAirCapability(a.clientCapabilities, recommendedValueCapability)
 }
 
 func (a *Agent) Authenticate(context.Context, acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
@@ -236,7 +231,7 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	return acp.NewSessionResponse{
 		SessionId:     s.id,
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode, a.recommendsConfigValues()),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode),
 	}, nil
 }
 
@@ -480,7 +475,7 @@ func (a *Agent) togglePlanMode(ctx context.Context, s *session) error {
 	if conn := a.connection(); conn != nil {
 		if err := notifyClient(ctx, conn, s.id, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
 			SessionUpdate: "config_option_update",
-			ConfigOptions: buildConfigOptions(a.models, modelID, effort, next, a.recommendsConfigValues()),
+			ConfigOptions: buildConfigOptions(a.models, modelID, effort, next),
 		}}); err != nil {
 			return err
 		}
@@ -582,7 +577,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acp.SetSessio
 	s.collaborationMode = collaborationMode
 	s.mu.Unlock()
 	return acp.SetSessionConfigOptionResponse{
-		ConfigOptions: buildConfigOptions(a.models, modelID, effort, collaborationMode, a.recommendsConfigValues()),
+		ConfigOptions: buildConfigOptions(a.models, modelID, effort, collaborationMode),
 	}, nil
 }
 
@@ -702,7 +697,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		Config:        sessionConfig(cwd, additional, params.McpServers),
 	})
 	if err != nil {
-		return acp.ResumeSessionResponse{}, fmt.Errorf("thread/resume: %w", err)
+		return acp.ResumeSessionResponse{}, sessionResumeError(err)
 	}
 	if err := a.awaitMCPStartup(ctx, string(params.SessionId), params.Meta, params.McpServers, mcpVersion); err != nil {
 		return acp.ResumeSessionResponse{}, err
@@ -713,7 +708,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}
 	return acp.ResumeSessionResponse{
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode, a.recommendsConfigValues()),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode),
 	}, nil
 }
 
@@ -733,7 +728,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		Config:        sessionConfig(cwd, additional, params.McpServers),
 	})
 	if err != nil {
-		return acp.LoadSessionResponse{}, fmt.Errorf("thread/resume: %w", err)
+		return acp.LoadSessionResponse{}, sessionResumeError(err)
 	}
 	thread := resp.Thread
 	thread.Turns = nil
@@ -754,7 +749,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	}
 	return acp.LoadSessionResponse{
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode, a.recommendsConfigValues()),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode),
 	}, nil
 }
 
@@ -807,7 +802,7 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acp.UnstableFork
 	return acp.UnstableForkSessionResponse{
 		SessionId:     s.id,
 		Modes:         buildSessionModeState(s.mode),
-		ConfigOptions: acpcommon.UnstableConfigOptions(buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode, a.recommendsConfigValues())),
+		ConfigOptions: acpcommon.UnstableConfigOptions(buildConfigOptions(a.models, s.modelID, s.effort, s.collaborationMode)),
 	}, nil
 }
 

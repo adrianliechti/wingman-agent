@@ -42,10 +42,10 @@ func (p *Popup) renderCommands(width int) []string {
 		return nil
 	}
 	t := theme.Default
-	inner := max(width-len(cellIndent), 1)
+	inner := max(width-len(cellIndent)-3, 0)
 	var lines []string
 	appendLine := func(text string) {
-		lines = append(lines, cellIndent+ansi.Truncate(text, inner, "…")+ansi.Reset)
+		lines = append(lines, popupText(cellIndent+text, width)+ansi.Reset)
 	}
 	for _, line := range p.header {
 		appendLine(line)
@@ -59,7 +59,8 @@ func (p *Popup) renderCommands(width int) []string {
 			}
 			heading += "  " + query
 		}
-		appendLine(heading)
+		p.closeRow = len(lines)
+		lines = append(lines, closeHeader(" "+cellIndent+heading, width))
 	}
 
 	visible := p.maxRows
@@ -99,9 +100,9 @@ func (p *Popup) renderCommands(width int) []string {
 		i := p.offset + row
 		if i >= len(p.filtered) {
 			if row == 0 {
-				appendLine(dim("    No matching commands"))
+				lines = append(lines, popupRow(cellIndent+dim("    No matching commands"), width, false, " "))
 			} else {
-				appendLine("")
+				lines = append(lines, popupRow("", width, false, " "))
 			}
 			continue
 		}
@@ -126,11 +127,8 @@ func (p *Popup) renderCommands(width int) []string {
 			shortcut := ansi.Truncate(commandLine(item.Shortcut), shortcutSpace-2, "…")
 			line += "  " + fg(t.BrBlack) + strings.Repeat(" ", max(shortcutSpace-2-ansi.Width(shortcut), 0)) + shortcut
 		}
-		line = ansi.Pad(ansi.Truncate(line, inner, "…"), inner)
-		if i == p.index {
-			line = selectionLine(line, inner)
-		}
-		appendLine(line)
+		p.mouseRows[len(lines)] = i
+		lines = append(lines, popupRow(cellIndent+line, width, i == p.index, scrollMarker(row, visible, p.offset, len(p.filtered))))
 	}
 
 	metadata := ""
@@ -147,11 +145,20 @@ func (p *Popup) renderCommands(width int) []string {
 	if len(p.filtered) > 0 {
 		position = fmt.Sprintf("%d/%d", p.index+1, len(p.filtered))
 	}
-	leftWidth := max(inner-ansi.Width(position)-2, 0)
+	footerWidth := width - len(cellIndent) - 2
+	if p.title == "" {
+		footerWidth -= closeButtonWidth
+	}
+	leftWidth := max(footerWidth-ansi.Width(position)-2, 0)
 	left := ""
 	if leftWidth > 0 {
 		left = ansi.Pad(ansi.Truncate("    "+commandLine(metadata), leftWidth, "…"), leftWidth) + "  "
 	}
-	appendLine(dim(left + position))
+	if p.title == "" {
+		p.closeRow = len(lines)
+		lines = append(lines, closeHeader(" "+cellIndent+dim(left+position), width))
+	} else {
+		appendLine(dim(left + position))
+	}
 	return lines
 }

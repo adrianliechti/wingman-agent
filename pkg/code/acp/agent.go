@@ -1715,11 +1715,8 @@ func elicitFieldsFromSchema(schema acpsdk.UnstableElicitationSchema) []tool.Elic
 		f.Description, _ = prop["description"].(string)
 		f.Default = prop["default"]
 		if meta, _ := prop["_meta"].(map[string]any); meta != nil {
-			if marker, _ := meta["_askUserQuestionCustomAnswer"].(map[string]any); marker != nil {
-				isCustom, _ := marker["isCustomAnswer"].(bool)
-				if isCustom {
-					f.CustomAnswerFor, _ = marker["questionId"].(string)
-				}
+			if wingman, _ := meta["wingman"].(map[string]any); wingman != nil {
+				f.CustomAnswerFor, _ = wingman["customAnswerFor"].(string)
 			}
 		}
 

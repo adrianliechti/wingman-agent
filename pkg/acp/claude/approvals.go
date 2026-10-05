@@ -479,9 +479,8 @@ func askElicitationSchema(questions []askQuestion) acp.UnstableElicitationSchema
 			"title":       "Other",
 			"description": customDescription,
 			"_meta": map[string]any{
-				"_askUserQuestionCustomAnswer": map[string]any{
-					"questionId":     askFieldKey(i),
-					"isCustomAnswer": true,
+				"wingman": map[string]any{
+					"customAnswerFor": askFieldKey(i),
 				},
 			},
 		}

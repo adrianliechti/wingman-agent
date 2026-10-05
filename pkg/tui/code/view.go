@@ -230,6 +230,7 @@ func (a *App) streamCells(width int) []string {
 // previews live at the tail of the scrollable chat until their turns start.
 func (a *App) render() {
 	a.motion.nextFrame = 0
+	a.mouse = mouseLayout{}
 	termWidth, height := a.term.Size()
 	if termWidth <= 0 || height <= 0 {
 		return
@@ -258,6 +259,8 @@ func (a *App) render() {
 	// Bottom section, built first so the chat viewport gets the remainder.
 	var bottom []string
 	editorStart := 0
+	modelRow := -1
+	popupStart, popupRows, popupTopClip := 0, 0, 0
 	var cursor inline.Pos
 	hasCursor := false
 
@@ -270,7 +273,10 @@ func (a *App) render() {
 		if height >= 5 {
 			bottom = append(bottom, "")
 		}
-		bottom = append(bottom, a.popup.Render(width)...)
+		popupStart = len(bottom)
+		popupLines := a.popup.Render(width)
+		popupRows = len(popupLines)
+		bottom = append(bottom, popupLines...)
 		if height >= 5 {
 			bottom = append(bottom, "")
 		}
@@ -278,6 +284,8 @@ func (a *App) render() {
 		// A long question must not push the options off-screen: keep the
 		// tail, which holds the items.
 		if len(bottom) > height {
+			popupStart -= len(bottom) - height
+			popupTopClip = 1 // The first retained row is replaced by an ellipsis.
 			bottom = append([]string{dim("…")}, bottom[len(bottom)-height+1:]...)
 		}
 	} else {
@@ -292,13 +300,19 @@ func (a *App) render() {
 		a.renderComposerSparkle(editorLines, cursor, width, time.Now())
 		hasCursor = true
 		editorStart = len(bottom)
+		if a.editor.bottomRightWidth > 0 {
+			modelRow = editorStart + len(editorLines) - 1
+		}
 		bottom = append(bottom, editorLines...)
 
 		if a.popup != nil {
 			if a.popup.kind == popupCommands {
 				a.popup.maxRows = max(1, min(popupMaxRows, height-len(bottom)-1))
 			}
-			bottom = append(bottom, a.popup.Render(width)...)
+			popupStart = len(bottom)
+			popupLines := a.popup.Render(width)
+			popupRows = len(popupLines)
+			bottom = append(bottom, popupLines...)
 		} else {
 			bottom = append(bottom, a.footerLine(width))
 		}
@@ -310,10 +324,25 @@ func (a *App) render() {
 		drop := len(bottom) - height
 		bottom = bottom[drop:]
 		editorStart -= drop
+		modelRow -= drop
+		popupStart -= drop
 	}
 
 	chatRows := max(height-len(bottom), 0)
 	a.lastChatRows = chatRows
+	for i := range a.mouse.footer {
+		a.mouse.footer[i].bounds.y = height - 1
+	}
+	if modelRow >= 0 {
+		a.mouse.model = mouseRect{x: a.editor.bottomRightStart, y: chatRows + modelRow, width: a.editor.bottomRightWidth, height: 1}
+	}
+	if a.popup != nil {
+		a.mouse.popup = a.popup
+		a.mouse.popupStart = chatRows + popupStart
+		top := chatRows + max(popupStart, popupTopClip)
+		end := min(height, chatRows+popupStart+popupRows)
+		a.mouse.popupBounds = mouseRect{y: top, width: width, height: max(0, end-top)}
+	}
 
 	view := a.chatViewLines(width)
 
@@ -386,7 +415,7 @@ func (a *App) render() {
 	}
 
 	if panelWidth > 0 {
-		padding := ansi.Reset + " " + panelLine(" ", 1)
+		padding := ansi.Reset + " " + panelLine(colored(theme.Default.Border, "│"), 1)
 		panel := a.diffPanel.render(panelWidth, height)
 		for len(frame) < height {
 			frame = append(frame, "")

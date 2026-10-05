@@ -16,10 +16,11 @@ import (
 const (
 	// diffPanelBreakpoint is the terminal width from which the working tree
 	// changes get their own pane beside the chat.
-	diffPanelBreakpoint = 140
-	diffPanelMinWidth   = 56
-	diffPanelMaxWidth   = 110
-	diffPanelPoll       = 2 * time.Second
+	diffPanelBreakpoint   = 140
+	diffPanelMinWidth     = 56
+	diffPanelMaxWidth     = 110
+	diffPanelChatMinWidth = 80
+	diffPanelPoll         = 2 * time.Second
 	// maxDiffLineChars keeps one minified or base64 line from flooding the pane.
 	maxDiffLineChars = 1000
 )
@@ -28,8 +29,12 @@ const (
 // on wide terminals. Diffs load off the UI loop and refresh when the
 // workspace change fingerprint moves.
 type diffPanel struct {
-	hidden    bool
-	requested bool
+	hidden      bool
+	requested   bool
+	width       int
+	resizing    bool
+	resizeX     int
+	resizeWidth int
 
 	diffs   []changes.FileDiff
 	err     error
@@ -60,7 +65,11 @@ func (a *App) diffPanelWidth(termWidth int) int {
 	if a.isStreaming() && !a.diffPanelShowing && !a.diffPanel.requested {
 		return 0
 	}
-	return min(diffPanelMaxWidth, max(diffPanelMinWidth, termWidth*42/100))
+	width := min(diffPanelMaxWidth, max(diffPanelMinWidth, termWidth*42/100))
+	if a.diffPanel.width > 0 {
+		width = a.diffPanel.width
+	}
+	return min(max(diffPanelMinWidth, width), termWidth-diffPanelChatMinWidth-2)
 }
 
 // toggleDiffPanel hides or shows the pane on wide terminals; narrow
@@ -71,6 +80,7 @@ func (a *App) toggleDiffPanel() bool {
 		return false
 	}
 	a.diffPanel.hidden = !a.diffPanel.hidden
+	a.diffPanel.resizing = false
 	a.diffPanel.requested = !a.diffPanel.hidden
 	if a.agent.Workspace().MemoryPath != "" {
 		hidden := a.diffPanel.hidden
@@ -153,28 +163,39 @@ func (a *App) scrollDiffPanel(delta int) {
 // render pins the summary on the first row and, once a file's own name row
 // has scrolled away, that file's name above its hunks.
 func (p *diffPanel) render(width, height int) []string {
+	if width <= 0 || height <= 0 {
+		return nil
+	}
 	if p.lines == nil || p.linesWidth != width {
 		p.header, p.lines, p.sections = renderDiffPanelLines(p.diffs, p.err, width-1)
 		p.linesWidth = width
 	}
-	content := max(1, width-1)
-	rows := max(0, height-1)
-	p.rows = rows
-	p.offset = min(p.offset, max(0, len(p.lines)-rows))
-	p.offset = max(p.offset, 0)
-
-	pin := func(line string) string { return ansi.Pad(ansi.Truncate(line, width, "…"), width) }
-	out := []string{pin(p.header)}
-
+	rows := height - 1
 	sticky := ""
-	for _, section := range p.sections {
-		if section.nameRow < p.offset {
-			sticky = section.path
+	// Pinned file rows reduce the viewport. Clamp against that viewport so
+	// the final diff lines remain reachable, then re-evaluate the pinned file.
+	for {
+		sticky, rows = "", height-1
+		for _, section := range p.sections {
+			if section.nameRow < p.offset {
+				sticky = section.path
+			}
 		}
+		if sticky != "" && rows > 2 {
+			rows -= 2
+		} else {
+			sticky = ""
+		}
+		offset := min(max(p.offset, 0), max(0, len(p.lines)-rows))
+		if offset == p.offset {
+			break
+		}
+		p.offset = offset
 	}
-	if sticky != "" && rows > 2 {
-		out = append(out, pin(bold(sticky)), pin(colored(theme.Default.Border, strings.Repeat("─", width))))
-		rows -= 2
+	p.rows = rows
+	out := []string{closeHeader(p.header, width)}
+	if sticky != "" {
+		out = append(out, bold(sticky), colored(theme.Default.Border, strings.Repeat("─", max(0, width-1))))
 	}
 
 	for row := range rows {
@@ -182,10 +203,14 @@ func (p *diffPanel) render(width, height int) []string {
 		if index := p.offset + row; index < len(p.lines) {
 			line = p.lines[index]
 		}
-		marker := scrollMarker(row, rows, p.offset, len(p.lines))
-		out = append(out, ansi.Pad(ansi.Truncate(line, content, "…"), content)+marker)
+		out = append(out, line)
 	}
+	// Keep the track continuous beside pinned rows, at the final column.
+	total := len(p.lines) + height - 1 - rows
 	for i := range out {
+		if i > 0 {
+			out[i] = scrollbarLine(out[i], width, scrollMarker(i-1, height-1, p.offset, total))
+		}
 		out[i] = panelLine(out[i], width)
 	}
 	return out[:min(len(out), height)]

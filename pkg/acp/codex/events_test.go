@@ -301,53 +301,17 @@ func TestCodexRateLimitNoteOnlySpeaksWhenReached(t *testing.T) {
 	}
 }
 
-func TestFileChangeDiffStats(t *testing.T) {
-	stats := func(t *testing.T, change string) (map[string]any, *acp.ToolCallContentDiff) {
-		t.Helper()
-		content := fileChangeContent(json.RawMessage(`{"changes":[` + change + `]}`))
-		if len(content) != 1 || content[0].Diff == nil {
-			t.Fatalf("content = %#v", content)
-		}
-		d := content[0].Diff
-		jetbrains, _ := d.Meta["jetbrains"].(map[string]any)
-		air, _ := jetbrains["air"].(map[string]any)
-		s, _ := air["diffStats"].(map[string]any)
-		return s, d
+func TestFileChangeRawDelete(t *testing.T) {
+	content := fileChangeContent(json.RawMessage(`{"changes":[{"path":"/p/old.txt","kind":{"type":"delete"},"diff":"gone\n"}]}`))
+	if len(content) != 1 || content[0].Diff == nil {
+		t.Fatalf("content = %#v", content)
 	}
-	for _, tt := range []struct {
-		name, change   string
-		added, removed int
-	}{
-		{"update", `{"path":"/p/a.go","kind":{"type":"update"},"diff":"--- a/p/a.go\n+++ b/p/a.go\n@@ -1,3 +1,4 @@\n line one\n-old\n+new\n+extra\n line three\n"}`, 2, 1},
-		{"two hunks and marker", `{"path":"/p/a.go","kind":{"type":"update"},"diff":"@@ -1,2 +1,2 @@\n-a\n+b\n c\n@@ -10 +10 @@\n-x\n\\ No newline at end of file\n+y\n\\ No newline at end of file"}`, 2, 2},
-		{"add raw", `{"path":"/p/new.txt","kind":{"type":"add"},"diff":"one\r\ntwo\rthree"}`, 3, 0},
-		{"add unified", `{"path":"/p/new.txt","kind":{"type":"add"},"diff":"--- /dev/null\n+++ /p/new.txt\n@@ -0,0 +1,2 @@\n+a\n+b"}`, 2, 0},
-		{"delete raw", `{"path":"/p/old.txt","kind":{"type":"delete"},"diff":"gone\n\n"}`, 0, 2},
-		{"empty add", `{"path":"/p/empty","kind":{"type":"add"},"diff":""}`, 0, 0},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			s, d := stats(t, tt.change)
-			if s == nil || s["version"] != 1 || s["added"] != tt.added || s["removed"] != tt.removed {
-				t.Fatalf("diffStats = %#v, want +%d -%d", s, tt.added, tt.removed)
-			}
-			if d.Meta["kind"] == nil {
-				t.Fatalf("diff kind was dropped: %#v", d.Meta)
-			}
-		})
-	}
-	for _, change := range []string{
-		`{"path":"/p/a.go","kind":{"type":"update"},"diff":"@@ -1,3 +1,3 @@\n-a\n+b"}`,
-		`{"path":"/p/a.go","kind":{"type":"update"},"diff":"@@ -5,1 +5,1 @@\n-a\n+b\n@@ -1,1 +1,1 @@\n-c\n+d"}`,
-		`{"path":"/p/a.go","kind":{"type":"update"},"diff":"no hunks"}`,
-		`{"path":"/p/a.go","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n\\ No newline at end of file\n-a\n+b"}`,
-	} {
-		if s, d := stats(t, change); s != nil || d.Meta["kind"] != "update" {
-			t.Errorf("invalid patch published stats %#v for %s", s, change)
-		}
-	}
-	_, d := stats(t, `{"path":"/p/old.txt","kind":{"type":"delete"},"diff":"gone\n"}`)
+	d := content[0].Diff
 	if d.OldText == nil || *d.OldText != "gone\n" || d.NewText != "" {
 		t.Fatalf("raw delete content = old %v new %q", d.OldText, d.NewText)
+	}
+	if len(d.Meta) != 1 || d.Meta["kind"] != "delete" {
+		t.Fatalf("diff metadata = %#v", d.Meta)
 	}
 }
 

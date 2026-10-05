@@ -98,6 +98,15 @@ func (s *session) close() {
 	if proc != nil {
 		proc.shutdown()
 	}
+	// A closing session must let its cancelled prompt release the turn gate
+	// before it is replaced or reported closed. Keep a bound for wedged clients.
+	ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	if err := s.promptMu.Lock(ctx); err == nil {
+		s.promptMu.Unlock()
+	} else {
+		fmt.Fprintf(s.agent.stderr, "claude-acp: session %s prompt cleanup: %v\n", s.id, err)
+	}
 }
 
 func (s *session) isClosed() bool {
@@ -151,6 +160,9 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 		}
 		return acp.StopReasonCancelled, nil, nil
 	case r := <-p.results:
+		if turnCtx.Err() != nil {
+			return acp.StopReasonCancelled, r.usage, nil
+		}
 		if r.err != nil {
 			s.dropProc(p)
 			return "", nil, r.err
@@ -158,6 +170,9 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 		s.pushTitleUpdate(ctx)
 		return r.stop, r.usage, nil
 	case <-p.dead:
+		if turnCtx.Err() != nil {
+			return acp.StopReasonCancelled, nil, nil
+		}
 		// Preserve a result already read immediately before process EOF.
 		select {
 		case r := <-p.results:
@@ -476,6 +491,9 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 				go perTurn.handle(req)
 			}
 		case "result":
+			if env.ParentToolUseID != "" || env.ParentAgentID != "" {
+				continue
+			}
 			var result cliResult
 			if json.Unmarshal(line, &result) != nil {
 				continue
@@ -600,6 +618,9 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		p.contextUsage.setModel(env.Model)
 		reportLoadErrors(ctx, conn, sid, env)
 	case "session_state_changed":
+		if env.ParentToolUseID != "" || env.ParentAgentID != "" {
+			return
+		}
 		if env.State == "idle" && p.finishTurn() {
 			select {
 			case p.results <- turnResult{err: acp.NewInternalError("claude went idle without producing a result; partial output may be incomplete")}:
@@ -699,13 +720,13 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		}
 
 	case "task_started":
-		if env.TaskID != "" && env.ToolUseID != "" {
+		if env.TaskID != "" && env.ToolUseID != "" && p.tools[env.ToolUseID] != "Monitor" && env.TaskType != "local_monitor" {
 			p.subagentMu.Lock()
 			p.subagentParents[env.TaskID] = env.ToolUseID
 			p.subagentMu.Unlock()
 		}
 	case "task_progress":
-		if toolCallID := p.subagentParent(env.TaskID, env.ToolUseID); toolCallID != "" {
+		if toolCallID := p.subagentParent(env.TaskID, env.ToolUseID); p.canReportTask(toolCallID, env.TaskType) {
 			if note := taskProgressNote(env); note != "" {
 				_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdateToolCall(acp.ToolCallId(toolCallID),
 					acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(note))}),
@@ -714,7 +735,7 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		}
 
 	case "task_notification":
-		if toolCallID := p.subagentParent(env.TaskID, env.ToolUseID); toolCallID != "" && strings.TrimSpace(env.Summary) != "" {
+		if toolCallID := p.subagentParent(env.TaskID, env.ToolUseID); p.canReportTask(toolCallID, env.TaskType) && strings.TrimSpace(env.Summary) != "" {
 			_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdateToolCall(acp.ToolCallId(toolCallID),
 				acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(strings.TrimSpace(env.Summary)))}),
 			)})
@@ -729,6 +750,10 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 			p.subagentMu.Unlock()
 		}
 	}
+}
+
+func (p *claudeProc) canReportTask(toolCallID, taskType string) bool {
+	return p.emitted.has(toolCallID) && p.tools[toolCallID] != "Monitor" && taskType != "local_monitor"
 }
 
 func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) {

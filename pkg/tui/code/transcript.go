@@ -669,7 +669,7 @@ func (o *transcriptOverlay) Render(width, height int) []string {
 
 	t := theme.Default
 	contentRows := max(0, height-3)
-	body, starts, ends := o.bodyLines(width)
+	body, starts, ends := o.bodyLines(max(1, width-1))
 	if len(body) == 0 {
 		body = []string{"  " + dim("No transcript yet…")}
 	}
@@ -725,12 +725,15 @@ func (o *transcriptOverlay) Render(width, height int) []string {
 	pct := fmt.Sprintf(" %d%% ", percent)
 	ruleWidth := max(10, width-ansi.Width(pct))
 	rule := colored(t.BrBlack, strings.Repeat("─", ruleWidth)) + dim(pct)
-	lines := []string{ansi.Truncate(title, width, "…"), ansi.Truncate(rule, width, "…")}
+	lines := []string{closeHeader(title, width), ansi.Truncate(rule, width, "…")}
 
 	end := min(len(body), o.offset+contentRows)
-	lines = append(lines, body[o.offset:end]...)
-	for len(lines) < height-1 {
-		lines = append(lines, "")
+	for row := range contentRows {
+		line := ""
+		if index := o.offset + row; index < end {
+			line = body[index]
+		}
+		lines = append(lines, scrollbarLine(line, width, scrollMarker(row, contentRows, o.offset, len(body))))
 	}
 
 	hints := o.hintLine()

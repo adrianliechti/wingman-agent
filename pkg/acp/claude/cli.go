@@ -126,6 +126,7 @@ type cliEnvelope struct {
 	ParentToolUseID    string          `json:"parent_tool_use_id,omitempty"`
 	ParentAgentID      string          `json:"parent_agent_id,omitempty"`
 	TaskID             string          `json:"task_id,omitempty"`
+	TaskType           string          `json:"task_type,omitempty"`
 	ToolUseID          string          `json:"tool_use_id,omitempty"`
 	ToolName           string          `json:"tool_name,omitempty"`
 	ElapsedTimeSeconds float64         `json:"elapsed_time_seconds,omitempty"`

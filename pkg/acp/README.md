@@ -4,6 +4,11 @@
 Wingman to ACP clients. The `claude`, `codex`, and `pi` packages bridge their
 respective backends to the same ACP interface.
 
+Wingman's form UI groups an optional custom-answer field with its choice field
+using `_meta.wingman.customAnswerFor` on the companion schema property. The value
+is the choice field's ID. The Wingman and Claude bridges emit this metadata;
+clients that do not recognize it can render the companion as a normal text field.
+
 The integration supports ACP protocol version 1. Major versions are negotiated
 by explicit support, not by assuming that every lower number is compatible.
 See the official [initialization](https://agentclientprotocol.com/protocol/v1/initialization)
