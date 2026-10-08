@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
@@ -29,6 +30,7 @@ type Options struct {
 	Env []string
 
 	Path string
+	Args []string
 
 	Stderr io.Writer
 }
@@ -45,6 +47,7 @@ type Agent struct {
 	defaultCwd    string
 	env           []string
 	path          string
+	args          []string
 	stderr        io.Writer
 
 	modelsMu     sync.Mutex
@@ -68,6 +71,10 @@ func New(opts Options) *Agent {
 	if stderr == nil {
 		stderr = os.Stderr
 	}
+	args := opts.Args
+	if args == nil {
+		args = claudecli.BuildArgs(nil)
+	}
 	return &Agent{
 		sessions:      make(map[acp.SessionId]*session),
 		defaultModel:  model,
@@ -75,6 +82,7 @@ func New(opts Options) *Agent {
 		defaultCwd:    opts.Cwd,
 		env:           opts.Env,
 		path:          path,
+		args:          slices.Clone(args),
 		stderr:        stderr,
 	}
 }

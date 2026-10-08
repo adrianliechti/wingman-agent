@@ -126,6 +126,7 @@ func runACPClaude(ctx context.Context, args []string) {
 			fatal(err)
 		}
 		opts.Env = claudecli.BuildEnv(os.Environ(), cfg)
+		opts.Args = claudecli.BuildArgs(cfg)
 	}
 
 	if err := claude.Run(ctx, opts, os.Stdin, os.Stdout, acpLogger(debug)); err != nil {

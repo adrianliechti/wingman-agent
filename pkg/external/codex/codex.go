@@ -3,8 +3,6 @@ package codex
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/external"
@@ -61,30 +59,17 @@ func tomlString(value string) string {
 }
 
 func BuildEnv(parent []string, cfg *CodexConfig) []string {
-	if parent == nil {
-		parent = os.Environ()
-	}
-	env := make([]string, 0, len(parent)+1)
-	env = append(env, parent...)
-	env = append(env, "WINGMAN_TOKEN="+cfg.AuthToken)
-	return env
+	return external.MergeEnv(parent, map[string]string{"WINGMAN_TOKEN": cfg.AuthToken})
 }
 
 func Run(ctx context.Context, args []string, options *Options) error {
-	if options == nil {
-		options = new(Options)
-	}
+	options = external.WithDefaults(options)
 
 	if options.Path == "" {
 		options.Path = BinPath()
 	}
 
-	if options.Env == nil {
-		options.Env = os.Environ()
-	}
-
 	cfg, err := NewConfig(ctx, options)
-
 	if err != nil {
 		return err
 	}
@@ -95,14 +80,5 @@ func Run(ctx context.Context, args []string, options *Options) error {
 	}
 	defer cleanup()
 
-	args = append(BuildArgs(cfg), args...)
-
-	cmd := exec.CommandContext(ctx, options.Path, args...)
-	cmd.Env = BuildEnv(options.Env, cfg)
-
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
+	return external.Run(ctx, options.Path, append(BuildArgs(cfg), args...), BuildEnv(options.Env, cfg))
 }
