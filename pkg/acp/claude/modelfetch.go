@@ -17,11 +17,13 @@ func (a *Agent) fetchModels(ctx context.Context) ([]ModelEntry, []acp.AvailableC
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, a.path,
+	args := append([]string{}, a.args...)
+	args = append(args,
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
 	)
+	cmd := exec.CommandContext(ctx, a.path, args...)
 	process.Hide(cmd)
 	cmd.Dir = a.defaultCwd
 	if a.env != nil {

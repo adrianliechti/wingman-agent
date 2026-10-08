@@ -975,15 +975,14 @@ func (s *streamWriter) writeJSON(v any) error {
 
 func (s *session) cliArgsLocked() []string {
 
-	args := []string{
+	args := append([]string{}, s.agent.args...)
+	args = append(args,
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
 		"--permission-prompt-tool", "stdio",
-
-		"--settings", `{"disableRemoteControl":true}`,
-	}
+	)
 	// ExitPlanMode can switch the running process to bypass only when the
 	// capability was enabled at startup. This does not select bypass mode.
 	if s.allowBypass {

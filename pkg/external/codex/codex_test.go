@@ -68,6 +68,28 @@ func TestResolveModelsPreservesProviderIDs(t *testing.T) {
 	}
 }
 
+func TestBuildEnvReplacesInheritedToken(t *testing.T) {
+	parent := []string{"PATH=/usr/bin", "WINGMAN_TOKEN=stale", "WINGMAN_TOKEN=older"}
+	original := slices.Clone(parent)
+	cfg := &CodexConfig{AuthToken: "gateway-token"}
+	env := BuildEnv(parent, cfg)
+	if want := []string{"PATH=/usr/bin", "WINGMAN_TOKEN=gateway-token"}; !slices.Equal(env, want) {
+		t.Fatalf("environment = %q, want %q", env, want)
+	}
+	if !slices.Equal(parent, original) {
+		t.Fatal("BuildEnv changed the parent environment")
+	}
+
+	t.Setenv("WINGMAN_TOKEN", "inherited")
+	t.Setenv("WINGMAN_ENV_TEST", "present")
+	if inherited := BuildEnv(nil, cfg); !slices.Contains(inherited, "WINGMAN_ENV_TEST=present") || slices.Contains(inherited, "WINGMAN_TOKEN=inherited") {
+		t.Fatal("nil parent should inherit the environment with the gateway token replaced")
+	}
+	if empty := BuildEnv([]string{}, cfg); !slices.Equal(empty, []string{"WINGMAN_TOKEN=gateway-token"}) {
+		t.Fatalf("empty parent should not inherit the process environment: %q", empty)
+	}
+}
+
 func containsConfig(args []string, value string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "--config" && args[i+1] == value {

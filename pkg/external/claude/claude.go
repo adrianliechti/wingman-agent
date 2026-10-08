@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,6 +30,25 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 		"ANTHROPIC_BASE_URL":   cfg.BaseURL,
 		"ANTHROPIC_API_KEY":    "",
 		"ANTHROPIC_AUTH_TOKEN": cfg.AuthToken,
+
+		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+		"CLAUDE_CODE_USE_BEDROCK":                    "",
+		"CLAUDE_CODE_USE_VERTEX":                     "",
+		"CLAUDE_CODE_USE_FOUNDRY":                    "",
+		"CLAUDE_CODE_USE_MANTLE":                     "",
+		"CLAUDE_CODE_USE_ANTHROPIC_AWS":              "",
+		"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD":     "",
+		"CLAUDE_CODE_USE_GATEWAY":                    "",
+
+		"ANTHROPIC_MODEL":                  cfg.DefaultModel,
+		"ANTHROPIC_DEFAULT_MODEL":          cfg.DefaultModel,
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":    cfg.HaikuModel,
+		"ANTHROPIC_DEFAULT_SONNET_MODEL":   cfg.SonnetModel,
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":     cfg.OpusModel,
+		"ANTHROPIC_DEFAULT_FABLE_MODEL":    cfg.FableModel,
+		"ANTHROPIC_CUSTOM_MODEL_OPTION":    "",
+		"CLAUDE_CODE_SUBAGENT_MODEL":       "inherit",
+		"CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "0",
 
 		"DISABLE_TELEMETRY":                        "1",
 		"DISABLE_ERROR_REPORTING":                  "1",
@@ -66,43 +86,33 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 		"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
 	}
 
-	if cfg.HaikuModel != "" {
-		vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = cfg.HaikuModel
-	}
-
-	if cfg.SonnetModel != "" {
-		vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] = cfg.SonnetModel
-	}
-
-	if cfg.OpusModel != "" {
-		vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] = cfg.OpusModel
-	}
-
-	if cfg.FableModel != "" {
-		vars["ANTHROPIC_DEFAULT_FABLE_MODEL"] = cfg.FableModel
-	}
-
-	if cfg.SonnetModel != "" {
-		vars["CLAUDE_CODE_SUBAGENT_MODEL"] = cfg.SonnetModel
+	if cfg.HaikuModel == "" {
+		// Background calls must also use a model the gateway serves.
+		vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = cfg.DefaultModel
 	}
 
 	return vars
 }
 
-func BuildArgs() []string {
-	return []string{"--settings", `{"disableRemoteControl":true}`}
+func BuildArgs(cfg *ClaudeConfig) []string {
+	args := []string{"--settings", `{"disableRemoteControl":true}`}
+	if cfg != nil {
+		// The SDK's parent policy channel is required: --settings alone does
+		// not enforce managed model restrictions. Never change machine policy.
+		policy, _ := json.Marshal(struct {
+			AvailableModels      []string `json:"availableModels"`
+			AvailableModelsMatch string   `json:"availableModelsMatch"`
+			EnforceModels        bool     `json:"enforceAvailableModels"`
+		}{cfg.Models, "exact", true})
+		args = append(args, "--managed-settings", string(policy))
+	}
+	return args
 }
 
 func BuildEnv(parent []string, cfg *ClaudeConfig) []string {
-	if parent == nil {
-		parent = os.Environ()
-	}
-	env := make([]string, 0, len(parent)+len(BuildVars(cfg)))
-	env = append(env, parent...)
-	for k, v := range BuildVars(cfg) {
-		env = append(env, k+"="+v)
-	}
-	return env
+	// Background tasks use ANTHROPIC_DEFAULT_HAIKU_MODEL instead of the
+	// deprecated small/fast model override.
+	return external.MergeEnv(parent, BuildVars(cfg), "ANTHROPIC_SMALL_FAST_MODEL")
 }
 
 func FindPath() (string, error) {
@@ -134,30 +144,16 @@ func FindPath() (string, error) {
 }
 
 func Run(ctx context.Context, args []string, options *Options) error {
-	if options == nil {
-		options = new(Options)
-	}
+	options = external.WithDefaults(options)
 
 	if options.Path == "" {
 		options.Path = BinPath()
 	}
 
-	if options.Env == nil {
-		options.Env = os.Environ()
-	}
-
 	cfg, err := NewConfig(ctx, options)
-
 	if err != nil {
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, options.Path, append(BuildArgs(), args...)...)
-	cmd.Env = BuildEnv(options.Env, cfg)
-
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
+	return external.Run(ctx, options.Path, append(BuildArgs(cfg), args...), BuildEnv(options.Env, cfg))
 }
