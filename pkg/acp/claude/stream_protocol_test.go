@@ -191,6 +191,13 @@ func TestResultFallbackResetsForNextPrompt(t *testing.T) {
 		_, _ = io.WriteString(writer, rootUsageFrame+"\n"+cumulativeResultFrame+"\n")
 		<-p.results
 		p.beginTurn(context.Background())
+		_, _ = io.WriteString(writer, `{"type":"system","subtype":"session_state_changed","state":"idle"}`+"\n")
+		synctest.Wait()
+		select {
+		case r := <-p.results:
+			t.Fatalf("previous result's trailing idle finished the next turn: %+v", r)
+		default:
+		}
 		stale, _ := json.Marshal(map[string]any{"type": "result", "subtype": "success", "user_message_uuid": oldID, "result": "stale answer"})
 		_, _ = writer.Write(append(stale, '\n'))
 		synctest.Wait()
@@ -258,7 +265,7 @@ func TestSyntheticLoginMessageRequiresAuthWithoutChatText(t *testing.T) {
 func TestResultMatchesMergedUserMessages(t *testing.T) {
 	p, conn, _ := newTranscriptProcess(t)
 	p.beginTurn(context.Background())
-	merged, _ := json.Marshal(map[string]any{"type": "result", "subtype": "success", "user_message_uuid": "task-notification", "user_message_uuids": []string{"task-notification", p.turnID}})
+	merged, _ := json.Marshal(map[string]any{"type": "result", "subtype": "success", "origin": map[string]any{"kind": "task-notification"}, "user_message_uuid": "task-notification", "user_message_uuids": []string{"task-notification", p.turnID}})
 	p.read(context.Background(), conn, "s", strings.NewReader(string(merged)+"\n"))
 	select {
 	case r := <-p.results:
@@ -267,5 +274,70 @@ func TestResultMatchesMergedUserMessages(t *testing.T) {
 		}
 	default:
 		t.Fatal("a result answering merged messages did not settle the turn")
+	}
+}
+
+func TestAutonomousResultCannotEndPendingPrompt(t *testing.T) {
+	for _, kind := range []string{"task-notification", "peer", "coordinator", "observer", "observer-activity"} {
+		t.Run(kind, func(t *testing.T) {
+			updates, result := captureCLITranscript(t, context.Background(),
+				`{"type":"result","subtype":"success","origin":{"kind":"`+kind+`"},"result":"background answer"}`,
+				`{"type":"system","subtype":"session_state_changed","state":"idle"}`,
+				`{"type":"result","subtype":"success","origin":{"kind":"user"},"result":"user answer"}`,
+			)
+			if text := transcriptText(updates); text != "user answer" || result.stop != acp.StopReasonEndTurn {
+				t.Fatalf("text = %q, result = %+v, want only the user answer", text, result)
+			}
+		})
+	}
+}
+
+func TestAutonomousResultIdleCannotEndNextPrompt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p, conn, _ := newTranscriptProcess(t)
+		reader, writer := io.Pipe()
+		defer reader.Close()
+		defer writer.Close()
+		go p.read(context.Background(), conn, "s", reader)
+		_, _ = io.WriteString(writer, `{"type":"result","subtype":"success","origin":{"kind":"task-notification"}}`+"\n")
+		synctest.Wait()
+		p.beginTurn(context.Background())
+		const idle = `{"type":"system","subtype":"session_state_changed","state":"idle"}` + "\n"
+		_, _ = io.WriteString(writer, idle)
+		synctest.Wait()
+		select {
+		case r := <-p.results:
+			t.Fatalf("autonomous result's trailing idle finished the next turn: %+v", r)
+		default:
+		}
+		_, _ = io.WriteString(writer, idle)
+		if r := <-p.results; r.err == nil {
+			t.Fatalf("idle without a result did not report an abandoned turn: %+v", r)
+		}
+	})
+}
+
+func TestResultPromptIDsTakePrecedenceOverOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		fields string
+		want   bool
+	}{
+		{`"origin":{"kind":"task-notification"},"user_message_uuid":"current"`, true},
+		{`"origin":{"kind":"observer"},"user_message_uuids":["other","current"]`, true},
+		{`"user_message_uuid":"current","user_message_uuids":["other"]`, false},
+		{`"user_message_uuid":"current","user_message_uuids":[]`, false},
+		{`"origin":{"kind":"unclassified"}`, true},
+		{`"origin":{"kind":"future-origin"}`, true},
+		{`"user_message_uuid":"previous"`, false},
+	} {
+		t.Run(tc.fields, func(t *testing.T) {
+			var result cliResult
+			if err := json.Unmarshal([]byte("{"+tc.fields+"}"), &result); err != nil {
+				t.Fatal(err)
+			}
+			if got := result.answers("current"); got != tc.want {
+				t.Fatalf("answers(current) = %t, want %t", got, tc.want)
+			}
+		})
 	}
 }

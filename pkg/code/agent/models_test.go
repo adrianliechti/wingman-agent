@@ -48,6 +48,13 @@ func TestModelSelectionByRole(t *testing.T) {
 	}
 }
 
+func TestUtilityPrefersHaiku55(t *testing.T) {
+	a := upstreamAgent("claude-sonnet-5-5", "claude-haiku-4-5", "claude-haiku-4-6", "anthropic/claude-haiku-5-5")
+	if got := roleModelID(t, a, nil, "utility"); got != "anthropic/claude-haiku-5-5" {
+		t.Fatalf("utility model = %q, want anthropic/claude-haiku-5-5", got)
+	}
+}
+
 func TestExplicitSelectionDrivesDelegationFamily(t *testing.T) {
 	a := upstreamAgent("claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "gpt-6-sol", "gpt-6-astra", "gpt-6-luna")
 	a.modelID = "gpt-6-sol"

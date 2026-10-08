@@ -8,6 +8,40 @@ project instructions, and environment context separately.
 
 ## Comparison baseline
 
+Re-reviewed on 2026-10-08 against local Codex commit
+`be2e129ecd67d900c016eda12d5d193e33d9c3da`. Every current model's
+`instructions_template` is unchanged from the September 30 baseline below;
+the catalog only removes obsolete null `instructions_variables` fields.
+Model-specific function-description prefixes are now supported upstream, but
+no catalog model supplies them, so there is no model guidance to import.
+Codex's `partial_answer` phase is adopted in Wingman's completion loop and
+retained through persistence and request replay. Partial answers continue the
+turn and cannot satisfy an empty `finish_turn` marker. Existing cancellation,
+CRLF preservation, Retry-After, and compaction-context coverage already handles
+the corresponding upstream fixes. Codex-only Guardian, incremental namespace,
+and idle multi-agent-v2 changes do not map to Wingman's harness.
+
+The follow-up review also checked these integration changes:
+
+| Codex change | Wingman assessment |
+| --- | --- |
+| `c9253c4977`: base instructions move into a developer input message | The backend already accepts system/developer input messages, including requests without top-level `instructions`. Keep Wingman's own instruction transport, which remains supported. |
+| `be48ae396e`: include JSON escaping and wrappers in truncated MCP result budgets | Wingman formats a bounded head/tail preview well below its inline result limit; it does not wrap a full-budget JSON preview in a second MCP result. |
+| `35a9b70444`: retain tool-call inventory completeness when recorded arguments are truncated | Wingman retains executable tool calls separately from output previews and has no equivalent lossy call-inventory flag. |
+
+The complete `go test ./...` suite passes in `wingman-agent`. The completion-loop
+and Claude ACP race suites also pass. The sibling backend's complete suite
+passes with `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY` explicitly
+empty so paid reference comparisons skip. Its offline Claude Code/Bedrock
+fixture now injects a trailing system instruction deterministically instead of
+requiring every CLI version to emit one. The backend's existing Haiku 5.5
+native/Bedrock thinking, sampling, output-limit,
+tokenizer, and conversation-replay support needed no further production change.
+The shared comparison preflight now skips when the backend model listing is
+unavailable and limits discovery to five seconds, preventing reference-provider
+calls before a usable backend/model has been established. Local mock tests cover
+available, absent, malformed, unauthorized, and unreachable listings plus caching.
+
 Reviewed all current GPT catalog variants on 2026-09-30 against Codex commit
 `92bc601ad60542c92bf0bb1e7a2eb70b84ac49d2` using its pinned
 [model catalog](https://github.com/openai/codex/blob/92bc601ad60542c92bf0bb1e7a2eb70b84ac49d2/codex-rs/models-manager/models.json).
@@ -165,3 +199,40 @@ and plan modes remain the policy owners. Longest-prefix routing distinguishes
 Validate routing, rendering, and mode composition with the existing focused
 Go suites. These checks do not establish a behavioral or latency improvement;
 matched live model evaluations were not part of this refresh.
+
+## Claude Haiku 5.5 review on October 8
+
+`models/claude-haiku-5-5/mode_agent.txt` adapts the effective prompt captured
+from the installed Claude Code 2.1.294 with `--model claude-haiku-5-5`.
+The Darwin ARM64 binary matches the official
+[release manifest](https://downloads.claude.ai/claude-code-releases/2.1.294/manifest.json):
+commit `8f033c6ebe3d82a87f502e199307f38f5d55ccca`, built October 8,
+SHA-256 `def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53`.
+The capture uses the isolated localhost mock API procedure above and dummy
+credentials, with no Anthropic inference. Haiku 4.5 and Sonnet 5.5 were captured
+for comparison. Haiku 5.5 has its own lean prompt, distinct from both models;
+Sonnet 5.5 retains its existing structure.
+
+Retain Haiku's new context-management guidance: effort controls reasoning
+depth rather than task scope; complete clear requests without unnecessary
+approval; distinguish questions from implementation requests; continue work
+that does not depend on a blocker; and verify a suspected failure before
+reporting it. Translate tools, identity, and session-context authority to
+Wingman's contracts. Preserve the established security and Git policies;
+omit billing, product catalogs, token countdown, and unrelated identity rules.
+The shared plan and unattended templates continue to own those modes.
+
+Claude Code 2.1.292 did not recognize Haiku 5.5 and selected the general prompt;
+use 2.1.294 or newer when repeating this capture. Raw captures from this review
+are in `/private/tmp/wingman-claude-prompt-review` and are temporary artifacts.
+Validate with the focused prompt, agent, and Claude ACP suites. No live model
+behavior or latency improvement is claimed.
+
+After the local backend was started, six direct Haiku 5.5 checks passed through
+its configured Bedrock model: default thinking, explicitly summarized adaptive
+thinking, signed replay, disabled thinking with `xhigh`, a forced tool with
+`max`, and Responses streaming with developer instructions in the input. A
+separate Claude Code 2.1.294 check selected the `haiku` alias, reported the
+resolved model as `claude-haiku-5-5`, read a temporary fixture with `Read`, and
+returned the expected calculation. These establish functional compatibility;
+they are not a matched prompt-quality or latency benchmark.

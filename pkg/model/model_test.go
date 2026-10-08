@@ -22,6 +22,7 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"MiniMax-M3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"grok-4.6", "Grok 4.6", ClassLarge, 500_000, 500_000},
 		{"claude-sonnet-5-5", "Claude Sonnet 5.5", ClassMedium, 1_000_000, 128_000},
+		{"claude-haiku-5-5", "Claude Haiku 5.5", ClassSmall, 1_000_000, 128_000},
 		{"claude-opus-5-5", "Claude Opus 5.5", ClassLarge, 1_000_000, 128_000},
 		{"claude-fable-5-1", "Claude Fable 5.1", ClassLarge, 1_000_000, 128_000},
 		{"claude-mythos-5-1", "Claude Mythos 5.1", ClassLarge, 1_000_000, 128_000},
@@ -214,6 +215,7 @@ func TestProviderPrefixedModelMapping(t *testing.T) {
 	cases := map[string]string{
 		"anthropic/claude-sonnet-5":   "Claude Sonnet 5",
 		"anthropic/claude-sonnet-5-5": "Claude Sonnet 5.5",
+		"anthropic/claude-haiku-5-5":  "Claude Haiku 5.5",
 		"anthropic/claude-opus-5-5":   "Claude Opus 5.5",
 		"anthropic/claude-fable-5-1":  "Claude Fable 5.1",
 		"anthropic/claude-mythos-5-1": "Claude Mythos 5.1",

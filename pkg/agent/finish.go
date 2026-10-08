@@ -36,7 +36,9 @@ func finishTool() tool.Tool {
 // marker and avoiding duplicate answers without discarding a different one.
 func (a *Agent) resolveFinishCalls(resp *response, calls []ToolCall, previousAnswer string, yield func(Message, error) bool) ([]ToolCall, bool, error) {
 	visibleAnswer := strings.TrimSpace(lastAssistantText(resp.messages))
-	if visibleAnswer == "" {
+	if endsWithNonterminalText(resp.messages) {
+		visibleAnswer = ""
+	} else if visibleAnswer == "" {
 		visibleAnswer = strings.TrimSpace(previousAnswer)
 	}
 	var work []ToolCall

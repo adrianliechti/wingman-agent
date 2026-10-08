@@ -74,8 +74,22 @@ func TestVariantFor(t *testing.T) {
 		t.Error("GPT-5.1 variants should share the GPT-5.1 prompt")
 	}
 
-	if VariantFor("claude-sonnet-5").Agent != VariantFor("claude-haiku-4-6").Agent {
-		t.Error("Claude Sonnet and Haiku should share the default Claude prompt")
+	for _, id := range []string{"claude-haiku-4-5", "claude-haiku-4-6"} {
+		if VariantFor("claude-sonnet-5").Agent != VariantFor(id).Agent {
+			t.Errorf("%s should share the default Claude prompt", id)
+		}
+	}
+	haiku55 := VariantFor("claude-haiku-5-5")
+	if haiku55.Agent == VariantFor("claude").Agent || haiku55.Agent == VariantFor("claude-sonnet-5-5").Agent {
+		t.Error("Haiku 5.5 should keep its distinct captured prompt")
+	}
+	for _, id := range []string{"CLAUDE-HAIKU-5-5", "claude-haiku-5.5", "anthropic/claude-haiku-5-5", "claude-haiku-5-5:latest"} {
+		if VariantFor(id) != haiku55 {
+			t.Errorf("VariantFor(%s) should resolve to Haiku 5.5", id)
+		}
+	}
+	if VariantFor("claude-haiku-5-5ish") != VariantFor("claude") {
+		t.Error("Haiku 5.5 prompt should not match a partial model name")
 	}
 	sonnet55 := VariantFor("claude-sonnet-5-5")
 	if sonnet55.Agent == VariantFor("claude-sonnet-5").Agent {
@@ -245,6 +259,7 @@ func TestClaudePromptFamilies(t *testing.T) {
 
 func TestBuildInstructionsRendersModelTemplate(t *testing.T) {
 	for _, id := range []string{
+		"claude-haiku-5-5",
 		"claude-sonnet-5-5",
 		"claude-sonnet-5",
 		"claude-opus-5-5",
@@ -391,6 +406,7 @@ func TestBuildInstructionsAlwaysExplainsProjectInstructionScope(t *testing.T) {
 
 func TestAgentPromptPolicy(t *testing.T) {
 	for _, id := range []string{
+		"claude-haiku-5-5",
 		"some-unknown-model",
 		"claude-sonnet-5-5",
 		"claude-sonnet-5",
@@ -438,6 +454,7 @@ func TestAgentPromptPolicy(t *testing.T) {
 
 func TestAgentPromptsExcludeRemovedTools(t *testing.T) {
 	for _, id := range []string{
+		"claude-haiku-5-5",
 		"some-unknown-model",
 		"claude-sonnet-5-5",
 		"claude-sonnet-5",

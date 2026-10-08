@@ -92,6 +92,7 @@ var gpt6SolLunaEfforts = []string{"none", "low", "medium", "high", "xhigh", "max
 var gpt6AstraEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 var gpt61SolEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 var claudeAlwaysThinkingEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+var claudeHaiku55Efforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
 var qwen38Efforts = []string{"none", "low", "medium", "xhigh"}
 
 // Models lists every known model in preference order: the first entry of a
@@ -114,6 +115,22 @@ var Models = []Model{
 
 		// Thinking cannot be disabled on Sonnet 5.5, so "none" is not offered.
 		Efforts: claudeAlwaysThinkingEfforts,
+	},
+	{
+		ID: "claude-haiku-5-5",
+
+		Namespace: "anthropic",
+
+		Name: "Claude Haiku 5.5",
+
+		Class: ClassSmall,
+
+		Output: 128000,
+
+		Context: 1000000,
+
+		// Adaptive thinking is the default; disabling it is also supported.
+		Efforts: claudeHaiku55Efforts,
 	},
 	{
 		ID: "claude-sonnet-5",

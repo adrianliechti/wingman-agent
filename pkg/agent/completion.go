@@ -34,7 +34,7 @@ func (s *completionState) advance(resp *response, requireFinish, finished, hasWo
 	text := lastAssistantText(resp.messages)
 	if strings.TrimSpace(text) != "" {
 		s.answer = ""
-		if !resp.incomplete && resp.stopReason != "pause_turn" {
+		if !resp.incomplete && resp.stopReason != "pause_turn" && !endsWithNonterminalText(resp.messages) {
 			s.answer = text
 		}
 	}
@@ -56,7 +56,7 @@ func (s *completionState) advance(resp *response, requireFinish, finished, hasWo
 	case finished || hasRefusal(resp.messages):
 	case requireFinish:
 		reason = ErrMissingFinish
-	case endsWithCommentary(resp.messages) || recovering && strings.TrimSpace(text) == "":
+	case endsWithNonterminalText(resp.messages) || recovering && strings.TrimSpace(text) == "":
 		reason = errMissingFinalAnswer
 	}
 	if reason == nil {

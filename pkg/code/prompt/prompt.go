@@ -21,7 +21,7 @@ var modePlan string
 var modeUnattended string
 
 // GPT-6 variants adapt each model's instructions_template from Codex's
-// codex-rs/models-manager/models.json (92bc601ad6), using Wingman's tools and
+// codex-rs/models-manager/models.json (be2e129ecd), using Wingman's tools and
 // shared session-context sections while retaining model-specific guidance.
 // See README.md for the comparison baseline and intentional harness differences.
 //

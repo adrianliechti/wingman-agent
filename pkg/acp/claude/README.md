@@ -22,6 +22,26 @@ package.
 
 ## Upstream review
 
+The 2026-10-08 review compared Claude ACP at `6a162ba`, including the folded
+prompt fix in `390b0b9`. Results that explicitly name the active prompt still
+settle it even when their origin is a background task. Autonomous results
+without a matching prompt ID, and their following idle events, cannot settle
+or fail the active user turn. An explicit UUID list takes precedence over the
+legacy singular UUID; unknown origins retain compatibility behavior.
+Trailing idle events are accounted for on every root result, including late
+events from the preceding prompt, so they cannot fail a newly started prompt.
+An idle without a preceding result still reports an abandoned turn.
+`stream_protocol_test.go` covers the autonomous, folded-prompt, and delayed-idle
+paths.
+
+An isolated initialize handshake with installed Claude Code 2.1.294 confirmed
+that the launcher overrides resolve `haiku` to `claude-haiku-5-5`, `sonnet` to
+`claude-sonnet-5-5`, `opus` to `claude-opus-5-5`, and `fable` to
+`claude-fable-5-1`. Haiku advertises `low`, `medium`, `high`, `xhigh`, and `max`
+effort through the CLI. Native ACP consumes this metadata directly; the
+Wingman backend exposes its additional API-level `none` setting separately.
+This handshake submitted no user prompt or inference request.
+
 The 2026-10-05 review compared Claude ACP at `0724b17`, including its cancellation
 and task fixes. Session close, delete, and replacement now wait up to five seconds
 after process shutdown for cancelled prompt cleanup. Cancellation wins when a

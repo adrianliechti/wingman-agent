@@ -325,6 +325,7 @@ type claudeProc struct {
 	turnCancel          context.CancelFunc
 	deliveredText       bool
 	deliveredCompaction bool
+	pendingResultIdles  int
 	subagentMu          sync.Mutex
 	subagentParents     map[string]string
 	results             chan turnResult
@@ -518,6 +519,9 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 			}
 			p.turnMu.Lock()
 			matches := p.turnActive && result.answers(p.turnID)
+			// Each root result has a trailing idle, which can arrive after
+			// the next prompt starts. It must not fail that new turn.
+			p.pendingResultIdles++
 			fallback := matches && p.turnCtx != nil && p.turnCtx.Err() == nil && !p.deliveredText && !p.deliveredCompaction
 			p.turnMu.Unlock()
 			if !matches {
@@ -643,6 +647,17 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 	case "session_state_changed":
 		if env.ParentToolUseID != "" || env.ParentAgentID != "" {
 			return
+		}
+		if env.State == "idle" {
+			p.turnMu.Lock()
+			skipped := p.pendingResultIdles > 0
+			if skipped {
+				p.pendingResultIdles--
+			}
+			p.turnMu.Unlock()
+			if skipped {
+				return
+			}
 		}
 		if env.State == "idle" && p.finishTurn() {
 			select {
@@ -847,10 +862,23 @@ func (p *claudeProc) applyMode(ctx context.Context, conn *acp.AgentSideConnectio
 
 // A reply to merged user messages lists each of them in user_message_uuids.
 func (r cliResult) answers(turnID string) bool {
-	if r.UserMessageUUID == "" && len(r.UserMessageUUIDs) == 0 {
-		return true
+	if r.UserMessageUUIDs != nil {
+		return slices.Contains(r.UserMessageUUIDs, turnID)
 	}
-	return r.UserMessageUUID == turnID || slices.Contains(r.UserMessageUUIDs, turnID)
+	if r.UserMessageUUID != "" {
+		return r.UserMessageUUID == turnID
+	}
+	return !r.autonomous()
+}
+
+func (r cliResult) autonomous() bool {
+	if r.Origin != nil {
+		switch r.Origin.Kind {
+		case "task-notification", "peer", "coordinator", "observer", "observer-activity":
+			return true
+		}
+	}
+	return false
 }
 
 func isSyntheticLoginMessage(m cliMessage) bool {

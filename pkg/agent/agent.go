@@ -521,8 +521,8 @@ func lastAssistantText(messages []Message) string {
 	return ""
 }
 
-func endsWithCommentary(messages []Message) bool {
-	commentary := false
+func endsWithNonterminalText(messages []Message) bool {
+	nonterminal := false
 	for _, message := range messages {
 		if message.Role != RoleAssistant {
 			continue
@@ -532,11 +532,11 @@ func endsWithCommentary(messages []Message) bool {
 				return false
 			}
 			if content.Text != "" {
-				commentary = message.Phase == PhaseCommentary
+				nonterminal = message.Phase == PhaseCommentary || message.Phase == PhasePartialAnswer
 			}
 		}
 	}
-	return commentary
+	return nonterminal
 }
 
 func hiddenContextMessage(text string) Message {

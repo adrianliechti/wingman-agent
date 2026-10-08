@@ -348,6 +348,8 @@ func TestExplicitFinishAcceptsBareMarkerAfterAnswer(t *testing.T) {
 		accepted  bool
 	}{
 		{name: "answer then marker", responses: []string{bare, finishOutput("done", "{}")}, accepted: true},
+		{name: "partial answer cannot finish", responses: []string{strings.ReplaceAll(finalAnswerOutput, "final_answer", "partial_answer"), finishOutput("bare", "{}"), phaseTestResponse(false, bare, finishOutput("done", "{}"))}},
+		{name: "partial replacement cannot reuse prior answer", responses: []string{bare, phaseTestResponse(false, strings.ReplaceAll(finalAnswerOutput, "final_answer", "partial_answer"), finishOutput("bare", "{}")), phaseTestResponse(false, bare, finishOutput("done", "{}"))}},
 		{name: "empty cutoff preserves answer", responses: []string{bare, cutoffTestResponse(), finishOutput("done", "{}")}, accepted: true},
 		{name: "reasoning cutoff preserves answer", responses: []string{bare, cutoffTestResponse(`{"type":"reasoning","id":"rs_cutoff","status":"completed","summary":[{"type":"summary_text","text":"Ready to finish."}]}`), finishOutput("done", "{}")}, accepted: true},
 		{name: "partial replacement needs a new answer", responses: []string{bare, cutoffTestResponse(strings.ReplaceAll(bare, "Checked and fixed.", "Actually, ")), finishOutput("bare", "{}"), phaseTestResponse(false, bare, finishOutput("done", "{}"))}},

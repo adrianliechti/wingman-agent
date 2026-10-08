@@ -25,6 +25,34 @@ func TestNormalizeSessionConfig(t *testing.T) {
 	}
 }
 
+func TestHaiku55SessionConfig(t *testing.T) {
+	levels := []string{"low", "medium", "high", "xhigh", "max"}
+	models := modelsFromCLI([]cliModel{{
+		Value: "haiku", DisplayName: "Haiku", ResolvedModel: "claude-haiku-5-5",
+		SupportsEffort: true, SupportedEffortLevels: levels,
+	}})
+	for _, effort := range levels {
+		t.Run(effort, func(t *testing.T) {
+			a := New(Options{Model: "claude-haiku-5-5", Effort: effort})
+			a.models, a.modelsLoaded = models, true
+			response, err := a.NewSession(context.Background(), acp.NewSessionRequest{Cwd: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := a.lookup(response.SessionId).cliArgsLocked()
+			for flag, want := range map[string]string{"--model": "haiku", "--effort": effort} {
+				i := slices.Index(args, flag)
+				if i < 0 || i+1 >= len(args) || args[i+1] != want {
+					t.Fatalf("CLI args = %v, want %s %s", args, flag, want)
+				}
+			}
+			if len(response.ConfigOptions) != 2 || response.ConfigOptions[1].Select.CurrentValue != acp.SessionConfigValueId(effort) {
+				t.Fatalf("session config = %+v, want Haiku effort %s", response.ConfigOptions, effort)
+			}
+		})
+	}
+}
+
 func TestConfiguredModelDoesNotChangeGeneration(t *testing.T) {
 	for _, model := range []string{"claude-sonnet-4-6", "claude-sonnet-6", "claude-sonnet-5-20260901", "claude-sonnet-5[1m]"} {
 		t.Run(model, func(t *testing.T) {

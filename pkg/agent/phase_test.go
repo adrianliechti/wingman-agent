@@ -107,7 +107,14 @@ func phaseTestResponse(itemsInDoneEvents bool, items ...string) string {
 	return stream.String()
 }
 
-func TestSendContinuesAfterCommentary(t *testing.T) {
+func TestSendContinuesAfterNonterminalText(t *testing.T) {
+	for _, phase := range []string{"commentary", "partial_answer"} {
+		t.Run(phase, func(t *testing.T) { testSendContinuesAfterNonterminalText(t, phase) })
+	}
+}
+
+func testSendContinuesAfterNonterminalText(t *testing.T, phase string) {
+	progress := strings.ReplaceAll(commentaryOutput, "commentary", phase)
 	for _, doneEvents := range []bool{false, true} {
 		t.Run(fmt.Sprintf("items_in_done_events=%t", doneEvents), func(t *testing.T) {
 			requests, toolRuns, stopHooks, commits := 0, 0, 0, 0
@@ -130,7 +137,7 @@ func TestSendContinuesAfterCommentary(t *testing.T) {
 							t.Error("user input has an assistant phase")
 						}
 					}
-					if item.Phase == "commentary" {
+					if item.Phase == phase {
 						commentary++
 					}
 				}
@@ -142,9 +149,9 @@ func TestSendContinuesAfterCommentary(t *testing.T) {
 				}
 				switch requests {
 				case 1:
-					return phaseTestResponse(doneEvents, commentaryOutput)
+					return phaseTestResponse(doneEvents, progress)
 				case 2:
-					return phaseTestResponse(doneEvents, strings.ReplaceAll(commentaryOutput, "msg_progress", "msg_progress_2"))
+					return phaseTestResponse(doneEvents, strings.ReplaceAll(progress, "msg_progress", "msg_progress_2"))
 				case 3:
 					return phaseTestResponse(doneEvents, `{"type":"function_call","id":"fc_check","call_id":"call_check","name":"check","arguments":"{}","status":"completed"}`)
 				default:
@@ -205,7 +212,7 @@ func TestSendContinuesAfterCommentary(t *testing.T) {
 					phases = append(phases, string(item.OfOutputMessage.Phase))
 				}
 			}
-			if !slices.Equal(phases, []string{"commentary", "commentary", "final_answer"}) {
+			if !slices.Equal(phases, []string{phase, phase, "final_answer"}) {
 				t.Fatalf("phases after session restore = %v", phases)
 			}
 		})
@@ -240,6 +247,7 @@ func TestSendStopsAtFinalAnswerOrUnphasedMessage(t *testing.T) {
 	}{
 		{"final", []string{finalAnswerOutput}},
 		{"commentary then final", []string{commentaryOutput, finalAnswerOutput}},
+		{"partial answer then final", []string{strings.ReplaceAll(commentaryOutput, "commentary", "partial_answer"), finalAnswerOutput}},
 		{"unphased", []string{strings.ReplaceAll(finalAnswerOutput, `"phase":"final_answer",`, "")}},
 		{"null phase", []string{strings.ReplaceAll(finalAnswerOutput, `"phase":"final_answer"`, `"phase":null`)}},
 		{"refusal", []string{strings.ReplaceAll(commentaryOutput, `"type":"output_text","text":"I will check that now.","annotations":[]`, `"type":"refusal","refusal":"Cannot help with that."`)}},

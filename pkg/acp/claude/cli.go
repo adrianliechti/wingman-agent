@@ -209,6 +209,9 @@ type cliMsgBlock struct {
 }
 
 type cliResult struct {
+	Origin *struct {
+		Kind string `json:"kind"`
+	} `json:"origin,omitempty"`
 	UserMessageUUID  string                   `json:"user_message_uuid,omitempty"`
 	UserMessageUUIDs []string                 `json:"user_message_uuids,omitempty"`
 	Subtype          string                   `json:"subtype"`
