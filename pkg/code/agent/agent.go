@@ -257,6 +257,7 @@ func (a *Agent) LoadSession(_ context.Context, id string) error {
 		return err
 	}
 	s.startSource = "resume"
+	a.restoreSessionSettings(s, saved.State)
 	if err := s.aa.Restore(saved.State); err != nil {
 		s.close()
 		return err

@@ -144,8 +144,14 @@ func fuzzyFindText(content, oldText string) fuzzyMatchResult {
 		return fuzzyMatchResult{index: -1}
 	}
 
+	fuzzyEnd := fuzzyIndex + len(fuzzyOldText)
 	originalIndex := fuzzyToOriginal[fuzzyIndex]
-	originalEnd := fuzzyToOriginal[fuzzyIndex+len(fuzzyOldText)]
+	originalEnd := fuzzyToOriginal[fuzzyEnd]
+	if fuzzyEnd == len(fuzzyContent) || fuzzyContent[fuzzyEnd] == '\n' {
+		for originalEnd < len(content) && (content[originalEnd] == ' ' || content[originalEnd] == '\t') {
+			originalEnd++
+		}
+	}
 
 	return fuzzyMatchResult{
 		found:          true,

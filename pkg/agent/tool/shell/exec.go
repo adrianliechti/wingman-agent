@@ -342,9 +342,12 @@ func sanitizeOutput(s string) string {
 			continue
 		}
 		segments := strings.Split(line, "\r")
-		keep := segments[len(segments)-1]
-		if keep == "" {
-			keep = segments[len(segments)-2]
+		keep := ""
+		for j := len(segments) - 1; j >= 0; j-- {
+			if segments[j] != "" {
+				keep = segments[j]
+				break
+			}
 		}
 		lines[i] = keep
 	}
@@ -626,13 +629,19 @@ waiting:
 		}
 	}
 
+	if s.exited() {
+		m.remove(id)
+		return completedSessionResult(s), nil
+	}
+
+	output := s.drain()
 	m.markBackgrounded(s)
 
 	notice := fmt.Sprintf("Still running with session_id %d — use exec_session to poll output, send input, or kill it", id)
 	if idled {
 		notice = fmt.Sprintf("Started and idle (no new output for %s), running with session_id %d — use exec_session to poll output, send input, or kill it", grace, id)
 	}
-	return s.result(sessionResult(s.drain(), notice)), nil
+	return s.result(sessionResult(output, notice)), nil
 }
 
 func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicitation, appr *Approvals, args map[string]any) (tool.Result, error) {
@@ -732,6 +741,11 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 		return completedSessionResult(s), nil
 	case <-timer.C:
 	case <-ctx.Done():
+	}
+
+	if s.exited() {
+		m.remove(id)
+		return completedSessionResult(s), nil
 	}
 
 	output := s.drain()

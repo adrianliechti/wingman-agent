@@ -8,7 +8,7 @@ import (
 )
 
 func reasoningPrefix(req *request) string {
-	tools, _ := json.Marshal(toTools(req.tools))
+	tools := req.encodedTools()
 	encoded, _ := json.Marshal([]string{req.instructions, string(tools)})
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])

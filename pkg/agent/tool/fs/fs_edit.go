@@ -51,46 +51,60 @@ func applyEditOp(content string, op editOp, pathArg string) (string, error) {
 		return op.newText, nil
 	}
 
+	newContent, found, err := applyMatchedEdit(content, op, pathArg)
+	if found || err != nil {
+		return newContent, err
+	}
+
+	// The model often copies from `read` output: the line-number gutter or a
+	// uniformly shifted indentation would otherwise cost a retry turn.
+	if oldText, newText, ok := stripReadLineNumbers(op.oldText, op.newText); ok {
+		op.oldText, op.newText = oldText, newText
+		newContent, found, err = applyMatchedEdit(content, op, pathArg)
+		if found || err != nil {
+			return newContent, err
+		}
+	}
+
+	newContent, found, err = applyIndentShiftedEdit(content, op, pathArg)
+	if found || err != nil {
+		return newContent, err
+	}
+
+	return "", missingOldStringError(content, op.oldText, pathArg)
+}
+
+// applyMatchedEdit applies op using exact, quote-normalized and whitespace-fuzzy
+// matching. found is false (with a nil error) when old_string does not occur.
+func applyMatchedEdit(content string, op editOp, pathArg string) (result string, found bool, err error) {
 	actualOldText := findActualEditString(content, op.oldText)
 	actualNewText := preserveEditQuoteStyle(op.oldText, actualOldText, op.newText)
+	quoteNormalized := actualOldText != op.oldText
 
 	matchResult := fuzzyFindText(content, actualOldText)
 
 	if !matchResult.found {
-		preview := content
-		if len(preview) > 200 {
-			preview = preview[:200] + "..."
-		}
-		return "", fmt.Errorf("could not find old_string in %s. Make sure it matches exactly (including whitespace and newlines). File starts with:\n%s", pathArg, preview)
+		return "", false, nil
 	}
 
 	occurrences := strings.Count(content, actualOldText)
 	if matchResult.usedFuzzyMatch {
 		occurrences = strings.Count(normalizeForFuzzyMatch(content), normalizeForFuzzyMatch(actualOldText))
+	} else if quoteNormalized {
+		occurrences = strings.Count(normalizeEditQuotes(content), normalizeEditQuotes(op.oldText))
 	}
 
 	if occurrences > 1 && !op.replaceAll {
-		return "", fmt.Errorf("found %d occurrences of the text in %s. The text must be unique — provide more context to make it unique, or set replace_all=true to replace all occurrences", occurrences, pathArg)
+		return "", true, fmt.Errorf("found %d occurrences of the text in %s. The text must be unique — provide more context to make it unique, or set replace_all=true to replace all occurrences", occurrences, pathArg)
 	}
 
 	var newContent string
 
 	if op.replaceAll {
-		if matchResult.usedFuzzyMatch {
-			if strings.Contains(normalizeForFuzzyMatch(actualNewText), normalizeForFuzzyMatch(actualOldText)) {
-				return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
-			}
-			newContent = content
-			for {
-				mr := fuzzyFindText(newContent, actualOldText)
-				if !mr.found {
-					break
-				}
-				next := newContent[:mr.index] + actualNewText + newContent[mr.index+mr.matchLength:]
-				if next == newContent {
-					return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
-				}
-				newContent = next
+		if matchResult.usedFuzzyMatch || quoteNormalized {
+			newContent = replaceAllMatches(content, op)
+			if newContent == content {
+				return "", true, fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
 			}
 		} else {
 			newContent = strings.ReplaceAll(content, actualOldText, actualNewText)
@@ -100,10 +114,31 @@ func applyEditOp(content string, op editOp, pathArg string) (string, error) {
 	}
 
 	if content == newContent {
-		return "", fmt.Errorf("no changes made to %s. The replacement produced identical content", pathArg)
+		return "", true, fmt.Errorf("no changes made to %s. The replacement produced identical content", pathArg)
 	}
 
-	return newContent, nil
+	return newContent, true, nil
+}
+
+// replaceAllMatches replaces every quote-normalized or whitespace-fuzzy match in
+// a single left-to-right pass. Replaced text is never rescanned, so a replacement
+// that contains old_string cannot loop or be rejected.
+func replaceAllMatches(content string, op editOp) string {
+	var b strings.Builder
+	pos := 0
+	for pos < len(content) {
+		rest := content[pos:]
+		mr := fuzzyFindText(rest, op.oldText)
+		if !mr.found || mr.matchLength == 0 {
+			break
+		}
+		matched := rest[mr.index : mr.index+mr.matchLength]
+		b.WriteString(rest[:mr.index])
+		b.WriteString(preserveEditQuoteStyle(op.oldText, matched, op.newText))
+		pos += mr.index + mr.matchLength
+	}
+	b.WriteString(content[pos:])
+	return b.String()
 }
 
 func findActualEditString(content, oldText string) string {
@@ -163,10 +198,10 @@ func preserveEditQuoteStyle(oldText, actualOldText, newText string) string {
 	}
 
 	result := newText
-	if strings.ContainsAny(actualOldText, "“”") {
+	if strings.ContainsAny(actualOldText, "“”") && !strings.ContainsAny(oldText, "“”") && !strings.Contains(actualOldText, "\"") {
 		result = applyCurlyDoubleQuotes(result)
 	}
-	if strings.ContainsAny(actualOldText, "‘’") {
+	if strings.ContainsAny(actualOldText, "‘’") && !strings.ContainsAny(oldText, "‘’") && !strings.Contains(actualOldText, "'") {
 		result = applyCurlySingleQuotes(result)
 	}
 	return result

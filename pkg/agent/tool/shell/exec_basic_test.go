@@ -164,3 +164,16 @@ func TestSanitizeOutput(t *testing.T) {
 		t.Fatalf("sanitized output = %q", got)
 	}
 }
+
+func TestSanitizeOutputKeepsLastNonEmptySegment(t *testing.T) {
+	for in, want := range map[string]string{
+		"progress\r\r": "progress",
+		"a\rb\r\r\r": "b",
+		"\r\r":        "",
+		"x\ry\nz\r":   "y\nz",
+	} {
+		if got := sanitizeOutput(in); got != want {
+			t.Errorf("sanitizeOutput(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

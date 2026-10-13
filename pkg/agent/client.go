@@ -130,6 +130,33 @@ type request struct {
 	outputSchema  map[string]any
 	requireFinish bool
 	disableTools  bool
+
+	cachedToolsPtr *tool.Tool
+	cachedToolsLen int
+	cachedToolsSet bool
+	cachedParams   []responses.ToolUnionParam
+	cachedToolsRaw []byte
+}
+
+func (r *request) compiledTools() []responses.ToolUnionParam {
+	var ptr *tool.Tool
+	if len(r.tools) > 0 {
+		ptr = &r.tools[0]
+	}
+	if r.cachedToolsSet && r.cachedToolsPtr == ptr && r.cachedToolsLen == len(r.tools) {
+		return r.cachedParams
+	}
+	r.cachedParams = toTools(r.tools)
+	r.cachedToolsRaw, _ = json.Marshal(r.cachedParams)
+	r.cachedToolsPtr = ptr
+	r.cachedToolsLen = len(r.tools)
+	r.cachedToolsSet = true
+	return r.cachedParams
+}
+
+func (r *request) encodedTools() []byte {
+	_ = r.compiledTools()
+	return r.cachedToolsRaw
 }
 
 type response struct {
@@ -152,7 +179,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: toInput(r.messages)},
 
-		Tools:             toTools(r.tools),
+		Tools:             r.compiledTools(),
 		ParallelToolCalls: openai.Bool(true),
 
 		// Encrypted reasoning lets the model resume its chain of thought across

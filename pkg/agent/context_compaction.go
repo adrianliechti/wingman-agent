@@ -154,8 +154,9 @@ func (a *Agent) compactMessages(ctx context.Context, req *request) error {
 		}
 		// A latest input inside the window is already verbatim.
 		guaranteeLatest := lastVisibleUserIndex(messages) < start
+		minCheckpointTokens := messageTokens(a.checkpointMessage("", len(window) > 0))
 
-		retained, err := compactionUserMessages(head, remaining, guaranteeLatest)
+		retained, err := compactionUserMessages(head, remaining-minCheckpointTokens, guaranteeLatest)
 		kept := len(retained) + len(window)
 		if guidance != nil && !guidanceInWindow {
 			kept++

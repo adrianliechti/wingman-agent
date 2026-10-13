@@ -51,7 +51,7 @@ type contextUsageAnchor struct {
 }
 
 func requestPrefix(req *request) ([]byte, int) {
-	tools, _ := json.Marshal(toTools(req.tools))
+	tools := req.encodedTools()
 	schema, _ := json.Marshal(req.outputSchema)
 	prefix, _ := json.Marshal([]string{req.model, req.effort, req.instructions, string(tools), string(schema)})
 	return prefix, estimateTokens(len(req.instructions) + len(tools) + len(schema))

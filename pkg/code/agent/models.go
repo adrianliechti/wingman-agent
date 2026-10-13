@@ -156,7 +156,7 @@ func (a *Agent) SetModel(_ context.Context, sessionID, id string) error {
 		s.modelID = id
 		s.effort = &effort
 	}
-	return nil
+	return a.saveSessionSettingsLocked(s)
 }
 
 func (a *Agent) FetchModels(ctx context.Context) {
@@ -237,6 +237,7 @@ func (a *Agent) SetEffort(_ context.Context, sessionID, value string) error {
 	if s != nil {
 		s.effort = &value
 	}
+	err := a.saveSessionSettingsLocked(s)
 	a.modelMu.Unlock()
-	return nil
+	return err
 }

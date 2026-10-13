@@ -273,8 +273,7 @@ func GrepTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 				}
 
 				if outputMode == "files_with_matches" {
-					matches := searchFileWithContext(fsys, searchPathFS, reportPath, re, 0, 0, 1, multiline, true)
-					if len(matches) == 0 {
+					if !fileHasMatch(fsys, searchPathFS, re, multiline) {
 						return tool.Text("No files found"), nil
 					}
 					if resultOffset > 0 {
@@ -338,8 +337,7 @@ func GrepTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 				display := target.ReportPath(path)
 
 				if outputMode == "files_with_matches" {
-					matches := searchFileWithContext(fsys, path, display, re, 0, 0, 1, multiline, true)
-					if len(matches) > 0 {
+					if fileHasMatch(fsys, path, re, multiline) {
 						fileMatches = append(fileMatches, fileMatch{path: display, modTime: entryModTime(d)})
 					}
 					return nil
@@ -559,6 +557,40 @@ func openTextFile(fsys fs.FS, path string) (io.ReadCloser, bool, error) {
 	}{io.MultiReader(bytes.NewReader(peek[:n]), f), f}, false, nil
 }
 
+func fileHasMatch(fsys fs.FS, path string, re *regexp.Regexp, multiline bool) bool {
+	rc, isBinary, err := openTextFile(fsys, path)
+	if err != nil || isBinary {
+		return false
+	}
+	defer rc.Close()
+
+	scanner := bufio.NewScanner(rc)
+	scanner.Buffer(make([]byte, 0, DefaultScanBufSize), MaxScanBufSize)
+
+	if multiline {
+		var b strings.Builder
+		first := true
+		for scanner.Scan() {
+			if !first {
+				b.WriteByte('\n')
+			}
+			first = false
+			b.Write(scanner.Bytes())
+		}
+		if err := scanner.Err(); err != nil && !errors.Is(err, bufio.ErrTooLong) {
+			return false
+		}
+		return re.MatchString(b.String())
+	}
+
+	for scanner.Scan() {
+		if re.Match(scanner.Bytes()) {
+			return true
+		}
+	}
+	return false
+}
+
 func countFileMatches(fsys fs.FS, path string, re *regexp.Regexp, multiline bool) int {
 	rc, isBinary, err := openTextFile(fsys, path)
 	if err != nil || isBinary {
@@ -740,12 +772,14 @@ func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, onFile func(pat
 type gitignoreCache struct {
 	fsys     fs.FS
 	patterns map[string][]gitignore.Pattern
+	matchers map[string]gitignore.Matcher
 }
 
 func newGitignoreCache(fsys fs.FS) *gitignoreCache {
 	return &gitignoreCache{
 		fsys:     fsys,
 		patterns: make(map[string][]gitignore.Pattern),
+		matchers: make(map[string]gitignore.Matcher),
 	}
 }
 
@@ -755,12 +789,26 @@ func (c *gitignoreCache) matches(path string, isDir bool) bool {
 		dir = pathpkg.Dir(dir)
 	}
 
-	patterns := c.patternsFor(dir)
-	if len(patterns) == 0 {
+	matcher := c.matcherFor(dir)
+	if matcher == nil {
 		return false
 	}
 
-	return gitignore.NewMatcher(patterns).Match(strings.Split(path, "/"), isDir)
+	return matcher.Match(strings.Split(path, "/"), isDir)
+}
+
+func (c *gitignoreCache) matcherFor(dir string) gitignore.Matcher {
+	if cached, ok := c.matchers[dir]; ok {
+		return cached
+	}
+	patterns := c.patternsFor(dir)
+	if len(patterns) == 0 {
+		c.matchers[dir] = nil
+		return nil
+	}
+	m := gitignore.NewMatcher(patterns)
+	c.matchers[dir] = m
+	return m
 }
 
 func (c *gitignoreCache) patternsFor(dir string) []gitignore.Pattern {
@@ -800,6 +848,35 @@ func searchFileWithContext(fsys fs.FS, path, displayPath string, re *regexp.Rege
 
 	buf := make([]byte, 0, DefaultScanBufSize)
 	scanner.Buffer(buf, MaxScanBufSize)
+
+	if !multiline && beforeContext == 0 && afterContext == 0 {
+		var results []string
+		lineNum := 0
+		for scanner.Scan() {
+			lineNum++
+			line := scanner.Bytes()
+			if !re.Match(line) {
+				continue
+			}
+			lineContent := string(line)
+			if len(lineContent) > MaxLineDisplayLength {
+				lineContent = lineContent[:MaxLineDisplayLength-3] + "..."
+			}
+			results = append(results, formatGrepLine(displayPath, lineNum, true, lineContent, showLineNumbers))
+			if len(results) >= limit {
+				return results
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			if !errors.Is(err, bufio.ErrTooLong) {
+				return nil
+			}
+			if len(results) > 0 && len(results) < limit {
+				results = append(results, formatGrepLine(displayPath, lineNum+1, true, fmt.Sprintf("line exceeds %dKB scan limit; remainder of file skipped", MaxScanBufSize/1024), showLineNumbers))
+			}
+		}
+		return results
+	}
 
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())

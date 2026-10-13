@@ -75,3 +75,35 @@ func TestToolPanicBecomesToolErrorNotProcessCrash(t *testing.T) {
 		})
 	}
 }
+
+func TestDuplicateToolCallIDReportsErrorWhenLeaderPanics(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	tl := tool.Tool{
+		Name: "boom",
+		Effect: func(map[string]any) tool.Effect {
+			close(started)
+			<-release
+			panic("effect exploded")
+		},
+		Execute: func(context.Context, map[string]any) (tool.Result, error) {
+			return tool.Text("ok"), nil
+		},
+	}
+	a := &Agent{Config: &Config{ToolTimeout: -1}}
+	tc := ToolCall{ID: "dup-panic", Name: "boom", Args: `{}`}
+
+	results := make(chan tool.Result, 2)
+	go func() { results <- a.runSingleToolCall(context.Background(), tc, []tool.Tool{tl}) }()
+	<-started
+	go func() { results <- a.runSingleToolCall(context.Background(), tc, []tool.Tool{tl}) }()
+	close(release)
+
+	first, second := <-results, <-results
+	if !first.IsError || !strings.Contains(first.Content, "panicked") {
+		t.Fatalf("leader result = %+v, want panic error", first)
+	}
+	if !second.IsError || !strings.Contains(second.Content, "panicked") {
+		t.Fatalf("duplicate waiter result = %+v, want panic error", second)
+	}
+}

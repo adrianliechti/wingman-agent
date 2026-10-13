@@ -769,16 +769,34 @@ func (a *Agent) processToolCallsParallel(ctx context.Context, calls []ToolCall, 
 	}
 
 	resultMessages := make([]Message, len(calls))
-	var unrecorded []Message
+	var batchEvents []RuntimeEvent
+	allDeferred := len(calls) > 0
 	for i, tc := range calls {
-		outcomes[i] = a.commitDeferredToolOutcome(tc, outcomes[i])
-		resultMessages[i] = toolResultMessage(tc, outcomes[i].result)
-		if !outcomes[i].recorded {
-			unrecorded = append(unrecorded, resultMessages[i])
+		if outcomes[i].deferredCommit == nil {
+			allDeferred = false
+			break
 		}
+		commit := outcomes[i].deferredCommit
+		batchEvents = append(batchEvents, a.toolOutcomeEvents(tc, outcomes[i].result, commit.operationID, commit.turnID, commit.effect)...)
+		resultMessages[i] = toolResultMessage(tc, outcomes[i].result)
 	}
-	if err := a.appendMessages(unrecorded...); err != nil {
-		return err
+	if allDeferred && a.recordEvents(batchEvents...) == nil {
+		for i := range outcomes {
+			outcomes[i].recorded = true
+			outcomes[i].deferredCommit = nil
+		}
+	} else {
+		var unrecorded []Message
+		for i, tc := range calls {
+			outcomes[i] = a.commitDeferredToolOutcome(tc, outcomes[i])
+			resultMessages[i] = toolResultMessage(tc, outcomes[i].result)
+			if !outcomes[i].recorded {
+				unrecorded = append(unrecorded, resultMessages[i])
+			}
+		}
+		if err := a.appendMessages(unrecorded...); err != nil {
+			return err
+		}
 	}
 	for _, i := range completionOrder {
 		if !yield(resultMessages[i], nil) {
@@ -866,7 +884,7 @@ func (a *Agent) runSingleToolCallOutcomeMode(ctx context.Context, tc ToolCall, t
 	return a.toolCallOutcome(ctx, tc, tools, deferCommit)
 }
 
-func (a *Agent) toolCallOutcome(ctx context.Context, tc ToolCall, tools []tool.Tool, deferCommit bool) toolCallOutcome {
+func (a *Agent) toolCallOutcome(ctx context.Context, tc ToolCall, tools []tool.Tool, deferCommit bool) (outcome toolCallOutcome) {
 	if tc.ID == "" {
 		return a.executeToolOperation(ctx, tc, tools, deferCommit)
 	}
@@ -897,12 +915,18 @@ func (a *Agent) toolCallOutcome(ctx context.Context, tc ToolCall, tools []tool.T
 	a.toolRuns[tc.ID] = run
 	a.toolRunsMu.Unlock()
 
-	outcome := a.executeToolOperation(ctx, tc, tools, deferCommit)
-	a.toolRunsMu.Lock()
-	run.result = cloneToolResult(outcome.result)
-	close(run.done)
-	a.toolRunsMu.Unlock()
-	return outcome
+	// A panic must be cached as the error it becomes; otherwise a duplicate
+	// call would replay the zero-value (successful) result.
+	defer func() {
+		if r := recover(); r != nil {
+			outcome = toolCallOutcome{result: tool.Error(fmt.Sprintf("error: tool %s panicked: %v", tc.Name, r))}
+		}
+		a.toolRunsMu.Lock()
+		run.result = cloneToolResult(outcome.result)
+		close(run.done)
+		a.toolRunsMu.Unlock()
+	}()
+	return a.executeToolOperation(ctx, tc, tools, deferCommit)
 }
 
 func (a *Agent) executeToolOperation(ctx context.Context, tc ToolCall, tools []tool.Tool, deferCommit bool) toolCallOutcome {
@@ -984,7 +1008,7 @@ func (a *Agent) commitDeferredToolOutcome(tc ToolCall, outcome toolCallOutcome) 
 	return a.commitToolOutcome(tc, outcome.result, commit.operationID, commit.turnID, commit.effect)
 }
 
-func (a *Agent) commitToolOutcome(tc ToolCall, result tool.Result, operationID, turnID string, effect tool.Effect) toolCallOutcome {
+func (a *Agent) toolOutcomeEvents(tc ToolCall, result tool.Result, operationID, turnID string, effect tool.Effect) []RuntimeEvent {
 	status := RuntimeCompleted
 	if result.IsError {
 		status = RuntimeFailed
@@ -997,13 +1021,17 @@ func (a *Agent) commitToolOutcome(tc ToolCall, result tool.Result, operationID, 
 		terminal.Error = result.Content
 	}
 	resultMessage := toolResultMessage(tc, result)
-	if err := a.recordEvents(append(messageEvents(resultMessage), RuntimeEvent{
+	return append(messageEvents(resultMessage), RuntimeEvent{
 		Type:        EventToolTerminal,
 		TurnID:      turnID,
 		OperationID: operationID,
 		Tool:        &RuntimeTool{CallID: tc.ID, Name: tc.Name, Args: tc.Args, Effect: string(effect), IsError: result.IsError},
 		Terminal:    terminal,
-	})...); err != nil {
+	})
+}
+
+func (a *Agent) commitToolOutcome(tc ToolCall, result tool.Result, operationID, turnID string, effect tool.Effect) toolCallOutcome {
+	if err := a.recordEvents(a.toolOutcomeEvents(tc, result, operationID, turnID, effect)...); err != nil {
 		return toolCallOutcome{result: tool.Error(fmt.Sprintf("error: tool finished but its result and terminal fact could not be persisted: %v", err))}
 	}
 	return toolCallOutcome{result: result, recorded: true}
