@@ -127,6 +127,7 @@ type cliEnvelope struct {
 	ParentAgentID      string          `json:"parent_agent_id,omitempty"`
 	TaskID             string          `json:"task_id,omitempty"`
 	TaskType           string          `json:"task_type,omitempty"`
+	IsBackgrounded     bool            `json:"is_backgrounded,omitempty"`
 	ToolUseID          string          `json:"tool_use_id,omitempty"`
 	ToolName           string          `json:"tool_name,omitempty"`
 	ElapsedTimeSeconds float64         `json:"elapsed_time_seconds,omitempty"`
@@ -145,11 +146,15 @@ type cliEnvelope struct {
 	PluginErrors    []cliLoadError   `json:"plugin_errors,omitempty"`
 
 	// rate_limit_event
-	ResetsAt      any    `json:"resetsAt,omitempty"`
-	RateLimitType string `json:"rateLimitType,omitempty"`
-	Patch         struct {
-		Status string `json:"status,omitempty"`
-	} `json:"patch"`
+	ResetsAt      any          `json:"resetsAt,omitempty"`
+	RateLimitType string       `json:"rateLimitType,omitempty"`
+	Patch         cliTaskPatch `json:"patch"`
+}
+
+// cliTaskPatch is the changed state carried by a task_updated event.
+type cliTaskPatch struct {
+	Status         string `json:"status,omitempty"`
+	IsBackgrounded *bool  `json:"is_backgrounded,omitempty"`
 }
 
 type cliNamedStatus struct {

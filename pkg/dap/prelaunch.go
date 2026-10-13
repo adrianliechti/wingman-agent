@@ -25,8 +25,7 @@ const (
 type debugProcess struct {
 	cmd      *exec.Cmd
 	done     chan struct{}
-	mu       sync.Mutex
-	err      error
+	err      error // published by closing done
 	stopping atomic.Bool
 	stopOnce sync.Once
 }
@@ -57,10 +56,7 @@ func startDebugProcess(plan Plan, output func(string, string)) (*debugProcess, e
 	}
 	process := &debugProcess{cmd: cmd, done: make(chan struct{})}
 	go func() {
-		err := cmd.Wait()
-		process.mu.Lock()
-		process.err = err
-		process.mu.Unlock()
+		process.err = cmd.Wait()
 		close(process.done)
 	}()
 	return process, nil
@@ -137,9 +133,7 @@ func (process *debugProcess) waitExit(ctx context.Context, title string) error {
 	defer cancel()
 	select {
 	case <-process.done:
-		process.mu.Lock()
 		err := process.err
-		process.mu.Unlock()
 		if err != nil {
 			return fmt.Errorf("%s failed: %w", title, err)
 		}
@@ -153,8 +147,7 @@ func (process *debugProcess) waitExit(ctx context.Context, title string) error {
 }
 
 func (process *debugProcess) waitError() error {
-	process.mu.Lock()
-	defer process.mu.Unlock()
+	<-process.done
 	if process.err == nil {
 		return errors.New("process exited")
 	}

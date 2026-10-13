@@ -26,12 +26,17 @@ type eventDispatcher struct {
 	agentPhases     map[string]string
 	lastGoal        string
 
-	mu            sync.Mutex
-	commandNames  map[string]string
+	commandNamesMu sync.Mutex
+	commandNames   map[string]string
+
+	// The prompt event loop owns the remaining state.
 	failure       error
 	lastError     *turnError
 	usage         *acp.Usage
 	completedPlan *completedPlan
+
+	// tokens accumulates usage across every backend turn of one prompt.
+	tokens *promptTokenUsage
 }
 
 type completedPlan struct {
@@ -57,14 +62,14 @@ func newEventDispatcher(ctx context.Context, conn *acp.AgentSideConnection, sid 
 
 // commandName is read by approval handlers, which run outside the event loop.
 func (d *eventDispatcher) commandName(itemID string) string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.commandNamesMu.Lock()
+	defer d.commandNamesMu.Unlock()
 	return d.commandNames[itemID]
 }
 
 func (d *eventDispatcher) setCommandName(itemID, name string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.commandNamesMu.Lock()
+	defer d.commandNamesMu.Unlock()
 	if name == "" {
 		delete(d.commandNames, itemID)
 	} else {
@@ -73,43 +78,44 @@ func (d *eventDispatcher) setCommandName(itemID, name string) {
 }
 
 func (d *eventDispatcher) setFailure(err error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.failure == nil {
 		d.failure = err
 	}
 }
 
 func (d *eventDispatcher) setUsage(u *acp.Usage) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.usage = u
 }
 
 func (d *eventDispatcher) getUsage() *acp.Usage {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	if d.tokens != nil {
+		if u := d.tokens.usage(); u != nil {
+			return u
+		}
+	}
 	return d.usage
 }
 
+// nonModelOutputItems are thread items Codex records without a model request.
+var nonModelOutputItems = map[string]bool{
+	"userMessage":       true,
+	"hookPrompt":        true,
+	"enteredReviewMode": true,
+	"subAgentActivity":  true,
+}
+
 func (d *eventDispatcher) getFailure() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	return d.failure
 }
 
 func (d *eventDispatcher) takeCompletedPlan() *completedPlan {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	plan := d.completedPlan
 	d.completedPlan = nil
 	return plan
 }
 
 func (d *eventDispatcher) setCompletedPlan(itemID, text string) {
-	d.mu.Lock()
 	d.completedPlan = &completedPlan{itemID: itemID, text: text}
-	d.mu.Unlock()
 }
 
 // isFatalTurnError reports whether an `error` notification without willRetry ends the turn.
@@ -390,6 +396,11 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 	id, kind, ok := peekItem(env.Item)
 	if !ok {
 		return
+	}
+	if d.tokens != nil && !nonModelOutputItems[kind] {
+		// Compaction also makes model requests, but emits no ordinary model
+		// output. Restored thread totals supply its historical baseline.
+		d.tokens.observeModelWork()
 	}
 
 	switch kind {
@@ -676,33 +687,16 @@ func joinReasoning(summary, content []string) string {
 }
 
 func (d *eventDispatcher) handleTokenUsage(params json.RawMessage) {
-	var p struct {
-		TokenUsage struct {
-			Last struct {
-				TotalTokens           int `json:"totalTokens"`
-				InputTokens           int `json:"inputTokens"`
-				CachedInputTokens     int `json:"cachedInputTokens"`
-				OutputTokens          int `json:"outputTokens"`
-				ReasoningOutputTokens int `json:"reasoningOutputTokens"`
-			} `json:"last"`
-			ModelContextWindow int `json:"modelContextWindow"`
-		} `json:"tokenUsage"`
-	}
+	var p tokenUsageUpdate
 	if json.Unmarshal(params, &p) != nil {
 		return
 	}
 	last := p.TokenUsage.Last
-	cachedRead := last.CachedInputTokens
-	output := max(0, last.OutputTokens)
-	reasoning := min(max(0, last.ReasoningOutputTokens), output)
-	d.setUsage(&acp.Usage{
-		TotalTokens: last.TotalTokens,
-		InputTokens: max(0, last.InputTokens-last.CachedInputTokens),
-		// Codex output includes reasoning; Wingman's ACP fields are separate.
-		OutputTokens:     output - reasoning,
-		CachedReadTokens: &cachedRead,
-		ThoughtTokens:    &reasoning,
-	})
+	if d.tokens != nil && p.TokenUsage.Total != nil {
+		d.tokens.observe(*p.TokenUsage.Total, last)
+	} else {
+		d.setUsage(last.acpUsage())
+	}
 	if size := p.TokenUsage.ModelContextWindow; size > 0 {
 		d.update(acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{
 			SessionUpdate: "usage_update",

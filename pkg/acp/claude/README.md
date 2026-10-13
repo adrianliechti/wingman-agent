@@ -22,6 +22,26 @@ package.
 
 ## Upstream review
 
+The 2026-10-13 review compared Claude ACP at `df21b3f` (v0.90.0, Claude Agent
+SDK 0.3.296 for Claude Code 2.1.296) and classified all 39 commits since
+`6a162ba`. A cancel now ends every tool call the turn left without a result
+(`53df1c7`): Claude Code writes a subagent's interrupted result only to the
+subagent's transcript, and a dead or force-cancelled process reports nothing.
+Remaining calls are reported `failed`, except calls of a live background
+subagent while the process runs. Permission-denied calls leave the open-call
+tracker immediately, so cancellation preserves their failure reason and does
+not finalize them twice. Terminal IDs remain known so delayed assistant blocks
+cannot reopen a cancelled or completed call. Cancellation also checks process
+death and session closure before preserving background calls, including when a
+result and EOF arrive together. The reports use a context that survives
+`session/cancel`, which also cancels the prompt request's context. A transition
+into `running` clears idle debt left by results that shared one idle (adjacent
+to `b007ac7`), so a later abandoned turn still fails instead of hanging.
+`upstream_review_test.go` covers both, and `TestLiveCancelEndsEveryToolCall`
+cancels a running root and subagent Bash call through the installed CLI. Bash
+`command_description` and Grep `file_path` aliases from newer CLIs are not yet
+read; v2, subagent-session, and AIR extension changes need no wire change here.
+
 The 2026-10-08 review compared Claude ACP at `6a162ba`, including the folded
 prompt fix in `390b0b9`. Results that explicitly name the active prompt still
 settle it even when their origin is a background task. Autonomous results
@@ -77,4 +97,12 @@ Run from the repository root:
 
 ```sh
 CLAUDE_ACP_LIVE=1 go test ./pkg/acp/claude -run '^TestLiveExitPlanModeEnablesBypass$' -count=1 -v -timeout=4m
+```
+
+`TestLiveCancelEndsEveryToolCall` cancels a running root Bash call and a
+foreground subagent's Bash call, preferring a Haiku model when the CLI offers
+one, and requires every tool call to end exactly once:
+
+```sh
+CLAUDE_ACP_LIVE=1 go test ./pkg/acp/claude -run '^TestLiveCancelEndsEveryToolCall$' -count=1 -v -timeout=8m
 ```

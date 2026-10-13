@@ -104,9 +104,7 @@ func TestClaudeSystemTracksSubagentParents(t *testing.T) {
 	if got := p.parentForAgent("agent-1"); got != "parent-1" {
 		t.Fatalf("parent = %q", got)
 	}
-	p.handleSystem(context.Background(), nil, "s", cliEnvelope{Type: "system", Subtype: "task_updated", TaskID: "agent-1", Patch: struct {
-		Status string `json:"status,omitempty"`
-	}{Status: "completed"}})
+	p.handleSystem(context.Background(), nil, "s", cliEnvelope{Type: "system", Subtype: "task_updated", TaskID: "agent-1", Patch: cliTaskPatch{Status: "completed"}})
 	if got := p.parentForAgent("agent-1"); got != "" {
 		t.Fatalf("parent after completion = %q", got)
 	}
@@ -277,13 +275,13 @@ func TestToolCallTrackerEmitsStartOnceThenRefines(t *testing.T) {
 	start := func() error { calls = append(calls, "start"); return nil }
 	refine := func() error { calls = append(calls, "refine"); return nil }
 
-	if err := tracker.emit("tool-1", start, refine); err != nil {
+	if err := tracker.emit("tool-1", "Bash", "", start, refine); err != nil {
 		t.Fatal(err)
 	}
-	if err := tracker.emit("tool-1", start, refine); err != nil {
+	if err := tracker.emit("tool-1", "Bash", "", start, refine); err != nil {
 		t.Fatal(err)
 	}
-	if err := tracker.emit("tool-2", start, refine); err != nil {
+	if err := tracker.emit("tool-2", "Bash", "", start, refine); err != nil {
 		t.Fatal(err)
 	}
 

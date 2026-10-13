@@ -80,6 +80,7 @@ func (c *Config) Generate(ctx context.Context, opts GenerateOptions) (GenerateRe
 
 	resp, err := c.client.Responses.New(ctx, params)
 	if err != nil {
+		err = withProviderDetails(err)
 		operation.End(telemetry.InferenceResult{Outcome: telemetryOutcome(err)})
 		return GenerateResult{}, err
 	}

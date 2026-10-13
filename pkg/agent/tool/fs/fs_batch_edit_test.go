@@ -17,16 +17,16 @@ func TestCancelledBatchEditDoesNotWriteAfterWaitingForTransaction(t *testing.T) 
 	defer root.Close()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	fileTransactionMu.Lock()
+	fileEditMu.Lock()
 	done := make(chan error, 1)
 	go func() {
 		_, err := batchEditTool(root, nil).Execute(ctx, map[string]any{
-			"file_path": "cancelled.txt", "old_string": "", "new_string": "must not be written",
+			"edits": []any{map[string]any{"file_path": "cancelled.txt", "old_string": "", "new_string": "must not be written"}},
 		})
 		done <- err
 	}()
 	cancel()
-	fileTransactionMu.Unlock()
+	fileEditMu.Unlock()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled edit returned %v", err)
 	}

@@ -80,11 +80,12 @@ func (e *Engine) SearchContent(ctx context.Context, opts ContentSearchOpts) (Con
 		return ContentSearchResult{}, err
 	}
 	e.mu.RLock()
-	files := make([]string, 0, len(e.files))
-	for file := range e.files {
+	indexedFiles := e.files
+	e.mu.RUnlock()
+	files := make([]string, 0, len(indexedFiles))
+	for file := range indexedFiles {
 		files = append(files, file)
 	}
-	e.mu.RUnlock()
 	sort.Strings(files)
 
 	byNode := make(map[string]*ContentHit)

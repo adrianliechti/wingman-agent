@@ -125,7 +125,7 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 				})
 			}
 
-			if err := commitFileTransaction(ctx, root, tx); err != nil {
+			if err := commitFileTransactionLocked(ctx, root, tx); err != nil {
 				return tool.Result{}, err
 			}
 			for _, change := range tx.changes {

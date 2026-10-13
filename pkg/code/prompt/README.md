@@ -236,3 +236,35 @@ separate Claude Code 2.1.294 check selected the `haiku` alias, reported the
 resolved model as `claude-haiku-5-5`, read a temporary fixture with `Read`, and
 returned the expected calculation. These establish functional compatibility;
 they are not a matched prompt-quality or latency benchmark.
+
+## Gemini review on October 13
+
+`models/gemini/mode_agent.txt` adapts gemini-cli's system prompt from
+`packages/core/src/prompts/snippets.ts` at commit
+`29315e53d0c2e9b78f301f3c24db235b0f3fa597` (2026-10-13, Apache-2.0). It replaces
+an earlier rewrite of VS Code Copilot Chat's `geminiPrompts.tsx`. Every Gemini
+model, including Gemini 4 Argon, uses this family prompt.
+
+The adaptation follows gemini-cli's modern-model composition for an interactive
+session in Default approval mode, with grep, glob, sub-agents, and a git
+repository available, and with topic narration, the task tracker, the plan-mode
+tool, and sandboxing disabled. It keeps Core Mandates, Context Efficiency,
+Engineering Standards, sub-agent delegation, hook-context handling, Primary
+Workflows, Operational Guidelines, and the Git rules. Tools and parameters are
+translated to Wingman's contracts: `explore` stands in for
+`codebase_investigator`, batched `edit` calls replace the one-edit-per-file
+rule, and dependent calls wait for a later turn instead of `wait_for_previous`.
+
+Product identity, the mode banner, `GEMINI.md` memory routing, skill activation,
+plan, YOLO, and non-interactive policies are omitted; the shared Memory, Skills,
+plan, and unattended templates own those. Sandbox recovery and `/help`/`/bug`
+are omitted. Wingman's software-security guidance is retained.
+
+Google's Gemini 4 Argon model page and prompting guide (both updated 2026-10-13)
+have no Argon-specific system-instruction guidance. They state that Gemini 4
+ignores `temperature`, `top_p`, and `top_k`; this repository does not set them.
+The AI Studio developer guide renders client-side and could not be read here.
+
+gemini-cli requires SWE-bench runs before changing its Context Efficiency
+section. The focused prompt and agent suites check routing and rendering only;
+use matched `bench/acpflow` runs before claiming behavioral improvements.

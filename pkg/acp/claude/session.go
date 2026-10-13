@@ -153,14 +153,18 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 		_ = p.out.writeJSON(interruptRequest())
 		select {
 		case r := <-p.results:
+			p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, true)
 			return acp.StopReasonCancelled, r.usage, nil
 		case <-p.dead:
 		case <-time.After(5 * time.Second):
 			s.dropProc(p)
 		}
+		// No further results can arrive from a dead or dropped process.
+		p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, false)
 		return acp.StopReasonCancelled, nil, nil
 	case r := <-p.results:
 		if turnCtx.Err() != nil {
+			p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, true)
 			return acp.StopReasonCancelled, r.usage, nil
 		}
 		if r.err != nil {
@@ -171,6 +175,7 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 		return r.stop, r.usage, nil
 	case <-p.dead:
 		if turnCtx.Err() != nil {
+			p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, false)
 			return acp.StopReasonCancelled, nil, nil
 		}
 		// Preserve a result already read immediately before process EOF.
@@ -326,8 +331,10 @@ type claudeProc struct {
 	deliveredText       bool
 	deliveredCompaction bool
 	pendingResultIdles  int
+	sessionState        string
 	subagentMu          sync.Mutex
 	subagentParents     map[string]string
+	backgroundTasks     map[string]bool
 	results             chan turnResult
 	dead                chan struct{}
 	shutdownOnce        sync.Once
@@ -648,6 +655,16 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		if env.ParentToolUseID != "" || env.ParentAgentID != "" {
 			return
 		}
+		p.turnMu.Lock()
+		// Entering running ends the idle period before it: every idle the CLI
+		// owed earlier results has been sent. CLI 2.1.270+ reports one idle for
+		// several results after an interrupt or while background agents run, so
+		// leftover debt would otherwise absorb a later abandoned turn's idle.
+		if env.State == "running" && p.sessionState != "running" {
+			p.pendingResultIdles = 0
+		}
+		p.sessionState = env.State
+		p.turnMu.Unlock()
 		if env.State == "idle" {
 			p.turnMu.Lock()
 			skipped := p.pendingResultIdles > 0
@@ -745,7 +762,7 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		if !p.emitted.has(toolCallID) {
 			toolCallID = env.ParentToolUseID
 		}
-		if p.emitted.has(toolCallID) {
+		if p.emitted.complete(toolCallID) {
 			msg := "Permission denied"
 			var detail string
 			if json.Unmarshal(env.Message, &detail) == nil && detail != "" {
@@ -761,6 +778,7 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		if env.TaskID != "" && env.ToolUseID != "" && p.tools[env.ToolUseID] != "Monitor" && env.TaskType != "local_monitor" {
 			p.subagentMu.Lock()
 			p.subagentParents[env.TaskID] = env.ToolUseID
+			p.setTaskBackgroundedLocked(env.TaskID, env.IsBackgrounded)
 			p.subagentMu.Unlock()
 		}
 	case "task_progress":
@@ -780,13 +798,67 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		}
 		p.subagentMu.Lock()
 		delete(p.subagentParents, env.TaskID)
+		delete(p.backgroundTasks, env.TaskID)
 		p.subagentMu.Unlock()
 	case "task_updated":
+		p.subagentMu.Lock()
 		if env.Patch.Status == "completed" || env.Patch.Status == "failed" || env.Patch.Status == "killed" {
-			p.subagentMu.Lock()
 			delete(p.subagentParents, env.TaskID)
-			p.subagentMu.Unlock()
+			delete(p.backgroundTasks, env.TaskID)
+		} else if env.Patch.IsBackgrounded != nil {
+			p.setTaskBackgroundedLocked(env.TaskID, *env.Patch.IsBackgrounded)
 		}
+		p.subagentMu.Unlock()
+	}
+}
+
+func (p *claudeProc) setTaskBackgroundedLocked(taskID string, backgrounded bool) {
+	if !backgrounded {
+		delete(p.backgroundTasks, taskID)
+		return
+	}
+	if p.backgroundTasks == nil {
+		p.backgroundTasks = map[string]bool{}
+	}
+	p.backgroundTasks[taskID] = true
+}
+
+// runsInBackground reports whether a live background subagent was started by
+// the Agent call agentToolUseID. A cancel leaves such a subagent running.
+func (p *claudeProc) runsInBackground(agentToolUseID string) bool {
+	p.subagentMu.Lock()
+	defer p.subagentMu.Unlock()
+	for taskID, parent := range p.subagentParents {
+		if parent == agentToolUseID && p.backgroundTasks[taskID] {
+			return true
+		}
+	}
+	return false
+}
+
+// closeCancelledToolCalls ends the tool calls a cancelled turn left without a
+// result. The interrupt reports root tools' results in the stream, but a
+// subagent's interrupted result is written only to its own transcript, and a
+// dead or dropped process reports nothing. While the process lives, calls of
+// a background subagent stay open because that subagent keeps running.
+func (p *claudeProc) closeCancelledToolCalls(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, keepBackground bool) {
+	// A result can win the select even when EOF is already ready. Session
+	// close also makes the process unavailable before its reader reports EOF.
+	keepBackground = keepBackground && !p.isDead() && (p.session == nil || !p.session.isClosed())
+	// session/cancel also cancels the prompt request's context. These reports
+	// belong to that turn and must still reach the client before its response;
+	// Notify bounds each write.
+	ctx = context.WithoutCancel(ctx)
+	closed := p.emitted.closeOpen(func(call openToolCall) bool {
+		return keepBackground && call.parentToolUseID != "" && p.runsInBackground(call.parentToolUseID)
+	})
+	for _, call := range closed {
+		u := acp.UpdateToolCall(acp.ToolCallId(call.id),
+			acp.WithUpdateStatus(acp.ToolCallStatusFailed),
+			acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock("The turn was cancelled before this tool call returned a result."))}),
+		)
+		withClaudeToolMeta(&u, call.name, call.parentToolUseID)
+		_ = acpcommon.Notify(ctx, conn, sid, u)
 	}
 }
 

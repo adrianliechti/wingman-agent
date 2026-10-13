@@ -21,6 +21,7 @@ type codexClient struct {
 	mu                   sync.Mutex
 	handlers             map[string]*threadHandlers
 	onGlobalNotification notificationHandler
+	tokenTotals          map[string]tokenBreakdown
 
 	mcpStartupVersion uint64
 	mcpStartup        map[mcpStartupKey]mcpStartupState
@@ -49,7 +50,8 @@ type threadHandlers struct {
 func newCodexClient(rpc *rpcClient) *codexClient {
 	c := &codexClient{
 		rpc: rpc, handlers: make(map[string]*threadHandlers),
-		mcpStartup: make(map[mcpStartupKey]mcpStartupState), mcpStartupChanged: make(chan struct{}),
+		tokenTotals: make(map[string]tokenBreakdown),
+		mcpStartup:  make(map[mcpStartupKey]mcpStartupState), mcpStartupChanged: make(chan struct{}),
 	}
 	rpc.onNotification = c.dispatchNotification
 	rpc.onRequest = c.dispatchRequest
@@ -101,6 +103,12 @@ func (c *codexClient) dispatchNotification(method string, params json.RawMessage
 		ThreadID string `json:"threadId"`
 	}
 	_ = json.Unmarshal(params, &probe)
+	if probe.ThreadID != "" && method == "thread/tokenUsage/updated" {
+		var p tokenUsageUpdate
+		if json.Unmarshal(params, &p) == nil && p.TokenUsage.Total != nil {
+			c.setThreadTokenTotal(probe.ThreadID, *p.TokenUsage.Total)
+		}
+	}
 
 	// Account- and process-scoped notifications carry no threadId; only per-thread handlers need one.
 	global, local := c.notificationHandlers(probe.ThreadID)

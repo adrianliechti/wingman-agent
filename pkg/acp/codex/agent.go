@@ -225,6 +225,8 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	}
 
 	s := a.registerSession(acp.SessionId(resp.Thread.ID), resp.Model, derefEffort(resp.ReasoningEffort), defaultCollaborationMode, additional)
+	// A new thread has used no tokens yet.
+	a.codex.setThreadTokenTotal(string(s.id), tokenBreakdown{})
 	if err := a.sendAvailableCommands(ctx, s.id); err != nil {
 		return acp.NewSessionResponse{}, err
 	}

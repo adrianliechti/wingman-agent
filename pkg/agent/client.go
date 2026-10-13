@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -70,6 +71,34 @@ type streamFailure struct {
 
 func (e *streamFailure) Error() string { return e.err.Error() }
 func (e *streamFailure) Unwrap() error { return e.err }
+
+// providerError restores the provider's code and message to an HTTP API
+// error's text. openai-go reports only the status from (*openai.Error).Error(),
+// which hides why a request failed (for example an exhausted quota).
+type providerError struct {
+	err *openai.Error
+}
+
+func (e *providerError) Error() string {
+	text := e.err.Error()
+	if e.err.Code != "" {
+		text += " (" + e.err.Code + ")"
+	}
+	if e.err.Message != "" {
+		text += ": " + e.err.Message
+	}
+	return text
+}
+
+func (e *providerError) Unwrap() error { return e.err }
+
+func withProviderDetails(err error) error {
+	apiErr, ok := errors.AsType[*openai.Error](err)
+	if !ok || apiErr != err || (apiErr.Code == "" && apiErr.Message == "") {
+		return err
+	}
+	return &providerError{err: apiErr}
+}
 
 // responseFailure preserves the machine-readable code from a terminal
 // Responses API error event. Some providers report transient failures in-band
@@ -367,7 +396,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 		if streamCtx.Err() != nil && ctx.Err() == nil {
 			err = fmt.Errorf("stream stalled: no events for %s", streamIdleTimeout)
 		}
-		return nil, &streamFailure{err: err, outputStarted: outputStarted}
+		return nil, &streamFailure{err: withProviderDetails(err), outputStarted: outputStarted}
 	}
 	if !terminalEvent {
 		return nil, &streamFailure{

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -77,6 +78,39 @@ func TestPreLaunchReadyCheckDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
+func TestPreLaunchExitErrorPublishedToConcurrentWaiters(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	process, err := startDebugProcess(Plan{
+		ProjectDir: t.TempDir(),
+		PreLaunch: &ProcessLaunch{
+			Title: "failing helper", Command: executable, WaitForExit: true,
+			Args: []string{"-test.run=^TestPreLaunchHelperProcess$", "--", "fail"},
+		},
+	}, func(string, string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Go(func() {
+			if err := process.waitExit(ctx, "failing helper"); err == nil || !strings.Contains(err.Error(), "exit status 7") {
+				t.Errorf("waitExit error = %v", err)
+				return
+			}
+			if err := process.waitError(); err == nil || !strings.Contains(err.Error(), "exit status 7") {
+				t.Errorf("waitError = %v", err)
+			}
+		})
+	}
+	workers.Wait()
+}
+
 func TestPreLaunchHelperProcess(t *testing.T) {
 	separator := -1
 	for index, arg := range os.Args {
@@ -87,6 +121,9 @@ func TestPreLaunchHelperProcess(t *testing.T) {
 	}
 	if separator < 0 || separator+1 >= len(os.Args) {
 		return
+	}
+	if os.Args[separator+1] == "fail" {
+		os.Exit(7)
 	}
 	port, err := strconv.Atoi(os.Args[separator+1])
 	if err != nil {

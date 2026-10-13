@@ -26,7 +26,7 @@ func TestVariantFor(t *testing.T) {
 	for _, id := range []string{
 		"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.1", "gpt-4o",
 		"claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-6", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
-		"gemini-3.7-flash", "gemini-3.6-flash", "glm-5.3", "glm-5.2", "kimi-k3", "minimax-m3", "grok-4.6",
+		"gemini-4-argon", "gemini-3.7-flash", "gemini-3.6-flash", "glm-5.3", "glm-5.2", "kimi-k3", "minimax-m3", "grok-4.6",
 		"qwen3.8-max", "qwen3.8", "qwen3.7-plus", "qwen3.5-plus",
 	} {
 		v := VariantFor(id)
@@ -280,6 +280,7 @@ func TestBuildInstructionsRendersModelTemplate(t *testing.T) {
 		"gpt-5.2",
 		"gpt-5.1-codex",
 		"gemini-3.6-flash",
+		"gemini-4-argon",
 		"glm-5.3",
 		"kimi-k3",
 		"minimax-m3",
@@ -428,6 +429,7 @@ func TestAgentPromptPolicy(t *testing.T) {
 		"gpt-5.2",
 		"gpt-5.1-codex",
 		"gemini-3.6-flash",
+		"gemini-4-argon",
 		"glm-5.3",
 		"kimi-k3",
 		"minimax-m3",
@@ -474,6 +476,7 @@ func TestAgentPromptsExcludeRemovedTools(t *testing.T) {
 		"gpt-5.2",
 		"gpt-5.1-codex",
 		"gemini-3.6-flash",
+		"gemini-4-argon",
 		"glm-5.3",
 		"kimi-k3",
 		"minimax-m3",
@@ -596,8 +599,44 @@ func TestQwenAgentContract(t *testing.T) {
 	}
 }
 
+func TestGeminiAgentContract(t *testing.T) {
+	for _, id := range []string{"gemini-4-argon", "google/gemini-4-argon", "gemini-3.7-flash"} {
+		if VariantFor(id) != VariantFor("gemini-3.6-flash") {
+			t.Errorf("%s should share the Gemini family prompt", id)
+		}
+	}
+
+	agent := strings.ToLower(VariantFor("gemini-4-argon").Agent)
+
+	for _, want := range []string{
+		"# core mandates",
+		"## context efficiency",
+		"research -> strategy -> execution",
+		"assume all requests are inquiries",
+		"never assume a library/framework is available",
+		"validation is the only path to finality",
+		"explain before acting",
+		"you must never return an empty response",
+		"never push changes to a remote repository",
+	} {
+		if !strings.Contains(agent, want) {
+			t.Errorf("Gemini agent prompt missing gemini-cli guidance %q", want)
+		}
+	}
+
+	for _, unwanted := range []string{
+		"gemini cli", "gemini.md", "run_shell_command", "read_file", "write_file", "write_todos", "update_topic",
+		"ask_user", "activate_skill", "enter_plan_mode", "codebase_investigator", "wait_for_previous", "is_background",
+		"agent_name", "<untrusted_context>", "<hook_context>", "/bug",
+	} {
+		if strings.Contains(agent, unwanted) {
+			t.Errorf("Gemini agent prompt contains gemini-cli harness instruction %q", unwanted)
+		}
+	}
+}
+
 func TestNewModelPromptsExcludeVendorHarnessInstructions(t *testing.T) {
-	for _, id := range []string{"gemini-3.6-flash", "glm-5.3", "kimi-k3", "minimax-m3", "grok-4.6", "qwen3.8"} {
+	for _, id := range []string{"gemini-3.6-flash", "gemini-4-argon", "glm-5.3", "kimi-k3", "minimax-m3", "grok-4.6", "qwen3.8"} {
 		t.Run(id, func(t *testing.T) {
 			agent := strings.ToLower(VariantFor(id).Agent)
 			for _, unwanted := range []string{"github copilot", "microsoft content policies", "vs code editor", "/mnt/agents", "tool_search_tool"} {

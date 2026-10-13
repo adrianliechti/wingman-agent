@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,8 +40,8 @@ type Engine struct {
 	staleVal bool
 
 	mu           sync.RWMutex
-	graph        *Graph
-	files        map[string]fileMeta
+	graph        *Graph              // immutable after publication; mu guards replacement
+	files        map[string]fileMeta // immutable after publication
 	indexedFiles int
 	skipped      []CoverageIssue
 	indexedAt    time.Time
@@ -141,8 +140,6 @@ func (e *Engine) DeadCode(ctx context.Context, limit int) ([]*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return g.deadCode(limit), nil
 }
 
@@ -157,8 +154,6 @@ func (e *Engine) DetectChanges(ctx context.Context, since string) (Changes, erro
 		return Changes{}, err
 	}
 
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return affectedNodes(g, changed), nil
 }
 
@@ -264,8 +259,7 @@ func (e *Engine) IsStale(ctx context.Context) bool {
 
 func (e *Engine) checkStale(ctx context.Context) bool {
 	e.mu.RLock()
-	files := make(map[string]fileMeta, len(e.files))
-	maps.Copy(files, e.files)
+	files := e.files
 	e.mu.RUnlock()
 
 	paths, err := collectFiles(ctx, e.root)
@@ -300,8 +294,6 @@ func (e *Engine) SearchPage(ctx context.Context, opts SearchOpts) (SearchResult,
 	if err != nil {
 		return SearchResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return g.searchPage(opts), nil
 }
 
@@ -315,8 +307,6 @@ func (e *Engine) Trace(ctx context.Context, from, to, file string, callers bool,
 	if err != nil {
 		return TraceResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	roots := g.resolve(from, file)
 	if len(roots) == 0 {
@@ -335,8 +325,6 @@ func (e *Engine) Architecture(ctx context.Context) (Arch, error) {
 	if err != nil {
 		return Arch{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return g.architecture(), nil
 }
 
@@ -345,8 +333,6 @@ func (e *Engine) Deps(ctx context.Context, target string, depth int) (DepsResult
 	if err != nil {
 		return DepsResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return g.deps(g.resolveModule(filepath.ToSlash(target)), depth), nil
 }
 
@@ -355,8 +341,6 @@ func (e *Engine) Hierarchy(ctx context.Context, name, file string) (HierarchyRes
 	if err != nil {
 		return HierarchyResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	cands := g.resolve(name, file)
 	if len(cands) == 0 {
@@ -401,8 +385,6 @@ func (e *Engine) Tests(ctx context.Context, name, file string) (TestsResult, err
 	if err != nil {
 		return TestsResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	cands := g.resolve(name, file)
 	if len(cands) == 0 {
@@ -421,8 +403,6 @@ func (e *Engine) Similar(ctx context.Context, name, file string, limit int) (Sim
 	if err != nil {
 		return SimilarResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	cands := g.resolve(name, file)
 	if len(cands) == 0 {
@@ -460,9 +440,7 @@ func (e *Engine) Snippet(ctx context.Context, name, file string) (Snippet, error
 		return Snippet{}, err
 	}
 
-	e.mu.RLock()
 	cands := g.resolve(name, file)
-	e.mu.RUnlock()
 
 	if len(cands) == 0 {
 		return Snippet{}, notFoundErr(name, file)

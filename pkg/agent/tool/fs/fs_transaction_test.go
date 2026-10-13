@@ -44,7 +44,10 @@ func TestTransactionRejectsChangedPreconditionsWithoutPartialWrites(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := commitFileTransaction(t.Context(), root, tx); err == nil || !strings.Contains(err.Error(), "changed on disk") {
+			fileEditMu.Lock()
+			err = commitFileTransactionLocked(t.Context(), root, tx)
+			fileEditMu.Unlock()
+			if err == nil || !strings.Contains(err.Error(), "changed on disk") {
 				t.Fatalf("commit error: %v", err)
 			}
 			first, err := root.ReadFile("first")
@@ -78,7 +81,10 @@ func TestConcurrentPreparedTransactionsCannotOverwriteEachOther(t *testing.T) {
 	for _, after := range []string{"one", "two"} {
 		wg.Go(func() {
 			tx := &fileTransaction{changes: []fileChange{{target: target, displayPath: "shared", before: []byte("before"), beforePresent: true, beforeMode: 0600, after: []byte(after), afterPresent: true}}}
-			results <- commitFileTransaction(t.Context(), root, tx)
+			fileEditMu.Lock()
+			err := commitFileTransactionLocked(t.Context(), root, tx)
+			fileEditMu.Unlock()
+			results <- err
 		})
 	}
 	wg.Wait()

@@ -240,10 +240,10 @@ func TestAskUserQuestionInvalidInputDenies(t *testing.T) {
 func TestToolCallTrackerCompletesAndDropsFailedStarts(t *testing.T) {
 	tracker := newToolCallTracker()
 	starts, refinements := 0, 0
-	if err := tracker.emit("tool-1", func() error { starts++; return nil }, func() error { refinements++; return nil }); err != nil {
+	if err := tracker.emit("tool-1", "Bash", "", func() error { starts++; return nil }, func() error { refinements++; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if err := tracker.emit("tool-1", func() error { starts++; return nil }, func() error { refinements++; return nil }); err != nil {
+	if err := tracker.emit("tool-1", "Bash", "", func() error { starts++; return nil }, func() error { refinements++; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if starts != 1 || refinements != 1 || !tracker.has("tool-1") {
@@ -252,13 +252,22 @@ func TestToolCallTrackerCompletesAndDropsFailedStarts(t *testing.T) {
 	if !tracker.complete("tool-1") || tracker.has("tool-1") || tracker.complete("tool-1") {
 		t.Fatal("completed tool call should be removed exactly once")
 	}
+	if err := tracker.emit("tool-1", "Bash", "", func() error { starts++; return nil }, func() error { refinements++; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if starts != 1 || refinements != 1 || tracker.has("tool-1") {
+		t.Fatal("a delayed sighting reopened or refined a completed call")
+	}
 
 	sentinel := errors.New("send failed")
-	if err := tracker.emit("tool-2", func() error { return sentinel }, func() error { return nil }); !errors.Is(err, sentinel) {
+	if err := tracker.emit("tool-2", "Bash", "", func() error { return sentinel }, func() error { return nil }); !errors.Is(err, sentinel) {
 		t.Fatalf("start error = %v", err)
 	}
 	if tracker.has("tool-2") {
 		t.Fatal("failed tool-call start must not remain active")
+	}
+	if err := tracker.emit("tool-2", "Bash", "", func() error { return nil }, func() error { return nil }); err != nil || !tracker.has("tool-2") {
+		t.Fatalf("a failed send must permit retry: %v", err)
 	}
 }
 

@@ -38,12 +38,10 @@ type fileTransaction struct {
 
 // Serialize agent transactions, including transactions from other sessions.
 // External edits are checked again after staging and before each replacement.
-var fileTransactionMu sync.Mutex
 var fileEditMu sync.Mutex
 
-func commitFileTransaction(ctx context.Context, workspaceRoot *os.Root, tx *fileTransaction) (err error) {
-	fileTransactionMu.Lock()
-	defer fileTransactionMu.Unlock()
+// commitFileTransactionLocked requires fileEditMu for preparation and commit.
+func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx *fileTransaction) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

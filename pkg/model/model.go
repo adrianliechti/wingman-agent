@@ -94,6 +94,7 @@ var gpt61SolEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 var claudeAlwaysThinkingEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 var claudeHaiku55Efforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
 var qwen38Efforts = []string{"none", "low", "medium", "xhigh"}
+var gemini4ArgonEfforts = []string{"low", "medium", "high"}
 
 // Models lists every known model in preference order: the first entry of a
 // family, filter or class is the one picked automatically.
@@ -754,6 +755,23 @@ var Models = []Model{
 		Output: 65536,
 
 		ContextThreshold: 200_000,
+	},
+	{
+		ID: "gemini-4-argon",
+
+		Namespace: "google",
+
+		Name: "Gemini 4 Argon",
+
+		Class: ClassLarge,
+
+		// Input, thinking, and output share one window.
+		Context: 1048576,
+		Output:  65536,
+
+		ContextThreshold: 200_000,
+
+		Efforts: gemini4ArgonEfforts,
 	},
 	{
 		ID: "gemini-3.1-flash-lite",

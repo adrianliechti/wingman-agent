@@ -18,6 +18,7 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"kimi-k3", "Kimi K3", ClassLarge, 1_048_576, 131_072},
 		{"glm-5.3", "GLM 5.3", ClassMedium, 1_000_000, 131_072},
 		{"gemini-3.7-flash", "Gemini 3.7 Flash", ClassMedium, 1_114_112, 65_536},
+		{"gemini-4-argon", "Gemini 4 Argon", ClassLarge, 1_048_576, 65_536},
 		{"minimax-m3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"MiniMax-M3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"grok-4.6", "Grok 4.6", ClassLarge, 500_000, 500_000},
@@ -110,6 +111,21 @@ func TestGPT6Verbosity(t *testing.T) {
 				t.Fatalf("Find(%q).Verbosity = %q, want low", id, got.Verbosity)
 			}
 		})
+	}
+}
+
+// Gemini 4 Argon shares one window between input, thinking, and output, and
+// offers three thinking levels.
+func TestGemini4ArgonLimitsAndEfforts(t *testing.T) {
+	got, ok := Find("gemini-4-argon")
+	if !ok {
+		t.Fatal("Find(gemini-4-argon) failed")
+	}
+	if got.InputTokens() != 1_048_576-65_536 {
+		t.Fatalf("InputTokens() = %d, want the shared window minus output", got.InputTokens())
+	}
+	if want := []string{"low", "medium", "high"}; !slices.Equal(got.Efforts, want) {
+		t.Fatalf("Efforts = %v, want %v", got.Efforts, want)
 	}
 }
 

@@ -178,6 +178,7 @@ func (a *Agent) generateBriefing(ctx context.Context, instructions string, messa
 			params.Reasoning.Effort = shared.ReasoningEffort(effort)
 		}
 		resp, err := a.client.Responses.New(inferenceCtx, params)
+		err = withProviderDetails(err)
 		var usage Usage
 		if resp != nil {
 			usage = responseToUsage(*resp)

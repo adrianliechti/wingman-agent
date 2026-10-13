@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -99,6 +100,109 @@ func TestCancelRetriesInterruptUntilTurnIsInterruptible(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestPromptUsageExcludesInterruptCleanupFromNextPrompt(t *testing.T) {
+	for _, updateAfterReply := range []bool{false, true} {
+		t.Run(fmt.Sprintf("update after interrupt reply=%t", updateAfterReply), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				first := tokenBreakdown{TotalTokens: 150, InputTokens: 120, OutputTokens: 30}
+				second := tokenBreakdown{TotalTokens: 200, InputTokens: 170, OutputTokens: 30}
+				starts := 0
+				notifyUsage := func(s *contractAppServer, turnID string, total, last tokenBreakdown) {
+					s.notify("thread/tokenUsage/updated", map[string]any{
+						"threadId": "thread-1", "turnId": turnID,
+						"tokenUsage": map[string]any{"total": total, "last": last},
+					})
+				}
+				agent, _ := scriptedAgent(t, func(s *contractAppServer, req rpcMessage) {
+					switch req.Method {
+					case "turn/start":
+						starts++
+						id := fmt.Sprintf("t%d", starts)
+						s.respond(req, turnStartResponse{Turn: turn{ID: id, Status: "inProgress"}})
+						if starts == 2 {
+							s.notify("item/started", map[string]any{"threadId": "thread-1", "turnId": id, "item": map[string]any{"id": "a2", "type": "agentMessage"}})
+							notifyUsage(s, id, first.combine(second, add), second)
+							s.notify("turn/completed", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": id, "status": "completed"}})
+						}
+					case "turn/interrupt":
+						if updateAfterReply {
+							s.respond(req, map[string]any{})
+						}
+						notifyUsage(s, "t1", first, first)
+						s.notify("turn/completed", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "t1", "status": "interrupted"}})
+						if !updateAfterReply {
+							s.respond(req, map[string]any{})
+						}
+					}
+				})
+				agent.sessions["thread-1"] = newSession("thread-1", "default", "", nil)
+				agent.codex.setThreadTokenTotal("thread-1", tokenBreakdown{})
+				prompt := acp.PromptRequest{SessionId: "thread-1", Prompt: []acp.ContentBlock{acp.TextBlock("hello")}}
+				done := make(chan acp.PromptResponse, 1)
+				go func() {
+					r, err := agent.Prompt(context.Background(), prompt)
+					if err != nil {
+						t.Errorf("prompt: %v", err)
+					}
+					done <- r
+				}()
+				synctest.Wait()
+				if err := agent.Cancel(context.Background(), acp.CancelNotification{SessionId: "thread-1"}); err != nil {
+					t.Fatal(err)
+				}
+				if r := <-done; r.StopReason != acp.StopReasonCancelled {
+					t.Fatalf("stop reason = %q, want cancelled", r.StopReason)
+				}
+				synctest.Wait()
+				r, err := agent.Prompt(context.Background(), prompt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r.Usage == nil || r.Usage.TotalTokens != 200 || r.Usage.InputTokens != 170 || r.Usage.OutputTokens != 30 {
+					t.Fatalf("second prompt usage = %+v, want only the 200-token second request", r.Usage)
+				}
+			})
+		})
+	}
+}
+
+func TestPromptUsageUsesRestoredHistoryQueuedDuringStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		history := tokenBreakdown{TotalTokens: 1000, InputTokens: 900, OutputTokens: 100}
+		compact := tokenBreakdown{TotalTokens: 300, InputTokens: 250, OutputTokens: 50}
+		request := tokenBreakdown{TotalTokens: 200, InputTokens: 170, OutputTokens: 30}
+		agent, _ := scriptedAgent(t, func(s *contractAppServer, req rpcMessage) {
+			if req.Method != "turn/start" {
+				return
+			}
+			usage := func(turnID string, total, last tokenBreakdown) {
+				s.notify("thread/tokenUsage/updated", map[string]any{"threadId": "thread-1", "turnId": turnID, "tokenUsage": map[string]any{"total": total, "last": last}})
+			}
+			// thread/resume can answer before its restored usage notification
+			// arrives. It belongs to the old turn, but supplies the baseline.
+			usage("old-turn", history, history)
+			s.respond(req, turnStartResponse{Turn: turn{ID: "current", Status: "inProgress"}})
+			compaction := map[string]any{"threadId": "thread-1", "turnId": "current", "item": map[string]any{"id": "compact", "type": "contextCompaction"}}
+			s.notify("item/started", compaction)
+			usage("current", history, history)
+			usage("current", history.combine(compact, add), compact)
+			s.notify("item/completed", compaction)
+			s.notify("item/started", map[string]any{"threadId": "thread-1", "turnId": "current", "item": map[string]any{"id": "answer", "type": "agentMessage"}})
+			usage("current", history.combine(compact, add).combine(request, add), request)
+			s.notify("turn/completed", map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "current", "status": "completed"}})
+		})
+		agent.SetAgentConnection(discardingConn(t))
+		agent.sessions["thread-1"] = newSession("thread-1", "default", "", nil)
+		r, err := agent.Prompt(context.Background(), acp.PromptRequest{SessionId: "thread-1", Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Usage == nil || r.Usage.TotalTokens != 500 || r.Usage.InputTokens != 420 || r.Usage.OutputTokens != 80 {
+			t.Fatalf("prompt usage = %+v, want only compaction and the ordinary request", r.Usage)
+		}
+	})
 }
 
 func TestInterruptDeadlineDuringRetryRetiresTransport(t *testing.T) {

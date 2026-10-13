@@ -33,7 +33,7 @@ type windowsPTY struct {
 
 	mu       sync.Mutex
 	console  windows.Handle
-	waitErr  error
+	waitErr  error // published by closing waited
 	waited   chan struct{}
 	closedCn bool
 }
@@ -87,13 +87,11 @@ func startPTY(spec CommandSpec, cols, rows int) (Terminal, error) {
 	// loop would block forever after the command finished.
 	go func() {
 		state, err := process.Wait()
-		p.mu.Lock()
 		if err != nil {
 			p.waitErr = err
 		} else if state != nil && !state.Success() {
 			p.waitErr = &exitError{code: state.ExitCode()}
 		}
-		p.mu.Unlock()
 		close(p.waited)
 		p.closeConsole()
 	}()
@@ -222,8 +220,6 @@ func (p *windowsPTY) Wait() error {
 		return nil
 	}
 	<-p.waited
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	return p.waitErr
 }
 

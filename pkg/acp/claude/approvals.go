@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,25 +34,61 @@ const (
 // tool_call_update referencing it, regardless of which path is first.
 type toolCallTracker struct {
 	mu      sync.Mutex
-	emitted map[string]bool
+	emitted map[string]openToolCall
+	closed  map[string]struct{}
+}
+
+// openToolCall names an emitted call that has not received a result, so a
+// cancellation can close it with the same metadata as its other updates.
+type openToolCall struct {
+	id, name, parentToolUseID string
 }
 
 func newToolCallTracker() *toolCallTracker {
-	return &toolCallTracker{emitted: map[string]bool{}}
+	return &toolCallTracker{emitted: map[string]openToolCall{}, closed: map[string]struct{}{}}
 }
 
-func (t *toolCallTracker) emit(id string, start, refine func() error) error {
+func (t *toolCallTracker) emit(id, name, parentToolUseID string, start, refine func() error) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.emitted[id] {
+	if _, ok := t.closed[id]; ok {
+		return nil
+	}
+	if call, ok := t.emitted[id]; ok {
+		if call.parentToolUseID == "" {
+			call.parentToolUseID = parentToolUseID
+			t.emitted[id] = call
+		}
 		return refine()
 	}
-	t.emitted[id] = true
+	t.emitted[id] = openToolCall{id: id, name: name, parentToolUseID: parentToolUseID}
 	if err := start(); err != nil {
 		delete(t.emitted, id)
 		return err
 	}
 	return nil
+}
+
+// closeOpen closes every open call that keep does not retain and returns
+// them in a stable order. Terminal IDs remain known so delayed starts,
+// refinements, and results cannot reopen or finalize the call again.
+func (t *toolCallTracker) closeOpen(keep func(openToolCall) bool) []openToolCall {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var closed []openToolCall
+	for id, call := range t.emitted {
+		if keep != nil && keep(call) {
+			continue
+		}
+		delete(t.emitted, id)
+		t.closed[id] = struct{}{}
+		closed = append(closed, call)
+	}
+	slices.SortFunc(closed, func(a, b openToolCall) int { return strings.Compare(a.id, b.id) })
+	return closed
 }
 
 func (t *toolCallTracker) has(id string) bool {
@@ -60,7 +97,8 @@ func (t *toolCallTracker) has(id string) bool {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.emitted[id]
+	_, ok := t.emitted[id]
+	return ok
 }
 
 func (t *toolCallTracker) complete(id string) bool {
@@ -69,10 +107,11 @@ func (t *toolCallTracker) complete(id string) bool {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if !t.emitted[id] {
+	if _, ok := t.emitted[id]; !ok {
 		return false
 	}
 	delete(t.emitted, id)
+	t.closed[id] = struct{}{}
 	return true
 }
 
@@ -159,7 +198,7 @@ func (a *approver) handle(req controlRequest) {
 	// the client has never seen. Emit it now if no one has yet, so the client
 	// can always associate the prompt below with a known tool call.
 	if id != "" && shouldEagerlyEmitToolCall(name) && a.emitted != nil {
-		_ = a.emitted.emit(id, func() error {
+		_ = a.emitted.emit(id, name, parentToolUseID, func() error {
 			return a.emitToolCallStart(id, name, req.Request.Input, parentToolUseID)
 		}, func() error {
 			return nil

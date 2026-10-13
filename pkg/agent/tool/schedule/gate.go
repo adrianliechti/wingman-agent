@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
@@ -40,6 +39,7 @@ func runGate(ctx context.Context, dir, script string, opts *Options) (bool, stri
 	}
 	var out gateOutput
 	cmd := shell.ToolCommand(ctx, script, dir, shellOpts)
+	// os/exec serializes writes when stdout and stderr share a writer.
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()
 
@@ -63,14 +63,11 @@ func runGate(ctx context.Context, dir, script string, opts *Options) (bool, stri
 
 // Retain the tail so the final JSON wake decision survives verbose scripts.
 type gateOutput struct {
-	mu        sync.Mutex
 	data      []byte
 	truncated bool
 }
 
 func (b *gateOutput) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	n := len(p)
 	if n >= gateMaxOutput {
 		b.data = append(b.data[:0], p[n-gateMaxOutput:]...)
@@ -85,8 +82,6 @@ func (b *gateOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 func (b *gateOutput) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	text := strings.TrimSpace(string(b.data))
 	if b.truncated {
 		return "[earlier output truncated]\n" + text

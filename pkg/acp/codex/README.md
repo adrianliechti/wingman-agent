@@ -99,6 +99,23 @@ Codex writes a thread's rollout on its first user message. Resuming or loading a
 session that was never prompted falls back to `thread/read` and replays no
 history; deleting it, an unknown ID, or an ID Codex cannot parse succeeds.
 
+The 2026-10-13 review compared the App Server adapter at `a636804` (v2.2.2,
+pinned to Codex 0.160.1; Wingman launches 0.162.1) and classified all 18 commits
+since `ca1d971`. Prompt usage now covers every model request of the prompt,
+including later backend turns such as plan implementation (`95bc33f`): it is
+the thread total at the end minus the total at the start, or the sum of the
+distinct per-request counts when the start is unknown or the total moves back.
+A new thread starts at zero; the RPC reader retains restored thread totals and
+interrupt-cleanup updates even without an active prompt consumer. Compaction
+also counts as model work, including before ordinary output on a resumed thread.
+Synthetic context estimates and context-full markers are excluded from prompt
+spend; they still update the baseline used to identify the next model request.
+Cache writes are separated from fresh input
+and reported as `cachedWriteTokens`. `usage_test.go` covers these cases, and
+`TestLiveCodexPromptUsageCoversEveryRequest` checks a tool-using prompt against
+the installed CLI. Whitespace-only session titles and the deleted-workspace
+error hint (`90fea43`, `a636804`) remain low-priority differences.
+
 The 2026-10-05 review compared scratch Codex at `7c2ce90716`, the retired scratch
 Codex adapter at `296069e`, Claude ACP at `0724b17`, and the current
 [App Server adapter](https://github.com/agentclientprotocol/codex-acp) at `ca1d971`.
@@ -149,4 +166,12 @@ Run from the repository root:
 
 ```sh
 CODEX_ACP_LIVE=1 go test ./pkg/acp/codex -run '^TestLiveCodex(UnpromptedPlanMode|MCPStartupSessionIsolation)$' -count=1 -v -timeout=2m
+```
+
+The live usage tests compare prompt usage with the sum of distinct model
+requests reported by the CLI. They cover a tool-using prompt, a follow-up after
+cancellation, and a resumed thread forced to compact before ordinary output:
+
+```sh
+CODEX_ACP_LIVE=1 go test ./pkg/acp/codex -run '^TestLiveCodex(PromptUsageCoversEveryRequest|UsageAfterCancellation|UsageWithInitialCompaction)$' -count=1 -v -timeout=8m
 ```

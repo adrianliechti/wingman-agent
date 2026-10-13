@@ -1224,15 +1224,6 @@ func (execution *ToolExecution) rememberProtocolOutcome(outcome Outcome, descrip
 	execution.outcomeMu.Unlock()
 }
 
-func (execution *ToolExecution) resolvedOutcome(outcome Outcome) (Outcome, string) {
-	execution.outcomeMu.Lock()
-	defer execution.outcomeMu.Unlock()
-	if outcome.ErrorType == "_OTHER" && execution.protocolOutcome.errorType() != "" {
-		return execution.protocolOutcome, execution.statusDescription
-	}
-	return outcome, ""
-}
-
 // End completes a tool span and records its duration.
 func (execution *ToolExecution) End(outcome Outcome) {
 	if execution == nil {
@@ -1240,8 +1231,11 @@ func (execution *ToolExecution) End(outcome Outcome) {
 	}
 	execution.endOnce.Do(func() {
 		ended := time.Now()
-		outcome, description := execution.resolvedOutcome(outcome)
 		execution.outcomeMu.Lock()
+		description := ""
+		if outcome.ErrorType == "_OTHER" && execution.protocolOutcome.errorType() != "" {
+			outcome, description = execution.protocolOutcome, execution.statusDescription
+		}
 		result, resultSet := execution.result, execution.resultSet
 		execution.outcomeMu.Unlock()
 		if outcome.errorType() == "" && resultSet && execution.span != nil {

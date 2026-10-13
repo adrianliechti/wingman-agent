@@ -207,7 +207,7 @@ func emitToolUseCall(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 		withClaudeToolMeta(&u, b.Name, parentToolUseID)
 		return send(u)
 	}
-	return tracker.emit(b.ID, start, refine)
+	return tracker.emit(b.ID, b.Name, parentToolUseID, start, refine)
 }
 
 func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache, tracker *toolCallTracker, parentToolUseID string) error {

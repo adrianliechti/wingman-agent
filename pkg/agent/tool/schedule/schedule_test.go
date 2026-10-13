@@ -284,6 +284,26 @@ func TestRunGate(t *testing.T) {
 	}
 }
 
+func TestRunGateCapturesConcurrentOutputStreams(t *testing.T) {
+	script := `
+(i=0; while [ "$i" -lt 100 ]; do echo stdout-line; i=$((i+1)); done) &
+(i=0; while [ "$i" -lt 100 ]; do echo stderr-line >&2; i=$((i+1)); done) &
+wait
+echo '{"wake": false}'
+`
+	dir := t.TempDir()
+	task := Task{Script: script, ScriptApproval: scriptApproval(dir, script)}
+	wake, output, err := RunTaskGate(t.Context(), dir, task, nil)
+	if err != nil || wake {
+		t.Fatalf("gate decision: wake=%v, err=%v, output=%q", wake, err, output)
+	}
+	for _, line := range []string{"stdout-line", "stderr-line"} {
+		if count := strings.Count(output, line); count != 100 {
+			t.Errorf("captured %d %s lines, want 100", count, line)
+		}
+	}
+}
+
 func TestFailureBackoffDelaysRetries(t *testing.T) {
 	last := time.Date(2026, 6, 12, 8, 0, 0, 0, time.UTC)
 	task := Task{

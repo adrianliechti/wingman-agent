@@ -156,6 +156,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 		s.mu.Unlock()
 	}()
 
+	var tokens *promptTokenUsage
 	disp := newEventDispatcher(turnCtx, conn, s.id)
 
 	run := func(input []any) (_ turnCompleted, runErr error) {
@@ -175,8 +176,14 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 				return turnCompleted{}, cc.rpc.closedError()
 			}
 		}
+		// Late-start interrupt cleanup can still update the thread total. Take
+		// the prompt's baseline only after that cleanup, before starting work.
+		if tokens == nil {
+			tokens = newPromptTokenUsage(cc.threadTokenTotal(threadID))
+		}
 		stream := newTurnStream(runCtx)
 		disp = newEventDispatcher(runCtx, conn, s.id)
+		disp.tokens = tokens
 		runDisp := disp
 		app := newApprover(runCtx, conn, s.id, clientCapabilities)
 		handlers := &threadHandlers{
@@ -321,6 +328,12 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 				return turnCompleted{}, err
 			}
 			if !owned {
+				if event.Method == "thread/tokenUsage/updated" {
+					var p tokenUsageUpdate
+					if json.Unmarshal(event.Params, &p) == nil && p.TokenUsage.Total != nil {
+						tokens.observeHistory(*p.TokenUsage.Total)
+					}
+				}
 				continue
 			}
 			if event.Method == "thread/closed" {
