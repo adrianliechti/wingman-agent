@@ -222,7 +222,7 @@ func TestLoopProviderFailureAllowsNextTurn(t *testing.T) {
 	}{
 		{"terminal failure", "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_request_error\",\"message\":\"bad request\"}}}\n\n", 1},
 		{"retry exhaustion", "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"unavailable\"}}}\n\n", maxStreamRetries + 1},
-		{"partial stream", "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"partial\",\"delta\":\"uncommitted\"}\n\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" + loopCall("partial", "probe", `{}`) + "}\n\n", 1},
+		{"partial stream", "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"partial\",\"delta\":\"uncommitted\"}\n\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":" + loopCall("partial", "probe", `{}`) + "}\n\n", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -277,34 +277,27 @@ func TestLoopProviderFailureAllowsNextTurn(t *testing.T) {
 	}
 }
 
-// Codex retries preserve accepted history; Pi only dispatches accepted assistant
-// tool calls. A completed call item in a failed stream is still uncommitted.
-func TestLoopRetryDoesNotExecuteUncommittedCalls(t *testing.T) {
+// Codex dispatches completed items before the response ends. A retry includes
+// the accepted call and result, even if the transport fails after dispatch.
+func TestLoopRetryRetainsCompletedCalls(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		requests, executions, resets, retries := 0, 0, 0, 0
 		client := streamingTestClient(func(r *http.Request) string {
 			requests++
 			req := readLoopRequest(t, r)
-			if requests <= 2 && !slices.Equal(loopInputOrder(req.Input), []string{"user:work"}) {
-				t.Error("retry included uncommitted output")
-			}
-			switch requests {
-			case 1:
-				return "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"partial\",\"delta\":\"uncommitted\"}\n\n" +
-					"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" + loopCall("write", "probe", `{}`) + "}\n\n" +
+			if requests == 1 {
+				return "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" + loopCall("write", "probe", `{}`) + "}\n\n" +
+					"data: {\"type\":\"response.output_text.delta\",\"item_id\":\"partial\",\"delta\":\"uncommitted\"}\n\n" +
 					"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"retry\"}}}\n\n"
-			case 2:
-				if executions != 0 {
-					t.Error("tool ran before the successful retry")
-				}
-				return phaseTestResponse(false, loopCall("write", "probe", `{}`))
-			default:
-				want := []string{"user:work", "call:write", "result:write"}
-				if got := loopInputOrder(req.Input); !slices.Equal(got, want) {
-					t.Errorf("continuation input=%v, want %v", got, want)
-				}
-				return phaseTestResponse(false, finalAnswerOutput)
 			}
+			want := []string{"user:work", "call:write", "result:write"}
+			if got := loopInputOrder(req.Input); !slices.Equal(got, want) {
+				t.Errorf("retry input=%v, want %v", got, want)
+			}
+			if executions != 1 || req.Input[2].Output != "written" {
+				t.Error("retry started before preserving the completed tool result")
+			}
+			return phaseTestResponse(false, finalAnswerOutput)
 		})
 		a := &Agent{Config: &Config{client: &client, Tools: func() []tool.Tool {
 			return []tool.Tool{{Name: "probe", Execute: func(context.Context, map[string]any) (tool.Result, error) {
@@ -316,7 +309,7 @@ func TestLoopRetryDoesNotExecuteUncommittedCalls(t *testing.T) {
 		if err := runLoopTurn(ctx, a, "work"); err != nil {
 			t.Fatal(err)
 		}
-		if requests != 3 || executions != 1 || resets != 1 || retries != 1 {
+		if requests != 2 || executions != 1 || resets != 1 || retries != 1 {
 			t.Fatalf("requests=%d executions=%d resets=%d retries=%d", requests, executions, resets, retries)
 		}
 	})

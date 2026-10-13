@@ -77,7 +77,7 @@ func TestRepairToolHistoryPreservesParallelCallsAndKnownResults(t *testing.T) {
 		}},
 		{Role: RoleUser, Content: []Content{{Text: "continue after interruption"}}},
 	}}
-	if err := a.repairToolHistory(); err != nil {
+	if err := a.repairToolHistory(false); err != nil {
 		t.Fatal(err)
 	}
 	items := toInput(a.requestMessages())
@@ -103,7 +103,7 @@ func TestRepairToolHistoryPreservesParallelCallsAndKnownResults(t *testing.T) {
 	if len(calls) != 2 || len(outputs) != 2 || strings.Contains(string(encoded), "unmatched") || !strings.Contains(string(encoded), "file A updated") || !strings.Contains(string(encoded), "Independent observed evidence") {
 		t.Fatalf("repair lost evidence or left invalid pairs: %s", encoded)
 	}
-	if err := a.repairToolHistory(); err != nil || a.ContextRevision != 1 {
+	if err := a.repairToolHistory(false); err != nil || a.ContextRevision != 1 {
 		t.Fatalf("repair is not idempotent: revision=%d err=%v", a.ContextRevision, err)
 	}
 	if len(a.MessagesSnapshot()) != 5 || a.MessagesSnapshot()[1].Content[0].Reasoning.Content != "opaque" {

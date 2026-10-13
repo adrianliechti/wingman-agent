@@ -61,9 +61,8 @@ func (p *pendingToolCall) markSnapshot(now time.Time) {
 }
 
 // streamFailure records whether a streamed request produced visible output
-// before its transport failed. The response is not committed and tool calls
-// are not executed until a terminal event arrives, so retrying remains safe;
-// outputStarted only explains why a client may have seen repeated deltas.
+// before its transport failed. Completed items may already be committed and
+// their tools dispatched; retries resume from that retained history.
 type streamFailure struct {
 	err           error
 	outputStarted bool
@@ -121,15 +120,17 @@ func (e *responseFailure) Error() string {
 }
 
 type request struct {
-	model         string
-	effort        string
-	instructions  string
-	cacheKey      string
-	messages      []Message
-	tools         []tool.Tool
-	outputSchema  map[string]any
-	requireFinish bool
-	disableTools  bool
+	model             string
+	effort            string
+	instructions      string
+	cacheKey          string
+	messages          []Message
+	tools             []tool.Tool
+	outputSchema      map[string]any
+	requireFinish     bool
+	disableTools      bool
+	onOutputItem      func([]Message) error
+	preserveReasoning bool
 
 	cachedToolsPtr *tool.Tool
 	cachedToolsLen int
@@ -167,6 +168,8 @@ type response struct {
 
 	finishReasons []string
 	stopReason    string
+	endTurn       *bool
+	dispatched    int
 
 	incomplete       bool
 	incompleteReason string
@@ -265,6 +268,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 	responseID := ""
 	responseModel := ""
 	stopReason := ""
+	var endTurn *bool
 	outputStarted := false
 	terminalEvent := false
 	emit := func(msg Message) bool {
@@ -273,6 +277,60 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 		}
 		outputStarted = true
 		return true
+	}
+
+	reconcile := func(items []responses.ResponseInputItemUnionParam) error {
+		// Some providers omit deltas or deliver only a prefix. Reconcile each
+		// final text/refusal part against what actually reached the consumer.
+		for _, item := range items {
+			m := item.OfOutputMessage
+			if m == nil {
+				continue
+			}
+			for i, part := range m.Content {
+				var full string
+				var sent *strings.Builder
+				key := outputPart{m.ID, int64(i)}
+				switch {
+				case part.OfOutputText != nil:
+					full, sent = part.OfOutputText.Text, streamedText[key]
+				case part.OfRefusal != nil:
+					full, sent = part.OfRefusal.Refusal, streamedRefusals[key]
+				default:
+					continue
+				}
+				seen := ""
+				if sent != nil {
+					seen = sent.String()
+				}
+				if !strings.HasPrefix(full, seen) {
+					return &streamFailure{err: fmt.Errorf("final response text does not match delivered deltas for %s part %d", m.ID, i), outputStarted: outputStarted}
+				}
+				remaining := strings.TrimPrefix(full, seen)
+				if remaining == "" {
+					continue
+				}
+				content := Content{TextID: m.ID}
+				if part.OfRefusal != nil {
+					content.Refusal = remaining
+				} else {
+					content.Text = remaining
+				}
+				if part.OfRefusal != nil {
+					remember(streamedRefusals, key, remaining)
+				} else {
+					remember(streamedText, key, remaining)
+				}
+				telemetry.ObserveOutputChunk(ctx)
+				if !emit(Message{
+					Role: RoleAssistant, Phase: MessagePhase(m.Phase),
+					Content: []Content{content},
+				}) {
+					return errYieldStopped
+				}
+			}
+		}
+		return nil
 	}
 
 	for stream.Next() {
@@ -368,9 +426,19 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 			}
 
 		case responses.ResponseOutputItemDoneEvent:
-			outputItems = append(outputItems, outputItemsToInput([]responses.ResponseOutputItemUnion{e.Item})...)
+			items := outputItemsToInput([]responses.ResponseOutputItemUnion{e.Item})
+			outputItems = append(outputItems, items...)
+			if r.onOutputItem != nil && len(items) > 0 {
+				if err := reconcile(items); err != nil {
+					return nil, err
+				}
+				if err := r.onOutputItem(r.outputMessages(items)); err != nil {
+					return nil, err
+				}
+			}
 
 		case responses.ResponseCompletedEvent:
+			endTurn = responseEndTurn(&e.Response)
 			stopReason = responseStopReason(&e.Response)
 			usageDelta = responseToUsage(e.Response)
 			responseID = e.Response.ID
@@ -432,69 +500,10 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 		}
 	}
 
-	// Some providers omit deltas or deliver only a prefix. Reconcile each
-	// final text/refusal part against what actually reached the consumer.
-	for _, item := range outputItems {
-		m := item.OfOutputMessage
-		if m == nil {
-			continue
-		}
-		for i, part := range m.Content {
-			var full string
-			var sent *strings.Builder
-			key := outputPart{m.ID, int64(i)}
-			switch {
-			case part.OfOutputText != nil:
-				full, sent = part.OfOutputText.Text, streamedText[key]
-			case part.OfRefusal != nil:
-				full, sent = part.OfRefusal.Refusal, streamedRefusals[key]
-			default:
-				continue
-			}
-			seen := ""
-			if sent != nil {
-				seen = sent.String()
-			}
-			if !strings.HasPrefix(full, seen) {
-				return nil, &streamFailure{err: fmt.Errorf("final response text does not match delivered deltas for %s part %d", m.ID, i), outputStarted: outputStarted}
-			}
-			remaining := strings.TrimPrefix(full, seen)
-			if remaining == "" {
-				continue
-			}
-			content := Content{TextID: m.ID}
-			if part.OfRefusal != nil {
-				content.Refusal = remaining
-			} else {
-				content.Text = remaining
-			}
-			telemetry.ObserveOutputChunk(ctx)
-			if !emit(Message{
-				Role: RoleAssistant, Phase: MessagePhase(m.Phase),
-				Content: []Content{content},
-			}) {
-				return nil, errYieldStopped
-			}
-		}
+	if err := reconcile(outputItems); err != nil {
+		return nil, err
 	}
-	messages := toMessages(outputItems)
-	if r.requireFinish {
-		for i := range messages {
-			if calls := extractToolCalls(messages[i : i+1]); len(calls) == 1 && calls[0].Name == finishToolName {
-				messages[i].Hidden = true
-			}
-		}
-	}
-	prefix := reasoningPrefix(r)
-
-	for _, m := range messages {
-		for _, c := range m.Content {
-			if c.Reasoning != nil {
-				c.Reasoning.Model = r.model
-				c.Reasoning.Prefix = prefix
-			}
-		}
-	}
+	messages := r.outputMessages(outputItems)
 
 	status := "completed"
 	if incomplete {
@@ -509,6 +518,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 
 		finishReasons: finishReasons,
 		stopReason:    stopReason,
+		endTurn:       endTurn,
 
 		incomplete:       incomplete,
 		incompleteReason: incompleteReason,
@@ -552,4 +562,26 @@ func outputItemsToInput(output []responses.ResponseOutputItemUnion) []responses.
 	}
 
 	return items
+}
+
+func (r *request) outputMessages(items []responses.ResponseInputItemUnionParam) []Message {
+	messages := toMessages(items)
+	if r.requireFinish {
+		for i := range messages {
+			if calls := extractToolCalls(messages[i : i+1]); len(calls) == 1 && calls[0].Name == finishToolName {
+				messages[i].Hidden = true
+			}
+		}
+	}
+	prefix := reasoningPrefix(r)
+
+	for _, m := range messages {
+		for _, c := range m.Content {
+			if c.Reasoning != nil {
+				c.Reasoning.Model = r.model
+				c.Reasoning.Prefix = prefix
+			}
+		}
+	}
+	return messages
 }

@@ -44,8 +44,8 @@ func isRecoverableError(err error) bool {
 	}
 
 	// Other non-API failures are retryable only when complete marked them as a
-	// stream transport failure. Partial responses are not committed and their
-	// tool calls are not executed, so a replay cannot duplicate side effects.
+	// stream transport failure. Retries include completed items and their
+	// tool results; incomplete items are discarded.
 	return streamErr != nil
 }
 
@@ -117,7 +117,7 @@ func isReasoningReplayError(err error) bool {
 // As in Codex normalization, missing results get a stable interruption notice.
 // Keep the attempted call so the next model cannot mistake it for unstarted
 // work. A result without a call is removed at content granularity.
-func (a *Agent) repairToolHistory() error {
+func (a *Agent) repairToolHistory(preserveReasoning bool) error {
 	messages := a.contextSnapshot()
 
 	callIDs := make(map[string]bool)
@@ -171,9 +171,13 @@ func (a *Agent) repairToolHistory() error {
 	}
 	cleaned = append(cleaned, missing...)
 
-	if pruned, ok := dropDanglingReasoning(cleaned); ok {
-		cleaned = pruned
-		changed = true
+	// An explicit end_turn:false can intentionally leave reasoning at the
+	// end of history. Keep it for the provider's next sampling request.
+	if !preserveReasoning {
+		if pruned, ok := dropDanglingReasoning(cleaned); ok {
+			cleaned = pruned
+			changed = true
+		}
 	}
 
 	if !changed {

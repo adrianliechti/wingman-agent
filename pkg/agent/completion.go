@@ -48,6 +48,12 @@ func (s *completionState) advance(resp *response, requireFinish, finished, hasWo
 	}
 	recovering := s.cutoff || s.attempts > 0
 	s.cutoff = false
+	if resp.endTurn != nil {
+		// A provider-requested continuation is normal sampling, not recovery:
+		// preserve history without inserting a reminder or using its budget.
+		s.attempts = 0
+		return !*resp.endTurn, nil, nil
+	}
 
 	var reason error
 	switch {

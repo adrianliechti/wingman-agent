@@ -130,7 +130,7 @@ func TestProviderOutputPrecedesRunTerminalInSameAppend(t *testing.T) {
 	if err := a.recordEvents(RuntimeEvent{Type: EventTurnStarted, TurnID: "turn"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.completeRun(context.Background(), "turn", &request{}, yieldAll); err != nil {
+	if _, err := a.completeRun(context.Background(), context.Background(), "turn", &request{}, yieldAll); err != nil {
 		t.Fatal(err)
 	}
 

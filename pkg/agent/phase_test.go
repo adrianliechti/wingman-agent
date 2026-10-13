@@ -189,7 +189,11 @@ func testSendContinuesAfterNonterminalText(t *testing.T, phase string) {
 					t.Fatal(err)
 				}
 			}
-			if requests != 4 || toolRuns != 1 || stopHooks != 1 || commits != 4 || a.Running() {
+			wantCommits := 4
+			if doneEvents {
+				wantCommits += 4
+			}
+			if requests != 4 || toolRuns != 1 || stopHooks != 1 || commits != wantCommits || a.Running() {
 				t.Fatalf("requests=%d tools=%d stop hooks=%d commits=%d running=%t; expected one complete turn through the final answer", requests, toolRuns, stopHooks, commits, a.Running())
 			}
 

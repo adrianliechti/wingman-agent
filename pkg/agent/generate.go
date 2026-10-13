@@ -130,3 +130,13 @@ func responseStopReason(resp *responses.Response) string {
 	_ = json.Unmarshal([]byte(resp.JSON.ExtraFields["stop_reason"].Raw()), &reason)
 	return reason
 }
+
+// Missing and null retain the fallback behavior for providers that do not
+// expose Codex's explicit turn boundary.
+func responseEndTurn(resp *responses.Response) *bool {
+	var endTurn *bool
+	if err := json.Unmarshal([]byte(resp.JSON.ExtraFields["end_turn"].Raw()), &endTurn); err != nil {
+		return nil
+	}
+	return endTurn
+}

@@ -225,6 +225,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 
 		turns := 0
 		var completion completionState
+		nativeContinuation := false
 		stopHookActive := false
 		for {
 			if err := ctx.Err(); err != nil {
@@ -237,6 +238,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				pending := a.takePendingInput()
 				if len(pending) > 0 {
 					completion = completionState{}
+					nativeContinuation = false
 				}
 				if err := a.appendInputs(ctx, pending...); err != nil {
 					stop(err)
@@ -244,7 +246,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				}
 			}
 
-			if err := a.repairToolHistory(); err != nil {
+			if err := a.repairToolHistory(nativeContinuation); err != nil {
 				stop(err)
 				return
 			}
@@ -297,14 +299,15 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			}
 
 			req := &request{
-				model:         stepRuntime.Model,
-				effort:        stepRuntime.ReasoningEffort,
-				instructions:  instructions,
-				cacheKey:      a.CacheKey,
-				messages:      a.requestMessages(),
-				tools:         tools,
-				outputSchema:  outputSchema,
-				requireFinish: requireFinish,
+				model:             stepRuntime.Model,
+				effort:            stepRuntime.ReasoningEffort,
+				instructions:      instructions,
+				cacheKey:          a.CacheKey,
+				messages:          a.requestMessages(),
+				tools:             tools,
+				outputSchema:      outputSchema,
+				requireFinish:     requireFinish,
+				preserveReasoning: nativeContinuation,
 			}
 			if err := a.prepareRequest(stepCtx, req); err != nil {
 				stop(err)
@@ -318,6 +321,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				return
 			}
 			turns++
+			nativeContinuation = resp.endTurn != nil && !*resp.endTurn
 
 			EmitStreamEvent(ctx, StreamEventCommit)
 			if err := ctx.Err(); err != nil {
@@ -325,8 +329,8 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				return
 			}
 
-			// Filtered responses cannot drive tool execution or automatic
-			// continuation. Fresh user input can still start another request.
+			// A filtered terminal response cannot dispatch further tools or
+			// automatically continue. Earlier completed items may have run.
 			needsFollowUp := false
 			var completionErr error
 			filtered := resp.incomplete && resp.incompleteReason == "content_filter"
@@ -340,7 +344,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 						return
 					}
 				}
-				if err := a.processToolCalls(stepCtx, calls, tools, yield); err != nil {
+				if err := a.processToolCalls(stepCtx, calls[resp.dispatched:], tools, yield); err != nil {
 					stop(err)
 					return
 				}
@@ -562,7 +566,7 @@ func waitForRetry(ctx context.Context, delay time.Duration) bool {
 // completeRun gives every provider invocation its own durable lifecycle. A
 // retry is therefore a new Run rather than an invisible overwrite of the
 // failed attempt. Usage is applied only by the terminal event.
-func (a *Agent) completeRun(ctx context.Context, turnID string, req *request, yield func(Message, error) bool) (*response, error) {
+func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, req *request, yield func(Message, error) bool) (resp *response, runErr error) {
 	runID := uuid.NewString()
 	if err := a.recordEvents(RuntimeEvent{
 		Type: EventRunStarted, TurnID: turnID, RunID: runID, Model: req.model,
@@ -570,7 +574,60 @@ func (a *Agent) completeRun(ctx context.Context, turnID string, req *request, yi
 		return nil, err
 	}
 
-	resp, runErr := a.complete(ctx, req, yield)
+	toolCtx, cancelTools := context.WithCancel(ctx)
+	defer cancelTools()
+	round := streamToolRound{agent: a, ctx: toolCtx, tools: req.tools}
+	var committed []Message
+	consumerOpen := true
+	emit := func(message Message, err error) bool {
+		if consumerOpen {
+			consumerOpen = yield(message, err)
+		}
+		if !consumerOpen {
+			cancelTools()
+		}
+		return consumerOpen
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			cancelTools()
+			_ = round.drain(func(Message, error) bool { return false })
+			panic(p)
+		}
+		if runErr != nil && req.requireFinish {
+			// A finish marker is only valid after the response completes. Give
+			// retained markers a rejected result before retrying a failed stream.
+			_, _, finishErr := a.resolveFinishCalls(&response{messages: committed, incomplete: true}, extractToolCalls(committed), "", emit)
+			runErr = errors.Join(runErr, finishErr)
+		}
+		runErr = errors.Join(runErr, round.drain(emit))
+		if resp != nil {
+			resp.dispatched = len(round.calls)
+		}
+	}()
+	streamReq := *req
+	streamReq.onOutputItem = func(messages []Message) error {
+		if err := a.appendMessages(messages...); err != nil {
+			return err
+		}
+		committed = append(committed, messages...)
+		EmitStreamEvent(ctx, StreamEventCommit)
+		for _, call := range extractToolCalls(messages) {
+			if req.requireFinish && call.Name == finishToolName {
+				continue
+			}
+			open := emit(toolCallMessage(call), nil)
+			round.start(call)
+			if !open {
+				return errYieldStopped
+			}
+		}
+		return nil
+	}
+	resp, runErr = a.complete(inferenceCtx, &streamReq, emit)
+	if runErr == nil && resp != nil && (len(resp.messages) < len(committed) || !messagesEqual(committed, resp.messages[:len(committed)])) {
+		runErr = fmt.Errorf("final response does not match its committed output items")
+	}
 	if resp != nil {
 		chargeTaskUsage(ctx, resp.usage)
 	}
@@ -598,7 +655,7 @@ func (a *Agent) completeRun(ctx context.Context, turnID string, req *request, yi
 	}
 	events := make([]RuntimeEvent, 0, 1)
 	if runErr == nil && resp != nil {
-		events = append(events, messageEvents(resp.messages...)...)
+		events = append(events, messageEvents(resp.messages[len(committed):]...)...)
 	}
 	events = append(events, event)
 	if err := a.recordEvents(events...); err != nil {

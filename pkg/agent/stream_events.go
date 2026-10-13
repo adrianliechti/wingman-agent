@@ -9,17 +9,18 @@ type StreamEvent uint8
 
 const (
 	// StreamEventReset asks a consumer to discard visible deltas from the
-	// current failed attempt before the agent retries the request.
+	// current failed attempt since its last commit before retrying the request.
 	StreamEventReset StreamEvent = iota + 1
-	// StreamEventCommit marks the current streamed attempt as accepted into
-	// retained history. A later retry reset must not discard its output.
+	// StreamEventCommit marks completed output as accepted into retained
+	// history. It can occur during a response, before its terminal event.
+	// A later retry reset must not discard output preceding this checkpoint.
 	StreamEventCommit
 )
 
 // StreamEventHandlers declares the lifecycle operations a stream consumer can
 // actually perform. In particular, a non-nil Reset is a capability promise:
-// the consumer can discard every delta from the failed attempt before Send
-// retries it.
+// the consumer can discard uncommitted deltas from the failed attempt before
+// Send retries it.
 type StreamEventHandlers struct {
 	Reset  func()
 	Commit func()

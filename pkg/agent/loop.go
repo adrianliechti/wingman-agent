@@ -87,7 +87,7 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 	defer func() { inference.End(streamingInferenceResult(resp, err, captureContent)) }()
 
 	for attempt := 0; ; attempt++ {
-		resp, err = a.completeRun(inferenceCtx, turnID, req, yield)
+		resp, err = a.completeRun(ctx, inferenceCtx, turnID, req, yield)
 		if err == nil || errors.Is(err, errYieldStopped) {
 			return resp, err
 		}
@@ -121,11 +121,14 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 		} else if !waitForRetry(ctx, delay) {
 			return resp, ctx.Err()
 		}
-		if isContextOverflowError(err) || isReasoningReplayError(err) {
-			req.messages = a.requestMessages()
-			if captureContent {
-				inference.SetContent(telemetryInferenceContent(req.messages, req.instructions, req.tools))
-			}
+		// Completed items and tool results survive stream failures. Rebuild
+		// every retry from that history, as with compaction/replay recovery.
+		if repairErr := a.repairToolHistory(req.preserveReasoning); repairErr != nil {
+			return resp, repairErr
+		}
+		req.messages = a.requestMessages()
+		if captureContent {
+			inference.SetContent(telemetryInferenceContent(req.messages, req.instructions, req.tools))
 		}
 		if ctx.Err() != nil {
 			return resp, ctx.Err()
