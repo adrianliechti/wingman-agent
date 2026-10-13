@@ -161,7 +161,10 @@ export function ChatPanel({
 }: ChatPanelProps) {
 	const scheme = useColorScheme();
 	const toast = useToast();
-	const { settings, setSettings } = useSessionSettings(sessionId, draftId);
+	const { settings, setSettings, retryModels } = useSessionSettings(
+		sessionId,
+		draftId,
+	);
 	const {
 		text: input,
 		files,
@@ -1110,7 +1113,11 @@ export function ChatPanel({
 											)
 										}
 									/>
-									<ModelPicker settings={settings} setSettings={setSettings} />
+									<ModelPicker
+										settings={settings}
+										setSettings={setSettings}
+										retryModels={retryModels}
+									/>
 								</div>
 
 								<div className="flex shrink-0 items-center gap-0">

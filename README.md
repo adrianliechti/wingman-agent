@@ -216,12 +216,14 @@ wingman exec --ephemeral "Triage this repository"
 | `wingman server` | Web UI with the same agent picker | Same shared registry and behavior as the TUI |
 | `wingman acp` or `wingman acp wingman` | Wingman over ACP stdio | Built-in Wingman configuration |
 | `wingman acp {claude,codex,pi}` | Native agent bridge over ACP stdio | Native CLI configuration/login |
-| `wingman acp {claude,codex,pi} --backend wingman` | Agent bridge over ACP stdio | Wingman backend via `WINGMAN_URL` |
-| `wingman run <target>` | Wrapped external CLI | Wingman via `WINGMAN_URL` |
+| `wingman acp {claude,codex,pi} --backend wingman` | Agent bridge over ACP stdio | Wingman gateway (default: `http://localhost:4242`) |
+| `wingman run <target>` | Wrapped external CLI | Wingman gateway (default: `http://localhost:4242`) |
 
 `wingman acp <target>` defaults to the native backend. This keeps subscription
 login and session behavior aligned with selecting the same agent in the TUI or
 Web UI; `--backend wingman` is the explicit opt-in to provider overrides.
+Native agents use their own configuration and login; they do not require
+`WINGMAN_URL`, `WINGMAN_TOKEN`, or a running Wingman gateway.
 
 ## ⚙️ Configuration
 
@@ -231,8 +233,8 @@ Web UI; `--backend wingman` is the explicit opt-in to provider overrides.
 
 | Variable | Description |
 |----------|-------------|
-| `WINGMAN_URL` | Wingman server URL (takes priority over Ollama and OpenAI variables) |
-| `WINGMAN_TOKEN` | Wingman server authentication token |
+| `WINGMAN_URL` | Optional gateway root URL (default: `http://localhost:4242`); an explicit value takes priority over other providers |
+| `WINGMAN_TOKEN` | Gateway authentication token, required only if the gateway requires authentication; also applies to the localhost default |
 | `OPENAI_API_KEY` | API key for an OpenAI-compatible backend |
 | `OPENAI_BASE_URL` | OpenAI-compatible API endpoint (default: `https://api.openai.com/v1`) |
 | `OPENROUTER_API_KEY` | OpenRouter API key; connects to `https://openrouter.ai/api/v1` |
@@ -241,7 +243,11 @@ Web UI; `--backend wingman` is the explicit opt-in to provider overrides.
 
 Provider priority is `WINGMAN_URL`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, then Ollama
 (`OLLAMA_HOST` or `OLLAMA_API_KEY`). When none is set, Wingman connects to an OpenAI-compatible
-backend at `http://localhost:4242/v1`.
+backend at `http://localhost:4242/v1`. Empty or whitespace-only values count as unset.
+The gateway must be running separately; `wingman server` serves the Web UI on
+port 9000 by default and does not start a model gateway. Model discovery has a
+10-second deadline, including transient retries, and runs in the background
+for the built-in agent's TUI and Web UI.
 
 **Models & Reasoning** — Agent and Plan share the selected model and effort. The initial model defaults to an available medium model; subagents inherit the selection unless explicitly overridden. Unattended is a separate setting: approve actions automatically and continue without questions. Plan stays read-only.
 
@@ -936,9 +942,13 @@ wingman run pi [args...]
 ```
 
 Each wrapper automatically configures the target CLI with the correct endpoint
-and authentication. `WINGMAN_URL` is required. These wrappers are deliberately
+and authentication. `WINGMAN_URL` is optional and defaults to
+`http://localhost:4242`; set it for another gateway. These wrappers are deliberately
 Wingman-backed and are separate from the native subscription-backed
 `wingman --agent <name>` modes.
+The Codex and Claude CLI wrappers discover models before launching, retry
+transient failures, and report configuration or availability errors within
+10 seconds. No separate health probe or stored readiness flag is needed.
 
 The Codex wrapper also supplies an embedded model catalog filtered to the
 OpenAI models advertised by the Wingman backend, so Codex's in-app `/model`

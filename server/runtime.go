@@ -21,6 +21,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code/agents"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 )
 
 const instanceHeader = "X-Wingman-Instance"
@@ -79,18 +80,19 @@ func (s *Server) checkInstance(next http.Handler) http.Handler {
 // workspace lifetime. Browser navigation never replaces execution ownership.
 type backendRuntime struct {
 	*Server
-	id          string
-	agent       code.Agent
-	turns       *code.TurnManager
-	mu          sync.Mutex
-	sessions    map[string]*sessionController
-	createMu    sync.Mutex
-	creations   map[string]creationReceipt
-	taskPumpMu  sync.Mutex
-	taskPumps   map[*task.Registry]bool
-	operationMu sync.Mutex
-	operations  sync.WaitGroup
-	closing     bool
+	id             string
+	agent          code.Agent
+	turns          *code.TurnManager
+	mu             sync.Mutex
+	sessions       map[string]*sessionController
+	createMu       sync.Mutex
+	creations      map[string]creationReceipt
+	taskPumpMu     sync.Mutex
+	taskPumps      map[*task.Registry]bool
+	operationMu    sync.Mutex
+	operations     sync.WaitGroup
+	closing        bool
+	modelDiscovery singleflight.Group
 }
 
 // Operations may nest (commands refresh metadata), but admission closes before
@@ -244,6 +246,7 @@ func (s *Server) registerSessionRoutes(r chi.Router) {
 		r.HandleFunc("/events", s.handleWebSocket)
 		r.Route("/backends/{backend}", func(r chi.Router) {
 			r.Get("/settings", s.backendOperation((*backendRuntime).handleDefaultSettings))
+			r.Post("/models/refresh", s.backendOperation((*backendRuntime).handleRefreshModels))
 			r.Get("/sessions", s.backendOperation((*backendRuntime).handleSessions))
 			r.Post("/sessions", s.backendHandler((*backendRuntime).handleNewSession))
 			r.Route("/sessions/{id}", func(r chi.Router) {

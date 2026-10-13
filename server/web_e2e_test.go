@@ -26,9 +26,10 @@ import (
 type webE2EModel struct {
 	filePath string
 
-	requests      atomic.Int32
-	toolRequests  atomic.Int32
-	steerRequests atomic.Int32
+	requests         atomic.Int32
+	toolRequests     atomic.Int32
+	steerRequests    atomic.Int32
+	discoveryFailure atomic.Bool
 
 	steerStarted chan struct{}
 	steerRelease chan struct{}
@@ -193,7 +194,15 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/models":
 		w.Header().Set("Content-Type", "application/json")
+		if m.discoveryFailure.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"error":{"message":"discovery unavailable"}}`)
+			return
+		}
 		fmt.Fprint(w, `{"object":"list","data":[{"id":"gpt-5.4","object":"model"}]}`)
+	case "/model-discovery":
+		m.discoveryFailure.Store(r.URL.Query().Get("fail") == "true")
+		w.WriteHeader(http.StatusNoContent)
 	case "/v1/responses":
 		m.requests.Add(1)
 		body, _ := io.ReadAll(r.Body)

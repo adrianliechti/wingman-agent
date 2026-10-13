@@ -23,10 +23,11 @@ type blockedModelAgent struct {
 	stopped chan struct{}
 }
 
-func (a *blockedModelAgent) FetchModels(ctx context.Context) {
+func (a *blockedModelAgent) FetchModels(ctx context.Context) error {
 	close(a.started)
 	<-ctx.Done()
 	close(a.stopped)
+	return ctx.Err()
 }
 
 type startupDiffWriter struct {

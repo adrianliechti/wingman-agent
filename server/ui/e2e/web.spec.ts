@@ -1108,6 +1108,110 @@ test("composer harness switching preserves existing conversations and their draf
 	).toBeVisible();
 });
 
+test("model discovery warning is compact and scoped to Wingman", async ({
+	page,
+}) => {
+	await mockACPBackend(page);
+	const message = "Connection refused at http://localhost:4242/v1/models";
+	await page.route(/\/api\/v2\/backends\/wingman\/settings$/, async (route) => {
+		const response = await route.fetch();
+		await route.fulfill({
+			json: { ...(await response.json()), modelsError: message },
+		});
+	});
+	const input = await composer(page);
+	const warning = page
+		.getByLabel("Model discovery failed")
+		.filter({ visible: true });
+	await expect(warning).toBeVisible();
+	await page
+		.locator("[data-composer-model] button")
+		.filter({ visible: true })
+		.click();
+	const picker = page.getByRole("dialog", {
+		name: "Model and reasoning effort",
+	});
+	await expect(picker.getByText(message, { exact: true })).toHaveCount(0);
+	await expect(picker.locator("details")).toHaveCount(0);
+	await expect(
+		picker.getByRole("button", { name: "Retry model discovery", exact: true }),
+	).toBeVisible();
+	await page.keyboard.press("Escape");
+	await expect(input).toBeEnabled();
+	await page.keyboard.press("Control+k");
+	const palette = page.getByRole("dialog", { name: "Command palette" });
+	await palette
+		.getByRole("combobox", { name: "Search commands" })
+		.fill("new chat");
+	await palette
+		.getByRole("option", { name: "New Chat (Codex)", exact: true })
+		.click();
+	await expect(
+		page.getByPlaceholder("Message Codex…").filter({ visible: true }),
+	).toBeVisible();
+	await expect(warning).toHaveCount(0);
+});
+
+test("model discovery retry recovers without restarting the workspace", async ({
+	page,
+}) => {
+	const refreshURL = "/api/v2/backends/wingman/models/refresh";
+	await page.request.post(`${controlURL()}/model-discovery?fail=true`);
+	try {
+		const failure = await page.request.post(refreshURL);
+		expect(failure.status()).toBe(502);
+		await composer(page);
+		const warning = page
+			.getByLabel("Model discovery failed")
+			.filter({ visible: true });
+		await expect(warning).toBeVisible();
+		await page
+			.locator("[data-composer-model] button")
+			.filter({ visible: true })
+			.click();
+		const picker = page.getByRole("dialog", {
+			name: "Model and reasoning effort",
+		});
+		const retry = picker.getByRole("button", {
+			name: "Retry model discovery",
+			exact: true,
+		});
+		await expect(retry).toHaveText("");
+		await expect(retry.locator("svg")).toBeVisible();
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await page.route(
+			`**${refreshURL}`,
+			async (route) => {
+				await gate;
+				await route.continue();
+			},
+			{ times: 1 },
+		);
+		try {
+			await retry.click();
+			await expect(retry).toBeDisabled();
+			await expect(retry).toHaveAttribute("aria-busy", "true");
+		} finally {
+			release();
+		}
+		await expect(retry).toBeEnabled();
+		await expect(warning).toBeVisible();
+		await page.request.post(`${controlURL()}/model-discovery?fail=false`);
+		await retry.click();
+		await expect(warning).toHaveCount(0);
+		await expect(
+			picker.getByRole("option", { name: "GPT 5.4", exact: true }),
+		).toBeVisible();
+		await expect(retry).toHaveCount(0);
+	} finally {
+		await page.request.post(`${controlURL()}/model-discovery?fail=false`);
+		await page.request.post(refreshURL);
+	}
+});
+
 test("new ACP chats load mode and model before the first message", async ({
 	page,
 }) => {
@@ -6589,8 +6693,11 @@ test("recovery: disconnected workspace keeps drafting and loaded files usable", 
 	await page.getByRole("treeitem", { name: /editable\.txt/ }).dblclick();
 	await expect(page.locator(".monaco-editor").first()).toBeVisible();
 	disconnect();
+	const warning = page.getByRole("status").filter({ hasText: "Reconnecting" });
+	await expect(warning).toBeVisible();
+	await expect(warning).toHaveText("ReconnectingRetry");
 	await expect(
-		page.getByText(/Reconnecting · drafts stay available/),
+		warning.getByRole("button", { name: "Retry", exact: true }),
 	).toBeVisible();
 	await page
 		.locator(".monaco-editor .view-line", { hasText: "original" })

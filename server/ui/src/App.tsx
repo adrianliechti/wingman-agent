@@ -3712,10 +3712,10 @@ export default function App() {
 			{!connected && (
 				<div
 					role="status"
-					className="absolute top-2 right-3 z-140 flex items-center gap-2 rounded border border-border bg-bg px-3 py-2 text-[12px] text-fg-muted shadow"
+					title="Reconnecting to Wingman. Your drafts remain available."
+					className="absolute top-2 right-3 z-140 flex items-center gap-1.5 rounded border border-border bg-bg px-2 py-1 text-[11px] text-fg-muted shadow"
 				>
-					<Loader2 size={14} className="animate-spin" /> Reconnecting · drafts
-					stay available
+					<Loader2 size={12} className="animate-spin" /> Reconnecting
 					<button className="underline" onClick={() => client.focus()}>
 						Retry
 					</button>

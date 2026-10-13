@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,7 +29,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	"github.com/adrianliechti/wingman-agent/pkg/remote"
 	"github.com/adrianliechti/wingman-agent/pkg/settings"
-	"github.com/adrianliechti/wingman-agent/pkg/system"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
 	"github.com/adrianliechti/wingman-agent/pkg/watch"
 )
@@ -226,20 +226,9 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	})
 
 	s.background.Go(func() {
-		wa.FetchModels(serverCtx)
-		if serverCtx.Err() != nil {
-			return
+		if err := rt.refreshModels(); err != nil && serverCtx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "Model discovery warning: %v\n", err)
 		}
-		rt.mu.Lock()
-		views := make([]*sessionController, 0, len(rt.sessions))
-		for _, view := range rt.sessions {
-			views = append(views, view)
-		}
-		rt.mu.Unlock()
-		for _, view := range views {
-			view.refreshSettings()
-		}
-		s.broadcast(Frame{Type: EvtModelChanged})
 	})
 
 	s.mux = chi.NewRouter()
@@ -311,13 +300,13 @@ func (s *Server) Run(ctx context.Context, port int) error {
 	defer stop()
 	defer s.Close()
 
-	resolvedPort, err := resolvePort(port)
+	listener, err := listenLocal(port)
 	if err != nil {
 		return err
 	}
+	defer listener.Close()
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf("localhost:%d", resolvedPort),
 		Handler: s,
 	}
 
@@ -333,14 +322,14 @@ func (s *Server) Run(ctx context.Context, port int) error {
 		}
 	}()
 
-	url := fmt.Sprintf("http://localhost:%d", resolvedPort)
+	url := fmt.Sprintf("http://localhost:%d", listener.Addr().(*net.TCPAddr).Port)
 	fmt.Fprintf(os.Stderr, "Wingman running at %s\n", url)
 
 	if !s.noBrowser {
 		openBrowser(url)
 	}
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
@@ -775,9 +764,12 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-func resolvePort(port int) (int, error) {
-	if port != 0 {
-		return port, nil
+// Keep the selected socket bound before announcing the URL or opening a browser.
+func listenLocal(port int) (net.Listener, error) {
+	if port == 0 {
+		if listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", DefaultPort)); err == nil {
+			return listener, nil
+		}
 	}
-	return system.FreePort(DefaultPort)
+	return net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 }

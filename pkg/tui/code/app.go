@@ -662,9 +662,14 @@ func (a *App) Run() error {
 
 	if fetcher, ok := a.agent.(modelFetcher); ok {
 		go func() {
-			fetcher.FetchModels(startupCtx)
+			err := fetcher.FetchModels(startupCtx)
 			if startupCtx.Err() == nil {
-				a.post(a.invalidate)
+				a.post(func() {
+					if err != nil {
+						a.appendChat(cellError("Model discovery failed", err.Error(), a.width()))
+					}
+					a.invalidate()
+				})
 			}
 		}()
 	}

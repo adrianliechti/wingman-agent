@@ -3,9 +3,9 @@ package external
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/internal/provider"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 
 	"github.com/openai/openai-go/v3"
@@ -43,46 +43,27 @@ func WithDefaults(options *Options) *Options {
 		options = new(Options)
 	}
 
-	if options.WingmanURL == "" {
-		options.WingmanURL = os.Getenv("WINGMAN_URL")
-	}
-
-	if options.WingmanToken == "" {
-		val := os.Getenv("WINGMAN_TOKEN")
-
-		if val == "" {
-			val = "-"
-		}
-
-		options.WingmanToken = val
-	}
+	options.WingmanURL, options.WingmanToken = provider.Wingman(options.WingmanURL, options.WingmanToken)
 
 	return options
 }
 
 func AvailableModels(ctx context.Context, options *Options) (map[string]bool, error) {
 	options = WithDefaults(options)
-	if strings.TrimSpace(options.WingmanURL) == "" {
-		return nil, fmt.Errorf("WINGMAN_URL is required")
-	}
 
 	client := openai.NewClient(
 		option.WithBaseURL(strings.TrimRight(options.WingmanURL, "/")+"/v1"),
 		option.WithAPIKey(options.WingmanToken),
 	)
 
-	iter := client.Models.ListAutoPaging(ctx)
-
-	available := make(map[string]bool)
-
-	for iter.Next() {
-		available[iter.Current().ID] = true
+	ids, err := provider.ModelIDs(ctx, client)
+	if err != nil {
+		return nil, fmt.Errorf("Wingman model discovery at %s failed; check that the gateway is running and WINGMAN_URL/WINGMAN_TOKEN are correct: %w", options.WingmanURL, err)
 	}
-
-	if err := iter.Err(); err != nil {
-		return nil, err
+	available := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		available[id] = true
 	}
-
 	return available, nil
 }
 

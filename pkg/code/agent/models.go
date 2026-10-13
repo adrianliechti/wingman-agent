@@ -159,18 +159,28 @@ func (a *Agent) SetModel(_ context.Context, sessionID, id string) error {
 	return a.saveSessionSettingsLocked(s)
 }
 
-func (a *Agent) FetchModels(ctx context.Context) {
+func (a *Agent) FetchModels(ctx context.Context) error {
 	models, err := a.cfg.Models(ctx)
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	a.modelDiscoveryErr = err
 	if err != nil {
-		return
+		return err
 	}
 	ids := make(map[string]bool, len(models))
 	for _, m := range models {
 		ids[m.ID] = true
 	}
-	a.modelMu.Lock()
 	a.upstreamModels = ids
-	a.modelMu.Unlock()
+	return nil
+}
+
+// ModelDiscoveryError reports discovery failure without discarding the last
+// known model list or preventing the use of an explicitly configured model.
+func (a *Agent) ModelDiscoveryError() error {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	return a.modelDiscoveryErr
 }
 
 var effortValues = append([]string{"auto"}, model.EffortLevels()...)

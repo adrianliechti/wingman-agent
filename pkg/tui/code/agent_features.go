@@ -11,7 +11,7 @@ import (
 )
 
 type modelFetcher interface {
-	FetchModels(context.Context)
+	FetchModels(context.Context) error
 }
 
 type sessionSaver interface {

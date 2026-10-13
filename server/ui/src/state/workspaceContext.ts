@@ -4,8 +4,8 @@ import {
 	useEffect,
 	useSyncExternalStore,
 } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { fetchJSON } from "../api/http.ts";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { fetchJSON, fetchOK } from "../api/http.ts";
 import {
 	EMPTY_SETTINGS,
 	isDraft,
@@ -43,6 +43,7 @@ export function draftSettingsKey(key: string, draftId: string) {
 	return JSON.stringify([splitSessionKey(key).backendId, draftId]);
 }
 export function useSessionSettings(key = "", draftId = key) {
+	const queryClient = useQueryClient();
 	const client = workspaceClient();
 	const { backend, drafts, setDraft } = useWorkspace();
 	const draft = isDraft(key);
@@ -68,5 +69,17 @@ export function useSessionSettings(key = "", draftId = key) {
 		if (draft) setDraft(settingsKey, patchDraftSettings(settings, patch));
 		else await client.command(key, { type: "settings", ...patch });
 	};
-	return { settings, setSettings };
+	const retryModels = async () => {
+		try {
+			await fetchOK(
+				`/api/v2/backends/${encodeURIComponent(owner)}/models/refresh`,
+				{ method: "POST" },
+			);
+		} finally {
+			await queryClient.invalidateQueries({
+				queryKey: backendSettingsQuery(owner).queryKey,
+			});
+		}
+	};
+	return { settings, setSettings, retryModels };
 }

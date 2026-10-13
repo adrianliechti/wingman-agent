@@ -13,6 +13,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 
+	"github.com/adrianliechti/wingman-agent/internal/provider"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
@@ -245,15 +246,15 @@ func (c *Config) Utility(ctx context.Context, instructions, input string) (strin
 }
 
 func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {
-	resp, err := c.client.Models.List(ctx)
+	ids, err := provider.ModelIDs(ctx, *c.client)
 	if err != nil {
 		return nil, err
 	}
 
 	var models []ModelInfo
 
-	for _, m := range resp.Data {
-		models = append(models, ModelInfo{ID: m.ID})
+	for _, id := range ids {
+		models = append(models, ModelInfo{ID: id})
 	}
 
 	return models, nil
@@ -321,8 +322,7 @@ func defaultTelemetryOptions() telemetry.Options {
 }
 
 func envPresent(name string) bool {
-	_, ok := os.LookupEnv(name)
-	return ok
+	return strings.TrimSpace(os.Getenv(name)) != ""
 }
 
 // DefaultModel returns the model requested via environment; WINGMAN_MODEL
@@ -405,30 +405,25 @@ func clientConfig() (baseURL, token string) {
 		}
 	}
 
-	return "http://localhost:4242/v1", "-"
+	baseURL, token = provider.Wingman("", "")
+	return baseURL + "/v1", token
 }
 
 func wingmanConfig() (baseURL, token string, ok bool) {
-	url, ok := os.LookupEnv("WINGMAN_URL")
-	if !ok {
+	if !envPresent("WINGMAN_URL") {
 		return "", "", false
 	}
-
-	token = os.Getenv("WINGMAN_TOKEN")
-	if token == "" {
-		token = "-"
-	}
-
-	return strings.TrimRight(url, "/") + "/v1", token, true
+	baseURL, token = provider.Wingman("", "")
+	return baseURL + "/v1", token, true
 }
 
 func openAIConfig() (baseURL, token string, ok bool) {
-	token, ok = os.LookupEnv("OPENAI_API_KEY")
-	if !ok {
+	token = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	if token == "" {
 		return "", "", false
 	}
 
-	baseURL = os.Getenv("OPENAI_BASE_URL")
+	baseURL = strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
@@ -437,8 +432,8 @@ func openAIConfig() (baseURL, token string, ok bool) {
 }
 
 func openRouterConfig() (baseURL, token string, ok bool) {
-	token, ok = os.LookupEnv("OPENROUTER_API_KEY")
-	if !ok {
+	token = strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
+	if token == "" {
 		return "", "", false
 	}
 
@@ -446,8 +441,8 @@ func openRouterConfig() (baseURL, token string, ok bool) {
 }
 
 func ollamaConfig() (baseURL, token string, ok bool) {
-	host := os.Getenv("OLLAMA_HOST")
-	token = os.Getenv("OLLAMA_API_KEY")
+	host := strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
+	token = strings.TrimSpace(os.Getenv("OLLAMA_API_KEY"))
 	if host == "" && token == "" {
 		return "", "", false
 	}

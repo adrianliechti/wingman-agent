@@ -16,6 +16,7 @@ export type SessionRef = {
 };
 export type SessionSettings = {
 	models: ModelInfo[];
+	modelsError?: string;
 	model: string;
 	effort: string;
 	efforts: string[];

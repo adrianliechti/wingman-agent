@@ -40,6 +40,9 @@ func isolateHomes(t *testing.T) (string, string) {
 
 func TestNativeOptionsPreserveEnvironmentWithoutProviderOverrides(t *testing.T) {
 	isolateHomes(t)
+	// Native agents neither resolve nor validate Wingman's gateway settings.
+	t.Setenv("WINGMAN_URL", "://invalid-gateway")
+	t.Setenv("WINGMAN_TOKEN", "gateway-token")
 	env := []string{
 		"PATH=/usr/bin",
 		"ANTHROPIC_API_KEY=anthropic-key",

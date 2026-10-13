@@ -219,7 +219,27 @@ func TestClientConfigProviderPriorityAndFallback(t *testing.T) {
 	assertClientConfig(t, "http://ollama.test/v1", "ollama-secret")
 	unsetEnv(t, "OLLAMA_HOST")
 	unsetEnv(t, "OLLAMA_API_KEY")
+	assertClientConfig(t, "http://localhost:4242/v1", "wingman-secret")
+	unsetEnv(t, "WINGMAN_TOKEN")
 	assertClientConfig(t, "http://localhost:4242/v1", "-")
+}
+
+func TestClientConfigIgnoresBlankProviders(t *testing.T) {
+	for _, name := range []string{"WINGMAN_URL", "WINGMAN_TOKEN", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENROUTER_API_KEY", "OLLAMA_HOST", "OLLAMA_API_KEY"} {
+		t.Setenv(name, " \t")
+	}
+	assertClientConfig(t, "http://localhost:4242/v1", "-")
+	if got := defaultTelemetryOptions().ProviderName; got != "wingman" {
+		t.Fatalf("provider = %s", got)
+	}
+	t.Setenv("OPENAI_API_KEY", " openai-token ")
+	assertClientConfig(t, "https://api.openai.com/v1", "openai-token")
+	if got := defaultTelemetryOptions().ProviderName; got != "openai" {
+		t.Fatalf("provider = %s", got)
+	}
+	t.Setenv("WINGMAN_URL", " https://gateway.test/prefix/ ")
+	t.Setenv("WINGMAN_TOKEN", " gateway-token ")
+	assertClientConfig(t, "https://gateway.test/prefix/v1", "gateway-token")
 }
 
 func TestDefaultTelemetryOptionsFollowBackend(t *testing.T) {

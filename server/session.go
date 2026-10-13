@@ -43,14 +43,15 @@ type PromptView struct {
 }
 
 type SessionSettings struct {
-	Models     []modelOption `json:"models"`
-	Model      string        `json:"model"`
-	Effort     string        `json:"effort"`
-	Efforts    []string      `json:"efforts"`
-	Mode       string        `json:"mode"`
-	Modes      []modeOption  `json:"modes"`
-	Unattended *bool         `json:"unattended,omitempty"`
-	CanDelete  bool          `json:"canDelete"`
+	Models      []modelOption `json:"models"`
+	Model       string        `json:"model"`
+	Effort      string        `json:"effort"`
+	Efforts     []string      `json:"efforts"`
+	Mode        string        `json:"mode"`
+	Modes       []modeOption  `json:"modes"`
+	Unattended  *bool         `json:"unattended,omitempty"`
+	CanDelete   bool          `json:"canDelete"`
+	ModelsError string        `json:"modelsError,omitempty"`
 }
 
 type modelOption struct {
@@ -169,6 +170,11 @@ func (b *backendRuntime) settings(sid string) SessionSettings {
 	effort, efforts := b.agent.Effort(sid)
 	modes, mode := b.agent.Modes(sid)
 	state := SessionSettings{Model: model, Effort: effort, Efforts: append([]string{}, efforts...), Mode: mode, Modes: toModeState(modes, mode).Modes, Models: []modelOption{}, CanDelete: supportsDelete(b.agent)}
+	if discovery, ok := b.agent.(interface{ ModelDiscoveryError() error }); ok {
+		if err := discovery.ModelDiscoveryError(); err != nil {
+			state.ModelsError = err.Error()
+		}
+	}
 	if policy, ok := b.agent.(code.UnattendedAgent); ok {
 		enabled := policy.Unattended(sid)
 		state.Unattended = &enabled

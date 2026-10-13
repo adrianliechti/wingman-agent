@@ -78,10 +78,7 @@ func Configure(ctx context.Context, options *Options) error {
 		return err
 	}
 
-	cfg, err := newGatewayConfig(options)
-	if err != nil {
-		return err
-	}
+	cfg := newGatewayConfig(options)
 
 	targets, err := targetPaths()
 	if err != nil {
@@ -117,16 +114,13 @@ type gatewayConfig struct {
 	AuthToken string
 }
 
-func newGatewayConfig(options *Options) (gatewayConfig, error) {
+func newGatewayConfig(options *Options) gatewayConfig {
 	options = external.WithDefaults(options)
-	if strings.TrimSpace(options.WingmanURL) == "" {
-		return gatewayConfig{}, fmt.Errorf("WINGMAN_URL is required")
-	}
 
 	return gatewayConfig{
 		BaseURL:   options.WingmanURL,
 		AuthToken: options.WingmanToken,
-	}, nil
+	}
 }
 
 func Restore() error {

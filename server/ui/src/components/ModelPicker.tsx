@@ -1,4 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import type { SettingsPatch } from "../state/workspaceContext.ts";
 import type { SessionSettings } from "../state/sessionStore.ts";
@@ -9,9 +10,10 @@ import { FloatingSurface } from "./ui/Floating";
 interface Props {
 	settings: SessionSettings;
 	setSettings: (patch: SettingsPatch) => Promise<void>;
+	retryModels: () => Promise<void>;
 }
 
-export function ModelPicker({ settings, setSettings }: Props) {
+export function ModelPicker({ settings, setSettings, retryModels }: Props) {
 	const toast = useToast();
 	const models = settings.models;
 	const model = settings.model;
@@ -22,6 +24,7 @@ export function ModelPicker({ settings, setSettings }: Props) {
 	const [dragging, setDragging] = useState(false);
 	const [button, setButton] = useState<HTMLButtonElement | null>(null);
 	const trackRef = useRef<HTMLDivElement>(null);
+	const discoveryMutation = useMutation({ mutationFn: retryModels });
 
 	const modelMutation = useMutation({
 		mutationFn: (id: string) => setSettings({ model: id }),
@@ -114,7 +117,7 @@ export function ModelPicker({ settings, setSettings }: Props) {
 		commit(index);
 	};
 
-	if (!model) return null;
+	if (!model && !settings.modelsError) return null;
 
 	return (
 		<div data-composer-model className="relative min-w-0 max-w-[260px]">
@@ -127,7 +130,14 @@ export function ModelPicker({ settings, setSettings }: Props) {
 				aria-haspopup="dialog"
 				aria-expanded={open}
 			>
-				<span className="truncate">{currentName}</span>
+				{settings.modelsError && (
+					<AlertTriangle
+						size={12}
+						className="shrink-0 text-warning"
+						aria-label="Model discovery failed"
+					/>
+				)}
+				<span className="truncate">{currentName || "Models unavailable"}</span>
 				{effort !== "auto" && effort !== "default" && (
 					<>
 						<span className="text-fg-dim">·</span>
@@ -144,13 +154,36 @@ export function ModelPicker({ settings, setSettings }: Props) {
 				label="Model and reasoning effort"
 				className="z-[100] min-w-[240px] max-w-[360px] bg-bg-elevated/95 backdrop-blur-sm border border-border rounded-md shadow-xl"
 			>
+				{settings.modelsError && (
+					<div className="flex items-center justify-between gap-3 border-b border-border px-3 py-1.5 text-[11px] text-warning">
+						<span>Model discovery failed</span>
+						<button
+							type="button"
+							className="shrink-0 rounded p-0.5 cursor-pointer hover:bg-bg-hover disabled:opacity-50 disabled:cursor-default"
+							aria-label="Retry model discovery"
+							title="Retry model discovery"
+							aria-busy={discoveryMutation.isPending}
+							disabled={discoveryMutation.isPending}
+							onClick={() => discoveryMutation.mutate()}
+						>
+							<RefreshCw
+								size={13}
+								className={
+									discoveryMutation.isPending ? "animate-spin" : undefined
+								}
+							/>
+						</button>
+					</div>
+				)}
 				<div
 					className="py-1 max-h-[260px] overflow-y-auto"
 					role="listbox"
 					aria-label="Model"
 				>
 					{models.length === 0 ? (
-						<div className="px-3 py-2 text-[12px] text-fg-dim">Loading…</div>
+						<div className="px-3 py-2 text-[12px] text-fg-dim">
+							{settings.modelsError ? "No models available" : "Loading…"}
+						</div>
 					) : (
 						models.map((m) => (
 							<button

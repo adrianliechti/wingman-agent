@@ -53,12 +53,13 @@ type Agent struct {
 
 	sessionsDir string
 
-	modelMu        sync.Mutex
-	modelID        string
-	effort         string
-	complexModel   string
-	utilityModel   string
-	upstreamModels map[string]bool
+	modelMu           sync.Mutex
+	modelID           string
+	effort            string
+	complexModel      string
+	utilityModel      string
+	upstreamModels    map[string]bool
+	modelDiscoveryErr error
 
 	mu       sync.Mutex
 	sessions map[string]*sessionState
