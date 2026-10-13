@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,11 +27,17 @@ func BinPath() string {
 }
 
 func BuildVars(cfg *ClaudeConfig) map[string]string {
-	return map[string]string{
+	vars := map[string]string{
 
-		"ANTHROPIC_BASE_URL":   cfg.BaseURL,
-		"ANTHROPIC_API_KEY":    "",
-		"ANTHROPIC_AUTH_TOKEN": cfg.AuthToken,
+		"ANTHROPIC_BASE_URL":       cfg.BaseURL,
+		"ANTHROPIC_API_KEY":        "",
+		"ANTHROPIC_AUTH_TOKEN":     cfg.AuthToken,
+		"ANTHROPIC_CUSTOM_HEADERS": "",
+
+		// Do not carry inherited subscription tokens into a gateway run.
+		"CLAUDE_CODE_OAUTH_TOKEN":         "",
+		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN": "",
+		"CLAUDE_CODE_OAUTH_SCOPES":        "",
 
 		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
 		"CLAUDE_CODE_USE_BEDROCK":                    "",
@@ -47,26 +54,60 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 		"ANTHROPIC_DEFAULT_MODEL": cfg.DefaultModel,
 
 		// Background calls must also use a model the gateway serves.
-		"ANTHROPIC_DEFAULT_HAIKU_MODEL":    cmp.Or(cfg.HaikuModel, cfg.DefaultModel),
-		"ANTHROPIC_DEFAULT_SONNET_MODEL":   cfg.SonnetModel,
-		"ANTHROPIC_DEFAULT_OPUS_MODEL":     cfg.OpusModel,
-		"ANTHROPIC_DEFAULT_FABLE_MODEL":    cfg.FableModel,
-		"ANTHROPIC_CUSTOM_MODEL_OPTION":    "",
-		"CLAUDE_CODE_SUBAGENT_MODEL":       "inherit",
-		"CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "0",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":        cmp.Or(cfg.HaikuModel, cfg.DefaultModel),
+		"ANTHROPIC_DEFAULT_SONNET_MODEL":       cfg.SonnetModel,
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":         cfg.OpusModel,
+		"ANTHROPIC_DEFAULT_FABLE_MODEL":        cfg.FableModel,
+		"ANTHROPIC_CUSTOM_MODEL_OPTION":        "",
+		"CLAUDE_CODE_SUBAGENT_MODEL":           "inherit",
+		"CLAUDE_CODE_SUBAGENT_MODEL_FORCE":     "0",
+		"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "1",
+	}
+	maps.Copy(vars, privacyVars())
+	return vars
+}
 
-		"DISABLE_TELEMETRY":                        "1",
-		"DISABLE_ERROR_REPORTING":                  "1",
-		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-		"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":      "1",
-		"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB":         "1",
-		"CLAUDE_CODE_ATTRIBUTION_HEADER":           "0",
-		"CLAUDE_CODE_HIDE_CWD":                     "1",
-		"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":     "1",
+// These values also go in session and parent settings: settings-file env
+// entries otherwise overwrite the process environment, including opt-outs.
+// Keep credentials out of this map because settings are passed on the argv.
+func privacyVars() map[string]string {
+	return map[string]string{
+		"DISABLE_TELEMETRY":                           "1",
+		"DISABLE_ERROR_REPORTING":                     "1",
+		"DISABLE_GROWTHBOOK":                          "1",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":    "1",
+		"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":         "1",
+		"CLAUDE_CODE_ENABLE_FEEDBACK_SURVEY_FOR_OTEL": "0",
+		"CLAUDE_CODE_SEND_FEEDBACK":                   "0",
+		"CLAUDE_CODE_ATTRIBUTION_HEADER":              "0",
+		"CLAUDE_CODE_HIDE_CWD":                        "1",
+
+		// Anthropic's telemetry opt-outs do not disable user-configured OTel.
+		"CLAUDE_CODE_ENABLE_TELEMETRY":        "0",
+		"CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "0",
+		"ENABLE_ENHANCED_TELEMETRY_BETA":      "0",
+		"ENABLE_BETA_TRACING_DETAILED":        "0",
+		"BETA_TRACING_ENDPOINT":               "",
+		"OTEL_METRICS_EXPORTER":               "none",
+		"OTEL_LOGS_EXPORTER":                  "none",
+		"OTEL_TRACES_EXPORTER":                "none",
+		"OTEL_LOG_USER_PROMPTS":               "0",
+		"OTEL_LOG_ASSISTANT_RESPONSES":        "0",
+		"OTEL_LOG_TOOL_CONTENT":               "0",
+		"OTEL_LOG_TOOL_DETAILS":               "0",
+		"OTEL_LOG_RAW_API_BODIES":             "0",
+		"OTEL_LOG_MANAGED_SETTINGS":           "0",
+		"CLAUDE_CODE_PROPAGATE_TRACEPARENT":   "0",
+
+		// Claude forces manual mode when the subprocess scrub is enabled.
+		// Auto mode therefore allows child tools to inherit credentials.
+		"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "0",
+		// Keep auto-mode classifier calls on the regular gateway API path.
+		"CLAUDE_CODE_AUTO_MODE_SERVER": "0",
 
 		"DISABLE_AUTOUPDATER":                "1",
+		"DISABLE_UPDATES":                    "1",
 		"DISABLE_FEEDBACK_COMMAND":           "1",
-		"DISABLE_BUG_COMMAND":                "1",
 		"DISABLE_INSTALLATION_CHECKS":        "1",
 		"DISABLE_EXTRA_USAGE_COMMAND":        "1",
 		"DISABLE_UPGRADE_COMMAND":            "1",
@@ -81,12 +122,16 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 		"DISABLE_COST_WARNINGS": "1",
 
 		"CLAUDE_CODE_DISABLE_ARTIFACT": "1",
+		// The shared supervisor can outlive and bypass this launch environment.
+		"CLAUDE_CODE_DISABLE_AGENT_VIEW": "1",
 
 		"IS_DEMO": "1",
 
 		"CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL": "1",
 
 		"ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+		"CLAUDE_CODE_ENABLE_CFC":      "0",
+		"CLAUDE_CODE_SYNC_SKILLS":     "0",
 
 		"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
 	}
@@ -95,14 +140,33 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 func BuildArgs(cfg *ClaudeConfig) []string {
 	args := []string{"--settings", `{"disableRemoteControl":true}`}
 	if cfg != nil {
+		settings := map[string]any{
+			"disableRemoteControl":      true,
+			"disableClaudeAiConnectors": true,
+			"syncClaudeAiSkills":        false,
+			"syncClaudeAiPlugins":       false,
+			"enableArtifact":            false,
+			"disableAgentView":          true,
+			"voice":                     map[string]bool{"enabled": false},
+			"feedbackDrafts":            "off",
+			"skipWebFetchPreflight":     true,
+			"apiKeyHelper":              "",
+			"otelHeadersHelper":         "",
+			"env":                       privacyVars(),
+		}
+		settingsJSON, _ := json.Marshal(settings)
+		args = []string{"--settings", string(settingsJSON), "--no-chrome"}
 		// The SDK's parent policy channel is required: --settings alone does
 		// not enforce managed model restrictions. Never change machine policy.
 		// "exact" also keeps Default on a listed model; enforceAvailableModels
 		// would additionally ignore ANTHROPIC_DEFAULT_MODEL.
-		policy, _ := json.Marshal(struct {
-			AvailableModels      []string `json:"availableModels"`
-			AvailableModelsMatch string   `json:"availableModelsMatch"`
-		}{cfg.Models, "exact"})
+		settings["availableModels"] = cfg.Models
+		settings["availableModelsMatch"] = "exact"
+		settings["allowedProviders"] = []string{"customEndpoint"}
+		// customEndpoint requires an exact managed endpoint pin. Only the URL,
+		// never the authentication token, is included in the parent policy.
+		settings["env"].(map[string]string)["ANTHROPIC_BASE_URL"] = cfg.BaseURL
+		policy, _ := json.Marshal(settings)
 		args = append(args, "--managed-settings", string(policy))
 	}
 	return args

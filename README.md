@@ -955,6 +955,50 @@ OpenAI models advertised by the Wingman backend, so Codex's in-app `/model`
 selector remains available with the correct model-specific instructions and
 tool metadata.
 
+The Claude and Codex wrappers apply privacy defaults for an enterprise gateway:
+
+- **Claude:** disables Anthropic telemetry, error reports, feedback, feature-flag
+  fetching, updates, remote control, cloud connectors, cloud skill/plugin sync,
+  artifacts, voice, and Chrome integration. OpenTelemetry exports and content
+  logging are disabled separately. WebFetch skips the preflight that would send
+  requested hostnames directly to Anthropic; fetching the URL itself remains
+  available. Local MCP servers, plugins, hooks, and project instructions still
+  load. Detached agent-view sessions are disabled because their shared supervisor
+  can bypass the wrapper's launch environment.
+- **Claude auto mode:** `wingman run claude` starts with `--permission-mode auto`.
+  Claude's subprocess credential scrub forces manual mode, so this wrapper
+  explicitly turns it off. Child tools can therefore inherit credentials.
+  Classifier requests use the normal gateway API rather than server-side review.
+  Explicit trailing permission-mode arguments still override the startup mode.
+- **Codex:** disables analytics, feedback, all OpenTelemetry exporters, hosted
+  web search, apps, the remote plugin catalog, plugin sharing/suggestions, fast
+  and ultrafast modes, realtime conversations, and automatic daemon startup.
+  Local plugins, MCP servers, hooks, and skills retain their configured behavior.
+  The wrapper uses an ephemeral CLI credential store, removes inherited OpenAI
+  API credentials, and supplies only the gateway token for provider auth. Shell
+  snapshots are off; shell tools exclude secret-named environment variables and
+  receive an empty `WINGMAN_TOKEN`.
+
+These are launch defaults, not a network boundary. Keep enterprise egress rules
+in place: local commands, MCP servers, hooks, and plugins have their own network
+paths. Local conversation storage is retained for resume; Codex's
+`history.persistence="none"` only disables its input-history file. Neither wrapper
+changes gateway-side retention or logging.
+
+Machine-managed policy can take precedence over wrapper settings. Claude's
+parent policy pins the gateway using `allowedProviders=["customEndpoint"]`
+(requires Claude Code 2.1.285+) and the exact `ANTHROPIC_BASE_URL`. On managed
+devices, deploy the same restrictions centrally or configure parent-policy
+merging. Codex CLI provider overrides merge with existing user provider fields;
+for enforced routing, deploy a complete `[model_providers.wingman]` definition
+through `requirements.toml`, which replaces the user definition, together with
+the required provider and authentication restrictions.
+
+See the current [Claude environment reference](https://code.claude.com/docs/en/env-vars),
+[Claude managed settings](https://code.claude.com/docs/en/managed-settings),
+[Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference),
+and [Codex gateway boundaries](https://learn.chatgpt.com/docs/enterprise/gateway-compatibility#data-and-tool-boundaries).
+
 ## 📊 Terminal-Bench
 
 Wingman can run Terminal-Bench tasks through Harbor's generic ACP agent runner.

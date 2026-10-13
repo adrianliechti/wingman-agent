@@ -25,13 +25,23 @@ func TestBuildArgsDisablesUnsupportedCodexFeatures(t *testing.T) {
 		"otel.exporter=\"none\"",
 		"otel.trace_exporter=\"none\"",
 		"otel.metrics_exporter=\"none\"",
-		"features.plugins=false",
+		"cli_auth_credentials_store=\"ephemeral\"",
+		"features.remote_plugin=false",
+		"features.plugin_sharing=false",
+		"features.ultrafast_mode=false",
+		"features.api_key_model_discovery=false",
 		"features.daemon_auto_start=false",
 		"features.realtime_conversation=false",
+		"features.shell_snapshot=false",
+		"shell_environment_policy.ignore_default_excludes=false",
+		"shell_environment_policy.set.WINGMAN_TOKEN=\"\"",
 	} {
 		if !containsConfig(args, value) {
 			t.Errorf("BuildArgs() = %q, missing %q", args, value)
 		}
+	}
+	if containsConfig(args, "features.plugins=false") {
+		t.Fatal("gateway defaults must preserve locally configured plugins")
 	}
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "--config" && strings.HasPrefix(args[i+1], "model=") {
@@ -69,7 +79,7 @@ func TestResolveModelsPreservesProviderIDs(t *testing.T) {
 }
 
 func TestBuildEnvReplacesInheritedToken(t *testing.T) {
-	parent := []string{"PATH=/usr/bin", "WINGMAN_TOKEN=stale", "WINGMAN_TOKEN=older"}
+	parent := []string{"PATH=/usr/bin", "WINGMAN_TOKEN=stale", "WINGMAN_TOKEN=older", "OPENAI_API_KEY=stale-key", "CODEX_API_KEY=stale-key"}
 	original := slices.Clone(parent)
 	cfg := &CodexConfig{AuthToken: "gateway-token"}
 	env := BuildEnv(parent, cfg)
