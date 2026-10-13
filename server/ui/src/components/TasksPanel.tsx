@@ -30,6 +30,7 @@ import { FloatingMenu } from "./ui/Floating";
 
 interface Props {
 	sessionId: string;
+	sessionRunning?: boolean;
 	onOpenTask?: (task: TaskEntry) => void;
 }
 
@@ -37,7 +38,7 @@ type MenuState =
 	| { x: number; y: number; kind: "schedule"; schedule: ScheduleEntry }
 	| { x: number; y: number; kind: "task"; task: TaskEntry };
 
-export function TasksPanel({ sessionId, onOpenTask }: Props) {
+export function TasksPanel({ sessionId, sessionRunning, onOpenTask }: Props) {
 	const toast = useToast();
 	const queryClient = useQueryClient();
 	const tasksQuery = useQuery({
@@ -45,6 +46,7 @@ export function TasksPanel({ sessionId, onOpenTask }: Props) {
 		enabled: !!sessionId,
 		queryFn: ({ signal }) => listTasks(sessionId, signal),
 		refetchInterval: (query) =>
+			sessionRunning ||
 			query.state.data?.some((task) => task.status === "running")
 				? 3000
 				: false,
@@ -54,7 +56,11 @@ export function TasksPanel({ sessionId, onOpenTask }: Props) {
 		enabled: !!sessionId,
 		queryFn: ({ signal }) => listSchedules(sessionId, signal),
 		refetchInterval: (query) =>
-			(query.state.data?.length ?? 0) > 0 ? 30000 : false,
+			sessionRunning
+				? 3000
+				: (query.state.data?.length ?? 0) > 0
+					? 30000
+					: false,
 	});
 	const tasks = tasksQuery.data ?? [];
 	const schedules = schedulesQuery.data ?? [];
@@ -119,7 +125,7 @@ export function TasksPanel({ sessionId, onOpenTask }: Props) {
 			await stopMutation.mutateAsync(id);
 		} catch (stopError) {
 			toast({
-				title: "Background task is still running",
+				title: "Task is still running",
 				description:
 					stopError instanceof Error ? stopError.message : String(stopError),
 				tone: "error",
@@ -138,8 +144,8 @@ export function TasksPanel({ sessionId, onOpenTask }: Props) {
 				{tasks.length === 0 && schedules.length === 0 && (
 					<PanelEmptyState
 						icon={Bot}
-						title="No background tasks"
-						hint="Background agents, commands, and scheduled tasks for this session appear here."
+						title="No tasks"
+						hint="Delegated agents, background commands, and scheduled tasks for this session appear here."
 					/>
 				)}
 				{schedules.length > 0 && (
@@ -211,7 +217,7 @@ export function TasksPanel({ sessionId, onOpenTask }: Props) {
 				))}
 				{schedules.length > 0 && tasks.length > 0 && (
 					<div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-fg-dim">
-						Background
+						Tasks
 					</div>
 				)}
 				{tasks.map((t) => (

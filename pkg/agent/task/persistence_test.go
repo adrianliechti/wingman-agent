@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,6 +59,48 @@ func TestFileRegistryRetriesCompletionWithoutRerunningTask(t *testing.T) {
 		r.Close()
 		assertRestoredTask(t, path, tk.ID, task.StatusDone, "finished report")
 	})
+}
+
+func TestFileRegistrySynchronousCompletion(t *testing.T) {
+	for _, failSave := range []bool{false, true} {
+		t.Run(fmt.Sprintf("save_failure=%t", failSave), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "tasks.json")
+				r, err := task.NewFileRegistry(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer r.Close()
+				calls := 0
+				var restoreWrites func()
+				tk, out, err := r.RunAgent(t.Context(), "sync", "inspect", "explore", nil, func(context.Context, *task.Task) (string, error) {
+					calls++
+					if failSave {
+						restoreWrites = blockRegistryWrites(t, path)
+					}
+					return "finished report", nil
+				})
+				if out != "finished report" || calls != 1 || (err != nil) != failSave {
+					t.Fatalf("output=%q calls=%d error=%v", out, calls, err)
+				}
+				if failSave {
+					if tk.Status() != task.StatusFailed || !strings.Contains(tk.Result(), "finished report") || !strings.Contains(err.Error(), "Do not rerun") {
+						t.Fatalf("save failure lost its result: status=%s result=%q error=%v", tk.Status(), tk.Result(), err)
+					}
+					restoreWrites()
+					// A later save includes the retained failure and its output.
+					r.Adopt("next", "explore", "done", 0)
+				}
+				select {
+				case event := <-r.Events():
+					t.Fatalf("inline result also emitted as notification: %+v", event)
+				default:
+				}
+				r.Close()
+				assertRestoredTask(t, path, tk.ID, tk.Status(), tk.Result())
+			})
+		})
+	}
 }
 
 func TestFileRegistryReportsUnsavedCompletionAndPreservesResult(t *testing.T) {

@@ -26,6 +26,7 @@ async function mockSavedSessions(
 	loaded: string[] = [],
 	backend = "wingman",
 	entries: ChatEntry[] = [],
+	phase: "idle" | "tool_running" = "idle",
 ) {
 	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
 	await page.route(
@@ -62,6 +63,7 @@ async function mockSavedSessions(
 						state: {
 							...emptySession(sessionKey(backend, id)),
 							status: "ready",
+							phase,
 						},
 					}),
 				);
@@ -3552,6 +3554,201 @@ test("keeps composer pickers visible in a constrained window", async ({
 	await expect(picker).toBeHidden();
 });
 
+test("discovers new agents after earlier tasks finish during the same turn", async ({
+	page,
+}) => {
+	await mockSavedSessions(
+		page,
+		[
+			{
+				id: "agent-poll",
+				title: "Agent polling",
+				updated_at: "2026-10-14T00:00:00Z",
+			},
+		],
+		[],
+		"wingman",
+		[],
+		"tool_running",
+	);
+	await page.route(/\/api\/capabilities$/, (route) =>
+		route.fulfill({
+			json: { git: false, lsp: false, tasks: true, terminal: true },
+		}),
+	);
+	let running = false;
+	await page.route(
+		/\/api\/v2\/backends\/wingman\/sessions\/[^/]+\/tasks$/,
+		(route) =>
+			route.fulfill({
+				json: [
+					{
+						id: "review",
+						description: "New review",
+						agent_type: "code-reviewer",
+						status: running ? "running" : "done",
+						elapsed_seconds: 3,
+						seq: running ? 2 : 1,
+					},
+				],
+			}),
+	);
+	await page.route(
+		/\/api\/v2\/backends\/wingman\/sessions\/[^/]+\/schedules$/,
+		(route) => route.fulfill({ json: [] }),
+	);
+	await composer(page);
+	await openSessions(page);
+	await page.getByTitle("Agent polling", { exact: true }).click();
+	const button = page.getByRole("button", { name: "Show agents", exact: true });
+	await expect(button).toBeVisible();
+	await expect(button.locator("svg.animate-pulse")).toHaveCount(0);
+	// No phase transition or tasks_changed event accompanies this new run.
+	running = true;
+	await expect(button.locator("svg.animate-pulse")).toHaveCount(1, {
+		timeout: 7000,
+	});
+});
+
+test("shows synchronous, asynchronous and scheduled tasks together", async ({
+	page,
+	request,
+}) => {
+	const input = await composer(page);
+	await input.fill("task visibility fixture");
+	await input.press("Enter");
+	const showAgents = page.getByRole("button", {
+		name: "Show agents",
+		exact: true,
+	});
+	await expect(showAgents).toBeVisible({ timeout: 10000 });
+	await showAgents.click();
+	const panel = page.getByRole("complementary", {
+		name: "Agents",
+		exact: true,
+	});
+	const sync = panel.getByTitle("Synchronous review", { exact: true });
+	const async = panel.getByTitle("Asynchronous review", { exact: true });
+	await expect(sync).toBeVisible();
+	await expect(async).toBeVisible();
+	await expect(
+		panel.getByText("Scheduled review", { exact: true }),
+	).toBeVisible();
+	await expect(
+		panel.getByRole("button", { name: "Stop agent", exact: true }),
+	).toHaveCount(2);
+	await expect(sync).toContainText(/read .*readme-preview\.md/);
+	await expect(async).toContainText(/read .*readme-preview\.md/);
+	const parent = page.getByRole("tab", { name: /^task visibility fixture/ });
+	await sync.click();
+	await expect(
+		page.getByText("Inspecting sync visibility files.", { exact: true }),
+	).toBeVisible();
+	await request.post(`${controlURL()}/release-task?name=sync%20visibility`);
+	await expect(
+		page
+			.getByText("Completed sync visibility review.", { exact: true })
+			.first(),
+	).toBeVisible({ timeout: 10000 });
+	await parent.click();
+	await expect(
+		page.getByText("Delegation finished.", { exact: true }).first(),
+	).toBeVisible();
+	await expect(sync).toContainText("done");
+	await expect(async).not.toContainText("done");
+	await expect(
+		panel.getByRole("button", { name: "Stop agent", exact: true }),
+	).toHaveCount(1);
+	// Background work remains inspectable after the foreground turn finishes.
+	await async.click();
+	await expect(
+		page.getByText("Inspecting async visibility files.", { exact: true }),
+	).toBeVisible();
+	await request.post(`${controlURL()}/release-task?name=async%20visibility`);
+	await expect(
+		page
+			.getByText("Completed async visibility review.", { exact: true })
+			.first(),
+	).toBeVisible({ timeout: 10000 });
+	await parent.click();
+	await expect(async).toContainText("done");
+	const schedule = panel.getByText("Scheduled review", { exact: true });
+	await schedule.click({ button: "right" });
+	await page.getByRole("menuitem", { name: "Pause", exact: true }).click();
+	await expect(panel).toContainText("paused");
+	await schedule.click({ button: "right" });
+	await page.getByRole("menuitem", { name: "Resume", exact: true }).click();
+	await expect(panel).not.toContainText("paused");
+	await page.reload();
+	await expect(
+		page.getByRole("button", { name: /^(Show|Hide) agents$/ }),
+	).toBeVisible();
+	if (
+		await page
+			.getByRole("button", { name: "Show agents", exact: true })
+			.isVisible()
+	) {
+		await page
+			.getByRole("button", { name: "Show agents", exact: true })
+			.click();
+	}
+	await expect(sync).toContainText("done");
+	await expect(async).toContainText("done");
+	await schedule.click({ button: "right" });
+	await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+	await page
+		.getByRole("dialog", { name: "Delete scheduled task?" })
+		.getByRole("button", { name: "Delete", exact: true })
+		.click();
+	await expect(schedule).toHaveCount(0);
+});
+
+test("stops synchronous and asynchronous agents from the panel", async ({
+	page,
+}) => {
+	const input = await composer(page);
+	await input.fill("task cancellation fixture");
+	await input.press("Enter");
+	await page
+		.getByRole("button", { name: "Show agents", exact: true })
+		.click({ timeout: 10000 });
+	const panel = page.getByRole("complementary", {
+		name: "Agents",
+		exact: true,
+	});
+	for (const name of ["Synchronous review", "Asynchronous review"]) {
+		const task = panel.getByTitle(name, { exact: true });
+		await expect(task).toBeVisible();
+		await task
+			.locator("..")
+			.getByRole("button", { name: "Stop agent", exact: true })
+			.click();
+		await expect(task).toContainText("stopped", { timeout: 10000 });
+	}
+	await expect(
+		panel.getByRole("button", { name: "Stop agent", exact: true }),
+	).toHaveCount(0);
+});
+
+test("fires a scheduled task and removes its one-time entry", async ({
+	page,
+}) => {
+	const input = await composer(page);
+	await input.fill("task schedule fixture");
+	await input.press("Enter");
+	await page
+		.getByRole("button", { name: "Show agents", exact: true })
+		.click({ timeout: 7000 });
+	const schedule = page
+		.getByRole("complementary", { name: "Agents", exact: true })
+		.getByText("e2e scheduled check", { exact: true });
+	await expect(schedule).toBeVisible();
+	await expect(
+		page.getByText("Scheduled check completed.", { exact: true }),
+	).toBeVisible({ timeout: 15000 });
+	await expect(schedule).toHaveCount(0);
+});
+
 test("keeps scheduled-agent actions above inspector clipping", async ({
 	page,
 }) => {
@@ -3615,7 +3812,7 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 	await openSessions(page);
 	await page.getByTitle("Agent menu check").click();
 	const showAgentsButton = page.getByRole("button", {
-		name: "Show background tasks",
+		name: "Show agents",
 		exact: true,
 	});
 	const sessionsButton = page.getByRole("button", {
@@ -3633,7 +3830,7 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 	await expect(showAgentsButton.locator("svg.animate-pulse")).toHaveCount(1);
 	await showAgentsButton.click();
 	await expect(
-		page.getByRole("button", { name: "Hide background tasks", exact: true }),
+		page.getByRole("button", { name: "Hide agents", exact: true }),
 	).toHaveAttribute("aria-pressed", "true");
 	const agents = page.locator(
 		'[data-chat-auxiliary-panel][data-view="agents"]',

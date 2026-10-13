@@ -20,6 +20,125 @@ func waitEvent(t *testing.T, r *task.Registry) task.Event {
 	}
 }
 
+func TestRunAgentLifecycle(t *testing.T) {
+	for _, action := range []string{"finish", "fail", "panic", "stop", "cancel parent", "close"} {
+		t.Run(action, func(t *testing.T) {
+			r := task.NewRegistry()
+			defer r.Close()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			started := make(chan *task.Task, 1)
+			release := make(chan struct{})
+			done := make(chan error, 1)
+			go func() {
+				_, _, err := r.RunAgent(ctx, "sync-agent", "inspect", "explore", nil, func(ctx context.Context, tk *task.Task) (string, error) {
+					tk.SetActivity("Reading files")
+					started <- tk
+					select {
+					case <-ctx.Done():
+						return "", ctx.Err()
+					case <-release:
+					}
+					if action == "fail" {
+						return "", errors.New("failed")
+					}
+					if action == "panic" {
+						panic("failed")
+					}
+					return "report", nil
+				})
+				done <- err
+			}()
+			var tk *task.Task
+			select {
+			case tk = <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("call did not start")
+			}
+			if got := r.List(); len(got) != 1 || got[0] != tk || tk.Status() != task.StatusRunning || tk.Activity() != "Reading files" {
+				t.Fatal("synchronous task is not visible while running")
+			}
+			if err := r.Relaunch(tk, nil); err == nil {
+				t.Fatal("relaunch admitted a running synchronous task")
+			}
+			switch action {
+			case "stop":
+				if err := r.Stop(tk.ID); err != nil {
+					t.Fatal(err)
+				}
+			case "cancel parent":
+				cancel()
+			case "close":
+				r.Close()
+			default:
+				close(release)
+			}
+			select {
+			case err := <-done:
+				if (err == nil) != (action == "finish") {
+					t.Fatalf("error=%v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("call did not finish")
+			}
+			want := task.StatusFailed
+			if action == "finish" {
+				want = task.StatusDone
+			} else if action == "stop" {
+				want = task.StatusStopped
+			}
+			if tk.Status() != want {
+				t.Fatalf("status=%s want=%s", tk.Status(), want)
+			}
+			if running, total := r.Counts(); running != 0 || total != 1 {
+				t.Fatalf("running=%d total=%d", running, total)
+			}
+			select {
+			case event := <-r.Events():
+				t.Fatalf("inline result also sent as a notification: %+v", event)
+			default:
+			}
+		})
+	}
+}
+
+func TestRunAgentPreparationFailureRollsBack(t *testing.T) {
+	r := task.NewRegistry()
+	defer r.Close()
+	prepareErr := errors.New("preparation failed")
+	_, _, err := r.RunAgent(t.Context(), "sync", "inspect", "explore", func(*task.Task) error {
+		return prepareErr
+	}, func(context.Context, *task.Task) (string, error) {
+		t.Error("ran after failed preparation")
+		return "", nil
+	})
+	if !errors.Is(err, prepareErr) {
+		t.Fatal(err)
+	}
+	if running, total := r.Counts(); running != 0 || total != 0 {
+		t.Fatalf("failed admission leaked: running=%d total=%d", running, total)
+	}
+}
+
+func TestRunAgentRemainsAvailableAtSessionLimit(t *testing.T) {
+	r := task.NewRegistry()
+	defer r.Close()
+	for range task.MaxPerSession {
+		if r.Adopt("previous", "explore", "done", 0) == nil {
+			t.Fatal("could not fill registry")
+		}
+	}
+	tk, out, err := r.RunAgent(t.Context(), "sync", "inspect", "explore", nil, func(_ context.Context, tk *task.Task) (string, error) {
+		if tk != nil {
+			t.Error("over-capacity run was registered")
+		}
+		return "inline result", nil
+	})
+	if tk != nil || err != nil || out != "inline result" {
+		t.Fatalf("task=%v output=%q error=%v", tk, out, err)
+	}
+}
+
 func TestLaunchDeliversCompletionEvent(t *testing.T) {
 	r := task.NewRegistry()
 	defer r.Close()

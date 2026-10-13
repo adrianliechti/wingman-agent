@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -82,12 +83,15 @@ func (t *Task) SetResumeContext(fn func(context.Context, string) error) {
 	t.mu.Unlock()
 }
 
-// SetDurableAgent binds the stable child identity, its current event ledger,
-// and opaque resume specification. The subagent package owns the spec format;
+// SetDurableAgent installs the child's current event ledger and opaque resume
+// specification for its admitted identity. The subagent package owns the format;
 // Registry only guarantees atomic persistence.
 func (t *Task) SetDurableAgent(agentID string, state agent.State, resumeData json.RawMessage) error {
 	t.mu.Lock()
-	t.AgentID = agentID
+	if agentID != t.AgentID {
+		t.mu.Unlock()
+		return fmt.Errorf("agent identity %q does not match admitted identity %q", agentID, t.AgentID)
+	}
 	t.agentState = cloneAgentState(state)
 	t.resumeData = append(json.RawMessage(nil), resumeData...)
 	registry := t.registry
@@ -318,8 +322,8 @@ func (t *Task) Elapsed() time.Duration {
 	return t.finished.Sub(t.Started)
 }
 
-// Registry tracks the background subagents of one session. Completed tasks
-// stay listed for task_output until the session ends; completion events are
+// Registry tracks the subagents of one session. Completed tasks stay listed
+// for task_output until the session ends; background completion events are
 // buffered so a consumer that attaches late still receives them.
 type Registry struct {
 	ctx    context.Context
@@ -357,7 +361,7 @@ func newRegistry(path string) *Registry {
 	}
 }
 
-// Events delivers one snapshot per finished run.
+// Events delivers one snapshot per finished background run, plus published events.
 func (r *Registry) Events() <-chan Event { return r.events }
 
 // Publish delivers an external background event (e.g. an exec_command exit)
@@ -402,25 +406,62 @@ func (r *Registry) Launch(description, agentType string, run func(ctx context.Co
 // LaunchAgent is Launch with a stable child identity and a preparation step
 // that is persisted before the goroutine can start.
 func (r *Registry) LaunchAgent(agentID, description, agentType string, prepare func(*Task) error, run func(ctx context.Context, t *Task) (string, error)) (*Task, error) {
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return nil, fmt.Errorf("session is shutting down")
-	}
-	if r.running >= MaxConcurrent {
-		r.mu.Unlock()
-		return nil, fmt.Errorf("too many background agents running (max %d); wait for one to finish or run this agent synchronously", MaxConcurrent)
-	}
-	if r.launched >= MaxPerSession {
-		r.mu.Unlock()
-		return nil, fmt.Errorf("background agent limit reached for this session (max %d)", MaxPerSession)
-	}
-
 	ctx, cancel := context.WithTimeout(r.ctx, MaxRunDuration)
 	if agentID == "" {
 		agentID = uuid.NewString()
 	}
 	ctx = tool.WithBackgroundOrigin(ctx, agentID)
+	t, err := r.start(agentID, description, agentType, cancel, true, prepare)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	go r.execute(ctx, cancel, t, true, run)
+	return t, nil
+}
+
+// RunAgent tracks a synchronous call from its start, including activity,
+// cancellation and durable history. Its result is returned inline, so it emits
+// no completion notification. At the session limit it runs without tracking,
+// preserving synchronous calls as a fallback when background work is capped.
+func (r *Registry) RunAgent(ctx context.Context, agentID, description, agentType string, prepare func(*Task) error, run func(context.Context, *Task) (string, error)) (*Task, string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(r.ctx, cancel)
+	defer stop()
+	t, err := r.start(agentID, description, agentType, cancel, false, prepare)
+	if err != nil {
+		return nil, "", err
+	}
+	if t == nil {
+		out, err := run(ctx, nil)
+		return nil, out, err
+	}
+	out, err := r.execute(ctx, cancel, t, false, run)
+	return t, out, err
+}
+
+func (r *Registry) start(agentID, description, agentType string, cancel context.CancelFunc, background bool, prepare func(*Task) error) (*Task, error) {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("session is shutting down")
+	}
+	if background && r.running >= MaxConcurrent {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("too many background agents running (max %d); wait for one to finish or run this agent synchronously", MaxConcurrent)
+	}
+	if r.launched >= MaxPerSession {
+		r.mu.Unlock()
+		if !background {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("background agent limit reached for this session (max %d)", MaxPerSession)
+	}
+
+	if agentID == "" {
+		agentID = uuid.NewString()
+	}
 	if r.hasAgentIDLocked(agentID) {
 		r.mu.Unlock()
 		cancel()
@@ -472,8 +513,6 @@ func (r *Registry) LaunchAgent(agentID, description, agentType string, prepare f
 		return nil, fmt.Errorf("session is shutting down")
 	}
 	r.mu.Unlock()
-
-	go r.execute(ctx, cancel, t, run)
 
 	return t, nil
 }
@@ -654,17 +693,17 @@ func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (str
 	}
 	r.mu.Unlock()
 
-	go r.execute(ctx, cancel, t, run)
+	go r.execute(ctx, cancel, t, true, run)
 
 	return nil
 }
 
-func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Task, run func(ctx context.Context, t *Task) (string, error)) {
+func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Task, notify bool, run func(ctx context.Context, t *Task) (string, error)) (string, error) {
 	defer cancel()
 	result, err := func() (out string, runErr error) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				runErr = fmt.Errorf("background agent panicked: %v", recovered)
+				runErr = fmt.Errorf("agent panicked: %v", recovered)
 			}
 		}()
 		return run(ctx, t)
@@ -690,6 +729,7 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 	if persistErr != nil && r.ctx.Err() == nil {
 		t.result = fmt.Sprintf("error: could not save background task completion: %v\nExecution status: %s. The output below remains available in this session but may be lost after restart. Do not rerun the task solely because saving failed.\n\n%s", persistErr, t.status, t.result)
 		t.status = StatusFailed
+		err = errors.Join(err, errors.New(t.result))
 	}
 	t.finishing = false
 	ev := Event{
@@ -709,9 +749,10 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 	closed := r.closed
 	r.mu.Unlock()
 
-	if !closed {
+	if notify && !closed {
 		r.send(ev)
 	}
+	return result, err
 }
 
 func (r *Registry) Get(id string) *Task {

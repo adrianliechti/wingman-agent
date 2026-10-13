@@ -476,6 +476,13 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 			if err != nil {
 				return tool.Result{}, err
 			}
+			prepare := func(tk *task.Task) error {
+				bindTaskRunner(tasks, tk, runner)
+				return tk.SetDurableAgent(agentID, runner.sub.StateSnapshot(), rawSpec)
+			}
+			run := func(execCtx context.Context, tk *task.Task) (string, error) {
+				return runner.runTurn(execCtx, ctx, tk, prompt)
+			}
 
 			if background, _ := args["background"].(bool); background {
 				// Admitted background tasks detach from this tool's context.
@@ -485,34 +492,22 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 				if tasks == nil {
 					return tool.Result{}, fmt.Errorf("background agents are not available in this session; run the agent synchronously")
 				}
-				t, err := tasks.LaunchAgent(agentID, description, subagentName,
-					func(tk *task.Task) error {
-						return tk.SetDurableAgent(agentID, runner.sub.StateSnapshot(), rawSpec)
-					},
-					func(execCtx context.Context, tk *task.Task) (string, error) {
-						return runner.runTurn(execCtx, ctx, tk, prompt)
-					},
-				)
+				t, err := tasks.LaunchAgent(agentID, description, subagentName, prepare, run)
 				if err != nil {
 					return tool.Result{}, err
 				}
-				bindTaskRunner(tasks, t, runner)
 				return tool.Text(fmt.Sprintf("Launched background agent %s (%s: %s). Continue with other work — the result arrives as a task notification when it finishes. Never assume or invent its result, and don't start work that overlaps its scope. Check on it with task_output, cancel it with task_stop, or ask it follow-ups later with task_send.", t.ID, subagentName, description)), nil
 			}
 
-			started := time.Now()
-			out, err := runner.runTurn(ctx, ctx, nil, prompt)
-			if err != nil || tasks == nil {
+			if tasks == nil {
+				out, err := run(ctx, nil)
 				return runner.reviewResult(out), err
 			}
-			t, adoptErr := tasks.AdoptAgent(agentID, description, subagentName, out, time.Since(started), func(tk *task.Task) error {
-				return tk.SetDurableAgent(agentID, runner.sub.StateSnapshot(), rawSpec)
-			})
-			if adoptErr != nil {
-				return runner.reviewResult(out), adoptErr
+			t, out, err := tasks.RunAgent(ctx, agentID, description, subagentName, prepare, run)
+			if err != nil {
+				return runner.reviewResult(out), err
 			}
 			if t != nil {
-				bindTaskRunner(tasks, t, runner)
 				out += fmt.Sprintf("\n(id %s — task_send continues this agent with its context intact)", t.ID)
 			}
 			return runner.reviewResult(out), nil

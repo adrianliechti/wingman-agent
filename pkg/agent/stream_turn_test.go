@@ -24,6 +24,51 @@ func endTurnResponse(endTurn string, items ...string) string {
 	return strings.Replace(phaseTestResponse(false, items...), `"response":{`, `"response":{"end_turn":`+endTurn+`,`, 1)
 }
 
+func TestFailedStreamDoesNotRetryAfterPersistenceFailure(t *testing.T) {
+	for _, failure := range []string{"run terminal", "tool result"} {
+		t.Run(failure, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				requests := 0
+				client := streamingTestClient(func(*http.Request) string {
+					requests++
+					if requests > 1 {
+						return phaseTestResponse(false, finalAnswerOutput)
+					}
+					output := ""
+					if failure == "tool result" {
+						output = itemDoneEvents(loopCall("write", "write", `{}`))
+					}
+					return output + "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"retry\"}}}\n\n"
+				})
+				storageErr := errors.New("storage unavailable")
+				a := &Agent{Config: &Config{client: &client, MaxTurns: 2, Tools: func() []tool.Tool {
+					return []tool.Tool{{Name: "write", Execute: func(context.Context, map[string]any) (tool.Result, error) {
+						return tool.Text("written"), nil
+					}}}
+				}}, Recorder: EventRecorderFunc(func(events []RuntimeEvent) error {
+					for _, event := range events {
+						if requests != 1 {
+							continue
+						}
+						if failure == "run terminal" && event.Type == EventRunTerminal {
+							return storageErr
+						}
+						if failure == "tool result" && event.Message != nil && len(event.Message.Content) > 0 && event.Message.Content[0].ToolResult != nil {
+							return storageErr
+						}
+					}
+					return nil
+				})}
+				ctx := WithStreamEventHandlers(t.Context(), StreamEventHandlers{Reset: func() {}})
+				err := runLoopTurn(ctx, a, "work")
+				if requests != 1 || !errors.Is(err, storageErr) {
+					t.Fatalf("requests=%d error=%v; want no retry after storage failure", requests, err)
+				}
+			})
+		})
+	}
+}
+
 func TestSendHonorsExplicitTurnBoundary(t *testing.T) {
 	for _, requireFinish := range []bool{false, true} {
 		for _, tc := range []struct{ name, output string }{

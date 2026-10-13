@@ -36,6 +36,7 @@ type webE2EModel struct {
 
 	cancelObserved chan struct{}
 	cancelOnce     sync.Once
+	taskReleases   sync.Map
 }
 
 func emitE2EEvent(w http.ResponseWriter, event any) {
@@ -216,6 +217,9 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		if m.handleTaskFixture(w, r, body) {
+			return
+		}
 		switch {
 		case strings.Contains(string(body), "progress-only fixture"):
 			if strings.Contains(string(body), "Continue the unfinished task from the saved conversation.") {
@@ -253,6 +257,10 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 		default:
 			http.Error(w, "unknown e2e prompt", http.StatusBadRequest)
 		}
+	case "/release-task":
+		release := m.taskRelease(r.URL.Query().Get("name"))
+		release.once.Do(func() { close(release.done) })
+		w.WriteHeader(http.StatusNoContent)
 	case "/release-steer":
 		select {
 		case <-m.steerStarted:

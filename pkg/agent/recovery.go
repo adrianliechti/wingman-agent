@@ -10,6 +10,19 @@ import (
 )
 
 func isRecoverableError(err error) bool {
+	// A retryable provider failure must not hide a simultaneous local failure
+	// (for example, an unsaved tool result) or consumer cancellation.
+	if joined, ok := errors.AsType[interface {
+		error
+		Unwrap() []error
+	}](err); ok {
+		for _, cause := range joined.Unwrap() {
+			if !isRecoverableError(cause) {
+				return false
+			}
+		}
+		return true
+	}
 	code, _ := providerErrorDetails(err)
 	switch code {
 	case "insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded":

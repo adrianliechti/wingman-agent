@@ -774,11 +774,15 @@ export default function App() {
 		!isDraft(activeTab.sessionId)
 			? activeTab.sessionId
 			: "";
+	const activeTaskPhase = activeTaskSessionId
+		? sessions[activeTaskSessionId]?.phase
+		: undefined;
 	const activeTasksQuery = useQuery({
 		queryKey: queryKeys.tasks.list(activeTaskSessionId),
 		enabled: showAgents && !!activeTaskSessionId,
 		queryFn: ({ signal }) => listTasks(activeTaskSessionId, signal),
 		refetchInterval: (query) =>
+			(activeTaskPhase && activeTaskPhase !== "idle") ||
 			query.state.data?.some((task) => task.status === "running")
 				? 3000
 				: query.state.data?.length === 0
@@ -794,13 +798,10 @@ export default function App() {
 	});
 	const activeTasks = activeTasksQuery.data ?? [];
 	const activeSchedules = activeSchedulesQuery.data ?? [];
-	const activeBackgroundAgentActivity = {
+	const activeTaskActivity = {
 		available: activeTasks.length > 0 || activeSchedules.length > 0,
 		working: activeTasks.some((task) => task.status === "running"),
 	};
-	const activeTaskPhase = activeTaskSessionId
-		? sessions[activeTaskSessionId]?.phase
-		: undefined;
 	useEffect(() => {
 		if (!showAgents || !activeTaskSessionId || !activeTaskPhase) return;
 		void queryClient.invalidateQueries({
@@ -2786,27 +2787,23 @@ export default function App() {
 				)}
 			{activeTab.type === "chat" && (
 				<>
-					{showAgents && activeBackgroundAgentActivity.available && (
+					{showAgents && activeTaskActivity.available && (
 						<button
 							type="button"
 							className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors hover:text-fg-muted ${activeChatAuxiliary === "agents" ? "bg-bg-active text-fg" : "text-fg-muted hover:bg-bg-hover"}`}
 							onClick={() => toggleChatAuxiliary(activeTab.id, "agents")}
 							aria-pressed={activeChatAuxiliary === "agents"}
 							title={
-								activeChatAuxiliary === "agents"
-									? "Hide background tasks"
-									: "Show background tasks"
+								activeChatAuxiliary === "agents" ? "Hide agents" : "Show agents"
 							}
 							aria-label={
-								activeChatAuxiliary === "agents"
-									? "Hide background tasks"
-									: "Show background tasks"
+								activeChatAuxiliary === "agents" ? "Hide agents" : "Show agents"
 							}
 						>
 							<Bot
 								size={13}
 								className={
-									activeBackgroundAgentActivity.working
+									activeTaskActivity.working
 										? "animate-pulse text-accent"
 										: undefined
 								}
@@ -3781,7 +3778,7 @@ function ChatTabLayout({
 					view === "sessions"
 						? "Sessions"
 						: view === "agents"
-							? "Background tasks"
+							? "Agents"
 							: "Chat details"
 				}
 				inert={!view}
@@ -3801,6 +3798,7 @@ function ChatTabLayout({
 					{showAgents && (
 						<div className={view === "agents" ? "h-full" : "hidden"}>
 							<TasksPanel
+								sessionRunning={runningSessionIds.has(sessionId)}
 								sessionId={isDraft(sessionId) ? "" : sessionId}
 								onOpenTask={onOpenTask}
 							/>
