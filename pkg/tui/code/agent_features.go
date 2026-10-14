@@ -2,6 +2,7 @@ package code
 
 import (
 	"context"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
@@ -37,6 +38,10 @@ type scheduleProvider interface {
 
 type toolProvider interface {
 	Tools(string) []tool.Tool
+}
+
+type userShellRecorder interface {
+	RecordUserShellCommand(sessionID, command, output string, exitCode int, duration time.Duration) error
 }
 
 type uiAwareAgent interface {

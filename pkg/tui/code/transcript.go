@@ -8,6 +8,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -110,7 +111,8 @@ func (o *transcriptOverlay) buildEntries() {
 		if message.Hidden {
 			continue
 		}
-		if message.Role == agent.RoleUser {
+		isUserShell := len(message.Content) == 1 && code.IsUserShellCommand(message.Content[0].AsText())
+		if message.Role == agent.RoleUser && !isUserShell {
 			if turn > 0 {
 				entries = append(entries, transcriptEntry{
 					key: fmt.Sprintf("separator:%d", turn), kind: transcriptSeparator,
@@ -149,6 +151,15 @@ func (o *transcriptOverlay) buildEntries() {
 			case strings.TrimSpace(content.AsText()) != "":
 				text := content.AsText()
 				if message.Role == agent.RoleUser {
+					if cmd, output, exitCode, ok := code.ParseUserShellCommand(text); ok {
+						entries = append(entries, transcriptEntry{
+							key: baseKey + ":usershell", kind: transcriptTool, raw: cmd + "\n" + output, selectable: true,
+							render: func(width int, expanded bool) []string {
+								return cellUserShell(cmd, output, exitCode, width, expanded)
+							},
+						})
+						continue
+					}
 					entries = append(entries, transcriptEntry{
 						key: baseKey + ":user", kind: transcriptUser, raw: text, selectable: true,
 						render: func(width int, _ bool) []string {

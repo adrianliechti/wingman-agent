@@ -56,8 +56,9 @@ func cellUser(text string, width int) []string {
 
 	bandWidth := max(width-len(cellIndent), 14)
 	inner := bandWidth - 3
+	spacer := cellIndent + band + strings.Repeat(" ", bandWidth) + ansi.Reset
 
-	var lines []string
+	lines := []string{spacer}
 	first := true
 
 	for line := range strings.SplitSeq(strings.TrimRight(markdown.Sanitize(text), "\n"), "\n") {
@@ -72,7 +73,7 @@ func cellUser(text string, width int) []string {
 		}
 	}
 
-	lines = append(lines, "")
+	lines = append(lines, spacer, "")
 	return lines
 }
 
@@ -352,6 +353,35 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 	}
 
 	lines = append(lines, continuationWrap(strings.Join(body, "\n"), width, colorize)...)
+
+	return lines
+}
+
+const userShellOutputMaxLines = 50
+
+// cellUserShell renders a user-invoked !<cmd> execution and its output.
+func cellUserShell(command, output string, exitCode int, width int, full bool) []string {
+	output = strings.ReplaceAll(output, "\r\n", "\n")
+	output = strings.TrimRight(output, "\n")
+	errored := exitCode != 0
+
+	info := ""
+	if errored {
+		info = fmt.Sprintf("exit code %d", exitCode)
+	}
+
+	lines := []string{toolTitleLine("exec_command", command, info, width, false, errored)}
+	colorize := func(s string) string { return dim(markdown.Sanitize(s)) }
+
+	if output != "" {
+		body := strings.Split(output, "\n")
+		if !full {
+			body = tailPreview(body, userShellOutputMaxLines)
+		}
+		lines = append(lines, continuationWrap(strings.Join(body, "\n"), width, colorize)...)
+	} else if !errored {
+		lines = append(lines, continuationWrap("(no output)", width, colorize)...)
+	}
 
 	return lines
 }

@@ -288,8 +288,7 @@ func (o *twoPaneOverlay) renderHeader(width int, detail bool) []string {
 			title += dim(" · " + strconv.Itoa(len(o.filtered)) + " matches")
 		}
 	}
-	rule := colored(theme.Default.Border, strings.Repeat("─", max(10, width)))
-	return []string{closeHeader(title, width), ansi.Truncate(rule, width, "…")}
+	return []string{closeHeader(title, width), ""}
 }
 
 func (o *twoPaneOverlay) Render(width, height int) []string {

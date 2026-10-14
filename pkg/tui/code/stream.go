@@ -156,6 +156,16 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 			lines = append(lines, cell...)
 
 		case strings.TrimSpace(c.AsText()) != "":
+			if msg.Role == agent.RoleUser {
+				if cmd, output, exitCode, ok := code.ParseUserShellCommand(c.AsText()); ok {
+					cell := cellUserShell(cmd, output, exitCode, width, false)
+					if a.flow.beforeTool(len(cell) > 1) {
+						lines = append(lines, "")
+					}
+					lines = append(lines, cell...)
+					continue
+				}
+			}
 			if a.flow.gap() {
 				lines = append(lines, "")
 			}

@@ -195,7 +195,7 @@ func (p *diffPanel) render(width, height int) []string {
 	p.rows = rows
 	out := []string{closeHeader(p.header, width)}
 	if sticky != "" {
-		out = append(out, bold(sticky), colored(theme.Default.Border, strings.Repeat("─", max(0, width-1))))
+		out = append(out, bold(sticky), "")
 	}
 
 	for row := range rows {
@@ -242,14 +242,14 @@ func renderDiffPanelLines(diffs []changes.FileDiff, err error, width int) (heade
 
 	for i, diff := range diffs {
 		stat := diffStatText(stats[i][0], stats[i][1])
-		path := ansi.Truncate(colored(diffStatusColor(diff.Status), diff.Path), max(10, width-ansi.Width(stat)-1), "…")
-		gap := max(1, width-ansi.Width(path)-ansi.Width(stat))
+		rowWidth := max(10, width-1)
+		path := ansi.Truncate(colored(diffStatusColor(diff.Status), diff.Path), max(10, rowWidth-ansi.Width(stat)-1), "…")
+		gap := max(1, rowWidth-ansi.Width(path)-ansi.Width(stat))
 		lines = append(lines, path+strings.Repeat(" ", gap)+stat)
 	}
 
 	for _, diff := range diffs {
-		rule := colored(t.Border, strings.Repeat("─", width))
-		lines = append(lines, "", rule)
+		lines = append(lines, "")
 		sections = append(sections, diffSection{path: diff.Path, nameRow: len(lines)})
 		lines = append(lines, bold(ansi.Truncate(diff.Path, width, "…")), "")
 		lines = append(lines, renderDiffPatchLines(diff.Patch, width)...)

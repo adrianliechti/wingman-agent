@@ -169,6 +169,12 @@ func (a *App) footerLine(width int) string {
 	}
 
 	if a.operationPending {
+		if a.shellRunning {
+			return withRight(colored(t.Magenta, "Running shell command · Esc cancels"))
+		}
+		if a.operationStatus != "" {
+			return withRight(colored(t.Cyan, a.operationStatus))
+		}
 		return withRight(colored(t.Cyan, "Updating session · Esc cancels"))
 	}
 	if activity := a.activityStatus(width - 2*len(cellIndent) - ansi.Width(rightText)); activity != "" {
@@ -181,6 +187,10 @@ func (a *App) footerLine(width int) string {
 			color = t.Yellow
 		}
 		return withRight(colored(color, a.backgroundStatus))
+	}
+
+	if a.isShellInput() {
+		return withRight(dim("enter") + " " + colored(t.Foreground, "run command") + dim("  esc") + " " + colored(t.Foreground, "exit shell"))
 	}
 
 	type footerCommand struct {

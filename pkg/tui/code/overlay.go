@@ -7,6 +7,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -158,7 +159,9 @@ func transcriptLines(messages []agent.Message, width int, isToolHidden func(stri
 			case c.AsText() != "":
 				switch msg.Role {
 				case agent.RoleUser:
-					if isCommandEcho(c.AsText()) {
+					if cmd, output, exitCode, ok := code.ParseUserShellCommand(c.AsText()); ok {
+						lines = append(lines, cellUserShell(cmd, output, exitCode, width, true)...)
+					} else if isCommandEcho(c.AsText()) {
 						lines = append(lines, cellCommand(c.AsText(), width)...)
 					} else {
 						lines = append(lines, cellUser(c.AsText(), width)...)

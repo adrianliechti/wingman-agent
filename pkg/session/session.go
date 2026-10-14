@@ -506,6 +506,16 @@ func messageTitle(m agent.Message) string {
 			continue
 		}
 		title := c.Text
+		if strings.HasPrefix(strings.TrimSpace(title), "<user_shell_command>") {
+			if start := strings.Index(title, "<command>"); start >= 0 {
+				if end := strings.Index(title[start:], "</command>"); end >= 0 {
+					cmd := strings.TrimSpace(title[start+len("<command>") : start+end])
+					if cmd != "" {
+						title = "! " + cmd
+					}
+				}
+			}
+		}
 		if idx := strings.IndexAny(title, "\n\r"); idx >= 0 {
 			title = title[:idx]
 		}

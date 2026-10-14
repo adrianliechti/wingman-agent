@@ -407,6 +407,24 @@ func (a *Agent) StopExecSession(id string, execID int) error {
 	return s.execManager.StopBackgroundSession(execID)
 }
 
+// RecordUserShellCommand records a user-executed `!` shell command and its
+// output in the session conversation history so the model can see it on
+// subsequent turns.
+func (a *Agent) RecordUserShellCommand(id, command, output string, exitCode int, duration time.Duration) error {
+	s := a.session(id)
+	if s == nil {
+		return fmt.Errorf("session %s not found", id)
+	}
+	msg := harness.Message{
+		Role:    harness.RoleUser,
+		Content: []harness.Content{{Text: code.FormatUserShellCommand(command, output, exitCode, duration)}},
+	}
+	if err := s.aa.RecordMessage(msg); err != nil {
+		return err
+	}
+	return a.Save(id)
+}
+
 // Schedules exposes the session's scheduled tasks so UI surfaces can list
 // them alongside its background agents.
 func (a *Agent) Schedules(id string) schedule.Store {

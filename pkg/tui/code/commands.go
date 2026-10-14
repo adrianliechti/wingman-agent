@@ -3,7 +3,10 @@ package code
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"time"
@@ -13,6 +16,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -285,6 +289,14 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 		return
 	}
 
+	if rest, ok := strings.CutPrefix(query, "!"); ok {
+		if a.popup != nil && a.popup.kind == popupCommands {
+			a.closePopup()
+		}
+		a.runUserShellCommand(query, strings.TrimSpace(rest))
+		return
+	}
+
 	if query == "/models" {
 		query = "/model"
 	}
@@ -374,6 +386,96 @@ func (a *App) hasAgentCommand(name string) bool {
 		}
 	}
 	return false
+}
+
+func (a *App) runUserShellCommand(raw, command string) {
+	if command == "" {
+		a.editor.SetText("")
+		a.saveCurrentDraft()
+		if a.flow.gap() {
+			a.appendChat([]string{""})
+		}
+		a.appendChat(cellNotice("Run a command with !<cmd>", theme.Default.BrBlack, a.width()))
+		a.invalidate()
+		return
+	}
+
+	a.editor.AddHistory(raw)
+	a.editor.SetText("")
+	a.showWelcome = false
+	a.saveCurrentDraft()
+
+	workDir := ""
+	if ws := a.agent.Workspace(); ws != nil && ws.RootPath != "" {
+		if info, err := os.Stat(ws.RootPath); err == nil && info.IsDir() {
+			workDir = ws.RootPath
+		}
+	}
+
+	id, epoch := a.sessionID, a.sessionEpoch
+	ctx, cancel := context.WithCancel(code.WithSessionID(a.ctx, id))
+	a.operationPending = true
+	a.shellRunning = true
+	a.operationCancel = cancel
+	a.invalidate()
+
+	go func() {
+		start := time.Now()
+		cmd := shell.Command(ctx, command, workDir)
+		rawOut, err := cmd.CombinedOutput()
+		duration := time.Since(start)
+		cancel()
+
+		exitCode := 0
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = -1
+			}
+		}
+
+		output := string(rawOut)
+		if output == "" && err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				output = err.Error()
+			}
+		}
+
+		var recordErr error
+		_, canRecord := a.agent.(userShellRecorder)
+		if recorder, ok := a.agent.(userShellRecorder); ok {
+			recordErr = recorder.RecordUserShellCommand(id, command, output, exitCode, duration)
+		}
+
+		a.post(func() {
+			a.operationPending = false
+			a.shellRunning = false
+			a.operationCancel = nil
+			if a.sessionID != id || a.sessionEpoch != epoch {
+				return
+			}
+			if recordErr != nil {
+				a.appendChat(cellNotice(fmt.Sprintf("Could not record shell command: %v", recordErr), theme.Default.Red, a.width()))
+			} else if canRecord {
+				before := a.printed
+				a.syncMessages()
+				if a.printed == before {
+					a.appendAnnotation(func(w int) []string {
+						return cellUserShell(command, output, exitCode, w, false)
+					})
+				}
+			} else {
+				a.appendAnnotation(func(w int) []string {
+					return cellUserShell(command, output, exitCode, w, false)
+				})
+			}
+			a.pollDiffPanel(false)
+			a.invalidate()
+		})
+	}()
 }
 
 func (a *App) submitAgentInput(input []agent.Content, echo string) bool {

@@ -49,3 +49,30 @@ func TestLightTextContrastOnSurfaces(t *testing.T) {
 		}
 	}
 }
+
+func TestDarkTextContrastOnSurfaces(t *testing.T) {
+previous := Default
+t.Cleanup(func() { Default = previous })
+SetDark()
+luminance := func(c ansi.Color) float64 {
+	channel := func(v uint8) float64 {
+		x := float64(v) / 255
+		if x <= 0.04045 {
+			return x / 12.92
+		}
+		return math.Pow((x+0.055)/1.055, 2.4)
+	}
+	return 0.2126*channel(c.R) + 0.7152*channel(c.G) + 0.0722*channel(c.B)
+}
+if luminance(Default.Border) >= luminance(Default.BrBlack) {
+	t.Errorf("dark Border (%06x) should be subtler than BrBlack (%06x)", Default.Border.Hex(), Default.BrBlack.Hex())
+}
+for _, bg := range []ansi.Color{Default.Background, Default.Surface, Default.Selection} {
+	for _, fg := range []ansi.Color{Default.Foreground, Default.Red, Default.Green, Default.Yellow, Default.Blue, Default.Magenta, Default.Cyan} {
+		contrast := (luminance(fg) + 0.05) / (luminance(bg) + 0.05)
+		if contrast < 4.5 {
+			t.Errorf("%06x text on %06x background has %.2f contrast; want at least 4.5", fg.Hex(), bg.Hex(), contrast)
+		}
+	}
+}
+}

@@ -143,6 +143,7 @@ func TestExplicitFinishCarriesAnswer(t *testing.T) {
 		{"answer in marker", []string{phaseTestResponse(false, finish)}, 1, "Checked and fixed."},
 		{"same answer is not repeated", []string{phaseTestResponse(false, finalAnswerOutput, finish)}, 1, "Checked and fixed."},
 		{"earlier answer is not repeated", []string{phaseTestResponse(false, finalAnswerOutput), phaseTestResponse(false, finish)}, 1, "Checked and fixed."},
+		{"empty braces in answer field treated as bare marker", []string{phaseTestResponse(false, finalAnswerOutput), phaseTestResponse(false, finishOutput("done", `{"answer":"{}"}`))}, 1, "Checked and fixed."},
 		{"cutoff answer is not published", []string{cutoffTestResponse(finishOutput("cut", `{"answer":"Partial answer"}`)), phaseTestResponse(false, finish)}, 1, "Checked and fixed."},
 		{"progress cannot hide answer", []string{phaseTestResponse(false, progress, finish)}, 2, "I will check that now.\nChecked and fixed."},
 		{"earlier progress cannot hide answer", []string{phaseTestResponse(false, progress), phaseTestResponse(false, finish)}, 2, "I will check that now.\nChecked and fixed."},

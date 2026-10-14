@@ -42,6 +42,10 @@ func (a *App) welcomeLines(width int) []string {
 	return lines
 }
 
+func (a *App) isShellInput() bool {
+	return !a.promptActive && !a.askActive && a.editor != nil && strings.HasPrefix(a.editor.Text(), "!")
+}
+
 func (a *App) composerChrome(width int) EditorChrome {
 	t := theme.Default
 	color := t.Border
@@ -49,6 +53,7 @@ func (a *App) composerChrome(width int) EditorChrome {
 	currentMode := a.currentMode()
 	planMode := currentMode == code.PlanModeID
 	unattendedMode := a.unattended()
+	shellMode := a.isShellInput()
 	if planMode {
 		color = t.Yellow
 	}
@@ -76,6 +81,10 @@ func (a *App) composerChrome(width int) EditorChrome {
 	if planMode && !a.promptActive && !a.askActive {
 		topLabel = modeLabel
 		bottomLeft = ""
+	}
+	if shellMode {
+		color = t.Magenta
+		topLabel = colored(t.Magenta, "SHELL")
 	}
 
 	identityLabel := strings.Join(identity, " · ")
@@ -415,7 +424,7 @@ func (a *App) render() {
 	}
 
 	if panelWidth > 0 {
-		padding := ansi.Reset + " " + panelLine(colored(theme.Default.Border, "│"), 1)
+		padding := ansi.Reset + " " + panelLine(" ", 1)
 		panel := a.diffPanel.render(panelWidth, height)
 		for len(frame) < height {
 			frame = append(frame, "")

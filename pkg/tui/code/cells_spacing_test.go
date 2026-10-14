@@ -84,6 +84,25 @@ func TestThoughtCellsGetSurroundingBlankLines(t *testing.T) {
 	}
 }
 
+func TestCellUserHasTopAndBottomBandSpacing(t *testing.T) {
+	lines := cellUser("hi", 40)
+	if len(lines) != 4 {
+		t.Fatalf("cellUser line count = %d, want 4 (top pad, content, bottom pad, trailing blank): %q", len(lines), lines)
+	}
+	if strings.TrimSpace(ansi.Strip(lines[0])) != "" || !strings.Contains(lines[0], "\x1b[") {
+		t.Fatalf("top row is not a painted band spacer: %q", lines[0])
+	}
+	if !strings.Contains(ansi.Strip(lines[1]), "› hi") {
+		t.Fatalf("content row = %q, want › hi", ansi.Strip(lines[1]))
+	}
+	if strings.TrimSpace(ansi.Strip(lines[2])) != "" || !strings.Contains(lines[2], "\x1b[") {
+		t.Fatalf("bottom row is not a painted band spacer: %q", lines[2])
+	}
+	if lines[3] != "" {
+		t.Fatalf("trailing row = %q, want empty line", lines[3])
+	}
+}
+
 func TestStreamingReasoningUsesStableChatHeading(t *testing.T) {
 	ws := newTestWorkspace(t, t.TempDir())
 

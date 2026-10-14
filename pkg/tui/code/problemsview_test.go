@@ -5,7 +5,19 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/language"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
+
+func TestDiagnosticsScanningStatusShowsInFooter(t *testing.T) {
+	a := &App{
+		operationPending: true,
+		operationStatus:  "Scanning workspace problems · Esc cancels",
+	}
+	footer := ansi.Strip(a.footerLine(80))
+	if !strings.Contains(footer, "Scanning workspace problems · Esc cancels") {
+		t.Fatalf("footer = %q, want scanning status", footer)
+	}
+}
 
 func TestDiagnosticsCoverageComplete(t *testing.T) {
 	coverage, partial := diagnosticsCoverage(language.WorkspaceReport{

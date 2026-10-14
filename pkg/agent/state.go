@@ -18,6 +18,21 @@ type State struct {
 	ContextRevision uint64         `json:"context_revision,omitempty"`
 }
 
+// RecordMessage appends a message to the conversation ledger without starting
+// a model turn. If a turn is currently running, the message is queued for the
+// next request boundary instead.
+func (a *Agent) RecordMessage(message Message) error {
+	if a.QueueInput(message.Content) {
+		return nil
+	}
+	var messages []Message
+	if update, changed := a.contextInstructionsUpdate(a.requestMessages()); changed {
+		messages = append(messages, update)
+	}
+	messages = append(messages, message)
+	return a.appendMessages(messages...)
+}
+
 func (a *Agent) appendMessages(messages ...Message) error {
 	return a.recordEvents(messageEvents(messages...)...)
 }

@@ -56,7 +56,7 @@ func (a *Agent) resolveFinishCalls(resp *response, calls []ToolCall, previousAns
 			if key != "answer" || !ok || strings.TrimSpace(text) == "" {
 				valid = false
 			}
-			if key == "answer" {
+			if key == "answer" && strings.TrimSpace(text) != "{}" {
 				answer = text
 			}
 		}

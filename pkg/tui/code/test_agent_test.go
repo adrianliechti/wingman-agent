@@ -86,6 +86,15 @@ func (a *uiTestAgent) Send(context.Context, string, []agent.Content) (iter.Seq2[
 func (a *uiTestAgent) Cancel(string) {}
 func (a *uiTestAgent) Close() error  { return nil }
 
+func (a *uiTestAgent) RecordUserShellCommand(_ string, command, output string, exitCode int, duration time.Duration) error {
+	a.messages = append(a.messages, agent.Message{
+		Role:    agent.RoleUser,
+		Content: []agent.Content{{Text: corecode.FormatUserShellCommand(command, output, exitCode, duration)}},
+	})
+	a.revision++
+	return nil
+}
+
 func waitForSessionOperation(t *testing.T, a *App) {
 	t.Helper()
 	deadline := time.NewTimer(2 * time.Second)

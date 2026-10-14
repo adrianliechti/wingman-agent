@@ -98,33 +98,52 @@ func collectWorkspaceDiagnostics(ctx context.Context, manager *lsp.Manager) Work
 	report := WorkspaceReport{Diagnostics: make(map[string][]Diagnostic)}
 	projects := manager.Projects()
 	unavailable := make(map[string]bool)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
 	for _, project := range projects {
 		if ctx.Err() != nil {
 			break
 		}
-		session, err := manager.ProjectSession(ctx, project)
-		if err != nil {
-			unavailable[projectLabel(manager.WorkingDir(), project)] = true
-			continue
-		}
-		files, uris, total, truncated := openDiagnosticFiles(ctx, project, projects, session)
-		report.CheckedFiles += len(files)
-		report.DiscoveredFiles += total
-		report.DiscoveryTruncated = report.DiscoveryTruncated || truncated
-		if !waitForServerIdle(ctx, session, serverIdleTimeout) || session.Age() < serverWarmupWindow {
-			report.Analyzing = true
-		}
-		states := collectDiagnosticStates(ctx, session, uris)
-		for i, file := range files {
-			if !states[i].known {
-				report.UnknownFiles++
-				continue
+		wg.Add(1)
+		go func(project lsp.Project) {
+			defer wg.Done()
+			if ctx.Err() != nil {
+				return
 			}
-			if values := DiagnosticsFromProtocol(states[i].diagnostics); len(values) > 0 {
-				report.Diagnostics[file] = values
+			session, err := manager.ProjectSession(ctx, project)
+			if err != nil {
+				mu.Lock()
+				unavailable[projectLabel(manager.WorkingDir(), project)] = true
+				mu.Unlock()
+				return
 			}
-		}
+			files, uris, total, truncated := openDiagnosticFiles(ctx, project, projects, session)
+			idle := waitForServerIdle(ctx, session, serverIdleTimeout)
+			waitForPushedDiagnostics(ctx, session, uris, min(30*time.Second, 5*time.Second+time.Duration(len(uris))*20*time.Millisecond))
+			states := collectDiagnosticStates(ctx, session, uris)
+
+			mu.Lock()
+			defer mu.Unlock()
+			report.CheckedFiles += len(files)
+			report.DiscoveredFiles += total
+			report.DiscoveryTruncated = report.DiscoveryTruncated || truncated
+			if !idle || session.Age() < serverWarmupWindow {
+				report.Analyzing = true
+			}
+			for i, file := range files {
+				if !states[i].known {
+					report.UnknownFiles++
+					continue
+				}
+				if values := DiagnosticsFromProtocol(states[i].diagnostics); len(values) > 0 {
+					report.Diagnostics[file] = values
+				}
+			}
+		}(project)
 	}
+	wg.Wait()
+
 	for name := range unavailable {
 		report.UnavailableServers = append(report.UnavailableServers, name)
 	}
@@ -150,7 +169,6 @@ func openDiagnosticFiles(ctx context.Context, project lsp.Project, projects []ls
 			uris = append(uris, uri)
 		}
 	}
-	waitForPushedDiagnostics(ctx, session, uris, min(30*time.Second, 5*time.Second+time.Duration(len(uris))*20*time.Millisecond))
 	return opened, uris, total, truncated
 }
 
@@ -199,13 +217,15 @@ func waitForServerIdle(ctx context.Context, session *lsp.Session, timeout time.D
 }
 
 func waitForPushedDiagnostics(ctx context.Context, session *lsp.Session, uris []string, timeout time.Duration) {
-	if session.SupportsPullDiagnostics() {
+	if session.SupportsPullDiagnostics() || len(uris) == 0 {
 		return
 	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+	lastSeen := -1
+	quietTicks := 0
 	for {
 		pending := 0
 		for _, uri := range uris {
@@ -215,6 +235,18 @@ func waitForPushedDiagnostics(ctx context.Context, session *lsp.Session, uris []
 		}
 		if pending == 0 {
 			return
+		}
+		seen := len(uris) - pending
+		if seen != lastSeen {
+			lastSeen = seen
+			quietTicks = 0
+		} else if !session.Analyzing() {
+			quietTicks++
+			if (seen > 0 && quietTicks >= 3) || (session.Age() >= 3*time.Second && quietTicks >= 5) {
+				return
+			}
+		} else {
+			quietTicks = 0
 		}
 		select {
 		case <-ctx.Done():

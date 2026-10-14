@@ -142,6 +142,8 @@ type App struct {
 	draftChangedAt   time.Time
 	draftPending     bool
 	operationPending bool
+	operationStatus  string
+	shellRunning     bool
 	operationCancel  context.CancelFunc
 
 	taskPumpStop chan struct{}
@@ -1222,6 +1224,11 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 			a.cancelStream()
 			return
 		}
+		if strings.TrimSpace(a.editor.Text()) == "!" {
+			a.editor.SetText("")
+			a.syncCommandPopup()
+			return
+		}
 		a.showToast("Draft kept · /discard clears it", theme.Default.BrBlack)
 		return
 
@@ -1313,7 +1320,7 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 		return
 	}
 
-	if ev.Key == inline.KeyRune && ev.Rune == '@' && !ev.Alt && a.popup == nil && !a.isStreaming() {
+	if ev.Key == inline.KeyRune && ev.Rune == '@' && !ev.Alt && a.popup == nil && !a.isStreaming() && !a.isShellInput() {
 		a.showFilePicker()
 		return
 	}
