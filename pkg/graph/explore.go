@@ -146,7 +146,7 @@ func (e *Engine) Neighborhood(ctx context.Context, id, name, file string) (Neigh
 	if node == nil {
 		cands := g.resolve(name, file)
 		if len(cands) == 0 {
-			return NeighborhoodResult{}, notFoundErr(name, file)
+			return NeighborhoodResult{}, g.notFoundErr(name, file)
 		}
 		node = cands[0]
 		others = othersOf(cands, node)

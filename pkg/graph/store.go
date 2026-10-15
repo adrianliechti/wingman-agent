@@ -29,6 +29,7 @@ type edgeRec struct {
 	To   int32      `json:"t"`
 	Kind EdgeKind   `json:"k"`
 	Via  Provenance `json:"v,omitempty"`
+	Line int        `json:"l,omitempty"`
 }
 
 // fileRefs groups one file's reference sites so the file path and language are
@@ -46,7 +47,7 @@ type refRec struct {
 	Kind EdgeKind `json:"k,omitempty"`
 }
 
-const snapshotVersion = 8
+const snapshotVersion = 11
 
 type snapshotData struct {
 	graph        *Graph
@@ -90,6 +91,7 @@ func loadSnapshot(path string) (*snapshotData, error) {
 			To:   snap.Nodes[e.To].ID,
 			Kind: e.Kind,
 			Via:  e.Via,
+			Line: e.Line,
 		})
 	}
 	g.build()
@@ -119,7 +121,7 @@ func saveSnapshot(path string, g *Graph, files map[string]fileMeta, indexedFiles
 		if !ok1 || !ok2 {
 			continue
 		}
-		edges = append(edges, edgeRec{From: from, To: to, Kind: e.Kind, Via: e.Via})
+		edges = append(edges, edgeRec{From: from, To: to, Kind: e.Kind, Via: e.Via, Line: e.Line})
 	}
 
 	byFile := make(map[string]*fileRefs)

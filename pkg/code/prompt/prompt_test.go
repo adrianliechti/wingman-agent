@@ -354,7 +354,7 @@ func TestBuildInstructionsSharedSections(t *testing.T) {
 		ProjectInstructions: "From AGENTS.md:\n\nproject rule",
 	})
 
-	for _, title := range []string{"Project Guidelines", "Skills", "Memory", "Environment"} {
+	for _, title := range []string{"Code intelligence", "Project Guidelines", "Skills", "Memory", "Environment"} {
 		if !strings.Contains(got, "# "+title+"\n") {
 			t.Errorf("instructions missing top-level %q section", title)
 		}

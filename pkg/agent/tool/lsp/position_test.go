@@ -49,13 +49,21 @@ func TestMatchSymbol(t *testing.T) {
 		{name: "Close", qualified: "Manager.Close", position: lsp.Position{Line: 20}},
 		{name: "(*Session).Close", qualified: "(*Session).Close", position: lsp.Position{Line: 30}},
 	}
-	for query, line := range map[string]uint32{"Manager": 10, "Close": 20, "Manager.Close": 20, "Session.Close": 30} {
-		candidate, ok := matchSymbol(candidates, query)
-		if !ok || candidate.position.Line != line {
-			t.Fatalf("%s: candidate=%+v ok=%v", query, candidate, ok)
+	for query, line := range map[string]uint32{"Manager": 10, "Manager.Close": 20, "Session.Close": 30} {
+		matches, err := matchSymbol(candidates, query)
+		if err != nil || len(matches) != 1 || matches[0].position.Line != line {
+			t.Fatalf("%s: matches=%+v err=%v", query, matches, err)
 		}
 	}
-	if _, ok := matchSymbol(candidates, "Missing"); ok {
+	if matches, err := matchSymbol(candidates, "Missing"); len(matches) != 0 || err != nil {
 		t.Fatal("missing symbol matched")
+	}
+	if _, err := matchSymbol(candidates, "Close"); err == nil || !strings.Contains(err.Error(), "ambiguous") || !strings.Contains(err.Error(), "Manager.Close") || !strings.Contains(err.Error(), "(*Session).Close") {
+		t.Fatalf("expected ambiguity with candidates: %v", err)
+	}
+	for _, query := range []string{"Missing.Close", "sion.Close"} {
+		if matches, err := matchSymbol(candidates, query); len(matches) != 0 || err != nil {
+			t.Fatalf("%q matched wrong receiver: %v %v", query, matches, err)
+		}
 	}
 }

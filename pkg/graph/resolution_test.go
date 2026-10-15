@@ -208,14 +208,22 @@ func New() int { return 2 }
 }
 
 type fakeImplResolver struct {
-	impls []ResolvedLocation
+	impls      []ResolvedLocation
+	definition *ResolvedLocation
+	calls      int
+	implCalls  int
 }
 
 func (f *fakeImplResolver) ResolveCall(ctx context.Context, file string, line, column int) (string, int, bool) {
+	f.calls++
+	if f.definition != nil {
+		return f.definition.File, f.definition.Line, true
+	}
 	return "", 0, false
 }
 
 func (f *fakeImplResolver) ResolveImplementations(ctx context.Context, file string, line, column int) []ResolvedLocation {
+	f.implCalls++
 	return f.impls
 }
 
@@ -248,20 +256,61 @@ func (i *Impl) Run() error { return nil }
 	if len(res.Callers) != 0 {
 		t.Fatalf("without resolver, p2 Run callers = %+v, want none", res.Callers)
 	}
-
-	resolver := &fakeImplResolver{impls: []ResolvedLocation{{File: "p2/impl.go", Line: 5}}}
-	e := New(root, filepath.Join(t.TempDir(), "graph.json"), WithResolver(resolver))
-	res, err = e.Neighborhood(ctx, "", "Run", "p2/")
+	seen := map[string]bool{}
+	for _, n := range plain.graph.Nodes {
+		if seen[n.ID] {
+			t.Fatalf("duplicate definition: %s", n.ID)
+		}
+		seen[n.ID] = true
+	}
+	res, err = plain.Neighborhood(ctx, "", "Run", "p1/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(res.Callers) != 1 || res.Callers[0].Name != "Use" {
-		t.Fatalf("with resolver, p2 Run callers = %+v, want Use", res.Callers)
+		t.Fatalf("without resolver, interface Run callers = %+v, want Use", res.Callers)
 	}
 
-	stats := e.EdgeStats()
-	if stats[ViaLSP] == 0 {
-		t.Fatalf("edge stats = %+v, want lsp-provenance edges", stats)
+	for name, definition := range map[string]*ResolvedLocation{
+		"without_definition":   nil,
+		"interface_definition": {File: "p1/use.go", Line: 4},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resolver := &fakeImplResolver{definition: definition, impls: []ResolvedLocation{{File: "p2/impl.go", Line: 5}}}
+			e := New(root, filepath.Join(t.TempDir(), "graph.json"), WithResolver(resolver))
+			res, err := e.Neighborhood(ctx, "", "Run", "p2/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res.Callers) != 1 || res.Callers[0].Name != "Use" {
+				t.Fatalf("with resolver, p2 Run callers = %+v, want Use", res.Callers)
+			}
+			if resolver.calls != 1 || resolver.implCalls != 1 {
+				t.Fatalf("definition/implementation queries = %d/%d, want 1/1", resolver.calls, resolver.implCalls)
+			}
+			if stats := e.EdgeStats(); stats[ViaLSP] == 0 {
+				t.Fatalf("edge stats = %+v, want lsp-provenance edges", stats)
+			}
+		})
+	}
+}
+
+func TestUniqueConcreteMethodAvoidsResolver(t *testing.T) {
+	root := t.TempDir()
+	// A neighboring interface on the same line must not turn Run into an
+	// interface member: classification needs byte ranges, not line ranges.
+	writeFile(t, root, "main.go", "package main\ntype I interface { Other() }; type Impl struct{}; func (i Impl) Run() {}; func Use(i Impl) { i.Run() }\n")
+	resolver := &fakeImplResolver{}
+	e := New(root, filepath.Join(t.TempDir(), "graph.json"), WithResolver(resolver))
+	res, err := e.Neighborhood(context.Background(), "", "Run", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Callers) != 1 || res.Callers[0].Name != "Use" {
+		t.Fatalf("Run callers = %+v, want Use", res.Callers)
+	}
+	if resolver.calls != 0 || resolver.implCalls != 0 {
+		t.Fatalf("unnecessary definition/implementation queries = %d/%d", resolver.calls, resolver.implCalls)
 	}
 }
 

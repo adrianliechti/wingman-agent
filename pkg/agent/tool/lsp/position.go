@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -45,12 +46,22 @@ func positionOfSymbolOnLine(path string, line int, symbol string) (lsp.Position,
 	if column < 0 {
 		return lsp.Position{}, fmt.Errorf("symbol %q not found on line %d", symbol, line)
 	}
+	if findWordInLineFrom(lines[line-1], symbol, column+1) >= 0 {
+		return lsp.Position{}, fmt.Errorf("symbol %q is ambiguous on line %d; pass line and column", symbol, line)
+	}
 	return lsp.Position{Line: uint32(line - 1), Character: uint32(utf16ColumnFromRune(lines[line-1], column))}, nil
 }
 
-func symbolPosition(ctx context.Context, session *lsp.Session, uri, name string) (lsp.Position, bool) {
+func symbolPosition(ctx context.Context, session *lsp.Session, uri, name string, line int) (lsp.Position, error) {
 	path, _ := fileuri.Path(uri)
-	result, err := session.DocumentSymbols(ctx, uri)
+	var result lsp.DocumentSymbolResult
+	var err error
+	if lsp.CapabilityEnabled(session.Capabilities().DocumentSymbolProvider) {
+		result, err = session.DocumentSymbols(ctx, uri)
+		if err != nil {
+			return lsp.Position{}, fmt.Errorf("symbol lookup failed: %w. %s", err, fallbackAdvice)
+		}
+	}
 	documentSymbols, symbols := language.DocumentSymbolsFromProtocol(result)
 	if err == nil {
 		var candidates []symbolCandidate
@@ -58,11 +69,25 @@ func symbolPosition(ctx context.Context, session *lsp.Session, uri, name string)
 			candidates = append(candidates, symbolCandidate{name: symbol.Name, qualified: symbol.Name, position: symbol.Location.Range.Start})
 		}
 		collectSymbolCandidates(documentSymbols, "", &candidates)
-		if matched, ok := matchSymbol(candidates, name); ok {
-			return snapToIdentifier(path, matched), true
+		if line > 0 {
+			candidates = slices.DeleteFunc(candidates, func(c symbolCandidate) bool { return int(c.position.Line)+1 != line })
+		}
+		matched, matchErr := matchSymbol(candidates, name)
+		if matchErr != nil {
+			return lsp.Position{}, matchErr
+		}
+		if len(matched) == 1 {
+			return snapToIdentifier(path, matched[0]), nil
 		}
 	}
-	return positionOfSymbol(path, symbolLeaf(name))
+	if err := ctx.Err(); err != nil {
+		return lsp.Position{}, err
+	}
+	// A qualified name must not silently resolve to an unrelated leaf name.
+	if strings.Contains(name, ".") {
+		return lsp.Position{}, fmt.Errorf("qualified symbol %q not found; use documentSymbol or pass line and column", name)
+	}
+	return positionOfSymbol(path, name)
 }
 
 func snapToIdentifier(path string, matched symbolCandidate) lsp.Position {
@@ -89,40 +114,50 @@ func collectSymbolCandidates(symbols []lsp.DocumentSymbol, prefix string, result
 	}
 }
 
-func matchSymbol(candidates []symbolCandidate, query string) (symbolCandidate, bool) {
+func matchSymbol(candidates []symbolCandidate, query string) ([]symbolCandidate, error) {
+	var matches []symbolCandidate
+	normalized := normalizeSymbol(query)
 	for _, candidate := range candidates {
-		if candidate.name == query || candidate.qualified == query {
-			return candidate, true
+		qualified, name := normalizeSymbol(candidate.qualified), normalizeSymbol(candidate.name)
+		matched := qualified == normalized || name == normalized
+		if strings.Contains(query, ".") {
+			matched = matched || strings.HasSuffix(qualified, "."+normalized) || strings.HasSuffix(name, "."+normalized)
+		} else {
+			matched = matched || symbolLeaf(candidate.name) == query
+		}
+		if matched && !slices.ContainsFunc(matches, func(other symbolCandidate) bool { return other.position == candidate.position }) {
+			matches = append(matches, candidate)
 		}
 	}
-	if strings.Contains(query, ".") {
-		normalized := normalizeSymbol(query)
-		for _, candidate := range candidates {
-			if strings.HasSuffix(normalizeSymbol(candidate.qualified), normalized) || strings.HasSuffix(normalizeSymbol(candidate.name), normalized) {
-				return candidate, true
-			}
+	if len(matches) > 1 {
+		var choices []string
+		for _, candidate := range matches[:min(len(matches), 10)] {
+			choices = append(choices, fmt.Sprintf("%s (line %d)", candidate.qualified, candidate.position.Line+1))
 		}
+		return nil, fmt.Errorf("symbol %q is ambiguous (%d matches): %s; pass a qualified symbol or line and column", query, len(matches), strings.Join(choices, ", "))
 	}
-	leaf := symbolLeaf(query)
-	for _, candidate := range candidates {
-		if symbolLeaf(candidate.name) == leaf {
-			return candidate, true
-		}
-	}
-	return symbolCandidate{}, false
+	return matches, nil
 }
 
-func positionOfSymbol(path, symbol string) (lsp.Position, bool) {
+func positionOfSymbol(path, symbol string) (lsp.Position, error) {
 	lines, err := readLines(path)
 	if err != nil {
-		return lsp.Position{}, false
+		return lsp.Position{}, err
 	}
+	var matches []symbolCandidate
 	for line, text := range lines {
-		if column := findWordInLine(text, symbol); column >= 0 {
-			return lsp.Position{Line: uint32(line), Character: uint32(utf16ColumnFromRune(text, column))}, true
+		for column := findWordInLine(text, symbol); column >= 0; column = findWordInLineFrom(text, symbol, column+1) {
+			matches = append(matches, symbolCandidate{name: symbol, qualified: symbol, position: lsp.Position{Line: uint32(line), Character: uint32(utf16ColumnFromRune(text, column))}})
 		}
 	}
-	return lsp.Position{}, false
+	matched, err := matchSymbol(matches, symbol)
+	if err != nil {
+		return lsp.Position{}, err
+	}
+	if len(matched) == 0 {
+		return lsp.Position{}, fmt.Errorf("symbol %q not found", symbol)
+	}
+	return matched[0].position, nil
 }
 
 func readLines(path string) ([]string, error) {

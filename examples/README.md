@@ -1,70 +1,48 @@
-# Examples
+# Configuration examples
 
-Copy-pasteable starting points for Wingman's configuration files. The examples
-are validated against the real parsers by `examples_test.go`, so their schemas
-and the capabilities described below stay aligned with the current release.
+Copy these examples into your project or personal Wingman configuration.
+Replace placeholder package names and remote endpoints before enabling them.
 
-## At a glance
+| Example | Destination | Use |
+|---------|-------------|-----|
+| [MCP servers](mcp.json) | `./mcp.json` or `~/.wingman/mcp.json` | Connect local and remote tools |
+| [Database specialist](agents/db-expert.md) | `.wingman/agents/` or `~/.wingman/agents/` | Add a read-only custom agent |
+| [Release verifier](agents/release-verifier.md) | `.wingman/agents/` or `~/.wingman/agents/` | Add a verification agent with a model preference |
+| [Test skill](skills/run-tests/) | `.wingman/skills/run-tests/` | Run tests through a reusable workflow |
+| [Release plugin](plugins/release-tools/) | `.wingman/plugins/release-tools/` or `~/.wingman/plugins/release-tools/` | Add skills, MCP servers, and a hook together |
+| [Structured output](non-interactive/README.md) | Run from a repository | Extract project metadata as JSON |
+| [Debugger samples](debug/README.md) | Open as a workspace | Try Run and Debug |
+| [C project](c/README.md) | Open as a workspace | Try navigation, diagnostics, and debugging |
 
-| Example | Copy to | What it demonstrates |
-|---------|---------|----------------------|
-| [`mcp.json`](mcp.json) | `./mcp.json` or `~/.wingman/mcp.json` | Project/personal stdio and remote MCP servers |
-| [`agents/db-expert.md`](agents/db-expert.md) | `.wingman/agents/` or `~/.wingman/agents/` | Read-only custom sub-agent |
-| [`agents/release-verifier.md`](agents/release-verifier.md) | same as above | Verification sub-agent with a model preference |
-| [`skills/run-tests/`](skills/run-tests) | `.wingman/skills/run-tests/` | A resource-backed skill with metadata, named arguments, path variables, and a helper script |
-| [`plugins/release-tools/`](plugins/release-tools) | `.wingman/plugins/release-tools/` or `~/.wingman/plugins/release-tools/` | An Agent Plugin bundling a portable skill, three MCP transports, resources, and a lifecycle hook |
-| [`non-interactive/`](non-interactive) | Run in place | A read-only `wingman exec` run with validated JSON Schema output |
-| [`debug/`](debug) | Open as a workspace | Small runnable targets for languages with a managed LSP and a supported DAP profile |
-| [`c/`](c) | Open as a workspace | A C program with separate source/header files and managed clangd through PyPI |
+For project instructions, add an `AGENTS.md` or `CLAUDE.md` with build commands,
+conventions, and other guidance to the project root.
 
-Project instructions need no template: put an `AGENTS.md` (or `CLAUDE.md`) with
-plain Markdown guidelines in the project root.
+## Add the test skill
 
-## Skill walkthrough
-
-Copy the complete directory because resources live beside `SKILL.md`:
+From the Wingman source checkout:
 
 ```sh
 mkdir -p .wingman/skills
 cp -R examples/skills/run-tests .wingman/skills/
 ```
 
-Then invoke `/run-tests` for the whole repository or `/run-tests ./pkg/skill`
-for one package. The sample intentionally exercises the full skill surface:
+Copy the whole directory, including its helper script and reference file.
+Invoke `/run-tests` for the repository or `/run-tests ./pkg/skill` for one
+package. Use `~/.wingman/skills/` instead for a personal installation.
 
-- portable Agent Skills fields (`license`, `compatibility`, string `metadata`,
-  and experimental `allowed-tools`);
-- Claude-compatible `arguments` and `argument-hint`, including the named
-  `$package` substitution and the original `$ARGUMENTS` text;
-- `${SKILL_DIR}` and `${PROJECT_DIR}` for stable access to bundled resources and
-  the active project;
-- a selectively loaded reference and a deterministic helper in `scripts/`.
+## Add the release plugin
 
-The `arguments` and `argument-hint` fields are convenient Wingman/Claude
-extensions. Remove them when publishing the skill inside a portable Agent
-Plugin. `allowed-tools` documents intent; it never bypasses tool approval.
-
-## Plugin walkthrough
-
-Copy the plugin as one directory:
+From the Wingman source checkout:
 
 ```sh
 mkdir -p .wingman/plugins
 cp -R examples/plugins/release-tools .wingman/plugins/
 ```
 
-The plugin demonstrates the standard `plugin.json`, immediate `skills/`
-children, and `mcp.json`, plus the Codex-owned `extensions.com.openai.hooks`
-extension. Its hook is declared by a `./` path, receives `PLUGIN_ROOT` and
-`PLUGIN_DATA`, and injects the plugin's resource locations when a session starts.
-The MCP file includes stdio, streamable HTTP, and SSE entries; its stdio server
-shows variable expansion in arguments, environment values, and the working
-directory.
+Update its example MCP settings before using it. Then invoke
+`/release-check v1.2.3` or `/release-tools:release-check v1.2.3`. The qualified
+name still reaches this plugin if another skill has the same short name.
 
-Invoke the bundled skill as `/release-check v1.2.3` or with its stable qualified
-name, `/release-tools:release-check v1.2.3`. The qualified form continues to
-reach this plugin if a project or personal skill shadows the bare name.
-
-The package names and remote endpoints are illustrative placeholders. Replace
-them before enabling the sample in a real project. Wingman asks for trust before
-running a project or plugin hook for the first time in a session.
+The plugin includes a skill, MCP settings, shared resources, and a session
+hook. Wingman asks before running a project or plugin hook for the first time
+in a session. Use `~/.wingman/plugins/` for a personal installation.

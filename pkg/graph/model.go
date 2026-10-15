@@ -40,6 +40,10 @@ type Node struct {
 	NameLine  int    `json:"name_line,omitempty"`
 	NameCol   int    `json:"name_col,omitempty"`
 	Lang      string `json:"lang"`
+
+	// Needed only while resolving edges during indexing; cached graphs
+	// already contain those edges. Byte containment avoids same-line guesses.
+	interfaceMethod bool
 }
 
 // Ref is a name usage site (call, inherits or implements clause) with an
@@ -58,6 +62,7 @@ type Edge struct {
 	To   string     `json:"to"`
 	Kind EdgeKind   `json:"kind"`
 	Via  Provenance `json:"via,omitempty"`
+	Line int        `json:"line,omitempty"` // One representative call site, 1-based in From's file.
 }
 
 type Import struct {

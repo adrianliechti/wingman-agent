@@ -297,29 +297,6 @@ func (e *Engine) SearchPage(ctx context.Context, opts SearchOpts) (SearchResult,
 	return g.searchPage(opts), nil
 }
 
-type TraceResult struct {
-	Roots []*Node
-	Paths []Path
-}
-
-func (e *Engine) Trace(ctx context.Context, from, to, file string, callers bool, maxDepth int) (TraceResult, error) {
-	g, err := e.ensureIndexed(ctx)
-	if err != nil {
-		return TraceResult{}, err
-	}
-
-	roots := g.resolve(from, file)
-	if len(roots) == 0 {
-		return TraceResult{}, notFoundErr(from, file)
-	}
-
-	var paths []Path
-	for _, r := range roots {
-		paths = append(paths, g.trace(r.ID, to, callers, maxDepth)...)
-	}
-	return TraceResult{Roots: roots, Paths: paths}, nil
-}
-
 func (e *Engine) Architecture(ctx context.Context) (Arch, error) {
 	g, err := e.ensureIndexed(ctx)
 	if err != nil {
@@ -344,7 +321,7 @@ func (e *Engine) Hierarchy(ctx context.Context, name, file string) (HierarchyRes
 
 	cands := g.resolve(name, file)
 	if len(cands) == 0 {
-		return HierarchyResult{}, notFoundErr(name, file)
+		return HierarchyResult{}, g.notFoundErr(name, file)
 	}
 
 	node := cands[0]
@@ -359,11 +336,24 @@ func (e *Engine) Hierarchy(ctx context.Context, name, file string) (HierarchyRes
 	return res, nil
 }
 
-func notFoundErr(name, file string) error {
+func (g *Graph) notFoundErr(name, file string) error {
+	message := fmt.Sprintf("no symbol named %q in the graph", name)
 	if file != "" {
-		return fmt.Errorf("no symbol named %q in file matching %q", name, file)
+		message = fmt.Sprintf("no symbol named %q in file matching %q", name, file)
 	}
-	return fmt.Errorf("no symbol named %q in the graph", name)
+	// Models often supply Type.Method. The index accepts path qualifiers;
+	// show actual definitions instead of discarding a potentially meaningful
+	// receiver/class qualifier and silently selecting the wrong method.
+	if i := strings.LastIndexAny(name, ".:/"); i > 0 && i+1 < len(name) {
+		candidates := g.resolve(name[i+1:], file)
+		if len(candidates) > 0 {
+			message += fmt.Sprintf(". Use a bare name or path:Name. Same-name definitions (verify receiver/class; showing %d of %d):", min(len(candidates), 5), len(candidates))
+			for _, n := range candidates[:min(len(candidates), 5)] {
+				message += fmt.Sprintf("\n- %s:%s (line %d)", n.File, n.Name, n.StartLine)
+			}
+		}
+	}
+	return errors.New(message)
 }
 
 func othersOf(cands []*Node, chosen *Node) []*Node {
@@ -388,7 +378,7 @@ func (e *Engine) Tests(ctx context.Context, name, file string) (TestsResult, err
 
 	cands := g.resolve(name, file)
 	if len(cands) == 0 {
-		return TestsResult{}, notFoundErr(name, file)
+		return TestsResult{}, g.notFoundErr(name, file)
 	}
 	res := g.testsFor(cands[0])
 	res.Others = othersOf(cands, cands[0])
@@ -406,7 +396,7 @@ func (e *Engine) Similar(ctx context.Context, name, file string, limit int) (Sim
 
 	cands := g.resolve(name, file)
 	if len(cands) == 0 {
-		return SimilarResult{}, notFoundErr(name, file)
+		return SimilarResult{}, g.notFoundErr(name, file)
 	}
 	node := cands[0]
 	for _, c := range cands {
@@ -443,7 +433,7 @@ func (e *Engine) Snippet(ctx context.Context, name, file string) (Snippet, error
 	cands := g.resolve(name, file)
 
 	if len(cands) == 0 {
-		return Snippet{}, notFoundErr(name, file)
+		return Snippet{}, g.notFoundErr(name, file)
 	}
 
 	node := cands[0]

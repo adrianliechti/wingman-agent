@@ -1,41 +1,39 @@
 # Wingman Agent
 
-A powerful AI-powered coding assistant that runs directly in your terminal. Wingman helps you with coding tasks by reading files, executing commands, editing code, and writing new files — all through natural conversation.
+An AI coding assistant for your terminal and browser. Ask Wingman to explain a
+codebase, fix bugs, write tests, or implement features. It can read and edit files,
+run commands, and help you review changes.
 
-![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)
-![License](https://img.shields.io/badge/License-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
+- Work in a terminal UI or a browser with an editor, Git diffs, and terminals.
+- Use an OpenAI-compatible API, OpenRouter, Ollama, or a Wingman gateway.
+- Connect installed coding agents such as Claude, Codex, Copilot, OpenCode, and Pi.
+- Get code navigation, diagnostics, and integrated debugging.
+- Extend your workflow with skills, plugins, and MCP servers.
 
-## ✨ Features
+## Install
 
-- **Interactive TUI** — Rich terminal interface with markdown rendering and syntax highlighting
-- **File Operations** — Read, batch-edit, create, and search files in your codebase
-- **Shell Integration** — Execute shell commands with user approval
-- **LSP Integration** — Code intelligence via auto-detected language servers (definitions, references, diagnostics, call hierarchy, and more)
-- **Predictive Tab Edits** — Low-latency inline and multiline next-edit suggestions in the web editor, with import cleanup through the active language server
-- **Selection AI Editing** — Transform selected code with free-form or preset instructions, preview the result inline, or send the selection and source file to chat
-- **Integrated Debugging** — Debug Adapter Protocol sessions with deterministic launch profiles, breakpoints, stepping, stack/variable inspection, output, and interactive terminals
-- **MCP Support** — Extend functionality with Model Context Protocol servers
-- **Multi-Model Support** — Works with any [OpenResponses API](https://www.openresponses.org) compatible endpoint with auto-selection
-- **Changes** — Git-backed working tree changes with a visual diff viewer and staged-diff commit-message generation
-- **Skills** — Define custom workflows using [Agent Skills](https://agentskills.io) format
-- **Plugins** — Install skills, MCP servers, and lifecycle hooks from Agent Plugins and Codex/Claude-compatible packages
-- **Image Support** — Paste images from clipboard for vision-capable models
-- **File Context** — Add files to context with `@` or drag-and-drop file paths
-- **Automatic Colors** — Adapts the built-in palette to light or dark terminal backgrounds
-- **Session Management** — Conversations are saved automatically and can be resumed
+### CLI
 
-## 📦 Installation
-
-### Homebrew (macOS and Linux)
+macOS and Linux, with a current Homebrew version:
 
 ```bash
 brew install --cask adrianliechti/tap/wingman-cli
 ```
 
-Requires a current Homebrew version. The CLI cask supports Apple Silicon and Intel macOS, plus ARM64 and x86-64 Linux.
+Windows (x64), with Scoop:
 
-### Desktop App
+```powershell
+scoop bucket add adrianliechti https://github.com/adrianliechti/scoop-bucket
+scoop install wingman
+```
+
+Or install from source with Go 1.26.3 or later:
+
+```bash
+go install github.com/adrianliechti/wingman-agent/cmd/wingman@latest
+```
+
+### Desktop app
 
 macOS (Apple Silicon):
 
@@ -50,959 +48,150 @@ scoop bucket add adrianliechti https://github.com/adrianliechti/scoop-bucket
 scoop install wingman-app
 ```
 
-### CLI with Scoop (Windows)
+## Get started
+
+Set up a model provider, then run Wingman in your project directory:
 
 ```bash
-scoop bucket add adrianliechti https://github.com/adrianliechti/scoop-bucket
-scoop install wingman
-```
-
-### From Source
-
-```bash
-go install github.com/adrianliechti/wingman-agent/cmd/wingman@latest
-```
-
-### Build Locally
-
-```bash
-git clone https://github.com/adrianliechti/wingman-agent.git
-cd wingman-agent
-go build -o wingman ./cmd/wingman
-```
-
-## 🚀 Quick Start
-
-1. **Set up your API key:**
-
-```bash
-# For any OpenAI-compatible API endpoint
 export OPENAI_API_KEY="your-api-key"
+# For another OpenAI-compatible provider, also set its endpoint:
+# export OPENAI_BASE_URL="https://your-provider.example/v1"
 
-# Optional: custom endpoint (defaults to OpenAI)
-export OPENAI_BASE_URL="https://your-api-endpoint/v1"
-```
-
-2. **Run Wingman in your project directory:**
-```bash
+cd your-project
 wingman
 ```
 
-To use the Wingman terminal UI with an existing native Codex, Claude, or Pi
-configuration (including subscription logins), sign in or configure the
-corresponding CLI and select it at startup:
+Try asking: “Explain how this project works”, “Fix the failing tests”, or
+“Add input validation to the signup form”. Wingman asks for approval when needed.
+Use Plan mode to explore an approach before making changes.
+
+To use an installed agent with its existing login and configuration:
 
 ```bash
-codex login
 wingman --agent codex
-
-claude auth login
 wingman --agent claude
-
 wingman --agent pi
 ```
 
-These modes use the native CLI's active login and session storage rather than
-the Wingman/OpenAI-compatible API configuration above. They inherit the current
-shell environment unchanged, so unset API-key or alternate-provider variables
-if you want the native CLI to use its stored subscription login.
+Sign in through that agent's own CLI first. These agents use their own provider
+settings, including inherited environment variables.
 
-The web UI uses the same agent registry and native login paths as the TUI.
-Detected Claude, Codex, Copilot, OpenCode, and Pi installations are offered in
-both. Additional ACP agents can be configured in `~/.wingman/agents.json`; they
-are merged with detected agents and replace a detected entry only when they use
-the same normalized name. The built-in **Wingman** entry continues to use the
-configured API backend.
-
-3. **Start chatting!** Ask Wingman to help with coding tasks:
-
-```
-> Show me all TODO comments in this project
-> Refactor the config package to use dependency injection
-> Write tests for the agent module
-```
-
-4. **Resume a previous session:**
-```bash
-wingman --continue            # resume the most recent session
-wingman --resume <session-id> # resume a specific session
-
-wingman --agent codex --continue  # resume the latest native Codex session
-wingman --agent claude --continue # resume the latest native Claude session
-wingman --agent pi --continue     # resume the latest native Pi session
-```
-
-### Remote web access
-
-Run the relay behind an HTTPS gateway. It serves HTTP on `:8080` by default;
-`--port` changes that port. The gateway handles TLS and certificates.
+Sessions are saved automatically:
 
 ```bash
-# On the relay host; use a strong shared registration token.
-WINGMAN_RELAY_TOKEN="your-secret" wingman relay --port 8080
-
-# In your project directory; use the same token.
-WINGMAN_REMOTE_TOKEN="your-secret" wingman server --remote https://relay.example.com
+wingman --continue                 # Resume the latest session
+wingman --resume <session-id>       # Resume a specific session
+wingman --agent codex --continue    # Resume a native agent session
 ```
 
-Open the pairing link printed by the workspace server, or scan its QR code
-on your phone. Local and remote browsers use the same running sessions.
-The phone layout provides an agent selector, session list, and chat controls.
+## Use the browser UI
 
-The gateway must preserve `Host`, set `X-Forwarded-Proto: https`, and forward
-WebSocket upgrades and streaming responses. Use a dedicated origin without a
-URL path prefix. Keep the relay's HTTP port on the gateway's private network.
-Remote access grants the same capabilities as the local web UI, including
-files and terminals; keep the pairing link private and use a trusted relay.
+```bash
+wingman server
+```
 
-`WINGMAN_REMOTE_URL` can replace `--remote`; `--remote-token` and `--token`
-can replace their respective environment variables. The link survives tunnel
-reconnections and expires when the workspace server restarts.
+Opens the web UI at `http://localhost:9000`, or another available port. Use
+`--port 9001` to choose a port. The UI includes chat, an agent picker, a file
+editor, changes, and terminals. Select code to chat about it or preview an AI
+edit. Use **Run | Debug** above a supported entry point to launch a debugger.
 
-See [remote-control.md](docs/remote-control.md) for the architecture, Docker
-build, tests, and operating limits.
+Wingman manages language servers and offers to install missing debuggers when
+you launch them. Your project's runtimes and build tools must be installed
+separately. See the [debugging examples](examples/debug/README.md) for supported
+languages and sample projects.
 
-### Non-interactive mode
+For access from a phone or another computer, see [remote web access](docs/remote-control.md).
 
-Use `wingman exec` (or `wingman e`) to run a prompt without opening the TUI.
-Exec always runs unattended: actions are approved automatically, and
-elicitation uses defaults or recommended choices instead of waiting for a UI.
-Required free-text questions are declined rather than answered with invented
-input.
+## Everyday controls
+
+In the terminal UI, use `@` to attach files and `Ctrl+P` to find commands.
+
+| Shortcut or command | Action |
+|---------------------|--------|
+| `Enter` | Send a message |
+| `Shift+Enter` or `Ctrl+J` | Insert a new line |
+| `Alt+Enter` | Queue a follow-up |
+| `Tab` | Switch between Agent and Plan mode |
+| `Escape` | Cancel the current response or close a menu |
+| `Ctrl+C` twice | Exit |
+| `/model` | Choose a model and reasoning effort |
+| `/diff` | Review working tree changes |
+| `/help` | Browse commands and skills |
+
+See [sessions and recovery](docs/sessions.md) for queues and drafts, and
+[reviewing changes](docs/reviewing-changes.md) for validation and undo.
+
+Bundled skills include `/init` to create project instructions, `/debug` to
+investigate a bug, `/test` to work on tests, and `/code-review` to review changes.
+
+## Run a prompt from a script
 
 ```bash
 wingman exec "Summarize this project"
-wingman exec "Fix the failing tests"
 git diff | wingman exec "Review this diff for bugs"
-```
-
-When stdin is piped alongside a prompt, Wingman treats it as context and keeps
-the positional prompt as the instruction. Use `-` when stdin should be the
-entire prompt. Input is capped at 10 MiB.
-
-```bash
-git diff | wingman exec "Review this diff for bugs"
-printf 'Summarize this project' | wingman exec -
-```
-
-The final assistant message is the only content written to stdout, and normal
-runs are otherwise quiet. Add `--debug` to stream reasoning, tool arguments,
-and tool results to stderr. `--json` runs a final tool-free formatting pass and
-returns one JSON object; `--schema` additionally constrains that object with a
-JSON Schema:
-
-```bash
 wingman exec "Generate release notes" > release-notes.md
-wingman exec --debug "Inspect the main packages"
-wingman exec --json "Inspect the main packages" | jq
+```
+
+`exec` runs unattended: it approves actions automatically and does not wait for
+questions. Piped input becomes context for the prompt. The final response goes
+to stdout; add `--debug` for progress and tool details on stderr.
+
+```bash
+wingman exec --json "Extract project metadata"
 wingman exec --schema ./project.schema.json "Extract project metadata"
-```
-
-Sessions are saved by default. Resume one by ID or continue the latest session
-for the current agent and workspace:
-
-```bash
-wingman exec resume <session-id> "Now suggest improvements"
 wingman exec resume --last "Implement the first suggestion"
-wingman exec --ephemeral "Triage this repository"
 ```
 
-### Agent Modes
+See the [non-interactive examples](examples/non-interactive/README.md) for structured output.
 
-| Command | UI/protocol | Model backend |
-|---------|-------------|---------------|
-| `wingman` or `wingman --agent wingman` | TUI | Built-in Wingman configuration |
-| `wingman --agent <name>` | TUI | Native detected CLI/login, or the matching `agents.json` ACP command |
-| `wingman server` | Web UI with the same agent picker | Same shared registry and behavior as the TUI |
-| `wingman acp` or `wingman acp wingman` | Wingman over ACP stdio | Built-in Wingman configuration |
-| `wingman acp {claude,codex,pi}` | Native agent bridge over ACP stdio | Native CLI configuration/login |
-| `wingman acp {claude,codex,pi} --backend wingman` | Agent bridge over ACP stdio | Wingman gateway (default: `http://localhost:4242`) |
-| `wingman run <target>` | Wrapped external CLI | Wingman gateway (default: `http://localhost:4242`) |
+## Configure your provider
 
-`wingman acp <target>` defaults to the native backend. This keeps subscription
-login and session behavior aligned with selecting the same agent in the TUI or
-Web UI; `--backend wingman` is the explicit opt-in to provider overrides.
-Native agents use their own configuration and login; they do not require
-`WINGMAN_URL`, `WINGMAN_TOKEN`, or a running Wingman gateway.
+The built-in Wingman agent reads provider settings from environment variables:
 
-## ⚙️ Configuration
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_API_KEY` | API key for OpenAI or a compatible provider |
+| `OPENAI_BASE_URL` | API endpoint; defaults to `https://api.openai.com/v1` |
+| `OPENROUTER_API_KEY` | Use OpenRouter |
+| `OLLAMA_HOST` | Use a local or remote Ollama server |
+| `OLLAMA_API_KEY` | Ollama API key; uses Ollama Cloud when no host is set |
+| `WINGMAN_URL` | Wingman gateway URL |
+| `WINGMAN_TOKEN` | Gateway authentication token, if required |
+| `WINGMAN_MODEL` | Default model; also selectable with `/model` |
+| `WINGMAN_EFFORT` | Reasoning effort; also selectable with `/model` |
 
-### Environment Variables
+Provider priority is `WINGMAN_URL`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, then
+Ollama. With none set, Wingman uses `http://localhost:4242/v1`. A gateway must run
+separately; `wingman server` starts the web UI.
 
-**Backend** — connect to a Wingman server, Ollama, or any OpenAI-compatible API:
+To route another coding CLI through your Wingman gateway, use
+`wingman run claude`, `wingman run codex`, or another supported target.
+Run `wingman --help` for the full command list and `wingman <command> --help`
+for command options.
 
-| Variable | Description |
-|----------|-------------|
-| `WINGMAN_URL` | Optional gateway root URL (default: `http://localhost:4242`); an explicit value takes priority over other providers |
-| `WINGMAN_TOKEN` | Gateway authentication token, required only if the gateway requires authentication; also applies to the localhost default |
-| `OPENAI_API_KEY` | API key for an OpenAI-compatible backend |
-| `OPENAI_BASE_URL` | OpenAI-compatible API endpoint (default: `https://api.openai.com/v1`) |
-| `OPENROUTER_API_KEY` | OpenRouter API key; connects to `https://openrouter.ai/api/v1` |
-| `OLLAMA_HOST` | Ollama server host; used when Wingman, OpenAI, and OpenRouter backends are unset |
-| `OLLAMA_API_KEY` | Optional Ollama API key; selects `https://ollama.com/v1` when `OLLAMA_HOST` is unset |
+## Customize your workflow
 
-Provider priority is `WINGMAN_URL`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, then Ollama
-(`OLLAMA_HOST` or `OLLAMA_API_KEY`). When none is set, Wingman connects to an OpenAI-compatible
-backend at `http://localhost:4242/v1`. Empty or whitespace-only values count as unset.
-The gateway must be running separately; `wingman server` serves the Web UI on
-port 9000 by default and does not start a model gateway. Model discovery has a
-10-second deadline, including transient retries, and runs in the background
-for the built-in agent's TUI and Web UI.
+- **Project instructions:** add an `AGENTS.md` or `CLAUDE.md` in your project root
+  with build commands, conventions, and other guidance.
+- **Skills:** put reusable workflows in `.wingman/skills/<name>/SKILL.md`, or in
+  `~/.wingman/skills/` to use them across projects. Invoke them with `/<name>`.
+- **Plugins:** place a plugin directory in `.wingman/plugins/` or
+  `~/.wingman/plugins/` to add its skills, MCP servers, and hooks.
+- **Custom agents:** add specialist instructions in `.wingman/agents/*.md` or
+  `~/.wingman/agents/`.
 
-**Models & Reasoning** — Agent and Plan share the selected model and effort. The initial model defaults to an available medium model; subagents inherit the selection unless explicitly overridden. Unattended is a separate setting: approve actions automatically and continue without questions. Plan stays read-only.
-
-| Variable | Description |
-|----------|-------------|
-| `WINGMAN_MODEL` | Session model for Agent and Plan; takes priority over `OPENAI_DEFAULT_MODEL` |
-| `WINGMAN_MODEL_COMPLEX` | Model for explicit `complex` subagent tasks (default: keep a selected large model, otherwise prefer an available large model in the selected family) |
-| `WINGMAN_MODEL_PLAN` | Legacy alias for `WINGMAN_MODEL_COMPLEX`; does not switch the model in Plan mode |
-| `WINGMAN_MODEL_UTILITY` | Model for recaps, compaction summaries, selection transformations, and commit messages (default: smallest available, e.g. Haiku/Luna) |
-| `WINGMAN_MODEL_TAB` | Optional model override for web-editor Tab predictions (default: the utility role, then the current coding model) |
-| `WINGMAN_EFFORT` | Session reasoning effort: `none`/`low`/`medium`/`high`/`xhigh`/`max`; unset or `auto` uses the model's default |
-| `WINGMAN_CONTEXT_WINDOW` | Effective context window in tokens; overrides model catalog values for compaction and usage reporting |
-| `WINGMAN_CONTEXT_WINDOW_MODE` | `full` compacts against the model's full catalog window instead of stopping at the provider's long-context price threshold |
-| `WINGMAN_LARGE_CONTEXT` | Deprecated alias for `WINGMAN_CONTEXT_WINDOW_MODE=full` |
-
-`WINGMAN_EFFORT_PLAN` is retired; use `WINGMAN_EFFORT` or a subagent's explicit `effort` argument. Switching collaboration modes preserves the model and effort. Selecting a different model resets effort to `auto`.
-
-**Behavior**
-
-| Variable | Description |
-|----------|-------------|
-| `WINGMAN_OUTPUT_TOKEN_BUDGET` | Built-in agent output allowance per response, including reasoning; clamped to the model's known maximum. `0` or unset uses the default policy described below |
-| `WINGMAN_TASK_MAX_TOKENS` | Built-in agent token allowance per turn, including inline helpers and in-turn utility calls; `0` or unset disables the limit |
-| `WINGMAN_TASK_TIMEOUT` | Built-in agent time allowance per turn, e.g. `20m`; `0s` or unset disables the limit |
-| `WINGMAN_SANDBOX` | `off` lifts the workspace path restriction from the file tools |
-| `WINGMAN_DISABLE_SHELL` | `1`, `true`, `yes`, or `on` disables `exec_command` and `exec_session` for the built-in agent (the variable name is retained for compatibility) |
-| `WINGMAN_DISABLE_WEBSEARCH` | `1`, `true`, `yes`, or `on` disables `web_search` for the built-in agent |
-| `WINGMAN_DISABLE_WEBFETCH` | `1`, `true`, `yes`, or `on` disables `fetch` for the built-in agent |
-| `WINGMAN_ELICITATION` | Headless (ACP) sessions: `accept` or `cancel` answers elicitation prompts automatically |
-| `WINGMAN_HOME` | Overrides the `~/.wingman` directory for all Wingman-owned user data |
-| `WINGMAN_<AGENT>_PATH` | Path override for an external agent binary (e.g. `WINGMAN_CODEX_PATH`) |
-
-Task tokens count provider-reported input plus output tokens. Cache and reasoning
-subtotals are not counted twice. The allowance stops subsequent work once a
-response reaches it; an in-flight response can exceed the remaining allowance.
-This is a token allowance, not a dollar billing cap. Inline helpers share their
-parent's allowance; detached tasks start separate allowances. Native external
-agents use their own limits.
-
-Built-in agent responses default to `min(64,000, model output limit)` for
-`max_output_tokens`. Set `WINGMAN_OUTPUT_TOKEN_BUDGET`, for example to `128000`,
-to request a different allowance, still clamped to the model catalog's output
-limit. Unknown limits keep the provider default unless an explicit budget is
-configured. This per-response allowance includes reasoning tokens.
-Default context reserves account for the resolved allowance, while explicit
-`ReserveTokens` overrides remain in effect. Utility helpers keep their separate
-output limits.
-
-For queue controls, draft recovery, per-turn review, and the regression test
-commands, see [Review improvements](docs/review-improvements.md).
-
-### OpenTelemetry GenAI telemetry
-
-The built-in Wingman agent emits the current OpenTelemetry GenAI
-semantic-convention traces and metrics, plus optional standard inference-detail
-and exception log events. Telemetry is a no-op by default: no SDK pipeline or
-exporter is created until standard OTLP variables are present or a pipeline is
-explicitly supplied in code.
+Connect an MCP server from the command line:
 
 ```bash
-export OTEL_SERVICE_NAME=wingman-agent
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-```
-
-`OTEL_EXPORTER_OTLP_ENDPOINT` enables traces and metrics. Signal-specific
-endpoints such as `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and
-`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` enable only that signal. The standard
-headers, timeout, compression, TLS, and signal-specific OTLP HTTP variables are
-passed through to the official Go exporters. `OTEL_TRACES_EXPORTER` and
-`OTEL_METRICS_EXPORTER` may be `otlp` or `none`; `OTEL_SDK_DISABLED=true`
-disables every signal.
-
-GenAI log events are separately opt-in, so configuring a log exporter cannot
-silently begin recording them:
-
-```bash
-export OTEL_LOGS_EXPORTER=otlp
-export OTEL_INSTRUMENTATION_GENAI_EMIT_EVENT=true
-```
-
-With a common `OTEL_EXPORTER_OTLP_ENDPOINT`, only the event switch is needed.
-`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` and the other standard log-exporter
-variables are also supported. The emitted events are
-`gen_ai.client.inference.operation.details` and, for failed model operations,
-`gen_ai.client.operation.exception`; they are not a Wingman-specific audit-log
-schema.
-
-Message content is excluded by default. The cross-language GenAI utilities
-variables control the opt-in behavior:
-
-| Variable | Values and behavior |
-|----------|---------------------|
-| `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | `NO_CONTENT` (default), `SPAN_ONLY`, `EVENT_ONLY`, or `SPAN_AND_EVENT` |
-| `OTEL_INSTRUMENTATION_GENAI_EMIT_EVENT` | `true` or `false`; when unset, defaults to true only for `EVENT_ONLY` and `SPAN_AND_EVENT` |
-
-Captured input/output messages, system instructions, tool calls/results, and
-tool definitions are emitted in the structured semantic-convention shape and
-may contain source code, credentials, or other sensitive data. The new
-instrumentation always uses the latest Development GenAI conventions and has no
-legacy pre-1.37 format, so `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`
-is not required and does not change its output.
-
-The built-in exporter is intentionally limited to OTLP over HTTP/protobuf.
-It does not include autoexport or console, Prometheus, or OTLP/gRPC exporter
-packages.
-The emitted signals include agent, model-inference, tool, and MCP spans plus the
-recommended duration, streaming, token-usage, and per-invocation call-count
-metrics. MCP client requests and peer-initiated operations are covered, along
-with client/server operation duration and client-session duration. W3C trace
-context and baggage are injected into and extracted from MCP `params._meta`.
-An MCP `tools/call` reuses its enclosing GenAI `execute_tool` span to avoid
-double instrumentation.
-
-Usage has one normalized meaning throughout the agent: `InputTokens` includes
-cache-read and cache-write tokens, while `OutputTokens` includes reasoning
-tokens. The cache and reasoning fields are detail subsets, so total usage is
-always `InputTokens + OutputTokens`; those detail fields are never added a
-second time. OpenAI Responses usage already has this inclusive shape. ACP's
-disjoint wire fields are folded into the inclusive totals on input and split
-back out on output.
-
-Library callers can explicitly enable telemetry with the `telemetry` package
-and assign it to `agent.Config.Telemetry` or `codeagent.Options.Telemetry`.
-`telemetry.Options.EmitEvents` and `CaptureMessageContent` provide the same
-event and capture controls in code; injected tracer, meter, and logger providers
-remain caller-owned. Pipelines created by `telemetry.New` should be shut down by
-their owner; a code agent can take ownership with `ShutdownTelemetryOnClose`.
-
-Telemetry covers the built-in Wingman agent when it is served over ACP. Native
-or third-party ACP agents such as Codex, Claude, Pi, Copilot, and OpenCode are
-not wrapped by this telemetry pipeline.
-
-### User Data
-
-In the web editor, select code and open the command palette (`Cmd+K` / `Ctrl+K`)
-to choose **Chat about this…** or **Transform selection…**. Transformations can
-use a custom instruction or the **Fix**, **Refactor**, and **Document** presets.
-Wingman shows the replacement as a Monaco inline-edit preview; accepting it
-changes only the live buffer until you save. Chat is prefilled with the selected
-text and its source file is attached. Both actions are also available from the
-editor context menu.
-
-For Git repositories, stage the intended changes and use the sparkle button by
-the commit box to generate a message from only the staged diff and recent
-commit-subject style. The message is inserted for review and is never committed
-automatically.
-
-`editor.tab.completion` is on by default and can be disabled or re-enabled from
-the command palette. The preference is stored in `~/.wingman/config.json`.
-Completions use model requests while you type; requests are edit-gated,
-debounced, and limited server-wide to one active request and one start every
-1.5 seconds.
-
-`window.terminal.position` controls whether terminals open in a main tab
-(`tab`, the default) or in the bottom dock (`bottom`). It can also be changed
-from the command palette and is stored in the same config file.
-
-`window.sidebar.position` places the side panel on the `right` (the default) or
-`left`. Use **Move Side Panel Left** / **Move Side Panel Right** in the command
-palette to change it. The preference is stored in the same config file.
-
-Wingman's `~/.wingman/config.json` stores these preferences and recent launcher
-workspaces only;
-backend URLs and authentication tokens are read from environment variables and
-are never persisted in this file.
-Set `WINGMAN_HOME` to relocate the complete `~/.wingman` directory, including
-settings, project memory and sessions, global MCP configuration, skills,
-plugins, and plugin data.
-
-Workspace and session roots can be directory symbolic links on macOS and Windows,
-or directory junctions on Windows (`mklink /J`). Workspace scans use the selected
-root and skip directory links encountered inside it. Terminal and debugger path
-checks compare resolved locations so nested links cannot bypass workspace boundaries.
-
-### Project Configuration
-
-Create an `AGENTS.md` (or `CLAUDE.md`) file in your project root to provide context-specific instructions. Wingman walks up from your working directory and reads all matching files it finds, so you can layer project and workspace-level guidelines:
-
-```markdown
-# Project Guidelines
-
-- Use Go 1.25+ features
-- Follow standard Go project layout
-- Write tests for all new functionality
-```
-
-### MCP Integration
-
-Add an `mcp.json` file to integrate with MCP servers:
-
-```json
-{
-  "mcpServers": {
-    "my-server": {
-      "command": "npx",
-      "args": ["-y", "@my-org/my-mcp-server"]
-    }
-  }
-}
-```
-
-Remote (HTTP/SSE) servers are also supported via the `url` and optional `headers` fields.
-
-Configs are loaded from two locations and merged: `~/.wingman/mcp.json` (global, shared across all projects) and `./mcp.json` (project root). When a server name appears in both, the project config wins.
-
-`wingman mcp` manages both files from the command line:
-
-```bash
-wingman mcp add fs -- npx -y @modelcontextprotocol/server-filesystem .   # stdio server
-wingman mcp add remote --url https://mcp.example.com/mcp                 # remote server
-wingman mcp add api --url https://api.example.com/mcp -H "X-Api-Key: …" --scope project
+wingman mcp add remote --url https://mcp.example.com/mcp
 wingman mcp list
-wingman mcp get remote
-wingman mcp remove fs
+wingman mcp remove remote
 ```
 
-Remote servers that require OAuth are logged in through your browser. `wingman mcp add`
-connects right away and starts the login when the server asks for it; `wingman mcp login NAME`
-repeats it later and `wingman mcp logout NAME` forgets the stored credentials. Wingman registers
-itself dynamically with the authorization server (pass `--client-id` for a pre-registered client)
-and receives the redirect on `http://localhost:3142/callback` (`--callback-port` changes the port).
-Tokens live in `~/.wingman/mcp-credentials.json` and are refreshed automatically; when a refresh
-is no longer possible, the agent reports that a login is required instead of opening a browser.
-
-### Debugging (experimental)
-
-Use the inline **Run | Debug** actions above a detected entry point. Wingman
-shows the launch options before starting and opens the session in a **Debug**
-tab with output, controls, variables, and the call stack.
-
-| Language/runtime | Adapter | Detected targets |
-|------------------|---------|------------------|
-| Go | [Delve](https://github.com/go-delve/delve/tree/master/Documentation/api/dap) | `main`, test, benchmark, fuzz, and runnable example functions |
-| Python | [debugpy](https://github.com/microsoft/debugpy) | Explicit `__main__` guards and conventional scripts |
-| Java | [Microsoft java-debug](https://github.com/microsoft/java-debug) through JDT LS | Qualified `public static void main` classes |
-| Rust | [CodeLLDB](https://github.com/vadimcn/codelldb) | Cargo binaries and examples |
-| C#/.NET | [NetCoreDbg](https://github.com/Samsung/netcoredbg) | `Main` methods and top-level `Program.cs` files |
-| JavaScript/TypeScript | [vscode-js-debug](https://github.com/microsoft/vscode-js-debug) | Node entry files and Node scripts in `package.json` |
-| React/Vite | vscode-js-debug browser profile | Vite development scripts in `package.json` |
-
-Debuggers use Wingman's managed installations. If the selected debugger is
-missing, the launch popup asks you to install it and shows progress, errors,
-and retry. Opening the web UI does not install debuggers.
-
-Unbuilt .NET and Rust targets are built with `dotnet build` or `cargo build`.
-Click the editor gutter to add breakpoints.
-Closing the Debug tab stops the session. Runnable samples live in
-[`examples/debug`](examples/debug).
-
-## 🛠️ Built-in Tools
-
-Wingman comes with powerful built-in tools:
-
-| Tool | Description |
-|------|-------------|
-| `read` | Read file contents with optional line range |
-| `edit` | Create or edit several files atomically with structured exact-string replacements |
-| `glob` | Find files using glob patterns |
-| `grep` | Search file contents using regex patterns |
-| `exec_command` | Run a command, returning a session id when it remains active |
-| `exec_session` | Poll, interact with, or stop a running command session |
-| `agent` | Launch a sub-agent to handle independent tasks in a separate context |
-| `schedule` | Create, list, pause, resume, or remove recurring or one-time work (interval, cron, or timestamp) that wakes the agent when due |
-| `lsp` | Code intelligence (definitions, references, diagnostics, symbols, call hierarchy) |
-
-### LSP and DAP installation
-
-Wingman registers only language servers and debuggers with managed installers.
-It detects the supported projects below and always uses its installation under
-`$WINGMAN_HOME/tools` (normally `~/.wingman/tools`). A missing or unusable
-managed copy does not fall back to `.venv`, `node_modules/.bin`, `PATH`, or an
-alternative system language server. Discovery, installation checks, and launch
-share this policy across the web UI, CLI, TUI, and ACP.
-
-Project interpreters, runtimes, SDKs, build tools, and browsers remain external.
-For example, Python programs still run with their project's interpreter, and
-Java builds still need a compatible JDK. Project and system language servers
-and debuggers are never selected.
-
-The web UI installs language tools at startup. Debuggers are installed on demand
-when you click **Run** or **Debug** beside an entry point and choose **Install
-debugger** in the launch popup. The popup shows which tools are installed,
-asks before installing missing tools, and shows setup progress with cancellation
-and retry. Only the selected language's debugger and its host dependencies are
-installed. Java debugging uses both managed JDT LS and the managed java-debug
-plug-in; external Java and JavaScript debugger overrides are not used by Wingman.
-
-Managed language tools check for updates at startup. Installed debuggers check
-when their launch popup opens. Both refresh at most once per day and request
-the latest release from their configured source. Failed refreshes preserve the
-existing managed copy; the debug popup shows a warning and still permits launch.
-Tool setup and debug launches cannot run concurrently. An active debug session
-blocks tool updates, keeping its language-server host running.
-Failed checks back off for an hour, while a missing debugger can be retried
-immediately from the popup. Updates are staged and validated before replacing
-the previous installation, so versions do not accumulate.
-
-Rust Analyzer uses a managed launcher for the component supplied by each
-project's active rustup toolchain. Wingman installs the component through
-rustup and respects pinned toolchains; it does not upgrade the Rust toolchain.
-Other project-local and system tools are not updated by Wingman.
-
-| Capability | Language | Executable | Install method | Source |
-|------------|----------|------------|----------------|--------|
-| LSP | Go | `gopls` | Go | [`golang.org/x/tools/gopls`](https://pkg.go.dev/golang.org/x/tools/gopls) |
-| DAP | Go | `dlv` | Go | [`github.com/go-delve/delve/cmd/dlv`](https://pkg.go.dev/github.com/go-delve/delve/cmd/dlv) |
-| LSP | Rust | `rust-analyzer` | rustup component | `rustup component add rust-analyzer` |
-| DAP | Rust | `codelldb` | GitHub release | Latest checksummed platform [CodeLLDB](https://github.com/vadimcn/codelldb/releases/latest) VSIX |
-| LSP | C#/.NET | `csharp-ls` | .NET tool / NuGet | [`csharp-ls`](https://www.nuget.org/packages/csharp-ls) |
-| DAP | C#/.NET | `netcoredbg` | GitHub release | Latest checksummed platform [NetCoreDbg](https://github.com/Samsung/netcoredbg/releases/latest) archive |
-| LSP | TypeScript/JavaScript | `typescript-language-server` | npm | [`typescript-language-server`](https://www.npmjs.com/package/typescript-language-server), [`typescript`](https://www.npmjs.com/package/typescript) |
-| DAP | JavaScript/TypeScript | `js-debug-adapter` | GitHub release | Latest checksummed standalone [vscode-js-debug](https://github.com/microsoft/vscode-js-debug/releases/latest) DAP archive |
-| LSP | Python | `ty` | pip / PyPI | [`ty`](https://pypi.org/project/ty/) |
-| LSP | C/C++ | `clangd` | pip / PyPI | [`clangd`](https://pypi.org/project/clangd/) (third-party LLVM binary wheels) |
-| DAP | Python | `debugpy-adapter` | pip / PyPI | [`debugpy`](https://pypi.org/project/debugpy/) |
-| LSP | Java | `jdtls` | Maven | Maven `LATEST` for `org.eclipse.jdt.ls:org.eclipse.jdt.ls.product:tar.gz` from the [Eclipse JDT LS Maven repository](https://repo.eclipse.org/repository/ls-maven2-releases/org/eclipse/jdt/ls/org.eclipse.jdt.ls.product/) |
-| DAP | Java | `java-debug-adapter` availability token; hosted by `jdtls` | Maven | Maven `LATEST` for [`com.microsoft.java:com.microsoft.java.debug.plugin`](https://central.sonatype.com/artifact/com.microsoft.java/com.microsoft.java.debug.plugin) |
-
-Browser debugging requires Chrome, Chromium, Edge, Brave, or a browser supplied
-through `CHROME_PATH`. Browsers are installed externally.
-
-Wingman installs pip packages in its own isolated
-environments under `$WINGMAN_HOME/tools`, leaving project virtual environments
-untouched.
-
-Python uses `ty server` as its only language server. Both ty and clangd install
-from prebuilt PyPI wheels, using the configured pip index (including JFrog
-Artifactory). Platforms without a compatible wheel report an installation error.
-
-Go, npm, pip, NuGet, and Maven installs honor their normal registry, proxy,
-credentials, mirror, and project configuration. JDT LS and java-debug prefer a
-project `mvnw` and otherwise use `mvn`. JDT LS's complete product archive comes
-through the Eclipse Maven repository, while the Java debug plug-in comes from
-Maven Central, so an enterprise Maven mirror can proxy, cache, or allowlist
-both. Rust Analyzer is installed with rustup in the project directory, preserving
-`rust-toolchain.toml` and rustup override selection; rustup mirrors can be set
-with `RUSTUP_DIST_SERVER`. The three direct GitHub recipes use proxy environment
-variables, support `GITHUB_TOKEN` or `GH_TOKEN`, allowlist official release
-asset names for the current platform, verify GitHub's SHA-256 digest, and never
-replace a working adapter after a failed refresh. CodeLLDB is managed on its
-official macOS, Linux, and Windows release platforms. NetCoreDbg is managed on
-Linux x64/ARM64, macOS ARM64, and Windows x64; unsupported platforms report an
-installation error. No Open VSX or browser archive downloader is used. In particular,
-`@puppeteer/browsers` is not installed automatically because the npm package
-subsequently downloads the browser from a separate binary host.
-
-Set `WINGMAN_MANAGED_TOOLS=off` to disable managed installation and updates.
-Already-installed managed tools keep working. This setting does not enable
-system fallback for managed capabilities.
-
-The npm-managed TypeScript packages provide LSP support only. Browser and Node
-debugging use managed vscode-js-debug. A Chromium browser is an additional runtime for
-browser targets, not a DAP package.
-
-### Supported LSP projects
-
-| Language | Server | Detected By |
-|----------|--------|-------------|
-| Go | `gopls` | `go.mod`, `go.work` |
-| TypeScript/JS | Managed `tsc` (7+) or `typescript-language-server` | `tsconfig.json`, `package.json` |
-| Python | Managed `ty` | `pyproject.toml`, `ty.toml`, `requirements.txt` |
-| C/C++ | Managed `clangd` | `compile_commands.json`, `compile_flags.txt`, `.clangd`, `CMakeLists.txt`, `meson.build` |
-| Rust | `rust-analyzer` | `Cargo.toml` |
-| Java | `jdtls` | `pom.xml`, `build.gradle`, `settings.gradle` |
-| C# | Managed `csharp-ls` | `*.csproj`, `*.sln` |
-
-C/C++ projects should provide a `compile_commands.json` compilation database or
-`compile_flags.txt` so clangd can resolve their include paths and compiler flags.
-See [`examples/c`](examples/c) for a small runnable C project.
-
-The LSP tool provides these operations:
-- **diagnostics** / **workspaceDiagnostics** — Compiler errors and warnings
-- **definition** / **implementation** — Navigate to symbol definitions or interface implementations
-- **references** — Find all usages of a symbol
-- **hover** — Type information and documentation
-- **documentSymbol** / **workspaceSymbol** — List or search symbols
-- **prepareCallHierarchy** / **incomingCalls** / **outgoingCalls** — Explore call graphs
-
-## 🎨 Modes
-
-- **Agent Mode** — Full autonomous operation with tool execution
-- **Plan Mode** — Planning and analysis without project source edits
-
-Toggle between modes using `Tab` or the explicit `/plan` and `/agent` commands.
-
-## ⌨️ Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| `Enter` | Send message |
-| `Alt+Enter` / `Shift+Enter` / `Ctrl+J` | Insert a new line (Shift+Enter requires terminal support) |
-| `Ctrl+P` | Open the searchable command center |
-| `Tab` | Toggle Agent/Plan mode (or autocomplete slash commands) |
-| `@` | Open fuzzy file picker to add file context |
-| `Ctrl+V` / `Ctrl+Alt+V` | Paste image or text directly from the system clipboard on macOS and Windows (including WSL) |
-| `Shift+Insert` | Paste using the terminal, or Wingman's clipboard action when the key is forwarded |
-| `Cmd+V` / `Ctrl+Shift+V` | Paste text using the terminal's native shortcut |
-| `Alt+E` | Expand collapsed pastes for editing |
-| `Ctrl+O` | Open the searchable transcript inspector |
-| `Ctrl+Y` | Copy the complete last assistant response to clipboard |
-| `Ctrl+L` | Clear chat history |
-| `Escape` | Cancel stream, close modal, or clear input |
-| `Ctrl+C` | Cancel stream or clear input; press twice to exit |
-
-These are terminal UI shortcuts. `Ctrl+V` works on macOS as well as Windows;
-`Cmd+V` remains the terminal's native text paste on macOS. If a Windows terminal
-captures `Ctrl+V`, use `Ctrl+Alt+V` to invoke Wingman's clipboard reader. Under WSL,
-Wingman falls back to the Windows clipboard when the Linux clipboard is unavailable
-or empty. In a remote SSH session, use the terminal's native text paste.
-
-Click the model label at the bottom right of the composer to choose a model,
-then click a reasoning effort. Pickers also support mouse-wheel navigation.
-On wide terminals, drag the divider beside the diff pane to resize it, or click
-`×` in its top-right corner to close it. Use `/diff` to reopen the pane.
-Overlays and picker menus also have a right-edge close button; scrollbars show
-the current position along the right edge of each scrollable pane or list.
-Click the footer's commands, files, plan/agent, transcript, or expand-paste
-hints to perform the same action as their keyboard shortcut.
-
-Wingman requests extended keyboard reporting to distinguish `Shift+Enter` from
-`Enter`. Terminals that send the same bytes for both require `Alt+Enter` or
-`Ctrl+J` instead. On macOS, Option must act as Alt/Esc for `Alt+Enter` and `Alt+E`.
-
-Pastes of at least 1,000 characters or nine lines collapse into compact labels.
-The full text is sent when you submit; arrows and deletion treat each label as
-one unit. Use `Alt+E` to expand the text before editing it.
-
-File references in assistant Markdown links, and existing paths in inline code,
-are clickable in terminals supporting OSC 8 hyperlinks. References such as
-`src/main.go:42` retain the line number in the destination; opening at that line
-depends on the terminal and file handler. Tables wrap to the available chat
-width and switch to labeled records on narrow screens.
-
-The empty composer sparkles while Wingman is idle, including between turns,
-and active status text shimmers. Sparkle pauses during input, work, menus,
-and when the terminal loses focus. Set
-`WINGMAN_ANIMATIONS=0` to disable both effects; `NO_COLOR` and `TERM=dumb` also
-disable animation.
-
-The TUI detects the terminal's light or dark background at startup. Set
-`WINGMAN_THEME=light` or `WINGMAN_THEME=dark` to choose explicitly, including
-when the terminal does not report its background color.
-
-## 📝 Commands
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Show available commands and skills |
-| `/model` | Select AI model and reasoning effort from available options |
-| `/plan` | Enter planning mode |
-| `/agent` | Return to execution mode |
-| `/unattended` | Toggle unattended operation: automatic approvals, no questions; keeps the selected mode |
-| `/problems` | Show LSP diagnostics for the workspace |
-| `/diff` | Show working tree changes; on wide terminals toggles a live diff pane beside the chat |
-| `/copy` | Copy the last response, an individual code block, or a blockquote |
-| `/export [path]` | Copy a Markdown transcript or save it to a new file; relative paths use the workspace directory |
-| `/resume` | Resume the most recent saved session |
-| `/clear` | Clear chat history |
-| `/quit` | Exit application |
-
-Skill slash commands (e.g. `/commit`, `/code-review`) also appear here — see **Skills** below.
-
-## 🔧 Skills
-
-Skills are reusable, invocable workflows defined in `SKILL.md` files. Project skills override personal, plugin, and bundled skills with the same name. Within each scope, the first listed directory wins:
-
-**Project skills** (scoped to the current repo):
-- `.wingman/skills/<name>/SKILL.md`
-- `.agents/skills/<name>/SKILL.md`
-- `.claude/skills/<name>/SKILL.md`
-
-**Personal skills** (user-wide, across all projects):
-- `~/.wingman/skills/<name>/SKILL.md`
-- `~/.agents/skills/<name>/SKILL.md`
-- `~/.claude/skills/<name>/SKILL.md`
-
-This allows project-specific customization while keeping personal defaults reusable across repositories. Wingman uses the same directory order and the same first-wins rule for skills, [plugins](#-plugins), and [custom agents](#-custom-agents), and reports every shadowed entry on startup so a silently ignored file is visible.
-
-Project and personal skills support directory symbolic links on macOS and Windows, and directory junctions on Windows (`mklink /J`). The entire `.agents/skills` or `.wingman/skills` folder, a grouping folder, or an individual skill directory can point to a separate Git checkout. Wingman follows these links for discovery and grants read access to the skills and their supporting files, while detecting directory cycles.
-
-Project and personal skill directories are refreshed while Wingman is running. Skills generated by compatible tools—such as Spec Kit commands written beneath `.agents/skills`—appear without restarting: opening a skill picker or invoking a skill refreshes immediately, while a lightweight reconciler updates already-open pickers within two seconds. Both `/skill` and Codex-style `$skill` invocations pass trailing text through `$ARGUMENTS`. Plugin reload remains a separate lifecycle operation because plugins can also change hooks, MCP servers, and permissions.
-
-Skill frontmatter follows the [Agent Skills specification](https://agentskills.io/specification): `name` and `description` are required; `license`, `compatibility`, `metadata`, and experimental `allowed-tools` are accepted. `allowed-tools` is descriptive metadata and never bypasses Wingman's normal tool approval policy.
-
-### Bundled Skills
-
-Wingman ships with built-in skills that are available immediately via slash commands. Their complete directories are synchronized to `$WINGMAN_HOME/skills/.system` (normally `~/.wingman/skills/.system`), while a personal or project skill with the same name cleanly overrides the built-in. The `.system` subtree and its short `.wingman` fingerprint marker are managed by Wingman and should not be edited directly.
-
-Existing `~/.wingman/skills/<name>` customizations from older Wingman versions remain personal overrides. Rename or remove one only when you want the current bundled skill to take precedence.
-
-| Skill | Description |
-|-------|-------------|
-| `/init` | Scan the project and generate an `AGENTS.md` with conventions and build commands |
-| `/architecture` | Design or evaluate a code-grounded architecture and implementation blueprint |
-| `/feature-dev` | Explore, design, implement, and verify non-trivial feature work |
-| `/debug` | Reproduce, isolate, and diagnose unexpected behavior before fixing it |
-| `/test` | Design, add, repair, or run focused behavioral tests |
-| `/commit` | Stage and commit changes with a well-crafted commit message |
-| `/pull-request` | Prepare, push, create, or update a reviewable pull request |
-| `/skill-creator` | Create or improve a focused skill with optional scripts and resources |
-| `/code-review` | Review code changes for correctness, style, and security |
-| `/simplify` | Review changed code for reuse, quality, and efficiency, then fix issues |
-| `/security-review` | Concise read-only security audit using parallel sub-agents |
-| `/vuln-scan` | Static vulnerability scan that writes `VULN-FINDINGS.json` / `.md` |
-| `/triage` | Verify, deduplicate, rank, and route raw security findings |
-| `/patch` | Fix verified security findings and prove the remediation |
-| `/threat-model` | Map assets, entry points, trust boundaries, and top threats |
-| `/memory` | Save or revise durable user, feedback, project, and reference context |
-
-### Custom Skill Example
-
-```markdown
----
-name: run-tests
-description: Run the project test suite with coverage
----
-
-# Testing Skill
-
-Run tests with: `go test -cover ./...`
-```
-
-Place this file at `.wingman/skills/run-tests/SKILL.md` and invoke it with `/run-tests`.
-Wingman supports Claude-style skill arguments: `$ARGUMENTS`, zero-based `$ARGUMENTS[N]`, and `$N`; non-empty arguments are appended as `ARGUMENTS: <value>` when no argument placeholder is present. The optional Claude extensions `arguments` (a space-separated string or string list) and `argument-hint` enable named positional substitutions such as `$component` and display `/skill [component]` hints in the UI. `${SKILL_DIR}` and `${PROJECT_DIR}` provide neutral directory variables, with `${CLAUDE_SKILL_DIR}` and `${CLAUDE_PROJECT_DIR}` accepted as compatibility aliases. The two extra frontmatter fields are intentionally non-portable and therefore rejected in Agent Plugin skills.
-
-A skill may keep any supporting files next to `SKILL.md`. Common conventions are `references/` for selectively loaded guidance, `assets/` for files to copy or transform, `templates/` and `examples/` for reusable inputs, and `scripts/` for deterministic helpers. Wingman copies the complete directory tree for built-in skills, including dotfiles and underscore-prefixed resources.
-
-Scripts run through Wingman's normal shell command path and its approval policy. Wingman does not infer dependencies or automatically create a virtual environment, so a skill that needs Python packages should document a reproducible command such as `uv run`, a lockfile-backed environment, or explicit venv setup.
-
-A ready-to-copy resource-backed skill with metadata, named arguments, directory variables, a reference, and a helper script lives in [`examples/skills/run-tests`](examples/skills/run-tests).
-
-## 🪝 Hooks
-
-Wingman loads Codex-format hooks from `~/.codex/hooks.json`, `<project>/.codex/hooks.json`, and enabled plugins. It supports the Codex lifecycle events and JSON input/output decision protocol; matching command hooks run concurrently. Project and plugin hooks require a one-time confirmation in each session before their first matching command runs.
-
-Command handlers are Codex-compatible. Wingman additionally supports Claude-style `type: "http"` handlers using the same JSON request and response body as command hooks. The HTTP extension requires explicit `allowedEnvVars` for environment interpolation in headers.
-
-See the [Codex hooks reference](https://learn.chatgpt.com/docs/hooks) for the configuration shape. Wingman intentionally does not load the former Wingman-specific flat hook format.
-
-## 🧩 Plugins
-
-A plugin bundles skills, MCP servers, and optional lifecycle hooks. Wingman implements the portable [Agent Plugins specification](https://agent-plugins.org) v1.0.0.
-
-Drop a plugin directory into any of these, project before personal, first name wins:
-
-- `.wingman/plugins/<name>/`, `.agents/plugins/<name>/`, `.claude/plugins/<name>/` (project)
-- `~/.wingman/plugins/<name>/`, `~/.agents/plugins/<name>/`, `~/.claude/plugins/<name>/` (personal)
-
-The plugins folder or an individual plugin directory can be a symbolic link or a
-Windows junction to another checkout. Plugin components must remain within the
-resolved plugin root, and plugin data must remain within its configured data root.
-
-A portable Agent Plugin starts with a `plugin.json` manifest and two standard component types. A complete package can also carry resources and client-owned extensions such as hooks:
-
-```text
-release-tools/
-├── plugin.json                        # required manifest
-├── mcp.json                           # MCP servers this plugin provides
-├── hooks/
-│   └── hooks.json                     # declared through extensions.com.openai
-├── scripts/
-│   └── release-context.sh             # hook helper
-├── templates/
-│   └── changelog.md                   # shared plugin resource
-├── skills/
-│   └── release-check/
-│       ├── SKILL.md                   # one skill per immediate subdirectory
-│       └── references/
-│           └── release-policy.md      # skill-local resource
-```
-
-```json
-{
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
-  "name": "release-tools",
-  "version": "1.0.0",
-  "description": "Release checklist skill plus the MCP servers it needs"
-}
-```
-
-`name` must be lowercase alphanumerics, hyphens, and periods. A manifest that violates the schema is rejected and reported. As explicit non-fatal exceptions, unknown top-level fields and a non-object `extensions` value are reported and ignored; unknown reverse-domain extension namespaces remain opaque.
-
-Only `plugin.json` is a plugin manifest. Native `.codex-plugin`, `.claude-plugin`, and `.cursor-plugin` manifests are not loaded. Skills are read only from immediate subdirectories of `skills/`, and MCP servers only from `mcp.json`, as defined by the portable specification. Every loaded `SKILL.md` is validated against the Agent Skills name, directory-name, description, compatibility, and frontmatter constraints.
-
-### Plugin hooks
-
-A plugin can supply a Codex hook declaration under the client-owned `extensions.com.openai.hooks` field. Wingman accepts a single `./` path, an array of paths, an inline hooks object, or an array of inline objects. Manifest paths must remain inside the resolved plugin root. `com.openai` is a namespaced Agent Plugins extension defined by Codex, not a portable Agent Plugins core field; no hook file is loaded implicitly.
-
-Plugin hook commands receive `PLUGIN_ROOT` and `PLUGIN_DATA`. The plugin data directory is created before hooks run. Plugin hooks are untrusted code: Wingman asks once per session before the first matching hook from each plugin executes.
-
-### Plugin MCP servers
-
-`mcp.json` uses the portable Agent Plugins format, which is stricter than Wingman's own `mcp.json`: every server declares its `type` explicitly, and `command` must be a bare executable name or a `./` path inside the plugin.
-
-```json
-{
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
-  "mcpServers": {
-    "changelog": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@example/changelog-mcp", "--cache", "${PLUGIN_DATA}/cache"],
-      "env": { "CHANGELOG_TEMPLATE": "${PLUGIN_ROOT}/templates/changelog.md" },
-      "cwd": "${PLUGIN_DATA}"
-    },
-    "release-api": {
-      "type": "streamable-http",
-      "url": "https://releases.example.com/mcp"
-    }
-  }
-}
-```
-
-Two variables are expanded in `args`, `env` values, and `cwd`, and are set in every plugin subprocess:
-
-| Variable | Points at | Use for |
-|----------|-----------|---------|
-| `PLUGIN_ROOT` | the plugin directory | bundled scripts, binaries, templates |
-| `PLUGIN_DATA` | `~/.wingman/plugin-data/<name>` (personal) or the project's state directory | caches, installed dependencies, generated files — survives plugin updates |
-
-Remote servers must use HTTPS unless they point at loopback, and must not carry credentials in `headers`, which are visible package data rather than a secret store.
-
-### Precedence and conflicts
-
-Plugin components join the same namespaces as your own configuration, and your configuration always wins:
-
-- **Skills** — a plugin skill is invoked by its plain name (`/release-check`) and also as `<plugin>:<skill>` (`/release-tools:release-check`). If a personal or project skill takes the plain name, the qualified form still reaches the plugin's copy.
-- **MCP servers** — plugin servers sit below `~/.wingman/mcp.json` and `./mcp.json`, so a server you configure yourself replaces the plugin's entry of the same name.
-- **Duplicate endpoints** — servers configured identically across any source are collapsed to one connection, so the same tools are not offered twice under different names. Any difference in headers, arguments, or environment keeps both.
-
-Component failures never take down the rest of a plugin: an unreadable `mcp.json` still leaves its skills loaded, and one invalid server entry skips only itself. Everything skipped is reported on startup.
-
-A ready-to-copy plugin lives in [`examples/plugins/release-tools`](examples/plugins/release-tools).
-
-## 🤝 Custom Agents
-
-Custom agent types extend the built-in sub-agent roster (`explore`, `code-reviewer`, `verification`, …) with your own specialists. Wingman discovers them from markdown files (first definition of a name wins, project before personal):
-
-- `.wingman/agents/*.md`, `.agents/agents/*.md`, `.claude/agents/*.md` (project)
-- `~/.wingman/agents/*.md`, `~/.agents/agents/*.md`, `~/.claude/agents/*.md` (personal)
-
-```markdown
----
-name: db-expert
-description: Deep PostgreSQL schema and query analysis
-access: read-only
----
-
-You are a PostgreSQL specialist. Inspect schemas, migrations, and queries...
-```
-
-The body becomes the agent's system prompt. `access` selects the toolset — `read-only` (search/read only), `verify` (read plus build/test commands), or `all` (default). A custom definition with a built-in name replaces that built-in.
-
-Subagent model choices are independent of Agent/Plan mode:
-
-- `default`: inherit the parent's model and effort. Built-in agents, including reviewers and security auditors, use this by default.
-- `utility`: use the configured utility model or an available small model for cheaper tasks.
-- `complex`: use the configured complex model or an available large model for demanding tasks. `plan` remains a compatibility alias.
-
-An optional `model` in a custom agent's frontmatter supplies its default choice. The `agent` tool's explicit `model` argument takes precedence; `model: default` restores inheritance even for a custom agent with an override. An optional `effort` argument adjusts reasoning effort to a supported level. Without an override, effort is inherited, and a changed model clamps it to its supported levels. If a requested tier has no available model, the parent model is retained.
-
-## 🖥️ Server Mode
-
-Wingman includes a web-based UI server — useful for IDE integrations or browser-based access:
-
-```bash
-wingman server [--port 9000]
-```
-
-This starts an HTTP server at `http://localhost:9000` (or another available
-port) with a React UI featuring a chat panel, file browser, diff viewer,
-diagnostics panel, a terminal (multiple
-xterm.js sessions, shell of your choice, `Ctrl+Alt+T`), and session management.
-`Ctrl+P` opens the command palette — same shortcut as the TUI command center
-(`Cmd/Ctrl+K` works too). The server uses WebSockets for real-time streaming.
-
-## 🧩 CLI Wrappers
-
-Wingman can launch other coding agents pre-configured to use a Wingman backend:
-
-```bash
-wingman run claude [args...]
-wingman run claude-desktop [args...]
-wingman run codex [args...]
-wingman run copilot [args...]
-wingman run gemini [args...]
-wingman run goose [args...]
-wingman run junie [args...]
-wingman run opencode [args...]
-wingman run pi [args...]
-```
-
-Each wrapper automatically configures the target CLI with the correct endpoint
-and authentication. `WINGMAN_URL` is optional and defaults to
-`http://localhost:4242`; set it for another gateway. These wrappers are deliberately
-Wingman-backed and are separate from the native subscription-backed
-`wingman --agent <name>` modes.
-The Codex and Claude CLI wrappers discover models before launching, retry
-transient failures, and report configuration or availability errors within
-10 seconds. No separate health probe or stored readiness flag is needed.
-
-The Codex wrapper also supplies an embedded model catalog filtered to the
-OpenAI models advertised by the Wingman backend, so Codex's in-app `/model`
-selector remains available with the correct model-specific instructions and
-tool metadata.
-
-The Claude and Codex wrappers apply privacy defaults for an enterprise gateway:
-
-- **Claude:** disables Anthropic telemetry, error reports, feedback, feature-flag
-  fetching, updates, remote control, cloud connectors, cloud skill/plugin sync,
-  artifacts, voice, and Chrome integration. OpenTelemetry exports and content
-  logging are disabled separately. WebFetch skips the preflight that would send
-  requested hostnames directly to Anthropic; fetching the URL itself remains
-  available. Local MCP servers, plugins, hooks, and project instructions still
-  load. Detached agent-view sessions are disabled because their shared supervisor
-  can bypass the wrapper's launch environment.
-- **Claude auto mode:** `wingman run claude` starts with `--permission-mode auto`.
-  Claude's subprocess credential scrub forces manual mode, so this wrapper
-  explicitly turns it off. Child tools can therefore inherit credentials.
-  Classifier requests use the normal gateway API rather than server-side review.
-  Explicit trailing permission-mode arguments still override the startup mode.
-- **Codex:** disables analytics, feedback, all OpenTelemetry exporters, hosted
-  web search, apps, the remote plugin catalog, plugin sharing/suggestions, fast
-  and ultrafast modes, realtime conversations, and automatic daemon startup.
-  Local plugins, MCP servers, hooks, and skills retain their configured behavior.
-  The wrapper uses an ephemeral CLI credential store, removes inherited OpenAI
-  API credentials, and supplies only the gateway token for provider auth. Shell
-  snapshots are off; shell tools exclude secret-named environment variables and
-  receive an empty `WINGMAN_TOKEN`.
-
-These are launch defaults, not a network boundary. Keep enterprise egress rules
-in place: local commands, MCP servers, hooks, and plugins have their own network
-paths. Local conversation storage is retained for resume; Codex's
-`history.persistence="none"` only disables its input-history file. Neither wrapper
-changes gateway-side retention or logging.
-
-Machine-managed policy can take precedence over wrapper settings. Claude's
-parent policy pins the gateway using `allowedProviders=["customEndpoint"]`
-(requires Claude Code 2.1.285+) and the exact `ANTHROPIC_BASE_URL`. On managed
-devices, deploy the same restrictions centrally or configure parent-policy
-merging. Codex CLI provider overrides merge with existing user provider fields;
-for enforced routing, deploy a complete `[model_providers.wingman]` definition
-through `requirements.toml`, which replaces the user definition, together with
-the required provider and authentication restrictions.
-
-See the current [Claude environment reference](https://code.claude.com/docs/en/env-vars),
-[Claude managed settings](https://code.claude.com/docs/en/managed-settings),
-[Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference),
-and [Codex gateway boundaries](https://learn.chatgpt.com/docs/enterprise/gateway-compatibility#data-and-tool-boundaries).
-
-## 📊 Terminal-Bench
-
-Wingman can run Terminal-Bench tasks through Harbor's generic ACP agent runner.
-The integration installs the released Wingman binary inside each task container,
-preserving the task's own Docker environment and verifier. See the
-[Terminal-Bench compatibility guide](bench/tbench/README.md) for the pinned
-agent descriptor and benchmark commands.
+Add `--scope project` to save a server in the project's `mcp.json`. Personal
+servers are stored in `~/.wingman/mcp.json`. Servers that require OAuth open a
+browser for sign-in.
+
+See [configuration examples](examples/README.md) for ready-to-copy skills,
+plugins, custom agents, and MCP settings. Wingman stores its settings and sessions
+in `~/.wingman`; set `WINGMAN_HOME` to choose another location.

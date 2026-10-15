@@ -93,6 +93,9 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 						return tool.Result{}, fmt.Errorf("read %s: %w", file.displayPath, err)
 					}
 				}
+				if freshness.staleContent(ctx, file.target, before) {
+					return tool.Result{}, fmt.Errorf("cannot edit %s: content changed since the preview; refresh it (no files changed)", file.displayPath)
+				}
 				bom, content := stripBom(string(before))
 				ending := detectLineEnding(content)
 				updated := normalizeToLF(content)

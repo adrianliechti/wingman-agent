@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +15,6 @@ import (
 
 const (
 	maxListedLocations     = 100
-	maxListedSymbols       = 100
 	maxDefinitionSnippets  = 5
 	definitionSnippetLines = 8
 )
@@ -57,17 +57,23 @@ func (c sourceCache) locationLine(location lsp.Location) (string, int, bool) {
 	return lines[line], runeColumnFromUTF16(lines[line], int(location.Range.Start.Character)) + 1, true
 }
 
-func formatLocations(title string, locations []lsp.Location, root string) string {
+func sortedLocations(locations []lsp.Location) []lsp.Location {
+	locations = slices.Clone(locations)
+	slices.SortStableFunc(locations, func(a, b lsp.Location) int {
+		return cmp.Or(cmp.Compare(a.URI.String(), b.URI.String()), cmp.Compare(a.Range.Start.Line, b.Range.Start.Line), cmp.Compare(a.Range.Start.Character, b.Range.Start.Character), cmp.Compare(a.Range.End.Line, b.Range.End.Line), cmp.Compare(a.Range.End.Character, b.Range.End.Character))
+	})
+	return locations
+}
+
+func formatLocations(title string, locations []lsp.Location, root string, pages ...resultPage) string {
+	p := selectedPage(pages)
 	files := make(map[string]bool)
 	for _, location := range locations {
 		files[location.URI.String()] = true
 	}
 	var out strings.Builder
 	fmt.Fprintf(&out, "%s (%d found across %d files):\n", title, len(locations), len(files))
-	shown := locations
-	if len(shown) > maxListedLocations {
-		shown = shown[:maxListedLocations]
-	}
+	shown := pageSlice(sortedLocations(locations), p)
 	cache := sourceCache{}
 	for _, location := range shown {
 		path, _ := fileuri.Path(location.URI.String())
@@ -78,19 +84,48 @@ func formatLocations(title string, locations []lsp.Location, root string) string
 			fmt.Fprintf(&out, "%s:%d:%d\n", relativePath(root, path), location.Range.Start.Line+1, column)
 		}
 	}
-	if len(locations) > len(shown) {
-		fmt.Fprintf(&out, "... showing first %d of %d locations\n", len(shown), len(locations))
-	}
+	out.WriteString(pageNote(len(locations), p, "locations"))
 	return out.String()
 }
 
-func formatDefinitions(locations []lsp.Location, root string) string {
+func formatReferenceCounts(locations []lsp.Location, root string, includeDeclaration bool, p resultPage) string {
+	counts := map[string]int{}
+	seen := map[string]bool{}
+	for _, location := range locations {
+		key := fmt.Sprintf("%s:%d:%d:%d:%d", location.URI.String(), location.Range.Start.Line, location.Range.Start.Character, location.Range.End.Line, location.Range.End.Character)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		path, ok := fileuri.Path(location.URI.String())
+		if !ok {
+			path = location.URI.String()
+		}
+		counts[relativePath(root, path)]++
+	}
+	var files []string
+	for file := range counts {
+		files = append(files, file)
+	}
+	slices.Sort(files)
+	declaration := "included"
+	if !includeDeclaration {
+		declaration = "excluded"
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "References: %d across %d files; declaration %s. Uses include non-call references.\n", len(seen), len(files), declaration)
+	for _, file := range pageSlice(files, p) {
+		fmt.Fprintf(&out, "%s: %d\n", file, counts[file])
+	}
+	out.WriteString(pageNote(len(files), p, "files"))
+	return out.String()
+}
+
+func formatDefinitions(locations []lsp.Location, root string, pages ...resultPage) string {
+	p := selectedPage(pages)
 	var out strings.Builder
 	fmt.Fprintf(&out, "Definition (%d found):\n", len(locations))
-	shown := locations
-	if len(shown) > maxListedLocations {
-		shown = shown[:maxListedLocations]
-	}
+	shown := pageSlice(sortedLocations(locations), p)
 	cache := sourceCache{}
 	for i, location := range shown {
 		path, _ := fileuri.Path(location.URI.String())
@@ -105,39 +140,18 @@ func formatDefinitions(locations []lsp.Location, root string) string {
 			fmt.Fprintf(&out, "%6d\t%s\n", line+1, lines[line])
 		}
 	}
-	if len(locations) > len(shown) {
-		fmt.Fprintf(&out, "\n... showing first %d of %d locations\n", len(shown), len(locations))
-	}
+	out.WriteString(pageNote(len(locations), p, "locations"))
 	return out.String()
 }
 
-func formatDocumentSymbols(symbols []lsp.DocumentSymbol, filePath, root string, indent int) string {
-	var out strings.Builder
-	if indent == 0 {
-		fmt.Fprintf(&out, "Symbols in %s:\n", relativePath(root, filePath))
-	}
-	prefix := strings.Repeat("  ", indent+1)
-	for _, symbol := range symbols {
-		detail := ""
-		if symbol.Detail != nil && *symbol.Detail != "" {
-			detail = " " + *symbol.Detail
-		}
-		fmt.Fprintf(&out, "%s%s (%s)%s - line %d\n", prefix, symbol.Name, symbolKindName(symbol.Kind), detail, symbol.SelectionRange.Start.Line+1)
-		if len(symbol.Children) > 0 {
-			out.WriteString(formatDocumentSymbols(symbol.Children, filePath, root, indent+1))
-		}
-	}
-	return out.String()
-}
-
-func formatSymbolInformation(symbols []lsp.SymbolInformation, root string) string {
+func formatSymbolInformation(symbols []lsp.SymbolInformation, root string, pages ...resultPage) string {
 	return formatSymbols(len(symbols), root, symbols, func(symbol lsp.SymbolInformation) (string, string) {
 		path, _ := fileuri.Path(symbol.Location.URI.String())
 		return path, fmt.Sprintf("  %s (%s) - Line %d\n", symbol.Name, symbolKindName(symbol.Kind), symbol.Location.Range.Start.Line+1)
-	})
+	}, selectedPage(pages))
 }
 
-func formatWorkspaceSymbols(symbols []lsp.WorkspaceSymbol, root string) string {
+func formatWorkspaceSymbols(symbols []lsp.WorkspaceSymbol, root string, pages ...resultPage) string {
 	return formatSymbols(len(symbols), root, symbols, func(symbol lsp.WorkspaceSymbol) (string, string) {
 		switch location := symbol.Location.(type) {
 		case *lsp.Location:
@@ -149,13 +163,17 @@ func formatWorkspaceSymbols(symbols []lsp.WorkspaceSymbol, root string) string {
 		default:
 			return "", fmt.Sprintf("  %s (%s)\n", symbol.Name, symbolKindName(symbol.Kind))
 		}
-	})
+	}, selectedPage(pages))
 }
 
-func formatSymbols[T any](total int, root string, symbols []T, line func(T) (string, string)) string {
-	if len(symbols) > maxListedSymbols {
-		symbols = symbols[:maxListedSymbols]
-	}
+func formatSymbols[T any](total int, root string, symbols []T, line func(T) (string, string), p resultPage) string {
+	symbols = slices.Clone(symbols)
+	slices.SortStableFunc(symbols, func(a, b T) int {
+		ap, at := line(a)
+		bp, bt := line(b)
+		return cmp.Or(cmp.Compare(ap, bp), cmp.Compare(at, bt))
+	})
+	symbols = pageSlice(symbols, p)
 	type group struct {
 		path  string
 		lines []string
@@ -174,37 +192,74 @@ func formatSymbols[T any](total int, root string, symbols []T, line func(T) (str
 		groups[index].lines = append(groups[index].lines, text)
 	}
 	var out strings.Builder
-	fmt.Fprintf(&out, "Symbols (%d found across %d files):\n", total, len(groups))
+	fmt.Fprintf(&out, "Symbols (%d found; %d files on this page):\n", total, len(groups))
 	for _, group := range groups {
 		fmt.Fprintf(&out, "\n%s:\n", group.path)
 		for _, line := range group.lines {
 			out.WriteString(line)
 		}
 	}
-	if total > len(symbols) {
-		fmt.Fprintf(&out, "\n... showing first %d of %d symbols; narrow the query for more\n", len(symbols), total)
-	}
+	out.WriteString(pageNote(total, p, "symbols"))
 	return out.String()
 }
 
-func formatIncomingCalls(calls []lsp.CallHierarchyIncomingCall, root string) string {
+func formatIncomingCalls(calls []lsp.CallHierarchyIncomingCall, root string, pages ...resultPage) string {
+	p := selectedPage(pages)
+	calls = slices.Clone(calls)
+	slices.SortStableFunc(calls, func(a, b lsp.CallHierarchyIncomingCall) int { return compareCallItems(a.From, b.From) })
 	var out strings.Builder
 	fmt.Fprintf(&out, "Incoming Calls (%d found):\n", len(calls))
-	for _, call := range calls {
+	for _, call := range pageSlice(calls, p) {
 		path, _ := fileuri.Path(call.From.URI.String())
 		fmt.Fprintf(&out, "  %s (%s) - %s:%d%s\n", call.From.Name, symbolKindName(call.From.Kind), relativePath(root, path), call.From.SelectionRange.Start.Line+1, formatCallSites(call.FromRanges, ", call sites at lines "))
 	}
+	out.WriteString(pageNote(len(calls), p, "callers"))
 	return out.String()
 }
 
-func formatOutgoingCalls(calls []lsp.CallHierarchyOutgoingCall, root string) string {
+func formatOutgoingCalls(calls []lsp.CallHierarchyOutgoingCall, root string, pages ...resultPage) string {
+	p := selectedPage(pages)
+	calls = slices.Clone(calls)
+	slices.SortStableFunc(calls, func(a, b lsp.CallHierarchyOutgoingCall) int { return compareCallItems(a.To, b.To) })
 	var out strings.Builder
 	fmt.Fprintf(&out, "Outgoing Calls (%d found):\n", len(calls))
-	for _, call := range calls {
+	for _, call := range pageSlice(calls, p) {
 		path, _ := fileuri.Path(call.To.URI.String())
 		fmt.Fprintf(&out, "  %s (%s) - %s:%d%s\n", call.To.Name, symbolKindName(call.To.Kind), relativePath(root, path), call.To.SelectionRange.Start.Line+1, formatCallSites(call.FromRanges, ", called at lines "))
 	}
+	out.WriteString(pageNote(len(calls), p, "callees"))
 	return out.String()
+}
+
+func compareCallItems(a, b lsp.CallHierarchyItem) int {
+	return cmp.Or(cmp.Compare(a.URI.String(), b.URI.String()), cmp.Compare(a.SelectionRange.Start.Line, b.SelectionRange.Start.Line), cmp.Compare(a.SelectionRange.Start.Character, b.SelectionRange.Start.Character), cmp.Compare(a.Name, b.Name))
+}
+
+func formatDocumentSymbolPage(symbols []lsp.DocumentSymbol, path, root string, p resultPage) string {
+	type entry struct {
+		symbol    lsp.DocumentSymbol
+		qualified string
+	}
+	var entries []entry
+	var walk func([]lsp.DocumentSymbol, string)
+	walk = func(symbols []lsp.DocumentSymbol, prefix string) {
+		for _, symbol := range symbols {
+			name := symbol.Name
+			if prefix != "" {
+				name = prefix + "." + name
+			}
+			entries = append(entries, entry{symbol, name})
+			walk(symbol.Children, name)
+		}
+	}
+	walk(symbols, "")
+	return formatSymbols(len(entries), root, entries, func(e entry) (string, string) {
+		detail := ""
+		if e.symbol.Detail != nil && *e.symbol.Detail != "" {
+			detail = " " + *e.symbol.Detail
+		}
+		return path, fmt.Sprintf("  %s (%s)%s - Line %d\n", e.qualified, symbolKindName(e.symbol.Kind), detail, e.symbol.SelectionRange.Start.Line+1)
+	}, p)
 }
 
 func formatCallSites(ranges []lsp.Range, prefix string) string {
