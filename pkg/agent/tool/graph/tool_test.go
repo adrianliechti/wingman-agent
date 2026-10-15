@@ -69,3 +69,27 @@ func TestCodeGraphSearchReportsPaginationAndRejectsNegativeOffset(t *testing.T) 
 		t.Fatalf("expected negative offset validation, got %v", err)
 	}
 }
+
+func TestTraceReturnsEvidenceAndCoverageLimits(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "calls.go"), []byte("package sample\nfunc Start() { Middle() }\nfunc Middle() { End() }\nfunc End() {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "empty.go"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	inspect := NewTools(coregraph.New(root, filepath.Join(t.TempDir(), "graph.json")))[0]
+	out, err := inspect.Execute(t.Context(), map[string]any{"operation": "trace", "symbol": "Start", "target": "End"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Start → Middle → End", "calls.go:2: func Start()", "calls.go:3: func Middle()", "Coverage incomplete: 1", "empty.go (empty)", "Edges resolved by name"} {
+		if !strings.Contains(out.Content, want) {
+			t.Fatalf("missing %q: %s", want, out.Content)
+		}
+	}
+	out, err = inspect.Execute(t.Context(), map[string]any{"operation": "trace", "symbol": "Start", "target": "End", "depth": 1})
+	if err != nil || !strings.Contains(out.Content, "INCOMPLETE") {
+		t.Fatalf("silent truncation: %s %v", out.Content, err)
+	}
+}

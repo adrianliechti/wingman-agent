@@ -417,6 +417,17 @@ func (s *Session) DocumentContent(filePath string) (string, bool) {
 	return doc.content, true
 }
 
+// DocumentSnapshot identifies the text/version used for an LSP edit preview.
+func (s *Session) DocumentSnapshot(filePath string) (string, int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc := s.documents[fileuri.FromPath(filePath)]
+	if doc == nil || !doc.opened {
+		return "", 0, false
+	}
+	return doc.content, doc.version, true
+}
+
 func (s *Session) syncDocument(ctx context.Context, filePath string, content []byte, saved bool) (string, error) {
 	s.documentMu.Lock()
 	defer s.documentMu.Unlock()
@@ -687,13 +698,7 @@ func (s *Session) locations(ctx context.Context, method, uri string, line, colum
 		})
 		return locationsFromDefinition(result), err
 	case methodReferences:
-		result, err := retryRPC(ctx, func() ([]protocol.Location, error) {
-			return s.rpc.References(ctx, &protocol.ReferenceParams{
-				TextDocumentPositionParams: documentPosition,
-				Context:                    protocol.ReferenceContext{IncludeDeclaration: true},
-			})
-		})
-		return []Location(result), err
+		return s.ReferenceLocations(ctx, uri, line, column)
 	default:
 		return nil, fmt.Errorf("unsupported location method %q", method)
 	}
@@ -711,8 +716,18 @@ func (s *Session) ImplementationLocations(ctx context.Context, uri string, line,
 	return s.locations(ctx, methodImplementation, uri, line, column)
 }
 
-func (s *Session) ReferenceLocations(ctx context.Context, uri string, line, column int) ([]Location, error) {
-	return s.locations(ctx, methodReferences, uri, line, column)
+func (s *Session) ReferenceLocations(ctx context.Context, uri string, line, column int, includeDeclaration ...bool) ([]Location, error) {
+	include := true
+	if len(includeDeclaration) > 0 {
+		include = includeDeclaration[0]
+	}
+	result, err := retryRPC(ctx, func() ([]protocol.Location, error) {
+		return s.rpc.References(ctx, &protocol.ReferenceParams{
+			TextDocumentPositionParams: protocol.TextDocumentPositionParams{TextDocument: wireDocument(uri), Position: wirePosition(line, column)},
+			Context:                    protocol.ReferenceContext{IncludeDeclaration: include},
+		})
+	})
+	return []Location(result), err
 }
 
 func (s *Session) Hover(ctx context.Context, uri string, line, column int) (*Hover, error) {

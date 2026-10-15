@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -34,6 +35,7 @@ type Manager struct {
 	detectedAt            time.Time
 	initializationOptions map[string][]byte
 	managedTools          tooling.ManagedTools
+	registry              *Registry
 }
 
 // ServerActivity describes one live language-server session without starting
@@ -109,7 +111,7 @@ func (m *Manager) detect() []projectRoot {
 	m.detectMu.Lock()
 	defer m.detectMu.Unlock()
 	if m.detectedAt.IsZero() || time.Since(m.detectedAt) >= detectionCacheTTL {
-		m.roots = detectAll(m.workingDir, m.managedTools)
+		m.roots = detectAll(m.workingDir, m.managedTools, m.registry)
 		for index := range m.roots {
 			if options := m.initializationOptions[serverOptionsKey(m.roots[index].Server.Name)]; len(options) > 0 {
 				m.roots[index].Server.InitializationOptions = slices.Clone(options)
@@ -130,6 +132,7 @@ func cloneProjectRoots(values []projectRoot) []projectRoot {
 		cloned[index] = value
 		cloned[index].Server.Args = slices.Clone(value.Server.Args)
 		cloned[index].Server.Languages = slices.Clone(value.Server.Languages)
+		cloned[index].Server.ExtensionToLanguage = maps.Clone(value.Server.ExtensionToLanguage)
 		cloned[index].Server.InitializationOptions = slices.Clone(value.Server.InitializationOptions)
 	}
 	return cloned

@@ -1,17 +1,28 @@
-# Non-interactive structured output
+# Structured output from a script
 
-Run the example from any repository you want Wingman to inspect:
+Install and configure Wingman, then run this example from the repository you
+want it to inspect. Use the example script's full path if you are outside the
+Wingman source checkout:
 
 ```sh
-examples/non-interactive/run.sh
+/path/to/wingman-agent/examples/non-interactive/run.sh
 ```
 
-It runs unattended, prints the final JSON to stdout, and saves the same value
-as `project.json` beside the example with `tee`. The command fails if the final
-response is not valid JSON or does not match `project.schema.json`.
+The script runs unattended, prints the final JSON to stdout, and saves it as
+`project.json` beside the script. Wingman validates the response against
+[project.schema.json](project.schema.json).
 
-For schema-less structured output, use `--json` by itself:
+To use a schema directly:
+
+```sh
+wingman exec --schema /path/to/project.schema.json "Extract project metadata"
+```
+
+For JSON without a schema:
 
 ```sh
 wingman exec --json "Summarize this repository" | jq
 ```
+
+`exec` approves actions automatically. See the [main README](../../README.md#run-a-prompt-from-a-script)
+for piping context and resuming a run.

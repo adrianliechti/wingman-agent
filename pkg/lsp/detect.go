@@ -33,17 +33,17 @@ func serverVersionSupported(server Server, command, workingDir string) bool {
 	return tooling.MajorVersionAtLeast(ctx, command, server.MinimumMajorVersion, workingDir)
 }
 
-func detectAll(workingDir string, managedTools tooling.ManagedTools) []projectRoot {
+func detectAll(workingDir string, managedTools tooling.ManagedTools, registries ...*Registry) []projectRoot {
 	if managedTools == nil {
 		return nil
 	}
-	index := indexWorkspace(workingDir)
+	index := indexWorkspace(workingDir, registries...)
 	versions := make(map[string]bool)
 
 	var roots []projectRoot
 	seen := make(map[string]bool)
 
-	for _, project := range knownProjects {
+	for _, project := range registryProjects(registries) {
 		for _, dir := range projectDirs(index, project) {
 			server, ok := resolveServer(dir, project.Servers, managedTools, versions)
 			if !ok {
@@ -144,8 +144,11 @@ func (i *workspaceIndex) hasChild(dir, pattern string) bool {
 	return false
 }
 
-func indexWorkspace(workingDir string) *workspaceIndex {
+func indexWorkspace(workingDir string, registries ...*Registry) *workspaceIndex {
 	globs := markerGlobs()
+	if len(registries) > 0 && registries[0] != nil {
+		globs = projectMarkerGlobs(registryProjects(registries))
+	}
 
 	index := &workspaceIndex{
 		byName: make(map[string][]string),
@@ -175,9 +178,11 @@ func indexWorkspace(workingDir string) *workspaceIndex {
 	return index
 }
 
-var markerGlobs = sync.OnceValue(func() []string {
+var markerGlobs = sync.OnceValue(func() []string { return projectMarkerGlobs(knownProjects) })
+
+func projectMarkerGlobs(projects []ProjectDefinition) []string {
 	var globs []string
-	for _, project := range knownProjects {
+	for _, project := range projects {
 		for _, patterns := range [][]string{project.Markers, project.Excludes} {
 			for _, pattern := range patterns {
 				if isGlob(pattern) && !slices.Contains(globs, pattern) {
@@ -187,7 +192,7 @@ var markerGlobs = sync.OnceValue(func() []string {
 		}
 	}
 	return globs
-})
+}
 
 func isGlob(pattern string) bool {
 	return strings.ContainsAny(pattern, `*?[`)

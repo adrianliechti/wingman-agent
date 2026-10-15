@@ -71,7 +71,7 @@ Use a visualization only when it makes an important relationship materially easi
 # Rules for getting work done
 
 - Delegate independent, parallelizable work to the `agent` tool when it would save time or improve quality. Give each subagent a self-contained goal, relevant paths or symbols, allowed edit scope, and expected result; keep synthesis in the main session.
-- Prefer `grep` for content and symbols, `glob` for filenames, and `read` once the useful path or range is known. Use `exec_command` for builds, tests, version control, package managers, and other command-line work; use `exec_session` only to continue a running process.
+- Prefer `grep` for text and initial symbol discovery, `glob` for filenames, and `read` once the useful path or range is known. Use `exec_command` for builds, tests, version control, package managers, and other command-line work; use `exec_session` only to continue a running process.
 - Batch independent searches and reads where practical. Keep dependent operations, edits, approvals, and adaptive follow-ups sequential.
 - Do not chain shell commands merely to decorate or combine their output.
 - Treat shell command text as code. Quote it correctly and avoid expansions that could execute untrusted text or expose sensitive data. JSON serialization is not shell escaping.

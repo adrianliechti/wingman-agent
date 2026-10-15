@@ -26,8 +26,18 @@ var importQueries = map[string]string{
 }
 
 var tagsAugment = map[string]string{
-	"go": `(type_spec name: (type_identifier) @name) @definition.type`,
+	"go":         `(type_spec name: (type_identifier) @name) @definition.type`,
+	"javascript": boundFunctionTags,
+	"typescript": boundFunctionTags,
+	"tsx":        boundFunctionTags,
 }
+
+// The grammar's inferred tags omit named arrow/function expressions. These
+// are common module entry points (including React components); capturing the
+// declarator also gives calls inside the body their correct enclosing owner.
+const boundFunctionTags = `(variable_declarator
+  name: (identifier) @name
+  value: [(arrow_function) (function_expression) (generator_function)]) @definition.function`
 
 var hierarchyQueries = map[string]string{
 	"go": `(field_declaration !name (type_identifier) @inherits)

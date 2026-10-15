@@ -2,6 +2,7 @@ package language
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -58,13 +59,24 @@ func (s *Service) WorkspaceSymbols(ctx context.Context, query string) ([]lsp.Sym
 	}
 	var symbols []lsp.SymbolInformation
 	var workspaceSymbols []lsp.WorkspaceSymbol
+	var failures []error
 	for _, project := range projects {
+		if err := ctx.Err(); err != nil {
+			failures = append(failures, err)
+			break
+		}
 		session, err := s.manager.ProjectSession(ctx, project)
 		if err != nil {
+			failures = append(failures, fmt.Errorf("%s (%s): %w", project.Server.Name, project.Dir, err))
+			continue
+		}
+		if !lsp.CapabilityEnabled(session.Capabilities().WorkspaceSymbolProvider) {
+			failures = append(failures, fmt.Errorf("%s (%s): workspace symbols unsupported", project.Server.Name, project.Dir))
 			continue
 		}
 		result, err := session.WorkspaceSymbols(ctx, query)
 		if err != nil {
+			failures = append(failures, fmt.Errorf("%s (%s): %w", project.Server.Name, project.Dir, err))
 			continue
 		}
 		switch result := result.(type) {
@@ -74,5 +86,5 @@ func (s *Service) WorkspaceSymbols(ctx context.Context, query string) ([]lsp.Sym
 			workspaceSymbols = append(workspaceSymbols, []lsp.WorkspaceSymbol(result)...)
 		}
 	}
-	return symbols, workspaceSymbols, nil
+	return symbols, workspaceSymbols, errors.Join(failures...)
 }

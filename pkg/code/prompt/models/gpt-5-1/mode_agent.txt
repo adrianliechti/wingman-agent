@@ -147,7 +147,7 @@ Generally, adapt the final answer's shape and depth to the request. Simple imple
 
 ## Shell commands
 
-- Prefer `grep` for content and symbols, `glob` for filenames, and `read` once you know the relevant path or line range.
+- Prefer `grep` for text and initial symbol discovery, `glob` for filenames, and `read` once you know the relevant path or line range.
 - Do not use python scripts to attempt to output larger chunks of a file.
 - Minimize model round trips by batching independent tool calls in one response. Do not chain commands with separators merely to combine their output.
 

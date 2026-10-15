@@ -1072,6 +1072,11 @@ func formatFileChangeNotice(paths []string) string {
 func (s *sessionState) tools() []tool.Tool {
 	tools := s.toolSet.Slice()
 	tools = append(tools, s.managedTools()...)
+	for i, t := range tools {
+		if t.Name == "lsp" {
+			tools[i] = s.freshness.TrackSnapshots(t)
+		}
+	}
 	if s.currentMode() == modePlan {
 		tools = planModeTools(tools)
 	}
@@ -1156,12 +1161,14 @@ func instructionTemplate(modelID string, data prompt.SectionData) (string, promp
 	data.Model = selected
 
 	base := strings.TrimSpace(variant.Agent)
+	var modes []string
 	if data.PlanMode {
-		base += "\n\n" + variant.Plan
+		modes = append(modes, variant.Plan)
 	}
 	if data.UnattendedMode {
-		base += "\n\n" + variant.Unattended
+		modes = append(modes, variant.Unattended)
 	}
+	data.ModeInstructions = strings.Join(modes, "\n\n")
 	return base, data
 }
 

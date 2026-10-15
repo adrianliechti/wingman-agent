@@ -15,9 +15,13 @@ type ServerRequirement struct {
 // those servers are already installed. It shares the normal project marker
 // index, so automatic installation and runtime discovery agree.
 func DetectRequirements(workingDir string) []ServerRequirement {
-	index := indexWorkspace(workingDir)
+	return detectRequirements(workingDir, nil)
+}
+
+func detectRequirements(workingDir string, registry *Registry) []ServerRequirement {
+	index := indexWorkspace(workingDir, registry)
 	var requirements []ServerRequirement
-	for _, project := range knownProjects {
+	for _, project := range registryProjects([]*Registry{registry}) {
 		directories := projectDirs(index, project)
 		if len(directories) == 0 {
 			continue

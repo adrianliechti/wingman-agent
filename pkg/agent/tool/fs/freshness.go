@@ -2,6 +2,9 @@ package fs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"maps"
 	"os"
 	"slices"
@@ -16,6 +19,7 @@ type fileState struct {
 	modTime time.Time
 	size    int64
 	missing bool
+	digest  string
 }
 
 // Freshness tracks the on-disk state of files the session's file tools
@@ -49,18 +53,76 @@ func (f *Freshness) recordInfo(ctx context.Context, target fileTarget, info os.F
 	if f == nil || info == nil || info.IsDir() {
 		return
 	}
-	st := fileState{target: target, modTime: info.ModTime(), size: info.Size()}
+	f.recordState(ctx, fileState{target: target, modTime: info.ModTime(), size: info.Size()})
+}
+
+func (f *Freshness) recordState(ctx context.Context, st fileState) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if origin := tool.BackgroundOrigin(ctx); origin != "" {
 		if f.background[origin] == nil {
 			f.background[origin] = map[string]fileState{}
 		}
-		f.background[origin][target.AbsPath] = st
+		f.background[origin][st.target.AbsPath] = st
 		return
 	}
-	f.states[target.AbsPath] = st
-	f.announced[target.AbsPath] = st
+	f.states[st.target.AbsPath] = st
+	f.announced[st.target.AbsPath] = st
+}
+
+// TrackSnapshots connects trusted preview tools to the session's edit baseline.
+// Ordinary reads deliberately refresh this baseline, as they do for stat-based
+// freshness. Each background agent keeps its own baseline.
+func (f *Freshness) TrackSnapshots(t tool.Tool) tool.Tool {
+	if f == nil {
+		return t
+	}
+	execute := t.Execute
+	t.Execute = func(ctx context.Context, args map[string]any) (tool.Result, error) {
+		result, err := execute(ctx, args)
+		if err != nil || result.IsError {
+			return result, err
+		}
+		snapshots, err := tool.ResultFileSnapshots(result.Metadata)
+		if err != nil {
+			return tool.Result{}, fmt.Errorf("read preview snapshots: %w", err)
+		}
+		var states []fileState
+		for _, snapshot := range snapshots {
+			digest, err := hex.DecodeString(snapshot.SHA256)
+			if err != nil || len(digest) != sha256.Size {
+				return tool.Result{}, fmt.Errorf("invalid preview snapshot for %s", snapshot.Path)
+			}
+			target, err := resolveFileTarget(snapshot.Path, f.root.Name(), nil, "track preview")
+			if err != nil {
+				return tool.Result{}, err
+			}
+			info, err := statFileTarget(f.root, target)
+			if err != nil {
+				return tool.Result{}, fmt.Errorf("preview file changed; refresh the preview: %w", err)
+			}
+			states = append(states, fileState{target: target, modTime: info.ModTime(), size: info.Size(), digest: hex.EncodeToString(digest)})
+		}
+		for _, st := range states {
+			f.recordState(ctx, st)
+		}
+		return result, nil
+	}
+	return t
+}
+
+func (f *Freshness) staleContent(ctx context.Context, target fileTarget, content []byte) bool {
+	if f == nil {
+		return false
+	}
+	f.mu.Lock()
+	states := f.states
+	if origin := tool.BackgroundOrigin(ctx); origin != "" {
+		states = f.background[origin]
+	}
+	digest := states[target.AbsPath].digest
+	f.mu.Unlock()
+	return digest != "" && fmt.Sprintf("%x", sha256.Sum256(content)) != digest
 }
 
 func (f *Freshness) forget(ctx context.Context, target fileTarget) {

@@ -127,6 +127,9 @@ var sectionSkills string
 //go:embed section_project.txt
 var sectionProject string
 
+//go:embed section_code_intelligence.txt
+var sectionCodeIntelligence string
+
 const BoundaryMarker = "--- session context ---"
 
 type namedTemplate struct {
@@ -146,7 +149,10 @@ var staticTemplates = []namedTemplate{tmplProject, tmplSkills, tmplMemory}
 var dynamicTemplates = []namedTemplate{tmplEnvironment}
 
 type SectionData struct {
-	Model               model.Model
+	Model model.Model
+	// ModeInstructions follows shared tool guidance so Plan and unattended
+	// restrictions retain precedence over the model's implementation defaults.
+	ModeInstructions    string
 	PlanMode            bool
 	UnattendedMode      bool
 	Date                string
@@ -185,13 +191,13 @@ func renderSections(templates []namedTemplate, data SectionData) []Section {
 }
 
 func BuildAgentContext(data SectionData) string {
-	return composeSections(renderSections([]namedTemplate{tmplProject, tmplEnvironment}, data))
+	return composeSections(append([]Section{{Title: "Code intelligence", Content: sectionCodeIntelligence}}, renderSections([]namedTemplate{tmplProject, tmplEnvironment}, data)...))
 }
 
 // BuildBaseInstructions contains only model and mode guidance. Session data
 // changes independently and is appended to conversation history by the harness.
 func BuildBaseInstructions(base string, data SectionData) string {
-	return strings.TrimSpace(renderBase(base, data))
+	return composeSections([]Section{{Content: renderBase(base, data)}, {Title: "Code intelligence", Content: sectionCodeIntelligence}, {Content: renderBase(data.ModeInstructions, data)}})
 }
 
 func BuildSessionContext(data SectionData) string {
@@ -202,7 +208,7 @@ func BuildSessionContext(data SectionData) string {
 
 func BuildInstructions(base string, data SectionData) string {
 	var staticParts []Section
-	staticParts = append(staticParts, Section{Content: renderBase(base, data)})
+	staticParts = append(staticParts, Section{Content: BuildBaseInstructions(base, data)})
 	staticParts = append(staticParts, renderSections(staticTemplates, data)...)
 
 	dynamicParts := renderSections(dynamicTemplates, data)

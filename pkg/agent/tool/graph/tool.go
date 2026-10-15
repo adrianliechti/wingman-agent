@@ -22,42 +22,32 @@ func graphTool(engine *graph.Engine) tool.Tool {
 	return tool.Tool{
 		Name: "code_graph",
 		Description: strings.Join([]string{
-			"Code knowledge graph (tree-sitter, many languages): definitions and their call/type/import links. Use instead of grep/read loops to find symbols and follow relationships; auto-builds on first use. With a language server, prefer `lsp` for precise definitions/references/types.",
-			"Operations (each uses the field in backticks):",
-			"- search `query`: definitions by name, word tokens (\"update client\" finds UpdateCloudClient), or regex — ranked by relevance; optional `kind`, `file`.",
-			"- search_content `pattern`: literal source search enriched with containing definitions, match lines, and graph rank; deduplicates repeated lines in one symbol and preserves raw hits outside definitions. Set `regex` for RE2 syntax; optional `file`, `glob`, `ignore_case`.",
-			"- trace `symbol`: call paths; `direction` callees (default) or callers; optional `target`, `file`.",
-			"- find_similar `symbol`: functions resembling it (shared callees + name).",
-			"- hierarchy `symbol`: super/sub types and implementers.",
-			"- tests `symbol`: tests covering it, or what a test covers.",
-			"- snippet `symbol`: its source code.",
-			"- deps `file`: module imports/importers; `depth`>1 for transitive.",
-			"- co_changes `file`: files historically committed together with it.",
-			"- changes: uncommitted edits (or everything since a git ref via `since`) mapped to definitions, plus their unchanged callers (impact).",
-			"- architecture: overview of languages, modules, entry points, hotspots.",
-			"- dead_code: callables with no known caller (candidates; misses reflection/exported/cross-language).",
-			"- index / status: rebuild the graph / report its state.",
+			"Read-only structural analysis: multi-hop call paths, module dependencies and change impact. Use lsp for exact bindings/references/types; grep for plain text. Queries auto-index; pass known symbols directly without search/index/status preflight.",
+			"search: ranked definitions. search_content: source matches grouped by containing definition, plus raw hits outside definitions.",
+			"trace: call paths with call-site source; name-resolved edges are candidates, not proof of receiver identity. snippet: full definition source if trace evidence is insufficient.",
+			"hierarchy: super/sub types and implementers. tests: direct test callers, or production symbols directly called by a test. find_similar: shared callees/name similarity.",
+			"deps: imports/importers. co_changes: files committed together. changes: changed definitions and affected callers. architecture: languages/modules/entry points/hotspots.",
+			"dead_code: no detected callers, not proof of unused code (reflection/exported/cross-language gaps). index: rebuild; status: inspect index.",
 		}, "\n"),
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"operation": map[string]any{
-					"type":        "string",
-					"enum":        []string{"index", "status", "search", "search_content", "trace", "architecture", "dead_code", "changes", "deps", "hierarchy", "snippet", "tests", "co_changes", "find_similar"},
-					"description": "Which operation to run.",
+					"type": "string",
+					"enum": []string{"index", "status", "search", "search_content", "trace", "architecture", "dead_code", "changes", "deps", "hierarchy", "snippet", "tests", "co_changes", "find_similar"},
 				},
 				"query": map[string]any{
 					"type":        "string",
-					"description": "search: symbol name, space-separated word tokens, or regex (case-insensitive); results ranked by match quality, kind, and callers.",
+					"description": "search: name, space-separated words, or regex; case-insensitive. Omit to list definitions.",
 				},
 				"pattern": map[string]any{
 					"type":        "string",
-					"description": "search_content: literal text to find in source files, or an RE2 expression when regex=true.",
+					"description": "Required for search_content: literal text, or RE2 when regex=true.",
 				},
 				"regex": map[string]any{
 					"type":        "boolean",
-					"description": "search_content: interpret pattern as an RE2 regular expression; defaults to false (literal).",
+					"description": "search_content: pattern is RE2.",
 					"default":     false,
 				},
 				"ignore_case": map[string]any{
@@ -67,15 +57,15 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				},
 				"glob": map[string]any{
 					"type":        "string",
-					"description": "search_content: optional source-file glob, e.g. `*.go` or `pkg/**/*.go`.",
+					"description": "search_content: file glob, e.g. pkg/**/*.go.",
 				},
 				"symbol": map[string]any{
 					"type":        "string",
-					"description": "trace/find_similar/hierarchy/tests/snippet: one exact symbol name; qualify as `pkg.Name` or `path:Name` (path substring) when several definitions share the name.",
+					"description": "Required for trace/hierarchy/tests/snippet/find_similar: exact name; path:Name filters by path substring. Use lsp to distinguish same-name receivers.",
 				},
 				"target": map[string]any{
 					"type":        "string",
-					"description": "trace: optional destination symbol to reach.",
+					"description": "trace: destination symbol; omit for reachable calls. Same name syntax as symbol.",
 				},
 				"direction": map[string]any{
 					"type":        "string",
@@ -85,27 +75,27 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				"kind": map[string]any{
 					"type":        "string",
 					"enum":        []string{"function", "method", "class", "interface", "type", "constructor", "module", "constant", "variable"},
-					"description": "search: restrict to a definition kind.",
+					"description": "search: definition kind filter.",
 				},
 				"file": map[string]any{
 					"type":        "string",
-					"description": "deps: target module/dir/file. co_changes: exact repo-relative path. search/search_content/trace/snippet/hierarchy/tests/find_similar: optional path-substring filter.",
+					"description": "Required for deps (module/dir/file) and co_changes (exact repo-relative path); otherwise a path-substring filter for search/search_content and symbol operations.",
 				},
 				"since": map[string]any{
 					"type":        "string",
-					"description": "changes: git ref to diff from (e.g. main, HEAD~5); default compares only uncommitted edits against HEAD.",
+					"description": "changes: base git ref; omit for uncommitted changes against HEAD.",
 				},
 				"depth": map[string]any{
 					"type":        "integer",
-					"description": "trace path depth (default 8); deps transitive depth (default 1).",
+					"description": "trace: max hops, default 8, cap 32. deps: default 1; >1 includes transitive dependencies.",
 				},
 				"limit": map[string]any{
 					"type":        "integer",
-					"description": "max results — search (default 50), search_content (10), dead_code (100), co_changes/find_similar (15).",
+					"description": "Result limit; defaults: search 50, search_content 10, dead_code 100, co_changes/find_similar 15.",
 				},
 				"offset": map[string]any{
 					"type":        "integer",
-					"description": "search/search_content: skip the first N ranked results for pagination.",
+					"description": "search/search_content: 0-based pagination offset.",
 					"default":     0,
 				},
 			},
@@ -188,7 +178,10 @@ func graphTool(engine *graph.Engine) tool.Tool {
 					return tool.Result{}, fmt.Errorf("symbol is required for trace")
 				}
 				callers := stringArg(args, "direction") == "callers"
-				depth, _ := tool.IntArg(args, "depth")
+				depth, _, err := tool.NonNegIntArg(args, "depth")
+				if err != nil {
+					return tool.Result{}, err
+				}
 				res, err := engine.Trace(ctx, symbol, strings.TrimSpace(stringArg(args, "target")), stringArg(args, "file"), callers, depth)
 				if err != nil {
 					return tool.Result{}, err
@@ -415,48 +408,86 @@ func formatTrace(res graph.TraceResult, callers bool) string {
 	if callers {
 		verb = "called by"
 	}
-
-	if len(res.Paths) == 0 {
-		return fmt.Sprintf("No %s relationships found.", strings.TrimSuffix(verb, " by"))
-	}
-
-	ambiguous := false
 	var b strings.Builder
 	if len(res.Roots) > 1 {
-		fmt.Fprintf(&b, "%d definitions share this name — paths merge all of them (pass `file` to pick one):\n", len(res.Roots))
-		for _, r := range res.Roots {
+		fmt.Fprintf(&b, "%d definitions share this name — paths merge all of them; qualify symbol or pass file:\n", len(res.Roots))
+		for _, r := range res.Roots[:min(len(res.Roots), maxListItems)] {
 			fmt.Fprintf(&b, "- %s\n", nodeLabel(r))
 		}
-		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "%d path(s) (%s):\n", len(res.Paths), verb)
-	paths := res.Paths
-	if len(paths) > maxListItems {
-		paths = paths[:maxListItems]
+	if len(res.Targets) > 1 {
+		fmt.Fprintf(&b, "Target matches %d definitions; qualify target to select one.\n", len(res.Targets))
 	}
+	fmt.Fprintf(&b, "%d path(s) (%s; depth <= %d):\n", len(res.Paths), verb, res.Depth)
+	paths := res.Paths[:min(len(res.Paths), graph.TraceDisplayPaths)]
+	ambiguous, nameBased := false, false
 	for _, p := range paths {
-		var line strings.Builder
+		b.WriteString("- ")
 		for i, n := range p.Nodes {
 			if i > 0 {
-				if i-1 < len(p.Via) && p.Via[i-1] == graph.ViaAmbiguous {
-					line.WriteString(" ⇢ ")
+				via := graph.ViaName
+				if i-1 < len(p.Via) {
+					via = p.Via[i-1]
+				}
+				if via == graph.ViaAmbiguous {
+					b.WriteString(" ⇢ ")
 					ambiguous = true
 				} else {
-					line.WriteString(" → ")
+					b.WriteString(" → ")
 				}
+				nameBased = nameBased || via != graph.ViaLSP
 			}
-			line.WriteString(n.Name)
+			b.WriteString(n.Name)
 		}
-		last := p.Nodes[len(p.Nodes)-1]
-		fmt.Fprintf(&b, "- %s   [%s:%d]\n", line.String(), last.File, last.StartLine)
+		b.WriteByte('\n')
 	}
 	if len(res.Paths) > len(paths) {
-		fmt.Fprintf(&b, "  … and %d more path(s); narrow with `target` or a smaller `depth`\n", len(res.Paths)-len(paths))
+		fmt.Fprintf(&b, "Showing %d of %d paths; narrow target or depth for the rest.\n", len(paths), len(res.Paths))
+	}
+	if res.Limited {
+		b.WriteString("INCOMPLETE: traversal reached a depth, path, or work limit. Narrow the query or adjust depth (max 32).\n")
+	} else {
+		b.WriteString("Traversal complete within this depth in the indexed graph.\n")
+	}
+	if len(res.Targets) == 0 {
+		b.WriteString("One route per reachable symbol; specify target to enumerate simple paths.\n")
+	}
+	if res.SourceChanged {
+		b.WriteString("Source changed since indexing; call index to rebuild before relying on these paths. Changed-file evidence is withheld.\n")
+	}
+	if len(res.SkippedFiles) > 0 {
+		fmt.Fprintf(&b, "Coverage incomplete: %d files not structurally indexed:\n", len(res.SkippedFiles))
+		for _, issue := range res.SkippedFiles[:min(len(res.SkippedFiles), 5)] {
+			fmt.Fprintf(&b, "- %s (%s)\n", issue.File, issue.Reason)
+		}
+		if len(res.SkippedFiles) > 5 {
+			b.WriteString("More skipped files listed by status.\n")
+		}
 	}
 	if ambiguous {
-		b.WriteString("\n⇢ = ambiguous name-based hop (install a language server to resolve precisely)")
+		b.WriteString("⇢ = ambiguous name-based hop; resolve receiver/binding with available LSP or source.\n")
+	} else if nameBased {
+		b.WriteString("Edges resolved by name/import scope; source below shows calls, not proof of receiver binding.\n")
 	}
-	return strings.TrimRight(b.String(), "\n")
+	if len(res.Evidence) > 0 {
+		b.WriteString("Call-site evidence (unique source lines):\n")
+		for _, site := range res.Evidence {
+			fmt.Fprintf(&b, "%s:%d: %s\n", site.File, site.Line, site.Source)
+		}
+	}
+	if res.EvidenceOmitted {
+		b.WriteString("Some source evidence was omitted or unavailable; read the relevant definitions if needed.\n")
+	}
+	out := strings.TrimRight(b.String(), "\n")
+	const maxTraceOutput = 24 << 10
+	if len(out) > maxTraceOutput {
+		end := strings.LastIndexByte(out[:maxTraceOutput], '\n')
+		if end < 0 {
+			end = 0
+		}
+		out = out[:end] + "\nOutput truncated; narrow target or depth."
+	}
+	return out
 }
 
 func formatDeps(d graph.DepsResult) string {
