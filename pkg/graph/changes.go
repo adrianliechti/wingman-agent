@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,7 +48,10 @@ type Changes struct {
 // gitChanges diffs the working tree against a base tree: HEAD by default, or
 // the resolved `since` revision. With `since`, committed changes (base..HEAD)
 // are included alongside uncommitted ones.
-func gitChanges(root, since string) ([]fileChange, error) {
+func gitChanges(ctx context.Context, root, since string) ([]fileChange, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	repo, err := git.PlainOpen(root)
 	if err != nil {
 		return nil, err
@@ -98,6 +102,9 @@ func gitChanges(root, since string) ([]fileChange, error) {
 
 	var out []fileChange
 	for path := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		slashPath := filepath.ToSlash(path)
 
 		var baseContent string
@@ -111,8 +118,18 @@ func gitChanges(root, since string) ([]fileChange, error) {
 			}
 		}
 
-		diskBytes, readErr := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
-		onDisk := readErr == nil
+		absPath := filepath.Join(root, filepath.FromSlash(path))
+		info, statErr := os.Lstat(absPath)
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return nil, fmt.Errorf("stat changed file %q: %w", path, statErr)
+		}
+		if statErr == nil && !info.Mode().IsRegular() {
+			if inBase {
+				out = append(out, fileChange{Path: slashPath, Kind: ChangeDeleted})
+			}
+			continue
+		}
+		onDisk := statErr == nil
 
 		switch {
 		case !inBase && onDisk:
@@ -120,6 +137,18 @@ func gitChanges(root, since string) ([]fileChange, error) {
 		case inBase && !onDisk:
 			out = append(out, fileChange{Path: slashPath, Kind: ChangeDeleted})
 		case inBase && onDisk:
+			if info.Size() > maxFileBytes || int64(len(baseContent)) > maxFileBytes {
+				out = append(out, fileChange{Path: slashPath, Kind: ChangeModified, AllLines: true})
+				continue
+			}
+			diskBytes, readErr := os.ReadFile(absPath)
+			if readErr != nil {
+				if os.IsNotExist(readErr) {
+					out = append(out, fileChange{Path: slashPath, Kind: ChangeDeleted})
+					continue
+				}
+				return nil, fmt.Errorf("read changed file %q: %w", path, readErr)
+			}
 			lines := changedNewLines(baseContent, string(diskBytes))
 			if len(lines) == 0 {
 				continue

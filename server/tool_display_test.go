@@ -47,7 +47,7 @@ func TestDisplayToolCompactsEditAndPreservesProvidedLocation(t *testing.T) {
 }
 
 func TestDisplayToolPromotesCommandWithoutRepeatingIt(t *testing.T) {
-	display := displayTool("exec_command", "", `{"command":"go test ./...","workdir":"pkg"}`, nil, nil)
+	display := displayTool("exec", "", `{"command":"go test ./...","workdir":"pkg"}`, nil, nil)
 	if display.name != "Run command" || display.kind != "execute" || display.hint != "go test ./..." {
 		t.Fatalf("display = %#v", display)
 	}

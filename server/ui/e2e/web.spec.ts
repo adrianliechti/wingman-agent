@@ -76,6 +76,64 @@ function sessionRow(page: Page, id: string) {
 		.locator(`[data-session-id=${JSON.stringify(sessionKey("wingman", id))}]`)
 		.filter({ visible: true });
 }
+
+test("renders read and fetch image attachments in restored transcripts", async ({
+	page,
+}) => {
+	const image =
+		"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=";
+	const entries: ChatEntry[] = [
+		{
+			id: "user",
+			type: "user",
+			content: "Inspect these images",
+			images: [image],
+		},
+		{
+			id: "read",
+			type: "tool",
+			content: "",
+			toolName: "Read file",
+			toolKind: "read",
+			toolResult: "[image attached below]",
+		},
+		{ id: "read-image", type: "assistant", content: "", images: [image] },
+		{
+			id: "fetch",
+			type: "tool",
+			content: "",
+			toolName: "Open page",
+			toolKind: "fetch",
+			toolResult: "[image attached below]",
+		},
+		{ id: "fetch-image", type: "assistant", content: "", images: [image] },
+	];
+	await mockSavedSessions(
+		page,
+		[
+			{
+				id: "images",
+				title: "Image tools",
+				updated_at: "2026-10-17T00:00:00Z",
+			},
+		],
+		[],
+		"wingman",
+		entries,
+	);
+	await page.goto("/wingman/images");
+	await page.getByRole("button", { name: "2 tools", exact: true }).click();
+	for (const id of ["user", "read-image", "fetch-image"]) {
+		const preview = page.locator(`[data-entry-id="${id}"] img`);
+		await expect(preview).toBeVisible();
+		await expect(preview).toHaveAttribute("src", image);
+		await expect
+			.poll(() =>
+				preview.evaluate((element: HTMLImageElement) => element.naturalWidth),
+			)
+			.toBe(1);
+	}
+});
 function sessionTab(page: Page, id: string) {
 	return page.locator(
 		`[data-center-tab=${JSON.stringify(`chat:${sessionKey("wingman", id)}`)}]`,
@@ -4498,6 +4556,53 @@ test("renders an elicitation form and returns the chosen option", async ({
 	).toBeVisible();
 });
 
+test("elicitation preserves multi-select and Other with object-property field names", async ({
+	page,
+}) => {
+	const replies: unknown[] = [];
+	await page.route(/\/sessions\/review-active\/commands$/, async (route) => {
+		const body = route.request().postDataJSON();
+		replies.push(body);
+		await route.fulfill({
+			json: { requestId: body.requestId, accepted: true },
+		});
+	});
+	await reviewActive(page, undefined, [
+		{
+			id: "elicit-properties",
+			kind: "ask",
+			message: "Choose the scope",
+			fields: [
+				{
+					name: "constructor",
+					title: "Scope",
+					type: "string",
+					required: true,
+					multiple: true,
+					enum: ["API", "CLI"],
+				},
+				{ name: "__proto__", title: "Details", type: "string", required: true },
+			],
+		},
+	]);
+	const prompt = page.locator("[data-prompt]");
+	await expect(prompt).toBeVisible();
+	await prompt.getByRole("button", { name: /API/ }).click();
+	await prompt.getByPlaceholder("Other…").fill("docs, tests");
+	await prompt.getByRole("button", { name: "Details", exact: true }).click();
+	await prompt.getByPlaceholder("Type your answer…").fill("Custom details");
+	await prompt.getByRole("button", { name: /Submit/ }).click();
+	await expect.poll(() => replies.length).toBe(1);
+	expect(replies[0]).toMatchObject({
+		type: "prompt_response",
+		action: "accept",
+		promptId: "elicit-properties",
+		content: JSON.parse(
+			'{"constructor":["API","docs, tests"],"__proto__":"Custom details"}',
+		),
+	});
+});
+
 test("cancels an active coding turn", async ({ page, request }) => {
 	const input = await composer(page);
 	await input.fill("cancel this request");
@@ -6843,7 +6948,7 @@ test("recovery: expanded tool output renders a bounded window", async ({
 			id: "large-tool",
 			type: "tool",
 			content: "",
-			toolName: "exec_command",
+			toolName: "exec",
 			toolArgs: '{"command":"go test ./..."}',
 			toolResult: output,
 		},

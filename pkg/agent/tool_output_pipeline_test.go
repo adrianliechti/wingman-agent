@@ -1,17 +1,62 @@
 package agent
 
 import (
+	"context"
 	"fmt"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 )
+
+func TestHookContextOverflowPersistsCompleteResult(t *testing.T) {
+	for _, originalBytes := range []int{100, tool.MaxInlineResultBytes - 100, tool.MaxInlineResultBytes + 100} {
+		t.Run(fmt.Sprint(originalBytes), func(t *testing.T) {
+			dir := t.TempDir()
+			original := strings.Repeat("x", originalBytes)
+			preContext := strings.Repeat("pre context\n", 100)
+			postContext := strings.Repeat("post context\n", 5000)
+			cfg := &Config{Hooks: hook.Hooks{
+				PreToolUse: []hook.PreToolUse{func(context.Context, tool.ToolCall) (hook.PreToolUseOutcome, error) {
+					return hook.PreToolUseOutcome{Outcome: hook.Outcome{AdditionalContext: []string{preContext}}}, nil
+				}},
+				PostToolUse: []hook.PostToolUse{func(_ context.Context, _ tool.ToolCall, content string) (hook.Outcome, error) {
+					if content != original {
+						t.Error("post-tool hook did not receive original tool output")
+					}
+					return hook.Outcome{AdditionalContext: []string{postContext}}, nil
+				}},
+			}}
+			cfg.Hooks.Append(hook.Hooks{TransformToolResult: []hook.TransformToolResult{truncation.Transform(dir)}})
+			// Derived agents must retain the same persistence behavior.
+			a := &Agent{Config: cfg.Derive()}
+			result := a.runSingleToolCall(t.Context(), ToolCall{Name: "probe"}, []tool.Tool{{
+				Name: "probe", Execute: func(context.Context, map[string]any) (tool.Result, error) {
+					return tool.Text(original), nil
+				},
+			}})
+			if result.IsError || len(result.Content) > tool.MaxInlineResultBytes || !strings.Contains(result.Content, "Full output saved to:") || strings.Contains(result.Content, "<truncated-output>") {
+				t.Fatalf("invalid final output: %d bytes, error=%t", len(result.Content), result.IsError)
+			}
+			files, err := os.ReadDir(dir)
+			if err != nil || len(files) != 1 {
+				t.Fatalf("saved results: %v, %v", files, err)
+			}
+			saved, err := os.ReadFile(filepath.Join(dir, files[0].Name()))
+			want := original + "\n\n<hook-context>\n" + preContext + "\n\n" + postContext + "\n</hook-context>"
+			if err != nil || string(saved) != want {
+				t.Fatal("saved result lost tool output or hook context")
+			}
+		})
+	}
+}
 
 func TestReadPaginationSurvivesFullOutputPipeline(t *testing.T) {
 	for _, line := range []string{"x", strings.Repeat("x", 40), strings.Repeat("日🙂", 143)} {
@@ -71,7 +116,7 @@ func TestReadPaginationSurvivesFullOutputPipeline(t *testing.T) {
 }
 
 func TestOversizedToolResultsPersistBeforeHarnessBounds(t *testing.T) {
-	for _, name := range []string{"read", "fetch", "exec_command", "mcp_tool", "lsp"} {
+	for _, name := range []string{"read", "fetch", "exec", "mcp_tool", "lsp"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			content := strings.Repeat("x", tool.MaxInlineResultBytes+1)

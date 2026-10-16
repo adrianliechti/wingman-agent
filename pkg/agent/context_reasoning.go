@@ -22,7 +22,11 @@ func (a *Agent) dropIncompatibleReasoning(req *request) error {
 		for _, c := range m.Content {
 			r := c.Reasoning
 			if r != nil && r.Content != "" && (r.Model != req.model || (r.Prefix != "" && r.Prefix != prefix)) {
-				return a.replaceContext("drop reasoning bound to another model or request prefix", req.messages)
+				if err := a.replaceContext("drop reasoning bound to another model or request prefix", req.messages); err != nil {
+					return err
+				}
+				req.messages = a.requestMessages()
+				return nil
 			}
 		}
 	}

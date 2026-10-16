@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -29,12 +30,50 @@ func finishTool() tool.Tool {
 	}
 }
 
+func (r *request) handlesFinishTool(name string) bool {
+	return (r.requireFinish || r.allowFinish) && name == finishToolName
+}
+
+func isFinishReminderMessage(m Message) bool {
+	if m.Role != RoleUser || !m.Hidden || len(m.Content) != 1 {
+		return false
+	}
+	text := m.Content[0].Text
+	return text == finishReminder || text == missingAnswerReminder
+}
+
+func (a *Agent) dropIncompatibleFinishReminders(req *request) error {
+	if req.requireFinish || !slices.ContainsFunc(req.messages, isFinishReminderMessage) {
+		return nil
+	}
+	messages := CloneMessages(req.messages)
+	updated := make([]Message, 0, len(messages))
+	for _, m := range messages {
+		if isFinishReminderMessage(m) {
+			if m.Content[0].Text == finishReminder {
+				continue
+			}
+			m.Content[0].Text = continuationReminder
+		}
+		updated = append(updated, m)
+	}
+	if err := a.replaceContext("drop finish-turn reminders for non-finish model", updated); err != nil {
+		return err
+	}
+	req.messages = a.requestMessages()
+	return nil
+}
+
 // The finish marker is a harness protocol operation, not an executable tool.
 // Record a result for replay, including rejected markers, but never dispatch it
 // through user tools or let it skip a batch of actual work. previousAnswer is
 // the completed text after the latest tool work or user input, allowing a bare
 // marker and avoiding duplicate answers without discarding a different one.
-func (a *Agent) resolveFinishCalls(resp *response, calls []ToolCall, previousAnswer string, yield func(Message, error) bool) ([]ToolCall, bool, error) {
+func (a *Agent) resolveFinishCalls(req *request, resp *response, calls []ToolCall, previousAnswer string, yield func(Message, error) bool) ([]ToolCall, bool, bool, error) {
+	if !slices.ContainsFunc(calls, func(c ToolCall) bool { return req.handlesFinishTool(c.Name) }) {
+		return calls, false, false, nil
+	}
+
 	visibleAnswer := strings.TrimSpace(lastAssistantText(resp.messages))
 	if endsWithNonterminalText(resp.messages) {
 		visibleAnswer = ""
@@ -73,6 +112,9 @@ func (a *Agent) resolveFinishCalls(resp *response, calls []ToolCall, previousAns
 		case visibleAnswer == "" && answer == "":
 			rejection = "You have not written a user-facing answer since the latest tool work or user input. Call finish_turn with your final answer (or a question needed to proceed) in its answer field. Do not repeat completed tool work."
 		}
+		if rejection != "" && !req.requireFinish {
+			rejection = "finish_turn is not used for this model. Write your final user-facing answer directly as assistant text after completing any remaining tool work."
+		}
 		result := tool.Error("Finish rejected. " + rejection)
 		if rejection == "" {
 			finished = true
@@ -87,18 +129,18 @@ func (a *Agent) resolveFinishCalls(resp *response, calls []ToolCall, previousAns
 			messages = append(messages, final)
 		}
 		if err := a.appendMessages(messages...); err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 		if final.Role != "" {
 			// Persist the validated answer with its marker result before showing
 			// it. Include it in this response for answer tracking and Stop hooks.
 			resp.messages = append(resp.messages, final)
 			if !yield(final, nil) {
-				return nil, false, errYieldStopped
+				return nil, false, false, errYieldStopped
 			}
 		}
 	}
-	return work, finished, nil
+	return work, finished, !finished, nil
 }
 
 func hasRefusal(messages []Message) bool {

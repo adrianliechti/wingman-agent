@@ -49,6 +49,8 @@ func TestParseDefinitionDefaultsAndValidation(t *testing.T) {
 		{"missing body", "---\nname: x\ndescription: d\n---\n"},
 		{"unknown access", "---\nname: x\ndescription: d\naccess: sudo\n---\nbody"},
 		{"no frontmatter", "just a prompt"},
+		{"horizontal rule not at start", "intro\n---\nname: x\ndescription: d\n---\nbody"},
+		{"unclosed frontmatter", "---\nname: x\ndescription: d\nbody"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,6 +58,14 @@ func TestParseDefinitionDefaultsAndValidation(t *testing.T) {
 				t.Fatal("want error")
 			}
 		})
+	}
+
+	bomDef, err := ParseDefinition("\ufeff---\nname: bom-helper\ndescription: \"line 1\\nline 2\"\n---\n" + strings.Repeat("a", 70*1024))
+	if err != nil {
+		t.Fatalf("ParseDefinition with BOM and >64KiB body failed: %v", err)
+	}
+	if bomDef.Description != "line 1 line 2" || len(bomDef.Instructions) != 70*1024 {
+		t.Fatalf("bomDef description=%q instructions len=%d", bomDef.Description, len(bomDef.Instructions))
 	}
 }
 

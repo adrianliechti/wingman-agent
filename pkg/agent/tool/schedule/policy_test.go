@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
@@ -97,14 +98,14 @@ func TestChangedOrLegacyDangerousGateCannotExecuteWithoutApproval(t *testing.T) 
 func TestVerboseGatePreservesDecisionAndBoundsBufferedOutput(t *testing.T) {
 	var output gateOutput
 	for range 1000 {
-		if _, err := output.Write([]byte(strings.Repeat("verbose log ", 100))); err != nil {
+		if _, err := output.Write([]byte(strings.Repeat("verbose € log ", 100))); err != nil {
 			t.Fatal(err)
 		}
 	}
 	output.Write([]byte("\n{\"wake\":false}\n"))
 	text := output.String()
-	if len(text) > gateMaxOutput+100 || !strings.Contains(text, "earlier output truncated") {
-		t.Fatalf("unbounded output: %d", len(text))
+	if len(text) > gateMaxOutput+100 || !strings.Contains(text, "earlier output truncated") || !utf8.ValidString(text) {
+		t.Fatalf("unbounded or invalid UTF-8 output: %d", len(text))
 	}
 	lines := strings.Split(text, "\n")
 	wake, ok := parseGateOutput(lines[len(lines)-1])

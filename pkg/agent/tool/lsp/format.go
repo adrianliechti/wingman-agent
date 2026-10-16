@@ -3,6 +3,7 @@ package lsp
 import (
 	"cmp"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,14 +27,33 @@ func relativePath(root, path string) string {
 	return path
 }
 
+func locationPath(uri string) string {
+	if path, ok := fileuri.Path(uri); ok {
+		return path
+	}
+	return uri
+}
+
 type sourceCache map[string][]string
 
 func (c sourceCache) lines(path string) []string {
 	if lines, ok := c[path]; ok {
 		return lines
 	}
-	data, err := os.ReadFile(path)
+	// Source context is optional; never read devices or unbounded server paths.
+	c[path] = nil
+	const maxSourceBytes = 2 << 20
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxSourceBytes {
+		return nil
+	}
+	file, err := os.Open(path)
 	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxSourceBytes+1))
+	if err != nil || len(data) > maxSourceBytes {
 		return nil
 	}
 	lines := strings.Split(string(data), "\n")
@@ -76,7 +96,7 @@ func formatLocations(title string, locations []lsp.Location, root string, pages 
 	shown := pageSlice(sortedLocations(locations), p)
 	cache := sourceCache{}
 	for _, location := range shown {
-		path, _ := fileuri.Path(location.URI.String())
+		path := locationPath(location.URI.String())
 		text, column, found := cache.locationLine(location)
 		if found {
 			fmt.Fprintf(&out, "%s:%d:%d: %s\n", relativePath(root, path), location.Range.Start.Line+1, column, strings.TrimSpace(text))
@@ -128,7 +148,7 @@ func formatDefinitions(locations []lsp.Location, root string, pages ...resultPag
 	shown := pageSlice(sortedLocations(locations), p)
 	cache := sourceCache{}
 	for i, location := range shown {
-		path, _ := fileuri.Path(location.URI.String())
+		path := locationPath(location.URI.String())
 		_, column, found := cache.locationLine(location)
 		fmt.Fprintf(&out, "\n%s:%d:%d\n", relativePath(root, path), location.Range.Start.Line+1, column)
 		if i >= maxDefinitionSnippets || !found {
@@ -146,7 +166,7 @@ func formatDefinitions(locations []lsp.Location, root string, pages ...resultPag
 
 func formatSymbolInformation(symbols []lsp.SymbolInformation, root string, pages ...resultPage) string {
 	return formatSymbols(len(symbols), root, symbols, func(symbol lsp.SymbolInformation) (string, string) {
-		path, _ := fileuri.Path(symbol.Location.URI.String())
+		path := locationPath(symbol.Location.URI.String())
 		return path, fmt.Sprintf("  %s (%s) - Line %d\n", symbol.Name, symbolKindName(symbol.Kind), symbol.Location.Range.Start.Line+1)
 	}, selectedPage(pages))
 }
@@ -155,10 +175,10 @@ func formatWorkspaceSymbols(symbols []lsp.WorkspaceSymbol, root string, pages ..
 	return formatSymbols(len(symbols), root, symbols, func(symbol lsp.WorkspaceSymbol) (string, string) {
 		switch location := symbol.Location.(type) {
 		case *lsp.Location:
-			path, _ := fileuri.Path(location.URI.String())
+			path := locationPath(location.URI.String())
 			return path, fmt.Sprintf("  %s (%s) - Line %d\n", symbol.Name, symbolKindName(symbol.Kind), location.Range.Start.Line+1)
 		case *lsp.LocationURIOnly:
-			path, _ := fileuri.Path(location.URI.String())
+			path := locationPath(location.URI.String())
 			return path, fmt.Sprintf("  %s (%s)\n", symbol.Name, symbolKindName(symbol.Kind))
 		default:
 			return "", fmt.Sprintf("  %s (%s)\n", symbol.Name, symbolKindName(symbol.Kind))
@@ -210,7 +230,7 @@ func formatIncomingCalls(calls []lsp.CallHierarchyIncomingCall, root string, pag
 	var out strings.Builder
 	fmt.Fprintf(&out, "Incoming Calls (%d found):\n", len(calls))
 	for _, call := range pageSlice(calls, p) {
-		path, _ := fileuri.Path(call.From.URI.String())
+		path := locationPath(call.From.URI.String())
 		fmt.Fprintf(&out, "  %s (%s) - %s:%d%s\n", call.From.Name, symbolKindName(call.From.Kind), relativePath(root, path), call.From.SelectionRange.Start.Line+1, formatCallSites(call.FromRanges, ", call sites at lines "))
 	}
 	out.WriteString(pageNote(len(calls), p, "callers"))
@@ -224,7 +244,7 @@ func formatOutgoingCalls(calls []lsp.CallHierarchyOutgoingCall, root string, pag
 	var out strings.Builder
 	fmt.Fprintf(&out, "Outgoing Calls (%d found):\n", len(calls))
 	for _, call := range pageSlice(calls, p) {
-		path, _ := fileuri.Path(call.To.URI.String())
+		path := locationPath(call.To.URI.String())
 		fmt.Fprintf(&out, "  %s (%s) - %s:%d%s\n", call.To.Name, symbolKindName(call.To.Kind), relativePath(root, path), call.To.SelectionRange.Start.Line+1, formatCallSites(call.FromRanges, ", called at lines "))
 	}
 	out.WriteString(pageNote(len(calls), p, "callees"))

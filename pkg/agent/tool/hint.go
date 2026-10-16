@@ -39,7 +39,7 @@ func ExtractHint(argsJSON, toolName string) string {
 		}
 	}
 
-	if toolName == "exec_session" {
+	if toolName == "exec_session" || toolName == "Continue command" {
 		if id, ok := IntArg(args, "session_id"); ok {
 			hint := fmt.Sprintf("session %d", id)
 			if kill, _ := args["kill"].(bool); kill {
@@ -52,13 +52,16 @@ func ExtractHint(argsJSON, toolName string) string {
 		}
 	}
 
-	if toolName == "elicit" {
+	// Keep the old name readable when restoring saved tool calls.
+	if toolName == "elicit" || toolName == "ask" {
 		if hint := ElicitHint(args); hint != "" {
 			return hint
 		}
 	}
 
-	if toolName == "task_send" || toolName == "task_stop" || toolName == "task_output" {
+	if toolName == "agent_send" || toolName == "agent_stop" || toolName == "agent_output" ||
+		toolName == "task_send" || toolName == "task_stop" || toolName == "task_output" ||
+		toolName == "Follow up with agent" || toolName == "Stop agent" || toolName == "Read agent output" {
 		id, _ := args["id"].(string)
 		id = strings.TrimSpace(id)
 		if message, _ := args["message"].(string); message != "" {

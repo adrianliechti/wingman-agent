@@ -30,11 +30,47 @@ func readWindowsClipboard() ([]Content, error) {
 }
 
 func readPowerShellText() (string, error) {
-	output, err := runPowerShell(`$text = Get-Clipboard -Format Text -Raw -ErrorAction SilentlyContinue; if ($null -ne $text) { [Console]::Out.Write($text) }`, false)
+	script := `Add-Type -AssemblyName System.Windows.Forms; $files = [System.Windows.Forms.Clipboard]::GetFileDropList(); if ($files -and $files.Count -gt 0) { [Console]::Out.Write(($files -join "` + "`n" + `")) } else { $text = Get-Clipboard -Format Text -Raw -ErrorAction SilentlyContinue; if ($null -ne $text) { [Console]::Out.Write($text) } }`
+	output, err := runPowerShell(script, true)
 	if err != nil {
 		return "", err
 	}
-	return string(output), nil
+	text := string(output)
+	if text != "" && isWSL() {
+		text = convertWSLClipboardPaths(text)
+	}
+	return text, nil
+}
+
+func convertWSLClipboardPaths(text string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	var converted []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !looksLikeWindowsDrivePath(trimmed) {
+			return text
+		}
+		out, err := exec.Command("wslpath", "-u", trimmed).Output()
+		if err != nil {
+			return text
+		}
+		converted = append(converted, strings.TrimSpace(string(out)))
+	}
+	if len(converted) == 0 {
+		return text
+	}
+	return strings.Join(converted, "\n")
+}
+
+func looksLikeWindowsDrivePath(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	d := s[0]
+	if (d < 'A' || d > 'Z') && (d < 'a' || d > 'z') {
+		return false
+	}
+	return s[1] == ':' && (s[2] == '\\' || s[2] == '/')
 }
 
 func readPowerShellImage() (string, error) {

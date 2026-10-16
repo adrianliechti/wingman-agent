@@ -144,15 +144,18 @@ func (a *App) editQueuedInput(input code.TurnInput) {
 	}
 	a.editingQueueID = input.ID
 	a.editor.SetText(queuedText(input))
-	a.pendingContent = nil
-	for _, part := range input.Content {
-		if part.File != nil {
-			a.pendingContent = append(a.pendingContent, agent.CloneContent([]agent.Content{part})...)
-		}
-	}
 	a.pendingFiles = nil
 	if input.Display != nil {
 		a.pendingFiles = slices.Clone(input.Display.Files)
+	}
+	a.pendingContent = nil
+	for _, part := range input.Content {
+		if part.File != nil {
+			if part.File.Name != "" && slices.Contains(a.pendingFiles, part.File.Name) {
+				continue
+			}
+			a.pendingContent = append(a.pendingContent, agent.CloneContent([]agent.Content{part})...)
+		}
 	}
 	a.showToast("Editing queued input · Enter updates · Esc cancels", theme.Default.Cyan)
 }

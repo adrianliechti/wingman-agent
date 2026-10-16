@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -111,7 +112,7 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 		for i := len(tx.changes) - 1; i >= 0; i-- {
 			change := &tx.changes[i]
 			if change.installed {
-				current, readErr := change.root.ReadFile(change.path)
+				current, readErr := readTransactionContent(context.WithoutCancel(ctx), change.root, change.path, len(change.after))
 				if readErr != nil || !bytes.Equal(current, change.after) {
 					errs = append(errs, fmt.Errorf("cannot roll back %s: changed externally; original retained at %s", change.displayPath, change.backupPath))
 					continue
@@ -136,7 +137,7 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 
 	// Validate the whole batch before moving even its first file.
 	for i := range tx.changes {
-		if err := validateFileChange(&tx.changes[i]); err != nil {
+		if err := validateFileChange(ctx, &tx.changes[i]); err != nil {
 			return err
 		}
 	}
@@ -146,7 +147,7 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 		if err := ctx.Err(); err != nil {
 			return errors.Join(err, rollback())
 		}
-		if err := validateFileChange(change); err != nil {
+		if err := validateFileChange(ctx, change); err != nil {
 			return errors.Join(err, rollback())
 		}
 		if change.beforePresent {
@@ -155,8 +156,11 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 				change.backupPath = ""
 				return errors.Join(fmt.Errorf("prepare %s: %w", change.displayPath, err), rollback())
 			}
-			moved, readErr := change.root.ReadFile(change.backupPath)
-			if readErr != nil || !bytes.Equal(moved, change.before) {
+			moved, readErr := readTransactionContent(ctx, change.root, change.backupPath, len(change.before))
+			if readErr != nil {
+				return errors.Join(fmt.Errorf("check %s: %w", change.displayPath, readErr), rollback())
+			}
+			if !bytes.Equal(moved, change.before) {
 				return errors.Join(fmt.Errorf("%s changed on disk during edit; read it again", change.displayPath), rollback())
 			}
 		}
@@ -231,7 +235,7 @@ func absoluteTransactionLocation(path string) (*os.Root, string, func(), error) 
 	return root, rel, func() { _ = root.Close() }, nil
 }
 
-func validateFileChange(change *fileChange) error {
+func validateFileChange(ctx context.Context, change *fileChange) error {
 	info, err := change.root.Stat(change.path)
 	if !change.beforePresent && os.IsNotExist(err) {
 		return nil
@@ -239,10 +243,10 @@ func validateFileChange(change *fileChange) error {
 	if err != nil {
 		return fmt.Errorf("%s changed on disk; read it again: %w", change.displayPath, err)
 	}
-	if !change.beforePresent || !info.Mode().IsRegular() || info.Mode().Perm() != change.beforeMode.Perm() {
+	if !change.beforePresent || !info.Mode().IsRegular() || info.Mode().Perm() != change.beforeMode.Perm() || info.Size() != int64(len(change.before)) {
 		return fmt.Errorf("%s changed on disk; read it again", change.displayPath)
 	}
-	current, err := change.root.ReadFile(change.path)
+	current, err := readTransactionContent(ctx, change.root, change.path, len(change.before))
 	if err != nil {
 		return fmt.Errorf("check %s: %w", change.displayPath, err)
 	}
@@ -250,4 +254,16 @@ func validateFileChange(change *fileChange) error {
 		return fmt.Errorf("%s changed on disk; read it again", change.displayPath)
 	}
 	return nil
+}
+
+// A file can grow after Stat, including during rollback. Read at most one byte
+// beyond the expected contents so the comparison detects growth without an
+// unbounded allocation. Even an expected empty file must have a bounded read.
+func readTransactionContent(ctx context.Context, root *os.Root, path string, expectedBytes int) ([]byte, error) {
+	file, err := root.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return readContent(ctx, io.LimitReader(file, int64(expectedBytes)+1), -1)
 }

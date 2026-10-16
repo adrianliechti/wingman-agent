@@ -186,7 +186,7 @@ func TestTextEditsUTF16CRLFAndInvalidRanges(t *testing.T) {
 }
 
 func FuzzCompactReplacement(f *testing.F) {
-	for _, pair := range [][2]string{{"abc\n", "aXc\n"}, {"a\nb\n", "a\nnew\nb\n"}, {"x\nx\n", "x\n"}, {"😀x", "😀y"}, {"", "new"}, {"abc", ""}} {
+	for _, pair := range [][2]string{{"abc\n", "aXc\n"}, {"a\nb\n", "a\nnew\nb\n"}, {"x\nx\n", "x\n"}, {"a\na\na\n", "X\nY\na\n"}, {"😀x", "😀y"}, {"", "new"}, {"abc", ""}} {
 		f.Add(pair[0], pair[1])
 	}
 	f.Fuzz(func(t *testing.T, before, after string) {
@@ -194,7 +194,7 @@ func FuzzCompactReplacement(f *testing.F) {
 			return
 		}
 		old, next := compactReplacement(before, after)
-		if before != "" && (old == "" || strings.Count(before, old) != 1) {
+		if before != "" && (old == "" || strings.Index(before, old) != strings.LastIndex(before, old)) {
 			t.Fatalf("non-unique old_string %q in %q", old, before)
 		}
 		if got := strings.Replace(before, old, next, 1); got != after {

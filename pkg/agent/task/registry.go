@@ -59,6 +59,40 @@ type Task struct {
 	resumeData json.RawMessage
 }
 
+// Info is one consistent view of a task. Reading status, result and sequence
+// separately could combine fields from different runs during a relaunch.
+type Info struct {
+	ID          string
+	Description string
+	AgentType   string
+	Status      Status
+	Result      string
+	Activity    string
+	Elapsed     time.Duration
+	Seq         int
+}
+
+func (t *Task) Info() Info {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	info := Info{
+		ID: t.ID, Description: t.Description, AgentType: t.AgentType,
+		Status: t.status, Result: t.result, Activity: t.activity, Seq: t.seq,
+	}
+	if t.finishing {
+		info.Status = StatusRunning
+	}
+	if info.Status == StatusRunning {
+		info.Result = ""
+	}
+	if t.finished.IsZero() {
+		info.Elapsed = time.Since(t.Started)
+	} else {
+		info.Elapsed = t.finished.Sub(t.Started)
+	}
+	return info
+}
+
 // Seq counts the task's runs: 1 for the initial launch, +1 per resume. It
 // distinguishes the completion notifications of successive runs.
 func (t *Task) Seq() int {
@@ -67,7 +101,7 @@ func (t *Task) Seq() int {
 	return t.seq
 }
 
-// SetResume installs the follow-up hook used by task_send: it restarts the
+// SetResume installs the follow-up hook used by agent_send: it restarts the
 // finished agent with a new prompt and its full prior context.
 func (t *Task) SetResume(fn func(prompt string) error) {
 	if fn == nil {
@@ -160,7 +194,14 @@ func (t *Task) Resume(prompt string) error {
 }
 
 func (t *Task) ResumeContext(ctx context.Context, prompt string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	t.mu.Lock()
+	if t.status == StatusRunning || t.finishing {
+		t.mu.Unlock()
+		return fmt.Errorf("agent %s is still running; its result arrives as a task notification", t.ID)
+	}
 	fn := t.resume
 	t.mu.Unlock()
 	if fn == nil {
@@ -323,7 +364,7 @@ func (t *Task) Elapsed() time.Duration {
 }
 
 // Registry tracks the subagents of one session. Completed tasks stay listed
-// for task_output until the session ends; background completion events are
+// for agent_output until the session ends; background completion events are
 // buffered so a consumer that attaches late still receives them.
 type Registry struct {
 	ctx    context.Context
@@ -364,7 +405,7 @@ func newRegistry(path string) *Registry {
 // Events delivers one snapshot per finished background run, plus published events.
 func (r *Registry) Events() <-chan Event { return r.events }
 
-// Publish delivers an external background event (e.g. an exec_command exit)
+// Publish delivers an external background event (e.g. an exec exit)
 // through the session's notification channel alongside subagent completions.
 func (r *Registry) Publish(ev Event) {
 	r.mu.Lock()
@@ -527,7 +568,7 @@ func (r *Registry) Adopt(description, agentType, result string, elapsed time.Dur
 }
 
 // AdoptAgent is Adopt with durable child state installed before it becomes
-// visible to task_send or UI readers.
+// visible to agent_send or UI readers.
 func (r *Registry) AdoptAgent(agentID, description, agentType, result string, elapsed time.Duration, prepare func(*Task) error) (*Task, error) {
 	r.mu.Lock()
 	if r.closed || r.launched >= MaxPerSession {
@@ -625,7 +666,7 @@ func (r *Registry) uniqueTaskIDLocked(agentID string) string {
 	}
 }
 
-// Relaunch restarts a finished task with a new run — the task_send follow-up
+// Relaunch restarts a finished task with a new run — the agent_send follow-up
 // path. The task keeps its id and history; status, timing, and cancellation
 // reset for the new run, and completion fires another event.
 func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (string, error)) error {
@@ -649,11 +690,19 @@ func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (str
 		r.mu.Unlock()
 		return fmt.Errorf("agent %s is still running; its result arrives as a task notification", t.ID)
 	}
+	prevStatus := t.status
+	prevStopped := t.stopped
+	prevResult := t.result
+	prevActivity := t.activity
+	prevFinished := t.finished
+	prevStarted := t.Started
+	prevSeq := t.seq
 	ctx, cancel := context.WithTimeout(r.ctx, MaxRunDuration)
 	ctx = tool.WithBackgroundOrigin(ctx, t.AgentID)
 	t.status = StatusRunning
 	t.stopped = false
 	t.result = ""
+	t.activity = ""
 	t.finished = time.Time{}
 	t.cancel = cancel
 	t.Started = time.Now()
@@ -663,11 +712,15 @@ func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (str
 	r.running++
 	r.launched++
 	r.mu.Unlock()
-	if err := r.persist(); err != nil {
+	rollback := func() {
 		t.mu.Lock()
-		t.status = StatusFailed
-		t.result = fmt.Sprintf("error: could not persist relaunch: %v", err)
-		t.finished = time.Now()
+		t.status = prevStatus
+		t.stopped = prevStopped
+		t.result = prevResult
+		t.activity = prevActivity
+		t.finished = prevFinished
+		t.Started = prevStarted
+		t.seq = prevSeq
 		t.cancel = nil
 		t.mu.Unlock()
 		r.mu.Lock()
@@ -675,20 +728,15 @@ func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (str
 		r.launched--
 		r.mu.Unlock()
 		cancel()
+	}
+	if err := r.persist(); err != nil {
+		rollback()
 		return err
 	}
 	r.mu.Lock()
 	if r.closed {
-		r.running--
-		r.launched--
 		r.mu.Unlock()
-		t.mu.Lock()
-		t.status = StatusStopped
-		t.result = "error: session shut down before the background agent restarted"
-		t.finished = time.Now()
-		t.cancel = nil
-		t.mu.Unlock()
-		cancel()
+		rollback()
 		return fmt.Errorf("session is shutting down")
 	}
 	r.mu.Unlock()
@@ -708,6 +756,9 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 		}()
 		return run(ctx, t)
 	}()
+	if err == nil {
+		err = ctx.Err()
+	}
 
 	t.mu.Lock()
 	t.finishing = true
@@ -715,9 +766,21 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 	switch {
 	case t.stopped:
 		t.status = StatusStopped
+		if err == nil {
+			err = context.Canceled
+		}
+		if result != "" {
+			result = "Agent stopped. Output below is incomplete:\n\n" + result
+		} else {
+			result = "Agent stopped before producing a final report."
+		}
 	case err != nil:
 		t.status = StatusFailed
-		result = fmt.Sprintf("error: %v", err)
+		if result != "" {
+			result = fmt.Sprintf("error: %v\n\nOutput below is incomplete:\n%s", err, result)
+		} else {
+			result = fmt.Sprintf("error: %v", err)
+		}
 	default:
 		t.status = StatusDone
 	}
@@ -732,6 +795,8 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 		err = errors.Join(err, errors.New(t.result))
 	}
 	t.finishing = false
+	t.cancel = nil
+	result = t.result
 	ev := Event{
 		Task:        t,
 		ID:          t.ID,
@@ -794,7 +859,9 @@ func (r *Registry) Stop(id string) error {
 	t.mu.Unlock()
 	// execute persists the stopped result after the run unwinds. The stop
 	// request itself has no durable transition until cancellation completes.
-	cancel()
+	if cancel != nil {
+		cancel()
+	}
 	return nil
 }
 

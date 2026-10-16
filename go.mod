@@ -3,8 +3,7 @@ module github.com/adrianliechti/wingman-agent
 go 1.26.3
 
 require (
-	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
-	github.com/adrianliechti/go-extract v0.0.0-20261002175639-224d63da6ec1
+	github.com/adrianliechti/go-extract v0.0.0-20261016221110-30128859586a
 	github.com/adrianliechti/go-shell v0.1.8
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/bmatcuk/doublestar/v4 v4.10.3
@@ -41,6 +40,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.47.0
 	go.opentelemetry.io/proto/otlp v1.11.1
 	go.yaml.in/yaml/v4 v4.0.0-rc.6
+	golang.org/x/image v0.47.0
 	golang.org/x/net v0.61.0
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/sync v0.24.0
@@ -52,6 +52,7 @@ require (
 require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/JohannesKaufmann/dom v0.3.1 // indirect
+	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2 // indirect
 	github.com/Microsoft/go-winio v0.6.4 // indirect
 	github.com/ProtonMail/go-crypto v1.5.2 // indirect
 	github.com/abemedia/go-cfb v0.2.0 // indirect
@@ -91,7 +92,6 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.47.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
-	golang.org/x/image v0.47.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20261012220534-4341edf3f941 // indirect

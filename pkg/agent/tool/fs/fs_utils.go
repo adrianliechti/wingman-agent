@@ -3,6 +3,9 @@ package fs
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 	pathpkg "path"
 	"path/filepath"
@@ -25,6 +28,9 @@ func detectLineEnding(content string) string {
 	if strings.Contains(content, "\r\n") {
 		return "\r\n"
 	}
+	if strings.Contains(content, "\r") && !strings.Contains(content, "\n") {
+		return "\r"
+	}
 	return "\n"
 }
 
@@ -36,8 +42,8 @@ func normalizeToLF(text string) string {
 }
 
 func restoreLineEndings(text, ending string) string {
-	if ending == "\r\n" {
-		return strings.ReplaceAll(text, "\n", "\r\n")
+	if ending != "\n" {
+		return strings.ReplaceAll(text, "\n", ending)
 	}
 
 	return text
@@ -144,7 +150,11 @@ func fuzzyFindText(content, oldText string) fuzzyMatchResult {
 		return fuzzyMatchResult{index: -1}
 	}
 
-	fuzzyEnd := fuzzyIndex + len(fuzzyOldText)
+	return originalFuzzyMatch(content, fuzzyContent, fuzzyToOriginal, fuzzyIndex, len(fuzzyOldText))
+}
+
+func originalFuzzyMatch(content, fuzzyContent string, fuzzyToOriginal []int, fuzzyIndex, length int) fuzzyMatchResult {
+	fuzzyEnd := fuzzyIndex + length
 	originalIndex := fuzzyToOriginal[fuzzyIndex]
 	originalEnd := fuzzyToOriginal[fuzzyEnd]
 	if fuzzyEnd == len(fuzzyContent) || fuzzyContent[fuzzyEnd] == '\n' {
@@ -211,33 +221,50 @@ func pathDomain(fsPath string) []string {
 	return strings.Split(fsPath, "/")
 }
 
-func loadGitignore(fsys fs.FS, domain []string) []gitignore.Pattern {
+func loadGitignore(ctx context.Context, fsys fs.FS, domain []string) ([]gitignore.Pattern, error) {
 	gitignorePath := ".gitignore"
 
 	if len(domain) > 0 {
 		gitignorePath = pathpkg.Join(append(domain, ".gitignore")...)
 	}
 
-	f, err := fsys.Open(gitignorePath)
-
+	info, err := fs.Stat(fsys, gitignorePath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("ignore file %s is not a regular file", gitignorePath)
+	}
+	f, err := fsys.Open(gitignorePath)
+	if err != nil {
+		return nil, err
 	}
 	defer f.Close()
+	content, err := readContent(ctx, f, MaxScanBufSize)
+	if err != nil {
+		return nil, err
+	}
+	if len(content) > MaxScanBufSize {
+		return nil, fmt.Errorf("ignore file %s exceeds %d byte limit", gitignorePath, MaxScanBufSize)
+	}
 
 	var patterns []gitignore.Pattern
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(bytes.NewReader(content))
+	scanner.Buffer(make([]byte, 0, DefaultScanBufSize), MaxScanBufSize+1)
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
 
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		if trimmed == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
 		patterns = append(patterns, gitignore.ParsePattern(line, domain))
 	}
 
-	return patterns
+	return patterns, scanner.Err()
 }

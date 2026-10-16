@@ -71,6 +71,13 @@ func TestFileStoreReportsMalformedYAML(t *testing.T) {
 	if _, err := store.List(); err == nil {
 		t.Fatal("expected malformed YAML error")
 	}
+
+	if err := os.WriteFile(store.Path(), []byte("   \n"), 0644); err != nil {
+		t.Fatalf("write empty tasks file: %v", err)
+	}
+	if got, err := store.List(); err != nil || len(got) != 0 {
+		t.Fatalf("empty tasks file List = %#v, %v, want empty", got, err)
+	}
 }
 
 func TestFileStoreKeepsMutateAtomicOnError(t *testing.T) {
@@ -132,16 +139,18 @@ func TestMemoryStoreSnapshotsAreIsolated(t *testing.T) {
 	store := NewMemoryStore()
 
 	if err := store.Mutate(func(tasks []Task) ([]Task, error) {
-		return append(tasks, Task{ID: "a", Status: StatusActive}), nil
+		now := time.Date(2026, 6, 12, 8, 0, 0, 0, time.UTC)
+		return append(tasks, Task{ID: "a", Status: StatusActive, LastRun: &now}), nil
 	}); err != nil {
 		t.Fatalf("Mutate failed: %v", err)
 	}
 
 	got, _ := store.List()
 	got[0].Status = StatusPaused
+	*got[0].LastRun = got[0].LastRun.Add(time.Hour)
 
 	again, _ := store.List()
-	if again[0].Status != StatusActive {
+	if again[0].Status != StatusActive || !again[0].LastRun.Equal(time.Date(2026, 6, 12, 8, 0, 0, 0, time.UTC)) {
 		t.Fatal("List must return a copy the caller cannot mutate in place")
 	}
 

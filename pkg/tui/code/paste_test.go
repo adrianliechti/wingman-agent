@@ -1,12 +1,21 @@
 package code
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/clipboard"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
@@ -318,3 +327,90 @@ func TestCopyLastResponseShowsBackendError(t *testing.T) {
 		t.Fatalf("toast = %#v", a.toast)
 	}
 }
+
+func TestDetectFilePathsMultiFileFormats(t *testing.T) {
+	dir := t.TempDir()
+	imgOne := filepath.Join(dir, "one.png")
+	imgTwo := filepath.Join(dir, "Screen Shot 2.png")
+	if err := os.WriteFile(imgOne, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imgTwo, []byte("two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	escapedTwo := strings.ReplaceAll(imgTwo, " ", `\ `)
+	if got := detectFilePaths(imgOne+" "+escapedTwo, dir); !reflect.DeepEqual(got, []string{imgOne, imgTwo}) {
+		t.Fatalf("escaped drag-and-drop paths = %#v, want %#v", got, []string{imgOne, imgTwo})
+	}
+
+	quoted := fmt.Sprintf("'%s' \"%s\"", imgOne, imgTwo)
+	if got := detectFilePaths(quoted, dir); !reflect.DeepEqual(got, []string{imgOne, imgTwo}) {
+		t.Fatalf("quoted paths = %#v, want %#v", got, []string{imgOne, imgTwo})
+	}
+
+	uriList := fmt.Sprintf("# comment\nfile://%s\nfile://%s\n", filepath.ToSlash(imgOne), strings.ReplaceAll(filepath.ToSlash(imgTwo), " ", "%20"))
+	if got := detectFilePaths(uriList, dir); !reflect.DeepEqual(got, []string{imgOne, imgTwo}) {
+		t.Fatalf("uri-list paths = %#v, want %#v", got, []string{imgOne, imgTwo})
+	}
+}
+
+func TestSubmitAttachedImageFileIncludesVisionContentAndAllowsEmptyPrompt(t *testing.T) {
+	a, _ := newQueueTestApp(t, 1)
+	a.agent.Workspace().RootPath = t.TempDir()
+
+	var buf bytes.Buffer
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	imgPath := filepath.Join(a.agent.Workspace().RootPath, "diagram.png")
+	if err := os.WriteFile(imgPath, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.addFileToContext("diagram.png"); err != nil {
+		t.Fatal(err)
+	}
+	a.submitInputIntent(code.TurnInputFollowUp)
+
+	snapshot := a.turns.Snapshot("session")
+	if len(snapshot.Inputs) != 2 {
+		t.Fatalf("queued turns = %d, want 2", len(snapshot.Inputs))
+	}
+	sub := snapshot.Inputs[1].Input
+	if sub.Display == nil || sub.Display.Text != "[diagram.png]" {
+		t.Fatalf("display = %#v, want [diagram.png]", sub.Display)
+	}
+	var sawVision bool
+	for _, part := range sub.Content {
+		if part.File != nil && part.File.Name == "diagram.png" && strings.HasPrefix(part.File.Data, "data:image/png;base64,") {
+			sawVision = true
+		}
+	}
+	if !sawVision {
+		t.Fatalf("expected attached image file to include vision File content, got %#v", sub.Content)
+	}
+}
+
+func TestApplyClipboardContentsMultiImages(t *testing.T) {
+	var buf bytes.Buffer
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	encoded := "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+
+	a := &App{agent: newUITestAgent(nil)}
+	a.applyClipboardContents([]clipboard.Content{
+		{Image: &encoded},
+		{Image: &encoded},
+	}, nil)
+	if got := a.countPendingImages(); got != 2 {
+		t.Fatalf("countPendingImages() = %d, want 2", got)
+	}
+	if a.toast == nil || a.toast.message != "Attached 2 items" {
+		t.Fatalf("toast = %#v, want Attached 2 items", a.toast)
+	}
+}
+

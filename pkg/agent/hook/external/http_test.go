@@ -3,6 +3,7 @@ package external
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -13,6 +14,27 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+func TestHTTPOversizedHookResponseDoesNotBypassDenial(t *testing.T) {
+	const prefix = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"`
+	const suffix = `"}}`
+	for _, size := range []int{maxHookOutput, maxHookOutput + 1, 2 * maxHookOutput} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			body := prefix + strings.Repeat("x", size-len(prefix)-len(suffix)) + suffix
+			withHTTPTransport(t, func(*http.Request) (*http.Response, error) {
+				return response(http.StatusOK, body), nil
+			})
+			cfg := configFor("PreToolUse", "Bash", Handler{Type: "http", URL: "https://hooks.test/pre"})
+			outcome, err := cfg.Build(t.TempDir(), nil).PreToolUse[0](t.Context(), tool.ToolCall{Name: "shell"})
+			if err != nil || !outcome.Block {
+				t.Fatalf("hook denial was lost: %+v, %v", outcome, err)
+			}
+			if overflow := strings.Contains(outcome.Reason, "exceeded"); overflow != (size > maxHookOutput) {
+				t.Fatalf("incorrect overflow handling at %d bytes", size)
+			}
+		})
+	}
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 

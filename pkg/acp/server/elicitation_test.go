@@ -15,6 +15,7 @@ func TestElicitationSchemaPreservesEnumDescriptions(t *testing.T) {
 		Title:            "Strategy",
 		Description:      "Choose a strategy",
 		Required:         true,
+		Strict:           true,
 		Enum:             []string{"safe", "fast"},
 		EnumDescriptions: []string{"Minimal changes", "Broader optimization"},
 		Default:          "safe",

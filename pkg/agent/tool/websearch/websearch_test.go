@@ -15,7 +15,10 @@ func TestParseResults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results := parseResults(string(page))
+	results, err := parseResults(strings.NewReader(string(page)))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(results) == 0 {
 		t.Fatal("no results parsed from fixture")
 	}

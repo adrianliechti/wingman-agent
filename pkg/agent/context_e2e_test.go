@@ -435,7 +435,7 @@ func TestTruncationE2EPersistsOutputBeforeReplay(t *testing.T) {
 	})
 	output := strings.Repeat("observed line\n", 6000)
 	cfg := e2eConfig(t, tool.Tool{Name: "shell", Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text(output), nil }})
-	cfg.Hooks.PostToolUse = []hook.PostToolUse{truncation.New(t.TempDir())}
+	cfg.Hooks.TransformToolResult = []hook.TransformToolResult{truncation.Transform(t.TempDir())}
 	a := &agent.Agent{Config: cfg}
 	if err := drain(t, a, "run the command"); err != nil {
 		t.Fatal(err)

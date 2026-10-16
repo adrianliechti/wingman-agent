@@ -31,13 +31,10 @@ func documentPath(path string) bool {
 }
 
 func documentData(data []byte) bool {
-	head := data
-	if len(head) > 1024 {
-		head = head[:1024]
-	}
-	return bytes.Contains(head, []byte("%PDF-")) ||
-		bytes.HasPrefix(head, []byte{'P', 'K', 0x03, 0x04}) ||
-		bytes.HasPrefix(head, []byte{0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1})
+	// Sniff headers only at the start; source code and prose can quote signatures.
+	return bytes.HasPrefix(data, []byte("%PDF-")) ||
+		bytes.HasPrefix(data, []byte{'P', 'K', 0x03, 0x04}) ||
+		bytes.HasPrefix(data, []byte{0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1})
 }
 
 func readDocument(

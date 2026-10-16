@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
@@ -17,8 +21,15 @@ func (s *backendRuntime) buildInput(msg Command) []agent.Content {
 			input = append(input, agent.Content{Text: block, Hidden: true})
 		}
 	}
+	var rootPath string
+	if s.workspace != nil {
+		rootPath = s.workspace.RootPath
+	}
 	for _, f := range msg.Files {
 		input = append(input, agent.Content{Text: fmt.Sprintf("[File: %s]", f)})
+		if dataURL := readAttachedWorkspaceImage(f, rootPath); dataURL != "" {
+			input = append(input, agent.Content{File: &agent.File{Name: f, Data: dataURL}})
+		}
 	}
 	for _, img := range msg.Images {
 		if img == "" {
@@ -27,6 +38,42 @@ func (s *backendRuntime) buildInput(msg Command) []agent.Content {
 		input = append(input, agent.Content{File: &agent.File{Data: img}})
 	}
 	return input
+}
+
+func readAttachedWorkspaceImage(path, rootPath string) string {
+	resolved := path
+	if !filepath.IsAbs(resolved) {
+		if rootPath == "" {
+			return ""
+		}
+		resolved = filepath.Join(rootPath, resolved)
+	}
+	f, err := os.Open(filepath.Clean(resolved))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > tool.MaxImageSourceBytes {
+		return ""
+	}
+	var head [512]byte
+	n, err := f.Read(head[:])
+	if err != nil && err != io.EOF {
+		return ""
+	}
+	if tool.ImageMIME(head[:n]) == "" {
+		return ""
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return ""
+	}
+	res, err := tool.ReadImage(context.Background(), f)
+	if err != nil {
+		return ""
+	}
+	return res.Content
 }
 
 func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
@@ -111,6 +158,9 @@ func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
 			case c.AsText() != "":
 				s.setSessionPhase(ev.SessionID, "streaming")
 				s.sendSession(ev.SessionID, Frame{Type: EvtTextDelta, ID: c.TextID, Text: c.AsText()})
+			}
+			if c.File != nil && c.File.Data != "" {
+				s.sendSession(ev.SessionID, Frame{Type: EvtImage, Content: c.File.Data})
 			}
 		}
 		s.sendUsageIfChanged(ev.SessionID)

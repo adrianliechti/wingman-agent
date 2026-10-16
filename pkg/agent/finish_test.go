@@ -18,6 +18,337 @@ func finishOutput(id, args string) string {
 	return string(b)
 }
 
+func TestExplicitFinishModelSwitchInSameChat(t *testing.T) {
+	bare := strings.ReplaceAll(finalAnswerOutput, `,"phase":"final_answer"`, "")
+
+	t.Run("mid-turn switch after completed answer finishes without extra request", func(t *testing.T) {
+		currentModel := "claude-sonnet-5-5"
+		requests, stops := 0, 0
+		client := streamingTestClient(func(*http.Request) string {
+			requests++
+			// Switch to a non-RequireFinish model after the first response streams its answer.
+			currentModel = "gpt-6-sol"
+			return phaseTestResponse(false, bare)
+		})
+		a := &Agent{Config: &Config{
+			client:        &client,
+			MaxTurns:      5,
+			Model:         func() string { return currentModel },
+			RequireFinish: func(m string) bool { return strings.HasPrefix(m, "claude-") },
+			Hooks: hook.Hooks{Stop: []hook.Stop{func(_ context.Context, last string, _ bool) (hook.Outcome, error) {
+				stops++
+				if last != "Checked and fixed." {
+					t.Errorf("Stop hook answer = %q, want Checked and fixed.", last)
+				}
+				return hook.Outcome{}, nil
+			}}},
+		}}
+		stream, err := a.Send(t.Context(), []Content{{Text: "Fix it."}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, err := range stream {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if requests != 1 || stops != 1 {
+			t.Fatalf("requests=%d stops=%d, want 1/1", requests, stops)
+		}
+		events := a.StateSnapshot().Events
+		if len(events) == 0 || events[len(events)-1].Type != EventTurnTerminal || events[len(events)-1].Terminal.Status != RuntimeCompleted {
+			t.Fatalf("last event = %#v, want completed EventTurnTerminal", events[len(events)-1])
+		}
+		for _, m := range a.requestMessages() {
+			if contentText(m.Content) == finishReminder {
+				t.Fatal("stale finishReminder remained in request context after switching to non-finish model")
+			}
+		}
+	})
+
+	t.Run("between-turn switch after missing finish strips finish reminders and tolerates mimicked finish_turn", func(t *testing.T) {
+		currentModel := "claude-sonnet-5-5"
+		requests := 0
+		var seenInputs []string
+		client := streamingTestClient(func(r *http.Request) string {
+			requests++
+			var body struct{ Input json.RawMessage }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			seenInputs = append(seenInputs, string(body.Input))
+			if currentModel == "claude-sonnet-5-5" {
+				return phaseTestResponse(false)
+			}
+			// Non-finish model mimics a finish_turn call from history.
+			return phaseTestResponse(false, finishOutput("mimic", `{"answer":"Resumed on GPT."}`))
+		})
+		a := &Agent{Config: &Config{
+			client:        &client,
+			MaxTurns:      5,
+			Model:         func() string { return currentModel },
+			RequireFinish: func(m string) bool { return strings.HasPrefix(m, "claude-") },
+		}}
+		stream, err := a.Send(t.Context(), []Content{{Text: "Start."}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var turn1Err error
+		for _, err := range stream {
+			turn1Err = errors.Join(turn1Err, err)
+		}
+		if !errors.Is(turn1Err, ErrMissingFinish) {
+			t.Fatalf("turn 1 error = %v, want ErrMissingFinish", turn1Err)
+		}
+
+		// Switch model to GPT on the same session and resume.
+		currentModel = "gpt-6-sol"
+		stream, err = a.Send(t.Context(), []Content{{Text: "Continue"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var visible []string
+		for msg, err := range stream {
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range msg.Content {
+				if c.ToolCall != nil && c.ToolCall.Name == finishToolName {
+					t.Fatal("finish_turn leaked as a visible tool call")
+				}
+				if c.Text != "" {
+					visible = append(visible, c.Text)
+				}
+			}
+		}
+		lastInput := seenInputs[len(seenInputs)-1]
+		if strings.Contains(lastInput, "call finish_turn") {
+			t.Fatalf("non-finish model received finish_turn reminder in input: %s", lastInput)
+		}
+		if !strings.Contains(lastInput, continuationReminder) {
+			t.Fatalf("missingAnswerReminder was not rewritten to continuationReminder: %s", lastInput)
+		}
+		if strings.Join(visible, "") != "Resumed on GPT." {
+			t.Fatalf("visible = %q, want Resumed on GPT.", visible)
+		}
+	})
+
+	t.Run("consumer stop during tool drain still rejects committed finish_turn", func(t *testing.T) {
+		check := `{"type":"function_call","id":"fc_check","call_id":"check","name":"check","arguments":"{}","status":"completed"}`
+		finish := finishOutput("premature", "{}")
+		client := streamingTestClient(func(*http.Request) string {
+			return itemDoneEvents(check, finish) + phaseTestResponse(false, check, finish)
+		})
+		commits := 0
+		a := &Agent{Config: &Config{
+			client:        &client,
+			RequireFinish: func(string) bool { return true },
+			Tools: func() []tool.Tool {
+				return []tool.Tool{{Name: "check", Execute: func(context.Context, map[string]any) (tool.Result, error) {
+					return tool.Text("checked"), nil
+				}}}
+			},
+		}}
+		ctx := WithStreamEventHandlers(t.Context(), StreamEventHandlers{Commit: func() { commits++ }})
+		stream, err := a.Send(ctx, []Content{{Text: "Run check."}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for msg, err := range stream {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(msg.Content) > 0 && msg.Content[0].ToolResult != nil && msg.Content[0].ToolResult.ID == "check" {
+				break
+			}
+		}
+		if commits != 2 {
+			t.Fatalf("commits = %d, want 2 (2 output items committed before drain)", commits)
+		}
+		foundFinishResult := false
+		for _, m := range a.MessagesSnapshot() {
+			for _, c := range m.Content {
+				if c.ToolResult != nil && c.ToolResult.ID == "premature" && c.ToolResult.IsError {
+					foundFinishResult = true
+				}
+			}
+		}
+		if !foundFinishResult {
+			t.Fatal("committed finish_turn was left without a rejected ToolResult after consumer stopped on tool drain")
+		}
+	})
+
+	t.Run("rejected optional finish_turn triggers bounded follow-up", func(t *testing.T) {
+		for _, args := range []string{`{}`, `{"bad":1}`} {
+			t.Run(args, func(t *testing.T) {
+				requests := 0
+				client := streamingTestClient(func(*http.Request) string {
+					requests++
+					return phaseTestResponse(false, finishOutput(fmt.Sprintf("bad_%d", requests), args))
+				})
+				a := &Agent{Config: &Config{
+					client:        &client,
+					MaxTurns:      5,
+					Model:         func() string { return "gpt-6-sol" },
+					RequireFinish: func(m string) bool { return strings.HasPrefix(m, "claude-") },
+				}}
+				stream, err := a.Send(t.Context(), []Content{{Text: "Answer."}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var runErr error
+				for _, err := range stream {
+					runErr = errors.Join(runErr, err)
+				}
+				if !errors.Is(runErr, ErrTurnIncomplete) || requests != 3 {
+					t.Fatalf("requests=%d err=%v, want 3 and ErrTurnIncomplete", requests, runErr)
+				}
+				rejections := 0
+				for _, m := range a.MessagesSnapshot() {
+					for _, c := range m.Content {
+						if result := c.ToolResult; result != nil && result.Name == finishToolName {
+							rejections++
+							if !result.IsError || !strings.Contains(result.Content, "answer directly as assistant text") {
+								t.Fatalf("expected finish rejection with direct-answer guidance, got %+v", result)
+							}
+						}
+					}
+				}
+				if rejections != requests {
+					t.Fatalf("finish results = %d, want %d", rejections, requests)
+				}
+			})
+		}
+	})
+
+	t.Run("mid-turn switch after empty pause_turn resumes pause instead of shortcutting", func(t *testing.T) {
+		currentModel := "claude-sonnet-5-5"
+		requests := 0
+		client := streamingTestClient(func(*http.Request) string {
+			requests++
+			switch requests {
+			case 1:
+				return phaseTestResponse(false, bare)
+			case 2:
+				// Empty pause_turn preserves completion.answer; switching to non-finish
+				// model afterwards must still resume the pause for request 3.
+				currentModel = "gpt-6-sol"
+				return pausedResponse()
+			default:
+				return phaseTestResponse(false, finalAnswerOutput)
+			}
+		})
+		a := &Agent{Config: &Config{
+			client:        &client,
+			MaxTurns:      5,
+			Model:         func() string { return currentModel },
+			RequireFinish: func(m string) bool { return strings.HasPrefix(m, "claude-") },
+		}}
+		stream, err := a.Send(t.Context(), []Content{{Text: "Work."}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, err := range stream {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if requests != 3 {
+			t.Fatalf("requests = %d, want 3 (answer -> pause_turn -> resumed completion)", requests)
+		}
+	})
+
+	t.Run("user tool named finish_turn is rejected even when RequireFinish policy returns false", func(t *testing.T) {
+		executed := 0
+		a := &Agent{Config: &Config{
+			Model:         func() string { return "gpt-6-sol" },
+			RequireFinish: func(string) bool { return false },
+			Tools: func() []tool.Tool {
+				return []tool.Tool{{Name: finishToolName, Execute: func(context.Context, map[string]any) (tool.Result, error) {
+					executed++
+					return tool.Text("ran"), nil
+				}}}
+			},
+		}}
+		stream, err := a.Send(t.Context(), []Content{{Text: "Run."}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		for _, err := range stream {
+			runErr = errors.Join(runErr, err)
+		}
+		if runErr == nil || !strings.Contains(runErr.Error(), "reserved by RequireFinish") || executed != 0 {
+			t.Fatalf("err=%v executed=%d, want reserved tool error and 0 executions", runErr, executed)
+		}
+	})
+}
+
+func TestRejectedOptionalFinishWithExplicitTurnBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		endTurn      string
+		repeat       bool
+		wantRequests int
+	}{
+		{"end turn then recover", "true", false, 2},
+		{"continue then recover", "false", false, 2},
+		{"repeated end turn is bounded", "true", true, 3},
+		{"repeated continuation is bounded", "false", true, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			client := streamingTestClient(func(r *http.Request) string {
+				requests++
+				if requests > 1 {
+					var body struct{ Input json.RawMessage }
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Fatal(err)
+					}
+					if !strings.Contains(string(body.Input), "Finish rejected.") {
+						t.Error("follow-up did not receive the rejected finish result")
+					}
+				}
+				if requests == 1 || tc.repeat {
+					return endTurnResponse(tc.endTurn, finishOutput(fmt.Sprintf("bad_%d", requests), "{}"))
+				}
+				return endTurnResponse("true", finalAnswerOutput)
+			})
+			a := &Agent{Config: &Config{
+				client: &client, MaxTurns: 5,
+				RequireFinish: func(string) bool { return false },
+			}}
+			stream, err := a.Send(t.Context(), []Content{{Text: "Answer."}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var visible strings.Builder
+			var runErr error
+			for message, err := range stream {
+				runErr = errors.Join(runErr, err)
+				visible.WriteString(contentText(message.Content))
+			}
+			if requests != tc.wantRequests {
+				t.Errorf("requests = %d, want %d", requests, tc.wantRequests)
+			}
+			if tc.repeat {
+				if !errors.Is(runErr, ErrTurnIncomplete) {
+					t.Fatalf("error = %v, want ErrTurnIncomplete", runErr)
+				}
+				assertIncompleteTurn(t, a)
+			} else {
+				if runErr != nil {
+					t.Fatal(runErr)
+				}
+				if got := visible.String(); got != "Checked and fixed." {
+					t.Errorf("visible answer = %q, want Checked and fixed.", got)
+				}
+				if outcome := a.TurnReviews()[0].Outcome; outcome != "completed" {
+					t.Errorf("outcome = %q, want completed", outcome)
+				}
+			}
+		})
+	}
+}
+
 func TestExplicitFinish(t *testing.T) {
 	bare := strings.ReplaceAll(finalAnswerOutput, `,"phase":"final_answer"`, "")
 	check := `{"type":"function_call","id":"fc_check","call_id":"check","name":"check","arguments":"{}","status":"completed"}`
@@ -349,6 +680,7 @@ func TestExplicitFinishAcceptsBareMarkerAfterAnswer(t *testing.T) {
 		accepted  bool
 	}{
 		{name: "answer then marker", responses: []string{bare, finishOutput("done", "{}")}, accepted: true},
+		{name: "malformed marker preserves answer", responses: []string{phaseTestResponse(false, bare, finishOutput("bad", `{"unexpected":true}`)), finishOutput("done", "{}")}},
 		{name: "partial answer cannot finish", responses: []string{strings.ReplaceAll(finalAnswerOutput, "final_answer", "partial_answer"), finishOutput("bare", "{}"), phaseTestResponse(false, bare, finishOutput("done", "{}"))}},
 		{name: "partial replacement cannot reuse prior answer", responses: []string{bare, phaseTestResponse(false, strings.ReplaceAll(finalAnswerOutput, "final_answer", "partial_answer"), finishOutput("bare", "{}")), phaseTestResponse(false, bare, finishOutput("done", "{}"))}},
 		{name: "empty cutoff preserves answer", responses: []string{bare, cutoffTestResponse(), finishOutput("done", "{}")}, accepted: true},

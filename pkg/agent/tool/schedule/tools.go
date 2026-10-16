@@ -3,10 +3,13 @@ package schedule
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
+	"github.com/google/uuid"
 )
 
 // One tool keeps the rarely used scheduling surface small in every request.
@@ -41,7 +44,7 @@ func Tools(store Store, options ...*Options) []tool.Tool {
 				},
 				"script": map[string]any{
 					"type":        "string",
-					"description": "create: pre-check run with the `exec_command` shell before each fire. Print {\"wake\": false} to skip the run; any other output, or a failure, wakes you with the output attached. Test it with `exec_command` first.",
+					"description": "create: pre-check run with the `exec` shell before each fire. Print {\"wake\": false} to skip the run; any other output, or a failure, wakes you with the output attached. Test it with `exec` first.",
 				},
 				"id": map[string]any{
 					"type":        "string",
@@ -52,6 +55,9 @@ func Tools(store Store, options ...*Options) []tool.Tool {
 			"additionalProperties": false,
 		},
 		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 			switch action, _ := args["action"].(string); action {
 			case "create":
 				return createTask(ctx, store, opts, args)
@@ -74,8 +80,14 @@ func scheduleEffect(args map[string]any) tool.Effect {
 	if args == nil {
 		return tool.EffectDynamic
 	}
-	if action, _ := args["action"].(string); action == "list" {
+	action, _ := args["action"].(string)
+	if action == "list" {
 		return tool.EffectReadOnly
+	}
+	if action == "create" {
+		if script, _ := args["script"].(string); shell.IsDangerousCommand(strings.TrimSpace(script)) {
+			return tool.EffectDangerous
+		}
 	}
 	return tool.EffectMutates
 }
@@ -83,7 +95,14 @@ func scheduleEffect(args map[string]any) tool.Effect {
 func createTask(ctx context.Context, store Store, opts *Options, args map[string]any) (tool.Result, error) {
 	prompt, _ := args["prompt"].(string)
 	sched, _ := args["schedule"].(string)
-	script, _ := args["script"].(string)
+	var script string
+	if raw, ok := args["script"]; ok && raw != nil {
+		s, ok := raw.(string)
+		if !ok {
+			return tool.Result{}, fmt.Errorf("script must be a string")
+		}
+		script = s
+	}
 
 	task, err := NewTask(prompt, sched)
 	if err != nil {
@@ -103,6 +122,9 @@ func createTask(ctx context.Context, store Store, opts *Options, args map[string
 	}
 
 	err = store.Mutate(func(tasks []Task) ([]Task, error) {
+		for slices.ContainsFunc(tasks, func(existing Task) bool { return existing.ID == task.ID }) {
+			task.ID = uuid.NewString()[:8]
+		}
 		return append(tasks, task), nil
 	})
 	if err != nil {
@@ -173,6 +195,10 @@ func updateStatus(store Store, args map[string]any, status string) (tool.Result,
 			return nil, err
 		}
 		tasks[i].Status = status
+		if status == StatusActive {
+			tasks[i].Failures = 0
+			tasks[i].LastAttempt = nil
+		}
 		updated = tasks[i].ID
 		return tasks, nil
 	})

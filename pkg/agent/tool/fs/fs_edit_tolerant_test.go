@@ -163,29 +163,116 @@ func TestEditToolTolerance(t *testing.T) {
 			args:    map[string]any{"old_string": "\t\tbar()", "new_string": "x"},
 			wantErr: "could not find old_string",
 		},
+		{
+			name:    "extra blank line in unchanged context still matches and preserves file spacing",
+			content: "\t\tif ok {\n\t\t\ta()\n\t\t}\n\t}\nfunc Next() {\n\trun(\"old\")\n}\n",
+			args: map[string]any{
+				"old_string": "\t\t\ta()\n\t\t}\n\t}\n\n\tfunc Next() {\n\t\trun(\"old\")",
+				"new_string": "\t\t\ta()\n\t\t}\n\t}\n\n\tfunc Next() {\n\t\trun(\"new\")",
+			},
+			want: "\t\tif ok {\n\t\t\ta()\n\t\t}\n\t}\nfunc Next() {\n\trun(\"new\")\n}\n",
+		},
+		{
+			name:    "missing blank line in old_string still matches when non-empty lines and indent shift match",
+			content: "func Alpha() {\n\tx := 1\n\n\ty := 2\n}\n",
+			args: map[string]any{
+				"old_string": "func Alpha() {\n\tx := 1\n\ty := 2\n}",
+				"new_string": "func Alpha() {\n\tx := 10\n\ty := 20\n}",
+			},
+			want: "func Alpha() {\n\tx := 10\n\ty := 20\n}\n",
+		},
+		{
+			name:    "blank-line tolerance deletes the whole changed line",
+			content: "alpha\n\nbeta\ngamma\n",
+			args:    map[string]any{"old_string": "alpha\nbeta\ngamma", "new_string": "alpha\ngamma"},
+			want:    "alpha\n\ngamma\n",
+		},
+		{
+			name:    "blank-line tolerance removes the final newline when requested",
+			content: "alpha\n\nbeta\n",
+			args:    map[string]any{"old_string": "alpha\nbeta\n", "new_string": "alpha\nchanged"},
+			want:    "alpha\n\nchanged",
+		},
+		{
+			name:    "blank-line tolerance adds the final newline when requested",
+			content: "alpha\n\nbeta",
+			args:    map[string]any{"old_string": "alpha\nbeta", "new_string": "alpha\nchanged\n"},
+			want:    "alpha\n\nchanged\n",
+		},
+		{
+			name:    "blank-line tolerance honors newline-only changes",
+			content: "alpha\n\nbeta\n",
+			args:    map[string]any{"old_string": "alpha\nbeta\n", "new_string": "alpha\nbeta"},
+			want:    "alpha\n\nbeta",
+		},
+		{
+			name:    "anchor indentation tolerance still requires the old final newline",
+			content: "alpha\n\tbeta",
+			args:    map[string]any{"old_string": "\talpha\n\tbeta\n", "new_string": "\talpha\n\tchanged\n"},
+			wantErr: "could not find old_string",
+		},
+		{
+			name:    "blank-line tolerance consumes boundary blank lines in full replacements",
+			content: "before\n\nalpha\n\nbeta\n\nafter\n",
+			args:    map[string]any{"old_string": "\nalpha\nbeta\n\n", "new_string": "\nchanged\n"},
+			want:    "before\n\nchanged\nafter\n",
+		},
+		{
+			name:    "blank-line tolerance rejects missing boundary context",
+			content: "before\nalpha\n\nbeta\n\nafter\n",
+			args:    map[string]any{"old_string": "\nalpha\nbeta\n\n", "new_string": "changed\n"},
+			wantErr: "could not find old_string",
+		},
+		{
+			name:    "ambiguous blank-line matches are rejected",
+			content: "alpha\n\nbeta\nalpha\n\nbeta\n",
+			args:    map[string]any{"old_string": "alpha\nbeta", "new_string": "alpha\nchanged"},
+			wantErr: "2 occurrences",
+		},
+		{
+			name:    "replace_all covers blank-line matches",
+			content: "alpha\n\nbeta\nalpha\n\nbeta\n",
+			args:    map[string]any{"old_string": "alpha\nbeta", "new_string": "alpha\nchanged", "replace_all": true},
+			want:    "alpha\n\nchanged\nalpha\n\nchanged\n",
+		},
+		{
+			name:    "replace_all skips overlapping boundary blank lines",
+			content: "\nalpha\n\nbeta\n\nalpha\n\nbeta\n\n",
+			args:    map[string]any{"old_string": "\nalpha\nbeta\n\n", "new_string": "changed\n", "replace_all": true},
+			want:    "changed\nalpha\n\nbeta\n\n",
+		},
+		{
+			name:    "blank-line tolerance normalizes CRLF edit arguments",
+			content: "alpha\n\nbeta\n",
+			args:    map[string]any{"old_string": "alpha\r\nbeta\r\n", "new_string": "alpha\r\nchanged\r\n"},
+			want:    "alpha\n\nchanged\n",
+		},
 	}
 
 	for i, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			name := fmt.Sprintf("case%d.txt", i)
-			got, err := edit(t, name, tt.content, tt.args)
+		for _, ending := range []struct{ name, value string }{{"LF", "\n"}, {"CRLF", "\r\n"}} {
+			t.Run(tt.name+"/"+ending.name, func(t *testing.T) {
+				name := fmt.Sprintf("case%d.txt", i)
+				content := strings.ReplaceAll(tt.content, "\n", ending.value)
+				got, err := edit(t, name, content, tt.args)
 
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+				if tt.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+						t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+					}
+					if got != content {
+						t.Fatalf("file changed despite error: %q", got)
+					}
+					return
 				}
-				if got != tt.content {
-					t.Fatalf("file changed despite error: %q", got)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
 				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Fatalf("content = %q, want %q", got, tt.want)
-			}
-		})
+				if want := strings.ReplaceAll(tt.want, "\n", ending.value); got != want {
+					t.Fatalf("content = %q, want %q", got, want)
+				}
+			})
+		}
 	}
 
 	t.Run("CRLF files keep their line endings through tolerant matching", func(t *testing.T) {
@@ -249,6 +336,22 @@ func TestEditToolTolerance(t *testing.T) {
 		})
 		if err == nil || !strings.Contains(err.Error(), "File starts with") {
 			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("mismatch error locates closest region using identifier tokens when line structure differs", func(t *testing.T) {
+		content := "package truncation\n\nfunc budgetFor(name string) int {\n\tswitch name {\n\tcase \"grep\":\n\t\treturn 1\n\tcase \"shell\", \"exec_command\", \"exec_session\":\n\t\treturn 2\n\tdefault:\n\t\treturn 3\n\t}\n}\n"
+		_, err := edit(t, "truncation.go", content, map[string]any{
+			"old_string": "var defaultTools = map[string]bool{\n\t\"exec_command\": true,\n\t\"exec_session\": true,\n\t\"shell\": true,\n}",
+			"new_string": "x",
+		})
+		if err == nil {
+			t.Fatal("expected mismatch error")
+		}
+		for _, want := range []string{"Closest match", `"shell", "exec_command", "exec_session"`} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q missing %q", err, want)
+			}
 		}
 	})
 }

@@ -109,7 +109,7 @@ func trimmedToolOutput(output string) string {
 }
 
 const (
-	// The code harness installs a more specific PostToolUse hook that persists
+	// The code harness installs a TransformToolResult hook that persists
 	// oversized output before replacing it with a preview. This is the final
 	// safety net for every other Agent embedding and for context added by hooks.
 	maxInlineToolResultBytes = tool.MaxInlineResultBytes

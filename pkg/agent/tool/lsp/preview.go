@@ -153,7 +153,7 @@ func previewVersionMatches(requested *int32, current int, opened bool) bool {
 	return *requested == 0
 }
 
-// Keep a unique, complete-line old_string so the normal atomic edit tool can
+// Keep a unique, complete-line old_string so the edit tool can
 // check its precondition. Never substitute a global textual rename.
 func compactReplacement(before, after string) (string, string) {
 	prefix := 0
@@ -173,7 +173,7 @@ func compactReplacement(before, after string) (string, string) {
 	}
 	newEnd := len(after) - (len(before) - end)
 	old, next := before[start:end], after[start:newEnd]
-	if old == "" || strings.Count(before, old) != 1 || strings.Index(before, old) != start {
+	if old == "" || strings.Index(before, old) != start || strings.LastIndex(before, old) != start {
 		return before, after
 	}
 	return old, next
@@ -251,6 +251,21 @@ func previewCodeActions(ctx context.Context, manager *lsp.Manager, args map[stri
 	if err != nil {
 		return tool.Result{}, err
 	}
+	lines, err := readLines(path)
+	if err != nil {
+		return tool.Result{}, err
+	}
+	selection := lsp.Range{End: lsp.Position{Line: uint32(len(lines) - 1), Character: uint32(utf16ColumnFromRune(lines[len(lines)-1], len([]rune(lines[len(lines)-1]))))}}
+	symbol, _ := args["symbol"].(string)
+	hasPosition := args["line"] != nil || args["column"] != nil || strings.TrimSpace(symbol) != ""
+	var position lsp.Position
+	var lookup string
+	if hasPosition {
+		position, lookup, err = resolvePosition(path, args)
+		if err != nil {
+			return tool.Result{}, err
+		}
+	}
 	session, uri, err := openFile(ctx, manager, path)
 	if err != nil {
 		return tool.Result{}, err
@@ -258,16 +273,7 @@ func previewCodeActions(ctx context.Context, manager *lsp.Manager, args map[stri
 	if err := requireCapability(session.Capabilities(), "codeActions"); err != nil {
 		return tool.Result{}, err
 	}
-	lines, err := readLines(path)
-	if err != nil {
-		return tool.Result{}, err
-	}
-	selection := lsp.Range{End: lsp.Position{Line: uint32(len(lines) - 1), Character: uint32(utf16ColumnFromRune(lines[len(lines)-1], len([]rune(lines[len(lines)-1]))))}}
-	if args["line"] != nil || args["column"] != nil || args["symbol"] != nil {
-		position, lookup, err := resolvePosition(path, args)
-		if err != nil {
-			return tool.Result{}, err
-		}
+	if hasPosition {
 		if lookup != "" {
 			line, _, _ := optionalPositiveInt(args, "line")
 			position, err = symbolPosition(ctx, session, uri, lookup, line)

@@ -29,14 +29,29 @@ const (
 )
 
 func Tools(ctx context.Context, m *mcp.Manager) ([]tool.Tool, error) {
+	if m == nil {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var tools []tool.Tool
 
 	sessions := m.Sessions()
 
 	for _, serverName := range slices.Sorted(maps.Keys(sessions)) {
+		if err := ctx.Err(); err != nil {
+			return tools, err
+		}
 		session := sessions[serverName]
+		if session == nil {
+			continue
+		}
 		serverTools, err := ToolsForServer(ctx, serverName, session)
 		if err != nil {
+			if ctx.Err() != nil {
+				return tools, ctx.Err()
+			}
 			fmt.Fprintf(os.Stderr, "warning: failed to list tools from MCP server %s: %v\n", serverName, err)
 			continue
 		}
@@ -47,6 +62,9 @@ func Tools(ctx context.Context, m *mcp.Manager) ([]tool.Tool, error) {
 }
 
 func ToolsForServer(ctx context.Context, serverName string, session *sdkmcp.ClientSession) ([]tool.Tool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, listToolsTimeout)
 	defer cancel()
 
@@ -54,6 +72,9 @@ func ToolsForServer(ctx context.Context, serverName string, session *sdkmcp.Clie
 	for mcpTool, err := range session.Tools(ctx, nil) {
 		if err != nil {
 			return nil, err
+		}
+		if mcpTool == nil {
+			continue
 		}
 		listed = append(listed, mcpTool)
 	}
@@ -102,6 +123,9 @@ func schemaToParams(serverName string, mcpTool sdkmcp.Tool) map[string]any {
 		return empty
 	}
 	if schema, ok := mcpTool.InputSchema.(map[string]any); ok {
+		if schema == nil {
+			return empty
+		}
 		return schema
 	}
 
@@ -111,14 +135,19 @@ func schemaToParams(serverName string, mcpTool sdkmcp.Tool) map[string]any {
 		return empty
 	}
 	var params map[string]any
-	if err := json.Unmarshal(schemaBytes, &params); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: unmarshal schema for %s_%s: %v\n", serverName, mcpTool.Name, err)
+	if err := json.Unmarshal(schemaBytes, &params); err != nil || params == nil {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: unmarshal schema for %s_%s: %v\n", serverName, mcpTool.Name, err)
+		}
 		return empty
 	}
 	return params
 }
 
 func callTool(ctx context.Context, session *sdkmcp.ClientSession, name string, args map[string]any) (tool.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return tool.Result{}, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, callToolTimeout)
 	defer cancel()
 
@@ -129,6 +158,9 @@ func callTool(ctx context.Context, session *sdkmcp.ClientSession, name string, a
 
 	if err != nil {
 		return tool.Result{}, fmt.Errorf("MCP tool call failed: %w", err)
+	}
+	if result == nil {
+		return tool.Text(""), nil
 	}
 
 	content := extractText(result.Content)
@@ -149,8 +181,15 @@ func extractText(content []sdkmcp.Content) string {
 	var parts []string
 
 	for _, c := range content {
-		if text, ok := c.(*sdkmcp.TextContent); ok {
-			parts = append(parts, text.Text)
+		switch v := c.(type) {
+		case *sdkmcp.TextContent:
+			if v != nil {
+				parts = append(parts, v.Text)
+			}
+		case *sdkmcp.EmbeddedResource:
+			if v != nil && v.Resource != nil && v.Resource.Text != "" {
+				parts = append(parts, v.Resource.Text)
+			}
 		}
 	}
 

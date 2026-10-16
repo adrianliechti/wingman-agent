@@ -50,12 +50,19 @@ func (g *Gate) Allowed(ctx context.Context) bool {
 	if g.decided {
 		return g.allowed
 	}
-	g.decided = true
 	if g.Confirm == nil {
+		g.decided = true
 		g.allowed = true
 		return true
 	}
+	if ctx.Err() != nil {
+		return false
+	}
 	ok, err := g.Confirm(ctx, g.Message)
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	g.decided = true
 	g.allowed = ok && err == nil
 	return g.allowed
 }
@@ -109,6 +116,9 @@ type Handler struct {
 }
 
 func (c *Config) RuleCount() int {
+	if c == nil {
+		return 0
+	}
 	total := 0
 	for _, groups := range c.allEvents() {
 		for _, group := range *groups.groups {
@@ -181,15 +191,15 @@ func (c *Config) validate() error {
 				}
 				switch handler.Type {
 				case "command":
-					if handler.Command == "" {
+					if strings.TrimSpace(handler.Command) == "" {
 						return fmt.Errorf("%s handler %d:%d has no command", event.name, groupIndex, handlerIndex)
 					}
 				case "http":
-					if handler.URL == "" {
+					if strings.TrimSpace(handler.URL) == "" {
 						return fmt.Errorf("%s handler %d:%d has no url", event.name, groupIndex, handlerIndex)
 					}
 				case "mcp_tool":
-					if handler.Server == "" || handler.Tool == "" {
+					if strings.TrimSpace(handler.Server) == "" || strings.TrimSpace(handler.Tool) == "" {
 						return fmt.Errorf("%s handler %d:%d has an incomplete mcp_tool target", event.name, groupIndex, handlerIndex)
 					}
 				case "prompt", "agent":
@@ -268,6 +278,9 @@ type BuildOptions struct {
 // these values into headers unless the process environment explicitly exposes
 // them through allowedEnvVars.
 func (c *Config) BuildWithOptions(workDir string, options BuildOptions) hook.Hooks {
+	if c == nil {
+		return hook.Hooks{}
+	}
 	// Freeze matching rules for the built hooks, including configs constructed
 	// in Go. Parsed groups already retain their validated compiled matchers.
 	snapshot := *c
@@ -328,13 +341,17 @@ type runResult struct {
 	completionOrder        int
 	exitCode               int
 	stdout                 string
+	stdoutTruncated        bool
 	stderr                 string
 	err                    error
 	additionalContextLimit *int
 }
 
 func runEvent(ctx context.Context, workDir string, options BuildOptions, event string, groups []MatcherGroup, matcherInputs []string, payload map[string]any) []runResult {
-	var selected []selectedHandler
+	if ctx.Err() != nil {
+		return nil
+	}
+	var synchronous []selectedHandler
 	order := 0
 	for _, group := range groups {
 		matcherIgnored := event == "UserPromptSubmit" || event == "Stop"
@@ -347,26 +364,23 @@ func runEvent(ctx context.Context, workDir string, options BuildOptions, event s
 				order++
 				continue
 			}
-			selected = append(selected, selectedHandler{configuredOrder: order, handler: handler})
+			if handler.Async {
+				// The released Codex runtime parses this field but does not execute
+				// async hooks yet. Avoid partial semantics that discard completion
+				// output or outlive session teardown differently from Codex.
+				order++
+				continue
+			}
+			synchronous = append(synchronous, selectedHandler{configuredOrder: order, handler: handler})
 			order++
 		}
 	}
-	if len(selected) == 0 || !options.Gate.Allowed(ctx) {
+	if len(synchronous) == 0 || !options.Gate.Allowed(ctx) {
 		return nil
 	}
 	input, err := json.Marshal(payload)
 	if err != nil {
 		return nil
-	}
-	var synchronous []selectedHandler
-	for _, selected := range selected {
-		if selected.handler.Async {
-			// The released Codex runtime parses this field but does not execute
-			// async hooks yet. Avoid partial semantics that discard completion
-			// output or outlive session teardown differently from Codex.
-			continue
-		}
-		synchronous = append(synchronous, selected)
 	}
 	ch := make(chan runResult, len(synchronous))
 	for _, selected := range synchronous {
@@ -432,7 +446,8 @@ func (h Handler) run(ctx context.Context, workDir, event string, input []byte, e
 	}
 	return runResult{
 		exitCode: exitCode, stdout: limit(stdout.String()), stderr: limit(stderr.String()),
-		err: nonExitError(err), additionalContextLimit: h.AdditionalContextLimit,
+		stdoutTruncated: stdout.Len() > maxHookOutput,
+		err:             nonExitError(err), additionalContextLimit: h.AdditionalContextLimit,
 	}
 }
 
@@ -524,7 +539,7 @@ func (h Handler) post(ctx context.Context, input []byte) runResult {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return runResult{exitCode: -1, stdout: limit(string(body)), err: fmt.Errorf("hook endpoint returned %s", resp.Status)}
 	}
-	return runResult{exitCode: 0, stdout: limit(string(body))}
+	return runResult{exitCode: 0, stdout: limit(string(body)), stdoutTruncated: len(body) > maxHookOutput}
 }
 
 func nonExitError(err error) error {
@@ -539,8 +554,9 @@ func nonExitError(err error) error {
 }
 
 func limit(value string) string {
+	overLimit := len(value) > maxHookOutput
 	value = strings.TrimSpace(value)
-	if len(value) <= maxHookOutput {
+	if !overLimit && len(value) <= maxHookOutput {
 		return value
 	}
 	return text.HeadBytes(value, maxHookOutput) + "\n[hook output truncated]"
@@ -638,19 +654,34 @@ func parseResult(event string, result runResult) parsedResult {
 		}
 		return parsedResult{}
 	}
-	if result.exitCode != 0 || result.stdout == "" {
+	if result.exitCode != 0 || result.stdout == "" && !result.stdoutTruncated {
 		return parsedResult{}
+	}
+	plainContext := (event == "SessionStart" || event == "SubagentStart" || event == "UserPromptSubmit") &&
+		strings.TrimSpace(result.stdout) != "" && !strings.HasPrefix(strings.TrimSpace(result.stdout), "{") && !strings.HasPrefix(strings.TrimSpace(result.stdout), "[")
+	if result.stdoutTruncated && !plainContext {
+		// Never turn a decision into a no-op by parsing a truncated JSON prefix.
+		reason := fmt.Sprintf("%s hook response exceeded the %d KiB output limit; its decision could not be read", event, maxHookOutput/1024)
+		switch event {
+		case "PreToolUse", "UserPromptSubmit":
+			return parsedResult{Outcome: hook.Outcome{Block: true, Reason: reason}}
+		case "PermissionRequest":
+			return parsedResult{permission: hook.PermissionRequestOutcome{Behavior: hook.PermissionDeny, Message: reason}}
+		case "SubagentStart":
+			// This event only supplies context; it has no blocking semantics.
+			return parsedResult{Outcome: hook.Outcome{AdditionalContext: []string{reason}}}
+		default:
+			return parsedResult{Outcome: hook.Outcome{Stop: true, Reason: reason}}
+		}
 	}
 	var output wireOutput
 	decoder := json.NewDecoder(strings.NewReader(result.stdout))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&output); err != nil {
-		if event == "SessionStart" || event == "SubagentStart" || event == "UserPromptSubmit" {
-			if !strings.HasPrefix(strings.TrimSpace(result.stdout), "{") && !strings.HasPrefix(strings.TrimSpace(result.stdout), "[") {
-				return parsedResult{Outcome: hook.Outcome{AdditionalContext: []string{
-					boundAdditionalContext(result.stdout, result.additionalContextLimit),
-				}}}
-			}
+		if plainContext {
+			return parsedResult{Outcome: hook.Outcome{AdditionalContext: []string{
+				boundAdditionalContext(result.stdout, result.additionalContextLimit),
+			}}}
 		}
 		return parsedResult{}
 	}
@@ -801,8 +832,11 @@ func validWireOutput(event string, output wireOutput) bool {
 		}
 		return *output.Decision == "block" && output.Reason != nil && strings.TrimSpace(*output.Reason) != ""
 
-	case "SessionStart", "SubagentStart":
+	case "SessionStart":
 		return output.Decision == nil && output.Reason == nil && !hasPermissionFields && !hasPermissionRequestDecision
+
+	case "SubagentStart":
+		return !unsupportedControl && output.Decision == nil && output.Reason == nil && !hasPermissionFields && !hasPermissionRequestDecision
 
 	case "Stop", "SubagentStop":
 		if specific != nil {
@@ -812,7 +846,7 @@ func validWireOutput(event string, output wireOutput) bool {
 			return output.Decision == nil || *output.Decision == "block"
 		}
 		if output.Decision == nil {
-			return specific == nil && output.Decision == nil
+			return true
 		}
 		return *output.Decision == "block" && output.Reason != nil && strings.TrimSpace(*output.Reason) != ""
 
@@ -886,10 +920,13 @@ func addSubagent(payload map[string]any, runtime hook.Runtime) {
 func toolWire(call tool.ToolCall) (string, map[string]any, []string) {
 	input := map[string]any{}
 	_ = json.Unmarshal([]byte(call.Args), &input)
+	if input == nil {
+		input = map[string]any{}
+	}
 	name := call.Name
 	aliases := []string{call.Name}
 	switch call.Name {
-	case "shell":
+	case "shell", "exec":
 		name = "Bash"
 	case "exec_command":
 		name = "Bash"

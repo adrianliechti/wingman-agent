@@ -51,3 +51,18 @@ func TestToolsForServerCollectsAllPages(t *testing.T) {
 		t.Fatalf("tool names = %v, want %v", names, want)
 	}
 }
+
+func TestExtractTextIncludesEmbeddedResourceTextAndNilGuards(t *testing.T) {
+	if tools, err := Tools(t.Context(), nil); err != nil || len(tools) != 0 {
+		t.Fatalf("nil manager: tools=%v err=%v", tools, err)
+	}
+	got := extractText([]sdkmcp.Content{
+		(*sdkmcp.TextContent)(nil),
+		&sdkmcp.TextContent{Text: "line 1"},
+		&sdkmcp.EmbeddedResource{Resource: &sdkmcp.ResourceContents{Text: "resource text"}},
+	})
+	if got != "line 1\nresource text" {
+		t.Fatalf("extractText = %q", got)
+	}
+}
+

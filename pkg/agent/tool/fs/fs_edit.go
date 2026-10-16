@@ -29,12 +29,22 @@ func newEditOp(entry map[string]any) (editOp, error) {
 	if !ok {
 		return editOp{}, fmt.Errorf("new_string is required")
 	}
+	if !utf8.ValidString(oldText) || !utf8.ValidString(newText) || strings.ContainsRune(oldText, 0) || strings.ContainsRune(newText, 0) {
+		return editOp{}, fmt.Errorf("old_string and new_string must be UTF-8 text without NUL bytes")
+	}
 
 	if oldText == newText && oldText != "" {
 		return editOp{}, fmt.Errorf("old_string and new_string are identical")
 	}
 
-	replaceAll, _ := entry["replace_all"].(bool)
+	replaceAll := false
+	if value, exists := entry["replace_all"]; exists {
+		var ok bool
+		replaceAll, ok = value.(bool)
+		if !ok {
+			return editOp{}, fmt.Errorf("replace_all must be a boolean")
+		}
+	}
 
 	return editOp{
 		oldText:    normalizeToLF(oldText),
@@ -44,8 +54,11 @@ func newEditOp(entry map[string]any) (editOp, error) {
 }
 
 func applyEditOp(content string, op editOp, pathArg string) (string, error) {
+	if err := checkEditSize(pathArg, int64(len(op.newText))); err != nil {
+		return "", err
+	}
 	if op.oldText == "" {
-		if strings.TrimSpace(content) != "" {
+		if content != "" {
 			return "", fmt.Errorf("cannot create or replace empty file %s: file already has content", pathArg)
 		}
 		return op.newText, nil
@@ -71,6 +84,11 @@ func applyEditOp(content string, op editOp, pathArg string) (string, error) {
 		return newContent, err
 	}
 
+	newContent, found, err = applyBlankLineTolerantEdit(content, op, pathArg)
+	if found || err != nil {
+		return newContent, err
+	}
+
 	return "", missingOldStringError(content, op.oldText, pathArg)
 }
 
@@ -78,7 +96,6 @@ func applyEditOp(content string, op editOp, pathArg string) (string, error) {
 // matching. found is false (with a nil error) when old_string does not occur.
 func applyMatchedEdit(content string, op editOp, pathArg string) (result string, found bool, err error) {
 	actualOldText := findActualEditString(content, op.oldText)
-	actualNewText := preserveEditQuoteStyle(op.oldText, actualOldText, op.newText)
 	quoteNormalized := actualOldText != op.oldText
 
 	matchResult := fuzzyFindText(content, actualOldText)
@@ -86,12 +103,14 @@ func applyMatchedEdit(content string, op editOp, pathArg string) (result string,
 	if !matchResult.found {
 		return "", false, nil
 	}
+	matched := content[matchResult.index : matchResult.index+matchResult.matchLength]
+	actualNewText := preserveEditQuoteStyle(op.oldText, matched, op.newText)
 
-	occurrences := strings.Count(content, actualOldText)
+	occurrences := countEditMatches(content, actualOldText, op.replaceAll)
 	if matchResult.usedFuzzyMatch {
-		occurrences = strings.Count(normalizeForFuzzyMatch(content), normalizeForFuzzyMatch(actualOldText))
+		occurrences = countEditMatches(normalizeForFuzzyMatch(content), normalizeForFuzzyMatch(actualOldText), op.replaceAll)
 	} else if quoteNormalized {
-		occurrences = strings.Count(normalizeEditQuotes(content), normalizeEditQuotes(op.oldText))
+		occurrences = countEditMatches(normalizeEditQuotes(content), normalizeEditQuotes(op.oldText), op.replaceAll)
 	}
 
 	if occurrences > 1 && !op.replaceAll {
@@ -102,14 +121,23 @@ func applyMatchedEdit(content string, op editOp, pathArg string) (result string,
 
 	if op.replaceAll {
 		if matchResult.usedFuzzyMatch || quoteNormalized {
-			newContent = replaceAllMatches(content, op)
+			newContent, err = replaceAllMatches(content, op, pathArg)
+			if err != nil {
+				return "", true, err
+			}
 			if newContent == content {
 				return "", true, fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
 			}
 		} else {
+			if err := checkEditSize(pathArg, int64(len(content))+int64(occurrences)*int64(len(actualNewText)-len(actualOldText))); err != nil {
+				return "", true, err
+			}
 			newContent = strings.ReplaceAll(content, actualOldText, actualNewText)
 		}
 	} else {
+		if err := checkEditSize(pathArg, int64(len(content)-matchResult.matchLength)+int64(len(actualNewText))); err != nil {
+			return "", true, err
+		}
 		newContent = content[:matchResult.index] + actualNewText + content[matchResult.index+matchResult.matchLength:]
 	}
 
@@ -123,22 +151,60 @@ func applyMatchedEdit(content string, op editOp, pathArg string) (result string,
 // replaceAllMatches replaces every quote-normalized or whitespace-fuzzy match in
 // a single left-to-right pass. Replaced text is never rescanned, so a replacement
 // that contains old_string cannot loop or be rejected.
-func replaceAllMatches(content string, op editOp) string {
+func replaceAllMatches(content string, op editOp, pathArg string) (string, error) {
+	normalized, offsets := normalizeForFuzzyMatchWithMap(content)
+	old := normalizeForFuzzyMatch(op.oldText)
 	var b strings.Builder
-	pos := 0
-	for pos < len(content) {
-		rest := content[pos:]
-		mr := fuzzyFindText(rest, op.oldText)
-		if !mr.found || mr.matchLength == 0 {
+	pos, normalizedPos := 0, 0
+	for old != "" && normalizedPos < len(normalized) {
+		index := strings.Index(normalized[normalizedPos:], old)
+		if index < 0 {
 			break
 		}
-		matched := rest[mr.index : mr.index+mr.matchLength]
-		b.WriteString(rest[:mr.index])
-		b.WriteString(preserveEditQuoteStyle(op.oldText, matched, op.newText))
-		pos += mr.index + mr.matchLength
+		index += normalizedPos
+		mr := originalFuzzyMatch(content, normalized, offsets, index, len(old))
+		end := mr.index + mr.matchLength
+		// The previous match may already have consumed trailing whitespace
+		// before this newline. The shared offset map still includes those bytes.
+		start := max(pos, mr.index)
+		replacement := preserveEditQuoteStyle(op.oldText, content[start:end], op.newText)
+		if err := checkEditSize(pathArg, int64(b.Len()+start-pos)+int64(len(replacement))); err != nil {
+			return "", err
+		}
+		b.WriteString(content[pos:start])
+		b.WriteString(replacement)
+		pos, normalizedPos = end, index+len(old)
+	}
+	if err := checkEditSize(pathArg, int64(b.Len()+len(content)-pos)); err != nil {
+		return "", err
 	}
 	b.WriteString(content[pos:])
-	return b.String()
+	return b.String(), nil
+}
+
+func checkEditSize(path string, size int64) error {
+	if size > MaxEditFileBytes {
+		return fmt.Errorf("file %s would exceed %d bytes; edits are capped at %d bytes", path, MaxEditFileBytes, MaxEditFileBytes)
+	}
+	return nil
+}
+
+// A unique match must also exclude overlapping occurrences. replace_all uses
+// the usual left-to-right, non-overlapping replacement semantics.
+func countEditMatches(content, old string, replaceAll bool) int {
+	if replaceAll {
+		return strings.Count(content, old)
+	}
+	count := 0
+	for old != "" {
+		index := strings.Index(content, old)
+		if index < 0 {
+			break
+		}
+		count++
+		content = content[index+1:]
+	}
+	return count
 }
 
 func findActualEditString(content, oldText string) string {

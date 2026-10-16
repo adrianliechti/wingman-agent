@@ -80,7 +80,7 @@ func TestFileRegistrySynchronousCompletion(t *testing.T) {
 					}
 					return "finished report", nil
 				})
-				if out != "finished report" || calls != 1 || (err != nil) != failSave {
+				if !strings.HasSuffix(out, "finished report") || out != tk.Result() || calls != 1 || (err != nil) != failSave {
 					t.Fatalf("output=%q calls=%d error=%v", out, calls, err)
 				}
 				if failSave {

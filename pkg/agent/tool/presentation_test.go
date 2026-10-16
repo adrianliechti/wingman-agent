@@ -1,6 +1,25 @@
 package tool
 
-import "testing"
+import (
+	"encoding/json"
+	"path/filepath"
+	"testing"
+)
+
+func TestPresentGlobUsesAbsolutePatternDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "src")
+	pattern := filepath.Join(dir, "**", "*.go")
+	args, err := json.Marshal(map[string]any{"path": "ignored", "pattern": pattern})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"glob", "Find files"} {
+		got := Present(name, "", string(args), false)
+		if got.Path != dir || got.Hint != pattern || got.Args != "" {
+			t.Fatalf("%s presentation = %#v", name, got)
+		}
+	}
+}
 
 func TestPresentCompactsBuiltInTools(t *testing.T) {
 	tests := []struct {
@@ -13,7 +32,7 @@ func TestPresentCompactsBuiltInTools(t *testing.T) {
 			want: Presentation{Title: "Read file", Kind: "read", Args: `{"limit":4}`, Path: "pkg/main.go", Line: 12},
 		},
 		{
-			name: "exec_command", args: `{"command":"go test ./...","workdir":"pkg"}`,
+			name: "exec", args: `{"command":"go test ./...","workdir":"pkg"}`,
 			want: Presentation{Title: "Run command", Kind: "execute", Args: `{"workdir":"pkg"}`, Hint: "go test ./..."},
 		},
 		{
@@ -33,7 +52,7 @@ func TestPresentCompactsBuiltInTools(t *testing.T) {
 			want: Presentation{Title: "Continue command", Kind: "execute", Args: `{"wait":10}`, Hint: "session 42: yes"},
 		},
 		{
-			name: "task_send", args: `{"id":"agent-1","message":"Check aliases"}`,
+			name: "agent_send", args: `{"id":"agent-1","message":"Check aliases"}`,
 			want: Presentation{Title: "Follow up with agent", Hint: "agent-1: Check aliases"},
 		},
 		{
@@ -55,6 +74,10 @@ func TestPresentDerivesHintsForHumanizedNames(t *testing.T) {
 	if input.Hint != "Which layout?" || input.Args == "" {
 		t.Fatalf("input presentation = %#v", input)
 	}
+	args := `{"session_id":42,"input":"yes\n","wait":10}`
+	if got, want := Present("Continue command", "", args, false), Present("exec_session", "", args, false); got != want {
+		t.Fatalf("humanized exec_session lost input: %#v, want %#v", got, want)
+	}
 }
 
 func TestPresentSummarizesMultipleWebQueries(t *testing.T) {
@@ -68,5 +91,28 @@ func TestPresentKeepsPartialInputUsable(t *testing.T) {
 	got := Present("shell", "", `{"command":"go test ./`, false)
 	if got.Title != "Run command" || got.Kind != "execute" || got.Hint != "go test ./" || got.Args == "" {
 		t.Fatalf("presentation = %#v", got)
+	}
+}
+
+func TestPresentRenamedToolsAndLegacyAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name, legacy, args, title, hint string
+	}{
+		{"exec", "exec_command", `{"command":"go test ./..."}`, "Run command", "go test ./..."},
+		{"search_web", "web_search", `{"query":"Go documentation"}`, "Web search", "Go documentation"},
+		{"elicit", "ask", `{"questions":[{"question":"Which layout?"}]}`, "Request input", "Which layout?"},
+		{"agent_output", "task_output", `{"id":"agent-1"}`, "Read agent output", "agent-1"},
+		{"agent_send", "task_send", `{"id":"agent-1","message":"Check aliases"}`, "Follow up with agent", "agent-1: Check aliases"},
+		{"agent_stop", "task_stop", `{"id":"agent-1"}`, "Stop agent", "agent-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Present(tc.name, "", tc.args, false)
+			if got.Title != tc.title || got.Hint != tc.hint {
+				t.Fatalf("presentation = %#v", got)
+			}
+			if legacy := Present(tc.legacy, "", tc.args, false); legacy != got {
+				t.Fatalf("legacy presentation = %#v, want %#v", legacy, got)
+			}
+		})
 	}
 }

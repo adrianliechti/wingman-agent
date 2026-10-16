@@ -128,6 +128,7 @@ type request struct {
 	tools             []tool.Tool
 	outputSchema      map[string]any
 	requireFinish     bool
+	allowFinish       bool
 	disableTools      bool
 	onOutputItem      func([]Message) error
 	preserveReasoning bool
@@ -383,7 +384,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 		case responses.ResponseOutputItemAddedEvent:
 			switch item := e.Item.AsAny().(type) {
 			case responses.ResponseFunctionToolCall:
-				if item.CallID == "" || r.requireFinish && item.Name == finishToolName {
+				if item.CallID == "" || r.handlesFinishTool(item.Name) {
 					break
 				}
 				pending := &pendingToolCall{
@@ -566,17 +567,13 @@ func outputItemsToInput(output []responses.ResponseOutputItemUnion) []responses.
 
 func (r *request) outputMessages(items []responses.ResponseInputItemUnionParam) []Message {
 	messages := toMessages(items)
-	if r.requireFinish {
-		for i := range messages {
-			if calls := extractToolCalls(messages[i : i+1]); len(calls) == 1 && calls[0].Name == finishToolName {
-				messages[i].Hidden = true
-			}
-		}
-	}
 	prefix := reasoningPrefix(r)
 
-	for _, m := range messages {
-		for _, c := range m.Content {
+	for i := range messages {
+		if calls := extractToolCalls(messages[i : i+1]); len(calls) == 1 && r.handlesFinishTool(calls[0].Name) {
+			messages[i].Hidden = true
+		}
+		for _, c := range messages[i].Content {
 			if c.Reasoning != nil {
 				c.Reasoning.Model = r.model
 				c.Reasoning.Prefix = prefix

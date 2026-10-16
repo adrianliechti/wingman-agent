@@ -312,3 +312,27 @@ func TestFireScheduleSeqIsUnique(t *testing.T) {
 		t.Fatalf("both fires used seq %d; UIs would drop the second as a duplicate", first.Seq)
 	}
 }
+
+func TestFireScheduleSkipsTaskPausedDuringGate(t *testing.T) {
+	s := newScheduleSession(t)
+	defer s.tasks.Close()
+
+	job := schedule.Task{
+		ID:        "paused-mid-gate",
+		Prompt:    "poll",
+		Schedule:  "every 1h",
+		Status:    schedule.StatusPaused,
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+	}
+	seedTask(t, s, job)
+
+	// Simulate fireSchedule starting when the snapshot was active, then seeing
+	// StatusPaused when committing the fire mutation.
+	job.Status = schedule.StatusActive
+	s.fireSchedule(context.Background(), job)
+
+	if ev, ok := waitEvent(t, s); ok {
+		t.Fatalf("paused task should not fire: %+v", ev)
+	}
+}
+

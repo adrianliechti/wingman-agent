@@ -18,12 +18,14 @@ const continuationReminder = `Your turn is still active. Continue the unfinished
 // completionState tracks recovery within one user turn. New accepted input,
 // actual tool work, and Stop-hook continuations reset its recovery budget.
 type completionState struct {
-	answer   string
-	attempts int
-	cutoff   bool
+	answer         string
+	attempts       int
+	cutoff         bool
+	awaitingFinish bool
 }
 
-func (s *completionState) advance(resp *response, requireFinish, finished, hasWork bool) (bool, *Message, error) {
+func (s *completionState) advance(resp *response, requireFinish, finished, finishRejected, hasWork bool) (bool, *Message, error) {
+	s.awaitingFinish = false
 	if hasWork {
 		*s = completionState{}
 		return true, nil, nil
@@ -31,6 +33,7 @@ func (s *completionState) advance(resp *response, requireFinish, finished, hasWo
 
 	// Empty cutoffs preserve an earlier completed answer. Replacement text,
 	// even partial text, requires a fresh completed answer before finishing.
+	// Rejecting a marker does not invalidate completed user-facing text.
 	text := lastAssistantText(resp.messages)
 	if strings.TrimSpace(text) != "" {
 		s.answer = ""
@@ -48,7 +51,8 @@ func (s *completionState) advance(resp *response, requireFinish, finished, hasWo
 	}
 	recovering := s.cutoff || s.attempts > 0
 	s.cutoff = false
-	if resp.endTurn != nil {
+	// Rejected markers use bounded recovery even with a native turn boundary.
+	if resp.endTurn != nil && !finishRejected {
 		// A provider-requested continuation is normal sampling, not recovery:
 		// preserve history without inserting a reminder or using its budget.
 		s.attempts = 0
@@ -62,7 +66,7 @@ func (s *completionState) advance(resp *response, requireFinish, finished, hasWo
 	case finished || hasRefusal(resp.messages):
 	case requireFinish:
 		reason = ErrMissingFinish
-	case endsWithNonterminalText(resp.messages) || recovering && strings.TrimSpace(text) == "":
+	case finishRejected || endsWithNonterminalText(resp.messages) || recovering && strings.TrimSpace(text) == "":
 		reason = errMissingFinalAnswer
 	}
 	if reason == nil {
@@ -84,6 +88,7 @@ func (s *completionState) advance(resp *response, requireFinish, finished, hasWo
 		if s.answer == "" {
 			reminder = missingAnswerReminder
 		}
+		s.awaitingFinish = !finishRejected && s.answer != ""
 	}
 	notice := hiddenContextMessage(reminder)
 	return true, &notice, nil

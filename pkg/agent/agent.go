@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"iter"
 	"maps"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -186,15 +185,16 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 		var outcomeErr error
 		consumerOpen := true
 		defer func() {
-			if r := recover(); r != nil {
+			r := recover()
+			if r != nil {
 				status = RuntimeFailed
 				outcomeErr = fmt.Errorf("agent turn panicked: %v", r)
-				finishErr := a.finishTurn(ctx, runtime.TurnID, status, outcomeErr, turnUsageBefore)
-				telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(outcomeErr, finishErr)})
-				panic(r)
 			}
 			finishErr := a.finishTurn(ctx, runtime.TurnID, status, outcomeErr, turnUsageBefore)
 			telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(outcomeErr, finishErr)})
+			if r != nil {
+				panic(r)
+			}
 			if finishErr != nil && consumerOpen {
 				yield(Message{}, finishErr)
 			}
@@ -255,67 +255,28 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				return
 			}
 
-			// Keep request settings with its hooks and tools, even if the user
-			// changes settings while the response is streaming.
-			stepRuntime := a.hookRuntime(ctx)
-			stepCtx := hook.WithRuntime(ctx, stepRuntime)
-
-			instructions := ""
-			if a.Instructions != nil {
-				instructions = a.Instructions()
-			}
-
-			// Re-read per round like model and instructions: the session mode can
-			// change mid-turn, and it decides which tools are offered.
-			var tools []tool.Tool
-			if a.Tools != nil {
-				// A catalog may reuse its backing slice when settings change.
-				// Keep the executors offered by this request until it completes.
-				tools = slices.Clone(a.Tools())
-			}
-			var outputSchema map[string]any
-			if schema, ok := OutputSchemaFromContext(ctx); ok {
-				outputSchema = schema
-			}
-			if outputSchema != nil {
-				// Structured output is a finalization pass. Keeping tools enabled
-				// lets some providers apply a tool's argument schema to ordinary
-				// text deltas instead of producing the requested final document.
-				tools = nil
-			}
-			requireFinish := outputSchema == nil && a.RequireFinish != nil && a.RequireFinish(stepRuntime.Model)
-			if requireFinish {
-				for _, t := range tools {
-					if t.Name == finishToolName {
-						stop(fmt.Errorf("agent: tool name %q is reserved by RequireFinish", finishToolName))
-						return
-					}
-				}
-				tools = append(slices.Clone(tools), finishTool())
-				if instructions != "" {
-					instructions += "\n\n"
-				}
-				instructions += finishInstructions
-			}
-
-			req := &request{
-				model:             stepRuntime.Model,
-				effort:            stepRuntime.ReasoningEffort,
-				instructions:      instructions,
-				cacheKey:          a.CacheKey,
-				messages:          a.requestMessages(),
-				tools:             tools,
-				outputSchema:      outputSchema,
-				requireFinish:     requireFinish,
-				preserveReasoning: nativeContinuation,
-			}
-			if err := a.prepareRequest(stepCtx, req); err != nil {
+			stepCtx, req, err := a.buildStepRequest(ctx, nativeContinuation)
+			if err != nil {
 				stop(err)
 				return
 			}
 
-			resp, err := a.completeWithRetry(stepCtx, runtime.TurnID, req, yield)
+			// If a previous round already completed a final answer and only
+			// continued to confirm finish_turn, switching mid-turn to a model
+			// that does not use finish_turn completes the turn without asking
+			// the new model to regenerate the answer.
+			if !req.requireFinish && completion.awaitingFinish {
+				done, err := a.finishStep(ctx, stepCtx, completion.answer, false, false, nil, &completion, &stopHookActive)
+				if done {
+					if err != nil {
+						stop(err)
+					}
+					return
+				}
+				continue
+			}
 
+			resp, err := a.completeWithRetry(stepCtx, runtime.TurnID, req, yield)
 			if err != nil {
 				stop(err)
 				return
@@ -335,21 +296,17 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			var completionErr error
 			filtered := resp.incomplete && resp.incompleteReason == "content_filter"
 			if !filtered {
-				calls := extractToolCalls(resp.messages)
-				finished := false
-				if requireFinish {
-					calls, finished, err = a.resolveFinishCalls(resp, calls, completion.answer, yield)
-					if err != nil {
-						stop(err)
-						return
-					}
+				calls, finished, finishRejected, err := a.resolveFinishCalls(req, resp, extractToolCalls(resp.messages), completion.answer, yield)
+				if err != nil {
+					stop(err)
+					return
 				}
-				if err := a.processToolCalls(stepCtx, calls[resp.dispatched:], tools, yield); err != nil {
+				if err := a.processToolCalls(stepCtx, calls[resp.dispatched:], req.tools, yield); err != nil {
 					stop(err)
 					return
 				}
 				var notice *Message
-				needsFollowUp, notice, completionErr = completion.advance(resp, requireFinish, finished, len(calls) > 0)
+				needsFollowUp, notice, completionErr = completion.advance(resp, req.requireFinish, finished, finishRejected, len(calls) > 0)
 				if notice != nil {
 					if err := a.appendMessages(*notice); err != nil {
 						stop(err)
@@ -358,55 +315,14 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				}
 			}
 
-			a.queueMu.Lock()
-			hasPendingInput := len(a.pendingInput) > 0
-			a.queueMu.Unlock()
-			if completionErr == nil && !needsFollowUp && !hasPendingInput && !resp.incomplete {
-				last := lastAssistantText(resp.messages)
-				if requireFinish && last == "" {
-					last = completion.answer
-				}
-				outcome := a.runStopHooks(stepCtx, last, stopHookActive)
-				if outcome.Stop {
-					reason := outcome.Reason
-					if reason == "" {
-						reason = "turn stopped by hook"
-					}
-					stop(hookStopError(reason))
-					return
-				}
-				if outcome.Block {
-					stopHookActive = true
-					needsFollowUp = true
-					completion = completionState{}
-					reason := outcome.Reason
-					if reason == "" {
-						reason = "A Stop hook requested another pass."
-					}
-					if err := a.appendMessages(hiddenContextMessage(reason)); err != nil {
-						stop(err)
-						return
-					}
-				}
+			last := lastAssistantText(resp.messages)
+			if req.requireFinish && last == "" {
+				last = completion.answer
 			}
-			if err := ctx.Err(); err != nil {
-				stop(err)
-				return
-			}
-
-			// Stop hooks run without queueMu. Recheck for newly accepted input
-			// and close admission under the same lock before ending the turn.
-			a.queueMu.Lock()
-			// Already accepted steering gets its own chance to finish, including
-			// input received during the last automatic continuation.
-			finished := !needsFollowUp && len(a.pendingInput) == 0
-			if finished {
-				a.finishing = true
-			}
-			a.queueMu.Unlock()
-			if finished {
-				if completionErr != nil {
-					stop(completionErr)
+			done, err := a.finishStep(ctx, stepCtx, last, needsFollowUp, resp.incomplete, completionErr, &completion, &stopHookActive)
+			if done {
+				if err != nil {
+					stop(err)
 				}
 				return
 			}
@@ -416,28 +332,6 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			}
 		}
 	}, nil
-}
-
-func (a *Agent) runPreCompact(ctx context.Context, trigger string) hook.Outcome {
-	var combined hook.Outcome
-	for _, h := range a.Hooks.PreCompact {
-		outcome, err := h(ctx, trigger)
-		if err == nil && outcome.Stop && !combined.Stop {
-			combined = outcome
-		}
-	}
-	return combined
-}
-
-func (a *Agent) runPostCompact(ctx context.Context, trigger string) hook.Outcome {
-	var combined hook.Outcome
-	for _, h := range a.Hooks.PostCompact {
-		outcome, err := h(ctx, trigger)
-		if err == nil && outcome.Stop && !combined.Stop {
-			combined = outcome
-		}
-	}
-	return combined
 }
 
 func (a *Agent) runSessionStartHooks(ctx context.Context, source string) (hook.Outcome, error) {
@@ -574,8 +468,16 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 		return nil, err
 	}
 
-	toolCtx, cancelTools := context.WithCancel(ctx)
+	toolCtx, cancelTools := withToolStop(ctx)
 	defer cancelTools()
+	inferenceCtx, cancelInference := context.WithCancel(inferenceCtx)
+	defer cancelInference()
+	stopInference := context.AfterFunc(toolCtx, func() {
+		if _, stopped := errors.AsType[hookStopError](context.Cause(toolCtx)); stopped {
+			cancelInference()
+		}
+	})
+	defer stopInference()
 	round := streamToolRound{agent: a, ctx: toolCtx, tools: req.tools}
 	var committed []Message
 	consumerOpen := true
@@ -594,13 +496,18 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 			_ = round.drain(func(Message, error) bool { return false })
 			panic(p)
 		}
-		if runErr != nil && req.requireFinish {
+		drainErr := round.drain(emit)
+		if _, stopped := errors.AsType[hookStopError](drainErr); stopped && runErr == context.Canceled {
+			// This stream was canceled by the hook, not by the provider.
+			runErr = nil
+		}
+		runErr = errors.Join(runErr, drainErr)
+		if runErr != nil {
 			// A finish marker is only valid after the response completes. Give
 			// retained markers a rejected result before retrying a failed stream.
-			_, _, finishErr := a.resolveFinishCalls(&response{messages: committed, incomplete: true}, extractToolCalls(committed), "", emit)
+			_, _, _, finishErr := a.resolveFinishCalls(req, &response{messages: committed, incomplete: true}, extractToolCalls(committed), "", emit)
 			runErr = errors.Join(runErr, finishErr)
 		}
-		runErr = errors.Join(runErr, round.drain(emit))
 		if resp != nil {
 			resp.dispatched = len(round.calls)
 		}
@@ -613,7 +520,7 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 		committed = append(committed, messages...)
 		EmitStreamEvent(ctx, StreamEventCommit)
 		for _, call := range extractToolCalls(messages) {
-			if req.requireFinish && call.Name == finishToolName {
+			if req.handlesFinishTool(call.Name) {
 				continue
 			}
 			open := emit(toolCallMessage(call), nil)
@@ -625,6 +532,15 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 		return nil
 	}
 	resp, runErr = a.complete(inferenceCtx, &streamReq, emit)
+	if _, stopped := errors.AsType[hookStopError](context.Cause(toolCtx)); stopped && inferenceCtx.Err() != nil {
+		// Cancellation can close the transport as EOF before its context error
+		// is delivered. Normalize only the inference error, retaining any later
+		// local persistence failures when the round is drained.
+		_, streamFailed := errors.AsType[*streamFailure](runErr)
+		if streamFailed || errors.Is(runErr, context.Canceled) {
+			runErr = context.Canceled
+		}
+	}
 	if runErr == nil && resp != nil && (len(resp.messages) < len(committed) || !messagesEqual(committed, resp.messages[:len(committed)])) {
 		runErr = fmt.Errorf("final response does not match its committed output items")
 	}
@@ -665,6 +581,7 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 		return nil, err
 	}
 	if runErr == nil && resp != nil {
+		committed = resp.messages
 		a.anchorContextUsage(req, resp)
 	}
 	return resp, runErr
@@ -725,11 +642,13 @@ func extractToolCalls(messages []Message) []ToolCall {
 }
 
 func (a *Agent) processToolCalls(ctx context.Context, calls []ToolCall, tools []tool.Tool, yield func(Message, error) bool) error {
+	ctx, cancel := withToolStop(ctx)
+	defer cancel()
 	a.beginToolRound()
 
 	for start := 0; start < len(calls); {
 		if err := ctx.Err(); err != nil {
-			return err
+			return context.Cause(ctx)
 		}
 		end := start + 1
 
@@ -754,13 +673,13 @@ func (a *Agent) processToolCalls(ctx context.Context, calls []ToolCall, tools []
 		start = end
 	}
 
-	return ctx.Err()
+	return context.Cause(ctx)
 }
 
 func (a *Agent) processToolCallsSequential(ctx context.Context, calls []ToolCall, tools []tool.Tool, yield func(Message, error) bool) error {
 	for _, tc := range calls {
 		if err := ctx.Err(); err != nil {
-			return err
+			return context.Cause(ctx)
 		}
 		if !yield(toolCallMessage(tc), nil) {
 			return errYieldStopped
@@ -779,7 +698,7 @@ func (a *Agent) processToolCallsSequential(ctx context.Context, calls []ToolCall
 		}
 	}
 
-	return nil
+	return context.Cause(ctx)
 }
 
 func (a *Agent) processToolCallsParallel(ctx context.Context, calls []ToolCall, tools []tool.Tool, yield func(Message, error) bool) error {
@@ -861,7 +780,7 @@ func (a *Agent) processToolCallsParallel(ctx context.Context, calls []ToolCall, 
 		}
 	}
 
-	return nil
+	return context.Cause(ctx)
 }
 
 type toolCallOutcome struct {
@@ -1233,6 +1152,9 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 				reason = "tool call blocked by hook"
 			}
 			result = tool.Error("error: " + reason)
+			if outcome.Stop {
+				stopToolTurn(ctx, reason)
+			}
 			execute = false
 			break
 		}
@@ -1263,12 +1185,24 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 			// continue into the next model request.
 			result.Content = reason
 			result.IsError = true
+			if outcome.Stop {
+				stopToolTurn(ctx, reason)
+				break
+			}
 		}
 	}
 	if len(hookContext) > 0 && !tool.IsImageResult(result.Content) {
 		result.Content += "\n\n<hook-context>\n" + strings.Join(hookContext, "\n\n") + "\n</hook-context>"
 	}
 	if !tool.IsImageResult(result.Content) {
+		for _, transform := range a.Hooks.TransformToolResult {
+			content, err := transform(ctx, hc, result.Content)
+			if err != nil {
+				result.Content, result.IsError = fmt.Sprintf("error: %v", err), true
+				break
+			}
+			result.Content = content
+		}
 		result.Content = boundToolResult(result.Content)
 	}
 	usageMu.Lock()

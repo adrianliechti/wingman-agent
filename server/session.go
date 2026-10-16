@@ -313,6 +313,14 @@ func (c *sessionController) apply(f Frame) {
 			c.publishLocked(SessionChange{Type: "entry.append", ID: c.entries[i].ID, Text: f.Text})
 		}
 		return
+	case EvtImage:
+		if f.Content == "" {
+			return
+		}
+		c.textID = ""
+		c.reasoningID = ""
+		c.upsertLocked(TranscriptEntry{ID: uuid.NewString(), Type: "assistant", Images: []string{f.Content}})
+		return
 	case EvtToolCall, EvtToolResult:
 		c.textID = ""
 		c.reasoningID = ""
@@ -367,6 +375,9 @@ func visibleInput(input code.TurnInput) code.TurnInputDisplay {
 			texts = append(texts, part.Text)
 		}
 		if part.File != nil && part.File.Data != "" {
+			if part.File.Name != "" && slices.Contains(out.Files, part.File.Name) {
+				continue
+			}
 			out.Images = append(out.Images, part.File.Data)
 		}
 	}
@@ -405,6 +416,9 @@ func transcriptEntries(messages []agent.Message) []TranscriptEntry {
 					textID = "assistant:" + part.TextID
 				}
 				entries = append(entries, TranscriptEntry{ID: textID, Type: "assistant", Content: part.Text, MessageID: part.TextID})
+			}
+			if part.Image != nil && part.Image.Data != "" {
+				entries = append(entries, TranscriptEntry{ID: id + ":image", Type: "assistant", Images: []string{part.Image.Data}})
 			}
 			if part.Reasoning != nil {
 				reasonID := id + ":reasoning"

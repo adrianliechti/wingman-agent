@@ -178,25 +178,42 @@ func (g *Graph) trace(ctx context.Context, fromID string, targets map[string]boo
 }
 
 func readTraceSource(path string, expected fileMeta) ([]byte, bool, error) {
+	return readSnapshotSource(path, expected, maxFileBytes)
+}
+
+// readSnapshotSource bounds the read and reports whether the disk source still
+// matches the index. Changed content may be searched, but cannot use old ranges.
+func readSnapshotSource(path string, expected fileMeta, maxBytes int64) ([]byte, bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, true, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, true, fmt.Errorf("not a regular source file")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, true, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
+	info, err = file.Stat()
 	if err != nil {
 		return nil, true, err
 	}
-	if info.Size() != expected.Size || info.ModTime().UnixNano() != expected.MTime {
-		return nil, true, nil
+	if !info.Mode().IsRegular() || info.Size() > maxBytes {
+		return nil, true, fmt.Errorf("source is not a regular file of at most %d bytes", maxBytes)
 	}
-	data, err := io.ReadAll(io.LimitReader(file, maxFileBytes+1))
+	changed := info.Size() != expected.Size || info.ModTime().UnixNano() != expected.MTime
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if int64(len(data)) > maxBytes {
+		return nil, true, fmt.Errorf("source exceeds %d bytes", maxBytes)
+	}
 	after, statErr := file.Stat()
 	if statErr != nil {
 		return nil, true, statErr
 	}
 	if after.Size() != info.Size() || after.ModTime() != info.ModTime() {
-		return nil, true, nil
+		return nil, true, fmt.Errorf("source changed while reading; retry")
 	}
-	return data, false, err
+	return data, changed, err
 }

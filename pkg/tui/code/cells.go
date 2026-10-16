@@ -219,15 +219,15 @@ func lastNonEmptyLine(s string) string {
 }
 
 func isShellTool(name string) bool {
-	return name == "shell" || name == "exec_command" || name == "exec_session"
+	return name == "exec" || name == "shell" || name == "exec_command" || name == "exec_session"
 }
 
 // toolLabel maps internal tool names to friendlier display titles.
 func toolLabel(name string) string {
 	switch name {
-	case "task_send":
+	case "agent_send", "task_send":
 		return "agent follow-up"
-	case "task_stop":
+	case "agent_stop", "task_stop":
 		return "agent stop"
 	}
 	return name
@@ -236,7 +236,7 @@ func toolLabel(name string) string {
 // isTaskCommand reports task tools whose success result is model-directed
 // boilerplate the chat should not echo.
 func isTaskCommand(name string) bool {
-	return name == "task_send" || name == "task_stop"
+	return name == "agent_send" || name == "agent_stop" || name == "task_send" || name == "task_stop"
 }
 
 func isMutationTool(name string) bool {
@@ -370,7 +370,7 @@ func cellUserShell(command, output string, exitCode int, width int, full bool) [
 		info = fmt.Sprintf("exit code %d", exitCode)
 	}
 
-	lines := []string{toolTitleLine("exec_command", command, info, width, false, errored)}
+	lines := []string{toolTitleLine("exec", command, info, width, false, errored)}
 	colorize := func(s string) string { return dim(markdown.Sanitize(s)) }
 
 	if output != "" {

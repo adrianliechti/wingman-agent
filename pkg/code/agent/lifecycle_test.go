@@ -204,7 +204,7 @@ func TestPlanAndUnattendedAreIndependent(t *testing.T) {
 }
 
 func TestPlanPreservesModelInstructions(t *testing.T) {
-	for _, id := range []string{"gpt-6-sol", "claude-sonnet-5-5"} {
+	for _, id := range []string{"gpt-6-sol", "gpt-5.4", "claude-sonnet-5-5", "claude-opus-5", "gemini-3.7-flash", "gemini-4-argon", "unknown-model"} {
 		source, data := instructionTemplate(id, prompt.SectionData{})
 		base := prompt.BuildBaseInstructions(source, data)
 		source, data = instructionTemplate(id, prompt.SectionData{PlanMode: true})
@@ -225,7 +225,7 @@ func TestPlanPreservesModelInstructions(t *testing.T) {
 func TestPlanRejectsMutatingDynamicToolCalls(t *testing.T) {
 	called := false
 	dynamic := tool.Tool{
-		Name: "exec_command",
+		Name: "exec",
 		Effect: func(args map[string]any) tool.Effect {
 			if args == nil {
 				return tool.EffectDynamic

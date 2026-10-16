@@ -41,6 +41,16 @@ func TestExecExitNotifiesBackgroundedSession(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no exit notification arrived")
 	}
+	// Notifications must not consume the late poll's output or exit metadata.
+	completed, err := tools[1].Execute(t.Context(), map[string]any{"session_id": 1, "wait": 0})
+	if err != nil || completed.Metadata["exit_code"] != 0 || !strings.Contains(completed.Content, "done") {
+		t.Fatalf("late poll = %+v, %v", completed, err)
+	}
+	select {
+	case duplicate := <-events:
+		t.Fatalf("duplicate notification: %+v", duplicate)
+	default:
+	}
 }
 
 func TestExecExitInlineDeliverySuppressesNotification(t *testing.T) {

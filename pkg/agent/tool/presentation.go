@@ -3,8 +3,11 @@ package tool
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 // Presentation is the display-ready form of a tool call. Tool producers use
@@ -71,8 +74,9 @@ var presentationSpecs = indexPresentationSpecs([]presentationSpec{
 	},
 	{
 		names: []string{"code_graph", "Inspect code graph"},
-		title: "Inspect code graph", kind: "read", omit: []string{"file"},
-		primary: []string{"query", "symbol", "operation"}, path: []string{"file"},
+		title: "Inspect code graph", kind: "read",
+		// file is usually a substring filter or module, not a navigable file.
+		primary: []string{"query", "pattern", "symbol", "operation"},
 	},
 	{
 		names: []string{"view_image", "View image"},
@@ -80,7 +84,7 @@ var presentationSpecs = indexPresentationSpecs([]presentationSpec{
 		path: []string{"file_path", "path"},
 	},
 	{
-		names: []string{"shell", "exec_command", "Run command"},
+		names: []string{"exec", "shell", "exec_command", "Run command"},
 		title: "Run command", kind: "execute", primary: []string{"command", "cmd"},
 	},
 	{
@@ -93,7 +97,7 @@ var presentationSpecs = indexPresentationSpecs([]presentationSpec{
 		title: "Open page", kind: "fetch", primary: []string{"url"},
 	},
 	{
-		names: []string{"web_search", "Web search"},
+		names: []string{"search_web", "web_search", "Web search"},
 		title: "Web search", kind: "fetch", primary: []string{"query", "pattern"},
 		listPrimary: "queries",
 	},
@@ -114,15 +118,15 @@ var presentationSpecs = indexPresentationSpecs([]presentationSpec{
 		title: "Message agent", primary: []string{"message"},
 	},
 	{
-		names: []string{"task_output", "Read agent output"},
+		names: []string{"agent_output", "task_output", "Read agent output"},
 		title: "Read agent output", omit: []string{"id"}, derivedHint: "extract",
 	},
 	{
-		names: []string{"task_send"},
+		names: []string{"agent_send", "task_send"},
 		title: "Follow up with agent", omit: []string{"id", "message"}, derivedHint: "extract",
 	},
 	{
-		names: []string{"task_stop", "Stop agent"},
+		names: []string{"agent_stop", "task_stop", "Stop agent"},
 		title: "Stop agent", omit: []string{"id"}, derivedHint: "extract",
 	},
 	{names: []string{"wait_agent", "Wait for agents"}, title: "Wait for agents"},
@@ -132,7 +136,7 @@ var presentationSpecs = indexPresentationSpecs([]presentationSpec{
 		title: "Interrupt agent", primary: []string{"target"},
 	},
 	{
-		names: []string{"elicit", "request_user_input", "Request input"},
+		names: []string{"elicit", "ask", "request_user_input", "Request input"},
 		title: "Request input", derivedHint: "elicit",
 	},
 	{
@@ -214,9 +218,20 @@ func Present(name, kind, argsJSON string, hasLocation bool) Presentation {
 		p.Hint = ExtractHint(argsJSON, name)
 		return p
 	}
+	// Both the built-in task continuation and external follow-up tools use
+	// this display title. Restored built-in calls retain their task id.
+	if name == "Follow up with agent" && args["id"] != nil {
+		spec = presentationSpecs["agent_send"]
+	}
 
 	if !hasLocation {
 		p.Path, p.Line = presentationLocation(spec, args)
+		if name == "glob" || name == "Find files" {
+			if pattern, ok := args["pattern"].(string); ok && filepath.IsAbs(pattern) {
+				dir, _ := doublestar.SplitPattern(filepath.ToSlash(pattern))
+				p.Path = filepath.FromSlash(dir)
+			}
+		}
 		if p.Path == "" && (name == "edit" || name == "Edit file") {
 			p.Path = firstBatchEditPath(args)
 		}

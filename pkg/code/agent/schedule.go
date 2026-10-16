@@ -102,6 +102,10 @@ func (s *sessionState) fireSchedule(ctx context.Context, t schedule.Task) {
 		var kept []schedule.Task
 		for i := range tasks {
 			if tasks[i].ID == t.ID {
+				if tasks[i].Status != schedule.StatusActive {
+					kept = append(kept, tasks[i])
+					continue
+				}
 				tasks[i].FireSeq++
 				fireSeq = tasks[i].FireSeq
 				if schedule.IsOneTime(tasks[i].Schedule) {

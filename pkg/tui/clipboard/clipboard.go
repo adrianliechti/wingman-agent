@@ -24,9 +24,19 @@ func Read() ([]Content, error) {
 }
 
 func readWithFallback(textReader, imageReader func() (string, error), fallback func() ([]Content, error)) ([]Content, error) {
+	return readImagesWithFallback(textReader, func() ([]string, error) {
+		image, err := imageReader()
+		if err != nil || image == "" {
+			return nil, err
+		}
+		return []string{image}, nil
+	}, fallback)
+}
+
+func readImagesWithFallback(textReader func() (string, error), imagesReader func() ([]string, error), fallback func() ([]Content, error)) ([]Content, error) {
 	text, textErr := textReader()
-	image, imageErr := imageReader()
-	contents, err := readContents(text, textErr, image, imageErr)
+	images, imageErr := imagesReader()
+	contents, err := readImageContents(text, textErr, images, imageErr)
 	if len(contents) != 0 || fallback == nil {
 		return contents, err
 	}
@@ -40,12 +50,26 @@ func readWithFallback(textReader, imageReader func() (string, error), fallback f
 }
 
 func readContents(text string, textErr error, image string, imageErr error) ([]Content, error) {
+	var images []string
+	if image != "" {
+		images = []string{image}
+	}
+	return readImageContents(text, textErr, images, imageErr)
+}
+
+func readImageContents(text string, textErr error, images []string, imageErr error) ([]Content, error) {
 	var contents []Content
 	if textErr == nil && text != "" {
 		contents = append(contents, Content{Text: text})
 	}
-	if imageErr == nil && image != "" {
-		contents = append(contents, Content{Image: &image})
+	if imageErr == nil {
+		for _, image := range images {
+			if image == "" {
+				continue
+			}
+			img := image
+			contents = append(contents, Content{Image: &img})
+		}
 	}
 	if len(contents) == 0 && textErr != nil && imageErr != nil {
 		return nil, fmt.Errorf("clipboard text: %v; clipboard image: %w", textErr, imageErr)

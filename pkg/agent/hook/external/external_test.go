@@ -1,11 +1,72 @@
 package external
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+func TestOversizedStructuredHookResponsesFailClosed(t *testing.T) {
+	for _, event := range []string{"PreToolUse", "PermissionRequest", "PostToolUse", "UserPromptSubmit", "SessionStart", "SubagentStart", "Stop", "SubagentStop", "PreCompact", "PostCompact"} {
+		t.Run(event, func(t *testing.T) {
+			result := parseResult(event, runResult{exitCode: 0, stdout: `{"continue":false,`, stdoutTruncated: true})
+			reason := result.Reason
+			switch event {
+			case "PreToolUse", "UserPromptSubmit":
+				if !result.Block {
+					t.Fatal("oversized hook did not block")
+				}
+			case "PermissionRequest":
+				if result.permission.Behavior != hook.PermissionDeny {
+					t.Fatal("oversized permission hook did not deny")
+				}
+				reason = result.permission.Message
+			case "SubagentStart":
+				if len(result.AdditionalContext) != 1 {
+					t.Fatal("missing overflow feedback")
+				}
+				reason = result.AdditionalContext[0]
+			default:
+				if !result.Stop {
+					t.Fatal("oversized hook did not stop")
+				}
+			}
+			if !strings.Contains(reason, "exceeded the 16 KiB output limit") {
+				t.Fatalf("missing overflow explanation: %q", reason)
+			}
+		})
+	}
+}
+
+func TestOversizedWhitespaceDoesNotHideHookDecision(t *testing.T) {
+	for _, event := range []string{"PreToolUse", "UserPromptSubmit"} {
+		result := parseResult(event, runResult{exitCode: 0, stdout: "", stdoutTruncated: true})
+		if !result.Block {
+			t.Fatalf("%s ignored an oversized response whose prefix was all whitespace", event)
+		}
+	}
+}
+
+func TestOversizedPlainHookContextKeepsMarkedPreview(t *testing.T) {
+	for _, event := range []string{"SessionStart", "SubagentStart", "UserPromptSubmit"} {
+		result := parseResult(event, runResult{exitCode: 0, stdout: limit(strings.Repeat("plain context\n", 2000)), stdoutTruncated: true})
+		if result.Block || result.Stop || len(result.AdditionalContext) != 1 || !strings.Contains(result.AdditionalContext[0], "truncated") {
+			t.Fatalf("%s plain context: %+v", event, result)
+		}
+	}
+}
+
+func TestOversizedStdoutDoesNotDiscardExitCodeDenial(t *testing.T) {
+	result := parseResult("PreToolUse", runResult{exitCode: 2, stdout: "oversized", stdoutTruncated: true, stderr: "denied by policy"})
+	if !result.Block || result.Reason != "denied by policy" {
+		t.Fatalf("lost explicit denial: %+v", result)
+	}
+}
 
 func TestCappedBufferDrainsAndMarksTruncation(t *testing.T) {
 	var output cappedBuffer
@@ -67,5 +128,67 @@ func TestCappedBufferLimitsExecStyleCopy(t *testing.T) {
 	}
 	if _, ok := any(&output).(io.ReaderFrom); ok {
 		t.Fatal("cappedBuffer exposes ReaderFrom, which bypasses the cap in os/exec")
+	}
+}
+
+func TestGateCancellationDoesNotStickDeclined(t *testing.T) {
+	calls := 0
+	gate := &Gate{
+		Message: "allow hooks?",
+		Confirm: func(ctx context.Context, _ string) (bool, error) {
+			calls++
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			return true, nil
+		},
+	}
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if gate.Allowed(canceled) {
+		t.Fatal("canceled context should not allow gate")
+	}
+	if calls != 0 {
+		t.Fatalf("Confirm called on already-canceled context (%d calls)", calls)
+	}
+	if !gate.Allowed(t.Context()) {
+		t.Fatal("subsequent active context should still prompt and allow")
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 confirmation prompt, got %d", calls)
+	}
+}
+
+func TestAsyncOnlyEventDoesNotPromptGate(t *testing.T) {
+	calls := 0
+	gate := &Gate{
+		Message: "allow hooks?",
+		Confirm: func(_ context.Context, _ string) (bool, error) {
+			calls++
+			return true, nil
+		},
+	}
+	cfg := &Config{
+		Hooks: Events{
+			PreToolUse: []MatcherGroup{{
+				Matcher: "Bash",
+				Hooks:   []Handler{{Type: "command", Command: "echo ok", Async: true}},
+			}},
+		},
+	}
+	hooks := cfg.Build(t.TempDir(), gate)
+	if _, err := hooks.PreToolUse[0](t.Context(), tool.ToolCall{Name: "shell"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("async-only hook should not prompt trust gate, got %d prompts", calls)
+	}
+}
+
+func TestLimitPreservesTruncationMarkerWithLeadingWhitespace(t *testing.T) {
+	raw := "   \n" + strings.Repeat("a", maxHookOutput)
+	if got := limit(raw); !strings.HasSuffix(got, "\n[hook output truncated]") {
+		t.Fatalf("expected truncation marker on oversized whitespace-prefixed output, got suffix %q", got[max(0, len(got)-40):])
 	}
 }

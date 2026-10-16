@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"io/fs"
+	"slices"
 	"strings"
 	"sync"
 	"text/template"
@@ -20,10 +21,9 @@ var modePlan string
 //go:embed mode_unattended.txt
 var modeUnattended string
 
-// GPT-6 variants adapt each model's instructions_template from Codex's
-// codex-rs/models-manager/models.json (be2e129ecd), using Wingman's tools and
-// shared session-context sections while retaining model-specific guidance.
-// See README.md for the comparison baseline and intentional harness differences.
+// Model variants adapt captured CLI requests to Wingman's tools and shared
+// session context. See README.md for versions, retained catalog baselines,
+// capture limitations, and intentional harness differences.
 //
 //go:embed models
 var modelFS embed.FS
@@ -130,6 +130,15 @@ var sectionProject string
 //go:embed section_code_intelligence.txt
 var sectionCodeIntelligence string
 
+//go:embed section_runtime.txt
+var sectionRuntime string
+
+//go:embed section_delegation.txt
+var sectionDelegation string
+
+//go:embed section_web.txt
+var sectionWeb string
+
 const BoundaryMarker = "--- session context ---"
 
 type namedTemplate struct {
@@ -150,6 +159,9 @@ var dynamicTemplates = []namedTemplate{tmplEnvironment}
 
 type SectionData struct {
 	Model model.Model
+	// ToolNames is the exposed catalog after configuration, mode, and role
+	// filtering. Optional tool guidance is omitted when its tools are absent.
+	ToolNames []string
 	// ModeInstructions follows shared tool guidance so Plan and unattended
 	// restrictions retain precedence over the model's implementation defaults.
 	ModeInstructions    string
@@ -165,6 +177,15 @@ type SectionData struct {
 	MemoryContent       string
 	Skills              string
 	ProjectInstructions string
+}
+
+func (d SectionData) HasTools(names ...string) bool {
+	for _, name := range names {
+		if !slices.Contains(d.ToolNames, name) {
+			return false
+		}
+	}
+	return true
 }
 
 type Section struct {
@@ -191,13 +212,28 @@ func renderSections(templates []namedTemplate, data SectionData) []Section {
 }
 
 func BuildAgentContext(data SectionData) string {
-	return composeSections(append([]Section{{Title: "Code intelligence", Content: sectionCodeIntelligence}}, renderSections([]namedTemplate{tmplProject, tmplEnvironment}, data)...))
+	sections := sharedRuntimeSections(data)
+	sections = append(sections, renderSections([]namedTemplate{tmplProject, tmplEnvironment}, data)...)
+	sections = append(sections, Section{Content: renderBase(data.ModeInstructions, data)})
+	return composeSections(sections)
 }
 
-// BuildBaseInstructions contains only model and mode guidance. Session data
-// changes independently and is appended to conversation history by the harness.
+func sharedRuntimeSections(data SectionData) []Section {
+	return []Section{
+		{Title: "Wingman runtime", Content: renderBase(sectionRuntime, data)},
+		{Title: "Code intelligence", Content: renderBase(sectionCodeIntelligence, data)},
+		{Title: "Web research", Content: renderBase(sectionWeb, data)},
+		{Title: "Delegation", Content: renderBase(sectionDelegation, data)},
+	}
+}
+
+// BuildBaseInstructions composes model behavior, shared runtime policy, and
+// mode restrictions. Mutable session context is appended separately to history.
 func BuildBaseInstructions(base string, data SectionData) string {
-	return composeSections([]Section{{Content: renderBase(base, data)}, {Title: "Code intelligence", Content: sectionCodeIntelligence}, {Content: renderBase(data.ModeInstructions, data)}})
+	sections := []Section{{Content: renderBase(base, data)}}
+	sections = append(sections, sharedRuntimeSections(data)...)
+	sections = append(sections, Section{Content: renderBase(data.ModeInstructions, data)})
+	return composeSections(sections)
 }
 
 func BuildSessionContext(data SectionData) string {

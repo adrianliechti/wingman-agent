@@ -150,7 +150,7 @@ func (m *webE2EModel) handleSteer(w http.ResponseWriter, r *http.Request) {
 	emitE2ETextResponse(w, "msg_steer_2", "Steering applied")
 }
 
-func (m *webE2EModel) handleAsk(w http.ResponseWriter, body []byte) {
+func (m *webE2EModel) handleElicit(w http.ResponseWriter, body []byte) {
 	var req struct {
 		Input []map[string]any `json:"input"`
 	}
@@ -158,7 +158,7 @@ func (m *webE2EModel) handleAsk(w http.ResponseWriter, body []byte) {
 	for _, item := range req.Input {
 		if item["type"] == "function_call_output" {
 			output, _ := item["output"].(string)
-			emitE2ETextResponse(w, "msg_ask_done", "You chose: "+strings.TrimSpace(output))
+			emitE2ETextResponse(w, "msg_elicit_done", "You chose: "+strings.TrimSpace(output))
 			return
 		}
 	}
@@ -175,7 +175,7 @@ func (m *webE2EModel) handleAsk(w http.ResponseWriter, body []byte) {
 	emitE2EEvent(w, map[string]any{
 		"type": "response.output_item.done", "sequence_number": 1, "output_index": 0,
 		"item": map[string]any{
-			"type": "function_call", "id": "fc_ask", "call_id": "call_ask",
+			"type": "function_call", "id": "fc_elicit", "call_id": "call_elicit",
 			"name": "elicit", "arguments": string(args), "status": "completed",
 		},
 	})
@@ -260,7 +260,7 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 		case strings.Contains(string(body), "initial request"):
 			m.handleSteer(w, r)
 		case strings.Contains(string(body), "pick a color"):
-			m.handleAsk(w, body)
+			m.handleElicit(w, body)
 		case strings.Contains(string(body), "render markdown"):
 			emitE2ETextResponse(w, "msg_markdown", "# Migration result\n\n- [x] Streaming\n\n| Language | Status |\n| --- | --- |\n| Go | ready |\n\n```go\npackage main\n\nfunc main() { println(\"ok\") }\n```\n\n```mermaid\ngraph TD; A-->B\n```\n\n```mermaid\nC4Context\n    Person(dev, \"Developer\", \"Uses the app\")\n    System(app, \"Application\", \"Does useful work\")\n    Rel(dev, app, \"Uses\")\n```\n\nMath stays literal: $x^2$.\n\n[Documentation](https://example.com/docs)")
 		default:

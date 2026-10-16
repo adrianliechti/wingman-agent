@@ -23,7 +23,7 @@ func safetyGuardLine(elicit *tool.Elicitation) string {
 // approvalWorkdir returns the directory to surface in approval prompts: empty
 // for the workspace default, the effective directory otherwise.
 func approvalWorkdir(workDir, dir string) string {
-	if dir == workDir {
+	if filepath.Clean(dir) == filepath.Clean(workDir) {
 		return ""
 	}
 	return dir
@@ -37,9 +37,16 @@ func resolveWorkdir(workDir string, args map[string]any) (string, error) {
 		return workDir, nil
 	}
 
+	if value == "~" || strings.HasPrefix(value, "~/") || strings.HasPrefix(value, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			value = filepath.Join(home, value[1:])
+		}
+	}
+
 	if !filepath.IsAbs(value) {
 		value = filepath.Join(workDir, value)
 	}
+	value = filepath.Clean(value)
 
 	info, err := os.Stat(value)
 	if err != nil || !info.IsDir() {
@@ -50,7 +57,7 @@ func resolveWorkdir(workDir string, args map[string]any) (string, error) {
 }
 
 // Command builds an *exec.Cmd that runs a script with the same interpreter
-// used by exec_command on this platform.
+// used by exec on this platform.
 func Command(ctx context.Context, command, workingDir string) *exec.Cmd {
 	return buildCommand(ctx, command, workingDir)
 }

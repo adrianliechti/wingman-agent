@@ -110,7 +110,8 @@ type App struct {
 	pendingEchoMu sync.Mutex
 	pendingEcho   []pendingEchoItem
 
-	elicitMu      sync.Mutex
+	elicitOnce    sync.Once
+	elicitGate    chan struct{}
 	dismissPrompt func()
 	promptActive  bool
 	confirmAll    sync.Map // session ID -> struct{}
@@ -446,7 +447,7 @@ func (a *App) deliverTaskResults(sessionID string, batch []task.Event) {
 			if a.sessionID != sessionID {
 				return
 			}
-			a.appendChat(cellNotice(fmt.Sprintf("Could not deliver background agent results: %v (use task_output to retrieve them)", err), theme.Default.Red, a.width()))
+			a.appendChat(cellNotice(fmt.Sprintf("Could not deliver background agent results: %v (use agent_output to retrieve them)", err), theme.Default.Red, a.width()))
 		})
 	}
 }
@@ -1587,7 +1588,8 @@ func (a *App) applyClipboardContents(contents []clipboard.Content, err error) {
 	beforeFiles := len(a.pendingFiles)
 	for _, content := range contents {
 		if content.Image != nil && a.acceptsClipboardAttachments() {
-			a.pendingContent = append(a.pendingContent, agent.Content{File: &agent.File{Data: *content.Image}})
+			data := normalizeClipboardImage(*content.Image)
+			a.pendingContent = append(a.pendingContent, agent.Content{File: &agent.File{Data: data}})
 		}
 		if content.Text != "" {
 			a.handlePaste(content.Text)

@@ -274,7 +274,16 @@ func addElicitationEnum(schema map[string]any, describedKey string, field tool.E
 		}
 		choices = append(choices, choice)
 	}
-	if described {
+	if !field.Strict {
+		// Built-in elicit options are suggestions. A closed enum/oneOf would
+		// reject free text even though the tool promises an Other answer.
+		fieldType := field.Type
+		if fieldType == "" {
+			fieldType = "string"
+		}
+		choices = append(choices, map[string]any{"type": fieldType, "title": "Other"})
+		schema["anyOf"] = choices
+	} else if described {
 		schema[describedKey] = choices
 	} else {
 		schema["enum"] = slices.Clone(field.Enum)

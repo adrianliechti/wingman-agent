@@ -381,7 +381,7 @@ func (a *Agent) Tasks(id string) *task.Registry {
 	return s.tasks
 }
 
-// ExecSessions exposes commands that exec_command left running so web clients
+// ExecSessions exposes commands that exec left running so web clients
 // can present them with the session's other background work.
 func (a *Agent) ExecSessions(id string) []shell.ExecSessionInfo {
 	s := a.session(id)
@@ -683,8 +683,8 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 			},
 		}))
 	}
-	sessionCfg.Hooks.PostToolUse = append(sessionCfg.Hooks.PostToolUse,
-		truncation.New(ws.ScratchPath),
+	sessionCfg.Hooks.TransformToolResult = append(sessionCfg.Hooks.TransformToolResult,
+		truncation.Transform(ws.ScratchPath),
 	)
 
 	allowedReadRoots, allowedWriteRoots := sessionFileRoots(ws)
@@ -727,7 +727,7 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	}
 	var webFetchTools []tool.Tool
 	if !a.options.DisableWebFetch {
-		webFetchTools = fetch.Tools(elicit, sessionCfg.Utility)
+		webFetchTools = fetch.Tools(elicit)
 	}
 	var webSearchTools []tool.Tool
 	if !a.options.DisableWebSearch {
@@ -1081,7 +1081,7 @@ func (s *sessionState) tools() []tool.Tool {
 		tools = planModeTools(tools)
 	}
 	if s.unattended.Load() {
-		tools = slices.DeleteFunc(tools, func(t tool.Tool) bool { return t.Name == "elicit" })
+		tools = slices.DeleteFunc(tools, func(t tool.Tool) bool { return t.Name == "elicit" || t.Name == "ask" })
 	}
 	slices.SortStableFunc(tools, func(a, b tool.Tool) int { return cmp.Compare(a.Name, b.Name) })
 	return tools
@@ -1132,6 +1132,7 @@ func planModeEffectExecute(t tool.Tool) func(context.Context, map[string]any) (t
 func (s *sessionState) instructions() string {
 	option, _ := s.parent.roleModel(s, "")
 	base, data := instructionTemplate(option.ID, prompt.SectionData{
+		ToolNames:      promptToolNames(s.tools()),
 		PlanMode:       s.currentMode() == modePlan,
 		UnattendedMode: s.unattended.Load(),
 	})
@@ -1142,8 +1143,18 @@ func (s *sessionState) contextInstructions() string {
 	return prompt.BuildSessionContext(s.instructionsData())
 }
 
-func (s *sessionState) subagentContext() string {
-	return prompt.BuildAgentContext(s.instructionsData())
+func (s *sessionState) subagentContext(tools []tool.Tool) string {
+	_, data := instructionTemplate("", s.instructionsData())
+	data.ToolNames = promptToolNames(tools)
+	return prompt.BuildAgentContext(data)
+}
+
+func promptToolNames(tools []tool.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+	return names
 }
 
 func BuildInstructions(modelID string, data prompt.SectionData) string {
@@ -1176,6 +1187,7 @@ func (s *sessionState) instructionsData() prompt.SectionData {
 	ws := s.parent.workspace
 	now := time.Now()
 	return prompt.SectionData{
+		ToolNames:           promptToolNames(s.tools()),
 		PlanMode:            s.currentMode() == modePlan,
 		UnattendedMode:      s.unattended.Load(),
 		Date:                now.Format("2006-01-02"),

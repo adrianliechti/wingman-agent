@@ -5,6 +5,7 @@ package external
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,28 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+func TestCommandOversizedHookResponseDoesNotBypassDenial(t *testing.T) {
+	const prefix = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"`
+	const suffix = `"}}`
+	for _, size := range []int{maxHookOutput, maxHookOutput + 1, 2 * maxHookOutput} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			dir := t.TempDir()
+			body := prefix + strings.Repeat("x", size-len(prefix)-len(suffix)) + suffix
+			if err := os.WriteFile(filepath.Join(dir, "response.json"), []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := configFor("PreToolUse", "Bash", Handler{Type: "command", Command: "cat response.json"})
+			outcome, err := cfg.Build(dir, nil).PreToolUse[0](t.Context(), tool.ToolCall{Name: "shell"})
+			if err != nil || !outcome.Block {
+				t.Fatalf("hook denial was lost: %+v, %v", outcome, err)
+			}
+			if overflow := strings.Contains(outcome.Reason, "exceeded"); overflow != (size > maxHookOutput) {
+				t.Fatalf("incorrect overflow handling at %d bytes", size)
+			}
+		})
+	}
+}
 
 func TestLoadCodexHooksJSONShape(t *testing.T) {
 	dir := t.TempDir()
@@ -194,22 +217,36 @@ func TestPreToolUseCodexPayloadAndStructuredDeny(t *testing.T) {
 	}
 }
 
-func TestPreToolUseCodexRewriteRestoresWingmanExecInput(t *testing.T) {
+func TestPreToolUseRewritePreservesShellInputSchema(t *testing.T) {
 	command := `printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":"echo rewritten","yield_time_ms":1000}}}'`
 	cfg := configFor("PreToolUse", "Bash", Handler{Type: "command", Command: command})
-	outcome, err := cfg.Build(t.TempDir(), nil).PreToolUse[0](context.Background(), tool.ToolCall{
-		Name: "exec_command",
-		Args: `{"cmd":"echo original","yield_time_ms":1000}`,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var updated map[string]any
-	if err := json.Unmarshal(outcome.UpdatedInput, &updated); err != nil {
-		t.Fatal(err)
-	}
-	if updated["cmd"] != "echo rewritten" || updated["command"] != nil {
-		t.Fatalf("updated input = %#v", updated)
+	for _, tc := range []struct{ name, key, other string }{
+		{"exec", "command", "cmd"},
+		{"shell", "command", "cmd"},
+		{"exec_command", "cmd", "command"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]any{tc.key: "echo original"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := tool.ToolCall{Name: tc.name, Args: string(args)}
+			name, input, _ := toolWire(call)
+			if name != "Bash" || input["command"] != "echo original" || input["cmd"] != nil {
+				t.Fatalf("hook input = %q %#v", name, input)
+			}
+			outcome, err := cfg.Build(t.TempDir(), nil).PreToolUse[0](context.Background(), call)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var updated map[string]any
+			if err := json.Unmarshal(outcome.UpdatedInput, &updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated[tc.key] != "echo rewritten" || updated[tc.other] != nil {
+				t.Fatalf("updated input = %#v", updated)
+			}
+		})
 	}
 }
 

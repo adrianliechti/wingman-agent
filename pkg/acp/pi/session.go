@@ -689,7 +689,7 @@ func presentTool(name string, args map[string]any, cwd string) toolPresentation 
 			"path", "file_path", "oldText", "newText", "old_string", "new_string",
 			"replaceAll", "replace_all", "edits",
 		)
-	case "bash", "shell", "exec_command":
+	case "bash", "shell", "exec", "exec_command":
 		title = "Run command"
 	case "grep":
 		title = "Search files"
@@ -795,7 +795,7 @@ func toolKind(name string) acp.ToolKind {
 		return acp.ToolKindRead
 	case "write", "edit":
 		return acp.ToolKindEdit
-	case "bash", "shell", "exec_command":
+	case "bash", "shell", "exec", "exec_command":
 		return acp.ToolKindExecute
 	case "grep", "glob":
 		return acp.ToolKindSearch

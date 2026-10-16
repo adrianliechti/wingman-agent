@@ -6,6 +6,7 @@ import (
 
 const (
 	EvtTextDelta           = "text_delta"
+	EvtImage               = "image"
 	EvtReasoningDelta      = "reasoning_delta"
 	EvtToolCall            = "tool_call"
 	EvtToolResult          = "tool_result"
@@ -27,6 +28,8 @@ const (
 )
 
 const (
+	// The prompt wire kind predates the tool rename to elicit. Keep "ask"
+	// for existing web clients; it is not an executable tool name.
 	PromptKindAsk      = "ask"
 	PromptKindConfirm  = "confirm"
 	PromptScopeSession = "session"

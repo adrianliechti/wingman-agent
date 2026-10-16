@@ -13,8 +13,8 @@ import (
 func taskTools(tasks *task.Registry) []tool.Tool {
 	return []tool.Tool{
 		{
-			Name:        "task_output",
-			Description: "Check on this session's agents, background and synchronous. Without `id`, lists them all with their status. With `id`, returns that agent's status and, once finished, its full result. Results also arrive automatically as task notifications — use this to peek early or to re-read a result. Never call it in a loop to wait: keep working, the notification arrives on its own.",
+			Name:        "agent_output",
+			Description: "Check this session's tracked agents, background and synchronous. Without `id`, lists them all with their status. With `id`, returns that agent's status and, once finished, its result. Background results also arrive automatically as task notifications; synchronous results return inline. Large results may be truncated by the shared output limit. Never poll in a loop to wait; continue independent work while background agents run.",
 			Effect:      tool.StaticEffect(tool.EffectReadOnly),
 			Hidden:      true,
 
@@ -22,45 +22,52 @@ func taskTools(tasks *task.Registry) []tool.Tool {
 				"type": "object",
 
 				"properties": map[string]any{
-					"id": map[string]any{"type": "string", "description": "Task id of a background agent. Omit to list all."},
+					"id": map[string]any{"type": "string", "description": "Task id of a tracked agent. Omit to list all."},
 				},
 
 				"additionalProperties": false,
 			},
 
 			Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
-				id, _ := args["id"].(string)
-				id = strings.TrimSpace(id)
-
-				if id == "" {
+				if err := ctx.Err(); err != nil {
+					return tool.Result{}, err
+				}
+				raw, present := args["id"]
+				if !present {
 					return tool.Text(formatTaskList(tasks)), nil
+				}
+				id, ok := raw.(string)
+				id = strings.TrimSpace(id)
+				if !ok || id == "" {
+					return tool.Result{}, fmt.Errorf("id must be a non-empty string; omit it to list agents")
 				}
 
 				t := tasks.Get(id)
 				if t == nil {
-					return tool.Result{}, fmt.Errorf("no background agent with id %s", id)
+					return tool.Result{}, fmt.Errorf("no agent with id %s", id)
 				}
 
-				if t.Status() == task.StatusRunning {
-					out := fmt.Sprintf("%s — still running (%s elapsed).", formatTaskLine(t), formatTaskElapsed(t))
-					if activity := t.Activity(); activity != "" {
-						out += fmt.Sprintf(" Currently: %s.", activity)
+				info := t.Info()
+				if info.Status == task.StatusRunning {
+					out := fmt.Sprintf("%s — still running.", formatTaskLine(info))
+					if info.Activity != "" {
+						out += fmt.Sprintf(" Currently: %s.", info.Activity)
 					}
-					return tool.Text(out + " The result will arrive as a task notification."), nil
+					return tool.Text(out), nil
 				}
-				return tool.Text(fmt.Sprintf("%s\n\n%s", formatTaskLine(t), t.Result())), nil
+				return tool.Text(fmt.Sprintf("%s\n\n%s", formatTaskLine(info), info.Result)), nil
 			},
 		},
 		{
-			Name:        "task_send",
-			Description: "Send a follow-up message to a finished agent — background or synchronous; every agent result carries its task id. It resumes in the background with its full prior context — no re-briefing needed — and the reply arrives as a task notification. Use this instead of launching a fresh agent when the question builds on work an agent already did. Never use it to have an agent confirm its own findings — verification needs a fresh agent without the finder's context.",
+			Name:        "agent_send",
+			Description: "Send a follow-up task to a finished, tracked agent, including one that failed or was stopped. It resumes in the background with its retained context and the reply arrives as a task notification. Running agents cannot receive messages through this tool. Use this when the question builds on an agent's prior work. Verification of its findings needs a fresh agent without the finder's context.",
 			Effect:      tool.StaticEffect(tool.EffectMutates),
 
 			Parameters: map[string]any{
 				"type": "object",
 
 				"properties": map[string]any{
-					"id":      map[string]any{"type": "string", "description": "Task id of the background agent to continue."},
+					"id":      map[string]any{"type": "string", "description": "Task id of the finished agent to continue."},
 					"message": map[string]any{"type": "string", "description": "The follow-up task or question. The agent keeps its earlier context; only state what is new."},
 				},
 
@@ -69,6 +76,9 @@ func taskTools(tasks *task.Registry) []tool.Tool {
 			},
 
 			Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+				if err := ctx.Err(); err != nil {
+					return tool.Result{}, err
+				}
 				id, _ := args["id"].(string)
 				id = strings.TrimSpace(id)
 				if id == "" {
@@ -81,7 +91,7 @@ func taskTools(tasks *task.Registry) []tool.Tool {
 
 				t := tasks.Get(id)
 				if t == nil {
-					return tool.Result{}, fmt.Errorf("no background agent with id %s", id)
+					return tool.Result{}, fmt.Errorf("no agent with id %s", id)
 				}
 				if err := t.ResumeContext(ctx, message); err != nil {
 					return tool.Result{}, err
@@ -90,22 +100,25 @@ func taskTools(tasks *task.Registry) []tool.Tool {
 			},
 		},
 		{
-			Name:        "task_stop",
-			Description: "Stop a running background agent. Its partial output is discarded; a stopped-task notification confirms the cancellation.",
+			Name:        "agent_stop",
+			Description: "Request cancellation of a running tracked agent. It remains running until cancellation settles; partial output is retained as incomplete and completed edits are not undone. Background runs deliver a stopped-task notification; synchronous runs return to their caller.",
 			Effect:      tool.StaticEffect(tool.EffectMutates),
 
 			Parameters: map[string]any{
 				"type": "object",
 
 				"properties": map[string]any{
-					"id": map[string]any{"type": "string", "description": "Task id of the background agent to stop."},
+					"id": map[string]any{"type": "string", "description": "Task id of the running agent to stop."},
 				},
 
 				"required":             []string{"id"},
 				"additionalProperties": false,
 			},
 
-			Execute: func(_ context.Context, args map[string]any) (tool.Result, error) {
+			Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+				if err := ctx.Err(); err != nil {
+					return tool.Result{}, err
+				}
 				id, _ := args["id"].(string)
 				id = strings.TrimSpace(id)
 				if id == "" {
@@ -114,7 +127,7 @@ func taskTools(tasks *task.Registry) []tool.Tool {
 				if err := tasks.Stop(id); err != nil {
 					return tool.Result{}, err
 				}
-				return tool.Text(fmt.Sprintf("Stop requested for background agent %s.", id)), nil
+				return tool.Text(fmt.Sprintf("Stop requested for agent %s.", id)), nil
 			},
 		},
 	}
@@ -123,26 +136,21 @@ func taskTools(tasks *task.Registry) []tool.Tool {
 func formatTaskList(tasks *task.Registry) string {
 	list := tasks.List()
 	if len(list) == 0 {
-		return "No background agents in this session."
+		return "No tracked agents in this session."
 	}
 
 	var b strings.Builder
 	for _, t := range list {
-		line := formatTaskLine(t)
-		if t.Status() == task.StatusRunning {
-			if activity := t.Activity(); activity != "" {
-				line += " — " + activity
-			}
+		info := t.Info()
+		line := formatTaskLine(info)
+		if info.Status == task.StatusRunning && info.Activity != "" {
+			line += " — " + info.Activity
 		}
 		fmt.Fprintf(&b, "%s\n", line)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func formatTaskLine(t *task.Task) string {
-	return fmt.Sprintf("%s [%s] %s (%s, %s)", t.ID, t.Status(), t.Description, t.AgentType, formatTaskElapsed(t))
-}
-
-func formatTaskElapsed(t *task.Task) string {
-	return t.Elapsed().Round(time.Second).String()
+func formatTaskLine(t task.Info) string {
+	return fmt.Sprintf("%s [%s] %s (%s, %s)", t.ID, t.Status, t.Description, t.AgentType, t.Elapsed.Round(time.Second))
 }

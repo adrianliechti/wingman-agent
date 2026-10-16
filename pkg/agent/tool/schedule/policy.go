@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
@@ -19,6 +21,9 @@ type Options struct {
 }
 
 func scriptApproval(dir, script string) string {
+	if dir != "" {
+		dir = filepath.Clean(dir)
+	}
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(dir+"\x00"+script)))
 }
 
@@ -45,6 +50,12 @@ func approveScript(ctx context.Context, dir, script string, opts *Options) error
 // RunTaskGate accepts only the exact script approved when the task was saved.
 // Legacy or edited scripts must pass the current policy before they can run.
 func RunTaskGate(ctx context.Context, dir string, task Task, opts *Options) (bool, string, error) {
+	if strings.TrimSpace(task.Script) == "" {
+		return true, "", nil
+	}
+	if dir == "" && opts != nil {
+		dir = opts.WorkDir
+	}
 	if opts != nil && opts.Disabled {
 		return gateFailure(fmt.Errorf("scheduled scripts are disabled because shell access is disabled"))
 	}

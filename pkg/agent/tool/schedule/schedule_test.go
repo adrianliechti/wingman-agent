@@ -34,6 +34,15 @@ func TestScheduleTaskRejectsBelowFloorInterval(t *testing.T) {
 		t.Fatalf("expected minimum interval error, got: %v", err)
 	}
 
+	_, err = scheduleTool.Execute(context.Background(), map[string]any{
+		"action":   "create",
+		"prompt":   "run",
+		"schedule": "* * * * * *",
+	})
+	if err == nil || !strings.Contains(err.Error(), "shortest supported interval") {
+		t.Fatalf("expected sub-floor 6-field cron error, got: %v", err)
+	}
+
 	if _, err := scheduleTool.Execute(context.Background(), map[string]any{
 		"action":   "create",
 		"prompt":   "run",
@@ -80,6 +89,9 @@ func TestScheduleToolExposesEffectPerAction(t *testing.T) {
 	}
 	if got := tl.Effect(nil); got != tool.EffectDynamic {
 		t.Fatalf("effect without arguments = %v, want dynamic", got)
+	}
+	if got := tl.Effect(map[string]any{"action": "create", "script": "rm -rf /"}); got != tool.EffectDangerous {
+		t.Fatalf("dangerous script effect = %v, want dangerous", got)
 	}
 	if _, err := tl.Execute(context.Background(), map[string]any{"action": "purge"}); err == nil {
 		t.Fatal("unknown action accepted")

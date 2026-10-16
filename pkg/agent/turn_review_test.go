@@ -11,7 +11,7 @@ func reviewResult(sequence uint64, name, args string, metadata map[string]any) R
 }
 func TestTurnReviewUsesDurableEditsAndActualValidationExits(t *testing.T) {
 	edit := reviewResult(3, "edit", "", map[string]any{tool.FileChangesMetadata: []tool.FileChange{{Path: "main.go", Before: "user work", After: "agent work", BeforeExists: true, AfterExists: true, Mode: 0644}}})
-	check := reviewResult(4, "exec_command", `{"command":"go test ./...","validation":true}`, map[string]any{"exit_code": 0})
+	check := reviewResult(4, "exec", `{"command":"go test ./...","validation":true}`, map[string]any{"exit_code": 0})
 	events := []RuntimeEvent{{Type: EventTurnStarted, TurnID: "turn"}, {Type: EventMessage, Message: &Message{Role: RoleUser, InputID: "input", Content: []Content{{Text: "work"}}}}, edit, check, {Type: EventContextCheckpoint}, {Type: EventTurnTerminal, TurnID: "turn", Terminal: &RuntimeTerminal{Status: RuntimeCompleted}}}
 	for _, disk := range []bool{false, true} {
 		source := events
@@ -35,7 +35,7 @@ func TestTurnReviewUsesDurableEditsAndActualValidationExits(t *testing.T) {
 }
 func TestTurnReviewDoesNotTrustSuccessTextOrForeignMetadata(t *testing.T) {
 	for _, metadata := range []map[string]any{nil, {"exit_code": nil}, {"exit_code": "0"}, {"exit_code": 0.5}, {"exit_code": 1}} {
-		events := []RuntimeEvent{{Type: EventTurnStarted, TurnID: "turn"}, reviewResult(2, "exec_command", `{"command":"go test","validation":true}`, metadata)}
+		events := []RuntimeEvent{{Type: EventTurnStarted, TurnID: "turn"}, reviewResult(2, "exec", `{"command":"go test","validation":true}`, metadata)}
 		events[1].Message.Content[0].ToolResult.Content = "all tests passed"
 		if review := BuildTurnReviews(events)[0]; review.Validation == "passed" {
 			t.Fatalf("trusted text: %+v", review)
@@ -50,9 +50,9 @@ func TestTurnReviewDoesNotTrustSuccessTextOrForeignMetadata(t *testing.T) {
 func TestTurnReviewMarksEachOutdatedCheckBeforePassingItToParent(t *testing.T) {
 	events := []RuntimeEvent{
 		{Type: EventTurnStarted, TurnID: "child"},
-		reviewResult(2, "exec_command", `{"command":"go vet","validation":true}`, map[string]any{"exit_code": 0}),
+		reviewResult(2, "exec", `{"command":"go vet","validation":true}`, map[string]any{"exit_code": 0}),
 		reviewResult(3, "edit", "", map[string]any{tool.FileChangesMetadata: []tool.FileChange{{Path: "file", Before: "old", After: "new"}}}),
-		reviewResult(4, "exec_command", `{"command":"go test","validation":true}`, map[string]any{"exit_code": 1}),
+		reviewResult(4, "exec", `{"command":"go test","validation":true}`, map[string]any{"exit_code": 1}),
 	}
 	child := BuildTurnReviews(events)[0]
 	if child.Checks[0].Outcome != "outdated" {
@@ -61,7 +61,7 @@ func TestTurnReviewMarksEachOutdatedCheckBeforePassingItToParent(t *testing.T) {
 	parent := BuildTurnReviews([]RuntimeEvent{
 		{Type: EventTurnStarted, TurnID: "parent"},
 		reviewResult(2, "agent", "", map[string]any{ChildReviewsMetadata: []TurnReview{child}}),
-		reviewResult(3, "exec_command", `{"command":"go test","validation":true}`, map[string]any{"exit_code": 0}),
+		reviewResult(3, "exec", `{"command":"go test","validation":true}`, map[string]any{"exit_code": 0}),
 	})[0]
 	if parent.Validation != "outdated" {
 		t.Fatalf("rerunning one check hid another stale check: %+v", parent)
@@ -72,7 +72,7 @@ func TestTurnReviewChildCheckSupersedesEarlierAttempt(t *testing.T) {
 	child := TurnReview{Checks: []ValidationCheck{{Command: "go test", Outcome: "passed"}}, Validation: "passed"}
 	review := BuildTurnReviews([]RuntimeEvent{
 		{Type: EventTurnStarted, TurnID: "parent"},
-		reviewResult(2, "exec_command", `{"command":"go test","validation":true}`, map[string]any{"exit_code": 1}),
+		reviewResult(2, "exec", `{"command":"go test","validation":true}`, map[string]any{"exit_code": 1}),
 		reviewResult(3, "agent", "", map[string]any{ChildReviewsMetadata: []TurnReview{child}}),
 	})[0]
 	if review.Validation != "passed" || len(review.Checks) != 1 {
@@ -96,7 +96,7 @@ func TestInlineChildReviewPreservesEditsAndValidationOrder(t *testing.T) {
 
 func TestTurnReviewOrdersChangesWithinOneLedgerEvent(t *testing.T) {
 	edit := reviewResult(2, "edit", "", map[string]any{tool.FileChangesMetadata: []tool.FileChange{{Path: "file", Before: "old", After: "new"}}})
-	check := reviewResult(2, "exec_command", `{"command":"go test","validation":true}`, map[string]any{"exit_code": 0})
+	check := reviewResult(2, "exec", `{"command":"go test","validation":true}`, map[string]any{"exit_code": 0})
 	for _, child := range []bool{false, true} {
 		event := check
 		event.Message = &Message{Content: append(append([]Content{}, check.Message.Content...), edit.Message.Content...)}
@@ -113,8 +113,8 @@ func TestTurnReviewOrdersChangesWithinOneLedgerEvent(t *testing.T) {
 }
 
 func TestTurnReviewKeepsChecksInDifferentDirectoriesSeparate(t *testing.T) {
-	failed := reviewResult(2, "exec_command", `{"command":"npm test","workdir":"frontend","validation":true}`, map[string]any{"exit_code": 1})
-	passed := reviewResult(3, "exec_command", `{"command":"npm test","workdir":"backend","validation":true}`, map[string]any{"exit_code": 0})
+	failed := reviewResult(2, "exec", `{"command":"npm test","workdir":"frontend","validation":true}`, map[string]any{"exit_code": 1})
+	passed := reviewResult(3, "exec", `{"command":"npm test","workdir":"backend","validation":true}`, map[string]any{"exit_code": 0})
 	for _, child := range []bool{false, true} {
 		event := passed
 		if child {
@@ -130,7 +130,7 @@ func TestTurnReviewKeepsChecksInDifferentDirectoriesSeparate(t *testing.T) {
 
 func TestTurnReviewPollingCannotRefreshChecksStartedBeforeEdits(t *testing.T) {
 	metadata := map[string]any{"session_id": 1, "command": "npm test", "workdir": "/workspace/frontend", "validation": true}
-	started := reviewResult(2, "exec_command", `{"command":"npm test","workdir":"frontend","validation":true}`, metadata)
+	started := reviewResult(2, "exec", `{"command":"npm test","workdir":"frontend","validation":true}`, metadata)
 	pending := reviewResult(4, "exec_session", `{"session_id":1}`, metadata)
 	completed := reviewResult(5, "exec_session", `{"session_id":1}`, map[string]any{
 		"session_id": 1, "command": "npm test", "workdir": "/workspace/frontend", "validation": true, "exit_code": 0,
@@ -156,8 +156,8 @@ func TestTurnReviewPollingCannotRefreshChecksStartedBeforeEdits(t *testing.T) {
 func TestTurnReviewLateExitCannotReplaceANewerCheck(t *testing.T) {
 	review := BuildTurnReviews([]RuntimeEvent{
 		{Type: EventTurnStarted, TurnID: "turn"},
-		reviewResult(2, "exec_command", `{"command":"go test","validation":true}`, map[string]any{"session_id": 1}),
-		reviewResult(3, "exec_command", `{"command":"go test","validation":true}`, map[string]any{"session_id": 2}),
+		reviewResult(2, "exec", `{"command":"go test","validation":true}`, map[string]any{"session_id": 1}),
+		reviewResult(3, "exec", `{"command":"go test","validation":true}`, map[string]any{"session_id": 2}),
 		reviewResult(4, "exec_session", `{"session_id":1}`, map[string]any{"session_id": 1, "command": "go test", "validation": true, "exit_code": 0}),
 	})[0]
 	if review.Validation != "not_confirmed" || len(review.Checks) != 1 {

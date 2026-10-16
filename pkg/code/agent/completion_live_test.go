@@ -43,21 +43,30 @@ func TestLiveCompletion(t *testing.T) {
 	if backend == "" {
 		t.Fatal("set WINGMAN_URL explicitly for live completion tests")
 	}
-	for _, model := range models {
-		t.Run(strings.TrimSpace(model), func(t *testing.T) {
+	for i, model := range models {
+		model = strings.TrimSpace(model)
+		t.Run(model, func(t *testing.T) {
 			t.Run("automatic_continuation", func(t *testing.T) {
-				testLiveCompletion(t, backend, strings.TrimSpace(model), 1)
+				testLiveCompletion(t, backend, model, model, 1)
 			})
 			t.Run("bounded_recovery_and_resume", func(t *testing.T) {
-				testLiveCompletion(t, backend, strings.TrimSpace(model), 3)
+				testLiveCompletion(t, backend, model, model, 3)
 			})
+			if len(models) > 1 {
+				switchModel := strings.TrimSpace(models[(i+1)%len(models)])
+				if switchModel != model {
+					t.Run("model_switch_after_fault_"+switchModel, func(t *testing.T) {
+						testLiveCompletion(t, backend, model, switchModel, 3)
+					})
+				}
+			}
 		})
 	}
 }
 
 type liveProgressKey struct{}
 
-func testLiveCompletion(t *testing.T, backend, model string, faultRequests int64) {
+func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultRequests int64) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	ws := newOptionsTestWorkspace(t)
@@ -158,7 +167,7 @@ func testLiveCompletion(t *testing.T, backend, model string, faultRequests int64
 			}
 		}
 	}()
-	const task = "Read sum.go and sum_test.go. Fix Sum to add its two arguments. Run go test . using exec_command with validation:true. Do not change the test. Use tools directly and do not delegate. Report only actual tool results."
+	const task = "Read sum.go and sum_test.go. Fix Sum to add its two arguments. Run go test . using exec with validation:true. Do not change the test. Use tools directly and do not delegate. Report only actual tool results."
 	if faultRequests == 3 {
 		stream, err := a.Send(ctx, id, []harness.Content{{Text: task}})
 		if err != nil {
@@ -186,6 +195,11 @@ func testLiveCompletion(t *testing.T, backend, model string, faultRequests int64
 		saved := a.session(id).aa.TurnReviews()
 		if len(saved) != 1 || saved[0].Outcome != "incomplete" {
 			t.Fatalf("restored reviews=%+v", saved)
+		}
+		if resumeModel != model {
+			if err := a.SetModel(ctx, id, resumeModel); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	if err := a.SetMode(ctx, id, code.UnattendedModeID); err != nil {
@@ -265,7 +279,7 @@ func testLiveCompletion(t *testing.T, backend, model string, faultRequests int64
 			}
 		}
 	}
-	if !strings.Contains(text.String(), "STEER_OK") || !strings.Contains(text.String(), "QUEUE_OK") || (requiresFinish(model) && finishes < 2) {
+	if !strings.Contains(text.String(), "STEER_OK") || !strings.Contains(text.String(), "QUEUE_OK") || (requiresFinish(resumeModel) && finishes < 2) {
 		t.Fatalf("steering/follow-up/finish missing: accepted finishes=%d text=%q", finishes, text.String())
 	}
 	usage := a.Usage(id)

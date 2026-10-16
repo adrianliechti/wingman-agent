@@ -51,11 +51,37 @@ func TestReadToolReadsDocumentAsMarkdown(t *testing.T) {
 	}
 }
 
-func TestReadToolReadsPDFAsMarkdown(t *testing.T) {
+func TestReadToolKeepsEmbeddedPDFSignaturesAsText(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "report.pdf"), buildTestPDF("PDF report text"), 0o644); err != nil {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer root.Close()
+
+	for _, tc := range []struct{ name, content, want string }{
+		{"detector.go", "package fs\nvar signature = []byte(\"%PDF-\")\n", "2\tvar signature = []byte(\"%PDF-\")"},
+		{"fixture.go", "package fs\nvar header = \"%PDF-1.7\\n\"\n", "2\tvar header = \"%PDF-1.7\\n\""},
+		{"README.md", "PDF header example:\n```\n%PDF-1.7\n```\n", "3\t%PDF-1.7"},
+		{"notes", "A PDF starts with %PDF-1.7.\n", "1\tA PDF starts with %PDF-1.7."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(dir, tc.name), []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			result, err := ReadTool(root).Execute(t.Context(), map[string]any{"file_path": tc.name})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(result.Content, tc.want) || result.Metadata["format"] != nil {
+				t.Fatalf("read text = %+v", result)
+			}
+		})
+	}
+}
+
+func TestReadToolReadsPDFAsMarkdown(t *testing.T) {
+	dir := t.TempDir()
 
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -63,19 +89,57 @@ func TestReadToolReadsPDFAsMarkdown(t *testing.T) {
 	}
 	defer root.Close()
 
-	result, err := ReadTool(root).Execute(context.Background(), map[string]any{
-		"file_path": "report.pdf",
-		"offset":    1,
-		"limit":     1,
-	})
+	for _, name := range []string{"report.pdf", "report", "report.bin"} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(dir, name), buildTestPDF("PDF report text"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			result, err := ReadTool(root).Execute(t.Context(), map[string]any{
+				"file_path": name,
+				"offset":    1,
+				"limit":     1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(result.Content, "1\tPDF report text") {
+				t.Fatalf("content = %q", result.Content)
+			}
+			if result.Metadata["format"] != "pdf" {
+				t.Fatalf("metadata = %#v", result.Metadata)
+			}
+		})
+	}
+}
+
+func TestReadToolSniffsDocumentsBeforeTextSizeThreshold(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Content, "1\tPDF report text") {
-		t.Fatalf("content = %q", result.Content)
+	defer root.Close()
+	if err := os.WriteFile(filepath.Join(dir, "report"), buildTestPDF("PDF report text"), 0644); err != nil {
+		t.Fatal(err)
 	}
-	if result.Metadata["format"] != "pdf" {
-		t.Fatalf("metadata = %#v", result.Metadata)
+	result, err := readTool(root, nil, 1).Execute(t.Context(), map[string]any{"file_path": "report"})
+	if err != nil || result.Metadata["format"] != "pdf" || !strings.Contains(result.Content, "PDF report text") {
+		t.Fatalf("document read = %+v, err = %v", result, err)
+	}
+}
+
+func TestReadToolReportsMalformedPDF(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "broken.pdf"), []byte("%PDF-1.7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if _, err := ReadTool(root).Execute(t.Context(), map[string]any{"file_path": "broken.pdf"}); err == nil || !strings.Contains(err.Error(), "read document") {
+		t.Fatalf("malformed PDF error = %v", err)
 	}
 }
 

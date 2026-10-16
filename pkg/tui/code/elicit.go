@@ -3,6 +3,7 @@ package code
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -15,8 +16,10 @@ func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
 		return true, nil
 	}
 
-	a.elicitMu.Lock()
-	defer a.elicitMu.Unlock()
+	if err := a.acquirePrompt(ctx); err != nil {
+		return false, err
+	}
+	defer a.releasePrompt()
 
 	items := []PopupItem{
 		{ID: "yes", Label: "yes", Detail: "approve this command"},
@@ -129,7 +132,7 @@ func (a *App) beginPrompt(ctx context.Context, show func() func()) (context.Cont
 }
 
 // askOptionsLocked presents an interactive selection popup and returns the
-// chosen ids (nil when declined or dismissed). Expects a.elicitMu held.
+// chosen ids (nil when declined or dismissed). Expects the prompt slot held.
 func (a *App) askOptionsLocked(ctx context.Context, title, message string, items []PopupItem, multi bool, hotkeys map[rune]string) ([]string, error) {
 	response := make(chan []string, 1)
 
@@ -186,8 +189,10 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 	// One lock across the whole request: a concurrent elicitation (parallel
 	// tool calls, an MCP server) must not splice its prompt between the
 	// fields of this one.
-	a.elicitMu.Lock()
-	defer a.elicitMu.Unlock()
+	if err := a.acquirePrompt(ctx); err != nil {
+		return tool.ElicitResult{}, err
+	}
+	defer a.releasePrompt()
 
 	fields := req.Fields
 
@@ -213,6 +218,7 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 
 		freeText := len(field.Enum) == 0 && field.Type != "boolean"
 		answerField := field
+		var selected []string
 		customField, hasCustom := customAnswerCompanion(fields, field.Name)
 
 		if !freeText {
@@ -230,8 +236,17 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 				return tool.ElicitResult{Action: tool.ElicitDecline}, nil
 			case "other":
 				freeText = true
+				selected, _ = value.([]string)
 				if hasCustom {
 					answerField = customField
+					if len(selected) > 0 {
+						content[field.Name] = selected
+					}
+				} else {
+					// Other is literal free text: "1" must not become option 1,
+					// and commas must not split the user's answer.
+					answerField.Enum = nil
+					answerField.Multiple = false
 				}
 			default:
 				if !bare {
@@ -265,6 +280,9 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 			}
 
 			if !bare {
+				if field.Multiple && !hasCustom {
+					value = append(selected, strings.TrimSpace(text))
+				}
 				content[answerField.Name] = value
 			} else if accepted, _ := value.(bool); !accepted {
 				return tool.ElicitResult{Action: tool.ElicitDecline}, nil
@@ -275,6 +293,28 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 
 	return tool.ElicitResult{Action: tool.ElicitAccept, Content: content}, nil
 }
+
+// Serializing prompts must not trap a cancelled turn behind a waiting user.
+func (a *App) acquirePrompt(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.elicitOnce.Do(func() { a.elicitGate = make(chan struct{}, 1) })
+	var appDone <-chan struct{}
+	if a.ctx != nil {
+		appDone = a.ctx.Done()
+	}
+	select {
+	case a.elicitGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-appDone:
+		return a.ctx.Err()
+	}
+}
+
+func (a *App) releasePrompt() { <-a.elicitGate }
 
 func customAnswerCompanion(fields []tool.ElicitField, questionID string) (tool.ElicitField, bool) {
 	for _, field := range fields {
@@ -325,8 +365,11 @@ func (a *App) elicitOptionsField(ctx context.Context, message string, field tool
 	}
 
 	items := make([]PopupItem, 0, len(field.Enum)+2)
+	values := make(map[string]string, len(field.Enum))
 	for i, option := range field.Enum {
-		item := PopupItem{ID: option, Label: option}
+		id := fmt.Sprintf("option_%d", i)
+		values[id] = option
+		item := PopupItem{ID: id, Label: option}
 		if i < len(field.EnumDescriptions) {
 			item.Detail = field.EnumDescriptions[i]
 		}
@@ -343,18 +386,18 @@ func (a *App) elicitOptionsField(ctx context.Context, message string, field tool
 		return nil, "", err
 	}
 
+	if slices.Contains(ids, "__decline") {
+		a.recordPrompt(ctx, "", message, "decline")
+		return nil, "decline", nil
+	}
 	var picks []string
 	for _, id := range ids {
-		switch id {
-		case "__decline":
-			picks = nil
-		case "__other":
-			return nil, "other", nil
-		default:
-			picks = append(picks, id)
-			continue
+		if value, ok := values[id]; ok {
+			picks = append(picks, value)
 		}
-		break
+	}
+	if !field.Strict && slices.Contains(ids, "__other") {
+		return picks, "other", nil
 	}
 
 	if len(picks) == 0 {
@@ -380,7 +423,7 @@ func fieldKind(field tool.ElicitField) string {
 	return field.Type
 }
 
-// askLineLocked expects a.elicitMu to be held by the caller.
+// askLineLocked expects the prompt slot to be held by the caller.
 func (a *App) askLineLocked(ctx context.Context, prompt, placeholder string) (string, error) {
 	response := make(chan string, 1)
 
@@ -480,6 +523,9 @@ func elicitPlaceholder(field tool.ElicitField) string {
 
 func parseElicitValue(field tool.ElicitField, text string) (any, bool) {
 	text = strings.TrimSpace(text)
+	if field.Required && text == "" {
+		return nil, false
+	}
 
 	if field.Multiple && len(field.Enum) > 0 {
 		picks := make([]string, 0, 4)

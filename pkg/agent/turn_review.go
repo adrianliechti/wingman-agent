@@ -111,11 +111,11 @@ func BuildTurnReviews(events []RuntimeEvent) []TurnReview {
 				}
 				var args map[string]any
 				_ = json.Unmarshal([]byte(result.Args), &args)
-				if result.Name == "exec_command" || result.Name == "exec_session" {
+				if result.Name == "exec" || result.Name == "exec_command" || result.Name == "exec_session" {
 					review.Untracked = true
 					sequence := position
 					id, known := tool.IntArg(result.Metadata, "session_id")
-					if result.Name == "exec_command" {
+					if result.Name == "exec" || result.Name == "exec_command" {
 						if known {
 							executions[id] = position
 						}

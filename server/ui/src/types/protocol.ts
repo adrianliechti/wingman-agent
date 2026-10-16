@@ -208,6 +208,7 @@ export interface LSPActivityStatus {
 	analyzing: boolean;
 	services: LSPServiceActivity[];
 }
+// Stable wire kinds, independent of the model-facing elicit tool name.
 export type PromptKind = "ask" | "confirm";
 
 export interface PromptField {

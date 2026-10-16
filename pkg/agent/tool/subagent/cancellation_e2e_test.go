@@ -140,12 +140,12 @@ func TestCancelledSubagentFollowUpDoesNotRestartE2E(t *testing.T) {
 			cancel()
 			var followUp *tool.Tool
 			for i := range tools {
-				if tools[i].Name == "task_send" {
+				if tools[i].Name == "agent_send" {
 					followUp = &tools[i]
 				}
 			}
 			if followUp == nil {
-				t.Fatal("missing task_send tool")
+				t.Fatal("missing agent_send tool")
 			}
 			_, err = followUp.Execute(ctx, map[string]any{"id": child.ID, "message": "continue"})
 			if !errors.Is(err, context.Canceled) || child.Seq() != before || requests.Load() != 1 {

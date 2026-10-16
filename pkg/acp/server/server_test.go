@@ -72,6 +72,17 @@ func TestNotifyContentPreservesMixedTextAndImage(t *testing.T) {
 	}
 }
 
+func TestNotifyContentPreservesAssistantImage(t *testing.T) {
+	var update acpsdk.SessionUpdate
+	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, agent.RoleAssistant, agent.Content{
+		File: &agent.File{Data: "data:image/png;base64,AA=="},
+	})
+	if update.AgentMessageChunk == nil || update.AgentMessageChunk.Content.Image == nil ||
+		update.AgentMessageChunk.Content.Image.Data != "AA==" {
+		t.Fatalf("assistant image update = %#v", update)
+	}
+}
+
 func TestNotifyContentUsesCompactFilePresentation(t *testing.T) {
 	var update acpsdk.SessionUpdate
 	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, agent.RoleAssistant, agent.Content{

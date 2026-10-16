@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
 	"runtime"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
@@ -25,12 +27,13 @@ const (
 	maxExecWait        = 300
 	maxExecSessions    = 16
 	maxUnreadBytes     = 1 << 20
+	maxExecTimeout     = math.MaxInt64 / int64(time.Second)
 )
 
 // execIdleGrace backgrounds a command that printed output then went quiet, as a started server does.
 var execIdleGrace = 15 * time.Second
 
-// ExecExit reports the exit of a backgrounded exec_command session that no
+// ExecExit reports the exit of a backgrounded exec session that no
 // tool call was waiting on, so the host can deliver it as a notification
 // instead of leaving the model to poll.
 type ExecExit struct {
@@ -43,7 +46,7 @@ type ExecExit struct {
 	Elapsed     time.Duration
 }
 
-// ExecSessionInfo is a read-only snapshot of a command that exec_command
+// ExecSessionInfo is a read-only snapshot of a command that exec
 // returned while it continued running in the background.
 type ExecSessionInfo struct {
 	ID          int
@@ -96,7 +99,7 @@ func (m *ExecManager) BackgroundSession(id int) (ExecSessionInfo, bool) {
 	return session.snapshot(), true
 }
 
-// StopBackgroundSession terminates a live command returned by exec_command.
+// StopBackgroundSession terminates a live command returned by exec.
 func (m *ExecManager) StopBackgroundSession(id int) error {
 	m.mu.Lock()
 	session := m.sessions[id]
@@ -150,7 +153,7 @@ func (m *ExecManager) add(s *execSession) (int, error) {
 	if len(m.sessions) >= 2*maxExecSessions {
 		var exited []int
 		for id, existing := range m.sessions {
-			if existing.exited() {
+			if existing.exited() && existing.waiters == 0 {
 				exited = append(exited, id)
 			}
 		}
@@ -192,10 +195,15 @@ func (m *ExecManager) markBackgrounded(s *execSession) {
 	}
 }
 
-func (m *ExecManager) beginWait(s *execSession) {
+// acquireWait claims the session before its exit can be notified or evicted.
+func (m *ExecManager) acquireWait(id int) *execSession {
 	m.mu.Lock()
-	s.waiters++
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	s := m.sessions[id]
+	if s != nil {
+		s.waiters++
+	}
+	return s
 }
 
 func (m *ExecManager) endWait(s *execSession) {
@@ -208,24 +216,25 @@ func (m *ExecManager) endWait(s *execSession) {
 }
 
 // notifyExit delivers a backgrounded session's exit as a background event.
-// Removal from the session map is the exactly-once delivery claim; a waiting
-// tool call suppresses the notification and reports the exit inline instead
+// A notified flag claims exactly-once delivery while retaining the result for
+// late polls. A waiting tool call reports the exit inline instead
 // (endWait re-runs this check for a waiter that woke on its timeout while the
 // process exited).
 func (m *ExecManager) notifyExit(s *execSession) {
 	m.mu.Lock()
-	if m.closed || m.onExit == nil || !s.backgrounded || s.waiters > 0 || m.sessions[s.id] != s {
+	if m.closed || m.onExit == nil || !s.backgrounded || s.waiters > 0 || s.notified || m.sessions[s.id] != s {
 		m.mu.Unlock()
 		return
 	}
-	delete(m.sessions, s.id)
+	s.notified = true
+	output := s.peek()
 	m.mu.Unlock()
 
 	m.onExit(ExecExit{
 		SessionID:   s.id,
 		Command:     s.command,
 		Description: s.description,
-		Output:      s.drain(),
+		Output:      output,
 		Notice:      s.exitNotice(),
 		Failed:      s.exitErr != nil,
 		Elapsed:     time.Since(s.started),
@@ -256,14 +265,17 @@ type execSession struct {
 	// exit notifications fire only for backgrounded sessions no tool call is
 	// currently waiting on.
 	backgrounded bool
+	notified     bool
 	waiters      int
 
-	mu        sync.Mutex
-	unread    bytes.Buffer
-	dropped   int
-	lastWrite time.Time
+	mu          sync.Mutex
+	unread      bytes.Buffer
+	dropped     int
+	lastWrite   time.Time
+	outputReady chan struct{}
 
-	inputMu        sync.Mutex
+	inputOnce      sync.Once
+	inputGate      chan struct{}
 	pendingInput   string
 	inputOverflow  bool
 	inputUncertain bool
@@ -282,13 +294,41 @@ func (s *execSession) snapshot() ExecSessionInfo {
 func (s *execSession) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.unread.Write(p)
-	s.lastWrite = time.Now()
-	if over := s.unread.Len() - maxUnreadBytes; over > 0 {
+	n := len(p)
+	// Drop before writing, so one large Write cannot allocate an unbounded
+	// backing buffer even though only the last MiB is retained.
+	if len(p) >= maxUnreadBytes {
+		s.dropped += s.unread.Len() + len(p) - maxUnreadBytes
+		s.unread.Reset()
+		p = p[len(p)-maxUnreadBytes:]
+	} else if over := s.unread.Len() + len(p) - maxUnreadBytes; over > 0 {
 		s.unread.Next(over)
 		s.dropped += over
 	}
-	return len(p), nil
+	s.unread.Write(p)
+	s.lastWrite = time.Now()
+	if s.outputReady != nil {
+		select {
+		case s.outputReady <- struct{}{}:
+		default:
+		}
+	}
+	return n, nil
+}
+
+func (s *execSession) outputAvailable() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.outputReady == nil {
+		s.outputReady = make(chan struct{}, 1)
+	}
+	if s.unread.Len() > 0 || s.dropped > 0 {
+		select {
+		case s.outputReady <- struct{}{}:
+		default:
+		}
+	}
+	return s.outputReady
 }
 
 // idleFor reports output seen, then quiet for d. drain() does not reset the clock.
@@ -301,8 +341,32 @@ func (s *execSession) idleFor(d time.Duration) bool {
 func (s *execSession) drain() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := sanitizeOutput(s.unread.String())
-	s.unread.Reset()
+	data := s.unread.Bytes()
+	end := len(data)
+	if !s.exited() {
+		// A read can stop inside a UTF-8 character; retain its unfinished suffix.
+		start := max(0, end-utf8.UTFMax+1)
+		for start < end && !utf8.RuneStart(data[start]) {
+			start++
+		}
+		for start < end {
+			if !utf8.FullRune(data[start:]) {
+				end = start
+				break
+			}
+			_, size := utf8.DecodeRune(data[start:])
+			start += size
+		}
+		end = completeTerminalPrefix(data[:end])
+	}
+	out := sanitizeOutput(string(s.unread.Next(end)))
+	if s.unread.Len() == 0 {
+		s.unread.Reset()
+	}
+	select {
+	case <-s.outputReady:
+	default:
+	}
 	if s.dropped > 0 {
 		out = fmt.Sprintf("[%d bytes of earlier output dropped]\n", s.dropped) + out
 		s.dropped = 0
@@ -325,6 +389,7 @@ func (s *execSession) peek() string {
 // its final content. TUI programs on a PTY otherwise fill results with cursor
 // noise that neither the model nor any UI can read.
 func sanitizeOutput(s string) string {
+	s = strings.ToValidUTF8(s, "�")
 	if !strings.ContainsAny(s, "\x1b\r") {
 		return s
 	}
@@ -352,6 +417,43 @@ func sanitizeOutput(s string) string {
 		lines[i] = keep
 	}
 	return strings.Join(lines, "\n")
+}
+
+// Keep an unfinished escape sequence with the next read; stripping each read
+// independently would turn a split "ESC [ 31" / "m" into visible "m" noise.
+func completeTerminalPrefix(data []byte) int {
+	for i := 0; i < len(data); i++ {
+		if data[i] != 0x1b {
+			continue
+		}
+		start := i
+		i++
+		if i == len(data) {
+			return start
+		}
+		switch data[i] {
+		case '[':
+			for i++; i < len(data) && (data[i] < 0x40 || data[i] > 0x7e); i++ {
+			}
+			if i == len(data) {
+				return start
+			}
+		case ']':
+			for i++; i < len(data); i++ {
+				if data[i] == 0x07 {
+					break
+				}
+				if data[i] == 0x1b && i+1 < len(data) && data[i+1] == '\\' {
+					i++
+					break
+				}
+			}
+			if i == len(data) {
+				return start
+			}
+		}
+	}
+	return len(data)
 }
 
 func (s *execSession) exited() bool {
@@ -387,17 +489,18 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 	commandLines := []string{
 		fmt.Sprintf("Run a command in the host shell. Waits up to `wait` seconds (default %d) for it to finish; if still running, the command keeps running in the background and a session_id is returned.", defaultExecWait),
 		"- Use directly for both short commands and long-running or interactive work such as dev servers, watch tasks, log tails, REPLs, and prompting CLIs.",
-		fmt.Sprintf("- Builds and test suites finish inline within the default wait, so just call and read the result. A command that prints output and then stays quiet for %.0fs is treated as started and handed back as a session, so dev servers return promptly without waiting out the full `wait`.", execIdleGrace.Seconds()),
+		fmt.Sprintf("- Commands that finish within the wait return their exit status inline. A command that prints output and then stays quiet for %.0fs is handed back as a running session; silence does not establish readiness or success.", execIdleGrace.Seconds()),
 		"- Set `timeout` for anything that could hang (network calls, flaky suites, unfamiliar binaries) — the process is killed at that deadline. Omit it for servers and watch tasks you intend to keep running.",
 		"- Set `tty` for programs that need a terminal (REPLs, prompts, programs that buffer output when piped). Unix only — ignored on Windows. Written input is echoed back in the output.",
 		"- Starts in the workspace directory (override with `workdir`). Shell state does not carry over between calls. stdout and stderr are merged. Output between reads is buffered (oldest dropped past 1MB); poll with `exec_session` to collect it.",
 		"- Not for file content work: use `read`/`edit`/`grep`/`glob` instead of cat, head, tail, sed, awk, echo-redirects, or find.",
-		"- The process is NOT killed when the wait elapses. Kill sessions you no longer need via `exec_session`.",
+		"- The process keeps running when the wait elapses or a waiting call is cancelled. Kill sessions you no longer need via `exec_session`.",
 	}
 
 	if manager.onExit != nil {
 		commandLines = append(commandLines,
 			"- When a backgrounded command exits on its own, its remaining output arrives automatically as a background notification — keep working instead of polling `exec_session` just to watch for the exit.",
+			"- Completed sessions are retained temporarily for a final `exec_session` read, including after notifications. Collect a background validation command's exit status this way before reporting it as checked.",
 		)
 	}
 
@@ -405,17 +508,19 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 	commandDescription := strings.Join(commandLines, "\n")
 
 	sessionDescription := strings.Join([]string{
-		"Interact with a session started by `exec_command`: poll new output (no input), write to its stdin (`input`), close stdin (`eof`), or terminate it (`kill`).",
+		"Interact with a session started by `exec`: poll new output (no input), write to its stdin (`input`), close stdin (`eof`), or terminate it (`kill`).",
 		"- Waits up to `wait` seconds for output (or exit) before returning.",
 		"- `input` supports C-style escapes (\\n Enter, \\e Esc, \\t, \\uHHHH; \\\\ for a literal backslash); anything else is sent verbatim with nothing appended. Include \\n to submit a line to an interactive program, else it is typed but not entered (e.g. save in vi with \"\\e:w file\\n\"). Destructive or privilege-escalating input lines require the same user confirmation as shell commands.",
 		"- \\u0003 (Ctrl-C) interrupts the process: on tty sessions via the terminal, otherwise via SIGINT to the process group (Unix only).",
 		"- On tty sessions, `eof` sends Ctrl-D instead of closing stdin.",
+		"- Cancelling a blocked stdin write requests termination and closes stdin, because some input may already have been delivered. Poll cancellation alone leaves the command running.",
+		"- Destructive input is confirmed for each submission; approvals are not reused across changing interactive process state.",
 		"- Sessions end when the process exits, is killed, or the agent session closes.",
 	}, "\n")
 
 	return []tool.Tool{
 		{
-			Name:        "exec_command",
+			Name:        "exec",
 			Description: commandDescription,
 			Effect:      ClassifyEffect,
 
@@ -428,8 +533,8 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 					"description": map[string]any{"type": "string", "description": "Short label (e.g. \"Start dev server\")."},
 					"workdir":     map[string]any{"type": "string", "description": "Directory to run the command in (absolute, or relative to the workspace). Defaults to the workspace root."},
 					"tty":         map[string]any{"type": "boolean", "description": "Run in a pseudo-terminal (Unix only)."},
-					"wait":        map[string]any{"type": "integer", "description": fmt.Sprintf("Seconds to wait before backgrounding (default %d, max %d; 0 backgrounds immediately).", defaultExecWait, maxExecWait)},
-					"timeout":     map[string]any{"type": "integer", "description": "Seconds after which the command is killed. Omit to let it run until it exits or the agent session closes."},
+					"wait":        map[string]any{"type": "integer", "minimum": 0, "description": fmt.Sprintf("Seconds to wait before backgrounding (default %d, capped at %d; 0 backgrounds immediately).", defaultExecWait, maxExecWait)},
+					"timeout":     map[string]any{"type": "integer", "minimum": 0, "maximum": maxExecTimeout, "description": "Seconds after which the command is killed. Omit or set 0 to let it run until it exits or the agent session closes."},
 				},
 
 				"required":             []string{"command"},
@@ -449,11 +554,11 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 				"type": "object",
 
 				"properties": map[string]any{
-					"session_id": map[string]any{"type": "integer", "description": "Session id returned by exec_command."},
+					"session_id": map[string]any{"type": "integer", "minimum": 1, "description": "Session id returned by exec."},
 					"input":      map[string]any{"type": "string", "description": "Text to write to the process stdin."},
 					"eof":        map[string]any{"type": "boolean", "description": "Close stdin after writing input."},
 					"kill":       map[string]any{"type": "boolean", "description": "Terminate the process."},
-					"wait":       map[string]any{"type": "integer", "description": fmt.Sprintf("Seconds to wait for output before returning (default %d, max %d; 0 returns immediately).", defaultSessionWait, maxExecWait)},
+					"wait":       map[string]any{"type": "integer", "minimum": 0, "description": fmt.Sprintf("Seconds to wait for output before returning (default %d, capped at %d; 0 returns immediately).", defaultSessionWait, maxExecWait)},
 				},
 
 				"required":             []string{"session_id"},
@@ -468,9 +573,15 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 }
 
 func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, elicit *tool.Elicitation, appr *Approvals, opts *Options, args map[string]any) (tool.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return tool.Result{}, err
+	}
+	if err := validateExecArgs(args, []string{"command", "description", "workdir"}, []string{"tty", "validation"}); err != nil {
+		return tool.Result{}, err
+	}
 	command, ok := args["command"].(string)
 
-	if !ok || command == "" {
+	if !ok || strings.TrimSpace(command) == "" {
 		return tool.Result{}, fmt.Errorf("command is required")
 	}
 
@@ -492,6 +603,9 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		}
 		timeout = value
 	}
+	if int64(timeout) > maxExecTimeout {
+		return tool.Result{}, fmt.Errorf("timeout must not exceed %d seconds", maxExecTimeout)
+	}
 
 	dir, err := resolveWorkdir(workDir, args)
 	if err != nil {
@@ -499,6 +613,9 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	}
 
 	if err := confirmDangerous(ctx, elicit, appr, args, approvalWorkdir(workDir, dir)); err != nil {
+		return tool.Result{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return tool.Result{}, err
 	}
 
@@ -529,6 +646,19 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		interrupt:   func() error { return interruptProcessGroup(cmd) },
 		done:        make(chan struct{}),
 	}
+	// Reserve capacity before starting the process. Rejected calls must never
+	// execute a command, and Close must be able to cancel a concurrent launch.
+	id, err := m.add(s)
+	if err != nil {
+		return tool.Result{}, err
+	}
+	started := false
+	defer func() {
+		if !started {
+			cancel()
+			m.remove(id)
+		}
+	}()
 
 	if tty {
 		master, err := startTTY(cmd)
@@ -544,6 +674,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 			close(copyDone)
 		}()
 		go func() {
+			defer cancel()
 			err := cmd.Wait()
 			exitedAt := time.Now()
 			select {
@@ -572,12 +703,14 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		}
 
 		go func() {
+			defer cancel()
 			s.exitErr = cmd.Wait()
 			s.exitedAt = time.Now()
 			close(s.done)
 			m.notifyExit(s)
 		}()
 	}
+	started = true
 
 	if timeout > 0 {
 		go func() {
@@ -586,15 +719,12 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 			select {
 			case <-s.done:
 			case <-t.C:
-				s.timedOut.Store(true)
-				s.cancel()
+				if !s.exited() {
+					s.timedOut.Store(true)
+					s.cancel()
+				}
 			}
 		}()
-	}
-
-	id, err := m.add(s)
-	if err != nil {
-		return tool.Result{}, err
 	}
 
 	timer := time.NewTimer(time.Duration(wait) * time.Second)
@@ -645,18 +775,19 @@ waiting:
 }
 
 func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicitation, appr *Approvals, args map[string]any) (tool.Result, error) {
-	id, ok := tool.IntArg(args, "session_id")
-	if !ok {
+	if err := ctx.Err(); err != nil {
+		return tool.Result{}, err
+	}
+	if err := validateExecArgs(args, []string{"input"}, []string{"eof", "kill"}); err != nil {
+		return tool.Result{}, err
+	}
+	id, present, err := tool.PositiveIntArg(args, "session_id")
+	if err != nil {
+		return tool.Result{}, err
+	}
+	if !present {
 		return tool.Result{}, fmt.Errorf("session_id is required")
 	}
-
-	s := m.get(id)
-	if s == nil {
-		return tool.Result{}, fmt.Errorf("no session with id %d (it may have exited and been cleaned up)", id)
-	}
-
-	m.beginWait(s)
-	defer m.endWait(s)
 
 	wait := defaultSessionWait
 	if value, present, err := tool.NonNegIntArg(args, "wait"); present {
@@ -668,6 +799,11 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 	if wait > maxExecWait {
 		wait = maxExecWait
 	}
+	s := m.acquireWait(id)
+	if s == nil {
+		return tool.Result{}, fmt.Errorf("no session with id %d (it may have exited and been cleaned up)", id)
+	}
+	defer m.endWait(s)
 
 	if kill, _ := args["kill"].(bool); kill {
 		alreadyExited := s.exited()
@@ -678,58 +814,36 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 		case <-ctx.Done():
 		}
 
-		notice := fmt.Sprintf("Session %d killed", id)
-		if alreadyExited {
-			notice = s.exitNotice()
-		} else if !s.exited() {
-			notice = fmt.Sprintf("Session %d kill signalled; the process has not exited yet", id)
+		if s.exited() {
+			m.remove(id)
+			result := completedSessionResult(s)
+			if !alreadyExited && s.exitErr != nil {
+				result.Content += fmt.Sprintf("\nSession %d killed", id)
+			}
+			return result, nil
 		}
-
-		m.remove(id)
+		m.markBackgrounded(s)
+		notice := fmt.Sprintf("Session %d kill signalled; the process has not exited yet", id)
 		return s.result(sessionResult(s.drain(), notice)), nil
 	}
 
 	input, _ := args["input"].(string)
 	input = decodeInput(input)
-
-	if input == "\u0003" {
-		s.inputMu.Lock()
-		s.pendingInput = ""
-		s.inputOverflow = false
-		s.inputUncertain = false
-		s.inputMu.Unlock()
-		if !s.tty {
-			if err := s.interrupt(); err != nil {
-				return tool.Result{}, fmt.Errorf("cannot interrupt on this platform; use kill instead: %w", err)
-			}
-		} else if _, err := io.WriteString(s.stdin, input); err != nil {
-			return tool.Result{}, fmt.Errorf("failed to write interrupt to stdin: %w", err)
+	if s.exited() {
+		m.remove(id)
+		result := completedSessionResult(s)
+		if input != "" {
+			result.Content += " (input was not delivered)"
 		}
-	} else if input != "" {
-		if result, err := writeSessionInput(ctx, m, id, s, elicit, appr, input); err != nil || result != nil {
-			if result != nil {
-				return *result, err
-			}
-			return tool.Result{}, err
-		}
+		return result, nil
 	}
 
-	if eof, _ := args["eof"].(bool); eof {
-		if err := confirmPendingSessionInput(ctx, s, elicit, appr); err != nil {
-			return tool.Result{}, err
+	eof, _ := args["eof"].(bool)
+	if result, err := applySessionInput(ctx, m, s, elicit, appr, input, eof); err != nil || result != nil {
+		if result != nil {
+			return *result, err
 		}
-		if s.tty {
-			if _, err := io.WriteString(s.stdin, "\x04"); err != nil && !s.exited() {
-				return tool.Result{}, fmt.Errorf("failed to send EOF to terminal: %w", err)
-			}
-			// Readline treats Ctrl-D on a non-empty buffer as delete-char, not
-			// EOF. Unless the process exits, its resulting line is unknowable.
-			s.inputMu.Lock()
-			s.inputUncertain = true
-			s.inputMu.Unlock()
-		} else {
-			s.stdin.Close()
-		}
+		return tool.Result{}, err
 	}
 
 	timer := time.NewTimer(time.Duration(wait) * time.Second)
@@ -741,6 +855,19 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 		return completedSessionResult(s), nil
 	case <-timer.C:
 	case <-ctx.Done():
+	case <-s.outputAvailable():
+		// Coalesce a short burst and let the process reaper report a command
+		// that printed its final line immediately before exiting.
+		if wait > 0 {
+			settle := time.NewTimer(20 * time.Millisecond)
+			select {
+			case <-s.done:
+			case <-timer.C:
+			case <-ctx.Done():
+			case <-settle.C:
+			}
+			settle.Stop()
+		}
 	}
 
 	if s.exited() {
@@ -756,13 +883,21 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 }
 
 func writeSessionInput(ctx context.Context, m *ExecManager, id int, s *execSession, elicit *tool.Elicitation, appr *Approvals, input string) (*tool.Result, error) {
+	if err := s.lockInput(ctx); err != nil {
+		return nil, err
+	}
+	defer s.unlockInput()
+	return writeSessionInputLocked(ctx, m, id, s, elicit, input)
+}
+
+func writeSessionInputLocked(ctx context.Context, m *ExecManager, id int, s *execSession, elicit *tool.Elicitation, input string) (*tool.Result, error) {
 	// Serialize input writes and retain the current logical line. Without this,
 	// an agent can submit "r" and "m -rf ...\n" in separate calls while each
 	// individual call looks harmless to the classifier.
-	s.inputMu.Lock()
-	defer s.inputMu.Unlock()
-
-	combined := applyInputEditing(s.pendingInput, input)
+	combined := s.pendingInput + input
+	if s.tty {
+		combined = applyInputEditing(s.pendingInput, input)
+	}
 	submitted, remainder := splitSubmittedInput(combined)
 	immediateControl := hasImmediateTerminalControl(input)
 	dangerous := immediateControl || s.inputUncertain
@@ -777,22 +912,23 @@ func writeSessionInput(ctx context.Context, m *ExecManager, id int, s *execSessi
 		approvalText += "  [terminal input state is unknown]"
 	}
 	if submitted != "" {
-		dangerous = dangerous || s.inputOverflow || IsDangerousCommand(submitted)
-		if s.inputOverflow {
+		overflowed := s.inputOverflow || len(submitted) > maxClassifiableBytes
+		dangerous = dangerous || overflowed || IsDangerousCommand(submitted)
+		if overflowed {
 			approvalText += "  [input line exceeded classifier limit]"
 		}
 	}
-	approvalCache := appr
-	if immediateControl || s.inputUncertain || s.inputOverflow {
-		// Control keys, unknown readline state, and truncated input are
-		// state-dependent; identical text is not an identical capability.
-		approvalCache = NewApprovals()
-	}
-	if err := confirmIfDangerous(ctx, elicit, approvalCache, approvalText, dangerous); err != nil {
+	// An interactive process can change cwd, aliases, or interpreter between
+	// writes. An earlier approval for identical input is not reusable.
+	if err := confirmIfDangerous(ctx, elicit, NewApprovals(), approvalText, dangerous); err != nil {
 		return nil, err
 	}
 
-	if _, err := io.WriteString(s.stdin, input); err != nil {
+	if err := s.writeInput(ctx, input); err != nil {
+		s.inputUncertain = true
+		if ctx.Err() != nil {
+			return nil, err
+		}
 		if s.exited() {
 			m.remove(id)
 			result := completedSessionResult(s)
@@ -802,18 +938,19 @@ func writeSessionInput(ctx context.Context, m *ExecManager, id int, s *execSessi
 		return nil, fmt.Errorf("failed to write to stdin: %w", err)
 	}
 
-	s.inputOverflow = len(remainder) > maxClassifiableBytes
-	if s.inputOverflow {
+	s.inputOverflow = (s.inputOverflow && submitted == "") || len(remainder) > maxClassifiableBytes
+	if len(remainder) > maxClassifiableBytes {
 		remainder = remainder[:maxClassifiableBytes]
+		for len(remainder) > 0 && !utf8.ValidString(remainder) {
+			remainder = remainder[:len(remainder)-1]
+		}
 	}
 	s.pendingInput = remainder
 	s.inputUncertain = terminalInputUncertainAfter(s.inputUncertain, input)
 	return nil, nil
 }
 
-func confirmPendingSessionInput(ctx context.Context, s *execSession, elicit *tool.Elicitation, appr *Approvals) error {
-	s.inputMu.Lock()
-	defer s.inputMu.Unlock()
+func confirmPendingSessionInputLocked(ctx context.Context, s *execSession, elicit *tool.Elicitation) error {
 	if s.pendingInput == "" && !s.inputOverflow && !s.inputUncertain {
 		return nil
 	}
@@ -824,11 +961,7 @@ func confirmPendingSessionInput(ctx context.Context, s *execSession, elicit *too
 	if s.inputUncertain {
 		text += "  [terminal input state is unknown]"
 	}
-	approvalCache := appr
-	if s.inputOverflow || s.inputUncertain {
-		approvalCache = NewApprovals()
-	}
-	return confirmIfDangerous(ctx, elicit, approvalCache, text, s.inputOverflow || s.inputUncertain || IsDangerousCommand(s.pendingInput))
+	return confirmIfDangerous(ctx, elicit, NewApprovals(), text, s.inputOverflow || s.inputUncertain || IsDangerousCommand(s.pendingInput))
 }
 
 func hasImmediateTerminalControl(input string) bool {
@@ -921,8 +1054,11 @@ func classifyExecSession(args map[string]any) tool.Effect {
 	if args == nil {
 		return tool.EffectDynamic
 	}
-	if input, _ := args["input"].(string); input != "" && IsDangerousCommand(input) {
-		return tool.EffectDangerous
+	if input, _ := args["input"].(string); input != "" {
+		decoded := decodeInput(input)
+		if decoded != "\x03" && (IsDangerousCommand(decoded) || hasImmediateTerminalControl(decoded)) {
+			return tool.EffectDangerous
+		}
 	}
 	if kill, _ := args["kill"].(bool); kill {
 		return tool.EffectMutates

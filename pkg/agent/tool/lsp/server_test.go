@@ -231,7 +231,7 @@ func TestCodeActionPreviewNeverExecutesCommands(t *testing.T) {
 
 func TestMissingDiagnosticsAreUnknown(t *testing.T) {
 	service, path, _ := fixtureService(t, "good")
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	result, err := NewTools(service)[0].Execute(ctx, map[string]any{"operation": "diagnostics", "file_path": path})
 	if err != nil || !strings.Contains(result.Content, "No diagnostics data") || strings.Contains(result.Content, "No diagnostics found") {

@@ -148,12 +148,24 @@ func (g *Graph) search(opts SearchOpts) []*Node {
 	return g.searchPage(opts).Nodes
 }
 
+func normalizeFileFilter(file string) string {
+	file = strings.TrimSpace(strings.ReplaceAll(file, "\\", "/"))
+	for strings.HasPrefix(file, "./") {
+		file = strings.TrimPrefix(file, "./")
+	}
+	if file == "." {
+		return ""
+	}
+	return file
+}
+
 func (g *Graph) searchPage(opts SearchOpts) SearchResult {
 	limit := opts.Limit
 	if limit == 0 {
 		limit = 50
 	}
 	offset := max(opts.Offset, 0)
+	fileFilter := normalizeFileFilter(opts.File)
 
 	var rx *regexp.Regexp
 	if opts.Query != "" {
@@ -174,7 +186,7 @@ func (g *Graph) searchPage(opts SearchOpts) SearchResult {
 		if opts.Kind != "" && n.Kind != opts.Kind {
 			continue
 		}
-		if opts.File != "" && !strings.Contains(n.File, opts.File) {
+		if fileFilter != "" && !strings.Contains(n.File, fileFilter) {
 			continue
 		}
 		score := g.matchScore(n, qLower, qTokens, rx)
@@ -224,7 +236,7 @@ func (g *Graph) searchPage(opts SearchOpts) SearchResult {
 	}
 	end := total
 	if limit > 0 {
-		end = min(offset+limit, total)
+		end = offset + min(limit, total-offset)
 	}
 	page := out[offset:end]
 	nodes := make([]*Node, len(page))
@@ -337,12 +349,13 @@ func containsAllTokens(have, want []string) bool {
 func (g *Graph) resolve(symbol, file string) []*Node {
 	name := symbol
 	var prefix string
+	file = normalizeFileFilter(file)
 
 	if i := strings.LastIndex(symbol, ":"); i > 0 {
-		prefix, name = symbol[:i], symbol[i+1:]
+		prefix, name = normalizeFileFilter(symbol[:i]), symbol[i+1:]
 	} else if len(g.byName[symbol]) == 0 {
 		if i := strings.LastIndexAny(symbol, "./"); i > 0 {
-			prefix, name = symbol[:i], symbol[i+1:]
+			prefix, name = normalizeFileFilter(symbol[:i]), symbol[i+1:]
 		}
 	}
 
@@ -451,7 +464,7 @@ type DepsResult struct {
 }
 
 func (g *Graph) resolveModule(target string) string {
-	t := strings.Trim(target, "/")
+	t := normalizeFileFilter(strings.Trim(target, "/"))
 	if t == "" {
 		return "."
 	}
@@ -463,7 +476,7 @@ func (g *Graph) resolveModule(target string) string {
 	}
 	best := ""
 	for m := range g.moduleSet {
-		if strings.Contains(m, t) && (best == "" || len(m) < len(best)) {
+		if strings.Contains(m, t) && (best == "" || len(m) < len(best) || len(m) == len(best) && m < best) {
 			best = m
 		}
 	}

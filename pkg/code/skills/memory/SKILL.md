@@ -59,7 +59,7 @@ The filename is the memory's identifier — lowercase letters, digits, underscor
 
 **Update an existing memory.** Use `edit` on the file for surgical changes. If the rule has changed, update the `description` in the frontmatter too so the index reflects the new gist.
 
-**Forget a memory.** Run `rm` on the file with `exec_command`. The index updates automatically on the next turn. If you only need to revise the fact, edit the file instead of deleting.
+**Forget a memory.** Run `rm` on the file with `exec`. The index updates automatically on the next turn. If you only need to revise the fact, edit the file instead of deleting.
 
 **List what's remembered.** `glob` `*.md` inside the memory dir; or just consult the index already injected into the session context.
 

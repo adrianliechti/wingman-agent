@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ func graphTool(engine *graph.Engine) tool.Tool {
 			"hierarchy: super/sub types and implementers. tests: direct test callers, or production symbols directly called by a test. find_similar: shared callees/name similarity.",
 			"deps: imports/importers. co_changes: files committed together. changes: changed definitions and affected callers. architecture: languages/modules/entry points/hotspots.",
 			"dead_code: no detected callers, not proof of unused code (reflection/exported/cross-language gaps). index: rebuild; status: inspect index.",
+			"Queries may use a cached graph while it refreshes in the background. Run index when current definitions are required.",
 		}, "\n"),
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 		Parameters: map[string]any{
@@ -87,14 +89,19 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				},
 				"depth": map[string]any{
 					"type":        "integer",
-					"description": "trace: max hops, default 8, cap 32. deps: default 1; >1 includes transitive dependencies.",
+					"minimum":     0,
+					"maximum":     32,
+					"description": "trace: max hops, default 8. deps: default 1; >1 includes transitive dependencies. Maximum 32; 0 uses the default.",
 				},
 				"limit": map[string]any{
 					"type":        "integer",
-					"description": "Result limit; defaults: search 50, search_content 10, dead_code 100, co_changes/find_similar 15.",
+					"minimum":     0,
+					"maximum":     1000,
+					"description": "Result limit (0 uses the default); defaults: search 50, search_content 10, dead_code 100, co_changes/find_similar 15. Maximum 1000.",
 				},
 				"offset": map[string]any{
 					"type":        "integer",
+					"minimum":     0,
 					"description": "search/search_content: 0-based pagination offset.",
 					"default":     0,
 				},
@@ -102,7 +109,18 @@ func graphTool(engine *graph.Engine) tool.Tool {
 			"required":             []string{"operation"},
 			"additionalProperties": false,
 		},
-		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+		Execute: func(ctx context.Context, args map[string]any) (result tool.Result, err error) {
+			defer func() {
+				if ctx.Err() != nil {
+					result, err = tool.Result{}, ctx.Err()
+				}
+			}()
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
+			if err := validateArgs(args); err != nil {
+				return tool.Result{}, err
+			}
 			operation, _ := args["operation"].(string)
 
 			switch operation {
@@ -121,7 +139,7 @@ func graphTool(engine *graph.Engine) tool.Tool {
 				}
 				freshness := "fresh"
 				if engine.IsStale(ctx) {
-					freshness = "stale — the next graph query will refresh it"
+					freshness = "stale — the next graph query starts a background refresh; run index to wait for a rebuild"
 				}
 				return tool.Text(fmt.Sprintf("Indexed at %s (%s): %d source files, %d definitions, %d call edges%s.%s",
 					st.IndexedAt.Format(time.RFC3339), freshness, st.Files, st.Nodes, st.Edges, edgeBreakdown(engine.EdgeStats()), formatCoverage(st.Skipped))), nil
@@ -202,7 +220,7 @@ func graphTool(engine *graph.Engine) tool.Tool {
 					return tool.Result{}, err
 				}
 				if len(nodes) == 0 {
-					return tool.Text("No dead code found (every callable has a detected caller)."), nil
+					return tool.Text("No unused-code candidates found within graph coverage. This does not prove that every callable is used."), nil
 				}
 				return tool.Text(formatNodes(nodes)), nil
 
@@ -292,6 +310,43 @@ func graphTool(engine *graph.Engine) tool.Tool {
 	}
 }
 
+func validateArgs(args map[string]any) error {
+	for _, key := range []string{"operation", "query", "pattern", "glob", "symbol", "target", "direction", "kind", "file", "since"} {
+		if raw, exists := args[key]; exists {
+			if _, ok := raw.(string); !ok {
+				return fmt.Errorf("%s must be a string", key)
+			}
+		}
+	}
+	for _, key := range []string{"regex", "ignore_case"} {
+		if raw, exists := args[key]; exists {
+			if _, ok := raw.(bool); !ok {
+				return fmt.Errorf("%s must be boolean", key)
+			}
+		}
+	}
+	for _, key := range []string{"limit", "offset", "depth"} {
+		if raw, exists := args[key]; exists {
+			value, ok := tool.IntValue(raw)
+			if !ok || value < 0 {
+				return fmt.Errorf("%s must be a non-negative integer", key)
+			}
+			if key == "limit" && value > 1000 || key == "depth" && value > 32 {
+				return fmt.Errorf("%s exceeds its maximum (%s)", key, map[string]string{"limit": "1000", "depth": "32"}[key])
+			}
+		}
+	}
+	for key, values := range map[string][]string{
+		"direction": {"callees", "callers"},
+		"kind":      {"function", "method", "class", "interface", "type", "constructor", "module", "constant", "variable"},
+	} {
+		if raw, exists := args[key]; exists && !slices.Contains(values, raw.(string)) {
+			return fmt.Errorf("%s must be one of: %s", key, strings.Join(values, ", "))
+		}
+	}
+	return nil
+}
+
 func stringArg(args map[string]any, key string) string {
 	s, _ := args[key].(string)
 	return s
@@ -369,10 +424,21 @@ func formatSearchResult(res graph.SearchResult) string {
 }
 
 func formatContentSearch(res graph.ContentSearchResult) string {
-	if res.TotalResults == 0 && res.TotalRawResults == 0 {
-		return "No matching source lines."
-	}
 	var b strings.Builder
+	if res.SourceChanged {
+		b.WriteString("Source changed since indexing; matches from changed files are ungrouped. Run index to refresh definitions and the discovered file set.\n\n")
+	}
+	if len(res.SkippedFiles) > 0 {
+		fmt.Fprintf(&b, "Search INCOMPLETE: %d file(s) could not be fully scanned. Narrow with file/glob or use grep.\n", len(res.SkippedFiles))
+		for _, issue := range res.SkippedFiles[:min(len(res.SkippedFiles), 5)] {
+			fmt.Fprintf(&b, "- %s: %s\n", issue.File, issue.Reason)
+		}
+		b.WriteString("\n")
+	}
+	if res.TotalResults == 0 && res.TotalRawResults == 0 {
+		b.WriteString("No matching source lines in scanned content.")
+		return b.String()
+	}
 	if res.TotalResults > 0 {
 		fmt.Fprintf(&b, "Showing %d of %d containing symbol(s) (offset %d):\n", len(res.Hits), res.TotalResults, res.Offset)
 		for _, hit := range res.Hits {

@@ -243,8 +243,8 @@ func TestAgentToolBackgroundSchemaAndTaskTools(t *testing.T) {
 	for _, tl := range withTasks {
 		names[tl.Name] = true
 	}
-	if !names["agent"] || !names["task_output"] || !names["task_stop"] {
-		t.Fatalf("tools with registry = %v, want agent, task_output, task_stop", names)
+	if !names["agent"] || !names["agent_output"] || !names["agent_stop"] {
+		t.Fatalf("tools with registry = %v, want agent, agent_output, agent_stop", names)
 	}
 	properties = withTasks[0].Parameters["properties"].(map[string]any)
 	if _, ok := properties["background"]; !ok {
@@ -312,14 +312,14 @@ func TestAgentToolBackgroundRunsDetached(t *testing.T) {
 		t.Fatalf("peek transcript missing agent output: %+v", messages)
 	}
 
-	out, err = byName["task_send"].Execute(t.Context(), map[string]any{
+	out, err = byName["agent_send"].Execute(t.Context(), map[string]any{
 		"id": done.Task.ID, "message": "and one more thing",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.Content, "resumed") {
-		t.Fatalf("task_send result = %q", out.Content)
+		t.Fatalf("agent_send result = %q", out.Content)
 	}
 
 	select {
@@ -347,12 +347,12 @@ func TestTaskSendValidation(t *testing.T) {
 
 	var taskSend tool.Tool
 	for _, tl := range Tools(&agent.Config{}, nil, reg) {
-		if tl.Name == "task_send" {
+		if tl.Name == "agent_send" {
 			taskSend = tl
 		}
 	}
 	if taskSend.Name == "" {
-		t.Fatal("task_send tool missing")
+		t.Fatal("agent_send tool missing")
 	}
 
 	if _, err := taskSend.Execute(t.Context(), map[string]any{"id": "nope", "message": "m"}); err == nil {
@@ -394,7 +394,7 @@ func TestAgentToolSyncRunAdoptedForFollowUps(t *testing.T) {
 		t.Fatalf("result = %q", out.Content)
 	}
 
-	m := regexp.MustCompile(`\(id (\S+) — task_send`).FindStringSubmatch(out.Content)
+	m := regexp.MustCompile(`\(id (\S+) — agent_send`).FindStringSubmatch(out.Content)
 	if m == nil {
 		t.Fatalf("result missing follow-up id: %q", out.Content)
 	}
@@ -408,7 +408,7 @@ func TestAgentToolSyncRunAdoptedForFollowUps(t *testing.T) {
 		t.Fatal("adopted task must expose its transcript")
 	}
 
-	if _, err := byName["task_send"].Execute(t.Context(), map[string]any{
+	if _, err := byName["agent_send"].Execute(t.Context(), map[string]any{
 		"id": id, "message": "and one more thing",
 	}); err != nil {
 		t.Fatal(err)
@@ -474,7 +474,7 @@ func TestAgentToolSyncRunWithoutRegistryOmitsFollowUpID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out.Content, "task_send") {
-		t.Fatalf("no-registry result must not advertise task_send: %q", out.Content)
+	if strings.Contains(out.Content, "agent_send") {
+		t.Fatalf("no-registry result must not advertise agent_send: %q", out.Content)
 	}
 }

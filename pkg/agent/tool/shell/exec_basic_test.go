@@ -20,7 +20,7 @@ func runExec(t *testing.T, command string) tool.Result {
 		"wait":    10,
 	})
 	if err != nil {
-		t.Fatalf("exec_command failed: %v", err)
+		t.Fatalf("exec failed: %v", err)
 	}
 	return result
 }
@@ -108,7 +108,7 @@ func TestExecCommandTimeoutKillsTheProcess(t *testing.T) {
 		"wait":    20,
 	})
 	if err != nil {
-		t.Fatalf("exec_command failed: %v", err)
+		t.Fatalf("exec failed: %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > 10*time.Second {
 		t.Fatalf("timeout did not kill the command promptly (took %s)", elapsed)
@@ -133,7 +133,7 @@ func TestExecCommandBackgroundsOnceOutputGoesQuiet(t *testing.T) {
 		"wait":    20,
 	})
 	if err != nil {
-		t.Fatalf("exec_command failed: %v", err)
+		t.Fatalf("exec failed: %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > 5*time.Second {
 		t.Fatalf("idle command was not backgrounded promptly (took %s)", elapsed)
@@ -151,7 +151,7 @@ func TestExecCommandBackgroundsOnceOutputGoesQuiet(t *testing.T) {
 		"wait":    20,
 	})
 	if err != nil {
-		t.Fatalf("exec_command failed: %v", err)
+		t.Fatalf("exec failed: %v", err)
 	}
 	if !strings.Contains(quiet.Content, "done") || !strings.Contains(quiet.Content, "Command completed") {
 		t.Fatalf("silent command was backgrounded instead of completing: %q", quiet.Content)

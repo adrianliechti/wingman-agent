@@ -203,7 +203,7 @@ func TestSessionFactsRestateLedgerEditsAndChecks(t *testing.T) {
 		return reviewResult(position, "edit", "", map[string]any{tool.FileChangesMetadata: []tool.FileChange{{Path: path, AfterExists: true}}})
 	}
 	check := func(position uint64, command string, exit int) RuntimeEvent {
-		return reviewResult(position, "exec_command", fmt.Sprintf(`{"command":%q,"validation":true}`, command), map[string]any{"exit_code": exit})
+		return reviewResult(position, "exec", fmt.Sprintf(`{"command":%q,"validation":true}`, command), map[string]any{"exit_code": exit})
 	}
 	a := &Agent{Config: &Config{}, Events: []RuntimeEvent{
 		{Type: EventTurnStarted, TurnID: "one"}, edit(2, "a.go"), check(3, "go test ./...", 0),

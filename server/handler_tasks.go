@@ -27,15 +27,15 @@ type TaskEntry struct {
 	Seq         int    `json:"seq"`
 }
 
-func taskEntry(t *task.Task) TaskEntry {
+func taskEntry(t task.Info) TaskEntry {
 	return TaskEntry{
 		ID:          t.ID,
 		Description: t.Description,
 		AgentType:   t.AgentType,
-		Status:      string(t.Status()),
-		Activity:    t.Activity(),
-		Elapsed:     int64(t.Elapsed() / time.Second),
-		Seq:         t.Seq(),
+		Status:      string(t.Status),
+		Activity:    t.Activity,
+		Elapsed:     int64(t.Elapsed / time.Second),
+		Seq:         t.Seq,
 	}
 }
 
@@ -196,7 +196,7 @@ func (s *backendRuntime) handleTasks(w http.ResponseWriter, r *http.Request) {
 	out := []TaskEntry{}
 	if reg != nil {
 		for _, t := range reg.List() {
-			out = append(out, taskEntry(t))
+			out = append(out, taskEntry(t.Info()))
 		}
 	}
 	if agent, ok := s.agent.(*codeagent.Agent); ok {
@@ -214,13 +214,14 @@ func (s *backendRuntime) handleTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if t := reg.Get(r.PathValue("taskID")); t != nil {
+		info := t.Info()
 		writeJSON(w, struct {
 			TaskEntry
 			Result     string            `json:"result,omitempty"`
 			Transcript []TranscriptEntry `json:"transcript"`
 		}{
-			TaskEntry:  taskEntry(t),
-			Result:     t.Result(),
+			TaskEntry:  taskEntry(info),
+			Result:     info.Result,
 			Transcript: transcriptEntries(t.PeekMessages()),
 		})
 		return

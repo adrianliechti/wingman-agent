@@ -2,13 +2,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { PendingPrompt, PromptReply } from "../../hooks/useWebSocket";
 import type { PromptField } from "../../types/protocol";
 
+function ownValue<T>(values: Record<string, T>, key: string): T | undefined {
+	return Object.hasOwn(values, key) ? values[key] : undefined;
+}
+
 function promptFieldValue(
 	field: PromptField,
 	selections: Record<string, string[]>,
 	others: Record<string, string>,
 ): string[] {
-	const other = (others[field.name] ?? "").trim();
-	const picked = selections[field.name] ?? [];
+	const other = (ownValue(others, field.name) ?? "").trim();
+	const picked = ownValue(selections, field.name) ?? [];
 	if (field.multiple) {
 		return other ? [...picked, other] : picked;
 	}
@@ -61,14 +65,14 @@ export function PromptBar({
 	);
 	const fields = allFields.filter((field) => !field.custom_answer_for);
 	const customFields = useMemo(() => {
-		const result: Record<string, PromptField> = {};
+		const result: Record<string, PromptField> = Object.create(null);
 		for (const field of allFields) {
 			if (field.custom_answer_for) result[field.custom_answer_for] = field;
 		}
 		return result;
 	}, [allFields]);
 	const [selections, setSelections] = useState<Record<string, string[]>>(() => {
-		const init: Record<string, string[]> = {};
+		const init: Record<string, string[]> = Object.create(null);
 		for (const f of fields) {
 			const d = f.default != null ? String(f.default) : "";
 			if (d && f.enum?.includes(d)) init[f.name] = [d];
@@ -76,7 +80,7 @@ export function PromptBar({
 		return init;
 	});
 	const [others, setOthers] = useState<Record<string, string>>(() => {
-		const init: Record<string, string> = {};
+		const init: Record<string, string> = Object.create(null);
 		for (const f of fields) {
 			if (f.default != null && !f.enum?.length) {
 				init[f.name] = String(f.default);
@@ -109,10 +113,10 @@ export function PromptBar({
 		);
 
 	const submit = () => {
-		const content: Record<string, unknown> = {};
+		const content: Record<string, unknown> = Object.create(null);
 		for (const f of fields) {
-			const other = (others[f.name] ?? "").trim();
-			const custom = customFields[f.name];
+			const other = (ownValue(others, f.name) ?? "").trim();
+			const custom = ownValue(customFields, f.name);
 			if (other && custom) {
 				content[custom.name] = coercePromptValue(custom, other);
 				continue;
@@ -145,7 +149,7 @@ export function PromptBar({
 			accept({ [field.name]: option });
 			return;
 		}
-		const current = selections[field.name] ?? [];
+		const current = ownValue(selections, field.name) ?? [];
 		let next: string[];
 		let nextOthers = others;
 		if (field.multiple) {
@@ -156,7 +160,7 @@ export function PromptBar({
 			next = current[0] === option ? [] : [option];
 			// Picking an option supersedes an abandoned free-text draft;
 			// otherwise the stale draft would silently win on submit.
-			if ((others[field.name] ?? "") !== "") {
+			if ((ownValue(others, field.name) ?? "") !== "") {
 				nextOthers = { ...others, [field.name]: "" };
 				setOthers(nextOthers);
 			}
@@ -174,9 +178,9 @@ export function PromptBar({
 	const submitOther = () => {
 		const f = fields[0];
 		if (!f) return;
-		const value = (others[f.name] ?? "").trim();
+		const value = (ownValue(others, f.name) ?? "").trim();
 		if (!value) return;
-		const target = customFields[f.name] ?? f;
+		const target = ownValue(customFields, f.name) ?? f;
 		accept({ [target.name]: coercePromptValue(target, value) });
 	};
 
@@ -267,8 +271,8 @@ export function PromptBar({
 								key={f.name}
 								field={f}
 								hideTitle={tabbed}
-								selected={selections[f.name] ?? []}
-								other={others[f.name] ?? ""}
+								selected={ownValue(selections, f.name) ?? []}
+								other={ownValue(others, f.name) ?? ""}
 								onToggle={(option) => toggleOption(f, option)}
 								onOther={(v) => setOthers((prev) => ({ ...prev, [f.name]: v }))}
 								onSubmit={
@@ -332,7 +336,7 @@ export function PromptBar({
 							type="button"
 							className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
 							onClick={submitOther}
-							disabled={(others[fields[0].name] ?? "").trim() === ""}
+							disabled={(ownValue(others, fields[0].name) ?? "").trim() === ""}
 							title="Submit (Enter)"
 						>
 							Send

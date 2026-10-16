@@ -183,3 +183,31 @@ func TestBatchEditToolRejectsOutsidePathBeforeWriting(t *testing.T) {
 		t.Fatalf("created file exists after rejected batch: %v", statErr)
 	}
 }
+
+func TestBatchEditToolReportsAllFailedEntriesInOneTurn(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := os.WriteFile(filepath.Join(directory, "a.txt"), []byte("alpha\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "b.txt"), []byte("beta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = batchEditTool(root, nil).Execute(context.Background(), map[string]any{"edits": []any{
+		map[string]any{"file_path": "a.txt", "old_string": "missing_a", "new_string": "x"},
+		map[string]any{"file_path": "b.txt", "old_string": "missing_b", "new_string": "y"},
+	}})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{"edits[0] for a.txt", "edits[1] for b.txt"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+}

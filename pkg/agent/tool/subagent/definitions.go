@@ -1,7 +1,6 @@
 package subagent
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -84,7 +83,10 @@ func appendDefinitions(defs []Definition, seen map[string]string, dir string) []
 }
 
 func ParseDefinition(data string) (Definition, error) {
-	frontmatter, body := splitFrontmatter(data)
+	frontmatter, body, ok := splitFrontmatter(data)
+	if !ok {
+		return Definition{}, fmt.Errorf("missing frontmatter")
+	}
 
 	var header struct {
 		Name        string `yaml:"name"`
@@ -98,7 +100,7 @@ func ParseDefinition(data string) (Definition, error) {
 
 	def := Definition{
 		Name:         strings.ToLower(strings.TrimSpace(header.Name)),
-		Description:  strings.TrimSpace(header.Description),
+		Description:  strings.Join(strings.Fields(header.Description), " "),
 		Instructions: strings.TrimSpace(body),
 	}
 
@@ -136,10 +138,18 @@ func ParseDefinition(data string) (Definition, error) {
 }
 
 func (d Definition) subagentType() subagentType {
-	st := subagentType{Instructions: d.Instructions, Model: d.Model}
+	var modelRole string
+	switch role := strings.ToLower(strings.TrimSpace(d.Model)); role {
+	case "plan":
+		modelRole = "complex"
+	case "default", "complex", "utility":
+		modelRole = role
+	}
 
-	switch d.Access {
-	case "read-only":
+	st := subagentType{Instructions: d.Instructions, Model: modelRole}
+
+	switch strings.ToLower(strings.TrimSpace(d.Access)) {
+	case "read-only", "readonly":
 		st.AllowTool = allowReadOnlyTool
 		st.WrapDynamicReadOnly = true
 		st.ReadOnly = true
@@ -152,35 +162,41 @@ func (d Definition) subagentType() subagentType {
 	return st
 }
 
-func splitFrontmatter(data string) (frontmatter, body string) {
-	scanner := bufio.NewScanner(strings.NewReader(data))
+func splitFrontmatter(data string) (frontmatter, body string, ok bool) {
+	data = strings.TrimPrefix(data, "\ufeff")
 
-	var inFrontmatter, pastFrontmatter bool
-	var front, rest strings.Builder
+	var firstLine, rest string
+	if before, after, found := strings.Cut(data, "\n"); found {
+		firstLine = strings.TrimSuffix(before, "\r")
+		rest = after
+	} else {
+		return "", "", false
+	}
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	if firstLine != "---" {
+		return "", "", false
+	}
 
-		if line == "---" {
-			if !inFrontmatter && !pastFrontmatter {
-				inFrontmatter = true
-				continue
-			}
-			if inFrontmatter {
-				inFrontmatter = false
-				pastFrontmatter = true
-				continue
-			}
-		}
-
+	var front, remaining strings.Builder
+	inFrontmatter := true
+	for line := range strings.SplitSeq(rest, "\n") {
+		trimmed := strings.TrimSuffix(line, "\r")
 		if inFrontmatter {
-			front.WriteString(line)
+			if trimmed == "---" {
+				inFrontmatter = false
+				continue
+			}
+			front.WriteString(trimmed)
 			front.WriteString("\n")
-		} else if pastFrontmatter {
-			rest.WriteString(line)
-			rest.WriteString("\n")
+		} else {
+			remaining.WriteString(trimmed)
+			remaining.WriteString("\n")
 		}
 	}
 
-	return front.String(), rest.String()
+	if inFrontmatter {
+		return "", "", false
+	}
+
+	return front.String(), remaining.String(), true
 }

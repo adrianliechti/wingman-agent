@@ -159,7 +159,7 @@ func TestEditFuzzyMatchesCommonTypography(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read edited file: %v", err)
 	}
-	if !strings.Contains(string(content), `say "bye"`) || !strings.Contains(string(content), "foo-baz") {
+	if !strings.Contains(string(content), `say “bye”`) || !strings.Contains(string(content), "foo-baz") {
 		t.Fatalf("unexpected edited content: %q", string(content))
 	}
 }
@@ -180,7 +180,7 @@ func TestEditReturnsConciseFileSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
-	if result.Content != "Applied 1 edits across 1 files atomically.\nM diff.txt" {
+	if result.Content != "Applied 1 edits across 1 files.\nM diff.txt" {
 		t.Fatalf("unexpected edit summary: %q", result.Content)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -15,6 +14,9 @@ import (
 )
 
 func NewTools(service *language.Service) []tool.Tool {
+	if service == nil {
+		return nil
+	}
 	return []tool.Tool{lspTool(service)}
 }
 
@@ -84,9 +86,44 @@ func lspTool(service *language.Service) tool.Tool {
 			"required":             []string{"operation"},
 			"additionalProperties": false,
 		},
-		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+		Execute: func(ctx context.Context, args map[string]any) (result tool.Result, err error) {
 			ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
+			defer func() {
+				if ctx.Err() != nil {
+					result, err = tool.Result{}, ctx.Err()
+				}
+			}()
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
+			for _, key := range []string{"operation", "file_path", "symbol", "query", "new_name", "action_title", "output_mode"} {
+				if raw, exists := args[key]; exists {
+					if _, ok := raw.(string); !ok {
+						return tool.Result{}, fmt.Errorf("%s must be a string", key)
+					}
+				}
+			}
+			if raw, exists := args["output_mode"]; exists {
+				if mode, _ := raw.(string); mode != "locations" && mode != "count" {
+					return tool.Result{}, fmt.Errorf("output_mode must be locations or count")
+				}
+			}
+			if raw, exists := args["include_declaration"]; exists {
+				if _, ok := raw.(bool); !ok {
+					return tool.Result{}, fmt.Errorf("include_declaration must be boolean")
+				}
+			}
+			for _, key := range []string{"line", "column"} {
+				if _, _, err := optionalPositiveInt(args, key); err != nil {
+					return tool.Result{}, err
+				}
+			}
+			if _, column := args["column"]; column {
+				if _, line := args["line"]; !line {
+					return tool.Result{}, fmt.Errorf("line must be a positive 1-based integer when column is supplied")
+				}
+			}
 			operation, _ := args["operation"].(string)
 			page, err := parsePage(args)
 			if err != nil {
@@ -239,17 +276,10 @@ func lspTool(service *language.Service) tool.Tool {
 				mode := "locations"
 				if raw, exists := args["output_mode"]; exists {
 					mode, _ = raw.(string)
-					if mode != "locations" && mode != "count" {
-						return tool.Result{}, fmt.Errorf("output_mode must be locations or count")
-					}
 				}
 				include := true
 				if raw, exists := args["include_declaration"]; exists {
-					var ok bool
-					include, ok = raw.(bool)
-					if !ok {
-						return tool.Result{}, fmt.Errorf("include_declaration must be boolean")
-					}
+					include, _ = raw.(bool)
 				}
 				content, err := runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
 					locations, err := s.ReferenceLocations(ctx, uri, line, column, include)
@@ -304,9 +334,6 @@ func lspTool(service *language.Service) tool.Tool {
 						}
 						content = formatOutgoingCalls(calls, manager.WorkingDir(), page)
 					}
-					if len(items) > 1 {
-						content += fmt.Sprintf("(%d call hierarchy items at this position; showing calls for %s)\n", len(items), items[0].Name)
-					}
 					return content, nil
 				})
 				return tool.Text(content), err
@@ -357,7 +384,7 @@ func resolvePosition(path string, args map[string]any) (lsp.Position, string, er
 
 func optionalPositiveInt(args map[string]any, key string) (int, bool, error) {
 	raw, present := args[key]
-	if !present || raw == nil {
+	if !present {
 		return 0, false, nil
 	}
 
@@ -419,15 +446,8 @@ func resolveExistingFile(workingDir, path string) (string, error) {
 }
 
 func pathInsideWorkspace(path, workingDir string) bool {
-	cp, cw := path, workingDir
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-		cp = strings.ToLower(cp)
-		cw = strings.ToLower(cw)
-	}
-	if cp == cw {
-		return true
-	}
-	return strings.HasPrefix(cp, cw+string(filepath.Separator))
+	rel, err := filepath.Rel(workingDir, path)
+	return err == nil && filepath.IsLocal(rel)
 }
 
 func expandHome(path string) string {

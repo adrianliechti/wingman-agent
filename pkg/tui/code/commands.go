@@ -284,8 +284,9 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 		return
 	}
 	query := strings.TrimSpace(a.editor.Text())
+	imageCount := a.countPendingImages()
 
-	if query == "" {
+	if query == "" && imageCount == 0 && len(a.pendingFiles) == 0 {
 		return
 	}
 
@@ -331,7 +332,6 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 
 	displayText := query
 
-	imageCount := a.countPendingImages()
 	if imageCount > 0 || len(a.pendingFiles) > 0 {
 		var attachments []string
 		if imageCount == 1 {
@@ -342,19 +342,32 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 		for _, f := range a.pendingFiles {
 			attachments = append(attachments, f)
 		}
-		displayText = fmt.Sprintf("%s\n[%s]", query, strings.Join(attachments, ", "))
+		if query != "" {
+			displayText = fmt.Sprintf("%s\n[%s]", query, strings.Join(attachments, ", "))
+		} else {
+			displayText = fmt.Sprintf("[%s]", strings.Join(attachments, ", "))
+		}
 	}
 
 	input := []agent.Content{{Text: displayText}}
 	input = append(input, a.pendingContent...)
 
 	if len(a.pendingFiles) > 0 {
+		var rootPath string
+		if workspace != nil {
+			rootPath = workspace.RootPath
+		}
 		var sb strings.Builder
 		fmt.Fprint(&sb, "\n[Attached files - use the read tool to access their content]\n")
 		for _, f := range a.pendingFiles {
 			fmt.Fprintf(&sb, "- %s\n", f)
 		}
 		input = append(input, agent.Content{Text: sb.String()})
+		for _, f := range a.pendingFiles {
+			if dataURL := readAttachedImageFile(f, rootPath); dataURL != "" {
+				input = append(input, agent.Content{File: &agent.File{Name: f, Data: dataURL}})
+			}
+		}
 	}
 
 	for _, inv := range skill.Invocations(query, skills) {
@@ -368,7 +381,9 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 
 	editing := a.editingQueueID != ""
 	if a.submitAgentInputIntent(input, displayText, intent) {
-		a.editor.AddHistory(query)
+		if query != "" {
+			a.editor.AddHistory(query)
+		}
 		a.editor.SetText("")
 		a.clearPendingContent()
 		a.showWelcome = false

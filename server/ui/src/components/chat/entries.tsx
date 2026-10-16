@@ -52,30 +52,30 @@ export const EntryView = memo(function EntryView({
 								))}
 							</div>
 						)}
-						{entry.images && entry.images.length > 0 && (
-							<div
-								className={`flex flex-wrap gap-1.5 ${entry.content || (entry.files?.length ?? 0) > 0 ? "mt-2" : ""}`}
-							>
-								{entry.images.map((src, i) => (
-									<a
-										key={`${entry.id}-img-${i}`}
-										href={src}
-										target="_blank"
-										rel="noreferrer"
-										className="block rounded overflow-hidden bg-bg-active"
-									>
-										<img
-											src={src}
-											alt="attachment"
-											className="block max-h-40 max-w-[240px] object-contain"
-										/>
-									</a>
-								))}
-							</div>
-						)}
 					</>
 				) : (
 					<MarkdownContent text={entry.content} streaming={isStreaming} />
+				)}
+				{entry.images && entry.images.length > 0 && (
+					<div
+						className={`flex flex-wrap gap-1.5 ${entry.content || (entry.files?.length ?? 0) > 0 ? "mt-2" : ""}`}
+					>
+						{entry.images.map((src, i) => (
+							<a
+								key={`${entry.id}-img-${i}`}
+								href={src}
+								target="_blank"
+								rel="noreferrer"
+								className="block rounded overflow-hidden bg-bg-active"
+							>
+								<img
+									src={src}
+									alt="attachment"
+									className="block max-h-40 max-w-[240px] object-contain"
+								/>
+							</a>
+						))}
+					</div>
 				)}
 			</div>
 		</div>
@@ -164,12 +164,15 @@ const ToolRow = memo(function ToolRow({
 	const isDiff = shouldRenderDiff(entry.toolKind, entry.toolName, result);
 	const args = isDiff ? null : parseArgs(entry.toolArgs);
 	const isCommandTool =
+		entry.toolName === "exec" ||
 		entry.toolName === "shell" ||
 		entry.toolName === "exec_command" ||
 		entry.toolName === "Run command" ||
 		(entry.toolKind === "execute" && typeof args?.command === "string");
 	const toolLabel =
-		entry.toolName === "shell" || entry.toolName === "exec_command"
+		entry.toolName === "exec" ||
+		entry.toolName === "shell" ||
+		entry.toolName === "exec_command"
 			? "Run command"
 			: entry.toolName;
 	const headerHint = displayHint

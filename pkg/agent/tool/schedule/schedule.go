@@ -59,13 +59,20 @@ func NewTask(prompt, sched string) (Task, error) {
 	if p.interval > 0 && p.interval < MinInterval {
 		return Task{}, fmt.Errorf("invalid interval %q: the shortest supported interval is %s", sched, MinInterval)
 	}
+	now := time.Now()
+	if p.cron != nil {
+		first := p.cron.Next(now)
+		if second := p.cron.Next(first); !first.IsZero() && !second.IsZero() && second.Sub(first) < MinInterval {
+			return Task{}, fmt.Errorf("invalid schedule %q: the shortest supported interval is %s", sched, MinInterval)
+		}
+	}
 
 	return Task{
 		ID:        uuid.NewString()[:8],
 		Prompt:    prompt,
 		Schedule:  sched,
 		Status:    StatusActive,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: now,
 	}, nil
 }
 

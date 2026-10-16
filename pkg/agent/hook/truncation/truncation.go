@@ -13,7 +13,7 @@ import (
 
 const MaxBytes = tool.MaxInlineResultBytes
 
-const grepMaxBytes = 20 * 1024
+const grepMaxBytes = tool.MaxGrepResultBytes
 
 const shellMaxBytes = tool.MaxInlineResultBytes
 
@@ -25,13 +25,15 @@ func budgetFor(name string) int {
 	switch name {
 	case "grep":
 		return grepMaxBytes
-	case "shell", "exec_command", "exec_session":
+	case "shell", "exec", "exec_command", "exec_session":
 		return shellMaxBytes
 	default:
 		return MaxBytes
 	}
 }
 
+// New provides a post-tool adapter. Install Transform in Hooks.TransformToolResult
+// when persistence must include context added by lifecycle hooks.
 func New(scratchDir string) hook.PostToolUse {
 	return func(_ context.Context, call tool.ToolCall, result string) (hook.Outcome, error) {
 		if tool.IsImageResult(result) {
@@ -47,8 +49,23 @@ func New(scratchDir string) hook.PostToolUse {
 	}
 }
 
+// Transform persists the assembled result after lifecycle hooks add context.
+func Transform(scratchDir string) hook.TransformToolResult {
+	truncate := New(scratchDir)
+	return func(ctx context.Context, call tool.ToolCall, result string) (string, error) {
+		outcome, err := truncate(ctx, call, result)
+		if outcome.UpdatedResult != nil {
+			return *outcome.UpdatedResult, err
+		}
+		return result, err
+	}
+}
+
 func writeScratch(scratchDir, toolName, content string) string {
 	if scratchDir == "" {
+		return ""
+	}
+	if err := os.MkdirAll(scratchDir, 0o700); err != nil {
 		return ""
 	}
 
@@ -56,12 +73,17 @@ func writeScratch(scratchDir, toolName, content string) string {
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	name := f.Name()
 	if _, err := f.WriteString(content); err != nil {
-		os.Remove(f.Name())
+		_ = f.Close()
+		_ = os.Remove(name)
 		return ""
 	}
-	return f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return ""
+	}
+	return name
 }
 
 func formatPersisted(result, scratchPath string) string {

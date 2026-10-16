@@ -22,6 +22,11 @@ func TestReadContents(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "clipboard text") || !strings.Contains(err.Error(), "clipboard image") {
 		t.Fatalf("combined error = %v", err)
 	}
+
+	multi, err := readImageContents("", nil, []string{"data:image/png;base64,MQ==", "data:image/png;base64,Mg=="}, nil)
+	if err != nil || len(multi) != 2 || multi[0].Image == nil || *multi[0].Image != "data:image/png;base64,MQ==" || multi[1].Image == nil || *multi[1].Image != "data:image/png;base64,Mg==" {
+		t.Fatalf("multi-image read = %#v, %v", multi, err)
+	}
 }
 
 func TestClipboardReadFallbackPreservesNativeContent(t *testing.T) {

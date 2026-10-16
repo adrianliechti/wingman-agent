@@ -67,20 +67,20 @@ func TestExplicitOptionsDisableOnlySelectedToolFamilies(t *testing.T) {
 		{
 			name:    "shell",
 			options: Options{DisableShell: true},
-			absent:  []string{"shell", "exec_command", "exec_session"},
-			present: []string{"fetch", "web_search"},
+			absent:  []string{"shell", "exec", "exec_session"},
+			present: []string{"fetch", "search_web"},
 		},
 		{
 			name:    "web search",
 			options: Options{DisableWebSearch: true},
-			absent:  []string{"web_search"},
-			present: []string{"exec_command", "exec_session", "fetch"},
+			absent:  []string{"search_web"},
+			present: []string{"exec", "exec_session", "fetch"},
 		},
 		{
 			name:    "web fetch",
 			options: Options{DisableWebFetch: true},
 			absent:  []string{"fetch"},
-			present: []string{"exec_command", "exec_session", "web_search"},
+			present: []string{"exec", "exec_session", "search_web"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -114,7 +114,7 @@ func TestEnvironmentOptionsAreResolvedAtAgentStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertTools(t, a, sessionID,
-		[]string{"shell", "exec_command", "exec_session", "web_search", "fetch", "todo"},
+		[]string{"shell", "exec", "exec_session", "search_web", "fetch", "todo"},
 		[]string{"read", "edit"},
 	)
 }
@@ -184,7 +184,7 @@ func TestLegacyToolsAreNotExposed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertTools(t, a, sessionID, []string{"shell", "todo"}, []string{"exec_command", "exec_session"})
+	assertTools(t, a, sessionID, []string{"shell", "todo"}, []string{"exec", "exec_session"})
 }
 
 func newOptionsTestWorkspace(t *testing.T) *code.Workspace {

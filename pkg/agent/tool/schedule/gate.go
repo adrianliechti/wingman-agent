@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 )
@@ -82,7 +83,13 @@ func (b *gateOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 func (b *gateOutput) String() string {
-	text := strings.TrimSpace(string(b.data))
+	data := b.data
+	if b.truncated {
+		for len(data) > 0 && !utf8.RuneStart(data[0]) {
+			data = data[1:]
+		}
+	}
+	text := strings.TrimSpace(string(data))
 	if b.truncated {
 		return "[earlier output truncated]\n" + text
 	}

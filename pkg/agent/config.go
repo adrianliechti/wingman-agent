@@ -177,14 +177,15 @@ func (c *Config) Derive() *Config {
 		// session. Tool, permission, compaction, and subagent lifecycle hooks
 		// also run inside delegated agents, matching Codex hook scoping.
 		Hooks: hook.Hooks{
-			PreToolUse:        slices.Clone(c.Hooks.PreToolUse),
-			PermissionRequest: slices.Clone(c.Hooks.PermissionRequest),
-			PostToolUse:       slices.Clone(c.Hooks.PostToolUse),
-			SubagentStart:     slices.Clone(c.Hooks.SubagentStart),
-			SubagentStop:      slices.Clone(c.Hooks.SubagentStop),
-			PreCompact:        slices.Clone(c.Hooks.PreCompact),
-			PostCompact:       slices.Clone(c.Hooks.PostCompact),
-			Stop:              slices.Clone(c.Hooks.Stop),
+			PreToolUse:          slices.Clone(c.Hooks.PreToolUse),
+			PermissionRequest:   slices.Clone(c.Hooks.PermissionRequest),
+			PostToolUse:         slices.Clone(c.Hooks.PostToolUse),
+			TransformToolResult: slices.Clone(c.Hooks.TransformToolResult),
+			SubagentStart:       slices.Clone(c.Hooks.SubagentStart),
+			SubagentStop:        slices.Clone(c.Hooks.SubagentStop),
+			PreCompact:          slices.Clone(c.Hooks.PreCompact),
+			PostCompact:         slices.Clone(c.Hooks.PostCompact),
+			Stop:                slices.Clone(c.Hooks.Stop),
 		},
 
 		MaxTurns:          c.MaxTurns,
@@ -213,7 +214,7 @@ func (c *Config) utilityModelName() string {
 
 // Utility runs a one-shot completion on the utility model (falling back to the
 // main model) and credits its token usage to the session through the context's
-// usage sink. It backs internal helpers such as fetch page extraction.
+// usage sink.
 func (c *Config) Utility(ctx context.Context, instructions, input string) (string, error) {
 	modelID := c.utilityModelName()
 	outputTokens := DefaultUtilityOutputTokenBudget

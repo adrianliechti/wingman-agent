@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
@@ -20,13 +21,15 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 		Name:   "edit",
 		Effect: tool.StaticEffect(tool.EffectMutates),
 		Description: strings.Join([]string{
-			"Create or edit one or more files atomically using exact string replacements.",
+			"Create or edit one or more UTF-8 text files using string replacements, with batch validation and rollback on commit errors.",
 			"- Put every independent replacement or file creation you already know about into one `edits` array; do not call this tool repeatedly when the changes can be batched.",
 			"- Read an existing file before editing it, and preserve its indentation exactly. Never include the read tool's line-number prefix.",
 			"- Each `old_string` must occur exactly once unless `replace_all` is true. Include enough unchanged surrounding text to make it unique.",
+			"- Exact matches take priority. If none exist, matching tolerates typography, trailing whitespace, copied line numbers, uniform indentation shifts, and small blank-line differences; ambiguous matches are rejected.",
+			"- Input and resulting files are limited to 10 MiB each. Binary files are not supported.",
 			"- To create a new file (or replace an empty file), use an empty `old_string` and put the complete file in `new_string`.",
 			"- Entries for the same file run in order, so later entries see earlier replacements.",
-			"- Every entry is validated and every result is staged before any file is changed. If one entry fails, no files change.",
+			"- Every entry is validated and every result is staged before any file is changed. Validation failures leave files unchanged; commit failures attempt rollback and report any restoration errors. External readers may observe the batch being committed.",
 			"- The result is authoritative; do not re-read files merely to verify a successful edit.",
 		}, "\n"),
 		Parameters: map[string]any{
@@ -35,7 +38,7 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 				"edits": map[string]any{
 					"type":        "array",
 					"minItems":    1,
-					"description": "All file creations and replacements to apply in one atomic transaction.",
+					"description": "All file creations and replacements to validate and stage together before committing.",
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
@@ -65,49 +68,84 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 
 			tx := &fileTransaction{}
 			summaries := make([]string, 0, len(files))
+			var batchErrs []string
 			for _, file := range files {
+				if err := ctx.Err(); err != nil {
+					return tool.Result{}, err
+				}
 				info, statErr := statFileTarget(root, file.target)
 				exists := statErr == nil
 				switch {
 				case exists && info.IsDir():
-					return tool.Result{}, fmt.Errorf("cannot edit %s: path is a directory", file.displayPath)
+					batchErrs = append(batchErrs, fmt.Sprintf("cannot edit %s: path is a directory", file.displayPath))
+					continue
 				case exists && !info.Mode().IsRegular():
-					return tool.Result{}, fmt.Errorf("cannot edit %s: path is not a regular file", file.displayPath)
+					batchErrs = append(batchErrs, fmt.Sprintf("cannot edit %s: path is not a regular file", file.displayPath))
+					continue
 				case statErr != nil && !os.IsNotExist(statErr):
-					return tool.Result{}, fmt.Errorf("stat %s: %w", file.displayPath, statErr)
+					batchErrs = append(batchErrs, fmt.Sprintf("stat %s: %v", file.displayPath, statErr))
+					continue
 				}
 				if !exists && file.entries[0].op.oldText != "" {
-					return tool.Result{}, fmt.Errorf("cannot edit %s: file does not exist; use an empty old_string to create it", file.displayPath)
+					batchErrs = append(batchErrs, fmt.Sprintf("cannot edit %s: file does not exist; use an empty old_string to create it", file.displayPath))
+					continue
 				}
 				if exists && info.Size() > MaxEditFileBytes {
-					return tool.Result{}, fmt.Errorf("file %s is %d bytes; edits are capped at %d bytes", file.displayPath, info.Size(), MaxEditFileBytes)
+					batchErrs = append(batchErrs, fmt.Sprintf("file %s is %d bytes; edits are capped at %d bytes", file.displayPath, info.Size(), MaxEditFileBytes))
+					continue
 				}
 				if exists && freshness.stale(ctx, file.target, info) {
-					return tool.Result{}, fmt.Errorf("cannot edit %s: the file changed on disk after you last read it; read it again first", file.displayPath)
+					batchErrs = append(batchErrs, fmt.Sprintf("cannot edit %s: the file changed on disk after you last read it; read it again first", file.displayPath))
+					continue
 				}
 
 				var before []byte
 				if exists {
-					before, err = readFileTarget(root, file.target)
+					before, err = readEditContent(ctx, root, file.target)
 					if err != nil {
-						return tool.Result{}, fmt.Errorf("read %s: %w", file.displayPath, err)
+						batchErrs = append(batchErrs, fmt.Sprintf("read %s: %v", file.displayPath, err))
+						continue
 					}
 				}
+				if !utf8.Valid(before) || bytes.IndexByte(before, 0) >= 0 {
+					batchErrs = append(batchErrs, fmt.Sprintf("cannot edit %s: only UTF-8 text files without NUL bytes are supported", file.displayPath))
+					continue
+				}
 				if freshness.staleContent(ctx, file.target, before) {
-					return tool.Result{}, fmt.Errorf("cannot edit %s: content changed since the preview; refresh it (no files changed)", file.displayPath)
+					batchErrs = append(batchErrs, fmt.Sprintf("cannot edit %s: content changed since the preview; refresh it (no files changed)", file.displayPath))
+					continue
 				}
 				bom, content := stripBom(string(before))
 				ending := detectLineEnding(content)
 				updated := normalizeToLF(content)
+				fileFailed := false
 				for _, entry := range file.entries {
-					updated, err = applyEditOp(updated, entry.op, file.displayPath)
-					if err != nil {
-						return tool.Result{}, fmt.Errorf("edits[%d] for %s: %w (no files changed)", entry.index, file.displayPath, err)
+					if err := ctx.Err(); err != nil {
+						return tool.Result{}, err
 					}
+					next, entryErr := applyEditOp(updated, entry.op, file.displayPath)
+					if entryErr != nil {
+						batchErrs = append(batchErrs, fmt.Sprintf("edits[%d] for %s: %v (no files changed)", entry.index, file.displayPath, entryErr))
+						fileFailed = true
+						continue
+					}
+					updated = next
+				}
+				if fileFailed {
+					continue
+				}
+				size := int64(len(bom)) + int64(len(updated))
+				if ending == "\r\n" {
+					size += int64(strings.Count(updated, "\n"))
+				}
+				if err := checkEditSize(file.displayPath, size); err != nil {
+					batchErrs = append(batchErrs, err.Error())
+					continue
 				}
 				after := []byte(bom + restoreLineEndings(updated, ending))
 				if exists && bytes.Equal(before, after) {
-					return tool.Result{}, fmt.Errorf("edits made no changes to %s", file.displayPath)
+					batchErrs = append(batchErrs, fmt.Sprintf("edits made no changes to %s", file.displayPath))
+					continue
 				}
 
 				mode := os.FileMode(0o644)
@@ -127,6 +165,9 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 					afterPresent:  true,
 				})
 			}
+			if len(batchErrs) > 0 {
+				return tool.Result{}, fmt.Errorf("%s", strings.Join(batchErrs, "\n\n"))
+			}
 
 			if err := commitFileTransactionLocked(ctx, root, tx); err != nil {
 				return tool.Result{}, err
@@ -138,9 +179,35 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 			for _, change := range tx.changes {
 				changes = append(changes, tool.FileChange{Path: change.displayPath, Before: string(change.before), After: string(change.after), BeforeExists: change.beforePresent, AfterExists: change.afterPresent, Mode: uint32(change.beforeMode.Perm())})
 			}
-			return tool.Result{Content: fmt.Sprintf("Applied %d edits across %d files atomically.\n%s", editCount, len(files), strings.Join(summaries, "\n")), Metadata: map[string]any{tool.FileChangesMetadata: changes}}, nil
+			return tool.Result{Content: fmt.Sprintf("Applied %d edits across %d files.\n%s", editCount, len(files), strings.Join(summaries, "\n")), Metadata: map[string]any{tool.FileChangesMetadata: changes}}, nil
 		},
 	}
+}
+
+func readEditContent(ctx context.Context, root *os.Root, target fileTarget) ([]byte, error) {
+	file, err := openFileTarget(root, target)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("path is not a regular file")
+	}
+	if err := checkEditSize(target.AbsPath, info.Size()); err != nil {
+		return nil, err
+	}
+	content, err := readContent(ctx, file, MaxEditFileBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkEditSize(target.AbsPath, int64(len(content))); err != nil {
+		return nil, err
+	}
+	return content, nil
 }
 
 type batchEditEntry struct {
@@ -184,7 +251,7 @@ func parseBatchEdits(root *os.Root, args map[string]any, allowedWriteRoots []str
 		if !exists {
 			fileIndex = len(files)
 			byTarget[key] = fileIndex
-			displayPath := pathArg
+			displayPath := target.AbsPath
 			if target.InWorkspace {
 				displayPath = filepath.ToSlash(filepath.Clean(target.RelPath))
 			}

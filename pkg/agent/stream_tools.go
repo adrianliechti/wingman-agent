@@ -7,6 +7,21 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
+type toolStopKey struct{}
+
+// Each tool round owns its stop scope, so child-agent stops cannot cancel the
+// parent's turn. Cancellation prevents queued calls from reaching executors.
+func withToolStop(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	return context.WithValue(ctx, toolStopKey{}, cancel), func() { cancel(nil) }
+}
+
+func stopToolTurn(ctx context.Context, reason string) {
+	if cancel, ok := ctx.Value(toolStopKey{}).(context.CancelCauseFunc); ok {
+		cancel(hookStopError(reason))
+	}
+}
+
 // Completed calls start while the response is still streaming. Results are
 // collected in call order after the response, keeping them behind its items in
 // provider history. Reads may overlap; mutations wait for earlier work and
@@ -76,6 +91,9 @@ func (r *streamToolRound) drain(yield func(Message, error) bool) error {
 		if err == nil && !yield(message, nil) {
 			err = errYieldStopped
 		}
+	}
+	if stop, ok := errors.AsType[hookStopError](context.Cause(r.ctx)); ok {
+		err = errors.Join(err, stop)
 	}
 	return err
 }

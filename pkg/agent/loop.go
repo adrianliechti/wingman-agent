@@ -3,10 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
 )
 
@@ -88,7 +91,8 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 
 	for attempt := 0; ; attempt++ {
 		resp, err = a.completeRun(ctx, inferenceCtx, turnID, req, yield)
-		if err == nil || errors.Is(err, errYieldStopped) {
+		_, hookStopped := errors.AsType[hookStopError](err)
+		if err == nil || errors.Is(err, errYieldStopped) || hookStopped {
 			return resp, err
 		}
 		if ctx.Err() != nil {
@@ -138,13 +142,13 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 
 // Both proactive compaction and overflow recovery run the same hook lifecycle.
 func (a *Agent) compactWithHooks(ctx context.Context, req *request) error {
-	if outcome := a.runPreCompact(ctx, "auto"); outcome.Stop {
+	if outcome := runCompactHooks(ctx, "auto", a.Hooks.PreCompact); outcome.Stop {
 		return hookStopError("compaction stopped by hook")
 	}
 	if err := a.compactMessages(ctx, req); err != nil {
 		return err
 	}
-	if outcome := a.runPostCompact(ctx, "auto"); outcome.Stop {
+	if outcome := runCompactHooks(ctx, "auto", a.Hooks.PostCompact); outcome.Stop {
 		return hookStopError("post-compaction hook stopped the turn")
 	}
 	outcome, err := a.runSessionStartHooks(ctx, "compact")
@@ -157,13 +161,139 @@ func (a *Agent) compactWithHooks(ctx context.Context, req *request) error {
 	return nil
 }
 
+func runCompactHooks[H ~func(context.Context, string) (hook.Outcome, error)](ctx context.Context, trigger string, hooks []H) hook.Outcome {
+	var combined hook.Outcome
+	for _, h := range hooks {
+		outcome, err := h(ctx, trigger)
+		if err == nil && outcome.Stop && !combined.Stop {
+			combined = outcome
+		}
+	}
+	return combined
+}
+
+func (a *Agent) buildStepRequest(ctx context.Context, nativeContinuation bool) (context.Context, *request, error) {
+	// Keep request settings with its hooks and tools, even if the user
+	// changes settings while the response is streaming.
+	stepRuntime := a.hookRuntime(ctx)
+	stepCtx := hook.WithRuntime(ctx, stepRuntime)
+
+	instructions := ""
+	if a.Instructions != nil {
+		instructions = a.Instructions()
+	}
+
+	// Re-read per round like model and instructions: the session mode can
+	// change mid-turn, and it decides which tools are offered.
+	var tools []tool.Tool
+	if a.Tools != nil {
+		// A catalog may reuse its backing slice when settings change.
+		// Keep the executors offered by this request until it completes.
+		tools = slices.Clone(a.Tools())
+	}
+	var outputSchema map[string]any
+	if schema, ok := OutputSchemaFromContext(ctx); ok {
+		outputSchema = schema
+	}
+	if outputSchema != nil {
+		// Structured output is a finalization pass. Keeping tools enabled
+		// lets some providers apply a tool's argument schema to ordinary
+		// text deltas instead of producing the requested final document.
+		tools = nil
+	}
+	allowFinish := outputSchema == nil && a.RequireFinish != nil
+	requireFinish := allowFinish && a.RequireFinish(stepRuntime.Model)
+	if allowFinish {
+		for _, t := range tools {
+			if t.Name == finishToolName {
+				return stepCtx, nil, fmt.Errorf("agent: tool name %q is reserved by RequireFinish", finishToolName)
+			}
+		}
+	}
+	if requireFinish {
+		tools = append(slices.Clone(tools), finishTool())
+		if instructions != "" {
+			instructions += "\n\n"
+		}
+		instructions += finishInstructions
+	}
+
+	req := &request{
+		model:             stepRuntime.Model,
+		effort:            stepRuntime.ReasoningEffort,
+		instructions:      instructions,
+		cacheKey:          a.CacheKey,
+		messages:          a.requestMessages(),
+		tools:             tools,
+		outputSchema:      outputSchema,
+		requireFinish:     requireFinish,
+		allowFinish:       allowFinish,
+		preserveReasoning: nativeContinuation,
+	}
+	if err := a.prepareRequest(stepCtx, req); err != nil {
+		return stepCtx, nil, err
+	}
+	return stepCtx, req, nil
+}
+
+// finishStep evaluates Stop hooks when a step has no pending follow-up or
+// queued input, and closes queue admission (a.finishing = true) if the turn
+// is ready to terminate.
+func (a *Agent) finishStep(ctx, stepCtx context.Context, lastAnswer string, needsFollowUp, incomplete bool, completionErr error, completion *completionState, stopHookActive *bool) (done bool, err error) {
+	a.queueMu.Lock()
+	hasPendingInput := len(a.pendingInput) > 0
+	a.queueMu.Unlock()
+	if completionErr == nil && !needsFollowUp && !hasPendingInput && !incomplete {
+		outcome := a.runStopHooks(stepCtx, lastAnswer, *stopHookActive)
+		if outcome.Stop {
+			reason := outcome.Reason
+			if reason == "" {
+				reason = "turn stopped by hook"
+			}
+			return true, hookStopError(reason)
+		}
+		if outcome.Block {
+			*stopHookActive = true
+			needsFollowUp = true
+			*completion = completionState{}
+			reason := outcome.Reason
+			if reason == "" {
+				reason = "A Stop hook requested another pass."
+			}
+			if err := a.appendMessages(hiddenContextMessage(reason)); err != nil {
+				return true, err
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return true, err
+	}
+
+	// Stop hooks run without queueMu. Recheck for newly accepted input
+	// and close admission under the same lock before ending the turn.
+	a.queueMu.Lock()
+	// Already accepted steering gets its own chance to finish, including
+	// input received during the last automatic continuation.
+	finished := !needsFollowUp && len(a.pendingInput) == 0
+	if finished {
+		a.finishing = true
+	}
+	a.queueMu.Unlock()
+	if finished {
+		return true, completionErr
+	}
+	return false, nil
+}
+
 // Check before every request, including the first request of a follow-up turn.
 // Rewriting historical results has a cache cost, so do it only under pressure.
 func (a *Agent) prepareRequest(ctx context.Context, req *request) error {
 	if err := a.dropIncompatibleReasoning(req); err != nil {
 		return err
 	}
-	req.messages = a.requestMessages()
+	if err := a.dropIncompatibleFinishReminders(req); err != nil {
+		return err
+	}
 	overshoot := a.compactionOvershoot(req.model, a.requestTokens(req))
 	if overshoot <= 0 {
 		return nil

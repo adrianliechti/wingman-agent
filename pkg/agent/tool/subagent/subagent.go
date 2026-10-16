@@ -32,7 +32,7 @@ const generalPurposeInstructions = `You are an agent performing a specific deleg
 
 const exploreInstructions = `You are a read-only codebase research specialist covering broad searches, feature tracing, and analysis of unfamiliar or legacy code. You may search, read, inspect git state, fetch URLs, and use read-only LSP or shell commands. You must not create, modify, delete, move, or copy files, install dependencies, or run mutating git commands. Use grep/glob/LSP before broad reads, read only the line windows that matter, and use parallel tool calls when searches or reads are independent. When tracing how a feature works, find the entry points, follow the call chain, and map the data flow and key components. When analyzing legacy or under-documented code, find the data structures first, then trace the procedures that read and write them, and call out magic values and risky coupling. Cite every concrete claim with file:line references and distinguish confirmed facts from inference. Lead with the answer; end with assumptions or gaps only if they matter. Reply in <=200 words unless the task explicitly asks for more.`
 
-const verificationInstructions = `You are a verification specialist. Your job is to test whether the implementation actually works, not to confirm by reading code. You must not modify project files, install dependencies, or run git write operations. You may run read-only inspection commands and normal build, test, lint, type-check, or local execution commands. For UI, API, CLI, migration, and integration changes, exercise the behavior directly when possible. Probe for failure, not confirmation: try at least one realistic way to break the change (edge input, error path) before declaring PASS. Set validation=true on exec_command when running an actual test, build, lint, or validation command so its exit status is recorded; leave it false for ordinary inspection. Include the exact commands you ran, the relevant output, and a verdict. End with exactly one line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL.`
+const verificationInstructions = `You are a verification specialist. Your job is to test whether the implementation actually works, not to confirm by reading code. You must not modify project files, install dependencies, or run git write operations. You may run read-only inspection commands and normal build, test, lint, type-check, or local execution commands. For UI, API, CLI, migration, and integration changes, exercise the behavior directly when possible. Probe for failure, not confirmation: try at least one realistic way to break the change (edge input, error path) before declaring PASS. Include the exact commands you ran, the relevant output, and a verdict. End with exactly one line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL.`
 
 const securityInstructions = `You are a security auditor reviewing code for genuinely exploitable vulnerabilities. You are read-only: you may search, read, inspect git state, and run read-only commands, but you must not create, modify, or delete files, build, run, or install anything, or make network requests against the target. Reason from the source. Default to skepticism: re-read the cited code yourself instead of trusting any summary, trace whether attacker-controlled input can actually reach the sink, and hunt for existing protections (input validation, parameterized queries, framework auto-escaping, type/length bounds, auth gates, dead/test code) before concluding a finding is real. Prefer a few high-confidence, exploitable findings over a long list of theoretical ones. For each finding give file:line, the data flow from entry point to sink, a concrete exploit scenario, and a specific fix; call out false positives as such. Reply concisely with file:line references.`
 
@@ -103,7 +103,10 @@ func mergeTypes(custom []Definition) (types map[string]subagentType, names []str
 
 	overrides := make(map[string]Definition, len(custom))
 	for _, d := range custom {
-		name := strings.ToLower(d.Name)
+		name := strings.ToLower(strings.TrimSpace(d.Name))
+		if name == "" {
+			continue
+		}
 		if _, ok := overrides[name]; !ok {
 			overrides[name] = d
 		}
@@ -113,7 +116,7 @@ func mergeTypes(custom []Definition) (types map[string]subagentType, names []str
 		names = append(names, b.name)
 		if d, ok := overrides[b.name]; ok {
 			types[b.name] = d.subagentType()
-			blurbs = append(blurbs, "- "+b.name+": "+d.Description)
+			blurbs = append(blurbs, "- "+b.name+": "+strings.Join(strings.Fields(d.Description), " "))
 			continue
 		}
 		types[b.name] = subagentTypes[b.name]
@@ -121,13 +124,16 @@ func mergeTypes(custom []Definition) (types map[string]subagentType, names []str
 	}
 
 	for _, d := range custom {
-		name := strings.ToLower(d.Name)
+		name := strings.ToLower(strings.TrimSpace(d.Name))
+		if name == "" {
+			continue
+		}
 		if _, ok := types[name]; ok {
 			continue
 		}
 		types[name] = d.subagentType()
 		names = append(names, name)
-		blurbs = append(blurbs, "- "+name+": "+d.Description)
+		blurbs = append(blurbs, "- "+name+": "+strings.Join(strings.Fields(d.Description), " "))
 	}
 
 	return types, names, blurbs
@@ -195,6 +201,11 @@ func newSubagentRunner(parent *agent.Config, typ subagentType, spec durableSpec,
 }
 
 func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Task, input string) (out string, err error) {
+	if r.collector != nil {
+		// Reports belong to one turn, even when it aborts after reporting.
+		r.collector.take()
+		defer r.collector.take()
+	}
 	if tk != nil {
 		r.sub.Recorder = agent.EventRecorderFunc(tk.AppendAgentEvents)
 		defer func() {
@@ -241,7 +252,24 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 		CacheCreationInputTokens: usage.CacheCreationInputTokens - before.CacheCreationInputTokens,
 	}
 	tool.ReportUsage(reportCtx, delta)
-	runMessages := r.sub.MessagesSnapshot()
+	state := r.sub.StateSnapshot()
+	// Stop hooks can end the stream without returning an error. The ledger
+	// remains authoritative about whether the child actually completed.
+	if runErr == nil {
+		for i := len(state.Events) - 1; i >= 0; i-- {
+			event := state.Events[i]
+			if event.Type == agent.EventTurnTerminal && event.Terminal != nil {
+				if event.Terminal.Status != agent.RuntimeCompleted {
+					runErr = fmt.Errorf("agent turn %s: %s", event.Terminal.Status, event.Terminal.Error)
+				}
+				break
+			}
+			if event.Type == agent.EventTurnStarted {
+				break
+			}
+		}
+	}
+	runMessages := state.Messages
 	if startIdx <= len(runMessages) {
 		runMessages = runMessages[startIdx:]
 	}
@@ -258,16 +286,13 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 		if text == "" {
 			return "", fmt.Errorf("agent error: %w", runErr)
 		}
-		return fmt.Sprintf("Agent aborted before finishing (%v). Last output before the abort — treat as incomplete:\n\n%s%s", runErr, text, trailer), nil
+		return text + trailer, fmt.Errorf("agent error: %w", runErr)
 	}
 	if r.collector != nil {
 		if payload := r.collector.take(); payload != "" {
 			return payload + trailer, nil
 		}
-		if text == "" {
-			return "Sub-agent completed without calling report and produced no output." + trailer, nil
-		}
-		return "Sub-agent completed without calling report; unstructured output follows:\n\n" + text + trailer, nil
+		return text + trailer, fmt.Errorf("agent finished without calling report; the required structured result is missing")
 	}
 	if text == "" {
 		return "Sub-agent completed but produced no output." + trailer, nil
@@ -289,6 +314,9 @@ func bindTaskRunner(tasks *task.Registry, tk *task.Task, runner *subagentRunner)
 
 func bindRestoredTasks(parent *agent.Config, types map[string]subagentType, tasks *task.Registry) {
 	for _, tk := range tasks.List() {
+		if tk.SupportsResume() || tk.Status() == task.StatusRunning {
+			continue
+		}
 		agentID, state, raw := tk.DurableAgent()
 		if agentID == "" || len(raw) == 0 {
 			continue
@@ -314,7 +342,10 @@ func bindRestoredTasks(parent *agent.Config, types map[string]subagentType, task
 	}
 }
 
-func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry, custom ...Definition) []tool.Tool {
+func Tools(cfg *agent.Config, sharedContext func([]tool.Tool) string, tasks *task.Registry, custom ...Definition) []tool.Tool {
+	if cfg == nil {
+		cfg = &agent.Config{}
+	}
 	types, names, blurbs := mergeTypes(custom)
 	if tasks != nil {
 		bindRestoredTasks(cfg, types, tasks)
@@ -337,7 +368,7 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 		lines = append(lines,
 			"",
 			"`background: true` returns a task id immediately and delivers the result later as a task notification. Use it for work you can overlap with your own; if your next step depends on the result, run synchronously. Never assume a running agent's result or start work that overlaps its scope. Give background editing agents a file scope disjoint from yours, and tell them to leave changes outside their scope alone.",
-			"Every result carries a task id: `task_output` checks status, `task_stop` cancels, and `task_send` continues a finished agent with its context intact.",
+			"Tracked runs carry a task id: `agent_output` checks status, `agent_stop` requests cancellation, and `agent_send` continues a finished agent with its context intact. At the session tracking limit, synchronous runs still work but have no task id or follow-up support.",
 		)
 	}
 
@@ -353,7 +384,7 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 		},
 		"schema": map[string]any{
 			"type":        "object",
-			"description": "Optional JSON Schema for the agent's final result. When set, the agent must deliver its result as validated JSON matching this schema, returned verbatim as the tool result.",
+			"description": "Optional JSON Schema for the agent's final report. The agent must call report with matching JSON; a missing report is a failure. The result contains the validated JSON followed by run statistics and, for tracked synchronous runs, a task id.",
 		},
 		"model": map[string]any{
 			"type":        "string",
@@ -416,11 +447,43 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 			if !ok {
 				return tool.Result{}, fmt.Errorf("unknown agent_type %q (available: %s)", subagentName, strings.Join(names, ", "))
 			}
+			description = strings.TrimSpace(description)
+			background := false
+			if raw, present := args["background"]; present {
+				background, ok = raw.(bool)
+				if !ok {
+					return tool.Result{}, fmt.Errorf("background must be a boolean")
+				}
+			}
+			if background && tasks == nil {
+				return tool.Result{}, fmt.Errorf("background agents are not available in this session; run the agent synchronously")
+			}
+			var schemaMap map[string]any
+			if raw, present := args["schema"]; present {
+				schemaMap, ok = raw.(map[string]any)
+				if !ok || schemaMap == nil {
+					return tool.Result{}, fmt.Errorf("schema must be a JSON Schema object")
+				}
+				if _, err := newReportCollector(schemaMap); err != nil {
+					return tool.Result{}, fmt.Errorf("invalid schema: %w", err)
+				}
+			}
+			resolved := cfg.Derive()
+			if err := applyModelOverrides(resolved, args, typ.Model); err != nil {
+				return tool.Result{}, err
+			}
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 
 			var instructions strings.Builder
 			instructions.WriteString(typ.Instructions)
 			if sharedContext != nil {
-				if c := strings.TrimSpace(sharedContext()); c != "" {
+				var childTools []tool.Tool
+				if cfg.Tools != nil {
+					childTools = toolsForType(cfg.Tools(), typ)
+				}
+				if c := strings.TrimSpace(sharedContext(childTools)); c != "" {
 					instructions.WriteString("\n\n" + c)
 				}
 			}
@@ -437,22 +500,10 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 			if err := ctx.Err(); err != nil {
 				return tool.Result{}, err
 			}
-			var schemaMap map[string]any
-			if raw, present := args["schema"]; present {
-				schemaMap, ok = raw.(map[string]any)
-				if !ok {
-					return tool.Result{}, fmt.Errorf("schema must be a JSON Schema object")
-				}
-				if _, err := newReportCollector(schemaMap); err != nil {
-					return tool.Result{}, fmt.Errorf("invalid schema: %w", err)
-				}
+			if schemaMap != nil {
 				instructions.WriteString("\n\nDeliver your final result by calling the `report` tool exactly once; its `result` argument must match the provided JSON schema. Prose output outside `report` is not the deliverable.")
 			}
 
-			resolved := cfg.Derive()
-			if err := applyModelOverrides(resolved, args, typ.Model); err != nil {
-				return tool.Result{}, err
-			}
 			modelID := ""
 			if resolved.Model != nil {
 				modelID = resolved.Model()
@@ -484,33 +535,24 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 				return runner.runTurn(execCtx, ctx, tk, prompt)
 			}
 
-			if background, _ := args["background"].(bool); background {
+			if background {
 				// Admitted background tasks detach from this tool's context.
 				if err := ctx.Err(); err != nil {
 					return tool.Result{}, err
-				}
-				if tasks == nil {
-					return tool.Result{}, fmt.Errorf("background agents are not available in this session; run the agent synchronously")
 				}
 				t, err := tasks.LaunchAgent(agentID, description, subagentName, prepare, run)
 				if err != nil {
 					return tool.Result{}, err
 				}
-				return tool.Text(fmt.Sprintf("Launched background agent %s (%s: %s). Continue with other work — the result arrives as a task notification when it finishes. Never assume or invent its result, and don't start work that overlaps its scope. Check on it with task_output, cancel it with task_stop, or ask it follow-ups later with task_send.", t.ID, subagentName, description)), nil
+				return tool.Text(fmt.Sprintf("Launched background agent %s (%s: %s). Continue with other work — the result arrives as a task notification when it finishes. Never assume or invent its result, and don't start work that overlaps its scope. Check on it with agent_output, cancel it with agent_stop, or ask it follow-ups later with agent_send.", t.ID, subagentName, description)), nil
 			}
 
 			if tasks == nil {
 				out, err := run(ctx, nil)
-				return runner.reviewResult(out), err
+				return runner.inlineResult(ctx, nil, out, err)
 			}
 			t, out, err := tasks.RunAgent(ctx, agentID, description, subagentName, prepare, run)
-			if err != nil {
-				return runner.reviewResult(out), err
-			}
-			if t != nil {
-				out += fmt.Sprintf("\n(id %s — task_send continues this agent with its context intact)", t.ID)
-			}
-			return runner.reviewResult(out), nil
+			return runner.inlineResult(ctx, t, out, err)
 		},
 	}}
 
@@ -522,6 +564,13 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 }
 
 func applyModelOverrides(cfg *agent.Config, args map[string]any, defaultRole string) error {
+	for _, key := range []string{"model", "effort"} {
+		if raw, present := args[key]; present {
+			if value, ok := raw.(string); !ok || strings.TrimSpace(value) == "" {
+				return fmt.Errorf("%s must be a non-empty string", key)
+			}
+		}
+	}
 	resolve := cfg.RoleModel
 
 	var target agent.ModelOption
@@ -540,6 +589,16 @@ func applyModelOverrides(cfg *agent.Config, args map[string]any, defaultRole str
 		return fmt.Errorf("unknown model role %q (use default, utility, or complex)", role)
 	}
 
+	level := ""
+	hasEffortOverride := false
+	if effort, _ := args["effort"].(string); strings.TrimSpace(effort) != "" {
+		level = strings.ToLower(strings.TrimSpace(effort))
+		if !slices.Contains(model.EffortLevels(), level) {
+			return fmt.Errorf("unknown effort %q (use none, low, medium, high, xhigh, or max)", level)
+		}
+		hasEffortOverride = true
+	}
+
 	// An unresolvable role keeps the inherited model: the role is a
 	// preference, not a contract, and the session model always works.
 	if role != "" && resolve != nil {
@@ -549,12 +608,7 @@ func applyModelOverrides(cfg *agent.Config, args map[string]any, defaultRole str
 		}
 	}
 
-	level := ""
-	if effort, _ := args["effort"].(string); strings.TrimSpace(effort) != "" {
-		level = strings.ToLower(strings.TrimSpace(effort))
-		if !slices.Contains(model.EffortLevels(), level) {
-			return fmt.Errorf("unknown effort %q (use none, low, medium, high, xhigh, or max)", level)
-		}
+	if hasEffortOverride {
 		if target.ID == "" && resolve != nil {
 			if opt, ok := resolve(""); ok {
 				target = opt
@@ -641,7 +695,10 @@ func (c *reportCollector) tool() tool.Tool {
 			"additionalProperties": false,
 		},
 
-		Execute: func(_ context.Context, args map[string]any) (tool.Result, error) {
+		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 			value, present := args["result"]
 			if !present {
 				return tool.Result{}, fmt.Errorf("result is required")
@@ -657,8 +714,14 @@ func (c *reportCollector) tool() tool.Tool {
 			}
 
 			c.mu.Lock()
+			defer c.mu.Unlock()
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
+			if c.result != "" {
+				return tool.Result{}, fmt.Errorf("a result has already been reported for this turn")
+			}
 			c.result = string(data)
-			c.mu.Unlock()
 
 			return tool.Text("Result recorded. End your turn."), nil
 		},
@@ -717,7 +780,7 @@ func finalText(messages []agent.Message) string {
 
 	var b strings.Builder
 	for _, m := range messages[lastTool+1:] {
-		if m.Role != agent.RoleAssistant {
+		if m.Hidden || m.Role != agent.RoleAssistant {
 			continue
 		}
 		for _, c := range m.Content {
@@ -787,14 +850,14 @@ func readOnlyDynamicTool(t tool.Tool) tool.Tool {
 // Scheduling belongs to the session: a delegated task must not wake it later.
 func allowNonAgentTool(t tool.Tool) bool {
 	switch t.Name {
-	case "agent", "task_output", "task_stop", "task_send", "schedule":
+	case "agent", "agent_output", "agent_stop", "agent_send", "task_output", "task_stop", "task_send", "schedule":
 		return false
 	}
 	return !t.Hidden
 }
 
 func allowReadOnlyTool(t tool.Tool) bool {
-	if t.Name == "elicit" {
+	if t.Name == "elicit" || t.Name == "ask" {
 		return false
 	}
 
@@ -818,9 +881,9 @@ func allowVerificationTool(t tool.Tool) bool {
 	}
 
 	switch t.Name {
-	case "write", "edit", "elicit":
+	case "write", "edit", "ask", "elicit":
 		return false
-	case "shell", "exec_command", "exec_session":
+	case "exec", "shell", "exec_command", "exec_session":
 		return true
 	default:
 		return t.Effect != nil && t.Effect(nil) == tool.EffectReadOnly
@@ -833,4 +896,27 @@ func (r *subagentRunner) reviewResult(out string) tool.Result {
 	result := tool.Text(out)
 	result.Metadata = map[string]any{agent.ChildReviewsMetadata: r.sub.TurnReviews()}
 	return result
+}
+
+func (r *subagentRunner) inlineResult(ctx context.Context, tk *task.Task, out string, err error) (tool.Result, error) {
+	// Registry execution already formats failures while preserving partial
+	// output. Untracked synchronous runs need the same treatment here.
+	if err != nil && tk == nil {
+		if out != "" {
+			out = fmt.Sprintf("error: %v\n\nOutput below is incomplete:\n%s", err, out)
+		} else {
+			return r.reviewResult(out), err
+		}
+	}
+	if tk != nil {
+		out += fmt.Sprintf("\n(id %s — agent_send continues this agent with its context intact)", tk.ID)
+	}
+	result := r.reviewResult(out)
+	result.IsError = err != nil
+	if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return result, err
+	}
+	// Returning a Go error causes the harness to replace the content. Use a
+	// failed tool result so the caller retains both findings and follow-up id.
+	return result, nil
 }

@@ -25,6 +25,5 @@ func Tools(root *os.Root, opts *Options) []tool.Tool {
 		batchEditTool(root, opts.Freshness, opts.AllowedWriteRoots...),
 		GrepTool(root, opts.AllowedReadRoots...),
 		GlobTool(root, opts.AllowedReadRoots...),
-		ImageTool(root, opts.AllowedReadRoots...),
 	}
 }
