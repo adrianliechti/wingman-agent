@@ -29,6 +29,7 @@ type shellSyntax struct {
 	hasRedirection   bool
 	definesFunction  bool
 	protectedWrite   bool
+	credentialRead   bool
 	downloadToShell  bool
 	uncertain        bool
 }
@@ -115,6 +116,7 @@ func parseShellSyntax(source string, dialect shellDialect) (result shellSyntax) 
 		result.hasRedirection = result.hasRedirection || tailSyntax.hasRedirection
 		result.definesFunction = result.definesFunction || tailSyntax.definesFunction
 		result.protectedWrite = result.protectedWrite || tailSyntax.protectedWrite
+		result.credentialRead = result.credentialRead || tailSyntax.credentialRead
 		result.downloadToShell = result.downloadToShell || tailSyntax.downloadToShell
 		result.uncertain = result.uncertain || tailSyntax.uncertain
 		for _, statement := range tailSyntax.statements {
@@ -165,8 +167,12 @@ func walkShellAST(node *gotreesitter.Node, lang *gotreesitter.Language, source [
 		result.hasRedirection = true
 	case "file_redirect", "herestring_redirect", "heredoc_redirect", "redirection":
 		result.hasRedirection = true
-		if target := redirectTarget(node, lang, source); target != "" && isProtectedRedirectTarget(target) {
-			result.protectedWrite = true
+		if target := redirectTarget(node, lang, source); target != "" {
+			if redirectWrites(node.Text(source), target) {
+				result.protectedWrite = result.protectedWrite || isProtectedRedirectTarget(target)
+			} else if typeName == "file_redirect" || typeName == "redirection" {
+				result.credentialRead = result.credentialRead || isSensitiveCredentialPath(target)
+			}
 		}
 	case "pipeline":
 		if directPipelineIsDangerous(node, lang, source, dialect) {
@@ -363,6 +369,14 @@ func redirectTarget(node *gotreesitter.Node, lang *gotreesitter.Language, source
 		return strings.TrimSpace(child.Text(source))
 	}
 	return ""
+}
+
+func redirectWrites(source, target string) bool {
+	// Inspect only the operator region, not a quoted filename containing >.
+	if end := strings.LastIndex(source, target); end >= 0 {
+		return strings.Contains(source[:end], ">")
+	}
+	return true
 }
 
 func directPipelineIsDangerous(node *gotreesitter.Node, lang *gotreesitter.Language, source []byte, dialect shellDialect) bool {

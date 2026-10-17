@@ -112,7 +112,7 @@ func TestClassifyEffect(t *testing.T) {
 		{"dangerous backtick substitution", map[string]any{"command": "echo `rm -rf tmp`"}, tool.EffectDangerous},
 		{"chmod is benign", map[string]any{"command": "chmod +x script.sh"}, tool.EffectMutates},
 		{"kill is benign", map[string]any{"command": "kill 1234"}, tool.EffectMutates},
-		{"find delete is benign", map[string]any{"command": "find . -name '*.pyc' -delete"}, tool.EffectMutates},
+		{"find recursive delete requires review", map[string]any{"command": "find . -name '*.pyc' -delete"}, tool.EffectDangerous},
 		{"missing command", map[string]any{}, tool.EffectMutates},
 		{"xargs replace-string recursive delete", map[string]any{"command": "echo target | xargs -I {} rm -rf {}"}, tool.EffectDangerous},
 		{"xargs long replace-string recursive delete", map[string]any{"command": "echo target | xargs --replace={} rm -rf {}"}, tool.EffectDangerous},

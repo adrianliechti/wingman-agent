@@ -782,7 +782,6 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	s.freshness = fs.NewFreshness(ws.Root)
 	s.schedules = schedule.NewFileStore(filepath.Join(artifactDir, "schedules"))
 	s.watchStop = make(chan struct{})
-	approvals := shell.NewApprovals()
 
 	sessionCfg.Hooks.UserPromptSubmit = append(sessionCfg.Hooks.UserPromptSubmit,
 		func(context.Context, string) (hook.Outcome, error) {
@@ -796,13 +795,13 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	)
 
 	shellOpts := &shell.Options{ScratchDir: ws.ScratchPath}
-	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.options.DisableShell, Elicitation: elicit, Approvals: approvals, Shell: shellOpts}
+	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.options.DisableShell, Elicitation: elicit, Shell: shellOpts}
 	go s.watchFileChanges()
 	go s.runSchedules()
 
 	var shellTools []tool.Tool
 	if !a.options.DisableShell {
-		shellTools = shell.ExecTools(s.execManager, ws.RootPath, elicit, approvals, shellOpts)
+		shellTools = shell.ExecTools(s.execManager, ws.RootPath, elicit, shellOpts)
 	}
 	var webFetchTools []tool.Tool
 	if !a.options.DisableWebFetch {

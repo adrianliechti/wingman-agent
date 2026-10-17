@@ -441,7 +441,7 @@ func TestRestoredChildKeepsAutoEffort(t *testing.T) {
 }
 
 func TestVerificationRetainsRealExecutionTools(t *testing.T) {
-	tools := shell.ExecTools(&shell.ExecManager{}, t.TempDir(), nil, nil, nil)
+	tools := shell.ExecTools(&shell.ExecManager{}, t.TempDir(), nil, nil)
 	if len(tools) != 2 {
 		t.Fatalf("unexpected execution toolset: %d", len(tools))
 	}

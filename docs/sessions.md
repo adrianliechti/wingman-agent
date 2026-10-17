@@ -107,6 +107,11 @@ in the chat; critical actions such as secret exfiltration stay denied. After
 repeated denials in one turn, the turn stops. Unattended mode runs every action
 without review.
 
+Risky shell commands and scheduled scripts are reviewed on each execution.
+Repeating a command or saving a schedule does not cache the verdict. After
+leaving Unattended mode, these actions go through review again. Risky shell
+actions cannot run when approval is unavailable.
+
 Wingman asks you only when the reviewer cannot decide, and for trust prompts
 such as running hooks from a cloned repository. Answer the prompt shown for the
 relevant session. In the browser, `Alt+A`

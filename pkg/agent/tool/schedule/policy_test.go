@@ -2,6 +2,8 @@ package schedule
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,7 +23,7 @@ func TestScheduleScriptsRequireTheExecutionPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := NewMemoryStore()
 			asked := 0
-			opts := &Options{WorkDir: t.TempDir(), Disabled: tc.disabled, Approvals: shell.NewApprovals(), Elicitation: &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) { asked++; return tc.approve, nil }}}
+			opts := &Options{WorkDir: t.TempDir(), Disabled: tc.disabled, Elicitation: &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) { asked++; return tc.approve, nil }}}
 			tools := Tools(store, opts)
 			_, err := tools[0].Execute(t.Context(), map[string]any{"action": "create", "prompt": "check", "schedule": "every 1h", "script": "git clean -fdx"})
 			if tc.disabled || !tc.approve {
@@ -37,8 +39,8 @@ func TestScheduleScriptsRequireTheExecutionPolicy(t *testing.T) {
 					t.Fatal(err)
 				}
 				tasks, _ := store.List()
-				if len(tasks) != 1 || tasks[0].ScriptApproval != scriptApproval(opts.WorkDir, tasks[0].Script) {
-					t.Fatal("approval not tied to saved script")
+				if len(tasks) != 1 || tasks[0].Script != "git clean -fdx" {
+					t.Fatal("approved script was not saved")
 				}
 			}
 			if tc.disabled && asked != 0 {
@@ -76,8 +78,17 @@ func TestChangedOrLegacyDangerousGateCannotExecuteWithoutApproval(t *testing.T) 
 	if err := os.WriteFile(marker, []byte("user work"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, hash := range []string{"", scriptApproval(dir, "echo harmless")} {
-		task := Task{Script: "rm -rf preserve-me", ScriptApproval: hash}
+	store := NewFileStore(t.TempDir())
+	// Old approval hashes remain readable but confer no authorization.
+	legacyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(filepath.Clean(dir)+"\x00rm -rf preserve-me")))
+	if err := os.WriteFile(store.Path(), []byte("tasks:\n  - script: rm -rf preserve-me\n    script_approval: "+legacyHash+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := store.List()
+	if err != nil || len(legacy) != 1 {
+		t.Fatalf("load legacy schedule: %v, %v", legacy, err)
+	}
+	for _, task := range []Task{{Script: "rm -rf preserve-me"}, legacy[0]} {
 		_, out, err := RunTaskGate(t.Context(), dir, task, nil)
 		if err == nil || !strings.Contains(out, "approval") {
 			t.Fatalf("unapproved gate: %q, %v", out, err)
@@ -86,12 +97,54 @@ func TestChangedOrLegacyDangerousGateCannotExecuteWithoutApproval(t *testing.T) 
 			t.Fatal("script ran without approval")
 		}
 	}
-	task := Task{Script: "rm -rf preserve-me", ScriptApproval: scriptApproval(dir, "rm -rf preserve-me")}
+	task := legacy[0]
 	if _, _, err := RunTaskGate(t.Context(), dir, task, &Options{Disabled: true}); err == nil {
 		t.Fatal("saved approval bypassed disabled shell")
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatal("disabled script ran")
+	}
+}
+
+func TestScheduledScriptRechecksReviewAfterCreationAndExecution(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX script")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "fixture")
+	store := NewMemoryStore()
+	calls := 0
+	opts := &Options{WorkDir: dir, Elicitation: &tool.Elicitation{Review: func(context.Context, tool.Approval) (tool.Verdict, error) {
+		calls++
+		return tool.Verdict{Allowed: calls <= 2, Reason: "new user work"}, nil
+	}}}
+	_, err := Tools(store, opts)[0].Execute(t.Context(), map[string]any{
+		"action": "create", "prompt": "check", "schedule": "every 1h", "script": "rm -rf fixture",
+	})
+	if err != nil || calls != 1 {
+		t.Fatalf("review-only schedule creation: calls=%d, err=%v", calls, err)
+	}
+	tasks, err := store.List()
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("saved tasks: %v, %v", tasks, err)
+	}
+	if err := os.WriteFile(marker, []byte("disposable"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := RunTaskGate(t.Context(), dir, tasks[0], opts); err != nil || calls != 2 {
+		t.Fatalf("first execution: calls=%d, err=%v", calls, err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("approved script did not run: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("new user work"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := RunTaskGate(t.Context(), dir, tasks[0], opts); err == nil || !strings.Contains(err.Error(), "new user work") || calls != 3 {
+		t.Fatalf("repeated execution: calls=%d, err=%v", calls, err)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "new user work" {
+		t.Fatalf("denied script changed user work: %q, %v", data, err)
 	}
 }
 

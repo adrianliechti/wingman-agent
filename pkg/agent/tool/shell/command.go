@@ -14,13 +14,13 @@ import (
 )
 
 func safetyGuardLine(elicit *tool.Elicitation) string {
-	if elicit == nil || elicit.Confirm == nil {
-		return "- There is NO confirmation gate: commands run immediately. Never run destructive or privilege-escalating commands (recursive deletes, sudo, force-push) unless the user explicitly asked for that exact action."
+	if elicit == nil || (elicit.Confirm == nil && elicit.Review == nil) {
+		return "- Risky commands cannot run because no approver is available. Routine commands run directly."
 	}
 	if elicit.Review != nil {
-		return "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands are checked by an automatic reviewer first; a denial states its reason and must not be worked around. An approved command re-runs without re-checking for the rest of the session."
+		return "- Safety guard: routine commands run directly. Risky actions receive automatic review for each execution. A denial states its reason and must not be worked around."
 	}
-	return "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first. An approved command re-runs without re-asking for the rest of the session."
+	return "- Safety guard: routine commands run directly; risky actions require approval for each execution."
 }
 
 // approvalWorkdir returns the directory to surface in approval prompts: empty

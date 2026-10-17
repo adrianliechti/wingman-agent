@@ -287,9 +287,6 @@ func TestClassifierChangelogRoutineCommandsStayQuiet(t *testing.T) {
 		{"find exec non-recursive rm", `find . -name '*.tmp' -exec rm {} \;`},
 		{"escaped non-recursive rm", `r\m /tmp/x.txt`},
 		{"escaped find non-recursive rm", `find . -name '*.tmp' -\exec rm {} \;`},
-		// deliberate divergence from Claude Code: -delete is scoped like a
-		// non-recursive rm and stays prompt-free
-		{"find delete", "find . -name '*.pyc' -delete"},
 		{"find print", "find . -name '*.go' -print"},
 		{"bash c harmless", `bash -c "ls -la"`},
 		{"bash script file", "bash scripts/build.sh"},

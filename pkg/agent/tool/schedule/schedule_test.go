@@ -304,8 +304,8 @@ wait
 echo '{"wake": false}'
 `
 	dir := t.TempDir()
-	task := Task{Script: script, ScriptApproval: scriptApproval(dir, script)}
-	wake, output, err := RunTaskGate(t.Context(), dir, task, nil)
+	task := Task{Script: script}
+	wake, output, err := RunTaskGate(t.Context(), dir, task, &Options{Elicitation: &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) { return true, nil }}})
 	if err != nil || wake {
 		t.Fatalf("gate decision: wake=%v, err=%v, output=%q", wake, err, output)
 	}

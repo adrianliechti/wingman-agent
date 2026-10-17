@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -130,6 +133,48 @@ func TestUnattendedSkipsReview(t *testing.T) {
 	verdict, err := a.review(ctx, tool.Approval{Message: "❯ rm -rf ~"})
 	if err != nil || !verdict.Allowed || len(*inputs) != 0 || len(ui.confirms) != 0 {
 		t.Fatalf("verdict = %+v, %v; reviews %d, confirms %v", verdict, err, len(*inputs), ui.confirms)
+	}
+}
+
+func TestShellApprovalDoesNotSurviveLeavingUnattendedMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX script")
+	}
+	a, ui, ctx, inputs := newReviewSession(t, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"Preserve new user work."}`)
+	id := code.SessionIDFromContext(ctx)
+	var exec tool.Tool
+	for _, candidate := range a.session(id).toolSet.Slice() {
+		if candidate.Name == "exec" {
+			exec = candidate
+			break
+		}
+	}
+	if exec.Execute == nil {
+		t.Fatal("session has no exec tool")
+	}
+	if err := a.SetUnattended(ctx, id, true); err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{"command": "rm -rf fixture", "wait": 10}
+	result, err := exec.Execute(ctx, args)
+	if err != nil || result.IsError || len(*inputs) != 0 || len(ui.confirms) != 0 {
+		t.Fatalf("unattended execution: %+v, %v; reviews=%d", result, err, len(*inputs))
+	}
+	marker := filepath.Join(a.workspace.RootPath, "fixture")
+	if err := os.WriteFile(marker, []byte("new user work"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetUnattended(ctx, id, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.Execute(ctx, args); err == nil || !strings.Contains(err.Error(), "Preserve new user work") {
+		t.Fatalf("unattended approval bypassed review: %v", err)
+	}
+	if len(*inputs) != 1 || len(ui.confirms) != 0 {
+		t.Fatalf("reviews=%d, confirms=%v", len(*inputs), ui.confirms)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "new user work" {
+		t.Fatalf("denied command changed user work: %q, %v", data, err)
 	}
 }
 

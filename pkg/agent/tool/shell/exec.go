@@ -481,11 +481,7 @@ func (s *execSession) exitNotice() string {
 	return "Command completed"
 }
 
-func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, appr *Approvals, opts *Options) []tool.Tool {
-	if appr == nil {
-		appr = NewApprovals()
-	}
-
+func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, opts *Options) []tool.Tool {
 	commandLines := []string{
 		fmt.Sprintf("Run a command in the host shell. Waits up to `wait` seconds (default %d) for it to finish; if still running, the command keeps running in the background and a session_id is returned.", defaultExecWait),
 		"- Use directly for both short commands and long-running or interactive work such as dev servers, watch tasks, log tails, REPLs, and prompting CLIs.",
@@ -542,7 +538,7 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 			},
 
 			Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
-				return executeExecCommand(ctx, manager, workDir, elicit, appr, opts, args)
+				return executeExecCommand(ctx, manager, workDir, elicit, opts, args)
 			},
 		},
 		{
@@ -566,13 +562,13 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 			},
 
 			Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
-				return executeExecSession(ctx, manager, elicit, appr, args)
+				return executeExecSession(ctx, manager, elicit, args)
 			},
 		},
 	}
 }
 
-func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, elicit *tool.Elicitation, appr *Approvals, opts *Options, args map[string]any) (tool.Result, error) {
+func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, elicit *tool.Elicitation, opts *Options, args map[string]any) (tool.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return tool.Result{}, err
 	}
@@ -612,7 +608,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		return tool.Result{}, err
 	}
 
-	if err := confirmDangerous(ctx, elicit, appr, args, approvalWorkdir(workDir, dir)); err != nil {
+	if err := confirmDangerous(ctx, elicit, args, approvalWorkdir(workDir, dir)); err != nil {
 		return tool.Result{}, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -774,7 +770,7 @@ waiting:
 	return s.result(sessionResult(output, notice)), nil
 }
 
-func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicitation, appr *Approvals, args map[string]any) (tool.Result, error) {
+func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicitation, args map[string]any) (tool.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return tool.Result{}, err
 	}
@@ -839,7 +835,7 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 	}
 
 	eof, _ := args["eof"].(bool)
-	if result, err := applySessionInput(ctx, m, s, elicit, appr, input, eof); err != nil || result != nil {
+	if result, err := applySessionInput(ctx, m, s, elicit, input, eof); err != nil || result != nil {
 		if result != nil {
 			return *result, err
 		}
@@ -882,7 +878,7 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 	return s.result(sessionResult(output, fmt.Sprintf("Session %d still running", id))), nil
 }
 
-func writeSessionInput(ctx context.Context, m *ExecManager, id int, s *execSession, elicit *tool.Elicitation, appr *Approvals, input string) (*tool.Result, error) {
+func writeSessionInput(ctx context.Context, m *ExecManager, id int, s *execSession, elicit *tool.Elicitation, input string) (*tool.Result, error) {
 	if err := s.lockInput(ctx); err != nil {
 		return nil, err
 	}
@@ -920,7 +916,7 @@ func writeSessionInputLocked(ctx context.Context, m *ExecManager, id int, s *exe
 	}
 	// An interactive process can change cwd, aliases, or interpreter between
 	// writes. An earlier approval for identical input is not reusable.
-	if err := confirmIfDangerous(ctx, elicit, NewApprovals(), "terminal_input", approvalText, dangerous); err != nil {
+	if err := confirmIfDangerous(ctx, elicit, "terminal_input", approvalText, dangerous); err != nil {
 		return nil, err
 	}
 
@@ -961,7 +957,7 @@ func confirmPendingSessionInputLocked(ctx context.Context, s *execSession, elici
 	if s.inputUncertain {
 		text += "  [terminal input state is unknown]"
 	}
-	return confirmIfDangerous(ctx, elicit, NewApprovals(), "terminal_input", text, s.inputOverflow || s.inputUncertain || IsDangerousCommand(s.pendingInput))
+	return confirmIfDangerous(ctx, elicit, "terminal_input", text, s.inputOverflow || s.inputUncertain || IsDangerousCommand(s.pendingInput))
 }
 
 func hasImmediateTerminalControl(input string) bool {
