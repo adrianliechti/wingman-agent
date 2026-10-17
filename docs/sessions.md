@@ -113,6 +113,9 @@ relevant session. In the browser, `Alt+A`
 focuses a prompt; `Y` or `N` then allows or declines that action. An approval
 does not disable later reviews. Each risky command, scheduled script execution,
 or permission expansion is evaluated against the current authorization.
+Saving a schedule does not cache the verdict. After leaving Unattended mode,
+these actions go through review again. Risky shell actions cannot run when
+approval is unavailable.
 
 ## Sandbox
 

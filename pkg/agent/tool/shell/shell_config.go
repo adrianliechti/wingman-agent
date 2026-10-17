@@ -163,7 +163,7 @@ var readOnlyCommands = map[string][]string{
 	"gem":    {"list", "search", "info", "specification", "dependency", "environment", "help", "version", "--version"},
 	"bundle": {"list", "show", "info", "outdated", "check", "version", "config list", "config get", "help"},
 
-	"java":   {"-version", "--version", "-help", "--help"},
+	"java": {"-version", "--version", "-help", "--help"},
 	// Maven goals execute plugins; even Gradle inspection tasks evaluate build
 	// scripts. Only standalone version queries bypass the read-only boundary.
 	"mvn":    {"-v", "-version", "--version"},

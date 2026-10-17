@@ -6,11 +6,100 @@ import (
 	"context"
 	"errors"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+func TestExecDangerousCommandRequiresAvailableApproval(t *testing.T) {
+	for _, scenario := range []string{"missing", "empty", "review denial", "review error"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "preserve-me")
+			if err := os.WriteFile(marker, []byte("user work"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var elicit *tool.Elicitation
+			want := "approval"
+			calls := 0
+			switch scenario {
+			case "empty":
+				elicit = &tool.Elicitation{}
+			case "review denial", "review error":
+				want = "fixture rejection"
+				elicit = &tool.Elicitation{Review: func(context.Context, tool.Approval) (tool.Verdict, error) {
+					calls++
+					if scenario == "review error" {
+						return tool.Verdict{}, errors.New(want)
+					}
+					return tool.Verdict{Reason: want}, nil
+				}}
+			}
+			m := NewExecManager(nil)
+			defer m.Close()
+			_, err := ExecTools(m, dir, elicit, nil)[0].Execute(t.Context(), map[string]any{"command": "rm -rf preserve-me", "wait": 10})
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("unapproved command: %v", err)
+			}
+			if elicit != nil && elicit.Review != nil && calls != 1 {
+				t.Fatalf("review-only approver called %d times", calls)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatal("unapproved command removed user work")
+			}
+		})
+	}
+}
+
+func TestExecRechecksApprovalAfterFilesChange(t *testing.T) {
+	for _, reviewer := range []bool{false, true} {
+		t.Run(map[bool]string{false: "confirmation", true: "review"}[reviewer], func(t *testing.T) {
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "fixture")
+			calls := 0
+			elicit := &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) {
+				if reviewer {
+					t.Fatal("confirmation bypassed the reviewer")
+				}
+				calls++
+				return calls == 1, nil
+			}}
+			if reviewer {
+				elicit.Review = func(context.Context, tool.Approval) (tool.Verdict, error) {
+					calls++
+					return tool.Verdict{Allowed: calls == 1, Reason: "new user work"}, nil
+				}
+			}
+			m := NewExecManager(nil)
+			defer m.Close()
+			exec := ExecTools(m, dir, elicit, nil)[0]
+			args := map[string]any{"command": "rm -rf fixture", "wait": 10}
+			if err := os.WriteFile(marker, []byte("disposable"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := exec.Execute(t.Context(), args)
+			if err != nil || result.IsError {
+				t.Fatalf("approved command: %+v, %v", result, err)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("approved command did not remove fixture: %v", err)
+			}
+			if err := os.WriteFile(marker, []byte("new user work"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := exec.Execute(t.Context(), args); err == nil || calls != 2 {
+				t.Fatalf("reused approval: calls=%d, err=%v", calls, err)
+			}
+			if data, err := os.ReadFile(marker); err != nil || string(data) != "new user work" {
+				t.Fatalf("denied repeat changed user work: %q, %v", data, err)
+			}
+		})
+	}
+}
 
 func TestExecChecksLifecycleBeforeStarting(t *testing.T) {
 	for _, scenario := range []string{"cancelled", "closed", "full"} {

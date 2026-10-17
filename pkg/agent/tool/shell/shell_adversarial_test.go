@@ -33,12 +33,16 @@ func TestAdversarialCommandsRequireReview(t *testing.T) {
 		`tee .vscode/settings.json`, `touch .envrc`, `mkdir .claude`,
 		`cp payload .git/hooks/pre-commit`, `cp -t .git/hooks payload`,
 		`mv .agents ordinary`, `rm .envrc`,
+		`echo payload > .bashrc`, `tee /etc/profile`, `touch .zshrc`,
+		`mkdir /etc/fixture`, `cp payload ~/.config/git/config`,
+		`cp -t /etc/fixture payload`, `cp --target-directory=/etc/fixture payload`,
+		`mv .bashrc ordinary`, `rm .zshrc`,
 		`find . -delete`, `find . -name '*.pyc' -delete`,
 		`git restore file.txt`, `git checkout -- file.txt`, `git push origin +HEAD:main`,
 		`git -cfoo.bar=baz status`, `rm --rec fixture`,
 		`command env BASH_ENV=./startup bash -c ':'`,
 		`nice env GIT_SSH_COMMAND=./helper git ls-remote origin`,
-		`fd pattern -xrm -rf fixture`, `cat <> .git/config`,
+		`fd pattern -xrm -rf fixture`, `cat <> .git/config`, `cat <> .bashrc`,
 		`cat < ~/.ssh/id_ed25519`,
 	} {
 		t.Run(command, func(t *testing.T) {
@@ -64,7 +68,7 @@ func TestAdversarialBenignCounterexamples(t *testing.T) {
 			}
 		})
 	}
-	for _, command := range []string{`echo payload > ordinary.txt`, `cp input.txt output.txt`, `git restore --staged file.txt`, `find . -name '*.pyc' -print`, `cat < .git/config`, `cat < '.agents/a>b'`} {
+	for _, command := range []string{`echo payload > ordinary.txt`, `cp input.txt output.txt`, `git restore --staged file.txt`, `find . -name '*.pyc' -print`, `cat < .git/config`, `cat < '.agents/a>b'`, `cat < /etc/profile`, `cat < '/etc/a>b'`} {
 		if isDangerousCommandDialect(command, dialectBash) {
 			t.Errorf("routine mutation/inspection requires review: %s", command)
 		}
