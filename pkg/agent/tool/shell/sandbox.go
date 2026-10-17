@@ -6,10 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 )
 
@@ -30,9 +30,9 @@ type sandboxPolicy struct {
 
 // Writes here would later run code outside the sandbox: through git, editors, direnv, shells, or agent config.
 var (
-	protectedDirs      = []string{".git/hooks", ".vscode", ".idea", ".codex", ".wingman", ".agents", ".claude"}
-	protectedFiles     = []string{".git/config", ".envrc"}
-	protectedRootFiles = []string{"mcp.json", ".mcp.json", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile"}
+	protectedDirs      = sandboxpolicy.ProtectedDirs
+	protectedFiles     = sandboxpolicy.ProtectedFiles
+	protectedRootFiles = sandboxpolicy.ProtectedRootFiles
 )
 
 func existingProtectedPaths(root string) []string {
@@ -44,13 +44,39 @@ func existingProtectedPaths(root string) []string {
 		path := filepath.Join(root, name)
 		if _, err := os.Lstat(path); err == nil {
 			paths = append(paths, path)
+			// Also protect a symlink's destination when it has another writable
+			// name. A deny on the link spelling alone does not cover that alias.
+			if target := canonicalPath(path); target != path && !slices.Contains(paths, target) {
+				paths = append(paths, target)
+			}
 		}
 	}
 	return paths
 }
 
+func sandboxProtectedRoots(policy sandboxPolicy) []string {
+	roots := slices.Clone(policy.WritableRoots)
+	if policy.ProtectedRoot != "" && !slices.Contains(roots, policy.ProtectedRoot) {
+		roots = append(roots, policy.ProtectedRoot)
+	}
+	return roots
+}
+
+// CheckSandbox detects unavailable backends before a session starts. Launch
+// errors (for example disabled user namespaces) still fail closed at execution.
+func CheckSandbox(workspace string) error {
+	if !workspaceSandboxEnabled() {
+		return nil
+	}
+	if err := validateWritableRoot(canonicalPath(workspace)); err != nil {
+		return err
+	}
+	_, _, err := platformSandboxCommand("/bin/sh", "true", workspace, sandboxPolicy{WritableRoots: []string{workspace}, ProtectedRoot: workspace})
+	return err
+}
+
 func sandboxNetworkEnabled() bool {
-	return !strings.EqualFold(strings.TrimSpace(os.Getenv(workspaceSandboxNetworkEnv)), "off")
+	return strings.EqualFold(strings.TrimSpace(os.Getenv(workspaceSandboxNetworkEnv)), "on")
 }
 
 // credentialPaths returns the existing credential stores sandboxed commands must not read.
@@ -74,9 +100,7 @@ func credentialPaths() []string {
 	return paths
 }
 
-// workspaceSandboxEnabled is deliberately opt-in while the native backends
-// mature. WINGMAN_SANDBOX=off keeps its existing meaning for the file tools;
-// workspace (or workspace-write) adds an OS boundary around shell processes.
+// Normal mode uses an OS boundary. Disabling it is an explicit host setting.
 func workspaceSandboxEnabled() bool {
 	// Native sandboxes are inherited by descendants. Avoid trying to apply a
 	// second Seatbelt profile or Bubblewrap namespace when a sandboxed command
@@ -84,12 +108,7 @@ func workspaceSandboxEnabled() bool {
 	if os.Getenv(workspaceSandboxActiveEnv) == "1" {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("WINGMAN_SANDBOX"))) {
-	case "workspace", "workspace-write":
-		return true
-	default:
-		return false
-	}
+	return sandboxpolicy.Enabled()
 }
 
 func pathWithin(root, candidate string) bool {
@@ -104,11 +123,7 @@ func pathWithin(root, candidate string) bool {
 }
 
 func canonicalPath(path string) string {
-	path = filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return resolved
-	}
-	return path
+	return sandboxpolicy.Canonical(path)
 }
 
 func buildSandboxedCommand(ctx context.Context, shell, command, workingDir string, opts sandboxOptions) (*exec.Cmd, error) {
@@ -123,7 +138,11 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 			return nil, fmt.Errorf("sandbox %s %q is not an accessible directory", label, path)
 		}
 	}
-	if !pathWithin(workspaceDir, workingDir) {
+	allowedWorkdir := pathWithin(workspaceDir, workingDir)
+	for _, root := range opts.ExtraWritableRoots {
+		allowedWorkdir = allowedWorkdir || pathWithin(root, workingDir)
+	}
+	if !allowedWorkdir {
 		return nil, fmt.Errorf("workdir %q is outside sandbox workspace %q", workingDir, workspaceDir)
 	}
 
@@ -140,7 +159,12 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 		WritableRoots: writableRootsFor(workspaceDir, opts.ExtraWritableRoots),
 		ProtectedRoot: workspaceDir,
 		DenyRead:      credentialPaths(),
-		Network:       sandboxNetworkEnabled(),
+		Network:       sandboxNetworkEnabled() || opts.Network,
+	}
+	for _, root := range policy.WritableRoots {
+		if err := validateWritableRoot(root); err != nil {
+			return nil, err
+		}
 	}
 	path, args, err := platformSandboxCommand(shell, command, workingDir, policy)
 	if err != nil {
@@ -156,10 +180,7 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 // an extra root is a nice-to-have, not a precondition like the workspace.
 func writableRootsFor(workspaceDir string, extraWritableRoots []string) []string {
 	writableRoots := []string{canonicalPath(workspaceDir)}
-	candidates := append(append([]string{}, extraWritableRoots...), os.TempDir())
-	if runtime.GOOS != "windows" {
-		candidates = append(candidates, "/tmp")
-	}
+	candidates := extraWritableRoots
 	for _, path := range candidates {
 		if path == "" {
 			continue

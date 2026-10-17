@@ -16,24 +16,25 @@ import (
 )
 
 func safetyGuardLine(elicit *tool.Elicitation) string {
-	if elicit == nil || elicit.Confirm == nil {
-		return "- There is NO confirmation gate: commands run immediately. Never run destructive or privilege-escalating commands (recursive deletes, sudo, force-push) unless the user explicitly asked for that exact action."
+	if elicit == nil || (elicit.Confirm == nil && elicit.Review == nil) {
+		return "- Risky commands and permission expansions cannot run because no approver is available. Routine commands can run within the configured sandbox."
 	}
 	if elicit.Review != nil {
-		return "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands are checked by an automatic reviewer first; a denial states its reason and must not be worked around. An approved command re-runs without re-checking for the rest of the session."
+		return "- Safety guard: routine commands run directly. Risky actions and permission expansions receive automatic review for each execution. A denial states its reason and must not be worked around."
 	}
-	return "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first. An approved command re-runs without re-asking for the rest of the session."
+	return "- Safety guard: routine commands run directly; risky actions and permission expansions require approval for each execution."
 }
 
 func sandboxGuideLine() string {
-	network := "Network access is allowed"
-	if !sandboxNetworkEnabled() {
-		network = "Network access is blocked"
+	network := "IP network access is blocked by default"
+	if sandboxNetworkEnabled() {
+		network = "IP network access is enabled by host configuration"
 	}
-	if runtime.GOOS == "windows" {
-		return "- Commands run in a native Windows process security environment: they can read most files but not existing credential paths such as ~/.ssh or ~/.aws, and write only inside the workspace, private temp, and memory directories. Existing Git metadata, editor settings, and agent configuration paths are read-only. Paths that do not exist yet are not protected. " + network + ". If a command needs more access, set `sandbox_permissions` to \"require_escalated\" with a `justification`; it then runs outside the sandbox after approval."
+	protection := "Protected Git metadata, editor settings and agent configuration stay read-only."
+	if runtime.GOOS != "darwin" {
+		protection += " The native backend only protects paths that exist when the command starts; never create protected configuration through a command."
 	}
-	return "- Commands run in a sandbox: they can read most files but not credentials such as ~/.ssh or ~/.aws, write only inside the workspace and temp directories, and cannot change .git/hooks, .git/config, editor settings, or agent configuration. " + network + ". If a command genuinely needs more, set `sandbox_permissions` to \"require_escalated\" with a `justification`; it then runs outside the sandbox after approval."
+	return "- Commands run in an OS sandbox. Writes are limited to the workspace, project memory and private temporary storage ($TMPDIR/$TEMP). Known credential stores are hidden and common authentication variables are removed. " + protection + " " + network + ". For a download or additional directory access, use sandbox_permissions=\"require_permissions\", network=true and/or writable_roots, with a justification. These grants apply to one execution and retain the sandbox. Reserve require_escalated for operations that genuinely need to run outside the sandbox. Every permission expansion is reviewed again."
 }
 
 // sandboxDenialHints follows Codex (plus the Windows spellings): output words that suggest the sandbox blocked a failed command.
@@ -45,15 +46,6 @@ func looksLikeSandboxDenial(output string, err error) bool {
 	}
 	output = strings.ToLower(output)
 	return slices.ContainsFunc(sandboxDenialHints, func(hint string) bool { return strings.Contains(output, hint) })
-}
-
-// approvalWorkdir returns the directory to surface in approval prompts: empty
-// for the workspace default, the effective directory otherwise.
-func approvalWorkdir(workDir, dir string) string {
-	if filepath.Clean(dir) == filepath.Clean(workDir) {
-		return ""
-	}
-	return dir
 }
 
 func resolveWorkdir(workDir string, args map[string]any) (string, error) {
@@ -79,7 +71,21 @@ func resolveWorkdir(workDir string, args map[string]any) (string, error) {
 	if err != nil || !info.IsDir() {
 		return "", fmt.Errorf("workdir %q is not an accessible directory", value)
 	}
-	if workspaceSandboxEnabled() && !pathWithin(workDir, value) {
+	if workspaceSandboxEnabled() && args["sandbox_permissions"] != "require_escalated" && !pathWithin(workDir, value) {
+		if args["sandbox_permissions"] == "require_permissions" {
+			if roots, ok := args["writable_roots"].([]any); ok {
+				for _, root := range roots {
+					if path, ok := root.(string); ok {
+						if !filepath.IsAbs(path) {
+							path = filepath.Join(workDir, path)
+						}
+						if pathWithin(path, value) {
+							return value, nil
+						}
+					}
+				}
+			}
+		}
 		return "", fmt.Errorf("workdir %q is outside sandbox workspace %q", value, workDir)
 	}
 
@@ -102,14 +108,30 @@ func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir str
 	if workspaceSandboxEnabled() && !escalated {
 		sandbox = &sandboxOptions{WorkspaceDir: workspaceDir}
 		if opts != nil {
-			sandbox.ExtraWritableRoots = opts.ExtraWritableRoots
+			sandbox.ExtraWritableRoots = append([]string(nil), opts.ExtraWritableRoots...)
+			sandbox.TempDir = opts.TempDir
+			sandbox.Network = opts.Network
 		}
+		if sandbox.TempDir == "" {
+			dir, err := os.MkdirTemp("", "wingman-command-")
+			if err != nil {
+				return nil, fmt.Errorf("create private sandbox temp: %w", err)
+			}
+			sandbox.TempDir = canonicalPath(dir)
+			context.AfterFunc(ctx, func() { _ = os.RemoveAll(dir) })
+		}
+		sandbox.ExtraWritableRoots = append(sandbox.ExtraWritableRoots, sandbox.TempDir)
 	}
 	return buildCommandWithEnvironment(ctx, command, workingDir, environmentForTools(opts), sandbox)
 }
 
 func buildCommandWithEnvironment(ctx context.Context, command, workingDir string, environment []string, sandbox *sandboxOptions) (*exec.Cmd, error) {
 	var cmd *exec.Cmd
+	if sandbox != nil && sandbox.TempDir != "" {
+		for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+			environment = setEnvironment(environment, key, sandbox.TempDir)
+		}
+	}
 
 	if runtime.GOOS == "windows" {
 		ps := findPowerShell()
@@ -156,6 +178,8 @@ func buildCommandWithEnvironment(ctx context.Context, command, workingDir string
 type sandboxOptions struct {
 	WorkspaceDir       string
 	ExtraWritableRoots []string
+	TempDir            string
+	Network            bool
 }
 
 func findPowerShell() string {

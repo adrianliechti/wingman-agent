@@ -94,7 +94,7 @@ func TestBubblewrapArgsProtectConfigHideCredentialsAndCutNetwork(t *testing.T) {
 		ProtectedRoot: workspace,
 		DenyRead:      []string{secrets, netrc},
 	})
-	hooks := filepath.Join(workspace, ".git", "hooks")
+	hooks := filepath.Join(workspace, ".git")
 	for _, sequence := range [][]string{
 		{"--unshare-net"},
 		{"--ro-bind", hooks, hooks},

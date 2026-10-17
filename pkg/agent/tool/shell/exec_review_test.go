@@ -24,7 +24,7 @@ func TestExecSessionPollReturnsWhenOutputArrives(t *testing.T) {
 	timer := time.AfterFunc(50*time.Millisecond, func() { s.Write([]byte("ready")) })
 	defer timer.Stop()
 	started := time.Now()
-	result, err := executeExecSession(t.Context(), m, nil, nil, map[string]any{"session_id": id, "wait": 2})
+	result, err := executeExecSession(t.Context(), m, nil, map[string]any{"session_id": id, "wait": 2})
 	if err != nil || !strings.Contains(result.Content, "ready") {
 		t.Fatalf("poll = %+v, %v", result, err)
 	}
@@ -32,7 +32,7 @@ func TestExecSessionPollReturnsWhenOutputArrives(t *testing.T) {
 		t.Fatal("poll waited after output became available")
 	}
 	started = time.Now()
-	result, err = executeExecSession(t.Context(), m, nil, nil, map[string]any{"session_id": id, "wait": 1})
+	result, err = executeExecSession(t.Context(), m, nil, map[string]any{"session_id": id, "wait": 1})
 	if err != nil || !strings.Contains(result.Content, "no new output") || time.Since(started) < 500*time.Millisecond {
 		t.Fatalf("stale output woke a later poll: %+v, %v", result, err)
 	}
@@ -48,7 +48,7 @@ func TestExecKillKeepsSessionUntilExit(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 	defer cancel()
-	result, err := executeExecSession(ctx, m, nil, nil, map[string]any{"session_id": id, "kill": true})
+	result, err := executeExecSession(ctx, m, nil, map[string]any{"session_id": id, "kill": true})
 	if err != nil || !strings.Contains(result.Content, "has not exited yet") {
 		t.Fatalf("kill = %+v, %v", result, err)
 	}
@@ -124,7 +124,7 @@ func TestExecSessionRejectsMalformedOptionsWithoutWriting(t *testing.T) {
 	for key, value := range map[string]any{"input": 3, "kill": "false", "eof": "true", "wait": 0.5, "session_id": 0} {
 		args := map[string]any{"session_id": id, "input": "hello", "wait": 0}
 		args[key] = value
-		if _, err := executeExecSession(t.Context(), m, nil, nil, args); err == nil || !strings.Contains(err.Error(), key) {
+		if _, err := executeExecSession(t.Context(), m, nil, args); err == nil || !strings.Contains(err.Error(), key) {
 			t.Fatalf("invalid %s accepted: %v", key, err)
 		}
 	}
@@ -141,10 +141,9 @@ func TestExecSessionApprovalDoesNotCarryAcrossInteractiveState(t *testing.T) {
 	}}
 	m := NewExecManager(nil)
 	defer m.Close()
-	appr := NewApprovals()
 	s := &execSession{stdin: &reviewWriteCloser{}, done: make(chan struct{})}
 	for range 2 {
-		if _, err := writeSessionInput(t.Context(), m, 1, s, elicit, appr, "rm -rf relative-dir\n"); err != nil {
+		if _, err := writeSessionInput(t.Context(), m, 1, s, elicit, "rm -rf relative-dir\n"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -178,7 +177,7 @@ func TestExecSessionBlockedInputCanBeCancelled(t *testing.T) {
 	defer cancel()
 	finished := make(chan error, 1)
 	go func() {
-		_, err := executeExecSession(ctx, m, nil, nil, map[string]any{"session_id": id, "input": "hello", "wait": 0})
+		_, err := executeExecSession(ctx, m, nil, map[string]any{"session_id": id, "input": "hello", "wait": 0})
 		finished <- err
 	}()
 	select {
@@ -208,17 +207,16 @@ func TestExecSessionOverflowPersistsAcrossBackspaceOnTTY(t *testing.T) {
 	}}
 	m := NewExecManager(nil)
 	defer m.Close()
-	appr := NewApprovals()
 	s := &execSession{tty: true, stdin: &reviewWriteCloser{}, done: make(chan struct{})}
 
 	longPrefix := strings.Repeat("a", maxClassifiableBytes) + "; rm -rf /"
-	if _, err := writeSessionInput(t.Context(), m, 1, s, elicit, appr, longPrefix); err != nil {
+	if _, err := writeSessionInput(t.Context(), m, 1, s, elicit, longPrefix); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := writeSessionInput(t.Context(), m, 1, s, elicit, appr, "\b"); err != nil {
+	if _, err := writeSessionInput(t.Context(), m, 1, s, elicit, "\b"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := writeSessionInput(t.Context(), m, 1, s, elicit, appr, "\n"); err == nil || !strings.Contains(err.Error(), "denied") {
+	if _, err := writeSessionInput(t.Context(), m, 1, s, elicit, "\n"); err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("overflowed line after backspace was not gated: %v", err)
 	}
 	if calls != 1 || !strings.Contains(message, "exceeded classifier limit") {

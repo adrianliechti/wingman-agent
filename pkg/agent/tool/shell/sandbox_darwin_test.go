@@ -5,6 +5,8 @@ package shell
 import (
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,8 +19,9 @@ import (
 func TestSeatbeltProfileUsesParameterizedWritableRoots(t *testing.T) {
 	profile, definitions := seatbeltProfile(sandboxPolicy{WritableRoots: []string{"/repo with spaces", "/private/tmp"}, Network: true})
 
-	if strings.Contains(profile, "/repo with spaces") {
-		t.Fatalf("profile interpolates an untrusted path directly: %s", profile)
+	writeGrant := strings.Split(strings.Split(profile, "(allow file-write*")[1], "(deny appleevent-send)")[0]
+	if strings.Contains(writeGrant, "/repo with spaces") {
+		t.Fatalf("write grant interpolates an untrusted path directly: %s", writeGrant)
 	}
 	for _, want := range []string{
 		`(deny default)`,
@@ -122,12 +125,19 @@ func TestSeatbeltProfileProtectsConfigAndCredentials(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.Mkdir(filepath.Join(workspace, "agent-config"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("agent-config", filepath.Join(workspace, ".agents")); err != nil {
+		t.Fatal(err)
+	}
 
 	profile, definitions := seatbeltProfile(sandboxPolicy{WritableRoots: []string{workspace}, ProtectedRoot: workspace, DenyRead: []string{secrets}})
 	checks := []string{
-		"touch ok.txt", "touch .git/ORIG_HEAD",
+		"touch ok.txt", "! touch .git/ORIG_HEAD",
 		"! touch .git/hooks/pre-commit", "! touch sub/.git/hooks/pre-commit", "! sh -c 'echo x >> .git/config'",
 		"! mkdir .vscode", "! touch mcp.json", "! mv .git moved", "! cat " + shellTestQuote(filepath.Join(secrets, "key")),
+		"! touch agent-config/bypass",
 	}
 	args := append([]string{"-p", profile}, definitions...)
 	// An && list fails on the first check that misbehaves; set -e would ignore negated commands.
@@ -143,7 +153,57 @@ func TestSeatbeltProfileProtectsConfigAndCredentials(t *testing.T) {
 	}
 }
 
-func TestSeatbeltProfileReachesUnixSocketsOnlyInsideWritableRoots(t *testing.T) {
+func TestScopedPermissionsRetainSeatbeltBoundaries(t *testing.T) {
+	t.Setenv("WINGMAN_SANDBOX", "workspace")
+	t.Setenv(workspaceSandboxActiveEnv, "")
+	t.Setenv(workspaceSandboxNetworkEnv, "off")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) }))
+	defer server.Close()
+	workspace, extra, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	curl := "/usr/bin/curl --noproxy '*' -fsS --max-time 2 " + shellTestQuote(server.URL)
+	for _, tc := range []struct {
+		name          string
+		network, root bool
+	}{{"default", false, false}, {"network", true, false}, {"directory", false, true}, {"both", true, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := map[string]any{}
+			if tc.network || tc.root {
+				args["sandbox_permissions"] = "require_permissions"
+				args["justification"] = "integration fixture"
+				args["network"] = tc.network
+				if tc.root {
+					args["writable_roots"] = []any{extra}
+				}
+			}
+			opts, _, err := executionOptions(workspace, args, &Options{TempDir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			networkCheck := curl
+			if !tc.network {
+				networkCheck = "! " + networkCheck
+			}
+			writeCheck := "touch " + shellTestQuote(filepath.Join(extra, tc.name))
+			if !tc.root {
+				writeCheck = "! " + writeCheck
+			}
+			checks := []string{networkCheck, writeCheck, "! touch " + shellTestQuote(filepath.Join(outside, tc.name)), `touch "$TMPDIR/private"`}
+			cmd, err := buildToolCommand(t.Context(), strings.Join(checks, " && "), workspace, workspace, opts, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := cmd.CombinedOutput()
+			if err != nil && strings.Contains(string(output), "sandbox_apply: Operation not permitted") {
+				t.Skip("nested Seatbelt profiles are unavailable")
+			}
+			if err != nil {
+				t.Fatalf("scoped grant changed other boundaries: %v\n%s", err, output)
+			}
+		})
+	}
+}
+
+func TestSeatbeltProfileBlocksHostUnixSocketsEvenInsideWritableRoots(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +236,7 @@ func TestSeatbeltProfileReachesUnixSocketsOnlyInsideWritableRoots(t *testing.T) 
 
 	profile, definitions := seatbeltProfile(sandboxPolicy{WritableRoots: []string{workspace}, Network: true})
 	args := append([]string{"-p", profile}, definitions...)
-	args = append(args, "--", "/bin/sh", "-c", "{ /usr/bin/nc -U "+shellTestQuote(inside)+" </dev/null && ! /usr/bin/nc -U "+shellTestQuote(outside)+" </dev/null; } 2>/dev/null")
+	args = append(args, "--", "/bin/sh", "-c", "{ ! /usr/bin/nc -U "+shellTestQuote(inside)+" </dev/null && ! /usr/bin/nc -U "+shellTestQuote(outside)+" </dev/null; } 2>/dev/null")
 	output, err := exec.Command(sandboxExecPath, args...).CombinedOutput()
 	if err != nil && strings.Contains(string(output), "sandbox_apply: Operation not permitted") {
 		t.Skip("nested Seatbelt profiles are unavailable")

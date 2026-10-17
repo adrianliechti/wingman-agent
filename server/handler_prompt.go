@@ -28,13 +28,6 @@ func (b *backendRuntime) Confirm(ctx context.Context, message string) (bool, err
 	if sid == "" {
 		return false, errors.New("prompt requires an explicit session")
 	}
-	c := b.session(sid)
-	c.mu.Lock()
-	all := c.confirmAll && c.state.Status != "deleted" && ctx.Err() == nil && b.ctx.Err() == nil
-	c.mu.Unlock()
-	if all {
-		return true, nil
-	}
 	reply, err := b.prompt(ctx, PromptKindConfirm, message, nil)
 	if err != nil {
 		return false, err
@@ -99,9 +92,6 @@ func (c *sessionController) resolvePromptLocked(command Command) error {
 	}
 	// Removal is the atomic winner selection for responses from multiple clients.
 	delete(c.prompts, command.PromptID)
-	if p.view.Kind == PromptKindConfirm && command.Action == string(tool.ElicitAccept) && command.Scope == PromptScopeSession {
-		c.confirmAll = true
-	}
 	p.reply <- command
 	c.publishPromptsLocked()
 	return nil

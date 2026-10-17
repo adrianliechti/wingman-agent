@@ -115,15 +115,9 @@ func nativeSandboxPolicy(policy sandboxPolicy) (nativeFilesystemPolicy, error) {
 			return result, fmt.Errorf("check sandbox hardlinks beneath %q: %w", root, err)
 		}
 	}
-	for _, path := range existingProtectedPaths(policy.ProtectedRoot) {
-		add(&result.ReadOnly, path)
-	}
-	// Native policies protect the Git directory itself against replacement;
-	// worktree pointer files receive the same protection.
-	if policy.ProtectedRoot != "" {
-		git := filepath.Join(policy.ProtectedRoot, ".git")
-		if _, err := os.Lstat(git); err == nil {
-			add(&result.ReadOnly, git)
+	for _, root := range sandboxProtectedRoots(policy) {
+		for _, path := range existingProtectedPaths(root) {
+			add(&result.ReadOnly, path)
 		}
 	}
 	carveouts := append([]string(nil), result.ReadOnly...)

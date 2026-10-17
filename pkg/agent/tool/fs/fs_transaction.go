@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 	"github.com/google/uuid"
 )
 
@@ -48,10 +49,18 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 	}
 	for i := range tx.changes {
 		change := &tx.changes[i]
+		if err := sandboxpolicy.CheckWrite(workspaceRoot.Name(), change.target.AbsPath); err != nil {
+			closeTransactionRoots(tx)
+			return err
+		}
 		change.root, change.path, change.closeRoot, err = transactionLocation(workspaceRoot, change.target)
 		if err != nil {
 			closeTransactionRoots(tx)
 			return fmt.Errorf("prepare %s: %w", change.displayPath, err)
+		}
+		if err := sandboxpolicy.CheckWrite(change.root.Name(), change.path); err != nil {
+			closeTransactionRoots(tx)
+			return err
 		}
 	}
 	defer closeTransactionRoots(tx)

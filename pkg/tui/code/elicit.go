@@ -12,10 +12,6 @@ import (
 )
 
 func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
-	if a.confirmAllForSession(ctx) {
-		return true, nil
-	}
-
 	if err := a.acquirePrompt(ctx); err != nil {
 		return false, err
 	}
@@ -24,10 +20,9 @@ func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
 	items := []PopupItem{
 		{ID: "yes", Label: "yes", Detail: "approve this command"},
 		{ID: "no", Label: "no", Detail: "deny"},
-		{ID: "always", Label: "always", Detail: "auto-approve for this session"},
 	}
 
-	hotkeys := map[rune]string{'y': "yes", 'n': "no", 'a': "always"}
+	hotkeys := map[rune]string{'y': "yes", 'n': "no"}
 
 	ids, err := a.askOptionsLocked(ctx, "Confirm command", message, items, false, hotkeys)
 	if err != nil {
@@ -43,32 +38,10 @@ func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
 	case "yes":
 		a.recordPrompt(ctx, "Confirm command", message, "Yes")
 		return true, nil
-	case "always":
-		a.rememberConfirmAll(ctx)
-		a.recordPrompt(ctx, "Confirm command", message, "Always (auto-approve commands for this session)")
-		return true, nil
 	default:
 		a.recordPrompt(ctx, "Confirm command", message, "No")
 		return false, nil
 	}
-}
-
-func (a *App) confirmationSessionID(ctx context.Context) string {
-	if id := corecode.SessionIDFromContext(ctx); id != "" {
-		return id
-	}
-	a.sessionMu.Lock()
-	defer a.sessionMu.Unlock()
-	return a.sessionID
-}
-
-func (a *App) confirmAllForSession(ctx context.Context) bool {
-	_, ok := a.confirmAll.Load(a.confirmationSessionID(ctx))
-	return ok
-}
-
-func (a *App) rememberConfirmAll(ctx context.Context) {
-	a.confirmAll.Store(a.confirmationSessionID(ctx), struct{}{})
 }
 
 // recordPrompt writes the resolved question and its answer into the chat —

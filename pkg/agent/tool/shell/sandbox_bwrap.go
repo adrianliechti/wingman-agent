@@ -10,11 +10,25 @@ import (
 )
 
 func platformSandboxCommand(shell, command, workingDir string, policy sandboxPolicy) (string, []string, error) {
+	if _, err := sandboxSeccompFilter(policy.Network); err != nil {
+		return "", nil, err
+	}
 	bwrap, err := findBubblewrap(policy.WritableRoots)
 	if err != nil {
 		return "", nil, err
 	}
-	return bwrap, bubblewrapArgs(shell, command, workingDir, policy), nil
+	exe, err := os.Executable()
+	if err != nil {
+		return "", nil, err
+	}
+	args := bubblewrapArgs(shell, command, workingDir, policy)
+	network := "isolated"
+	if policy.Network {
+		network = "network"
+	}
+	// The helper installs seccomp before executing any model-generated code.
+	args = append(args[:len(args)-3], append([]string{exe, linuxSandboxHelper, network}, args[len(args)-3:]...)...)
+	return bwrap, args, nil
 }
 
 func bubblewrapArgs(shell, command, workingDir string, policy sandboxPolicy) []string {
@@ -39,8 +53,10 @@ func bubblewrapArgs(shell, command, workingDir string, policy sandboxPolicy) []s
 		args = append(args, "--bind", root, root)
 	}
 	// Mounts can only cover paths that exist, so nested or not-yet-created ones stay writable on Linux.
-	for _, path := range existingProtectedPaths(policy.ProtectedRoot) {
-		args = append(args, "--ro-bind", path, path)
+	for _, root := range sandboxProtectedRoots(policy) {
+		for _, path := range existingProtectedPaths(root) {
+			args = append(args, "--ro-bind", path, path)
+		}
 	}
 	for _, path := range policy.DenyRead {
 		if info, err := os.Stat(path); err == nil && info.IsDir() {

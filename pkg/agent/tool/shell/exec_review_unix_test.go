@@ -36,7 +36,7 @@ func TestExecChecksLifecycleBeforeStarting(t *testing.T) {
 				}
 				want = "too many running sessions"
 			}
-			_, err := ExecTools(m, t.TempDir(), nil, nil, nil)[0].Execute(ctx, map[string]any{"command": "echo side-effect", "wait": 0})
+			_, err := ExecTools(m, t.TempDir(), nil, nil)[0].Execute(ctx, map[string]any{"command": "echo side-effect", "wait": 0})
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("expected %q before trying to start process, got %v", want, err)
 			}
@@ -49,7 +49,7 @@ func TestExecRejectsInvalidOptionsBeforeStarting(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			m := NewExecManager(nil)
 			defer m.Close()
-			_, err := ExecTools(m, t.TempDir(), nil, nil, nil)[0].Execute(t.Context(), map[string]any{"command": "true", key: value})
+			_, err := ExecTools(m, t.TempDir(), nil, nil)[0].Execute(t.Context(), map[string]any{"command": "true", key: value})
 			if err == nil || !strings.Contains(err.Error(), key) {
 				t.Fatalf("invalid %s accepted: %v", key, err)
 			}
@@ -68,7 +68,7 @@ func TestExecSessionCancelledInputHasNoSideEffects(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err = executeExecSession(ctx, m, nil, nil, map[string]any{"session_id": id, "input": "hello", "wait": 0})
+	_, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": id, "input": "hello", "wait": 0})
 	if !errors.Is(err, context.Canceled) || writer.Len() != 0 {
 		t.Fatalf("cancelled input was written: %q, %v", writer.String(), err)
 	}
@@ -77,7 +77,7 @@ func TestExecSessionCancelledInputHasNoSideEffects(t *testing.T) {
 func TestExecKillReportsValidationExitStatus(t *testing.T) {
 	m := NewExecManager(nil)
 	defer m.Close()
-	tools := ExecTools(m, t.TempDir(), nil, nil, nil)
+	tools := ExecTools(m, t.TempDir(), nil, nil)
 	started, err := tools[0].Execute(t.Context(), map[string]any{"command": "sleep 30", "validation": true, "wait": 0})
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestExecKillReportsValidationExitStatus(t *testing.T) {
 func TestExecBlockedPipeWriteTerminatesOnCancellation(t *testing.T) {
 	m := NewExecManager(nil)
 	defer m.Close()
-	tools := ExecTools(m, t.TempDir(), nil, nil, nil)
+	tools := ExecTools(m, t.TempDir(), nil, nil)
 	started, err := tools[0].Execute(t.Context(), map[string]any{"command": "sleep 30", "wait": 0})
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +115,7 @@ func TestExecFailedStartReleasesCapacity(t *testing.T) {
 	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
 	m := NewExecManager(nil)
 	defer m.Close()
-	tools := ExecTools(m, t.TempDir(), nil, nil, nil)
+	tools := ExecTools(m, t.TempDir(), nil, nil)
 	for range maxExecSessions + 1 {
 		if _, err := tools[0].Execute(t.Context(), map[string]any{"command": "true"}); err == nil || !strings.Contains(err.Error(), "failed to start") {
 			t.Fatalf("failed launch leaked capacity: %v", err)

@@ -48,9 +48,9 @@ func TestResolveWorkdirWorkspaceSandboxRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
-func TestWorkspaceSandboxIsExplicitOptIn(t *testing.T) {
+func TestWorkspaceSandboxIsDefaultAndRequiresExplicitOptOut(t *testing.T) {
 	t.Setenv(workspaceSandboxActiveEnv, "")
-	for _, value := range []string{"", "off", "false", "1"} {
+	for _, value := range []string{"off", "false", "0", "no", "disabled"} {
 		t.Run(value, func(t *testing.T) {
 			t.Setenv("WINGMAN_SANDBOX", value)
 			if workspaceSandboxEnabled() {
@@ -58,7 +58,7 @@ func TestWorkspaceSandboxIsExplicitOptIn(t *testing.T) {
 			}
 		})
 	}
-	for _, value := range []string{"workspace", "workspace-write", "WORKSPACE"} {
+	for _, value := range []string{"", "workspace", "workspace-write", "WORKSPACE", "1", "typo"} {
 		t.Run(value, func(t *testing.T) {
 			t.Setenv("WINGMAN_SANDBOX", value)
 			if !workspaceSandboxEnabled() {
@@ -122,7 +122,7 @@ func TestExecSandboxConfinesWritesToWorkspace(t *testing.T) {
 
 	manager := NewExecManager(nil)
 	defer manager.Close()
-	exec := ExecTools(manager, t.TempDir(), nil, nil, nil)[0]
+	exec := ExecTools(manager, t.TempDir(), nil, nil)[0]
 	run := func(command string) tool.Result {
 		result, err := exec.Execute(context.Background(), map[string]any{"command": command, "wait": 10})
 		if err != nil {
@@ -161,7 +161,7 @@ func TestExecEscalationRunsOutsideSandboxAfterApproval(t *testing.T) {
 	}
 	manager := NewExecManager(nil)
 	defer manager.Close()
-	exec := ExecTools(manager, t.TempDir(), elicit, nil, nil)[0]
+	exec := ExecTools(manager, t.TempDir(), elicit, nil)[0]
 	if _, ok := exec.Parameters["properties"].(map[string]any)["sandbox_permissions"]; !ok {
 		t.Fatal("sandboxed exec does not offer sandbox_permissions")
 	}
@@ -196,8 +196,8 @@ func TestExecEscalationFailsClosedWithoutApprover(t *testing.T) {
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	manager := NewExecManager(nil)
 	defer manager.Close()
-	_, err := ExecTools(manager, t.TempDir(), nil, nil, nil)[0].Execute(context.Background(), map[string]any{
-		"command": "true", "sandbox_permissions": "require_escalated",
+	_, err := ExecTools(manager, t.TempDir(), nil, nil)[0].Execute(context.Background(), map[string]any{
+		"command": "true", "sandbox_permissions": "require_escalated", "justification": "test approval unavailable",
 	})
 	if err == nil || !strings.Contains(err.Error(), "requires approval") {
 		t.Fatalf("escalation without an approver = %v", err)
@@ -205,10 +205,10 @@ func TestExecEscalationFailsClosedWithoutApprover(t *testing.T) {
 }
 
 func TestExecOffersEscalationOnlyWhenSandboxed(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "")
+	t.Setenv("WINGMAN_SANDBOX", "off")
 	manager := NewExecManager(nil)
 	defer manager.Close()
-	if _, ok := ExecTools(manager, t.TempDir(), nil, nil, nil)[0].Parameters["properties"].(map[string]any)["sandbox_permissions"]; ok {
+	if _, ok := ExecTools(manager, t.TempDir(), nil, nil)[0].Parameters["properties"].(map[string]any)["sandbox_permissions"]; ok {
 		t.Fatal("unsandboxed exec offers sandbox_permissions")
 	}
 }

@@ -59,8 +59,8 @@ func platformSandboxCommand(shell, command, workingDir string, policy sandboxPol
 
 func validateSandboxWritableRoot(root string) error {
 	root = canonicalPath(root)
-	// The shared policy includes an implicit temp grant. Native Windows owns
-	// private temp storage instead, so the helper discards this host grant.
+	// Native Windows owns private temp storage. Ignore a legacy shared-temp
+	// grant if an older caller supplied one; never make the host temp writable.
 	if strings.EqualFold(root, canonicalPath(os.TempDir())) {
 		return nil
 	}

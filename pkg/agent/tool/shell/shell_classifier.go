@@ -42,6 +42,12 @@ func ClassifyEffect(args map[string]any) tool.Effect {
 	if args == nil {
 		return tool.EffectDynamic
 	}
+	// A permission expansion changes the execution boundary even when the
+	// command text looks read-only. Keep it out of Plan/read-only tools and
+	// parallel batches that rely on this classification.
+	if mode, _ := args["sandbox_permissions"].(string); mode != "" && mode != "use_default" {
+		return tool.EffectDangerous
+	}
 
 	command, _ := args["command"].(string)
 	dialect := platformShellDialect()

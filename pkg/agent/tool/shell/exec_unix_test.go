@@ -22,17 +22,17 @@ func TestExecValidationMetadataKeepsWorkdirThroughPolling(t *testing.T) {
 	m := NewExecManager(nil)
 	defer m.Close()
 	command := `read input; test "$input" = done`
-	started, err := executeExecCommand(t.Context(), m, dir, nil, nil, nil, map[string]any{
+	started, err := executeExecCommand(t.Context(), m, dir, nil, nil, map[string]any{
 		"command": command, "workdir": "package", "validation": true, "wait": 0,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, err := executeExecSession(t.Context(), m, nil, nil, map[string]any{"session_id": 1, "wait": 0})
+	pending, err := executeExecSession(t.Context(), m, nil, map[string]any{"session_id": 1, "wait": 0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	completed, err := executeExecSession(t.Context(), m, nil, nil, map[string]any{"session_id": 1, "input": "done\n", "wait": 10})
+	completed, err := executeExecSession(t.Context(), m, nil, map[string]any{"session_id": 1, "input": "done\n", "wait": 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestExecCommandCompletes(t *testing.T) {
 	m := NewExecManager(nil)
 	defer m.Close()
 
-	out, err := executeExecCommand(context.Background(), m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{
+	out, err := executeExecCommand(context.Background(), m, t.TempDir(), nil, nil, map[string]any{
 		"command": "echo hello",
 	})
 	if err != nil {
@@ -71,7 +71,7 @@ func TestExecCommandExitCode(t *testing.T) {
 	m := NewExecManager(nil)
 	defer m.Close()
 
-	out, err := executeExecCommand(context.Background(), m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{
+	out, err := executeExecCommand(context.Background(), m, t.TempDir(), nil, nil, map[string]any{
 		"command": "exit 3",
 	})
 	if err != nil {
@@ -88,7 +88,7 @@ func TestExecCommandBackgroundPollKill(t *testing.T) {
 
 	ctx := context.Background()
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{
+	out, err := executeExecCommand(ctx, m, t.TempDir(), nil, nil, map[string]any{
 		"command": "echo started; sleep 30",
 		"wait":    1,
 	})
@@ -99,7 +99,7 @@ func TestExecCommandBackgroundPollKill(t *testing.T) {
 		t.Fatalf("output = %q", out.Content)
 	}
 
-	out, err = executeExecSession(ctx, m, nil, NewApprovals(), map[string]any{"session_id": 1, "wait": 0})
+	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "wait": 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestExecCommandBackgroundPollKill(t *testing.T) {
 		t.Fatalf("output = %q", out.Content)
 	}
 
-	out, err = executeExecSession(ctx, m, nil, NewApprovals(), map[string]any{"session_id": 1, "kill": true})
+	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "kill": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestExecCommandBackgroundPollKill(t *testing.T) {
 		t.Fatalf("output = %q", out.Content)
 	}
 
-	if _, err := executeExecSession(ctx, m, nil, NewApprovals(), map[string]any{"session_id": 1}); err == nil {
+	if _, err := executeExecSession(ctx, m, nil, map[string]any{"session_id": 1}); err == nil {
 		t.Fatal("expected error for removed session")
 	}
 }
@@ -126,7 +126,7 @@ func TestExecSessionStdin(t *testing.T) {
 
 	ctx := context.Background()
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{
+	out, err := executeExecCommand(ctx, m, t.TempDir(), nil, nil, map[string]any{
 		"command": "cat",
 		"wait":    1,
 	})
@@ -137,7 +137,7 @@ func TestExecSessionStdin(t *testing.T) {
 		t.Fatalf("output = %q", out.Content)
 	}
 
-	out, err = executeExecSession(ctx, m, nil, NewApprovals(), map[string]any{"session_id": 1, "input": "hello\n", "wait": 1})
+	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "input": "hello\n", "wait": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestExecSessionStdin(t *testing.T) {
 		t.Fatalf("output = %q", out.Content)
 	}
 
-	out, err = executeExecSession(ctx, m, nil, NewApprovals(), map[string]any{"session_id": 1, "eof": true, "wait": 10})
+	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "eof": true, "wait": 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestExecCommandTTY(t *testing.T) {
 
 	ctx := context.Background()
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{
+	out, err := executeExecCommand(ctx, m, t.TempDir(), nil, nil, map[string]any{
 		"command": "[ -t 0 ] && echo isatty || echo notty",
 		"tty":     true,
 	})
@@ -171,7 +171,7 @@ func TestExecCommandTTY(t *testing.T) {
 		t.Fatalf("tty output = %q", out.Content)
 	}
 
-	out, err = executeExecCommand(ctx, m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{
+	out, err = executeExecCommand(ctx, m, t.TempDir(), nil, nil, map[string]any{
 		"command": "[ -t 0 ] && echo isatty || echo notty",
 	})
 	if err != nil {
@@ -188,7 +188,7 @@ func TestExecSessionTTYStdinEOF(t *testing.T) {
 
 	ctx := context.Background()
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{
+	out, err := executeExecCommand(ctx, m, t.TempDir(), nil, nil, map[string]any{
 		"command": "cat",
 		"tty":     true,
 		"wait":    1,
@@ -200,7 +200,7 @@ func TestExecSessionTTYStdinEOF(t *testing.T) {
 		t.Fatalf("output = %q", out.Content)
 	}
 
-	out, err = executeExecSession(ctx, m, nil, NewApprovals(), map[string]any{"session_id": 1, "input": "hello\n", "wait": 1})
+	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "input": "hello\n", "wait": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestExecSessionTTYStdinEOF(t *testing.T) {
 		t.Fatalf("output = %q", out.Content)
 	}
 
-	out, err = executeExecSession(ctx, m, nil, NewApprovals(), map[string]any{"session_id": 1, "eof": true, "wait": 10})
+	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "eof": true, "wait": 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,9 +230,8 @@ func TestExecSessionDangerousInputConfirmed(t *testing.T) {
 			return false, nil
 		},
 	}
-	appr := NewApprovals()
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, appr, nil, map[string]any{
+	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, nil, map[string]any{
 		"command": "cat",
 		"wait":    1,
 	})
@@ -243,7 +242,7 @@ func TestExecSessionDangerousInputConfirmed(t *testing.T) {
 		t.Fatalf("output = %q", out.Content)
 	}
 
-	_, err = executeExecSession(ctx, m, elicit, appr, map[string]any{"session_id": 1, "input": "sudo rm -rf /tmp/x\n"})
+	_, err = executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": "sudo rm -rf /tmp/x\n"})
 	if err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("dangerous stdin not denied: %v", err)
 	}
@@ -251,7 +250,7 @@ func TestExecSessionDangerousInputConfirmed(t *testing.T) {
 		t.Fatalf("confirm called %d times, want 1", confirmCalls)
 	}
 
-	if _, err := executeExecSession(ctx, m, elicit, appr, map[string]any{"session_id": 1, "input": "hello\n", "wait": 1}); err != nil {
+	if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": "hello\n", "wait": 1}); err != nil {
 		t.Fatalf("benign stdin failed: %v", err)
 	}
 	if confirmCalls != 1 {
@@ -273,9 +272,8 @@ func TestExecSessionDangerousInputCannotBeSplitAcrossWrites(t *testing.T) {
 			return false, nil
 		},
 	}
-	appr := NewApprovals()
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, appr, nil, map[string]any{
+	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, nil, map[string]any{
 		"command": "cat",
 		"wait":    1,
 	})
@@ -286,14 +284,14 @@ func TestExecSessionDangerousInputCannotBeSplitAcrossWrites(t *testing.T) {
 		t.Fatalf("output = %q", out.Content)
 	}
 
-	if _, err := executeExecSession(ctx, m, elicit, appr, map[string]any{"session_id": 1, "input": "r", "wait": 0}); err != nil {
+	if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": "r", "wait": 0}); err != nil {
 		t.Fatalf("partial input failed: %v", err)
 	}
 	if confirmCalls != 0 {
 		t.Fatalf("partial input prompted before submission (%d calls)", confirmCalls)
 	}
 
-	_, err = executeExecSession(ctx, m, elicit, appr, map[string]any{"session_id": 1, "input": "m -rf /tmp/x\n"})
+	_, err = executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": "m -rf /tmp/x\n"})
 	if err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("split dangerous stdin not denied: %v", err)
 	}
@@ -319,9 +317,8 @@ func TestExecSessionPendingInputCheckedBeforeEOFOrCtrlD(t *testing.T) {
 			return false, nil
 		},
 	}
-	appr := NewApprovals()
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, appr, nil, map[string]any{
+	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, nil, map[string]any{
 		"command": "cat",
 		"wait":    1,
 	})
@@ -332,7 +329,7 @@ func TestExecSessionPendingInputCheckedBeforeEOFOrCtrlD(t *testing.T) {
 		t.Fatalf("output = %q", out.Content)
 	}
 
-	if _, err := executeExecSession(ctx, m, elicit, appr, map[string]any{
+	if _, err := executeExecSession(ctx, m, elicit, map[string]any{
 		"session_id": 1,
 		"input":      "rm -rf /tmp/wingman-marker",
 		"wait":       0,
@@ -343,14 +340,14 @@ func TestExecSessionPendingInputCheckedBeforeEOFOrCtrlD(t *testing.T) {
 		t.Fatalf("unsubmitted input prompted early (%d calls)", confirmCalls)
 	}
 
-	if _, err := executeExecSession(ctx, m, elicit, appr, map[string]any{"session_id": 1, "eof": true}); err == nil || !strings.Contains(err.Error(), "denied") {
+	if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "eof": true}); err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("dangerous pending input was not denied before EOF: %v", err)
 	}
 	if confirmCalls != 1 || !strings.Contains(approvalMessage, "rm -rf /tmp/wingman-marker") {
 		t.Fatalf("EOF approval = %q (%d calls)", approvalMessage, confirmCalls)
 	}
 
-	if _, err := executeExecSession(ctx, m, elicit, appr, map[string]any{"session_id": 1, "input": "\x04"}); err == nil || !strings.Contains(err.Error(), "denied") {
+	if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": "\x04"}); err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("raw Ctrl-D was not denied: %v", err)
 	}
 	if confirmCalls != 2 {
@@ -372,9 +369,8 @@ func TestExecSessionPromptTransformationAcrossStateAndWrites(t *testing.T) {
 			return false, nil
 		},
 	}
-	appr := NewApprovals()
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, appr, nil, map[string]any{
+	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, nil, map[string]any{
 		"command": "cat",
 		"wait":    1,
 	})
@@ -386,7 +382,7 @@ func TestExecSessionPromptTransformationAcrossStateAndWrites(t *testing.T) {
 	}
 
 	for _, input := range []string{`a='$'` + "\n", `b="$a(touch /tmp/wingman-marker)"` + "\n", `echo ${b@`} {
-		if _, err := executeExecSession(ctx, m, elicit, appr, map[string]any{"session_id": 1, "input": input, "wait": 0}); err != nil {
+		if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": input, "wait": 0}); err != nil {
 			t.Fatalf("safe setup/partial input %q failed: %v", input, err)
 		}
 	}
@@ -394,7 +390,7 @@ func TestExecSessionPromptTransformationAcrossStateAndWrites(t *testing.T) {
 		t.Fatalf("setup or partial expansion prompted early (%d calls)", confirmCalls)
 	}
 
-	if _, err := executeExecSession(ctx, m, elicit, appr, map[string]any{"session_id": 1, "input": "P}\n"}); err == nil || !strings.Contains(err.Error(), "denied") {
+	if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": "P}\n"}); err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("split @P expansion was not denied: %v", err)
 	}
 	if confirmCalls != 1 || !strings.Contains(approvalMessage, `echo ${b@P}`) {
@@ -429,10 +425,9 @@ func TestTerminalControlApprovalsAreNeverRemembered(t *testing.T) {
 	s := &execSession{stdin: &testWriteCloser{}}
 	m := NewExecManager(nil)
 	defer m.Close()
-	appr := NewApprovals()
 
 	for range 3 {
-		if _, err := writeSessionInput(context.Background(), m, 1, s, elicit, appr, "\t"); err != nil {
+		if _, err := writeSessionInput(context.Background(), m, 1, s, elicit, "\t"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -451,7 +446,7 @@ func TestExecSessionCtrlCInterruptsPipeSession(t *testing.T) {
 
 	ctx := context.Background()
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{
+	out, err := executeExecCommand(ctx, m, t.TempDir(), nil, nil, map[string]any{
 		"command": "sleep 30",
 		"wait":    1,
 	})
@@ -462,7 +457,7 @@ func TestExecSessionCtrlCInterruptsPipeSession(t *testing.T) {
 		t.Fatalf("output = %q", out.Content)
 	}
 
-	out, err = executeExecSession(ctx, m, nil, NewApprovals(), map[string]any{"session_id": 1, "input": "\u0003", "wait": 10})
+	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "input": "\u0003", "wait": 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,14 +472,14 @@ func TestExecSessionPollReportsExitedProcessWithZeroWait(t *testing.T) {
 	for range 50 {
 		m := NewExecManager(nil)
 
-		out, err := executeExecCommand(t.Context(), m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{"command": "echo hi", "wait": 0})
+		out, err := executeExecCommand(t.Context(), m, t.TempDir(), nil, nil, map[string]any{"command": "echo hi", "wait": 0})
 		if err != nil {
 			m.Close()
 			t.Fatal(err)
 		}
 		if s := m.get(1); s != nil {
 			<-s.done
-			out, err = executeExecSession(t.Context(), m, nil, NewApprovals(), map[string]any{"session_id": 1, "wait": 0})
+			out, err = executeExecSession(t.Context(), m, nil, map[string]any{"session_id": 1, "wait": 0})
 			if err != nil {
 				m.Close()
 				t.Fatal(err)
@@ -501,7 +496,7 @@ func TestExecSessionPollReportsExitedProcessWithZeroWait(t *testing.T) {
 func TestExecCommandZeroWaitReturnsExitedProcessInline(t *testing.T) {
 	for range 50 {
 		m := NewExecManager(nil)
-		out, err := executeExecCommand(t.Context(), m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{"command": "true", "wait": 0})
+		out, err := executeExecCommand(t.Context(), m, t.TempDir(), nil, nil, map[string]any{"command": "true", "wait": 0})
 		m.Close()
 		if err != nil {
 			t.Fatal(err)

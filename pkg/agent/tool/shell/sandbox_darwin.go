@@ -30,8 +30,8 @@ func platformSandboxCommand(shell, command, _ string, policy sandboxPolicy) (str
 // policy used by Anthropic Sandbox Runtime, narrowed to Wingman's
 // workspace-write mode. Apple Events and Launch Services operations stay
 // blocked because either can ask an unsandboxed GUI process to act on behalf
-// of the sandboxed command. Unix sockets are reachable only inside writable
-// roots, so host services such as docker.sock or SSH agents stay out of reach.
+// of the sandboxed command. Host Unix sockets stay unreachable, including
+// sockets inside writable roots; IP networking only adds the DNS service.
 func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 	var definitions []string
 	paramRules := func(prefix string, paths []string) string {
@@ -44,7 +44,6 @@ func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 		return rules.String()
 	}
 	writeRules := paramRules("WRITABLE_ROOT", policy.WritableRoots)
-	socketRules := strings.ReplaceAll(writeRules, " (literal ", " (subpath ")
 
 	profile := `(version 1)
 (deny default)
@@ -108,11 +107,13 @@ func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 	if policy.Network {
 		profile += seatbeltNetwork
 	}
-	if socketRules != "" {
-		profile += "(allow network*" + socketRules + ")\n"
+	var protectedPaths []string
+	for _, root := range sandboxProtectedRoots(policy) {
+		profile += seatbeltProtectedRules(root)
+		protectedPaths = append(protectedPaths, existingProtectedPaths(root)...)
 	}
-	if policy.ProtectedRoot != "" {
-		profile += seatbeltProtectedRules(policy.ProtectedRoot)
+	if rules := paramRules("PROTECTED_PATH", protectedPaths); rules != "" {
+		profile += "(deny file-write*" + rules + ")\n"
 	}
 	if denyRules := paramRules("DENY_READ", policy.DenyRead); denyRules != "" {
 		profile += "(deny file-read*" + denyRules + ")\n(deny file-write*" + denyRules + ")\n"

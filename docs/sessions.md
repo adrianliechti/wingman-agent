@@ -110,27 +110,44 @@ without review.
 Wingman asks you only when the reviewer cannot decide, and for trust prompts
 such as running hooks from a cloned repository. Answer the prompt shown for the
 relevant session. In the browser, `Alt+A`
-focuses a prompt; `Y` or `N` then allows or declines an approval. **Allow for
-session** grants the scope described by that prompt.
+focuses a prompt; `Y` or `N` then allows or declines that action. An approval
+does not disable later reviews. Each risky command, scheduled script execution,
+or permission expansion is evaluated against the current authorization.
 
 ## Sandbox
 
-Set `WINGMAN_SANDBOX=workspace` to run the agent's shell commands and scheduled
-scripts in an OS sandbox: Seatbelt on macOS, bubblewrap (`bwrap`) on Linux,
-and a native process security environment (PSEC) on Windows.
+The agent's shell commands and scheduled scripts use an OS sandbox by default:
+Seatbelt on macOS, bubblewrap (`bwrap`) with seccomp on Linux, and a native
+process security environment (PSEC) on Windows. Unavailable backends fail closed.
+Set `WINGMAN_SANDBOX=off` to explicitly disable isolation.
 
 - Commands can read most files, but not credentials such as `~/.ssh`,
-  `~/.aws`, `~/.gnupg`, `~/.kube`, or Wingman's MCP tokens.
-- They write only to the workspace, project memory, and temporary directories,
-  and cannot change `.git/hooks`, `.git/config`, `.vscode`, `.envrc`, or agent
-  configuration such as `.wingman`, `.agents`, `.claude`, and `mcp.json`.
-- Network access is on; set `WINGMAN_SANDBOX_NETWORK=off` to block it. On macOS,
-  local services such as the Docker socket or SSH agent stay unreachable.
-- When a command needs more, the agent can ask to run it outside the sandbox.
-  In Agent mode the reviewer decides; Unattended mode allows it.
+  `~/.aws`, `~/.gnupg`, `~/.kube`, or Wingman's MCP tokens. Common authentication
+  environment variables, including GitHub and cloud tokens, are removed.
+- They write only to the workspace, project memory, and private temporary
+  storage (`$TMPDIR`/`$TEMP`). The shared host temporary directory is read-only.
+- Git metadata, including the index and worktree pointer files, editor settings,
+  `.envrc`, and agent configuration are protected. The edit tool checks the same
+  protected names, including files that do not exist yet.
+- IP network access is off. A command can request `sandbox_permissions:
+  "require_permissions"` with `network: true` and/or `writable_roots`, plus a
+  justification. Reviewed grants apply to one execution and keep the sandbox.
+  `WINGMAN_SANDBOX_NETWORK=on` enables IP networking globally instead.
+- Host Unix sockets, including Docker and SSH agents, stay blocked on macOS
+  and Linux, even with IP networking enabled. macOS allows its DNS service.
+- `sandbox_permissions: "require_escalated"` requests execution outside the
+  sandbox when scoped permissions cannot do the job, such as a Git commit.
+  In Agent mode the reviewer decides; Unattended mode allows the request.
 
-Your own `!` commands and hooks run unsandboxed. On Linux, protected paths that
-do not exist yet, or sit below the workspace root, are not covered.
+Routine commands run without review. The shell classifier still identifies
+destructive intent and supplies Plan mode, read-only subagent, and parallel
+execution decisions. The sandbox limits capabilities; it does not prevent all
+data loss inside writable directories or make every network transfer safe.
+
+Your own `!` commands and hooks run unsandboxed. On Linux and Windows, native
+protected-path rules cover existing paths at each writable root; paths that
+do not exist yet, or sit below those roots, are not covered. The classifier
+remains a supplementary check, not a complete security boundary for those gaps.
 
 On Windows the sandbox attaches filesystem and network policy to the processes.
 Wingman does not change existing host ACLs, integrity labels, or ownership, and
@@ -149,7 +166,7 @@ does not provision sandbox users or require elevation.
   conservatively, because another link may point outside the workspace or to a
   credential file. Wingman checks writable trees before each launch; large
   workspaces can take longer to start.
-- `WINGMAN_SANDBOX_NETWORK=off` blocks network access through native policy.
+- Network access is blocked through native policy unless explicitly enabled.
 - The command and all its descendants are stopped before policy is released.
   Killing the helper also kills the process tree through a kill-on-close job.
 - Filesystem write grants include security changes inside writable roots.

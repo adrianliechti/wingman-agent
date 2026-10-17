@@ -17,12 +17,12 @@ func TestDefaultEnvironmentPolicyScrubsAgentCredentials(t *testing.T) {
 		"GITHUB_TOKEN=workflow-token",
 	})
 	joined := strings.Join(got, "\n")
-	for _, secret := range []string{"openai-secret", "anthropic-secret", "ANTHROPIC_BASE_URL"} {
+	for _, secret := range []string{"openai-secret", "anthropic-secret", "ANTHROPIC_BASE_URL", "workflow-token"} {
 		if strings.Contains(joined, secret) {
 			t.Fatalf("filtered environment leaked %q: %s", secret, joined)
 		}
 	}
-	if !strings.Contains(joined, "PATH=/bin") || !strings.Contains(joined, "GITHUB_TOKEN=workflow-token") {
+	if !strings.Contains(joined, "PATH=/bin") {
 		t.Fatalf("ordinary development environment was removed: %s", joined)
 	}
 }

@@ -115,7 +115,6 @@ type App struct {
 	elicitGate    chan struct{}
 	dismissPrompt func()
 	promptActive  bool
-	confirmAll    sync.Map // session ID -> struct{}
 	askActive     bool
 	askMessage    string
 	askHeader     []string

@@ -11,8 +11,14 @@ type Options struct {
 	// ScratchDir receives complete shell transcripts when inline capture is
 	// exceeded. Empty disables transcript persistence while retaining head/tail.
 	ScratchDir string
+	// TempDir is private to the session. Shared host temp directories are never
+	// granted to commands merely because they are temporary storage.
+	TempDir string
+	// Network grants IP networking for this execution while retaining the
+	// filesystem sandbox. Only the approval path may set this per command.
+	Network bool
 
-	// ExtraWritableRoots grants the optional workspace sandbox write access to
+	// ExtraWritableRoots grants the workspace sandbox write access to
 	// directories outside the workspace, such as project memory and scratch data.
 	ExtraWritableRoots []string
 
@@ -42,6 +48,10 @@ var defaultDeniedEnvironment = []string{
 	"WINGMAN_API_KEY",
 	"WINGMAN_AUTH_TOKEN",
 	"WINGMAN_TOKEN",
+	"GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN",
+	"AWS_*", "AZURE_*", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_AUTH_*",
+	"SSH_AUTH_SOCK", "SSH_AGENT_PID", "DOCKER_HOST", "DOCKER_CONTEXT",
+	"DBUS_SESSION_BUS_ADDRESS", "KUBECONFIG",
 }
 
 func DefaultEnvironmentPolicy() EnvironmentPolicy {

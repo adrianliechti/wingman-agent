@@ -68,7 +68,7 @@ func (s *execSession) writeInput(ctx context.Context, input string) error {
 	return err
 }
 
-func applySessionInput(ctx context.Context, m *ExecManager, s *execSession, elicit *tool.Elicitation, appr *Approvals, input string, eof bool) (*tool.Result, error) {
+func applySessionInput(ctx context.Context, m *ExecManager, s *execSession, elicit *tool.Elicitation, input string, eof bool) (*tool.Result, error) {
 	if input == "" && !eof {
 		return nil, nil
 	}

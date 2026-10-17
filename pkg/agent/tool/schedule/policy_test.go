@@ -21,7 +21,7 @@ func TestScheduleScriptsRequireTheExecutionPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := NewMemoryStore()
 			asked := 0
-			opts := &Options{WorkDir: t.TempDir(), Disabled: tc.disabled, Approvals: shell.NewApprovals(), Elicitation: &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) { asked++; return tc.approve, nil }}}
+			opts := &Options{WorkDir: t.TempDir(), Disabled: tc.disabled, Elicitation: &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) { asked++; return tc.approve, nil }}}
 			tools := Tools(store, opts)
 			_, err := tools[0].Execute(t.Context(), map[string]any{"action": "create", "prompt": "check", "schedule": "every 1h", "script": "git clean -fdx"})
 			if tc.disabled || !tc.approve {
@@ -37,8 +37,8 @@ func TestScheduleScriptsRequireTheExecutionPolicy(t *testing.T) {
 					t.Fatal(err)
 				}
 				tasks, _ := store.List()
-				if len(tasks) != 1 || tasks[0].ScriptApproval != scriptApproval(opts.WorkDir, tasks[0].Script) {
-					t.Fatal("approval not tied to saved script")
+				if len(tasks) != 1 || tasks[0].Script != "git clean -fdx" {
+					t.Fatal("approved script was not saved")
 				}
 			}
 			if tc.disabled && asked != 0 {
@@ -76,8 +76,16 @@ func TestChangedOrLegacyDangerousGateCannotExecuteWithoutApproval(t *testing.T) 
 	if err := os.WriteFile(marker, []byte("user work"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, hash := range []string{"", scriptApproval(dir, "echo harmless")} {
-		task := Task{Script: "rm -rf preserve-me", ScriptApproval: hash}
+	store := NewFileStore(t.TempDir())
+	// Old approval hashes remain readable but confer no authorization.
+	if err := os.WriteFile(store.Path(), []byte("tasks:\n  - script: rm -rf preserve-me\n    script_approval: legacy-grant\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := store.List()
+	if err != nil || len(legacy) != 1 {
+		t.Fatalf("load legacy schedule: %v, %v", legacy, err)
+	}
+	for _, task := range []Task{{Script: "rm -rf preserve-me"}, legacy[0]} {
 		_, out, err := RunTaskGate(t.Context(), dir, task, nil)
 		if err == nil || !strings.Contains(out, "approval") {
 			t.Fatalf("unapproved gate: %q, %v", out, err)
@@ -86,7 +94,7 @@ func TestChangedOrLegacyDangerousGateCannotExecuteWithoutApproval(t *testing.T) 
 			t.Fatal("script ran without approval")
 		}
 	}
-	task := Task{Script: "rm -rf preserve-me", ScriptApproval: scriptApproval(dir, "rm -rf preserve-me")}
+	task := legacy[0]
 	if _, _, err := RunTaskGate(t.Context(), dir, task, &Options{Disabled: true}); err == nil {
 		t.Fatal("saved approval bypassed disabled shell")
 	}

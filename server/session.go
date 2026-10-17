@@ -120,7 +120,6 @@ type sessionController struct {
 	state       SessionState
 	subscribers map[sessionSubscription]struct{}
 	prompts     map[string]pendingPrompt
-	confirmAll  bool
 	textID      string
 	reasoningID string
 	attempt     map[string]bool

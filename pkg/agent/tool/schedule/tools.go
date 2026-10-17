@@ -117,10 +117,6 @@ func createTask(ctx context.Context, store Store, opts *Options, args map[string
 	if err := approveScript(ctx, dir, task.Script, opts); err != nil {
 		return tool.Result{}, err
 	}
-	if task.Script != "" {
-		task.ScriptApproval = scriptApproval(dir, task.Script)
-	}
-
 	err = store.Mutate(func(tasks []Task) ([]Task, error) {
 		for slices.ContainsFunc(tasks, func(existing Task) bool { return existing.ID == task.ID }) {
 			task.ID = uuid.NewString()[:8]

@@ -767,6 +767,11 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	)
 
 	allowedReadRoots, allowedWriteRoots := sessionFileRoots(ws)
+	if !a.options.DisableShell {
+		if err := shell.CheckSandbox(ws.RootPath); err != nil {
+			return nil, fmt.Errorf("sandbox unavailable (WINGMAN_SANDBOX=off explicitly disables isolation): %w", err)
+		}
+	}
 
 	artifactDir, err := session.ArtifactDir(a.sessionsDir, id)
 	if err != nil {
@@ -782,7 +787,6 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	s.freshness = fs.NewFreshness(ws.Root)
 	s.schedules = schedule.NewFileStore(filepath.Join(artifactDir, "schedules"))
 	s.watchStop = make(chan struct{})
-	approvals := shell.NewApprovals()
 
 	sessionCfg.Hooks.UserPromptSubmit = append(sessionCfg.Hooks.UserPromptSubmit,
 		func(context.Context, string) (hook.Outcome, error) {
@@ -795,14 +799,20 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 		},
 	)
 
-	shellOpts := &shell.Options{ScratchDir: ws.ScratchPath, ExtraWritableRoots: []string{ws.MemoryPath}}
-	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.options.DisableShell, Elicitation: elicit, Approvals: approvals, Shell: shellOpts}
+	privateTemp, err := os.MkdirTemp("", "wingman-session-")
+	if err != nil {
+		return nil, fmt.Errorf("create private session temp: %w", err)
+	}
+	shellOpts := &shell.Options{ScratchDir: ws.ScratchPath, TempDir: privateTemp, ExtraWritableRoots: []string{ws.MemoryPath}}
+	allowedReadRoots = append(allowedReadRoots, privateTemp)
+	allowedWriteRoots = append(allowedWriteRoots, privateTemp)
+	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.options.DisableShell, Elicitation: elicit, Shell: shellOpts}
 	go s.watchFileChanges()
 	go s.runSchedules()
 
 	var shellTools []tool.Tool
 	if !a.options.DisableShell {
-		shellTools = shell.ExecTools(s.execManager, ws.RootPath, elicit, approvals, shellOpts)
+		shellTools = shell.ExecTools(s.execManager, ws.RootPath, elicit, shellOpts)
 	}
 	var webFetchTools []tool.Tool
 	if !a.options.DisableWebFetch {
@@ -829,6 +839,7 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	s.toolSet = tool.NewSet(baseTools...)
 	// Close runs in reverse: tasks first so background subagents are canceled
 	// before their shared exec sessions are killed.
+	s.toolSet.Own("private temporary files", func() error { return os.RemoveAll(privateTemp) })
 	s.toolSet.Own("exec manager", func() error {
 		s.execManager.Close()
 		return nil
@@ -865,13 +876,6 @@ func sessionFileRoots(ws *code.Workspace) (readRoots, writeRoots []string) {
 		readRoots = append(readRoots, ws.MemoryPath)
 		writeRoots = append(writeRoots, ws.MemoryPath)
 	}
-
-	// Agents stage scratch files (downscaled images, montages, compile helpers,
-	// intermediate outputs) under the OS temp dir. Allow the file tools to both
-	// read and write it — the shell tool can already write there, so restricting
-	// only the dedicated tools just pushes work onto shell.
-	readRoots = append(readRoots, os.TempDir())
-	writeRoots = append(writeRoots, os.TempDir())
 
 	// WINGMAN_SANDBOX=off lifts the workspace path restriction entirely so the
 	// file tools reach the whole filesystem like the shell tool already does —

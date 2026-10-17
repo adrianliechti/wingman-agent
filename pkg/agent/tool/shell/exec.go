@@ -482,11 +482,7 @@ func (s *execSession) exitNotice() string {
 	return "Command completed"
 }
 
-func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, appr *Approvals, opts *Options) []tool.Tool {
-	if appr == nil {
-		appr = NewApprovals()
-	}
-
+func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, opts *Options) []tool.Tool {
 	commandLines := []string{
 		fmt.Sprintf("Run a command in the host shell. Waits up to `wait` seconds (default %d) for it to finish; if still running, the command keeps running in the background and a session_id is returned.", defaultExecWait),
 		"- Use directly for both short commands and long-running or interactive work such as dev servers, watch tasks, log tails, REPLs, and prompting CLIs.",
@@ -517,8 +513,10 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 	}
 	if workspaceSandboxEnabled() {
 		commandLines = append(commandLines, sandboxGuideLine())
-		properties["sandbox_permissions"] = map[string]any{"type": "string", "enum": []string{"use_default", "require_escalated"}, "description": "require_escalated runs the command outside the sandbox after approval."}
-		properties["justification"] = map[string]any{"type": "string", "description": "Why the command must run outside the sandbox."}
+		properties["sandbox_permissions"] = map[string]any{"type": "string", "enum": []string{"use_default", "require_permissions", "require_escalated"}, "description": "require_permissions grants network or additional writable roots for one command after review while retaining the sandbox. require_escalated runs outside the sandbox after review."}
+		properties["network"] = map[string]any{"type": "boolean", "description": "Request IP network access with require_permissions."}
+		properties["writable_roots"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Existing directories to make writable with require_permissions. Protected configuration and credentials stay restricted."}
+		properties["justification"] = map[string]any{"type": "string", "description": "Why this command needs the requested permissions."}
 	}
 	commandDescription := strings.Join(commandLines, "\n")
 
@@ -548,7 +546,7 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 			},
 
 			Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
-				return executeExecCommand(ctx, manager, workDir, elicit, appr, opts, args)
+				return executeExecCommand(ctx, manager, workDir, elicit, opts, args)
 			},
 		},
 		{
@@ -572,17 +570,17 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 			},
 
 			Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
-				return executeExecSession(ctx, manager, elicit, appr, args)
+				return executeExecSession(ctx, manager, elicit, args)
 			},
 		},
 	}
 }
 
-func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, elicit *tool.Elicitation, appr *Approvals, opts *Options, args map[string]any) (tool.Result, error) {
+func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, elicit *tool.Elicitation, opts *Options, args map[string]any) (tool.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return tool.Result{}, err
 	}
-	if err := validateExecArgs(args, []string{"command", "description", "workdir", "sandbox_permissions", "justification"}, []string{"tty", "validation"}); err != nil {
+	if err := validateExecArgs(args, []string{"command", "description", "workdir", "sandbox_permissions", "justification"}, []string{"tty", "validation", "network"}); err != nil {
 		return tool.Result{}, err
 	}
 	command, ok := args["command"].(string)
@@ -613,19 +611,19 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		return tool.Result{}, fmt.Errorf("timeout must not exceed %d seconds", maxExecTimeout)
 	}
 
+	opts, permissionMode, err := executionOptions(workDir, args, opts)
+	if err != nil {
+		return tool.Result{}, err
+	}
 	dir, err := resolveWorkdir(workDir, args)
 	if err != nil {
 		return tool.Result{}, err
 	}
 
 	sandboxed := workspaceSandboxEnabled()
-	escalated := sandboxed && args["sandbox_permissions"] == "require_escalated"
-	if escalated {
-		justification, _ := args["justification"].(string)
-		err = confirmEscalation(ctx, elicit, appr, command, justification, approvalWorkdir(workDir, dir))
-	} else {
-		err = confirmDangerous(ctx, elicit, appr, args, approvalWorkdir(workDir, dir))
-	}
+	escalated := sandboxed && permissionMode == "require_escalated"
+	justification, _ := args["justification"].(string)
+	err = confirmExecution(ctx, elicit, command, workDir, dir, permissionMode, justification, opts)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -793,7 +791,7 @@ waiting:
 	return s.result(sessionResult(output, notice)), nil
 }
 
-func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicitation, appr *Approvals, args map[string]any) (tool.Result, error) {
+func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicitation, args map[string]any) (tool.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return tool.Result{}, err
 	}
@@ -858,7 +856,7 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 	}
 
 	eof, _ := args["eof"].(bool)
-	if result, err := applySessionInput(ctx, m, s, elicit, appr, input, eof); err != nil || result != nil {
+	if result, err := applySessionInput(ctx, m, s, elicit, input, eof); err != nil || result != nil {
 		if result != nil {
 			return *result, err
 		}
@@ -901,7 +899,7 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 	return s.result(sessionResult(output, fmt.Sprintf("Session %d still running", id))), nil
 }
 
-func writeSessionInput(ctx context.Context, m *ExecManager, id int, s *execSession, elicit *tool.Elicitation, appr *Approvals, input string) (*tool.Result, error) {
+func writeSessionInput(ctx context.Context, m *ExecManager, id int, s *execSession, elicit *tool.Elicitation, input string) (*tool.Result, error) {
 	if err := s.lockInput(ctx); err != nil {
 		return nil, err
 	}
@@ -939,7 +937,7 @@ func writeSessionInputLocked(ctx context.Context, m *ExecManager, id int, s *exe
 	}
 	// An interactive process can change cwd, aliases, or interpreter between
 	// writes. An earlier approval for identical input is not reusable.
-	if err := confirmIfDangerous(ctx, elicit, NewApprovals(), "terminal_input", approvalText, dangerous); err != nil {
+	if err := confirmIfDangerous(ctx, elicit, "terminal_input", approvalText, dangerous); err != nil {
 		return nil, err
 	}
 
@@ -980,7 +978,7 @@ func confirmPendingSessionInputLocked(ctx context.Context, s *execSession, elici
 	if s.inputUncertain {
 		text += "  [terminal input state is unknown]"
 	}
-	return confirmIfDangerous(ctx, elicit, NewApprovals(), "terminal_input", text, s.inputOverflow || s.inputUncertain || IsDangerousCommand(s.pendingInput))
+	return confirmIfDangerous(ctx, elicit, "terminal_input", text, s.inputOverflow || s.inputUncertain || IsDangerousCommand(s.pendingInput))
 }
 
 func hasImmediateTerminalControl(input string) bool {
@@ -1060,7 +1058,7 @@ func completedSessionResult(s *execSession) tool.Result {
 	}
 	output, notice := s.drain(), s.exitNotice()
 	if s.sandboxed && looksLikeSandboxDenial(output, s.exitErr) {
-		notice += "\nThe sandbox may have blocked this command. If it needs access outside the workspace, rerun it with sandbox_permissions \"require_escalated\" and a justification."
+		notice += "\nThe sandbox may have blocked this command. Request the needed access with sandbox_permissions \"require_permissions\", network or writable_roots, and a justification. Use require_escalated only when the sandbox itself must be removed."
 	}
 	result := s.result(sessionResult(output, notice))
 	result.IsError = s.exitErr != nil
