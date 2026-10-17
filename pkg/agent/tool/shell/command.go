@@ -26,12 +26,12 @@ func safetyGuardLine(elicit *tool.Elicitation) string {
 }
 
 func sandboxGuideLine() string {
-	if runtime.GOOS == "windows" {
-		return "- Commands run with a Low integrity, write-restricted Windows token. They can read most files but not existing credential paths such as ~/.ssh or ~/.aws, and write inside the workspace, private temp, and memory directories. Existing protected git, editor, and agent configuration paths are read-only. Paths that do not exist yet are not protected, and some existing Low integrity directories outside the workspace remain writable. Network access is allowed; disabling it is unsupported. If a command needs more access, set `sandbox_permissions` to \"require_escalated\" with a `justification`; it then runs outside the sandbox after approval."
-	}
 	network := "Network access is allowed"
 	if !sandboxNetworkEnabled() {
 		network = "Network access is blocked"
+	}
+	if runtime.GOOS == "windows" {
+		return "- Commands run in a native Windows process security environment: they can read most files but not existing credential paths such as ~/.ssh or ~/.aws, and write only inside the workspace, private temp, and memory directories. Existing Git metadata, editor settings, and agent configuration paths are read-only. Paths that do not exist yet are not protected. " + network + ". If a command needs more access, set `sandbox_permissions` to \"require_escalated\" with a `justification`; it then runs outside the sandbox after approval."
 	}
 	return "- Commands run in a sandbox: they can read most files but not credentials such as ~/.ssh or ~/.aws, write only inside the workspace and temp directories, and cannot change .git/hooks, .git/config, editor settings, or agent configuration. " + network + ". If a command genuinely needs more, set `sandbox_permissions` to \"require_escalated\" with a `justification`; it then runs outside the sandbox after approval."
 }

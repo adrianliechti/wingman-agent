@@ -222,8 +222,8 @@ func touchCommand(path string) string {
 }
 
 // sandboxTestHome returns the home directory for writes outside the
-// workspace. On Windows it is a temp dir: the backend persistently labels the
-// credential paths beneath the home, which must not touch the real ones.
+// workspace. Windows uses a temporary home so credential tests and approved
+// outside writes operate on fixtures.
 func sandboxTestHome(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {

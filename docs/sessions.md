@@ -117,7 +117,7 @@ session** grants the scope described by that prompt.
 
 Set `WINGMAN_SANDBOX=workspace` to run the agent's shell commands and scheduled
 scripts in an OS sandbox: Seatbelt on macOS, bubblewrap (`bwrap`) on Linux,
-and a Low integrity, write-restricted token on Windows.
+and a native process security environment (PSEC) on Windows.
 
 - Commands can read most files, but not credentials such as `~/.ssh`,
   `~/.aws`, `~/.gnupg`, `~/.kube`, or Wingman's MCP tokens.
@@ -132,25 +132,35 @@ and a Low integrity, write-restricted token on Windows.
 Your own `!` commands and hooks run unsandboxed. On Linux, protected paths that
 do not exist yet, or sit below the workspace root, are not covered.
 
-On Windows the sandbox works by changing ACLs and labels, and leaves them in
-place:
+On Windows the sandbox attaches filesystem and network policy to the processes.
+Wingman does not change existing host ACLs, integrity labels, or ownership, and
+does not provision sandbox users or require elevation.
 
-- The workspace and memory directory get a Low integrity label and an access
-  entry for a per-workspace SID. The first command in a large workspace can
-  therefore take a while.
-- Existing protected paths get a deny entry for that SID. Paths that do not
-  exist yet are not covered.
-- Credential paths get a label that hides them from Low integrity processes.
-  This does not affect your own programs.
-- Commands use a private temp directory instead of `%TEMP%`.
-- Files moved in from elsewhere keep their old ACLs and may be read-only to the
-  sandbox.
-- Windows runtime devices require the token to retain the Everyone and logon
-  SIDs in its restricted access check. Existing directories outside the workspace
-  that are already Low integrity and writable by those SIDs can also be written.
-  This backend therefore does not provide strict isolation of filesystem writes.
-- `WINGMAN_SANDBOX_NETWORK=off` is not supported and makes commands fail.
-- The workspace cannot be a drive root or your home directory.
+- Windows must expose PSEC 1.0 and native denied paths. The initial supporting
+  Windows 11 builds are 26100.9278 and 26200.9278; Wingman queries the actual API
+  capabilities before launching. Unsupported hosts fail without an ACL fallback.
+- Windows supplies private temporary storage for each environment and sets its
+  `TEMP` and `TMP`. The host's shared temporary directory is not writable.
+- Existing `.git` metadata is read-only, including a worktree's `.git` pointer
+  file. This also blocks commands that update the index or create commits.
+- Existing protected editor and agent paths are read-only. Paths that do not
+  exist when the command starts are not covered.
+- Existing files with multiple hardlinks beneath writable roots are denied
+  conservatively, because another link may point outside the workspace or to a
+  credential file. Wingman checks writable trees before each launch; large
+  workspaces can take longer to start.
+- `WINGMAN_SANDBOX_NETWORK=off` blocks network access through native policy.
+- The command and all its descendants are stopped before policy is released.
+  Killing the helper also kills the process tree through a kill-on-close job.
+- Filesystem write grants include security changes inside writable roots.
+  A command that explicitly changes the workspace ACL can persist that change;
+  native policy continues to block protected-path and outside writes. The
+  sandbox itself performs no ACL or label changes.
+- The workspace cannot be a drive root, share root, or your home directory.
+
+Switching to PSEC does not undo ACLs or labels applied by earlier Wingman
+versions. Those versions did not retain original descriptors, so exact automatic
+restoration is unavailable.
 
 See [reviewing changes](reviewing-changes.md) to inspect or undo a turn, and
 [remote web access](remote-control.md) to connect through a relay.

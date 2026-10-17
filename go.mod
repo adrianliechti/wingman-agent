@@ -12,6 +12,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/go-git/go-git/v5 v5.19.3
+	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/google/go-dap v0.12.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
