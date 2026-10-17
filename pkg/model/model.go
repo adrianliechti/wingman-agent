@@ -682,6 +682,21 @@ var Models = []Model{
 	// Google
 
 	{
+		ID: "gemini-3.8-flash",
+
+		Namespace: "google",
+
+		Name: "Gemini 3.8 Flash",
+
+		Class: ClassMedium,
+
+		Input:  1048576,
+		Output: 65536,
+
+		ContextThreshold: 200_000,
+	},
+
+	{
 		ID: "gemini-3.7-flash",
 
 		Namespace: "google",
@@ -804,6 +819,19 @@ var Models = []Model{
 		Context: 1000000,
 	},
 	{
+		ID: "glm-5.3-flash",
+
+		Namespace: "z-ai",
+
+		Name: "GLM 5.3 Flash",
+
+		Class: ClassSmall,
+
+		Output: 131072,
+
+		Context: 1000000,
+	},
+	{
 		ID: "glm-5.2",
 
 		Namespace: "z-ai",
@@ -822,11 +850,26 @@ var Models = []Model{
 	{
 		ID: "deepseek-v4-pro",
 
+		Aliases:   []string{"deepseek-v4-pro-0813"},
 		Namespace: "deepseek",
 
 		Name: "DeepSeek V4 Pro",
 
 		Class: ClassLarge,
+
+		Output: 384000,
+
+		Context: 1000000,
+	},
+	{
+		ID: "deepseek-v4.1-flash",
+
+		Aliases:   []string{"deepseek-flash", "deepseek-v4.1-flash-1017"},
+		Namespace: "deepseek",
+
+		Name: "DeepSeek V4.1 Flash",
+
+		Class: ClassSmall,
 
 		Output: 384000,
 
@@ -861,6 +904,20 @@ var Models = []Model{
 
 	// Mistral
 
+	{
+		ID: "mistral-large-4",
+
+		Aliases:   []string{"mistral-large-4-0"},
+		Namespace: "mistralai",
+
+		Name: "Mistral Large 4",
+
+		Class: ClassLarge,
+
+		Output: 262144,
+
+		Context: 1048576,
+	},
 	{
 		ID: "mistral-medium",
 
@@ -926,6 +983,20 @@ var Models = []Model{
 	// xAI
 
 	{
+		ID: "grok-4.7",
+
+		Namespace: "x-ai",
+
+		Name: "Grok 4.7",
+
+		Class: ClassLarge,
+
+		Output: 500000,
+
+		Context:          500000,
+		ContextThreshold: 200_000,
+	},
+	{
 		ID: "grok-4.6",
 
 		Namespace: "x-ai",
@@ -945,7 +1016,7 @@ var Models = []Model{
 	{
 		ID: "qwen3.8-max",
 
-		Aliases:   []string{"qwen3.8-2.4t-a95b"},
+		Aliases:   []string{"qwen3.8-2.4t-a95b", "qwen3.8-max-0902"},
 		Namespace: "qwen",
 
 		Name: "Qwen 3.8 Max",
@@ -971,6 +1042,19 @@ var Models = []Model{
 		Context: 262144,
 
 		Efforts: qwen38Efforts,
+	},
+	{
+		ID: "qwen3.8-flash",
+
+		Namespace: "qwen",
+
+		Name: "Qwen 3.8 Flash",
+
+		Class: ClassSmall,
+
+		Output: 131072,
+
+		Context: 1000000,
 	},
 
 	{
