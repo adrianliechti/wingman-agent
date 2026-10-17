@@ -57,9 +57,13 @@ func (a *App) builtinCommands() []slashCommand {
 	}
 	modes, _ := a.agent.Modes(a.sessionID)
 	for _, mode := range modes {
+		description := fmt.Sprintf("Switch to %s mode", mode.Name)
+		if mode.Description != "" {
+			description += ". " + mode.Description
+		}
 		cmds = append(cmds, slashCommand{
 			Name: "/" + mode.ID,
-			Desc: mode.Description,
+			Desc: description,
 			Busy: true,
 			Run:  func(a *App) { a.setMode(mode.ID) },
 		})
@@ -78,7 +82,7 @@ func (a *App) builtinCommands() []slashCommand {
 		cmds = append(cmds, slashCommand{Name: "/context", Desc: "Show context window usage", Busy: true, Run: (*App).showContextStats})
 	}
 	if _, ok := a.agent.(taskProvider); ok {
-		cmds = append(cmds, slashCommand{Name: "/tasks", Desc: "Show background agents and scheduled tasks", Busy: true, Run: (*App).showTasks})
+		cmds = append(cmds, slashCommand{Name: "/agents", Desc: "Watch agents and view scheduled tasks", Busy: true, Run: (*App).showAgents})
 	}
 	if _, ok := a.agent.(recapProvider); ok {
 		cmds = append(cmds, slashCommand{Name: "/recap", Desc: "Summarize the session so far", Run: (*App).showRecap})
@@ -553,12 +557,12 @@ func (a *App) showHelp() {
 	a.showCommandCenter()
 }
 
-func (a *App) showTasks() {
+func (a *App) showAgents() {
 	t := theme.Default
 
 	provider, ok := a.agent.(taskProvider)
 	if !ok {
-		a.appendChat(cellNotice("Background agents are unavailable for this agent", t.Yellow, a.width()))
+		a.appendChat(cellNotice("Agent transcripts are unavailable for this agent", t.Yellow, a.width()))
 		return
 	}
 
@@ -577,7 +581,7 @@ func (a *App) showTasks() {
 	}
 
 	if len(tasks) == 0 && len(jobs) == 0 {
-		a.appendChat(cellNotice("No background agents or scheduled tasks in this session", t.Yellow, a.width()))
+		a.appendChat(cellNotice("No agents or scheduled tasks in this session", t.Yellow, a.width()))
 		return
 	}
 
@@ -609,7 +613,7 @@ func (a *App) showTasks() {
 		})
 	}
 
-	a.popup = newPopup(popupList, "background agents & scheduled tasks (enter to watch)", items, func(ids []string) {
+	a.popup = newPopup(popupList, "agents & scheduled tasks (enter to view)", items, func(ids []string) {
 		if id, ok := strings.CutPrefix(ids[0], schedulePopupPrefix); ok {
 			a.showSchedule(id)
 			return
