@@ -288,4 +288,3 @@ func readAttachedImageFile(path, workingDir string) string {
 	}
 	return res.Content
 }
-

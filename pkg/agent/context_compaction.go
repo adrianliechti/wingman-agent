@@ -124,7 +124,7 @@ func (a *Agent) checkpointMessage(summary string, window bool) Message {
 // the recent window. Without a window the checkpoint stays last and guidance
 // precedes the last user input, like Codex's local compaction. Original
 // messages remain in the canonical ledger.
-func (a *Agent) compactMessages(ctx context.Context, req *request) error {
+func (a *Agent) compactMessages(ctx context.Context, req *request, focus string) error {
 	messages := a.requestMessages()
 	if len(messages) == 0 {
 		return fmt.Errorf("context limit reached with no history to compact; conversation preserved")
@@ -175,7 +175,7 @@ func (a *Agent) compactMessages(ctx context.Context, req *request) error {
 			return err
 		}
 
-		summary, err := a.summarizeContext(ctx, req, head)
+		summary, err := a.summarizeContext(ctx, req, head, focus)
 		if err != nil {
 			return fmt.Errorf("compact context: %w", err)
 		}
@@ -212,6 +212,55 @@ func (a *Agent) compactMessages(ctx context.Context, req *request) error {
 		}
 		return a.replaceContext("compact model context", compacted)
 	}
+}
+
+// CompactResult reports the estimated request size around a manual checkpoint.
+type CompactResult struct {
+	TokensBefore int64
+	TokensAfter  int64
+}
+
+// Compact checkpoints the context between turns on request. focus tells the
+// summary what to preserve in particular.
+func (a *Agent) Compact(ctx context.Context, focus string) (CompactResult, error) {
+	a.queueMu.Lock()
+	if a.running {
+		a.queueMu.Unlock()
+		return CompactResult{}, ErrTurnInProgress
+	}
+	// finishing keeps QueueInput from accepting steering that no turn consumes.
+	a.running, a.finishing = true, true
+	a.queueMu.Unlock()
+	defer a.setRunning(false)
+
+	if !slices.ContainsFunc(a.requestMessages(), func(m Message) bool { return m.Role == RoleAssistant }) {
+		return CompactResult{}, ErrNothingToCompact
+	}
+	if err := a.repairToolHistory(false); err != nil {
+		return CompactResult{}, err
+	}
+	if err := a.syncContextInstructions(); err != nil {
+		return CompactResult{}, err
+	}
+	ctx, req, err := a.newStepRequest(ctx, false)
+	if err != nil {
+		return CompactResult{}, err
+	}
+	if err := a.normalizeRequest(req); err != nil {
+		return CompactResult{}, err
+	}
+	before := a.requestTokens(req)
+	if err := a.compactWithHooks(ctx, req, "manual", focus); err != nil {
+		return CompactResult{}, err
+	}
+	req.messages = a.requestMessages()
+	after := a.requestTokens(req)
+	// No response has measured the rewritten context yet; until one does,
+	// usage displays the estimate instead of the pre-compaction size.
+	if err := a.recordEvents(RuntimeEvent{Type: EventUsage, Usage: &Usage{LastInputTokens: after}}); err != nil {
+		return CompactResult{}, err
+	}
+	return CompactResult{TokensBefore: before, TokensAfter: after}, nil
 }
 
 const (

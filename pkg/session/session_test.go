@@ -360,3 +360,101 @@ func TestSessionIDCannotEscapeStorageDirectory(t *testing.T) {
 		})
 	}
 }
+
+func TestFork(t *testing.T) {
+	dir := t.TempDir()
+	state := agent.State{Messages: []agent.Message{userMsg("hello world"), assistantMsg("hi")}}
+	if err := Save(dir, "s1", state); err != nil {
+		t.Fatal(err)
+	}
+	sourceArtifacts, err := ArtifactDir(dir, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sourceArtifacts, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceArtifacts, "tasks.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "s1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Fork(dir, "s1", "s2", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	forked, err := Load(dir, "s2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forked.ID != "s2" || forked.Title != "Fork of hello world" {
+		t.Fatalf("forked = %q %q", forked.ID, forked.Title)
+	}
+	if len(forked.State.Messages) != 2 || forked.State.Messages[1].Content[0].Text != "hi" {
+		t.Fatalf("forked messages = %+v", forked.State.Messages)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "s1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("fork modified the source journal")
+	}
+	forkArtifacts, err := ArtifactDir(dir, "s2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(forkArtifacts); !os.IsNotExist(err) {
+		t.Fatalf("fork copied sidecar artifacts: %v", err)
+	}
+
+	forked.State.Messages = append(forked.State.Messages, userMsg("diverge"))
+	if err := Save(dir, "s2", forked.State); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded, err := Load(dir, "s2"); err != nil || len(reloaded.State.Messages) != 3 || reloaded.Title != "Fork of hello world" {
+		t.Fatalf("reloaded fork = %+v, %v", reloaded, err)
+	}
+	if source, err := Load(dir, "s1"); err != nil || len(source.State.Messages) != 2 {
+		t.Fatalf("source after fork append = %+v, %v", source, err)
+	}
+
+	sessions, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	titles := map[string]string{}
+	for _, s := range sessions {
+		titles[s.ID] = s.Title
+	}
+	if titles["s1"] != "hello world" || titles["s2"] != "Fork of hello world" {
+		t.Fatalf("titles = %v", titles)
+	}
+}
+
+func TestForkTitleAndErrors(t *testing.T) {
+	dir := t.TempDir()
+	if err := Save(dir, "s1", agent.State{Messages: []agent.Message{userMsg("hello")}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Fork(dir, "s1", "s2", "Try another approach"); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := Load(dir, "s2"); err != nil || s.Title != "Try another approach" {
+		t.Fatalf("titled fork = %q, %v", s.Title, err)
+	}
+
+	if err := Fork(dir, "s1", "s2", ""); err == nil {
+		t.Fatal("fork overwrote an existing session")
+	}
+	if err := Fork(dir, "missing", "s3", ""); err == nil {
+		t.Fatal("fork of a missing session succeeded")
+	}
+	if err := Fork(dir, "s1", "../escape", ""); err == nil {
+		t.Fatal("fork accepted an invalid session ID")
+	}
+}

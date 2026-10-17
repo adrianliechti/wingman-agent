@@ -413,4 +413,3 @@ func TestApplyClipboardContentsMultiImages(t *testing.T) {
 		t.Fatalf("toast = %#v, want Attached 2 items", a.toast)
 	}
 }
-

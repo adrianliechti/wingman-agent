@@ -120,9 +120,32 @@ type ElicitResult struct {
 	Content map[string]any `json:"content,omitempty"`
 }
 
+// Approval is an agent action that needs permission. Message is what a person
+// is asked; Action is the structured subject an automatic reviewer judges.
+type Approval struct {
+	Message string
+	Action  map[string]any
+}
+
+// Verdict carries a denial reason meant for the model when Allowed is false.
+type Verdict struct {
+	Allowed bool
+	Reason  string
+}
+
 type Elicitation struct {
 	Elicit  func(ctx context.Context, req ElicitRequest) (ElicitResult, error)
 	Confirm func(ctx context.Context, message string) (bool, error)
+	// Review decides action approvals when set; trust prompts keep using Confirm.
+	Review func(ctx context.Context, req Approval) (Verdict, error)
+}
+
+func (e *Elicitation) Approve(ctx context.Context, req Approval) (Verdict, error) {
+	if e.Review != nil {
+		return e.Review(ctx, req)
+	}
+	ok, err := e.Confirm(ctx, req.Message)
+	return Verdict{Allowed: ok}, err
 }
 
 func IntValue(value any) (int, bool) {

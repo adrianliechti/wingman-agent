@@ -32,7 +32,7 @@ func UnattendedMode() Mode {
 	return Mode{
 		ID:          UnattendedModeID,
 		Name:        "Unattended",
-		Description: "Approve actions automatically and continue without questions.",
+		Description: "Run every action without review and continue without questions.",
 	}
 }
 
@@ -108,6 +108,12 @@ type Agent interface {
 	Close() error
 }
 
+// Compactor checkpoints a session's model context on demand; focus guides
+// what the summary preserves.
+type Compactor interface {
+	Compact(ctx context.Context, sessionID, focus string) (agent.CompactResult, error)
+}
+
 // UnattendedAgent exposes an interaction policy independent of Agent/Plan mode.
 // Adapters that only expose provider-defined modes may omit this interface.
 type UnattendedAgent interface {
@@ -119,6 +125,12 @@ var (
 	ErrTurnInProgress = agent.ErrTurnInProgress
 	ErrEmptyInput     = agent.ErrEmptyInput
 )
+
+// SessionForker copies a settled session's history into a new, loaded session
+// and returns its ID. The source session is left untouched.
+type SessionForker interface {
+	ForkSession(ctx context.Context, id, title string) (string, error)
+}
 
 type SessionLoadStreamer interface {
 	LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]agent.Message, error]

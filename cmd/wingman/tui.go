@@ -17,6 +17,7 @@ import (
 type tuiOptions struct {
 	Agent     string
 	SessionID string
+	Fork      bool
 }
 
 func newTUIAgent(ctx context.Context, ws *code.Workspace, name string) (code.Agent, error) {
@@ -65,7 +66,18 @@ func runTUI(ctx context.Context, opts tuiOptions) {
 		sessionID = latestSessionID(sessions)
 	}
 
-	if sessionID != "" {
+	if sessionID != "" && opts.Fork {
+		forker, ok := wa.(code.SessionForker)
+		if !ok {
+			_ = wa.Close()
+			fatal(fmt.Errorf("agent %q cannot fork sessions", opts.Agent))
+		}
+		sessionID, err = forker.ForkSession(ctx, sessionID, "")
+		if err != nil {
+			_ = wa.Close()
+			fatal(err)
+		}
+	} else if sessionID != "" {
 		if err := wa.LoadSession(ctx, sessionID); err != nil {
 			_ = wa.Close()
 			fatal(err)

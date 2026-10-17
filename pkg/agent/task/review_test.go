@@ -70,4 +70,3 @@ func TestReviewRelaunchPersistFailureRollsBackTaskState(t *testing.T) {
 		t.Fatalf("failed relaunch clobbered task state: %+v", info)
 	}
 }
-

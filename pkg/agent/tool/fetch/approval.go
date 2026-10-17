@@ -68,11 +68,17 @@ func approveHost(ctx context.Context, elicit *tool.Elicitation, approvals *hostA
 		approvals.pending[origin] = pending
 		approvals.mu.Unlock()
 
-		ok, err := elicit.Confirm(ctx, fmt.Sprintf("Fetch from %s?\n%s", origin, displayURL))
+		verdict, err := elicit.Approve(ctx, tool.Approval{
+			Message: fmt.Sprintf("Fetch from %s?\n%s", origin, displayURL),
+			Action:  map[string]any{"type": "fetch", "origin": origin, "url": displayURL},
+		})
 		if ctx.Err() != nil {
 			err = ctx.Err()
-		} else if err == nil && !ok {
+		} else if err == nil && !verdict.Allowed {
 			err = fmt.Errorf("the user declined fetching from %s", origin)
+			if verdict.Reason != "" {
+				err = errors.New(verdict.Reason)
+			}
 		}
 		approvals.mu.Lock()
 		if err == nil {

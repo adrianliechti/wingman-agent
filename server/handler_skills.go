@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -54,6 +55,10 @@ func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		active := runtime.agent
+		if _, ok := active.(code.Compactor); ok {
+			result = slices.DeleteFunc(result, func(entry SkillEntry) bool { return entry.Name == "compact" })
+			result = append(result, SkillEntry{Name: "compact", Description: "Summarize the conversation to free context", InputHint: "[focus]"})
+		}
 		if provider, ok := active.(code.CommandProvider); ok {
 			seen := make(map[string]bool, len(result))
 			for _, item := range result {

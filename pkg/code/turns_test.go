@@ -254,6 +254,97 @@ func waitForState(t *testing.T, events <-chan TurnEvent, id string, state TurnIn
 	}
 }
 
+type compactingTestAgent struct {
+	*turnManagerTestAgent
+	compacts chan string
+	release  chan error
+}
+
+func newCompactingTestAgent() *compactingTestAgent {
+	return &compactingTestAgent{turnManagerTestAgent: newTurnManagerTestAgent(), compacts: make(chan string, 1), release: make(chan error, 1)}
+}
+
+func (a *compactingTestAgent) Compact(ctx context.Context, _ string, focus string) (agent.CompactResult, error) {
+	a.compacts <- focus
+	select {
+	case <-ctx.Done():
+		return agent.CompactResult{}, ctx.Err()
+	case err := <-a.release:
+		return agent.CompactResult{TokensBefore: 100, TokensAfter: 10}, err
+	}
+}
+
+func TestTurnManagerCompactionQueuesInputsBehindIt(t *testing.T) {
+	a := newCompactingTestAgent()
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+
+	results := make(chan agent.CompactResult, 1)
+	if err := m.StartCompact("s", "api design", func(result agent.CompactResult, err error) {
+		if err != nil {
+			t.Error(err)
+		}
+		results <- result
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if focus := waitValue(t, a.compacts); focus != "api design" {
+		t.Fatalf("focus = %q", focus)
+	}
+	if !m.Snapshot("s").Compacting {
+		t.Fatal("snapshot does not report the running compaction")
+	}
+	if err := m.StartCompact("s", "", func(agent.CompactResult, error) {}); !errors.Is(err, ErrTurnInProgress) {
+		t.Fatalf("second compaction err = %v", err)
+	}
+	snap, err := m.Submit(context.Background(), "s", turnInput("1", "after", TurnInputFollowUp))
+	if err != nil || snap.State != TurnInputQueued {
+		t.Fatalf("input during compaction = %+v, %v", snap, err)
+	}
+
+	a.release <- nil
+	if got := waitValue(t, results); got.TokensAfter != 10 {
+		t.Fatalf("result = %+v", got)
+	}
+	if text := waitValue(t, a.starts); text != "after" {
+		t.Fatalf("queued input started as %q", text)
+	}
+	a.releases <- struct{}{}
+}
+
+func TestTurnManagerCancelStopsCompactionAndPausesQueue(t *testing.T) {
+	a := newCompactingTestAgent()
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+
+	errs := make(chan error, 1)
+	if err := m.StartCompact("s", "", func(_ agent.CompactResult, err error) { errs <- err }); err != nil {
+		t.Fatal(err)
+	}
+	waitValue(t, a.compacts)
+	if _, err := m.Submit(context.Background(), "s", turnInput("1", "after", TurnInputFollowUp)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CancelCurrent("s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitValue(t, errs); !errors.Is(err, context.Canceled) {
+		t.Fatalf("compaction err = %v", err)
+	}
+	snap := m.Snapshot("s")
+	if snap.Compacting || !snap.Paused || len(snap.Inputs) != 1 || snap.Inputs[0].State != TurnInputQueued {
+		t.Fatalf("snapshot after cancel = %+v", snap)
+	}
+}
+
+func TestTurnManagerCompactionRequiresCapability(t *testing.T) {
+	m := NewTurnManager(context.Background(), newTurnManagerTestAgent(), nil)
+	defer m.Close()
+	if err := m.StartCompact("s", "", func(agent.CompactResult, error) {}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestTurnManagerQueuesFIFO(t *testing.T) {
 	a := newTurnManagerTestAgent()
 	events := make(chan TurnEvent, 32)

@@ -90,6 +90,7 @@ type Workspace struct {
 
 	mcpCatalogMu      sync.Mutex
 	mcpTrustDecisions map[string]bool
+	hookTrust         *trustFile
 	mcpRefreshCancel  context.CancelFunc
 	managedUpdates    map[*ManagedToolsUpdate]struct{}
 
@@ -1708,4 +1709,19 @@ func bundledSkillsFingerprint(source fs.FS) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+// CallMCPTool runs a tool on an already-connected MCP server for mcp_tool hooks.
+func (w *Workspace) CallMCPTool(ctx context.Context, server, name string, input map[string]any) (string, error) {
+	w.mu.RLock()
+	manager := w.MCP
+	w.mu.RUnlock()
+	if manager == nil {
+		return "", errors.New("MCP is not available in this workspace")
+	}
+	session := manager.Session(server)
+	if session == nil {
+		return "", fmt.Errorf("MCP server %q is not connected", server)
+	}
+	return toolmcp.CallText(ctx, session, name, input)
 }

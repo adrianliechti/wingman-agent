@@ -93,6 +93,9 @@ type PreCompact func(ctx context.Context, trigger string) (Outcome, error)
 type PostCompact func(ctx context.Context, trigger string) (Outcome, error)
 type Stop func(ctx context.Context, lastAssistantMessage string, active bool) (Outcome, error)
 
+// Interrupt observes a turn the user interrupted; it cannot change the outcome.
+type Interrupt func(ctx context.Context)
+
 type Hooks struct {
 	PreToolUse          []PreToolUse
 	PermissionRequest   []PermissionRequest
@@ -106,6 +109,7 @@ type Hooks struct {
 	PreCompact          []PreCompact
 	PostCompact         []PostCompact
 	Stop                []Stop
+	Interrupt           []Interrupt
 }
 
 func (h *Hooks) Append(other Hooks) {
@@ -121,4 +125,5 @@ func (h *Hooks) Append(other Hooks) {
 	h.PreCompact = append(h.PreCompact, other.PreCompact...)
 	h.PostCompact = append(h.PostCompact, other.PostCompact...)
 	h.Stop = append(h.Stop, other.Stop...)
+	h.Interrupt = append(h.Interrupt, other.Interrupt...)
 }

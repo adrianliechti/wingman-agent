@@ -123,6 +123,7 @@ func (s *Server) Initialize(_ context.Context, params acpsdk.InitializeRequest) 
 				Resume: &acpsdk.SessionResumeCapabilities{},
 				Close:  &acpsdk.SessionCloseCapabilities{},
 				Delete: &acpsdk.SessionDeleteCapabilities{},
+				Fork:   &acpsdk.SessionForkCapabilities{},
 			},
 		},
 	}, nil
@@ -934,6 +935,43 @@ func (s *Server) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionR
 	return acpsdk.ResumeSessionResponse{
 		Modes:         modeState(w.agent, string(params.SessionId)),
 		ConfigOptions: sessionConfigOptions(w.agent, string(params.SessionId)),
+	}, nil
+}
+
+func (s *Server) UnstableForkSession(ctx context.Context, params acpsdk.UnstableForkSessionRequest) (acpsdk.UnstableForkSessionResponse, error) {
+	cwd, err := normalizeCwd(params.Cwd)
+	if err != nil {
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	servers, err := acpcommon.StableMCPServers(params.McpServers, serverMCPCapabilities)
+	if err != nil {
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	w, err := s.acquireWorkspace(ctx, cwd, servers)
+	if err != nil {
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	sid, err := w.agent.ForkSession(ctx, string(params.SessionId), "")
+	if err != nil {
+		s.releaseWorkspace(w)
+		if errors.Is(err, fs.ErrNotExist) {
+			return acpsdk.UnstableForkSessionResponse{}, &acpsdk.RequestError{
+				Code:    -32002,
+				Message: "Resource not found",
+				Data:    map[string]any{"sessionId": string(params.SessionId)},
+			}
+		}
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	acpSid := acpsdk.SessionId(sid)
+	if err := s.registerSession(acpSid, w); err != nil {
+		s.releaseWorkspace(w)
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	return acpsdk.UnstableForkSessionResponse{
+		SessionId:     acpSid,
+		Modes:         modeState(w.agent, sid),
+		ConfigOptions: acpcommon.UnstableConfigOptions(sessionConfigOptions(w.agent, sid)),
 	}, nil
 }
 

@@ -115,4 +115,3 @@ func writeNativeText(text string) error {
 
 	return cmd.Run()
 }
-

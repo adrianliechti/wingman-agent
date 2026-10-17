@@ -81,6 +81,7 @@ type sessionState struct {
 	// goroutine and written from the UI one.
 	mode        atomic.Value // sessionMode
 	unattended  atomic.Bool
+	reviews     reviewBreaker
 	toolSet     *tool.Set
 	turnTools   atomic.Value // []tool.Tool, pinned for the running turn
 	execManager *shell.ExecManager
@@ -94,6 +95,9 @@ type sessionState struct {
 
 	changedMu    sync.Mutex
 	changedPaths []string
+
+	hookContextMu sync.Mutex
+	hookContext   []string
 
 	projectInstructionsMu   sync.Mutex
 	projectInstructionCache projectInstructionCache
@@ -155,7 +159,7 @@ func New(ws *code.Workspace, cfg *harness.Config, ui code.UI, options ...Options
 		sessionsDir:  filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
 		sessions:     map[string]*sessionState{},
 	}
-	a.prompts = &tool.Elicitation{Elicit: a.elicit, Confirm: a.confirm}
+	a.prompts = &tool.Elicitation{Elicit: a.elicit, Confirm: a.confirm, Review: a.review}
 
 	// MCP servers elicit through the same UI surface as the elicit tool. Their
 	// requests may arrive without session correlation. Web embedders require
@@ -284,6 +288,42 @@ func (a *Agent) LoadSession(_ context.Context, id string) error {
 	return nil
 }
 
+// ForkSession carries over history, model selection and mode. Background
+// tasks, schedules and queued inputs stay with the source.
+func (a *Agent) ForkSession(ctx context.Context, id, title string) (string, error) {
+	newID := uuid.NewString()
+	source := a.session(id)
+	if err := a.forkJournal(source, id, newID, title); err != nil {
+		return "", err
+	}
+	if err := a.copySessionSettings(id, newID); err != nil {
+		_ = session.Delete(a.sessionsDir, newID)
+		return "", err
+	}
+	if err := a.LoadSession(ctx, newID); err != nil {
+		_ = session.Delete(a.sessionsDir, newID)
+		return "", err
+	}
+	if fork := a.session(newID); fork != nil && source != nil {
+		fork.setMode(source.currentMode())
+		fork.unattended.Store(source.unattended.Load())
+	}
+	return newID, nil
+}
+
+func (a *Agent) forkJournal(source *sessionState, id, newID, title string) error {
+	if source == nil {
+		return session.Fork(a.sessionsDir, id, newID, title)
+	}
+	// Holding cancelMu keeps a new turn from starting while the journal is copied.
+	source.cancelMu.Lock()
+	defer source.cancelMu.Unlock()
+	if source.cancelFn != nil || source.aa.Running() {
+		return code.ErrTurnInProgress
+	}
+	return session.Fork(a.sessionsDir, id, newID, title)
+}
+
 func (a *Agent) DeleteSession(_ context.Context, id string) error {
 	a.mu.Lock()
 	s, inMem := a.sessions[id]
@@ -345,6 +385,38 @@ func (a *Agent) Recap(ctx context.Context, id string) (string, error) {
 		return "", fmt.Errorf("session %s not found", id)
 	}
 	return s.aa.Recap(ctx)
+}
+
+func (a *Agent) Compact(ctx context.Context, id, focus string) (harness.CompactResult, error) {
+	s := a.session(id)
+	if s == nil {
+		return harness.CompactResult{}, fmt.Errorf("session %s not found", id)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	s.cancelMu.Lock()
+	if s.closed {
+		s.cancelMu.Unlock()
+		return harness.CompactResult{}, errors.New("session is closed")
+	}
+	if s.cancelFn != nil || s.aa.Running() {
+		s.cancelMu.Unlock()
+		return harness.CompactResult{}, code.ErrTurnInProgress
+	}
+	s.cancelGen++
+	gen := s.cancelGen
+	s.cancelFn = cancel
+	s.cancelMu.Unlock()
+	defer s.clearCancel(gen)
+
+	ctx = hook.WithRuntime(ctx, hook.Runtime{
+		SessionID:      s.aa.CacheKey,
+		CWD:            s.parent.workspace.RootPath,
+		Model:          s.aa.Model(),
+		PermissionMode: s.permissionMode(),
+		StartSource:    s.startSource,
+	})
+	return s.aa.Compact(ctx, focus)
 }
 
 func (a *Agent) ContextStats(id string) (harness.ContextStats, bool) {
@@ -548,7 +620,7 @@ func (a *Agent) Close() error {
 }
 
 var wingmanModes = []code.Mode{
-	{ID: code.AgentModeID, Name: "Agent", Description: "Make changes and run checks."},
+	{ID: code.AgentModeID, Name: "Agent", Description: "Make changes and run checks. Risky actions are reviewed automatically."},
 	{ID: code.PlanModeID, Name: "Plan", Description: "Read-only. Proposes a plan."},
 }
 
@@ -654,34 +726,62 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 		)
 	}
 
+	hookAsync := external.NewAsync(func(runtime hook.Runtime, parts []string) {
+		// A subagent's hook context describes calls the main turn never saw.
+		if runtime.AgentID != "" {
+			return
+		}
+		if !s.aa.QueueInput([]harness.Content{{Text: strings.Join(parts, "\n\n"), Hidden: true}}) {
+			s.stashHookContext(parts)
+		}
+	})
+	hookOptions := external.BuildOptions{Async: hookAsync, MCP: ws.CallMCPTool, SpillDir: ws.ScratchPath}
+	hookTrust := ws.HookTrust()
+
 	// Workspace hooks come with the repo, not the user — gate them behind a
-	// one-time confirmation so a cloned project cannot run commands unprompted.
-	var workspaceGate *external.Gate
+	// confirmation so a cloned project cannot run commands unprompted.
+	workspaceOptions := hookOptions
 	if rules := workspaceHooks.RuleCount(); rules > 0 {
-		workspaceGate = &external.Gate{
-			Confirm: elicit.Confirm,
-			Message: fmt.Sprintf("Run %d workspace hook rule(s) from %s?", rules, workspaceHooksPath),
+		fingerprint, fingerprintErr := workspaceHooks.Fingerprint(ws.RootPath, workspaceHooksPath)
+		workspaceOptions.Gate = &external.Gate{
+			Confirm:     elicit.Confirm,
+			Message:     fmt.Sprintf("Run %d workspace hook rule(s) from %s?\n\nApproval is remembered until these hooks change.", rules, workspaceHooksPath),
+			Fingerprint: func() (string, error) { return fingerprint, fingerprintErr },
+			Store:       hookTrust,
 		}
 	}
 
-	sessionCfg.Hooks.Append(globalHooks.Build(ws.RootPath, nil))
-	sessionCfg.Hooks.Append(workspaceHooks.Build(ws.RootPath, workspaceGate))
+	sessionCfg.Hooks.Append(globalHooks.BuildWithOptions(ws.RootPath, hookOptions))
+	sessionCfg.Hooks.Append(workspaceHooks.BuildWithOptions(ws.RootPath, workspaceOptions))
 	for i := range ws.Plugins {
 		p := &ws.Plugins[i]
 		if p.Hooks == nil || p.Hooks.RuleCount() == 0 {
 			continue
 		}
-		pluginGate := &external.Gate{
+		declarations, declarationsErr := p.Hooks.Fingerprint(ws.RootPath, p.Name, p.Root, p.Data)
+		pluginOptions := hookOptions
+		pluginOptions.Gate = &external.Gate{
 			Confirm: elicit.Confirm,
-			Message: fmt.Sprintf("Run %d hook rule(s) from plugin %q at %s?", p.Hooks.RuleCount(), p.Name, p.Root),
-		}
-		sessionCfg.Hooks.Append(p.Hooks.BuildWithOptions(ws.RootPath, external.BuildOptions{
-			Gate: pluginGate,
-			Environment: map[string]string{
-				"PLUGIN_ROOT": p.Root,
-				"PLUGIN_DATA": p.Data,
+			Message: fmt.Sprintf("Run %d hook rule(s) from plugin %q at %s?\n\nApproval is remembered until the plugin changes.", p.Hooks.RuleCount(), p.Name, p.Root),
+			Fingerprint: func() (string, error) {
+				if declarationsErr != nil {
+					return "", declarationsErr
+				}
+				content, err := external.ContentHash(p.Root)
+				if err != nil {
+					return "", err
+				}
+				return declarations + "/" + content, nil
 			},
-		}))
+			Store: hookTrust,
+		}
+		pluginOptions.Environment = map[string]string{
+			"PLUGIN_ROOT":        p.Root,
+			"PLUGIN_DATA":        p.Data,
+			"CLAUDE_PLUGIN_ROOT": p.Root,
+			"CLAUDE_PLUGIN_DATA": p.Data,
+		}
+		sessionCfg.Hooks.Append(p.Hooks.BuildWithOptions(ws.RootPath, pluginOptions))
 	}
 	sessionCfg.Hooks.TransformToolResult = append(sessionCfg.Hooks.TransformToolResult,
 		truncation.Transform(ws.ScratchPath),
@@ -708,11 +808,11 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	sessionCfg.Hooks.UserPromptSubmit = append(sessionCfg.Hooks.UserPromptSubmit,
 		func(context.Context, string) (hook.Outcome, error) {
 			s.sweepFileChanges()
-			notice := formatFileChangeNotice(s.takeFileChanges())
-			if notice == "" {
-				return hook.Outcome{}, nil
+			parts := s.takeHookContext()
+			if notice := formatFileChangeNotice(s.takeFileChanges()); notice != "" {
+				parts = append(parts, notice)
 			}
-			return hook.Outcome{AdditionalContext: []string{notice}}, nil
+			return hook.Outcome{AdditionalContext: parts}, nil
 		},
 	)
 
@@ -756,6 +856,10 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	})
 	s.toolSet.Own("task registry", func() error {
 		s.tasks.Close()
+		return nil
+	})
+	s.toolSet.Own("async hooks", func() error {
+		hookAsync.Close()
 		return nil
 	})
 	return s, nil
@@ -878,28 +982,17 @@ func (a *Agent) elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elicit
 func (a *Agent) confirm(ctx context.Context, message string) (bool, error) {
 	ctx = a.promptContext(ctx)
 	if s := a.session(code.SessionIDFromContext(ctx)); s != nil {
-		if call, ok := hook.ToolCallFromContext(ctx); ok {
-			allowed := false
-			for _, run := range s.aa.Hooks.PermissionRequest {
-				outcome, err := run(ctx, call)
-				if err != nil {
-					continue
-				}
-				switch outcome.Behavior {
-				case hook.PermissionDeny:
-					return false, nil
-				case hook.PermissionAllow:
-					allowed = true
-				}
-			}
-			if allowed {
-				return true, nil
-			}
+		if allowed, decided := s.permissionHooks(ctx); decided {
+			return allowed, nil
 		}
 		if s.unattended.Load() {
 			return true, nil
 		}
 	}
+	return a.askUser(ctx, message)
+}
+
+func (a *Agent) askUser(ctx context.Context, message string) (bool, error) {
 	ui := a.currentUI()
 	if ui == nil {
 		return false, nil
@@ -927,6 +1020,7 @@ func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, c
 	gen := s.cancelGen
 	s.cancelFn = cancel
 	s.cancelMu.Unlock()
+	s.reviews.reset()
 
 	// Hooks can wait on UI or external processes. Cancel and Close must be
 	// able to reach this turn while its synchronous setup is still running.
@@ -1042,6 +1136,22 @@ func (s *sessionState) stashFileChanges(paths []string) {
 		}
 	}
 	s.changedMu.Unlock()
+}
+
+// stashHookContext keeps async hook output that finished between turns for
+// the next prompt.
+func (s *sessionState) stashHookContext(parts []string) {
+	s.hookContextMu.Lock()
+	s.hookContext = append(s.hookContext, parts...)
+	s.hookContextMu.Unlock()
+}
+
+func (s *sessionState) takeHookContext() []string {
+	s.hookContextMu.Lock()
+	parts := s.hookContext
+	s.hookContext = nil
+	s.hookContextMu.Unlock()
+	return parts
 }
 
 const fileChangeNoticeMax = 20

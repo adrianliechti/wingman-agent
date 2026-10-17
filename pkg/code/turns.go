@@ -30,6 +30,7 @@ type managedTurnSession struct {
 	cancelRequested bool
 	paused          bool
 	running         bool
+	compacting      bool
 	ids             map[string]struct{}
 }
 
@@ -425,6 +426,77 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 	return nil
 }
 
+// StartCompact runs a manual context checkpoint as the session's exclusive
+// operation. Inputs submitted meanwhile wait in the FIFO queue, CancelCurrent
+// interrupts it, and done receives the outcome on the worker goroutine.
+func (m *TurnManager) StartCompact(sessionID, focus string, done func(agent.CompactResult, error)) error {
+	compactor, ok := m.agent.(Compactor)
+	if !ok {
+		return errors.ErrUnsupported
+	}
+	if !m.beginWork() {
+		return m.ctx.Err()
+	}
+	defer m.workers.Done()
+	s := m.session(sessionID)
+	s.mu.Lock()
+	if !s.queueLoaded {
+		err := s.queueErr
+		s.mu.Unlock()
+		return err
+	}
+	if s.active != nil || s.running {
+		s.mu.Unlock()
+		return ErrTurnInProgress
+	}
+	ctx, cancel := context.WithCancel(WithSessionID(m.ctx, sessionID))
+	s.running, s.compacting = true, true
+	s.cancel, s.cancelRequested = cancel, false
+	s.done = make(chan struct{})
+	finished := s.done
+	s.mu.Unlock()
+
+	m.workers.Go(func() {
+		defer close(finished)
+		result, err := compactor.Compact(ctx, sessionID, focus)
+		cancel()
+
+		s.mu.Lock()
+		s.compacting = false
+		s.cancel, s.cancelRequested = nil, false
+		next, persistErr := m.promoteLocked(sessionID, s)
+		s.running = next != nil
+		s.mu.Unlock()
+
+		done(result, err)
+		if persistErr != nil {
+			m.emit(TurnEvent{SessionID: sessionID, State: TurnInputFailed, Err: persistErr})
+		}
+		if next == nil {
+			return
+		}
+		m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(next.input), InputID: next.input.ID, State: TurnInputActive, Intent: next.input.Intent})
+		m.runSession(sessionID, s)
+	})
+	return nil
+}
+
+func (m *TurnManager) promoteLocked(sessionID string, s *managedTurnSession) (*managedTurnInput, error) {
+	if m.ctx.Err() != nil || s.paused || len(s.queued) == 0 {
+		return nil, nil
+	}
+	next := s.queued[0]
+	s.queued = s.queued[1:]
+	s.active = next
+	if err := m.persistLocked(sessionID, s); err != nil {
+		s.active = nil
+		s.queued = append([]*managedTurnInput{next}, s.queued...)
+		s.paused = true
+		return nil, err
+	}
+	return next, nil
+}
+
 func (m *TurnManager) RemoveQueued(sessionID, inputID string) error {
 	s := m.session(sessionID)
 	s.mu.Lock()
@@ -654,7 +726,7 @@ func (m *TurnManager) Snapshot(sessionID string) TurnSnapshot {
 	s := m.session(sessionID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := TurnSnapshot{Paused: s.paused, Features: m.Features(sessionID), Error: s.queueErr}
+	out := TurnSnapshot{Paused: s.paused, Compacting: s.compacting, Features: m.Features(sessionID), Error: s.queueErr}
 	if s.active != nil {
 		out.Inputs = append(out.Inputs, TurnInputSnapshot{
 			Input: CloneTurnInput(s.active.input), ID: s.active.input.ID, State: TurnInputActive, Intent: s.active.input.Intent,

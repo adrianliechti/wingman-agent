@@ -920,7 +920,7 @@ func writeSessionInputLocked(ctx context.Context, m *ExecManager, id int, s *exe
 	}
 	// An interactive process can change cwd, aliases, or interpreter between
 	// writes. An earlier approval for identical input is not reusable.
-	if err := confirmIfDangerous(ctx, elicit, NewApprovals(), approvalText, dangerous); err != nil {
+	if err := confirmIfDangerous(ctx, elicit, NewApprovals(), "terminal_input", approvalText, dangerous); err != nil {
 		return nil, err
 	}
 
@@ -961,7 +961,7 @@ func confirmPendingSessionInputLocked(ctx context.Context, s *execSession, elici
 	if s.inputUncertain {
 		text += "  [terminal input state is unknown]"
 	}
-	return confirmIfDangerous(ctx, elicit, NewApprovals(), text, s.inputOverflow || s.inputUncertain || IsDangerousCommand(s.pendingInput))
+	return confirmIfDangerous(ctx, elicit, NewApprovals(), "terminal_input", text, s.inputOverflow || s.inputUncertain || IsDangerousCommand(s.pendingInput))
 }
 
 func hasImmediateTerminalControl(input string) bool {

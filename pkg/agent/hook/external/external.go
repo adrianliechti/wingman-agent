@@ -27,18 +27,32 @@ import (
 const (
 	defaultTimeout                 = 600
 	sessionEndTimeout              = 1
-	maxHookOutput                  = 16 * 1024
+	maxSessionEndTimeout           = 3
+	maxHookOutput                  = 1024 * 1024
 	defaultAdditionalContextTokens = 2_500
+	maxConcurrentAsyncHooks        = 8
 )
 
 // Gate defers a workspace trust decision until the first matching hook fires.
+// With a Fingerprint and Store, approval is remembered for the exact hook
+// content, and any change to that content asks again.
 type Gate struct {
 	Confirm func(ctx context.Context, message string) (bool, error)
 	Message string
 
-	mu      sync.Mutex
-	decided bool
-	allowed bool
+	Fingerprint func() (string, error)
+	Store       TrustStore
+
+	mu          sync.Mutex
+	decided     bool
+	allowed     bool
+	fingerprint string
+}
+
+// TrustStore persists approved hook fingerprints across sessions.
+type TrustStore interface {
+	Trusted(fingerprint string) bool
+	Trust(fingerprint string) error
 }
 
 func (g *Gate) Allowed(ctx context.Context) bool {
@@ -47,12 +61,22 @@ func (g *Gate) Allowed(ctx context.Context) bool {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.decided {
+	fingerprint := ""
+	if g.Fingerprint != nil {
+		var err error
+		if fingerprint, err = g.Fingerprint(); err != nil {
+			return false
+		}
+	}
+	if g.decided && fingerprint == g.fingerprint {
 		return g.allowed
 	}
+	if fingerprint != "" && g.Store != nil && g.Store.Trusted(fingerprint) {
+		g.decided, g.allowed, g.fingerprint = true, true, fingerprint
+		return true
+	}
 	if g.Confirm == nil {
-		g.decided = true
-		g.allowed = true
+		g.decided, g.allowed, g.fingerprint = true, true, fingerprint
 		return true
 	}
 	if ctx.Err() != nil {
@@ -62,8 +86,10 @@ func (g *Gate) Allowed(ctx context.Context) bool {
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	g.decided = true
-	g.allowed = ok && err == nil
+	g.decided, g.allowed, g.fingerprint = true, ok && err == nil, fingerprint
+	if g.allowed && fingerprint != "" && g.Store != nil {
+		_ = g.Store.Trust(fingerprint)
+	}
 	return g.allowed
 }
 
@@ -87,6 +113,7 @@ type Events struct {
 	SubagentStart     []MatcherGroup `json:"SubagentStart,omitempty"`
 	SubagentStop      []MatcherGroup `json:"SubagentStop,omitempty"`
 	Stop              []MatcherGroup `json:"Stop,omitempty"`
+	Interrupt         []MatcherGroup `json:"Interrupt,omitempty"`
 }
 
 type MatcherGroup struct {
@@ -229,6 +256,7 @@ func (c *Config) merge(other Config) {
 	c.Hooks.SubagentStart = append(c.Hooks.SubagentStart, other.Hooks.SubagentStart...)
 	c.Hooks.SubagentStop = append(c.Hooks.SubagentStop, other.Hooks.SubagentStop...)
 	c.Hooks.Stop = append(c.Hooks.Stop, other.Hooks.Stop...)
+	c.Hooks.Interrupt = append(c.Hooks.Interrupt, other.Hooks.Interrupt...)
 }
 
 // Merge appends another hook source while preserving source order.
@@ -257,6 +285,7 @@ func (c *Config) allEvents() []namedGroups {
 		{"SubagentStart", &c.Hooks.SubagentStart},
 		{"SubagentStop", &c.Hooks.SubagentStop},
 		{"Stop", &c.Hooks.Stop},
+		{"Interrupt", &c.Hooks.Interrupt},
 	}
 }
 
@@ -271,7 +300,17 @@ func (c *Config) Build(workDir string, gate *Gate) hook.Hooks {
 type BuildOptions struct {
 	Gate        *Gate
 	Environment map[string]string
+	// Async runs handlers marked async; without it they are skipped.
+	Async *Async
+	// MCP calls a tool on an already-connected server for mcp_tool handlers.
+	MCP MCPCaller
+	// SpillDir receives oversized hook output; the model sees a preview and path.
+	SpillDir string
 }
+
+// MCPCaller returns the text content of a tool result, or an error when the
+// call fails or the tool reports an error.
+type MCPCaller func(ctx context.Context, server, tool string, input map[string]any) (string, error)
 
 // BuildWithOptions compiles hooks and injects source-specific environment
 // variables into command handlers. HTTP handlers intentionally do not inherit
@@ -328,6 +367,9 @@ func (c *Config) BuildWithOptions(workDir string, options BuildOptions) hook.Hoo
 	if len(c.Hooks.Stop) > 0 {
 		built.Stop = append(built.Stop, c.stop(workDir, options))
 	}
+	if len(c.Hooks.Interrupt) > 0 {
+		built.Interrupt = append(built.Interrupt, c.interrupt(workDir, options))
+	}
 	return built
 }
 
@@ -345,47 +387,57 @@ type runResult struct {
 	stderr                 string
 	err                    error
 	additionalContextLimit *int
+	spillDir               string
 }
 
 func runEvent(ctx context.Context, workDir string, options BuildOptions, event string, groups []MatcherGroup, matcherInputs []string, payload map[string]any) []runResult {
 	if ctx.Err() != nil {
 		return nil
 	}
-	var synchronous []selectedHandler
+	var synchronous, background []selectedHandler
 	order := 0
 	for _, group := range groups {
-		matcherIgnored := event == "UserPromptSubmit" || event == "Stop"
+		matcherIgnored := event == "UserPromptSubmit" || event == "Stop" || event == "Interrupt"
 		if !matcherIgnored && !group.compiled.matches(matcherInputs) {
 			order += len(group.Hooks)
 			continue
 		}
 		for _, handler := range group.Hooks {
-			if handler.Type != "command" && handler.Type != "http" {
-				order++
-				continue
-			}
-			if handler.Async {
-				// The released Codex runtime parses this field but does not execute
-				// async hooks yet. Avoid partial semantics that discard completion
-				// output or outlive session teardown differently from Codex.
-				order++
-				continue
-			}
-			synchronous = append(synchronous, selectedHandler{configuredOrder: order, handler: handler})
+			selected := selectedHandler{configuredOrder: order, handler: handler}
 			order++
+			switch {
+			case handler.Type == "prompt" || handler.Type == "agent":
+			case handler.Type == "mcp_tool" && event == "SessionEnd":
+			case handler.Async && handler.Type != "mcp_tool" && event != "SessionEnd":
+				if options.Async != nil {
+					background = append(background, selected)
+				}
+			default:
+				synchronous = append(synchronous, selected)
+			}
 		}
 	}
-	if len(synchronous) == 0 || !options.Gate.Allowed(ctx) {
+	if len(synchronous) == 0 && len(background) == 0 || !options.Gate.Allowed(ctx) {
 		return nil
 	}
 	input, err := json.Marshal(payload)
 	if err != nil {
 		return nil
 	}
+	runtime := hook.RuntimeFromContext(ctx)
+	for _, selected := range background {
+		options.Async.start(runtime, func(ctx context.Context) []string {
+			result := selected.handler.run(ctx, workDir, event, input, options)
+			return parseResult(event, result).AdditionalContext
+		})
+	}
+	if len(synchronous) == 0 {
+		return nil
+	}
 	ch := make(chan runResult, len(synchronous))
 	for _, selected := range synchronous {
 		go func() {
-			result := selected.handler.run(ctx, workDir, event, input, options.Environment)
+			result := selected.handler.run(ctx, workDir, event, input, options)
 			result.configuredOrder = selected.configuredOrder
 			ch <- result
 		}()
@@ -404,24 +456,35 @@ func runEvent(ctx context.Context, workDir string, options BuildOptions, event s
 	return results
 }
 
-func (h Handler) run(ctx context.Context, workDir, event string, input []byte, environment map[string]string) runResult {
+func (h Handler) run(ctx context.Context, workDir, event string, input []byte, options BuildOptions) runResult {
 	timeoutSeconds := defaultTimeout
-	if event == "SessionEnd" {
+	shortLived := event == "SessionEnd" || event == "Interrupt"
+	if shortLived {
 		timeoutSeconds = sessionEndTimeout
 	}
 	if h.Timeout != nil {
 		timeoutSeconds = max(*h.Timeout, 1)
 	}
-	if event == "SessionEnd" && timeoutSeconds > 3 {
-		timeoutSeconds = 3
+	if shortLived {
+		timeoutSeconds = min(timeoutSeconds, maxSessionEndTimeout)
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
-	if h.Type == "http" {
-		result := h.post(ctx, input)
-		result.additionalContextLimit = h.AdditionalContextLimit
-		return result
+	var result runResult
+	switch h.Type {
+	case "http":
+		result = h.post(ctx, input)
+	case "mcp_tool":
+		result = h.callMCP(ctx, input, options.MCP)
+	default:
+		result = h.runCommand(ctx, workDir, input, options.Environment)
 	}
+	result.additionalContextLimit = h.AdditionalContextLimit
+	result.spillDir = options.SpillDir
+	return result
+}
+
+func (h Handler) runCommand(ctx context.Context, workDir string, input []byte, environment map[string]string) runResult {
 	command := h.Command
 	if runtime.GOOS == "windows" {
 		if h.CommandWindows != "" {
@@ -429,6 +492,10 @@ func (h Handler) run(ctx context.Context, workDir, event string, input []byte, e
 		} else if h.CommandWindowsSnake != "" {
 			command = h.CommandWindowsSnake
 		}
+	}
+	// Codex substitutes ${NAME} itself so plugin paths work in every shell.
+	for name, value := range environment {
+		command = strings.ReplaceAll(command, "${"+name+"}", value)
 	}
 	cmd := shell.Command(ctx, command, workDir)
 	if len(environment) > 0 {
@@ -447,7 +514,7 @@ func (h Handler) run(ctx context.Context, workDir, event string, input []byte, e
 	return runResult{
 		exitCode: exitCode, stdout: limit(stdout.String()), stderr: limit(stderr.String()),
 		stdoutTruncated: stdout.Len() > maxHookOutput,
-		err:             nonExitError(err), additionalContextLimit: h.AdditionalContextLimit,
+		err:             nonExitError(err),
 	}
 }
 
@@ -680,7 +747,7 @@ func parseResult(event string, result runResult) parsedResult {
 	if err := decoder.Decode(&output); err != nil {
 		if plainContext {
 			return parsedResult{Outcome: hook.Outcome{AdditionalContext: []string{
-				boundAdditionalContext(result.stdout, result.additionalContextLimit),
+				boundAdditionalContext(result.stdout, result.additionalContextLimit, result.spillDir),
 			}}}
 		}
 		return parsedResult{}
@@ -706,7 +773,7 @@ func parseResult(event string, result runResult) parsedResult {
 	if specific != nil && specific.AdditionalContext != nil {
 		if context := strings.TrimSpace(*specific.AdditionalContext); context != "" {
 			parsed.AdditionalContext = append(parsed.AdditionalContext,
-				boundAdditionalContext(context, result.additionalContextLimit))
+				boundAdditionalContext(context, result.additionalContextLimit, result.spillDir))
 		}
 	}
 	switch event {
@@ -742,10 +809,23 @@ func parseResult(event string, result runResult) parsedResult {
 	return parsed
 }
 
+// spillFeedback bounds the reasons Codex feeds back to the model: PostToolUse
+// feedback and Stop/SubagentStop continuations.
+func spillFeedback(event string, parsed parsedResult, spillDir string) parsedResult {
+	switch event {
+	case "PostToolUse", "Stop", "SubagentStop":
+		if parsed.Block && parsed.Reason != "" {
+			parsed.Reason = boundAdditionalContext(parsed.Reason, nil, spillDir)
+		}
+	}
+	return parsed
+}
+
 // boundAdditionalContext applies Codex's per-handler approximate-token
 // threshold. A zero value explicitly disables this limit; the process-level
-// maxHookOutput ceiling remains in force for safety.
-func boundAdditionalContext(value string, configured *int) string {
+// maxHookOutput ceiling remains in force for safety. Oversized text is saved
+// in full to spillDir when set, and the preview names the file.
+func boundAdditionalContext(value string, configured *int, spillDir string) string {
 	tokenLimit := defaultAdditionalContextTokens
 	if configured != nil {
 		tokenLimit = *configured
@@ -754,12 +834,36 @@ func boundAdditionalContext(value string, configured *int) string {
 		return value
 	}
 
+	footer := ""
+	if path := writeSpill(spillDir, value); path != "" {
+		footer = "\n\nFull hook output saved to: " + path
+	}
 	byteBudget := tokenLimit * 4
 	marker := fmt.Sprintf("\n… hook additionalContext truncated from approximately %d tokens …\n", (len(value)+3)/4)
-	previewBudget := max(byteBudget-len(marker), 0)
+	previewBudget := max(byteBudget-len(marker)-len(footer), 0)
 	headBudget := previewBudget / 2
 	tailBudget := previewBudget - headBudget
-	return text.HeadLines(value, headBudget) + marker + text.TailLines(value, tailBudget)
+	return text.HeadLines(value, headBudget) + marker + text.TailLines(value, tailBudget) + footer
+}
+
+func writeSpill(dir, content string) string {
+	if dir == "" {
+		return ""
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	file, err := os.CreateTemp(dir, "hook-output-*.txt")
+	if err != nil {
+		return ""
+	}
+	_, writeErr := file.WriteString(content)
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		_ = os.Remove(file.Name())
+		return ""
+	}
+	return file.Name()
 }
 
 // validWireOutput applies Codex's event-specific output schemas and semantic
@@ -860,7 +964,7 @@ func aggregate(event string, results []runResult) parsedResult {
 	var combined parsedResult
 	latestRewrite := -1
 	for _, result := range results {
-		parsed := parseResult(event, result)
+		parsed := spillFeedback(event, parseResult(event, result), result.spillDir)
 		combined.AdditionalContext = append(combined.AdditionalContext, parsed.AdditionalContext...)
 		if parsed.Stop && !combined.Stop {
 			combined.Stop = true
@@ -1055,6 +1159,13 @@ func (c *Config) postCompact(workDir string, options BuildOptions) hook.PostComp
 		addSubagent(payload, hook.RuntimeFromContext(ctx))
 		payload["trigger"] = trigger
 		return aggregate("PostCompact", runEvent(ctx, workDir, options, "PostCompact", c.Hooks.PostCompact, []string{trigger}, payload)).Outcome, nil
+	}
+}
+
+func (c *Config) interrupt(workDir string, options BuildOptions) hook.Interrupt {
+	return func(ctx context.Context) {
+		payload := commonPayload(ctx, "Interrupt", workDir)
+		runEvent(ctx, workDir, options, "Interrupt", c.Hooks.Interrupt, nil, payload)
 	}
 }
 

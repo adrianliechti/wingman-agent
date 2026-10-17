@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Loader2, MessageSquare, Trash2 } from "lucide-react";
+import { GitFork, Loader2, MessageSquare, Trash2 } from "lucide-react";
 import { useState } from "react";
 import {
 	useWorkspace,
@@ -15,6 +15,7 @@ interface Props {
 	backendId?: string;
 	onSessionSelect: (id: string, disposition?: TabDisposition) => void;
 	onSessionDelete?: (id: string, title: string) => void;
+	onSessionFork?: (id: string) => void;
 	runningSessionIds?: Set<string>;
 	touch?: boolean;
 }
@@ -24,6 +25,7 @@ export function AgentSessions({
 	backendId,
 	onSessionSelect,
 	onSessionDelete,
+	onSessionFork,
 	runningSessionIds,
 	touch = false,
 }: Props) {
@@ -35,8 +37,9 @@ export function AgentSessions({
 		error,
 		refetch,
 	} = useQuery(sessionQueries.list(backend));
-	const canDelete =
-		useQuery(backendSettingsQuery(backend)).data?.canDelete ?? false;
+	const settings = useQuery(backendSettingsQuery(backend)).data;
+	const canDelete = settings?.canDelete ?? false;
+	const canFork = !!onSessionFork && (settings?.canFork ?? false);
 
 	const [menu, setMenu] = useState<{
 		id: string;
@@ -188,6 +191,20 @@ export function AgentSessions({
 						<MessageSquare size={12} className="shrink-0" />
 						Open session
 					</button>
+					{canFork && (
+						<button
+							type="button"
+							role="menuitem"
+							onClick={() => {
+								onSessionFork?.(menu.id);
+								setMenu(null);
+							}}
+							className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-[12px] text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg"
+						>
+							<GitFork size={12} className="shrink-0" />
+							Fork session
+						</button>
+					)}
 					{canDelete && <div className="my-1 border-t border-border-subtle" />}
 					{canDelete && (
 						<button

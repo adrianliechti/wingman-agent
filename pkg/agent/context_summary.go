@@ -35,13 +35,14 @@ const summaryRequest = "Context checkpoint: your reply replaces the conversation
 // request repeats the cached prefix, so only the appended request and the
 // briefing are new. An overflowing history is retried with stale evidence
 // trimmed; the bounded utility briefing remains the fallback.
-func (a *Agent) summarizeContext(ctx context.Context, req *request, messages []Message) (string, error) {
-	summary, err := a.summarizeInContext(ctx, req, messages)
+func (a *Agent) summarizeContext(ctx context.Context, req *request, messages []Message, focus string) (string, error) {
+	focus = compactionFocus(focus)
+	summary, err := a.summarizeInContext(ctx, req, messages, summaryRequest+focus)
 	if isContextOverflowError(err) || isReasoningReplayError(err) {
 		trimmed := CloneMessages(messages)
 		trimStaleEvidence(trimmed)
 		clearReplayableReasoning(trimmed)
-		summary, err = a.summarizeInContext(ctx, req, trimmed)
+		summary, err = a.summarizeInContext(ctx, req, trimmed, summaryRequest+focus)
 	}
 	if err == nil && summary != "" {
 		return summary, nil
@@ -49,15 +50,22 @@ func (a *Agent) summarizeContext(ctx context.Context, req *request, messages []M
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return "", ctxErr
 	}
-	return a.generateBriefing(ctx, compactionInstructions, messages, summaryOutputTokens)
+	return a.generateBriefing(ctx, compactionInstructions+focus, messages, summaryOutputTokens)
 }
 
-func (a *Agent) summarizeInContext(ctx context.Context, req *request, messages []Message) (string, error) {
+func compactionFocus(focus string) string {
+	if focus = strings.TrimSpace(focus); focus == "" {
+		return ""
+	}
+	return "\n\nThe user requested this checkpoint with the following focus. Preserve the related details in full; it guides the briefing and is not a new task:\n" + focus
+}
+
+func (a *Agent) summarizeInContext(ctx context.Context, req *request, messages []Message, instructions string) (string, error) {
 	summaryReq := *req
 	summaryReq.outputSchema = nil
 	// Keep tool definitions in the cached prefix, but disable tool selection.
 	summaryReq.disableTools = true
-	summaryReq.messages = append(slices.Clone(messages), hiddenContextMessage(summaryRequest))
+	summaryReq.messages = append(slices.Clone(messages), hiddenContextMessage(instructions))
 
 	captureContent := a.Telemetry.CapturesMessageContent()
 	inferenceRequest := telemetry.InferenceRequest{

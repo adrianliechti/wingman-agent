@@ -2,6 +2,7 @@ package code
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1481,6 +1482,37 @@ func (a *App) resumeSession() {
 	a.showSessionPicker(false)
 }
 
+func (a *App) forkSession(title string) {
+	forker, ok := a.agent.(code.SessionForker)
+	if !ok {
+		a.appendChat(cellNotice("Forking is unavailable for this agent", theme.Default.Yellow, a.width()))
+		return
+	}
+	if len(a.agent.Messages(a.sessionID)) == 0 {
+		a.appendChat(cellNotice("Nothing to fork yet", theme.Default.Yellow, a.width()))
+		return
+	}
+	previousID := a.sessionID
+	var id string
+	a.runSessionOperation("Could not fork session", func(ctx context.Context, current string) error {
+		var err error
+		id, err = forker.ForkSession(ctx, current, title)
+		return err
+	}, func() {
+		a.turns.CancelCurrent(previousID)
+		a.activateSession(id)
+		a.showWelcome = false
+		a.chat = nil
+		a.chatScroll = 0
+		a.follow = true
+		a.clearSelection()
+		a.syncMessages()
+		banner := fmt.Sprintf("Forked session; the original is kept as %s", shortSessionID(previousID))
+		a.appendAnnotation(func(width int) []string { return cellNotice(banner, theme.Default.Green, width) })
+		a.invalidate()
+	})
+}
+
 // showRecap asynchronously summarizes the session and posts the result as a
 // notice-style cell; the session may keep working meanwhile.
 func (a *App) showRecap() {
@@ -1520,6 +1552,47 @@ func (a *App) showRecap() {
 			a.invalidate()
 		})
 	}()
+}
+
+// compactContext checkpoints the model context through the turn manager, so
+// background follow-ups queue behind it; Esc cancels like a turn.
+func (a *App) compactContext(focus string) {
+	if a.operationPending {
+		a.showToast("Wait for the current operation or press Esc to cancel", theme.Default.Yellow)
+		return
+	}
+	if a.turns == nil {
+		return
+	}
+	id, epoch := a.sessionID, a.sessionEpoch
+	err := a.turns.StartCompact(id, focus, func(result agent.CompactResult, err error) {
+		a.post(func() {
+			a.operationPending = false
+			a.operationStatus = ""
+			a.operationCancel = nil
+			if a.sessionID != id || a.sessionEpoch != epoch {
+				return
+			}
+			switch {
+			case errors.Is(err, context.Canceled):
+				a.appendChat(cellNotice("Compaction cancelled", theme.Default.BrBlack, a.width()))
+			case err != nil:
+				a.appendChat(cellNotice(fmt.Sprintf("Compaction failed: %v", err), theme.Default.Yellow, a.width()))
+			default:
+				a.refreshUsage()
+				a.appendChat(cellNotice(fmt.Sprintf("Context compacted · ~%s → ~%s tokens", tui.FormatTokens(result.TokensBefore), tui.FormatTokens(result.TokensAfter)), theme.Default.BrBlack, a.width()))
+			}
+			a.invalidate()
+		})
+	})
+	if err != nil {
+		a.appendChat(cellNotice(fmt.Sprintf("Compaction failed: %v", err), theme.Default.Yellow, a.width()))
+		return
+	}
+	a.operationPending = true
+	a.operationStatus = "Compacting context · Esc cancels"
+	a.operationCancel = func() { _ = a.turns.CancelCurrent(id) }
+	a.invalidate()
 }
 
 func (a *App) copyTextToClipboard(text string) {

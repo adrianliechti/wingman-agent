@@ -623,8 +623,30 @@ func (a *Agent) finishTurn(ctx context.Context, turnID string, status RuntimeSta
 	recordErr := a.recordEvents(RuntimeEvent{
 		Type: EventTurnTerminal, TurnID: turnID, Usage: &delta, Terminal: terminal,
 	})
+	if status == RuntimeInterrupted && userInterrupted(ctx, outcomeErr) {
+		a.runInterruptHooks(ctx)
+	}
 	a.setRunning(false)
 	return errors.Join(appendErr, recordErr)
+}
+
+// userInterrupted excludes hook stops and task budgets, which also cancel turns.
+func userInterrupted(ctx context.Context, err error) bool {
+	if _, hookStopped := errors.AsType[hookStopError](err); hookStopped {
+		return false
+	}
+	cause := context.Cause(ctx)
+	if errors.Is(cause, ErrTaskTokenBudget) || errors.Is(cause, ErrTaskTimeBudget) {
+		return false
+	}
+	return errors.Is(err, context.Canceled)
+}
+
+func (a *Agent) runInterruptHooks(ctx context.Context) {
+	ctx = context.WithoutCancel(ctx)
+	for _, h := range a.Hooks.Interrupt {
+		h(ctx)
+	}
 }
 
 func extractToolCalls(messages []Message) []ToolCall {

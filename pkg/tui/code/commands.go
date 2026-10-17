@@ -66,7 +66,7 @@ func (a *App) builtinCommands() []slashCommand {
 	}
 	if _, ok := a.agent.(code.UnattendedAgent); ok {
 		cmds = append(cmds, slashCommand{
-			Name: "/unattended", Desc: "Toggle automatic approvals and skip questions", Busy: true,
+			Name: "/unattended", Desc: "Toggle running every action without review and skipping questions", Busy: true,
 			Run: (*App).toggleUnattendedMode,
 		})
 	}
@@ -82,6 +82,19 @@ func (a *App) builtinCommands() []slashCommand {
 	}
 	if _, ok := a.agent.(recapProvider); ok {
 		cmds = append(cmds, slashCommand{Name: "/recap", Desc: "Summarize the session so far", Run: (*App).showRecap})
+	}
+	if _, ok := a.agent.(code.Compactor); ok {
+		cmds = append(cmds, slashCommand{
+			Name: "/compact", Hint: "[focus]", Desc: "Summarize the conversation to free context",
+			Run: func(a *App) { a.compactContext("") }, RunArgs: (*App).compactContext,
+		})
+	}
+
+	if _, ok := a.agent.(code.SessionForker); ok {
+		cmds = append(cmds, slashCommand{
+			Name: "/fork", Hint: "[title]", Desc: "Continue in a copy of this session; the original is kept",
+			Run: func(a *App) { a.forkSession("") }, RunArgs: (*App).forkSession,
+		})
 	}
 
 	cmds = append(cmds,

@@ -52,7 +52,7 @@ func TestSummarizeContextRejectsUnfinishedResponse(t *testing.T) {
 			})}))
 			a := &Agent{Config: &Config{client: &client}, Messages: []Message{{Role: RoleUser, Content: []Content{{Text: "Complete the original task."}}}}}
 			req := &request{model: "m", instructions: "session instructions", messages: a.requestMessages(), tools: []tool.Tool{{Name: "check"}}}
-			summary, err := a.summarizeContext(t.Context(), req, req.messages)
+			summary, err := a.summarizeContext(t.Context(), req, req.messages, "")
 			if err != nil || summary != "Recovered checkpoint." || requests != 2 {
 				t.Fatalf("summary=%q requests=%d error=%v", summary, requests, err)
 			}

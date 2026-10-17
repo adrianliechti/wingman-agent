@@ -2,7 +2,11 @@ package external
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -36,7 +40,7 @@ func TestOversizedStructuredHookResponsesFailClosed(t *testing.T) {
 					t.Fatal("oversized hook did not stop")
 				}
 			}
-			if !strings.Contains(reason, "exceeded the 16 KiB output limit") {
+			if !strings.Contains(reason, fmt.Sprintf("exceeded the %d KiB output limit", maxHookOutput/1024)) {
 				t.Fatalf("missing overflow explanation: %q", reason)
 			}
 		})
@@ -90,13 +94,13 @@ func TestCappedBufferDrainsAndMarksTruncation(t *testing.T) {
 
 func TestBoundAdditionalContextUsesDefaultAndConfiguredLimits(t *testing.T) {
 	short := strings.Repeat("x", defaultAdditionalContextTokens*4)
-	if got := boundAdditionalContext(short, nil); got != short {
+	if got := boundAdditionalContext(short, nil, ""); got != short {
 		t.Fatal("default limit changed an in-budget context")
 	}
 
 	limit := 100
 	input := "HEAD" + strings.Repeat("☃", 1_000) + "TAIL"
-	got := boundAdditionalContext(input, &limit)
+	got := boundAdditionalContext(input, &limit, "")
 	if !strings.Contains(got, "additionalContext truncated") {
 		t.Fatal("configured limit did not report truncation")
 	}
@@ -108,7 +112,7 @@ func TestBoundAdditionalContextUsesDefaultAndConfiguredLimits(t *testing.T) {
 	}
 
 	unlimited := 0
-	if got := boundAdditionalContext(input, &unlimited); got != input {
+	if got := boundAdditionalContext(input, &unlimited, ""); got != input {
 		t.Fatal("zero limit did not preserve unlimited context")
 	}
 }
@@ -160,13 +164,13 @@ func TestGateCancellationDoesNotStickDeclined(t *testing.T) {
 	}
 }
 
-func TestAsyncOnlyEventDoesNotPromptGate(t *testing.T) {
+func TestAsyncOnlyEventPromptsGateOnlyWhenItRuns(t *testing.T) {
 	calls := 0
 	gate := &Gate{
 		Message: "allow hooks?",
 		Confirm: func(_ context.Context, _ string) (bool, error) {
 			calls++
-			return true, nil
+			return false, nil
 		},
 	}
 	cfg := &Config{
@@ -177,12 +181,115 @@ func TestAsyncOnlyEventDoesNotPromptGate(t *testing.T) {
 			}},
 		},
 	}
-	hooks := cfg.Build(t.TempDir(), gate)
-	if _, err := hooks.PreToolUse[0](t.Context(), tool.ToolCall{Name: "shell"}); err != nil {
+	if _, err := cfg.Build(t.TempDir(), gate).PreToolUse[0](t.Context(), tool.ToolCall{Name: "shell"}); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 0 {
-		t.Fatalf("async-only hook should not prompt trust gate, got %d prompts", calls)
+		t.Fatalf("skipped async hook prompted the trust gate %d times", calls)
+	}
+	async := NewAsync(nil)
+	defer async.Close()
+	hooks := cfg.BuildWithOptions(t.TempDir(), BuildOptions{Gate: gate, Async: async})
+	if _, err := hooks.PreToolUse[0](t.Context(), tool.ToolCall{Name: "shell"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("async hook must pass the trust gate, got %d prompts", calls)
+	}
+}
+
+type memoryTrust map[string]bool
+
+func (m memoryTrust) Trusted(fingerprint string) bool { return m[fingerprint] }
+
+func (m memoryTrust) Trust(fingerprint string) error {
+	m[fingerprint] = true
+	return nil
+}
+
+func TestGateRemembersFingerprintAndReasksAfterChange(t *testing.T) {
+	store := memoryTrust{}
+	fingerprint := "v1"
+	prompts := 0
+	newGate := func() *Gate {
+		return &Gate{
+			Message:     "allow hooks?",
+			Confirm:     func(context.Context, string) (bool, error) { prompts++; return true, nil },
+			Fingerprint: func() (string, error) { return fingerprint, nil },
+			Store:       store,
+		}
+	}
+	if !newGate().Allowed(t.Context()) || prompts != 1 {
+		t.Fatalf("first approval: prompts = %d", prompts)
+	}
+	gate := newGate()
+	if !gate.Allowed(t.Context()) || prompts != 1 {
+		t.Fatalf("unchanged hooks re-prompted in a new session: prompts = %d", prompts)
+	}
+	fingerprint = "v2"
+	if !gate.Allowed(t.Context()) || prompts != 2 {
+		t.Fatalf("edited hooks did not re-prompt: prompts = %d", prompts)
+	}
+	if !store["v1"] || !store["v2"] {
+		t.Fatalf("store = %#v", store)
+	}
+}
+
+func TestGateFailsClosedWhenFingerprintFails(t *testing.T) {
+	gate := &Gate{
+		Confirm:     func(context.Context, string) (bool, error) { return true, nil },
+		Fingerprint: func() (string, error) { return "", errors.New("changed while hashing") },
+	}
+	if gate.Allowed(t.Context()) {
+		t.Fatal("gate allowed hooks whose content could not be fingerprinted")
+	}
+}
+
+func TestConfigFingerprintTracksDeclarationsAndIdentity(t *testing.T) {
+	preToolUse := func(command string) *Config {
+		return &Config{Hooks: Events{PreToolUse: []MatcherGroup{{Matcher: "Bash", Hooks: []Handler{{Type: "command", Command: command}}}}}}
+	}
+	cfg := preToolUse("check.sh")
+	base, err := cfg.Fingerprint("/repo", "/repo/.codex/hooks.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _ := cfg.Fingerprint("/repo", "/repo/.codex/hooks.json")
+	otherRepo, _ := cfg.Fingerprint("/other", "/repo/.codex/hooks.json")
+	edited := preToolUse("check.sh --fix")
+	changed, _ := edited.Fingerprint("/repo", "/repo/.codex/hooks.json")
+	if base != again || base == otherRepo || base == changed {
+		t.Fatalf("fingerprints: base=%s again=%s other=%s changed=%s", base, again, otherRepo, changed)
+	}
+}
+
+func TestContentHashDetectsScriptEditsAndIgnoresBytecode(t *testing.T) {
+	root := t.TempDir()
+	script := filepath.Join(root, "hooks", "check.sh")
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("echo ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ContentHash(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "__pycache__"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "__pycache__", "x.pyc"), []byte("bytecode"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := ContentHash(root); after != before {
+		t.Fatal("python bytecode changed the plugin fingerprint")
+	}
+	if err := os.WriteFile(script, []byte("echo pwned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := ContentHash(root); after == before {
+		t.Fatal("editing a hook script did not change the plugin fingerprint")
 	}
 }
 

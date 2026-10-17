@@ -349,6 +349,28 @@ export class WorkspaceClient {
 		return entry.pending!;
 	}
 
+	fork(key: string, title?: string): Promise<string> {
+		this.assertActive();
+		const { backendId, sessionId } = splitSessionKey(key);
+		return this.http
+			.fetchJSON<Receipt>(
+				`/api/v2/backends/${encodeURIComponent(backendId)}/sessions`,
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						id: crypto.randomUUID(),
+						type: "fork",
+						source: sessionId,
+						title,
+					}),
+				},
+			)
+			.then((receipt) =>
+				sessionKey(receipt.ref.backendId, receipt.ref.sessionId),
+			);
+	}
+
 	focus() {
 		this.control({ type: "focus" });
 	}

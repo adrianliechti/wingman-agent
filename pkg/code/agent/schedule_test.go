@@ -335,4 +335,3 @@ func TestFireScheduleSkipsTaskPausedDuringGate(t *testing.T) {
 		t.Fatalf("paused task should not fire: %+v", ev)
 	}
 }
-

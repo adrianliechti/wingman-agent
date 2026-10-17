@@ -72,6 +72,38 @@ func TestMCPTrustBindsToExactConfigurationAndWorkspace(t *testing.T) {
 	}
 }
 
+func TestHookTrustPersistsPerWorkspace(t *testing.T) {
+	testenv.WingmanHome(t)
+	root := t.TempDir()
+	if err := (&Workspace{RootPath: root}).HookTrust().Trust("sha256:a"); err != nil {
+		t.Fatal(err)
+	}
+	restarted := (&Workspace{RootPath: root}).HookTrust()
+	if !restarted.Trusted("sha256:a") || restarted.Trusted("sha256:b") {
+		t.Fatal("hook approval did not survive restart for exactly the approved fingerprint")
+	}
+	if (&Workspace{RootPath: t.TempDir()}).HookTrust().Trusted("sha256:a") {
+		t.Fatal("other workspace inherited hook approval")
+	}
+	path := filepath.Join(projectStateDir(root), "hook-trust.json")
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Trusted("sha256:a") {
+		t.Fatal("unreadable trust file must not trust hooks")
+	}
+}
+
+func TestCallMCPToolRequiresConnectedServer(t *testing.T) {
+	ws := &Workspace{RootPath: t.TempDir(), MCP: mcp.NewManager(&mcp.Config{Servers: map[string]mcp.ServerConfig{}})}
+	if _, err := ws.CallMCPTool(t.Context(), "policy", "check", nil); err == nil || !strings.Contains(err.Error(), "not connected") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := (&Workspace{}).CallMCPTool(t.Context(), "policy", "check", nil); err == nil {
+		t.Fatal("call without MCP succeeded")
+	}
+}
+
 func TestProjectMCPIsBlockedBeforeStartingItsProcess(t *testing.T) {
 	testenv.WingmanHome(t)
 	dir := t.TempDir()

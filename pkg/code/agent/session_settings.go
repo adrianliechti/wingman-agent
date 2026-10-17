@@ -55,6 +55,22 @@ func (a *Agent) saveSessionSettingsLocked(s *sessionState) error {
 	return writeFileAtomic(dir, sessionSettingsFile, data)
 }
 
+func (a *Agent) copySessionSettings(fromID, toID string) error {
+	settings, err := a.loadSessionSettings(fromID)
+	if err != nil || settings == (sessionSettings{}) {
+		return err
+	}
+	dir, err := session.ArtifactDir(a.sessionsDir, toID)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(dir, sessionSettingsFile, data)
+}
+
 // restoreSessionSettings applies saved settings, falling back to the model of
 // the last turn for sessions recorded before settings were persisted.
 func (a *Agent) restoreSessionSettings(s *sessionState, state harness.State) {

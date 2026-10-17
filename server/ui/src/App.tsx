@@ -2,6 +2,7 @@ import { useMainLayout } from "./hooks/useMainLayout.ts";
 import { useMobileLayout } from "./hooks/useMobileLayout.ts";
 import { MobileNavigation } from "./components/MobileNavigation";
 import {
+	backendSettingsQuery,
 	useWorkspace,
 	useSessionSettings,
 	draftSettingsKey,
@@ -22,10 +23,12 @@ import {
 	Eye,
 	FileText,
 	FilePlus,
+	FoldVertical,
 	FolderOpen,
 	FolderTree,
 	GitCompare,
 	GitCompareArrows,
+	GitFork,
 	Globe2,
 	History,
 	Lightbulb,
@@ -79,7 +82,7 @@ import {
 } from "./api/debug";
 import { createWorkspaceFile } from "./api/files";
 import { queryKeys } from "./api/query";
-import { deleteSession, type SessionInfo } from "./api/sessions";
+import { deleteSession, forkSession, type SessionInfo } from "./api/sessions";
 import {
 	setEditorTabCompletion,
 	setWindowSidebarPosition,
@@ -172,6 +175,7 @@ import {
 } from "./workspaceEdit";
 import {
 	contextRemainingPercent,
+	formatTokens,
 	shouldShowContextIndicator,
 } from "./utils/usage";
 const FileTab = lazy(async () => {
@@ -363,6 +367,7 @@ export default function App() {
 		updateQueued,
 		resumeQueue,
 		clearQueue,
+		compact,
 		dismissError,
 		respondPrompt,
 		subscribe,
@@ -888,6 +893,9 @@ export default function App() {
 
 	const phase = activeSession?.phase ?? "idle";
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
+	const canCompact =
+		useQuery(backendSettingsQuery(splitSessionKey(sessionId).backendId)).data
+			?.canCompact ?? false;
 
 	useEffect(() => {
 		const ref = splitSessionKey(sessionId);
@@ -1843,6 +1851,21 @@ export default function App() {
 		selectBackend(splitSessionKey(id).backendId);
 		openChatTab(id, disposition);
 	};
+
+	const handleSessionFork = async (id: string) => {
+		let forked: string;
+		try {
+			forked = await forkSession(id);
+		} catch (error) {
+			toast({
+				title: "Session was not forked",
+				description: error instanceof Error ? error.message : String(error),
+				tone: "error",
+			});
+			return;
+		}
+		handleSessionSelect(forked, "keep");
+	};
 	const draftCreations = useRef(new Map<string, Promise<string>>());
 	useEffect(() => composerDrafts.syncTabs(tabs), [composerDrafts, tabs]);
 	const [draftErrors, setDraftErrors] = useState<
@@ -2253,6 +2276,16 @@ export default function App() {
 			icon: <MessageSquarePlus size={12} className="text-fg-dim shrink-0" />,
 			run: () => void handleNewSession(backend.id),
 		})),
+		...(activeSettings.canFork && !isDraft(sessionId) && phase === "idle"
+			? [
+					{
+						id: "fork-session",
+						label: "Fork Session",
+						icon: <GitFork size={12} className="text-fg-dim shrink-0" />,
+						run: () => void handleSessionFork(sessionId),
+					},
+				]
+			: []),
 		...(tabs.some((tab) => tab.type === "chat")
 			? [
 					{
@@ -2260,6 +2293,20 @@ export default function App() {
 						label: "Show sessions",
 						icon: <History size={12} className="text-fg-dim shrink-0" />,
 						run: () => showActiveChatAuxiliary("sessions"),
+					},
+				]
+			: []),
+		...(canCompact &&
+		activeTab.type === "chat" &&
+		!isDraft(sessionId) &&
+		phase === "idle"
+			? [
+					{
+						id: "compact-context",
+						label: "Compact context",
+						hint: "/compact",
+						icon: <FoldVertical size={12} className="text-fg-dim shrink-0" />,
+						run: () => void compact(sessionId),
 					},
 				]
 			: []),
@@ -2452,6 +2499,7 @@ export default function App() {
 						void handleSessionSelect(id, disposition);
 					}}
 					onSessionDelete={(id, title) => setSessionDelete({ id, title })}
+					onSessionFork={(id) => void handleSessionFork(id)}
 					onOpenTask={openTask}
 				>
 					<SessionChatPanel
@@ -2468,6 +2516,7 @@ export default function App() {
 						onCancel={(clear) => {
 							if (key) cancel(key, clear ?? false);
 						}}
+						onCompact={(focus) => (key ? compact(key, focus) : false)}
 						onRemoveQueued={(id, state) => {
 							if (!key) return;
 							if (state === "queued" || state === "sending") {
@@ -3756,6 +3805,7 @@ function ChatTabLayout({
 	runningSessionIds,
 	onSessionSelect,
 	onSessionDelete,
+	onSessionFork,
 	onOpenTask,
 }: {
 	children: ReactNode;
@@ -3766,6 +3816,7 @@ function ChatTabLayout({
 	runningSessionIds: Set<string>;
 	onSessionSelect: (id: string, disposition?: TabDisposition) => void;
 	onSessionDelete: (id: string, title: string) => void;
+	onSessionFork: (id: string) => void;
 	onOpenTask: (task: TaskEntry) => void;
 }) {
 	return (
@@ -3793,6 +3844,7 @@ function ChatTabLayout({
 							runningSessionIds={runningSessionIds}
 							onSessionSelect={onSessionSelect}
 							onSessionDelete={onSessionDelete}
+							onSessionFork={onSessionFork}
 						/>
 					</div>
 					{showAgents && (
@@ -3808,12 +3860,6 @@ function ChatTabLayout({
 			</aside>
 		</div>
 	);
-}
-
-function formatTokens(n: number): string {
-	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-	return String(n);
 }
 
 function debugOperationLabel(operation: DebugOperation): string {

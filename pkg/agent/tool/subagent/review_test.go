@@ -282,4 +282,3 @@ func TestReviewToolsDoesNotRebindActiveTasks(t *testing.T) {
 		t.Fatal("unexpected resume call")
 	}
 }
-

@@ -492,3 +492,63 @@ func TestSessionEntryIdentitySurvivesCommitAndLateSteering(t *testing.T) {
 		t.Fatalf("commit changed identity or duplicated steering: %+v", c.entries)
 	}
 }
+
+type compactingProtocolAgent struct {
+	*protocolAgent
+	focus   chan string
+	release chan error
+}
+
+func (a *compactingProtocolAgent) Compact(ctx context.Context, _, focus string) (agent.CompactResult, error) {
+	a.focus <- focus
+	select {
+	case err := <-a.release:
+		if err != nil {
+			return agent.CompactResult{}, err
+		}
+		return agent.CompactResult{TokensBefore: 900, TokensAfter: 90}, nil
+	case <-ctx.Done():
+		return agent.CompactResult{}, ctx.Err()
+	}
+}
+
+func TestSessionCompactCommandReportsPhaseAndOutcome(t *testing.T) {
+	s, other, _ := newProtocolServer(t)
+	a := &compactingProtocolAgent{protocolAgent: &protocolAgent{}, focus: make(chan string, 1), release: make(chan error, 1)}
+	b := s.bindBackend("compact", a)
+	s.runtimes["compact"] = b
+	c := b.session("saved")
+	c.load()
+	if !b.settings("saved").CanCompact || other.settings("saved").CanCompact {
+		t.Fatal("compaction capability not advertised per backend")
+	}
+	state := func() SessionState {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.state
+	}
+
+	rec := protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-1", Epoch: c.epoch, Type: "compact", Text: "api design"})
+	if rec.Code != 200 {
+		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
+	}
+	if focus := <-a.focus; focus != "api design" || state().Phase != "compacting" {
+		t.Fatalf("focus=%q phase=%q", focus, state().Phase)
+	}
+	a.release <- nil
+	waitProtocol(t, func() bool { return state().Phase == "idle" && state().Compaction != nil })
+	if st := state(); st.Compaction.TokensAfter != 90 || st.Error != nil {
+		t.Fatalf("state after compaction = %+v", st)
+	}
+
+	rec = protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-2", Epoch: c.epoch, Type: "compact"})
+	if rec.Code != 200 {
+		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
+	}
+	<-a.focus
+	a.release <- errors.New("compaction did not reduce context")
+	waitProtocol(t, func() bool { return state().Phase == "idle" && state().Error != nil })
+	if st := state(); *st.Error != "compaction did not reduce context" || st.Compaction != nil {
+		t.Fatalf("state after failure = %+v", st)
+	}
+}

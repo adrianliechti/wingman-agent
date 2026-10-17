@@ -109,10 +109,11 @@ type TurnInputSnapshot struct {
 }
 
 type TurnSnapshot struct {
-	Inputs   []TurnInputSnapshot
-	Paused   bool
-	Features TurnFeatures
-	Error    error
+	Inputs     []TurnInputSnapshot
+	Paused     bool
+	Compacting bool
+	Features   TurnFeatures
+	Error      error
 }
 
 type TurnEvent struct {

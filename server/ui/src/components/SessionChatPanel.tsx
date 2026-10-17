@@ -18,6 +18,7 @@ export function SessionChatPanel(
 		| "canSteer"
 		| "prompts"
 		| "toolProgress"
+		| "compaction"
 	>,
 ) {
 	const view = useSessionView(props.sessionId);
@@ -49,6 +50,7 @@ export function SessionChatPanel(
 				entries={view?.entries ?? EMPTY}
 				phase={view?.phase ?? "idle"}
 				retry={view?.retry}
+				compaction={view?.compaction}
 				pendingInputs={view?.pendingInputs ?? EMPTY}
 				queuePaused={view?.queuePaused ?? false}
 				canSteer={view?.canSteer ?? false}

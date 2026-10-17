@@ -65,4 +65,3 @@ func TestExtractTextIncludesEmbeddedResourceTextAndNilGuards(t *testing.T) {
 		t.Fatalf("extractText = %q", got)
 	}
 }
-

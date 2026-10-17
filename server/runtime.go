@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -302,6 +303,8 @@ type Command struct {
 	Effort     *string              `json:"effort,omitempty"`
 	Mode       *string              `json:"mode,omitempty"`
 	Unattended *bool                `json:"unattended,omitempty"`
+	Source     string               `json:"source,omitempty"`
+	Title      string               `json:"title,omitempty"`
 }
 
 type Receipt struct {
@@ -339,8 +342,13 @@ func (b *backendRuntime) handleNewSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer b.operations.Done()
-	if command.ID == "" || command.Type != "create" {
-		http.Error(w, "create command and request id required", 400)
+	if command.ID == "" || command.Type != "create" && command.Type != "fork" {
+		http.Error(w, "create or fork command and request id required", 400)
+		return
+	}
+	forker, canFork := b.agent.(code.SessionForker)
+	if command.Type == "fork" && (!canFork || command.Source == "") {
+		http.Error(w, "fork requires a source session on an agent that supports forking", 400)
 		return
 	}
 	b.createMu.Lock()
@@ -354,9 +362,19 @@ func (b *backendRuntime) handleNewSession(w http.ResponseWriter, r *http.Request
 		writeJSON(w, previous.receipt)
 		return
 	}
-	id, err := b.agent.NewSession(b.ctx)
+	var id string
+	var err error
+	if command.Type == "fork" {
+		id, err = forker.ForkSession(code.WithSessionID(b.ctx, command.Source), command.Source, command.Title)
+	} else {
+		id, err = b.agent.NewSession(b.ctx)
+	}
 	if err != nil {
-		http.Error(w, err.Error(), 502)
+		status := 502
+		if errors.Is(err, code.ErrTurnInProgress) {
+			status = 409
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	c := b.session(id)
@@ -474,6 +492,15 @@ func (c *sessionController) execute(command Command) error {
 			}
 		}
 		b.ensureTaskPump(sid)
+	case "compact":
+		c.mu.Lock()
+		c.state.Error, c.state.Compaction = nil, nil
+		c.mu.Unlock()
+		if err := b.turns.StartCompact(sid, command.Text, func(result agent.CompactResult, err error) {
+			b.finishCompaction(sid, result, err)
+		}); err != nil {
+			return err
+		}
 	case "queue_remove":
 		if err := b.turns.RemoveQueued(sid, command.InputID); err != nil {
 			return err

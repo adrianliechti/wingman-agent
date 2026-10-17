@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -104,6 +105,78 @@ func TestSendCompactionHookLifecycle(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestManualCompactionUsesFocusAndManualTrigger(t *testing.T) {
+	summaries := 0
+	client := openai.NewClient(option.WithAPIKey("test"), option.WithHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			var request struct {
+				Input json.RawMessage `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(request.Input), summaryRequest[:40]) {
+				t.Fatal("manual compaction sent a model turn")
+			}
+			if !strings.Contains(string(request.Input), "keep the API design decisions") {
+				t.Errorf("summary request omitted the focus: %s", request.Input)
+			}
+			summaries++
+			body := phaseTestResponse(false, strings.ReplaceAll(finalAnswerOutput, "Checked and fixed.", "summary of earlier work"))
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		}),
+	}))
+	var order []string
+	a := &Agent{Config: &Config{
+		client: &client,
+		Hooks: hook.Hooks{
+			SessionStart: []hook.SessionStart{func(_ context.Context, source string) (hook.Outcome, error) {
+				order = append(order, "start:"+source)
+				return hook.Outcome{}, nil
+			}},
+			PreCompact: []hook.PreCompact{func(_ context.Context, trigger string) (hook.Outcome, error) {
+				order = append(order, "pre:"+trigger)
+				return hook.Outcome{}, nil
+			}},
+			PostCompact: []hook.PostCompact{func(_ context.Context, trigger string) (hook.Outcome, error) {
+				order = append(order, "post:"+trigger)
+				return hook.Outcome{}, nil
+			}},
+		},
+	}, Messages: []Message{
+		{Role: RoleUser, Content: []Content{{Text: "earlier work"}}},
+		{Role: RoleAssistant, Content: []Content{{Text: strings.Repeat("earlier progress ", 1000)}}},
+	}}
+
+	result, err := a.Compact(t.Context(), "keep the API design decisions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"pre:manual", "post:manual", "start:compact"}; !slices.Equal(order, want) || summaries != 1 {
+		t.Fatalf("hook order=%v summaries=%d", order, summaries)
+	}
+	if result.TokensAfter <= 0 || result.TokensAfter >= result.TokensBefore || a.UsageSnapshot().LastInputTokens != result.TokensAfter {
+		t.Fatalf("result=%+v usage=%+v", result, a.UsageSnapshot())
+	}
+	if a.ContextRevision != 1 || len(a.MessagesSnapshot()) != 2 || !strings.Contains(contentText(a.requestMessages()[1].Content), "summary of earlier work") {
+		t.Fatalf("revision=%d context=%+v", a.ContextRevision, a.requestMessages())
+	}
+	if a.Running() {
+		t.Fatal("manual compaction left the agent marked running")
+	}
+}
+
+func TestManualCompactionRejectsBusyOrEmptySessions(t *testing.T) {
+	a := &Agent{Config: &Config{}, Messages: []Message{{Role: RoleUser, Content: []Content{{Text: "only a request"}}}}}
+	if _, err := a.Compact(t.Context(), ""); !errors.Is(err, ErrNothingToCompact) {
+		t.Fatalf("empty history err = %v", err)
+	}
+	a.running = true
+	if _, err := a.Compact(t.Context(), ""); !errors.Is(err, ErrTurnInProgress) {
+		t.Fatalf("busy err = %v", err)
 	}
 }
 

@@ -271,4 +271,3 @@ func TestExecuteDeduplicatesCollidingHeaderSlugsAndFiltersEmptySelections(t *tes
 		t.Fatalf("rendered = %q", result.Content)
 	}
 }
-

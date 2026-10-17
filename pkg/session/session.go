@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ type record struct {
 	Version   int                 `json:"version,omitempty"`
 	ID        string              `json:"id,omitempty"`
 	CreatedAt *time.Time          `json:"created_at,omitempty"`
+	Title     string              `json:"title,omitempty"`
 	Event     *agent.RuntimeEvent `json:"event,omitempty"`
 }
 
@@ -197,6 +199,93 @@ func Save(sessionsDir, id string, state agent.State) error {
 	return j.appendMissing(normalized.Events)
 }
 
+// Fork copies the journaled history of id into the new session newID. Sidecar
+// artifacts are not copied. An empty title becomes "Fork of <source title>".
+func Fork(sessionsDir, id, newID, title string) error {
+	if sessionsDir == "" {
+		return fmt.Errorf("no sessions directory available")
+	}
+	if err := validateSessionID(id); err != nil {
+		return err
+	}
+	if err := validateSessionID(newID); err != nil {
+		return err
+	}
+	if err := ensureCurrentFormat(sessionsDir, id); err != nil {
+		return err
+	}
+	source := sessionPath(sessionsDir, id)
+	sourceCoord := journalCoord(source)
+	sourceCoord.mu.Lock()
+	loaded, err := loadCurrent(source, id, false)
+	sourceCoord.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	events := loaded.session.State.Events
+	if len(events) == 0 {
+		return fmt.Errorf("session %s has no history to fork", id)
+	}
+	if title == "" {
+		title = "Fork of " + cmp.Or(loaded.session.Title, "untitled session")
+	}
+
+	path := sessionPath(sessionsDir, newID)
+	coord := journalCoord(path)
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("session %s already exists", newID)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	created := time.Now().UTC()
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	if err := enc.Encode(record{Type: "meta", Version: journalVersion, ID: newID, CreatedAt: &created, Title: title}); err != nil {
+		return err
+	}
+	for i := range events {
+		if err := enc.Encode(record{Type: "event", Event: &events[i]}); err != nil {
+			return err
+		}
+	}
+	if err := writeFileAtomic(path, buf.Bytes()); err != nil {
+		return fmt.Errorf("write forked session journal: %w", err)
+	}
+	coord.initialized = true
+	coord.createdAt = created
+	coord.lastSequence = events[len(events)-1].Sequence
+	return nil
+}
+
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return nil
+}
+
 func Load(sessionsDir, id string) (Session, error) {
 	if sessionsDir == "" {
 		return Session{}, fmt.Errorf("no sessions directory available")
@@ -344,6 +433,9 @@ func loadCurrent(path, fallbackID string, infoOnly bool) (currentLoad, error) {
 			}
 			if r.CreatedAt != nil {
 				s.CreatedAt = *r.CreatedAt
+			}
+			if r.Title != "" {
+				s.Title = r.Title
 			}
 		case "event":
 			if r.Event == nil {

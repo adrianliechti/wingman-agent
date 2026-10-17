@@ -252,12 +252,33 @@ func (s *backendRuntime) sendTurnSnapshot(sessionID string) {
 		message := snapshot.Error.Error()
 		c.state.Error = &message
 	}
-	if !snapshotHasActive(snapshot) {
+	switch {
+	case snapshot.Compacting:
+		c.state.Phase = "compacting"
+	case !snapshotHasActive(snapshot):
 		c.state.Phase = "idle"
-	} else if c.state.Phase == "idle" {
+	case c.state.Phase == "idle" || c.state.Phase == "compacting":
 		c.state.Phase = "thinking"
 	}
 	c.publishStateLocked()
+}
+
+func (s *backendRuntime) finishCompaction(sessionID string, result agent.CompactResult, err error) {
+	c := s.session(sessionID)
+	c.mu.Lock()
+	if c.state.Status != "deleted" {
+		switch {
+		case errors.Is(err, context.Canceled):
+		case err != nil:
+			message := err.Error()
+			c.state.Error = &message
+		default:
+			c.state.Compaction = &CompactionView{TokensBefore: result.TokensBefore, TokensAfter: result.TokensAfter}
+		}
+	}
+	c.mu.Unlock()
+	s.sendUsageIfChanged(sessionID)
+	s.sendTurnSnapshot(sessionID)
 }
 
 func turnQueueEntry(input code.TurnInput, state code.TurnInputState, position int) TurnQueueEntry {

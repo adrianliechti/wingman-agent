@@ -62,7 +62,7 @@ wingman
 ```
 
 Try asking: “Explain how this project works”, “Fix the failing tests”, or
-“Add input validation to the signup form”. Wingman asks for approval when needed.
+“Add input validation to the signup form”. Risky actions are reviewed automatically before they run.
 Use Plan mode to explore an approach before making changes.
 
 To use an installed agent with its existing login and configuration:

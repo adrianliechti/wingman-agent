@@ -216,4 +216,3 @@ func buildTestPDF(text string) []byte {
 	fmt.Fprintf(&pdf, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
 	return pdf.Bytes()
 }
-

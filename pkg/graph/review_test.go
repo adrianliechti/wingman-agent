@@ -149,4 +149,3 @@ func TestGitChangesSkipsNonRegularReplacedPath(t *testing.T) {
 		t.Fatalf("DetectChanges failed when file replaced by directory: %v", err)
 	}
 }
-

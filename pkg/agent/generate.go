@@ -23,6 +23,7 @@ type GenerateOptions struct {
 	Input           string
 	OutputSchema    map[string]any
 	MaxOutputTokens int64
+	PromptCacheKey  string
 }
 
 // GenerateResult is the visible response plus provider-reported usage for
@@ -65,6 +66,9 @@ func (c *Config) Generate(ctx context.Context, opts GenerateOptions) (GenerateRe
 	}
 	if opts.MaxOutputTokens > 0 {
 		params.MaxOutputTokens = openai.Int(opts.MaxOutputTokens)
+	}
+	if opts.PromptCacheKey != "" {
+		params.PromptCacheKey = openai.String(opts.PromptCacheKey)
 	}
 	if opts.OutputSchema != nil {
 		format := responses.ResponseFormatTextConfigParamOfJSONSchema(

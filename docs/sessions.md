@@ -21,6 +21,23 @@ Closing a browser tab leaves its running work on the workspace server. Stopping
 the workspace server ends that running work. Deleting a session cancels its
 active turn and removes its saved history.
 
+## Fork a conversation
+
+Fork to try another direction without losing the original thread. The fork
+copies the conversation, model, effort, and mode; background agents, schedules,
+and queued follow-ups stay with the original. Forking waits for the current turn
+to finish.
+
+In the terminal UI, run `/fork [title]`. To fork when starting:
+
+```bash
+wingman --continue --fork
+wingman --resume <session-id> --fork
+```
+
+In the browser, right-click a session in the session list and choose **Fork
+session**, or search for **Fork Session** in the command palette.
+
 ## Steer work or queue a follow-up
 
 While the agent is working, send a message to steer the current task, or queue
@@ -71,7 +88,17 @@ restarts, preserve unsent drafts and editor buffers before reloading.
 
 ## Approvals and questions
 
-Answer the prompt shown for the relevant session. In the browser, `Alt+A`
+In Agent mode, a reviewer model checks risky actions, such as destructive
+shell commands, fetches from new sites, and scheduled scripts, before they run.
+It uses the utility model and the conversation to judge whether you asked for
+the action. A denied action returns its reason to the agent. To allow it, say so
+in the chat; critical actions such as secret exfiltration stay denied. After
+repeated denials in one turn, the turn stops. Unattended mode runs every action
+without review.
+
+Wingman asks you only when the reviewer cannot decide, and for trust prompts
+such as running hooks from a cloned repository. Answer the prompt shown for the
+relevant session. In the browser, `Alt+A`
 focuses a prompt; `Y` or `N` then allows or declines an approval. **Allow for
 session** grants the scope described by that prompt.
 

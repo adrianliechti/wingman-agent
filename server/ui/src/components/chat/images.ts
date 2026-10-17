@@ -31,8 +31,11 @@ export async function processImage(file: File): Promise<string> {
 
 	try {
 		const longest = Math.max(bitmap.width, bitmap.height);
-		const isAlphaCapable = file.type === "image/png" || file.type === "image/webp";
-		const maxPassthrough = isAlphaCapable ? PNG_PASSTHROUGH_MAX_BYTES : PASSTHROUGH_MAX_BYTES;
+		const isAlphaCapable =
+			file.type === "image/png" || file.type === "image/webp";
+		const maxPassthrough = isAlphaCapable
+			? PNG_PASSTHROUGH_MAX_BYTES
+			: PASSTHROUGH_MAX_BYTES;
 		if (longest <= MAX_EDGE && file.size <= maxPassthrough) {
 			return readImageAsDataUrl(file);
 		}

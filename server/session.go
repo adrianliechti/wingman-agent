@@ -51,6 +51,8 @@ type SessionSettings struct {
 	Modes       []modeOption  `json:"modes"`
 	Unattended  *bool         `json:"unattended,omitempty"`
 	CanDelete   bool          `json:"canDelete"`
+	CanFork     bool          `json:"canFork"`
+	CanCompact  bool          `json:"canCompact"`
 	ModelsError string        `json:"modelsError,omitempty"`
 }
 
@@ -69,11 +71,17 @@ type UsageView struct {
 	ContextWindow   int64 `json:"contextWindow"`
 }
 
+type CompactionView struct {
+	TokensBefore int64 `json:"tokensBefore"`
+	TokensAfter  int64 `json:"tokensAfter"`
+}
+
 type SessionState struct {
 	Status        string            `json:"status"`
 	Phase         string            `json:"phase"`
 	Retry         *agent.RetryInfo  `json:"retry,omitempty"`
 	Error         *string           `json:"error"`
+	Compaction    *CompactionView   `json:"compaction,omitempty"`
 	Usage         UsageView         `json:"usage"`
 	Prompts       []PromptView      `json:"prompts"`
 	PendingInputs []TurnQueueEntry  `json:"pendingInputs"`
@@ -169,7 +177,9 @@ func (b *backendRuntime) settings(sid string) SessionSettings {
 	models, model := b.agent.Models(sid)
 	effort, efforts := b.agent.Effort(sid)
 	modes, mode := b.agent.Modes(sid)
-	state := SessionSettings{Model: model, Effort: effort, Efforts: append([]string{}, efforts...), Mode: mode, Modes: toModeState(modes, mode).Modes, Models: []modelOption{}, CanDelete: supportsDelete(b.agent)}
+	_, canFork := b.agent.(code.SessionForker)
+	_, canCompact := b.agent.(code.Compactor)
+	state := SessionSettings{Model: model, Effort: effort, Efforts: append([]string{}, efforts...), Mode: mode, Modes: toModeState(modes, mode).Modes, Models: []modelOption{}, CanDelete: supportsDelete(b.agent), CanFork: canFork, CanCompact: canCompact}
 	if discovery, ok := b.agent.(interface{ ModelDiscoveryError() error }); ok {
 		if err := discovery.ModelDiscoveryError(); err != nil {
 			state.ModelsError = err.Error()
@@ -283,6 +293,7 @@ func (c *sessionController) apply(f Frame) {
 	case EvtTurnInput:
 		if f.Input != nil && (f.Input.State == string(code.TurnInputActive) || f.Input.State == string(code.TurnInputSteered)) {
 			c.state.Error = nil
+			c.state.Compaction = nil
 			if f.Input.Origin != "task" && (f.Input.Text != "" || len(f.Input.Files)+len(f.Input.Images) > 0) {
 				c.upsertLocked(TranscriptEntry{ID: "input:" + f.Input.ID, InputID: f.Input.ID, Type: "user", Content: f.Input.Text, Files: f.Input.Files, Images: f.Input.Images})
 			}

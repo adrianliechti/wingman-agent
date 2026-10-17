@@ -111,7 +111,7 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 		}
 
 		if isContextOverflowError(err) {
-			if err := a.compactWithHooks(ctx, req); err != nil {
+			if err := a.compactWithHooks(ctx, req, "auto", ""); err != nil {
 				return resp, err
 			}
 		} else if isReasoningReplayError(err) {
@@ -140,15 +140,15 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 	}
 }
 
-// Both proactive compaction and overflow recovery run the same hook lifecycle.
-func (a *Agent) compactWithHooks(ctx context.Context, req *request) error {
-	if outcome := runCompactHooks(ctx, "auto", a.Hooks.PreCompact); outcome.Stop {
+// Manual, proactive and overflow compaction run the same hook lifecycle.
+func (a *Agent) compactWithHooks(ctx context.Context, req *request, trigger, focus string) error {
+	if outcome := runCompactHooks(ctx, trigger, a.Hooks.PreCompact); outcome.Stop {
 		return hookStopError("compaction stopped by hook")
 	}
-	if err := a.compactMessages(ctx, req); err != nil {
+	if err := a.compactMessages(ctx, req, focus); err != nil {
 		return err
 	}
-	if outcome := runCompactHooks(ctx, "auto", a.Hooks.PostCompact); outcome.Stop {
+	if outcome := runCompactHooks(ctx, trigger, a.Hooks.PostCompact); outcome.Stop {
 		return hookStopError("post-compaction hook stopped the turn")
 	}
 	outcome, err := a.runSessionStartHooks(ctx, "compact")
@@ -173,6 +173,17 @@ func runCompactHooks[H ~func(context.Context, string) (hook.Outcome, error)](ctx
 }
 
 func (a *Agent) buildStepRequest(ctx context.Context, nativeContinuation bool) (context.Context, *request, error) {
+	stepCtx, req, err := a.newStepRequest(ctx, nativeContinuation)
+	if err != nil {
+		return stepCtx, nil, err
+	}
+	if err := a.prepareRequest(stepCtx, req); err != nil {
+		return stepCtx, nil, err
+	}
+	return stepCtx, req, nil
+}
+
+func (a *Agent) newStepRequest(ctx context.Context, nativeContinuation bool) (context.Context, *request, error) {
 	// Keep request settings with its hooks and tools, even if the user
 	// changes settings while the response is streaming.
 	stepRuntime := a.hookRuntime(ctx)
@@ -230,9 +241,6 @@ func (a *Agent) buildStepRequest(ctx context.Context, nativeContinuation bool) (
 		allowFinish:       allowFinish,
 		preserveReasoning: nativeContinuation,
 	}
-	if err := a.prepareRequest(stepCtx, req); err != nil {
-		return stepCtx, nil, err
-	}
 	return stepCtx, req, nil
 }
 
@@ -288,10 +296,7 @@ func (a *Agent) finishStep(ctx, stepCtx context.Context, lastAnswer string, need
 // Check before every request, including the first request of a follow-up turn.
 // Rewriting historical results has a cache cost, so do it only under pressure.
 func (a *Agent) prepareRequest(ctx context.Context, req *request) error {
-	if err := a.dropIncompatibleReasoning(req); err != nil {
-		return err
-	}
-	if err := a.dropIncompatibleFinishReminders(req); err != nil {
+	if err := a.normalizeRequest(req); err != nil {
 		return err
 	}
 	overshoot := a.compactionOvershoot(req.model, a.requestTokens(req))
@@ -303,10 +308,17 @@ func (a *Agent) prepareRequest(ctx context.Context, req *request) error {
 		return err
 	}
 	if int64(freed) < overshoot {
-		if err := a.compactWithHooks(ctx, req); err != nil {
+		if err := a.compactWithHooks(ctx, req, "auto", ""); err != nil {
 			return err
 		}
 	}
 	req.messages = a.requestMessages()
 	return nil
+}
+
+func (a *Agent) normalizeRequest(req *request) error {
+	if err := a.dropIncompatibleReasoning(req); err != nil {
+		return err
+	}
+	return a.dropIncompatibleFinishReminders(req)
 }

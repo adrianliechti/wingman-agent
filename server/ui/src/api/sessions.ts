@@ -20,6 +20,9 @@ export interface ModeState {
 export async function deleteSession(key: string): Promise<void> {
 	await workspaceClient().command(key, { type: "delete" });
 }
+export function forkSession(key: string, title?: string): Promise<string> {
+	return workspaceClient().fork(key, title);
+}
 export const sessionQueries = {
 	list: (backend: string) =>
 		queryOptions({
