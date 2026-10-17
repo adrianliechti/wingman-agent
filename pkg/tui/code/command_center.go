@@ -14,7 +14,7 @@ func builtinGroup(name string) string {
 		return "Workspace"
 	case "/resume", "/fork", "/recap", "/clear", "/copy", "/export", "/queue", "/discard":
 		return "Session"
-	case "/model", "/agent", "/plan", "/unattended", "/tasks":
+	case "/model", "/agent", "/plan", "/unattended", "/agents":
 		return "Agent"
 	default:
 		return "Application"

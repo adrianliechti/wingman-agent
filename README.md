@@ -115,6 +115,8 @@ In the terminal UI, use `@` to attach files and `Ctrl+P` to find commands.
 | `Escape` | Cancel the current response or close a menu |
 | `Ctrl+C` twice | Exit |
 | `/model` | Choose a model and reasoning effort |
+| `/agent` or `/plan` | Switch to Agent or Plan mode |
+| `/agents` | Watch agents and view scheduled tasks |
 | `/diff` | Review working tree changes |
 | `/help` | Browse commands and skills |
 

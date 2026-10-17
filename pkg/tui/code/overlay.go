@@ -176,7 +176,7 @@ func transcriptLines(messages []agent.Message, width int, isToolHidden func(stri
 	return lines
 }
 
-// taskOverlay is a live window onto a background agent's transcript: while
+// taskOverlay is a live window onto a synchronous or background agent's transcript: while
 // the task runs it re-snapshots the messages (throttled) and follows the
 // bottom until the user scrolls away.
 type taskOverlay struct {
@@ -195,7 +195,7 @@ func (a *App) showTaskPeek(t *task.Task) {
 		task:   t,
 		follow: true,
 	}
-	o.pager.hints = dim("↑↓/jk/wheel scroll · g/G top/bottom · esc close")
+	o.pager.hints = dim("↑↓/jk/wheel scroll · g/G top/bottom · esc back to chat")
 	a.openOverlay(o)
 }
 

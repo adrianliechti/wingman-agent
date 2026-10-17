@@ -62,6 +62,17 @@ The browser composer also offers steering and queue controls. Editing a queued
 message preserves your separate composer draft. Restored queues stay paused
 until you resume them, so reopening a session does not run saved work immediately.
 
+## Watch agents
+
+With the built-in Wingman agent, run `/agents` in the terminal UI to list the
+session's synchronous and background agents, including finished runs. Select an
+agent and press Enter to watch its transcript; press Escape to return to chat.
+The viewer is read-only and stays available while the main agent is working.
+The `/agents` picker also lists scheduled tasks; select one to view its details.
+
+`/agent` selects Agent mode, and `/plan` selects Plan mode. Tab toggles between
+these modes.
+
 ## Recover a draft
 
 Drafts and attachments are saved separately from sent messages. Switching
