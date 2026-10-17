@@ -5,16 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 )
 
 const (
 	optionAllowOnce   acp.PermissionOptionId = "allow-once"
 	optionAllowAlways acp.PermissionOptionId = "allow-always"
 	optionRejectOnce  acp.PermissionOptionId = "reject-once"
+	optionCancel      acp.PermissionOptionId = "cancel"
 
 	optionExecpolicyAmendment     acp.PermissionOptionId = "accept-execpolicy-amendment"
 	optionAllowPermissionsTurn    acp.PermissionOptionId = "allow-permissions-turn"
@@ -48,15 +51,23 @@ type approver struct {
 	conn      *acp.AgentSideConnection
 	sessionID acp.SessionId
 	client    acp.ClientCapabilities
-
-	mu          sync.Mutex
-	pendingURLs map[acp.UnstableElicitationId]struct{}
 }
 
 func newApprover(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, client acp.ClientCapabilities) *approver {
 	return &approver{
 		ctx: ctx, conn: conn, sessionID: sid, client: client,
-		pendingURLs: make(map[acp.UnstableElicitationId]struct{}),
+	}
+}
+
+func (a *approver) forRequest(requestCtx context.Context) (*approver, func()) {
+	ctx, cancel := context.WithCancel(a.ctx)
+	stop := context.AfterFunc(requestCtx, cancel)
+	if requestCtx.Err() != nil {
+		cancel()
+	}
+	return newApprover(ctx, a.conn, a.sessionID, a.client), func() {
+		stop()
+		cancel()
 	}
 }
 
@@ -70,41 +81,83 @@ func (a *approver) ask(tc acp.ToolCallUpdate) (id acp.PermissionOptionId, ok boo
 }
 
 func (a *approver) askWithOptions(tc acp.ToolCallUpdate, options []acp.PermissionOption) (id acp.PermissionOptionId, ok bool) {
-	resp, err := a.conn.RequestPermission(a.ctx, acp.RequestPermissionRequest{
-		SessionId: a.sessionID,
-		ToolCall:  tc,
-		Options:   options,
+	resp, err := callClient(a.ctx, a.conn, func() (acp.RequestPermissionResponse, error) {
+		return a.conn.RequestPermission(a.ctx, acp.RequestPermissionRequest{
+			SessionId: a.sessionID, ToolCall: tc, Options: options,
+		})
 	})
-	if err != nil || resp.Outcome.Cancelled != nil {
+	if err != nil || a.ctx.Err() != nil || resp.Outcome.Cancelled != nil || resp.Outcome.Selected == nil {
 		return "", false
 	}
 	return resp.Outcome.Selected.OptionId, true
 }
 
-func (a *approver) handleExec(p execApprovalParams) execApprovalResponse {
-	tc := pendingToolCall(p.ItemID, acp.ToolKindExecute)
+func (a *approver) handleExec(p execApprovalParams, toolName string) execApprovalResponse {
+	toolCallID, title := p.ItemID, "Run command"
+	if p.Kind == "writeStdin" {
+		title, toolName = "Send input to terminal", "write_stdin"
+	}
+	// Callbacks for an already running command get their own card so the command's tool call keeps its state.
+	separate := p.Kind == "writeStdin" || (p.ApprovalID != "" && p.ApprovalID != p.ItemID)
+	if separate {
+		approvalID := p.ApprovalID
+		if approvalID == "" {
+			approvalID = uuid.NewString()
+		}
+		toolCallID = "approval:" + approvalID
+	}
+	tc := pendingToolCall(toolCallID, acp.ToolKindExecute)
+	tc.Title = &title
+	tc.Meta = toolNameMeta(toolName)
 	if p.Reason != "" {
 		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(p.Reason))}
 	}
 	if p.Command != "" {
-		tc.RawInput = map[string]any{"command": stripShellPrefix(p.Command), "cwd": p.Cwd}
+		command := stripShellPrefix(p.Command)
+		if command == "" {
+			command = p.Command
+		}
+		tc.RawInput = commandRawInput(command, p.Cwd)
 	}
 
-	choices := commandApprovalChoices(p)
-	id, ok := a.askWithOptions(tc, approvalOptions(choices))
-	if !ok {
-		return execApprovalResponse{Decision: "cancel"}
-	}
-	for _, choice := range choices {
-		if choice.option.OptionId == id {
-			return execApprovalResponse{Decision: choice.decision}
+	response := execApprovalResponse{Decision: "cancel"}
+	if choices := commandApprovalChoices(p); len(choices) > 0 {
+		if id, ok := a.askWithOptions(tc, approvalOptions(choices)); ok {
+			response.Decision = unmatchedCommandDecision(choices)
+			for _, choice := range choices {
+				if choice.option.OptionId == id {
+					response.Decision = choice.decision
+				}
+			}
 		}
 	}
-	return execApprovalResponse{Decision: "decline"}
+	if separate {
+		status := acp.ToolCallStatusCompleted
+		if response.Decision == "decline" || response.Decision == "cancel" {
+			status = acp.ToolCallStatusFailed
+		}
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(a.ctx), 2*time.Second)
+		defer cancel()
+		_ = notifyClient(finishCtx, a.conn, a.sessionID, acp.UpdateToolCall(tc.ToolCallId,
+			acp.WithUpdateStatus(status),
+			acp.WithUpdateRawOutput(map[string]any{"decision": response.Decision}),
+		))
+	}
+	return response
+}
+
+func unmatchedCommandDecision(choices []approvalChoice) any {
+	for _, choice := range choices {
+		if choice.decision == "decline" {
+			return "decline"
+		}
+	}
+	return "cancel"
 }
 
 func (a *approver) handleFile(p fileApprovalParams) fileApprovalResponse {
 	tc := pendingToolCall(p.ItemID, acp.ToolKindEdit)
+	tc.Title = new("Edit files")
 	if p.Reason != "" {
 		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(p.Reason))}
 	}
@@ -123,19 +176,7 @@ func (a *approver) handleFile(p fileApprovalParams) fileApprovalResponse {
 }
 
 func (a *approver) handlePermissions(p permissionsApprovalParams) permissionsApprovalResponse {
-	title := p.Reason
-	if title == "" {
-		title = "Permissions Request"
-	}
-	tc := pendingToolCall(p.ItemID, acp.ToolKindOther)
-	tc.Title = &title
-	tc.RawInput = p
-	if content := formatRequestedPermissions(p.Permissions); content != "" {
-		if p.Reason != "" {
-			content = p.Reason + "\n\n" + content
-		}
-		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(content))}
-	}
+	tc := permissionsToolCall(p)
 
 	options := []acp.PermissionOption{
 		permissionOption(optionAllowPermissionsSession, "Allow for Session", acp.PermissionOptionKindAllowAlways, permissionGrantChanges(p.Permissions, "session")...),
@@ -156,6 +197,21 @@ func (a *approver) handlePermissions(p permissionsApprovalParams) permissionsApp
 	}
 }
 
+func permissionsToolCall(p permissionsApprovalParams) acp.ToolCallUpdate {
+	tc := pendingToolCall(p.ItemID, acp.ToolKindOther)
+	tc.Title = new("Permissions request")
+	tc.Meta = toolNameMeta("request_permissions")
+	if content := formatRequestedPermissions(p.Permissions); content != "" {
+		if p.Reason != "" {
+			content = p.Reason + "\n\n" + content
+		}
+		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(content))}
+	} else if p.Reason != "" {
+		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(p.Reason))}
+	}
+	return tc
+}
+
 func approvalOptions(choices []approvalChoice) []acp.PermissionOption {
 	options := make([]acp.PermissionOption, 0, len(choices))
 	for _, choice := range choices {
@@ -164,61 +220,136 @@ func approvalOptions(choices []approvalChoice) []acp.PermissionOption {
 	return options
 }
 
+type commandDecision struct {
+	name       string
+	execpolicy []string
+	network    *networkPolicyAmendment
+}
+
 func commandApprovalChoices(p execApprovalParams) []approvalChoice {
-	alwaysName := "Allow for Session"
-	var alwaysChanges []map[string]any
-	if p.NetworkApprovalContext != nil && p.NetworkApprovalContext.Host != "" {
-		alwaysName = "Allow Host for Session"
-		matcher := map[string]any{"type": "host", "host": p.NetworkApprovalContext.Host}
-		if p.NetworkApprovalContext.Protocol != "" {
-			matcher["protocol"] = p.NetworkApprovalContext.Protocol
+	decisions := defaultCommandDecisions(p)
+	if p.AvailableDecisions != nil {
+		decisions = parseCommandDecisions(p.AvailableDecisions)
+	}
+	offersDecline := slices.ContainsFunc(decisions, func(d commandDecision) bool { return d.name == "decline" })
+	choices := make([]approvalChoice, 0, len(decisions))
+	networkIndex := 0
+	for _, decision := range decisions {
+		switch {
+		case decision.execpolicy != nil:
+			choices = append(choices, execpolicyChoice(decision.execpolicy))
+		case decision.network != nil:
+			choices = append(choices, networkPolicyChoice(networkIndex, *decision.network))
+			networkIndex++
+		case decision.name == "accept":
+			choices = append(choices, approvalChoice{permissionOption(optionAllowOnce, "Allow Once", acp.PermissionOptionKindAllowOnce), "accept"})
+		case decision.name == "acceptForSession":
+			choices = append(choices, sessionCommandChoice(p.NetworkApprovalContext))
+		case decision.name == "decline":
+			choices = append(choices, approvalChoice{permissionOption(optionRejectOnce, "Reject", acp.PermissionOptionKindRejectOnce), "decline"})
+		case decision.name == "cancel":
+			name := "Reject"
+			if offersDecline {
+				name = "Reject and Stop"
+			}
+			choices = append(choices, approvalChoice{permissionOption(optionCancel, name, acp.PermissionOptionKindRejectOnce), "cancel"})
 		}
-		alwaysChanges = append(alwaysChanges, map[string]any{
+	}
+	return choices
+}
+
+// Older app-servers omit availableDecisions.
+func defaultCommandDecisions(p execApprovalParams) []commandDecision {
+	decisions := []commandDecision{{name: "accept"}, {name: "acceptForSession"}}
+	if len(p.ProposedExecpolicyAmendment) > 0 {
+		decisions = append(decisions, commandDecision{execpolicy: p.ProposedExecpolicyAmendment})
+	}
+	for _, amendment := range p.ProposedNetworkPolicyAmendments {
+		decisions = append(decisions, commandDecision{network: &amendment})
+	}
+	return append(decisions, commandDecision{name: "decline"})
+}
+
+func parseCommandDecisions(raw []json.RawMessage) []commandDecision {
+	decisions := make([]commandDecision, 0, len(raw))
+	for _, value := range raw {
+		var name string
+		if json.Unmarshal(value, &name) == nil {
+			decisions = append(decisions, commandDecision{name: name})
+			continue
+		}
+		var object struct {
+			Execpolicy *struct {
+				Amendment []string `json:"execpolicy_amendment"`
+			} `json:"acceptWithExecpolicyAmendment"`
+			Network *struct {
+				Amendment networkPolicyAmendment `json:"network_policy_amendment"`
+			} `json:"applyNetworkPolicyAmendment"`
+		}
+		if json.Unmarshal(value, &object) != nil {
+			continue
+		}
+		switch {
+		case object.Execpolicy != nil && len(object.Execpolicy.Amendment) > 0:
+			decisions = append(decisions, commandDecision{execpolicy: object.Execpolicy.Amendment})
+		case object.Network != nil && object.Network.Amendment.Host != "":
+			decisions = append(decisions, commandDecision{network: &object.Network.Amendment})
+		}
+	}
+	return decisions
+}
+
+func sessionCommandChoice(network *networkApprovalContext) approvalChoice {
+	name := "Allow for Session"
+	var changes []map[string]any
+	if network != nil && network.Host != "" {
+		name = "Allow Host for Session"
+		matcher := map[string]any{"type": "host", "host": network.Host}
+		if network.Protocol != "" {
+			matcher["protocol"] = network.Protocol
+		}
+		changes = append(changes, map[string]any{
 			"type": "grant", "operation": "grant",
-			"description": fmt.Sprintf("Allow access to %s for this session", p.NetworkApprovalContext.Host),
+			"description": fmt.Sprintf("Allow access to %s for this session", network.Host),
 			"lifetime":    map[string]any{"scope": "session"},
 			"targets":     []any{map[string]any{"type": "network", "matcher": matcher}},
 		})
 	}
-	choices := []approvalChoice{
-		{permissionOption(optionAllowOnce, "Allow Once", acp.PermissionOptionKindAllowOnce), "accept"},
-		{permissionOption(optionAllowAlways, alwaysName, acp.PermissionOptionKindAllowAlways, alwaysChanges...), "acceptForSession"},
+	return approvalChoice{permissionOption(optionAllowAlways, name, acp.PermissionOptionKindAllowAlways, changes...), "acceptForSession"}
+}
+
+func execpolicyChoice(amendment []string) approvalChoice {
+	prefix := strings.Join(amendment, " ")
+	label := "Allow and Remember Command Pattern"
+	if prefix != "" && !strings.ContainsAny(prefix, "\r\n") {
+		label = fmt.Sprintf("Allow Commands Starting With `%s`", prefix)
 	}
-	if len(p.ProposedExecpolicyAmendment) > 0 {
-		prefix := strings.Join(p.ProposedExecpolicyAmendment, " ")
-		label := "Allow and Remember Command Pattern"
-		if prefix != "" && !strings.ContainsAny(prefix, "\r\n") {
-			label = fmt.Sprintf("Allow Commands Starting With `%s`", prefix)
-		}
-		choices = append(choices, approvalChoice{
-			permissionOption(optionExecpolicyAmendment, label, acp.PermissionOptionKindAllowAlways, map[string]any{
-				"type": "policy_rule", "operation": "add", "ruleBehavior": "allow",
-				"description": "Allow commands starting with " + prefix,
-				"targets":     []any{map[string]any{"type": "command", "matcher": map[string]any{"type": "argv_prefix", "argv": p.ProposedExecpolicyAmendment}}},
-			}),
-			map[string]any{"acceptWithExecpolicyAmendment": map[string]any{"execpolicy_amendment": p.ProposedExecpolicyAmendment}},
-		})
+	return approvalChoice{
+		permissionOption(optionExecpolicyAmendment, label, acp.PermissionOptionKindAllowAlways, map[string]any{
+			"type": "policy_rule", "operation": "add", "ruleBehavior": "allow",
+			"description": "Allow commands starting with " + prefix,
+			"targets":     []any{map[string]any{"type": "command", "matcher": map[string]any{"type": "argv_prefix", "argv": amendment}}},
+		}),
+		map[string]any{"acceptWithExecpolicyAmendment": map[string]any{"execpolicy_amendment": amendment}},
 	}
-	for i, amendment := range p.ProposedNetworkPolicyAmendments {
-		kind := acp.PermissionOptionKindAllowAlways
-		verb := "Allow"
-		future := "Allow"
-		if amendment.Action == "deny" {
-			kind = acp.PermissionOptionKindRejectAlways
-			verb = "Block"
-			future = "Block"
-		}
-		id := acp.PermissionOptionId(fmt.Sprintf("apply-network-policy-amendment:%d", i))
-		choices = append(choices, approvalChoice{
-			permissionOption(id, fmt.Sprintf("%s %s in the Future", future, amendment.Host), kind, map[string]any{
-				"type": "policy_rule", "operation": "add", "ruleBehavior": amendment.Action,
-				"description": fmt.Sprintf("%s access to %s", verb, amendment.Host),
-				"targets":     []any{map[string]any{"type": "network", "matcher": map[string]any{"type": "host", "host": amendment.Host}}},
-			}),
-			map[string]any{"applyNetworkPolicyAmendment": map[string]any{"network_policy_amendment": amendment}},
-		})
+}
+
+func networkPolicyChoice(index int, amendment networkPolicyAmendment) approvalChoice {
+	kind := acp.PermissionOptionKindAllowAlways
+	verb := "Allow"
+	if amendment.Action == "deny" {
+		kind = acp.PermissionOptionKindRejectAlways
+		verb = "Block"
 	}
-	return append(choices, approvalChoice{permissionOption(optionRejectOnce, "Reject", acp.PermissionOptionKindRejectOnce), "decline"})
+	id := acp.PermissionOptionId(fmt.Sprintf("apply-network-policy-amendment:%d", index))
+	return approvalChoice{
+		permissionOption(id, fmt.Sprintf("%s %s in the Future", verb, amendment.Host), kind, map[string]any{
+			"type": "policy_rule", "operation": "add", "ruleBehavior": amendment.Action,
+			"description": fmt.Sprintf("%s access to %s", verb, amendment.Host),
+			"targets":     []any{map[string]any{"type": "network", "matcher": map[string]any{"type": "host", "host": amendment.Host}}},
+		}),
+		map[string]any{"applyNetworkPolicyAmendment": map[string]any{"network_policy_amendment": amendment}},
+	}
 }
 
 func fileApprovalChoices(p fileApprovalParams) []approvalChoice {
@@ -339,7 +470,7 @@ func (a *approver) handleElicitation(p elicitationParams) elicitationResponse {
 			return a.handleURLElicitation(p)
 		}
 	}
-	if p.Mode != "form" && p.Mode != "openai/form" {
+	if !isMessageOnlyElicitation(p) {
 		return elicitationResponse{Action: "decline", Content: nil, Meta: nil}
 	}
 	title := p.Message
@@ -349,22 +480,53 @@ func (a *approver) handleElicitation(p elicitationParams) elicitationResponse {
 	if p.ServerName != "" {
 		title = fmt.Sprintf("%s: %s", p.ServerName, title)
 	}
-	tc := pendingToolCall(fmt.Sprintf("mcp-elicitation:%s", p.ServerName), acp.ToolKindOther)
+	tc := pendingToolCall("mcp-elicitation:"+uuid.NewString(), acp.ToolKindOther)
 	tc.Title = &title
 	if p.Message != "" {
 		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(p.Message))}
 	}
 
-	id, ok := a.ask(tc)
-	if !ok {
-		return elicitationResponse{Action: "cancel"}
+	response := elicitationResponse{Action: "cancel"}
+	if id, ok := a.ask(tc); ok {
+		switch id {
+		case optionAllowOnce, optionAllowAlways:
+			response.Action = "accept"
+		default:
+			response.Action = "decline"
+		}
 	}
-	switch id {
-	case optionAllowOnce, optionAllowAlways:
-		return elicitationResponse{Action: "accept"}
-	default:
-		return elicitationResponse{Action: "decline"}
+	// Synthetic permission cards have no backend completion event; close them even after cancellation.
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(a.ctx), 2*time.Second)
+	defer cancel()
+	_ = notifyClient(finishCtx, a.conn, a.sessionID, acp.UpdateToolCall(tc.ToolCallId,
+		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
+		acp.WithUpdateRawOutput(map[string]any{"action": response.Action}),
+	))
+	return response
+}
+
+func isMessageOnlyElicitation(p elicitationParams) bool {
+	if p.Mode != "form" {
+		return false
 	}
+	schema := strings.TrimSpace(string(p.RequestedSchema))
+	if schema == "" || schema == "null" {
+		return true
+	}
+	var requested map[string]json.RawMessage
+	if json.Unmarshal(p.RequestedSchema, &requested) != nil {
+		return false
+	}
+	var schemaType string
+	if json.Unmarshal(requested["type"], &schemaType) != nil || schemaType != "object" {
+		return false
+	}
+	propertiesRaw, ok := requested["properties"]
+	if !ok || strings.TrimSpace(string(propertiesRaw)) == "null" {
+		return false
+	}
+	var properties map[string]json.RawMessage
+	return json.Unmarshal(propertiesRaw, &properties) == nil && len(properties) == 0
 }
 
 func (a *approver) elicitationMeta(meta map[string]any) map[string]any {
@@ -390,15 +552,17 @@ func (a *approver) handleFormElicitation(p elicitationParams) elicitationRespons
 		schema.Properties = map[string]any{}
 	}
 
-	resp, err := a.conn.UnstableCreateElicitation(a.ctx, acp.UnstableCreateElicitationRequest{
-		Form: &acp.UnstableCreateElicitationForm{
-			Meta:            a.elicitationMeta(p.Meta),
-			Message:         p.Message,
-			Mode:            "form",
-			RequestedSchema: schema,
-		},
+	resp, err := callClient(a.ctx, a.conn, func() (acp.UnstableCreateElicitationResponse, error) {
+		return a.conn.UnstableCreateElicitation(a.ctx, acp.UnstableCreateElicitationRequest{
+			Form: &acp.UnstableCreateElicitationForm{
+				Meta:            a.elicitationMeta(p.Meta),
+				Message:         p.Message,
+				Mode:            "form",
+				RequestedSchema: schema,
+			},
+		})
 	})
-	if err != nil || resp.Cancel != nil {
+	if err != nil || a.ctx.Err() != nil || resp.Cancel != nil {
 		return elicitationResponse{Action: "cancel", Content: nil, Meta: nil}
 	}
 	if resp.Decline != nil {
@@ -411,46 +575,34 @@ func (a *approver) handleFormElicitation(p elicitationParams) elicitationRespons
 }
 
 func (a *approver) handleURLElicitation(p elicitationParams) elicitationResponse {
-	id := acp.UnstableElicitationId(p.ElicitationID)
-	if id == "" || p.URL == "" {
+	if p.ElicitationID == "" || p.URL == "" {
 		return elicitationResponse{Action: "cancel", Content: nil, Meta: nil}
 	}
-	resp, err := a.conn.UnstableCreateElicitation(a.ctx, acp.UnstableCreateElicitationRequest{
-		Url: &acp.UnstableCreateElicitationUrl{
-			Meta:          a.elicitationMeta(p.Meta),
-			ElicitationId: id,
-			Message:       p.Message,
-			Mode:          "url",
-			Url:           p.URL,
-		},
+	// MCP servers can reuse their own IDs across sessions. ACP requires each
+	// outstanding URL interaction to have a unique ID on the client connection.
+	id := acp.UnstableElicitationId(uuid.NewString())
+	resp, err := callClient(a.ctx, a.conn, func() (acp.UnstableCreateElicitationResponse, error) {
+		return a.conn.UnstableCreateElicitation(a.ctx, acp.UnstableCreateElicitationRequest{
+			Url: &acp.UnstableCreateElicitationUrl{
+				Meta:          a.elicitationMeta(p.Meta),
+				ElicitationId: id,
+				Message:       p.Message,
+				Mode:          "url",
+				Url:           p.URL,
+			},
+		})
 	})
-	if err != nil || resp.Cancel != nil {
+	if err != nil || a.ctx.Err() != nil || resp.Cancel != nil {
 		return elicitationResponse{Action: "cancel", Content: nil, Meta: nil}
 	}
 	if resp.Decline != nil {
 		return elicitationResponse{Action: "decline", Content: nil, Meta: resp.Decline.Meta}
 	}
 	if resp.Accept != nil {
-		a.mu.Lock()
-		a.pendingURLs[id] = struct{}{}
-		a.mu.Unlock()
-		return elicitationResponse{Action: "accept", Content: resp.Accept.Content, Meta: resp.Accept.Meta}
+		// Consent to open a URL does not mean its external workflow has finished.
+		// serverRequest/resolved only closes the app-server request, so it cannot
+		// justify an ACP elicitation/complete notification. Completion is optional.
+		return elicitationResponse{Action: "accept", Meta: resp.Accept.Meta}
 	}
 	return elicitationResponse{Action: "cancel", Content: nil, Meta: nil}
-}
-
-func (a *approver) handleNotification(method string) {
-	if method != "serverRequest/resolved" {
-		return
-	}
-	a.mu.Lock()
-	ids := make([]acp.UnstableElicitationId, 0, len(a.pendingURLs))
-	for id := range a.pendingURLs {
-		ids = append(ids, id)
-	}
-	clear(a.pendingURLs)
-	a.mu.Unlock()
-	for _, id := range ids {
-		_ = a.conn.UnstableCompleteElicitation(a.ctx, acp.UnstableCompleteElicitationNotification{ElicitationId: id})
-	}
 }

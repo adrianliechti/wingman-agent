@@ -3,12 +3,17 @@ package elicit
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
-const maxQuestions = 4
+const (
+	maxQuestions = 4
+	minOptions   = 2
+	maxOptions   = 4
+)
 
 func Tools(elicit *tool.Elicitation) []tool.Tool {
 	if elicit == nil || elicit.Elicit == nil {
@@ -20,7 +25,7 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 		"- Use only when blocked on a decision that is genuinely the user's — product intent, ambiguous requirements, a preference the workspace cannot answer. If being wrong is cheap to correct, assume and proceed instead.",
 		"- 1-4 questions per call, usually with 2-4 mutually exclusive `options` with one-line tradeoff descriptions. Put a recommended option first, labeled \"(Recommended)\". When asking several questions, give each a short `header` chip (max ~12 chars) so answers stay attributable; omit `header` for a single question.",
 		"- The UI always adds a free-text \"Other\" reply — never add such an option; options are shortcuts, not constraints. Omit `options` entirely for open-ended questions.",
-		"- `multi_select` allows several picks (the answer becomes a list); `preview` (single-select only) renders code/mockups while the user compares options.",
+		"- `multi_select` allows several picks (the answer becomes a list); `preview` (single-select only) shows code/mockups in clients that support previews.",
 		"- Not for tool-execution confirmations (handled by the harness).",
 	}, "\n")
 
@@ -35,6 +40,8 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 			"properties": map[string]any{
 				"questions": map[string]any{
 					"type":        "array",
+					"minItems":    1,
+					"maxItems":    maxQuestions,
 					"description": "The questions to ask the user (1-4).",
 					"items": map[string]any{
 						"type": "object",
@@ -43,6 +50,8 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 							"header":   map[string]any{"type": "string", "description": "Chip label, e.g. \"Auth method\"; used to attribute answers when asking several questions. Omit for a single question."},
 							"options": map[string]any{
 								"type":        "array",
+								"minItems":    minOptions,
+								"maxItems":    maxOptions,
 								"description": "The choices (2-4). Omit for a free-form question.",
 								"items": map[string]any{
 									"type": "object",
@@ -68,6 +77,10 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
+
 			questions, ok := args["questions"].([]any)
 
 			if !ok || len(questions) == 0 {
@@ -82,10 +95,10 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 				return tool.Result{}, err
 			}
 
-			req := tool.ElicitRequest{Fields: fields}
-			if len(fields) == 1 {
+			req := tool.ElicitRequest{Fields: slices.Clone(fields)}
+			if len(req.Fields) == 1 {
 				// A single question reads best as the prompt message itself.
-				req.Message = fields[0].Description
+				req.Message = req.Fields[0].Description
 				req.Fields[0].Description = ""
 			}
 
@@ -94,14 +107,19 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 			if err != nil {
 				return tool.Result{}, err
 			}
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 
 			switch result.Action {
 			case tool.ElicitAccept:
 				return tool.Text(renderAnswers(fields, result.Content)), nil
 			case tool.ElicitDecline:
-				return tool.Text("The user declined to answer. Proceed without this input; do not re-ask the same questions."), nil
-			default:
+				return tool.Text("The user declined to answer. Do not infer an answer or repeat the same questions; continue only work that does not depend on this input."), nil
+			case tool.ElicitCancel:
 				return tool.Text("The user dismissed the questions without answering."), nil
+			default:
+				return tool.Result{}, fmt.Errorf("invalid elicitation response action %q", result.Action)
 			}
 		},
 
@@ -124,8 +142,14 @@ func parseQuestions(raw []any) ([]tool.ElicitField, error) {
 			return nil, fmt.Errorf("questions[%d].question is required", i)
 		}
 
-		header, _ := entry["header"].(string)
-		header = strings.TrimSpace(header)
+		var header string
+		if rawHeader, present := entry["header"]; present {
+			h, ok := rawHeader.(string)
+			if !ok {
+				return nil, fmt.Errorf("questions[%d].header must be a string", i)
+			}
+			header = strings.TrimSpace(h)
+		}
 
 		title := header
 		if title == "" {
@@ -136,12 +160,20 @@ func parseQuestions(raw []any) ([]tool.ElicitField, error) {
 		if name == "" {
 			name = fmt.Sprintf("q_%d", i+1)
 		}
-		if seen[name] {
-			name = fmt.Sprintf("%s_%d", name, i+1)
+		base := name
+		for suffix := i + 1; seen[name]; suffix++ {
+			name = fmt.Sprintf("%s_%d", base, suffix)
 		}
 		seen[name] = true
 
-		multiple, _ := entry["multi_select"].(bool)
+		var multiple bool
+		if rawMulti, present := entry["multi_select"]; present {
+			m, ok := rawMulti.(bool)
+			if !ok {
+				return nil, fmt.Errorf("questions[%d].multi_select must be a boolean", i)
+			}
+			multiple = m
+		}
 
 		field := tool.ElicitField{
 			Name:        name,
@@ -152,23 +184,49 @@ func parseQuestions(raw []any) ([]tool.ElicitField, error) {
 			Multiple:    multiple,
 		}
 
-		if rawOptions, ok := entry["options"].([]any); ok {
+		if rawOptionsVal, present := entry["options"]; present {
+			rawOptions, ok := rawOptionsVal.([]any)
+			if !ok {
+				return nil, fmt.Errorf("questions[%d].options must be an array", i)
+			}
+			if len(rawOptions) < minOptions || len(rawOptions) > maxOptions {
+				return nil, fmt.Errorf("questions[%d].options must contain %d-%d options; omit options for free text", i, minOptions, maxOptions)
+			}
 			for j, rawOption := range rawOptions {
 				option, ok := rawOption.(map[string]any)
 				if !ok {
 					return nil, fmt.Errorf("questions[%d].options[%d] must be an object with a label", i, j)
 				}
 				label, _ := option["label"].(string)
-				if strings.TrimSpace(label) == "" {
+				label = strings.TrimSpace(label)
+				if label == "" {
 					return nil, fmt.Errorf("questions[%d].options[%d].label is required", i, j)
 				}
-				optionDescription, _ := option["description"].(string)
-				preview, _ := option["preview"].(string)
+				if slices.ContainsFunc(field.Enum, func(existing string) bool { return strings.EqualFold(existing, label) }) {
+					return nil, fmt.Errorf("questions[%d].options[%d] duplicates label %q", i, j, label)
+				}
+				optionDescription, ok := option["description"].(string)
+				if !ok || strings.TrimSpace(optionDescription) == "" {
+					return nil, fmt.Errorf("questions[%d].options[%d].description must be a non-empty string", i, j)
+				}
+				var preview string
+				if rawPreview, present := option["preview"]; present {
+					preview, ok = rawPreview.(string)
+					if !ok {
+						return nil, fmt.Errorf("questions[%d].options[%d].preview must be a string", i, j)
+					}
+					if multiple {
+						return nil, fmt.Errorf("questions[%d].options[%d].preview requires single selection", i, j)
+					}
+				}
 
-				field.Enum = append(field.Enum, strings.TrimSpace(label))
+				field.Enum = append(field.Enum, label)
 				field.EnumDescriptions = append(field.EnumDescriptions, strings.TrimSpace(optionDescription))
 				field.EnumPreviews = append(field.EnumPreviews, preview)
 			}
+		}
+		if multiple && len(field.Enum) == 0 {
+			return nil, fmt.Errorf("questions[%d].multi_select requires options", i)
 		}
 
 		fields = append(fields, field)
@@ -203,13 +261,24 @@ func answerText(value any) string {
 	case string:
 		return strings.TrimSpace(v)
 	case []string:
-		return strings.TrimSpace(strings.Join(v, ", "))
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				parts = append(parts, trimmed)
+			}
+		}
+		return strings.Join(parts, ", ")
 	case []any:
 		parts := make([]string, 0, len(v))
 		for _, item := range v {
-			parts = append(parts, fmt.Sprintf("%v", item))
+			if item == nil {
+				continue
+			}
+			if trimmed := strings.TrimSpace(fmt.Sprintf("%v", item)); trimmed != "" {
+				parts = append(parts, trimmed)
+			}
 		}
-		return strings.TrimSpace(strings.Join(parts, ", "))
+		return strings.Join(parts, ", ")
 	case nil:
 		return ""
 	default:
@@ -218,7 +287,7 @@ func answerText(value any) string {
 }
 
 func truncateQuestion(s string, max int) string {
-	s = strings.TrimSpace(s)
+	s = strings.Join(strings.Fields(s), " ")
 	runes := []rune(s)
 	if len(runes) <= max {
 		return s
@@ -228,12 +297,17 @@ func truncateQuestion(s string, max int) string {
 
 func slugify(s string) string {
 	var b strings.Builder
+	lastUnderscore := false
 	for _, r := range strings.ToLower(s) {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
 			b.WriteRune(r)
+			lastUnderscore = false
 		case r == ' ', r == '-', r == '_':
-			b.WriteByte('_')
+			if b.Len() > 0 && !lastUnderscore {
+				b.WriteByte('_')
+				lastUnderscore = true
+			}
 		}
 	}
 	return strings.Trim(b.String(), "_")

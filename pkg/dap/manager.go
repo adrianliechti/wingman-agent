@@ -6,20 +6,24 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
+	"github.com/adrianliechti/wingman-agent/internal/tooling"
 )
 
 const detectionCacheTTL = 30 * time.Second
 
-var ErrActiveSession = errors.New("a debug session is already active")
+var (
+	ErrActiveSession = errors.New("a debug session is already active")
+	ErrBusy          = errors.New("debugger setup or launch is already in progress; try again when it finishes")
+)
 
 type detectedAdapter struct {
 	adapter  AdapterDescriptor
@@ -37,6 +41,7 @@ type Manager struct {
 
 	detectMu   sync.Mutex
 	detected   []detectedAdapter
+	missing    []detectedAdapter
 	detectedAt time.Time
 
 	mu          sync.Mutex
@@ -47,8 +52,12 @@ type Manager struct {
 
 type sessionStarter func(context.Context, string, Plan, StartOptions) (*Session, error)
 
-func NewManager(root string, adapters ...AdapterDescriptor) *Manager {
-	return newManager(root, adapters, resolveAdapterCommand, startSession)
+func NewManager(root string, tools tooling.ManagedTools, adapters ...AdapterDescriptor) *Manager {
+	resolve := func(string) string { return "" }
+	if tools != nil {
+		resolve = tools.Resolve
+	}
+	return newManager(root, adapters, resolve, startSession)
 }
 
 // SetTerminalLauncher connects the protocol client to the editor's PTY host.
@@ -66,6 +75,25 @@ func (m *Manager) SetAdapterConnector(connector AdapterConnector) {
 	m.mu.Lock()
 	m.connector = connector
 	m.mu.Unlock()
+}
+
+// SetAdapters replaces descriptors used by future discovery and sessions.
+// An already-running session is unaffected.
+func (m *Manager) SetAdapters(adapters ...AdapterDescriptor) {
+	m.detectMu.Lock()
+	m.adapters = cloneAdapters(adapters)
+	m.detected = nil
+	m.missing = nil
+	m.detectedAt = time.Time{}
+	m.detectMu.Unlock()
+}
+
+// InvalidateDetection makes newly installed or updated adapters visible on
+// the next lookup without waiting for the detection cache TTL.
+func (m *Manager) InvalidateDetection() {
+	m.detectMu.Lock()
+	m.detectedAt = time.Time{}
+	m.detectMu.Unlock()
 }
 
 func newManager(root string, adapters []AdapterDescriptor, lookup func(string) string, starter sessionStarter) *Manager {
@@ -87,31 +115,50 @@ func (m *Manager) detect(ctx context.Context) ([]detectedAdapter, error) {
 		return cloneDetected(m.detected), nil
 	}
 
-	var detected []detectedAdapter
-	for _, candidate := range m.adapters {
-		projects, err := detectProjects(ctx, m.root, candidate.Markers, candidate.SourceExtensions)
-		if err != nil {
-			return nil, fmt.Errorf("detect %s projects: %w", candidate.Language, err)
-		}
+	specs := make([]tooling.ProjectSpec, len(m.adapters))
+	for index, candidate := range m.adapters {
+		specs[index] = tooling.ProjectSpec{Markers: candidate.Markers, Extensions: candidate.SourceExtensions}
+	}
+	projectsByAdapter, err := tooling.DetectProjects(ctx, m.root, specs)
+	if err != nil {
+		return nil, fmt.Errorf("detect debugger projects: %w", err)
+	}
+	var detected, missing []detectedAdapter
+	for index, candidate := range m.adapters {
+		projects := projectsByAdapter[index]
 		if len(projects) == 0 {
 			continue
 		}
-		command := m.resolveDetectedCommand(candidate.Command, projects)
-		if command == "" && candidate.FallbackCommand != "" {
-			command = m.resolveDetectedCommand(candidate.FallbackCommand, projects)
-			if command != "" {
-				candidate.Args = slices.Clone(candidate.FallbackArgs)
-			}
-		}
+		command := m.lookup(candidate.Command)
 		if command == "" {
+			missing = append(missing, detectedAdapter{adapter: candidate, projects: projects})
 			continue
 		}
 		candidate.Command = command
 		detected = append(detected, detectedAdapter{adapter: candidate, projects: projects})
 	}
 	m.detected = detected
+	m.missing = missing
 	m.detectedAt = time.Now()
 	return cloneDetected(detected), nil
+}
+
+// MissingRequirements reports debugger projects whose adapter command could
+// not be resolved. It shares the normal discovery cache and workspace scan.
+func (m *Manager) MissingRequirements(ctx context.Context) ([]AdapterRequirement, error) {
+	if _, err := m.detect(ctx); err != nil {
+		return nil, err
+	}
+	m.detectMu.Lock()
+	defer m.detectMu.Unlock()
+	result := make([]AdapterRequirement, 0, len(m.missing))
+	for _, value := range m.missing {
+		result = append(result, AdapterRequirement{
+			Name: value.adapter.Name, Language: value.adapter.Language,
+			Commands: []string{value.adapter.Command}, Projects: slices.Clone(value.projects),
+		})
+	}
+	return result, nil
 }
 
 func cloneAdapters(values []AdapterDescriptor) []AdapterDescriptor {
@@ -119,7 +166,6 @@ func cloneAdapters(values []AdapterDescriptor) []AdapterDescriptor {
 	for i, value := range values {
 		cloned[i] = value
 		cloned[i].Args = slices.Clone(value.Args)
-		cloned[i].FallbackArgs = slices.Clone(value.FallbackArgs)
 		cloned[i].Markers = slices.Clone(value.Markers)
 		cloned[i].SourceExtensions = slices.Clone(value.SourceExtensions)
 		cloned[i].Defaults = maps.Clone(value.Defaults)
@@ -127,24 +173,6 @@ func cloneAdapters(values []AdapterDescriptor) []AdapterDescriptor {
 		cloned[i].IOValues = maps.Clone(value.IOValues)
 	}
 	return cloned
-}
-
-func (m *Manager) resolveDetectedCommand(command string, projects []string) string {
-	if command == "" {
-		return ""
-	}
-	if resolved := m.lookup(command); resolved != "" {
-		return resolved
-	}
-	if resolved := resolveWorkspaceAdapterCommand(m.root, command); resolved != "" {
-		return resolved
-	}
-	for _, project := range projects {
-		if resolved := resolveWorkspaceAdapterCommand(project, command); resolved != "" {
-			return resolved
-		}
-	}
-	return ""
 }
 
 func cloneDetected(values []detectedAdapter) []detectedAdapter {
@@ -177,18 +205,43 @@ func (m *Manager) Adapters(ctx context.Context) ([]AdapterInfo, error) {
 	return result, nil
 }
 
-func (m *Manager) Start(ctx context.Context, options StartOptions) (*Session, error) {
-	m.startMu.Lock()
-	defer m.startMu.Unlock()
-
+// BeginPreparation reserves an idle debugger until the returned release
+// function is called. Tool updates share this reservation with Start because
+// refreshing a hosted adapter can restart its language server.
+func (m *Manager) BeginPreparation() (func(), error) {
+	if !m.startMu.TryLock() {
+		return nil, ErrBusy
+	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.closed {
-		m.mu.Unlock()
+		m.startMu.Unlock()
 		return nil, errors.New("DAP manager is closed")
 	}
 	if m.session != nil && m.session.Status().State != StateTerminated {
-		m.mu.Unlock()
+		m.startMu.Unlock()
 		return nil, ErrActiveSession
+	}
+	return m.startMu.Unlock, nil
+}
+
+func (m *Manager) Start(ctx context.Context, options StartOptions) (*Session, error) {
+	release, err := m.BeginPreparation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	m.mu.Lock()
+	for path, breakpoints := range options.Breakpoints {
+		if err := validateSourceBreakpoints(breakpoints); err != nil {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("breakpoints for %s: %w", path, err)
+		}
+	}
+	if err := validateFunctionBreakpoints(options.FunctionBreakpoints); err != nil {
+		m.mu.Unlock()
+		return nil, err
 	}
 	combinedBreakpoints := make(map[string][]SourceBreakpoint, len(options.Breakpoints)+len(m.breakpoints))
 	for path, breakpoints := range options.Breakpoints {
@@ -208,7 +261,11 @@ func (m *Manager) Start(ctx context.Context, options StartOptions) (*Session, er
 		return nil, err
 	}
 	if len(values) == 0 {
-		return nil, errors.New("no debug adapter detected in this workspace")
+		missing, missingErr := m.MissingRequirements(ctx)
+		if missingErr != nil {
+			return nil, missingErr
+		}
+		return nil, MissingAdapterError(missing)
 	}
 	selected, err := selectAdapter(values, options.Adapter)
 	if err != nil {
@@ -218,19 +275,38 @@ func (m *Manager) Start(ctx context.Context, options StartOptions) (*Session, er
 	if err != nil {
 		return nil, err
 	}
-	// Prefer the selected project's virtual environment or node_modules binary
-	// over a workspace-wide fallback found during discovery. This matters in
-	// monorepos where projects intentionally pin different adapter versions.
-	if registered := m.registeredAdapter(selected.adapter.Name); registered != nil {
-		if command := resolveWorkspaceAdapterCommand(plan.ProjectDir, registered.Command); command != "" {
-			plan.Adapter.Command = command
-			plan.Adapter.Args = slices.Clone(registered.Args)
+	registered := m.registeredAdapter(selected.adapter.Name)
+	if registered == nil || registered.Command == "" {
+		return nil, fmt.Errorf("debug adapter %s is not available for project %s", selected.adapter.Name, plan.ProjectDir)
+	}
+	plan.Adapter.Command = registered.Command
+	plan.Adapter.Args = slices.Clone(registered.Args)
+	if plan.Adapter.Transport == TransportConnect {
+		if preparer, ok := options.adapterConnector.(AdapterPlanPreparer); ok {
+			plan, err = preparer.PrepareAdapter(ctx, plan)
+			if err != nil {
+				return nil, fmt.Errorf("prepare debug adapter %s: %w", plan.Adapter.Name, err)
+			}
 		}
 	}
 
 	id := uuid.NewString()[:8]
 	session, err := m.start(ctx, id, plan, options)
 	if err != nil {
+		if session != nil {
+			m.mu.Lock()
+			if m.closed {
+				m.mu.Unlock()
+				session.Close()
+				return nil, errors.New("DAP manager is closed")
+			}
+			previous := m.session
+			m.session = session
+			m.mu.Unlock()
+			if previous != nil {
+				previous.Close()
+			}
+		}
 		return nil, err
 	}
 	m.mu.Lock()
@@ -249,9 +325,12 @@ func (m *Manager) Start(ctx context.Context, options StartOptions) (*Session, er
 }
 
 func (m *Manager) registeredAdapter(name string) *AdapterDescriptor {
+	m.detectMu.Lock()
+	defer m.detectMu.Unlock()
 	for _, adapter := range m.adapters {
 		if strings.EqualFold(adapter.Name, name) {
 			value := cloneAdapters([]AdapterDescriptor{adapter})[0]
+			value.Command = m.lookup(value.Command)
 			return &value
 		}
 	}
@@ -289,9 +368,21 @@ func selectAdapter(values []detectedAdapter, requested string) (detectedAdapter,
 	requested = strings.TrimSpace(requested)
 	if requested != "" && requested != "auto" {
 		for _, value := range values {
-			if strings.EqualFold(value.adapter.Name, requested) || strings.EqualFold(value.adapter.Language, requested) {
+			if strings.EqualFold(value.adapter.Name, requested) {
 				return value, nil
 			}
+		}
+		var matching []detectedAdapter
+		for _, value := range values {
+			if strings.EqualFold(value.adapter.Language, requested) {
+				matching = append(matching, value)
+			}
+		}
+		if len(matching) == 1 {
+			return matching[0], nil
+		}
+		if len(matching) > 1 {
+			return detectedAdapter{}, fmt.Errorf("multiple %s debug adapters are available; choose one by name", requested)
 		}
 		return detectedAdapter{}, fmt.Errorf("debug adapter %q is not available", requested)
 	}
@@ -366,7 +457,17 @@ func resolvePlan(workspace string, selected detectedAdapter, options StartOption
 		Request:    requestName,
 		IO:         ioMode,
 		Arguments:  arguments,
+		PreLaunch:  cloneProcessLaunch(options.PreLaunch),
 	}, nil
+}
+
+func cloneProcessLaunch(value *ProcessLaunch) *ProcessLaunch {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	clone.Args = slices.Clone(value.Args)
+	return &clone
 }
 
 // ResolveConfigurationPaths validates and resolves the path fields declared by
@@ -420,34 +521,23 @@ func ResolveConfigurationPaths(workspace, projectDir string, fields []Configurat
 }
 
 func ensurePotentialPathInside(workspace, path string, allowMissing bool) error {
-	if !allowMissing {
-		return ensureResolvedPathInside(workspace, path)
+	resolvedWorkspace, err := pathutil.Resolve(workspace)
+	if err != nil {
+		return fmt.Errorf("resolve workspace symlinks: %w", err)
 	}
-	probe := path
-	for {
-		if _, err := os.Lstat(probe); err == nil {
-			if err := ensureResolvedPathInside(workspace, probe); err != nil {
-				return err
-			}
-			if probe != path {
-				info, err := os.Stat(probe)
-				if err != nil {
-					return fmt.Errorf("inspect existing parent: %w", err)
-				}
-				if !info.IsDir() {
-					return errors.New("existing parent is not a directory")
-				}
-			}
-			return nil
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect path: %w", err)
-		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			return errors.New("no existing parent directory")
-		}
-		probe = parent
+	resolve := pathutil.Resolve
+	if allowMissing {
+		resolve = pathutil.ResolveExistingPrefix
 	}
+	resolvedPath, err := resolve(path)
+	if err != nil {
+		return fmt.Errorf("resolve symlinks: %w", err)
+	}
+	rel, err := filepath.Rel(resolvedWorkspace, resolvedPath)
+	if err != nil || !filepath.IsLocal(rel) {
+		return errors.New("must stay inside the workspace after resolving symlinks")
+	}
+	return nil
 }
 
 func selectProjectDir(workspace string, projects []string, requested string, configuration map[string]any) (string, error) {
@@ -495,6 +585,10 @@ func selectProjectDir(workspace string, projects []string, requested string, con
 }
 
 func ResolveWorkspaceDirectory(workspace, value string) (string, error) {
+	workspace, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace: %w", err)
+	}
 	path := value
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(workspace, path)
@@ -514,26 +608,10 @@ func ResolveWorkspaceDirectory(workspace, value string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("project_dir %q is not a directory", value)
 	}
-	if err := ensureResolvedPathInside(workspace, abs); err != nil {
+	if err := ensurePotentialPathInside(workspace, abs, false); err != nil {
 		return "", fmt.Errorf("project_dir %q: %w", value, err)
 	}
 	return filepath.Clean(abs), nil
-}
-
-func ensureResolvedPathInside(workspace, path string) error {
-	resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		return fmt.Errorf("resolve workspace symlinks: %w", err)
-	}
-	resolvedPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return fmt.Errorf("resolve symlinks: %w", err)
-	}
-	rel, err := filepath.Rel(resolvedWorkspace, resolvedPath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return errors.New("must stay inside the workspace after resolving symlinks")
-	}
-	return nil
 }
 
 func nearestProject(projects []string, target string) string {
@@ -586,6 +664,9 @@ func (m *Manager) Breakpoints(path string) []SourceBreakpoint {
 }
 
 func (m *Manager) SetBreakpoints(ctx context.Context, path string, values []SourceBreakpoint) ([]Breakpoint, error) {
+	if err := validateSourceBreakpoints(values); err != nil {
+		return nil, err
+	}
 	path = filepath.Clean(path)
 	m.mu.Lock()
 	m.breakpoints[path] = slices.Clone(values)
@@ -631,123 +712,4 @@ func (m *Manager) Close() {
 	if session != nil {
 		session.Close()
 	}
-}
-
-func resolveAdapterCommand(command string) string {
-	if filepath.IsAbs(command) {
-		if executableFile(command) {
-			return command
-		}
-		return ""
-	}
-	if path, err := exec.LookPath(command); err == nil {
-		return path
-	}
-	var dirs []string
-	if value := os.Getenv("GOBIN"); value != "" {
-		dirs = append(dirs, value)
-	}
-	if value := os.Getenv("GOPATH"); value != "" {
-		dirs = append(dirs, filepath.Join(value, "bin"))
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs,
-			filepath.Join(home, "go", "bin"),
-			filepath.Join(home, ".cargo", "bin"),
-			filepath.Join(home, ".dotnet", "tools"),
-			filepath.Join(home, ".bun", "bin"),
-			filepath.Join(home, ".local", "bin"),
-			filepath.Join(home, ".local", "share", "nvim", "mason", "bin"),
-			filepath.Join(home, ".npm-global", "bin"),
-			filepath.Join(home, ".local", "share", "mise", "shims"),
-			filepath.Join(home, ".asdf", "shims"),
-		)
-		if runtime.GOOS == "windows" {
-			if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
-				dirs = append(dirs, filepath.Join(localAppData, "nvim-data", "mason", "bin"))
-			}
-		}
-		if command == "codelldb" {
-			if path := resolveCodeLLDB(home); path != "" {
-				return path
-			}
-		}
-	}
-	if runtime.GOOS != "windows" {
-		dirs = append(dirs, "/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin")
-	}
-	for _, dir := range dirs {
-		for _, name := range commandNames(command) {
-			path := filepath.Join(dir, name)
-			if executableFile(path) {
-				return path
-			}
-		}
-	}
-	return ""
-}
-
-func resolveCodeLLDB(home string) string {
-	dataHome := os.Getenv("XDG_DATA_HOME")
-	if dataHome == "" {
-		dataHome = filepath.Join(home, ".local", "share")
-	}
-	patterns := []string{
-		filepath.Join(home, ".vscode", "extensions", "vadimcn.vscode-lldb-*", "adapter"),
-		filepath.Join(home, ".vscode-insiders", "extensions", "vadimcn.vscode-lldb-*", "adapter"),
-		filepath.Join(home, ".cursor", "extensions", "vadimcn.vscode-lldb-*", "adapter"),
-		filepath.Join(home, ".windsurf", "extensions", "vadimcn.vscode-lldb-*", "adapter"),
-		filepath.Join(dataHome, "nvim", "mason", "packages", "codelldb", "extension", "adapter"),
-	}
-	var directories []string
-	for _, pattern := range patterns {
-		matches, _ := filepath.Glob(pattern)
-		directories = append(directories, matches...)
-	}
-	slices.Sort(directories)
-	for index := len(directories) - 1; index >= 0; index-- {
-		for _, name := range commandNames("codelldb") {
-			path := filepath.Join(directories[index], name)
-			if executableFile(path) {
-				return path
-			}
-		}
-	}
-	return ""
-}
-
-func resolveWorkspaceAdapterCommand(workspace, command string) string {
-	for _, directory := range []string{".venv", "venv", "env", filepath.Join("node_modules", ".bin")} {
-		bin := "bin"
-		if directory == filepath.Join("node_modules", ".bin") {
-			bin = ""
-		}
-		if runtime.GOOS == "windows" {
-			if bin != "" {
-				bin = "Scripts"
-			}
-		}
-		for _, name := range commandNames(command) {
-			path := filepath.Join(workspace, directory, bin, name)
-			if executableFile(path) {
-				return path
-			}
-		}
-	}
-	return ""
-}
-
-func commandNames(command string) []string {
-	if runtime.GOOS == "windows" {
-		return []string{command + ".exe", command + ".cmd", command + ".bat", command}
-	}
-	return []string{command}
-}
-
-func executableFile(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
-		return false
-	}
-	return runtime.GOOS == "windows" || info.Mode()&0o111 != 0
 }

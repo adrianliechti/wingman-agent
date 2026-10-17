@@ -64,6 +64,13 @@ type AdapterConnector interface {
 	ConnectAdapter(context.Context, Plan) (io.ReadWriteCloser, error)
 }
 
+// AdapterPlanPreparer optionally enriches a resolved plan before the adapter
+// transport starts. It lets a host-created adapter obtain launch details from
+// its owning service without putting language-specific behavior in Manager.
+type AdapterPlanPreparer interface {
+	PrepareAdapter(context.Context, Plan) (Plan, error)
+}
+
 // AdapterDescriptor describes how to start one debug adapter process. Command
 // is resolved to an executable before a Plan reaches the session layer.
 type AdapterDescriptor struct {
@@ -72,8 +79,6 @@ type AdapterDescriptor struct {
 	AdapterID          string
 	Command            string
 	Args               []string
-	FallbackCommand    string
-	FallbackArgs       []string
 	Transport          Transport
 	ReadyPrefix        string
 	Markers            []string
@@ -119,8 +124,21 @@ type StartOptions struct {
 	Breakpoints         map[string][]SourceBreakpoint
 	FunctionBreakpoints []FunctionBreakpoint
 	IO                  IOMode
+	PreLaunch           *ProcessLaunch
 	terminalLauncher    TerminalLauncher
 	adapterConnector    AdapterConnector
+}
+
+// ProcessLaunch is a process owned by the debug session and started before
+// the adapter. ReadyURL, when set, must respond before the adapter launches.
+// WaitForExit instead runs the process to successful completion, such as a
+// build step.
+type ProcessLaunch struct {
+	Title       string   `json:"title"`
+	Command     string   `json:"command"`
+	Args        []string `json:"args,omitempty"`
+	ReadyURL    string   `json:"ready_url,omitempty"`
+	WaitForExit bool     `json:"wait_for_exit,omitempty"`
 }
 
 type SourceBreakpoint struct {
@@ -146,6 +164,7 @@ type Plan struct {
 	Request    string
 	IO         IOMode
 	Arguments  map[string]any
+	PreLaunch  *ProcessLaunch
 }
 
 type State string

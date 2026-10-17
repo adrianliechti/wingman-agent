@@ -27,10 +27,10 @@ func confirmDangerous(ctx context.Context, elicit *tool.Elicitation, appr *Appro
 	if workdir != "" {
 		command = command + "  [in " + workdir + "]"
 	}
-	return confirmIfDangerous(ctx, elicit, appr, command, ClassifyEffect(args) == tool.EffectDangerous)
+	return confirmIfDangerous(ctx, elicit, appr, "shell_command", command, ClassifyEffect(args) == tool.EffectDangerous)
 }
 
-func confirmIfDangerous(ctx context.Context, elicit *tool.Elicitation, appr *Approvals, text string, dangerous bool) error {
+func confirmIfDangerous(ctx context.Context, elicit *tool.Elicitation, appr *Approvals, kind, text string, dangerous bool) error {
 	if !dangerous || elicit == nil || elicit.Confirm == nil {
 		return nil
 	}
@@ -47,14 +47,17 @@ func confirmIfDangerous(ctx context.Context, elicit *tool.Elicitation, appr *App
 		return nil
 	}
 
-	approved, err := elicit.Confirm(ctx, "❯ "+approvalDisplayText(text))
+	verdict, err := elicit.Approve(ctx, tool.Approval{
+		Message: "❯ " + approvalDisplayText(text),
+		Action:  map[string]any{"type": kind, "text": text},
+	})
 
 	if err != nil {
-		return fmt.Errorf("failed to get user approval: %w", err)
+		return fmt.Errorf("failed to get approval: %w", err)
 	}
 
-	if !approved {
-		return fmt.Errorf("command execution denied by user")
+	if err := verdict.Err("command execution denied by user"); err != nil {
+		return err
 	}
 
 	appr.mu.Lock()
@@ -85,4 +88,12 @@ func approvalDisplayText(text string) string {
 		}
 	}
 	return out.String()
+}
+
+// ConfirmCommand checks a script with the interactive shell classifier and gate.
+func ConfirmCommand(ctx context.Context, command, workdir string, elicit *tool.Elicitation, approvals *Approvals) error {
+	if approvals == nil {
+		approvals = NewApprovals()
+	}
+	return confirmDangerous(ctx, elicit, approvals, map[string]any{"command": command}, workdir)
 }

@@ -12,17 +12,24 @@ import (
 // Editor is a multiline input bounded by horizontal rules. The rule color is
 // a status channel (mode, activity) set by the app.
 type Editor struct {
-	value  []rune
-	cursor int
+	value   []rune
+	cursor  int
+	pastes  []editorPaste
+	pasteID int
 
-	placeholder string
-	ruleColor   ansi.Color
+	placeholder      string
+	ruleColor        ansi.Color
+	bottomRightStart int
+	bottomRightWidth int
 
 	history []string
 	histIdx int
 	draft   string
 
-	scroll int
+	scroll         int
+	rowWidth       int
+	wrappedRows    []editorRow
+	verticalColumn int
 }
 
 type EditorChrome struct {
@@ -37,19 +44,36 @@ const editorInset = 2
 
 func NewEditor() *Editor {
 	return &Editor{
-		placeholder: "Ask anything...",
-		ruleColor:   theme.Default.BrBlack,
-		histIdx:     -1,
+		placeholder:    "Ask anything...",
+		ruleColor:      theme.Default.Border,
+		histIdx:        -1,
+		verticalColumn: -1,
 	}
 }
 
 func (e *Editor) Text() string {
-	return string(e.value)
+	var text strings.Builder
+	start := 0
+	for _, paste := range e.pastes {
+		text.WriteString(string(e.value[start:paste.start]))
+		text.WriteString(paste.text)
+		start = paste.end
+	}
+	text.WriteString(string(e.value[start:]))
+	return text.String()
 }
 
 func (e *Editor) SetText(text string) {
+	e.ResetHistoryCursor()
+	e.setText(text)
+}
+
+func (e *Editor) setText(text string) {
 	e.value = []rune(text)
+	e.pastes = nil
 	e.cursor = len(e.value)
+	e.wrappedRows = nil
+	e.verticalColumn = -1
 }
 
 func (e *Editor) SetPlaceholder(p string) {
@@ -73,9 +97,10 @@ func (e *Editor) AddHistory(entry string) {
 }
 
 func (e *Editor) Insert(text string) {
-	runes := []rune(text)
-	e.value = append(e.value[:e.cursor], append(runes, e.value[e.cursor:]...)...)
-	e.cursor += len(runes)
+	if text == "" {
+		return
+	}
+	e.ReplaceRange(e.cursor, e.cursor, text)
 }
 
 // ReplaceRange substitutes the rune range [from, to) with text and leaves the
@@ -90,7 +115,11 @@ func (e *Editor) ReplaceRange(from, to int, text string) {
 	if from > to {
 		return
 	}
+	from, to = e.pasteRange(from, to)
+	e.ResetHistoryCursor()
+	e.wrappedRows = nil
 	runes := []rune(text)
+	e.shiftPastes(from, to, len(runes))
 	e.value = append(e.value[:from], append(runes, e.value[to:]...)...)
 	e.cursor = from + len(runes)
 }
@@ -117,6 +146,10 @@ func (e *Editor) deleteRange(from, to int) {
 	if from >= to {
 		return
 	}
+	from, to = e.pasteRange(from, to)
+	e.ResetHistoryCursor()
+	e.wrappedRows = nil
+	e.shiftPastes(from, to, 0)
 	e.value = append(e.value[:from], e.value[to:]...)
 	if e.cursor > to {
 		e.cursor -= to - from
@@ -154,7 +187,19 @@ func (e *Editor) nextWord() int {
 // HandleKey processes an input event. It reports whether the event was
 // consumed; unconsumed navigation (history recall) is handled by the caller.
 func (e *Editor) HandleKey(ev inline.KeyEvent) bool {
+	previousCursor := e.cursor
+	defer func() { e.snapPasteCursor(e.cursor < previousCursor) }()
+	if ev.Key != inline.KeyUp && ev.Key != inline.KeyDown {
+		e.verticalColumn = -1
+	}
 	switch ev.Key {
+	case inline.KeyEnter:
+		if ev.Alt || ev.Shift {
+			e.Insert("\n")
+			return true
+		}
+		return false
+
 	case inline.KeyRune:
 		if ev.Alt {
 			switch ev.Rune {
@@ -164,6 +209,8 @@ func (e *Editor) HandleKey(ev inline.KeyEvent) bool {
 			case 'f':
 				e.cursor = e.nextWord()
 				return true
+			case 'e':
+				return e.expandPastes()
 			}
 			return false
 		}
@@ -268,41 +315,38 @@ func (e *Editor) HandleKey(ev inline.KeyEvent) bool {
 	return false
 }
 
-// moveVertical moves the cursor across logical lines; returns false at the
-// buffer edge so the app can use up/down for history.
+// moveVertical follows the displayed rows, including soft wraps. Only the
+// first and last displayed rows hand up/down back to history navigation.
 func (e *Editor) moveVertical(delta int) bool {
-	start, _ := e.lineBounds()
-	col := e.cursor - start
-
-	if delta < 0 {
-		if start == 0 {
-			return false
-		}
-		prevStart := start - 1
-		for prevStart > 0 && e.value[prevStart-1] != '\n' {
-			prevStart--
-		}
-		prevLen := start - 1 - prevStart
-		if col > prevLen {
-			col = prevLen
-		}
-		e.cursor = prevStart + col
-		return true
+	width := e.rowWidth
+	if width == 0 {
+		width = max(len(e.value)*2, 1)
 	}
-
-	_, end := e.lineBounds()
-	if end >= len(e.value) {
+	rows := e.rows(width)
+	current, col := e.cursorPosition(rows)
+	if e.verticalColumn < 0 {
+		e.verticalColumn = col
+	}
+	col = e.verticalColumn
+	target := current + delta
+	if target < 0 || target >= len(rows) {
 		return false
 	}
-	nextStart := end + 1
-	nextEnd := nextStart
-	for nextEnd < len(e.value) && e.value[nextEnd] != '\n' {
-		nextEnd++
+	row := rows[target]
+	e.cursor = row.start
+	used := 0
+	for _, r := range row.text {
+		used += runeWidth(r)
+		if used > col {
+			break
+		}
+		e.cursor++
 	}
-	if col > nextEnd-nextStart {
-		col = nextEnd - nextStart
+	// A wrap boundary belongs to the following row; keep upward movement
+	// inside its target row even when that row is shorter.
+	if target+1 < len(rows) && e.cursor == rows[target+1].start && e.cursor > row.start {
+		e.cursor--
 	}
-	e.cursor = nextStart + col
 	return true
 }
 
@@ -318,7 +362,7 @@ func (e *Editor) HistoryPrev() bool {
 		return true
 	}
 	e.histIdx--
-	e.SetText(e.history[e.histIdx])
+	e.setText(e.history[e.histIdx])
 	return true
 }
 
@@ -329,16 +373,17 @@ func (e *Editor) HistoryNext() bool {
 	e.histIdx++
 	if e.histIdx >= len(e.history) {
 		e.histIdx = -1
-		e.SetText(e.draft)
+		e.setText(e.draft)
 		return true
 	}
-	e.SetText(e.history[e.histIdx])
+	e.setText(e.history[e.histIdx])
 	return true
 }
 
 func (e *Editor) ResetHistoryCursor() {
 	e.histIdx = -1
 	e.draft = ""
+	e.verticalColumn = -1
 }
 
 type editorRow struct {
@@ -352,6 +397,12 @@ type editorRow struct {
 func (e *Editor) rows(inner int) []editorRow {
 	if inner < 1 {
 		inner = 1
+	}
+	if e.rowWidth == inner && e.wrappedRows != nil {
+		return e.wrappedRows
+	}
+	if e.rowWidth != inner {
+		e.verticalColumn = -1
 	}
 
 	var rows []editorRow
@@ -397,7 +448,19 @@ func (e *Editor) rows(inner int) []editorRow {
 		}
 	}
 
+	e.rowWidth = inner
+	e.wrappedRows = rows
 	return rows
+}
+
+func (e *Editor) cursorPosition(rows []editorRow) (rowIndex, col int) {
+	for i, row := range rows {
+		if e.cursor >= row.start && e.cursor <= row.start+row.runeCount {
+			rowIndex = i
+			col = ansi.Width(string(e.value[row.start:e.cursor]))
+		}
+	}
+	return
 }
 
 func runeWidth(r rune) int {
@@ -407,6 +470,7 @@ func runeWidth(r rune) int {
 // Render returns the editor lines (rules included) and the cursor position
 // relative to the returned block.
 func (e *Editor) Render(width, maxRows int, chrome EditorChrome) ([]string, inline.Pos) {
+	e.bottomRightStart, e.bottomRightWidth = 0, 0
 	t := theme.Default
 	inner := width - 2*len(cellIndent) - 2*editorInset
 	continuationPrefix := cellIndent + strings.Repeat(" ", editorInset)
@@ -441,6 +505,8 @@ func (e *Editor) Render(width, maxRows int, chrome EditorChrome) ([]string, inli
 				right = ansi.Truncate(right, maxRight, "…")
 				rightPart = " " + right
 				rightWidth = ansi.Width(right) + 1
+				e.bottomRightStart = len(cellIndent) + ruleWidth - ansi.Width(right)
+				e.bottomRightWidth = ansi.Width(right)
 			}
 		}
 
@@ -450,13 +516,7 @@ func (e *Editor) Render(width, maxRows int, chrome EditorChrome) ([]string, inli
 
 	rows := e.rows(inner)
 
-	cursorRow, cursorCol := 0, 0
-	for i, row := range rows {
-		if e.cursor >= row.start && e.cursor <= row.start+row.runeCount {
-			cursorRow = i
-			cursorCol = ansi.Width(string([]rune(row.text)[:e.cursor-row.start]))
-		}
-	}
+	cursorRow, cursorCol := e.cursorPosition(rows)
 
 	if maxRows < 3 {
 		maxRows = 3
@@ -511,7 +571,7 @@ func (e *Editor) Render(width, maxRows int, chrome EditorChrome) ([]string, inli
 			if e.scroll+i == 0 {
 				prefix = promptPrefix
 			}
-			lines = append(lines, prefix+row.text)
+			lines = append(lines, prefix+e.renderPasteRow(row))
 		}
 	}
 	if attachmentGap > 0 {

@@ -14,12 +14,35 @@ import (
 	"testing"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
+// Use a real local gopls as the fixture for Wingman's managed installation,
+// without requiring network downloads in the test suite.
+func copyTestGopls(t *testing.T, wingmanHome string) bool {
+	t.Helper()
+	source, err := exec.LookPath("gopls")
+	if err != nil {
+		return false
+	}
+	contents, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(wingmanHome, "tools", "gopls", "bin", filepath.Base(source))
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, contents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return true
+}
+
 func TestExternalGoIntelliSense(t *testing.T) {
-	if _, err := exec.LookPath("gopls"); err != nil {
+	if !copyTestGopls(t, testenv.WingmanHome(t)) {
 		t.Skip("gopls is not installed")
 	}
 
@@ -33,12 +56,12 @@ func TestExternalGoIntelliSense(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true})
+	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer app.Close()
-	web := httptest.NewServer(app)
+	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
 	response, err := http.Post(web.URL+"/api/lsp/completions", "application/json", strings.NewReader(
@@ -110,7 +133,7 @@ func TestExternalGoIntelliSense(t *testing.T) {
 }
 
 func TestExternalDefinitionNavigation(t *testing.T) {
-	if _, err := exec.LookPath("gopls"); err != nil {
+	if !copyTestGopls(t, testenv.WingmanHome(t)) {
 		t.Skip("gopls is not installed")
 	}
 
@@ -124,12 +147,12 @@ func TestExternalDefinitionNavigation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true})
+	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer app.Close()
-	web := httptest.NewServer(app)
+	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
 	var locations []lsp.Location

@@ -1,9 +1,12 @@
 package codex
 
 import (
-	"slices"
+	"regexp"
+	"strings"
 
 	"github.com/coder/acp-go-sdk"
+
+	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type modelEntry struct {
@@ -30,13 +33,33 @@ func modelsFromCodex(list []codexModel) []modelEntry {
 		}
 		out = append(out, modelEntry{
 			ID:           m.ID,
-			Name:         name,
+			Name:         formatModelDisplayName(name),
 			Description:  m.Description,
 			EffortLevels: efforts,
 			Default:      m.IsDefault,
 		})
 	}
 	return out
+}
+
+var (
+	gptPrefixRe        = regexp.MustCompile(`(?i)^gpt-`)
+	modelNameSeparator = regexp.MustCompile(`[-/]+`)
+)
+
+// formatModelDisplayName turns Codex's GPT ids into compact picker labels
+// ("gpt-5.3-codex" -> "5.3 Codex"); other provider names keep their punctuation.
+func formatModelDisplayName(name string) string {
+	if !gptPrefixRe.MatchString(name) {
+		return name
+	}
+	var parts []string
+	for _, part := range modelNameSeparator.Split(name[len("gpt-"):], -1) {
+		if part != "" {
+			parts = append(parts, strings.ToUpper(part[:1])+part[1:])
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 func findModel(models []modelEntry, id string) *modelEntry {
@@ -70,8 +93,10 @@ const (
 )
 
 func buildConfigOptions(models []modelEntry, currentModelID, currentEffort, collaborationMode string) []acp.SessionConfigOption {
-	opts := []acp.SessionConfigOption{modelConfigOption(models, currentModelID)}
-	if effort := effortConfigOption(models, currentModelID, currentEffort); effort != nil {
+	model := modelConfigOption(models, currentModelID)
+	effort := effortConfigOption(models, currentModelID, currentEffort)
+	opts := []acp.SessionConfigOption{model}
+	if effort != nil {
 		opts = append(opts, *effort)
 	}
 	opts = append(opts, collaborationModeConfigOption(collaborationMode))
@@ -103,6 +128,13 @@ func collaborationModeConfigOption(current string) acp.SessionConfigOption {
 	return opt
 }
 
+func resumedCollaborationMode(mode *codexCollaborationMode) string {
+	if mode != nil && mode.Mode == planCollaborationMode {
+		return planCollaborationMode
+	}
+	return defaultCollaborationMode
+}
+
 func isValidCollaborationMode(mode string) bool {
 	return mode == defaultCollaborationMode || mode == planCollaborationMode
 }
@@ -125,7 +157,7 @@ func modelConfigOption(models []modelEntry, currentID string) acp.SessionConfigO
 	}
 	if currentID != "" && findModel(models, currentID) == nil {
 		ungrouped = append(acp.SessionConfigSelectOptionsUngrouped{
-			{Value: acp.SessionConfigValueId(currentID), Name: currentID},
+			{Value: acp.SessionConfigValueId(currentID), Name: formatModelDisplayName(currentID)},
 		}, ungrouped...)
 	}
 	opt := acp.NewSessionConfigOptionSelect(
@@ -139,63 +171,20 @@ func modelConfigOption(models []modelEntry, currentID string) acp.SessionConfigO
 
 func effortConfigOption(models []modelEntry, currentModelID, currentEffort string) *acp.SessionConfigOption {
 	m := findModel(models, currentModelID)
-	if m == nil || len(m.EffortLevels) == 0 {
+	if m == nil {
 		return nil
 	}
-
-	ungrouped := acp.SessionConfigSelectOptionsUngrouped{
-		{Value: "default", Name: "Default"},
-	}
-	for _, lvl := range m.EffortLevels {
-		ungrouped = append(ungrouped, acp.SessionConfigSelectOption{
-			Value: acp.SessionConfigValueId(lvl),
-			Name:  titleCase(lvl),
-		})
-	}
-
-	current := currentEffort
-	if current == "" || !isValidEffort(m, current) {
-		current = "default"
-	}
-	opt := acp.NewSessionConfigOptionSelect(
-		acp.SessionConfigValueId(current),
-		acp.SessionConfigSelectOptions{Ungrouped: &ungrouped},
-	)
-	desc := "Reasoning effort for the selected model"
-	cat := acp.SessionConfigOptionCategoryThoughtLevel
-	opt.Select.Id = effortConfigID
-	opt.Select.Name = "Effort"
-	opt.Select.Description = &desc
-	opt.Select.Category = &cat
-	return &opt
-}
-
-func isValidEffort(m *modelEntry, level string) bool {
-	if level == "" || level == "default" {
-		return true
-	}
-	return slices.Contains(m.EffortLevels, level)
+	return acpcommon.EffortConfigOption(m.EffortLevels, currentEffort)
 }
 
 func normalizeSessionConfig(models []modelEntry, modelID, effort string) (string, string) {
 	if m := resolveModel(models, modelID); m != nil {
 		modelID = m.ID
-		if !isValidEffort(m, effort) {
+		if !acpcommon.IsValidEffort(m.EffortLevels, effort) {
 			effort = "default"
 		}
 	}
 	return modelID, effort
-}
-
-func titleCase(s string) string {
-	if s == "" {
-		return s
-	}
-	out := []byte(s)
-	if out[0] >= 'a' && out[0] <= 'z' {
-		out[0] -= 0x20
-	}
-	return string(out)
 }
 
 const defaultModeID = "agent"
@@ -255,20 +244,9 @@ func modeFor(id string) sessionMode {
 }
 
 func buildSessionModeState(currentID string) *acp.SessionModeState {
-	if currentID == "" {
-		currentID = defaultModeID
-	}
-	available := make([]acp.SessionMode, 0, len(sessionModes))
+	infos := make([]acpcommon.ModeInfo, 0, len(sessionModes))
 	for _, m := range sessionModes {
-		desc := m.description
-		available = append(available, acp.SessionMode{
-			Id:          acp.SessionModeId(m.id),
-			Name:        m.name,
-			Description: &desc,
-		})
+		infos = append(infos, acpcommon.ModeInfo{ID: m.id, Name: m.name, Description: m.description})
 	}
-	return &acp.SessionModeState{
-		AvailableModes: available,
-		CurrentModeId:  acp.SessionModeId(currentID),
-	}
+	return acpcommon.SessionModeState(infos, currentID, defaultModeID)
 }

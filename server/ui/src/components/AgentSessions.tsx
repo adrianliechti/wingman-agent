@@ -1,28 +1,45 @@
 import { useQuery } from "@tanstack/react-query";
-import { Loader2, MessageSquare, Trash2 } from "lucide-react";
+import { GitFork, Loader2, MessageSquare, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { agentQueries } from "../api/agents";
+import {
+	useWorkspace,
+	backendSettingsQuery,
+} from "../state/workspaceContext.ts";
+import { splitSessionKey } from "../state/sessionStore.ts";
 import { sessionQueries, type SessionInfo } from "../api/sessions";
 import type { TabDisposition } from "../types/tabs";
 import { FloatingMenu } from "./ui/Floating";
 
 interface Props {
 	currentSessionId: string;
+	backendId?: string;
 	onSessionSelect: (id: string, disposition?: TabDisposition) => void;
 	onSessionDelete?: (id: string, title: string) => void;
+	onSessionFork?: (id: string) => void;
 	runningSessionIds?: Set<string>;
-	switchingAgent?: string | null;
+	touch?: boolean;
 }
 
 export function AgentSessions({
 	currentSessionId,
+	backendId,
 	onSessionSelect,
 	onSessionDelete,
+	onSessionFork,
 	runningSessionIds,
-	switchingAgent,
+	touch = false,
 }: Props) {
-	const sessions = useQuery(sessionQueries.list()).data ?? [];
-	const canDelete = useQuery(agentQueries.current()).data?.canDelete ?? false;
+	const { backend: selectedBackend } = useWorkspace();
+	const backend = backendId ?? selectedBackend;
+	const {
+		data: sessions = [],
+		isPending,
+		error,
+		refetch,
+	} = useQuery(sessionQueries.list(backend));
+	const settings = useQuery(backendSettingsQuery(backend)).data;
+	const canDelete = settings?.canDelete ?? false;
+	const canFork = !!onSessionFork && (settings?.canFork ?? false);
 
 	const [menu, setMenu] = useState<{
 		id: string;
@@ -39,17 +56,33 @@ export function AgentSessions({
 			aria-label="Sessions"
 		>
 			<div className="flex-1 overflow-y-auto pb-2">
-				{switchingAgent && (
+				{isPending && (
 					<div className="h-full flex items-center justify-center">
 						<Loader2 size={14} className="text-fg-dim animate-spin" />
 					</div>
 				)}
-				{!switchingAgent && groups.length === 0 && (
+				{error && (
+					<div
+						role="alert"
+						className="px-3 py-8 text-center text-sm text-danger"
+					>
+						<p>Could not load sessions.</p>
+						<button
+							type="button"
+							className="mt-2 min-h-11 rounded-md border border-border px-4"
+							onClick={() => void refetch()}
+						>
+							Retry
+						</button>
+					</div>
+				)}
+				{!isPending && !error && groups.length === 0 && (
 					<div className="px-3 py-8 text-[11px] text-fg-dim text-center">
 						No sessions yet
 					</div>
 				)}
-				{!switchingAgent &&
+				{!isPending &&
+					!error &&
 					groups.map((group, groupIndex) => (
 						<div key={group.label}>
 							<div
@@ -61,7 +94,8 @@ export function AgentSessions({
 							</div>
 							{group.sessions.map((s) => {
 								const active = s.id === currentSessionId;
-								const displayTitle = s.title || s.id.substring(0, 8);
+								const displayTitle =
+									s.title || splitSessionKey(s.id).sessionId.substring(0, 8);
 								return (
 									<div
 										key={s.id}
@@ -72,6 +106,7 @@ export function AgentSessions({
 												: "text-fg-muted hover:bg-bg-hover hover:text-fg"
 										}`}
 										onContextMenu={(e) => {
+											if (touch) return;
 											e.preventDefault();
 											setMenu({
 												id: s.id,
@@ -84,7 +119,9 @@ export function AgentSessions({
 										<button
 											type="button"
 											className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 py-1.5 text-left"
-											onClick={() => onSessionSelect(s.id, "preview")}
+											onClick={() =>
+												onSessionSelect(s.id, touch ? "keep" : "preview")
+											}
 											onDoubleClick={() => onSessionSelect(s.id, "keep")}
 											onKeyDown={(event) => {
 												if (
@@ -118,6 +155,16 @@ export function AgentSessions({
 												</div>
 											</div>
 										</button>
+										{touch && canDelete && onSessionDelete && (
+											<button
+												type="button"
+												className="flex min-h-11 w-11 shrink-0 items-center justify-center rounded-md text-fg-dim active:bg-bg-hover active:text-danger"
+												aria-label={`Delete ${displayTitle}`}
+												onClick={() => onSessionDelete(s.id, displayTitle)}
+											>
+												<Trash2 size={18} />
+											</button>
+										)}
 									</div>
 								);
 							})}
@@ -144,6 +191,20 @@ export function AgentSessions({
 						<MessageSquare size={12} className="shrink-0" />
 						Open session
 					</button>
+					{canFork && (
+						<button
+							type="button"
+							role="menuitem"
+							onClick={() => {
+								onSessionFork?.(menu.id);
+								setMenu(null);
+							}}
+							className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-[12px] text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg"
+						>
+							<GitFork size={12} className="shrink-0" />
+							Fork session
+						</button>
+					)}
 					{canDelete && <div className="my-1 border-t border-border-subtle" />}
 					{canDelete && (
 						<button

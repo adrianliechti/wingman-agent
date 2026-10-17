@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,9 +18,9 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	"github.com/adrianliechti/wingman-agent/pkg/code"
 	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/clipboard"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
@@ -138,14 +140,101 @@ func TestTUIE2ESendsAndRendersTurn(t *testing.T) {
 	h.postText(t, "hello e2e")
 
 	waitForTUI(t, func() bool {
-		messages := h.agent.Messages(h.sessionID)
+		messages := h.visibleMessages()
 		return len(messages) >= 2 && messages[len(messages)-1].Role == agent.RoleAssistant
 	})
 	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "E2E reply") })
 
-	messages := h.agent.Messages(h.sessionID)
+	messages := h.visibleMessages()
 	if messages[0].Role != agent.RoleUser || messages[0].Content[0].Text != "hello e2e" {
 		t.Fatalf("user message = %+v", messages[0])
+	}
+}
+
+func TestTUIE2EPasteWaitsForExplicitSubmit(t *testing.T) {
+	model := tuiModelServer(t)
+	defer model.Close()
+	t.Setenv("WINGMAN_URL", model.URL)
+	t.Setenv("WINGMAN_MODEL", "gpt-5.4")
+	t.Setenv("WINGMAN_CALLER", "e2e")
+	const pasted = "pasted first line\r\n第二行 🦋"
+	for name, sequence := range map[string]string{
+		"Ctrl+V":       "\x16",
+		"Ctrl+Alt+V":   "\x1b\x16",
+		"CSI-u":        "\x1b[118;5:1u\x1b[118;5:3u",
+		"xterm":        "\x1b[27;5;118~",
+		"native paste": "\x1b[200~" + pasted + "\x1b[201~",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTUIE2EHarness(t)
+			var reads atomic.Int32
+			ready := make(chan struct{})
+			h.app.post(func() {
+				h.app.clipboardRead = func() ([]clipboard.Content, error) {
+					reads.Add(1)
+					return []clipboard.Content{{Text: pasted}}, nil
+				}
+				close(ready)
+			})
+			<-ready
+			if _, err := io.WriteString(h.input, sequence); err != nil {
+				t.Fatal(err)
+			}
+			waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "第二行") })
+			if messages := h.visibleMessages(); len(messages) != 0 {
+				t.Fatalf("paste submitted without Enter: %+v", messages)
+			}
+			wantReads := int32(1)
+			if name == "native paste" {
+				wantReads = 0
+			}
+			if reads.Load() != wantReads {
+				t.Fatalf("clipboard reads = %d, want %d", reads.Load(), wantReads)
+			}
+			h.postText(t, "")
+			waitForTUI(t, func() bool { return len(h.visibleMessages()) >= 2 })
+			messages := h.visibleMessages()
+			if text := messages[0].Content[0].Text; text != "pasted first line\n第二行 🦋" {
+				t.Fatalf("submitted paste = %q", text)
+			}
+		})
+	}
+}
+
+func TestTUIE2EMultilineCollapsedPasteAndExport(t *testing.T) {
+	model := tuiModelServer(t)
+	defer model.Close()
+	t.Setenv("WINGMAN_URL", model.URL)
+	t.Setenv("WINGMAN_MODEL", "gpt-5.4")
+	t.Setenv("WINGMAN_CALLER", "e2e")
+	h := newTUIE2EHarness(t)
+	pasted := strings.Repeat("日本語 and exact paste content\n", 50)
+	input := "first\x1b[13;2usecond\x1b[13;2uthird\x1b[13;2ufourth\x1b[27;2;13~fifth\x1b[106;5u"
+	input += "\x1b[200~" + pasted + "\x1b[201~tail"
+	if _, err := io.WriteString(h.input, input); err != nil {
+		t.Fatal(err)
+	}
+	waitForTUI(t, func() bool {
+		return strings.Contains(h.output.Text(), "[Paste 1") && strings.Contains(h.output.Text(), "tail")
+	})
+	if messages := h.visibleMessages(); len(messages) != 0 {
+		t.Fatalf("modified Enter or paste submitted prematurely: %+v", messages)
+	}
+	h.postText(t, "")
+	waitForTUI(t, func() bool { return len(h.visibleMessages()) >= 2 && h.app.getPhase() == PhaseIdle })
+	want := "first\nsecond\nthird\nfourth\nfifth\n" + pasted + "tail"
+	if got := h.visibleMessages()[0].Content[0].Text; got != want {
+		t.Fatalf("submitted text lost multiline input or collapsed payload: %q", got)
+	}
+	path := filepath.Join(t.TempDir(), "conversation with spaces.md")
+	h.postText(t, "/export \""+path+"\"")
+	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "Saved ") })
+	document, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(document), want) || !strings.Contains(string(document), "E2E reply") {
+		t.Fatalf("export did not save the conversation source: %v, %q", err, document)
+	}
+	if len(h.visibleMessages()) != 2 {
+		t.Fatal("export was sent to the model as a prompt")
 	}
 }
 
@@ -183,7 +272,7 @@ func TestTUIE2ENativeToolRoundKeepsOrder(t *testing.T) {
 	h := newTUIE2EHarness(t)
 	h.postText(t, "run a tool")
 	waitForTUI(t, func() bool {
-		messages := h.agent.Messages(h.sessionID)
+		messages := h.visibleMessages()
 		return h.app.getPhase() == PhaseIdle && len(messages) >= 4 && strings.Contains(finalMessageText(messages), "After tool.")
 	})
 
@@ -232,7 +321,7 @@ func TestTUIE2ECommandCenterAndTranscriptSearch(t *testing.T) {
 
 	h.postText(t, "hello transcript")
 	waitForTUI(t, func() bool {
-		messages := h.agent.Messages(h.sessionID)
+		messages := h.visibleMessages()
 		return len(messages) >= 2 && messages[len(messages)-1].Role == agent.RoleAssistant
 	})
 
@@ -395,12 +484,12 @@ func TestTUIE2ESteersActiveTurn(t *testing.T) {
 	close(model.release)
 
 	waitForTUI(t, func() bool {
-		messages := h.agent.Messages(h.sessionID)
+		messages := h.visibleMessages()
 		return len(messages) >= 4 && messages[len(messages)-1].Role == agent.RoleAssistant
 	})
 	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "Steering applied") })
 
-	messages := h.agent.Messages(h.sessionID)
+	messages := h.visibleMessages()
 	want := []struct {
 		role agent.MessageRole
 		text string
@@ -418,4 +507,49 @@ func TestTUIE2ESteersActiveTurn(t *testing.T) {
 			t.Fatalf("message %d = %+v, want %s %q", i, messages[i], expected.role, expected.text)
 		}
 	}
+}
+
+// The transcript contract excludes hidden session context. Test user-visible
+// behavior without depending on the harness's provider context representation.
+func (h *tuiE2EHarness) visibleMessages() []agent.Message {
+	var visible []agent.Message
+	for _, message := range h.agent.Messages(h.sessionID) {
+		if !message.Hidden {
+			visible = append(visible, message)
+		}
+	}
+	return visible
+}
+
+func TestTUIE2EAltEnterQueuesWithoutSteering(t *testing.T) {
+	model := &tuiSteeringModel{release: make(chan struct{})}
+	provider := httptest.NewServer(http.HandlerFunc(model.handler))
+	defer provider.Close()
+	t.Setenv("WINGMAN_URL", provider.URL)
+	t.Setenv("WINGMAN_MODEL", "gpt-5.4")
+	h := newTUIE2EHarness(t)
+	h.postText(t, "initial request")
+	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "Working") })
+	if _, err := io.WriteString(h.input, "queued follow-up\x1b[13;3u"); err != nil {
+		t.Fatal(err)
+	}
+	waitForTUI(t, func() bool {
+		for _, item := range h.app.turns.Snapshot(h.sessionID).Inputs {
+			if item.State == "queued" && item.Input.Content[0].Text == "queued follow-up" {
+				return true
+			}
+		}
+		return false
+	})
+	for _, message := range h.visibleMessages() {
+		for _, content := range message.Content {
+			if content.Text == "queued follow-up" {
+				t.Fatal("queued input steered active turn")
+			}
+		}
+	}
+	if err := h.app.turns.ClearQueue(h.sessionID); err != nil {
+		t.Fatal(err)
+	}
+	close(model.release)
 }

@@ -18,28 +18,45 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/httpclient"
+	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 const (
-	defaultTimeout    = 600
-	sessionEndTimeout = 1
-	maxHookOutput     = 16 * 1024
+	defaultTimeout                 = 600
+	sessionEndTimeout              = 1
+	maxSessionEndTimeout           = 3
+	maxHookOutput                  = 1024 * 1024
+	maxHookStderr                  = 64 * 1024
+	defaultAdditionalContextTokens = 2_500
+	maxConcurrentAsyncHooks        = 8
 )
 
-// Gate defers a workspace trust decision until the first matching hook fires.
+// Gate asks once per session; with a Fingerprint and Store, approval persists until the hooks change.
 type Gate struct {
 	Confirm func(ctx context.Context, message string) (bool, error)
 	Message string
+
+	// Fingerprint identifies the hook content; empty means it cannot be remembered.
+	Fingerprint func() string
+	Store       TrustStore
 
 	mu      sync.Mutex
 	decided bool
 	allowed bool
 }
 
-func (g *Gate) Allowed(ctx context.Context) bool {
+// TrustStore persists approved hook fingerprints across sessions.
+type TrustStore interface {
+	Trusted(fingerprint string) bool
+	Trust(fingerprint string) error
+}
+
+// Allowed without prompt never blocks an observe-only event on an undecided trust question.
+func (g *Gate) Allowed(ctx context.Context, prompt bool) bool {
 	if g == nil {
 		return true
 	}
@@ -48,13 +65,29 @@ func (g *Gate) Allowed(ctx context.Context) bool {
 	if g.decided {
 		return g.allowed
 	}
-	g.decided = true
-	if g.Confirm == nil {
-		g.allowed = true
+	fingerprint := ""
+	if g.Fingerprint != nil {
+		fingerprint = g.Fingerprint()
+	}
+	if fingerprint != "" && g.Store != nil && g.Store.Trusted(fingerprint) {
+		g.decided, g.allowed = true, true
 		return true
 	}
+	if g.Confirm == nil {
+		g.decided, g.allowed = true, true
+		return true
+	}
+	if !prompt || ctx.Err() != nil {
+		return false
+	}
 	ok, err := g.Confirm(ctx, g.Message)
-	g.allowed = ok && err == nil
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	g.decided, g.allowed = true, ok && err == nil
+	if g.allowed && fingerprint != "" && g.Store != nil {
+		_ = g.Store.Trust(fingerprint)
+	}
 	return g.allowed
 }
 
@@ -78,11 +111,14 @@ type Events struct {
 	SubagentStart     []MatcherGroup `json:"SubagentStart,omitempty"`
 	SubagentStop      []MatcherGroup `json:"SubagentStop,omitempty"`
 	Stop              []MatcherGroup `json:"Stop,omitempty"`
+	Interrupt         []MatcherGroup `json:"Interrupt,omitempty"`
 }
 
 type MatcherGroup struct {
 	Matcher string    `json:"matcher,omitempty"`
 	Hooks   []Handler `json:"hooks"`
+
+	compiled *compiledMatcher
 }
 
 type Handler struct {
@@ -105,9 +141,12 @@ type Handler struct {
 }
 
 func (c *Config) RuleCount() int {
+	if c == nil {
+		return 0
+	}
 	total := 0
 	for _, groups := range c.allEvents() {
-		for _, group := range groups.groups {
+		for _, group := range *groups.groups {
 			total += len(group.Hooks)
 		}
 	}
@@ -161,10 +200,13 @@ func Parse(name string, data []byte) (*Config, error) {
 
 func (c *Config) validate() error {
 	for _, event := range c.allEvents() {
-		for groupIndex, group := range event.groups {
-			if !validMatcher(group.Matcher) {
+		for groupIndex := range *event.groups {
+			group := &(*event.groups)[groupIndex]
+			matcher, err := compileMatcher(group.Matcher)
+			if err != nil {
 				return fmt.Errorf("%s matcher group %d has invalid regex %q", event.name, groupIndex, group.Matcher)
 			}
+			group.compiled = matcher
 			for handlerIndex, handler := range group.Hooks {
 				if handler.Timeout != nil && *handler.Timeout < 0 {
 					return fmt.Errorf("%s handler %d:%d has a negative timeout", event.name, groupIndex, handlerIndex)
@@ -174,15 +216,15 @@ func (c *Config) validate() error {
 				}
 				switch handler.Type {
 				case "command":
-					if handler.Command == "" {
+					if strings.TrimSpace(handler.Command) == "" {
 						return fmt.Errorf("%s handler %d:%d has no command", event.name, groupIndex, handlerIndex)
 					}
 				case "http":
-					if handler.URL == "" {
+					if strings.TrimSpace(handler.URL) == "" {
 						return fmt.Errorf("%s handler %d:%d has no url", event.name, groupIndex, handlerIndex)
 					}
 				case "mcp_tool":
-					if handler.Server == "" || handler.Tool == "" {
+					if strings.TrimSpace(handler.Server) == "" || strings.TrimSpace(handler.Tool) == "" {
 						return fmt.Errorf("%s handler %d:%d has an incomplete mcp_tool target", event.name, groupIndex, handlerIndex)
 					}
 				case "prompt", "agent":
@@ -212,6 +254,7 @@ func (c *Config) merge(other Config) {
 	c.Hooks.SubagentStart = append(c.Hooks.SubagentStart, other.Hooks.SubagentStart...)
 	c.Hooks.SubagentStop = append(c.Hooks.SubagentStop, other.Hooks.SubagentStop...)
 	c.Hooks.Stop = append(c.Hooks.Stop, other.Hooks.Stop...)
+	c.Hooks.Interrupt = append(c.Hooks.Interrupt, other.Hooks.Interrupt...)
 }
 
 // Merge appends another hook source while preserving source order.
@@ -224,22 +267,23 @@ func (c *Config) Merge(other *Config) {
 
 type namedGroups struct {
 	name   string
-	groups []MatcherGroup
+	groups *[]MatcherGroup
 }
 
 func (c *Config) allEvents() []namedGroups {
 	return []namedGroups{
-		{"PreToolUse", c.Hooks.PreToolUse},
-		{"PermissionRequest", c.Hooks.PermissionRequest},
-		{"PostToolUse", c.Hooks.PostToolUse},
-		{"PreCompact", c.Hooks.PreCompact},
-		{"PostCompact", c.Hooks.PostCompact},
-		{"SessionStart", c.Hooks.SessionStart},
-		{"SessionEnd", c.Hooks.SessionEnd},
-		{"UserPromptSubmit", c.Hooks.UserPromptSubmit},
-		{"SubagentStart", c.Hooks.SubagentStart},
-		{"SubagentStop", c.Hooks.SubagentStop},
-		{"Stop", c.Hooks.Stop},
+		{"PreToolUse", &c.Hooks.PreToolUse},
+		{"PermissionRequest", &c.Hooks.PermissionRequest},
+		{"PostToolUse", &c.Hooks.PostToolUse},
+		{"PreCompact", &c.Hooks.PreCompact},
+		{"PostCompact", &c.Hooks.PostCompact},
+		{"SessionStart", &c.Hooks.SessionStart},
+		{"SessionEnd", &c.Hooks.SessionEnd},
+		{"UserPromptSubmit", &c.Hooks.UserPromptSubmit},
+		{"SubagentStart", &c.Hooks.SubagentStart},
+		{"SubagentStop", &c.Hooks.SubagentStop},
+		{"Stop", &c.Hooks.Stop},
+		{"Interrupt", &c.Hooks.Interrupt},
 	}
 }
 
@@ -254,13 +298,38 @@ func (c *Config) Build(workDir string, gate *Gate) hook.Hooks {
 type BuildOptions struct {
 	Gate        *Gate
 	Environment map[string]string
+	// Async runs handlers marked async; without it they are skipped.
+	Async *Async
+	// MCP calls a tool on an already-connected server for mcp_tool handlers.
+	MCP MCPCaller
+	// SpillDir receives oversized hook output; the model sees a preview and path.
+	SpillDir string
 }
+
+// MCPCaller returns a tool's text, or an error when the call or the tool fails.
+type MCPCaller func(ctx context.Context, server, tool string, input map[string]any) (string, error)
 
 // BuildWithOptions compiles hooks and injects source-specific environment
 // variables into command handlers. HTTP handlers intentionally do not inherit
 // these values into headers unless the process environment explicitly exposes
 // them through allowedEnvVars.
 func (c *Config) BuildWithOptions(workDir string, options BuildOptions) hook.Hooks {
+	if c == nil {
+		return hook.Hooks{}
+	}
+	// Freeze matching rules for the built hooks, including configs constructed
+	// in Go. Parsed groups already retain their validated compiled matchers.
+	snapshot := *c
+	for _, event := range snapshot.allEvents() {
+		groups := slices.Clone(*event.groups)
+		for i := range groups {
+			if groups[i].compiled == nil || groups[i].compiled.pattern != groups[i].Matcher {
+				groups[i].compiled, _ = compileMatcher(groups[i].Matcher)
+			}
+		}
+		*event.groups = groups
+	}
+	c = &snapshot
 	var built hook.Hooks
 	if len(c.Hooks.PreToolUse) > 0 {
 		built.PreToolUse = append(built.PreToolUse, c.preToolUse(workDir, options))
@@ -295,6 +364,9 @@ func (c *Config) BuildWithOptions(workDir string, options BuildOptions) hook.Hoo
 	if len(c.Hooks.Stop) > 0 {
 		built.Stop = append(built.Stop, c.stop(workDir, options))
 	}
+	if len(c.Hooks.Interrupt) > 0 {
+		built.Interrupt = append(built.Interrupt, c.interrupt(workDir, options))
+	}
 	return built
 }
 
@@ -304,53 +376,65 @@ type selectedHandler struct {
 }
 
 type runResult struct {
-	configuredOrder int
-	completionOrder int
-	exitCode        int
-	stdout          string
-	stderr          string
-	err             error
+	configuredOrder        int
+	completionOrder        int
+	exitCode               int
+	stdout                 string
+	stdoutTruncated        bool
+	stderr                 string
+	err                    error
+	additionalContextLimit *int
+	spillDir               string
 }
 
 func runEvent(ctx context.Context, workDir string, options BuildOptions, event string, groups []MatcherGroup, matcherInputs []string, payload map[string]any) []runResult {
-	var selected []selectedHandler
+	if ctx.Err() != nil {
+		return nil
+	}
+	var synchronous, background []selectedHandler
 	order := 0
 	for _, group := range groups {
-		matcherIgnored := event == "UserPromptSubmit" || event == "Stop"
-		if !matcherIgnored && !groupMatches(group.Matcher, matcherInputs) {
+		matcherIgnored := event == "UserPromptSubmit" || event == "Stop" || event == "Interrupt"
+		if !matcherIgnored && !group.compiled.matches(matcherInputs) {
 			order += len(group.Hooks)
 			continue
 		}
 		for _, handler := range group.Hooks {
-			if handler.Type != "command" && handler.Type != "http" {
-				order++
-				continue
-			}
-			selected = append(selected, selectedHandler{configuredOrder: order, handler: handler})
+			selected := selectedHandler{configuredOrder: order, handler: handler}
 			order++
+			switch {
+			case handler.Type == "prompt" || handler.Type == "agent":
+			case handler.Type == "mcp_tool" && event == "SessionEnd":
+			case handler.Async && handler.Type != "mcp_tool" && event != "SessionEnd":
+				if options.Async != nil {
+					background = append(background, selected)
+				}
+			default:
+				synchronous = append(synchronous, selected)
+			}
 		}
 	}
-	if len(selected) == 0 || !options.Gate.Allowed(ctx) {
+	if len(synchronous) == 0 && len(background) == 0 || !options.Gate.Allowed(ctx, !observeOnly(event)) {
 		return nil
 	}
 	input, err := json.Marshal(payload)
 	if err != nil {
 		return nil
 	}
-	var synchronous []selectedHandler
-	for _, selected := range selected {
-		if selected.handler.Async {
-			// The released Codex runtime parses this field but does not execute
-			// async hooks yet. Avoid partial semantics that discard completion
-			// output or outlive session teardown differently from Codex.
-			continue
-		}
-		synchronous = append(synchronous, selected)
+	runtime := hook.RuntimeFromContext(ctx)
+	for _, selected := range background {
+		options.Async.start(runtime, func(ctx context.Context) []string {
+			result := selected.handler.run(ctx, workDir, event, input, options)
+			return parseResult(event, result).AdditionalContext
+		})
+	}
+	if len(synchronous) == 0 {
+		return nil
 	}
 	ch := make(chan runResult, len(synchronous))
 	for _, selected := range synchronous {
 		go func() {
-			result := selected.handler.run(ctx, workDir, event, input, options.Environment)
+			result := selected.handler.run(ctx, workDir, event, input, options)
 			result.configuredOrder = selected.configuredOrder
 			ch <- result
 		}()
@@ -369,22 +453,39 @@ func runEvent(ctx context.Context, workDir string, options BuildOptions, event s
 	return results
 }
 
-func (h Handler) run(ctx context.Context, workDir, event string, input []byte, environment map[string]string) runResult {
+// observeOnly events run at teardown: they must stay short and never prompt for trust.
+func observeOnly(event string) bool {
+	return event == "SessionEnd" || event == "Interrupt"
+}
+
+func (h Handler) run(ctx context.Context, workDir, event string, input []byte, options BuildOptions) runResult {
 	timeoutSeconds := defaultTimeout
-	if event == "SessionEnd" {
+	if observeOnly(event) {
 		timeoutSeconds = sessionEndTimeout
 	}
 	if h.Timeout != nil {
 		timeoutSeconds = max(*h.Timeout, 1)
 	}
-	if event == "SessionEnd" && timeoutSeconds > 3 {
-		timeoutSeconds = 3
+	if observeOnly(event) {
+		timeoutSeconds = min(timeoutSeconds, maxSessionEndTimeout)
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
-	if h.Type == "http" {
-		return h.post(ctx, input)
+	var result runResult
+	switch h.Type {
+	case "http":
+		result = h.post(ctx, input)
+	case "mcp_tool":
+		result = h.callMCP(ctx, input, options.MCP)
+	default:
+		result = h.runCommand(ctx, workDir, input, options.Environment)
 	}
+	result.additionalContextLimit = h.AdditionalContextLimit
+	result.spillDir = options.SpillDir
+	return result
+}
+
+func (h Handler) runCommand(ctx context.Context, workDir string, input []byte, environment map[string]string) runResult {
 	command := h.Command
 	if runtime.GOOS == "windows" {
 		if h.CommandWindows != "" {
@@ -393,23 +494,81 @@ func (h Handler) run(ctx context.Context, workDir, event string, input []byte, e
 			command = h.CommandWindowsSnake
 		}
 	}
-	cmd, err := shell.Command(ctx, command, workDir)
-	if err != nil {
-		return runResult{err: err}
-	}
+	// Codex substitutes ${NAME} itself so plugin paths work in every shell.
+	cmd := shell.Command(ctx, Expand(command, environment), workDir)
 	if len(environment) > 0 {
-		cmd.Env = mergedEnvironment(cmd.Env, environment)
+		cmd.Env = mergedEnvironment(os.Environ(), environment)
 	}
 	cmd.Stdin = bytes.NewReader(input)
-	var stdout, stderr bytes.Buffer
+	stdout := cappedBuffer{limit: maxHookOutput + 1}
+	stderr := cappedBuffer{limit: maxHookStderr + 1}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err = cmd.Run()
+	err := cmd.Run()
 	exitCode := -1
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
-	return runResult{exitCode: exitCode, stdout: limit(stdout.String()), stderr: limit(stderr.String()), err: nonExitError(err)}
+	return runResult{
+		exitCode: exitCode, stdout: limit(stdout.String()), stderr: limit(stderr.String()),
+		stdoutTruncated: stdout.Len() > maxHookOutput,
+		err:             nonExitError(err),
+	}
+}
+
+// Expand replaces ${NAME} for names in vars in one pass; replacement text is never rescanned.
+func Expand(value string, vars map[string]string) string {
+	var b strings.Builder
+	for {
+		start := strings.Index(value, "${")
+		if start < 0 {
+			break
+		}
+		end := strings.IndexByte(value[start+2:], '}')
+		if end < 0 {
+			break
+		}
+		replacement, ok := vars[value[start+2:start+2+end]]
+		if !ok {
+			b.WriteString(value[:start+2])
+			value = value[start+2:]
+			continue
+		}
+		b.WriteString(value[:start])
+		b.WriteString(replacement)
+		value = value[start+3+end:]
+	}
+	b.WriteString(value)
+	return b.String()
+}
+
+// cappedBuffer keeps draining a child process after the retained prefix is
+// full. Returning the original input length is required by io.Writer and keeps
+// a noisy hook from seeing a short-write error or blocking on a full pipe.
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	written := len(p)
+	remaining := b.limit - b.buf.Len()
+	if remaining <= 0 {
+		return written, nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	_, _ = b.buf.Write(p)
+	return written, nil
+}
+
+func (b *cappedBuffer) Len() int {
+	return b.buf.Len()
+}
+
+func (b *cappedBuffer) String() string {
+	return b.buf.String()
 }
 
 func mergedEnvironment(base []string, overrides map[string]string) []string {
@@ -471,7 +630,7 @@ func (h Handler) post(ctx context.Context, input []byte) runResult {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return runResult{exitCode: -1, stdout: limit(string(body)), err: fmt.Errorf("hook endpoint returned %s", resp.Status)}
 	}
-	return runResult{exitCode: 0, stdout: limit(string(body))}
+	return runResult{exitCode: 0, stdout: limit(string(body)), stdoutTruncated: len(body) > maxHookOutput}
 }
 
 func nonExitError(err error) error {
@@ -486,38 +645,48 @@ func nonExitError(err error) error {
 }
 
 func limit(value string) string {
+	overLimit := len(value) > maxHookOutput
 	value = strings.TrimSpace(value)
-	if len(value) <= maxHookOutput {
+	if !overLimit && len(value) <= maxHookOutput {
 		return value
 	}
-	return value[:maxHookOutput] + "\n[hook output truncated]"
+	return text.HeadBytes(value, maxHookOutput) + "\n[hook output truncated]"
 }
 
-func validMatcher(matcher string) bool {
-	if matcher == "" || matcher == "*" || exactMatcher(matcher) {
-		return true
-	}
-	_, err := regexp.Compile(matcher)
-	return err == nil
+type compiledMatcher struct {
+	pattern string
+	regex   *regexp.Regexp
 }
 
-func groupMatches(matcher string, inputs []string) bool {
-	if matcher == "" || matcher == "*" {
+func compileMatcher(pattern string) (*compiledMatcher, error) {
+	matcher := &compiledMatcher{pattern: pattern}
+	if pattern == "" || pattern == "*" || exactMatcher(pattern) {
+		return matcher, nil
+	}
+	regex, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	matcher.regex = regex
+	return matcher, nil
+}
+
+func (m *compiledMatcher) matches(inputs []string) bool {
+	if m == nil {
+		return false
+	}
+	if m.pattern == "" || m.pattern == "*" {
 		return true
 	}
-	if exactMatcher(matcher) {
-		for candidate := range strings.SplitSeq(matcher, "|") {
+	if m.regex == nil {
+		for candidate := range strings.SplitSeq(m.pattern, "|") {
 			if slices.Contains(inputs, candidate) {
 				return true
 			}
 		}
 		return false
 	}
-	re, err := regexp.Compile(matcher)
-	if err != nil {
-		return false
-	}
-	return slices.ContainsFunc(inputs, re.MatchString)
+	return slices.ContainsFunc(inputs, m.regex.MatchString)
 }
 
 func exactMatcher(matcher string) bool {
@@ -576,17 +745,34 @@ func parseResult(event string, result runResult) parsedResult {
 		}
 		return parsedResult{}
 	}
-	if result.exitCode != 0 || result.stdout == "" {
+	if result.exitCode != 0 || result.stdout == "" && !result.stdoutTruncated {
 		return parsedResult{}
+	}
+	plainContext := (event == "SessionStart" || event == "SubagentStart" || event == "UserPromptSubmit") &&
+		strings.TrimSpace(result.stdout) != "" && !strings.HasPrefix(strings.TrimSpace(result.stdout), "{") && !strings.HasPrefix(strings.TrimSpace(result.stdout), "[")
+	if result.stdoutTruncated && !plainContext {
+		// Never turn a decision into a no-op by parsing a truncated JSON prefix.
+		reason := fmt.Sprintf("%s hook response exceeded the %d KiB output limit; its decision could not be read", event, maxHookOutput/1024)
+		switch event {
+		case "PreToolUse", "UserPromptSubmit":
+			return parsedResult{Outcome: hook.Outcome{Block: true, Reason: reason}}
+		case "PermissionRequest":
+			return parsedResult{permission: hook.PermissionRequestOutcome{Behavior: hook.PermissionDeny, Message: reason}}
+		case "SubagentStart":
+			// This event only supplies context; it has no blocking semantics.
+			return parsedResult{Outcome: hook.Outcome{AdditionalContext: []string{reason}}}
+		default:
+			return parsedResult{Outcome: hook.Outcome{Stop: true, Reason: reason}}
+		}
 	}
 	var output wireOutput
 	decoder := json.NewDecoder(strings.NewReader(result.stdout))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&output); err != nil {
-		if event == "SessionStart" || event == "SubagentStart" || event == "UserPromptSubmit" {
-			if !strings.HasPrefix(strings.TrimSpace(result.stdout), "{") && !strings.HasPrefix(strings.TrimSpace(result.stdout), "[") {
-				return parsedResult{Outcome: hook.Outcome{AdditionalContext: []string{result.stdout}}}
-			}
+		if plainContext {
+			return parsedResult{Outcome: hook.Outcome{AdditionalContext: []string{
+				boundAdditionalContext(result.stdout, result.additionalContextLimit, result.spillDir),
+			}}}
 		}
 		return parsedResult{}
 	}
@@ -610,7 +796,8 @@ func parseResult(event string, result runResult) parsedResult {
 	}
 	if specific != nil && specific.AdditionalContext != nil {
 		if context := strings.TrimSpace(*specific.AdditionalContext); context != "" {
-			parsed.AdditionalContext = append(parsed.AdditionalContext, context)
+			parsed.AdditionalContext = append(parsed.AdditionalContext,
+				boundAdditionalContext(context, result.additionalContextLimit, result.spillDir))
 		}
 	}
 	switch event {
@@ -644,6 +831,39 @@ func parseResult(event string, result runResult) parsedResult {
 		}
 	}
 	return parsed
+}
+
+// spillFeedback bounds reasons fed back to the model, after every parseResult return path.
+func spillFeedback(event string, parsed parsedResult, spillDir string) parsedResult {
+	switch event {
+	case "PostToolUse", "Stop", "SubagentStop":
+		if parsed.Block && parsed.Reason != "" {
+			parsed.Reason = boundAdditionalContext(parsed.Reason, nil, spillDir)
+		}
+	}
+	return parsed
+}
+
+// boundAdditionalContext applies Codex's token threshold (0 disables it), spilling the full text to spillDir.
+func boundAdditionalContext(value string, configured *int, spillDir string) string {
+	tokenLimit := defaultAdditionalContextTokens
+	if configured != nil {
+		tokenLimit = *configured
+	}
+	if tokenLimit == 0 || (len(value)+3)/4 <= tokenLimit {
+		return value
+	}
+
+	footer := ""
+	if path := truncation.WriteScratch(spillDir, "hook", value); path != "" {
+		footer = "\n\nFull output saved to: " + path
+	}
+	byteBudget := tokenLimit * 4
+	marker := fmt.Sprintf("\n… hook additionalContext truncated from approximately %d tokens …\n", (len(value)+3)/4)
+	previewBudget := max(byteBudget-len(marker)-len(footer), 0)
+	headBudget := previewBudget / 2
+	tailBudget := previewBudget - headBudget
+	return text.HeadLines(value, headBudget) + marker + text.TailLines(value, tailBudget) + footer
 }
 
 // validWireOutput applies Codex's event-specific output schemas and semantic
@@ -716,8 +936,11 @@ func validWireOutput(event string, output wireOutput) bool {
 		}
 		return *output.Decision == "block" && output.Reason != nil && strings.TrimSpace(*output.Reason) != ""
 
-	case "SessionStart", "SubagentStart":
+	case "SessionStart":
 		return output.Decision == nil && output.Reason == nil && !hasPermissionFields && !hasPermissionRequestDecision
+
+	case "SubagentStart":
+		return !unsupportedControl && output.Decision == nil && output.Reason == nil && !hasPermissionFields && !hasPermissionRequestDecision
 
 	case "Stop", "SubagentStop":
 		if specific != nil {
@@ -727,7 +950,7 @@ func validWireOutput(event string, output wireOutput) bool {
 			return output.Decision == nil || *output.Decision == "block"
 		}
 		if output.Decision == nil {
-			return specific == nil && output.Decision == nil
+			return true
 		}
 		return *output.Decision == "block" && output.Reason != nil && strings.TrimSpace(*output.Reason) != ""
 
@@ -741,7 +964,7 @@ func aggregate(event string, results []runResult) parsedResult {
 	var combined parsedResult
 	latestRewrite := -1
 	for _, result := range results {
-		parsed := parseResult(event, result)
+		parsed := spillFeedback(event, parseResult(event, result), result.spillDir)
 		combined.AdditionalContext = append(combined.AdditionalContext, parsed.AdditionalContext...)
 		if parsed.Stop && !combined.Stop {
 			combined.Stop = true
@@ -776,7 +999,7 @@ func commonPayload(ctx context.Context, event, workDir string) map[string]any {
 	if runtime.TranscriptPath != "" {
 		transcript = runtime.TranscriptPath
 	}
-	return map[string]any{
+	payload := map[string]any{
 		"session_id":      runtime.SessionID,
 		"turn_id":         runtime.TurnID,
 		"transcript_path": transcript,
@@ -785,6 +1008,10 @@ func commonPayload(ctx context.Context, event, workDir string) map[string]any {
 		"model":           runtime.Model,
 		"permission_mode": runtime.PermissionMode,
 	}
+	if runtime.ReasoningEffort != "" {
+		payload["reasoning_effort"] = runtime.ReasoningEffort
+	}
+	return payload
 }
 
 func addSubagent(payload map[string]any, runtime hook.Runtime) {
@@ -797,10 +1024,13 @@ func addSubagent(payload map[string]any, runtime hook.Runtime) {
 func toolWire(call tool.ToolCall) (string, map[string]any, []string) {
 	input := map[string]any{}
 	_ = json.Unmarshal([]byte(call.Args), &input)
+	if input == nil {
+		input = map[string]any{}
+	}
 	name := call.Name
 	aliases := []string{call.Name}
 	switch call.Name {
-	case "shell":
+	case "shell", "exec":
 		name = "Bash"
 	case "exec_command":
 		name = "Bash"
@@ -811,9 +1041,9 @@ func toolWire(call tool.ToolCall) (string, map[string]any, []string) {
 	case "agent":
 		name = "Agent"
 	case "write":
-		aliases = append(aliases, "Write", "apply_patch")
+		aliases = append(aliases, "Write")
 	case "edit":
-		aliases = append(aliases, "Edit", "apply_patch")
+		aliases = append(aliases, "Edit")
 	}
 	aliases = append(aliases, name)
 	return name, input, aliases
@@ -929,6 +1159,13 @@ func (c *Config) postCompact(workDir string, options BuildOptions) hook.PostComp
 		addSubagent(payload, hook.RuntimeFromContext(ctx))
 		payload["trigger"] = trigger
 		return aggregate("PostCompact", runEvent(ctx, workDir, options, "PostCompact", c.Hooks.PostCompact, []string{trigger}, payload)).Outcome, nil
+	}
+}
+
+func (c *Config) interrupt(workDir string, options BuildOptions) hook.Interrupt {
+	return func(ctx context.Context) {
+		payload := commonPayload(ctx, "Interrupt", workDir)
+		runEvent(ctx, workDir, options, "Interrupt", c.Hooks.Interrupt, nil, payload)
 	}
 }
 

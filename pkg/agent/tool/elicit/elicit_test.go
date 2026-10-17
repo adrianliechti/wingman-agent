@@ -101,6 +101,18 @@ func TestExecuteValidatesQuestions(t *testing.T) {
 		{"option without label", map[string]any{"questions": []any{
 			question("Which?", "Pick", map[string]any{"description": "no label"}),
 		}}},
+		{"duplicate option label", map[string]any{"questions": []any{
+			question("Which?", "Pick",
+				map[string]any{"label": "Postgres", "description": "a"},
+				map[string]any{"label": "postgres", "description": "b"},
+			),
+		}}},
+		{"multi_select without options", map[string]any{"questions": []any{
+			map[string]any{"question": "Which?", "multi_select": true},
+		}}},
+		{"non-array options", map[string]any{"questions": []any{
+			map[string]any{"question": "Which?", "options": "invalid"},
+		}}},
 		{"too many", map[string]any{"questions": []any{
 			question("1?", "A"), question("2?", "B"), question("3?", "C"),
 			question("4?", "D"), question("5?", "E"),
@@ -231,5 +243,31 @@ func TestExecutePropagatesElicitationError(t *testing.T) {
 	})
 	if !errors.Is(err, sentinel) {
 		t.Errorf("expected sentinel error to propagate, got: %v", err)
+	}
+}
+
+func TestExecuteDeduplicatesCollidingHeaderSlugsAndFiltersEmptySelections(t *testing.T) {
+	var got tool.ElicitRequest
+	et := Tools(answering(map[string]any{
+		"a_3": "first",
+		"a":   []any{"", nil},
+		"a_4": []string{"  one ", "", "two  "},
+	}, &got))[0]
+
+	result, err := et.Execute(context.Background(), map[string]any{
+		"questions": []any{
+			question("First?", "a_3"),
+			question("Second?", "a"),
+			question("Third?", "a"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got.Fields) != 3 || got.Fields[0].Name != "a_3" || got.Fields[1].Name != "a" || got.Fields[2].Name != "a_4" {
+		t.Fatalf("fields = %+v", got.Fields)
+	}
+	if !strings.Contains(result.Content, "- a_3: first") || !strings.Contains(result.Content, "- a: (no answer)") || !strings.Contains(result.Content, "- a: one, two") {
+		t.Fatalf("rendered = %q", result.Content)
 	}
 }

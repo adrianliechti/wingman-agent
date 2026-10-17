@@ -1,48 +1,33 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo, useRef, useState } from "react";
-import {
-	modelQueries,
-	setCurrentEffort,
-	setCurrentModel,
-	type EffortState,
-	type ModelInfo,
-} from "../api/models";
-import { queryKeys } from "../api/query";
+import { useMutation } from "@tanstack/react-query";
+import { AlertTriangle, RefreshCw } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import type { SettingsPatch } from "../state/workspaceContext.ts";
+import type { SessionSettings } from "../state/sessionStore.ts";
 import { ModelProviderIcon } from "./ModelProviderIcon";
 import { useToast } from "./ui/Feedback";
 import { FloatingSurface } from "./ui/Floating";
 
 interface Props {
-	sessionId?: string;
+	settings: SessionSettings;
+	setSettings: (patch: SettingsPatch) => Promise<void>;
+	retryModels: () => Promise<void>;
 }
 
-const EMPTY_MODELS: ModelInfo[] = [];
-const EMPTY_EFFORTS: string[] = [];
-
-export function ModelPicker({ sessionId }: Props) {
+export function ModelPicker({ settings, setSettings, retryModels }: Props) {
 	const toast = useToast();
-	const queryClient = useQueryClient();
-	const models = useQuery(modelQueries.list()).data ?? EMPTY_MODELS;
-	const currentModel = useQuery(modelQueries.current(sessionId)).data;
-	const currentEffort = useQuery(modelQueries.effort(sessionId)).data;
-	const model = currentModel?.model ?? "";
-	const effort = currentEffort?.effort || "auto";
-	const effortOptions = Array.isArray(currentEffort?.options)
-		? currentEffort.options
-		: EMPTY_EFFORTS;
+	const models = settings.models;
+	const model = settings.model;
+	const effort = settings.effort || "auto";
+	const effortOptions = settings.efforts;
 	const [open, setOpen] = useState(false);
 	const [dragPct, setDragPct] = useState<number | null>(null);
 	const [dragging, setDragging] = useState(false);
-	const btnRef = useRef<HTMLButtonElement>(null);
+	const [button, setButton] = useState<HTMLButtonElement | null>(null);
 	const trackRef = useRef<HTMLDivElement>(null);
+	const discoveryMutation = useMutation({ mutationFn: retryModels });
 
 	const modelMutation = useMutation({
-		mutationFn: (id: string) => setCurrentModel(id, sessionId),
-		onSuccess: (data, id) => {
-			queryClient.setQueryData(queryKeys.models.current(sessionId), {
-				model: data.model || id,
-			});
-		},
+		mutationFn: (id: string) => setSettings({ model: id }),
 		onError: (error) =>
 			toast({
 				title: "Could not change model",
@@ -51,16 +36,7 @@ export function ModelPicker({ sessionId }: Props) {
 			}),
 	});
 	const effortMutation = useMutation({
-		mutationFn: (value: string) => setCurrentEffort(value, sessionId),
-		onSuccess: (data, value) => {
-			queryClient.setQueryData<EffortState>(
-				queryKeys.models.effort(sessionId),
-				(current) => ({
-					...current,
-					effort: data.effort || value,
-				}),
-			);
-		},
+		mutationFn: (value: string) => setSettings({ effort: value }),
 		onError: (error) =>
 			toast({
 				title: "Could not change effort",
@@ -69,46 +45,27 @@ export function ModelPicker({ sessionId }: Props) {
 			}),
 	});
 
-	const toggle = useCallback(() => {
+	const toggle = () => {
 		setOpen((v) => !v);
-	}, []);
+	};
 
-	const selectModel = useCallback(
-		(id: string) => {
-			modelMutation.mutate(id);
-		},
-		[modelMutation],
-	);
+	const selectModel = (id: string) => {
+		modelMutation.mutate(id);
+	};
 
-	const selectEffort = useCallback(
-		(value: string) => {
-			effortMutation.mutate(value);
-		},
-		[effortMutation],
-	);
+	const selectEffort = (value: string) => {
+		effortMutation.mutate(value);
+	};
 
 	const currentName = useMemo(() => {
 		const match = models.find((m) => m.id === model);
 		return match?.name || model;
 	}, [models, model]);
-	const currentNamespace = useMemo(
-		() => models.find((m) => m.id === model)?.namespace,
-		[models, model],
-	);
 
-	const defaultEffort = useMemo(
-		() =>
-			effortOptions.find((v) => v === "default" || v === "auto") ?? "default",
-		[effortOptions],
-	);
-	const efforts = useMemo(
-		() => effortOptions.filter((v) => v !== defaultEffort),
-		[effortOptions, defaultEffort],
-	);
-	const steps = useMemo(
-		() => [defaultEffort, ...efforts],
-		[defaultEffort, efforts],
-	);
+	const defaultEffort =
+		effortOptions.find((v) => v === "default" || v === "auto") ?? "default";
+	const efforts = effortOptions.filter((v) => v !== defaultEffort);
+	const steps = [defaultEffort, ...efforts];
 	const stepIndex = Math.max(0, steps.indexOf(effort));
 	const pct =
 		dragPct ?? (steps.length > 1 ? (stepIndex / (steps.length - 1)) * 100 : 0);
@@ -116,78 +73,71 @@ export function ModelPicker({ sessionId }: Props) {
 		steps.length > 1 ? Math.round((pct / 100) * (steps.length - 1)) : 0;
 	const knobLabel = previewIndex === 0 ? "Auto" : steps[previewIndex];
 
-	const commit = useCallback(
-		(index: number) => {
-			const value = steps[index];
-			if (value !== undefined && value !== effort) selectEffort(value);
-		},
-		[steps, effort, selectEffort],
-	);
+	const commit = (index: number) => {
+		const value = steps[index];
+		if (value !== undefined && value !== effort) selectEffort(value);
+	};
 
-	const handlePointerDown = useCallback(
-		(e: React.PointerEvent) => {
-			const track = trackRef.current;
-			if (!track || steps.length < 2) return;
-			const rect = track.getBoundingClientRect();
-			const toPct = (clientX: number) =>
-				Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100));
-			setDragging(true);
-			setDragPct(toPct(e.clientX));
-			const onMove = (ev: PointerEvent) => setDragPct(toPct(ev.clientX));
-			const onUp = (ev: PointerEvent) => {
-				window.removeEventListener("pointermove", onMove);
-				window.removeEventListener("pointerup", onUp);
-				const finalPct = toPct(ev.clientX);
-				const index = Math.round((finalPct / 100) * (steps.length - 1));
-				setDragging(false);
-				setDragPct(null);
-				commit(index);
-			};
-			window.addEventListener("pointermove", onMove);
-			window.addEventListener("pointerup", onUp);
-		},
-		[steps, commit],
-	);
-
-	const handleKeyDown = useCallback(
-		(e: React.KeyboardEvent) => {
-			let index = stepIndex;
-			if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
-				index = Math.max(0, stepIndex - 1);
-			} else if (e.key === "ArrowRight" || e.key === "ArrowUp") {
-				index = Math.min(steps.length - 1, stepIndex + 1);
-			} else if (e.key === "Home") {
-				index = 0;
-			} else if (e.key === "End") {
-				index = steps.length - 1;
-			} else {
-				return;
-			}
-			e.preventDefault();
+	const handlePointerDown = (e: React.PointerEvent) => {
+		const track = trackRef.current;
+		if (!track || steps.length < 2) return;
+		const rect = track.getBoundingClientRect();
+		const toPct = (clientX: number) =>
+			Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100));
+		setDragging(true);
+		setDragPct(toPct(e.clientX));
+		const onMove = (ev: PointerEvent) => setDragPct(toPct(ev.clientX));
+		const onUp = (ev: PointerEvent) => {
+			window.removeEventListener("pointermove", onMove);
+			window.removeEventListener("pointerup", onUp);
+			const finalPct = toPct(ev.clientX);
+			const index = Math.round((finalPct / 100) * (steps.length - 1));
+			setDragging(false);
+			setDragPct(null);
 			commit(index);
-		},
-		[stepIndex, steps, commit],
-	);
+		};
+		window.addEventListener("pointermove", onMove);
+		window.addEventListener("pointerup", onUp);
+	};
 
-	if (!model) return null;
+	const handleKeyDown = (e: React.KeyboardEvent) => {
+		let index = stepIndex;
+		if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+			index = Math.max(0, stepIndex - 1);
+		} else if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+			index = Math.min(steps.length - 1, stepIndex + 1);
+		} else if (e.key === "Home") {
+			index = 0;
+		} else if (e.key === "End") {
+			index = steps.length - 1;
+		} else {
+			return;
+		}
+		e.preventDefault();
+		commit(index);
+	};
+
+	if (!model && !settings.modelsError) return null;
 
 	return (
-		<div className="relative">
+		<div data-composer-model className="relative min-w-0 max-w-[260px]">
 			<button
-				ref={btnRef}
+				ref={setButton}
 				type="button"
 				onClick={toggle}
-				className="flex items-center gap-1 px-2 h-7 rounded text-[11.5px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors max-w-[260px]"
+				className="picker-control flex items-center gap-1 px-2 h-7 rounded text-[11.5px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors max-w-full"
 				title={`${model} · ${effort}`}
 				aria-haspopup="dialog"
 				aria-expanded={open}
 			>
-				<ModelProviderIcon
-					namespace={currentNamespace}
-					size={12}
-					className="shrink-0"
-				/>
-				<span className="truncate">{currentName}</span>
+				{settings.modelsError && (
+					<AlertTriangle
+						size={12}
+						className="shrink-0 text-warning"
+						aria-label="Model discovery failed"
+					/>
+				)}
+				<span className="truncate">{currentName || "Models unavailable"}</span>
 				{effort !== "auto" && effort !== "default" && (
 					<>
 						<span className="text-fg-dim">·</span>
@@ -198,19 +148,42 @@ export function ModelPicker({ sessionId }: Props) {
 			<FloatingSurface
 				open={open}
 				onOpenChange={setOpen}
-				reference={btnRef.current}
+				reference={button}
 				placement="top-start"
 				role="dialog"
 				label="Model and reasoning effort"
 				className="z-[100] min-w-[240px] max-w-[360px] bg-bg-elevated/95 backdrop-blur-sm border border-border rounded-md shadow-xl"
 			>
+				{settings.modelsError && (
+					<div className="flex items-center justify-between gap-3 border-b border-border px-3 py-1.5 text-[11px] text-warning">
+						<span>Model discovery failed</span>
+						<button
+							type="button"
+							className="shrink-0 rounded p-0.5 cursor-pointer hover:bg-bg-hover disabled:opacity-50 disabled:cursor-default"
+							aria-label="Retry model discovery"
+							title="Retry model discovery"
+							aria-busy={discoveryMutation.isPending}
+							disabled={discoveryMutation.isPending}
+							onClick={() => discoveryMutation.mutate()}
+						>
+							<RefreshCw
+								size={13}
+								className={
+									discoveryMutation.isPending ? "animate-spin" : undefined
+								}
+							/>
+						</button>
+					</div>
+				)}
 				<div
 					className="py-1 max-h-[260px] overflow-y-auto"
 					role="listbox"
 					aria-label="Model"
 				>
 					{models.length === 0 ? (
-						<div className="px-3 py-2 text-[12px] text-fg-dim">Loading…</div>
+						<div className="px-3 py-2 text-[12px] text-fg-dim">
+							{settings.modelsError ? "No models available" : "Loading…"}
+						</div>
 					) : (
 						models.map((m) => (
 							<button
@@ -218,7 +191,7 @@ export function ModelPicker({ sessionId }: Props) {
 								role="option"
 								aria-selected={m.id === model}
 								key={m.id}
-								className={`flex items-center gap-2 w-full text-left px-3 py-1.5 text-[12px] cursor-pointer whitespace-nowrap transition-colors ${
+								className={`picker-control flex items-center gap-2 w-full text-left px-3 py-1.5 text-[12px] cursor-pointer whitespace-nowrap transition-colors ${
 									m.id === model
 										? "text-fg bg-bg-active"
 										: "text-fg-muted hover:text-fg hover:bg-bg-hover"

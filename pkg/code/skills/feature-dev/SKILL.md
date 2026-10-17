@@ -1,71 +1,31 @@
 ---
 name: feature-dev
-description: Deliver a non-trivial feature by tracing the existing code, resolving material requirements, choosing one fitting architecture, implementing reviewable slices, and proving the behavior with focused tests. Use when a requested change spans components, changes behavior or contracts, introduces a new workflow, or would be risky to implement without first understanding local patterns.
+description: Implement a substantial feature across components, from exploration through verification. Use for coordinated behavior changes.
 ---
 # Feature Development
 
-Deliver the feature end to end. Scale the process to the change: a focused feature may need one explorer and a compact blueprint; a cross-cutting feature may need several independent research passes. Do not add ceremony that does not reduce risk.
+Deliver the requested feature end to end. Scale planning and exploration to the uncertainty in the change.
 
-Implement the following feature or change. If no invocation argument follows, use the user's latest request:
+Feature: $ARGUMENTS
 
-$ARGUMENTS
+Use the conversation when the argument is empty. A request for a plan stops at a plan; a request to build authorizes implementation within its stated scope.
 
-## Phase 1: Establish scope and explore
+## Establish the behavior
 
-Read the applicable project instructions and inspect git status before editing. Launch one to three `explore` agents with disjoint questions such as the current execution flow, similar features, extension points, user experience, and test strategy. Give each:
+Read project instructions and git status. Trace the nearest existing feature through its entry point, integration boundaries, state changes, and tests. Read the key implementation behind exploration summaries. Once the affected behavior, reusable components, and verification approach are clear, implement; deepen exploration only for a concrete unresolved question.
 
-- user request;
-- likely paths or symbols, if known;
-- project guideline files (`AGENTS.md`, `CLAUDE.md`) that apply;
-- request for entry points, execution flow, data flow, key abstractions, similar implementations, compatibility surfaces, tests, and five to ten essential files.
+Turn the request into observable acceptance criteria: what succeeds, what fails, what state changes, and what existing behavior must continue to work. Resolve choices from repository evidence where possible. Ask only when the answer would materially change scope, public behavior, data ownership, or an irreversible migration; continue independent work while awaiting it.
 
-Require file:line evidence and a clear facts-versus-inference distinction. After the agents return, read the essential files yourself; do not design from summaries alone.
+## Choose and implement an approach
 
-## Phase 2: Resolve material ambiguity
+Choose one design that fits the existing system. Explain consequential trade-offs and the files or interfaces affected. Compare alternatives only when they could change the decision. For a small feature, this can be a few sentences.
 
-Turn exploration into a concrete behavioral contract: inputs, outputs, error behavior, persistence, compatibility, and explicit non-goals. State safe assumptions. Ask the user only when different answers would materially change behavior, data, public contracts, or scope; otherwise proceed with the best-supported local convention.
+Implement coherent slices that can be exercised independently. Prefer existing abstractions when their contracts fit; introduce a new boundary when it simplifies ownership or behavior. Do not force a tiny patch when a coherent rewrite is needed. Preserve unrelated work and compatibility outside the requested change.
 
-## Phase 3: Architecture
+## Verify the result
 
-Launch a `code-architect` agent with the request and explorer findings. Ask for one implementation blueprint, not a menu:
+Check the acceptance criteria with meaningful tests or direct behavior checks using the repository's conventions. Exercise relevant failure paths as well as the successful path. Inspect the final diff for incomplete wiring, stale callers, configuration or migration gaps, and accidental scope growth.
 
-- patterns and conventions found;
-- files to create or modify;
-- component responsibilities and interfaces;
-- data flow;
-- error handling, persistence, security, performance, and compatibility concerns;
-- focused test strategy;
-- phased build sequence.
+Run the narrowest relevant checks, fix demonstrated issues, and rerun checks invalidated by those fixes. Broaden verification when shared behavior or integration boundaries changed. Update user-facing documentation when the feature changes how the product is used.
 
-Include the smallest coherent implementation slices and identify which slice can be verified independently. Reject parallel abstractions that duplicate an existing path. If the blueprint exposes a new material ambiguity, resolve it before editing.
-
-## Phase 4: Implement
-
-Work through the blueprint in small, reviewable phases:
-
-1. Edit the minimum set of existing files first.
-2. Add new files only when the existing architecture calls for them.
-3. Keep public behavior and APIs stable unless the request explicitly changes them.
-4. Follow local style and helper APIs instead of inventing parallel patterns.
-5. Leave unrelated refactors for later.
-
-Use `test-engineer` when behavior is broad, stateful, security-sensitive, or regression-prone. For a narrow change, add focused tests directly. Give every mutating subagent a disjoint file scope and explicit non-goals.
-
-## Phase 5: Review and verify
-
-After implementation:
-
-1. Inspect the final diff for accidental scope growth and changes to public APIs, CLI behavior, configuration, persisted data, or migrations.
-2. Launch a `code-reviewer` agent on the diff for correctness, silent failures, compatibility, test gaps, guideline violations, and security regressions.
-3. Launch a `code-simplifier` agent only if the diff introduces abstractions, repeated logic, or hot-path work.
-4. Run the narrowest meaningful build, test, lint, type-check, or direct behavior check. Broaden only when the changed surface warrants it.
-5. Fix real issues and rerun checks invalidated by the fix.
-
-## Phase 6: Report
-
-Summarize:
-
-- what changed;
-- key files touched;
-- tests/checks run and their result;
-- any deliberate non-goals, follow-up risks, or manual verification still needed.
+Report the resulting behavior, consequential decisions, verification results, and any remaining blocker or material limitation. Distinguish implemented behavior from planned follow-up work.

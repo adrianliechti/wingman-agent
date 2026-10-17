@@ -1,10 +1,11 @@
 package claude
 
 import (
-	"slices"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
+
+	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type ModelEntry struct {
@@ -53,6 +54,11 @@ func resolveModel(models []ModelEntry, id string) *ModelEntry {
 			return &models[i]
 		}
 	}
+	// Do not substitute a family alias for a versioned or date-pinned model.
+	base := strings.TrimSuffix(canonical, modelContextHint(id))
+	if strings.ContainsAny(base, "0123456789") {
+		return nil
+	}
 	for i := range models {
 		lid, lname := strings.ToLower(models[i].ID), strings.ToLower(models[i].Name)
 		if modelContextHint(models[i].ID) == modelContextHint(id) &&
@@ -61,6 +67,14 @@ func resolveModel(models []ModelEntry, id string) *ModelEntry {
 		}
 	}
 	return nil
+}
+
+func realModelID(model string) string {
+	model = strings.TrimSpace(model)
+	if strings.HasPrefix(model, "<") && strings.HasSuffix(model, ">") {
+		return ""
+	}
+	return model
 }
 
 func resolveResumedModel(models []ModelEntry, live string) *ModelEntry {
@@ -143,68 +157,27 @@ func modelConfigOption(models []ModelEntry, currentID string) acp.SessionConfigO
 
 func effortConfigOption(models []ModelEntry, currentModelID, currentEffort string) *acp.SessionConfigOption {
 	m := findModel(models, currentModelID)
-	if m == nil || len(m.EffortLevels) == 0 {
+	if m == nil {
 		return nil
 	}
-
-	ungrouped := acp.SessionConfigSelectOptionsUngrouped{
-		{Value: "default", Name: "Default"},
-	}
-	for _, lvl := range m.EffortLevels {
-		ungrouped = append(ungrouped, acp.SessionConfigSelectOption{
-			Value: acp.SessionConfigValueId(lvl),
-			Name:  titleCase(lvl),
-		})
-	}
-
-	current := currentEffort
-	if current == "" || !isValidEffort(m, current) {
-		current = "default"
-	}
-	opt := acp.NewSessionConfigOptionSelect(
-		acp.SessionConfigValueId(current),
-		acp.SessionConfigSelectOptions{Ungrouped: &ungrouped},
-	)
-	desc := "Reasoning effort for the selected model"
-	cat := acp.SessionConfigOptionCategoryThoughtLevel
-	opt.Select.Id = effortConfigID
-	opt.Select.Name = "Effort"
-	opt.Select.Description = &desc
-	opt.Select.Category = &cat
-	return &opt
-}
-
-func isValidEffort(m *ModelEntry, level string) bool {
-	if level == "" || level == "default" {
-		return true
-	}
-	return slices.Contains(m.EffortLevels, level)
+	return acpcommon.EffortConfigOption(m.EffortLevels, currentEffort)
 }
 
 func normalizeSessionConfig(models []ModelEntry, modelID, effort string) (string, string) {
 	if m := resolveModel(models, modelID); m != nil {
 		modelID = m.ID
-		if !isValidEffort(m, effort) {
+		if !acpcommon.IsValidEffort(m.EffortLevels, effort) {
 			effort = "default"
 		}
 	}
 	return modelID, effort
 }
 
-func titleCase(s string) string {
-	if s == "" {
-		return s
-	}
-	out := []byte(s)
-	if out[0] >= 'a' && out[0] <= 'z' {
-		out[0] -= 0x20
-	}
-	return string(out)
-}
-
-const defaultModeID = "agent"
-
-const exitPlanPermissionMode = "auto"
+const (
+	defaultModeID = "agent"
+	planModeID    = "plan"
+	bypassModeID  = "unattended"
+)
 
 type sessionMode struct {
 	id             string
@@ -228,21 +201,13 @@ func findMode(id string) *sessionMode {
 	return nil
 }
 
-func buildSessionModeState(currentID string) *acp.SessionModeState {
-	if currentID == "" {
-		currentID = defaultModeID
-	}
-	available := make([]acp.SessionMode, 0, len(sessionModes))
+func buildSessionModeState(currentID string, allowBypass bool) *acp.SessionModeState {
+	infos := make([]acpcommon.ModeInfo, 0, len(sessionModes))
 	for _, m := range sessionModes {
-		desc := m.description
-		available = append(available, acp.SessionMode{
-			Id:          acp.SessionModeId(m.id),
-			Name:        m.name,
-			Description: &desc,
-		})
+		if m.id == bypassModeID && !allowBypass {
+			continue
+		}
+		infos = append(infos, acpcommon.ModeInfo{ID: m.id, Name: m.name, Description: m.description})
 	}
-	return &acp.SessionModeState{
-		AvailableModes: available,
-		CurrentModeId:  acp.SessionModeId(currentID),
-	}
+	return acpcommon.SessionModeState(infos, currentID, defaultModeID)
 }

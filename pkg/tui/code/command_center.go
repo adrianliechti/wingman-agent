@@ -12,7 +12,7 @@ func builtinGroup(name string) string {
 	switch name {
 	case "/diff", "/problems", "/context":
 		return "Workspace"
-	case "/resume", "/recap", "/clear":
+	case "/resume", "/fork", "/recap", "/clear", "/copy", "/export", "/queue", "/discard":
 		return "Session"
 	case "/model", "/agent", "/plan", "/unattended", "/tasks":
 		return "Agent"
@@ -23,6 +23,8 @@ func builtinGroup(name string) string {
 
 func builtinShortcut(name string) string {
 	switch name {
+	case "/queue":
+		return "ctrl+q"
 	case "/agent", "/plan":
 		return "tab"
 	case "/unattended":
@@ -76,8 +78,10 @@ func (a *App) showCommandCenter() {
 			DisabledReason: "available when the current turn finishes",
 		}
 		switch command.Name {
-		case "/agent", "/plan", "/unattended":
+		case "/agent", "/plan":
 			item.Checked = strings.TrimPrefix(command.Name, "/") == currentMode
+		case "/unattended":
+			item.Checked = a.unattended()
 		}
 
 		run := func() { command.Run(a) }
@@ -133,9 +137,11 @@ func (a *App) refreshCommandCenter() {
 	}
 
 	a.showCommandCenter()
+	a.popup.maxRows = previous.maxRows
 	a.popup.SetQuery(previous.query)
 	if item, ok := previous.Current(); ok {
 		a.popup.SelectID(item.ID)
+		a.popup.offset = max(a.popup.index-(previous.index-previous.offset), 0)
 	}
 }
 

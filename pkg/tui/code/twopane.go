@@ -272,21 +272,6 @@ func (o *twoPaneOverlay) HandleMouse(ev inline.MouseEvent) {
 	}
 }
 
-func scrollMarker(row, rows, offset, total int) string {
-	if total <= rows || rows <= 0 {
-		return " "
-	}
-	thumb := max(1, rows*rows/total)
-	start := 0
-	if maxOffset := total - rows; maxOffset > 0 {
-		start = offset * (rows - thumb) / maxOffset
-	}
-	if row >= start && row < start+thumb {
-		return colored(theme.Default.Cyan, "█")
-	}
-	return dim("│")
-}
-
 func (o *twoPaneOverlay) renderHeader(width int, detail bool) []string {
 	title := bold(o.title)
 	if detail {
@@ -303,8 +288,7 @@ func (o *twoPaneOverlay) renderHeader(width int, detail bool) []string {
 			title += dim(" · " + strconv.Itoa(len(o.filtered)) + " matches")
 		}
 	}
-	rule := colored(theme.Default.BrBlack, strings.Repeat("─", max(10, width)))
-	return []string{ansi.Truncate(title, width, "…"), ansi.Truncate(rule, width, "…")}
+	return []string{closeHeader(title, width), ""}
 }
 
 func (o *twoPaneOverlay) Render(width, height int) []string {
@@ -319,7 +303,6 @@ func (o *twoPaneOverlay) Render(width, height int) []string {
 }
 
 func (o *twoPaneOverlay) renderWide(width, height, rows int) []string {
-	t := theme.Default
 	listWidth := min(paneListWidth, max(28, width*36/100))
 	detailWidth := max(10, width-listWidth-3)
 
@@ -337,22 +320,20 @@ func (o *twoPaneOverlay) renderWide(width, height, rows int) []string {
 		position := o.listOffset + row
 		if position >= 0 && position < len(o.filtered) {
 			left = o.items(position == o.selected && !o.focusRight, o.filtered[position])
-			left = ansi.Pad(ansi.Truncate(left, listWidth, "…"), listWidth)
+			left = ansi.Pad(ansi.Truncate(left, listWidth-1, "…"), listWidth-1)
 			if position == o.selected && !o.focusRight {
-				left = ansi.Highlight(left, 0, listWidth, ansi.Bg(t.Selection))
+				left = selectionLine(left, listWidth-1)
 			}
 		} else {
-			left = strings.Repeat(" ", listWidth)
+			left = strings.Repeat(" ", listWidth-1)
 		}
+		left = scrollbarLine(left, listWidth, scrollMarker(row, rows, o.listOffset, len(o.filtered)))
 		if index := o.detailOffset + row; index < len(o.detail) {
 			right = o.detail[index]
 		}
-		divider := colored(t.BrBlack, "│")
-		if o.focusRight {
-			divider = colored(t.Cyan, "┃")
-		}
 		marker := scrollMarker(row, rows, o.detailOffset, len(o.detail))
-		line := left + divider + " " + ansi.Pad(ansi.Truncate(right, detailWidth, "…"), detailWidth) + marker
+		right = " " + ansi.Pad(ansi.Truncate(right, detailWidth, "…"), detailWidth) + marker
+		line := left + ansi.Reset + " " + panelLine(right, detailWidth+2)
 		lines = append(lines, ansi.Truncate(line, width, "…"))
 	}
 	hints := "↑↓/jk select · enter/right detail · tab switch · / filter · esc close"
@@ -382,10 +363,10 @@ func (o *twoPaneOverlay) renderNarrow(width, height, rows int) []string {
 			if position >= 0 && position < len(o.filtered) {
 				line = o.items(position == o.selected, o.filtered[position])
 				if position == o.selected {
-					line = ansi.Highlight(ansi.Pad(ansi.Truncate(line, width, "…"), width), 0, width, ansi.Bg(theme.Default.Selection))
+					line = selectionLine(line, max(0, width-1))
 				}
 			}
-			lines = append(lines, ansi.Truncate(line, width, "…"))
+			lines = append(lines, scrollbarLine(line, width, scrollMarker(row, rows, o.listOffset, len(o.filtered))))
 		}
 		hints := "↑↓/jk select · enter/right open · / filter · esc close"
 		if o.searching {
@@ -401,7 +382,7 @@ func (o *twoPaneOverlay) renderNarrow(width, height, rows int) []string {
 			line = o.detail[index]
 		}
 		marker := scrollMarker(row, rows, o.detailOffset, len(o.detail))
-		lines = append(lines, ansi.Pad(ansi.Truncate(line, max(1, width-1), "…"), max(1, width-1))+marker)
+		lines = append(lines, scrollbarLine(line, width, marker))
 	}
 	lines = append(lines, ansi.Truncate(dim("↑↓/jk scroll · g/G top/bottom · left/esc back"), width, "…"))
 	return lines[:min(len(lines), height)]

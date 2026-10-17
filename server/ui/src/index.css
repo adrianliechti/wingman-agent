@@ -163,9 +163,19 @@ select,
 	outline-offset: -2px;
 }
 
+.picker-control:focus-visible {
+	outline: none;
+	background-color: var(--color-bg-hover);
+}
+.picker-control[aria-checked="true"]:focus-visible,
+.picker-control[aria-selected="true"]:focus-visible {
+	background-color: var(--color-bg-active);
+}
+
 /* The entire rounded composer is the input affordance. Its textarea remains
    visually transparent while focus is shown on the outer surface only. */
 [data-chat-composer] {
+	container: chat-composer / inline-size;
 	background: var(--color-bg-input);
 	border: 1px solid var(--color-border-subtle);
 	transition:
@@ -179,6 +189,19 @@ select,
 	border-color: var(--color-border-strong);
 }
 
+/* History and split panes reduce the composer independently of the viewport.
+   Keep the model longer than the mode, reserving room for message actions. */
+@container chat-composer (width < 420px) {
+	[data-composer-mode] {
+		display: none;
+	}
+}
+@container chat-composer (width < 260px) {
+	[data-composer-model] {
+		display: none;
+	}
+}
+
 .chat-composer-textarea,
 .chat-composer-textarea:hover,
 .chat-composer-textarea:focus,
@@ -189,22 +212,37 @@ select,
 	box-shadow: none;
 }
 
-/* Minimal scrollbars */
+/* iOS-style overlay scrollbars. The standards-based properties match
+   Tailwind 4.3's scrollbar utilities; WebKit gets the same slim capsule. */
 @layer base {
 	* {
-		scrollbar-color: var(--color-scrollbar-thumb) transparent;
+		scrollbar-color: transparent transparent;
 		scrollbar-width: thin;
 	}
+	*.scrollbar-active {
+		scrollbar-color: var(--color-scrollbar-thumb) transparent;
+	}
 	::-webkit-scrollbar {
-		width: 6px;
-		height: 6px;
+		width: 8px;
+		height: 8px;
 	}
 	::-webkit-scrollbar-thumb {
-		background: var(--color-scrollbar-thumb);
-		border-radius: 3px;
+		min-width: 32px;
+		min-height: 32px;
+		border: 2px solid transparent;
+		border-radius: 9999px;
+		background: transparent content-box;
+	}
+	.scrollbar-active::-webkit-scrollbar-thumb {
+		background-color: var(--color-scrollbar-thumb);
 	}
 	::-webkit-scrollbar-thumb:hover {
-		background: var(--color-scrollbar-thumb-hover);
+		background-color: var(--color-scrollbar-thumb-hover);
+	}
+	::-webkit-scrollbar-button {
+		display: none;
+		width: 0;
+		height: 0;
 	}
 	::-webkit-scrollbar-track,
 	::-webkit-scrollbar-corner {
@@ -214,9 +252,26 @@ select,
 
 /* The primary toolbar doubles as desktop window chrome. Electron and recent
    WebView2 builds understand app-region directly; AppKit uses the equivalent
-   native full-size-content window configured by app/titlebar_darwin.go. */
+   native full-size-content window configured by go-shell.
+
+	 go-shell publishes the space its native window controls occupy as
+	 --shell-titlebar-inset-left / -right, so the toolbar reserves whichever side
+	 the platform puts them on: the macOS traffic lights on the left, the Windows
+	 caption buttons on the right. Wingman owns the Windows app menu. */
 .window-titlebar {
-	--window-controls-inset: 0px;
+	--window-controls-inset: var(--shell-titlebar-inset-left, 0px);
+	--window-controls-inset-end: var(--shell-titlebar-inset-right, 0px);
+	/* go-shell already pads its reported inset past the caption glyphs, so the
+	   trailing edge of the toolbar can reach back into that cushion instead of
+	   stacking a second gap on top of it. */
+	--window-controls-cushion: 6px;
+	--window-controls-reserve-end: max(
+		0px,
+		calc(var(--window-controls-inset-end) - var(--window-controls-cushion))
+	);
+	--window-menu-inset: 0px;
+	height: var(--shell-titlebar-height, 40px);
+	min-height: var(--shell-titlebar-height, 40px);
 	--shell-window-drag: drag;
 	app-region: drag;
 	-webkit-app-region: drag;
@@ -226,6 +281,25 @@ select,
 
 .window-titlebar-controls-spacer {
 	width: var(--window-controls-inset);
+}
+
+.window-titlebar-controls-spacer-end {
+	width: var(--window-controls-reserve-end);
+	min-width: var(--window-controls-reserve-end);
+}
+
+.window-app-menu {
+	display: none;
+}
+
+html[data-window-chrome="windows-overlay"] .window-titlebar {
+	--window-menu-inset: 32px;
+}
+
+html[data-window-chrome="windows-overlay"] .window-app-menu {
+	display: flex;
+	min-width: var(--window-menu-inset);
+	width: var(--window-menu-inset);
 }
 
 .window-titlebar :where(button, a, input, select, textarea, [role="tab"]) {
@@ -238,10 +312,6 @@ select,
    feedback; a 32px rounded fill looks oversized inside the slim chrome. */
 .window-titlebar button:not([role="tab"]):hover {
 	background-color: transparent;
-}
-
-html[data-window-chrome="macos-overlay"] .window-titlebar {
-	--window-controls-inset: 76px;
 }
 
 ::selection {
@@ -446,6 +516,18 @@ html[data-window-chrome="macos-overlay"] .window-titlebar {
 		color-mix(in srgb, var(--color-warning) 70%, transparent);
 }
 
+/* URLs in code keep their token color; Ctrl/Cmd+click opens them. */
+.md-code-link {
+	color: inherit;
+	text-decoration: underline dotted
+		color-mix(in srgb, currentColor 45%, transparent);
+	text-underline-offset: 2px;
+	cursor: text;
+}
+.md-code-link:hover {
+	text-decoration-style: solid;
+}
+
 .md-token-comment {
 	color: var(--color-fg-dim);
 	font-style: italic;
@@ -483,4 +565,52 @@ html[data-window-chrome="macos-overlay"] .window-titlebar {
 }
 .wingman-static-diff .diff-hidden-lines .center a {
 	display: none;
+}
+
+/* Change the layout around the existing content; never mount a second chat. */
+[data-mobile-layout] {
+	padding-top: env(safe-area-inset-top);
+	padding-bottom: env(safe-area-inset-bottom);
+}
+[data-mobile-layout] [data-window-titlebar],
+[data-mobile-layout] [data-panel-frame],
+[data-mobile-layout] [data-layout-panel="side"],
+[data-mobile-layout] #wingman-layout > [role="separator"] {
+	display: none !important;
+}
+[data-mobile-layout] #pane-split > [role="separator"],
+[data-mobile-layout] #pane-split > [data-mobile-active="false"] {
+	display: none !important;
+}
+[data-mobile-layout] #pane-split > [data-mobile-active="true"],
+[data-mobile-layout] [data-layout-panel="center"] {
+	flex: 1 1 100% !important;
+}
+@media (pointer: coarse) and (max-width: 1024px) {
+	.chat-composer-textarea {
+		font-size: 16px;
+	}
+	[data-chat-composer] button {
+		min-height: 44px;
+		min-width: 36px;
+	}
+	[data-chat-composer] [aria-haspopup="dialog"] {
+		max-width: 40vw;
+	}
+	[data-mobile-sessions] [data-session-id] > button {
+		min-height: 52px;
+	}
+	[data-mobile-sessions] [data-session-id] .text-\[12px\] {
+		font-size: 14px;
+	}
+}
+
+@media (pointer: coarse) {
+	[data-prompt] button,
+	[data-prompt] input {
+		min-height: 44px;
+	}
+	[data-prompt] button {
+		min-width: 44px;
+	}
 }

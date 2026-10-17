@@ -6,6 +6,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
 const (
@@ -16,9 +17,9 @@ const (
 )
 
 // runSchedules fires this session's due tasks into its own conversation. The
-// schedules live and die with the session: nothing is persisted, and a task
-// that comes due while a turn is running is queued by the turn manager rather
-// than dropped. The loop sleeps until the earliest next run instead of a
+// schedules are persisted with the session, and a task that comes due while a
+// turn is running is queued by the turn manager rather than dropped. The loop
+// sleeps until the earliest next run instead of a
 // fixed tick, so sub-minute intervals fire on time; store changes wake it to
 // re-plan.
 func (s *sessionState) runSchedules() {
@@ -87,7 +88,7 @@ func (s *sessionState) fireSchedule(ctx context.Context, t schedule.Task) {
 	var gateErr error
 
 	if t.Script != "" {
-		wake, gateOutput, gateErr = schedule.RunGate(ctx, s.parent.workspace.RootPath, t.Script)
+		wake, gateOutput, gateErr = schedule.RunTaskGate(code.WithSessionID(ctx, s.id), s.parent.workspace.RootPath, t, s.scriptOptions)
 	}
 
 	if ctx.Err() != nil {
@@ -96,10 +97,17 @@ func (s *sessionState) fireSchedule(ctx context.Context, t schedule.Task) {
 
 	now := time.Now()
 
-	s.schedules.Mutate(func(tasks []schedule.Task) ([]schedule.Task, error) {
+	var fireSeq uint64
+	if err := s.schedules.Mutate(func(tasks []schedule.Task) ([]schedule.Task, error) {
 		var kept []schedule.Task
 		for i := range tasks {
 			if tasks[i].ID == t.ID {
+				if tasks[i].Status != schedule.StatusActive {
+					kept = append(kept, tasks[i])
+					continue
+				}
+				tasks[i].FireSeq++
+				fireSeq = tasks[i].FireSeq
 				if schedule.IsOneTime(tasks[i].Schedule) {
 					continue
 				}
@@ -115,7 +123,9 @@ func (s *sessionState) fireSchedule(ctx context.Context, t schedule.Task) {
 			kept = append(kept, tasks[i])
 		}
 		return kept, nil
-	})
+	}); err != nil || fireSeq == 0 {
+		return
+	}
 
 	if !wake {
 		return
@@ -135,6 +145,6 @@ func (s *sessionState) fireSchedule(ctx context.Context, t schedule.Task) {
 		Status:      task.StatusDone,
 		// Seq distinguishes successive fires of the same task: UIs derive the
 		// turn input id from it, and a repeated id is dropped as a duplicate.
-		Seq: int(s.scheduleSeq.Add(1)),
+		Seq: int(fireSeq),
 	})
 }

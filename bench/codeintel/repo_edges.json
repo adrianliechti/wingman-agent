@@ -1,0 +1,32 @@
+{
+  "gin": [
+    ["gin.go:583", "ServeHTTP", "gin.go:605", "handleHTTPRequest", true],
+    ["gin.go:605", "handleHTTPRequest", "context.go:182", "Next", true],
+    ["gin.go:675", "serveError", "context.go:182", "Next", true],
+    ["gin.go:312", "Use", "routergroup.go:65", "Use", true],
+    ["context.go:199", "Abort", "context.go:182", "Next", false],
+    ["gin.go:583", "ServeHTTP", "gin.go:675", "serveError", false]
+  ],
+  "django": [
+    ["django/db/models/query.py:385", "__iter__", "django/db/models/query.py:1926", "_fetch_all", true],
+    ["django/db/models/query.py:1926", "_fetch_all", "django/db/models/query.py:1318", "_prefetch_related_objects", true],
+    ["django/db/models/query.py:85", "__iter__", "django/db/models/sql/compiler.py:1544", "execute_sql", true],
+    ["django/db/models/sql/compiler.py:1544", "execute_sql", "django/db/models/sql/compiler.py:736", "as_sql", true],
+    ["django/db/models/query.py:85", "__iter__", "django/db/models/query.py:1926", "_fetch_all", false],
+    ["django/db/models/query.py:1926", "_fetch_all", "django/db/models/query.py:2112", "_fetch_all", false]
+  ],
+  "excalidraw": [
+    ["src/renderer/renderScene.ts:1086", "renderStaticScene", "src/renderer/renderScene.ts:902", "_renderStaticScene", true],
+    ["src/renderer/renderScene.ts:1086", "renderStaticScene", "src/renderer/renderScene.ts:1076", "renderStaticSceneThrottled", true],
+    ["src/renderer/renderScene.ts:1059", "renderInteractiveScene", "src/renderer/renderScene.ts:445", "_renderInteractiveScene", true],
+    ["src/renderer/renderScene.ts:1059", "renderInteractiveScene", "src/renderer/renderScene.ts:1047", "renderInteractiveSceneThrottled", true],
+    ["src/renderer/renderScene.ts:1086", "renderStaticScene", "src/renderer/renderScene.ts:445", "_renderInteractiveScene", false],
+    ["src/renderer/renderScene.ts:1098", "cancelRender", "src/utils.ts:136", "throttleRAF", false]
+  ],
+  "vscode": [
+    ["src/vs/workbench/services/extensions/common/rpcProtocol.ts:360", "_receiveRequest", "src/vs/workbench/services/extensions/common/rpcProtocol.ts:441", "_invokeHandler", true],
+    ["src/vs/workbench/services/extensions/common/rpcProtocol.ts:441", "_invokeHandler", "src/vs/workbench/services/extensions/common/rpcProtocol.ts:449", "_doInvokeHandler", true],
+    ["src/vs/workbench/services/extensions/common/rpcProtocol.ts:360", "_receiveRequest", "src/vs/workbench/services/extensions/common/rpcProtocol.ts:397", "_receiveCancel", false],
+    ["src/vs/workbench/services/extensions/common/rpcProtocol.ts:403", "_receiveReply", "src/vs/workbench/services/extensions/common/rpcProtocol.ts:449", "_doInvokeHandler", false]
+  ]
+}

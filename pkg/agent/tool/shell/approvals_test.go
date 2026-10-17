@@ -16,7 +16,7 @@ func TestApprovalDisplayMakesObfuscationVisible(t *testing.T) {
 	}}
 
 	raw := "rm\t-rf /tmp/x\u202e"
-	if err := confirmIfDangerous(context.Background(), elicit, NewApprovals(), raw, true); err != nil {
+	if err := confirmIfDangerous(context.Background(), elicit, NewApprovals(), "shell_command", raw, true); err != nil {
 		t.Fatal(err)
 	}
 	if strings.ContainsRune(shown, '\t') || strings.ContainsRune(shown, '\u202e') {
@@ -36,7 +36,7 @@ func TestApprovalKeysDoNotTrimCarriageReturn(t *testing.T) {
 	appr := NewApprovals()
 
 	for _, command := range []string{"sudo id\r", "sudo id"} {
-		if err := confirmIfDangerous(context.Background(), elicit, appr, command, true); err != nil {
+		if err := confirmIfDangerous(context.Background(), elicit, appr, "shell_command", command, true); err != nil {
 			t.Fatal(err)
 		}
 	}

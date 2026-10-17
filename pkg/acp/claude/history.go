@@ -1,7 +1,6 @@
 package claude
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +13,9 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
+	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 const maxProjectKeyLen = 200
@@ -56,17 +58,19 @@ func projectDirFor(cwd string) string {
 		return ""
 	}
 	resolved := cwd
-	if r, err := filepath.EvalSymlinks(cwd); err == nil {
+	if r, err := pathutil.Resolve(cwd); err == nil {
 		resolved = r
 	}
 	return filepath.Join(root, encodeCwd(resolved))
 }
 
 type historyHeader struct {
-	Type    string               `json:"type"`
-	AITitle string               `json:"aiTitle,omitempty"`
-	Cwd     string               `json:"cwd,omitempty"`
-	Message historyHeaderMessage `json:"message"`
+	Type            string               `json:"type"`
+	AITitle         string               `json:"aiTitle,omitempty"`
+	Cwd             string               `json:"cwd,omitempty"`
+	ParentToolUseID string               `json:"parent_tool_use_id,omitempty"`
+	ParentAgentID   string               `json:"parent_agent_id,omitempty"`
+	Message         historyHeaderMessage `json:"message"`
 }
 
 type historyHeaderMessage struct {
@@ -83,12 +87,13 @@ func scanSessionModel(path string) string {
 	defer f.Close()
 
 	var model string
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	scanner := newCLIScanner(f)
 	for scanner.Scan() {
 		var h historyHeader
-		if json.Unmarshal(scanner.Bytes(), &h) == nil && h.Type == "assistant" && h.Message.Model != "" {
-			model = h.Message.Model
+		if json.Unmarshal(scanner.Bytes(), &h) == nil && h.Type == "assistant" && h.ParentToolUseID == "" && h.ParentAgentID == "" {
+			if current := realModelID(h.Message.Model); current != "" {
+				model = current
+			}
 		}
 	}
 	_ = scanner.Err()
@@ -204,8 +209,7 @@ func scanSessionMetadata(path string) (title, cwd string) {
 		return "", ""
 	}
 	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	scanner := newCLIScanner(f)
 
 	var firstUserText, latestAITitle string
 	for scanner.Scan() {
@@ -274,7 +278,7 @@ func truncateTitle(s string) string {
 	return s[:max-1] + "…"
 }
 
-func replayHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, cwd string, plan *taskPlan) error {
+func replayHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, cwd string) error {
 	dir := projectDirFor(cwd)
 	if dir == "" {
 		return nil
@@ -288,13 +292,12 @@ func replayHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 		return err
 	}
 	defer f.Close()
-	return streamHistory(ctx, conn, sid, cwd, f, plan)
+	return streamHistory(ctx, conn, sid, cwd, f)
 }
 
-func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, cwd string, r io.Reader, plan *taskPlan) error {
+func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, cwd string, r io.Reader) error {
 	cache := toolUseCache{}
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	scanner := newCLIScanner(r)
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -309,11 +312,15 @@ func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 		}
 		switch env.Type {
 		case "user":
-			if err := replayUserMessage(ctx, conn, sid, env.Message, cache, plan, env.ParentToolUseID); err != nil {
+			if err := replayUserMessage(ctx, conn, sid, env.Message, cache, env.ParentToolUseID); err != nil {
 				return err
 			}
 		case "assistant":
-			if err := emitAssistant(ctx, conn, sid, env.Message, cwd, cache, nil, nil, plan, env.ParentToolUseID); err != nil {
+			var message cliMessage
+			if env.ParentToolUseID == "" && json.Unmarshal(env.Message, &message) == nil && isSyntheticLoginMessage(message) {
+				continue
+			}
+			if err := emitAssistant(ctx, conn, sid, env.Message, cwd, cache, nil, nil, env.ParentToolUseID); err != nil {
 				return err
 			}
 		}
@@ -326,7 +333,18 @@ func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 
 var localCommandStdoutPattern = regexp.MustCompile(`(?s)<local-command-stdout>(.*?)</local-command-stdout>`)
 
-var localCommandTagPattern = regexp.MustCompile(`(?s)<command-name>.*?</command-name>|<command-message>.*?</command-message>|<command-args>.*?</command-args>|<local-command-stderr>.*?</local-command-stderr>`)
+var localCommandTagPattern = regexp.MustCompile(`(?s)<command-name>.*?</command-name>|<command-message>.*?</command-message>|<command-args>.*?</command-args>|<local-command-stderr>.*?</local-command-stderr>|<system-reminder>.*?</system-reminder>`)
+
+var (
+	commandNamePattern = regexp.MustCompile(`(?s)<command-name>(.*?)</command-name>`)
+	commandArgsPattern = regexp.MustCompile(`(?s)<command-args>(.*?)</command-args>`)
+)
+
+// replayHiddenCommands are client-local commands whose marker-only records are UI noise, not prompts.
+var replayHiddenCommands = map[string]bool{
+	"/context": true, "/heapdump": true, "/extra-usage": true,
+	"/compact": true, "/model": true, "/status": true, "/usage": true,
+}
 
 func stripMarkerTags(text string) (string, bool) {
 	stripped := localCommandStdoutPattern.ReplaceAllString(text, "$1")
@@ -337,7 +355,29 @@ func stripMarkerTags(text string) (string, bool) {
 	return stripped, true
 }
 
-func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache, plan *taskPlan, parentToolUseID string) error {
+// A marker-only slash skill invocation is rebuilt as the command the user typed.
+func replayUserText(text string) (string, bool) {
+	if stripped, ok := stripMarkerTags(text); ok {
+		return stripped, true
+	}
+	if strings.Contains(text, "<local-command-stdout>") || strings.Contains(text, "<local-command-stderr>") {
+		return "", false
+	}
+	m := commandNamePattern.FindStringSubmatch(text)
+	if m == nil {
+		return "", false
+	}
+	name := strings.TrimSpace(m[1])
+	if !strings.HasPrefix(name, "/") || replayHiddenCommands[strings.SplitN(name, " ", 2)[0]] {
+		return "", false
+	}
+	if args := commandArgsPattern.FindStringSubmatch(text); args != nil && strings.TrimSpace(args[1]) != "" {
+		return name + " " + strings.TrimSpace(args[1]), true
+	}
+	return name, true
+}
+
+func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache, parentToolUseID string) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -353,14 +393,11 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 		if parentToolUseID != "" {
 			return nil
 		}
-		text, ok := stripMarkerTags(s)
+		text, ok := replayUserText(s)
 		if !ok {
 			return nil
 		}
-		return conn.SessionUpdate(ctx, acp.SessionNotification{
-			SessionId: sid,
-			Update:    acp.UpdateUserMessageText(text),
-		})
+		return acpcommon.Notify(ctx, conn, sid, acp.UpdateUserMessageText(text))
 	}
 
 	var blocks []cliMsgBlock
@@ -373,14 +410,11 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 			if parentToolUseID != "" {
 				continue
 			}
-			text, ok := stripMarkerTags(b.Text)
+			text, ok := replayUserText(b.Text)
 			if !ok {
 				continue
 			}
-			if err := conn.SessionUpdate(ctx, acp.SessionNotification{
-				SessionId: sid,
-				Update:    acp.UpdateUserMessageText(text),
-			}); err != nil {
+			if err := acpcommon.Notify(ctx, conn, sid, acp.UpdateUserMessageText(text)); err != nil {
 				return err
 			}
 		case "tool_result":
@@ -388,17 +422,6 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 				continue
 			}
 			name := cache[b.ToolUseID]
-			if applyTaskPlanResult(plan, name, b) {
-				if err := conn.SessionUpdate(ctx, acp.SessionNotification{
-					SessionId: sid,
-					Update:    acp.UpdatePlan(plan.entries()...),
-				}); err != nil {
-					return err
-				}
-			}
-			if isPlanTool(name) {
-				continue
-			}
 			status := acp.ToolCallStatusCompleted
 			if b.IsError {
 				status = acp.ToolCallStatusFailed
@@ -409,10 +432,7 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 			}
 			u := acp.UpdateToolCall(acp.ToolCallId(b.ToolUseID), opts...)
 			withClaudeToolMeta(&u, name, parentToolUseID)
-			if err := conn.SessionUpdate(ctx, acp.SessionNotification{
-				SessionId: sid,
-				Update:    u,
-			}); err != nil {
+			if err := acpcommon.Notify(ctx, conn, sid, u); err != nil {
 				return err
 			}
 		}

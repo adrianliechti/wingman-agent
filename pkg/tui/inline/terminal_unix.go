@@ -8,8 +8,8 @@ import (
 	"syscall"
 )
 
-func setupConsole() error {
-	return nil
+func setupConsole() (func(), error) {
+	return nil, nil
 }
 
 func (t *Terminal) watchResize() {

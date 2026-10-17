@@ -1,16 +1,20 @@
-import { Bug, Check, Loader2, Monitor, MonitorPlay, Play } from "lucide-react";
 import {
-	type ReactNode,
-	useCallback,
-	useEffect,
-	useRef,
-	useState,
-} from "react";
+	Bug,
+	Check,
+	Download,
+	Loader2,
+	Monitor,
+	MonitorPlay,
+	Play,
+} from "lucide-react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
 	type DebugAction,
 	type DebugLaunchPlan,
 	type DebugSession,
 	type DebugTarget,
+	type DebugToolProgress,
+	type DebugToolStatus,
 	generateDebugPlan,
 	startDebugPlan,
 } from "../api/debug";
@@ -31,45 +35,82 @@ interface Props {
 	seed?: DebugLauncherSeed;
 	onClose: () => void;
 	onStarted?: (session: DebugSession) => void;
+	onFailed?: (message: string) => void;
 }
 
-type Phase = "planning" | "review" | "starting" | "error";
+type Phase = "planning" | "install" | "review" | "starting" | "error";
 
-export function DebugLauncher({ open, seed, onClose, onStarted }: Props) {
+export function DebugLauncher({ open, seed, ...callbacks }: Props) {
+	const requestKey = open
+		? seed
+			? JSON.stringify([seed.action, seed.target.id, seed.currentPath])
+			: "missing"
+		: "closed";
+	return (
+		<DebugLauncherContent
+			key={requestKey}
+			open={open}
+			seed={seed}
+			{...callbacks}
+		/>
+	);
+}
+
+function DebugLauncherContent({
+	open,
+	seed,
+	onClose,
+	onStarted,
+	onFailed,
+}: Props) {
 	const requestRef = useRef<AbortController | null>(null);
-	const [phase, setPhase] = useState<Phase>("planning");
+	const [phase, setPhase] = useState<Phase>(seed ? "planning" : "error");
 	const [plan, setPlan] = useState<DebugLaunchPlan | null>(null);
+	const [progress, setProgress] = useState<DebugToolProgress | null>(null);
+	const [tools, setTools] = useState<DebugToolStatus[]>([]);
+	const [installRequested, setInstallRequested] = useState(false);
 	const [pauseAtEntry, setPauseAtEntry] = useState(false);
 	const [configurationText, setConfigurationText] = useState("{}");
-	const [error, setError] = useState("");
+	const [error, setError] = useState(
+		seed ? "" : "Choose Run or Debug beside a runnable entry point.",
+	);
+	const [attempt, setAttempt] = useState(0);
+	const action = seed?.action;
+	const currentPath = seed?.currentPath;
+	const targetID = seed?.target.id;
+	const canInstall =
+		tools.some((tool) => !tool.installed) &&
+		tools.every((tool) => tool.installed || tool.installable);
 
 	useEffect(() => {
-		if (!open) return;
-		requestRef.current?.abort();
+		if (!open || !action || currentPath === undefined || !targetID) return;
 		const controller = new AbortController();
 		requestRef.current = controller;
-		setPhase("planning");
-		setPlan(null);
-		setPauseAtEntry(false);
-		setConfigurationText("{}");
-		setError("");
-
-		if (!seed) {
-			setError("Choose Run or Debug beside a runnable entry point.");
-			setPhase("error");
-			return () => controller.abort();
-		}
 
 		void generateDebugPlan(
 			{
-				action: seed.action,
-				target_id: seed.target.id,
-				current_path: seed.currentPath,
+				action,
+				target_id: targetID,
+				current_path: currentPath,
+				install: installRequested,
 			},
 			controller.signal,
+			(update) => {
+				if (!controller.signal.aborted) setProgress(update);
+			},
+			(statuses) => {
+				if (!controller.signal.aborted) setTools(statuses);
+			},
 		)
-			.then((generated) => {
+			.then((result) => {
 				if (controller.signal.aborted) return;
+				if (result.type === "installation_required") {
+					setTools(result.tools);
+					setPhase("install");
+					return;
+				}
+				const generated = result.plan;
+				setError(result.warning ?? "");
 				setPlan(generated);
 				setPauseAtEntry(
 					generated.breakpoints.length > 0 ||
@@ -83,10 +124,29 @@ export function DebugLauncher({ open, seed, onClose, onStarted }: Props) {
 				setError(errorMessage(cause));
 				setPhase("error");
 			});
-		return () => controller.abort();
-	}, [open, seed]);
+		return () => {
+			controller.abort();
+			requestRef.current?.abort();
+		};
+	}, [action, attempt, currentPath, installRequested, open, targetID]);
 
-	const start = useCallback(async () => {
+	const close = () => {
+		requestRef.current?.abort();
+		onClose();
+	};
+
+	const retry = () => {
+		requestRef.current?.abort();
+		setPhase("planning");
+		setPlan(null);
+		setProgress(null);
+		setPauseAtEntry(false);
+		setConfigurationText("{}");
+		setError("");
+		setAttempt((value) => value + 1);
+	};
+
+	const start = async () => {
 		if (!plan) return;
 		let configuration: unknown;
 		try {
@@ -105,36 +165,102 @@ export function DebugLauncher({ open, seed, onClose, onStarted }: Props) {
 		requestRef.current = controller;
 		setPhase("starting");
 		setError("");
+		const request = {
+			...plan,
+			configuration,
+			breakpoints: pauseAtEntry ? plan.breakpoints : [],
+			function_breakpoints: pauseAtEntry ? plan.function_breakpoints : [],
+		};
 		try {
-			const session = await startDebugPlan(
-				{
-					...plan,
-					configuration,
-					breakpoints: pauseAtEntry ? plan.breakpoints : [],
-					function_breakpoints: pauseAtEntry ? plan.function_breakpoints : [],
-				},
-				controller.signal,
-			);
-			onStarted?.(session);
-			onClose();
+			const session = await startDebugPlan(request, controller.signal);
+			if (controller.signal.aborted) return;
+			if (onStarted) onStarted(session);
+			close();
 		} catch (cause) {
 			if (controller.signal.aborted) return;
-			setError(errorMessage(cause));
+			const message = errorMessage(cause);
+			if (onFailed) {
+				onFailed(message);
+				close();
+				return;
+			}
+			setError(message);
 			setPhase("review");
 		}
-	}, [configurationText, onClose, onStarted, pauseAtEntry, plan]);
+	};
 
 	return (
 		<Dialog
 			open={open}
 			title={
-				plan?.title ?? (seed?.action === "run" ? "Run target" : "Debug target")
+				plan?.title ??
+				`${seed?.action === "run" ? "Run" : "Debug"} ${seed?.target.name ?? "target"}`
 			}
-			onClose={onClose}
+			onClose={close}
 			initialFocus="first"
 		>
 			<div className="w-full space-y-3">
-				{phase === "planning" && <Busy label="Preparing launch…" />}
+				{tools.length > 0 && (
+					<ul
+						aria-label="Debugger setup"
+						className="space-y-2 rounded-md border border-border-subtle bg-bg-surface/30 px-3 py-2.5 text-[11px]"
+					>
+						{tools.map((tool) => (
+							<li
+								key={tool.tool}
+								className="flex items-center justify-between gap-3"
+							>
+								<span className="text-fg-muted">{tool.label}</span>
+								<span className="flex items-center gap-1.5 text-fg-dim">
+									{phase === "planning" &&
+									progress?.tool === tool.tool &&
+									progress.phase === "updating" ? (
+										"Updating…"
+									) : tool.installed ? (
+										<>
+											<Check size={12} className="text-success" /> Installed
+										</>
+									) : phase === "planning" &&
+									  progress?.tool === tool.tool &&
+									  progress.phase !== "checking" ? (
+										"Installing…"
+									) : phase === "error" && installRequested && progress ? (
+										"Installation failed"
+									) : tool.unavailable_reason ? (
+										tool.unavailable_reason
+									) : (
+										"Not installed"
+									)}
+								</span>
+							</li>
+						))}
+					</ul>
+				)}
+				{phase === "install" && (
+					<p className="text-[11px] leading-relaxed text-fg-muted">
+						{canInstall
+							? "Install the missing debugger tools in Wingman to continue?"
+							: tools.some((tool) => tool.unavailable_reason)
+								? "Install the required runtime or build tool, then check again."
+								: "Wingman's debugger installation is disabled. Enable managed tool installation, then check again."}
+					</p>
+				)}
+				{phase === "planning" && (
+					<Busy
+						label={
+							progress
+								? `${progress.phase === "checking" ? "Checking" : progress.phase === "updating" ? "Updating" : "Installing"} ${progress.label}…`
+								: installRequested
+									? "Preparing installation…"
+									: "Checking debugger…"
+						}
+						detail={
+							progress && progress.phase !== "checking"
+								? "This may take a few minutes."
+								: undefined
+						}
+					/>
+				)}
 
 				{plan && (phase === "review" || phase === "starting") && (
 					<>
@@ -181,6 +307,8 @@ export function DebugLauncher({ open, seed, onClose, onStarted }: Props) {
 								</div>
 								<textarea
 									aria-label="Adapter launch options"
+									autoCapitalize="none"
+									autoCorrect="off"
 									value={configurationText}
 									onChange={(event) => setConfigurationText(event.target.value)}
 									rows={6}
@@ -199,9 +327,31 @@ export function DebugLauncher({ open, seed, onClose, onStarted }: Props) {
 				)}
 
 				<div className="flex justify-end gap-2 pt-1">
-					<button type="button" className={dialogButtonClass} onClick={onClose}>
+					<button type="button" className={dialogButtonClass} onClick={close}>
 						Cancel
 					</button>
+					{phase === "install" && (
+						<button
+							type="button"
+							className={dialogPrimaryButtonClass}
+							onClick={() => {
+								if (canInstall) setInstallRequested(true);
+								retry();
+							}}
+						>
+							{canInstall && <Download size={12} />}
+							{canInstall ? "Install debugger" : "Check again"}
+						</button>
+					)}
+					{phase === "error" && seed && (
+						<button
+							type="button"
+							className={dialogPrimaryButtonClass}
+							onClick={retry}
+						>
+							Retry
+						</button>
+					)}
 					{phase === "review" && plan && (
 						<button
 							type="button"
@@ -292,10 +442,16 @@ function ToggleOption({
 	);
 }
 
-function Busy({ label }: { label: string }) {
+function Busy({ label, detail }: { label: string; detail?: string }) {
 	return (
-		<div className="flex items-center gap-2 rounded-md border border-border-subtle bg-bg-surface/30 px-3 py-3 text-[11px] text-fg-muted">
-			<Loader2 size={12} className="animate-spin" /> {label}
+		<div
+			role="status"
+			className="rounded-md border border-border-subtle bg-bg-surface/30 px-3 py-3 text-[11px] text-fg-muted"
+		>
+			<div className="flex items-center gap-2">
+				<Loader2 size={12} className="shrink-0 animate-spin" /> {label}
+			</div>
+			{detail && <p className="mt-1.5 text-fg-dim">{detail}</p>}
 		</div>
 	);
 }
@@ -305,7 +461,10 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function errorMessage(value: unknown) {
-	return value instanceof Error ? value.message : String(value);
+	const message = value instanceof Error ? value.message : String(value);
+	return message
+		? message[0].toUpperCase() + message.slice(1)
+		: "The debugger could not start.";
 }
 
 const fieldClass =

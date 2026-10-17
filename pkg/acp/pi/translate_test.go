@@ -2,6 +2,7 @@ package pi
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -104,6 +105,26 @@ func TestPromptToPi(t *testing.T) {
 	}
 }
 
+func TestPromptToPiPreservesBlobResources(t *testing.T) {
+	imageMIME := "image/png"
+	binaryMIME := "application/pdf"
+	blocks := []acp.ContentBlock{
+		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{
+			Uri: "file:///work/image.png", MimeType: &imageMIME, Blob: "IMAGE",
+		}}),
+		acp.ResourceBlock(acp.EmbeddedResourceResource{BlobResourceContents: &acp.BlobResourceContents{
+			Uri: "file:///work/report.pdf", MimeType: &binaryMIME, Blob: "PDF",
+		}}),
+	}
+	message, images := promptToPi(blocks)
+	if len(images) != 1 || images[0].MimeType != imageMIME || images[0].Data != "IMAGE" {
+		t.Fatalf("images = %#v", images)
+	}
+	if !strings.Contains(message, "file:///work/report.pdf (application/pdf, base64)\nPDF") {
+		t.Fatalf("message = %q", message)
+	}
+}
+
 func TestToolKind(t *testing.T) {
 	cases := map[string]acp.ToolKind{
 		"read":    acp.ToolKindRead,
@@ -153,7 +174,7 @@ func TestReplayMessagesPreservesRichConversation(t *testing.T) {
 		{"role":"toolResult","toolCallId":"call-1","toolName":"read","content":[{"type":"text","text":"contents"}],"isError":false}
 	]}`)
 	var updates []acp.SessionUpdate
-	replayMessages(func(update acp.SessionUpdate) { updates = append(updates, update) }, data)
+	replayMessages(func(update acp.SessionUpdate) { updates = append(updates, update) }, data, "/workspace")
 
 	var userText, userImage, agentThought, agentText, toolStart, toolEnd bool
 	for _, update := range updates {
@@ -169,6 +190,9 @@ func TestReplayMessagesPreservesRichConversation(t *testing.T) {
 		}
 		if update.ToolCall != nil {
 			toolStart = true
+			if update.ToolCall.Title != "Read file" || len(update.ToolCall.Locations) != 1 || update.ToolCall.RawInput != nil {
+				t.Fatalf("replayed tool presentation = %#v", update.ToolCall)
+			}
 		}
 		if update.ToolCallUpdate != nil {
 			toolEnd = true

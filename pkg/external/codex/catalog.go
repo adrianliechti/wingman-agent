@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
-// models.json is the unmodified codex-rs/models-manager/models.json asset.
+// models.json contains unmodified entries from codex-rs/models-manager/models.json.
 // Keeping the full upstream entries preserves Codex's model-specific
 // instructions and tool metadata. Run `task generate:codex-models` to refresh
 // it; Wingman-specific fields are changed only in the temporary runtime copy.
@@ -71,15 +70,16 @@ func buildModelCatalog(modelIDs []string) ([]byte, error) {
 	seen := make(map[string]bool, len(modelIDs))
 
 	for _, id := range modelIDs {
-		if id == "" || seen[id] || !strings.HasPrefix(id, "gpt-") {
+		if id == "" || seen[id] {
 			continue
 		}
 		seen[id] = true
 
-		templateID := modelTemplateID(id, templates)
-		template, ok := templates[templateID]
+		template, ok := templates[model.CanonicalID(id)]
 		if !ok {
-			return nil, fmt.Errorf("embedded Codex model catalog is missing template %q", templateID)
+			// Do not give an unrecognized model another model's instructions
+			// or tool configuration.
+			continue
 		}
 
 		entry := maps.Clone(template)
@@ -91,36 +91,12 @@ func buildModelCatalog(modelIDs []string) ([]byte, error) {
 		entry["upgrade"] = nil
 		entry["multi_agent_version"] = "v1"
 
-		if id != templateID && !(id == "gpt-5.6" && templateID == "gpt-5.6-sol") {
-			entry["description"] = "OpenAI model available through Wingman."
-			if m, ok := model.Find(id); ok {
-				entry["context_window"] = m.ContextTokens()
-				entry["max_context_window"] = m.ContextTokens()
-			}
-		}
-
 		selected = append(selected, entry)
 	}
 
 	if len(selected) == 0 {
-		return nil, fmt.Errorf("no OpenAI models are available for the Codex launcher")
+		return nil, fmt.Errorf("no available OpenAI models match the embedded Codex catalog; update Wingman or refresh the catalog with task generate:codex-models and rebuild")
 	}
 
 	return json.MarshalIndent(modelCatalog{Models: selected}, "", "  ")
-}
-
-func modelTemplateID(id string, templates map[string]map[string]any) string {
-	if _, ok := templates[id]; ok {
-		return id
-	}
-
-	if id == "gpt-5.6" {
-		return "gpt-5.6-sol"
-	}
-
-	if strings.Contains(id, "mini") || strings.Contains(id, "spark") {
-		return "gpt-5.4-mini"
-	}
-
-	return "gpt-5.2"
 }

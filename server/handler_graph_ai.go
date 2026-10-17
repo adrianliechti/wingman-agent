@@ -23,7 +23,7 @@ const (
 )
 
 // generationTarget resolves a role ("" = the session's main model, "utility",
-// "plan") to a concrete model plus its lowest supported reasoning effort —
+// "complex") to a concrete model plus its lowest supported reasoning effort —
 // summarizing and ranking need no deliberation, so the cheapest effort wins.
 // Unknown capability keeps effort unset rather than guessing.
 func (s *Server) generationTarget(role string) (model, effort string) {

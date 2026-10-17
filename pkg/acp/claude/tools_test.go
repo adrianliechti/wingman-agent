@@ -3,7 +3,12 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"net"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -19,7 +24,8 @@ func TestResultToTurn(t *testing.T) {
 		{"success max_tokens", `{"type":"result","subtype":"success","stop_reason":"max_tokens"}`, acp.StopReasonMaxTokens, false},
 		{"success refusal", `{"type":"result","subtype":"success","stop_reason":"refusal"}`, acp.StopReasonRefusal, false},
 		{"success is_error", `{"type":"result","subtype":"success","is_error":true,"result":"boom"}`, "", true},
-		{"login required", `{"type":"result","subtype":"success","result":"Please run /login first"}`, "", true},
+		{"login required", `{"type":"result","subtype":"success","is_error":true,"result":"Please run /login first"}`, "", true},
+		{"login text in a successful answer", `{"type":"result","subtype":"success","result":"Tell them: Please run /login"}`, acp.StopReasonEndTurn, false},
 		{"error_during_execution", `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["x","y"]}`, "", true},
 		{"error_max_turns recoverable", `{"type":"result","subtype":"error_max_turns"}`, acp.StopReasonMaxTurnRequests, false},
 		{"error_max_turns is_error", `{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["limit"]}`, "", true},
@@ -27,7 +33,7 @@ func TestResultToTurn(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, _ := resultToTurn([]byte(tt.line))
+			got := resultToTurn([]byte(tt.line))
 			if tt.wantErr {
 				if got.err == nil {
 					t.Fatalf("expected error, got stop=%q", got.stop)
@@ -78,7 +84,7 @@ func TestClaudeToolMetadataIncludesParent(t *testing.T) {
 
 func TestClaudeSystemIdleFailsOnlyActiveTurn(t *testing.T) {
 	p := &claudeProc{results: make(chan turnResult, 1), subagentParents: map[string]string{}}
-	p.beginTurn()
+	p.beginTurn(context.Background())
 	p.handleSystem(context.Background(), nil, "s", cliEnvelope{Type: "system", Subtype: "session_state_changed", State: "idle"})
 	r := <-p.results
 	if r.err == nil {
@@ -98,16 +104,14 @@ func TestClaudeSystemTracksSubagentParents(t *testing.T) {
 	if got := p.parentForAgent("agent-1"); got != "parent-1" {
 		t.Fatalf("parent = %q", got)
 	}
-	p.handleSystem(context.Background(), nil, "s", cliEnvelope{Type: "system", Subtype: "task_updated", TaskID: "agent-1", Patch: struct {
-		Status string `json:"status,omitempty"`
-	}{Status: "completed"}})
+	p.handleSystem(context.Background(), nil, "s", cliEnvelope{Type: "system", Subtype: "task_updated", TaskID: "agent-1", Patch: cliTaskPatch{Status: "completed"}})
 	if got := p.parentForAgent("agent-1"); got != "" {
 		t.Fatalf("parent after completion = %q", got)
 	}
 }
 
 func TestResultLoginIsAuthRequired(t *testing.T) {
-	got, _ := resultToTurn([]byte(`{"type":"result","subtype":"success","result":"Please run /login"}`))
+	got := resultToTurn([]byte(`{"type":"result","subtype":"success","is_error":true,"result":"Please run /login"}`))
 	re, ok := got.err.(*acp.RequestError)
 	if !ok {
 		t.Fatalf("want *acp.RequestError, got %T", got.err)
@@ -123,8 +127,8 @@ func TestToolInfoEditProducesDiff(t *testing.T) {
 	if info.kind != acp.ToolKindEdit {
 		t.Errorf("kind = %q, want edit", info.kind)
 	}
-	if info.title != "Edit main.go" {
-		t.Errorf("title = %q, want %q", info.title, "Edit main.go")
+	if info.title != "Edit file" {
+		t.Errorf("title = %q, want %q", info.title, "Edit file")
 	}
 	if len(info.content) != 1 || info.content[0].Diff == nil {
 		t.Fatalf("expected one diff content block, got %+v", info.content)
@@ -136,12 +140,15 @@ func TestToolInfoEditProducesDiff(t *testing.T) {
 	if len(info.locations) != 1 || info.locations[0].Path != "/proj/main.go" {
 		t.Errorf("locations = %+v", info.locations)
 	}
+	if info.rawInput != nil {
+		t.Errorf("edit input duplicates its chip/diff: %#v", info.rawInput)
+	}
 }
 
 func TestToolInfoSkillIncludesName(t *testing.T) {
 	info := toolInfoFromToolUse("Skill", json.RawMessage(`{"skill":"commits","args":"--all"}`), "/proj")
-	if info.title != "Load skill: commits" {
-		t.Errorf("title = %q, want %q", info.title, "Load skill: commits")
+	if info.title != "Load skill" {
+		t.Errorf("title = %q, want %q", info.title, "Load skill")
 	}
 	if info.kind != acp.ToolKindOther {
 		t.Errorf("kind = %q, want other", info.kind)
@@ -149,44 +156,68 @@ func TestToolInfoSkillIncludesName(t *testing.T) {
 	if len(info.content) != 0 {
 		t.Errorf("content = %#v, want none", info.content)
 	}
+	input, ok := info.rawInput.(map[string]any)
+	if !ok || input["skill"] != "commits" || input["args"] != "--all" {
+		t.Errorf("display input = %#v", info.rawInput)
+	}
 }
 
 func TestToolInfoReadTitleAndLocation(t *testing.T) {
 	input := json.RawMessage(`{"file_path":"/proj/pkg/x.go","offset":10,"limit":5}`)
 	info := toolInfoFromToolUse("Read", input, "/proj")
-	if want := "Read pkg/x.go (10 - 14)"; info.title != want {
+	if want := "Read file"; info.title != want {
 		t.Errorf("title = %q, want %q", info.title, want)
 	}
 	if len(info.locations) != 1 || info.locations[0].Line == nil || *info.locations[0].Line != 10 {
 		t.Errorf("locations = %+v", info.locations)
 	}
+	args, ok := info.rawInput.(map[string]any)
+	if !ok || args["limit"] != float64(5) || args["offset"] != nil || args["file_path"] != nil {
+		t.Errorf("display input = %#v", info.rawInput)
+	}
 }
 
 func TestToolInfoGrepLabel(t *testing.T) {
-	input := json.RawMessage(`{"pattern":"todo","-i":true,"output_mode":"files_with_matches","glob":"*.go"}`)
-	info := toolInfoFromToolUse("Grep", input, "")
-	if want := `grep -i -l --include="*.go" "todo"`; info.title != want {
+	input := json.RawMessage(`{"pattern":"todo","path":"pkg","-i":true,"output_mode":"files_with_matches","glob":"*.go"}`)
+	info := toolInfoFromToolUse("Grep", input, "/proj")
+	if want := "Search files"; info.title != want {
 		t.Errorf("title = %q, want %q", info.title, want)
 	}
 	if info.kind != acp.ToolKindSearch {
 		t.Errorf("kind = %q, want search", info.kind)
 	}
+	if len(info.locations) != 1 || info.locations[0].Path != "/proj/pkg" {
+		t.Errorf("locations = %#v", info.locations)
+	}
+	args, ok := info.rawInput.(map[string]any)
+	if !ok || args["pattern"] != "todo" || args["path"] != nil {
+		t.Errorf("display input = %#v", info.rawInput)
+	}
 }
 
-func TestPlanEntriesFromTodoWrite(t *testing.T) {
-	input := json.RawMessage(`{"todos":[{"content":"a","status":"completed"},{"content":"b","status":"in_progress"},{"content":"c","status":"pending"}]}`)
-	entries, ok := planEntriesFromTodoWrite(input)
-	if !ok || len(entries) != 3 {
-		t.Fatalf("entries=%+v ok=%v", entries, ok)
+func TestToolCallStartUsesLocationWithoutSyntheticPathInput(t *testing.T) {
+	update := toolCallStartUpdate(
+		"read-1", "Read", json.RawMessage(`{"file_path":"/proj/main.go"}`), "/proj",
+		acp.ToolCallStatusInProgress,
+	)
+	if update.ToolCall == nil {
+		t.Fatal("missing tool call")
 	}
-	if entries[0].Status != acp.PlanEntryStatusCompleted ||
-		entries[1].Status != acp.PlanEntryStatusInProgress ||
-		entries[2].Status != acp.PlanEntryStatusPending {
-		t.Errorf("statuses = %+v", entries)
+	if update.ToolCall.Title != "Read file" || len(update.ToolCall.Locations) != 1 {
+		t.Fatalf("tool call = %#v", update.ToolCall)
 	}
+	if update.ToolCall.RawInput != nil {
+		t.Fatalf("location was mirrored into input: %#v", update.ToolCall.RawInput)
+	}
+}
 
-	if _, ok := planEntriesFromTodoWrite(json.RawMessage(`{}`)); ok {
-		t.Errorf("expected ok=false for missing todos")
+func TestUnknownToolUsesRawInputOnlyOnce(t *testing.T) {
+	info := toolInfoFromToolUse("mcp__example", json.RawMessage(`{"query":"value"}`), "/proj")
+	if info.rawInput == nil {
+		t.Fatal("missing raw input")
+	}
+	if len(info.content) != 0 {
+		t.Fatalf("raw input was duplicated as content: %#v", info.content)
 	}
 }
 
@@ -198,11 +229,11 @@ func TestMarkdownEscapeLengthensFence(t *testing.T) {
 	}
 }
 
-func TestResultUsageAndUpdate(t *testing.T) {
+func TestResultUsage(t *testing.T) {
 	line := `{"type":"result","subtype":"success","total_cost_usd":0.05,` +
 		`"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":300,"cache_creation_input_tokens":40},` +
 		`"modelUsage":{"claude-haiku":{"contextWindow":200000},"claude-opus":{"contextWindow":1000000}}}`
-	tr, upd := resultToTurn([]byte(line))
+	tr := resultToTurn([]byte(line))
 	if tr.usage == nil {
 		t.Fatal("expected usage")
 	}
@@ -211,15 +242,6 @@ func TestResultUsageAndUpdate(t *testing.T) {
 	}
 	if tr.usage.CachedReadTokens == nil || *tr.usage.CachedReadTokens != 300 {
 		t.Errorf("cachedRead = %v", tr.usage.CachedReadTokens)
-	}
-	if upd == nil || upd.UsageUpdate == nil {
-		t.Fatal("expected usage_update")
-	}
-	if upd.UsageUpdate.Used != 460 || upd.UsageUpdate.Size != 1000000 {
-		t.Errorf("usage_update used=%d size=%d", upd.UsageUpdate.Used, upd.UsageUpdate.Size)
-	}
-	if upd.UsageUpdate.Cost == nil || upd.UsageUpdate.Cost.Amount != 0.05 {
-		t.Errorf("cost = %+v", upd.UsageUpdate.Cost)
 	}
 }
 
@@ -253,13 +275,13 @@ func TestToolCallTrackerEmitsStartOnceThenRefines(t *testing.T) {
 	start := func() error { calls = append(calls, "start"); return nil }
 	refine := func() error { calls = append(calls, "refine"); return nil }
 
-	if err := tracker.emit("tool-1", start, refine); err != nil {
+	if err := tracker.emit("tool-1", "Bash", "", start, refine); err != nil {
 		t.Fatal(err)
 	}
-	if err := tracker.emit("tool-1", start, refine); err != nil {
+	if err := tracker.emit("tool-1", "Bash", "", start, refine); err != nil {
 		t.Fatal(err)
 	}
-	if err := tracker.emit("tool-2", start, refine); err != nil {
+	if err := tracker.emit("tool-2", "Bash", "", start, refine); err != nil {
 		t.Fatal(err)
 	}
 
@@ -274,27 +296,27 @@ func TestToolCallTrackerEmitsStartOnceThenRefines(t *testing.T) {
 	}
 }
 
-func TestShouldEmitToolCall(t *testing.T) {
-	cases := map[string]bool{
-		"Bash":      true,
-		"Write":     true,
-		"TodoWrite": false,
-		"Task":      false,
-		"Agent":     false,
+func TestToolCallTrackingPolicy(t *testing.T) {
+	tests := []struct {
+		name  string
+		eager bool
+	}{
+		{name: "Bash", eager: true},
+		{name: "Write", eager: true},
+		{name: "Edit", eager: true},
+		{name: "Task", eager: false},
+		{name: "Agent", eager: false},
 	}
-	for name, want := range cases {
-		if got := shouldEmitToolCall(name); got != want {
-			t.Errorf("shouldEmitToolCall(%q) = %v, want %v", name, got, want)
+	for _, tt := range tests {
+		if got := shouldEagerlyEmitToolCall(tt.name); got != tt.eager {
+			t.Errorf("shouldEagerlyEmitToolCall(%q) = %v, want %v", tt.name, got, tt.eager)
 		}
 	}
 }
 
-func TestBashImageResultBlocksSurfacesImage(t *testing.T) {
-	raw := []byte(`[{"type":"text","text":"saved"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]`)
-	blocks, ok := bashImageResultBlocks(raw)
-	if !ok {
-		t.Fatal("expected mixed content to be detected")
-	}
+func TestBashImageResultSurfacesImage(t *testing.T) {
+	raw := json.RawMessage(`[{"type":"text","text":"saved"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]`)
+	blocks := toolResultContent("Bash", cliMsgBlock{Content: raw})
 	if len(blocks) != 2 {
 		t.Fatalf("expected 2 blocks, got %d: %+v", len(blocks), blocks)
 	}
@@ -305,12 +327,172 @@ func TestBashImageResultBlocksSurfacesImage(t *testing.T) {
 		t.Errorf("image block = %+v", blocks[1])
 	}
 
-	if _, ok := bashImageResultBlocks([]byte(`[{"type":"text","text":"plain output"}]`)); ok {
-		t.Error("text-only array should fall back to normal extraction (ok=false)")
+	blocks = toolResultContent("Bash", cliMsgBlock{Content: json.RawMessage(`[{"type":"text","text":"plain output"}]`)})
+	if len(blocks) != 1 || blocks[0].Content == nil || blocks[0].Content.Content.Text == nil || blocks[0].Content.Content.Text.Text != "```console\nplain output\n```" {
+		t.Errorf("text-only output = %+v", blocks)
+	}
+	blocks = toolResultContent("Bash", cliMsgBlock{Content: json.RawMessage(`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":""}}]`)})
+	if len(blocks) != 0 {
+		t.Errorf("empty image output = %+v", blocks)
+	}
+}
+
+func TestReadImageResultPreservesMixedContent(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"text","text":"File preview: *draft*"},
+		{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}
+	]`)
+	blocks := toolResultContent("Read", cliMsgBlock{Content: raw})
+	if len(blocks) != 2 {
+		t.Fatalf("content = %+v", blocks)
+	}
+	if blocks[0].Content == nil || blocks[0].Content.Content.Text == nil || blocks[0].Content.Content.Text.Text != markdownEscape("File preview: *draft*") {
+		t.Fatalf("text block = %+v", blocks[0])
+	}
+	if blocks[1].Content == nil || blocks[1].Content.Content.Image == nil || blocks[1].Content.Content.Image.Data != "AAAA" || blocks[1].Content.Content.Image.MimeType != "image/png" {
+		t.Fatalf("image block = %+v", blocks[1])
+	}
+}
+
+func TestReadImageResultUsesPlaceholderForNonInlineSource(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  json.RawMessage
+		want string
+	}{
+		{name: "url", raw: json.RawMessage(`[{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}]`), want: `[image: https://example.test/image.png]`},
+		{name: "file", raw: json.RawMessage(`[{"type":"image","source":{"type":"file"}}]`), want: `[image: file reference]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blocks := toolResultContent("Read", cliMsgBlock{Content: tc.raw})
+			if len(blocks) != 1 || blocks[0].Content == nil || blocks[0].Content.Content.Text == nil ||
+				blocks[0].Content.Content.Text.Text != tc.want {
+				t.Fatalf("content = %+v", blocks)
+			}
+		})
+	}
+}
+
+type toolUpdateClient struct {
+	stubClient
+	updates chan acp.SessionUpdate
+}
+
+func (c *toolUpdateClient) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
+	c.updates <- notification.Update
+	return nil
+}
+
+func (c *toolUpdateClient) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{
+		Cancelled: &acp.RequestPermissionOutcomeCancelled{},
+	}}, nil
+}
+
+func TestLiveSubagentResultCompletesTrackedToolCall(t *testing.T) {
+	agentSide, clientSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = agentSide.Close()
+		_ = clientSide.Close()
+	})
+	conn := acp.NewAgentSideConnection(New(Options{}), agentSide, agentSide)
+	client := &toolUpdateClient{updates: make(chan acp.SessionUpdate, 2)}
+	_ = acp.NewClientSideConnection(client, clientSide, clientSide)
+	tracker := newToolCallTracker()
+
+	assistant := json.RawMessage(`{"content":[{"type":"tool_use","id":"task-1","name":"Task","input":{"description":"research"}}]}`)
+	if err := emitAssistant(context.Background(), conn, "session", assistant, "/workspace", nil, tracker, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	result := json.RawMessage(`{"content":[{"type":"tool_result","tool_use_id":"task-1","content":"done"}]}`)
+	if err := emitToolResults(context.Background(), conn, "session", result, toolUseCache{"task-1": "Task"}, tracker, ""); err != nil {
+		t.Fatal(err)
 	}
 
-	if blocks, ok := bashImageResultBlocks([]byte(`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":""}}]`)); ok {
-		t.Errorf("non-text content with no extractable data should fall back (ok=false), got blocks=%+v", blocks)
+	var updates []acp.SessionUpdate
+	for len(updates) < 2 {
+		select {
+		case update := <-client.updates:
+			updates = append(updates, update)
+		case <-time.After(time.Second):
+			t.Fatalf("received %d updates, want start and completion", len(updates))
+		}
+	}
+	if updates[0].ToolCall == nil || updates[0].ToolCall.ToolCallId != "task-1" {
+		t.Fatalf("start update = %#v", updates[0])
+	}
+	if updates[1].ToolCallUpdate == nil || updates[1].ToolCallUpdate.Status == nil || *updates[1].ToolCallUpdate.Status != acp.ToolCallStatusCompleted {
+		t.Fatalf("completion update = %#v", updates[1])
+	}
+	if tracker.has("task-1") {
+		t.Fatal("completed subagent remained tracked")
+	}
+}
+
+func TestDocumentToolResultUsesCompactPlaceholder(t *testing.T) {
+	payload := "QUJDRA=="
+	raw := json.RawMessage(`[{"type":"document","title":"API spec","source":{"type":"base64","media_type":"application/pdf","data":"` + payload + `"}}]`)
+	content := toolResultContent("Read", cliMsgBlock{Content: raw})
+	if len(content) != 1 || content[0].Content == nil || content[0].Content.Content.Text == nil {
+		t.Fatalf("content = %#v", content)
+	}
+	text := content[0].Content.Content.Text.Text
+	if text != `[document "API spec": application/pdf, 4 B]` {
+		t.Fatalf("placeholder = %q", text)
+	}
+	if strings.Contains(text, payload) {
+		t.Fatal("document payload leaked into ACP content")
+	}
+}
+
+func TestDocumentToolResultPreservesMixedOrderAndSuppressesDataURL(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"text","text":"before"},
+		{"type":"document","title":"Remote","source":{"type":"url","url":"https://example.com/spec.pdf"}},
+		{"type":"text","text":"after"},
+		{"type":"document","title":"Inline","source":{"type":"url","url":"data:application/pdf;base64,SECRET"}}
+	]`)
+	content := toolResultContent("Read", cliMsgBlock{Content: raw})
+	if len(content) != 4 {
+		t.Fatalf("content = %#v", content)
+	}
+	want := []string{
+		markdownEscape("before"),
+		`[document "Remote": https://example.com/spec.pdf]`,
+		markdownEscape("after"),
+		`[document "Inline"]`,
+	}
+	for i, expected := range want {
+		if content[i].Content == nil || content[i].Content.Content.Text == nil || content[i].Content.Content.Text.Text != expected {
+			t.Errorf("content[%d] = %#v, want %q", i, content[i], expected)
+		}
+	}
+}
+
+func TestSubagentPartialOutputNoteIsClientFacing(t *testing.T) {
+	note := "NOTE: this agent stopped at its 12-turn limit before finishing. Send the agent a message.\n\nPartial report"
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`"` + strings.ReplaceAll(note, "\n", `\n`) + `"`),
+		json.RawMessage(`[{"type":"text","text":"NOTE: this agent stopped at its 12-turn limit before finishing. Continue it."},{"type":"text","text":"Partial report"}]`),
+		json.RawMessage(`[{"type":"text","text":""},{"type":"text","text":"NOTE: this agent stopped at its 12-turn limit before finishing.\n\nPartial report"}]`),
+	} {
+		content := toolResultContent("Task", cliMsgBlock{Content: raw})
+		if len(content) == 0 || content[0].Content == nil || content[0].Content.Content.Text == nil {
+			t.Fatalf("content = %#v", content)
+		}
+		if got := content[0].Content.Content.Text.Text; got != partialOutputLabel && got != partialOutputLabel+"\n\nPartial report" {
+			t.Errorf("partial label = %q", got)
+		}
+	}
+
+	unchanged := "Report before NOTE: this agent stopped at its 12-turn limit before finishing."
+	content := toolResultContent("Task", cliMsgBlock{Content: json.RawMessage(`"` + unchanged + `"`)})
+	if got := content[0].Content.Content.Text.Text; got != unchanged {
+		t.Fatalf("mid-string note changed to %q", got)
+	}
+	content = toolResultContent("Bash", cliMsgBlock{Content: json.RawMessage(`"` + strings.ReplaceAll(note, "\n", `\n`) + `"`)})
+	if got := content[0].Content.Content.Text.Text; strings.Contains(got, partialOutputLabel) {
+		t.Fatalf("non-subagent note was rewritten: %q", got)
 	}
 }
 
@@ -327,18 +509,6 @@ func TestResolveModelAlias(t *testing.T) {
 	}
 	if m := resolveModel(models, "gpt-5"); m != nil {
 		t.Errorf("unrelated should be nil, got %v", m)
-	}
-}
-
-func TestToolKindForMatchesToolInfo(t *testing.T) {
-	for _, name := range []string{
-		"Read", "Glob", "Grep", "WebFetch", "WebSearch",
-		"Edit", "Write", "MultiEdit", "Bash", "Agent", "Task", "ExitPlanMode",
-	} {
-		info := toolInfoFromToolUse(name, json.RawMessage(`{}`), "/tmp")
-		if got := toolKindFor(name); got != info.kind {
-			t.Errorf("toolKindFor(%q) = %q, toolInfoFromToolUse kind = %q", name, got, info.kind)
-		}
 	}
 }
 
@@ -367,81 +537,6 @@ func TestAlwaysAllowPermissions(t *testing.T) {
 
 	if got := alwaysAllowPermissions(controlRequestBody{}); got != nil {
 		t.Errorf("no tool name should yield nil, got %#v", got)
-	}
-}
-
-func TestTaskPlan(t *testing.T) {
-	p := newTaskPlan()
-
-	p.noteCreate("tu1", json.RawMessage(`{"subject":"first","description":"d","activeForm":"Doing first"}`))
-	if p.completeCreate("tu1", "Task #1 created successfully: first", false) != true {
-		t.Fatal("create #1 should register")
-	}
-	p.noteCreate("tu2", json.RawMessage(`{"subject":"second"}`))
-	if !p.completeCreate("tu2", "Task #2 created successfully: second", false) {
-		t.Fatal("create #2 should register")
-	}
-
-	entries := p.entries()
-	if len(entries) != 2 || entries[0].Content != "first" || entries[0].Status != acp.PlanEntryStatusPending {
-		t.Fatalf("entries after create = %#v", entries)
-	}
-
-	p.noteUpdate("update-1", json.RawMessage(`{"taskId":"1","status":"completed"}`))
-	if !p.completeUpdate("update-1", `{"success":true,"taskId":"1"}`, false) {
-		t.Fatal("update #1 should change state")
-	}
-	p.noteUpdate("update-2", json.RawMessage(`{"taskId":"1","status":"completed"}`))
-	if p.completeUpdate("update-2", `{"success":true,"taskId":"1"}`, false) {
-		t.Fatal("repeat update should be a no-op")
-	}
-	p.noteUpdate("update-3", json.RawMessage(`{"taskId":"99","status":"completed"}`))
-	if p.completeUpdate("update-3", "ok", false) {
-		t.Fatal("unknown task id should be a no-op")
-	}
-	if entries := p.entries(); entries[0].Status != acp.PlanEntryStatusCompleted || entries[1].Status != acp.PlanEntryStatusPending {
-		t.Fatalf("entries after update = %#v", entries)
-	}
-
-	if p.completeCreate("tu-unknown", "Task #3 created successfully: x", false) {
-		t.Fatal("result without matching create should be a no-op")
-	}
-	p.noteCreate("tu3", json.RawMessage(`{"subject":"third"}`))
-	if p.completeCreate("tu3", "something went wrong", false) {
-		t.Fatal("unparseable result should not register")
-	}
-
-	p.noteUpdate("failed-update", json.RawMessage(`{"taskId":"2","status":"completed"}`))
-	if p.completeUpdate("failed-update", "Task #2 not found", false) {
-		t.Fatal("logically failed update should not change state")
-	}
-	if entries := p.entries(); entries[1].Status != acp.PlanEntryStatusPending {
-		t.Fatalf("failed update changed task state: %#v", entries)
-	}
-
-	if entries, ok := p.unfinishedEntries(); !ok || len(entries) != 2 {
-		t.Fatalf("unfinished entries = %#v, %v", entries, ok)
-	}
-
-	p.noteUpdate("delete-2", json.RawMessage(`{"taskId":"2","status":"deleted"}`))
-	if !p.completeUpdate("delete-2", `{"success":true,"taskId":"2"}`, false) {
-		t.Fatal("delete #2 should change state")
-	}
-	if entries := p.entries(); len(entries) != 1 || entries[0].Content != "first" {
-		t.Fatalf("entries after delete = %#v", entries)
-	}
-	p.clear()
-	if entries, ok := p.unfinishedEntries(); ok || len(entries) != 0 {
-		t.Fatalf("entries after clear = %#v, %v", entries, ok)
-	}
-	if !p.applyTaskList(`{"tasks":[{"id":"7","subject":"restored","status":"in_progress"}]}`, false) {
-		t.Fatal("structured task list should restore state")
-	}
-	if entries := p.entries(); len(entries) != 1 || entries[0].Content != "restored" || entries[0].Status != acp.PlanEntryStatusInProgress {
-		t.Fatalf("entries after task list = %#v", entries)
-	}
-	if !p.applyTaskList("No tasks found", false) || len(p.entries()) != 0 {
-		t.Fatalf("empty task list did not clear state: %#v", p.entries())
 	}
 }
 
@@ -483,8 +578,8 @@ func TestAskElicitationSchema(t *testing.T) {
 		t.Errorf("custom field = %#v", custom)
 	} else {
 		meta, _ := custom["_meta"].(map[string]any)
-		marker, _ := meta["_askUserQuestionCustomAnswer"].(map[string]any)
-		if marker["questionId"] != "question_0" || marker["isCustomAnswer"] != true {
+		marker, _ := meta["wingman"].(map[string]any)
+		if marker["customAnswerFor"] != "question_0" {
 			t.Errorf("custom field marker = %#v", marker)
 		}
 	}
@@ -504,17 +599,77 @@ func TestAskAnswersFromContent(t *testing.T) {
 		{Question: "Q1", Options: []askOption{{Label: "a"}}},
 		{Question: "Q2", MultiSelect: true, Options: []askOption{{Label: "x"}, {Label: "y"}}},
 		{Question: "Q3", Options: []askOption{{Label: "z"}}},
+		{Question: "Q4", Options: []askOption{{Label: "w"}}},
+		{Question: "Q5", MultiSelect: true, Options: []askOption{{Label: "p"}}},
 	}
-	answers := askAnswersFromContent(questions, map[string]any{
+	answers, annotations := askAnswersFromContent(questions, map[string]any{
 		"question_0":        "a",
 		"question_1":        []any{"x", "y"},
+		"question_1_custom": "Redis, not Memcached",
 		"question_2":        "z",
-		"question_2_custom": " my own answer ",
+		"question_2_custom": " a note ",
+		"question_3_custom": " my own answer ",
+		"question_4_custom": "q",
 	})
-	if answers["Q1"] != "a" || answers["Q2"] != "x, y" || answers["Q3"] != "my own answer" {
-		t.Errorf("answers = %#v", answers)
+	want := map[string]any{"Q1": "a", "Q2": `x, y, "Redis, not Memcached"`, "Q3": "z", "Q4": "my own answer", "Q5": "q"}
+	if !reflect.DeepEqual(answers, want) {
+		t.Errorf("answers = %#v, want %#v", answers, want)
 	}
-	if got := askAnswersFromContent(questions, map[string]any{}); len(got) != 0 {
-		t.Errorf("empty content = %#v", got)
+	wantNotes := map[string]any{"Q3": map[string]any{"notes": "a note"}}
+	if !reflect.DeepEqual(annotations, wantNotes) {
+		t.Errorf("annotations = %#v, want %#v", annotations, wantNotes)
+	}
+	if got, notes := askAnswersFromContent(questions, map[string]any{}); len(got) != 0 || len(notes) != 0 {
+		t.Errorf("empty content = %#v %#v", got, notes)
+	}
+}
+
+func TestToolInfoWriteAcceptsCLIAliases(t *testing.T) {
+	for _, input := range []string{
+		`{"path":"main.go","file_text":"package main"}`,
+		`{"file_path":"main.go","file_content":"package main"}`,
+	} {
+		info := toolInfoFromToolUse("Write", json.RawMessage(input), "/proj")
+		if len(info.content) != 1 || info.content[0].Diff == nil || info.content[0].Diff.NewText != "package main" {
+			t.Fatalf("%s content = %+v", input, info.content)
+		}
+		if len(info.locations) != 1 || info.locations[0].Path != filepath.Join("/proj", "main.go") {
+			t.Fatalf("%s locations = %+v", input, info.locations)
+		}
+	}
+}
+
+func TestPowerShellRendersLikeBash(t *testing.T) {
+	info := toolInfoFromToolUse("PowerShell", json.RawMessage(`{"command":"Get-ChildItem","description":"List files"}`), "/proj")
+	if info.kind != acp.ToolKindExecute || info.title != "Run command" {
+		t.Fatalf("info = %+v", info)
+	}
+	content := toolResultContent("PowerShell", cliMsgBlock{Content: json.RawMessage(`"a.txt\n"`)})
+	if len(content) != 1 || content[0].Content.Content.Text.Text != "```console\na.txt\n```" {
+		t.Fatalf("content = %#v", content)
+	}
+}
+
+func TestSubagentHandbackFrameIsUnwrapped(t *testing.T) {
+	framed := handbackHeader + "\n  Report line one\n    indented code\n  last line"
+	for _, raw := range []string{framed, "  NOTE: this agent stopped at its 5-turn limit before finishing.\n" + framed} {
+		b, _ := json.Marshal(raw)
+		content := toolResultContent("Agent", cliMsgBlock{Content: b})
+		got := content[0].Content.Content.Text.Text
+		if strings.Contains(got, "[Subagent hand-back]") || !strings.HasSuffix(got, "Report line one\n  indented code\nlast line") {
+			t.Fatalf("unwrapped = %q", got)
+		}
+		if strings.Contains(raw, "NOTE:") && !strings.HasPrefix(got, partialOutputLabel+"\n\n") {
+			t.Fatalf("partial note not relabeled: %q", got)
+		}
+	}
+	noteOnly := "  NOTE: this agent stopped at its 5-turn limit before finishing."
+	b, _ := json.Marshal(noteOnly)
+	if got := toolResultContent("Task", cliMsgBlock{Content: b})[0].Content.Content.Text.Text; got != partialOutputLabel {
+		t.Fatalf("note-only result = %q", got)
+	}
+	quoted := "Report quoting\n" + handbackHeader + "x"
+	if got := unwrapHandbackFrame(quoted); got != quoted {
+		t.Fatalf("non-frame text changed: %q", got)
 	}
 }

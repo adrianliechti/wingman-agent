@@ -3,12 +3,12 @@ package code
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
 func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
@@ -16,8 +16,10 @@ func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
 		return true, nil
 	}
 
-	a.elicitMu.Lock()
-	defer a.elicitMu.Unlock()
+	if err := a.acquirePrompt(ctx); err != nil {
+		return false, err
+	}
+	defer a.releasePrompt()
 
 	items := []PopupItem{
 		{ID: "yes", Label: "yes", Detail: "approve this command"},
@@ -39,17 +41,14 @@ func (a *App) Confirm(ctx context.Context, message string) (bool, error) {
 
 	switch choice {
 	case "yes":
-		a.recordPrompt("Confirm command", message, "Yes")
+		a.recordPrompt(ctx, "Confirm command", message, "Yes")
 		return true, nil
 	case "always":
 		a.rememberConfirmAll(ctx)
-		a.recordPrompt("Confirm command", message, "Always")
-		a.post(func() {
-			a.appendChat(cellNotice("Auto-approving commands for this session", theme.Default.BrBlack, a.width()))
-		})
+		a.recordPrompt(ctx, "Confirm command", message, "Always (auto-approve commands for this session)")
 		return true, nil
 	default:
-		a.recordPrompt("Confirm command", message, "No")
+		a.recordPrompt(ctx, "Confirm command", message, "No")
 		return false, nil
 	}
 }
@@ -74,22 +73,70 @@ func (a *App) rememberConfirmAll(ctx context.Context) {
 
 // recordPrompt writes the resolved question and its answer into the chat —
 // the question is only shown at the bottom while it is being asked.
-func (a *App) recordPrompt(title, message, answer string) {
+func (a *App) recordPrompt(ctx context.Context, title, message, answer string) {
+	a.sessionMu.Lock()
+	epoch := a.sessionEpoch
+	a.sessionMu.Unlock()
 	a.post(func() {
+		id := corecode.SessionIDFromContext(ctx)
+		if a.sessionEpoch != epoch || (id != "" && id != a.sessionID) {
+			return
+		}
 		a.flushToolGap()
 		a.appendChat(cellPrompt(title, message, "", a.width()))
 		a.appendChat(cellUser(answer, a.width()))
-		a.setPhase(PhaseThinking)
 		a.invalidate()
 	})
 }
 
+// beginPrompt gives a prompt ownership of its UI until it finishes or the
+// session changes. Setup and cleanup both run on the input loop.
+func (a *App) beginPrompt(ctx context.Context, show func() func()) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	a.sessionMu.Lock()
+	epoch := a.sessionEpoch
+	a.sessionMu.Unlock()
+	var closePrompt func()
+
+	a.post(func() {
+		id := corecode.SessionIDFromContext(ctx)
+		if ctx.Err() != nil || a.sessionEpoch != epoch || (id != "" && id != a.sessionID) {
+			cancel()
+			return
+		}
+		cleanup := show()
+		closed := false
+		closePrompt = func() {
+			if closed {
+				return
+			}
+			closed = true
+			cleanup()
+			a.dismissPrompt = nil
+			a.invalidate()
+		}
+		a.dismissPrompt = func() {
+			cancel()
+			closePrompt()
+		}
+		a.invalidate()
+	})
+	return ctx, func() {
+		cancel()
+		a.post(func() {
+			if closePrompt != nil {
+				closePrompt()
+			}
+		})
+	}
+}
+
 // askOptionsLocked presents an interactive selection popup and returns the
-// chosen ids (nil when declined or dismissed). Expects a.elicitMu held.
+// chosen ids (nil when declined or dismissed). Expects the prompt slot held.
 func (a *App) askOptionsLocked(ctx context.Context, title, message string, items []PopupItem, multi bool, hotkeys map[rune]string) ([]string, error) {
 	response := make(chan []string, 1)
 
-	a.post(func() {
+	ctx, finish := a.beginPrompt(ctx, func() func() {
 		a.promptActive = true
 
 		popup := newPopup(popupList, popupHint("", multi), items, func(ids []string) {
@@ -108,20 +155,18 @@ func (a *App) askOptionsLocked(ctx context.Context, title, message string, items
 			}
 		}
 		a.popup = popup
-		a.invalidate()
-	})
-
-	defer a.post(func() {
-		a.promptActive = false
-		if a.popup != nil && a.popup.kind == popupList {
-			a.closePopup()
+		return func() {
+			a.promptActive = false
+			if a.popup == popup {
+				a.closePopup()
+			}
 		}
-		a.invalidate()
 	})
+	defer finish()
 
 	select {
 	case ids := <-response:
-		return ids, nil
+		return ids, ctx.Err()
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-a.ctx.Done():
@@ -144,8 +189,10 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 	// One lock across the whole request: a concurrent elicitation (parallel
 	// tool calls, an MCP server) must not splice its prompt between the
 	// fields of this one.
-	a.elicitMu.Lock()
-	defer a.elicitMu.Unlock()
+	if err := a.acquirePrompt(ctx); err != nil {
+		return tool.ElicitResult{}, err
+	}
+	defer a.releasePrompt()
 
 	fields := req.Fields
 
@@ -171,6 +218,7 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 
 		freeText := len(field.Enum) == 0 && field.Type != "boolean"
 		answerField := field
+		var selected []string
 		customField, hasCustom := customAnswerCompanion(fields, field.Name)
 
 		if !freeText {
@@ -188,8 +236,17 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 				return tool.ElicitResult{Action: tool.ElicitDecline}, nil
 			case "other":
 				freeText = true
+				selected, _ = value.([]string)
 				if hasCustom {
 					answerField = customField
+					if len(selected) > 0 {
+						content[field.Name] = selected
+					}
+				} else {
+					// Other is literal free text: "1" must not become option 1,
+					// and commas must not split the user's answer.
+					answerField.Enum = nil
+					answerField.Multiple = false
 				}
 			default:
 				if !bare {
@@ -223,6 +280,9 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 			}
 
 			if !bare {
+				if field.Multiple && !hasCustom {
+					value = append(selected, strings.TrimSpace(text))
+				}
 				content[answerField.Name] = value
 			} else if accepted, _ := value.(bool); !accepted {
 				return tool.ElicitResult{Action: tool.ElicitDecline}, nil
@@ -233,6 +293,28 @@ func (a *App) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitRe
 
 	return tool.ElicitResult{Action: tool.ElicitAccept, Content: content}, nil
 }
+
+// Serializing prompts must not trap a cancelled turn behind a waiting user.
+func (a *App) acquirePrompt(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.elicitOnce.Do(func() { a.elicitGate = make(chan struct{}, 1) })
+	var appDone <-chan struct{}
+	if a.ctx != nil {
+		appDone = a.ctx.Done()
+	}
+	select {
+	case a.elicitGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-appDone:
+		return a.ctx.Err()
+	}
+}
+
+func (a *App) releasePrompt() { <-a.elicitGate }
 
 func customAnswerCompanion(fields []tool.ElicitField, questionID string) (tool.ElicitField, bool) {
 	for _, field := range fields {
@@ -273,18 +355,21 @@ func (a *App) elicitOptionsField(ctx context.Context, message string, field tool
 			return nil, "", err
 		}
 		if len(ids) == 0 {
-			a.recordPrompt("", message, "decline")
+			a.recordPrompt(ctx, "", message, "decline")
 			return nil, "decline", nil
 		}
 
 		value := ids[0] == "yes"
-		a.recordPrompt("", message, ids[0])
+		a.recordPrompt(ctx, "", message, ids[0])
 		return value, "", nil
 	}
 
 	items := make([]PopupItem, 0, len(field.Enum)+2)
+	values := make(map[string]string, len(field.Enum))
 	for i, option := range field.Enum {
-		item := PopupItem{ID: option, Label: option}
+		id := fmt.Sprintf("option_%d", i)
+		values[id] = option
+		item := PopupItem{ID: id, Label: option}
 		if i < len(field.EnumDescriptions) {
 			item.Detail = field.EnumDescriptions[i]
 		}
@@ -301,26 +386,26 @@ func (a *App) elicitOptionsField(ctx context.Context, message string, field tool
 		return nil, "", err
 	}
 
+	if slices.Contains(ids, "__decline") {
+		a.recordPrompt(ctx, "", message, "decline")
+		return nil, "decline", nil
+	}
 	var picks []string
 	for _, id := range ids {
-		switch id {
-		case "__decline":
-			picks = nil
-		case "__other":
-			return nil, "other", nil
-		default:
-			picks = append(picks, id)
-			continue
+		if value, ok := values[id]; ok {
+			picks = append(picks, value)
 		}
-		break
+	}
+	if !field.Strict && slices.Contains(ids, "__other") {
+		return picks, "other", nil
 	}
 
 	if len(picks) == 0 {
-		a.recordPrompt("", message, "decline")
+		a.recordPrompt(ctx, "", message, "decline")
 		return nil, "decline", nil
 	}
 
-	a.recordPrompt("", message, strings.Join(picks, ", "))
+	a.recordPrompt(ctx, "", message, strings.Join(picks, ", "))
 
 	if field.Multiple {
 		return picks, "", nil
@@ -338,29 +423,33 @@ func fieldKind(field tool.ElicitField) string {
 	return field.Type
 }
 
-// askLineLocked expects a.elicitMu to be held by the caller.
+// askLineLocked expects the prompt slot to be held by the caller.
 func (a *App) askLineLocked(ctx context.Context, prompt, placeholder string) (string, error) {
-	a.askResponse = make(chan string, 1)
+	response := make(chan string, 1)
 
-	a.post(func() {
+	ctx, finish := a.beginPrompt(ctx, func() func() {
+		draft := a.currentDraft()
+		a.saveCurrentDraft()
+		a.restoreDraft(composerState{})
 		a.askActive = true
+		a.askResponse = response
 		a.askMessage = prompt
 		a.askHeader = cellPrompt("", prompt, "", a.width())
 		a.editor.SetPlaceholder(placeholder)
-		a.invalidate()
+		return func() {
+			a.askActive = false
+			a.askResponse = nil
+			a.askMessage = ""
+			a.askHeader = nil
+			a.editor.SetPlaceholder("Ask anything...")
+			a.restoreDraft(draft)
+		}
 	})
-
-	defer a.post(func() {
-		a.askActive = false
-		a.askMessage = ""
-		a.askHeader = nil
-		a.editor.SetPlaceholder("Ask anything...")
-		a.invalidate()
-	})
+	defer finish()
 
 	select {
-	case result := <-a.askResponse:
-		return result, nil
+	case result := <-response:
+		return result, ctx.Err()
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case <-a.ctx.Done():
@@ -434,6 +523,9 @@ func elicitPlaceholder(field tool.ElicitField) string {
 
 func parseElicitValue(field tool.ElicitField, text string) (any, bool) {
 	text = strings.TrimSpace(text)
+	if field.Required && text == "" {
+		return nil, false
+	}
 
 	if field.Multiple && len(field.Enum) > 0 {
 		picks := make([]string, 0, 4)

@@ -12,8 +12,21 @@ const (
 	RoleSystem    MessageRole = "system"
 )
 
+type MessagePhase string
+
+const (
+	PhaseCommentary    MessagePhase = "commentary"
+	PhasePartialAnswer MessagePhase = "partial_answer"
+	PhaseFinalAnswer   MessagePhase = "final_answer"
+)
+
 type Message struct {
-	Role MessageRole `json:"role"`
+	InputID string      `json:"input_id,omitempty"`
+	Role    MessageRole `json:"role"`
+
+	// Phase distinguishes assistant progress, partial answers, and final answers and
+	// must survive persistence and replay in subsequent provider requests.
+	Phase MessagePhase `json:"phase,omitempty"`
 
 	Content []Content `json:"content"`
 	Hidden  bool      `json:"hidden,omitempty"`
@@ -40,15 +53,32 @@ type Content struct {
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
 }
 
+// AsText returns Text if present, otherwise Refusal.
+// Refusal remains separate in retained history for faithful provider replay.
+func (c Content) AsText() string {
+	if c.Text != "" {
+		return c.Text
+	}
+	return c.Refusal
+}
+
 type File struct {
 	Name string `json:"name,omitempty"`
 	Data string `json:"data,omitempty"`
 }
 
 type Usage struct {
+	// InputTokens and OutputTokens are inclusive totals. Cache reads and cache
+	// creation are subsets of InputTokens; reasoning is a subset of
+	// OutputTokens. The JSON names retain session compatibility with earlier
+	// versions of wingman-agent.
 	InputTokens  int64 `json:"input_tokens"`
-	CachedTokens int64 `json:"cached_tokens"`
 	OutputTokens int64 `json:"output_tokens"`
+
+	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
+
+	CacheReadInputTokens     int64 `json:"cached_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_write_tokens,omitempty"`
 
 	// LastInputTokens is the input size of the most recent request — the
 	// current context occupancy, unlike the cumulative counters above.
@@ -58,11 +88,20 @@ type Usage struct {
 	ContextWindow int64 `json:"context_window,omitempty"`
 }
 
+// TotalTokens returns the provider-neutral total without double-counting cache
+// or reasoning subsets.
+func (u Usage) TotalTokens() int64 {
+	return u.InputTokens + u.OutputTokens
+}
+
 type ToolCall struct {
 	ID string `json:"id"`
 
-	Name string `json:"name"`
-	Args string `json:"args,omitempty"`
+	Name         string            `json:"name"`
+	Kind         string            `json:"kind,omitempty"`
+	Args         string            `json:"args,omitempty"`
+	Locations    []ToolLocation    `json:"locations,omitempty"`
+	Presentation *ToolPresentation `json:"presentation,omitempty"`
 
 	Partial bool `json:"partial,omitempty"`
 }
@@ -70,12 +109,28 @@ type ToolCall struct {
 type ToolResult struct {
 	ID string `json:"id,omitempty"`
 
-	Name string `json:"name"`
-	Args string `json:"args,omitempty"`
+	Name         string            `json:"name"`
+	Kind         string            `json:"kind,omitempty"`
+	Args         string            `json:"args,omitempty"`
+	Locations    []ToolLocation    `json:"locations,omitempty"`
+	Presentation *ToolPresentation `json:"presentation,omitempty"`
 
 	Content  string         `json:"content,omitempty"`
 	IsError  bool           `json:"is_error,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+type ToolPresentation struct {
+	Title     string         `json:"title"`
+	Kind      string         `json:"kind,omitempty"`
+	Args      string         `json:"args,omitempty"`
+	Hint      string         `json:"hint,omitempty"`
+	Locations []ToolLocation `json:"locations,omitempty"`
+}
+
+type ToolLocation struct {
+	Path string `json:"path"`
+	Line int    `json:"line,omitempty"`
 }
 
 type Reasoning struct {
@@ -92,4 +147,7 @@ type Reasoning struct {
 	// agent loop can purge stale payloads when the session model changes.
 	Content string `json:"content,omitempty"`
 	Model   string `json:"model,omitempty"`
+	// Prefix binds replay to the instructions and tools used for generation.
+	// Persist it so a resumed chat can detect settings edits too.
+	Prefix string `json:"prefix,omitempty"`
 }

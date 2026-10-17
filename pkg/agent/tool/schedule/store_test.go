@@ -37,6 +37,30 @@ func TestFileStoreCreatesAgentDir(t *testing.T) {
 	}
 }
 
+func TestFileStoreSignalsChangesAndRestoresTasks(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileStore(dir)
+	if err := store.Mutate(func(tasks []Task) ([]Task, error) {
+		return append(tasks, Task{ID: "durable", Schedule: "every 1h", Status: StatusActive, FireSeq: 4}), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-store.Changed():
+	default:
+		t.Fatal("file mutation did not wake scheduler")
+	}
+
+	restored := NewFileStore(dir)
+	tasks, err := restored.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != "durable" || tasks[0].FireSeq != 4 {
+		t.Fatalf("restored tasks = %#v", tasks)
+	}
+}
+
 func TestFileStoreReportsMalformedYAML(t *testing.T) {
 	store := NewFileStore(t.TempDir())
 
@@ -46,6 +70,13 @@ func TestFileStoreReportsMalformedYAML(t *testing.T) {
 
 	if _, err := store.List(); err == nil {
 		t.Fatal("expected malformed YAML error")
+	}
+
+	if err := os.WriteFile(store.Path(), []byte("   \n"), 0644); err != nil {
+		t.Fatalf("write empty tasks file: %v", err)
+	}
+	if got, err := store.List(); err != nil || len(got) != 0 {
+		t.Fatalf("empty tasks file List = %#v, %v, want empty", got, err)
 	}
 }
 
@@ -108,16 +139,18 @@ func TestMemoryStoreSnapshotsAreIsolated(t *testing.T) {
 	store := NewMemoryStore()
 
 	if err := store.Mutate(func(tasks []Task) ([]Task, error) {
-		return append(tasks, Task{ID: "a", Status: StatusActive}), nil
+		now := time.Date(2026, 6, 12, 8, 0, 0, 0, time.UTC)
+		return append(tasks, Task{ID: "a", Status: StatusActive, LastRun: &now}), nil
 	}); err != nil {
 		t.Fatalf("Mutate failed: %v", err)
 	}
 
 	got, _ := store.List()
 	got[0].Status = StatusPaused
+	*got[0].LastRun = got[0].LastRun.Add(time.Hour)
 
 	again, _ := store.List()
-	if again[0].Status != StatusActive {
+	if again[0].Status != StatusActive || !again[0].LastRun.Equal(time.Date(2026, 6, 12, 8, 0, 0, 0, time.UTC)) {
 		t.Fatal("List must return a copy the caller cannot mutate in place")
 	}
 

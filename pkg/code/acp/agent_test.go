@@ -275,14 +275,14 @@ func TestTranslateUpdateReleasesCompletedToolCall(t *testing.T) {
 	}
 }
 
-func TestTranslateUpdateNormalizesCommandToolForTerminalRenderer(t *testing.T) {
+func TestTranslateUpdatePreservesCommandActionTitle(t *testing.T) {
 	a := &Agent{}
 	sess := &sessionState{toolCalls: map[string]toolCall{}}
 	turn := &turn{}
 	id := acp.ToolCallId("command-1")
 	update := acp.StartToolCall(
 		id,
-		"sed -n '1,20p' README.md",
+		"Run command",
 		acp.WithStartKind(acp.ToolKindExecute),
 		acp.WithStartRawInput(map[string]any{"command": "sed -n '1,20p' README.md", "cwd": "/workspace"}),
 	)
@@ -291,8 +291,126 @@ func TestTranslateUpdateNormalizesCommandToolForTerminalRenderer(t *testing.T) {
 		t.Fatalf("translated command = %+v, ok=%v", msg, ok)
 	}
 	call := msg.Content[0].ToolCall
-	if call.Name != "shell" || !strings.Contains(call.Args, `"command":"sed -n '1,20p' README.md"`) {
-		t.Fatalf("normalized command = %+v", call)
+	if call.Name != "Run command" || call.Kind != "execute" || !strings.Contains(call.Args, `"command":"sed -n '1,20p' README.md"`) {
+		t.Fatalf("command = %+v", call)
+	}
+}
+
+func TestTranslateUpdatePreservesSemanticDiffKind(t *testing.T) {
+	a := &Agent{}
+	sess := &sessionState{toolCalls: map[string]toolCall{}}
+	turn := &turn{}
+	id := acp.ToolCallId("edit-1")
+	old := "old\n"
+
+	start, ok := a.translateUpdate(sess, turn, acp.StartToolCall(
+		id,
+		"Editing files",
+		acp.WithStartKind(acp.ToolKindEdit),
+	))
+	if !ok || start.Content[0].ToolCall == nil || start.Content[0].ToolCall.Kind != "edit" {
+		t.Fatalf("translated start = %+v, ok=%v", start, ok)
+	}
+
+	result, ok := a.translateUpdate(sess, turn, acp.UpdateToolCall(
+		id,
+		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
+		acp.WithUpdateContent([]acp.ToolCallContent{{Diff: &acp.ToolCallContentDiff{
+			Type: "diff", Path: "/workspace/a.go", OldText: &old, NewText: "new\n",
+		}}}),
+	))
+	if !ok || result.Content[0].ToolResult == nil || result.Content[0].ToolResult.Kind != "edit" {
+		t.Fatalf("translated result = %+v, ok=%v", result, ok)
+	}
+}
+
+func TestTranslateUpdatePreservesToolLocations(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	a := &Agent{workspace: &code.Workspace{RootPath: workspaceRoot}}
+	sess := &sessionState{toolCalls: map[string]toolCall{}}
+	turn := &turn{}
+	id := acp.ToolCallId("read-1")
+	line := 12
+	path := filepath.Join(workspaceRoot, "main.go")
+
+	start, ok := a.translateUpdate(sess, turn, acp.StartToolCall(
+		id,
+		"Read main.go",
+		acp.WithStartKind(acp.ToolKindRead),
+		acp.WithStartLocations([]acp.ToolCallLocation{{Path: path, Line: &line}}),
+	))
+	if !ok || start.Content[0].ToolCall == nil {
+		t.Fatalf("translated start = %+v, ok=%v", start, ok)
+	}
+	locations := start.Content[0].ToolCall.Locations
+	if len(locations) != 1 || locations[0].Path != "main.go" || locations[0].Line != 12 {
+		t.Fatalf("start locations = %+v", locations)
+	}
+
+	updatedLine := 24
+	result, ok := a.translateUpdate(sess, turn, acp.UpdateToolCall(
+		id,
+		acp.WithUpdateLocations([]acp.ToolCallLocation{{Path: path, Line: &updatedLine}}),
+		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
+		acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock("contents"))}),
+	))
+	if !ok || result.Content[0].ToolResult == nil {
+		t.Fatalf("translated result = %+v, ok=%v", result, ok)
+	}
+	locations = result.Content[0].ToolResult.Locations
+	if len(locations) != 1 || locations[0].Line != 24 {
+		t.Fatalf("result locations = %+v", locations)
+	}
+}
+
+func TestTranslateUpdateInfersEditKindFromStructuredDiff(t *testing.T) {
+	a := &Agent{}
+	sess := &sessionState{toolCalls: map[string]toolCall{}}
+	turn := &turn{}
+	id := acp.ToolCallId("edit-1")
+
+	if _, ok := a.translateUpdate(sess, turn, acp.StartToolCall(id, "Changed a file")); !ok {
+		t.Fatal("tool call start was not translated")
+	}
+	result, ok := a.translateUpdate(sess, turn, acp.UpdateToolCall(
+		id,
+		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
+		acp.WithUpdateContent([]acp.ToolCallContent{{Diff: &acp.ToolCallContentDiff{
+			Type: "diff", Path: "/workspace/new.go", NewText: "package main\n",
+		}}}),
+	))
+	if !ok || result.Content[0].ToolResult == nil || result.Content[0].ToolResult.Kind != "edit" {
+		t.Fatalf("translated result = %+v, ok=%v", result, ok)
+	}
+}
+
+func TestTranslateUpdateRetainsStartDiffForStatusOnlyCompletion(t *testing.T) {
+	a := &Agent{}
+	sess := &sessionState{toolCalls: map[string]toolCall{}}
+	turn := &turn{}
+	id := acp.ToolCallId("edit-1")
+	old := "before\n"
+
+	if _, ok := a.translateUpdate(sess, turn, acp.StartToolCall(
+		id,
+		"Edit file",
+		acp.WithStartKind(acp.ToolKindEdit),
+		acp.WithStartContent([]acp.ToolCallContent{{Diff: &acp.ToolCallContentDiff{
+			Type: "diff", Path: "main.go", OldText: &old, NewText: "after\n",
+		}}}),
+	)); !ok {
+		t.Fatal("tool call start was not translated")
+	}
+
+	result, ok := a.translateUpdate(sess, turn, acp.UpdateToolCall(
+		id,
+		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
+	))
+	if !ok || len(result.Content) != 1 || result.Content[0].ToolResult == nil {
+		t.Fatalf("translated result = %+v, ok=%v", result, ok)
+	}
+	if body := result.Content[0].ToolResult.Content; !strings.Contains(body, "-before") || !strings.Contains(body, "+after") {
+		t.Fatalf("retained diff = %q", body)
 	}
 }
 
@@ -414,8 +532,8 @@ func TestElicitFieldsFromSchema(t *testing.T) {
 			},
 			"question_0_custom": map[string]any{
 				"type": "string", "title": "Other",
-				"_meta": map[string]any{"_askUserQuestionCustomAnswer": map[string]any{
-					"questionId": "question_0", "isCustomAnswer": true,
+				"_meta": map[string]any{"wingman": map[string]any{
+					"customAnswerFor": "question_0",
 				}},
 			},
 			"question_1": map[string]any{

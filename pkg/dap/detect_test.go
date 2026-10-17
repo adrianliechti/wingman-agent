@@ -3,12 +3,28 @@ package dap
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
+
+type preparingConnector struct {
+	called bool
+}
+
+func (*preparingConnector) ConnectAdapter(context.Context, Plan) (io.ReadWriteCloser, error) {
+	return nil, errors.New("not used by this test")
+}
+
+func (connector *preparingConnector) PrepareAdapter(_ context.Context, plan Plan) (Plan, error) {
+	connector.called = true
+	plan.Arguments["prepared"] = true
+	return plan, nil
+}
 
 func TestDetectProjectsUsesDescriptorMarkersAndSkipsGeneratedTrees(t *testing.T) {
 	root := t.TempDir()
@@ -211,6 +227,23 @@ func TestWorkspacePathsRejectSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestResolveWorkspaceDirectoryAcceptsRelativeWorkspace(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	project := filepath.Join(workspace, "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	got, err := ResolveWorkspaceDirectory("workspace", "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != project {
+		t.Fatalf("ResolveWorkspaceDirectory = %q, want %q", got, project)
+	}
+}
+
 func TestConfigurationPathCanAllowMissingBuildOutput(t *testing.T) {
 	root := t.TempDir()
 	configuration, err := ResolveConfigurationPaths(root, root, []ConfigurationPath{{Key: "program", AllowMissing: true}}, map[string]any{
@@ -268,25 +301,44 @@ func TestManagerRejectsSecondActiveSession(t *testing.T) {
 	if _, err := manager.Start(context.Background(), StartOptions{}); !errors.Is(err, ErrActiveSession) {
 		t.Fatalf("Start error = %v, want ErrActiveSession", err)
 	}
+	if _, err := manager.BeginPreparation(); !errors.Is(err, ErrActiveSession) {
+		t.Fatalf("setup error = %v, want ErrActiveSession", err)
+	}
+	manager.session = nil
+	release, err := manager.BeginPreparation()
+	if err != nil {
+		t.Fatalf("setup after session ended = %v", err)
+	}
+	release()
 }
 
-func TestResolveCodeLLDBFindsEditorExtension(t *testing.T) {
-	home := t.TempDir()
-	name := "codelldb"
-	if runtime.GOOS == "windows" {
-		name = "codelldb.exe"
-	}
-	path := filepath.Join(home, ".vscode", "extensions", "vadimcn.vscode-lldb-1.11.0", "adapter", name)
-	writeTestFile(t, path, "adapter\n")
-	if err := os.Chmod(path, 0o755); err != nil {
+func TestManagerPreparationExcludesLaunchAndAllowsClose(t *testing.T) {
+	manager := NewManager(t.TempDir(), nil)
+	release, err := manager.BeginPreparation()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := resolveCodeLLDB(home); got != path {
-		t.Fatalf("resolveCodeLLDB = %q, want %q", got, path)
+	defer release()
+	if _, err := manager.BeginPreparation(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("concurrent setup = %v, want ErrBusy", err)
+	}
+	if _, err := manager.Start(context.Background(), StartOptions{}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("launch during setup = %v, want ErrBusy", err)
+	}
+	// Close must not wait for setup: the workspace cancels installers during
+	// shutdown, and they may still be unwinding their progress callbacks.
+	manager.Close()
+}
+
+func TestManagerPreparationRejectsClosedManager(t *testing.T) {
+	manager := NewManager(t.TempDir(), nil)
+	manager.Close()
+	if _, err := manager.BeginPreparation(); err == nil {
+		t.Fatal("closed manager accepted setup")
 	}
 }
 
-func TestManagerFindsAdapterInNestedProjectEnvironment(t *testing.T) {
+func TestManagerRejectsAdapterInNestedProjectEnvironment(t *testing.T) {
 	root := t.TempDir()
 	project := filepath.Join(root, "services", "api")
 	writeTestFile(t, filepath.Join(project, "pyproject.toml"), "[project]\n")
@@ -297,7 +349,7 @@ func TestManagerFindsAdapterInNestedProjectEnvironment(t *testing.T) {
 		binDir = "Scripts"
 		adapterName += ".exe"
 	}
-	adapterPath := filepath.Join(project, ".venv", binDir, adapterName)
+	adapterPath := filepath.Join(root, "services", ".venv", binDir, adapterName)
 	writeTestFile(t, adapterPath, "adapter\n")
 	if err := os.Chmod(adapterPath, 0o755); err != nil {
 		t.Fatal(err)
@@ -311,32 +363,169 @@ func TestManagerFindsAdapterInNestedProjectEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(values) != 1 || values[0].adapter.Command != adapterPath {
-		t.Fatalf("detected adapters = %#v, want nested command %q", values, adapterPath)
+	if len(values) != 0 {
+		t.Fatalf("detected adapters = %#v, unexpected project command %q", values, adapterPath)
 	}
 }
 
-func TestManagerUsesDescriptorFallbackCommand(t *testing.T) {
+type testManagedTools map[string]string
+
+func (m testManagedTools) Resolve(command string) string { return m[command] }
+
+func TestManagerManagedResolverIgnoresProjectAndSystemAdapters(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "pyproject.toml"), "[project]\n")
 	writeTestFile(t, filepath.Join(root, "main.py"), "print('ready')\n")
-	fallbackPath := filepath.Join(root, "python-for-debugpy")
+	name := "debugpy-adapter"
+	bin := "bin"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+		bin = "Scripts"
+	}
+	local := filepath.Join(root, ".venv", bin, name)
+	writeTestFile(t, local, "adapter\n")
+	if err := os.Chmod(local, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	manager := newManager(root, []AdapterDescriptor{{
-		Name: "debugpy", Command: "debugpy-adapter",
-		FallbackCommand: "python3", FallbackArgs: []string{"/editor/debugpy/adapter"},
-		Markers: []string{"pyproject.toml"}, SourceExtensions: []string{".py"},
-	}}, func(command string) string {
-		if command == "python3" {
-			return fallbackPath
-		}
-		return ""
-	}, nil)
+		Name: "debugpy", Command: "debugpy-adapter", Markers: []string{"pyproject.toml"}, SourceExtensions: []string{".py"},
+	}}, func(string) string { return filepath.Join(root, "path", "debugpy-adapter") }, nil)
+	managed := filepath.Join(root, "managed", "debugpy-adapter")
+	tools := testManagedTools{"debugpy-adapter": managed}
+	manager.lookup = tools.Resolve
 	values, err := manager.detect(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(values) != 1 || values[0].adapter.Command != fallbackPath || !reflect.DeepEqual(values[0].adapter.Args, []string{"/editor/debugpy/adapter"}) {
-		t.Fatalf("detected adapters = %#v", values)
+	if len(values) != 1 || values[0].adapter.Command != managed {
+		t.Fatalf("detected adapters = %#v, want managed command %q", values, managed)
+	}
+	failure := errors.New("captured launch")
+	manager.start = func(_ context.Context, _ string, plan Plan, _ StartOptions) (*Session, error) {
+		if plan.Adapter.Command != managed {
+			t.Fatalf("launched %q instead of managed adapter %q", plan.Adapter.Command, managed)
+		}
+		return nil, failure
+	}
+	if _, err := manager.Start(context.Background(), StartOptions{Adapter: "debugpy"}); !errors.Is(err, failure) {
+		t.Fatalf("managed launch = %v", err)
+	}
+	// Removing the managed tool after discovery must not change the source at launch.
+	tools["debugpy-adapter"] = ""
+	if _, err := manager.Start(context.Background(), StartOptions{Adapter: "debugpy"}); err == nil || errors.Is(err, failure) {
+		t.Fatalf("missing managed launch = %v", err)
+	}
+	manager.InvalidateDetection()
+	if values, err := manager.Adapters(context.Background()); err != nil || len(values) != 0 {
+		t.Fatalf("unmanaged fallback = %+v, %v", values, err)
+	}
+}
+
+func TestManagerPrefersManagedAdapterOverSystemFallback(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/test\n")
+	managed := filepath.Join(root, "managed", "dlv")
+	manager := newManager(root, []AdapterDescriptor{{
+		Name: "delve", Command: "dlv", Markers: []string{"go.mod"}, SourceExtensions: []string{".go"},
+	}}, func(string) string { return filepath.Join(root, "path", "dlv") }, nil)
+	manager.lookup = testManagedTools{"dlv": managed}.Resolve
+
+	values, err := manager.detect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := managed
+	if len(values) != 1 || values[0].adapter.Command != want {
+		t.Fatalf("detected adapters = %#v, want managed command %q", values, want)
+	}
+}
+
+func TestManagerUsesManagedAdapterWhenSystemIsMissing(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/test\n")
+	managed := filepath.Join(root, "managed", "dlv")
+	manager := newManager(root, []AdapterDescriptor{{
+		Name: "delve", Command: "dlv", Markers: []string{"go.mod"}, SourceExtensions: []string{".go"},
+	}}, func(string) string { return "" }, nil)
+	manager.lookup = testManagedTools{"dlv": managed}.Resolve
+	values, err := manager.detect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0].adapter.Command != managed {
+		t.Fatalf("detected adapters = %#v, want managed command %q", values, managed)
+	}
+}
+
+func TestManagerRejectsProjectAdaptersAcrossProjects(t *testing.T) {
+	root := t.TempDir()
+	projects := []string{filepath.Join(root, "one"), filepath.Join(root, "two")}
+	for _, project := range projects {
+		writeTestFile(t, filepath.Join(project, "pyproject.toml"), "[project]\n")
+		writeTestFile(t, filepath.Join(project, "main.py"), "print('ready')\n")
+	}
+	name := "debugpy-adapter"
+	directory := "bin"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+		directory = "Scripts"
+	}
+	local := filepath.Join(projects[0], ".venv", directory, name)
+	writeTestFile(t, local, "adapter\n")
+	if err := os.Chmod(local, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager := newManager(root, []AdapterDescriptor{{
+		Name: "debugpy", Language: "Python", Command: "debugpy-adapter",
+		Markers: []string{"pyproject.toml"}, SourceExtensions: []string{".py"},
+	}}, func(string) string { return "" }, nil)
+	values, err := manager.detect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 0 {
+		t.Fatalf("available projects = %#v", values)
+	}
+	missing, err := manager.MissingRequirements(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 1 || !reflect.DeepEqual(missing[0].Projects, projects) {
+		t.Fatalf("missing requirements = %#v", missing)
+	}
+}
+
+func TestDetectRequirementsDoesNotRequireInstalledAdapter(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "main.py"), "print('ready')\n")
+	requirements, err := DetectRequirements(context.Background(), root, []AdapterDescriptor{{
+		Name: "debugpy", Command: "debugpy-adapter", SourceExtensions: []string{".py"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []AdapterRequirement{{
+		Name: "debugpy", Commands: []string{"debugpy-adapter"}, Projects: []string{root},
+	}}
+	if !reflect.DeepEqual(requirements, want) {
+		t.Fatalf("requirements = %#v, want %#v", requirements, want)
+	}
+}
+
+func TestSelectAdapterRejectsAmbiguousLanguage(t *testing.T) {
+	values := []detectedAdapter{
+		{adapter: AdapterDescriptor{Name: "first", Language: "Test"}},
+		{adapter: AdapterDescriptor{Name: "second", Language: "Test"}},
+	}
+	if _, err := selectAdapter(values, "Test"); err == nil || !strings.Contains(err.Error(), "multiple") {
+		t.Fatalf("language selection error = %v, want ambiguity", err)
+	}
+	selected, err := selectAdapter(values, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.adapter.Name != "second" {
+		t.Fatalf("selected adapter = %q", selected.adapter.Name)
 	}
 }
 
@@ -361,6 +550,56 @@ func TestManagerStopClearsTheOnlySession(t *testing.T) {
 	status := session.Status()
 	if status.Stop != nil || status.Error != "" {
 		t.Fatalf("normal stop status = %+v", status)
+	}
+}
+
+func TestManagerRetainsFailedSessionForDebuggerOutput(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "package.json"), `{"scripts":{"dev":"vite"}}`)
+	adapterPath := filepath.Join(root, "js-debug-adapter")
+	writeTestFile(t, adapterPath, "adapter\n")
+	if err := os.Chmod(adapterPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("No supported Chromium browser was found.")
+	manager := newManager(root, []AdapterDescriptor{{
+		Name: "vscode-js-debug", Language: "JavaScript/TypeScript", Command: "js-debug-adapter", Markers: []string{"package.json"},
+	}}, func(string) string { return adapterPath }, func(_ context.Context, id string, plan Plan, _ StartOptions) (*Session, error) {
+		return &Session{id: id, plan: plan, state: StateTerminated, terminalErr: failure}, failure
+	})
+
+	if _, err := manager.Start(context.Background(), StartOptions{Adapter: "vscode-js-debug"}); !errors.Is(err, failure) {
+		t.Fatalf("Start error = %v, want %v", err, failure)
+	}
+	session := manager.ActiveSession()
+	if session == nil || session.Status().Error != failure.Error() {
+		t.Fatalf("failed session = %#v", session)
+	}
+}
+
+func TestManagerPreparesConnectedAdapterPlanBeforeStarting(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), "<project/>\n")
+	adapterPath := filepath.Join(root, "java-debug-adapter")
+	writeTestFile(t, adapterPath, "adapter\n")
+	if err := os.Chmod(adapterPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var started Plan
+	manager := newManager(root, []AdapterDescriptor{{
+		Name: "java-debug", Language: "Java", Command: "java-debug-adapter",
+		Transport: TransportConnect, Markers: []string{"pom.xml"}, SourceExtensions: []string{".java"},
+	}}, func(string) string { return adapterPath }, func(_ context.Context, id string, plan Plan, _ StartOptions) (*Session, error) {
+		started = plan
+		return &Session{id: id, plan: plan, state: StateStarting}, nil
+	})
+	connector := &preparingConnector{}
+	manager.SetAdapterConnector(connector)
+	if _, err := manager.Start(context.Background(), StartOptions{Adapter: "java-debug"}); err != nil {
+		t.Fatal(err)
+	}
+	if !connector.called || started.Arguments["prepared"] != true {
+		t.Fatalf("prepared = %v, started plan = %#v", connector.called, started)
 	}
 }
 

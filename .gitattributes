@@ -1,0 +1,2 @@
+# Production bundles contain whitespace inside third-party string literals.
+server/static/** linguist-generated=true -whitespace

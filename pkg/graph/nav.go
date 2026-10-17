@@ -385,8 +385,6 @@ func (e *Engine) Definitions(ctx context.Context, file string, src []byte, line,
 	if err != nil {
 		return nil, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	cands := rankNodes(g, file, name, lang)
 	if len(cands) > 50 {
@@ -459,8 +457,6 @@ func (e *Engine) References(ctx context.Context, file string, src []byte, line, 
 	if err != nil {
 		return nil, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	fam := langFamily(lang)
 	var out []Location
@@ -507,9 +503,7 @@ func (e *Engine) Hover(ctx context.Context, file string, src []byte, line, col i
 	if err != nil {
 		return nil, err
 	}
-	e.mu.RLock()
 	cands := rankNodes(g, file, name, lang)
-	e.mu.RUnlock()
 
 	if len(cands) == 0 {
 		return nil, nil
@@ -535,8 +529,6 @@ func (e *Engine) Implementations(ctx context.Context, file string, src []byte, l
 	if err != nil {
 		return nil, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	fam := langFamily(lang)
 	var out []Location

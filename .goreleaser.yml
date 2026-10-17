@@ -60,11 +60,13 @@ changelog:
     - title: Others
       order: 999
 
-# macOS: Homebrew cask (formula `brews` was deprecated in GoReleaser v2).
+# macOS and Linux: Homebrew cask.
 homebrew_casks:
   - name: wingman-cli
     # The installed command stays `wingman` (the built binary name).
     binaries: [wingman]
+    # The publisher adds postflight_steps; GoReleaser's hooks still emit postflight.
+    skip_upload: true
     repository:
       owner: adrianliechti
       name: homebrew-tap
@@ -76,14 +78,15 @@ homebrew_casks:
     homepage: "https://github.com/adrianliechti/wingman-agent"
     description: "AI-powered coding assistant for your terminal"
 
-    # Unsigned binary: strip the macOS quarantine attribute so it runs without
-    # a Gatekeeper prompt. (Casks only install on macOS; the guard is defensive.)
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/wingman"]
-          end
+publishers:
+  - name: homebrew-cask
+    # Select only the extra cask file, not the archives with ID "wingman".
+    ids: [wingman-cli]
+    extra_files:
+      - glob: dist/homebrew/Casks/wingman-cli.rb
+    env:
+      - GITHUB_TOKEN={{ .Env.GITHUB_TOKEN }}
+    cmd: ./scripts/publish-cask.sh {{ .Version }} wingman-cli
 
 # Windows: Scoop bucket.
 scoops:

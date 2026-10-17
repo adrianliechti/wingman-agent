@@ -2,9 +2,9 @@ package graph
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -18,6 +18,7 @@ const (
 	defaultContentLimit = 10
 	maxRawContentHits   = 50
 	maxContentLineBytes = 1024 * 1024
+	maxContentFileBytes = 16 << 20
 	maxContentPreview   = 300
 )
 
@@ -55,6 +56,8 @@ type ContentSearchResult struct {
 	Offset          int             `json:"offset"`
 	HasMore         bool            `json:"has_more"`
 	RawHasMore      bool            `json:"raw_has_more"`
+	SkippedFiles    []CoverageIssue `json:"skipped_files,omitempty"`
+	SourceChanged   bool            `json:"source_changed,omitempty"`
 }
 
 // SearchContent scans the graph's discovered source-file set, maps each
@@ -80,43 +83,56 @@ func (e *Engine) SearchContent(ctx context.Context, opts ContentSearchOpts) (Con
 		return ContentSearchResult{}, err
 	}
 	e.mu.RLock()
-	files := make([]string, 0, len(e.files))
-	for file := range e.files {
+	indexedFiles := e.files
+	matchingSnapshot := e.graph == g
+	e.mu.RUnlock()
+	files := make([]string, 0, len(indexedFiles))
+	for file := range indexedFiles {
 		files = append(files, file)
 	}
-	e.mu.RUnlock()
 	sort.Strings(files)
 
+	fileFilter := normalizeFileFilter(opts.File)
 	byNode := make(map[string]*ContentHit)
 	var raw []RawContentHit
 	totalRaw := 0
 	totalLines := 0
+	var skipped []CoverageIssue
+	sourceChanged := !matchingSnapshot
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return ContentSearchResult{}, err
 		}
-		if opts.File != "" && !strings.Contains(file, opts.File) {
+		if fileFilter != "" && !strings.Contains(file, fileFilter) {
 			continue
 		}
 		if opts.Glob != "" && !matchesContentGlob(opts.Glob, file) {
 			continue
 		}
 
-		f, err := os.Open(filepath.Join(e.root, filepath.FromSlash(file)))
+		data, changed, err := readSnapshotSource(filepath.Join(e.root, filepath.FromSlash(file)), indexedFiles[file], maxContentFileBytes)
 		if err != nil {
+			skipped = append(skipped, CoverageIssue{File: file, Reason: err.Error()})
 			continue
 		}
-		scanner := bufio.NewScanner(f)
+		sourceChanged = sourceChanged || changed
+		scanner := bufio.NewScanner(bytes.NewReader(data))
 		scanner.Buffer(make([]byte, 0, 64*1024), maxContentLineBytes)
 		line := 0
 		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				return ContentSearchResult{}, err
+			}
 			line++
 			text := scanner.Text()
 			if !match(text) {
 				continue
 			}
 			totalLines++
-			n := g.nodeAt(file, line)
+			var n *Node
+			if matchingSnapshot && !changed {
+				n = g.nodeAt(file, line)
+			}
 			if n == nil {
 				totalRaw++
 				if opts.Limit < 0 || len(raw) < maxRawContentHits {
@@ -131,7 +147,9 @@ func (e *Engine) SearchContent(ctx context.Context, opts ContentSearchOpts) (Con
 			}
 			hit.MatchLines = append(hit.MatchLines, line)
 		}
-		_ = f.Close()
+		if err := scanner.Err(); err != nil {
+			skipped = append(skipped, CoverageIssue{File: file, Reason: fmt.Sprintf("scan incomplete: %v", err)})
+		}
 	}
 
 	hits := make([]ContentHit, 0, len(byNode))
@@ -177,7 +195,7 @@ func (e *Engine) SearchContent(ctx context.Context, opts ContentSearchOpts) (Con
 	offset := min(max(opts.Offset, 0), total)
 	end := total
 	if limit > 0 {
-		end = min(offset+limit, total)
+		end = offset + min(limit, total-offset)
 	}
 
 	return ContentSearchResult{
@@ -189,6 +207,8 @@ func (e *Engine) SearchContent(ctx context.Context, opts ContentSearchOpts) (Con
 		Offset:          offset,
 		HasMore:         end < total,
 		RawHasMore:      totalRaw > len(raw),
+		SkippedFiles:    skipped,
+		SourceChanged:   sourceChanged,
 	}, nil
 }
 

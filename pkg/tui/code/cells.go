@@ -52,12 +52,13 @@ func (f *cellFlow) gap() bool {
 // background band, text starting at the shared 2-column gutter.
 func cellUser(text string, width int) []string {
 	t := theme.Default
-	band := ansi.Bg(t.Selection)
+	band := ansi.Bg(t.Surface)
 
 	bandWidth := max(width-len(cellIndent), 14)
 	inner := bandWidth - 3
+	spacer := cellIndent + band + strings.Repeat(" ", bandWidth) + ansi.Reset
 
-	var lines []string
+	lines := []string{spacer}
 	first := true
 
 	for line := range strings.SplitSeq(strings.TrimRight(markdown.Sanitize(text), "\n"), "\n") {
@@ -72,7 +73,7 @@ func cellUser(text string, width int) []string {
 		}
 	}
 
-	lines = append(lines, "")
+	lines = append(lines, spacer, "")
 	return lines
 }
 
@@ -98,13 +99,17 @@ func cellCommand(text string, width int) []string {
 
 // cellAssistant renders assistant markdown behind a status circle: dim while
 // streaming, green when committed, red on failure.
-func cellAssistant(text string, width int, circle ansi.Color) []string {
-	inner := max(width-len(cellIndent)-2, 10)
+func cellAssistant(text string, width int, circle ansi.Color, directory ...string) []string {
+	inner := max(width-len(cellIndent)-2, 1)
+	options := markdown.Options{Width: inner}
+	if len(directory) > 0 {
+		options.Directory = directory[0]
+	}
 
 	var lines []string
 	first := true
 
-	for line := range strings.SplitSeq(strings.TrimRight(markdown.Render(text), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(markdown.Render(text, options), "\n"), "\n") {
 		for _, wl := range ansi.Wrap(line, inner) {
 			prefix := "  "
 			if first {
@@ -133,7 +138,7 @@ func cellReasoning(summary string, width int, full bool) []string {
 
 	// Markdown accents survive, but every reset falls back to the dim italic
 	// base so the whole thought keeps its muted look.
-	rendered := strings.ReplaceAll(markdown.Render(summary), ansi.Reset, ansi.Reset+style)
+	rendered := strings.ReplaceAll(markdown.Render(summary, markdown.Options{Width: inner}), ansi.Reset, ansi.Reset+style)
 
 	var lines []string
 	first := true
@@ -152,6 +157,56 @@ func cellReasoning(summary string, width int, full bool) []string {
 	return lines
 }
 
+// cellReasoningHeadings renders the structured reasoning headings retained in
+// the normal chat. Complete reasoning bodies are reserved for the transcript.
+func cellReasoningHeadings(headings string, width int) []string {
+	var lines []string
+	for heading := range strings.SplitSeq(headings, "\n") {
+		if heading != "" {
+			lines = append(lines, cellReasoning(heading, width, false)...)
+		}
+	}
+	return lines
+}
+
+// extractReasoningHeader returns the first complete structured heading in a
+// reasoning part. Incomplete delimiters are left buffered until a later delta.
+func extractReasoningHeader(summary string) string {
+	header, _, _ := strings.Cut(extractReasoningHeadings(summary), "\n")
+	return header
+}
+
+// extractReasoningHeadings recovers every structured bold heading from a
+// committed summary whose original provider part boundaries are no longer
+// represented separately.
+func extractReasoningHeadings(summary string) string {
+	var headings []string
+	for offset := 0; offset < len(summary); {
+		relativeStart := strings.Index(summary[offset:], "**")
+		if relativeStart < 0 {
+			break
+		}
+		start := offset + relativeStart
+		rest := summary[start+2:]
+		end := strings.Index(rest, "**")
+		if end < 0 {
+			break
+		}
+		lineStart := strings.LastIndex(summary[:start], "\n") + 1
+		if strings.TrimSpace(summary[lineStart:start]) == "" {
+			if heading := normalizeReasoningHeading(rest[:end]); heading != "" {
+				headings = append(headings, heading)
+			}
+		}
+		offset = start + 2 + end + 2
+	}
+	return strings.Join(headings, "\n")
+}
+
+func normalizeReasoningHeading(heading string) string {
+	return strings.Join(strings.Fields(markdown.Sanitize(heading)), " ")
+}
+
 func lastNonEmptyLine(s string) string {
 	lines := strings.Split(s, "\n")
 	for _, line := range slices.Backward(lines) {
@@ -164,15 +219,15 @@ func lastNonEmptyLine(s string) string {
 }
 
 func isShellTool(name string) bool {
-	return name == "shell" || name == "exec_command" || name == "exec_session"
+	return name == "exec" || name == "shell" || name == "exec_command" || name == "exec_session"
 }
 
 // toolLabel maps internal tool names to friendlier display titles.
 func toolLabel(name string) string {
 	switch name {
-	case "task_send":
+	case "agent_send", "task_send":
 		return "agent follow-up"
-	case "task_stop":
+	case "agent_stop", "task_stop":
 		return "agent stop"
 	}
 	return name
@@ -181,7 +236,7 @@ func toolLabel(name string) string {
 // isTaskCommand reports task tools whose success result is model-directed
 // boilerplate the chat should not echo.
 func isTaskCommand(name string) bool {
-	return name == "task_send" || name == "task_stop"
+	return name == "agent_send" || name == "agent_stop" || name == "task_send" || name == "task_stop"
 }
 
 func isMutationTool(name string) bool {
@@ -237,6 +292,22 @@ func tailPreview(lines []string, n int) []string {
 	return append(out, lines[len(lines)-n:]...)
 }
 
+// trimShellTail drops trailing blank lines and the "Command completed" footer
+// so a collapsed preview shows real output instead of padding.
+func trimShellTail(lines []string) []string {
+	trimBlank := func(lines []string) []string {
+		for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+			lines = lines[:len(lines)-1]
+		}
+		return lines
+	}
+	lines = trimBlank(lines)
+	if len(lines) > 0 && lines[len(lines)-1] == "Command completed" {
+		lines = trimBlank(lines[:len(lines)-1])
+	}
+	return lines
+}
+
 // headPreview keeps the first n lines — diffs read from the top.
 func headPreview(lines []string, n int) []string {
 	if len(lines) <= n+1 {
@@ -248,10 +319,6 @@ func headPreview(lines []string, n int) []string {
 
 func cellTool(result *agent.ToolResult, width int, full bool) []string {
 	name := result.Name
-
-	if name == "todo" {
-		return cellTodo(result.Args, width)
-	}
 
 	hint := tool.ExtractHint(result.Args, result.Name)
 	output := strings.TrimRight(result.Content, "\n")
@@ -266,7 +333,7 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 	switch {
 	case isShellTool(name):
 		if !full {
-			body = tailPreview(preview, 3)
+			body = tailPreview(trimShellTail(preview), 3)
 		}
 	case isMutationTool(name):
 		t := theme.Default
@@ -306,6 +373,35 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 	return lines
 }
 
+const userShellOutputMaxLines = 50
+
+// cellUserShell renders a user-invoked !<cmd> execution and its output.
+func cellUserShell(command, output string, exitCode int, width int, full bool) []string {
+	output = strings.ReplaceAll(output, "\r\n", "\n")
+	output = strings.TrimRight(output, "\n")
+	errored := exitCode != 0
+
+	info := ""
+	if errored {
+		info = fmt.Sprintf("exit code %d", exitCode)
+	}
+
+	lines := []string{toolTitleLine("exec", command, info, width, false, errored)}
+	colorize := func(s string) string { return dim(markdown.Sanitize(s)) }
+
+	if output != "" {
+		body := strings.Split(output, "\n")
+		if !full {
+			body = tailPreview(body, userShellOutputMaxLines)
+		}
+		lines = append(lines, continuationWrap(strings.Join(body, "\n"), width, colorize)...)
+	} else if !errored {
+		lines = append(lines, continuationWrap("(no output)", width, colorize)...)
+	}
+
+	return lines
+}
+
 func cellToolProgress(name, hint, progress string, width int) []string {
 	lines := []string{toolTitleLine(name, hint, "", width, true, false)}
 
@@ -313,51 +409,6 @@ func cellToolProgress(name, hint, progress string, width int) []string {
 		inner := max(width-len(cellIndent)-2, 10)
 		text := markdown.Sanitize(strings.ReplaceAll(progress, "\n", " "))
 		lines = append(lines, cellIndent+"  "+dim(ansi.Truncate(text, inner, "…")))
-	}
-
-	return lines
-}
-
-func cellTodo(argsJSON string, width int) []string {
-	items := tool.ParseTodoItems(argsJSON)
-	if len(items) == 0 {
-		return []string{toolTitleLine("todo", "", "", width, false, false)}
-	}
-	return cellTodoItems(items, width)
-}
-
-func cellTodoItems(items []tool.TodoItem, width int) []string {
-	t := theme.Default
-
-	completed := 0
-	for _, item := range items {
-		if item.Status == "completed" {
-			completed++
-		}
-	}
-
-	lines := []string{cellIndent + dim("• ") + bold("plan") + " " + dim(fmt.Sprintf("%d/%d", completed, len(items)))}
-
-	inner := max(width-len(cellIndent)-4, 10)
-
-	for _, item := range items {
-		var line string
-		content := markdown.Sanitize(item.Content)
-		switch item.Status {
-		case "completed":
-			line = fg(t.Green) + "✔ " + ansi.Reset + fg(t.BrBlack) + ansi.Strike + content
-		case "in_progress":
-			line = fg(t.Cyan) + ansi.Bold + "□ " + content
-		default:
-			line = fg(t.BrBlack) + "□ " + content
-		}
-		for i, wl := range ansi.Wrap(line, inner) {
-			prefix := cellIndent + "  "
-			if i > 0 {
-				prefix += "  "
-			}
-			lines = append(lines, prefix+wl+ansi.Reset)
-		}
 	}
 
 	return lines
@@ -457,11 +508,11 @@ func cellTurnSeparator(elapsed string, tools, thoughts int, width int) []string 
 
 	var line string
 	if label == "" || ansi.Width(label)+8 > inner {
-		line = strings.Repeat("─", inner)
+		line = colored(theme.Default.Border, strings.Repeat("─", inner))
 	} else {
 		rest := inner - ansi.Width(label) - 5
-		line = "── " + label + " " + strings.Repeat("─", rest)
+		line = colored(theme.Default.Border, "── ") + dim(label) + colored(theme.Default.Border, " "+strings.Repeat("─", rest))
 	}
 
-	return []string{cellIndent + dim(line), ""}
+	return []string{cellIndent + line, ""}
 }

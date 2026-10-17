@@ -25,6 +25,22 @@ func colored(c ansi.Color, text string) string {
 	return fg(c) + text + ansi.Reset
 }
 
+// Paint complete rows with an explicit foreground as well as a background:
+// terminal-default text may be unreadable on a painted panel after an SGR reset.
+func surfaceLine(text string, width int, background ansi.Color) string {
+	base := fg(theme.Default.Foreground) + ansi.Bg(background)
+	line := ansi.Pad(ansi.Truncate(text, width, "…"), width)
+	return ansi.Reset + base + strings.ReplaceAll(line, ansi.Reset, ansi.Reset+base) + ansi.Reset
+}
+
+func panelLine(text string, width int) string {
+	return surfaceLine(text, width, theme.Default.Surface)
+}
+
+func selectionLine(text string, width int) string {
+	return surfaceLine(text, width, theme.Default.Selection)
+}
+
 // indentWrap wraps styled text and prefixes every line with the standard cell
 // indent.
 func indentWrap(text string, width int) []string {

@@ -12,6 +12,10 @@ import (
 func (a *App) showDiffView() {
 	t := theme.Default
 
+	if a.toggleDiffPanel() {
+		return
+	}
+
 	if !a.agent.Workspace().HasChanges() {
 		a.showToast("Change tracking is still starting", t.Yellow)
 		return
@@ -60,7 +64,7 @@ func (a *App) showDiffView() {
 		stats := colored(t.Green, fmt.Sprintf("+%d", ins)) + " " + colored(t.Red, fmt.Sprintf("-%d", del))
 
 		if selected {
-			return colored(t.Cyan, "→ ") + colored(statusColor, icon) + " " + colored(t.Cyan, diff.Path) + " " + stats
+			return colored(t.Cyan, "› ") + colored(statusColor, icon) + " " + colored(t.Foreground, diff.Path) + " " + stats
 		}
 		return "  " + colored(statusColor, icon) + " " + diff.Path + " " + stats
 	}

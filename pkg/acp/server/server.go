@@ -20,7 +20,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
 
-	"github.com/adrianliechti/wingman-agent/pkg/acp"
+	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -34,28 +34,39 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = cfg.Telemetry.Shutdown(shutdownCtx)
+		cancel()
+	}()
 	s := &Server{
 		config:      cfg,
 		sessions:    map[acpsdk.SessionId]*sessionEntry{},
 		sessionDirs: map[acpsdk.SessionId]string{},
 		workspaces:  map[string]*workspaceEntry{},
 	}
-	s.conn = acpsdk.NewAgentSideConnection(s, out, in)
+	writer := acpcommon.NewConnectionWriter(out, 0)
+	defer writer.Close()
+	s.conn = acpsdk.NewAgentSideConnection(s, writer, in)
 	s.conn.SetLogger(slog.Default())
 
 	select {
 	case <-s.conn.Done():
+	case <-writer.Done():
 	case <-ctx.Done():
 	}
 
 	s.mu.Lock()
+	s.closing = true
 	sessionIDs := slices.Collect(maps.Keys(s.sessions))
 	s.mu.Unlock()
 	for _, id := range sessionIDs {
 		_, _ = s.CloseSession(context.Background(), acpsdk.CloseSessionRequest{SessionId: id})
 	}
-	return nil
+	return writer.Err()
 }
+
+var serverMCPCapabilities = acpsdk.McpCapabilities{Http: true, Sse: true}
 
 type Server struct {
 	conn   *acpsdk.AgentSideConnection
@@ -65,25 +76,29 @@ type Server struct {
 	sessions    map[acpsdk.SessionId]*sessionEntry
 	sessionDirs map[acpsdk.SessionId]string
 	workspaces  map[string]*workspaceEntry
+	closing     bool
 
 	formElicitation atomic.Bool
 }
 
 type sessionEntry struct {
-	id        acpsdk.SessionId
-	agent     *codeagent.Agent
-	workspace *workspaceEntry
-	cancel    context.CancelFunc
-	closing   bool
+	id         acpsdk.SessionId
+	agent      *codeagent.Agent
+	workspace  *workspaceEntry
+	cancel     context.CancelFunc
+	promptDone chan struct{}
+	closing    bool
+	lastTitle  string
 }
 
 type workspaceEntry struct {
-	ws    *code.Workspace
-	agent *codeagent.Agent
-	key   string
-	refs  int
-	ready chan struct{}
-	err   error
+	ws         *code.Workspace
+	agent      *codeagent.Agent
+	key        string
+	refs       int
+	ready      chan struct{}
+	err        error
+	toolUpdate *code.ManagedToolsUpdate
 }
 
 func (s *Server) Initialize(_ context.Context, params acpsdk.InitializeRequest) (acpsdk.InitializeResponse, error) {
@@ -97,13 +112,18 @@ func (s *Server) Initialize(_ context.Context, params acpsdk.InitializeRequest) 
 			Version: "0.1.0",
 		},
 		AgentCapabilities: acpsdk.AgentCapabilities{
-			LoadSession:        true,
-			PromptCapabilities: acpsdk.PromptCapabilities{Image: true},
+			LoadSession:     true,
+			McpCapabilities: serverMCPCapabilities,
+			PromptCapabilities: acpsdk.PromptCapabilities{
+				Image:           true,
+				EmbeddedContext: true,
+			},
 			SessionCapabilities: acpsdk.SessionCapabilities{
 				List:   &acpsdk.SessionListCapabilities{},
 				Resume: &acpsdk.SessionResumeCapabilities{},
 				Close:  &acpsdk.SessionCloseCapabilities{},
 				Delete: &acpsdk.SessionDeleteCapabilities{},
+				Fork:   &acpsdk.SessionForkCapabilities{},
 			},
 		},
 	}, nil
@@ -118,6 +138,9 @@ func (s *Server) Logout(_ context.Context, _ acpsdk.LogoutRequest) (acpsdk.Logou
 }
 
 func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
+	if err := ctx.Err(); err != nil {
+		return tool.ElicitResult{Action: tool.ElicitCancel}, err
+	}
 	if result, handled := environmentElicitation(req); handled {
 		return result, nil
 	}
@@ -126,11 +149,15 @@ func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elici
 	}
 
 	params := acpsdk.NewUnstableCreateElicitationRequestForm(elicitationSchema(req))
+	// The SDK does not yet expose top-level sessionId for form requests.
+	params.Form.Meta = map[string]any{"sessionId": code.SessionIDFromContext(ctx)}
 	params.Form.Message = req.Message
 	if params.Form.Message == "" {
 		params.Form.Message = "Additional input is needed."
 	}
-	response, err := s.conn.UnstableCreateElicitation(ctx, params)
+	response, err := acpcommon.Call(ctx, func() (acpsdk.UnstableCreateElicitationResponse, error) {
+		return s.conn.UnstableCreateElicitation(ctx, params)
+	})
 	if err != nil {
 		// The client advertised form support, so an RPC failure is not evidence
 		// that the user accepted the schema defaults. Treat it as cancellation;
@@ -216,9 +243,8 @@ func elicitationSchema(req tool.ElicitRequest) acpsdk.UnstableElicitationSchema 
 		}
 		if field.CustomAnswerFor != "" {
 			property["_meta"] = map[string]any{
-				"_askUserQuestionCustomAnswer": map[string]any{
-					"questionId":     field.CustomAnswerFor,
-					"isCustomAnswer": true,
+				"wingman": map[string]any{
+					"customAnswerFor": field.CustomAnswerFor,
 				},
 			}
 		}
@@ -249,7 +275,16 @@ func addElicitationEnum(schema map[string]any, describedKey string, field tool.E
 		}
 		choices = append(choices, choice)
 	}
-	if described {
+	if !field.Strict {
+		// Built-in elicit options are suggestions. A closed enum/oneOf would
+		// reject free text even though the tool promises an Other answer.
+		fieldType := field.Type
+		if fieldType == "" {
+			fieldType = "string"
+		}
+		choices = append(choices, map[string]any{"type": fieldType, "title": "Other"})
+		schema["anyOf"] = choices
+	} else if described {
 		schema[describedKey] = choices
 	} else {
 		schema["enum"] = slices.Clone(field.Enum)
@@ -273,25 +308,24 @@ func (s *Server) Confirm(ctx context.Context, message string) (bool, error) {
 		acpsdk.WithStartKind(acpsdk.ToolKindOther),
 		acpsdk.WithStartStatus(acpsdk.ToolCallStatusPending),
 	)
-	if err := s.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
-		SessionId: acpsdk.SessionId(sid),
-		Update:    start,
-	}); err != nil {
+	if err := acpcommon.Notify(ctx, s.conn, acpsdk.SessionId(sid), start); err != nil {
 		return false, err
 	}
 
-	response, err := s.conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
-		SessionId: acpsdk.SessionId(sid),
-		ToolCall: acpsdk.ToolCallUpdate{
-			ToolCallId: toolCallID,
-			Title:      new(message),
-			Kind:       acpsdk.Ptr(acpsdk.ToolKindOther),
-			Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
-		},
-		Options: []acpsdk.PermissionOption{
-			{Kind: acpsdk.PermissionOptionKindAllowOnce, Name: "Allow", OptionId: allow},
-			{Kind: acpsdk.PermissionOptionKindRejectOnce, Name: "Reject", OptionId: "reject"},
-		},
+	response, err := acpcommon.Call(ctx, func() (acpsdk.RequestPermissionResponse, error) {
+		return s.conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
+			SessionId: acpsdk.SessionId(sid),
+			ToolCall: acpsdk.ToolCallUpdate{
+				ToolCallId: toolCallID,
+				Title:      new(message),
+				Kind:       acpsdk.Ptr(acpsdk.ToolKindOther),
+				Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
+			},
+			Options: []acpsdk.PermissionOption{
+				{Kind: acpsdk.PermissionOptionKindAllowOnce, Name: "Allow", OptionId: allow},
+				{Kind: acpsdk.PermissionOptionKindRejectOnce, Name: "Reject", OptionId: "reject"},
+			},
+		})
 	})
 	if err != nil {
 		s.finishPermissionToolCall(ctx, acpsdk.SessionId(sid), toolCallID, acpsdk.ToolCallStatusFailed)
@@ -313,10 +347,7 @@ func (s *Server) finishPermissionToolCall(ctx context.Context, sid acpsdk.Sessio
 	// caller's deadline. Keep this cleanup bounded in case the client is gone.
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
-	return s.conn.SessionUpdate(finishCtx, acpsdk.SessionNotification{
-		SessionId: sid,
-		Update:    acpsdk.UpdateToolCall(id, acpsdk.WithUpdateStatus(status)),
-	})
+	return acpcommon.Notify(finishCtx, s.conn, sid, acpsdk.UpdateToolCall(id, acpsdk.WithUpdateStatus(status)))
 }
 
 func (s *Server) NewSession(ctx context.Context, params acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
@@ -335,7 +366,10 @@ func (s *Server) NewSession(ctx context.Context, params acpsdk.NewSessionRequest
 		return acpsdk.NewSessionResponse{}, err
 	}
 	acpSid := acpsdk.SessionId(sid)
-	s.registerSession(acpSid, w)
+	if err := s.registerSession(acpSid, w); err != nil {
+		s.releaseWorkspace(w)
+		return acpsdk.NewSessionResponse{}, err
+	}
 
 	return acpsdk.NewSessionResponse{
 		SessionId:     acpSid,
@@ -352,6 +386,10 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 	key := workspaceKey(cwd, requested)
 
 	s.mu.Lock()
+	if s.closing || ctx.Err() != nil {
+		s.mu.Unlock()
+		return nil, errors.New("ACP connection is closing")
+	}
 	if w, ok := s.workspaces[key]; ok {
 		w.refs++
 		s.mu.Unlock()
@@ -369,10 +407,19 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 			ws.MCP.Dir = cwd
 		}
 		maps.Copy(ws.MCP.Servers, requested)
+		for name := range requested {
+			delete(ws.MCP.TrustRequired, name)
+		}
 	}
 	wa := codeagent.New(ws, s.config, s)
 
 	s.mu.Lock()
+	if s.closing || ctx.Err() != nil {
+		s.mu.Unlock()
+		_ = wa.Close()
+		ws.Close()
+		return nil, errors.New("ACP connection is closing")
+	}
 	if existing, ok := s.workspaces[key]; ok {
 
 		existing.refs++
@@ -386,9 +433,23 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 	s.mu.Unlock()
 
 	ws.WarmUp()
+	w.toolUpdate = ws.StartManagedToolsUpdate(context.Background(), code.ManagedLSPTools)
+	go func() {
+		if _, err := w.toolUpdate.Wait(); err != nil {
+			slog.Warn("managed tools update failed", "cwd", cwd, "err", err)
+		}
+	}()
 	mcpCtx, cancelMCP := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	if err := ws.InitMCP(mcpCtx); err != nil {
-		missing := missingRequestedMCPServers(requested, ws.MCP.Sessions())
+		// A local stdio server that won't start is a misconfiguration worth
+		// failing on; a remote one is usually transient and must not take the
+		// whole session down with it.
+		var missing []string
+		for _, name := range missingRequestedMCPServers(requested, ws.MCP.Sessions()) {
+			if requested[name].Transport == "" {
+				missing = append(missing, name)
+			}
+		}
 		if len(missing) > 0 {
 			w.err = fmt.Errorf("initialize requested MCP servers %s: %w", strings.Join(missing, ", "), err)
 		} else {
@@ -406,23 +467,46 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 }
 
 func requestedMCPConfig(servers []acpsdk.McpServer) (map[string]mcp.ServerConfig, error) {
-	if err := acp.ValidateMCPServers(servers, acpsdk.McpCapabilities{}); err != nil {
+	if err := acpcommon.ValidateMCPServers(servers, serverMCPCapabilities); err != nil {
 		return nil, err
 	}
 	result := make(map[string]mcp.ServerConfig, len(servers))
 	for _, server := range servers {
-		stdio := server.Stdio
-		env := make(map[string]string, len(stdio.Env))
-		for _, item := range stdio.Env {
-			env[item.Name] = item.Value
-		}
-		result[stdio.Name] = mcp.ServerConfig{
-			Command: stdio.Command,
-			Args:    append([]string(nil), stdio.Args...),
-			Env:     env,
+		switch {
+		case server.Stdio != nil:
+			stdio := server.Stdio
+			env := make(map[string]string, len(stdio.Env))
+			for _, item := range stdio.Env {
+				env[item.Name] = item.Value
+			}
+			result[stdio.Name] = mcp.ServerConfig{
+				Command: stdio.Command,
+				Args:    append([]string(nil), stdio.Args...),
+				Env:     env,
+			}
+		case server.Http != nil:
+			result[server.Http.Name] = mcp.ServerConfig{
+				Transport: "streamable-http",
+				URL:       server.Http.Url,
+				Headers:   headerMap(server.Http.Headers),
+			}
+		case server.Sse != nil:
+			result[server.Sse.Name] = mcp.ServerConfig{
+				Transport: "sse",
+				URL:       server.Sse.Url,
+				Headers:   headerMap(server.Sse.Headers),
+			}
 		}
 	}
 	return result, nil
+}
+
+func headerMap(headers []acpsdk.HttpHeader) map[string]string {
+	m := make(map[string]string, len(headers))
+	for _, h := range headers {
+		m[h.Name] = h.Value
+	}
+	return m
 }
 
 func workspaceKey(cwd string, requested map[string]mcp.ServerConfig) string {
@@ -467,12 +551,19 @@ func (s *Server) releaseWorkspace(w *workspaceEntry) {
 	}
 	delete(s.workspaces, w.key)
 	s.mu.Unlock()
+	if w.toolUpdate != nil {
+		w.toolUpdate.Cancel()
+	}
 	_ = w.agent.Close()
 	w.ws.Close()
 }
 
-func (s *Server) registerSession(id acpsdk.SessionId, w *workspaceEntry) {
+func (s *Server) registerSession(id acpsdk.SessionId, w *workspaceEntry) error {
 	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return errors.New("ACP connection is closing")
+	}
 	if s.sessionDirs == nil {
 		s.sessionDirs = map[acpsdk.SessionId]string{}
 	}
@@ -486,10 +577,35 @@ func (s *Server) registerSession(id acpsdk.SessionId, w *workspaceEntry) {
 	if exists {
 		s.releaseWorkspace(w)
 	}
+	return nil
+}
+
+func (s *Server) replaceLoadedSession(id acpsdk.SessionId, w *workspaceEntry) error {
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return errors.New("ACP connection is closing")
+	}
+	old := s.sessions[id]
+	if old != nil && (old.closing || old.cancel != nil) {
+		s.mu.Unlock()
+		return fmt.Errorf("session %s has a prompt in progress or is closing", id)
+	}
+	if s.sessionDirs == nil {
+		s.sessionDirs = map[acpsdk.SessionId]string{}
+	}
+	s.sessionDirs[id] = w.agent.SessionsDir()
+	s.sessions[id] = &sessionEntry{id: id, agent: w.agent, workspace: w}
+	s.mu.Unlock()
+
+	if old != nil {
+		s.releaseWorkspace(old.workspace)
+	}
+	return nil
 }
 
 func normalizeCwd(cwd string) (string, error) {
-	cwd, _, err := acp.NormalizeSessionRoots(cwd, nil)
+	cwd, _, err := acpcommon.NormalizeSessionRoots(cwd, nil)
 	return cwd, err
 }
 
@@ -563,35 +679,58 @@ func (s *Server) lookupSession(id acpsdk.SessionId) *sessionEntry {
 	return s.sessions[id]
 }
 
-func (s *Server) retainSession(id acpsdk.SessionId, cancel context.CancelFunc) (*sessionEntry, func(), error) {
-	s.mu.Lock()
-	sess := s.sessions[id]
-	if sess == nil {
-		s.mu.Unlock()
-		return nil, nil, fmt.Errorf("session %s not found", id)
-	}
-	if sess.closing {
-		s.mu.Unlock()
-		return nil, nil, fmt.Errorf("session %s is closing", id)
-	}
-	if sess.cancel != nil {
-		s.mu.Unlock()
-		return nil, nil, fmt.Errorf("session %s already has a prompt in progress", id)
-	}
-	sess.workspace.refs++
-	sess.cancel = cancel
-	s.mu.Unlock()
-	return sess, func() {
+func (s *Server) retainSession(ctx context.Context, id acpsdk.SessionId, cancel context.CancelFunc) (*sessionEntry, func(), error) {
+	for {
 		s.mu.Lock()
-		if s.sessions[id] == sess {
-			if sess.closing {
-				delete(s.sessions, id)
-			} else {
-				sess.cancel = nil
+		if err := ctx.Err(); err != nil {
+			s.mu.Unlock()
+			return nil, nil, err
+		}
+		sess := s.sessions[id]
+		if sess == nil {
+			s.mu.Unlock()
+			return nil, nil, fmt.Errorf("session %s not found", id)
+		}
+		if sess.closing {
+			s.mu.Unlock()
+			return nil, nil, fmt.Errorf("session %s is closing", id)
+		}
+		if sess.cancel != nil {
+			done := sess.promptDone
+			s.mu.Unlock()
+			if done == nil {
+				return nil, nil, fmt.Errorf("session %s already has a prompt in progress", id)
+			}
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
 			}
 		}
+
+		done := make(chan struct{})
+		sess.workspace.refs++
+		sess.cancel = cancel
+		sess.promptDone = done
 		s.mu.Unlock()
-	}, nil
+		return sess, func() {
+			closeDone := false
+			s.mu.Lock()
+			if sess.promptDone == done {
+				sess.cancel = nil
+				sess.promptDone = nil
+				closeDone = true
+				if s.sessions[id] == sess && sess.closing {
+					delete(s.sessions, id)
+				}
+			}
+			s.mu.Unlock()
+			if closeDone {
+				close(done)
+			}
+		}, nil
+	}
 }
 
 func (s *Server) Cancel(_ context.Context, params acpsdk.CancelNotification) error {
@@ -607,71 +746,124 @@ func (s *Server) Cancel(_ context.Context, params acpsdk.CancelNotification) err
 	return nil
 }
 
-func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
+// pushSessionInfo reports the title the agent derived for this session, so the
+// client can replace its placeholder thread name.
+func (s *Server) pushSessionInfo(ctx context.Context, sess *sessionEntry) {
+	if s.conn == nil || sess.workspace == nil || sess.workspace.ws == nil {
+		return
+	}
+	info, err := session.Load(code.SessionsDir(sess.workspace.ws.RootPath), string(sess.id))
+	if err != nil || info.Title == "" {
+		return
+	}
+	if sess.lastTitle == info.Title {
+		return
+	}
+	sess.lastTitle = info.Title
+
+	title := info.Title
+	update := acpsdk.SessionSessionInfoUpdate{SessionUpdate: "session_info_update", Title: &title}
+	if !info.UpdatedAt.IsZero() {
+		u := info.UpdatedAt.UTC().Format(time.RFC3339)
+		update.UpdatedAt = &u
+	}
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	_ = s.conn.SessionUpdate(sendCtx, acpsdk.SessionNotification{
+		SessionId: sess.id,
+		Update:    acpsdk.SessionUpdate{SessionInfoUpdate: &update},
+	})
+}
+
+func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (response acpsdk.PromptResponse, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	sess, unregister, err := s.retainSession(params.SessionId, cancel)
+	sess, unregister, err := s.retainSession(ctx, params.SessionId, cancel)
 	if err != nil {
 		return acpsdk.PromptResponse{}, err
 	}
 	defer s.releaseWorkspace(sess.workspace)
 	defer unregister()
+	defer func() {
+		// Cancellation can reach setup, a notification write, or inference.
+		// All three are the same terminal outcome for an accepted prompt.
+		if errors.Is(err, context.Canceled) {
+			response = promptResponse(sess, acpsdk.StopReasonCancelled, params.MessageId)
+			err = nil
+		}
+	}()
 
 	defer func() {
 		if err := sess.agent.Save(string(sess.id)); err != nil {
 			slog.Warn("save session failed", "session", sess.id, "err", err)
+			return
 		}
+		s.pushSessionInfo(ctx, sess)
 	}()
 
+	var notifyErr error
 	notify := func(u acpsdk.SessionUpdate) {
-		_ = s.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
-			SessionId: params.SessionId,
-			Update:    u,
-		})
+		if notifyErr != nil {
+			return
+		}
+		sendCtx := ctx
+		// Finish tool calls already announced in_progress; the SDK won't write on a cancelled ctx.
+		if ctx.Err() != nil {
+			detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			defer cancel()
+			sendCtx = detached
+		}
+		notifyErr = acpcommon.Notify(sendCtx, s.conn, params.SessionId, u)
+		if notifyErr != nil {
+			cancel()
+		}
 	}
 
 	// ACP agent_message_chunk updates cannot be retracted. Deliberately leave
 	// Reset unsupported so a recoverable error after visible output terminates
 	// the attempt instead of duplicating it with an invisible retry.
-	stream, err := sess.agent.Send(ctx, string(sess.id), acp.ContentFromBlocks(params.Prompt))
+	stream, err := sess.agent.Send(ctx, string(sess.id), acpcommon.ContentFromBlocks(params.Prompt))
 	if err != nil {
 		return acpsdk.PromptResponse{}, err
 	}
 	for msg, err := range stream {
+		if notifyErr != nil {
+			return acpsdk.PromptResponse{}, notifyErr
+		}
 		if err != nil {
-			reason, streamErr := classifyPromptStreamError(err)
-			if streamErr != nil {
-				return acpsdk.PromptResponse{}, streamErr
-			}
-			return promptResponse(sess, reason, params.MessageId), nil
+			return acpsdk.PromptResponse{}, err
 		}
 		for _, c := range msg.Content {
 			notifyContent(notify, agent.RoleAssistant, c)
 		}
 	}
-	return promptResponse(sess, acpsdk.StopReasonEndTurn, params.MessageId), nil
-}
-
-func classifyPromptStreamError(err error) (acpsdk.StopReason, error) {
-	if errors.Is(err, context.Canceled) {
-		return acpsdk.StopReasonCancelled, nil
+	if notifyErr != nil {
+		return acpsdk.PromptResponse{}, notifyErr
 	}
-	return "", err
+	return promptResponse(sess, acpsdk.StopReasonEndTurn, params.MessageId), nil
 }
 
 func promptResponse(sess *sessionEntry, reason acpsdk.StopReason, messageID *string) acpsdk.PromptResponse {
 	u := sess.agent.Usage(string(sess.id))
 	input := tokenCount(u.InputTokens)
-	cached := min(tokenCount(u.CachedTokens), input)
+	cacheRead := min(tokenCount(u.CacheReadInputTokens), input)
+	cacheWrite := min(tokenCount(u.CacheCreationInputTokens), input-cacheRead)
 	output := tokenCount(u.OutputTokens)
+	reasoning := min(tokenCount(u.ReasoningTokens), output)
 	usage := &acpsdk.Usage{
-		InputTokens:  input - cached,
-		OutputTokens: output,
+		InputTokens:  input - cacheRead - cacheWrite,
+		OutputTokens: output - reasoning,
 		TotalTokens:  addTokenCounts(input, output),
 	}
-	if cached > 0 {
-		usage.CachedReadTokens = &cached
+	if cacheRead > 0 {
+		usage.CachedReadTokens = &cacheRead
+	}
+	if cacheWrite > 0 {
+		usage.CachedWriteTokens = &cacheWrite
+	}
+	if reasoning > 0 {
+		usage.ThoughtTokens = &reasoning
 	}
 	return acpsdk.PromptResponse{StopReason: reason, Usage: usage, UserMessageId: messageID}
 }
@@ -740,12 +932,42 @@ func (s *Server) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionR
 	if err != nil {
 		return acpsdk.ResumeSessionResponse{}, err
 	}
-	if w == nil {
-		return acpsdk.ResumeSessionResponse{}, nil
-	}
 	return acpsdk.ResumeSessionResponse{
 		Modes:         modeState(w.agent, string(params.SessionId)),
 		ConfigOptions: sessionConfigOptions(w.agent, string(params.SessionId)),
+	}, nil
+}
+
+func (s *Server) UnstableForkSession(ctx context.Context, params acpsdk.UnstableForkSessionRequest) (acpsdk.UnstableForkSessionResponse, error) {
+	cwd, err := normalizeCwd(params.Cwd)
+	if err != nil {
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	servers, err := acpcommon.StableMCPServers(params.McpServers, serverMCPCapabilities)
+	if err != nil {
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	w, err := s.acquireWorkspace(ctx, cwd, servers)
+	if err != nil {
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	sid, err := w.agent.ForkSession(ctx, string(params.SessionId), "")
+	if err != nil {
+		s.releaseWorkspace(w)
+		if errors.Is(err, fs.ErrNotExist) {
+			return acpsdk.UnstableForkSessionResponse{}, sessionNotFound(params.SessionId)
+		}
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	acpSid := acpsdk.SessionId(sid)
+	if err := s.registerSession(acpSid, w); err != nil {
+		s.releaseWorkspace(w)
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	return acpsdk.UnstableForkSessionResponse{
+		SessionId:     acpSid,
+		Modes:         modeState(w.agent, sid),
+		ConfigOptions: acpcommon.UnstableConfigOptions(sessionConfigOptions(w.agent, sid)),
 	}, nil
 }
 
@@ -754,10 +976,9 @@ func (s *Server) LoadSession(ctx context.Context, params acpsdk.LoadSessionReque
 	if err != nil {
 		return acpsdk.LoadSessionResponse{}, err
 	}
-	if w == nil {
-		return acpsdk.LoadSessionResponse{}, nil
+	if err := s.replayMessages(ctx, params.SessionId, messages); err != nil {
+		return acpsdk.LoadSessionResponse{}, err
 	}
-	s.replayMessages(ctx, params.SessionId, messages)
 	return acpsdk.LoadSessionResponse{
 		Modes:         modeState(w.agent, string(params.SessionId)),
 		ConfigOptions: sessionConfigOptions(w.agent, string(params.SessionId)),
@@ -776,20 +997,23 @@ func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.S
 	if err := w.agent.LoadSession(ctx, string(id)); err != nil {
 		s.releaseWorkspace(w)
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, nil
+			return nil, nil, sessionNotFound(id)
 		}
 		return nil, nil, fmt.Errorf("session %s not found: %w", id, err)
 	}
-	s.registerSession(id, w)
+	if err := s.replaceLoadedSession(id, w); err != nil {
+		s.releaseWorkspace(w)
+		return nil, nil, err
+	}
 	return w, w.agent.Messages(string(id)), nil
 }
 
-func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messages []agent.Message) {
+func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messages []agent.Message) error {
+	var notifyErr error
 	notify := func(u acpsdk.SessionUpdate) {
-		_ = s.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
-			SessionId: sid,
-			Update:    u,
-		})
+		if notifyErr == nil {
+			notifyErr = acpcommon.Notify(ctx, s.conn, sid, u)
+		}
 	}
 	for _, m := range messages {
 		if m.Hidden {
@@ -797,8 +1021,12 @@ func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messa
 		}
 		for _, c := range m.Content {
 			notifyContent(notify, m.Role, c)
+			if notifyErr != nil {
+				return notifyErr
+			}
 		}
 	}
+	return ctx.Err()
 }
 
 func notifyContent(notify func(acpsdk.SessionUpdate), role agent.MessageRole, c agent.Content) {
@@ -807,20 +1035,43 @@ func notifyContent(notify func(acpsdk.SessionUpdate), role agent.MessageRole, c 
 		if c.ToolCall.Partial {
 			return
 		}
-		raw := parseRawInput(c.ToolCall.Args)
-		opts := []acpsdk.ToolCallStartOpt{
-			acpsdk.WithStartKind(mapKind(c.ToolCall.Name)),
-			acpsdk.WithStartStatus(acpsdk.ToolCallStatusInProgress),
-			acpsdk.WithStartRawInput(raw),
+		presentation := c.ToolCall.Presentation
+		if presentation == nil {
+			presentation = agent.NewToolPresentation(
+				c.ToolCall.Name, c.ToolCall.Kind, c.ToolCall.Args, c.ToolCall.Locations,
+			)
 		}
-		if locs := toolLocations(c.ToolCall.Name, raw); len(locs) > 0 {
-			opts = append(opts, acpsdk.WithStartLocations(locs))
+		title := presentation.Title
+		if title == "" {
+			title = c.ToolCall.Name
+		}
+		if title == "" {
+			title = "Tool call"
+		}
+		kind := acpsdk.ToolKind(presentation.Kind)
+		if kind == "" {
+			kind = acpsdk.ToolKindOther
+		}
+		rawInput := parseRawInput(presentation.Args)
+		locations := sdkToolLocations(presentation.Locations)
+		opts := []acpsdk.ToolCallStartOpt{
+			acpsdk.WithStartKind(kind),
+			acpsdk.WithStartStatus(acpsdk.ToolCallStatusInProgress),
+		}
+		if len(locations) > 0 {
+			opts = append(opts, acpsdk.WithStartLocations(locations))
+		}
+		// Locations are rendered as file chips. Apply the compact display input
+		// afterwards so the SDK cannot mirror a lone location back into args.
+		if rawInput != nil || len(locations) > 0 {
+			opts = append(opts, acpsdk.WithStartRawInput(rawInput))
 		}
 		notify(acpsdk.StartToolCall(
 			acpsdk.ToolCallId(c.ToolCall.ID),
-			toolTitle(c.ToolCall.Name, raw),
+			title,
 			opts...,
 		))
+		return
 	case c.ToolResult != nil:
 		status := acpsdk.ToolCallStatusCompleted
 		if c.ToolResult.IsError {
@@ -833,13 +1084,17 @@ func notifyContent(notify func(acpsdk.SessionUpdate), role agent.MessageRole, c 
 				acpsdk.ToolContent(acpsdk.TextBlock(c.ToolResult.Content)),
 			}),
 		))
-	case c.Reasoning != nil && c.Reasoning.Summary != "":
+		return
+	}
+
+	if c.Reasoning != nil && c.Reasoning.Summary != "" {
 		notify(acpsdk.UpdateAgentThoughtText(c.Reasoning.Summary))
-	case c.Text != "":
+	}
+	for _, block := range acpcommon.ContentToBlocks([]agent.Content{c}) {
 		if role == agent.RoleUser {
-			notify(acpsdk.UpdateUserMessageText(c.Text))
+			notify(acpsdk.UpdateUserMessage(block))
 		} else {
-			notify(acpsdk.UpdateAgentMessageText(c.Text))
+			notify(acpsdk.UpdateAgentMessage(block))
 		}
 	}
 }
@@ -860,6 +1115,13 @@ func (s *Server) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSe
 		}
 	case "effort":
 		if err := sess.agent.SetEffort(ctx, string(p.SessionId), string(p.Value)); err != nil {
+			return acpsdk.SetSessionConfigOptionResponse{}, err
+		}
+	case "unattended":
+		if p.Value != "on" && p.Value != "off" {
+			return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("unattended must be on or off")
+		}
+		if err := sess.agent.SetUnattended(ctx, string(p.SessionId), p.Value == "on"); err != nil {
 			return acpsdk.SetSessionConfigOptionResponse{}, err
 		}
 	default:
@@ -917,6 +1179,7 @@ func sessionConfigOptions(a *codeagent.Agent, sid string) []acpsdk.SessionConfig
 	return []acpsdk.SessionConfigOption{
 		modelConfigOption(a, sid),
 		effortConfigOption(a, sid),
+		unattendedConfigOption(a, sid),
 	}
 }
 
@@ -955,7 +1218,7 @@ func effortConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOpti
 	for _, v := range values {
 		opts = append(opts, acpsdk.SessionConfigSelectOption{
 			Value: acpsdk.SessionConfigValueId(v),
-			Name:  titleCase(v),
+			Name:  acpcommon.TitleCase(v),
 		})
 	}
 	return acpsdk.SessionConfigOption{
@@ -968,136 +1231,39 @@ func effortConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOpti
 	}
 }
 
-func titleCase(s string) string {
-	if s == "" {
-		return s
+func unattendedConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOption {
+	current := "off"
+	if a.Unattended(sid) {
+		current = "on"
 	}
-	return strings.ToUpper(s[:1]) + s[1:]
+	opts := acpsdk.SessionConfigSelectOptionsUngrouped{
+		{Value: "off", Name: "Off"},
+		{Value: "on", Name: "On"},
+	}
+	return acpsdk.SessionConfigOption{
+		Select: &acpsdk.SessionConfigOptionSelect{
+			Id: "unattended", Name: "Unattended",
+			CurrentValue: acpsdk.SessionConfigValueId(current),
+			Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &opts},
+		},
+	}
 }
 
-func toolTitle(name string, raw any) string {
-	args, _ := raw.(map[string]any)
-	str := func(key string) string {
-		if args == nil {
-			return ""
+func sdkToolLocations(locations []agent.ToolLocation) []acpsdk.ToolCallLocation {
+	result := make([]acpsdk.ToolCallLocation, 0, len(locations))
+	for _, location := range locations {
+		if location.Path == "" {
+			continue
 		}
-		v, _ := args[key].(string)
-		return v
+		mapped := acpsdk.ToolCallLocation{Path: location.Path}
+		if location.Line > 0 {
+			mapped.Line = new(location.Line)
+		}
+		result = append(result, mapped)
 	}
-	intArg := func(key string) int {
-		if args == nil {
-			return 0
-		}
-		switch v := args[key].(type) {
-		case float64:
-			return int(v)
-		case int:
-			return v
-		}
-		return 0
-	}
-	truncate := func(s string, max int) string {
-		if len(s) <= max {
-			return s
-		}
-		return s[:max-3] + "..."
-	}
-
-	var detail string
-	switch name {
-	case "read", "write", "edit":
-
-		detail = str("file_path")
-		if detail == "" {
-			detail = str("path")
-		}
-	case "grep":
-		if p := str("pattern"); p != "" {
-			detail = p
-			if path := str("path"); path != "" {
-				detail = p + " in " + path
-			}
-		}
-	case "glob":
-		if p := str("pattern"); p != "" {
-			detail = p
-			if path := str("path"); path != "" {
-				detail = p + " in " + path
-			}
-		}
-	case "lsp":
-		if op := str("operation"); op != "" {
-			detail = op
-			if fp := str("file_path"); fp != "" {
-				if line := intArg("line"); line > 0 {
-					detail = fmt.Sprintf("%s %s:%d", op, fp, line)
-				} else {
-					detail = op + " " + fp
-				}
-			} else if q := str("query"); q != "" {
-				detail = op + " " + q
-			}
-		}
-	case "shell":
-		if cmd := str("command"); cmd != "" {
-			if desc := str("description"); desc != "" {
-				detail = desc
-			} else {
-				detail = truncate(cmd, 60)
-			}
-		}
-	case "elicit":
-		detail = truncate(tool.ElicitHint(args), 80)
-	case "agent":
-
-		prompt := str("prompt")
-		if agentType := str("agent_type"); agentType != "" && prompt != "" {
-			detail = truncate(agentType+": "+prompt, 80)
-		} else if prompt != "" {
-			detail = truncate(prompt, 60)
-		}
-	}
-	if detail == "" {
-		return name
-	}
-	return name + ": " + strings.TrimSpace(detail)
+	return result
 }
 
-func toolLocations(name string, raw any) []acpsdk.ToolCallLocation {
-	args, _ := raw.(map[string]any)
-	if args == nil {
-		return nil
-	}
-	var path string
-	switch name {
-	case "read", "write", "edit":
-		path, _ = args["file_path"].(string)
-		if path == "" {
-
-			path, _ = args["path"].(string)
-		}
-	case "lsp":
-		path, _ = args["file_path"].(string)
-	case "grep", "glob":
-		path, _ = args["path"].(string)
-	}
-	if path == "" {
-		return nil
-	}
-	return []acpsdk.ToolCallLocation{{Path: path}}
-}
-
-func mapKind(name string) acpsdk.ToolKind {
-	switch name {
-	case "read", "lsp":
-		return acpsdk.ToolKindRead
-	case "grep", "glob":
-		return acpsdk.ToolKindSearch
-	case "write", "edit":
-		return acpsdk.ToolKindEdit
-	case "shell":
-		return acpsdk.ToolKindExecute
-	default:
-		return acpsdk.ToolKindOther
-	}
+func sessionNotFound(id acpsdk.SessionId) *acpsdk.RequestError {
+	return &acpsdk.RequestError{Code: -32002, Message: "Resource not found", Data: map[string]any{"sessionId": string(id)}}
 }

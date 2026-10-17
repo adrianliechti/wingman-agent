@@ -3,8 +3,6 @@ package codex
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/external"
@@ -28,6 +26,10 @@ func BuildArgs(cfg *CodexConfig) []string {
 		"--config", "model_providers.wingman.wire_api=\"responses\"",
 		"--config", "model_providers.wingman.requires_openai_auth=false",
 		"--config", "model_providers.wingman.supports_websockets=false",
+		"--config", "model_providers.wingman.supports_standalone_web_search=false",
+		"--config", "model_providers.wingman.capabilities.external_web_access=false",
+		// Keep the user's ChatGPT login separate from this gateway process.
+		"--config", "cli_auth_credentials_store=\"ephemeral\"",
 
 		"--config", "feedback.enabled=false",
 		"--config", "analytics.enabled=false",
@@ -39,8 +41,19 @@ func BuildArgs(cfg *CodexConfig) []string {
 
 		"--config", "web_search=\"disabled\"",
 		"--config", "features.apps=false",
-		"--config", "features.plugins=false",
+		// Local plugins and MCP servers still load from the user's config.
+		"--config", "features.remote_plugin=false",
+		"--config", "features.plugin_sharing=false",
+		"--config", "features.recommended_plugins=false",
+		"--config", "features.tool_suggest=false",
 		"--config", "features.fast_mode=false",
+		"--config", "features.ultrafast_mode=false",
+		"--config", "features.daemon_auto_start=false",
+		"--config", "features.realtime_conversation=false",
+		// Avoid persisting a snapshot of the parent shell's credentials.
+		"--config", "features.shell_snapshot=false",
+		"--config", "shell_environment_policy.ignore_default_excludes=false",
+		"--config", "shell_environment_policy.set.WINGMAN_TOKEN=\"\"",
 
 		"--config", "tui.show_tooltips=false",
 		"--config", "check_for_update_on_startup=false",
@@ -48,6 +61,7 @@ func BuildArgs(cfg *CodexConfig) []string {
 
 	if cfg.ModelCatalog != "" {
 		args = append(args, "--config", "model_catalog_json="+tomlString(cfg.ModelCatalog))
+		args = append(args, "--config", "features.api_key_model_discovery=false")
 	}
 
 	return args
@@ -59,30 +73,17 @@ func tomlString(value string) string {
 }
 
 func BuildEnv(parent []string, cfg *CodexConfig) []string {
-	if parent == nil {
-		parent = os.Environ()
-	}
-	env := make([]string, 0, len(parent)+1)
-	env = append(env, parent...)
-	env = append(env, "WINGMAN_TOKEN="+cfg.AuthToken)
-	return env
+	return external.MergeEnv(parent, map[string]string{"WINGMAN_TOKEN": cfg.AuthToken}, "OPENAI_API_KEY", "CODEX_API_KEY")
 }
 
 func Run(ctx context.Context, args []string, options *Options) error {
-	if options == nil {
-		options = new(Options)
-	}
+	options = external.WithDefaults(options)
 
 	if options.Path == "" {
 		options.Path = BinPath()
 	}
 
-	if options.Env == nil {
-		options.Env = os.Environ()
-	}
-
 	cfg, err := NewConfig(ctx, options)
-
 	if err != nil {
 		return err
 	}
@@ -93,14 +94,5 @@ func Run(ctx context.Context, args []string, options *Options) error {
 	}
 	defer cleanup()
 
-	args = append(BuildArgs(cfg), args...)
-
-	cmd := exec.CommandContext(ctx, options.Path, args...)
-	cmd.Env = BuildEnv(options.Env, cfg)
-
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
+	return external.Run(ctx, options.Path, append(BuildArgs(cfg), args...), BuildEnv(options.Env, cfg))
 }

@@ -2,12 +2,12 @@ package claude
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
@@ -30,6 +30,7 @@ type Options struct {
 	Env []string
 
 	Path string
+	Args []string
 
 	Stderr io.Writer
 }
@@ -40,13 +41,13 @@ type Agent struct {
 	mu              sync.Mutex
 	sessions        map[acp.SessionId]*session
 	formElicitation bool
-	planUpdates     bool
 
 	defaultModel  string
 	defaultEffort string
 	defaultCwd    string
 	env           []string
 	path          string
+	args          []string
 	stderr        io.Writer
 
 	modelsMu     sync.Mutex
@@ -70,6 +71,10 @@ func New(opts Options) *Agent {
 	if stderr == nil {
 		stderr = os.Stderr
 	}
+	args := opts.Args
+	if args == nil {
+		args = claudecli.BuildArgs(nil)
+	}
 	return &Agent{
 		sessions:      make(map[acp.SessionId]*session),
 		defaultModel:  model,
@@ -77,6 +82,7 @@ func New(opts Options) *Agent {
 		defaultCwd:    opts.Cwd,
 		env:           opts.Env,
 		path:          path,
+		args:          slices.Clone(args),
 		stderr:        stderr,
 	}
 }
@@ -101,12 +107,6 @@ func (a *Agent) supportsFormElicitation() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.formElicitation
-}
-
-func (a *Agent) supportsPlanUpdates() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.planUpdates
 }
 
 func (a *Agent) lookup(id acp.SessionId) *session {
@@ -160,7 +160,6 @@ func (a *Agent) sendAvailableCommands(s *session) {
 func (a *Agent) Initialize(_ context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error) {
 	a.mu.Lock()
 	a.formElicitation = params.ClientCapabilities.Elicitation != nil && params.ClientCapabilities.Elicitation.Form != nil
-	a.planUpdates = params.ClientCapabilities.PlanCapabilities != nil
 	a.mu.Unlock()
 
 	title := "Claude (ACP)"
@@ -210,18 +209,17 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, err
 	}
 	a.ensureModels(ctx)
-	id := acp.SessionId(newUUID())
+	id := acp.SessionId(uuid.NewString())
 	modelID, effort := normalizeSessionConfig(a.models, a.defaultModel, a.defaultEffort)
 	s := a.newSession(id, cwd, modelID, effort, additional)
 	s.mcpServers = params.McpServers
-	a.mu.Lock()
-	a.sessions[id] = s
-	a.mu.Unlock()
+	s.allowBypass = a.bypassAllowed(cwd, params.Meta)
+	a.storeSession(s)
 	a.sendAvailableCommands(s)
 
 	return acp.NewSessionResponse{
 		SessionId:     id,
-		Modes:         buildSessionModeState(s.mode),
+		Modes:         buildSessionModeState(s.mode, s.allowBypass),
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
@@ -230,6 +228,16 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	s := a.lookup(params.SessionId)
 	if s == nil {
 		return acp.PromptResponse{}, fmt.Errorf("session %s not found", params.SessionId)
+	}
+	if err := s.promptMu.Lock(ctx); err != nil {
+		return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+	}
+	defer s.promptMu.Unlock()
+	if s.isClosed() {
+		return acp.PromptResponse{}, fmt.Errorf("session %s is closed", params.SessionId)
+	}
+	if ctx.Err() != nil {
+		return acp.PromptResponse{StopReason: acp.StopReasonCancelled, UserMessageId: params.MessageId}, nil
 	}
 	stop, usage, err := s.runTurn(ctx, params.Prompt)
 	if err != nil {
@@ -255,8 +263,11 @@ func (a *Agent) SetSessionMode(_ context.Context, params acp.SetSessionModeReque
 		return acp.SetSessionModeResponse{}, fmt.Errorf("unknown mode %q", id)
 	}
 	s.mu.Lock()
-	s.mode = id
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	if id == bypassModeID && !s.allowBypass {
+		return acp.SetSessionModeResponse{}, fmt.Errorf("mode %q is not available in this session", id)
+	}
+	s.setModeLocked(id)
 	return acp.SetSessionModeResponse{}, nil
 }
 
@@ -283,12 +294,12 @@ func (a *Agent) SetSessionConfigOption(_ context.Context, params acp.SetSessionC
 			s.modelID = m.ID
 		}
 		s.modelOverride = true
-		if m != nil && !isValidEffort(m, s.effort) {
+		if m != nil && !acpcommon.IsValidEffort(m.EffortLevels, s.effort) {
 			s.effort = "default"
 		}
 	case effortConfigID:
 		m := findModel(a.models, s.modelID)
-		if m == nil || !isValidEffort(m, value) {
+		if m == nil || !acpcommon.IsValidEffort(m.EffortLevels, value) {
 			return acp.SetSessionConfigOptionResponse{}, fmt.Errorf("effort %q invalid for model %s", value, s.modelID)
 		}
 		s.effort = value
@@ -349,10 +360,10 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, cwd)
 	}
 	a.ensureModels(ctx)
-	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, string(params.SessionId), false)
+	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, params.Meta, string(params.SessionId), false)
 	a.sendAvailableCommands(s)
 	return acp.ResumeSessionResponse{
-		Modes:         buildSessionModeState(s.mode),
+		Modes:         buildSessionModeState(s.mode, s.allowBypass),
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
@@ -369,29 +380,38 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 		return acp.LoadSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, cwd)
 	}
 	a.ensureModels(ctx)
-	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, string(params.SessionId), false)
-	if err := replayHistory(ctx, a.conn, params.SessionId, cwd, s.plan); err != nil {
+	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, params.Meta, string(params.SessionId), false)
+	if err := replayHistory(ctx, a.conn, params.SessionId, cwd); err != nil {
 		return acp.LoadSessionResponse{}, fmt.Errorf("replay history: %w", err)
 	}
 	a.sendAvailableCommands(s)
 	return acp.LoadSessionResponse{
-		Modes:         buildSessionModeState(s.mode),
+		Modes:         buildSessionModeState(s.mode, s.allowBypass),
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
 
 func (a *Agent) UnstableForkSession(_ context.Context, params acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error) {
+	servers, err := acpcommon.StableMCPServers(params.McpServers, acp.McpCapabilities{Http: true, Sse: true})
+	if err != nil {
+		return acp.UnstableForkSessionResponse{}, err
+	}
 	cwd, additional, err := acpcommon.NormalizeSessionRoots(params.Cwd, params.AdditionalDirectories)
 	if err != nil {
 		return acp.UnstableForkSessionResponse{}, err
 	}
-	newID := acp.SessionId(newUUID())
-	a.adoptSession(newID, cwd, additional, nil, string(params.SessionId), true)
+	newID := acp.SessionId(uuid.NewString())
+	s := a.adoptSession(newID, cwd, additional, servers, params.Meta, string(params.SessionId), true)
+	a.sendAvailableCommands(s)
 
-	return acp.UnstableForkSessionResponse{SessionId: newID}, nil
+	return acp.UnstableForkSessionResponse{
+		SessionId:     newID,
+		Modes:         buildSessionModeState(s.mode, s.allowBypass),
+		ConfigOptions: acpcommon.UnstableConfigOptions(buildConfigOptions(a.models, s.modelID, s.effort)),
+	}, nil
 }
 
-func (a *Agent) adoptSession(id acp.SessionId, cwd string, additionalDirs []string, mcpServers []acp.McpServer, resumeFrom string, fork bool) *session {
+func (a *Agent) adoptSession(id acp.SessionId, cwd string, additionalDirs []string, mcpServers []acp.McpServer, meta map[string]any, resumeFrom string, fork bool) *session {
 	modelID, effort := normalizeSessionConfig(a.models, a.defaultModel, a.defaultEffort)
 	s := a.newSession(id, cwd, modelID, effort, additionalDirs)
 	if resumeFrom != "" && (a.defaultModel == "" || a.defaultModel == "default") {
@@ -407,27 +427,28 @@ func (a *Agent) adoptSession(id acp.SessionId, cwd string, additionalDirs []stri
 	}
 	s.modelID, s.effort = normalizeSessionConfig(a.models, s.modelID, s.effort)
 	s.mcpServers = mcpServers
+	s.allowBypass = a.bypassAllowed(cwd, meta)
 	s.resumeFrom = resumeFrom
 	s.forkOnResume = fork
-	a.mu.Lock()
-	a.sessions[id] = s
-	a.mu.Unlock()
+	a.storeSession(s)
 	return s
 }
 
-func newUUID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-
-		return "00000000-0000-4000-8000-000000000000"
+func (a *Agent) bypassAllowed(cwd string, meta map[string]any) bool {
+	claudeCode, _ := meta["claudeCode"].(map[string]any)
+	options, _ := claudeCode["options"].(map[string]any)
+	if allow, ok := options["allowDangerouslySkipPermissions"].(bool); ok && !allow {
+		return false
 	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%s-%s-%s-%s-%s",
-		hex.EncodeToString(b[0:4]),
-		hex.EncodeToString(b[4:6]),
-		hex.EncodeToString(b[6:8]),
-		hex.EncodeToString(b[8:10]),
-		hex.EncodeToString(b[10:16]),
-	)
+	return !bypassDisabledBySettings(cwd, a.env)
+}
+
+func (a *Agent) storeSession(s *session) {
+	a.mu.Lock()
+	old := a.sessions[s.id]
+	a.sessions[s.id] = s
+	a.mu.Unlock()
+	if old != nil && old != s {
+		old.close()
+	}
 }

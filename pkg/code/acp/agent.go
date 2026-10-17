@@ -17,8 +17,10 @@ import (
 	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 	"github.com/sergi/go-diff/diffmatchpatch"
 
+	"github.com/adrianliechti/wingman-agent/internal/process"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
@@ -30,27 +32,33 @@ type Agent struct {
 	workspace *code.Workspace
 	def       code.AgentDef
 
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	conn      *acpsdk.ClientSideConnection
-	closeOnce sync.Once
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	stdout        io.Closer
+	conn          *acpsdk.ClientSideConnection
+	closeOnce     sync.Once
+	transportOnce sync.Once
+	processDone   chan struct{}
 
 	serverDone <-chan struct{}
+	serverW    io.Closer
 	cleanup    func() error
 	steer      func(context.Context, acpsdk.SessionId, []acpsdk.ContentBlock, string) error
 
 	caps acpsdk.AgentCapabilities
 
-	uiMu sync.RWMutex
-	ui   code.UI
+	uiMu          sync.RWMutex
+	ui            code.UI
+	updateMu      sync.RWMutex
+	updateHandler func(string)
+	updatePending map[string]bool
+	updateRunning bool
 
 	configMu      sync.RWMutex
 	models        []model.Model
 	modelID       string
-	modelOptID    string
 	modelDefault  string
 	effortID      string
-	effortOptID   string
 	effortDefault string
 	effortOpts    []string
 
@@ -66,8 +74,7 @@ var (
 )
 
 type sessionState struct {
-	parent *Agent
-	id     acpsdk.SessionId
+	id acpsdk.SessionId
 
 	mu       sync.Mutex
 	messages []agent.Message
@@ -94,26 +101,89 @@ type sessionState struct {
 }
 
 type toolCall struct {
-	name string
-	args string
+	name      string
+	kind      string
+	args      string
+	locations []agent.ToolLocation
+	diff      string
 }
 
 type turn struct {
-	ctx    context.Context
-	events chan event
-	done   chan struct{}
-	cancel context.CancelFunc
+	ctx      context.Context
+	events   chan event
+	done     chan struct{}
+	cancel   context.CancelFunc
+	updateMu sync.Mutex
 
 	mu                sync.Mutex
 	emitted           []agent.Message
 	lastContentKey    string
 	ignoreUserUpdates bool
+	streamErr         error
+}
+
+// send drops the message once the turn is finished.
+func (t *turn) send(msg agent.Message) {
+	select {
+	case <-t.done:
+		return
+	case <-t.ctx.Done():
+		return
+	default:
+	}
+	select {
+	case t.events <- event{msg: msg}:
+	case <-t.done:
+	case <-t.ctx.Done():
+	default:
+		t.mu.Lock()
+		t.streamErr = errors.New("ACP session update buffer exhausted; the consumer stopped reading")
+		t.mu.Unlock()
+		t.cancel()
+	}
 }
 
 func (t *turn) messages() []agent.Message {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return agent.CloneMessages(t.emitted)
+}
+
+// cancelOutstandingToolCalls renders tool calls that never reached a terminal status.
+func (s *sessionState) cancelOutstandingToolCalls(t *turn) []agent.Message {
+	s.toolCallsMu.Lock()
+	pending := s.toolCalls
+	s.toolCalls = map[string]toolCall{}
+	s.toolCallsMu.Unlock()
+
+	ids := make([]string, 0, len(pending))
+	for id := range pending {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	messages := make([]agent.Message, 0, len(ids))
+	for _, id := range ids {
+		call := pending[id]
+		msg := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{ToolResult: &agent.ToolResult{
+			ID:        id,
+			Name:      call.name,
+			Kind:      call.kind,
+			Args:      call.args,
+			Locations: call.locations,
+			Presentation: agent.NewToolPresentation(
+				call.name, call.kind, call.args, call.locations,
+			),
+			Content: "tool call cancelled",
+			IsError: true,
+		}}}}
+		t.mu.Lock()
+		t.emitted = append(t.emitted, msg)
+		t.lastContentKey = ""
+		t.mu.Unlock()
+		messages = append(messages, msg)
+	}
+	return messages
 }
 
 func (s *sessionState) finalizeTurn(t *turn) {
@@ -147,6 +217,8 @@ func New(ctx context.Context, ws *code.Workspace, def code.AgentDef) (*Agent, er
 
 	cwd := ws.RootPath
 	cmd := exec.Command(def.Command, def.Args...)
+	cmd.WaitDelay = 2 * time.Second
+	process.Hide(cmd)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
 	for k, v := range def.Env {
@@ -158,26 +230,43 @@ func New(ctx context.Context, ws *code.Workspace, def code.AgentDef) (*Agent, er
 	if err != nil {
 		return nil, fmt.Errorf("agent %q: stdin pipe: %w", def.Name, err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	// Own stdout so Wait can observe process death while the reader drains
+	// final frames, even when a subprocess inherited the output pipe.
+	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("agent %q: stdout pipe: %w", def.Name, err)
 	}
+	cmd.Stdout = stdoutWriter
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
+		_ = stdoutWriter.Close()
 		return nil, fmt.Errorf("agent %q: start: %w", def.Name, err)
 	}
+	_ = stdoutWriter.Close()
 
 	a := &Agent{
 		workspace: ws,
 		def:       def,
 		cmd:       cmd,
-		stdin:     stdin,
+		stdin:     acp.NewConnectionWriter(stdin, 0),
+		stdout:    stdout,
 		sessions:  map[string]*sessionState{},
 		pending:   map[string][]acpsdk.SessionUpdate{},
 	}
-	a.conn = acpsdk.NewClientSideConnection(a, stdin, stdout)
+	a.conn = acpsdk.NewClientSideConnection(a, a.stdin, stdout)
+	a.watchWriter(a.stdin.(*acp.ConnectionWriter))
+	a.processDone = make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(a.processDone)
+		select {
+		case <-a.conn.Done():
+		case <-time.After(100 * time.Millisecond):
+			a.abortTransport()
+		}
+	}()
 
 	a.conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
@@ -206,7 +295,8 @@ func NewInProcess(
 	a := &Agent{
 		workspace: ws,
 		def:       code.AgentDef{Name: name},
-		stdin:     clientW,
+		stdin:     acp.NewConnectionWriter(clientW, 0),
+		stdout:    clientR,
 		sessions:  map[string]*sessionState{},
 		pending:   map[string][]acpsdk.SessionUpdate{},
 		cleanup:   cleanup,
@@ -217,13 +307,17 @@ func NewInProcess(
 		a.steer = s.Steer
 	}
 
-	srvConn := acpsdk.NewAgentSideConnection(serverAgent, serverW, serverR)
+	serverWriter := acp.NewConnectionWriter(serverW, 0)
+	srvConn := acpsdk.NewAgentSideConnection(serverAgent, serverWriter, serverR)
 	if setupServer != nil {
 		setupServer(srvConn)
 	}
 	a.serverDone = srvConn.Done()
+	a.serverW = serverWriter
 
-	a.conn = acpsdk.NewClientSideConnection(a, clientW, clientR)
+	a.conn = acpsdk.NewClientSideConnection(a, a.stdin, clientR)
+	a.watchWriter(a.stdin.(*acp.ConnectionWriter))
+	a.watchWriter(serverWriter)
 	a.conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	})))
@@ -244,24 +338,28 @@ func (a *Agent) initialize(ctx context.Context) (acpsdk.InitializeResponse, erro
 	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
 	defer cancel()
 	title := "Wingman"
-	resp, err := a.conn.Initialize(initCtx, acpsdk.InitializeRequest{
-		ProtocolVersion: acpsdk.ProtocolVersionNumber,
-		ClientInfo: &acpsdk.Implementation{
-			Name: "wingman", Title: &title, Version: "0.1.0",
-		},
-		ClientCapabilities: acpsdk.ClientCapabilities{
-			Fs: acpsdk.FileSystemCapabilities{
-				ReadTextFile:  true,
-				WriteTextFile: true,
+	resp, err := acp.Call(initCtx, func() (acpsdk.InitializeResponse, error) {
+		return a.conn.Initialize(initCtx, acpsdk.InitializeRequest{
+			ProtocolVersion: acpsdk.ProtocolVersionNumber,
+			ClientInfo: &acpsdk.Implementation{
+				Name: "wingman", Title: &title, Version: "0.1.0",
 			},
-			Elicitation: &acpsdk.ElicitationCapabilities{
-				Form: &acpsdk.ElicitationFormCapabilities{},
+			ClientCapabilities: acpsdk.ClientCapabilities{
+				Fs: acpsdk.FileSystemCapabilities{
+					ReadTextFile:  true,
+					WriteTextFile: true,
+				},
+				Elicitation: &acpsdk.ElicitationCapabilities{
+					Form: &acpsdk.ElicitationFormCapabilities{},
+				},
 			},
-		},
+		})
 	})
 	if err != nil {
 		return acpsdk.InitializeResponse{}, err
 	}
+	// Major protocol versions can contain breaking changes. Accept only a
+	// version this implementation actually supports.
 	if resp.ProtocolVersion != acpsdk.ProtocolVersionNumber {
 		return acpsdk.InitializeResponse{}, fmt.Errorf("unsupported ACP protocol version %d (want %d)", resp.ProtocolVersion, acpsdk.ProtocolVersionNumber)
 	}
@@ -480,10 +578,12 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if resp.SessionId == "" {
+		return "", errors.New("ACP agent returned an empty session ID")
+	}
 
 	id := string(resp.SessionId)
 	sess := &sessionState{
-		parent:    a,
 		id:        resp.SessionId,
 		toolCalls: map[string]toolCall{},
 	}
@@ -533,7 +633,6 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 	sess, exists := a.sessions[id]
 	if !exists {
 		sess = &sessionState{
-			parent:    a,
 			id:        acpsdk.SessionId(id),
 			toolCalls: map[string]toolCall{},
 		}
@@ -565,6 +664,13 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 			cancel: cancel,
 		}
 		sess.mu.Lock()
+		if sess.loaded {
+			snap := agent.CloneMessages(sess.messages)
+			sess.mu.Unlock()
+			cancel()
+			yield(snap, nil)
+			return
+		}
 		if sess.inflight != nil {
 			sess.mu.Unlock()
 			cancel()
@@ -574,10 +680,14 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 		sess.inflight = t
 		sess.mu.Unlock()
 
+		rpcCtx, cancelRPC := context.WithCancel(context.WithoutCancel(loadCtx))
+		responseDone := make(chan struct{})
+		cleanupDone := a.drainTurn(t, sess.id, responseDone, cancelRPC, false)
 		ok := false
 		defer func() {
 			close(t.done)
 			cancel()
+			<-cleanupDone
 			sess.toolCallsMu.Lock()
 			clear(sess.toolCalls)
 			sess.toolCallsMu.Unlock()
@@ -598,8 +708,10 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 
 		loadErrCh := make(chan error, 1)
 		go func() {
+			defer close(responseDone)
+			defer cancelRPC()
 			if a.caps.LoadSession {
-				resp, err := a.conn.LoadSession(loadCtx, acpsdk.LoadSessionRequest{
+				resp, err := a.conn.LoadSession(rpcCtx, acpsdk.LoadSessionRequest{
 					SessionId:  acpsdk.SessionId(id),
 					Cwd:        a.workspace.RootPath,
 					McpServers: []acpsdk.McpServer{},
@@ -611,7 +723,7 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 				loadErrCh <- err
 				return
 			}
-			resp, err := a.conn.ResumeSession(loadCtx, acpsdk.ResumeSessionRequest{
+			resp, err := a.conn.ResumeSession(rpcCtx, acpsdk.ResumeSessionRequest{
 				SessionId:  acpsdk.SessionId(id),
 				Cwd:        a.workspace.RootPath,
 				McpServers: []acpsdk.McpServer{},
@@ -625,8 +737,14 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 
 		for {
 			select {
-			case <-ctx.Done():
-				yield(nil, ctx.Err())
+			case <-loadCtx.Done():
+				t.mu.Lock()
+				err := t.streamErr
+				t.mu.Unlock()
+				if err == nil {
+					err = loadCtx.Err()
+				}
+				yield(nil, err)
 				return
 			case err := <-loadErrCh:
 				if err != nil {
@@ -672,53 +790,44 @@ func (a *Agent) DeleteSession(ctx context.Context, id string) error {
 }
 
 func (a *Agent) Messages(id string) []agent.Message {
-	sess := a.session(id)
-	if sess == nil {
-		return nil
-	}
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	return agent.CloneMessages(sess.messages)
+	return readSession(a, id, func(s *sessionState) []agent.Message {
+		return agent.CloneMessages(s.messages)
+	})
 }
 
 func (a *Agent) HistorySnapshot(id string) code.HistorySnapshot {
-	sess := a.session(id)
-	if sess == nil {
-		return code.HistorySnapshot{}
-	}
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	return code.HistorySnapshot{Messages: agent.CloneMessages(sess.messages)}
+	return readSession(a, id, func(s *sessionState) code.HistorySnapshot {
+		return code.HistorySnapshot{Messages: agent.CloneMessages(s.messages)}
+	})
 }
 
 func (a *Agent) HistoryVersion(id string) code.HistoryVersion {
-	sess := a.session(id)
-	if sess == nil {
-		return code.HistoryVersion{}
-	}
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	return code.HistoryVersion{MessageCount: len(sess.messages)}
+	return readSession(a, id, func(s *sessionState) code.HistoryVersion {
+		return code.HistoryVersion{MessageCount: len(s.messages)}
+	})
 }
 
 func (a *Agent) Commands(id string) []code.Command {
-	sess := a.session(id)
-	if sess == nil {
-		return nil
-	}
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	return append([]code.Command(nil), sess.commands...)
+	return readSession(a, id, func(s *sessionState) []code.Command {
+		return append([]code.Command(nil), s.commands...)
+	})
 }
 
 func (a *Agent) Usage(id string) agent.Usage {
+	return readSession(a, id, func(s *sessionState) agent.Usage { return s.usage })
+}
+
+// readSession runs fn under the session lock, or returns the zero value when
+// the session is unknown.
+func readSession[T any](a *Agent, id string, fn func(*sessionState) T) T {
 	sess := a.session(id)
 	if sess == nil {
-		return agent.Usage{}
+		var zero T
+		return zero
 	}
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	return sess.usage
+	return fn(sess)
 }
 
 func (a *Agent) session(id string) *sessionState {
@@ -728,6 +837,9 @@ func (a *Agent) session(id string) *sessionState {
 }
 
 func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (iter.Seq2[agent.Message, error], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(input) == 0 {
 		return nil, code.ErrEmptyInput
 	}
@@ -756,31 +868,42 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (ite
 	sess.inflight = t
 	sess.messages = append(sess.messages, agent.Message{
 		Role:    agent.RoleUser,
+		InputID: agent.InputIDFromContext(ctx),
 		Content: input,
 	})
 	sess.mu.Unlock()
 
+	// Keep the original request alive through session/cancel. Its response is
+	// the fence after the final notifications for this turn.
+	rpcCtx, cancelRPC := context.WithCancel(context.WithoutCancel(sendCtx))
+	responseDone := make(chan struct{})
+	cleanupDone := a.drainTurn(t, sess.id, responseDone, cancelRPC, true)
 	go func() {
-		resp, err := a.conn.Prompt(sendCtx, acpsdk.PromptRequest{
+		defer cancelRPC()
+		resp, err := a.conn.Prompt(rpcCtx, acpsdk.PromptRequest{
 			SessionId: sess.id,
 			Prompt:    acp.ContentToBlocks(input),
 		})
+		remoteCancelled := err == nil && resp.StopReason == acpsdk.StopReasonCancelled
+		if remoteCancelled {
+			err = context.Canceled
+		} else if err == nil {
+			if reason := stopReasonError(resp.StopReason); reason != nil {
+				err = reason
+			}
+		}
 
-		if err == nil && resp.Usage != nil {
+		if resp.Usage != nil {
 			sess.mu.Lock()
 			lastInputTokens := sess.usage.LastInputTokens
 			contextWindow := sess.usage.ContextWindow
-			sess.usage = agent.Usage{
-				InputTokens:     int64(resp.Usage.InputTokens),
-				OutputTokens:    int64(resp.Usage.OutputTokens),
-				LastInputTokens: lastInputTokens,
-				ContextWindow:   contextWindow,
-			}
-			if resp.Usage.CachedReadTokens != nil {
-				sess.usage.CachedTokens = int64(*resp.Usage.CachedReadTokens)
-			}
+			usage := usageFromACP(resp.Usage)
+			usage.LastInputTokens = lastInputTokens
+			usage.ContextWindow = contextWindow
+			sess.usage = usage
 			sess.mu.Unlock()
 		}
+		close(responseDone)
 		select {
 		case t.events <- event{done: true, err: err}:
 		case <-t.done:
@@ -788,30 +911,51 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (ite
 	}()
 
 	return func(yield func(agent.Message, error) bool) {
-		completed := false
 		defer func() {
 			cancel()
 			close(t.done)
-			if !completed {
-				a.cancelPrompt(sess.id)
-			}
-			sess.toolCallsMu.Lock()
-			clear(sess.toolCalls)
-			sess.toolCallsMu.Unlock()
-
+			<-cleanupDone
 			sess.finalizeTurn(t)
 		}()
+		flushCancelled := func() bool {
+			t.updateMu.Lock()
+			defer t.updateMu.Unlock()
+			for _, msg := range sess.cancelOutstandingToolCalls(t) {
+				if !yield(msg, nil) {
+					return false
+				}
+			}
+			return true
+		}
 		for {
 			select {
-			case <-ctx.Done():
-				yield(agent.Message{}, ctx.Err())
+			case <-sendCtx.Done():
+				if flushCancelled() {
+					t.mu.Lock()
+					err := t.streamErr
+					t.mu.Unlock()
+					if err == nil {
+						err = sendCtx.Err()
+					}
+					yield(agent.Message{}, err)
+				}
 				return
 			case ev := <-t.events:
 				if ev.done {
-					completed = ev.err == nil ||
-						(!errors.Is(ev.err, context.Canceled) && !errors.Is(ev.err, context.DeadlineExceeded))
-					if ev.err != nil {
-						yield(agent.Message{}, ev.err)
+					if !flushCancelled() {
+						return
+					}
+					err := ev.err
+					if sendCtx.Err() != nil {
+						t.mu.Lock()
+						err = t.streamErr
+						t.mu.Unlock()
+						if err == nil {
+							err = sendCtx.Err()
+						}
+					}
+					if err != nil {
+						yield(agent.Message{}, err)
 					}
 					return
 				}
@@ -823,10 +967,55 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (ite
 	}, nil
 }
 
+// stopReasonError reports a turn cut short; end_turn and cancelled are the caller's.
+func stopReasonError(reason acpsdk.StopReason) error {
+	switch reason {
+	case acpsdk.StopReasonRefusal:
+		return errors.New("the agent refused to continue this turn")
+	case acpsdk.StopReasonMaxTokens:
+		return errors.New("the agent stopped: output token limit reached")
+	case acpsdk.StopReasonMaxTurnRequests:
+		return errors.New("the agent stopped: maximum requests per turn reached")
+	case acpsdk.StopReasonEndTurn, acpsdk.StopReasonCancelled:
+		return nil
+	default:
+		return fmt.Errorf("agent returned an invalid stop reason %q", reason)
+	}
+}
+
+func usageFromACP(usage *acpsdk.Usage) agent.Usage {
+	if usage == nil {
+		return agent.Usage{}
+	}
+	cacheRead := optionalACPTokenCount(usage.CachedReadTokens)
+	cacheCreation := optionalACPTokenCount(usage.CachedWriteTokens)
+	reasoning := optionalACPTokenCount(usage.ThoughtTokens)
+	return agent.Usage{
+		InputTokens:              tokenCount64(usage.InputTokens) + cacheRead + cacheCreation,
+		OutputTokens:             tokenCount64(usage.OutputTokens) + reasoning,
+		ReasoningTokens:          reasoning,
+		CacheReadInputTokens:     cacheRead,
+		CacheCreationInputTokens: cacheCreation,
+	}
+}
+
+func optionalACPTokenCount(value *int) int64 {
+	if value == nil {
+		return 0
+	}
+	return tokenCount64(*value)
+}
+
+func tokenCount64(value int) int64 {
+	return int64(max(value, 0))
+}
+
 func (a *Agent) cancelPrompt(id acpsdk.SessionId) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = a.conn.Cancel(ctx, acpsdk.CancelNotification{SessionId: id})
+	_, _ = acp.Call(ctx, func() (struct{}, error) {
+		return struct{}{}, a.conn.Cancel(ctx, acpsdk.CancelNotification{SessionId: id})
+	})
 }
 
 func (a *Agent) TurnFeatures(string) code.TurnFeatures {
@@ -852,7 +1041,7 @@ func (a *Agent) Steer(ctx context.Context, id string, input code.TurnInput) erro
 		return err
 	}
 	sess.mu.Lock()
-	steered := agent.Message{Role: agent.RoleUser, Content: input.Content}
+	steered := agent.Message{Role: agent.RoleUser, Content: input.Content, InputID: input.ID}
 	if sess.inflight == t {
 		t.mu.Lock()
 		t.emitted = append(t.emitted, steered)
@@ -899,22 +1088,28 @@ func (a *Agent) shutdown() {
 		a.mu.Unlock()
 
 		if a.caps.SessionCapabilities.Close != nil && len(sessions) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
 			for _, sess := range sessions {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				_, _ = a.conn.CloseSession(ctx, acpsdk.CloseSessionRequest{SessionId: sess.id})
-				cancel()
+				if ctx.Err() != nil {
+					break
+				}
+				_, _ = acp.Call(ctx, func() (acpsdk.CloseSessionResponse, error) {
+					return a.conn.CloseSession(ctx, acpsdk.CloseSessionRequest{SessionId: sess.id})
+				})
 			}
 		}
 
-		if a.stdin != nil {
-			_ = a.stdin.Close()
-		}
+		a.abortTransport()
 
 		if a.serverDone != nil {
 			select {
 			case <-a.serverDone:
 			case <-time.After(2 * time.Second):
 			}
+		}
+		if a.serverW != nil {
+			_ = a.serverW.Close()
 		}
 		if a.cleanup != nil {
 			_ = a.cleanup()
@@ -923,42 +1118,16 @@ func (a *Agent) shutdown() {
 		if a.cmd == nil || a.cmd.Process == nil {
 			return
 		}
-		exited := make(chan struct{})
-		go func() {
-			_ = a.cmd.Wait()
-			close(exited)
-		}()
 		select {
-		case <-exited:
+		case <-a.processDone:
 		case <-time.After(2 * time.Second):
 			_ = a.cmd.Process.Kill()
-			<-exited
+			<-a.processDone
 		}
 	})
 }
 
 func (a *Agent) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) error {
-	if n.Update.ConfigOptionUpdate != nil {
-		sess := a.session(string(n.SessionId))
-		if sess == nil {
-			a.rememberPendingUpdate(string(n.SessionId), n.Update)
-			return nil
-		}
-		a.refreshConfig(sess, n.Update.ConfigOptionUpdate.ConfigOptions)
-		return nil
-	}
-
-	if n.Update.CurrentModeUpdate != nil {
-		if sess := a.session(string(n.SessionId)); sess != nil {
-			sess.mu.Lock()
-			sess.modeID = string(n.Update.CurrentModeUpdate.CurrentModeId)
-			sess.mu.Unlock()
-		} else {
-			a.rememberPendingUpdate(string(n.SessionId), n.Update)
-		}
-		return nil
-	}
-
 	sess := a.session(string(n.SessionId))
 	if sess == nil {
 		if isSessionStateUpdate(n.Update) {
@@ -967,6 +1136,7 @@ func (a *Agent) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) e
 		return nil
 	}
 	if a.applySessionStateUpdate(sess, n.Update) {
+		a.notifySessionChange(string(n.SessionId))
 		return nil
 	}
 	sess.mu.Lock()
@@ -975,14 +1145,20 @@ func (a *Agent) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) e
 	if t == nil {
 		return nil
 	}
+	t.updateMu.Lock()
+	defer t.updateMu.Unlock()
+	select {
+	case <-t.ctx.Done():
+		return nil
+	case <-t.done:
+		return nil
+	default:
+	}
 	msg, ok := a.translateUpdate(sess, t, n.Update)
 	if !ok {
 		return nil
 	}
-	select {
-	case t.events <- event{msg: msg}:
-	case <-t.done:
-	}
+	t.send(msg)
 	return nil
 }
 
@@ -1060,6 +1236,29 @@ func (a *Agent) applySessionStateUpdate(sess *sessionState, update acpsdk.Sessio
 func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpdate) (agent.Message, bool) {
 	emit := func(role agent.MessageRole, c agent.Content, contentKey string) agent.Message {
 		t.mu.Lock()
+		var previous *agent.Content
+		if n := len(t.emitted); n > 0 && t.emitted[n-1].Role == role && t.lastContentKey == contentKey {
+			content := t.emitted[n-1].Content
+			if len(content) > 0 {
+				previous = &content[len(content)-1]
+			}
+		}
+		if c.Text != "" && c.TextID == "" {
+			if previous != nil && previous.Text != "" {
+				c.TextID = previous.TextID
+			}
+			if c.TextID == "" {
+				c.TextID = uuid.NewString()
+			}
+		}
+		if c.Reasoning != nil && c.Reasoning.ID == "" {
+			if previous != nil && previous.Reasoning != nil {
+				c.Reasoning.ID = previous.Reasoning.ID
+			}
+			if c.Reasoning.ID == "" {
+				c.Reasoning.ID = uuid.NewString()
+			}
+		}
 		if n := len(t.emitted); n > 0 && t.emitted[n-1].Role == role {
 			contents := t.emitted[n-1].Content
 			if len(contents) == 0 || t.lastContentKey != contentKey || !mergeACPContent(&contents[len(contents)-1], c) {
@@ -1069,8 +1268,11 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 			t.emitted = append(t.emitted, agent.Message{Role: role, Content: []agent.Content{c}})
 		}
 		t.lastContentKey = contentKey
+		// The live delta must not share pointers with the accumulated history.
+		// Later reasoning chunks mutate that history while the UI reads deltas.
+		delta := agent.CloneContent([]agent.Content{c})
 		t.mu.Unlock()
-		return agent.Message{Role: role, Content: []agent.Content{c}}
+		return agent.Message{Role: role, Content: delta}
 	}
 
 	switch {
@@ -1078,26 +1280,29 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		if t.ignoreUserUpdates {
 			return agent.Message{}, false
 		}
-		text := blockText(u.UserMessageChunk.Content)
-		if text == "" {
+		content, ok := messageBlockContent(u.UserMessageChunk.Content)
+		if !ok {
 			return agent.Message{}, false
 		}
 		id := ""
 		if u.UserMessageChunk.MessageId != nil {
 			id = *u.UserMessageChunk.MessageId
 		}
-		return emit(agent.RoleUser, agent.Content{Text: text}, "user:"+id), true
+		return emit(agent.RoleUser, content, "user:"+id), true
 
 	case u.AgentMessageChunk != nil:
-		text := blockText(u.AgentMessageChunk.Content)
-		if text == "" {
+		content, ok := messageBlockContent(u.AgentMessageChunk.Content)
+		if !ok {
 			return agent.Message{}, false
 		}
 		id := ""
 		if u.AgentMessageChunk.MessageId != nil {
 			id = *u.AgentMessageChunk.MessageId
 		}
-		return emit(agent.RoleAssistant, agent.Content{Text: text, TextID: id}, "agent:"+id), true
+		if content.Text != "" {
+			content.TextID = id
+		}
+		return emit(agent.RoleAssistant, content, "agent:"+id), true
 
 	case u.AgentThoughtChunk != nil:
 		text := blockText(u.AgentThoughtChunk.Content)
@@ -1113,29 +1318,59 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 	case u.ToolCall != nil:
 		tc := u.ToolCall
 		args := rawValueToString(tc.RawInput)
+		kind := semanticToolKind(tc.Kind, tc.Content)
+		locations := agentToolLocations(a.workspaceRoot(), tc.Locations)
 
 		name := tc.Title
-		// ACP titles are display strings, not stable tool identifiers. Preserve
-		// specialized tools such as MCP calls, but normalize command-bearing
-		// execute calls so Wingman's terminal renderer can show `$ <command>`.
-		if tc.Kind == acpsdk.ToolKindExecute {
-			if input, ok := tc.RawInput.(map[string]any); ok {
-				if command, _ := input["command"].(string); command != "" {
-					name = "shell"
-				}
-			}
-		}
 		if name == "" {
 			name = string(tc.Kind)
 		}
+		presentation := agent.NewToolPresentation(name, kind, args, locations)
 		sess.toolCallsMu.Lock()
-		sess.toolCalls[string(tc.ToolCallId)] = toolCall{name: name, args: args}
+		sess.toolCalls[string(tc.ToolCallId)] = toolCall{
+			name: name, kind: kind, args: args, locations: locations,
+			diff: toolCallDiffText(tc.Content),
+		}
 		sess.toolCallsMu.Unlock()
-		return emit(agent.RoleAssistant, agent.Content{ToolCall: &agent.ToolCall{
-			ID:   string(tc.ToolCallId),
-			Name: name,
-			Args: args,
-		}}, ""), true
+		callMsg := emit(agent.RoleAssistant, agent.Content{ToolCall: &agent.ToolCall{
+			ID:           string(tc.ToolCallId),
+			Name:         name,
+			Kind:         kind,
+			Args:         args,
+			Locations:    locations,
+			Presentation: presentation,
+		}}, "")
+
+		// A tool_call may arrive already terminal, with no tool_call_update to follow.
+		if tc.Status == acpsdk.ToolCallStatusCompleted || tc.Status == acpsdk.ToolCallStatusFailed {
+			sess.toolCallsMu.Lock()
+			delete(sess.toolCalls, string(tc.ToolCallId))
+			sess.toolCallsMu.Unlock()
+
+			body := toolCallContentText(tc.Content)
+			if body == "" {
+				body = toolCallDiffText(tc.Content)
+			}
+			if body == "" && tc.RawOutput != nil {
+				body = rawValueToString(tc.RawOutput)
+			}
+			failed := tc.Status == acpsdk.ToolCallStatusFailed
+			if body == "" && failed {
+				body = "tool call failed"
+			}
+			t.send(callMsg)
+			return emit(agent.RoleAssistant, agent.Content{ToolResult: &agent.ToolResult{
+				ID:           string(tc.ToolCallId),
+				Name:         name,
+				Kind:         kind,
+				Args:         args,
+				Locations:    locations,
+				Presentation: presentation,
+				Content:      body,
+				IsError:      failed,
+			}}, ""), true
+		}
+		return callMsg, true
 
 	case u.ToolCallUpdate != nil:
 		tu := u.ToolCallUpdate
@@ -1146,6 +1381,17 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		}
 		if tu.RawInput != nil {
 			prior.args = rawValueToString(tu.RawInput)
+		}
+		if tu.Kind != nil {
+			prior.kind = semanticToolKind(*tu.Kind, tu.Content)
+		} else if prior.kind == "" {
+			prior.kind = semanticToolKind("", tu.Content)
+		}
+		if tu.Locations != nil {
+			prior.locations = agentToolLocations(a.workspaceRoot(), tu.Locations)
+		}
+		if diff := toolCallDiffText(tu.Content); diff != "" {
+			prior.diff = diff
 		}
 		sess.toolCalls[string(tu.ToolCallId)] = prior
 		sess.toolCallsMu.Unlock()
@@ -1163,6 +1409,9 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		delete(sess.toolCalls, string(tu.ToolCallId))
 		sess.toolCallsMu.Unlock()
 		body := toolCallContentText(tu.Content)
+		if body == "" {
+			body = prior.diff
+		}
 		if body == "" && tu.RawOutput != nil {
 			body = rawValueToString(tu.RawOutput)
 		}
@@ -1170,15 +1419,28 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 			body = "tool call failed"
 		}
 		return emit(agent.RoleAssistant, agent.Content{ToolResult: &agent.ToolResult{
-			ID:      string(tu.ToolCallId),
-			Name:    prior.name,
-			Args:    prior.args,
+			ID:        string(tu.ToolCallId),
+			Name:      prior.name,
+			Kind:      prior.kind,
+			Args:      prior.args,
+			Locations: prior.locations,
+			Presentation: agent.NewToolPresentation(
+				prior.name, prior.kind, prior.args, prior.locations,
+			),
 			Content: body,
 			IsError: status == acpsdk.ToolCallStatusFailed,
 		}}, ""), true
 
 	}
 	return agent.Message{}, false
+}
+
+func messageBlockContent(block acpsdk.ContentBlock) (agent.Content, bool) {
+	contents := acp.ContentFromBlocks([]acpsdk.ContentBlock{block})
+	if len(contents) != 1 {
+		return agent.Content{}, false
+	}
+	return contents[0], true
 }
 
 func (a *Agent) reportToolProgress(t *turn, update *acpsdk.SessionToolCallUpdate) {
@@ -1234,10 +1496,18 @@ func (a *Agent) RequestPermission(ctx context.Context, p acpsdk.RequestPermissio
 	cancelled := acpsdk.RequestPermissionResponse{
 		Outcome: acpsdk.RequestPermissionOutcome{Cancelled: &acpsdk.RequestPermissionOutcomeCancelled{}},
 	}
+	ctx, release := a.interactionContext(ctx, string(p.SessionId))
+	defer release()
+	if ctx.Err() != nil {
+		return cancelled, nil
+	}
 	if len(p.Options) == 0 {
 		return cancelled, nil
 	}
 	selected := func(id acpsdk.PermissionOptionId) acpsdk.RequestPermissionResponse {
+		if ctx.Err() != nil {
+			return cancelled
+		}
 		return acpsdk.RequestPermissionResponse{
 			Outcome: acpsdk.RequestPermissionOutcome{
 				Selected: &acpsdk.RequestPermissionOutcomeSelected{OptionId: id},
@@ -1278,16 +1548,18 @@ func (a *Agent) RequestPermission(ctx context.Context, p acpsdk.RequestPermissio
 	if !hasDescription {
 		descriptions = nil
 	}
-	res, err := ui.Elicit(code.WithSessionID(ctx, string(p.SessionId)), tool.ElicitRequest{
-		Message: permissionMessage(p),
-		Fields: []tool.ElicitField{{
-			Name:             "choice",
-			Type:             "string",
-			Required:         true,
-			Enum:             names,
-			EnumDescriptions: descriptions,
-			Strict:           true,
-		}},
+	res, err := acp.Call(ctx, func() (tool.ElicitResult, error) {
+		return ui.Elicit(code.WithSessionID(ctx, string(p.SessionId)), tool.ElicitRequest{
+			Message: permissionMessage(p),
+			Fields: []tool.ElicitField{{
+				Name:             "choice",
+				Type:             "string",
+				Required:         true,
+				Enum:             names,
+				EnumDescriptions: descriptions,
+				Strict:           true,
+			}},
+		})
 	})
 	if err == nil {
 		switch res.Action {
@@ -1310,7 +1582,12 @@ func (a *Agent) RequestPermission(ctx context.Context, p acpsdk.RequestPermissio
 		}
 	}
 
-	ok, err := ui.Confirm(code.WithSessionID(ctx, string(p.SessionId)), permissionMessage(p))
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return cancelled, nil
+	}
+	ok, err := acp.Call(ctx, func() (bool, error) {
+		return ui.Confirm(code.WithSessionID(ctx, string(p.SessionId)), permissionMessage(p))
+	})
 	if err != nil {
 		return cancelled, nil
 	}
@@ -1335,8 +1612,16 @@ func (a *Agent) UnstableCreateElicitation(ctx context.Context, p acpsdk.Unstable
 	// elicitations. Native adapters preserve it as metadata; use that exact
 	// scope before falling back to the only active turn.
 	sid := elicitationSessionID(p.Form.Meta)
-	if sid == "" || a.session(sid) == nil {
+	if sid != "" && a.session(sid) == nil {
+		return cancel, nil
+	}
+	if sid == "" {
 		sid = a.activeSessionID()
+	}
+	ctx, release := a.interactionContext(ctx, sid)
+	defer release()
+	if ctx.Err() != nil {
+		return cancel, nil
 	}
 	if sid != "" {
 		ctx = code.WithSessionID(ctx, sid)
@@ -1358,7 +1643,9 @@ func (a *Agent) UnstableCreateElicitation(ctx context.Context, p acpsdk.Unstable
 	if ui == nil {
 		return acpsdk.UnstableCreateElicitationResponse{Decline: &acpsdk.UnstableCreateElicitationDecline{Action: "decline"}}, nil
 	}
-	res, err := ui.Elicit(ctx, req)
+	res, err := acp.Call(ctx, func() (tool.ElicitResult, error) {
+		return ui.Elicit(ctx, req)
+	})
 	if err != nil {
 		return cancel, nil
 	}
@@ -1394,18 +1681,19 @@ func (a *Agent) activeSessionID() string {
 	}
 	a.mu.Unlock()
 
-	if len(ids) == 1 {
-		return ids[0]
-	}
+	active := ""
 	for i, sess := range states {
 		sess.mu.Lock()
 		inflight := sess.inflight != nil
 		sess.mu.Unlock()
 		if inflight {
-			return ids[i]
+			if active != "" {
+				return ""
+			}
+			active = ids[i]
 		}
 	}
-	return ""
+	return active
 }
 
 func elicitFieldsFromSchema(schema acpsdk.UnstableElicitationSchema) []tool.ElicitField {
@@ -1427,11 +1715,8 @@ func elicitFieldsFromSchema(schema acpsdk.UnstableElicitationSchema) []tool.Elic
 		f.Description, _ = prop["description"].(string)
 		f.Default = prop["default"]
 		if meta, _ := prop["_meta"].(map[string]any); meta != nil {
-			if marker, _ := meta["_askUserQuestionCustomAnswer"].(map[string]any); marker != nil {
-				isCustom, _ := marker["isCustomAnswer"].(bool)
-				if isCustom {
-					f.CustomAnswerFor, _ = marker["questionId"].(string)
-				}
+			if wingman, _ := meta["wingman"].(map[string]any); wingman != nil {
+				f.CustomAnswerFor, _ = wingman["customAnswerFor"].(string)
 			}
 		}
 
@@ -1607,17 +1892,19 @@ func (a *Agent) resolvePath(p string) (string, error) {
 func (a *Agent) CreateTerminal(context.Context, acpsdk.CreateTerminalRequest) (acpsdk.CreateTerminalResponse, error) {
 	return acpsdk.CreateTerminalResponse{}, errors.New("terminal not supported")
 }
+
+// Terminal is not advertised; a zero-valued success would read as real data.
 func (a *Agent) KillTerminal(context.Context, acpsdk.KillTerminalRequest) (acpsdk.KillTerminalResponse, error) {
-	return acpsdk.KillTerminalResponse{}, nil
+	return acpsdk.KillTerminalResponse{}, acpsdk.NewMethodNotFound("terminal/kill")
 }
 func (a *Agent) ReleaseTerminal(context.Context, acpsdk.ReleaseTerminalRequest) (acpsdk.ReleaseTerminalResponse, error) {
-	return acpsdk.ReleaseTerminalResponse{}, nil
+	return acpsdk.ReleaseTerminalResponse{}, acpsdk.NewMethodNotFound("terminal/release")
 }
 func (a *Agent) TerminalOutput(context.Context, acpsdk.TerminalOutputRequest) (acpsdk.TerminalOutputResponse, error) {
-	return acpsdk.TerminalOutputResponse{Output: ""}, nil
+	return acpsdk.TerminalOutputResponse{}, acpsdk.NewMethodNotFound("terminal/output")
 }
 func (a *Agent) WaitForTerminalExit(context.Context, acpsdk.WaitForTerminalExitRequest) (acpsdk.WaitForTerminalExitResponse, error) {
-	return acpsdk.WaitForTerminalExitResponse{}, nil
+	return acpsdk.WaitForTerminalExitResponse{}, acpsdk.NewMethodNotFound("terminal/wait_for_exit")
 }
 
 func (a *Agent) refreshConfig(sess *sessionState, options []acpsdk.SessionConfigOption) {
@@ -1666,9 +1953,7 @@ func (a *Agent) refreshConfig(sess *sessionState, options []acpsdk.SessionConfig
 	a.configMu.Lock()
 	a.models = models
 	a.modelID = modelID
-	a.modelOptID = modelOptID
 	a.effortID = effortID
-	a.effortOptID = effortOptID
 	a.effortOpts = effortOpts
 	a.configMu.Unlock()
 
@@ -1723,6 +2008,63 @@ func toolCallContentText(items []acpsdk.ToolCallContent) string {
 	return strings.Join(parts, "\n")
 }
 
+func toolCallDiffText(items []acpsdk.ToolCallContent) string {
+	var parts []string
+	for _, item := range items {
+		if item.Diff == nil {
+			continue
+		}
+		if text := diffBlockText(item.Diff); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func semanticToolKind(kind acpsdk.ToolKind, items []acpsdk.ToolCallContent) string {
+	if kind != "" {
+		return string(kind)
+	}
+	for _, item := range items {
+		if item.Diff != nil {
+			return string(acpsdk.ToolKindEdit)
+		}
+	}
+	return ""
+}
+
+func (a *Agent) workspaceRoot() string {
+	if a.workspace == nil {
+		return ""
+	}
+	return a.workspace.RootPath
+}
+
+func agentToolLocations(workspaceRoot string, locations []acpsdk.ToolCallLocation) []agent.ToolLocation {
+	if len(locations) == 0 {
+		return nil
+	}
+	result := make([]agent.ToolLocation, 0, len(locations))
+	for _, location := range locations {
+		if location.Path == "" {
+			continue
+		}
+		locationPath := location.Path
+		if workspaceRoot != "" && filepath.IsAbs(locationPath) {
+			if relative, err := filepath.Rel(workspaceRoot, locationPath); err == nil &&
+				relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+				locationPath = relative
+			}
+		}
+		mapped := agent.ToolLocation{Path: filepath.ToSlash(locationPath)}
+		if location.Line != nil {
+			mapped.Line = *location.Line
+		}
+		result = append(result, mapped)
+	}
+	return result
+}
+
 func diffBlockText(d *acpsdk.ToolCallContentDiff) string {
 	old := ""
 	if d.OldText != nil {
@@ -1766,4 +2108,10 @@ func rawValueToString(v any) string {
 		return string(data)
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+func (a *Agent) SetSessionUpdateHandler(handler func(string)) {
+	a.updateMu.Lock()
+	a.updateHandler = handler
+	a.updateMu.Unlock()
 }

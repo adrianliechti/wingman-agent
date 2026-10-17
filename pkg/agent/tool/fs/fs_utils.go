@@ -3,471 +3,33 @@ package fs
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	pathpkg "path"
 	"path/filepath"
-	"runtime"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
-	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 const (
 	DefaultMaxLines = 2000
-	DefaultMaxBytes = 48 * 1024
+	DefaultMaxBytes = tool.MaxInlineResultBytes
 
 	MaxReadFileBytes = 10 * 1024 * 1024
 	MaxEditFileBytes = 10 * 1024 * 1024
 )
 
-func normalizePath(path, workingDir string) string {
-	if !filepath.IsAbs(path) {
-		return filepath.FromSlash(path)
-	}
-
-	if rel, ok := relPathWithinWorkspace(path, workingDir); ok {
-		return rel
-	}
-
-	return filepath.FromSlash(path)
-}
-
-func normalizePathFS(path, workingDir string) string {
-	return pathpkg.Clean(filepath.ToSlash(normalizePath(path, workingDir)))
-}
-
-func expandHome(path string) string {
-	if path == "~" {
-		if home, err := os.UserHomeDir(); err == nil {
-			return home
-		}
-		return path
-	}
-	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
-}
-
-func ensurePathInWorkspaceFS(pathArg, workingDir, action string) (string, error) {
-	if isOutsideWorkspace(pathArg, workingDir) {
-		return "", fmt.Errorf("cannot %s: path %q is outside workspace %q", action, pathArg, workingDir)
-	}
-
-	return normalizePathFS(pathArg, workingDir), nil
-}
-
-func matchAllowedRoot(absPath string, allowedRoots []string) (rootClean, sub string, ok bool) {
-	if slices.Contains(allowedRoots, "*") {
-		return cleanPath(absPath), "", true
-	}
-
-	if rootClean, sub, ok = matchAllowedRootLiteral(cleanPath(absPath), allowedRoots); ok {
-		return rootClean, sub, true
-	}
-
-	resolved := resolveForCompare(cleanPath(absPath))
-	resolvedRoots := make([]string, len(allowedRoots))
-	changed := resolved != cleanPath(absPath)
-	for i, allowed := range allowedRoots {
-		resolvedRoots[i] = resolveForCompare(cleanPath(allowed))
-		if resolvedRoots[i] != cleanPath(allowed) {
-			changed = true
-		}
-	}
-	if !changed {
-		return "", "", false
-	}
-
-	return matchAllowedRootLiteral(resolved, resolvedRoots)
-}
-
-func matchAllowedRootLiteral(cleaned string, allowedRoots []string) (rootClean, sub string, ok bool) {
-	cmpPath := normalizePathForComparison(cleaned)
-	sep := string(filepath.Separator)
-
-	for _, allowed := range allowedRoots {
-		allowedClean := cleanPath(allowed)
-		cmpAllowed := normalizePathForComparison(allowedClean)
-		if cmpPath == cmpAllowed {
-			return allowedClean, "", true
-		}
-		if strings.HasPrefix(cmpPath, cmpAllowed+sep) {
-
-			return allowedClean, cleaned[len(allowedClean)+1:], true
-		}
-	}
-	return "", "", false
-}
-
-// resolveForCompare resolves symlinks (and Windows junctions) for containment
-// comparisons, falling back to resolving the parent when the leaf does not
-// exist yet (e.g. a file about to be created).
-func resolveForCompare(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return resolved
-	}
-
-	dir := filepath.Dir(path)
-	if dir == path {
-		return path
-	}
-	if resolvedDir, err := filepath.EvalSymlinks(dir); err == nil {
-		return filepath.Join(resolvedDir, filepath.Base(path))
-	}
-
-	return path
-}
-
-// resolveInWorkspace reports where an in-workspace relative path actually
-// lives after resolving links, and whether that location is still inside the
-// resolved workspace root. os.Root rejects absolute link targets — which
-// Windows junctions always are — so in-root aliases fall back to direct
-// access through this check.
-func resolveInWorkspace(workingDir, rel string) (string, bool) {
-	resolved := resolveForCompare(filepath.Join(workingDir, rel))
-
-	resolvedRoot, err := filepath.EvalSymlinks(workingDir)
-	if err != nil {
-		return "", false
-	}
-
-	if _, ok := relPathLiteral(resolved, resolvedRoot); !ok {
-		return "", false
-	}
-
-	return resolved, true
-}
-
-// fallbackRoot serves in-workspace paths whose literal spelling os.Root
-// refused (absolute in-root symlink, Windows junction): it re-anchors an
-// os.Root at the resolved workspace root and returns the resolved relative
-// path. Going back through os.Root — instead of plain os calls on the
-// resolved path — keeps containment kernel-enforced, so a link retargeted
-// after resolution fails closed rather than escaping.
-func fallbackRoot(workingDir, rel string) (*os.Root, string, bool) {
-	abs := filepath.Join(workingDir, rel)
-	resolved := resolveForCompare(abs)
-
-	resolvedRoot, err := filepath.EvalSymlinks(workingDir)
-	if err != nil {
-		return nil, "", false
-	}
-
-	// No alias involved — the original failure was not link-related and a
-	// retry through the same bytes would just repeat it.
-	if resolved == filepath.Clean(abs) && resolvedRoot == filepath.Clean(workingDir) {
-		return nil, "", false
-	}
-
-	sub, ok := relPathLiteral(resolved, resolvedRoot)
-	if !ok || sub == "" {
-		return nil, "", false
-	}
-
-	r, err := os.OpenRoot(resolvedRoot)
-	if err != nil {
-		return nil, "", false
-	}
-
-	return r, sub, true
-}
-
-type fileTarget struct {
-	InWorkspace bool
-	RelPath     string
-	AbsPath     string
-}
-
-func statFileTarget(root *os.Root, target fileTarget) (os.FileInfo, error) {
-	if target.InWorkspace {
-		info, err := root.Stat(target.RelPath)
-		if err != nil {
-			if fr, sub, ok := fallbackRoot(root.Name(), target.RelPath); ok {
-				defer fr.Close()
-				return fr.Stat(sub)
-			}
-		}
-		return info, err
-	}
-	return os.Stat(target.AbsPath)
-}
-
-func readFileTarget(root *os.Root, target fileTarget) ([]byte, error) {
-	if target.InWorkspace {
-		content, err := root.ReadFile(target.RelPath)
-		if err != nil {
-			if fr, sub, ok := fallbackRoot(root.Name(), target.RelPath); ok {
-				defer fr.Close()
-				return fr.ReadFile(sub)
-			}
-		}
-		return content, err
-	}
-	return os.ReadFile(target.AbsPath)
-}
-
-func openFileTarget(root *os.Root, target fileTarget) (*os.File, error) {
-	if target.InWorkspace {
-		f, err := root.Open(target.RelPath)
-		if err != nil {
-			if fr, sub, ok := fallbackRoot(root.Name(), target.RelPath); ok {
-				defer fr.Close()
-				return fr.Open(sub)
-			}
-		}
-		return f, err
-	}
-	return os.Open(target.AbsPath)
-}
-
-func writeFileTarget(root *os.Root, target fileTarget, content string) error {
-	if target.InWorkspace {
-		err := writeRootFile(root, target.RelPath, content)
-		if err != nil {
-			if fr, sub, ok := fallbackRoot(root.Name(), target.RelPath); ok {
-				defer fr.Close()
-				return writeRootFile(fr, sub, content)
-			}
-		}
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(target.AbsPath), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(target.AbsPath, []byte(content), 0644)
-}
-
-func resolveFileTarget(pathArg, workingDir string, allowedRoots []string, action string) (fileTarget, error) {
-	pathArg = expandHome(pathArg)
-
-	if !isOutsideWorkspace(pathArg, workingDir) {
-		return fileTarget{InWorkspace: true, RelPath: normalizePath(pathArg, workingDir)}, nil
-	}
-
-	if !filepath.IsAbs(pathArg) {
-		return fileTarget{}, fmt.Errorf("cannot %s: relative path %q is outside workspace", action, pathArg)
-	}
-
-	if rootClean, sub, ok := matchAllowedRoot(pathArg, allowedRoots); ok {
-		abs := rootClean
-		if sub != "" {
-			abs = filepath.Join(rootClean, sub)
-		}
-		return fileTarget{AbsPath: abs}, nil
-	}
-
-	return fileTarget{}, fmt.Errorf("cannot %s: path %q is outside workspace %q and not in any allowed root", action, pathArg, workingDir)
-}
-
-type searchTarget struct {
-	Root        *os.Root
-	SearchDirFS string
-	close       func()
-
-	reportPrefix string
-}
-
-func (st *searchTarget) Close() {
-	if st.close != nil {
-		st.close()
-	}
-}
-
-func (st *searchTarget) ReportPath(fsPath string) string {
-	if st.reportPrefix == "" {
-		return filepath.FromSlash(fsPath)
-	}
-	return filepath.Join(st.reportPrefix, filepath.FromSlash(fsPath))
-}
-
-func resolveSearchTarget(pathArg, workingDir string, workspaceRoot *os.Root, allowedReadRoots []string, action string) (*searchTarget, error) {
-	pathArg = expandHome(pathArg)
-
-	if !isOutsideWorkspace(pathArg, workingDir) {
-		searchDirFS, err := ensurePathInWorkspaceFS(pathArg, workingDir, action)
-		if err != nil {
-			return nil, err
-		}
-		if searchDirFS != "." && searchDirFS != "" {
-			if _, statErr := workspaceRoot.Stat(searchDirFS); statErr != nil {
-				if target, ok := linkedSearchTarget(pathArg, workingDir, searchDirFS); ok {
-					return target, nil
-				}
-			}
-		}
-		return &searchTarget{Root: workspaceRoot, SearchDirFS: searchDirFS}, nil
-	}
-
-	if !filepath.IsAbs(pathArg) {
-		return nil, fmt.Errorf("cannot %s: relative path %q is outside workspace", action, pathArg)
-	}
-
-	rootClean, sub, ok := matchAllowedRoot(pathArg, allowedReadRoots)
-	if !ok {
-		return nil, fmt.Errorf("cannot %s: path %q is outside workspace %q and not in any allowed read root", action, pathArg, workingDir)
-	}
-
-	r, err := os.OpenRoot(rootClean)
-	if err != nil {
-		return nil, fmt.Errorf("cannot %s: open allowed root %q: %w", action, rootClean, err)
-	}
-
-	searchDirFS := "."
-	if sub != "" {
-		searchDirFS = filepath.ToSlash(sub)
-	}
-
-	return &searchTarget{
-		Root:         r,
-		SearchDirFS:  searchDirFS,
-		reportPrefix: rootClean,
-		close:        func() { r.Close() },
-	}, nil
-}
-
-// linkedSearchTarget serves search paths that traverse an in-root alias
-// (absolute symlink, Windows junction) that os.Root refuses, by opening a
-// dedicated root at the resolved location while reporting the caller's
-// spelling.
-func linkedSearchTarget(pathArg, workingDir, searchDirFS string) (*searchTarget, bool) {
-	resolved, ok := resolveInWorkspace(workingDir, filepath.FromSlash(searchDirFS))
-	if !ok {
-		return nil, false
-	}
-
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return nil, false
-	}
-
-	prefix := normalizePath(pathArg, workingDir)
-	dir, sub := resolved, "."
-	if !info.IsDir() {
-		dir, sub = filepath.Dir(resolved), filepath.Base(resolved)
-		prefix = filepath.Dir(prefix)
-	}
-
-	r, err := os.OpenRoot(dir)
-	if err != nil {
-		return nil, false
-	}
-
-	return &searchTarget{
-		Root:         r,
-		SearchDirFS:  filepath.ToSlash(sub),
-		reportPrefix: prefix,
-		close:        func() { r.Close() },
-	}, true
-}
-
-func isOutsideWorkspace(path, workingDir string) bool {
-	if !filepath.IsAbs(path) {
-		return false
-	}
-
-	_, ok := relPathWithinWorkspace(path, workingDir)
-
-	return !ok
-}
-
-func relPathWithinWorkspace(absPath, workingDir string) (string, bool) {
-	if rel, ok := relPathLiteral(absPath, workingDir); ok {
-		return rel, true
-	}
-
-	// The path or the workspace may be spelled through an alias (symlink,
-	// macOS /tmp, a Windows junction like C:\dev); retry on resolved paths.
-	resolvedPath := resolveForCompare(cleanPath(absPath))
-	resolvedDir := resolveForCompare(cleanPath(workingDir))
-	if resolvedPath == cleanPath(absPath) && resolvedDir == cleanPath(workingDir) {
-		return "", false
-	}
-
-	return relPathLiteral(resolvedPath, resolvedDir)
-}
-
-func relPathLiteral(absPath, workingDir string) (string, bool) {
-	if !filepath.IsAbs(absPath) {
-		return filepath.FromSlash(absPath), true
-	}
-
-	absPathClean := cleanPath(absPath)
-	absWorkingDir := cleanPath(workingDir)
-
-	compPath := normalizePathForComparison(absPathClean)
-	compWorking := normalizePathForComparison(absWorkingDir)
-	sep := string(filepath.Separator)
-
-	if compPath == compWorking {
-		return ".", true
-	}
-
-	prefix := compWorking
-	if !strings.HasSuffix(prefix, sep) {
-		prefix += sep
-	}
-
-	if strings.HasPrefix(compPath, prefix) {
-		if strings.HasSuffix(absWorkingDir, sep) {
-			return absPathClean[len(absWorkingDir):], true
-		}
-
-		return absPathClean[len(absWorkingDir)+len(sep):], true
-	}
-
-	relComp, err := filepath.Rel(compWorking, compPath)
-
-	if err != nil {
-		return "", false
-	}
-
-	if relComp == "." {
-		return ".", true
-	}
-
-	if relComp == ".." || strings.HasPrefix(relComp, ".."+sep) {
-		return "", false
-	}
-
-	if relOrig, err := filepath.Rel(absWorkingDir, absPathClean); err == nil {
-		if relOrig == "." {
-			return ".", true
-		}
-
-		if relOrig != ".." && !strings.HasPrefix(relOrig, ".."+sep) {
-			return relOrig, true
-		}
-	}
-
-	return relComp, true
-}
-
-func cleanPath(path string) string {
-	if path == "" {
-		return path
-	}
-
-	return filepath.Clean(filepath.FromSlash(path))
-}
-
-func normalizePathForComparison(path string) string {
-	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
-		return strings.ToLower(path)
-	}
-	return path
-}
-
 func detectLineEnding(content string) string {
 	if strings.Contains(content, "\r\n") {
 		return "\r\n"
+	}
+	if strings.Contains(content, "\r") && !strings.Contains(content, "\n") {
+		return "\r"
 	}
 	return "\n"
 }
@@ -480,8 +42,8 @@ func normalizeToLF(text string) string {
 }
 
 func restoreLineEndings(text, ending string) string {
-	if ending == "\r\n" {
-		return strings.ReplaceAll(text, "\n", "\r\n")
+	if ending != "\n" {
+		return strings.ReplaceAll(text, "\n", ending)
 	}
 
 	return text
@@ -588,8 +150,18 @@ func fuzzyFindText(content, oldText string) fuzzyMatchResult {
 		return fuzzyMatchResult{index: -1}
 	}
 
+	return originalFuzzyMatch(content, fuzzyContent, fuzzyToOriginal, fuzzyIndex, len(fuzzyOldText))
+}
+
+func originalFuzzyMatch(content, fuzzyContent string, fuzzyToOriginal []int, fuzzyIndex, length int) fuzzyMatchResult {
+	fuzzyEnd := fuzzyIndex + length
 	originalIndex := fuzzyToOriginal[fuzzyIndex]
-	originalEnd := fuzzyToOriginal[fuzzyIndex+len(fuzzyOldText)]
+	originalEnd := fuzzyToOriginal[fuzzyEnd]
+	if fuzzyEnd == len(fuzzyContent) || fuzzyContent[fuzzyEnd] == '\n' {
+		for originalEnd < len(content) && (content[originalEnd] == ' ' || content[originalEnd] == '\t') {
+			originalEnd++
+		}
+	}
 
 	return fuzzyMatchResult{
 		found:          true,
@@ -597,66 +169,6 @@ func fuzzyFindText(content, oldText string) fuzzyMatchResult {
 		matchLength:    originalEnd - originalIndex,
 		usedFuzzyMatch: true,
 	}
-}
-
-// maxDiffLines caps the diff echoed back to the model after edit/write: the
-// model just produced the content, so a huge rewrite doesn't need repeating.
-const maxDiffLines = 200
-
-func generateDiffString(oldContent, newContent string) string {
-	dmp := diffmatchpatch.New()
-
-	oldLines, newLines, lineArray := dmp.DiffLinesToChars(oldContent, newContent)
-	diffs := dmp.DiffMain(oldLines, newLines, false)
-	diffs = dmp.DiffCharsToLines(diffs, lineArray)
-	diffs = dmp.DiffCleanupSemantic(diffs)
-
-	var output strings.Builder
-	oldLineNum := 1
-	newLineNum := 1
-
-	for _, diff := range diffs {
-		lines := strings.Split(diff.Text, "\n")
-
-		if len(lines) > 0 && lines[len(lines)-1] == "" {
-			lines = lines[:len(lines)-1]
-		}
-
-		switch diff.Type {
-		case diffmatchpatch.DiffEqual:
-			oldLineNum += len(lines)
-			newLineNum += len(lines)
-		case diffmatchpatch.DiffDelete:
-			for _, line := range lines {
-				fmt.Fprintf(&output, "-%d %s\n", oldLineNum, line)
-				oldLineNum++
-			}
-		case diffmatchpatch.DiffInsert:
-			for _, line := range lines {
-				fmt.Fprintf(&output, "+%d %s\n", newLineNum, line)
-				newLineNum++
-			}
-		}
-	}
-
-	return capDiffLines(output.String())
-}
-
-func capDiffLines(diff string) string {
-	trimmed := strings.TrimRight(diff, "\n")
-	if trimmed == "" {
-		return diff
-	}
-
-	lines := strings.Split(trimmed, "\n")
-	if len(lines) <= maxDiffLines {
-		return diff
-	}
-
-	omitted := len(lines) - maxDiffLines
-	lines = lines[:maxDiffLines]
-
-	return strings.Join(lines, "\n") + fmt.Sprintf("\n… diff truncated: %d more changed lines (the file was written in full)\n", omitted)
 }
 
 var vcsDirs = map[string]bool{
@@ -709,33 +221,50 @@ func pathDomain(fsPath string) []string {
 	return strings.Split(fsPath, "/")
 }
 
-func loadGitignore(fsys fs.FS, domain []string) []gitignore.Pattern {
+func loadGitignore(ctx context.Context, fsys fs.FS, domain []string) ([]gitignore.Pattern, error) {
 	gitignorePath := ".gitignore"
 
 	if len(domain) > 0 {
 		gitignorePath = pathpkg.Join(append(domain, ".gitignore")...)
 	}
 
-	f, err := fsys.Open(gitignorePath)
-
+	info, err := fs.Stat(fsys, gitignorePath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("ignore file %s is not a regular file", gitignorePath)
+	}
+	f, err := fsys.Open(gitignorePath)
+	if err != nil {
+		return nil, err
 	}
 	defer f.Close()
+	content, err := readContent(ctx, f, MaxScanBufSize)
+	if err != nil {
+		return nil, err
+	}
+	if len(content) > MaxScanBufSize {
+		return nil, fmt.Errorf("ignore file %s exceeds %d byte limit", gitignorePath, MaxScanBufSize)
+	}
 
 	var patterns []gitignore.Pattern
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(bytes.NewReader(content))
+	scanner.Buffer(make([]byte, 0, DefaultScanBufSize), MaxScanBufSize+1)
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
 
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		if trimmed == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
 		patterns = append(patterns, gitignore.ParsePattern(line, domain))
 	}
 
-	return patterns
+	return patterns, scanner.Err()
 }

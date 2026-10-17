@@ -4,19 +4,18 @@ package clipboard
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 )
 
-func Read() ([]Content, error) {
-	text, textErr := readText()
-	imageDataURL, imageErr := readImage()
-	return readContents(text, textErr, imageDataURL, imageErr)
-}
-
 func readText() (string, error) {
+	if paths, err := readFinderFilePaths(); err == nil && len(paths) > 0 {
+		return strings.Join(paths, "\n"), nil
+	}
+
 	output, err := exec.Command("pbpaste").Output()
 
 	if err != nil {
@@ -26,7 +25,43 @@ func readText() (string, error) {
 	return string(output), nil
 }
 
+func readFinderFilePaths() ([]string, error) {
+	const script = `
+ObjC.import("AppKit");
+const pb = $.NSPasteboard.generalPasteboard;
+const classes = $.NSArray.arrayWithObject($.NSURL.class);
+const urls = pb.readObjectsForClassesOptions(classes, $());
+const paths = [];
+if (urls) {
+	const n = urls.count;
+	for (let i = 0; i < n; i++) {
+		const u = urls.objectAtIndex(i);
+		if (u && u.isFileURL) {
+			const p = ObjC.unwrap(u.path);
+			if (p) paths.push(p);
+		}
+	}
+}
+JSON.stringify(paths);
+`
+	output, err := exec.Command("osascript", "-l", "JavaScript", "-e", script).Output()
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(output))), &paths); err != nil {
+		return nil, err
+	}
+	return paths, nil
+}
+
 func readImage() (string, error) {
+	// If the clipboard holds copied file URLs (e.g. from Finder), let readText()
+	// provide the full file paths instead of extracting the Finder file icon.
+	if paths, err := readFinderFilePaths(); err == nil && len(paths) > 0 {
+		return "", nil
+	}
+
 	tmpFile, err := os.CreateTemp("", "clipboard-*.png")
 
 	if err != nil {

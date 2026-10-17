@@ -2,6 +2,7 @@ package code
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
+	"github.com/adrianliechti/wingman-agent/pkg/settings"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/clipboard"
@@ -39,24 +41,43 @@ type App struct {
 	sessionID    string
 	sessionEpoch uint64
 
-	phase      atomic.Int32
-	phaseStart time.Time
+	phase                atomic.Int32
+	pendingPhase         atomic.Pointer[phaseUpdate]
+	phaseStart           time.Time
+	metadataPending      atomic.Bool
+	skillRefreshPending  atomic.Bool
+	skillRefreshAt       time.Time
+	scheduleCountPending atomic.Bool
+	scheduleCountAt      time.Time
+	scheduleCountSession string
+	scheduleCount        int
+	queueDirty           atomic.Bool
+	stopRequested        atomic.Bool
 
 	spinnerFrame int
 	quitDeadline time.Time
 	termFocused  bool
 	wasStreaming bool
+	motion       tuiMotion
 
 	// footerHint is a transient warning shown in the footer instead of the
 	// key hints; it clears on the next input action or when it expires.
 	footerHint string
 	toast      *toast
 
+	backgroundStatus  string
+	backgroundWarning bool
+	backgroundExpiry  time.Time
+
 	showWelcome bool
 
 	editor  *Editor
 	popup   *Popup
 	overlay Overlay
+
+	diffPanel        diffPanel
+	diffPanelShowing bool
+	mouse            mouseLayout
 
 	// cmdTokenStart is the rune index of the slash token driving the command
 	// popup; cmdPopupInline tracks which command set the popup was built for.
@@ -90,13 +111,15 @@ type App struct {
 	pendingEchoMu sync.Mutex
 	pendingEcho   []pendingEchoItem
 
-	elicitMu     sync.Mutex
-	promptActive bool
-	confirmAll   sync.Map // session ID -> struct{}
-	askActive    bool
-	askMessage   string
-	askHeader    []string
-	askResponse  chan string
+	elicitOnce    sync.Once
+	elicitGate    chan struct{}
+	dismissPrompt func()
+	promptActive  bool
+	confirmAll    sync.Map // session ID -> struct{}
+	askActive     bool
+	askMessage    string
+	askHeader     []string
+	askResponse   chan string
 
 	inputTokens       int64
 	outputTokens      int64
@@ -112,7 +135,18 @@ type App struct {
 	clipboardRead  func() ([]clipboard.Content, error)
 	clipboardWrite func(string) error
 
-	turns *code.TurnManager
+	turns            *code.TurnManager
+	queuePaused      bool
+	queueCount       int
+	editingQueueID   string
+	beforeQueueEdit  *composerState
+	drafts           *draftStore
+	draftChangedAt   time.Time
+	draftPending     bool
+	operationPending bool
+	operationStatus  string
+	shellRunning     bool
+	operationCancel  context.CancelFunc
 
 	taskPumpStop chan struct{}
 
@@ -120,9 +154,10 @@ type App struct {
 	renderLast    atomic.Int64
 	dirty         bool
 
-	streamStateMu sync.Mutex
-	streamCurrent streamSnapshot
-	streamHistory []streamSnapshot
+	streamStateMu   sync.Mutex
+	streamCurrent   streamSnapshot
+	streamHistory   []streamSnapshot
+	streamCellCache []streamCellCache
 }
 
 // streamSnapshot is one ordered piece of an in-flight turn. ACP commits the
@@ -142,7 +177,12 @@ type streamSnapshot struct {
 	reasoning     string
 	reasoningID   string
 	reasoningPart int
-	retryAttempt  bool
+	// reasoningPartStart locates the current summary part within reasoning so
+	// a heading split across deltas can be extracted without a second buffer.
+	reasoningPartStart  int
+	reasoningHeadings   string
+	reasoningHeadingSet bool
+	retryAttempt        bool
 }
 
 type toast struct {
@@ -186,17 +226,34 @@ func New(ctx context.Context, coderAgent code.Agent, sessionID string) *App {
 		editor:      NewEditor(),
 		follow:      true,
 		termFocused: true,
+		motion:      newTUIMotion(),
 	}
 
 	a.turns = code.NewTurnManager(tool.WithProgressSink(ctx, a.onToolProgress), coderAgent, a.handleTurnEvent)
+	a.drafts = newDraftStore(coderAgent.Workspace(), coderAgent.Name())
+	a.restoreDraft(a.drafts.Get(sessionID))
+	if coderAgent.Workspace().MemoryPath != "" {
+		if preferences, err := settings.Load(); err == nil {
+			a.diffPanel.hidden = preferences.TUIDiffPanelHidden
+		}
+	}
+	a.syncQueuedInputs()
 	setAgentUI(coderAgent, a)
+	if source, ok := coderAgent.(code.SessionUpdateSource); ok {
+		source.SetSessionUpdateHandler(a.onSessionUpdate)
+	}
 
 	return a
 }
 
 // onToolProgress receives live status text for active current or archived
 // tool calls. Archived calls occur when ACP runs tools in parallel.
-func (a *App) onToolProgress(_ context.Context, callID, text string) {
+func (a *App) onToolProgress(ctx context.Context, callID, text string) {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	if id := code.SessionIDFromContext(ctx); id != "" && id != a.sessionID {
+		return
+	}
 	a.streamStateMu.Lock()
 	updated := false
 	if callID == a.streamCurrent.toolID && a.streamCurrent.toolResult == nil {
@@ -226,9 +283,17 @@ func (a *App) WithTerminal(t *inline.Terminal) {
 // the previous turn. The epoch prevents already-queued UI callbacks from an
 // older activation of the same session from rendering later.
 func (a *App) activateSession(id string) {
+	if a.dismissPrompt != nil {
+		a.dismissPrompt()
+	}
+	a.saveCurrentDraft()
+	a.editingQueueID = ""
+	a.beforeQueueEdit = nil
 	a.sessionMu.Lock()
 	a.sessionID = id
 	a.sessionEpoch++
+	a.pendingPhase.Store(nil)
+	a.metadataPending.Store(false)
 	a.clearStreamingState()
 	a.setPhase(PhaseIdle)
 	a.sessionMu.Unlock()
@@ -240,8 +305,45 @@ func (a *App) activateSession(id string) {
 	a.historyRevisionSet = false
 	a.resetTurnStats()
 	a.usageVisibleUntil = time.Time{}
+	a.pendingEchoMu.Lock()
+	a.pendingEcho = nil
+	a.pendingEchoMu.Unlock()
+	a.clearPendingContent()
+	if a.editor != nil {
+		a.editor.SetText("")
+	}
+	if a.drafts != nil {
+		a.restoreDraft(a.drafts.Get(id))
+	}
+	a.syncQueuedInputs()
+	a.motion = tuiMotion{enabled: a.motion.enabled}
+	a.refreshUsage()
 
 	a.startTaskPump()
+}
+
+func (a *App) onSessionUpdate(id string) {
+	a.withCurrentSession(id, func() {
+		// Updates may also arrive synchronously from a settings command on the
+		// UI thread. Schedule one refresh without waiting for space in its queue.
+		a.metadataPending.Store(true)
+		a.requestRender()
+	})
+}
+
+func (a *App) refreshMetadata() {
+	if a.queueDirty.Swap(false) {
+		a.syncQueuedInputs()
+	}
+	if !a.metadataPending.Swap(false) {
+		return
+	}
+	a.refreshUsage()
+	a.refreshCommandCenter()
+	if a.popup != nil && a.popup.kind == popupCommands && a.editor != nil {
+		a.popup = nil
+		a.syncCommandPopup()
+	}
 }
 
 // startTaskPump forwards background-agent completions of the current session
@@ -346,7 +448,7 @@ func (a *App) deliverTaskResults(sessionID string, batch []task.Event) {
 			if a.sessionID != sessionID {
 				return
 			}
-			a.appendChat(cellNotice(fmt.Sprintf("Could not deliver background agent results: %v (use task_output to retrieve them)", err), theme.Default.Red, a.width()))
+			a.appendChat(cellNotice(fmt.Sprintf("Could not deliver background agent results: %v (use agent_output to retrieve them)", err), theme.Default.Red, a.width()))
 		})
 	}
 }
@@ -413,10 +515,37 @@ func (a *App) setFooterHint(hint string) {
 	a.invalidate()
 }
 
-const toastDuration = 2500 * time.Millisecond
+const (
+	toastDuration             = 2500 * time.Millisecond
+	backgroundWarningDuration = 15 * time.Second
+)
 
 func (a *App) showToast(message string, color ansi.Color) {
 	a.toast = &toast{message: message, color: color, expiresAt: time.Now().Add(toastDuration)}
+	a.invalidate()
+}
+
+// SetBackgroundStatus reports optional workspace setup without interrupting
+// input or adding infrastructure messages to the conversation transcript.
+func (a *App) SetBackgroundStatus(message string, warning bool) {
+	a.post(func() {
+		a.backgroundStatus = message
+		a.backgroundWarning = warning
+		a.backgroundExpiry = time.Time{}
+		if message != "" && warning {
+			a.backgroundExpiry = time.Now().Add(backgroundWarningDuration)
+		}
+		a.invalidate()
+	})
+}
+
+func (a *App) expireBackgroundStatus(now time.Time) {
+	if a.backgroundExpiry.IsZero() || now.Before(a.backgroundExpiry) {
+		return
+	}
+	a.backgroundStatus = ""
+	a.backgroundWarning = false
+	a.backgroundExpiry = time.Time{}
 	a.invalidate()
 }
 
@@ -526,37 +655,49 @@ func (a *App) Run() error {
 		return err
 	}
 
+	defer a.term.Stop()
 	a.term.EnterAlt()
 	a.term.SetTitle(a.terminalTitle())
 	a.term.EnableMouse(true)
 
-	if fetcher, ok := a.agent.(modelFetcher); ok {
-		fetcher.FetchModels(a.ctx)
-	}
-
+	startupCtx, cancelStartup := context.WithCancel(a.ctx)
+	defer cancelStartup()
 	a.setPhase(PhasePreparing)
+
+	if fetcher, ok := a.agent.(modelFetcher); ok {
+		go func() {
+			err := fetcher.FetchModels(startupCtx)
+			if startupCtx.Err() == nil {
+				a.post(func() {
+					if err != nil {
+						a.appendChat(cellError("Model discovery failed", err.Error(), a.width()))
+					}
+					a.invalidate()
+				})
+			}
+		}()
+	}
 
 	go func() {
 		a.agent.Workspace().WarmUp()
+		a.post(func() { a.pollDiffPanel(false) })
 
-		if err := a.agent.Workspace().InitMCP(a.ctx); err != nil {
+		if err := a.agent.Workspace().InitMCP(startupCtx, a); err != nil && startupCtx.Err() == nil {
 			a.post(func() {
 				a.appendChat(cellError("MCP initialization failed", err.Error(), a.width()))
 			})
 		}
 
 		a.post(func() {
-			a.setPhase(PhaseIdle)
+			if a.getPhase() == PhasePreparing {
+				a.setPhase(PhaseIdle)
+			}
 			a.invalidate()
 		})
 	}()
 
+	a.refreshUsage()
 	if messages := a.agent.Messages(a.sessionID); len(messages) > 0 {
-		usage := a.agent.Usage(a.sessionID)
-		a.inputTokens = usage.InputTokens
-		a.outputTokens = usage.OutputTokens
-		a.lastInputTokens = usage.LastInputTokens
-		a.contextWindow = usage.ContextWindow
 		a.syncMessages()
 	}
 
@@ -567,14 +708,22 @@ func (a *App) Run() error {
 
 	ticker := time.NewTicker(spinnerInterval)
 	defer ticker.Stop()
+	motionTimer := time.NewTimer(time.Hour)
+	motionTimer.Stop()
+	defer motionTimer.Stop()
+	if a.motion.nextFrame > 0 {
+		motionTimer.Reset(a.motion.nextFrame)
+	}
 
 	for {
 		select {
 		case <-a.quit:
+			cancelStartup()
 			a.shutdown()
 			return nil
 
 		case <-a.ctx.Done():
+			cancelStartup()
 			a.shutdown()
 			return nil
 
@@ -584,10 +733,16 @@ func (a *App) Run() error {
 		case fn := <-a.queue:
 			fn()
 
+		case <-motionTimer.C:
+			a.invalidate()
+
 		case now := <-ticker.C:
 			a.expireQuitGate(now)
 			a.expireToast(now)
+			a.expireBackgroundStatus(now)
 			a.expireUsage(now)
+			a.pollDiffPanel(false)
+			a.flushDraftWhenIdle(now)
 			if a.getPhase() != PhaseIdle {
 				a.spinnerFrame++
 				a.invalidate()
@@ -616,12 +771,30 @@ func (a *App) Run() error {
 			a.dirty = false
 			a.syncMessages()
 			a.render()
+			if a.motion.nextFrame > 0 {
+				motionTimer.Reset(a.motion.nextFrame)
+			} else {
+				motionTimer.Stop()
+			}
 		}
 	}
 }
 
 func (a *App) shutdown() {
+	a.term.Stop()
+	if a.operationCancel != nil {
+		a.operationCancel()
+	}
+	a.saveCurrentDraft()
+	if a.drafts != nil {
+		if err := a.drafts.Flush(); err != nil {
+			fmt.Fprintf(os.Stderr, "Could not save draft: %v\n", err)
+		}
+	}
 	a.saveSession()
+	if source, ok := a.agent.(code.SessionUpdateSource); ok {
+		source.SetSessionUpdateHandler(nil)
+	}
 
 	a.turns.SetHandler(nil)
 	a.turns.Close()
@@ -636,8 +809,8 @@ func (a *App) shutdown() {
 
 	if len(messages) > 0 {
 		fmt.Fprintf(os.Stderr, "\n")
-		if usage.CachedTokens > 0 {
-			fmt.Fprintf(os.Stderr, "  Tokens: ↑%s (%s cached) ↓%s\n", tui.FormatTokens(usage.InputTokens), tui.FormatTokens(usage.CachedTokens), tui.FormatTokens(usage.OutputTokens))
+		if usage.CacheReadInputTokens > 0 {
+			fmt.Fprintf(os.Stderr, "  Tokens: ↑%s (%s cached) ↓%s\n", tui.FormatTokens(usage.InputTokens), tui.FormatTokens(usage.CacheReadInputTokens), tui.FormatTokens(usage.OutputTokens))
 		} else {
 			fmt.Fprintf(os.Stderr, "  Tokens: ↑%s ↓%s\n", tui.FormatTokens(usage.InputTokens), tui.FormatTokens(usage.OutputTokens))
 		}
@@ -650,10 +823,15 @@ func (a *App) shutdown() {
 	}
 }
 
+// width is the chat column: the terminal minus the diff pane, its divider,
+// and the gap before it while the pane is showing.
 func (a *App) width() int {
 	w, _ := a.term.Size()
 	if w <= 0 {
 		return 80
+	}
+	if panel := a.diffPanelWidth(w); panel > 0 {
+		return w - panel - 2
 	}
 	return w
 }
@@ -744,6 +922,16 @@ func (p selPos) before(q selPos) bool {
 // handleMouse routes wheel to chat scrolling and left-button drags to
 // text selection; the two coexist without a mode switch.
 func (a *App) handleMouse(ev inline.MouseEvent) {
+	if a.handleMouseControls(ev) {
+		return
+	}
+	if a.diffPanelShowing && ev.X-1 > a.width() {
+		if ev.Kind == inline.MouseWheel {
+			a.scrollDiffPanel(ev.WheelDelta * 3)
+		}
+		return
+	}
+
 	switch ev.Kind {
 	case inline.MouseWheel:
 		a.scrollChat(ev.WheelDelta * 3)
@@ -896,16 +1084,24 @@ func (a *App) isStreaming() bool {
 }
 
 func (a *App) handleEvent(ev inline.Event) {
+	defer a.markDraftChanged()
 	switch ev := ev.(type) {
 	case inline.FocusEvent:
 		a.termFocused = ev.Focused
+		a.invalidate()
 
 	case inline.ResizeEvent:
+		a.diffPanel.resizing = false
 		a.term.Resized(ev.Width, ev.Height)
 		a.rebuildChat()
 
 	case inline.MouseEvent:
 		if a.overlay != nil {
+			w, _ := a.term.Size()
+			if ev.Kind == inline.MousePress && ev.Y == 1 && ev.X > w-closeButtonWidth && ev.X <= w {
+				a.closeOverlay()
+				return
+			}
 			if m, ok := a.overlay.(interface{ HandleMouse(inline.MouseEvent) }); ok {
 				m.HandleMouse(ev)
 				a.invalidate()
@@ -959,7 +1155,7 @@ func (a *App) handlePaste(text string) {
 		return
 	}
 	if a.askActive {
-		a.editor.Insert(text)
+		a.editor.InsertPaste(text)
 		return
 	}
 
@@ -975,18 +1171,37 @@ func (a *App) handlePaste(text string) {
 		return
 	}
 
-	a.editor.Insert(text)
+	a.editor.InsertPaste(text)
 	a.syncCommandPopup()
 }
 
 func (a *App) handleKey(ev inline.KeyEvent) {
+	defer a.markDraftChanged()
 	if ev.Key != inline.KeyCtrl || ev.Rune != 'c' {
 		a.disarmQuitGate()
+	}
+	// Clipboard shortcuts and terminal paste must use the same focused target,
+	// including picker queries and overlay search fields.
+	if ev.Key == inline.KeyCtrl && ev.Rune == 'v' {
+		a.pasteFromClipboard()
+		return
 	}
 
 	if a.overlay != nil {
 		if a.overlay.HandleKey(ev) {
 			a.closeOverlay()
+		}
+		return
+	}
+
+	if ev.Key == inline.KeyEnter && ev.Alt && !ev.Shift && !a.promptActive && !a.askActive {
+		a.submitInputIntent(code.TurnInputFollowUp)
+		return
+	}
+	if ev.Key == inline.KeyEnter && ev.Shift {
+		if a.popup == nil || a.popup.kind == popupCommands || a.popup.kind == popupFiles {
+			a.editor.HandleKey(ev)
+			a.syncCommandPopup()
 		}
 		return
 	}
@@ -999,13 +1214,24 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 
 	switch ev.Key {
 	case inline.KeyEsc:
+		if a.operationCancel != nil {
+			a.operationCancel()
+			return
+		}
+		if a.editingQueueID != "" {
+			a.endQueueEdit()
+			return
+		}
 		if a.isStreaming() {
 			a.cancelStream()
 			return
 		}
-		a.editor.SetText("")
-		a.clearPendingContent()
-		a.syncCommandPopup()
+		if strings.TrimSpace(a.editor.Text()) == "!" {
+			a.editor.SetText("")
+			a.syncCommandPopup()
+			return
+		}
+		a.showToast("Draft kept · /discard clears it", theme.Default.BrBlack)
 		return
 
 	case inline.KeyCtrl:
@@ -1045,8 +1271,8 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 		case 'l':
 			a.clearChat()
 			return
-		case 'v':
-			a.pasteFromClipboard()
+		case 'q':
+			a.showTurnQueue()
 			return
 		case 'p':
 			a.showCommandCenter()
@@ -1096,7 +1322,7 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 		return
 	}
 
-	if ev.Key == inline.KeyRune && ev.Rune == '@' && !ev.Alt && a.popup == nil && !a.isStreaming() {
+	if ev.Key == inline.KeyRune && ev.Rune == '@' && !ev.Alt && a.popup == nil && !a.isStreaming() && !a.isShellInput() {
 		a.showFilePicker()
 		return
 	}
@@ -1191,7 +1417,6 @@ func (a *App) answerPrompt() {
 		a.flushToolGap()
 		a.appendChat(cellPrompt("", a.askMessage, "", a.width()))
 		a.appendChat(cellUser(text, a.width()))
-		a.setPhase(PhaseThinking)
 		select {
 		case a.askResponse <- text:
 		default:
@@ -1200,7 +1425,13 @@ func (a *App) answerPrompt() {
 }
 
 func (a *App) cancelStream() {
-	a.turns.CancelAll(a.sessionID)
+	if err := a.turns.CancelCurrent(a.sessionID); err != nil {
+		a.showToast(err.Error(), theme.Default.Red)
+		return
+	}
+	a.stopRequested.Store(true)
+	a.setPhase(PhaseStopping)
+	a.syncQueuedInputs()
 
 	if a.askActive {
 		a.editor.SetText("")
@@ -1231,27 +1462,45 @@ func (a *App) countPendingImages() int {
 
 func (a *App) clearChat() {
 	previousID := a.sessionID
-	id, err := a.agent.NewSession(a.ctx)
-	if err != nil {
-		a.appendChat(cellNotice(fmt.Sprintf("Could not create session: %v", err), theme.Default.Red, a.width()))
-		return
-	}
-	a.turns.CancelAll(previousID)
-	a.activateSession(id)
-	a.clearPendingContent()
-	a.inputTokens = 0
-	a.outputTokens = 0
-	a.lastInputTokens = 0
-	a.contextWindow = 0
-	a.chat = nil
-	a.chatScroll = 0
-	a.follow = true
-	a.clearSelection()
-	a.invalidate()
+	var id string
+	a.runSessionOperation("Could not create session", func(ctx context.Context, _ string) error {
+		var err error
+		id, err = a.agent.NewSession(ctx)
+		return err
+	}, func() {
+		a.turns.CancelCurrent(previousID)
+		a.activateSession(id)
+		a.chat = nil
+		a.chatScroll = 0
+		a.follow = true
+		a.clearSelection()
+		a.invalidate()
+	})
 }
 
 func (a *App) resumeSession() {
 	a.showSessionPicker(false)
+}
+
+func (a *App) forkSession(title string) {
+	forker, ok := a.agent.(code.SessionForker)
+	if !ok {
+		a.appendChat(cellNotice("Forking is unavailable for this agent", theme.Default.Yellow, a.width()))
+		return
+	}
+	if len(a.agent.Messages(a.sessionID)) == 0 {
+		a.appendChat(cellNotice("Nothing to fork yet", theme.Default.Yellow, a.width()))
+		return
+	}
+	previousID := a.sessionID
+	var id string
+	a.runSessionOperation("Could not fork session", func(ctx context.Context, current string) error {
+		var err error
+		id, err = forker.ForkSession(ctx, current, title)
+		return err
+	}, func() {
+		a.switchToSession(previousID, id, fmt.Sprintf("Forked session; the original is kept as %s", shortSessionID(previousID)))
+	})
 }
 
 // showRecap asynchronously summarizes the session and posts the result as a
@@ -1287,12 +1536,52 @@ func (a *App) showRecap() {
 				a.appendChat(cellNotice("Nothing to recap yet", theme.Default.Yellow, a.width()))
 			default:
 				a.appendAnnotation(func(width int) []string {
-					return cellAssistant(recap, width, theme.Default.Cyan)
+					return cellAssistant(recap, width, theme.Default.Cyan, a.agent.Workspace().RootPath)
 				})
 			}
 			a.invalidate()
 		})
 	}()
+}
+
+// compactContext goes through the turn manager so follow-ups queue behind it.
+func (a *App) compactContext(focus string) {
+	if a.operationPending {
+		a.showToast("Wait for the current operation or press Esc to cancel", theme.Default.Yellow)
+		return
+	}
+	if a.turns == nil {
+		return
+	}
+	id, epoch := a.sessionID, a.sessionEpoch
+	err := a.turns.StartCompact(id, focus, func(result agent.CompactResult, err error) {
+		a.post(func() {
+			a.operationPending = false
+			a.operationStatus = ""
+			a.operationCancel = nil
+			if a.sessionID != id || a.sessionEpoch != epoch {
+				return
+			}
+			switch {
+			case errors.Is(err, context.Canceled):
+				a.appendChat(cellNotice("Compaction cancelled", theme.Default.BrBlack, a.width()))
+			case err != nil:
+				a.appendChat(cellNotice(fmt.Sprintf("Compaction failed: %v", err), theme.Default.Yellow, a.width()))
+			default:
+				a.refreshUsage()
+				a.appendChat(cellNotice(fmt.Sprintf("Context compacted · ~%s → ~%s tokens", tui.FormatTokens(result.TokensBefore), tui.FormatTokens(result.TokensAfter)), theme.Default.BrBlack, a.width()))
+			}
+			a.invalidate()
+		})
+	})
+	if err != nil {
+		a.appendChat(cellNotice(fmt.Sprintf("Compaction failed: %v", err), theme.Default.Yellow, a.width()))
+		return
+	}
+	a.operationPending = true
+	a.operationStatus = "Compacting context · Esc cancels"
+	a.operationCancel = func() { _ = a.turns.CancelCurrent(id) }
+	a.invalidate()
 }
 
 func (a *App) copyTextToClipboard(text string) {
@@ -1318,10 +1607,16 @@ func (a *App) copyLastResponse() {
 }
 
 func (a *App) pasteFromClipboard() {
+	sessionID, popup, overlay, askResponse := a.sessionID, a.popup, a.overlay, a.askResponse
 	go func() {
 		contents, err := a.readClipboard()
 
 		a.post(func() {
+			// OS clipboard access can be slow. Never deliver it to a session or
+			// prompt the user opened after pressing paste.
+			if a.sessionID != sessionID || a.popup != popup || a.overlay != overlay || a.askResponse != askResponse {
+				return
+			}
 			a.applyClipboardContents(contents, err)
 		})
 	}()
@@ -1355,7 +1650,8 @@ func (a *App) applyClipboardContents(contents []clipboard.Content, err error) {
 	beforeFiles := len(a.pendingFiles)
 	for _, content := range contents {
 		if content.Image != nil && a.acceptsClipboardAttachments() {
-			a.pendingContent = append(a.pendingContent, agent.Content{File: &agent.File{Data: *content.Image}})
+			data := normalizeClipboardImage(*content.Image)
+			a.pendingContent = append(a.pendingContent, agent.Content{File: &agent.File{Data: data}})
 		}
 		if content.Text != "" {
 			a.handlePaste(content.Text)
@@ -1385,8 +1681,8 @@ func lastAssistantText(messages []agent.Message) string {
 		}
 		var text strings.Builder
 		for _, content := range message.Content {
-			if !content.Hidden && content.Text != "" {
-				text.WriteString(content.Text)
+			if !content.Hidden && content.AsText() != "" {
+				text.WriteString(content.AsText())
 			}
 		}
 		if result := text.String(); strings.TrimSpace(result) != "" {
@@ -1428,11 +1724,25 @@ func (a *App) togglePlanMode() {
 }
 
 func (a *App) toggleUnattendedMode() {
-	if a.currentMode() == code.UnattendedModeID {
+	if policy, ok := a.agent.(code.UnattendedAgent); ok {
+		enabled := !policy.Unattended(a.sessionID)
+		a.runSessionOperation("Could not change unattended setting", func(ctx context.Context, id string) error {
+			return policy.SetUnattended(ctx, id, enabled)
+		}, nil)
+		return
+	}
+	if a.unattended() {
 		a.setMode(code.AgentModeID)
 	} else {
 		a.setMode(code.UnattendedModeID)
 	}
+}
+
+func (a *App) unattended() bool {
+	if policy, ok := a.agent.(code.UnattendedAgent); ok {
+		return policy.Unattended(a.sessionID)
+	}
+	return a.currentMode() == code.UnattendedModeID
 }
 
 func (a *App) setMode(modeID string) {
@@ -1440,9 +1750,5 @@ func (a *App) setMode(modeID string) {
 	if current == modeID {
 		return
 	}
-	if err := a.agent.SetMode(a.ctx, a.sessionID, modeID); err != nil {
-		a.showToast("Could not change mode: "+err.Error(), theme.Default.Red)
-		return
-	}
-	a.invalidate()
+	a.runSessionOperation("Could not change mode", func(ctx context.Context, id string) error { return a.agent.SetMode(ctx, id, modeID) }, nil)
 }

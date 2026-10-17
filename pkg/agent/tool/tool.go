@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -29,11 +30,21 @@ type Tool struct {
 	Execute     func(ctx context.Context, args map[string]any) (Result, error)
 	Hidden      bool
 	Effect      func(args map[string]any) Effect
+	Telemetry   TelemetryMetadata
 
 	// Timeout replaces the harness default tool timeout for this tool.
 	// An explicitly configured Config.ToolTimeout takes precedence; negative
 	// values disable the deadline.
 	Timeout time.Duration
+}
+
+// TelemetryMetadata carries non-sensitive protocol identity used by the
+// agent's OpenTelemetry instrumentation. It must never contain arguments or
+// results.
+type TelemetryMetadata struct {
+	ToolType           string
+	MCPMethod          string
+	MCPProtocolVersion string
 }
 
 // Result separates tool-reported failure from executor/transport failure and
@@ -110,9 +121,41 @@ type ElicitResult struct {
 	Content map[string]any `json:"content,omitempty"`
 }
 
+// Approval pairs the question for a person with the structured Action a reviewer judges.
+type Approval struct {
+	Message string
+	Action  map[string]any
+}
+
+type Verdict struct {
+	Allowed bool
+	Reason  string
+}
+
+// Err returns nil when allowed, else the reviewer's reason or declined.
+func (v Verdict) Err(declined string) error {
+	switch {
+	case v.Allowed:
+		return nil
+	case v.Reason != "":
+		return errors.New(v.Reason)
+	}
+	return errors.New(declined)
+}
+
 type Elicitation struct {
 	Elicit  func(ctx context.Context, req ElicitRequest) (ElicitResult, error)
 	Confirm func(ctx context.Context, message string) (bool, error)
+	// Review, when set, decides approvals instead of asking through Confirm.
+	Review func(ctx context.Context, req Approval) (Verdict, error)
+}
+
+func (e *Elicitation) Approve(ctx context.Context, req Approval) (Verdict, error) {
+	if e.Review != nil {
+		return e.Review(ctx, req)
+	}
+	ok, err := e.Confirm(ctx, req.Message)
+	return Verdict{Allowed: ok}, err
 }
 
 func IntValue(value any) (int, bool) {

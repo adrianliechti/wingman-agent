@@ -2,15 +2,29 @@ package tool
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"image"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"net/http"
 	"strings"
+
+	"golang.org/x/image/draw"
+	_ "golang.org/x/image/webp" // Register WebP decoding for image resizing.
 )
+
+// Source images may be larger than the attachments accepted by providers.
+const MaxImageSourceBytes = 32 * 1024 * 1024
+
+const maxImagePixels = 64_000_000
+
+// MaxImageBytes retains the existing 5MB attachment budget across providers.
+const MaxImageBytes = 5 * 1024 * 1024
 
 // MaxImageResultBytes bounds a data-URL tool result that may be forwarded to
 // the model as an image attachment; larger payloads stay ordinary text and
@@ -18,8 +32,7 @@ import (
 const MaxImageResultBytes = 8 * 1024 * 1024
 
 // MaxImageDimension matches the strictest input-image dimension accepted by
-// supported model providers. Rejecting larger tool results keeps an otherwise
-// valid image from poisoning the next model request.
+// supported model providers. Larger source images are resized before attachment.
 const MaxImageDimension = 8000
 
 var imageResultMimes = map[string]bool{
@@ -27,6 +40,102 @@ var imageResultMimes = map[string]bool{
 	"image/jpeg": true,
 	"image/gif":  true,
 	"image/webp": true,
+}
+
+// ImageMIME identifies supported raster images by their contents, independent
+// of file extensions or HTTP Content-Type headers. SVG remains text.
+func ImageMIME(data []byte) string {
+	mime := http.DetectContentType(data)
+	if imageResultMimes[mime] {
+		return mime
+	}
+	return ""
+}
+
+// ReadImage bounds source reads and returns an image data URL. Images that fit
+// the attachment limits retain their bytes (including animation). Larger images
+// become a PNG, preserving transparency and aspect ratio. GIF resizing uses the
+// first frame; animated WebP must already fit the attachment limits.
+func ReadImage(ctx context.Context, source io.Reader) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	data, err := io.ReadAll(io.LimitReader(source, MaxImageSourceBytes+1))
+	if err != nil {
+		return Result{}, fmt.Errorf("read image: %w", err)
+	}
+	if len(data) > MaxImageSourceBytes {
+		return Result{}, fmt.Errorf("image exceeds the %dMB source limit", MaxImageSourceBytes/(1024*1024))
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	mime := ImageMIME(data)
+	width, height, err := ImageDimensions(data, mime)
+	if err != nil {
+		return Result{}, fmt.Errorf("read image: %w", err)
+	}
+	if int64(width) > maxImagePixels/int64(height) {
+		return Result{}, fmt.Errorf("image is %dx%d; exceeds the %d megapixel limit; resize or crop it first", width, height, maxImagePixels/1_000_000)
+	}
+	originalWidth, originalHeight := width, height
+	needsResize := len(data) > MaxImageBytes || width > MaxImageDimension || height > MaxImageDimension
+	animatedWebP := mime == "image/webp" && len(data) >= 30 && string(data[12:16]) == "VP8X" && data[20]&2 != 0
+	if animatedWebP && needsResize {
+		return Result{}, fmt.Errorf("animated WebP exceeds attachment limits; resize it or extract a frame first")
+	}
+	var bitmap image.Image
+	if !animatedWebP {
+		// Decode even when preserving the bytes: a valid dimensions header
+		// alone does not make a truncated or corrupt bitmap safe to attach.
+		bitmap, _, err = image.Decode(bytes.NewReader(data))
+		if err != nil {
+			return Result{}, fmt.Errorf("decode image: %w", err)
+		}
+	}
+	if needsResize {
+		// A GIF's first frame may cover only part of its logical canvas.
+		canvas := image.Rect(0, 0, width, height)
+		if bitmap.Bounds() != canvas {
+			composite := image.NewNRGBA(canvas)
+			draw.Draw(composite, bitmap.Bounds(), bitmap, bitmap.Bounds().Min, draw.Src)
+			bitmap = composite
+		}
+		if width > MaxImageDimension || height > MaxImageDimension {
+			longest := max(width, height)
+			width = max(1, int(int64(width)*MaxImageDimension/int64(longest)))
+			height = max(1, int(int64(height)*MaxImageDimension/int64(longest)))
+		}
+		for {
+			if err := ctx.Err(); err != nil {
+				return Result{}, err
+			}
+			resized := image.NewNRGBA(image.Rect(0, 0, width, height))
+			draw.ApproxBiLinear.Scale(resized, resized.Bounds(), bitmap, bitmap.Bounds(), draw.Src, nil)
+			var encoded bytes.Buffer
+			if err := png.Encode(&encoded, resized); err != nil {
+				return Result{}, fmt.Errorf("encode resized image: %w", err)
+			}
+			data, mime = encoded.Bytes(), "image/png"
+			if len(data) <= MaxImageBytes {
+				break
+			}
+			// Keep the original aspect ratio across successive reductions.
+			longest := max(width, height) * 3 / 4
+			width = max(1, int(int64(originalWidth)*int64(longest)/int64(max(originalWidth, originalHeight))))
+			height = max(1, int(int64(originalHeight)*int64(longest)/int64(max(originalWidth, originalHeight))))
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	return Result{
+		Content: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data),
+		Metadata: map[string]any{
+			"media_type": mime, "width": width, "height": height,
+			"original_width": originalWidth, "original_height": originalHeight,
+		},
+	}, nil
 }
 
 // IsImageResult reports whether a tool result is a well-formed image data URL
@@ -48,7 +157,7 @@ func IsImageResult(s string) bool {
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
+	if err != nil || len(decoded) > MaxImageBytes {
 		return false
 	}
 

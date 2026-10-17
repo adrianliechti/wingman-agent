@@ -1,20 +1,18 @@
 package server
 
 import (
-	"cmp"
 	"context"
 	"embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,19 +23,15 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/code/agents"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
+	"github.com/adrianliechti/wingman-agent/pkg/devtools"
+	"github.com/adrianliechti/wingman-agent/pkg/remote"
 	"github.com/adrianliechti/wingman-agent/pkg/settings"
-	"github.com/adrianliechti/wingman-agent/pkg/system"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
 	"github.com/adrianliechti/wingman-agent/pkg/watch"
 )
-
-var _ code.UI = (*Server)(nil)
 
 //go:embed static/*
 var staticFiles embed.FS
@@ -48,7 +42,10 @@ var StaticFS, _ = fs.Sub(staticFiles, "static")
 const DefaultPort = 9000
 
 type ServerOptions struct {
-	NoBrowser bool
+	NoBrowser           bool
+	RemoteURL           string
+	RemoteToken         string
+	disableManagedTools bool
 }
 
 type Server struct {
@@ -65,37 +62,27 @@ type Server struct {
 	closeOnce  sync.Once
 	background sync.WaitGroup
 
-	mu    sync.Mutex
-	agent code.Agent
-	turns *code.TurnManager
-
-	turnMetaMu sync.Mutex
-	turnMeta   map[string]map[string]ClientMessage
-	turnUsage  map[string]agent.Usage
-
-	phasesMu sync.Mutex
-	phases   map[string]string
-
-	wsMu    sync.Mutex
-	wsConns map[*websocket.Conn]*wsClient
-	sendMu  sync.Mutex
-
-	promptsMu      sync.Mutex
-	pendingPrompts map[string]pendingPrompt
-	confirmAll     map[string]bool
+	runtimesMu sync.Mutex
+	runtimes   map[string]*backendRuntime
+	starting   map[string]*backendStartup
+	scope      WorkspaceScope
+	wsMu       sync.Mutex
+	wsConns    map[*websocket.Conn]*wsClient
+	sendMu     sync.Mutex
 
 	lspExternalMu    sync.Mutex
 	lspExternalPaths map[string]bool
 	fileWriteMu      sync.Mutex
 
-	taskPumpMu sync.Mutex
-	taskPumps  map[*task.Registry]bool
-
 	terminals        *terminal.Manager
 	preview          *filePreviewServer
 	tab              *editorTabService
-	tabSettingsMu    sync.Mutex
+	transforms       *editorTransformService
+	commitMessages   *gitCommitMessageService
+	settingsMu       sync.Mutex
 	tabEnabled       atomic.Bool
+	terminalPosition atomic.Value
+	sidebarPosition  atomic.Value
 	tabRequestMu     sync.Mutex
 	tabRequestID     uint64
 	tabRequestCancel context.CancelFunc
@@ -109,6 +96,9 @@ type Server struct {
 	prevLSP         bool
 	prevDebug       bool
 	prevFingerprint uint64
+
+	managedToolsMu sync.RWMutex
+	managedTools   managedToolsStatus
 }
 
 func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, error) {
@@ -123,23 +113,26 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	if err != nil {
 		return nil, err
 	}
+	closeTelemetry := func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = cfg.Telemetry.Shutdown(shutdownCtx)
+		cancel()
+	}
 	ws, err := code.NewWorkspace(workDir)
 	if err != nil {
+		closeTelemetry()
 		return nil, err
 	}
 	serverCtx, cancel := context.WithCancel(ctx)
 	s := &Server{
-		noBrowser:      opts.NoBrowser,
-		workspace:      ws,
-		config:         cfg,
-		ctx:            serverCtx,
-		cancel:         cancel,
-		phases:         map[string]string{},
-		wsConns:        map[*websocket.Conn]*wsClient{},
-		pendingPrompts: map[string]pendingPrompt{},
-		confirmAll:     map[string]bool{},
-		turnMeta:       map[string]map[string]ClientMessage{},
-		turnUsage:      map[string]agent.Usage{},
+		noBrowser: opts.NoBrowser,
+		workspace: ws,
+		config:    cfg,
+		ctx:       serverCtx,
+		cancel:    cancel,
+		runtimes:  make(map[string]*backendRuntime),
+		scope:     workspaceScope(ws.RootPath),
+		wsConns:   map[*websocket.Conn]*wsClient{},
 	}
 
 	s.terminals = terminal.NewManager(ws.RootPath)
@@ -148,23 +141,29 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	if err != nil {
 		cancel()
 		ws.Close()
+		closeTelemetry()
 		return nil, err
 	}
 
-	wa := codeagent.New(ws, cfg, nil)
-	wa.SetUI(s)
+	wa := codeagent.New(ws, cfg, nil, codeagent.Options{RequireSessionContext: true, IsolateSessionSettings: true})
+	rt := s.bindBackend(code.BuiltinAgentName, wa)
+	s.runtimes[code.BuiltinAgentName] = rt
 	cfg.RoleModel = wa.RoleModel
 	cfg.Model = func() string {
 		option, _ := wa.RoleModel("")
 		return option.ID
 	}
 	s.tab = newEditorTabService(cfg)
+	s.transforms = newEditorTransformService(cfg)
+	s.commitMessages = newGitCommitMessageService(cfg)
 	s.tabEnabled.Store(true)
+	s.terminalPosition.Store(settings.WindowTerminalPositionTab)
+	s.sidebarPosition.Store(settings.WindowSidebarPositionRight)
 	if userSettings, loadErr := settings.Load(); loadErr == nil {
 		s.tabEnabled.Store(userSettings.EditorTabCompletion)
+		s.terminalPosition.Store(userSettings.WindowTerminalPosition)
+		s.sidebarPosition.Store(userSettings.WindowSidebarPosition)
 	}
-	s.agent = wa
-	s.turns = code.NewTurnManager(tool.WithProgressSink(serverCtx, s.onToolProgress), wa, s.handleTurnEvent)
 
 	ws.WarmUp()
 	if terminal.Supported() {
@@ -181,6 +180,37 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	s.background.Go(func() {
 		s.files.Run(serverCtx)
 	})
+	if !opts.disableManagedTools {
+		update := ws.StartManagedToolsUpdate(serverCtx, code.ManagedLSPTools, func(progress devtools.Progress) {
+			s.setManagedToolsStatus(managedToolsStatus{
+				State: "installing", Tool: progress.Tool, Label: progress.Label, Phase: progress.Phase,
+				Current: progress.Current, Total: progress.Total,
+			})
+		})
+		s.background.Go(func() {
+			changed, updateErr := update.WaitContext(serverCtx)
+			if serverCtx.Err() != nil {
+				return
+			}
+			if updateErr != nil {
+				fmt.Fprintf(os.Stderr, "managed tools warning: %v\n", updateErr)
+				if devtools.IsUnavailable(updateErr) {
+					s.setManagedToolsStatus(managedToolsStatus{
+						State: "error", Error: updateErr.Error(), Unavailable: devtools.ToolLabels(devtools.UnavailableTools(updateErr)),
+					})
+				} else {
+					s.setManagedToolsStatus(managedToolsStatus{State: "ready"})
+				}
+			} else {
+				s.setManagedToolsStatus(managedToolsStatus{State: "ready"})
+			}
+			if changed && serverCtx.Err() == nil {
+				if s.files != nil {
+					s.files.Flush()
+				}
+			}
+		})
+	}
 	s.skillFiles = watch.New(watch.Options{
 		Fallback: 2 * time.Second,
 		Active:   s.hasClients,
@@ -196,18 +226,22 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	})
 
 	s.background.Go(func() {
-		wa.FetchModels(serverCtx)
-		if serverCtx.Err() != nil {
-			return
+		if err := rt.refreshModels(); err != nil && serverCtx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "Model discovery warning: %v\n", err)
 		}
-		s.broadcast(Frame{Type: EvtModelChanged})
 	})
 
 	s.mux = chi.NewRouter()
 	s.registerRoutes(s.mux)
 
 	csrf := http.NewCrossOriginProtection()
-	s.handler = csrf.Handler(s.mux)
+	s.handler = LocalHostOnly(csrf.Handler(s.checkInstance(s.mux)))
+	if opts.RemoteURL != "" {
+		if err := s.startRemote(remote.ClientOptions{Relay: opts.RemoteURL, Token: opts.RemoteToken}); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
 
 	return s, nil
 }
@@ -218,23 +252,42 @@ func (s *Server) Close() {
 			s.cancel()
 		}
 
-		s.mu.Lock()
-		a := s.agent
-		turns := s.turns
-		s.agent = nil
-		s.turns = nil
-		s.mu.Unlock()
-		if turns != nil {
-			turns.SetHandler(nil)
-			turns.Close()
+		s.wsMu.Lock()
+		for _, client := range s.wsConns {
+			client.close()
+			_ = client.conn.CloseNow()
 		}
-		if a != nil {
-			_ = a.Close()
+		s.wsMu.Unlock()
+		s.runtimesMu.Lock()
+		runtimes := make([]*backendRuntime, 0, len(s.runtimes))
+		for _, rt := range s.runtimes {
+			rt.operationMu.Lock()
+			rt.closing = true
+			rt.operationMu.Unlock()
+			runtimes = append(runtimes, rt)
+		}
+		s.runtimesMu.Unlock()
+		for _, rt := range runtimes {
+			rt.turns.SetHandler(nil)
+			rt.turns.Close()
+			rt.operations.Wait()
+			_ = rt.agent.Close()
 		}
 		s.background.Wait()
-		s.preview.Close()
-		s.workspace.Close()
-		s.terminals.Close()
+		if s.preview != nil {
+			s.preview.Close()
+		}
+		if s.workspace != nil {
+			s.workspace.Close()
+		}
+		if s.terminals != nil {
+			s.terminals.Close()
+		}
+		if s.config != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = s.config.Telemetry.Shutdown(shutdownCtx)
+			cancel()
+		}
 	})
 }
 
@@ -242,89 +295,41 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }
 
-func (s *Server) activeAgent() code.Agent {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.agent
-}
-
-func (s *Server) swapAgent(next code.Agent) {
-	s.mu.Lock()
-	prev := s.agent
-	prevTurns := s.turns
-	s.agent = next
-	s.turns = code.NewTurnManager(tool.WithProgressSink(s.ctx, s.onToolProgress), next, s.handleTurnEvent)
-	s.mu.Unlock()
-	if prevTurns != nil {
-		prevTurns.SetHandler(nil)
-		prevTurns.Close()
-	}
-	s.turnMetaMu.Lock()
-	s.turnMeta = map[string]map[string]ClientMessage{}
-	s.turnUsage = map[string]agent.Usage{}
-	s.turnMetaMu.Unlock()
-	s.promptsMu.Lock()
-	s.confirmAll = map[string]bool{}
-	s.promptsMu.Unlock()
-	s.phasesMu.Lock()
-	s.phases = map[string]string{}
-	s.phasesMu.Unlock()
-	if prev != nil && prev != next {
-		_ = prev.Close()
-	}
-}
-
-func (s *Server) onToolProgress(ctx context.Context, callID, text string) {
-	if sid := code.SessionIDFromContext(ctx); sid != "" {
-		s.sendSession(sid, Frame{Type: EvtToolProgress, ID: callID, Text: text})
-	}
-}
-
-func (s *Server) activeRuntime() (code.Agent, *code.TurnManager) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.agent, s.turns
-}
-
-func (s *Server) handleWebSocketURL(w http.ResponseWriter, r *http.Request) {
-	proto := "ws"
-	if r.TLS != nil {
-		proto = "wss"
-	}
-	writeJSON(w, map[string]string{"url": fmt.Sprintf("%s://%s/ws", proto, r.Host)})
-}
-
 func (s *Server) Run(ctx context.Context, port int) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	s.ctx = ctx
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	defer s.Close()
 
-	resolvedPort, err := resolvePort(port)
+	listener, err := listenLocal(port)
 	if err != nil {
 		return err
 	}
+	defer listener.Close()
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf("localhost:%d", resolvedPort),
 		Handler: s,
 	}
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		<-sigCh
-		cancel()
-		srv.Close()
+		select {
+		case <-ctx.Done():
+			_ = srv.Close()
+		case <-s.ctx.Done():
+			_ = srv.Close()
+		case <-done:
+		}
 	}()
 
-	url := fmt.Sprintf("http://localhost:%d", resolvedPort)
+	url := fmt.Sprintf("http://localhost:%d", listener.Addr().(*net.TCPAddr).Port)
 	fmt.Fprintf(os.Stderr, "Wingman running at %s\n", url)
 
 	if !s.noBrowser {
 		openBrowser(url)
 	}
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
@@ -358,6 +363,7 @@ func (s *Server) registerRoutes(r chi.Router) {
 			r.Post("/init", s.handleGitInit)
 			r.Get("/status", s.handleGitStatus)
 			r.Get("/branches", s.handleGitBranches)
+			r.Post("/fetch", s.handleGitFetch)
 			r.Get("/history", s.handleGitHistory)
 			r.Get("/compare", s.handleGitCompare)
 			r.Post("/branches", s.handleGitCreateBranch)
@@ -365,42 +371,12 @@ func (s *Server) registerRoutes(r chi.Router) {
 			r.Post("/stage", s.handleGitStage)
 			r.Post("/unstage", s.handleGitUnstage)
 			r.Post("/commit", s.handleGitCommit)
+			r.Post("/commit-message", s.handleGitCommitMessage)
 			r.Post("/pull", s.handleGitPull)
 			r.Post("/push", s.handleGitPush)
 		})
 
-		r.Route("/sessions", func(r chi.Router) {
-			r.Get("/", s.handleSessions)
-			r.Post("/", s.handleNewSession)
-			r.Route("/{id}", func(r chi.Router) {
-				r.Delete("/", s.handleDeleteSession)
-				r.Post("/load", s.handleLoadSession)
-				r.Get("/model", s.handleModel)
-				r.Post("/model", s.handleSetModel)
-				r.Get("/effort", s.handleEffort)
-				r.Post("/effort", s.handleSetEffort)
-				r.Get("/mode", s.handleMode)
-				r.Post("/mode", s.handleSetMode)
-				r.Get("/tasks", s.handleTasks)
-				r.Get("/tasks/{taskID}", s.handleTask)
-				r.Post("/tasks/{taskID}/stop", s.handleTaskStop)
-				r.Get("/schedules", s.handleSchedules)
-				r.Delete("/schedules/{scheduleID}", s.handleScheduleDelete)
-				r.Post("/schedules/{scheduleID}/pause", s.handleSchedulePause)
-				r.Post("/schedules/{scheduleID}/resume", s.handleScheduleResume)
-			})
-		})
-
-		r.Get("/models", s.handleModels)
-		r.Get("/model", s.handleModel)
-		r.Post("/model", s.handleSetModel)
-		r.Get("/effort", s.handleEffort)
-		r.Post("/effort", s.handleSetEffort)
-		r.Get("/mode", s.handleMode)
-
-		r.Get("/agents", s.handleAgents)
-		r.Get("/agent", s.handleAgent)
-		r.Post("/agent", s.handleSetAgent)
+		s.registerSessionRoutes(r)
 
 		r.Route("/terminals", func(r chi.Router) {
 			r.Get("/", s.handleTerminals)
@@ -423,6 +399,7 @@ func (s *Server) registerRoutes(r chi.Router) {
 		})
 
 		r.Route("/lsp", func(r chi.Router) {
+			r.Get("/status", s.handleLSPStatus)
 			r.Get("/capabilities", s.handleLSPEditorCapabilities)
 			r.Post("/document", s.handleLSPDocumentLifecycle)
 			r.Get("/diagnostics", s.handleDiagnostics)
@@ -464,13 +441,13 @@ func (s *Server) registerRoutes(r chi.Router) {
 			r.Post("/variables", s.handleDebugVariables)
 		})
 		r.Post("/editor/tab", s.handleEditorTab)
+		r.Post("/editor/transform", s.handleEditorTransform)
 		r.Post("/settings/editor.tab.completion", s.handleEditorTabSettings)
+		r.Post("/settings/window.terminal.position", s.handleWindowTerminalSettings)
+		r.Post("/settings/window.sidebar.position", s.handleWindowSidebarSettings)
 		r.Get("/skills", s.handleSkills)
 		r.Get("/capabilities", s.handleCapabilities)
-		r.Get("/ws", s.handleWebSocketURL)
 	})
-
-	r.HandleFunc("/ws", s.handleWebSocket)
 
 	fileServer := http.FileServer(http.FS(StaticFS))
 	r.Handle("/*", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -481,35 +458,6 @@ func (s *Server) registerRoutes(r chi.Router) {
 		}
 		fileServer.ServeHTTP(w, req)
 	}))
-}
-
-func (s *Server) sessionPhase(id string) string {
-	s.phasesMu.Lock()
-	defer s.phasesMu.Unlock()
-	if p := s.phases[id]; p != "" {
-		return p
-	}
-	return "idle"
-}
-
-func (s *Server) setSessionPhase(id, phase string) {
-	s.phasesMu.Lock()
-	if s.phases[id] == phase {
-		s.phasesMu.Unlock()
-		return
-	}
-	if phase == "" || phase == "idle" {
-		delete(s.phases, id)
-	} else {
-		s.phases[id] = phase
-	}
-	s.phasesMu.Unlock()
-	s.sendSession(id, Frame{Type: EvtPhase, Phase: phase})
-}
-
-func (s *Server) sendSession(sid string, f Frame) {
-	f.Session = sid
-	s.send(f)
 }
 
 func (s *Server) broadcast(f Frame) {
@@ -596,273 +544,83 @@ func (s *Server) send(f Frame) {
 	}
 }
 
-func (s *Server) sendSessionState(sid string) {
-	a := s.activeAgent()
-	if a == nil {
-		return
-	}
-	s.sendSessionSnapshot(sid, a.Messages(sid), a.Usage(sid))
-	for _, f := range s.pendingPromptFramesFor(sid) {
-		s.send(f)
-	}
-	s.sendTurnSnapshot(sid)
-}
-
-func (s *Server) sendSessionSnapshot(sid string, messages []agent.Message, u agent.Usage) {
-	frame := Frame{
-		Type:         EvtSessionState,
-		Phase:        s.sessionPhase(sid),
-		Messages:     convertMessages(messages),
-		InputTokens:  u.InputTokens,
-		CachedTokens: u.CachedTokens,
-		OutputTokens: u.OutputTokens,
-
-		LastInputTokens: u.LastInputTokens,
-		ContextWindow:   u.ContextWindow,
-	}
-	if a := s.activeAgent(); a != nil && frame.ContextWindow <= 0 && u.LastInputTokens > 0 {
-		_, model := a.Models(sid)
-		frame.ContextWindow = int64(agent.ContextWindowFor(model))
-	}
-	s.sendSession(sid, frame)
-}
-
-func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	a := s.activeAgent()
-	if a == nil {
-		writeJSON(w, []SessionEntry{})
-		return
-	}
-	infos, err := a.ListSessions(r.Context())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "list sessions (%s): %v\n", a.Name(), err)
-		http.Error(w, fmt.Sprintf("list sessions: %v", err), http.StatusBadGateway)
-		return
-	}
-	out := make([]SessionEntry, 0, len(infos))
-	for _, si := range infos {
-		ent := SessionEntry{ID: si.ID, Title: si.Title}
-		if !si.UpdatedAt.IsZero() {
-			ent.UpdatedAt = si.UpdatedAt.Format(time.RFC3339)
-			ent.CreatedAt = ent.UpdatedAt
-		}
-		out = append(out, ent)
-	}
-	slices.SortFunc(out, func(a, b SessionEntry) int {
-		return cmp.Compare(b.UpdatedAt, a.UpdatedAt)
-	})
-	writeJSON(w, out)
-}
-
-func (s *Server) handleNewSession(w http.ResponseWriter, r *http.Request) {
-	a := s.activeAgent()
-	if a == nil {
-		http.Error(w, "no active agent", http.StatusInternalServerError)
-		return
-	}
-	id, err := a.NewSession(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	s.broadcast(Frame{Type: EvtModelChanged})
-	s.sendTurnSnapshot(id)
-	s.ensureTaskPump(id)
-	writeJSON(w, map[string]string{"id": id})
-}
-
-func (s *Server) handleLoadSession(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if id == "" {
-		http.Error(w, "session id required", http.StatusBadRequest)
-		return
-	}
-	a := s.activeAgent()
-	if a == nil {
-		http.Error(w, "no active agent", http.StatusInternalServerError)
-		return
-	}
-
-	loadCtx := code.WithSessionID(s.ctx, id)
-	var err error
-	if loader, ok := a.(code.SessionLoadStreamer); ok {
-		err = s.streamLoad(loadCtx, loader, id)
-	} else {
-		err = a.LoadSession(loadCtx, id)
-	}
-	if err != nil {
-		if errors.Is(err, errors.ErrUnsupported) {
-			http.Error(w, "load not supported for this agent", http.StatusMethodNotAllowed)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	s.sendSessionState(id)
-	s.ensureTaskPump(id)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) streamLoad(ctx context.Context, loader code.SessionLoadStreamer, id string) error {
-	a := s.activeAgent()
-	const minInterval = 150 * time.Millisecond
-	var last time.Time
-	for msgs, err := range loader.LoadSessionStream(ctx, id) {
-		if err != nil {
-			return err
-		}
-		now := time.Now()
-		if !last.IsZero() && now.Sub(last) < minInterval {
-			continue
-		}
-		last = now
-		s.sendSessionSnapshot(id, msgs, a.Usage(id))
-	}
-	return nil
-}
-
-func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if id == "" {
-		http.Error(w, "session id required", http.StatusBadRequest)
-		return
-	}
-	a := s.activeAgent()
-	if a == nil {
-		http.Error(w, "no active agent", http.StatusInternalServerError)
-		return
-	}
-	if _, turns := s.activeRuntime(); turns != nil {
-		turns.CancelAll(id)
-	}
-	if err := a.DeleteSession(r.Context(), id); err != nil {
-		if errors.Is(err, errors.ErrUnsupported) {
-			http.Error(w, "delete not supported for this agent", http.StatusMethodNotAllowed)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.phasesMu.Lock()
-	delete(s.phases, id)
-	s.phasesMu.Unlock()
-	s.broadcast(Frame{Type: EvtSessionsChanged})
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
-	a := s.activeAgent()
-	if a == nil {
-		writeJSON(w, map[string]string{"model": ""})
-		return
-	}
-	_, current := a.Models(r.PathValue("id"))
-	writeJSON(w, map[string]string{"model": current})
-}
-
-func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
-	a := s.activeAgent()
-	if a == nil {
-		writeJSON(w, []map[string]string{})
-		return
-	}
-	available, _ := a.Models("")
-	result := make([]map[string]string, 0, len(available))
-	for _, m := range available {
-		result = append(result, map[string]string{
-			"id":        m.ID,
-			"name":      m.Name,
-			"namespace": m.Namespace,
-		})
-	}
-	writeJSON(w, result)
-}
-
-func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Model string `json:"model"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Model == "" {
-		http.Error(w, "model is required", http.StatusBadRequest)
-		return
-	}
-	a := s.activeAgent()
-	if a == nil {
-		http.Error(w, "no active agent", http.StatusInternalServerError)
-		return
-	}
-	if err := a.SetModel(r.Context(), r.PathValue("id"), body.Model); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	s.broadcast(Frame{Type: EvtModelChanged})
-	writeJSON(w, map[string]string{"model": body.Model})
-}
-
-func (s *Server) handleEffort(w http.ResponseWriter, r *http.Request) {
-	a := s.activeAgent()
-	if a == nil {
-		writeJSON(w, map[string]any{"effort": "", "options": []string{}})
-		return
-	}
-	current, options := a.Effort(r.PathValue("id"))
-	writeJSON(w, map[string]any{"effort": current, "options": options})
-}
-
-func (s *Server) handleSetEffort(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Effort string `json:"effort"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
-		return
-	}
-	a := s.activeAgent()
-	if a == nil {
-		http.Error(w, "no active agent", http.StatusInternalServerError)
-		return
-	}
-	if err := a.SetEffort(r.Context(), r.PathValue("id"), body.Effort); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, map[string]string{"effort": body.Effort})
-}
-
 type capabilitiesResponse struct {
-	Git           bool   `json:"git"`
-	GitInit       bool   `json:"git_init"`
-	LSP           bool   `json:"lsp"`
-	Debug         bool   `json:"debug"`
-	Diffs         bool   `json:"diffs"`
-	Tasks         bool   `json:"tasks"`
-	Terminal      bool   `json:"terminal"`
-	Tab           bool   `json:"tab"`
-	EditorTab     bool   `json:"editor.tab.completion"`
-	Platform      string `json:"platform"`
-	WorkspaceName string `json:"workspace_name"`
-	Notice        string `json:"notice,omitempty"`
+	Git                    bool                            `json:"git"`
+	GitInit                bool                            `json:"git_init"`
+	LSP                    bool                            `json:"lsp"`
+	Debug                  bool                            `json:"debug"`
+	Tasks                  bool                            `json:"tasks"`
+	Terminal               bool                            `json:"terminal"`
+	Tab                    bool                            `json:"tab"`
+	EditorTab              bool                            `json:"editor.tab.completion"`
+	WindowTerminalPosition settings.WindowTerminalPosition `json:"window.terminal.position"`
+	WindowSidebarPosition  settings.WindowSidebarPosition  `json:"window.sidebar.position"`
+	Platform               string                          `json:"platform"`
+	WorkspaceName          string                          `json:"workspace_name"`
+	ManagedTools           *managedToolsStatus             `json:"managed_tools,omitempty"`
+}
+
+type managedToolsStatus struct {
+	State       string                 `json:"state"`
+	Tool        string                 `json:"tool,omitempty"`
+	Label       string                 `json:"label,omitempty"`
+	Phase       devtools.ProgressPhase `json:"phase,omitempty"`
+	Current     int                    `json:"current,omitempty"`
+	Total       int                    `json:"total,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	Unavailable []string               `json:"unavailable,omitempty"`
+}
+
+func (s *Server) setManagedToolsStatus(status managedToolsStatus) {
+	s.managedToolsMu.Lock()
+	s.managedTools = status
+	s.managedToolsMu.Unlock()
+	s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+}
+
+func (s *Server) managedToolsStatus() managedToolsStatus {
+	s.managedToolsMu.RLock()
+	defer s.managedToolsMu.RUnlock()
+	return s.managedTools
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	ws := s.workspace
-	_, isCoder := s.activeAgent().(*codeagent.Agent)
 	hasChanges := ws.HasChanges()
 	caps := capabilitiesResponse{
-		Git:           hasChanges,
-		GitInit:       isCoder && !hasChanges,
-		LSP:           ws.HasLSP(),
-		Debug:         s.debugAvailable(r.Context()),
-		Diffs:         hasChanges,
-		Tasks:         isCoder,
-		Terminal:      terminal.Supported(),
-		Tab:           s.tab != nil,
-		EditorTab:     s.tab != nil && s.tabEnabled.Load(),
-		Platform:      runtime.GOOS,
-		WorkspaceName: filepath.Base(ws.RootPath),
+		Git:                    hasChanges,
+		GitInit:                !hasChanges,
+		LSP:                    ws.HasLSP(),
+		Debug:                  s.debugAvailable(r.Context()),
+		Tasks:                  true,
+		Terminal:               terminal.Supported(),
+		Tab:                    s.tab != nil,
+		EditorTab:              s.tab != nil && s.tabEnabled.Load(),
+		WindowTerminalPosition: s.windowTerminalPosition(),
+		WindowSidebarPosition:  s.windowSidebarPosition(),
+		Platform:               runtime.GOOS,
+		WorkspaceName:          filepath.Base(ws.RootPath),
+	}
+	if status := s.managedToolsStatus(); status.State != "" {
+		caps.ManagedTools = &status
 	}
 	writeJSON(w, caps)
+}
+
+func (s *Server) windowTerminalPosition() settings.WindowTerminalPosition {
+	position, ok := s.terminalPosition.Load().(settings.WindowTerminalPosition)
+	if !ok || !position.Valid() {
+		return settings.WindowTerminalPositionTab
+	}
+	return position
+}
+
+func (s *Server) windowSidebarPosition() settings.WindowSidebarPosition {
+	position, ok := s.sidebarPosition.Load().(settings.WindowSidebarPosition)
+	if !ok || !position.Valid() {
+		return settings.WindowSidebarPositionRight
+	}
+	return position
 }
 
 func (s *Server) debugAvailable(ctx context.Context) bool {
@@ -886,7 +644,9 @@ func (s *Server) hasClients() bool {
 }
 
 func (s *Server) flushFiles() {
-	s.files.Flush()
+	if s.files != nil {
+		s.files.Flush()
+	}
 	s.broadcast(Frame{Type: EvtFilesChanged})
 }
 
@@ -948,14 +708,14 @@ func convertMessages(messages []agent.Message) []ConversationMessage {
 		if m.Hidden {
 			continue
 		}
-		cm := ConversationMessage{Role: string(m.Role)}
+		cm := ConversationMessage{Role: string(m.Role), InputID: m.InputID}
 		for _, c := range m.Content {
 			if c.Hidden {
 				continue
 			}
 			cc := ConversationContent{}
-			if c.Text != "" {
-				cc.Text = c.Text
+			if c.AsText() != "" {
+				cc.Text = c.AsText()
 				cc.TextID = c.TextID
 			}
 			if c.File != nil && c.File.Data != "" {
@@ -965,19 +725,31 @@ func convertMessages(messages []agent.Message) []ConversationMessage {
 				cc.Reasoning = &ConversationReasoning{ID: c.Reasoning.ID, Summary: c.Reasoning.Summary}
 			}
 			if c.ToolCall != nil {
+				display := displayTool(
+					c.ToolCall.Name, c.ToolCall.Kind, c.ToolCall.Args, c.ToolCall.Locations,
+					c.ToolCall.Presentation,
+				)
 				cc.ToolCall = &ConversationTool{
-					ID:   c.ToolCall.ID,
-					Name: c.ToolCall.Name,
-					Args: c.ToolCall.Args,
-					Hint: tool.ExtractHint(c.ToolCall.Args, c.ToolCall.Name),
+					ID:        c.ToolCall.ID,
+					Name:      display.name,
+					Kind:      display.kind,
+					Args:      display.args,
+					Locations: display.locations,
+					Hint:      display.hint,
 				}
 			}
 			if c.ToolResult != nil {
+				display := displayTool(
+					c.ToolResult.Name, c.ToolResult.Kind, c.ToolResult.Args, c.ToolResult.Locations,
+					c.ToolResult.Presentation,
+				)
 				cc.ToolResult = &ConversationResult{
-					ID:      c.ToolResult.ID,
-					Name:    c.ToolResult.Name,
-					Args:    c.ToolResult.Args,
-					Content: c.ToolResult.Content,
+					ID:        c.ToolResult.ID,
+					Name:      display.name,
+					Kind:      display.kind,
+					Args:      display.args,
+					Locations: display.locations,
+					Content:   c.ToolResult.Content,
 				}
 			}
 			cm.Content = append(cm.Content, cc)
@@ -992,23 +764,12 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-func resolvePort(port int) (int, error) {
-	if port != 0 {
-		return port, nil
+// Keep the selected socket bound before announcing the URL or opening a browser.
+func listenLocal(port int) (net.Listener, error) {
+	if port == 0 {
+		if listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", DefaultPort)); err == nil {
+			return listener, nil
+		}
 	}
-	return system.FreePort(DefaultPort)
-}
-
-func (s *Server) constructBackend(name string) (code.Agent, error) {
-	a, err := agents.New(s.ctx, s.workspace, name, s.config)
-	if err != nil {
-		return nil, err
-	}
-	if us, ok := a.(interface{ SetUI(code.UI) }); ok {
-		us.SetUI(s)
-	}
-	if w, ok := a.(*codeagent.Agent); ok {
-		w.FetchModels(s.ctx)
-	}
-	return a, nil
+	return net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 }

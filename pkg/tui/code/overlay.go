@@ -7,6 +7,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -109,23 +110,23 @@ func (p *pager) Render(width, height int) []string {
 		percent = (p.offset + rows) * 100 / len(p.lines)
 	}
 
-	head := cellIndent + bold(p.title)
+	head := closeHeader(cellIndent+bold(p.title), width)
 	ruleWidth := max(width-2*len(cellIndent), 10)
 	pct := fmt.Sprintf(" %d%% ", percent)
-	rule := strings.Repeat("─", ruleWidth-ansi.Width(pct)-2) + pct + "──"
+	rule := colored(t.Border, strings.Repeat("─", ruleWidth-ansi.Width(pct)-2)) + dim(pct) + colored(t.Border, "──")
 
-	lines := []string{head, cellIndent + colored(t.BrBlack, rule)}
+	lines := []string{head, cellIndent + rule}
 
 	end := min(p.offset+rows, len(p.lines))
 
 	// Lines were wrapped at open time; a narrower terminal since then must
 	// not leak over-wide lines into the renderer.
-	for _, line := range p.lines[p.offset:end] {
-		lines = append(lines, ansi.Truncate(line, width, "…"))
-	}
-
-	for len(lines) < height-1 {
-		lines = append(lines, "")
+	for row := range rows {
+		line := ""
+		if index := p.offset + row; index < end {
+			line = p.lines[index]
+		}
+		lines = append(lines, scrollbarLine(line, width, scrollMarker(row, rows, p.offset, len(p.lines))))
 	}
 
 	lines = append(lines, cellIndent+p.hints)
@@ -155,16 +156,18 @@ func transcriptLines(messages []agent.Message, width int, isToolHidden func(stri
 			case c.Reasoning != nil && c.Reasoning.Summary != "":
 				lines = append(lines, cellReasoning(c.Reasoning.Summary, width, true)...)
 				lines = append(lines, "")
-			case c.Text != "":
+			case c.AsText() != "":
 				switch msg.Role {
 				case agent.RoleUser:
-					if isCommandEcho(c.Text) {
-						lines = append(lines, cellCommand(c.Text, width)...)
+					if cmd, output, exitCode, ok := code.ParseUserShellCommand(c.AsText()); ok {
+						lines = append(lines, cellUserShell(cmd, output, exitCode, width, true)...)
+					} else if isCommandEcho(c.AsText()) {
+						lines = append(lines, cellCommand(c.AsText(), width)...)
 					} else {
-						lines = append(lines, cellUser(c.Text, width)...)
+						lines = append(lines, cellUser(c.AsText(), width)...)
 					}
 				case agent.RoleAssistant:
-					lines = append(lines, cellAssistant(c.Text, width, theme.Default.Green)...)
+					lines = append(lines, cellAssistant(c.AsText(), width, theme.Default.Green)...)
 				}
 			}
 		}

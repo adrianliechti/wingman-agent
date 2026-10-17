@@ -5,22 +5,31 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
+	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
 )
 
 const (
 	debugRequestLimit       = 2 << 20
-	debugControlMaxWait     = 30 * time.Second
+	debugControlWait        = 150 * time.Millisecond
+	debugPauseWait          = 750 * time.Millisecond
 	debugStateRequestBudget = 2 * time.Second
+	debugInspectionBudget   = 5 * time.Second
 )
+
+var errDebugStateChanged = errors.New("debug session state changed; refresh and try again")
 
 type debugPlanBreakpoint struct {
 	FilePath     string `json:"file_path"`
@@ -34,7 +43,6 @@ type debugPlanBreakpoint struct {
 type debugLaunchPlan struct {
 	Action              string                `json:"action"`
 	Title               string                `json:"title"`
-	Summary             string                `json:"summary"`
 	Adapter             string                `json:"adapter"`
 	TerminalAvailable   bool                  `json:"terminal_available"`
 	ProjectDir          string                `json:"project_dir"`
@@ -43,6 +51,7 @@ type debugLaunchPlan struct {
 	Configuration       map[string]any        `json:"configuration"`
 	Breakpoints         []debugPlanBreakpoint `json:"breakpoints"`
 	FunctionBreakpoints []string              `json:"function_breakpoints"`
+	PreLaunch           *dap.ProcessLaunch    `json:"prelaunch,omitempty"`
 }
 
 type debugStateResponse struct {
@@ -94,7 +103,7 @@ func (s *Server) handleDebugTargets(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	targets, err := debugadapter.NewRegistry().DetectFile(filepath.ToSlash(rel), source)
+	targets, err := s.workspace.DebugRegistry().DetectFile(filepath.ToSlash(rel), source)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -106,6 +115,16 @@ type debugPlanRequest struct {
 	Action      string `json:"action"`
 	TargetID    string `json:"target_id"`
 	CurrentPath string `json:"current_path"`
+	Install     bool   `json:"install,omitempty"`
+}
+
+type debugPlanEvent struct {
+	Type     string                `json:"type"`
+	Progress *devtools.Progress    `json:"progress,omitempty"`
+	Plan     *debugLaunchPlan      `json:"plan,omitempty"`
+	Error    string                `json:"error,omitempty"`
+	Tools    []devtools.ToolStatus `json:"tools,omitempty"`
+	Warning  string                `json:"warning,omitempty"`
 }
 
 func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
@@ -127,21 +146,6 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "target_id and current_path are required", http.StatusBadRequest)
 		return
 	}
-	var adapterInfo []dap.AdapterInfo
-	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
-		values, err := manager.Adapters(r.Context())
-		adapterInfo = values
-		return err
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	if len(adapterInfo) == 0 {
-		http.Error(w, "no debug adapter detected in this workspace", http.StatusNotFound)
-		return
-	}
-
 	currentFile, ok := s.resolveExistingRegularFile(w, request.CurrentPath)
 	if !ok {
 		return
@@ -163,29 +167,140 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "debug target is no longer available", http.StatusBadRequest)
 		return
 	}
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	if s.ctx != nil {
+		stop := context.AfterFunc(s.ctx, cancel)
+		defer stop()
+	}
+	streaming := strings.Contains(r.Header.Get("Accept"), "application/x-ndjson")
+	encoder := json.NewEncoder(w)
+	controller := http.NewResponseController(w)
+	emit := func(event debugPlanEvent) {
+		if !streaming {
+			writeJSON(w, event)
+			return
+		}
+		if err := encoder.Encode(event); err != nil {
+			cancel()
+			return
+		}
+		if err := controller.Flush(); err != nil {
+			cancel()
+		}
+	}
+	fail := func(err error, status int) {
+		if streaming {
+			emit(debugPlanEvent{Type: "error", Error: err.Error()})
+		} else {
+			http.Error(w, err.Error(), status)
+		}
+	}
+	if streaming {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Accel-Buffering", "no")
+		if err := controller.Flush(); err != nil {
+			return
+		}
+	}
+	statuses, err := s.workspace.DebugToolStatus(ctx, selected.Language)
+	if err != nil {
+		fail(err, http.StatusServiceUnavailable)
+		return
+	}
+	missing := slices.ContainsFunc(statuses, func(status devtools.ToolStatus) bool { return !status.Installed })
+	if missing && !request.Install {
+		emit(debugPlanEvent{Type: "installation_required", Tools: statuses})
+		return
+	}
+	if streaming {
+		emit(debugPlanEvent{Type: "tools", Tools: statuses})
+	}
+	if slices.ContainsFunc(statuses, func(status devtools.ToolStatus) bool { return !status.Installed && !status.Installable }) {
+		fail(errors.New("managed debugger installation is disabled or unavailable; enable managed tool installation and retry"), http.StatusServiceUnavailable)
+		return
+	}
+	previousTool := ""
+	changed, installErr := s.workspace.UpdateDebugTools(ctx, selected.Language, request.Install, func(progress devtools.Progress) {
+		if streaming {
+			// A completed dependency should show its installed state while
+			// setup continues with the next tool (for example Java's host).
+			if progress.Phase == devtools.ProgressChecking && previousTool != "" {
+				if snapshot, err := s.workspace.DebugToolStatus(ctx, selected.Language); err == nil {
+					emit(debugPlanEvent{Type: "tools", Tools: snapshot})
+				}
+			}
+			previousTool = progress.Tool
+			emit(debugPlanEvent{Type: "progress", Progress: &progress})
+		}
+	})
+	if changed {
+		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	if errors.Is(installErr, dap.ErrActiveSession) || errors.Is(installErr, dap.ErrBusy) {
+		fail(installErr, http.StatusConflict)
+		return
+	}
+	statuses, err = s.workspace.DebugToolStatus(ctx, selected.Language)
+	if err != nil {
+		fail(err, http.StatusServiceUnavailable)
+		return
+	}
+	missing = slices.ContainsFunc(statuses, func(status devtools.ToolStatus) bool { return !status.Installed })
+	if missing && !request.Install {
+		emit(debugPlanEvent{Type: "installation_required", Tools: statuses})
+		return
+	}
+	if streaming {
+		emit(debugPlanEvent{Type: "tools", Tools: statuses})
+	}
+	if missing {
+		if installErr == nil {
+			installErr = errors.New("required debugger tools are unavailable; retry installation")
+		}
+		fail(installErr, http.StatusServiceUnavailable)
+		return
+	}
+	var adapterInfo []dap.AdapterInfo
+	err = s.workspace.WithDAPManager(func(manager *dap.Manager) error {
+		values, err := manager.Adapters(ctx)
+		adapterInfo = values
+		return err
+	})
+	if err != nil {
+		fail(errors.Join(err, installErr), http.StatusServiceUnavailable)
+		return
+	}
 	adapterInfo, err = selectTargetDebugAdapter(adapterInfo, *selected)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		fail(errors.Join(err, installErr), http.StatusBadRequest)
 		return
 	}
 	projectDir, err := selectTargetDebugProject(s.workspace.RootPath, adapterInfo[0], *selected)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		fail(err, http.StatusBadRequest)
 		return
 	}
-	profile, err := debugadapter.NewRegistry().Plan(adapterInfo[0].Language, debugadapter.Request{
-		Action: request.Action, WorkspaceDir: s.workspace.RootPath, ProjectDir: projectDir, Target: *selected,
+	profile, err := s.workspace.DebugRegistry().Plan(adapterInfo[0].Language, debugadapter.Request{
+		Action: request.Action, WorkspaceDir: s.workspace.RootPath, ProjectDir: projectDir,
+		Target: *selected,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		fail(err, http.StatusUnprocessableEntity)
 		return
 	}
 	plan := debugLaunchPlan{
-		Action: request.Action, Title: profile.Title, Summary: profile.Summary,
+		Action: request.Action, Title: profile.Title,
 		Adapter: adapterInfo[0].Name, ProjectDir: profile.ProjectDir, Request: profile.Request,
 		TerminalAvailable: profile.SupportsTerminal && adapterInfo[0].TerminalStrategy != dap.TerminalUnsupported && terminal.Supported(),
 		IO:                string(profile.IO), Configuration: profile.Configuration,
 		FunctionBreakpoints: profile.FunctionBreakpoints,
+		PreLaunch:           profile.PreLaunch,
 	}
 	for _, breakpoint := range profile.Breakpoints {
 		plan.Breakpoints = append(plan.Breakpoints, debugPlanBreakpoint{
@@ -193,10 +308,18 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	if err := s.validateDebugPlan(&plan, adapterInfo); err != nil {
-		http.Error(w, "invalid deterministic debug configuration: "+err.Error(), http.StatusUnprocessableEntity)
+		fail(fmt.Errorf("invalid deterministic debug configuration: %w", err), http.StatusUnprocessableEntity)
 		return
 	}
-	writeJSON(w, plan)
+	if streaming {
+		warning := ""
+		if installErr != nil {
+			warning = "Could not update debugger tools. Using the installed version.\n" + installErr.Error()
+		}
+		emit(debugPlanEvent{Type: "plan", Plan: &plan, Warning: warning})
+	} else {
+		writeJSON(w, plan)
+	}
 }
 
 func (s *Server) handleDebugStart(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +346,7 @@ func (s *Server) handleDebugStart(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		code := http.StatusBadRequest
-		if errors.Is(err, dap.ErrActiveSession) {
+		if errors.Is(err, dap.ErrActiveSession) || errors.Is(err, dap.ErrBusy) {
 			code = http.StatusConflict
 		}
 		http.Error(w, err.Error(), code)
@@ -279,9 +402,20 @@ func (s *Server) handleDebugState(w http.ResponseWriter, r *http.Request) {
 		}
 		requestCtx, cancel := context.WithTimeout(r.Context(), debugStateRequestBudget)
 		defer cancel()
-		frames, _, err := session.StackTrace(requestCtx, 0, 0, 1)
-		if err != nil {
-			response.FrameError = err.Error()
+		threadID := 0
+		if status.Stop != nil {
+			threadID = status.Stop.ThreadID
+		}
+		frames, _, frameErr := session.StackTrace(requestCtx, threadID, 0, 1)
+		current := session.Status()
+		if debugStatusChanged(status, current) {
+			// A resume, another stop, or termination can overtake stackTrace.
+			// Never pair a frame from that newer state with the stale stop epoch.
+			response.Session = &current
+			return nil
+		}
+		if frameErr != nil {
+			response.FrameError = frameErr.Error()
 			return nil
 		}
 		if len(frames) > 0 {
@@ -321,9 +455,14 @@ func (s *Server) handleDebugInspection(w http.ResponseWriter, r *http.Request) {
 
 		requestCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
-		threads, err := session.Threads(requestCtx)
-		if err != nil {
-			response.Error = err.Error()
+		threads, threadsErr := session.Threads(requestCtx)
+		current := session.Status()
+		if debugStatusChanged(status, current) {
+			response.Session = &current
+			return nil
+		}
+		if threadsErr != nil {
+			response.Error = threadsErr.Error()
 			return nil
 		}
 		response.Threads = threads
@@ -331,9 +470,15 @@ func (s *Server) handleDebugInspection(w http.ResponseWriter, r *http.Request) {
 		if status.Stop != nil {
 			threadID = status.Stop.ThreadID
 		}
-		frames, _, err := session.StackTrace(requestCtx, threadID, 0, 100)
-		if err != nil {
-			response.Error = err.Error()
+		frames, _, framesErr := session.StackTrace(requestCtx, threadID, 0, 100)
+		current = session.Status()
+		if debugStatusChanged(status, current) {
+			response.Session = &current
+			response.Threads = []dap.Thread{}
+			return nil
+		}
+		if framesErr != nil {
+			response.Error = framesErr.Error()
 			return nil
 		}
 		for index := range frames {
@@ -386,19 +531,15 @@ func (s *Server) handleDebugBreakpoints(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleDebugControl(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Operation     string `json:"operation"`
-		SessionID     string `json:"session_id,omitempty"`
-		ThreadID      int    `json:"thread_id,omitempty"`
-		WaitTimeoutMS int    `json:"wait_timeout_ms,omitempty"`
+		Operation string `json:"operation"`
+		SessionID string `json:"session_id,omitempty"`
+		ThreadID  int    `json:"thread_id,omitempty"`
 	}
 	if err := decodeDebugJSON(w, r, &body); err != nil {
 		return
 	}
 	body.Operation = strings.TrimSpace(body.Operation)
-	if body.WaitTimeoutMS < 0 || time.Duration(body.WaitTimeoutMS)*time.Millisecond > debugControlMaxWait {
-		http.Error(w, "wait_timeout_ms is out of range", http.StatusBadRequest)
-		return
-	}
+	waitTimeout := debugControlWaitFor(body.Operation)
 	var status *dap.Status
 	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
 		session, err := manager.Session(strings.TrimSpace(body.SessionID))
@@ -429,8 +570,8 @@ func (s *Server) handleDebugControl(w http.ResponseWriter, r *http.Request) {
 		if err != nil || body.Operation == "stop" {
 			return err
 		}
-		if body.WaitTimeoutMS > 0 {
-			waitCtx, cancel := context.WithTimeout(r.Context(), time.Duration(body.WaitTimeoutMS)*time.Millisecond)
+		if waitTimeout > 0 {
+			waitCtx, cancel := context.WithTimeout(r.Context(), waitTimeout)
 			_, _ = session.WaitForStop(waitCtx, before)
 			cancel()
 		}
@@ -445,12 +586,20 @@ func (s *Server) handleDebugControl(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"session": status})
 }
 
+func debugControlWaitFor(operation string) time.Duration {
+	if operation == "pause" {
+		return debugPauseWait
+	}
+	return debugControlWait
+}
+
 func (s *Server) handleDebugEvaluate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		SessionID  string `json:"session_id,omitempty"`
-		Expression string `json:"expression"`
-		FrameID    int    `json:"frame_id,omitempty"`
-		Context    string `json:"context,omitempty"`
+		SessionID    string `json:"session_id,omitempty"`
+		StateVersion uint64 `json:"state_version,omitempty"`
+		Expression   string `json:"expression"`
+		FrameID      int    `json:"frame_id,omitempty"`
+		Context      string `json:"context,omitempty"`
 	}
 	if err := decodeDebugJSON(w, r, &body); err != nil {
 		return
@@ -462,17 +611,33 @@ func (s *Server) handleDebugEvaluate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid evaluate context", http.StatusBadRequest)
 		return
 	}
+	if body.FrameID > 0 && body.StateVersion == 0 {
+		http.Error(w, "state_version must be positive when frame_id is set", http.StatusBadRequest)
+		return
+	}
+	requestCtx, cancel := context.WithTimeout(r.Context(), debugInspectionBudget)
+	defer cancel()
 	var evaluation dap.Evaluation
 	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
 		session, err := manager.Session(strings.TrimSpace(body.SessionID))
 		if err != nil {
 			return err
 		}
-		evaluation, err = session.EvaluateContext(r.Context(), body.Expression, body.FrameID, body.Context)
+		var before dap.Status
+		if body.StateVersion > 0 {
+			before, err = debugStopAtVersion(session, body.StateVersion)
+			if err != nil {
+				return err
+			}
+		}
+		evaluation, err = session.EvaluateContext(requestCtx, body.Expression, body.FrameID, body.Context)
+		if body.StateVersion > 0 && debugStatusChanged(before, session.Status()) {
+			return errDebugStateChanged
+		}
 		return err
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeDebugInspectionError(w, err)
 		return
 	}
 	writeJSON(w, evaluation)
@@ -480,8 +645,9 @@ func (s *Server) handleDebugEvaluate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDebugScopes(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		SessionID string `json:"session_id,omitempty"`
-		FrameID   int    `json:"frame_id"`
+		SessionID    string `json:"session_id,omitempty"`
+		StateVersion uint64 `json:"state_version"`
+		FrameID      int    `json:"frame_id"`
 	}
 	if err := decodeDebugJSON(w, r, &body); err != nil {
 		return
@@ -490,20 +656,27 @@ func (s *Server) handleDebugScopes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "frame_id must be positive", http.StatusBadRequest)
 		return
 	}
+	if body.StateVersion == 0 {
+		http.Error(w, "state_version must be positive", http.StatusBadRequest)
+		return
+	}
+	requestCtx, cancel := context.WithTimeout(r.Context(), debugInspectionBudget)
+	defer cancel()
 	var scopes []debugScopeInspection
 	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
 		session, err := manager.Session(strings.TrimSpace(body.SessionID))
 		if err != nil {
 			return err
 		}
-		if session.Status().State != dap.StateStopped {
-			return errors.New("debug session must be stopped to inspect scopes")
+		before, err := debugStopAtVersion(session, body.StateVersion)
+		if err != nil {
+			return err
 		}
-		scopes = inspectDebugScopes(r.Context(), session, body.FrameID)
-		return nil
+		scopes, err = inspectDebugScopes(requestCtx, session, body.FrameID, before)
+		return err
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeDebugInspectionError(w, err)
 		return
 	}
 	if scopes == nil {
@@ -512,16 +685,25 @@ func (s *Server) handleDebugScopes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"scopes": scopes})
 }
 
-func inspectDebugScopes(ctx context.Context, session *dap.Session, frameID int) []debugScopeInspection {
+func inspectDebugScopes(ctx context.Context, session *dap.Session, frameID int, before dap.Status) ([]debugScopeInspection, error) {
 	scopes, err := session.Scopes(ctx, frameID)
+	if debugStatusChanged(before, session.Status()) {
+		return nil, errDebugStateChanged
+	}
 	if err != nil {
-		return []debugScopeInspection{{Error: err.Error()}}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return []debugScopeInspection{{Error: err.Error()}}, nil
 	}
 	result := make([]debugScopeInspection, 0, len(scopes))
 	for _, scope := range scopes {
 		inspection := debugScopeInspection{Scope: scope, Variables: []dap.Variable{}}
 		if scope.VariablesReference > 0 {
 			variables, err := session.Variables(ctx, scope.VariablesReference, 0, 200)
+			if debugStatusChanged(before, session.Status()) {
+				return nil, errDebugStateChanged
+			}
 			if err != nil {
 				inspection.Error = err.Error()
 			} else {
@@ -530,15 +712,16 @@ func inspectDebugScopes(ctx context.Context, session *dap.Session, frameID int) 
 		}
 		result = append(result, inspection)
 	}
-	return result
+	return result, nil
 }
 
 func (s *Server) handleDebugVariables(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		SessionID string `json:"session_id,omitempty"`
-		Reference int    `json:"variables_reference"`
-		Start     int    `json:"start,omitempty"`
-		Count     int    `json:"count,omitempty"`
+		SessionID    string `json:"session_id,omitempty"`
+		StateVersion uint64 `json:"state_version"`
+		Reference    int    `json:"variables_reference"`
+		Start        int    `json:"start,omitempty"`
+		Count        int    `json:"count,omitempty"`
 	}
 	if err := decodeDebugJSON(w, r, &body); err != nil {
 		return
@@ -547,23 +730,33 @@ func (s *Server) handleDebugVariables(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid variables range", http.StatusBadRequest)
 		return
 	}
+	if body.StateVersion == 0 {
+		http.Error(w, "state_version must be positive", http.StatusBadRequest)
+		return
+	}
 	if body.Count == 0 {
 		body.Count = 200
 	}
+	requestCtx, cancel := context.WithTimeout(r.Context(), debugInspectionBudget)
+	defer cancel()
 	var variables []dap.Variable
 	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
 		session, err := manager.Session(strings.TrimSpace(body.SessionID))
 		if err != nil {
 			return err
 		}
-		if session.Status().State != dap.StateStopped {
-			return errors.New("debug session must be stopped to inspect variables")
+		before, err := debugStopAtVersion(session, body.StateVersion)
+		if err != nil {
+			return err
 		}
-		variables, err = session.Variables(r.Context(), body.Reference, body.Start, body.Count)
+		variables, err = session.Variables(requestCtx, body.Reference, body.Start, body.Count)
+		if debugStatusChanged(before, session.Status()) {
+			return errDebugStateChanged
+		}
 		return err
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeDebugInspectionError(w, err)
 		return
 	}
 	if variables == nil {
@@ -572,18 +765,30 @@ func (s *Server) handleDebugVariables(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"variables": variables})
 }
 
+func debugStopAtVersion(session *dap.Session, version uint64) (dap.Status, error) {
+	status := session.Status()
+	if status.State != dap.StateStopped {
+		return dap.Status{}, errors.New("debug session must be stopped to inspect it")
+	}
+	if status.StateVersion != version {
+		return dap.Status{}, errDebugStateChanged
+	}
+	return status, nil
+}
+
+func writeDebugInspectionError(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	switch {
+	case errors.Is(err, errDebugStateChanged):
+		status = http.StatusConflict
+	case errors.Is(err, context.DeadlineExceeded):
+		status = http.StatusGatewayTimeout
+	}
+	http.Error(w, err.Error(), status)
+}
+
 func decodeDebugJSON(w http.ResponseWriter, r *http.Request, target any) error {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, debugRequestLimit))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		http.Error(w, "invalid body: expected a single JSON value", http.StatusBadRequest)
-		return errors.New("request body contains more than one JSON value")
-	}
-	return nil
+	return decodeJSONRequest(w, r, target, debugRequestLimit)
 }
 
 func (s *Server) detectDebugTargets(currentFile string) ([]debugadapter.Target, error) {
@@ -591,7 +796,7 @@ func (s *Server) detectDebugTargets(currentFile string) ([]debugadapter.Target, 
 	if err != nil {
 		return nil, err
 	}
-	return debugadapter.NewRegistry().DetectFile(filepath.ToSlash(currentFile), source)
+	return s.workspace.DebugRegistry().DetectFile(filepath.ToSlash(currentFile), source)
 }
 
 func selectTargetDebugAdapter(values []dap.AdapterInfo, target debugadapter.Target) ([]dap.AdapterInfo, error) {
@@ -664,12 +869,22 @@ func normalizeDebugFrame(root string, frame *dap.StackFrame) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(root, path)
 	}
-	rel, err := filepath.Rel(root, filepath.Clean(path))
+	resolvedRoot, rootErr := pathutil.Resolve(filepath.Clean(root))
+	resolvedPath, pathErr := pathutil.Resolve(filepath.Clean(path))
+	if rootErr != nil || pathErr != nil {
+		frame.Source.Path = ""
+		return
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolvedPath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		frame.Source.Path = ""
 		return
 	}
 	frame.Source.Path = filepath.ToSlash(rel)
+}
+
+func debugStatusChanged(before, after dap.Status) bool {
+	return before.SessionID != after.SessionID || before.StateVersion != after.StateVersion
 }
 
 func (s *Server) debugStartOptions(plan debugLaunchPlan) dap.StartOptions {
@@ -679,6 +894,7 @@ func (s *Server) debugStartOptions(plan debugLaunchPlan) dap.StartOptions {
 		Request:       plan.Request,
 		IO:            dap.IOMode(plan.IO),
 		Configuration: cloneJSONMap(plan.Configuration),
+		PreLaunch:     cloneDebugProcessLaunch(plan.PreLaunch),
 		Breakpoints:   make(map[string][]dap.SourceBreakpoint),
 	}
 	for _, breakpoint := range plan.Breakpoints {
@@ -694,6 +910,15 @@ func (s *Server) debugStartOptions(plan debugLaunchPlan) dap.StartOptions {
 		}
 	}
 	return options
+}
+
+func cloneDebugProcessLaunch(value *dap.ProcessLaunch) *dap.ProcessLaunch {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	clone.Args = slices.Clone(value.Args)
+	return &clone
 }
 
 func cloneJSONMap(value map[string]any) map[string]any {
@@ -718,10 +943,25 @@ func (s *Server) validateDebugPlan(plan *debugLaunchPlan, adapters []dap.Adapter
 	var selectedAdapter *dap.AdapterInfo
 	for index := range adapters {
 		adapter := &adapters[index]
-		if strings.EqualFold(adapter.Name, plan.Adapter) || strings.EqualFold(adapter.Language, plan.Adapter) {
+		if strings.EqualFold(adapter.Name, plan.Adapter) {
 			plan.Adapter = adapter.Name
 			selectedAdapter = adapter
 			break
+		}
+	}
+	if selectedAdapter == nil {
+		var matching []int
+		for index := range adapters {
+			if strings.EqualFold(adapters[index].Language, plan.Adapter) {
+				matching = append(matching, index)
+			}
+		}
+		if len(matching) > 1 {
+			return fmt.Errorf("multiple %s debug adapters are available; choose one by name", plan.Adapter)
+		}
+		if len(matching) == 1 {
+			selectedAdapter = &adapters[matching[0]]
+			plan.Adapter = selectedAdapter.Name
 		}
 	}
 	if selectedAdapter == nil {
@@ -743,6 +983,24 @@ func (s *Server) validateDebugPlan(plan *debugLaunchPlan, adapters []dap.Adapter
 	}
 	if plan.Configuration == nil {
 		plan.Configuration = map[string]any{}
+	}
+	if plan.PreLaunch != nil {
+		plan.PreLaunch.Title = strings.TrimSpace(plan.PreLaunch.Title)
+		plan.PreLaunch.Command = strings.TrimSpace(plan.PreLaunch.Command)
+		if plan.PreLaunch.Title == "" || plan.PreLaunch.Command == "" || !filepath.IsAbs(plan.PreLaunch.Command) {
+			return errors.New("prelaunch process requires a title and absolute command")
+		}
+		info, err := os.Stat(plan.PreLaunch.Command)
+		if err != nil || info.IsDir() {
+			return fmt.Errorf("prelaunch command %q is unavailable", plan.PreLaunch.Command)
+		}
+		if plan.PreLaunch.ReadyURL != "" {
+			readyURL, err := url.Parse(plan.PreLaunch.ReadyURL)
+			if err != nil || (readyURL.Scheme != "http" && readyURL.Scheme != "https") || !loopbackDebugHost(readyURL.Hostname()) {
+				return errors.New("prelaunch ready_url must be an HTTP URL on this machine")
+			}
+			plan.PreLaunch.ReadyURL = readyURL.String()
+		}
 	}
 	projectPath, err := dap.ResolveWorkspaceDirectory(s.workspace.RootPath, plan.ProjectDir)
 	if err != nil {
@@ -776,7 +1034,6 @@ func (s *Server) validateDebugPlan(plan *debugLaunchPlan, adapters []dap.Adapter
 		return err
 	}
 	plan.Title = strings.TrimSpace(plan.Title)
-	plan.Summary = strings.TrimSpace(plan.Summary)
 	if plan.Title == "" {
 		plan.Title = "Debug session"
 	}
@@ -787,4 +1044,12 @@ func (s *Server) validateDebugPlan(plan *debugLaunchPlan, adapters []dap.Adapter
 		plan.FunctionBreakpoints = []string{}
 	}
 	return nil
+}
+
+func loopbackDebugHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

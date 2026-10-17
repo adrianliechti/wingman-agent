@@ -2,9 +2,9 @@
 import {
 	createContext,
 	type ReactNode,
-	useCallback,
 	useContext,
 	useEffect,
+	useEffectEvent,
 	useId,
 	useRef,
 	useState,
@@ -29,17 +29,17 @@ const ToastContext = createContext<((toast: ToastInput) => void) | null>(null);
 export function ToastProvider({ children }: { children: ReactNode }) {
 	const [toasts, setToasts] = useState<ToastItem[]>([]);
 	const nextId = useRef(0);
-	const showToast = useCallback((toast: ToastInput) => {
+	const showToast = (toast: ToastInput) => {
 		const id = ++nextId.current;
 		setToasts((items) => [...items.slice(-3), { ...toast, id }]);
 		window.setTimeout(
 			() => setToasts((items) => items.filter((item) => item.id !== id)),
 			toast.tone === "error" ? 7000 : 4000,
 		);
-	}, []);
+	};
 
 	return (
-		<ToastContext.Provider value={showToast}>
+		<ToastContext value={showToast}>
 			{children}
 			{createPortal(
 				<div
@@ -61,7 +61,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 				</div>,
 				document.body,
 			)}
-		</ToastContext.Provider>
+		</ToastContext>
 	);
 }
 
@@ -136,6 +136,7 @@ export function Dialog({
 	const descriptionId = useId();
 	const panelRef = useRef<HTMLDivElement>(null);
 	const returnFocusRef = useRef<HTMLElement | null>(null);
+	const handleClose = useEffectEvent(onClose);
 
 	useEffect(() => {
 		if (!open) return;
@@ -149,9 +150,10 @@ export function Dialog({
 			target?.focus();
 		});
 		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.isComposing) return;
 			if (event.key === "Escape") {
 				event.preventDefault();
-				onClose();
+				handleClose();
 				return;
 			}
 			if (event.key !== "Tab") return;
@@ -173,7 +175,7 @@ export function Dialog({
 			document.removeEventListener("keydown", onKeyDown);
 			returnFocusRef.current?.focus();
 		};
-	}, [initialFocus, onClose, open]);
+	}, [initialFocus, open]);
 
 	if (!open) return null;
 	return createPortal(

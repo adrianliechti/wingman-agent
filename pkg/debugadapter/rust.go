@@ -14,6 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
+	"github.com/adrianliechti/wingman-agent/internal/process"
+	"github.com/adrianliechti/wingman-agent/internal/tooling"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 )
 
@@ -43,29 +46,11 @@ type rustAdapter struct {
 func (rustAdapter) Language() string { return "Rust" }
 
 func (rustAdapter) Descriptor() dap.AdapterDescriptor {
-	return dap.AdapterDescriptor{
-		Name:             "codelldb",
-		Language:         "Rust",
-		AdapterID:        "lldb",
-		Command:          "codelldb",
-		Transport:        dap.TransportStdio,
-		TerminalStrategy: dap.TerminalRunInTerminal,
-		Markers:          []string{"Cargo.toml", "Cargo.lock"},
-		SourceExtensions: []string{".rs"},
-		Defaults: map[string]any{
-			"type":            "lldb",
-			"sourceLanguages": []string{"rust"},
-		},
-		ConfigurationPaths: []dap.ConfigurationPath{
-			{Key: "program", AllowMissing: true},
-			{Key: "cwd", Directory: true},
-		},
-		IOConfigKey: "terminal",
-		IOValues: map[dap.IOMode]string{
-			dap.IOOutput:   "console",
-			dap.IOTerminal: "integrated",
-		},
-	}
+	descriptor := lldbDescriptor("codelldb", "Rust")
+	descriptor.Markers = []string{"Cargo.toml", "Cargo.lock"}
+	descriptor.SourceExtensions = []string{".rs"}
+	descriptor.Defaults["sourceLanguages"] = []string{"rust"}
+	return descriptor
 }
 
 func (rustAdapter) Matches(path string) bool {
@@ -134,8 +119,18 @@ func (adapter rustAdapter) Plan(request Request) (Plan, error) {
 		buildTarget = "--example " + target.Name
 	}
 	summary := fmt.Sprintf("%s Rust %s %s.", actionLabel(request.Action), targetLabel, target.Name)
+	var preLaunch *dap.ProcessLaunch
 	if !exists {
-		summary += fmt.Sprintf(" Build it with cargo build %s first; the expected executable is %s.", buildTarget, filepath.ToSlash(program))
+		if cargo := resolveCargoExecutable(); cargo != "" {
+			buildArgs := []string{"build", "--bin", target.Name}
+			if kind == "example" {
+				buildArgs = []string{"build", "--example", target.Name}
+			}
+			preLaunch = &dap.ProcessLaunch{Title: "cargo build", Command: cargo, Args: buildArgs, WaitForExit: true}
+			summary += fmt.Sprintf(" The %s is built with cargo build %s first.", targetLabel, buildTarget)
+		} else {
+			summary += fmt.Sprintf(" Build it with cargo build %s first; the expected executable is %s.", buildTarget, filepath.ToSlash(program))
+		}
 	}
 	plan := Plan{
 		Title:            actionLabel(request.Action) + " " + target.Name,
@@ -145,6 +140,7 @@ func (adapter rustAdapter) Plan(request Request) (Plan, error) {
 		IO:               dap.IOOutput,
 		SupportsTerminal: true,
 		Configuration:    configuration,
+		PreLaunch:        preLaunch,
 	}
 	if request.Action == "run" {
 		configuration["noDebug"] = true
@@ -165,7 +161,10 @@ func loadCargoMetadata(projectDir string) (cargoMetadata, error) {
 	command := exec.CommandContext(ctx, cargo,
 		"metadata", "--no-deps", "--format-version=1", "--manifest-path", manifest,
 	)
+	process.Hide(command)
 	command.Dir = projectDir
+	command.Env = tooling.Environment(cargo, os.Environ())
+	command.WaitDelay = 3 * time.Second
 	output, err := command.Output()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -192,26 +191,11 @@ func loadCargoMetadata(projectDir string) (cargoMetadata, error) {
 
 func resolveCargoExecutable() string {
 	if configured := strings.TrimSpace(os.Getenv("CARGO")); configured != "" {
-		if path, err := exec.LookPath(configured); err == nil {
+		if path, err := tooling.LookPath(configured); err == nil {
 			return path
 		}
 	}
-	if path, err := exec.LookPath("cargo"); err == nil {
-		return path
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	name := "cargo"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	path := filepath.Join(home, ".cargo", "bin", name)
-	if info, err := os.Stat(path); err == nil && !info.IsDir() && (runtime.GOOS == "windows" || info.Mode()&0o111 != 0) {
-		return path
-	}
-	return ""
+	return tooling.Resolve("cargo")
 }
 
 func rustCargoTarget(request Request, metadata cargoMetadata) (cargoMetadataTarget, string, error) {
@@ -308,30 +292,5 @@ func rustProjectDir(request Request) (string, error) {
 // a possibly unbuilt output path so comparisons remain correct through
 // symlinked temporary/workspace directories as well.
 func canonicalCargoPath(value string) (string, error) {
-	path, err := filepath.Abs(filepath.Clean(value))
-	if err != nil {
-		return "", err
-	}
-	probe := path
-	var missing []string
-	for {
-		if _, err := os.Lstat(probe); err == nil {
-			resolved, err := filepath.EvalSymlinks(probe)
-			if err != nil {
-				return "", err
-			}
-			for index := len(missing) - 1; index >= 0; index-- {
-				resolved = filepath.Join(resolved, missing[index])
-			}
-			return filepath.Clean(resolved), nil
-		} else if !os.IsNotExist(err) {
-			return "", err
-		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			return path, nil
-		}
-		missing = append(missing, filepath.Base(probe))
-		probe = parent
-	}
+	return pathutil.ResolveExistingPrefix(value)
 }

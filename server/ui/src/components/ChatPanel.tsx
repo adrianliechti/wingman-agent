@@ -1,7 +1,7 @@
+import { VirtualTurns } from "./chat/VirtualTurns";
 import {
 	ArrowUp,
 	Loader2,
-	LoaderCircle,
 	ListPlus,
 	Paperclip,
 	Plus,
@@ -9,13 +9,21 @@ import {
 	X,
 } from "lucide-react";
 import {
-	useCallback,
 	useEffect,
+	useEffectEvent,
 	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
+	useSyncExternalStore,
+	useCallback,
 } from "react";
+import { ComposerDraft } from "../state/composerDraft.ts";
+import { isDraft, splitSessionKey } from "../state/sessionStore.ts";
+import { formatTokens } from "../utils/usage";
+import { useSessionSettings } from "../state/workspaceContext.ts";
+import { useToast } from "./ui/Feedback.tsx";
+import { atTextareaEdge } from "../utils/textareaNavigation";
 import { useColorScheme } from "../hooks/useColorScheme";
 import { type Skill, useSkills } from "../hooks/useSkills";
 import type {
@@ -28,21 +36,28 @@ import type { Phase, TurnInputIntent, TurnInputState } from "../types/protocol";
 import { ToolProgressContext } from "./chat/progress";
 import { type PendingImage, processImage } from "./chat/images";
 import { PromptBar } from "./chat/PromptBar";
+import { ScrollSnapshot } from "./chat/ScrollSnapshot";
 import { TurnView } from "./chat/TurnView";
 import { buildTurns, findEntryElement, type Turn } from "./chat/turns";
 import { FilePicker } from "./FilePicker";
+import { AgentPicker } from "./AgentPicker";
 import { ModelPicker } from "./ModelPicker";
-import { ModePicker, type ModeOption } from "./ModePicker";
+import { ModePicker } from "./ModePicker";
 import { SkillPicker } from "./SkillPicker";
 import { TurnQueue } from "./TurnQueue";
+import { IncompleteTurnNotice } from "./chat/IncompleteTurnNotice";
 
-interface Props {
+export interface ChatPanelProps {
+	draft: ComposerDraft;
+	draftId: string;
 	sessionId?: string;
+	onSelectBackend: (id: string) => void;
+	placeholder?: string;
 	entries: ChatEntry[];
 	phase: Phase;
-	modes: ModeOption[];
-	mode: string;
-	onSelectMode: (next: string) => void;
+	retry?: { attempt: number; reason: string; delayMillis: number };
+	compaction?: { tokensBefore: number; tokensAfter: number };
+	available?: boolean;
 	onSend: (
 		text: string,
 		files?: string[],
@@ -50,6 +65,7 @@ interface Props {
 		intent?: TurnInputIntent,
 	) => boolean | Promise<boolean>;
 	onCancel: (clearQueue?: boolean) => void;
+	onCompact?: (focus: string) => boolean | Promise<boolean>;
 	pendingInputs?: PendingTurnInput[];
 	queuePaused?: boolean;
 	canSteer?: boolean;
@@ -59,20 +75,29 @@ interface Props {
 		text: string,
 		files?: string[],
 		images?: string[],
-	) => boolean;
+	) => boolean | Promise<boolean>;
 	onResumeQueue?: () => void;
 	onClearQueue?: () => void;
 	loading?: boolean;
 	loadError?: string | null;
 	error?: string | null;
+	incomplete?: boolean;
 	onDismissError?: () => void;
-	prompt?: PendingPrompt | null;
-	onPromptReply?: (reply: PromptReply) => void;
-	seed?: { text: string; nonce: number } | null;
+	prompts?: PendingPrompt[];
+	onPromptReply?: (id: string, reply: PromptReply) => void;
+	onOpenFile?: (path: string, line?: number) => void;
+	seed?: {
+		text: string;
+		files?: string[];
+		append?: boolean;
+		nonce: number;
+	} | null;
+	onSeedConsumed?: (nonce: number) => void;
 	toolProgress?: Record<string, string>;
 }
 
 const PIN_TOP_GAP = 16;
+const FOLLOW_SLACK = 32;
 
 // slashTokenAt returns the /command token the caret sits in: the index of its
 // leading slash and the typed query behind it. A token starts at the beginning
@@ -96,21 +121,36 @@ function slashTokenAt(
 	return null;
 }
 
+// compactFocus returns the focus of a /compact command, or null for other input.
+function compactFocus(text: string): string | null {
+	const match = /^\/compact(?:\s+([\s\S]*))?$/.exec(text);
+	return match ? (match[1] ?? "").trim() : null;
+}
+
 function wordEndAt(text: string, caret: number): number {
 	let end = Math.min(caret, text.length);
-	while (end < text.length && !" \t\n".includes(text[end])) end++;
+	while (end < text.length) {
+		const code = text.charCodeAt(end);
+		if (code === 9 || code === 10 || code === 32) break;
+		end++;
+	}
 	return end;
 }
 
 export function ChatPanel({
+	draft,
+	draftId,
 	sessionId,
+	onSelectBackend,
+	placeholder = "Message Wingman…",
 	entries,
 	phase,
-	modes,
-	mode,
-	onSelectMode,
+	retry,
+	compaction,
+	available = true,
 	onSend,
 	onCancel,
+	onCompact,
 	pendingInputs = [],
 	queuePaused = false,
 	canSteer = false,
@@ -121,65 +161,88 @@ export function ChatPanel({
 	loading,
 	loadError,
 	error,
+	incomplete,
 	onDismissError,
-	prompt,
+	prompts = [],
 	onPromptReply,
+	onOpenFile,
 	seed,
+	onSeedConsumed,
 	toolProgress,
-}: Props) {
+}: ChatPanelProps) {
 	const scheme = useColorScheme();
-	const [input, setInput] = useState("");
-	const [caret, setCaret] = useState(0);
-	const [skillActive, setSkillActive] = useState(0);
+	const toast = useToast();
+	const { settings, setSettings, retryModels } = useSessionSettings(
+		sessionId,
+		draftId,
+	);
+	const {
+		text: input,
+		files,
+		images,
+		editingQueueId,
+		submitting,
+		error: sendError,
+	} = useSyncExternalStore(draft.subscribe, draft.getSnapshot);
+	const [caret, setCaret] = useState(input.length);
 	const [dismissedToken, setDismissedToken] = useState<string | null>(null);
-	const [files, setFiles] = useState<string[]>([]);
-	const [images, setImages] = useState<PendingImage[]>([]);
 	const [showPicker, setShowPicker] = useState(false);
-	const [submitting, setSubmitting] = useState(false);
-	const [sendError, setSendError] = useState<string | null>(null);
 	const inputError = sendError ?? error;
-	const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
 	const queueSettling =
 		pendingInputs.length > 0 &&
 		pendingInputs.every((item) => item.state === "sending");
 	const [revealSettling, setRevealSettling] = useState(false);
+	if (!queueSettling && revealSettling) setRevealSettling(false);
 	useEffect(() => {
-		if (!queueSettling) {
-			setRevealSettling(false);
-			return;
-		}
+		if (!queueSettling) return;
 		const timer = setTimeout(() => setRevealSettling(true), 400);
 		return () => clearTimeout(timer);
 	}, [queueSettling]);
 	const showQueue =
 		pendingInputs.length > 0 && (!queueSettling || revealSettling);
+	const historyPadding =
+		entries.length === 0 ? "" : showQueue ? "pb-56" : "pb-24";
 	const containerRef = useRef<HTMLDivElement>(null);
 	const contentRef = useRef<HTMLDivElement>(null);
 	const spacerRef = useRef<HTMLDivElement>(null);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const imageInputRef = useRef<HTMLInputElement>(null);
-	const composerRef = useRef<HTMLDivElement>(null);
-	const filePickerButtonRef = useRef<HTMLButtonElement>(null);
-	const turns = useMemo(() => buildTurns(entries), [entries]);
+	const [composer, setComposer] = useState<HTMLDivElement | null>(null);
+	const [filePickerButton, setFilePickerButton] =
+		useState<HTMLButtonElement | null>(null);
+	const turns = buildTurns(entries);
 
 	const submitPendingRef = useRef(false);
 	const historyIdxRef = useRef<number | null>(null);
 	const historyDraftRef = useRef("");
 	const pinRef = useRef<{ id: string; top: number } | null>(null);
 	const userScrolledRef = useRef(false);
+	// Keep the newest output in view until the user scrolls away from it.
+	const followRef = useRef(true);
+	const lastScrollTopRef = useRef(0);
 	const programmaticUntilRef = useRef(0);
 	const restoredRef = useRef(false);
 
 	const writeScrollTop = useCallback((el: HTMLElement, top: number) => {
 		programmaticUntilRef.current = performance.now() + 100;
 		el.scrollTop = top;
+		lastScrollTopRef.current = el.scrollTop;
 	}, []);
+
+	// The spacer only reserves room for pinning, so "latest" ends above it.
+	const latestScrollTop = (container: HTMLElement) =>
+		Math.max(
+			0,
+			container.scrollHeight -
+				(spacerRef.current?.offsetHeight ?? 0) -
+				container.clientHeight,
+		);
 
 	const pendingAnchorRef = useRef<{ id: string; viewportTop: number } | null>(
 		null,
 	);
 
-	const captureAnchorForTurns = useCallback((sourceTurns: Turn[]) => {
+	const captureAnchorForTurns = (sourceTurns: Turn[]) => {
 		const c = containerRef.current;
 		const content = contentRef.current;
 		if (!c || !content) return;
@@ -210,9 +273,9 @@ export function ChatPanel({
 			above = { id, viewportTop };
 		}
 		pendingAnchorRef.current = visible ?? below ?? above;
-	}, []);
+	};
 
-	const applyPendingAnchor = useCallback(() => {
+	const applyPendingAnchor = () => {
 		const c = containerRef.current;
 		const content = contentRef.current;
 		if (!c || !content) return;
@@ -227,47 +290,63 @@ export function ChatPanel({
 		if (Math.abs(delta) > 0.5) {
 			writeScrollTop(c, c.scrollTop + delta);
 		}
-	}, [writeScrollTop]);
+	};
 
 	const isActive = phase !== "idle";
+	const [awayFromLatest, setAwayFromLatest] = useState(false);
+	const latestOutput = entries.at(-1);
+	const [seenOutput, setSeenOutput] = useState(latestOutput);
+	const unreadOutput = seenOutput !== latestOutput;
 
 	useEffect(() => {
-		if (!isActive) textareaRef.current?.focus();
-	}, [isActive]);
+		if (
+			document.activeElement === document.body &&
+			!matchMedia("(pointer: coarse)").matches
+		)
+			textareaRef.current?.focus();
+	}, []);
 
 	// setDraft replaces the composer text and keeps the tracked caret in sync;
 	// every programmatic text change must go through it (or set both).
-	const setDraft = useCallback((text: string) => {
-		setInput(text);
-		setCaret(text.length);
-	}, []);
+	const setDraft = useCallback(
+		(text: string) => {
+			draft.update({ text });
+			setCaret(text.length);
+		},
+		[draft],
+	);
 
-	const [prevSeed, setPrevSeed] = useState(seed);
-	if (seed && seed !== prevSeed) {
-		setPrevSeed(seed);
-		setDraft(seed.text);
-	}
-
+	// Start empty so a seed delivered while switching from an editor is applied
+	// by the newly mounted chat panel, not mistaken for one it already consumed.
+	const consumedSeed = useRef<number | undefined>(undefined);
 	useEffect(() => {
-		if (!seed) return;
+		if (!seed || consumedSeed.current === seed.nonce) return;
+		consumedSeed.current = seed.nonce;
+		const current = draft.getSnapshot();
+		setDraft(
+			seed.append && current.text.trim()
+				? `${current.text}\n\n${seed.text}`
+				: seed.text,
+		);
+		if (seed.files?.length)
+			draft.update({ files: [...new Set([...current.files, ...seed.files])] });
 		historyIdxRef.current = null;
 		textareaRef.current?.focus();
-	}, [seed]);
-
-	const prevPhaseRef = useRef(phase);
-	/* This is intentionally a pre-commit DOM snapshot for the phase-driven
-	   auto-collapse. Function components do not have a getSnapshotBeforeUpdate
-	   hook, and a layout effect would run after the working entries have
-	   already collapsed. */
-	if (prevPhaseRef.current !== "idle" && phase === "idle") {
-		if (userScrolledRef.current) captureAnchorForTurns(turns);
-	}
-	prevPhaseRef.current = phase;
+		onSeedConsumed?.(seed.nonce);
+	}, [draft, onSeedConsumed, seed, setDraft]);
 
 	const skillToken = slashTokenAt(input, caret);
 	const tokenKey = skillToken
 		? `${skillToken.start}:${skillToken.query}`
 		: null;
+	const [skillSelection, setSkillSelection] = useState<{
+		token: string | null;
+		index: number;
+	}>({ token: tokenKey, index: 0 });
+	const skillActive =
+		skillSelection.token === tokenKey ? skillSelection.index : 0;
+	const setSkillActive = (index: number) =>
+		setSkillSelection({ token: tokenKey, index });
 
 	const tokenOpen = !!skillToken;
 	const skills = useSkills(sessionId, tokenOpen);
@@ -283,11 +362,6 @@ export function ChatPanel({
 		);
 	}, [skills, skillQuery]);
 
-	const [prevTokenKey, setPrevTokenKey] = useState(tokenKey);
-	if (prevTokenKey !== tokenKey) {
-		setPrevTokenKey(tokenKey);
-		setSkillActive(0);
-	}
 	const activeSkill = Math.min(
 		skillActive,
 		Math.max(0, skillMatches.length - 1),
@@ -304,16 +378,13 @@ export function ChatPanel({
 		return out;
 	}, [entries]);
 
-	const recallHistory = useCallback(
-		(text: string) => {
-			setDraft(text);
-			requestAnimationFrame(() => {
-				const ta = textareaRef.current;
-				if (ta) ta.setSelectionRange(ta.value.length, ta.value.length);
-			});
-		},
-		[setDraft],
-	);
+	const recallHistory = (text: string) => {
+		setDraft(text);
+		requestAnimationFrame(() => {
+			const ta = textareaRef.current;
+			if (ta) ta.setSelectionRange(ta.value.length, ta.value.length);
+		});
+	};
 
 	useLayoutEffect(() => {
 		if (restoredRef.current || entries.length === 0) return;
@@ -337,6 +408,7 @@ export function ChatPanel({
 
 			submitPendingRef.current = false;
 			userScrolledRef.current = false;
+			followRef.current = false;
 
 			spacer.style.height = `${container.clientHeight}px`;
 			const cRect = container.getBoundingClientRect();
@@ -405,217 +477,248 @@ export function ChatPanel({
 		const container = containerRef.current;
 		if (!container) return;
 		const onScroll = () => {
-			if (performance.now() < programmaticUntilRef.current) return;
-			userScrolledRef.current = true;
+			const distance = latestScrollTop(container) - container.scrollTop;
+			if (performance.now() >= programmaticUntilRef.current)
+				userScrolledRef.current = true;
+			if (Math.abs(container.scrollTop - lastScrollTopRef.current) > 1)
+				followRef.current = distance <= FOLLOW_SLACK;
+			lastScrollTopRef.current = container.scrollTop;
+			const away = distance > 160;
+			setAwayFromLatest(away);
+			if (!away) setSeenOutput(latestOutput);
 		};
 		container.addEventListener("scroll", onScroll, { passive: true });
 		return () => container.removeEventListener("scroll", onScroll);
-	}, []);
+	}, [latestOutput]);
 
-	const handleSubmit = useCallback(
-		async (
-			intent?: TurnInputIntent,
-			overrideText?: string,
-		): Promise<boolean> => {
-			const text = (overrideText ?? input).trim();
-			if ((!text && images.length === 0 && files.length === 0) || submitting) {
+	// Streaming output grows the transcript without firing scroll events.
+	const handleTranscriptResize = useEffectEvent(() => {
+		const container = containerRef.current;
+		if (!container) return;
+		// Resizes can land before the scroll event of a user who just moved away.
+		if (
+			Math.abs(container.scrollTop - lastScrollTopRef.current) > 1 &&
+			latestScrollTop(container) - container.scrollTop > FOLLOW_SLACK
+		)
+			followRef.current = false;
+		const pinned = pinRef.current && !userScrolledRef.current;
+		if (followRef.current && !pinned) {
+			const top = latestScrollTop(container);
+			if (Math.abs(container.scrollTop - top) > 1)
+				writeScrollTop(container, top);
+		}
+		const away = latestScrollTop(container) - container.scrollTop > 160;
+		setAwayFromLatest(away);
+		if (!away) setSeenOutput(latestOutput);
+	});
+	const transcriptView =
+		loading && entries.length === 0
+			? "loading"
+			: loadError
+				? "error"
+				: entries.length === 0 && phase === "idle"
+					? "empty"
+					: "entries";
+	useEffect(() => {
+		const content = contentRef.current;
+		if (transcriptView !== "entries" || !content) return;
+		const observer = new ResizeObserver(() => handleTranscriptResize());
+		observer.observe(content);
+		return () => observer.disconnect();
+	}, [transcriptView]);
+
+	const handleSubmit = async (
+		intent?: TurnInputIntent,
+		overrideText?: string,
+	): Promise<boolean> => {
+		if (!available || prompts.length) return false;
+		const current = draft.getSnapshot();
+		const text = (overrideText ?? current.text).trim();
+		if (
+			(!text && current.images.length === 0 && current.files.length === 0) ||
+			current.submitting
+		) {
+			return false;
+		}
+		const focus = compactFocus(text);
+		if (
+			focus !== null &&
+			onCompact &&
+			settings.canCompact &&
+			!current.editingQueueId &&
+			current.files.length + current.images.length === 0
+		) {
+			if (!sessionId || isDraft(sessionId)) {
+				toast({ title: "Nothing to compact yet" });
 				return false;
 			}
-			submitPendingRef.current = true;
-			setSubmitting(true);
-			setSendError(null);
+			return draft.submit(() => onCompact(focus));
+		}
+		submitPendingRef.current = true;
+		const focused = document.activeElement;
+		const sent = await draft.submit(({ images, files, editingQueueId }) => {
 			const imageData =
 				images.length > 0 ? images.map((i) => i.dataUrl) : undefined;
-			let sent = false;
-			try {
-				if (editingQueueId && onUpdateQueued) {
-					sent = onUpdateQueued(
-						editingQueueId,
-						text,
-						files.length > 0 ? files : undefined,
-						imageData,
-					);
-				} else {
-					const nextIntent =
-						intent ?? (isActive && canSteer ? "steer" : "follow_up");
-					sent = await onSend(
-						text,
-						files.length > 0 ? files : undefined,
-						imageData,
-						nextIntent,
-					);
-				}
-			} catch {
-				sent = false;
-			} finally {
-				setSubmitting(false);
+			if (editingQueueId && onUpdateQueued) {
+				return onUpdateQueued(
+					editingQueueId,
+					text,
+					files.length > 0 ? files : undefined,
+					imageData,
+				);
+			} else {
+				const nextIntent =
+					intent ?? (isActive && canSteer ? "steer" : "follow_up");
+				return onSend(
+					text,
+					files.length > 0 ? files : undefined,
+					imageData,
+					nextIntent,
+				);
 			}
-			if (!sent) {
-				submitPendingRef.current = false;
-				setSendError("Message was not accepted. Your draft has been kept.");
-				return false;
-			}
-			setDraft("");
-			setFiles([]);
-			setImages([]);
-			setEditingQueueId(null);
-			historyIdxRef.current = null;
-			historyDraftRef.current = "";
+		});
+		if (!sent) {
+			submitPendingRef.current = false;
+			return false;
+		}
+		historyIdxRef.current = null;
+		historyDraftRef.current = "";
+		if (
+			document.activeElement === focused &&
+			focused?.closest("[data-chat-composer]")
+		)
 			textareaRef.current?.focus();
-			return true;
-		},
-		[
-			input,
-			submitting,
-			images,
-			editingQueueId,
-			onUpdateQueued,
-			isActive,
-			canSteer,
-			onSend,
-			files,
-			setDraft,
-		],
-	);
+		return true;
+	};
 
 	// selectSkill completes the slash token at the caret in place; only a lone
 	// leading command without an input hint submits directly.
-	const selectSkill = useCallback(
-		(s: Skill) => {
-			const tok = slashTokenAt(input, caret);
-			if (!tok) return;
+	const selectSkill = (s: Skill) => {
+		const tok = slashTokenAt(input, caret);
+		if (!tok) return;
 
-			const end = wordEndAt(input, caret);
-			const whole = tok.start === 0 && end === input.length;
-			const needsInput = !!s.input_hint;
+		const end = wordEndAt(input, caret);
+		const whole = tok.start === 0 && end === input.length;
+		const needsInput = !!s.input_hint;
 
-			if (whole && !needsInput) {
-				void handleSubmit(undefined, `/${s.name}`);
-				return;
-			}
+		if (whole && !needsInput) {
+			void handleSubmit(undefined, `/${s.name}`);
+			return;
+		}
 
-			const insert = `/${s.name}`;
-			const trailing = input.slice(end);
-			const glue = trailing.startsWith(" ") ? "" : " ";
-			setInput(input.slice(0, tok.start) + insert + glue + trailing);
-			const pos = tok.start + insert.length + 1;
-			setCaret(pos);
-			requestAnimationFrame(() => {
-				const ta = textareaRef.current;
-				if (ta) {
-					ta.focus();
-					ta.setSelectionRange(pos, pos);
-				}
-			});
-		},
-		[input, caret, handleSubmit],
-	);
+		const insert = `/${s.name}`;
+		const trailing = input.slice(end);
+		const glue = trailing.startsWith(" ") ? "" : " ";
+		draft.update({
+			text: input.slice(0, tok.start) + insert + glue + trailing,
+		});
+		const pos = tok.start + insert.length + 1;
+		setCaret(pos);
+		requestAnimationFrame(() => {
+			const ta = textareaRef.current;
+			if (ta) {
+				ta.focus();
+				ta.setSelectionRange(pos, pos);
+			}
+		});
+	};
 
-	const handleKeyDown = useCallback(
-		(e: React.KeyboardEvent) => {
-			if (showSkills) {
-				switch (e.key) {
-					case "ArrowDown":
-						e.preventDefault();
-						setSkillActive(Math.min(activeSkill + 1, skillMatches.length - 1));
-						return;
-					case "ArrowUp":
-						e.preventDefault();
-						setSkillActive(Math.max(activeSkill - 1, 0));
-						return;
-					case "Enter":
-					case "Tab": {
-						e.preventDefault();
-						const s = skillMatches[activeSkill];
-						if (s) selectSkill(s);
-						return;
-					}
-					case "Escape":
-						e.preventDefault();
-						setDismissedToken(tokenKey);
-						return;
-				}
-			}
-			if (e.key === "Enter" && !e.shiftKey) {
-				e.preventDefault();
-				void handleSubmit(e.altKey ? "follow_up" : undefined);
-			}
-			if (e.key === "Escape" && isActive) {
-				onCancel();
-			}
-			if (e.key === "ArrowUp" && !editingQueueId && history.length > 0) {
-				const ta = e.currentTarget as HTMLTextAreaElement;
-				const onFirstLine = !ta.value
-					.slice(0, ta.selectionStart)
-					.includes("\n");
-				if (onFirstLine) {
+	const handleKeyDown = (e: React.KeyboardEvent) => {
+		if (e.nativeEvent.isComposing) return;
+		if (showSkills) {
+			switch (e.key) {
+				case "ArrowDown":
 					e.preventDefault();
-					const navigating = historyIdxRef.current !== null;
-					const idx = navigating
-						? Math.max(0, (historyIdxRef.current as number) - 1)
-						: history.length - 1;
-					if (!navigating) historyDraftRef.current = input;
+					setSkillActive(Math.min(activeSkill + 1, skillMatches.length - 1));
+					return;
+				case "ArrowUp":
+					e.preventDefault();
+					setSkillActive(Math.max(activeSkill - 1, 0));
+					return;
+				case "Enter":
+				case "Tab": {
+					e.preventDefault();
+					const s = skillMatches[activeSkill];
+					if (s) selectSkill(s);
+					return;
+				}
+				case "Escape":
+					e.preventDefault();
+					setDismissedToken(tokenKey);
+					return;
+			}
+		}
+		if (e.key === "Enter" && !e.shiftKey) {
+			e.preventDefault();
+			void handleSubmit(e.altKey ? "follow_up" : undefined);
+		}
+		if (e.key === "Escape" && isActive) {
+			onCancel();
+		}
+		if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) return;
+		if (e.key === "ArrowUp" && !editingQueueId && history.length > 0) {
+			const ta = e.currentTarget as HTMLTextAreaElement;
+			if (ta.selectionStart !== ta.selectionEnd) return;
+			const onFirstLine = atTextareaEdge(ta, "first");
+			if (onFirstLine) {
+				e.preventDefault();
+				const navigating = historyIdxRef.current !== null;
+				const idx = navigating
+					? Math.max(0, (historyIdxRef.current as number) - 1)
+					: history.length - 1;
+				if (!navigating) historyDraftRef.current = input;
+				historyIdxRef.current = idx;
+				recallHistory(history[idx]);
+			}
+		}
+		if (e.key === "ArrowDown" && historyIdxRef.current !== null) {
+			const ta = e.currentTarget as HTMLTextAreaElement;
+			if (ta.selectionStart !== ta.selectionEnd) return;
+			const onLastLine = atTextareaEdge(ta, "last");
+			if (onLastLine) {
+				e.preventDefault();
+				const idx = (historyIdxRef.current as number) + 1;
+				if (idx >= history.length) {
+					historyIdxRef.current = null;
+					recallHistory(historyDraftRef.current);
+				} else {
 					historyIdxRef.current = idx;
 					recallHistory(history[idx]);
 				}
 			}
-			if (e.key === "ArrowDown" && historyIdxRef.current !== null) {
-				const ta = e.currentTarget as HTMLTextAreaElement;
-				const onLastLine = !ta.value.slice(ta.selectionEnd).includes("\n");
-				if (onLastLine) {
-					e.preventDefault();
-					const idx = (historyIdxRef.current as number) + 1;
-					if (idx >= history.length) {
-						historyIdxRef.current = null;
-						recallHistory(historyDraftRef.current);
-					} else {
-						historyIdxRef.current = idx;
-						recallHistory(history[idx]);
-					}
-				}
-			}
-		},
-		[
-			handleSubmit,
-			isActive,
-			onCancel,
-			showSkills,
-			skillMatches,
-			activeSkill,
-			selectSkill,
-			tokenKey,
-			editingQueueId,
-			history,
-			input,
-			recallHistory,
-		],
-	);
+		}
+	};
 
-	const editPendingInput = useCallback(
-		(item: PendingTurnInput) => {
-			setDraft(item.text);
-			setFiles(item.files);
-			setImages(
-				item.images.map((dataUrl) => ({ id: crypto.randomUUID(), dataUrl })),
-			);
-			setEditingQueueId(item.state === "queued" ? item.id : null);
-			setSendError(null);
-			textareaRef.current?.focus();
-		},
-		[setDraft],
-	);
+	const editPendingInput = (item: PendingTurnInput) => {
+		const next = {
+			text: item.text,
+			files: item.files,
+			images: item.images.map((dataUrl) => ({
+				id: crypto.randomUUID(),
+				dataUrl,
+			})),
+			editingQueueId: item.state === "queued" ? item.id : null,
+		};
+		if (next.editingQueueId) draft.beginQueueEdit(next);
+		else draft.update(next);
+		setCaret(item.text.length);
+		textareaRef.current?.focus();
+	};
 
-	const addFile = useCallback((path: string) => {
-		setFiles((prev) => (prev.includes(path) ? prev : [...prev, path]));
+	const addFile = (path: string) => {
+		const { files } = draft.getSnapshot();
+		if (!files.includes(path)) draft.update({ files: [...files, path] });
 		setShowPicker(false);
 		textareaRef.current?.focus();
-	}, []);
+	};
 
-	const removeFile = useCallback((path: string) => {
-		setFiles((prev) => prev.filter((p) => p !== path));
-	}, []);
+	const removeFile = (path: string) => {
+		draft.update({
+			files: draft.getSnapshot().files.filter((p) => p !== path),
+		});
+	};
 
-	const addImageFiles = useCallback(async (fileList: FileList | File[]) => {
+	const addImageFiles = async (fileList: FileList | File[]) => {
 		const next: PendingImage[] = [];
 		for (const f of Array.from(fileList)) {
 			if (!f.type.startsWith("image/")) continue;
@@ -624,12 +727,15 @@ export function ChatPanel({
 				next.push({ id: crypto.randomUUID(), dataUrl, name: f.name });
 			} catch {}
 		}
-		if (next.length > 0) setImages((prev) => [...prev, ...next]);
-	}, []);
+		if (next.length > 0)
+			draft.update({ images: [...draft.getSnapshot().images, ...next] });
+	};
 
-	const removeImage = useCallback((id: string) => {
-		setImages((prev) => prev.filter((i) => i.id !== id));
-	}, []);
+	const removeImage = (id: string) => {
+		draft.update({
+			images: draft.getSnapshot().images.filter((i) => i.id !== id),
+		});
+	};
 
 	const [dragOver, setDragOver] = useState(false);
 	const dragDepthRef = useRef(0);
@@ -642,60 +748,54 @@ export function ChatPanel({
 		);
 	};
 
-	const handleDragEnter = useCallback((e: React.DragEvent) => {
+	const handleDragEnter = (e: React.DragEvent) => {
 		if (!hasDragPayload(e)) return;
 		e.preventDefault();
 		dragDepthRef.current++;
 		setDragOver(true);
-	}, []);
+	};
 
-	const handleDragOver = useCallback((e: React.DragEvent) => {
+	const handleDragOver = (e: React.DragEvent) => {
 		if (!hasDragPayload(e)) return;
 		e.preventDefault();
-	}, []);
+	};
 
-	const handleDragLeave = useCallback((e: React.DragEvent) => {
+	const handleDragLeave = (e: React.DragEvent) => {
 		if (!hasDragPayload(e)) return;
 		dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
 		if (dragDepthRef.current === 0) setDragOver(false);
-	}, []);
+	};
 
-	const handleDrop = useCallback(
-		(e: React.DragEvent) => {
-			if (!hasDragPayload(e)) return;
-			e.preventDefault();
-			dragDepthRef.current = 0;
-			setDragOver(false);
-			const path = e.dataTransfer.getData("application/x-wingman-file");
-			if (path) {
-				addFile(path);
-				return;
-			}
-			if (e.dataTransfer.files?.length) {
-				void addImageFiles(e.dataTransfer.files);
-				textareaRef.current?.focus();
-			}
-		},
-		[addFile, addImageFiles],
-	);
+	const handleDrop = (e: React.DragEvent) => {
+		if (!hasDragPayload(e)) return;
+		e.preventDefault();
+		dragDepthRef.current = 0;
+		setDragOver(false);
+		const path = e.dataTransfer.getData("application/x-wingman-file");
+		if (path) {
+			addFile(path);
+			return;
+		}
+		if (e.dataTransfer.files?.length) {
+			void addImageFiles(e.dataTransfer.files);
+			textareaRef.current?.focus();
+		}
+	};
 
-	const handlePaste = useCallback(
-		(e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-			const items = e.clipboardData?.items;
-			if (!items) return;
-			const pasted: File[] = [];
-			for (const item of items) {
-				if (item.kind !== "file") continue;
-				if (!item.type.startsWith("image/")) continue;
-				const f = item.getAsFile();
-				if (f) pasted.push(f);
-			}
-			if (pasted.length === 0) return;
-			e.preventDefault();
-			void addImageFiles(pasted);
-		},
-		[addImageFiles],
-	);
+	const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+		const items = e.clipboardData?.items;
+		if (!items) return;
+		const pasted: File[] = [];
+		for (const item of items) {
+			if (item.kind !== "file") continue;
+			if (!item.type.startsWith("image/")) continue;
+			const f = item.getAsFile();
+			if (f) pasted.push(f);
+		}
+		if (pasted.length === 0) return;
+		e.preventDefault();
+		void addImageFiles(pasted);
+	};
 
 	return (
 		<div
@@ -705,6 +805,13 @@ export function ChatPanel({
 			onDragLeave={handleDragLeave}
 			onDrop={handleDrop}
 		>
+			<ScrollSnapshot
+				phase={phase}
+				capture={() => {
+					if (userScrolledRef.current) captureAnchorForTurns(turns);
+				}}
+				restore={applyPendingAnchor}
+			/>
 			{dragOver && (
 				<div className="absolute inset-2 z-30 pointer-events-none rounded-lg border-2 border-dashed border-accent bg-accent/5 flex items-center justify-center">
 					<span className="text-[12px] text-fg-muted bg-bg/80 px-3 py-1 rounded">
@@ -713,20 +820,21 @@ export function ChatPanel({
 				</div>
 			)}
 			<div
-				className={`h-full overflow-y-auto [overflow-anchor:none] ${showQueue ? "pb-56" : "pb-24"}`}
+				data-chat-history
+				className={`h-full overflow-y-auto [overflow-anchor:none] ${historyPadding}`}
 				ref={containerRef}
 			>
-				{loading && entries.length === 0 ? (
+				{transcriptView === "loading" ? (
 					<div className="h-full flex items-center justify-center">
 						<Loader2 size={16} className="text-fg-dim animate-spin" />
 					</div>
-				) : loadError ? (
+				) : transcriptView === "error" ? (
 					<div className="h-full flex items-center justify-center">
 						<div className="max-w-sm px-4 text-center text-[13px] text-danger break-words">
 							{loadError}
 						</div>
 					</div>
-				) : entries.length === 0 && phase === "idle" ? (
+				) : transcriptView === "empty" ? (
 					<div className="flex h-full items-center justify-center px-4">
 						<div className="flex max-w-sm flex-col items-center text-center">
 							<img
@@ -741,21 +849,32 @@ export function ChatPanel({
 					</div>
 				) : (
 					<div className="mx-auto w-full max-w-4xl px-4 py-4" ref={contentRef}>
-						<ToolProgressContext.Provider value={toolProgress ?? {}}>
-							{turns.map((turn, idx) => {
-								const isLastTurn = idx === turns.length - 1;
-								const isActive = isLastTurn && phase !== "idle";
-								return (
-									<TurnView
-										key={turn.key}
-										turn={turn}
-										isActive={isActive}
-										phase={phase}
-										applyPendingAnchor={applyPendingAnchor}
-									/>
-								);
-							})}
-						</ToolProgressContext.Provider>
+						<ToolProgressContext value={toolProgress ?? {}}>
+							{turns.length > 80 ? (
+								<VirtualTurns
+									turns={turns}
+									phase={phase}
+									scroll={containerRef}
+									onOpenFile={onOpenFile}
+									applyPendingAnchor={applyPendingAnchor}
+								/>
+							) : (
+								turns.map((turn, idx) => {
+									const isLastTurn = idx === turns.length - 1;
+									const isActive = isLastTurn && phase !== "idle";
+									return (
+										<TurnView
+											key={turn.key}
+											turn={turn}
+											isActive={isActive}
+											phase={phase}
+											applyPendingAnchor={applyPendingAnchor}
+											onOpenFile={onOpenFile}
+										/>
+									);
+								})
+							)}
+						</ToolProgressContext>
 					</div>
 				)}
 				<div ref={spacerRef} aria-hidden style={{ height: 0 }} />
@@ -764,6 +883,47 @@ export function ChatPanel({
 			<div className="absolute bottom-0 left-0 right-0 z-20">
 				<div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none" />
 				<div className="mx-auto w-full max-w-4xl bg-bg px-4 pb-3">
+					{phase === "compacting" && (
+						<div role="status" className="mb-2 text-[12px] text-fg-muted">
+							Compacting context…
+						</div>
+					)}
+					{phase === "idle" && compaction && (
+						<div role="status" className="mb-2 text-[12px] text-fg-dim">
+							Context compacted · ~{formatTokens(compaction.tokensBefore)} → ~
+							{formatTokens(compaction.tokensAfter)} tokens
+						</div>
+					)}
+					{phase === "retrying" && (
+						<div role="status" className="mb-2 text-[12px] text-warning">
+							Retrying
+							{retry
+								? ` · ${retry.reason} · attempt ${retry.attempt} in ${(retry.delayMillis / 1000).toFixed(1)}s`
+								: "…"}
+						</div>
+					)}
+					{awayFromLatest && (
+						<div className="flex justify-center pb-2">
+							<button
+								type="button"
+								className="rounded-full border border-border bg-bg-surface px-3 py-2 text-[12px] text-fg-muted shadow"
+								onClick={() => {
+									const container = containerRef.current;
+									if (container)
+										writeScrollTop(container, latestScrollTop(container));
+									userScrolledRef.current = true;
+									followRef.current = true;
+									setAwayFromLatest(false);
+									setSeenOutput(latestOutput);
+								}}
+							>
+								{unreadOutput
+									? "New output · Jump to latest"
+									: "Jump to latest"}{" "}
+								↓
+							</button>
+						</div>
+					)}
 					{showQueue && (
 						<TurnQueue
 							items={pendingInputs}
@@ -774,6 +934,25 @@ export function ChatPanel({
 							onClear={onClearQueue}
 						/>
 					)}
+					{incomplete && !isActive && (
+						<IncompleteTurnNotice
+							key={sessionId}
+							disabled={
+								!available ||
+								submitting ||
+								prompts.length > 0 ||
+								pendingInputs.length > 0
+							}
+							onContinue={() =>
+								onSend(
+									"Continue the unfinished task from the saved conversation. Check what was already completed and avoid repeating it.",
+									undefined,
+									undefined,
+									"follow_up",
+								)
+							}
+						/>
+					)}
 					{inputError && (
 						<div className="mb-1.5 flex items-start gap-2 rounded border border-danger/40 bg-danger/5 px-2 py-1 text-[11px] text-danger">
 							<span className="min-w-0 flex-1 break-words">{inputError}</span>
@@ -781,7 +960,7 @@ export function ChatPanel({
 								type="button"
 								className="shrink-0 opacity-70 hover:opacity-100"
 								onClick={() => {
-									setSendError(null);
+									draft.dismissError();
 									onDismissError?.();
 								}}
 								aria-label="Dismiss error"
@@ -790,15 +969,21 @@ export function ChatPanel({
 							</button>
 						</div>
 					)}
-					{prompt && onPromptReply ? (
-						<PromptBar
-							key={prompt.id}
-							prompt={prompt}
-							onReply={onPromptReply}
-						/>
-					) : (
+					{prompts.length > 0 && onPromptReply && (
+						<>
+							{prompts.map((prompt) => (
+								<PromptBar
+									key={prompt.id}
+									prompt={prompt}
+									available={available}
+									onReply={(reply) => onPromptReply(prompt.id, reply)}
+								/>
+							))}
+						</>
+					)}
+					{
 						<div
-							ref={composerRef}
+							ref={setComposer}
 							data-chat-composer
 							className="relative rounded-xl"
 						>
@@ -808,7 +993,7 @@ export function ChatPanel({
 									<button
 										type="button"
 										className="text-fg-dim hover:text-fg"
-										onClick={() => setEditingQueueId(null)}
+										onClick={() => draft.cancelQueueEdit()}
 									>
 										Cancel
 									</button>
@@ -816,7 +1001,7 @@ export function ChatPanel({
 							)}
 							{showSkills && (
 								<SkillPicker
-									anchor={composerRef.current}
+									anchor={composer}
 									skills={skillMatches}
 									active={activeSkill}
 									onSelect={selectSkill}
@@ -883,7 +1068,7 @@ export function ChatPanel({
 									value={input}
 									onChange={(e) => {
 										historyIdxRef.current = null;
-										setInput(e.target.value);
+										draft.update({ text: e.target.value });
 										setCaret(e.target.selectionStart);
 									}}
 									onSelect={(e) =>
@@ -891,16 +1076,16 @@ export function ChatPanel({
 									}
 									onKeyDown={handleKeyDown}
 									onPaste={handlePaste}
-									placeholder="Message Wingman…"
+									placeholder={placeholder}
 									rows={1}
 								/>
 							</div>
 
-							<div className="flex items-center justify-between px-1.5 pb-1.5 pt-1 gap-1">
-								<div className="flex items-center gap-0 min-w-0">
-									<div className="relative flex items-center">
+							<div className="flex flex-wrap items-center justify-between px-1.5 pb-1.5 pt-1 gap-1">
+								<div className="flex flex-1 items-center gap-0 min-w-7">
+									<div className="relative flex shrink-0 items-center">
 										<button
-											ref={filePickerButtonRef}
+											ref={setFilePickerButton}
 											type="button"
 											className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
 											onClick={() => setShowPicker((s) => !s)}
@@ -910,7 +1095,7 @@ export function ChatPanel({
 										</button>
 										{showPicker && (
 											<FilePicker
-												anchor={filePickerButtonRef.current}
+												anchor={filePickerButton}
 												onSelect={addFile}
 												onClose={() => setShowPicker(false)}
 											/>
@@ -927,15 +1112,51 @@ export function ChatPanel({
 											e.target.value = "";
 										}}
 									/>
-									<ModePicker
-										modes={modes}
-										current={mode}
-										onSelect={onSelectMode}
+									<AgentPicker
+										currentId={
+											sessionId
+												? splitSessionKey(sessionId).backendId
+												: undefined
+										}
+										onSelect={onSelectBackend}
+										newChat={
+											entries.length > 0 ||
+											phase !== "idle" ||
+											pendingInputs.length > 0
+										}
+										disabled={submitting}
 									/>
-									<ModelPicker sessionId={sessionId} />
+									<ModePicker
+										modes={settings.modes}
+										current={settings.mode}
+										unattended={settings.unattended}
+										onUnattendedChange={(unattended) =>
+											void setSettings({ unattended }).catch((error) =>
+												toast({
+													title: "Could not change unattended setting",
+													description: String(error),
+													tone: "error",
+												}),
+											)
+										}
+										onSelect={(mode) =>
+											void setSettings({ mode }).catch((error) =>
+												toast({
+													title: "Could not change mode",
+													description: String(error),
+													tone: "error",
+												}),
+											)
+										}
+									/>
+									<ModelPicker
+										settings={settings}
+										setSettings={setSettings}
+										retryModels={retryModels}
+									/>
 								</div>
 
-								<div className="flex items-center gap-0">
+								<div className="flex shrink-0 items-center gap-0">
 									<button
 										type="button"
 										className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
@@ -944,79 +1165,60 @@ export function ChatPanel({
 									>
 										<Paperclip size={14} />
 									</button>
-									{(() => {
-										const hasInput =
-											input.trim() !== "" ||
-											images.length > 0 ||
-											files.length > 0;
-										const mode: "send" | "stop" | "disabled" = hasInput
-											? "send"
-											: isActive
-												? "stop"
-												: "disabled";
-										return (
-											<>
-												<button
-													type="button"
-													className={`group w-7 h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
-														mode === "disabled"
-															? "text-fg-dim opacity-40 cursor-not-allowed"
-															: "text-fg-muted hover:text-fg hover:bg-bg-hover"
-													}`}
-													onClick={
-														mode === "stop"
-															? () => onCancel(false)
-															: () => void handleSubmit()
-													}
-													disabled={mode === "disabled" || submitting}
-													title={
-														mode === "stop"
-															? "Stop (Esc)"
-															: editingQueueId
-																? "Update queued message (Enter)"
-																: mode === "send" && isActive && canSteer
-																	? "Steer current turn (Enter) · Queue with Alt+Enter"
-																	: mode === "send" && isActive
-																		? "Queue follow-up (Enter)"
-																		: "Send (Enter)"
-													}
-												>
-													{mode === "stop" ? (
-														<>
-															<LoaderCircle
-																size={14}
-																className="animate-spin group-hover:hidden"
-															/>
-															<Square
-																size={10}
-																fill="currentColor"
-																className="hidden group-hover:block"
-															/>
-														</>
-													) : (
-														<ArrowUp size={14} />
-													)}
-												</button>
-												{hasInput &&
-													isActive &&
-													canSteer &&
-													!editingQueueId && (
-														<button
-															type="button"
-															className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-															onClick={() => void handleSubmit("follow_up")}
-															title="Queue after current turn (Alt+Enter)"
-														>
-															<ListPlus size={14} />
-														</button>
-													)}
-											</>
-										);
-									})()}
+									{isActive && (
+										<button
+											type="button"
+											className="w-8 h-8 flex items-center justify-center rounded text-danger hover:bg-bg-hover"
+											title="Stop (Esc)"
+											aria-label="Stop (Esc)"
+											disabled={!available}
+											onClick={() => onCancel(false)}
+										>
+											<Square size={12} fill="currentColor" />
+										</button>
+									)}
+									<button
+										type="button"
+										className="w-8 h-8 flex items-center justify-center rounded text-fg-muted hover:bg-bg-hover disabled:opacity-40"
+										onClick={() => void handleSubmit()}
+										disabled={
+											!available ||
+											submitting ||
+											prompts.length > 0 ||
+											(!input.trim() && !images.length && !files.length)
+										}
+										title={
+											editingQueueId
+												? "Update queued message (Enter)"
+												: isActive && canSteer
+													? "Steer current turn (Enter) · Queue with Alt+Enter"
+													: isActive
+														? "Queue follow-up (Enter)"
+														: "Send (Enter)"
+										}
+									>
+										<ArrowUp size={14} />
+									</button>
+									{isActive && canSteer && !editingQueueId && (
+										<button
+											type="button"
+											className="w-8 h-8 flex items-center justify-center rounded text-fg-muted hover:bg-bg-hover disabled:opacity-40"
+											disabled={
+												!available ||
+												submitting ||
+												prompts.length > 0 ||
+												(!input.trim() && !images.length && !files.length)
+											}
+											onClick={() => void handleSubmit("follow_up")}
+											title="Queue after current turn (Alt+Enter)"
+										>
+											<ListPlus size={14} />
+										</button>
+									)}
 								</div>
 							</div>
 						</div>
-					)}
+					}
 				</div>
 			</div>
 		</div>

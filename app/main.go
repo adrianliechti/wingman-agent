@@ -30,6 +30,8 @@ type App struct {
 	launcher http.Handler
 }
 
+const shutdownTimeout = time.Second
+
 func main() {
 	// Repair PATH before anything detects agents via exec.LookPath: GUI
 	// launches (Finder/Dock) inherit a minimal PATH that hides Homebrew /
@@ -46,16 +48,20 @@ func main() {
 		OnShutdown: app.shutdown,
 
 		Width:  1280,
-		Height: 768,
+		Height: 800,
 
 		MinWidth:  640,
 		MinHeight: 400,
 
 		TitleBar: shell.TitleBarOptions{
 			Overlay:         true,
-			ControlsOffsetX: 4,
+			ControlsOffsetX: 6,
 			ControlsOffsetY: 4,
+
+			Height: 40,
 		},
+		// go-shell installs this menu natively on macOS. The Windows title bar
+		// renders the same commands in the web UI and owns their Ctrl shortcuts.
 		FileMenu: []shell.MenuItem{
 			{Title: "New File...", Command: "new-file", Key: "n", Disabled: true},
 			{Title: "Open Folder...", Command: "open-folder", Key: "o"},
@@ -109,7 +115,7 @@ func (a *App) newLauncher() http.Handler {
 	mux.HandleFunc("POST /app/workspaces/open", a.handleOpenWorkspace)
 	mux.HandleFunc("POST /app/folder", a.handleSelectFolder)
 
-	return mux
+	return server.LocalHostOnly(http.NewCrossOriginProtection().Handler(mux))
 }
 
 func (a *App) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +169,11 @@ func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
 
 	a.mu.Lock()
 	current := a.server
+	if current != nil && request.Replace && r.Header.Get("X-Wingman-Instance") != current.InstanceID() {
+		a.mu.Unlock()
+		http.Error(w, "workspace instance changed; reload the workspace", http.StatusConflict)
+		return
+	}
 	if current != nil && !request.Replace {
 		a.mu.Unlock()
 		http.Error(w, "workspace already open", http.StatusConflict)
@@ -209,9 +220,8 @@ func (a *App) handleSelectFolder(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"path": path})
 }
 
-// shutdown bounds the teardown so a slow component (LSP shutdown
-// handshakes, MCP subprocesses) can't hang app quit. Kill signals are
-// issued before the waits we abandon.
+// shutdown gives normal cleanup a brief opportunity to finish without making
+// native app termination depend on a slow protocol handshake or installer.
 func (a *App) shutdown() {
 	a.mu.Lock()
 	srv := a.server
@@ -229,7 +239,7 @@ func (a *App) shutdown() {
 
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(shutdownTimeout):
 		log.Println("shutdown timed out, exiting anyway")
 	}
 }

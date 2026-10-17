@@ -15,6 +15,7 @@ func TestElicitationSchemaPreservesEnumDescriptions(t *testing.T) {
 		Title:            "Strategy",
 		Description:      "Choose a strategy",
 		Required:         true,
+		Strict:           true,
 		Enum:             []string{"safe", "fast"},
 		EnumDescriptions: []string{"Minimal changes", "Broader optimization"},
 		Default:          "safe",
@@ -63,8 +64,8 @@ func TestElicitationSchemaPreservesCustomAnswerCompanion(t *testing.T) {
 
 	property := schema.Properties["question_0_custom"].(map[string]any)
 	meta := property["_meta"].(map[string]any)
-	marker := meta["_askUserQuestionCustomAnswer"].(map[string]any)
-	if marker["questionId"] != "question_0" || marker["isCustomAnswer"] != true {
+	marker := meta["wingman"].(map[string]any)
+	if marker["customAnswerFor"] != "question_0" {
 		t.Fatalf("custom answer marker = %#v", marker)
 	}
 }

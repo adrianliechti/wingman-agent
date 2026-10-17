@@ -72,21 +72,68 @@ func TestIdleExtensionDialogIsCancelled(t *testing.T) {
 	}
 }
 
-func TestToolTitleBashCommand(t *testing.T) {
-	if got := toolTitle("bash", map[string]any{"command": "echo hi"}); got != "echo hi" {
+func TestFailedLoadKeepsExistingLiveSession(t *testing.T) {
+	cwd := t.TempDir()
+	sessionsDir := t.TempDir()
+	const id = acp.SessionId("00000000-0000-4000-8000-000000000099")
+	history := []byte(`{"type":"session","id":"` + string(id) + `","cwd":"` + cwd + `"}` + "\n")
+	if err := os.WriteFile(filepath.Join(sessionsDir, "session.jsonl"), history, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	old := newSession(id, cwd, &process{})
+	a := New(Options{Path: filepath.Join(t.TempDir(), "missing-pi"), SessionsDir: sessionsDir})
+	a.storeSession(old)
+	t.Cleanup(func() { _ = a.Close() })
+
+	_, err := a.LoadSession(context.Background(), acp.LoadSessionRequest{
+		SessionId: id, Cwd: cwd, McpServers: []acp.McpServer{},
+	})
+	if err == nil {
+		t.Fatal("load with a missing Pi executable succeeded")
+	}
+	if got := a.lookup(id); got != old || old.isClosed() {
+		t.Fatalf("failed load replaced or closed the live session: got=%p old=%p", got, old)
+	}
+}
+
+func TestPresentToolTitles(t *testing.T) {
+	if got := presentTool("bash", map[string]any{"command": "echo hi"}, "").title; got != "Run command" {
 		t.Errorf("bash command title = %q", got)
 	}
-	if got := toolTitle("bash", map[string]any{"cmd": "ls"}); got != "ls" {
+	if got := presentTool("bash", map[string]any{"cmd": "ls"}, "").title; got != "Run command" {
 		t.Errorf("bash cmd title = %q", got)
 	}
-	if got := toolTitle("bash", nil); got != "bash" {
+	if got := presentTool("bash", nil, "").title; got != "Run command" {
 		t.Errorf("bash without args = %q", got)
 	}
-	if got := toolTitle("read", map[string]any{"command": "x"}); got != "read" {
+	if got := presentTool("read", map[string]any{"command": "x"}, "").title; got != "Read file" {
 		t.Errorf("non-bash = %q", got)
 	}
-	if got := toolTitle("", nil); got != "tool" {
+	if got := presentTool("", nil, "").title; got != "Tool call" {
 		t.Errorf("empty name = %q", got)
+	}
+}
+
+func TestPresentToolKeepsPathOnlyAsLocation(t *testing.T) {
+	presentation := presentTool("read", map[string]any{
+		"path": "pkg/main.go", "offset": float64(12), "limit": float64(4),
+	}, "/workspace")
+	if presentation.title != "Read file" || presentation.kind != acp.ToolKindRead {
+		t.Fatalf("presentation = %#v", presentation)
+	}
+	if len(presentation.locations) != 1 || presentation.locations[0].Path != "/workspace/pkg/main.go" ||
+		presentation.locations[0].Line == nil || *presentation.locations[0].Line != 12 {
+		t.Fatalf("locations = %#v", presentation.locations)
+	}
+	args, ok := presentation.rawInput.(map[string]any)
+	if !ok || args["limit"] != float64(4) || args["offset"] != nil || args["path"] != nil {
+		t.Fatalf("display input = %#v", presentation.rawInput)
+	}
+
+	update := acp.StartToolCall("read-1", presentation.title, startToolOptions(presentation, acp.ToolCallStatusPending)...)
+	if _, duplicated := update.ToolCall.RawInput.(map[string]any)["path"]; duplicated {
+		t.Fatalf("SDK mirrored path into input: %#v", update.ToolCall.RawInput)
 	}
 }
 

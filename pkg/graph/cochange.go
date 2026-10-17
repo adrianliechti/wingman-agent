@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"context"
 	"path/filepath"
 	"sort"
 
@@ -28,8 +29,12 @@ type CoChangesResult struct {
 	Related []CoChange `json:"related"`
 }
 
-func coChanges(root, target string, limit int) (CoChangesResult, error) {
+func coChanges(ctx context.Context, root, target string, limit int) (CoChangesResult, error) {
+	target = normalizeFileFilter(target)
 	res := CoChangesResult{File: target}
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
 
 	repo, err := git.PlainOpen(root)
 	if err != nil {
@@ -48,6 +53,9 @@ func coChanges(root, target string, limit int) (CoChangesResult, error) {
 	counts := map[string]int{}
 	walked := 0
 	err = iter.ForEach(func(c *object.Commit) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if res.Commits >= maxCoChangeHits || walked >= maxCoChangeWalked {
 			return storer.ErrStop
 		}

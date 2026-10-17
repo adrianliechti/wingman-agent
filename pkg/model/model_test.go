@@ -6,7 +6,7 @@ import (
 )
 
 func TestCurrentProviderModels(t *testing.T) {
-	t.Setenv("WINGMAN_LARGE_CONTEXT", "1")
+	t.Setenv("WINGMAN_CONTEXT_WINDOW_MODE", "full")
 
 	cases := []struct {
 		id      string
@@ -18,9 +18,19 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"kimi-k3", "Kimi K3", ClassLarge, 1_048_576, 131_072},
 		{"glm-5.3", "GLM 5.3", ClassMedium, 1_000_000, 131_072},
 		{"gemini-3.7-flash", "Gemini 3.7 Flash", ClassMedium, 1_114_112, 65_536},
+		{"gemini-4-argon", "Gemini 4 Argon", ClassLarge, 1_048_576, 65_536},
 		{"minimax-m3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"MiniMax-M3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"grok-4.6", "Grok 4.6", ClassLarge, 500_000, 500_000},
+		{"claude-sonnet-5-5", "Claude Sonnet 5.5", ClassMedium, 1_000_000, 128_000},
+		{"claude-haiku-5-5", "Claude Haiku 5.5", ClassSmall, 1_000_000, 128_000},
+		{"claude-opus-5-5", "Claude Opus 5.5", ClassLarge, 1_000_000, 128_000},
+		{"claude-fable-5-1", "Claude Fable 5.1", ClassLarge, 1_000_000, 128_000},
+		{"claude-mythos-5-1", "Claude Mythos 5.1", ClassLarge, 1_000_000, 128_000},
+		{"gpt-6-astra", "GPT 6 Astra", ClassLarge, 1_050_000, 128_000},
+		{"gpt-6.1-sol", "GPT 6.1 Sol", ClassMedium, 1_050_000, 128_000},
+		{"gpt-6-sol", "GPT 6 Sol", ClassMedium, 1_050_000, 128_000},
+		{"gpt-6-luna", "GPT 6 Luna", ClassSmall, 1_050_000, 128_000},
 	}
 
 	for _, tc := range cases {
@@ -38,6 +48,10 @@ func TestCurrentProviderModels(t *testing.T) {
 
 func TestCurrentProviderModelAvailability(t *testing.T) {
 	available := Available(map[string]bool{
+		"gpt-6-astra":  true,
+		"gpt-6.1-sol":  true,
+		"gpt-6-sol":    true,
+		"gpt-6-luna":   true,
 		"gpt-5.4-nano": true,
 		"kimi-k3":      true,
 		"glm-5.3":      true,
@@ -50,8 +64,83 @@ func TestCurrentProviderModelAvailability(t *testing.T) {
 		ids = append(ids, m.ID)
 	}
 
-	if want := []string{"glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6"}; !slices.Equal(ids, want) {
+	if want := []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6"}; !slices.Equal(ids, want) {
 		t.Fatalf("Available() ids = %v, want %v", ids, want)
+	}
+}
+
+func TestClaude51ModelAvailability(t *testing.T) {
+	available := Available(map[string]bool{
+		"claude-fable-5-1":  true,
+		"claude-mythos-5-1": true,
+	})
+
+	ids := make([]string, 0, len(available))
+	for _, m := range available {
+		ids = append(ids, m.ID)
+	}
+
+	if want := []string{"claude-fable-5-1", "claude-mythos-5-1"}; !slices.Equal(ids, want) {
+		t.Fatalf("Available() ids = %v, want %v", ids, want)
+	}
+}
+
+func TestAlwaysThinkingClaudeEfforts(t *testing.T) {
+	want := []string{"low", "medium", "high", "xhigh", "max"}
+	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5", "claude-fable-5-1", "claude-mythos-5", "claude-mythos-5-1"} {
+		t.Run(id, func(t *testing.T) {
+			got, ok := Find(id)
+			if !ok {
+				t.Fatalf("Find(%q) failed", id)
+			}
+			if !slices.Equal(got.Efforts, want) {
+				t.Fatalf("Find(%q).Efforts = %v, want %v", id, got.Efforts, want)
+			}
+		})
+	}
+}
+
+func TestGPT6Verbosity(t *testing.T) {
+	for _, id := range []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"} {
+		t.Run(id, func(t *testing.T) {
+			got, ok := Find(id)
+			if !ok {
+				t.Fatalf("Find(%q) failed", id)
+			}
+			if got.Verbosity != "low" {
+				t.Fatalf("Find(%q).Verbosity = %q, want low", id, got.Verbosity)
+			}
+		})
+	}
+}
+
+// Gemini 4 Argon shares one window between input, thinking, and output, and
+// offers three thinking levels.
+func TestGemini4ArgonLimitsAndEfforts(t *testing.T) {
+	got, ok := Find("gemini-4-argon")
+	if !ok {
+		t.Fatal("Find(gemini-4-argon) failed")
+	}
+	if got.InputTokens() != 1_048_576-65_536 {
+		t.Fatalf("InputTokens() = %d, want the shared window minus output", got.InputTokens())
+	}
+	if want := []string{"low", "medium", "high"}; !slices.Equal(got.Efforts, want) {
+		t.Fatalf("Efforts = %v, want %v", got.Efforts, want)
+	}
+}
+
+func TestQwen38Efforts(t *testing.T) {
+	want := []string{"none", "low", "medium", "xhigh"}
+	for _, id := range []string{"qwen3.8", "qwen3.8:27b-mlx", "qwen/qwen3.8-27b"} {
+		t.Run(id, func(t *testing.T) {
+			got, ok := Find(id)
+			if !ok {
+				t.Fatalf("Find(%q) failed", id)
+			}
+			if !slices.Equal(got.Efforts, want) {
+				t.Fatalf("Find(%q).Efforts = %v, want %v", id, got.Efforts, want)
+			}
+		})
 	}
 }
 
@@ -69,8 +158,8 @@ func TestDeepSeekFlash0731IsPreferred(t *testing.T) {
 	}
 }
 
-func TestOllamaModelMappingUsesLongestPrefix(t *testing.T) {
-	t.Setenv("WINGMAN_LARGE_CONTEXT", "1")
+func TestOllamaModelMapping(t *testing.T) {
+	t.Setenv("WINGMAN_CONTEXT_WINDOW_MODE", "full")
 
 	cases := []struct {
 		id      string
@@ -85,6 +174,7 @@ func TestOllamaModelMappingUsesLongestPrefix(t *testing.T) {
 		{"qwen/qwen3.8-max", "Qwen 3.8 Max", 1_000_000},
 		{"qwen/qwen3.8-2.4t-a95b", "Qwen 3.8 Max", 1_000_000},
 		{"openai/gpt-5.6-sol", "GPT 5.6 Sol", 1_050_000},
+		{"openai/gpt-6-astra", "GPT 6 Astra", 1_050_000},
 		{"GPT-5.6-SOL:27B-MLX", "GPT 5.6 Sol", 1_050_000},
 	}
 
@@ -109,6 +199,28 @@ func TestOllamaModelMappingUsesLongestPrefix(t *testing.T) {
 	}
 }
 
+func TestCanonicalID(t *testing.T) {
+	for id, want := range map[string]string{
+		"openai/gpt-5.6":                     "gpt-5.6-sol",
+		"~openai/GPT-6-ASTRA:latest":         "gpt-6-astra",
+		"~openai/GPT-6.1-SOL:latest":         "gpt-6.1-sol",
+		"qwen/qwen3.8-27b:Q4_K_M":            "qwen3.8",
+		"anthropic/claude-sonnet-5-5:latest": "claude-sonnet-5-5",
+		"MiniMax-M3":                         "minimax-m3",
+		"anthropic/gpt-6-astra":              "anthropic/gpt-6-astra",
+		"unknown/deployment:tag":             "unknown/deployment:tag",
+		"gpt-5.6-sol-preview":                "gpt-5.6-sol-preview",
+		"claude-sonnet-5-5-20260928":         "claude-sonnet-5-5-20260928",
+	} {
+		if got := CanonicalID(id); got != want {
+			t.Errorf("CanonicalID(%q) = %q, want %q", id, got, want)
+		}
+		if resolved, ok := Find(id); ok && resolved.ID != id {
+			t.Errorf("Find(%q) changed the backend's ID to %q", id, resolved.ID)
+		}
+	}
+}
+
 func TestProviderPrefixedModelMapping(t *testing.T) {
 	for _, m := range Models {
 		if m.Namespace == "" {
@@ -117,16 +229,25 @@ func TestProviderPrefixedModelMapping(t *testing.T) {
 	}
 
 	cases := map[string]string{
-		"anthropic/claude-sonnet-5": "Claude Sonnet 5",
-		"openai/gpt-5.6-sol":        "GPT 5.6 Sol",
-		"google/gemini-3.1-pro":     "Gemini 3.1 Pro",
-		"z-ai/glm-5.3":              "GLM 5.3",
-		"deepseek/deepseek-v4-pro":  "DeepSeek V4 Pro",
-		"mistralai/mistral-medium":  "Mistral Medium 3.5",
-		"moonshotai/kimi-k3":        "Kimi K3",
-		"minimax/minimax-m3":        "MiniMax M3",
-		"x-ai/grok-4.6":             "Grok 4.6",
-		"qwen/qwen3.8-27b":          "Qwen 3.8",
+		"anthropic/claude-sonnet-5":   "Claude Sonnet 5",
+		"anthropic/claude-sonnet-5-5": "Claude Sonnet 5.5",
+		"anthropic/claude-haiku-5-5":  "Claude Haiku 5.5",
+		"anthropic/claude-opus-5-5":   "Claude Opus 5.5",
+		"anthropic/claude-fable-5-1":  "Claude Fable 5.1",
+		"anthropic/claude-mythos-5-1": "Claude Mythos 5.1",
+		"openai/gpt-5.6-sol":          "GPT 5.6 Sol",
+		"openai/gpt-6-astra":          "GPT 6 Astra",
+		"openai/gpt-6.1-sol":          "GPT 6.1 Sol",
+		"openai/gpt-6-sol":            "GPT 6 Sol",
+		"openai/gpt-6-luna":           "GPT 6 Luna",
+		"google/gemini-3.1-pro":       "Gemini 3.1 Pro",
+		"z-ai/glm-5.3":                "GLM 5.3",
+		"deepseek/deepseek-v4-pro":    "DeepSeek V4 Pro",
+		"mistralai/mistral-medium":    "Mistral Medium 3.5",
+		"moonshotai/kimi-k3":          "Kimi K3",
+		"minimax/minimax-m3":          "MiniMax M3",
+		"x-ai/grok-4.6":               "Grok 4.6",
+		"qwen/qwen3.8-27b":            "Qwen 3.8",
 	}
 
 	for id, name := range cases {
@@ -153,6 +274,15 @@ func TestCurrentProviderModelClassification(t *testing.T) {
 		{"glm-5.3", "glm", ClassMedium},
 		{"MiniMax-M3", "minimax", ClassLarge},
 		{"grok-4.6", "grok", ClassLarge},
+		{"gpt-6-astra", "gpt", ClassLarge},
+		{"gpt-6-sol", "gpt", ClassMedium},
+		{"gpt-6-luna", "gpt", ClassSmall},
+		{"claude-opus-5-5", "claude", ClassLarge},
+		{"claude-sonnet-5-5", "claude", ClassMedium},
+		{"anthropic/claude-sonnet-5-5", "claude", ClassMedium},
+		{"~openai/GPT-6-ASTRA:latest", "gpt", ClassLarge},
+		{"google/gemini-3.7-flash", "gemini", ClassMedium},
+		{"qwen/qwen3.8-27b:latest", "qwen3", ClassMedium},
 	}
 
 	for _, tc := range cases {

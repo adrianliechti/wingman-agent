@@ -24,8 +24,6 @@ func (e *Engine) ModuleGraph(ctx context.Context) (ModuleGraph, error) {
 	if err != nil {
 		return ModuleGraph{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return g.moduleGraph(), nil
 }
 
@@ -73,8 +71,6 @@ func (e *Engine) ModuleProfiles(ctx context.Context, modules []string, topSymbol
 	if err != nil {
 		return nil, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	wanted := make(map[string]bool, len(modules))
 	for _, m := range modules {
@@ -141,8 +137,6 @@ func (e *Engine) Neighborhood(ctx context.Context, id, name, file string) (Neigh
 	if err != nil {
 		return NeighborhoodResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	var node *Node
 	var others []*Node
@@ -152,7 +146,7 @@ func (e *Engine) Neighborhood(ctx context.Context, id, name, file string) (Neigh
 	if node == nil {
 		cands := g.resolve(name, file)
 		if len(cands) == 0 {
-			return NeighborhoodResult{}, notFoundErr(name, file)
+			return NeighborhoodResult{}, g.notFoundErr(name, file)
 		}
 		node = cands[0]
 		others = othersOf(cands, node)

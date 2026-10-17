@@ -6,11 +6,11 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
 )
@@ -30,7 +30,7 @@ type sessionFileInfo struct {
 
 func listSessionFiles(sessionsDir string) []sessionFileInfo {
 	var files []string
-	_ = filepath.WalkDir(sessionsDir, func(path string, d fs.DirEntry, err error) error {
+	_ = pathutil.WalkDir(sessionsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -73,7 +73,7 @@ func listSessionFiles(sessionsDir string) []sessionFileInfo {
 }
 
 func canonicalPath(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+	if resolved, err := pathutil.Resolve(path); err == nil {
 		return resolved
 	}
 	return path
@@ -242,7 +242,7 @@ func normalizePiText(content json.RawMessage) string {
 	return b.String()
 }
 
-func replayMessages(send func(acp.SessionUpdate), data json.RawMessage) {
+func replayMessages(send func(acp.SessionUpdate), data json.RawMessage, cwd string) {
 	var d struct {
 		Messages []json.RawMessage `json:"messages"`
 	}
@@ -302,14 +302,11 @@ func replayMessages(send func(acp.SessionUpdate), data json.RawMessage) {
 						continue
 					}
 					startedTools[block.ID] = true
-					opts := []acp.ToolCallStartOpt{
-						acp.WithStartKind(toolKind(block.Name)),
-						acp.WithStartStatus(acp.ToolCallStatusPending),
-					}
-					if block.Arguments != nil {
-						opts = append(opts, acp.WithStartRawInput(block.Arguments))
-					}
-					send(acp.StartToolCall(acp.ToolCallId(block.ID), toolTitle(block.Name, block.Arguments), opts...))
+					presentation := presentTool(block.Name, block.Arguments, cwd)
+					send(acp.StartToolCall(
+						acp.ToolCallId(block.ID), presentation.title,
+						startToolOptions(presentation, acp.ToolCallStatusPending)...,
+					))
 				}
 			}
 
@@ -319,9 +316,6 @@ func replayMessages(send func(acp.SessionUpdate), data json.RawMessage) {
 				id = uuid.NewString()
 			}
 			name := m.ToolName
-			if name == "" {
-				name = "tool"
-			}
 			status := acp.ToolCallStatusCompleted
 			if m.IsError {
 				status = acp.ToolCallStatusFailed
@@ -329,9 +323,10 @@ func replayMessages(send func(acp.SessionUpdate), data json.RawMessage) {
 			var args map[string]any
 			_ = json.Unmarshal(m.Args, &args)
 			if !startedTools[id] {
-				send(acp.StartToolCall(acp.ToolCallId(id), toolTitle(name, args),
-					acp.WithStartKind(toolKind(name)),
-					acp.WithStartStatus(status),
+				presentation := presentTool(name, args, cwd)
+				send(acp.StartToolCall(
+					acp.ToolCallId(id), presentation.title,
+					startToolOptions(presentation, status)...,
 				))
 			}
 			opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(status)}

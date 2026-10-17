@@ -11,11 +11,11 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
-const MaxBytes = 100 * 1024
+const MaxBytes = tool.MaxInlineResultBytes
 
-const grepMaxBytes = 20 * 1024
+const grepMaxBytes = tool.MaxGrepResultBytes
 
-const shellMaxBytes = 48 * 1024
+const shellMaxBytes = tool.MaxInlineResultBytes
 
 const headPreviewBytes = 4 * 1024
 
@@ -25,13 +25,15 @@ func budgetFor(name string) int {
 	switch name {
 	case "grep":
 		return grepMaxBytes
-	case "shell":
+	case "shell", "exec", "exec_command", "exec_session":
 		return shellMaxBytes
 	default:
 		return MaxBytes
 	}
 }
 
+// New provides a post-tool adapter. Install Transform in Hooks.TransformToolResult
+// when persistence must include context added by lifecycle hooks.
 func New(scratchDir string) hook.PostToolUse {
 	return func(_ context.Context, call tool.ToolCall, result string) (hook.Outcome, error) {
 		if tool.IsImageResult(result) {
@@ -41,14 +43,30 @@ func New(scratchDir string) hook.PostToolUse {
 		if len(result) <= budget {
 			return hook.Outcome{}, nil
 		}
-		path := writeScratch(scratchDir, call.Name, result)
+		path := WriteScratch(scratchDir, call.Name, result)
 		updated := formatPersisted(result, path)
 		return hook.Outcome{UpdatedResult: &updated}, nil
 	}
 }
 
-func writeScratch(scratchDir, toolName, content string) string {
+// Transform persists the assembled result after lifecycle hooks add context.
+func Transform(scratchDir string) hook.TransformToolResult {
+	truncate := New(scratchDir)
+	return func(ctx context.Context, call tool.ToolCall, result string) (string, error) {
+		outcome, err := truncate(ctx, call, result)
+		if outcome.UpdatedResult != nil {
+			return *outcome.UpdatedResult, err
+		}
+		return result, err
+	}
+}
+
+// WriteScratch saves content under scratchDir and returns its path, or "" on failure.
+func WriteScratch(scratchDir, toolName, content string) string {
 	if scratchDir == "" {
+		return ""
+	}
+	if err := os.MkdirAll(scratchDir, 0o700); err != nil {
 		return ""
 	}
 
@@ -56,26 +74,32 @@ func writeScratch(scratchDir, toolName, content string) string {
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	name := f.Name()
 	if _, err := f.WriteString(content); err != nil {
-		os.Remove(f.Name())
+		_ = f.Close()
+		_ = os.Remove(name)
 		return ""
 	}
-	return f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return ""
+	}
+	return name
 }
 
 func formatPersisted(result, scratchPath string) string {
-	head := text.HeadBytes(result, headPreviewBytes)
-	tail := text.TailBytes(result, tailPreviewBytes)
+	head := text.HeadLines(result, headPreviewBytes)
+	tail := text.TailLines(result[len(head):], tailPreviewBytes)
+	omitted := len(result) - len(head) - len(tail)
 
 	var b strings.Builder
 	b.WriteString("<persisted-output>\n")
-	fmt.Fprintf(&b, "Output was %d bytes — too large for inline.", len(result))
+	fmt.Fprintf(&b, "Output was %d bytes (%d lines); %d bytes omitted from this preview.", len(result), text.LineCount(result), omitted)
 	if scratchPath != "" {
 		fmt.Fprintf(&b, " Full output saved to: %s", scratchPath)
 	}
 	fmt.Fprintf(&b, "\n\nPreview (first %d bytes):\n\n%s", len(head), head)
-	fmt.Fprintf(&b, "\n\n[...]\n\nPreview (last %d bytes):\n\n%s", len(tail), tail)
+	fmt.Fprintf(&b, "\n\n[... %d bytes omitted ...]\n\nPreview (last %d bytes):\n\n%s", omitted, len(tail), tail)
 	if scratchPath != "" {
 		b.WriteString("\n\nUse `read` on the path above to retrieve specific ranges.")
 	}

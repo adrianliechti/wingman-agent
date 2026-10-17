@@ -1,20 +1,16 @@
 ---
 name: example-skill
-description: Describe the workflow and the user requests that should activate it.
+description: Describe the specific outcome and the requests that should trigger this skill.
 ---
 
 # Example Skill
 
-State the outcome this workflow produces.
+State what successful completion produces and how to choose the scope from the request.
 
-## Workflow
+## Approach
 
-1. Inspect the relevant inputs and existing project conventions.
-2. Follow the smallest reliable sequence that produces the requested outcome.
-3. Verify the result with a representative check.
+Describe the task-specific decisions, evidence, and constraints that improve the outcome. Keep steps only when their order matters. Link supporting resources where needed and explain when to read or execute them.
 
-## Constraints
+## Verification and result
 
-- State important safety boundaries and stopping conditions.
-- Link any required supporting resource with a path relative to this file.
-- Report the outcome and any unresolved blocker concisely.
+Explain how to check the observable result and what to report when evidence or required access is missing. Preserve the user's intent and authorization; omit this section if the workflow already makes these clear.

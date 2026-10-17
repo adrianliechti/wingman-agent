@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	acpsdk "github.com/coder/acp-go-sdk"
@@ -19,6 +21,38 @@ import (
 
 func TestACPContract(t *testing.T) {
 	acptest.Run(t, newContractServer)
+}
+
+type cancelOnProgressWriter struct {
+	cancel func()
+	called atomic.Bool
+}
+
+func (w *cancelOnProgressWriter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), acptest.CancelText) && w.called.CompareAndSwap(false, true) {
+		w.cancel()
+	}
+	return len(p), nil
+}
+
+func TestPromptCancellationDuringNotification(t *testing.T) {
+	s := newContractServer(t).(*contractServer)
+	t.Cleanup(func() { _ = s.Close() })
+	reader, peer := net.Pipe()
+	t.Cleanup(func() { _ = reader.Close(); _ = peer.Close() })
+	writer := &cancelOnProgressWriter{}
+	s.SetAgentConnection(acpsdk.NewAgentSideConnection(s, writer, reader))
+	ctx := t.Context()
+	session, err := s.NewSession(ctx, acpsdk.NewSessionRequest{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.cancel = func() { _ = s.Cancel(ctx, acpsdk.CancelNotification{SessionId: session.SessionId}) }
+	id := "cancel-during-notification"
+	response, err := s.Prompt(ctx, acpsdk.PromptRequest{SessionId: session.SessionId, MessageId: &id, Prompt: []acpsdk.ContentBlock{acpsdk.TextBlock(acptest.CancelPrompt)}})
+	if !writer.called.Load() || err != nil || response.StopReason != acpsdk.StopReasonCancelled || response.UserMessageId == nil || *response.UserMessageId != id {
+		t.Fatalf("cancelled=%t response=%+v error=%v", writer.called.Load(), response, err)
+	}
 }
 
 type contractServer struct {
@@ -87,7 +121,7 @@ func (b *contractModelBackend) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	case "/responses":
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
-		if strings.Contains(string(body), acptest.CancelPrompt) {
+		if strings.Contains(string(body), acptest.CancelPrompt) && !strings.Contains(string(body), acptest.NormalPrompt) {
 			writeContractSSE(w, map[string]any{
 				"type": "response.output_text.delta", "sequence_number": 1,
 				"item_id": "cancel-message", "output_index": 0, "content_index": 0,
@@ -112,7 +146,7 @@ func (b *contractModelBackend) ServeHTTP(w http.ResponseWriter, r *http.Request)
 					"name": "glob", "arguments": `{"pattern":"*"}`, "status": "completed",
 				},
 			})
-			writeContractSSE(w, completedEvent(2, 11, 2, 3, nil))
+			writeContractSSE(w, completedEvent(2, 11, 2, 0, 3, 0, nil))
 			return
 		}
 		writeContractSSE(w, map[string]any{
@@ -120,7 +154,7 @@ func (b *contractModelBackend) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			"item_id": "contract-message", "output_index": 0, "content_index": 0,
 			"delta": acptest.NormalText,
 		})
-		writeContractSSE(w, completedEvent(2, 13, 4, 5, nil))
+		writeContractSSE(w, completedEvent(2, 13, 4, 0, 5, 0, nil))
 	default:
 		http.NotFound(w, r)
 	}

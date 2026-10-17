@@ -11,15 +11,16 @@ import (
 // may populate only the fields they know; the external hook adapter supplies
 // Codex-compatible zero/null values for the rest.
 type Runtime struct {
-	SessionID      string
-	TurnID         string
-	TranscriptPath string
-	CWD            string
-	Model          string
-	PermissionMode string
-	StartSource    string
-	AgentID        string
-	AgentType      string
+	SessionID       string
+	TurnID          string
+	TranscriptPath  string
+	CWD             string
+	Model           string
+	ReasoningEffort string
+	PermissionMode  string
+	StartSource     string
+	AgentID         string
+	AgentType       string
 }
 
 type runtimeKey struct{}
@@ -79,6 +80,10 @@ type PermissionRequestOutcome struct {
 type PreToolUse func(ctx context.Context, call tool.ToolCall) (PreToolUseOutcome, error)
 type PermissionRequest func(ctx context.Context, call tool.ToolCall) (PermissionRequestOutcome, error)
 type PostToolUse func(ctx context.Context, call tool.ToolCall, result string) (Outcome, error)
+
+// TransformToolResult processes the final result, including hook context,
+// before the harness applies its fallback size limit. It is not a lifecycle event.
+type TransformToolResult func(ctx context.Context, call tool.ToolCall, result string) (string, error)
 type UserPromptSubmit func(ctx context.Context, prompt string) (Outcome, error)
 type SessionStart func(ctx context.Context, source string) (Outcome, error)
 type SessionEnd func(ctx context.Context, reason string)
@@ -88,24 +93,30 @@ type PreCompact func(ctx context.Context, trigger string) (Outcome, error)
 type PostCompact func(ctx context.Context, trigger string) (Outcome, error)
 type Stop func(ctx context.Context, lastAssistantMessage string, active bool) (Outcome, error)
 
+// Interrupt observes a turn the user interrupted; it cannot change the outcome.
+type Interrupt func(ctx context.Context)
+
 type Hooks struct {
-	PreToolUse        []PreToolUse
-	PermissionRequest []PermissionRequest
-	PostToolUse       []PostToolUse
-	UserPromptSubmit  []UserPromptSubmit
-	SessionStart      []SessionStart
-	SessionEnd        []SessionEnd
-	SubagentStart     []SubagentStart
-	SubagentStop      []SubagentStop
-	PreCompact        []PreCompact
-	PostCompact       []PostCompact
-	Stop              []Stop
+	PreToolUse          []PreToolUse
+	PermissionRequest   []PermissionRequest
+	PostToolUse         []PostToolUse
+	TransformToolResult []TransformToolResult
+	UserPromptSubmit    []UserPromptSubmit
+	SessionStart        []SessionStart
+	SessionEnd          []SessionEnd
+	SubagentStart       []SubagentStart
+	SubagentStop        []SubagentStop
+	PreCompact          []PreCompact
+	PostCompact         []PostCompact
+	Stop                []Stop
+	Interrupt           []Interrupt
 }
 
 func (h *Hooks) Append(other Hooks) {
 	h.PreToolUse = append(h.PreToolUse, other.PreToolUse...)
 	h.PermissionRequest = append(h.PermissionRequest, other.PermissionRequest...)
 	h.PostToolUse = append(h.PostToolUse, other.PostToolUse...)
+	h.TransformToolResult = append(h.TransformToolResult, other.TransformToolResult...)
 	h.UserPromptSubmit = append(h.UserPromptSubmit, other.UserPromptSubmit...)
 	h.SessionStart = append(h.SessionStart, other.SessionStart...)
 	h.SessionEnd = append(h.SessionEnd, other.SessionEnd...)
@@ -114,4 +125,5 @@ func (h *Hooks) Append(other Hooks) {
 	h.PreCompact = append(h.PreCompact, other.PreCompact...)
 	h.PostCompact = append(h.PostCompact, other.PostCompact...)
 	h.Stop = append(h.Stop, other.Stop...)
+	h.Interrupt = append(h.Interrupt, other.Interrupt...)
 }

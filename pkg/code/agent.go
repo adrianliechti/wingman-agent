@@ -32,7 +32,7 @@ func UnattendedMode() Mode {
 	return Mode{
 		ID:          UnattendedModeID,
 		Name:        "Unattended",
-		Description: "Auto-approves actions and makes reasonable assumptions instead of asking.",
+		Description: "Run every action without review and continue without questions.",
 	}
 }
 
@@ -108,10 +108,27 @@ type Agent interface {
 	Close() error
 }
 
+// Compactor checkpoints a session's context on demand; focus guides what the summary keeps.
+type Compactor interface {
+	Compact(ctx context.Context, sessionID, focus string) (agent.CompactResult, error)
+}
+
+// UnattendedAgent exposes an interaction policy independent of Agent/Plan mode.
+// Adapters that only expose provider-defined modes may omit this interface.
+type UnattendedAgent interface {
+	Unattended(sessionID string) bool
+	SetUnattended(ctx context.Context, sessionID string, enabled bool) error
+}
+
 var (
 	ErrTurnInProgress = agent.ErrTurnInProgress
 	ErrEmptyInput     = agent.ErrEmptyInput
 )
+
+// SessionForker copies an idle session into a new loaded one and returns its ID.
+type SessionForker interface {
+	ForkSession(ctx context.Context, id, title string) (string, error)
+}
 
 type SessionLoadStreamer interface {
 	LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]agent.Message, error]
@@ -148,4 +165,11 @@ type HistoryVersionProvider interface {
 // present command discovery alongside their own local commands.
 type CommandProvider interface {
 	Commands(sessionID string) []Command
+}
+
+// SessionUpdateSource reports backend metadata updates that can arrive outside
+// a Send stream (ACP configuration, commands, title, modes and usage).
+// The callback runs after releasing adapter locks.
+type SessionUpdateSource interface {
+	SetSessionUpdateHandler(func(sessionID string))
 }

@@ -8,20 +8,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	. "github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 )
 
-func TestWriteAndReadNormalizeAbsoluteWorkspacePaths(t *testing.T) {
+func TestEditAndReadNormalizeAbsoluteWorkspacePaths(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
 	absPath := filepath.Join(tmpDir, "foo", "bar.txt")
-	_, err := WriteTool(root).Execute(context.Background(), map[string]any{
-		"file_path": absPath,
-		"content":   "hello",
-	})
+	_, err := EditTool(root).Execute(context.Background(), createArgs(absPath, "hello"))
 	if err != nil {
-		t.Fatalf("write absolute workspace path: %v", err)
+		t.Fatalf("create absolute workspace path: %v", err)
 	}
 
 	result, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": absPath})
@@ -44,12 +42,9 @@ func TestWorkspaceBoundaryViaTools(t *testing.T) {
 		}
 	}
 
-	_, err = WriteTool(root).Execute(context.Background(), map[string]any{
-		"file_path": filepath.Join(os.TempDir(), "wingman-outside-test.txt"),
-		"content":   "x",
-	})
+	_, err = EditTool(root).Execute(context.Background(), createArgs(filepath.Join(os.TempDir(), "wingman-outside-test.txt"), "x"))
 	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
-		t.Fatalf("expected outside workspace write error, got: %v", err)
+		t.Fatalf("expected outside workspace create error, got: %v", err)
 	}
 }
 
@@ -79,22 +74,36 @@ func TestSandboxWildcardRoot(t *testing.T) {
 	root, _, cleanup := createTestRoot(t)
 	defer cleanup()
 
-	outside := filepath.Join(os.TempDir(), "wingman-wildcard-root-test.txt")
-	if err := os.WriteFile(outside, []byte("system config"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(outside)
-
-	if _, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": outside}); err == nil {
-		t.Fatal("expected outside-workspace rejection without a wildcard root")
-	}
-
-	out, err := ReadTool(root, "*").Execute(context.Background(), map[string]any{"file_path": outside})
-	if err != nil {
-		t.Fatalf("wildcard root read failed: %v", err)
-	}
-	if !strings.Contains(out.Content, "system config") {
-		t.Errorf("expected file content, got: %s", out.Content)
+	outside := filepath.Join(t.TempDir(), "config.txt")
+	for _, check := range []struct {
+		makeTool func(*os.Root, ...string) tool.Tool
+		args     map[string]any
+		want     string
+		wantFile string
+	}{
+		{ReadTool, map[string]any{"file_path": outside}, "system config", "system config"},
+		{GrepTool, map[string]any{"path": outside, "pattern": "system"}, outside, "system config"},
+		{GlobTool, map[string]any{"path": filepath.Dir(outside), "pattern": "*.txt"}, outside, "system config"},
+		{EditTool, map[string]any{"file_path": outside, "old_string": "system", "new_string": "edited"}, "Applied", "edited config"},
+	} {
+		t.Run(check.makeTool(root).Name, func(t *testing.T) {
+			if err := os.WriteFile(outside, []byte("system config"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := check.makeTool(root).Execute(context.Background(), check.args); err == nil {
+				t.Fatal("accepted an outside path without a wildcard root")
+			}
+			if data, err := os.ReadFile(outside); err != nil || string(data) != "system config" {
+				t.Fatalf("denied operation changed file: %q, %v", data, err)
+			}
+			out, err := check.makeTool(root, "*").Execute(context.Background(), check.args)
+			if err != nil || !strings.Contains(out.Content, check.want) {
+				t.Fatalf("wildcard operation = %q, %v; want %q", out.Content, err, check.want)
+			}
+			if data, err := os.ReadFile(outside); err != nil || string(data) != check.wantFile {
+				t.Fatalf("wildcard file = %q, %v; want %q", data, err, check.wantFile)
+			}
+		})
 	}
 }
 
@@ -150,12 +159,12 @@ func TestEditFuzzyMatchesCommonTypography(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read edited file: %v", err)
 	}
-	if !strings.Contains(string(content), `say "bye"`) || !strings.Contains(string(content), "foo-baz") {
+	if !strings.Contains(string(content), `say “bye”`) || !strings.Contains(string(content), "foo-baz") {
 		t.Fatalf("unexpected edited content: %q", string(content))
 	}
 }
 
-func TestEditReturnsLineDiff(t *testing.T) {
+func TestEditReturnsConciseFileSummary(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
@@ -171,7 +180,7 @@ func TestEditReturnsLineDiff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
-	if !strings.Contains(result.Content, "-2 old") || !strings.Contains(result.Content, "+2 new") {
-		t.Fatalf("expected line-numbered diff, got: %q", result.Content)
+	if result.Content != "Applied 1 edits across 1 files.\nM diff.txt" {
+		t.Fatalf("unexpected edit summary: %q", result.Content)
 	}
 }

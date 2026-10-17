@@ -2,6 +2,7 @@ package code
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,9 +16,195 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/dap"
+	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
+	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	wingmcp "github.com/adrianliechti/wingman-agent/pkg/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
+
+func TestManagedToolsUpdateWaitContextStopsWaiting(t *testing.T) {
+	update := &ManagedToolsUpdate{done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := update.WaitContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("WaitContext error = %v, want context cancellation", err)
+	}
+}
+
+func TestWorkspaceCloseCancelsManagedToolUpdates(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	update := &ManagedToolsUpdate{cancel: cancel, done: make(chan struct{})}
+	workspace := &Workspace{
+		managedUpdates: map[*ManagedToolsUpdate]struct{}{update: {}},
+	}
+
+	workspace.Close()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("workspace close did not cancel its managed tool update")
+	}
+}
+
+func TestDebugToolSetupBlocksLaunchAndCanCloseWorkspace(t *testing.T) {
+	testenv.UserHome(t)
+	testenv.WingmanHome(t)
+	t.Setenv("WINGMAN_MANAGED_TOOLS", "on")
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/demo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace.WarmUp()
+	t.Cleanup(workspace.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	checked := false
+	_, err = workspace.UpdateDebugTools(ctx, "Go", true, func(progress devtools.Progress) {
+		if progress.Phase != devtools.ProgressChecking {
+			return
+		}
+		checked = true
+		if _, err := workspace.DAP.Start(ctx, dap.StartOptions{}); !errors.Is(err, dap.ErrBusy) {
+			t.Errorf("launch during update = %v, want ErrBusy", err)
+		}
+		cancel()
+		workspace.Close()
+	})
+	if !checked || !errors.Is(err, context.Canceled) {
+		t.Fatalf("setup = %v, checking = %t", err, checked)
+	}
+}
+
+type managedToolDirectoryStub struct{}
+
+func (managedToolDirectoryStub) ToolDir(string) string { return "" }
+
+func TestManagedToolRequirementsIncludeJavaDebuggerAndHost(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "pom.xml"), []byte("<project/>\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspace := &Workspace{
+		RootPath:      root,
+		debugRegistry: debugadapter.NewRegistry(managedToolDirectoryStub{}),
+	}
+
+	findJDTLS := func(requirements []devtools.Requirement) (devtools.Requirement, bool) {
+		for _, requirement := range requirements {
+			if slices.Contains(requirement.Alternatives, "jdtls") {
+				return requirement, true
+			}
+		}
+		return devtools.Requirement{}, false
+	}
+
+	lspOnly, err := workspace.managedToolRequirements(context.Background(), ManagedLSPTools, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requirement, ok := findJDTLS(lspOnly); !ok {
+		t.Fatalf("LSP-only JDT LS requirement = %+v, found %t", requirement, ok)
+	}
+
+	dapOnly, err := workspace.managedToolRequirements(context.Background(), ManagedDAPTools, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requirement, ok := findJDTLS(dapOnly); !ok {
+		t.Fatalf("DAP-only JDT LS host requirement = %+v, found %t", requirement, ok)
+	}
+	foundDebugger := false
+	for _, requirement := range dapOnly {
+		foundDebugger = foundDebugger || slices.Contains(requirement.Alternatives, "java-debug-adapter")
+	}
+	if !foundDebugger {
+		t.Fatalf("DAP-only Java debugger requirement was not detected: %+v", dapOnly)
+	}
+
+	editor, err := workspace.managedToolRequirements(context.Background(), ManagedEditorTools, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requirement, ok := findJDTLS(editor); !ok {
+		t.Fatalf("editor JDT LS requirement = %+v, found %t", requirement, ok)
+	}
+}
+
+func TestManagedDAPRequirementsIncludeJavaScriptDebugger(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"scripts":{"start":"node server.js"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspace := &Workspace{RootPath: root}
+	requirements, err := workspace.managedToolRequirements(context.Background(), ManagedDAPTools, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, requirement := range requirements {
+		if slices.Contains(requirement.Alternatives, "js-debug-adapter") && slices.Contains(requirement.Projects, root) {
+			return
+		}
+	}
+	t.Fatalf("JavaScript debugger requirement not detected: %+v", requirements)
+}
+
+func TestManagedDebugRequirementsSelectOnlyRequestedLanguage(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("WINGMAN_JAVA_DEBUG_BUNDLE", "")
+	for name, contents := range map[string]string{
+		"go.mod":       "module example.com/demo\n\ngo 1.25\n",
+		"pom.xml":      "<project/>\n",
+		"package.json": "{}\n",
+		"main.py":      "print('hello')\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workspace := &Workspace{
+		RootPath:      root,
+		debugRegistry: debugadapter.NewRegistry(managedToolDirectoryStub{}),
+	}
+	for _, test := range []struct {
+		language string
+		commands []string
+	}{
+		{language: "Go", commands: []string{"dlv"}},
+		{language: "Python", commands: []string{"debugpy-adapter"}},
+		{language: "Java", commands: []string{"java-debug-adapter", "jdtls"}},
+	} {
+		t.Run(test.language, func(t *testing.T) {
+			requirements, err := workspace.managedToolRequirements(context.Background(), ManagedDAPTools, test.language)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var commands []string
+			for _, requirement := range requirements {
+				commands = append(commands, requirement.Alternatives...)
+			}
+			slices.Sort(commands)
+			if !slices.Equal(commands, test.commands) {
+				t.Fatalf("commands = %v, want %v", commands, test.commands)
+			}
+		})
+	}
+	requirements, err := workspace.managedToolRequirements(context.Background(), ManagedLSPTools, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, requirement := range requirements {
+		for _, command := range requirement.Alternatives {
+			if slices.Contains([]string{"dlv", "debugpy-adapter", "java-debug-adapter", "js-debug-adapter"}, command) {
+				t.Fatalf("startup language tools include debugger %q", command)
+			}
+		}
+	}
+}
 
 func TestWarmUpCreatesLSPManagerOutsideGitRepository(t *testing.T) {
 	testenv.UserHome(t)
@@ -289,26 +476,43 @@ func waitForMCPToolNames(t *testing.T, w *Workspace, want ...string) {
 	}
 }
 
-func TestWithEditDiagnosticsWrapsOnlyEditAndWrite(t *testing.T) {
+func TestWithEditDiagnosticsPassesThroughWithoutLanguageService(t *testing.T) {
 	w := &Workspace{RootPath: t.TempDir()}
 
 	execute := func(ctx context.Context, args map[string]any) (tool.Result, error) {
-		return tool.Text("diff output"), nil
+		return tool.Result{Content: "diff output", Metadata: map[string]any{
+			tool.FileChangesMetadata: []tool.FileChange{{Path: "main.go", AfterExists: true}},
+		}}, nil
 	}
 	tools := w.WithEditDiagnostics([]tool.Tool{
 		{Name: "edit", Execute: execute},
-		{Name: "write", Execute: execute},
 		{Name: "read", Execute: execute},
 	})
 
 	for _, tl := range tools {
-		out, err := tl.Execute(context.Background(), map[string]any{"file_path": "main.go"})
+		out, err := tl.Execute(context.Background(), map[string]any{"edits": []any{map[string]any{"file_path": "main.go"}}})
 		if err != nil {
 			t.Fatalf("%s: %v", tl.Name, err)
 		}
 		if out.Content != "diff output" {
 			t.Fatalf("%s output = %q, want passthrough with no LSP manager", tl.Name, out.Content)
 		}
+	}
+}
+
+func TestEditedPathsCoverBatchedEdits(t *testing.T) {
+	result := tool.Result{Metadata: map[string]any{tool.FileChangesMetadata: []tool.FileChange{
+		{Path: "a.go", AfterExists: true},
+		{Path: "b/b.go", AfterExists: true},
+		{Path: "a.go", AfterExists: true},
+		{Path: "gone.go"},
+	}}}
+
+	if got := editedPaths(result); !slices.Equal(got, []string{"a.go", "b/b.go"}) {
+		t.Fatalf("editedPaths = %v", got)
+	}
+	if got := editedPaths(tool.Text("no metadata")); got != nil {
+		t.Fatalf("editedPaths without metadata = %v", got)
 	}
 }
 
@@ -513,6 +717,8 @@ type: project
 # Migrate auth middleware
 `)
 
+	mustWrite(t, filepath.Join(dir, "über_setup.md"), "---\ndescription: unicode title stays intact\n---\n\nbody\n")
+
 	mustWrite(t, filepath.Join(dir, "notes.txt"), "ignore me\n")
 
 	if err := os.MkdirAll(filepath.Join(dir, "subdir"), 0755); err != nil {
@@ -524,10 +730,11 @@ type: project
 	content := w.MemoryContent()
 
 	wantLines := []string{
-		"- feedback_testing.md — no DB mocks; real DB only",
-		"- note.md — Just a one-liner about something.",
-		"- preferences.md — User Preferences",
-		"- typed_only.md — Migrate auth middleware",
+		"- [Feedback testing](feedback_testing.md) — no DB mocks; real DB only",
+		"- [Note](note.md) — Just a one-liner about something.",
+		"- [Preferences](preferences.md) — User Preferences",
+		"- [Typed only](typed_only.md) — Migrate auth middleware",
+		"- [Über setup](über_setup.md) — unicode title stays intact",
 	}
 	for _, want := range wantLines {
 		if !strings.Contains(content, want) {
@@ -543,6 +750,32 @@ type: project
 	}
 }
 
+func TestMemoryContent_NewestFirst(t *testing.T) {
+	dir := t.TempDir()
+
+	base := time.Now().Add(-time.Hour)
+	for i, name := range []string{"project_oldest.md", "feedback_middle.md", "user_newest.md"} {
+		path := filepath.Join(dir, name)
+		mustWrite(t, path, "---\ndescription: hook "+name+"\n---\n\nbody\n")
+		stamp := base.Add(time.Duration(i) * time.Minute)
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatalf("chtimes %s: %v", name, err)
+		}
+	}
+
+	w := &Workspace{MemoryPath: dir}
+	got := w.MemoryContent()
+
+	want := []string{
+		"- [User newest](user_newest.md) — hook user_newest.md",
+		"- [Feedback middle](feedback_middle.md) — hook feedback_middle.md",
+		"- [Project oldest](project_oldest.md) — hook project_oldest.md",
+	}
+	if got != strings.Join(want, "\n") {
+		t.Errorf("expected newest-first index:\n%s\ngot:\n%s", strings.Join(want, "\n"), got)
+	}
+}
+
 func TestMemoryContent_CacheInvalidatesOnFileChange(t *testing.T) {
 	dir := t.TempDir()
 	w := &Workspace{MemoryPath: dir}
@@ -552,7 +785,7 @@ func TestMemoryContent_CacheInvalidatesOnFileChange(t *testing.T) {
 	}
 
 	mustWrite(t, filepath.Join(dir, "a.md"), "---\ndescription: first\n---\n\nbody\n")
-	if got := w.MemoryContent(); !strings.Contains(got, "a.md — first") {
+	if got := w.MemoryContent(); !strings.Contains(got, "[A](a.md) — first") {
 		t.Errorf("expected new file picked up, got %q", got)
 	}
 
@@ -561,7 +794,7 @@ func TestMemoryContent_CacheInvalidatesOnFileChange(t *testing.T) {
 	if err := os.Chtimes(filepath.Join(dir, "a.md"), future, future); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
-	if got := w.MemoryContent(); !strings.Contains(got, "a.md — second") {
+	if got := w.MemoryContent(); !strings.Contains(got, "[A](a.md) — second") {
 		t.Errorf("expected updated description, got %q", got)
 	}
 
@@ -574,12 +807,24 @@ func TestMemoryContent_CacheInvalidatesOnFileChange(t *testing.T) {
 }
 
 func TestLoadBundledSkillsIncludesCoreWorkflows(t *testing.T) {
-	scratch := t.TempDir()
-	skills, err := loadBundledSkills(scratch)
+	testenv.UserHome(t)
+	home := testenv.WingmanHome(t)
+	skills, systemRoot, err := loadBundledSkills()
 	if err != nil {
 		t.Fatalf("loadBundledSkills: %v", err)
 	}
+	if want := filepath.Join(home, "skills", ".system"); systemRoot != want {
+		t.Fatalf("system skills root = %q, want %q", systemRoot, want)
+	}
+	if marker, err := os.ReadFile(filepath.Join(systemRoot, bundledSkillsMarkerFile)); err != nil || strings.TrimSpace(string(marker)) == "" {
+		t.Fatalf("system skills marker = %q, %v", marker, err)
+	}
 
+	resources := map[string][]string{
+		"architecture":    {"references/diagrams.md"},
+		"security-review": {"references/triage.md", "references/remediation.md"},
+		"skill-creator":   {"assets/.gitignore", "assets/SKILL.template.md", "references/skill-format.md"},
+	}
 	names := make(map[string]bool, len(skills))
 	for _, sk := range skills {
 		names[sk.Name] = true
@@ -590,24 +835,27 @@ func TestLoadBundledSkillsIncludesCoreWorkflows(t *testing.T) {
 			t.Errorf("skill %q has empty content", sk.Name)
 		}
 		switch sk.Name {
-		case "architecture", "code-review", "commit", "debug", "feature-dev", "patch", "pull-request", "security-review", "system-design", "test", "threat-model", "triage", "vuln-scan":
+		case "architecture", "code-review", "commit", "debug", "feature-dev", "pull-request", "security-review", "simplify", "test", "threat-model":
 			if !strings.Contains(sk.Content, "$ARGUMENTS") {
 				t.Errorf("argument-taking skill %q does not expose Claude-compatible $ARGUMENTS", sk.Name)
 			}
 		}
-		if sk.Name == "skill-creator" {
-			for _, resource := range []string{"assets/.gitignore", "assets/SKILL.template.md", "references/skill-format.md"} {
-				if _, err := os.Stat(filepath.Join(sk.Location, filepath.FromSlash(resource))); err != nil {
-					t.Errorf("skill-creator resource %q was not copied: %v", resource, err)
-				}
+		if !strings.HasPrefix(sk.Location, systemRoot+string(filepath.Separator)) {
+			t.Errorf("skill %q location %q is outside managed system skills", sk.Name, sk.Location)
+		}
+		for _, resource := range resources[sk.Name] {
+			want, err := bundledFS.ReadFile("skills/" + sk.Name + "/" + resource)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if !strings.HasPrefix(sk.Location, filepath.Join(scratch, "skills")+string(filepath.Separator)) {
-				t.Errorf("skill-creator location %q is outside managed scratch skills", sk.Location)
+			got, err := os.ReadFile(filepath.Join(sk.Location, filepath.FromSlash(resource)))
+			if err != nil || string(got) != string(want) {
+				t.Errorf("skill %q resource %q differs from bundle: %v", sk.Name, resource, err)
 			}
 		}
 	}
 
-	for _, name := range []string{
+	wantNames := []string{
 		"architecture",
 		"code-review",
 		"commit",
@@ -615,20 +863,103 @@ func TestLoadBundledSkillsIncludesCoreWorkflows(t *testing.T) {
 		"feature-dev",
 		"init",
 		"memory",
-		"patch",
 		"pull-request",
 		"security-review",
 		"skill-creator",
 		"simplify",
-		"system-design",
 		"test",
 		"threat-model",
-		"triage",
-		"vuln-scan",
-	} {
+	}
+	if len(skills) != len(wantNames) {
+		t.Errorf("loaded %d bundled skills, want %d; got %v", len(skills), len(wantNames), names)
+	}
+	for _, name := range wantNames {
 		if !names[name] {
 			t.Errorf("bundled skill %q was not loaded; got %v", name, names)
 		}
+	}
+}
+
+func TestLoadBundledSkillsRefreshesMismatchedSystemSnapshot(t *testing.T) {
+	testenv.UserHome(t)
+	home := testenv.WingmanHome(t)
+	systemRoot := filepath.Join(home, "skills", ".system")
+	staleSkill := filepath.Join(systemRoot, "removed-skill", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(staleSkill), 0755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, staleSkill, "stale")
+	if err := os.MkdirAll(filepath.Join(systemRoot, "feature-dev"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(systemRoot, "feature-dev", "SKILL.md"), "tampered")
+	mustWrite(t, filepath.Join(systemRoot, bundledSkillsMarkerFile), "old-fingerprint")
+
+	_, gotRoot, err := loadBundledSkills()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRoot != systemRoot {
+		t.Fatalf("system skills root = %q, want %q", gotRoot, systemRoot)
+	}
+	if _, err := os.Stat(staleSkill); !os.IsNotExist(err) {
+		t.Fatalf("stale system skill survived refresh: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(systemRoot, "feature-dev", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) == "tampered" || !strings.Contains(string(data), "name: feature-dev") {
+		t.Fatalf("embedded system skill was not restored: %q", data)
+	}
+	marker, err := os.ReadFile(filepath.Join(systemRoot, bundledSkillsMarkerFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(marker)) == "old-fingerprint" {
+		t.Fatal("system skills marker was not refreshed")
+	}
+}
+
+func TestLoadBundledSkillsReusesMatchingSystemSnapshot(t *testing.T) {
+	testenv.UserHome(t)
+	testenv.WingmanHome(t)
+	_, systemRoot, err := loadBundledSkills()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(systemRoot, "sentinel")
+	mustWrite(t, sentinel, "keep")
+
+	if _, _, err := loadBundledSkills(); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "keep" {
+		t.Fatalf("matching system snapshot was unnecessarily replaced: %q, %v", data, err)
+	}
+}
+
+func TestSystemSkillsSurviveWorkspaceScratchCleanup(t *testing.T) {
+	testenv.UserHome(t)
+	testenv.WingmanHome(t)
+	ws, err := NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	feature := skill.FindSkill("feature-dev", ws.Skills())
+	if feature == nil {
+		ws.Close()
+		t.Fatal("feature-dev system skill was not loaded")
+	}
+	skillFile := filepath.Join(feature.Location, "SKILL.md")
+	scratch := ws.ScratchPath
+	ws.Close()
+
+	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
+		t.Fatalf("scratch directory survived workspace close: %v", err)
+	}
+	if _, err := os.Stat(skillFile); err != nil {
+		t.Fatalf("system skill was removed with scratch: %v", err)
 	}
 }
 
@@ -645,7 +976,7 @@ description: Personal override
 ---
 Use the personal workflow.`)
 
-	bundled, err := loadBundledSkills(t.TempDir())
+	bundled, systemRoot, err := loadBundledSkills()
 	if err != nil {
 		t.Fatalf("loadBundledSkills: %v", err)
 	}
@@ -658,8 +989,10 @@ Use the personal workflow.`)
 	if override == nil || override.Bundled || override.Description != "Personal override" {
 		t.Fatalf("personal override was not selected: %#v", override)
 	}
-	if _, err := os.Stat(filepath.Join(home, "skills", ".system")); !os.IsNotExist(err) {
-		t.Fatalf("bundled snapshot leaked into personal discovery root: %v", err)
+	for _, sk := range personal {
+		if strings.HasPrefix(sk.Location, systemRoot+string(filepath.Separator)) {
+			t.Fatalf("system skill was rediscovered as personal: %#v", sk)
+		}
 	}
 }
 

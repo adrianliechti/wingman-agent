@@ -13,9 +13,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/oauth2"
 
+	"github.com/adrianliechti/wingman-agent/internal/process"
 	"github.com/adrianliechti/wingman-agent/pkg/httpclient"
+	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
 )
 
 type Manager struct {
@@ -23,12 +27,20 @@ type Manager struct {
 
 	Dir string
 
+	// TrustRequired records configuration sources that must be approved before connecting.
+	TrustRequired map[string]string
+
+	// Credentials holds OAuth state for remote servers.
+	Credentials *CredentialStore
+
 	elicit atomic.Pointer[ElicitFunc]
 
 	toolListChanged atomic.Pointer[ToolListChangedFunc]
+	telemetry       atomic.Pointer[telemetry.Telemetry]
 
-	mu       sync.RWMutex
-	sessions map[string]*mcp.ClientSession
+	mu                  sync.RWMutex
+	sessions            map[string]*mcp.ClientSession
+	sessionObservations map[*mcp.ClientSession]*telemetry.MCPSession
 }
 
 type ToolListChangedFunc func(serverName string)
@@ -37,7 +49,10 @@ func NewManager(cfg *Config) *Manager {
 	return &Manager{
 		Config: cfg,
 
-		sessions: make(map[string]*mcp.ClientSession),
+		Credentials: DefaultCredentialStore(),
+
+		sessions:            make(map[string]*mcp.ClientSession),
+		sessionObservations: make(map[*mcp.ClientSession]*telemetry.MCPSession),
 	}
 }
 
@@ -72,10 +87,26 @@ func Load(paths ...string) (*Manager, error) {
 	return NewManager(merged), nil
 }
 
-func (m *Manager) Connect(ctx context.Context) error {
+func (m *Manager) Connect(ctx context.Context, authorize ...func(context.Context, string, ServerConfig) error) error {
 	var errs []error
 
 	for _, name := range slices.Sorted(maps.Keys(m.Servers)) {
+		m.mu.RLock()
+		connected := m.sessions[name] != nil
+		m.mu.RUnlock()
+		if connected {
+			continue
+		}
+		if m.TrustRequired[name] != "" {
+			if len(authorize) == 0 || authorize[0] == nil {
+				errs = append(errs, fmt.Errorf("MCP server %s requires approval of %s", name, m.TrustRequired[name]))
+				continue
+			}
+			if err := authorize[0](ctx, name, m.Servers[name]); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		}
 		if err := m.connect(ctx, name, m.Servers[name]); err != nil {
 			errs = append(errs, err)
 		}
@@ -94,10 +125,35 @@ func (m *Manager) AddServer(ctx context.Context, name string, server ServerConfi
 }
 
 func (m *Manager) AddSession(name string, session *mcp.ClientSession) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.addSession(context.Background(), name, session, m.Servers[name])
+}
 
+func (m *Manager) addSession(ctx context.Context, name string, session *mcp.ClientSession, server ServerConfig) {
+	if session == nil {
+		return
+	}
+	var observation *telemetry.MCPSession
+	if tel := m.telemetry.Load(); tel != nil {
+		observation = tel.StartMCPSession(ctx, mcpSessionRequest(session, server))
+	}
+	m.mu.Lock()
 	m.sessions[name] = session
+	if observation != nil {
+		m.sessionObservations[session] = observation
+	}
+	m.mu.Unlock()
+
+	if observation != nil {
+		go func() {
+			observation.End(telemetry.Outcome{Err: session.Wait()})
+		}()
+	}
+}
+
+// SetTelemetry instruments clients created by this manager. It should normally
+// be called before Connect so initialization is covered as well.
+func (m *Manager) SetTelemetry(tel *telemetry.Telemetry) {
+	m.telemetry.Store(tel)
 }
 
 func (m *Manager) SetToolListChangedHandler(handler ToolListChangedFunc) {
@@ -109,11 +165,20 @@ func (m *Manager) SetToolListChangedHandler(handler ToolListChangedFunc) {
 }
 
 func (m *Manager) Close() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	sessions := make([]*mcp.ClientSession, 0, len(m.sessions))
+	observations := make([]*telemetry.MCPSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session)
+		observations = append(observations, m.sessionObservations[session])
+	}
+	m.mu.RUnlock()
 
-	for _, s := range m.sessions {
-		s.Close()
+	for i, session := range sessions {
+		if observations[i] != nil {
+			observations[i].End(telemetry.Outcome{})
+		}
+		_ = session.Close()
 	}
 }
 
@@ -133,9 +198,15 @@ func (m *Manager) Session(name string) *mcp.ClientSession {
 }
 
 func (m *Manager) connect(ctx context.Context, name string, server ServerConfig) error {
-	client := m.newClient(name)
+	client := m.newClient(name, server)
 
-	transport, err := createTransport(server, m.Dir)
+	handler, err := m.oauthHandler(name, server)
+
+	if err != nil {
+		return fmt.Errorf("MCP server %s: %w", name, err)
+	}
+
+	transport, err := createTransport(server, m.Dir, handler)
 
 	if err != nil {
 		return fmt.Errorf("MCP server %s: %w", name, err)
@@ -150,15 +221,13 @@ func (m *Manager) connect(ctx context.Context, name string, server ServerConfig)
 		return fmt.Errorf("%s: %w", name, err)
 	}
 
-	m.mu.Lock()
-	m.sessions[name] = session
-	m.mu.Unlock()
+	m.addSession(ctx, name, session, server)
 
 	return nil
 }
 
-func (m *Manager) newClient(name string) *mcp.Client {
-	return mcp.NewClient(&mcp.Implementation{
+func (m *Manager) newClient(name string, servers ...ServerConfig) *mcp.Client {
+	client := mcp.NewClient(&mcp.Implementation{
 		Name:    "wingman",
 		Version: "1.0.0",
 	}, &mcp.ClientOptions{
@@ -169,15 +238,47 @@ func (m *Manager) newClient(name string) *mcp.Client {
 			}
 		},
 	})
+	if tel := m.telemetry.Load(); tel != nil {
+		var server ServerConfig
+		if len(servers) > 0 {
+			server = servers[0]
+		}
+		client.AddSendingMiddleware(mcpClientTelemetryMiddleware(tel, mcpTransport(server)))
+		client.AddReceivingMiddleware(mcpServerTelemetryMiddleware(tel, mcpTransport(server)))
+	}
+	return client
 }
 
-func createTransport(server ServerConfig, dir string) (mcp.Transport, error) {
+// oauthHandler equips remote servers with stored credentials. Without a
+// usable token the flow fails and points the user at 'wingman mcp login'.
+func (m *Manager) oauthHandler(name string, server ServerConfig) (auth.OAuthHandler, error) {
+	if server.URL == "" || hasAuthorizationHeader(server.Headers) {
+		return nil, nil
+	}
+
+	store := m.Credentials
+
+	if store == nil {
+		store = DefaultCredentialStore()
+	}
+
+	return newOAuthHandler(oauthOptions{
+		store:  store,
+		server: server,
+		fetcher: func(context.Context, *auth.AuthorizationArgs) (*auth.AuthorizationResult, error) {
+			return nil, fmt.Errorf("%w: run 'wingman mcp login %s'", ErrLoginRequired, name)
+		},
+	})
+}
+
+func createTransport(server ServerConfig, dir string, handler auth.OAuthHandler) (mcp.Transport, error) {
 	if server.Dir != "" {
 		dir = server.Dir
 	}
 
 	if server.Command != "" {
 		cmd := exec.Command(server.Command, server.Args...)
+		process.Hide(cmd)
 		cmd.Dir = dir
 		if len(server.Env) > 0 {
 			cmd.Env = os.Environ()
@@ -203,6 +304,15 @@ func createTransport(server ServerConfig, dir string) (mcp.Transport, error) {
 		}
 
 		if server.Transport == "sse" {
+			// The SSE transport has no OAuth hook, so stored tokens ride on the client.
+			if handler != nil {
+				if ts, err := handler.TokenSource(context.Background()); err == nil && ts != nil {
+					client := *httpClient
+					client.Transport = &oauth2.Transport{Source: ts, Base: httpClient.Transport}
+					httpClient = &client
+				}
+			}
+
 			return &mcp.SSEClientTransport{
 				Endpoint: server.URL,
 
@@ -214,6 +324,8 @@ func createTransport(server ServerConfig, dir string) (mcp.Transport, error) {
 			Endpoint: server.URL,
 
 			HTTPClient: httpClient,
+
+			OAuthHandler: handler,
 		}, nil
 	}
 

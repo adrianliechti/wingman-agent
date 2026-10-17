@@ -15,6 +15,21 @@ import (
 
 const popupMaxRows = 8
 
+// One cell of padding on either side of the content, followed by the
+// scrollbar in the outermost cell.
+func popupRow(text string, width int, selected bool, marker string) string {
+	inner := max(0, width-3)
+	line := " " + ansi.Pad(ansi.Truncate(text, inner, "…"), inner) + " "
+	if selected {
+		line = selectionLine(line, max(0, width-1))
+	}
+	return scrollbarLine(line, width, marker)
+}
+
+func popupText(text string, width int) string {
+	return ansi.Pad(ansi.Truncate(" "+text, max(0, width-1), "…"), max(0, width-1)) + " "
+}
+
 type PopupItem struct {
 	ID             string
 	Label          string
@@ -62,6 +77,10 @@ type Popup struct {
 	hotkeys  map[rune]string
 	onAccept func(ids []string)
 	onCancel func()
+	// mouseRows maps rendered rows to filtered indices; headings and padding
+	// are deliberately absent.
+	mouseRows map[int]int
+	closeRow  int
 }
 
 func newPopup(kind popupKind, title string, items []PopupItem, onAccept func(ids []string)) *Popup {
@@ -92,6 +111,8 @@ func (s popupSource) String(i int) string {
 func (s popupSource) Len() int { return len(s.items) }
 
 func (p *Popup) SetQuery(query string) {
+	previous, hadPrevious := p.Current()
+	previousRow := p.index - p.offset
 	changed := query != p.query
 	p.query = query
 	p.filtered = p.filtered[:0]
@@ -112,8 +133,8 @@ func (p *Popup) SetQuery(query string) {
 			p.filtered = append(p.filtered, m.Index)
 		}
 		if p.kind == popupPalette {
-			// Fuzzy results arrive in score order; regrouping keeps each
-			// group header rendering once while scores order items within.
+			// Search filters the catalog in place, keeping familiar commands
+			// in their original order as the query grows.
 			rank := make(map[string]int, len(p.items))
 			for i, item := range p.items {
 				if _, ok := rank[item.Group]; !ok {
@@ -121,11 +142,43 @@ func (p *Popup) SetQuery(query string) {
 				}
 			}
 			slices.SortStableFunc(p.filtered, func(left, right int) int {
-				return cmp.Compare(rank[p.items[left].Group], rank[p.items[right].Group])
+				if order := cmp.Compare(rank[p.items[left].Group], rank[p.items[right].Group]); order != 0 {
+					return order
+				}
+				return cmp.Compare(left, right)
 			})
 		}
 	}
 
+	if changed && p.commandList() {
+		best, bestRank := -1, 3
+		for i, idx := range p.filtered {
+			item := p.items[idx]
+			if item.Disabled {
+				continue
+			}
+			rank := commandMatchRank(item.Label, query)
+			if rank < bestRank || rank == bestRank && hadPrevious && item.ID == previous.ID {
+				best, bestRank = i, rank
+			}
+		}
+		if best >= 0 {
+			p.index, p.offset = best, 0
+			if hadPrevious && p.items[p.filtered[best]].ID == previous.ID {
+				p.offset = max(best-previousRow, 0)
+			}
+			return
+		}
+	}
+	if hadPrevious && !changed {
+		for i, idx := range p.filtered {
+			if p.items[idx].ID == previous.ID {
+				p.index = i
+				p.offset = max(i-previousRow, 0)
+				return
+			}
+		}
+	}
 	if changed || p.index < 0 || p.index >= len(p.filtered) {
 		p.index = 0
 		for i, idx := range p.filtered {
@@ -294,12 +347,20 @@ func (p *Popup) HandleKey(ev inline.KeyEvent) (bool, bool) {
 }
 
 func (p *Popup) Render(width int) []string {
+	p.mouseRows = make(map[int]int)
+	p.closeRow = -1
+	if width <= 0 {
+		return nil
+	}
+	if p.commandList() {
+		return p.renderCommands(width)
+	}
 	t := theme.Default
 
 	var lines []string
 
 	for _, line := range p.header {
-		lines = append(lines, ansi.Truncate(line, width, "…"))
+		lines = append(lines, popupText(line, width))
 	}
 
 	if p.title != "" {
@@ -307,11 +368,12 @@ func (p *Popup) Render(width int) []string {
 		if p.kind == popupList && p.query != "" {
 			title += "  " + p.query
 		}
-		lines = append(lines, cellIndent+dim(title))
+		p.closeRow = len(lines)
+		lines = append(lines, closeHeader(" "+cellIndent+dim(title), width))
 	}
 
 	if len(p.filtered) == 0 {
-		lines = append(lines, cellIndent+dim("  no matches"))
+		lines = append(lines, popupRow(cellIndent+dim("  no matches"), width, false, " "))
 		return lines
 	}
 
@@ -328,63 +390,44 @@ func (p *Popup) Render(width int) []string {
 
 	end := min(p.offset+visible, len(p.filtered))
 
-	inner := max(width-len(cellIndent), 20)
-
 	for i := p.offset; i < end; i++ {
 		item := p.items[p.filtered[i]]
-		if p.kind == popupPalette && item.Group != "" {
-			previousGroup := ""
-			if i > p.offset {
-				previousGroup = p.items[p.filtered[i-1]].Group
-			}
-			if i == p.offset || item.Group != previousGroup {
-				lines = append(lines, cellIndent+dim("  "+strings.ToUpper(item.Group)))
-			}
-		}
-
 		marker := "  "
 		if p.multi {
 			marker = dim("□ ")
 			if p.selected[item.ID] {
 				marker = colored(t.Cyan, "■ ")
 			}
-		}
-
-		check := ""
-		if item.Checked {
-			check = colored(t.Green, "✓ ")
+		} else if item.Checked {
+			marker = colored(t.Cyan, "✓ ")
 		}
 
 		var line string
 		if i == p.index {
-			line = colored(t.Cyan, "→ ") + marker + check + fg(t.Cyan) + item.Label + ansi.Reset
+			line = colored(t.Cyan, "› ") + marker + colored(t.Foreground, commandLine(item.Label))
 		} else {
-			line = "  " + marker + check + item.Label
+			line = "  " + marker + colored(t.Foreground, commandLine(item.Label))
 		}
 
-		detail := item.Detail
+		detail := commandLine(item.Detail)
 		if item.Disabled && item.DisabledReason != "" {
-			detail = item.DisabledReason
+			detail = commandLine(item.DisabledReason)
 		}
 		if detail != "" {
 			line += "  " + dim(detail)
 		}
 		if item.Shortcut != "" {
-			line += "  " + dim(item.Shortcut)
+			line += "  " + dim(commandLine(item.Shortcut))
 		}
 		if item.Disabled {
 			line = dim(ansi.Strip(line))
 		}
-
-		lines = append(lines, cellIndent+ansi.Truncate(line, inner, "…")+ansi.Reset)
+		p.mouseRows[len(lines)] = i
+		lines = append(lines, popupRow(cellIndent+line, width, i == p.index, scrollMarker(i-p.offset, end-p.offset, p.offset, len(p.filtered))))
 	}
 
 	if len(p.filtered) > visible {
-		lines = append(lines, cellIndent+dim(fmt.Sprintf("  (%d/%d)", p.index+1, len(p.filtered))))
+		lines = append(lines, popupText(cellIndent+dim(fmt.Sprintf("  (%d/%d)", p.index+1, len(p.filtered))), width))
 	}
-	if p.kind == popupPalette {
-		lines = append(lines, cellIndent+ansi.Truncate(dim("  ↑↓ navigate · enter open · esc back/close"), inner, "…"))
-	}
-
 	return lines
 }

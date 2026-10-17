@@ -2,7 +2,10 @@
 <html lang="en">
 	<head>
 		<meta charset="UTF-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+		/>
 		<link
 			data-wingman-favicon
 			rel="icon"
@@ -21,20 +24,12 @@
 					theme === "dark" ? "/icon_dark.svg" : "/icon_light.svg";
 			})();
 		</script>
-		<style>
-			html {
-				color-scheme: light dark;
-				background-color: #0a0a0a;
-			}
-			html[data-theme="light"] {
-				background-color: #ffffff;
-			}
-		</style>
+		<style>html{--lightningcss-light:initial;--lightningcss-dark: ;color-scheme:light dark;background-color:#0a0a0a}@media (prefers-color-scheme:dark){html{--lightningcss-light: ;--lightningcss-dark:initial}}html[data-theme=light]{background-color:#fff}</style>
 		<title>Wingman</title>
 		<script type="module" crossorigin src="/assets/index.js"></script>
 		<link rel="modulepreload" crossorigin href="/assets/rolldown-runtime.js">
-		<link rel="modulepreload" crossorigin href="/assets/editor.js">
-		<link rel="stylesheet" crossorigin href="/assets/editor.css">
+		<link rel="modulepreload" crossorigin href="/assets/react.js">
+		<link rel="modulepreload" crossorigin href="/assets/preload.js">
 		<link rel="stylesheet" crossorigin href="/assets/index.css">
 	</head>
 	<body>

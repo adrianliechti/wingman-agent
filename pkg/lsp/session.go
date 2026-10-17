@@ -2,22 +2,26 @@ package lsp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf16"
 
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"go.lsp.dev/jsonrpc2"
 	"go.lsp.dev/protocol"
 	lspuri "go.lsp.dev/uri"
+
+	"github.com/adrianliechti/wingman-agent/internal/tooling"
 )
 
 type Session struct {
@@ -29,9 +33,13 @@ type Session struct {
 	cancelFunc context.CancelFunc
 
 	documentMu   sync.Mutex
+	commandMu    sync.Mutex
+	applyEditMu  sync.Mutex
 	mu           sync.Mutex
 	documents    map[string]*document
-	progress     map[string]bool
+	progress     map[string]WorkProgress
+	commandEdits []CommandWorkspaceEdit
+	captureEdits bool
 	created      time.Time
 	pullDiags    bool
 	capabilities protocol.ServerCapabilities
@@ -67,7 +75,7 @@ const startupTimeout = 30 * time.Second
 func connect(ctx context.Context, workingDir string, server Server) (*Session, error) {
 	cmd := exec.Command(server.Command, server.Args...)
 	cmd.Dir = workingDir
-	cmd.Env = os.Environ()
+	cmd.Env = tooling.Environment(server.Command, os.Environ())
 	cmd.Stderr = io.Discard
 
 	setSysProcAttr(cmd)
@@ -97,7 +105,7 @@ func connect(ctx context.Context, workingDir string, server Server) (*Session, e
 		rootURI:    fileuri.FromPath(workingDir),
 		cancelFunc: cancel,
 		documents:  make(map[string]*document),
-		progress:   make(map[string]bool),
+		progress:   make(map[string]WorkProgress),
 		created:    time.Now(),
 	}
 	session.alive.Store(true)
@@ -132,6 +140,10 @@ type sessionClient struct {
 	session *Session
 }
 
+func (c *sessionClient) WorkspaceFolders(context.Context) ([]protocol.WorkspaceFolder, error) {
+	return c.session.workspaceFolders(), nil
+}
+
 func (c *sessionClient) PublishDiagnostics(_ context.Context, params *protocol.PublishDiagnosticsParams) error {
 	version, _ := params.Version.Get()
 	uri := params.URI.String()
@@ -148,13 +160,24 @@ func (c *sessionClient) WorkDoneProgressCreate(context.Context, *protocol.WorkDo
 	return nil
 }
 
-func (c *sessionClient) Progress(_ context.Context, params *protocol.ProgressParams) error {
-	var value struct {
-		Kind string `json:"kind"`
+func (c *sessionClient) ApplyEdit(_ context.Context, params *protocol.ApplyWorkspaceEditParams) (*protocol.ApplyWorkspaceEditResult, error) {
+	if params == nil {
+		reason := "the language server sent an empty workspace edit request"
+		return &protocol.ApplyWorkspaceEditResult{Applied: false, FailureReason: &reason}, nil
 	}
+	if err := c.session.captureCommandEdit(params); err == nil {
+		return &protocol.ApplyWorkspaceEditResult{Applied: true}, nil
+	} else {
+		reason := err.Error()
+		return &protocol.ApplyWorkspaceEditResult{Applied: false, FailureReason: &reason}, nil
+	}
+}
+
+func (c *sessionClient) Progress(_ context.Context, params *protocol.ProgressParams) error {
+	var value progressUpdate
 	if err := protocol.Unmarshal(params.Value, &value); err == nil {
 		token, _ := protocol.Marshal(params.Token)
-		c.session.applyProgress(token, value.Kind)
+		c.session.applyProgress(string(token), value)
 	}
 	return nil
 }
@@ -163,15 +186,53 @@ func (s *Session) IsAlive() bool {
 	return s.alive.Load()
 }
 
-func (s *Session) applyProgress(token json.RawMessage, kind string) {
+// WorkProgress is one server-reported background operation. Title is stable
+// for the lifetime of an operation; Message and Percentage may be updated by
+// subsequent progress reports.
+type WorkProgress struct {
+	Title      string  `json:"title,omitempty"`
+	Message    string  `json:"message,omitempty"`
+	Percentage *uint32 `json:"percentage,omitempty"`
+}
+
+type progressUpdate struct {
+	Kind       string  `json:"kind"`
+	Title      string  `json:"title,omitempty"`
+	Message    *string `json:"message,omitempty"`
+	Percentage *uint32 `json:"percentage,omitempty"`
+}
+
+func (s *Session) applyProgress(token string, update progressUpdate) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	switch kind {
+	if s.progress == nil {
+		s.progress = make(map[string]WorkProgress)
+	}
+	switch update.Kind {
 	case "begin":
-		s.progress[string(token)] = true
+		progress := WorkProgress{Title: update.Title}
+		applyProgressUpdate(&progress, update)
+		s.progress[token] = progress
+	case "report":
+		progress := s.progress[token]
+		applyProgressUpdate(&progress, update)
+		s.progress[token] = progress
 	case "end":
-		delete(s.progress, string(token))
+		delete(s.progress, token)
+	}
+}
+
+func applyProgressUpdate(progress *WorkProgress, update progressUpdate) {
+	if update.Title != "" {
+		progress.Title = update.Title
+	}
+	if update.Message != nil {
+		progress.Message = *update.Message
+	}
+	if update.Percentage != nil {
+		percentage := *update.Percentage
+		progress.Percentage = &percentage
 	}
 }
 
@@ -181,6 +242,26 @@ func (s *Session) Analyzing() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.progress) > 0
+}
+
+func (s *Session) Progress() []WorkProgress {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]WorkProgress, 0, len(s.progress))
+	for _, progress := range s.progress {
+		if progress.Percentage != nil {
+			percentage := *progress.Percentage
+			progress.Percentage = &percentage
+		}
+		result = append(result, progress)
+	}
+	slices.SortFunc(result, func(a, b WorkProgress) int {
+		if order := strings.Compare(a.Title, b.Title); order != 0 {
+			return order
+		}
+		return strings.Compare(a.Message, b.Message)
+	})
+	return result
 }
 
 func (s *Session) Age() time.Duration {
@@ -213,6 +294,7 @@ func (s *Session) openedDocuments() []openDocument {
 
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
+		s.alive.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
@@ -229,6 +311,9 @@ func retryRPC[T any](ctx context.Context, call func() (T, error)) (T, error) {
 	for attempt := range maxRetries {
 		result, err = call()
 		if err == nil || !isTransientError(err) {
+			return result, err
+		}
+		if attempt == maxRetries-1 {
 			return result, err
 		}
 		delay := retryBaseDelay << attempt
@@ -263,6 +348,17 @@ func isTransientError(err error) bool {
 }
 
 func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, error) {
+	uri := fileuri.FromPath(filePath)
+	s.mu.Lock()
+	doc := s.documents[uri]
+	dirty := doc != nil && doc.opened && !doc.saved
+	s.mu.Unlock()
+	if dirty {
+		// A disk-backed request must never replace an editor-owned unsaved
+		// buffer. Feature requests from the editor carry their content and will
+		// synchronize it explicitly through SyncDocument.
+		return uri, nil
+	}
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
@@ -297,10 +393,12 @@ func (s *Session) CloseDocument(ctx context.Context, filePath string) error {
 	if !opened {
 		return nil
 	}
-	if err := s.rpc.DidClose(ctx, &protocol.DidCloseTextDocumentParams{
-		TextDocument: protocol.TextDocumentIdentifier{URI: lspuri.MustParse(uri)},
-	}); err != nil {
-		return fmt.Errorf("didClose: %w", err)
+	if s.documentSyncPolicy().openClose {
+		if err := s.rpc.DidClose(ctx, &protocol.DidCloseTextDocumentParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: lspuri.MustParse(uri)},
+		}); err != nil {
+			return fmt.Errorf("didClose: %w", err)
+		}
 	}
 
 	s.mu.Lock()
@@ -317,6 +415,17 @@ func (s *Session) DocumentContent(filePath string) (string, bool) {
 		return "", false
 	}
 	return doc.content, true
+}
+
+// DocumentSnapshot identifies the text/version used for an LSP edit preview.
+func (s *Session) DocumentSnapshot(filePath string) (string, int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc := s.documents[fileuri.FromPath(filePath)]
+	if doc == nil || !doc.opened {
+		return "", 0, false
+	}
+	return doc.content, doc.version, true
 }
 
 func (s *Session) syncDocument(ctx context.Context, filePath string, content []byte, saved bool) (string, error) {
@@ -340,9 +449,19 @@ func (s *Session) syncDocument(ctx context.Context, filePath string, content []b
 	}
 	s.mu.Unlock()
 
+	policy := s.documentSyncPolicy()
 	notifySaved := func() error {
+		if !policy.save {
+			return nil
+		}
+		var text *string
+		if policy.includeText {
+			value := string(content)
+			text = &value
+		}
 		if err := s.rpc.DidSave(ctx, &protocol.DidSaveTextDocumentParams{
 			TextDocument: protocol.TextDocumentIdentifier{URI: lspuri.MustParse(uri)},
+			Text:         text,
 		}); err != nil {
 			return fmt.Errorf("didSave: %w", err)
 		}
@@ -359,16 +478,16 @@ func (s *Session) syncDocument(ctx context.Context, filePath string, content []b
 		}
 
 	case opened:
-		if err := s.rpc.DidChange(ctx, &protocol.DidChangeTextDocumentParams{
-			TextDocument: protocol.VersionedTextDocumentIdentifier{
-				TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: lspuri.MustParse(uri)},
-				Version:                int32(version),
-			},
-			ContentChanges: []protocol.TextDocumentContentChangeEvent{
-				&protocol.TextDocumentContentChangeWholeDocument{Text: string(content)},
-			},
-		}); err != nil {
-			return "", fmt.Errorf("didChange: %w", err)
+		if changes := documentChanges(policy.change, doc.content, string(content)); len(changes) > 0 {
+			if err := s.rpc.DidChange(ctx, &protocol.DidChangeTextDocumentParams{
+				TextDocument: protocol.VersionedTextDocumentIdentifier{
+					TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: lspuri.MustParse(uri)},
+					Version:                int32(version),
+				},
+				ContentChanges: changes,
+			}); err != nil {
+				return "", fmt.Errorf("didChange: %w", err)
+			}
 		}
 		if saved {
 			if err := notifySaved(); err != nil {
@@ -377,15 +496,17 @@ func (s *Session) syncDocument(ctx context.Context, filePath string, content []b
 		}
 
 	default:
-		if err := s.rpc.DidOpen(ctx, &protocol.DidOpenTextDocumentParams{
-			TextDocument: protocol.TextDocumentItem{
-				URI:        lspuri.MustParse(uri),
-				LanguageID: protocol.LanguageKind(s.server.LanguageIDForPath(filePath)),
-				Version:    1,
-				Text:       string(content),
-			},
-		}); err != nil {
-			return "", fmt.Errorf("didOpen: %w", err)
+		if policy.openClose {
+			if err := s.rpc.DidOpen(ctx, &protocol.DidOpenTextDocumentParams{
+				TextDocument: protocol.TextDocumentItem{
+					URI:        lspuri.MustParse(uri),
+					LanguageID: protocol.LanguageKind(s.server.LanguageIDForPath(filePath)),
+					Version:    1,
+					Text:       string(content),
+				},
+			}); err != nil {
+				return "", fmt.Errorf("didOpen: %w", err)
+			}
 		}
 	}
 
@@ -401,6 +522,74 @@ func (s *Session) syncDocument(ctx context.Context, filePath string, content []b
 	s.mu.Unlock()
 
 	return uri, nil
+}
+
+type documentSyncPolicy struct {
+	openClose   bool
+	change      protocol.TextDocumentSyncKind
+	save        bool
+	includeText bool
+}
+
+func (s *Session) documentSyncPolicy() documentSyncPolicy {
+	switch sync := s.capabilities.TextDocumentSync.(type) {
+	case protocol.TextDocumentSyncKind:
+		return documentSyncPolicy{
+			openClose: sync != protocol.TextDocumentSyncKindNone,
+			change:    sync,
+		}
+	case *protocol.TextDocumentSyncOptions:
+		policy := documentSyncPolicy{}
+		if sync.OpenClose != nil {
+			policy.openClose = *sync.OpenClose
+		}
+		if sync.Change != nil {
+			policy.change = *sync.Change
+		}
+		switch save := sync.Save.(type) {
+		case protocol.Boolean:
+			policy.save = bool(save)
+		case *protocol.SaveOptions:
+			policy.save = true
+			policy.includeText = save.IncludeText != nil && *save.IncludeText
+		}
+		return policy
+	default:
+		return documentSyncPolicy{}
+	}
+}
+
+func documentChanges(kind protocol.TextDocumentSyncKind, previous, content string) []protocol.TextDocumentContentChangeEvent {
+	switch kind {
+	case protocol.TextDocumentSyncKindFull:
+		return []protocol.TextDocumentContentChangeEvent{
+			&protocol.TextDocumentContentChangeWholeDocument{Text: content},
+		}
+	case protocol.TextDocumentSyncKindIncremental:
+		return []protocol.TextDocumentContentChangeEvent{
+			&protocol.TextDocumentContentChangePartial{
+				Range: protocol.Range{
+					Start: protocol.Position{},
+					End:   documentEndPosition(previous),
+				},
+				Text: content,
+			},
+		}
+	default:
+		return nil
+	}
+}
+
+func documentEndPosition(content string) protocol.Position {
+	line := strings.Count(content, "\n")
+	lastLine := content
+	if newline := strings.LastIndexByte(content, '\n'); newline >= 0 {
+		lastLine = content[newline+1:]
+	}
+	return protocol.Position{
+		Line:      uint32(line),
+		Character: uint32(len(utf16.Encode([]rune(lastLine)))),
+	}
 }
 
 func (s *Session) publishedProtocolDiagnostics(uri string) ([]protocol.Diagnostic, bool) {
@@ -509,13 +698,7 @@ func (s *Session) locations(ctx context.Context, method, uri string, line, colum
 		})
 		return locationsFromDefinition(result), err
 	case methodReferences:
-		result, err := retryRPC(ctx, func() ([]protocol.Location, error) {
-			return s.rpc.References(ctx, &protocol.ReferenceParams{
-				TextDocumentPositionParams: documentPosition,
-				Context:                    protocol.ReferenceContext{IncludeDeclaration: true},
-			})
-		})
-		return []Location(result), err
+		return s.ReferenceLocations(ctx, uri, line, column)
 	default:
 		return nil, fmt.Errorf("unsupported location method %q", method)
 	}
@@ -533,8 +716,18 @@ func (s *Session) ImplementationLocations(ctx context.Context, uri string, line,
 	return s.locations(ctx, methodImplementation, uri, line, column)
 }
 
-func (s *Session) ReferenceLocations(ctx context.Context, uri string, line, column int) ([]Location, error) {
-	return s.locations(ctx, methodReferences, uri, line, column)
+func (s *Session) ReferenceLocations(ctx context.Context, uri string, line, column int, includeDeclaration ...bool) ([]Location, error) {
+	include := true
+	if len(includeDeclaration) > 0 {
+		include = includeDeclaration[0]
+	}
+	result, err := retryRPC(ctx, func() ([]protocol.Location, error) {
+		return s.rpc.References(ctx, &protocol.ReferenceParams{
+			TextDocumentPositionParams: protocol.TextDocumentPositionParams{TextDocument: wireDocument(uri), Position: wirePosition(line, column)},
+			Context:                    protocol.ReferenceContext{IncludeDeclaration: include},
+		})
+	})
+	return []Location(result), err
 }
 
 func (s *Session) Hover(ctx context.Context, uri string, line, column int) (*Hover, error) {
@@ -650,15 +843,25 @@ func (s *Session) PrepareCallHierarchy(ctx context.Context, uri string, line, co
 	})
 }
 
+func (s *Session) workspaceFolders() []protocol.WorkspaceFolder {
+	path, _ := fileuri.Path(s.rootURI)
+	return []protocol.WorkspaceFolder{{URI: lspuri.MustParse(s.rootURI), Name: filepath.Base(path)}}
+}
+
 func (s *Session) initialize(ctx context.Context) error {
 	processID := int32(os.Getpid())
 	rootURI := lspuri.MustParse(s.rootURI)
 	params := &protocol.InitializeParams{
+		WorkspaceFoldersInitializeParams: protocol.WorkspaceFoldersInitializeParams{
+			WorkspaceFolders: protocol.NewNullable(s.workspaceFolders()),
+		},
 		ProcessID:             &processID,
 		RootURI:               &rootURI,
 		InitializationOptions: protocol.LSPAny(s.server.InitializationOptions),
 		Capabilities: protocol.ClientCapabilities{
 			Workspace: &protocol.WorkspaceClientCapabilities{
+				ApplyEdit:        pointer(true),
+				WorkspaceFolders: pointer(true),
 				WorkspaceEdit: &protocol.WorkspaceEditClientCapabilities{
 					DocumentChanges:         pointer(true),
 					FailureHandling:         protocol.FailureHandlingKindTextOnlyTransactional,
@@ -704,7 +907,17 @@ func (s *Session) initialize(ctx context.Context) error {
 					DataSupport:             pointer(true),
 					HonorsChangeAnnotations: pointer(true),
 					CodeActionLiteralSupport: protocol.ClientCodeActionLiteralOptions{
-						CodeActionKind: protocol.ClientCodeActionKindOptions{},
+						CodeActionKind: protocol.ClientCodeActionKindOptions{ValueSet: []protocol.CodeActionKind{
+							protocol.CodeActionKindQuickFix,
+							protocol.CodeActionKindRefactor,
+							protocol.CodeActionKindRefactorExtract,
+							protocol.CodeActionKindRefactorInline,
+							protocol.CodeActionKindRefactorMove,
+							protocol.CodeActionKindRefactorRewrite,
+							protocol.CodeActionKindSource,
+							protocol.CodeActionKindSourceOrganizeImports,
+							protocol.CodeActionKindSourceFixAll,
+						}},
 					},
 					ResolveSupport: protocol.ClientCodeActionResolveOptions{Properties: []string{"edit", "command"}},
 				},

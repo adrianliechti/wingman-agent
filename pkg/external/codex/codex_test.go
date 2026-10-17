@@ -25,11 +25,23 @@ func TestBuildArgsDisablesUnsupportedCodexFeatures(t *testing.T) {
 		"otel.exporter=\"none\"",
 		"otel.trace_exporter=\"none\"",
 		"otel.metrics_exporter=\"none\"",
-		"features.plugins=false",
+		"cli_auth_credentials_store=\"ephemeral\"",
+		"features.remote_plugin=false",
+		"features.plugin_sharing=false",
+		"features.ultrafast_mode=false",
+		"features.api_key_model_discovery=false",
+		"features.daemon_auto_start=false",
+		"features.realtime_conversation=false",
+		"features.shell_snapshot=false",
+		"shell_environment_policy.ignore_default_excludes=false",
+		"shell_environment_policy.set.WINGMAN_TOKEN=\"\"",
 	} {
 		if !containsConfig(args, value) {
 			t.Errorf("BuildArgs() = %q, missing %q", args, value)
 		}
+	}
+	if containsConfig(args, "features.plugins=false") {
+		t.Fatal("gateway defaults must preserve locally configured plugins")
 	}
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "--config" && strings.HasPrefix(args[i+1], "model=") {
@@ -40,13 +52,51 @@ func TestBuildArgsDisablesUnsupportedCodexFeatures(t *testing.T) {
 
 func TestResolveModelsIncludesStandardAndFastOpenAIModels(t *testing.T) {
 	models := resolveModels(map[string]bool{
+		"gpt-6-astra":     true,
+		"gpt-6.1-sol":     true,
+		"gpt-6-sol":       true,
+		"gpt-6-luna":      true,
 		"gpt-5.6-luna":    true,
 		"claude-sonnet-5": true,
 		"gpt-5.4":         true,
 	})
 
-	if want := []string{"gpt-5.4", "gpt-5.6-luna"}; !slices.Equal(models, want) {
+	if want := []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.4", "gpt-6-luna", "gpt-5.6-luna"}; !slices.Equal(models, want) {
 		t.Fatalf("models = %q, want %q", models, want)
+	}
+}
+
+func TestResolveModelsPreservesProviderIDs(t *testing.T) {
+	models := resolveModels(map[string]bool{
+		"openai/gpt-6-astra":          true,
+		"~openai/GPT-6-LUNA:latest":   true,
+		"anthropic/claude-sonnet-5-5": true,
+	})
+	want := []string{"openai/gpt-6-astra", "~openai/GPT-6-LUNA:latest"}
+	if !slices.Equal(models, want) {
+		t.Fatalf("models = %q, want %q", models, want)
+	}
+}
+
+func TestBuildEnvReplacesInheritedToken(t *testing.T) {
+	parent := []string{"PATH=/usr/bin", "WINGMAN_TOKEN=stale", "WINGMAN_TOKEN=older", "OPENAI_API_KEY=stale-key", "CODEX_API_KEY=stale-key"}
+	original := slices.Clone(parent)
+	cfg := &CodexConfig{AuthToken: "gateway-token"}
+	env := BuildEnv(parent, cfg)
+	if want := []string{"PATH=/usr/bin", "WINGMAN_TOKEN=gateway-token"}; !slices.Equal(env, want) {
+		t.Fatalf("environment = %q, want %q", env, want)
+	}
+	if !slices.Equal(parent, original) {
+		t.Fatal("BuildEnv changed the parent environment")
+	}
+
+	t.Setenv("WINGMAN_TOKEN", "inherited")
+	t.Setenv("WINGMAN_ENV_TEST", "present")
+	if inherited := BuildEnv(nil, cfg); !slices.Contains(inherited, "WINGMAN_ENV_TEST=present") || slices.Contains(inherited, "WINGMAN_TOKEN=inherited") {
+		t.Fatal("nil parent should inherit the environment with the gateway token replaced")
+	}
+	if empty := BuildEnv([]string{}, cfg); !slices.Equal(empty, []string{"WINGMAN_TOKEN=gateway-token"}) {
+		t.Fatalf("empty parent should not inherit the process environment: %q", empty)
 	}
 }
 

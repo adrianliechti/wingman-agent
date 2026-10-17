@@ -1,8 +1,9 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	ArrowDownToLine,
 	ArrowUpFromLine,
 	Check,
+	CheckCircle2,
 	ChevronDown,
 	ClipboardCopy,
 	Code2,
@@ -16,8 +17,16 @@ import {
 	RefreshCw,
 	RotateCcw,
 	Search,
+	Sparkles,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	useEffect,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
+	useCallback,
+} from "react";
 import {
 	Group,
 	Panel,
@@ -27,13 +36,16 @@ import {
 } from "react-resizable-panels";
 import { listDiffs, revertDiff } from "../api/diffs";
 import {
+	fetchGitBranches,
 	getGitBranches,
 	getGitStatus,
+	generateGitCommitMessage,
 	initializeGitRepository,
-	runGitAction,
-	type GitAction,
+	runGitCommand,
+	type GitCommand,
+	type GitCommandType,
 } from "../api/git";
-import { queryKeys } from "../api/query";
+import { invalidateGitIndexQueries, queryKeys } from "../api/query";
 import type {
 	DiffEntry,
 	DiffLayer,
@@ -43,12 +55,12 @@ import type {
 	GitStatus,
 } from "../types/protocol";
 import type { TabDisposition } from "../types/tabs";
+import { PanelEmptyState } from "./ui/EmptyState";
 import { Dialog, dialogButtonClass } from "./ui/Feedback";
 import { FloatingMenu, FloatingSurface } from "./ui/Floating";
 import { GitHistoryPanel } from "./GitCompareControls";
 
 interface Props {
-	sessionId: string;
 	git?: boolean;
 	canInit?: boolean;
 	onOpenDiff?: (
@@ -88,7 +100,6 @@ const EMPTY_GIT_STATUS: GitStatus = {
 const EMPTY_BRANCHES: GitBranchInfo[] = [];
 
 export function DiffsPanel({
-	sessionId,
 	git = false,
 	canInit = false,
 	onOpenDiff,
@@ -97,10 +108,10 @@ export function DiffsPanel({
 }: Props) {
 	const queryClient = useQueryClient();
 	const changesQuery = useQuery<GitStatus | DiffEntry[]>({
-		queryKey: git ? queryKeys.git.status : queryKeys.diffs.list(sessionId),
+		queryKey: git ? queryKeys.git.status : queryKeys.diffs.list(),
 		enabled: git || !canInit,
 		queryFn: ({ signal }) =>
-			git ? getGitStatus(signal) : listDiffs({ sessionId, signal }),
+			git ? getGitStatus(signal) : listDiffs({ signal }),
 	});
 	const diffs = git
 		? []
@@ -112,6 +123,7 @@ export function DiffsPanel({
 	const [menu, setMenu] = useState<MenuState | null>(null);
 	const [busy, setBusy] = useState("");
 	const [message, setMessage] = useState("");
+	const messageRef = useRef("");
 	const [operationError, setError] = useState("");
 	const error =
 		operationError ||
@@ -122,42 +134,71 @@ export function DiffsPanel({
 				: "");
 	const [notice, setNotice] = useState("");
 	const [revertTarget, setRevertTarget] = useState<DiffEntry | null>(null);
-	const load = useCallback(
-		() =>
-			queryClient.invalidateQueries({
+	const load = (action?: GitCommandType) => {
+		if (
+			git &&
+			(action === "stage" || action === "stage_all" || action === "unstage")
+		) {
+			return invalidateGitIndexQueries(queryClient);
+		}
+		return queryClient.invalidateQueries(
+			{
 				queryKey: git ? queryKeys.git.all : queryKeys.diffs.all,
-			}),
-		[git, queryClient],
-	);
+			},
+			{ cancelRefetch: false },
+		);
+	};
 	useEffect(() => {
 		if (!notice) return;
 		const timeout = window.setTimeout(() => setNotice(""), 3000);
 		return () => window.clearTimeout(timeout);
 	}, [notice]);
 
-	const request = useCallback(
-		async (action: GitAction, body?: unknown) => {
-			setBusy(action);
-			setError("");
-			setNotice("");
-			try {
-				const output = await runGitAction(action, body);
-				if (output) setNotice(output);
-				await load();
-				return true;
-			} catch (e) {
-				setError(e instanceof Error ? e.message : String(e));
-				return false;
-			} finally {
-				setBusy("");
-			}
-		},
-		[load],
-	);
+	const request = async (command: GitCommand) => {
+		setBusy(command.type);
+		setError("");
+		setNotice("");
+		let ok = false;
+		try {
+			const output = await runGitCommand(command);
+			if (output) setNotice(output);
+			await load(command.type);
+			ok = true;
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		}
+		setBusy("");
+		return ok;
+	};
 
 	const requestRevert = (diff: DiffEntry) => {
 		setMenu(null);
 		setRevertTarget(diff);
+	};
+
+	const updateMessage = (value: string) => {
+		messageRef.current = value;
+		setMessage(value);
+	};
+
+	const generateCommitMessage = async () => {
+		const initial = messageRef.current;
+		setBusy("commit-message");
+		setError("");
+		setNotice("");
+		try {
+			const generated = await generateGitCommitMessage();
+			if (messageRef.current === initial) {
+				updateMessage(generated);
+			} else {
+				setNotice(
+					"Generated message was not inserted because the commit box changed.",
+				);
+			}
+		} catch (error) {
+			setError(error instanceof Error ? error.message : String(error));
+		}
+		setBusy("");
 	};
 
 	const confirmRevert = async () => {
@@ -165,14 +206,13 @@ export function DiffsPanel({
 		if (!diff) return;
 		setBusy("revert");
 		try {
-			await revertDiff(diff.path, sessionId);
+			await revertDiff(diff.path);
 			await load();
 			setRevertTarget(null);
 		} catch (e) {
 			setError(e instanceof Error ? e.message : String(e));
-		} finally {
-			setBusy("");
 		}
+		setBusy("");
 	};
 
 	if (!git && canInit) {
@@ -189,14 +229,15 @@ export function DiffsPanel({
 					message={message}
 					error={error}
 					notice={notice}
-					onMessage={setMessage}
+					onMessage={updateMessage}
 					onRequest={request}
 					onOpenDiff={onOpenDiff}
 					onOpenCompare={onOpenCompare}
 					onOpenFile={onOpenFile}
 					onCommit={async () => {
-						if (await request("commit", { message })) setMessage("");
+						if (await request({ type: "commit", message })) updateMessage("");
 					}}
+					onGenerateMessage={generateCommitMessage}
 					onRevert={(file) => requestRevert(gitFileAsDiff(file))}
 				/>
 				<RevertDialog
@@ -211,7 +252,7 @@ export function DiffsPanel({
 
 	return (
 		<div className="relative flex h-full flex-col overflow-hidden bg-transparent">
-			<div className="overflow-y-auto flex-1 py-2">
+			<div className="flex flex-1 flex-col overflow-y-auto py-2">
 				{diffs.length === 0 && !error && <EmptyChanges loaded={loaded} />}
 				{diffs.map((diff) => (
 					<ChangeRow
@@ -290,9 +331,8 @@ function GitInitPrompt() {
 			]);
 		} catch (e) {
 			setError(e instanceof Error ? e.message : String(e));
-		} finally {
-			setBusy(false);
 		}
+		setBusy(false);
 	};
 
 	return (
@@ -376,6 +416,7 @@ function GitChanges({
 	onOpenCompare,
 	onOpenFile,
 	onCommit,
+	onGenerateMessage,
 	onRevert,
 }: {
 	status: GitStatus;
@@ -385,7 +426,7 @@ function GitChanges({
 	error: string;
 	notice: string;
 	onMessage: (value: string) => void;
-	onRequest: (action: GitAction, body?: unknown) => Promise<boolean>;
+	onRequest: (command: GitCommand) => Promise<boolean>;
 	onOpenDiff?: (
 		path: string,
 		layer?: DiffLayer,
@@ -399,19 +440,18 @@ function GitChanges({
 	) => void;
 	onOpenFile?: (path: string, disposition?: TabDisposition) => void;
 	onCommit: () => Promise<void>;
+	onGenerateMessage: () => Promise<void>;
 	onRevert: (file: GitFileStatus) => void;
 }) {
 	const [menu, setMenu] = useState<GitMenuState | null>(null);
 	const [historyOpen, setHistoryOpen] = useState(false);
+	const [stackCommitAction, setStackCommitAction] = useState(false);
 	const historyPanelRef = usePanelRef();
-	const staged = useMemo(
-		() => status.files.filter((file) => file.staged),
-		[status.files],
-	);
-	const changed = useMemo(
-		() => status.files.filter((file) => file.changed),
-		[status.files],
-	);
+	const commitBoxRef = useRef<HTMLDivElement>(null);
+	const commitMeasureRef = useRef<HTMLTextAreaElement>(null);
+	const commitButtonRef = useRef<HTMLButtonElement>(null);
+	const staged = status.files.filter((file) => file.staged);
+	const changed = status.files.filter((file) => file.changed);
 	const hasStaged = staged.length > 0;
 	const disabled = busy !== "";
 	const paths = (files: GitFileStatus[]) => [
@@ -431,7 +471,7 @@ function GitChanges({
 			staged: isStaged,
 		});
 	};
-	const toggleHistory = useCallback(() => {
+	const toggleHistory = () => {
 		const panel = historyPanelRef.current;
 		if (!panel) return;
 		if (panel.isCollapsed()) {
@@ -441,10 +481,38 @@ function GitChanges({
 			setHistoryOpen(false);
 			panel.collapse();
 		}
-	}, [historyPanelRef]);
-	const handleHistoryResize = useCallback(({ inPixels }: PanelSize) => {
+	};
+	const handleHistoryResize = ({ inPixels }: PanelSize) => {
 		setHistoryOpen(inPixels > 33);
-	}, []);
+	};
+	const measureCommitLayout = useCallback(() => {
+		const box = commitBoxRef.current;
+		const measure = commitMeasureRef.current;
+		const button = commitButtonRef.current;
+		if (!message.trim() || !box || !measure || !button) {
+			setStackCommitAction(false);
+			return;
+		}
+		// Measure at the width the field would have beside the button. Keeping
+		// that width stable avoids the layout flipping when the button moves.
+		measure.style.width = `${Math.max(1, box.clientWidth - button.offsetWidth - 2)}px`;
+		const style = window.getComputedStyle(measure);
+		const singleLineHeight =
+			Number.parseFloat(style.lineHeight) +
+			Number.parseFloat(style.paddingTop) +
+			Number.parseFloat(style.paddingBottom);
+		setStackCommitAction(
+			/[\r\n]/.test(message) || measure.scrollHeight > singleLineHeight + 1,
+		);
+	}, [message]);
+	useLayoutEffect(() => {
+		measureCommitLayout();
+		const box = commitBoxRef.current;
+		if (!box || typeof ResizeObserver === "undefined") return;
+		const observer = new ResizeObserver(measureCommitLayout);
+		observer.observe(box);
+		return () => observer.disconnect();
+	}, [measureCommitLayout]);
 
 	return (
 		<Group
@@ -458,7 +526,7 @@ function GitChanges({
 				className="min-h-0 overflow-hidden"
 			>
 				<div className="flex h-full min-h-0 flex-col overflow-hidden bg-transparent">
-					<div className="relative h-9 px-2 flex items-center gap-1 shrink-0 border-b border-border-subtle bg-bg-surface/20">
+					<div className="relative h-9 px-2 flex items-center gap-1 shrink-0">
 						<BranchPicker
 							status={status}
 							disabled={disabled}
@@ -476,7 +544,7 @@ function GitChanges({
 							icon={<ArrowDownToLine size={12} />}
 							disabled={disabled || !status.upstream}
 							loading={busy === "pull"}
-							onClick={() => void onRequest("pull")}
+							onClick={() => void onRequest({ type: "pull" })}
 						/>
 						<SyncButton
 							label={status.ahead ? `Push ${status.ahead}` : "Push"}
@@ -488,11 +556,11 @@ function GitChanges({
 							icon={<ArrowUpFromLine size={12} />}
 							disabled={disabled || !status.has_remote}
 							loading={busy === "push"}
-							onClick={() => void onRequest("push")}
+							onClick={() => void onRequest({ type: "push" })}
 						/>
 					</div>
 
-					<div className="overflow-y-auto flex-1 py-1.5">
+					<div className="flex flex-1 flex-col overflow-y-auto py-1.5">
 						{hasStaged ? (
 							<>
 								<ChangeGroup
@@ -502,10 +570,16 @@ function GitChanges({
 									action={<Minus size={11} />}
 									actionLabel="Unstage"
 									onAll={() =>
-										void onRequest("unstage", { paths: paths(staged) })
+										void onRequest({
+											type: "unstage",
+											paths: paths(staged),
+										})
 									}
 									onFile={(file) =>
-										void onRequest("unstage", { paths: gitFilePaths(file) })
+										void onRequest({
+											type: "unstage",
+											paths: gitFilePaths(file),
+										})
 									}
 									onOpenDiff={onOpenDiff}
 									onContextMenu={openMenu}
@@ -517,11 +591,12 @@ function GitChanges({
 									disabled={disabled}
 									action={<Plus size={11} />}
 									actionLabel="Stage"
-									onAll={() =>
-										void onRequest("stage", { paths: paths(changed) })
-									}
+									onAll={() => void onRequest({ type: "stage_all" })}
 									onFile={(file) =>
-										void onRequest("stage", { paths: gitFilePaths(file) })
+										void onRequest({
+											type: "stage",
+											paths: gitFilePaths(file),
+										})
 									}
 									onOpenDiff={onOpenDiff}
 									onContextMenu={openMenu}
@@ -534,9 +609,12 @@ function GitChanges({
 								disabled={disabled}
 								action={<Plus size={11} />}
 								actionLabel="Stage"
-								onAll={() => void onRequest("stage", { paths: paths(changed) })}
+								onAll={() => void onRequest({ type: "stage_all" })}
 								onFile={(file) =>
-									void onRequest("stage", { paths: gitFilePaths(file) })
+									void onRequest({
+										type: "stage",
+										paths: gitFilePaths(file),
+									})
 								}
 								onOpenDiff={onOpenDiff}
 								onContextMenu={openMenu}
@@ -563,27 +641,66 @@ function GitChanges({
 									{staged.length === 1 ? "file" : "files"}
 								</span>
 							</div>
-							<div className="h-8 flex items-center rounded-md border border-border-subtle bg-bg focus-within:border-border transition-colors">
-								<input
+							<div
+								ref={commitBoxRef}
+								className={`relative min-h-8 rounded-md border border-border-subtle bg-bg transition-colors focus-within:border-border ${
+									stackCommitAction
+										? "flex flex-col items-stretch"
+										: "flex items-end"
+								}`}
+							>
+								<textarea
+									ref={commitMeasureRef}
+									value={message}
+									readOnly
+									aria-hidden="true"
+									tabIndex={-1}
+									rows={1}
+									className="pointer-events-none fixed left-0 top-0 -z-10 h-0 resize-none overflow-hidden px-2 py-1.5 text-[11.5px] leading-4 opacity-0"
+								/>
+								<textarea
 									value={message}
 									onChange={(e) => onMessage(e.target.value)}
 									placeholder="Commit message…"
 									aria-label="Commit message"
-									className="h-full min-w-0 flex-1 bg-transparent px-2 text-[11.5px] text-fg placeholder:text-fg-dim outline-none"
+									rows={1}
+									className={`field-sizing-content min-h-7 max-h-24 min-w-0 resize-none overflow-y-auto bg-transparent px-2 py-1.5 text-[11.5px] leading-4 text-fg placeholder:text-fg-dim outline-none ${
+										stackCommitAction ? "w-full flex-none" : "flex-1"
+									}`}
 								/>
-								<button
-									type="submit"
-									disabled={disabled || !message.trim()}
-									title="Commit staged changes"
-									className="h-7 mr-0.5 px-2 rounded flex items-center gap-1 text-[10.5px] text-fg-muted hover:text-fg hover:bg-bg-hover disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
-								>
-									{busy === "commit" ? (
-										<Loader2 size={11} className="animate-spin" />
-									) : (
-										<GitCommitHorizontal size={11} />
-									)}
-									Commit
-								</button>
+								{message.trim() ? (
+									<button
+										ref={commitButtonRef}
+										type="submit"
+										disabled={disabled}
+										title="Commit staged changes"
+										className={`mb-0.5 mr-0.5 flex h-7 shrink-0 items-center gap-1 rounded px-2 text-[10.5px] text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-25 ${
+											stackCommitAction ? "self-end" : ""
+										}`}
+									>
+										{busy === "commit" ? (
+											<Loader2 size={11} className="animate-spin" />
+										) : (
+											<GitCommitHorizontal size={11} />
+										)}
+										Commit
+									</button>
+								) : (
+									<button
+										type="button"
+										disabled={disabled}
+										onClick={() => void onGenerateMessage()}
+										title="Generate commit message from staged changes"
+										aria-label="Generate commit message"
+										className="mb-0.5 mr-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-dim hover:bg-bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-30"
+									>
+										{busy === "commit-message" ? (
+											<Loader2 size={11} className="animate-spin" />
+										) : (
+											<Sparkles size={11} />
+										)}
+									</button>
+								)}
 							</div>
 						</form>
 					)}
@@ -625,10 +742,13 @@ function GitChanges({
 								icon={menu.staged ? <Minus size={11} /> : <Plus size={11} />}
 								label={menu.staged ? "Unstage Changes" : "Stage Changes"}
 								onClick={() => {
-									const action = menu.staged ? "unstage" : "stage";
 									const paths = gitFilePaths(menu.file);
 									setMenu(null);
-									void onRequest(action, { paths });
+									void onRequest(
+										menu.staged
+											? { type: "unstage", paths }
+											: { type: "stage", paths },
+									);
 								}}
 							/>
 							{!menu.staged && (
@@ -692,46 +812,44 @@ function BranchPicker({
 }: {
 	status: GitStatus;
 	disabled: boolean;
-	onRequest: (action: GitAction, body?: unknown) => Promise<boolean>;
+	onRequest: (command: GitCommand) => Promise<boolean>;
 	onCompare?: (base: string, head: string, mode: CompareMode) => void;
 }) {
-	const buttonRef = useRef<HTMLButtonElement>(null);
+	const [button, setButton] = useState<HTMLButtonElement | null>(null);
 	const searchRef = useRef<HTMLInputElement>(null);
 	const [open, setOpen] = useState(false);
 	const [query, setQuery] = useState("");
 	const [creating, setCreating] = useState(false);
 	const [newBranch, setNewBranch] = useState("");
+	const queryClient = useQueryClient();
 	const branchesQuery = useQuery({
-		queryKey: queryKeys.git.branches(false),
+		queryKey: queryKeys.git.branches,
 		enabled: false,
-		queryFn: ({ signal }) => getGitBranches(false, signal),
+		queryFn: ({ signal }) => getGitBranches(signal),
 	});
-	const refreshedBranchesQuery = useQuery({
-		queryKey: queryKeys.git.branches(true),
-		enabled: false,
-		queryFn: ({ signal }) => getGitBranches(true, signal),
+	const refreshBranches = useMutation({
+		mutationFn: fetchGitBranches,
+		onSuccess: (branches) => {
+			queryClient.setQueryData(queryKeys.git.branches, branches);
+		},
 	});
 	const refetchBranches = branchesQuery.refetch;
-	const refetchRemoteBranches = refreshedBranchesQuery.refetch;
-	const branchData =
-		refreshedBranchesQuery.dataUpdatedAt >= branchesQuery.dataUpdatedAt
-			? refreshedBranchesQuery.data
-			: branchesQuery.data;
-	const branches = branchData?.branches ?? EMPTY_BRANCHES;
-	const warning = branchData?.warning ?? "";
-	const branchError = refreshedBranchesQuery.error ?? branchesQuery.error;
+	const refetchRemoteBranches = refreshBranches.mutate;
+	const branches = branchesQuery.data?.branches ?? EMPTY_BRANCHES;
+	const warning = branchesQuery.data?.warning ?? "";
+	const branchError = refreshBranches.error ?? branchesQuery.error;
 	const loadError = branchError
 		? branchError instanceof Error
 			? branchError.message
 			: String(branchError)
 		: "";
-	const loading = branchesQuery.isFetching || refreshedBranchesQuery.isFetching;
+	const loading = branchesQuery.isFetching || refreshBranches.isPending;
 
 	useEffect(() => {
 		if (!open) return;
 		void (async () => {
 			await refetchBranches();
-			await refetchRemoteBranches();
+			refetchRemoteBranches();
 		})();
 		requestAnimationFrame(() => searchRef.current?.focus());
 	}, [open, refetchBranches, refetchRemoteBranches]);
@@ -760,7 +878,8 @@ function BranchPicker({
 			return;
 		}
 		if (
-			await onRequest("checkout", {
+			await onRequest({
+				type: "checkout_branch",
 				name: branch.name,
 				...(branch.remote ? { remote: branch.remote } : {}),
 			})
@@ -776,13 +895,13 @@ function BranchPicker({
 	const create = async () => {
 		const name = newBranch.trim();
 		if (!name) return;
-		if (await onRequest("branches", { name })) close();
+		if (await onRequest({ type: "create_branch", name })) close();
 	};
 
 	return (
 		<div className="relative min-w-0">
 			<button
-				ref={buttonRef}
+				ref={setButton}
 				type="button"
 				disabled={disabled}
 				onClick={() => setOpen((value) => !value)}
@@ -802,7 +921,7 @@ function BranchPicker({
 					if (nextOpen) setOpen(true);
 					else close();
 				}}
-				reference={buttonRef.current}
+				reference={button}
 				placement="bottom-start"
 				role="dialog"
 				label="Git branches"
@@ -813,6 +932,10 @@ function BranchPicker({
 						<Search size={11} className="ml-2 text-fg-dim shrink-0" />
 						<input
 							ref={searchRef}
+							autoCapitalize="none"
+							autoComplete="off"
+							autoCorrect="off"
+							spellCheck={false}
 							value={query}
 							onChange={(event) => setQuery(event.target.value)}
 							placeholder="Find a branch…"
@@ -886,6 +1009,10 @@ function BranchPicker({
 						>
 							<input
 								autoFocus
+								autoCapitalize="none"
+								autoComplete="off"
+								autoCorrect="off"
+								spellCheck={false}
 								value={newBranch}
 								onChange={(event) => setNewBranch(event.target.value)}
 								placeholder="feature/name"
@@ -1013,8 +1140,8 @@ function ChangeGroup({
 }) {
 	if (files.length === 0) return null;
 	return (
-		<div className="pb-1">
-			<div className="h-7 px-3 flex items-center text-[10.5px] font-medium text-fg-dim">
+		<div className="shrink-0 pb-1">
+			<div className="sticky top-0 z-10 h-7 px-3 flex items-center bg-bg-surface/80 text-[10.5px] font-medium text-fg-dim backdrop-blur-md">
 				<span>{title}</span>
 				<span className="ml-1.5 min-w-4 h-4 px-1 rounded-full bg-bg-active text-[9px] leading-4 text-center tabular-nums">
 					{files.length}
@@ -1218,11 +1345,22 @@ function SyncButton({
 }
 
 function EmptyChanges({ loaded }: { loaded: boolean }) {
+	if (!loaded) {
+		return (
+			<PanelEmptyState
+				icon={Loader2}
+				iconClassName="animate-spin text-fg-dim"
+				title="Loading…"
+			/>
+		);
+	}
 	return (
-		<div className="flex min-h-12 items-center justify-center gap-1.5 px-3 text-center text-[11px] text-fg-dim">
-			{!loaded && <Loader2 size={11} className="animate-spin" />}
-			<span>{loaded ? "Working tree clean" : "Loading…"}</span>
-		</div>
+		<PanelEmptyState
+			icon={CheckCircle2}
+			iconClassName="text-success/70"
+			title="Working tree clean"
+			hint="New, modified, and deleted files appear here."
+		/>
 	);
 }
 

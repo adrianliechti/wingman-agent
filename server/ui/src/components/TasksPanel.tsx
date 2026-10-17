@@ -24,11 +24,13 @@ import {
 } from "../api/tasks";
 import type { ScheduleEntry, TaskEntry } from "../types/protocol";
 import { formatElapsed } from "../utils/tasks";
+import { PanelEmptyState } from "./ui/EmptyState";
 import { Dialog, dialogButtonClass, useToast } from "./ui/Feedback";
 import { FloatingMenu } from "./ui/Floating";
 
 interface Props {
 	sessionId: string;
+	sessionRunning?: boolean;
 	onOpenTask?: (task: TaskEntry) => void;
 }
 
@@ -36,7 +38,7 @@ type MenuState =
 	| { x: number; y: number; kind: "schedule"; schedule: ScheduleEntry }
 	| { x: number; y: number; kind: "task"; task: TaskEntry };
 
-export function TasksPanel({ sessionId, onOpenTask }: Props) {
+export function TasksPanel({ sessionId, sessionRunning, onOpenTask }: Props) {
 	const toast = useToast();
 	const queryClient = useQueryClient();
 	const tasksQuery = useQuery({
@@ -44,6 +46,7 @@ export function TasksPanel({ sessionId, onOpenTask }: Props) {
 		enabled: !!sessionId,
 		queryFn: ({ signal }) => listTasks(sessionId, signal),
 		refetchInterval: (query) =>
+			sessionRunning ||
 			query.state.data?.some((task) => task.status === "running")
 				? 3000
 				: false,
@@ -53,7 +56,11 @@ export function TasksPanel({ sessionId, onOpenTask }: Props) {
 		enabled: !!sessionId,
 		queryFn: ({ signal }) => listSchedules(sessionId, signal),
 		refetchInterval: (query) =>
-			(query.state.data?.length ?? 0) > 0 ? 30000 : false,
+			sessionRunning
+				? 3000
+				: (query.state.data?.length ?? 0) > 0
+					? 30000
+					: false,
 	});
 	const tasks = tasksQuery.data ?? [];
 	const schedules = schedulesQuery.data ?? [];
@@ -118,7 +125,7 @@ export function TasksPanel({ sessionId, onOpenTask }: Props) {
 			await stopMutation.mutateAsync(id);
 		} catch (stopError) {
 			toast({
-				title: "Agent is still running",
+				title: "Task is still running",
 				description:
 					stopError instanceof Error ? stopError.message : String(stopError),
 				tone: "error",
@@ -128,16 +135,18 @@ export function TasksPanel({ sessionId, onOpenTask }: Props) {
 
 	return (
 		<div className="relative flex h-full flex-col overflow-hidden bg-transparent">
-			<div className="overflow-y-auto flex-1">
+			<div className="flex flex-1 flex-col overflow-y-auto">
 				{error && (
-					<div className="mx-2 mt-2 rounded bg-danger/5 px-2 py-1.5 text-[10px] text-danger/80">
+					<div className="mx-2 mt-2 shrink-0 rounded bg-danger/5 px-2 py-1.5 text-[10px] text-danger/80">
 						{error}
 					</div>
 				)}
 				{tasks.length === 0 && schedules.length === 0 && (
-					<div className="px-3 py-6 text-[11px] text-fg-dim text-center">
-						No background agents or scheduled tasks in this session
-					</div>
+					<PanelEmptyState
+						icon={Bot}
+						title="No tasks"
+						hint="Delegated agents, background commands, and scheduled tasks for this session appear here."
+					/>
 				)}
 				{schedules.length > 0 && (
 					<div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-fg-dim">
@@ -208,7 +217,7 @@ export function TasksPanel({ sessionId, onOpenTask }: Props) {
 				))}
 				{schedules.length > 0 && tasks.length > 0 && (
 					<div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-fg-dim">
-						Agents
+						Tasks
 					</div>
 				)}
 				{tasks.map((t) => (
@@ -229,7 +238,9 @@ export function TasksPanel({ sessionId, onOpenTask }: Props) {
 							<button
 								type="button"
 								className="group/action ml-2 flex w-5 shrink-0 items-center justify-center text-fg-dim transition-colors hover:text-danger focus-visible:text-danger"
-								title="Stop agent"
+								title={
+									t.agent_type === "command" ? "Stop command" : "Stop agent"
+								}
 								onClick={() => void stop(t.id)}
 							>
 								<span className="group-hover:hidden group-focus/action:hidden">

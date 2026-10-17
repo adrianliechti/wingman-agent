@@ -9,6 +9,8 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
+
+	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
 )
 
 // GenerateOptions describes a stateless, tool-free model request. It is used
@@ -21,10 +23,12 @@ type GenerateOptions struct {
 	Input           string
 	OutputSchema    map[string]any
 	MaxOutputTokens int64
+	PromptCacheKey  string
 }
 
 // GenerateResult is the visible response plus provider-reported usage for
-// independent budgeting and accounting.
+// independent budgeting and accounting. Usage is retained when a provider
+// response is rejected; Text is populated only on success.
 type GenerateResult struct {
 	Text  string
 	Usage Usage
@@ -38,6 +42,19 @@ func (c *Config) Generate(ctx context.Context, opts GenerateOptions) (GenerateRe
 	if modelID == "" {
 		modelID = c.utilityModelName()
 	}
+	captureContent := c.Telemetry.CapturesMessageContent()
+	inferenceRequest := telemetry.InferenceRequest{
+		Model:          modelID,
+		ConversationID: conversationID(ctx, c.CacheKey),
+		ReasoningLevel: strings.TrimSpace(opts.Effort),
+	}
+	if captureContent {
+		inferenceRequest.Content = telemetry.InferenceContent{
+			InputMessages:      telemetryStringInput(opts.Input),
+			SystemInstructions: telemetrySystemInstructions(opts.Instructions),
+		}
+	}
+	ctx, operation := c.Telemetry.StartInference(ctx, inferenceRequest)
 	params := responses.ResponseNewParams{
 		Model:        modelID,
 		Instructions: openai.String(opts.Instructions),
@@ -49,6 +66,9 @@ func (c *Config) Generate(ctx context.Context, opts GenerateOptions) (GenerateRe
 	}
 	if opts.MaxOutputTokens > 0 {
 		params.MaxOutputTokens = openai.Int(opts.MaxOutputTokens)
+	}
+	if opts.PromptCacheKey != "" {
+		params.PromptCacheKey = openai.String(opts.PromptCacheKey)
 	}
 	if opts.OutputSchema != nil {
 		format := responses.ResponseFormatTextConfigParamOfJSONSchema(
@@ -64,14 +84,63 @@ func (c *Config) Generate(ctx context.Context, opts GenerateOptions) (GenerateRe
 
 	resp, err := c.client.Responses.New(ctx, params)
 	if err != nil {
+		err = withProviderDetails(err)
+		operation.End(telemetry.InferenceResult{Outcome: telemetryOutcome(err)})
 		return GenerateResult{}, err
 	}
-	text := strings.TrimSpace(recoverySummaryOutput(resp))
+	usage := responseToUsage(*resp)
+	chargeTaskUsage(ctx, usage)
+	err = responseStatusError(resp)
+	defer func() { operation.End(inferenceResult(resp, usage, err, captureContent)) }()
+	if err != nil {
+		return GenerateResult{Usage: usage}, err
+	}
+	text := strings.TrimSpace(resp.OutputText())
 	if opts.OutputSchema != nil && text != "" {
 		var value any
-		if err := json.Unmarshal([]byte(text), &value); err != nil {
-			return GenerateResult{}, fmt.Errorf("decode structured model response: %w", err)
+		if err = json.Unmarshal([]byte(text), &value); err != nil {
+			err = fmt.Errorf("decode structured model response: %w", err)
+			return GenerateResult{Usage: usage}, err
 		}
 	}
-	return GenerateResult{Text: text, Usage: responseToUsage(*resp)}, nil
+	return GenerateResult{Text: text, Usage: usage}, nil
+}
+
+// Some compatible providers omit status. Any explicit status must indicate a
+// completed response before helpers can use its output, even if text is present.
+func responseStatusError(resp *responses.Response) error {
+	switch resp.Status {
+	case "", responses.ResponseStatusCompleted:
+		if responseStopReason(resp) == "pause_turn" {
+			return fmt.Errorf("response paused before completion")
+		}
+		return nil
+	case responses.ResponseStatusFailed:
+		return &responseFailure{code: string(resp.Error.Code), message: resp.Error.Message}
+	case responses.ResponseStatusIncomplete:
+		if reason := resp.IncompleteDetails.Reason; reason != "" {
+			return fmt.Errorf("response incomplete: %s", reason)
+		}
+		return fmt.Errorf("response incomplete")
+	default:
+		return fmt.Errorf("response was not completed (status: %s)", resp.Status)
+	}
+}
+
+// Wingman's extension preserves native boundaries that Responses status alone
+// cannot express. Providers without the extension retain their existing behavior.
+func responseStopReason(resp *responses.Response) string {
+	var reason string
+	_ = json.Unmarshal([]byte(resp.JSON.ExtraFields["stop_reason"].Raw()), &reason)
+	return reason
+}
+
+// Missing and null retain the fallback behavior for providers that do not
+// expose Codex's explicit turn boundary.
+func responseEndTurn(resp *responses.Response) *bool {
+	var endTurn *bool
+	if err := json.Unmarshal([]byte(resp.JSON.ExtraFields["end_turn"].Raw()), &endTurn); err != nil {
+		return nil
+	}
+	return endTurn
 }

@@ -250,7 +250,7 @@ func TestLoadReportsSkillsNotADirectory(t *testing.T) {
 	}
 }
 
-func TestLoadReportsInvalidSkill(t *testing.T) {
+func TestLoadWarnsOnSkillDirectoryMismatchButKeepsSkill(t *testing.T) {
 	p, notes := mustLoad(t, map[string]string{
 		"plugin.json": validManifest,
 		"skills/broken/SKILL.md": `---
@@ -260,7 +260,7 @@ description: Does not match its directory.
 body`,
 	})
 
-	if len(p.Skills) != 0 || !hasNote(notes, `skipping skill "broken"`) {
+	if len(p.Skills) != 1 || p.Skills[0].Name != "different" || !hasNote(notes, `name "different" does not match its directory "broken"`) {
 		t.Fatalf("skills = %#v, notes = %v", p.Skills, notes)
 	}
 }

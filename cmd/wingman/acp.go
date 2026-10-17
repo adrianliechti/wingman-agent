@@ -36,13 +36,13 @@ func parseACPBackend(value string) (acpBackend, error) {
 
 func printACPHelp() {
 	fmt.Fprint(os.Stdout, `Usage:
-  wingman acp [wingman]
+  wingman acp [wingman] [--listen ADDRESS]
   wingman acp claude [--backend native|wingman] [--model ID] [--effort LEVEL]
   wingman acp codex  [--backend native|wingman] [--model ID] [--effort LEVEL]
   wingman acp pi     [--backend native|wingman]
 
 The native backend reuses the agent's existing configuration and login.
-The wingman backend routes model traffic through WINGMAN_URL.
+The wingman backend routes model traffic through WINGMAN_URL (default: http://localhost:4242).
 `)
 }
 
@@ -50,23 +50,31 @@ func runACP(ctx context.Context, args []string) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	target := "wingman"
-	if len(args) > 0 {
+	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
+		printACPHelp()
+		return
+	}
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		target = args[0]
 		args = args[1:]
 	}
 
 	switch target {
-	case "--help", "-h", "help":
-		printACPHelp()
 	case "wingman":
-		if len(args) > 0 {
-			if args[0] == "--help" || args[0] == "-h" {
-				printACPHelp()
-				return
-			}
-			fatal(fmt.Errorf("wingman acp wingman does not accept arguments"))
+		listen := ""
+		fs := newFlags("wingman acp wingman")
+		fs.String(&listen, "--listen ADDRESS", "serve ACP over TCP instead of stdin/stdout")
+		if err := fs.Parse(args); err != nil {
+			fatal(err)
 		}
-		if err := server.Run(ctx, os.Stdin, os.Stdout); err != nil {
+
+		var err error
+		if listen == "" {
+			err = server.Run(ctx, os.Stdin, os.Stdout)
+		} else {
+			err = server.ListenAndServe(ctx, listen)
+		}
+		if err != nil {
 			fatal(err)
 		}
 	case "claude":
@@ -118,6 +126,7 @@ func runACPClaude(ctx context.Context, args []string) {
 			fatal(err)
 		}
 		opts.Env = claudecli.BuildEnv(os.Environ(), cfg)
+		opts.Args = claudecli.BuildArgs(cfg)
 	}
 
 	if err := claude.Run(ctx, opts, os.Stdin, os.Stdout, acpLogger(debug)); err != nil {
@@ -163,12 +172,27 @@ func runACPCodex(ctx context.Context, args []string) {
 		}
 		opts.Env = codexcli.BuildEnv(os.Environ(), cfg)
 		opts.ExtraArgs = codexcli.BuildArgs(cfg)
+		endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+		if endpoint = strings.TrimRight(endpoint, "/"); endpoint != "" {
+			opts.ExtraArgs = append(opts.ExtraArgs, codexOTLPArgs(endpoint)...)
+		}
 	}
 
 	err = codex.Run(ctx, opts, os.Stdin, os.Stdout, acpLogger(debug))
 	cleanup()
 	if err != nil {
 		fatal(err)
+	}
+}
+
+func codexOTLPArgs(endpoint string) []string {
+	exporter := func(path string) string {
+		return fmt.Sprintf(`{ otlp-http = { endpoint = %q, protocol = "json" } }`, endpoint+path)
+	}
+	return []string{
+		"--config", "analytics.enabled=true",
+		"--config", "otel.exporter=" + exporter("/v1/logs"),
+		"--config", "otel.metrics_exporter=" + exporter("/v1/metrics"),
 	}
 }
 
@@ -189,14 +213,8 @@ func runACPPi(ctx context.Context, args []string) {
 		fatal(err)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		fatal(err)
-	}
-
 	opts := pi.Options{
 		Path:        picli.BinPath(),
-		Dir:         cwd,
 		Env:         os.Environ(),
 		SessionsDir: picli.NativeSessionsDir(),
 	}

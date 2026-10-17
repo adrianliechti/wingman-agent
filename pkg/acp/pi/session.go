@@ -9,10 +9,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
+	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
 type session struct {
@@ -21,14 +23,16 @@ type session struct {
 	proc    *process
 	cleanup func()
 
+	promptMu       acpcommon.PromptGate
 	mu             sync.Mutex
+	closed         bool
 	models         []modelEntry
 	currentModel   string
 	thinkingLevels []string
 	thinking       string
 
-	cancelRequested atomic.Bool
-	cancelTurn      context.CancelFunc
+	cancelTurn context.CancelFunc
+	closeOnce  sync.Once
 }
 
 func newSession(id acp.SessionId, cwd string, proc *process) *session {
@@ -65,15 +69,28 @@ func (s *session) refreshConfiguration(ctx context.Context) error {
 }
 
 func (s *session) close() {
-	s.proc.dispose()
-	if s.cleanup != nil {
-		s.cleanup()
-	}
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		cancel := s.cancelTurn
+		s.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		s.proc.dispose()
+		if s.cleanup != nil {
+			s.cleanup()
+		}
+	})
+}
+
+func (s *session) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 func (s *session) cancel() {
-	s.cancelRequested.Store(true)
-
 	s.mu.Lock()
 	cancel := s.cancelTurn
 	s.mu.Unlock()
@@ -89,12 +106,14 @@ type turnResult struct {
 }
 
 func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, prompt []acp.ContentBlock) (acp.StopReason, error) {
-	s.cancelRequested.Store(false)
-
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return acp.StopReasonCancelled, nil
+	}
 	s.cancelTurn = cancel
 	s.mu.Unlock()
 	defer func() {
@@ -110,6 +129,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pr
 		conn:      conn,
 		sess:      s,
 		done:      make(chan turnResult, 1),
+		settled:   make(chan struct{}),
 		tools:     map[string]bool{},
 		mutations: map[string]bool{},
 		snapshots: map[string]fileSnapshot{},
@@ -126,10 +146,27 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pr
 	select {
 	case <-turnCtx.Done():
 		abortCtx, abortCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = s.proc.abort(abortCtx)
+		err := s.proc.abort(abortCtx)
 		abortCancel()
+		if err == nil {
+			select {
+			case <-t.settled:
+				return acp.StopReasonCancelled, nil
+			case <-s.proc.done:
+			case <-time.After(2 * time.Second):
+			}
+		}
+		// An abort response only acknowledges the command. Without the settled
+		// event, old output could otherwise complete the next prompt.
+		s.close()
 		return acp.StopReasonCancelled, nil
 	case <-s.proc.done:
+		// The final settled event can precede EOF in the same read batch.
+		select {
+		case res := <-t.done:
+			return res.stop, res.err
+		default:
+		}
 		return "", errors.New("pi process exited unexpectedly")
 	case res := <-t.done:
 		return res.stop, res.err
@@ -141,7 +178,9 @@ type turn struct {
 	conn *acp.AgentSideConnection
 	sess *session
 
-	done chan turnResult
+	done       chan turnResult
+	settled    chan struct{}
+	settleOnce sync.Once
 
 	tools     map[string]bool
 	mutations map[string]bool
@@ -157,10 +196,14 @@ type fileSnapshot struct {
 }
 
 func (t *turn) emit(u acp.SessionUpdate) {
-	if t.ctx.Err() != nil {
-		return
+	ctx := t.ctx
+	// Finish tool calls already announced in_progress; the SDK won't write on a cancelled ctx.
+	if ctx.Err() != nil {
+		detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		ctx = detached
 	}
-	_ = t.conn.SessionUpdate(t.ctx, acp.SessionNotification{SessionId: t.sess.id, Update: u})
+	_ = acpcommon.Notify(ctx, t.conn, t.sess.id, u)
 }
 
 func (t *turn) resolve(stop acp.StopReason, err error) {
@@ -174,8 +217,7 @@ func (t *turn) onPromptResult(err error) {
 	if err == nil {
 		return
 	}
-	if t.sess.cancelRequested.Load() {
-		t.resolve(acp.StopReasonCancelled, nil)
+	if t.ctx != nil && t.ctx.Err() != nil {
 		return
 	}
 	if isAuthError(err) {
@@ -214,7 +256,17 @@ func (t *turn) handle(raw json.RawMessage) {
 		t.handleToolEnd(raw)
 
 	case "extension_ui_request":
-		t.handleExtensionUI(raw)
+		// The backend can send abort responses and settled events while the
+		// client is displaying a dialog. Keep the RPC reader available for them.
+		var request struct {
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(raw, &request)
+		if request.Method == "confirm" || request.Method == "select" {
+			go t.handleExtensionUI(raw)
+		} else {
+			t.handleExtensionUI(raw)
+		}
 
 	case "auto_retry_start":
 		t.emit(acp.UpdateAgentMessageText("Retrying...\n\n"))
@@ -230,10 +282,13 @@ func (t *turn) handle(raw json.RawMessage) {
 
 	case "agent_settled":
 		reason := acp.StopReasonEndTurn
-		if t.sess.cancelRequested.Load() {
+		if t.ctx != nil && t.ctx.Err() != nil {
 			reason = acp.StopReasonCancelled
 		}
 		t.resolve(reason, nil)
+		if t.settled != nil {
+			t.settleOnce.Do(func() { close(t.settled) })
+		}
 	}
 }
 
@@ -279,17 +334,11 @@ func (t *turn) handleMessageUpdate(raw json.RawMessage) {
 			return
 		}
 		args := toolArgs(tc)
-		opts := []acp.ToolCallStartOpt{
-			acp.WithStartKind(toolKind(tc.Name)),
-			acp.WithStartStatus(acp.ToolCallStatusPending),
-		}
-		if args != nil {
-			opts = append(opts, acp.WithStartRawInput(args))
-		}
-		if locs := toolLocations(args, t.sess.cwd); len(locs) > 0 {
-			opts = append(opts, acp.WithStartLocations(locs))
-		}
-		t.emit(acp.StartToolCall(acp.ToolCallId(tc.ID), toolTitle(tc.Name, args), opts...))
+		presentation := presentTool(tc.Name, args, t.sess.cwd)
+		t.emit(acp.StartToolCall(
+			acp.ToolCallId(tc.ID), presentation.title,
+			startToolOptions(presentation, acp.ToolCallStatusPending)...,
+		))
 	}
 }
 
@@ -305,36 +354,34 @@ func (t *turn) handleToolStart(raw json.RawMessage) {
 
 	var args map[string]any
 	_ = json.Unmarshal(p.Args, &args)
-	locs := toolLocations(args, t.sess.cwd)
-	t.snapshotFileMutation(p.ToolName, p.ToolCallID, args, locs)
+	presentation := presentTool(p.ToolName, args, t.sess.cwd)
+	t.snapshotFileMutation(p.ToolName, p.ToolCallID, args, presentation.locations)
 
 	seen := t.tools[p.ToolCallID]
 	t.tools[p.ToolCallID] = true
 
 	if !seen {
-		opts := []acp.ToolCallStartOpt{
-			acp.WithStartKind(toolKind(p.ToolName)),
-			acp.WithStartStatus(acp.ToolCallStatusInProgress),
-		}
-		if args != nil {
-			opts = append(opts, acp.WithStartRawInput(args))
-		}
-		if len(locs) > 0 {
-			opts = append(opts, acp.WithStartLocations(locs))
-		}
-		t.emit(acp.StartToolCall(acp.ToolCallId(p.ToolCallID), toolTitle(p.ToolName, args), opts...))
+		t.emit(acp.StartToolCall(
+			acp.ToolCallId(p.ToolCallID), presentation.title,
+			startToolOptions(presentation, acp.ToolCallStatusInProgress)...,
+		))
 		return
 	}
 
 	opts := []acp.ToolCallUpdateOpt{
 		acp.WithUpdateStatus(acp.ToolCallStatusInProgress),
-		acp.WithUpdateTitle(toolTitle(p.ToolName, args)),
+		acp.WithUpdateTitle(presentation.title),
+		acp.WithUpdateKind(presentation.kind),
 	}
-	if args != nil {
-		opts = append(opts, acp.WithUpdateRawInput(args))
+	if presentation.rawInput != nil {
+		opts = append(opts, acp.WithUpdateRawInput(presentation.rawInput))
+	} else if args != nil || len(presentation.locations) > 0 {
+		// A streamed partial call may have exposed partialArgs. Replace it with
+		// an empty object once the complete call is represented solely by a chip.
+		opts = append(opts, acp.WithUpdateRawInput(map[string]any{}))
 	}
-	if len(locs) > 0 {
-		opts = append(opts, acp.WithUpdateLocations(locs))
+	if len(presentation.locations) > 0 {
+		opts = append(opts, acp.WithUpdateLocations(presentation.locations))
 	}
 	t.emit(acp.UpdateToolCall(acp.ToolCallId(p.ToolCallID), opts...))
 }
@@ -436,7 +483,7 @@ func (t *turn) ensureToolStarted(id string) {
 		t.tools[id] = true
 	}
 	if !seen {
-		t.emit(acp.StartToolCall(acp.ToolCallId(id), "tool",
+		t.emit(acp.StartToolCall(acp.ToolCallId(id), "Tool call",
 			acp.WithStartKind(acp.ToolKindOther),
 			acp.WithStartStatus(acp.ToolCallStatusInProgress),
 		))
@@ -507,13 +554,15 @@ func (t *turn) askConfirm(id, title, message string) bool {
 		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(message))}
 	}
 
-	resp, err := t.conn.RequestPermission(t.ctx, acp.RequestPermissionRequest{
-		SessionId: t.sess.id,
-		ToolCall:  tc,
-		Options: []acp.PermissionOption{
-			{OptionId: "yes", Name: "Yes", Kind: acp.PermissionOptionKindAllowOnce},
-			{OptionId: "no", Name: "No", Kind: acp.PermissionOptionKindRejectOnce},
-		},
+	resp, err := acpcommon.Call(t.ctx, func() (acp.RequestPermissionResponse, error) {
+		return t.conn.RequestPermission(t.ctx, acp.RequestPermissionRequest{
+			SessionId: t.sess.id,
+			ToolCall:  tc,
+			Options: []acp.PermissionOption{
+				{OptionId: "yes", Name: "Yes", Kind: acp.PermissionOptionKindAllowOnce},
+				{OptionId: "no", Name: "No", Kind: acp.PermissionOptionKindRejectOnce},
+			},
+		})
 	})
 	if err != nil || resp.Outcome.Selected == nil {
 		return false
@@ -547,10 +596,12 @@ func (t *turn) askSelect(id, title string, options []string) (string, bool) {
 		})
 	}
 
-	resp, err := t.conn.RequestPermission(t.ctx, acp.RequestPermissionRequest{
-		SessionId: t.sess.id,
-		ToolCall:  tc,
-		Options:   opts,
+	resp, err := acpcommon.Call(t.ctx, func() (acp.RequestPermissionResponse, error) {
+		return t.conn.RequestPermission(t.ctx, acp.RequestPermissionRequest{
+			SessionId: t.sess.id,
+			ToolCall:  tc,
+			Options:   opts,
+		})
 	})
 	if err != nil || resp.Outcome.Selected == nil {
 		return "", false
@@ -605,21 +656,94 @@ func toolLocations(args map[string]any, cwd string) []acp.ToolCallLocation {
 	if !filepath.IsAbs(path) && cwd != "" {
 		path = filepath.Join(cwd, path)
 	}
-	return []acp.ToolCallLocation{{Path: path}}
+	location := acp.ToolCallLocation{Path: path}
+	if offset, ok := tool.IntArg(args, "offset"); ok && offset > 0 {
+		location.Line = new(offset)
+	}
+	return []acp.ToolCallLocation{location}
 }
 
-func toolTitle(name string, args map[string]any) string {
-	if name == "bash" {
-		for _, key := range []string{"command", "cmd"} {
-			if cmd, ok := args[key].(string); ok && strings.TrimSpace(cmd) != "" {
-				return cmd
-			}
-		}
+type toolPresentation struct {
+	title     string
+	kind      acp.ToolKind
+	rawInput  any
+	locations []acp.ToolCallLocation
+}
+
+func presentTool(name string, args map[string]any, cwd string) toolPresentation {
+	kind := toolKind(name)
+	locations := toolLocations(args, cwd)
+	title := name
+	omit := []string{}
+
+	switch strings.ToLower(name) {
+	case "read":
+		title = "Read file"
+		omit = append(omit, "path", "file_path", "offset")
+	case "write":
+		title = "Write file"
+		omit = append(omit, "path", "file_path", "content")
+	case "edit":
+		title = "Edit file"
+		omit = append(omit,
+			"path", "file_path", "oldText", "newText", "old_string", "new_string",
+			"replaceAll", "replace_all", "edits",
+		)
+	case "bash", "shell", "exec", "exec_command":
+		title = "Run command"
+	case "grep":
+		title = "Search files"
+		omit = append(omit, "path", "file_path")
+	case "glob":
+		title = "Find files"
+		omit = append(omit, "path", "file_path")
+	case "view_image":
+		title = "View image"
+		omit = append(omit, "path", "file_path")
 	}
-	if name == "" {
-		return "tool"
+
+	if title == "" {
+		title = "Tool call"
 	}
-	return name
+	if len(locations) > 0 && len(omit) == 0 {
+		omit = append(omit, "path", "file_path")
+	}
+	return toolPresentation{
+		title: title, kind: kind,
+		rawInput: compactToolArgs(args, omit...), locations: locations,
+	}
+}
+
+func compactToolArgs(args map[string]any, omit ...string) any {
+	if len(args) == 0 {
+		return nil
+	}
+	display := make(map[string]any, len(args))
+	for key, value := range args {
+		display[key] = value
+	}
+	for _, key := range omit {
+		delete(display, key)
+	}
+	if len(display) == 0 {
+		return nil
+	}
+	return display
+}
+
+func startToolOptions(p toolPresentation, status acp.ToolCallStatus) []acp.ToolCallStartOpt {
+	opts := []acp.ToolCallStartOpt{
+		acp.WithStartKind(p.kind),
+		acp.WithStartStatus(status),
+	}
+	if len(p.locations) > 0 {
+		opts = append(opts, acp.WithStartLocations(p.locations))
+	}
+	// Apply rawInput after locations to undo the SDK's synthetic path mirror.
+	if p.rawInput != nil || len(p.locations) > 0 {
+		opts = append(opts, acp.WithStartRawInput(p.rawInput))
+	}
+	return opts
 }
 
 func absPath(path, cwd string) string {
@@ -666,13 +790,17 @@ func findUniqueLine(text, needle string) *int {
 }
 
 func toolKind(name string) acp.ToolKind {
-	switch name {
+	switch strings.ToLower(name) {
 	case "read":
 		return acp.ToolKindRead
 	case "write", "edit":
 		return acp.ToolKindEdit
-	case "bash":
+	case "bash", "shell", "exec", "exec_command":
 		return acp.ToolKindExecute
+	case "grep", "glob":
+		return acp.ToolKindSearch
+	case "view_image":
+		return acp.ToolKindRead
 	default:
 		return acp.ToolKindOther
 	}
@@ -721,26 +849,27 @@ func promptToPi(blocks []acp.ContentBlock) (string, []piImage) {
 			b.WriteString("\n[Context] " + block.ResourceLink.Uri)
 
 		case block.Resource != nil:
-			if text, uri := resourceContents(block.Resource.Resource); text != "" {
-				b.WriteString("\n[Embedded Context] " + uri + "\n" + text)
+			resource := block.Resource.Resource
+			switch {
+			case resource.TextResourceContents != nil:
+				r := resource.TextResourceContents
+				b.WriteString("\n[Embedded Context] " + r.Uri + "\n" + r.Text)
+			case resource.BlobResourceContents != nil:
+				r := resource.BlobResourceContents
+				mimeType := "application/octet-stream"
+				if r.MimeType != nil && *r.MimeType != "" {
+					mimeType = *r.MimeType
+				}
+				if strings.HasPrefix(strings.ToLower(mimeType), "image/") && r.Blob != "" {
+					images = append(images, piImage{Type: "image", MimeType: mimeType, Data: r.Blob})
+					break
+				}
+				b.WriteString("\n[Embedded Context] " + r.Uri + " (" + mimeType + ", base64)\n" + r.Blob)
 			}
 		}
 	}
 
 	return b.String(), images
-}
-
-func resourceContents(res any) (text, uri string) {
-	data, err := json.Marshal(res)
-	if err != nil {
-		return "", ""
-	}
-	var v struct {
-		Text string `json:"text"`
-		URI  string `json:"uri"`
-	}
-	_ = json.Unmarshal(data, &v)
-	return v.Text, v.URI
 }
 
 func splitDataURL(s string) (mime, data string, ok bool) {

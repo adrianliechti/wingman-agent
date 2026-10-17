@@ -2,7 +2,9 @@ package code
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -27,6 +30,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/changes"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
+	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	"github.com/adrianliechti/wingman-agent/pkg/graph"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
@@ -59,14 +63,16 @@ func SessionIDFromContext(ctx context.Context) string {
 }
 
 type Workspace struct {
-	Root        *os.Root
-	RootPath    string
-	MemoryPath  string
-	ScratchPath string
+	Root             *os.Root
+	RootPath         string
+	MemoryPath       string
+	ScratchPath      string
+	SystemSkillsPath string
 
 	Plugins []plugin.Plugin
 
-	MCP *mcp.Manager
+	MCP      *mcp.Manager
+	DevTools *devtools.Manager
 
 	Language *language.Service
 	DAP      *dap.Manager
@@ -77,12 +83,16 @@ type Workspace struct {
 	mu               sync.RWMutex
 	closed           bool
 	warmed           bool
+	debugRegistry    *debugadapter.Registry
 	mcpToolsByServer map[string][]tool.Tool
 	lspTools         []tool.Tool
 	graphTools       []tool.Tool
 
-	mcpCatalogMu     sync.Mutex
-	mcpRefreshCancel context.CancelFunc
+	mcpCatalogMu      sync.Mutex
+	mcpTrustDecisions map[string]bool
+	hookTrust         *trustFile
+	mcpRefreshCancel  context.CancelFunc
+	managedUpdates    map[*ManagedToolsUpdate]struct{}
 
 	// LSP calls may include server startup and network round-trips. Keep their
 	// lifetime lock separate from workspace state so close does not block
@@ -116,7 +126,7 @@ func NewWorkspace(workDir string) (*Workspace, error) {
 		root.Close()
 		return nil, fmt.Errorf("create scratch directory: %w", err)
 	}
-	bundled, err := loadBundledSkills(scratchDir)
+	bundled, systemSkillsPath, err := loadBundledSkills()
 	if err != nil {
 		os.RemoveAll(scratchDir)
 		root.Close()
@@ -142,16 +152,22 @@ func NewWorkspace(workDir string) (*Workspace, error) {
 	reportShadowedPluginSkills(mergedSkills)
 
 	mcpManager := loadMCP(workDir, plugins)
+	managedTools, toolsErr := devtools.New()
+	if toolsErr != nil {
+		fmt.Fprintf(os.Stderr, "managed tools: %v\n", toolsErr)
+	}
 
 	return &Workspace{
-		Root:        root,
-		RootPath:    workDir,
-		MemoryPath:  memoryDir,
-		ScratchPath: scratchDir,
-		Plugins:     plugins,
-		MCP:         mcpManager,
-		baseSkills:  baseSkills,
-		skills:      mergedSkills,
+		Root:             root,
+		RootPath:         workDir,
+		MemoryPath:       memoryDir,
+		ScratchPath:      scratchDir,
+		SystemSkillsPath: systemSkillsPath,
+		Plugins:          plugins,
+		MCP:              mcpManager,
+		DevTools:         managedTools,
+		baseSkills:       baseSkills,
+		skills:           mergedSkills,
 	}, nil
 }
 
@@ -219,6 +235,13 @@ func loadMCP(workDir string, plugins []plugin.Plugin) *mcp.Manager {
 		manager = mcp.NewManager(&mcp.Config{Servers: map[string]mcp.ServerConfig{}})
 	}
 
+	manager.TrustRequired = map[string]string{}
+	projectConfig := filepath.Join(workDir, "mcp.json")
+	if cfg, err := mcp.LoadConfig(projectConfig); err == nil {
+		for name := range cfg.Servers {
+			manager.TrustRequired[name] = projectConfig
+		}
+	}
 	configured := slices.Sorted(maps.Keys(manager.Servers))
 
 	for _, name := range slices.Sorted(maps.Keys(servers)) {
@@ -228,6 +251,7 @@ func loadMCP(workDir string, plugins []plugin.Plugin) *mcp.Manager {
 		}
 
 		manager.Servers[name] = servers[name]
+		manager.TrustRequired[name] = "plugin configuration at " + servers[name].Dir
 	}
 
 	for _, note := range mcp.Dedup(manager.Servers, configured) {
@@ -257,15 +281,13 @@ func (w *Workspace) WarmUp() {
 			changesManager = changes.New(w.RootPath)
 		}
 
-		debugRegistry := debugadapter.NewRegistry()
-		var languageOptions []lsp.ManagerOption
-		if bundles := debugRegistry.JDTLSBundles(); len(bundles) > 0 {
-			languageOptions = append(languageOptions, lsp.WithServerInitializationOptions("jdtls", map[string]any{
-				"bundles": bundles,
-			}))
+		debugRegistry := debugadapter.NewRegistry(w.DevTools)
+		languageOptions := []lsp.ManagerOption{lsp.WithManagedTools(w.DevTools)}
+		for server, options := range debugRegistry.ServerInitializations() {
+			languageOptions = append(languageOptions, lsp.WithServerInitializationOptions(server, options))
 		}
 		languageService := language.New(w.RootPath, filepath.Join(projectGraphDir(w.RootPath), "graph.json"), languageOptions...)
-		dapManager := dap.NewManager(w.RootPath, debugRegistry.Descriptors()...)
+		dapManager := dap.NewManager(w.RootPath, w.DevTools, debugRegistry.Descriptors()...)
 		dapManager.SetAdapterConnector(debugadapter.NewConnector(languageService))
 		graphEngine := languageService.Graph()
 		lspTools := lsptool.NewTools(languageService)
@@ -290,6 +312,7 @@ func (w *Workspace) WarmUp() {
 		w.Changes = changesManager
 		w.Language = languageService
 		w.DAP = dapManager
+		w.debugRegistry = debugRegistry
 		w.lspTools = lspTools
 		w.graphTools = graphTools
 		w.warmed = true
@@ -301,7 +324,244 @@ func (w *Workspace) WarmUp() {
 	})
 }
 
-func (w *Workspace) InitMCP(ctx context.Context) error {
+// ManagedToolSet selects the curated editor capabilities a frontend uses.
+// Language runtimes and build tools remain external.
+type ManagedToolSet uint8
+
+const (
+	ManagedLSPTools ManagedToolSet = 1 << iota
+	ManagedDAPTools
+	ManagedEditorTools = ManagedLSPTools | ManagedDAPTools
+)
+
+// UpdateManagedTools installs missing project-relevant tools. Successful
+// updates invalidate discovery caches immediately; active sessions keep
+// running and use the new command on their next start.
+func (w *Workspace) UpdateManagedTools(ctx context.Context, tools ManagedToolSet, progress ...func(devtools.Progress)) (bool, error) {
+	return w.updateManagedTools(ctx, tools, "", true, progress...)
+}
+
+// DebugToolStatus checks the selected language's debugger and host dependencies
+// without installing anything.
+func (w *Workspace) DebugToolStatus(ctx context.Context, language string) ([]devtools.ToolStatus, error) {
+	w.mu.RLock()
+	manager := w.DevTools
+	w.mu.RUnlock()
+	requirements, err := w.managedToolRequirements(ctx, ManagedDAPTools, language)
+	if err != nil {
+		return nil, err
+	}
+	return manager.Status(ctx, requirements)
+}
+
+// UpdateDebugTools installs or refreshes the selected language's managed
+// debugger and host dependencies, checking for updates at most once per day.
+func (w *Workspace) UpdateDebugTools(ctx context.Context, language string, install bool, progress ...func(devtools.Progress)) (bool, error) {
+	if strings.TrimSpace(language) == "" {
+		return false, errors.New("debugger language is required")
+	}
+	return w.updateManagedTools(ctx, ManagedDAPTools, language, install, progress...)
+}
+
+func (w *Workspace) updateManagedTools(ctx context.Context, tools ManagedToolSet, language string, install bool, progress ...func(devtools.Progress)) (bool, error) {
+	w.mu.RLock()
+	manager := w.DevTools
+	dapManager := w.DAP
+	closed := w.closed
+	w.mu.RUnlock()
+	if closed || manager == nil {
+		return false, nil
+	}
+	if dapManager != nil {
+		release, err := dapManager.BeginPreparation()
+		if err != nil {
+			return false, err
+		}
+		defer release()
+	}
+
+	requirements, detectErr := w.managedToolRequirements(ctx, tools, language)
+	onDemand := language != ""
+	var changed bool
+	var updateErr error
+	if onDemand {
+		changed, updateErr = manager.UpdateOnDemand(ctx, requirements, install, progress...)
+	} else {
+		changed, updateErr = manager.Update(ctx, requirements, progress...)
+	}
+	if !changed && !onDemand {
+		return false, errors.Join(detectErr, updateErr)
+	}
+
+	w.lspLifeMu.RLock()
+	w.dapLifeMu.RLock()
+	w.mu.RLock()
+	languageService := w.Language
+	dapManager = w.DAP
+	closed = w.closed
+	w.mu.RUnlock()
+	if !closed {
+		updatedRegistry := debugadapter.NewRegistry(manager)
+		w.mu.Lock()
+		if !w.closed {
+			w.debugRegistry = updatedRegistry
+		}
+		w.mu.Unlock()
+		if languageService != nil {
+			for server, options := range updatedRegistry.ServerInitializations() {
+				updateErr = errors.Join(updateErr, languageService.SetServerInitializationOptions(server, options))
+			}
+			languageService.InvalidateLSPDetection()
+		}
+		if dapManager != nil {
+			dapManager.SetAdapters(updatedRegistry.Descriptors()...)
+		}
+	}
+	w.dapLifeMu.RUnlock()
+	w.lspLifeMu.RUnlock()
+	return changed, errors.Join(detectErr, updateErr)
+}
+
+// managedToolRequirements keeps frontend and language scope explicit. The
+// devtools manager selects curated recipes from these detected requirements.
+func (w *Workspace) managedToolRequirements(ctx context.Context, tools ManagedToolSet, language string) ([]devtools.Requirement, error) {
+	root := w.RootPath
+	registry := w.DebugRegistry()
+
+	var adapterRequirements []dap.AdapterRequirement
+	var detectErr error
+	needsJavaHost := false
+	if tools&ManagedDAPTools != 0 {
+		descriptors := registry.Descriptors()
+		if language != "" {
+			descriptors = slices.DeleteFunc(descriptors, func(descriptor dap.AdapterDescriptor) bool {
+				return !strings.EqualFold(descriptor.Language, language)
+			})
+		}
+		adapterRequirements, detectErr = dap.DetectRequirements(ctx, root, descriptors)
+		needsJavaHost = slices.ContainsFunc(adapterRequirements, func(requirement dap.AdapterRequirement) bool {
+			return strings.EqualFold(requirement.Language, "Java")
+		})
+	}
+
+	var requirements []devtools.Requirement
+	if tools&ManagedLSPTools != 0 || needsJavaHost {
+		for _, requirement := range lsp.DetectRequirements(root) {
+			alternatives := requirement.Commands
+			if tools&ManagedLSPTools == 0 {
+				alternatives = slices.DeleteFunc(slices.Clone(alternatives), func(command string) bool {
+					return command != "jdtls"
+				})
+				if len(alternatives) == 0 {
+					continue
+				}
+			}
+			requirements = append(requirements, devtools.Requirement{
+				Alternatives: alternatives, Workspace: root, Projects: requirement.Directories,
+				MinimumMajorVersions: requirement.MinimumMajorVersions,
+			})
+		}
+	}
+
+	if tools&ManagedDAPTools == 0 {
+		return requirements, detectErr
+	}
+	for _, requirement := range adapterRequirements {
+		requirements = append(requirements, devtools.Requirement{
+			Alternatives: requirement.Commands, Workspace: root, Projects: requirement.Projects,
+		})
+	}
+	return requirements, detectErr
+}
+
+type managedToolsResult struct {
+	changed bool
+	err     error
+}
+
+// ManagedToolsUpdate owns one background update lifecycle. All frontends use
+// it so cancellation and shutdown have identical behavior.
+type ManagedToolsUpdate struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	result managedToolsResult
+}
+
+func (w *Workspace) StartManagedToolsUpdate(ctx context.Context, tools ManagedToolSet, progress ...func(devtools.Progress)) *ManagedToolsUpdate {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	updateCtx, cancel := context.WithCancel(ctx)
+	update := &ManagedToolsUpdate{cancel: cancel, done: make(chan struct{})}
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		cancel()
+		close(update.done)
+		return update
+	}
+	if w.managedUpdates == nil {
+		w.managedUpdates = make(map[*ManagedToolsUpdate]struct{})
+	}
+	w.managedUpdates[update] = struct{}{}
+	w.mu.Unlock()
+	go func() {
+		defer func() {
+			w.mu.Lock()
+			delete(w.managedUpdates, update)
+			w.mu.Unlock()
+			close(update.done)
+		}()
+		update.result.changed, update.result.err = w.UpdateManagedTools(updateCtx, tools, progress...)
+		if updateCtx.Err() != nil {
+			update.result.err = nil
+		}
+	}()
+	return update
+}
+
+func (u *ManagedToolsUpdate) Cancel() {
+	if u != nil && u.cancel != nil {
+		u.cancel()
+	}
+}
+
+func (u *ManagedToolsUpdate) Wait() (bool, error) {
+	return u.WaitContext(context.Background())
+}
+
+// WaitContext observes completion without making shutdown depend on an
+// installer that has not returned yet. Cancel remains separate so callers can
+// stop the update before choosing how long they are willing to wait.
+func (u *ManagedToolsUpdate) WaitContext(ctx context.Context) (bool, error) {
+	if u == nil {
+		return false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-u.done:
+		return u.result.changed, u.result.err
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
+// DebugRegistry returns the language debug adapters configured for the
+// workspace. All frontends plan and detect against the same registry.
+func (w *Workspace) DebugRegistry() *debugadapter.Registry {
+	w.mu.RLock()
+	registry := w.debugRegistry
+	manager := w.DevTools
+	w.mu.RUnlock()
+	if registry != nil {
+		return registry
+	}
+	return debugadapter.NewRegistry(manager)
+}
+
+func (w *Workspace) InitMCP(ctx context.Context, ui ...UI) error {
 	w.mu.RLock()
 	manager := w.MCP
 	closed := w.closed
@@ -313,7 +573,13 @@ func (w *Workspace) InitMCP(ctx context.Context) error {
 	w.mcpCatalogMu.Lock()
 	defer w.mcpCatalogMu.Unlock()
 	w.startMCPToolRefreshes(manager)
-	connectErr := manager.Connect(ctx)
+	var confirm UI
+	if len(ui) > 0 {
+		confirm = ui[0]
+	}
+	connectErr := manager.Connect(ctx, func(ctx context.Context, name string, server mcp.ServerConfig) error {
+		return w.approveMCP(ctx, confirm, name, server)
+	})
 
 	sessions := manager.Sessions()
 	toolsByServer := make(map[string][]tool.Tool)
@@ -421,6 +687,11 @@ func (w *Workspace) Close() {
 	root := w.Root
 	scratchPath := w.ScratchPath
 	mcpRefreshCancel := w.mcpRefreshCancel
+	managedUpdates := make([]*ManagedToolsUpdate, 0, len(w.managedUpdates))
+	for update := range w.managedUpdates {
+		managedUpdates = append(managedUpdates, update)
+	}
+	clear(w.managedUpdates)
 	w.MCP = nil
 	w.Language = nil
 	w.DAP = nil
@@ -430,14 +701,17 @@ func (w *Workspace) Close() {
 	w.lspTools = nil
 	w.graphTools = nil
 	w.mu.Unlock()
+	for _, update := range managedUpdates {
+		update.Cancel()
+	}
 	if mcpManager != nil {
 		mcpManager.SetToolListChangedHandler(nil)
 	}
 	if mcpRefreshCancel != nil {
 		mcpRefreshCancel()
 	}
-	// Java's debug adapter is hosted by JDT LS, so DAP must disconnect while
-	// the language service is still available.
+	// Some debug adapters are hosted by a language server, so DAP must
+	// disconnect while the language service is still available.
 	if dapManager != nil {
 		dapManager.Close()
 	}
@@ -533,6 +807,16 @@ func (w *Workspace) EditorLSPDocumentContent(filePath string) (string, bool) {
 		return "", false
 	}
 	return service.DocumentContent(filePath)
+}
+
+func (w *Workspace) LSPActivities() []lsp.ServerActivity {
+	w.mu.RLock()
+	service := w.Language
+	w.mu.RUnlock()
+	if service == nil {
+		return nil
+	}
+	return service.Activities()
 }
 
 func (w *Workspace) Diagnostics(ctx context.Context) language.WorkspaceReport {
@@ -696,6 +980,14 @@ func (w *Workspace) ExecuteLSPCommand(ctx context.Context, filePath string, cont
 	return service.ExecuteCommand(ctx, filePath, content, command)
 }
 
+func (w *Workspace) ExecuteLSPCommandWithEdits(ctx context.Context, filePath string, content *string, command lsp.Command) (any, []lsp.CommandWorkspaceEdit, error) {
+	service, err := w.languageService()
+	if err != nil {
+		return nil, nil, err
+	}
+	return service.ExecuteCommandWithEdits(ctx, filePath, content, command)
+}
+
 func (w *Workspace) Formatting(ctx context.Context, filePath string, content *string, options lsp.FormattingOptions) ([]lsp.TextEdit, error) {
 	service, err := w.languageService()
 	if err != nil {
@@ -760,10 +1052,12 @@ func (w *Workspace) SemanticTokens(ctx context.Context, filePath string, content
 	return service.SemanticTokens(ctx, filePath, content)
 }
 
+const maxEditDiagnosticFiles = 8
+
 func (w *Workspace) WithEditDiagnostics(tools []tool.Tool) []tool.Tool {
 	wrapped := append([]tool.Tool(nil), tools...)
 	for i := range wrapped {
-		if wrapped[i].Name != "edit" && wrapped[i].Name != "write" {
+		if wrapped[i].Name != "edit" {
 			continue
 		}
 		execute := wrapped[i].Execute
@@ -775,8 +1069,7 @@ func (w *Workspace) WithEditDiagnostics(tools []tool.Tool) []tool.Tool {
 			if err != nil {
 				return out, err
 			}
-			path, _ := args["file_path"].(string)
-			if note := w.postEditDiagnostics(ctx, path); note != "" {
+			if note := w.postEditDiagnostics(ctx, editedPaths(out)); note != "" {
 				out.Content += "\n\n" + note
 			}
 			return out, nil
@@ -785,21 +1078,40 @@ func (w *Workspace) WithEditDiagnostics(tools []tool.Tool) []tool.Tool {
 	return wrapped
 }
 
-func (w *Workspace) postEditDiagnostics(ctx context.Context, path string) string {
-	if strings.TrimSpace(path) == "" {
-		return ""
+// The result metadata names every file of a batched edit, resolved the same
+// way the edit itself resolved them.
+func editedPaths(result tool.Result) []string {
+	changes, _ := tool.ResultFileChanges(result.Metadata)
+	var paths []string
+	for _, change := range changes {
+		if change.AfterExists && strings.TrimSpace(change.Path) != "" && !slices.Contains(paths, change.Path) {
+			paths = append(paths, change.Path)
+		}
 	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(w.RootPath, path)
-	}
+	return paths
+}
 
+// Each file may wait up to two seconds for its server, so files are checked
+// concurrently.
+func (w *Workspace) postEditDiagnostics(ctx context.Context, paths []string) string {
 	w.mu.RLock()
 	service := w.Language
 	w.mu.RUnlock()
-	if service == nil {
+	if service == nil || len(paths) == 0 {
 		return ""
 	}
-	return service.PostEditDiagnostics(ctx, path)
+
+	paths = paths[:min(len(paths), maxEditDiagnosticFiles)]
+	notes := make([]string, len(paths))
+	var wg sync.WaitGroup
+	for i, path := range paths {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(w.RootPath, path)
+		}
+		wg.Go(func() { notes[i] = service.PostEditDiagnostics(ctx, path) })
+	}
+	wg.Wait()
+	return strings.Join(slices.DeleteFunc(notes, func(note string) bool { return note == "" }), "\n\n")
 }
 
 func (w *Workspace) protectLSPTools(tools []tool.Tool) []tool.Tool {
@@ -825,6 +1137,25 @@ func (w *Workspace) Diffs(ctx context.Context) ([]changes.FileDiff, error) {
 		return nil, nil
 	}
 	return w.Changes.Diffs(ctx)
+}
+
+// DiffsIfChanged checks for changes and loads their diffs in one Git scan.
+func (w *Workspace) DiffsIfChanged(ctx context.Context, previous uint64) ([]changes.FileDiff, uint64, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.Changes == nil {
+		return nil, 0, nil
+	}
+	return w.Changes.DiffsIfChanged(ctx, previous)
+}
+
+func (w *Workspace) DiffsLayer(ctx context.Context, layer changes.DiffLayer) ([]changes.FileDiff, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.Changes == nil {
+		return nil, changes.ErrNotGitRepository
+	}
+	return w.Changes.DiffsLayer(ctx, layer)
 }
 
 func (w *Workspace) Diff(ctx context.Context, path string, layer changes.DiffLayer) (changes.FileDiff, error) {
@@ -921,6 +1252,15 @@ func (w *Workspace) GitHistory(ctx context.Context) ([]changes.GitCommit, error)
 	return w.Changes.History(ctx)
 }
 
+func (w *Workspace) GitHistoryLimit(ctx context.Context, limit int) ([]changes.GitCommit, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.Changes == nil {
+		return nil, changes.ErrNotGitRepository
+	}
+	return w.Changes.HistoryLimit(ctx, limit)
+}
+
 func (w *Workspace) GitCompare(ctx context.Context, base, head string, mergeBase bool) (changes.CompareResult, error) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -1009,7 +1349,7 @@ func (w *Workspace) MemoryContent() string {
 
 	var lines []string
 	for _, f := range files {
-		line := "- " + f.name
+		line := fmt.Sprintf("- [%s](%s)", memoryTitle(f.name), f.name)
 		if hook := extractMemoryHook(filepath.Join(w.MemoryPath, f.name)); hook != "" {
 			line += " — " + hook
 		}
@@ -1053,8 +1393,25 @@ func listMemoryFiles(dir string) []memoryFile {
 		files = append(files, memoryFile{name: e.Name(), mtime: info.ModTime()})
 	}
 
-	slices.SortFunc(files, func(a, b memoryFile) int { return strings.Compare(a.name, b.name) })
+	slices.SortFunc(files, func(a, b memoryFile) int {
+		if c := b.mtime.Compare(a.mtime); c != 0 {
+			return c
+		}
+		return strings.Compare(a.name, b.name)
+	})
 	return files
+}
+
+func memoryTitle(name string) string {
+	title := strings.TrimSuffix(name, filepath.Ext(name))
+	title = strings.NewReplacer("_", " ", "-", " ").Replace(title)
+	title = strings.Join(strings.Fields(title), " ")
+	if title == "" {
+		return name
+	}
+	runes := []rune(title)
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
 }
 
 func extractMemoryHook(path string) string {
@@ -1133,6 +1490,13 @@ func (w *Workspace) HasLSP() bool {
 	return service != nil && service.HasLSP()
 }
 
+func (w *Workspace) HasLSPFor(filePath string) bool {
+	w.mu.RLock()
+	service := w.Language
+	w.mu.RUnlock()
+	return service != nil && service.HasLSPFor(filePath)
+}
+
 func (w *Workspace) HasChanges() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -1183,8 +1547,7 @@ func projectKey(workingDir string) string {
 }
 
 func globalMCPConfigPath() string {
-	path, _ := layout.WingmanPath("mcp.json")
-	return path
+	return mcp.GlobalConfigPath()
 }
 
 func projectStateDir(workingDir string) string {
@@ -1271,16 +1634,94 @@ func resolveWorktreeRoot(worktreeDir, gitFile string) string {
 	return ""
 }
 
-func loadBundledSkills(scratchDir string) ([]skill.Skill, error) {
+var bundledSkillsInstallMu sync.Mutex
+
+const bundledSkillsMarkerFile = ".wingman"
+
+func loadBundledSkills() ([]skill.Skill, string, error) {
 	source, err := fs.Sub(bundledFS, "skills")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	destination := filepath.Join(scratchDir, "skills")
-	if err := os.CopyFS(destination, source); err != nil {
-		return nil, err
+	destination, err := skill.SystemSkillsRoot()
+	if err != nil {
+		return nil, "", err
+	}
+	fingerprint, err := bundledSkillsFingerprint(source)
+	if err != nil {
+		return nil, "", fmt.Errorf("fingerprint system skills: %w", err)
 	}
 
-	return skill.LoadBundledAt(source, ".", destination)
+	// .system is a reserved Wingman-owned snapshot. Refresh it wholesale so
+	// changed files are replaced and skills removed from the embedded bundle do
+	// not survive as stale personal-looking entries. Serialize workspace starts
+	// within this process so two projects cannot interleave the refresh.
+	bundledSkillsInstallMu.Lock()
+	defer bundledSkillsInstallMu.Unlock()
+	markerPath := filepath.Join(destination, bundledSkillsMarkerFile)
+	marker, markerErr := os.ReadFile(markerPath)
+	if markerErr != nil || strings.TrimSpace(string(marker)) != fingerprint {
+		if err := os.RemoveAll(destination); err != nil {
+			return nil, "", fmt.Errorf("remove system skills: %w", err)
+		}
+		if err := os.CopyFS(destination, source); err != nil {
+			return nil, "", fmt.Errorf("copy system skills: %w", err)
+		}
+		if err := os.WriteFile(markerPath, []byte(fingerprint+"\n"), 0644); err != nil {
+			return nil, "", fmt.Errorf("mark system skills: %w", err)
+		}
+	}
+
+	skills, err := skill.LoadBundledAt(source, ".", destination)
+	return skills, destination, err
+}
+
+func bundledSkillsFingerprint(source fs.FS) (string, error) {
+	digest := sha256.New()
+	writeField := func(value []byte) {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+		_, _ = digest.Write(size[:])
+		_, _ = digest.Write(value)
+	}
+
+	err := fs.WalkDir(source, ".", func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			writeField([]byte("directory"))
+			writeField([]byte(name))
+			return nil
+		}
+
+		data, err := fs.ReadFile(source, name)
+		if err != nil {
+			return err
+		}
+		writeField([]byte("file"))
+		writeField([]byte(name))
+		writeField(data)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+// CallMCPTool runs a tool on an already-connected MCP server for mcp_tool hooks.
+func (w *Workspace) CallMCPTool(ctx context.Context, server, name string, input map[string]any) (string, error) {
+	w.mu.RLock()
+	manager := w.MCP
+	w.mu.RUnlock()
+	if manager == nil {
+		return "", errors.New("MCP is not available in this workspace")
+	}
+	session := manager.Session(server)
+	if session == nil {
+		return "", fmt.Errorf("MCP server %q is not connected", server)
+	}
+	return toolmcp.CallText(ctx, session, name, input)
 }

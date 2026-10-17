@@ -1,12 +1,23 @@
 package code
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
+	"fmt"
+	"image"
+	"image/png"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/clipboard"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
 func TestNormalizePastedText(t *testing.T) {
@@ -142,6 +153,91 @@ func TestPasteFromClipboardUsesInjectedReader(t *testing.T) {
 	}
 }
 
+func TestClipboardShortcutUsesFocusedInput(t *testing.T) {
+	for _, target := range []string{"composer", "picker", "overlay search"} {
+		for _, alt := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/alt=%t", target, alt), func(t *testing.T) {
+				a := &App{
+					agent: newUITestAgent(nil), editor: NewEditor(),
+					queue: make(chan func(), 1), quit: make(chan struct{}),
+					clipboardRead: func() ([]clipboard.Content, error) {
+						return []clipboard.Content{{Text: "hello\r\nworld"}}, nil
+					},
+				}
+				switch target {
+				case "picker":
+					a.popup = newPopup(popupList, "Pick", nil, nil)
+				case "overlay search":
+					overlay := newTwoPaneOverlay("Search", "", 0, nil, nil, nil)
+					overlay.searching = true
+					a.overlay = overlay
+				}
+				a.handleKey(inline.KeyEvent{Key: inline.KeyCtrl, Rune: 'v', Alt: alt})
+				select {
+				case fn := <-a.queue:
+					fn()
+				case <-time.After(time.Second):
+					t.Fatal("paste shortcut was swallowed before reading the clipboard")
+				}
+				switch target {
+				case "composer":
+					if a.editor.Text() != "hello\nworld" {
+						t.Fatalf("composer = %q", a.editor.Text())
+					}
+				case "picker":
+					if a.popup.query != "hello world" || a.editor.Text() != "" {
+						t.Fatalf("picker = %q; hidden composer = %q", a.popup.query, a.editor.Text())
+					}
+				case "overlay search":
+					if a.overlay.(*twoPaneOverlay).query != "hello world" || a.editor.Text() != "" {
+						t.Fatal("paste did not stay in the focused overlay search")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestDelayedClipboardDoesNotPasteIntoAnotherTarget(t *testing.T) {
+	for _, target := range []string{"session", "popup", "overlay", "prompt"} {
+		t.Run(target, func(t *testing.T) {
+			started, release := make(chan struct{}), make(chan struct{})
+			a := &App{
+				agent: newUITestAgent(nil), editor: NewEditor(), sessionID: "first",
+				queue: make(chan func(), 1), quit: make(chan struct{}),
+				clipboardRead: func() ([]clipboard.Content, error) {
+					close(started)
+					<-release
+					return []clipboard.Content{{Text: "first target only"}}, nil
+				},
+			}
+			a.pasteFromClipboard()
+			<-started
+			switch target {
+			case "session":
+				a.sessionID = "second"
+			case "popup":
+				a.popup = newPopup(popupList, "Pick", nil, nil)
+			case "overlay":
+				a.overlay = newTwoPaneOverlay("Search", "", 0, nil, nil, nil)
+			case "prompt":
+				a.askActive = true
+				a.askResponse = make(chan string, 1)
+			}
+			close(release)
+			select {
+			case fn := <-a.queue:
+				fn()
+			case <-time.After(time.Second):
+				t.Fatal("paste did not complete")
+			}
+			if a.editor.Text() != "" || (a.popup != nil && a.popup.query != "") {
+				t.Fatal("delayed clipboard text was inserted into another target")
+			}
+		})
+	}
+}
+
 func TestApplyClipboardContentsShowsErrorsAndEmptyState(t *testing.T) {
 	a := &App{}
 	a.applyClipboardContents(nil, errors.New("unavailable"))
@@ -229,5 +325,91 @@ func TestCopyLastResponseShowsBackendError(t *testing.T) {
 	a.copyLastResponse()
 	if a.toast == nil || a.toast.message != "Clipboard copy failed: unavailable" {
 		t.Fatalf("toast = %#v", a.toast)
+	}
+}
+
+func TestDetectFilePathsMultiFileFormats(t *testing.T) {
+	dir := t.TempDir()
+	imgOne := filepath.Join(dir, "one.png")
+	imgTwo := filepath.Join(dir, "Screen Shot 2.png")
+	if err := os.WriteFile(imgOne, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imgTwo, []byte("two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	escapedTwo := strings.ReplaceAll(imgTwo, " ", `\ `)
+	if got := detectFilePaths(imgOne+" "+escapedTwo, dir); !reflect.DeepEqual(got, []string{imgOne, imgTwo}) {
+		t.Fatalf("escaped drag-and-drop paths = %#v, want %#v", got, []string{imgOne, imgTwo})
+	}
+
+	quoted := fmt.Sprintf("'%s' \"%s\"", imgOne, imgTwo)
+	if got := detectFilePaths(quoted, dir); !reflect.DeepEqual(got, []string{imgOne, imgTwo}) {
+		t.Fatalf("quoted paths = %#v, want %#v", got, []string{imgOne, imgTwo})
+	}
+
+	uriList := fmt.Sprintf("# comment\nfile://%s\nfile://%s\n", filepath.ToSlash(imgOne), strings.ReplaceAll(filepath.ToSlash(imgTwo), " ", "%20"))
+	if got := detectFilePaths(uriList, dir); !reflect.DeepEqual(got, []string{imgOne, imgTwo}) {
+		t.Fatalf("uri-list paths = %#v, want %#v", got, []string{imgOne, imgTwo})
+	}
+}
+
+func TestSubmitAttachedImageFileIncludesVisionContentAndAllowsEmptyPrompt(t *testing.T) {
+	a, _ := newQueueTestApp(t, 1)
+	a.agent.Workspace().RootPath = t.TempDir()
+
+	var buf bytes.Buffer
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	imgPath := filepath.Join(a.agent.Workspace().RootPath, "diagram.png")
+	if err := os.WriteFile(imgPath, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.addFileToContext("diagram.png"); err != nil {
+		t.Fatal(err)
+	}
+	a.submitInputIntent(code.TurnInputFollowUp)
+
+	snapshot := a.turns.Snapshot("session")
+	if len(snapshot.Inputs) != 2 {
+		t.Fatalf("queued turns = %d, want 2", len(snapshot.Inputs))
+	}
+	sub := snapshot.Inputs[1].Input
+	if sub.Display == nil || sub.Display.Text != "[diagram.png]" {
+		t.Fatalf("display = %#v, want [diagram.png]", sub.Display)
+	}
+	var sawVision bool
+	for _, part := range sub.Content {
+		if part.File != nil && part.File.Name == "diagram.png" && strings.HasPrefix(part.File.Data, "data:image/png;base64,") {
+			sawVision = true
+		}
+	}
+	if !sawVision {
+		t.Fatalf("expected attached image file to include vision File content, got %#v", sub.Content)
+	}
+}
+
+func TestApplyClipboardContentsMultiImages(t *testing.T) {
+	var buf bytes.Buffer
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	encoded := "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+
+	a := &App{agent: newUITestAgent(nil)}
+	a.applyClipboardContents([]clipboard.Content{
+		{Image: &encoded},
+		{Image: &encoded},
+	}, nil)
+	if got := a.countPendingImages(); got != 2 {
+		t.Fatalf("countPendingImages() = %d, want 2", got)
+	}
+	if a.toast == nil || a.toast.message != "Attached 2 items" {
+		t.Fatalf("toast = %#v, want Attached 2 items", a.toast)
 	}
 }

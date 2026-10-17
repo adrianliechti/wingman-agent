@@ -2,6 +2,8 @@ package code
 
 import (
 	"context"
+	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,6 +13,38 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
+
+func TestStreamCellsRefreshForContentLayoutAndTheme(t *testing.T) {
+	previousTheme := theme.Default
+	t.Cleanup(func() { theme.Default = previousTheme })
+	theme.SetDark()
+	a := &App{}
+	check := func(width int) {
+		t.Helper()
+		fresh := &App{streamCurrent: a.streamCurrent, streamHistory: a.streamHistory, flow: a.flow, promptActive: a.promptActive}
+		if got, want := a.streamCells(width), fresh.streamCells(width); !slices.Equal(got, want) {
+			t.Fatalf("stale live cells:\n%q\nwant:\n%q", got, want)
+		}
+	}
+	a.streamCurrent.text = "First **reply**"
+	check(80)
+	check(80)
+	a.streamCurrent.text += " with more text"
+	check(80)
+	check(18)
+	theme.SetLight()
+	check(18)
+	a.appendLiveUserEcho("follow up")
+	check(80)
+	a.streamCurrent = streamSnapshot{toolName: "shell", toolHint: "go test", toolProgress: "running"}
+	check(80)
+	a.streamCurrent.completeTool(&agent.ToolResult{Name: "shell", Content: "all tests passed"})
+	check(80)
+	a.promptActive = true
+	check(80)
+	a.clearStreamingState()
+	check(80)
+}
 
 type namedUITestAgent struct{ *uiTestAgent }
 
@@ -115,6 +149,35 @@ func TestSurfacesFitResponsiveWidths(t *testing.T) {
 		a.popup.maxRows = 8
 		check("command center", width, a.popup.Render(width))
 		a.popup = nil
+	}
+}
+
+func TestCommandFilteringKeepsComposerAndChatAnchored(t *testing.T) {
+	for _, height := range []int{8, 24} {
+		term := inline.NewTerminal(inline.WithIO(strings.NewReader(""), io.Discard, func() (int, int) { return 80, height }))
+		term.Resized(80, height)
+		term.EnterAlt()
+		a := &App{ctx: context.Background(), agent: newUITestAgent(nil), editor: NewEditor()}
+		a.WithTerminal(term)
+		a.editor.SetText("/")
+		a.syncCommandPopup()
+		a.render()
+		chatRows := a.lastChatRows
+		for _, query := range []string{"/co", "/copy", "/no-such-command", "/"} {
+			a.editor.SetText(query)
+			a.syncCommandPopup()
+			if a.popup == nil {
+				t.Fatalf("filter %q closed and moved the list", query)
+			}
+			a.render()
+			if a.lastChatRows != chatRows {
+				t.Fatalf("height %d, filter %q changed chat rows from %d to %d", height, query, chatRows, a.lastChatRows)
+			}
+			editorLines, _ := a.editor.Render(80, 5, a.composerChrome(80))
+			if len(editorLines)+len(a.popup.Render(80)) > height {
+				t.Fatal("command list pushed the composer off-screen")
+			}
+		}
 	}
 }
 

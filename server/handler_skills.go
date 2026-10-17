@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -17,6 +18,9 @@ type SkillEntry struct {
 // skillBlocks expands leading or inline /skill and $skill invocations into
 // hidden instruction blocks.
 func (s *Server) skillBlocks(text string) []string {
+	if s.workspace == nil {
+		return nil
+	}
 	s.refreshSkills()
 	var blocks []string
 	for _, inv := range skill.Invocations(text, s.workspace.Skills()) {
@@ -44,7 +48,17 @@ func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
 			InputHint:   hint,
 		})
 	}
-	if active := s.activeAgent(); active != nil {
+	if backend := r.URL.Query().Get("backend"); backend != "" {
+		runtime, err := s.backend(backend)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		active := runtime.agent
+		if _, ok := active.(code.Compactor); ok {
+			result = slices.DeleteFunc(result, func(entry SkillEntry) bool { return entry.Name == "compact" })
+			result = append(result, SkillEntry{Name: "compact", Description: "Summarize the conversation to free context", InputHint: "[focus]"})
+		}
 		if provider, ok := active.(code.CommandProvider); ok {
 			seen := make(map[string]bool, len(result))
 			for _, item := range result {

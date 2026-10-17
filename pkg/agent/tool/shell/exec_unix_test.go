@@ -5,11 +5,46 @@ package shell
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+func TestExecValidationMetadataKeepsWorkdirThroughPolling(t *testing.T) {
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "package")
+	if err := os.Mkdir(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	m := NewExecManager(nil)
+	defer m.Close()
+	command := `read input; test "$input" = done`
+	started, err := executeExecCommand(t.Context(), m, dir, nil, nil, nil, map[string]any{
+		"command": command, "workdir": "package", "validation": true, "wait": 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := executeExecSession(t.Context(), m, nil, nil, map[string]any{"session_id": 1, "wait": 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := executeExecSession(t.Context(), m, nil, nil, map[string]any{"session_id": 1, "input": "done\n", "wait": 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range []tool.Result{started, pending, completed} {
+		if result.Metadata["session_id"] != 1 || result.Metadata["command"] != command || result.Metadata["workdir"] != subdir || result.Metadata["validation"] != true {
+			t.Fatalf("lost validation attribution: %+v", result)
+		}
+	}
+	if started.Metadata["exit_code"] != nil || pending.Metadata["exit_code"] != nil || completed.Metadata["exit_code"] != 0 {
+		t.Fatalf("exit codes: started=%v, pending=%v, completed=%v", started.Metadata, pending.Metadata, completed.Metadata)
+	}
+}
 
 func TestExecCommandCompletes(t *testing.T) {
 	m := NewExecManager(nil)
@@ -433,6 +468,49 @@ func TestExecSessionCtrlCInterruptsPipeSession(t *testing.T) {
 	}
 	if !strings.Contains(out.Content, "signal: interrupt") {
 		t.Fatalf("output = %q", out.Content)
+	}
+}
+
+func TestExecSessionPollReportsExitedProcessWithZeroWait(t *testing.T) {
+	// With wait=0 the timer and the exit channel are both ready; the poll must
+	// still report the exit rather than racing into "still running".
+	for range 50 {
+		m := NewExecManager(nil)
+
+		out, err := executeExecCommand(t.Context(), m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{"command": "echo hi", "wait": 0})
+		if err != nil {
+			m.Close()
+			t.Fatal(err)
+		}
+		if s := m.get(1); s != nil {
+			<-s.done
+			out, err = executeExecSession(t.Context(), m, nil, NewApprovals(), map[string]any{"session_id": 1, "wait": 0})
+			if err != nil {
+				m.Close()
+				t.Fatal(err)
+			}
+		}
+		m.Close()
+
+		if !strings.Contains(out.Content, "Command completed") || strings.Contains(out.Content, "still running") {
+			t.Fatalf("exited process reported as running: %q", out.Content)
+		}
+	}
+}
+
+func TestExecCommandZeroWaitReturnsExitedProcessInline(t *testing.T) {
+	for range 50 {
+		m := NewExecManager(nil)
+		out, err := executeExecCommand(t.Context(), m, t.TempDir(), nil, NewApprovals(), nil, map[string]any{"command": "true", "wait": 0})
+		m.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Either the process had not exited yet (a session is handed back) or it
+		// had, in which case the result must be the completed one.
+		if !strings.Contains(out.Content, "Command completed") && !strings.Contains(out.Content, "session_id 1") {
+			t.Fatalf("unexpected result: %q", out.Content)
+		}
 	}
 }
 

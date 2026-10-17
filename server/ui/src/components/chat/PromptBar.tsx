@@ -1,14 +1,18 @@
-import { useCallback, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PendingPrompt, PromptReply } from "../../hooks/useWebSocket";
 import type { PromptField } from "../../types/protocol";
+
+function ownValue<T>(values: Record<string, T>, key: string): T | undefined {
+	return Object.hasOwn(values, key) ? values[key] : undefined;
+}
 
 function promptFieldValue(
 	field: PromptField,
 	selections: Record<string, string[]>,
 	others: Record<string, string>,
 ): string[] {
-	const other = (others[field.name] ?? "").trim();
-	const picked = selections[field.name] ?? [];
+	const other = (ownValue(others, field.name) ?? "").trim();
+	const picked = ownValue(selections, field.name) ?? [];
 	if (field.multiple) {
 		return other ? [...picked, other] : picked;
 	}
@@ -27,27 +31,48 @@ function coercePromptValue(field: PromptField, value: string): unknown {
 export function PromptBar({
 	prompt,
 	onReply,
+	available = true,
 }: {
 	prompt: PendingPrompt;
 	onReply: (reply: PromptReply) => void;
+	available?: boolean;
 }) {
+	const root = useRef<HTMLFieldSetElement>(null);
+	useEffect(() => {
+		const previous = document.activeElement as HTMLElement | null;
+		const element = root.current;
+		const focus = (event: KeyboardEvent) => {
+			if (
+				event.altKey &&
+				!event.ctrlKey &&
+				!event.metaKey &&
+				event.key.toLowerCase() === "a"
+			) {
+				event.preventDefault();
+				element?.focus();
+			}
+		};
+		window.addEventListener("keydown", focus);
+		return () => {
+			window.removeEventListener("keydown", focus);
+			if (element?.contains(document.activeElement) && previous?.isConnected)
+				previous.focus();
+		};
+	}, []);
 	const allFields = useMemo(
 		() => (prompt.kind === "ask" ? (prompt.fields ?? []) : []),
 		[prompt.kind, prompt.fields],
 	);
-	const fields = useMemo(
-		() => allFields.filter((field) => !field.custom_answer_for),
-		[allFields],
-	);
+	const fields = allFields.filter((field) => !field.custom_answer_for);
 	const customFields = useMemo(() => {
-		const result: Record<string, PromptField> = {};
+		const result: Record<string, PromptField> = Object.create(null);
 		for (const field of allFields) {
 			if (field.custom_answer_for) result[field.custom_answer_for] = field;
 		}
 		return result;
 	}, [allFields]);
 	const [selections, setSelections] = useState<Record<string, string[]>>(() => {
-		const init: Record<string, string[]> = {};
+		const init: Record<string, string[]> = Object.create(null);
 		for (const f of fields) {
 			const d = f.default != null ? String(f.default) : "";
 			if (d && f.enum?.includes(d)) init[f.name] = [d];
@@ -55,7 +80,7 @@ export function PromptBar({
 		return init;
 	});
 	const [others, setOthers] = useState<Record<string, string>>(() => {
-		const init: Record<string, string> = {};
+		const init: Record<string, string> = Object.create(null);
 		for (const f of fields) {
 			if (f.default != null && !f.enum?.length) {
 				init[f.name] = String(f.default);
@@ -67,16 +92,13 @@ export function PromptBar({
 		return init;
 	});
 
-	const accept = useCallback(
-		(content: Record<string, unknown>) => {
-			onReply({ action: "accept", content });
-		},
-		[onReply],
-	);
+	const accept = (content: Record<string, unknown>) => {
+		onReply({ action: "accept", content });
+	};
 
-	const decline = useCallback(() => {
+	const decline = () => {
 		onReply({ action: "decline" });
-	}, [onReply]);
+	};
 
 	// A lone single-select question submits on click, like a menu.
 	const instant =
@@ -90,11 +112,11 @@ export function PromptBar({
 			(f) => !f.required || promptFieldValue(f, selections, others).length > 0,
 		);
 
-	const submit = useCallback(() => {
-		const content: Record<string, unknown> = {};
+	const submit = () => {
+		const content: Record<string, unknown> = Object.create(null);
 		for (const f of fields) {
-			const other = (others[f.name] ?? "").trim();
-			const custom = customFields[f.name];
+			const other = (ownValue(others, f.name) ?? "").trim();
+			const custom = ownValue(customFields, f.name);
 			if (other && custom) {
 				content[custom.name] = coercePromptValue(custom, other);
 				continue;
@@ -104,69 +126,63 @@ export function PromptBar({
 			content[f.name] = f.multiple ? value : coercePromptValue(f, value[0]);
 		}
 		accept(content);
-	}, [fields, selections, others, customFields, accept]);
+	};
 
 	const [activeIdx, setActiveIdx] = useState(0);
 
-	const advanceFrom = useCallback(
-		(
-			fromIdx: number,
-			sel: Record<string, string[]>,
-			oth: Record<string, string>,
-		) => {
-			for (let step = 1; step < fields.length; step++) {
-				const i = (fromIdx + step) % fields.length;
-				if (promptFieldValue(fields[i], sel, oth).length === 0) {
-					setActiveIdx(i);
-					return;
-				}
-			}
-		},
-		[fields],
-	);
-
-	const toggleOption = useCallback(
-		(field: PromptField, option: string) => {
-			if (instant) {
-				accept({ [field.name]: option });
+	const advanceFrom = (
+		fromIdx: number,
+		sel: Record<string, string[]>,
+		oth: Record<string, string>,
+	) => {
+		for (let step = 1; step < fields.length; step++) {
+			const i = (fromIdx + step) % fields.length;
+			if (promptFieldValue(fields[i], sel, oth).length === 0) {
+				setActiveIdx(i);
 				return;
 			}
-			const current = selections[field.name] ?? [];
-			let next: string[];
-			let nextOthers = others;
-			if (field.multiple) {
-				next = current.includes(option)
-					? current.filter((o) => o !== option)
-					: [...current, option];
-			} else {
-				next = current[0] === option ? [] : [option];
-				// Picking an option supersedes an abandoned free-text draft;
-				// otherwise the stale draft would silently win on submit.
-				if ((others[field.name] ?? "") !== "") {
-					nextOthers = { ...others, [field.name]: "" };
-					setOthers(nextOthers);
-				}
-			}
-			const nextSelections = { ...selections, [field.name]: next };
-			setSelections(nextSelections);
+		}
+	};
 
-			if (!field.multiple && next.length > 0 && fields.length > 1) {
-				const idx = fields.findIndex((f) => f.name === field.name);
-				advanceFrom(idx, nextSelections, nextOthers);
+	const toggleOption = (field: PromptField, option: string) => {
+		if (instant) {
+			accept({ [field.name]: option });
+			return;
+		}
+		const current = ownValue(selections, field.name) ?? [];
+		let next: string[];
+		let nextOthers = others;
+		if (field.multiple) {
+			next = current.includes(option)
+				? current.filter((o) => o !== option)
+				: [...current, option];
+		} else {
+			next = current[0] === option ? [] : [option];
+			// Picking an option supersedes an abandoned free-text draft;
+			// otherwise the stale draft would silently win on submit.
+			if ((ownValue(others, field.name) ?? "") !== "") {
+				nextOthers = { ...others, [field.name]: "" };
+				setOthers(nextOthers);
 			}
-		},
-		[instant, accept, selections, others, fields, advanceFrom],
-	);
+		}
+		const nextSelections = { ...selections, [field.name]: next };
+		setSelections(nextSelections);
+
+		if (!field.multiple && next.length > 0 && fields.length > 1) {
+			const idx = fields.findIndex((f) => f.name === field.name);
+			advanceFrom(idx, nextSelections, nextOthers);
+		}
+	};
 
 	// Instant mode's free-text path, shared by the Enter key and the Send button.
-	const submitOther = useCallback(() => {
+	const submitOther = () => {
 		const f = fields[0];
 		if (!f) return;
-		const value = (others[f.name] ?? "").trim();
+		const value = (ownValue(others, f.name) ?? "").trim();
 		if (!value) return;
-		const target = customFields[f.name] ?? f;
+		const target = ownValue(customFields, f.name) ?? f;
 		accept({ [target.name]: coercePromptValue(target, value) });
-	}, [fields, others, customFields, accept]);
+	};
 
 	const declineButton = (
 		<button
@@ -182,7 +198,37 @@ export function PromptBar({
 	const visibleFields = tabbed ? [fields[activeIdx]] : fields;
 
 	return (
-		<div className="relative rounded-lg border border-warning bg-bg-surface/60 flex flex-col">
+		<fieldset
+			ref={root}
+			disabled={!available}
+			data-prompt
+			role="group"
+			aria-label={
+				prompt.kind === "ask"
+					? "Question · Alt+A to focus"
+					: "Approval required · Alt+A to focus"
+			}
+			tabIndex={-1}
+			onKeyDown={(event) => {
+				if (
+					!available ||
+					prompt.kind === "ask" ||
+					event.altKey ||
+					event.ctrlKey ||
+					event.metaKey ||
+					(event.target as Element).closest(
+						"input, textarea, [contenteditable]",
+					)
+				)
+					return;
+				const key = event.key.toLowerCase();
+				if (key !== "y" && key !== "n") return;
+				event.preventDefault();
+				event.stopPropagation();
+				onReply({ action: key === "y" ? "accept" : "decline" });
+			}}
+			className="relative mb-2 min-w-0 rounded-lg border border-warning bg-bg-surface/60 flex flex-col focus-visible:outline-2 focus-visible:outline-warning"
+		>
 			{tabbed ? (
 				<div className="flex items-center gap-1 flex-wrap px-2 pt-2">
 					{fields.map((f, i) => {
@@ -225,8 +271,8 @@ export function PromptBar({
 								key={f.name}
 								field={f}
 								hideTitle={tabbed}
-								selected={selections[f.name] ?? []}
-								other={others[f.name] ?? ""}
+								selected={ownValue(selections, f.name) ?? []}
+								other={ownValue(others, f.name) ?? ""}
 								onToggle={(option) => toggleOption(f, option)}
 								onOther={(v) => setOthers((prev) => ({ ...prev, [f.name]: v }))}
 								onSubmit={
@@ -250,22 +296,23 @@ export function PromptBar({
 					<button
 						type="button"
 						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-						onClick={() => onReply({ approved: false })}
+						onClick={() => onReply({ action: "decline" })}
 					>
 						Deny
 					</button>
 					<button
 						type="button"
 						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-						onClick={() => onReply({ approved: true, always: true })}
-						title="Approve and don't ask again in this session"
+						onClick={() => onReply({ action: "accept", scope: "session" })}
+						title="Approve this action for this session"
 					>
-						Always allow
+						Allow for session
 					</button>
 					<button
 						type="button"
 						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-bg bg-success hover:opacity-90 cursor-pointer transition-opacity"
-						onClick={() => onReply({ approved: true })}
+						title="Approve once (Y when approval has focus)"
+						onClick={() => onReply({ action: "accept" })}
 					>
 						Approve
 					</button>
@@ -289,7 +336,7 @@ export function PromptBar({
 							type="button"
 							className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
 							onClick={submitOther}
-							disabled={(others[fields[0].name] ?? "").trim() === ""}
+							disabled={(ownValue(others, fields[0].name) ?? "").trim() === ""}
 							title="Submit (Enter)"
 						>
 							Send
@@ -306,7 +353,7 @@ export function PromptBar({
 					)}
 				</div>
 			)}
-		</div>
+		</fieldset>
 	);
 }
 
@@ -341,6 +388,7 @@ function PromptQuestion({
 		"w-full bg-bg border border-border rounded px-2 py-1 text-fg text-[12px] font-mono outline-none focus:border-warning transition-colors placeholder:text-fg-dim";
 
 	const handleKeyDown = (e: React.KeyboardEvent) => {
+		if (e.nativeEvent.isComposing) return;
 		if (e.key === "Enter" && !e.shiftKey && onSubmit) {
 			e.preventDefault();
 			onSubmit();

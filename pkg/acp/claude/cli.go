@@ -1,10 +1,24 @@
 package claude
 
 import (
+	"bufio"
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/coder/acp-go-sdk"
 )
+
+const maxCLIMessageSize = 32 * 1024 * 1024
+
+func newCLIScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxCLIMessageSize)
+	return scanner
+}
 
 func mcpConfigJSON(servers []acp.McpServer) string {
 	if len(servers) == 0 {
@@ -35,6 +49,55 @@ func mcpConfigJSON(servers []acp.McpServer) string {
 	return string(b)
 }
 
+// Any tier counts, project ones included: the setting can only take a permission away.
+func bypassDisabledBySettings(cwd string, env []string) bool {
+	for _, path := range settingsPaths(cwd, env) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var settings struct {
+			Permissions struct {
+				DisableBypassPermissionsMode string `json:"disableBypassPermissionsMode"`
+			} `json:"permissions"`
+		}
+		if json.Unmarshal(b, &settings) == nil && settings.Permissions.DisableBypassPermissionsMode == "disable" {
+			return true
+		}
+	}
+	return false
+}
+
+func settingsPaths(cwd string, env []string) []string {
+	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "CLAUDE_CONFIG_DIR="); ok {
+			configDir = v
+		}
+	}
+	if configDir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			configDir = filepath.Join(home, ".claude")
+		}
+	}
+	var paths []string
+	switch runtime.GOOS {
+	case "darwin":
+		paths = append(paths, "/Library/Application Support/ClaudeCode/managed-settings.json")
+	case "windows":
+		paths = append(paths, `C:\Program Files\ClaudeCode\managed-settings.json`)
+	default:
+		paths = append(paths, "/etc/claude-code/managed-settings.json")
+	}
+	if configDir != "" {
+		paths = append(paths, filepath.Join(configDir, "settings.json"))
+	}
+	if cwd != "" {
+		paths = append(paths, filepath.Join(cwd, ".claude", "settings.json"), filepath.Join(cwd, ".claude", "settings.local.json"))
+	}
+	return paths
+}
+
 func headerMap(headers []acp.HttpHeader) map[string]string {
 	m := map[string]string{}
 	for _, h := range headers {
@@ -50,32 +113,78 @@ type cliEnvelope struct {
 	Event              json.RawMessage `json:"event,omitempty"`
 	Content            json.RawMessage `json:"content,omitempty"`
 	State              string          `json:"state,omitempty"`
+	Level              string          `json:"level,omitempty"`
 	Status             string          `json:"status,omitempty"`
 	CompactResult      string          `json:"compact_result,omitempty"`
 	SessionID          string          `json:"session_id,omitempty"`
+	Model              string          `json:"model,omitempty"`
 	OriginalModel      string          `json:"original_model,omitempty"`
 	FallbackModel      string          `json:"fallback_model,omitempty"`
 	Direction          string          `json:"direction,omitempty"`
 	RefusalCategory    string          `json:"api_refusal_category,omitempty"`
 	RefusalExplanation string          `json:"api_refusal_explanation,omitempty"`
 	ParentToolUseID    string          `json:"parent_tool_use_id,omitempty"`
+	ParentAgentID      string          `json:"parent_agent_id,omitempty"`
 	TaskID             string          `json:"task_id,omitempty"`
+	TaskType           string          `json:"task_type,omitempty"`
+	IsBackgrounded     bool            `json:"is_backgrounded,omitempty"`
 	ToolUseID          string          `json:"tool_use_id,omitempty"`
 	ToolName           string          `json:"tool_name,omitempty"`
 	ElapsedTimeSeconds float64         `json:"elapsed_time_seconds,omitempty"`
 	SubagentType       string          `json:"subagent_type,omitempty"`
 	SubagentRetry      map[string]any  `json:"subagent_retry,omitempty"`
-	Patch              struct {
-		Status string `json:"status,omitempty"`
-	} `json:"patch"`
+	Description        string          `json:"description,omitempty"`
+	LastToolName       string          `json:"last_tool_name,omitempty"`
+	Summary            string          `json:"summary,omitempty"`
+	CompactMetadata    *struct {
+		PostTokens *int `json:"post_tokens,omitempty"`
+	} `json:"compact_metadata,omitempty"`
+
+	// The only signal a misconfigured server or plugin produces; stderr stays empty when captured.
+	MCPServers      []cliNamedStatus `json:"mcp_servers,omitempty"`
+	MCPServerErrors []cliLoadError   `json:"mcp_server_errors,omitempty"`
+	PluginErrors    []cliLoadError   `json:"plugin_errors,omitempty"`
+
+	// rate_limit_event
+	ResetsAt      any          `json:"resetsAt,omitempty"`
+	RateLimitType string       `json:"rateLimitType,omitempty"`
+	Patch         cliTaskPatch `json:"patch"`
+}
+
+// cliTaskPatch is the changed state carried by a task_updated event.
+type cliTaskPatch struct {
+	Status         string `json:"status,omitempty"`
+	IsBackgrounded *bool  `json:"is_backgrounded,omitempty"`
+}
+
+type cliNamedStatus struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+// cliLoadError covers mcp_server_errors (`name`) and plugin_errors (`plugin`).
+type cliLoadError struct {
+	Name    string `json:"name"`
+	Plugin  string `json:"plugin"`
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+func (e cliLoadError) label() string {
+	if e.Name != "" {
+		return e.Name
+	}
+	return e.Plugin
 }
 
 type streamEvent struct {
-	Type    string `json:"type"`
-	Index   int    `json:"index"`
-	Message struct {
-		ID string `json:"id"`
-	} `json:"message"`
+	Type         string          `json:"type"`
+	Index        int             `json:"index"`
+	Message      cliMessage      `json:"message"`
+	Usage        json.RawMessage `json:"usage,omitempty"`
+	ContentBlock struct {
+		Type string `json:"type"`
+	} `json:"content_block"`
 	Delta struct {
 		Type     string `json:"type"`
 		Text     string `json:"text,omitempty"`
@@ -85,31 +194,39 @@ type streamEvent struct {
 
 type cliMessage struct {
 	ID      string        `json:"id"`
+	Model   string        `json:"model,omitempty"`
+	Usage   *cliUsage     `json:"usage,omitempty"`
 	Content []cliMsgBlock `json:"content"`
 }
 
 type cliMsgBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	Thinking  string          `json:"thinking,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   json.RawMessage `json:"content,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
-	Source    *cliImageSource `json:"source,omitempty"`
+	Type      string           `json:"type"`
+	Text      string           `json:"text,omitempty"`
+	Thinking  string           `json:"thinking,omitempty"`
+	ID        string           `json:"id,omitempty"`
+	Name      string           `json:"name,omitempty"`
+	Input     json.RawMessage  `json:"input,omitempty"`
+	ToolUseID string           `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage  `json:"content,omitempty"`
+	IsError   bool             `json:"is_error,omitempty"`
+	Title     string           `json:"title,omitempty"`
+	Source    *cliResultSource `json:"source,omitempty"`
 }
 
 type cliResult struct {
-	Subtype      string                   `json:"subtype"`
-	StopReason   string                   `json:"stop_reason"`
-	IsError      bool                     `json:"is_error"`
-	Result       string                   `json:"result"`
-	Errors       []string                 `json:"errors"`
-	Usage        *cliUsage                `json:"usage,omitempty"`
-	ModelUsage   map[string]cliModelUsage `json:"modelUsage,omitempty"`
-	TotalCostUSD float64                  `json:"total_cost_usd,omitempty"`
+	Origin *struct {
+		Kind string `json:"kind"`
+	} `json:"origin,omitempty"`
+	UserMessageUUID  string                   `json:"user_message_uuid,omitempty"`
+	UserMessageUUIDs []string                 `json:"user_message_uuids,omitempty"`
+	Subtype          string                   `json:"subtype"`
+	StopReason       string                   `json:"stop_reason"`
+	IsError          bool                     `json:"is_error"`
+	Result           string                   `json:"result"`
+	Errors           []string                 `json:"errors"`
+	Usage            *cliUsage                `json:"usage,omitempty"`
+	ModelUsage       map[string]cliModelUsage `json:"modelUsage,omitempty"`
+	TotalCostUSD     float64                  `json:"total_cost_usd,omitempty"`
 }
 
 type cliUsage struct {
@@ -125,6 +242,7 @@ type cliModelUsage struct {
 
 type cliInput struct {
 	Type    string          `json:"type"`
+	UUID    string          `json:"uuid,omitempty"`
 	Message cliInputMessage `json:"message"`
 }
 
@@ -134,15 +252,23 @@ type cliInputMessage struct {
 }
 
 type cliInputContent struct {
-	Type   string          `json:"type"`
-	Text   string          `json:"text,omitempty"`
-	Source *cliImageSource `json:"source,omitempty"`
+	Type   string               `json:"type"`
+	Text   string               `json:"text,omitempty"`
+	Source *cliInputImageSource `json:"source,omitempty"`
 }
 
-type cliImageSource struct {
+type cliInputImageSource struct {
 	Type      string `json:"type"`
-	MediaType string `json:"media_type"`
-	Data      string `json:"data"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+}
+
+type cliResultSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 type controlRequest struct {
@@ -152,13 +278,20 @@ type controlRequest struct {
 }
 
 type controlRequestBody struct {
-	Subtype               string          `json:"subtype"`
-	ToolName              string          `json:"tool_name"`
-	ToolUseID             string          `json:"tool_use_id"`
-	AgentID               string          `json:"agent_id,omitempty"`
-	Input                 json.RawMessage `json:"input"`
-	Description           string          `json:"description"`
-	PermissionSuggestions json.RawMessage `json:"permission_suggestions,omitempty"`
+	Subtype                 string          `json:"subtype"`
+	ToolName                string          `json:"tool_name"`
+	ToolUseID               string          `json:"tool_use_id"`
+	AgentID                 string          `json:"agent_id,omitempty"`
+	Input                   json.RawMessage `json:"input"`
+	Description             string          `json:"description"`
+	PermissionSuggestions   json.RawMessage `json:"permission_suggestions,omitempty"`
+	MatchedAskRule          json.RawMessage `json:"matched_ask_rule,omitempty"`
+	SuppressAlwaysAllowRule bool            `json:"suppress_always_allow_rule,omitempty"`
+	DefaultToNo             bool            `json:"default_to_no,omitempty"`
+	MCPServer               *struct {
+		Name   string `json:"name"`
+		Source string `json:"source,omitempty"`
+	} `json:"mcp_server,omitempty"`
 }
 
 type controlResponse struct {

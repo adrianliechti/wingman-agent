@@ -19,13 +19,13 @@ func TestTerminalAPI(t *testing.T) {
 
 	ctx := t.Context()
 
-	app, err := New(ctx, t.TempDir(), &ServerOptions{NoBrowser: true})
+	app, err := New(ctx, t.TempDir(), &ServerOptions{NoBrowser: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer app.Close()
 
-	web := httptest.NewServer(app)
+	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
 	res, err := http.Post(web.URL+"/api/terminals", "application/json", strings.NewReader(`{"cols":100,"rows":30}`))

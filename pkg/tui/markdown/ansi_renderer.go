@@ -14,17 +14,25 @@ import (
 )
 
 type ANSIRenderer struct {
-	theme theme.Theme
+	theme     theme.Theme
+	options   Options
+	link      string
+	codeLink  string
+	fileLinks map[string]string
 
 	// blockStyle is re-applied after inline elements close so a codespan or
 	// emphasis inside a heading doesn't strip the heading's bold.
 	blockStyle string
 }
 
-func NewANSIRenderer() *ANSIRenderer {
-	return &ANSIRenderer{
+func NewANSIRenderer(options ...Options) *ANSIRenderer {
+	r := &ANSIRenderer{
 		theme: theme.Default,
 	}
+	if len(options) > 0 {
+		r.options = options[0]
+	}
+	return r
 }
 
 func (r *ANSIRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
@@ -58,6 +66,10 @@ func (r *ANSIRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 
 func (r *ANSIRenderer) dim() string {
 	return ansi.Fg(r.theme.BrBlack)
+}
+
+func (r *ANSIRenderer) border() string {
+	return ansi.Fg(r.theme.Border)
 }
 
 func (r *ANSIRenderer) closeInline(w util.BufWriter) {
@@ -207,7 +219,7 @@ func (r *ANSIRenderer) renderThematicBreak(w util.BufWriter, source []byte, node
 		if node.PreviousSibling() != nil {
 			w.WriteString("\n")
 		}
-		fmt.Fprintf(w, "%s%s%s\n", r.dim(), strings.Repeat("─", 40), ansi.Reset)
+		fmt.Fprintf(w, "%s%s%s\n", r.border(), strings.Repeat("─", 40), ansi.Reset)
 	}
 
 	return ast.WalkContinue, nil
@@ -234,7 +246,14 @@ func (r *ANSIRenderer) renderText(w util.BufWriter, source []byte, node ast.Node
 		w.WriteString(sanitize(string(segment.Value(source))))
 
 		if n.HardLineBreak() || n.SoftLineBreak() {
+			// Each physical row owns its hyperlink, including hard line breaks.
+			if r.link != "" {
+				w.WriteString(ansi.HyperlinkEnd)
+			}
 			w.WriteString("\n")
+			if r.link != "" {
+				w.WriteString(strings.TrimSuffix(ansi.Hyperlink("", r.link), ansi.HyperlinkEnd))
+			}
 		}
 	}
 
@@ -252,8 +271,19 @@ func (r *ANSIRenderer) renderString(w util.BufWriter, source []byte, node ast.No
 
 func (r *ANSIRenderer) renderCodeSpan(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
+		r.codeLink = ""
+		if r.link == "" {
+			r.codeLink = r.codeFileDestination(string(node.Text(source)))
+		}
 		w.WriteString(ansi.Fg(r.theme.Cyan))
+		if r.codeLink != "" {
+			w.WriteString(strings.TrimSuffix(ansi.Hyperlink("", r.codeLink), ansi.HyperlinkEnd))
+		}
 	} else {
+		if r.codeLink != "" {
+			w.WriteString(ansi.HyperlinkEnd)
+		}
+		r.codeLink = ""
 		r.closeInline(w)
 	}
 
@@ -278,11 +308,21 @@ func (r *ANSIRenderer) renderEmphasis(w util.BufWriter, source []byte, node ast.
 
 func (r *ANSIRenderer) renderLink(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.Link)
+	destination := r.linkDestination(string(n.Destination))
 
 	if entering {
+		r.link = destination
 		w.WriteString(ansi.Fg(r.theme.Cyan))
+		if destination != "" {
+			w.WriteString(strings.TrimSuffix(ansi.Hyperlink("", destination), ansi.HyperlinkEnd))
+		}
 	} else {
-		fmt.Fprintf(w, "%s %s(%s)", ansi.Reset, r.dim(), sanitize(string(n.Destination)))
+		r.link = ""
+		if destination != "" {
+			w.WriteString(ansi.HyperlinkEnd)
+		} else {
+			fmt.Fprintf(w, "%s %s(%s)", ansi.Reset, r.dim(), sanitize(string(n.Destination)))
+		}
 		r.closeInline(w)
 	}
 
@@ -293,7 +333,8 @@ func (r *ANSIRenderer) renderAutoLink(w util.BufWriter, source []byte, node ast.
 	n := node.(*ast.AutoLink)
 
 	if entering {
-		fmt.Fprintf(w, "%s%s%s", ansi.Fg(r.theme.Cyan), sanitize(string(n.URL(source))), ansi.Reset)
+		label := sanitize(string(n.URL(source)))
+		fmt.Fprintf(w, "%s%s%s", ansi.Fg(r.theme.Cyan), ansi.Hyperlink(label, r.linkDestination(label)), ansi.Reset)
 	}
 
 	return ast.WalkSkipChildren, nil
@@ -323,101 +364,6 @@ func (r *ANSIRenderer) renderRawHTML(w util.BufWriter, source []byte, node ast.N
 	}
 
 	return ast.WalkContinue, nil
-}
-
-func (r *ANSIRenderer) renderTable(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
-	if !entering {
-		w.WriteString("\n")
-
-		return ast.WalkContinue, nil
-	}
-
-	if node.PreviousSibling() != nil {
-		w.WriteString("\n")
-	}
-
-	table := node.(*east.Table)
-	var rows [][]string
-	var isHeader []bool
-
-	for row := node.FirstChild(); row != nil; row = row.NextSibling() {
-		var cells []string
-		_, header := row.(*east.TableHeader)
-		isHeader = append(isHeader, header)
-
-		for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
-			var cellText strings.Builder
-
-			for child := cell.FirstChild(); child != nil; child = child.NextSibling() {
-				if text, ok := child.(*ast.Text); ok {
-					cellText.Write(text.Segment.Value(source))
-				} else if str, ok := child.(*ast.String); ok {
-					cellText.Write(str.Value)
-				} else {
-					for c := child.FirstChild(); c != nil; c = c.NextSibling() {
-						if t, ok := c.(*ast.Text); ok {
-							cellText.Write(t.Segment.Value(source))
-						}
-					}
-				}
-			}
-			cells = append(cells, sanitize(cellText.String()))
-		}
-		rows = append(rows, cells)
-	}
-
-	colWidths := make([]int, len(table.Alignments))
-
-	for _, row := range rows {
-		for i, cell := range row {
-			cellWidth := visibleLen(cell)
-
-			if i < len(colWidths) && cellWidth > colWidths[i] {
-				colWidths[i] = cellWidth
-			}
-		}
-	}
-
-	for rowIdx, row := range rows {
-		for i, cell := range row {
-			if i > 0 {
-				fmt.Fprintf(w, "%s│%s", r.dim(), ansi.Reset)
-			}
-
-			escaped := sanitize(cell)
-			w.WriteString(" ")
-
-			if isHeader[rowIdx] {
-				fmt.Fprintf(w, "%s%s%s", ansi.Bold, escaped, ansi.Reset)
-			} else {
-				w.WriteString(escaped)
-			}
-
-			if i < len(colWidths) {
-				padding := colWidths[i] - visibleLen(cell) + 1
-
-				for range padding {
-					w.WriteString(" ")
-				}
-			}
-		}
-
-		w.WriteString("\n")
-
-		if isHeader[rowIdx] {
-			for i, width := range colWidths {
-				if i > 0 {
-					fmt.Fprintf(w, "%s┼%s", r.dim(), ansi.Reset)
-				}
-
-				fmt.Fprintf(w, "%s%s%s", r.dim(), strings.Repeat("─", width+2), ansi.Reset)
-			}
-
-			w.WriteString("\n")
-		}
-	}
-
-	return ast.WalkSkipChildren, nil
 }
 
 func (r *ANSIRenderer) renderTableHeader(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {

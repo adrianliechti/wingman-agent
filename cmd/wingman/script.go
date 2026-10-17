@@ -149,6 +149,8 @@ func runScript(ctx context.Context, opts scriptOptions) error {
 		return err
 	}
 	defer ws.Close()
+	stopToolUpdate := startManagedToolUpdate(ctx, ws)
+	defer stopToolUpdate()
 
 	a, err := agents.New(ctx, ws, opts.Agent, nil)
 	if err != nil {
@@ -415,6 +417,12 @@ func validateJSONOutput(result string) error {
 }
 
 func setScriptMode(ctx context.Context, a code.Agent, sessionID, wanted string) error {
+	if policy, ok := a.(code.UnattendedAgent); ok && wanted == code.UnattendedModeID {
+		if err := a.SetMode(ctx, sessionID, code.AgentModeID); err != nil {
+			return err
+		}
+		return policy.SetUnattended(ctx, sessionID, true)
+	}
 	available, current := a.Modes(sessionID)
 	if current == wanted {
 		return nil
@@ -601,7 +609,7 @@ func (c *scriptTextCollector) Add(message agent.Message) {
 	}
 	for _, content := range message.Content {
 		if !content.Hidden {
-			c.current.WriteString(content.Text)
+			c.current.WriteString(content.AsText())
 		}
 	}
 }
@@ -631,7 +639,7 @@ func finalAssistantText(messages []agent.Message) string {
 		var result strings.Builder
 		for _, content := range message.Content {
 			if !content.Hidden {
-				result.WriteString(content.Text)
+				result.WriteString(content.AsText())
 			}
 		}
 		if result.Len() > 0 {

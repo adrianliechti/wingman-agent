@@ -18,6 +18,11 @@ func (a *App) getPhase() AppPhase {
 }
 
 func (a *App) setPhase(phase AppPhase) {
+	if phase == PhaseIdle {
+		a.stopRequested.Store(false)
+	} else if a.stopRequested.Load() {
+		phase = PhaseStopping
+	}
 	prev := AppPhase(a.phase.Swap(int32(phase)))
 
 	if phase == PhaseIdle {
@@ -33,12 +38,22 @@ func (a *App) setPhase(phase AppPhase) {
 	}
 }
 
-// queuePhase updates the phase from agent goroutines and schedules a repaint.
+type phaseUpdate struct {
+	epoch uint64
+	phase AppPhase
+}
+
+// Called while sessionMu protects the active session. Coalesce phase changes
+// with the repaint instead of blocking the event producer on the UI queue.
 func (a *App) queuePhase(phase AppPhase) {
-	a.post(func() {
-		a.setPhase(phase)
-		a.invalidate()
-	})
+	a.pendingPhase.Store(&phaseUpdate{epoch: a.sessionEpoch, phase: phase})
+	a.requestRender()
+}
+
+func (a *App) applyPendingPhase() {
+	if update := a.pendingPhase.Swap(nil); update != nil && update.epoch == a.sessionEpoch {
+		a.setPhase(update.phase)
+	}
 }
 
 // syncMessages flushes newly committed messages to scrollback.
@@ -130,26 +145,40 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 			continue
 
 		case c.Reasoning != nil && c.Reasoning.Summary != "":
-			cell := cellReasoning(c.Reasoning.Summary, width, true)
+			headings := extractReasoningHeadings(c.Reasoning.Summary)
+			if headings == "" {
+				continue
+			}
+			cell := cellReasoningHeadings(headings, width)
 			if a.flow.beforeThought(len(cell) > 1) {
 				lines = append(lines, "")
 			}
 			lines = append(lines, cell...)
 
-		case strings.TrimSpace(c.Text) != "":
+		case strings.TrimSpace(c.AsText()) != "":
+			if msg.Role == agent.RoleUser {
+				if cmd, output, exitCode, ok := code.ParseUserShellCommand(c.AsText()); ok {
+					cell := cellUserShell(cmd, output, exitCode, width, false)
+					if a.flow.beforeTool(len(cell) > 1) {
+						lines = append(lines, "")
+					}
+					lines = append(lines, cell...)
+					continue
+				}
+			}
 			if a.flow.gap() {
 				lines = append(lines, "")
 			}
 			switch msg.Role {
 			case agent.RoleUser:
-				a.removePendingEchoText(c.Text)
-				if isCommandEcho(c.Text) {
-					lines = append(lines, cellCommand(c.Text, width)...)
+				a.removePendingEchoText(c.AsText())
+				if isCommandEcho(c.AsText()) {
+					lines = append(lines, cellCommand(c.AsText(), width)...)
 				} else {
-					lines = append(lines, cellUser(c.Text, width)...)
+					lines = append(lines, cellUser(c.AsText(), width)...)
 				}
 			case agent.RoleAssistant:
-				lines = append(lines, cellAssistant(c.Text, width, theme.Default.Green)...)
+				lines = append(lines, cellAssistant(c.AsText(), width, theme.Default.Green, a.agent.Workspace().RootPath)...)
 			}
 		}
 	}
@@ -216,11 +245,11 @@ func (a *App) reconcileCommittedMessage(msg agent.Message) {
 			a.releaseToolCellLocked(content.ToolResult)
 		case content.Reasoning != nil && content.Reasoning.Summary != "":
 			a.releaseReasoningLocked(content.Reasoning)
-		case strings.TrimSpace(content.Text) != "":
+		case strings.TrimSpace(content.AsText()) != "":
 			if msg.Role == agent.RoleUser {
-				a.releaseUserTextLocked(content.Text)
+				a.releaseUserTextLocked(content.AsText())
 			} else if msg.Role == agent.RoleAssistant {
-				assistantText = append(assistantText, assistantPart{content.TextID, content.Text})
+				assistantText = append(assistantText, assistantPart{content.TextID, content.AsText()})
 			}
 		}
 	}
@@ -265,9 +294,7 @@ func (a *App) releaseReasoningLocked(reasoning *agent.Reasoning) {
 		return snapshot.reasoning == reasoning.Summary
 	}
 	a.releaseStreamFieldLocked(match, func(snapshot *streamSnapshot) {
-		snapshot.reasoning = ""
-		snapshot.reasoningID = ""
-		snapshot.reasoningPart = 0
+		snapshot.clearReasoning()
 		snapshot.retryAttempt = false
 	})
 }
@@ -368,9 +395,7 @@ func (a *App) commitStreamAttempt() {
 func (a *App) clearRetryableOutputLocked(snapshot *streamSnapshot) {
 	snapshot.text = ""
 	snapshot.textID = ""
-	snapshot.reasoning = ""
-	snapshot.reasoningID = ""
-	snapshot.reasoningPart = 0
+	snapshot.clearReasoning()
 	if snapshot.toolPartial {
 		snapshot.clearTool()
 	}
@@ -393,6 +418,15 @@ func (snapshot *streamSnapshot) clearTool() {
 	snapshot.toolResult = nil
 }
 
+func (snapshot *streamSnapshot) clearReasoning() {
+	snapshot.reasoning = ""
+	snapshot.reasoningID = ""
+	snapshot.reasoningPart = 0
+	snapshot.reasoningPartStart = 0
+	snapshot.reasoningHeadings = ""
+	snapshot.reasoningHeadingSet = false
+}
+
 func (snapshot streamSnapshot) empty() bool {
 	return snapshot.userText == "" && snapshot.toolName == "" && strings.TrimSpace(snapshot.text) == "" && snapshot.reasoning == ""
 }
@@ -400,11 +434,6 @@ func (snapshot streamSnapshot) empty() bool {
 func (snapshot streamSnapshot) toolLines(width int, expanded bool) []string {
 	if snapshot.toolResult != nil {
 		return cellTool(snapshot.toolResult, width, expanded)
-	}
-	if snapshot.toolName == "todo" {
-		if items := tool.ParseTodoItems(snapshot.toolArgs); len(items) > 0 {
-			return cellTodoItems(items, width)
-		}
 	}
 	return cellToolProgress(snapshot.toolName, snapshot.toolHint, snapshot.toolProgress, width)
 }
@@ -493,6 +522,8 @@ func (a *App) requestRender() {
 	time.AfterFunc(delay, func() {
 		a.post(func() {
 			a.renderPending.Store(false)
+			a.applyPendingPhase()
+			a.refreshMetadata()
 			a.renderLast.Store(time.Now().UnixNano())
 			a.invalidate()
 		})
@@ -500,17 +531,35 @@ func (a *App) requestRender() {
 }
 
 func (a *App) handleTurnEvent(ev code.TurnEvent) {
+	if ev.Retry != nil {
+		info := *ev.Retry
+		a.withCurrentSession(ev.SessionID, func() {
+			a.queuePhase(PhaseRetrying)
+			epoch := a.sessionEpoch
+			a.post(func() {
+				if a.sessionID != ev.SessionID || a.sessionEpoch != epoch {
+					return
+				}
+				a.showToast(fmt.Sprintf("Retry %d: %s (%.1fs)", info.Attempt, info.Reason, float64(info.DelayMillis)/1000), theme.Default.Yellow)
+			})
+		})
+		return
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.sessionMu.Lock()
 			visible := a.sessionID == ev.SessionID
+			epoch := a.sessionEpoch
 			if visible {
 				a.clearStreamingState()
+				a.queuePhase(PhaseIdle)
 			}
 			a.sessionMu.Unlock()
 			if visible {
-				a.queuePhase(PhaseIdle)
 				a.post(func() {
+					if a.sessionEpoch != epoch {
+						return
+					}
 					a.appendChat(cellNotice(fmt.Sprintf("Internal error: %v", recovered), theme.Default.Red, a.width()))
 				})
 			}
@@ -522,7 +571,7 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 			switch ev.StreamEvent {
 			case agent.StreamEventReset:
 				a.resetFailedStreamAttempt()
-				a.queuePhase(PhaseThinking)
+				a.queuePhase(PhaseRetrying)
 				a.requestRender()
 			case agent.StreamEventCommit:
 				a.commitStreamAttempt()
@@ -539,6 +588,10 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 		return
 	}
 
+	if ev.State != "" {
+		a.queueDirty.Store(true)
+		a.requestRender()
+	}
 	switch ev.State {
 	case code.TurnInputActive:
 		a.withCurrentSession(ev.SessionID, func() {
@@ -547,10 +600,13 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 			a.promotePendingEcho(ev.InputID)
 			a.queuePhase(PhaseThinking)
 		})
-	case code.TurnInputCompleted, code.TurnInputCancelled, code.TurnInputFailed:
-		a.post(func() {
-			a.removePendingEcho(ev.InputID)
+	case code.TurnInputSteered:
+		a.withCurrentSession(ev.SessionID, func() {
+			a.promotePendingEcho(ev.InputID)
+			a.requestRender()
 		})
+	case code.TurnInputCompleted, code.TurnInputCancelled, code.TurnInputFailed, code.TurnInputIncomplete:
+		a.removePendingEcho(ev.InputID)
 		if ev.Executed {
 			a.finishTurn(ev.SessionID, ev.State, ev.Err)
 		}
@@ -601,33 +657,41 @@ func (a *App) handleStreamMessage(msg agent.Message) {
 			a.requestRender()
 
 		case c.Reasoning != nil && c.Reasoning.Summary != "":
-			if a.getPhase() != PhaseThinking {
-				a.queuePhase(PhaseThinking)
-			}
+			a.queuePhase(PhaseThinking)
 			a.streamStateMu.Lock()
 			if a.streamCurrent.reasoning != "" && c.Reasoning.ID != a.streamCurrent.reasoningID {
 				a.archiveStreamStateLocked()
 			}
 			if a.streamCurrent.reasoning != "" && c.Reasoning.Part != a.streamCurrent.reasoningPart {
 				a.streamCurrent.reasoning += "\n\n"
+				a.streamCurrent.reasoningPartStart = len(a.streamCurrent.reasoning)
+				a.streamCurrent.reasoningHeadingSet = false
 			}
 			a.streamCurrent.reasoning += c.Reasoning.Summary
+			if !a.streamCurrent.reasoningHeadingSet {
+				currentPart := a.streamCurrent.reasoning[a.streamCurrent.reasoningPartStart:]
+				header := extractReasoningHeader(currentPart)
+				if header != "" {
+					a.streamCurrent.reasoningHeadingSet = true
+					if a.streamCurrent.reasoningHeadings != "" {
+						a.streamCurrent.reasoningHeadings += "\n"
+					}
+					a.streamCurrent.reasoningHeadings += header
+				}
+			}
 			a.streamCurrent.reasoningID = c.Reasoning.ID
 			a.streamCurrent.reasoningPart = c.Reasoning.Part
 			a.streamCurrent.retryAttempt = true
 			a.streamStateMu.Unlock()
-			a.requestRender()
 
-		case c.Text != "":
-			if a.getPhase() != PhaseStreaming {
-				a.queuePhase(PhaseStreaming)
-			}
+		case c.AsText() != "":
+			a.queuePhase(PhaseStreaming)
 			a.streamStateMu.Lock()
 			if a.streamCurrent.reasoning != "" ||
 				(a.streamCurrent.text != "" && c.TextID != "" && a.streamCurrent.textID != "" && c.TextID != a.streamCurrent.textID) {
 				a.archiveStreamStateLocked()
 			}
-			a.streamCurrent.text += c.Text
+			a.streamCurrent.text += c.AsText()
 			a.streamCurrent.textID = c.TextID
 			a.streamCurrent.retryAttempt = true
 			a.streamStateMu.Unlock()
@@ -641,6 +705,7 @@ func (a *App) finishTurn(sessionID string, state code.TurnInputState, turnErr er
 
 	a.sessionMu.Lock()
 	visible := a.sessionID == sessionID
+	epoch := a.sessionEpoch
 	var nextPhase AppPhase
 	if visible {
 		nextPhase = PhaseIdle
@@ -650,24 +715,26 @@ func (a *App) finishTurn(sessionID string, state code.TurnInputState, turnErr er
 				break
 			}
 		}
+		// Retire the finished stream before TurnManager starts the next input.
+		// A deferred cleanup could otherwise erase the next turn's live output.
+		a.clearStreamingState()
+		a.queuePhase(nextPhase)
 	}
 	a.sessionMu.Unlock()
 
 	if visible {
-		epoch := a.currentEpoch()
 		a.post(func() {
 			if a.sessionID != sessionID || a.sessionEpoch != epoch {
 				return
 			}
 
-			a.clearStreamingState()
-			a.setPhase(nextPhase)
+			a.applyPendingPhase()
 			a.syncMessages()
 			a.refreshUsage()
 
 			switch {
 			case state == code.TurnInputCompleted:
-				if nextPhase == PhaseIdle {
+				if a.getPhase() == PhaseIdle {
 					a.flushTurnSeparator()
 					a.revealUsage(time.Now())
 					a.bellIfUnfocused()
@@ -675,10 +742,14 @@ func (a *App) finishTurn(sessionID string, state code.TurnInputState, turnErr er
 			case state == code.TurnInputCancelled || errors.Is(turnErr, context.Canceled):
 				a.flushToolGap()
 				a.appendChat(cellNotice("Cancelled", t.Yellow, a.width()))
-				a.resetTurnStats()
+			case state == code.TurnInputIncomplete:
+				a.flushToolGap()
+				a.appendChat(cellNotice("Turn incomplete. Output saved. Send Continue to resume.", t.Yellow, a.width()))
 			default:
 				a.flushToolGap()
 				a.appendChat(cellNotice(fmt.Sprintf("Error: %v", turnErr), t.Red, a.width()))
+			}
+			if state != code.TurnInputCompleted && a.getPhase() == PhaseIdle {
 				a.resetTurnStats()
 			}
 
@@ -689,12 +760,6 @@ func (a *App) finishTurn(sessionID string, state code.TurnInputState, turnErr er
 	if state == code.TurnInputCompleted {
 		a.saveSessionID(sessionID)
 	}
-}
-
-func (a *App) currentEpoch() uint64 {
-	a.sessionMu.Lock()
-	defer a.sessionMu.Unlock()
-	return a.sessionEpoch
 }
 
 // flushToolGap commits the blank line a trailing tool cell is still owed, so

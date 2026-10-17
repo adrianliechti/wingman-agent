@@ -1,9 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { File, MessageSquare, Sparkles } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { fileQueries, type FileHit } from "../api/files";
-import { modelQueries, setCurrentModel, type ModelInfo } from "../api/models";
-import { queryKeys } from "../api/query";
+import { useWorkspace, type SettingsPatch } from "../state/workspaceContext.ts";
+import type { SessionSettings } from "../state/sessionStore.ts";
 import { sessionQueries, type SessionInfo } from "../api/sessions";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { type Skill, useSkills } from "../hooks/useSkills";
@@ -29,12 +29,13 @@ interface Item {
 	run: () => void;
 }
 
-const EMPTY_MODELS: ModelInfo[] = [];
 const EMPTY_SESSIONS: SessionInfo[] = [];
 const EMPTY_FILES: FileHit[] = [];
 
 interface Props {
 	sessionId?: string;
+	settings: SessionSettings;
+	setSettings: (patch: SettingsPatch) => Promise<void>;
 	onClose: () => void;
 	actions: PaletteAction[];
 	onRunSkill: (skill: PaletteSkill) => void;
@@ -44,6 +45,8 @@ interface Props {
 
 export function CommandPalette({
 	sessionId,
+	settings,
+	setSettings,
 	onClose,
 	actions,
 	onRunSkill,
@@ -51,33 +54,28 @@ export function CommandPalette({
 	onOpenFile,
 }: Props) {
 	const toast = useToast();
-	const queryClient = useQueryClient();
 	const listId = useId();
 	const [query, setQuery] = useState("");
-	const [active, setActive] = useState(0);
+	const [activeKey, setActiveKey] = useState<string | null>(null);
 	const listRef = useRef<HTMLDivElement>(null);
 	const skills = useSkills(sessionId);
-	const sessionList = useQuery(sessionQueries.list()).data ?? EMPTY_SESSIONS;
-	const models = useQuery(modelQueries.list()).data ?? EMPTY_MODELS;
-	const currentModel =
-		useQuery(modelQueries.current(sessionId)).data?.model ?? "";
+	const { backend } = useWorkspace();
+	const sessionList =
+		useQuery(sessionQueries.list(backend)).data ?? EMPTY_SESSIONS;
+	const models = settings.models;
+	const currentModel = settings.model;
 	const debouncedQuery = useDebouncedValue(query.trim(), 80);
 	const fileQuery = useQuery({
 		...fileQueries.search(debouncedQuery),
 		enabled: debouncedQuery.length >= 2,
 	});
 	const files =
-		debouncedQuery.length >= 2
+		debouncedQuery.length >= 2 && debouncedQuery === query.trim()
 			? (fileQuery.data ?? EMPTY_FILES).slice(0, 8)
 			: EMPTY_FILES;
 
 	const switchModel = useMutation({
-		mutationFn: (model: string) => setCurrentModel(model, sessionId),
-		onSuccess: (data, model) => {
-			queryClient.setQueryData(queryKeys.models.current(sessionId), {
-				model: data.model || model,
-			});
-		},
+		mutationFn: (model: string) => setSettings({ model }),
 		onError: (error) => {
 			toast({
 				title: "Could not change model",
@@ -104,7 +102,7 @@ export function CommandPalette({
 			});
 		}
 		const modelHits = models.filter(
-			(m) => m.id !== currentModel && match(m.name, m.id),
+			(m) => m.id !== currentModel && match(`Switch to ${m.name}`, m.id),
 		);
 		for (const m of modelHits.slice(0, q ? modelHits.length : 5)) {
 			out.push({
@@ -169,19 +167,16 @@ export function CommandPalette({
 		switchModel,
 	]);
 
-	const [prevQuery, setPrevQuery] = useState(query);
-	if (prevQuery !== query) {
-		setPrevQuery(query);
-		setActive(0);
-	}
-
+	const active = Math.max(
+		0,
+		items.findIndex((item) => item.key === activeKey),
+	);
+	const selectedKey = items[active]?.key;
 	useEffect(() => {
 		listRef.current
 			?.querySelector(`[data-idx="${active}"]`)
 			?.scrollIntoView({ block: "nearest" });
-	}, [active]);
-
-	const clamped = Math.min(active, Math.max(0, items.length - 1));
+	}, [active, selectedKey]);
 
 	const runItem = (item: Item) => {
 		onClose();
@@ -189,18 +184,19 @@ export function CommandPalette({
 	};
 
 	const onKeyDown = (e: React.KeyboardEvent) => {
+		if (e.nativeEvent.isComposing) return;
 		if (e.key === "Escape") {
 			e.preventDefault();
 			onClose();
 		} else if (e.key === "ArrowDown") {
 			e.preventDefault();
-			setActive(Math.min(clamped + 1, items.length - 1));
+			setActiveKey(items[Math.min(active + 1, items.length - 1)]?.key ?? null);
 		} else if (e.key === "ArrowUp") {
 			e.preventDefault();
-			setActive(Math.max(clamped - 1, 0));
+			setActiveKey(items[Math.max(active - 1, 0)]?.key ?? null);
 		} else if (e.key === "Enter") {
 			e.preventDefault();
-			const item = items[clamped];
+			const item = items[active];
 			if (item) runItem(item);
 		}
 	};
@@ -222,9 +218,16 @@ export function CommandPalette({
 				<div className="px-3 py-2.5 border-b border-border-subtle">
 					<input
 						autoFocus
+						autoCapitalize="none"
+						autoComplete="off"
+						autoCorrect="off"
+						spellCheck={false}
 						type="text"
 						value={query}
-						onChange={(e) => setQuery(e.target.value)}
+						onChange={(event) => {
+							setQuery(event.target.value);
+							setActiveKey(null);
+						}}
 						onKeyDown={onKeyDown}
 						placeholder="Type a command, session, skill or file…"
 						role="combobox"
@@ -232,7 +235,7 @@ export function CommandPalette({
 						aria-expanded="true"
 						aria-controls={listId}
 						aria-activedescendant={
-							items[clamped] ? `${listId}-${clamped}` : undefined
+							selectedKey ? `${listId}-${active}` : undefined
 						}
 						aria-autocomplete="list"
 						className="w-full bg-transparent text-fg text-[13px] outline-none placeholder:text-fg-dim"
@@ -257,7 +260,7 @@ export function CommandPalette({
 									</div>
 								) : null;
 							lastGroup = item.group;
-							const isActive = i === clamped;
+							const isActive = i === active;
 							return (
 								<div key={item.key}>
 									{header}
@@ -268,7 +271,7 @@ export function CommandPalette({
 										role="option"
 										aria-selected={isActive}
 										onClick={() => runItem(item)}
-										onMouseEnter={() => setActive(i)}
+										onMouseMove={() => setActiveKey(item.key)}
 										className={`w-full flex items-center gap-2 px-3 py-1.5 text-left cursor-pointer transition-colors ${
 											isActive
 												? "bg-bg-active text-fg"

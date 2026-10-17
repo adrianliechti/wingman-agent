@@ -1,10 +1,8 @@
 package fs
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -12,178 +10,13 @@ import (
 )
 
 func EditTool(root *os.Root, allowedWriteRoots ...string) tool.Tool {
-	return editTool(root, nil, nil, allowedWriteRoots...)
-}
-
-func editTool(root *os.Root, tracker *contentTracker, freshness *Freshness, allowedWriteRoots ...string) tool.Tool {
-	return tool.Tool{
-		Name:   "edit",
-		Effect: tool.StaticEffect(tool.EffectMutates),
-
-		Description: strings.Join([]string{
-			"Performs exact string replacements in files.",
-			"- You must `read` the file at least once in this conversation before editing it.",
-			"- Preserve indentation exactly as it appears after the `read` line-number prefix (`42\\t...`); never include the prefix itself.",
-			"- The edit FAILS if `old_string` is not unique in the file: add surrounding context (2-4 adjacent lines usually suffice) or set `replace_all` for intentional file-wide replacements like symbol renames.",
-			"- Prefer `write` for new files.",
-			"- For several changes to one file, pass `edits` (array of {old_string, new_string, replace_all}) in a single call. Edits apply in order — later ones see earlier results — and the call is atomic: if any edit fails, nothing is written.",
-			"- The returned diff is authoritative — do not re-read the file to verify an edit; a failed edit writes nothing.",
-		}, "\n"),
-
-		Parameters: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"file_path":   map[string]any{"type": "string", "description": "The absolute path to the file to modify."},
-				"old_string":  map[string]any{"type": "string", "description": "The text to replace. Must be unique unless replace_all=true. Use an empty string only to create a new file or replace an empty file. Omit when using edits."},
-				"new_string":  map[string]any{"type": "string", "description": "The text to replace it with (must be different from old_string). Omit when using edits."},
-				"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences of old_string (default false).", "default": false},
-				"edits": map[string]any{
-					"type":        "array",
-					"description": "Multiple replacements applied in order in a single atomic call. Use instead of old_string/new_string.",
-					"items": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"old_string":  map[string]any{"type": "string", "description": "The text to replace. Must be unique unless replace_all=true."},
-							"new_string":  map[string]any{"type": "string", "description": "The text to replace it with (must be different from old_string)."},
-							"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences of old_string (default false).", "default": false},
-						},
-						"required":             []string{"old_string", "new_string"},
-						"additionalProperties": false,
-					},
-				},
-			},
-			"required":             []string{"file_path"},
-			"additionalProperties": false,
-		},
-
-		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
-			pathArg, ok := args["file_path"].(string)
-
-			if !ok || pathArg == "" {
-				return tool.Result{}, fmt.Errorf("file_path is required")
-			}
-
-			workingDir := root.Name()
-			target, err := resolveFileTarget(pathArg, workingDir, allowedWriteRoots, "edit file")
-			if err != nil {
-				return tool.Result{}, err
-			}
-
-			ops, err := parseEditOps(args)
-			if err != nil {
-				return tool.Result{}, err
-			}
-
-			info, err := statFileTarget(root, target)
-			exists := err == nil
-			switch {
-			case exists:
-				if info.IsDir() {
-					return tool.Result{}, fmt.Errorf("cannot edit file: path %q is a directory", pathArg)
-				}
-				if !info.Mode().IsRegular() {
-					return tool.Result{}, fmt.Errorf("cannot edit file: path %q is not a regular file", pathArg)
-				}
-			case !os.IsNotExist(err):
-				return tool.Result{}, fmt.Errorf("stat file %q: %w", pathArg, err)
-			case ops[0].oldText != "":
-				return tool.Result{}, fmt.Errorf("cannot edit %s: file does not exist", pathArg)
-			}
-
-			if exists && freshness.stale(ctx, target, info) {
-				return tool.Result{}, fmt.Errorf("cannot edit %s: the file changed on disk after you last read it (edited externally or by another agent) — `read` it again first and take the changes into account", pathArg)
-			}
-
-			var contentBytes []byte
-			if exists {
-				contentBytes, err = readFileTarget(root, target)
-				if err != nil {
-					return tool.Result{}, fmt.Errorf("read file %q: %w", pathArg, err)
-				}
-			}
-
-			if len(contentBytes) > MaxEditFileBytes {
-				return tool.Result{}, fmt.Errorf("file %s is %d bytes; edits are capped at %d bytes — use `write` for full rewrites or narrow the change", pathArg, len(contentBytes), MaxEditFileBytes)
-			}
-
-			bom, content := stripBom(string(contentBytes))
-			originalEnding := detectLineEnding(content)
-			normalizedContent := normalizeToLF(content)
-
-			newContent := normalizedContent
-			for i, op := range ops {
-				newContent, err = applyEditOp(newContent, op, pathArg)
-				if err != nil {
-					if len(ops) > 1 {
-						return tool.Result{}, fmt.Errorf("edits[%d]: %w (no edits were applied)", i, err)
-					}
-					return tool.Result{}, err
-				}
-			}
-
-			finalContent := bom + restoreLineEndings(newContent, originalEnding)
-
-			if err := writeFileTarget(root, target, finalContent); err != nil {
-				return tool.Result{}, fmt.Errorf("write file %q: %w", pathArg, err)
-			}
-
-			tracker.record([]byte(finalContent))
-			freshness.record(ctx, target)
-
-			diff := generateDiffString(normalizedContent, newContent)
-
-			if len(ops) > 1 {
-				return tool.Text(fmt.Sprintf("Successfully applied %d edits to %s.\n\n%s", len(ops), pathArg, diff)), nil
-			}
-			return tool.Text(fmt.Sprintf("Successfully replaced text in %s.\n\n%s", pathArg, diff)), nil
-		},
-	}
+	return batchEditTool(root, nil, allowedWriteRoots...)
 }
 
 type editOp struct {
 	oldText    string
 	newText    string
 	replaceAll bool
-}
-
-func parseEditOps(args map[string]any) ([]editOp, error) {
-	rawEdits := args["edits"]
-
-	if rawEdits == nil {
-		op, err := newEditOp(args)
-		if err != nil {
-			return nil, err
-		}
-		return []editOp{op}, nil
-	}
-
-	_, hasOld := args["old_string"].(string)
-	_, hasNew := args["new_string"].(string)
-	if hasOld || hasNew {
-		return nil, fmt.Errorf("provide either edits or old_string/new_string, not both")
-	}
-	if replaceAll, _ := args["replace_all"].(bool); replaceAll {
-		return nil, fmt.Errorf("replace_all cannot be combined with edits; set it per edit entry instead")
-	}
-
-	list, ok := rawEdits.([]any)
-	if !ok || len(list) == 0 {
-		return nil, fmt.Errorf("edits must be a non-empty array of {old_string, new_string} objects")
-	}
-
-	ops := make([]editOp, 0, len(list))
-	for i, item := range list {
-		entry, ok := item.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("edits[%d] must be an object with old_string and new_string", i)
-		}
-		op, err := newEditOp(entry)
-		if err != nil {
-			return nil, fmt.Errorf("edits[%d]: %w", i, err)
-		}
-		ops = append(ops, op)
-	}
-	return ops, nil
 }
 
 func newEditOp(entry map[string]any) (editOp, error) {
@@ -196,12 +29,22 @@ func newEditOp(entry map[string]any) (editOp, error) {
 	if !ok {
 		return editOp{}, fmt.Errorf("new_string is required")
 	}
+	if !utf8.ValidString(oldText) || !utf8.ValidString(newText) || strings.ContainsRune(oldText, 0) || strings.ContainsRune(newText, 0) {
+		return editOp{}, fmt.Errorf("old_string and new_string must be UTF-8 text without NUL bytes")
+	}
 
-	if oldText == newText {
+	if oldText == newText && oldText != "" {
 		return editOp{}, fmt.Errorf("old_string and new_string are identical")
 	}
 
-	replaceAll, _ := entry["replace_all"].(bool)
+	replaceAll := false
+	if value, exists := entry["replace_all"]; exists {
+		var ok bool
+		replaceAll, ok = value.(bool)
+		if !ok {
+			return editOp{}, fmt.Errorf("replace_all must be a boolean")
+		}
+	}
 
 	return editOp{
 		oldText:    normalizeToLF(oldText),
@@ -211,91 +54,157 @@ func newEditOp(entry map[string]any) (editOp, error) {
 }
 
 func applyEditOp(content string, op editOp, pathArg string) (string, error) {
+	if err := checkEditSize(pathArg, int64(len(op.newText))); err != nil {
+		return "", err
+	}
 	if op.oldText == "" {
-		if strings.TrimSpace(content) != "" {
+		if content != "" {
 			return "", fmt.Errorf("cannot create or replace empty file %s: file already has content", pathArg)
 		}
 		return op.newText, nil
 	}
 
+	newContent, found, err := applyMatchedEdit(content, op, pathArg)
+	if found || err != nil {
+		return newContent, err
+	}
+
+	// The model often copies from `read` output: the line-number gutter or a
+	// uniformly shifted indentation would otherwise cost a retry turn.
+	if oldText, newText, ok := stripReadLineNumbers(op.oldText, op.newText); ok {
+		op.oldText, op.newText = oldText, newText
+		newContent, found, err = applyMatchedEdit(content, op, pathArg)
+		if found || err != nil {
+			return newContent, err
+		}
+	}
+
+	newContent, found, err = applyIndentShiftedEdit(content, op, pathArg)
+	if found || err != nil {
+		return newContent, err
+	}
+
+	newContent, found, err = applyBlankLineTolerantEdit(content, op, pathArg)
+	if found || err != nil {
+		return newContent, err
+	}
+
+	return "", missingOldStringError(content, op.oldText, pathArg)
+}
+
+// applyMatchedEdit applies op using exact, quote-normalized and whitespace-fuzzy
+// matching. found is false (with a nil error) when old_string does not occur.
+func applyMatchedEdit(content string, op editOp, pathArg string) (result string, found bool, err error) {
 	actualOldText := findActualEditString(content, op.oldText)
-	actualNewText := preserveEditQuoteStyle(op.oldText, actualOldText, op.newText)
+	quoteNormalized := actualOldText != op.oldText
 
 	matchResult := fuzzyFindText(content, actualOldText)
 
 	if !matchResult.found {
-		preview := content
-		if len(preview) > 200 {
-			preview = preview[:200] + "..."
-		}
-		return "", fmt.Errorf("could not find old_string in %s. Make sure it matches exactly (including whitespace and newlines). File starts with:\n%s", pathArg, preview)
+		return "", false, nil
 	}
+	matched := content[matchResult.index : matchResult.index+matchResult.matchLength]
+	actualNewText := preserveEditQuoteStyle(op.oldText, matched, op.newText)
 
-	occurrences := strings.Count(content, actualOldText)
+	occurrences := countEditMatches(content, actualOldText, op.replaceAll)
 	if matchResult.usedFuzzyMatch {
-		occurrences = strings.Count(normalizeForFuzzyMatch(content), normalizeForFuzzyMatch(actualOldText))
+		occurrences = countEditMatches(normalizeForFuzzyMatch(content), normalizeForFuzzyMatch(actualOldText), op.replaceAll)
+	} else if quoteNormalized {
+		occurrences = countEditMatches(normalizeEditQuotes(content), normalizeEditQuotes(op.oldText), op.replaceAll)
 	}
 
 	if occurrences > 1 && !op.replaceAll {
-		return "", fmt.Errorf("found %d occurrences of the text in %s. The text must be unique — provide more context to make it unique, or set replace_all=true to replace all occurrences", occurrences, pathArg)
+		return "", true, fmt.Errorf("found %d occurrences of the text in %s. The text must be unique — provide more context to make it unique, or set replace_all=true to replace all occurrences", occurrences, pathArg)
 	}
 
 	var newContent string
 
 	if op.replaceAll {
-		if matchResult.usedFuzzyMatch {
-			if strings.Contains(normalizeForFuzzyMatch(actualNewText), normalizeForFuzzyMatch(actualOldText)) {
-				return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
+		if matchResult.usedFuzzyMatch || quoteNormalized {
+			newContent, err = replaceAllMatches(content, op, pathArg)
+			if err != nil {
+				return "", true, err
 			}
-			newContent = content
-			for {
-				mr := fuzzyFindText(newContent, actualOldText)
-				if !mr.found {
-					break
-				}
-				next := newContent[:mr.index] + actualNewText + newContent[mr.index+mr.matchLength:]
-				if next == newContent {
-					return "", fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
-				}
-				newContent = next
+			if newContent == content {
+				return "", true, fmt.Errorf("replace_all made no progress in %s. Use an exact old_string or a replacement that changes the matched text", pathArg)
 			}
 		} else {
+			if err := checkEditSize(pathArg, int64(len(content))+int64(occurrences)*int64(len(actualNewText)-len(actualOldText))); err != nil {
+				return "", true, err
+			}
 			newContent = strings.ReplaceAll(content, actualOldText, actualNewText)
 		}
 	} else {
+		if err := checkEditSize(pathArg, int64(len(content)-matchResult.matchLength)+int64(len(actualNewText))); err != nil {
+			return "", true, err
+		}
 		newContent = content[:matchResult.index] + actualNewText + content[matchResult.index+matchResult.matchLength:]
 	}
 
 	if content == newContent {
-		return "", fmt.Errorf("no changes made to %s. The replacement produced identical content", pathArg)
+		return "", true, fmt.Errorf("no changes made to %s. The replacement produced identical content", pathArg)
 	}
 
-	return newContent, nil
+	return newContent, true, nil
 }
 
-func writeRootFile(root *os.Root, path, content string) (err error) {
-	dir := filepath.Dir(path)
-	if dir != "." && dir != "" {
-		if err := root.MkdirAll(dir, 0755); err != nil {
-			return err
+// replaceAllMatches replaces every quote-normalized or whitespace-fuzzy match in
+// a single left-to-right pass. Replaced text is never rescanned, so a replacement
+// that contains old_string cannot loop or be rejected.
+func replaceAllMatches(content string, op editOp, pathArg string) (string, error) {
+	normalized, offsets := normalizeForFuzzyMatchWithMap(content)
+	old := normalizeForFuzzyMatch(op.oldText)
+	var b strings.Builder
+	pos, normalizedPos := 0, 0
+	for old != "" && normalizedPos < len(normalized) {
+		index := strings.Index(normalized[normalizedPos:], old)
+		if index < 0 {
+			break
 		}
-	}
-
-	outFile, err := root.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := outFile.Close(); closeErr != nil && err == nil {
-			err = fmt.Errorf("failed to close file: %w", closeErr)
+		index += normalizedPos
+		mr := originalFuzzyMatch(content, normalized, offsets, index, len(old))
+		end := mr.index + mr.matchLength
+		// The previous match may already have consumed trailing whitespace
+		// before this newline. The shared offset map still includes those bytes.
+		start := max(pos, mr.index)
+		replacement := preserveEditQuoteStyle(op.oldText, content[start:end], op.newText)
+		if err := checkEditSize(pathArg, int64(b.Len()+start-pos)+int64(len(replacement))); err != nil {
+			return "", err
 		}
-	}()
-
-	if _, err := outFile.WriteString(content); err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
+		b.WriteString(content[pos:start])
+		b.WriteString(replacement)
+		pos, normalizedPos = end, index+len(old)
 	}
+	if err := checkEditSize(pathArg, int64(b.Len()+len(content)-pos)); err != nil {
+		return "", err
+	}
+	b.WriteString(content[pos:])
+	return b.String(), nil
+}
 
+func checkEditSize(path string, size int64) error {
+	if size > MaxEditFileBytes {
+		return fmt.Errorf("file %s would exceed %d bytes; edits are capped at %d bytes", path, MaxEditFileBytes, MaxEditFileBytes)
+	}
 	return nil
+}
+
+// A unique match must also exclude overlapping occurrences. replace_all uses
+// the usual left-to-right, non-overlapping replacement semantics.
+func countEditMatches(content, old string, replaceAll bool) int {
+	if replaceAll {
+		return strings.Count(content, old)
+	}
+	count := 0
+	for old != "" {
+		index := strings.Index(content, old)
+		if index < 0 {
+			break
+		}
+		count++
+		content = content[index+1:]
+	}
+	return count
 }
 
 func findActualEditString(content, oldText string) string {
@@ -355,10 +264,10 @@ func preserveEditQuoteStyle(oldText, actualOldText, newText string) string {
 	}
 
 	result := newText
-	if strings.ContainsAny(actualOldText, "“”") {
+	if strings.ContainsAny(actualOldText, "“”") && !strings.ContainsAny(oldText, "“”") && !strings.Contains(actualOldText, "\"") {
 		result = applyCurlyDoubleQuotes(result)
 	}
-	if strings.ContainsAny(actualOldText, "‘’") {
+	if strings.ContainsAny(actualOldText, "‘’") && !strings.ContainsAny(oldText, "‘’") && !strings.Contains(actualOldText, "'") {
 		result = applyCurlySingleQuotes(result)
 	}
 	return result

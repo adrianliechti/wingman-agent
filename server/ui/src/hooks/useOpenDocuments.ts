@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
 import {
-	readWorkspaceFile,
-	writeWorkspaceFile,
-	writeWorkspaceFiles,
-} from "../api/files";
+	closeDocumentModel,
+	moveDocumentModels,
+} from "../state/documentModels";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { readWorkspaceFile, writeWorkspaceFile } from "../api/files";
 import { runEditorSaveParticipants } from "../editorSaveParticipants";
 import { syncLSPDocument, type LSPDocumentEvent } from "../api/lsp";
 import type { FileContent, ServerMessage } from "../types/protocol";
@@ -17,6 +17,7 @@ import {
 export interface OpenDocument {
 	path: string;
 	external: boolean;
+	untitled: boolean;
 	file: FileContent | null;
 	draft: string;
 	savedContent: string;
@@ -30,6 +31,7 @@ export interface OpenDocument {
 
 export interface SaveResult {
 	ok: boolean;
+	dirty?: boolean;
 	error?: string;
 	conflict?: boolean;
 }
@@ -40,10 +42,96 @@ export interface ApplyWorkspaceEditResult extends SaveResult {
 
 type Subscribe = (handler: (message: ServerMessage) => void) => () => void;
 
+type PreparedEdit = {
+	path: string;
+	content: string;
+	original: string;
+	file: FileContent;
+	base?: OpenDocument;
+};
+
+async function prepareWorkspaceEdit(
+	envelope: WorkspaceEditEnvelope,
+	documentsRef: { current: Record<string, OpenDocument> },
+): Promise<PreparedEdit[]> {
+	const operations = textEditOperations(envelope);
+	if (operations.size === 0) return [];
+	const prepared: PreparedEdit[] = [];
+	const paths = new Set<string>();
+
+	for (const [documentUri, groups] of operations) {
+		const expected = envelope.documents[documentUri];
+		if (!expected?.revision) throw new Error("Missing file revision.");
+		if (paths.has(expected.path)) {
+			throw new Error(
+				`The language server addressed “${expected.path}” more than once.`,
+			);
+		}
+		paths.add(expected.path);
+		const open = documentsRef.current[expected.path];
+		if (open?.external || open?.file?.binary) {
+			throw new Error(`Cannot edit read-only file “${expected.path}”.`);
+		}
+		if (open && (!open.file || open.loading)) {
+			throw new Error(`“${expected.path}” is still loading.`);
+		}
+		if (open && (await contentRevision(open.draft)) !== expected.revision) {
+			throw new Error(
+				`“${expected.path}” changed after the language server prepared this edit. Try again.`,
+			);
+		}
+		let file: FileContent;
+		let content: string;
+		if (open?.file) {
+			if (open.conflict) {
+				throw new Error(`“${expected.path}” changed on disk.`);
+			}
+			file = open.file;
+			content = open.draft;
+		} else {
+			const current = await readWorkspaceFile(expected.path);
+			if (current.binary || current.revision !== expected.revision) {
+				throw new Error(
+					`“${expected.path}” changed before the edit was applied.`,
+				);
+			}
+			file = current;
+			content = current.content ?? "";
+		}
+
+		const original = content;
+		for (const group of groups) content = applyTextEdits(content, group.edits);
+		prepared.push({
+			path: expected.path,
+			content,
+			original,
+			file,
+			base: open,
+		});
+	}
+
+	// Do not partially apply a multi-file edit if any target changed while
+	// unopened files were being read.
+	for (const target of prepared) {
+		if (documentsRef.current[target.path] !== target.base) {
+			throw new Error(
+				`“${target.path}” changed while the language server edit was prepared. Try again.`,
+			);
+		}
+	}
+	return prepared;
+}
+
 export function useOpenDocuments(subscribe?: Subscribe) {
 	const [documents, setDocuments] = useState<Record<string, OpenDocument>>({});
 	const documentsRef = useRef(documents);
 	const requestRef = useRef<Record<string, number>>({});
+	const savesRef = useRef(
+		new Map<
+			string,
+			{ file: FileContent | null; promise: Promise<SaveResult> }
+		>(),
+	);
 	const lspQueuesRef = useRef(new Map<string, Promise<void>>());
 	const lspChangeTimersRef = useRef(
 		new Map<string, { timer: number; content: string }>(),
@@ -66,32 +154,26 @@ export function useOpenDocuments(subscribe?: Subscribe) {
 		},
 		[],
 	);
-	const cancelPendingLSPChange = useCallback((path: string) => {
+	const cancelPendingLSPChange = (path: string) => {
 		const pending = lspChangeTimersRef.current.get(path);
 		if (!pending) return;
 		window.clearTimeout(pending.timer);
 		lspChangeTimersRef.current.delete(path);
-	}, []);
-	const scheduleLSPChange = useCallback(
-		(path: string, content: string) => {
-			cancelPendingLSPChange(path);
-			const timer = window.setTimeout(() => {
-				lspChangeTimersRef.current.delete(path);
-				queueLSPEvent("change", path, content);
-			}, 150);
-			lspChangeTimersRef.current.set(path, { timer, content });
-		},
-		[cancelPendingLSPChange, queueLSPEvent],
-	);
-	const flushLSPChange = useCallback(
-		(path: string) => {
-			const pending = lspChangeTimersRef.current.get(path);
-			if (!pending) return;
-			cancelPendingLSPChange(path);
-			queueLSPEvent("change", path, pending.content);
-		},
-		[cancelPendingLSPChange, queueLSPEvent],
-	);
+	};
+	const scheduleLSPChange = (path: string, content: string) => {
+		cancelPendingLSPChange(path);
+		const timer = window.setTimeout(() => {
+			lspChangeTimersRef.current.delete(path);
+			queueLSPEvent("change", path, content);
+		}, 150);
+		lspChangeTimersRef.current.set(path, { timer, content });
+	};
+	const flushLSPChange = (path: string) => {
+		const pending = lspChangeTimersRef.current.get(path);
+		if (!pending) return;
+		cancelPendingLSPChange(path);
+		queueLSPEvent("change", path, pending.content);
+	};
 	const updateDocuments = useCallback(
 		(
 			update: (
@@ -107,128 +189,167 @@ export function useOpenDocuments(subscribe?: Subscribe) {
 		[],
 	);
 
-	const readDocument = useCallback(
-		async (path: string, external: boolean) => {
-			const request = (requestRef.current[path] ?? 0) + 1;
-			requestRef.current[path] = request;
+	const readDocument = async (path: string, external: boolean) => {
+		const request = (requestRef.current[path] ?? 0) + 1;
+		requestRef.current[path] = request;
+		updateDocuments((current) => ({
+			...current,
+			[path]: {
+				...(current[path] ?? emptyDocument(path, external)),
+				loading: true,
+				saving: false,
+				error: null,
+			},
+		}));
+		let file: FileContent;
+		try {
+			file = await readWorkspaceFile(path, external);
+		} catch (error) {
+			if (requestRef.current[path] !== request) return;
+			const message = error instanceof Error ? error.message : String(error);
 			updateDocuments((current) => ({
 				...current,
 				[path]: {
 					...(current[path] ?? emptyDocument(path, external)),
-					loading: true,
-					error: null,
-				},
-			}));
-			try {
-				const file = await readWorkspaceFile(path, external);
-				if (requestRef.current[path] !== request) return;
-				const content = file.content ?? "";
-				updateDocuments((current) => ({
-					...current,
-					[path]: {
-						...(current[path] ?? emptyDocument(path, external)),
-						file,
-						draft: content,
-						savedContent: content,
-						loading: false,
-						error: null,
-						saveError: null,
-						conflict: false,
-						revision: (current[path]?.revision ?? 0) + 1,
-					},
-				}));
-				if (!external && !file.binary) {
-					queueLSPEvent("open", path, content);
-				}
-			} catch (error) {
-				if (requestRef.current[path] !== request) return;
-				updateDocuments((current) => ({
-					...current,
-					[path]: {
-						...(current[path] ?? emptyDocument(path, external)),
-						loading: false,
-						error: error instanceof Error ? error.message : String(error),
-					},
-				}));
-			}
-		},
-		[queueLSPEvent, updateDocuments],
-	);
-
-	const openDocument = useCallback(
-		(path: string, external = false) => {
-			if (documentsRef.current[path]) return;
-			const initial = emptyDocument(path, external);
-			updateDocuments((current) => ({ ...current, [path]: initial }));
-			void readDocument(path, external);
-		},
-		[readDocument, updateDocuments],
-	);
-
-	const openCreatedDocument = useCallback(
-		(file: FileContent) => {
-			const path = file.path;
-			requestRef.current[path] = (requestRef.current[path] ?? 0) + 1;
-			const content = file.content ?? "";
-			updateDocuments((current) => ({
-				...current,
-				[path]: {
-					path,
-					external: false,
-					file,
-					draft: content,
-					savedContent: content,
 					loading: false,
-					saving: false,
-					error: null,
-					saveError: null,
-					conflict: false,
-					revision: (current[path]?.revision ?? 0) + 1,
+					error: message,
 				},
 			}));
-			if (!file.binary) queueLSPEvent("open", path, content);
-		},
-		[queueLSPEvent, updateDocuments],
-	);
+			return;
+		}
+		if (requestRef.current[path] !== request) return;
+		const content = file.content ?? "";
+		updateDocuments((current) => ({
+			...current,
+			[path]: {
+				...(current[path] ?? emptyDocument(path, external)),
+				file,
+				draft: content,
+				savedContent: content,
+				loading: false,
+				error: null,
+				saveError: null,
+				conflict: false,
+				revision: (current[path]?.revision ?? 0) + 1,
+			},
+		}));
+		if (!external && !file.binary) {
+			queueLSPEvent("open", path, content);
+		}
+	};
 
-	const updateDraft = useCallback(
-		(path: string, draft: string) => {
-			const document = documentsRef.current[path];
-			if (document && !document.external && !document.file?.binary) {
-				scheduleLSPChange(path, draft);
-			}
-			updateDocuments((current) => {
-				const document = current[path];
-				if (!document) return current;
-				return {
-					...current,
-					[path]: { ...document, draft, saveError: null },
-				};
-			});
-		},
-		[scheduleLSPChange, updateDocuments],
-	);
+	const openDocument = (path: string, external = false) => {
+		if (documentsRef.current[path]) return;
+		const initial = emptyDocument(path, external);
+		updateDocuments((current) => ({ ...current, [path]: initial }));
+		void readDocument(path, external);
+	};
 
-	const saveDocument = useCallback(
-		async (path: string, force = false): Promise<SaveResult> => {
-			let document = documentsRef.current[path];
-			if (!document || document.external || document.file?.binary) {
-				return { ok: true };
-			}
-			flushLSPChange(path);
-			// Saving a clean buffer is a no-op; save participants must not get a
-			// chance to rewrite an unmodified file on disk.
-			if (document.draft === document.savedContent) {
-				queueLSPEvent("save", path, document.draft);
-				return { ok: true };
-			}
+	const openCreatedDocument = (file: FileContent) => {
+		const path = file.path;
+		requestRef.current[path] = (requestRef.current[path] ?? 0) + 1;
+		const content = file.content ?? "";
+		updateDocuments((current) => ({
+			...current,
+			[path]: {
+				path,
+				external: false,
+				untitled: false,
+				file,
+				draft: content,
+				savedContent: content,
+				loading: false,
+				saving: false,
+				error: null,
+				saveError: null,
+				conflict: false,
+				revision: (current[path]?.revision ?? 0) + 1,
+			},
+		}));
+		if (!file.binary) queueLSPEvent("open", path, content);
+	};
+
+	const openUntitledDocument = (path: string) => {
+		const file: FileContent = {
+			path,
+			content: "",
+			language: "plaintext",
+			revision: "",
+			size: 0,
+		};
+		requestRef.current[path] = (requestRef.current[path] ?? 0) + 1;
+		updateDocuments((current) => ({
+			...current,
+			[path]: {
+				path,
+				external: false,
+				untitled: true,
+				file,
+				draft: "",
+				savedContent: "",
+				loading: false,
+				saving: false,
+				error: null,
+				saveError: null,
+				conflict: false,
+				revision: 0,
+			},
+		}));
+	};
+
+	const updateDraft = (path: string, draft: string) => {
+		const document = documentsRef.current[path];
+		if (
+			document &&
+			!document.external &&
+			!document.untitled &&
+			!document.file?.binary
+		) {
+			scheduleLSPChange(path, draft);
+		}
+		updateDocuments((current) => {
+			const document = current[path];
+			if (!document) return current;
+			return {
+				...current,
+				[path]: { ...document, draft, saveError: null },
+			};
+		});
+	};
+
+	const performSaveDocument = async (
+		path: string,
+		force = false,
+	): Promise<SaveResult> => {
+		const document = documentsRef.current[path];
+		if (!document || document.external || document.file?.binary) {
+			return { ok: true };
+		}
+		if (document.untitled) {
+			return { ok: false, error: "Choose a name before saving this file." };
+		}
+		const file = document.file;
+		flushLSPChange(path);
+		// Saving a clean buffer is a no-op; save participants must not get a
+		// chance to rewrite an unmodified file on disk.
+		if (document.draft === document.savedContent) {
+			queueLSPEvent("save", path, document.draft);
+			return { ok: true };
+		}
+		updateDocuments((current) => ({
+			...current,
+			[path]: { ...current[path], saving: true, saveError: null },
+		}));
+		const attempt = async (): Promise<SaveResult> => {
 			await runEditorSaveParticipants(path);
-			document = documentsRef.current[path];
-			if (!document || document.external || document.file?.binary) {
-				return { ok: true };
+			const document = documentsRef.current[path];
+			if (!document || document.file !== file) {
+				return {
+					ok: false,
+					error: "The file was closed, moved, or reloaded while saving.",
+				};
 			}
-			// A source action can update the active Monaco model while the save is
-			// waiting, so synchronize and persist the newest buffer.
+			// Save participants may change the buffer. Persist their newest edits.
 			flushLSPChange(path);
 			if (document.draft === document.savedContent) {
 				queueLSPEvent("save", path, document.draft);
@@ -241,37 +362,19 @@ export function useOpenDocuments(subscribe?: Subscribe) {
 					error: "This file changed on disk after it was opened.",
 				};
 			}
-			updateDocuments((current) => ({
-				...current,
-				[path]: { ...current[path], saving: true, saveError: null },
-			}));
-			try {
-				const result = await writeWorkspaceFile({
-					path,
-					content: document.draft,
-					revision: document.file?.revision,
-					force,
-				});
-				if (!result.ok) {
-					updateDocuments((current) => {
-						const latest = current[path];
-						if (!latest) return current;
-						return {
-							...current,
-							[path]: {
-								...latest,
-								saving: false,
-								saveError: null,
-								conflict: true,
-							},
-						};
-					});
-					return {
-						ok: false,
-						conflict: true,
-						error: result.error,
-					};
-				}
+			const result = await writeWorkspaceFile({
+				path,
+				content: document.draft,
+				revision: document.file?.revision,
+				force,
+			});
+			if (documentsRef.current[path]?.file !== file) {
+				return {
+					ok: false,
+					error: "The file was closed, moved, or reloaded while saving.",
+				};
+			}
+			if (!result.ok) {
 				updateDocuments((current) => {
 					const latest = current[path];
 					if (!latest) return current;
@@ -279,242 +382,236 @@ export function useOpenDocuments(subscribe?: Subscribe) {
 						...current,
 						[path]: {
 							...latest,
-							file: latest.file
-								? {
-										...latest.file,
-										content: document.draft,
-										revision: result.revision,
-									}
-								: latest.file,
-							savedContent: document.draft,
 							saving: false,
 							saveError: null,
-							conflict: false,
+							conflict: true,
 						},
 					};
 				});
-				queueLSPEvent("save", path, document.draft);
-				return { ok: true };
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				updateDocuments((current) => {
-					const latest = current[path];
-					if (!latest) return current;
-					return {
-						...current,
-						[path]: {
-							...latest,
-							saving: false,
-							saveError: message,
-						},
-					};
-				});
-				return { ok: false, error: message };
-			}
-		},
-		[flushLSPChange, queueLSPEvent, updateDocuments],
-	);
-
-	const discardDocument = useCallback(
-		(path: string) => {
-			const document = documentsRef.current[path];
-			if (document && !document.external && !document.file?.binary) {
-				cancelPendingLSPChange(path);
-				queueLSPEvent("save", path, document.savedContent);
+				return {
+					ok: false,
+					conflict: true,
+					error: result.error,
+				};
 			}
 			updateDocuments((current) => {
-				const document = current[path];
-				if (!document) return current;
+				const latest = current[path];
+				if (!latest) return current;
 				return {
 					...current,
 					[path]: {
-						...document,
-						draft: document.savedContent,
+						...latest,
+						file: latest.file
+							? {
+									...latest.file,
+									content: document.draft,
+									revision: result.revision,
+								}
+							: latest.file,
+						savedContent: document.draft,
+						saving: false,
 						saveError: null,
 						conflict: false,
 					},
 				};
 			});
-		},
-		[cancelPendingLSPChange, queueLSPEvent, updateDocuments],
-	);
-
-	const applyWorkspaceEdit = useCallback(
-		async (
-			envelope: WorkspaceEditEnvelope,
-		): Promise<ApplyWorkspaceEditResult> => {
-			try {
-				const operations = textEditOperations(envelope);
-				if (operations.size === 0) return { ok: true, paths: [] };
-				const writes: Array<{
-					path: string;
-					content: string;
-					revision: string;
-				}> = [];
-
-				for (const [documentUri, groups] of operations) {
-					const expected = envelope.documents[documentUri];
-					if (!expected?.revision) throw new Error("Missing file revision.");
-					const open = documentsRef.current[expected.path];
-					if (open?.external || open?.file?.binary) {
-						throw new Error(`Cannot edit read-only file “${expected.path}”.`);
-					}
-					if (
-						open &&
-						(await contentRevision(open.draft)) !== expected.revision
-					) {
-						throw new Error(
-							`“${expected.path}” changed after the language server prepared this edit. Try again.`,
-						);
-					}
-					let content: string;
-					let diskRevision: string;
-					if (open?.file?.revision) {
-						if (open.conflict) {
-							throw new Error(`“${expected.path}” changed on disk.`);
-						}
-						content = open.draft;
-						diskRevision = open.file.revision;
-					} else {
-						const current = await readWorkspaceFile(expected.path);
-						if (current.binary || current.revision !== expected.revision) {
-							throw new Error(
-								`“${expected.path}” changed before the edit was applied.`,
-							);
-						}
-						content = current.content ?? "";
-						diskRevision = current.revision;
-					}
-
-					for (const group of groups)
-						content = applyTextEdits(content, group.edits);
-					writes.push({
-						path: expected.path,
-						content,
-						revision: diskRevision,
-					});
-				}
-
-				const result = await writeWorkspaceFiles(writes);
-				if (!result.ok) {
-					updateDocuments((current) => {
-						let changed = false;
-						const next = { ...current };
-						for (const file of writes) {
-							if (!next[file.path] || next[file.path].conflict) continue;
-							next[file.path] = { ...next[file.path], conflict: true };
-							changed = true;
-						}
-						return changed ? next : current;
-					});
-					return { ok: false, conflict: true, error: result.error };
-				}
-
-				const contents = new Map(
-					writes.map((file) => [file.path, file.content]),
-				);
-				updateDocuments((current) => {
-					let changed = false;
-					const next = { ...current };
-					for (const [path, content] of contents) {
-						const document = next[path];
-						if (!document?.file) continue;
-						next[path] = {
-							...document,
-							file: {
-								...document.file,
-								content,
-								revision: result.revisions[path],
-								size: new Blob([content]).size,
-							},
-							draft: content,
-							savedContent: content,
-							conflict: false,
-							saveError: null,
-							revision: document.revision + 1,
-						};
-						changed = true;
-					}
-					return changed ? next : current;
-				});
-				for (const [path, content] of contents) {
-					const document = documentsRef.current[path];
-					if (document && !document.external && !document.file?.binary) {
-						cancelPendingLSPChange(path);
-						queueLSPEvent("save", path, content);
-					}
-				}
-				return { ok: true, paths: writes.map((file) => file.path) };
-			} catch (error) {
+			const latest = documentsRef.current[path];
+			const dirty = latest.draft !== document.draft;
+			cancelPendingLSPChange(path);
+			queueLSPEvent("save", path, document.draft);
+			if (dirty) queueLSPEvent("change", path, latest.draft);
+			return { ok: true, dirty };
+		};
+		let result: SaveResult;
+		try {
+			result = await attempt();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			updateDocuments((current) => {
+				const latest = current[path];
+				if (!latest || latest.file !== file) return current;
 				return {
-					ok: false,
-					error: error instanceof Error ? error.message : String(error),
+					...current,
+					[path]: {
+						...latest,
+						saving: false,
+						saveError: message,
+					},
+				};
+			});
+			result = { ok: false, error: message };
+		}
+		updateDocuments((current) => {
+			const latest = current[path];
+			if (!latest?.saving || latest.file !== file) return current;
+			return { ...current, [path]: { ...latest, saving: false } };
+		});
+		return result;
+	};
+
+	const saveDocument = (path: string, force = false): Promise<SaveResult> => {
+		const file = documentsRef.current[path]?.file ?? null;
+		const pending = savesRef.current.get(path);
+		if (pending?.file === file) return pending.promise;
+		const promise = performSaveDocument(path, force);
+		savesRef.current.set(path, { file, promise });
+		void promise.finally(() => {
+			if (savesRef.current.get(path)?.promise === promise)
+				savesRef.current.delete(path);
+		});
+		return promise;
+	};
+
+	const discardDocument = (path: string) => {
+		const document = documentsRef.current[path];
+		if (
+			document &&
+			!document.external &&
+			!document.untitled &&
+			!document.file?.binary
+		) {
+			cancelPendingLSPChange(path);
+			queueLSPEvent("save", path, document.savedContent);
+		}
+		updateDocuments((current) => {
+			const document = current[path];
+			if (!document) return current;
+			return {
+				...current,
+				[path]: {
+					...document,
+					draft: document.savedContent,
+					saveError: null,
+					conflict: false,
+				},
+			};
+		});
+	};
+
+	const applyWorkspaceEdit = async (
+		envelope: WorkspaceEditEnvelope,
+	): Promise<ApplyWorkspaceEditResult> => {
+		let prepared: PreparedEdit[];
+		try {
+			prepared = await prepareWorkspaceEdit(envelope, documentsRef);
+		} catch (error) {
+			return {
+				ok: false,
+				error: error instanceof Error ? error.message : String(error),
+			};
+		}
+		const changed = prepared.filter(
+			(target) => target.content !== target.original,
+		);
+		if (changed.length === 0) return { ok: true, paths: [] };
+		updateDocuments((current) => {
+			const next = { ...current };
+			for (const target of changed) {
+				const base = target.base;
+				next[target.path] = {
+					...(base ?? {
+						path: target.path,
+						external: false,
+						untitled: false,
+						file: target.file,
+						draft: target.original,
+						savedContent: target.original,
+						loading: false,
+						saving: false,
+						error: null,
+						saveError: null,
+						conflict: false,
+						revision: 0,
+					}),
+					draft: target.content,
+					conflict: false,
+					saveError: null,
+					revision: (base?.revision ?? 0) + 1,
 				};
 			}
-		},
-		[cancelPendingLSPChange, queueLSPEvent, updateDocuments],
-	);
+			return next;
+		});
+		for (const target of changed) {
+			cancelPendingLSPChange(target.path);
+			// "change" also opens a document that was not editor-owned yet,
+			// while correctly preserving its unsaved state in the LSP session.
+			queueLSPEvent("change", target.path, target.content);
+		}
+		return { ok: true, paths: changed.map((target) => target.path) };
+	};
 
-	const closeDocument = useCallback(
-		(path: string) => {
-			const document = documentsRef.current[path];
+	const closeDocument = (path: string) => {
+		closeDocumentModel(path);
+		const document = documentsRef.current[path];
+		cancelPendingLSPChange(path);
+		if (
+			document &&
+			!document.external &&
+			!document.untitled &&
+			!document.file?.binary
+		) {
+			queueLSPEvent("close", path);
+		}
+		requestRef.current[path] = (requestRef.current[path] ?? 0) + 1;
+		updateDocuments((current) => {
+			if (!current[path]) return current;
+			const next = { ...current };
+			delete next[path];
+			return next;
+		});
+	};
+
+	const moveDocuments = (from: string, to: string) => {
+		moveDocumentModels(from, to);
+		for (const [path, document] of Object.entries(documentsRef.current)) {
+			if (path !== from && !path.startsWith(`${from}/`)) continue;
+			if (document.external || document.file?.binary) continue;
+			const movedPath = `${to}${path.slice(from.length)}`;
 			cancelPendingLSPChange(path);
-			if (document && !document.external && !document.file?.binary) {
-				queueLSPEvent("close", path);
-			}
-			requestRef.current[path] = (requestRef.current[path] ?? 0) + 1;
-			updateDocuments((current) => {
-				if (!current[path]) return current;
-				const next = { ...current };
-				delete next[path];
-				return next;
-			});
-		},
-		[cancelPendingLSPChange, queueLSPEvent, updateDocuments],
-	);
-
-	const moveDocuments = useCallback(
-		(from: string, to: string) => {
-			for (const [path, document] of Object.entries(documentsRef.current)) {
+			queueLSPEvent("close", path);
+			if (document.loading) continue;
+			queueLSPEvent(
+				document.draft === document.savedContent ? "open" : "change",
+				movedPath,
+				document.draft,
+			);
+		}
+		updateDocuments((current) => {
+			let changed = false;
+			const next = { ...current };
+			for (const [path, document] of Object.entries(current)) {
 				if (path !== from && !path.startsWith(`${from}/`)) continue;
-				if (document.external || document.file?.binary) continue;
 				const movedPath = `${to}${path.slice(from.length)}`;
-				cancelPendingLSPChange(path);
-				queueLSPEvent("close", path);
-				queueLSPEvent(
-					document.draft === document.savedContent ? "open" : "change",
-					movedPath,
-					document.draft,
-				);
+				requestRef.current[path] = (requestRef.current[path] ?? 0) + 1;
+				requestRef.current[movedPath] =
+					(requestRef.current[movedPath] ?? 0) + 1;
+				delete next[path];
+				next[movedPath] = {
+					...document,
+					path: movedPath,
+					saving: false,
+					file: document.file ? { ...document.file, path: movedPath } : null,
+				};
+				changed = true;
 			}
-			updateDocuments((current) => {
-				let changed = false;
-				const next = { ...current };
-				for (const [path, document] of Object.entries(current)) {
-					if (path !== from && !path.startsWith(`${from}/`)) continue;
-					const movedPath = `${to}${path.slice(from.length)}`;
-					requestRef.current[path] = (requestRef.current[path] ?? 0) + 1;
-					requestRef.current[movedPath] =
-						(requestRef.current[movedPath] ?? 0) + 1;
-					delete next[path];
-					next[movedPath] = {
-						...document,
-						path: movedPath,
-						file: document.file ? { ...document.file, path: movedPath } : null,
-					};
-					changed = true;
-				}
-				return changed ? next : current;
-			});
-		},
-		[cancelPendingLSPChange, queueLSPEvent, updateDocuments],
-	);
+			return changed ? next : current;
+		});
+		for (const document of Object.values(documentsRef.current)) {
+			if (
+				document.loading &&
+				(document.path === to || document.path.startsWith(`${to}/`))
+			) {
+				void readDocument(document.path, document.external);
+			}
+		}
+	};
 
 	const refreshOpenDocuments = useCallback(async () => {
 		const open = Object.values(documentsRef.current).filter(
 			(document) =>
 				!document.external &&
 				!document.loading &&
+				!document.saving &&
 				document.file &&
 				!document.file.binary,
 		);
@@ -524,49 +621,52 @@ export function useOpenDocuments(subscribe?: Subscribe) {
 				if (!baseRevision) return;
 				const request = (requestRef.current[document.path] ?? 0) + 1;
 				requestRef.current[document.path] = request;
+				let file: FileContent;
 				try {
-					const file = await readWorkspaceFile(document.path);
-					if (requestRef.current[document.path] !== request) return;
-					const content = file.content ?? "";
-					let synchronize = false;
-					updateDocuments((current) => {
-						const latest = current[document.path];
-						if (!latest) return current;
-						if (latest.file?.revision !== baseRevision) return current;
-						if (file.revision === latest.file?.revision) {
-							synchronize = true;
-							if (!latest.conflict) return current;
-							return {
-								...current,
-								[document.path]: { ...latest, conflict: false },
-							};
-						}
-						const dirty = latest.draft !== latest.savedContent;
-						if (dirty) {
-							if (latest.conflict) return current;
-							return {
-								...current,
-								[document.path]: {
-									...latest,
-									conflict: true,
-								},
-							};
-						}
-						synchronize = true;
+					file = await readWorkspaceFile(document.path);
+				} catch {
+					return;
+				}
+				if (requestRef.current[document.path] !== request) return;
+				const content = file.content ?? "";
+				let synchronize = false;
+				updateDocuments((current) => {
+					const latest = current[document.path];
+					if (!latest || latest.saving) return current;
+					if (latest.file?.revision !== baseRevision) return current;
+					if (file.revision === latest.file?.revision) {
+						synchronize = latest.draft === latest.savedContent;
+						if (!latest.conflict) return current;
+						return {
+							...current,
+							[document.path]: { ...latest, conflict: false },
+						};
+					}
+					const dirty = latest.draft !== latest.savedContent;
+					if (dirty) {
+						if (latest.conflict) return current;
 						return {
 							...current,
 							[document.path]: {
 								...latest,
-								file,
-								draft: content,
-								savedContent: content,
-								conflict: false,
-								revision: latest.revision + 1,
+								conflict: true,
 							},
 						};
-					});
-					if (synchronize) queueLSPEvent("save", document.path, content);
-				} catch {}
+					}
+					synchronize = true;
+					return {
+						...current,
+						[document.path]: {
+							...latest,
+							file,
+							draft: content,
+							savedContent: content,
+							conflict: false,
+							revision: latest.revision + 1,
+						},
+					};
+				});
+				if (synchronize) queueLSPEvent("save", document.path, content);
 			}),
 		);
 	}, [queueLSPEvent, updateDocuments]);
@@ -604,7 +704,7 @@ export function useOpenDocuments(subscribe?: Subscribe) {
 				(document) =>
 					!document.external &&
 					!document.file?.binary &&
-					document.draft !== document.savedContent,
+					(document.untitled || document.draft !== document.savedContent),
 			)
 			.map((document) => document.path),
 	);
@@ -624,6 +724,7 @@ export function useOpenDocuments(subscribe?: Subscribe) {
 		dirtyPaths,
 		openDocument,
 		openCreatedDocument,
+		openUntitledDocument,
 		updateDraft,
 		saveDocument,
 		discardDocument,
@@ -638,6 +739,7 @@ function emptyDocument(path: string, external: boolean): OpenDocument {
 	return {
 		path,
 		external,
+		untitled: false,
 		file: null,
 		draft: "",
 		savedContent: "",

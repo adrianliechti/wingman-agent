@@ -588,7 +588,7 @@ func TestGrepTool(t *testing.T) {
 	})
 }
 
-func TestGrepHandlesLongLines(t *testing.T) {
+func TestGrepReportsIncompleteSearchAtLongLines(t *testing.T) {
 	root, tmpDir, cleanup := createTestRoot(t)
 	defer cleanup()
 
@@ -600,20 +600,12 @@ func TestGrepHandlesLongLines(t *testing.T) {
 
 	grepTool := GrepTool(root)
 
-	result, err := grepTool.Execute(context.Background(), map[string]any{
+	_, err := grepTool.Execute(context.Background(), map[string]any{
 		"pattern":     "needle",
 		"output_mode": "content",
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !strings.Contains(result.Content, "needle line 1") || !strings.Contains(result.Content, "needle line 2") {
-		t.Errorf("expected pre-long-line matches preserved, got: %s", result.Content)
-	}
-
-	if !strings.Contains(result.Content, "exceeds") || !strings.Contains(result.Content, "scan limit") {
-		t.Errorf("expected scan-cutoff sentinel, got: %s", result.Content)
+	if err == nil || !strings.Contains(err.Error(), "scan limit") || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("expected explicit incomplete-search error, got: %v", err)
 	}
 }
 
@@ -628,15 +620,11 @@ func TestGrepLongLineWithoutMatchDoesNotCreateFalsePositive(t *testing.T) {
 
 	grepTool := GrepTool(root)
 
-	result, err := grepTool.Execute(context.Background(), map[string]any{
+	_, err := grepTool.Execute(context.Background(), map[string]any{
 		"pattern": "needle",
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Content != "No files found" {
-		t.Errorf("expected no false positive for long line without match, got: %s", result.Content)
+	if err == nil || !strings.Contains(err.Error(), "scan limit") {
+		t.Fatalf("expected incomplete-search error instead of a negative result, got: %v", err)
 	}
 }
 
@@ -788,4 +776,27 @@ func TestGrepAllowedReadRoots(t *testing.T) {
 			t.Fatal("expected error for path outside workspace and allow-list")
 		}
 	})
+}
+
+func TestGrepWildcardReadRoot(t *testing.T) {
+	root, _, cleanup := createTestRoot(t)
+	defer cleanup()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "table.go")
+	if err := os.WriteFile(file, []byte("type Table struct{}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dir, file} {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			result, err := GrepTool(root, "*").Execute(context.Background(), map[string]any{
+				"path": path, "pattern": "Table",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(result.Content, file) {
+				t.Fatalf("result = %q, want %q", result.Content, file)
+			}
+		})
+	}
 }

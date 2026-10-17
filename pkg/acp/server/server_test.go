@@ -21,6 +21,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
@@ -58,16 +59,154 @@ func TestNotifyContentIgnoresPartialToolCall(t *testing.T) {
 	}
 }
 
-func TestClassifyPromptStreamError(t *testing.T) {
-	reason, err := classifyPromptStreamError(context.Canceled)
-	if err != nil || reason != acpsdk.StopReasonCancelled {
-		t.Fatalf("cancelled stream = %q, %v", reason, err)
+func TestNotifyContentPreservesMixedTextAndImage(t *testing.T) {
+	var updates []acpsdk.SessionUpdate
+	notifyContent(func(update acpsdk.SessionUpdate) { updates = append(updates, update) }, agent.RoleUser, agent.Content{
+		Text: "describe this",
+		File: &agent.File{Data: "data:image/png;base64,AA=="},
+	})
+	if len(updates) != 2 || updates[0].UserMessageChunk == nil || updates[0].UserMessageChunk.Content.Text == nil ||
+		updates[0].UserMessageChunk.Content.Text.Text != "describe this" || updates[1].UserMessageChunk == nil ||
+		updates[1].UserMessageChunk.Content.Image == nil || updates[1].UserMessageChunk.Content.Image.Data != "AA==" {
+		t.Fatalf("updates = %#v", updates)
+	}
+}
+
+func TestNotifyContentPreservesAssistantImage(t *testing.T) {
+	var update acpsdk.SessionUpdate
+	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, agent.RoleAssistant, agent.Content{
+		File: &agent.File{Data: "data:image/png;base64,AA=="},
+	})
+	if update.AgentMessageChunk == nil || update.AgentMessageChunk.Content.Image == nil ||
+		update.AgentMessageChunk.Content.Image.Data != "AA==" {
+		t.Fatalf("assistant image update = %#v", update)
+	}
+}
+
+func TestNotifyContentUsesCompactFilePresentation(t *testing.T) {
+	var update acpsdk.SessionUpdate
+	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, agent.RoleAssistant, agent.Content{
+		ToolCall: &agent.ToolCall{
+			ID: "read-1", Name: "read",
+			Args: `{"file_path":"/workspace/main.go","offset":12,"limit":4}`,
+		},
+	})
+
+	call := update.ToolCall
+	if call == nil || call.Title != "Read file" || call.Kind != acpsdk.ToolKindRead {
+		t.Fatalf("tool call = %#v", call)
+	}
+	if len(call.Locations) != 1 || call.Locations[0].Path != "/workspace/main.go" ||
+		call.Locations[0].Line == nil || *call.Locations[0].Line != 12 {
+		t.Fatalf("locations = %#v", call.Locations)
+	}
+	args, ok := call.RawInput.(map[string]any)
+	if !ok || args["limit"] != float64(4) || args["offset"] != nil || args["file_path"] != nil || args["path"] != nil {
+		t.Fatalf("display input = %#v", call.RawInput)
+	}
+}
+
+func TestNotifyContentDoesNotRepeatEditPayload(t *testing.T) {
+	var update acpsdk.SessionUpdate
+	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, agent.RoleAssistant, agent.Content{
+		ToolCall: &agent.ToolCall{
+			ID: "edit-1", Name: "edit",
+			Args: `{"file_path":"/workspace/main.go","old_string":"before","new_string":"after"}`,
+		},
+	})
+
+	call := update.ToolCall
+	if call == nil || call.Title != "Edit file" || len(call.Locations) != 1 {
+		t.Fatalf("tool call = %#v", call)
+	}
+	if call.RawInput != nil {
+		t.Fatalf("edit payload duplicated its diff/result: %#v", call.RawInput)
+	}
+}
+
+func TestRetainSessionQueuesPromptsAndHonorsWaitingContext(t *testing.T) {
+	const id = acpsdk.SessionId("session-1")
+	w := &workspaceEntry{refs: 1}
+	s := &Server{sessions: map[acpsdk.SessionId]*sessionEntry{
+		id: {id: id, workspace: w},
+	}}
+
+	_, finishFirst, err := s.retainSession(context.Background(), id, func() {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type retained struct {
+		finish func()
+		err    error
+	}
+	second := make(chan retained, 1)
+	go func() {
+		_, finish, err := s.retainSession(context.Background(), id, func() {})
+		second <- retained{finish: finish, err: err}
+	}()
+	select {
+	case got := <-second:
+		t.Fatalf("second prompt was not queued: %v", got.err)
+	case <-time.After(20 * time.Millisecond):
 	}
 
-	want := errors.New("model stream failed")
-	reason, err = classifyPromptStreamError(want)
-	if !errors.Is(err, want) || reason != "" {
-		t.Fatalf("failed stream = %q, %v", reason, err)
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	cancelWait()
+	if _, _, err := s.retainSession(waitCtx, id, func() {}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiting prompt error = %v, want context.Canceled", err)
+	}
+
+	finishFirst()
+	var got retained
+	select {
+	case got = <-second:
+	case <-time.After(time.Second):
+		t.Fatal("queued prompt did not start after the prior prompt finished")
+	}
+	if got.err != nil || got.finish == nil {
+		t.Fatalf("queued prompt = %#v", got)
+	}
+	got.finish()
+	// Prompt retains are normally paired with the Prompt method's deferred
+	// workspace releases. Keep that invariant in this isolated lifecycle test.
+	s.releaseWorkspace(w)
+	s.releaseWorkspace(w)
+}
+
+func TestReplaceLoadedSessionSwapsWorkspaceAndRejectsBusySession(t *testing.T) {
+	const id = acpsdk.SessionId("session-1")
+	oldAgent := &codeagent.Agent{}
+	newAgent := &codeagent.Agent{}
+	oldWorkspace := &workspaceEntry{agent: oldAgent, key: "old", refs: 2}
+	newWorkspace := &workspaceEntry{agent: newAgent, key: "new", refs: 1}
+	oldSession := &sessionEntry{id: id, agent: oldAgent, workspace: oldWorkspace}
+	s := &Server{
+		sessions:    map[acpsdk.SessionId]*sessionEntry{id: oldSession},
+		sessionDirs: map[acpsdk.SessionId]string{id: "old-dir"},
+		workspaces: map[string]*workspaceEntry{
+			"old": oldWorkspace,
+			"new": newWorkspace,
+		},
+	}
+
+	if err := s.replaceLoadedSession(id, newWorkspace); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.lookupSession(id); got == oldSession || got.workspace != newWorkspace || got.agent != newAgent {
+		t.Fatalf("replacement session = %#v", got)
+	}
+	if oldWorkspace.refs != 1 || newWorkspace.refs != 1 {
+		t.Fatalf("workspace refs = old:%d new:%d", oldWorkspace.refs, newWorkspace.refs)
+	}
+
+	busy := s.lookupSession(id)
+	busy.cancel = func() {}
+	thirdWorkspace := &workspaceEntry{agent: &codeagent.Agent{}, key: "third", refs: 1}
+	if err := s.replaceLoadedSession(id, thirdWorkspace); err == nil {
+		t.Fatal("busy session was replaced")
+	}
+	if s.lookupSession(id) != busy || thirdWorkspace.refs != 1 {
+		t.Fatal("failed replacement changed session ownership")
 	}
 }
 
@@ -267,15 +406,15 @@ func TestACPTaskTurnWritesFileAndReportsUsage(t *testing.T) {
 						"type":      "function_call",
 						"id":        "fc_1",
 						"call_id":   "call_1",
-						"name":      "write",
-						"arguments": fmt.Sprintf(`{"file_path":%q,"content":"benchmark-ready\n"}`, filepath.Join(workdir, "solution.txt")),
+						"name":      "edit",
+						"arguments": fmt.Sprintf(`{"edits":[{"file_path":%q,"old_string":"","new_string":"benchmark-ready\n"}]}`, filepath.Join(workdir, "solution.txt")),
 						"status":    "completed",
 					},
 				})
-				writeSSE(t, w, completedEvent(2, 11, 2, 3, nil))
+				writeSSE(t, w, completedEvent(2, 11, 2, 1, 3, 1, nil))
 				return
 			}
-			writeSSE(t, w, completedEvent(1, 13, 4, 5, []map[string]any{{
+			writeSSE(t, w, completedEvent(1, 13, 4, 2, 5, 2, []map[string]any{{
 				"type":   "message",
 				"id":     "msg_1",
 				"role":   "assistant",
@@ -332,11 +471,17 @@ func TestACPTaskTurnWritesFileAndReportsUsage(t *testing.T) {
 	if response.Usage == nil {
 		t.Fatal("prompt response did not include usage")
 	}
-	if response.Usage.InputTokens != 18 || response.Usage.OutputTokens != 8 || response.Usage.TotalTokens != 32 {
-		t.Fatalf("usage = %+v, want input=18 cached=6 output=8 total=32", *response.Usage)
+	if response.Usage.InputTokens != 15 || response.Usage.OutputTokens != 5 || response.Usage.TotalTokens != 32 {
+		t.Fatalf("usage = %+v, want input=15 output=5 total=32", *response.Usage)
 	}
 	if response.Usage.CachedReadTokens == nil || *response.Usage.CachedReadTokens != 6 {
-		t.Fatalf("cached usage = %v, want 6", response.Usage.CachedReadTokens)
+		t.Fatalf("cache-read usage = %v, want 6", response.Usage.CachedReadTokens)
+	}
+	if response.Usage.CachedWriteTokens == nil || *response.Usage.CachedWriteTokens != 3 {
+		t.Fatalf("cache-write usage = %v, want 3", response.Usage.CachedWriteTokens)
+	}
+	if response.Usage.ThoughtTokens == nil || *response.Usage.ThoughtTokens != 3 {
+		t.Fatalf("reasoning usage = %v, want 3", response.Usage.ThoughtTokens)
 	}
 	content, err := os.ReadFile(filepath.Join(workdir, "solution.txt"))
 	if err != nil {
@@ -383,14 +528,19 @@ func writeSSE(t *testing.T, w http.ResponseWriter, event map[string]any) {
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 }
 
-func completedEvent(sequence, input, cached, output int, items []map[string]any) map[string]any {
+func completedEvent(sequence, input, cached, cacheWrite, output, reasoning int, items []map[string]any) map[string]any {
 	response := map[string]any{
 		"usage": map[string]any{
 			"input_tokens": input,
 			"input_tokens_details": map[string]any{
-				"cached_tokens": cached,
+				"cached_tokens":      cached,
+				"cache_write_tokens": cacheWrite,
 			},
 			"output_tokens": output,
+			"output_tokens_details": map[string]any{
+				"reasoning_tokens": reasoning,
+			},
+			"total_tokens": input + output,
 		},
 	}
 	if items != nil {

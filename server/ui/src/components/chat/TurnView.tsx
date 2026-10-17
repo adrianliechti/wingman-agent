@@ -5,18 +5,23 @@ import { sampleSpinnerVerb } from "../../spinnerVerbs";
 import type { Phase } from "../../types/protocol";
 import { EntryView, ToolGroupView } from "./entries";
 import type { Turn } from "./turns";
+import { TurnReviewCard } from "./TurnReviews";
+
+interface TurnViewProps {
+	turn: Turn;
+	isActive: boolean;
+	phase: Phase;
+	applyPendingAnchor: () => void;
+	onOpenFile?: (path: string, line?: number) => void;
+}
 
 export const TurnView = memo(function TurnView({
 	turn,
 	isActive,
 	phase,
 	applyPendingAnchor,
-}: {
-	turn: Turn;
-	isActive: boolean;
-	phase: Phase;
-	applyPendingAnchor: () => void;
-}) {
+	onOpenFile,
+}: TurnViewProps) {
 	const canCollapse =
 		!isActive && turn.final !== null && turn.working.length > 0;
 	const [override, setOverride] = useState<boolean | null>(null);
@@ -48,6 +53,7 @@ export const TurnView = memo(function TurnView({
 							phase={phase}
 							canCollapse={canCollapse}
 							onCollapse={() => setExpanded(false)}
+							onOpenFile={onOpenFile}
 						/>
 						{isActive &&
 							!(phase === "streaming" && turn.final?.type === "assistant") &&
@@ -74,24 +80,15 @@ export const TurnView = memo(function TurnView({
 			{isActive && turn.working.length === 0 && !turn.final && (
 				<PhaseIndicator />
 			)}
+			<TurnReviewCard inputId={turn.user?.inputId} onOpenFile={onOpenFile} />
 		</>
 	);
 }, areTurnPropsEqual);
 
-function areTurnPropsEqual(
-	prev: {
-		turn: Turn;
-		isActive: boolean;
-		phase: Phase;
-	},
-	next: {
-		turn: Turn;
-		isActive: boolean;
-		phase: Phase;
-	},
-) {
+function areTurnPropsEqual(prev: TurnViewProps, next: TurnViewProps) {
 	if (!sameTurnEntries(prev.turn, next.turn)) return false;
 	if (prev.isActive !== next.isActive) return false;
+	if (prev.onOpenFile !== next.onOpenFile) return false;
 	if (!prev.isActive && !next.isActive) return true;
 	return (
 		prev.phase === next.phase &&
@@ -114,12 +111,14 @@ const WorkingExpanded = memo(function WorkingExpanded({
 	phase,
 	canCollapse,
 	onCollapse,
+	onOpenFile,
 }: {
 	entries: ChatEntry[];
 	isActive: boolean;
 	phase: Phase;
 	canCollapse: boolean;
 	onCollapse: () => void;
+	onOpenFile?: (path: string, line?: number) => void;
 }) {
 	const nodes: React.ReactNode[] = [];
 	let i = 0;
@@ -136,6 +135,7 @@ const WorkingExpanded = memo(function WorkingExpanded({
 					entries={slice}
 					isTrailing={isTrailing}
 					phase={phase}
+					onOpenFile={onOpenFile}
 				/>,
 			);
 			continue;

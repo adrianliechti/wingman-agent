@@ -147,6 +147,19 @@ func TestScriptTextCollectorDiscardsFailedAttempt(t *testing.T) {
 	}
 }
 
+func TestScriptRefusalIsVisibleInStreamAndHistory(t *testing.T) {
+	message := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Refusal: "I cannot help with that."}}}
+	collector := &scriptTextCollector{}
+	collector.Add(message)
+	collector.Commit()
+	if got := collector.Text(); got != "I cannot help with that." {
+		t.Fatalf("streamed refusal = %q", got)
+	}
+	if got := finalAssistantText([]agent.Message{message}); got != "I cannot help with that." {
+		t.Fatalf("retained refusal = %q", got)
+	}
+}
+
 func TestScriptReporterShowsToolProgressOnlyInDebugMode(t *testing.T) {
 	args := "{\n  \"file_path\": \"pkg/agent/models.go\",\n  \"offset\": 10\n}"
 	toolCall := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{ToolCall: &agent.ToolCall{
@@ -375,6 +388,30 @@ type fakeScriptAgent struct {
 	jsonCalls   int
 	inputs      [][]agent.Content
 	saved       string
+}
+
+type unattendedScriptAgent struct {
+	*fakeScriptAgent
+	unattended bool
+}
+
+func (a *unattendedScriptAgent) Unattended(string) bool { return a.unattended }
+func (a *unattendedScriptAgent) SetUnattended(_ context.Context, _ string, enabled bool) error {
+	a.unattended = enabled
+	return nil
+}
+
+func TestScriptEnablesIndependentUnattendedPolicy(t *testing.T) {
+	a := &unattendedScriptAgent{fakeScriptAgent: &fakeScriptAgent{
+		modes:       []code.Mode{{ID: code.AgentModeID}, {ID: code.PlanModeID}},
+		currentMode: code.PlanModeID, model: "selected", effort: "medium",
+	}}
+	if err := setScriptMode(t.Context(), a, "sid", code.UnattendedModeID); err != nil {
+		t.Fatal(err)
+	}
+	if !a.unattended || a.currentMode != code.AgentModeID || a.model != "selected" || a.effort != "medium" {
+		t.Fatalf("exec policy lost execution mode or selection: %+v", a)
+	}
 }
 
 func (a *fakeScriptAgent) Name() string                          { return "fake" }

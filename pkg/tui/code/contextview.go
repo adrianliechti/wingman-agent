@@ -61,7 +61,10 @@ func cellContextStats(stats agent.ContextStats, width int) []string {
 		{fmt.Sprintf("Messages (%d)", stats.MessageCount), int64(stats.MessagesTokens), t.Magenta},
 	}
 
-	current := stats.LastInputTokens
+	current := stats.CurrentTokens
+	if current <= 0 {
+		current = stats.LastInputTokens
+	}
 	if current <= 0 {
 		current = int64(stats.EstimatedTotal())
 	}

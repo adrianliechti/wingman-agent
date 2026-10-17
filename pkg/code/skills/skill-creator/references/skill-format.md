@@ -1,6 +1,6 @@
 # Wingman skill format
 
-A skill is a directory whose required entry point is `SKILL.md`. Every file beneath that directory travels with a bundled skill and is copied into its managed workspace snapshot, so resources are not limited to a fixed set of folder names. Follow the [Agent Skills specification](https://agentskills.io/specification) for portable skills.
+A skill is a directory whose required entry point is `SKILL.md`. Every file beneath that directory travels with a bundled skill and is copied into its managed system snapshot, so resources are not limited to a fixed set of folder names. Follow the [Agent Skills specification](https://agentskills.io/specification) for portable skills.
 
 ## Minimal frontmatter
 
@@ -18,6 +18,10 @@ The optional standard fields are `license`, `compatibility`, `metadata`, and `al
 For a Wingman or Claude Code skill that does not need to remain portable, `arguments` may be a space-separated string or list of positional names, and `argument-hint` may override the hint displayed beside the slash command. A declaration such as `arguments: [component, source, target]` exposes `$component`, `$source`, and `$target` in the body and displays `[component] [source] [target]` when no explicit hint is supplied. Do not use these fields in an Agent Plugin skill: the plugin specification requires its skills to conform to portable Agent Skills frontmatter.
 
 Body substitutions are `$ARGUMENTS`, `$ARGUMENTS[N]`, `$N`, and declared `$name` arguments. `${SKILL_DIR}` and `${PROJECT_DIR}` resolve directories; the Claude-compatible `${CLAUDE_SKILL_DIR}` and `${CLAUDE_PROJECT_DIR}` names are aliases.
+
+Indexed arguments are zero-based. If the body has no argument placeholder, Wingman appends supplied arguments automatically. Escape an argument placeholder with one backslash when teaching its literal syntax in `SKILL.md`. Substitutions apply to the skill body, not supporting files. Do not rely on a substituted argument when a skill is loaded implicitly; use the current request when no invocation arguments are available.
+
+Wingman does not use `agents/openai.yaml`, Claude's `tools`, or model-selection frontmatter to configure skill execution. Do not copy provider-specific metadata or tool names into a skill unless the destination actually supports them.
 
 ## Resource layout
 

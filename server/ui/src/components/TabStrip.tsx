@@ -8,6 +8,7 @@ export interface TabStripItem {
 	dirty: boolean;
 	running: boolean;
 	closable: boolean;
+	status?: "Needs input" | "Completed";
 }
 
 export function TabStrip({
@@ -123,6 +124,7 @@ export function TabStrip({
 						id={tab.id}
 						kind={tab.type}
 						label={item.label}
+						status={item.status}
 						active={tab.id === activeTabId}
 						preview={!!tab.preview}
 						closable={item.closable}

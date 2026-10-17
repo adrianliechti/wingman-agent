@@ -1,18 +1,23 @@
 package claude
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/google/uuid"
+
+	"github.com/adrianliechti/wingman-agent/internal/process"
 )
 
 type session struct {
@@ -20,18 +25,21 @@ type session struct {
 	cwd   string
 	agent *Agent
 
+	promptMu       acpcommon.PromptGate
 	mu             sync.Mutex
+	closed         bool
 	modelID        string
 	modelOverride  bool
 	effort         string
 	mode           string
+	prePlanMode    string
+	allowBypass    bool
 	mcpServers     []acp.McpServer
 	additionalDirs []string
 	resumeFrom     string
 	forkOnResume   bool
 	started        bool
 	lastTitle      string
-	plan           *taskPlan
 	cancel         context.CancelFunc
 	proc           *claudeProc
 }
@@ -45,12 +53,27 @@ func (a *Agent) newSession(id acp.SessionId, cwd, model, effort string, addition
 		modelOverride:  model != "" && model != "default",
 		effort:         effort,
 		mode:           defaultModeID,
+		allowBypass:    true,
 		additionalDirs: append([]string(nil), additionalDirs...),
 	}
-	if a.supportsPlanUpdates() {
-		s.plan = newTaskPlan()
-	}
 	return s
+}
+
+// setModeLocked remembers the mode the session left when it entered plan mode.
+func (s *session) setModeLocked(modeID string) {
+	switch {
+	case modeID != planModeID:
+		s.prePlanMode = ""
+	case s.mode != planModeID:
+		s.prePlanMode = s.mode
+	}
+	s.mode = modeID
+}
+
+func (s *session) currentPrePlanMode() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prePlanMode
 }
 
 func (s *session) cancelTurn() {
@@ -64,6 +87,7 @@ func (s *session) cancelTurn() {
 
 func (s *session) close() {
 	s.mu.Lock()
+	s.closed = true
 	cancel := s.cancel
 	proc := s.proc
 	s.proc = nil
@@ -74,6 +98,21 @@ func (s *session) close() {
 	if proc != nil {
 		proc.shutdown()
 	}
+	// A closing session must let its cancelled prompt release the turn gate
+	// before it is replaced or reported closed. Keep a bound for wedged clients.
+	ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	if err := s.promptMu.Lock(ctx); err == nil {
+		s.promptMu.Unlock()
+	} else {
+		fmt.Fprintf(s.agent.stderr, "claude-acp: session %s prompt cleanup: %v\n", s.id, err)
+	}
+}
+
+func (s *session) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.StopReason, *acp.Usage, error) {
@@ -85,6 +124,10 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return acp.StopReasonCancelled, nil, nil
+	}
 	s.cancel = cancel
 	s.mu.Unlock()
 	defer func() {
@@ -93,19 +136,12 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 		s.mu.Unlock()
 	}()
 
-	p.beginTurn()
-	if p.plan != nil {
-		if entries, ok := p.plan.unfinishedEntries(); ok {
-			if err := s.agent.conn.SessionUpdate(turnCtx, acp.SessionNotification{
-				SessionId: s.id,
-				Update:    acp.UpdatePlan(entries...),
-			}); err != nil {
-				p.finishTurn()
-				return "", nil, fmt.Errorf("republish task plan: %w", err)
-			}
-		}
-	}
-	if err := p.out.writeJSON(promptMessage(prompt)); err != nil {
+	p.beginTurn(turnCtx)
+	input := promptMessage(prompt)
+	p.turnMu.Lock()
+	input.UUID = p.turnID
+	p.turnMu.Unlock()
+	if err := p.out.writeJSON(input); err != nil {
 		p.finishTurn()
 		s.dropProc(p)
 		return "", nil, fmt.Errorf("write prompt: %w", err)
@@ -117,13 +153,20 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 		_ = p.out.writeJSON(interruptRequest())
 		select {
 		case r := <-p.results:
+			p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, true)
 			return acp.StopReasonCancelled, r.usage, nil
 		case <-p.dead:
 		case <-time.After(5 * time.Second):
 			s.dropProc(p)
 		}
+		// No further results can arrive from a dead or dropped process.
+		p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, false)
 		return acp.StopReasonCancelled, nil, nil
 	case r := <-p.results:
+		if turnCtx.Err() != nil {
+			p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, true)
+			return acp.StopReasonCancelled, r.usage, nil
+		}
 		if r.err != nil {
 			s.dropProc(p)
 			return "", nil, r.err
@@ -131,6 +174,19 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 		s.pushTitleUpdate(ctx)
 		return r.stop, r.usage, nil
 	case <-p.dead:
+		if turnCtx.Err() != nil {
+			p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, false)
+			return acp.StopReasonCancelled, nil, nil
+		}
+		// Preserve a result already read immediately before process EOF.
+		select {
+		case r := <-p.results:
+			if r.err != nil {
+				s.dropProc(p)
+			}
+			return r.stop, r.usage, r.err
+		default:
+		}
 		s.dropProc(p)
 		return "", nil, fmt.Errorf("claude process exited unexpectedly")
 	}
@@ -177,6 +233,9 @@ func (s *session) ensureProc() (*claudeProc, error) {
 	a := s.agent
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil, fmt.Errorf("session %s is closed", s.id)
+	}
 
 	sig := s.spawnSigLocked()
 	if s.proc != nil && s.proc.sig == sig && !s.proc.isDead() {
@@ -190,6 +249,8 @@ func (s *session) ensureProc() (*claudeProc, error) {
 	args := s.cliArgsLocked()
 	procCtx, kill := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(procCtx, a.path, args...)
+	cmd.WaitDelay = 2 * time.Second
+	process.Hide(cmd)
 	cmd.Dir = s.cwd
 	if a.env != nil {
 		cmd.Env = a.env
@@ -212,7 +273,7 @@ func (s *session) ensureProc() (*claudeProc, error) {
 
 	p := &claudeProc{
 		cmd:             cmd,
-		out:             &streamWriter{w: stdin},
+		out:             &streamWriter{w: acpcommon.NewConnectionWriter(stdin, 0)},
 		stdin:           stdin,
 		sig:             sig,
 		kill:            kill,
@@ -222,7 +283,6 @@ func (s *session) ensureProc() (*claudeProc, error) {
 		tools:           toolUseCache{},
 		emitted:         newToolCallTracker(),
 		streamedContent: &streamedBlockTracker{},
-		plan:            s.plan,
 		subagentParents: make(map[string]string),
 		results:         make(chan turnResult, 1),
 		dead:            make(chan struct{}),
@@ -261,20 +321,45 @@ type claudeProc struct {
 	tools           toolUseCache
 	emitted         *toolCallTracker
 	streamedContent *streamedBlockTracker
-	plan            *taskPlan
+	contextUsage    contextUsage
 
-	turnMu          sync.Mutex
-	turnActive      bool
-	subagentMu      sync.Mutex
-	subagentParents map[string]string
-	results         chan turnResult
-	dead            chan struct{}
+	turnMu              sync.Mutex
+	turnActive          bool
+	turnID              string
+	turnCtx             context.Context
+	turnCancel          context.CancelFunc
+	deliveredText       bool
+	deliveredCompaction bool
+	pendingResultIdles  int
+	sessionState        string
+	subagentMu          sync.Mutex
+	subagentParents     map[string]string
+	backgroundTasks     map[string]bool
+	results             chan turnResult
+	dead                chan struct{}
+	shutdownOnce        sync.Once
 }
 
-func (p *claudeProc) beginTurn() {
+func (p *claudeProc) beginTurn(ctx context.Context) {
 	p.turnMu.Lock()
+	if p.turnCancel != nil {
+		p.turnCancel()
+	}
+	p.turnCtx, p.turnCancel = context.WithCancel(ctx)
+	p.turnID = uuid.NewString()
 	p.turnActive = true
+	p.deliveredText = false
+	p.deliveredCompaction = false
 	p.turnMu.Unlock()
+}
+
+func (p *claudeProc) markTurnOutput(text, compaction bool) {
+	p.turnMu.Lock()
+	defer p.turnMu.Unlock()
+	if p.turnActive {
+		p.deliveredText = p.deliveredText || text
+		p.deliveredCompaction = p.deliveredCompaction || compaction
+	}
 }
 
 func (p *claudeProc) finishTurn() bool {
@@ -282,7 +367,20 @@ func (p *claudeProc) finishTurn() bool {
 	defer p.turnMu.Unlock()
 	wasActive := p.turnActive
 	p.turnActive = false
+	if p.turnCancel != nil {
+		p.turnCancel()
+		p.turnCancel = nil
+	}
 	return wasActive
+}
+
+func (p *claudeProc) failTurn(err error) {
+	if p.finishTurn() {
+		select {
+		case p.results <- turnResult{err: err}:
+		default:
+		}
+	}
 }
 
 func (p *claudeProc) parentForAgent(agentID string) string {
@@ -310,26 +408,37 @@ func (p *claudeProc) isDead() bool {
 }
 
 func (p *claudeProc) shutdown() {
-
-	_ = p.stdin.Close()
-	select {
-	case <-p.dead:
-	case <-time.After(5 * time.Second):
-		p.kill()
-		<-p.dead
-	}
-	_ = p.cmd.Wait()
+	p.shutdownOnce.Do(func() {
+		_ = p.stdin.Close()
+		exited := make(chan struct{})
+		go func() {
+			_ = p.cmd.Wait()
+			close(exited)
+		}()
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+			p.kill()
+			<-exited
+		}
+	})
 }
 
 func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, r io.Reader) {
 	defer close(p.dead)
+	defer p.finishTurn()
 	stderr := p.session.agent.stderr
+	p.session.mu.Lock()
+	p.contextUsage.setModel(p.session.modelID)
+	allowBypass := p.session.allowBypass
+	p.session.mu.Unlock()
 	app := &approver{ctx: ctx, conn: conn, sid: sid, out: p.out, cwd: p.cwd, emitted: p.emitted, parentForAgent: p.parentForAgent,
-		askForm:   p.session.agent.supportsFormElicitation(),
-		applyMode: func(modeID string) { p.applyMode(ctx, conn, sid, modeID) }}
+		askForm:     p.session.agent.supportsFormElicitation(),
+		applyMode:   func(modeID string) { p.applyMode(ctx, conn, sid, modeID) },
+		allowBypass: allowBypass,
+		prePlanMode: p.session.currentPrePlanMode}
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	scanner := newCLIScanner(r)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -342,36 +451,117 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 		}
 		switch env.Type {
 		case "stream_event":
-			if env.ParentToolUseID != "" {
+			if env.ParentToolUseID != "" || env.ParentAgentID != "" {
 				continue
 			}
+			var event streamEvent
+			if json.Unmarshal(env.Event, &event) != nil {
+				continue
+			}
+			p.contextUsage.observeStream(event)
 			if err := emitStreamEvent(ctx, conn, sid, env.Event, p.streamedContent); err != nil {
-				fmt.Fprintf(stderr, "claude-acp: emit stream event: %v\n", err)
+				p.failTurn(fmt.Errorf("send stream event: %w", err))
+				return
+			} else {
+				p.markTurnOutput(event.Type == "content_block_delta" && event.Delta.Type == "text_delta" && event.Delta.Text != "",
+					event.ContentBlock.Type == "compaction" || event.Delta.Type == "compaction_delta")
 			}
 		case "assistant":
-			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools, p.emitted, p.streamedContent, p.plan, env.ParentToolUseID); err != nil {
-				fmt.Fprintf(stderr, "claude-acp: emit assistant: %v\n", err)
+			root := env.ParentToolUseID == "" && env.ParentAgentID == ""
+			var message cliMessage
+			if root && json.Unmarshal(env.Message, &message) == nil {
+				// The client owns the login UI; the CLI's TUI advice must not reach the chat.
+				if isSyntheticLoginMessage(message) {
+					if p.finishTurn() {
+						select {
+						case p.results <- turnResult{err: acp.NewAuthRequired(nil)}:
+						default:
+						}
+					}
+					continue
+				}
+				p.contextUsage.observeAssistant(message)
+			}
+			if err := emitAssistant(ctx, conn, sid, env.Message, p.cwd, p.tools, p.emitted, p.streamedContent, env.ParentToolUseID); err != nil {
+				p.failTurn(fmt.Errorf("send assistant: %w", err))
+				return
+			} else if root {
+				for _, block := range message.Content {
+					_, visible := stripMarkerTags(block.Text)
+					p.markTurnOutput(block.Type == "text" && visible, block.Type == "compaction")
+				}
 			}
 		case "user":
-			if err := emitToolResults(ctx, conn, sid, env.Message, p.tools, p.emitted, p.plan, env.ParentToolUseID); err != nil {
-				fmt.Fprintf(stderr, "claude-acp: emit tool result: %v\n", err)
+			if err := emitToolResults(ctx, conn, sid, env.Message, p.tools, p.emitted, env.ParentToolUseID); err != nil {
+				p.failTurn(fmt.Errorf("send tool result: %w", err))
+				return
 			}
 		case "tool_progress":
-			p.handleToolProgress(ctx, conn, sid, env)
+			if err := p.handleToolProgress(ctx, conn, sid, env); err != nil {
+				p.failTurn(fmt.Errorf("send tool progress: %w", err))
+				return
+			}
 		case "control_request":
 			var req controlRequest
 			if json.Unmarshal(line, &req) == nil {
-				go app.handle(req)
+				// Capture this turn before launching the dialog goroutine. A later
+				// turn must never inherit an earlier request's permission answer.
+				perTurn := *app
+				p.turnMu.Lock()
+				perTurn.ctx = p.turnCtx
+				p.turnMu.Unlock()
+				if perTurn.ctx == nil {
+					app.respondDeny(req.RequestID)
+					continue
+				}
+				go perTurn.handle(req)
 			}
 		case "result":
-			tr, usageUpd := resultToTurn(line)
-			p.finishTurn()
-			if usageUpd != nil {
-				_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: *usageUpd})
+			if env.ParentToolUseID != "" || env.ParentAgentID != "" {
+				continue
+			}
+			var result cliResult
+			if json.Unmarshal(line, &result) != nil {
+				continue
+			}
+			p.turnMu.Lock()
+			matches := p.turnActive && result.answers(p.turnID)
+			// Each root result has a trailing idle, which can arrive after
+			// the next prompt starts. It must not fail that new turn.
+			p.pendingResultIdles++
+			fallback := matches && p.turnCtx != nil && p.turnCtx.Err() == nil && !p.deliveredText && !p.deliveredCompaction
+			p.turnMu.Unlock()
+			if !matches {
+				continue
+			}
+			tr := resultToTurn(line)
+			if !p.finishTurn() {
+				continue
+			}
+			// Cached answers may arrive only in result, with no generated tokens.
+			if fallback && result.Subtype == "success" && tr.err == nil && tr.stop == acp.StopReasonEndTurn &&
+				(result.Usage == nil || result.Usage.OutputTokens == 0) {
+				if text, ok := stripMarkerTags(result.Result); ok {
+					if err := acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(text)); err != nil {
+						tr.err = fmt.Errorf("send result text: %w", err)
+					}
+				}
+			}
+			if usageUpd := p.contextUsage.resultUpdate(result, p.models); usageUpd != nil {
+				if err := acpcommon.Notify(ctx, conn, sid, *usageUpd); err != nil && tr.err == nil {
+					tr.err = fmt.Errorf("send usage: %w", err)
+				}
 			}
 			select {
 			case p.results <- tr:
 			default:
+			}
+		case "rate_limit_event":
+			if note := rateLimitNote(env); note != "" {
+				if err := acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(note)); err != nil {
+					p.failTurn(fmt.Errorf("send rate limit notice: %w", err))
+					return
+				}
 			}
 		case "system":
 			p.handleSystem(ctx, conn, sid, env)
@@ -382,15 +572,110 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 	}
 }
 
+// rateLimitNote skips the routine "allowed" heartbeat.
+func rateLimitNote(env cliEnvelope) string {
+	status := strings.TrimSpace(env.Status)
+	if status == "" || status == "allowed" {
+		return ""
+	}
+	note := "Rate limit " + status
+	if env.RateLimitType != "" {
+		note += " (" + strings.ReplaceAll(env.RateLimitType, "_", " ") + ")"
+	}
+	if resets := formatResetsAt(env.ResetsAt); resets != "" {
+		note += ", resets " + resets
+	}
+	return "*" + note + ".*\n\n"
+}
+
+func formatResetsAt(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case float64:
+		return time.Unix(int64(t), 0).Format(time.RFC3339)
+	}
+	return ""
+}
+
+// subagentParent falls back to tool_use_id when the task was never registered.
+func (p *claudeProc) subagentParent(taskID, toolUseID string) string {
+	if taskID != "" {
+		p.subagentMu.Lock()
+		id := p.subagentParents[taskID]
+		p.subagentMu.Unlock()
+		if id != "" {
+			return id
+		}
+	}
+	return toolUseID
+}
+
+func taskProgressNote(env cliEnvelope) string {
+	parts := make([]string, 0, 3)
+	if d := strings.TrimSpace(env.Description); d != "" {
+		parts = append(parts, d)
+	}
+	if t := strings.TrimSpace(env.SubagentType); t != "" {
+		parts = append(parts, "("+t+")")
+	}
+	if tool := strings.TrimSpace(env.LastToolName); tool != "" {
+		parts = append(parts, "— "+tool)
+	}
+	return strings.Join(parts, " ")
+}
+
+// reportLoadErrors surfaces system/init's mcp_server_errors and plugin_errors.
+func reportLoadErrors(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) {
+	var lines []string
+	for _, e := range env.MCPServerErrors {
+		lines = append(lines, fmt.Sprintf("- MCP server %q skipped (%s): %s", e.label(), e.Type, e.Message))
+	}
+	for _, e := range env.PluginErrors {
+		lines = append(lines, fmt.Sprintf("- Plugin %q failed to load (%s): %s", e.label(), e.Type, e.Message))
+	}
+	for _, s := range env.MCPServers {
+		if s.Status == "failed" {
+			lines = append(lines, fmt.Sprintf("- MCP server %q failed to connect", s.Name))
+		}
+	}
+	if len(lines) == 0 {
+		return
+	}
+	_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid,
+		Update: acp.UpdateAgentMessageText("Startup warnings:\n" + strings.Join(lines, "\n") + "\n\n")})
+}
+
 func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) {
 	switch env.Subtype {
-	case "conversation_reset":
-		if p.plan != nil {
-			p.plan.clear()
-			_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdatePlan()})
-		}
-
+	case "init":
+		p.contextUsage.setModel(env.Model)
+		reportLoadErrors(ctx, conn, sid, env)
 	case "session_state_changed":
+		if env.ParentToolUseID != "" || env.ParentAgentID != "" {
+			return
+		}
+		p.turnMu.Lock()
+		// Entering running ends the idle period before it: every idle the CLI
+		// owed earlier results has been sent. CLI 2.1.270+ reports one idle for
+		// several results after an interrupt or while background agents run, so
+		// leftover debt would otherwise absorb a later abandoned turn's idle.
+		if env.State == "running" && p.sessionState != "running" {
+			p.pendingResultIdles = 0
+		}
+		p.sessionState = env.State
+		p.turnMu.Unlock()
+		if env.State == "idle" {
+			p.turnMu.Lock()
+			skipped := p.pendingResultIdles > 0
+			if skipped {
+				p.pendingResultIdles--
+			}
+			p.turnMu.Unlock()
+			if skipped {
+				return
+			}
+		}
 		if env.State == "idle" && p.finishTurn() {
 			select {
 			case p.results <- turnResult{err: acp.NewInternalError("claude went idle without producing a result; partial output may be incomplete")}:
@@ -414,12 +699,15 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		if env.RefusalExplanation != "" {
 			message += "\n\n" + env.RefusalExplanation
 		}
-		_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdateAgentMessageText(message)})
+		_ = acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(message))
 		if env.Direction != "revert" {
 			p.applyFallbackModel(ctx, conn, sid, env.FallbackModel)
 		}
 
 	case "status":
+		if env.ParentToolUseID != "" || env.ParentAgentID != "" {
+			return
+		}
 		var text string
 		switch {
 		case env.Status == "compacting":
@@ -430,13 +718,43 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 			text = "Compacting failed.\n\n"
 		}
 		if text != "" {
-			_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdateAgentMessageText(text)})
+			p.markTurnOutput(false, true)
+			_ = acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(text))
 		}
+
+	case "compact_boundary":
+		if env.ParentToolUseID != "" || env.ParentAgentID != "" {
+			return
+		}
+		p.markTurnOutput(false, true)
+		var postTokens *int
+		if env.CompactMetadata != nil {
+			postTokens = env.CompactMetadata.PostTokens
+		}
+		p.contextUsage.compact(postTokens)
+		if update := p.contextUsage.update(0); update != nil {
+			_ = acpcommon.Notify(ctx, conn, sid, *update)
+		}
+
+	case "informational":
+		var content string
+		if json.Unmarshal(env.Content, &content) != nil || strings.TrimSpace(content) == "" {
+			return
+		}
+		text := content
+		if env.Level != "" && env.Level != "info" {
+			text = "**" + strings.ToUpper(env.Level[:1]) + env.Level[1:] + ":** " + content
+		}
+		update := acp.UpdateAgentMessageText(text)
+		update.AgentMessageChunk.Meta = map[string]any{"claudeCode": map[string]any{"kind": "informational", "level": env.Level}}
+		p.markTurnOutput(true, false)
+		_ = acpcommon.Notify(ctx, conn, sid, update)
 
 	case "local_command_output":
 		var out string
 		if json.Unmarshal(env.Content, &out) == nil && strings.TrimSpace(out) != "" {
-			_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdateAgentMessageText(out)})
+			p.markTurnOutput(true, false)
+			_ = acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(out))
 		}
 
 	case "permission_denied":
@@ -444,7 +762,7 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		if !p.emitted.has(toolCallID) {
 			toolCallID = env.ParentToolUseID
 		}
-		if p.emitted.has(toolCallID) {
+		if p.emitted.complete(toolCallID) {
 			msg := "Permission denied"
 			var detail string
 			if json.Unmarshal(env.Message, &detail) == nil && detail != "" {
@@ -457,31 +775,104 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		}
 
 	case "task_started":
-		if env.TaskID != "" && env.ToolUseID != "" {
+		if env.TaskID != "" && env.ToolUseID != "" && p.tools[env.ToolUseID] != "Monitor" && env.TaskType != "local_monitor" {
 			p.subagentMu.Lock()
 			p.subagentParents[env.TaskID] = env.ToolUseID
+			p.setTaskBackgroundedLocked(env.TaskID, env.IsBackgrounded)
 			p.subagentMu.Unlock()
 		}
+	case "task_progress":
+		if toolCallID := p.subagentParent(env.TaskID, env.ToolUseID); p.canReportTask(toolCallID, env.TaskType) {
+			if note := taskProgressNote(env); note != "" {
+				_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdateToolCall(acp.ToolCallId(toolCallID),
+					acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(note))}),
+				)})
+			}
+		}
+
 	case "task_notification":
+		if toolCallID := p.subagentParent(env.TaskID, env.ToolUseID); p.canReportTask(toolCallID, env.TaskType) && strings.TrimSpace(env.Summary) != "" {
+			_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdateToolCall(acp.ToolCallId(toolCallID),
+				acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(strings.TrimSpace(env.Summary)))}),
+			)})
+		}
 		p.subagentMu.Lock()
 		delete(p.subagentParents, env.TaskID)
+		delete(p.backgroundTasks, env.TaskID)
 		p.subagentMu.Unlock()
 	case "task_updated":
+		p.subagentMu.Lock()
 		if env.Patch.Status == "completed" || env.Patch.Status == "failed" || env.Patch.Status == "killed" {
-			p.subagentMu.Lock()
 			delete(p.subagentParents, env.TaskID)
-			p.subagentMu.Unlock()
+			delete(p.backgroundTasks, env.TaskID)
+		} else if env.Patch.IsBackgrounded != nil {
+			p.setTaskBackgroundedLocked(env.TaskID, *env.Patch.IsBackgrounded)
 		}
+		p.subagentMu.Unlock()
 	}
 }
 
-func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) {
+func (p *claudeProc) setTaskBackgroundedLocked(taskID string, backgrounded bool) {
+	if !backgrounded {
+		delete(p.backgroundTasks, taskID)
+		return
+	}
+	if p.backgroundTasks == nil {
+		p.backgroundTasks = map[string]bool{}
+	}
+	p.backgroundTasks[taskID] = true
+}
+
+// runsInBackground reports whether a live background subagent was started by
+// the Agent call agentToolUseID. A cancel leaves such a subagent running.
+func (p *claudeProc) runsInBackground(agentToolUseID string) bool {
+	p.subagentMu.Lock()
+	defer p.subagentMu.Unlock()
+	for taskID, parent := range p.subagentParents {
+		if parent == agentToolUseID && p.backgroundTasks[taskID] {
+			return true
+		}
+	}
+	return false
+}
+
+// closeCancelledToolCalls ends the tool calls a cancelled turn left without a
+// result. The interrupt reports root tools' results in the stream, but a
+// subagent's interrupted result is written only to its own transcript, and a
+// dead or dropped process reports nothing. While the process lives, calls of
+// a background subagent stay open because that subagent keeps running.
+func (p *claudeProc) closeCancelledToolCalls(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, keepBackground bool) {
+	// A result can win the select even when EOF is already ready. Session
+	// close also makes the process unavailable before its reader reports EOF.
+	keepBackground = keepBackground && !p.isDead() && (p.session == nil || !p.session.isClosed())
+	// session/cancel also cancels the prompt request's context. These reports
+	// belong to that turn and must still reach the client before its response;
+	// Notify bounds each write.
+	ctx = context.WithoutCancel(ctx)
+	closed := p.emitted.closeOpen(func(call openToolCall) bool {
+		return keepBackground && call.parentToolUseID != "" && p.runsInBackground(call.parentToolUseID)
+	})
+	for _, call := range closed {
+		u := acp.UpdateToolCall(acp.ToolCallId(call.id),
+			acp.WithUpdateStatus(acp.ToolCallStatusFailed),
+			acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock("The turn was cancelled before this tool call returned a result."))}),
+		)
+		withClaudeToolMeta(&u, call.name, call.parentToolUseID)
+		_ = acpcommon.Notify(ctx, conn, sid, u)
+	}
+}
+
+func (p *claudeProc) canReportTask(toolCallID, taskType string) bool {
+	return p.emitted.has(toolCallID) && p.tools[toolCallID] != "Monitor" && taskType != "local_monitor"
+}
+
+func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) error {
 	toolCallID := env.ToolUseID
 	if !p.emitted.has(toolCallID) {
 		toolCallID = env.ParentToolUseID
 	}
 	if !p.emitted.has(toolCallID) {
-		return
+		return nil
 	}
 	name := env.ToolName
 	if name == "" {
@@ -498,7 +889,7 @@ func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acp.AgentSide
 	if update.ToolCallUpdate != nil {
 		update.ToolCallUpdate.Meta = map[string]any{"claudeCode": claudeMeta}
 	}
-	_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: update})
+	return acpcommon.Notify(ctx, conn, sid, update)
 }
 
 func (p *claudeProc) applyFallbackModel(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, fallback string) {
@@ -510,20 +901,17 @@ func (p *claudeProc) applyFallbackModel(ctx context.Context, conn *acp.AgentSide
 	p.session.mu.Lock()
 	p.session.modelID = modelID
 	p.session.modelOverride = false
-	if m := findModel(p.models, modelID); m != nil && !isValidEffort(m, p.session.effort) {
+	if m := findModel(p.models, modelID); m != nil && !acpcommon.IsValidEffort(m.EffortLevels, p.session.effort) {
 		p.session.effort = "default"
 	}
 	p.sig = p.session.spawnSigLocked()
 	effort := p.session.effort
 	p.session.mu.Unlock()
 
-	_ = conn.SessionUpdate(ctx, acp.SessionNotification{
-		SessionId: sid,
-		Update: acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
-			SessionUpdate: "config_option_update",
-			ConfigOptions: buildConfigOptions(p.models, modelID, effort),
-		}},
-	})
+	_ = acpcommon.Notify(ctx, conn, sid, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
+		SessionUpdate: "config_option_update",
+		ConfigOptions: buildConfigOptions(p.models, modelID, effort),
+	}})
 }
 
 func (p *claudeProc) applyMode(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, modeID string) {
@@ -532,32 +920,55 @@ func (p *claudeProc) applyMode(ctx context.Context, conn *acp.AgentSideConnectio
 	}
 	p.session.mu.Lock()
 	changed := p.session.mode != modeID
-	p.session.mode = modeID
+	p.session.setModeLocked(modeID)
 	p.sig = p.session.spawnSigLocked()
 	p.session.mu.Unlock()
 	if !changed {
 		return
 	}
-	_ = conn.SessionUpdate(ctx, acp.SessionNotification{
-		SessionId: sid,
-		Update: acp.SessionUpdate{CurrentModeUpdate: &acp.SessionCurrentModeUpdate{
-			SessionUpdate: "current_mode_update",
-			CurrentModeId: acp.SessionModeId(modeID),
-		}},
-	})
+	_ = acpcommon.Notify(ctx, conn, sid, acp.SessionUpdate{CurrentModeUpdate: &acp.SessionCurrentModeUpdate{
+		SessionUpdate: "current_mode_update",
+		CurrentModeId: acp.SessionModeId(modeID),
+	}})
 }
 
-func resultToTurn(line []byte) (turnResult, *acp.SessionUpdate) {
+// A reply to merged user messages lists each of them in user_message_uuids.
+func (r cliResult) answers(turnID string) bool {
+	if r.UserMessageUUIDs != nil {
+		return slices.Contains(r.UserMessageUUIDs, turnID)
+	}
+	if r.UserMessageUUID != "" {
+		return r.UserMessageUUID == turnID
+	}
+	return !r.autonomous()
+}
+
+func (r cliResult) autonomous() bool {
+	if r.Origin != nil {
+		switch r.Origin.Kind {
+		case "task-notification", "peer", "coordinator", "observer", "observer-activity":
+			return true
+		}
+	}
+	return false
+}
+
+func isSyntheticLoginMessage(m cliMessage) bool {
+	return m.Model == "<synthetic>" && len(m.Content) == 1 && m.Content[0].Type == "text" &&
+		strings.Contains(m.Content[0].Text, "Please run /login")
+}
+
+func resultToTurn(line []byte) turnResult {
 	var r cliResult
 	_ = json.Unmarshal(line, &r)
 
 	tr := resultOutcome(r)
 	tr.usage = resultUsage(r)
-	return tr, usageUpdate(r, tr.usage)
+	return tr
 }
 
 func resultOutcome(r cliResult) turnResult {
-	if strings.Contains(r.Result, "Please run /login") {
+	if r.IsError && strings.Contains(r.Result, "Please run /login") {
 		return turnResult{err: acp.NewAuthRequired(nil)}
 	}
 	switch r.Subtype {
@@ -600,26 +1011,6 @@ func resultUsage(r cliResult) *acp.Usage {
 	}
 }
 
-func usageUpdate(r cliResult, usage *acp.Usage) *acp.SessionUpdate {
-	if usage == nil {
-		return nil
-	}
-	size := 0
-	for _, mu := range r.ModelUsage {
-		if mu.ContextWindow > size {
-			size = mu.ContextWindow
-		}
-	}
-	if size == 0 {
-		return nil
-	}
-	upd := &acp.SessionUsageUpdate{SessionUpdate: "usage_update", Used: usage.TotalTokens, Size: size}
-	if r.TotalCostUSD > 0 {
-		upd.Cost = &acp.Cost{Amount: r.TotalCostUSD, Currency: "USD"}
-	}
-	return &acp.SessionUpdate{UsageUpdate: upd}
-}
-
 func resultErrMessage(r cliResult) string {
 	if msg := strings.Join(r.Errors, ", "); msg != "" {
 		return msg
@@ -633,7 +1024,7 @@ func resultErrMessage(r cliResult) string {
 func interruptRequest() controlInterrupt {
 	return controlInterrupt{
 		Type:      "control_request",
-		RequestID: newUUID(),
+		RequestID: uuid.NewString(),
 		Request:   controlInterruptBody{Subtype: "interrupt"},
 	}
 }
@@ -656,14 +1047,17 @@ func (s *streamWriter) writeJSON(v any) error {
 
 func (s *session) cliArgsLocked() []string {
 
-	args := []string{
+	args := append(slices.Clone(s.agent.args),
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
 		"--permission-prompt-tool", "stdio",
-
-		"--settings", `{"disableRemoteControl":true}`,
+	)
+	// ExitPlanMode can switch the running process to bypass only when the
+	// capability was enabled at startup. This does not select bypass mode.
+	if s.allowBypass {
+		args = append(args, "--allow-dangerously-skip-permissions")
 	}
 	switch {
 	case s.started:
@@ -702,22 +1096,60 @@ func (s *session) cliArgsLocked() []string {
 func promptMessage(blocks []acp.ContentBlock) cliInput {
 	in := cliInput{Type: "user", Message: cliInputMessage{Role: "user"}}
 	add := func(c cliInputContent) { in.Message.Content = append(in.Message.Content, c) }
+	var contextBlocks []cliInputContent
 	for _, b := range blocks {
 		switch {
 		case b.Text != nil:
 			add(cliInputContent{Type: "text", Text: b.Text.Text})
-		case b.Image != nil && b.Image.Data != "":
-			add(cliInputContent{Type: "image", Source: &cliImageSource{
-				Type:      "base64",
-				MediaType: b.Image.MimeType,
-				Data:      b.Image.Data,
-			}})
+		case b.Image != nil:
+			switch {
+			case b.Image.Data != "":
+				add(cliInputContent{Type: "image", Source: &cliInputImageSource{
+					Type:      "base64",
+					MediaType: b.Image.MimeType,
+					Data:      b.Image.Data,
+				}})
+			case b.Image.Uri != nil && (strings.HasPrefix(*b.Image.Uri, "http://") || strings.HasPrefix(*b.Image.Uri, "https://")):
+				add(cliInputContent{Type: "image", Source: &cliInputImageSource{Type: "url", URL: *b.Image.Uri}})
+			}
 		case b.ResourceLink != nil:
-			add(cliInputContent{Type: "text", Text: fmt.Sprintf("[@%s](%s)", b.ResourceLink.Name, b.ResourceLink.Uri)})
-		case b.Resource != nil && b.Resource.Resource.TextResourceContents != nil:
-			r := b.Resource.Resource.TextResourceContents
-			add(cliInputContent{Type: "text", Text: fmt.Sprintf("\n<context ref=%q>\n%s\n</context>", r.Uri, r.Text)})
+			add(cliInputContent{Type: "text", Text: formatResourceLink(b.ResourceLink.Name, b.ResourceLink.Uri)})
+		case b.Resource != nil:
+			resource := b.Resource.Resource
+			switch {
+			case resource.TextResourceContents != nil:
+				r := resource.TextResourceContents
+				add(cliInputContent{Type: "text", Text: formatResourceLink("", r.Uri)})
+				contextBlocks = append(contextBlocks, cliInputContent{Type: "text", Text: fmt.Sprintf("\n<context ref=%q>\n%s\n</context>", r.Uri, r.Text)})
+			case resource.BlobResourceContents != nil:
+				r := resource.BlobResourceContents
+				mimeType := "application/octet-stream"
+				if r.MimeType != nil && *r.MimeType != "" {
+					mimeType = *r.MimeType
+				}
+				if strings.HasPrefix(strings.ToLower(mimeType), "image/") && r.Blob != "" {
+					add(cliInputContent{Type: "image", Source: &cliInputImageSource{
+						Type: "base64", MediaType: mimeType, Data: r.Blob,
+					}})
+					break
+				}
+				add(cliInputContent{Type: "text", Text: formatResourceLink("", r.Uri)})
+				contextBlocks = append(contextBlocks, cliInputContent{Type: "text", Text: fmt.Sprintf(
+					"\n<context ref=%q mimeType=%q encoding=%q>\n%s\n</context>", r.Uri, mimeType, "base64", r.Blob,
+				)})
+			}
 		}
 	}
+	in.Message.Content = append(in.Message.Content, contextBlocks...)
 	return in
+}
+
+func formatResourceLink(name, uri string) string {
+	if name != "" {
+		return fmt.Sprintf("[@%s](%s)", name, uri)
+	}
+	if path, ok := strings.CutPrefix(uri, "file://"); ok {
+		return fmt.Sprintf("[@%s](%s)", filepath.Base(path), uri)
+	}
+	return uri
 }

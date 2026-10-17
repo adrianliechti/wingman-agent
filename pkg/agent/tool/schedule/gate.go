@@ -1,11 +1,13 @@
 package schedule
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 )
@@ -18,20 +20,37 @@ const (
 // RunGate executes a task's pre-check script. It reports whether the agent
 // should be woken; on script failure it fails open so the agent can fix it,
 // and returns the error so the scheduler can back off repeat failures.
-func RunGate(ctx context.Context, dir, script string) (bool, string, error) {
+func RunGate(ctx context.Context, dir, script string, options ...*Options) (bool, string, error) {
+	var opts *Options
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	if err := approveScript(ctx, dir, script, opts); err != nil {
+		return gateFailure(err)
+	}
+	return runGate(ctx, dir, script, opts)
+}
+
+func runGate(ctx context.Context, dir, script string, opts *Options) (bool, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, gateTimeout)
 	defer cancel()
 
-	cmd, err := shell.Command(ctx, script, dir)
+	var shellOpts *shell.Options
+	workspace := dir
+	if opts != nil {
+		shellOpts = opts.Shell
+		workspace = cmp.Or(opts.WorkDir, dir)
+	}
+	var out gateOutput
+	cmd, err := shell.ToolCommand(ctx, script, workspace, dir, shellOpts)
 	if err != nil {
 		return true, fmt.Sprintf("pre-check script failed (%v); fix the script or remove it from the task.", err), err
 	}
-	out, err := cmd.CombinedOutput()
+	// os/exec serializes writes when stdout and stderr share a writer.
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err = cmd.Run()
 
-	output := strings.TrimSpace(string(out))
-	if len(output) > gateMaxOutput {
-		output = output[:gateMaxOutput] + "\n[output truncated]"
-	}
+	output := out.String()
 
 	if err != nil {
 		return true, fmt.Sprintf("pre-check script failed (%v); fix the script or remove it from the task.\n%s", err, output), err
@@ -47,6 +66,40 @@ func RunGate(ctx context.Context, dir, script string) (bool, string, error) {
 	}
 
 	return true, output, nil
+}
+
+// Retain the tail so the final JSON wake decision survives verbose scripts.
+type gateOutput struct {
+	data      []byte
+	truncated bool
+}
+
+func (b *gateOutput) Write(p []byte) (int, error) {
+	n := len(p)
+	if n >= gateMaxOutput {
+		b.data = append(b.data[:0], p[n-gateMaxOutput:]...)
+		b.truncated = true
+	} else {
+		if excess := len(b.data) + n - gateMaxOutput; excess > 0 {
+			b.data = b.data[excess:]
+			b.truncated = true
+		}
+		b.data = append(b.data, p...)
+	}
+	return n, nil
+}
+func (b *gateOutput) String() string {
+	data := b.data
+	if b.truncated {
+		for len(data) > 0 && !utf8.RuneStart(data[0]) {
+			data = data[1:]
+		}
+	}
+	text := strings.TrimSpace(string(data))
+	if b.truncated {
+		return "[earlier output truncated]\n" + text
+	}
+	return text
 }
 
 func parseGateOutput(s string) (bool, bool) {

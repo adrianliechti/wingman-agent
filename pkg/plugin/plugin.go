@@ -76,7 +76,7 @@ func discover(root, dataRoot string, plugins []Plugin, diagnostics []Diagnostic,
 
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if info, err := os.Stat(filepath.Join(root, entry.Name())); err == nil && info.IsDir() {
 			names = append(names, entry.Name())
 		}
 	}
@@ -222,6 +222,9 @@ func loadSkills(root, name string) ([]skill.Skill, []string) {
 		if loadErr != nil {
 			notes = append(notes, fmt.Sprintf("skipping skill %q: %v", entry.Name(), loadErr))
 			continue
+		}
+		if msg := skill.DirectoryMismatchWarning(sk.Name, entry.Name()); msg != "" {
+			notes = append(notes, msg)
 		}
 		if !sk.Portable() {
 			notes = append(notes, fmt.Sprintf("skipping skill %q: plugin skills must use portable Agent Skills frontmatter", entry.Name()))

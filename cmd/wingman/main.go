@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
 func fatal(err error) {
@@ -14,8 +16,19 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
+func startManagedToolUpdate(ctx context.Context, workspace *code.Workspace) func() {
+	update := workspace.StartManagedToolsUpdate(ctx, code.ManagedLSPTools)
+	go func() {
+		_, updateErr := update.Wait()
+		if updateErr != nil {
+			fmt.Fprintf(os.Stderr, "Managed tools warning: %v\n", updateErr)
+		}
+	}()
+	return update.Cancel
+}
+
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), shutdownSignals()...)
 	defer cancel()
 
 	args := os.Args[1:]
@@ -34,10 +47,18 @@ func main() {
 		}
 	case "server":
 		runServer(ctx, args[1:])
+	case "relay":
+		runRelay(ctx, args[1:])
 	case "acp":
 		runACP(ctx, args[1:])
 	case "run":
 		runRun(ctx, args[1:])
+	case "mcp":
+		runMCP(ctx, args[1:])
+	case "extract":
+		if err := runExtract(ctx, args[1:]); err != nil {
+			fatal(err)
+		}
 	default:
 		if !strings.HasPrefix(args[0], "-") {
 			fatal(fmt.Errorf("unknown command %q (run 'wingman --help' for usage)", args[0]))
@@ -62,6 +83,7 @@ func parseTUIArgs(args []string) (tuiOptions, error) {
 	fs.String(&opts.Agent, "--agent, -a name", "use wingman or any detected/configured agent")
 	fs.Bool(&latest, "--continue, -c", "resume the agent's latest session")
 	fs.String(&opts.SessionID, "--resume, -r ID", "resume the specified session")
+	fs.Bool(&opts.Fork, "--fork", "continue in a copy of the resumed session")
 
 	if err := fs.Parse(args); err != nil {
 		return tuiOptions{}, err
@@ -69,6 +91,10 @@ func parseTUIArgs(args []string) (tuiOptions, error) {
 
 	if latest && opts.SessionID == "" {
 		opts.SessionID = "latest"
+	}
+
+	if opts.Fork && opts.SessionID == "" {
+		return tuiOptions{}, fmt.Errorf("--fork requires --continue or --resume")
 	}
 
 	return opts, nil
@@ -82,17 +108,21 @@ Usage:
   wingman exec [flags] [PROMPT] Run non-interactively (alias: e)
   wingman exec resume [ID]      Resume a non-interactive session
   wingman server [flags]        Run the web UI server
+  wingman relay [flags]         Run a relay for remote web access
   wingman acp [target] [flags]  Run as an ACP stdio server (wingman | claude | codex | pi)
   wingman run <target> [args]   Run an external agent through wingman
+  wingman mcp <command>         Manage MCP servers (list, get, add, remove, login, logout)
+  wingman extract <path>        Extract text from a document (PDF, DOCX, XLSX, PPTX, ...)
 
 Run targets:
   claude, claude-desktop, codex, copilot, gemini, goose, junie, opencode, pi
 
 TUI flags:
-  --agent, -a name  Use wingman or any detected/configured agent (default: wingman)
-  --continue, -c    Resume the agent's latest session
-  --resume, -r ID   Resume the specified session
-  --help, -h        Show this help
+  --agent, -a name     Use wingman or any detected/configured agent (default: wingman)
+  --continue, -c       Resume the agent's latest session
+  --resume, -r ID      Resume the specified session
+  --fork               Continue in a copy of the resumed session
+  --help, -h           Show this help
 
 Exec flags:
   --json                        Return the final response as a JSON object
@@ -103,6 +133,16 @@ Exec flags:
   --effort LEVEL                Override the reasoning effort for this session
   --agent, -a NAME              Use wingman or any detected/configured agent
   --cd, -C PATH                 Set the workspace root
+
+Server flags:
+  --port N                      Local port (default: 9000)
+  --no-browser                  Do not open a browser on startup
+  --remote URL                  Connect through a Wingman relay
+  --remote-token TOKEN          Relay registration token
+
+Relay flags:
+  --port N                      HTTP port behind a gateway (default: 8080)
+  --token TOKEN                 Required registration token (or WINGMAN_RELAY_TOKEN)
 
 Resume:
   wingman exec resume --last [PROMPT]

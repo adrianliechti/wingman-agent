@@ -23,20 +23,20 @@ func newStreamTestApp(messages []agent.Message) (*App, *uiTestAgent) {
 func TestSyncMessagesReconcilesNativeCommittedStream(t *testing.T) {
 	a, testAgent := newStreamTestApp(nil)
 	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		Reasoning: &agent.Reasoning{ID: "reason-1", Summary: "planning the edit"},
+		Reasoning: &agent.Reasoning{ID: "reason-1", Summary: "**Planning the edit**\nprivate details"},
 	}}})
 	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
 		Text: "Let me inspect the file.",
 	}}})
 
 	testAgent.messages = append(testAgent.messages, agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
-		{Reasoning: &agent.Reasoning{ID: "reason-1", Summary: "planning the edit"}},
+		{Reasoning: &agent.Reasoning{ID: "reason-1", Summary: "**Planning the edit**\nprivate details"}},
 		{Text: "Let me inspect the file."},
 		{ToolCall: &agent.ToolCall{ID: "call-1", Name: "read", Args: `{"path":"main.go"}`}},
 	}})
 	a.syncMessages()
 
-	if tail := ansi.Strip(strings.Join(a.streamCells(100), "\n")); strings.Contains(tail, "planning the edit") || strings.Contains(tail, "Let me inspect the file.") {
+	if tail := ansi.Strip(strings.Join(a.streamCells(100), "\n")); strings.Contains(tail, "Planning the edit") || strings.Contains(tail, "Let me inspect the file.") {
 		t.Fatalf("committed response remained in live tail: %q", tail)
 	}
 
@@ -52,8 +52,11 @@ func TestSyncMessagesReconcilesNativeCommittedStream(t *testing.T) {
 	if count := strings.Count(out, "Let me inspect the file."); count != 1 {
 		t.Fatalf("assistant response rendered %d times: %q", count, out)
 	}
-	if count := strings.Count(out, "planning the edit"); count != 1 {
+	if count := strings.Count(out, "Planning the edit"); count != 1 {
 		t.Fatalf("reasoning rendered %d times: %q", count, out)
+	}
+	if strings.Contains(out, "private details") {
+		t.Fatalf("normal chat exposed full reasoning: %q", out)
 	}
 	if textAt, toolAt := strings.Index(out, "Let me inspect the file."), strings.Index(out, "main.go"); textAt < 0 || toolAt <= textAt {
 		t.Fatalf("tool result is not after its response: %q", out)
@@ -211,6 +214,30 @@ func TestCommittedTextReconcilesByMessageID(t *testing.T) {
 	out := ansi.Strip(strings.Join(a.chatViewLines(100), "\n"))
 	if strings.Contains(out, "partial rendering") || strings.Count(out, "authoritative retained text") != 1 {
 		t.Fatalf("stable text ID did not reconcile live and retained content: %q", out)
+	}
+}
+
+func TestRefusalRendersOnceAfterCommit(t *testing.T) {
+	a, testAgent := newStreamTestApp(nil)
+	message := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
+		Refusal: "I cannot help with that.", TextID: "refusal-1",
+	}}}
+	a.handleStreamMessage(message)
+	if got := a.streamCurrent.text; got != "I cannot help with that." {
+		t.Fatalf("live refusal = %q", got)
+	}
+	testAgent.messages = append(testAgent.messages, message)
+	a.syncMessages()
+	if out := ansi.Strip(strings.Join(a.chatViewLines(100), "\n")); strings.Count(out, "I cannot help with that.") != 1 {
+		t.Fatalf("committed refusal should replace the live text: %q", out)
+	}
+	inspector := &transcriptOverlay{app: a, selected: -1, expanded: map[string]bool{}, cache: map[string]transcriptCache{}}
+	inspector.buildEntries()
+	if len(inspector.entries) != 1 {
+		t.Fatalf("refusal produced %d transcript entries", len(inspector.entries))
+	}
+	if out := ansi.Strip(strings.Join(inspector.entryLines(inspector.entries[0], 100, false), "\n")); !strings.Contains(out, "I cannot help with that.") {
+		t.Fatalf("transcript omitted refusal: %q", out)
 	}
 }
 

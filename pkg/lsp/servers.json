@@ -1,0 +1,35 @@
+[
+  {
+    "name": "typescript", "label": "TypeScript",
+    "markers": ["tsconfig.json", "jsconfig.json", "package.json", "package-lock.json", "bun.lock", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"],
+    "excludes": ["deno.json", "deno.jsonc"],
+    "servers": [
+      {"name": "typescript-go", "command": "tsc", "args": ["--lsp", "--stdio"], "languages": ["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"], "language_id": "typescript", "minimum_major_version": 7},
+      {"name": "typescript-language-server", "command": "typescript-language-server", "args": ["--stdio"], "languages": ["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"], "language_id": "typescript"}
+    ]
+  },
+  {
+    "name": "go", "markers": ["go.mod", "go.work", "go.sum"],
+    "servers": [{"name": "gopls", "command": "gopls", "args": ["serve"], "languages": ["go"], "language_id": "go"}]
+  },
+  {
+    "name": "rust", "markers": ["Cargo.toml", "Cargo.lock"],
+    "servers": [{"name": "rust-analyzer", "command": "rust-analyzer", "args": [], "languages": ["rs"], "language_id": "rust", "minimum_major_version": -1}]
+  },
+  {
+    "name": "python", "markers": ["pyproject.toml", "ty.toml", "setup.py", "requirements.txt", "Pipfile", "setup.cfg"],
+    "servers": [{"name": "ty", "command": "ty", "args": ["server"], "languages": ["py", "pyi"], "language_id": "python"}]
+  },
+  {
+    "name": "cpp", "label": "C/C++", "markers": ["compile_commands.json", "compile_flags.txt", ".clangd", "CMakeLists.txt", "meson.build"],
+    "servers": [{"name": "clangd", "command": "clangd", "languages": ["c", "h", "cc", "hh", "cpp", "hpp", "cxx", "hxx", "c++", "h++", "ipp", "tpp"], "language_id": "cpp"}]
+  },
+  {
+    "name": "java", "markers": ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", ".project", ".classpath"],
+    "servers": [{"name": "jdtls", "command": "jdtls", "args": [], "languages": ["java"], "language_id": "java"}]
+  },
+  {
+    "name": "csharp", "label": "C#", "markers": ["*.csproj", "*.sln", "*.slnx", "global.json"],
+    "servers": [{"name": "csharp-ls", "command": "csharp-ls", "args": [], "languages": ["cs"], "language_id": "csharp"}]
+  }
+]

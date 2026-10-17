@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"io/fs"
+	"slices"
 	"strings"
 	"sync"
 	"text/template"
@@ -20,6 +21,10 @@ var modePlan string
 //go:embed mode_unattended.txt
 var modeUnattended string
 
+// Model variants adapt captured CLI requests to Wingman's tools and shared
+// session context. See README.md for versions, retained catalog baselines,
+// capture limitations, and intentional harness differences.
+//
 //go:embed models
 var modelFS embed.FS
 
@@ -79,11 +84,14 @@ func loadVariants() map[string]Variant {
 }
 
 func VariantFor(id string) Variant {
-	id = model.Normalize(id)
+	id = model.Normalize(model.CanonicalID(id))
+	if _, suffix, ok := strings.Cut(id, "/"); ok {
+		id = suffix
+	}
 
 	match := ""
 	for prefix := range variants {
-		if (id == prefix || strings.HasPrefix(id, prefix+"-")) && len(prefix) > len(match) {
+		if hasVariantPrefix(id, prefix) && len(prefix) > len(match) {
 			match = prefix
 		}
 	}
@@ -93,6 +101,18 @@ func VariantFor(id string) Variant {
 	}
 
 	return Variant{Agent: modeAgent, Plan: modePlan, Unattended: modeUnattended}
+}
+
+func hasVariantPrefix(id, prefix string) bool {
+	if id == prefix {
+		return true
+	}
+	if !strings.HasPrefix(id, prefix) || len(id) == len(prefix) {
+		return false
+	}
+
+	next := id[len(prefix)]
+	return next == '-' || next >= '0' && next <= '9'
 }
 
 //go:embed section_environment.txt
@@ -106,6 +126,18 @@ var sectionSkills string
 
 //go:embed section_project.txt
 var sectionProject string
+
+//go:embed section_code_intelligence.txt
+var sectionCodeIntelligence string
+
+//go:embed section_runtime.txt
+var sectionRuntime string
+
+//go:embed section_delegation.txt
+var sectionDelegation string
+
+//go:embed section_web.txt
+var sectionWeb string
 
 const BoundaryMarker = "--- session context ---"
 
@@ -126,7 +158,13 @@ var staticTemplates = []namedTemplate{tmplProject, tmplSkills, tmplMemory}
 var dynamicTemplates = []namedTemplate{tmplEnvironment}
 
 type SectionData struct {
-	Model               model.Model
+	Model model.Model
+	// ToolNames is the exposed catalog after configuration, mode, and role
+	// filtering. Optional tool guidance is omitted when its tools are absent.
+	ToolNames []string
+	// ModeInstructions follows shared tool guidance so Plan and unattended
+	// restrictions retain precedence over the model's implementation defaults.
+	ModeInstructions    string
 	PlanMode            bool
 	UnattendedMode      bool
 	Date                string
@@ -139,6 +177,15 @@ type SectionData struct {
 	MemoryContent       string
 	Skills              string
 	ProjectInstructions string
+}
+
+func (d SectionData) HasTools(names ...string) bool {
+	for _, name := range names {
+		if !slices.Contains(d.ToolNames, name) {
+			return false
+		}
+	}
+	return true
 }
 
 type Section struct {
@@ -165,12 +212,39 @@ func renderSections(templates []namedTemplate, data SectionData) []Section {
 }
 
 func BuildAgentContext(data SectionData) string {
-	return composeSections(renderSections([]namedTemplate{tmplProject, tmplEnvironment}, data))
+	sections := sharedRuntimeSections(data)
+	sections = append(sections, renderSections([]namedTemplate{tmplProject, tmplEnvironment}, data)...)
+	sections = append(sections, Section{Content: renderBase(data.ModeInstructions, data)})
+	return composeSections(sections)
+}
+
+func sharedRuntimeSections(data SectionData) []Section {
+	return []Section{
+		{Title: "Wingman runtime", Content: renderBase(sectionRuntime, data)},
+		{Title: "Code intelligence", Content: renderBase(sectionCodeIntelligence, data)},
+		{Title: "Web research", Content: renderBase(sectionWeb, data)},
+		{Title: "Delegation", Content: renderBase(sectionDelegation, data)},
+	}
+}
+
+// BuildBaseInstructions composes model behavior, shared runtime policy, and
+// mode restrictions. Mutable session context is appended separately to history.
+func BuildBaseInstructions(base string, data SectionData) string {
+	sections := []Section{{Content: renderBase(base, data)}}
+	sections = append(sections, sharedRuntimeSections(data)...)
+	sections = append(sections, Section{Content: renderBase(data.ModeInstructions, data)})
+	return composeSections(sections)
+}
+
+func BuildSessionContext(data SectionData) string {
+	sections := renderSections(staticTemplates, data)
+	sections = append(sections, renderSections(dynamicTemplates, data)...)
+	return composeSections(sections)
 }
 
 func BuildInstructions(base string, data SectionData) string {
 	var staticParts []Section
-	staticParts = append(staticParts, Section{Content: renderBase(base, data)})
+	staticParts = append(staticParts, Section{Content: BuildBaseInstructions(base, data)})
 	staticParts = append(staticParts, renderSections(staticTemplates, data)...)
 
 	dynamicParts := renderSections(dynamicTemplates, data)

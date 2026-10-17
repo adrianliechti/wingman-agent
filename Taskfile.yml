@@ -4,13 +4,56 @@ version: "3"
 
 dotenv: [".env"]
 
+vars:
+  IMAGE_REPOSITORY: ghcr.io/adrianliechti/wingman-agent
+  IMAGE_STACKS:
+    sh: find docker -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort
+
 tasks:
+  image:build:
+    desc: Build every worker stack for the local Docker Engine
+    cmds:
+      - for:
+          var: IMAGE_STACKS
+        task: image:build:stack
+        vars:
+          STACK: "{{.ITEM}}"
+
+  image:publish:
+    desc: Publish every worker stack to GHCR
+    cmds:
+      - for:
+          var: IMAGE_STACKS
+        task: image:publish:stack
+        vars:
+          STACK: "{{.ITEM}}"
+
+  image:build:stack:
+    internal: true
+    requires:
+      vars: [STACK]
+    vars:
+      PLATFORMS:
+        sh: tr -d '[:space:]' < docker/{{.STACK}}/platforms
+    cmds:
+      - docker buildx build . --file docker/{{.STACK}}/Dockerfile --load {{if not (contains "," .PLATFORMS)}}--platform {{.PLATFORMS}}{{end}} --tag {{.IMAGE_REPOSITORY}}:{{.STACK}}
+
+  image:publish:stack:
+    internal: true
+    requires:
+      vars: [STACK]
+    vars:
+      PLATFORMS:
+        sh: tr -d '[:space:]' < docker/{{.STACK}}/platforms
+    cmds:
+      - docker buildx build . --file docker/{{.STACK}}/Dockerfile --platform {{.PLATFORMS}} --tag {{.IMAGE_REPOSITORY}}:{{.STACK}} --push
+
   generate:codex-models:
     desc: Refresh the embedded Codex model catalog from upstream
     cmds:
       - curl -fsSL https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json -o pkg/external/codex/models.json
 
-  ui:
+  build:ui:
     desc: Build the web UI assets
     dir: server/ui
     cmds:
@@ -24,7 +67,7 @@ tasks:
 
   test:web:
     desc: Build and run browser end-to-end tests
-    deps: [ui]
+    deps: [build:ui]
     dir: server/ui
     cmds:
       - npm run test:web
@@ -42,13 +85,13 @@ tasks:
 
   run:web:
     desc: Run the web server
-    deps: [ui]
+    deps: [build:ui]
     cmds:
       - go run ./cmd/wingman server
 
   build:app:
     desc: Build the desktop app for this platform; all resources are generated from app/appicon.png
-    deps: [ui]
+    deps: [build:ui]
     dir: app
     cmds:
       - go tool appbundle -name "Wingman Agent" -id com.adrianliechti.wingman-agent -description "Wingman Agent" -company "Adrian Liechti" -copyright "© Adrian Liechti" -package .
@@ -57,8 +100,15 @@ tasks:
     desc: Build and launch the desktop app with web inspection enabled
     deps: [build:app]
     dir: app
+    env:
+      WINGMAN_DEBUG: "1"
     cmds:
-      - open -n --env WINGMAN_DEBUG=1 "build/bin/Wingman Agent.app"
+      - cmd: open -n --env WINGMAN_DEBUG=1 "build/bin/Wingman Agent.app"
+        platforms: [darwin]
+      - cmd: '"build/bin/Wingman Agent.exe"'
+        platforms: [windows]
+      - cmd: '"build/bin/Wingman Agent"'
+        platforms: [linux]
 
   run:app:ollama:
     desc: Build and launch the desktop app against local Ollama
@@ -76,7 +126,7 @@ tasks:
 
   install:cli:
     desc: Build and install the CLI to GOPATH/bin or GOBIN
-    deps: [ui]
+    deps: [build:ui]
     cmds:
       - dest="$(go env GOBIN)" && [ -z "$dest" ] && dest="$(go env GOPATH)/bin" && go build -o "$dest/wingman" ./cmd/wingman
 
@@ -100,13 +150,13 @@ tasks:
       - goreleaser release --clean -f .goreleaser.yml
 
   release:app:
-    desc: Release the macOS desktop app + Homebrew cask (macOS only; needs GITHUB_TOKEN)
+    desc: Release the macOS and Windows desktop apps + Homebrew cask + Scoop (run on macOS; needs GITHUB_TOKEN)
     cmds:
       # --skip=validate: skip git-state checks so snapshot/dry runs work from a dirty tree.
       - goreleaser release --clean --skip=validate -f .goreleaser.app.yml
 
   release:
-    desc: Full release — CLI (all platforms) then the desktop app, on the current git tag
+    desc: Full release — CLI (all platforms) then desktop apps, on the current git tag
     cmds:
       - task: release:cli
       - task: release:app

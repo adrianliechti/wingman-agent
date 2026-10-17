@@ -2,123 +2,18 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-
-	"github.com/coder/websocket"
-	"github.com/google/uuid"
+	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
 )
 
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := websocket.Accept(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer conn.CloseNow()
-
-	conn.SetReadLimit(32 << 20)
-
-	client := newWSClient(conn)
-	s.wsMu.Lock()
-	s.wsConns[conn] = client
-	s.wsMu.Unlock()
-
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		client.run()
-	}()
-
-	defer func() {
-		s.wsMu.Lock()
-		delete(s.wsConns, conn)
-		s.wsMu.Unlock()
-		client.close()
-		<-writerDone
-	}()
-
-	for {
-		_, data, err := conn.Read(r.Context())
-		if err != nil {
-			return
-		}
-
-		var msg ClientMessage
-		if err := json.Unmarshal(data, &msg); err != nil {
-			continue
-		}
-
-		switch msg.Type {
-		case MsgSend:
-			if msg.SessionID == "" {
-				continue
-			}
-			s.handleSend(r.Context(), msg)
-
-		case MsgCancel:
-			if msg.SessionID == "" {
-				continue
-			}
-			if _, turns := s.activeRuntime(); turns != nil {
-				if msg.ClearQueue {
-					turns.CancelAll(msg.SessionID)
-				} else {
-					turns.CancelCurrent(msg.SessionID)
-				}
-				s.sendTurnSnapshot(msg.SessionID)
-			}
-
-		case MsgQueueRemove:
-			if _, turns := s.activeRuntime(); turns != nil && msg.SessionID != "" && msg.ID != "" {
-				if err := turns.RemoveQueued(msg.SessionID, msg.ID); err != nil {
-					s.sendTurnInputError(msg.SessionID, msg.ID, err)
-				}
-			}
-
-		case MsgQueueUpdate:
-			s.handleQueueUpdate(msg)
-
-		case MsgQueueResume:
-			if _, turns := s.activeRuntime(); turns != nil && msg.SessionID != "" {
-				turns.Resume(msg.SessionID)
-				s.sendTurnSnapshot(msg.SessionID)
-			}
-
-		case MsgQueueClear:
-			if _, turns := s.activeRuntime(); turns != nil && msg.SessionID != "" {
-				turns.ClearQueue(msg.SessionID)
-				s.sendTurnSnapshot(msg.SessionID)
-			}
-
-		case MsgSync:
-			for _, sid := range msg.Sessions {
-				if sid == "" {
-					continue
-				}
-				s.sendSessionState(sid)
-			}
-
-		case MsgPromptResponse:
-			if msg.PromptID == "" {
-				continue
-			}
-			s.resolvePrompt(msg)
-
-		case MsgFocus:
-
-			s.files.Notify()
-		}
-	}
-}
-
-func (s *Server) buildInput(msg ClientMessage) []agent.Content {
+func (s *backendRuntime) buildInput(msg Command) []agent.Content {
 	var input []agent.Content
 	if msg.Text != "" {
 		input = append(input, agent.Content{Text: msg.Text})
@@ -126,8 +21,15 @@ func (s *Server) buildInput(msg ClientMessage) []agent.Content {
 			input = append(input, agent.Content{Text: block, Hidden: true})
 		}
 	}
+	var rootPath string
+	if s.workspace != nil {
+		rootPath = s.workspace.RootPath
+	}
 	for _, f := range msg.Files {
 		input = append(input, agent.Content{Text: fmt.Sprintf("[File: %s]", f)})
+		if dataURL := readAttachedWorkspaceImage(f, rootPath); dataURL != "" {
+			input = append(input, agent.Content{File: &agent.File{Name: f, Data: dataURL}})
+		}
 	}
 	for _, img := range msg.Images {
 		if img == "" {
@@ -138,54 +40,84 @@ func (s *Server) buildInput(msg ClientMessage) []agent.Content {
 	return input
 }
 
-func (s *Server) handleSend(ctx context.Context, msg ClientMessage) {
-	_, turns := s.activeRuntime()
-	if turns == nil {
-		return
+func readAttachedWorkspaceImage(path, rootPath string) string {
+	resolved := path
+	if !filepath.IsAbs(resolved) {
+		if rootPath == "" {
+			return ""
+		}
+		resolved = filepath.Join(rootPath, resolved)
 	}
-	if msg.ID == "" {
-		msg.ID = uuid.NewString()
-	}
-	intent := code.TurnInputIntent(msg.Intent)
-	if intent != code.TurnInputSteer {
-		intent = code.TurnInputFollowUp
-	}
-	msg.Intent = string(intent)
-	s.storeTurnMeta(msg)
-	_, err := turns.Submit(ctx, msg.SessionID, code.TurnInput{
-		ID: msg.ID, Content: s.buildInput(msg), Intent: intent,
-	})
+	f, err := os.Open(filepath.Clean(resolved))
 	if err != nil {
-		s.sendTurnInputError(msg.SessionID, msg.ID, err)
-		s.deleteTurnMeta(msg.SessionID, msg.ID)
-		return
+		return ""
 	}
-	s.sendTurnSnapshot(msg.SessionID)
-	s.ensureTaskPump(msg.SessionID)
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > tool.MaxImageSourceBytes {
+		return ""
+	}
+	var head [512]byte
+	n, err := f.Read(head[:])
+	if err != nil && err != io.EOF {
+		return ""
+	}
+	if tool.ImageMIME(head[:n]) == "" {
+		return ""
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return ""
+	}
+	res, err := tool.ReadImage(context.Background(), f)
+	if err != nil {
+		return ""
+	}
+	return res.Content
 }
 
-func (s *Server) handleTurnEvent(ev code.TurnEvent) {
+func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
+	if ev.Retry != nil {
+		c := s.session(ev.SessionID)
+		c.mu.Lock()
+		c.state.Phase, c.state.Retry = "retrying", ev.Retry
+		c.publishStateLocked()
+		c.mu.Unlock()
+		return
+	}
 	if ev.StreamEvent != 0 {
 		switch ev.StreamEvent {
 		case agent.StreamEventReset:
 			s.sendSession(ev.SessionID, Frame{Type: EvtStreamReset})
 		case agent.StreamEventCommit:
-			s.sendSession(ev.SessionID, Frame{Type: EvtStreamCommit})
+			s.session(ev.SessionID).replaceHistory()
 		}
 		return
 	}
 
 	if ev.Message != nil {
+		if ev.Message.Hidden || ev.Message.Role == agent.RoleUser {
+			return
+		}
 		for _, c := range ev.Message.Content {
+			if c.Hidden {
+				continue
+			}
 			switch {
 			case c.ToolCall != nil:
+				display := displayTool(
+					c.ToolCall.Name, c.ToolCall.Kind, c.ToolCall.Args, c.ToolCall.Locations,
+					c.ToolCall.Presentation,
+				)
 				s.sendSession(ev.SessionID, Frame{
-					Type:    EvtToolCall,
-					ID:      c.ToolCall.ID,
-					Name:    c.ToolCall.Name,
-					Args:    c.ToolCall.Args,
-					Hint:    tool.ExtractHint(c.ToolCall.Args, c.ToolCall.Name),
-					Partial: c.ToolCall.Partial,
+					Type:      EvtToolCall,
+					ID:        c.ToolCall.ID,
+					Name:      display.name,
+					Kind:      display.kind,
+					Args:      display.args,
+					Locations: display.locations,
+					Hint:      display.hint,
+					Partial:   c.ToolCall.Partial,
 				})
 				if c.ToolCall.Partial {
 					s.setSessionPhase(ev.SessionID, "thinking")
@@ -194,14 +126,25 @@ func (s *Server) handleTurnEvent(ev code.TurnEvent) {
 				}
 
 			case c.ToolResult != nil:
+				display := displayTool(
+					c.ToolResult.Name, c.ToolResult.Kind, c.ToolResult.Args, c.ToolResult.Locations,
+					c.ToolResult.Presentation,
+				)
 				s.sendSession(ev.SessionID, Frame{
-					Type:    EvtToolResult,
-					ID:      c.ToolResult.ID,
-					Name:    c.ToolResult.Name,
-					Content: c.ToolResult.Content,
+					Type:      EvtToolResult,
+					ID:        c.ToolResult.ID,
+					Name:      display.name,
+					Kind:      display.kind,
+					Args:      display.args,
+					Locations: display.locations,
+					Hint:      display.hint,
+					Content:   c.ToolResult.Content,
 				})
 
-				s.files.Notify()
+				if s.files != nil {
+					s.files.Notify()
+				}
+				s.sendSession(ev.SessionID, Frame{Type: EvtTasksChanged})
 
 			case c.Reasoning != nil && c.Reasoning.Summary != "":
 				s.setSessionPhase(ev.SessionID, "thinking")
@@ -212,9 +155,12 @@ func (s *Server) handleTurnEvent(ev code.TurnEvent) {
 					Text: c.Reasoning.Summary,
 				})
 
-			case c.Text != "":
+			case c.AsText() != "":
 				s.setSessionPhase(ev.SessionID, "streaming")
-				s.sendSession(ev.SessionID, Frame{Type: EvtTextDelta, ID: c.TextID, Text: c.Text})
+				s.sendSession(ev.SessionID, Frame{Type: EvtTextDelta, ID: c.TextID, Text: c.AsText()})
+			}
+			if c.File != nil && c.File.Data != "" {
+				s.sendSession(ev.SessionID, Frame{Type: EvtImage, Content: c.File.Data})
 			}
 		}
 		s.sendUsageIfChanged(ev.SessionID)
@@ -224,14 +170,13 @@ func (s *Server) handleTurnEvent(ev code.TurnEvent) {
 	if ev.State == "" {
 		return
 	}
-	if ev.Intent != "" {
-		s.updateTurnIntent(ev.SessionID, ev.InputID, ev.Intent)
-	}
-	s.sendTurnInputStatus(ev)
+	entry := turnQueueEntry(ev.Input, ev.State, ev.Position)
+	s.sendSession(ev.SessionID, Frame{Type: EvtTurnInput, Input: &entry})
 
 	switch ev.State {
 	case code.TurnInputActive:
 		s.setSessionPhase(ev.SessionID, "thinking")
+		s.broadcast(Frame{Type: EvtSessionsChanged})
 	case code.TurnInputFailed:
 		if ev.Err != nil && !errors.Is(ev.Err, context.Canceled) {
 			s.sendSession(ev.SessionID, Frame{Type: EvtError, Message: ev.Err.Error()})
@@ -245,38 +190,30 @@ func (s *Server) handleTurnEvent(ev code.TurnEvent) {
 	if ev.Executed {
 		s.finalizeTurn(ev.SessionID)
 	}
-	if ev.State == code.TurnInputCompleted || ev.State == code.TurnInputCancelled || ev.State == code.TurnInputFailed {
-		s.deleteTurnMeta(ev.SessionID, ev.InputID)
-	}
 	s.sendTurnSnapshot(ev.SessionID)
 }
 
-func (s *Server) finalizeTurn(sid string) {
-	a := s.activeAgent()
+func (s *backendRuntime) finalizeTurn(sid string) {
+	a := s.agent
 	if a == nil {
 		return
 	}
+	s.session(sid).replaceHistory()
 	s.sendUsageIfChanged(sid)
 
 	ws := s.workspace
 	s.flushFiles()
 
-	if ws.HasLSP() {
+	if ws != nil && ws.HasLSP() {
 		s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 	}
 
-	saved := true
-	if w, ok := a.(*codeagent.Agent); ok {
-		saved = w.Save(sid) == nil
-	}
-	if saved && len(a.Messages(sid)) > 0 {
+	// Persistence belongs to the backend's journal, including partial and
+	// interrupted turns. Web finalization only refreshes resource projections.
+	if len(a.Messages(sid)) > 0 {
 		s.broadcast(Frame{Type: EvtSessionsChanged})
 	}
 
-	_, turns := s.activeRuntime()
-	if turns == nil || !snapshotHasActive(turns.Snapshot(sid)) {
-		s.setSessionPhase(sid, "idle")
-	}
 }
 
 func snapshotHasActive(snapshot code.TurnSnapshot) bool {
@@ -288,158 +225,67 @@ func snapshotHasActive(snapshot code.TurnSnapshot) bool {
 	return false
 }
 
-func (s *Server) handleQueueUpdate(msg ClientMessage) {
-	if msg.SessionID == "" || msg.ID == "" {
+func (s *backendRuntime) sendTurnSnapshot(sessionID string) {
+	if s.turns == nil {
 		return
 	}
-	_, turns := s.activeRuntime()
-	if turns == nil {
+	c := s.session(sessionID)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state.Status == "deleted" {
 		return
 	}
-	previous, ok := s.getTurnMeta(msg.SessionID, msg.ID)
-	if !ok {
-		s.sendTurnInputError(msg.SessionID, msg.ID, code.ErrInputNotQueued)
-		return
-	}
-	msg.Type = MsgSend
-	msg.Intent = string(code.TurnInputFollowUp)
-	s.storeTurnMeta(msg)
-	err := turns.ReplaceQueued(msg.SessionID, msg.ID, code.TurnInput{
-		ID: msg.ID, Content: s.buildInput(msg), Intent: code.TurnInputFollowUp,
-	})
-	if err != nil {
-		s.storeTurnMeta(previous)
-		s.sendTurnInputError(msg.SessionID, msg.ID, err)
-		return
-	}
-	s.sendTurnSnapshot(msg.SessionID)
-}
-
-func (s *Server) sendTurnInputStatus(ev code.TurnEvent) {
-	meta, _ := s.getTurnMeta(ev.SessionID, ev.InputID)
-	s.sendSession(ev.SessionID, turnInputFrame(ev.InputID, meta, ev.State, ev.Position, ev.Err))
-}
-
-func (s *Server) sendTurnInputError(sessionID, inputID string, err error) {
-	meta, _ := s.getTurnMeta(sessionID, inputID)
-	s.sendSession(sessionID, turnInputFrame(inputID, meta, code.TurnInputFailed, 0, err))
-}
-
-func turnInputFrame(inputID string, meta ClientMessage, state code.TurnInputState, position int, err error) Frame {
-	meta.ID = inputID
-	entry := turnQueueEntry(meta, state, position)
-	return Frame{
-		Type: EvtTurnInput, ID: entry.ID, State: entry.State,
-		Intent: entry.Intent, Position: entry.Position, Text: entry.Text,
-		Message: errorText(err), Queue: []TurnQueueEntry{entry},
-	}
-}
-
-func (s *Server) sendTurnSnapshot(sessionID string) {
-	_, turns := s.activeRuntime()
-	if turns == nil {
-		return
-	}
-	snapshot := turns.Snapshot(sessionID)
+	snapshot := s.turns.Snapshot(sessionID)
 	queue := make([]TurnQueueEntry, 0, len(snapshot.Inputs))
 	for _, input := range snapshot.Inputs {
-		meta, _ := s.getTurnMeta(sessionID, input.ID)
-		queue = append(queue, turnQueueEntry(meta, input.State, input.Position))
+		// Accepted active/steered inputs already belong to the transcript. Only
+		// waiting user inputs are editable in the queue panel.
+		if input.State != code.TurnInputQueued || input.Input.Origin == "task" {
+			continue
+		}
+		queue = append(queue, turnQueueEntry(input.Input, input.State, input.Position))
 	}
-	s.sendSession(sessionID, Frame{
-		Type: EvtTurnQueue, Queue: queue, Paused: snapshot.Paused,
-		CanSteer: snapshot.Features.Steer,
-	})
-}
-
-func turnQueueEntry(meta ClientMessage, state code.TurnInputState, position int) TurnQueueEntry {
-	return TurnQueueEntry{
-		ID: meta.ID, State: string(state), Intent: meta.Intent, Position: position,
-		Text: meta.Text, Files: append([]string(nil), meta.Files...),
-		Images: append([]string(nil), meta.Images...), ImageCount: len(meta.Images),
+	c.state.PendingInputs = queue
+	c.state.QueuePaused = snapshot.Paused
+	c.state.CanSteer = snapshot.Features.Steer
+	if snapshot.Error != nil {
+		message := snapshot.Error.Error()
+		c.state.Error = &message
 	}
-}
-
-func errorText(err error) string {
-	if err == nil {
-		return ""
+	switch {
+	case snapshot.Compacting:
+		c.state.Phase = "compacting"
+	case !snapshotHasActive(snapshot):
+		c.state.Phase = "idle"
+	case c.state.Phase == "idle" || c.state.Phase == "compacting":
+		c.state.Phase = "thinking"
 	}
-	return err.Error()
+	c.publishStateLocked()
 }
 
-func (s *Server) storeTurnMeta(msg ClientMessage) {
-	msg.Files = append([]string(nil), msg.Files...)
-	msg.Images = append([]string(nil), msg.Images...)
-	s.turnMetaMu.Lock()
-	byID := s.turnMeta[msg.SessionID]
-	if byID == nil {
-		byID = map[string]ClientMessage{}
-		s.turnMeta[msg.SessionID] = byID
-	}
-	byID[msg.ID] = msg
-	s.turnMetaMu.Unlock()
-}
-
-func (s *Server) getTurnMeta(sessionID, inputID string) (ClientMessage, bool) {
-	s.turnMetaMu.Lock()
-	defer s.turnMetaMu.Unlock()
-	msg, ok := s.turnMeta[sessionID][inputID]
-	return msg, ok
-}
-
-func (s *Server) updateTurnIntent(sessionID, inputID string, intent code.TurnInputIntent) {
-	s.turnMetaMu.Lock()
-	if byID := s.turnMeta[sessionID]; byID != nil {
-		msg := byID[inputID]
-		msg.Intent = string(intent)
-		byID[inputID] = msg
-	}
-	s.turnMetaMu.Unlock()
-}
-
-func (s *Server) deleteTurnMeta(sessionID, inputID string) {
-	s.turnMetaMu.Lock()
-	if byID := s.turnMeta[sessionID]; byID != nil {
-		delete(byID, inputID)
-		if len(byID) == 0 {
-			delete(s.turnMeta, sessionID)
+func (s *backendRuntime) finishCompaction(sessionID string, result agent.CompactResult, err error) {
+	c := s.session(sessionID)
+	c.mu.Lock()
+	if c.state.Status != "deleted" {
+		switch {
+		case errors.Is(err, context.Canceled):
+		case err != nil:
+			message := err.Error()
+			c.state.Error = &message
+		default:
+			c.state.Compaction = &CompactionView{TokensBefore: result.TokensBefore, TokensAfter: result.TokensAfter}
 		}
 	}
-	s.turnMetaMu.Unlock()
+	c.mu.Unlock()
+	s.sendUsageIfChanged(sessionID)
+	s.sendTurnSnapshot(sessionID)
 }
 
-func (s *Server) sendUsageIfChanged(sessionID string) {
-	a := s.activeAgent()
-	if a == nil {
-		return
-	}
-	u := a.Usage(sessionID)
-	s.turnMetaMu.Lock()
-	previous := s.turnUsage[sessionID]
-	if u == previous {
-		s.turnMetaMu.Unlock()
-		return
-	}
-	s.turnUsage[sessionID] = u
-	s.turnMetaMu.Unlock()
-	s.sendSession(sessionID, s.usageFrame(a, sessionID, u))
+func turnQueueEntry(input code.TurnInput, state code.TurnInputState, position int) TurnQueueEntry {
+	display := visibleInput(code.CloneTurnInput(input))
+	return TurnQueueEntry{ID: input.ID, State: string(state), Intent: string(input.Intent), Position: position, Text: display.Text, Files: display.Files, Images: display.Images, Origin: input.Origin}
 }
 
-func (s *Server) usageFrame(a code.Agent, sid string, u agent.Usage) Frame {
-	f := Frame{
-		Type:         EvtUsage,
-		InputTokens:  u.InputTokens,
-		CachedTokens: u.CachedTokens,
-		OutputTokens: u.OutputTokens,
-
-		LastInputTokens: u.LastInputTokens,
-		ContextWindow:   u.ContextWindow,
-	}
-
-	if f.ContextWindow <= 0 && u.LastInputTokens > 0 {
-		_, model := a.Models(sid)
-		f.ContextWindow = int64(agent.ContextWindowFor(model))
-	}
-
-	return f
+func (s *backendRuntime) sendUsageIfChanged(sessionID string) {
+	s.session(sessionID).refreshSettings()
 }

@@ -8,7 +8,7 @@ import {
 	RefreshCw,
 	ShieldCheck,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
 	type GraphNode,
 	fetchGraphOverview,
@@ -82,7 +82,8 @@ export function InsightsTab({
 }) {
 	const [view, setView] = useState<GraphView>(memory.view);
 	const [focus, setFocus] = useState<Focus | null>(memory.focus);
-	const analysisButtonRef = useRef<HTMLButtonElement | null>(null);
+	const [analysisButton, setAnalysisButton] =
+		useState<HTMLButtonElement | null>(null);
 	const [analysisOpen, setAnalysisOpen] = useState(false);
 	const queryClient = useQueryClient();
 	const overviewQuery = useQuery({
@@ -111,17 +112,13 @@ export function InsightsTab({
 		memory.focus = focus;
 	}, [focus]);
 
-	const explore = useCallback((node: GraphNode) => {
-		setFocus((previous) => {
-			if (previous) {
-				memory.history = [...memory.history.slice(-24), previous];
-			}
-			return { id: node.id, name: node.name, file: node.file };
-		});
+	const explore = (node: GraphNode) => {
+		if (focus) memory.history = [...memory.history.slice(-24), focus];
+		setFocus({ id: node.id, name: node.name, file: node.file });
 		setView("search");
-	}, []);
+	};
 
-	const goBack = useCallback(() => {
+	const goBack = () => {
 		const previous = memory.history[memory.history.length - 1];
 		if (previous) {
 			memory.history = memory.history.slice(0, -1);
@@ -129,19 +126,19 @@ export function InsightsTab({
 			return;
 		}
 		setFocus(null);
-	}, []);
+	};
 
-	const selectModule = useCallback((path: string) => {
+	const selectModule = (path: string) => {
 		memory.mapSelection = path;
 		setView("map");
-	}, []);
+	};
 
-	const searchModule = useCallback((path: string) => {
+	const searchModule = (path: string) => {
 		memory.searchSeed = { file: path };
 		memory.history = [];
 		setFocus(null);
 		setView("search");
-	}, []);
+	};
 
 	const status = overview?.status;
 	const refreshTitle = [
@@ -182,7 +179,7 @@ export function InsightsTab({
 				))}
 				<div className="flex-1" />
 				<button
-					ref={analysisButtonRef}
+					ref={setAnalysisButton}
 					type="button"
 					onClick={() => setAnalysisOpen((open) => !open)}
 					aria-haspopup="menu"
@@ -209,7 +206,7 @@ export function InsightsTab({
 			<FloatingMenu
 				open={analysisOpen}
 				onOpenChange={setAnalysisOpen}
-				reference={analysisButtonRef.current}
+				reference={analysisButton}
 				placement="bottom-end"
 				label="Insights analyses"
 				className="z-[100] w-72 rounded-md border border-border bg-bg-elevated/95 py-1 shadow-xl backdrop-blur-sm"

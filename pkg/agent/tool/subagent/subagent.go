@@ -3,7 +3,9 @@ package subagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
 type subagentType struct {
@@ -61,7 +64,6 @@ var subagentTypes = map[string]subagentType{
 		AllowTool:           allowReadOnlyTool,
 		WrapDynamicReadOnly: true,
 		ReadOnly:            true,
-		Model:               "plan",
 	},
 	"code-architect": {
 		Instructions:        codeArchitectInstructions,
@@ -74,7 +76,6 @@ var subagentTypes = map[string]subagentType{
 		AllowTool:           allowReadOnlyTool,
 		WrapDynamicReadOnly: true,
 		ReadOnly:            true,
-		Model:               "plan",
 	},
 	"code-simplifier": {
 		Instructions: codeSimplifierInstructions,
@@ -102,7 +103,10 @@ func mergeTypes(custom []Definition) (types map[string]subagentType, names []str
 
 	overrides := make(map[string]Definition, len(custom))
 	for _, d := range custom {
-		name := strings.ToLower(d.Name)
+		name := strings.ToLower(strings.TrimSpace(d.Name))
+		if name == "" {
+			continue
+		}
 		if _, ok := overrides[name]; !ok {
 			overrides[name] = d
 		}
@@ -112,7 +116,7 @@ func mergeTypes(custom []Definition) (types map[string]subagentType, names []str
 		names = append(names, b.name)
 		if d, ok := overrides[b.name]; ok {
 			types[b.name] = d.subagentType()
-			blurbs = append(blurbs, "- "+b.name+": "+d.Description)
+			blurbs = append(blurbs, "- "+b.name+": "+strings.Join(strings.Fields(d.Description), " "))
 			continue
 		}
 		types[b.name] = subagentTypes[b.name]
@@ -120,42 +124,255 @@ func mergeTypes(custom []Definition) (types map[string]subagentType, names []str
 	}
 
 	for _, d := range custom {
-		name := strings.ToLower(d.Name)
+		name := strings.ToLower(strings.TrimSpace(d.Name))
+		if name == "" {
+			continue
+		}
 		if _, ok := types[name]; ok {
 			continue
 		}
 		types[name] = d.subagentType()
 		names = append(names, name)
-		blurbs = append(blurbs, "- "+name+": "+d.Description)
+		blurbs = append(blurbs, "- "+name+": "+strings.Join(strings.Fields(d.Description), " "))
 	}
 
 	return types, names, blurbs
 }
 
-func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry, custom ...Definition) []tool.Tool {
+const durableSpecVersion = 1
+
+// durableSpec contains only stable, serializable construction inputs. Tool
+// implementations and hooks are rebound from the current session on restore.
+type durableSpec struct {
+	Version      int            `json:"version"`
+	AgentID      string         `json:"agent_id"`
+	AgentType    string         `json:"agent_type"`
+	Instructions string         `json:"instructions"`
+	Model        string         `json:"model,omitempty"`
+	Effort       string         `json:"effort,omitempty"`
+	Schema       map[string]any `json:"schema,omitempty"`
+}
+
+type subagentRunner struct {
+	spec      durableSpec
+	sub       *agent.Agent
+	collector *reportCollector
+}
+
+func newSubagentRunner(parent *agent.Config, typ subagentType, spec durableSpec, state agent.State) (*subagentRunner, error) {
+	if spec.Version != durableSpecVersion || spec.AgentID == "" || spec.AgentType == "" {
+		return nil, fmt.Errorf("invalid durable subagent specification")
+	}
+	var collector *reportCollector
+	var err error
+	if spec.Schema != nil {
+		collector, err = newReportCollector(spec.Schema)
+		if err != nil {
+			return nil, fmt.Errorf("restore subagent result schema: %w", err)
+		}
+	}
+
+	subcfg := parent.Derive()
+	subcfg.CacheKey = spec.AgentID
+	subcfg.Instructions = func() string { return spec.Instructions }
+	// The durable specification already contains the child's scoped context.
+	subcfg.ContextInstructions = nil
+	if spec.Model != "" {
+		subcfg.Model = func() string { return spec.Model }
+	}
+	// Empty effort means auto and is also part of the child's snapshot. Do not
+	// leave it bound to the parent's mutable effort callback on spawn or resume.
+	subcfg.Effort = func() string { return spec.Effort }
+	subcfg.Tools = func() []tool.Tool {
+		var tools []tool.Tool
+		if parent.Tools != nil {
+			tools = toolsForType(parent.Tools(), typ)
+		}
+		if collector != nil {
+			tools = append(tools, collector.tool())
+		}
+		return tools
+	}
+	sub := &agent.Agent{Config: subcfg}
+	if err := sub.Restore(state); err != nil {
+		return nil, fmt.Errorf("restore child agent %s: %w", spec.AgentID, err)
+	}
+	return &subagentRunner{spec: spec, sub: sub, collector: collector}, nil
+}
+
+func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Task, input string) (out string, err error) {
+	if r.collector != nil {
+		// Reports belong to one turn, even when it aborts after reporting.
+		r.collector.take()
+		defer r.collector.take()
+	}
+	if tk != nil {
+		r.sub.Recorder = agent.EventRecorderFunc(tk.AppendAgentEvents)
+		defer func() {
+			if persistErr := tk.SetAgentState(r.sub.StateSnapshot()); persistErr != nil {
+				err = errors.Join(err, fmt.Errorf("persist child agent state: %w", persistErr))
+			}
+		}()
+	}
+
+	runtime := hook.RuntimeFromContext(execCtx)
+	if runtime == (hook.Runtime{}) {
+		runtime = hook.RuntimeFromContext(reportCtx)
+		runtime.TurnID = ""
+	}
+	runtime.AgentID = r.spec.AgentID
+	runtime.AgentType = r.spec.AgentType
+	execCtx = hook.WithRuntime(execCtx, runtime)
+	execCtx = agent.WithStreamEventHandlers(execCtx, agent.StreamEventHandlers{
+		Reset: func() {
+			if tk != nil {
+				tk.SetActivity("")
+			}
+		},
+	})
+	started := time.Now()
+	before := r.sub.UsageSnapshot()
+	startIdx := len(r.sub.MessagesSnapshot())
+
+	stream, runErr := r.sub.Send(execCtx, []agent.Content{{Text: input}})
+	if runErr == nil {
+		for msg, err := range stream {
+			if err != nil {
+				runErr = err
+				break
+			}
+			if tk != nil {
+				updateTaskActivity(tk, msg)
+			}
+		}
+	}
+
+	usage := r.sub.UsageSnapshot()
+	delta := tool.UsageDelta{
+		InputTokens:              usage.InputTokens - before.InputTokens,
+		OutputTokens:             usage.OutputTokens - before.OutputTokens,
+		ReasoningTokens:          usage.ReasoningTokens - before.ReasoningTokens,
+		CacheReadInputTokens:     usage.CacheReadInputTokens - before.CacheReadInputTokens,
+		CacheCreationInputTokens: usage.CacheCreationInputTokens - before.CacheCreationInputTokens,
+	}
+	tool.ReportUsage(reportCtx, delta)
+	state := r.sub.StateSnapshot()
+	// Stop hooks can end the stream without returning an error. The ledger
+	// remains authoritative about whether the child actually completed.
+	if runErr == nil {
+		for i := len(state.Events) - 1; i >= 0; i-- {
+			event := state.Events[i]
+			if event.Type == agent.EventTurnTerminal && event.Terminal != nil {
+				if event.Terminal.Status != agent.RuntimeCompleted {
+					runErr = fmt.Errorf("agent turn %s: %s", event.Terminal.Status, event.Terminal.Error)
+				}
+				break
+			}
+			if event.Type == agent.EventTurnStarted {
+				break
+			}
+		}
+	}
+	runMessages := state.Messages
+	if startIdx <= len(runMessages) {
+		runMessages = runMessages[startIdx:]
+	}
+	trailer := runTrailer(runMessages, agent.Usage{
+		InputTokens:              delta.InputTokens,
+		OutputTokens:             delta.OutputTokens,
+		ReasoningTokens:          delta.ReasoningTokens,
+		CacheReadInputTokens:     delta.CacheReadInputTokens,
+		CacheCreationInputTokens: delta.CacheCreationInputTokens,
+	}, time.Since(started))
+	text := strings.TrimSpace(finalText(runMessages))
+
+	if runErr != nil {
+		if text == "" {
+			return "", fmt.Errorf("agent error: %w", runErr)
+		}
+		return text + trailer, fmt.Errorf("agent error: %w", runErr)
+	}
+	if r.collector != nil {
+		if payload := r.collector.take(); payload != "" {
+			return payload + trailer, nil
+		}
+		return text + trailer, fmt.Errorf("agent finished without calling report; the required structured result is missing")
+	}
+	if text == "" {
+		return "Sub-agent completed but produced no output." + trailer, nil
+	}
+	return text + trailer, nil
+}
+
+func bindTaskRunner(tasks *task.Registry, tk *task.Task, runner *subagentRunner) {
+	tk.SetPeek(runner.sub.MessagesSnapshot)
+	tk.SetResumeContext(func(reportCtx context.Context, followUp string) error {
+		if err := reportCtx.Err(); err != nil {
+			return err
+		}
+		return tasks.Relaunch(tk, func(execCtx context.Context, current *task.Task) (string, error) {
+			return runner.runTurn(execCtx, reportCtx, current, followUp)
+		})
+	})
+}
+
+func bindRestoredTasks(parent *agent.Config, types map[string]subagentType, tasks *task.Registry) {
+	for _, tk := range tasks.List() {
+		if tk.SupportsResume() || tk.Status() == task.StatusRunning {
+			continue
+		}
+		agentID, state, raw := tk.DurableAgent()
+		if agentID == "" || len(raw) == 0 {
+			continue
+		}
+		var spec durableSpec
+		if err := json.Unmarshal(raw, &spec); err != nil {
+			continue
+		}
+		typ, ok := types[spec.AgentType]
+		if !ok {
+			continue
+		}
+		runner, err := newSubagentRunner(parent, typ, spec, state)
+		if err != nil {
+			continue
+		}
+		runner.sub.Recorder = agent.EventRecorderFunc(tk.AppendAgentEvents)
+		if err := runner.sub.ReconcileInterrupted("process restarted before the child operation settled"); err != nil {
+			continue
+		}
+		_ = tk.SetAgentState(runner.sub.StateSnapshot())
+		bindTaskRunner(tasks, tk, runner)
+	}
+}
+
+func Tools(cfg *agent.Config, sharedContext func([]tool.Tool) string, tasks *task.Registry, custom ...Definition) []tool.Tool {
+	if cfg == nil {
+		cfg = &agent.Config{}
+	}
 	types, names, blurbs := mergeTypes(custom)
+	if tasks != nil {
+		bindRestoredTasks(cfg, types, tasks)
+	}
 
 	lines := []string{
-		"Launch a subagent for a bounded task. It runs in a separate context with a filtered toolset and returns one final report; it does not see your conversation, and its intermediate output (file dumps, logs, test runs) never enters your context — only the report does. The report is delivered to you, not the user — relay what matters in your response.",
+		"Launch a subagent for a bounded task. It runs in a separate context with a filtered toolset, does not see your conversation, and returns one final report to you, not the user. Only the report enters your context.",
 		"",
 		"Agent types:",
 	}
 	lines = append(lines, blurbs...)
 	lines = append(lines,
 		"",
-		"Write a self-contained prompt: goal, relevant paths/symbols, allowed edit scope, expected output shape. Pick the narrowest fitting type. Don't delegate a single known lookup (use `read`/`grep`/`glob` directly) or synthesis of results you already hold.",
+		"Write a self-contained prompt: goal, relevant paths or symbols, allowed edit scope, and the expected report shape. Pick the narrowest fitting type. Do not delegate a single known lookup or the synthesis of results you already hold. Give a verifier only the claim to check, not the reasoning behind it.",
 		"",
-		"Keep finding and verifying separated: an agent that produced findings never checks them itself. To validate claims — another agent's or your own — launch a fresh agent per claim, prompted to refute the claim rather than confirm it, and pass it only the claim, not the reasoning behind it; the claim is verified when an honest refutation attempt fails, and an uncertain verdict counts as refuted. For a claim that can fail in more than one way, prefer a few verifiers with distinct lenses (correctness, security, does-it-reproduce) over one generalist.",
-		"",
-		"By default the agent inherits your model and reasoning effort — almost always correct. Override `model` or `effort` only when a different tier clearly fits: `utility` (or lower effort) for mechanical, low-risk sweeps; `plan` (or higher effort) for the hardest verification, review, or architecture work.",
+		"The agent inherits your model and effort by default. Use `model: default` to explicitly inherit, including when a custom agent specifies another model. Override `model` or `effort` only when a different tier clearly fits: `utility` for mechanical sweeps, `complex` for demanding review or architecture work. These choices do not change Agent/Plan mode.",
 	)
 
 	if tasks != nil {
 		lines = append(lines,
 			"",
-			"Set `background: true` to launch the agent in the background and keep working: the call returns immediately with a task id, and the result arrives later as a task notification. Prefer background for research or verification you can overlap with other work, and launch several to cover independent areas in parallel. Keep the critical path yourself: if your very next step depends on the result, run the agent synchronously instead of waiting idle. While one runs, never invent or assume its result and don't start work that overlaps its scope. Use `task_output` to check on tasks, `task_stop` to cancel one, and `task_send` to ask a finished agent follow-ups with its context intact.",
-			"Editing agent types may also run in the background, but give each a file scope disjoint from files you plan to touch: concurrent edits to the same file fail and force a re-read, and prefer `edit` over `write` for any file a background agent might change. Tell each editing agent it is not alone in the tree — it must leave changes outside its scope alone, even ones that look wrong.",
-			"Synchronous runs are kept too: their result ends with a task id, and `task_send` continues that agent later with its context intact.",
+			"`background: true` returns a task id immediately and delivers the result later as a task notification. Use it for work you can overlap with your own; if your next step depends on the result, run synchronously. Never assume a running agent's result or start work that overlaps its scope. Give background editing agents a file scope disjoint from yours, and tell them to leave changes outside their scope alone.",
+			"Tracked runs carry a task id: `agent_output` checks status, `agent_stop` requests cancellation, and `agent_send` continues a finished agent with its context intact. At the session tracking limit, synchronous runs still work but have no task id or follow-up support.",
 		)
 	}
 
@@ -171,12 +388,12 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 		},
 		"schema": map[string]any{
 			"type":        "object",
-			"description": "Optional JSON Schema for the agent's final result. When set, the agent must deliver its result as validated JSON matching this schema, returned verbatim as the tool result.",
+			"description": "Optional JSON Schema for the agent's final report. The agent must call report with matching JSON; a missing report is a failure. The result contains the validated JSON followed by run statistics and, for tracked synchronous runs, a task id.",
 		},
 		"model": map[string]any{
 			"type":        "string",
-			"description": "Optional model role for the new agent: `plan` runs the session's planning model (most capable available), `utility` its utility model (smallest and fastest). Omit to inherit the session model (the default and preferred).",
-			"enum":        []string{"plan", "utility"},
+			"description": "Model choice for the new agent: `default` inherits the parent's selected model, `utility` selects the configured utility model or an available small model, and `complex` selects the configured complex model or an available large model. Omit to inherit unless the custom agent definition specifies a model. `plan` is a compatibility alias for `complex`.",
+			"enum":        []string{"default", "utility", "complex", "plan"},
 		},
 		"effort": map[string]any{
 			"type":        "string",
@@ -208,6 +425,9 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 		},
 
 		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 			agentID := uuid.NewString()
 			description, ok := args["description"].(string)
 
@@ -231,206 +451,112 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 			if !ok {
 				return tool.Result{}, fmt.Errorf("unknown agent_type %q (available: %s)", subagentName, strings.Join(names, ", "))
 			}
+			description = strings.TrimSpace(description)
+			background := false
+			if raw, present := args["background"]; present {
+				background, ok = raw.(bool)
+				if !ok {
+					return tool.Result{}, fmt.Errorf("background must be a boolean")
+				}
+			}
+			if background && tasks == nil {
+				return tool.Result{}, fmt.Errorf("background agents are not available in this session; run the agent synchronously")
+			}
+			var schemaMap map[string]any
+			if raw, present := args["schema"]; present {
+				schemaMap, ok = raw.(map[string]any)
+				if !ok || schemaMap == nil {
+					return tool.Result{}, fmt.Errorf("schema must be a JSON Schema object")
+				}
+				if _, err := newReportCollector(schemaMap); err != nil {
+					return tool.Result{}, fmt.Errorf("invalid schema: %w", err)
+				}
+			}
+			resolved := cfg.Derive()
+			if err := applyModelOverrides(resolved, args, typ.Model); err != nil {
+				return tool.Result{}, err
+			}
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 
 			var instructions strings.Builder
 			instructions.WriteString(typ.Instructions)
 			if sharedContext != nil {
-				if c := strings.TrimSpace(sharedContext()); c != "" {
+				var childTools []tool.Tool
+				if cfg.Tools != nil {
+					childTools = toolsForType(cfg.Tools(), typ)
+				}
+				if c := strings.TrimSpace(sharedContext(childTools)); c != "" {
 					instructions.WriteString("\n\n" + c)
 				}
 			}
 			for _, h := range cfg.Hooks.SubagentStart {
+				if err := ctx.Err(); err != nil {
+					return tool.Result{}, err
+				}
 				outcome, err := h(ctx, agentID, subagentName)
 				if err == nil && len(outcome.AdditionalContext) > 0 {
 					instructions.WriteString("\n\n" + strings.Join(outcome.AdditionalContext, "\n\n"))
 				}
 			}
 
-			var collector *reportCollector
-			if raw, present := args["schema"]; present {
-				schemaMap, ok := raw.(map[string]any)
-				if !ok {
-					return tool.Result{}, fmt.Errorf("schema must be a JSON Schema object")
-				}
-				var err error
-				if collector, err = newReportCollector(schemaMap); err != nil {
-					return tool.Result{}, fmt.Errorf("invalid schema: %w", err)
-				}
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
+			if schemaMap != nil {
 				instructions.WriteString("\n\nDeliver your final result by calling the `report` tool exactly once; its `result` argument must match the provided JSON schema. Prose output outside `report` is not the deliverable.")
 			}
 
-			subcfg := cfg.Derive()
-			subcfg.Instructions = func() string { return instructions.String() }
-
-			if err := applyModelOverrides(subcfg, args, typ.Model); err != nil {
+			modelID := ""
+			if resolved.Model != nil {
+				modelID = resolved.Model()
+			}
+			effort := ""
+			if resolved.Effort != nil {
+				effort = resolved.Effort()
+			}
+			spec := durableSpec{
+				Version: durableSpecVersion, AgentID: agentID, AgentType: subagentName,
+				Instructions: instructions.String(), Model: modelID, Effort: effort, Schema: schemaMap,
+			}
+			rawSpec, err := json.Marshal(spec)
+			if err != nil {
 				return tool.Result{}, err
 			}
-
-			subcfg.Tools = func() []tool.Tool {
-				var tools []tool.Tool
-				if cfg.Tools != nil {
-					tools = toolsForType(cfg.Tools(), typ)
-				}
-				if collector != nil {
-					tools = append(tools, collector.tool())
-				}
-				return tools
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
+			runner, err := newSubagentRunner(cfg, typ, spec, agent.State{})
+			if err != nil {
+				return tool.Result{}, err
+			}
+			prepare := func(tk *task.Task) error {
+				bindTaskRunner(tasks, tk, runner)
+				return tk.SetDurableAgent(agentID, runner.sub.StateSnapshot(), rawSpec)
+			}
+			run := func(execCtx context.Context, tk *task.Task) (string, error) {
+				return runner.runTurn(execCtx, ctx, tk, prompt)
 			}
 
-			// reportCtx outlives a background run's execution context: its
-			// values (usage sink) stay readable after the launching tool call
-			// returns and its cancellation must not stop accounting.
-			reportCtx := ctx
-
-			sub := &agent.Agent{Config: subcfg}
-
-			// runTurn is one turn on the shared sub-agent: the initial task and
-			// each task_send follow-up. Usage is reported as this turn's delta —
-			// the cumulative snapshot would double-bill resumed agents.
-			runTurn := func(execCtx context.Context, tk *task.Task, input string) (string, error) {
-				runtime := hook.RuntimeFromContext(execCtx)
-				runtime.AgentID = agentID
-				runtime.AgentType = subagentName
-				execCtx = hook.WithRuntime(execCtx, runtime)
-				// Sub-agent deltas are buffered internally rather than rendered on
-				// the parent stream, so a failed attempt can always be discarded.
-				execCtx = agent.WithStreamEventHandlers(execCtx, agent.StreamEventHandlers{
-					Reset: func() {
-						if tk != nil {
-							tk.SetActivity("")
-						}
-					},
-				})
-				started := time.Now()
-				before := sub.UsageSnapshot()
-				startIdx := len(sub.MessagesSnapshot())
-
-				runOnce := func(prompt string) error {
-					stream, err := sub.Send(execCtx, []agent.Content{{Text: prompt}})
-					if err != nil {
-						return err
-					}
-					for msg, err := range stream {
-						if err != nil {
-							return err
-						}
-						if tk != nil {
-							updateTaskActivity(tk, msg)
-						}
-					}
-					return nil
+			if background {
+				// Admitted background tasks detach from this tool's context.
+				if err := ctx.Err(); err != nil {
+					return tool.Result{}, err
 				}
-
-				runErr := runOnce(input)
-				stopHookActive := false
-				for runErr == nil && len(cfg.Hooks.SubagentStop) > 0 {
-					runMessages := sub.MessagesSnapshot()
-					if startIdx <= len(runMessages) {
-						runMessages = runMessages[startIdx:]
-					}
-					lastMessage := strings.TrimSpace(finalText(runMessages))
-					var stopOutcome hook.Outcome
-					for _, h := range cfg.Hooks.SubagentStop {
-						out, err := h(execCtx, agentID, subagentName, lastMessage, stopHookActive)
-						if err != nil {
-							continue
-						}
-						if out.Stop {
-							stopOutcome = out
-							break
-						}
-						if out.Block && !stopOutcome.Block {
-							stopOutcome = out
-						}
-					}
-					if stopOutcome.Stop || !stopOutcome.Block {
-						break
-					}
-					stopHookActive = true
-					reason := stopOutcome.Reason
-					if reason == "" {
-						reason = "A SubagentStop hook requested another pass."
-					}
-					runErr = runOnce(reason)
-				}
-
-				usage := sub.UsageSnapshot()
-				delta := tool.UsageDelta{
-					InputTokens:  usage.InputTokens - before.InputTokens,
-					CachedTokens: usage.CachedTokens - before.CachedTokens,
-					OutputTokens: usage.OutputTokens - before.OutputTokens,
-				}
-				tool.ReportUsage(reportCtx, delta)
-
-				// Only this run's messages: a resumed agent's history still holds
-				// every earlier run, and finalText over the full history would
-				// re-deliver the previous run's answer.
-				runMessages := sub.MessagesSnapshot()
-				if startIdx <= len(runMessages) {
-					runMessages = runMessages[startIdx:]
-				}
-
-				trailer := runTrailer(runMessages, agent.Usage{InputTokens: delta.InputTokens, CachedTokens: delta.CachedTokens, OutputTokens: delta.OutputTokens}, time.Since(started))
-
-				text := strings.TrimSpace(finalText(runMessages))
-
-				if runErr != nil {
-					if text == "" {
-						return "", fmt.Errorf("agent error: %w", runErr)
-					}
-					return fmt.Sprintf("Agent aborted before finishing (%v). Last output before the abort — treat as incomplete:\n\n%s%s", runErr, text, trailer), nil
-				}
-
-				if collector != nil {
-					if payload := collector.take(); payload != "" {
-						return payload + trailer, nil
-					}
-					if text == "" {
-						return "Sub-agent completed without calling report and produced no output." + trailer, nil
-					}
-					return "Sub-agent completed without calling report; unstructured output follows:\n\n" + text + trailer, nil
-				}
-
-				if text == "" {
-					return "Sub-agent completed but produced no output." + trailer, nil
-				}
-				return text + trailer, nil
-			}
-
-			if background, _ := args["background"].(bool); background {
-				if tasks == nil {
-					return tool.Result{}, fmt.Errorf("background agents are not available in this session; run the agent synchronously")
-				}
-				t, err := tasks.Launch(description, subagentName, func(execCtx context.Context, tk *task.Task) (string, error) {
-					return runTurn(execCtx, tk, prompt)
-				})
+				t, err := tasks.LaunchAgent(agentID, description, subagentName, prepare, run)
 				if err != nil {
 					return tool.Result{}, err
 				}
-				t.SetPeek(sub.MessagesSnapshot)
-				t.SetResume(func(followUp string) error {
-					return tasks.Relaunch(t, func(execCtx context.Context, tk *task.Task) (string, error) {
-						return runTurn(execCtx, tk, followUp)
-					})
-				})
-				return tool.Text(fmt.Sprintf("Launched background agent %s (%s: %s). Continue with other work — the result arrives as a task notification when it finishes. Never assume or invent its result, and don't start work that overlaps its scope. Check on it with task_output, cancel it with task_stop, or ask it follow-ups later with task_send.", t.ID, subagentName, description)), nil
+				return tool.Text(fmt.Sprintf("Launched background agent %s (%s: %s). Continue with other work — the result arrives as a task notification when it finishes. Never assume or invent its result, and don't start work that overlaps its scope. Check on it with agent_output, cancel it with agent_stop, or ask it follow-ups later with agent_send.", t.ID, subagentName, description)), nil
 			}
 
-			started := time.Now()
-			out, err := runTurn(ctx, nil, prompt)
-			if err != nil || tasks == nil {
-				return tool.Text(out), err
+			if tasks == nil {
+				out, err := run(ctx, nil)
+				return runner.inlineResult(ctx, nil, out, err)
 			}
-			if t := tasks.Adopt(description, subagentName, out, time.Since(started)); t != nil {
-				t.SetPeek(sub.MessagesSnapshot)
-				t.SetResume(func(followUp string) error {
-					return tasks.Relaunch(t, func(execCtx context.Context, tk *task.Task) (string, error) {
-						return runTurn(execCtx, tk, followUp)
-					})
-				})
-				out += fmt.Sprintf("\n(id %s — task_send continues this agent with its context intact)", t.ID)
-			}
-			return tool.Text(out), nil
+			t, out, err := tasks.RunAgent(ctx, agentID, description, subagentName, prepare, run)
+			return runner.inlineResult(ctx, t, out, err)
 		},
 	}}
 
@@ -441,24 +567,14 @@ func Tools(cfg *agent.Config, sharedContext func() string, tasks *task.Registry,
 	return agentTools
 }
 
-var effortRank = map[string]int{"none": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4, "max": 5}
-
-func clampEffort(level string, target agent.ModelOption) string {
-	if len(target.Efforts) == 0 {
-		return level
-	}
-
-	clamped := target.Efforts[0]
-	for _, supported := range target.Efforts {
-		if effortRank[supported] > effortRank[level] {
-			break
-		}
-		clamped = supported
-	}
-	return clamped
-}
-
 func applyModelOverrides(cfg *agent.Config, args map[string]any, defaultRole string) error {
+	for _, key := range []string{"model", "effort"} {
+		if raw, present := args[key]; present {
+			if value, ok := raw.(string); !ok || strings.TrimSpace(value) == "" {
+				return fmt.Errorf("%s must be a non-empty string", key)
+			}
+		}
+	}
 	resolve := cfg.RoleModel
 
 	var target agent.ModelOption
@@ -466,11 +582,25 @@ func applyModelOverrides(cfg *agent.Config, args map[string]any, defaultRole str
 	role := defaultRole
 	if model, _ := args["model"].(string); strings.TrimSpace(model) != "" {
 		role = strings.ToLower(strings.TrimSpace(model))
-		switch role {
-		case "plan", "utility":
-		default:
-			return fmt.Errorf("unknown model role %q (use plan or utility, or omit to inherit)", role)
+	}
+	switch role {
+	case "default":
+		role = ""
+	case "plan":
+		role = "complex"
+	case "", "complex", "utility":
+	default:
+		return fmt.Errorf("unknown model role %q (use default, utility, or complex)", role)
+	}
+
+	level := ""
+	hasEffortOverride := false
+	if effort, _ := args["effort"].(string); strings.TrimSpace(effort) != "" {
+		level = strings.ToLower(strings.TrimSpace(effort))
+		if !slices.Contains(model.EffortLevels(), level) {
+			return fmt.Errorf("unknown effort %q (use none, low, medium, high, xhigh, or max)", level)
 		}
+		hasEffortOverride = true
 	}
 
 	// An unresolvable role keeps the inherited model: the role is a
@@ -482,27 +612,20 @@ func applyModelOverrides(cfg *agent.Config, args map[string]any, defaultRole str
 		}
 	}
 
-	level := ""
-	if effort, _ := args["effort"].(string); strings.TrimSpace(effort) != "" {
-		level = strings.ToLower(strings.TrimSpace(effort))
-		if _, ok := effortRank[level]; !ok {
-			return fmt.Errorf("unknown effort %q (use none, low, medium, high, xhigh, or max)", level)
-		}
+	if hasEffortOverride {
 		if target.ID == "" && resolve != nil {
 			if opt, ok := resolve(""); ok {
 				target = opt
 			}
 		}
 	} else if target.ID != "" && cfg.Effort != nil {
-		// A model override also clamps the inherited effort: the session may
-		// run at a level the smaller model does not support.
-		if inherited := cfg.Effort(); inherited != clampEffort(inherited, target) {
-			level = inherited
-		}
+		// Snapshot inherited effort once, including auto, before clamping it
+		// to the overridden model. The parent may change while the child starts.
+		level = cfg.Effort()
 	}
 
-	if level != "" {
-		clamped := clampEffort(level, target)
+	if target.ID != "" || level != "" {
+		clamped := model.ClampEffort(level, target.Efforts)
 		cfg.Effort = func() string { return clamped }
 	}
 
@@ -576,7 +699,10 @@ func (c *reportCollector) tool() tool.Tool {
 			"additionalProperties": false,
 		},
 
-		Execute: func(_ context.Context, args map[string]any) (tool.Result, error) {
+		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
 			value, present := args["result"]
 			if !present {
 				return tool.Result{}, fmt.Errorf("result is required")
@@ -592,8 +718,14 @@ func (c *reportCollector) tool() tool.Tool {
 			}
 
 			c.mu.Lock()
+			defer c.mu.Unlock()
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
+			if c.result != "" {
+				return tool.Result{}, fmt.Errorf("a result has already been reported for this turn")
+			}
 			c.result = string(data)
-			c.mu.Unlock()
 
 			return tool.Text("Result recorded. End your turn."), nil
 		},
@@ -603,6 +735,9 @@ func (c *reportCollector) tool() tool.Tool {
 func runTrailer(messages []agent.Message, usage agent.Usage, elapsed time.Duration) string {
 	calls := 0
 	for _, m := range messages {
+		if m.Hidden {
+			continue
+		}
 		for _, c := range m.Content {
 			if c.ToolCall != nil {
 				calls++
@@ -632,9 +767,14 @@ func formatTokens(n int64) string {
 	}
 }
 
+// Hidden harness markers such as finish_turn follow the report; they must not
+// hide it.
 func finalText(messages []agent.Message) string {
 	lastTool := -1
 	for i, m := range messages {
+		if m.Hidden {
+			continue
+		}
 		for _, c := range m.Content {
 			if c.ToolCall != nil || c.ToolResult != nil {
 				lastTool = i
@@ -644,12 +784,12 @@ func finalText(messages []agent.Message) string {
 
 	var b strings.Builder
 	for _, m := range messages[lastTool+1:] {
-		if m.Role != agent.RoleAssistant {
+		if m.Hidden || m.Role != agent.RoleAssistant {
 			continue
 		}
 		for _, c := range m.Content {
-			if c.Text != "" {
-				b.WriteString(c.Text)
+			if c.AsText() != "" {
+				b.WriteString(c.AsText())
 			}
 		}
 	}
@@ -711,16 +851,17 @@ func readOnlyDynamicTool(t tool.Tool) tool.Tool {
 	return t
 }
 
+// Scheduling belongs to the session: a delegated task must not wake it later.
 func allowNonAgentTool(t tool.Tool) bool {
 	switch t.Name {
-	case "agent", "task_output", "task_stop", "task_send":
+	case "agent", "agent_output", "agent_stop", "agent_send", "task_output", "task_stop", "task_send", "schedule":
 		return false
 	}
 	return !t.Hidden
 }
 
 func allowReadOnlyTool(t tool.Tool) bool {
-	if t.Name == "elicit" {
+	if t.Name == "elicit" || t.Name == "ask" {
 		return false
 	}
 
@@ -744,11 +885,42 @@ func allowVerificationTool(t tool.Tool) bool {
 	}
 
 	switch t.Name {
-	case "write", "edit", "elicit":
+	case "write", "edit", "ask", "elicit":
 		return false
-	case "shell":
+	case "exec", "shell", "exec_command", "exec_session":
 		return true
 	default:
 		return t.Effect != nil && t.Effect(nil) == tool.EffectReadOnly
 	}
+}
+
+// The inline child has its own ledger, but its edits and checks belong in the
+// calling turn's review. Background tasks retain independent attribution.
+func (r *subagentRunner) reviewResult(out string) tool.Result {
+	result := tool.Text(out)
+	result.Metadata = map[string]any{agent.ChildReviewsMetadata: r.sub.TurnReviews()}
+	return result
+}
+
+func (r *subagentRunner) inlineResult(ctx context.Context, tk *task.Task, out string, err error) (tool.Result, error) {
+	// Registry execution already formats failures while preserving partial
+	// output. Untracked synchronous runs need the same treatment here.
+	if err != nil && tk == nil {
+		if out != "" {
+			out = fmt.Sprintf("error: %v\n\nOutput below is incomplete:\n%s", err, out)
+		} else {
+			return r.reviewResult(out), err
+		}
+	}
+	if tk != nil {
+		out += fmt.Sprintf("\n(id %s — agent_send continues this agent with its context intact)", tk.ID)
+	}
+	result := r.reviewResult(out)
+	result.IsError = err != nil
+	if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return result, err
+	}
+	// Returning a Go error causes the harness to replace the content. Use a
+	// failed tool result so the caller retains both findings and follow-up id.
+	return result, nil
 }

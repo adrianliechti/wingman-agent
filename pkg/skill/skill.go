@@ -3,7 +3,6 @@ package skill
 import (
 	"bytes"
 	"fmt"
-	"html"
 	"io/fs"
 	"os"
 	"path"
@@ -13,6 +12,7 @@ import (
 
 	"go.yaml.in/yaml/v4"
 
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 )
 
@@ -280,17 +280,25 @@ func splitArguments(value string) []string {
 }
 
 func Discover(root string) ([]Skill, error) {
-	return discover(projectDiscoveryRoots(root), root, true), nil
+	return discover(projectDiscoveryRoots(root), root, true, ""), nil
 }
 
 func DiscoverPersonal() ([]Skill, error) {
+	return discoverPersonal(true)
+}
+
+func discoverPersonal(report bool) ([]Skill, error) {
 	sources := layout.PersonalRoots("skills")
 	if len(sources) == 0 {
 		_, err := os.UserHomeDir()
 		return nil, err
 	}
 
-	return discover(sources, "", true), nil
+	systemRoot, err := SystemSkillsRoot()
+	if err != nil {
+		return nil, err
+	}
+	return discover(sources, "", report, systemRoot), nil
 }
 
 func MustDiscoverPersonal() []Skill {
@@ -301,18 +309,18 @@ func MustDiscoverPersonal() []Skill {
 // Rediscover repeats project discovery without reprinting diagnostics already
 // reported at startup. It is intended for runtime catalog reconciliation.
 func Rediscover(root string) ([]Skill, error) {
-	return discover(projectDiscoveryRoots(root), root, false), nil
+	return discover(projectDiscoveryRoots(root), root, false, ""), nil
 }
 
 // RediscoverPersonal repeats personal discovery without reprinting diagnostics
 // already reported at startup.
 func RediscoverPersonal() ([]Skill, error) {
-	sources := layout.PersonalRoots("skills")
-	if len(sources) == 0 {
-		_, err := os.UserHomeDir()
-		return nil, err
-	}
-	return discover(sources, "", false), nil
+	return discoverPersonal(false)
+}
+
+// SystemSkillsRoot returns Wingman's reserved bundled-skill directory.
+func SystemSkillsRoot() (string, error) {
+	return layout.WingmanPath("skills", ".system")
 }
 
 // DiscoveryRoots returns every directory that can contribute skills to a
@@ -337,28 +345,35 @@ func projectDiscoveryRoots(root string) []string {
 // LoadDir loads skills beneath dir. Directories without SKILL.md are grouping
 // directories and are traversed recursively; a skill directory is a leaf so
 // supporting resources below it cannot be mistaken for additional skills.
-// Symlinked directories are followed once, with their resolved paths used to
-// prevent cycles.
+// Symbolic links and Windows junctions are followed once, with their resolved
+// paths used to prevent cycles.
 func LoadDir(dir string) []Skill {
-	return loadDir(dir, true)
+	return loadDir(dir, true, "")
 }
 
-func loadDir(dir string, report bool) []Skill {
+func loadDir(dir string, report bool, excludedRoot string) []Skill {
 	var skills []Skill
 	visited := make(map[string]bool)
+	var excludedInfo fs.FileInfo
+	if excludedRoot != "" {
+		excludedRoot = filepath.Clean(excludedRoot)
+		excludedInfo, _ = os.Stat(excludedRoot)
+	}
 
 	var walk func(string)
 	walk = func(current string) {
-		resolved, err := filepath.EvalSymlinks(current)
-		if err != nil {
+		if excludedRoot != "" && filepath.Clean(current) == excludedRoot {
 			return
 		}
-		resolved, err = filepath.Abs(resolved)
+		resolved, err := pathutil.Resolve(current)
 		if err != nil || visited[resolved] {
 			return
 		}
 		info, err := os.Stat(resolved)
 		if err != nil || !info.IsDir() {
+			return
+		}
+		if excludedInfo != nil && os.SameFile(info, excludedInfo) {
 			return
 		}
 		visited[resolved] = true
@@ -371,6 +386,11 @@ func loadDir(dir string, report bool) []Skill {
 					fmt.Fprintf(os.Stderr, "skill: skipped %s: %v\n", skillFile, err)
 				}
 				return
+			}
+			if report {
+				if msg := DirectoryMismatchWarning(sk.Name, filepath.Base(current)); msg != "" {
+					fmt.Fprintf(os.Stderr, "skill: %s\n", msg)
+				}
 			}
 			skills = append(skills, sk)
 			return
@@ -425,12 +445,12 @@ func skillDirsThroughRepo(root, configDir string) []string {
 	return dirs
 }
 
-func discover(sources []string, relativeTo string, report bool) []Skill {
+func discover(sources []string, relativeTo string, report bool, excludedRoot string) []Skill {
 	var skills []Skill
 	seen := make(map[string]string)
 
 	for _, source := range sources {
-		for _, sk := range loadDir(source, report) {
+		for _, sk := range loadDir(source, report, excludedRoot) {
 			key := strings.ToLower(sk.Name)
 
 			if winner, ok := seen[key]; ok {
@@ -613,23 +633,39 @@ func renderPromptSkills(skills []Skill, descriptionLimit int) string {
 	var sb strings.Builder
 	fmt.Fprint(&sb, "<available_skills>\n")
 	for _, skill := range skills {
-		description := []rune(skill.Description)
-		if len(description) > descriptionLimit {
-			description = description[:descriptionLimit]
-		}
-		fmt.Fprint(&sb, formatPromptSkill(skill, string(description)))
+		fmt.Fprint(&sb, formatPromptSkill(skill, truncateDescription(skill.Description, descriptionLimit)))
 	}
 	fmt.Fprint(&sb, "</available_skills>")
 	return sb.String()
 }
 
+// A shortened description ends at a word boundary so it still reads as prose.
+func truncateDescription(description string, limit int) string {
+	runes := []rune(description)
+	if len(runes) <= limit {
+		return description
+	}
+	if limit <= 0 {
+		return ""
+	}
+	cut := string(runes[:limit])
+	if i := strings.LastIndexAny(cut, " \t\n"); i > 0 {
+		cut = cut[:i]
+	}
+	return strings.TrimRight(cut, " ,;:.-") + "…"
+}
+
+// Element text only needs markup characters escaped; entity-encoding quotes
+// would just cost tokens.
+var promptTextEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
 func formatPromptSkill(s Skill, description string) string {
 	var sb strings.Builder
 	fmt.Fprint(&sb, "  <skill>\n")
-	fmt.Fprintf(&sb, "    <name>%s</name>\n", html.EscapeString(s.Qualified()))
-	fmt.Fprintf(&sb, "    <description>%s</description>\n", html.EscapeString(description))
+	fmt.Fprintf(&sb, "    <name>%s</name>\n", promptTextEscaper.Replace(s.Qualified()))
+	fmt.Fprintf(&sb, "    <description>%s</description>\n", promptTextEscaper.Replace(description))
 	if s.Location != "" {
-		fmt.Fprintf(&sb, "    <location>%s/SKILL.md</location>\n", html.EscapeString(displayLocation(s.Location)))
+		fmt.Fprintf(&sb, "    <location>%s/SKILL.md</location>\n", promptTextEscaper.Replace(displayLocation(s.Location)))
 	}
 	fmt.Fprint(&sb, "  </skill>\n")
 	return sb.String()
@@ -656,11 +692,19 @@ func parseSkillFile(path string) (Skill, error) {
 	if err != nil {
 		return Skill{}, err
 	}
-	directoryName := filepath.Base(filepath.Dir(path))
-	if skill.Name != directoryName {
-		return Skill{}, fmt.Errorf("skill name %q must match parent directory %q", skill.Name, filepath.Base(filepath.Dir(path)))
-	}
 	return skill, nil
+}
+
+// DirectoryMismatchWarning returns a human-readable warning when a skill's
+// frontmatter name differs from its containing directory name, matching the
+// Agent Skills specification's naming convention without rejecting the skill
+// the way Claude Code and other implementations tolerate the mismatch too.
+// It returns "" when the names match.
+func DirectoryMismatchWarning(name, directoryName string) string {
+	if name == directoryName {
+		return ""
+	}
+	return fmt.Sprintf("skill name %q does not match its directory %q", name, directoryName)
 }
 
 func parseSkillData(data string) (Skill, string, error) {

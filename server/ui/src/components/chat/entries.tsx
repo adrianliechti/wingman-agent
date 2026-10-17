@@ -1,16 +1,15 @@
-import { ChevronDown, ChevronRight, LoaderCircle } from "lucide-react";
+import { VirtualOutput } from "./VirtualOutput";
 import {
-	memo,
-	useCallback,
-	useContext,
-	useEffect,
-	useRef,
-	useState,
-} from "react";
+	ChevronDown,
+	ChevronRight,
+	FileText,
+	LoaderCircle,
+} from "lucide-react";
+import { memo, useContext, useEffect, useRef, useState } from "react";
 import type { ChatEntry } from "../../hooks/useWebSocket";
-import { parseTodoItems } from "../../streamingJson";
-import type { Phase } from "../../types/protocol";
+import type { Phase, ToolLocation } from "../../types/protocol";
 import { MarkdownContent } from "../MarkdownContent";
+import { looksLikeDiffPath, shouldRenderDiff } from "./diffOutput";
 import { ToolProgressContext } from "./progress";
 
 export const EntryView = memo(function EntryView({
@@ -53,30 +52,30 @@ export const EntryView = memo(function EntryView({
 								))}
 							</div>
 						)}
-						{entry.images && entry.images.length > 0 && (
-							<div
-								className={`flex flex-wrap gap-1.5 ${entry.content || (entry.files?.length ?? 0) > 0 ? "mt-2" : ""}`}
-							>
-								{entry.images.map((src, i) => (
-									<a
-										key={`${entry.id}-img-${i}`}
-										href={src}
-										target="_blank"
-										rel="noreferrer"
-										className="block rounded overflow-hidden bg-bg-active"
-									>
-										<img
-											src={src}
-											alt="attachment"
-											className="block max-h-40 max-w-[240px] object-contain"
-										/>
-									</a>
-								))}
-							</div>
-						)}
 					</>
 				) : (
 					<MarkdownContent text={entry.content} streaming={isStreaming} />
+				)}
+				{entry.images && entry.images.length > 0 && (
+					<div
+						className={`flex flex-wrap gap-1.5 ${entry.content || (entry.files?.length ?? 0) > 0 ? "mt-2" : ""}`}
+					>
+						{entry.images.map((src, i) => (
+							<a
+								key={`${entry.id}-img-${i}`}
+								href={src}
+								target="_blank"
+								rel="noreferrer"
+								className="block rounded overflow-hidden bg-bg-active"
+							>
+								<img
+									src={src}
+									alt="attachment"
+									className="block max-h-40 max-w-[240px] object-contain"
+								/>
+							</a>
+						))}
+					</div>
 				)}
 			</div>
 		</div>
@@ -112,77 +111,30 @@ export const ToolGroupView = memo(function ToolGroupView({
 	entries,
 	isTrailing,
 	phase,
+	onOpenFile,
 }: {
 	entries: ChatEntry[];
 	isTrailing: boolean;
 	phase: Phase;
+	onOpenFile?: (path: string, line?: number) => void;
 }) {
 	return (
 		<div className="mb-4">
 			{entries.map((entry) => {
 				const running =
 					isTrailing && phase !== "idle" && entry.toolResult === undefined;
-				if (entry.toolName === "todo") {
-					return <TodoRow key={entry.id} entry={entry} running={running} />;
-				}
-				return <ToolRow key={entry.id} entry={entry} running={running} />;
+				return (
+					<ToolRow
+						key={entry.id}
+						entry={entry}
+						running={running}
+						onOpenFile={onOpenFile}
+					/>
+				);
 			})}
 		</div>
 	);
 });
-
-function TodoRow({ entry, running }: { entry: ChatEntry; running: boolean }) {
-	const items = parseTodoItems(entry.toolArgs);
-
-	if (!items.length) {
-		return <ToolRow entry={entry} running={running} />;
-	}
-
-	const completed = items.filter((it) => it.status === "completed").length;
-
-	return (
-		<div data-entry-id={entry.id} className="border-l-2 border-purple pl-3">
-			<div className="flex items-center gap-2 py-0.5 text-[12px]">
-				{running && (
-					<LoaderCircle
-						size={11}
-						className="animate-spin text-fg-dim"
-						aria-label={entry.toolPartial ? "Preparing plan" : "Updating plan"}
-					/>
-				)}
-				<span className="text-purple font-mono text-[11px]">plan</span>
-				<span className="text-fg-dim font-mono text-[11px]">
-					{completed}/{items.length}
-				</span>
-			</div>
-			<div className="flex flex-col">
-				{items.map((it, i) => (
-					<div
-						key={`${i}-${it.content}`}
-						className="flex items-start gap-1.5 text-[12px] font-mono leading-relaxed"
-					>
-						{it.status === "completed" ? (
-							<>
-								<span className="text-success">✔</span>
-								<span className="text-fg-dim line-through">{it.content}</span>
-							</>
-						) : it.status === "in_progress" ? (
-							<>
-								<span className="text-accent">□</span>
-								<span className="text-fg font-medium">{it.content}</span>
-							</>
-						) : (
-							<>
-								<span className="text-fg-dim">□</span>
-								<span className="text-fg-dim">{it.content}</span>
-							</>
-						)}
-					</div>
-				))}
-			</div>
-		</div>
-	);
-}
 
 function parseArgs(json?: string): Record<string, unknown> | null {
 	if (!json) return null;
@@ -198,29 +150,45 @@ function parseArgs(json?: string): Record<string, unknown> | null {
 const ToolRow = memo(function ToolRow({
 	entry,
 	running,
+	onOpenFile,
 }: {
 	entry: ChatEntry;
 	running: boolean;
+	onOpenFile?: (path: string, line?: number) => void;
 }) {
 	const [expanded, setExpanded] = useState(false);
 	const [showAll, setShowAll] = useState(false);
 	const [hovered, setHovered] = useState(false);
 	const displayHint = entry.toolHint ? truncate(entry.toolHint, 80) : "";
-	const isDiff = entry.toolName === "edit" || entry.toolName === "write";
-	const isShell =
-		entry.toolName === "shell" || entry.toolName === "exec_command";
 	const result = (entry.toolResult || "").replace(/\n+$/, "");
+	const isDiff = shouldRenderDiff(entry.toolKind, entry.toolName, result);
+	const args = isDiff ? null : parseArgs(entry.toolArgs);
+	const isCommandTool =
+		entry.toolName === "exec" ||
+		entry.toolName === "shell" ||
+		entry.toolName === "exec_command" ||
+		entry.toolName === "Run command" ||
+		(entry.toolKind === "execute" && typeof args?.command === "string");
+	const toolLabel =
+		entry.toolName === "exec" ||
+		entry.toolName === "shell" ||
+		entry.toolName === "exec_command"
+			? "Run command"
+			: entry.toolName;
+	const headerHint = displayHint
+		? `${isCommandTool ? "$ " : ""}${displayHint}`
+		: "";
+	const locations = entry.toolLocations ?? [];
 	const limit = isDiff ? 4000 : 2000;
 	const overflows = result.length > limit;
 	const shown = showAll ? result : truncate(result, limit);
 
 	const progressText =
 		useContext(ToolProgressContext)[entry.toolId ?? ""] ?? "";
-	const args = isDiff ? null : parseArgs(entry.toolArgs);
 	const command =
-		isShell && typeof args?.command === "string" ? args.command : "";
+		isCommandTool && typeof args?.command === "string" ? args.command : "";
 	const workdir =
-		isShell && typeof args?.workdir === "string" ? args.workdir : "";
+		isCommandTool && typeof args?.workdir === "string" ? args.workdir : "";
 	const argEntries =
 		!command && args
 			? Object.entries(args).map(([key, value]) => ({
@@ -231,7 +199,9 @@ const ToolRow = memo(function ToolRow({
 					),
 				}))
 			: [];
-	const hasCall = !!command || argEntries.length > 0;
+	const hasInputDetails = !!command || argEntries.length > 0;
+	const hasDetails = hasInputDetails || !!result;
+	const canExpand = hasDetails && !entry.toolPartial;
 
 	return (
 		<div
@@ -240,42 +210,74 @@ const ToolRow = memo(function ToolRow({
 			onMouseLeave={() => setHovered(false)}
 		>
 			<div className="border-l-2 border-purple pl-3">
-				<button
-					type="button"
-					aria-expanded={expanded}
-					className="flex w-full cursor-pointer items-center gap-2 py-0.5 text-left text-[12px] transition-colors"
-					onClick={() => setExpanded(!expanded)}
-				>
-					<span className="text-fg-dim shrink-0 flex items-center">
-						{running ? (
-							<LoaderCircle
-								size={11}
-								className="animate-spin"
-								aria-label={
-									entry.toolPartial ? "Preparing tool" : "Tool running"
-								}
-							/>
-						) : expanded ? (
-							<ChevronDown size={12} />
-						) : (
-							<ChevronRight size={12} />
-						)}
-					</span>
-					<span className="text-purple font-mono text-[11px] shrink-0">
-						{isShell ? "$" : entry.toolName}
-					</span>
-					{displayHint && (
-						<span className="text-fg-dim font-mono text-[11px] overflow-hidden text-ellipsis whitespace-nowrap flex-1">
-							{displayHint}
+				<div className="flex min-w-0 flex-nowrap items-center gap-2 overflow-hidden py-0.5">
+					<button
+						type="button"
+						aria-expanded={canExpand ? expanded : undefined}
+						aria-disabled={!canExpand}
+						tabIndex={canExpand ? 0 : -1}
+						className={`flex min-w-0 items-center gap-2 overflow-hidden text-left text-[12px] transition-colors ${
+							canExpand ? "cursor-pointer" : "cursor-default"
+						}`}
+						onClick={() => canExpand && setExpanded(!expanded)}
+					>
+						<span className="text-fg-dim flex w-3 shrink-0 items-center justify-center">
+							{running ? (
+								<LoaderCircle
+									size={11}
+									className="animate-spin"
+									aria-label={
+										entry.toolPartial ? "Preparing tool" : "Tool running"
+									}
+								/>
+							) : !canExpand ? (
+								<span
+									className="h-1 w-1 rounded-full bg-current opacity-60"
+									aria-hidden="true"
+								/>
+							) : expanded ? (
+								<ChevronDown size={12} />
+							) : (
+								<ChevronRight size={12} />
+							)}
 						</span>
+						<span className="text-purple font-mono text-[11px] shrink-0">
+							{toolLabel}
+						</span>
+						{headerHint && (
+							<span
+								className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-dim"
+								title={entry.toolHint}
+							>
+								{headerHint}
+							</span>
+						)}
+					</button>
+					{onOpenFile && locations.length > 0 && (
+						<div className="flex min-w-0 max-w-[45%] shrink-0 items-center gap-1 overflow-hidden">
+							{locations.map((location, index) => (
+								<button
+									key={`${location.path}:${location.line ?? ""}:${index}`}
+									type="button"
+									className="flex min-w-0 max-w-[260px] cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg"
+									title={location.path}
+									onClick={() => onOpenFile(location.path, location.line)}
+								>
+									<FileText size={10} className="shrink-0" />
+									<span className="truncate">
+										{toolLocationLabel(location)}
+									</span>
+								</button>
+							))}
+						</div>
 					)}
-				</button>
+				</div>
 				{running && progressText && (
 					<div className="pl-5 text-[11px] text-fg-dim font-mono italic overflow-hidden text-ellipsis whitespace-nowrap">
 						{progressText}
 					</div>
 				)}
-				{expanded && (
+				{expanded && canExpand && (
 					<div
 						className={`mt-1 px-3 py-2 text-[11px] whitespace-pre-wrap break-all text-fg-dim bg-bg-surface rounded-md font-mono leading-relaxed ${
 							showAll ? "max-h-[50vh] overflow-y-auto overscroll-contain" : ""
@@ -296,20 +298,24 @@ const ToolRow = memo(function ToolRow({
 								</div>
 							))
 						)}
-						{hasCall && <div className="my-1.5 h-px bg-border-subtle" />}
-						{result ? (
-							isDiff ? (
+						{hasInputDetails && result && (
+							<div className="my-1.5 h-px bg-border-subtle" />
+						)}
+						{result &&
+							(showAll && result.length > 12000 ? (
+								<VirtualOutput
+									text={result}
+									lineClass={isDiff ? diffLineClass : undefined}
+								/>
+							) : isDiff ? (
 								<DiffText text={shown} />
 							) : (
 								shown
-							)
-						) : (
-							<span className="italic opacity-70">(no output)</span>
-						)}
+							))}
 					</div>
 				)}
 			</div>
-			{expanded && entry.toolResult && (
+			{expanded && result && (
 				<div className="pl-3 h-4 mt-0.5 flex items-center gap-3">
 					{overflows && (
 						<button
@@ -322,7 +328,9 @@ const ToolRow = memo(function ToolRow({
 								: `Show all (${formatChars(result.length)})`}
 						</button>
 					)}
-					{hovered && <CopyTextButton text={entry.toolResult} label="Copy" />}
+					{hovered && (
+						<CopyTextButton text={entry.toolResult ?? ""} label="Copy" />
+					)}
 				</div>
 			)}
 		</div>
@@ -331,23 +339,53 @@ const ToolRow = memo(function ToolRow({
 
 function DiffText({ text }: { text: string }) {
 	return (
-		<>
+		<div className="-mx-3">
 			{text.split("\n").map((line, i) => (
 				<div
 					key={`${i}-${line.slice(0, 24)}`}
-					className={
-						line.startsWith("+")
-							? "text-success"
-							: line.startsWith("-")
-								? "text-danger"
-								: undefined
-					}
+					className={`px-3 ${diffLineClass(line)}`}
 				>
 					{line || " "}
 				</div>
 			))}
-		</>
+		</div>
 	);
+}
+
+function diffLineClass(line: string): string {
+	if (
+		line.startsWith("diff ") ||
+		line.startsWith("index ") ||
+		line.startsWith("---") ||
+		line.startsWith("+++")
+	) {
+		return "text-fg-muted";
+	}
+	if (line.startsWith("@@")) {
+		return "text-purple bg-[rgba(197,134,192,0.08)]";
+	}
+	if (line.startsWith("*** ")) {
+		return "text-purple bg-[rgba(197,134,192,0.08)]";
+	}
+	if (line.startsWith("+")) {
+		return "text-success bg-[rgba(78,201,176,0.08)]";
+	}
+	if (line.startsWith("-")) {
+		return "text-danger bg-[rgba(244,135,113,0.08)]";
+	}
+	if (looksLikeDiffPath(line)) {
+		return "border-y border-border-subtle bg-bg-active/50 text-fg font-medium";
+	}
+	if (line.startsWith("\\ No newline")) {
+		return "text-fg-dim italic";
+	}
+	return "";
+}
+
+function toolLocationLabel(location: ToolLocation): string {
+	const name = location.path.replaceAll("\\", "/").split("/").pop();
+	const label = name || location.path;
+	return location.line ? `${label}:${location.line}` : label;
 }
 
 function truncate(text: string, max: number): string {
@@ -379,20 +417,17 @@ function CopyTextButton({
 		[],
 	);
 
-	const handleClick = useCallback(
-		(e: React.MouseEvent<HTMLButtonElement>) => {
-			e.stopPropagation();
-			navigator.clipboard
-				.writeText(text)
-				.then(() => {
-					setCopied(true);
-					if (timer.current) window.clearTimeout(timer.current);
-					timer.current = window.setTimeout(() => setCopied(false), 1200);
-				})
-				.catch(() => {});
-		},
-		[text],
-	);
+	const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+		e.stopPropagation();
+		navigator.clipboard
+			.writeText(text)
+			.then(() => {
+				setCopied(true);
+				if (timer.current) window.clearTimeout(timer.current);
+				timer.current = window.setTimeout(() => setCopied(false), 1200);
+			})
+			.catch(() => {});
+	};
 
 	return (
 		<button

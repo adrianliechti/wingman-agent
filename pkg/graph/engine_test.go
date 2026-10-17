@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -111,6 +112,59 @@ func TestSearchPagination(t *testing.T) {
 	if first.Nodes[0].ID == second.Nodes[0].ID || first.Nodes[1].ID == second.Nodes[0].ID {
 		t.Fatalf("pagination repeated a result: first=%v second=%v", first.Nodes, second.Nodes)
 	}
+}
+
+func TestQueriesDuringIndexPublication(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := t.Context()
+	if _, err := e.Index(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Go(func() {
+			<-start
+			for range 30 {
+				nodes, err := e.Search(ctx, SearchOpts{Query: "greet"})
+				if err != nil || len(nodes) != 1 || nodes[0].Name != "greet" {
+					t.Errorf("search during indexing: %v, %v", nodes, err)
+					return
+				}
+				trace, err := e.Trace(ctx, "main", "format", "", false, 8)
+				if err != nil || len(trace.Paths) == 0 {
+					t.Errorf("trace during indexing: %+v, %v", trace, err)
+					return
+				}
+				profiles, err := e.ModuleProfiles(ctx, []string{"."}, 20)
+				if err != nil || len(profiles["."].Symbols) == 0 {
+					t.Errorf("profiles during indexing: %v, %v", profiles, err)
+					return
+				}
+				content, err := e.SearchContent(ctx, ContentSearchOpts{Pattern: "greet"})
+				if err != nil || content.TotalLineHits == 0 {
+					t.Errorf("content search during indexing: %+v, %v", content, err)
+					return
+				}
+				if e.checkStale(ctx) {
+					t.Error("unchanged files reported stale during indexing")
+					return
+				}
+			}
+		})
+	}
+	workers.Go(func() {
+		<-start
+		for range 10 {
+			if _, err := e.Index(ctx); err != nil {
+				t.Errorf("concurrent index: %v", err)
+				return
+			}
+		}
+	})
+	close(start)
+	workers.Wait()
 }
 
 func TestSearchSortingAndUnlimitedResults(t *testing.T) {

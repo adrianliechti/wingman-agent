@@ -22,13 +22,20 @@ func TestLauncherSmoke(t *testing.T) {
 
 	get := func(path string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		req := httptest.NewRequest("GET", "http://localhost"+path, nil)
+		if app.server != nil {
+			req.Header.Set("X-Wingman-Instance", app.server.InstanceID())
+		}
+		app.ServeHTTP(rec, req)
 		return rec
 	}
 
 	post := func(path, body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("POST", path, strings.NewReader(body))
+		req := httptest.NewRequest("POST", "http://localhost"+path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		if app.server != nil {
+			req.Header.Set("X-Wingman-Instance", app.server.InstanceID())
+		}
 		rec := httptest.NewRecorder()
 		app.ServeHTTP(rec, req)
 		return rec
@@ -37,7 +44,13 @@ func TestLauncherSmoke(t *testing.T) {
 	if rec := get("/"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Wingman Agent") {
 		t.Fatalf("start page: %d", rec.Code)
 	} else if !strings.Contains(rec.Body.String(), "--shell-window-drag: drag") {
-		t.Fatal("start page has no macOS window drag region")
+		t.Fatal("start page has no window drag region")
+	} else if !strings.Contains(rec.Body.String(), `data-window-chrome="windows-overlay"`) {
+		t.Fatal("start page has no app-owned Windows menu")
+	} else if !strings.Contains(rec.Body.String(), "window.shell?.platform") {
+		t.Fatal("start page does not consume the injected shell environment")
+	} else if strings.Contains(rec.Body.String(), "shell_chrome") {
+		t.Fatal("start page still depends on URL-based shell detection")
 	}
 
 	if rec := get("/app/workspaces"); rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "null" {
@@ -77,10 +90,38 @@ func TestLauncherSmoke(t *testing.T) {
 		t.Fatalf("second open should fail")
 	}
 
+	stale := httptest.NewRequest("POST", "http://localhost/app/workspaces/open", strings.NewReader(`{"path":"`+workspace+`","replace":true}`))
+	stale.Header.Set("X-Wingman-Instance", "old-instance")
+	rejected := httptest.NewRecorder()
+	app.ServeHTTP(rejected, stale)
+	if rejected.Code != http.StatusConflict {
+		t.Fatalf("stale workspace replacement: %d", rejected.Code)
+	}
 	replacement := t.TempDir()
 	if rec := post("/app/workspaces/open", `{"path":"`+replacement+`","replace":true}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("replace workspace: %d %q", rec.Code, rec.Body.String())
 	}
 
 	app.shutdown()
+}
+
+func TestLauncherRejectsRebindingAndCrossOriginCommands(t *testing.T) {
+	app := &App{}
+	handler := app.newLauncher()
+	for _, path := range []string{"/", "/app/workspaces", "/app/workspaces/open"} {
+		request := httptest.NewRequest("POST", "http://attacker.example"+path, nil)
+		request.Header.Set("Origin", "http://attacker.example")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("host check allowed %s: %d", path, response.Code)
+		}
+	}
+	request := httptest.NewRequest("POST", "http://localhost/app/workspaces/open", nil)
+	request.Header.Set("Origin", "https://attacker.example")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin command allowed: %d", response.Code)
+	}
 }

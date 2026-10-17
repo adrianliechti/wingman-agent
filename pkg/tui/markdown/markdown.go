@@ -13,10 +13,20 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
+// Options supplies the available content width and workspace for file links.
+type Options struct {
+	Width     int
+	Directory string
+}
+
 // Render converts markdown to ANSI-styled terminal text. An unterminated
 // trailing code fence (mid-stream) is still highlighted live.
-func Render(text string) string {
+func Render(text string, options ...Options) string {
 	t := theme.Default
+	var settings Options
+	if len(options) > 0 {
+		settings = options[0]
+	}
 
 	completeText := text
 	incompleteCode := ""
@@ -40,7 +50,7 @@ func Render(text string) string {
 		goldmark.WithRenderer(
 			renderer.NewRenderer(
 				renderer.WithNodeRenderers(
-					util.Prioritized(NewANSIRenderer(), 100),
+					util.Prioritized(NewANSIRenderer(settings), 100),
 				),
 			),
 		),

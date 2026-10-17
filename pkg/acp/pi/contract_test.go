@@ -26,8 +26,8 @@ func TestACPContract(t *testing.T) {
 
 func newContractAgent(t *testing.T) acptest.Agent {
 	t.Helper()
-	script, dir, env := acptest.CommandHelper(t, "TestPiContractHelper", "PI_CONTRACT_HELPER")
-	return New(Options{Path: script, Dir: dir, Env: env})
+	script, _, env := acptest.CommandHelper(t, "TestPiContractHelper", "PI_CONTRACT_HELPER")
+	return New(Options{Path: script, Env: env})
 }
 
 func TestPiContractHelper(t *testing.T) {
@@ -65,8 +65,11 @@ func runPiContractHelper() {
 			})
 		case "get_available_thinking_levels":
 			writePiResponse(req.ID, map[string]any{"levels": []string{"off", "medium", "max"}})
-		case "set_model", "set_thinking_level", "abort":
+		case "set_model", "set_thinking_level":
 			writePiResponse(req.ID, map[string]any{})
+		case "abort":
+			writePiResponse(req.ID, map[string]any{})
+			writePiContract(map[string]any{"type": "agent_settled"})
 		case "clone":
 			cloned = true
 			writePiResponse(req.ID, map[string]any{"cancelled": false})
@@ -106,7 +109,7 @@ func TestForkSessionUsesPiCloneWithoutReplacingSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	agent := New(Options{Path: script, Dir: dir, Env: env, SessionsDir: sessionsDir})
+	agent := New(Options{Path: script, Env: env, SessionsDir: sessionsDir})
 	defer agent.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

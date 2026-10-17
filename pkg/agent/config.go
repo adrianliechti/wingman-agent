@@ -2,18 +2,22 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/responses"
 
+	"github.com/adrianliechti/wingman-agent/internal/provider"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
+	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
 )
 
 const (
@@ -23,10 +27,21 @@ const (
 
 	DefaultContextWindow = 400_000
 
-	DefaultReserveTokens = 32_000
+	DefaultReserveTokens     = 32_000
+	DefaultOutputTokenBudget = 64_000
+
+	// Leave room for reasoning as well as extracted lists and code. This is
+	// a ceiling; utility helpers can finish well below it.
+	DefaultUtilityOutputTokenBudget = 64_000
 )
 
 func ContextWindowFor(id string) int {
+	if value := strings.TrimSpace(os.Getenv("WINGMAN_CONTEXT_WINDOW")); value != "" {
+		if window, err := strconv.Atoi(value); err == nil && window > 0 {
+			return window
+		}
+	}
+
 	if candidate, ok := model.Find(id); ok {
 		window := candidate.ContextTokens()
 		if window > 0 {
@@ -35,6 +50,21 @@ func ContextWindowFor(id string) int {
 	}
 
 	return DefaultContextWindow
+}
+
+// outputTokenBudgetFor clamps a per-response allowance, including reasoning,
+// to the model's advertised output limit. Unknown limits leave the provider
+// default in effect unless an explicit budget is supplied.
+func (c *Config) outputTokenBudgetFor(id string) int {
+	budget := c.OutputTokenBudget
+	m, ok := model.Find(id)
+	if !ok || m.OutputTokens() <= 0 {
+		return max(0, budget)
+	}
+	if budget <= 0 {
+		budget = DefaultOutputTokenBudget
+	}
+	return min(budget, m.OutputTokens())
 }
 
 // ModelOption is a resolved model role. Efforts lists the supported reasoning
@@ -47,12 +77,30 @@ type ModelOption struct {
 type Config struct {
 	client *openai.Client
 
+	// Telemetry instruments agent, model, and tool operations. DefaultConfig
+	// initializes it when standard OTEL exporter variables are present. Library
+	// callers may inject a separately configured pipeline instead.
+	Telemetry *telemetry.Telemetry
+
 	Model        func() string
 	Effort       func() string
 	Tools        func() []tool.Tool
 	Instructions func() string
 
-	// RoleModel resolves "main", "plan", and "utility" role models. An empty
+	// PermissionMode reports the active mode for hooks at each request boundary.
+	PermissionMode func() string
+
+	// RequireFinish enables the explicit finish_turn protocol for a model.
+	// Text-only replies cannot end Send when enabled. Structured output and
+	// native refusals use their own completion semantics.
+	RequireFinish func(model string) bool
+
+	// ContextInstructions supplies mutable session guidance (environment,
+	// project instructions, memory, skills). Changes append a replacement
+	// snapshot to history instead of rewriting the cached Instructions prefix.
+	ContextInstructions func() string
+
+	// RoleModel resolves "default", "complex", and "utility" role models. An empty
 	// role names the currently inherited model and is used for effort clamping.
 	// ok=false or an empty ID keeps the inherited model. Nil disables role
 	// overrides.
@@ -69,6 +117,19 @@ type Config struct {
 	// negative disables the safety bound.
 	MaxTurns int
 
+	// OutputTokenBudget limits tokens generated per main-agent response,
+	// including reasoning, and is clamped to a known model output limit.
+	// Zero uses DefaultOutputTokenBudget for known limits and the provider
+	// default otherwise. Utility helpers retain their own output budgets.
+	OutputTokenBudget int
+
+	// MaxTaskTokens limits cumulative reported input + output tokens per task,
+	// including inline agents, retries and utility calls. Zero is unlimited.
+	MaxTaskTokens int64
+	// MaxTaskDuration includes inference, tools, retries and approval waits.
+	// Zero is unlimited. ToolTimeout remains an independent per-tool limit.
+	MaxTaskDuration time.Duration
+
 	// MaxParallelTools bounds concurrently executing read-only tool calls.
 	// Zero uses the default; negative allows the whole emitted batch.
 	MaxParallelTools int
@@ -82,14 +143,33 @@ type Config struct {
 	ReserveTokens int
 }
 
+func (c *Config) hookRuntime(ctx context.Context) hook.Runtime {
+	runtime := hook.RuntimeFromContext(ctx)
+	runtime.Model, runtime.ReasoningEffort = "", ""
+	if c.Model != nil {
+		runtime.Model = c.Model()
+	}
+	if c.Effort != nil {
+		runtime.ReasoningEffort = c.Effort()
+	}
+	if c.PermissionMode != nil {
+		runtime.PermissionMode = c.PermissionMode()
+	}
+	return runtime
+}
+
 func (c *Config) Derive() *Config {
 	return &Config{
-		client:       c.client,
-		Model:        c.Model,
-		Effort:       c.Effort,
-		Tools:        c.Tools,
-		Instructions: c.Instructions,
-		RoleModel:    c.RoleModel,
+		client:              c.client,
+		Telemetry:           c.Telemetry,
+		Model:               c.Model,
+		Effort:              c.Effort,
+		Tools:               c.Tools,
+		Instructions:        c.Instructions,
+		PermissionMode:      c.PermissionMode,
+		RequireFinish:       c.RequireFinish,
+		ContextInstructions: c.ContextInstructions,
+		RoleModel:           c.RoleModel,
 
 		CacheKey: c.CacheKey,
 
@@ -97,19 +177,23 @@ func (c *Config) Derive() *Config {
 		// session. Tool, permission, compaction, and subagent lifecycle hooks
 		// also run inside delegated agents, matching Codex hook scoping.
 		Hooks: hook.Hooks{
-			PreToolUse:        slices.Clone(c.Hooks.PreToolUse),
-			PermissionRequest: slices.Clone(c.Hooks.PermissionRequest),
-			PostToolUse:       slices.Clone(c.Hooks.PostToolUse),
-			SubagentStart:     slices.Clone(c.Hooks.SubagentStart),
-			SubagentStop:      slices.Clone(c.Hooks.SubagentStop),
-			PreCompact:        slices.Clone(c.Hooks.PreCompact),
-			PostCompact:       slices.Clone(c.Hooks.PostCompact),
-			Stop:              slices.Clone(c.Hooks.Stop),
+			PreToolUse:          slices.Clone(c.Hooks.PreToolUse),
+			PermissionRequest:   slices.Clone(c.Hooks.PermissionRequest),
+			PostToolUse:         slices.Clone(c.Hooks.PostToolUse),
+			TransformToolResult: slices.Clone(c.Hooks.TransformToolResult),
+			SubagentStart:       slices.Clone(c.Hooks.SubagentStart),
+			SubagentStop:        slices.Clone(c.Hooks.SubagentStop),
+			PreCompact:          slices.Clone(c.Hooks.PreCompact),
+			PostCompact:         slices.Clone(c.Hooks.PostCompact),
+			Stop:                slices.Clone(c.Hooks.Stop),
 		},
 
-		MaxTurns:         c.MaxTurns,
-		MaxParallelTools: c.MaxParallelTools,
-		ToolTimeout:      c.ToolTimeout,
+		MaxTurns:          c.MaxTurns,
+		OutputTokenBudget: c.OutputTokenBudget,
+		MaxTaskTokens:     c.MaxTaskTokens,
+		MaxTaskDuration:   c.MaxTaskDuration,
+		MaxParallelTools:  c.MaxParallelTools,
+		ToolTimeout:       c.ToolTimeout,
 
 		ContextWindow: c.ContextWindow,
 		ReserveTokens: c.ReserveTokens,
@@ -130,41 +214,51 @@ func (c *Config) utilityModelName() string {
 
 // Utility runs a one-shot completion on the utility model (falling back to the
 // main model) and credits its token usage to the session through the context's
-// usage sink. It backs internal helpers such as fetch page extraction.
+// usage sink.
 func (c *Config) Utility(ctx context.Context, instructions, input string) (string, error) {
-	resp, err := c.client.Responses.New(ctx, responses.ResponseNewParams{
-		Model:        c.utilityModelName(),
-		Instructions: openai.String(instructions),
-		Input: responses.ResponseNewParamsInputUnion{
-			OfString: openai.String(input),
-		},
-		Store: openai.Bool(false),
-	})
-
-	if err != nil {
-		return "", err
+	modelID := c.utilityModelName()
+	outputTokens := DefaultUtilityOutputTokenBudget
+	if m, ok := model.Find(modelID); ok && m.OutputTokens() > 0 {
+		outputTokens = min(outputTokens, m.OutputTokens())
 	}
-
-	usage := responseToUsage(*resp)
-	tool.ReportUsage(ctx, tool.UsageDelta{
-		InputTokens:  usage.InputTokens,
-		CachedTokens: usage.CachedTokens,
-		OutputTokens: usage.OutputTokens,
+	result, err := c.Generate(ctx, GenerateOptions{
+		Model:           modelID,
+		Effort:          utilityEffort(modelID),
+		Instructions:    instructions,
+		Input:           input,
+		MaxOutputTokens: int64(outputTokens),
 	})
+	reportUsage(ctx, result.Usage)
+	return result.Text, err
+}
 
-	return strings.TrimSpace(recoverySummaryOutput(resp)), nil
+func utilityEffort(modelID string) string {
+	if m, ok := model.Find(modelID); ok && slices.Contains(m.Efforts, "low") {
+		return "low"
+	}
+	return ""
+}
+
+func reportUsage(ctx context.Context, usage Usage) {
+	tool.ReportUsage(ctx, tool.UsageDelta{
+		InputTokens:              usage.InputTokens,
+		OutputTokens:             usage.OutputTokens,
+		ReasoningTokens:          usage.ReasoningTokens,
+		CacheReadInputTokens:     usage.CacheReadInputTokens,
+		CacheCreationInputTokens: usage.CacheCreationInputTokens,
+	})
 }
 
 func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {
-	resp, err := c.client.Models.List(ctx)
+	ids, err := provider.ModelIDs(ctx, *c.client)
 	if err != nil {
 		return nil, err
 	}
 
 	var models []ModelInfo
 
-	for _, m := range resp.Data {
-		models = append(models, ModelInfo{ID: m.ID})
+	for _, id := range ids {
+		models = append(models, ModelInfo{ID: id})
 	}
 
 	return models, nil
@@ -172,14 +266,67 @@ func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {
 
 func DefaultConfig() (*Config, error) {
 	client := createClient()
-
 	cfg := &Config{client: &client}
+	if value := strings.TrimSpace(os.Getenv("WINGMAN_OUTPUT_TOKEN_BUDGET")); value != "" {
+		budget, err := strconv.Atoi(value)
+		if err != nil || budget < 0 {
+			return nil, fmt.Errorf("WINGMAN_OUTPUT_TOKEN_BUDGET must be a nonnegative integer")
+		}
+		cfg.OutputTokenBudget = budget
+	}
+	if err := cfg.loadTaskLimits(); err != nil {
+		return nil, err
+	}
+	tel, err := telemetry.NewFromEnvironment(context.Background(), defaultTelemetryOptions())
+	if err != nil {
+		return nil, fmt.Errorf("configure OpenTelemetry: %w", err)
+	}
+
+	cfg.Telemetry = tel
 
 	if model := DefaultModel(); model != "" {
 		cfg.Model = func() string { return model }
 	}
 
 	return cfg, nil
+}
+
+func defaultTelemetryOptions() telemetry.Options {
+	baseURL, _ := clientConfig()
+	provider := "wingman"
+	switch {
+	case envPresent("WINGMAN_URL"):
+		provider = "wingman"
+	case envPresent("OPENAI_API_KEY"):
+		provider = "openai"
+	case envPresent("OPENROUTER_API_KEY"):
+		provider = "openrouter"
+	case envPresent("OLLAMA_HOST") || envPresent("OLLAMA_API_KEY"):
+		provider = "ollama"
+	}
+
+	opts := telemetry.Options{
+		AgentName:    "wingman",
+		ProviderName: provider,
+	}
+	if parsed, err := url.Parse(baseURL); err == nil {
+		opts.ServerAddress = parsed.Hostname()
+		if port := parsed.Port(); port != "" {
+			opts.ServerPort, _ = strconv.Atoi(port)
+		} else {
+			switch strings.ToLower(parsed.Scheme) {
+			case "http":
+				opts.ServerPort = 80
+			case "https":
+				opts.ServerPort = 443
+			}
+		}
+	}
+	return opts
+}
+
+func envPresent(name string) bool {
+	return strings.TrimSpace(os.Getenv(name)) != ""
 }
 
 // DefaultModel returns the model requested via environment; WINGMAN_MODEL
@@ -192,11 +339,18 @@ func DefaultModel() string {
 	return os.Getenv("OPENAI_DEFAULT_MODEL")
 }
 
-// DefaultPlanModel returns the model for plan mode; empty selects the largest
-// available model automatically.
-func DefaultPlanModel() string {
+// DefaultComplexModel selects the model for explicit complex subagent tasks.
+// WINGMAN_MODEL_PLAN remains a legacy alias; neither setting changes Plan mode.
+func DefaultComplexModel() string {
+	if v := os.Getenv("WINGMAN_MODEL_COMPLEX"); v != "" {
+		return v
+	}
 	return os.Getenv("WINGMAN_MODEL_PLAN")
 }
+
+// DefaultPlanModel is the legacy name for DefaultComplexModel.
+// Deprecated: use DefaultComplexModel. Plan mode uses the selected model.
+func DefaultPlanModel() string { return DefaultComplexModel() }
 
 // DefaultUtilityModel returns the model for internal utility calls (recaps,
 // compaction summaries); empty selects the smallest available automatically.
@@ -205,17 +359,15 @@ func DefaultUtilityModel() string {
 }
 
 // DefaultEffort returns the reasoning effort requested via WINGMAN_EFFORT.
-// Empty (or "auto") leaves the role-based default in place. Unrecognized
+// Empty (or "auto") leaves the model's default in place. Unrecognized
 // values are ignored so a typo cannot silently pin an unexpected effort.
 func DefaultEffort() string {
 	return effortFromEnv("WINGMAN_EFFORT")
 }
 
-// DefaultPlanEffort returns the reasoning effort for plan mode requested via
-// WINGMAN_EFFORT_PLAN; empty uses the role-based default.
-func DefaultPlanEffort() string {
-	return effortFromEnv("WINGMAN_EFFORT_PLAN")
-}
+// DefaultPlanEffort is retained for source compatibility.
+// Deprecated: use DefaultEffort. Agent and Plan share their effort setting.
+func DefaultPlanEffort() string { return DefaultEffort() }
 
 func effortFromEnv(name string) string {
 	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(name))); v {
@@ -257,30 +409,25 @@ func clientConfig() (baseURL, token string) {
 		}
 	}
 
-	return "http://localhost:4242/v1", "-"
+	baseURL, token = provider.Wingman("", "")
+	return baseURL + "/v1", token
 }
 
 func wingmanConfig() (baseURL, token string, ok bool) {
-	url, ok := os.LookupEnv("WINGMAN_URL")
-	if !ok {
+	if !envPresent("WINGMAN_URL") {
 		return "", "", false
 	}
-
-	token = os.Getenv("WINGMAN_TOKEN")
-	if token == "" {
-		token = "-"
-	}
-
-	return strings.TrimRight(url, "/") + "/v1", token, true
+	baseURL, token = provider.Wingman("", "")
+	return baseURL + "/v1", token, true
 }
 
 func openAIConfig() (baseURL, token string, ok bool) {
-	token, ok = os.LookupEnv("OPENAI_API_KEY")
-	if !ok {
+	token = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	if token == "" {
 		return "", "", false
 	}
 
-	baseURL = os.Getenv("OPENAI_BASE_URL")
+	baseURL = strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
@@ -289,8 +436,8 @@ func openAIConfig() (baseURL, token string, ok bool) {
 }
 
 func openRouterConfig() (baseURL, token string, ok bool) {
-	token, ok = os.LookupEnv("OPENROUTER_API_KEY")
-	if !ok {
+	token = strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
+	if token == "" {
 		return "", "", false
 	}
 
@@ -298,8 +445,8 @@ func openRouterConfig() (baseURL, token string, ok bool) {
 }
 
 func ollamaConfig() (baseURL, token string, ok bool) {
-	host := os.Getenv("OLLAMA_HOST")
-	token = os.Getenv("OLLAMA_API_KEY")
+	host := strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
+	token = strings.TrimSpace(os.Getenv("OLLAMA_API_KEY"))
 	if host == "" && token == "" {
 		return "", "", false
 	}

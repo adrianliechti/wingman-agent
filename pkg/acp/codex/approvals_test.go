@@ -50,7 +50,7 @@ func TestPermissionsApprovalDispatchAndSafeFallback(t *testing.T) {
 	c := &codexClient{handlers: make(map[string]*threadHandlers)}
 	called := false
 	c.setThreadHandlers("thread-1", &threadHandlers{
-		onPermissionsApproval: func(p permissionsApprovalParams) permissionsApprovalResponse {
+		onPermissionsApproval: func(_ context.Context, p permissionsApprovalParams) permissionsApprovalResponse {
 			called = true
 			if p.ItemID != "permission-1" || p.Permissions["network"] == nil {
 				t.Fatalf("params = %#v", p)
@@ -76,6 +76,35 @@ func TestPermissionsApprovalDispatchAndSafeFallback(t *testing.T) {
 	}
 }
 
+func TestMessageOnlyElicitations(t *testing.T) {
+	tests := []struct {
+		name   string
+		params elicitationParams
+		want   bool
+	}{
+		{name: "form without schema", params: elicitationParams{Mode: "form"}, want: true},
+		{name: "null schema", params: elicitationParams{Mode: "form", RequestedSchema: json.RawMessage(`null`)}, want: true},
+		{name: "empty object", params: elicitationParams{Mode: "form", RequestedSchema: json.RawMessage(`{"type":"object","properties":{}}`)}, want: true},
+		{name: "structured field", params: elicitationParams{Mode: "form", RequestedSchema: json.RawMessage(`{"type":"object","properties":{"code":{"type":"string"}},"required":["code"]}`)}},
+		{name: "openai form mode is no longer offered", params: elicitationParams{Mode: "openai/form"}},
+		{name: "missing properties", params: elicitationParams{Mode: "form", RequestedSchema: json.RawMessage(`{"type":"object"}`)}},
+		{name: "null properties", params: elicitationParams{Mode: "form", RequestedSchema: json.RawMessage(`{"type":"object","properties":null}`)}},
+		{name: "unknown mode", params: elicitationParams{Mode: "unknown"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isMessageOnlyElicitation(tt.params); got != tt.want {
+				t.Errorf("isMessageOnlyElicitation(%#v) = %v, want %v", tt.params, got, tt.want)
+			}
+		})
+	}
+
+	structured := elicitationParams{Mode: "form", RequestedSchema: json.RawMessage(`{"type":"object","properties":{"code":{"type":"string"}}}`)}
+	if got := (&approver{}).handleElicitation(structured); got.Action != "decline" {
+		t.Fatalf("structured fallback action = %q, want decline", got.Action)
+	}
+}
+
 func TestPermissionsGrantMetadata(t *testing.T) {
 	permissions := map[string]any{
 		"network": map[string]any{"enabled": true},
@@ -94,6 +123,29 @@ func TestPermissionsGrantMetadata(t *testing.T) {
 	granted := grantedPermissions(map[string]any{"network": permissions["network"], "unknown": true})
 	if granted["network"] == nil || granted["unknown"] != nil {
 		t.Fatalf("granted permissions = %#v", granted)
+	}
+}
+
+func TestPermissionsToolCallUsesOneReadableRepresentation(t *testing.T) {
+	tc := permissionsToolCall(permissionsApprovalParams{
+		ItemID: "permission-1",
+		Reason: "The command needs network access.",
+		Permissions: map[string]any{
+			"network": map[string]any{"enabled": true},
+		},
+	})
+	if tc.Title == nil || *tc.Title != "Permissions request" {
+		t.Fatalf("title = %#v", tc.Title)
+	}
+	if tc.RawInput != nil {
+		t.Fatalf("internal request duplicated as raw input: %#v", tc.RawInput)
+	}
+	if len(tc.Content) != 1 || tc.Content[0].Content == nil {
+		t.Fatalf("content = %#v", tc.Content)
+	}
+	text := tc.Content[0].Content.Content.Text
+	if text == nil || text.Text != "The command needs network access.\n\nNetwork Access: true" {
+		t.Fatalf("content text = %#v", text)
 	}
 }
 
@@ -116,4 +168,83 @@ func permissionDescription(option acp.PermissionOption) string {
 	}
 	description, _ := changes[0]["description"].(string)
 	return description
+}
+
+func TestCommandApprovalChoicesFollowAvailableDecisions(t *testing.T) {
+	tests := []struct {
+		name      string
+		params    string
+		wantIDs   []acp.PermissionOptionId
+		wantNames []string
+	}{
+		{
+			name:      "absent keeps legacy options",
+			params:    `{"itemId":"cmd"}`,
+			wantIDs:   []acp.PermissionOptionId{optionAllowOnce, optionAllowAlways, optionRejectOnce},
+			wantNames: []string{"Allow Once", "Allow for Session", "Reject"},
+		},
+		{
+			name:      "null keeps legacy options",
+			params:    `{"itemId":"cmd","availableDecisions":null}`,
+			wantIDs:   []acp.PermissionOptionId{optionAllowOnce, optionAllowAlways, optionRejectOnce},
+			wantNames: []string{"Allow Once", "Allow for Session", "Reject"},
+		},
+		{
+			name:      "write stdin",
+			params:    `{"kind":"writeStdin","itemId":"cmd","approvalId":"a1","availableDecisions":["accept","cancel"]}`,
+			wantIDs:   []acp.PermissionOptionId{optionAllowOnce, optionCancel},
+			wantNames: []string{"Allow Once", "Reject"},
+		},
+		{
+			name:      "execpolicy object",
+			params:    `{"itemId":"cmd","proposedExecpolicyAmendment":["npm","test"],"availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["npm","test"]}},"cancel"]}`,
+			wantIDs:   []acp.PermissionOptionId{optionAllowOnce, optionExecpolicyAmendment, optionCancel},
+			wantNames: []string{"Allow Once", "Allow Commands Starting With `npm test`", "Reject"},
+		},
+		{
+			name:      "decline and cancel",
+			params:    `{"itemId":"cmd","networkApprovalContext":{"host":"example.com"},"availableDecisions":["accept","acceptForSession",{"applyNetworkPolicyAmendment":{"network_policy_amendment":{"host":"example.com","action":"deny"}}},"decline","cancel"]}`,
+			wantIDs:   []acp.PermissionOptionId{optionAllowOnce, optionAllowAlways, "apply-network-policy-amendment:0", optionRejectOnce, optionCancel},
+			wantNames: []string{"Allow Once", "Allow Host for Session", "Block example.com in the Future", "Reject", "Reject and Stop"},
+		},
+		{
+			name:    "unknown decisions are skipped",
+			params:  `{"itemId":"cmd","availableDecisions":["accept","somethingNew",{"unknown":{}},"cancel"]}`,
+			wantIDs: []acp.PermissionOptionId{optionAllowOnce, optionCancel},
+		},
+		{
+			name:   "empty offers nothing",
+			params: `{"itemId":"cmd","availableDecisions":[]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var p execApprovalParams
+			if err := json.Unmarshal([]byte(tt.params), &p); err != nil {
+				t.Fatal(err)
+			}
+			choices := commandApprovalChoices(p)
+			if len(choices) != len(tt.wantIDs) {
+				t.Fatalf("choices = %#v, want %v", choices, tt.wantIDs)
+			}
+			for i, choice := range choices {
+				if choice.option.OptionId != tt.wantIDs[i] {
+					t.Errorf("option %d = %q, want %q", i, choice.option.OptionId, tt.wantIDs[i])
+				}
+				if tt.wantNames != nil && choice.option.Name != tt.wantNames[i] {
+					t.Errorf("option %d name = %q, want %q", i, choice.option.Name, tt.wantNames[i])
+				}
+			}
+		})
+	}
+
+	var p execApprovalParams
+	_ = json.Unmarshal([]byte(`{"itemId":"cmd","availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["npm","test"]}},"cancel"]}`), &p)
+	got, err := json.Marshal(choiceByID(t, commandApprovalChoices(p), optionExecpolicyAmendment).decision)
+	if err != nil || string(got) != `{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["npm","test"]}}` {
+		t.Fatalf("execpolicy decision = %s, err=%v", got, err)
+	}
+	if got := (&approver{}).handleExec(execApprovalParams{ItemID: "cmd", AvailableDecisions: []json.RawMessage{}}, ""); got.Decision != "cancel" {
+		t.Fatalf("approval without decisions = %+v, want cancel", got)
+	}
 }

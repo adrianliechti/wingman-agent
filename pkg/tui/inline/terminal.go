@@ -8,6 +8,7 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"golang.org/x/term"
 )
 
@@ -24,8 +25,9 @@ type Terminal struct {
 	reader io.Reader
 	out    io.Writer
 
-	events chan Event
-	done   chan struct{}
+	events   chan Event
+	done     chan struct{}
+	stopOnce sync.Once
 
 	// sizeMu guards width/height: the resize watcher goroutine compares them
 	// against fresh queries while the app goroutine updates them.
@@ -38,8 +40,9 @@ type Terminal struct {
 
 	mouse bool
 
-	oldState *term.State
-	sizeFn   func() (int, int)
+	oldState       *term.State
+	restoreConsole func()
+	sizeFn         func() (int, int)
 }
 
 type Option func(*Terminal)
@@ -51,6 +54,8 @@ const (
 	disableFocusReporting = "\x1b[?1004l"
 	saveWindowTitle       = "\x1b[22;0t"
 	restoreWindowTitle    = "\x1b[23;0t"
+	pushKeyboardMode      = "\x1b[>1u"
+	popKeyboardMode       = "\x1b[<u"
 )
 
 // WithIO replaces the terminal's reader/writer, disabling raw-mode handling —
@@ -98,7 +103,8 @@ func (t *Terminal) Start() error {
 		}
 		t.oldState = state
 
-		if err := setupConsole(); err != nil {
+		t.restoreConsole, err = setupConsole()
+		if err != nil {
 			term.Restore(int(t.in.Fd()), t.oldState)
 			return err
 		}
@@ -138,19 +144,24 @@ func (t *Terminal) MouseEnabled() bool {
 }
 
 func (t *Terminal) Stop() {
-	close(t.done)
+	t.stopOnce.Do(func() {
+		close(t.done)
 
-	t.EnableMouse(false)
+		t.EnableMouse(false)
 
-	if t.alt {
-		t.ExitAlt()
-	}
+		if t.alt {
+			t.ExitAlt()
+		}
 
-	fmt.Fprint(t.out, disableFocusReporting+disableBracketedPaste+restoreWindowTitle+"\x1b[0m\x1b[?25h")
+		fmt.Fprint(t.out, disableFocusReporting+disableBracketedPaste+restoreWindowTitle+"\x1b[0m\x1b[?25h")
+		if t.restoreConsole != nil {
+			t.restoreConsole()
+		}
 
-	if t.in != nil && t.oldState != nil {
-		term.Restore(int(t.in.Fd()), t.oldState)
-	}
+		if t.in != nil && t.oldState != nil {
+			term.Restore(int(t.in.Fd()), t.oldState)
+		}
+	})
 }
 
 func (t *Terminal) querySize() (int, int) {
@@ -207,6 +218,9 @@ func (t *Terminal) EnterAlt() {
 	t.alt = true
 	t.altFrame = nil
 	fmt.Fprint(t.out, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H")
+	// Supporting terminals distinguish Shift+Enter and ambiguous Ctrl/Alt
+	// chords. The mode stack belongs to this screen and is restored on exit.
+	fmt.Fprint(t.out, pushKeyboardMode)
 }
 
 func (t *Terminal) ExitAlt() {
@@ -214,6 +228,7 @@ func (t *Terminal) ExitAlt() {
 		return
 	}
 	t.alt = false
+	fmt.Fprint(t.out, popKeyboardMode)
 	fmt.Fprint(t.out, "\x1b[?1049l")
 }
 
@@ -245,7 +260,13 @@ func (t *Terminal) RenderAlt(lines []string, cursor *Pos) {
 	var frame strings.Builder
 	frame.WriteString("\x1b[?2026h\x1b[?25l")
 
-	for i := 0; i < t.height; i++ {
+	width, height := t.Size()
+	clipped := make([]string, min(len(lines), height))
+	for i, line := range lines[:len(clipped)] {
+		clipped[i] = ansi.Truncate(line, max(width, 0), "")
+	}
+	lines = clipped
+	for i := 0; i < height; i++ {
 		line := ""
 		if i < len(lines) {
 			line = lines[i]
@@ -259,7 +280,7 @@ func (t *Terminal) RenderAlt(lines []string, cursor *Pos) {
 	t.altFrame = append(t.altFrame[:0], lines...)
 
 	if cursor != nil {
-		fmt.Fprintf(&frame, "\x1b[%d;%dH\x1b[?25h", cursor.Row+1, cursor.Col+1)
+		fmt.Fprintf(&frame, "\x1b[%d;%dH\x1b[?25h", min(max(cursor.Row, 0), max(height-1, 0))+1, min(max(cursor.Col, 0), max(width-1, 0))+1)
 	}
 
 	frame.WriteString("\x1b[?2026l")

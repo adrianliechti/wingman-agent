@@ -2,7 +2,11 @@ package code
 
 import (
 	"cmp"
+	"context"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"time"
@@ -12,6 +16,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -23,8 +28,9 @@ type slashCommand struct {
 	Hint string
 
 	// Busy marks commands that stay usable while a turn is running.
-	Busy bool
-	Run  func(a *App)
+	Busy    bool
+	Run     func(a *App)
+	RunArgs func(a *App, args string)
 }
 
 func (c slashCommand) Label() string {
@@ -36,8 +42,18 @@ func (c slashCommand) Label() string {
 
 func (a *App) builtinCommands() []slashCommand {
 	cmds := []slashCommand{
+		{Name: "/queue", Desc: "Resume, edit or remove queued inputs", Busy: true, Run: (*App).showTurnQueue, RunArgs: (*App).runQueueCommand},
+		{Name: "/discard", Desc: "Discard the current draft", Busy: true, Run: func(a *App) {
+			a.editor.SetText("")
+			a.clearPendingContent()
+			a.editingQueueID = ""
+			a.beforeQueueEdit = nil
+			a.saveCurrentDraft()
+		}},
 		{Name: "/help", Desc: "Open command center", Busy: true, Run: (*App).showHelp},
 		{Name: "/model", Desc: "Select AI model and effort", Run: (*App).showModelPicker},
+		{Name: "/copy", Desc: "Copy a response, code block, or blockquote", Busy: true, Run: (*App).showCopyPicker},
+		{Name: "/export", Desc: "Export conversation as Markdown (optional file path)", Busy: true, Run: (*App).showExportPicker, RunArgs: (*App).exportTranscript},
 	}
 	modes, _ := a.agent.Modes(a.sessionID)
 	for _, mode := range modes {
@@ -48,9 +64,15 @@ func (a *App) builtinCommands() []slashCommand {
 			Run:  func(a *App) { a.setMode(mode.ID) },
 		})
 	}
+	if _, ok := a.agent.(code.UnattendedAgent); ok {
+		cmds = append(cmds, slashCommand{
+			Name: "/unattended", Desc: "Toggle running every action without review and skipping questions", Busy: true,
+			Run: (*App).toggleUnattendedMode,
+		})
+	}
 	cmds = append(cmds,
 		slashCommand{Name: "/problems", Desc: "Show problems", Busy: true, Run: (*App).showDiagnosticsView},
-		slashCommand{Name: "/diff", Desc: "Show working tree changes", Busy: true, Run: (*App).showDiffView},
+		slashCommand{Name: "/diff", Desc: "Show or hide working tree changes", Busy: true, Run: (*App).showDiffView},
 	)
 	if _, ok := a.agent.(contextStatsProvider); ok {
 		cmds = append(cmds, slashCommand{Name: "/context", Desc: "Show context window usage", Busy: true, Run: (*App).showContextStats})
@@ -60,6 +82,19 @@ func (a *App) builtinCommands() []slashCommand {
 	}
 	if _, ok := a.agent.(recapProvider); ok {
 		cmds = append(cmds, slashCommand{Name: "/recap", Desc: "Summarize the session so far", Run: (*App).showRecap})
+	}
+	if _, ok := a.agent.(code.Compactor); ok {
+		cmds = append(cmds, slashCommand{
+			Name: "/compact", Hint: "[focus]", Desc: "Summarize the conversation to free context",
+			Run: func(a *App) { a.compactContext("") }, RunArgs: (*App).compactContext,
+		})
+	}
+
+	if _, ok := a.agent.(code.SessionForker); ok {
+		cmds = append(cmds, slashCommand{
+			Name: "/fork", Hint: "[title]", Desc: "Continue in a copy of this session; the original is kept",
+			Run: func(a *App) { a.forkSession("") }, RunArgs: (*App).forkSession,
+		})
 	}
 
 	cmds = append(cmds,
@@ -77,8 +112,9 @@ func (a *App) builtinCommands() []slashCommand {
 
 func (a *App) findBuiltin(query string) *slashCommand {
 	cmds := a.builtinCommands()
+	name, _, _ := strings.Cut(query, " ")
 	for i := range cmds {
-		if cmds[i].Name == query {
+		if cmds[i].Name == query || cmds[i].RunArgs != nil && cmds[i].Name == name {
 			return &cmds[i]
 		}
 	}
@@ -88,7 +124,7 @@ func (a *App) findBuiltin(query string) *slashCommand {
 func (a *App) skillCommands() []slashCommand {
 	var cmds []slashCommand
 	workspace := a.agent.Workspace()
-	workspace.RefreshSkills()
+	a.requestSkillRefresh()
 	skills := workspace.Skills()
 	for i := range skills {
 		s := &skills[i]
@@ -217,10 +253,6 @@ func (a *App) syncCommandPopup() {
 
 	a.cmdTokenStart = start
 	a.popup.SetQuery(token)
-
-	if a.popup.Empty() {
-		a.closePopup()
-	}
 }
 
 // completeCommand replaces the slash token at the cursor with the selected
@@ -257,10 +289,25 @@ func (a *App) completeCommand(id string) bool {
 	return changed
 }
 
-func (a *App) submitInput() {
-	query := strings.TrimSpace(a.editor.Text())
+func (a *App) submitInput() { a.submitInputIntent(code.TurnInputSteer) }
 
-	if query == "" {
+func (a *App) submitInputIntent(intent code.TurnInputIntent) {
+	if a.operationPending {
+		a.showToast("Wait for the current operation or press Esc to cancel", theme.Default.Yellow)
+		return
+	}
+	query := strings.TrimSpace(a.editor.Text())
+	imageCount := a.countPendingImages()
+
+	if query == "" && imageCount == 0 && len(a.pendingFiles) == 0 {
+		return
+	}
+
+	if rest, ok := strings.CutPrefix(query, "!"); ok {
+		if a.popup != nil && a.popup.kind == popupCommands {
+			a.closePopup()
+		}
+		a.runUserShellCommand(query, strings.TrimSpace(rest))
 		return
 	}
 
@@ -279,26 +326,25 @@ func (a *App) submitInput() {
 
 	if cmd != nil {
 		a.editor.SetText("")
-		cmd.Run(a)
+		if cmd.RunArgs != nil {
+			cmd.RunArgs(a, strings.TrimSpace(strings.TrimPrefix(query, cmd.Name)))
+		} else {
+			cmd.Run(a)
+		}
 		return
 	}
 
 	workspace := a.agent.Workspace()
-	workspace.RefreshSkills()
+	a.requestSkillRefresh()
 	skills := workspace.Skills()
 
 	if name, ok := skill.ParseSlashCommand(query); ok && skill.FindSkill(name, skills) == nil && !a.hasAgentCommand(name) {
-		a.editor.SetText("")
 		a.appendChat(cellNotice(fmt.Sprintf("Unknown command: /%s", name), theme.Default.Yellow, a.width()))
 		return
 	}
 
-	a.editor.AddHistory(query)
-	a.editor.SetText("")
-
 	displayText := query
 
-	imageCount := a.countPendingImages()
 	if imageCount > 0 || len(a.pendingFiles) > 0 {
 		var attachments []string
 		if imageCount == 1 {
@@ -309,19 +355,32 @@ func (a *App) submitInput() {
 		for _, f := range a.pendingFiles {
 			attachments = append(attachments, f)
 		}
-		displayText = fmt.Sprintf("%s\n[%s]", query, strings.Join(attachments, ", "))
+		if query != "" {
+			displayText = fmt.Sprintf("%s\n[%s]", query, strings.Join(attachments, ", "))
+		} else {
+			displayText = fmt.Sprintf("[%s]", strings.Join(attachments, ", "))
+		}
 	}
 
 	input := []agent.Content{{Text: displayText}}
 	input = append(input, a.pendingContent...)
 
 	if len(a.pendingFiles) > 0 {
+		var rootPath string
+		if workspace != nil {
+			rootPath = workspace.RootPath
+		}
 		var sb strings.Builder
 		fmt.Fprint(&sb, "\n[Attached files - use the read tool to access their content]\n")
 		for _, f := range a.pendingFiles {
 			fmt.Fprintf(&sb, "- %s\n", f)
 		}
 		input = append(input, agent.Content{Text: sb.String()})
+		for _, f := range a.pendingFiles {
+			if dataURL := readAttachedImageFile(f, rootPath); dataURL != "" {
+				input = append(input, agent.Content{File: &agent.File{Name: f, Data: dataURL}})
+			}
+		}
 	}
 
 	for _, inv := range skill.Invocations(query, skills) {
@@ -333,10 +392,19 @@ func (a *App) submitInput() {
 		input = append(input, agent.Content{Text: block, Hidden: true})
 	}
 
-	a.clearPendingContent()
-	a.showWelcome = false
-
-	a.submitAgentInput(input, displayText)
+	editing := a.editingQueueID != ""
+	if a.submitAgentInputIntent(input, displayText, intent) {
+		if query != "" {
+			a.editor.AddHistory(query)
+		}
+		a.editor.SetText("")
+		a.clearPendingContent()
+		a.showWelcome = false
+		if editing {
+			a.endQueueEdit()
+		}
+		a.saveCurrentDraft()
+	}
 }
 
 func (a *App) hasAgentCommand(name string) bool {
@@ -348,34 +416,137 @@ func (a *App) hasAgentCommand(name string) bool {
 	return false
 }
 
-func (a *App) submitAgentInput(input []agent.Content, echo string) {
-	id := uuid.NewString()
-
-	snap, err := a.turns.Submit(a.ctx, a.sessionID, code.TurnInput{
-		ID: id, Content: input, Intent: code.TurnInputSteer,
-	})
-	if err != nil {
-		a.appendChat(cellNotice(fmt.Sprintf("Could not submit turn: %v", err), theme.Default.Red, a.width()))
+func (a *App) runUserShellCommand(raw, command string) {
+	if command == "" {
+		a.editor.SetText("")
+		a.saveCurrentDraft()
+		if a.flow.gap() {
+			a.appendChat([]string{""})
+		}
+		a.appendChat(cellNotice("Run a command with !<cmd>", theme.Default.BrBlack, a.width()))
+		a.invalidate()
 		return
 	}
 
-	// A native steer is already part of the active turn. Put it into the live
-	// transcript at the point where it was accepted so later model output
-	// appears beneath it. Only inputs still waiting for a turn remain previews
-	// at the bottom of the chat.
-	if echo != "" {
-		switch snap.State {
-		case code.TurnInputSteered:
-			a.appendLiveUserEcho(echo)
-		case code.TurnInputQueued:
-			a.pendingEchoMu.Lock()
-			a.pendingEcho = append(a.pendingEcho, pendingEchoItem{ID: id, Text: echo, State: snap.State})
-			a.pendingEchoMu.Unlock()
+	a.editor.AddHistory(raw)
+	a.editor.SetText("")
+	a.showWelcome = false
+	a.saveCurrentDraft()
+
+	workDir := ""
+	if ws := a.agent.Workspace(); ws != nil && ws.RootPath != "" {
+		if info, err := os.Stat(ws.RootPath); err == nil && info.IsDir() {
+			workDir = ws.RootPath
 		}
 	}
 
+	id, epoch := a.sessionID, a.sessionEpoch
+	ctx, cancel := context.WithCancel(code.WithSessionID(a.ctx, id))
+	a.operationPending = true
+	a.shellRunning = true
+	a.operationCancel = cancel
+	a.invalidate()
+
+	go func() {
+		start := time.Now()
+		cmd := shell.Command(ctx, command, workDir)
+		rawOut, err := cmd.CombinedOutput()
+		duration := time.Since(start)
+		cancel()
+
+		exitCode := 0
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = -1
+			}
+		}
+
+		output := string(rawOut)
+		if output == "" && err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				output = err.Error()
+			}
+		}
+
+		var recordErr error
+		_, canRecord := a.agent.(userShellRecorder)
+		if recorder, ok := a.agent.(userShellRecorder); ok {
+			recordErr = recorder.RecordUserShellCommand(id, command, output, exitCode, duration)
+		}
+
+		a.post(func() {
+			a.operationPending = false
+			a.shellRunning = false
+			a.operationCancel = nil
+			if a.sessionID != id || a.sessionEpoch != epoch {
+				return
+			}
+			if recordErr != nil {
+				a.appendChat(cellNotice(fmt.Sprintf("Could not record shell command: %v", recordErr), theme.Default.Red, a.width()))
+			} else if canRecord {
+				before := a.printed
+				a.syncMessages()
+				if a.printed == before {
+					a.appendAnnotation(func(w int) []string {
+						return cellUserShell(command, output, exitCode, w, false)
+					})
+				}
+			} else {
+				a.appendAnnotation(func(w int) []string {
+					return cellUserShell(command, output, exitCode, w, false)
+				})
+			}
+			a.pollDiffPanel(false)
+			a.invalidate()
+		})
+	}()
+}
+
+func (a *App) submitAgentInput(input []agent.Content, echo string) bool {
+	return a.submitAgentInputIntent(input, echo, code.TurnInputSteer)
+}
+
+func (a *App) submitAgentInputIntent(input []agent.Content, echo string, intent code.TurnInputIntent) bool {
+	a.syncQueuedInputs()
+	displayText := echo
+	if a.editor != nil && strings.TrimSpace(a.editor.Text()) != "" {
+		displayText = strings.TrimSpace(a.editor.Text())
+	}
+	display := &code.TurnInputDisplay{Text: displayText, Files: slices.Clone(a.pendingFiles)}
+	if a.editingQueueID != "" {
+		if err := a.turns.ReplaceQueued(a.sessionID, a.editingQueueID, code.TurnInput{Content: input, Intent: code.TurnInputFollowUp, Display: display}); err != nil {
+			a.showToast("Could not update queued input: "+err.Error(), theme.Default.Red)
+			return false
+		}
+		a.syncQueuedInputs()
+		return true
+	}
+	id := uuid.NewString()
+	// Active and Steered can arrive before Submit returns. Install the preview
+	// first so those events move it ahead of the turn's first streamed output.
+	if echo != "" {
+		a.pendingEchoMu.Lock()
+		a.pendingEcho = append(a.pendingEcho, pendingEchoItem{ID: id, Text: echo, State: code.TurnInputQueued})
+		a.pendingEchoMu.Unlock()
+	}
+
+	_, err := a.turns.Submit(a.ctx, a.sessionID, code.TurnInput{
+		ID: id, Content: input, Intent: intent, Display: display,
+	})
+	if err != nil {
+		a.removePendingEcho(id)
+		a.appendChat(cellNotice(fmt.Sprintf("Could not submit turn: %v", err), theme.Default.Red, a.width()))
+		return false
+	}
+
+	a.syncQueuedInputs()
 	a.syncMessages()
 	a.invalidate()
+	return true
 }
 
 func (a *App) showHelp() {
@@ -455,6 +626,14 @@ func (a *App) showTasks() {
 const schedulePopupPrefix = "schedule:"
 
 func (a *App) activeScheduleCount() int {
+	if a.scheduleCountSession != a.sessionID {
+		a.scheduleCountSession = a.sessionID
+		a.scheduleCount = 0
+		a.scheduleCountAt = time.Time{}
+	}
+	if time.Since(a.scheduleCountAt) < time.Second || a.scheduleCountPending.Load() {
+		return a.scheduleCount
+	}
 	sp, ok := a.agent.(scheduleProvider)
 	if !ok {
 		return 0
@@ -464,18 +643,29 @@ func (a *App) activeScheduleCount() int {
 		return 0
 	}
 
-	jobs, err := store.List()
-	if err != nil {
-		return 0
-	}
-
-	count := 0
-	for _, job := range jobs {
-		if job.Status == schedule.StatusActive {
-			count++
+	a.scheduleCountAt = time.Now()
+	a.scheduleCountPending.Store(true)
+	id, epoch := a.sessionID, a.sessionEpoch
+	go func() {
+		defer a.scheduleCountPending.Store(false)
+		jobs, err := store.List()
+		if err != nil {
+			return
 		}
-	}
-	return count
+		count := 0
+		for _, job := range jobs {
+			if job.Status == schedule.StatusActive {
+				count++
+			}
+		}
+		a.post(func() {
+			if a.sessionID == id && a.sessionEpoch == epoch && a.scheduleCount != count {
+				a.scheduleCount = count
+				a.invalidate()
+			}
+		})
+	}()
+	return a.scheduleCount
 }
 
 func (a *App) showSchedule(id string) {
@@ -539,12 +729,7 @@ func (a *App) showModelPickerLevel(back bool) {
 	}
 	popup := newPopup(kind, title, items, func(ids []string) {
 		modelID := ids[0]
-		if err := a.agent.SetModel(a.ctx, a.sessionID, modelID); err != nil {
-			a.showToast("Could not change model: "+err.Error(), theme.Default.Red)
-			return
-		}
-		a.invalidate()
-		a.showEffortPickerLevel(back)
+		a.runSessionOperation("Could not change model", func(ctx context.Context, id string) error { return a.agent.SetModel(ctx, id, modelID) }, func() { a.showEffortPickerLevel(back) })
 	})
 	if back {
 		popup.onCancel = a.showCommandCenter
@@ -584,11 +769,8 @@ func (a *App) showEffortPickerLevel(back bool) {
 		title = "commands › model › effort"
 	}
 	popup := newPopup(kind, title, items, func(ids []string) {
-		if err := a.agent.SetEffort(a.ctx, a.sessionID, ids[0]); err != nil {
-			a.showToast("Could not change effort: "+err.Error(), theme.Default.Red)
-			return
-		}
-		a.invalidate()
+		effort := ids[0]
+		a.runSessionOperation("Could not change effort", func(ctx context.Context, id string) error { return a.agent.SetEffort(ctx, id, effort) }, nil)
 	})
 	popup.onCancel = func() { a.showModelPickerLevel(back) }
 	for i := range popup.items {

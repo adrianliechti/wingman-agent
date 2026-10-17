@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,8 +18,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
-	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
@@ -32,22 +33,25 @@ type javaAdapter struct {
 	bundles []string
 }
 
-func newJavaAdapter() javaAdapter {
-	return javaAdapter{bundles: discoverJavaDebugBundles()}
+// ServerInitialization loads the java-debug plug-in into JDT LS; the Java DAP
+// endpoint is served by that bundle rather than a standalone executable.
+func (adapter javaAdapter) ServerInitialization() (string, any) {
+	if len(adapter.bundles) == 0 {
+		return "", nil
+	}
+	return "jdtls", map[string]any{"bundles": slices.Clone(adapter.bundles)}
 }
 
 func (javaAdapter) Language() string { return "Java" }
 
 func (adapter javaAdapter) Descriptor() dap.AdapterDescriptor {
-	command := ""
-	if len(adapter.bundles) > 0 {
-		command = "jdtls"
-	}
 	return dap.AdapterDescriptor{
-		Name:             "java-debug",
-		Language:         "Java",
-		AdapterID:        "java",
-		Command:          command,
+		Name:      "java-debug",
+		Language:  "Java",
+		AdapterID: "java",
+		// The actual adapter starts inside managed JDT LS. This command is
+		// an availability token for the managed java-debug bundle.
+		Command:          "java-debug-adapter",
 		Transport:        dap.TransportConnect,
 		TerminalStrategy: dap.TerminalRunInTerminal,
 		Markers:          []string{"pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", ".project", ".classpath"},
@@ -60,6 +64,29 @@ func (adapter javaAdapter) Descriptor() dap.AdapterDescriptor {
 		IOValues:        vscodeIOValues(),
 		TargetConfigKey: "mainClass",
 	}
+}
+
+func managedJavaDebugBundles(root string) []string {
+	if root == "" {
+		return nil
+	}
+	directory := filepath.Join(root, "java-debug")
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil
+	}
+	var matches []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() && strings.HasPrefix(name, "com.microsoft.java.debug.plugin-") && strings.HasSuffix(name, ".jar") {
+			matches = append(matches, filepath.Join(directory, name))
+		}
+	}
+	slices.Sort(matches)
+	if len(matches) == 0 {
+		return nil
+	}
+	return []string{matches[len(matches)-1]}
 }
 
 func (javaAdapter) Matches(path string) bool {
@@ -212,78 +239,94 @@ func hasWord(source []byte, word string) bool {
 	return pattern.Match(source)
 }
 
-func discoverJavaDebugBundles() []string {
-	var explicit []string
-	for _, value := range filepath.SplitList(os.Getenv("WINGMAN_JAVA_DEBUG_BUNDLE")) {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if info, err := os.Stat(value); err == nil && !info.IsDir() {
-			explicit = append(explicit, filepath.Clean(value))
-		}
-	}
-	if len(explicit) > 0 {
-		slices.Sort(explicit)
-		return slices.Compact(explicit)
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return nil
-	}
-	dataHome := os.Getenv("XDG_DATA_HOME")
-	if dataHome == "" {
-		dataHome = filepath.Join(home, ".local", "share")
-	}
-	patterns := []string{
-		filepath.Join(home, ".vscode", "extensions", "vscjava.vscode-java-debug-*", "server", "com.microsoft.java.debug.plugin-*.jar"),
-		filepath.Join(home, ".vscode-insiders", "extensions", "vscjava.vscode-java-debug-*", "server", "com.microsoft.java.debug.plugin-*.jar"),
-		filepath.Join(home, ".cursor", "extensions", "vscjava.vscode-java-debug-*", "server", "com.microsoft.java.debug.plugin-*.jar"),
-		filepath.Join(home, ".windsurf", "extensions", "vscjava.vscode-java-debug-*", "server", "com.microsoft.java.debug.plugin-*.jar"),
-		filepath.Join(dataHome, "nvim", "mason", "packages", "java-debug-adapter", "extension", "server", "com.microsoft.java.debug.plugin-*.jar"),
-	}
-	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
-		patterns = append(patterns,
-			filepath.Join(localAppData, "nvim-data", "mason", "packages", "java-debug-adapter", "extension", "server", "com.microsoft.java.debug.plugin-*.jar"),
-		)
-	}
-	var matches []string
-	for _, pattern := range patterns {
-		values, _ := filepath.Glob(pattern)
-		matches = append(matches, values...)
-	}
-	slices.Sort(matches)
-	if len(matches) == 0 {
-		return nil
-	}
-	// Loading multiple installed versions registers the same extension points
-	// twice. The newest lexical extension/plugin version is the safe default.
-	return []string{matches[len(matches)-1]}
+// CommandExecutor is the single language-service capability host connectors
+// need: running a workspace-scoped LSP command against a source file. The
+// composition layer injects the implementation so adapters never depend on
+// service wiring.
+type CommandExecutor interface {
+	ExecuteCommand(ctx context.Context, filePath string, content *string, command lsp.Command) (any, error)
 }
 
 // Connector bridges host-created adapters into the language-neutral DAP
-// manager. At present only java-debug needs this path.
+// manager. At present only java-debug needs this path: its DAP socket is
+// opened by JDT LS rather than a standalone executable.
 type Connector struct {
-	language *language.Service
+	commands CommandExecutor
 }
 
-func NewConnector(service *language.Service) *Connector {
-	return &Connector{language: service}
+func NewConnector(commands CommandExecutor) *Connector {
+	return &Connector{commands: commands}
+}
+
+// PrepareAdapter resolves the Java launch details normally supplied by the
+// VS Code Java extension. java-debug requires these values even though its DAP
+// endpoint is already hosted inside JDT LS.
+func (connector *Connector) PrepareAdapter(ctx context.Context, plan dap.Plan) (dap.Plan, error) {
+	if err := connector.validate(plan); err != nil {
+		return plan, err
+	}
+	if !strings.EqualFold(plan.Request, "launch") {
+		return plan, nil
+	}
+	mainClass := strings.TrimSpace(plan.Target)
+	if mainClass == "" {
+		return plan, errors.New("Java launch requires a mainClass")
+	}
+	source, err := findJavaSource(plan.ProjectDir, mainClass)
+	if err != nil {
+		return plan, err
+	}
+	arguments := maps.Clone(plan.Arguments)
+	if arguments == nil {
+		arguments = make(map[string]any)
+	}
+	projectName, _ := arguments["projectName"].(string)
+	if !hasJavaConfigurationValue(arguments, "classPaths") && !hasJavaConfigurationValue(arguments, "modulePaths") {
+		result, commandErr := connector.execute(ctx, source, "vscode.java.resolveClasspath", mainClass, nullableString(projectName))
+		if commandErr != nil {
+			return plan, fmt.Errorf("resolve Java classpath through JDT LS: %w", commandErr)
+		}
+		var paths [][]string
+		if err := decodeJavaCommandResult(result, &paths); err != nil || len(paths) != 2 {
+			if err == nil {
+				err = fmt.Errorf("expected [modulePaths, classPaths], got %d values", len(paths))
+			}
+			return plan, fmt.Errorf("decode Java classpath from JDT LS: %w", err)
+		}
+		if len(paths[0]) == 0 && len(paths[1]) == 0 {
+			return plan, errors.New("JDT LS returned no Java module paths or class paths")
+		}
+		arguments["modulePaths"] = paths[0]
+		arguments["classPaths"] = paths[1]
+	}
+	if !hasJavaConfigurationValue(arguments, "javaExec") {
+		result, commandErr := connector.execute(ctx, source, "vscode.java.resolveJavaExecutable", mainClass, nullableString(projectName))
+		if commandErr != nil {
+			return plan, fmt.Errorf("resolve Java executable through JDT LS: %w", commandErr)
+		}
+		var executable string
+		if err := decodeJavaCommandResult(result, &executable); err != nil {
+			return plan, fmt.Errorf("decode Java executable from JDT LS: %w", err)
+		}
+		executable = strings.TrimSpace(executable)
+		if executable == "" {
+			return plan, errors.New("JDT LS returned no Java executable")
+		}
+		arguments["javaExec"] = executable
+	}
+	plan.Arguments = arguments
+	return plan, nil
 }
 
 func (connector *Connector) ConnectAdapter(ctx context.Context, plan dap.Plan) (io.ReadWriteCloser, error) {
-	if connector == nil || connector.language == nil {
-		return nil, errors.New("language service is unavailable")
-	}
-	if !strings.EqualFold(plan.Adapter.Name, "java-debug") {
-		return nil, fmt.Errorf("no host connector is registered for %s", plan.Adapter.Name)
+	if err := connector.validate(plan); err != nil {
+		return nil, err
 	}
 	source, err := findJavaSource(plan.ProjectDir, plan.Target)
 	if err != nil {
 		return nil, err
 	}
-	result, err := connector.language.ExecuteCommand(ctx, source, nil, lsp.Command{
+	result, err := connector.commands.ExecuteCommand(ctx, source, nil, lsp.Command{
 		Command: "vscode.java.startDebugSession",
 	})
 	if err != nil {
@@ -300,6 +343,78 @@ func (connector *Connector) ConnectAdapter(ctx context.Context, plan dap.Plan) (
 	return connection, nil
 }
 
+func (connector *Connector) validate(plan dap.Plan) error {
+	if connector == nil || connector.commands == nil {
+		return errors.New("language service is unavailable")
+	}
+	if !strings.EqualFold(plan.Adapter.Name, "java-debug") {
+		return fmt.Errorf("no host connector is registered for %s", plan.Adapter.Name)
+	}
+	return nil
+}
+
+func (connector *Connector) execute(ctx context.Context, source, name string, arguments ...any) (any, error) {
+	values := make([]lsp.LSPAny, len(arguments))
+	for index, argument := range arguments {
+		encoded, err := json.Marshal(argument)
+		if err != nil {
+			return nil, fmt.Errorf("encode argument %d for %s: %w", index, name, err)
+		}
+		values[index] = encoded
+	}
+	return connector.commands.ExecuteCommand(ctx, source, nil, lsp.Command{Command: name, Arguments: values})
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func hasJavaConfigurationValue(arguments map[string]any, key string) bool {
+	value, exists := arguments[key]
+	if !exists || value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case []string:
+		return len(typed) > 0
+	case []any:
+		return len(typed) > 0
+	default:
+		return true
+	}
+}
+
+func decodeJavaCommandResult(value any, destination any) error {
+	var encoded []byte
+	switch typed := value.(type) {
+	case []byte:
+		encoded = typed
+	case string:
+		var err error
+		encoded, err = json.Marshal(typed)
+		if err != nil {
+			return err
+		}
+	case fmt.Stringer:
+		encoded = []byte(typed.String())
+	default:
+		var err error
+		encoded, err = json.Marshal(value)
+		if err != nil {
+			return err
+		}
+	}
+	if len(bytes.TrimSpace(encoded)) == 0 {
+		return errors.New("empty command result")
+	}
+	return json.Unmarshal(encoded, destination)
+}
+
 func findJavaSource(projectDir, mainClass string) (string, error) {
 	simpleName := mainClass
 	if index := strings.LastIndex(simpleName, "."); index >= 0 {
@@ -311,7 +426,7 @@ func findJavaSource(projectDir, mainClass string) (string, error) {
 	expected := simpleName + ".java"
 	var fallback string
 	visited := 0
-	err := filepath.WalkDir(projectDir, func(path string, entry fs.DirEntry, walkErr error) error {
+	err := pathutil.WalkDir(projectDir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
@@ -359,10 +474,30 @@ func javaDebugPort(value any) (int, error) {
 		}
 	case int:
 		port = typed
+	case int8:
+		port = int(typed)
+	case int16:
+		port = int(typed)
 	case int32:
 		port = int(typed)
 	case int64:
 		port = int(typed)
+	case uint:
+		if uint64(typed) <= uint64(^uint(0)>>1) {
+			port = int(typed)
+		}
+	case uint8:
+		port = int(typed)
+	case uint16:
+		port = int(typed)
+	case uint32:
+		if uint64(typed) <= uint64(^uint(0)>>1) {
+			port = int(typed)
+		}
+	case uint64:
+		if typed <= uint64(^uint(0)>>1) {
+			port = int(typed)
+		}
 	case json.Number:
 		parsed, _ := strconv.Atoi(string(typed))
 		port = parsed
@@ -371,9 +506,12 @@ func javaDebugPort(value any) (int, error) {
 		port = parsed
 	case map[string]any:
 		return javaDebugPort(typed["port"])
+	case fmt.Stringer:
+		parsed, _ := strconv.Atoi(strings.TrimSpace(typed.String()))
+		port = parsed
 	}
 	if port < 1 || port > 65535 {
-		return 0, fmt.Errorf("JDT LS returned an invalid java-debug port %v", value)
+		return 0, fmt.Errorf("JDT LS returned an invalid java-debug port %v (%T)", value, value)
 	}
 	return port, nil
 }

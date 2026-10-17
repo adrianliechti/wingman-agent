@@ -108,7 +108,7 @@ func userToInput(m Message) []responses.ResponseInputItemUnionParam {
 		if c.ToolResult != nil && c.ToolResult.ID != "" {
 			items = append(items, responses.ResponseInputItemUnionParam{
 				OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
-					CallID: c.ToolResult.ID,
+					CallID: openai.String(c.ToolResult.ID),
 					Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
 						OfString: openai.String(c.ToolResult.Content),
 					},
@@ -126,7 +126,7 @@ func userToInput(m Message) []responses.ResponseInputItemUnionParam {
 
 func assistantToInput(m Message) ([]responses.ResponseInputItemUnionParam, []responses.ResponseInputContentUnionParam) {
 	var items []responses.ResponseInputItemUnionParam
-	output := &responses.ResponseOutputMessageParam{}
+	output := &responses.ResponseOutputMessageParam{Phase: responses.ResponseOutputMessagePhase(m.Phase)}
 
 	// Reasoning items must precede the output they belong to on the wire.
 	for _, c := range m.Content {
@@ -169,7 +169,7 @@ func assistantToInput(m Message) ([]responses.ResponseInputItemUnionParam, []res
 		if c.ToolResult != nil && c.ToolResult.ID != "" {
 			items = append(items, responses.ResponseInputItemUnionParam{
 				OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
-					CallID: c.ToolResult.ID,
+					CallID: openai.String(c.ToolResult.ID),
 					Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
 						OfString: openai.String(c.ToolResult.Content),
 					},
@@ -219,9 +219,11 @@ func reasoningToInput(r *Reasoning) *responses.ResponseReasoningItemParam {
 
 func responseToUsage(r responses.Response) Usage {
 	return Usage{
-		InputTokens:  r.Usage.InputTokens,
-		CachedTokens: r.Usage.InputTokensDetails.CachedTokens,
-		OutputTokens: r.Usage.OutputTokens,
+		InputTokens:              r.Usage.InputTokens,
+		OutputTokens:             r.Usage.OutputTokens,
+		ReasoningTokens:          r.Usage.OutputTokensDetails.ReasoningTokens,
+		CacheReadInputTokens:     r.Usage.InputTokensDetails.CachedTokens,
+		CacheCreationInputTokens: r.Usage.InputTokensDetails.CacheWriteTokens,
 	}
 }
 
@@ -259,9 +261,9 @@ func toMessages(items []responses.ResponseInputItemUnionParam) []Message {
 			})
 
 		case item.OfFunctionCallOutput != nil:
-			tc := toolCallsByID[item.OfFunctionCallOutput.CallID]
+			tc := toolCallsByID[item.OfFunctionCallOutput.CallID.Value]
 			tr := ToolResult{
-				ID:      item.OfFunctionCallOutput.CallID,
+				ID:      item.OfFunctionCallOutput.CallID.Value,
 				Name:    tc.Name,
 				Args:    tc.Args,
 				Content: item.OfFunctionCallOutput.Output.OfString.Value,
@@ -305,7 +307,11 @@ func fromEasyInput(m *responses.EasyInputMessageParam) (Message, bool) {
 		role = RoleUser
 	}
 
-	return Message{Role: role, Content: contents}, true
+	message := Message{Role: role, Content: contents}
+	if role == RoleAssistant {
+		message.Phase = MessagePhase(m.Phase)
+	}
+	return message, true
 }
 
 func fromInput(m *responses.ResponseInputItemMessageParam) (Message, bool) {
@@ -341,7 +347,7 @@ func fromOutput(m *responses.ResponseOutputMessageParam) (Message, bool) {
 		}
 
 		if refusal := part.OfRefusal; refusal != nil && refusal.Refusal != "" {
-			contents = append(contents, Content{Refusal: refusal.Refusal})
+			contents = append(contents, Content{Refusal: refusal.Refusal, TextID: m.ID})
 		}
 	}
 
@@ -349,7 +355,7 @@ func fromOutput(m *responses.ResponseOutputMessageParam) (Message, bool) {
 		return Message{}, false
 	}
 
-	return Message{Role: RoleAssistant, Content: contents}, true
+	return Message{Role: RoleAssistant, Phase: MessagePhase(m.Phase), Content: contents}, true
 }
 
 func inputContentToContents(contentList responses.ResponseInputMessageContentListParam) []Content {

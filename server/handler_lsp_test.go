@@ -72,12 +72,12 @@ func TestLSPDefinitionRequestValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true})
+	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer app.Close()
-	web := httptest.NewServer(app)
+	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
 	tests := []struct {
@@ -125,12 +125,12 @@ func greet() {}
 		t.Fatal(err)
 	}
 
-	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true})
+	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer app.Close()
-	web := httptest.NewServer(app)
+	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
 	post := func(t *testing.T, endpoint, body string, out any) {
@@ -264,12 +264,12 @@ func greet() {}
 
 func TestWorkspaceDiagnosticsResponseIncludesCoverage(t *testing.T) {
 	t.Setenv("WINGMAN_URL", "http://localhost:1")
-	app, err := New(context.Background(), t.TempDir(), &ServerOptions{NoBrowser: true})
+	app, err := New(context.Background(), t.TempDir(), &ServerOptions{NoBrowser: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer app.Close()
-	web := httptest.NewServer(app)
+	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
 	response, err := http.Get(web.URL + "/api/lsp/diagnostics")
@@ -297,6 +297,29 @@ func TestWorkspaceDiagnosticsResponseIncludesCoverage(t *testing.T) {
 	}
 }
 
+func TestLSPStatusReturnsAnEmptyActivityList(t *testing.T) {
+	t.Setenv("WINGMAN_URL", "http://localhost:1")
+	app, err := New(context.Background(), t.TempDir(), &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/lsp/status", nil)
+	response := httptest.NewRecorder()
+	serveTestHTTP(app, response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	var body lspActivityResponse
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Analyzing || body.Services == nil || len(body.Services) != 0 {
+		t.Fatalf("activity = %+v", body)
+	}
+}
+
 func TestLSPFileDiagnosticsRequestValidation(t *testing.T) {
 	t.Setenv("WINGMAN_URL", "http://localhost:1")
 	workDir := t.TempDir()
@@ -304,12 +327,12 @@ func TestLSPFileDiagnosticsRequestValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true})
+	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer app.Close()
-	web := httptest.NewServer(app)
+	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
 	tests := []struct {

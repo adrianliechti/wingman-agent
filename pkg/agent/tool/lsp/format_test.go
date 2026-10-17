@@ -66,3 +66,33 @@ func TestFormatDefinitionsIncludesSnippet(t *testing.T) {
 		t.Fatalf("unexpected definitions: %q", result)
 	}
 }
+
+func TestReferenceCountsAreCompleteDeduplicatedAndPageFiles(t *testing.T) {
+	root := t.TempDir()
+	var locations []lsp.Location
+	for group := range 5 {
+		uri, err := lsp.ParseURI(fileuri.FromPath(filepath.Join(root, fmt.Sprintf("calls_%d.go", group))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for line := range 23 + group {
+			locations = append(locations, lsp.Location{URI: uri, Range: lsp.Range{Start: lsp.Position{Line: uint32(line)}}})
+		}
+	}
+	locations = append(locations, locations[0])
+	full := formatReferenceCounts(locations, root, false, resultPage{limit: 100})
+	for _, want := range []string{"125 across 5 files", "declaration excluded", "non-call references", "calls_0.go: 23", "calls_4.go: 27"} {
+		if !strings.Contains(full, want) {
+			t.Fatalf("missing %q: %s", want, full)
+		}
+	}
+	page := formatReferenceCounts(locations, root, true, resultPage{offset: 2, limit: 2})
+	if strings.Contains(page, "calls_0.go") || !strings.Contains(page, "calls_2.go: 25") || !strings.Contains(page, "offset=4") || !strings.Contains(page, "declaration included") {
+		t.Fatal(page)
+	}
+	listed := formatLocations("References", locations[:125], root, resultPage{limit: 100}) + formatLocations("References", locations[:125], root, resultPage{offset: 100, limit: 100})
+	if len(full)*5 >= len(listed) {
+		t.Fatalf("count output not materially smaller: %d vs %d bytes", len(full), len(listed))
+	}
+	t.Logf("reference count output: %d bytes vs %d bytes of locations (source files absent)", len(full), len(listed))
+}

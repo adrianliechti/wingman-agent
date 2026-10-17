@@ -4,11 +4,32 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"testing"
+	"time"
 
 	"go.lsp.dev/protocol"
+
+	"github.com/adrianliechti/wingman-agent/internal/tooling"
+	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 )
+
+func TestEveryLanguageServerHasManagedInstaller(t *testing.T) {
+	t.Setenv("WINGMAN_HOME", t.TempDir())
+	tools, err := devtools.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range knownProjects {
+		for _, server := range project.Servers {
+			if !tools.CanManage(server.Command) {
+				t.Errorf("%s registers %s without a managed installer", project.Name, server.Command)
+			}
+		}
+	}
+}
 
 func TestManagerInitializationOptionsAreStableSessionIdentity(t *testing.T) {
 	manager := NewManager(t.TempDir(), WithServerInitializationOptions("jdtls", map[string]any{
@@ -46,105 +67,6 @@ func TestManagerInitializationOptionsAreStableSessionIdentity(t *testing.T) {
 	}
 }
 
-func TestFindCommandIn(t *testing.T) {
-	dir := t.TempDir()
-	name := "gopls"
-	if runtime.GOOS == "windows" {
-		name = "gopls.exe"
-	}
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := findCommandIn([]string{t.TempDir(), dir}, "gopls"); got != path {
-		t.Fatalf("findCommandIn = %q, want %q", got, path)
-	}
-
-	if got := findCommandIn([]string{dir}, "rust-analyzer"); got != "" {
-		t.Fatalf("findCommandIn for missing command = %q, want empty", got)
-	}
-}
-
-func TestResolveCommandFindsVenvServers(t *testing.T) {
-	binSub := filepath.Join(".venv", "bin")
-	fileName := "pylsp"
-	if runtime.GOOS == "windows" {
-		binSub = filepath.Join(".venv", "Scripts")
-		fileName = "pylsp.exe"
-	}
-
-	root := t.TempDir()
-	proj := filepath.Join(root, "services", "api")
-	binDir := filepath.Join(proj, binSub)
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(binDir, fileName)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := resolveCommand(proj, root, "pylsp"); got != path {
-		t.Fatalf("resolveCommand = %q, want %q", got, path)
-	}
-
-	// A venv at the workspace root serves nested project dirs via walk-up.
-	rootBin := filepath.Join(root, binSub)
-	if err := os.MkdirAll(rootBin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rootServer := filepath.Join(rootBin, "basedpyright-langserver")
-	if runtime.GOOS == "windows" {
-		rootServer += ".cmd"
-	}
-	if err := os.WriteFile(rootServer, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := resolveCommand(proj, root, "basedpyright-langserver"); got != rootServer {
-		t.Fatalf("walk-up resolveCommand = %q, want %q", got, rootServer)
-	}
-}
-
-func TestCommandCandidates(t *testing.T) {
-	got := commandCandidates("windows", "gopls")
-	want := []string{"gopls.exe", "gopls.cmd", "gopls.bat", "gopls"}
-	if len(got) != len(want) {
-		t.Fatalf("windows candidates = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("windows candidates = %v, want %v", got, want)
-		}
-	}
-
-	if got := commandCandidates("darwin", "gopls"); len(got) != 1 || got[0] != "gopls" {
-		t.Fatalf("darwin candidates = %v, want [gopls]", got)
-	}
-}
-
-func TestFindCommandInIgnoresNonExecutable(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("executable bits are not checked on windows")
-	}
-
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "gopls"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(dir, "rust-analyzer"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := findCommandIn([]string{dir}, "gopls"); got != "" {
-		t.Fatalf("non-executable file resolved: %q", got)
-	}
-	if got := findCommandIn([]string{dir}, "rust-analyzer"); got != "" {
-		t.Fatalf("directory resolved: %q", got)
-	}
-}
-
 func TestServerVersionSupported(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test helper uses a POSIX shell script")
@@ -157,19 +79,23 @@ func TestServerVersionSupported(t *testing.T) {
 	}
 
 	server := Server{MinimumMajorVersion: 7}
-	if !serverVersionSupported(server, command) {
+	if !serverVersionSupported(server, command, dir) {
 		t.Fatal("TypeScript 7 should satisfy a version 7 minimum")
 	}
 	server.MinimumMajorVersion = 8
-	if serverVersionSupported(server, command) {
+	if serverVersionSupported(server, command, dir) {
 		t.Fatal("TypeScript 7 should not satisfy a version 8 minimum")
 	}
-	if !serverVersionSupported(Server{}, filepath.Join(dir, "missing")) {
+	if !serverVersionSupported(Server{}, filepath.Join(dir, "missing"), dir) {
 		t.Fatal("servers without a version constraint should not be probed")
 	}
 }
 
-func TestDetectAllPrefersNativeTypeScriptSevenLSP(t *testing.T) {
+type testManagedTools map[string]string
+
+func (m testManagedTools) Resolve(command string) string { return m[command] }
+
+func TestDetectAllChecksManagedTypeScriptVersionWithoutExternalFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test helper uses POSIX shell scripts")
 	}
@@ -187,12 +113,160 @@ func TestDetectAllPrefersNativeTypeScriptSevenLSP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	roots := detectAll(root)
+	managed := filepath.Join(t.TempDir(), "tsc")
+	if err := os.WriteFile(managed, []byte("#!/bin/sh\nprintf 'Version 6.0.0\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tools := testManagedTools{"tsc": managed, "typescript-language-server": ""}
+	if roots := detectAll(root, tools); len(roots) != 0 {
+		t.Fatalf("managed TypeScript below the minimum fell back to project server: %+v", roots)
+	}
+	tools["typescript-language-server"] = filepath.Join(t.TempDir(), "typescript-language-server")
+	roots := detectAll(root, tools)
+	if len(roots) != 1 || roots[0].Server.Name != "typescript-language-server" || roots[0].Server.Command != tools["typescript-language-server"] {
+		t.Fatalf("managed TypeScript 6 should use managed language server: %+v", roots)
+	}
+	if err := os.WriteFile(managed, []byte("#!/bin/sh\nprintf 'Version 7.0.2\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roots = detectAll(root, tools)
 	if len(roots) != 1 {
 		t.Fatalf("detected roots = %+v, want one TypeScript root", roots)
 	}
-	if roots[0].Server.Name != "typescript-go" || roots[0].Server.Command != tsc {
-		t.Fatalf("detected server = %+v, want native TypeScript server %q", roots[0].Server, tsc)
+	if roots[0].Server.Name != "typescript-go" || roots[0].Server.Command != managed {
+		t.Fatalf("detected server = %+v, want managed native TypeScript server %q", roots[0].Server, managed)
+	}
+}
+
+func TestDetectRequirementsDoesNotRequireInstalledServer(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	requirements := DetectRequirements(root)
+	if len(requirements) != 1 || requirements[0].Project != "go" || !reflect.DeepEqual(requirements[0].Commands, []string{"gopls"}) {
+		t.Fatalf("requirements = %+v", requirements)
+	}
+}
+
+func TestDetectRequirementsRecognizesGradleSettings(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "settings.gradle"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	requirements := DetectRequirements(root)
+	if len(requirements) != 1 || requirements[0].Project != "java" || !slices.Contains(requirements[0].Commands, "jdtls") {
+		t.Fatalf("Java requirement not detected: %+v", requirements)
+	}
+}
+
+func TestPythonDetectionRequiresTyWithoutFallback(t *testing.T) {
+	for _, marker := range []string{"pyproject.toml", "ty.toml", "requirements.txt"} {
+		t.Run(marker, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, marker), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			requirements := DetectRequirements(root)
+			if len(requirements) != 1 || !reflect.DeepEqual(requirements[0].Commands, []string{"ty"}) {
+				t.Fatalf("Python requirements = %+v", requirements)
+			}
+			tools := testManagedTools{"basedpyright-langserver": filepath.Join(t.TempDir(), "basedpyright-langserver")}
+			if roots := detectAll(root, tools); len(roots) != 0 {
+				t.Fatalf("Python used another server when ty was missing: %+v", roots)
+			}
+			tools["ty"] = filepath.Join(t.TempDir(), "ty")
+			roots := detectAll(root, tools)
+			if len(roots) != 1 || roots[0].Server.Name != "ty" || !reflect.DeepEqual(roots[0].Server.Args, []string{"server"}) {
+				t.Fatalf("Python server = %+v", roots)
+			}
+		})
+	}
+}
+
+func TestClangdDetectionRoutesSourcesAndHeaders(t *testing.T) {
+	for _, marker := range []string{"compile_commands.json", "compile_flags.txt", ".clangd", "CMakeLists.txt", "meson.build"} {
+		t.Run(marker, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, marker), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			manager := NewManager(root, WithManagedTools(testManagedTools{"clangd": filepath.Join(t.TempDir(), "clangd")}))
+			defer manager.Close()
+			for file, language := range map[string]string{"main.c": "c", "main.C": "cpp", "main.cpp": "cpp", "lib.h": "cpp", "lib.hpp": "cpp"} {
+				path := filepath.Join(root, "src", file)
+				server := manager.FindServer(path)
+				if server == nil || server.Name != "clangd" || server.LanguageIDForPath(path) != language {
+					t.Errorf("server for %s = %+v, want clangd with language %s", file, server, language)
+				}
+			}
+		})
+	}
+}
+
+func TestDetectAllUsesManagedServer(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("PATH", "")
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(root, "managed", "gopls")
+	roots := detectAll(root, testManagedTools{"gopls": managed})
+	if len(roots) != 1 || roots[0].Server.Command != managed {
+		t.Fatalf("roots = %+v, want managed command %q", roots, managed)
+	}
+}
+
+func TestDetectAllPrefersManagedServerOverSystemFallback(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	bin := filepath.Join(root, "system-bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	system := filepath.Join(bin, tooling.Candidates(runtime.GOOS, "gopls")[0])
+	if err := os.WriteFile(system, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(root, "managed", "gopls")
+	roots := detectAll(root, testManagedTools{"gopls": managed})
+	if len(roots) != 1 || roots[0].Server.Command != managed {
+		t.Fatalf("roots = %+v, want managed command %q", roots, managed)
+	}
+}
+
+func TestJavaDebugHostUsesOnlyManagedJDTLS(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "pom.xml"), []byte("<project/>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "node_modules", ".bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, tooling.Candidates(runtime.GOOS, "jdtls")[0]), []byte("host"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	managed := filepath.Join(root, "managed", "jdtls")
+	tools := testManagedTools{"jdtls": managed}
+	manager := NewManager(root, WithManagedTools(tools))
+	defer manager.Close()
+	roots := manager.detect()
+	if len(roots) != 1 || roots[0].Server.Command != managed {
+		t.Fatalf("Java hosts = %+v", roots)
+	}
+	tools["jdtls"] = ""
+	manager.InvalidateDetection()
+	if roots := manager.detect(); len(roots) != 0 {
+		t.Fatalf("unmanaged Java host was accepted: %+v", roots)
 	}
 }
 
@@ -229,7 +303,7 @@ func TestIndexWorkspaceSkipsIgnoredContents(t *testing.T) {
 
 	index := indexWorkspace(root)
 	entries := index.matching("package.json")
-	if len(entries) != 1 || entries[0].path != filepath.Join(root, "package.json") {
+	if len(entries) != 1 || entries[0] != filepath.Join(root, "package.json") {
 		t.Fatalf("indexed package.json entries = %+v, want only the root marker", entries)
 	}
 	if !index.hasChild(root, "package.json") {
@@ -239,41 +313,17 @@ func TestIndexWorkspaceSkipsIgnoredContents(t *testing.T) {
 
 func TestIndexWorkspaceKeepsHiddenDirectoryMarker(t *testing.T) {
 	root := t.TempDir()
-	marker := filepath.Join(root, ".metals")
+	marker := filepath.Join(root, ".project")
 	if err := os.Mkdir(marker, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	for _, entry := range indexWorkspace(root).matching(".metals") {
-		if entry.path == marker && entry.isDir {
+	for _, path := range indexWorkspace(root).matching(".project") {
+		if path == marker {
 			return
 		}
 	}
 	t.Fatalf("hidden directory marker %q was not recorded", marker)
-}
-
-func TestHasNestedFileMatchesFilesOnly(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "component.vue"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	index := indexWorkspace(root)
-	if index.hasNestedFile(root, []string{"*.vue"}) {
-		t.Fatal("directory should not satisfy a source-file requirement")
-	}
-
-	nested := filepath.Join(root, "src")
-	if err := os.Mkdir(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(nested, "component.vue"), []byte("<template/>\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if !indexWorkspace(root).hasNestedFile(root, []string{"*.vue"}) {
-		t.Fatal("nested source file should satisfy requirement")
-	}
 }
 
 func TestProjectDirsAppliesExcludes(t *testing.T) {
@@ -295,4 +345,37 @@ func TestProjectDirsAppliesExcludes(t *testing.T) {
 		return
 	}
 	t.Fatal("typescript project type not found")
+}
+
+func TestIsSubPathHandlesRelativeRoots(t *testing.T) {
+	if !isSubPath(".", filepath.Join("nested", "source.go")) {
+		t.Fatal("relative workspace root did not contain a nested file")
+	}
+	if !isSubPath("workspace", filepath.Join("workspace", "nested", "source.go")) {
+		t.Fatal("relative project root did not contain a nested file")
+	}
+	if isSubPath("workspace", "workspace-other") {
+		t.Fatal("path with a shared textual prefix was treated as a child")
+	}
+}
+
+func TestDetectedProjectsDoNotExposeCachedServerSlices(t *testing.T) {
+	manager := &Manager{roots: []projectRoot{{
+		Dir: "project",
+		Server: Server{
+			Args:                  []string{"--stdio"},
+			Languages:             []string{"go"},
+			InitializationOptions: []byte(`{"setting":true}`),
+		},
+	}}, detectedAt: time.Now()}
+
+	first := manager.detect()
+	first[0].Server.Args[0] = "changed"
+	first[0].Server.Languages[0] = "changed"
+	first[0].Server.InitializationOptions[0] = 'x'
+
+	second := manager.detect()
+	if second[0].Server.Args[0] != "--stdio" || second[0].Server.Languages[0] != "go" || string(second[0].Server.InitializationOptions) != `{"setting":true}` {
+		t.Fatalf("cached descriptor was mutated through a detection result: %+v", second[0].Server)
+	}
 }

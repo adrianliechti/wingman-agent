@@ -18,14 +18,11 @@ func TestPathHandlingCrossplatform(t *testing.T) {
 	os.MkdirAll(filepath.Join(tmpDir, "a", "b", "c"), 0755)
 	os.WriteFile(filepath.Join(tmpDir, "a", "b", "c", "file.txt"), []byte("content"), 0644)
 
-	writeTool := WriteTool(root)
+	editTool := EditTool(root)
 	readTool := ReadTool(root)
 
 	t.Run("forward slash paths work", func(t *testing.T) {
-		_, err := writeTool.Execute(context.Background(), map[string]any{
-			"file_path": "a/b/c/new.txt",
-			"content":   "test",
-		})
+		_, err := editTool.Execute(context.Background(), createArgs("a/b/c/new.txt", "test"))
 
 		if err != nil {
 			t.Fatalf("unexpected error with forward slashes: %v", err)
@@ -46,10 +43,7 @@ func TestPathHandlingCrossplatform(t *testing.T) {
 
 	if runtime.GOOS == "windows" {
 		t.Run("backslash paths work on windows", func(t *testing.T) {
-			_, err := writeTool.Execute(context.Background(), map[string]any{
-				"file_path": "a\\b\\c\\win.txt",
-				"content":   "windows",
-			})
+			_, err := editTool.Execute(context.Background(), createArgs("a\\b\\c\\win.txt", "windows"))
 
 			if err != nil {
 				t.Fatalf("unexpected error with backslashes: %v", err)

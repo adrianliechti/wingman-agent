@@ -31,6 +31,7 @@ type CommandOrCodeAction = protocol.CommandOrCodeAction
 type CodeAction = protocol.CodeAction
 type CodeActionOptions = protocol.CodeActionOptions
 type Command = protocol.Command
+type LSPAny = protocol.LSPAny
 type FormattingOptions = protocol.FormattingOptions
 type TextEdit = protocol.TextEdit
 type InlayHint = protocol.InlayHint
@@ -107,6 +108,22 @@ const (
 )
 
 func Optional[T any](value T) OptionalValue[T] { return protocol.NewOptional(value) }
+
+// CapabilityEnabled handles the boolean-or-options shape used by many LSP
+// server capabilities. A non-nil options value enables the capability.
+func CapabilityEnabled(value any) bool {
+	if value == nil {
+		return false
+	}
+	switch enabled := value.(type) {
+	case protocol.Boolean:
+		return bool(enabled)
+	case bool:
+		return enabled
+	default:
+		return true
+	}
+}
 
 func Marshal(value any) ([]byte, error) { return protocol.Marshal(value) }
 

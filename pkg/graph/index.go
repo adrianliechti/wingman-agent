@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
 )
@@ -191,7 +192,8 @@ func indexRepo(ctx context.Context, root string, resolver CallResolver) (*Graph,
 	}
 
 	seen := map[string]bool{}
-	addEdge := func(from, to string, kind EdgeKind, via Provenance) {
+	addEdge := func(r indexRef, to string, via Provenance) {
+		from, kind := r.fromID, r.kind
 		if from == to {
 			return
 		}
@@ -200,7 +202,7 @@ func indexRepo(ctx context.Context, root string, resolver CallResolver) (*Graph,
 			return
 		}
 		seen[key] = true
-		g.Edges = append(g.Edges, &Edge{From: from, To: to, Kind: kind, Via: via})
+		g.Edges = append(g.Edges, &Edge{From: from, To: to, Kind: kind, Via: via, Line: r.line + 1})
 	}
 
 	resolves := 0
@@ -214,9 +216,9 @@ func indexRepo(ctx context.Context, root string, resolver CallResolver) (*Graph,
 		added := false
 		if df, dl, ok := resolver.ResolveCall(ctx, r.file, r.line, r.col); ok {
 			if tgt := g.nodeAt(df, dl); tgt != nil {
-				addEdge(r.fromID, tgt.ID, r.kind, ViaLSP)
+				addEdge(r, tgt.ID, ViaLSP)
 				added = true
-				if !isTypeKind(tgt.Kind) {
+				if !isTypeKind(tgt.Kind) && !tgt.interfaceMethod {
 					return true
 				}
 			}
@@ -231,7 +233,7 @@ func indexRepo(ctx context.Context, root string, resolver CallResolver) (*Graph,
 		}
 		for _, loc := range impls {
 			if tgt := g.nodeAt(loc.File, loc.Line); tgt != nil {
-				addEdge(r.fromID, tgt.ID, r.kind, ViaLSP)
+				addEdge(r, tgt.ID, ViaLSP)
 				added = true
 			}
 		}
@@ -293,7 +295,13 @@ func indexRepo(ctx context.Context, root string, resolver CallResolver) (*Graph,
 				resolveViaLSP(r)
 			}
 		case 1:
-			addEdge(r.fromID, cands[0].ID, r.kind, ViaName)
+			// An interface member is a declaration, not the concrete call
+			// target. Resolve its implementations even when its name is unique
+			// among imported modules; retain the structural edge offline.
+			if r.kind == EdgeCalls && cands[0].interfaceMethod && resolveViaLSP(r) {
+				continue
+			}
+			addEdge(r, cands[0].ID, ViaName)
 		default:
 			if resolveViaLSP(r) {
 				continue
@@ -302,7 +310,7 @@ func indexRepo(ctx context.Context, root string, resolver CallResolver) (*Graph,
 				continue
 			}
 			for _, cand := range cands {
-				addEdge(r.fromID, cand.ID, r.kind, ViaAmbiguous)
+				addEdge(r, cand.ID, ViaAmbiguous)
 			}
 		}
 	}
@@ -321,7 +329,7 @@ func indexRepo(ctx context.Context, root string, resolver CallResolver) (*Graph,
 
 func collectFiles(ctx context.Context, root string) ([]string, error) {
 	var paths []string
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	err := pathutil.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -484,6 +492,7 @@ func (ex *extractor) processFile(root, absPath string) *fileResult {
 		kind  Kind
 	}
 	var defs []defSpan
+	definitions := make(map[string]*Node)
 
 	for _, t := range tags {
 		kind, ok := kindFromTag(t.Kind)
@@ -491,12 +500,20 @@ func (ex *extractor) processFile(root, absPath string) *fileResult {
 			continue
 		}
 		id := fmt.Sprintf("%s#%s@%d", rel, t.Name, t.Range.StartByte)
+		if existing := definitions[id]; existing != nil {
+			// Built-in queries may now cover definitions also supplied by
+			// our augmentations. Keep one node and prefer the specific kind.
+			if existing.Kind == KindType && isTypeKind(kind) {
+				existing.Kind = kind
+			}
+			continue
+		}
 		namePos := t.NameRange.StartByte
 		if t.NameRange.EndByte == 0 {
 			namePos = t.Range.StartByte
 		}
 		nameLine, nameCol := li.lspPos(namePos)
-		res.nodes = append(res.nodes, &Node{
+		node := &Node{
 			ID:        id,
 			Kind:      kind,
 			Name:      t.Name,
@@ -506,8 +523,22 @@ func (ex *extractor) processFile(root, absPath string) *fileResult {
 			NameLine:  nameLine + 1,
 			NameCol:   nameCol + 1,
 			Lang:      entry.Name,
-		})
+		}
+		definitions[id] = node
+		res.nodes = append(res.nodes, node)
 		defs = append(defs, defSpan{id: id, start: t.Range.StartByte, end: t.Range.EndByte, kind: kind})
+	}
+	for _, method := range defs {
+		node := definitions[method.id]
+		if node.Kind != KindMethod {
+			continue
+		}
+		for _, parent := range defs {
+			if definitions[parent.id].Kind == KindInterface && parent.start <= method.start && method.end <= parent.end {
+				node.interfaceMethod = true
+				break
+			}
+		}
 	}
 
 	sort.Slice(defs, func(i, j int) bool {

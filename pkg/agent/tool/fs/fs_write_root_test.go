@@ -40,17 +40,12 @@ func createWriteRootSetup(t *testing.T) (*os.Root, string, string, func()) {
 	return root, workspaceDir, allowedDir, cleanup
 }
 
-func TestWriteToolAllowsWritesInsideAllowedRoot(t *testing.T) {
+func TestEditToolCreatesInsideAllowedRoot(t *testing.T) {
 	root, _, allowedDir, cleanup := createWriteRootSetup(t)
 	defer cleanup()
 
-	writeTool := WriteTool(root, allowedDir)
-
 	target := filepath.Join(allowedDir, "feedback_testing.md")
-	if _, err := writeTool.Execute(context.Background(), map[string]any{
-		"file_path": target,
-		"content":   "hello memory",
-	}); err != nil {
+	if _, err := EditTool(root, allowedDir).Execute(context.Background(), createArgs(target, "hello memory")); err != nil {
 		t.Fatalf("write inside allowed root: %v", err)
 	}
 
@@ -63,11 +58,9 @@ func TestWriteToolAllowsWritesInsideAllowedRoot(t *testing.T) {
 	}
 }
 
-func TestWriteToolRejectsWritesOutsideAllowedRoots(t *testing.T) {
+func TestEditToolRejectsCreatesOutsideAllowedRoots(t *testing.T) {
 	root, _, allowedDir, cleanup := createWriteRootSetup(t)
 	defer cleanup()
-
-	writeTool := WriteTool(root, allowedDir)
 
 	other, err := os.MkdirTemp("", "fs_other_*")
 	if err != nil {
@@ -75,10 +68,7 @@ func TestWriteToolRejectsWritesOutsideAllowedRoots(t *testing.T) {
 	}
 	defer os.RemoveAll(other)
 
-	_, err = writeTool.Execute(context.Background(), map[string]any{
-		"file_path": filepath.Join(other, "x.md"),
-		"content":   "nope",
-	})
+	_, err = EditTool(root, allowedDir).Execute(context.Background(), createArgs(filepath.Join(other, "x.md"), "nope"))
 	if err == nil {
 		t.Fatal("expected error writing outside workspace and allowed roots")
 	}
@@ -168,13 +158,10 @@ func TestExpandHomeAcrossTools(t *testing.T) {
 	}
 	t.Cleanup(func() { root.Close() })
 
-	t.Run("write expands ~/", func(t *testing.T) {
-		_, err := WriteTool(root, allowedDir).Execute(context.Background(), map[string]any{
-			"file_path": tildePrefix + "/note.md",
-			"content":   "via tilde",
-		})
+	t.Run("edit creates via ~/", func(t *testing.T) {
+		_, err := EditTool(root, allowedDir).Execute(context.Background(), createArgs(tildePrefix+"/note.md", "via tilde"))
 		if err != nil {
-			t.Fatalf("write via ~/: %v", err)
+			t.Fatalf("create via ~/: %v", err)
 		}
 		data, _ := os.ReadFile(filepath.Join(allowedDir, "note.md"))
 		if string(data) != "via tilde" {
@@ -224,17 +211,14 @@ func TestExpandHomeAcrossTools(t *testing.T) {
 	})
 }
 
-func TestWriteToolWithoutAllowedRootsStillRespectsWorkspace(t *testing.T) {
+func TestEditToolWithoutAllowedRootsStillRespectsWorkspace(t *testing.T) {
 	root, workspaceDir, _, cleanup := createWriteRootSetup(t)
 	defer cleanup()
 
-	writeTool := WriteTool(root)
+	editTool := EditTool(root)
 
 	rel := "in_workspace.txt"
-	if _, err := writeTool.Execute(context.Background(), map[string]any{
-		"file_path": rel,
-		"content":   "in workspace",
-	}); err != nil {
+	if _, err := editTool.Execute(context.Background(), createArgs(rel, "in workspace")); err != nil {
 		t.Fatalf("workspace write: %v", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(workspaceDir, rel))
@@ -248,10 +232,7 @@ func TestWriteToolWithoutAllowedRootsStillRespectsWorkspace(t *testing.T) {
 	}
 	defer os.RemoveAll(sibling)
 
-	if _, err := writeTool.Execute(context.Background(), map[string]any{
-		"file_path": filepath.Join(sibling, "x.txt"),
-		"content":   "nope",
-	}); err == nil {
+	if _, err := editTool.Execute(context.Background(), createArgs(filepath.Join(sibling, "x.txt"), "nope")); err == nil {
 		t.Fatal("expected sandbox rejection for sibling dir")
 	}
 }

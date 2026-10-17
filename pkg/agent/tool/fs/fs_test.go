@@ -28,3 +28,8 @@ func createTestRoot(t *testing.T) (*os.Root, string, func()) {
 
 	return root, tmpDir, cleanup
 }
+
+// createArgs is the edit call that creates a file (or fills an empty one).
+func createArgs(path, content string) map[string]any {
+	return map[string]any{"edits": []any{map[string]any{"file_path": path, "old_string": "", "new_string": content}}}
+}

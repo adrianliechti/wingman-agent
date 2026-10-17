@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 type CallResolver interface {
@@ -33,7 +34,7 @@ type Engine struct {
 	cachePath string
 	resolver  CallResolver
 
-	buildMu    sync.Mutex
+	buildGate  *semaphore.Weighted
 	refreshing atomic.Bool
 
 	staleMu  sync.Mutex
@@ -41,8 +42,8 @@ type Engine struct {
 	staleVal bool
 
 	mu           sync.RWMutex
-	graph        *Graph
-	files        map[string]fileMeta
+	graph        *Graph              // immutable after publication; mu guards replacement
+	files        map[string]fileMeta // immutable after publication
 	indexedFiles int
 	skipped      []CoverageIssue
 	indexedAt    time.Time
@@ -57,7 +58,7 @@ func WithResolver(r CallResolver) Option {
 }
 
 func New(root, cachePath string, opts ...Option) *Engine {
-	e := &Engine{root: root, cachePath: cachePath}
+	e := &Engine{root: root, cachePath: cachePath, buildGate: semaphore.NewWeighted(1)}
 	for _, o := range opts {
 		o(e)
 	}
@@ -141,8 +142,6 @@ func (e *Engine) DeadCode(ctx context.Context, limit int) ([]*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return g.deadCode(limit), nil
 }
 
@@ -152,23 +151,26 @@ func (e *Engine) DetectChanges(ctx context.Context, since string) (Changes, erro
 		return Changes{}, err
 	}
 
-	changed, err := gitChanges(e.root, since)
+	changed, err := gitChanges(ctx, e.root, since)
 	if err != nil {
 		return Changes{}, err
 	}
 
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return affectedNodes(g, changed), nil
 }
 
 func (e *Engine) Index(ctx context.Context) (Status, error) {
-	e.buildMu.Lock()
-	defer e.buildMu.Unlock()
+	if err := e.buildGate.Acquire(ctx, 1); err != nil {
+		return Status{}, err
+	}
+	defer e.buildGate.Release(1)
 	return e.indexLocked(ctx)
 }
 
 func (e *Engine) indexLocked(ctx context.Context) (Status, error) {
+	if err := ctx.Err(); err != nil {
+		return Status{}, err
+	}
 	g, files, stats, err := indexRepo(ctx, e.root, e.resolver)
 	if err != nil {
 		return Status{}, err
@@ -199,15 +201,24 @@ func (e *Engine) indexLocked(ctx context.Context) (Status, error) {
 // ensureIndexed never blocks a query on freshness: a missing graph builds
 // synchronously, a stale one is served while one background refresh runs.
 func (e *Engine) ensureIndexed(ctx context.Context) (*Graph, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if g := e.tryLoadCache(); g != nil {
-		if e.IsStale(ctx) {
+		stale := e.IsStale(ctx)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if stale {
 			e.refreshInBackground()
 		}
 		return g, nil
 	}
 
-	e.buildMu.Lock()
-	defer e.buildMu.Unlock()
+	if err := e.buildGate.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	defer e.buildGate.Release(1)
 
 	e.mu.RLock()
 	g := e.graph
@@ -255,6 +266,9 @@ func (e *Engine) IsStale(ctx context.Context) bool {
 	e.staleMu.Unlock()
 
 	stale := e.checkStale(ctx)
+	if ctx.Err() != nil {
+		return true
+	}
 	e.staleMu.Lock()
 	e.staleAt = time.Now()
 	e.staleVal = stale
@@ -264,8 +278,7 @@ func (e *Engine) IsStale(ctx context.Context) bool {
 
 func (e *Engine) checkStale(ctx context.Context) bool {
 	e.mu.RLock()
-	files := make(map[string]fileMeta, len(e.files))
-	maps.Copy(files, e.files)
+	files := e.files
 	e.mu.RUnlock()
 
 	paths, err := collectFiles(ctx, e.root)
@@ -300,34 +313,7 @@ func (e *Engine) SearchPage(ctx context.Context, opts SearchOpts) (SearchResult,
 	if err != nil {
 		return SearchResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return g.searchPage(opts), nil
-}
-
-type TraceResult struct {
-	Roots []*Node
-	Paths []Path
-}
-
-func (e *Engine) Trace(ctx context.Context, from, to, file string, callers bool, maxDepth int) (TraceResult, error) {
-	g, err := e.ensureIndexed(ctx)
-	if err != nil {
-		return TraceResult{}, err
-	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	roots := g.resolve(from, file)
-	if len(roots) == 0 {
-		return TraceResult{}, notFoundErr(from, file)
-	}
-
-	var paths []Path
-	for _, r := range roots {
-		paths = append(paths, g.trace(r.ID, to, callers, maxDepth)...)
-	}
-	return TraceResult{Roots: roots, Paths: paths}, nil
 }
 
 func (e *Engine) Architecture(ctx context.Context) (Arch, error) {
@@ -335,8 +321,6 @@ func (e *Engine) Architecture(ctx context.Context) (Arch, error) {
 	if err != nil {
 		return Arch{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return g.architecture(), nil
 }
 
@@ -345,8 +329,6 @@ func (e *Engine) Deps(ctx context.Context, target string, depth int) (DepsResult
 	if err != nil {
 		return DepsResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return g.deps(g.resolveModule(filepath.ToSlash(target)), depth), nil
 }
 
@@ -355,12 +337,10 @@ func (e *Engine) Hierarchy(ctx context.Context, name, file string) (HierarchyRes
 	if err != nil {
 		return HierarchyResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	cands := g.resolve(name, file)
 	if len(cands) == 0 {
-		return HierarchyResult{}, notFoundErr(name, file)
+		return HierarchyResult{}, g.notFoundErr(name, file)
 	}
 
 	node := cands[0]
@@ -375,11 +355,24 @@ func (e *Engine) Hierarchy(ctx context.Context, name, file string) (HierarchyRes
 	return res, nil
 }
 
-func notFoundErr(name, file string) error {
+func (g *Graph) notFoundErr(name, file string) error {
+	message := fmt.Sprintf("no symbol named %q in the graph", name)
 	if file != "" {
-		return fmt.Errorf("no symbol named %q in file matching %q", name, file)
+		message = fmt.Sprintf("no symbol named %q in file matching %q", name, file)
 	}
-	return fmt.Errorf("no symbol named %q in the graph", name)
+	// Models often supply Type.Method. The index accepts path qualifiers;
+	// show actual definitions instead of discarding a potentially meaningful
+	// receiver/class qualifier and silently selecting the wrong method.
+	if i := strings.LastIndexAny(name, ".:/"); i > 0 && i+1 < len(name) {
+		candidates := g.resolve(name[i+1:], file)
+		if len(candidates) > 0 {
+			message += fmt.Sprintf(". Use a bare name or path:Name. Same-name definitions (verify receiver/class; showing %d of %d):", min(len(candidates), 5), len(candidates))
+			for _, n := range candidates[:min(len(candidates), 5)] {
+				message += fmt.Sprintf("\n- %s:%s (line %d)", n.File, n.Name, n.StartLine)
+			}
+		}
+	}
+	return errors.New(message)
 }
 
 func othersOf(cands []*Node, chosen *Node) []*Node {
@@ -401,12 +394,10 @@ func (e *Engine) Tests(ctx context.Context, name, file string) (TestsResult, err
 	if err != nil {
 		return TestsResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	cands := g.resolve(name, file)
 	if len(cands) == 0 {
-		return TestsResult{}, notFoundErr(name, file)
+		return TestsResult{}, g.notFoundErr(name, file)
 	}
 	res := g.testsFor(cands[0])
 	res.Others = othersOf(cands, cands[0])
@@ -421,12 +412,10 @@ func (e *Engine) Similar(ctx context.Context, name, file string, limit int) (Sim
 	if err != nil {
 		return SimilarResult{}, err
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	cands := g.resolve(name, file)
 	if len(cands) == 0 {
-		return SimilarResult{}, notFoundErr(name, file)
+		return SimilarResult{}, g.notFoundErr(name, file)
 	}
 	node := cands[0]
 	for _, c := range cands {
@@ -445,7 +434,7 @@ func (e *Engine) CoChanges(ctx context.Context, file string, limit int) (CoChang
 	if limit <= 0 {
 		limit = 15
 	}
-	return coChanges(e.root, filepath.ToSlash(file), limit)
+	return coChanges(ctx, e.root, filepath.ToSlash(file), limit)
 }
 
 type Snippet struct {
@@ -460,34 +449,38 @@ func (e *Engine) Snippet(ctx context.Context, name, file string) (Snippet, error
 		return Snippet{}, err
 	}
 
-	e.mu.RLock()
 	cands := g.resolve(name, file)
-	e.mu.RUnlock()
 
 	if len(cands) == 0 {
-		return Snippet{}, notFoundErr(name, file)
+		return Snippet{}, g.notFoundErr(name, file)
 	}
 
 	node := cands[0]
-	code, err := e.readLines(node.File, node.StartLine, node.EndLine)
+	e.mu.RLock()
+	meta, known := e.files[node.File]
+	matchingSnapshot := e.graph == g
+	e.mu.RUnlock()
+	if !known || !matchingSnapshot {
+		return Snippet{}, fmt.Errorf("index changed during query; retry snippet")
+	}
+	data, changed, err := readTraceSource(filepath.Join(e.root, filepath.FromSlash(node.File)), meta)
+	if err != nil {
+		return Snippet{}, err
+	}
+	if changed {
+		return Snippet{}, fmt.Errorf("source changed since indexing; run index before requesting snippet")
+	}
+	code, err := snippetLines(data, node.StartLine, node.EndLine)
 	if err != nil {
 		return Snippet{}, err
 	}
 	return Snippet{Node: node, Code: code, Others: othersOf(cands, node)}, nil
 }
 
-func (e *Engine) readLines(rel string, start, end int) (string, error) {
+func snippetLines(data []byte, start, end int) (string, error) {
 	if start <= 0 {
 		start = 1
 	}
-	clean := filepath.FromSlash(rel)
-	full := filepath.Join(e.root, clean)
-
-	data, err := os.ReadFile(full)
-	if err != nil {
-		return "", err
-	}
-
 	lines := strings.Split(string(data), "\n")
 	if start > len(lines) {
 		return "", errors.New("line range out of bounds")
@@ -498,7 +491,7 @@ func (e *Engine) readLines(rel string, start, end int) (string, error) {
 
 	var b strings.Builder
 	for i := start; i <= end; i++ {
-		fmt.Fprintf(&b, "%d\t%s\n", i, lines[i-1])
+		fmt.Fprintf(&b, "%d\t%s\n", i, strings.TrimSuffix(lines[i-1], "\r"))
 	}
 	return b.String(), nil
 }

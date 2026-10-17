@@ -1,0 +1,85 @@
+import {
+	createContext,
+	useContext,
+	useEffect,
+	useSyncExternalStore,
+} from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { fetchJSON, fetchOK } from "../api/http.ts";
+import {
+	EMPTY_SETTINGS,
+	isDraft,
+	splitSessionKey,
+	type SessionSettings,
+	type SettingsPatch,
+} from "./sessionStore.ts";
+import { patchDraftSettings, settingsForDraft } from "./sessionSettings.ts";
+import { workspaceClient } from "./workspaceClient.ts";
+
+export type { SettingsPatch } from "./sessionStore.ts";
+type Navigation = {
+	backend: string;
+	selectBackend: (id: string) => void;
+	drafts: Record<string, SettingsPatch>;
+	setDraft: (key: string, patch: SettingsPatch) => void;
+};
+export const WorkspaceContext = createContext<Navigation | null>(null);
+export function useWorkspace() {
+	const value = useContext(WorkspaceContext);
+	if (!value) throw new Error("Workspace provider missing");
+	return value;
+}
+export function backendSettingsQuery(backend: string) {
+	return {
+		queryKey: ["server", "backend-settings", backend],
+		queryFn: ({ signal }: { signal: AbortSignal }) =>
+			fetchJSON<SessionSettings>(
+				`/api/v2/backends/${encodeURIComponent(backend)}/settings`,
+				{ signal },
+			),
+	};
+}
+export function draftSettingsKey(key: string, draftId: string) {
+	return JSON.stringify([splitSessionKey(key).backendId, draftId]);
+}
+export function useSessionSettings(key = "", draftId = key) {
+	const queryClient = useQueryClient();
+	const client = workspaceClient();
+	const { backend, drafts, setDraft } = useWorkspace();
+	const draft = isDraft(key);
+	const owner = key ? splitSessionKey(key).backendId : backend;
+	const settingsKey = JSON.stringify([owner, draftId]);
+	const hasDefaults = owner === "wingman";
+	const catalogs = useQuery({
+		...backendSettingsQuery(owner),
+		enabled: draft && hasDefaults,
+	});
+	const sessionSettings = useSyncExternalStore(
+		client.store.subscribeRender,
+		() => client.store.getSnapshot()[key]?.settings ?? EMPTY_SETTINGS,
+	);
+	useEffect(() => client.watch(key), [client, key]);
+	const settings = draft
+		? settingsForDraft(
+				(hasDefaults && catalogs.data) || EMPTY_SETTINGS,
+				drafts[settingsKey],
+			)
+		: sessionSettings;
+	const setSettings = async (patch: SettingsPatch) => {
+		if (draft) setDraft(settingsKey, patchDraftSettings(settings, patch));
+		else await client.command(key, { type: "settings", ...patch });
+	};
+	const retryModels = async () => {
+		try {
+			await fetchOK(
+				`/api/v2/backends/${encodeURIComponent(owner)}/models/refresh`,
+				{ method: "POST" },
+			);
+		} finally {
+			await queryClient.invalidateQueries({
+				queryKey: backendSettingsQuery(owner).queryKey,
+			});
+		}
+	};
+	return { settings, setSettings, retryModels };
+}

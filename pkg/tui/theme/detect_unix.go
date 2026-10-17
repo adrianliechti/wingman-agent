@@ -6,88 +6,99 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
+
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
 
-func queryTerminalBackground() bool {
+func queryTerminalBackground() (light, known bool) {
 	fd := int(os.Stdin.Fd())
 
-	if !term.IsTerminal(fd) {
-		return false
+	if !term.IsTerminal(fd) || !term.IsTerminal(int(os.Stdout.Fd())) {
+		return false, false
 	}
 
 	oldState, err := term.MakeRaw(fd)
 
 	if err != nil {
-		return false
+		return false, false
 	}
+	defer term.Restore(fd, oldState)
 
-	// A deadline read, not a goroutine: an abandoned blocking Read would
-	// swallow the user's first keystrokes on terminals that never answer
-	// the OSC query.
-	if err := os.Stdin.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
-		term.Restore(fd, oldState)
-		return false
+	if _, err := os.Stdout.WriteString("\x1b]11;?\x07"); err != nil {
+		return false, false
 	}
+	return readTerminalBackground(fd, 200*time.Millisecond)
+}
 
-	os.Stdout.WriteString("\x1b]11;?\x07")
-
-	buf := make([]byte, 64)
-	n, _ := os.Stdin.Read(buf)
-	os.Stdin.SetReadDeadline(time.Time{})
-
-	result := false
-	if n > 0 {
-		result = parseLuma(string(buf[:n])) > 0.5
-	}
-
-	syscall.SetNonblock(fd, true)
-	drainBuf := make([]byte, 64)
-
-	for {
-		n, _ := syscall.Read(fd, drainBuf)
-
-		if n <= 0 {
-			break
+// TTY files can reject os.File.SetReadDeadline (including on macOS). Poll
+// readiness directly, with one deadline for the entire fragmented reply and
+// no background reader left consuming input after a timeout.
+func readTerminalBackground(fd int, timeout time.Duration) (light, known bool) {
+	deadline := time.Now().Add(timeout)
+	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	var response strings.Builder
+	var buf [128]byte
+	for response.Len() < 4096 {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false, false
+		}
+		milliseconds := int((remaining + time.Millisecond - 1) / time.Millisecond)
+		n, err := unix.Poll(fds, milliseconds)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil || n == 0 || fds[0].Revents&unix.POLLIN == 0 {
+			return false, false
+		}
+		n, err = unix.Read(fd, buf[:])
+		if err == unix.EINTR || err == unix.EAGAIN {
+			continue
+		}
+		if err != nil || n == 0 {
+			return false, false
+		}
+		response.Write(buf[:n])
+		if color, ok := parseBackgroundColor(response.String()); ok {
+			luma := (0.299*float64(color.R) + 0.587*float64(color.G) + 0.114*float64(color.B)) / 255
+			return luma > 0.5, true
 		}
 	}
-	syscall.SetNonblock(fd, false)
-
-	term.Restore(fd, oldState)
-
-	return result
+	return false, false
 }
 
-func parseLuma(s string) float64 {
-	i := strings.Index(s, "rgb:")
-
-	if i == -1 {
-		return 0
+// An OSC reply is valid only once BEL or ST has terminated all three
+// components; a partial reply must never select the wrong palette.
+func parseBackgroundColor(s string) (ansi.Color, bool) {
+	_, s, found := strings.Cut(s, "\x1b]11;rgb:")
+	if !found {
+		return ansi.Color{}, false
 	}
-
-	s = s[i+4:]
-	parts := strings.SplitN(s, "/", 3)
-
-	if len(parts) < 3 {
-		return 0
+	end := strings.IndexByte(s, '\a')
+	if st := strings.Index(s, "\x1b\\"); st >= 0 && (end < 0 || st < end) {
+		end = st
 	}
-
-	r := parseHex(parts[0])
-	g := parseHex(parts[1])
-	b := parseHex(strings.TrimRight(parts[2], "\x07\x1b\\"))
-
-	return 0.299*float64(r)/255 + 0.587*float64(g)/255 + 0.114*float64(b)/255
-}
-
-func parseHex(s string) int {
-	if len(s) == 4 {
-		s = s[:2]
+	if end < 0 {
+		return ansi.Color{}, false
 	}
-
-	v, _ := strconv.ParseInt(s, 16, 32)
-
-	return int(v)
+	parts := strings.Split(s[:end], "/")
+	if len(parts) != 3 {
+		return ansi.Color{}, false
+	}
+	var rgb [3]uint8
+	for i, part := range parts {
+		if len(part) < 1 || len(part) > 4 {
+			return ansi.Color{}, false
+		}
+		value, err := strconv.ParseUint(part, 16, 16)
+		if err != nil {
+			return ansi.Color{}, false
+		}
+		rgb[i] = uint8(value * 255 / ((1 << (4 * len(part))) - 1))
+	}
+	return ansi.Color{R: rgb[0], G: rgb[1], B: rgb[2]}, true
 }

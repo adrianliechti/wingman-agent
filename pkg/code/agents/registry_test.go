@@ -40,6 +40,9 @@ func isolateHomes(t *testing.T) (string, string) {
 
 func TestNativeOptionsPreserveEnvironmentWithoutProviderOverrides(t *testing.T) {
 	isolateHomes(t)
+	// Native agents neither resolve nor validate Wingman's gateway settings.
+	t.Setenv("WINGMAN_URL", "://invalid-gateway")
+	t.Setenv("WINGMAN_TOKEN", "gateway-token")
 	env := []string{
 		"PATH=/usr/bin",
 		"ANTHROPIC_API_KEY=anthropic-key",
@@ -65,8 +68,8 @@ func TestNativeOptionsPreserveEnvironmentWithoutProviderOverrides(t *testing.T) 
 		t.Fatalf("nativeCodexOptions().Stderr = %T, want io.Discard", codex.Stderr)
 	}
 
-	pi := nativePiOptions("/workspace", env)
-	if pi.Dir != "/workspace" || !slices.Equal(pi.Env, env) || len(pi.Args) != 0 {
+	pi := nativePiOptions(env)
+	if !slices.Equal(pi.Env, env) || len(pi.Args) != 0 {
 		t.Fatalf("nativePiOptions() = %#v", pi)
 	}
 	if pi.Stderr != io.Discard {

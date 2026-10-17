@@ -5,6 +5,7 @@ package external
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,28 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
+
+func TestCommandOversizedHookResponseDoesNotBypassDenial(t *testing.T) {
+	const prefix = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"`
+	const suffix = `"}}`
+	for _, size := range []int{maxHookOutput, maxHookOutput + 1, 2 * maxHookOutput} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			dir := t.TempDir()
+			body := prefix + strings.Repeat("x", size-len(prefix)-len(suffix)) + suffix
+			if err := os.WriteFile(filepath.Join(dir, "response.json"), []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := configFor("PreToolUse", "Bash", Handler{Type: "command", Command: "cat response.json"})
+			outcome, err := cfg.Build(dir, nil).PreToolUse[0](t.Context(), tool.ToolCall{Name: "shell"})
+			if err != nil || !outcome.Block {
+				t.Fatalf("hook denial was lost: %+v, %v", outcome, err)
+			}
+			if overflow := strings.Contains(outcome.Reason, "exceeded"); overflow != (size > maxHookOutput) {
+				t.Fatalf("incorrect overflow handling at %d bytes", size)
+			}
+		})
+	}
+}
 
 func TestLoadCodexHooksJSONShape(t *testing.T) {
 	dir := t.TempDir()
@@ -114,8 +137,12 @@ func TestCodexMatcherSemantics(t *testing.T) {
 		{"^Write$", []string{"Edit", "Write"}, true},
 	}
 	for _, test := range tests {
-		if got := groupMatches(test.matcher, test.input); got != test.want {
-			t.Errorf("groupMatches(%q, %q) = %v, want %v", test.matcher, test.input, got, test.want)
+		matcher, err := compileMatcher(test.matcher)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := matcher.matches(test.input); got != test.want {
+			t.Errorf("matches(%q, %q) = %v, want %v", test.matcher, test.input, got, test.want)
 		}
 	}
 }
@@ -125,15 +152,19 @@ func TestCodexApplyPatchMatcherAliases(t *testing.T) {
 		name string
 		want []string
 	}{
-		{"write", []string{"write", "Write", "apply_patch"}},
-		{"edit", []string{"edit", "Edit", "apply_patch"}},
+		{"write", []string{"write", "Write"}},
+		{"edit", []string{"edit", "Edit"}},
 	} {
 		name, _, aliases := toolWire(tool.ToolCall{Name: test.name})
 		if name != test.name {
 			t.Errorf("toolWire(%q) name = %q", test.name, name)
 		}
 		for _, matcher := range test.want {
-			if !groupMatches("^"+matcher+"$", aliases) {
+			compiled, err := compileMatcher("^" + matcher + "$")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !compiled.matches(aliases) {
 				t.Errorf("toolWire(%q) aliases %q do not match %q", test.name, aliases, matcher)
 			}
 		}
@@ -186,22 +217,36 @@ func TestPreToolUseCodexPayloadAndStructuredDeny(t *testing.T) {
 	}
 }
 
-func TestPreToolUseCodexRewriteRestoresWingmanExecInput(t *testing.T) {
+func TestPreToolUseRewritePreservesShellInputSchema(t *testing.T) {
 	command := `printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":"echo rewritten","yield_time_ms":1000}}}'`
 	cfg := configFor("PreToolUse", "Bash", Handler{Type: "command", Command: command})
-	outcome, err := cfg.Build(t.TempDir(), nil).PreToolUse[0](context.Background(), tool.ToolCall{
-		Name: "exec_command",
-		Args: `{"cmd":"echo original","yield_time_ms":1000}`,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var updated map[string]any
-	if err := json.Unmarshal(outcome.UpdatedInput, &updated); err != nil {
-		t.Fatal(err)
-	}
-	if updated["cmd"] != "echo rewritten" || updated["command"] != nil {
-		t.Fatalf("updated input = %#v", updated)
+	for _, tc := range []struct{ name, key, other string }{
+		{"exec", "command", "cmd"},
+		{"shell", "command", "cmd"},
+		{"exec_command", "cmd", "command"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]any{tc.key: "echo original"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := tool.ToolCall{Name: tc.name, Args: string(args)}
+			name, input, _ := toolWire(call)
+			if name != "Bash" || input["command"] != "echo original" || input["cmd"] != nil {
+				t.Fatalf("hook input = %q %#v", name, input)
+			}
+			outcome, err := cfg.Build(t.TempDir(), nil).PreToolUse[0](context.Background(), call)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var updated map[string]any
+			if err := json.Unmarshal(outcome.UpdatedInput, &updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated[tc.key] != "echo rewritten" || updated[tc.other] != nil {
+				t.Fatalf("updated input = %#v", updated)
+			}
+		})
 	}
 }
 
@@ -264,7 +309,7 @@ func TestCodexConcurrentAggregationUsesConfiguredOrderAndLatestCompletedRewrite(
 	}
 }
 
-func TestCodexAsyncCommandHookIsParsedButSkipped(t *testing.T) {
+func TestAsyncCommandHookWithoutRuntimeIsSkipped(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "done")
 	cfg := configFor("PreToolUse", "Bash", Handler{
@@ -277,7 +322,169 @@ func TestCodexAsyncCommandHookIsParsedButSkipped(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("async hook ran unexpectedly: %v", err)
+		t.Fatalf("async hook ran without a session runtime: %v", err)
+	}
+}
+
+func TestAsyncCommandHookDeliversContextWithoutControl(t *testing.T) {
+	delivered := make(chan []string, 1)
+	async := NewAsync(func(runtime hook.Runtime, parts []string) {
+		if runtime.SessionID != "s1" {
+			t.Errorf("runtime = %+v, want the scheduling session", runtime)
+		}
+		delivered <- parts
+	})
+	defer async.Close()
+	output := `{"decision":"block","reason":"ignored","hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"lint passed"}}`
+	cfg := &Config{Hooks: Events{PostToolUse: []MatcherGroup{{Matcher: "Bash", Hooks: []Handler{{
+		Type: "command", Command: "sleep 0.1; printf '%s' '" + output + "'", Async: true,
+	}}}}}}
+	hooks := cfg.BuildWithOptions(t.TempDir(), BuildOptions{Async: async})
+	ctx := hook.WithRuntime(t.Context(), hook.Runtime{SessionID: "s1"})
+	started := time.Now()
+	outcome, err := hooks.PostToolUse[0](ctx, tool.ToolCall{Name: "shell"}, "ok")
+	if err != nil || outcome.Block || len(outcome.AdditionalContext) != 0 {
+		t.Fatalf("async hook affected the synchronous outcome: %+v, %v", outcome, err)
+	}
+	if time.Since(started) > 80*time.Millisecond {
+		t.Fatal("event waited for the async hook")
+	}
+	select {
+	case parts := <-delivered:
+		if len(parts) != 1 || parts[0] != "lint passed" {
+			t.Fatalf("delivered = %#v", parts)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("async hook context was not delivered")
+	}
+}
+
+func TestAsyncCloseCancelsAndWaitsForRunningHooks(t *testing.T) {
+	dir := t.TempDir()
+	started := filepath.Join(dir, "started")
+	finished := filepath.Join(dir, "finished")
+	async := NewAsync(func(hook.Runtime, []string) { t.Error("canceled hook delivered context") })
+	cfg := configFor("UserPromptSubmit", "", Handler{
+		Type:    "command",
+		Command: "touch " + started + "; sleep 30; touch " + finished + "; echo late",
+		Async:   true,
+	})
+	hooks := cfg.BuildWithOptions(dir, BuildOptions{Async: async})
+	if _, err := hooks.UserPromptSubmit[0](t.Context(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("async hook did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	closed := make(chan struct{})
+	go func() {
+		async.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not cancel the running hook")
+	}
+	if _, err := os.Stat(finished); !os.IsNotExist(err) {
+		t.Fatalf("hook kept running after Close: %v", err)
+	}
+	if _, err := hooks.UserPromptSubmit[0](t.Context(), "after close"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionEndAsyncHookRunsSynchronously(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ended")
+	async := NewAsync(nil)
+	defer async.Close()
+	cfg := &Config{Hooks: Events{SessionEnd: []MatcherGroup{{Hooks: []Handler{{
+		Type: "command", Command: "printf ended > " + marker, Async: true,
+	}}}}}}
+	cfg.BuildWithOptions(dir, BuildOptions{Async: async}).SessionEnd[0](t.Context(), "other")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("SessionEnd async hook did not run before returning: %v", err)
+	}
+}
+
+func TestInterruptHookPayloadIgnoresMatcherAndCapsTimeout(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "payload.json")
+	timeout := 60
+	cfg := &Config{Hooks: Events{Interrupt: []MatcherGroup{
+		{Matcher: "^never$", Hooks: []Handler{{Type: "command", Command: "cat > " + marker}}},
+		{Hooks: []Handler{{Type: "command", Command: "sleep 30", Timeout: &timeout}}},
+	}}}
+	hooks := cfg.Build(dir, nil)
+	ctx := hook.WithRuntime(t.Context(), hook.Runtime{SessionID: "s1", TurnID: "t1", Model: "m", PermissionMode: "default"})
+	started := time.Now()
+	hooks.Interrupt[0](ctx)
+	if elapsed := time.Since(started); elapsed > maxSessionEndTimeout*time.Second+3*time.Second {
+		t.Fatalf("Interrupt hook ran %s, want the %ds cap", elapsed, maxSessionEndTimeout)
+	}
+	payload := readJSONMap(t, marker)
+	if payload["hook_event_name"] != "Interrupt" || payload["session_id"] != "s1" || payload["turn_id"] != "t1" || payload["permission_mode"] != "default" {
+		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestPluginEnvironmentPlaceholdersAreSubstituted(t *testing.T) {
+	cfg := configFor("SessionStart", "", Handler{
+		Type:    "command",
+		Command: `printf '%s' '${CLAUDE_PLUGIN_ROOT}/hook'`,
+	})
+	hooks := cfg.BuildWithOptions(t.TempDir(), BuildOptions{Environment: map[string]string{
+		"CLAUDE_PLUGIN_ROOT": "/plugins/demo",
+	}})
+	outcome, err := hooks.SessionStart[0](context.Background(), "startup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outcome.AdditionalContext) != 1 || outcome.AdditionalContext[0] != "/plugins/demo/hook" {
+		t.Fatalf("context = %#v", outcome.AdditionalContext)
+	}
+}
+
+func TestOversizedHookContextSpillsToFile(t *testing.T) {
+	dir := t.TempDir()
+	spill := filepath.Join(dir, "spill")
+	body := "HEAD" + strings.Repeat("x\n", defaultAdditionalContextTokens*4) + "TAIL"
+	if err := os.WriteFile(filepath.Join(dir, "context.txt"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := configFor("UserPromptSubmit", "", Handler{Type: "command", Command: "cat context.txt"})
+	outcome, err := cfg.BuildWithOptions(dir, BuildOptions{SpillDir: spill}).UserPromptSubmit[0](t.Context(), "hi")
+	if err != nil || len(outcome.AdditionalContext) != 1 {
+		t.Fatalf("outcome = %+v, %v", outcome, err)
+	}
+	preview := outcome.AdditionalContext[0]
+	_, path, ok := strings.Cut(preview, "Full output saved to: ")
+	if !ok || !strings.HasPrefix(preview, "HEAD") || len(preview) > defaultAdditionalContextTokens*4+len(path)+64 {
+		t.Fatalf("preview missing head, path, or budget: %d bytes", len(preview))
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil || string(saved) != strings.TrimSpace(body) {
+		t.Fatalf("spilled file = %d bytes, %v", len(saved), err)
+	}
+}
+
+func TestPostToolUseFeedbackSpillsToFile(t *testing.T) {
+	dir := t.TempDir()
+	reason := strings.Repeat("r", defaultAdditionalContextTokens*8)
+	cfg := &Config{Hooks: Events{PostToolUse: []MatcherGroup{{Matcher: "Bash", Hooks: []Handler{{
+		Type: "command", Command: "printf '" + reason + "' >&2; exit 2",
+	}}}}}}
+	outcome, err := cfg.BuildWithOptions(dir, BuildOptions{SpillDir: dir}).PostToolUse[0](t.Context(), tool.ToolCall{Name: "shell"}, "ok")
+	if err != nil || !outcome.Block || !strings.Contains(outcome.Reason, "Full output saved to: ") {
+		t.Fatalf("feedback was not spilled: block=%v len=%d, %v", outcome.Block, len(outcome.Reason), err)
 	}
 }
 

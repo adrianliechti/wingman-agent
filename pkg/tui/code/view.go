@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
@@ -14,8 +16,6 @@ import (
 )
 
 func (a *App) welcomeLines(width int) []string {
-	t := theme.Default
-
 	center := func(text string) string {
 		pad := max((width-ansi.Width(text))/2, 0)
 		return strings.Repeat(" ", pad) + text
@@ -24,11 +24,8 @@ func (a *App) welcomeLines(width int) []string {
 	var lines []string
 
 	if width > 66 {
-		colors := []string{
-			fg(t.Blue), fg(t.Cyan), fg(t.Green), fg(t.Yellow), fg(t.Red), fg(t.Magenta),
-		}
 		for i, l := range tui.LogoLines {
-			lines = append(lines, center(colors[i%len(colors)]+l+ansi.Reset))
+			lines = append(lines, center(colored(theme.LogoColors[i%len(theme.LogoColors)], l)))
 		}
 	} else {
 		lines = append(lines, center(bold("wingman")))
@@ -45,19 +42,26 @@ func (a *App) welcomeLines(width int) []string {
 	return lines
 }
 
+func (a *App) isShellInput() bool {
+	return !a.promptActive && !a.askActive && a.editor != nil && strings.HasPrefix(a.editor.Text(), "!")
+}
+
 func (a *App) composerChrome(width int) EditorChrome {
 	t := theme.Default
-	color := t.BrBlack
+	color := t.Border
 	modeLabel := ""
 	currentMode := a.currentMode()
 	planMode := currentMode == code.PlanModeID
-	unattendedMode := currentMode == code.UnattendedModeID
+	unattendedMode := a.unattended()
+	shellMode := a.isShellInput()
 	if planMode {
 		color = t.Yellow
-		modeLabel = colored(t.Yellow, "PLAN")
 	}
 	if unattendedMode {
 		color = t.Red
+	}
+	if planMode {
+		modeLabel = colored(color, "PLAN")
 	}
 	if a.promptActive || a.askActive {
 		color = t.Red
@@ -78,15 +82,19 @@ func (a *App) composerChrome(width int) EditorChrome {
 		topLabel = modeLabel
 		bottomLeft = ""
 	}
+	if shellMode {
+		color = t.Magenta
+		topLabel = colored(t.Magenta, "SHELL")
+	}
 
 	identityLabel := strings.Join(identity, " · ")
 	identityStyle := ""
 	if identityLabel != "" {
 		identityStyle = dim(identityLabel)
-		if planMode {
-			identityStyle = colored(t.Yellow, identityLabel)
-		} else if unattendedMode {
+		if unattendedMode {
 			identityStyle = colored(t.Red, identityLabel)
+		} else if planMode {
+			identityStyle = colored(t.Yellow, identityLabel)
 		}
 	}
 
@@ -114,31 +122,87 @@ func modelIdentity(available []model.Model, current string) string {
 	return model.Name(current)
 }
 
+// Cache only visible cell inputs. Spinner ticks, cursor movement, and hidden
+// reasoning deltas do not require parsing and wrapping the same Markdown again.
+type streamCellKey struct {
+	hidden                                                 bool
+	user, text, headings, toolName, toolHint, toolProgress string
+	toolResult                                             *agent.ToolResult
+	directory                                              string
+	width                                                  int
+	theme                                                  theme.Theme
+}
+
+type streamCellCache struct {
+	key                              streamCellKey
+	user, tool, assistant, reasoning []string
+}
+
+func (c *streamCellCache) update(snapshot streamSnapshot, width int, hidden bool, directory string) {
+	key := streamCellKey{
+		user: snapshot.userText, text: snapshot.text, headings: snapshot.reasoningHeadings,
+		toolName: snapshot.toolName, toolHint: snapshot.toolHint, toolProgress: snapshot.toolProgress,
+		toolResult: snapshot.toolResult, width: width, hidden: hidden, theme: theme.Default, directory: directory,
+	}
+	if c.key == key {
+		return
+	}
+	*c = streamCellCache{key: key}
+	if key.user != "" {
+		if isCommandEcho(key.user) {
+			c.user = cellCommand(key.user, width)
+		} else {
+			c.user = cellUser(key.user, width)
+		}
+	}
+	if key.toolName != "" && !key.hidden {
+		c.tool = snapshot.toolLines(width, false)
+	}
+	if strings.TrimSpace(key.text) != "" {
+		c.assistant = cellAssistant(key.text, width, key.theme.BrBlack, key.directory)
+	}
+	if key.headings != "" {
+		c.reasoning = cellReasoningHeadings(key.headings, width)
+	}
+}
+
 // streamCells renders the in-flight turn tail shown below the committed chat.
-// Displaced snapshots keep earlier thoughts, messages, and tools visible while
-// ACP waits until turn completion to commit the complete transcript.
-// Spacing follows the same cellFlow rules as committed cells (on a copy of
-// the state), so nothing shifts when the turn finalizes.
+// Displaced snapshots keep earlier reasoning headings, messages, and tools
+// visible while ACP waits until turn completion to commit the complete
+// transcript. Reasoning bodies remain buffered for reconciliation and the
+// transcript overlay; the live chat shows only their stable structured heading.
+// Visible live cells follow the same cellFlow rules as committed cells (on a
+// copy of the state).
 func (a *App) streamCells(width int) []string {
 	snapshots := a.snapshotStreamState()
+	directory := ""
+	if a.agent != nil {
+		directory = a.agent.Workspace().RootPath
+	}
+	if len(a.streamCellCache) > len(snapshots) {
+		clear(a.streamCellCache[len(snapshots):])
+		a.streamCellCache = a.streamCellCache[:len(snapshots)]
+	}
+	for len(a.streamCellCache) < len(snapshots) {
+		a.streamCellCache = append(a.streamCellCache, streamCellCache{})
+	}
 
 	flow := a.flow
 	var lines []string
 
-	for _, snapshot := range snapshots {
+	for i, snapshot := range snapshots {
+		cached := &a.streamCellCache[i]
+		hidden := snapshot.toolName != "" && a.isToolHidden(snapshot.toolName)
+		cached.update(snapshot, width, hidden, directory)
 		if snapshot.userText != "" {
 			if flow.gap() {
 				lines = append(lines, "")
 			}
-			if isCommandEcho(snapshot.userText) {
-				lines = append(lines, cellCommand(snapshot.userText, width)...)
-			} else {
-				lines = append(lines, cellUser(snapshot.userText, width)...)
-			}
+			lines = append(lines, cached.user...)
 		}
 
-		if snapshot.toolName != "" && !a.isToolHidden(snapshot.toolName) {
-			cell := snapshot.toolLines(width, false)
+		if snapshot.toolName != "" && !hidden {
+			cell := cached.tool
 			if flow.beforeTool(len(cell) > 1) {
 				lines = append(lines, "")
 			}
@@ -149,11 +213,11 @@ func (a *App) streamCells(width int) []string {
 			if flow.gap() {
 				lines = append(lines, "")
 			}
-			lines = append(lines, cellAssistant(snapshot.text, width, theme.Default.BrBlack)...)
+			lines = append(lines, cached.assistant...)
 		}
 
-		if snapshot.reasoning != "" {
-			cell := cellReasoning(snapshot.reasoning, width, false)
+		if snapshot.reasoningHeadings != "" {
+			cell := cached.reasoning
 			if flow.beforeThought(len(cell) > 1) {
 				lines = append(lines, "")
 			}
@@ -174,14 +238,27 @@ func (a *App) streamCells(width int) []string {
 // status-rich composer and popup or footer pinned at the bottom. Queued input
 // previews live at the tail of the scrollable chat until their turns start.
 func (a *App) render() {
-	width, height := a.term.Size()
-	if width <= 0 || height <= 0 {
+	a.motion.nextFrame = 0
+	a.mouse = mouseLayout{}
+	termWidth, height := a.term.Size()
+	if termWidth <= 0 || height <= 0 {
 		return
 	}
 
 	if a.overlay != nil {
-		a.term.RenderAlt(a.overlay.Render(width, height), nil)
+		a.term.RenderAlt(a.overlay.Render(termWidth, height), nil)
 		return
+	}
+
+	// The chat rewraps whenever the diff pane appears or disappears.
+	panelWidth := a.diffPanelWidth(termWidth)
+	if showing := panelWidth > 0; showing != a.diffPanelShowing {
+		a.diffPanelShowing = showing
+		a.rebuildChat()
+	}
+	width := termWidth
+	if panelWidth > 0 {
+		width = termWidth - panelWidth - 2
 	}
 
 	// Selection mode: the popup is the only live element — the composer and
@@ -191,22 +268,33 @@ func (a *App) render() {
 	// Bottom section, built first so the chat viewport gets the remainder.
 	var bottom []string
 	editorStart := 0
+	modelRow := -1
+	popupStart, popupRows, popupTopClip := 0, 0, 0
 	var cursor inline.Pos
 	hasCursor := false
 
 	if listPopup {
 		if a.popup.kind == popupPalette {
-			a.popup.maxRows = max(3, min(10, height/3))
+			a.popup.maxRows = max(1, min(10, height/3))
 		} else {
 			a.popup.maxRows = max(5, min(14, height/2))
 		}
-		bottom = append(bottom, "")
-		bottom = append(bottom, a.popup.Render(width)...)
-		bottom = append(bottom, "")
+		if height >= 5 {
+			bottom = append(bottom, "")
+		}
+		popupStart = len(bottom)
+		popupLines := a.popup.Render(width)
+		popupRows = len(popupLines)
+		bottom = append(bottom, popupLines...)
+		if height >= 5 {
+			bottom = append(bottom, "")
+		}
 
 		// A long question must not push the options off-screen: keep the
 		// tail, which holds the items.
 		if len(bottom) > height {
+			popupStart -= len(bottom) - height
+			popupTopClip = 1 // The first retained row is replaced by an ellipsis.
 			bottom = append([]string{dim("…")}, bottom[len(bottom)-height+1:]...)
 		}
 	} else {
@@ -218,12 +306,22 @@ func (a *App) render() {
 
 		var editorLines []string
 		editorLines, cursor = a.editor.Render(width, maxEditorRows, a.composerChrome(width))
+		a.renderComposerSparkle(editorLines, cursor, width, time.Now())
 		hasCursor = true
 		editorStart = len(bottom)
+		if a.editor.bottomRightWidth > 0 {
+			modelRow = editorStart + len(editorLines) - 1
+		}
 		bottom = append(bottom, editorLines...)
 
 		if a.popup != nil {
-			bottom = append(bottom, a.popup.Render(width)...)
+			if a.popup.kind == popupCommands {
+				a.popup.maxRows = max(1, min(popupMaxRows, height-len(bottom)-1))
+			}
+			popupStart = len(bottom)
+			popupLines := a.popup.Render(width)
+			popupRows = len(popupLines)
+			bottom = append(bottom, popupLines...)
 		} else {
 			bottom = append(bottom, a.footerLine(width))
 		}
@@ -235,10 +333,25 @@ func (a *App) render() {
 		drop := len(bottom) - height
 		bottom = bottom[drop:]
 		editorStart -= drop
+		modelRow -= drop
+		popupStart -= drop
 	}
 
 	chatRows := max(height-len(bottom), 0)
 	a.lastChatRows = chatRows
+	for i := range a.mouse.footer {
+		a.mouse.footer[i].bounds.y = height - 1
+	}
+	if modelRow >= 0 {
+		a.mouse.model = mouseRect{x: a.editor.bottomRightStart, y: chatRows + modelRow, width: a.editor.bottomRightWidth, height: 1}
+	}
+	if a.popup != nil {
+		a.mouse.popup = a.popup
+		a.mouse.popupStart = chatRows + popupStart
+		top := chatRows + max(popupStart, popupTopClip)
+		end := min(height, chatRows+popupStart+popupRows)
+		a.mouse.popupBounds = mouseRect{y: top, width: width, height: max(0, end-top)}
+	}
 
 	view := a.chatViewLines(width)
 
@@ -289,7 +402,7 @@ func (a *App) render() {
 			if to <= from {
 				to = from + 1
 			}
-			line = ansi.Highlight(line, from, to, ansi.Reverse)
+			line = ansi.Highlight(line, from, to, fg(theme.Default.Foreground)+ansi.Bg(theme.Default.Selection))
 		}
 
 		frame = append(frame, line)
@@ -307,6 +420,17 @@ func (a *App) render() {
 			if keep > 0 {
 				frame[idx] = ansi.Pad(ansi.Truncate(frame[idx], keep, "…"), keep) + " " + indicator
 			}
+		}
+	}
+
+	if panelWidth > 0 {
+		padding := ansi.Reset + " " + panelLine(" ", 1)
+		panel := a.diffPanel.render(panelWidth, height)
+		for len(frame) < height {
+			frame = append(frame, "")
+		}
+		for i := range height {
+			frame[i] = ansi.Pad(ansi.Truncate(frame[i], width, "…"), width) + padding + panel[i]
 		}
 	}
 

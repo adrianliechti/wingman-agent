@@ -16,9 +16,12 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -40,6 +43,154 @@ func streamingTestClient(body func(*http.Request) string) openai.Client {
 		option.WithAPIKey("test"),
 		option.WithHTTPClient(httpClient),
 	)
+}
+
+func TestSendEmitsGenAITelemetry(t *testing.T) {
+	var requests atomic.Int64
+	client := streamingTestClient(func(*http.Request) string {
+		if requests.Add(1) == 1 {
+			return "data: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"echo\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n" +
+				"data: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test-2026\",\"usage\":{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens\":3}}}\n\n"
+		}
+		return "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-test-2026\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":12,\"input_tokens_details\":{\"cached_tokens\":4},\"output_tokens\":2}}}\n\n"
+	})
+
+	recorder := tracetest.NewSpanRecorder()
+	provider := trace.NewTracerProvider(trace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	tel, err := telemetry.New(context.Background(), telemetry.Options{
+		AgentName:             "code-agent",
+		ProviderName:          "openai",
+		TracerProvider:        provider,
+		DisableMetrics:        true,
+		CaptureMessageContent: telemetry.ContentCaptureSpanOnly,
+	})
+	if err != nil {
+		t.Fatalf("create telemetry: %v", err)
+	}
+
+	a := &Agent{Config: &Config{
+		client:       &client,
+		Telemetry:    tel,
+		Model:        func() string { return "gpt-test" },
+		Instructions: func() string { return "Be helpful" },
+		Tools: func() []tool.Tool {
+			return []tool.Tool{{
+				Name:        "echo",
+				Description: "Echo a value",
+				Execute: func(context.Context, map[string]any) (tool.Result, error) {
+					return tool.Text("ok"), nil
+				},
+			}}
+		},
+	}}
+	ctx := hook.WithRuntime(context.Background(), hook.Runtime{SessionID: "session-42"})
+	stream, err := a.Send(ctx, []Content{{Text: "start"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range stream {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	spans := recorder.Ended()
+	var agentSpan trace.ReadOnlySpan
+	var inferenceCount, toolCount int
+	finishReasons := map[string][]string{}
+	for _, span := range spans {
+		switch span.Name() {
+		case "invoke_agent code-agent":
+			agentSpan = span
+		case "chat gpt-test":
+			inferenceCount++
+			if responseID, ok := spanStringAttribute(span, "gen_ai.response.id"); ok {
+				if reasons, ok := spanStringSliceAttribute(span, "gen_ai.response.finish_reasons"); ok {
+					finishReasons[responseID] = reasons
+				}
+			}
+			for _, name := range []string{
+				"gen_ai.input.messages",
+				"gen_ai.output.messages",
+				"gen_ai.system_instructions",
+				"gen_ai.tool.definitions",
+			} {
+				if !hasSpanAttribute(span, name) {
+					t.Errorf("inference span is missing captured attribute %q", name)
+				}
+			}
+		case "execute_tool echo":
+			toolCount++
+		}
+	}
+	if agentSpan == nil || inferenceCount != 2 || toolCount != 1 {
+		t.Fatalf("spans = %v, want one agent, two inference, and one tool span", spanNames(spans))
+	}
+	if got, ok := spanInt64Attribute(agentSpan, "gen_ai.usage.input_tokens"); !ok || got != 22 {
+		t.Errorf("agent input tokens = %d (present %v), want 22", got, ok)
+	}
+	if got, ok := spanInt64Attribute(agentSpan, "gen_ai.usage.output_tokens"); !ok || got != 5 {
+		t.Errorf("agent output tokens = %d (present %v), want 5", got, ok)
+	}
+	if got := finishReasons["resp_1"]; !slices.Equal(got, []string{"tool_call"}) {
+		t.Errorf("first inference finish reasons = %v, want [tool_call]", got)
+	}
+	if got := finishReasons["resp_2"]; !slices.Equal(got, []string{"stop"}) {
+		t.Errorf("second inference finish reasons = %v, want [stop]", got)
+	}
+	for _, span := range spans {
+		if span == agentSpan {
+			continue
+		}
+		if span.Parent().SpanID() != agentSpan.SpanContext().SpanID() {
+			t.Errorf("span %q is not a direct child of the agent span", span.Name())
+		}
+	}
+}
+
+func spanInt64Attribute(span trace.ReadOnlySpan, name string) (int64, bool) {
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) == name {
+			return attr.Value.AsInt64(), true
+		}
+	}
+	return 0, false
+}
+
+func spanStringAttribute(span trace.ReadOnlySpan, name string) (string, bool) {
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) == name {
+			return attr.Value.AsString(), true
+		}
+	}
+	return "", false
+}
+
+func spanStringSliceAttribute(span trace.ReadOnlySpan, name string) ([]string, bool) {
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) == name {
+			return attr.Value.AsStringSlice(), true
+		}
+	}
+	return nil, false
+}
+
+func hasSpanAttribute(span trace.ReadOnlySpan, name string) bool {
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) == name {
+			return true
+		}
+	}
+	return false
+}
+
+func spanNames(spans []trace.ReadOnlySpan) []string {
+	names := make([]string, len(spans))
+	for i, span := range spans {
+		names[i] = span.Name()
+	}
+	return names
 }
 
 func TestSendLimitsRunawayToolCallRounds(t *testing.T) {
@@ -120,17 +271,17 @@ func TestSendAllowsFinalResponseAtMaxTurns(t *testing.T) {
 }
 
 func TestCompleteStreamsPartialToolCalls(t *testing.T) {
-	const args = "{\\\"items\\\":[{\\\"content\\\":\\\"Fix\\\",\\\"status\\\":\\\"pending\\\"}]}"
+	const args = "{\\\"path\\\":\\\"main.go\\\",\\\"line_end\\\":20}"
 
 	client := streamingTestClient(func(*http.Request) string {
-		return "data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"todo\",\"arguments\":\"{\\\"items\\\":[\",\"status\":\"in_progress\"}}\n\n" +
-			"data: {\"type\":\"response.function_call_arguments.done\",\"sequence_number\":3,\"output_index\":0,\"item_id\":\"fc_1\",\"name\":\"todo\",\"arguments\":\"" + args + "\"}\n\n" +
-			"data: {\"type\":\"response.output_item.done\",\"sequence_number\":4,\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"todo\",\"arguments\":\"" + args + "\",\"status\":\"completed\"}}\n\n" +
+		return "data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\",\"status\":\"in_progress\"}}\n\n" +
+			"data: {\"type\":\"response.function_call_arguments.done\",\"sequence_number\":3,\"output_index\":0,\"item_id\":\"fc_1\",\"arguments\":\"" + args + "\"}\n\n" +
+			"data: {\"type\":\"response.output_item.done\",\"sequence_number\":4,\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"" + args + "\",\"status\":\"completed\"}}\n\n" +
 			"data: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":1}}}\n\n"
 	})
 
 	var partials []ToolCall
-	resp, err := complete(context.Background(), &client, &request{}, func(m Message, err error) bool {
+	resp, err := (&Config{client: &client}).complete(context.Background(), &request{}, func(m Message, err error) bool {
 		for _, c := range m.Content {
 			if c.ToolCall != nil {
 				partials = append(partials, *c.ToolCall)
@@ -146,16 +297,16 @@ func TestCompleteStreamsPartialToolCalls(t *testing.T) {
 		t.Fatalf("partial tool calls = %v, want announcement and completion", partials)
 	}
 	first, last := partials[0], partials[len(partials)-1]
-	if !first.Partial || first.ID != "call_1" || first.Name != "todo" || first.Args != `{"items":[` {
+	if !first.Partial || first.ID != "call_1" || first.Name != "read" || first.Args != `{"path":` {
 		t.Fatalf("announcement = %+v", first)
 	}
-	wantArgs := `{"items":[{"content":"Fix","status":"pending"}]}`
-	if !last.Partial || last.ID != "call_1" || last.Args != wantArgs {
+	wantArgs := `{"path":"main.go","line_end":20}`
+	if !last.Partial || last.ID != "call_1" || last.Name != "read" || last.Args != wantArgs {
 		t.Fatalf("completion snapshot = %+v", last)
 	}
 
 	calls := extractToolCalls(resp.messages)
-	if len(calls) != 1 || calls[0].Partial || calls[0].ID != "call_1" || calls[0].Args != wantArgs {
+	if len(calls) != 1 || calls[0].Partial || calls[0].ID != "call_1" || calls[0].Name != "read" || calls[0].Args != wantArgs {
 		t.Fatalf("committed calls = %+v", calls)
 	}
 }
@@ -173,7 +324,7 @@ func TestCompleteTracksInterleavedPartialCallsByOutputIndex(t *testing.T) {
 	})
 
 	latest := map[string]string{}
-	resp, err := complete(context.Background(), &client, &request{}, func(m Message, _ error) bool {
+	resp, err := (&Config{client: &client}).complete(context.Background(), &request{}, func(m Message, _ error) bool {
 		for _, c := range m.Content {
 			if c.ToolCall != nil {
 				latest[c.ToolCall.ID] = c.ToolCall.Args
@@ -201,7 +352,7 @@ func TestCompleteDoesNotCommitIncompleteToolCall(t *testing.T) {
 	})
 
 	partialSeen := false
-	resp, err := complete(context.Background(), &client, &request{}, func(m Message, err error) bool {
+	resp, err := (&Config{client: &client}).complete(context.Background(), &request{}, func(m Message, err error) bool {
 		for _, c := range m.Content {
 			partialSeen = partialSeen || c.ToolCall != nil && c.ToolCall.Partial
 		}
@@ -258,7 +409,7 @@ func TestCompleteClassifiesTransientTerminalFailureBeforeOutput(t *testing.T) {
 		return "data: {\"type\":\"response.failed\",\"sequence_number\":1,\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"try again\"}}}\n\n"
 	})
 
-	_, err := complete(context.Background(), &client, &request{}, yieldAll)
+	_, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err == nil {
 		t.Fatal("complete error = nil, want response failure")
 	}
@@ -361,7 +512,7 @@ func TestCompleteRetriesTransientTerminalFailureAfterOutput(t *testing.T) {
 		return "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.failed\",\"sequence_number\":2,\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"try again\"}}}\n\n"
 	})
 
-	_, err := complete(context.Background(), &client, &request{}, yieldAll)
+	_, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err == nil {
 		t.Fatal("complete error = nil, want response failure")
 	}
@@ -443,15 +594,20 @@ func TestEndRunPreservesQueuedUserInput(t *testing.T) {
 	a := &Agent{
 		Config:       &Config{},
 		running:      true,
-		pendingInput: [][]Content{{{Text: "queued"}}},
+		pendingInput: []Message{{Role: RoleUser, InputID: "queued-id", Content: []Content{{Text: "queued"}}}},
 	}
 
-	a.endRun()
+	if err := a.recordEvents(RuntimeEvent{Type: EventTurnStarted, TurnID: "turn"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.finishTurn(t.Context(), "turn", RuntimeInterrupted, context.Canceled, Usage{}); err != nil {
+		t.Fatal(err)
+	}
 
 	if a.running || len(a.pendingInput) != 0 {
 		t.Fatalf("run state was not cleared: running=%v pending=%d", a.running, len(a.pendingInput))
 	}
-	if len(a.Messages) != 1 || a.Messages[0].Role != RoleUser || a.Messages[0].Content[0].Text != "queued" {
+	if len(a.Messages) != 1 || a.Messages[0].Role != RoleUser || a.Messages[0].Content[0].Text != "queued" || a.Messages[0].InputID != "queued-id" {
 		t.Fatalf("queued input was not preserved: %+v", a.Messages)
 	}
 }
@@ -474,7 +630,7 @@ func TestQueueInputOnlyAcceptsDuringRunAndOwnsItsSlice(t *testing.T) {
 
 	a.queueMu.Lock()
 	defer a.queueMu.Unlock()
-	if len(a.pendingInput) != 1 || a.pendingInput[0][0].Text != "guidance" || a.pendingInput[0][0].File.Name != "before.txt" {
+	if len(a.pendingInput) != 1 || a.pendingInput[0].Content[0].Text != "guidance" || a.pendingInput[0].Content[0].File.Name != "before.txt" {
 		t.Fatalf("pending input = %#v", a.pendingInput)
 	}
 }
@@ -519,7 +675,7 @@ func TestCompleteBackfillsOutputFromTerminalEvent(t *testing.T) {
 		return "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":1}}}\n\ndata: [DONE]\n\n"
 	})
 
-	resp, err := complete(context.Background(), &client, &request{}, yieldAll)
+	resp, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +689,7 @@ func TestCompleteBackfillsItemsMissingFromDoneEvents(t *testing.T) {
 		return "data: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"first\",\"annotations\":[]}]}}\n\ndata: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"first\",\"annotations\":[]}]},{\"type\":\"message\",\"id\":\"msg_2\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"second\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":2}}}\n\n"
 	})
 
-	resp, err := complete(context.Background(), &client, &request{}, yieldAll)
+	resp, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -607,7 +763,8 @@ func TestToolTimeoutIncludesPreHooks(t *testing.T) {
 	got := a.runSingleToolCall(context.Background(), ToolCall{Name: "slow"}, []tool.Tool{{
 		Name: "slow",
 		Execute: func(ctx context.Context, _ map[string]any) (tool.Result, error) {
-			return tool.Result{}, ctx.Err()
+			t.Error("executor started after the pre-hook exhausted its timeout")
+			return tool.Text("side effect"), nil
 		},
 	}})
 	if !strings.Contains(got.Content, "10ms time limit") {
@@ -666,12 +823,32 @@ func TestCodexPostToolBlockReplacesOriginalResult(t *testing.T) {
 	}
 }
 
+func TestToolResultHasHarnessLevelSizeLimit(t *testing.T) {
+	input := "HEAD" + strings.Repeat("☃", maxInlineToolResultBytes) + "TAIL"
+	a := &Agent{Config: &Config{}}
+	got := a.runSingleToolCall(context.Background(), ToolCall{Name: "unbounded"}, []tool.Tool{{
+		Name: "unbounded",
+		Execute: func(context.Context, map[string]any) (tool.Result, error) {
+			return tool.Text(input), nil
+		},
+	}})
+	if !strings.Contains(got.Content, "truncated by the agent harness") {
+		t.Fatalf("tool result did not report truncation")
+	}
+	if !strings.Contains(got.Content, "HEAD") || !strings.Contains(got.Content, "TAIL") {
+		t.Fatalf("tool result did not preserve head and tail")
+	}
+	if len(got.Content) >= len(input) {
+		t.Fatalf("bounded result length = %d, input length = %d", len(got.Content), len(input))
+	}
+}
+
 func TestCompleteRejectsStreamWithoutTerminalEvent(t *testing.T) {
 	client := streamingTestClient(func(*http.Request) string {
 		return "data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{}}\n\ndata: [DONE]\n\n"
 	})
 
-	_, err := complete(context.Background(), &client, &request{}, yieldAll)
+	_, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err == nil {
 		t.Fatal("expected an incomplete stream error")
 	}
@@ -685,7 +862,7 @@ func TestCompleteRetriesStreamWithoutTerminalAfterOutput(t *testing.T) {
 		return "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"partial\"}\n\ndata: [DONE]\n\n"
 	})
 
-	_, err := complete(context.Background(), &client, &request{}, yieldAll)
+	_, err := (&Config{client: &client}).complete(context.Background(), &request{}, yieldAll)
 	if err == nil {
 		t.Fatal("expected an incomplete stream error")
 	}

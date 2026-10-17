@@ -3,9 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"maps"
 	"regexp"
 	"strings"
 	"sync"
@@ -20,23 +18,25 @@ type eventDispatcher struct {
 	sessionID acp.SessionId
 	done      chan turnCompleted
 
-	toolOut         map[string]*strings.Builder
+	toolOut         map[string]*toolOutput
 	seenReasoning   map[string]bool
 	seenAgentText   map[string]bool
 	guardianStarted map[string]bool
 	startedTools    map[string]bool
 	agentPhases     map[string]string
-	planText        map[string]string
-	planEmitted     map[string]string
-	planEmittedAt   map[string]time.Time
 	lastGoal        string
-	planUpdates     bool
-	planMu          sync.Mutex
 
-	mu            sync.Mutex
+	commandNamesMu sync.Mutex
+	commandNames   map[string]string
+
+	// The prompt event loop owns the remaining state.
 	failure       error
+	lastError     *turnError
 	usage         *acp.Usage
 	completedPlan *completedPlan
+
+	// tokens accumulates usage across every backend turn of one prompt.
+	tokens *promptTokenUsage
 }
 
 type completedPlan struct {
@@ -50,70 +50,82 @@ func newEventDispatcher(ctx context.Context, conn *acp.AgentSideConnection, sid 
 		conn:            conn,
 		sessionID:       sid,
 		done:            make(chan turnCompleted, 1),
-		toolOut:         map[string]*strings.Builder{},
+		toolOut:         map[string]*toolOutput{},
 		seenReasoning:   map[string]bool{},
 		seenAgentText:   map[string]bool{},
 		guardianStarted: map[string]bool{},
 		startedTools:    map[string]bool{},
 		agentPhases:     map[string]string{},
-		planText:        map[string]string{},
-		planEmitted:     map[string]string{},
-		planEmittedAt:   map[string]time.Time{},
+		commandNames:    map[string]string{},
+	}
+}
+
+// commandName is read by approval handlers, which run outside the event loop.
+func (d *eventDispatcher) commandName(itemID string) string {
+	d.commandNamesMu.Lock()
+	defer d.commandNamesMu.Unlock()
+	return d.commandNames[itemID]
+}
+
+func (d *eventDispatcher) setCommandName(itemID, name string) {
+	d.commandNamesMu.Lock()
+	defer d.commandNamesMu.Unlock()
+	if name == "" {
+		delete(d.commandNames, itemID)
+	} else {
+		d.commandNames[itemID] = name
 	}
 }
 
 func (d *eventDispatcher) setFailure(err error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.failure == nil {
 		d.failure = err
 	}
 }
 
 func (d *eventDispatcher) setUsage(u *acp.Usage) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.usage = u
 }
 
 func (d *eventDispatcher) getUsage() *acp.Usage {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	if d.tokens != nil {
+		if u := d.tokens.usage(); u != nil {
+			return u
+		}
+	}
 	return d.usage
 }
 
+// nonModelOutputItems are thread items Codex records without a model request.
+var nonModelOutputItems = map[string]bool{
+	"userMessage":       true,
+	"hookPrompt":        true,
+	"enteredReviewMode": true,
+	"subAgentActivity":  true,
+}
+
 func (d *eventDispatcher) getFailure() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	return d.failure
 }
 
 func (d *eventDispatcher) takeCompletedPlan() *completedPlan {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	plan := d.completedPlan
 	d.completedPlan = nil
 	return plan
 }
 
 func (d *eventDispatcher) setCompletedPlan(itemID, text string) {
-	d.mu.Lock()
 	d.completedPlan = &completedPlan{itemID: itemID, text: text}
-	d.mu.Unlock()
 }
 
-// isFatalTurnError reports whether a codex `error` notification represents an
-// unrecoverable turn failure (auth/usage-limit/connection 401). The codex
-// app-server is always launched with a configured provider + token, so these
-// surface as a turn error rather than an ACP auth-required prompt (matching the
-// reference's authConfigured=internalError path).
+// isFatalTurnError reports whether an `error` notification without willRetry ends the turn.
 func isFatalTurnError(info json.RawMessage) bool {
 	if len(info) == 0 {
 		return false
 	}
 	var s string
 	if json.Unmarshal(info, &s) == nil {
-		return s == "unauthorized" || s == "usageLimitExceeded"
+		return s == "unauthorized" || s == "usageLimitExceeded" || s == "rateLimitExceeded"
 	}
 	var obj map[string]struct {
 		HTTPStatusCode int `json:"httpStatusCode"`
@@ -134,30 +146,45 @@ func isFatalTurnError(info json.RawMessage) bool {
 	return false
 }
 
+func isAuthenticationError(info json.RawMessage) bool {
+	var s string
+	if json.Unmarshal(info, &s) == nil {
+		return s == "unauthorized"
+	}
+	var obj map[string]struct {
+		HTTPStatusCode int `json:"httpStatusCode"`
+	}
+	if json.Unmarshal(info, &obj) != nil || len(obj) != 1 {
+		return false
+	}
+	for _, v := range obj {
+		return v.HTTPStatusCode == 401
+	}
+	return false
+}
+
 func (d *eventDispatcher) update(u acp.SessionUpdate) {
 	d.updateWithContext(d.ctx, u)
 }
 
 func (d *eventDispatcher) updateWithContext(ctx context.Context, u acp.SessionUpdate) {
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || d.getFailure() != nil {
 		return
 	}
-	_ = d.conn.SessionUpdate(ctx, acp.SessionNotification{
-		SessionId: d.sessionID,
-		Update:    u,
-	})
+	if err := notifyClient(ctx, d.conn, d.sessionID, u); err != nil && d.ctx.Err() == nil {
+		d.setFailure(fmt.Errorf("send ACP update: %w", err))
+	}
 }
 
 func (d *eventDispatcher) appendToolOut(itemID, text string) {
 	b := d.toolOut[itemID]
 	if b == nil {
-		b = &strings.Builder{}
+		b = &toolOutput{}
 		d.toolOut[itemID] = b
 	}
-	b.WriteString(text)
-	d.update(acp.UpdateToolCall(acp.ToolCallId(itemID), acp.WithUpdateContent([]acp.ToolCallContent{
-		acp.ToolContent(acp.TextBlock(b.String())),
-	})))
+	// ACP content replaces the previous content. Re-sending every growing
+	// snapshot causes quadratic traffic; emit the bounded output at completion.
+	b.append(text)
 }
 
 func (d *eventDispatcher) handle(method string, params json.RawMessage) {
@@ -203,10 +230,10 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		var g guardianNotif
 		if json.Unmarshal(params, &g) == nil && g.ReviewID != "" {
 			if d.guardianStarted[g.ReviewID] {
-				d.update(guardianUpdateToolCall(g, params))
+				d.update(guardianUpdateToolCall(g))
 			} else {
 				d.guardianStarted[g.ReviewID] = true
-				d.update(guardianStartToolCall(g, params))
+				d.update(guardianStartToolCall(g))
 			}
 		}
 
@@ -215,9 +242,9 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		if json.Unmarshal(params, &g) == nil && g.ReviewID != "" {
 			if d.guardianStarted[g.ReviewID] {
 				delete(d.guardianStarted, g.ReviewID)
-				d.update(guardianUpdateToolCall(g, params))
+				d.update(guardianUpdateToolCall(g))
 			} else {
-				d.update(guardianStartToolCall(g, params))
+				d.update(guardianStartToolCall(g))
 			}
 		}
 
@@ -230,30 +257,31 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			d.update(acp.UpdateAgentMessageText("\n\nGoal cleared.\n\n"))
 		}
 
-	case "turn/plan/updated":
-		if d.planUpdates {
-			d.handlePlanUpdated(params)
-		}
-
 	case "error":
 		var p struct {
-			Error struct {
-				Message        string          `json:"message"`
-				CodexErrorInfo json.RawMessage `json:"codexErrorInfo"`
-			} `json:"error"`
+			Error     turnError `json:"error"`
+			WillRetry *bool     `json:"willRetry"`
 		}
 		if json.Unmarshal(params, &p) != nil {
 			return
 		}
-		if p.Error.Message != "" {
-			d.update(acp.UpdateAgentMessageText(p.Error.Message + "\n\n"))
-		}
-		if isFatalTurnError(p.Error.CodexErrorInfo) {
-			msg := p.Error.Message
-			if msg == "" {
-				msg = "codex turn failed"
+		d.lastError = &p.Error
+		// ACP auth_required starts the client's login flow; repeating the refusal as text adds noise.
+		if isAuthenticationError(p.Error.CodexErrorInfo) {
+			if p.WillRetry == nil || !*p.WillRetry {
+				d.setFailure(acp.NewAuthRequired(nil))
+				select {
+				case d.done <- turnCompleted{}:
+				default:
+				}
 			}
-			d.setFailure(errors.New(msg))
+			return
+		}
+		if p.Error.Message != "" {
+			d.update(acp.UpdateAgentMessageText(readableServiceErrorMessage(p.Error.Message) + "\n\n"))
+		}
+		if (p.WillRetry != nil && !*p.WillRetry) || (p.WillRetry == nil && isFatalTurnError(p.Error.CodexErrorInfo)) {
+			d.setFailure(&p.Error)
 
 			select {
 			case d.done <- turnCompleted{}:
@@ -279,48 +307,8 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			d.appendToolOut(p.ItemID, p.Delta)
 		}
 
-	case "item/mcpToolCall/progress":
-		var p struct {
-			ItemID  string `json:"itemId"`
-			Message string `json:"message"`
-		}
-		if json.Unmarshal(params, &p) == nil && p.ItemID != "" && strings.TrimSpace(p.Message) != "" {
-			d.appendToolOut(p.ItemID, strings.TrimSpace(p.Message)+"\n")
-		}
-
-	case "item/plan/delta":
-		var p struct {
-			ItemID string `json:"itemId"`
-			Delta  string `json:"delta"`
-		}
-		if json.Unmarshal(params, &p) == nil && p.ItemID != "" && p.Delta != "" {
-			d.planMu.Lock()
-			d.planText[p.ItemID] += p.Delta
-			text := d.planText[p.ItemID]
-			emit := d.planUpdates && (d.planEmitted[p.ItemID] == "" || time.Since(d.planEmittedAt[p.ItemID]) >= 100*time.Millisecond)
-			d.planMu.Unlock()
-			if emit {
-				d.emitMarkdownPlan(d.ctx, p.ItemID, text)
-			}
-		}
-
 	case "thread/tokenUsage/updated":
 		d.handleTokenUsage(params)
-
-	case "thread/compacted":
-		d.update(acp.UpdateAgentMessageText("*Context compacted to fit the model's context window.*\n\n"))
-
-	case "thread/name/updated":
-		var p struct {
-			ThreadName string `json:"threadName"`
-		}
-		if json.Unmarshal(params, &p) == nil && p.ThreadName != "" {
-			name := p.ThreadName
-			d.update(acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{
-				SessionUpdate: "session_info_update",
-				Title:         &name,
-			}})
-		}
 
 	case "configWarning":
 		var p struct {
@@ -347,8 +335,22 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 
 	case "turn/completed":
 		var tc turnCompleted
-		if json.Unmarshal(params, &tc) == nil {
-			d.flushPendingPlanUpdates(d.ctx)
+		if err := json.Unmarshal(params, &tc); err != nil {
+			d.setFailure(fmt.Errorf("decode turn/completed: %w", err))
+		} else {
+			if tc.Turn.Status == "failed" {
+				if tc.Turn.Error == nil {
+					tc.Turn.Error = d.lastError
+				}
+				if tc.Turn.Error == nil {
+					tc.Turn.Error = &turnError{}
+				}
+				if isAuthenticationError(tc.Turn.Error.CodexErrorInfo) {
+					d.setFailure(acp.NewAuthRequired(nil))
+				} else {
+					d.setFailure(tc.Turn.Error)
+				}
+			}
 			select {
 			case d.done <- tc:
 			default:
@@ -395,6 +397,11 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 	if !ok {
 		return
 	}
+	if d.tokens != nil && !nonModelOutputItems[kind] {
+		// Compaction also makes model requests, but emits no ordinary model
+		// output. Restored thread totals supply its historical baseline.
+		d.tokens.observeModelWork()
+	}
 
 	switch kind {
 	case "agentMessage":
@@ -404,34 +411,6 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 		_ = json.Unmarshal(env.Item, &it)
 		d.agentPhases[id] = it.Phase
 
-	case "commandExecution":
-		var it struct {
-			Command        string          `json:"command"`
-			Cwd            string          `json:"cwd"`
-			CommandActions []commandAction `json:"commandActions"`
-		}
-		_ = json.Unmarshal(env.Item, &it)
-		if title, kind, locs, ok := commandActionToolCall(it.CommandActions); ok {
-			opts := []acp.ToolCallStartOpt{
-				acp.WithStartKind(kind),
-				acp.WithStartStatus(acp.ToolCallStatusInProgress),
-			}
-			if len(locs) > 0 {
-				opts = append(opts, acp.WithStartLocations(locs))
-			}
-			d.update(acp.StartToolCall(acp.ToolCallId(id), title, opts...))
-			break
-		}
-		title := stripShellPrefix(it.Command)
-		if title == "" {
-			title = "Run command"
-		}
-		d.update(acp.StartToolCall(acp.ToolCallId(id), title,
-			acp.WithStartKind(acp.ToolKindExecute),
-			acp.WithStartStatus(acp.ToolCallStatusInProgress),
-			acp.WithStartRawInput(map[string]any{"command": title, "cwd": it.Cwd}),
-		))
-
 	case "fileChange":
 		opts := []acp.ToolCallStartOpt{
 			acp.WithStartKind(acp.ToolKindEdit),
@@ -440,36 +419,16 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 		if content := fileChangeContent(env.Item); len(content) > 0 {
 			opts = append(opts, acp.WithStartContent(content))
 		}
-		d.update(acp.StartToolCall(acp.ToolCallId(id), "Editing files", opts...))
+		opts = appendDisplayLocations(opts, fileChangeLocations(env.Item))
+		d.update(acp.StartToolCall(acp.ToolCallId(id), "Edit files", opts...))
 
-	case "mcpToolCall":
-		var it struct {
-			Server string          `json:"server"`
-			Tool   string          `json:"tool"`
-			Args   json.RawMessage `json:"arguments"`
+	case "commandExecution", "mcpToolCall", "dynamicToolCall":
+		if u, ok := itemToolCallStart(env.Item, id, kind, acp.ToolCallStatusInProgress); ok {
+			if kind == "commandExecution" {
+				d.setCommandName(id, toolNameFromMeta(u.ToolCall.Meta))
+			}
+			d.update(u)
 		}
-		_ = json.Unmarshal(env.Item, &it)
-		var args map[string]any
-		_ = json.Unmarshal(it.Args, &args)
-		d.update(acp.StartToolCall(acp.ToolCallId(id), fmt.Sprintf("mcp.%s.%s", it.Server, it.Tool),
-			acp.WithStartKind(acp.ToolKindExecute),
-			acp.WithStartStatus(acp.ToolCallStatusInProgress),
-			acp.WithStartRawInput(map[string]any{"server": it.Server, "tool": it.Tool, "arguments": args}),
-		))
-
-	case "dynamicToolCall":
-		var it struct {
-			Tool string          `json:"tool"`
-			Args json.RawMessage `json:"arguments"`
-		}
-		_ = json.Unmarshal(env.Item, &it)
-		var args map[string]any
-		_ = json.Unmarshal(it.Args, &args)
-		d.update(acp.StartToolCall(acp.ToolCallId(id), it.Tool,
-			acp.WithStartKind(acp.ToolKindExecute),
-			acp.WithStartStatus(acp.ToolCallStatusInProgress),
-			acp.WithStartRawInput(map[string]any{"arguments": args}),
-		))
 
 	case "webSearch":
 		d.update(webSearchStartToolCall(env.Item, acp.ToolCallStatusInProgress))
@@ -528,18 +487,28 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 	case "commandExecution":
 		var it struct {
 			Status           string  `json:"status"`
+			Source           string  `json:"source"`
 			AggregatedOutput *string `json:"aggregatedOutput"`
 		}
 		_ = json.Unmarshal(env.Item, &it)
+		d.setCommandName(id, "")
 		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(toolStatusFor(it.Status))}
 
-		if _, streamed := d.toolOut[id]; !streamed && it.AggregatedOutput != nil && *it.AggregatedOutput != "" {
+		output := ""
+		if buffered := d.toolOut[id]; buffered != nil {
+			output = buffered.String()
+		} else if it.AggregatedOutput != nil {
+			output = boundedToolOutput(*it.AggregatedOutput)
+		}
+		if output != "" {
 			opts = append(opts, acp.WithUpdateContent([]acp.ToolCallContent{
-				acp.ToolContent(acp.TextBlock(*it.AggregatedOutput)),
+				acp.ToolContent(acp.TextBlock(output)),
 			}))
 		}
 		delete(d.toolOut, id)
-		d.update(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
+		u := acp.UpdateToolCall(acp.ToolCallId(id), opts...)
+		u.ToolCallUpdate.Meta = toolNameMeta(commandToolName(it.Source))
+		d.update(u)
 
 	case "fileChange":
 		var it struct {
@@ -554,10 +523,14 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 
 	case "dynamicToolCall":
 		var it struct {
-			Status string `json:"status"`
+			Status    string `json:"status"`
+			Namespace string `json:"namespace"`
+			Tool      string `json:"tool"`
 		}
 		_ = json.Unmarshal(env.Item, &it)
-		d.update(acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(toolStatusFor(it.Status))))
+		u := acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(toolStatusFor(it.Status)))
+		u.ToolCallUpdate.Meta = toolNameMeta(functionToolName(it.Tool, it.Namespace))
+		d.update(u)
 
 	case "mcpToolCall":
 		var it struct {
@@ -573,7 +546,7 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		_ = json.Unmarshal(it.Args, &args)
 		opts := []acp.ToolCallUpdateOpt{
 			acp.WithUpdateStatus(toolStatusFor(it.Status)),
-			acp.WithUpdateRawInput(map[string]any{"server": it.Server, "tool": it.Tool, "arguments": args}),
+			acp.WithUpdateRawInput(args),
 		}
 		if out := mcpRawOutput(it.Result, it.Error); out != nil {
 			opts = append(opts, acp.WithUpdateRawOutput(out))
@@ -620,25 +593,10 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 			Text string `json:"text"`
 		}
 		_ = json.Unmarshal(env.Item, &it)
-		d.planMu.Lock()
-		text := it.Text
-		if text == "" {
-			text = d.planText[id]
+		if it.Text != "" {
+			d.update(acp.UpdateAgentMessageText("Plan:\n" + it.Text))
+			d.setCompletedPlan(id, it.Text)
 		}
-		delete(d.planText, id)
-		d.planMu.Unlock()
-		if text != "" {
-			if d.planUpdates {
-				d.emitMarkdownPlan(d.ctx, id, text)
-			} else {
-				d.update(acp.UpdateAgentMessageText("Plan:\n" + text))
-			}
-			d.setCompletedPlan(id, text)
-		}
-		d.planMu.Lock()
-		delete(d.planEmitted, id)
-		delete(d.planEmittedAt, id)
-		d.planMu.Unlock()
 
 	case "exitedReviewMode":
 		var it struct {
@@ -665,35 +623,41 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 	}
 }
 
-func (d *eventDispatcher) emitMarkdownPlan(ctx context.Context, itemID, text string) {
-	if text == "" {
-		return
+// rateLimitNote speaks only when constrained; the notification is a per-turn heartbeat.
+func rateLimitNote(params json.RawMessage) string {
+	var p struct {
+		RateLimits struct {
+			LimitName            string  `json:"limitName"`
+			SpendControlReached  *bool   `json:"spendControlReached"`
+			RateLimitReachedType *string `json:"rateLimitReachedType"`
+			Primary              *struct {
+				UsedPercent int    `json:"usedPercent"`
+				ResetsAt    *int64 `json:"resetsAt"`
+			} `json:"primary"`
+		} `json:"rateLimits"`
 	}
-	d.planMu.Lock()
-	if d.planEmitted[itemID] == text {
-		d.planMu.Unlock()
-		return
+	if json.Unmarshal(params, &p) != nil {
+		return ""
 	}
-	d.planEmitted[itemID] = text
-	d.planEmittedAt[itemID] = time.Now()
-	d.planMu.Unlock()
-	d.updateWithContext(ctx, acp.SessionUpdate{PlanUpdate: &acp.SessionPlanUpdate{
-		SessionUpdate: "plan_update",
-		Plan:          acp.NewPlanUpdateContentMarkdown(acp.PlanId(itemID), text),
-	}})
-}
 
-func (d *eventDispatcher) flushPendingPlanUpdates(ctx context.Context) {
-	if !d.planUpdates {
-		return
+	limits := p.RateLimits
+	reached := limits.RateLimitReachedType != nil && *limits.RateLimitReachedType != ""
+	spend := limits.SpendControlReached != nil && *limits.SpendControlReached
+	if !reached && !spend {
+		return ""
 	}
-	d.planMu.Lock()
-	pending := make(map[string]string, len(d.planText))
-	maps.Copy(pending, d.planText)
-	d.planMu.Unlock()
-	for itemID, text := range pending {
-		d.emitMarkdownPlan(ctx, itemID, text)
+
+	note := "Rate limit reached"
+	if spend && !reached {
+		note = "Spend limit reached"
 	}
+	if limits.LimitName != "" {
+		note += " (" + limits.LimitName + ")"
+	}
+	if limits.Primary != nil && limits.Primary.ResetsAt != nil {
+		note += ", resets " + time.Unix(*limits.Primary.ResetsAt, 0).Format(time.RFC3339)
+	}
+	return "*" + note + ".*\n\n"
 }
 
 func mcpRawOutput(result, mcpErr json.RawMessage) map[string]any {
@@ -723,31 +687,16 @@ func joinReasoning(summary, content []string) string {
 }
 
 func (d *eventDispatcher) handleTokenUsage(params json.RawMessage) {
-	var p struct {
-		TokenUsage struct {
-			Last struct {
-				TotalTokens           int `json:"totalTokens"`
-				InputTokens           int `json:"inputTokens"`
-				CachedInputTokens     int `json:"cachedInputTokens"`
-				OutputTokens          int `json:"outputTokens"`
-				ReasoningOutputTokens int `json:"reasoningOutputTokens"`
-			} `json:"last"`
-			ModelContextWindow int `json:"modelContextWindow"`
-		} `json:"tokenUsage"`
-	}
+	var p tokenUsageUpdate
 	if json.Unmarshal(params, &p) != nil {
 		return
 	}
 	last := p.TokenUsage.Last
-	cachedRead := last.CachedInputTokens
-	reasoning := last.ReasoningOutputTokens
-	d.setUsage(&acp.Usage{
-		TotalTokens:      last.TotalTokens,
-		InputTokens:      max(0, last.InputTokens-last.CachedInputTokens),
-		OutputTokens:     last.OutputTokens,
-		CachedReadTokens: &cachedRead,
-		ThoughtTokens:    &reasoning,
-	})
+	if d.tokens != nil && p.TokenUsage.Total != nil {
+		d.tokens.observe(*p.TokenUsage.Total, last)
+	} else {
+		d.setUsage(last.acpUsage())
+	}
 	if size := p.TokenUsage.ModelContextWindow; size > 0 {
 		d.update(acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{
 			SessionUpdate: "usage_update",
@@ -755,34 +704,6 @@ func (d *eventDispatcher) handleTokenUsage(params json.RawMessage) {
 			Size:          size,
 		}})
 	}
-}
-
-func (d *eventDispatcher) handlePlanUpdated(params json.RawMessage) {
-	var p struct {
-		Plan []struct {
-			Step   string `json:"step"`
-			Status string `json:"status"`
-		} `json:"plan"`
-	}
-	if err := json.Unmarshal(params, &p); err != nil {
-		return
-	}
-	entries := make([]acp.PlanEntry, 0, len(p.Plan))
-	for _, e := range p.Plan {
-		status := acp.PlanEntryStatusPending
-		switch e.Status {
-		case "inProgress":
-			status = acp.PlanEntryStatusInProgress
-		case "completed":
-			status = acp.PlanEntryStatusCompleted
-		}
-		entries = append(entries, acp.PlanEntry{
-			Content:  e.Step,
-			Priority: acp.PlanEntryPriorityMedium,
-			Status:   status,
-		})
-	}
-	d.update(acp.UpdatePlan(entries...))
 }
 
 func peekItem(item json.RawMessage) (id, kind string, ok bool) {
@@ -800,7 +721,7 @@ func toolStatusFor(s string) acp.ToolCallStatus {
 	switch s {
 	case "inProgress":
 		return acp.ToolCallStatusInProgress
-	case "failed", "declined":
+	case "failed", "declined", "interrupted":
 		return acp.ToolCallStatusFailed
 	default:
 		return acp.ToolCallStatusCompleted
@@ -813,39 +734,53 @@ type commandAction struct {
 	Query string `json:"query"`
 }
 
-func commandActionToolCall(actions []commandAction) (title string, kind acp.ToolKind, locations []acp.ToolCallLocation, ok bool) {
+// The ACP SDK mirrors a lone location into rawInput.path. Codex already
+// supplies the location as a file chip, so clear that synthetic input to keep
+// clients from rendering the same path again as a hint and expanded argument.
+func appendDisplayLocations(opts []acp.ToolCallStartOpt, locations []acp.ToolCallLocation) []acp.ToolCallStartOpt {
+	if len(locations) == 0 {
+		return opts
+	}
+	return append(opts, acp.WithStartLocations(locations), acp.WithStartRawInput(nil))
+}
+
+func commandRawInput(command, cwd string) map[string]any {
+	input := map[string]any{"command": command}
+	if cwd != "" {
+		input["cwd"] = cwd
+	}
+	return input
+}
+
+func commandActionToolCall(actions []commandAction) (title string, kind acp.ToolKind, rawInput any, locations []acp.ToolCallLocation, ok bool) {
 	if len(actions) != 1 {
-		return "", "", nil, false
+		return "", "", nil, nil, false
 	}
 	a := actions[0]
 	switch a.Type {
 	case "read":
 		if a.Path == "" {
-			return "", "", nil, false
+			return "", "", nil, nil, false
 		}
-		return fmt.Sprintf("Read file '%s'", a.Path), acp.ToolKindRead, []acp.ToolCallLocation{{Path: a.Path}}, true
+		return "Read file", acp.ToolKindRead, nil, []acp.ToolCallLocation{{Path: a.Path}}, true
 	case "search":
-		return searchTitle(a.Query, a.Path), acp.ToolKindSearch, nil, true
-	case "listFiles":
+		var locations []acp.ToolCallLocation
 		if a.Path != "" {
-			return fmt.Sprintf("List files in '%s'", a.Path), acp.ToolKindRead, nil, true
+			locations = []acp.ToolCallLocation{{Path: a.Path}}
 		}
-		return "List files", acp.ToolKindRead, nil, true
+		var input any
+		if a.Query != "" {
+			input = map[string]any{"query": a.Query}
+		}
+		return "Search files", acp.ToolKindSearch, input, locations, true
+	case "listFiles":
+		var locations []acp.ToolCallLocation
+		if a.Path != "" {
+			locations = []acp.ToolCallLocation{{Path: a.Path}}
+		}
+		return "List files", acp.ToolKindRead, nil, locations, true
 	}
-	return "", "", nil, false
-}
-
-func searchTitle(query, path string) string {
-	switch {
-	case query != "" && path != "":
-		return fmt.Sprintf("Search for '%s' in %s", query, path)
-	case query != "":
-		return fmt.Sprintf("Search for '%s'", query)
-	case path != "":
-		return fmt.Sprintf("Search in '%s'", path)
-	default:
-		return "Search"
-	}
+	return "", "", nil, nil, false
 }
 
 type fileChange struct {
@@ -870,28 +805,49 @@ func fileChangeContent(raw json.RawMessage) []acp.ToolCallContent {
 		}
 		var oldText *string
 		var newText string
-		if ch.Kind.Type == "add" && !isUnifiedDiff(ch.Diff) {
-
+		switch {
+		case ch.Kind.Type == "add" && !isUnifiedDiff(ch.Diff):
 			newText = ch.Diff
-		} else {
+		case ch.Kind.Type == "delete" && !isUnifiedDiff(ch.Diff):
+			oldText = &ch.Diff
+		default:
 			old, nw := splitUnifiedDiff(ch.Diff)
 			newText = nw
 			if ch.Kind.Type != "add" {
 				oldText = &old
 			}
 		}
+		meta := map[string]any{"kind": ch.Kind.Type}
 		content = append(content, acp.ToolCallContent{
 			Diff: &acp.ToolCallContentDiff{
 				Type:    "diff",
 				Path:    ch.Path,
 				OldText: oldText,
 				NewText: newText,
-
-				Meta: map[string]any{"kind": ch.Kind.Type},
+				Meta:    meta,
 			},
 		})
 	}
 	return content
+}
+
+func fileChangeLocations(raw json.RawMessage) []acp.ToolCallLocation {
+	var it struct {
+		Changes []fileChange `json:"changes"`
+	}
+	if json.Unmarshal(raw, &it) != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	locations := make([]acp.ToolCallLocation, 0, len(it.Changes))
+	for _, change := range it.Changes {
+		if change.Path == "" || seen[change.Path] {
+			continue
+		}
+		seen[change.Path] = true
+		locations = append(locations, acp.ToolCallLocation{Path: change.Path})
+	}
+	return locations
 }
 
 func isUnifiedDiff(s string) bool {

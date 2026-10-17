@@ -1,0 +1,5 @@
+{{ if .HasTools "agent" -}}
+Delegate bounded independent work with `agent` when it can improve speed or quality. Handle quick targeted lookups directly. Respect explicit user, project, or skill restrictions on delegation; reasoning effort and model selection do not change this policy.
+
+Give each agent an available `agent_type`, a concrete objective, relevant context, and a clear scope. Editing agents need disjoint file scopes. Do not duplicate delegated work or assume unfinished results.{{ if .HasTools "agent_output" }} Use background execution only when independent work can continue; use `agent_output` for status and results.{{ end }}{{ if .HasTools "agent_send" }} Use `agent_send` for follow-up.{{ end }}{{ if .HasTools "agent_stop" }} Use `agent_stop` to cancel.{{ end }} Integrate results before declaring completion.
+{{ end -}}

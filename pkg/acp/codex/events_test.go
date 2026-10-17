@@ -3,6 +3,9 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -44,24 +47,6 @@ func TestMessageUpdatesCarryIDsAndPhase(t *testing.T) {
 	thought := agentThoughtUpdate("thinking", "thought-id")
 	if thought.AgentThoughtChunk == nil || thought.AgentThoughtChunk.MessageId == nil || *thought.AgentThoughtChunk.MessageId != "thought-id" {
 		t.Fatalf("thought update = %#v", thought)
-	}
-}
-
-func TestTurnCompletedFlushesThrottledPlanTail(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	d := newEventDispatcher(ctx, nil, "session-1")
-	d.planUpdates = true
-
-	d.handle("item/plan/delta", json.RawMessage(`{"itemId":"plan-1","delta":"first"}`))
-	d.handle("item/plan/delta", json.RawMessage(`{"itemId":"plan-1","delta":" second"}`))
-	if got := d.planEmitted["plan-1"]; got != "first" {
-		t.Fatalf("plan before completion = %q, want first throttled snapshot", got)
-	}
-
-	d.handle("turn/completed", json.RawMessage(`{"threadId":"session-1","turn":{"id":"turn-1","status":"completed"}}`))
-	if got := d.planEmitted["plan-1"]; got != "first second" {
-		t.Fatalf("plan after completion = %q, want flushed snapshot", got)
 	}
 }
 
@@ -110,44 +95,63 @@ func TestFileChangeContentUpdate(t *testing.T) {
 	}
 }
 
+func TestFileChangeLocationsAreDistinct(t *testing.T) {
+	raw := json.RawMessage(`{"changes":[{"path":"/p/a.go"},{"path":"/p/a.go"},{"path":"/p/b.go"},{"path":""}]}`)
+	locations := fileChangeLocations(raw)
+	if len(locations) != 2 || locations[0].Path != "/p/a.go" || locations[1].Path != "/p/b.go" {
+		t.Fatalf("locations = %#v", locations)
+	}
+}
+
 func TestCommandActionToolCall(t *testing.T) {
-	title, kind, locs, ok := commandActionToolCall([]commandAction{{Type: "read", Path: "/x"}})
-	if !ok || title != "Read file '/x'" || kind != acp.ToolKindRead || len(locs) != 1 || locs[0].Path != "/x" {
+	title, kind, input, locs, ok := commandActionToolCall([]commandAction{{Type: "read", Path: "/x"}})
+	if !ok || title != "Read file" || kind != acp.ToolKindRead || input != nil || len(locs) != 1 || locs[0].Path != "/x" {
 		t.Errorf("read: got %q %v %v %v", title, kind, locs, ok)
 	}
 
-	title, kind, _, ok = commandActionToolCall([]commandAction{{Type: "search", Query: "foo", Path: "/p"}})
-	if !ok || title != "Search for 'foo' in /p" || kind != acp.ToolKindSearch {
-		t.Errorf("search: got %q %v %v", title, kind, ok)
+	title, kind, input, locs, ok = commandActionToolCall([]commandAction{{Type: "search", Query: "foo", Path: "/p"}})
+	query, _ := input.(map[string]any)["query"].(string)
+	if !ok || title != "Search files" || kind != acp.ToolKindSearch || query != "foo" || len(locs) != 1 || locs[0].Path != "/p" {
+		t.Errorf("search: got %q %v %v %v", title, kind, locs, ok)
 	}
 
-	title, kind, _, ok = commandActionToolCall([]commandAction{{Type: "listFiles", Path: "/p"}})
-	if !ok || title != "List files in '/p'" || kind != acp.ToolKindRead {
-		t.Errorf("listFiles: got %q %v %v", title, kind, ok)
+	title, kind, input, locs, ok = commandActionToolCall([]commandAction{{Type: "listFiles", Path: "/p"}})
+	if !ok || title != "List files" || kind != acp.ToolKindRead || len(locs) != 1 || locs[0].Path != "/p" {
+		t.Errorf("listFiles: got %q %v %v %v", title, kind, locs, ok)
 	}
-	if title, _, _, _ := commandActionToolCall([]commandAction{{Type: "listFiles"}}); title != "List files" {
+	if title, _, _, _, _ := commandActionToolCall([]commandAction{{Type: "listFiles"}}); title != "List files" {
 		t.Errorf("listFiles no path: got %q", title)
 	}
 
-	if _, _, _, ok := commandActionToolCall([]commandAction{{Type: "read", Path: "/x"}, {Type: "read", Path: "/y"}}); ok {
+	if _, _, _, _, ok := commandActionToolCall([]commandAction{{Type: "read", Path: "/x"}, {Type: "read", Path: "/y"}}); ok {
 		t.Errorf("multiple actions should not resolve to a single mapping")
 	}
-	if _, _, _, ok := commandActionToolCall([]commandAction{{Type: "unknown"}}); ok {
+	if _, _, _, _, ok := commandActionToolCall([]commandAction{{Type: "unknown"}}); ok {
 		t.Errorf("unknown action should not resolve")
 	}
 }
 
-func TestSearchTitle(t *testing.T) {
-	cases := map[string][2]string{
-		"Search for 'q' in /p": {"q", "/p"},
-		"Search for 'q'":       {"q", ""},
-		"Search in '/p'":       {"", "/p"},
-		"Search":               {"", ""},
+func TestDisplayLocationsDoNotBecomeRawInput(t *testing.T) {
+	opts := appendDisplayLocations(nil, []acp.ToolCallLocation{{Path: "/project/main.go"}})
+	update := acp.StartToolCall("read-1", "Read file", opts...)
+	if update.ToolCall == nil {
+		t.Fatal("missing tool call")
 	}
-	for want, in := range cases {
-		if got := searchTitle(in[0], in[1]); got != want {
-			t.Errorf("searchTitle(%q,%q) = %q, want %q", in[0], in[1], got, want)
-		}
+	if len(update.ToolCall.Locations) != 1 || update.ToolCall.Locations[0].Path != "/project/main.go" {
+		t.Fatalf("locations = %#v", update.ToolCall.Locations)
+	}
+	if update.ToolCall.RawInput != nil {
+		t.Fatalf("raw input duplicated the location: %#v", update.ToolCall.RawInput)
+	}
+}
+
+func TestCommandRawInputOmitsEmptyWorkingDirectory(t *testing.T) {
+	input := commandRawInput("go test ./...", "")
+	if input["command"] != "go test ./..." {
+		t.Fatalf("command = %#v", input["command"])
+	}
+	if _, ok := input["cwd"]; ok {
+		t.Fatalf("empty cwd should be omitted: %#v", input)
 	}
 }
 
@@ -195,6 +199,7 @@ func TestIsFatalTurnError(t *testing.T) {
 	}{
 		{"unauthorized string", `"unauthorized"`, true},
 		{"usage limit string", `"usageLimitExceeded"`, true},
+		{"rate limit string", `"rateLimitExceeded"`, true},
 		{"other string", `"somethingElse"`, false},
 		{"http 401 object", `{"httpConnectionFailed":{"httpStatusCode":401}}`, true},
 		{"stream disconnected 401", `{"responseStreamDisconnected":{"httpStatusCode":401}}`, true},
@@ -209,11 +214,37 @@ func TestIsFatalTurnError(t *testing.T) {
 			}
 		})
 	}
+
+	d := newEventDispatcher(context.Background(), nil, "session")
+	d.handle("error", json.RawMessage(`{"error":{"codexErrorInfo":"rateLimitExceeded"}}`))
+	if d.getFailure() == nil {
+		t.Fatal("rate-limit notification did not record a turn failure")
+	}
+	select {
+	case <-d.done:
+	default:
+		t.Fatal("rate-limit notification did not unblock the turn")
+	}
+}
+
+func TestToolStatusFor(t *testing.T) {
+	cases := map[string]acp.ToolCallStatus{
+		"inProgress":  acp.ToolCallStatusInProgress,
+		"completed":   acp.ToolCallStatusCompleted,
+		"failed":      acp.ToolCallStatusFailed,
+		"declined":    acp.ToolCallStatusFailed,
+		"interrupted": acp.ToolCallStatusFailed,
+	}
+	for status, want := range cases {
+		if got := toolStatusFor(status); got != want {
+			t.Errorf("toolStatusFor(%q) = %q, want %q", status, got, want)
+		}
+	}
 }
 
 func TestTokenUsageComponentsMatchTotal(t *testing.T) {
 	d := newEventDispatcher(context.Background(), nil, "session")
-	d.handleTokenUsage([]byte(`{"tokenUsage":{"last":{"totalTokens":20,"inputTokens":15,"cachedInputTokens":5,"outputTokens":4,"reasoningOutputTokens":1}}}`))
+	d.handleTokenUsage([]byte(`{"tokenUsage":{"last":{"totalTokens":110,"inputTokens":100,"cachedInputTokens":40,"outputTokens":10,"reasoningOutputTokens":5}}}`))
 	u := d.getUsage()
 	if u == nil || u.CachedReadTokens == nil || u.ThoughtTokens == nil {
 		t.Fatalf("usage = %#v", u)
@@ -221,4 +252,144 @@ func TestTokenUsageComponentsMatchTotal(t *testing.T) {
 	if got := u.InputTokens + *u.CachedReadTokens + u.OutputTokens + *u.ThoughtTokens; got != u.TotalTokens {
 		t.Fatalf("component sum = %d, total = %d", got, u.TotalTokens)
 	}
+	if u.InputTokens != 60 || *u.CachedReadTokens != 40 || u.OutputTokens != 5 || *u.ThoughtTokens != 5 {
+		t.Fatalf("usage = %+v", u)
+	}
+}
+
+func TestCodexReasoningUsageStaysWithinOutput(t *testing.T) {
+	for _, tt := range []struct {
+		name                                         string
+		output, reasoning, wantOutput, wantReasoning int
+	}{
+		{"no reasoning", 10, 0, 10, 0},
+		{"all reasoning", 10, 10, 0, 10},
+		{"excess reasoning", 10, 20, 0, 10},
+		{"negative reasoning", 10, -5, 10, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newEventDispatcher(context.Background(), nil, "s")
+			payload, _ := json.Marshal(map[string]any{"tokenUsage": map[string]any{"last": map[string]any{
+				"totalTokens": tt.output, "outputTokens": tt.output, "reasoningOutputTokens": tt.reasoning,
+			}}})
+			d.handleTokenUsage(payload)
+			u := d.getUsage()
+			if u.OutputTokens != tt.wantOutput || *u.ThoughtTokens != tt.wantReasoning {
+				t.Fatalf("output=%d reasoning=%d, want %d/%d", u.OutputTokens, *u.ThoughtTokens, tt.wantOutput, tt.wantReasoning)
+			}
+		})
+	}
+}
+
+func TestCodexRateLimitNoteOnlySpeaksWhenReached(t *testing.T) {
+	// The rolling heartbeat fires several times per turn; an unconstrained
+	// snapshot must stay silent.
+	quiet := `{"rateLimits":{"limitName":"weekly","primary":{"usedPercent":12}}}`
+	if got := rateLimitNote(json.RawMessage(quiet)); got != "" {
+		t.Fatalf("unconstrained snapshot produced %q, want silence", got)
+	}
+
+	reached := `{"rateLimits":{"limitName":"weekly","rateLimitReachedType":"primary","primary":{"usedPercent":100,"resetsAt":1788000000}}}`
+	got := rateLimitNote(json.RawMessage(reached))
+	if !strings.Contains(got, "Rate limit reached") || !strings.Contains(got, "weekly") {
+		t.Fatalf("reached snapshot = %q", got)
+	}
+
+	spend := `{"rateLimits":{"spendControlReached":true}}`
+	if got := rateLimitNote(json.RawMessage(spend)); !strings.Contains(got, "Spend limit reached") {
+		t.Fatalf("spend snapshot = %q", got)
+	}
+}
+
+func TestFileChangeRawDelete(t *testing.T) {
+	content := fileChangeContent(json.RawMessage(`{"changes":[{"path":"/p/old.txt","kind":{"type":"delete"},"diff":"gone\n"}]}`))
+	if len(content) != 1 || content[0].Diff == nil {
+		t.Fatalf("content = %#v", content)
+	}
+	d := content[0].Diff
+	if d.OldText == nil || *d.OldText != "gone\n" || d.NewText != "" {
+		t.Fatalf("raw delete content = old %v new %q", d.OldText, d.NewText)
+	}
+	if len(d.Meta) != 1 || d.Meta["kind"] != "delete" {
+		t.Fatalf("diff metadata = %#v", d.Meta)
+	}
+}
+
+func TestToolCallsCarryCodexToolNames(t *testing.T) {
+	name := func(meta map[string]any) string { return toolNameFromMeta(meta) }
+	for source, want := range map[string]string{"unifiedExecStartup": "exec_command", "unifiedExecInteraction": "write_stdin", "agent": "", "userShell": ""} {
+		u, ok := itemToolCallStart(json.RawMessage(`{"command":"ls","source":"`+source+`"}`), "cmd", "commandExecution", acp.ToolCallStatusInProgress)
+		if !ok || name(u.ToolCall.Meta) != want {
+			t.Errorf("source %s: meta = %#v, want %q", source, u.ToolCall.Meta, want)
+		}
+	}
+	u, _ := itemToolCallStart(json.RawMessage(`{"command":"cat a","source":"unifiedExecStartup","commandActions":[{"type":"read","path":"/a"}]}`), "read", "commandExecution", acp.ToolCallStatusCompleted)
+	if name(u.ToolCall.Meta) != "exec_command" || u.ToolCall.Title != "Read file" {
+		t.Errorf("command action = %#v", u.ToolCall)
+	}
+	u, _ = itemToolCallStart(json.RawMessage(`{"tool":"lookup","namespace":"mcp__docs__","arguments":{}}`), "dyn", "dynamicToolCall", acp.ToolCallStatusInProgress)
+	if name(u.ToolCall.Meta) != "mcp__docs__lookup" {
+		t.Errorf("dynamic tool meta = %#v", u.ToolCall.Meta)
+	}
+	if u, _ := imageViewToolCall(json.RawMessage(`{"id":"img","path":"/a.png"}`)); name(u.ToolCall.Meta) != "view_image" {
+		t.Errorf("image view meta = %#v", u.ToolCall.Meta)
+	}
+	if tc := permissionsToolCall(permissionsApprovalParams{ItemID: "perm"}); name(tc.Meta) != "request_permissions" {
+		t.Errorf("permissions meta = %#v", tc.Meta)
+	}
+
+	d := newEventDispatcher(context.Background(), discardingConn(t), "session")
+	d.handle("item/started", json.RawMessage(`{"item":{"id":"cmd","type":"commandExecution","command":"ls","source":"unifiedExecStartup"}}`))
+	if d.commandName("cmd") != "exec_command" {
+		t.Fatalf("started command name = %q", d.commandName("cmd"))
+	}
+	d.handle("item/completed", json.RawMessage(`{"item":{"id":"cmd","type":"commandExecution","status":"completed","source":"unifiedExecStartup"}}`))
+	if d.commandName("cmd") != "" {
+		t.Fatal("completed command kept its approval name")
+	}
+}
+
+func TestAuthenticationErrorsUseACPLoginFlow(t *testing.T) {
+	isAuthRequired := func(err error) bool {
+		var re *acp.RequestError
+		return errors.As(err, &re) && re.Code == acp.NewAuthRequired(nil).Code
+	}
+	for _, info := range []string{`"unauthorized"`, `{"responseStreamDisconnected":{"httpStatusCode":401}}`, `{"anyFutureVariant":{"httpStatusCode":401}}`} {
+		d := newEventDispatcher(context.Background(), nil, "session")
+		d.handle("error", json.RawMessage(`{"error":{"message":"Sign in","codexErrorInfo":`+info+`},"willRetry":true}`))
+		if d.getFailure() != nil {
+			t.Fatalf("%s: retrying auth error failed the turn", info)
+		}
+		d.handle("error", json.RawMessage(`{"error":{"message":"Sign in","codexErrorInfo":`+info+`},"willRetry":false}`))
+		if err := d.getFailure(); !isAuthRequired(err) {
+			t.Fatalf("%s: failure = %v, want auth_required", info, err)
+		}
+		select {
+		case <-d.done:
+		default:
+			t.Fatalf("%s: auth failure did not end the turn", info)
+		}
+	}
+
+	d := newEventDispatcher(context.Background(), nil, "session")
+	d.handle("turn/completed", json.RawMessage(`{"turn":{"id":"t","status":"failed","error":{"message":"Sign in","codexErrorInfo":"unauthorized"}}}`))
+	if err := d.getFailure(); !isAuthRequired(err) {
+		t.Fatalf("failed turn = %v, want auth_required", err)
+	}
+	d = newEventDispatcher(context.Background(), nil, "session")
+	d.handle("turn/completed", json.RawMessage(`{"turn":{"id":"t","status":"failed","error":{"message":"boom","codexErrorInfo":{"httpConnectionFailed":{"httpStatusCode":500}}}}}`))
+	if err := d.getFailure(); err == nil || isAuthRequired(err) {
+		t.Fatalf("non-auth failure = %v", err)
+	}
+}
+
+func discardingConn(t *testing.T) *acp.AgentSideConnection {
+	t.Helper()
+	agentIO, clientIO := net.Pipe()
+	t.Cleanup(func() {
+		_ = agentIO.Close()
+		_ = clientIO.Close()
+	})
+	_ = acp.NewClientSideConnection(&liveClient{}, clientIO, clientIO)
+	return acp.NewAgentSideConnection(&Agent{}, agentIO, agentIO)
 }

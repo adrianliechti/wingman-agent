@@ -57,6 +57,32 @@ func (s *Service) HasLSP() bool {
 	return !s.closed && len(s.manager.DetectServers()) > 0
 }
 
+func (s *Service) HasLSPFor(filePath string) bool {
+	s.lifeMu.RLock()
+	defer s.lifeMu.RUnlock()
+	return !s.closed && s.manager.FindServer(filePath) != nil
+}
+
+// InvalidateLSPDetection makes managed-tool changes visible to subsequent
+// capability and session lookups.
+func (s *Service) InvalidateLSPDetection() {
+	s.lifeMu.RLock()
+	defer s.lifeMu.RUnlock()
+	if !s.closed {
+		s.manager.InvalidateDetection()
+	}
+}
+
+// SetServerInitializationOptions refreshes a server's startup configuration.
+func (s *Service) SetServerInitializationOptions(name string, value any) error {
+	s.lifeMu.RLock()
+	defer s.lifeMu.RUnlock()
+	if s.closed {
+		return nil
+	}
+	return s.manager.SetServerInitializationOptions(name, value)
+}
+
 func (s *Service) hasLSPServerFor(filePath string) bool {
 	return s.manager.FindServer(filePath) != nil
 }
@@ -140,4 +166,13 @@ func (s *Service) DocumentContent(filePath string) (string, bool) {
 		return "", false
 	}
 	return session.DocumentContent(filePath)
+}
+
+func (s *Service) Activities() []lsp.ServerActivity {
+	s.lifeMu.RLock()
+	defer s.lifeMu.RUnlock()
+	if s.closed {
+		return nil
+	}
+	return s.manager.Activities()
 }

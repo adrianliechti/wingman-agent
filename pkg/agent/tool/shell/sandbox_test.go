@@ -1,11 +1,16 @@
 package shell
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
 func TestResolveWorkdirWorkspaceSandbox(t *testing.T) {
@@ -102,5 +107,36 @@ func TestBuildSandboxedCommandRejectsMissingWorkspace(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	if _, err := buildSandboxedCommand(t.Context(), "/bin/sh", "true", missing, sandboxOptions{WorkspaceDir: missing}); err == nil || !strings.Contains(err.Error(), "not an accessible directory") {
 		t.Fatalf("missing workspace error = %v", err)
+	}
+}
+
+func TestExecSandboxConfinesWritesToWorkspace(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("no sandbox backend on this platform")
+	}
+	t.Setenv("WINGMAN_SANDBOX", "workspace")
+	t.Setenv(workspaceSandboxActiveEnv, "")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(home, fmt.Sprintf(".wingman-sandbox-test-%d", os.Getpid()))
+	defer os.Remove(outside)
+
+	manager := NewExecManager(nil)
+	defer manager.Close()
+	exec := ExecTools(manager, t.TempDir(), nil, nil, nil)[0]
+	run := func(command string) tool.Result {
+		result, err := exec.Execute(context.Background(), map[string]any{"command": command, "wait": 10})
+		if err != nil {
+			t.Skipf("sandbox backend unavailable: %v", err)
+		}
+		return result
+	}
+	if inside := run("touch inside.txt"); inside.IsError {
+		t.Fatalf("write inside the workspace failed: %s", inside.Content)
+	}
+	if escaped := run("touch '" + outside + "'"); !escaped.IsError {
+		t.Fatalf("write outside the workspace was allowed: %s", escaped.Content)
 	}
 }

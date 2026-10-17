@@ -4,31 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"testing"
 )
-
-func TestPythonAdapterFindsEditorBundledDebugpy(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	adapterPath := filepath.Join(home, ".vscode", "extensions", "ms-python.debugpy-2026.6.0", "bundled", "libs", "debugpy", "adapter")
-	if err := os.MkdirAll(adapterPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(adapterPath, "__main__.py"), []byte("# adapter\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	descriptor := newPythonAdapter().Descriptor()
-	wantCommand := "python3"
-	if runtime.GOOS == "windows" {
-		wantCommand = "python"
-	}
-	if descriptor.FallbackCommand != wantCommand || len(descriptor.FallbackArgs) != 1 || descriptor.FallbackArgs[0] != adapterPath {
-		t.Fatalf("Python descriptor = %#v", descriptor)
-	}
-}
 
 func TestGoAdapterFindsMainAndTestTargets(t *testing.T) {
 	registry := NewRegistry()
@@ -210,7 +188,7 @@ Console.WriteLine(message);
 	}
 }
 
-func TestJavaScriptAdapterFindsNodeAndViteTargets(t *testing.T) {
+func TestJavaScriptAdapterFindsNodeAndPackageScriptTargets(t *testing.T) {
 	registry := NewRegistry()
 	targets, err := registry.DetectFile("tools/main.ts", []byte(`const message: string = "ready";
 console.log(message);
@@ -222,14 +200,27 @@ console.log(message);
 		t.Fatalf("TypeScript targets = %#v", targets)
 	}
 
-	targets, err = registry.DetectFile("web/vite.config.ts", []byte(`import { defineConfig } from "vite";
-export default defineConfig({ server: { port: 4173 } });
-`))
+	targets, err = registry.DetectFile("web/package.json", []byte(`{
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite --port 4173",
+    "preview": "vite preview",
+    "server": "tsx src/server.ts"
+  }
+}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(targets) != 1 || targets[0].Kind != "vite" || targets[0].Line != 1 {
-		t.Fatalf("Vite targets = %#v", targets)
+	if len(targets) != 2 || targets[0].Kind != "browser-script" || targets[0].Name != "dev" || targets[0].Line != 4 || targets[1].Kind != "node-script" || targets[1].Name != "server" || targets[1].Line != 6 {
+		t.Fatalf("package script targets = %#v", targets)
+	}
+
+	targets, err = registry.DetectFile("web/vite.config.ts", []byte(`export default { server: { port: 4173 } }`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("Vite config remained a launch target: %#v", targets)
 	}
 
 	targets, err = registry.DetectFile("web/src/main.tsx", []byte(`import { createRoot } from "react-dom/client";
@@ -268,6 +259,25 @@ func TestRegistryDetectWorkspaceSkipsGeneratedTrees(t *testing.T) {
 	}
 }
 
+func TestRegistryDetectWorkspaceDoesNotFollowSourceSymlinks(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.go")
+	if err := os.WriteFile(outside, []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linked.go")); err != nil {
+		t.Skipf("source symlinks are unavailable: %v", err)
+	}
+
+	targets, err := NewRegistry().DetectWorkspace(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("workspace discovery followed a source symlink: %#v", targets)
+	}
+}
+
 func TestCheckedInDebuggerSamplesExposeRunnableTargets(t *testing.T) {
 	tests := []struct {
 		path     string
@@ -280,7 +290,8 @@ func TestCheckedInDebuggerSamplesExposeRunnableTargets(t *testing.T) {
 		{path: "examples/debug/rust/src/main.rs", language: "Rust", kind: "main"},
 		{path: "examples/debug/dotnet/Program.cs", language: dotnetLanguage, kind: "main"},
 		{path: "examples/debug/typescript/src/main.ts", language: javascriptLanguage, kind: "node"},
-		{path: "examples/debug/react-vite/vite.config.ts", language: javascriptLanguage, kind: "vite"},
+		{path: "examples/debug/typescript/package.json", language: javascriptLanguage, kind: "node-script"},
+		{path: "examples/debug/react-vite/package.json", language: javascriptLanguage, kind: "browser-script"},
 	}
 
 	registry := NewRegistry()
@@ -298,5 +309,15 @@ func TestCheckedInDebuggerSamplesExposeRunnableTargets(t *testing.T) {
 				t.Fatalf("targets = %#v, want one %s %s target", targets, test.language, test.kind)
 			}
 		})
+	}
+}
+
+func writeDiscoveryTestFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

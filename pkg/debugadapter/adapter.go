@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
+	"github.com/adrianliechti/wingman-agent/internal/tooling"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 )
 
@@ -36,10 +38,11 @@ type Target struct {
 }
 
 type Request struct {
-	Action       string
-	WorkspaceDir string
-	ProjectDir   string
-	Target       Target
+	Action            string
+	WorkspaceDir      string
+	ProjectDir        string
+	BrowserExecutable string
+	Target            Target
 }
 
 type Breakpoint struct {
@@ -58,6 +61,7 @@ type Plan struct {
 	Configuration       map[string]any
 	Breakpoints         []Breakpoint
 	FunctionBreakpoints []string
+	PreLaunch           *dap.ProcessLaunch
 }
 
 // LanguageAdapter owns all stable language-specific behavior. Implementations
@@ -82,14 +86,22 @@ func vscodeIOValues() map[dap.IOMode]string {
 	}
 }
 
-func NewRegistry() *Registry {
+// ToolDirectory locates managed installations for adapters that load bundled
+// files in addition to resolving an executable availability token.
+type ToolDirectory interface {
+	ToolDir(id string) string
+}
+
+// NewRegistry uses managed adapters and optionally loads their bundled files.
+func NewRegistry(toolDirectories ...ToolDirectory) *Registry {
+	java := javaAdapter{}
+	if len(toolDirectories) > 0 {
+		if tools := toolDirectories[0]; tools != nil {
+			java.bundles = managedJavaDebugBundles(tools.ToolDir("java-debug"))
+		}
+	}
 	return NewRegistryWith(
-		goAdapter{},
-		newPythonAdapter(),
-		newJavaAdapter(),
-		rustAdapter{},
-		dotnetAdapter{},
-		newJavaScriptAdapter(),
+		goAdapter{}, pythonAdapter{}, java, rustAdapter{}, cAdapter{}, dotnetAdapter{}, javaScriptAdapter{},
 	)
 }
 
@@ -124,17 +136,26 @@ func (registry *Registry) Descriptors() []dap.AdapterDescriptor {
 	return result
 }
 
-// JDTLSBundles returns Java debug plug-ins that must be loaded when JDT LS is
-// initialized. The Java DAP server is supplied by this bundle, not by a
-// standalone executable.
-func (registry *Registry) JDTLSBundles() []string {
+// serverInitializer marks adapters whose DAP endpoint is hosted inside a
+// language server that needs additional initialization options.
+type serverInitializer interface {
+	ServerInitialization() (server string, options any)
+}
+
+// ServerInitializations returns the language-server initialization options
+// required by hosted adapters, keyed by server name.
+func (registry *Registry) ServerInitializations() map[string]any {
+	result := make(map[string]any)
 	for _, adapter := range registry.adapters {
-		java, ok := adapter.(javaAdapter)
-		if ok {
-			return slices.Clone(java.bundles)
+		initializer, ok := adapter.(serverInitializer)
+		if !ok {
+			continue
+		}
+		if server, options := initializer.ServerInitialization(); server != "" && options != nil {
+			result[server] = options
 		}
 	}
-	return nil
+	return result
 }
 
 func (registry *Registry) Plan(language string, request Request) (Plan, error) {
@@ -176,7 +197,7 @@ func (registry *Registry) DetectWorkspace(ctx context.Context, root string) ([]T
 	root = filepath.Clean(root)
 	visited := 0
 	var result []Target
-	err := filepath.WalkDir(root, func(filePath string, entry fs.DirEntry, walkErr error) error {
+	err := pathutil.WalkDir(root, func(filePath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
@@ -209,7 +230,7 @@ func (registry *Registry) DetectWorkspace(ctx context.Context, root string) ([]T
 		}
 		visited++
 		info, err := entry.Info()
-		if err != nil || info.Size() > maxSourceBytes {
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxSourceBytes {
 			return nil
 		}
 		source, err := os.ReadFile(filePath)
@@ -246,15 +267,7 @@ func sortTargets(values []Target) {
 }
 
 func skipDir(name string) bool {
-	if strings.HasPrefix(name, ".") {
-		return true
-	}
-	switch name {
-	case "node_modules", "vendor", "testdata", "target", "build", "dist", "__pycache__", "venv", "env":
-		return true
-	default:
-		return false
-	}
+	return tooling.SkipDirectory(name)
 }
 
 func projectPath(projectDir, targetPath string) (string, error) {
@@ -282,4 +295,15 @@ func actionLabel(action string) string {
 
 func targetBreakpoint(target Target) []Breakpoint {
 	return []Breakpoint{{FilePath: target.Path, Line: target.Line, Column: target.Column}}
+}
+
+func absoluteCommandPath(command string) string {
+	path, err := tooling.LookPath(command)
+	if err != nil {
+		return ""
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		return absolute
+	}
+	return path
 }

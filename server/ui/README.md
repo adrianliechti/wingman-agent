@@ -1,73 +1,49 @@
-# React + TypeScript + Vite
+# Wingman web UI
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+To use the browser UI, run `wingman server` in your project directory. See the
+[main README](../../README.md#use-the-browser-ui) for setup.
 
-Currently, two official plugins are available:
+## Build from source
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+From this directory:
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-	globalIgnores(["dist"]),
-	{
-		files: ["**/*.{ts,tsx}"],
-		extends: [
-			// Other configs...
-
-			// Remove tseslint.configs.recommended and replace with this
-			tseslint.configs.recommendedTypeChecked,
-			// Alternatively, use this for stricter rules
-			tseslint.configs.strictTypeChecked,
-			// Optionally, add this for stylistic rules
-			tseslint.configs.stylisticTypeChecked,
-
-			// Other configs...
-		],
-		languageOptions: {
-			parserOptions: {
-				project: ["./tsconfig.node.json", "./tsconfig.app.json"],
-				tsconfigRootDir: import.meta.dirname,
-			},
-			// other options...
-		},
-	},
-]);
+```bash
+npm install
+npm run build
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+The build writes assets to `../static`, which the Go server embeds. Rebuild
+those assets before rebuilding the server or running browser tests.
 
-```js
-// eslint.config.js
-import reactX from "eslint-plugin-react-x";
-import reactDom from "eslint-plugin-react-dom";
+From the repository root, `task run:web` builds the UI and starts the server.
 
-export default defineConfig([
-	globalIgnores(["dist"]),
-	{
-		files: ["**/*.{ts,tsx}"],
-		extends: [
-			// Other configs...
-			// Enable lint rules for React
-			reactX.configs["recommended-typescript"],
-			// Enable lint rules for React DOM
-			reactDom.configs.recommended,
-		],
-		languageOptions: {
-			parserOptions: {
-				project: ["./tsconfig.node.json", "./tsconfig.app.json"],
-				tsconfigRootDir: import.meta.dirname,
-			},
-			// other options...
-		},
-	},
-]);
+## Frontend development
+
+Run a workspace server on port 4242 and start Vite from this directory:
+
+```bash
+# In a separate terminal at the repository root:
+go run ./cmd/wingman server --port 4242 --no-browser
+
+# In this directory:
+npm run dev
 ```
+
+Open the URL printed by Vite. It proxies `/api` requests and WebSocket
+connections to the workspace server on port 4242. Configure the model provider
+in the workspace server's environment. If you use a model gateway, run it on
+a different port and set `WINGMAN_URL` to its address.
+
+## Checks
+
+```bash
+npm run test:unit
+npm run lint
+npm run fmt:check
+npm run build
+```
+
+For browser tests, install Chromium with `npx playwright install chromium`,
+then run `npm run test:web` after building the assets. The browser fixture uses
+a local fake model and needs no model account. Some editor checks also need
+`gopls` installed. `E2E_GREP` selects tests by name.

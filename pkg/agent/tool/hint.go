@@ -16,13 +16,14 @@ var workingDirTools = map[string]bool{
 }
 
 func ExtractHint(argsJSON, toolName string) string {
-	if toolName == "todo" {
-		return TodoHint(argsJSON)
-	}
-
 	args, ok := parseArgs(argsJSON)
 	if !ok {
 		return wdFallback(toolName)
+	}
+	if toolName == "edit" || toolName == "Edit file" {
+		if path := firstBatchEditPath(args); path != "" {
+			return normalizeWorkspacePath(strings.Join(strings.Fields(path), " "))
+		}
 	}
 
 	if desc, ok := args["description"]; ok {
@@ -38,7 +39,7 @@ func ExtractHint(argsJSON, toolName string) string {
 		}
 	}
 
-	if toolName == "exec_session" {
+	if toolName == "exec_session" || toolName == "Continue command" {
 		if id, ok := IntArg(args, "session_id"); ok {
 			hint := fmt.Sprintf("session %d", id)
 			if kill, _ := args["kill"].(bool); kill {
@@ -51,13 +52,16 @@ func ExtractHint(argsJSON, toolName string) string {
 		}
 	}
 
-	if toolName == "elicit" {
+	// Keep the old name readable when restoring saved tool calls.
+	if toolName == "elicit" || toolName == "ask" {
 		if hint := ElicitHint(args); hint != "" {
 			return hint
 		}
 	}
 
-	if toolName == "task_send" || toolName == "task_stop" || toolName == "task_output" {
+	if toolName == "agent_send" || toolName == "agent_stop" || toolName == "agent_output" ||
+		toolName == "task_send" || toolName == "task_stop" || toolName == "task_output" ||
+		toolName == "Follow up with agent" || toolName == "Stop agent" || toolName == "Read agent output" {
 		id, _ := args["id"].(string)
 		id = strings.TrimSpace(id)
 		if message, _ := args["message"].(string); message != "" {
@@ -111,56 +115,6 @@ func parseArgs(argsJSON string) (map[string]any, bool) {
 		return nil, false
 	}
 	return args, true
-}
-
-type TodoItem struct {
-	Content string `json:"content"`
-	Status  string `json:"status"`
-}
-
-// ParseTodoItems extracts a todo checklist from complete or streaming arguments.
-func ParseTodoItems(argsJSON string) []TodoItem {
-	var args struct {
-		Items []TodoItem `json:"items"`
-	}
-	if json.Unmarshal([]byte(argsJSON), &args) != nil {
-		if json.Unmarshal([]byte(closeJSONPrefix(argsJSON)), &args) != nil {
-			return nil
-		}
-	}
-
-	items := args.Items[:0]
-	for _, item := range args.Items {
-		if strings.TrimSpace(item.Content) != "" {
-			items = append(items, item)
-		}
-	}
-	return items
-}
-
-// TodoHint summarizes a todo call as progress plus the active step.
-func TodoHint(argsJSON string) string {
-	items := ParseTodoItems(argsJSON)
-	if len(items) == 0 {
-		return ""
-	}
-
-	completed := 0
-	current := ""
-	for _, item := range items {
-		if item.Status == "completed" {
-			completed++
-		}
-		if item.Status == "in_progress" && current == "" {
-			current = strings.Join(strings.Fields(item.Content), " ")
-		}
-	}
-
-	hint := fmt.Sprintf("%d/%d", completed, len(items))
-	if current != "" {
-		hint += " · " + current
-	}
-	return hint
 }
 
 // ElicitHint summarizes an elicit tool call as its first question plus a

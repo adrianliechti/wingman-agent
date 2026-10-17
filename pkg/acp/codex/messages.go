@@ -4,6 +4,11 @@ import "github.com/coder/acp-go-sdk"
 
 func userMessageUpdate(content acp.ContentBlock, id string) acp.SessionUpdate {
 	u := acp.UpdateUserMessage(content)
+	// The SDK omits text-block _meta when encoding ContentBlock. Preserve
+	// attachment references on the enclosing message chunk, which survives.
+	if content.Text != nil {
+		u.UserMessageChunk.Meta = content.Text.Meta
+	}
 	if id != "" {
 		u.UserMessageChunk.MessageId = new(id)
 	}
@@ -27,4 +32,11 @@ func agentThoughtUpdate(text, id string) acp.SessionUpdate {
 		u.AgentThoughtChunk.MessageId = new(id)
 	}
 	return u
+}
+
+func sessionTitleUpdate(title string) acp.SessionUpdate {
+	return acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{
+		SessionUpdate: "session_info_update",
+		Title:         &title,
+	}}
 }

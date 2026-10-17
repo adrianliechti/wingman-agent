@@ -136,8 +136,14 @@ func (dotnetAdapter) Plan(request Request) (Plan, error) {
 		"justMyCode": true,
 	}
 	summary := fmt.Sprintf("%s .NET entry point %s.", actionLabel(request.Action), request.Target.Path)
+	var preLaunch *dap.ProcessLaunch
 	if !exists {
-		summary = fmt.Sprintf("%s Build it with dotnet build first; the expected assembly is %s.", summary, filepath.ToSlash(relativeProgram))
+		if dotnet := absoluteCommandPath("dotnet"); dotnet != "" {
+			preLaunch = &dap.ProcessLaunch{Title: "dotnet build", Command: dotnet, Args: []string{"build"}, WaitForExit: true}
+			summary += " The project is built with dotnet build first."
+		} else {
+			summary = fmt.Sprintf("%s Build it with dotnet build first; the expected assembly is %s.", summary, filepath.ToSlash(relativeProgram))
+		}
 	}
 	plan := Plan{
 		Title:         actionLabel(request.Action) + " " + request.Target.Name,
@@ -146,6 +152,7 @@ func (dotnetAdapter) Plan(request Request) (Plan, error) {
 		Request:       "launch",
 		IO:            dap.IOOutput,
 		Configuration: configuration,
+		PreLaunch:     preLaunch,
 	}
 	if request.Action == "run" {
 		configuration["noDebug"] = true
@@ -259,6 +266,8 @@ func dotnetProgramPath(projectRoot, projectFile string, metadata dotnetProjectMe
 func findBuiltDotnetAssembly(projectRoot, fileName, targetFramework string) string {
 	binDir := filepath.Join(projectRoot, "bin")
 	var candidates []string
+	// bin is discovered beneath the project, not an explicitly selected root.
+	// Keep skipping it when it is itself a directory link.
 	_ = filepath.WalkDir(binDir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return nil

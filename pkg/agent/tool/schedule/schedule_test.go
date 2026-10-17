@@ -10,9 +10,10 @@ import (
 )
 
 func TestScheduleTaskRejectsNonPositiveInterval(t *testing.T) {
-	scheduleTool := findTool(t, "schedule_task")
+	scheduleTool := findTool(t, "schedule")
 
 	_, err := scheduleTool.Execute(context.Background(), map[string]any{
+		"action":   "create",
 		"prompt":   "run",
 		"schedule": "every 0s",
 	})
@@ -22,9 +23,10 @@ func TestScheduleTaskRejectsNonPositiveInterval(t *testing.T) {
 }
 
 func TestScheduleTaskRejectsBelowFloorInterval(t *testing.T) {
-	scheduleTool := findTool(t, "schedule_task")
+	scheduleTool := findTool(t, "schedule")
 
 	_, err := scheduleTool.Execute(context.Background(), map[string]any{
+		"action":   "create",
 		"prompt":   "run",
 		"schedule": "every 5s",
 	})
@@ -32,7 +34,17 @@ func TestScheduleTaskRejectsBelowFloorInterval(t *testing.T) {
 		t.Fatalf("expected minimum interval error, got: %v", err)
 	}
 
+	_, err = scheduleTool.Execute(context.Background(), map[string]any{
+		"action":   "create",
+		"prompt":   "run",
+		"schedule": "* * * * * *",
+	})
+	if err == nil || !strings.Contains(err.Error(), "shortest supported interval") {
+		t.Fatalf("expected sub-floor 6-field cron error, got: %v", err)
+	}
+
 	if _, err := scheduleTool.Execute(context.Background(), map[string]any{
+		"action":   "create",
 		"prompt":   "run",
 		"schedule": "every 15s",
 	}); err != nil {
@@ -61,26 +73,28 @@ func TestBelowFloorIntervalStillEvaluates(t *testing.T) {
 	}
 }
 
-func TestScheduleToolsExposeEffects(t *testing.T) {
+func TestScheduleToolExposesEffectPerAction(t *testing.T) {
+	tl := findTool(t, "schedule")
 	tests := map[string]tool.Effect{
-		"schedule_task": tool.EffectMutates,
-		"list_tasks":    tool.EffectReadOnly,
-		"pause_task":    tool.EffectMutates,
-		"resume_task":   tool.EffectMutates,
-		"remove_task":   tool.EffectMutates,
+		"create": tool.EffectMutates,
+		"list":   tool.EffectReadOnly,
+		"pause":  tool.EffectMutates,
+		"resume": tool.EffectMutates,
+		"remove": tool.EffectMutates,
 	}
-
-	for _, tl := range Tools(NewMemoryStore()) {
-		want, ok := tests[tl.Name]
-		if !ok {
-			t.Fatalf("unexpected tool %q", tl.Name)
+	for action, want := range tests {
+		if got := tl.Effect(map[string]any{"action": action}); got != want {
+			t.Fatalf("%s effect = %v, want %v", action, got, want)
 		}
-		if tl.Effect == nil {
-			t.Fatalf("%s effect is nil", tl.Name)
-		}
-		if got := tl.Effect(nil); got != want {
-			t.Fatalf("%s effect = %v, want %v", tl.Name, got, want)
-		}
+	}
+	if got := tl.Effect(nil); got != tool.EffectDynamic {
+		t.Fatalf("effect without arguments = %v, want dynamic", got)
+	}
+	if got := tl.Effect(map[string]any{"action": "create", "script": "rm -rf /"}); got != tool.EffectDangerous {
+		t.Fatalf("dangerous script effect = %v, want dangerous", got)
+	}
+	if _, err := tl.Execute(context.Background(), map[string]any{"action": "purge"}); err == nil {
+		t.Fatal("unknown action accepted")
 	}
 }
 
@@ -88,11 +102,12 @@ func TestToolsResolveIDPrefix(t *testing.T) {
 	store := NewMemoryStore()
 	tools := toolSet(t, store)
 
-	if _, err := tools["schedule_task"].Execute(context.Background(), map[string]any{
+	if _, err := tools["schedule"].Execute(context.Background(), map[string]any{
+		"action":   "create",
 		"prompt":   "check the build",
 		"schedule": "every 1h",
 	}); err != nil {
-		t.Fatalf("schedule_task failed: %v", err)
+		t.Fatalf("create failed: %v", err)
 	}
 
 	tasks, _ := store.List()
@@ -104,8 +119,8 @@ func TestToolsResolveIDPrefix(t *testing.T) {
 		t.Fatalf("id = %q, want a short id", id)
 	}
 
-	if _, err := tools["pause_task"].Execute(context.Background(), map[string]any{"id": id[:4]}); err != nil {
-		t.Fatalf("pause_task by prefix failed: %v", err)
+	if _, err := tools["schedule"].Execute(context.Background(), map[string]any{"action": "pause", "id": id[:4]}); err != nil {
+		t.Fatalf("pause by prefix failed: %v", err)
 	}
 	if tasks, _ = store.List(); tasks[0].Status != StatusPaused {
 		t.Fatalf("status = %q, want paused", tasks[0].Status)
@@ -114,8 +129,11 @@ func TestToolsResolveIDPrefix(t *testing.T) {
 		t.Fatalf("paused task next run = %v, want none", next)
 	}
 
-	if _, err := tools["remove_task"].Execute(context.Background(), map[string]any{"id": id}); err != nil {
-		t.Fatalf("remove_task failed: %v", err)
+	if result, err := tools["schedule"].Execute(context.Background(), map[string]any{"action": "list"}); err != nil || !strings.Contains(result.Content, id) {
+		t.Fatalf("list = %q, %v", result.Content, err)
+	}
+	if _, err := tools["schedule"].Execute(context.Background(), map[string]any{"action": "remove", "id": id}); err != nil {
+		t.Fatalf("remove failed: %v", err)
 	}
 	if tasks, _ = store.List(); len(tasks) != 0 {
 		t.Fatalf("tasks = %#v, want empty", tasks)
@@ -275,6 +293,26 @@ func TestRunGate(t *testing.T) {
 	}
 	if wake, out, err := RunGate(ctx, dir, `exit 3`); !wake || err == nil || !strings.Contains(out, "failed") {
 		t.Fatalf("script failure should fail open with a note and an error, got wake=%v out=%q err=%v", wake, out, err)
+	}
+}
+
+func TestRunGateCapturesConcurrentOutputStreams(t *testing.T) {
+	script := `
+(i=0; while [ "$i" -lt 100 ]; do echo stdout-line; i=$((i+1)); done) &
+(i=0; while [ "$i" -lt 100 ]; do echo stderr-line >&2; i=$((i+1)); done) &
+wait
+echo '{"wake": false}'
+`
+	dir := t.TempDir()
+	task := Task{Script: script, ScriptApproval: scriptApproval(dir, script)}
+	wake, output, err := RunTaskGate(t.Context(), dir, task, nil)
+	if err != nil || wake {
+		t.Fatalf("gate decision: wake=%v, err=%v, output=%q", wake, err, output)
+	}
+	for _, line := range []string{"stdout-line", "stderr-line"} {
+		if count := strings.Count(output, line); count != 100 {
+			t.Errorf("captured %d %s lines, want 100", count, line)
+		}
 	}
 }
 

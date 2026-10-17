@@ -17,12 +17,13 @@ const (
 type TurnInputState string
 
 const (
-	TurnInputQueued    TurnInputState = "queued"
-	TurnInputActive    TurnInputState = "active"
-	TurnInputSteered   TurnInputState = "steered"
-	TurnInputCompleted TurnInputState = "completed"
-	TurnInputCancelled TurnInputState = "cancelled"
-	TurnInputFailed    TurnInputState = "failed"
+	TurnInputQueued     TurnInputState = "queued"
+	TurnInputActive     TurnInputState = "active"
+	TurnInputSteered    TurnInputState = "steered"
+	TurnInputCompleted  TurnInputState = "completed"
+	TurnInputCancelled  TurnInputState = "cancelled"
+	TurnInputFailed     TurnInputState = "failed"
+	TurnInputIncomplete TurnInputState = "incomplete"
 )
 
 type TurnFeatures struct {
@@ -58,9 +59,45 @@ var (
 )
 
 type TurnInput struct {
-	ID      string
-	Content []agent.Content
-	Intent  TurnInputIntent
+	ID      string          `json:"id"`
+	Content []agent.Content `json:"content"`
+	Intent  TurnInputIntent `json:"intent"`
+	// Display is the original visible input, persisted with the execution payload.
+	// A nil display denotes an older queue record and is normalized on read.
+	Display *TurnInputDisplay `json:"display,omitempty"`
+	Origin  string            `json:"origin,omitempty"`
+}
+
+type TurnInputDisplay struct {
+	Text   string   `json:"text"`
+	Files  []string `json:"files,omitempty"`
+	Images []string `json:"images,omitempty"`
+}
+
+func CloneTurnInput(input TurnInput) TurnInput {
+	input.Content = agent.CloneContent(input.Content)
+	if input.Display != nil {
+		display := *input.Display
+		display.Files = append([]string(nil), display.Files...)
+		display.Images = append([]string(nil), display.Images...)
+		input.Display = &display
+	}
+	return input
+}
+
+// TurnQueueState contains only inputs that have not started. Active and
+// steered inputs are represented by the runtime ledger and are never replayed
+// automatically after a crash.
+type TurnQueueState struct {
+	Inputs []TurnInput `json:"inputs,omitempty"`
+	Paused bool        `json:"paused,omitempty"`
+}
+
+// TurnQueueStore is an optional Agent capability used by TurnManager. A
+// backend that does not implement it keeps the existing in-memory behavior.
+type TurnQueueStore interface {
+	LoadTurnQueue(sessionID string) (TurnQueueState, error)
+	SaveTurnQueue(sessionID string, state TurnQueueState) error
 }
 
 type TurnInputSnapshot struct {
@@ -68,12 +105,15 @@ type TurnInputSnapshot struct {
 	State    TurnInputState
 	Intent   TurnInputIntent
 	Position int
+	Input    TurnInput
 }
 
 type TurnSnapshot struct {
-	Inputs   []TurnInputSnapshot
-	Paused   bool
-	Features TurnFeatures
+	Inputs     []TurnInputSnapshot
+	Paused     bool
+	Compacting bool
+	Features   TurnFeatures
+	Error      error
 }
 
 type TurnEvent struct {
@@ -82,9 +122,11 @@ type TurnEvent struct {
 	State     TurnInputState
 	Intent    TurnInputIntent
 	Position  int
+	Input     TurnInput
 	// StreamEvent carries a transport lifecycle boundary separately from
 	// conversational messages.
 	StreamEvent agent.StreamEvent
+	Retry       *agent.RetryInfo
 	// Message is only valid for the duration of the synchronous event handler.
 	// Handlers that retain it must copy its content.
 	Message *agent.Message

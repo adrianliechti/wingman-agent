@@ -8,6 +8,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -46,13 +47,18 @@ type transcriptCache struct {
 type transcriptOverlay struct {
 	app *App
 
-	entries    []transcriptEntry
-	selected   int
-	offset     int
-	height     int
-	follow     bool
-	lineOffset int
-	lineMax    int
+	entries      []transcriptEntry
+	selected     int
+	offset       int
+	height       int
+	follow       bool
+	lineOffset   int
+	lineMax      int
+	manualScroll bool
+	bodyRows     int
+	contentRows  int
+	layoutStarts []int
+	layoutEnds   []int
 
 	expanded map[string]bool
 	cache    map[string]transcriptCache
@@ -105,7 +111,8 @@ func (o *transcriptOverlay) buildEntries() {
 		if message.Hidden {
 			continue
 		}
-		if message.Role == agent.RoleUser {
+		isUserShell := len(message.Content) == 1 && code.IsUserShellCommand(message.Content[0].AsText())
+		if message.Role == agent.RoleUser && !isUserShell {
 			if turn > 0 {
 				entries = append(entries, transcriptEntry{
 					key: fmt.Sprintf("separator:%d", turn), kind: transcriptSeparator,
@@ -137,13 +144,22 @@ func (o *transcriptOverlay) buildEntries() {
 				key := baseKey + ":reasoning:" + reasoning.ID
 				entries = append(entries, transcriptEntry{
 					key: key, kind: transcriptReasoning, raw: reasoning.Summary, selectable: true,
-					render: func(width int, expanded bool) []string {
-						return cellReasoning(reasoning.Summary, width, expanded)
+					render: func(width int, _ bool) []string {
+						return cellReasoning(reasoning.Summary, width, true)
 					},
 				})
-			case strings.TrimSpace(content.Text) != "":
-				text := content.Text
+			case strings.TrimSpace(content.AsText()) != "":
+				text := content.AsText()
 				if message.Role == agent.RoleUser {
+					if cmd, output, exitCode, ok := code.ParseUserShellCommand(text); ok {
+						entries = append(entries, transcriptEntry{
+							key: baseKey + ":usershell", kind: transcriptTool, raw: cmd + "\n" + output, selectable: true,
+							render: func(width int, expanded bool) []string {
+								return cellUserShell(cmd, output, exitCode, width, expanded)
+							},
+						})
+						continue
+					}
 					entries = append(entries, transcriptEntry{
 						key: baseKey + ":user", kind: transcriptUser, raw: text, selectable: true,
 						render: func(width int, _ bool) []string {
@@ -157,7 +173,7 @@ func (o *transcriptOverlay) buildEntries() {
 					entries = append(entries, transcriptEntry{
 						key: baseKey + ":assistant", kind: transcriptAssistant, raw: text, selectable: true,
 						render: func(width int, _ bool) []string {
-							return cellAssistant(text, width, theme.Default.Green)
+							return cellAssistant(text, width, theme.Default.Green, o.app.agent.Workspace().RootPath)
 						},
 					})
 				}
@@ -199,7 +215,7 @@ func (o *transcriptOverlay) buildEntries() {
 			entries = append(entries, transcriptEntry{
 				key: prefix + ":text", kind: transcriptAssistant, raw: streamingText, selectable: true,
 				render: func(width int, _ bool) []string {
-					return cellAssistant(streamingText, width, theme.Default.BrBlack)
+					return cellAssistant(streamingText, width, theme.Default.BrBlack, o.app.agent.Workspace().RootPath)
 				},
 			})
 		}
@@ -207,8 +223,8 @@ func (o *transcriptOverlay) buildEntries() {
 			streamingReasoning := snapshot.reasoning
 			entries = append(entries, transcriptEntry{
 				key: prefix + ":reasoning", kind: transcriptReasoning, raw: streamingReasoning, selectable: true,
-				render: func(width int, expanded bool) []string {
-					return cellReasoning(streamingReasoning, width, expanded)
+				render: func(width int, _ bool) []string {
+					return cellReasoning(streamingReasoning, width, true)
 				},
 			})
 		}
@@ -270,6 +286,7 @@ func (o *transcriptOverlay) moveSelection(delta int) {
 			o.selected = i
 			o.lineOffset = 0
 			o.follow = false
+			o.manualScroll = false
 			return
 		}
 	}
@@ -287,10 +304,57 @@ func (o *transcriptOverlay) step(delta int) {
 		if next != current {
 			o.lineOffset = next
 			o.follow = false
+			o.manualScroll = false
 			return
 		}
 	}
 	o.moveSelection(delta)
+}
+
+// page scrolls by one rendered viewport. Unlike entry-based movement, this
+// preserves page boundaries through long reasoning and tool output.
+func (o *transcriptOverlay) page(delta int) {
+	if delta == 0 || o.contentRows <= 0 || o.bodyRows <= 0 {
+		return
+	}
+
+	maxOffset := max(0, o.bodyRows-o.contentRows)
+	target := min(max(o.offset+delta*o.contentRows, 0), maxOffset)
+	if target == o.offset {
+		return
+	}
+
+	o.offset = target
+	o.follow = false
+	o.manualScroll = true
+	o.lineOffset = 0
+
+	// Keep a useful selection in the new viewport. Prefer an entry whose first
+	// line is visible; when a single entry fills the viewport, retain it and
+	// remember the line offset so arrow navigation can continue naturally.
+	selected := -1
+	for i, entry := range o.entries {
+		if !entry.selectable || i >= len(o.layoutStarts) || i >= len(o.layoutEnds) {
+			continue
+		}
+		start, end := o.layoutStarts[i], o.layoutEnds[i]
+		lineMax := end - start - o.contentRows
+		if lineMax > 0 && start <= target && target <= start+lineMax {
+			selected = i
+			o.lineOffset = target - start
+			break
+		}
+		if start >= target && start < target+o.contentRows {
+			selected = i
+			break
+		}
+	}
+	if selected < 0 {
+		selected = o.lastSelectable()
+	}
+	if selected >= 0 {
+		o.selected = selected
+	}
 }
 
 func (o *transcriptOverlay) updateMatches(move bool) {
@@ -316,6 +380,7 @@ func (o *transcriptOverlay) updateMatches(move bool) {
 				o.selected = index
 				o.lineOffset = 0
 				o.follow = false
+				o.manualScroll = false
 			}
 			return
 		}
@@ -325,6 +390,7 @@ func (o *transcriptOverlay) updateMatches(move bool) {
 		o.selected = o.matches[0]
 		o.lineOffset = 0
 		o.follow = false
+		o.manualScroll = false
 	}
 }
 
@@ -336,6 +402,7 @@ func (o *transcriptOverlay) jumpMatch(delta int) {
 	o.selected = o.matches[o.matchPos]
 	o.lineOffset = 0
 	o.follow = false
+	o.manualScroll = false
 }
 
 func (o *transcriptOverlay) HandlePaste(text string) bool {
@@ -352,26 +419,41 @@ func (o *transcriptOverlay) toggleSelected() {
 		return
 	}
 	entry := o.entries[o.selected]
-	if entry.kind == transcriptTool || entry.kind == transcriptReasoning {
+	if entry.kind == transcriptTool {
 		o.expanded[entry.key] = !o.expanded[entry.key]
 		delete(o.cache, entry.key)
+		o.manualScroll = false
 	}
 }
 
 func (o *transcriptOverlay) toggleAll() {
 	expand := false
 	for _, entry := range o.entries {
-		if (entry.kind == transcriptTool || entry.kind == transcriptReasoning) && !o.expanded[entry.key] {
+		if entry.kind == transcriptTool && !o.expanded[entry.key] {
 			expand = true
 			break
 		}
 	}
 	for _, entry := range o.entries {
-		if entry.kind == transcriptTool || entry.kind == transcriptReasoning {
+		if entry.kind == transcriptTool {
 			o.expanded[entry.key] = expand
 			delete(o.cache, entry.key)
 		}
 	}
+	o.manualScroll = false
+}
+
+func (o *transcriptOverlay) hintLine() string {
+	parts := []string{"↑↓ line", "pgup/dn page"}
+	if o.selected >= 0 && o.selected < len(o.entries) && o.entries[o.selected].kind == transcriptTool {
+		action := "enter show details"
+		if o.expanded[o.entries[o.selected].key] {
+			action = "enter hide details"
+		}
+		parts = append(parts, action)
+	}
+	parts = append(parts, "/ search", "y copy", "ctrl+o close")
+	return strings.Join(parts, " · ")
 }
 
 func (o *transcriptOverlay) HandleKey(ev inline.KeyEvent) bool {
@@ -422,21 +504,19 @@ func (o *transcriptOverlay) HandleKey(ev inline.KeyEvent) bool {
 	case inline.KeyDown:
 		o.step(1)
 	case inline.KeyPgUp:
-		for range max(1, (o.height-4)/3) {
-			o.moveSelection(-1)
-		}
+		o.page(-1)
 	case inline.KeyPgDn:
-		for range max(1, (o.height-4)/3) {
-			o.moveSelection(1)
-		}
+		o.page(1)
 	case inline.KeyHome:
 		o.selected = o.firstSelectable()
 		o.lineOffset = 0
 		o.follow = false
+		o.manualScroll = false
 	case inline.KeyEnd:
 		o.selected = o.lastSelectable()
 		o.lineOffset = 0
 		o.follow = true
+		o.manualScroll = false
 	case inline.KeyEnter:
 		o.toggleSelected()
 	case inline.KeyRune:
@@ -452,10 +532,12 @@ func (o *transcriptOverlay) HandleKey(ev inline.KeyEvent) bool {
 			o.selected = o.firstSelectable()
 			o.lineOffset = 0
 			o.follow = false
+			o.manualScroll = false
 		case 'G':
 			o.selected = o.lastSelectable()
 			o.lineOffset = 0
 			o.follow = true
+			o.manualScroll = false
 		case 'n':
 			o.jumpMatch(1)
 		case 'N':
@@ -598,10 +680,14 @@ func (o *transcriptOverlay) Render(width, height int) []string {
 
 	t := theme.Default
 	contentRows := max(0, height-3)
-	body, starts, ends := o.bodyLines(width)
+	body, starts, ends := o.bodyLines(max(1, width-1))
 	if len(body) == 0 {
 		body = []string{"  " + dim("No transcript yet…")}
 	}
+	o.bodyRows = len(body)
+	o.contentRows = contentRows
+	o.layoutStarts = append(o.layoutStarts[:0], starts...)
+	o.layoutEnds = append(o.layoutEnds[:0], ends...)
 
 	o.lineMax = 0
 	if o.selected >= 0 && o.selected < len(starts) {
@@ -610,7 +696,7 @@ func (o *transcriptOverlay) Render(width, height int) []string {
 
 	if o.follow {
 		o.offset = max(0, len(body)-contentRows)
-	} else if o.selected >= 0 && o.selected < len(starts) {
+	} else if !o.manualScroll && o.selected >= 0 && o.selected < len(starts) {
 		if o.lineMax > 0 {
 			o.lineOffset = min(max(o.lineOffset, 0), o.lineMax)
 			o.offset = starts[o.selected] + o.lineOffset
@@ -650,15 +736,18 @@ func (o *transcriptOverlay) Render(width, height int) []string {
 	pct := fmt.Sprintf(" %d%% ", percent)
 	ruleWidth := max(10, width-ansi.Width(pct))
 	rule := colored(t.BrBlack, strings.Repeat("─", ruleWidth)) + dim(pct)
-	lines := []string{ansi.Truncate(title, width, "…"), ansi.Truncate(rule, width, "…")}
+	lines := []string{closeHeader(title, width), ansi.Truncate(rule, width, "…")}
 
 	end := min(len(body), o.offset+contentRows)
-	lines = append(lines, body[o.offset:end]...)
-	for len(lines) < height-1 {
-		lines = append(lines, "")
+	for row := range contentRows {
+		line := ""
+		if index := o.offset + row; index < end {
+			line = body[index]
+		}
+		lines = append(lines, scrollbarLine(line, width, scrollMarker(row, contentRows, o.offset, len(body))))
 	}
 
-	hints := "↑↓ select · enter expand · / search · y copy · E all · ctrl+o close"
+	hints := o.hintLine()
 	if o.searching {
 		hints = "type to search · enter accept · esc clear"
 	}

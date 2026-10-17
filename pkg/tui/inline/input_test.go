@@ -30,6 +30,72 @@ func TestInputReaderCtrlV(t *testing.T) {
 	}
 }
 
+func TestInputReaderPasteShortcuts(t *testing.T) {
+	for name, sequence := range map[string]string{
+		"legacy":           "\x16",
+		"legacy ctrl alt":  "\x1b\x16",
+		"CSI u":            "\x1b[118;5u",
+		"CSI u ctrl alt":   "\x1b[118;7u",
+		"CSI u ctrl shift": "\x1b[118;6u",
+		"uppercase":        "\x1b[86;6u",
+		"kitty press":      "\x1b[118;5:1u",
+		"kitty alternate":  "\x1b[118:86;6u",
+		"kitty base key":   "\x1b[1084::118;5u",
+		"caps lock":        "\x1b[118;69u",
+		"xterm":            "\x1b[27;5;118~",
+		"xterm ctrl alt":   "\x1b[27;7;118~",
+		"shift insert":     "\x1b[2;2~",
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Exercise every possible read boundary, including split CSI parameters.
+			for split := 0; split <= len(sequence); split++ {
+				in, events := testInputReader()
+				in.buf = []byte(sequence[:split])
+				in.process()
+				in.buf = append(in.buf, sequence[split:]...)
+				in.process()
+				event, ok := nextEvent(t, events).(KeyEvent)
+				if !ok || event.Key != KeyCtrl || event.Rune != 'v' {
+					t.Fatalf("split %d: event = %#v, want paste shortcut", split, event)
+				}
+				if len(events) != 0 || len(in.buf) != 0 {
+					t.Fatalf("split %d: duplicate event or unconsumed input", split)
+				}
+			}
+		})
+	}
+}
+
+func TestInputReaderDoesNotPasteForUnrelatedExtendedKeys(t *testing.T) {
+	for _, sequence := range []string{
+		"\x1b[118u", "\x1b[118;1u", "\x1b[118;3u", "\x1b[118;9u",
+		"\x1b[119;5u", "\x1b[118;5:2u", "\x1b[118;5:3u",
+		"\x1b[118;0u", "\x1b[118;999999999999999999999u", "\x1b[118;5:9u",
+		"\x1b[27;1;118~", "\x1b[2~", "\x1b[118;7;64u",
+	} {
+		t.Run(sequence, func(t *testing.T) {
+			in, events := testInputReader()
+			in.buf = []byte(sequence)
+			in.process()
+			for len(events) > 0 {
+				if key, ok := (<-events).(KeyEvent); ok && key.Key == KeyCtrl && key.Rune == 'v' {
+					t.Fatalf("unexpected paste shortcut: %#v", key)
+				}
+			}
+		})
+	}
+}
+
+func TestInputReaderPastedShortcutsNeverReadClipboardOrSubmit(t *testing.T) {
+	in, events := testInputReader()
+	in.buf = []byte("\x1b[200~first\r\n\x16\x1b[118;5u\x1b[27;5;118~\x1b[2;2~last\x1b[201~")
+	in.process()
+	event, ok := nextEvent(t, events).(PasteEvent)
+	if !ok || event.Text != "first\nlast" || len(events) != 0 {
+		t.Fatalf("events escaped paste boundary: %#v (%d extra)", event, len(events))
+	}
+}
+
 func TestInputReaderFocusEvents(t *testing.T) {
 	in, events := testInputReader()
 	in.buf = []byte("\x1b[I\x1b[O")
@@ -63,4 +129,50 @@ func TestInputReaderBracketedPasteNormalizesNewlines(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTerminalControlRepliesNeverBecomeComposerInput(t *testing.T) {
+	for _, sequence := range []string{"\x1b]52;c;clipboard text\a", "\x1bPprivate response\x1b\\", "\x1b]10;rgb:ffff/eeee/dddd\x1b\\"} {
+		for split := 1; split < len(sequence); split++ {
+			events := make(chan Event, 100)
+			in := &inputReader{events: events, done: make(chan struct{})}
+			in.buf = []byte(sequence[:split])
+			in.process()
+			in.buf = append(in.buf, []byte(sequence[split:]+"x")...)
+			in.process()
+			if len(events) != 1 {
+				t.Fatalf("%q split %d emitted %d events", sequence, split, len(events))
+			}
+			if event := (<-events).(KeyEvent); event.Key != KeyRune || event.Rune != 'x' {
+				t.Fatalf("terminal reply leaked: %+v", event)
+			}
+		}
+	}
+}
+
+func FuzzTerminalControlReply(f *testing.F) {
+	f.Add([]byte("response"))
+	f.Add([]byte("\x1b\x1bmore text"))
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		if len(payload) > 8192 {
+			t.Skip()
+		}
+		// Exclude terminators, then feed a reply in one-byte chunks.
+		for i := range payload {
+			if payload[i] == '\a' || payload[i] == '\\' {
+				payload[i] = ' '
+			}
+		}
+		events := make(chan Event, len(payload)+20)
+		in := &inputReader{events: events, done: make(chan struct{})}
+		sequence := append([]byte("\x1b]52;c;"), payload...)
+		sequence = append(sequence, '\a')
+		for _, b := range sequence {
+			in.buf = append(in.buf, b)
+			in.process()
+		}
+		if len(events) != 0 || len(in.buf) != 0 {
+			t.Fatalf("control reply leaked events=%d buffered=%d", len(events), len(in.buf))
+		}
+	})
 }

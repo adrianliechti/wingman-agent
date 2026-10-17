@@ -20,14 +20,16 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
+	"github.com/adrianliechti/wingman-agent/pkg/remote"
 )
 
 type webE2EModel struct {
 	filePath string
 
-	requests      atomic.Int32
-	toolRequests  atomic.Int32
-	steerRequests atomic.Int32
+	requests         atomic.Int32
+	toolRequests     atomic.Int32
+	steerRequests    atomic.Int32
+	discoveryFailure atomic.Bool
 
 	steerStarted chan struct{}
 	steerRelease chan struct{}
@@ -35,6 +37,7 @@ type webE2EModel struct {
 
 	cancelObserved chan struct{}
 	cancelOnce     sync.Once
+	taskReleases   sync.Map
 }
 
 func emitE2EEvent(w http.ResponseWriter, event any) {
@@ -91,14 +94,13 @@ func emitE2ETabNoop(w http.ResponseWriter) {
 func (m *webE2EModel) handleTool(w http.ResponseWriter) {
 	if m.toolRequests.Add(1) == 1 {
 		args, _ := json.Marshal(map[string]any{
-			"file_path": m.filePath,
-			"content":   "created by the browser e2e test\n",
+			"edits": []map[string]any{{"file_path": m.filePath, "old_string": "", "new_string": "created by the browser e2e test\n"}},
 		})
 		emitE2EEvent(w, map[string]any{
 			"type": "response.output_item.done", "sequence_number": 1, "output_index": 0,
 			"item": map[string]any{
 				"type": "function_call", "id": "fc_write", "call_id": "call_write",
-				"name": "write", "arguments": string(args), "status": "completed",
+				"name": "edit", "arguments": string(args), "status": "completed",
 			},
 		})
 		emitE2EEvent(w, map[string]any{
@@ -148,7 +150,7 @@ func (m *webE2EModel) handleSteer(w http.ResponseWriter, r *http.Request) {
 	emitE2ETextResponse(w, "msg_steer_2", "Steering applied")
 }
 
-func (m *webE2EModel) handleAsk(w http.ResponseWriter, body []byte) {
+func (m *webE2EModel) handleElicit(w http.ResponseWriter, body []byte) {
 	var req struct {
 		Input []map[string]any `json:"input"`
 	}
@@ -156,7 +158,7 @@ func (m *webE2EModel) handleAsk(w http.ResponseWriter, body []byte) {
 	for _, item := range req.Input {
 		if item["type"] == "function_call_output" {
 			output, _ := item["output"].(string)
-			emitE2ETextResponse(w, "msg_ask_done", "You chose: "+strings.TrimSpace(output))
+			emitE2ETextResponse(w, "msg_elicit_done", "You chose: "+strings.TrimSpace(output))
 			return
 		}
 	}
@@ -173,7 +175,7 @@ func (m *webE2EModel) handleAsk(w http.ResponseWriter, body []byte) {
 	emitE2EEvent(w, map[string]any{
 		"type": "response.output_item.done", "sequence_number": 1, "output_index": 0,
 		"item": map[string]any{
-			"type": "function_call", "id": "fc_ask", "call_id": "call_ask",
+			"type": "function_call", "id": "fc_elicit", "call_id": "call_elicit",
 			"name": "elicit", "arguments": string(args), "status": "completed",
 		},
 	})
@@ -192,7 +194,15 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/models":
 		w.Header().Set("Content-Type", "application/json")
+		if m.discoveryFailure.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"error":{"message":"discovery unavailable"}}`)
+			return
+		}
 		fmt.Fprint(w, `{"object":"list","data":[{"id":"gpt-5.4","object":"model"}]}`)
+	case "/model-discovery":
+		m.discoveryFailure.Store(r.URL.Query().Get("fail") == "true")
+		w.WriteHeader(http.StatusNoContent)
 	case "/v1/responses":
 		m.requests.Add(1)
 		body, _ := io.ReadAll(r.Body)
@@ -216,7 +226,25 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		if m.handleTaskFixture(w, r, body) {
+			return
+		}
 		switch {
+		case strings.Contains(string(body), "progress-only fixture"):
+			if strings.Contains(string(body), "Continue the unfinished task from the saved conversation.") {
+				emitE2ETextResponse(w, "msg_resumed", "Resumed and completed the fixture.")
+				return
+			}
+			emitE2EEvent(w, map[string]any{
+				"type": "response.completed",
+				"response": map[string]any{
+					"status": "completed",
+					"output": []any{map[string]any{
+						"type": "message", "id": fmt.Sprintf("msg_progress_%d", m.requests.Load()), "role": "assistant", "status": "completed", "phase": "commentary",
+						"content": []any{map[string]any{"type": "output_text", "text": "Now I will run the tests."}},
+					}},
+				},
+			})
 		case strings.Contains(string(body), "create e2e-result.txt"):
 			m.handleTool(w)
 		case strings.Contains(string(body), "cancel this request"):
@@ -232,12 +260,16 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 		case strings.Contains(string(body), "initial request"):
 			m.handleSteer(w, r)
 		case strings.Contains(string(body), "pick a color"):
-			m.handleAsk(w, body)
+			m.handleElicit(w, body)
 		case strings.Contains(string(body), "render markdown"):
 			emitE2ETextResponse(w, "msg_markdown", "# Migration result\n\n- [x] Streaming\n\n| Language | Status |\n| --- | --- |\n| Go | ready |\n\n```go\npackage main\n\nfunc main() { println(\"ok\") }\n```\n\n```mermaid\ngraph TD; A-->B\n```\n\n```mermaid\nC4Context\n    Person(dev, \"Developer\", \"Uses the app\")\n    System(app, \"Application\", \"Does useful work\")\n    Rel(dev, app, \"Uses\")\n```\n\nMath stays literal: $x^2$.\n\n[Documentation](https://example.com/docs)")
 		default:
 			http.Error(w, "unknown e2e prompt", http.StatusBadRequest)
 		}
+	case "/release-task":
+		release := m.taskRelease(r.URL.Query().Get("name"))
+		release.once.Do(func() { close(release.done) })
+		w.WriteHeader(http.StatusNoContent)
 	case "/release-steer":
 		select {
 		case <-m.steerStarted:
@@ -251,6 +283,8 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 			close(m.steerRelease)
 		}
 		w.WriteHeader(http.StatusNoContent)
+	case "/model-stats":
+		writeJSON(w, map[string]int32{"requests": m.requests.Load()})
 	case "/cancelled":
 		select {
 		case <-m.cancelObserved:
@@ -264,7 +298,12 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
-	testenv.WingmanHome(t)
+	if dir := os.Getenv("E2E_STATIC_DIR"); dir != "" {
+		previous := StaticFS
+		StaticFS = os.DirFS(dir)
+		t.Cleanup(func() { StaticFS = previous })
+	}
+	copyTestGopls(t, testenv.WingmanHome(t))
 	workDir := t.TempDir()
 	if err := os.WriteFile(
 		filepath.Join(workDir, "theme-preview.html"),
@@ -329,6 +368,20 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(
+		filepath.Join(workDir, "standalone-diagnostics.tsx"),
+		[]byte("import { createRoot } from \"react-dom/client\";\nconst view = <main>Hello</main>;\ncreateRoot(document.body).render(view);\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(workDir, "syntax-highlight.sh"),
+		[]byte("#!/usr/bin/env bash\nif [ -n \"$HOME\" ]; then\n  echo \"ready\"\nfi\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
 	tabFiles := map[string]string{
 		"tab-effectiveness.go": "package main\n\nfunc display() {\n    userName := \"Ada\"\n    prepare()\n    validate()\n    println(userName)\n}\n",
 		"tab-ghost.go":         "package main\n\nfunc main() {\n\ttotal := price *\n\t_ = total\n}\n",
@@ -363,13 +416,23 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	app, err := New(ctx, workDir, &ServerOptions{NoBrowser: true})
+	app, err := New(ctx, workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer app.Close()
 	web := httptest.NewServer(app)
 	defer web.Close()
+	relay := remote.NewRelay("test-token")
+	relayWeb := httptest.NewServer(relay)
+	defer func() { relay.Close(); relayWeb.Close() }()
+	credentials := remote.NewCredentials()
+	stopRemote := connectTestRemote(t, app, relayWeb.URL, credentials)
+	defer stopRemote()
+	pairURL, err := remote.PairURL(relayWeb.URL, credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	playwrightArgs := []string{"playwright", "test", "e2e/web.spec.ts", "--config", "playwright.config.ts"}
 	grepPattern := os.Getenv("E2E_GREP")
@@ -380,8 +443,11 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 	cmd.Dir = filepath.Join("ui")
 	cmd.Env = append(os.Environ(),
 		"E2E_BASE_URL="+web.URL,
+		"E2E_INSTANCE="+app.scope.InstanceID,
 		"E2E_CONTROL_URL="+modelServer.URL,
 		"E2E_WORKSPACE="+workDir,
+		"E2E_RELAY_URL="+relayWeb.URL,
+		"E2E_PAIR_URL="+pairURL,
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

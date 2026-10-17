@@ -10,6 +10,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
@@ -30,17 +31,26 @@ func formatElapsed(d time.Duration) string {
 
 // activityStatus renders transient model/tool state for the existing footer
 // row, keeping the composer rails stable while a turn runs.
-func (a *App) activityStatus() string {
+func (a *App) activityStatus(width int) string {
 	t := theme.Default
 	phase := a.getPhase()
 
 	// While a question is pending the agent is waiting on the user; a
 	// spinner would be misleading.
-	if phase == PhaseIdle || a.promptActive || a.askActive {
+	if a.promptActive || a.askActive {
+		return colored(t.Yellow, "Waiting for your response")
+	}
+	if a.queuePaused && phase == PhaseIdle {
+		return colored(t.Yellow, "Queue paused · ctrl+q to resume")
+	}
+	if phase == PhaseIdle {
 		return ""
 	}
 
 	frame := spinnerFrames[a.spinnerFrame%len(spinnerFrames)]
+	if !a.motion.enabled || !a.termFocused {
+		frame = "•"
+	}
 
 	var label string
 	var color = t.Cyan
@@ -50,17 +60,31 @@ func (a *App) activityStatus() string {
 		label, color = "Preparing", t.BrBlack
 	case PhaseThinking, PhaseStreaming:
 		label, color = "Thinking", t.Cyan
+		if summary := a.reasoningStatus(); summary != "" {
+			label = summary
+		}
 	case PhaseToolRunning:
 		label, color = "Running", t.Yellow
+	case PhaseRetrying:
+		label, color = "Retrying", t.Yellow
+	case PhaseStopping:
+		label, color = "Stopping", t.Yellow
 	}
 
-	line := colored(color, frame+" "+label)
-
+	suffix := ""
 	if phase != PhasePreparing && !a.phaseStart.IsZero() {
-		line += dim(" " + formatElapsed(time.Since(a.phaseStart)) + " · esc interrupt")
+		suffix = " " + formatElapsed(time.Since(a.phaseStart)) + " · esc stop"
+		if phase != PhaseStopping {
+			suffix += " · enter steer · alt+enter queue"
+		}
 	}
-
-	return line
+	label = ansi.Truncate(label, max(width-ansi.Width(suffix)-2, 1), "…")
+	styled := colored(color, label)
+	if a.motion.enabled && a.termFocused && !a.selecting && !a.selActive {
+		styled = shimmerStatus(label, time.Since(a.phaseStart), color)
+		a.motion.schedule(50 * time.Millisecond)
+	}
+	return colored(color, frame+" ") + styled + dim(suffix)
 }
 
 func (a *App) contextLeftPercent() (int, bool) {
@@ -84,10 +108,13 @@ func (a *App) contextLeftPercent() (int, bool) {
 // footerLine renders key hints left and session facts right, dropping hints
 // from the right of the hint list until everything fits.
 func (a *App) footerLine(width int) string {
+	a.mouse.footer = nil
 	t := theme.Default
 
 	var right []string
-
+	if a.queueCount > 0 {
+		right = append(right, dim(fmt.Sprintf("%d queued", a.queueCount)))
+	}
 	var reg *task.Registry
 	if provider, ok := a.agent.(taskProvider); ok {
 		reg = provider.Tasks(a.sessionID)
@@ -141,37 +168,70 @@ func (a *App) footerLine(width int) string {
 		return withRight(colored(a.toast.color, a.toast.message))
 	}
 
-	if activity := a.activityStatus(); activity != "" {
+	if a.operationPending {
+		if a.shellRunning {
+			return withRight(colored(t.Magenta, "Running shell command · Esc cancels"))
+		}
+		if a.operationStatus != "" {
+			return withRight(colored(t.Cyan, a.operationStatus))
+		}
+		return withRight(colored(t.Cyan, "Updating session · Esc cancels"))
+	}
+	if activity := a.activityStatus(width - 2*len(cellIndent) - ansi.Width(rightText)); activity != "" {
 		return withRight(activity)
 	}
 
-	var left []string
-
-	hint := func(key, label string) string {
-		return dim(key) + " " + colored(t.Foreground, label)
+	if a.backgroundStatus != "" {
+		color := t.BrBlack
+		if a.backgroundWarning {
+			color = t.Yellow
+		}
+		return withRight(colored(color, a.backgroundStatus))
 	}
 
-	hints := []string{
-		hint("ctrl+p", "commands"),
-		hint("@", "files"),
-		hint("tab", "plan"),
-		hint("ctrl+o", "transcript"),
+	if a.isShellInput() {
+		return withRight(dim("enter") + " " + colored(t.Foreground, "run command") + dim("  esc") + " " + colored(t.Foreground, "exit shell"))
 	}
 
+	type footerCommand struct {
+		text string
+		key  inline.KeyEvent
+	}
+	hint := func(key, label string, event inline.KeyEvent) footerCommand {
+		return footerCommand{text: dim(key) + " " + colored(t.Foreground, label), key: event}
+	}
+	hints := []footerCommand{
+		hint("ctrl+p", "commands", inline.KeyEvent{Key: inline.KeyCtrl, Rune: 'p'}),
+		hint("@", "files", inline.KeyEvent{Key: inline.KeyRune, Rune: '@'}),
+		hint("tab", "plan", inline.KeyEvent{Key: inline.KeyTab}),
+		hint("ctrl+o", "transcript", inline.KeyEvent{Key: inline.KeyCtrl, Rune: 'o'}),
+	}
 	_, current := a.agent.Modes(a.sessionID)
 	if current == code.PlanModeID {
-		hints[2] = hint("tab", "agent")
+		hints[2] = hint("tab", "agent", inline.KeyEvent{Key: inline.KeyTab})
+	}
+	if a.editor != nil && len(a.editor.pastes) > 0 {
+		hints = append([]footerCommand{hint("alt+e", "expand paste", inline.KeyEvent{Key: inline.KeyRune, Rune: 'e', Alt: true})}, hints...)
 	}
 
 	sep := dim("  ")
 	rightWidth := ansi.Width(rightText)
 
 	for n := len(hints); n >= 0; n-- {
-		parts := append(append([]string{}, left...), hints[:n]...)
+		parts := make([]string, n)
+		for i := range n {
+			parts[i] = hints[i].text
+		}
 		leftText := strings.Join(parts, sep)
 		gap := width - 2*len(cellIndent) - ansi.Width(leftText) - rightWidth
 
 		if gap >= 2 {
+			x := ansi.Width(cellIndent)
+			for _, hint := range hints[:n] {
+				w := ansi.Width(hint.text)
+				a.mouse.footer = append(a.mouse.footer, mouseAction{bounds: mouseRect{x: x, width: w, height: 1}, key: hint.key})
+				x += w + ansi.Width(sep)
+			}
 			return cellIndent + leftText + strings.Repeat(" ", gap) + rightText
 		}
 	}

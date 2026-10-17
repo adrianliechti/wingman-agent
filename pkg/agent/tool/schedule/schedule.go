@@ -24,16 +24,18 @@ const (
 )
 
 type Task struct {
-	ID        string     `yaml:"id"`
-	Prompt    string     `yaml:"prompt"`
-	Schedule  string     `yaml:"schedule"`
-	Script    string     `yaml:"script,omitempty"`
-	Status    string     `yaml:"status"`
-	CreatedAt time.Time  `yaml:"created_at"`
-	LastRun   *time.Time `yaml:"last_run,omitempty"`
+	ID             string     `yaml:"id"`
+	Prompt         string     `yaml:"prompt"`
+	Schedule       string     `yaml:"schedule"`
+	Script         string     `yaml:"script,omitempty"`
+	ScriptApproval string     `yaml:"script_approval,omitempty"`
+	Status         string     `yaml:"status"`
+	CreatedAt      time.Time  `yaml:"created_at"`
+	LastRun        *time.Time `yaml:"last_run,omitempty"`
 
 	Failures    int        `yaml:"failures,omitempty"`
 	LastAttempt *time.Time `yaml:"last_attempt,omitempty"`
+	FireSeq     uint64     `yaml:"fire_seq,omitempty"`
 }
 
 func NewTask(prompt, sched string) (Task, error) {
@@ -57,13 +59,20 @@ func NewTask(prompt, sched string) (Task, error) {
 	if p.interval > 0 && p.interval < MinInterval {
 		return Task{}, fmt.Errorf("invalid interval %q: the shortest supported interval is %s", sched, MinInterval)
 	}
+	now := time.Now()
+	if p.cron != nil {
+		first := p.cron.Next(now)
+		if second := p.cron.Next(first); !first.IsZero() && !second.IsZero() && second.Sub(first) < MinInterval {
+			return Task{}, fmt.Errorf("invalid schedule %q: the shortest supported interval is %s", sched, MinInterval)
+		}
+	}
 
 	return Task{
 		ID:        uuid.NewString()[:8],
 		Prompt:    prompt,
 		Schedule:  sched,
 		Status:    StatusActive,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: now,
 	}, nil
 }
 

@@ -2,22 +2,14 @@ package server
 
 import (
 	"os/exec"
-	"path/filepath"
+	"path"
 	"runtime"
+
+	"github.com/adrianliechti/wingman-agent/internal/browser"
 )
 
 func openBrowser(url string) {
-	var name string
-	var args []string
-	switch runtime.GOOS {
-	case "windows":
-		name, args = "rundll32", []string{"url.dll,FileProtocolHandler", url}
-	case "darwin":
-		name, args = "open", []string{url}
-	default:
-		name, args = "xdg-open", []string{url}
-	}
-	_ = startDetached(name, args...)
+	_ = browser.Open(url)
 }
 
 func revealPath(target string, isDir bool) error {
@@ -32,8 +24,11 @@ func revealCommand(goos, target string, isDir bool) (string, []string) {
 	case "darwin":
 		return "open", []string{"-R", target}
 	default:
+		// The generic branch only ever runs on systems with slash-separated
+		// paths, so trim with path rather than filepath: the latter would follow
+		// the host's separator and mangle the target when goos is overridden.
 		if !isDir {
-			target = filepath.Dir(target)
+			target = path.Dir(target)
 		}
 		return "xdg-open", []string{target}
 	}

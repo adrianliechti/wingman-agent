@@ -2,8 +2,10 @@ package changes
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,61 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+func TestDiffsIfChangedTracksWorktreeIndexAndHead(t *testing.T) {
+	dir := t.TempDir()
+	repo := initRepository(t, dir)
+	writeFile(t, dir, "file.txt", "one\n")
+	stage(t, repo, "file.txt")
+	commit(t, repo, "initial")
+	m := New(dir)
+	defer m.Close()
+	ctx := context.Background()
+	var previous uint64
+	for _, step := range []struct {
+		name   string
+		change func()
+		files  int
+	}{
+		{name: "clean", change: func() {}},
+		{name: "modified", change: func() { writeFile(t, dir, "file.txt", "two\n") }, files: 1},
+		{name: "staged", change: func() { stage(t, repo, "file.txt") }, files: 1},
+		{name: "committed", change: func() { commit(t, repo, "second") }},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			step.change()
+			diffs, fingerprint, err := m.DiffsIfChanged(ctx, previous)
+			if err != nil || fingerprint == 0 || fingerprint == previous || len(diffs) != step.files {
+				t.Fatalf("snapshot = %d files, fingerprint %d (previous %d), error %v", len(diffs), fingerprint, previous, err)
+			}
+			if fingerprint != m.Fingerprint(ctx) {
+				t.Fatal("snapshot and standalone fingerprints differ")
+			}
+			if len(diffs) > 0 && (diffs[0].Original != "one\n" || diffs[0].Modified != "two\n") {
+				t.Fatalf("unexpected diff contents: %+v", diffs[0])
+			}
+			unchanged, same, err := m.DiffsIfChanged(ctx, fingerprint)
+			if err != nil || unchanged != nil || same != fingerprint {
+				t.Fatalf("unchanged snapshot = %+v, %d, %v", unchanged, same, err)
+			}
+			forced, same, err := m.DiffsIfChanged(ctx, 0)
+			if err != nil || same != fingerprint || !reflect.DeepEqual(forced, diffs) {
+				t.Fatalf("forced snapshot = %+v, %d, %v", forced, same, err)
+			}
+			previous = fingerprint
+		})
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, _, err := m.DiffsIfChanged(cancelled, previous); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled snapshot error = %v", err)
+	}
+	m.Close()
+	if _, _, err := m.DiffsIfChanged(ctx, previous); !errors.Is(err, ErrClosed) {
+		t.Fatalf("closed snapshot error = %v", err)
+	}
+}
 
 func TestNativeRepositoryFingerprintIncludesIndexAndHead(t *testing.T) {
 	dir := t.TempDir()
@@ -99,6 +156,46 @@ func TestNativeRepositoryDiffLayersAndRevertPreservesIndex(t *testing.T) {
 	}
 }
 
+func TestNativeRepositoryDiffsLayerReturnsConsistentIndexAndWorktreeSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	repo := initRepository(t, dir)
+	writeFile(t, dir, "both.txt", "base\n")
+	writeFile(t, dir, "worktree.txt", "base\n")
+	stage(t, repo, "both.txt")
+	stage(t, repo, "worktree.txt")
+	commit(t, repo, "initial")
+
+	writeFile(t, dir, "both.txt", "staged\n")
+	stage(t, repo, "both.txt")
+	writeFile(t, dir, "both.txt", "worktree\n")
+	writeFile(t, dir, "worktree.txt", "worktree\n")
+
+	m := New(dir)
+	defer m.Close()
+	staged, err := m.DiffsLayer(context.Background(), DiffStaged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staged) != 1 || staged[0].Path != "both.txt" || staged[0].Original != "base\n" || staged[0].Modified != "staged\n" {
+		t.Fatalf("staged diffs = %+v", staged)
+	}
+
+	unstaged, err := m.DiffsLayer(context.Background(), DiffUnstaged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := make(map[string]FileDiff, len(unstaged))
+	for _, diff := range unstaged {
+		byPath[diff.Path] = diff
+	}
+	if len(byPath) != 2 || byPath["both.txt"].Original != "staged\n" || byPath["both.txt"].Modified != "worktree\n" || byPath["worktree.txt"].Original != "base\n" || byPath["worktree.txt"].Modified != "worktree\n" {
+		t.Fatalf("unstaged diffs = %+v", unstaged)
+	}
+	if _, err := m.DiffsLayer(context.Background(), DiffLayer("unknown")); err == nil {
+		t.Fatal("invalid aggregate diff layer was accepted")
+	}
+}
+
 func TestNativeRepositoryRevertRejectsStagedOnlyChange(t *testing.T) {
 	dir := t.TempDir()
 	repo := initRepository(t, dir)
@@ -137,6 +234,50 @@ func TestNativeSubdirectoryCommitRejectsStagedChangesOutsideScope(t *testing.T) 
 	status, statusErr := m.GitStatus(context.Background())
 	if statusErr != nil || len(status.Files) != 1 || status.Files[0].Path != "inside.txt" || !status.Files[0].Staged {
 		t.Fatalf("scoped status = %+v, %v", status, statusErr)
+	}
+}
+
+func TestNativeStageAllIsScopedToWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	repo := initRepository(t, dir)
+	writeFile(t, dir, "sub/modified.txt", "one\n")
+	writeFile(t, dir, "sub/deleted.txt", "one\n")
+	writeFile(t, dir, "outside.txt", "one\n")
+	stage(t, repo, "sub/modified.txt")
+	stage(t, repo, "sub/deleted.txt")
+	stage(t, repo, "outside.txt")
+	commit(t, repo, "initial")
+
+	writeFile(t, dir, "sub/modified.txt", "two\n")
+	if err := os.Remove(filepath.Join(dir, "sub/deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "sub/added.txt", "two\n")
+	writeFile(t, dir, "outside.txt", "two\n")
+
+	m := New(filepath.Join(dir, "sub"))
+	defer m.Close()
+	if err := m.Stage(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := worktree.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"sub/modified.txt", "sub/deleted.txt", "sub/added.txt"} {
+		file := files.File(path)
+		if file.Staging == git.Unmodified || file.Worktree != git.Unmodified {
+			t.Fatalf("stage-all status for %s = %c%c", path, file.Staging, file.Worktree)
+		}
+	}
+	outside := files.File("outside.txt")
+	if outside.Staging != git.Unmodified || outside.Worktree != git.Modified {
+		t.Fatalf("outside status = %c%c", outside.Staging, outside.Worktree)
 	}
 }
 
@@ -257,6 +398,13 @@ func TestNativeRepositoryCompareAndHistory(t *testing.T) {
 	}
 	if !refs[featureBranch.Short()] {
 		t.Fatalf("feature ref missing from history: %+v", history)
+	}
+	recent, err := m.HistoryLimit(context.Background(), 2)
+	if err != nil || len(recent) != 2 {
+		t.Fatalf("limited history = %+v, %v", recent, err)
+	}
+	if _, err := m.HistoryLimit(context.Background(), -1); err == nil {
+		t.Fatal("negative history limit was accepted")
 	}
 	if _, err := m.Compare(context.Background(), "missing", featureBranch.Short(), false); err == nil {
 		t.Fatal("comparison with a missing ref succeeded")

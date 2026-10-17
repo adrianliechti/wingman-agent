@@ -5,9 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
@@ -57,6 +62,42 @@ func TestEditorReplaceRange(t *testing.T) {
 	}
 }
 
+type compactUITestAgent struct {
+	*uiTestAgent
+	focus string
+}
+
+func (a *compactUITestAgent) Compact(_ context.Context, _ string, focus string) (agent.CompactResult, error) {
+	a.focus = focus
+	return agent.CompactResult{TokensBefore: 120_000, TokensAfter: 18_000}, nil
+}
+
+func TestCompactCommandRunsThroughTurnManagerWithFocus(t *testing.T) {
+	a, _ := newDiffPanelTestApp(t, 80, 20)
+	if a.findBuiltin("/compact") != nil {
+		t.Fatal("/compact offered for an agent that cannot compact")
+	}
+	compactor := &compactUITestAgent{uiTestAgent: a.agent.(*uiTestAgent)}
+	a.agent = compactor
+	a.queue = make(chan func(), 8)
+	a.turns = code.NewTurnManager(context.Background(), compactor, nil)
+	defer a.turns.Close()
+
+	a.editor.SetText("/compact keep the API design")
+	a.submitInput()
+	if !a.operationPending || !strings.Contains(a.operationStatus, "Compacting") {
+		t.Fatalf("pending=%t status=%q", a.operationPending, a.operationStatus)
+	}
+	waitForSessionOperation(t, a)
+
+	if compactor.focus != "keep the API design" {
+		t.Fatalf("focus = %q", compactor.focus)
+	}
+	if chat := ansi.Strip(strings.Join(a.chat, "\n")); !strings.Contains(chat, "Context compacted · ~120.0K → ~18.0K tokens") {
+		t.Fatalf("chat missing result:\n%s", chat)
+	}
+}
+
 func TestSlashCommandLabelIncludesArgumentHint(t *testing.T) {
 	command := slashCommand{Name: "/migrate", Hint: "[component] [from] [to]"}
 	if got := command.Label(); got != "/migrate [component] [from] [to]" {
@@ -90,6 +131,15 @@ Migrate the requested component.
 	a := &App{ctx: context.Background(), agent: agent, editor: NewEditor()}
 	a.editor.SetText("/mig")
 	a.syncCommandPopup()
+	// Discovery is asynchronous; drive the same metadata refresh as the UI.
+	deadline := time.Now().Add(2 * time.Second)
+	for a.skillRefreshPending.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if a.skillRefreshPending.Load() {
+		t.Fatal("skill discovery did not complete")
+	}
+	a.refreshMetadata()
 
 	item, ok := a.popup.Current()
 	if !ok || item.ID != "/migrate" || item.Label != "/migrate [component] [from] [to]" {

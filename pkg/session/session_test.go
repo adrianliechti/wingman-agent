@@ -78,7 +78,7 @@ func TestSaveAppends(t *testing.T) {
 
 	lines := fileLines(t, path)
 
-	var metas, messages, states int
+	var metas, messages int
 	for _, line := range lines {
 		var r record
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
@@ -87,15 +87,15 @@ func TestSaveAppends(t *testing.T) {
 		switch r.Type {
 		case "meta":
 			metas++
-		case "message":
-			messages++
-		case "state":
-			states++
+		case "event":
+			if r.Event != nil && r.Event.Type == agent.EventMessage {
+				messages++
+			}
 		}
 	}
 
-	if metas != 1 || messages != 3 || states != 2 {
-		t.Errorf("metas=%d messages=%d states=%d", metas, messages, states)
+	if metas != 1 || messages != 3 {
+		t.Errorf("metas=%d messages=%d", metas, messages)
 	}
 
 	s, err := Load(dir, "s1")
@@ -107,7 +107,7 @@ func TestSaveAppends(t *testing.T) {
 	}
 }
 
-func TestSaveRewritesOnRevisionChange(t *testing.T) {
+func TestSaveAppendsContextCheckpointWithoutRewritingHistory(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s1.jsonl")
 
@@ -116,15 +116,15 @@ func TestSaveRewritesOnRevisionChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state.Messages = []agent.Message{userMsg("summary"), userMsg("recent")}
-	state.Revision = 1
+	state.Context = []agent.Message{userMsg("summary"), userMsg("recent")}
+	state.ContextSet = true
 	if err := Save(dir, "s1", state); err != nil {
 		t.Fatal(err)
 	}
 
 	lines := fileLines(t, path)
 	if len(lines) != 4 {
-		t.Errorf("lines = %d, want 4 (meta + 2 messages + state)", len(lines))
+		t.Errorf("lines = %d, want 4 (meta + 2 messages + checkpoint)", len(lines))
 	}
 
 	s, err := Load(dir, "s1")
@@ -134,8 +134,11 @@ func TestSaveRewritesOnRevisionChange(t *testing.T) {
 	if len(s.State.Messages) != 2 {
 		t.Errorf("messages = %d", len(s.State.Messages))
 	}
-	if s.State.Messages[0].Content[0].Text != "summary" {
+	if s.State.Messages[0].Content[0].Text != "first" {
 		t.Errorf("first message = %q", s.State.Messages[0].Content[0].Text)
+	}
+	if len(s.State.Context) != 2 || s.State.Context[0].Content[0].Text != "summary" {
+		t.Fatalf("context checkpoint was not restored: %#v", s.State.Context)
 	}
 }
 
@@ -182,6 +185,97 @@ func TestLegacyMigration(t *testing.T) {
 	}
 	if migrated.CreatedAt.Sub(legacy.CreatedAt).Abs() > time.Second {
 		t.Errorf("created_at not preserved: %v != %v", migrated.CreatedAt, legacy.CreatedAt)
+	}
+}
+
+func TestLegacyJSONLMigrationIsolatedAndOneWay(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "old-lines.jsonl")
+	created := time.Now().Add(-2 * time.Hour).UTC().Round(time.Second)
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := json.NewEncoder(f)
+	message := userMsg("legacy jsonl")
+	usage := agent.Usage{InputTokens: 7}
+	for _, r := range []legacyRecord{
+		{Type: "meta", ID: "old-lines", CreatedAt: &created},
+		{Type: "message", Message: &message},
+		{Type: "state", Usage: &usage},
+	} {
+		if err := enc.Encode(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(dir, "old-lines")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.State.Messages) != 1 || loaded.State.Usage.InputTokens != 7 {
+		t.Fatalf("migrated state = %#v", loaded.State)
+	}
+	if loaded.CreatedAt.Sub(created).Abs() > time.Second {
+		t.Fatalf("created_at = %v, want %v", loaded.CreatedAt, created)
+	}
+
+	lines := fileLines(t, path)
+	for i, line := range lines {
+		var r record
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			if r.Type != "meta" || r.Version != journalVersion {
+				t.Fatalf("migrated header = %#v", r)
+			}
+			continue
+		}
+		if r.Type != "event" || r.Event == nil {
+			t.Fatalf("legacy record survived migration: %#v", r)
+		}
+	}
+}
+
+func TestOpenJournalRepairsIncompleteFinalRecord(t *testing.T) {
+	dir := t.TempDir()
+	state := agent.State{Messages: []agent.Message{userMsg("first")}}
+	if err := Save(dir, "repair", state); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "repair.jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"event","event":`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	journalCoordinators.Delete(filepath.Clean(path)) // simulate a new process
+	j, err := OpenJournal(dir, "repair")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := assistantMsg("second")
+	if err := j.AppendEvents([]agent.RuntimeEvent{{
+		Sequence: 2, ID: "second", Type: agent.EventMessage, At: time.Now().UTC(), Message: &message,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(dir, "repair")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.State.Messages) != 2 || loaded.State.Messages[1].Content[0].Text != "second" {
+		t.Fatalf("repaired messages = %#v", loaded.State.Messages)
 	}
 }
 
@@ -241,5 +335,126 @@ func TestDelete(t *testing.T) {
 	}
 	if len(s.State.Messages) != 1 {
 		t.Errorf("messages = %d", len(s.State.Messages))
+	}
+}
+
+func TestSessionIDCannotEscapeStorageDirectory(t *testing.T) {
+	dir := t.TempDir()
+	for _, id := range []string{"", ".", "..", "../outside", `..\\outside`, "/absolute"} {
+		t.Run(strings.ReplaceAll(id, "/", "_"), func(t *testing.T) {
+			if _, err := ArtifactDir(dir, id); err == nil {
+				t.Fatalf("ArtifactDir accepted %q", id)
+			}
+			if _, err := OpenJournal(dir, id); err == nil {
+				t.Fatalf("OpenJournal accepted %q", id)
+			}
+			if err := Save(dir, id, agent.State{Messages: []agent.Message{userMsg("unsafe")}}); err == nil {
+				t.Fatalf("Save accepted %q", id)
+			}
+			if _, err := Load(dir, id); err == nil {
+				t.Fatalf("Load accepted %q", id)
+			}
+			if err := Delete(dir, id); err == nil {
+				t.Fatalf("Delete accepted %q", id)
+			}
+		})
+	}
+}
+
+func TestFork(t *testing.T) {
+	dir := t.TempDir()
+	state := agent.State{Messages: []agent.Message{userMsg("hello world"), assistantMsg("hi")}}
+	if err := Save(dir, "s1", state); err != nil {
+		t.Fatal(err)
+	}
+	sourceArtifacts, err := ArtifactDir(dir, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sourceArtifacts, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceArtifacts, "tasks.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "s1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Fork(dir, "s1", "s2", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	forked, err := Load(dir, "s2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forked.ID != "s2" || forked.Title != "Fork of hello world" {
+		t.Fatalf("forked = %q %q", forked.ID, forked.Title)
+	}
+	if len(forked.State.Messages) != 2 || forked.State.Messages[1].Content[0].Text != "hi" {
+		t.Fatalf("forked messages = %+v", forked.State.Messages)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "s1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("fork modified the source journal")
+	}
+	forkArtifacts, err := ArtifactDir(dir, "s2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(forkArtifacts); !os.IsNotExist(err) {
+		t.Fatalf("fork copied sidecar artifacts: %v", err)
+	}
+
+	forked.State.Messages = append(forked.State.Messages, userMsg("diverge"))
+	if err := Save(dir, "s2", forked.State); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded, err := Load(dir, "s2"); err != nil || len(reloaded.State.Messages) != 3 || reloaded.Title != "Fork of hello world" {
+		t.Fatalf("reloaded fork = %+v, %v", reloaded, err)
+	}
+	if source, err := Load(dir, "s1"); err != nil || len(source.State.Messages) != 2 {
+		t.Fatalf("source after fork append = %+v, %v", source, err)
+	}
+
+	sessions, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	titles := map[string]string{}
+	for _, s := range sessions {
+		titles[s.ID] = s.Title
+	}
+	if titles["s1"] != "hello world" || titles["s2"] != "Fork of hello world" {
+		t.Fatalf("titles = %v", titles)
+	}
+}
+
+func TestForkTitleAndErrors(t *testing.T) {
+	dir := t.TempDir()
+	if err := Save(dir, "s1", agent.State{Messages: []agent.Message{userMsg("hello")}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Fork(dir, "s1", "s2", "Try another approach"); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := Load(dir, "s2"); err != nil || s.Title != "Try another approach" {
+		t.Fatalf("titled fork = %q, %v", s.Title, err)
+	}
+
+	if err := Fork(dir, "s1", "s2", ""); err == nil {
+		t.Fatal("fork overwrote an existing session")
+	}
+	if err := Fork(dir, "missing", "s3", ""); err == nil {
+		t.Fatal("fork of a missing session succeeded")
+	}
+	if err := Fork(dir, "s1", "../escape", ""); err == nil {
+		t.Fatal("fork accepted an invalid session ID")
 	}
 }

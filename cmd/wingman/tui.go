@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agents"
+	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	codetui "github.com/adrianliechti/wingman-agent/pkg/tui/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -14,6 +17,7 @@ import (
 type tuiOptions struct {
 	Agent     string
 	SessionID string
+	Fork      bool
 }
 
 func newTUIAgent(ctx context.Context, ws *code.Workspace, name string) (code.Agent, error) {
@@ -62,7 +66,18 @@ func runTUI(ctx context.Context, opts tuiOptions) {
 		sessionID = latestSessionID(sessions)
 	}
 
-	if sessionID != "" {
+	if sessionID != "" && opts.Fork {
+		forker, ok := wa.(code.SessionForker)
+		if !ok {
+			_ = wa.Close()
+			fatal(fmt.Errorf("agent %q cannot fork sessions", opts.Agent))
+		}
+		sessionID, err = forker.ForkSession(ctx, sessionID, "")
+		if err != nil {
+			_ = wa.Close()
+			fatal(err)
+		}
+	} else if sessionID != "" {
 		if err := wa.LoadSession(ctx, sessionID); err != nil {
 			_ = wa.Close()
 			fatal(err)
@@ -76,6 +91,34 @@ func runTUI(ctx context.Context, opts tuiOptions) {
 	}
 
 	app := codetui.New(ctx, wa, sessionID)
+	toolUpdate := ws.StartManagedToolsUpdate(ctx, code.ManagedLSPTools, func(progress devtools.Progress) {
+		label := progress.Label
+		if label == "" {
+			label = progress.Tool
+		}
+		message := "Installing " + label
+		if progress.Phase == devtools.ProgressUpdating {
+			message = "Updating " + label
+		}
+		if progress.Total > 0 {
+			message = fmt.Sprintf("%s (%d/%d)", message, progress.Current, progress.Total)
+		}
+		app.SetBackgroundStatus(message, false)
+	})
+	defer toolUpdate.Cancel()
+	go func() {
+		_, updateErr := toolUpdate.Wait()
+		if devtools.IsUnavailable(updateErr) {
+			tools := devtools.ToolLabels(devtools.UnavailableTools(updateErr))
+			message := "Automatic development-tool setup could not finish"
+			if len(tools) > 0 {
+				message = "Could not install " + strings.Join(tools, ", ")
+			}
+			app.SetBackgroundStatus(message+"; project and system tools still work", true)
+			return
+		}
+		app.SetBackgroundStatus("", false)
+	}()
 
 	if err := app.Run(); err != nil {
 		_ = wa.Close()

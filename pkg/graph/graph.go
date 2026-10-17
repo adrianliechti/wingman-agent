@@ -22,6 +22,7 @@ type Graph struct {
 	out        map[string][]string
 	in         map[string][]string
 	edgeVia    map[string]Provenance
+	edgeLine   map[string]int
 
 	superOut map[string][]string
 	superIn  map[string][]string
@@ -41,6 +42,7 @@ func (g *Graph) build() {
 	g.out = make(map[string][]string)
 	g.in = make(map[string][]string)
 	g.edgeVia = make(map[string]Provenance)
+	g.edgeLine = make(map[string]int)
 	g.superOut = make(map[string][]string)
 	g.superIn = make(map[string][]string)
 	g.implOut = make(map[string][]string)
@@ -66,6 +68,7 @@ func (g *Graph) build() {
 			g.out[e.From] = append(g.out[e.From], e.To)
 			g.in[e.To] = append(g.in[e.To], e.From)
 			g.edgeVia[e.From+"\x00"+e.To] = e.Via
+			g.edgeLine[e.From+"\x00"+e.To] = e.Line
 		case EdgeInherits:
 			g.superOut[e.From] = append(g.superOut[e.From], e.To)
 			g.superIn[e.To] = append(g.superIn[e.To], e.From)
@@ -145,12 +148,24 @@ func (g *Graph) search(opts SearchOpts) []*Node {
 	return g.searchPage(opts).Nodes
 }
 
+func normalizeFileFilter(file string) string {
+	file = strings.TrimSpace(strings.ReplaceAll(file, "\\", "/"))
+	for strings.HasPrefix(file, "./") {
+		file = strings.TrimPrefix(file, "./")
+	}
+	if file == "." {
+		return ""
+	}
+	return file
+}
+
 func (g *Graph) searchPage(opts SearchOpts) SearchResult {
 	limit := opts.Limit
 	if limit == 0 {
 		limit = 50
 	}
 	offset := max(opts.Offset, 0)
+	fileFilter := normalizeFileFilter(opts.File)
 
 	var rx *regexp.Regexp
 	if opts.Query != "" {
@@ -171,7 +186,7 @@ func (g *Graph) searchPage(opts SearchOpts) SearchResult {
 		if opts.Kind != "" && n.Kind != opts.Kind {
 			continue
 		}
-		if opts.File != "" && !strings.Contains(n.File, opts.File) {
+		if fileFilter != "" && !strings.Contains(n.File, fileFilter) {
 			continue
 		}
 		score := g.matchScore(n, qLower, qTokens, rx)
@@ -221,7 +236,7 @@ func (g *Graph) searchPage(opts SearchOpts) SearchResult {
 	}
 	end := total
 	if limit > 0 {
-		end = min(offset+limit, total)
+		end = offset + min(limit, total-offset)
 	}
 	page := out[offset:end]
 	nodes := make([]*Node, len(page))
@@ -334,12 +349,13 @@ func containsAllTokens(have, want []string) bool {
 func (g *Graph) resolve(symbol, file string) []*Node {
 	name := symbol
 	var prefix string
+	file = normalizeFileFilter(file)
 
 	if i := strings.LastIndex(symbol, ":"); i > 0 {
-		prefix, name = symbol[:i], symbol[i+1:]
+		prefix, name = normalizeFileFilter(symbol[:i]), symbol[i+1:]
 	} else if len(g.byName[symbol]) == 0 {
 		if i := strings.LastIndexAny(symbol, "./"); i > 0 {
-			prefix, name = symbol[:i], symbol[i+1:]
+			prefix, name = normalizeFileFilter(symbol[:i]), symbol[i+1:]
 		}
 	}
 
@@ -448,7 +464,7 @@ type DepsResult struct {
 }
 
 func (g *Graph) resolveModule(target string) string {
-	t := strings.Trim(target, "/")
+	t := normalizeFileFilter(strings.Trim(target, "/"))
 	if t == "" {
 		return "."
 	}
@@ -460,7 +476,7 @@ func (g *Graph) resolveModule(target string) string {
 	}
 	best := ""
 	for m := range g.moduleSet {
-		if strings.Contains(m, t) && (best == "" || len(m) < len(best)) {
+		if strings.Contains(m, t) && (best == "" || len(m) < len(best) || len(m) == len(best) && m < best) {
 			best = m
 		}
 	}
@@ -520,64 +536,6 @@ func (g *Graph) transitiveDeps(module string, depth int) []string {
 type Path struct {
 	Nodes []*Node
 	Via   []Provenance
-}
-
-const maxTracePaths = 200
-
-func (g *Graph) trace(fromID, toName string, callers bool, maxDepth int) []Path {
-	if maxDepth <= 0 {
-		maxDepth = 8
-	}
-
-	adj := g.out
-	if callers {
-		adj = g.in
-	}
-
-	type frame struct {
-		id   string
-		path []string
-	}
-
-	var paths []Path
-	visited := map[string]bool{fromID: true}
-	queue := []frame{{id: fromID, path: []string{fromID}}}
-
-	for len(queue) > 0 && len(paths) < maxTracePaths {
-		cur := queue[0]
-		queue = queue[1:]
-
-		if len(cur.path) > maxDepth {
-			continue
-		}
-
-		next := adj[cur.id]
-
-		if toName == "" {
-			if len(cur.path) > 1 {
-				paths = append(paths, g.pathFromIDs(cur.path, callers))
-			}
-		}
-
-		for _, nid := range next {
-			n := g.byID[nid]
-			if n == nil {
-				continue
-			}
-			np := append(append([]string{}, cur.path...), nid)
-			if toName != "" && n.Name == toName {
-				paths = append(paths, g.pathFromIDs(np, callers))
-				continue
-			}
-			if visited[nid] {
-				continue
-			}
-			visited[nid] = true
-			queue = append(queue, frame{id: nid, path: np})
-		}
-	}
-
-	return paths
 }
 
 func (g *Graph) pathFromIDs(ids []string, callers bool) Path {

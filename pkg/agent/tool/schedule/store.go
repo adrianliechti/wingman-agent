@@ -1,9 +1,11 @@
 package schedule
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"sync"
 
 	"go.yaml.in/yaml/v4"
@@ -19,16 +21,22 @@ type Store interface {
 	Mutate(fn func([]Task) ([]Task, error)) error
 }
 
+type ObservableStore interface {
+	Store
+	Changed() <-chan struct{}
+}
+
 type taskFile struct {
 	Tasks []Task `yaml:"tasks"`
 }
 
 type FileStore struct {
-	dir string
+	dir     string
+	changed chan struct{}
 }
 
 func NewFileStore(dir string) *FileStore {
-	return &FileStore{dir: dir}
+	return &FileStore{dir: dir, changed: make(chan struct{}, 1)}
 }
 
 // dirLocks are keyed by path, not by store, so independent FileStore values
@@ -72,7 +80,11 @@ func (s *FileStore) Mutate(fn func([]Task) ([]Task, error)) error {
 		return err
 	}
 
-	return s.save(updated)
+	if err := s.save(updated); err != nil {
+		return err
+	}
+	s.signalChanged()
+	return nil
 }
 
 func (s *FileStore) load() ([]Task, error) {
@@ -84,8 +96,15 @@ func (s *FileStore) load() ([]Task, error) {
 		return nil, err
 	}
 
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, nil
+	}
+
 	var f taskFile
 	if err := yaml.Load(data, &f); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
 		return nil, err
 	}
 
@@ -134,30 +153,60 @@ func (s *MemoryStore) List() ([]Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return slices.Clone(s.tasks), nil
+	return cloneTasks(s.tasks), nil
 }
 
 func (s *MemoryStore) Mutate(fn func([]Task) ([]Task, error)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	updated, err := fn(slices.Clone(s.tasks))
+	updated, err := fn(cloneTasks(s.tasks))
 	if err != nil {
 		return err
 	}
 
-	s.tasks = updated
+	s.tasks = cloneTasks(updated)
 
+	s.signalChanged()
+	return nil
+}
+
+func cloneTasks(tasks []Task) []Task {
+	if tasks == nil {
+		return nil
+	}
+	out := make([]Task, len(tasks))
+	for i, t := range tasks {
+		if t.LastRun != nil {
+			v := *t.LastRun
+			t.LastRun = &v
+		}
+		if t.LastAttempt != nil {
+			v := *t.LastAttempt
+			t.LastAttempt = &v
+		}
+		out[i] = t
+	}
+	return out
+}
+
+func (s *FileStore) signalChanged()   { signalChanged(s.changed) }
+func (s *MemoryStore) signalChanged() { signalChanged(s.changed) }
+
+func signalChanged(ch chan struct{}) {
 	select {
-	case s.changed <- struct{}{}:
+	case ch <- struct{}{}:
 	default:
 	}
-	return nil
 }
 
 // Changed signals (coalesced, one buffered tick) after every successful
 // Mutate, so a scheduler sleeping until the next known due time can wake up
 // and re-plan when tasks are added or removed mid-sleep.
 func (s *MemoryStore) Changed() <-chan struct{} {
+	return s.changed
+}
+
+func (s *FileStore) Changed() <-chan struct{} {
 	return s.changed
 }

@@ -144,9 +144,23 @@ func writeClaudeDelta(text string) {
 	writeClaudeContract(map[string]any{
 		"type": "stream_event",
 		"event": map[string]any{
+			"type": "message_start",
+			"message": map[string]any{
+				"model": "claude-contract",
+				"usage": map[string]any{"input_tokens": 10, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 2},
+			},
+		},
+	})
+	writeClaudeContract(map[string]any{
+		"type": "stream_event",
+		"event": map[string]any{
 			"type":  "content_block_delta",
 			"delta": map[string]any{"type": "text_delta", "text": text},
 		},
+	})
+	writeClaudeContract(map[string]any{
+		"type":  "stream_event",
+		"event": map[string]any{"type": "message_delta", "usage": map[string]any{"output_tokens": 4}},
 	})
 }
 

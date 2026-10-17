@@ -1,13 +1,16 @@
 package skill_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
 
+	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	. "github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
@@ -348,6 +351,34 @@ func TestFormatForPromptEscapesXMLAndStaysWithinBudget(t *testing.T) {
 	}
 }
 
+func TestFormatForPromptShortensDescriptionsAtWords(t *testing.T) {
+	var skills []Skill
+	for i := range 30 {
+		skills = append(skills, Skill{
+			Name:        fmt.Sprintf("skill-%d", i),
+			Description: strings.Repeat("Review the user's changes carefully. ", 12),
+		})
+	}
+	result := FormatForPrompt(skills)
+	if len(result) > 8000 || strings.Contains(result, "&#39;") {
+		t.Fatalf("prompt length = %d or escaped apostrophes: %q", len(result), result)
+	}
+	for _, line := range strings.Split(result, "\n") {
+		description, ok := strings.CutPrefix(strings.TrimSpace(line), "<description>")
+		if !ok {
+			continue
+		}
+		description = strings.TrimSuffix(description, "</description>")
+		if !strings.HasSuffix(description, "…") || strings.HasSuffix(strings.TrimSuffix(description, "…"), " ") {
+			t.Fatalf("description not shortened at a word boundary: %q", description)
+		}
+		words := strings.Fields(strings.TrimSuffix(description, "…"))
+		if last := strings.TrimRight(words[len(words)-1], "."); !slices.Contains([]string{"Review", "the", "user's", "changes", "carefully"}, last) {
+			t.Fatalf("description ends mid-word: %q", description)
+		}
+	}
+}
+
 func writeSkill(t *testing.T, dir, name, description string) {
 	t.Helper()
 
@@ -394,6 +425,37 @@ func TestDiscoverIgnoresOpencode(t *testing.T) {
 	}
 }
 
+func TestDiscoverPersonalIgnoresReservedSystemSkills(t *testing.T) {
+	home := testenv.UserHome(t)
+	wingmanHome := testenv.WingmanHome(t)
+
+	writeSkill(t, filepath.Join(wingmanHome, "skills", ".system", "bundled"), "bundled", "system")
+	writeSkill(t, filepath.Join(wingmanHome, "skills", "personal"), "personal", "user")
+
+	skills, err := DiscoverPersonal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 1 || skills[0].Name != "personal" {
+		t.Fatalf("personal skills = %#v, want only personal", skills)
+	}
+
+	agentsDir := filepath.Join(home, ".agents")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(wingmanHome, "skills"), filepath.Join(agentsDir, "skills")); err != nil {
+		t.Skipf("skill-root symlink is unavailable: %v", err)
+	}
+	skills, err = DiscoverPersonal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 1 || skills[0].Name != "personal" {
+		t.Fatalf("personal skills through alias = %#v, want only personal", skills)
+	}
+}
+
 func TestMergeKeepsShadowedPluginSkillQualified(t *testing.T) {
 	plugin := []Skill{{Name: "deploy", Description: "from plugin", Plugin: "ops"}}
 	project := []Skill{{Name: "deploy", Description: "from project"}}
@@ -426,7 +488,7 @@ func TestMergeDropsShadowedNonPluginSkill(t *testing.T) {
 	}
 }
 
-func TestLoadDirEnforcesAgentSkillsNameAndDirectoryRules(t *testing.T) {
+func TestLoadDirEnforcesAgentSkillsNameRulesButAllowsDirectoryMismatch(t *testing.T) {
 	root := t.TempDir()
 	writeSkill(t, filepath.Join(root, "right-name"), "other-name", "mismatch")
 	writeSkill(t, filepath.Join(root, "Bad-Name"), "Bad-Name", "uppercase")
@@ -434,8 +496,12 @@ func TestLoadDirEnforcesAgentSkillsNameAndDirectoryRules(t *testing.T) {
 	writeSkill(t, filepath.Join(root, "valid-skill"), "valid-skill", "valid")
 
 	skills := LoadDir(root)
-	if len(skills) != 1 || skills[0].Name != "valid-skill" {
-		t.Fatalf("skills = %#v, want only the Agent Skills-conformant entry", skills)
+	names := make([]string, len(skills))
+	for i, sk := range skills {
+		names[i] = sk.Name
+	}
+	if len(skills) != 2 || !slices.Contains(names, "other-name") || !slices.Contains(names, "valid-skill") {
+		t.Fatalf("skills = %#v, want the directory-mismatched and valid entries, not the malformed names", skills)
 	}
 }
 

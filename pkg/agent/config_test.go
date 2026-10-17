@@ -9,14 +9,20 @@ import (
 )
 
 func TestContextWindowFor(t *testing.T) {
+	unsetEnv(t, "WINGMAN_CONTEXT_WINDOW")
+	unsetEnv(t, "WINGMAN_CONTEXT_WINDOW_MODE")
 	unsetEnv(t, "WINGMAN_LARGE_CONTEXT")
 
 	cases := []struct {
 		model string
 		want  int
 	}{
+		{"claude-sonnet-5-5", 1_000_000},
+		{"claude-haiku-5-5", 1_000_000},
 		{"claude-sonnet-5", 1_000_000},
+		{"claude-opus-5-5", 1_000_000},
 		{"claude-opus-4-8", 1_000_000},
+		{"claude-fable-5-1", 1_000_000},
 		{"claude-fable-5", 1_000_000},
 		{"claude-haiku-4-5", 200_000},
 		{"gpt-5.6-sol", 272_000},
@@ -37,6 +43,7 @@ func TestContextWindowFor(t *testing.T) {
 		{"grok-4.6", 200_000},
 		{"deepseek-v4-pro", 1_000_000},
 		{"mistral-medium-latest", 262_144},
+		{"qwen3.8:27b-mlx", 262_144},
 		{"qwen3.7-plus", 1_000_000},
 		{"GPT-5.5", 272_000},
 		{"some-unknown-model", DefaultContextWindow},
@@ -49,11 +56,54 @@ func TestContextWindowFor(t *testing.T) {
 		}
 	}
 
-	t.Setenv("WINGMAN_LARGE_CONTEXT", "1")
+	t.Setenv("WINGMAN_CONTEXT_WINDOW_MODE", "full")
 	for modelID, want := range map[string]int{"gpt-5.6-sol": 1_050_000, "minimax-m3": 1_000_000, "grok-4.6": 500_000} {
 		if got := ContextWindowFor(modelID); got != want {
-			t.Errorf("ContextWindowFor(%q) with WINGMAN_LARGE_CONTEXT = %d, want %d", modelID, got, want)
+			t.Errorf("ContextWindowFor(%q) with full context mode = %d, want %d", modelID, got, want)
 		}
+	}
+}
+
+func TestDefaultComplexModelAcceptsLegacyEnvironment(t *testing.T) {
+	t.Setenv("WINGMAN_MODEL_PLAN", "legacy-complex")
+	t.Setenv("WINGMAN_MODEL_COMPLEX", "")
+	if got := DefaultComplexModel(); got != "legacy-complex" {
+		t.Fatalf("legacy complex model = %q", got)
+	}
+	t.Setenv("WINGMAN_MODEL_COMPLEX", "explicit-complex")
+	if got := DefaultComplexModel(); got != "explicit-complex" {
+		t.Fatalf("complex model precedence = %q", got)
+	}
+	t.Setenv("WINGMAN_EFFORT", "medium")
+	t.Setenv("WINGMAN_EFFORT_PLAN", "max")
+	if got := DefaultEffort(); got != "medium" {
+		t.Fatalf("legacy plan effort affected session: %q", got)
+	}
+}
+
+func TestContextWindowForEnvironmentOverride(t *testing.T) {
+	t.Setenv("WINGMAN_CONTEXT_WINDOW", " 131072 ")
+	t.Setenv("WINGMAN_CONTEXT_WINDOW_MODE", "full")
+	t.Setenv("WINGMAN_LARGE_CONTEXT", "1")
+
+	for _, modelID := range []string{"qwen3.8:27b-mlx", "gpt-5.6-sol", "some-unknown-model", ""} {
+		if got := ContextWindowFor(modelID); got != 131_072 {
+			t.Errorf("ContextWindowFor(%q) = %d, want environment override 131072", modelID, got)
+		}
+	}
+}
+
+func TestContextWindowForIgnoresInvalidEnvironmentOverride(t *testing.T) {
+	t.Setenv("WINGMAN_CONTEXT_WINDOW_MODE", "")
+	t.Setenv("WINGMAN_LARGE_CONTEXT", "")
+
+	for _, value := range []string{"invalid", "0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("WINGMAN_CONTEXT_WINDOW", value)
+			if got := ContextWindowFor("qwen3.8"); got != 262_144 {
+				t.Errorf("ContextWindowFor(qwen3.8) = %d, want catalog fallback 262144", got)
+			}
+		})
 	}
 }
 
@@ -169,7 +219,60 @@ func TestClientConfigProviderPriorityAndFallback(t *testing.T) {
 	assertClientConfig(t, "http://ollama.test/v1", "ollama-secret")
 	unsetEnv(t, "OLLAMA_HOST")
 	unsetEnv(t, "OLLAMA_API_KEY")
+	assertClientConfig(t, "http://localhost:4242/v1", "wingman-secret")
+	unsetEnv(t, "WINGMAN_TOKEN")
 	assertClientConfig(t, "http://localhost:4242/v1", "-")
+}
+
+func TestClientConfigIgnoresBlankProviders(t *testing.T) {
+	for _, name := range []string{"WINGMAN_URL", "WINGMAN_TOKEN", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENROUTER_API_KEY", "OLLAMA_HOST", "OLLAMA_API_KEY"} {
+		t.Setenv(name, " \t")
+	}
+	assertClientConfig(t, "http://localhost:4242/v1", "-")
+	if got := defaultTelemetryOptions().ProviderName; got != "wingman" {
+		t.Fatalf("provider = %s", got)
+	}
+	t.Setenv("OPENAI_API_KEY", " openai-token ")
+	assertClientConfig(t, "https://api.openai.com/v1", "openai-token")
+	if got := defaultTelemetryOptions().ProviderName; got != "openai" {
+		t.Fatalf("provider = %s", got)
+	}
+	t.Setenv("WINGMAN_URL", " https://gateway.test/prefix/ ")
+	t.Setenv("WINGMAN_TOKEN", " gateway-token ")
+	assertClientConfig(t, "https://gateway.test/prefix/v1", "gateway-token")
+}
+
+func TestDefaultTelemetryOptionsFollowBackend(t *testing.T) {
+	for _, name := range []string{
+		"WINGMAN_URL", "WINGMAN_TOKEN", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+		"OPENROUTER_API_KEY", "OLLAMA_HOST", "OLLAMA_API_KEY",
+	} {
+		unsetEnv(t, name)
+	}
+
+	t.Run("fallback", func(t *testing.T) {
+		opts := defaultTelemetryOptions()
+		if opts.ServiceName != "" || opts.ProviderName != "wingman" || opts.ServerAddress != "localhost" || opts.ServerPort != 4242 {
+			t.Fatalf("telemetry options = %+v", opts)
+		}
+	})
+
+	t.Run("OpenAI", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "test")
+		t.Setenv("OPENAI_BASE_URL", "https://openai.test/v1")
+		opts := defaultTelemetryOptions()
+		if opts.ProviderName != "openai" || opts.ServerAddress != "openai.test" || opts.ServerPort != 443 {
+			t.Fatalf("telemetry options = %+v", opts)
+		}
+	})
+
+	t.Run("Ollama", func(t *testing.T) {
+		t.Setenv("OLLAMA_HOST", "ollama.test")
+		opts := defaultTelemetryOptions()
+		if opts.ProviderName != "ollama" || opts.ServerAddress != "ollama.test" || opts.ServerPort != 80 {
+			t.Fatalf("telemetry options = %+v", opts)
+		}
+	})
 }
 
 func assertClientConfig(t *testing.T, wantBaseURL, wantToken string) {
