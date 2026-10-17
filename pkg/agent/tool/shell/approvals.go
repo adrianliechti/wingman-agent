@@ -30,6 +30,21 @@ func confirmDangerous(ctx context.Context, elicit *tool.Elicitation, appr *Appro
 	return confirmIfDangerous(ctx, elicit, appr, "shell_command", command, ClassifyEffect(args) == tool.EffectDangerous)
 }
 
+// confirmEscalation always asks: outside the sandbox a command has the user's full privileges.
+func confirmEscalation(ctx context.Context, elicit *tool.Elicitation, appr *Approvals, command, justification, workdir string) error {
+	if elicit == nil || elicit.Confirm == nil {
+		return fmt.Errorf("running outside the sandbox requires approval, which is unavailable here")
+	}
+	text := command + "  [outside the sandbox]"
+	if workdir != "" {
+		text += "  [in " + workdir + "]"
+	}
+	if justification = strings.TrimSpace(justification); justification != "" {
+		text += "\nJustification: " + justification
+	}
+	return confirmIfDangerous(ctx, elicit, appr, "sandbox_escalation", text, true)
+}
+
 func confirmIfDangerous(ctx context.Context, elicit *tool.Elicitation, appr *Approvals, kind, text string, dangerous bool) error {
 	if !dangerous || elicit == nil || elicit.Confirm == nil {
 		return nil

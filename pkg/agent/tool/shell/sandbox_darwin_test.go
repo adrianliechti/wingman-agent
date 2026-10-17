@@ -4,6 +4,7 @@ package shell
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +15,7 @@ import (
 )
 
 func TestSeatbeltProfileUsesParameterizedWritableRoots(t *testing.T) {
-	profile, definitions := seatbeltProfile([]string{"/repo with spaces", "/private/tmp"})
+	profile, definitions := seatbeltProfile(sandboxPolicy{WritableRoots: []string{"/repo with spaces", "/private/tmp"}, Network: true})
 
 	if strings.Contains(profile, "/repo with spaces") {
 		t.Fatalf("profile interpolates an untrusted path directly: %s", profile)
@@ -48,7 +49,12 @@ func TestSeatbeltProfileUsesParameterizedWritableRoots(t *testing.T) {
 }
 
 func TestSeatbeltProfileCompiles(t *testing.T) {
-	profile, definitions := seatbeltProfile([]string{t.TempDir(), "/private/tmp"})
+	profile, definitions := seatbeltProfile(sandboxPolicy{
+		WritableRoots: []string{t.TempDir(), "/private/tmp"},
+		ProtectedRoot: filepath.Join(t.TempDir(), `we"ird\ (root)`),
+		DenyRead:      []string{t.TempDir()},
+		Network:       true,
+	})
 	args := []string{"-p", profile}
 	args = append(args, definitions...)
 	args = append(args, "--", "/usr/bin/true")
@@ -76,7 +82,7 @@ func TestSeatbeltProfileEnforcesWorkspaceWrites(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(outside) })
 	inside := filepath.Join(workspace, "inside")
 
-	profile, definitions := seatbeltProfile([]string{workspace})
+	profile, definitions := seatbeltProfile(sandboxPolicy{WritableRoots: []string{workspace}})
 	args := []string{"-p", profile}
 	args = append(args, definitions...)
 	command := "touch " + shellTestQuote(inside) + " && ! touch " + shellTestQuote(outside)
@@ -101,4 +107,81 @@ func TestSeatbeltProfileEnforcesWorkspaceWrites(t *testing.T) {
 
 func shellTestQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func TestSeatbeltProfileProtectsConfigAndCredentials(t *testing.T) {
+	workspace := canonicalPath(t.TempDir())
+	secrets := canonicalPath(t.TempDir())
+	for _, dir := range []string{".git/hooks", "sub/.git/hooks"} {
+		if err := os.MkdirAll(filepath.Join(workspace, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, content := range map[string]string{filepath.Join(workspace, ".git/config"): "[core]\n", filepath.Join(secrets, "key"): "secret"} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	profile, definitions := seatbeltProfile(sandboxPolicy{WritableRoots: []string{workspace}, ProtectedRoot: workspace, DenyRead: []string{secrets}})
+	checks := []string{
+		"touch ok.txt", "touch .git/ORIG_HEAD",
+		"! touch .git/hooks/pre-commit", "! touch sub/.git/hooks/pre-commit", "! sh -c 'echo x >> .git/config'",
+		"! mkdir .vscode", "! touch mcp.json", "! mv .git moved", "! cat " + shellTestQuote(filepath.Join(secrets, "key")),
+	}
+	args := append([]string{"-p", profile}, definitions...)
+	// An && list fails on the first check that misbehaves; set -e would ignore negated commands.
+	args = append(args, "--", "/bin/sh", "-c", "{ "+strings.Join(checks, " && ")+"; } 2>/dev/null")
+	cmd := exec.Command(sandboxExecPath, args...)
+	cmd.Dir = workspace
+	output, err := cmd.CombinedOutput()
+	if err != nil && strings.Contains(string(output), "sandbox_apply: Operation not permitted") {
+		t.Skip("nested Seatbelt profiles are unavailable")
+	}
+	if err != nil {
+		t.Fatalf("a protection check failed: %v\n%s", err, output)
+	}
+}
+
+func TestSeatbeltProfileReachesUnixSocketsOnlyInsideWritableRoots(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Socket paths are limited to about 104 bytes, too short for t.TempDir.
+	short, err := os.MkdirTemp("/tmp", "wm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(short) })
+	workspace := canonicalPath(short)
+	inside := filepath.Join(workspace, "s")
+	outside := filepath.Join(home, fmt.Sprintf(".wm-sock-%d", os.Getpid()))
+	for _, path := range []string{inside, outside} {
+		listener, err := net.Listen("unix", path)
+		if err != nil {
+			t.Skipf("unix sockets unavailable: %v", err)
+		}
+		t.Cleanup(func() { listener.Close() })
+		go func() {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				conn.Close()
+			}
+		}()
+	}
+
+	profile, definitions := seatbeltProfile(sandboxPolicy{WritableRoots: []string{workspace}, Network: true})
+	args := append([]string{"-p", profile}, definitions...)
+	args = append(args, "--", "/bin/sh", "-c", "{ /usr/bin/nc -U "+shellTestQuote(inside)+" </dev/null && ! /usr/bin/nc -U "+shellTestQuote(outside)+" </dev/null; } 2>/dev/null")
+	output, err := exec.Command(sandboxExecPath, args...).CombinedOutput()
+	if err != nil && strings.Contains(string(output), "sandbox_apply: Operation not permitted") {
+		t.Skip("nested Seatbelt profiles are unavailable")
+	}
+	if err != nil {
+		t.Fatalf("socket reachability is wrong: %v\n%s", err, output)
+	}
 }

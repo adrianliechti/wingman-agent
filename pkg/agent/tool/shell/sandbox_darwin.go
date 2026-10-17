@@ -5,16 +5,17 @@ package shell
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 )
 
 const sandboxExecPath = "/usr/bin/sandbox-exec"
 
-func platformSandboxCommand(shell, command, _ string, writableRoots []string) (string, []string, error) {
+func platformSandboxCommand(shell, command, _ string, policy sandboxPolicy) (string, []string, error) {
 	if info, err := os.Stat(sandboxExecPath); err != nil || info.IsDir() {
 		return "", nil, fmt.Errorf("workspace shell sandbox requires %s", sandboxExecPath)
 	}
-	profile, definitions := seatbeltProfile(writableRoots)
+	profile, definitions := seatbeltProfile(policy)
 	args := []string{"-p", profile}
 	args = append(args, definitions...)
 	args = append(args, "--", shell, "-c", command)
@@ -29,15 +30,21 @@ func platformSandboxCommand(shell, command, _ string, writableRoots []string) (s
 // policy used by Anthropic Sandbox Runtime, narrowed to Wingman's
 // workspace-write mode. Apple Events and Launch Services operations stay
 // blocked because either can ask an unsandboxed GUI process to act on behalf
-// of the sandboxed command. Network remains enabled in this first mode.
-func seatbeltProfile(writableRoots []string) (string, []string) {
-	var writeRules strings.Builder
+// of the sandboxed command. Unix sockets are reachable only inside writable
+// roots, so host services such as docker.sock or SSH agents stay out of reach.
+func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 	var definitions []string
-	for i, root := range writableRoots {
-		name := fmt.Sprintf("WRITABLE_ROOT_%d", i)
-		fmt.Fprintf(&writeRules, " (literal (param %q)) (subpath (param %q))", name, name)
-		definitions = append(definitions, "-D"+name+"="+root)
+	paramRules := func(prefix string, paths []string) string {
+		var rules strings.Builder
+		for i, path := range paths {
+			name := fmt.Sprintf("%s_%d", prefix, i)
+			fmt.Fprintf(&rules, " (literal (param %q)) (subpath (param %q))", name, name)
+			definitions = append(definitions, "-D"+name+"="+path)
+		}
+		return rules.String()
 	}
+	writeRules := paramRules("WRITABLE_ROOT", policy.WritableRoots)
+	socketRules := strings.ReplaceAll(writeRules, " (literal ", " (subpath ")
 
 	profile := `(version 1)
 (deny default)
@@ -76,7 +83,7 @@ func seatbeltProfile(writableRoots []string) (string, []string) {
 (allow sysctl-write (sysctl-name "kern.tcsm_enable"))
 (allow distributed-notification-post)
 (allow file-read*)
-(allow file-write*` + writeRules.String() + `
+(allow file-write*` + writeRules + `
  (literal "/dev/null")
  (literal "/dev/zero")
  (literal "/dev/random")
@@ -94,10 +101,61 @@ func seatbeltProfile(writableRoots []string) (string, []string) {
  (literal "/dev/tty")
  (literal "/dev/ptmx")
  (regex #"^/dev/ttys"))
-(allow network*)
 (allow pseudo-tty)
 (deny appleevent-send)
-(deny lsopen)`
-
+(deny lsopen)
+`
+	if policy.Network {
+		profile += seatbeltNetwork
+	}
+	if socketRules != "" {
+		profile += "(allow network*" + socketRules + ")\n"
+	}
+	if policy.ProtectedRoot != "" {
+		profile += seatbeltProtectedRules(policy.ProtectedRoot)
+	}
+	if denyRules := paramRules("DENY_READ", policy.DenyRead); denyRules != "" {
+		profile += "(deny file-read*" + denyRules + ")\n(deny file-write*" + denyRules + ")\n"
+	}
 	return profile, definitions
+}
+
+// seatbeltNetwork allows IP traffic plus the DNS and TLS trust services it needs, following Codex.
+const seatbeltNetwork = `(allow network-outbound (remote ip "*:*"))
+(allow network-inbound (local ip "*:*"))
+(allow network-bind (local ip "*:*"))
+(allow network-outbound (literal "/private/var/run/mDNSResponder"))
+(allow mach-lookup
+ (global-name "com.apple.networkd")
+ (global-name "com.apple.ocspd")
+ (global-name "com.apple.trustd.agent")
+ (global-name "com.apple.SystemConfiguration.DNSConfiguration")
+ (global-name "com.apple.SystemConfiguration.configd"))
+(allow sysctl-read (sysctl-name-regex #"^net.routetable"))
+`
+
+// seatbeltProtectedRules denies writes to protected paths at any depth and
+// blocks renaming .git or the workspace, which would sidestep the path rules.
+func seatbeltProtectedRules(root string) string {
+	prefix := "^" + regexp.QuoteMeta(root) + "/"
+	var filters []string
+	for _, dir := range protectedDirs {
+		filters = append(filters, seatbeltRegex(prefix+"(.*/)?"+regexp.QuoteMeta(dir)+"(/.*)?$"))
+	}
+	for _, file := range protectedFiles {
+		filters = append(filters, seatbeltRegex(prefix+"(.*/)?"+regexp.QuoteMeta(file)+"$"))
+	}
+	for _, file := range protectedRootFiles {
+		filters = append(filters, seatbeltRegex(prefix+regexp.QuoteMeta(file)+"$"))
+	}
+	return "(deny file-write*\n " + strings.Join(filters, "\n ") + ")\n" +
+		"(deny file-write-unlink " + seatbeltRegex(prefix+`(.*/)?\.git$`) + " (literal " + seatbeltString(root) + "))\n"
+}
+
+func seatbeltRegex(pattern string) string {
+	return "(regex " + seatbeltString(pattern) + ")"
+}
+
+func seatbeltString(value string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"`
 }

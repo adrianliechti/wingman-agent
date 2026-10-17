@@ -2,11 +2,13 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +23,25 @@ func safetyGuardLine(elicit *tool.Elicitation) string {
 		return "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands are checked by an automatic reviewer first; a denial states its reason and must not be worked around. An approved command re-runs without re-checking for the rest of the session."
 	}
 	return "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first. An approved command re-runs without re-asking for the rest of the session."
+}
+
+func sandboxGuideLine() string {
+	network := "Network access is allowed"
+	if !sandboxNetworkEnabled() {
+		network = "Network access is blocked"
+	}
+	return "- Commands run in a sandbox: they can read most files but not credentials such as ~/.ssh or ~/.aws, write only inside the workspace and temp directories, and cannot change .git/hooks, .git/config, editor settings, or agent configuration. " + network + ". If a command genuinely needs more, set `sandbox_permissions` to \"require_escalated\" with a `justification`; it then runs outside the sandbox after approval."
+}
+
+// sandboxDenialHints follows Codex: output words that suggest the sandbox blocked a failed command.
+var sandboxDenialHints = []string{"operation not permitted", "permission denied", "read-only file system", "sandbox"}
+
+func looksLikeSandboxDenial(output string, err error) bool {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() <= 0 {
+		return false
+	}
+	output = strings.ToLower(output)
+	return slices.ContainsFunc(sandboxDenialHints, func(hint string) bool { return strings.Contains(output, hint) })
 }
 
 // approvalWorkdir returns the directory to surface in approval prompts: empty
@@ -70,12 +91,12 @@ func Command(ctx context.Context, command, workingDir string) *exec.Cmd {
 
 // ToolCommand applies the environment policy and workspace sandbox for model-generated scripts.
 func ToolCommand(ctx context.Context, command, workspaceDir, workingDir string, opts *Options) (*exec.Cmd, error) {
-	return buildToolCommand(ctx, command, workspaceDir, workingDir, opts)
+	return buildToolCommand(ctx, command, workspaceDir, workingDir, opts, false)
 }
 
-func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir string, opts *Options) (*exec.Cmd, error) {
+func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir string, opts *Options, escalated bool) (*exec.Cmd, error) {
 	var sandbox *sandboxOptions
-	if workspaceSandboxEnabled() {
+	if workspaceSandboxEnabled() && !escalated {
 		sandbox = &sandboxOptions{WorkspaceDir: workspaceDir}
 		if opts != nil {
 			sandbox.ExtraWritableRoots = opts.ExtraWritableRoots

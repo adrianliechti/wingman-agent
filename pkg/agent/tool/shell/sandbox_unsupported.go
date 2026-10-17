@@ -7,6 +7,6 @@ import (
 	"runtime"
 )
 
-func platformSandboxCommand(_, _, _ string, _ []string) (string, []string, error) {
+func platformSandboxCommand(_, _, _ string, _ sandboxPolicy) (string, []string, error) {
 	return "", nil, fmt.Errorf("workspace shell sandbox is not supported on %s", runtime.GOOS)
 }

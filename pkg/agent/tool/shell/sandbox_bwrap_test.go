@@ -14,7 +14,7 @@ import (
 )
 
 func TestBubblewrapArgsMakeOnlySelectedRootsWritable(t *testing.T) {
-	args := bubblewrapArgs("/bin/sh", "touch marker", "/repo/sub", []string{"/repo", "/tmp"})
+	args := bubblewrapArgs("/bin/sh", "touch marker", "/repo/sub", sandboxPolicy{WritableRoots: []string{"/repo", "/tmp"}, Network: true})
 
 	for _, sequence := range [][]string{
 		{"--new-session", "--unshare-user", "--unshare-pid"},
@@ -53,7 +53,7 @@ func TestBubblewrapEnforcesWorkspaceWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := "touch " + shellTestQuoteLinux(inside) + " && ! touch " + shellTestQuoteLinux(outside)
-	cmd := exec.Command(bwrap, bubblewrapArgs("/bin/sh", command, workspace, []string{workspace})...)
+	cmd := exec.Command(bwrap, bubblewrapArgs("/bin/sh", command, workspace, sandboxPolicy{WritableRoots: []string{workspace}, Network: true})...)
 	cmd.Dir = workspace
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("sandboxed command failed: %v\n%s", err, output)
@@ -77,4 +77,35 @@ func containsSequence(values, sequence []string) bool {
 		}
 	}
 	return false
+}
+
+func TestBubblewrapArgsProtectConfigHideCredentialsAndCutNetwork(t *testing.T) {
+	workspace := t.TempDir()
+	secrets := t.TempDir()
+	netrc := filepath.Join(t.TempDir(), ".netrc")
+	if err := os.MkdirAll(filepath.Join(workspace, ".git", "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(netrc, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := bubblewrapArgs("/bin/sh", "true", workspace, sandboxPolicy{
+		WritableRoots: []string{workspace},
+		ProtectedRoot: workspace,
+		DenyRead:      []string{secrets, netrc},
+	})
+	hooks := filepath.Join(workspace, ".git", "hooks")
+	for _, sequence := range [][]string{
+		{"--unshare-net"},
+		{"--ro-bind", hooks, hooks},
+		{"--tmpfs", secrets},
+		{"--ro-bind", "/dev/null", netrc},
+	} {
+		if !containsSequence(args, sequence) {
+			t.Errorf("args do not contain %q: %q", sequence, args)
+		}
+	}
+	if slices.Contains(args, filepath.Join(workspace, ".vscode")) {
+		t.Fatalf("missing protected path was mounted: %q", args)
+	}
 }

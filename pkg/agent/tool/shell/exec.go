@@ -243,6 +243,7 @@ func (m *ExecManager) notifyExit(s *execSession) {
 
 type execSession struct {
 	id          int
+	sandboxed   bool
 	validation  bool
 	command     string
 	workdir     string
@@ -505,6 +506,20 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 	}
 
 	commandLines = append(commandLines, safetyGuardLine(elicit))
+	properties := map[string]any{
+		"command":     map[string]any{"type": "string", "description": "Command to run."},
+		"validation":  map[string]any{"type": "boolean", "description": "Set true for a test, build, lint or other check of the changes. The review records its actual exit status; use false for ordinary commands."},
+		"description": map[string]any{"type": "string", "description": "Short label (e.g. \"Start dev server\")."},
+		"workdir":     map[string]any{"type": "string", "description": "Directory to run the command in (absolute, or relative to the workspace). Defaults to the workspace root."},
+		"tty":         map[string]any{"type": "boolean", "description": "Run in a pseudo-terminal (Unix only)."},
+		"wait":        map[string]any{"type": "integer", "minimum": 0, "description": fmt.Sprintf("Seconds to wait before backgrounding (default %d, capped at %d; 0 backgrounds immediately).", defaultExecWait, maxExecWait)},
+		"timeout":     map[string]any{"type": "integer", "minimum": 0, "maximum": maxExecTimeout, "description": "Seconds after which the command is killed. Omit or set 0 to let it run until it exits or the agent session closes."},
+	}
+	if workspaceSandboxEnabled() {
+		commandLines = append(commandLines, sandboxGuideLine())
+		properties["sandbox_permissions"] = map[string]any{"type": "string", "enum": []string{"use_default", "require_escalated"}, "description": "require_escalated runs the command outside the sandbox after approval."}
+		properties["justification"] = map[string]any{"type": "string", "description": "Why the command must run outside the sandbox."}
+	}
 	commandDescription := strings.Join(commandLines, "\n")
 
 	sessionDescription := strings.Join([]string{
@@ -525,17 +540,8 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, a
 			Effect:      ClassifyEffect,
 
 			Parameters: map[string]any{
-				"type": "object",
-
-				"properties": map[string]any{
-					"command":     map[string]any{"type": "string", "description": "Command to run."},
-					"validation":  map[string]any{"type": "boolean", "description": "Set true for a test, build, lint or other check of the changes. The review records its actual exit status; use false for ordinary commands."},
-					"description": map[string]any{"type": "string", "description": "Short label (e.g. \"Start dev server\")."},
-					"workdir":     map[string]any{"type": "string", "description": "Directory to run the command in (absolute, or relative to the workspace). Defaults to the workspace root."},
-					"tty":         map[string]any{"type": "boolean", "description": "Run in a pseudo-terminal (Unix only)."},
-					"wait":        map[string]any{"type": "integer", "minimum": 0, "description": fmt.Sprintf("Seconds to wait before backgrounding (default %d, capped at %d; 0 backgrounds immediately).", defaultExecWait, maxExecWait)},
-					"timeout":     map[string]any{"type": "integer", "minimum": 0, "maximum": maxExecTimeout, "description": "Seconds after which the command is killed. Omit or set 0 to let it run until it exits or the agent session closes."},
-				},
+				"type":       "object",
+				"properties": properties,
 
 				"required":             []string{"command"},
 				"additionalProperties": false,
@@ -576,7 +582,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	if err := ctx.Err(); err != nil {
 		return tool.Result{}, err
 	}
-	if err := validateExecArgs(args, []string{"command", "description", "workdir"}, []string{"tty", "validation"}); err != nil {
+	if err := validateExecArgs(args, []string{"command", "description", "workdir", "sandbox_permissions", "justification"}, []string{"tty", "validation"}); err != nil {
 		return tool.Result{}, err
 	}
 	command, ok := args["command"].(string)
@@ -612,7 +618,15 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		return tool.Result{}, err
 	}
 
-	if err := confirmDangerous(ctx, elicit, appr, args, approvalWorkdir(workDir, dir)); err != nil {
+	sandboxed := workspaceSandboxEnabled()
+	escalated := sandboxed && args["sandbox_permissions"] == "require_escalated"
+	if escalated {
+		justification, _ := args["justification"].(string)
+		err = confirmEscalation(ctx, elicit, appr, command, justification, approvalWorkdir(workDir, dir))
+	} else {
+		err = confirmDangerous(ctx, elicit, appr, args, approvalWorkdir(workDir, dir))
+	}
+	if err != nil {
 		return tool.Result{}, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -626,7 +640,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 
 	sctx, cancel := context.WithCancel(context.Background())
 
-	cmd, err := buildToolCommand(sctx, command, workDir, dir, opts)
+	cmd, err := buildToolCommand(sctx, command, workDir, dir, opts, escalated)
 	if err != nil {
 		cancel()
 		return tool.Result{}, err
@@ -639,6 +653,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	validation, _ := args["validation"].(bool)
 
 	s := &execSession{
+		sandboxed:   sandboxed && !escalated,
 		validation:  validation,
 		command:     command,
 		workdir:     dir,
@@ -1043,7 +1058,11 @@ func completedSessionResult(s *execSession) tool.Result {
 	if s.exitedAt.IsZero() {
 		duration = time.Since(s.started)
 	}
-	result := s.result(sessionResult(s.drain(), s.exitNotice()))
+	output, notice := s.drain(), s.exitNotice()
+	if s.sandboxed && looksLikeSandboxDenial(output, s.exitErr) {
+		notice += "\nThe sandbox may have blocked this command. If it needs access outside the workspace, rerun it with sandbox_permissions \"require_escalated\" and a justification."
+	}
+	result := s.result(sessionResult(output, notice))
 	result.IsError = s.exitErr != nil
 	result.Metadata["duration_ms"] = duration.Milliseconds()
 	if exitErr, ok := errors.AsType[*exec.ExitError](s.exitErr); ok {

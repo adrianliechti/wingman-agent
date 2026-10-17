@@ -106,10 +106,20 @@ session** grants the scope described by that prompt.
 
 Set `WINGMAN_SANDBOX=workspace` to run the agent's shell commands and scheduled
 scripts in an OS sandbox: Seatbelt on macOS, bubblewrap (`bwrap`) on Linux.
-Commands can read anywhere but write only to the workspace, project memory, and
-temporary directories; network access stays enabled. A command the sandbox
-blocks fails and is not retried outside it. Your own `!` commands and hooks run
-unsandboxed. Windows is not supported yet.
+
+- Commands can read most files, but not credentials such as `~/.ssh`,
+  `~/.aws`, `~/.gnupg`, `~/.kube`, or Wingman's MCP tokens.
+- They write only to the workspace, project memory, and temporary directories,
+  and cannot change `.git/hooks`, `.git/config`, `.vscode`, `.envrc`, or agent
+  configuration such as `.wingman`, `.agents`, `.claude`, and `mcp.json`.
+- Network access is on; set `WINGMAN_SANDBOX_NETWORK=off` to block it. On macOS,
+  local services such as the Docker socket or SSH agent stay unreachable.
+- When a command needs more, the agent can ask to run it outside the sandbox.
+  In Agent mode the reviewer decides; Unattended mode allows it.
+
+Your own `!` commands and hooks run unsandboxed. On Linux, protected paths that
+do not exist yet, or sit below the workspace root, are not covered. Windows is
+not supported yet.
 
 See [reviewing changes](reviewing-changes.md) to inspect or undo a turn, and
 [remote web access](remote-control.md) to connect through a relay.

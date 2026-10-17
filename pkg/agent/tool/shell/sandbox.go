@@ -8,9 +8,56 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/adrianliechti/wingman-agent/pkg/layout"
 )
 
-const workspaceSandboxActiveEnv = "WINGMAN_SANDBOX_ACTIVE"
+const (
+	workspaceSandboxActiveEnv  = "WINGMAN_SANDBOX_ACTIVE"
+	workspaceSandboxNetworkEnv = "WINGMAN_SANDBOX_NETWORK"
+)
+
+// sandboxPolicy is what a platform backend enforces for one command.
+type sandboxPolicy struct {
+	WritableRoots []string
+	// ProtectedRoot keeps git, editor, and agent configuration read-only beneath the workspace.
+	ProtectedRoot string
+	// DenyRead hides existing credential paths.
+	DenyRead []string
+	Network  bool
+}
+
+// Writes here would later run code outside the sandbox: through git, editors, direnv, shells, or agent config.
+var (
+	protectedDirs      = []string{".git/hooks", ".vscode", ".idea", ".codex", ".wingman", ".agents", ".claude"}
+	protectedFiles     = []string{".git/config", ".envrc"}
+	protectedRootFiles = []string{"mcp.json", ".mcp.json", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile"}
+)
+
+func sandboxNetworkEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv(workspaceSandboxNetworkEnv)), "off")
+}
+
+// credentialPaths returns the existing credential stores sandboxed commands must not read.
+func credentialPaths() []string {
+	var candidates []string
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		for _, rel := range []string{".ssh", ".aws", ".gnupg", ".azure", ".kube", ".netrc", ".git-credentials", ".docker/config.json", ".config/gh", ".config/gcloud"} {
+			candidates = append(candidates, filepath.Join(home, rel))
+		}
+	}
+	if path, err := layout.WingmanPath("mcp-credentials.json"); err == nil {
+		candidates = append(candidates, path)
+	}
+	var paths []string
+	for _, path := range candidates {
+		path = canonicalPath(path)
+		if _, err := os.Lstat(path); err == nil && !slices.Contains(paths, path) {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
 
 // workspaceSandboxEnabled is deliberately opt-in while the native backends
 // mature. WINGMAN_SANDBOX=off keeps its existing meaning for the file tools;
@@ -69,15 +116,18 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 	if err != nil {
 		return nil, fmt.Errorf("resolve sandbox shell %q: %w", shell, err)
 	}
-	shellPath, err = filepath.Abs(shellPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolve sandbox shell %q: %w", shell, err)
+	// Keep the link name: multi-call binaries such as busybox dispatch on argv[0].
+	if shell, err = filepath.Abs(shellPath); err != nil {
+		return nil, fmt.Errorf("resolve sandbox shell %q: %w", shellPath, err)
 	}
-	shell = canonicalPath(shellPath)
 
-	writableRoots := writableRootsFor(workspaceDir, opts.ExtraWritableRoots)
-
-	path, args, err := platformSandboxCommand(shell, command, workingDir, writableRoots)
+	policy := sandboxPolicy{
+		WritableRoots: writableRootsFor(workspaceDir, opts.ExtraWritableRoots),
+		ProtectedRoot: workspaceDir,
+		DenyRead:      credentialPaths(),
+		Network:       sandboxNetworkEnabled(),
+	}
+	path, args, err := platformSandboxCommand(shell, command, workingDir, policy)
 	if err != nil {
 		return nil, err
 	}
