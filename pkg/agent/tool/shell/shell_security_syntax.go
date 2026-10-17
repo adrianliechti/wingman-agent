@@ -844,31 +844,8 @@ func hasShellSessionPoisoning(statements []string) bool {
 			return true
 		}
 
-		for _, word := range words {
-			if !isEnvAssignment(word) {
-				break
-			}
-			if dangerousSessionAssignment(word) {
-				return true
-			}
-		}
-		if commandBase(words[0]) == "env" {
-			for i := 1; i < len(words); i++ {
-				word := words[i]
-				if word == "-u" || word == "--unset" {
-					i++
-					continue
-				}
-				if strings.HasPrefix(word, "-") {
-					continue
-				}
-				if !isEnvAssignment(word) {
-					break
-				}
-				if dangerousSessionAssignment(word) {
-					return true
-				}
-			}
+		if hasDangerousWrappedAssignment(words) {
+			return true
 		}
 
 		resolved, cmd, unresolved := unwrapCommandWords(words)
@@ -918,6 +895,24 @@ func hasShellSessionPoisoning(statements []string) bool {
 				}
 			}
 		}
+	}
+	return false
+}
+
+// Inspect every wrapper layer before quote-removed argv is flattened. Otherwise
+// command/nice/timeout can conceal env startup hooks from the review gate.
+func hasDangerousWrappedAssignment(words []string) bool {
+	for len(words) > 0 {
+		for len(words) > 0 && isEnvAssignment(words[0]) {
+			if dangerousSessionAssignment(words[0]) {
+				return true
+			}
+			words = words[1:]
+		}
+		if len(words) == 0 || !commandRunners[commandBase(words[0])] {
+			return false
+		}
+		words = skipRunnerFlags(commandBase(words[0]), words[1:])
 	}
 	return false
 }

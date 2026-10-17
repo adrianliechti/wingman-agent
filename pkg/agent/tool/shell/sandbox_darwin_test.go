@@ -138,6 +138,7 @@ func TestSeatbeltProfileProtectsConfigAndCredentials(t *testing.T) {
 		"! touch .git/hooks/pre-commit", "! touch sub/.git/hooks/pre-commit", "! sh -c 'echo x >> .git/config'",
 		"! mkdir .vscode", "! touch mcp.json", "! mv .git moved", "! cat " + shellTestQuote(filepath.Join(secrets, "key")),
 		"! touch agent-config/bypass",
+		"! mkdir .CoDeX", "! touch .EnVrC", "! touch .mCp.JsOn",
 	}
 	args := append([]string{"-p", profile}, definitions...)
 	// An && list fails on the first check that misbehaves; set -e would ignore negated commands.

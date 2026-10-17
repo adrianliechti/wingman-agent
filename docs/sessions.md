@@ -144,6 +144,13 @@ destructive intent and supplies Plan mode, read-only subagent, and parallel
 execution decisions. The sandbox limits capabilities; it does not prevent all
 data loss inside writable directories or make every network transfer safe.
 
+Read-only classification is conservative: output-file operands, dynamically
+supplied options, and build tools that execute project code do not qualify as
+inspection commands. They remain available in normal Agent mode. Losing the
+read-only classification alone does not trigger approval; destructive actions
+such as recursive `find -delete`, forced Git updates, and protected configuration
+writes receive automatic review.
+
 Your own `!` commands and hooks run unsandboxed. On Linux and Windows, native
 protected-path rules cover existing paths at each writable root; paths that
 do not exist yet, or sit below those roots, are not covered. The classifier

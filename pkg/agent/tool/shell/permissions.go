@@ -48,6 +48,11 @@ func executionOptions(workspace string, args map[string]any, base *Options) (*Op
 			if !filepath.IsAbs(path) {
 				path = filepath.Join(workspace, path)
 			}
+			// A protected directory must not become the root of a new grant:
+			// backend exclusions beneath that root would miss the directory itself.
+			if sandboxpolicy.ProtectedRelative(path) || sandboxpolicy.ProtectedRelative(canonicalPath(path)) {
+				return nil, "", fmt.Errorf("cannot grant a protected configuration directory %q; request explicit escalation", path)
+			}
 			path = canonicalPath(path)
 			if err := validateWritableRoot(path); err != nil {
 				return nil, "", err
@@ -128,6 +133,14 @@ func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, wo
 	if justification != "" {
 		text += "\nJustification: " + justification
 	}
+	// Review can take time. A changed symlink must not silently redirect a
+	// reviewed grant, workspace, or working directory before launch.
+	boundaries := map[string]string{}
+	for _, path := range append([]string{workspace, workdir, opts.TempDir}, opts.ExtraWritableRoots...) {
+		if path != "" {
+			boundaries[path] = canonicalPath(path)
+		}
+	}
 	verdict, err := elicit.Approve(ctx, tool.Approval{
 		Message: "❯ " + approvalDisplayText(text),
 		Action: map[string]any{"type": kind, "command": command, "workdir": workdir,
@@ -136,5 +149,13 @@ func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, wo
 	if err != nil {
 		return fmt.Errorf("failed to get approval: %w", err)
 	}
-	return verdict.Err("command execution denied by user")
+	if err := verdict.Err("command execution denied by user"); err != nil {
+		return err
+	}
+	for path, approved := range boundaries {
+		if canonicalPath(path) != approved {
+			return fmt.Errorf("execution path %q changed during approval; request review again", path)
+		}
+	}
+	return nil
 }

@@ -140,7 +140,7 @@ var readOnlyCommands = map[string][]string{
 	"gh": {"status", "repo view", "pr list", "pr view", "pr status", "pr diff", "issue list", "issue view", "issue status", "gist list", "gist view", "release list", "release view", "run list", "run view", "workflow list", "workflow view", "help", "version"},
 
 	"npm":  {"list", "ls", "ll", "la", "view", "info", "show", "outdated", "search", "help", "config list", "config get", "version", "explain", "why", "fund", "audit"},
-	"yarn": {"list", "info", "why", "outdated", "licenses", "config list", "config get", "help", "version", "audit"},
+	"yarn": {"list", "info", "why", "outdated", "licenses", "config list", "config get", "help", "--version", "audit"},
 	"pnpm": {"list", "ls", "ll", "why", "outdated", "licenses", "config list", "config get", "help", "version", "audit"},
 	"bun":  {"pm ls", "pm cache", "help", "version"},
 	"deno": {"info", "doc", "types", "help", "version"},
@@ -148,24 +148,26 @@ var readOnlyCommands = map[string][]string{
 	"python":  {"-V", "--version", "-h", "--help"},
 	"python3": {"-V", "--version", "-h", "--help"},
 	"node":    {"-v", "--version", "-h", "--help"},
-	"npx":     {"which", "--version", "-v"},
+	"npx":     {"--version", "-v"},
 
 	"pip":  {"list", "show", "freeze", "check", "config list", "config get", "help", "version", "--version"},
 	"pip3": {"list", "show", "freeze", "check", "config list", "config get", "help", "version", "--version"},
 	"uv":   {"pip list", "pip show", "pip freeze", "pip check", "version", "help"},
 
 	"poetry": {"show", "version", "env info", "env list", "config list", "config get", "help", "about", "check"},
-	"pdm":    {"list", "show", "info", "config", "venv list", "help", "version"},
+	"pdm":    {"list", "show", "info", "venv list", "help", "version"},
 
 	"cargo":  {"tree", "metadata", "version", "search", "help", "pkgid", "verify-project", "read-manifest", "locate-project", "--version", "-V"},
 	"rustup": {"show", "check", "component list", "target list", "toolchain list", "help", "version", "--version"},
 
 	"gem":    {"list", "search", "info", "specification", "dependency", "environment", "help", "version", "--version"},
-	"bundle": {"list", "show", "info", "outdated", "check", "version", "config list", "config get", "help", "viz"},
+	"bundle": {"list", "show", "info", "outdated", "check", "version", "config list", "config get", "help"},
 
 	"java":   {"-version", "--version", "-help", "--help"},
-	"mvn":    {"dependency:tree", "dependency:list", "dependency:analyze", "help:describe", "help:effective-pom", "help:effective-settings", "versions:display-dependency-updates", "versions:display-plugin-updates", "-v", "-version", "--version", "help"},
-	"gradle": {"dependencies", "projects", "tasks", "properties", "help", "-v", "-version", "--version"},
+	// Maven goals execute plugins; even Gradle inspection tasks evaluate build
+	// scripts. Only standalone version queries bypass the read-only boundary.
+	"mvn":    {"-v", "-version", "--version"},
+	"gradle": {"-v", "--version"},
 
 	"dotnet":   {"list", "nuget list", "tool list", "workload list", "sdk check", "help", "--version", "--info", "--list-sdks", "--list-runtimes"},
 	"composer": {"show", "info", "search", "outdated", "licenses", "depends", "why", "prohibits", "why-not", "config list", "diagnose", "help", "list", "about", "--version", "-V"},
@@ -175,10 +177,10 @@ var readOnlyCommands = map[string][]string{
 
 	"kubectl":   {"version", "--version", "get", "describe", "logs", "explain", "api-resources", "api-versions", "cluster-info", "top", "config view", "config get-contexts", "config current-context", "auth can-i", "auth whoami", "diff", "events", "help"},
 	"helm":      {"version", "--version", "list", "ls", "status", "get", "get all", "get hooks", "get manifest", "get notes", "get values", "history", "show", "show all", "show chart", "show crds", "show readme", "show values", "search hub", "search repo", "repo list", "env", "help"},
-	"kustomize": {"build", "cfg", "version", "help"},
+	"kustomize": {"build", "version", "help"},
 
-	"terraform": {"version", "providers", "state list", "state show", "output", "graph", "show", "validate", "help", "-version", "-help"},
-	"tofu":      {"version", "providers", "state list", "state show", "output", "graph", "show", "validate", "help", "-version", "-help"},
+	"terraform": {"version", "providers", "state list", "state show", "output", "graph", "show", "help", "-version", "-help"},
+	"tofu":      {"version", "providers", "state list", "state show", "output", "graph", "show", "help", "-version", "-help"},
 }
 
 var normalizedReadOnlyCommands = map[string][]string{}

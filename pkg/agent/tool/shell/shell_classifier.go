@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
@@ -93,7 +94,7 @@ func isDangerousShellAnalysis(analysis shellAnalysis, dialect shellDialect) bool
 	if decoded := decodePowerShellBackticks(command); decoded != command && isDangerousPowerShellScript(decoded) {
 		return true
 	}
-	if syntax.protectedWrite || syntax.downloadToShell {
+	if syntax.protectedWrite || syntax.credentialRead || syntax.downloadToShell {
 		return true
 	}
 
@@ -305,6 +306,11 @@ func isProtectedNormalizedPath(path string) bool {
 	if path == "" {
 		return false
 	}
+	// Keep direct-spelling review rules aligned with both the OS sandbox and
+	// edit tools. These checks also apply when native enforcement is disabled.
+	if sandboxpolicy.ProtectedRelative(path) || slices.Contains(sandboxpolicy.ProtectedRootFiles, filepath.Base(path)) {
+		return true
+	}
 
 	if len(path) > 2 && path[1] == ':' && strings.HasPrefix(path[2:], "/windows/") {
 		return true
@@ -347,7 +353,8 @@ func IsReadOnlyCommand(command string) bool {
 }
 
 func isReadOnlyCommandDialect(command string, dialect shellDialect) bool {
-	return isReadOnlyShellAnalysis(analyzeShellCommand(command, dialect))
+	analysis := analyzeShellCommand(command, dialect)
+	return !isDangerousShellAnalysis(analysis, dialect) && isReadOnlyShellAnalysis(analysis)
 }
 
 func isReadOnlyShellAnalysis(analysis shellAnalysis) bool {
@@ -711,12 +718,6 @@ func skipRunnerFlags(runner string, args []string) []string {
 		args = args[1:]
 	}
 
-	if runner == "env" {
-		for len(args) > 0 && isEnvAssignment(args[0]) {
-			args = args[1:]
-		}
-	}
-
 	if runner == "timeout" && len(args) > 0 {
 		args = args[1:]
 	}
@@ -787,7 +788,7 @@ func isSingleCommandReadOnly(command string) bool {
 	}
 
 	args := words[1:]
-	if commandHasRuntimeArguments(args) && commandNeedsStaticArguments(cmd) {
+	if commandHasRuntimeArguments(args) && (commandNeedsStaticArguments(cmd) || len(subs) > 0) {
 		return false
 	}
 	if hasPowerShellVariableWritingParameter(args) {
@@ -834,8 +835,7 @@ func isSingleCommandReadOnly(command string) bool {
 		}
 	case "fd":
 		for _, arg := range args {
-			switch arg {
-			case "-x", "--exec", "-X", "--exec-batch":
+			if arg == "--exec" || arg == "--exec-batch" || strings.HasPrefix(arg, "--exec=") || strings.HasPrefix(arg, "--exec-batch=") || strings.HasPrefix(arg, "-x") || strings.HasPrefix(arg, "-X") {
 				return false
 			}
 		}
@@ -858,11 +858,9 @@ func isSingleCommandReadOnly(command string) bool {
 			}
 		}
 	case "xxd":
-		for _, arg := range args {
-			if arg == "-r" || arg == "-revert" {
-				return false
-			}
-		}
+		return singleInputReadOnly(args, []string{"-c", "-g", "-l", "-o", "-s", "-n"}, []string{"-a", "-b", "-C", "-E", "-e", "-u", "-p", "-ps", "-i", "-v"})
+	case "uniq":
+		return singleInputReadOnly(args, []string{"-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"}, []string{"-c", "-d", "-D", "-u", "-i", "-z", "--count", "--repeated", "--unique", "--ignore-case", "--zero-terminated"})
 	case "file":
 		for _, arg := range args {
 			if arg == "-m" || arg == "-M" || arg == "-f" ||
@@ -920,11 +918,29 @@ func isSingleCommandReadOnly(command string) bool {
 		if len(args) != 0 {
 			return false
 		}
-	case "node", "python", "python3":
+	case "node", "python", "python3", "npx", "java", "mvn", "gradle":
 		// These are allowlisted only for a single version/help flag. Node, in
 		// particular, processes --run even when -v appears first.
 		if len(args) != 1 {
 			return false
+		}
+	case "npm", "pnpm", "poetry":
+		if len(args) > 0 && args[0] == "version" {
+			for _, arg := range args[1:] {
+				if arg != "--json" && arg != "--short" && arg != "-s" {
+					return false
+				}
+			}
+		}
+	case "terraform", "tofu":
+		if len(args) > 0 && args[0] == "providers" && len(args) != 1 {
+			return false
+		}
+	case "kustomize":
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-o") || strings.HasPrefix(arg, "--output") || strings.HasPrefix(arg, "--enable-") {
+				return false
+			}
 		}
 	}
 
@@ -966,43 +982,82 @@ var safeReadOnlyEnvironment = map[string]bool{
 }
 
 func hasUnsafeReadOnlyEnvironment(words []string) bool {
-	i := 0
-	for i < len(words) && isEnvAssignment(words[i]) {
-		i++
-	}
-	if i == len(words) {
-		for _, word := range words {
-			if environmentAssignmentCanHijack(word) {
+	for len(words) > 0 {
+		i := 0
+		for i < len(words) && isEnvAssignment(words[i]) {
+			i++
+		}
+		for _, word := range words[:i] {
+			if (i == len(words) && environmentAssignmentCanHijack(word)) || (i < len(words) && !safeEnvironmentAssignment(word)) {
 				return true
 			}
 		}
-		return false
-	}
-	for _, word := range words[:i] {
-		if !safeEnvironmentAssignment(word) {
+		words = words[i:]
+		if len(words) == 0 {
+			return false
+		}
+		if hasExecutablePath(words[0]) {
 			return true
 		}
+		runner := commandBase(words[0])
+		if !commandRunners[runner] {
+			return false
+		}
+		// xargs obtains new arguments from input; nohup can create nohup.out.
+		if runner == "xargs" || runner == "nohup" {
+			return true
+		}
+		rest := skipRunnerFlags(runner, words[1:])
+		if runner == "time" || runner == "env" {
+			for _, arg := range words[1 : len(words)-len(rest)] {
+				if runner == "time" && (strings.HasPrefix(arg, "-o") || strings.HasPrefix(arg, "--output")) || runner == "env" && strings.HasPrefix(arg, "-P") {
+					return true
+				}
+			}
+		}
+		words = rest
 	}
-	if i >= len(words) || commandBase(words[i]) != "env" {
-		return false
-	}
+	return false
+}
 
-	for j := i + 1; j < len(words); j++ {
-		word := words[j]
-		if strings.HasPrefix(word, "-") {
-			if (word == "-u" || word == "--unset") && j+1 < len(words) {
-				j++
+// uniq and xxd accept an optional output pathname, with no output flag. Only
+// known options and at most one input operand are safe to run as read-only.
+func singleInputReadOnly(args, valueOptions, switches []string) bool {
+	inputs := 0
+	options := true
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if options && arg == "--" {
+			options = false
+			continue
+		}
+		if !options || arg == "-" || !strings.HasPrefix(arg, "-") {
+			inputs++
+			if inputs > 1 {
+				return false
 			}
 			continue
 		}
-		if !isEnvAssignment(word) {
-			break
+		if slices.Contains(switches, arg) {
+			continue
 		}
-		if !safeEnvironmentAssignment(word) {
-			return true
+		matched := false
+		for _, option := range valueOptions {
+			if arg == option {
+				i++
+				matched = i < len(args)
+				break
+			}
+			if len(option) == 2 && strings.HasPrefix(arg, option) || strings.HasPrefix(arg, option+"=") {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func environmentAssignmentCanHijack(word string) bool {
@@ -1078,11 +1133,12 @@ func bunPmCacheReadOnly(args []string) bool {
 func gitSubcommandReadOnly(sub string, args []string) bool {
 	switch sub {
 	case "branch":
+		listing := slices.Contains(args, "--list") || slices.Contains(args, "-l")
 		for _, arg := range args {
 			switch arg {
 			case "--list", "-l", "--show-current", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose":
 			default:
-				if !strings.HasPrefix(arg, "--format=") && !strings.HasPrefix(arg, "--sort=") {
+				if !(listing && !strings.HasPrefix(arg, "-")) && !strings.HasPrefix(arg, "--format=") && !strings.HasPrefix(arg, "--sort=") {
 					return false
 				}
 			}
@@ -1092,6 +1148,9 @@ func gitSubcommandReadOnly(sub string, args []string) bool {
 		listing := false
 		positional := false
 		for _, arg := range args {
+			if arg == "-d" || arg == "--delete" || arg == "-f" || arg == "--force" {
+				return false
+			}
 			switch {
 			case arg == "-l" || arg == "--list":
 				listing = true
@@ -1243,6 +1302,18 @@ func isDangerousSingleCommandDialect(command string, dialect shellDialect) bool 
 	if hasPowerShellDefaultParameterWrite(args) {
 		return true
 	}
+	switch cmd {
+	case "touch", "mkdir", "rmdir", "rm", "mv", "chmod", "chown", "ln", "tee", "cp", "install":
+		for _, arg := range args {
+			// Inspect option-attached targets too, such as cp --target-directory.
+			if _, value, ok := strings.Cut(arg, "="); strings.HasPrefix(arg, "-") && ok {
+				arg = value
+			}
+			if isProtectedRedirectTarget(arg) {
+				return true
+			}
+		}
+	}
 
 	switch cmd {
 	case "sudo", "su", "doas", "pkexec", "run0", "gosu":
@@ -1300,21 +1371,6 @@ func isDangerousSingleCommandDialect(command string, dialect shellDialect) bool 
 		return argsHaveURL(args) && containsArgFold(args, "url.dll,fileprotocolhandler")
 	case "rm":
 		return hasRecursiveRemoveArg(args)
-	case "tee":
-		for _, arg := range args {
-			if !strings.HasPrefix(arg, "-") && isProtectedRedirectTarget(arg) {
-				return true
-			}
-		}
-		return false
-	case "cp", "mv", "install":
-		for _, arg := range slices.Backward(args) {
-			if strings.HasPrefix(arg, "-") {
-				continue
-			}
-			return isProtectedRedirectTarget(arg)
-		}
-		return false
 	case "git":
 		return isDangerousGitCommand(args)
 	}
@@ -1432,11 +1488,13 @@ func extractShellScript(args []string) string {
 	return ""
 }
 
-// findHasDangerousAction classifies -exec payloads; -delete stays benign like
-// a plain non-recursive rm — it is scoped by find's own filters.
+// findHasDangerousAction reviews recursive deletion and executable payloads.
+// A textual filter does not establish that the matched files are disposable.
 func findHasDangerousAction(args []string) bool {
 	for i, arg := range args {
 		switch arg {
+		case "-delete":
+			return true
 		case "-exec", "-execdir", "-ok", "-okdir":
 			var payload []string
 			for _, a := range args[i+1:] {
@@ -1463,6 +1521,9 @@ func fdHasDangerousExec(args []string) bool {
 			if payload, ok := strings.CutPrefix(arg, prefix); ok {
 				return isDangerousSingleCommand(strings.TrimSpace(payload + " " + strings.Join(args[i+1:], " ")))
 			}
+		}
+		if len(arg) > 2 && (strings.HasPrefix(arg, "-x") || strings.HasPrefix(arg, "-X")) {
+			return isDangerousSingleCommand(strings.Join(append([]string{arg[2:]}, args[i+1:]...), " "))
 		}
 	}
 	return false
@@ -1592,10 +1653,12 @@ func isDangerousGitCommand(args []string) bool {
 	case "reset":
 		return hasDynamicArgument(args) || hasAnyArg(args, "--hard") || hasAnyArgPrefix(args, "--hard=")
 	case "checkout":
-		return hasDynamicArgument(args) || hasAnyArg(args, "-f", "--force")
+		return hasDynamicArgument(args) || hasAnyArg(args, "-f", "--force", "--")
+	case "restore":
+		return hasDynamicArgument(args) || !hasAnyArg(args, "--staged", "-S") || hasAnyArg(args, "--worktree", "-W")
 	case "push":
 		return hasDynamicArgument(args) || hasAnyArg(args, "--force", "--force-with-lease", "-f") ||
-			hasAnyArgPrefix(args, "--force-with-lease=")
+			hasAnyArgPrefix(args, "--force-with-lease=", "+")
 	case "branch":
 		return hasDynamicArgument(args) || hasAnyArg(args, "-D")
 	case "rebase":
@@ -1644,7 +1707,7 @@ func hasRecursiveRemoveArg(args []string) bool {
 		if argumentIsDynamic(arg) {
 			return true
 		}
-		if arg == "--recursive" || strings.HasPrefix(arg, "--recursive=") {
+		if len(arg) >= len("--r") && strings.HasPrefix("--recursive", arg) || strings.HasPrefix(arg, "--recursive=") {
 			return true
 		}
 
@@ -1693,7 +1756,7 @@ func gitGlobalOptionRunsCommand(args []string) bool {
 			return false
 		}
 		name, _, _ := strings.Cut(arg, "=")
-		if name == "-c" {
+		if strings.HasPrefix(name, "-c") {
 			return true
 		}
 		if len(name) >= 4 && (strings.HasPrefix("--config-env", name) || strings.HasPrefix("--exec-path", name)) {

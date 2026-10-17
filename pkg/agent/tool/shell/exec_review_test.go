@@ -152,6 +152,35 @@ func TestExecSessionApprovalDoesNotCarryAcrossInteractiveState(t *testing.T) {
 	}
 }
 
+func TestExecSessionDeniedSplitCommandIsNotSubmitted(t *testing.T) {
+	for _, eof := range []bool{false, true} {
+		m := NewExecManager(nil)
+		writer := &reviewWriteCloser{}
+		s := &execSession{stdin: writer, done: make(chan struct{})}
+		calls := 0
+		elicit := &tool.Elicitation{Review: func(_ context.Context, approval tool.Approval) (tool.Verdict, error) {
+			calls++
+			if !strings.Contains(approval.Message, "rm --rec fixture") {
+				t.Fatalf("review lost earlier input: %s", approval.Message)
+			}
+			return tool.Verdict{Reason: "fixture denial"}, nil
+		}}
+		if _, err := writeSessionInput(t.Context(), m, 1, s, elicit, "rm --rec fixture"); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		if eof {
+			_, err = applySessionInput(t.Context(), m, s, elicit, "", true)
+		} else {
+			_, err = writeSessionInput(t.Context(), m, 1, s, elicit, "\n")
+		}
+		if err == nil || calls != 1 || writer.String() != "rm --rec fixture" {
+			t.Fatalf("eof=%t: denied command submitted: %q, reviews=%d, err=%v", eof, writer.String(), calls, err)
+		}
+		m.Close()
+	}
+}
+
 type reviewWriteCloser struct{ bytes.Buffer }
 
 func (*reviewWriteCloser) Close() error { return nil }

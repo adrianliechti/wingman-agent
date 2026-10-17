@@ -107,6 +107,43 @@ func TestPermissionExpansionsCannotMasqueradeAsReadOnly(t *testing.T) {
 	}
 }
 
+func TestScopedRootCannotSelectProtectedConfiguration(t *testing.T) {
+	t.Setenv("WINGMAN_SANDBOX", "workspace")
+	t.Setenv(workspaceSandboxActiveEnv, "")
+	workspace, outside := t.TempDir(), t.TempDir()
+	for _, name := range []string{".git", ".agents", ".codex", ".vscode"} {
+		root := filepath.Join(outside, name)
+		if err := os.Mkdir(root, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := executionOptions(workspace, map[string]any{"sandbox_permissions": "require_permissions", "writable_roots": []any{root}, "justification": "fixture"}, nil); err == nil {
+			t.Errorf("granted protected directory %s", root)
+		}
+	}
+}
+
+func TestPermissionReviewRejectsChangedRootAlias(t *testing.T) {
+	t.Setenv("WINGMAN_SANDBOX", "workspace")
+	t.Setenv(workspaceSandboxActiveEnv, "")
+	first, second, parent := t.TempDir(), t.TempDir(), t.TempDir()
+	alias := filepath.Join(parent, "workspace")
+	if err := os.Symlink(first, alias); err != nil {
+		t.Skip(err)
+	}
+	elicit := &tool.Elicitation{Review: func(context.Context, tool.Approval) (tool.Verdict, error) {
+		if err := os.Remove(alias); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(second, alias); err != nil {
+			t.Fatal(err)
+		}
+		return tool.Verdict{Allowed: true}, nil
+	}}
+	if err := confirmExecution(t.Context(), elicit, "echo fixture", alias, alias, "require_permissions", "fixture", &Options{Network: true}); err == nil {
+		t.Fatal("approval followed a changed workspace alias")
+	}
+}
+
 func TestReviewOnlyApproverIsUsedAndMissingApproverFailsClosed(t *testing.T) {
 	calls := 0
 	elicit := &tool.Elicitation{Review: func(context.Context, tool.Approval) (tool.Verdict, error) {
