@@ -955,11 +955,7 @@ func (s *Server) UnstableForkSession(ctx context.Context, params acpsdk.Unstable
 	if err != nil {
 		s.releaseWorkspace(w)
 		if errors.Is(err, fs.ErrNotExist) {
-			return acpsdk.UnstableForkSessionResponse{}, &acpsdk.RequestError{
-				Code:    -32002,
-				Message: "Resource not found",
-				Data:    map[string]any{"sessionId": string(params.SessionId)},
-			}
+			return acpsdk.UnstableForkSessionResponse{}, sessionNotFound(params.SessionId)
 		}
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
@@ -1001,11 +997,7 @@ func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.S
 	if err := w.agent.LoadSession(ctx, string(id)); err != nil {
 		s.releaseWorkspace(w)
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, &acpsdk.RequestError{
-				Code:    -32002,
-				Message: "Resource not found",
-				Data:    map[string]any{"sessionId": string(id)},
-			}
+			return nil, nil, sessionNotFound(id)
 		}
 		return nil, nil, fmt.Errorf("session %s not found: %w", id, err)
 	}
@@ -1270,4 +1262,8 @@ func sdkToolLocations(locations []agent.ToolLocation) []acpsdk.ToolCallLocation 
 		result = append(result, mapped)
 	}
 	return result
+}
+
+func sessionNotFound(id acpsdk.SessionId) *acpsdk.RequestError {
+	return &acpsdk.RequestError{Code: -32002, Message: "Resource not found", Data: map[string]any{"sessionId": string(id)}}
 }

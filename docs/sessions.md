@@ -25,8 +25,8 @@ active turn and removes its saved history.
 
 Fork to try another direction without losing the original thread. The fork
 copies the conversation, model, effort, and mode; background agents, schedules,
-and queued follow-ups stay with the original. Forking waits for the current turn
-to finish.
+and queued follow-ups stay with the original. A session cannot be forked while
+a turn is running; wait for it to finish or stop it first.
 
 In the terminal UI, run `/fork [title]`. To fork when starting:
 

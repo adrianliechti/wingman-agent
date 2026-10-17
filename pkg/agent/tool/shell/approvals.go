@@ -2,7 +2,6 @@ package shell
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -57,11 +56,8 @@ func confirmIfDangerous(ctx context.Context, elicit *tool.Elicitation, appr *App
 		return fmt.Errorf("failed to get approval: %w", err)
 	}
 
-	if !verdict.Allowed {
-		if verdict.Reason != "" {
-			return errors.New(verdict.Reason)
-		}
-		return fmt.Errorf("command execution denied by user")
+	if err := verdict.Err("command execution denied by user"); err != nil {
+		return err
 	}
 
 	appr.mu.Lock()

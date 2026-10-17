@@ -7,9 +7,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 )
 
-// Async runs a session's async handlers in the background. They cannot block
-// or rewrite anything; additional context they produce is delivered when they
-// finish. Close cancels running handlers and waits for them to exit.
+// Async runs observe-only handlers in the background and delivers their context when they finish.
 type Async struct {
 	deliver func(runtime hook.Runtime, context []string)
 
@@ -38,14 +36,15 @@ func (a *Async) start(runtime hook.Runtime, run func(ctx context.Context) []stri
 	if a.closed {
 		return
 	}
+	// Async hooks are best-effort: a full pool drops the run instead of parking goroutines.
+	select {
+	case a.slots <- struct{}{}:
+	default:
+		return
+	}
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		select {
-		case a.slots <- struct{}{}:
-		case <-a.ctx.Done():
-			return
-		}
 		defer func() { <-a.slots }()
 		context := run(hook.WithRuntime(a.ctx, runtime))
 		if len(context) == 0 || a.ctx.Err() != nil || a.deliver == nil {

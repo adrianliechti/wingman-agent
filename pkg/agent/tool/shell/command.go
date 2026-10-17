@@ -17,6 +17,9 @@ func safetyGuardLine(elicit *tool.Elicitation) string {
 	if elicit == nil || elicit.Confirm == nil {
 		return "- There is NO confirmation gate: commands run immediately. Never run destructive or privilege-escalating commands (recursive deletes, sudo, force-push) unless the user explicitly asked for that exact action."
 	}
+	if elicit.Review != nil {
+		return "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands are checked by an automatic reviewer first; a denial states its reason and must not be worked around. An approved command re-runs without re-checking for the rest of the session."
+	}
 	return "- Safety guard: routine mutating commands run directly, but destructive or privilege-escalating commands require user confirmation first. An approved command re-runs without re-asking for the rest of the session."
 }
 

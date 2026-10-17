@@ -2,7 +2,6 @@ import { useMainLayout } from "./hooks/useMainLayout.ts";
 import { useMobileLayout } from "./hooks/useMobileLayout.ts";
 import { MobileNavigation } from "./components/MobileNavigation";
 import {
-	backendSettingsQuery,
 	useWorkspace,
 	useSessionSettings,
 	draftSettingsKey,
@@ -893,9 +892,6 @@ export default function App() {
 
 	const phase = activeSession?.phase ?? "idle";
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
-	const canCompact =
-		useQuery(backendSettingsQuery(splitSessionKey(sessionId).backendId)).data
-			?.canCompact ?? false;
 
 	useEffect(() => {
 		const ref = splitSessionKey(sessionId);
@@ -2296,7 +2292,7 @@ export default function App() {
 					},
 				]
 			: []),
-		...(canCompact &&
+		...(activeSettings.canCompact &&
 		activeTab.type === "chat" &&
 		!isDraft(sessionId) &&
 		phase === "idle"

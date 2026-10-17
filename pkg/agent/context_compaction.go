@@ -220,8 +220,7 @@ type CompactResult struct {
 	TokensAfter  int64
 }
 
-// Compact checkpoints the context between turns on request. focus tells the
-// summary what to preserve in particular.
+// Compact checkpoints the context between turns; focus tells the summary what to keep.
 func (a *Agent) Compact(ctx context.Context, focus string) (CompactResult, error) {
 	a.queueMu.Lock()
 	if a.running {
@@ -255,8 +254,7 @@ func (a *Agent) Compact(ctx context.Context, focus string) (CompactResult, error
 	}
 	req.messages = a.requestMessages()
 	after := a.requestTokens(req)
-	// No response has measured the rewritten context yet; until one does,
-	// usage displays the estimate instead of the pre-compaction size.
+	// Until a response measures the rewritten context, usage shows this estimate.
 	if err := a.recordEvents(RuntimeEvent{Type: EventUsage, Usage: &Usage{LastInputTokens: after}}); err != nil {
 		return CompactResult{}, err
 	}

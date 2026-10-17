@@ -103,7 +103,7 @@ type sessionState struct {
 	projectInstructionCache projectInstructionCache
 
 	cancelMu    sync.Mutex
-	cancelFn    context.CancelFunc
+	cancelFn    context.CancelCauseFunc
 	cancelGen   uint64
 	closed      bool
 	startSource string
@@ -288,19 +288,18 @@ func (a *Agent) LoadSession(_ context.Context, id string) error {
 	return nil
 }
 
-// ForkSession carries over history, model selection and mode. Background
-// tasks, schedules and queued inputs stay with the source.
+// ForkSession copies history, model and mode; tasks, schedules and queued inputs stay with the source.
 func (a *Agent) ForkSession(ctx context.Context, id, title string) (string, error) {
 	newID := uuid.NewString()
 	source := a.session(id)
 	if err := a.forkJournal(source, id, newID, title); err != nil {
 		return "", err
 	}
-	if err := a.copySessionSettings(id, newID); err != nil {
-		_ = session.Delete(a.sessionsDir, newID)
-		return "", err
+	err := a.copySessionSettings(id, newID)
+	if err == nil {
+		err = a.LoadSession(ctx, newID)
 	}
-	if err := a.LoadSession(ctx, newID); err != nil {
+	if err != nil {
 		_ = session.Delete(a.sessionsDir, newID)
 		return "", err
 	}
@@ -315,12 +314,12 @@ func (a *Agent) forkJournal(source *sessionState, id, newID, title string) error
 	if source == nil {
 		return session.Fork(a.sessionsDir, id, newID, title)
 	}
-	// Holding cancelMu keeps a new turn from starting while the journal is copied.
-	source.cancelMu.Lock()
-	defer source.cancelMu.Unlock()
-	if source.cancelFn != nil || source.aa.Running() {
-		return code.ErrTurnInProgress
+	// Claiming the session keeps a turn from starting while the journal is copied.
+	gen, err := source.claimTurn(func(error) {})
+	if err != nil {
+		return err
 	}
+	defer source.clearCancel(gen)
 	return session.Fork(a.sessionsDir, id, newID, title)
 }
 
@@ -392,31 +391,14 @@ func (a *Agent) Compact(ctx context.Context, id, focus string) (harness.CompactR
 	if s == nil {
 		return harness.CompactResult{}, fmt.Errorf("session %s not found", id)
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	s.cancelMu.Lock()
-	if s.closed {
-		s.cancelMu.Unlock()
-		return harness.CompactResult{}, errors.New("session is closed")
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	gen, err := s.claimTurn(cancel)
+	if err != nil {
+		return harness.CompactResult{}, err
 	}
-	if s.cancelFn != nil || s.aa.Running() {
-		s.cancelMu.Unlock()
-		return harness.CompactResult{}, code.ErrTurnInProgress
-	}
-	s.cancelGen++
-	gen := s.cancelGen
-	s.cancelFn = cancel
-	s.cancelMu.Unlock()
 	defer s.clearCancel(gen)
-
-	ctx = hook.WithRuntime(ctx, hook.Runtime{
-		SessionID:      s.aa.CacheKey,
-		CWD:            s.parent.workspace.RootPath,
-		Model:          s.aa.Model(),
-		PermissionMode: s.permissionMode(),
-		StartSource:    s.startSource,
-	})
-	return s.aa.Compact(ctx, focus)
+	return s.aa.Compact(hook.WithRuntime(ctx, s.hookRuntime()), focus)
 }
 
 func (a *Agent) ContextStats(id string) (harness.ContextStats, bool) {
@@ -536,13 +518,13 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 
 	a.lastActive.Store(id)
 
-	sendCtx, cancel := context.WithCancel(code.WithSessionID(ctx, id))
+	sendCtx, cancel := context.WithCancelCause(code.WithSessionID(ctx, id))
 	// Startup cannot ask a web client without session correlation. Defer local
 	// configuration approval until this turn, where prompts have an owner.
 	if a.workspace.MCP != nil && len(a.workspace.MCP.TrustRequired) > 0 {
 		if err := a.workspace.InitMCP(sendCtx, a.currentUI()); err != nil {
 			if sendCtx.Err() != nil {
-				cancel()
+				cancel(nil)
 				return nil, sendCtx.Err()
 			}
 			input = append(slices.Clone(input), harness.Content{Text: "Some MCP servers are unavailable: " + err.Error(), Hidden: true})
@@ -550,14 +532,14 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 	}
 	stream, gen, err := s.beginSend(sendCtx, input, cancel)
 	if err != nil {
-		cancel()
+		cancel(nil)
 		return nil, err
 	}
 
 	return func(yield func(harness.Message, error) bool) {
 		defer func() {
 			s.clearCancel(gen)
-			cancel()
+			cancel(nil)
 		}()
 		for msg, err := range stream {
 			if !yield(msg, err) {
@@ -584,7 +566,7 @@ func (a *Agent) Steer(_ context.Context, id string, input code.TurnInput) error 
 
 func (a *Agent) Cancel(id string) {
 	if s := a.session(id); s != nil {
-		s.cancel()
+		s.cancel(harness.ErrInterrupted)
 	}
 }
 
@@ -736,17 +718,17 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 		}
 	})
 	hookOptions := external.BuildOptions{Async: hookAsync, MCP: ws.CallMCPTool, SpillDir: ws.ScratchPath}
-	hookTrust := ws.HookTrust()
+	hookTrust := attendedTrust{TrustStore: ws.HookTrust(), session: s}
 
 	// Workspace hooks come with the repo, not the user — gate them behind a
 	// confirmation so a cloned project cannot run commands unprompted.
 	workspaceOptions := hookOptions
 	if rules := workspaceHooks.RuleCount(); rules > 0 {
-		fingerprint, fingerprintErr := workspaceHooks.Fingerprint(ws.RootPath, workspaceHooksPath)
+		fingerprint, _ := workspaceHooks.Fingerprint(ws.RootPath, workspaceHooksPath)
 		workspaceOptions.Gate = &external.Gate{
-			Confirm:     elicit.Confirm,
+			Confirm:     a.confirm,
 			Message:     fmt.Sprintf("Run %d workspace hook rule(s) from %s?\n\nApproval is remembered until these hooks change.", rules, workspaceHooksPath),
-			Fingerprint: func() (string, error) { return fingerprint, fingerprintErr },
+			Fingerprint: func() string { return fingerprint },
 			Store:       hookTrust,
 		}
 	}
@@ -761,17 +743,14 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 		declarations, declarationsErr := p.Hooks.Fingerprint(ws.RootPath, p.Name, p.Root, p.Data)
 		pluginOptions := hookOptions
 		pluginOptions.Gate = &external.Gate{
-			Confirm: elicit.Confirm,
+			Confirm: a.confirm,
 			Message: fmt.Sprintf("Run %d hook rule(s) from plugin %q at %s?\n\nApproval is remembered until the plugin changes.", p.Hooks.RuleCount(), p.Name, p.Root),
-			Fingerprint: func() (string, error) {
-				if declarationsErr != nil {
-					return "", declarationsErr
-				}
+			Fingerprint: func() string {
 				content, err := external.ContentHash(p.Root)
-				if err != nil {
-					return "", err
+				if declarationsErr != nil || err != nil {
+					return ""
 				}
-				return declarations + "/" + content, nil
+				return declarations + "/" + content
 			},
 			Store: hookTrust,
 		}
@@ -950,7 +929,13 @@ func userHooksConfigPath() string {
 }
 
 func (a *Agent) promptContext(ctx context.Context) context.Context {
-	if a.options.RequireSessionContext || code.SessionIDFromContext(ctx) != "" {
+	if code.SessionIDFromContext(ctx) != "" {
+		return ctx
+	}
+	if sid := hook.RuntimeFromContext(ctx).SessionID; sid != "" && a.session(sid) != nil {
+		return code.WithSessionID(ctx, sid)
+	}
+	if a.options.RequireSessionContext {
 		return ctx
 	}
 
@@ -979,20 +964,12 @@ func (a *Agent) elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elicit
 	return ui.Elicit(ctx, req)
 }
 
+// confirm asks a person, or approves in unattended mode; tool approvals go through review.
 func (a *Agent) confirm(ctx context.Context, message string) (bool, error) {
 	ctx = a.promptContext(ctx)
-	if s := a.session(code.SessionIDFromContext(ctx)); s != nil {
-		if allowed, decided := s.permissionHooks(ctx); decided {
-			return allowed, nil
-		}
-		if s.unattended.Load() {
-			return true, nil
-		}
+	if s := a.session(code.SessionIDFromContext(ctx)); s != nil && s.unattended.Load() {
+		return true, nil
 	}
-	return a.askUser(ctx, message)
-}
-
-func (a *Agent) askUser(ctx context.Context, message string) (bool, error) {
 	ui := a.currentUI()
 	if ui == nil {
 		return false, nil
@@ -1000,38 +977,18 @@ func (a *Agent) askUser(ctx context.Context, message string) (bool, error) {
 	return ui.Confirm(ctx, message)
 }
 
-func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, cancel context.CancelFunc) (iter.Seq2[harness.Message, error], uint64, error) {
+func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, cancel context.CancelCauseFunc) (iter.Seq2[harness.Message, error], uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
 	catalog := collectManagedTools(s.parent.workspace)
-
-	s.cancelMu.Lock()
-	if s.closed {
-		s.cancelMu.Unlock()
-		return nil, 0, errors.New("session is closed")
-	}
-	if s.cancelFn != nil || s.aa.Running() {
-		s.cancelMu.Unlock()
-		return nil, 0, code.ErrTurnInProgress
+	// Claiming before setup lets Cancel and Close reach hooks that wait on UI or external processes.
+	gen, err := s.claimTurn(cancel)
+	if err != nil {
+		return nil, 0, err
 	}
 	s.turnTools.Store(catalog)
-	s.cancelGen++
-	gen := s.cancelGen
-	s.cancelFn = cancel
-	s.cancelMu.Unlock()
-	s.reviews.reset()
-
-	// Hooks can wait on UI or external processes. Cancel and Close must be
-	// able to reach this turn while its synchronous setup is still running.
-	ctx = hook.WithRuntime(ctx, hook.Runtime{
-		SessionID:      s.aa.CacheKey,
-		CWD:            s.parent.workspace.RootPath,
-		Model:          s.aa.Model(),
-		PermissionMode: s.permissionMode(),
-		StartSource:    s.startSource,
-	})
-	stream, err := s.aa.Send(ctx, input)
+	stream, err := s.aa.Send(hook.WithRuntime(ctx, s.hookRuntime()), input)
 	if err != nil {
 		s.clearCancel(gen)
 		return nil, 0, err
@@ -1041,6 +998,31 @@ func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, c
 		return nil, 0, errors.New("agent returned a nil turn stream")
 	}
 	return stream, gen, nil
+}
+
+// claimTurn reserves the session for one operation; release it with clearCancel.
+func (s *sessionState) claimTurn(cancel context.CancelCauseFunc) (uint64, error) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	if s.closed {
+		return 0, errors.New("session is closed")
+	}
+	if s.cancelFn != nil || s.aa.Running() {
+		return 0, code.ErrTurnInProgress
+	}
+	s.cancelGen++
+	s.cancelFn = cancel
+	return s.cancelGen, nil
+}
+
+func (s *sessionState) hookRuntime() hook.Runtime {
+	return hook.Runtime{
+		SessionID:      s.aa.CacheKey,
+		CWD:            s.parent.workspace.RootPath,
+		Model:          s.aa.Model(),
+		PermissionMode: s.permissionMode(),
+		StartSource:    s.startSource,
+	}
 }
 
 func (s *sessionState) clearCancel(gen uint64) {
@@ -1053,12 +1035,12 @@ func (s *sessionState) clearCancel(gen uint64) {
 	s.cancelMu.Unlock()
 }
 
-func (s *sessionState) cancel() {
+func (s *sessionState) cancel(cause error) {
 	s.cancelMu.Lock()
 	fn := s.cancelFn
 	s.cancelMu.Unlock()
 	if fn != nil {
-		fn()
+		fn(cause)
 	}
 }
 
@@ -1074,7 +1056,7 @@ func (s *sessionState) close() {
 	s.cancelFn = nil
 	s.cancelMu.Unlock()
 	if fn != nil {
-		fn()
+		fn(nil)
 	}
 	close(s.watchStop)
 	_ = s.toolSet.Close()
@@ -1138,8 +1120,7 @@ func (s *sessionState) stashFileChanges(paths []string) {
 	s.changedMu.Unlock()
 }
 
-// stashHookContext keeps async hook output that finished between turns for
-// the next prompt.
+// stashHookContext holds async hook output that finished between turns for the next prompt.
 func (s *sessionState) stashHookContext(parts []string) {
 	s.hookContextMu.Lock()
 	s.hookContext = append(s.hookContext, parts...)
@@ -1152,6 +1133,19 @@ func (s *sessionState) takeHookContext() []string {
 	s.hookContext = nil
 	s.hookContextMu.Unlock()
 	return parts
+}
+
+// attendedTrust remembers only approvals a person gave; unattended ones last for the session.
+type attendedTrust struct {
+	external.TrustStore
+	session *sessionState
+}
+
+func (t attendedTrust) Trust(fingerprint string) error {
+	if t.session.unattended.Load() {
+		return nil
+	}
+	return t.TrustStore.Trust(fingerprint)
 }
 
 const fileChangeNoticeMax = 20

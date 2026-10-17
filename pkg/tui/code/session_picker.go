@@ -87,16 +87,19 @@ func shortSessionID(id string) string {
 func (a *App) loadSessionInfo(info corecode.SessionInfo) {
 	previousID := a.sessionID
 	a.runSessionOperation("Failed to load session", func(ctx context.Context, _ string) error { return a.agent.LoadSession(ctx, info.ID) }, func() {
-		a.turns.CancelCurrent(previousID)
-		a.activateSession(info.ID)
-		a.showWelcome = false
-		a.chat = nil
-		a.chatScroll = 0
-		a.follow = true
-		a.clearSelection()
-		a.syncMessages()
-		banner := fmt.Sprintf("Resumed session from %s", info.UpdatedAt.Format("Jan 2 15:04"))
-		a.appendAnnotation(func(width int) []string { return cellNotice(banner, theme.Default.Green, width) })
-		a.invalidate()
+		a.switchToSession(previousID, info.ID, fmt.Sprintf("Resumed session from %s", info.UpdatedAt.Format("Jan 2 15:04")))
 	})
+}
+
+func (a *App) switchToSession(previousID, id, banner string) {
+	a.turns.CancelCurrent(previousID)
+	a.activateSession(id)
+	a.showWelcome = false
+	a.chat = nil
+	a.chatScroll = 0
+	a.follow = true
+	a.clearSelection()
+	a.syncMessages()
+	a.appendAnnotation(func(width int) []string { return cellNotice(banner, theme.Default.Green, width) })
+	a.invalidate()
 }

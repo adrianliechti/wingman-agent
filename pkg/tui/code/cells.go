@@ -292,6 +292,22 @@ func tailPreview(lines []string, n int) []string {
 	return append(out, lines[len(lines)-n:]...)
 }
 
+// trimShellTail drops trailing blank lines and the "Command completed" footer
+// so a collapsed preview shows real output instead of padding.
+func trimShellTail(lines []string) []string {
+	trimBlank := func(lines []string) []string {
+		for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+			lines = lines[:len(lines)-1]
+		}
+		return lines
+	}
+	lines = trimBlank(lines)
+	if len(lines) > 0 && lines[len(lines)-1] == "Command completed" {
+		lines = trimBlank(lines[:len(lines)-1])
+	}
+	return lines
+}
+
 // headPreview keeps the first n lines — diffs read from the top.
 func headPreview(lines []string, n int) []string {
 	if len(lines) <= n+1 {
@@ -317,7 +333,7 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 	switch {
 	case isShellTool(name):
 		if !full {
-			body = tailPreview(preview, 3)
+			body = tailPreview(trimShellTail(preview), 3)
 		}
 	case isMutationTool(name):
 		t := theme.Default

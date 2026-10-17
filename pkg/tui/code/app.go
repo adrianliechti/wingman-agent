@@ -1499,17 +1499,7 @@ func (a *App) forkSession(title string) {
 		id, err = forker.ForkSession(ctx, current, title)
 		return err
 	}, func() {
-		a.turns.CancelCurrent(previousID)
-		a.activateSession(id)
-		a.showWelcome = false
-		a.chat = nil
-		a.chatScroll = 0
-		a.follow = true
-		a.clearSelection()
-		a.syncMessages()
-		banner := fmt.Sprintf("Forked session; the original is kept as %s", shortSessionID(previousID))
-		a.appendAnnotation(func(width int) []string { return cellNotice(banner, theme.Default.Green, width) })
-		a.invalidate()
+		a.switchToSession(previousID, id, fmt.Sprintf("Forked session; the original is kept as %s", shortSessionID(previousID)))
 	})
 }
 
@@ -1554,8 +1544,7 @@ func (a *App) showRecap() {
 	}()
 }
 
-// compactContext checkpoints the model context through the turn manager, so
-// background follow-ups queue behind it; Esc cancels like a turn.
+// compactContext goes through the turn manager so follow-ups queue behind it.
 func (a *App) compactContext(focus string) {
 	if a.operationPending {
 		a.showToast("Wait for the current operation or press Esc to cancel", theme.Default.Yellow)

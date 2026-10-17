@@ -2,7 +2,6 @@ package external
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -150,13 +149,13 @@ func TestGateCancellationDoesNotStickDeclined(t *testing.T) {
 
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	if gate.Allowed(canceled) {
+	if gate.Allowed(canceled, true) {
 		t.Fatal("canceled context should not allow gate")
 	}
 	if calls != 0 {
 		t.Fatalf("Confirm called on already-canceled context (%d calls)", calls)
 	}
-	if !gate.Allowed(t.Context()) {
+	if !gate.Allowed(t.Context(), true) {
 		t.Fatal("subsequent active context should still prompt and allow")
 	}
 	if calls != 1 {
@@ -215,33 +214,52 @@ func TestGateRemembersFingerprintAndReasksAfterChange(t *testing.T) {
 		return &Gate{
 			Message:     "allow hooks?",
 			Confirm:     func(context.Context, string) (bool, error) { prompts++; return true, nil },
-			Fingerprint: func() (string, error) { return fingerprint, nil },
+			Fingerprint: func() string { return fingerprint },
 			Store:       store,
 		}
 	}
-	if !newGate().Allowed(t.Context()) || prompts != 1 {
+	if !newGate().Allowed(t.Context(), true) || prompts != 1 {
 		t.Fatalf("first approval: prompts = %d", prompts)
 	}
 	gate := newGate()
-	if !gate.Allowed(t.Context()) || prompts != 1 {
+	if !gate.Allowed(t.Context(), true) || prompts != 1 {
 		t.Fatalf("unchanged hooks re-prompted in a new session: prompts = %d", prompts)
 	}
 	fingerprint = "v2"
-	if !gate.Allowed(t.Context()) || prompts != 2 {
-		t.Fatalf("edited hooks did not re-prompt: prompts = %d", prompts)
+	if !gate.Allowed(t.Context(), true) || prompts != 1 {
+		t.Fatalf("a decided session re-checked its hooks: prompts = %d", prompts)
+	}
+	if !newGate().Allowed(t.Context(), true) || prompts != 2 {
+		t.Fatalf("edited hooks did not re-prompt in the next session: prompts = %d", prompts)
 	}
 	if !store["v1"] || !store["v2"] {
 		t.Fatalf("store = %#v", store)
 	}
 }
 
-func TestGateFailsClosedWhenFingerprintFails(t *testing.T) {
+func TestGateAsksWithoutRememberingWhenFingerprintFails(t *testing.T) {
+	store := memoryTrust{}
+	prompts := 0
 	gate := &Gate{
-		Confirm:     func(context.Context, string) (bool, error) { return true, nil },
-		Fingerprint: func() (string, error) { return "", errors.New("changed while hashing") },
+		Confirm:     func(context.Context, string) (bool, error) { prompts++; return true, nil },
+		Fingerprint: func() string { return "" },
+		Store:       store,
 	}
-	if gate.Allowed(t.Context()) {
-		t.Fatal("gate allowed hooks whose content could not be fingerprinted")
+	if !gate.Allowed(t.Context(), true) || prompts != 1 {
+		t.Fatalf("unfingerprintable hooks were not asked about: prompts = %d", prompts)
+	}
+	if len(store) != 0 {
+		t.Fatalf("approval without a fingerprint was remembered: %#v", store)
+	}
+}
+
+func TestObserveOnlyEventsNeverPromptTheGate(t *testing.T) {
+	prompts := 0
+	gate := &Gate{Message: "allow hooks?", Confirm: func(context.Context, string) (bool, error) { prompts++; return true, nil }}
+	cfg := &Config{Hooks: Events{Interrupt: []MatcherGroup{{Hooks: []Handler{{Type: "command", Command: "echo ok"}}}}}}
+	cfg.Build(t.TempDir(), gate).Interrupt[0](t.Context())
+	if prompts != 0 {
+		t.Fatalf("Interrupt hook prompted the trust gate %d times", prompts)
 	}
 }
 

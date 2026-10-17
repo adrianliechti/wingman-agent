@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
 	"encoding/json"
@@ -199,8 +200,7 @@ func Save(sessionsDir, id string, state agent.State) error {
 	return j.appendMissing(normalized.Events)
 }
 
-// Fork copies the journaled history of id into the new session newID. Sidecar
-// artifacts are not copied. An empty title becomes "Fork of <source title>".
+// Fork copies id's journal, not its sidecar artifacts, into newID; title defaults to "Fork of <source>".
 func Fork(sessionsDir, id, newID, title string) error {
 	if sessionsDir == "" {
 		return fmt.Errorf("no sessions directory available")
@@ -241,17 +241,7 @@ func Fork(sessionsDir, id, newID, title string) error {
 	}
 
 	created := time.Now().UTC()
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	if err := enc.Encode(record{Type: "meta", Version: journalVersion, ID: newID, CreatedAt: &created, Title: title}); err != nil {
-		return err
-	}
-	for i := range events {
-		if err := enc.Encode(record{Type: "event", Event: &events[i]}); err != nil {
-			return err
-		}
-	}
-	if err := writeFileAtomic(path, buf.Bytes()); err != nil {
+	if err := writeJournal(path, record{Type: "meta", Version: journalVersion, ID: newID, CreatedAt: &created, Title: title}, events); err != nil {
 		return fmt.Errorf("write forked session journal: %w", err)
 	}
 	coord.initialized = true
@@ -260,30 +250,32 @@ func Fork(sessionsDir, id, newID, title string) error {
 	return nil
 }
 
-func writeFileAtomic(path string, data []byte) error {
+// writeJournal atomically replaces path with a journal of meta and events.
+func writeJournal(path string, meta record, events []agent.RuntimeEvent) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
 	if err != nil {
 		return err
 	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+	defer os.Remove(tmp.Name())
+	w := bufio.NewWriter(tmp)
+	enc := json.NewEncoder(w)
+	err = enc.Encode(meta)
+	for i := 0; err == nil && i < len(events); i++ {
+		err = enc.Encode(record{Type: "event", Event: &events[i]})
+	}
+	if err == nil {
+		err = w.Flush()
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	return nil
+	return os.Rename(tmp.Name(), path)
 }
 
 func Load(sessionsDir, id string) (Session, error) {

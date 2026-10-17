@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -177,21 +178,13 @@ func callTool(ctx context.Context, session *sdkmcp.ClientSession, name string, a
 	return tool.Text(content), nil
 }
 
-// CallText runs a tool for callers that need only its text; a tool-reported
-// failure is returned as an error.
+// CallText runs a tool for callers that need only its text; a tool-reported failure is an error.
 func CallText(ctx context.Context, session *sdkmcp.ClientSession, name string, args map[string]any) (string, error) {
-	result, err := session.CallTool(ctx, &sdkmcp.CallToolParams{Name: name, Arguments: args})
-	if err != nil {
-		return "", fmt.Errorf("MCP tool call failed: %w", err)
+	result, err := callTool(ctx, session, name, args)
+	if err == nil && result.IsError {
+		err = errors.New(result.Content)
 	}
-	if result == nil {
-		return "", nil
-	}
-	content := extractText(result.Content)
-	if result.IsError {
-		return "", fmt.Errorf("MCP tool returned an error: %s", content)
-	}
-	return content, nil
+	return result.Content, err
 }
 
 func extractText(content []sdkmcp.Content) string {

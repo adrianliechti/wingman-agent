@@ -466,7 +466,7 @@ func TestOversizedHookContextSpillsToFile(t *testing.T) {
 		t.Fatalf("outcome = %+v, %v", outcome, err)
 	}
 	preview := outcome.AdditionalContext[0]
-	_, path, ok := strings.Cut(preview, "Full hook output saved to: ")
+	_, path, ok := strings.Cut(preview, "Full output saved to: ")
 	if !ok || !strings.HasPrefix(preview, "HEAD") || len(preview) > defaultAdditionalContextTokens*4+len(path)+64 {
 		t.Fatalf("preview missing head, path, or budget: %d bytes", len(preview))
 	}
@@ -483,7 +483,7 @@ func TestPostToolUseFeedbackSpillsToFile(t *testing.T) {
 		Type: "command", Command: "printf '" + reason + "' >&2; exit 2",
 	}}}}}}
 	outcome, err := cfg.BuildWithOptions(dir, BuildOptions{SpillDir: dir}).PostToolUse[0](t.Context(), tool.ToolCall{Name: "shell"}, "ok")
-	if err != nil || !outcome.Block || !strings.Contains(outcome.Reason, "Full hook output saved to: ") {
+	if err != nil || !outcome.Block || !strings.Contains(outcome.Reason, "Full output saved to: ") {
 		t.Fatalf("feedback was not spilled: block=%v len=%d, %v", outcome.Block, len(outcome.Reason), err)
 	}
 }

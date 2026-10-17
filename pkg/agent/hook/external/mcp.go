@@ -12,8 +12,7 @@ import (
 
 var placeholderPattern = regexp.MustCompile(`\$\{([^{}]+)\}`)
 
-// callMCP expands the handler's input template against the event and treats
-// the tool's text like a command hook's stdout.
+// callMCP treats the tool's text like a command hook's stdout.
 func (h Handler) callMCP(ctx context.Context, input []byte, caller MCPCaller) runResult {
 	if caller == nil {
 		return runResult{exitCode: -1, err: errors.New("MCP tools are not available to hooks")}
@@ -35,9 +34,7 @@ func (h Handler) callMCP(ctx context.Context, input []byte, caller MCPCaller) ru
 	return runResult{exitCode: 0, stdout: limit(text), stdoutTruncated: len(text) > maxHookOutput}
 }
 
-// expandTemplate substitutes ${field.nested} placeholders from the hook event.
-// A placeholder that is the whole string keeps its JSON type; one embedded in
-// text is rendered as a string. Missing fields fail the hook.
+// expandTemplate fills ${field.nested} from the event; a whole-value placeholder keeps its JSON type.
 func expandTemplate(template map[string]any, event any) (map[string]any, error) {
 	expanded := make(map[string]any, len(template))
 	for key, value := range template {

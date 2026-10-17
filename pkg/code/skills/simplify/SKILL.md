@@ -1,54 +1,31 @@
 ---
 name: simplify
-description: Behavior-preserving cleanup of recently changed code for reuse, clarity, consistency, and efficiency. Use after completing code changes to improve quality before committing.
+description: Refactor a requested area or recent changes for clarity and reuse while preserving observable behavior.
 ---
-# Simplify: Code Review and Cleanup
+# Simplify
 
-Review all changed files for reuse, quality, and efficiency, then fix what's worth fixing. This is a quality pass, not a bug hunt — use `/code-review` for correctness.
+Make the code easier to understand and maintain without changing its contract.
 
-**Preserve behavior exactly.** Every change here must leave functionality, outputs, and public contracts identical — you are changing *how* the code reads, never *what* it does. Prefer clear, explicit code over clever or maximally compact code; readability wins over fewer lines.
+Scope: $ARGUMENTS
 
-## Phase 1: Identify Changes
+Use the requested files or change. Otherwise inspect the current diff, including staged changes; if it is empty, use files explicitly discussed in the conversation. Do not expand to unrelated code merely to find something to improve.
 
-Run `git diff` (or `git diff HEAD` if there are staged changes) to see what changed. If there are no git changes, review the most recently modified files that the user mentioned or that you edited earlier in this conversation.
+## Find worthwhile changes
 
-## Phase 2: Launch Three Review Agents in Parallel
+Read the implementation, callers, and relevant tests. Look for:
 
-Launch all three as `code-reviewer` agents concurrently in a single message. Pass each the full diff so it has complete context. These discovery agents are read-only; you make the edits after aggregating their findings.
+- duplicated behavior that an existing helper already expresses correctly;
+- redundant state, unnecessary layers, or branches that obscure the main flow;
+- names and boundaries that hide ownership or invariants;
+- repeated work on a demonstrated hot path;
+- stale comments or explanations of obvious syntax.
 
-### Agent 1: Code Reuse Review
+Compare contracts before reusing a helper: similar-looking code may have different validation, ordering, error, or lifetime semantics. A shared abstraction should reduce conceptual complexity, not just line count. Preserve comments that explain constraints, compatibility, or non-obvious decisions.
 
-For each change:
+## Refactor and check
 
-1. **Search for existing utilities and helpers** that could replace newly written code. Look for similar patterns elsewhere in the codebase -- common locations are utility directories, shared modules, and files adjacent to the changed ones.
-2. **Flag any new function that duplicates existing functionality.** Suggest the existing function to use instead.
-3. **Flag any inline logic that could use an existing utility** -- hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
+Apply the worthwhile changes directly within scope. Preserve outputs, error behavior, side-effect ordering, concurrency, resource ownership, and public interfaces. A performance change that alters these contracts is a separate behavior change.
 
-### Agent 2: Code Quality Review
+Review the resulting diff and run checks that cover the affected behavior. Do not add tests that merely encode the new internal shape. If a real bug is discovered, distinguish its correction from behavior-preserving cleanup and follow the user's scope.
 
-Review the same changes for hacky patterns:
-
-1. **Redundant state**: state that duplicates existing state, cached values that could be derived, observers/effects that could be direct calls
-2. **Parameter sprawl**: adding new parameters to a function instead of generalizing or restructuring existing ones
-3. **Copy-paste with slight variation**: near-duplicate code blocks that should be unified with a shared abstraction
-4. **Leaky abstractions**: exposing internal details that should be encapsulated, or breaking existing abstraction boundaries
-5. **Stringly-typed code**: using raw strings where constants, enums, or typed values already exist in the codebase
-6. **Unnecessary comments**: comments explaining WHAT the code does (well-named identifiers already do that), narrating the change, or referencing the task/caller -- delete; keep only non-obvious WHY (hidden constraints, subtle invariants, workarounds)
-
-### Agent 3: Efficiency Review
-
-Review the same changes for efficiency:
-
-1. **Unnecessary work**: redundant computations, repeated file reads, duplicate network/API calls, N+1 patterns
-2. **Missed concurrency**: independent operations run sequentially when they could run in parallel
-3. **Hot-path bloat**: new blocking work added to startup or per-request hot paths
-4. **Recurring no-op updates**: state/store updates inside polling loops, intervals, or event handlers that fire unconditionally -- add a change-detection guard so downstream consumers aren't notified when nothing changed
-5. **Unnecessary existence checks**: pre-checking file/resource existence before operating (TOCTOU anti-pattern) -- operate directly and handle the error
-6. **Memory**: unbounded data structures, missing cleanup, event listener leaks
-7. **Overly broad operations**: reading entire files when only a portion is needed, loading all items when filtering for one
-
-## Phase 3: Fix Issues
-
-Wait for all three agents to complete. Aggregate their findings and fix each issue directly. If a finding is a false positive or not worth addressing, note it and move on -- do not argue with the finding, just skip it.
-
-When done, briefly summarize what was fixed (or confirm the code was already clean).
+Summarize the simplifications and verification. If no change improves the code, say so and leave it alone.

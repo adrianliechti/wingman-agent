@@ -26,7 +26,7 @@ type managedTurnSession struct {
 	queued  []*managedTurnInput
 	steered []*managedTurnInput
 
-	cancel          context.CancelFunc
+	cancel          context.CancelCauseFunc
 	cancelRequested bool
 	paused          bool
 	running         bool
@@ -312,19 +312,19 @@ func (m *TurnManager) runSession(sessionID string, s *managedTurnSession) {
 			s.mu.Unlock()
 			return
 		}
-		runCtx, cancel := context.WithCancel(WithSessionID(m.ctx, sessionID))
+		runCtx, cancel := context.WithCancelCause(WithSessionID(m.ctx, sessionID))
 		s.cancel = cancel
 		cancelBeforeStart := s.cancelRequested || m.ctx.Err() != nil
 		s.mu.Unlock()
 
 		var runErr error
 		if cancelBeforeStart {
-			cancel()
+			cancel(nil)
 			runErr = context.Canceled
 		} else {
 			runErr = m.executeInput(runCtx, sessionID, item)
 		}
-		cancel()
+		cancel(nil)
 
 		s.mu.Lock()
 		cancelled := s.cancelRequested || errors.Is(runErr, context.Canceled)
@@ -348,26 +348,7 @@ func (m *TurnManager) runSession(sessionID string, s *managedTurnSession) {
 		}
 		item.terminal, item.err = state, runErr
 
-		var next *managedTurnInput
-		promote := func() error {
-			if m.ctx.Err() == nil && !s.paused && len(s.queued) > 0 {
-				next = s.queued[0]
-				s.queued = s.queued[1:]
-				s.active = next
-			}
-			if err := m.persistLocked(sessionID, s); err != nil {
-				if next != nil {
-					s.active = nil
-					s.queued = append([]*managedTurnInput{next}, s.queued...)
-					next = nil
-				}
-				s.paused = len(s.queued) > 0
-				s.queueErr = err
-				return err
-			}
-			return nil
-		}
-		persistErr := promote()
+		next, persistErr := m.promoteLocked(sessionID, s)
 		// Keep running true until terminal callbacks have projected the finished
 		// turn. New submits during finalization remain queued behind that boundary.
 		s.mu.Unlock()
@@ -377,7 +358,7 @@ func (m *TurnManager) runSession(sessionID string, s *managedTurnSession) {
 		}
 		s.mu.Lock()
 		if next == nil && persistErr == nil {
-			persistErr = promote()
+			next, persistErr = m.promoteLocked(sessionID, s)
 		}
 		s.running = next != nil
 		s.mu.Unlock()
@@ -426,9 +407,7 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 	return nil
 }
 
-// StartCompact runs a manual context checkpoint as the session's exclusive
-// operation. Inputs submitted meanwhile wait in the FIFO queue, CancelCurrent
-// interrupts it, and done receives the outcome on the worker goroutine.
+// StartCompact runs compaction as the session's exclusive operation; inputs queue behind it.
 func (m *TurnManager) StartCompact(sessionID, focus string, done func(agent.CompactResult, error)) error {
 	compactor, ok := m.agent.(Compactor)
 	if !ok {
@@ -449,7 +428,7 @@ func (m *TurnManager) StartCompact(sessionID, focus string, done func(agent.Comp
 		s.mu.Unlock()
 		return ErrTurnInProgress
 	}
-	ctx, cancel := context.WithCancel(WithSessionID(m.ctx, sessionID))
+	ctx, cancel := context.WithCancelCause(WithSessionID(m.ctx, sessionID))
 	s.running, s.compacting = true, true
 	s.cancel, s.cancelRequested = cancel, false
 	s.done = make(chan struct{})
@@ -459,7 +438,7 @@ func (m *TurnManager) StartCompact(sessionID, focus string, done func(agent.Comp
 	m.workers.Go(func() {
 		defer close(finished)
 		result, err := compactor.Compact(ctx, sessionID, focus)
-		cancel()
+		cancel(nil)
 
 		s.mu.Lock()
 		s.compacting = false
@@ -481,17 +460,21 @@ func (m *TurnManager) StartCompact(sessionID, focus string, done func(agent.Comp
 	return nil
 }
 
+// promoteLocked activates the next queued input unless paused and persists the queue.
 func (m *TurnManager) promoteLocked(sessionID string, s *managedTurnSession) (*managedTurnInput, error) {
-	if m.ctx.Err() != nil || s.paused || len(s.queued) == 0 {
-		return nil, nil
+	var next *managedTurnInput
+	if m.ctx.Err() == nil && !s.paused && len(s.queued) > 0 {
+		next = s.queued[0]
+		s.queued = s.queued[1:]
+		s.active = next
 	}
-	next := s.queued[0]
-	s.queued = s.queued[1:]
-	s.active = next
 	if err := m.persistLocked(sessionID, s); err != nil {
-		s.active = nil
-		s.queued = append([]*managedTurnInput{next}, s.queued...)
-		s.paused = true
+		if next != nil {
+			s.active = nil
+			s.queued = append([]*managedTurnInput{next}, s.queued...)
+		}
+		s.paused = len(s.queued) > 0
+		s.queueErr = err
 		return nil, err
 	}
 	return next, nil
@@ -621,7 +604,7 @@ func (m *TurnManager) cancelSession(sessionID string, clearQueue bool) error {
 	s.mu.Unlock()
 
 	if cancel != nil {
-		cancel()
+		cancel(agent.ErrInterrupted)
 	}
 	m.agent.Cancel(sessionID)
 	for _, item := range queued {
@@ -774,7 +757,7 @@ func (m *TurnManager) Close() {
 		cancel := s.cancel
 		s.mu.Unlock()
 		if cancel != nil {
-			cancel()
+			cancel(nil)
 		}
 		m.agent.Cancel(id)
 	}

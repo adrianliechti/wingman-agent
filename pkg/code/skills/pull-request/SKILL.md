@@ -1,49 +1,29 @@
 ---
 name: pull-request
-description: Prepare, push, create, or update a pull request from the current work with a focused commit history, verified branch diff, accurate rationale, test evidence, and no unrelated or sensitive files. Use when the user asks to open, create, prepare, publish, or refresh a pull request; invocation authorizes the necessary branch push and PR mutation but never force-pushing or merging.
+description: Prepare PR text, open a pull request, or update an existing PR within the requested publication scope.
 ---
 # Pull Request
 
-Turn the intended local work into a reviewable pull request. This workflow may create a branch, commit intended changes, push that branch, and create or update its pull request. Never force-push, merge, approve, add labels, or post review comments unless separately requested.
+Request or title hint: $ARGUMENTS
 
-Treat `$ARGUMENTS` as an optional title or intent hint.
+Choose the action from the request:
 
-## Phase 1: Inspect
+- **Prepare text:** inspect the relevant change and return a title or description. Skip branch creation, commits, pushes, and hosted edits.
+- **Update PR text:** inspect the PR and its diff, then update the requested fields. Unpublished local work is outside this operation.
+- **Open a PR or publish new code:** prepare the intended branch and publish it. An explicitly requested draft PR is a hosted action too.
 
-In parallel, inspect:
+## Describe the change
 
-- `git status --short`, staged and unstaged diffs, and relevant untracked files;
-- current branch, upstream, remotes, default branch, and merge base;
-- recent commit subjects and commits unique to the branch;
-- an existing pull request for the branch, when repository tooling is available.
+Identify the actual base and head using the existing PR or repository configuration. For local work, inspect status, the commit list, and the complete merge-base diff. Include staged, unstaged, and relevant untracked changes when the request covers uncommitted work. Use individual commit patches when needed to explain intent or check what the history would publish. Do not substitute the latest commit or an unrelated checkout for the branch change.
 
-Separate intended work from unrelated user changes. Check the complete branch diff—not only the latest commit—for secrets, generated artifacts, debug output, accidental files, and scope drift. If mixed changes cannot be separated safely, ask before staging or pushing.
+Follow the repository's PR template. Lead with the problem and resulting behavior, then relevant verification and risks. Keep simple changes short. Describe the final implementation; preserve useful issue references, images, and migration notes while replacing stale text. Use existing check results that still apply. A text-only edit does not require rerunning the project's tests.
 
-## Phase 2: Establish readiness
+## Publish the branch when requested
 
-Read applicable project instructions. Run the narrowest meaningful tests or checks if they have not already passed for the final diff. Stop before publishing when required checks fail, the branch has unresolved conflicts, the change is incomplete, or the diff contains sensitive material. Report the blocker rather than bypassing it.
+Confirm the repository, remote, base, and intended commits. Separate unrelated local and staged work; inspect the whole index before committing. Create a topic branch when needed, including when intended commits already exist on the default branch. Preserve history, commit conventions, and hooks.
 
-Review public APIs, CLI behavior, configuration, persisted data, migrations, documentation, rollout, and rollback implications. Capture relevant caveats in the PR body.
+Inspect for incomplete work, sensitive content in files or history, accidental changes, conflicts, and compatibility implications. Run missing required checks for the final change. Explain failures or unavailable checks and represent draft status honestly; do not claim readiness from incomplete evidence.
 
-## Phase 3: Prepare git history
+Push only when publishing commits is needed, without force. Create a PR when requested and none exists; otherwise update the intended existing PR. Rewriting history, merging, or approving requires a separate request.
 
-If on the default branch with uncommitted intended work, create a concise descriptive branch. Stage explicit paths only and inspect `git diff --cached`. Commit using the repository's message style, incorporating `$ARGUMENTS` when useful. Preserve existing commits and staged work; never amend or rewrite history.
-
-If there is nothing new to commit, continue only when the branch already contains commits absent from the base. Push with upstream tracking. Never use a force option.
-
-## Phase 4: Create or update the PR
-
-Derive the title and body from the merge-base diff and current conversation. Preserve useful existing body content, especially issue references, images, migration notes, and externally supplied context.
-
-The body should explain:
-
-1. **Why** the change is needed;
-2. **What** changed at the behavioral or architectural level;
-3. **How verified**, including exact meaningful tests or manual checks;
-4. **Risk and rollout**, including compatibility, migration, feature flags, and rollback when relevant.
-
-Describe only the net change. Do not mention abandoned approaches, absolute local paths, secrets, or confidential context. Use repository-relative paths and issue references. Create a new PR when none exists; otherwise update it only where the current title or body is stale.
-
-## Phase 5: Report
-
-Return the PR link, branch and base, commits pushed, checks run and results, and any reviewer-visible risk or manual verification still outstanding.
+For hosted edits, use structured arguments or a body file for multiline text. After an ambiguous failure, inspect remote state before retrying to avoid duplicate PRs. Verify the resulting base, head, and edited fields. Return the PR link and relevant checks, or the prepared text for a local drafting request.

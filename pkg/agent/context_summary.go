@@ -134,14 +134,9 @@ func (a *Agent) generateBriefing(ctx context.Context, instructions string, messa
 	modelID := a.utilityModelName()
 	window := ContextWindowFor(modelID)
 	outputLimit := window / 4
-	effort := ""
-	if m, ok := model.Find(modelID); ok {
-		if m.OutputTokens() > 0 {
-			outputLimit = min(outputLimit, m.OutputTokens())
-		}
-		if slices.Contains(m.Efforts, "low") {
-			effort = "low"
-		}
+	effort := utilityEffort(modelID)
+	if m, ok := model.Find(modelID); ok && m.OutputTokens() > 0 {
+		outputLimit = min(outputLimit, m.OutputTokens())
 	}
 	outputTokens = max(1, min(outputTokens, outputLimit))
 	maxOutputTokens := max(outputTokens, min(2*outputTokens, outputLimit))

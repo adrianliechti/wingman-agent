@@ -218,23 +218,28 @@ func (c *Config) utilityModelName() string {
 func (c *Config) Utility(ctx context.Context, instructions, input string) (string, error) {
 	modelID := c.utilityModelName()
 	outputTokens := DefaultUtilityOutputTokenBudget
-	effort := ""
-	if m, ok := model.Find(modelID); ok {
-		if limit := m.OutputTokens(); limit > 0 {
-			outputTokens = min(outputTokens, limit)
-		}
-		if slices.Contains(m.Efforts, "low") {
-			effort = "low"
-		}
+	if m, ok := model.Find(modelID); ok && m.OutputTokens() > 0 {
+		outputTokens = min(outputTokens, m.OutputTokens())
 	}
 	result, err := c.Generate(ctx, GenerateOptions{
 		Model:           modelID,
-		Effort:          effort,
+		Effort:          utilityEffort(modelID),
 		Instructions:    instructions,
 		Input:           input,
 		MaxOutputTokens: int64(outputTokens),
 	})
-	usage := result.Usage
+	reportUsage(ctx, result.Usage)
+	return result.Text, err
+}
+
+func utilityEffort(modelID string) string {
+	if m, ok := model.Find(modelID); ok && slices.Contains(m.Efforts, "low") {
+		return "low"
+	}
+	return ""
+}
+
+func reportUsage(ctx context.Context, usage Usage) {
 	tool.ReportUsage(ctx, tool.UsageDelta{
 		InputTokens:              usage.InputTokens,
 		OutputTokens:             usage.OutputTokens,
@@ -242,8 +247,6 @@ func (c *Config) Utility(ctx context.Context, instructions, input string) (strin
 		CacheReadInputTokens:     usage.CacheReadInputTokens,
 		CacheCreationInputTokens: usage.CacheCreationInputTokens,
 	})
-
-	return result.Text, err
 }
 
 func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {

@@ -13,8 +13,7 @@ import (
 	"strings"
 )
 
-// Fingerprint identifies the exact hook declarations together with the
-// caller's source identity, such as the workspace and file they came from.
+// Fingerprint hashes the hook declarations together with their source identity.
 func (c *Config) Fingerprint(identity ...string) (string, error) {
 	declarations, err := json.Marshal(c)
 	if err != nil {
@@ -27,8 +26,7 @@ func (c *Config) Fingerprint(identity ...string) (string, error) {
 	return fmt.Sprintf("sha256:%x", hash.Sum(nil)), nil
 }
 
-// ContentHash fingerprints a plugin bundle so an edited hook script needs new
-// approval. Like Codex, it skips Python build artifacts and virtualenvs.
+// ContentHash fingerprints a plugin bundle, skipping Python build artifacts like Codex.
 func ContentHash(root string) (string, error) {
 	info, err := os.Lstat(root)
 	if err != nil {

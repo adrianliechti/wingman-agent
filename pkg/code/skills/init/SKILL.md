@@ -1,60 +1,21 @@
 ---
 name: init
-description: "Create or refresh a concise AGENTS.md from verified repository evidence: instruction hierarchy, exact build and test commands, architecture boundaries, code conventions, and non-obvious operational constraints. Use when onboarding Wingman to a repository, fixing stale project guidance, or capturing durable conventions that future coding sessions must follow."
+description: Create or refresh AGENTS.md from repository evidence. Use for project guidance and stale agent instructions.
 ---
-# Initialize Project Guidelines
+# Initialize Project Guidance
 
-Create or refresh the root `AGENTS.md`. Preserve correct existing guidance, remove stale claims, and add only durable information that changes how an agent should work. Do not create nested instruction files unless the user asks.
+Create or update the requested instruction file, defaulting to the root `AGENTS.md`. Preserve useful guidance and remove stale or duplicated instructions. Inspect existing `AGENTS.md`, `CLAUDE.md`, and scoped instructions before deciding what belongs at the root.
 
-## Steps
+## Gather evidence
 
-1. **Read the instruction hierarchy** -- find existing `AGENTS.md`, `CLAUDE.md`, and equivalent project guidance from the repository root to the current directory. Note conflicts and scope; do not silently overwrite useful rules.
+Find the actual build, test, lint, and development commands in task files, package manifests, CI, and contributor documentation. Include the directory a command runs from, prerequisites that are easy to miss, and a focused test invocation where available. Run a narrow safe check when practical; distinguish a command discovered in configuration from one successfully executed.
 
-2. **Map the project** -- use targeted file and symbol searches to identify:
-   - Language: check file extensions, `go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`, `pom.xml`, etc.
-   - Framework: check imports, config files, directory conventions
-   - Package manager: npm/yarn/pnpm/bun, pip/poetry/uv, cargo, etc.
-   - Entrypoints, generated code, workspace/package boundaries, and high-risk directories
+Trace the few architecture or ownership boundaries an agent must understand before editing. Identify generated files and their source, compatibility constraints, integration-test requirements, and recurring workflow traps. Check explicit documentation and representative code before treating a pattern as a project rule.
 
-3. **Verify commands** -- derive exact commands from:
-   - `Makefile`, `justfile`, `Taskfile.yml`
-   - `package.json` scripts
-   - CI config (`.github/workflows/`, `.gitlab-ci.yml`)
-   - Existing contributor documentation
+## Write the smallest useful guide
 
-   Prefer commands the repository itself declares. Run a narrow, safe validation when practical; otherwise label the command as discovered but unverified. Never invent a conventional command merely because it fits the language.
+Include only information that changes how an agent should work in this repository. Prefer concrete commands and non-obvious constraints over a stack inventory, directory tour, or generic coding advice. Link maintained documentation instead of copying it. Keep package-specific rules in their existing scope; do not create nested instruction files unless needed by the request.
 
-4. **Extract non-obvious conventions** -- inspect:
-   - Linter configs (`.eslintrc`, `.golangci.yml`, `rustfmt.toml`, `ruff.toml`)
-   - Formatter configs (`.prettierrc`, `gofmt`, `biome.json`)
-   - Editor config (`.editorconfig`)
-   - Representative implementation and test files
-   - Recent history for recurring workflow constraints, without copying ephemeral branch or issue details
+Resolve contradictions against current evidence while preserving the user's stated conventions. Do not turn one session's workaround into a permanent restriction. Omit temporary task state, branch names, speculative rules, empty sections, and instructions already enforced by tooling.
 
-   Record conventions only when supported by configuration, repeated code, or explicit documentation. Omit facts a competent agent can immediately infer from filenames.
-
-5. **Write or update `AGENTS.md`** with the smallest useful set of sections:
-
-```markdown
-# Project Guidelines
-
-## Tech Stack
-[Language, framework, key dependencies]
-
-## Build & Run
-[How to build, run, and test the project -- include exact commands]
-
-## Code Style
-[Formatting, linting, naming conventions]
-
-## Project Structure
-[Key directories and their purpose]
-
-## Testing
-[How to run tests, testing conventions, how to run a single test]
-
-## Constraints
-[Generated files, compatibility surfaces, security boundaries, or workflow traps]
-```
-
-Keep it concise and imperative. Include copy-pasteable commands and scope them to the directory where they must run. Omit empty sections, generic advice, temporary task context, and duplicated README content. After writing, reread the result against the evidence and call out any command you could not verify.
+Reread the result against its sources. Report the file updated, consequential corrections, and commands or assumptions that remain unverified.

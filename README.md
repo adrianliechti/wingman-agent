@@ -180,6 +180,15 @@ for command options.
 - **Custom agents:** add specialist instructions in `.wingman/agents/*.md` or
   `~/.wingman/agents/`.
 
+Built-in skills cover feature development, debugging, testing, simplification,
+code review, architecture, security review, threat modeling, commits, pull
+requests, project instructions, memory, and skill creation.
+`/architecture` handles system design as well as existing-system analysis.
+`/security-review` handles scanning, supplied findings, and remediation when
+requested. These replace `/system-design`, `/vuln-scan`, `/triage`, and `/patch`.
+For example, use `/security-review triage findings.json` to validate a report or
+`/security-review fix the confirmed findings in findings.json` to remediate it.
+
 Connect an MCP server from the command line:
 
 ```bash

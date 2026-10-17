@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -8,8 +9,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
 //go:embed review_policy.md
@@ -22,6 +21,9 @@ const (
 	reviewUserBytes       = 24 * 1024
 	reviewOutputTokens    = 4096
 )
+
+// UserShellCommandTag opens the message recording a user's `!` command and its output.
+const UserShellCommandTag = "<user_shell_command>"
 
 const reviewRejectionInstructions = "Do not attempt to achieve the same outcome via workaround, indirect execution, or policy circumvention. Proceed only with a materially safer alternative, or if the user explicitly approves the action after being informed of the risk. Otherwise, stop and ask the user."
 
@@ -51,8 +53,7 @@ type Review struct {
 	Rationale         string `json:"rationale"`
 }
 
-// Allowed enforces the policy's outcome table on top of the model's outcome,
-// so an unauthorized high-risk or any critical action cannot be allowed.
+// Allowed re-applies the outcome table so the model cannot allow unauthorized high or any critical risk.
 func (r Review) Allowed() bool {
 	if r.Outcome != "allow" {
 		return false
@@ -74,8 +75,7 @@ func (r Review) Rejection() string {
 	return fmt.Sprintf("This action was rejected by automatic review (risk: %s).\nReason: %s\n%s", r.RiskLevel, rationale, reviewRejectionInstructions)
 }
 
-// ReviewAction asks the utility model whether a planned action may run, using
-// the session transcript as evidence of what the user authorized.
+// ReviewAction asks the utility model whether the transcript authorizes a planned action.
 func (a *Agent) ReviewAction(ctx context.Context, action map[string]any) (Review, error) {
 	ctx, cancel := context.WithTimeout(ctx, reviewTimeout)
 	defer cancel()
@@ -100,21 +100,18 @@ func (a *Agent) ReviewAction(ctx context.Context, action map[string]any) (Review
 	input.Write(planned)
 	input.WriteString("\n")
 
-	effort := ""
-	if m, ok := model.Find(modelID); ok && slices.Contains(m.Efforts, "low") {
-		effort = "low"
-	}
 	var lastErr error
 	for range reviewAttempts {
 		result, err := a.Generate(ctx, GenerateOptions{
 			Model:           modelID,
-			Effort:          effort,
+			Effort:          utilityEffort(modelID),
 			Instructions:    reviewPolicy,
 			Input:           input.String(),
 			OutputSchema:    reviewSchema,
 			MaxOutputTokens: reviewOutputTokens,
 			PromptCacheKey:  "review:" + a.CacheKey,
 		})
+		reportUsage(ctx, result.Usage)
 		if err == nil {
 			var review Review
 			if review, err = parseReview(result.Text); err == nil {
@@ -153,9 +150,7 @@ type reviewRecord struct {
 	Text   string `json:"text"`
 }
 
-// reviewTranscript renders host-labelled JSON records, so text inside a record
-// cannot forge another author. User records are kept first, then the newest
-// remaining evidence fills the budget.
+// reviewTranscript renders host-labelled JSON so record text cannot forge an author.
 func reviewTranscript(messages []Message, budget int) (string, bool) {
 	var records []reviewRecord
 	add := func(author, tool, text string, isError bool, limit int) {
@@ -186,6 +181,9 @@ func reviewTranscript(messages []Message, budget int) (string, bool) {
 				add("host", "", c.Text, false, 1500)
 			case m.Role == RoleUser && c.File != nil:
 				add("user", "", "[attachment: "+c.File.Name+"]", false, 200)
+			case m.Role == RoleUser && strings.HasPrefix(strings.TrimSpace(c.Text), UserShellCommandTag):
+				// The user typed the command, but its output is untrusted evidence.
+				add("tool_result", "user_shell", c.Text, false, 1500)
 			case m.Role == RoleUser:
 				add("user", "", c.Text, false, 3600)
 			case m.Role == RoleAssistant:
@@ -198,48 +196,28 @@ func reviewTranscript(messages []Message, budget int) (string, bool) {
 	for i := range records {
 		encoded[i], _ = json.Marshal(records[i])
 	}
+	// User records claim their share first, then the newest evidence fills the rest.
 	keep := make([]bool, len(records))
-	omitted := false
 	userBudget := min(reviewUserBytes, budget/2)
 	remaining := budget
 	for i, r := range slices.Backward(records) {
-		if r.Author != "user" && r.Author != "user_answer" {
-			continue
-		}
-		if size := len(encoded[i]) + 2; size <= userBudget {
+		if size := len(encoded[i]) + 2; (r.Author == "user" || r.Author == "user_answer") && size <= userBudget {
 			keep[i] = true
 			userBudget -= size
 			remaining -= size
-		} else {
-			omitted = true
 		}
 	}
 	for i := range slices.Backward(records) {
-		if keep[i] {
-			continue
-		}
-		if size := len(encoded[i]) + 2; size <= remaining {
+		if size := len(encoded[i]) + 2; !keep[i] && size <= remaining {
 			keep[i] = true
 			remaining -= size
-		} else {
-			omitted = true
 		}
 	}
-
-	var b strings.Builder
-	b.WriteString("[")
-	first := true
+	var kept [][]byte
 	for i := range records {
-		if !keep[i] {
-			continue
+		if keep[i] {
+			kept = append(kept, encoded[i])
 		}
-		if !first {
-			b.WriteString(",")
-		}
-		first = false
-		b.WriteString("\n")
-		b.Write(encoded[i])
 	}
-	b.WriteString("\n]")
-	return b.String(), omitted
+	return "[\n" + string(bytes.Join(kept, []byte(",\n"))) + "\n]", slices.Contains(keep, false)
 }

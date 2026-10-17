@@ -82,8 +82,7 @@ func (w *Workspace) approveMCP(ctx context.Context, ui UI, name string, server m
 	return nil
 }
 
-// HookTrust remembers approved workspace and plugin hook fingerprints outside
-// the repository, so unchanged hooks are not re-approved every session.
+// HookTrust stores approved hook fingerprints outside the repository.
 func (w *Workspace) HookTrust() external.TrustStore {
 	w.mu.Lock()
 	defer w.mu.Unlock()

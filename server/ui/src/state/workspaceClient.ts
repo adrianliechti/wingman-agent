@@ -329,22 +329,13 @@ export class WorkspaceClient {
 		}
 		if (!entry.pending) {
 			const current = entry;
-			current.pending = this.http
-				.fetchJSON<Receipt>(
-					`/api/v2/backends/${encodeURIComponent(backend)}/sessions`,
-					{
-						method: "POST",
-						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({ id: current.id, type: "create" }),
-					},
-				)
-				.then((receipt) =>
-					sessionKey(receipt.ref.backendId, receipt.ref.sessionId),
-				)
-				.catch((error) => {
-					current.pending = undefined;
-					throw error;
-				});
+			current.pending = this.postSession(backend, {
+				id: current.id,
+				type: "create",
+			}).catch((error) => {
+				current.pending = undefined;
+				throw error;
+			});
 		}
 		return entry.pending!;
 	}
@@ -352,18 +343,22 @@ export class WorkspaceClient {
 	fork(key: string, title?: string): Promise<string> {
 		this.assertActive();
 		const { backendId, sessionId } = splitSessionKey(key);
+		return this.postSession(backendId, {
+			id: crypto.randomUUID(),
+			type: "fork",
+			source: sessionId,
+			title,
+		});
+	}
+
+	private postSession(backend: string, body: object): Promise<string> {
 		return this.http
 			.fetchJSON<Receipt>(
-				`/api/v2/backends/${encodeURIComponent(backendId)}/sessions`,
+				`/api/v2/backends/${encodeURIComponent(backend)}/sessions`,
 				{
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({
-						id: crypto.randomUUID(),
-						type: "fork",
-						source: sessionId,
-						title,
-					}),
+					body: JSON.stringify(body),
 				},
 			)
 			.then((receipt) =>

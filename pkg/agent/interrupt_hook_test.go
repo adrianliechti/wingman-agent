@@ -32,11 +32,11 @@ func interruptProbeAgent(postToolUse []hook.PostToolUse, execute func(context.Co
 }
 
 func TestInterruptHookFiresWhenUserCancelsTurn(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
 	var fired []hook.Runtime
 	a := interruptProbeAgent(nil, func(toolCtx context.Context) error {
-		cancel()
+		cancel(ErrInterrupted)
 		<-toolCtx.Done()
 		return toolCtx.Err()
 	}, &fired)
@@ -80,5 +80,20 @@ func TestInterruptHookIgnoresTaskBudgets(t *testing.T) {
 	_ = runLoopTurn(t.Context(), a, "work")
 	if len(fired) != 0 {
 		t.Fatalf("task budget fired Interrupt %d times", len(fired))
+	}
+}
+
+func TestInterruptHookIgnoresOtherCancellations(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var fired []hook.Runtime
+	a := interruptProbeAgent(nil, func(toolCtx context.Context) error {
+		cancel()
+		<-toolCtx.Done()
+		return toolCtx.Err()
+	}, &fired)
+	_ = runLoopTurn(ctx, a, "work")
+	if len(fired) != 0 {
+		t.Fatalf("closing the session fired Interrupt %d times", len(fired))
 	}
 }

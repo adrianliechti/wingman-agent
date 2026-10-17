@@ -129,7 +129,7 @@ func TestForkSessionRefusesRunningTurn(t *testing.T) {
 	}
 	source := a.session(id)
 	source.cancelMu.Lock()
-	source.cancelFn = func() {}
+	source.cancelFn = func(error) {}
 	source.cancelMu.Unlock()
 
 	if _, err := a.ForkSession(t.Context(), id, ""); !errors.Is(err, code.ErrTurnInProgress) {

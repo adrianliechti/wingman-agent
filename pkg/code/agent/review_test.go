@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
@@ -73,8 +74,14 @@ func newReviewSession(t *testing.T, verdict string) (*Agent, *reviewUI, context.
 }
 
 func TestReviewDeniesWithoutAskingAndTripsBreaker(t *testing.T) {
-	a, ui, ctx, inputs := newReviewSession(t, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"Deletes the home directory."}`)
+	a, ui, sessionCtx, inputs := newReviewSession(t, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"Deletes the home directory."}`)
 	approval := tool.Approval{Message: "❯ rm -rf ~", Action: map[string]any{"type": "shell_command", "text": "rm -rf ~"}}
+	for range reviewConsecutiveDenials {
+		if verdict, err := a.review(sessionCtx, approval); err != nil || strings.Contains(verdict.Reason, "turn was interrupted") {
+			t.Fatalf("denial outside a turn tripped the breaker: %+v, %v", verdict, err)
+		}
+	}
+	ctx := hook.WithRuntime(sessionCtx, hook.Runtime{TurnID: "turn-1"})
 	var verdict tool.Verdict
 	for i := range reviewConsecutiveDenials {
 		var err error
@@ -130,17 +137,51 @@ func TestReviewBreakerCountsRecentDenials(t *testing.T) {
 	var b reviewBreaker
 	tripped := false
 	for i := range reviewRecentDenials {
-		_, _, tripped = b.record(true)
+		_, _, tripped = b.record("turn-1", true)
 		if i < reviewConsecutiveDenials-1 && tripped {
 			t.Fatalf("tripped after %d denials", i+1)
 		}
-		b.record(false)
+		b.record("turn-1", false)
 	}
-	if _, recent, tripped := b.record(true); !tripped && recent < reviewRecentDenials {
+	if _, recent, tripped := b.record("turn-1", true); !tripped && recent < reviewRecentDenials {
 		t.Fatalf("recent denials = %d, breaker did not trip", recent)
 	}
-	b.reset()
-	if _, _, tripped := b.record(true); tripped {
-		t.Fatal("reset breaker tripped on the first denial")
+	if _, _, tripped := b.record("turn-2", true); tripped {
+		t.Fatal("a new turn inherited the previous turn's denials")
+	}
+	var interleaved reviewBreaker
+	interleaved.record("turn-main", true)
+	interleaved.record("turn-main", true)
+	interleaved.record("bg:turn-sub", false)
+	if _, _, tripped := interleaved.record("turn-main", true); !tripped {
+		t.Fatal("interleaved background review reset the main turn's consecutive denials")
+	}
+	for range reviewConsecutiveDenials {
+		if _, _, tripped := b.record("", true); tripped {
+			t.Fatal("denials outside a turn tripped the breaker")
+		}
+	}
+}
+
+type recordingTrust map[string]bool
+
+func (r recordingTrust) Trusted(fingerprint string) bool { return r[fingerprint] }
+
+func (r recordingTrust) Trust(fingerprint string) error {
+	r[fingerprint] = true
+	return nil
+}
+
+func TestUnattendedHookApprovalIsNotRemembered(t *testing.T) {
+	store := recordingTrust{}
+	s := &sessionState{}
+	trust := attendedTrust{TrustStore: store, session: s}
+	s.unattended.Store(true)
+	if err := trust.Trust("sha256:auto"); err != nil || store["sha256:auto"] {
+		t.Fatalf("unattended approval persisted: %v %v", store, err)
+	}
+	s.unattended.Store(false)
+	if err := trust.Trust("sha256:asked"); err != nil || !store["sha256:asked"] {
+		t.Fatalf("attended approval not persisted: %v %v", store, err)
 	}
 }

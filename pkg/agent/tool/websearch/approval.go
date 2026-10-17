@@ -54,15 +54,12 @@ func approveSearch(ctx context.Context, elicit *tool.Elicitation, approval *sear
 		displayQuery := strings.Join(strings.Fields(query), " ")
 		verdict, err := elicit.Approve(ctx, tool.Approval{
 			Message: fmt.Sprintf("Allow web searches via DuckDuckGo for this session?\nFirst query: %s", displayQuery),
-			Action:  map[string]any{"type": "web_search", "provider": "DuckDuckGo", "query": displayQuery},
+			Action:  map[string]any{"type": "web_search", "provider": "DuckDuckGo", "query": displayQuery, "scope": "allows every web search for the rest of the session"},
 		})
 		if ctx.Err() != nil {
 			err = ctx.Err()
-		} else if err == nil && !verdict.Allowed {
-			err = fmt.Errorf("the user declined web search")
-			if verdict.Reason != "" {
-				err = errors.New(verdict.Reason)
-			}
+		} else if err == nil {
+			err = verdict.Err("the user declined web search")
 		}
 		approval.mu.Lock()
 		approval.allowed = err == nil

@@ -216,6 +216,10 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 	}
 
 	runtime := hook.RuntimeFromContext(execCtx)
+	if runtime == (hook.Runtime{}) {
+		runtime = hook.RuntimeFromContext(reportCtx)
+		runtime.TurnID = ""
+	}
 	runtime.AgentID = r.spec.AgentID
 	runtime.AgentType = r.spec.AgentType
 	execCtx = hook.WithRuntime(execCtx, runtime)

@@ -108,8 +108,7 @@ type Agent interface {
 	Close() error
 }
 
-// Compactor checkpoints a session's model context on demand; focus guides
-// what the summary preserves.
+// Compactor checkpoints a session's context on demand; focus guides what the summary keeps.
 type Compactor interface {
 	Compact(ctx context.Context, sessionID, focus string) (agent.CompactResult, error)
 }
@@ -126,8 +125,7 @@ var (
 	ErrEmptyInput     = agent.ErrEmptyInput
 )
 
-// SessionForker copies a settled session's history into a new, loaded session
-// and returns its ID. The source session is left untouched.
+// SessionForker copies an idle session into a new loaded one and returns its ID.
 type SessionForker interface {
 	ForkSession(ctx context.Context, id, title string) (string, error)
 }

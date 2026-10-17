@@ -451,12 +451,12 @@ func (r *Registry) LaunchAgent(agentID, description, agentType string, prepare f
 	if agentID == "" {
 		agentID = uuid.NewString()
 	}
-	ctx = tool.WithBackgroundOrigin(ctx, agentID)
 	t, err := r.start(agentID, description, agentType, cancel, true, prepare)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
+	ctx = tool.WithBackgroundOrigin(ctx, t.ID)
 	go r.execute(ctx, cancel, t, true, run)
 	return t, nil
 }

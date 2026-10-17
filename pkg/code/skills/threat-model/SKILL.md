@@ -1,44 +1,31 @@
 ---
 name: threat-model
-description: Build a threat model for a codebase — map assets, entry points, trust boundaries, and the threats that matter — and write THREAT_MODEL.md to focus later scanning and triage. Use when the user asks to threat-model a system, map the attack surface, or decide what to worry about before security review.
+description: Model assets, attackers, trust boundaries, and abuse scenarios to prioritize a system's security work.
 ---
 # Threat Model
 
-A threat model answers "what could go wrong with this system, who would do it, and what should we do about it?" — independently of any specific bug. It is the map that tells `security-review` where to look and which findings matter.
+Explain what could go wrong, who could cause it, and which controls reduce the risk. A threat describes an abuse scenario; a vulnerability is a particular flaw that may enable it.
 
-**Litmus test:** if patching one line makes an entry disappear, it was a vulnerability, not a threat. "Attacker achieves RCE via untrusted media parsing" is a threat; "`dr_wav.h:412` doesn't bounds-check `chunk_size`" is a vulnerability. This skill produces threats; vulnerabilities appear only as *evidence* that raises a threat's likelihood.
+System or scope: $ARGUMENTS
 
-**Read-only except for the output file.** Read source, git history, and any vuln reports the user supplies; write only `<path>/THREAT_MODEL.md`. Do not build, run, or fuzz. Use `explore` and `security` agents for the research swarm. Default `$ARGUMENTS` to the current directory.
+Use the repository and conversation when no target is given. Analyze without changing implementation. Present the model in chat unless the user asks for a document; use their path or the repository's convention when saving it.
 
-## Step 1 — Pick a mode
+## Reconstruct the system
 
-- **bootstrap** (default): derive the model from the code itself. Best for inherited/third-party code, or when no system owner is in the session.
-- **interview**: if the user is the system owner and present, walk the four questions below with the `elicit` tool, then ground their answers in the code. Best for new systems where the risk lives in business logic the code doesn't show.
-- **bootstrap-then-interview**: bootstrap a draft first, then walk it with the owner. Use when both code and owner are available — the owner refines a code-grounded draft instead of starting cold.
+Read entry points, data flows, identity and authorization checks, storage, external integrations, and deployment configuration. Identify valuable assets and the principals that can read, change, execute, or delete them. Consult existing designs, incidents, and security reports as evidence, checking their currency.
 
-The four interview questions: (1) What are we working on? (2) What can go wrong? (3) What are we going to do about it? (4) Did we do a good job?
+Separate facts visible in code from deployment assumptions and owner intent. Ask for missing information when it changes who is trusted or what impact matters. Do not require a full interview when the repository and request already establish the scope.
 
-## Step 2 — Bootstrap research swarm
+## Develop abuse scenarios
 
-Launch agents in parallel, each covering one area, returning structured notes:
-- **Assets & data**: what's valuable — secrets, PII, money, integrity of outputs, availability.
-- **Entry points & trust boundaries**: every place untrusted input enters (network, files, IPC, CLI on multi-tenant hosts, deserialization) and the boundary it crosses.
-- **Actors**: who interacts with the system and at what privilege; who a worst-case attacker is.
-- **History**: `git log` for security-relevant changes; any supplied CVEs, pentest reports, or `vulns.txt`. Generalize past bugs into threat *classes*.
+For each meaningful boundary, describe an actor's starting access, controlled input or state, path across the boundary, affected asset, and consequence. Consider malicious files or dependencies, cross-tenant access, confused deputies, external tool capabilities, and operational controls where the system actually exposes them.
 
-Then do a STRIDE gap-fill pass (Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privilege) to catch threats the code alone didn't surface.
+Use spoofing, tampering, repudiation, disclosure, denial of service, and privilege escalation as prompts for gaps, not mandatory findings. Distinguish existing controls from proposed ones, and identify the evidence that a control covers the path. Do not infer an enforcement boundary merely from a process, folder, or service name.
 
-## Step 3 — Write THREAT_MODEL.md
+Rank threats using impact and plausible opportunity, stating assumptions rather than inventing numeric scores. A threat is not accepted risk unless an owner or documented decision accepts it; otherwise call it unresolved or deprioritized with a reason.
 
-Write `<path>/THREAT_MODEL.md` with these sections so downstream skills can parse it:
+## Deliver
 
-1. **Context** — what the system does, in two or three sentences.
-2. **Assets** — what must be protected.
-3. **Entry points & trust boundaries** — a table: `entry point | input source | trust boundary crossed`.
-4. **Threats** — a table: `id | threat | actor | attack surface | asset at risk | impact | likelihood | status | controls`. Rank by impact × likelihood.
-5. **Deprioritized** — threats consciously accepted, with why.
-6. **Open questions** — what the code couldn't answer (these seed an interview pass).
+Include system context and scope, assets and actors, entry points and trust boundaries, and prioritized threats. Give threats stable IDs, abuse paths, existing controls, residual risks, and concrete mitigations or verification work. A compact data-flow diagram can clarify the boundaries.
 
-## Step 4 — Hand back
-
-Tell the user: the path written, the top 5 threats by impact × likelihood (id + one line each), and the open questions. Next step: `/security-review $ARGUMENTS` will use the entry-points and threats tables to focus its scan.
+Close with material unknowns and the highest-value next investigations. Keep confirmed vulnerabilities distinct from threat scenarios. When refreshing an existing model, preserve stable identifiers and record how new evidence changes the assessment.

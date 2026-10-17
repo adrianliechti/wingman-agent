@@ -43,7 +43,7 @@ func New(scratchDir string) hook.PostToolUse {
 		if len(result) <= budget {
 			return hook.Outcome{}, nil
 		}
-		path := writeScratch(scratchDir, call.Name, result)
+		path := WriteScratch(scratchDir, call.Name, result)
 		updated := formatPersisted(result, path)
 		return hook.Outcome{UpdatedResult: &updated}, nil
 	}
@@ -61,7 +61,8 @@ func Transform(scratchDir string) hook.TransformToolResult {
 	}
 }
 
-func writeScratch(scratchDir, toolName, content string) string {
+// WriteScratch saves content under scratchDir and returns its path, or "" on failure.
+func WriteScratch(scratchDir, toolName, content string) string {
 	if scratchDir == "" {
 		return ""
 	}

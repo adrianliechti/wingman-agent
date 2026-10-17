@@ -44,15 +44,7 @@ func (a *Agent) saveSessionSettingsLocked(s *sessionState) error {
 	if s == nil || a.sessionsDir == "" {
 		return nil
 	}
-	dir, err := session.ArtifactDir(a.sessionsDir, s.id)
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(sessionSettings{Model: s.modelID, Effort: s.effort})
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(dir, sessionSettingsFile, data)
+	return a.writeSessionSettings(s.id, sessionSettings{Model: s.modelID, Effort: s.effort})
 }
 
 func (a *Agent) copySessionSettings(fromID, toID string) error {
@@ -60,7 +52,11 @@ func (a *Agent) copySessionSettings(fromID, toID string) error {
 	if err != nil || settings == (sessionSettings{}) {
 		return err
 	}
-	dir, err := session.ArtifactDir(a.sessionsDir, toID)
+	return a.writeSessionSettings(toID, settings)
+}
+
+func (a *Agent) writeSessionSettings(id string, settings sessionSettings) error {
+	dir, err := session.ArtifactDir(a.sessionsDir, id)
 	if err != nil {
 		return err
 	}

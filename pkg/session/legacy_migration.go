@@ -159,35 +159,7 @@ func migrateLegacySession(path string, legacy Session) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".migrate-")
-	if err != nil {
-		return err
-	}
-	cleanup := func() {
-		tmp.Close()
-		os.Remove(tmp.Name())
-	}
-	enc := json.NewEncoder(tmp)
-	if err := enc.Encode(record{Type: "meta", Version: journalVersion, ID: id, CreatedAt: &created}); err != nil {
-		cleanup()
-		return err
-	}
-	for i := range state.Events {
-		if err := enc.Encode(record{Type: "event", Event: &state.Events[i]}); err != nil {
-			cleanup()
-			return err
-		}
-	}
-	if err := tmp.Sync(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
+	if err := writeJournal(path, record{Type: "meta", Version: journalVersion, ID: id, CreatedAt: &created}, state.Events); err != nil {
 		return fmt.Errorf("migrate legacy session: %w", err)
 	}
 	return nil

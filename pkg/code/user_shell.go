@@ -5,10 +5,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/adrianliechti/wingman-agent/pkg/agent"
 )
 
 const (
-	userShellOpenTag    = "<user_shell_command>"
+	userShellOpenTag    = agent.UserShellCommandTag
 	userShellCloseTag   = "</user_shell_command>"
 	userShellCommandTag = "<command>"
 	userShellCmdEndTag  = "</command>"

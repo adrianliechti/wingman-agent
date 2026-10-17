@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/httpclient"
@@ -29,24 +30,23 @@ const (
 	sessionEndTimeout              = 1
 	maxSessionEndTimeout           = 3
 	maxHookOutput                  = 1024 * 1024
+	maxHookStderr                  = 64 * 1024
 	defaultAdditionalContextTokens = 2_500
 	maxConcurrentAsyncHooks        = 8
 )
 
-// Gate defers a workspace trust decision until the first matching hook fires.
-// With a Fingerprint and Store, approval is remembered for the exact hook
-// content, and any change to that content asks again.
+// Gate asks once per session; with a Fingerprint and Store, approval persists until the hooks change.
 type Gate struct {
 	Confirm func(ctx context.Context, message string) (bool, error)
 	Message string
 
-	Fingerprint func() (string, error)
+	// Fingerprint identifies the hook content; empty means it cannot be remembered.
+	Fingerprint func() string
 	Store       TrustStore
 
-	mu          sync.Mutex
-	decided     bool
-	allowed     bool
-	fingerprint string
+	mu      sync.Mutex
+	decided bool
+	allowed bool
 }
 
 // TrustStore persists approved hook fingerprints across sessions.
@@ -55,38 +55,36 @@ type TrustStore interface {
 	Trust(fingerprint string) error
 }
 
-func (g *Gate) Allowed(ctx context.Context) bool {
+// Allowed without prompt never blocks an observe-only event on an undecided trust question.
+func (g *Gate) Allowed(ctx context.Context, prompt bool) bool {
 	if g == nil {
 		return true
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	fingerprint := ""
-	if g.Fingerprint != nil {
-		var err error
-		if fingerprint, err = g.Fingerprint(); err != nil {
-			return false
-		}
-	}
-	if g.decided && fingerprint == g.fingerprint {
+	if g.decided {
 		return g.allowed
 	}
+	fingerprint := ""
+	if g.Fingerprint != nil {
+		fingerprint = g.Fingerprint()
+	}
 	if fingerprint != "" && g.Store != nil && g.Store.Trusted(fingerprint) {
-		g.decided, g.allowed, g.fingerprint = true, true, fingerprint
+		g.decided, g.allowed = true, true
 		return true
 	}
 	if g.Confirm == nil {
-		g.decided, g.allowed, g.fingerprint = true, true, fingerprint
+		g.decided, g.allowed = true, true
 		return true
 	}
-	if ctx.Err() != nil {
+	if !prompt || ctx.Err() != nil {
 		return false
 	}
 	ok, err := g.Confirm(ctx, g.Message)
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	g.decided, g.allowed, g.fingerprint = true, ok && err == nil, fingerprint
+	g.decided, g.allowed = true, ok && err == nil
 	if g.allowed && fingerprint != "" && g.Store != nil {
 		_ = g.Store.Trust(fingerprint)
 	}
@@ -308,8 +306,7 @@ type BuildOptions struct {
 	SpillDir string
 }
 
-// MCPCaller returns the text content of a tool result, or an error when the
-// call fails or the tool reports an error.
+// MCPCaller returns a tool's text, or an error when the call or the tool fails.
 type MCPCaller func(ctx context.Context, server, tool string, input map[string]any) (string, error)
 
 // BuildWithOptions compiles hooks and injects source-specific environment
@@ -417,7 +414,7 @@ func runEvent(ctx context.Context, workDir string, options BuildOptions, event s
 			}
 		}
 	}
-	if len(synchronous) == 0 && len(background) == 0 || !options.Gate.Allowed(ctx) {
+	if len(synchronous) == 0 && len(background) == 0 || !options.Gate.Allowed(ctx, !observeOnly(event)) {
 		return nil
 	}
 	input, err := json.Marshal(payload)
@@ -456,16 +453,20 @@ func runEvent(ctx context.Context, workDir string, options BuildOptions, event s
 	return results
 }
 
+// observeOnly events run at teardown: they must stay short and never prompt for trust.
+func observeOnly(event string) bool {
+	return event == "SessionEnd" || event == "Interrupt"
+}
+
 func (h Handler) run(ctx context.Context, workDir, event string, input []byte, options BuildOptions) runResult {
 	timeoutSeconds := defaultTimeout
-	shortLived := event == "SessionEnd" || event == "Interrupt"
-	if shortLived {
+	if observeOnly(event) {
 		timeoutSeconds = sessionEndTimeout
 	}
 	if h.Timeout != nil {
 		timeoutSeconds = max(*h.Timeout, 1)
 	}
-	if shortLived {
+	if observeOnly(event) {
 		timeoutSeconds = min(timeoutSeconds, maxSessionEndTimeout)
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
@@ -494,16 +495,13 @@ func (h Handler) runCommand(ctx context.Context, workDir string, input []byte, e
 		}
 	}
 	// Codex substitutes ${NAME} itself so plugin paths work in every shell.
-	for name, value := range environment {
-		command = strings.ReplaceAll(command, "${"+name+"}", value)
-	}
-	cmd := shell.Command(ctx, command, workDir)
+	cmd := shell.Command(ctx, Expand(command, environment), workDir)
 	if len(environment) > 0 {
 		cmd.Env = mergedEnvironment(os.Environ(), environment)
 	}
 	cmd.Stdin = bytes.NewReader(input)
 	stdout := cappedBuffer{limit: maxHookOutput + 1}
-	stderr := cappedBuffer{limit: maxHookOutput + 1}
+	stderr := cappedBuffer{limit: maxHookStderr + 1}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -516,6 +514,32 @@ func (h Handler) runCommand(ctx context.Context, workDir string, input []byte, e
 		stdoutTruncated: stdout.Len() > maxHookOutput,
 		err:             nonExitError(err),
 	}
+}
+
+// Expand replaces ${NAME} for names in vars in one pass; replacement text is never rescanned.
+func Expand(value string, vars map[string]string) string {
+	var b strings.Builder
+	for {
+		start := strings.Index(value, "${")
+		if start < 0 {
+			break
+		}
+		end := strings.IndexByte(value[start+2:], '}')
+		if end < 0 {
+			break
+		}
+		replacement, ok := vars[value[start+2:start+2+end]]
+		if !ok {
+			b.WriteString(value[:start+2])
+			value = value[start+2:]
+			continue
+		}
+		b.WriteString(value[:start])
+		b.WriteString(replacement)
+		value = value[start+3+end:]
+	}
+	b.WriteString(value)
+	return b.String()
 }
 
 // cappedBuffer keeps draining a child process after the retained prefix is
@@ -809,8 +833,7 @@ func parseResult(event string, result runResult) parsedResult {
 	return parsed
 }
 
-// spillFeedback bounds the reasons Codex feeds back to the model: PostToolUse
-// feedback and Stop/SubagentStop continuations.
+// spillFeedback bounds reasons fed back to the model, after every parseResult return path.
 func spillFeedback(event string, parsed parsedResult, spillDir string) parsedResult {
 	switch event {
 	case "PostToolUse", "Stop", "SubagentStop":
@@ -821,10 +844,7 @@ func spillFeedback(event string, parsed parsedResult, spillDir string) parsedRes
 	return parsed
 }
 
-// boundAdditionalContext applies Codex's per-handler approximate-token
-// threshold. A zero value explicitly disables this limit; the process-level
-// maxHookOutput ceiling remains in force for safety. Oversized text is saved
-// in full to spillDir when set, and the preview names the file.
+// boundAdditionalContext applies Codex's token threshold (0 disables it), spilling the full text to spillDir.
 func boundAdditionalContext(value string, configured *int, spillDir string) string {
 	tokenLimit := defaultAdditionalContextTokens
 	if configured != nil {
@@ -835,8 +855,8 @@ func boundAdditionalContext(value string, configured *int, spillDir string) stri
 	}
 
 	footer := ""
-	if path := writeSpill(spillDir, value); path != "" {
-		footer = "\n\nFull hook output saved to: " + path
+	if path := truncation.WriteScratch(spillDir, "hook", value); path != "" {
+		footer = "\n\nFull output saved to: " + path
 	}
 	byteBudget := tokenLimit * 4
 	marker := fmt.Sprintf("\n… hook additionalContext truncated from approximately %d tokens …\n", (len(value)+3)/4)
@@ -844,26 +864,6 @@ func boundAdditionalContext(value string, configured *int, spillDir string) stri
 	headBudget := previewBudget / 2
 	tailBudget := previewBudget - headBudget
 	return text.HeadLines(value, headBudget) + marker + text.TailLines(value, tailBudget) + footer
-}
-
-func writeSpill(dir, content string) string {
-	if dir == "" {
-		return ""
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return ""
-	}
-	file, err := os.CreateTemp(dir, "hook-output-*.txt")
-	if err != nil {
-		return ""
-	}
-	_, writeErr := file.WriteString(content)
-	closeErr := file.Close()
-	if writeErr != nil || closeErr != nil {
-		_ = os.Remove(file.Name())
-		return ""
-	}
-	return file.Name()
 }
 
 // validWireOutput applies Codex's event-specific output schemas and semantic
