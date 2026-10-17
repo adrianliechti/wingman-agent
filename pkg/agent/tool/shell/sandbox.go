@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -33,6 +34,20 @@ var (
 	protectedFiles     = []string{".git/config", ".envrc"}
 	protectedRootFiles = []string{"mcp.json", ".mcp.json", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile"}
 )
+
+func existingProtectedPaths(root string) []string {
+	if root == "" {
+		return nil
+	}
+	var paths []string
+	for _, name := range slices.Concat(protectedDirs, protectedFiles, protectedRootFiles) {
+		path := filepath.Join(root, name)
+		if _, err := os.Lstat(path); err == nil {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
 
 func sandboxNetworkEnabled() bool {
 	return !strings.EqualFold(strings.TrimSpace(os.Getenv(workspaceSandboxNetworkEnv)), "off")
@@ -141,7 +156,11 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 // an extra root is a nice-to-have, not a precondition like the workspace.
 func writableRootsFor(workspaceDir string, extraWritableRoots []string) []string {
 	writableRoots := []string{canonicalPath(workspaceDir)}
-	for _, path := range append(append([]string{}, extraWritableRoots...), os.TempDir(), "/tmp") {
+	candidates := append(append([]string{}, extraWritableRoots...), os.TempDir())
+	if runtime.GOOS != "windows" {
+		candidates = append(candidates, "/tmp")
+	}
+	for _, path := range candidates {
 		if path == "" {
 			continue
 		}

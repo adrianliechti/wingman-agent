@@ -111,15 +111,12 @@ func TestBuildSandboxedCommandRejectsMissingWorkspace(t *testing.T) {
 }
 
 func TestExecSandboxConfinesWritesToWorkspace(t *testing.T) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		t.Skip("no sandbox backend on this platform")
 	}
 	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	home := sandboxTestHome(t)
 	outside := filepath.Join(home, fmt.Sprintf(".wingman-sandbox-test-%d", os.Getpid()))
 	defer os.Remove(outside)
 
@@ -129,28 +126,28 @@ func TestExecSandboxConfinesWritesToWorkspace(t *testing.T) {
 	run := func(command string) tool.Result {
 		result, err := exec.Execute(context.Background(), map[string]any{"command": command, "wait": 10})
 		if err != nil {
+			if runtime.GOOS == "windows" {
+				t.Fatal(err)
+			}
 			t.Skipf("sandbox backend unavailable: %v", err)
 		}
 		return result
 	}
-	if inside := run("touch inside.txt"); inside.IsError {
+	if inside := run(touchCommand("inside.txt")); inside.IsError {
 		t.Fatalf("write inside the workspace failed: %s", inside.Content)
 	}
-	if escaped := run("touch '" + outside + "'"); !escaped.IsError {
+	if escaped := run(touchCommand(outside)); !escaped.IsError {
 		t.Fatalf("write outside the workspace was allowed: %s", escaped.Content)
 	}
 }
 
 func TestExecEscalationRunsOutsideSandboxAfterApproval(t *testing.T) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		t.Skip("no sandbox backend on this platform")
 	}
 	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	home := sandboxTestHome(t)
 	outside := filepath.Join(home, fmt.Sprintf(".wingman-escalation-test-%d", os.Getpid()))
 	defer os.Remove(outside)
 
@@ -169,15 +166,18 @@ func TestExecEscalationRunsOutsideSandboxAfterApproval(t *testing.T) {
 		t.Fatal("sandboxed exec does not offer sandbox_permissions")
 	}
 
-	denied, err := exec.Execute(context.Background(), map[string]any{"command": "touch '" + outside + "'", "wait": 10})
+	denied, err := exec.Execute(context.Background(), map[string]any{"command": touchCommand(outside), "wait": 10})
 	if err != nil {
+		if runtime.GOOS == "windows" {
+			t.Fatal(err)
+		}
 		t.Skipf("sandbox backend unavailable: %v", err)
 	}
 	if !denied.IsError || !strings.Contains(denied.Content, "require_escalated") {
 		t.Fatalf("sandbox denial carries no escalation hint: %s", denied.Content)
 	}
 	escalated, err := exec.Execute(context.Background(), map[string]any{
-		"command": "touch '" + outside + "'", "wait": 10,
+		"command": touchCommand(outside), "wait": 10,
 		"sandbox_permissions": "require_escalated", "justification": "write a marker in the home directory",
 	})
 	if err != nil || escalated.IsError {
@@ -211,4 +211,30 @@ func TestExecOffersEscalationOnlyWhenSandboxed(t *testing.T) {
 	if _, ok := ExecTools(manager, t.TempDir(), nil, nil, nil)[0].Parameters["properties"].(map[string]any)["sandbox_permissions"]; ok {
 		t.Fatal("unsandboxed exec offers sandbox_permissions")
 	}
+}
+
+// touchCommand creates path in the platform's tool shell.
+func touchCommand(path string) string {
+	if runtime.GOOS == "windows" {
+		return "New-Item -ItemType File -Force -Path '" + path + "' | Out-Null"
+	}
+	return "touch '" + path + "'"
+}
+
+// sandboxTestHome returns the home directory for writes outside the
+// workspace. On Windows it is a temp dir: the backend persistently labels the
+// credential paths beneath the home, which must not touch the real ones.
+func sandboxTestHome(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		home := t.TempDir()
+		t.Setenv("USERPROFILE", home)
+		t.Setenv("WINGMAN_HOME", filepath.Join(home, ".wingman"))
+		return home
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return home
 }

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 )
 
 func platformSandboxCommand(shell, command, workingDir string, policy sandboxPolicy) (string, []string, error) {
@@ -51,20 +50,6 @@ func bubblewrapArgs(shell, command, workingDir string, policy sandboxPolicy) []s
 		}
 	}
 	return append(args, "--chdir", workingDir, "--", shell, "-c", command)
-}
-
-func existingProtectedPaths(root string) []string {
-	if root == "" {
-		return nil
-	}
-	var paths []string
-	for _, name := range slices.Concat(protectedDirs, protectedFiles, protectedRootFiles) {
-		path := filepath.Join(root, name)
-		if _, err := os.Lstat(path); err == nil {
-			paths = append(paths, path)
-		}
-	}
-	return paths
 }
 
 func findBubblewrap(writableRoots []string) (string, error) {

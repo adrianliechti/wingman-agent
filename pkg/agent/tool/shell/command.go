@@ -26,6 +26,9 @@ func safetyGuardLine(elicit *tool.Elicitation) string {
 }
 
 func sandboxGuideLine() string {
+	if runtime.GOOS == "windows" {
+		return "- Commands run with a Low integrity, write-restricted Windows token. They can read most files but not existing credential paths such as ~/.ssh or ~/.aws, and write inside the workspace, private temp, and memory directories. Existing protected git, editor, and agent configuration paths are read-only. Paths that do not exist yet are not protected, and some existing Low integrity directories outside the workspace remain writable. Network access is allowed; disabling it is unsupported. If a command needs more access, set `sandbox_permissions` to \"require_escalated\" with a `justification`; it then runs outside the sandbox after approval."
+	}
 	network := "Network access is allowed"
 	if !sandboxNetworkEnabled() {
 		network = "Network access is blocked"
@@ -33,8 +36,8 @@ func sandboxGuideLine() string {
 	return "- Commands run in a sandbox: they can read most files but not credentials such as ~/.ssh or ~/.aws, write only inside the workspace and temp directories, and cannot change .git/hooks, .git/config, editor settings, or agent configuration. " + network + ". If a command genuinely needs more, set `sandbox_permissions` to \"require_escalated\" with a `justification`; it then runs outside the sandbox after approval."
 }
 
-// sandboxDenialHints follows Codex: output words that suggest the sandbox blocked a failed command.
-var sandboxDenialHints = []string{"operation not permitted", "permission denied", "read-only file system", "sandbox"}
+// sandboxDenialHints follows Codex (plus the Windows spellings): output words that suggest the sandbox blocked a failed command.
+var sandboxDenialHints = []string{"operation not permitted", "permission denied", "read-only file system", "sandbox", "is denied"}
 
 func looksLikeSandboxDenial(output string, err error) bool {
 	if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() <= 0 {
@@ -109,13 +112,18 @@ func buildCommandWithEnvironment(ctx context.Context, command, workingDir string
 	var cmd *exec.Cmd
 
 	if runtime.GOOS == "windows" {
-		if sandbox != nil {
-			return nil, fmt.Errorf("workspace shell sandbox is not supported on Windows")
-		}
 		ps := findPowerShell()
 
 		wrapped := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + command
-		cmd = exec.CommandContext(ctx, ps, "-NoProfile", "-NoLogo", "-NonInteractive", "-Command", wrapped)
+		if sandbox == nil {
+			cmd = exec.CommandContext(ctx, ps, "-NoProfile", "-NoLogo", "-NonInteractive", "-Command", wrapped)
+		} else {
+			var err error
+			if cmd, err = buildSandboxedCommand(ctx, ps, wrapped, workingDir, *sandbox); err != nil {
+				return nil, err
+			}
+			environment = setEnvironment(environment, workspaceSandboxActiveEnv, "1")
+		}
 	} else {
 		shell := os.Getenv("SHELL")
 		if shell == "" {

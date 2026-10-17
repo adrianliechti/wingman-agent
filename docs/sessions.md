@@ -105,7 +105,8 @@ session** grants the scope described by that prompt.
 ## Sandbox
 
 Set `WINGMAN_SANDBOX=workspace` to run the agent's shell commands and scheduled
-scripts in an OS sandbox: Seatbelt on macOS, bubblewrap (`bwrap`) on Linux.
+scripts in an OS sandbox: Seatbelt on macOS, bubblewrap (`bwrap`) on Linux,
+and a Low integrity, write-restricted token on Windows.
 
 - Commands can read most files, but not credentials such as `~/.ssh`,
   `~/.aws`, `~/.gnupg`, `~/.kube`, or Wingman's MCP tokens.
@@ -118,8 +119,27 @@ scripts in an OS sandbox: Seatbelt on macOS, bubblewrap (`bwrap`) on Linux.
   In Agent mode the reviewer decides; Unattended mode allows it.
 
 Your own `!` commands and hooks run unsandboxed. On Linux, protected paths that
-do not exist yet, or sit below the workspace root, are not covered. Windows is
-not supported yet.
+do not exist yet, or sit below the workspace root, are not covered.
+
+On Windows the sandbox works by changing ACLs and labels, and leaves them in
+place:
+
+- The workspace and memory directory get a Low integrity label and an access
+  entry for a per-workspace SID. The first command in a large workspace can
+  therefore take a while.
+- Existing protected paths get a deny entry for that SID. Paths that do not
+  exist yet are not covered.
+- Credential paths get a label that hides them from Low integrity processes.
+  This does not affect your own programs.
+- Commands use a private temp directory instead of `%TEMP%`.
+- Files moved in from elsewhere keep their old ACLs and may be read-only to the
+  sandbox.
+- Windows runtime devices require the token to retain the Everyone and logon
+  SIDs in its restricted access check. Existing directories outside the workspace
+  that are already Low integrity and writable by those SIDs can also be written.
+  This backend therefore does not provide strict isolation of filesystem writes.
+- `WINGMAN_SANDBOX_NETWORK=off` is not supported and makes commands fail.
+- The workspace cannot be a drive root or your home directory.
 
 See [reviewing changes](reviewing-changes.md) to inspect or undo a turn, and
 [remote web access](remote-control.md) to connect through a relay.
