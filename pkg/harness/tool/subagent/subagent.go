@@ -495,11 +495,12 @@ func Tools(cfg *harness.Config, sharedContext func([]tool.Tool) string, tasks *t
 					instructions.WriteString("\n\n" + c)
 				}
 			}
-			for _, h := range cfg.Hooks.SubagentStart {
+			for i, h := range cfg.Hooks.SubagentStart {
 				if err := ctx.Err(); err != nil {
 					return tool.Result{}, err
 				}
 				outcome, err := h(ctx, agentID, subagentName)
+				hook.ReportError(ctx, "SubagentStart", "", i, err)
 				if err == nil && len(outcome.AdditionalContext) > 0 {
 					instructions.WriteString("\n\n" + strings.Join(outcome.AdditionalContext, "\n\n"))
 				}

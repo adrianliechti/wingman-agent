@@ -98,9 +98,10 @@ func (s *sessionState) permissionHooks(ctx context.Context) (allowed, decided bo
 	if !ok {
 		return false, false
 	}
-	for _, run := range s.aa.Hooks.PermissionRequest {
+	for i, run := range s.aa.Hooks.PermissionRequest {
 		outcome, err := run(ctx, call)
 		if err != nil {
+			hook.ReportError(ctx, "PermissionRequest", "", i, err)
 			continue
 		}
 		switch outcome.Behavior {

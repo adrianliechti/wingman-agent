@@ -31,9 +31,10 @@ func (a *Agent) appendInputs(ctx context.Context, inputs ...Message) error {
 		var hookContext []string
 		var inputErr error
 		if !message.Hidden {
-			for _, h := range a.Hooks.UserPromptSubmit {
+			for i, h := range a.Hooks.UserPromptSubmit {
 				out, err := h(ctx, contentText(message.Content))
 				if err != nil {
+					hook.ReportError(ctx, "UserPromptSubmit", "", i, err)
 					inputErr = err
 					break
 				}
@@ -141,13 +142,13 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 
 // Manual, proactive and overflow compaction run the same hook lifecycle.
 func (a *Agent) compactWithHooks(ctx context.Context, req *request, trigger, focus string) error {
-	if outcome := runCompactHooks(ctx, trigger, a.Hooks.PreCompact); outcome.Stop {
+	if outcome := runCompactHooks(ctx, "PreCompact", trigger, a.Hooks.PreCompact); outcome.Stop {
 		return hookStopError("compaction stopped by hook")
 	}
 	if err := a.compactMessages(ctx, req, focus); err != nil {
 		return err
 	}
-	if outcome := runCompactHooks(ctx, trigger, a.Hooks.PostCompact); outcome.Stop {
+	if outcome := runCompactHooks(ctx, "PostCompact", trigger, a.Hooks.PostCompact); outcome.Stop {
 		return hookStopError("post-compaction hook stopped the turn")
 	}
 	outcome, err := a.runSessionStartHooks(ctx, "compact")
@@ -160,10 +161,11 @@ func (a *Agent) compactWithHooks(ctx context.Context, req *request, trigger, foc
 	return nil
 }
 
-func runCompactHooks[H ~func(context.Context, string) (hook.Outcome, error)](ctx context.Context, trigger string, hooks []H) hook.Outcome {
+func runCompactHooks[H ~func(context.Context, string) (hook.Outcome, error)](ctx context.Context, event, trigger string, hooks []H) hook.Outcome {
 	var combined hook.Outcome
-	for _, h := range hooks {
+	for i, h := range hooks {
 		outcome, err := h(ctx, trigger)
+		hook.ReportError(ctx, event, "", i, err)
 		if err == nil && outcome.Stop && !combined.Stop {
 			combined = outcome
 		}

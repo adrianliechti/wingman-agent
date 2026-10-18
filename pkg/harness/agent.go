@@ -399,12 +399,13 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 func (a *Agent) runSessionStartHooks(ctx context.Context, source string) (hook.Outcome, error) {
 	var combined hook.Outcome
 	var parts []string
-	for _, h := range a.Hooks.SessionStart {
+	for i, h := range a.Hooks.SessionStart {
 		if err := ctx.Err(); err != nil {
 			return combined, err
 		}
 		outcome, err := h(ctx, source)
 		if err != nil {
+			hook.ReportError(ctx, "SessionStart", "", i, err)
 			continue
 		}
 		parts = append(parts, outcome.AdditionalContext...)
@@ -425,9 +426,10 @@ func (a *Agent) runSessionStartHooks(ctx context.Context, source string) (hook.O
 
 func (a *Agent) runStopHooks(ctx context.Context, lastAssistantMessage string, active bool) hook.Outcome {
 	var combined hook.Outcome
-	for _, h := range a.Hooks.Stop {
+	for i, h := range a.Hooks.Stop {
 		outcome, err := h(ctx, lastAssistantMessage, active)
 		if err != nil {
+			hook.ReportError(ctx, "Stop", "", i, err)
 			continue
 		}
 		if outcome.Stop && !combined.Stop {
@@ -445,9 +447,10 @@ func (a *Agent) runStopHooks(ctx context.Context, lastAssistantMessage string, a
 	if runtime.AgentID == "" || combined.Stop || combined.Block {
 		return combined
 	}
-	for _, h := range a.Hooks.SubagentStop {
+	for i, h := range a.Hooks.SubagentStop {
 		outcome, err := h(ctx, runtime.AgentID, runtime.AgentType, lastAssistantMessage, active)
 		if err != nil {
+			hook.ReportError(ctx, "SubagentStop", "", i, err)
 			continue
 		}
 		if outcome.Stop {
@@ -1195,10 +1198,11 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 	execute := true
 	var hookContext []string
 
-	for _, h := range a.Hooks.PreToolUse {
+	for i, h := range a.Hooks.PreToolUse {
 		outcome, err := h(ctx, hc)
 
 		if err != nil {
+			hook.ReportError(ctx, "PreToolUse", "", i, err)
 			result = tool.Error(fmt.Sprintf("error: %v", err))
 			execute = false
 			break
@@ -1226,10 +1230,11 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 		result = a.executeTool(hook.WithToolCall(ctx, hc), tc, t, timeout, started)
 	}
 
-	for _, h := range a.Hooks.PostToolUse {
+	for i, h := range a.Hooks.PostToolUse {
 		outcome, err := h(ctx, hc, result.Content)
 
 		if err != nil {
+			hook.ReportError(ctx, "PostToolUse", "", i, err)
 			result.Content, result.IsError = fmt.Sprintf("error: %v", err), true
 			break
 		}
@@ -1257,9 +1262,10 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 		result.Content += "\n\n<hook-context>\n" + strings.Join(hookContext, "\n\n") + "\n</hook-context>"
 	}
 	if !tool.IsImageResult(result.Content) {
-		for _, transform := range a.Hooks.TransformToolResult {
+		for i, transform := range a.Hooks.TransformToolResult {
 			content, err := transform(ctx, hc, result.Content)
 			if err != nil {
+				hook.ReportError(ctx, "TransformToolResult", "", i, err)
 				result.Content, result.IsError = fmt.Sprintf("error: %v", err), true
 				break
 			}

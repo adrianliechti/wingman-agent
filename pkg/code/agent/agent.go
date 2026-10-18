@@ -23,17 +23,11 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
-	elicittool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/elicit"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fetch"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/shell"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/subagent"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
@@ -285,12 +279,10 @@ func (a *Agent) loadSession(ctx context.Context, id string) error {
 	s.startSource = "resume"
 	a.restoreSessionSettings(s, saved.State)
 	if err := s.aa.Restore(saved.State); err != nil {
-		s.close()
-		return err
+		return errors.Join(err, s.close())
 	}
 	if err := s.aa.ReconcileInterrupted("process restarted before the operation settled"); err != nil {
-		s.close()
-		return err
+		return errors.Join(err, s.close())
 	}
 
 	return a.registerSession(ctx, s)
@@ -306,8 +298,7 @@ func (a *Agent) registerSession(ctx context.Context, s *sessionState) error {
 	}
 	if err != nil {
 		a.mu.Unlock()
-		s.close()
-		return err
+		return errors.Join(err, s.close())
 	}
 	a.sessions[s.id] = s
 	s.startBackground()
@@ -359,13 +350,15 @@ func (a *Agent) DeleteSession(ctx context.Context, id string) error {
 	}
 	a.mu.Unlock()
 
+	var closeErr error
 	if inMem {
-		s.close()
+		closeErr = s.close()
 	}
-	if err := session.Delete(a.sessionsDir, id); err != nil && !os.IsNotExist(err) {
-		return err
+	deleteErr := session.Delete(a.sessionsDir, id)
+	if os.IsNotExist(deleteErr) {
+		deleteErr = nil
 	}
-	return nil
+	return errors.Join(closeErr, deleteErr)
 }
 
 func (a *Agent) Save(id string) error {
@@ -584,10 +577,13 @@ func (a *Agent) Close() error {
 	sessions := slices.Collect(maps.Values(a.sessions))
 	a.sessions = map[string]*sessionState{}
 	a.mu.Unlock()
+	var errs []error
 	for _, s := range sessions {
-		s.close()
+		if err := s.close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 var wingmanModes = []code.Mode{
@@ -645,259 +641,6 @@ func (a *Agent) Tools(id string) []tool.Tool {
 	return s.tools()
 }
 
-func (a *Agent) buildSession(id string) (*sessionState, error) {
-	journal, err := session.OpenJournal(a.sessionsDir, id)
-	if err != nil {
-		return nil, err
-	}
-	sessionCfg := a.cfg.Clone()
-	s := &sessionState{
-		id:      id,
-		parent:  a,
-		aa:      &harness.Agent{Config: sessionCfg, Recorder: journal},
-		journal: journal,
-	}
-	s.aa.CacheKey = id
-	s.setMode(modeAgent)
-	sessionCfg.Tools = s.catalogTools
-	sessionCfg.PinTools = true
-	sessionCfg.FilterTools = s.filterTools
-	prepare := sessionCfg.PrepareTurn
-	sessionCfg.PrepareTurn = func(ctx context.Context, input []harness.Content) ([]harness.Content, error) {
-		if prepare != nil {
-			var err error
-			input, err = prepare(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-		}
-		return s.prepareTurn(ctx, input)
-	}
-	sessionCfg.Instructions = s.instructions
-	sessionCfg.ContextInstructions = s.contextInstructions
-	sessionCfg.PermissionMode = s.permissionMode
-	if sessionCfg.RequireFinish == nil {
-		sessionCfg.RequireFinish = requiresFinish
-	}
-	sessionCfg.Model = func() string {
-		option, _ := a.roleModel(s, "")
-		return option.ID
-	}
-	sessionCfg.Effort = func() string {
-		return a.effortFor(s)
-	}
-	sessionCfg.RoleModel = func(role string) (harness.ModelOption, bool) {
-		return a.roleModel(s, role)
-	}
-	elicit := a.prompts
-	ws := a.workspace
-
-	globalHooks, globalErr := external.Load(userHooksConfigPath())
-	workspaceHooksPath := filepath.Join(ws.RootPath, ".codex", "hooks.json")
-	workspaceHooks, workspaceErr := external.Load(workspaceHooksPath)
-
-	// Fail closed: a hook config the user wrote but that no longer parses must
-	// not silently disable the guards it configures.
-	if err := errors.Join(globalErr, workspaceErr); err != nil {
-		message := fmt.Sprintf("hook configuration is invalid; fix or remove it to unblock tools: %v", err)
-		sessionCfg.Hooks.PreToolUse = append(sessionCfg.Hooks.PreToolUse,
-			func(context.Context, tool.ToolCall) (hook.PreToolUseOutcome, error) {
-				return hook.PreToolUseOutcome{Outcome: hook.Outcome{Block: true, Reason: message}}, nil
-			},
-		)
-	}
-
-	hookAsync := external.NewAsync(func(runtime hook.Runtime, parts []string) {
-		// A subagent's hook context describes calls the main turn never saw.
-		if runtime.AgentID != "" {
-			return
-		}
-		if !s.aa.QueueInput([]harness.Content{{Text: strings.Join(parts, "\n\n"), Hidden: true}}) {
-			s.stashHookContext(parts)
-		}
-	})
-	hookOptions := external.BuildOptions{Async: hookAsync, MCP: ws.CallMCPTool, SpillDir: ws.ScratchPath}
-	hookTrust := attendedTrust{TrustStore: ws.HookTrust(), session: s}
-
-	// Workspace hooks come with the repo, not the user — gate them behind a
-	// confirmation so a cloned project cannot run commands unprompted.
-	workspaceOptions := hookOptions
-	if rules := workspaceHooks.RuleCount(); rules > 0 {
-		fingerprint, _ := workspaceHooks.Fingerprint(ws.RootPath, workspaceHooksPath)
-		workspaceOptions.Gate = &external.Gate{
-			Confirm:     a.confirm,
-			Message:     fmt.Sprintf("Run %d workspace hook rule(s) from %s?\n\nApproval is remembered until these hooks change.", rules, workspaceHooksPath),
-			Fingerprint: func() string { return fingerprint },
-			Store:       hookTrust,
-		}
-	}
-
-	sessionCfg.Hooks.Append(globalHooks.BuildWithOptions(ws.RootPath, hookOptions))
-	sessionCfg.Hooks.Append(workspaceHooks.BuildWithOptions(ws.RootPath, workspaceOptions))
-	for i := range ws.Plugins {
-		p := &ws.Plugins[i]
-		if p.Hooks == nil || p.Hooks.RuleCount() == 0 {
-			continue
-		}
-		declarations, declarationsErr := p.Hooks.Fingerprint(ws.RootPath, p.Name, p.Root, p.Data)
-		pluginOptions := hookOptions
-		pluginOptions.Gate = &external.Gate{
-			Confirm: a.confirm,
-			Message: fmt.Sprintf("Run %d hook rule(s) from plugin %q at %s?\n\nApproval is remembered until the plugin changes.", p.Hooks.RuleCount(), p.Name, p.Root),
-			Fingerprint: func() string {
-				content, err := external.ContentHash(p.Root)
-				if declarationsErr != nil || err != nil {
-					return ""
-				}
-				return declarations + "/" + content
-			},
-			Store: hookTrust,
-		}
-		pluginOptions.Environment = map[string]string{
-			"PLUGIN_ROOT":        p.Root,
-			"PLUGIN_DATA":        p.Data,
-			"CLAUDE_PLUGIN_ROOT": p.Root,
-			"CLAUDE_PLUGIN_DATA": p.Data,
-		}
-		sessionCfg.Hooks.Append(p.Hooks.BuildWithOptions(ws.RootPath, pluginOptions))
-	}
-	sessionCfg.Hooks.TransformToolResult = append(sessionCfg.Hooks.TransformToolResult,
-		truncation.Transform(ws.ScratchPath),
-	)
-
-	allowedReadRoots, allowedWriteRoots := sessionFileRoots(ws)
-	if !a.cfg.DisableShell && !a.cfg.DisableSandbox {
-		if err := shell.CheckSandbox(ws.RootPath); err != nil {
-			return nil, fmt.Errorf("sandbox unavailable (WINGMAN_SANDBOX=off explicitly disables isolation): %w", err)
-		}
-	}
-
-	artifactDir, err := session.ArtifactDir(a.sessionsDir, id)
-	if err != nil {
-		return nil, err
-	}
-	s.tasks, err = task.NewFileRegistry(filepath.Join(artifactDir, "tasks.json"))
-	if err != nil {
-		return nil, fmt.Errorf("restore background tasks: %w", err)
-	}
-	s.execManager = shell.NewExecManager(func(e shell.ExecExit) {
-		s.tasks.Publish(execExitEvent(e))
-	})
-	s.freshness = fs.NewFreshness(ws.Root)
-	s.schedules = schedule.NewFileStore(filepath.Join(artifactDir, "schedules"))
-
-	sessionCfg.Hooks.UserPromptSubmit = append(sessionCfg.Hooks.UserPromptSubmit,
-		func(context.Context, string) (hook.Outcome, error) {
-			s.sweepFileChanges()
-			parts := s.takeHookContext()
-			if notice := formatFileChangeNotice(s.takeFileChanges()); notice != "" {
-				parts = append(parts, notice)
-			}
-			return hook.Outcome{AdditionalContext: parts}, nil
-		},
-	)
-
-	privateTemp, err := os.MkdirTemp("", "wingman-session-")
-	if err != nil {
-		return nil, fmt.Errorf("create private session temp: %w", err)
-	}
-	shellOpts := &shell.Options{
-		ScratchDir:         ws.ScratchPath,
-		TempDir:            privateTemp,
-		DisableSandbox:     a.cfg.DisableSandbox,
-		Network:            a.cfg.SandboxNetwork,
-		ExtraWritableRoots: []string{ws.MemoryPath},
-	}
-	allowedReadRoots = append(allowedReadRoots, privateTemp)
-	allowedWriteRoots = append(allowedWriteRoots, privateTemp)
-	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.cfg.DisableShell, Elicitation: elicit, Shell: shellOpts}
-
-	var shellTools []tool.Tool
-	if !a.cfg.DisableShell {
-		shellTools = shell.ExecTools(s.execManager, ws.RootPath, elicit, shellOpts)
-	}
-	var webFetchTools []tool.Tool
-	if !a.cfg.DisableWebFetch {
-		webFetchTools = fetch.Tools(elicit)
-	}
-	var webSearchTools []tool.Tool
-	if !a.cfg.DisableWebSearch {
-		webSearchTools = websearch.Tools(elicit)
-	}
-
-	baseTools := slices.Concat(
-		ws.WithEditDiagnostics(fs.Tools(ws.Root, &fs.Options{
-			AllowedReadRoots:  allowedReadRoots,
-			AllowedWriteRoots: allowedWriteRoots,
-			Freshness:         s.freshness,
-		})),
-		shellTools,
-		schedule.Tools(s.schedules, s.scriptOptions),
-		elicittool.Tools(elicit),
-		webFetchTools,
-		webSearchTools,
-		subagent.Tools(sessionCfg, s.subagentContext, s.tasks, subagent.Discover(ws.RootPath)...),
-	)
-	s.toolSet = tool.NewSet(baseTools...)
-	// Close runs in reverse: tasks first so background subagents are canceled
-	// before their shared exec sessions are killed.
-	s.toolSet.Own("private temporary files", func() error { return os.RemoveAll(privateTemp) })
-	s.toolSet.Own("exec manager", func() error {
-		s.execManager.Close()
-		return nil
-	})
-	s.toolSet.Own("task registry", func() error {
-		s.tasks.Close()
-		return nil
-	})
-	s.toolSet.Own("async hooks", func() error {
-		hookAsync.Close()
-		return nil
-	})
-	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
-	var background sync.WaitGroup
-	s.startBackground = func() {
-		background.Go(func() { s.watchFileChanges(backgroundCtx) })
-		background.Go(func() { s.scheduleRunner().Run(backgroundCtx) })
-	}
-	closeSession := sessionCfg.CloseSession
-	sessionCfg.CloseSession = func() error {
-		cancelBackground()
-		background.Wait()
-		err := s.toolSet.Close()
-		if closeSession != nil {
-			err = errors.Join(err, closeSession())
-		}
-		return err
-	}
-	return s, nil
-}
-
-func sessionFileRoots(ws *code.Workspace) (readRoots, writeRoots []string) {
-	readRoots = skill.DiscoveryRoots(ws.RootPath)
-	for _, sk := range ws.Skills() {
-		if sk.Bundled {
-			continue
-		}
-		if path := sk.AbsoluteDir(ws.RootPath); path != "" {
-			readRoots = append(readRoots, path)
-		}
-	}
-	// System skills live outside the workspace, but their references and scripts
-	// must remain readable. Deliberately do not add this root to write roots.
-	if ws.SystemSkillsPath != "" {
-		readRoots = append(readRoots, ws.SystemSkillsPath)
-	}
-	readRoots = append(readRoots, ws.ScratchPath)
-
-	if ws.MemoryPath != "" {
-		readRoots = append(readRoots, ws.MemoryPath)
-		writeRoots = append(writeRoots, ws.MemoryPath)
-	}
-
-	return readRoots, writeRoots
-}
-
 // execExitNotifyLimit caps how much trailing output of a backgrounded command
 // an exit notification injects into the conversation.
 const execExitNotifyLimit = 16 * 1024
@@ -931,14 +674,6 @@ func execExitEvent(e shell.ExecExit) task.Event {
 		Result:      result,
 		Elapsed:     e.Elapsed,
 	}
-}
-
-func userHooksConfigPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".codex", "hooks.json")
 }
 
 func (a *Agent) promptContext(ctx context.Context) context.Context {
@@ -1015,10 +750,13 @@ func (s *sessionState) hookRuntime() hook.Runtime {
 	}
 }
 
-func (s *sessionState) close() {
+func (s *sessionState) close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = s.aa.Close(hook.WithRuntime(ctx, s.hookRuntime()), "other")
+	if err := s.aa.Close(hook.WithRuntime(ctx, s.hookRuntime()), "other"); err != nil {
+		return fmt.Errorf("close session %s: %w", s.id, err)
+	}
+	return nil
 }
 
 // watchFileChanges announces external file modifications mid-turn: while a
@@ -1078,19 +816,6 @@ func (s *sessionState) takeHookContext() []string {
 	s.hookContext = nil
 	s.hookContextMu.Unlock()
 	return parts
-}
-
-// attendedTrust remembers only approvals a person gave; unattended ones last for the session.
-type attendedTrust struct {
-	external.TrustStore
-	session *sessionState
-}
-
-func (t attendedTrust) Trust(fingerprint string) error {
-	if t.session.unattended.Load() {
-		return nil
-	}
-	return t.TrustStore.Trust(fingerprint)
 }
 
 const fileChangeNoticeMax = 20
