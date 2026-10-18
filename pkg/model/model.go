@@ -94,6 +94,9 @@ var gpt61SolEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 var claudeAlwaysThinkingEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 var claudeHaiku55Efforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
 var qwen38Efforts = []string{"none", "low", "medium", "xhigh"}
+var nemotronEfforts = []string{"none", "medium", "high"}
+var nemotron3SuperEfforts = []string{"none", "low", "high"}
+var nemotronThinkingEfforts = []string{"none", "high"}
 var gemini4ArgonEfforts = []string{"low", "medium", "high"}
 
 // Models lists every known model in preference order: the first entry of a
@@ -1098,6 +1101,109 @@ var Models = []Model{
 		Output: 65536,
 
 		Context: 1000000,
+	},
+
+	// NVIDIA
+
+	{
+		ID: "nemotron-3-ultra",
+
+		Aliases:   []string{"nemotron-3-ultra-550b-a55b", "nvidia-nemotron-3-ultra-550b-a55b-nvfp4", "nvidia-nemotron-3-ultra-550b-a55b-bf16"},
+		Namespace: "nvidia",
+
+		Name: "Nemotron 3 Ultra",
+
+		Class: ClassLarge,
+
+		Output: 65536,
+
+		// The weights support 1M, but NVIDIA's recipes and OpenRouter serve
+		// 256K; WINGMAN_CONTEXT_WINDOW covers larger deployments.
+		Context: 262144,
+
+		Efforts: nemotronEfforts,
+	},
+	{
+		ID: "nemotron-3.5-super",
+
+		Aliases:   []string{"nemotron-3.5-super-vl", "nemotron-3.5-super-vl-120b-a12b", "nvidia-nemotron-3.5-super-vl-120b-a12b-nvfp4", "nvidia-nemotron-3.5-super-vl-120b-a12b-bf16"},
+		Namespace: "nvidia",
+
+		Name: "Nemotron 3.5 Super",
+
+		Class: ClassMedium,
+
+		Output: 65536,
+
+		Context: 262144,
+
+		Efforts: nemotronEfforts,
+	},
+	{
+		ID: "nemotron-3.5-bolt",
+
+		Aliases:   []string{"nemotron-3.5-bolt-74b-a9b", "nvidia-nemotron-3.5-bolt-74b-a9b-24gb", "nvidia-nemotron-3.5-bolt-74b-a9b-bf16"},
+		Namespace: "nvidia",
+
+		Name: "Nemotron 3.5 Bolt",
+
+		Class: ClassMedium,
+
+		Output: 65536,
+
+		Context: 262144,
+
+		Efforts: nemotronEfforts,
+	},
+	{
+		ID: "nemotron-3.5-lightning",
+
+		Aliases:   []string{"nemotron-3.5-lightning-30b-a3b", "nvidia-nemotron-3.5-lightning-30b-a3b-nvfp4", "nvidia-nemotron-3.5-lightning-30b-a3b-bf16"},
+		Namespace: "nvidia",
+
+		Name: "Nemotron 3.5 Lightning",
+
+		Class: ClassSmall,
+
+		Output: 65536,
+
+		Context: 262144,
+
+		Efforts: nemotronThinkingEfforts,
+	},
+
+	{
+		ID: "nemotron-3-super",
+
+		Aliases:   []string{"nemotron-3-super-120b-a12b", "nvidia-nemotron-3-super-120b-a12b-fp8", "nvidia-nemotron-3-super-120b-a12b-nvfp4", "nvidia-nemotron-3-super-120b-a12b-bf16"},
+		Namespace: "nvidia",
+
+		Name: "Nemotron 3 Super",
+
+		Class: ClassMedium,
+
+		Output: 65536,
+
+		Context: 262144,
+
+		Efforts: nemotron3SuperEfforts,
+	},
+	{
+		ID: "nemotron-3-nano",
+
+		// Ollama serves both sizes under this name (`:30b`, `:4b`).
+		Aliases:   []string{"nemotron-3-nano-30b-a3b", "nemotron-3-nano-4b", "nvidia-nemotron-3-nano-30b-a3b-fp8", "nvidia-nemotron-3-nano-30b-a3b-nvfp4", "nvidia-nemotron-3-nano-30b-a3b-bf16", "nvidia-nemotron-3-nano-4b-fp8", "nvidia-nemotron-3-nano-4b-bf16"},
+		Namespace: "nvidia",
+
+		Name: "Nemotron 3 Nano",
+
+		Class: ClassSmall,
+
+		Output: 65536,
+
+		Context: 262144,
+
+		Efforts: nemotronThinkingEfforts,
 	},
 }
 

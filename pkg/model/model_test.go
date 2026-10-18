@@ -135,6 +135,46 @@ func TestGemini4ArgonLimitsAndEfforts(t *testing.T) {
 	}
 }
 
+func TestNemotronModels(t *testing.T) {
+	cases := []struct {
+		id      string
+		name    string
+		class   Class
+		efforts []string
+	}{
+		{"nemotron-3-ultra:cloud", "Nemotron 3 Ultra", ClassLarge, []string{"none", "medium", "high"}},
+		{"nvidia/nemotron-3-ultra-550b-a55b", "Nemotron 3 Ultra", ClassLarge, []string{"none", "medium", "high"}},
+		{"nvidia/nemotron-3.5-super-vl", "Nemotron 3.5 Super", ClassMedium, []string{"none", "medium", "high"}},
+		{"nemotron-3.5-super:120b-a12b-q4_K_M", "Nemotron 3.5 Super", ClassMedium, []string{"none", "medium", "high"}},
+		{"nemotron-3.5-bolt:74b-a9b-iq2", "Nemotron 3.5 Bolt", ClassMedium, []string{"none", "medium", "high"}},
+		{"nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB", "Nemotron 3.5 Bolt", ClassMedium, []string{"none", "medium", "high"}},
+		{"nvidia/nemotron-3.5-lightning:free", "Nemotron 3.5 Lightning", ClassSmall, []string{"none", "high"}},
+		{"nvidia/nemotron-3-super-120b-a12b", "Nemotron 3 Super", ClassMedium, []string{"none", "low", "high"}},
+		{"nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8", "Nemotron 3 Super", ClassMedium, []string{"none", "low", "high"}},
+		{"nemotron-3-nano:4b", "Nemotron 3 Nano", ClassSmall, []string{"none", "high"}},
+		{"nvidia/nemotron-3-nano-30b-a3b", "Nemotron 3 Nano", ClassSmall, []string{"none", "high"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			got, ok := Find(tc.id)
+			if !ok {
+				t.Fatalf("Find(%q) failed", tc.id)
+			}
+			if got.ID != tc.id || got.Name != tc.name || got.Class != tc.class || got.ContextTokens() != 262_144 || !slices.Equal(got.Efforts, tc.efforts) {
+				t.Fatalf("Find(%q) = %+v, want name=%q class=%v context=262144 efforts=%v", tc.id, got, tc.name, tc.class, tc.efforts)
+			}
+			if family := Family(tc.id); family != "nemotron" {
+				t.Fatalf("Family(%q) = %q, want nemotron", tc.id, family)
+			}
+		})
+	}
+
+	if got, ok := Find("qwen/nemotron-3-super"); ok {
+		t.Fatalf("Find(qwen/nemotron-3-super) = %+v; want no cross-provider match", got)
+	}
+}
+
 func TestQwen38Efforts(t *testing.T) {
 	want := []string{"none", "low", "medium", "xhigh"}
 	for _, id := range []string{"qwen3.8", "qwen3.8:27b-mlx", "qwen/qwen3.8-27b"} {

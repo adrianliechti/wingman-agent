@@ -114,6 +114,27 @@ template no longer treats arbitrary reminder tags in tool output as trusted
 instructions. Shared family routing does not imply every older Claude ID was
 captured.
 
+### Fallback (Qwen, Nemotron, GLM, Kimi, MiniMax, Grok, DeepSeek, Mistral)
+
+Only Claude, GPT, and Gemini keep variants, each adapted from a captured vendor
+CLI request. Every other model uses the fallback. The former Qwen, GLM, Kimi,
+MiniMax, and Grok templates were paraphrases rather than vendor captures: Qwen
+from Qwen Code, the others from VS Code Copilot's per-vendor prompts. Their
+sources contain no model-version-specific instructions: Qwen Code (0.25.2) varies
+only few-shot tool-call examples by model; Copilot applies its GLM prompt only to
+GLM 4.6/4.7 and gives later GLM releases its default prompt. NVIDIA publishes no
+coding-agent prompt for Nemotron.
+
+The fallback keeps the behavior-changing rules those templates shared: real tool
+calls instead of prose, no invented paths or APIs, no placeholders or omission
+markers in files, efficient reads, and a stop-and-reassess rule for repeated
+failures (from Copilot's Kimi and xAI prompts and Qwen Code's loop detector).
+It reuses earlier observations for follow-up questions, as Qwen Code's
+2026-10-04 change does to avoid repeated investigation on local hosts. From
+GPT-6.1 Sol it takes shell quoting and destructive-target checks; personality,
+writing style, and update cadence stay GPT-specific. Formatting differences
+such as GLM 4.x's capitalized MUST rules and section names were not kept.
+
 All model variants and the fallback receive the same shared runtime contract.
 GPT-5.1/5.2 no longer suggest asking to run validation that the task already
 authorizes. The fallback also clarifies action requests, persistent authorization,
