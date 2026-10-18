@@ -101,7 +101,9 @@ func TestReviewDeniesWithoutAskingAndTripsBreaker(t *testing.T) {
 	if len(ui.confirms) != 0 {
 		t.Fatalf("user was asked: %v", ui.confirms)
 	}
-	if !strings.Contains((*inputs)[0], a.workspace.RootPath) {
+	// The planned action is JSON-encoded, so Windows path separators are escaped.
+	workspace, _ := json.Marshal(a.workspace.RootPath)
+	if !strings.Contains((*inputs)[0], strings.Trim(string(workspace), `"`)) {
 		t.Fatalf("planned action lacks workspace:\n%s", (*inputs)[0])
 	}
 }

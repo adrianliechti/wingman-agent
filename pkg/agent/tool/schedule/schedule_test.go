@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -303,6 +304,13 @@ func TestRunGateCapturesConcurrentOutputStreams(t *testing.T) {
 wait
 echo '{"wake": false}'
 `
+	if runtime.GOOS == "windows" {
+		// Pre-check scripts run in PowerShell on Windows.
+		script = `
+foreach ($i in 1..100) { [Console]::Out.WriteLine('stdout-line'); [Console]::Error.WriteLine('stderr-line') }
+echo '{"wake": false}'
+`
+	}
 	dir := t.TempDir()
 	task := Task{Script: script}
 	wake, output, err := RunTaskGate(t.Context(), dir, task, &Options{Elicitation: &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) { return true, nil }}})

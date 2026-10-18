@@ -186,7 +186,7 @@ func TestToolInfoGrepLabel(t *testing.T) {
 	if info.kind != acp.ToolKindSearch {
 		t.Errorf("kind = %q, want search", info.kind)
 	}
-	if len(info.locations) != 1 || info.locations[0].Path != "/proj/pkg" {
+	if len(info.locations) != 1 || info.locations[0].Path != filepath.Join("/proj", "pkg") {
 		t.Errorf("locations = %#v", info.locations)
 	}
 	args, ok := info.rawInput.(map[string]any)

@@ -112,7 +112,9 @@ func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir str
 			sandbox.TempDir = opts.TempDir
 			sandbox.Network = opts.Network
 		}
-		if sandbox.TempDir == "" {
+		// The native Windows sandbox assigns each environment private TEMP/TMP
+		// storage; a per-command root would also defeat environment reuse.
+		if sandbox.TempDir == "" && runtime.GOOS != "windows" {
 			dir, err := os.MkdirTemp("", "wingman-command-")
 			if err != nil {
 				return nil, fmt.Errorf("create private sandbox temp: %w", err)

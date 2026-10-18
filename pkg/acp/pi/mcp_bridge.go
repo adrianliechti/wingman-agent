@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
+	acpsdk "github.com/coder/acp-go-sdk"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 const mcpConfigEnv = "WINGMAN_PI_MCP_CONFIG"
@@ -40,8 +40,8 @@ type preparedMCPBridge struct {
 	cleanup    func()
 }
 
-func prepareMCPBridge(cwd string, baseEnv []string, servers []acp.McpServer) (*preparedMCPBridge, error) {
-	if err := acpcommon.ValidateMCPServers(servers, acp.McpCapabilities{}); err != nil {
+func prepareMCPBridge(cwd string, baseEnv []string, servers []acpsdk.McpServer) (*preparedMCPBridge, error) {
+	if err := acp.ValidateMCPServers(servers, acpsdk.McpCapabilities{}); err != nil {
 		return nil, err
 	}
 	if len(servers) == 0 {

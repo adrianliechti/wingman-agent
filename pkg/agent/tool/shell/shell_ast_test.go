@@ -157,3 +157,73 @@ func TestDialectSpecificClassification(t *testing.T) {
 		})
 	}
 }
+
+// The PowerShell grammar rejects common native-command arguments that
+// PowerShell's argument mode passes through literally; those must not prompt.
+func TestPowerShellNativeArgumentsParse(t *testing.T) {
+	for _, command := range []string{
+		"make -j8",
+		"go test -count=1 ./...",
+		"go test -run=TestX ./...",
+		"git log --pretty=oneline",
+		"git log --format=%H",
+		"git log -10 --pretty=oneline",
+		"npm run build -- --watch",
+		"gcc -O2 -o out main.c",
+		"kubectl get pods -o=json",
+		"dotnet test --filter Name=X",
+	} {
+		analysis := analyzeShellCommand(command, dialectPowerShell)
+		if analysis.rejected || isDangerousShellAnalysis(analysis, dialectPowerShell) {
+			t.Errorf("%q: rejected=%v, want a confident parse that does not prompt", command, analysis.rejected)
+		}
+		if got := strings.Join(analysis.syntax.statements, "\n"); got != command {
+			t.Errorf("%q: statements %q must keep the original text", command, got)
+		}
+	}
+}
+
+func TestPowerShellNativeArgumentTerminators(t *testing.T) {
+	for _, tt := range []struct {
+		command    string
+		statements []string
+	}{
+		{"make -j8; git log -10", []string{"make -j8", "git log -10"}},
+		{"git log -10|Select-Object -First 1", []string{"git log -10", "Select-Object -First 1"}},
+		{"if ($true) { git log -10}", []string{"git log -10"}},
+	} {
+		syntax := parseShellSyntax(tt.command, dialectPowerShell)
+		if syntax.uncertain || syntax.executableSource != tt.command || strings.Join(syntax.statements, "\n") != strings.Join(tt.statements, "\n") {
+			t.Errorf("%q: unexpected analysis: %+v", tt.command, syntax)
+		}
+	}
+}
+
+// Masking only papers over grammar gaps: flags keep their meaning and words
+// with PowerShell syntax are never masked.
+func TestPowerShellArgumentMaskKeepsClassification(t *testing.T) {
+	for _, command := range []string{
+		"git -c core.sshCommand=calc fetch",
+		"Remove-Item -Recurse -Force C:/x",
+		"git log --format=$(Invoke-Expression x)",
+		"tool -x=@args",
+	} {
+		masked := string(maskPowerShellArgumentWords([]byte(command)))
+		if len(masked) != len(command) {
+			t.Fatalf("%q: mask changed the length", command)
+		}
+		if !isDangerousCommandDialect(command, dialectPowerShell) {
+			t.Errorf("%q must stay dangerous (masked as %q)", command, masked)
+		}
+	}
+	for _, command := range []string{"git fetch --upload-pack=calc origin", "git log --output=x.txt", "sed -i.bak s/a/b/ f"} {
+		if isReadOnlyCommandDialect(command, dialectPowerShell) {
+			t.Errorf("%q must not become read-only", command)
+		}
+	}
+	for _, unmasked := range []string{"-5 + 3", "$x = -10", "Get-Item x; -j8", "tool -x=$y", "tool --%", "cmd --% /c del /s /q C:/x"} {
+		if got := string(maskPowerShellArgumentWords([]byte(unmasked))); got != unmasked {
+			t.Errorf("%q must not be masked, got %q", unmasked, got)
+		}
+	}
+}

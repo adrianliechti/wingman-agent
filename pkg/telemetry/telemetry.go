@@ -952,11 +952,14 @@ func (inference *Inference) End(result InferenceResult) {
 			inference.span.SetAttributes(keyResponseFinishReasons.StringSlice(result.FinishReasons))
 		}
 		inference.chunkMu.Lock()
+		// Gate on the observation rather than a positive duration: coarse
+		// clocks (Windows ticks) can report a genuine first chunk as zero.
+		firstChunkSeen := inference.firstChunkSeen
 		timeToFirstChunk := inference.timeToFirstChunk
 		outputChunkTimes := append([]time.Duration(nil), inference.outputChunkTimes...)
 		content := inference.content
 		inference.chunkMu.Unlock()
-		if timeToFirstChunk > 0 && inference.span != nil {
+		if firstChunkSeen && inference.span != nil {
 			inference.span.SetAttributes(keyResponseTimeToFirstChunk.Float64(timeToFirstChunk.Seconds()))
 		}
 		if result.Usage != nil && inference.span != nil {
@@ -987,7 +990,7 @@ func (inference *Inference) End(result InferenceResult) {
 		if t.clientOperationDuration != nil {
 			t.clientOperationDuration.Record(inference.ctx, ended.Sub(inference.started).Seconds(), metricOptions(durationAttrs))
 		}
-		if timeToFirstChunk > 0 && t.clientTimeToFirstChunk != nil {
+		if firstChunkSeen && t.clientTimeToFirstChunk != nil {
 			t.clientTimeToFirstChunk.Record(inference.ctx, timeToFirstChunk.Seconds(), metricOptions(attrs))
 		}
 		if t.clientTimePerChunk != nil {
@@ -1006,7 +1009,7 @@ func (inference *Inference) End(result InferenceResult) {
 			inference.invocation.inputTokens.Add(result.Usage.InputTokens)
 			inference.invocation.outputTokens.Add(result.Usage.OutputTokens)
 		}
-		inference.emitEvent(result, content, timeToFirstChunk, ended)
+		inference.emitEvent(result, content, firstChunkSeen, timeToFirstChunk, ended)
 		inference.emitExceptionEvent(result.Outcome, ended)
 		if inference.span != nil {
 			inference.span.End(trace.WithTimestamp(ended))
@@ -1014,7 +1017,7 @@ func (inference *Inference) End(result InferenceResult) {
 	})
 }
 
-func (inference *Inference) emitEvent(result InferenceResult, content InferenceContent, timeToFirstChunk time.Duration, timestamp time.Time) {
+func (inference *Inference) emitEvent(result InferenceResult, content InferenceContent, firstChunkSeen bool, timeToFirstChunk time.Duration, timestamp time.Time) {
 	if inference.telemetry.logger == nil {
 		return
 	}
@@ -1028,7 +1031,7 @@ func (inference *Inference) emitEvent(result InferenceResult, content InferenceC
 	if len(result.FinishReasons) > 0 {
 		attrs = append(attrs, keyResponseFinishReasons.StringSlice(result.FinishReasons))
 	}
-	if timeToFirstChunk > 0 {
+	if firstChunkSeen {
 		attrs = append(attrs, keyResponseTimeToFirstChunk.Float64(timeToFirstChunk.Seconds()))
 	}
 	if result.Usage != nil {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	acpsdk "github.com/coder/acp-go-sdk"
 )
 
@@ -47,7 +47,7 @@ func (a *Agent) notifySessionChange(id string) {
 	}()
 }
 
-func (a *Agent) watchWriter(writer *acpcommon.ConnectionWriter) {
+func (a *Agent) watchWriter(writer *acp.ConnectionWriter) {
 	go func() {
 		select {
 		case <-writer.Done():

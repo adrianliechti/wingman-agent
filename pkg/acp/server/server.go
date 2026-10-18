@@ -20,7 +20,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -45,7 +45,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		sessionDirs: map[acpsdk.SessionId]string{},
 		workspaces:  map[string]*workspaceEntry{},
 	}
-	writer := acpcommon.NewConnectionWriter(out, 0)
+	writer := acp.NewConnectionWriter(out, 0)
 	defer writer.Close()
 	s.conn = acpsdk.NewAgentSideConnection(s, writer, in)
 	s.conn.SetLogger(slog.Default())
@@ -155,7 +155,7 @@ func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elici
 	if params.Form.Message == "" {
 		params.Form.Message = "Additional input is needed."
 	}
-	response, err := acpcommon.Call(ctx, func() (acpsdk.UnstableCreateElicitationResponse, error) {
+	response, err := acp.Call(ctx, func() (acpsdk.UnstableCreateElicitationResponse, error) {
 		return s.conn.UnstableCreateElicitation(ctx, params)
 	})
 	if err != nil {
@@ -308,11 +308,11 @@ func (s *Server) Confirm(ctx context.Context, message string) (bool, error) {
 		acpsdk.WithStartKind(acpsdk.ToolKindOther),
 		acpsdk.WithStartStatus(acpsdk.ToolCallStatusPending),
 	)
-	if err := acpcommon.Notify(ctx, s.conn, acpsdk.SessionId(sid), start); err != nil {
+	if err := acp.Notify(ctx, s.conn, acpsdk.SessionId(sid), start); err != nil {
 		return false, err
 	}
 
-	response, err := acpcommon.Call(ctx, func() (acpsdk.RequestPermissionResponse, error) {
+	response, err := acp.Call(ctx, func() (acpsdk.RequestPermissionResponse, error) {
 		return s.conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
 			SessionId: acpsdk.SessionId(sid),
 			ToolCall: acpsdk.ToolCallUpdate{
@@ -347,7 +347,7 @@ func (s *Server) finishPermissionToolCall(ctx context.Context, sid acpsdk.Sessio
 	// caller's deadline. Keep this cleanup bounded in case the client is gone.
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
-	return acpcommon.Notify(finishCtx, s.conn, sid, acpsdk.UpdateToolCall(id, acpsdk.WithUpdateStatus(status)))
+	return acp.Notify(finishCtx, s.conn, sid, acpsdk.UpdateToolCall(id, acpsdk.WithUpdateStatus(status)))
 }
 
 func (s *Server) NewSession(ctx context.Context, params acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
@@ -467,7 +467,7 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 }
 
 func requestedMCPConfig(servers []acpsdk.McpServer) (map[string]mcp.ServerConfig, error) {
-	if err := acpcommon.ValidateMCPServers(servers, serverMCPCapabilities); err != nil {
+	if err := acp.ValidateMCPServers(servers, serverMCPCapabilities); err != nil {
 		return nil, err
 	}
 	result := make(map[string]mcp.ServerConfig, len(servers))
@@ -605,7 +605,7 @@ func (s *Server) replaceLoadedSession(id acpsdk.SessionId, w *workspaceEntry) er
 }
 
 func normalizeCwd(cwd string) (string, error) {
-	cwd, _, err := acpcommon.NormalizeSessionRoots(cwd, nil)
+	cwd, _, err := acp.NormalizeSessionRoots(cwd, nil)
 	return cwd, err
 }
 
@@ -814,7 +814,7 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (respo
 			defer cancel()
 			sendCtx = detached
 		}
-		notifyErr = acpcommon.Notify(sendCtx, s.conn, params.SessionId, u)
+		notifyErr = acp.Notify(sendCtx, s.conn, params.SessionId, u)
 		if notifyErr != nil {
 			cancel()
 		}
@@ -823,7 +823,7 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (respo
 	// ACP agent_message_chunk updates cannot be retracted. Deliberately leave
 	// Reset unsupported so a recoverable error after visible output terminates
 	// the attempt instead of duplicating it with an invisible retry.
-	stream, err := sess.agent.Send(ctx, string(sess.id), acpcommon.ContentFromBlocks(params.Prompt))
+	stream, err := sess.agent.Send(ctx, string(sess.id), acp.ContentFromBlocks(params.Prompt))
 	if err != nil {
 		return acpsdk.PromptResponse{}, err
 	}
@@ -943,7 +943,7 @@ func (s *Server) UnstableForkSession(ctx context.Context, params acpsdk.Unstable
 	if err != nil {
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
-	servers, err := acpcommon.StableMCPServers(params.McpServers, serverMCPCapabilities)
+	servers, err := acp.StableMCPServers(params.McpServers, serverMCPCapabilities)
 	if err != nil {
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
@@ -967,7 +967,7 @@ func (s *Server) UnstableForkSession(ctx context.Context, params acpsdk.Unstable
 	return acpsdk.UnstableForkSessionResponse{
 		SessionId:     acpSid,
 		Modes:         modeState(w.agent, sid),
-		ConfigOptions: acpcommon.UnstableConfigOptions(sessionConfigOptions(w.agent, sid)),
+		ConfigOptions: acp.UnstableConfigOptions(sessionConfigOptions(w.agent, sid)),
 	}, nil
 }
 
@@ -1012,7 +1012,7 @@ func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messa
 	var notifyErr error
 	notify := func(u acpsdk.SessionUpdate) {
 		if notifyErr == nil {
-			notifyErr = acpcommon.Notify(ctx, s.conn, sid, u)
+			notifyErr = acp.Notify(ctx, s.conn, sid, u)
 		}
 	}
 	for _, m := range messages {
@@ -1090,7 +1090,7 @@ func notifyContent(notify func(acpsdk.SessionUpdate), role agent.MessageRole, c 
 	if c.Reasoning != nil && c.Reasoning.Summary != "" {
 		notify(acpsdk.UpdateAgentThoughtText(c.Reasoning.Summary))
 	}
-	for _, block := range acpcommon.ContentToBlocks([]agent.Content{c}) {
+	for _, block := range acp.ContentToBlocks([]agent.Content{c}) {
 		if role == agent.RoleUser {
 			notify(acpsdk.UpdateUserMessage(block))
 		} else {
@@ -1218,7 +1218,7 @@ func effortConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOpti
 	for _, v := range values {
 		opts = append(opts, acpsdk.SessionConfigSelectOption{
 			Value: acpsdk.SessionConfigValueId(v),
-			Name:  acpcommon.TitleCase(v),
+			Name:  acp.TitleCase(v),
 		})
 	}
 	return acpsdk.SessionConfigOption{

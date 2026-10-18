@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"math/rand/v2"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -30,13 +31,13 @@ func TestPersistedPreviewAccounting(t *testing.T) {
 		if err != nil || len(entries) != 1 {
 			t.Fatalf("saved files = %v, %v", entries, err)
 		}
-		full, err := os.ReadFile(dir + "/" + entries[0].Name())
+		full, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
 		if err != nil || string(full) != result {
 			t.Fatal("saved output was changed")
 		}
 		head, tail := text.HeadLines(result, headPreviewBytes), text.TailLines(result, tailPreviewBytes)
 		omitted := len(result) - len(head) - len(tail)
-		for _, want := range []string{fmt.Sprintf("%d bytes (6001 lines); %d bytes omitted", len(result), omitted), head, tail, "Use `read`", dir + "/" + entries[0].Name()} {
+		for _, want := range []string{fmt.Sprintf("%d bytes (6001 lines); %d bytes omitted", len(result), omitted), head, tail, "Use `read`", filepath.Join(dir, entries[0].Name())} {
 			if !strings.Contains(preview, want) {
 				t.Fatalf("preview missing %q", text.HeadBytes(want, 100))
 			}

@@ -71,6 +71,10 @@ func CheckWrite(root, path string) error {
 	for _, pair := range [][2]string{{filepath.Clean(root), filepath.Clean(path)}, {Canonical(root), Canonical(path)}} {
 		rel, err := filepath.Rel(pair[0], pair[1])
 		if err != nil {
+			// A path on another volume (Windows drive or share) is outside root.
+			if !strings.EqualFold(filepath.VolumeName(pair[0]), filepath.VolumeName(pair[1])) {
+				continue
+			}
 			return fmt.Errorf("resolve protected path: %w", err)
 		}
 		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {

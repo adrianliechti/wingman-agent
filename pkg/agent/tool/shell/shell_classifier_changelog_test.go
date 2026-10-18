@@ -14,6 +14,8 @@ import (
 // Each case names the release that fixed the equivalent bypass there.
 
 func TestClassifierChangelogDangerous(t *testing.T) {
+	// POSIX-syntax rows run against the bash classifier on every platform.
+	posixOnly := map[string]bool{"substitution as command": true}
 	tests := []struct {
 		name    string
 		command string
@@ -146,7 +148,7 @@ func TestClassifierChangelogDangerous(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ClassifyEffect(map[string]any{"command": tt.command}); got != tool.EffectDangerous {
+			if got := ClassifyEffectFor(tt.command, posixOnly[tt.name]); got != tool.EffectDangerous {
 				t.Fatalf("ClassifyEffect(%q) = %q, want %q", tt.command, got, tool.EffectDangerous)
 			}
 		})
@@ -157,6 +159,8 @@ func TestClassifierChangelogDangerous(t *testing.T) {
 // command_safety), which parses whole scripts: commands hidden in control
 // flow, trap actions, and exec must classify like top-level commands.
 func TestClassifierCodexDerivedDangerous(t *testing.T) {
+	// POSIX-syntax rows run against the bash classifier on every platform.
+	posixOnly := map[string]bool{"conditional build": true, "trap cleanup echo": true, "loop over tests": true}
 	dangerous := []struct {
 		name    string
 		command string
@@ -173,7 +177,7 @@ func TestClassifierCodexDerivedDangerous(t *testing.T) {
 
 	for _, tt := range dangerous {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ClassifyEffect(map[string]any{"command": tt.command}); got != tool.EffectDangerous {
+			if got := ClassifyEffectFor(tt.command, posixOnly[tt.name]); got != tool.EffectDangerous {
 				t.Fatalf("ClassifyEffect(%q) = %q, want %q", tt.command, got, tool.EffectDangerous)
 			}
 		})
@@ -190,7 +194,7 @@ func TestClassifierCodexDerivedDangerous(t *testing.T) {
 
 	for _, tt := range quiet {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ClassifyEffect(map[string]any{"command": tt.command}); got == tool.EffectDangerous {
+			if got := ClassifyEffectFor(tt.command, posixOnly[tt.name]); got == tool.EffectDangerous {
 				t.Fatalf("ClassifyEffect(%q) = dangerous, must not prompt", tt.command)
 			}
 		})
@@ -269,6 +273,16 @@ func TestClassifierChangelogNotReadOnly(t *testing.T) {
 // Annoyance guard: routine commands must never require confirmation, and the
 // allowlisted inspection commands must stay read-only.
 func TestClassifierChangelogRoutineCommandsStayQuiet(t *testing.T) {
+	// POSIX-syntax rows run against the bash classifier on every platform.
+	posixOnly := map[string]bool{
+		"find exec non-recursive rm":    true,
+		"escaped find non-recursive rm": true,
+		"variable prefixed path":        true,
+		"mixed quoted heredoc body":     true,
+		"safe line continuation":        true,
+		"quoted ls":                     true,
+		"git for-each-ref":              true,
+	}
 	notDangerous := []struct {
 		name    string
 		command string
@@ -303,7 +317,7 @@ func TestClassifierChangelogRoutineCommandsStayQuiet(t *testing.T) {
 
 	for _, tt := range notDangerous {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ClassifyEffect(map[string]any{"command": tt.command}); got == tool.EffectDangerous {
+			if got := ClassifyEffectFor(tt.command, posixOnly[tt.name]); got == tool.EffectDangerous {
 				t.Fatalf("ClassifyEffect(%q) = dangerous, must not prompt", tt.command)
 			}
 		})
@@ -340,7 +354,7 @@ func TestClassifierChangelogRoutineCommandsStayQuiet(t *testing.T) {
 
 	for _, tt := range readOnly {
 		t.Run(tt.name, func(t *testing.T) {
-			if !IsReadOnlyCommand(tt.command) {
+			if !IsReadOnlyCommandFor(tt.command, posixOnly[tt.name]) {
 				t.Fatalf("IsReadOnlyCommand(%q) = false, want true", tt.command)
 			}
 		})
@@ -350,6 +364,13 @@ func TestClassifierChangelogRoutineCommandsStayQuiet(t *testing.T) {
 // Realistic compound commands models emit during normal work: none of these
 // may ever reach a confirmation prompt.
 func TestClassifierComplexValidCommandsStayQuiet(t *testing.T) {
+	// POSIX-syntax rows run against the bash classifier on every platform.
+	posixOnly := map[string]bool{
+		"format arrow unquoted":      true,
+		"loop over seq":              true,
+		"conditional with redirects": true,
+		"quoted heredoc script body": true,
+	}
 	commands := []struct {
 		name    string
 		command string
@@ -379,7 +400,7 @@ func TestClassifierComplexValidCommandsStayQuiet(t *testing.T) {
 
 	for _, tt := range commands {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ClassifyEffect(map[string]any{"command": tt.command}); got == tool.EffectDangerous {
+			if got := ClassifyEffectFor(tt.command, posixOnly[tt.name]); got == tool.EffectDangerous {
 				t.Fatalf("ClassifyEffect(%q) = dangerous, must not prompt", tt.command)
 			}
 		})

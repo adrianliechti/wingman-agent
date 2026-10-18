@@ -25,9 +25,15 @@ func attachmentFileURI(value string) (string, bool) {
 		}
 		return u.String(), true
 	}
-	if windowsAttachmentPath.MatchString(value) || strings.HasPrefix(value, `\\`) {
+	switch {
+	case windowsAttachmentPath.MatchString(value) || strings.HasPrefix(value, `\\`):
 		value = strings.ReplaceAll(value, `\`, "/")
-	} else if !strings.HasPrefix(value, "/") {
+	case strings.HasPrefix(value, "//"):
+	case strings.HasPrefix(value, "/"):
+		// A POSIX-absolute path recorded by Codex is already absolute; don't
+		// let fileuri resolve it against a local drive on Windows.
+		return (&url.URL{Scheme: "file", Path: value}).String(), true
+	default:
 		return "", false
 	}
 	return fileuri.FromPath(value), true

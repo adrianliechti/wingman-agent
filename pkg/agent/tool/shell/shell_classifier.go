@@ -40,6 +40,10 @@ func analyzeShellCommand(command string, dialect shellDialect) shellAnalysis {
 }
 
 func ClassifyEffect(args map[string]any) tool.Effect {
+	return classifyEffectDialect(args, platformShellDialect())
+}
+
+func classifyEffectDialect(args map[string]any, dialect shellDialect) tool.Effect {
 	if args == nil {
 		return tool.EffectDynamic
 	}
@@ -51,7 +55,6 @@ func ClassifyEffect(args map[string]any) tool.Effect {
 	}
 
 	command, _ := args["command"].(string)
-	dialect := platformShellDialect()
 	analysis := analyzeShellCommand(command, dialect)
 	if isDangerousShellAnalysis(analysis, dialect) {
 		return tool.EffectDangerous

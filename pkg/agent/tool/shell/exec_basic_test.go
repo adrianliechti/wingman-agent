@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +27,11 @@ func runExec(t *testing.T, command string) tool.Result {
 }
 
 func TestExecCommandHandlesShellScriptsAndMergedOutput(t *testing.T) {
-	result := runExec(t, `x=hello; for y in world again; do echo "$x $y"; done; echo stderr >&2`)
+	command := `x=hello; for y in world again; do echo "$x $y"; done; echo stderr >&2`
+	if runtime.GOOS == "windows" {
+		command = `$x = 'hello'; foreach ($y in 'world', 'again') { Write-Output "$x $y" }; [Console]::Error.WriteLine('stderr')`
+	}
+	result := runExec(t, command)
 	for _, want := range []string{"hello world", "hello again", "stderr", "Command completed"} {
 		if !strings.Contains(result.Content, want) {
 			t.Fatalf("output %q does not contain %q", result.Content, want)
@@ -35,7 +40,7 @@ func TestExecCommandHandlesShellScriptsAndMergedOutput(t *testing.T) {
 }
 
 func TestExecCommandReportsEmptyOutputAndStructuredFailure(t *testing.T) {
-	empty := runExec(t, "true")
+	empty := runExec(t, "exit 0")
 	if empty.Content != "Command completed" || empty.IsError {
 		t.Fatalf("empty command result = %+v", empty)
 	}
@@ -56,15 +61,19 @@ func TestExecCommandWorkdirAndEnvironment(t *testing.T) {
 	manager := NewExecManager(nil)
 	defer manager.Close()
 	execTool := ExecTools(manager, workDir, nil, nil)[0]
+	command, want := "printf '%s|%s' \"$PWD\" \"$GIT_EDITOR\"", "/sub|true"
+	if runtime.GOOS == "windows" {
+		command, want = `Write-Output "$PWD|$env:GIT_EDITOR"`, `\sub|true`
+	}
 	result, err := execTool.Execute(context.Background(), map[string]any{
-		"command": "printf '%s|%s' \"$PWD\" \"$GIT_EDITOR\"",
+		"command": command,
 		"workdir": "sub",
 		"wait":    10,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Content, "/sub|true") {
+	if !strings.Contains(result.Content, want) {
 		t.Fatalf("unexpected workdir/environment output: %q", result.Content)
 	}
 	if _, err := execTool.Execute(context.Background(), map[string]any{"command": "pwd", "workdir": "missing"}); err == nil {

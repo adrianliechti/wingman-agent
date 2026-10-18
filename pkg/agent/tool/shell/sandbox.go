@@ -71,8 +71,7 @@ func CheckSandbox(workspace string) error {
 	if err := validateWritableRoot(canonicalPath(workspace)); err != nil {
 		return err
 	}
-	_, _, err := platformSandboxCommand("/bin/sh", "true", workspace, sandboxPolicy{WritableRoots: []string{workspace}, ProtectedRoot: workspace})
-	return err
+	return platformSandboxCheck(workspace, sandboxPolicy{WritableRoots: []string{workspace}, ProtectedRoot: workspace})
 }
 
 func sandboxNetworkEnabled() bool {

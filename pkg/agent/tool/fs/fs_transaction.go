@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 
 	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
@@ -252,7 +253,7 @@ func validateFileChange(ctx context.Context, change *fileChange) error {
 	if err != nil {
 		return fmt.Errorf("%s changed on disk; read it again: %w", change.displayPath, err)
 	}
-	if !change.beforePresent || !info.Mode().IsRegular() || info.Mode().Perm() != change.beforeMode.Perm() || info.Size() != int64(len(change.before)) {
+	if !change.beforePresent || !info.Mode().IsRegular() || !samePermissions(info.Mode(), change.beforeMode) || info.Size() != int64(len(change.before)) {
 		return fmt.Errorf("%s changed on disk; read it again", change.displayPath)
 	}
 	current, err := readTransactionContent(ctx, change.root, change.path, len(change.before))
@@ -263,6 +264,16 @@ func validateFileChange(ctx context.Context, change *fileChange) error {
 		return fmt.Errorf("%s changed on disk; read it again", change.displayPath)
 	}
 	return nil
+}
+
+// samePermissions compares the permission bits the platform can represent.
+// Windows only reports the read-only attribute (0444 or 0666), so a mode
+// recorded or staged as 0644 must still match once it is read back.
+func samePermissions(a, b os.FileMode) bool {
+	if runtime.GOOS == "windows" {
+		return a.Perm()&0o200 == b.Perm()&0o200
+	}
+	return a.Perm() == b.Perm()
 }
 
 // A file can grow after Stat, including during rollback. Read at most one byte

@@ -503,7 +503,7 @@ func TestNativeRepositoryComparePathTypeChanges(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := os.Symlink("target", filepath.Join(dir, "entry")); err != nil {
-			t.Fatal(err)
+			t.Skipf("symlinks unavailable: %v", err)
 		}
 		stage(t, repo, "entry")
 		commit(t, repo, "symlink")

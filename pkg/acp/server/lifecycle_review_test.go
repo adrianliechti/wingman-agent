@@ -9,7 +9,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -142,7 +142,7 @@ func TestHistoryReplaySurfacesStalledClientWrite(t *testing.T) {
 		local, peer := net.Pipe()
 		defer local.Close()
 		defer peer.Close()
-		writer := acpcommon.NewConnectionWriter(local, time.Second)
+		writer := acp.NewConnectionWriter(local, time.Second)
 		defer writer.Close()
 		s := &Server{}
 		s.conn = acpsdk.NewAgentSideConnection(s, writer, local)

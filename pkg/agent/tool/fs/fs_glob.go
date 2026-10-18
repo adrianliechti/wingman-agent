@@ -165,7 +165,7 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 }
 
 func resolveGlobSearch(searchDir, pattern, workingDir string, workspaceRoot *os.Root, allowedReadRoots []string) (*searchTarget, string, bool, error) {
-	rawPattern := expandHome(normalizePathArg(pattern))
+	rawPattern := anchorRootedPath(expandHome(normalizePathArg(pattern)), workingDir)
 	pattern = filepath.ToSlash(rawPattern)
 
 	if filepath.IsAbs(rawPattern) {

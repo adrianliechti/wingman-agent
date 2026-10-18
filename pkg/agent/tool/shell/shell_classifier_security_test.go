@@ -407,6 +407,12 @@ func TestClassifierSecurityCredentialStoreReadsRequireApproval(t *testing.T) {
 }
 
 func TestClassifierSecurityBenignCounterexamplesStayQuiet(t *testing.T) {
+	// POSIX-syntax rows run against the bash classifier on every platform.
+	posixOnly := map[string]bool{
+		"numeric shift arithmetic":            true,
+		"numeric double bracket arithmetic":   true,
+		"hash joined to word by continuation": true,
+	}
 	tests := []struct {
 		name    string
 		command string
@@ -432,7 +438,7 @@ func TestClassifierSecurityBenignCounterexamplesStayQuiet(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ClassifyEffect(map[string]any{"command": tt.command}); got == tool.EffectDangerous {
+			if got := ClassifyEffectFor(tt.command, posixOnly[tt.name]); got == tool.EffectDangerous {
 				t.Fatalf("ClassifyEffect(%q) = dangerous; inert counterexample must not prompt", tt.command)
 			}
 		})

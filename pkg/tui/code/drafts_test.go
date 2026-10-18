@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -48,7 +49,8 @@ func TestDraftStorePersistsAttachmentsAndDoesNotResurrectSentDraft(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0077 != 0 {
+	// Windows has no POSIX permission bits; os.Stat always reports 0666 there.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
 		t.Fatalf("draft permissions = %v", info.Mode())
 	}
 }

@@ -140,6 +140,11 @@ func TestEditMetadataSurvivesPersistenceAndUndo(t *testing.T) {
 	if err := root.WriteFile("file", before, 0750); err != nil {
 		t.Fatal(err)
 	}
+	// Windows only represents the read-only attribute; expect the reported mode.
+	original, err := root.Stat("file")
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := EditTool(root).Execute(t.Context(), map[string]any{"edits": []any{
 		map[string]any{"file_path": "created", "old_string": "", "new_string": "created\n"},
 		map[string]any{"file_path": "file", "old_string": "say \"hello\"\nnext", "new_string": "say \"bye\"\nnext"},
@@ -164,7 +169,7 @@ func TestEditMetadataSurvivesPersistenceAndUndo(t *testing.T) {
 		if err != nil || string(after) != change.After {
 			t.Fatalf("incorrect after state for %s", change.Path)
 		}
-		if change.Path == "file" && (change.Before != string(before) || change.Mode != 0750) {
+		if change.Path == "file" && (change.Before != string(before) || change.Mode != uint32(original.Mode().Perm())) {
 			t.Fatalf("incorrect baseline: %+v", change)
 		}
 	}

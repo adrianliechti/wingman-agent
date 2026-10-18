@@ -97,7 +97,8 @@ func (a *uiTestAgent) RecordUserShellCommand(_ string, command, output string, e
 
 func waitForSessionOperation(t *testing.T, a *App) {
 	t.Helper()
-	deadline := time.NewTimer(2 * time.Second)
+	// Generous ceiling: a cold PowerShell start alone can take seconds.
+	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
 	for a.operationPending {
 		select {

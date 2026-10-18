@@ -63,6 +63,12 @@ func TestBatchEditToolAppliesCrossFileTransaction(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, "existing.txt"), []byte("one two\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	// Windows only represents the read-only attribute, so compare against the
+	// mode the platform actually reports.
+	original, err := os.Stat(filepath.Join(directory, "existing.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := batchEditTool(root, nil).Execute(context.Background(), map[string]any{"edits": []any{
 		map[string]any{"file_path": "existing.txt", "old_string": "one", "new_string": "ONE"},
@@ -81,7 +87,7 @@ func TestBatchEditToolAppliesCrossFileTransaction(t *testing.T) {
 	if contents, _ := os.ReadFile(filepath.Join(directory, "nested", "created.txt")); string(contents) != "created\n" {
 		t.Fatalf("created contents = %q", contents)
 	}
-	if info, err := os.Stat(filepath.Join(directory, "existing.txt")); err != nil || info.Mode().Perm() != 0o640 {
+	if info, err := os.Stat(filepath.Join(directory, "existing.txt")); err != nil || info.Mode().Perm() != original.Mode().Perm() {
 		t.Fatalf("existing mode = %v, %v", info, err)
 	}
 }

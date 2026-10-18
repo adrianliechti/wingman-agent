@@ -26,6 +26,8 @@ func TestWindowsFileToolPaths(t *testing.T) {
 		{"leading slash with forward slashes", func(p string) string { return "/" + filepath.ToSlash(p) }},
 		{"doubled separators", func(p string) string { return strings.ReplaceAll(p, `\`, `\\`) }},
 		{"leading slash with doubled separators", func(p string) string { return "/" + strings.ReplaceAll(p, `\`, `\\`) }},
+		{"rooted on workspace drive", func(p string) string { return strings.TrimPrefix(p, filepath.VolumeName(p)) }},
+		{"rooted with forward slashes", func(p string) string { return filepath.ToSlash(strings.TrimPrefix(p, filepath.VolumeName(p))) }},
 	}
 	for _, scope := range []struct{ name, dir string }{{"workspace", workspace}, {"allowed root", allowed}} {
 		t.Run(scope.name, func(t *testing.T) {
@@ -72,6 +74,31 @@ func TestWindowsFileToolPaths(t *testing.T) {
 						})
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestWindowsRootedPathsPreserveAccessChecks(t *testing.T) {
+	root, _, denied, cleanup := createWriteRootSetup(t)
+	defer cleanup()
+	file := filepath.Join(denied, "table.go")
+	rootedFile := strings.TrimPrefix(file, filepath.VolumeName(file))
+	rootedDir := strings.TrimPrefix(denied, filepath.VolumeName(denied))
+	for _, test := range []struct {
+		name string
+		tool tool.Tool
+		args map[string]any
+	}{
+		{"read", ReadTool(root), map[string]any{"file_path": rootedFile}},
+		{"grep", GrepTool(root), map[string]any{"path": rootedDir, "pattern": "Table"}},
+		{"glob", GlobTool(root), map[string]any{"path": rootedDir, "pattern": "**/*.go"}},
+		{"glob rooted pattern", GlobTool(root), map[string]any{"pattern": filepath.Join(rootedDir, "**", "*.go")}},
+		{"edit", EditTool(root), createArgs(rootedFile, "type Table struct{}")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := test.tool.Execute(context.Background(), test.args); err == nil || !strings.Contains(err.Error(), "outside workspace") {
+				t.Fatalf("expected workspace access error, got %v", err)
 			}
 		})
 	}

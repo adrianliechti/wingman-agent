@@ -468,7 +468,9 @@ func (a *App) runUserShellCommand(raw, command string) {
 			}
 		}
 
-		output := string(rawOut)
+		// Windows shells end lines with CRLF; record the output the agent
+		// sees with plain newlines, as the shell tool does.
+		output := strings.ReplaceAll(string(rawOut), "\r\n", "\n")
 		if output == "" && err != nil {
 			var exitErr *exec.ExitError
 			if !errors.As(err, &exitErr) {

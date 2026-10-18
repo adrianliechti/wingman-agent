@@ -5,18 +5,18 @@ package shell
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -100,18 +100,12 @@ func TestWindowsSandboxLaunchFailureDoesNotChangeSecurity(t *testing.T) {
 	sandboxTestHome(t)
 	workspace := t.TempDir()
 	before := sandboxSecuritySnapshot(t, workspace)
-	exe, err := os.Executable()
+	exe, args, err := platformSandboxCommand(filepath.Join(workspace, "missing.exe"), "exit 0", workspace,
+		sandboxPolicy{WritableRoots: []string{workspace}, ProtectedRoot: workspace, Network: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := json.Marshal(sandboxLaunch{
-		Policy: sandboxPolicy{WritableRoots: []string{workspace}, ProtectedRoot: workspace, Network: true},
-		Argv:   []string{filepath.Join(workspace, "missing.exe")},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.CommandContext(t.Context(), exe, sandboxHelperArg, base64.RawURLEncoding.EncodeToString(raw))
+	cmd := exec.CommandContext(t.Context(), exe, args...)
 	cmd.Dir = workspace
 	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "start ") {
 		t.Fatalf("launch failure: %v %s", err, out)
@@ -211,6 +205,7 @@ func TestWindowsSandboxForcedHelperKillReapsChildren(t *testing.T) {
 	workspace := t.TempDir()
 	before := sandboxSecuritySnapshot(t, workspace)
 	defer assertSandboxSecurityUnchanged(t, before)
+	warmWindowsSandbox(t, workspace)
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	command := `$p = [Diagnostics.Process]::Start((Get-Process -Id $PID).Path, '-NoProfile -Command "Start-Sleep 30"'); Set-Content started.txt $p.Id; Start-Sleep 30`
@@ -336,6 +331,7 @@ func TestWindowsSandboxPowerShellStartup(t *testing.T) {
 			}
 			workspace := t.TempDir()
 			before := sandboxSecuritySnapshot(t, workspace)
+			warmWindowsSandbox(t, workspace)
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
 			cmd, err := buildSandboxedCommand(ctx, shell, `Write-Output "TEMP=$env:TEMP TMP=$env:TMP ACTIVE=$env:WINGMAN_SANDBOX_ACTIVE"; Set-Content (Join-Path $env:TEMP startup.txt) ok; if (-not $?) { exit 1 }; Set-Content inside.txt ok; if (-not $?) { exit 1 }`, workspace, sandboxOptions{WorkspaceDir: workspace})
@@ -348,7 +344,42 @@ func TestWindowsSandboxPowerShellStartup(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PowerShell startup: %v", err)
 			}
+			if strings.Contains(string(out), powerShellDefaultDrivesDiagnostic) || strings.Contains(string(out), "__wingman_sandbox_started_") {
+				t.Fatalf("startup diagnostic or marker was visible: %s", out)
+			}
 			assertSandboxSecurityUnchanged(t, before)
+		})
+	}
+}
+
+func TestWindowsSandboxPreservesUserStderrAndExitCode(t *testing.T) {
+	sandboxTestHome(t)
+	workspace := t.TempDir()
+	warmWindowsSandbox(t, workspace)
+	for _, name := range []string{"pwsh.exe", "powershell.exe"} {
+		t.Run(name, func(t *testing.T) {
+			shell, err := exec.LookPath(name)
+			if err != nil {
+				t.Skipf("%s is not installed", name)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			command := `[Console]::Out.Write('stdout-kept'); [Console]::Error.WriteLine('user stderr'); [Console]::Error.Write("` + powerShellDefaultDrivesDiagnostic + `"); exit 7`
+			cmd, err := buildSandboxedCommand(ctx, shell, command, workspace, sandboxOptions{WorkspaceDir: workspace})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd.Dir = workspace
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err = cmd.Run()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+				t.Fatalf("exit code: %v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			if stdout.String() != "stdout-kept" || strings.ReplaceAll(stderr.String(), "\r\n", "\n") != "user stderr\n"+powerShellDefaultDrivesDiagnostic {
+				t.Fatalf("user output changed: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
 		})
 	}
 }
@@ -457,6 +488,7 @@ func TestWindowsSandboxCancellationKillsBackgroundChildren(t *testing.T) {
 	workspace := t.TempDir()
 	before := sandboxSecuritySnapshot(t, workspace)
 	defer assertSandboxSecurityUnchanged(t, before)
+	warmWindowsSandbox(t, workspace)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	command := `$p = [Diagnostics.Process]::Start((Get-Process -Id $PID).Path, '-NoProfile -Command "Start-Sleep 3; Set-Content late.txt x"'); Set-Content started.txt $p.Id; Start-Sleep 30`
@@ -464,6 +496,8 @@ func TestWindowsSandboxCancellationKillsBackgroundChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -474,10 +508,15 @@ func TestWindowsSandboxCancellationKillsBackgroundChildren(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(workspace, "started.txt")); err == nil {
 			break
 		}
+		select {
+		case err := <-done:
+			t.Fatalf("sandbox exited before starting its child: %v %s", err, output.String())
+		default:
+		}
 		if time.Now().After(deadline) {
 			cancel()
 			<-done
-			t.Fatal("sandbox did not start its child")
+			t.Fatalf("sandbox did not start its child: %s", output.String())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -494,6 +533,23 @@ func TestWindowsSandboxCancellationKillsBackgroundChildren(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace, "late.txt")); err == nil {
 		t.Fatal("background child outlived cancellation")
 	}
+}
+
+// Separate cold policy creation from tests of a running process tree. The
+// native environment may take seconds to create, before the shell starts.
+func warmWindowsSandbox(t *testing.T, workspace string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	started := time.Now()
+	cmd, err := buildCommandWithEnvironment(ctx, "exit 0", workspace, os.Environ(), &sandboxOptions{WorkspaceDir: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cold sandbox startup: %v %s", err, out)
+	}
+	t.Logf("cold sandbox startup took %s", time.Since(started))
 }
 
 func TestWindowsSandboxProtectsWorktreeGitFile(t *testing.T) {
@@ -576,5 +632,105 @@ func TestWindowsSandboxKillsBackgroundChildren(t *testing.T) {
 	time.Sleep(5 * time.Second)
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("background child outlived the sandboxed command")
+	}
+}
+
+func TestWindowsSandboxReusedEnvironmentDoesNotLeakHandles(t *testing.T) {
+	sandboxTestHome(t)
+	workspace := t.TempDir()
+	run := func() {
+		cmd, err := buildCommandWithEnvironment(t.Context(), "exit 0", workspace, os.Environ(), &sandboxOptions{WorkspaceDir: workspace})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("sandboxed command: %v %s", err, out)
+		}
+	}
+	// Warm up the environment, the launcher pipe, and the runtime's threads.
+	for range 24 {
+		run()
+	}
+	before := sandboxHandleCount(t)
+	const launches = 16
+	for range launches {
+		run()
+	}
+	// Each launch used to keep the shell's process handle and a duplicate.
+	if after := sandboxHandleCount(t); int64(after)-int64(before) >= launches {
+		t.Fatalf("handle count grew from %d to %d over %d launches", before, after, launches)
+	}
+}
+
+func TestWindowsSandboxCacheRetainsActiveEnvironment(t *testing.T) {
+	if err := checkNativeSandboxSupport(); err != nil {
+		t.Skip(err)
+	}
+	workspace := t.TempDir()
+	policy := nativeFilesystemPolicy{ReadWrite: []string{workspace}}
+	handle, release, err := acquireNativeSandboxEnvironment(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	// More recent policies must not evict one that still owns a running job.
+	for range maxSandboxEnvironments {
+		_, done, err := acquireNativeSandboxEnvironment(nativeFilesystemPolicy{ReadWrite: []string{t.TempDir()}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		done()
+	}
+	sandboxEnvironments.Lock()
+	retained := false
+	for _, entry := range sandboxEnvironments.cached {
+		if entry.handle == handle {
+			retained = entry.active == 1
+		}
+	}
+	sandboxEnvironments.Unlock()
+	if !retained {
+		t.Fatal("active environment was evicted")
+	}
+}
+
+func sandboxHandleCount(t *testing.T) uint32 {
+	t.Helper()
+	var count uint32
+	r, _, err := windows.NewLazySystemDLL("kernel32.dll").NewProc("GetProcessHandleCount").Call(uintptr(windows.CurrentProcess()), uintptr(unsafe.Pointer(&count)))
+	if r == 0 {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// Cached volume reads go stale; launches must keep working regardless.
+func TestWindowsSandboxRecoversFromStaleVolumeReads(t *testing.T) {
+	sandboxTestHome(t)
+	workspace := t.TempDir()
+	revoked := filepath.Join(t.TempDir(), "revoked")
+	if err := os.Mkdir(revoked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sandboxVolumeReads(); err != nil {
+		t.Fatal(err)
+	}
+	// A path that was readable when the volume reads were cached no longer is.
+	deny := exec.Command("icacls", revoked, "/deny", "*S-1-1-0:(F)")
+	if out, err := deny.CombinedOutput(); err != nil {
+		t.Fatalf("deny access: %v %s", err, out)
+	}
+	t.Cleanup(func() { exec.Command("icacls", revoked, "/remove:d", "*S-1-1-0").Run() })
+	sandboxVolumeCache.Lock()
+	sandboxVolumeCache.paths = append(slices.Clone(sandboxVolumeCache.paths), revoked)
+	sandboxVolumeCache.Unlock()
+	t.Cleanup(func() { invalidateSandboxVolumeReads() })
+
+	cmd, err := buildCommandWithEnvironment(t.Context(), "Set-Content inside.txt ok", workspace, os.Environ(), &sandboxOptions{WorkspaceDir: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sandboxed command after a stale volume cache: %v %s", err, out)
 	}
 }

@@ -231,7 +231,9 @@ func TestSkillExamplesParse(t *testing.T) {
 	if strings.Contains(block, "${SKILL_DIR}") || strings.Contains(block, "${PROJECT_DIR}") || strings.Contains(block, "$package") || strings.Contains(block, "$ARGUMENTS") {
 		t.Fatalf("run-tests substitutions were not rendered: %s", block)
 	}
-	if !strings.Contains(block, filepath.Join(projectDir, "skills", "run-tests", "scripts", "run.sh")) || !strings.Contains(block, "./pkg/skill") {
+	// SKILL.md writes "${SKILL_DIR}/scripts/run.sh"; only the variable is
+	// substituted, so the suffix keeps its forward slashes on every platform.
+	if !strings.Contains(block, filepath.Join(projectDir, "skills", "run-tests")+"/scripts/run.sh") || !strings.Contains(block, "./pkg/skill") {
 		t.Fatalf("run-tests rendered instructions miss paths or arguments: %s", block)
 	}
 

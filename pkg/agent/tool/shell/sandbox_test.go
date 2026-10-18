@@ -124,7 +124,7 @@ func TestExecSandboxConfinesWritesToWorkspace(t *testing.T) {
 	defer manager.Close()
 	exec := ExecTools(manager, t.TempDir(), nil, nil)[0]
 	run := func(command string) tool.Result {
-		result, err := exec.Execute(context.Background(), map[string]any{"command": command, "wait": 10})
+		result, err := exec.Execute(context.Background(), map[string]any{"command": command, "wait": 60})
 		if err != nil {
 			if runtime.GOOS == "windows" {
 				t.Fatal(err)

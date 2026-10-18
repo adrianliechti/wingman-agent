@@ -16,7 +16,11 @@ func TestFileReferencesAndMultilineLinks(t *testing.T) {
 	if err := os.WriteFile(path, []byte("package main\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	want := (&url.URL{Scheme: "file", Path: filepath.ToSlash(path), Fragment: "L42"}).String()
+	slashPath := filepath.ToSlash(path)
+	if !strings.HasPrefix(slashPath, "/") { // Windows drive path in a file URI.
+		slashPath = "/" + slashPath
+	}
+	want := (&url.URL{Scheme: "file", Path: slashPath, Fragment: "L42"}).String()
 	for _, source := range []string{"[source](<" + path + ":42>)", "`main file.go:42`", "[source](<main%20file.go#L42>)"} {
 		got := Render(source, Options{Directory: directory})
 		if !strings.Contains(got, "\x1b]8;;"+want+"\x1b\\") {

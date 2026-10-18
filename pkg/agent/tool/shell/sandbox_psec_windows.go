@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -66,8 +67,7 @@ type nativeFilesystemPolicy struct {
 
 func nativeSandboxPolicy(policy sandboxPolicy) (nativeFilesystemPolicy, error) {
 	result := nativeFilesystemPolicy{Network: policy.Network}
-	add := func(paths *[]string, path string) {
-		path = canonicalPath(path)
+	addCanonical := func(paths *[]string, path string) {
 		for _, existing := range *paths {
 			if strings.EqualFold(path, existing) {
 				return
@@ -75,6 +75,7 @@ func nativeSandboxPolicy(policy sandboxPolicy) (nativeFilesystemPolicy, error) {
 		}
 		*paths = append(*paths, path)
 	}
+	add := func(paths *[]string, path string) { addCanonical(paths, canonicalPath(path)) }
 	for _, path := range policy.WritableRoots {
 		if !strings.EqualFold(canonicalPath(path), canonicalPath(os.TempDir())) {
 			add(&result.ReadWrite, path)
@@ -122,33 +123,12 @@ func nativeSandboxPolicy(policy sandboxPolicy) (nativeFilesystemPolicy, error) {
 	}
 	carveouts := append([]string(nil), result.ReadOnly...)
 
-	// PSEC volume-root grants are nonrecursive. As in Codex's native adapter,
-	// expand currently accessible immediate children to retain broad reads.
-	drives, err := windows.GetLogicalDrives()
+	volumeReads, err := sandboxVolumeReads()
 	if err != nil {
-		return result, fmt.Errorf("enumerate sandbox read volumes: %w", err)
+		return result, err
 	}
-	for i := range 26 {
-		if drives&(1<<i) == 0 {
-			continue
-		}
-		root := fmt.Sprintf("%c:\\", 'A'+i)
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			continue // Empty/removable/disconnected volumes are not required.
-		}
-		add(&result.ReadOnly, root)
-		for _, entry := range entries {
-			path := filepath.Join(root, entry.Name())
-			// The OS rejects grants for inaccessible objects. Only implicit read
-			// grants may be skipped; explicit writes and denies fail at creation.
-			h, err := openSandboxPolicyPath(path)
-			if err != nil {
-				continue
-			}
-			windows.CloseHandle(h)
-			add(&result.ReadOnly, path)
-		}
+	for _, path := range volumeReads {
+		addCanonical(&result.ReadOnly, path)
 	}
 	// Resolve equal-path access modes before serializing. Narrower read-only
 	// and deny paths remain carveouts beneath writable roots.
@@ -175,6 +155,66 @@ func nativeSandboxPolicy(policy sandboxPolicy) (nativeFilesystemPolicy, error) {
 	}
 	result.ReadOnly = reads
 	return result, nil
+}
+
+// Listing mapped network drives can take seconds, or tens of seconds when
+// cold, so the volume expansion is reused for a while.
+const sandboxVolumeReadsTTL = 5 * time.Minute
+
+var sandboxVolumeCache struct {
+	sync.Mutex
+	paths []string
+	at    time.Time
+}
+
+// sandboxVolumeReads lists the canonical drive roots and their currently
+// accessible immediate children. PSEC volume-root grants are nonrecursive; as in Codex's
+// native adapter, the children retain broad reads.
+func sandboxVolumeReads() ([]string, error) {
+	sandboxVolumeCache.Lock()
+	defer sandboxVolumeCache.Unlock()
+	if sandboxVolumeCache.paths != nil && time.Since(sandboxVolumeCache.at) < sandboxVolumeReadsTTL {
+		return sandboxVolumeCache.paths, nil
+	}
+	drives, err := windows.GetLogicalDrives()
+	if err != nil {
+		return nil, fmt.Errorf("enumerate sandbox read volumes: %w", err)
+	}
+	paths := []string{}
+	for i := range 26 {
+		if drives&(1<<i) == 0 {
+			continue
+		}
+		root := fmt.Sprintf("%c:\\", 'A'+i)
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue // Empty/removable/disconnected volumes are not required.
+		}
+		paths = append(paths, canonicalPath(root))
+		for _, entry := range entries {
+			path := filepath.Join(root, entry.Name())
+			// The OS rejects grants for inaccessible objects. Only implicit read
+			// grants may be skipped; explicit writes and denies fail at creation.
+			h, err := openSandboxPolicyPath(path)
+			if err != nil {
+				continue
+			}
+			windows.CloseHandle(h)
+			paths = append(paths, canonicalPath(path))
+		}
+	}
+	sandboxVolumeCache.paths, sandboxVolumeCache.at = paths, time.Now()
+	return paths, nil
+}
+
+// invalidateSandboxVolumeReads drops the cached volume reads and reports
+// whether anything was cached.
+func invalidateSandboxVolumeReads() bool {
+	sandboxVolumeCache.Lock()
+	defer sandboxVolumeCache.Unlock()
+	cached := sandboxVolumeCache.paths != nil
+	sandboxVolumeCache.paths = nil
+	return cached
 }
 
 func openSandboxPolicyPath(path string) (windows.Handle, error) {

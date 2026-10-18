@@ -4,9 +4,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/coder/acp-go-sdk"
+	acpsdk "github.com/coder/acp-go-sdk"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type modelEntry struct {
@@ -92,10 +92,10 @@ const (
 	planCollaborationMode    = "plan"
 )
 
-func buildConfigOptions(models []modelEntry, currentModelID, currentEffort, collaborationMode string) []acp.SessionConfigOption {
+func buildConfigOptions(models []modelEntry, currentModelID, currentEffort, collaborationMode string) []acpsdk.SessionConfigOption {
 	model := modelConfigOption(models, currentModelID)
 	effort := effortConfigOption(models, currentModelID, currentEffort)
-	opts := []acp.SessionConfigOption{model}
+	opts := []acpsdk.SessionConfigOption{model}
 	if effort != nil {
 		opts = append(opts, *effort)
 	}
@@ -103,11 +103,11 @@ func buildConfigOptions(models []modelEntry, currentModelID, currentEffort, coll
 	return opts
 }
 
-func collaborationModeConfigOption(current string) acp.SessionConfigOption {
+func collaborationModeConfigOption(current string) acpsdk.SessionConfigOption {
 	if current != planCollaborationMode {
 		current = defaultCollaborationMode
 	}
-	ungrouped := acp.SessionConfigSelectOptionsUngrouped{
+	ungrouped := acpsdk.SessionConfigSelectOptionsUngrouped{
 		{Value: defaultCollaborationMode, Name: "Default"},
 		{
 			Value:       planCollaborationMode,
@@ -115,12 +115,12 @@ func collaborationModeConfigOption(current string) acp.SessionConfigOption {
 			Description: new("Plan before making changes"),
 		},
 	}
-	opt := acp.NewSessionConfigOptionSelect(
-		acp.SessionConfigValueId(current),
-		acp.SessionConfigSelectOptions{Ungrouped: &ungrouped},
+	opt := acpsdk.NewSessionConfigOptionSelect(
+		acpsdk.SessionConfigValueId(current),
+		acpsdk.SessionConfigSelectOptions{Ungrouped: &ungrouped},
 	)
 	desc := "How Codex collaborates for subsequent turns"
-	category := acp.SessionConfigOptionCategory("_codex_collaboration_mode")
+	category := acpsdk.SessionConfigOptionCategory("_codex_collaboration_mode")
 	opt.Select.Id = collaborationModeConfigID
 	opt.Select.Name = "Collaboration mode"
 	opt.Select.Description = &desc
@@ -139,12 +139,12 @@ func isValidCollaborationMode(mode string) bool {
 	return mode == defaultCollaborationMode || mode == planCollaborationMode
 }
 
-func modelConfigOption(models []modelEntry, currentID string) acp.SessionConfigOption {
-	ungrouped := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(models))
+func modelConfigOption(models []modelEntry, currentID string) acpsdk.SessionConfigOption {
+	ungrouped := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(models))
 	for _, m := range models {
 		desc := m.Description
-		opt := acp.SessionConfigSelectOption{
-			Value: acp.SessionConfigValueId(m.ID),
+		opt := acpsdk.SessionConfigSelectOption{
+			Value: acpsdk.SessionConfigValueId(m.ID),
 			Name:  m.Name,
 		}
 		if desc != "" {
@@ -156,31 +156,31 @@ func modelConfigOption(models []modelEntry, currentID string) acp.SessionConfigO
 		currentID = models[0].ID
 	}
 	if currentID != "" && findModel(models, currentID) == nil {
-		ungrouped = append(acp.SessionConfigSelectOptionsUngrouped{
-			{Value: acp.SessionConfigValueId(currentID), Name: formatModelDisplayName(currentID)},
+		ungrouped = append(acpsdk.SessionConfigSelectOptionsUngrouped{
+			{Value: acpsdk.SessionConfigValueId(currentID), Name: formatModelDisplayName(currentID)},
 		}, ungrouped...)
 	}
-	opt := acp.NewSessionConfigOptionSelect(
-		acp.SessionConfigValueId(currentID),
-		acp.SessionConfigSelectOptions{Ungrouped: &ungrouped},
+	opt := acpsdk.NewSessionConfigOptionSelect(
+		acpsdk.SessionConfigValueId(currentID),
+		acpsdk.SessionConfigSelectOptions{Ungrouped: &ungrouped},
 	)
 	opt.Select.Id = modelConfigID
 	opt.Select.Name = "Model"
 	return opt
 }
 
-func effortConfigOption(models []modelEntry, currentModelID, currentEffort string) *acp.SessionConfigOption {
+func effortConfigOption(models []modelEntry, currentModelID, currentEffort string) *acpsdk.SessionConfigOption {
 	m := findModel(models, currentModelID)
 	if m == nil {
 		return nil
 	}
-	return acpcommon.EffortConfigOption(m.EffortLevels, currentEffort)
+	return acp.EffortConfigOption(m.EffortLevels, currentEffort)
 }
 
 func normalizeSessionConfig(models []modelEntry, modelID, effort string) (string, string) {
 	if m := resolveModel(models, modelID); m != nil {
 		modelID = m.ID
-		if !acpcommon.IsValidEffort(m.EffortLevels, effort) {
+		if !acp.IsValidEffort(m.EffortLevels, effort) {
 			effort = "default"
 		}
 	}
@@ -243,10 +243,10 @@ func modeFor(id string) sessionMode {
 	return *findMode(defaultModeID)
 }
 
-func buildSessionModeState(currentID string) *acp.SessionModeState {
-	infos := make([]acpcommon.ModeInfo, 0, len(sessionModes))
+func buildSessionModeState(currentID string) *acpsdk.SessionModeState {
+	infos := make([]acp.ModeInfo, 0, len(sessionModes))
 	for _, m := range sessionModes {
-		infos = append(infos, acpcommon.ModeInfo{ID: m.id, Name: m.name, Description: m.description})
+		infos = append(infos, acp.ModeInfo{ID: m.id, Name: m.name, Description: m.description})
 	}
-	return acpcommon.SessionModeState(infos, currentID, defaultModeID)
+	return acp.SessionModeState(infos, currentID, defaultModeID)
 }

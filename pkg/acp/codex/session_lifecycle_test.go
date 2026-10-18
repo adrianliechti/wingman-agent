@@ -258,7 +258,7 @@ func TestUnpromptedResumeAndLoadPreserveSelectedModelAndEffort(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			created, err := agent.NewSession(ctx, acp.NewSessionRequest{Cwd: "/work"})
+			created, err := agent.NewSession(ctx, acp.NewSessionRequest{Cwd: workCwd})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -272,13 +272,13 @@ func TestUnpromptedResumeAndLoadPreserveSelectedModelAndEffort(t *testing.T) {
 			}
 			var options []acp.SessionConfigOption
 			if operation == "resume" {
-				resumed, err := agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: created.SessionId, Cwd: "/work"})
+				resumed, err := agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: created.SessionId, Cwd: workCwd})
 				if err != nil {
 					t.Fatal(err)
 				}
 				options = resumed.ConfigOptions
 			} else {
-				loaded, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: created.SessionId, Cwd: "/work"})
+				loaded, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: created.SessionId, Cwd: workCwd})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -326,12 +326,12 @@ func TestUnmaterializedThreadCanBeResumedLoadedAndDeleted(t *testing.T) {
 				}
 			})
 			ctx := context.Background()
-			resumed, err := agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: "thread-1", Cwd: "/work"})
+			resumed, err := agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: "thread-1", Cwd: workCwd})
 			if !known {
 				if err == nil || !strings.Contains(err.Error(), "no rollout found") {
 					t.Fatalf("unknown thread resume = %v", err)
 				}
-				if _, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: "thread-1", Cwd: "/work", McpServers: []acp.McpServer{}}); err == nil {
+				if _, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: "thread-1", Cwd: workCwd, McpServers: []acp.McpServer{}}); err == nil {
 					t.Fatal("unknown thread was loaded")
 				}
 			} else {
@@ -341,7 +341,7 @@ func TestUnmaterializedThreadCanBeResumedLoadedAndDeleted(t *testing.T) {
 				if s := agent.lookup("thread-1"); s == nil || s.effort != "high" {
 					t.Fatalf("resumed session = %#v", s)
 				}
-				if _, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: "thread-1", Cwd: "/work", McpServers: []acp.McpServer{}}); err != nil {
+				if _, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: "thread-1", Cwd: workCwd, McpServers: []acp.McpServer{}}); err != nil {
 					t.Fatalf("load: %v", err)
 				}
 				for _, method := range methods() {
@@ -409,7 +409,7 @@ func TestMCPStartupAwaitTimeout(t *testing.T) {
 				// A state from before the request must not satisfy this wait.
 				agent.codex.recordMCPStartup(json.RawMessage(`{"threadId":"thread-1","name":"docs","status":"ready"}`))
 				start := time.Now()
-				if _, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/work", McpServers: servers, Meta: tt.meta}); err != nil {
+				if _, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: workCwd, McpServers: servers, Meta: tt.meta}); err != nil {
 					t.Fatal(err)
 				}
 				if waited := time.Since(start); waited != tt.wantWait {
@@ -423,7 +423,7 @@ func TestMCPStartupAwaitTimeout(t *testing.T) {
 			s.respond(req, map[string]any{"thread": map[string]any{"id": "thread-1"}, "model": "m"})
 			_ = s.conn.Close()
 		})
-		_, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/work", McpServers: servers, Meta: map[string]any{"mcpStartupAwaitTimeoutMs": float64(5000)}})
+		_, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: workCwd, McpServers: servers, Meta: map[string]any{"mcpStartupAwaitTimeoutMs": float64(5000)}})
 		if err == nil || !strings.Contains(err.Error(), "MCP server startup") {
 			t.Fatalf("backend exit during MCP startup = %v", err)
 		}
@@ -463,12 +463,12 @@ func TestMCPStartupWaitsForRequestedThread(t *testing.T) {
 					var err error
 					switch operation {
 					case "new":
-						_, err = agent.NewSession(ctx, acp.NewSessionRequest{Cwd: "/work", McpServers: servers, Meta: meta})
+						_, err = agent.NewSession(ctx, acp.NewSessionRequest{Cwd: workCwd, McpServers: servers, Meta: meta})
 					case "resume":
-						_, err = agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: "thread-1", Cwd: "/work", McpServers: servers, Meta: meta})
+						_, err = agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: "thread-1", Cwd: workCwd, McpServers: servers, Meta: meta})
 					case "fork":
 						_, err = agent.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{
-							SessionId: "thread-1", Cwd: "/work", McpServers: []acp.UnstableMcpServer{{Stdio: server}}, Meta: meta,
+							SessionId: "thread-1", Cwd: workCwd, McpServers: []acp.UnstableMcpServer{{Stdio: server}}, Meta: meta,
 						})
 					}
 					if err != nil {
@@ -492,7 +492,7 @@ func TestInitializeReturnsStandardCapabilities(t *testing.T) {
 	if init.Meta != nil {
 		t.Fatalf("unexpected initialize metadata: %#v", init.Meta)
 	}
-	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: "/contract", McpServers: []acp.McpServer{}})
+	session, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: contractCwd, McpServers: []acp.McpServer{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,21 +682,21 @@ func TestResumeLoadAndForkReportPlanMode(t *testing.T) {
 			if tt.localMode != "" {
 				agent.registerSession("thread-1", "m", "", tt.localMode, nil)
 			}
-			resumed, err := agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: "thread-1", Cwd: "/work"})
+			resumed, err := agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: "thread-1", Cwd: workCwd})
 			if err != nil || collaboration(resumed.ConfigOptions) != tt.want {
 				t.Fatalf("resume = %#v, %v", resumed.ConfigOptions, err)
 			}
 			if tt.localMode != "" {
 				agent.registerSession("thread-1", "m", "", tt.localMode, nil)
 			}
-			loaded, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: "thread-1", Cwd: "/work", McpServers: []acp.McpServer{}})
+			loaded, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: "thread-1", Cwd: workCwd, McpServers: []acp.McpServer{}})
 			if err != nil || collaboration(loaded.ConfigOptions) != tt.want {
 				t.Fatalf("load = %#v, %v", loaded.ConfigOptions, err)
 			}
 			if s := agent.lookup("thread-1"); s == nil || s.collaborationMode != tt.want {
 				t.Fatalf("loaded session = %#v", s)
 			}
-			forked, err := agent.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{SessionId: "thread-1", Cwd: "/work"})
+			forked, err := agent.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{SessionId: "thread-1", Cwd: workCwd})
 			if err != nil {
 				t.Fatal(err)
 			}

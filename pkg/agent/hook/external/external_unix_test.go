@@ -562,20 +562,6 @@ func TestBuildOptionsInjectPluginEnvironment(t *testing.T) {
 	}
 }
 
-func configFor(event, matcher string, handler Handler) *Config {
-	group := []MatcherGroup{{Matcher: matcher, Hooks: []Handler{handler}}}
-	cfg := &Config{}
-	switch event {
-	case "PreToolUse":
-		cfg.Hooks.PreToolUse = group
-	case "UserPromptSubmit":
-		cfg.Hooks.UserPromptSubmit = group
-	case "SessionStart":
-		cfg.Hooks.SessionStart = group
-	}
-	return cfg
-}
-
 func readJSONMap(t *testing.T, path string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(path)

@@ -5,25 +5,24 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
-	"github.com/coder/acp-go-sdk"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
+	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 )
 
 type session struct {
-	id      acp.SessionId
+	id      acpsdk.SessionId
 	cwd     string
 	proc    *process
 	cleanup func()
 
-	promptMu       acpcommon.PromptGate
+	promptMu       acp.PromptGate
 	mu             sync.Mutex
 	closed         bool
 	models         []modelEntry
@@ -35,11 +34,11 @@ type session struct {
 	closeOnce  sync.Once
 }
 
-func newSession(id acp.SessionId, cwd string, proc *process) *session {
+func newSession(id acpsdk.SessionId, cwd string, proc *process) *session {
 	return &session{id: id, cwd: cwd, proc: proc, thinking: defaultThinkingLevel}
 }
 
-func (s *session) configOptions() []acp.SessionConfigOption {
+func (s *session) configOptions() []acpsdk.SessionConfigOption {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return buildConfigOptions(s.models, s.currentModel, s.thinkingLevels, s.thinking)
@@ -101,18 +100,18 @@ func (s *session) cancel() {
 }
 
 type turnResult struct {
-	stop acp.StopReason
+	stop acpsdk.StopReason
 	err  error
 }
 
-func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, prompt []acp.ContentBlock) (acp.StopReason, error) {
+func (s *session) runTurn(ctx context.Context, conn *acpsdk.AgentSideConnection, prompt []acpsdk.ContentBlock) (acpsdk.StopReason, error) {
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return acp.StopReasonCancelled, nil
+		return acpsdk.StopReasonCancelled, nil
 	}
 	s.cancelTurn = cancel
 	s.mu.Unlock()
@@ -151,7 +150,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pr
 		if err == nil {
 			select {
 			case <-t.settled:
-				return acp.StopReasonCancelled, nil
+				return acpsdk.StopReasonCancelled, nil
 			case <-s.proc.done:
 			case <-time.After(2 * time.Second):
 			}
@@ -159,7 +158,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pr
 		// An abort response only acknowledges the command. Without the settled
 		// event, old output could otherwise complete the next prompt.
 		s.close()
-		return acp.StopReasonCancelled, nil
+		return acpsdk.StopReasonCancelled, nil
 	case <-s.proc.done:
 		// The final settled event can precede EOF in the same read batch.
 		select {
@@ -175,7 +174,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, pr
 
 type turn struct {
 	ctx  context.Context
-	conn *acp.AgentSideConnection
+	conn *acpsdk.AgentSideConnection
 	sess *session
 
 	done       chan turnResult
@@ -195,7 +194,7 @@ type fileSnapshot struct {
 	oldText *string
 }
 
-func (t *turn) emit(u acp.SessionUpdate) {
+func (t *turn) emit(u acpsdk.SessionUpdate) {
 	ctx := t.ctx
 	// Finish tool calls already announced in_progress; the SDK won't write on a cancelled ctx.
 	if ctx.Err() != nil {
@@ -203,10 +202,10 @@ func (t *turn) emit(u acp.SessionUpdate) {
 		defer cancel()
 		ctx = detached
 	}
-	_ = acpcommon.Notify(ctx, t.conn, t.sess.id, u)
+	_ = acp.Notify(ctx, t.conn, t.sess.id, u)
 }
 
-func (t *turn) resolve(stop acp.StopReason, err error) {
+func (t *turn) resolve(stop acpsdk.StopReason, err error) {
 	select {
 	case t.done <- turnResult{stop: stop, err: err}:
 	default:
@@ -221,7 +220,7 @@ func (t *turn) onPromptResult(err error) {
 		return
 	}
 	if isAuthError(err) {
-		t.resolve("", acp.NewAuthRequired(nil))
+		t.resolve("", acpsdk.NewAuthRequired(nil))
 		return
 	}
 	t.resolve("", err)
@@ -269,21 +268,21 @@ func (t *turn) handle(raw json.RawMessage) {
 		}
 
 	case "auto_retry_start":
-		t.emit(acp.UpdateAgentMessageText("Retrying...\n\n"))
+		t.emit(acpsdk.UpdateAgentMessageText("Retrying...\n\n"))
 
 	case "auto_retry_end":
-		t.emit(acp.UpdateAgentMessageText("Retry finished, resuming.\n\n"))
+		t.emit(acpsdk.UpdateAgentMessageText("Retry finished, resuming.\n\n"))
 
 	case "compaction_start":
-		t.emit(acp.UpdateAgentMessageText("Context nearing limit, running automatic compaction...\n\n"))
+		t.emit(acpsdk.UpdateAgentMessageText("Context nearing limit, running automatic compaction...\n\n"))
 
 	case "compaction_end":
-		t.emit(acp.UpdateAgentMessageText("Automatic compaction finished.\n\n"))
+		t.emit(acpsdk.UpdateAgentMessageText("Automatic compaction finished.\n\n"))
 
 	case "agent_settled":
-		reason := acp.StopReasonEndTurn
+		reason := acpsdk.StopReasonEndTurn
 		if t.ctx != nil && t.ctx.Err() != nil {
-			reason = acp.StopReasonCancelled
+			reason = acpsdk.StopReasonCancelled
 		}
 		t.resolve(reason, nil)
 		if t.settled != nil {
@@ -312,11 +311,11 @@ func (t *turn) handleMessageUpdate(raw json.RawMessage) {
 	switch ame.Type {
 	case "text_delta":
 		if ame.Delta != "" {
-			t.emit(acp.UpdateAgentMessageText(ame.Delta))
+			t.emit(acpsdk.UpdateAgentMessageText(ame.Delta))
 		}
 	case "thinking_delta":
 		if ame.Delta != "" {
-			t.emit(acp.UpdateAgentThoughtText(ame.Delta))
+			t.emit(acpsdk.UpdateAgentThoughtText(ame.Delta))
 		}
 	case "toolcall_start", "toolcall_delta", "toolcall_end":
 		tc := ame.ToolCall
@@ -335,9 +334,9 @@ func (t *turn) handleMessageUpdate(raw json.RawMessage) {
 		}
 		args := toolArgs(tc)
 		presentation := presentTool(tc.Name, args, t.sess.cwd)
-		t.emit(acp.StartToolCall(
-			acp.ToolCallId(tc.ID), presentation.title,
-			startToolOptions(presentation, acp.ToolCallStatusPending)...,
+		t.emit(acpsdk.StartToolCall(
+			acpsdk.ToolCallId(tc.ID), presentation.title,
+			startToolOptions(presentation, acpsdk.ToolCallStatusPending)...,
 		))
 	}
 }
@@ -361,32 +360,32 @@ func (t *turn) handleToolStart(raw json.RawMessage) {
 	t.tools[p.ToolCallID] = true
 
 	if !seen {
-		t.emit(acp.StartToolCall(
-			acp.ToolCallId(p.ToolCallID), presentation.title,
-			startToolOptions(presentation, acp.ToolCallStatusInProgress)...,
+		t.emit(acpsdk.StartToolCall(
+			acpsdk.ToolCallId(p.ToolCallID), presentation.title,
+			startToolOptions(presentation, acpsdk.ToolCallStatusInProgress)...,
 		))
 		return
 	}
 
-	opts := []acp.ToolCallUpdateOpt{
-		acp.WithUpdateStatus(acp.ToolCallStatusInProgress),
-		acp.WithUpdateTitle(presentation.title),
-		acp.WithUpdateKind(presentation.kind),
+	opts := []acpsdk.ToolCallUpdateOpt{
+		acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusInProgress),
+		acpsdk.WithUpdateTitle(presentation.title),
+		acpsdk.WithUpdateKind(presentation.kind),
 	}
 	if presentation.rawInput != nil {
-		opts = append(opts, acp.WithUpdateRawInput(presentation.rawInput))
+		opts = append(opts, acpsdk.WithUpdateRawInput(presentation.rawInput))
 	} else if args != nil || len(presentation.locations) > 0 {
 		// A streamed partial call may have exposed partialArgs. Replace it with
 		// an empty object once the complete call is represented solely by a chip.
-		opts = append(opts, acp.WithUpdateRawInput(map[string]any{}))
+		opts = append(opts, acpsdk.WithUpdateRawInput(map[string]any{}))
 	}
 	if len(presentation.locations) > 0 {
-		opts = append(opts, acp.WithUpdateLocations(presentation.locations))
+		opts = append(opts, acpsdk.WithUpdateLocations(presentation.locations))
 	}
-	t.emit(acp.UpdateToolCall(acp.ToolCallId(p.ToolCallID), opts...))
+	t.emit(acpsdk.UpdateToolCall(acpsdk.ToolCallId(p.ToolCallID), opts...))
 }
 
-func (t *turn) snapshotFileMutation(toolName, toolCallID string, args map[string]any, locs []acp.ToolCallLocation) {
+func (t *turn) snapshotFileMutation(toolName, toolCallID string, args map[string]any, locs []acpsdk.ToolCallLocation) {
 	if toolName != "edit" && toolName != "write" {
 		return
 	}
@@ -421,13 +420,13 @@ func (t *turn) handleToolUpdate(raw json.RawMessage) {
 	}
 	t.ensureToolStarted(p.ToolCallID)
 
-	opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(acp.ToolCallStatusInProgress)}
+	opts := []acpsdk.ToolCallUpdateOpt{acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusInProgress)}
 	if !t.mutations[p.ToolCallID] {
 		if text := toolResultToText(p.PartialResult); text != "" {
-			opts = append(opts, acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(text))}))
+			opts = append(opts, acpsdk.WithUpdateContent([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(text))}))
 		}
 	}
-	t.emit(acp.UpdateToolCall(acp.ToolCallId(p.ToolCallID), opts...))
+	t.emit(acpsdk.UpdateToolCall(acpsdk.ToolCallId(p.ToolCallID), opts...))
 }
 
 func (t *turn) handleToolEnd(raw json.RawMessage) {
@@ -441,17 +440,17 @@ func (t *turn) handleToolEnd(raw json.RawMessage) {
 	}
 	t.ensureToolStarted(p.ToolCallID)
 
-	status := acp.ToolCallStatusCompleted
+	status := acpsdk.ToolCallStatusCompleted
 	if p.IsError {
-		status = acp.ToolCallStatusFailed
+		status = acpsdk.ToolCallStatusFailed
 	}
 
-	var content []acp.ToolCallContent
+	var content []acpsdk.ToolCallContent
 	if snap, ok := t.snapshots[p.ToolCallID]; ok && !p.IsError {
 		if data, err := os.ReadFile(absPath(snap.path, t.sess.cwd)); err == nil {
 			newText := string(data)
 			if snap.oldText == nil || newText != *snap.oldText {
-				content = []acp.ToolCallContent{{Diff: &acp.ToolCallContentDiff{
+				content = []acpsdk.ToolCallContent{{Diff: &acpsdk.ToolCallContentDiff{
 					Type:    "diff",
 					Path:    snap.path,
 					OldText: snap.oldText,
@@ -462,15 +461,15 @@ func (t *turn) handleToolEnd(raw json.RawMessage) {
 	}
 	if content == nil {
 		if text := toolResultToText(p.Result); text != "" {
-			content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(text))}
+			content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(text))}
 		}
 	}
 
-	opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(status)}
+	opts := []acpsdk.ToolCallUpdateOpt{acpsdk.WithUpdateStatus(status)}
 	if len(content) > 0 {
-		opts = append(opts, acp.WithUpdateContent(content))
+		opts = append(opts, acpsdk.WithUpdateContent(content))
 	}
-	t.emit(acp.UpdateToolCall(acp.ToolCallId(p.ToolCallID), opts...))
+	t.emit(acpsdk.UpdateToolCall(acpsdk.ToolCallId(p.ToolCallID), opts...))
 
 	delete(t.tools, p.ToolCallID)
 	delete(t.mutations, p.ToolCallID)
@@ -483,9 +482,9 @@ func (t *turn) ensureToolStarted(id string) {
 		t.tools[id] = true
 	}
 	if !seen {
-		t.emit(acp.StartToolCall(acp.ToolCallId(id), "Tool call",
-			acp.WithStartKind(acp.ToolKindOther),
-			acp.WithStartStatus(acp.ToolCallStatusInProgress),
+		t.emit(acpsdk.StartToolCall(acpsdk.ToolCallId(id), "Tool call",
+			acpsdk.WithStartKind(acpsdk.ToolKindOther),
+			acpsdk.WithStartStatus(acpsdk.ToolCallStatusInProgress),
 		))
 	}
 }
@@ -517,7 +516,7 @@ func (t *turn) handleExtensionUI(raw json.RawMessage) {
 
 	case "notify":
 		if p.Message != "" {
-			u := acp.UpdateAgentMessageText(p.Message + "\n\n")
+			u := acpsdk.UpdateAgentMessageText(p.Message + "\n\n")
 			level := p.NotifyType
 			if level == "" {
 				level = "info"
@@ -542,25 +541,25 @@ func (t *turn) askConfirm(id, title, message string) bool {
 	if tcTitle == "" {
 		tcTitle = "Confirm"
 	}
-	status := acp.ToolCallStatusPending
-	kind := acp.ToolKindOther
-	tc := acp.ToolCallUpdate{
-		ToolCallId: acp.ToolCallId("pi-ui-" + id),
+	status := acpsdk.ToolCallStatusPending
+	kind := acpsdk.ToolKindOther
+	tc := acpsdk.ToolCallUpdate{
+		ToolCallId: acpsdk.ToolCallId("pi-ui-" + id),
 		Title:      &tcTitle,
 		Kind:       &kind,
 		Status:     &status,
 	}
 	if message != "" {
-		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(message))}
+		tc.Content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(message))}
 	}
 
-	resp, err := acpcommon.Call(t.ctx, func() (acp.RequestPermissionResponse, error) {
-		return t.conn.RequestPermission(t.ctx, acp.RequestPermissionRequest{
+	resp, err := acp.Call(t.ctx, func() (acpsdk.RequestPermissionResponse, error) {
+		return t.conn.RequestPermission(t.ctx, acpsdk.RequestPermissionRequest{
 			SessionId: t.sess.id,
 			ToolCall:  tc,
-			Options: []acp.PermissionOption{
-				{OptionId: "yes", Name: "Yes", Kind: acp.PermissionOptionKindAllowOnce},
-				{OptionId: "no", Name: "No", Kind: acp.PermissionOptionKindRejectOnce},
+			Options: []acpsdk.PermissionOption{
+				{OptionId: "yes", Name: "Yes", Kind: acpsdk.PermissionOptionKindAllowOnce},
+				{OptionId: "no", Name: "No", Kind: acpsdk.PermissionOptionKindRejectOnce},
 			},
 		})
 	})
@@ -578,26 +577,26 @@ func (t *turn) askSelect(id, title string, options []string) (string, bool) {
 	if tcTitle == "" {
 		tcTitle = "Select"
 	}
-	status := acp.ToolCallStatusPending
-	kind := acp.ToolKindOther
-	tc := acp.ToolCallUpdate{
-		ToolCallId: acp.ToolCallId("pi-ui-" + id),
+	status := acpsdk.ToolCallStatusPending
+	kind := acpsdk.ToolKindOther
+	tc := acpsdk.ToolCallUpdate{
+		ToolCallId: acpsdk.ToolCallId("pi-ui-" + id),
 		Title:      &tcTitle,
 		Kind:       &kind,
 		Status:     &status,
 	}
 
-	opts := make([]acp.PermissionOption, 0, len(options))
+	opts := make([]acpsdk.PermissionOption, 0, len(options))
 	for i, name := range options {
-		opts = append(opts, acp.PermissionOption{
-			OptionId: acp.PermissionOptionId(choiceID(i)),
+		opts = append(opts, acpsdk.PermissionOption{
+			OptionId: acpsdk.PermissionOptionId(choiceID(i)),
 			Name:     name,
-			Kind:     acp.PermissionOptionKindAllowOnce,
+			Kind:     acpsdk.PermissionOptionKindAllowOnce,
 		})
 	}
 
-	resp, err := acpcommon.Call(t.ctx, func() (acp.RequestPermissionResponse, error) {
-		return t.conn.RequestPermission(t.ctx, acp.RequestPermissionRequest{
+	resp, err := acp.Call(t.ctx, func() (acpsdk.RequestPermissionResponse, error) {
+		return t.conn.RequestPermission(t.ctx, acpsdk.RequestPermissionRequest{
 			SessionId: t.sess.id,
 			ToolCall:  tc,
 			Options:   opts,
@@ -648,26 +647,23 @@ func toolPath(args map[string]any) string {
 	return ""
 }
 
-func toolLocations(args map[string]any, cwd string) []acp.ToolCallLocation {
+func toolLocations(args map[string]any, cwd string) []acpsdk.ToolCallLocation {
 	path := toolPath(args)
 	if path == "" {
 		return nil
 	}
-	if !filepath.IsAbs(path) && cwd != "" {
-		path = filepath.Join(cwd, path)
-	}
-	location := acp.ToolCallLocation{Path: path}
+	location := acpsdk.ToolCallLocation{Path: acp.ResolvePath(path, cwd)}
 	if offset, ok := tool.IntArg(args, "offset"); ok && offset > 0 {
 		location.Line = new(offset)
 	}
-	return []acp.ToolCallLocation{location}
+	return []acpsdk.ToolCallLocation{location}
 }
 
 type toolPresentation struct {
 	title     string
-	kind      acp.ToolKind
+	kind      acpsdk.ToolKind
 	rawInput  any
-	locations []acp.ToolCallLocation
+	locations []acpsdk.ToolCallLocation
 }
 
 func presentTool(name string, args map[string]any, cwd string) toolPresentation {
@@ -731,26 +727,23 @@ func compactToolArgs(args map[string]any, omit ...string) any {
 	return display
 }
 
-func startToolOptions(p toolPresentation, status acp.ToolCallStatus) []acp.ToolCallStartOpt {
-	opts := []acp.ToolCallStartOpt{
-		acp.WithStartKind(p.kind),
-		acp.WithStartStatus(status),
+func startToolOptions(p toolPresentation, status acpsdk.ToolCallStatus) []acpsdk.ToolCallStartOpt {
+	opts := []acpsdk.ToolCallStartOpt{
+		acpsdk.WithStartKind(p.kind),
+		acpsdk.WithStartStatus(status),
 	}
 	if len(p.locations) > 0 {
-		opts = append(opts, acp.WithStartLocations(p.locations))
+		opts = append(opts, acpsdk.WithStartLocations(p.locations))
 	}
 	// Apply rawInput after locations to undo the SDK's synthetic path mirror.
 	if p.rawInput != nil || len(p.locations) > 0 {
-		opts = append(opts, acp.WithStartRawInput(p.rawInput))
+		opts = append(opts, acpsdk.WithStartRawInput(p.rawInput))
 	}
 	return opts
 }
 
 func absPath(path, cwd string) string {
-	if filepath.IsAbs(path) || cwd == "" {
-		return path
-	}
-	return filepath.Join(cwd, path)
+	return acp.ResolvePath(path, cwd)
 }
 
 func editOldTexts(args map[string]any) []string {
@@ -789,20 +782,20 @@ func findUniqueLine(text, needle string) *int {
 	return &line
 }
 
-func toolKind(name string) acp.ToolKind {
+func toolKind(name string) acpsdk.ToolKind {
 	switch strings.ToLower(name) {
 	case "read":
-		return acp.ToolKindRead
+		return acpsdk.ToolKindRead
 	case "write", "edit":
-		return acp.ToolKindEdit
+		return acpsdk.ToolKindEdit
 	case "bash", "shell", "exec", "exec_command":
-		return acp.ToolKindExecute
+		return acpsdk.ToolKindExecute
 	case "grep", "glob":
-		return acp.ToolKindSearch
+		return acpsdk.ToolKindSearch
 	case "view_image":
-		return acp.ToolKindRead
+		return acpsdk.ToolKindRead
 	default:
-		return acp.ToolKindOther
+		return acpsdk.ToolKindOther
 	}
 }
 
@@ -823,7 +816,7 @@ type piImage struct {
 	Data     string `json:"data"`
 }
 
-func promptToPi(blocks []acp.ContentBlock) (string, []piImage) {
+func promptToPi(blocks []acpsdk.ContentBlock) (string, []piImage) {
 	var b strings.Builder
 	var images []piImage
 

@@ -2,6 +2,7 @@ package acp
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -38,4 +39,17 @@ func NormalizeSessionRoots(cwd string, additionalDirectories []string) (string, 
 		}
 	}
 	return cwd, out, nil
+}
+
+// ResolvePath resolves a tool-reported path against the session cwd. A path
+// that is rooted but has no volume (\dir\file on Windows) keeps cwd's volume
+// instead of being nested beneath cwd.
+func ResolvePath(path, cwd string) string {
+	if path == "" || cwd == "" || filepath.IsAbs(path) {
+		return path
+	}
+	if os.IsPathSeparator(path[0]) {
+		return filepath.VolumeName(cwd) + path
+	}
+	return filepath.Join(cwd, path)
 }

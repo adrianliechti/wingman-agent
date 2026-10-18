@@ -16,6 +16,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/clipboard"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
@@ -349,7 +350,7 @@ func TestDetectFilePathsMultiFileFormats(t *testing.T) {
 		t.Fatalf("quoted paths = %#v, want %#v", got, []string{imgOne, imgTwo})
 	}
 
-	uriList := fmt.Sprintf("# comment\nfile://%s\nfile://%s\n", filepath.ToSlash(imgOne), strings.ReplaceAll(filepath.ToSlash(imgTwo), " ", "%20"))
+	uriList := fmt.Sprintf("# comment\n%s\n%s\n", fileuri.FromPath(imgOne), fileuri.FromPath(imgTwo))
 	if got := detectFilePaths(uriList, dir); !reflect.DeepEqual(got, []string{imgOne, imgTwo}) {
 		t.Fatalf("uri-list paths = %#v, want %#v", got, []string{imgOne, imgTwo})
 	}

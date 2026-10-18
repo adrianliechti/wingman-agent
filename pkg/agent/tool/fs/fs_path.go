@@ -40,6 +40,16 @@ func normalizePathArg(path string) string {
 	return path
 }
 
+// A Windows path such as \etc\passwd is rooted on the current drive without
+// being absolute, so it must not be joined onto the workspace. Anchor it on
+// the workspace volume, where a shell started in the workspace resolves it.
+func anchorRootedPath(path, workingDir string) string {
+	if runtime.GOOS == "windows" && path != "" && os.IsPathSeparator(path[0]) && filepath.VolumeName(path) == "" {
+		return filepath.VolumeName(workingDir) + path
+	}
+	return path
+}
+
 func matchAllowedRoot(absPath string, allowedRoots []string) (rootClean, sub string, ok bool) {
 	absPath = filepath.Clean(absPath)
 	if slices.Contains(allowedRoots, "*") {
@@ -262,7 +272,7 @@ func openFileTarget(root *os.Root, target fileTarget) (*os.File, error) {
 // matchFileTarget selects the access grant shared by file and search tools.
 // File tools bind its identity; search tools retain its opened handle.
 func matchFileTarget(pathArg, workingDir string, allowedRoots []string, action string) (fileTarget, error) {
-	pathArg = expandHome(normalizePathArg(pathArg))
+	pathArg = anchorRootedPath(expandHome(normalizePathArg(pathArg)), workingDir)
 
 	rootClean, sub, allowed := matchExplicitRoot(pathArg, workingDir, allowedRoots)
 	if !allowed {

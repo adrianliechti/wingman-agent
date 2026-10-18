@@ -94,12 +94,28 @@ func parseShellSyntax(source string, dialect shellDialect) (result shellSyntax) 
 	}()
 
 	sourceBytes := []byte(source)
-	tree, err := parser.Parse(sourceBytes)
+	parsed := sourceBytes
+	if dialect == dialectPowerShell {
+		parsed = maskPowerShellArgumentWords(sourceBytes)
+	}
+	// Node offsets are shared; all text below comes from the original source.
+	tree, err := parser.Parse(parsed)
 	parserReusable = true
 	if err != nil || tree == nil || tree.RootNode() == nil {
 		result.statements = []string{source}
 		result.uncertain = true
 		return result
+	}
+	// Restoring a token may change the context of later tokens. Validate
+	// again after each reparse; every pass only restores original bytes.
+	for dialect == dialectPowerShell && restorePowerShellNonArguments(tree.RootNode(), lang, sourceBytes, parsed) {
+		tree.Release()
+		tree, err = parser.Parse(parsed)
+		if err != nil || tree == nil || tree.RootNode() == nil {
+			result.statements = []string{source}
+			result.uncertain = true
+			return result
+		}
 	}
 	defer tree.Release()
 	result.uncertain = tree.RootNode().HasErrorOrMissing() && !shellParseErrorsHandled(tree.RootNode(), lang, sourceBytes)
@@ -321,6 +337,123 @@ func heredocTailStart(source []byte, start uint32, delimiter string) (uint32, bo
 	return uint32(len(source)), false
 }
 
+// maskPowerShellArgumentWords works around grammar gaps for native-command
+// arguments such as -j8, -count=1, --pretty=oneline, -O2, and a bare --,
+// which PowerShell's argument mode passes through as literal text. Inside
+// such a dash word, characters the grammar trips over become letters of the
+// same length, so the word stays one bareword. Words with any character that
+// is meaningful to PowerShell (variables, subexpressions, quotes, operators,
+// splatting, escapes, or the --% stop-parsing token) are left untouched and
+// still fail closed. These are provisional replacements: after parsing,
+// restorePowerShellNonArguments restores anything outside a complete command
+// argument before the tree is used for classification.
+func maskPowerShellArgumentWords(source []byte) []byte {
+	var masked []byte
+	for start := 0; start < len(source); {
+		if source[start] != '-' || start == 0 || !isPowerShellArgumentSeparator(source[start-1]) || !followsPowerShellWord(source[:start]) {
+			start++
+			continue
+		}
+		end := start
+		for end < len(source) && !isPowerShellArgumentEnd(source[end]) {
+			end++
+		}
+		word := source[start:end]
+		if needsPowerShellArgumentMask(word) {
+			if masked == nil {
+				masked = slices.Clone(source)
+			}
+			for i := start; i < end; i++ {
+				if c := masked[i]; c != '-' && !isASCIILetter(c) {
+					masked[i] = 'x'
+				}
+			}
+			if strings.Trim(string(word), "-") == "" {
+				masked[start] = 'x' // a bare -- (end of parameters) becomes a plain word
+			}
+		}
+		start = end
+	}
+	if masked == nil {
+		return source
+	}
+	return masked
+}
+
+// Only a complete parameter or bareword directly in command_elements may
+// retain a replacement. In particular, quoted text, comments, command names,
+// expressions and dynamic arguments must retain their original parse.
+func restorePowerShellNonArguments(root *gotreesitter.Node, lang *gotreesitter.Language, original, parsed []byte) bool {
+	if slices.Equal(original, parsed) {
+		return false
+	}
+	allowed := make([]bool, len(parsed))
+	var visit func(*gotreesitter.Node)
+	visit = func(node *gotreesitter.Node) {
+		parent := node.Parent()
+		if (node.Type(lang) == "command_parameter" || node.Type(lang) == "generic_token") && parent != nil && parent.Type(lang) == "command_elements" {
+			start, end := int(node.StartByte()), int(node.EndByte())
+			if start > 0 && isPowerShellArgumentSeparator(original[start-1]) && (end == len(original) || isPowerShellArgumentEnd(original[end])) && needsPowerShellArgumentMask(original[start:end]) {
+				for i := start; i < end; i++ {
+					allowed[i] = true
+				}
+			}
+		}
+		for _, child := range node.Children() {
+			visit(child)
+		}
+	}
+	visit(root)
+	restored := false
+	for i := range parsed {
+		if parsed[i] != original[i] && !allowed[i] {
+			parsed[i] = original[i]
+			restored = true
+		}
+	}
+	return restored
+}
+
+func needsPowerShellArgumentMask(word []byte) bool {
+	if string(word) == "--%" {
+		return false
+	}
+	rest := strings.TrimLeft(string(word), "-")
+	if rest == "" {
+		return len(word) == 2
+	}
+	needs := false
+	for _, c := range []byte(rest) {
+		switch {
+		case isASCIILetter(c), c == '-', c == '_':
+		case c >= '0' && c <= '9', strings.IndexByte("=:.%+/~", c) >= 0:
+			needs = true
+		default:
+			return false
+		}
+	}
+	return needs
+}
+
+func isPowerShellArgumentSeparator(c byte) bool { return c == ' ' || c == '\t' }
+
+func isPowerShellArgumentEnd(c byte) bool {
+	return isPowerShellArgumentSeparator(c) || strings.IndexByte("\r\n;|)}", c) >= 0
+}
+
+func isASCIILetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+
+// followsPowerShellWord reports whether the dash word continues a command:
+// the previous non-blank character on its line must end another word.
+func followsPowerShellWord(before []byte) bool {
+	for i := len(before) - 1; i >= 0; i-- {
+		if !isPowerShellArgumentSeparator(before[i]) {
+			return strings.IndexByte(";|&({}\n\r=,", before[i]) < 0
+		}
+	}
+	return false
+}
+
 func shellParseErrorsHandled(node *gotreesitter.Node, lang *gotreesitter.Language, source []byte) bool {
 	if node.IsMissing() {
 		return false
@@ -388,9 +521,13 @@ func directPipelineIsDangerous(node *gotreesitter.Node, lang *gotreesitter.Langu
 			words, ok := splitShellWords(command)
 			if ok && len(words) > 0 {
 				cmd := commandBase(strings.Trim(words[0], `(){}[]`))
-				if downloadSeen && (cmd == "invoke-expression" || cmd == "iex") {
+				if downloadSeen && (cmd == "invoke-expression" || cmd == "iex" || cmd == "pwsh" || cmd == "powershell") {
 					return true
 				}
+			}
+			// Git for Windows and MSYS put POSIX shells on PATH.
+			if downloadSeen && isShellInterpreter(command) {
+				return true
 			}
 			downloadSeen = downloadSeen || isPowerShellDownloadCommand(command)
 			continue

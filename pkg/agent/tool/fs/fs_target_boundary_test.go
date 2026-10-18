@@ -3,6 +3,7 @@ package fs
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
@@ -38,6 +39,16 @@ func TestFileTargetRejectsReplacedAllowedRoot(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer search.Close()
+			// Windows refuses to rename a directory while a handle to it is
+			// open, so the search handle itself pins the allowed root there.
+			// Release it to exercise the per-operation targets.
+			pinned := runtime.GOOS == "windows"
+			if pinned {
+				if err := os.Rename(allowed, filepath.Join(base, "moved")); err == nil {
+					t.Fatal("renamed an allowed root held open by a search")
+				}
+				search.Close()
+			}
 			// Replace the authorized directory between target resolution and I/O.
 			if err := os.Rename(allowed, filepath.Join(base, "moved")); err != nil {
 				t.Fatal(err)
@@ -63,6 +74,9 @@ func TestFileTargetRejectsReplacedAllowedRoot(t *testing.T) {
 				t.Errorf("outside file was changed: %q, %v", data, err)
 			}
 			// Searches retain their original handle for the whole request.
+			if pinned {
+				return
+			}
 			if data, err := search.Root.ReadFile("note.txt"); err != nil || string(data) != "allowed" {
 				t.Errorf("search lost its original allowed root: %q, %v", data, err)
 			}

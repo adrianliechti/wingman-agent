@@ -317,3 +317,17 @@ func TestLimitPreservesTruncationMarkerWithLeadingWhitespace(t *testing.T) {
 		t.Fatalf("expected truncation marker on oversized whitespace-prefixed output, got suffix %q", got[max(0, len(got)-40):])
 	}
 }
+
+func configFor(event, matcher string, handler Handler) *Config {
+	group := []MatcherGroup{{Matcher: matcher, Hooks: []Handler{handler}}}
+	cfg := &Config{}
+	switch event {
+	case "PreToolUse":
+		cfg.Hooks.PreToolUse = group
+	case "UserPromptSubmit":
+		cfg.Hooks.UserPromptSubmit = group
+	case "SessionStart":
+		cfg.Hooks.SessionStart = group
+	}
+	return cfg
+}

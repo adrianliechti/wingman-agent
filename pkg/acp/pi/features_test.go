@@ -122,7 +122,7 @@ func TestPresentToolKeepsPathOnlyAsLocation(t *testing.T) {
 	if presentation.title != "Read file" || presentation.kind != acp.ToolKindRead {
 		t.Fatalf("presentation = %#v", presentation)
 	}
-	if len(presentation.locations) != 1 || presentation.locations[0].Path != "/workspace/pkg/main.go" ||
+	if len(presentation.locations) != 1 || presentation.locations[0].Path != filepath.Join("/workspace", "pkg", "main.go") ||
 		presentation.locations[0].Line == nil || *presentation.locations[0].Line != 12 {
 		t.Fatalf("locations = %#v", presentation.locations)
 	}
