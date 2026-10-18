@@ -22,6 +22,7 @@ type GitFileStatus struct {
 
 type GitStatus struct {
 	Branch    string          `json:"branch"`
+	Head      string          `json:"head"`
 	Upstream  string          `json:"upstream,omitempty"`
 	Ahead     int             `json:"ahead"`
 	Behind    int             `json:"behind"`
@@ -90,7 +91,7 @@ func (s *Server) handleGitStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := GitStatus{
-		Branch: status.Branch, Upstream: status.Upstream,
+		Branch: status.Branch, Head: status.Head, Upstream: status.Upstream,
 		Ahead: status.Ahead, Behind: status.Behind, HasRemote: status.HasRemote,
 		Files: make([]GitFileStatus, 0, len(status.Files)),
 	}
@@ -151,6 +152,30 @@ func (s *Server) handleGitHistory(w http.ResponseWriter, r *http.Request) {
 			Hash: commit.Hash, Parents: commit.Parents, Summary: commit.Summary,
 			Author: commit.Author, AuthoredAt: commit.AuthoredAt.Format(time.RFC3339), Refs: commit.Refs,
 		})
+	}
+	writeJSON(w, result)
+}
+
+func (s *Server) handleGitInsights(w http.ResponseWriter, r *http.Request) {
+	result, err := s.workspace.GitInsights(r.Context())
+	if err != nil {
+		writeGitError(w, err)
+		return
+	}
+	if result.Weeks == nil {
+		result.Weeks = []changes.WeekActivity{}
+	}
+	if result.AuthorWeeks == nil {
+		result.AuthorWeeks = []changes.AuthorSeries{}
+	}
+	if result.Authors == nil {
+		result.Authors = []changes.AuthorStat{}
+	}
+	if result.Modules == nil {
+		result.Modules = []changes.ModuleActivity{}
+	}
+	if result.Churn == nil {
+		result.Churn = []changes.ChurnStat{}
 	}
 	writeJSON(w, result)
 }

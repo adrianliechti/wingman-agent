@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/adrianliechti/wingman-agent/pkg/graph"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
@@ -15,7 +14,7 @@ func (s *Service) DefinitionLocations(ctx context.Context, filePath string, cont
 		func(session *lsp.Session, uri string) ([]lsp.Location, error) {
 			return session.DefinitionLocations(ctx, uri, line, column)
 		},
-		(*graph.Engine).Definitions,
+		s.TreeSitterDefinitions,
 	)
 }
 
@@ -32,7 +31,7 @@ func (s *Service) ImplementationLocations(ctx context.Context, filePath string, 
 		func(session *lsp.Session, uri string) ([]lsp.Location, error) {
 			return session.ImplementationLocations(ctx, uri, line, column)
 		},
-		(*graph.Engine).Implementations,
+		s.TreeSitterImplementations,
 	)
 }
 
@@ -43,7 +42,10 @@ func (s *Service) ReferenceLocations(ctx context.Context, filePath string, conte
 		func(session *lsp.Session, uri string) ([]lsp.Location, error) {
 			return session.ReferenceLocations(ctx, uri, line, column)
 		},
-		(*graph.Engine).References,
+		func(ctx context.Context, filePath string, content *string, line, column int) ([]lsp.Location, error) {
+			locations, _, err := s.TreeSitterReferences(ctx, filePath, content, line, column, true)
+			return locations, err
+		},
 	)
 }
 
@@ -54,7 +56,7 @@ func (s *Service) structuralLocations(
 	line, column int,
 	capability func(lsp.ServerCapabilities) any,
 	request func(*lsp.Session, string) ([]lsp.Location, error),
-	fallback func(*graph.Engine, context.Context, string, []byte, int, int) ([]graph.Location, error),
+	fallback func(context.Context, string, *string, int, int) ([]lsp.Location, error),
 ) ([]lsp.Location, error) {
 	if s.hasLSPServerFor(filePath) {
 		locations, supported, err := s.capabilityLocationRequest(ctx, filePath, content, capability, request)
@@ -65,7 +67,7 @@ func (s *Service) structuralLocations(
 			return nil, ctx.Err()
 		}
 	}
-	return s.graphLocations(ctx, filePath, content, line, column, fallback)
+	return fallback(ctx, filePath, content, line, column)
 }
 
 func (s *Service) capabilityLocationRequest(
@@ -119,7 +121,7 @@ func (s *Service) Hover(ctx context.Context, filePath string, content *string, l
 			return "", ctx.Err()
 		}
 	}
-	return s.graphHover(ctx, filePath, content, line, column)
+	return s.TreeSitterHover(ctx, filePath, content, line, column)
 }
 
 func (s *Service) CompletionItems(ctx context.Context, filePath string, content *string, line, column int, completionContext *lsp.CompletionContext) (lsp.CompletionList, error) {
@@ -145,7 +147,7 @@ func (s *Service) CompletionItems(ctx context.Context, filePath string, content 
 	if completionContext != nil && completionContext.TriggerCharacter != nil {
 		return lsp.CompletionList{Items: []lsp.CompletionItem{}}, nil
 	}
-	items, err := s.graphCompletionItems(ctx, filePath, content)
+	items, err := s.treeSitterCompletionItems(filePath, content)
 	return lsp.CompletionList{Items: items}, err
 }
 
@@ -294,7 +296,8 @@ func (s *Service) DocumentSymbols(ctx context.Context, filePath string, content 
 			return nil, nil, ctx.Err()
 		}
 	}
-	return s.graphDocumentSymbols(filePath, content)
+	symbols, err := s.TreeSitterDocumentSymbols(filePath, content)
+	return symbols, nil, err
 }
 
 func (s *Service) DocumentHighlights(ctx context.Context, filePath string, content *string, line, column int) ([]lsp.DocumentHighlight, error) {
@@ -317,7 +320,7 @@ func (s *Service) DocumentHighlights(ctx context.Context, filePath string, conte
 			return nil, ctx.Err()
 		}
 	}
-	return s.graphDocumentHighlights(filePath, content, line, column)
+	return s.treeSitterDocumentHighlights(filePath, content, line, column)
 }
 
 func (s *Service) FoldingRanges(ctx context.Context, filePath string, content *string) ([]lsp.FoldingRange, error) {
@@ -340,7 +343,7 @@ func (s *Service) FoldingRanges(ctx context.Context, filePath string, content *s
 			return nil, ctx.Err()
 		}
 	}
-	return s.graphFoldingRanges(filePath, content)
+	return s.treeSitterFoldingRanges(filePath, content)
 }
 
 func (s *Service) SemanticTokens(ctx context.Context, filePath string, content *string) ([]SemanticToken, error) {
@@ -365,7 +368,7 @@ func (s *Service) SemanticTokens(ctx context.Context, filePath string, content *
 			return nil, ctx.Err()
 		}
 	}
-	return s.graphSemanticTokens(filePath, content)
+	return s.treeSitterSemanticTokens(filePath, content)
 }
 
 func semanticTokenLegend(capabilities lsp.ServerCapabilities) lsp.SemanticTokensLegend {

@@ -18,4 +18,3 @@ bench/.uv-cache/
 bench/.uv-python/
 bench/.task/
 bench/jobs/
-/bench/codeintel/results/

@@ -103,24 +103,20 @@ test("reconnect invalidation covers every server query family", () => {
 	}
 });
 
-test("file events refresh graph status without reloading indexed graph data", () => {
+test("working tree events do not recompute insights", () => {
 	const client = new QueryClient();
 	client.setQueryData(queryKeys.files.tree(""), []);
-	client.setQueryData(queryKeys.insights.overview, {});
-	client.setQueryData(queryKeys.insights.modules, {});
+	client.setQueryData(queryKeys.gitInsights, {});
 
 	invalidateForServerMessage(client, { type: "files_changed" });
+	invalidateForServerMessage(client, { type: "diffs_changed" });
 
 	assert.equal(
 		client.getQueryState(queryKeys.files.tree(""))?.isInvalidated,
 		true,
 	);
 	assert.equal(
-		client.getQueryState(queryKeys.insights.overview)?.isInvalidated,
-		true,
-	);
-	assert.equal(
-		client.getQueryState(queryKeys.insights.modules)?.isInvalidated,
+		client.getQueryState(queryKeys.gitInsights)?.isInvalidated,
 		false,
 	);
 });

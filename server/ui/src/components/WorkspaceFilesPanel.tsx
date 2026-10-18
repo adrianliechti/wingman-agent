@@ -1,4 +1,4 @@
-import { Lightbulb, Search, X } from "lucide-react";
+import { Search, X } from "lucide-react";
 import type { ReactNode } from "react";
 import type { ServerMessage } from "../types/protocol";
 import type { TabDisposition } from "../types/tabs";
@@ -13,7 +13,6 @@ interface Props {
 	searchFocusKey: number;
 	onSearch: () => void;
 	onCloseSearch: () => void;
-	onOpenInsights: () => void;
 	onFileSelect: (path: string, disposition?: TabDisposition) => void;
 	onFileMove: (from: string, to: string) => void;
 	onOpenSearchResult: (
@@ -37,7 +36,6 @@ export function WorkspaceFilesPanel({
 	searchFocusKey,
 	onSearch,
 	onCloseSearch,
-	onOpenInsights,
 	onFileSelect,
 	onFileMove,
 	onOpenSearchResult,
@@ -62,15 +60,6 @@ export function WorkspaceFilesPanel({
 						{workspaceName || "Files"}
 					</span>
 				)}
-				<button
-					type="button"
-					onClick={onOpenInsights}
-					title="Open insights"
-					aria-label="Open insights"
-					className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-dim hover:bg-bg-hover hover:text-fg"
-				>
-					<Lightbulb size={12} />
-				</button>
 				<button
 					type="button"
 					onClick={searching ? onCloseSearch : onSearch}

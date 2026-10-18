@@ -1183,8 +1183,8 @@ func (s *sessionState) managedTools() []tool.Tool {
 }
 
 func collectManagedTools(ws *code.Workspace) []tool.Tool {
-	mcpTools, lspTools, graphTools := ws.ManagedTools()
-	return slices.Concat(mcpTools, lspTools, graphTools)
+	mcpTools, lspTools := ws.ManagedTools()
+	return slices.Concat(mcpTools, lspTools)
 }
 
 func planModeTools(tools []tool.Tool) []tool.Tool {

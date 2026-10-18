@@ -79,7 +79,11 @@ func TestLSPFixtureServer(t *testing.T) {
 				result = []any{map[string]any{"name": "FoundSymbol", "kind": 12, "location": map[string]any{"uri": "file:///fixture/one.mock", "range": map[string]any{"start": map[string]int{"line": 0, "character": 0}, "end": map[string]int{"line": 0, "character": 1}}}}}
 			}
 		case "textDocument/documentSymbol":
-			result = []any{}
+			if mode == "fail-symbols" {
+				rpcError = map[string]any{"code": -32603, "message": "fixture symbol lookup failed"}
+			} else {
+				result = []any{}
+			}
 		case "textDocument/codeAction":
 			result = []any{map[string]any{"title": "Run command", "kind": "quickfix", "command": map[string]any{"title": "Command", "command": "fixture.mutate"}}}
 		case "shutdown":
@@ -109,15 +113,19 @@ func fixtureService(t *testing.T, modes ...string) (*language.Service, string, [
 	var paths, logs []string
 	for i, mode := range modes {
 		name := fmt.Sprintf("fixture%d", i)
+		ext := name
+		if mode == "fail-symbols" {
+			ext = "go"
+		}
 		dir := filepath.Join(root, name)
 		os.MkdirAll(dir, 0700)
 		os.WriteFile(filepath.Join(dir, name+".marker"), nil, 0600)
-		path := filepath.Join(dir, "one."+name)
+		path := filepath.Join(dir, "one."+ext)
 		os.WriteFile(path, []byte("value\n"), 0600)
 		paths = append(paths, path)
 		log := filepath.Join(t.TempDir(), "rpc.log")
 		logs = append(logs, log)
-		definitions = append(definitions, lsp.ProjectDefinition{Name: name, Markers: []string{name + ".marker"}, Servers: []lsp.Server{{Name: name, Command: name, Args: []string{"-test.run=^TestLSPFixtureServer$", "--", "lsp-fixture", mode, log}, Languages: []string{name}, LanguageID: "fixture"}}})
+		definitions = append(definitions, lsp.ProjectDefinition{Name: name, Markers: []string{name + ".marker"}, Servers: []lsp.Server{{Name: name, Command: name, Args: []string{"-test.run=^TestLSPFixtureServer$", "--", "lsp-fixture", mode, log}, Languages: []string{ext}, LanguageID: "fixture"}}})
 	}
 	encoded, _ := json.Marshal(definitions)
 	registry, err := lsp.ParseRegistry(encoded)
@@ -128,7 +136,7 @@ func fixtureService(t *testing.T, modes ...string) (*language.Service, string, [
 	for i := range modes {
 		managed[fmt.Sprintf("fixture%d", i)] = executable
 	}
-	service := language.New(root, filepath.Join(t.TempDir(), "graph.json"), lsp.WithManagedTools(managed), lsp.WithRegistry(registry))
+	service := language.New(root, lsp.WithManagedTools(managed), lsp.WithRegistry(registry))
 	t.Cleanup(service.Close)
 	return service, paths[0], logs
 }
@@ -151,7 +159,7 @@ func TestUnsupportedCapabilityDoesNotIssueRPC(t *testing.T) {
 	service, path, logs := fixtureService(t, "good")
 	for _, operation := range []string{"findReferences", "goToTypeDefinition", "previewRename"} {
 		result, err := NewTools(service)[0].Execute(t.Context(), map[string]any{"operation": operation, "file_path": path, "line": 1, "column": 1, "new_name": "renamed"})
-		if err == nil || !strings.Contains(err.Error(), "unsupported") || !strings.Contains(err.Error(), "code_graph") {
+		if err == nil || !strings.Contains(err.Error(), "unsupported") || !strings.Contains(err.Error(), "grep") {
 			t.Fatalf("%s: %s %v", operation, result.Content, err)
 		}
 	}
@@ -214,6 +222,17 @@ func TestWorkspaceSymbolFailuresAreNotEmptySuccess(t *testing.T) {
 				t.Fatal("server failure reported as empty success")
 			}
 		})
+	}
+}
+
+func TestSymbolLookupFailureFallsBackToTreeSitter(t *testing.T) {
+	service, path, _ := fixtureService(t, "fail-symbols")
+	if err := os.WriteFile(path, []byte("package app\nfunc run() {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := NewTools(service)[0].Execute(t.Context(), map[string]any{"operation": "hover", "file_path": path, "symbol": "run"})
+	if err != nil || !strings.Contains(result.Content, "Tree-sitter fallback") || !strings.Contains(result.Content, "func run() {}") {
+		t.Fatalf("result = %q, err = %v, want syntax fallback after symbol RPC failure", result.Content, err)
 	}
 }
 

@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import {
+	ChartColumn,
 	ChevronDown,
 	ChevronRight,
 	ClipboardCopy,
@@ -36,11 +37,13 @@ export function GitHistoryPanel({
 	open,
 	disabled,
 	onCompare,
+	onOpenInsights,
 	onToggle,
 }: {
 	open: boolean;
 	disabled: boolean;
 	onCompare: OpenCompare;
+	onOpenInsights?: () => void;
 	onToggle: () => void;
 }) {
 	"use no memo"; // TanStack Virtual's imperative instance must not be compiler-memoized.
@@ -121,16 +124,29 @@ export function GitHistoryPanel({
 
 	return (
 		<div className="flex h-full min-h-0 flex-col border-t border-border-subtle bg-bg-surface/15">
-			<button
-				type="button"
-				onClick={onToggle}
-				aria-expanded={open}
-				className="flex h-8 w-full shrink-0 items-center gap-1.5 px-3 text-[10.5px] text-fg-dim hover:bg-bg-hover hover:text-fg-muted"
-			>
-				{open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-				<History size={11} />
-				<span>History</span>
-			</button>
+			<div className="flex h-8 w-full shrink-0 items-center hover:bg-bg-hover">
+				<button
+					type="button"
+					onClick={onToggle}
+					aria-expanded={open}
+					className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-[10.5px] text-fg-dim hover:text-fg-muted"
+				>
+					{open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+					<History size={11} />
+					<span>History</span>
+				</button>
+				{onOpenInsights && (
+					<button
+						type="button"
+						onClick={onOpenInsights}
+						title="Open insights"
+						aria-label="Open insights"
+						className="mr-1.5 grid h-6 w-6 shrink-0 place-items-center rounded text-fg-dim hover:bg-bg-active hover:text-fg"
+					>
+						<ChartColumn size={12} />
+					</button>
+				)}
+			</div>
 			{open && (
 				<div className="flex min-h-0 flex-1 flex-col border-t border-border-subtle">
 					{commits.length === 0 ? (

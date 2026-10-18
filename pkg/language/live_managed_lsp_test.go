@@ -99,7 +99,7 @@ func TestLiveManagedTyAndClangd(t *testing.T) {
 			if _, err := tools.Update(ctx, []devtools.Requirement{{Alternatives: []string{test.server}, Workspace: root}}); err != nil {
 				t.Fatal(err)
 			}
-			service := language.New(root, filepath.Join(t.TempDir(), "graph.json"), lsp.WithManagedTools(tools))
+			service := language.New(root, lsp.WithManagedTools(tools))
 			defer service.Close()
 			if test.server == "ty" {
 				logFile := filepath.Join(t.TempDir(), "ty.log")

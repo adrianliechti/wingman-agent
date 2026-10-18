@@ -7,7 +7,7 @@ import (
 )
 
 func TestGenerationTargetUsesBaseConfigRoleModel(t *testing.T) {
-	s := &Server{Config: &harness.Config{
+	cfg := &harness.Config{
 		Model: func() string { return "main-model" },
 		RoleModel: func(role string) (harness.ModelOption, bool) {
 			switch role {
@@ -22,13 +22,13 @@ func TestGenerationTargetUsesBaseConfigRoleModel(t *testing.T) {
 				return harness.ModelOption{}, false
 			}
 		},
-	}}
+	}
 
-	model, effort := s.generationTarget("utility")
+	model, effort := resolveGenerationTarget(cfg, "utility", "")
 	if model != "utility-model" || effort != "none" {
 		t.Fatalf("utility target = %q/%q", model, effort)
 	}
-	model, effort = s.generationTarget("")
+	model, effort = resolveGenerationTarget(cfg, "", "")
 	if model != "resolved-main" || effort != "" {
 		t.Fatalf("main target = %q/%q", model, effort)
 	}

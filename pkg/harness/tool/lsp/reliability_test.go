@@ -67,11 +67,11 @@ func TestPageValidation(t *testing.T) {
 func TestUnavailableLSPProvidesFallbackWithoutCleanResult(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "main.go")
-	os.WriteFile(file, []byte("package main\nfunc run() {}\n"), 0600)
-	service := language.New(root, filepath.Join(t.TempDir(), "graph.json"))
+	os.WriteFile(file, []byte("package main\nfunc run() {}\nfunc main() { run() }\n"), 0600)
+	service := language.New(root)
 	defer service.Close()
 	inspect := NewTools(service)[0]
-	for _, operation := range []string{"status", "diagnostics", "workspaceSymbol", "goToDefinition", "goToTypeDefinition", "previewRename", "codeActions"} {
+	for _, operation := range []string{"diagnostics", "goToTypeDefinition", "previewRename", "codeActions"} {
 		t.Run(operation, func(t *testing.T) {
 			result, err := inspect.Execute(t.Context(), map[string]any{"operation": operation, "file_path": "main.go", "symbol": "run", "new_name": "execute"})
 			message := result.Content
@@ -82,6 +82,32 @@ func TestUnavailableLSPProvidesFallbackWithoutCleanResult(t *testing.T) {
 				t.Fatalf("unhelpful fallback: %s", message)
 			}
 		})
+	}
+	for operation, want := range map[string]string{
+		"status":             "tree-sitter answers",
+		"workspaceSymbol":    "run (Function) - Line 2",
+		"documentSymbol":     "run (Function) - Line 2",
+		"goToDefinition":     "main.go:2:6",
+		"findReferences":     "main.go:3:15: func main() { run() }",
+		"hover":              "func run() {}",
+		"goToImplementation": "No implementations found",
+		"incomingCalls":      "main (Function) - main.go:3, call sites at lines 3",
+		"outgoingCalls":      "No outgoing calls found",
+	} {
+		t.Run("tree-sitter/"+operation, func(t *testing.T) {
+			result, err := inspect.Execute(t.Context(), map[string]any{"operation": operation, "file_path": "main.go", "symbol": "run"})
+			if err != nil || !strings.Contains(result.Content, want) || !strings.Contains(strings.ToLower(result.Content), "tree-sitter") {
+				t.Fatalf("result = %q, err = %v, want labeled tree-sitter result containing %q", result.Content, err, want)
+			}
+		})
+	}
+	result, err := inspect.Execute(t.Context(), map[string]any{"operation": "outgoingCalls", "file_path": "main.go", "symbol": "main"})
+	if err != nil || !strings.Contains(result.Content, "run (Function) - main.go:2, called at lines 3") {
+		t.Fatalf("outgoing calls = %q, %v", result.Content, err)
+	}
+	result, err = inspect.Execute(t.Context(), map[string]any{"operation": "workspaceSymbol", "query": "absentSymbol"})
+	if err != nil || !strings.Contains(result.Content, "No symbols found") || !strings.Contains(result.Content, "Tree-sitter fallback") {
+		t.Fatalf("empty syntax search = %q, %v, want a labeled empty result", result.Content, err)
 	}
 	if len(service.Manager().Activities()) != 0 {
 		t.Fatal("availability checks started a server")

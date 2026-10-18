@@ -156,14 +156,14 @@ func TestLSPToolResolvesSymbolOnLine(t *testing.T) {
 		t.Fatalf("expected symbol-not-on-line error, got: %v", err)
 	}
 
-	_, err = lspTool.Execute(context.Background(), map[string]any{
+	result, err := lspTool.Execute(context.Background(), map[string]any{
 		"operation": "hover",
 		"file_path": "main.go",
 		"line":      1,
 		"symbol":    "main",
 	})
-	if err == nil || !strings.Contains(err.Error(), "no LSP server found") {
-		t.Fatalf("expected symbol to resolve and fail at session, got: %v", err)
+	if err != nil || !strings.Contains(result.Content, "Tree-sitter fallback (no language server for this file)") {
+		t.Fatalf("expected symbol to resolve and fall back to tree-sitter, got: %q %v", result.Content, err)
 	}
 }
 
@@ -232,7 +232,7 @@ func newTestManager(t *testing.T) *language.Service {
 
 func newLanguageService(t *testing.T, root string) *language.Service {
 	t.Helper()
-	service := language.New(root, filepath.Join(t.TempDir(), "graph.json"))
+	service := language.New(root)
 	t.Cleanup(service.Close)
 	return service
 }

@@ -20,12 +20,57 @@ export type GitCommand =
 	| { type: "unstage"; paths: string[] };
 export type GitCommandType = GitCommand["type"];
 
+export interface GitWeekActivity {
+	week: string;
+	commits: number;
+}
+
+export interface GitAuthorStat {
+	name: string;
+	commits: number;
+	files: number;
+	last: string;
+}
+
+export interface GitChurnStat {
+	file: string;
+	commits: number;
+	authors: number;
+	recent_authors: { name: string; commits: number }[];
+}
+
+export interface GitAuthorSeries {
+	name: string;
+	weeks: number[];
+}
+
+export interface GitModuleActivity {
+	module: string;
+	commits: number;
+}
+
+export interface GitInsights {
+	commits: number;
+	total_authors: number;
+	since: string;
+	weeks: GitWeekActivity[];
+	author_weeks: GitAuthorSeries[];
+	punch: number[][];
+	authors: GitAuthorStat[];
+	modules: GitModuleActivity[];
+	churn: GitChurnStat[];
+}
+
 export function getGitStatus(signal?: AbortSignal): Promise<GitStatus> {
 	return fetchJSON<GitStatus>("/api/git/status", { signal });
 }
 
 export function getGitHistory(signal?: AbortSignal): Promise<GitCommit[]> {
 	return fetchJSON<GitCommit[]>("/api/git/history", { signal });
+}
+
+export function getGitInsights(signal?: AbortSignal): Promise<GitInsights> {
+	return fetchJSON<GitInsights>("/api/git/insights", { signal });
 }
 
 export function getGitBranches(signal?: AbortSignal): Promise<GitBranches> {

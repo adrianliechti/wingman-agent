@@ -594,7 +594,6 @@ func TestFallbackPlanContract(t *testing.T) {
 	for _, unwanted := range []string{
 		"use planning mode for",
 		"agent_type",
-		"`grep` / `glob` / `code_graph` / `lsp`",
 	} {
 		if strings.Contains(plan, unwanted) {
 			t.Errorf("fallback plan prompt contains unnecessary routing guidance %q", unwanted)

@@ -93,6 +93,7 @@ export interface GitFileStatus {
 
 export interface GitStatus {
 	branch: string;
+	head: string;
 	upstream?: string;
 	ahead: number;
 	behind: number;

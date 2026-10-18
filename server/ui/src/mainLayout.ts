@@ -11,7 +11,7 @@ export interface CenterTab {
 		| "terminal"
 		| "debug"
 		| "task"
-		| "graph";
+		| "insights";
 	label: string;
 	path?: string;
 	diffLayer?: DiffLayer;

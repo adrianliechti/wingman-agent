@@ -2,9 +2,11 @@ package lsp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,7 +27,8 @@ func lspTool(service *language.Service) tool.Tool {
 	return tool.Tool{
 		Name: "lsp",
 		Description: strings.Join([]string{
-			"Read-only language-server queries: exact definitions, types, references, implementations, calls, diagnostics and refactoring previews. Prefer for aliases and same-name symbols; use code_graph for multi-hop paths.",
+			"Read-only language-server queries: exact definitions, types, references, implementations, calls, diagnostics and refactoring previews. Prefer for aliases and same-name symbols.",
+			"Without a working server, definitions, references, hover, symbols, implementations and calls fall back to tree-sitter: syntactic, name-matched candidates, labeled as such; verify bindings before relying on them.",
 			"Call known files/symbols directly; no status preflight. Servers/capabilities may be unavailable.",
 			"Navigation, hover, calls and previewRename require file_path plus symbol or line+column. Results include source lines; definitions include snippets.",
 			"findReferences includes non-call uses; incomingCalls/outgoingCalls report calls. Rename/code-action previews never modify files or execute commands; apply through edit.",
@@ -130,7 +133,9 @@ func lspTool(service *language.Service) tool.Tool {
 				return tool.Result{}, err
 			}
 
-			runPosition := func(fn func(session *lsp.Session, uri string, line, column int) (string, error)) (string, error) {
+			// fallback, when non-nil, answers from tree-sitter if the server
+			// is missing, lacks the capability or fails the request.
+			runPosition := func(fn func(session *lsp.Session, uri string, line, column int) (string, error), fallback func(path string, line, column int) (string, error)) (string, error) {
 				path, err := requiredFileArg(manager.WorkingDir(), args, "file_path")
 				if err != nil {
 					return "", err
@@ -140,28 +145,39 @@ func lspTool(service *language.Service) tool.Tool {
 				if err != nil {
 					return "", err
 				}
+				line, _, _ := optionalPositiveInt(args, "line")
 
-				session, uri, err := openFile(ctx, manager, path)
-				if err != nil {
-					return "", err
+				var content string
+				session, uri, lspErr := openFile(ctx, manager, path)
+				if lspErr == nil {
+					lspErr = requireCapability(session.Capabilities(), operation)
 				}
-				if err := requireCapability(session.Capabilities(), operation); err != nil {
-					return "", err
+				if lspErr == nil {
+					position := pos
+					if lookup != "" {
+						position, lspErr = symbolPosition(ctx, session, uri, lookup, line)
+					}
+					if lspErr == nil {
+						if content, err = fn(session, uri, int(position.Line), int(position.Character)); err == nil {
+							return content, nil
+						}
+						lspErr = fmt.Errorf("%s failed: %w. %s", operation, err, fallbackAdvice)
+					}
+				}
+				if fallback == nil || ctx.Err() != nil || !language.TreeSitterSupported(path) {
+					return content, lspErr
 				}
 
 				if lookup != "" {
-					line, _, _ := optionalPositiveInt(args, "line")
-					pos, err = symbolPosition(ctx, session, uri, lookup, line)
-					if err != nil {
+					if pos, err = treeSitterSymbolPosition(ctx, service, path, lookup, line); err != nil {
 						return "", err
 					}
 				}
-
-				content, err := fn(session, uri, int(pos.Line), int(pos.Character))
+				content, err = fallback(path, int(pos.Line), int(pos.Character))
 				if err != nil {
-					return content, fmt.Errorf("%s failed: %w. %s", operation, err, fallbackAdvice)
+					return "", fmt.Errorf("%s tree-sitter fallback failed: %w. %s", operation, err, fallbackAdvice)
 				}
-				return content, nil
+				return treeSitterNote(manager, path, lspErr) + content, nil
 			}
 
 			switch operation {
@@ -183,7 +199,7 @@ func lspTool(service *language.Service) tool.Tool {
 					}
 					preview, err = workspaceEditPreview(manager, edit, started)
 					return preview.Content, err
-				})
+				}, nil)
 				return preview, err
 			case "diagnostics":
 				path, _ := args["file_path"].(string)
@@ -216,48 +232,89 @@ func lspTool(service *language.Service) tool.Tool {
 			case "workspaceSymbol":
 				query, _ := args["query"].(string)
 				symbols, workspaceSymbols, err := service.WorkspaceSymbols(ctx, query)
-				if err != nil && len(symbols)+len(workspaceSymbols) == 0 {
-					return tool.Result{}, fmt.Errorf("workspace symbol search unavailable/incomplete: %w. %s", err, fallbackAdvice)
+				// Files without a server (or every file, when no server
+				// answered) are covered syntactically.
+				serversFailed := err != nil && len(symbols)+len(workspaceSymbols) == 0
+				syntactic, truncated, syntaxErr := service.TreeSitterWorkspaceSymbols(ctx, query, !serversFailed)
+				if ctx.Err() != nil {
+					return tool.Result{}, ctx.Err()
 				}
-				for _, symbol := range symbols {
+				for _, symbol := range slices.Concat(symbols, syntactic) {
 					location := symbol.Location
 					converted := lsp.WorkspaceSymbol{Location: &location}
 					converted.Name, converted.Kind = symbol.Name, symbol.Kind
 					workspaceSymbols = append(workspaceSymbols, converted)
 				}
-				if len(workspaceSymbols) > 0 {
-					content := formatWorkspaceSymbols(workspaceSymbols, manager.WorkingDir(), page)
-					if err != nil {
-						content = "Partial workspace results: " + err.Error() + ". " + fallbackAdvice + "\n\n" + content
-					}
-					return tool.Text(content), nil
+				if len(workspaceSymbols) == 0 && (syntaxErr != nil || serversFailed && len(manager.Projects()) > 0) {
+					return tool.Result{}, fmt.Errorf("workspace symbol search unavailable/incomplete: %w. %s", errors.Join(err, syntaxErr), fallbackAdvice)
 				}
-				return tool.Text("No symbols found"), nil
+				var notes []string
+				switch {
+				case serversFailed:
+					notes = append(notes, fmt.Sprintf("Tree-sitter fallback (language servers: %s): syntactic, name-matched results.", lspFailure(err)))
+				case err != nil:
+					notes = append(notes, "Partial workspace results: "+err.Error()+". "+fallbackAdvice)
+				}
+				if len(syntactic) > 0 && !serversFailed {
+					notes = append(notes, fmt.Sprintf("%d symbols from files without a language server come from tree-sitter (syntactic).", len(syntactic)))
+				}
+				if truncated {
+					notes = append(notes, "Tree-sitter matches were capped; refine the query.")
+				}
+				content := "No symbols found"
+				if len(workspaceSymbols) > 0 {
+					content = formatWorkspaceSymbols(workspaceSymbols, manager.WorkingDir(), page)
+				}
+				if len(notes) > 0 {
+					content = strings.Join(notes, "\n") + "\n\n" + content
+				}
+				return tool.Text(content), nil
 			case "documentSymbol":
 				path, err := requiredFileArg(manager.WorkingDir(), args, "file_path")
 				if err != nil {
 					return tool.Result{}, err
 				}
-				session, uri, err := openFile(ctx, manager, path)
+				session, uri, lspErr := openFile(ctx, manager, path)
+				if lspErr == nil {
+					lspErr = requireCapability(session.Capabilities(), "documentSymbol")
+				}
+				if lspErr == nil {
+					result, err := session.DocumentSymbols(ctx, uri)
+					documentSymbols, symbols := language.DocumentSymbolsFromProtocol(result)
+					if err == nil {
+						if len(symbols) > 0 {
+							return tool.Text(formatSymbolInformation(symbols, manager.WorkingDir(), page)), nil
+						}
+						if len(documentSymbols) > 0 {
+							return tool.Text(formatDocumentSymbolPage(documentSymbols, path, manager.WorkingDir(), page)), nil
+						}
+						return tool.Text("No symbols found"), nil
+					}
+					lspErr = err
+				}
+				if ctx.Err() != nil || !language.TreeSitterSupported(path) {
+					return tool.Result{}, errors.Join(lspErr, ctx.Err())
+				}
+				documentSymbols, err := service.TreeSitterDocumentSymbols(path, nil)
 				if err != nil {
 					return tool.Result{}, err
 				}
-				if err := requireCapability(session.Capabilities(), "documentSymbol"); err != nil {
-					return tool.Result{}, err
-				}
-				result, err := session.DocumentSymbols(ctx, uri)
-				documentSymbols, symbols := language.DocumentSymbolsFromProtocol(result)
-				if err != nil {
-					return tool.Result{}, err
-				}
-				if len(symbols) > 0 {
-					return tool.Text(formatSymbolInformation(symbols, manager.WorkingDir(), page)), nil
-				}
+				content := "No symbols found"
 				if len(documentSymbols) > 0 {
-					return tool.Text(formatDocumentSymbolPage(documentSymbols, path, manager.WorkingDir(), page)), nil
+					content = formatDocumentSymbolPage(documentSymbols, path, manager.WorkingDir(), page)
 				}
-				return tool.Text("No symbols found"), nil
+				return tool.Text(treeSitterNote(manager, path, lspErr) + content), nil
 			case "goToDefinition", "goToTypeDefinition":
+				var fallback func(string, int, int) (string, error)
+				if operation == "goToDefinition" {
+					fallback = func(path string, line, column int) (string, error) {
+						locations, err := service.TreeSitterDefinitions(ctx, path, nil, line, column)
+						if err != nil || len(locations) == 0 {
+							return "No definition found", err
+						}
+						return formatDefinitions(locations, manager.WorkingDir(), page), nil
+					}
+				}
 				content, err := runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
 					var locations []lsp.Location
 					var err error
@@ -270,7 +327,7 @@ func lspTool(service *language.Service) tool.Tool {
 						return "No definition found", err
 					}
 					return formatDefinitions(locations, manager.WorkingDir(), page), nil
-				})
+				}, fallback)
 				return tool.Text(content), err
 			case "findReferences":
 				mode := "locations"
@@ -290,12 +347,36 @@ func lspTool(service *language.Service) tool.Tool {
 						return "No references found", err
 					}
 					return formatLocations("References", locations, manager.WorkingDir(), page), nil
+				}, func(path string, line, column int) (string, error) {
+					locations, truncated, err := service.TreeSitterReferences(ctx, path, nil, line, column, include)
+					if err != nil {
+						return "", err
+					}
+					var content string
+					switch {
+					case mode == "count":
+						content = formatReferenceCounts(locations, manager.WorkingDir(), include, page)
+					case len(locations) == 0:
+						return "No references found", nil
+					default:
+						content = formatLocations("References", locations, manager.WorkingDir(), page)
+					}
+					if truncated {
+						content = fmt.Sprintf("Only the first %d matches were collected.\n", len(locations)) + content
+					}
+					return content, nil
 				})
 				return tool.Text(content), err
 			case "hover":
 				content, err := runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
 					hover, err := s.Hover(ctx, uri, line, column)
 					content := language.HoverText(hover)
+					if err == nil && content == "" {
+						content = "No hover information available"
+					}
+					return content, err
+				}, func(path string, line, column int) (string, error) {
+					content, err := service.TreeSitterHover(ctx, path, nil, line, column)
 					if err == nil && content == "" {
 						content = "No hover information available"
 					}
@@ -307,6 +388,12 @@ func lspTool(service *language.Service) tool.Tool {
 					locations, err := s.ImplementationLocations(ctx, uri, line, column)
 					if err != nil || len(locations) == 0 {
 						return "No implementations found", err
+					}
+					return formatLocations("Implementations", locations, manager.WorkingDir(), page), nil
+				}, func(path string, line, column int) (string, error) {
+					locations, err := service.TreeSitterImplementations(ctx, path, nil, line, column)
+					if err != nil || len(locations) == 0 {
+						return "No implementations found (only explicit extends/implements/embedding is visible syntactically)", err
 					}
 					return formatLocations("Implementations", locations, manager.WorkingDir(), page), nil
 				})
@@ -333,6 +420,23 @@ func lspTool(service *language.Service) tool.Tool {
 							return "No outgoing calls found", err
 						}
 						content = formatOutgoingCalls(calls, manager.WorkingDir(), page)
+					}
+					return content, nil
+				}, func(path string, line, column int) (string, error) {
+					if operation == "incomingCalls" {
+						calls, err := service.TreeSitterIncomingCalls(ctx, path, line, column)
+						if err != nil || len(calls) == 0 {
+							return "No incoming calls found", err
+						}
+						return formatIncomingCalls(calls, manager.WorkingDir(), page), nil
+					}
+					calls, unresolved, err := service.TreeSitterOutgoingCalls(ctx, path, line, column)
+					if err != nil || len(calls)+len(unresolved) == 0 {
+						return "No outgoing calls found", err
+					}
+					content := formatOutgoingCalls(calls, manager.WorkingDir(), page)
+					if len(unresolved) > 0 {
+						content += "\nNo workspace declaration (library or dynamic calls): " + strings.Join(unresolved, ", ") + "\n"
 					}
 					return content, nil
 				})

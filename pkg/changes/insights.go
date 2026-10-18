@@ -1,7 +1,8 @@
-package graph
+package changes
 
 import (
 	"context"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -72,8 +73,10 @@ type GitInsightsResult struct {
 	Churn        []ChurnStat      `json:"churn"`
 }
 
-func (e *Engine) GitInsights(ctx context.Context) (GitInsightsResult, error) {
-	return gitInsights(ctx, e.root)
+// Insights summarizes recent repository activity: weekly commits, authors,
+// active modules and the most frequently changed files.
+func (m *Manager) Insights(ctx context.Context) (GitInsightsResult, error) {
+	return gitInsights(ctx, m.workingDir)
 }
 
 func topPathSegment(file string) string {
@@ -298,4 +301,43 @@ func gitInsights(ctx context.Context, root string) (GitInsightsResult, error) {
 	}
 
 	return res, nil
+}
+
+// commitFiles returns the set of paths changed by a commit relative to its
+// first parent (the full file set for a root commit).
+func commitFiles(c *object.Commit) (map[string]bool, error) {
+	cur, err := c.Tree()
+	if err != nil {
+		return nil, err
+	}
+
+	files := map[string]bool{}
+	if c.NumParents() == 0 {
+		err := cur.Files().ForEach(func(f *object.File) error {
+			files[filepath.ToSlash(f.Name)] = true
+			return nil
+		})
+		return files, err
+	}
+
+	parent, err := c.Parent(0)
+	if err != nil {
+		return nil, err
+	}
+	parentTree, err := parent.Tree()
+	if err != nil {
+		return nil, err
+	}
+	changes, err := parentTree.Diff(cur)
+	if err != nil {
+		return nil, err
+	}
+	for _, ch := range changes {
+		name := ch.To.Name
+		if name == "" {
+			name = ch.From.Name
+		}
+		files[filepath.ToSlash(name)] = true
+	}
+	return files, nil
 }

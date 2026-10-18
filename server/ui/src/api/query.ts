@@ -45,19 +45,9 @@ export const queryKeys = {
 				reference,
 			] as const,
 	},
-	insights: {
-		all: ["server", "insights"] as const,
-		overview: ["server", "insights", "overview"] as const,
-		modules: ["server", "insights", "modules"] as const,
-		activity: ["server", "insights", "activity"] as const,
-		summaries: (modules: readonly string[], cachedOnly: boolean) =>
-			["server", "insights", "summaries", cachedOnly, ...modules] as const,
-		symbolSearch: (options: object) =>
-			["server", "insights", "symbol-search", options] as const,
-		contentSearch: (options: object) =>
-			["server", "insights", "content-search", options] as const,
-		symbol: (focus: object) => ["server", "insights", "symbol", focus] as const,
-	},
+	// Outside git.all: working-tree changes do not alter commit history, and
+	// recomputing the history walk on every edit would be wasted work.
+	gitInsights: ["server", "git-insights"] as const,
 	diffs: {
 		all: ["server", "diffs"] as const,
 		list: (layer?: string, path?: string) =>
@@ -166,9 +156,6 @@ export function invalidateForServerMessage(
 			break;
 		case "files_changed":
 			invalidate(queryKeys.files.all);
-			// The indexed graph is unchanged until reindexing, but its coverage
-			// status must report that the source tree is now stale.
-			invalidate(queryKeys.insights.overview);
 			break;
 		case "tasks_changed":
 			invalidate(

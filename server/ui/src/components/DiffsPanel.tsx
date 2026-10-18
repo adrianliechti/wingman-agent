@@ -74,6 +74,7 @@ interface Props {
 		mode: CompareMode,
 		disposition?: TabDisposition,
 	) => void;
+	onOpenInsights?: () => void;
 	onOpenFile?: (path: string, disposition?: TabDisposition) => void;
 }
 
@@ -92,6 +93,7 @@ interface GitMenuState {
 
 const EMPTY_GIT_STATUS: GitStatus = {
 	branch: "",
+	head: "",
 	ahead: 0,
 	behind: 0,
 	has_remote: false,
@@ -104,6 +106,7 @@ export function DiffsPanel({
 	canInit = false,
 	onOpenDiff,
 	onOpenCompare,
+	onOpenInsights,
 	onOpenFile,
 }: Props) {
 	const queryClient = useQueryClient();
@@ -233,6 +236,7 @@ export function DiffsPanel({
 					onRequest={request}
 					onOpenDiff={onOpenDiff}
 					onOpenCompare={onOpenCompare}
+					onOpenInsights={onOpenInsights}
 					onOpenFile={onOpenFile}
 					onCommit={async () => {
 						if (await request({ type: "commit", message })) updateMessage("");
@@ -414,6 +418,7 @@ function GitChanges({
 	onRequest,
 	onOpenDiff,
 	onOpenCompare,
+	onOpenInsights,
 	onOpenFile,
 	onCommit,
 	onGenerateMessage,
@@ -438,6 +443,7 @@ function GitChanges({
 		mode: CompareMode,
 		disposition?: TabDisposition,
 	) => void;
+	onOpenInsights?: () => void;
 	onOpenFile?: (path: string, disposition?: TabDisposition) => void;
 	onCommit: () => Promise<void>;
 	onGenerateMessage: () => Promise<void>;
@@ -795,6 +801,7 @@ function GitChanges({
 							open={historyOpen}
 							disabled={disabled}
 							onCompare={onOpenCompare}
+							onOpenInsights={onOpenInsights}
 							onToggle={toggleHistory}
 						/>
 					</Panel>

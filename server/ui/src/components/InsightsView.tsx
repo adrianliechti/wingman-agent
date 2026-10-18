@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
-import { fetchGraphInsights } from "../../api/insights";
-import { queryKeys } from "../../api/query";
+import { getGitInsights, getGitStatus } from "../api/git";
+import { queryKeys } from "../api/query";
 
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -83,19 +83,26 @@ function BarRow({
 	);
 }
 
-export function ActivityView({
+export function InsightsView({
 	onOpenFile,
 }: {
 	onOpenFile: (path: string, line?: number) => void;
 }) {
+	const headQuery = useQuery({
+		queryKey: queryKeys.git.status,
+		queryFn: ({ signal }) => getGitStatus(signal),
+		select: (status) => status.head,
+	});
 	const query = useQuery({
-		queryKey: queryKeys.insights.activity,
-		queryFn: ({ signal }) => fetchGraphInsights(signal),
+		queryKey: [...queryKeys.gitInsights, headQuery.data],
+		enabled: headQuery.isSuccess,
+		queryFn: ({ signal }) => getGitInsights(signal),
 	});
 	const insights = query.data ?? null;
-	const error = query.error
-		? query.error instanceof Error
-			? query.error.message
+	const queryError = headQuery.error ?? query.error;
+	const error = queryError
+		? queryError instanceof Error
+			? queryError.message
 			: "Load failed"
 		: null;
 

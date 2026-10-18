@@ -17,6 +17,7 @@ import {
 import {
 	Bot,
 	Bug,
+	ChartColumn,
 	Compass,
 	Code2,
 	Eye,
@@ -30,7 +31,6 @@ import {
 	GitFork,
 	Globe2,
 	History,
-	Lightbulb,
 	Loader2,
 	type LucideIcon,
 	MessageSquare,
@@ -133,7 +133,7 @@ import type {
 	EditorSelectionContext,
 	FileTabHandle,
 } from "./components/FileTab";
-import { InsightsTab } from "./components/insights/InsightsTab";
+import { InsightsView } from "./components/InsightsView";
 import { ProblemsPanel } from "./components/ProblemsPanel";
 import { TasksPanel } from "./components/TasksPanel";
 import { TaskTab } from "./components/TaskTab";
@@ -375,8 +375,6 @@ export default function App() {
 	useServerQueryInvalidation(subscribe, connected);
 	const queryClient = useQueryClient();
 	const toast = useToast();
-	const createSessionMutation = () =>
-		client.create(agentId, crypto.randomUUID());
 	const {
 		documents,
 		dirtyPaths,
@@ -1132,8 +1130,11 @@ export default function App() {
 		);
 	};
 
-	const openInsightsTab = () => {
-		showCenterTab({ id: "graph", type: "graph", label: "Insights" }, "keep");
+	const openInsights = () => {
+		showCenterTab(
+			{ id: "insights", type: "insights", label: "Insights" },
+			"keep",
+		);
 	};
 	const openDebugLauncher = (seed: DebugLauncherSeed) => {
 		setDebugLauncher({ ...seed });
@@ -1979,29 +1980,6 @@ export default function App() {
 		intent: TurnInputIntent = "follow_up",
 	): Promise<boolean> => sendForSession(sessionId, text, files, images, intent);
 
-	const startInsightsAnalysis = async (command: string) => {
-		let sent = false;
-		let failure: unknown = null;
-		try {
-			const id = await createSessionMutation();
-			openChatTab(id, "keep");
-			sent = await sendChat(id, command);
-		} catch (error) {
-			failure = error;
-		}
-		if (sent) return;
-		toast({
-			title: "Could not start analysis",
-			description:
-				failure === null
-					? "The chat connection is not ready"
-					: failure instanceof Error
-						? failure.message
-						: String(failure),
-			tone: "error",
-		});
-	};
-
 	const focusChat = () => {
 		const tab =
 			tabs.find((t) => t.type === "chat" && t.sessionId === currentSessionId) ??
@@ -2332,6 +2310,16 @@ export default function App() {
 					},
 				]
 			: []),
+		...(capabilities?.git
+			? [
+					{
+						id: "insights",
+						label: "Show insights",
+						icon: <ChartColumn size={12} className="text-fg-dim shrink-0" />,
+						run: openInsights,
+					},
+				]
+			: []),
 		...(showTerminal
 			? [
 					...(terminalShells.length === 0
@@ -2389,12 +2377,6 @@ export default function App() {
 			hint: IS_MAC ? "⇧⌘F" : "Ctrl+Shift+F",
 			icon: <Search size={12} className="text-fg-dim shrink-0" />,
 			run: showWorkspaceSearch,
-		},
-		{
-			id: "code-graph",
-			label: "Open insights",
-			icon: <Lightbulb size={12} className="text-fg-dim shrink-0" />,
-			run: openInsightsTab,
 		},
 		{
 			id: "show-files",
@@ -2621,12 +2603,11 @@ export default function App() {
 				/>
 			);
 		}
-		if (tab.type === "graph") {
+		if (tab.type === "insights") {
 			return (
-				<InsightsTab
+				<InsightsView
 					key={tab.id}
-					onStartAnalysis={(command) => void startInsightsAnalysis(command)}
-					onOpenFile={(path, line, column) => openFile(path, line, column)}
+					onOpenFile={(path, line) => openFile(path, line)}
 				/>
 			);
 		}
@@ -3037,6 +3018,7 @@ export default function App() {
 						canInit={capabilities?.git_init ?? false}
 						onOpenDiff={openDiff}
 						onOpenCompare={openCompare}
+						onOpenInsights={openInsights}
 						onOpenFile={(path, disposition) =>
 							openFile(path, undefined, undefined, undefined, disposition)
 						}
@@ -3057,7 +3039,6 @@ export default function App() {
 						searchFocusKey={searchFocusKey}
 						onSearch={showWorkspaceSearch}
 						onCloseSearch={() => setWorkspaceSearching(false)}
-						onOpenInsights={openInsightsTab}
 						onFileSelect={(path, disposition) =>
 							openFile(path, undefined, undefined, undefined, disposition)
 						}

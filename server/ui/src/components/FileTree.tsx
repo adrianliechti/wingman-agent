@@ -192,12 +192,7 @@ export function FileTree({ onFileSelect, onFileMove, platform }: Props) {
 	}, [rootQuery.error, toast]);
 
 	const refresh = async () => {
-		await Promise.all([
-			queryClient.invalidateQueries({ queryKey: queryKeys.files.all }),
-			queryClient.invalidateQueries({
-				queryKey: queryKeys.insights.overview,
-			}),
-		]);
+		await queryClient.invalidateQueries({ queryKey: queryKeys.files.all });
 	};
 
 	const toggleDir = async (path: string) => {

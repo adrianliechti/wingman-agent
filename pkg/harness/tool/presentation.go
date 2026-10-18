@@ -73,12 +73,6 @@ var presentationSpecs = indexPresentationSpecs([]presentationSpec{
 		path:    []string{"file_path"}, line: "line",
 	},
 	{
-		names: []string{"code_graph", "Inspect code graph"},
-		title: "Inspect code graph", kind: "read",
-		// file is usually a substring filter or module, not a navigable file.
-		primary: []string{"query", "pattern", "symbol", "operation"},
-	},
-	{
 		names: []string{"view_image", "View image"},
 		title: "View image", kind: "read", omit: []string{"file_path", "path"},
 		path: []string{"file_path", "path"},

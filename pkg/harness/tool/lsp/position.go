@@ -55,30 +55,40 @@ func positionOfSymbolOnLine(path string, line int, symbol string) (lsp.Position,
 func symbolPosition(ctx context.Context, session *lsp.Session, uri, name string, line int) (lsp.Position, error) {
 	path, _ := fileuri.Path(uri)
 	var result lsp.DocumentSymbolResult
-	var err error
 	if lsp.CapabilityEnabled(session.Capabilities().DocumentSymbolProvider) {
+		var err error
 		result, err = session.DocumentSymbols(ctx, uri)
 		if err != nil {
 			return lsp.Position{}, fmt.Errorf("symbol lookup failed: %w. %s", err, fallbackAdvice)
 		}
 	}
 	documentSymbols, symbols := language.DocumentSymbolsFromProtocol(result)
-	if err == nil {
-		var candidates []symbolCandidate
-		for _, symbol := range symbols {
-			candidates = append(candidates, symbolCandidate{name: symbol.Name, qualified: symbol.Name, position: symbol.Location.Range.Start})
-		}
-		collectSymbolCandidates(documentSymbols, "", &candidates)
-		if line > 0 {
-			candidates = slices.DeleteFunc(candidates, func(c symbolCandidate) bool { return int(c.position.Line)+1 != line })
-		}
-		matched, matchErr := matchSymbol(candidates, name)
-		if matchErr != nil {
-			return lsp.Position{}, matchErr
-		}
-		if len(matched) == 1 {
-			return snapToIdentifier(path, matched[0]), nil
-		}
+	return declarationPosition(ctx, path, documentSymbols, symbols, name, line)
+}
+
+func treeSitterSymbolPosition(ctx context.Context, service *language.Service, path, name string, line int) (lsp.Position, error) {
+	documentSymbols, err := service.TreeSitterDocumentSymbols(path, nil)
+	if err != nil {
+		return lsp.Position{}, err
+	}
+	return declarationPosition(ctx, path, documentSymbols, nil, name, line)
+}
+
+func declarationPosition(ctx context.Context, path string, documentSymbols []lsp.DocumentSymbol, symbols []lsp.SymbolInformation, name string, line int) (lsp.Position, error) {
+	var candidates []symbolCandidate
+	for _, symbol := range symbols {
+		candidates = append(candidates, symbolCandidate{name: symbol.Name, qualified: symbol.Name, position: symbol.Location.Range.Start})
+	}
+	collectSymbolCandidates(documentSymbols, "", &candidates)
+	if line > 0 {
+		candidates = slices.DeleteFunc(candidates, func(c symbolCandidate) bool { return int(c.position.Line)+1 != line })
+	}
+	matched, err := matchSymbol(candidates, name)
+	if err != nil {
+		return lsp.Position{}, err
+	}
+	if len(matched) == 1 {
+		return snapToIdentifier(path, matched[0]), nil
 	}
 	if err := ctx.Err(); err != nil {
 		return lsp.Position{}, err

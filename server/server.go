@@ -90,9 +90,6 @@ type Server struct {
 	tabRequestID     uint64
 	tabRequestCancel context.CancelFunc
 
-	summariesMu sync.Mutex
-	summaries   *summaryStore
-
 	files           *watch.Monitor
 	skillFiles      *watch.Monitor
 	prevGit         bool
@@ -363,6 +360,7 @@ func (s *Server) registerRoutes(r chi.Router) {
 			r.Get("/branches", s.handleGitBranches)
 			r.Post("/fetch", s.handleGitFetch)
 			r.Get("/history", s.handleGitHistory)
+			r.Get("/insights", s.handleGitInsights)
 			r.Get("/compare", s.handleGitCompare)
 			r.Post("/branches", s.handleGitCreateBranch)
 			r.Post("/checkout", s.handleGitCheckoutBranch)
@@ -383,17 +381,6 @@ func (s *Server) registerRoutes(r chi.Router) {
 			r.Get("/{id}", s.handleTerminal)
 			r.Delete("/{id}", s.handleDeleteTerminal)
 			r.HandleFunc("/{id}/ws", s.handleTerminalWebSocket)
-		})
-
-		r.Route("/graph", func(r chi.Router) {
-			r.Get("/overview", s.handleGraphOverview)
-			r.Post("/index", s.handleGraphIndex)
-			r.Get("/search", s.handleGraphSearch)
-			r.Post("/content-search", s.handleGraphContentSearch)
-			r.Get("/symbol", s.handleGraphSymbol)
-			r.Get("/modules", s.handleGraphModules)
-			r.Get("/insights", s.handleGraphInsights)
-			r.Post("/summaries", s.handleGraphSummaries)
 		})
 
 		r.Route("/lsp", func(r chi.Router) {

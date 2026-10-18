@@ -27,9 +27,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
-	"github.com/adrianliechti/wingman-agent/pkg/graph"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
-	graphtool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/graph"
 	lsptool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/lsp"
 	mcptool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
@@ -86,7 +84,6 @@ type Workspace struct {
 	debugRegistry    *debugadapter.Registry
 	mcpToolsByServer map[string][]tool.Tool
 	lspTools         []tool.Tool
-	graphTools       []tool.Tool
 
 	mcpCatalogMu      sync.Mutex
 	mcpTrustDecisions map[string]bool
@@ -286,12 +283,10 @@ func (w *Workspace) WarmUp() {
 		for server, options := range debugRegistry.ServerInitializations() {
 			languageOptions = append(languageOptions, lsp.WithServerInitializationOptions(server, options))
 		}
-		languageService := language.New(w.RootPath, filepath.Join(projectGraphDir(w.RootPath), "graph.json"), languageOptions...)
+		languageService := language.New(w.RootPath, languageOptions...)
 		dapManager := dap.NewManager(w.RootPath, w.DevTools, debugRegistry.Descriptors()...)
 		dapManager.SetAdapterConnector(debugadapter.NewConnector(languageService))
-		graphEngine := languageService.Graph()
 		lspTools := lsptool.NewTools(languageService)
-		graphTools := graphtool.NewTools(graphEngine)
 
 		lspTools = w.protectLSPTools(lspTools)
 
@@ -314,7 +309,6 @@ func (w *Workspace) WarmUp() {
 		w.DAP = dapManager
 		w.debugRegistry = debugRegistry
 		w.lspTools = lspTools
-		w.graphTools = graphTools
 		w.warmed = true
 		w.mu.Unlock()
 		w.dapLifeMu.Unlock()
@@ -699,7 +693,6 @@ func (w *Workspace) Close() {
 	w.mcpToolsByServer = nil
 	w.mcpRefreshCancel = nil
 	w.lspTools = nil
-	w.graphTools = nil
 	w.mu.Unlock()
 	for _, update := range managedUpdates {
 		update.Cancel()
@@ -851,21 +844,9 @@ func (w *Workspace) languageService() (*language.Service, error) {
 	return service, nil
 }
 
-func (w *Workspace) GraphEngine() (*graph.Engine, error) {
-	service, err := w.languageService()
-	if err != nil {
-		return nil, err
-	}
-	return service.Graph(), nil
-}
-
-func (w *Workspace) GraphStateDir() string {
-	return projectGraphDir(w.RootPath)
-}
-
 // DefinitionLocations resolves a position in a disk file or in-memory editor
 // buffer using the language server associated with the file, falling back to
-// the tree-sitter graph index when no server covers it.
+// tree-sitter syntax when no server covers it.
 func (w *Workspace) DefinitionLocations(ctx context.Context, filePath string, content *string, line, column int) ([]lsp.Location, error) {
 	service, err := w.languageService()
 	if err != nil {
@@ -1252,6 +1233,15 @@ func (w *Workspace) GitHistory(ctx context.Context) ([]changes.GitCommit, error)
 	return w.Changes.History(ctx)
 }
 
+func (w *Workspace) GitInsights(ctx context.Context) (changes.GitInsightsResult, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.Changes == nil {
+		return changes.GitInsightsResult{}, changes.ErrNotGitRepository
+	}
+	return w.Changes.Insights(ctx)
+}
+
 func (w *Workspace) GitHistoryLimit(ctx context.Context, limit int) ([]changes.GitCommit, error) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -1457,12 +1447,11 @@ func splitFrontmatter(text string) (fm, body string, ok bool) {
 	return before, body, true
 }
 
-func (w *Workspace) ManagedTools() (mcpTools, lspTools, graphTools []tool.Tool) {
+func (w *Workspace) ManagedTools() (mcpTools, lspTools []tool.Tool) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	mcpTools = flattenMCPTools(w.mcpToolsByServer)
 	lspTools = append([]tool.Tool(nil), w.lspTools...)
-	graphTools = append([]tool.Tool(nil), w.graphTools...)
 	return
 }
 
@@ -1561,10 +1550,6 @@ func projectStateDir(workingDir string) string {
 
 func projectMemoryDir(workingDir string) string {
 	return filepath.Join(projectStateDir(workingDir), "memory")
-}
-
-func projectGraphDir(workingDir string) string {
-	return filepath.Join(projectStateDir(workingDir), "graph")
 }
 
 // projectPluginDataDir holds PLUGIN_DATA for plugins installed in the project,

@@ -387,7 +387,6 @@ func TestWingmanHomeOwnsPersonalWorkspaceState(t *testing.T) {
 		"global MCP config": {globalMCPConfigPath(), filepath.Join(home, "mcp.json")},
 		"project state":     {projectStateDir(workDir), projectDir},
 		"memory":            {projectMemoryDir(workDir), filepath.Join(projectDir, "memory")},
-		"graph":             {projectGraphDir(workDir), filepath.Join(projectDir, "graph")},
 		"project plugins":   {projectPluginDataDir(workDir), filepath.Join(projectDir, "plugin-data")},
 		"personal plugins":  {personalPluginDataDir(), filepath.Join(home, "plugin-data")},
 		"sessions":          {SessionsDir(workDir), filepath.Join(projectDir, "sessions")},
@@ -427,7 +426,7 @@ func TestWorkspaceRefreshesMCPToolsAfterListChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	initial, _, _ := w.ManagedTools()
+	initial, _ := w.ManagedTools()
 	if got := mcpToolNames(initial); !slices.Equal(got, []string{"dynamic_first"}) {
 		t.Fatalf("initial MCP tools = %v", got)
 	}
@@ -464,7 +463,7 @@ func waitForMCPToolNames(t *testing.T, w *Workspace, want ...string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		tools, _, _ := w.ManagedTools()
+		tools, _ := w.ManagedTools()
 		got := mcpToolNames(tools)
 		if slices.Equal(got, want) {
 			return

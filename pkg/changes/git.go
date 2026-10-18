@@ -28,6 +28,7 @@ type GitFileStatus struct {
 
 type GitStatus struct {
 	Branch    string
+	Head      string
 	Upstream  string
 	Ahead     int
 	Behind    int
@@ -528,6 +529,9 @@ func (m *Manager) gitStatusLocked() (GitStatus, error) {
 		return GitStatus{}, err
 	}
 	status.Branch = branch
+	if head != nil {
+		status.Head = head.Hash().String()
+	}
 	branchConfig := cfg.Branches[branch]
 	if branchConfig == nil || branchConfig.Remote == "" || branchConfig.Merge == "" {
 		return status, nil

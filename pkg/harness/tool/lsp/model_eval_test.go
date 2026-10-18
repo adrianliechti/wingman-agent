@@ -15,7 +15,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/graph"
 	lsptool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
@@ -56,7 +55,7 @@ func TestLiveLSPToolSelection(t *testing.T) {
 				}
 				options = append(options, lsp.WithManagedTools(managed))
 			}
-			service := language.New(root, filepath.Join(t.TempDir(), "graph.json"), options...)
+			service := language.New(root, options...)
 			defer service.Close()
 			fsRoot, err := os.OpenRoot(root)
 			if err != nil {
@@ -70,7 +69,6 @@ func TestLiveLSPToolSelection(t *testing.T) {
 				}
 			}
 			tools = append(tools, lsptool.NewTools(service)...)
-			tools = append(tools, graph.NewTools(service.Graph())...)
 			cfg, err := harness.ConfigFromEnvironment()
 			if err != nil {
 				t.Fatal(err)
@@ -163,7 +161,7 @@ func TestLiveLSPRenamePreview(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	service := language.New(root, filepath.Join(t.TempDir(), "graph.json"), lsp.WithManagedTools(managed))
+	service := language.New(root, lsp.WithManagedTools(managed))
 	defer service.Close()
 	fsRoot, err := os.OpenRoot(root)
 	if err != nil {

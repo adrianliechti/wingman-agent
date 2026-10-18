@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/adrianliechti/wingman-agent/pkg/graph"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
+	"github.com/adrianliechti/wingman-agent/pkg/treesitter"
 )
 
 // Service owns the code-intelligence backends for one workspace. It is the
@@ -14,24 +14,21 @@ import (
 type Service struct {
 	root    string
 	manager *lsp.Manager
-	graph   *graph.Engine
+	syntax  *treesitter.Workspace
 
 	lifeMu sync.RWMutex
 	closed bool
 }
 
-func New(root, graphStorePath string, managerOptions ...lsp.ManagerOption) *Service {
-	service := &Service{
+func New(root string, managerOptions ...lsp.ManagerOption) *Service {
+	return &Service{
 		root:    root,
 		manager: lsp.NewManager(root, managerOptions...),
+		syntax:  treesitter.NewWorkspace(root),
 	}
-	service.graph = graph.New(root, graphStorePath, graph.WithResolver(&lspResolver{service: service}))
-	return service
 }
 
 func (s *Service) Manager() *lsp.Manager { return s.manager }
-
-func (s *Service) Graph() *graph.Engine { return s.graph }
 
 func (s *Service) WarmUp() {
 	s.lifeMu.RLock()

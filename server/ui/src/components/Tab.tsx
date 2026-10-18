@@ -1,9 +1,9 @@
 import {
 	Bot,
 	Bug,
+	ChartColumn,
 	FileText,
 	GitCompare,
-	Lightbulb,
 	Loader2,
 	MessageSquare,
 	SquareTerminal,
@@ -18,7 +18,7 @@ export type TabKind =
 	| "terminal"
 	| "debug"
 	| "task"
-	| "graph";
+	| "insights";
 
 export function Tab({
 	id,
@@ -68,8 +68,8 @@ export function Tab({
 						? GitCompare
 						: kind === "task"
 							? Bot
-							: kind === "graph"
-								? Lightbulb
+							: kind === "insights"
+								? ChartColumn
 								: FileText;
 
 	return (

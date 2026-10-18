@@ -1,9 +1,8 @@
-package graph
+package changes
 
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -44,8 +43,7 @@ func TestGitInsights(t *testing.T) {
 	writeFile(t, dir, "a.go", "package p\n// v3\n")
 	commit("alice", now, "a.go")
 
-	e := New(dir, filepath.Join(t.TempDir(), "graph.json"))
-	res, err := e.GitInsights(context.Background())
+	res, err := gitInsights(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,8 +131,7 @@ func TestGitInsightsKeepsTotalAuthorCountWhenListIsCapped(t *testing.T) {
 		}
 	}
 
-	e := New(dir, filepath.Join(t.TempDir(), "graph.json"))
-	res, err := e.GitInsights(context.Background())
+	res, err := gitInsights(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,8 +172,7 @@ func TestGitInsightsDoesNotStopAtAnOldDatedCommit(t *testing.T) {
 	commit("recent", now, "package p\n")
 	commit("old-head", now.AddDate(-2, 0, 0), "package p\n// old timestamp\n")
 
-	e := New(dir, filepath.Join(t.TempDir(), "graph.json"))
-	res, err := e.GitInsights(context.Background())
+	res, err := gitInsights(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}

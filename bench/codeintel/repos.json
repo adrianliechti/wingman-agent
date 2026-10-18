@@ -1,6 +1,0 @@
-{
-  "gin": {"repository": "gin-gonic/gin", "ref": "v1.10.0", "commit": "75ccf94d605a05fe24817fc2f166f6f2959d5cea"},
-  "django": {"repository": "django/django", "ref": "5.1", "commit": "373cb3037fe4e67adbac9ac43340391e859aa957"},
-  "excalidraw": {"repository": "excalidraw/excalidraw", "ref": "v0.17.6", "commit": "0dbd2a39319d41fda37b2945dea0dcbd58d6a564"},
-  "vscode": {"repository": "microsoft/vscode", "ref": "1.96.0", "commit": "138f619c86f1199955d53b4166bef66ef252935c"}
-}

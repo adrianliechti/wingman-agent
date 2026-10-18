@@ -45,6 +45,9 @@ func TestGitAPIStageCommitPushAndPull(t *testing.T) {
 	defer web.Close()
 
 	status := getGitStatus(t, web.URL)
+	if status.Head != "" {
+		t.Fatalf("unborn HEAD = %q, want empty", status.Head)
+	}
 	if len(status.Files) != 1 || status.Files[0].Path != "hello.txt" || !status.Files[0].Changed {
 		t.Fatalf("initial status = %+v", status)
 	}
@@ -62,6 +65,10 @@ func TestGitAPIStageCommitPushAndPull(t *testing.T) {
 	postGit(t, web.URL, "commit", `{"message":"initial commit"}`)
 	if status = getGitStatus(t, web.URL); len(status.Files) != 0 {
 		t.Fatalf("status after commit = %+v", status)
+	}
+	head, err := repo.Head()
+	if err != nil || status.Head != head.Hash().String() {
+		t.Fatalf("status HEAD = %q, repository HEAD = %v, err = %v", status.Head, head, err)
 	}
 	mainBranch := status.Branch
 	postGit(t, web.URL, "branches", `{"name":"feature/web-picker"}`)

@@ -52,7 +52,7 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	service := language.New(root, filepath.Join(t.TempDir(), "graph.json"), lsp.WithManagedTools(tools))
+	service := language.New(root, lsp.WithManagedTools(tools))
 	defer service.Close()
 	inspect := lsptool.NewTools(service)[0]
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
@@ -203,7 +203,7 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 		}
 	})
 	t.Run("missing_server", func(t *testing.T) {
-		missing := language.New(root, filepath.Join(t.TempDir(), "graph.json"))
+		missing := language.New(root)
 		defer missing.Close()
 		result, err := lsptool.NewTools(missing)[0].Execute(ctx, map[string]any{"operation": "hover", "file_path": "types.go", "symbol": "Item"})
 		if err == nil || !strings.Contains(err.Error(), "grep/glob/read") {

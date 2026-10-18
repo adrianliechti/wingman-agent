@@ -264,7 +264,7 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 // resolveLSPFile validates a workspace-relative request path, writing the
 // error response on failure. requireLSP additionally demands an available
-// language server; endpoints with a graph fallback pass false.
+// language server; endpoints with a tree-sitter fallback pass false.
 func (s *Server) resolveLSPFile(w http.ResponseWriter, p string, requireLSP bool) (string, bool) {
 	rel, ok := s.resolveExistingRegularFile(w, p)
 	if !ok {

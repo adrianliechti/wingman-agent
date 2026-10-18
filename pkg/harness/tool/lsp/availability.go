@@ -6,10 +6,30 @@ import (
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
-const fallbackAdvice = "Use available grep/glob/read or code_graph tools; verify changes with relevant compiler/tests. Do not repeatedly retry this unavailable LSP query."
+const fallbackAdvice = "Use available grep/glob/read tools; verify changes with relevant compiler/tests. Do not repeatedly retry this unavailable LSP query."
+
+const treeSitterOperations = "goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, incomingCalls and outgoingCalls"
+
+// treeSitterNote labels fallback results so they are not mistaken for
+// type-resolved language-server answers.
+func treeSitterNote(manager *lsp.Manager, path string, cause error) string {
+	reason := "no language server for this file"
+	if manager.FindServer(path) != nil {
+		reason = "language server: " + lspFailure(cause)
+	}
+	return "Tree-sitter fallback (" + reason + "): syntactic, name-matched results; same-named symbols are not told apart.\n\n"
+}
+
+func lspFailure(err error) string {
+	if err == nil {
+		return "unavailable"
+	}
+	return strings.TrimSuffix(strings.TrimSuffix(err.Error(), fallbackAdvice), ". ")
+}
 
 func operationCapability(c lsp.ServerCapabilities, operation string) any {
 	switch operation {
@@ -54,6 +74,9 @@ func serverStatus(manager *lsp.Manager, args map[string]any) (tool.Result, error
 		}
 		server := manager.FindServer(path)
 		if server == nil {
+			if language.TreeSitterSupported(path) {
+				return tool.Text("LSP unavailable for this file; tree-sitter answers " + treeSitterOperations + " syntactically (name-matched)."), nil
+			}
 			return tool.Text("LSP unavailable for this file. " + fallbackAdvice), nil
 		}
 		content := "Detected server: " + server.Name
@@ -71,7 +94,7 @@ func serverStatus(manager *lsp.Manager, args map[string]any) (tool.Result, error
 	}
 	projects := manager.Projects()
 	if len(projects) == 0 {
-		return tool.Text("No LSP servers detected in workspace. " + fallbackAdvice), nil
+		return tool.Text("No LSP servers detected in workspace; tree-sitter answers " + treeSitterOperations + " syntactically (name-matched) for supported files. Diagnostics, type definitions, rename and code actions are unavailable."), nil
 	}
 	var content strings.Builder
 	content.WriteString("Detected language servers (not started by status; capabilities checked when queried):\n")

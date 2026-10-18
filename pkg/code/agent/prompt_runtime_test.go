@@ -224,7 +224,7 @@ func TestDelegatedRequestsIncludeRuntimeAndActiveMode(t *testing.T) {
 				for _, candidate := range req.Tools {
 					available[candidate.Name] = true
 				}
-				for _, name := range []string{"agent", "agent_output", "elicit", "edit", "exec", "search_web", "fetch", "lsp", "code_graph"} {
+				for _, name := range []string{"agent", "agent_output", "elicit", "edit", "exec", "search_web", "fetch", "lsp"} {
 					if strings.Contains(got, "`"+name+"`") != available[name] {
 						t.Errorf("child prompt guidance for %s does not match serialized tools", name)
 					}
