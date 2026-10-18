@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 )
 
 type ScheduleEntry struct {
@@ -21,7 +21,7 @@ type ScheduleEntry struct {
 }
 
 func (s *backendRuntime) sessionSchedules(sessionID string) schedule.Store {
-	ca, ok := s.agent.(*codeagent.Agent)
+	ca, ok := s.agent.(*agent.Agent)
 	if !ok {
 		return nil
 	}

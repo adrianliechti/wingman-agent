@@ -10,9 +10,9 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 func TestTextFileCallbacksSupportAbsolutePaths(t *testing.T) {
@@ -92,9 +92,9 @@ func TestHistoryProvidersReturnVersionedClone(t *testing.T) {
 	const sessionID = "session"
 	a := &Agent{sessions: map[string]*sessionState{
 		sessionID: {
-			messages: []agent.Message{{
-				Role:    agent.RoleAssistant,
-				Content: []agent.Content{{Text: "original"}},
+			messages: []harness.Message{{
+				Role:    harness.RoleAssistant,
+				Content: []harness.Content{{Text: "original"}},
 			}},
 		},
 	}}
@@ -430,13 +430,13 @@ func TestSteerAcceptedBeforeFinalizationIsPersistedWithTurn(t *testing.T) {
 	a, sess, active := steerTestAgent(func(context.Context, acp.SessionId, []acp.ContentBlock, string) error {
 		return nil
 	})
-	input := code.TurnInput{ID: "input-1", Content: []agent.Content{{Text: "guide"}}}
+	input := code.TurnInput{ID: "input-1", Content: []harness.Content{{Text: "guide"}}}
 	if err := a.Steer(context.Background(), "session-1", input); err != nil {
 		t.Fatal(err)
 	}
 	sess.finalizeTurn(active)
 
-	if len(sess.messages) != 1 || sess.messages[0].Role != agent.RoleUser || sess.messages[0].Content[0].Text != "guide" {
+	if len(sess.messages) != 1 || sess.messages[0].Role != harness.RoleUser || sess.messages[0].Content[0].Text != "guide" {
 		t.Fatalf("messages = %+v", sess.messages)
 	}
 }
@@ -452,7 +452,7 @@ func TestSteerAcceptedAfterFinalizationIsStillPersisted(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- a.Steer(context.Background(), "session-1", code.TurnInput{
-			ID: "input-1", Content: []agent.Content{{Text: "guide"}},
+			ID: "input-1", Content: []harness.Content{{Text: "guide"}},
 		})
 	}()
 	<-started
@@ -462,7 +462,7 @@ func TestSteerAcceptedAfterFinalizationIsStillPersisted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(sess.messages) != 1 || sess.messages[0].Role != agent.RoleUser || sess.messages[0].Content[0].Text != "guide" {
+	if len(sess.messages) != 1 || sess.messages[0].Role != harness.RoleUser || sess.messages[0].Content[0].Text != "guide" {
 		t.Fatalf("messages = %+v", sess.messages)
 	}
 }
@@ -473,7 +473,7 @@ func TestSteerFailureDoesNotPersistInput(t *testing.T) {
 		return want
 	})
 	err := a.Steer(context.Background(), "session-1", code.TurnInput{
-		ID: "input-1", Content: []agent.Content{{Text: "guide"}},
+		ID: "input-1", Content: []harness.Content{{Text: "guide"}},
 	})
 	if !errors.Is(err, want) {
 		t.Fatalf("steer error = %v", err)
@@ -489,7 +489,7 @@ func TestSteerRequiresInflightTurn(t *testing.T) {
 		return nil
 	})
 	sess.inflight = nil
-	err := a.Steer(context.Background(), "session-1", code.TurnInput{ID: "input-1", Content: []agent.Content{{Text: "guide"}}})
+	err := a.Steer(context.Background(), "session-1", code.TurnInput{ID: "input-1", Content: []harness.Content{{Text: "guide"}}})
 	if !errors.Is(err, code.ErrNoActiveTurn) {
 		t.Fatalf("steer error = %v", err)
 	}

@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
 
@@ -28,21 +28,21 @@ func newTestWorkspace(t *testing.T, path string) *code.Workspace {
 func TestThoughtCellsGetSurroundingBlankLines(t *testing.T) {
 	ws := newTestWorkspace(t, t.TempDir())
 
-	a := &App{agent: codeagent.New(ws, &agent.Config{}, nil)}
+	a := &App{agent: agent.New(ws, agent.Config{}, nil)}
 
-	toolMsg := func(id string) agent.Message {
-		return agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
-			{ToolResult: &agent.ToolResult{ID: id, Name: "read", Content: "ok"}},
+	toolMsg := func(id string) harness.Message {
+		return harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
+			{ToolResult: &harness.ToolResult{ID: id, Name: "read", Content: "ok"}},
 		}}
 	}
-	thoughtMsg := func(id, summary string) agent.Message {
-		return agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
-			{Reasoning: &agent.Reasoning{ID: id, Summary: summary}},
+	thoughtMsg := func(id, summary string) harness.Message {
+		return harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
+			{Reasoning: &harness.Reasoning{ID: id, Summary: summary}},
 		}}
 	}
 
 	var lines []string
-	for _, m := range []agent.Message{
+	for _, m := range []harness.Message{
 		toolMsg("call_1"),
 		thoughtMsg("rs_1", "**Considering the options**\nfull reasoning body"),
 		thoughtMsg("rs_2", "**Settling on a plan**\nmore reasoning body"),
@@ -106,13 +106,13 @@ func TestCellUserHasTopAndBottomBandSpacing(t *testing.T) {
 func TestStreamingReasoningUsesStableChatHeading(t *testing.T) {
 	ws := newTestWorkspace(t, t.TempDir())
 
-	a := &App{agent: codeagent.New(ws, &agent.Config{}, nil), queue: make(chan func(), 64), quit: make(chan struct{})}
+	a := &App{agent: agent.New(ws, agent.Config{}, nil), queue: make(chan func(), 64), quit: make(chan struct{})}
 
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
 		{Text: "streamed answer"},
 	}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
-		{Reasoning: &agent.Reasoning{ID: "rs_1", Summary: "**Planning the next step** more detail"}},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
+		{Reasoning: &harness.Reasoning{ID: "rs_1", Summary: "**Planning the next step** more detail"}},
 	}})
 	a.setPhase(PhaseThinking)
 
@@ -131,15 +131,15 @@ func TestStreamingReasoningUsesStableChatHeading(t *testing.T) {
 
 func TestReasoningHeadingWaitsForCompleteBoldText(t *testing.T) {
 	a := &App{queue: make(chan func(), 64), quit: make(chan struct{})}
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		Reasoning: &agent.Reasoning{ID: "reason-1", Summary: "**Checking"},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		Reasoning: &harness.Reasoning{ID: "reason-1", Summary: "**Checking"},
 	}}})
 	if tail := ansi.Strip(strings.Join(a.streamCells(80), "\n")); strings.Contains(tail, "Checking") {
 		t.Fatalf("partial reasoning heading became visible: %q", tail)
 	}
 
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		Reasoning: &agent.Reasoning{ID: "reason-1", Summary: " files** and reading details"},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		Reasoning: &harness.Reasoning{ID: "reason-1", Summary: " files** and reading details"},
 	}}})
 	tail := ansi.Strip(strings.Join(a.streamCells(80), "\n"))
 	if !strings.Contains(tail, "Checking files") || strings.Contains(tail, "reading details") {
@@ -149,11 +149,11 @@ func TestReasoningHeadingWaitsForCompleteBoldText(t *testing.T) {
 
 func TestReasoningHeadingsAccumulateAcrossPartBoundaries(t *testing.T) {
 	a := &App{queue: make(chan func(), 64), quit: make(chan struct{})}
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		Reasoning: &agent.Reasoning{ID: "reason-1", Part: 0, Summary: "**Inspecting files** body"},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		Reasoning: &harness.Reasoning{ID: "reason-1", Part: 0, Summary: "**Inspecting files** body"},
 	}}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		Reasoning: &agent.Reasoning{ID: "reason-1", Part: 1, Summary: "**Planning changes** body"},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		Reasoning: &harness.Reasoning{ID: "reason-1", Part: 1, Summary: "**Planning changes** body"},
 	}}})
 
 	tail := ansi.Strip(strings.Join(a.streamCells(80), "\n"))
@@ -178,23 +178,23 @@ func TestCommittedReasoningExtractsOnlyLineHeadings(t *testing.T) {
 
 func TestStreamTailRetainsIntermediateACPCells(t *testing.T) {
 	a := &App{queue: make(chan func(), 64), quit: make(chan struct{})}
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
-		{Reasoning: &agent.Reasoning{ID: "reason-1", Summary: "checking the repository"}},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
+		{Reasoning: &harness.Reasoning{ID: "reason-1", Summary: "checking the repository"}},
 	}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
-		{Reasoning: &agent.Reasoning{ID: "reason-2", Summary: "choosing the relevant file"}},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
+		{Reasoning: &harness.Reasoning{ID: "reason-2", Summary: "choosing the relevant file"}},
 	}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
 		{Text: "I found the relevant path."},
 	}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
-		{ToolCall: &agent.ToolCall{ID: "call-1", Name: "read", Args: `{"path":"one.go"}`}},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
+		{ToolCall: &harness.ToolCall{ID: "call-1", Name: "read", Args: `{"path":"one.go"}`}},
 	}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
-		{ToolResult: &agent.ToolResult{ID: "call-1", Name: "read", Content: "ok"}},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
+		{ToolResult: &harness.ToolResult{ID: "call-1", Name: "read", Content: "ok"}},
 	}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
-		{ToolCall: &agent.ToolCall{ID: "call-2", Name: "read", Args: `{"path":"two.go"}`}},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
+		{ToolCall: &harness.ToolCall{ID: "call-2", Name: "read", Args: `{"path":"two.go"}`}},
 	}})
 
 	tail := a.streamCells(100)
@@ -232,9 +232,9 @@ func TestStreamTailRetainsIntermediateACPCells(t *testing.T) {
 func TestWhitespaceOnlyTextRendersNothing(t *testing.T) {
 	ws := newTestWorkspace(t, t.TempDir())
 
-	a := &App{agent: codeagent.New(ws, &agent.Config{}, nil)}
+	a := &App{agent: agent.New(ws, agent.Config{}, nil)}
 
-	msg := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "\n\n"}}}
+	msg := harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "\n\n"}}}
 	if lines := a.formatMessageCells(msg, 80); len(lines) != 0 {
 		t.Fatalf("whitespace-only text rendered cells: %q", lines)
 	}
@@ -243,7 +243,7 @@ func TestWhitespaceOnlyTextRendersNothing(t *testing.T) {
 func TestAnnotationsSurviveChatRebuild(t *testing.T) {
 	ws := newTestWorkspace(t, t.TempDir())
 
-	a := &App{agent: codeagent.New(ws, &agent.Config{}, nil)}
+	a := &App{agent: agent.New(ws, agent.Config{}, nil)}
 
 	a.annotations = append(a.annotations, chatAnnotation{
 		afterMessages: 0,

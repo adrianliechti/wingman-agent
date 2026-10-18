@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
@@ -95,7 +95,7 @@ func (a *App) contextLeftPercent() (int, bool) {
 	window := a.contextWindow
 	if window <= 0 {
 		_, currentModel := a.agent.Models(a.sessionID)
-		window = int64(agent.ContextWindowFor(currentModel))
+		window = int64(harness.ContextWindowFor(currentModel))
 	}
 	if window <= 0 {
 		return 0, false

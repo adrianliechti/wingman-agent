@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
@@ -127,7 +127,7 @@ func modelIdentity(available []model.Model, current string) string {
 type streamCellKey struct {
 	hidden                                                 bool
 	user, text, headings, toolName, toolHint, toolProgress string
-	toolResult                                             *agent.ToolResult
+	toolResult                                             *harness.ToolResult
 	directory                                              string
 	width                                                  int
 	theme                                                  theme.Theme

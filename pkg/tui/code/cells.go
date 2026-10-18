@@ -5,8 +5,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -329,7 +329,7 @@ func headPreview(lines []string, n int) []string {
 	return append(out, fmt.Sprintf("… +%d more (ctrl+o transcript)", len(lines)-n))
 }
 
-func cellTool(result *agent.ToolResult, width int, full bool) []string {
+func cellTool(result *harness.ToolResult, width int, full bool) []string {
 	name := result.Name
 
 	hint := tool.ExtractHint(result.Args, result.Name)

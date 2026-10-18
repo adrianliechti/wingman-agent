@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
-func userMsg(text string) agent.Message {
-	return agent.Message{Role: agent.RoleUser, Content: []agent.Content{{Text: text}}}
+func userMsg(text string) harness.Message {
+	return harness.Message{Role: harness.RoleUser, Content: []harness.Content{{Text: text}}}
 }
 
-func assistantMsg(text string) agent.Message {
-	return agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: text}}}
+func assistantMsg(text string) harness.Message {
+	return harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: text}}}
 }
 
 func fileLines(t *testing.T, path string) []string {
@@ -31,9 +31,9 @@ func fileLines(t *testing.T, path string) []string {
 func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 
-	state := agent.State{
-		Messages: []agent.Message{userMsg("hello world"), assistantMsg("hi")},
-		Usage:    agent.Usage{InputTokens: 10, OutputTokens: 5},
+	state := harness.State{
+		Messages: []harness.Message{userMsg("hello world"), assistantMsg("hi")},
+		Usage:    harness.Usage{InputTokens: 10, OutputTokens: 5},
 	}
 
 	if err := Save(dir, "s1", state); err != nil {
@@ -66,7 +66,7 @@ func TestSaveAppends(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s1.jsonl")
 
-	state := agent.State{Messages: []agent.Message{userMsg("first")}}
+	state := harness.State{Messages: []harness.Message{userMsg("first")}}
 	if err := Save(dir, "s1", state); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestSaveAppends(t *testing.T) {
 		case "meta":
 			metas++
 		case "event":
-			if r.Event != nil && r.Event.Type == agent.EventMessage {
+			if r.Event != nil && r.Event.Type == harness.EventMessage {
 				messages++
 			}
 		}
@@ -111,12 +111,12 @@ func TestSaveAppendsContextCheckpointWithoutRewritingHistory(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s1.jsonl")
 
-	state := agent.State{Messages: []agent.Message{userMsg("first"), assistantMsg("reply")}}
+	state := harness.State{Messages: []harness.Message{userMsg("first"), assistantMsg("reply")}}
 	if err := Save(dir, "s1", state); err != nil {
 		t.Fatal(err)
 	}
 
-	state.Context = []agent.Message{userMsg("summary"), userMsg("recent")}
+	state.Context = []harness.Message{userMsg("summary"), userMsg("recent")}
 	state.ContextSet = true
 	if err := Save(dir, "s1", state); err != nil {
 		t.Fatal(err)
@@ -149,9 +149,9 @@ func TestLegacyMigration(t *testing.T) {
 		ID:        "old",
 		CreatedAt: time.Now().Add(-time.Hour),
 		UpdatedAt: time.Now().Add(-time.Hour),
-		State: agent.State{
-			Messages: []agent.Message{userMsg("legacy message")},
-			Usage:    agent.Usage{InputTokens: 1},
+		State: harness.State{
+			Messages: []harness.Message{userMsg("legacy message")},
+			Usage:    harness.Usage{InputTokens: 1},
 		},
 	}
 	data, _ := json.Marshal(legacy)
@@ -198,7 +198,7 @@ func TestLegacyJSONLMigrationIsolatedAndOneWay(t *testing.T) {
 	}
 	enc := json.NewEncoder(f)
 	message := userMsg("legacy jsonl")
-	usage := agent.Usage{InputTokens: 7}
+	usage := harness.Usage{InputTokens: 7}
 	for _, r := range []legacyRecord{
 		{Type: "meta", ID: "old-lines", CreatedAt: &created},
 		{Type: "message", Message: &message},
@@ -243,7 +243,7 @@ func TestLegacyJSONLMigrationIsolatedAndOneWay(t *testing.T) {
 
 func TestOpenJournalRepairsIncompleteFinalRecord(t *testing.T) {
 	dir := t.TempDir()
-	state := agent.State{Messages: []agent.Message{userMsg("first")}}
+	state := harness.State{Messages: []harness.Message{userMsg("first")}}
 	if err := Save(dir, "repair", state); err != nil {
 		t.Fatal(err)
 	}
@@ -265,8 +265,8 @@ func TestOpenJournalRepairsIncompleteFinalRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := assistantMsg("second")
-	if err := j.AppendEvents([]agent.RuntimeEvent{{
-		Sequence: 2, ID: "second", Type: agent.EventMessage, At: time.Now().UTC(), Message: &message,
+	if err := j.AppendEvents([]harness.RuntimeEvent{{
+		Sequence: 2, ID: "second", Type: harness.EventMessage, At: time.Now().UTC(), Message: &message,
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -282,12 +282,12 @@ func TestOpenJournalRepairsIncompleteFinalRecord(t *testing.T) {
 func TestList(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := Save(dir, "a", agent.State{Messages: []agent.Message{userMsg("session a")}}); err != nil {
+	if err := Save(dir, "a", harness.State{Messages: []harness.Message{userMsg("session a")}}); err != nil {
 		t.Fatal(err)
 	}
 
 	legacy := Session{ID: "b", Title: "session b", CreatedAt: time.Now(), UpdatedAt: time.Now()}
-	legacy.State.Messages = []agent.Message{userMsg("session b")}
+	legacy.State.Messages = []harness.Message{userMsg("session b")}
 	data, _ := json.Marshal(legacy)
 	if err := os.WriteFile(filepath.Join(dir, "b.json"), data, 0644); err != nil {
 		t.Fatal(err)
@@ -313,7 +313,7 @@ func TestList(t *testing.T) {
 func TestDelete(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := Save(dir, "s1", agent.State{Messages: []agent.Message{userMsg("hi")}}); err != nil {
+	if err := Save(dir, "s1", harness.State{Messages: []harness.Message{userMsg("hi")}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -325,7 +325,7 @@ func TestDelete(t *testing.T) {
 		t.Error("expected error loading deleted session")
 	}
 
-	if err := Save(dir, "s1", agent.State{Messages: []agent.Message{userMsg("again")}}); err != nil {
+	if err := Save(dir, "s1", harness.State{Messages: []harness.Message{userMsg("again")}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -348,7 +348,7 @@ func TestSessionIDCannotEscapeStorageDirectory(t *testing.T) {
 			if _, err := OpenJournal(dir, id); err == nil {
 				t.Fatalf("OpenJournal accepted %q", id)
 			}
-			if err := Save(dir, id, agent.State{Messages: []agent.Message{userMsg("unsafe")}}); err == nil {
+			if err := Save(dir, id, harness.State{Messages: []harness.Message{userMsg("unsafe")}}); err == nil {
 				t.Fatalf("Save accepted %q", id)
 			}
 			if _, err := Load(dir, id); err == nil {
@@ -363,7 +363,7 @@ func TestSessionIDCannotEscapeStorageDirectory(t *testing.T) {
 
 func TestFork(t *testing.T) {
 	dir := t.TempDir()
-	state := agent.State{Messages: []agent.Message{userMsg("hello world"), assistantMsg("hi")}}
+	state := harness.State{Messages: []harness.Message{userMsg("hello world"), assistantMsg("hi")}}
 	if err := Save(dir, "s1", state); err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +437,7 @@ func TestFork(t *testing.T) {
 
 func TestForkTitleAndErrors(t *testing.T) {
 	dir := t.TempDir()
-	if err := Save(dir, "s1", agent.State{Messages: []agent.Message{userMsg("hello")}}); err != nil {
+	if err := Save(dir, "s1", harness.State{Messages: []harness.Message{userMsg("hello")}}); err != nil {
 		t.Fatal(err)
 	}
 

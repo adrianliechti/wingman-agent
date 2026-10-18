@@ -211,7 +211,7 @@ go test ./pkg/code/prompt ./pkg/code/agent
 For model-catalog changes, also run:
 
 ```bash
-go test ./pkg/model ./pkg/external/codex ./pkg/acp/codex ./pkg/agent
+go test ./pkg/model ./pkg/external/codex ./pkg/acp/codex ./pkg/harness
 ```
 
 These tests check routing, conditional fragment rendering, shared tool/schema

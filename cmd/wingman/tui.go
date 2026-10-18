@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/code/agents"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	codetui "github.com/adrianliechti/wingman-agent/pkg/tui/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -18,10 +18,6 @@ type tuiOptions struct {
 	Agent     string
 	SessionID string
 	Fork      bool
-}
-
-func newTUIAgent(ctx context.Context, ws *code.Workspace, name string) (code.Agent, error) {
-	return agents.New(ctx, ws, name, nil)
 }
 
 func latestSessionID(sessions []code.SessionInfo) string {
@@ -36,32 +32,26 @@ func latestSessionID(sessions []code.SessionInfo) string {
 	return id
 }
 
-func runTUI(ctx context.Context, opts tuiOptions) {
+func runTUI(ctx context.Context, opts tuiOptions) (err error) {
 	theme.Auto()
 
 	wd, err := os.Getwd()
 	if err != nil {
-		fatal(err)
+		return err
 	}
 
-	ws, err := code.NewWorkspace(wd)
+	host, err := newAgentHost(ctx, wd, opts.Agent)
 	if err != nil {
-		fatal(err)
+		return err
 	}
-
-	defer ws.Close()
-
-	wa, err := newTUIAgent(ctx, ws, opts.Agent)
-	if err != nil {
-		fatal(err)
-	}
+	defer func() { err = errors.Join(err, host.Close()) }()
+	ws, wa := host.workspace, host.agent
 
 	sessionID := opts.SessionID
 	if sessionID == "latest" {
 		sessions, err := wa.ListSessions(ctx)
 		if err != nil {
-			_ = wa.Close()
-			fatal(err)
+			return err
 		}
 		sessionID = latestSessionID(sessions)
 	}
@@ -69,24 +59,20 @@ func runTUI(ctx context.Context, opts tuiOptions) {
 	if sessionID != "" && opts.Fork {
 		forker, ok := wa.(code.SessionForker)
 		if !ok {
-			_ = wa.Close()
-			fatal(fmt.Errorf("agent %q cannot fork sessions", opts.Agent))
+			return fmt.Errorf("agent %q cannot fork sessions", opts.Agent)
 		}
 		sessionID, err = forker.ForkSession(ctx, sessionID, "")
 		if err != nil {
-			_ = wa.Close()
-			fatal(err)
+			return err
 		}
 	} else if sessionID != "" {
 		if err := wa.LoadSession(ctx, sessionID); err != nil {
-			_ = wa.Close()
-			fatal(err)
+			return err
 		}
 	} else {
 		sessionID, err = wa.NewSession(ctx)
 		if err != nil {
-			_ = wa.Close()
-			fatal(err)
+			return err
 		}
 	}
 
@@ -120,8 +106,5 @@ func runTUI(ctx context.Context, opts tuiOptions) {
 		app.SetBackgroundStatus("", false)
 	}()
 
-	if err := app.Run(); err != nil {
-		_ = wa.Close()
-		fatal(err)
-	}
+	return app.Run()
 }

@@ -10,8 +10,8 @@ import (
 	"testing/synctest"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
 
@@ -32,9 +32,9 @@ func TestSessionSwitchDiscardsPendingTurnUpdatesAndComposerContent(t *testing.T)
 		a.editor = NewEditor()
 		a.editor.SetText("old draft")
 		a.pendingFiles = []string{"old.go"}
-		a.pendingContent = []agent.Content{{Text: "old attachment"}}
+		a.pendingContent = []harness.Content{{Text: "old attachment"}}
 		a.pendingEcho = []pendingEchoItem{{ID: "old-input", Text: "queued"}}
-		message := agent.Message{Content: []agent.Content{{Text: "old output"}}}
+		message := harness.Message{Content: []harness.Content{{Text: "old output"}}}
 		a.handleTurnEvent(corecode.TurnEvent{SessionID: "session", Message: &message})
 		a.onSessionUpdate("session")
 		synctest.Wait() // Leave the old repaint waiting in the UI queue.
@@ -58,13 +58,13 @@ func TestFinishingTurnDoesNotClearTheNextTurnsOutput(t *testing.T) {
 				a.turns = corecode.NewTurnManager(a.ctx, coder, a.handleTurnEvent)
 				defer a.turns.Close()
 				a.termFocused = true
-				previous := agent.Message{Content: []agent.Content{{Text: "previous output"}}}
+				previous := harness.Message{Content: []harness.Content{{Text: "previous output"}}}
 				a.handleTurnEvent(corecode.TurnEvent{SessionID: "session", Message: &previous})
 				a.handleTurnEvent(corecode.TurnEvent{SessionID: "session", State: state, Executed: true, Err: errors.New("test failure")})
 				// TurnManager emits the next Active and output after the terminal
 				// callback returns, potentially before the UI processes that callback.
 				a.handleTurnEvent(corecode.TurnEvent{SessionID: "session", State: corecode.TurnInputActive})
-				next := agent.Message{Content: []agent.Content{{Text: "next output"}}}
+				next := harness.Message{Content: []harness.Content{{Text: "next output"}}}
 				a.handleTurnEvent(corecode.TurnEvent{SessionID: "session", Message: &next})
 				synctest.Wait()
 				drainStateUpdates(a)
@@ -86,11 +86,11 @@ func TestFinishingTurnDoesNotClearTheNextTurnsOutput(t *testing.T) {
 type metadataTestAgent struct {
 	*uiTestAgent
 	handler func(string)
-	usage   agent.Usage
+	usage   harness.Usage
 }
 
 func (a *metadataTestAgent) SetSessionUpdateHandler(handler func(string)) { a.handler = handler }
-func (a *metadataTestAgent) Usage(string) agent.Usage                     { return a.usage }
+func (a *metadataTestAgent) Usage(string) harness.Usage                   { return a.usage }
 
 func TestIdleSessionMetadataRefreshesWithoutInputAndCoalesces(t *testing.T) {
 	testenv.WingmanHome(t)
@@ -108,7 +108,7 @@ func TestIdleSessionMetadataRefreshesWithoutInputAndCoalesces(t *testing.T) {
 		a.popup.SetQuery("plan")
 		a.dirty = false
 		coder.mode = "plan"
-		coder.usage = agent.Usage{InputTokens: 42, ContextWindow: 1000}
+		coder.usage = harness.Usage{InputTokens: 42, ContextWindow: 1000}
 		// A settings command can notify on the UI thread, even when its queue
 		// is full. Repeated notifications must not wait for that queue to drain.
 		for range cap(a.queue) {
@@ -144,7 +144,7 @@ func TestRejectedTurnKeepsComposerAndAttachments(t *testing.T) {
 	a.editor = NewEditor()
 	a.editor.SetText("keep this draft")
 	a.pendingFiles = []string{"main.go"}
-	content := []agent.Content{{Text: "attached content"}}
+	content := []harness.Content{{Text: "attached content"}}
 	a.pendingContent = content
 	a.turns = corecode.NewTurnManager(a.ctx, coder, a.handleTurnEvent)
 	a.turns.Close()
@@ -159,9 +159,9 @@ func TestRejectedTurnKeepsComposerAndAttachments(t *testing.T) {
 
 type streamingTestAgent struct{ *uiTestAgent }
 
-func (a *streamingTestAgent) Send(ctx context.Context, _ string, _ []agent.Content) (iter.Seq2[agent.Message, error], error) {
-	return func(yield func(agent.Message, error) bool) {
-		yield(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "streamed response"}}}, nil)
+func (a *streamingTestAgent) Send(ctx context.Context, _ string, _ []harness.Content) (iter.Seq2[harness.Message, error], error) {
+	return func(yield func(harness.Message, error) bool) {
+		yield(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "streamed response"}}}, nil)
 		<-ctx.Done()
 	}, nil
 }
@@ -173,7 +173,7 @@ func TestAcceptedUserInputPrecedesImmediateStreamOutput(t *testing.T) {
 		a.agent = coder
 		a.turns = corecode.NewTurnManager(a.ctx, coder, a.handleTurnEvent)
 		defer a.turns.Close()
-		if !a.submitAgentInput([]agent.Content{{Text: "user input"}}, "user input") {
+		if !a.submitAgentInput([]harness.Content{{Text: "user input"}}, "user input") {
 			t.Fatal("submission failed")
 		}
 		synctest.Wait()

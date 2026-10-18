@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 // WINGMAN_URL=http://localhost:4242 WINGMAN_LIVE_COMPLETION_MODELS=claude-sonnet-5,gpt-5.6-terra
@@ -132,12 +132,14 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	t.Cleanup(endpoint.Close)
 	t.Setenv("WINGMAN_URL", endpoint.URL)
 	t.Setenv("WINGMAN_MODEL", model)
-	cfg, err := harness.DefaultConfig()
+	cfg, err := DefaultConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.MaxTurns = 16
-	a := New(ws, cfg, nil, Options{DisableWebSearch: true, DisableWebFetch: true})
+	cfg.DisableWebSearch = true
+	cfg.DisableWebFetch = true
+	a := New(ws, cfg, nil)
 	t.Cleanup(func() { _ = a.Close() })
 	id, err := a.NewSession(ctx)
 	if err != nil {
@@ -188,7 +190,7 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 		if err := a.Close(); err != nil {
 			t.Fatal(err)
 		}
-		a = New(ws, cfg, nil, Options{DisableWebSearch: true, DisableWebFetch: true})
+		a = New(ws, cfg, nil)
 		if err := a.LoadSession(ctx, id); err != nil {
 			t.Fatal(err)
 		}

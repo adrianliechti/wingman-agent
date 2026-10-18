@@ -3,12 +3,13 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 func TestTurnReviewAndUndoSurviveJournalReload(t *testing.T) {
@@ -51,7 +52,7 @@ func TestTurnReviewAndUndoSurviveJournalReload(t *testing.T) {
 	}))
 	defer provider.Close()
 	t.Setenv("WINGMAN_URL", provider.URL)
-	cfg, err := harness.DefaultConfig()
+	cfg, err := DefaultConfig()
 	if err != nil {
 		t.Fatal(err)
 	}

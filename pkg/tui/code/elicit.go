@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 func (a *App) Confirm(ctx context.Context, message string) (bool, error) {

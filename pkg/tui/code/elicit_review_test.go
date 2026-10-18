@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 type elicitOutcome struct {

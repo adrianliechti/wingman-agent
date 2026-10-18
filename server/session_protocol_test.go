@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
@@ -24,7 +24,7 @@ import (
 type protocolAgent struct {
 	code.Agent
 	mu       sync.Mutex
-	messages []agent.Message
+	messages []harness.Message
 	queue    code.TurnQueueState
 	model    string
 	failSave bool
@@ -42,7 +42,7 @@ func (a *protocolAgent) Models(string) ([]model.Model, string) {
 }
 func (a *protocolAgent) Effort(string) (string, []string)   { return "auto", []string{"auto", "high"} }
 func (a *protocolAgent) Modes(string) ([]code.Mode, string) { return nil, "" }
-func (a *protocolAgent) Usage(string) agent.Usage           { return agent.Usage{} }
+func (a *protocolAgent) Usage(string) harness.Usage         { return harness.Usage{} }
 func (a *protocolAgent) SetModel(_ context.Context, _, value string) error {
 	a.mu.Lock()
 	a.model = value
@@ -61,10 +61,10 @@ func (a *protocolAgent) LoadSession(_ context.Context, id string) error {
 }
 func (a *protocolAgent) DeleteSession(context.Context, string) error              { return nil }
 func (a *protocolAgent) ListSessions(context.Context) ([]code.SessionInfo, error) { return nil, nil }
-func (a *protocolAgent) Messages(string) []agent.Message {
+func (a *protocolAgent) Messages(string) []harness.Message {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return append([]agent.Message(nil), a.messages...)
+	return append([]harness.Message(nil), a.messages...)
 }
 func (a *protocolAgent) LoadTurnQueue(string) (code.TurnQueueState, error) {
 	a.mu.Lock()
@@ -82,25 +82,25 @@ func (a *protocolAgent) SaveTurnQueue(_ string, queue code.TurnQueueState) error
 }
 func (a *protocolAgent) Cancel(string) {}
 func (a *protocolAgent) Close() error  { return nil }
-func (a *protocolAgent) Send(ctx context.Context, _ string, input []agent.Content) (iter.Seq2[agent.Message, error], error) {
+func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	a.sent.Add(1)
 	a.mu.Lock()
-	a.messages = append(a.messages, agent.Message{Role: agent.RoleUser, Content: agent.CloneContent(input)})
+	a.messages = append(a.messages, harness.Message{Role: harness.RoleUser, Content: harness.CloneContent(input)})
 	a.mu.Unlock()
-	return func(yield func(agent.Message, error) bool) {
-		if !yield(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "live prefix", TextID: "answer"}}}, nil) {
+	return func(yield func(harness.Message, error) bool) {
+		if !yield(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "live prefix", TextID: "answer"}}}, nil) {
 			return
 		}
 		if a.gate != nil {
 			select {
 			case <-a.gate:
 			case <-ctx.Done():
-				yield(agent.Message{}, ctx.Err())
+				yield(harness.Message{}, ctx.Err())
 				return
 			}
 		}
 		a.mu.Lock()
-		a.messages = append(a.messages, agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "live prefix", TextID: "answer"}}})
+		a.messages = append(a.messages, harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "live prefix", TextID: "answer"}}})
 		a.mu.Unlock()
 	}, nil
 }
@@ -166,7 +166,7 @@ func TestSessionSnapshotRetainsLiveTextAndHasTargetedSubscriptions(t *testing.T)
 	unrelated := b.session("unrelated")
 	unrelated.subscribe(other, "other")
 	_ = receiveEvent(t, other)
-	_, err := b.turns.Submit(b.ctx, "saved", code.TurnInput{ID: "input", Content: []agent.Content{{Text: "question"}}})
+	_, err := b.turns.Submit(b.ctx, "saved", code.TurnInput{ID: "input", Content: []harness.Content{{Text: "question"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestSessionSnapshotRetainsLiveTextAndHasTargetedSubscriptions(t *testing.T)
 
 func TestSessionRestoresEditableQueueAndRejectsMissingHistory(t *testing.T) {
 	s, b, a := newProtocolServer(t)
-	a.queue = code.TurnQueueState{Inputs: []code.TurnInput{{ID: "saved-input", Intent: code.TurnInputFollowUp, Content: []agent.Content{{Text: "original"}, {Text: "[File: main.go]"}, {Text: "secret", Hidden: true}}}}}
+	a.queue = code.TurnQueueState{Inputs: []code.TurnInput{{ID: "saved-input", Intent: code.TurnInputFollowUp, Content: []harness.Content{{Text: "original"}, {Text: "[File: main.go]"}, {Text: "secret", Hidden: true}}}}}
 	c := b.session("saved")
 	c.load()
 	client := newWSClient(nil)
@@ -409,7 +409,7 @@ func TestSessionSettingsRoundTripIndependentUnattendedPolicy(t *testing.T) {
 
 func TestSessionQueuePersistenceFailureDoesNotAcknowledgeClearing(t *testing.T) {
 	s, b, a := newProtocolServer(t)
-	a.queue = code.TurnQueueState{Inputs: []code.TurnInput{{ID: "queued", Content: []agent.Content{{Text: "keep me"}}}}}
+	a.queue = code.TurnQueueState{Inputs: []code.TurnInput{{ID: "queued", Content: []harness.Content{{Text: "keep me"}}}}}
 	c := b.session("saved")
 	c.load()
 	a.mu.Lock()
@@ -474,7 +474,7 @@ func TestSessionEntryIdentitySurvivesCommitAndLateSteering(t *testing.T) {
 	_, b, a := newProtocolServer(t)
 	c := b.session("saved")
 	c.load()
-	input := code.TurnInput{ID: "input", Content: []agent.Content{{Text: "guidance"}}}
+	input := code.TurnInput{ID: "input", Content: []harness.Content{{Text: "guidance"}}}
 	entry := turnQueueEntry(input, code.TurnInputSteered, 0)
 	c.apply(Frame{Type: EvtTurnInput, Input: &entry})
 	c.apply(Frame{Type: EvtTextDelta, ID: "text", Text: "answer"})
@@ -482,7 +482,7 @@ func TestSessionEntryIdentitySurvivesCommitAndLateSteering(t *testing.T) {
 	userID, textID := c.entries[0].ID, c.entries[1].ID
 	c.mu.Unlock()
 	a.mu.Lock()
-	a.messages = []agent.Message{{Role: agent.RoleUser, InputID: "input", Content: input.Content}, {Role: agent.RoleAssistant, Content: []agent.Content{{Text: "answer", TextID: "text"}}}}
+	a.messages = []harness.Message{{Role: harness.RoleUser, InputID: "input", Content: input.Content}, {Role: harness.RoleAssistant, Content: []harness.Content{{Text: "answer", TextID: "text"}}}}
 	a.mu.Unlock()
 	c.replaceHistory()
 	c.apply(Frame{Type: EvtTurnInput, Input: &entry}) // accepted steer notification crossed the commit boundary
@@ -499,16 +499,16 @@ type compactingProtocolAgent struct {
 	release chan error
 }
 
-func (a *compactingProtocolAgent) Compact(ctx context.Context, _, focus string) (agent.CompactResult, error) {
+func (a *compactingProtocolAgent) Compact(ctx context.Context, _, focus string) (harness.CompactResult, error) {
 	a.focus <- focus
 	select {
 	case err := <-a.release:
 		if err != nil {
-			return agent.CompactResult{}, err
+			return harness.CompactResult{}, err
 		}
-		return agent.CompactResult{TokensBefore: 900, TokensAfter: 90}, nil
+		return harness.CompactResult{TokensBefore: 900, TokensAfter: 90}, nil
 	case <-ctx.Done():
-		return agent.CompactResult{}, ctx.Err()
+		return harness.CompactResult{}, ctx.Err()
 	}
 }
 

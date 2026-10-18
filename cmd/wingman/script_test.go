@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
@@ -136,11 +136,11 @@ func (r *ioLimitByteReader) Read(p []byte) (int, error) {
 
 func TestScriptTextCollectorDiscardsFailedAttempt(t *testing.T) {
 	c := &scriptTextCollector{}
-	c.Add(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "discard me"}}})
+	c.Add(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "discard me"}}})
 	c.Reset()
-	c.Add(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "keep"}}})
+	c.Add(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "keep"}}})
 	c.Commit()
-	c.Add(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: " this"}}})
+	c.Add(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: " this"}}})
 
 	if got := c.Text(); got != "keep this" {
 		t.Fatalf("Text() = %q, want %q", got, "keep this")
@@ -148,24 +148,24 @@ func TestScriptTextCollectorDiscardsFailedAttempt(t *testing.T) {
 }
 
 func TestScriptRefusalIsVisibleInStreamAndHistory(t *testing.T) {
-	message := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Refusal: "I cannot help with that."}}}
+	message := harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Refusal: "I cannot help with that."}}}
 	collector := &scriptTextCollector{}
 	collector.Add(message)
 	collector.Commit()
 	if got := collector.Text(); got != "I cannot help with that." {
 		t.Fatalf("streamed refusal = %q", got)
 	}
-	if got := finalAssistantText([]agent.Message{message}); got != "I cannot help with that." {
+	if got := finalAssistantText([]harness.Message{message}); got != "I cannot help with that." {
 		t.Fatalf("retained refusal = %q", got)
 	}
 }
 
 func TestScriptReporterShowsToolProgressOnlyInDebugMode(t *testing.T) {
 	args := "{\n  \"file_path\": \"pkg/agent/models.go\",\n  \"offset\": 10\n}"
-	toolCall := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{ToolCall: &agent.ToolCall{
+	toolCall := harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolCall: &harness.ToolCall{
 		ID: "call-1", Name: "read", Args: args,
 	}}}}
-	toolResult := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{ToolResult: &agent.ToolResult{
+	toolResult := harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: &harness.ToolResult{
 		ID: "call-1", Name: "read", Args: args, Content: "first line\nsecond line",
 	}}}}
 
@@ -199,8 +199,8 @@ func TestScriptReporterShowsToolProgressOnlyInDebugMode(t *testing.T) {
 func TestScriptReporterDropsUncommittedPartialTool(t *testing.T) {
 	var errOut bytes.Buffer
 	reporter := newScriptReporter(true, &errOut)
-	reporter.add(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolCall: &agent.ToolCall{ID: "call-1", Name: "write", Args: `{"file_path":"partial`, Partial: true},
+	reporter.add(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolCall: &harness.ToolCall{ID: "call-1", Name: "write", Args: `{"file_path":"partial`, Partial: true},
 	}}})
 	reporter.commit()
 
@@ -208,11 +208,11 @@ func TestScriptReporterDropsUncommittedPartialTool(t *testing.T) {
 		t.Fatalf("partial tool was reported as executed: %q", errOut.String())
 	}
 
-	reporter.add(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolCall: &agent.ToolCall{ID: "call-1", Name: "write", Args: `{"file_path":"main.go"}`},
+	reporter.add(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolCall: &harness.ToolCall{ID: "call-1", Name: "write", Args: `{"file_path":"main.go"}`},
 	}}})
-	reporter.add(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolResult: &agent.ToolResult{ID: "call-1", Name: "write", Args: `{"file_path":"main.go"}`, Content: "ok"},
+	reporter.add(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolResult: &harness.ToolResult{ID: "call-1", Name: "write", Args: `{"file_path":"main.go"}`, Content: "ok"},
 	}}})
 	if got := errOut.String(); strings.Count(got, "→ write /main.go") != 1 || !strings.Contains(got, "✓ write /main.go") {
 		t.Fatalf("definitive tool reporting = %q", got)
@@ -220,11 +220,11 @@ func TestScriptReporterDropsUncommittedPartialTool(t *testing.T) {
 }
 
 func TestFinalAssistantTextUsesLatestTurn(t *testing.T) {
-	messages := []agent.Message{
-		{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "old"}}},
-		{Role: agent.RoleUser, Content: []agent.Content{{Text: "new question"}}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{{ToolResult: &agent.ToolResult{Name: "read"}}}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "new"}, {Text: " answer"}}},
+	messages := []harness.Message{
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "old"}}},
+		{Role: harness.RoleUser, Content: []harness.Content{{Text: "new question"}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: &harness.ToolResult{Name: "read"}}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "new"}, {Text: " answer"}}},
 	}
 	if got := finalAssistantText(messages); got != "new answer" {
 		t.Fatalf("finalAssistantText() = %q", got)
@@ -373,20 +373,20 @@ func newFakeScriptAgent() *fakeScriptAgent {
 }
 
 type fakeScriptAgent struct {
-	messages    []agent.Message
-	input       []agent.Content
+	messages    []harness.Message
+	input       []harness.Content
 	modes       []code.Mode
 	currentMode string
 	model       string
 	effort      string
-	usage       agent.Usage
+	usage       harness.Usage
 	loaded      string
 	deleted     string
 	response    string
 	sendCount   int
 	schemaCalls int
 	jsonCalls   int
-	inputs      [][]agent.Content
+	inputs      [][]harness.Content
 	saved       string
 }
 
@@ -449,30 +449,30 @@ func (a *fakeScriptAgent) Save(id string) error {
 	a.saved = id
 	return nil
 }
-func (a *fakeScriptAgent) Messages(string) []agent.Message {
-	return agent.CloneMessages(a.messages)
+func (a *fakeScriptAgent) Messages(string) []harness.Message {
+	return harness.CloneMessages(a.messages)
 }
-func (a *fakeScriptAgent) Usage(string) agent.Usage { return a.usage }
-func (a *fakeScriptAgent) Send(ctx context.Context, _ string, input []agent.Content) (iter.Seq2[agent.Message, error], error) {
+func (a *fakeScriptAgent) Usage(string) harness.Usage { return a.usage }
+func (a *fakeScriptAgent) Send(ctx context.Context, _ string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	a.sendCount++
-	if schema, ok := agent.OutputSchemaFromContext(ctx); ok {
+	if schema, ok := harness.OutputSchemaFromContext(ctx); ok {
 		a.schemaCalls++
 		if len(schema) == 0 {
 			a.jsonCalls++
 		}
 	}
-	a.input = agent.CloneContent(input)
-	a.inputs = append(a.inputs, agent.CloneContent(input))
-	a.messages = append(a.messages, agent.Message{Role: agent.RoleUser, Content: agent.CloneContent(input)})
-	return func(yield func(agent.Message, error) bool) {
+	a.input = harness.CloneContent(input)
+	a.inputs = append(a.inputs, harness.CloneContent(input))
+	a.messages = append(a.messages, harness.Message{Role: harness.RoleUser, Content: harness.CloneContent(input)})
+	return func(yield func(harness.Message, error) bool) {
 		response := a.response
 		if response == "" {
 			response = "hello back"
 		}
-		message := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: response}}}
+		message := harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: response}}}
 		if yield(message, nil) {
 			a.messages = append(a.messages, message)
-			a.usage = agent.Usage{InputTokens: 4, OutputTokens: 2}
+			a.usage = harness.Usage{InputTokens: 4, OutputTokens: 2}
 		}
 	}, nil
 }

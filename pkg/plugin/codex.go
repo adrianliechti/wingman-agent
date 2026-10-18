@@ -9,7 +9,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/external"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
 )
 
 // Codex defines this client-owned Agent Plugins extension namespace in

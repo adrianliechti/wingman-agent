@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 // This helper acts as an ACP process and can leave stdout inherited by a child
@@ -88,7 +88,7 @@ func TestProcessExitDrainsFinalResponseOrFailsInheritedOutput(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			stream, err := a.Send(ctx, id, []agent.Content{{Text: "go"}})
+			stream, err := a.Send(ctx, id, []harness.Content{{Text: "go"}})
 			if err != nil {
 				t.Fatal(err)
 			}

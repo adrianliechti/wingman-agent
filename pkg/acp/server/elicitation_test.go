@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 func TestElicitationSchemaPreservesEnumDescriptions(t *testing.T) {

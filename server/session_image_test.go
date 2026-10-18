@@ -3,8 +3,8 @@ package server
 import (
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 func TestToolImagesSurviveLiveAndRestoredTranscripts(t *testing.T) {
@@ -14,12 +14,12 @@ func TestToolImagesSurviveLiveAndRestoredTranscripts(t *testing.T) {
 			controller := backend.session("saved")
 			controller.load()
 			const image = "data:image/png;base64,AA=="
-			messages := []agent.Message{
-				{Role: agent.RoleAssistant, Content: []agent.Content{{ToolCall: &agent.ToolCall{ID: "image", Name: name, Args: `{"file_path":"shot.png"}`}}}},
-				{Role: agent.RoleAssistant, Content: []agent.Content{
-					{ToolResult: &agent.ToolResult{ID: "image", Name: name, Content: "[image attached below]"}},
-					{File: &agent.File{Data: image}},
-					{File: &agent.File{Data: "hidden"}, Hidden: true},
+			messages := []harness.Message{
+				{Role: harness.RoleAssistant, Content: []harness.Content{{ToolCall: &harness.ToolCall{ID: "image", Name: name, Args: `{"file_path":"shot.png"}`}}}},
+				{Role: harness.RoleAssistant, Content: []harness.Content{
+					{ToolResult: &harness.ToolResult{ID: "image", Name: name, Content: "[image attached below]"}},
+					{File: &harness.File{Data: image}},
+					{File: &harness.File{Data: "hidden"}, Hidden: true},
 				}},
 			}
 			for _, message := range messages {

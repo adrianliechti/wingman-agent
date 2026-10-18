@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/external"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 )
 

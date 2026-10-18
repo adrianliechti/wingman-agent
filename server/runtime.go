@@ -15,11 +15,11 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agents"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
@@ -149,7 +149,7 @@ type backendStartup struct {
 
 func (s *Server) backend(id string) (*backendRuntime, error) {
 	return s.resolveBackend(id, func(ctx context.Context) (code.Agent, error) {
-		return agents.New(ctx, s.workspace, id, s.config)
+		return agents.NewExternal(ctx, s.workspace, id)
 	})
 }
 
@@ -496,7 +496,7 @@ func (c *sessionController) execute(command Command) error {
 		c.mu.Lock()
 		c.state.Error, c.state.Compaction = nil, nil
 		c.mu.Unlock()
-		if err := b.turns.StartCompact(sid, command.Text, func(result agent.CompactResult, err error) {
+		if err := b.turns.StartCompact(sid, command.Text, func(result harness.CompactResult, err error) {
 			b.finishCompaction(sid, result, err)
 		}); err != nil {
 			return err

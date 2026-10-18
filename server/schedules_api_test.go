@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 )
 
 func TestSchedulesAPI(t *testing.T) {

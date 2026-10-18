@@ -4,16 +4,17 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	acpsdk "github.com/coder/acp-go-sdk"
 )
 
@@ -83,6 +84,7 @@ func TestConcurrentClosePreservesRetainedWorkspaceUntilPromptEnds(t *testing.T) 
 	// One independent reference keeps the zero-resource workspace usable here.
 	w := &workspaceEntry{refs: 2, key: "workspace"}
 	s := &Server{sessions: map[acpsdk.SessionId]*sessionEntry{id: {id: id, workspace: w}}}
+	s.workspaceRefs.Add(w.refs)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	_, finish, err := s.retainSession(ctx, id, cancel)
@@ -123,9 +125,52 @@ func TestCancelledPromptCannotAcquireIdleSession(t *testing.T) {
 	}
 }
 
+func TestCloseWaitsForPromptWorkspaceRelease(t *testing.T) {
+	s := newContractServer(t).(*contractServer)
+	t.Cleanup(func() { _ = s.Close() })
+	response, err := s.NewSession(t.Context(), acpsdk.NewSessionRequest{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sess, finish, err := s.retainSession(ctx, response.SessionId, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { s.close(); close(done) }()
+	<-ctx.Done()
+	select {
+	case <-done:
+		t.Error("shutdown returned while a prompt still retained its workspace")
+	case <-time.After(20 * time.Millisecond):
+	}
+	if _, err := sess.workspace.ws.Root.Stat("."); err != nil {
+		t.Errorf("shutdown closed a retained workspace: %v", err)
+	}
+	finish()
+	s.releaseWorkspace(sess.workspace)
+	<-done
+	if _, err := sess.workspace.ws.Root.Stat("."); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("shutdown left the workspace open: %v", err)
+	}
+}
+
+func TestClosingServerRejectsPromptAdmission(t *testing.T) {
+	w := &workspaceEntry{refs: 1}
+	s := &Server{closing: true, sessions: map[acpsdk.SessionId]*sessionEntry{"s": {workspace: w}}}
+	if _, _, err := s.retainSession(t.Context(), "s", func() {}); err == nil {
+		t.Fatal("closing server accepted a prompt")
+	}
+	if w.refs != 1 || s.sessions["s"].cancel != nil {
+		t.Fatal("rejected prompt changed session ownership")
+	}
+}
+
 func TestClosingServerRejectsLateSessionRegistration(t *testing.T) {
 	s := &Server{closing: true, sessions: map[acpsdk.SessionId]*sessionEntry{}}
-	w := &workspaceEntry{agent: &codeagent.Agent{}, refs: 1}
+	w := &workspaceEntry{agent: &agent.Agent{}, refs: 1}
 	if err := s.registerSession("new", w); err == nil {
 		t.Fatal("registered session after shutdown")
 	}
@@ -146,7 +191,7 @@ func TestHistoryReplaySurfacesStalledClientWrite(t *testing.T) {
 		defer writer.Close()
 		s := &Server{}
 		s.conn = acpsdk.NewAgentSideConnection(s, writer, local)
-		err := s.replayMessages(context.Background(), "s", []agent.Message{{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "history"}}}})
+		err := s.replayMessages(context.Background(), "s", []harness.Message{{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "history"}}}})
 		if err == nil {
 			t.Fatal("history replay reported success after a failed write")
 		}

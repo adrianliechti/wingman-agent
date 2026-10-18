@@ -5,14 +5,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
-func newStreamTestApp(messages []agent.Message) (*App, *uiTestAgent) {
+func newStreamTestApp(messages []harness.Message) (*App, *uiTestAgent) {
 	testAgent := newUITestAgent(messages)
 	return &App{
 		ctx: context.Background(), agent: testAgent, sessionID: "session",
@@ -22,17 +22,17 @@ func newStreamTestApp(messages []agent.Message) (*App, *uiTestAgent) {
 
 func TestSyncMessagesReconcilesNativeCommittedStream(t *testing.T) {
 	a, testAgent := newStreamTestApp(nil)
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		Reasoning: &agent.Reasoning{ID: "reason-1", Summary: "**Planning the edit**\nprivate details"},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		Reasoning: &harness.Reasoning{ID: "reason-1", Summary: "**Planning the edit**\nprivate details"},
 	}}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
 		Text: "Let me inspect the file.",
 	}}})
 
-	testAgent.messages = append(testAgent.messages, agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{
-		{Reasoning: &agent.Reasoning{ID: "reason-1", Summary: "**Planning the edit**\nprivate details"}},
+	testAgent.messages = append(testAgent.messages, harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
+		{Reasoning: &harness.Reasoning{ID: "reason-1", Summary: "**Planning the edit**\nprivate details"}},
 		{Text: "Let me inspect the file."},
-		{ToolCall: &agent.ToolCall{ID: "call-1", Name: "read", Args: `{"path":"main.go"}`}},
+		{ToolCall: &harness.ToolCall{ID: "call-1", Name: "read", Args: `{"path":"main.go"}`}},
 	}})
 	a.syncMessages()
 
@@ -40,12 +40,12 @@ func TestSyncMessagesReconcilesNativeCommittedStream(t *testing.T) {
 		t.Fatalf("committed response remained in live tail: %q", tail)
 	}
 
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolCall: &agent.ToolCall{ID: "call-1", Name: "read", Args: `{"path":"main.go"}`},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolCall: &harness.ToolCall{ID: "call-1", Name: "read", Args: `{"path":"main.go"}`},
 	}}})
-	result := &agent.ToolResult{ID: "call-1", Name: "read", Args: `{"path":"main.go"}`, Content: "package main"}
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{ToolResult: result}}})
-	testAgent.messages = append(testAgent.messages, agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{ToolResult: result}}})
+	result := &harness.ToolResult{ID: "call-1", Name: "read", Args: `{"path":"main.go"}`, Content: "package main"}
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: result}}})
+	testAgent.messages = append(testAgent.messages, harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: result}}})
 	a.syncMessages()
 
 	out := ansi.Strip(strings.Join(a.chatViewLines(100), "\n"))
@@ -64,10 +64,10 @@ func TestSyncMessagesReconcilesNativeCommittedStream(t *testing.T) {
 }
 
 func TestSyncMessagesRebuildsRewrittenHistory(t *testing.T) {
-	a, testAgent := newStreamTestApp([]agent.Message{{Role: agent.RoleUser, Content: []agent.Content{{Text: "old history"}}}})
+	a, testAgent := newStreamTestApp([]harness.Message{{Role: harness.RoleUser, Content: []harness.Content{{Text: "old history"}}}})
 	a.syncMessages()
 
-	testAgent.messages = []agent.Message{{Role: agent.RoleUser, Content: []agent.Content{{Text: "compacted history"}}}}
+	testAgent.messages = []harness.Message{{Role: harness.RoleUser, Content: []harness.Content{{Text: "compacted history"}}}}
 	testAgent.revision++
 	a.syncMessages()
 
@@ -78,7 +78,7 @@ func TestSyncMessagesRebuildsRewrittenHistory(t *testing.T) {
 }
 
 func TestSyncMessagesSkipsUnchangedHistoryClone(t *testing.T) {
-	a, testAgent := newStreamTestApp([]agent.Message{{Role: agent.RoleUser, Content: []agent.Content{{Text: "hello"}}}})
+	a, testAgent := newStreamTestApp([]harness.Message{{Role: harness.RoleUser, Content: []harness.Content{{Text: "hello"}}}})
 	a.syncMessages()
 	if testAgent.snapshots != 1 {
 		t.Fatalf("initial history snapshots = %d, want 1", testAgent.snapshots)
@@ -89,7 +89,7 @@ func TestSyncMessagesSkipsUnchangedHistoryClone(t *testing.T) {
 		t.Fatalf("unchanged history was cloned again: snapshots = %d", testAgent.snapshots)
 	}
 
-	testAgent.messages = append(testAgent.messages, agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "answer"}}})
+	testAgent.messages = append(testAgent.messages, harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "answer"}}})
 	a.syncMessages()
 	if testAgent.snapshots != 2 {
 		t.Fatalf("appended history was not cloned: snapshots = %d", testAgent.snapshots)
@@ -99,8 +99,8 @@ func TestSyncMessagesSkipsUnchangedHistoryClone(t *testing.T) {
 func TestStreamResetDropsOnlyFailedAttemptOutput(t *testing.T) {
 	a, _ := newStreamTestApp(nil)
 	a.appendLiveUserEcho("keep this guidance")
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "failed partial"}}})
-	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: agent.StreamEventReset})
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "failed partial"}}})
+	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: harness.StreamEventReset})
 
 	tail := ansi.Strip(strings.Join(a.streamCells(100), "\n"))
 	if strings.Contains(tail, "failed partial") || !strings.Contains(tail, "keep this guidance") {
@@ -110,14 +110,14 @@ func TestStreamResetDropsOnlyFailedAttemptOutput(t *testing.T) {
 
 func TestStreamResetPreservesCommittedEarlierRound(t *testing.T) {
 	a, _ := newStreamTestApp(nil)
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
 		Text: "accepted output", TextID: "message-1",
 	}}})
-	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: agent.StreamEventCommit})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
+	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: harness.StreamEventCommit})
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
 		Text: "failed output", TextID: "message-2",
 	}}})
-	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: agent.StreamEventReset})
+	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: harness.StreamEventReset})
 
 	tail := ansi.Strip(strings.Join(a.streamCells(100), "\n"))
 	if !strings.Contains(tail, "accepted output") || strings.Contains(tail, "failed output") {
@@ -127,11 +127,11 @@ func TestStreamResetPreservesCommittedEarlierRound(t *testing.T) {
 
 func TestPartialToolCallUpdatesInPlaceAndResets(t *testing.T) {
 	a, _ := newStreamTestApp(nil)
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolCall: &agent.ToolCall{ID: "call-1", Name: "shell", Partial: true},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolCall: &harness.ToolCall{ID: "call-1", Name: "shell", Partial: true},
 	}}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolCall: &agent.ToolCall{ID: "call-1", Name: "shell", Args: `{"command":"go test"}`, Partial: true},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolCall: &harness.ToolCall{ID: "call-1", Name: "shell", Args: `{"command":"go test"}`, Partial: true},
 	}}})
 
 	snapshots := a.snapshotStreamState()
@@ -139,7 +139,7 @@ func TestPartialToolCallUpdatesInPlaceAndResets(t *testing.T) {
 		t.Fatalf("partial snapshots did not merge: %+v", snapshots)
 	}
 
-	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: agent.StreamEventReset})
+	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: harness.StreamEventReset})
 	if snapshots := a.snapshotStreamState(); len(snapshots) != 0 {
 		t.Fatalf("failed partial tool survived reset: %+v", snapshots)
 	}
@@ -147,11 +147,11 @@ func TestPartialToolCallUpdatesInPlaceAndResets(t *testing.T) {
 
 func TestToolResultMakesPartialSnapshotAuthoritative(t *testing.T) {
 	a, _ := newStreamTestApp(nil)
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolCall: &agent.ToolCall{ID: "call-1", Name: "shell", Args: `{"command":"go test"}`, Partial: true},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolCall: &harness.ToolCall{ID: "call-1", Name: "shell", Args: `{"command":"go test"}`, Partial: true},
 	}}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolResult: &agent.ToolResult{ID: "call-1", Name: "shell", Content: "ok"},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolResult: &harness.ToolResult{ID: "call-1", Name: "shell", Content: "ok"},
 	}}})
 	a.commitStreamAttempt()
 
@@ -163,11 +163,11 @@ func TestToolResultMakesPartialSnapshotAuthoritative(t *testing.T) {
 
 func TestStreamCommitReplacesPartialToolWithDefinitiveCall(t *testing.T) {
 	a, _ := newStreamTestApp(nil)
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolCall: &agent.ToolCall{ID: "call-1", Name: "shell", Args: `{"command":"go te"}`, Partial: true},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolCall: &harness.ToolCall{ID: "call-1", Name: "shell", Args: `{"command":"go te"}`, Partial: true},
 	}}})
 	a.renderPending.Store(false)
-	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: agent.StreamEventCommit})
+	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: harness.StreamEventCommit})
 	if snapshots := a.snapshotStreamState(); len(snapshots) != 0 {
 		t.Fatalf("commit retained non-authoritative tool call: %+v", snapshots)
 	}
@@ -175,8 +175,8 @@ func TestStreamCommitReplacesPartialToolWithDefinitiveCall(t *testing.T) {
 		t.Fatal("commit did not schedule removal of the partial tool")
 	}
 
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolCall: &agent.ToolCall{ID: "call-1", Name: "shell", Args: `{"command":"go test"}`},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolCall: &harness.ToolCall{ID: "call-1", Name: "shell", Args: `{"command":"go test"}`},
 	}}})
 
 	snapshots := a.snapshotStreamState()
@@ -187,11 +187,11 @@ func TestStreamCommitReplacesPartialToolWithDefinitiveCall(t *testing.T) {
 
 func TestStreamCommitStartsFreshTextCell(t *testing.T) {
 	a, _ := newStreamTestApp(nil)
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
 		Text: "first", TextID: "message-1",
 	}}})
-	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: agent.StreamEventCommit})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
+	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: harness.StreamEventCommit})
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
 		Text: "second", TextID: "message-1",
 	}}})
 
@@ -203,10 +203,10 @@ func TestStreamCommitStartsFreshTextCell(t *testing.T) {
 
 func TestCommittedTextReconcilesByMessageID(t *testing.T) {
 	a, testAgent := newStreamTestApp(nil)
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
 		Text: "partial rendering", TextID: "message-1",
 	}}})
-	testAgent.messages = append(testAgent.messages, agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
+	testAgent.messages = append(testAgent.messages, harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
 		Text: "authoritative retained text", TextID: "message-1",
 	}}})
 	a.syncMessages()
@@ -219,7 +219,7 @@ func TestCommittedTextReconcilesByMessageID(t *testing.T) {
 
 func TestRefusalRendersOnceAfterCommit(t *testing.T) {
 	a, testAgent := newStreamTestApp(nil)
-	message := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
+	message := harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
 		Refusal: "I cannot help with that.", TextID: "refusal-1",
 	}}}
 	a.handleStreamMessage(message)
@@ -245,18 +245,18 @@ func TestReleaseToolCellKeepsLiveCellUntilMatchingResult(t *testing.T) {
 	a := &App{}
 	a.streamCurrent = streamSnapshot{toolID: "call-1", toolName: "shell", toolHint: "ls"}
 
-	a.releaseToolCell(&agent.ToolResult{ID: "call-2", Name: "shell"})
+	a.releaseToolCell(&harness.ToolResult{ID: "call-2", Name: "shell"})
 	if a.streamCurrent.toolName == "" {
 		t.Fatal("live cell released by a different call's result")
 	}
 
-	a.releaseToolCell(&agent.ToolResult{ID: "call-1", Name: "shell"})
+	a.releaseToolCell(&harness.ToolResult{ID: "call-1", Name: "shell"})
 	if a.streamCurrent.toolName != "" || a.streamCurrent.toolID != "" {
 		t.Fatal("live cell not released by matching result")
 	}
 
 	a.streamCurrent = streamSnapshot{toolName: "read"}
-	a.releaseToolCell(&agent.ToolResult{Name: "read"})
+	a.releaseToolCell(&harness.ToolResult{Name: "read"})
 	if a.streamCurrent.toolName != "" {
 		t.Fatal("live cell not released by name fallback")
 	}
@@ -264,11 +264,11 @@ func TestReleaseToolCellKeepsLiveCellUntilMatchingResult(t *testing.T) {
 
 func TestReleaseToolCellRemovesArchivedCompletedTool(t *testing.T) {
 	a := &App{queue: make(chan func(), 8), quit: make(chan struct{})}
-	result := &agent.ToolResult{ID: "call-1", Name: "read", Args: `{"path":"one.go"}`, Content: "ok"}
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolCall: &agent.ToolCall{ID: result.ID, Name: result.Name, Args: result.Args},
+	result := &harness.ToolResult{ID: "call-1", Name: "read", Args: `{"path":"one.go"}`, Content: "ok"}
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolCall: &harness.ToolCall{ID: result.ID, Name: result.Name, Args: result.Args},
 	}}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{ToolResult: result}}})
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: result}}})
 
 	if tail := strings.Join(a.streamCells(100), "\n"); !strings.Contains(tail, "one.go") {
 		t.Fatalf("completed ACP tool vanished before commit: %q", tail)
@@ -281,11 +281,11 @@ func TestReleaseToolCellRemovesArchivedCompletedTool(t *testing.T) {
 
 func TestParallelArchivedToolReceivesProgressAndCompletion(t *testing.T) {
 	a := &App{queue: make(chan func(), 8), quit: make(chan struct{})}
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolCall: &agent.ToolCall{ID: "call-1", Name: "read", Args: `{"path":"one.go"}`},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolCall: &harness.ToolCall{ID: "call-1", Name: "read", Args: `{"path":"one.go"}`},
 	}}})
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolCall: &agent.ToolCall{ID: "call-2", Name: "read", Args: `{"path":"two.go"}`},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolCall: &harness.ToolCall{ID: "call-2", Name: "read", Args: `{"path":"two.go"}`},
 	}}})
 
 	a.onToolProgress(context.Background(), "call-1", "halfway")
@@ -293,8 +293,8 @@ func TestParallelArchivedToolReceivesProgressAndCompletion(t *testing.T) {
 		t.Fatalf("archived tool progress was lost: %+v", a.streamHistory)
 	}
 
-	a.handleStreamMessage(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{
-		ToolResult: &agent.ToolResult{ID: "call-1", Name: "read", Content: "ok"},
+	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
+		ToolResult: &harness.ToolResult{ID: "call-1", Name: "read", Content: "ok"},
 	}}})
 	if a.streamHistory[0].toolResult == nil || a.streamHistory[0].toolResult.Args == "" {
 		t.Fatalf("archived tool did not retain its completed result: %+v", a.streamHistory[0])
@@ -348,7 +348,7 @@ func TestQueuedEchoMovesIntoTranscriptWhenTurnBecomesActive(t *testing.T) {
 func TestActivateSessionResetsTurnState(t *testing.T) {
 	ws := newTestWorkspace(t, t.TempDir())
 
-	a := &App{agent: codeagent.New(ws, &agent.Config{}, nil), sessionID: "old", sessionEpoch: 3}
+	a := &App{agent: agent.New(ws, agent.Config{}, nil), sessionID: "old", sessionEpoch: 3}
 	a.phase.Store(int32(PhaseStreaming))
 	a.streamCurrent = streamSnapshot{
 		text: "partial", reasoning: "thinking", reasoningID: "reasoning", toolName: "shell",

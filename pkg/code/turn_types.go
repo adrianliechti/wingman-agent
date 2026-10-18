@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 type TurnInputIntent string
@@ -59,9 +59,9 @@ var (
 )
 
 type TurnInput struct {
-	ID      string          `json:"id"`
-	Content []agent.Content `json:"content"`
-	Intent  TurnInputIntent `json:"intent"`
+	ID      string            `json:"id"`
+	Content []harness.Content `json:"content"`
+	Intent  TurnInputIntent   `json:"intent"`
 	// Display is the original visible input, persisted with the execution payload.
 	// A nil display denotes an older queue record and is normalized on read.
 	Display *TurnInputDisplay `json:"display,omitempty"`
@@ -75,7 +75,7 @@ type TurnInputDisplay struct {
 }
 
 func CloneTurnInput(input TurnInput) TurnInput {
-	input.Content = agent.CloneContent(input.Content)
+	input.Content = harness.CloneContent(input.Content)
 	if input.Display != nil {
 		display := *input.Display
 		display.Files = append([]string(nil), display.Files...)
@@ -125,11 +125,11 @@ type TurnEvent struct {
 	Input     TurnInput
 	// StreamEvent carries a transport lifecycle boundary separately from
 	// conversational messages.
-	StreamEvent agent.StreamEvent
-	Retry       *agent.RetryInfo
+	StreamEvent harness.StreamEvent
+	Retry       *harness.RetryInfo
 	// Message is only valid for the duration of the synchronous event handler.
 	// Handlers that retain it must copy its content.
-	Message *agent.Message
+	Message *harness.Message
 	Err     error
 	// Executed is true only for the primary input whose Agent.Send call ended.
 	// Steered and removed queued inputs also receive terminal states but must not

@@ -34,6 +34,7 @@ type Command = protocol.Command
 type LSPAny = protocol.LSPAny
 type FormattingOptions = protocol.FormattingOptions
 type TextEdit = protocol.TextEdit
+type AnnotatedTextEdit = protocol.AnnotatedTextEdit
 type InlayHint = protocol.InlayHint
 type TextDocumentEdit = protocol.TextDocumentEdit
 type CreateFile = protocol.CreateFile
@@ -75,6 +76,8 @@ const (
 )
 
 const DocumentHighlightKindText = protocol.DocumentHighlightKindText
+
+const CodeActionTriggerKindInvoked = protocol.CodeActionTriggerKindInvoked
 
 type SymbolKind = protocol.SymbolKind
 

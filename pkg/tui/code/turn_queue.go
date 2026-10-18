@@ -5,8 +5,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
@@ -154,7 +154,7 @@ func (a *App) editQueuedInput(input code.TurnInput) {
 			if part.File.Name != "" && slices.Contains(a.pendingFiles, part.File.Name) {
 				continue
 			}
-			a.pendingContent = append(a.pendingContent, agent.CloneContent([]agent.Content{part})...)
+			a.pendingContent = append(a.pendingContent, harness.CloneContent([]harness.Content{part})...)
 		}
 	}
 	a.showToast("Editing queued input · Enter updates · Esc cancels", theme.Default.Cyan)

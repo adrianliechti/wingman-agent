@@ -13,7 +13,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	acpsdk "github.com/coder/acp-go-sdk"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 type session struct {

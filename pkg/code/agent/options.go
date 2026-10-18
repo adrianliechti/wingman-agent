@@ -4,69 +4,37 @@ import (
 	"os"
 	"strings"
 
-	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
-// Options controls the built-in tools exposed by an Agent. Environment
-// variables are resolved once when the agent starts and are combined with the
-// explicitly supplied options.
+// Options toggles code agent features; the zero value enables all tools with sandboxing.
 type Options struct {
-	// RequireSessionContext disables single-client prompt routing fallbacks.
-	RequireSessionContext  bool
-	IsolateSessionSettings bool
-	DisableShell           bool
-	DisableSandbox         bool
-	DisableWebSearch       bool
-	DisableWebFetch        bool
+	// IsolateSessions disables single-client prompt routing fallbacks and keeps model
+	// and effort changes scoped to the session where they were made.
+	IsolateSessions bool
 
-	Sandbox *SandboxOptions
+	DisableShell     bool
+	DisableSandbox   bool
+	SandboxNetwork   bool
+	DisableWebSearch bool
+	DisableWebFetch  bool
 
-	// Telemetry overrides the pipeline on the underlying agent.Config. A nil
-	// value inherits that config, including automatic standard OTEL environment
-	// configuration from agent.DefaultConfig.
-	Telemetry *telemetry.Telemetry
-
-	// ShutdownTelemetryOnClose transfers ownership of the selected telemetry
-	// pipeline to this Agent. The Agent closes associated workspace MCP sessions
-	// before shutting the pipeline down so their final metrics can be exported.
-	// Most embedders should leave ownership with the component that created the
-	// pipeline.
-	ShutdownTelemetryOnClose bool
+	// Empty role models are selected automatically from available models.
+	ComplexModel string
+	UtilityModel string
 }
 
-// SandboxOptions configures the OS sandbox used for shell commands and
-// scheduled scripts. A nil value or nil fields inherit the environment
-// defaults (WINGMAN_SANDBOX_NETWORK).
-type SandboxOptions struct {
-	Network *bool
-}
-
-func resolveOptions(options []Options) Options {
-	resolved := Options{
+// optionsFromEnvironment reads startup settings for DefaultConfig.
+func optionsFromEnvironment() Options {
+	return Options{
 		DisableShell:     environmentEnabled("WINGMAN_DISABLE_SHELL"),
 		DisableSandbox:   sandboxDisabledFromEnv(),
+		SandboxNetwork:   environmentEnabled("WINGMAN_SANDBOX_NETWORK"),
 		DisableWebSearch: environmentEnabled("WINGMAN_DISABLE_WEBSEARCH"),
 		DisableWebFetch:  environmentEnabled("WINGMAN_DISABLE_WEBFETCH"),
-		Sandbox: &SandboxOptions{
-			Network: new(environmentEnabled("WINGMAN_SANDBOX_NETWORK")),
-		},
+		ComplexModel:     harness.DefaultComplexModel(),
+		UtilityModel:     harness.DefaultUtilityModel(),
 	}
-	for _, option := range options {
-		resolved.RequireSessionContext = resolved.RequireSessionContext || option.RequireSessionContext
-		resolved.IsolateSessionSettings = resolved.IsolateSessionSettings || option.IsolateSessionSettings
-		resolved.DisableShell = resolved.DisableShell || option.DisableShell
-		resolved.DisableSandbox = resolved.DisableSandbox || option.DisableSandbox
-		resolved.DisableWebSearch = resolved.DisableWebSearch || option.DisableWebSearch
-		resolved.DisableWebFetch = resolved.DisableWebFetch || option.DisableWebFetch
-		if option.Sandbox != nil && option.Sandbox.Network != nil {
-			resolved.Sandbox.Network = new(*option.Sandbox.Network)
-		}
-		if option.Telemetry != nil {
-			resolved.Telemetry = option.Telemetry
-		}
-		resolved.ShutdownTelemetryOnClose = resolved.ShutdownTelemetryOnClose || option.ShutdownTelemetryOnClose
-	}
-	return resolved
 }
 
 func sandboxDisabledFromEnv() bool {

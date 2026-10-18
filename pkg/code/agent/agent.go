@@ -19,21 +19,21 @@ import (
 
 	"github.com/google/uuid"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/external"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	elicittool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/elicit"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fetch"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/truncation"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	elicittool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/elicit"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fetch"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/shell"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/subagent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
@@ -42,8 +42,7 @@ import (
 
 type Agent struct {
 	workspace *code.Workspace
-	cfg       *harness.Config
-	options   Options
+	cfg       Config
 
 	uiMu    sync.RWMutex
 	ui      code.UI
@@ -143,21 +142,23 @@ func (s *sessionState) permissionMode() string {
 	return "default"
 }
 
-// New constructs a built-in code agent. Options are optional so existing
-// callers keep the default tool set; multiple values are combined.
-func New(ws *code.Workspace, cfg *harness.Config, ui code.UI, options ...Options) *Agent {
-	resolvedOptions := resolveOptions(options)
+// New creates a code agent; the caller keeps ownership of the workspace and telemetry.
+func New(ws *code.Workspace, cfg Config, ui code.UI) *Agent {
+	cfg.Config = *cfg.Config.Clone()
 	a := &Agent{
 		workspace:    ws,
 		cfg:          cfg,
-		options:      resolvedOptions,
 		ui:           ui,
-		modelID:      harness.DefaultModel(),
-		effort:       harness.DefaultEffort(),
-		complexModel: harness.DefaultComplexModel(),
-		utilityModel: harness.DefaultUtilityModel(),
+		complexModel: cfg.ComplexModel,
+		utilityModel: cfg.UtilityModel,
 		sessionsDir:  filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
 		sessions:     map[string]*sessionState{},
+	}
+	if cfg.Model != nil {
+		a.modelID = cfg.Model()
+	}
+	if cfg.Effort != nil {
+		a.effort = cfg.Effort()
 	}
 	a.prompts = &tool.Elicitation{Elicit: a.elicit, Confirm: a.confirm, Review: a.review}
 
@@ -166,11 +167,7 @@ func New(ws *code.Workspace, cfg *harness.Config, ui code.UI, options ...Options
 	// an explicit session; single-client embedders retain their routing fallback.
 	if ws.MCP != nil {
 		ws.MCP.SetElicit(a.elicit)
-		tel := cfg.Telemetry
-		if resolvedOptions.Telemetry != nil {
-			tel = resolvedOptions.Telemetry
-		}
-		ws.MCP.SetTelemetry(tel)
+		ws.MCP.SetTelemetry(cfg.Telemetry)
 	}
 
 	return a
@@ -583,21 +580,6 @@ func (a *Agent) Close() error {
 	for _, s := range sessions {
 		s.close()
 	}
-	if a.options.ShutdownTelemetryOnClose {
-		// The MCP manager can retain session-duration observations until the
-		// workspace closes. End those sessions while the owned meter provider is
-		// still accepting records; Workspace.Close may safely close them again.
-		if a.workspace != nil && a.workspace.MCP != nil {
-			a.workspace.MCP.Close()
-		}
-		tel := a.options.Telemetry
-		if tel == nil {
-			tel = a.cfg.Telemetry
-		}
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return tel.Shutdown(shutdownCtx)
-	}
 	return nil
 }
 
@@ -661,10 +643,7 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	if err != nil {
 		return nil, err
 	}
-	sessionCfg := a.cfg.Derive()
-	if a.options.Telemetry != nil {
-		sessionCfg.Telemetry = a.options.Telemetry
-	}
+	sessionCfg := a.cfg.Clone()
 	s := &sessionState{
 		id:      id,
 		parent:  a,
@@ -767,8 +746,7 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	)
 
 	allowedReadRoots, allowedWriteRoots := sessionFileRoots(ws)
-	sandboxNetwork := a.options.Sandbox != nil && a.options.Sandbox.Network != nil && *a.options.Sandbox.Network
-	if !a.options.DisableShell && !a.options.DisableSandbox {
+	if !a.cfg.DisableShell && !a.cfg.DisableSandbox {
 		if err := shell.CheckSandbox(ws.RootPath); err != nil {
 			return nil, fmt.Errorf("sandbox unavailable (WINGMAN_SANDBOX=off explicitly disables isolation): %w", err)
 		}
@@ -807,26 +785,26 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	shellOpts := &shell.Options{
 		ScratchDir:         ws.ScratchPath,
 		TempDir:            privateTemp,
-		DisableSandbox:     a.options.DisableSandbox,
-		Network:            sandboxNetwork,
+		DisableSandbox:     a.cfg.DisableSandbox,
+		Network:            a.cfg.SandboxNetwork,
 		ExtraWritableRoots: []string{ws.MemoryPath},
 	}
 	allowedReadRoots = append(allowedReadRoots, privateTemp)
 	allowedWriteRoots = append(allowedWriteRoots, privateTemp)
-	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.options.DisableShell, Elicitation: elicit, Shell: shellOpts}
+	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.cfg.DisableShell, Elicitation: elicit, Shell: shellOpts}
 	go s.watchFileChanges()
 	go s.runSchedules()
 
 	var shellTools []tool.Tool
-	if !a.options.DisableShell {
+	if !a.cfg.DisableShell {
 		shellTools = shell.ExecTools(s.execManager, ws.RootPath, elicit, shellOpts)
 	}
 	var webFetchTools []tool.Tool
-	if !a.options.DisableWebFetch {
+	if !a.cfg.DisableWebFetch {
 		webFetchTools = fetch.Tools(elicit)
 	}
 	var webSearchTools []tool.Tool
-	if !a.options.DisableWebSearch {
+	if !a.cfg.DisableWebSearch {
 		webSearchTools = websearch.Tools(elicit)
 	}
 
@@ -937,7 +915,7 @@ func (a *Agent) promptContext(ctx context.Context) context.Context {
 	if sid := hook.RuntimeFromContext(ctx).SessionID; sid != "" && a.session(sid) != nil {
 		return code.WithSessionID(ctx, sid)
 	}
-	if a.options.RequireSessionContext {
+	if a.cfg.IsolateSessions {
 		return ctx
 	}
 

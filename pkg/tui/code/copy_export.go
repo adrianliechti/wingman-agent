@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -102,10 +102,10 @@ func writeTranscriptFile(path, document string) error {
 // Export source content rather than rendered terminal rows. Hidden context and
 // opaque provider reasoning are excluded, and attachments are named without
 // embedding their base64 payloads.
-func transcriptMarkdown(messages []agent.Message, isToolHidden func(string) bool) string {
+func transcriptMarkdown(messages []harness.Message, isToolHidden func(string) bool) string {
 	var transcript strings.Builder
 	for _, message := range messages {
-		if message.Hidden || message.Role == agent.RoleSystem {
+		if message.Hidden || message.Role == harness.RoleSystem {
 			continue
 		}
 		var body strings.Builder
@@ -147,7 +147,7 @@ func transcriptMarkdown(messages []agent.Message, isToolHidden func(string) bool
 			continue
 		}
 		role := "Assistant"
-		if message.Role == agent.RoleUser {
+		if message.Role == harness.RoleUser {
 			role = "User"
 		}
 		fmt.Fprintf(&transcript, "## %s\n\n%s", role, body.String())

@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 func TestProjectInstructionsE2ERefreshAtToolBoundaries(t *testing.T) {
@@ -70,7 +70,7 @@ func TestProjectInstructionsE2ERefreshAtToolBoundaries(t *testing.T) {
 	}))
 	t.Cleanup(provider.Close)
 	t.Setenv("WINGMAN_URL", provider.URL)
-	cfg, err := harness.DefaultConfig()
+	cfg, err := DefaultConfig()
 	if err != nil {
 		t.Fatal(err)
 	}

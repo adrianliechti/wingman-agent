@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
@@ -32,8 +32,8 @@ func (a *queueTestAgent) SaveTurnQueue(_ string, s corecode.TurnQueueState) erro
 	a.persisted = s
 	return nil
 }
-func (a *queueTestAgent) Send(ctx context.Context, _ string, input []agent.Content) (iter.Seq2[agent.Message, error], error) {
-	return func(func(agent.Message, error) bool) {
+func (a *queueTestAgent) Send(ctx context.Context, _ string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
+	return func(func(harness.Message, error) bool) {
 		select {
 		case a.sent <- input[0].Text:
 		case <-ctx.Done():
@@ -47,7 +47,7 @@ func newQueueTestApp(t *testing.T, count int) (*App, *queueTestAgent) {
 	app.editor = NewEditor()
 	fakeQueue := &queueTestAgent{uiTestAgent: fake, sent: make(chan string, count+1)}
 	for i := 0; i < count; i++ {
-		fakeQueue.persisted.Inputs = append(fakeQueue.persisted.Inputs, corecode.TurnInput{ID: strings.Repeat("x", i+1), Content: []agent.Content{{Text: "recovered follow-up"}}})
+		fakeQueue.persisted.Inputs = append(fakeQueue.persisted.Inputs, corecode.TurnInput{ID: strings.Repeat("x", i+1), Content: []harness.Content{{Text: "recovered follow-up"}}})
 	}
 	app.agent = fakeQueue
 	app.turns = corecode.NewTurnManager(app.ctx, fakeQueue, app.handleTurnEvent)

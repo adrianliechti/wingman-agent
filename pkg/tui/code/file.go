@@ -11,7 +11,7 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -135,13 +135,13 @@ func contextFileID(path string) string {
 // applyContextSelection replaces the pending attachments with the picker
 // outcome. Pending files the picker never offered (paths outside the
 // workspace, ignored files) ride along in the selection and are kept.
-func (a *App) applyContextSelection(images []agent.Content, files []fileMatch, ids []string) {
+func (a *App) applyContextSelection(images []harness.Content, files []fileMatch, ids []string) {
 	selected := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		selected[id] = true
 	}
 
-	var content []agent.Content
+	var content []harness.Content
 	for _, existing := range a.pendingContent {
 		if existing.File == nil {
 			content = append(content, existing)

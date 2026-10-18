@@ -12,10 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 	"github.com/adrianliechti/wingman-agent/pkg/settings"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
@@ -126,7 +126,7 @@ type App struct {
 	contextWindow     int64
 	usageVisibleUntil time.Time
 
-	pendingContent []agent.Content
+	pendingContent []harness.Content
 	pendingFiles   []string
 
 	// Clipboard functions are injectable so UI behavior can be tested without
@@ -170,7 +170,7 @@ type streamSnapshot struct {
 	toolHint      string
 	toolPartial   bool
 	toolProgress  string
-	toolResult    *agent.ToolResult
+	toolResult    *harness.ToolResult
 	text          string
 	textID        string
 	reasoning     string
@@ -204,6 +204,7 @@ type chatAnnotation struct {
 	render        func(width int) []string
 }
 
+// New borrows the agent and workspace. The host closes them after Run returns.
 func New(ctx context.Context, coderAgent code.Agent, sessionID string) *App {
 	saveExecutablePath()
 
@@ -437,7 +438,7 @@ func (a *App) deliverTaskResults(sessionID string, batch []task.Event) {
 	_, err := a.turns.Submit(a.ctx, sessionID, code.TurnInput{
 		ID:     id,
 		Intent: code.TurnInputSteer,
-		Content: []agent.Content{{
+		Content: []harness.Content{{
 			Text:   strings.Join(blocks, "\n\n"),
 			Hidden: true,
 		}},
@@ -660,11 +661,15 @@ func (a *App) Run() error {
 	a.term.EnableMouse(true)
 
 	startupCtx, cancelStartup := context.WithCancel(a.ctx)
-	defer cancelStartup()
+	var startup sync.WaitGroup
+	defer func() {
+		cancelStartup()
+		startup.Wait()
+	}()
 	a.setPhase(PhasePreparing)
 
 	if fetcher, ok := a.agent.(modelFetcher); ok {
-		go func() {
+		startup.Go(func() {
 			err := fetcher.FetchModels(startupCtx)
 			if startupCtx.Err() == nil {
 				a.post(func() {
@@ -674,10 +679,10 @@ func (a *App) Run() error {
 					a.invalidate()
 				})
 			}
-		}()
+		})
 	}
 
-	go func() {
+	startup.Go(func() {
 		a.agent.Workspace().WarmUp()
 		a.post(func() { a.pollDiffPanel(false) })
 
@@ -693,7 +698,7 @@ func (a *App) Run() error {
 			}
 			a.invalidate()
 		})
-	}()
+	})
 
 	a.refreshUsage()
 	if messages := a.agent.Messages(a.sessionID); len(messages) > 0 {
@@ -780,6 +785,7 @@ func (a *App) Run() error {
 }
 
 func (a *App) shutdown() {
+	a.stop()
 	a.term.Stop()
 	if a.operationCancel != nil {
 		a.operationCancel()
@@ -800,11 +806,6 @@ func (a *App) shutdown() {
 	messages := a.agent.Messages(a.sessionID)
 	usage := a.agent.Usage(a.sessionID)
 	name := a.agent.Name()
-	workspace := a.agent.Workspace()
-	_ = a.agent.Close()
-	workspace.Close()
-
-	a.term.Stop()
 
 	if len(messages) > 0 {
 		fmt.Fprintf(os.Stderr, "\n")
@@ -854,7 +855,7 @@ func (a *App) appendAnnotation(render func(width int) []string) {
 
 // restoreChatLines renders the full message history with annotations
 // interleaved at their recorded positions.
-func (a *App) restoreChatLines(messages []agent.Message, width int) []string {
+func (a *App) restoreChatLines(messages []harness.Message, width int) []string {
 	var lines []string
 
 	emit := func(ann chatAnnotation) {
@@ -895,7 +896,7 @@ func (a *App) rebuildChat() {
 	a.rebuildChatFrom(messages)
 }
 
-func (a *App) rebuildChatFrom(messages []agent.Message) {
+func (a *App) rebuildChatFrom(messages []harness.Message) {
 	a.reconcileCurrentTurn(messages)
 	a.chat = nil
 	a.printed = 0
@@ -1553,7 +1554,7 @@ func (a *App) compactContext(focus string) {
 		return
 	}
 	id, epoch := a.sessionID, a.sessionEpoch
-	err := a.turns.StartCompact(id, focus, func(result agent.CompactResult, err error) {
+	err := a.turns.StartCompact(id, focus, func(result harness.CompactResult, err error) {
 		a.post(func() {
 			a.operationPending = false
 			a.operationStatus = ""
@@ -1650,7 +1651,7 @@ func (a *App) applyClipboardContents(contents []clipboard.Content, err error) {
 	for _, content := range contents {
 		if content.Image != nil && a.acceptsClipboardAttachments() {
 			data := normalizeClipboardImage(*content.Image)
-			a.pendingContent = append(a.pendingContent, agent.Content{File: &agent.File{Data: data}})
+			a.pendingContent = append(a.pendingContent, harness.Content{File: &harness.File{Data: data}})
 		}
 		if content.Text != "" {
 			a.handlePaste(content.Text)
@@ -1673,9 +1674,9 @@ func (a *App) acceptsClipboardAttachments() bool {
 	return a.popup == nil || a.popup.kind == popupCommands || a.popup.kind == popupFiles
 }
 
-func lastAssistantText(messages []agent.Message) string {
+func lastAssistantText(messages []harness.Message) string {
 	for _, message := range slices.Backward(messages) {
-		if message.Role != agent.RoleAssistant || message.Hidden {
+		if message.Role != harness.RoleAssistant || message.Hidden {
 			continue
 		}
 		var text strings.Builder

@@ -34,7 +34,9 @@ func main() {
 	args := os.Args[1:]
 
 	if len(args) == 0 {
-		runTUI(ctx, tuiOptions{Agent: "wingman"})
+		if err := runTUI(ctx, tuiOptions{Agent: "wingman"}); err != nil {
+			fatal(err)
+		}
 		return
 	}
 
@@ -70,7 +72,9 @@ func main() {
 			fatal(err)
 		}
 
-		runTUI(ctx, opts)
+		if err := runTUI(ctx, opts); err != nil {
+			fatal(err)
+		}
 	}
 }
 

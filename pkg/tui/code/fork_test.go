@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
 
@@ -24,7 +24,7 @@ func (a *forkingTestAgent) ForkSession(_ context.Context, id, title string) (str
 func TestForkCommandSwitchesToForkedSession(t *testing.T) {
 	testenv.WingmanHome(t)
 	testenv.UserHome(t)
-	a, base := newStreamTestApp([]agent.Message{{Role: agent.RoleUser, Content: []agent.Content{{Text: "hello"}}}})
+	a, base := newStreamTestApp([]harness.Message{{Role: harness.RoleUser, Content: []harness.Content{{Text: "hello"}}}})
 	coder := &forkingTestAgent{uiTestAgent: base}
 	a.agent = coder
 	a.editor = NewEditor()

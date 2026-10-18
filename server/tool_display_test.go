@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 func TestDisplayToolKeepsFilePathOnlyAsChip(t *testing.T) {
@@ -35,7 +35,7 @@ func TestDisplayToolCompactsEditAndPreservesProvidedLocation(t *testing.T) {
 	display := displayTool(
 		"edit", "edit",
 		`{"file_path":"ignored.go","old_string":"before","new_string":"after"}`,
-		[]agent.ToolLocation{{Path: "actual.go", Line: 8}},
+		[]harness.ToolLocation{{Path: "actual.go", Line: 8}},
 		nil,
 	)
 	if display.name != "Edit file" || display.kind != "edit" || display.args != "" || display.hint != "" {
@@ -87,9 +87,9 @@ func TestDisplayToolUsesFriendlyCollaborationAction(t *testing.T) {
 func TestDisplayToolUsesProducerPresentation(t *testing.T) {
 	display := displayTool(
 		"internal_name", "other", `{"internal":true}`, nil,
-		&agent.ToolPresentation{
+		&harness.ToolPresentation{
 			Title: "External action", Kind: "search", Args: `{"limit":2}`,
-			Hint: "needle", Locations: []agent.ToolLocation{{Path: "pkg/main.go"}},
+			Hint: "needle", Locations: []harness.ToolLocation{{Path: "pkg/main.go"}},
 		},
 	)
 	if display.name != "External action" || display.kind != "search" || display.args != `{"limit":2}` || display.hint != "needle" {
@@ -101,13 +101,13 @@ func TestDisplayToolUsesProducerPresentation(t *testing.T) {
 }
 
 func TestConvertMessagesUsesSameCompactPresentation(t *testing.T) {
-	messages := convertMessages([]agent.Message{{
-		Role: agent.RoleAssistant,
-		Content: []agent.Content{
-			{ToolCall: &agent.ToolCall{
+	messages := convertMessages([]harness.Message{{
+		Role: harness.RoleAssistant,
+		Content: []harness.Content{
+			{ToolCall: &harness.ToolCall{
 				ID: "read-1", Name: "read", Args: `{"file_path":"main.go"}`,
 			}},
-			{ToolResult: &agent.ToolResult{
+			{ToolResult: &harness.ToolResult{
 				ID: "read-1", Name: "read", Args: `{"file_path":"main.go"}`, Content: "contents",
 			}},
 		},
@@ -123,9 +123,9 @@ func TestConvertMessagesUsesSameCompactPresentation(t *testing.T) {
 }
 
 func TestConvertMessagesPromotesPrimaryArgumentInHistory(t *testing.T) {
-	messages := convertMessages([]agent.Message{{
-		Role: agent.RoleAssistant,
-		Content: []agent.Content{{ToolCall: &agent.ToolCall{
+	messages := convertMessages([]harness.Message{{
+		Role: harness.RoleAssistant,
+		Content: []harness.Content{{ToolCall: &harness.ToolCall{
 			ID: "glob-1", Name: "Find files", Kind: "search",
 			Args: `{"pattern":"README*","limit":20}`,
 		}}},

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
@@ -26,7 +26,7 @@ func seedForkSource(t *testing.T, a *Agent, id string) {
 
 func TestForkSessionCarriesHistorySettingsAndMode(t *testing.T) {
 	ws := newOptionsTestWorkspace(t)
-	a := New(ws, &harness.Config{}, nil, Options{IsolateSessionSettings: true})
+	a := New(ws, Config{Options: Options{IsolateSessions: true}}, nil)
 	defer a.Close()
 
 	const id = "fork-source"
@@ -96,7 +96,7 @@ func TestForkSessionCarriesHistorySettingsAndMode(t *testing.T) {
 
 func TestForkSessionFromUnloadedSession(t *testing.T) {
 	ws := newOptionsTestWorkspace(t)
-	a := New(ws, &harness.Config{}, nil)
+	a := New(ws, Config{Options: optionsFromEnvironment()}, nil)
 	defer a.Close()
 
 	const id = "on-disk"
@@ -119,7 +119,7 @@ func TestForkSessionFromUnloadedSession(t *testing.T) {
 
 func TestForkSessionRefusesRunningTurn(t *testing.T) {
 	ws := newOptionsTestWorkspace(t)
-	a := New(ws, &harness.Config{}, nil)
+	a := New(ws, Config{Options: optionsFromEnvironment()}, nil)
 	defer a.Close()
 
 	const id = "busy"

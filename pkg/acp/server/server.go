@@ -21,10 +21,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
@@ -56,13 +56,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	case <-ctx.Done():
 	}
 
-	s.mu.Lock()
-	s.closing = true
-	sessionIDs := slices.Collect(maps.Keys(s.sessions))
-	s.mu.Unlock()
-	for _, id := range sessionIDs {
-		_, _ = s.CloseSession(context.Background(), acpsdk.CloseSessionRequest{SessionId: id})
-	}
+	s.close()
 	return writer.Err()
 }
 
@@ -70,7 +64,7 @@ var serverMCPCapabilities = acpsdk.McpCapabilities{Http: true, Sse: true}
 
 type Server struct {
 	conn   *acpsdk.AgentSideConnection
-	config *agent.Config
+	config agent.Config
 
 	mu          sync.Mutex
 	sessions    map[acpsdk.SessionId]*sessionEntry
@@ -78,12 +72,26 @@ type Server struct {
 	workspaces  map[string]*workspaceEntry
 	closing     bool
 
+	// workspaceRefs lets close wait until every workspace has been released.
+	workspaceRefs sync.WaitGroup
+
 	formElicitation atomic.Bool
+}
+
+func (s *Server) close() {
+	s.mu.Lock()
+	s.closing = true
+	sessionIDs := slices.Collect(maps.Keys(s.sessions))
+	s.mu.Unlock()
+	for _, id := range sessionIDs {
+		_, _ = s.CloseSession(context.Background(), acpsdk.CloseSessionRequest{SessionId: id})
+	}
+	s.workspaceRefs.Wait()
 }
 
 type sessionEntry struct {
 	id         acpsdk.SessionId
-	agent      *codeagent.Agent
+	agent      *agent.Agent
 	workspace  *workspaceEntry
 	cancel     context.CancelFunc
 	promptDone chan struct{}
@@ -93,7 +101,7 @@ type sessionEntry struct {
 
 type workspaceEntry struct {
 	ws         *code.Workspace
-	agent      *codeagent.Agent
+	agent      *agent.Agent
 	key        string
 	refs       int
 	ready      chan struct{}
@@ -390,6 +398,7 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 		s.mu.Unlock()
 		return nil, errors.New("ACP connection is closing")
 	}
+	s.workspaceRefs.Add(1)
 	if w, ok := s.workspaces[key]; ok {
 		w.refs++
 		s.mu.Unlock()
@@ -399,6 +408,7 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 
 	ws, err := code.NewWorkspace(cwd)
 	if err != nil {
+		s.workspaceRefs.Done()
 		return nil, err
 	}
 	if len(requested) > 0 {
@@ -411,13 +421,14 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 			delete(ws.MCP.TrustRequired, name)
 		}
 	}
-	wa := codeagent.New(ws, s.config, s)
+	wa := agent.New(ws, s.config, s)
 
 	s.mu.Lock()
 	if s.closing || ctx.Err() != nil {
 		s.mu.Unlock()
 		_ = wa.Close()
 		ws.Close()
+		s.workspaceRefs.Done()
 		return nil, errors.New("ACP connection is closing")
 	}
 	if existing, ok := s.workspaces[key]; ok {
@@ -543,6 +554,7 @@ func missingRequestedMCPServers[T any](requested map[string]mcp.ServerConfig, co
 }
 
 func (s *Server) releaseWorkspace(w *workspaceEntry) {
+	defer s.workspaceRefs.Done()
 	s.mu.Lock()
 	w.refs--
 	if w.refs > 0 {
@@ -686,6 +698,10 @@ func (s *Server) retainSession(ctx context.Context, id acpsdk.SessionId, cancel 
 			s.mu.Unlock()
 			return nil, nil, err
 		}
+		if s.closing {
+			s.mu.Unlock()
+			return nil, nil, errors.New("ACP connection is closing")
+		}
 		sess := s.sessions[id]
 		if sess == nil {
 			s.mu.Unlock()
@@ -710,6 +726,7 @@ func (s *Server) retainSession(ctx context.Context, id acpsdk.SessionId, cancel 
 		}
 
 		done := make(chan struct{})
+		s.workspaceRefs.Add(1)
 		sess.workspace.refs++
 		sess.cancel = cancel
 		sess.promptDone = done
@@ -835,7 +852,7 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (respo
 			return acpsdk.PromptResponse{}, err
 		}
 		for _, c := range msg.Content {
-			notifyContent(notify, agent.RoleAssistant, c)
+			notifyContent(notify, harness.RoleAssistant, c)
 		}
 	}
 	if notifyErr != nil {
@@ -985,7 +1002,7 @@ func (s *Server) LoadSession(ctx context.Context, params acpsdk.LoadSessionReque
 	}, nil
 }
 
-func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.SessionId, servers []acpsdk.McpServer) (*workspaceEntry, []agent.Message, error) {
+func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.SessionId, servers []acpsdk.McpServer) (*workspaceEntry, []harness.Message, error) {
 	cwd, err := normalizeCwd(cwdParam)
 	if err != nil {
 		return nil, nil, err
@@ -1008,7 +1025,7 @@ func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.S
 	return w, w.agent.Messages(string(id)), nil
 }
 
-func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messages []agent.Message) error {
+func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messages []harness.Message) error {
 	var notifyErr error
 	notify := func(u acpsdk.SessionUpdate) {
 		if notifyErr == nil {
@@ -1029,7 +1046,7 @@ func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messa
 	return ctx.Err()
 }
 
-func notifyContent(notify func(acpsdk.SessionUpdate), role agent.MessageRole, c agent.Content) {
+func notifyContent(notify func(acpsdk.SessionUpdate), role harness.MessageRole, c harness.Content) {
 	switch {
 	case c.ToolCall != nil:
 		if c.ToolCall.Partial {
@@ -1037,7 +1054,7 @@ func notifyContent(notify func(acpsdk.SessionUpdate), role agent.MessageRole, c 
 		}
 		presentation := c.ToolCall.Presentation
 		if presentation == nil {
-			presentation = agent.NewToolPresentation(
+			presentation = harness.NewToolPresentation(
 				c.ToolCall.Name, c.ToolCall.Kind, c.ToolCall.Args, c.ToolCall.Locations,
 			)
 		}
@@ -1090,8 +1107,8 @@ func notifyContent(notify func(acpsdk.SessionUpdate), role agent.MessageRole, c 
 	if c.Reasoning != nil && c.Reasoning.Summary != "" {
 		notify(acpsdk.UpdateAgentThoughtText(c.Reasoning.Summary))
 	}
-	for _, block := range acp.ContentToBlocks([]agent.Content{c}) {
-		if role == agent.RoleUser {
+	for _, block := range acp.ContentToBlocks([]harness.Content{c}) {
+		if role == harness.RoleUser {
 			notify(acpsdk.UpdateUserMessage(block))
 		} else {
 			notify(acpsdk.UpdateAgentMessage(block))
@@ -1144,7 +1161,7 @@ func (s *Server) SetSessionMode(ctx context.Context, params acpsdk.SetSessionMod
 	return acpsdk.SetSessionModeResponse{}, nil
 }
 
-func modeState(a *codeagent.Agent, sid string) *acpsdk.SessionModeState {
+func modeState(a *agent.Agent, sid string) *acpsdk.SessionModeState {
 	modes, current := a.Modes(sid)
 	if len(modes) == 0 {
 		return nil
@@ -1175,7 +1192,7 @@ func parseRawInput(args string) any {
 	return args
 }
 
-func sessionConfigOptions(a *codeagent.Agent, sid string) []acpsdk.SessionConfigOption {
+func sessionConfigOptions(a *agent.Agent, sid string) []acpsdk.SessionConfigOption {
 	return []acpsdk.SessionConfigOption{
 		modelConfigOption(a, sid),
 		effortConfigOption(a, sid),
@@ -1183,7 +1200,7 @@ func sessionConfigOptions(a *codeagent.Agent, sid string) []acpsdk.SessionConfig
 	}
 }
 
-func modelConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOption {
+func modelConfigOption(a *agent.Agent, sid string) acpsdk.SessionConfigOption {
 	available, current := a.Models(sid)
 	opts := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(available))
 	foundCurrent := false
@@ -1212,7 +1229,7 @@ func modelConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOptio
 	}
 }
 
-func effortConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOption {
+func effortConfigOption(a *agent.Agent, sid string) acpsdk.SessionConfigOption {
 	current, values := a.Effort(sid)
 	opts := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(values))
 	for _, v := range values {
@@ -1231,7 +1248,7 @@ func effortConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOpti
 	}
 }
 
-func unattendedConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOption {
+func unattendedConfigOption(a *agent.Agent, sid string) acpsdk.SessionConfigOption {
 	current := "off"
 	if a.Unattended(sid) {
 		current = "on"
@@ -1249,7 +1266,7 @@ func unattendedConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfig
 	}
 }
 
-func sdkToolLocations(locations []agent.ToolLocation) []acpsdk.ToolCallLocation {
+func sdkToolLocations(locations []harness.ToolLocation) []acpsdk.ToolCallLocation {
 	result := make([]acpsdk.ToolCallLocation, 0, len(locations))
 	for _, location := range locations {
 		if location.Path == "" {

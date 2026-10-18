@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
@@ -102,7 +102,7 @@ func (a *App) syncMessages() {
 	a.refreshUsage()
 }
 
-func (a *App) historySnapshot() ([]agent.Message, uint64, bool) {
+func (a *App) historySnapshot() ([]harness.Message, uint64, bool) {
 	if provider, ok := a.agent.(code.HistorySnapshotProvider); ok {
 		snapshot := provider.HistorySnapshot(a.sessionID)
 		return snapshot.Messages, snapshot.Revision, true
@@ -118,8 +118,8 @@ func (a *App) refreshUsage() {
 	a.contextWindow = usage.ContextWindow
 }
 
-func (a *App) formatMessageCells(msg agent.Message, width int) []string {
-	if msg.Hidden || msg.Role == agent.RoleSystem {
+func (a *App) formatMessageCells(msg harness.Message, width int) []string {
+	if msg.Hidden || msg.Role == harness.RoleSystem {
 		return nil
 	}
 
@@ -156,7 +156,7 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 			lines = append(lines, cell...)
 
 		case strings.TrimSpace(c.AsText()) != "":
-			if msg.Role == agent.RoleUser {
+			if msg.Role == harness.RoleUser {
 				if cmd, output, exitCode, ok := code.ParseUserShellCommand(c.AsText()); ok {
 					cell := cellUserShell(cmd, output, exitCode, width, false)
 					if a.flow.beforeTool(len(cell) > 1) {
@@ -170,14 +170,14 @@ func (a *App) formatMessageCells(msg agent.Message, width int) []string {
 				lines = append(lines, "")
 			}
 			switch msg.Role {
-			case agent.RoleUser:
+			case harness.RoleUser:
 				a.removePendingEchoText(c.AsText())
 				if isCommandEcho(c.AsText()) {
 					lines = append(lines, cellCommand(c.AsText(), width)...)
 				} else {
 					lines = append(lines, cellUser(c.AsText(), width)...)
 				}
-			case agent.RoleAssistant:
+			case harness.RoleAssistant:
 				lines = append(lines, cellAssistant(c.AsText(), width, theme.Default.Green, a.agent.Workspace().RootPath)...)
 			}
 		}
@@ -199,13 +199,13 @@ func (a *App) removePendingEchoText(text string) {
 
 // releaseToolCell drops the live tool cell once its committed result reaches
 // the chat.
-func (a *App) releaseToolCell(result *agent.ToolResult) {
+func (a *App) releaseToolCell(result *harness.ToolResult) {
 	a.streamStateMu.Lock()
 	a.releaseToolCellLocked(result)
 	a.streamStateMu.Unlock()
 }
 
-func (a *App) releaseToolCellLocked(result *agent.ToolResult) {
+func (a *App) releaseToolCellLocked(result *harness.ToolResult) {
 	if a.streamCurrent.matchesTool(result) {
 		a.streamCurrent.clearTool()
 	} else {
@@ -226,8 +226,8 @@ func (a *App) releaseToolCellLocked(result *agent.ToolResult) {
 // retained transcript. Native sessions commit between tool rounds, while ACP
 // sessions may not commit until the turn ends, so reconciliation is content-
 // based rather than tied to turn phase.
-func (a *App) reconcileCommittedMessage(msg agent.Message) {
-	if msg.Hidden || msg.Role == agent.RoleSystem {
+func (a *App) reconcileCommittedMessage(msg harness.Message) {
+	if msg.Hidden || msg.Role == harness.RoleSystem {
 		return
 	}
 
@@ -246,9 +246,9 @@ func (a *App) reconcileCommittedMessage(msg agent.Message) {
 		case content.Reasoning != nil && content.Reasoning.Summary != "":
 			a.releaseReasoningLocked(content.Reasoning)
 		case strings.TrimSpace(content.AsText()) != "":
-			if msg.Role == agent.RoleUser {
+			if msg.Role == harness.RoleUser {
 				a.releaseUserTextLocked(content.AsText())
-			} else if msg.Role == agent.RoleAssistant {
+			} else if msg.Role == harness.RoleAssistant {
 				assistantText = append(assistantText, assistantPart{content.TextID, content.AsText()})
 			}
 		}
@@ -269,11 +269,11 @@ func (a *App) reconcileCommittedMessage(msg agent.Message) {
 	a.compactStreamHistoryLocked()
 }
 
-func (a *App) reconcileCurrentTurn(messages []agent.Message) {
+func (a *App) reconcileCurrentTurn(messages []harness.Message) {
 	start := 0
 	for i := len(messages) - 1; i >= 0; i-- {
 		message := messages[i]
-		if message.Role == agent.RoleUser && !message.Hidden {
+		if message.Role == harness.RoleUser && !message.Hidden {
 			start = i
 			break
 		}
@@ -283,7 +283,7 @@ func (a *App) reconcileCurrentTurn(messages []agent.Message) {
 	}
 }
 
-func (a *App) releaseReasoningLocked(reasoning *agent.Reasoning) {
+func (a *App) releaseReasoningLocked(reasoning *harness.Reasoning) {
 	match := func(snapshot *streamSnapshot) bool {
 		if snapshot.reasoning == "" {
 			return false
@@ -402,7 +402,7 @@ func (a *App) clearRetryableOutputLocked(snapshot *streamSnapshot) {
 	snapshot.retryAttempt = false
 }
 
-func (snapshot streamSnapshot) matchesTool(result *agent.ToolResult) bool {
+func (snapshot streamSnapshot) matchesTool(result *harness.ToolResult) bool {
 	return snapshot.toolName != "" &&
 		((result.ID != "" && result.ID == snapshot.toolID) ||
 			(snapshot.toolID == "" && result.Name == snapshot.toolName))
@@ -480,7 +480,7 @@ func (a *App) snapshotStreamState() []streamSnapshot {
 	return snapshots
 }
 
-func (a *App) completeToolStateLocked(result *agent.ToolResult) {
+func (a *App) completeToolStateLocked(result *harness.ToolResult) {
 	if a.streamCurrent.matchesTool(result) {
 		a.streamCurrent.completeTool(result)
 		a.archiveStreamStateLocked()
@@ -494,7 +494,7 @@ func (a *App) completeToolStateLocked(result *agent.ToolResult) {
 	}
 }
 
-func (snapshot *streamSnapshot) completeTool(result *agent.ToolResult) {
+func (snapshot *streamSnapshot) completeTool(result *harness.ToolResult) {
 	completed := *result
 	if completed.ID == "" {
 		completed.ID = snapshot.toolID
@@ -569,11 +569,11 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 	if ev.StreamEvent != 0 {
 		a.withCurrentSession(ev.SessionID, func() {
 			switch ev.StreamEvent {
-			case agent.StreamEventReset:
+			case harness.StreamEventReset:
 				a.resetFailedStreamAttempt()
 				a.queuePhase(PhaseRetrying)
 				a.requestRender()
-			case agent.StreamEventCommit:
+			case harness.StreamEventCommit:
 				a.commitStreamAttempt()
 				a.requestRender()
 			}
@@ -613,7 +613,7 @@ func (a *App) handleTurnEvent(ev code.TurnEvent) {
 	}
 }
 
-func (a *App) handleStreamMessage(msg agent.Message) {
+func (a *App) handleStreamMessage(msg harness.Message) {
 	for _, c := range msg.Content {
 		switch {
 		case c.ToolCall != nil:
@@ -779,7 +779,7 @@ func (a *App) turnWork() (tools, thoughts int) {
 	}
 
 	for _, m := range messages[a.turnBase:] {
-		if m.Hidden || m.Role == agent.RoleSystem {
+		if m.Hidden || m.Role == harness.RoleSystem {
 			continue
 		}
 		for _, c := range m.Content {

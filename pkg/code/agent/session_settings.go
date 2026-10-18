@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 

@@ -1,24 +1,26 @@
 package server
 
-import "github.com/adrianliechti/wingman-agent/pkg/agent"
+import (
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+)
 
 type displayedTool struct {
 	name      string
 	kind      string
 	args      string
 	hint      string
-	locations []agent.ToolLocation
+	locations []harness.ToolLocation
 }
 
 // displayTool renders metadata supplied by the tool producer. The fallback
 // keeps sessions written before presentation metadata was introduced usable.
 func displayTool(
 	name, kind, args string,
-	locations []agent.ToolLocation,
-	presentation *agent.ToolPresentation,
+	locations []harness.ToolLocation,
+	presentation *harness.ToolPresentation,
 ) displayedTool {
 	if presentation == nil {
-		presentation = agent.NewToolPresentation(name, kind, args, locations)
+		presentation = harness.NewToolPresentation(name, kind, args, locations)
 	}
 	title := presentation.Title
 	if title == "" {

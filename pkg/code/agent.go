@@ -5,8 +5,8 @@ import (
 	"iter"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
@@ -92,16 +92,16 @@ type Agent interface {
 
 	DeleteSession(ctx context.Context, id string) error
 
-	Messages(sessionID string) []agent.Message
+	Messages(sessionID string) []harness.Message
 
-	Usage(sessionID string) agent.Usage
+	Usage(sessionID string) harness.Usage
 
 	// Send starts one turn and returns its event stream. Immediate validation
 	// and busy-session failures are returned directly; errors that happen after
 	// the turn starts are yielded by the stream. Send never queues implicitly.
 	// Once Send returns successfully, the agent owns input and callers may reuse
 	// or mutate their slice.
-	Send(ctx context.Context, sessionID string, input []agent.Content) (iter.Seq2[agent.Message, error], error)
+	Send(ctx context.Context, sessionID string, input []harness.Content) (iter.Seq2[harness.Message, error], error)
 
 	Cancel(sessionID string)
 
@@ -110,7 +110,7 @@ type Agent interface {
 
 // Compactor checkpoints a session's context on demand; focus guides what the summary keeps.
 type Compactor interface {
-	Compact(ctx context.Context, sessionID, focus string) (agent.CompactResult, error)
+	Compact(ctx context.Context, sessionID, focus string) (harness.CompactResult, error)
 }
 
 // UnattendedAgent exposes an interaction policy independent of Agent/Plan mode.
@@ -121,8 +121,8 @@ type UnattendedAgent interface {
 }
 
 var (
-	ErrTurnInProgress = agent.ErrTurnInProgress
-	ErrEmptyInput     = agent.ErrEmptyInput
+	ErrTurnInProgress = harness.ErrTurnInProgress
+	ErrEmptyInput     = harness.ErrEmptyInput
 )
 
 // SessionForker copies an idle session into a new loaded one and returns its ID.
@@ -131,14 +131,14 @@ type SessionForker interface {
 }
 
 type SessionLoadStreamer interface {
-	LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]agent.Message, error]
+	LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]harness.Message, error]
 }
 
 // HistorySnapshot is an atomic view of a session's retained messages. Revision
 // changes only when existing history is rewritten (for example by compaction),
 // not when messages are appended normally.
 type HistorySnapshot struct {
-	Messages []agent.Message
+	Messages []harness.Message
 	Revision uint64
 }
 

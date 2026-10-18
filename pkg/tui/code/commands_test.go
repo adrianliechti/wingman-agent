@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
@@ -67,9 +67,9 @@ type compactUITestAgent struct {
 	focus string
 }
 
-func (a *compactUITestAgent) Compact(_ context.Context, _ string, focus string) (agent.CompactResult, error) {
+func (a *compactUITestAgent) Compact(_ context.Context, _ string, focus string) (harness.CompactResult, error) {
 	a.focus = focus
-	return agent.CompactResult{TokensBefore: 120_000, TokensAfter: 18_000}, nil
+	return harness.CompactResult{TokensBefore: 120_000, TokensAfter: 18_000}, nil
 }
 
 func TestCompactCommandRunsThroughTurnManagerWithFocus(t *testing.T) {

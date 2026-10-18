@@ -13,10 +13,10 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/acp/claude"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	claudecli "github.com/adrianliechti/wingman-agent/pkg/external/claude"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 type scriptedUI struct {
@@ -91,7 +91,7 @@ func TestLiveWebPipelineAskUserQuestion(t *testing.T) {
 		t.Fatalf("new session: %v", err)
 	}
 
-	stream, err := a.Send(ctx, sessionID, []agent.Content{{
+	stream, err := a.Send(ctx, sessionID, []harness.Content{{
 		Text: "Use the AskUserQuestion tool to ask me one question: \"Which color?\" with the options Red and Blue. " +
 			"After I answer, reply with exactly the color I chose and nothing else.",
 	}})

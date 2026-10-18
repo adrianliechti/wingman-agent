@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/external"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
 )
 
 const (

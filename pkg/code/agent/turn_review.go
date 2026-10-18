@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
 )
 
 func (a *Agent) TurnReviews(ctx context.Context, id string) ([]harness.TurnReview, error) {

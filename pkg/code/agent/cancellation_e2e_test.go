@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 )
 
 func cancellationE2EAgent(t *testing.T, hooks hook.Hooks) (*Agent, string, *atomic.Int64) {
@@ -28,21 +28,19 @@ func cancellationE2EAgent(t *testing.T, hooks hook.Hooks) (*Agent, string, *atom
 	}))
 	t.Cleanup(backend.Close)
 	t.Setenv("WINGMAN_URL", backend.URL)
-	cfg, err := harness.DefaultConfig()
+	cfg, err := DefaultConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.Model = func() string { return "test-model" }
 	cfg.RequireFinish = func(string) bool { return false }
+	cfg.Hooks = hooks
 	a := New(ws, cfg, nil)
 	t.Cleanup(func() { _ = a.Close() })
 	id, err := a.NewSession(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Derive intentionally excludes main-session hooks for delegated agents;
-	// install fixture hooks on this top-level session before its first Send.
-	a.session(id).aa.Hooks.Append(hooks)
 	return a, id, requests
 }
 

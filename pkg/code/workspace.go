@@ -23,15 +23,15 @@ import (
 	"github.com/google/uuid"
 	"go.yaml.in/yaml/v4"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	graphtool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/graph"
-	lsptool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/lsp"
-	toolmcp "github.com/adrianliechti/wingman-agent/pkg/agent/tool/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/changes"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	"github.com/adrianliechti/wingman-agent/pkg/graph"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	graphtool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/graph"
+	lsptool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/lsp"
+	mcptool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
@@ -586,7 +586,7 @@ func (w *Workspace) InitMCP(ctx context.Context, ui ...UI) error {
 	toolsErrs := []error{connectErr}
 	for _, serverName := range slices.Sorted(maps.Keys(sessions)) {
 		session := sessions[serverName]
-		tools, err := toolmcp.ToolsForServer(ctx, serverName, session)
+		tools, err := mcptool.ToolsForServer(ctx, serverName, session)
 		if err != nil {
 			toolsErrs = append(toolsErrs, fmt.Errorf("list MCP tools from %s: %w", serverName, err))
 			continue
@@ -639,7 +639,7 @@ func (w *Workspace) refreshMCPServerTools(ctx context.Context, manager *mcp.Mana
 		return
 	}
 
-	tools, err := toolmcp.ToolsForServer(ctx, serverName, session)
+	tools, err := mcptool.ToolsForServer(ctx, serverName, session)
 	if err != nil {
 		if ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to refresh tools from MCP server %s: %v\n", serverName, err)
@@ -1723,5 +1723,5 @@ func (w *Workspace) CallMCPTool(ctx context.Context, server, name string, input 
 	if session == nil {
 		return "", fmt.Errorf("MCP server %q is not connected", server)
 	}
-	return toolmcp.CallText(ctx, session, name, input)
+	return mcptool.CallText(ctx, session, name, input)
 }

@@ -12,8 +12,8 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/diff"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/settings"
 )
 
@@ -130,15 +130,15 @@ type editorTabMarkers struct {
 	omitted   string
 }
 
-func newEditorTabService(cfg *agent.Config) *editorTabService {
+func newEditorTabService(cfg *harness.Config) *editorTabService {
 	return newEditorTabServiceForModel(cfg, os.Getenv("WINGMAN_MODEL_TAB"))
 }
 
-func newEditorTabServiceForModel(cfg *agent.Config, model string) *editorTabService {
+func newEditorTabServiceForModel(cfg *harness.Config, model string) *editorTabService {
 	service := &editorTabService{modelOverride: strings.TrimSpace(model)}
 	service.complete = func(ctx context.Context, prompt string) (editorTabCompletion, error) {
 		modelID, effort := resolveGenerationTarget(cfg, "utility", service.modelOverride)
-		result, err := cfg.Generate(ctx, agent.GenerateOptions{
+		result, err := cfg.Generate(ctx, harness.GenerateOptions{
 			Model:           modelID,
 			Effort:          effort,
 			Instructions:    editorTabInstructions,

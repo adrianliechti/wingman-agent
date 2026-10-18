@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/changes"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 const (
@@ -51,11 +51,11 @@ type gitCommitMessageService struct {
 	complete func(context.Context, string) (gitCommitMessageCompletion, error)
 }
 
-func newGitCommitMessageService(cfg *agent.Config) *gitCommitMessageService {
+func newGitCommitMessageService(cfg *harness.Config) *gitCommitMessageService {
 	service := &gitCommitMessageService{}
 	service.complete = func(ctx context.Context, prompt string) (gitCommitMessageCompletion, error) {
 		modelID, effort := resolveGenerationTarget(cfg, "utility", "")
-		result, err := cfg.Generate(ctx, agent.GenerateOptions{
+		result, err := cfg.Generate(ctx, harness.GenerateOptions{
 			Model:           modelID,
 			Effort:          effort,
 			Instructions:    gitCommitMessageInstructions,

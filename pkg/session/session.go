@@ -15,26 +15,26 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 const journalVersion = 2
 
 type Session struct {
-	ID        string      `json:"id"`
-	Title     string      `json:"title,omitempty"`
-	CreatedAt time.Time   `json:"created_at"`
-	UpdatedAt time.Time   `json:"updated_at"`
-	State     agent.State `json:"state"`
+	ID        string        `json:"id"`
+	Title     string        `json:"title,omitempty"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
+	State     harness.State `json:"state"`
 }
 
 type record struct {
-	Type      string              `json:"type"`
-	Version   int                 `json:"version,omitempty"`
-	ID        string              `json:"id,omitempty"`
-	CreatedAt *time.Time          `json:"created_at,omitempty"`
-	Title     string              `json:"title,omitempty"`
-	Event     *agent.RuntimeEvent `json:"event,omitempty"`
+	Type      string                `json:"type"`
+	Version   int                   `json:"version,omitempty"`
+	ID        string                `json:"id,omitempty"`
+	CreatedAt *time.Time            `json:"created_at,omitempty"`
+	Title     string                `json:"title,omitempty"`
+	Event     *harness.RuntimeEvent `json:"event,omitempty"`
 }
 
 // Journal is the live append boundary for one session. All instances for the
@@ -106,7 +106,7 @@ func OpenJournal(sessionsDir, id string) (*Journal, error) {
 	return &Journal{path: path, id: id, coord: coord}, nil
 }
 
-func (j *Journal) AppendEvents(events []agent.RuntimeEvent) error {
+func (j *Journal) AppendEvents(events []harness.RuntimeEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -115,14 +115,14 @@ func (j *Journal) AppendEvents(events []agent.RuntimeEvent) error {
 	return j.appendLocked(events, false)
 }
 
-func (j *Journal) appendMissing(events []agent.RuntimeEvent) error {
+func (j *Journal) appendMissing(events []harness.RuntimeEvent) error {
 	j.coord.mu.Lock()
 	defer j.coord.mu.Unlock()
 	return j.appendLocked(events, true)
 }
 
-func (j *Journal) appendLocked(events []agent.RuntimeEvent, skipExisting bool) error {
-	var pending []agent.RuntimeEvent
+func (j *Journal) appendLocked(events []harness.RuntimeEvent, skipExisting bool) error {
+	var pending []harness.RuntimeEvent
 	for _, event := range events {
 		if skipExisting && event.Sequence <= j.coord.lastSequence {
 			continue
@@ -179,7 +179,7 @@ func (j *Journal) appendLocked(events []agent.RuntimeEvent, skipExisting bool) e
 
 // Save is a compatibility/backstop API. Live built-in sessions append through
 // Journal as facts happen; Save only fills events absent from the file.
-func Save(sessionsDir, id string, state agent.State) error {
+func Save(sessionsDir, id string, state harness.State) error {
 	if sessionsDir == "" {
 		return fmt.Errorf("no sessions directory available")
 	}
@@ -251,7 +251,7 @@ func Fork(sessionsDir, id, newID, title string) error {
 }
 
 // writeJournal atomically replaces path with a journal of meta and events.
-func writeJournal(path string, meta record, events []agent.RuntimeEvent) error {
+func writeJournal(path string, meta record, events []harness.RuntimeEvent) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
 	if err != nil {
 		return err
@@ -331,7 +331,7 @@ func List(sessionsDir string) ([]Session, error) {
 				continue
 			}
 			s = legacy
-			s.State = agent.State{}
+			s.State = harness.State{}
 		}
 		seen[id] = true
 		sessions = append(sessions, s)
@@ -351,7 +351,7 @@ func List(sessionsDir string) ([]Session, error) {
 		if err != nil {
 			continue
 		}
-		s.State = agent.State{}
+		s.State = harness.State{}
 		sessions = append(sessions, s)
 	}
 	slices.SortFunc(sessions, func(a, b Session) int { return b.UpdatedAt.Compare(a.UpdatedAt) })
@@ -402,7 +402,7 @@ func loadCurrent(path, fallbackID string, infoOnly bool) (currentLoad, error) {
 	}
 
 	s := Session{ID: fallbackID}
-	var events []agent.RuntimeEvent
+	var events []harness.RuntimeEvent
 	lines := bytes.Split(data, []byte{'\n'})
 	for i, line := range lines {
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -434,7 +434,7 @@ func loadCurrent(path, fallbackID string, infoOnly bool) (currentLoad, error) {
 				return currentLoad{}, fmt.Errorf("session journal line %d has no event", i+1)
 			}
 			events = append(events, *r.Event)
-			if s.Title == "" && r.Event.Type == agent.EventMessage && r.Event.Message != nil {
+			if s.Title == "" && r.Event.Type == harness.EventMessage && r.Event.Message != nil {
 				s.Title = messageTitle(*r.Event.Message)
 			}
 		default:
@@ -455,7 +455,7 @@ func loadCurrent(path, fallbackID string, infoOnly bool) (currentLoad, error) {
 		last = events[len(events)-1].Sequence
 	}
 	if !infoOnly {
-		state, err := normalizeState(agent.State{Events: events})
+		state, err := normalizeState(harness.State{Events: events})
 		if err != nil {
 			return currentLoad{}, err
 		}
@@ -488,10 +488,10 @@ func repairIncompleteTail(path string) error {
 	return nil
 }
 
-func normalizeState(state agent.State) (agent.State, error) {
-	var runtime agent.Agent
+func normalizeState(state harness.State) (harness.State, error) {
+	var runtime harness.Agent
 	if err := runtime.Restore(state); err != nil {
-		return agent.State{}, fmt.Errorf("restore session state: %w", err)
+		return harness.State{}, fmt.Errorf("restore session state: %w", err)
 	}
 	return runtime.StateSnapshot(), nil
 }
@@ -499,42 +499,42 @@ func normalizeState(state agent.State) (agent.State, error) {
 // normalizeStateForSave preserves the old State-based API for callers that
 // still append to State.Messages directly. Existing ledger history must be an
 // exact prefix; rewrites are rejected because new journals are append-only.
-func normalizeStateForSave(state agent.State) (agent.State, error) {
+func normalizeStateForSave(state harness.State) (harness.State, error) {
 	normalized, err := normalizeState(state)
 	if err != nil {
-		return agent.State{}, err
+		return harness.State{}, err
 	}
 	if len(state.Events) == 0 {
 		return normalized, nil
 	}
-	events := append([]agent.RuntimeEvent(nil), state.Events...)
+	events := append([]harness.RuntimeEvent(nil), state.Events...)
 	sequence := uint64(0)
 	if len(events) > 0 {
 		sequence = events[len(events)-1].Sequence
 	}
 	if state.Messages != nil {
 		if len(state.Messages) < len(normalized.Messages) || !equalMessages(state.Messages[:len(normalized.Messages)], normalized.Messages) {
-			return agent.State{}, fmt.Errorf("canonical session history cannot be rewritten")
+			return harness.State{}, fmt.Errorf("canonical session history cannot be rewritten")
 		}
 		for _, message := range state.Messages[len(normalized.Messages):] {
 			sequence++
-			copy := agent.CloneMessages([]agent.Message{message})[0]
-			events = append(events, agent.RuntimeEvent{
+			copy := harness.CloneMessages([]harness.Message{message})[0]
+			events = append(events, harness.RuntimeEvent{
 				Sequence: sequence, ID: fmt.Sprintf("state-message-%d", sequence),
-				Type: agent.EventMessage, At: time.Now().UTC(), Message: &copy,
+				Type: harness.EventMessage, At: time.Now().UTC(), Message: &copy,
 			})
 		}
 	}
 	if state.ContextSet && (!normalized.ContextSet || !equalMessages(state.Context, normalized.Context)) {
 		sequence++
-		events = append(events, agent.RuntimeEvent{
+		events = append(events, harness.RuntimeEvent{
 			Sequence: sequence, ID: fmt.Sprintf("state-context-%d", sequence),
-			Type: agent.EventContextCheckpoint, At: time.Now().UTC(),
-			Context: agent.CloneMessages(state.Context), ContextReason: "State compatibility checkpoint",
+			Type: harness.EventContextCheckpoint, At: time.Now().UTC(),
+			Context: harness.CloneMessages(state.Context), ContextReason: "State compatibility checkpoint",
 		})
 	}
 	if state.Usage != normalized.Usage {
-		delta := agent.Usage{
+		delta := harness.Usage{
 			InputTokens:              state.Usage.InputTokens - normalized.Usage.InputTokens,
 			OutputTokens:             state.Usage.OutputTokens - normalized.Usage.OutputTokens,
 			ReasoningTokens:          state.Usage.ReasoningTokens - normalized.Usage.ReasoningTokens,
@@ -544,18 +544,18 @@ func normalizeStateForSave(state agent.State) (agent.State, error) {
 			ContextWindow:            state.Usage.ContextWindow,
 		}
 		if delta.InputTokens < 0 || delta.OutputTokens < 0 || delta.ReasoningTokens < 0 || delta.CacheReadInputTokens < 0 || delta.CacheCreationInputTokens < 0 {
-			return agent.State{}, fmt.Errorf("cumulative session usage cannot decrease")
+			return harness.State{}, fmt.Errorf("cumulative session usage cannot decrease")
 		}
 		sequence++
-		events = append(events, agent.RuntimeEvent{
+		events = append(events, harness.RuntimeEvent{
 			Sequence: sequence, ID: fmt.Sprintf("state-usage-%d", sequence),
-			Type: agent.EventUsage, At: time.Now().UTC(), Usage: &delta,
+			Type: harness.EventUsage, At: time.Now().UTC(), Usage: &delta,
 		})
 	}
-	return normalizeState(agent.State{Events: events})
+	return normalizeState(harness.State{Events: events})
 }
 
-func equalMessages(left, right []agent.Message) bool {
+func equalMessages(left, right []harness.Message) bool {
 	a, err := json.Marshal(left)
 	if err != nil {
 		return false
@@ -581,8 +581,8 @@ func isCurrentJournal(path string) (bool, error) {
 	return header.Type == "meta" && header.Version == journalVersion, nil
 }
 
-func messageTitle(m agent.Message) string {
-	if m.Hidden || m.Role != agent.RoleUser {
+func messageTitle(m harness.Message) string {
+	if m.Hidden || m.Role != harness.RoleUser {
 		return ""
 	}
 	for _, c := range m.Content {
@@ -614,7 +614,7 @@ func messageTitle(m agent.Message) string {
 	return ""
 }
 
-func extractTitle(messages []agent.Message) string {
+func extractTitle(messages []harness.Message) string {
 	for _, message := range messages {
 		if title := messageTitle(message); title != "" {
 			return title

@@ -7,7 +7,7 @@ import (
 	"maps"
 	"sync"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 type managedTurnInput struct {
@@ -341,7 +341,7 @@ func (m *TurnManager) runSession(sessionID string, s *managedTurnSession) {
 		state := TurnInputCompleted
 		if cancelled {
 			state = TurnInputCancelled
-		} else if errors.Is(runErr, agent.ErrTurnIncomplete) {
+		} else if errors.Is(runErr, harness.ErrTurnIncomplete) {
 			state = TurnInputIncomplete
 		} else if runErr != nil {
 			state = TurnInputFailed
@@ -378,16 +378,16 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 			err = fmt.Errorf("agent turn panicked: %v", recovered)
 		}
 	}()
-	ctx = agent.WithInputID(ctx, item.input.ID)
-	ctx = agent.WithStreamEventHandlers(ctx, agent.StreamEventHandlers{
-		Retry: func(info agent.RetryInfo) {
+	ctx = harness.WithInputID(ctx, item.input.ID)
+	ctx = harness.WithStreamEventHandlers(ctx, harness.StreamEventHandlers{
+		Retry: func(info harness.RetryInfo) {
 			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, Retry: &info})
 		},
 		Reset: func() {
-			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, StreamEvent: agent.StreamEventReset})
+			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, StreamEvent: harness.StreamEventReset})
 		},
 		Commit: func() {
-			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, StreamEvent: agent.StreamEventCommit})
+			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, StreamEvent: harness.StreamEventCommit})
 		},
 	})
 	stream, err := m.agent.Send(ctx, sessionID, item.input.Content)
@@ -408,7 +408,7 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 }
 
 // StartCompact runs compaction as the session's exclusive operation; inputs queue behind it.
-func (m *TurnManager) StartCompact(sessionID, focus string, done func(agent.CompactResult, error)) error {
+func (m *TurnManager) StartCompact(sessionID, focus string, done func(harness.CompactResult, error)) error {
 	compactor, ok := m.agent.(Compactor)
 	if !ok {
 		return errors.ErrUnsupported
@@ -604,7 +604,7 @@ func (m *TurnManager) cancelSession(sessionID string, clearQueue bool) error {
 	s.mu.Unlock()
 
 	if cancel != nil {
-		cancel(agent.ErrInterrupted)
+		cancel(harness.ErrInterrupted)
 	}
 	m.agent.Cancel(sessionID)
 	for _, item := range queued {

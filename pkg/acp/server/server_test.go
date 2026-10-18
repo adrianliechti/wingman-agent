@@ -18,10 +18,10 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
@@ -37,8 +37,8 @@ type recordingClient struct {
 
 func TestNotifyContentPreservesToolFailureStatus(t *testing.T) {
 	var update acpsdk.SessionUpdate
-	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, agent.RoleAssistant, agent.Content{
-		ToolResult: &agent.ToolResult{ID: "call-1", Name: "shell", Content: "failed", IsError: true},
+	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, harness.RoleAssistant, harness.Content{
+		ToolResult: &harness.ToolResult{ID: "call-1", Name: "shell", Content: "failed", IsError: true},
 	})
 
 	if update.ToolCallUpdate == nil || update.ToolCallUpdate.Status == nil {
@@ -51,8 +51,8 @@ func TestNotifyContentPreservesToolFailureStatus(t *testing.T) {
 
 func TestNotifyContentIgnoresPartialToolCall(t *testing.T) {
 	called := false
-	notifyContent(func(acpsdk.SessionUpdate) { called = true }, agent.RoleAssistant, agent.Content{
-		ToolCall: &agent.ToolCall{ID: "call-1", Name: "shell", Partial: true},
+	notifyContent(func(acpsdk.SessionUpdate) { called = true }, harness.RoleAssistant, harness.Content{
+		ToolCall: &harness.ToolCall{ID: "call-1", Name: "shell", Partial: true},
 	})
 	if called {
 		t.Fatal("partial tool call was sent to ACP")
@@ -61,9 +61,9 @@ func TestNotifyContentIgnoresPartialToolCall(t *testing.T) {
 
 func TestNotifyContentPreservesMixedTextAndImage(t *testing.T) {
 	var updates []acpsdk.SessionUpdate
-	notifyContent(func(update acpsdk.SessionUpdate) { updates = append(updates, update) }, agent.RoleUser, agent.Content{
+	notifyContent(func(update acpsdk.SessionUpdate) { updates = append(updates, update) }, harness.RoleUser, harness.Content{
 		Text: "describe this",
-		File: &agent.File{Data: "data:image/png;base64,AA=="},
+		File: &harness.File{Data: "data:image/png;base64,AA=="},
 	})
 	if len(updates) != 2 || updates[0].UserMessageChunk == nil || updates[0].UserMessageChunk.Content.Text == nil ||
 		updates[0].UserMessageChunk.Content.Text.Text != "describe this" || updates[1].UserMessageChunk == nil ||
@@ -74,8 +74,8 @@ func TestNotifyContentPreservesMixedTextAndImage(t *testing.T) {
 
 func TestNotifyContentPreservesAssistantImage(t *testing.T) {
 	var update acpsdk.SessionUpdate
-	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, agent.RoleAssistant, agent.Content{
-		File: &agent.File{Data: "data:image/png;base64,AA=="},
+	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, harness.RoleAssistant, harness.Content{
+		File: &harness.File{Data: "data:image/png;base64,AA=="},
 	})
 	if update.AgentMessageChunk == nil || update.AgentMessageChunk.Content.Image == nil ||
 		update.AgentMessageChunk.Content.Image.Data != "AA==" {
@@ -85,8 +85,8 @@ func TestNotifyContentPreservesAssistantImage(t *testing.T) {
 
 func TestNotifyContentUsesCompactFilePresentation(t *testing.T) {
 	var update acpsdk.SessionUpdate
-	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, agent.RoleAssistant, agent.Content{
-		ToolCall: &agent.ToolCall{
+	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, harness.RoleAssistant, harness.Content{
+		ToolCall: &harness.ToolCall{
 			ID: "read-1", Name: "read",
 			Args: `{"file_path":"/workspace/main.go","offset":12,"limit":4}`,
 		},
@@ -108,8 +108,8 @@ func TestNotifyContentUsesCompactFilePresentation(t *testing.T) {
 
 func TestNotifyContentDoesNotRepeatEditPayload(t *testing.T) {
 	var update acpsdk.SessionUpdate
-	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, agent.RoleAssistant, agent.Content{
-		ToolCall: &agent.ToolCall{
+	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, harness.RoleAssistant, harness.Content{
+		ToolCall: &harness.ToolCall{
 			ID: "edit-1", Name: "edit",
 			Args: `{"file_path":"/workspace/main.go","old_string":"before","new_string":"after"}`,
 		},
@@ -130,6 +130,7 @@ func TestRetainSessionQueuesPromptsAndHonorsWaitingContext(t *testing.T) {
 	s := &Server{sessions: map[acpsdk.SessionId]*sessionEntry{
 		id: {id: id, workspace: w},
 	}}
+	s.workspaceRefs.Add(w.refs)
 
 	_, finishFirst, err := s.retainSession(context.Background(), id, func() {})
 	if err != nil {
@@ -175,8 +176,8 @@ func TestRetainSessionQueuesPromptsAndHonorsWaitingContext(t *testing.T) {
 
 func TestReplaceLoadedSessionSwapsWorkspaceAndRejectsBusySession(t *testing.T) {
 	const id = acpsdk.SessionId("session-1")
-	oldAgent := &codeagent.Agent{}
-	newAgent := &codeagent.Agent{}
+	oldAgent := &agent.Agent{}
+	newAgent := &agent.Agent{}
 	oldWorkspace := &workspaceEntry{agent: oldAgent, key: "old", refs: 2}
 	newWorkspace := &workspaceEntry{agent: newAgent, key: "new", refs: 1}
 	oldSession := &sessionEntry{id: id, agent: oldAgent, workspace: oldWorkspace}
@@ -188,6 +189,7 @@ func TestReplaceLoadedSessionSwapsWorkspaceAndRejectsBusySession(t *testing.T) {
 			"new": newWorkspace,
 		},
 	}
+	s.workspaceRefs.Add(oldWorkspace.refs + newWorkspace.refs)
 
 	if err := s.replaceLoadedSession(id, newWorkspace); err != nil {
 		t.Fatal(err)
@@ -201,7 +203,7 @@ func TestReplaceLoadedSessionSwapsWorkspaceAndRejectsBusySession(t *testing.T) {
 
 	busy := s.lookupSession(id)
 	busy.cancel = func() {}
-	thirdWorkspace := &workspaceEntry{agent: &codeagent.Agent{}, key: "third", refs: 1}
+	thirdWorkspace := &workspaceEntry{agent: &agent.Agent{}, key: "third", refs: 1}
 	if err := s.replaceLoadedSession(id, thirdWorkspace); err == nil {
 		t.Fatal("busy session was replaced")
 	}
@@ -335,9 +337,9 @@ func TestACPDeleteListedSessionWithoutLoading(t *testing.T) {
 	cwd := t.TempDir()
 	dir := code.SessionsDir(cwd)
 	const id = "listed-session"
-	if err := session.Save(dir, id, agent.State{Messages: []agent.Message{{
-		Role: agent.RoleUser,
-		Content: []agent.Content{{
+	if err := session.Save(dir, id, harness.State{Messages: []harness.Message{{
+		Role: harness.RoleUser,
+		Content: []harness.Content{{
 			Text: "hello",
 		}},
 	}}}); err != nil {

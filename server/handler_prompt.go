@@ -5,8 +5,8 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/google/uuid"
 )
 

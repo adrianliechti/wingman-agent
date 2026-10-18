@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
@@ -18,7 +18,7 @@ import (
 func TestMouseResizesDiffPanelAcrossDivider(t *testing.T) {
 	a, _ := newDiffPanelTestApp(t, 220, 20)
 	a.diffPanel.diffs = diffPanelFixture
-	a.agent.(*uiTestAgent).messages = []agent.Message{{Role: agent.RoleUser, Content: []agent.Content{{Text: strings.Repeat("hello ", 80)}}}}
+	a.agent.(*uiTestAgent).messages = []harness.Message{{Role: harness.RoleUser, Content: []harness.Content{{Text: strings.Repeat("hello ", 80)}}}}
 	a.render()
 	before := slices.Clone(a.chat)
 	width := a.diffPanelWidth(220)

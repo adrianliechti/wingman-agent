@@ -15,11 +15,11 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
-	wingmcp "github.com/adrianliechti/wingman-agent/pkg/mcp"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
@@ -418,7 +418,7 @@ func TestWorkspaceRefreshesMCPToolsAfterListChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manager := wingmcp.NewManager(&wingmcp.Config{Servers: map[string]wingmcp.ServerConfig{}})
+	manager := mcp.NewManager(&mcp.Config{Servers: map[string]mcp.ServerConfig{}})
 	manager.AddSession("dynamic", clientSession)
 	w := &Workspace{MCP: manager}
 	defer w.Close()

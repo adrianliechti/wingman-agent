@@ -17,15 +17,15 @@ import (
 	"testing"
 	"time"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	filetools "github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
-	graphtools "github.com/adrianliechti/wingman-agent/pkg/agent/tool/graph"
-	lsptools "github.com/adrianliechti/wingman-agent/pkg/agent/tool/lsp"
-	mcptools "github.com/adrianliechti/wingman-agent/pkg/agent/tool/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	"github.com/adrianliechti/wingman-agent/pkg/graph"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
+	graphtool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/graph"
+	lsptool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/lsp"
+	mcptool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
@@ -327,7 +327,7 @@ func runRepositorySession(t *testing.T, corpus, repo, model, cfg string, repeat 
 	}
 	defer fsRoot.Close()
 	var available []tool.Tool
-	for _, candidate := range filetools.Tools(fsRoot, nil) {
+	for _, candidate := range fs.Tools(fsRoot, nil) {
 		if slices.Contains([]string{"read", "grep", "glob"}, candidate.Name) {
 			available = append(available, candidate)
 		}
@@ -337,7 +337,7 @@ func runRepositorySession(t *testing.T, corpus, repo, model, cfg string, repeat 
 		if !engine.StatusOrLoad().Indexed {
 			return fail(fmt.Errorf("missing offline graph for %s", repo))
 		}
-		available = append(available, graphtools.NewTools(engine)...)
+		available = append(available, graphtool.NewTools(engine)...)
 	}
 	if cfg == "graph_lsp" || cfg == "graph_missing_lsp" {
 		var opts []lsp.ManagerOption
@@ -346,7 +346,7 @@ func runRepositorySession(t *testing.T, corpus, repo, model, cfg string, repeat 
 		}
 		service := language.New(root, "", opts...)
 		defer service.Close()
-		available = append(available, lsptools.NewTools(service)...)
+		available = append(available, lsptool.NewTools(service)...)
 	}
 	if cfg == "external_graph" {
 		// Direct MCP mode has one writer lock per index. Serialize sessions
@@ -367,7 +367,7 @@ func runRepositorySession(t *testing.T, corpus, repo, model, cfg string, repeat 
 		if err := manager.Connect(ctx); err != nil {
 			return fail(err)
 		}
-		external, err := mcptools.ToolsForServer(ctx, "external", manager.Session("external"))
+		external, err := mcptool.ToolsForServer(ctx, "external", manager.Session("external"))
 		if err != nil {
 			return fail(err)
 		}
@@ -408,7 +408,7 @@ func runRepositorySession(t *testing.T, corpus, repo, model, cfg string, repeat 
 			return out, err
 		}
 	}
-	hcfg, err := harness.DefaultConfig()
+	hcfg, err := harness.ConfigFromEnvironment()
 	if err != nil {
 		return fail(err)
 	}
@@ -420,17 +420,17 @@ func runRepositorySession(t *testing.T, corpus, repo, model, cfg string, repeat 
 	hcfg.Instructions = func() string {
 		return prompt.BuildBaseInstructions(prompt.VariantFor(model).Agent, prompt.SectionData{}) + "\nWorkspace: " + root + "\nAnswer using this checkout, which can differ from versions you remember. Use the available tools; do not delegate or request new tools. Return only the requested JSON. Paths in answers must be relative to the repository root. The external graph, when available, indexes an identical source copy."
 	}
-	agent := &harness.Agent{Config: hcfg}
+	runner := &harness.Agent{Config: hcfg}
 	result.SetupMS = time.Since(started).Milliseconds()
 	for _, task := range tasks {
-		before := agent.UsageSnapshot()
-		messagesBefore := len(agent.MessagesSnapshot())
+		before := runner.UsageSnapshot()
+		messagesBefore := len(runner.MessagesSnapshot())
 		traceMu.Lock()
 		traceStart := len(traces)
 		traceMu.Unlock()
 		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 		start := time.Now()
-		stream, runErr := agent.Send(ctx, []harness.Content{{Text: task.Question}})
+		stream, runErr := runner.Send(ctx, []harness.Content{{Text: task.Question}})
 		if runErr == nil {
 			for _, err := range stream {
 				if err != nil {
@@ -441,7 +441,7 @@ func runRepositorySession(t *testing.T, corpus, repo, model, cfg string, repeat 
 		}
 		cancel()
 		turn := repositoryTurn{trial: trial{Task: task.Name, Configuration: cfg, Repeat: repeat, ElapsedMS: time.Since(start).Milliseconds(), Tools: map[string]int{}, Operations: map[string]int{}}, ChecksTotal: len(task.Answer)}
-		messages := agent.MessagesSnapshot()
+		messages := runner.MessagesSnapshot()
 		for _, message := range messages[messagesBefore:] {
 			var final strings.Builder
 			for _, content := range message.Content {
@@ -460,7 +460,7 @@ func runRepositorySession(t *testing.T, corpus, repo, model, cfg string, repeat 
 				turn.Final = final.String()
 			}
 		}
-		usage := agent.UsageSnapshot()
+		usage := runner.UsageSnapshot()
 		turn.InputTokens = usage.InputTokens - before.InputTokens
 		turn.OutputTokens = usage.OutputTokens - before.OutputTokens
 		turn.LastInputTokens = usage.LastInputTokens

@@ -13,11 +13,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -366,7 +366,7 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 		}
 	}
 
-	input := []agent.Content{{Text: displayText}}
+	input := []harness.Content{{Text: displayText}}
 	input = append(input, a.pendingContent...)
 
 	if len(a.pendingFiles) > 0 {
@@ -379,10 +379,10 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 		for _, f := range a.pendingFiles {
 			fmt.Fprintf(&sb, "- %s\n", f)
 		}
-		input = append(input, agent.Content{Text: sb.String()})
+		input = append(input, harness.Content{Text: sb.String()})
 		for _, f := range a.pendingFiles {
 			if dataURL := readAttachedImageFile(f, rootPath); dataURL != "" {
-				input = append(input, agent.Content{File: &agent.File{Name: f, Data: dataURL}})
+				input = append(input, harness.Content{File: &harness.File{Name: f, Data: dataURL}})
 			}
 		}
 	}
@@ -393,7 +393,7 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 			a.appendChat(cellNotice(fmt.Sprintf("Failed to load skill %q: %v", inv.Skill.Name, err), theme.Default.Red, a.width()))
 			continue
 		}
-		input = append(input, agent.Content{Text: block, Hidden: true})
+		input = append(input, harness.Content{Text: block, Hidden: true})
 	}
 
 	editing := a.editingQueueID != ""
@@ -512,11 +512,11 @@ func (a *App) runUserShellCommand(raw, command string) {
 	}()
 }
 
-func (a *App) submitAgentInput(input []agent.Content, echo string) bool {
+func (a *App) submitAgentInput(input []harness.Content, echo string) bool {
 	return a.submitAgentInputIntent(input, echo, code.TurnInputSteer)
 }
 
-func (a *App) submitAgentInputIntent(input []agent.Content, echo string, intent code.TurnInputIntent) bool {
+func (a *App) submitAgentInputIntent(input []harness.Content, echo string, intent code.TurnInputIntent) bool {
 	a.syncQueuedInputs()
 	displayText := echo
 	if a.editor != nil && strings.TrimSpace(a.editor.Text()) != "" {
@@ -795,7 +795,7 @@ func (a *App) showFilePicker() {
 				return
 			}
 
-			var images []agent.Content
+			var images []harness.Content
 			for _, content := range a.pendingContent {
 				if content.File != nil {
 					images = append(images, content)

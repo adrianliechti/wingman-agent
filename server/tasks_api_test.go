@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
 )
 
 func TestTasksAPI(t *testing.T) {

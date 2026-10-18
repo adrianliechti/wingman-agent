@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 const (
-	userShellOpenTag    = agent.UserShellCommandTag
+	userShellOpenTag    = harness.UserShellCommandTag
 	userShellCloseTag   = "</user_shell_command>"
 	userShellCommandTag = "<command>"
 	userShellCmdEndTag  = "</command>"

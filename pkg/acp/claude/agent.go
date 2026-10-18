@@ -3,7 +3,6 @@ package claude
 import (
 	"context"
 	"fmt"
-	"github.com/google/uuid"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,9 +10,9 @@ import (
 	"sync"
 
 	acpsdk "github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
-
 	claudecli "github.com/adrianliechti/wingman-agent/pkg/external/claude"
 )
 

@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/shell"
 )
 
 type TaskEntry struct {
@@ -66,7 +66,7 @@ func execSessionID(taskID string) (int, bool) {
 }
 
 func (s *backendRuntime) sessionTasks(sessionID string) *task.Registry {
-	ca, ok := s.agent.(*codeagent.Agent)
+	ca, ok := s.agent.(*agent.Agent)
 	if !ok {
 		return nil
 	}
@@ -175,7 +175,7 @@ func (s *backendRuntime) deliverTaskResults(sessionID string, batch []task.Event
 		ID:     fmt.Sprintf("task-%s-%d", first.ID, first.Seq),
 		Intent: code.TurnInputSteer,
 		Origin: "task",
-		Content: []agent.Content{{
+		Content: []harness.Content{{
 			Text:   strings.Join(blocks, "\n\n"),
 			Hidden: true,
 		}},
@@ -199,7 +199,7 @@ func (s *backendRuntime) handleTasks(w http.ResponseWriter, r *http.Request) {
 			out = append(out, taskEntry(t.Info()))
 		}
 	}
-	if agent, ok := s.agent.(*codeagent.Agent); ok {
+	if agent, ok := s.agent.(*agent.Agent); ok {
 		for _, session := range agent.ExecSessions(r.PathValue("id")) {
 			out = append(out, execTaskEntry(session))
 		}
@@ -227,7 +227,7 @@ func (s *backendRuntime) handleTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if id, ok := execSessionID(r.PathValue("taskID")); ok {
-		if agent, agentOK := s.agent.(*codeagent.Agent); agentOK {
+		if agent, agentOK := s.agent.(*agent.Agent); agentOK {
 			if session, found := agent.ExecSession(r.PathValue("id"), id); found {
 				transcript := []TranscriptEntry{}
 				if session.Output != "" {
@@ -261,7 +261,7 @@ func (s *backendRuntime) handleTaskStop(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	} else if id, ok := execSessionID(taskID); ok {
-		agent, agentOK := s.agent.(*codeagent.Agent)
+		agent, agentOK := s.agent.(*agent.Agent)
 		if !agentOK {
 			http.Error(w, "background command unavailable", http.StatusNotFound)
 			return

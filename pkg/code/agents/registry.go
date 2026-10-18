@@ -13,10 +13,8 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/acp/claude"
 	"github.com/adrianliechti/wingman-agent/pkg/acp/codex"
 	"github.com/adrianliechti/wingman-agent/pkg/acp/pi"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	codeacp "github.com/adrianliechti/wingman-agent/pkg/code/acp"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/external"
 	claudecli "github.com/adrianliechti/wingman-agent/pkg/external/claude"
 	codexcli "github.com/adrianliechti/wingman-agent/pkg/external/codex"
@@ -59,7 +57,7 @@ type inProcessAgent interface {
 }
 
 func wrapInProcess(ctx context.Context, ws *code.Workspace, name string, srv inProcessAgent) (code.Agent, error) {
-	a, err := codeacp.NewInProcess(ctx, ws, name, srv, srv.SetAgentConnection, srv.Close)
+	a, err := acp.NewInProcess(ctx, ws, name, srv, srv.SetAgentConnection, srv.Close)
 	if err != nil {
 		_ = srv.Close()
 		return nil, err
@@ -106,7 +104,7 @@ func detected() []Registration {
 		out = append(out, Registration{
 			ID: ID(name), Name: name,
 			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
-				return codeacp.New(ctx, ws, def)
+				return acp.New(ctx, ws, def)
 			},
 		})
 	}
@@ -140,7 +138,7 @@ func configured() ([]Registration, error) {
 		out = append(out, Registration{
 			ID: id, Name: name,
 			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
-				return codeacp.New(ctx, ws, def)
+				return acp.New(ctx, ws, def)
 			},
 		})
 	}
@@ -186,24 +184,10 @@ func Names() ([]string, error) {
 	return names(available), nil
 }
 
-// New constructs the built-in agent or any detected/configured ACP agent.
-// builtinConfig lets long-lived hosts reuse their existing Wingman config.
-func New(ctx context.Context, ws *code.Workspace, name string, builtinConfig *agent.Config) (code.Agent, error) {
+// NewExternal constructs a detected/configured ACP agent. Hosts construct the
+// built-in code agent directly and own its provider resources.
+func NewExternal(ctx context.Context, ws *code.Workspace, name string) (code.Agent, error) {
 	name = ID(name)
-	if name == "" || name == code.BuiltinAgentName {
-		ownsTelemetry := false
-		if builtinConfig == nil {
-			var err error
-			builtinConfig, err = agent.DefaultConfig()
-			if err != nil {
-				return nil, err
-			}
-			ownsTelemetry = true
-		}
-		return codeagent.New(ws, builtinConfig, nil, codeagent.Options{
-			ShutdownTelemetryOnClose: ownsTelemetry,
-		}), nil
-	}
 
 	available, err := Available()
 	if err != nil {

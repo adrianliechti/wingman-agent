@@ -7,9 +7,9 @@ import (
 	"maps"
 	"sync"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 const (

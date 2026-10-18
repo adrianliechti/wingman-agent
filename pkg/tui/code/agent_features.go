@@ -4,11 +4,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
 	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 )
 
 type modelFetcher interface {
@@ -24,7 +24,7 @@ type recapProvider interface {
 }
 
 type contextStatsProvider interface {
-	ContextStats(string) (agent.ContextStats, bool)
+	ContextStats(string) (harness.ContextStats, bool)
 }
 
 type taskProvider interface {

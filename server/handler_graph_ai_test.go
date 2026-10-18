@@ -3,23 +3,23 @@ package server
 import (
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 func TestGenerationTargetUsesBaseConfigRoleModel(t *testing.T) {
-	s := &Server{config: &agent.Config{
+	s := &Server{Config: &harness.Config{
 		Model: func() string { return "main-model" },
-		RoleModel: func(role string) (agent.ModelOption, bool) {
+		RoleModel: func(role string) (harness.ModelOption, bool) {
 			switch role {
 			case "utility":
-				return agent.ModelOption{
+				return harness.ModelOption{
 					ID:      "utility-model",
 					Efforts: []string{"none", "low", "high"},
 				}, true
 			case "":
-				return agent.ModelOption{ID: "resolved-main"}, true
+				return harness.ModelOption{ID: "resolved-main"}, true
 			default:
-				return agent.ModelOption{}, false
+				return harness.ModelOption{}, false
 			}
 		},
 	}}
