@@ -110,7 +110,7 @@ func TestACPVersionNegotiationAndV1Cancellation(t *testing.T) {
 				if string(result["protocolVersion"]) != "1" || result["agentCapabilities"] == nil || result["info"] != nil || string(result["authMethods"]) != "[]" {
 					t.Fatalf("expected a v1 negotiation response: %s", initialized.Result)
 				}
-				peer.send(t, `"new"`, "session/new", `{"cwd":"/contract","mcpServers":[]}`)
+				peer.send(t, `"new"`, "session/new", `{"cwd":`+contractCwdJSON+`,"mcpServers":[]}`)
 				created := peer.response(t, `"new"`)
 				var session acp.NewSessionResponse
 				if err := json.Unmarshal(created.Result, &session); err != nil || created.Error != nil || session.SessionId == "" {

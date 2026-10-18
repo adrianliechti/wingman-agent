@@ -10,9 +10,9 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 type adapterProtocolAgent struct {
@@ -235,14 +235,14 @@ func TestLoadSessionStreamReplaysAndCachesHistory(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = a.Close() })
 
-	var final []agent.Message
+	var final []harness.Message
 	for snapshot, err := range a.LoadSessionStream(context.Background(), "existing") {
 		if err != nil {
 			t.Fatal(err)
 		}
 		final = snapshot
 	}
-	if len(final) != 2 || final[0].Role != agent.RoleUser || len(final[0].Content) != 2 ||
+	if len(final) != 2 || final[0].Role != harness.RoleUser || len(final[0].Content) != 2 ||
 		final[0].Content[0].Text != "question" || final[0].Content[1].File == nil ||
 		final[0].Content[1].File.Data != "data:image/png;base64,AA==" {
 		t.Fatalf("history = %#v", final)
@@ -459,9 +459,9 @@ func TestSendPreservesMixedInputAndACPStreamState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	input := []agent.Content{{
+	input := []harness.Content{{
 		Text: "describe this",
-		File: &agent.File{Name: "pixel.png", Data: "data:image/png;base64,AA=="},
+		File: &harness.File{Name: "pixel.png", Data: "data:image/png;base64,AA=="},
 	}}
 	stream, err := a.Send(context.Background(), sessionID, input)
 	if err != nil {
@@ -521,7 +521,7 @@ func TestSendSurfacesCancelledStopReasonWithoutRedundantCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream, err := a.Send(context.Background(), sessionID, []agent.Content{{Text: "cancelled remotely"}})
+	stream, err := a.Send(context.Background(), sessionID, []harness.Content{{Text: "cancelled remotely"}})
 	if err != nil {
 		t.Fatal(err)
 	}

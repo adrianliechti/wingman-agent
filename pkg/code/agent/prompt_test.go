@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 type promptCaptureUI struct {
@@ -43,7 +43,7 @@ func TestPromptContextUsesLastActiveSession(t *testing.T) {
 }
 
 func TestWebPromptContextNeverGuessesAnOwner(t *testing.T) {
-	a := &Agent{options: Options{RequireSessionContext: true}, sessions: map[string]*sessionState{"one": {}, "two": {}}}
+	a := &Agent{cfg: Config{Options: Options{IsolateSessions: true}}, sessions: map[string]*sessionState{"one": {}, "two": {}}}
 	a.lastActive.Store("one")
 	if got := code.SessionIDFromContext(a.promptContext(context.Background())); got != "" {
 		t.Fatalf("guessed session %q", got)

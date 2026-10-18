@@ -1,44 +1,29 @@
 ---
 name: test
-description: Design, add, repair, or run focused tests for a change or subsystem using the repository's existing test architecture, concrete behavioral risks, meaningful assertions, and proportionate verification. Use when the user asks what or how to test, requests regression or integration coverage, wants tests written or fixed, or needs confidence beyond compilation.
+description: Plan, add, repair, or run tests for a specified behavior. Use for test strategy, regression coverage, and test maintenance.
 ---
 # Test
 
-Use `$ARGUMENTS` to identify the change, behavior, file, or subsystem. If empty, prefer the current diff and the user's latest request.
+Target: $ARGUMENTS
 
-Choose the mode from the request:
+Infer the mode from the request: a strategy is read-only, writing or repairing tests includes execution, and running tests does not by itself authorize changing production behavior. With no target, use the current change and conversation.
 
-- **Plan**: inspect and return a prioritized test strategy without editing.
-- **Add or repair**: write focused executable tests, then run them.
-- **Run**: execute the narrowest meaningful existing checks and diagnose failures without changing code unless asked.
+## Select meaningful coverage
 
-## Phase 1: Understand behavior and conventions
+Read the implementation and nearby tests, fixtures, helpers, and CI commands. Choose the lowest layer that exercises the real contract. Use integration tests where the risk lies between components; mocking that boundary would miss the point.
 
-Read the implementation branches and boundaries before writing tests. Inspect applicable instruction files, nearby tests, shared fixtures, test helpers, CI commands, and package scripts. Identify the correct test layer: unit for isolated logic, integration for component contracts, end-to-end for critical user flows, and characterization for risky legacy behavior.
+For each proposed test, identify the observable behavior and a plausible regression it would catch. Prioritize the requested behavior, the exact bug trigger, boundaries, and consequential failure or state-transition paths. Consider cancellation, cleanup, retries, persistence, concurrency, and compatibility only where relevant.
 
-Do not introduce a new framework when the repository already has one. Do not copy a large fixture when an existing builder or helper expresses the same setup.
+Avoid assertions about private structure, compiler-enforced properties, or framework behavior. Do not substitute a coverage percentage for an account of what is protected.
 
-## Phase 2: Build a risk-based matrix
+## Write or repair
 
-Cover only meaningful risks:
+Use the existing framework and fixtures. Keep setup minimal and assertions specific to the contract. Control time, randomness, and external dependencies; use synchronization rather than sleeps for concurrency tests. Verify that failures occur for the intended reason, especially in negative tests. For a regression, demonstrate failure against the original behavior when practical, using an isolated copy if testing an older revision would disturb current edits.
 
-- primary success behavior;
-- boundary and representative edge inputs;
-- important error, cancellation, retry, and cleanup paths;
-- state transitions, persistence, concurrency, or idempotency when relevant;
-- public API, protocol, serialization, migration, or compatibility contracts;
-- the exact regression trigger for a reported bug.
+When repairing a failing test, determine whether the implementation, expected behavior, or test environment is wrong. Do not update snapshots blindly, weaken assertions to match a bug, or skip a flaky test to obtain a pass. Fix production code when resolving that behavior is part of the user's request; otherwise report the defect.
 
-Skip tests of constants, trivial accessors, compiler-enforced properties, framework behavior, and implementation details that can change without affecting users. Prefer whole-object or observable-output assertions over scattered field checks. Every test should fail for a clear behavioral reason.
+## Run and report
 
-For a broad, stateful, or cross-component scope, delegate test construction to `test-engineer` with explicit file boundaries and expected behaviors. Write narrow tests directly.
+Reuse existing coverage when it already exercises the risk. Run the smallest relevant command and broaden for shared behavior or integration risk. After a change, rerun checks it could invalidate; do not add duplicate tests or repeat successful suites merely to complete a checklist.
 
-## Phase 3: Execute proportionately
-
-Run the smallest command that exercises the new or requested coverage. If it passes, broaden only when shared code, protocols, persistence, or build configuration changed. Do not install dependencies without permission and do not hide flaky or failing tests by skipping them.
-
-When a failure reveals a production bug, preserve the failing evidence and report it. Fix production code only if the user requested the behavior fixed, then rerun every check invalidated by the change.
-
-## Report
-
-List behaviors covered, tests added or changed, exact commands and results, failures or flakes found, and important risks intentionally left to another layer or manual verification. Do not substitute a coverage percentage for behavioral confidence.
+Report the behaviors covered, commands and outcomes, and important gaps. Distinguish a failed assertion from a check that could not run because of missing dependencies, services, or permissions.

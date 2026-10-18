@@ -20,11 +20,11 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
@@ -45,7 +45,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		sessionDirs: map[acpsdk.SessionId]string{},
 		workspaces:  map[string]*workspaceEntry{},
 	}
-	writer := acpcommon.NewConnectionWriter(out, 0)
+	writer := acp.NewConnectionWriter(out, 0)
 	defer writer.Close()
 	s.conn = acpsdk.NewAgentSideConnection(s, writer, in)
 	s.conn.SetLogger(slog.Default())
@@ -56,13 +56,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	case <-ctx.Done():
 	}
 
-	s.mu.Lock()
-	s.closing = true
-	sessionIDs := slices.Collect(maps.Keys(s.sessions))
-	s.mu.Unlock()
-	for _, id := range sessionIDs {
-		_, _ = s.CloseSession(context.Background(), acpsdk.CloseSessionRequest{SessionId: id})
-	}
+	s.close()
 	return writer.Err()
 }
 
@@ -70,7 +64,7 @@ var serverMCPCapabilities = acpsdk.McpCapabilities{Http: true, Sse: true}
 
 type Server struct {
 	conn   *acpsdk.AgentSideConnection
-	config *agent.Config
+	config agent.Config
 
 	mu          sync.Mutex
 	sessions    map[acpsdk.SessionId]*sessionEntry
@@ -78,12 +72,26 @@ type Server struct {
 	workspaces  map[string]*workspaceEntry
 	closing     bool
 
+	// workspaceRefs lets close wait until every workspace has been released.
+	workspaceRefs sync.WaitGroup
+
 	formElicitation atomic.Bool
+}
+
+func (s *Server) close() {
+	s.mu.Lock()
+	s.closing = true
+	sessionIDs := slices.Collect(maps.Keys(s.sessions))
+	s.mu.Unlock()
+	for _, id := range sessionIDs {
+		_, _ = s.CloseSession(context.Background(), acpsdk.CloseSessionRequest{SessionId: id})
+	}
+	s.workspaceRefs.Wait()
 }
 
 type sessionEntry struct {
 	id         acpsdk.SessionId
-	agent      *codeagent.Agent
+	agent      *agent.Agent
 	workspace  *workspaceEntry
 	cancel     context.CancelFunc
 	promptDone chan struct{}
@@ -93,7 +101,7 @@ type sessionEntry struct {
 
 type workspaceEntry struct {
 	ws         *code.Workspace
-	agent      *codeagent.Agent
+	agent      *agent.Agent
 	key        string
 	refs       int
 	ready      chan struct{}
@@ -123,6 +131,7 @@ func (s *Server) Initialize(_ context.Context, params acpsdk.InitializeRequest) 
 				Resume: &acpsdk.SessionResumeCapabilities{},
 				Close:  &acpsdk.SessionCloseCapabilities{},
 				Delete: &acpsdk.SessionDeleteCapabilities{},
+				Fork:   &acpsdk.SessionForkCapabilities{},
 			},
 		},
 	}, nil
@@ -154,7 +163,7 @@ func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elici
 	if params.Form.Message == "" {
 		params.Form.Message = "Additional input is needed."
 	}
-	response, err := acpcommon.Call(ctx, func() (acpsdk.UnstableCreateElicitationResponse, error) {
+	response, err := acp.Call(ctx, func() (acpsdk.UnstableCreateElicitationResponse, error) {
 		return s.conn.UnstableCreateElicitation(ctx, params)
 	})
 	if err != nil {
@@ -307,11 +316,11 @@ func (s *Server) Confirm(ctx context.Context, message string) (bool, error) {
 		acpsdk.WithStartKind(acpsdk.ToolKindOther),
 		acpsdk.WithStartStatus(acpsdk.ToolCallStatusPending),
 	)
-	if err := acpcommon.Notify(ctx, s.conn, acpsdk.SessionId(sid), start); err != nil {
+	if err := acp.Notify(ctx, s.conn, acpsdk.SessionId(sid), start); err != nil {
 		return false, err
 	}
 
-	response, err := acpcommon.Call(ctx, func() (acpsdk.RequestPermissionResponse, error) {
+	response, err := acp.Call(ctx, func() (acpsdk.RequestPermissionResponse, error) {
 		return s.conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
 			SessionId: acpsdk.SessionId(sid),
 			ToolCall: acpsdk.ToolCallUpdate{
@@ -346,7 +355,7 @@ func (s *Server) finishPermissionToolCall(ctx context.Context, sid acpsdk.Sessio
 	// caller's deadline. Keep this cleanup bounded in case the client is gone.
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
-	return acpcommon.Notify(finishCtx, s.conn, sid, acpsdk.UpdateToolCall(id, acpsdk.WithUpdateStatus(status)))
+	return acp.Notify(finishCtx, s.conn, sid, acpsdk.UpdateToolCall(id, acpsdk.WithUpdateStatus(status)))
 }
 
 func (s *Server) NewSession(ctx context.Context, params acpsdk.NewSessionRequest) (acpsdk.NewSessionResponse, error) {
@@ -389,6 +398,7 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 		s.mu.Unlock()
 		return nil, errors.New("ACP connection is closing")
 	}
+	s.workspaceRefs.Add(1)
 	if w, ok := s.workspaces[key]; ok {
 		w.refs++
 		s.mu.Unlock()
@@ -398,6 +408,7 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 
 	ws, err := code.NewWorkspace(cwd)
 	if err != nil {
+		s.workspaceRefs.Done()
 		return nil, err
 	}
 	if len(requested) > 0 {
@@ -410,13 +421,14 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 			delete(ws.MCP.TrustRequired, name)
 		}
 	}
-	wa := codeagent.New(ws, s.config, s)
+	wa := agent.New(ws, s.config, s)
 
 	s.mu.Lock()
 	if s.closing || ctx.Err() != nil {
 		s.mu.Unlock()
 		_ = wa.Close()
 		ws.Close()
+		s.workspaceRefs.Done()
 		return nil, errors.New("ACP connection is closing")
 	}
 	if existing, ok := s.workspaces[key]; ok {
@@ -466,7 +478,7 @@ func (s *Server) acquireWorkspace(ctx context.Context, cwd string, requestedServ
 }
 
 func requestedMCPConfig(servers []acpsdk.McpServer) (map[string]mcp.ServerConfig, error) {
-	if err := acpcommon.ValidateMCPServers(servers, serverMCPCapabilities); err != nil {
+	if err := acp.ValidateMCPServers(servers, serverMCPCapabilities); err != nil {
 		return nil, err
 	}
 	result := make(map[string]mcp.ServerConfig, len(servers))
@@ -542,6 +554,7 @@ func missingRequestedMCPServers[T any](requested map[string]mcp.ServerConfig, co
 }
 
 func (s *Server) releaseWorkspace(w *workspaceEntry) {
+	defer s.workspaceRefs.Done()
 	s.mu.Lock()
 	w.refs--
 	if w.refs > 0 {
@@ -604,7 +617,7 @@ func (s *Server) replaceLoadedSession(id acpsdk.SessionId, w *workspaceEntry) er
 }
 
 func normalizeCwd(cwd string) (string, error) {
-	cwd, _, err := acpcommon.NormalizeSessionRoots(cwd, nil)
+	cwd, _, err := acp.NormalizeSessionRoots(cwd, nil)
 	return cwd, err
 }
 
@@ -685,6 +698,10 @@ func (s *Server) retainSession(ctx context.Context, id acpsdk.SessionId, cancel 
 			s.mu.Unlock()
 			return nil, nil, err
 		}
+		if s.closing {
+			s.mu.Unlock()
+			return nil, nil, errors.New("ACP connection is closing")
+		}
 		sess := s.sessions[id]
 		if sess == nil {
 			s.mu.Unlock()
@@ -709,6 +726,7 @@ func (s *Server) retainSession(ctx context.Context, id acpsdk.SessionId, cancel 
 		}
 
 		done := make(chan struct{})
+		s.workspaceRefs.Add(1)
 		sess.workspace.refs++
 		sess.cancel = cancel
 		sess.promptDone = done
@@ -813,7 +831,7 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (respo
 			defer cancel()
 			sendCtx = detached
 		}
-		notifyErr = acpcommon.Notify(sendCtx, s.conn, params.SessionId, u)
+		notifyErr = acp.Notify(sendCtx, s.conn, params.SessionId, u)
 		if notifyErr != nil {
 			cancel()
 		}
@@ -822,7 +840,7 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (respo
 	// ACP agent_message_chunk updates cannot be retracted. Deliberately leave
 	// Reset unsupported so a recoverable error after visible output terminates
 	// the attempt instead of duplicating it with an invisible retry.
-	stream, err := sess.agent.Send(ctx, string(sess.id), acpcommon.ContentFromBlocks(params.Prompt))
+	stream, err := sess.agent.Send(ctx, string(sess.id), acp.ContentFromBlocks(params.Prompt))
 	if err != nil {
 		return acpsdk.PromptResponse{}, err
 	}
@@ -834,7 +852,7 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (respo
 			return acpsdk.PromptResponse{}, err
 		}
 		for _, c := range msg.Content {
-			notifyContent(notify, agent.RoleAssistant, c)
+			notifyContent(notify, harness.RoleAssistant, c)
 		}
 	}
 	if notifyErr != nil {
@@ -937,6 +955,39 @@ func (s *Server) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionR
 	}, nil
 }
 
+func (s *Server) UnstableForkSession(ctx context.Context, params acpsdk.UnstableForkSessionRequest) (acpsdk.UnstableForkSessionResponse, error) {
+	cwd, err := normalizeCwd(params.Cwd)
+	if err != nil {
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	servers, err := acp.StableMCPServers(params.McpServers, serverMCPCapabilities)
+	if err != nil {
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	w, err := s.acquireWorkspace(ctx, cwd, servers)
+	if err != nil {
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	sid, err := w.agent.ForkSession(ctx, string(params.SessionId), "")
+	if err != nil {
+		s.releaseWorkspace(w)
+		if errors.Is(err, fs.ErrNotExist) {
+			return acpsdk.UnstableForkSessionResponse{}, sessionNotFound(params.SessionId)
+		}
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	acpSid := acpsdk.SessionId(sid)
+	if err := s.registerSession(acpSid, w); err != nil {
+		s.releaseWorkspace(w)
+		return acpsdk.UnstableForkSessionResponse{}, err
+	}
+	return acpsdk.UnstableForkSessionResponse{
+		SessionId:     acpSid,
+		Modes:         modeState(w.agent, sid),
+		ConfigOptions: acp.UnstableConfigOptions(sessionConfigOptions(w.agent, sid)),
+	}, nil
+}
+
 func (s *Server) LoadSession(ctx context.Context, params acpsdk.LoadSessionRequest) (acpsdk.LoadSessionResponse, error) {
 	w, messages, err := s.loadAndAttach(ctx, params.Cwd, params.SessionId, params.McpServers)
 	if err != nil {
@@ -951,7 +1002,7 @@ func (s *Server) LoadSession(ctx context.Context, params acpsdk.LoadSessionReque
 	}, nil
 }
 
-func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.SessionId, servers []acpsdk.McpServer) (*workspaceEntry, []agent.Message, error) {
+func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.SessionId, servers []acpsdk.McpServer) (*workspaceEntry, []harness.Message, error) {
 	cwd, err := normalizeCwd(cwdParam)
 	if err != nil {
 		return nil, nil, err
@@ -963,11 +1014,7 @@ func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.S
 	if err := w.agent.LoadSession(ctx, string(id)); err != nil {
 		s.releaseWorkspace(w)
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, &acpsdk.RequestError{
-				Code:    -32002,
-				Message: "Resource not found",
-				Data:    map[string]any{"sessionId": string(id)},
-			}
+			return nil, nil, sessionNotFound(id)
 		}
 		return nil, nil, fmt.Errorf("session %s not found: %w", id, err)
 	}
@@ -978,11 +1025,11 @@ func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.S
 	return w, w.agent.Messages(string(id)), nil
 }
 
-func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messages []agent.Message) error {
+func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messages []harness.Message) error {
 	var notifyErr error
 	notify := func(u acpsdk.SessionUpdate) {
 		if notifyErr == nil {
-			notifyErr = acpcommon.Notify(ctx, s.conn, sid, u)
+			notifyErr = acp.Notify(ctx, s.conn, sid, u)
 		}
 	}
 	for _, m := range messages {
@@ -999,7 +1046,7 @@ func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messa
 	return ctx.Err()
 }
 
-func notifyContent(notify func(acpsdk.SessionUpdate), role agent.MessageRole, c agent.Content) {
+func notifyContent(notify func(acpsdk.SessionUpdate), role harness.MessageRole, c harness.Content) {
 	switch {
 	case c.ToolCall != nil:
 		if c.ToolCall.Partial {
@@ -1007,7 +1054,7 @@ func notifyContent(notify func(acpsdk.SessionUpdate), role agent.MessageRole, c 
 		}
 		presentation := c.ToolCall.Presentation
 		if presentation == nil {
-			presentation = agent.NewToolPresentation(
+			presentation = harness.NewToolPresentation(
 				c.ToolCall.Name, c.ToolCall.Kind, c.ToolCall.Args, c.ToolCall.Locations,
 			)
 		}
@@ -1060,8 +1107,8 @@ func notifyContent(notify func(acpsdk.SessionUpdate), role agent.MessageRole, c 
 	if c.Reasoning != nil && c.Reasoning.Summary != "" {
 		notify(acpsdk.UpdateAgentThoughtText(c.Reasoning.Summary))
 	}
-	for _, block := range acpcommon.ContentToBlocks([]agent.Content{c}) {
-		if role == agent.RoleUser {
+	for _, block := range acp.ContentToBlocks([]harness.Content{c}) {
+		if role == harness.RoleUser {
 			notify(acpsdk.UpdateUserMessage(block))
 		} else {
 			notify(acpsdk.UpdateAgentMessage(block))
@@ -1114,7 +1161,7 @@ func (s *Server) SetSessionMode(ctx context.Context, params acpsdk.SetSessionMod
 	return acpsdk.SetSessionModeResponse{}, nil
 }
 
-func modeState(a *codeagent.Agent, sid string) *acpsdk.SessionModeState {
+func modeState(a *agent.Agent, sid string) *acpsdk.SessionModeState {
 	modes, current := a.Modes(sid)
 	if len(modes) == 0 {
 		return nil
@@ -1145,7 +1192,7 @@ func parseRawInput(args string) any {
 	return args
 }
 
-func sessionConfigOptions(a *codeagent.Agent, sid string) []acpsdk.SessionConfigOption {
+func sessionConfigOptions(a *agent.Agent, sid string) []acpsdk.SessionConfigOption {
 	return []acpsdk.SessionConfigOption{
 		modelConfigOption(a, sid),
 		effortConfigOption(a, sid),
@@ -1153,7 +1200,7 @@ func sessionConfigOptions(a *codeagent.Agent, sid string) []acpsdk.SessionConfig
 	}
 }
 
-func modelConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOption {
+func modelConfigOption(a *agent.Agent, sid string) acpsdk.SessionConfigOption {
 	available, current := a.Models(sid)
 	opts := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(available))
 	foundCurrent := false
@@ -1182,13 +1229,13 @@ func modelConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOptio
 	}
 }
 
-func effortConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOption {
+func effortConfigOption(a *agent.Agent, sid string) acpsdk.SessionConfigOption {
 	current, values := a.Effort(sid)
 	opts := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(values))
 	for _, v := range values {
 		opts = append(opts, acpsdk.SessionConfigSelectOption{
 			Value: acpsdk.SessionConfigValueId(v),
-			Name:  acpcommon.TitleCase(v),
+			Name:  acp.TitleCase(v),
 		})
 	}
 	return acpsdk.SessionConfigOption{
@@ -1201,7 +1248,7 @@ func effortConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOpti
 	}
 }
 
-func unattendedConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfigOption {
+func unattendedConfigOption(a *agent.Agent, sid string) acpsdk.SessionConfigOption {
 	current := "off"
 	if a.Unattended(sid) {
 		current = "on"
@@ -1219,7 +1266,7 @@ func unattendedConfigOption(a *codeagent.Agent, sid string) acpsdk.SessionConfig
 	}
 }
 
-func sdkToolLocations(locations []agent.ToolLocation) []acpsdk.ToolCallLocation {
+func sdkToolLocations(locations []harness.ToolLocation) []acpsdk.ToolCallLocation {
 	result := make([]acpsdk.ToolCallLocation, 0, len(locations))
 	for _, location := range locations {
 		if location.Path == "" {
@@ -1232,4 +1279,8 @@ func sdkToolLocations(locations []agent.ToolLocation) []acpsdk.ToolCallLocation 
 		result = append(result, mapped)
 	}
 	return result
+}
+
+func sessionNotFound(id acpsdk.SessionId) *acpsdk.RequestError {
+	return &acpsdk.RequestError{Code: -32002, Message: "Resource not found", Data: map[string]any{"sessionId": string(id)}}
 }

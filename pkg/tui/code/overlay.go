@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -136,7 +136,7 @@ func (p *pager) Render(width, height int) []string {
 
 // transcriptLines renders committed messages with nothing truncated. A nil
 // isToolHidden shows every tool result.
-func transcriptLines(messages []agent.Message, width int, isToolHidden func(string) bool) []string {
+func transcriptLines(messages []harness.Message, width int, isToolHidden func(string) bool) []string {
 	var lines []string
 
 	for _, msg := range messages {
@@ -158,7 +158,7 @@ func transcriptLines(messages []agent.Message, width int, isToolHidden func(stri
 				lines = append(lines, "")
 			case c.AsText() != "":
 				switch msg.Role {
-				case agent.RoleUser:
+				case harness.RoleUser:
 					if cmd, output, exitCode, ok := code.ParseUserShellCommand(c.AsText()); ok {
 						lines = append(lines, cellUserShell(cmd, output, exitCode, width, true)...)
 					} else if isCommandEcho(c.AsText()) {
@@ -166,7 +166,7 @@ func transcriptLines(messages []agent.Message, width int, isToolHidden func(stri
 					} else {
 						lines = append(lines, cellUser(c.AsText(), width)...)
 					}
-				case agent.RoleAssistant:
+				case harness.RoleAssistant:
 					lines = append(lines, cellAssistant(c.AsText(), width, theme.Default.Green)...)
 				}
 			}
@@ -176,7 +176,7 @@ func transcriptLines(messages []agent.Message, width int, isToolHidden func(stri
 	return lines
 }
 
-// taskOverlay is a live window onto a background agent's transcript: while
+// taskOverlay is a live window onto a synchronous or background agent's transcript: while
 // the task runs it re-snapshots the messages (throttled) and follows the
 // bottom until the user scrolls away.
 type taskOverlay struct {
@@ -195,7 +195,7 @@ func (a *App) showTaskPeek(t *task.Task) {
 		task:   t,
 		follow: true,
 	}
-	o.pager.hints = dim("↑↓/jk/wheel scroll · g/G top/bottom · esc close")
+	o.pager.hints = dim("↑↓/jk/wheel scroll · g/G top/bottom · esc back to chat")
 	a.openOverlay(o)
 }
 

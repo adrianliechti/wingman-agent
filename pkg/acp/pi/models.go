@@ -5,9 +5,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/coder/acp-go-sdk"
+	acpsdk "github.com/coder/acp-go-sdk"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 const (
@@ -118,8 +118,8 @@ func findModel(models []modelEntry, id string) *modelEntry {
 	return nil
 }
 
-func buildConfigOptions(models []modelEntry, currentModel string, thinkingLevels []string, thinking string) []acp.SessionConfigOption {
-	opts := make([]acp.SessionConfigOption, 0, 2)
+func buildConfigOptions(models []modelEntry, currentModel string, thinkingLevels []string, thinking string) []acpsdk.SessionConfigOption {
+	opts := make([]acpsdk.SessionConfigOption, 0, 2)
 	if len(models) > 0 {
 		opts = append(opts, modelConfigOption(models, currentModel))
 	}
@@ -129,43 +129,43 @@ func buildConfigOptions(models []modelEntry, currentModel string, thinkingLevels
 	return opts
 }
 
-func modelConfigOption(models []modelEntry, currentID string) acp.SessionConfigOption {
-	ungrouped := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(models))
+func modelConfigOption(models []modelEntry, currentID string) acpsdk.SessionConfigOption {
+	ungrouped := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(models))
 	for _, m := range models {
-		ungrouped = append(ungrouped, acp.SessionConfigSelectOption{
-			Value: acp.SessionConfigValueId(m.ID),
+		ungrouped = append(ungrouped, acpsdk.SessionConfigSelectOption{
+			Value: acpsdk.SessionConfigValueId(m.ID),
 			Name:  m.Name,
 		})
 	}
 	if findModel(models, currentID) == nil && len(models) > 0 {
 		currentID = models[0].ID
 	}
-	opt := acp.NewSessionConfigOptionSelect(
-		acp.SessionConfigValueId(currentID),
-		acp.SessionConfigSelectOptions{Ungrouped: &ungrouped},
+	opt := acpsdk.NewSessionConfigOptionSelect(
+		acpsdk.SessionConfigValueId(currentID),
+		acpsdk.SessionConfigSelectOptions{Ungrouped: &ungrouped},
 	)
 	opt.Select.Id = modelConfigID
 	opt.Select.Name = "Model"
 	return opt
 }
 
-func effortConfigOption(levels []string, thinking string) acp.SessionConfigOption {
+func effortConfigOption(levels []string, thinking string) acpsdk.SessionConfigOption {
 	if !isThinkingLevel(levels, thinking) {
 		thinking = levels[0]
 	}
-	ungrouped := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(levels))
+	ungrouped := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(levels))
 	for _, l := range levels {
-		ungrouped = append(ungrouped, acp.SessionConfigSelectOption{
-			Value: acp.SessionConfigValueId(l),
-			Name:  acpcommon.TitleCase(l),
+		ungrouped = append(ungrouped, acpsdk.SessionConfigSelectOption{
+			Value: acpsdk.SessionConfigValueId(l),
+			Name:  acp.TitleCase(l),
 		})
 	}
-	opt := acp.NewSessionConfigOptionSelect(
-		acp.SessionConfigValueId(thinking),
-		acp.SessionConfigSelectOptions{Ungrouped: &ungrouped},
+	opt := acpsdk.NewSessionConfigOptionSelect(
+		acpsdk.SessionConfigValueId(thinking),
+		acpsdk.SessionConfigSelectOptions{Ungrouped: &ungrouped},
 	)
 	desc := "Reasoning effort for this session"
-	cat := acp.SessionConfigOptionCategoryThoughtLevel
+	cat := acpsdk.SessionConfigOptionCategoryThoughtLevel
 	opt.Select.Id = effortConfigID
 	opt.Select.Name = "Thinking"
 	opt.Select.Description = &desc

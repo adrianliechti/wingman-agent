@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
+	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 const maxProjectKeyLen = 200
@@ -100,12 +100,12 @@ func scanSessionModel(path string) string {
 	return model
 }
 
-func listProjectSessions(cwd string) ([]acp.SessionInfo, error) {
+func listProjectSessions(cwd string) ([]acpsdk.SessionInfo, error) {
 	dirs, err := projectDirs(cwd)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]acp.SessionInfo, 0)
+	out := make([]acpsdk.SessionInfo, 0)
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -134,8 +134,8 @@ func listProjectSessions(cwd string) ([]acp.SessionInfo, error) {
 				continue
 			}
 			ts := info.ModTime().UTC().Format(time.RFC3339)
-			si := acp.SessionInfo{
-				SessionId: acp.SessionId(id),
+			si := acpsdk.SessionInfo{
+				SessionId: acpsdk.SessionId(id),
 				Cwd:       sessCwd,
 				UpdatedAt: &ts,
 			}
@@ -181,7 +181,7 @@ func projectDirs(cwd string) ([]string, error) {
 	return out, nil
 }
 
-func deleteProjectSession(id acp.SessionId) error {
+func deleteProjectSession(id acpsdk.SessionId) error {
 	dirs, err := projectDirs("")
 	if err != nil {
 		return err
@@ -194,7 +194,7 @@ func deleteProjectSession(id acp.SessionId) error {
 	return nil
 }
 
-func sessionExists(cwd string, id acp.SessionId) bool {
+func sessionExists(cwd string, id acpsdk.SessionId) bool {
 	dir := projectDirFor(cwd)
 	if dir == "" {
 		return false
@@ -278,7 +278,7 @@ func truncateTitle(s string) string {
 	return s[:max-1] + "…"
 }
 
-func replayHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, cwd string) error {
+func replayHistory(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, cwd string) error {
 	dir := projectDirFor(cwd)
 	if dir == "" {
 		return nil
@@ -295,7 +295,7 @@ func replayHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 	return streamHistory(ctx, conn, sid, cwd, f)
 }
 
-func streamHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, cwd string, r io.Reader) error {
+func streamHistory(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, cwd string, r io.Reader) error {
 	cache := toolUseCache{}
 	scanner := newCLIScanner(r)
 	for scanner.Scan() {
@@ -377,7 +377,7 @@ func replayUserText(text string) (string, bool) {
 	return name, true
 }
 
-func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache, parentToolUseID string) error {
+func replayUserMessage(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, raw json.RawMessage, cache toolUseCache, parentToolUseID string) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -397,7 +397,7 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 		if !ok {
 			return nil
 		}
-		return acpcommon.Notify(ctx, conn, sid, acp.UpdateUserMessageText(text))
+		return acp.Notify(ctx, conn, sid, acpsdk.UpdateUserMessageText(text))
 	}
 
 	var blocks []cliMsgBlock
@@ -414,7 +414,7 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 			if !ok {
 				continue
 			}
-			if err := acpcommon.Notify(ctx, conn, sid, acp.UpdateUserMessageText(text)); err != nil {
+			if err := acp.Notify(ctx, conn, sid, acpsdk.UpdateUserMessageText(text)); err != nil {
 				return err
 			}
 		case "tool_result":
@@ -422,17 +422,17 @@ func replayUserMessage(ctx context.Context, conn *acp.AgentSideConnection, sid a
 				continue
 			}
 			name := cache[b.ToolUseID]
-			status := acp.ToolCallStatusCompleted
+			status := acpsdk.ToolCallStatusCompleted
 			if b.IsError {
-				status = acp.ToolCallStatusFailed
+				status = acpsdk.ToolCallStatusFailed
 			}
-			opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(status)}
+			opts := []acpsdk.ToolCallUpdateOpt{acpsdk.WithUpdateStatus(status)}
 			if content := toolResultContent(name, b); len(content) > 0 {
-				opts = append(opts, acp.WithUpdateContent(content))
+				opts = append(opts, acpsdk.WithUpdateContent(content))
 			}
-			u := acp.UpdateToolCall(acp.ToolCallId(b.ToolUseID), opts...)
+			u := acpsdk.UpdateToolCall(acpsdk.ToolCallId(b.ToolUseID), opts...)
 			withClaudeToolMeta(&u, name, parentToolUseID)
-			if err := acpcommon.Notify(ctx, conn, sid, u); err != nil {
+			if err := acp.Notify(ctx, conn, sid, u); err != nil {
 				return err
 			}
 		}

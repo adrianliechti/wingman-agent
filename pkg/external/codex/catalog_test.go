@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -156,7 +157,8 @@ func TestPrepareModelCatalogCleansUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	// Windows has no POSIX permission bits; os.Stat always reports 0666 there.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		t.Errorf("catalog permissions = %o, want private", info.Mode().Perm())
 	}
 

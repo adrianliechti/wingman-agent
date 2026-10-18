@@ -15,15 +15,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 type legacyRecord struct {
-	Type      string         `json:"type"`
-	ID        string         `json:"id,omitempty"`
-	CreatedAt *time.Time     `json:"created_at,omitempty"`
-	Message   *agent.Message `json:"message,omitempty"`
-	Usage     *agent.Usage   `json:"usage,omitempty"`
+	Type      string           `json:"type"`
+	ID        string           `json:"id,omitempty"`
+	CreatedAt *time.Time       `json:"created_at,omitempty"`
+	Message   *harness.Message `json:"message,omitempty"`
+	Usage     *harness.Usage   `json:"usage,omitempty"`
 }
 
 func ensureCurrentFormat(sessionsDir, id string) error {
@@ -126,10 +126,10 @@ func loadLegacyJSON(path string) (Session, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return Session{}, fmt.Errorf("failed to parse legacy session file: %w", err)
 	}
-	if len(s.State.Messages) == 0 && len(s.State.Events) == 0 && s.State.Usage == (agent.Usage{}) {
+	if len(s.State.Messages) == 0 && len(s.State.Events) == 0 && s.State.Usage == (harness.Usage{}) {
 		var flat struct {
-			Messages []agent.Message `json:"messages,omitempty"`
-			Usage    agent.Usage     `json:"usage"`
+			Messages []harness.Message `json:"messages,omitempty"`
+			Usage    harness.Usage     `json:"usage"`
 		}
 		if err := json.Unmarshal(data, &flat); err == nil {
 			s.State.Messages = flat.Messages
@@ -159,35 +159,7 @@ func migrateLegacySession(path string, legacy Session) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".migrate-")
-	if err != nil {
-		return err
-	}
-	cleanup := func() {
-		tmp.Close()
-		os.Remove(tmp.Name())
-	}
-	enc := json.NewEncoder(tmp)
-	if err := enc.Encode(record{Type: "meta", Version: journalVersion, ID: id, CreatedAt: &created}); err != nil {
-		cleanup()
-		return err
-	}
-	for i := range state.Events {
-		if err := enc.Encode(record{Type: "event", Event: &state.Events[i]}); err != nil {
-			cleanup()
-			return err
-		}
-	}
-	if err := tmp.Sync(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
+	if err := writeJournal(path, record{Type: "meta", Version: journalVersion, ID: id, CreatedAt: &created}, state.Events); err != nil {
 		return fmt.Errorf("migrate legacy session: %w", err)
 	}
 	return nil

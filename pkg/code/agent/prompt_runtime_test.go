@@ -9,13 +9,12 @@ import (
 	"strings"
 	"testing"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 func TestSharedPromptReferencesRegisteredToolSchemas(t *testing.T) {
-	a := New(newOptionsTestWorkspace(t), &harness.Config{}, nil)
+	a := New(newOptionsTestWorkspace(t), Config{Options: optionsFromEnvironment()}, nil)
 	t.Cleanup(func() { _ = a.Close() })
 	id, err := a.NewSession(t.Context())
 	if err != nil {
@@ -97,7 +96,7 @@ func TestPromptGuidanceFollowsConfiguredTools(t *testing.T) {
 		{name: "no web", options: Options{DisableWebSearch: true, DisableWebFetch: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a := New(ws, &harness.Config{}, nil, tc.options)
+			a := New(ws, Config{Options: tc.options}, nil)
 			t.Cleanup(func() { _ = a.Close() })
 			id, err := a.NewSession(t.Context())
 			if err != nil {
@@ -143,7 +142,7 @@ func TestDelegatedRequestsIncludeRuntimeAndActiveMode(t *testing.T) {
 	}))
 	t.Cleanup(provider.Close)
 	t.Setenv("WINGMAN_URL", provider.URL)
-	cfg, err := harness.DefaultConfig()
+	cfg, err := DefaultConfig()
 	if err != nil {
 		t.Fatal(err)
 	}

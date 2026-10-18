@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +41,9 @@ type Factory func(*testing.T) Agent
 func CommandHelper(t *testing.T, testName, envKey string) (path, dir string, env []string) {
 	t.Helper()
 	dir = t.TempDir()
+	if runtime.GOOS == "windows" {
+		return windowsCommandHelper(t, testName), dir, append(os.Environ(), envKey+"=1")
+	}
 	path = filepath.Join(dir, "acp-contract-helper")
 	binary := "'" + strings.ReplaceAll(os.Args[0], "'", "'\\''") + "'"
 	body := fmt.Sprintf("#!/bin/sh\nexec %s -test.run '^%s$' -- \"$@\"\n", binary, testName)

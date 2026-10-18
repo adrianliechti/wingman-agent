@@ -13,11 +13,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/shell"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -57,16 +57,20 @@ func (a *App) builtinCommands() []slashCommand {
 	}
 	modes, _ := a.agent.Modes(a.sessionID)
 	for _, mode := range modes {
+		description := fmt.Sprintf("Switch to %s mode", mode.Name)
+		if mode.Description != "" {
+			description += ". " + mode.Description
+		}
 		cmds = append(cmds, slashCommand{
 			Name: "/" + mode.ID,
-			Desc: mode.Description,
+			Desc: description,
 			Busy: true,
 			Run:  func(a *App) { a.setMode(mode.ID) },
 		})
 	}
 	if _, ok := a.agent.(code.UnattendedAgent); ok {
 		cmds = append(cmds, slashCommand{
-			Name: "/unattended", Desc: "Toggle automatic approvals and skip questions", Busy: true,
+			Name: "/unattended", Desc: "Toggle running every action without review and skipping questions", Busy: true,
 			Run: (*App).toggleUnattendedMode,
 		})
 	}
@@ -78,10 +82,23 @@ func (a *App) builtinCommands() []slashCommand {
 		cmds = append(cmds, slashCommand{Name: "/context", Desc: "Show context window usage", Busy: true, Run: (*App).showContextStats})
 	}
 	if _, ok := a.agent.(taskProvider); ok {
-		cmds = append(cmds, slashCommand{Name: "/tasks", Desc: "Show background agents and scheduled tasks", Busy: true, Run: (*App).showTasks})
+		cmds = append(cmds, slashCommand{Name: "/agents", Desc: "Watch agents and view scheduled tasks", Busy: true, Run: (*App).showAgents})
 	}
 	if _, ok := a.agent.(recapProvider); ok {
 		cmds = append(cmds, slashCommand{Name: "/recap", Desc: "Summarize the session so far", Run: (*App).showRecap})
+	}
+	if _, ok := a.agent.(code.Compactor); ok {
+		cmds = append(cmds, slashCommand{
+			Name: "/compact", Hint: "[focus]", Desc: "Summarize the conversation to free context",
+			Run: func(a *App) { a.compactContext("") }, RunArgs: (*App).compactContext,
+		})
+	}
+
+	if _, ok := a.agent.(code.SessionForker); ok {
+		cmds = append(cmds, slashCommand{
+			Name: "/fork", Hint: "[title]", Desc: "Continue in a copy of this session; the original is kept",
+			Run: func(a *App) { a.forkSession("") }, RunArgs: (*App).forkSession,
+		})
 	}
 
 	cmds = append(cmds,
@@ -349,7 +366,7 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 		}
 	}
 
-	input := []agent.Content{{Text: displayText}}
+	input := []harness.Content{{Text: displayText}}
 	input = append(input, a.pendingContent...)
 
 	if len(a.pendingFiles) > 0 {
@@ -362,10 +379,10 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 		for _, f := range a.pendingFiles {
 			fmt.Fprintf(&sb, "- %s\n", f)
 		}
-		input = append(input, agent.Content{Text: sb.String()})
+		input = append(input, harness.Content{Text: sb.String()})
 		for _, f := range a.pendingFiles {
 			if dataURL := readAttachedImageFile(f, rootPath); dataURL != "" {
-				input = append(input, agent.Content{File: &agent.File{Name: f, Data: dataURL}})
+				input = append(input, harness.Content{File: &harness.File{Name: f, Data: dataURL}})
 			}
 		}
 	}
@@ -376,7 +393,7 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 			a.appendChat(cellNotice(fmt.Sprintf("Failed to load skill %q: %v", inv.Skill.Name, err), theme.Default.Red, a.width()))
 			continue
 		}
-		input = append(input, agent.Content{Text: block, Hidden: true})
+		input = append(input, harness.Content{Text: block, Hidden: true})
 	}
 
 	editing := a.editingQueueID != ""
@@ -451,7 +468,9 @@ func (a *App) runUserShellCommand(raw, command string) {
 			}
 		}
 
-		output := string(rawOut)
+		// Windows shells end lines with CRLF; record the output the agent
+		// sees with plain newlines, as the shell tool does.
+		output := strings.ReplaceAll(string(rawOut), "\r\n", "\n")
 		if output == "" && err != nil {
 			var exitErr *exec.ExitError
 			if !errors.As(err, &exitErr) {
@@ -493,11 +512,11 @@ func (a *App) runUserShellCommand(raw, command string) {
 	}()
 }
 
-func (a *App) submitAgentInput(input []agent.Content, echo string) bool {
+func (a *App) submitAgentInput(input []harness.Content, echo string) bool {
 	return a.submitAgentInputIntent(input, echo, code.TurnInputSteer)
 }
 
-func (a *App) submitAgentInputIntent(input []agent.Content, echo string, intent code.TurnInputIntent) bool {
+func (a *App) submitAgentInputIntent(input []harness.Content, echo string, intent code.TurnInputIntent) bool {
 	a.syncQueuedInputs()
 	displayText := echo
 	if a.editor != nil && strings.TrimSpace(a.editor.Text()) != "" {
@@ -540,12 +559,12 @@ func (a *App) showHelp() {
 	a.showCommandCenter()
 }
 
-func (a *App) showTasks() {
+func (a *App) showAgents() {
 	t := theme.Default
 
 	provider, ok := a.agent.(taskProvider)
 	if !ok {
-		a.appendChat(cellNotice("Background agents are unavailable for this agent", t.Yellow, a.width()))
+		a.appendChat(cellNotice("Agent transcripts are unavailable for this agent", t.Yellow, a.width()))
 		return
 	}
 
@@ -564,7 +583,7 @@ func (a *App) showTasks() {
 	}
 
 	if len(tasks) == 0 && len(jobs) == 0 {
-		a.appendChat(cellNotice("No background agents or scheduled tasks in this session", t.Yellow, a.width()))
+		a.appendChat(cellNotice("No agents or scheduled tasks in this session", t.Yellow, a.width()))
 		return
 	}
 
@@ -596,7 +615,7 @@ func (a *App) showTasks() {
 		})
 	}
 
-	a.popup = newPopup(popupList, "background agents & scheduled tasks (enter to watch)", items, func(ids []string) {
+	a.popup = newPopup(popupList, "agents & scheduled tasks (enter to view)", items, func(ids []string) {
 		if id, ok := strings.CutPrefix(ids[0], schedulePopupPrefix); ok {
 			a.showSchedule(id)
 			return
@@ -776,7 +795,7 @@ func (a *App) showFilePicker() {
 				return
 			}
 
-			var images []agent.Content
+			var images []harness.Content
 			for _, content := range a.pendingContent {
 				if content.File != nil {
 					images = append(images, content)

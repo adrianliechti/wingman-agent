@@ -57,7 +57,7 @@ func indentWrap(text string, width int) []string {
 
 // continuationWrap renders tool output lines under a `└` gutter.
 func continuationWrap(text string, width int, colorize func(string) string) []string {
-	inner := max(width-len(cellIndent)-4, 10)
+	inner := max(width-len(cellIndent)-2, 1)
 
 	var lines []string
 	first := true

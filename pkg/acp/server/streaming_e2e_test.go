@@ -12,9 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	acpsdk "github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/testenv"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 )
 
 type streamingClient struct {

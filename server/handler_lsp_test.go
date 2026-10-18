@@ -156,7 +156,9 @@ func greet() {}
 			t.Fatalf("locations = %+v, want one", locations)
 		}
 		path, ok := fileuri.Path(string(locations[0].URI))
-		if !ok || filepath.Clean(path) != filepath.Join(workDir, "main.go") || locations[0].Range.Start.Line != 6 || locations[0].Range.Start.Character != 5 {
+		// Language servers canonicalize drive letters (gopls reports
+		// file:///f%3A/...), so compare file identity rather than spelling.
+		if !ok || !sameFile(t, path, filepath.Join(workDir, "main.go")) || locations[0].Range.Start.Line != 6 || locations[0].Range.Start.Character != 5 {
 			t.Fatalf("location = %+v, want main.go:7:6", locations[0])
 		}
 	})
@@ -362,4 +364,17 @@ func TestLSPFileDiagnosticsRequestValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func sameFile(t *testing.T, a, b string) bool {
+	t.Helper()
+	infoA, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	infoB, err := os.Stat(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return os.SameFile(infoA, infoB)
 }

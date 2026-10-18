@@ -43,6 +43,7 @@ export type Phase =
 	| "streaming"
 	| "tool_running"
 	| "retrying"
+	| "compacting"
 	| "stopping";
 
 export interface ToolLocation {

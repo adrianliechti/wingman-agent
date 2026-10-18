@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -16,7 +15,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 )
 
 func TestACPContract(t *testing.T) {
@@ -95,15 +94,7 @@ func (s *contractServer) SetAgentConnection(conn *acpsdk.AgentSideConnection) {
 }
 
 func (s *contractServer) Close() error {
-	s.mu.Lock()
-	ids := make([]acpsdk.SessionId, 0, len(s.sessions))
-	for id := range s.sessions {
-		ids = append(ids, id)
-	}
-	s.mu.Unlock()
-	for _, id := range ids {
-		_, _ = s.CloseSession(context.Background(), acpsdk.CloseSessionRequest{SessionId: id})
-	}
+	s.close()
 	s.model.Close()
 	return nil
 }

@@ -3,17 +3,17 @@ package code
 import (
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
 
 func TestCellContextStatsAlignment(t *testing.T) {
-	stats := agent.ContextStats{
+	stats := harness.ContextStats{
 		Model:              "claude-fable-5",
 		Window:             1_000_000,
 		InstructionsTokens: 4200,
 		ToolsTokens:        17_600,
-		ToolStats:          []agent.ToolStat{{Name: "shell", Tokens: 1400}, {Name: "agent", Tokens: 1100}},
+		ToolStats:          []harness.ToolStat{{Name: "shell", Tokens: 1400}, {Name: "agent", Tokens: 1100}},
 		MessagesTokens:     18_700,
 		MessageCount:       58,
 		LastInputTokens:    42_500,

@@ -3,6 +3,7 @@ package settings
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -63,7 +64,8 @@ func TestSettingsDefaultAndUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows has no POSIX permission bits; os.Stat always reports 0666 there.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("config permissions = %o, want 600", info.Mode().Perm())
 	}
 	data, err := os.ReadFile(path)

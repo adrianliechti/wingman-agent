@@ -3,68 +3,69 @@ package claude
 import (
 	"cmp"
 	"encoding/json"
-	"path/filepath"
 	"regexp"
 	"strings"
 
-	"github.com/coder/acp-go-sdk"
+	acpsdk "github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type toolUseCache map[string]string
 
 type toolInfo struct {
 	title     string
-	kind      acp.ToolKind
+	kind      acpsdk.ToolKind
 	rawInput  any
-	locations []acp.ToolCallLocation
-	content   []acp.ToolCallContent
+	locations []acpsdk.ToolCallLocation
+	content   []acpsdk.ToolCallContent
 }
 
 // toolCallStartUpdate builds the tool_call notification for a tool_use. It's
 // shared by the two sites that can be first to surface one — the streamed
 // tool_use block (events.go) and the eager permission-request path
 // (approvals.go) — so they can't drift apart.
-func toolCallStartUpdate(id, name string, rawInput json.RawMessage, cwd string, status acp.ToolCallStatus) acp.SessionUpdate {
+func toolCallStartUpdate(id, name string, rawInput json.RawMessage, cwd string, status acpsdk.ToolCallStatus) acpsdk.SessionUpdate {
 	info := toolInfoFromToolUse(name, rawInput, cwd)
-	opts := []acp.ToolCallStartOpt{
-		acp.WithStartKind(info.kind),
-		acp.WithStartStatus(status),
+	opts := []acpsdk.ToolCallStartOpt{
+		acpsdk.WithStartKind(info.kind),
+		acpsdk.WithStartStatus(status),
 	}
 	if len(info.content) > 0 {
-		opts = append(opts, acp.WithStartContent(info.content))
+		opts = append(opts, acpsdk.WithStartContent(info.content))
 	}
 	if len(info.locations) > 0 {
-		opts = append(opts, acp.WithStartLocations(info.locations))
+		opts = append(opts, acpsdk.WithStartLocations(info.locations))
 	}
 	// WithStartLocations mirrors a lone location into rawInput.path. Apply the
 	// display input afterwards so a file chip never becomes a duplicate hint or
 	// expanded path argument.
 	if info.rawInput != nil || len(info.locations) > 0 {
-		opts = append(opts, acp.WithStartRawInput(info.rawInput))
+		opts = append(opts, acpsdk.WithStartRawInput(info.rawInput))
 	}
-	return acp.StartToolCall(acp.ToolCallId(id), info.title, opts...)
+	return acpsdk.StartToolCall(acpsdk.ToolCallId(id), info.title, opts...)
 }
 
 // toolCallRefineUpdate builds the tool_call_update that refines a tool_call
 // already emitted by the other path with the now-complete info, instead of
 // duplicating it. See toolCallTracker.
-func toolCallRefineUpdate(id, name string, rawInput json.RawMessage, cwd string, status acp.ToolCallStatus) acp.SessionUpdate {
+func toolCallRefineUpdate(id, name string, rawInput json.RawMessage, cwd string, status acpsdk.ToolCallStatus) acpsdk.SessionUpdate {
 	info := toolInfoFromToolUse(name, rawInput, cwd)
-	opts := []acp.ToolCallUpdateOpt{
-		acp.WithUpdateTitle(info.title),
-		acp.WithUpdateKind(info.kind),
-		acp.WithUpdateStatus(status),
+	opts := []acpsdk.ToolCallUpdateOpt{
+		acpsdk.WithUpdateTitle(info.title),
+		acpsdk.WithUpdateKind(info.kind),
+		acpsdk.WithUpdateStatus(status),
 	}
 	if info.rawInput != nil {
-		opts = append(opts, acp.WithUpdateRawInput(info.rawInput))
+		opts = append(opts, acpsdk.WithUpdateRawInput(info.rawInput))
 	}
 	if len(info.content) > 0 {
-		opts = append(opts, acp.WithUpdateContent(info.content))
+		opts = append(opts, acpsdk.WithUpdateContent(info.content))
 	}
 	if len(info.locations) > 0 {
-		opts = append(opts, acp.WithUpdateLocations(info.locations))
+		opts = append(opts, acpsdk.WithUpdateLocations(info.locations))
 	}
-	return acp.UpdateToolCall(acp.ToolCallId(id), opts...)
+	return acpsdk.UpdateToolCall(acpsdk.ToolCallId(id), opts...)
 }
 
 func unmarshalAny(raw json.RawMessage) (any, bool) {
@@ -96,18 +97,15 @@ func displayInput(raw json.RawMessage, omit ...string) any {
 	return args
 }
 
-func displayLocation(path, cwd string, line int) []acp.ToolCallLocation {
+func displayLocation(path, cwd string, line int) []acpsdk.ToolCallLocation {
 	if path == "" {
 		return nil
 	}
-	if !filepath.IsAbs(path) && cwd != "" {
-		path = filepath.Join(cwd, path)
-	}
-	location := acp.ToolCallLocation{Path: path}
+	location := acpsdk.ToolCallLocation{Path: acp.ResolvePath(path, cwd)}
 	if line > 0 {
 		location.Line = new(line)
 	}
-	return []acp.ToolCallLocation{location}
+	return []acpsdk.ToolCallLocation{location}
 }
 
 func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) toolInfo {
@@ -122,11 +120,11 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		if in.Description != "" {
 			title = in.Description
 		}
-		var content []acp.ToolCallContent
+		var content []acpsdk.ToolCallContent
 		if in.Prompt != "" {
-			content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(in.Prompt))}
+			content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(in.Prompt))}
 		}
-		return toolInfo{title: title, kind: acp.ToolKindThink, content: content}
+		return toolInfo{title: title, kind: acpsdk.ToolKindThink, content: content}
 
 	case "Bash", "PowerShell":
 		var in struct {
@@ -134,12 +132,12 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 			Description string `json:"description"`
 		}
 		_ = json.Unmarshal(rawInput, &in)
-		var content []acp.ToolCallContent
+		var content []acpsdk.ToolCallContent
 		if in.Description != "" {
-			content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(in.Description))}
+			content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(in.Description))}
 		}
 		return toolInfo{
-			title: "Run command", kind: acp.ToolKindExecute,
+			title: "Run command", kind: acpsdk.ToolKindExecute,
 			rawInput: displayInput(rawInput, "description"), content: content,
 		}
 
@@ -151,7 +149,7 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		}
 		_ = json.Unmarshal(rawInput, &in)
 		return toolInfo{
-			title: "Read file", kind: acp.ToolKindRead,
+			title: "Read file", kind: acpsdk.ToolKindRead,
 			rawInput:  displayInput(rawInput, "file_path", "offset"),
 			locations: displayLocation(in.FilePath, cwd, in.Offset),
 		}
@@ -168,15 +166,15 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		_ = json.Unmarshal(rawInput, &in)
 		in.FilePath = cmp.Or(in.FilePath, in.Path)
 		in.Content = cmp.Or(in.Content, in.FileText, in.FileContent)
-		var content []acp.ToolCallContent
-		var locations []acp.ToolCallLocation
+		var content []acpsdk.ToolCallContent
+		var locations []acpsdk.ToolCallLocation
 		if in.FilePath != "" {
-			content = []acp.ToolCallContent{acp.ToolDiffContent(in.FilePath, in.Content)}
+			content = []acpsdk.ToolCallContent{acpsdk.ToolDiffContent(in.FilePath, in.Content)}
 			locations = displayLocation(in.FilePath, cwd, 0)
 		} else if in.Content != "" {
-			content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(in.Content))}
+			content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(in.Content))}
 		}
-		return toolInfo{title: "Write file", kind: acp.ToolKindEdit, content: content, locations: locations}
+		return toolInfo{title: "Write file", kind: acpsdk.ToolKindEdit, content: content, locations: locations}
 
 	case "Edit":
 		var in struct {
@@ -185,14 +183,14 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 			NewString string `json:"new_string"`
 		}
 		_ = json.Unmarshal(rawInput, &in)
-		var content []acp.ToolCallContent
-		var locations []acp.ToolCallLocation
+		var content []acpsdk.ToolCallContent
+		var locations []acpsdk.ToolCallLocation
 		var display any
 		if in.FilePath != "" {
 			if in.OldString != "" {
-				content = []acp.ToolCallContent{acp.ToolDiffContent(in.FilePath, in.NewString, in.OldString)}
+				content = []acpsdk.ToolCallContent{acpsdk.ToolDiffContent(in.FilePath, in.NewString, in.OldString)}
 			} else if in.NewString != "" {
-				content = []acp.ToolCallContent{acp.ToolDiffContent(in.FilePath, in.NewString)}
+				content = []acpsdk.ToolCallContent{acpsdk.ToolDiffContent(in.FilePath, in.NewString)}
 			}
 			locations = displayLocation(in.FilePath, cwd, 0)
 		}
@@ -201,7 +199,7 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		} else {
 			display = displayInput(rawInput, "file_path")
 		}
-		return toolInfo{title: "Edit file", kind: acp.ToolKindEdit, rawInput: display, content: content, locations: locations}
+		return toolInfo{title: "Edit file", kind: acpsdk.ToolKindEdit, rawInput: display, content: content, locations: locations}
 
 	case "NotebookEdit":
 		var in struct {
@@ -209,7 +207,7 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		}
 		_ = json.Unmarshal(rawInput, &in)
 		return toolInfo{
-			title: "Edit notebook", kind: acp.ToolKindEdit,
+			title: "Edit notebook", kind: acpsdk.ToolKindEdit,
 			rawInput:  displayInput(rawInput, "notebook_path"),
 			locations: displayLocation(in.NotebookPath, cwd, 0),
 		}
@@ -221,7 +219,7 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		}
 		_ = json.Unmarshal(rawInput, &in)
 		return toolInfo{
-			title: "Find files", kind: acp.ToolKindSearch,
+			title: "Find files", kind: acpsdk.ToolKindSearch,
 			rawInput:  displayInput(rawInput, "path"),
 			locations: displayLocation(in.Path, cwd, 0),
 		}
@@ -232,7 +230,7 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		}
 		_ = json.Unmarshal(rawInput, &in)
 		return toolInfo{
-			title: "Search files", kind: acp.ToolKindSearch,
+			title: "Search files", kind: acpsdk.ToolKindSearch,
 			rawInput:  displayInput(rawInput, "path"),
 			locations: displayLocation(in.Path, cwd, 0),
 		}
@@ -243,12 +241,12 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 			Prompt string `json:"prompt"`
 		}
 		_ = json.Unmarshal(rawInput, &in)
-		var content []acp.ToolCallContent
+		var content []acpsdk.ToolCallContent
 		if in.Prompt != "" {
-			content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(in.Prompt))}
+			content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(in.Prompt))}
 		}
 		return toolInfo{
-			title: "Open page", kind: acp.ToolKindFetch,
+			title: "Open page", kind: acpsdk.ToolKindFetch,
 			rawInput: displayInput(rawInput, "prompt"), content: content,
 		}
 
@@ -259,40 +257,40 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 			BlockedDomains []string `json:"blocked_domains"`
 		}
 		_ = json.Unmarshal(rawInput, &in)
-		return toolInfo{title: "Web search", kind: acp.ToolKindFetch, rawInput: displayInput(rawInput)}
+		return toolInfo{title: "Web search", kind: acpsdk.ToolKindFetch, rawInput: displayInput(rawInput)}
 
 	case "TaskOutput":
-		return toolInfo{title: "Read command output", kind: acp.ToolKindExecute, rawInput: displayInput(rawInput)}
+		return toolInfo{title: "Read command output", kind: acpsdk.ToolKindExecute, rawInput: displayInput(rawInput)}
 
 	case "TaskStop":
-		return toolInfo{title: "Stop command", kind: acp.ToolKindExecute, rawInput: displayInput(rawInput)}
+		return toolInfo{title: "Stop command", kind: acpsdk.ToolKindExecute, rawInput: displayInput(rawInput)}
 
 	case "EnterPlanMode":
-		return toolInfo{title: "Planning", kind: acp.ToolKindSwitchMode, rawInput: displayInput(rawInput)}
+		return toolInfo{title: "Planning", kind: acpsdk.ToolKindSwitchMode, rawInput: displayInput(rawInput)}
 
 	case "ExitPlanMode":
 		var in struct {
 			Plan string `json:"plan"`
 		}
 		_ = json.Unmarshal(rawInput, &in)
-		var content []acp.ToolCallContent
+		var content []acpsdk.ToolCallContent
 		if in.Plan != "" {
-			content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(in.Plan))}
+			content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(in.Plan))}
 		}
-		return toolInfo{title: "Ready to code?", kind: acp.ToolKindSwitchMode, content: content}
+		return toolInfo{title: "Ready to code?", kind: acpsdk.ToolKindSwitchMode, content: content}
 
 	case "Skill":
-		return toolInfo{title: "Load skill", kind: acp.ToolKindOther, rawInput: displayInput(rawInput)}
+		return toolInfo{title: "Load skill", kind: acpsdk.ToolKindOther, rawInput: displayInput(rawInput)}
 
 	case "AskUserQuestion":
-		return toolInfo{title: "Request input", kind: acp.ToolKindOther}
+		return toolInfo{title: "Request input", kind: acpsdk.ToolKindOther}
 
 	default:
 		title := name
 		if title == "" {
 			title = "Tool call"
 		}
-		return toolInfo{title: title, kind: acp.ToolKindOther, rawInput: displayInput(rawInput)}
+		return toolInfo{title: title, kind: acpsdk.ToolKindOther, rawInput: displayInput(rawInput)}
 	}
 }
 

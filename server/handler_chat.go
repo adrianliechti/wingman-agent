@@ -8,17 +8,17 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
-func (s *backendRuntime) buildInput(msg Command) []agent.Content {
-	var input []agent.Content
+func (s *backendRuntime) buildInput(msg Command) []harness.Content {
+	var input []harness.Content
 	if msg.Text != "" {
-		input = append(input, agent.Content{Text: msg.Text})
+		input = append(input, harness.Content{Text: msg.Text})
 		for _, block := range s.skillBlocks(msg.Text) {
-			input = append(input, agent.Content{Text: block, Hidden: true})
+			input = append(input, harness.Content{Text: block, Hidden: true})
 		}
 	}
 	var rootPath string
@@ -26,16 +26,16 @@ func (s *backendRuntime) buildInput(msg Command) []agent.Content {
 		rootPath = s.workspace.RootPath
 	}
 	for _, f := range msg.Files {
-		input = append(input, agent.Content{Text: fmt.Sprintf("[File: %s]", f)})
+		input = append(input, harness.Content{Text: fmt.Sprintf("[File: %s]", f)})
 		if dataURL := readAttachedWorkspaceImage(f, rootPath); dataURL != "" {
-			input = append(input, agent.Content{File: &agent.File{Name: f, Data: dataURL}})
+			input = append(input, harness.Content{File: &harness.File{Name: f, Data: dataURL}})
 		}
 	}
 	for _, img := range msg.Images {
 		if img == "" {
 			continue
 		}
-		input = append(input, agent.Content{File: &agent.File{Data: img}})
+		input = append(input, harness.Content{File: &harness.File{Data: img}})
 	}
 	return input
 }
@@ -87,16 +87,16 @@ func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
 	}
 	if ev.StreamEvent != 0 {
 		switch ev.StreamEvent {
-		case agent.StreamEventReset:
+		case harness.StreamEventReset:
 			s.sendSession(ev.SessionID, Frame{Type: EvtStreamReset})
-		case agent.StreamEventCommit:
+		case harness.StreamEventCommit:
 			s.session(ev.SessionID).replaceHistory()
 		}
 		return
 	}
 
 	if ev.Message != nil {
-		if ev.Message.Hidden || ev.Message.Role == agent.RoleUser {
+		if ev.Message.Hidden || ev.Message.Role == harness.RoleUser {
 			return
 		}
 		for _, c := range ev.Message.Content {
@@ -252,12 +252,33 @@ func (s *backendRuntime) sendTurnSnapshot(sessionID string) {
 		message := snapshot.Error.Error()
 		c.state.Error = &message
 	}
-	if !snapshotHasActive(snapshot) {
+	switch {
+	case snapshot.Compacting:
+		c.state.Phase = "compacting"
+	case !snapshotHasActive(snapshot):
 		c.state.Phase = "idle"
-	} else if c.state.Phase == "idle" {
+	case c.state.Phase == "idle" || c.state.Phase == "compacting":
 		c.state.Phase = "thinking"
 	}
 	c.publishStateLocked()
+}
+
+func (s *backendRuntime) finishCompaction(sessionID string, result harness.CompactResult, err error) {
+	c := s.session(sessionID)
+	c.mu.Lock()
+	if c.state.Status != "deleted" {
+		switch {
+		case errors.Is(err, context.Canceled):
+		case err != nil:
+			message := err.Error()
+			c.state.Error = &message
+		default:
+			c.state.Compaction = &CompactionView{TokensBefore: result.TokensBefore, TokensAfter: result.TokensAfter}
+		}
+	}
+	c.mu.Unlock()
+	s.sendUsageIfChanged(sessionID)
+	s.sendTurnSnapshot(sessionID)
 }
 
 func turnQueueEntry(input code.TurnInput, state code.TurnInputState, position int) TurnQueueEntry {

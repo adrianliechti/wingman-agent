@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 )
 
 func TestListenLocalReservesDefaultAndFallbackPorts(t *testing.T) {
@@ -74,7 +74,7 @@ func TestModelDiscoveryFailureReachesLateWebClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := rt.agent.(*codeagent.Agent)
+	a := rt.agent.(*agent.Agent)
 	deadline := time.After(5 * time.Second)
 	for a.ModelDiscoveryError() == nil {
 		select {

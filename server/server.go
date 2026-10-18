@@ -22,13 +22,14 @@ import (
 	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/remote"
 	"github.com/adrianliechti/wingman-agent/pkg/settings"
+	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
 	"github.com/adrianliechti/wingman-agent/pkg/watch"
 )
@@ -49,10 +50,12 @@ type ServerOptions struct {
 }
 
 type Server struct {
+	*harness.Config
+
 	noBrowser bool
 
 	workspace *code.Workspace
-	config    *agent.Config
+	telemetry *telemetry.Telemetry
 
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -101,7 +104,7 @@ type Server struct {
 	managedTools   managedToolsStatus
 }
 
-func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, error) {
+func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, err error) {
 	if opts == nil {
 		opts = new(ServerOptions)
 	}
@@ -113,49 +116,47 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	if err != nil {
 		return nil, err
 	}
-	closeTelemetry := func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = cfg.Telemetry.Shutdown(shutdownCtx)
-		cancel()
-	}
-	ws, err := code.NewWorkspace(workDir)
-	if err != nil {
-		closeTelemetry()
-		return nil, err
-	}
 	serverCtx, cancel := context.WithCancel(ctx)
 	s := &Server{
 		noBrowser: opts.NoBrowser,
-		workspace: ws,
-		config:    cfg,
+		telemetry: cfg.Telemetry,
 		ctx:       serverCtx,
 		cancel:    cancel,
 		runtimes:  make(map[string]*backendRuntime),
-		scope:     workspaceScope(ws.RootPath),
 		wsConns:   map[*websocket.Conn]*wsClient{},
 	}
+	defer func() {
+		if err != nil {
+			s.Close()
+		}
+	}()
+	ws, err := code.NewWorkspace(workDir)
+	if err != nil {
+		return nil, err
+	}
+	s.workspace = ws
+	s.scope = workspaceScope(ws.RootPath)
 
 	s.terminals = terminal.NewManager(ws.RootPath)
 	s.terminals.SetExitHandler(s.onTerminalExit)
 	s.preview, err = newFilePreviewServer(ws.Root)
 	if err != nil {
-		cancel()
-		ws.Close()
-		closeTelemetry()
 		return nil, err
 	}
 
-	wa := codeagent.New(ws, cfg, nil, codeagent.Options{RequireSessionContext: true, IsolateSessionSettings: true})
+	cfg.IsolateSessions = true
+	wa := agent.New(ws, cfg, nil)
 	rt := s.bindBackend(code.BuiltinAgentName, wa)
 	s.runtimes[code.BuiltinAgentName] = rt
-	cfg.RoleModel = wa.RoleModel
-	cfg.Model = func() string {
+	s.Config = cfg.Clone()
+	s.RoleModel = wa.RoleModel
+	s.Model = func() string {
 		option, _ := wa.RoleModel("")
 		return option.ID
 	}
-	s.tab = newEditorTabService(cfg)
-	s.transforms = newEditorTransformService(cfg)
-	s.commitMessages = newGitCommitMessageService(cfg)
+	s.tab = newEditorTabService(s.Config)
+	s.transforms = newEditorTransformService(s.Config)
+	s.commitMessages = newGitCommitMessageService(s.Config)
 	s.tabEnabled.Store(true)
 	s.terminalPosition.Store(settings.WindowTerminalPositionTab)
 	s.sidebarPosition.Store(settings.WindowSidebarPositionRight)
@@ -238,7 +239,6 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	s.handler = LocalHostOnly(csrf.Handler(s.checkInstance(s.mux)))
 	if opts.RemoteURL != "" {
 		if err := s.startRemote(remote.ClientOptions{Relay: opts.RemoteURL, Token: opts.RemoteToken}); err != nil {
-			s.Close()
 			return nil, err
 		}
 	}
@@ -283,11 +283,9 @@ func (s *Server) Close() {
 		if s.terminals != nil {
 			s.terminals.Close()
 		}
-		if s.config != nil {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = s.config.Telemetry.Shutdown(shutdownCtx)
-			cancel()
-		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = s.telemetry.Shutdown(shutdownCtx)
+		cancel()
 	})
 }
 
@@ -702,7 +700,7 @@ func (s *Server) refreshSkills() {
 	}
 }
 
-func convertMessages(messages []agent.Message) []ConversationMessage {
+func convertMessages(messages []harness.Message) []ConversationMessage {
 	var result []ConversationMessage
 	for _, m := range messages {
 		if m.Hidden {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -47,7 +47,7 @@ type contextCategory struct {
 	color  ansi.Color
 }
 
-func cellContextStats(stats agent.ContextStats, width int) []string {
+func cellContextStats(stats harness.ContextStats, width int) []string {
 	t := theme.Default
 
 	window := int64(stats.Window)

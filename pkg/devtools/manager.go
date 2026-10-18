@@ -955,7 +955,11 @@ func acquireUpdateLock(ctx context.Context, root string, now func() time.Time) (
 			return maintainUpdateLock(path, token, now), nil
 		}
 		if !os.IsExist(err) {
-			return nil, err
+			// Windows reports a legacy directory lock as "is a directory"
+			// rather than "exists"; recover it like any other stale lock.
+			if info, statErr := os.Stat(path); statErr != nil || !info.IsDir() {
+				return nil, err
+			}
 		}
 
 		info, statErr := os.Stat(path)

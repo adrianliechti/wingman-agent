@@ -37,6 +37,11 @@ func TestParseTUIArgs(t *testing.T) {
 			args: []string{"--resume", "session-123", "-a", "codex"},
 			want: tuiOptions{Agent: "codex", SessionID: "session-123"},
 		},
+		{
+			name: "fork latest",
+			args: []string{"-c", "--fork"},
+			want: tuiOptions{Agent: "wingman", SessionID: "latest", Fork: true},
+		},
 	}
 
 	for _, tt := range tests {
@@ -55,6 +60,12 @@ func TestParseTUIArgs(t *testing.T) {
 func TestParseTUIArgsRejectsMissingAgent(t *testing.T) {
 	if _, err := parseTUIArgs([]string{"--agent"}); err == nil {
 		t.Fatal("parseTUIArgs() succeeded without an agent name")
+	}
+}
+
+func TestParseTUIArgsRejectsForkWithoutSession(t *testing.T) {
+	if _, err := parseTUIArgs([]string{"--fork"}); err == nil {
+		t.Fatal("parseTUIArgs() accepted --fork without a session to fork")
 	}
 }
 

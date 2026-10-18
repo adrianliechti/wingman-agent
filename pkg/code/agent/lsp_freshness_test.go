@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
 )
 
 func TestSessionLSPPreviewProtectsOrdinaryEdit(t *testing.T) {

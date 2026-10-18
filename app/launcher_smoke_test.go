@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,15 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 )
+
+func jsonString(t *testing.T, value string) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
 
 func TestLauncherSmoke(t *testing.T) {
 	testenv.UserHome(t)
@@ -67,7 +77,7 @@ func TestLauncherSmoke(t *testing.T) {
 
 	workspace := t.TempDir()
 
-	if rec := post("/app/workspaces/open", `{"path":"`+workspace+`"}`); rec.Code != http.StatusNoContent {
+	if rec := post("/app/workspaces/open", `{"path":`+jsonString(t, workspace)+`}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("open workspace: %d %q", rec.Code, rec.Body.String())
 	}
 	config, err := os.ReadFile(filepath.Join(home, "config.json"))
@@ -86,11 +96,11 @@ func TestLauncherSmoke(t *testing.T) {
 		t.Fatalf("workspace server not mounted: %d %q", rec.Code, rec.Body.String())
 	}
 
-	if rec := post("/app/workspaces/open", `{"path":"`+workspace+`"}`); rec.Code == http.StatusNoContent {
+	if rec := post("/app/workspaces/open", `{"path":`+jsonString(t, workspace)+`}`); rec.Code == http.StatusNoContent {
 		t.Fatalf("second open should fail")
 	}
 
-	stale := httptest.NewRequest("POST", "http://localhost/app/workspaces/open", strings.NewReader(`{"path":"`+workspace+`","replace":true}`))
+	stale := httptest.NewRequest("POST", "http://localhost/app/workspaces/open", strings.NewReader(`{"path":`+jsonString(t, workspace)+`,"replace":true}`))
 	stale.Header.Set("X-Wingman-Instance", "old-instance")
 	rejected := httptest.NewRecorder()
 	app.ServeHTTP(rejected, stale)
@@ -98,7 +108,7 @@ func TestLauncherSmoke(t *testing.T) {
 		t.Fatalf("stale workspace replacement: %d", rejected.Code)
 	}
 	replacement := t.TempDir()
-	if rec := post("/app/workspaces/open", `{"path":"`+replacement+`","replace":true}`); rec.Code != http.StatusNoContent {
+	if rec := post("/app/workspaces/open", `{"path":`+jsonString(t, replacement)+`,"replace":true}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("replace workspace: %d %q", rec.Code, rec.Body.String())
 	}
 

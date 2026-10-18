@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 type liveEditorTabCase struct {
@@ -25,7 +25,7 @@ func TestLiveEditorTabModels(t *testing.T) {
 	if modelList == "" {
 		t.Skip("set WINGMAN_TAB_LIVE_MODELS to run the live Tab smoke test")
 	}
-	cfg, err := agent.DefaultConfig()
+	cfg, err := harness.ConfigFromEnvironment()
 	if err != nil {
 		t.Fatal(err)
 	}

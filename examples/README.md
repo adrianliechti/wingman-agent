@@ -44,5 +44,6 @@ Update its example MCP settings before using it. Then invoke
 name still reaches this plugin if another skill has the same short name.
 
 The plugin includes a skill, MCP settings, shared resources, and a session
-hook. Wingman asks before running a project or plugin hook for the first time
-in a session. Use `~/.wingman/plugins/` for a personal installation.
+hook. Wingman asks before running a project or plugin hook and remembers the
+approval until the hooks or plugin files change. Use `~/.wingman/plugins/` for a
+personal installation.

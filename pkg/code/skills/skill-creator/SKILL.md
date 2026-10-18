@@ -1,34 +1,35 @@
 ---
 name: skill-creator
-description: Create or improve an Agent Skill with a focused SKILL.md and optional scripts, references, assets, templates, or examples. Use when the user asks to add, scaffold, audit, or refine a reusable skill.
+description: Create, evaluate, or improve an Agent Skill's triggers, instructions, and supporting resources.
 ---
-
 # Skill Creator
 
-Create a small, portable skill that teaches one repeatable workflow.
+Write the guidance a capable agent needs to make better decisions on a recognizable task. A skill should add task-specific knowledge, not repeat generic instructions or prescribe ceremony.
 
-## Workflow
+## Understand the workflow
 
-1. Inspect the target repository and any existing skill before writing files. Confirm the user goal, trigger conditions, expected inputs, and successful output from available context; ask only when a missing choice would materially change the workflow.
-2. Read [references/skill-format.md](references/skill-format.md). Use [assets/SKILL.template.md](assets/SKILL.template.md) as a starting point when creating a new skill.
-3. Keep `SKILL.md` concise. Put essential routing and procedure in the body, and move detailed policies, schemas, examples, or domain background into directly linked files under `references/`.
-4. Add supporting files only when they improve reliability:
-   - `scripts/` for deterministic computation or file processing.
-   - `assets/` for files the workflow copies, transforms, or uses as input.
-   - `references/` for material the agent should load selectively.
-   - Other clearly named directories such as `templates/` or `examples/` when they communicate purpose better.
-5. Reference every necessary supporting file from `SKILL.md` and state when to read, copy, or run it. Use paths relative to the skill directory.
-6. Prefer instructions and existing tools over a script. When a script is justified, make its runtime and dependencies explicit in the skill; do not assume the host creates a virtual environment or installs packages automatically.
-7. For a skill with Python helpers, optionally reuse [assets/.gitignore](assets/.gitignore) to keep local environments and bytecode out of version control.
-8. Validate the result: parse the frontmatter, verify every linked relative path exists, inspect scripts for unsafe or undocumented side effects, and exercise at least one representative invocation when practical.
+Inspect the existing skill, its callers, and the user's examples. Establish the requests it should handle, nearby requests it should not attract, expected inputs, and successful outputs. Infer these from the conversation before asking for more examples.
 
-## Quality bar
+For a new skill, choose a discoverable location: `.wingman/skills/<name>/` for this project or `~/.wingman/skills/<name>/` when the user wants it across projects. Respect an explicit destination and any plugin layout. When updating a built-in skill, edit its source rather than the managed `.system` snapshot.
 
-- One recognizable user goal per skill.
-- A description that says both what the skill does and when it should activate.
-- Imperative, testable instructions with explicit stopping conditions.
-- Progressive disclosure: load only the references needed for the current task.
-- No duplicated prose between `SKILL.md` and references.
-- No generated documentation or ornamental assets that the workflow never uses.
+Read [references/skill-format.md](references/skill-format.md) when creating a skill or changing metadata, substitutions, or resource layout. A prose-only revision need not reload it. For a new skill, adapt [assets/SKILL.template.md](assets/SKILL.template.md); omit sections that do not help.
 
-When updating an existing skill, preserve useful conventions and unrelated user-authored resources. Report the files added or changed and any runtime prerequisites.
+## Write and structure
+
+Make the description a short discovery cue: the capability and the requests it serves. Put distinguishing terms first because catalogs may truncate descriptions. Keep procedure and output details in the body; add exclusions only to prevent likely misrouting. Check neighboring skills for overlap instead of making every description a catchall.
+
+Keep essential decisions and constraints in `SKILL.md`. Move substantial conditional procedures, schemas, or domain details into directly linked references, with instructions for when to read them. Simple skills do not need reference directories. Do not duplicate the same rule across layers.
+
+Use scripts when deterministic execution or repeated transformations justify them. State runtime, dependencies, side effects, and invocation; the host does not install dependencies or create environments automatically. Use assets for material copied into output. For Python helpers, [assets/.gitignore](assets/.gitignore) can exclude local environments and bytecode.
+
+Match prescription to risk. Explain invariants and decision criteria; avoid fixed agent counts, models, scores, or approval rounds without a concrete need. Preserve user scope, authorization, and host rules. Add only guidance that changes decisions; do not repeat the host's tool, delegation, or verification policy. Make costly exploration and evaluation conditional on what they resolve.
+
+Rewrite, consolidate, or delete instructions that do not improve outcomes. Before removing a resource or skill, check its references and consumers and update affected entry points.
+
+## Validate decisions as well as files
+
+Parse the frontmatter, resolve linked resources, and run any new or changed scripts on representative input. Use the format validator described in the reference when available.
+
+Walk through a representative request, a nearby request that should not trigger the skill, and a consequential edge case. Check whether the instructions lead to the right scope, result, and stopping condition. For complex workflows, behavioral trials in a temporary workspace can provide stronger evidence; use independent agents only when delegation is authorized. Compare observable outcomes rather than matching headings or wording.
+
+Report what changed and what was actually validated. Structural checks do not prove better model behavior; improve further from observed failures rather than accumulating speculative rules.

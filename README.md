@@ -62,7 +62,7 @@ wingman
 ```
 
 Try asking: “Explain how this project works”, “Fix the failing tests”, or
-“Add input validation to the signup form”. Wingman asks for approval when needed.
+“Add input validation to the signup form”. Risky actions are reviewed automatically before they run.
 Use Plan mode to explore an approach before making changes.
 
 To use an installed agent with its existing login and configuration:
@@ -115,6 +115,8 @@ In the terminal UI, use `@` to attach files and `Ctrl+P` to find commands.
 | `Escape` | Cancel the current response or close a menu |
 | `Ctrl+C` twice | Exit |
 | `/model` | Choose a model and reasoning effort |
+| `/agent` or `/plan` | Switch to Agent or Plan mode |
+| `/agents` | Watch agents and view scheduled tasks |
 | `/diff` | Review working tree changes |
 | `/help` | Browse commands and skills |
 
@@ -179,6 +181,15 @@ for command options.
   `~/.wingman/plugins/` to add its skills, MCP servers, and hooks.
 - **Custom agents:** add specialist instructions in `.wingman/agents/*.md` or
   `~/.wingman/agents/`.
+
+Built-in skills cover feature development, debugging, testing, simplification,
+code review, architecture, security review, threat modeling, commits, pull
+requests, project instructions, memory, and skill creation.
+`/architecture` handles system design as well as existing-system analysis.
+`/security-review` handles scanning, supplied findings, and remediation when
+requested. These replace `/system-design`, `/vuln-scan`, `/triage`, and `/patch`.
+For example, use `/security-review triage findings.json` to validate a report or
+`/security-review fix the confirmed findings in findings.json` to remediate it.
 
 Connect an MCP server from the command line:
 

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 func TestTurnQueueEntryPreservesEditableInput(t *testing.T) {
@@ -20,15 +20,15 @@ func TestTurnQueueEntryPreservesEditableInput(t *testing.T) {
 func TestToolCallFrameCarriesPartialState(t *testing.T) {
 	b, err := json.Marshal(Frame{
 		Type: EvtToolCall, ID: "call-1", Kind: "edit", Partial: true,
-		Locations: []agent.ToolLocation{{Path: "/workspace/main.go", Line: 8}},
+		Locations: []harness.ToolLocation{{Path: "/workspace/main.go", Line: 8}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var decoded struct {
-		Kind      string               `json:"kind"`
-		Partial   bool                 `json:"partial"`
-		Locations []agent.ToolLocation `json:"locations"`
+		Kind      string                 `json:"kind"`
+		Partial   bool                   `json:"partial"`
+		Locations []harness.ToolLocation `json:"locations"`
 	}
 	if err := json.Unmarshal(b, &decoded); err != nil {
 		t.Fatal(err)
@@ -48,11 +48,11 @@ func TestSnapshotHasActive(t *testing.T) {
 }
 
 func TestConvertMessagesPreservesAssistantTextIdentity(t *testing.T) {
-	for _, content := range []agent.Content{
+	for _, content := range []harness.Content{
 		{Text: "answer", TextID: "message-1"},
 		{Refusal: "answer", TextID: "message-1"},
 	} {
-		messages := convertMessages([]agent.Message{{Role: agent.RoleAssistant, Content: []agent.Content{content}}})
+		messages := convertMessages([]harness.Message{{Role: harness.RoleAssistant, Content: []harness.Content{content}}})
 		if len(messages) != 1 || len(messages[0].Content) != 1 {
 			t.Fatalf("messages = %+v", messages)
 		}
@@ -63,11 +63,11 @@ func TestConvertMessagesPreservesAssistantTextIdentity(t *testing.T) {
 }
 
 func TestConvertMessagesPreservesToolKind(t *testing.T) {
-	messages := convertMessages([]agent.Message{{
-		Role: agent.RoleAssistant,
-		Content: []agent.Content{
-			{ToolCall: &agent.ToolCall{ID: "edit-1", Name: "Editing files", Kind: "edit", Locations: []agent.ToolLocation{{Path: "/workspace/main.go"}}}},
-			{ToolResult: &agent.ToolResult{ID: "edit-1", Name: "Editing files", Kind: "edit", Locations: []agent.ToolLocation{{Path: "/workspace/main.go"}}, Content: "+new"}},
+	messages := convertMessages([]harness.Message{{
+		Role: harness.RoleAssistant,
+		Content: []harness.Content{
+			{ToolCall: &harness.ToolCall{ID: "edit-1", Name: "Editing files", Kind: "edit", Locations: []harness.ToolLocation{{Path: "/workspace/main.go"}}}},
+			{ToolResult: &harness.ToolResult{ID: "edit-1", Name: "Editing files", Kind: "edit", Locations: []harness.ToolLocation{{Path: "/workspace/main.go"}}, Content: "+new"}},
 		},
 	}})
 

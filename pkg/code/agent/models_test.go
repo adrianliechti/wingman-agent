@@ -174,7 +174,7 @@ func TestSessionAutoEffortOverridesGlobalSetting(t *testing.T) {
 	for _, action := range []string{"auto", "switch-model"} {
 		t.Run(action, func(t *testing.T) {
 			a := upstreamAgent("gpt-6-astra", "gpt-6-sol")
-			a.options.IsolateSessionSettings = true
+			a.cfg.IsolateSessions = true
 			a.modelID = "gpt-6-astra"
 			a.effort = "max"
 			s := &sessionState{}
@@ -345,7 +345,7 @@ func TestSelectingCurrentModelPreservesEffort(t *testing.T) {
 	for _, isolate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "shared", true: "isolated"}[isolate], func(t *testing.T) {
 			a := upstreamAgent("openai/gpt-6-sol", "gpt-6-astra")
-			a.options.IsolateSessionSettings = isolate
+			a.cfg.IsolateSessions = isolate
 			a.modelID, a.effort = "gpt-6-sol", "high"
 			s := &sessionState{}
 			a.sessions["sid"] = s
@@ -472,7 +472,7 @@ func TestUnavailableDelegationTierKeepsSelectedModel(t *testing.T) {
 
 func TestWebSessionSettingsDoNotChangeOtherSessionsOrDefaults(t *testing.T) {
 	a := upstreamAgent("gpt-5.4", "gpt-5.5")
-	a.options.IsolateSessionSettings = true
+	a.cfg.IsolateSessions = true
 	a.modelID = "gpt-5.4"
 	a.sessions["one"] = &sessionState{}
 	a.sessions["two"] = &sessionState{}

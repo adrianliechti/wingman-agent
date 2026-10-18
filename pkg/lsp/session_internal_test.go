@@ -13,6 +13,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"go.lsp.dev/jsonrpc2"
 	"go.lsp.dev/protocol"
+	lspuri "go.lsp.dev/uri"
 )
 
 type initializationRecorder struct {
@@ -38,7 +39,8 @@ func TestInitializationAndWorkspaceRequestsUseTheSameProjectURI(t *testing.T) {
 		t.Fatal(err)
 	}
 	folders, set := rpc.params.WorkspaceFolders.Get()
-	if !set || len(folders) != 1 || folders[0].URI.String() != uri || folders[0].Name != "project with spaces" {
+	// The protocol URI is vscode-canonical (file:///c%3A/... on Windows).
+	if !set || len(folders) != 1 || folders[0].URI != lspuri.MustParse(uri) || folders[0].Name != "project with spaces" {
 		t.Fatalf("initial workspace folders = %+v (set=%v)", folders, set)
 	}
 	if capability := rpc.params.Capabilities.Workspace.WorkspaceFolders; capability == nil || !*capability {

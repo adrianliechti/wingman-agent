@@ -9,8 +9,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
 
@@ -288,4 +288,3 @@ func readAttachedImageFile(path, workingDir string) string {
 	}
 	return res.Content
 }
-

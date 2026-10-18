@@ -79,10 +79,11 @@ func (r *ANSIRenderer) codeFileDestination(text string) string {
 	if err != nil || u.Scheme != "file" {
 		return ""
 	}
-	local := filepath.FromSlash(u.Path)
+	local := u.Path
 	if len(local) > 2 && local[0] == '/' && local[2] == ':' {
 		local = local[1:]
 	}
+	local = filepath.FromSlash(local)
 	if info, err := os.Stat(local); err == nil && !info.IsDir() {
 		r.fileLinks[text] = destination
 		return destination

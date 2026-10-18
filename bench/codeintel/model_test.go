@@ -16,13 +16,13 @@ import (
 	"testing"
 	"time"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	filetools "github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
-	graphtools "github.com/adrianliechti/wingman-agent/pkg/agent/tool/graph"
-	lsptools "github.com/adrianliechti/wingman-agent/pkg/agent/tool/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/graph"
+	lsptool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
@@ -160,18 +160,18 @@ func TestModelToolMatrix(t *testing.T) {
 							t.Fatal(err)
 						}
 						defer fsRoot.Close()
-						freshness := filetools.NewFreshness(fsRoot)
+						freshness := fs.NewFreshness(fsRoot)
 						var available []tool.Tool
-						for _, candidate := range filetools.Tools(fsRoot, &filetools.Options{Freshness: freshness}) {
+						for _, candidate := range fs.Tools(fsRoot, &fs.Options{Freshness: freshness}) {
 							if slices.Contains([]string{"read", "grep", "glob"}, candidate.Name) || f.after != nil && candidate.Name == "edit" {
 								available = append(available, candidate)
 							}
 						}
 						if cfg.graph {
-							available = append(available, graphtools.NewTools(service.Graph())...)
+							available = append(available, graph.NewTools(service.Graph())...)
 						}
 						if cfg.lsp {
-							available = append(available, freshness.TrackSnapshots(lsptools.NewTools(service)[0]))
+							available = append(available, freshness.TrackSnapshots(lsptool.NewTools(service)[0]))
 						}
 						var traceMu sync.Mutex
 						var traces []trace
@@ -194,7 +194,7 @@ func TestModelToolMatrix(t *testing.T) {
 							}
 						}
 						slices.SortFunc(available, func(a, b tool.Tool) int { return strings.Compare(a.Name, b.Name) })
-						hcfg, err := harness.DefaultConfig()
+						hcfg, err := harness.ConfigFromEnvironment()
 						if err != nil {
 							t.Fatal(err)
 						}

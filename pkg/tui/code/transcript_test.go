@@ -5,17 +5,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
 func TestTranscriptInspectorSearchAndExpansion(t *testing.T) {
-	messages := []agent.Message{
-		{Role: agent.RoleUser, Content: []agent.Content{{Text: "find the needle"}}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{
-			{ToolResult: &agent.ToolResult{ID: "tool-1", Name: "read", Args: `{"path":"file.go"}`, Content: "one\ntwo\nthree\nfour\nfive"}},
-			{Reasoning: &agent.Reasoning{ID: "reason-1", Summary: "checking the needle carefully"}},
+	messages := []harness.Message{
+		{Role: harness.RoleUser, Content: []harness.Content{{Text: "find the needle"}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{
+			{ToolResult: &harness.ToolResult{ID: "tool-1", Name: "read", Args: `{"path":"file.go"}`, Content: "one\ntwo\nthree\nfour\nfive"}},
+			{Reasoning: &harness.Reasoning{ID: "reason-1", Summary: "checking the needle carefully"}},
 			{Text: "done"},
 		}},
 	}
@@ -57,8 +57,8 @@ func TestTranscriptInspectorSearchAndExpansion(t *testing.T) {
 }
 
 func TestTranscriptShowsFullReasoningWhileChatShowsHeadings(t *testing.T) {
-	messages := []agent.Message{
-		{Role: agent.RoleAssistant, Content: []agent.Content{{Reasoning: &agent.Reasoning{
+	messages := []harness.Message{
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Reasoning: &harness.Reasoning{
 			ID: "reason-1", Summary: "**Considering the options**\nweighing the tradeoffs carefully",
 		}}}},
 	}
@@ -80,9 +80,9 @@ func TestTranscriptShowsFullReasoningWhileChatShowsHeadings(t *testing.T) {
 }
 
 func TestTranscriptLiveTailOrderAndVanishedSelection(t *testing.T) {
-	messages := []agent.Message{
-		{Role: agent.RoleUser, Content: []agent.Content{{Text: "prompt one"}}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "answer one"}}},
+	messages := []harness.Message{
+		{Role: harness.RoleUser, Content: []harness.Content{{Text: "prompt one"}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "answer one"}}},
 	}
 	a := &App{ctx: context.Background(), agent: newUITestAgent(messages), sessionID: "session"}
 	a.streamCurrent = streamSnapshot{text: "partial answer", reasoning: "**Weighing options**\nfull live details"}
@@ -115,10 +115,10 @@ func TestTranscriptLiveTailOrderAndVanishedSelection(t *testing.T) {
 
 func TestTranscriptTallEntryLineScroll(t *testing.T) {
 	output := strings.TrimSpace(strings.Repeat("line\n", 60))
-	messages := []agent.Message{
-		{Role: agent.RoleUser, Content: []agent.Content{{Text: "run it"}}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{
-			{ToolResult: &agent.ToolResult{ID: "tool-1", Name: "shell", Args: `{"command":"seq 60"}`, Content: output}},
+	messages := []harness.Message{
+		{Role: harness.RoleUser, Content: []harness.Content{{Text: "run it"}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{
+			{ToolResult: &harness.ToolResult{ID: "tool-1", Name: "shell", Args: `{"command":"seq 60"}`, Content: output}},
 			{Text: "done"},
 		}},
 	}
@@ -177,9 +177,9 @@ func TestTranscriptTallEntryLineScroll(t *testing.T) {
 }
 
 func TestTranscriptShortOverlayKeys(t *testing.T) {
-	messages := []agent.Message{
-		{Role: agent.RoleUser, Content: []agent.Content{{Text: "one"}}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "two"}}},
+	messages := []harness.Message{
+		{Role: harness.RoleUser, Content: []harness.Content{{Text: "one"}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "two"}}},
 	}
 	a := &App{ctx: context.Background(), agent: newUITestAgent(messages), sessionID: "session"}
 	o := &transcriptOverlay{app: a, selected: -1, follow: true, expanded: map[string]bool{}, cache: map[string]transcriptCache{}}

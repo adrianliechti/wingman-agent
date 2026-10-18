@@ -12,21 +12,21 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
 type composerState struct {
-	Text     string          `json:"text"`
-	Content  []agent.Content `json:"content,omitempty"`
-	Files    []string        `json:"files,omitempty"`
-	QueueID  string          `json:"queueId,omitempty"`
-	Previous *composerState  `json:"previous,omitempty"`
+	Text     string            `json:"text"`
+	Content  []harness.Content `json:"content,omitempty"`
+	Files    []string          `json:"files,omitempty"`
+	QueueID  string            `json:"queueId,omitempty"`
+	Previous *composerState    `json:"previous,omitempty"`
 }
 
 func (d composerState) clone() composerState {
-	d.Content = agent.CloneContent(d.Content)
+	d.Content = harness.CloneContent(d.Content)
 	d.Files = slices.Clone(d.Files)
 	if d.Previous != nil {
 		previous := *d.Previous
@@ -140,7 +140,7 @@ func (a *App) restoreDraft(draft composerState) {
 	if a.editor != nil {
 		a.editor.SetText(draft.Text)
 	}
-	a.pendingContent = agent.CloneContent(draft.Content)
+	a.pendingContent = harness.CloneContent(draft.Content)
 	a.pendingFiles = slices.Clone(draft.Files)
 	a.editingQueueID = draft.QueueID
 	a.beforeQueueEdit = draft.clone().Previous

@@ -2,6 +2,7 @@ package code
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -62,7 +63,12 @@ func TestUserShellCommandExecutesPrintsOutputAndRecordsForAgent(t *testing.T) {
 	a.queue = make(chan func(), 8)
 	a.agent.(*uiTestAgent).workspace.RootPath = t.TempDir()
 
-	a.editor.SetText("!printf 'hello-shell\\nline-two\\n'")
+	// User shell commands run in PowerShell on Windows, which has no printf.
+	command := "printf 'hello-shell\\nline-two\\n'"
+	if runtime.GOOS == "windows" {
+		command = "Write-Output 'hello-shell' 'line-two'"
+	}
+	a.editor.SetText("!" + command)
 	a.submitInput()
 	waitForSessionOperation(t, a)
 
@@ -74,7 +80,7 @@ func TestUserShellCommandExecutesPrintsOutputAndRecordsForAgent(t *testing.T) {
 	if !ok {
 		t.Fatalf("recorded message is not <user_shell_command>:\n%s", msgs[0].Content[0].AsText())
 	}
-	if cmd != "printf 'hello-shell\\nline-two\\n'" || exitCode != 0 {
+	if cmd != command || exitCode != 0 {
 		t.Fatalf("parsed (%q, %d), want command with exit 0", cmd, exitCode)
 	}
 	if output != "hello-shell\nline-two" {
@@ -82,7 +88,7 @@ func TestUserShellCommandExecutesPrintsOutputAndRecordsForAgent(t *testing.T) {
 	}
 
 	chatText := ansi.Strip(strings.Join(a.chat, "\n"))
-	for _, want := range []string{"$ printf 'hello-shell\\nline-two\\n'", "hello-shell", "line-two"} {
+	for _, want := range []string{"$ " + command, "hello-shell", "line-two"} {
 		if !strings.Contains(chatText, want) {
 			t.Fatalf("chat missing %q:\n%s", want, chatText)
 		}
@@ -93,7 +99,7 @@ func TestUserShellCommandExecutesPrintsOutputAndRecordsForAgent(t *testing.T) {
 		t.Fatal("showTranscript did not open transcript overlay")
 	}
 	rendered := ansi.Strip(strings.Join(a.overlay.Render(80, 20), "\n"))
-	if !strings.Contains(rendered, "$ printf 'hello-shell\\nline-two\\n'") || !strings.Contains(rendered, "hello-shell") {
+	if !strings.Contains(rendered, "$ "+command) || !strings.Contains(rendered, "hello-shell") {
 		t.Fatalf("transcript overlay missing shell output:\n%s", rendered)
 	}
 	if strings.Contains(rendered, "<user_shell_command>") {

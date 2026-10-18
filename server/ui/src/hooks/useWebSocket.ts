@@ -82,6 +82,8 @@ export function useWebSocket() {
 			images?: string[],
 		) => run(key, { type: "queue_update", inputId, text, files, images }),
 		resumeQueue: (key: string) => run(key, { type: "queue_resume" }),
+		compact: (key: string, focus = "") =>
+			run(key, { type: "compact", text: focus }),
 		clearQueue: (key: string) => run(key, { type: "queue_clear" }),
 		dismissError: (key: string) =>
 			setDismissed((current) => ({

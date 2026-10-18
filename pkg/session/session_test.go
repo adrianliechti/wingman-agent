@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
-func userMsg(text string) agent.Message {
-	return agent.Message{Role: agent.RoleUser, Content: []agent.Content{{Text: text}}}
+func userMsg(text string) harness.Message {
+	return harness.Message{Role: harness.RoleUser, Content: []harness.Content{{Text: text}}}
 }
 
-func assistantMsg(text string) agent.Message {
-	return agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: text}}}
+func assistantMsg(text string) harness.Message {
+	return harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: text}}}
 }
 
 func fileLines(t *testing.T, path string) []string {
@@ -31,9 +31,9 @@ func fileLines(t *testing.T, path string) []string {
 func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 
-	state := agent.State{
-		Messages: []agent.Message{userMsg("hello world"), assistantMsg("hi")},
-		Usage:    agent.Usage{InputTokens: 10, OutputTokens: 5},
+	state := harness.State{
+		Messages: []harness.Message{userMsg("hello world"), assistantMsg("hi")},
+		Usage:    harness.Usage{InputTokens: 10, OutputTokens: 5},
 	}
 
 	if err := Save(dir, "s1", state); err != nil {
@@ -66,7 +66,7 @@ func TestSaveAppends(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s1.jsonl")
 
-	state := agent.State{Messages: []agent.Message{userMsg("first")}}
+	state := harness.State{Messages: []harness.Message{userMsg("first")}}
 	if err := Save(dir, "s1", state); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestSaveAppends(t *testing.T) {
 		case "meta":
 			metas++
 		case "event":
-			if r.Event != nil && r.Event.Type == agent.EventMessage {
+			if r.Event != nil && r.Event.Type == harness.EventMessage {
 				messages++
 			}
 		}
@@ -111,12 +111,12 @@ func TestSaveAppendsContextCheckpointWithoutRewritingHistory(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s1.jsonl")
 
-	state := agent.State{Messages: []agent.Message{userMsg("first"), assistantMsg("reply")}}
+	state := harness.State{Messages: []harness.Message{userMsg("first"), assistantMsg("reply")}}
 	if err := Save(dir, "s1", state); err != nil {
 		t.Fatal(err)
 	}
 
-	state.Context = []agent.Message{userMsg("summary"), userMsg("recent")}
+	state.Context = []harness.Message{userMsg("summary"), userMsg("recent")}
 	state.ContextSet = true
 	if err := Save(dir, "s1", state); err != nil {
 		t.Fatal(err)
@@ -149,9 +149,9 @@ func TestLegacyMigration(t *testing.T) {
 		ID:        "old",
 		CreatedAt: time.Now().Add(-time.Hour),
 		UpdatedAt: time.Now().Add(-time.Hour),
-		State: agent.State{
-			Messages: []agent.Message{userMsg("legacy message")},
-			Usage:    agent.Usage{InputTokens: 1},
+		State: harness.State{
+			Messages: []harness.Message{userMsg("legacy message")},
+			Usage:    harness.Usage{InputTokens: 1},
 		},
 	}
 	data, _ := json.Marshal(legacy)
@@ -198,7 +198,7 @@ func TestLegacyJSONLMigrationIsolatedAndOneWay(t *testing.T) {
 	}
 	enc := json.NewEncoder(f)
 	message := userMsg("legacy jsonl")
-	usage := agent.Usage{InputTokens: 7}
+	usage := harness.Usage{InputTokens: 7}
 	for _, r := range []legacyRecord{
 		{Type: "meta", ID: "old-lines", CreatedAt: &created},
 		{Type: "message", Message: &message},
@@ -243,7 +243,7 @@ func TestLegacyJSONLMigrationIsolatedAndOneWay(t *testing.T) {
 
 func TestOpenJournalRepairsIncompleteFinalRecord(t *testing.T) {
 	dir := t.TempDir()
-	state := agent.State{Messages: []agent.Message{userMsg("first")}}
+	state := harness.State{Messages: []harness.Message{userMsg("first")}}
 	if err := Save(dir, "repair", state); err != nil {
 		t.Fatal(err)
 	}
@@ -265,8 +265,8 @@ func TestOpenJournalRepairsIncompleteFinalRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := assistantMsg("second")
-	if err := j.AppendEvents([]agent.RuntimeEvent{{
-		Sequence: 2, ID: "second", Type: agent.EventMessage, At: time.Now().UTC(), Message: &message,
+	if err := j.AppendEvents([]harness.RuntimeEvent{{
+		Sequence: 2, ID: "second", Type: harness.EventMessage, At: time.Now().UTC(), Message: &message,
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -282,12 +282,12 @@ func TestOpenJournalRepairsIncompleteFinalRecord(t *testing.T) {
 func TestList(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := Save(dir, "a", agent.State{Messages: []agent.Message{userMsg("session a")}}); err != nil {
+	if err := Save(dir, "a", harness.State{Messages: []harness.Message{userMsg("session a")}}); err != nil {
 		t.Fatal(err)
 	}
 
 	legacy := Session{ID: "b", Title: "session b", CreatedAt: time.Now(), UpdatedAt: time.Now()}
-	legacy.State.Messages = []agent.Message{userMsg("session b")}
+	legacy.State.Messages = []harness.Message{userMsg("session b")}
 	data, _ := json.Marshal(legacy)
 	if err := os.WriteFile(filepath.Join(dir, "b.json"), data, 0644); err != nil {
 		t.Fatal(err)
@@ -313,7 +313,7 @@ func TestList(t *testing.T) {
 func TestDelete(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := Save(dir, "s1", agent.State{Messages: []agent.Message{userMsg("hi")}}); err != nil {
+	if err := Save(dir, "s1", harness.State{Messages: []harness.Message{userMsg("hi")}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -325,7 +325,7 @@ func TestDelete(t *testing.T) {
 		t.Error("expected error loading deleted session")
 	}
 
-	if err := Save(dir, "s1", agent.State{Messages: []agent.Message{userMsg("again")}}); err != nil {
+	if err := Save(dir, "s1", harness.State{Messages: []harness.Message{userMsg("again")}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -348,7 +348,7 @@ func TestSessionIDCannotEscapeStorageDirectory(t *testing.T) {
 			if _, err := OpenJournal(dir, id); err == nil {
 				t.Fatalf("OpenJournal accepted %q", id)
 			}
-			if err := Save(dir, id, agent.State{Messages: []agent.Message{userMsg("unsafe")}}); err == nil {
+			if err := Save(dir, id, harness.State{Messages: []harness.Message{userMsg("unsafe")}}); err == nil {
 				t.Fatalf("Save accepted %q", id)
 			}
 			if _, err := Load(dir, id); err == nil {
@@ -358,5 +358,103 @@ func TestSessionIDCannotEscapeStorageDirectory(t *testing.T) {
 				t.Fatalf("Delete accepted %q", id)
 			}
 		})
+	}
+}
+
+func TestFork(t *testing.T) {
+	dir := t.TempDir()
+	state := harness.State{Messages: []harness.Message{userMsg("hello world"), assistantMsg("hi")}}
+	if err := Save(dir, "s1", state); err != nil {
+		t.Fatal(err)
+	}
+	sourceArtifacts, err := ArtifactDir(dir, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sourceArtifacts, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceArtifacts, "tasks.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "s1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Fork(dir, "s1", "s2", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	forked, err := Load(dir, "s2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forked.ID != "s2" || forked.Title != "Fork of hello world" {
+		t.Fatalf("forked = %q %q", forked.ID, forked.Title)
+	}
+	if len(forked.State.Messages) != 2 || forked.State.Messages[1].Content[0].Text != "hi" {
+		t.Fatalf("forked messages = %+v", forked.State.Messages)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "s1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("fork modified the source journal")
+	}
+	forkArtifacts, err := ArtifactDir(dir, "s2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(forkArtifacts); !os.IsNotExist(err) {
+		t.Fatalf("fork copied sidecar artifacts: %v", err)
+	}
+
+	forked.State.Messages = append(forked.State.Messages, userMsg("diverge"))
+	if err := Save(dir, "s2", forked.State); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded, err := Load(dir, "s2"); err != nil || len(reloaded.State.Messages) != 3 || reloaded.Title != "Fork of hello world" {
+		t.Fatalf("reloaded fork = %+v, %v", reloaded, err)
+	}
+	if source, err := Load(dir, "s1"); err != nil || len(source.State.Messages) != 2 {
+		t.Fatalf("source after fork append = %+v, %v", source, err)
+	}
+
+	sessions, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	titles := map[string]string{}
+	for _, s := range sessions {
+		titles[s.ID] = s.Title
+	}
+	if titles["s1"] != "hello world" || titles["s2"] != "Fork of hello world" {
+		t.Fatalf("titles = %v", titles)
+	}
+}
+
+func TestForkTitleAndErrors(t *testing.T) {
+	dir := t.TempDir()
+	if err := Save(dir, "s1", harness.State{Messages: []harness.Message{userMsg("hello")}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Fork(dir, "s1", "s2", "Try another approach"); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := Load(dir, "s2"); err != nil || s.Title != "Try another approach" {
+		t.Fatalf("titled fork = %q, %v", s.Title, err)
+	}
+
+	if err := Fork(dir, "s1", "s2", ""); err == nil {
+		t.Fatal("fork overwrote an existing session")
+	}
+	if err := Fork(dir, "missing", "s3", ""); err == nil {
+		t.Fatal("fork of a missing session succeeded")
+	}
+	if err := Fork(dir, "s1", "../escape", ""); err == nil {
+		t.Fatal("fork accepted an invalid session ID")
 	}
 }

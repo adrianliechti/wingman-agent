@@ -4,19 +4,19 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/go-chi/chi/v5"
 )
 
 type turnReviewer interface {
-	TurnReviews(context.Context, string) ([]agent.TurnReview, error)
+	TurnReviews(context.Context, string) ([]harness.TurnReview, error)
 	UndoTurn(context.Context, string, string) error
 }
 
 func (b *backendRuntime) handleTurnReviews(w http.ResponseWriter, r *http.Request) {
 	reviewer, ok := b.agent.(turnReviewer)
 	if !ok {
-		writeJSON(w, []agent.TurnReview{})
+		writeJSON(w, []harness.TurnReview{})
 		return
 	}
 	reviews, err := reviewer.TurnReviews(r.Context(), chi.URLParam(r, "id"))

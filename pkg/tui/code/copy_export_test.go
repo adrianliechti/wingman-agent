@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
@@ -14,7 +14,7 @@ func TestCopyPickerCopiesSelectedBlockFromSource(t *testing.T) {
 	const response = "An example:\n\n```go\n\tprintln(\"hello\")  \n```\n\n> useful quote\n"
 	var copied string
 	a := &App{
-		agent:          newUITestAgent([]agent.Message{{Role: agent.RoleAssistant, Content: []agent.Content{{Text: response}}}}),
+		agent:          newUITestAgent([]harness.Message{{Role: harness.RoleAssistant, Content: []harness.Content{{Text: response}}}}),
 		clipboardWrite: func(text string) error { copied = text; return nil },
 	}
 	a.showCopyPicker()
@@ -35,20 +35,20 @@ func TestCopyPickerCopiesSelectedBlockFromSource(t *testing.T) {
 }
 
 func TestTranscriptExportIncludesVisibleSourceAndOmitsHiddenContext(t *testing.T) {
-	messages := []agent.Message{
-		{Role: agent.RoleSystem, Content: []agent.Content{{Text: "system secret"}}},
-		{Role: agent.RoleUser, Hidden: true, Content: []agent.Content{{Text: "hidden message"}}},
-		{Role: agent.RoleUser, Content: []agent.Content{{Text: "question"}, {Text: "hidden context", Hidden: true}, {File: &agent.File{Name: "image.png", Data: "base64 secret"}}}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{
-			{Reasoning: &agent.Reasoning{Summary: "Checking the code", Content: "encrypted secret"}},
+	messages := []harness.Message{
+		{Role: harness.RoleSystem, Content: []harness.Content{{Text: "system secret"}}},
+		{Role: harness.RoleUser, Hidden: true, Content: []harness.Content{{Text: "hidden message"}}},
+		{Role: harness.RoleUser, Content: []harness.Content{{Text: "question"}, {Text: "hidden context", Hidden: true}, {File: &harness.File{Name: "image.png", Data: "base64 secret"}}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{
+			{Reasoning: &harness.Reasoning{Summary: "Checking the code", Content: "encrypted secret"}},
 			{Text: "**Original** Markdown\n\n```go\nmain()\n```"},
-			{ToolCall: &agent.ToolCall{ID: "call1", Name: "shell", Args: "{}"}},
+			{ToolCall: &harness.ToolCall{ID: "call1", Name: "shell", Args: "{}"}},
 		}},
-		{Role: agent.RoleUser, Content: []agent.Content{
-			{ToolResult: &agent.ToolResult{ID: "call1", Name: "shell", Args: "{}", Content: "```inside output\n\n"}},
-			{ToolResult: &agent.ToolResult{Name: "hidden_tool", Content: "hidden tool secret"}},
+		{Role: harness.RoleUser, Content: []harness.Content{
+			{ToolResult: &harness.ToolResult{ID: "call1", Name: "shell", Args: "{}", Content: "```inside output\n\n"}},
+			{ToolResult: &harness.ToolResult{Name: "hidden_tool", Content: "hidden tool secret"}},
 		}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{{Refusal: "Cannot do that."}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Refusal: "Cannot do that."}}},
 	}
 	document := transcriptMarkdown(messages, func(name string) bool { return name == "hidden_tool" })
 	for _, want := range []string{"## User", "question", "Attachment: image.png", "## Assistant", "Checking the code", "**Original** Markdown", "### Tool: shell", "````text\n```inside output\n\n````", "Cannot do that."} {

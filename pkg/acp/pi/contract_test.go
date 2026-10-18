@@ -103,7 +103,8 @@ func TestForkSessionUsesPiCloneWithoutReplacingSource(t *testing.T) {
 	script, dir, env := acptest.CommandHelper(t, "TestPiContractHelper", "PI_CONTRACT_HELPER")
 	sessionsDir := t.TempDir()
 	source := filepath.Join(sessionsDir, "source.jsonl")
-	data := `{"type":"session","id":"` + contractSessionID + `","cwd":"` + dir + `"}` + "\n" +
+	cwdJSON, _ := json.Marshal(dir)
+	data := `{"type":"session","id":"` + contractSessionID + `","cwd":` + string(cwdJSON) + `}` + "\n" +
 		`{"type":"message","id":"entry","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}` + "\n"
 	if err := os.WriteFile(source, []byte(data), 0o600); err != nil {
 		t.Fatal(err)

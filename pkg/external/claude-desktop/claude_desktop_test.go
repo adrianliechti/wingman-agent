@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -42,9 +43,10 @@ func TestWriteGatewayProfileConfiguresCurrentClaudeSurfaces(t *testing.T) {
 	if _, ok := cfg["inferenceModels"]; ok {
 		t.Error("inferenceModels should be removed")
 	}
+	// Windows has no POSIX permission bits; os.Stat always reports 0666 there.
 	if info, err := os.Stat(path); err != nil {
 		t.Fatal(err)
-	} else if info.Mode().Perm() != 0600 {
+	} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Errorf("mode = %v, want 0600", info.Mode().Perm())
 	}
 }

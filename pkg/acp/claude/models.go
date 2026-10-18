@@ -3,9 +3,9 @@ package claude
 import (
 	"strings"
 
-	"github.com/coder/acp-go-sdk"
+	acpsdk "github.com/coder/acp-go-sdk"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type ModelEntry struct {
@@ -108,16 +108,16 @@ const (
 	effortConfigID = "effort"
 )
 
-func buildConfigOptions(models []ModelEntry, currentModelID, currentEffort string) []acp.SessionConfigOption {
-	opts := []acp.SessionConfigOption{modelConfigOption(models, currentModelID)}
+func buildConfigOptions(models []ModelEntry, currentModelID, currentEffort string) []acpsdk.SessionConfigOption {
+	opts := []acpsdk.SessionConfigOption{modelConfigOption(models, currentModelID)}
 	if effort := effortConfigOption(models, currentModelID, currentEffort); effort != nil {
 		opts = append(opts, *effort)
 	}
 	return opts
 }
 
-func modelConfigOption(models []ModelEntry, currentID string) acp.SessionConfigOption {
-	ungrouped := make(acp.SessionConfigSelectOptionsUngrouped, 0, len(models))
+func modelConfigOption(models []ModelEntry, currentID string) acpsdk.SessionConfigOption {
+	ungrouped := make(acpsdk.SessionConfigSelectOptionsUngrouped, 0, len(models))
 	for _, m := range models {
 		desc := m.Description
 		if m.ID == "default" && m.ResolvedModel != "" {
@@ -129,8 +129,8 @@ func modelConfigOption(models []ModelEntry, currentID string) acp.SessionConfigO
 				}
 			}
 		}
-		opt := acp.SessionConfigSelectOption{
-			Value: acp.SessionConfigValueId(m.ID),
+		opt := acpsdk.SessionConfigSelectOption{
+			Value: acpsdk.SessionConfigValueId(m.ID),
 			Name:  m.Name,
 		}
 		if desc != "" {
@@ -142,31 +142,31 @@ func modelConfigOption(models []ModelEntry, currentID string) acp.SessionConfigO
 		currentID = models[0].ID
 	}
 	if currentID != "" && findModel(models, currentID) == nil {
-		ungrouped = append(acp.SessionConfigSelectOptionsUngrouped{
-			{Value: acp.SessionConfigValueId(currentID), Name: currentID},
+		ungrouped = append(acpsdk.SessionConfigSelectOptionsUngrouped{
+			{Value: acpsdk.SessionConfigValueId(currentID), Name: currentID},
 		}, ungrouped...)
 	}
-	opt := acp.NewSessionConfigOptionSelect(
-		acp.SessionConfigValueId(currentID),
-		acp.SessionConfigSelectOptions{Ungrouped: &ungrouped},
+	opt := acpsdk.NewSessionConfigOptionSelect(
+		acpsdk.SessionConfigValueId(currentID),
+		acpsdk.SessionConfigSelectOptions{Ungrouped: &ungrouped},
 	)
 	opt.Select.Id = modelConfigID
 	opt.Select.Name = "Model"
 	return opt
 }
 
-func effortConfigOption(models []ModelEntry, currentModelID, currentEffort string) *acp.SessionConfigOption {
+func effortConfigOption(models []ModelEntry, currentModelID, currentEffort string) *acpsdk.SessionConfigOption {
 	m := findModel(models, currentModelID)
 	if m == nil {
 		return nil
 	}
-	return acpcommon.EffortConfigOption(m.EffortLevels, currentEffort)
+	return acp.EffortConfigOption(m.EffortLevels, currentEffort)
 }
 
 func normalizeSessionConfig(models []ModelEntry, modelID, effort string) (string, string) {
 	if m := resolveModel(models, modelID); m != nil {
 		modelID = m.ID
-		if !acpcommon.IsValidEffort(m.EffortLevels, effort) {
+		if !acp.IsValidEffort(m.EffortLevels, effort) {
 			effort = "default"
 		}
 	}
@@ -201,13 +201,13 @@ func findMode(id string) *sessionMode {
 	return nil
 }
 
-func buildSessionModeState(currentID string, allowBypass bool) *acp.SessionModeState {
-	infos := make([]acpcommon.ModeInfo, 0, len(sessionModes))
+func buildSessionModeState(currentID string, allowBypass bool) *acpsdk.SessionModeState {
+	infos := make([]acp.ModeInfo, 0, len(sessionModes))
 	for _, m := range sessionModes {
 		if m.id == bypassModeID && !allowBypass {
 			continue
 		}
-		infos = append(infos, acpcommon.ModeInfo{ID: m.id, Name: m.name, Description: m.description})
+		infos = append(infos, acp.ModeInfo{ID: m.id, Name: m.name, Description: m.description})
 	}
-	return acpcommon.SessionModeState(infos, currentID, defaultModeID)
+	return acp.SessionModeState(infos, currentID, defaultModeID)
 }

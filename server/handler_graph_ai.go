@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/graph"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"golang.org/x/sync/errgroup"
 )
@@ -27,10 +27,10 @@ const (
 // summarizing and ranking need no deliberation, so the cheapest effort wins.
 // Unknown capability keeps effort unset rather than guessing.
 func (s *Server) generationTarget(role string) (model, effort string) {
-	return resolveGenerationTarget(s.config, role, "")
+	return resolveGenerationTarget(s.Config, role, "")
 }
 
-func resolveGenerationTarget(cfg *agent.Config, role, override string) (modelID, effort string) {
+func resolveGenerationTarget(cfg *harness.Config, role, override string) (modelID, effort string) {
 	modelID = strings.TrimSpace(override)
 	var efforts []string
 	if modelID == "" && cfg.RoleModel != nil {
@@ -199,7 +199,7 @@ func (s *Server) generateModuleSummary(ctx context.Context, profile graph.Module
 	}
 
 	model, effort := s.generationTarget("utility")
-	result, err := s.config.Generate(ctx, agent.GenerateOptions{
+	result, err := s.Generate(ctx, harness.GenerateOptions{
 		Model:           model,
 		Effort:          effort,
 		Instructions:    summaryInstructions,

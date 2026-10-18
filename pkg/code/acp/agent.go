@@ -22,9 +22,9 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/internal/process"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
@@ -77,8 +77,8 @@ type sessionState struct {
 	id acpsdk.SessionId
 
 	mu       sync.Mutex
-	messages []agent.Message
-	usage    agent.Usage
+	messages []harness.Message
+	usage    harness.Usage
 	inflight *turn
 	loaded   bool
 
@@ -104,7 +104,7 @@ type toolCall struct {
 	name      string
 	kind      string
 	args      string
-	locations []agent.ToolLocation
+	locations []harness.ToolLocation
 	diff      string
 }
 
@@ -116,14 +116,14 @@ type turn struct {
 	updateMu sync.Mutex
 
 	mu                sync.Mutex
-	emitted           []agent.Message
+	emitted           []harness.Message
 	lastContentKey    string
 	ignoreUserUpdates bool
 	streamErr         error
 }
 
 // send drops the message once the turn is finished.
-func (t *turn) send(msg agent.Message) {
+func (t *turn) send(msg harness.Message) {
 	select {
 	case <-t.done:
 		return
@@ -143,14 +143,14 @@ func (t *turn) send(msg agent.Message) {
 	}
 }
 
-func (t *turn) messages() []agent.Message {
+func (t *turn) messages() []harness.Message {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return agent.CloneMessages(t.emitted)
+	return harness.CloneMessages(t.emitted)
 }
 
 // cancelOutstandingToolCalls renders tool calls that never reached a terminal status.
-func (s *sessionState) cancelOutstandingToolCalls(t *turn) []agent.Message {
+func (s *sessionState) cancelOutstandingToolCalls(t *turn) []harness.Message {
 	s.toolCallsMu.Lock()
 	pending := s.toolCalls
 	s.toolCalls = map[string]toolCall{}
@@ -162,16 +162,16 @@ func (s *sessionState) cancelOutstandingToolCalls(t *turn) []agent.Message {
 	}
 	sort.Strings(ids)
 
-	messages := make([]agent.Message, 0, len(ids))
+	messages := make([]harness.Message, 0, len(ids))
 	for _, id := range ids {
 		call := pending[id]
-		msg := agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{ToolResult: &agent.ToolResult{
+		msg := harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: &harness.ToolResult{
 			ID:        id,
 			Name:      call.name,
 			Kind:      call.kind,
 			Args:      call.args,
 			Locations: call.locations,
-			Presentation: agent.NewToolPresentation(
+			Presentation: harness.NewToolPresentation(
 				call.name, call.kind, call.args, call.locations,
 			),
 			Content: "tool call cancelled",
@@ -199,7 +199,7 @@ func (s *sessionState) finalizeTurn(t *turn) {
 }
 
 type event struct {
-	msg  agent.Message
+	msg  harness.Message
 	err  error
 	done bool
 }
@@ -622,9 +622,9 @@ func (a *Agent) LoadSession(ctx context.Context, id string) error {
 	return ferr
 }
 
-func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]agent.Message, error] {
+func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]harness.Message, error] {
 	if !a.caps.LoadSession && a.caps.SessionCapabilities.Resume == nil {
-		return func(yield func([]agent.Message, error) bool) {
+		return func(yield func([]harness.Message, error) bool) {
 			yield(nil, errors.ErrUnsupported)
 		}
 	}
@@ -647,15 +647,15 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 
 	sess.mu.Lock()
 	if sess.loaded {
-		snap := agent.CloneMessages(sess.messages)
+		snap := harness.CloneMessages(sess.messages)
 		sess.mu.Unlock()
-		return func(yield func([]agent.Message, error) bool) {
+		return func(yield func([]harness.Message, error) bool) {
 			yield(snap, nil)
 		}
 	}
 	sess.mu.Unlock()
 
-	return func(yield func([]agent.Message, error) bool) {
+	return func(yield func([]harness.Message, error) bool) {
 		loadCtx, cancel := context.WithCancel(ctx)
 		t := &turn{
 			ctx:    loadCtx,
@@ -665,7 +665,7 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 		}
 		sess.mu.Lock()
 		if sess.loaded {
-			snap := agent.CloneMessages(sess.messages)
+			snap := harness.CloneMessages(sess.messages)
 			sess.mu.Unlock()
 			cancel()
 			yield(snap, nil)
@@ -702,7 +702,7 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ag
 			sess.mu.Unlock()
 		}()
 
-		snapshot := func() []agent.Message {
+		snapshot := func() []harness.Message {
 			return t.messages()
 		}
 
@@ -789,15 +789,15 @@ func (a *Agent) DeleteSession(ctx context.Context, id string) error {
 	return err
 }
 
-func (a *Agent) Messages(id string) []agent.Message {
-	return readSession(a, id, func(s *sessionState) []agent.Message {
-		return agent.CloneMessages(s.messages)
+func (a *Agent) Messages(id string) []harness.Message {
+	return readSession(a, id, func(s *sessionState) []harness.Message {
+		return harness.CloneMessages(s.messages)
 	})
 }
 
 func (a *Agent) HistorySnapshot(id string) code.HistorySnapshot {
 	return readSession(a, id, func(s *sessionState) code.HistorySnapshot {
-		return code.HistorySnapshot{Messages: agent.CloneMessages(s.messages)}
+		return code.HistorySnapshot{Messages: harness.CloneMessages(s.messages)}
 	})
 }
 
@@ -813,8 +813,8 @@ func (a *Agent) Commands(id string) []code.Command {
 	})
 }
 
-func (a *Agent) Usage(id string) agent.Usage {
-	return readSession(a, id, func(s *sessionState) agent.Usage { return s.usage })
+func (a *Agent) Usage(id string) harness.Usage {
+	return readSession(a, id, func(s *sessionState) harness.Usage { return s.usage })
 }
 
 // readSession runs fn under the session lock, or returns the zero value when
@@ -836,14 +836,14 @@ func (a *Agent) session(id string) *sessionState {
 	return a.sessions[id]
 }
 
-func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (iter.Seq2[agent.Message, error], error) {
+func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(input) == 0 {
 		return nil, code.ErrEmptyInput
 	}
-	input = agent.CloneContent(input)
+	input = harness.CloneContent(input)
 	a.mu.Lock()
 	sess, ok := a.sessions[id]
 	a.mu.Unlock()
@@ -866,9 +866,9 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (ite
 		return nil, code.ErrTurnInProgress
 	}
 	sess.inflight = t
-	sess.messages = append(sess.messages, agent.Message{
-		Role:    agent.RoleUser,
-		InputID: agent.InputIDFromContext(ctx),
+	sess.messages = append(sess.messages, harness.Message{
+		Role:    harness.RoleUser,
+		InputID: harness.InputIDFromContext(ctx),
 		Content: input,
 	})
 	sess.mu.Unlock()
@@ -910,7 +910,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (ite
 		}
 	}()
 
-	return func(yield func(agent.Message, error) bool) {
+	return func(yield func(harness.Message, error) bool) {
 		defer func() {
 			cancel()
 			close(t.done)
@@ -937,7 +937,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (ite
 					if err == nil {
 						err = sendCtx.Err()
 					}
-					yield(agent.Message{}, err)
+					yield(harness.Message{}, err)
 				}
 				return
 			case ev := <-t.events:
@@ -955,7 +955,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []agent.Content) (ite
 						}
 					}
 					if err != nil {
-						yield(agent.Message{}, err)
+						yield(harness.Message{}, err)
 					}
 					return
 				}
@@ -983,14 +983,14 @@ func stopReasonError(reason acpsdk.StopReason) error {
 	}
 }
 
-func usageFromACP(usage *acpsdk.Usage) agent.Usage {
+func usageFromACP(usage *acpsdk.Usage) harness.Usage {
 	if usage == nil {
-		return agent.Usage{}
+		return harness.Usage{}
 	}
 	cacheRead := optionalACPTokenCount(usage.CachedReadTokens)
 	cacheCreation := optionalACPTokenCount(usage.CachedWriteTokens)
 	reasoning := optionalACPTokenCount(usage.ThoughtTokens)
-	return agent.Usage{
+	return harness.Usage{
 		InputTokens:              tokenCount64(usage.InputTokens) + cacheRead + cacheCreation,
 		OutputTokens:             tokenCount64(usage.OutputTokens) + reasoning,
 		ReasoningTokens:          reasoning,
@@ -1036,12 +1036,12 @@ func (a *Agent) Steer(ctx context.Context, id string, input code.TurnInput) erro
 	if t == nil {
 		return code.ErrNoActiveTurn
 	}
-	input.Content = agent.CloneContent(input.Content)
+	input.Content = harness.CloneContent(input.Content)
 	if err := a.steer(ctx, sess.id, acp.ContentToBlocks(input.Content), input.ID); err != nil {
 		return err
 	}
 	sess.mu.Lock()
-	steered := agent.Message{Role: agent.RoleUser, Content: input.Content, InputID: input.ID}
+	steered := harness.Message{Role: harness.RoleUser, Content: input.Content, InputID: input.ID}
 	if sess.inflight == t {
 		t.mu.Lock()
 		t.emitted = append(t.emitted, steered)
@@ -1233,10 +1233,10 @@ func (a *Agent) applySessionStateUpdate(sess *sessionState, update acpsdk.Sessio
 	return false
 }
 
-func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpdate) (agent.Message, bool) {
-	emit := func(role agent.MessageRole, c agent.Content, contentKey string) agent.Message {
+func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpdate) (harness.Message, bool) {
+	emit := func(role harness.MessageRole, c harness.Content, contentKey string) harness.Message {
 		t.mu.Lock()
-		var previous *agent.Content
+		var previous *harness.Content
 		if n := len(t.emitted); n > 0 && t.emitted[n-1].Role == role && t.lastContentKey == contentKey {
 			content := t.emitted[n-1].Content
 			if len(content) > 0 {
@@ -1265,35 +1265,35 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 				t.emitted[n-1].Content = append(contents, c)
 			}
 		} else {
-			t.emitted = append(t.emitted, agent.Message{Role: role, Content: []agent.Content{c}})
+			t.emitted = append(t.emitted, harness.Message{Role: role, Content: []harness.Content{c}})
 		}
 		t.lastContentKey = contentKey
 		// The live delta must not share pointers with the accumulated history.
 		// Later reasoning chunks mutate that history while the UI reads deltas.
-		delta := agent.CloneContent([]agent.Content{c})
+		delta := harness.CloneContent([]harness.Content{c})
 		t.mu.Unlock()
-		return agent.Message{Role: role, Content: delta}
+		return harness.Message{Role: role, Content: delta}
 	}
 
 	switch {
 	case u.UserMessageChunk != nil:
 		if t.ignoreUserUpdates {
-			return agent.Message{}, false
+			return harness.Message{}, false
 		}
 		content, ok := messageBlockContent(u.UserMessageChunk.Content)
 		if !ok {
-			return agent.Message{}, false
+			return harness.Message{}, false
 		}
 		id := ""
 		if u.UserMessageChunk.MessageId != nil {
 			id = *u.UserMessageChunk.MessageId
 		}
-		return emit(agent.RoleUser, content, "user:"+id), true
+		return emit(harness.RoleUser, content, "user:"+id), true
 
 	case u.AgentMessageChunk != nil:
 		content, ok := messageBlockContent(u.AgentMessageChunk.Content)
 		if !ok {
-			return agent.Message{}, false
+			return harness.Message{}, false
 		}
 		id := ""
 		if u.AgentMessageChunk.MessageId != nil {
@@ -1302,18 +1302,18 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		if content.Text != "" {
 			content.TextID = id
 		}
-		return emit(agent.RoleAssistant, content, "agent:"+id), true
+		return emit(harness.RoleAssistant, content, "agent:"+id), true
 
 	case u.AgentThoughtChunk != nil:
 		text := blockText(u.AgentThoughtChunk.Content)
 		if text == "" {
-			return agent.Message{}, false
+			return harness.Message{}, false
 		}
 		id := ""
 		if u.AgentThoughtChunk.MessageId != nil {
 			id = *u.AgentThoughtChunk.MessageId
 		}
-		return emit(agent.RoleAssistant, agent.Content{Reasoning: &agent.Reasoning{ID: id, Summary: text}}, "thought:"+id), true
+		return emit(harness.RoleAssistant, harness.Content{Reasoning: &harness.Reasoning{ID: id, Summary: text}}, "thought:"+id), true
 
 	case u.ToolCall != nil:
 		tc := u.ToolCall
@@ -1325,14 +1325,14 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		if name == "" {
 			name = string(tc.Kind)
 		}
-		presentation := agent.NewToolPresentation(name, kind, args, locations)
+		presentation := harness.NewToolPresentation(name, kind, args, locations)
 		sess.toolCallsMu.Lock()
 		sess.toolCalls[string(tc.ToolCallId)] = toolCall{
 			name: name, kind: kind, args: args, locations: locations,
 			diff: toolCallDiffText(tc.Content),
 		}
 		sess.toolCallsMu.Unlock()
-		callMsg := emit(agent.RoleAssistant, agent.Content{ToolCall: &agent.ToolCall{
+		callMsg := emit(harness.RoleAssistant, harness.Content{ToolCall: &harness.ToolCall{
 			ID:           string(tc.ToolCallId),
 			Name:         name,
 			Kind:         kind,
@@ -1359,7 +1359,7 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 				body = "tool call failed"
 			}
 			t.send(callMsg)
-			return emit(agent.RoleAssistant, agent.Content{ToolResult: &agent.ToolResult{
+			return emit(harness.RoleAssistant, harness.Content{ToolResult: &harness.ToolResult{
 				ID:           string(tc.ToolCallId),
 				Name:         name,
 				Kind:         kind,
@@ -1397,12 +1397,12 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		sess.toolCallsMu.Unlock()
 		if tu.Status == nil {
 			a.reportToolProgress(t, tu)
-			return agent.Message{}, false
+			return harness.Message{}, false
 		}
 		status := *tu.Status
 		if status != acpsdk.ToolCallStatusCompleted && status != acpsdk.ToolCallStatusFailed {
 			a.reportToolProgress(t, tu)
-			return agent.Message{}, false
+			return harness.Message{}, false
 		}
 		sess.toolCallsMu.Lock()
 		prior = sess.toolCalls[string(tu.ToolCallId)]
@@ -1418,13 +1418,13 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		if body == "" && status == acpsdk.ToolCallStatusFailed {
 			body = "tool call failed"
 		}
-		return emit(agent.RoleAssistant, agent.Content{ToolResult: &agent.ToolResult{
+		return emit(harness.RoleAssistant, harness.Content{ToolResult: &harness.ToolResult{
 			ID:        string(tu.ToolCallId),
 			Name:      prior.name,
 			Kind:      prior.kind,
 			Args:      prior.args,
 			Locations: prior.locations,
-			Presentation: agent.NewToolPresentation(
+			Presentation: harness.NewToolPresentation(
 				prior.name, prior.kind, prior.args, prior.locations,
 			),
 			Content: body,
@@ -1432,13 +1432,13 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		}}, ""), true
 
 	}
-	return agent.Message{}, false
+	return harness.Message{}, false
 }
 
-func messageBlockContent(block acpsdk.ContentBlock) (agent.Content, bool) {
+func messageBlockContent(block acpsdk.ContentBlock) (harness.Content, bool) {
 	contents := acp.ContentFromBlocks([]acpsdk.ContentBlock{block})
 	if len(contents) != 1 {
-		return agent.Content{}, false
+		return harness.Content{}, false
 	}
 	return contents[0], true
 }
@@ -1468,7 +1468,7 @@ func (a *Agent) reportToolProgress(t *turn, update *acpsdk.SessionToolCallUpdate
 // mergeACPContent keeps transport chunks as deltas for the live stream while
 // storing them as one logical content block for transcript rendering. Without
 // this, a tokenized Codex response becomes one finalized TUI cell per token.
-func mergeACPContent(dst *agent.Content, src agent.Content) bool {
+func mergeACPContent(dst *harness.Content, src harness.Content) bool {
 	if dst.Text != "" && src.Text != "" {
 		dst.Text += src.Text
 		return true
@@ -2040,11 +2040,11 @@ func (a *Agent) workspaceRoot() string {
 	return a.workspace.RootPath
 }
 
-func agentToolLocations(workspaceRoot string, locations []acpsdk.ToolCallLocation) []agent.ToolLocation {
+func agentToolLocations(workspaceRoot string, locations []acpsdk.ToolCallLocation) []harness.ToolLocation {
 	if len(locations) == 0 {
 		return nil
 	}
-	result := make([]agent.ToolLocation, 0, len(locations))
+	result := make([]harness.ToolLocation, 0, len(locations))
 	for _, location := range locations {
 		if location.Path == "" {
 			continue
@@ -2056,7 +2056,7 @@ func agentToolLocations(workspaceRoot string, locations []acpsdk.ToolCallLocatio
 				locationPath = relative
 			}
 		}
-		mapped := agent.ToolLocation{Path: filepath.ToSlash(locationPath)}
+		mapped := harness.ToolLocation{Path: filepath.ToSlash(locationPath)}
 		if location.Line != nil {
 			mapped.Line = *location.Line
 		}

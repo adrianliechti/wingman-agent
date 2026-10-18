@@ -34,7 +34,9 @@ func main() {
 	args := os.Args[1:]
 
 	if len(args) == 0 {
-		runTUI(ctx, tuiOptions{Agent: "wingman"})
+		if err := runTUI(ctx, tuiOptions{Agent: "wingman"}); err != nil {
+			fatal(err)
+		}
 		return
 	}
 
@@ -70,7 +72,9 @@ func main() {
 			fatal(err)
 		}
 
-		runTUI(ctx, opts)
+		if err := runTUI(ctx, opts); err != nil {
+			fatal(err)
+		}
 	}
 }
 
@@ -83,6 +87,7 @@ func parseTUIArgs(args []string) (tuiOptions, error) {
 	fs.String(&opts.Agent, "--agent, -a name", "use wingman or any detected/configured agent")
 	fs.Bool(&latest, "--continue, -c", "resume the agent's latest session")
 	fs.String(&opts.SessionID, "--resume, -r ID", "resume the specified session")
+	fs.Bool(&opts.Fork, "--fork", "continue in a copy of the resumed session")
 
 	if err := fs.Parse(args); err != nil {
 		return tuiOptions{}, err
@@ -90,6 +95,10 @@ func parseTUIArgs(args []string) (tuiOptions, error) {
 
 	if latest && opts.SessionID == "" {
 		opts.SessionID = "latest"
+	}
+
+	if opts.Fork && opts.SessionID == "" {
+		return tuiOptions{}, fmt.Errorf("--fork requires --continue or --resume")
 	}
 
 	return opts, nil
@@ -116,6 +125,7 @@ TUI flags:
   --agent, -a name     Use wingman or any detected/configured agent (default: wingman)
   --continue, -c       Resume the agent's latest session
   --resume, -r ID      Resume the specified session
+  --fork               Continue in a copy of the resumed session
   --help, -h           Show this help
 
 Exec flags:

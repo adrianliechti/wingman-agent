@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	graphtools "github.com/adrianliechti/wingman-agent/pkg/agent/tool/graph"
-	lsptools "github.com/adrianliechti/wingman-agent/pkg/agent/tool/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/graph"
+	graphtool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/graph"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
 )
 
@@ -31,7 +31,7 @@ func TestGraphFindsBothCallPathsAfterLSPUnavailable(t *testing.T) {
 	root := writeFixture(t, f)
 	service := language.New(root, filepath.Join(t.TempDir(), "graph.json"))
 	defer service.Close()
-	_, err := lsptools.NewTools(service)[0].Execute(t.Context(), map[string]any{"operation": "outgoingCalls", "file_path": "entry.go", "symbol": "Handle"})
+	_, err := lsp.NewTools(service)[0].Execute(t.Context(), map[string]any{"operation": "outgoingCalls", "file_path": "entry.go", "symbol": "Handle"})
 	if err == nil || !strings.Contains(err.Error(), "code_graph") {
 		t.Fatalf("missing fallback: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestGraphFindsBothCallPathsAfterLSPUnavailable(t *testing.T) {
 	if !reflect.DeepEqual(paths, f.answer.(pathAnswer).Paths) {
 		t.Fatalf("graph paths=%v", paths)
 	}
-	out, err := graphtools.NewTools(service.Graph())[0].Execute(t.Context(), map[string]any{"operation": "trace", "symbol": "Handle", "target": "WriteRecord"})
+	out, err := graphtool.NewTools(service.Graph())[0].Execute(t.Context(), map[string]any{"operation": "trace", "symbol": "Handle", "target": "WriteRecord"})
 	if err != nil || !strings.Contains(out.Content, "2 path(s)") || strings.Contains(out.Content, "OtherEntry") {
 		t.Fatalf("%s %v", out.Content, err)
 	}
@@ -64,7 +64,7 @@ func TestGraphReceiverAmbiguityIsVisibleWithoutLSP(t *testing.T) {
 	f := fixtureNamed(t, "receiver_references")
 	root := writeFixture(t, f)
 	engine := graph.New(root, filepath.Join(t.TempDir(), "graph.json"))
-	out, err := graphtools.NewTools(engine)[0].Execute(t.Context(), map[string]any{"operation": "trace", "symbol": "Close", "direction": "callers"})
+	out, err := graphtool.NewTools(engine)[0].Execute(t.Context(), map[string]any{"operation": "trace", "symbol": "Close", "direction": "callers"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestGraphContentPaginationRecoversAllSourceCandidates(t *testing.T) {
 	f := fixtureNamed(t, "reference_completeness")
 	root := writeFixture(t, f)
 	engine := graph.New(root, filepath.Join(t.TempDir(), "graph.json"))
-	inspect := graphtools.NewTools(engine)[0]
+	inspect := graphtool.NewTools(engine)[0]
 	seen := map[string]bool{}
 	rawSeen := false
 	for offset := 0; ; offset += 30 {
@@ -173,7 +173,7 @@ func TestGraphAnalyzesPythonAndTypeScriptWithoutLanguageServers(t *testing.T) {
 				t.Fatal(err)
 			}
 			engine := graph.New(root, filepath.Join(t.TempDir(), "graph.json"))
-			out, err := graphtools.NewTools(engine)[0].Execute(t.Context(), map[string]any{"operation": "trace", "symbol": "entry", "target": "leaf"})
+			out, err := graphtool.NewTools(engine)[0].Execute(t.Context(), map[string]any{"operation": "trace", "symbol": "entry", "target": "leaf"})
 			if err != nil || !strings.Contains(out.Content, "entry → middle → leaf") {
 				t.Fatalf("%s %v", out.Content, err)
 			}

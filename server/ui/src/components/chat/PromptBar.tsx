@@ -302,14 +302,6 @@ export function PromptBar({
 					</button>
 					<button
 						type="button"
-						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-						onClick={() => onReply({ action: "accept", scope: "session" })}
-						title="Approve this action for this session"
-					>
-						Allow for session
-					</button>
-					<button
-						type="button"
 						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-bg bg-success hover:opacity-90 cursor-pointer transition-opacity"
 						title="Approve once (Y when approval has focus)"
 						onClick={() => onReply({ action: "accept" })}

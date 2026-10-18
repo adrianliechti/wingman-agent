@@ -6,9 +6,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -112,7 +112,7 @@ func (o *transcriptOverlay) buildEntries() {
 			continue
 		}
 		isUserShell := len(message.Content) == 1 && code.IsUserShellCommand(message.Content[0].AsText())
-		if message.Role == agent.RoleUser && !isUserShell {
+		if message.Role == harness.RoleUser && !isUserShell {
 			if turn > 0 {
 				entries = append(entries, transcriptEntry{
 					key: fmt.Sprintf("separator:%d", turn), kind: transcriptSeparator,
@@ -150,7 +150,7 @@ func (o *transcriptOverlay) buildEntries() {
 				})
 			case strings.TrimSpace(content.AsText()) != "":
 				text := content.AsText()
-				if message.Role == agent.RoleUser {
+				if message.Role == harness.RoleUser {
 					if cmd, output, exitCode, ok := code.ParseUserShellCommand(text); ok {
 						entries = append(entries, transcriptEntry{
 							key: baseKey + ":usershell", kind: transcriptTool, raw: cmd + "\n" + output, selectable: true,
@@ -169,7 +169,7 @@ func (o *transcriptOverlay) buildEntries() {
 							return cellUser(text, width)
 						},
 					})
-				} else if message.Role == agent.RoleAssistant {
+				} else if message.Role == harness.RoleAssistant {
 					entries = append(entries, transcriptEntry{
 						key: baseKey + ":assistant", kind: transcriptAssistant, raw: text, selectable: true,
 						render: func(width int, _ bool) []string {

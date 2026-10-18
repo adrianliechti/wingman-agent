@@ -7,9 +7,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/coder/acp-go-sdk"
+	acpsdk "github.com/coder/acp-go-sdk"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type streamedBlock struct {
@@ -88,7 +88,7 @@ func (t *streamedBlockTracker) consume(content []cliMsgBlock) []cliMsgBlock {
 	return kept
 }
 
-func emitStreamEvent(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, streamed *streamedBlockTracker) error {
+func emitStreamEvent(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, raw json.RawMessage, streamed *streamedBlockTracker) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -103,22 +103,22 @@ func emitStreamEvent(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 	if e.Type != "content_block_delta" {
 		return nil
 	}
-	var update acp.SessionUpdate
+	var update acpsdk.SessionUpdate
 	switch e.Delta.Type {
 	case "text_delta":
 		if e.Delta.Text == "" {
 			return nil
 		}
-		update = acp.UpdateAgentMessageText(e.Delta.Text)
+		update = acpsdk.UpdateAgentMessageText(e.Delta.Text)
 	case "thinking_delta":
 		if e.Delta.Thinking == "" {
 			return nil
 		}
-		update = acp.UpdateAgentThoughtText(e.Delta.Thinking)
+		update = acpsdk.UpdateAgentThoughtText(e.Delta.Thinking)
 	default:
 		return nil
 	}
-	if err := acpcommon.Notify(ctx, conn, sid, update); err != nil {
+	if err := acp.Notify(ctx, conn, sid, update); err != nil {
 		return err
 	}
 	if e.Delta.Type == "text_delta" {
@@ -132,7 +132,7 @@ func emitStreamEvent(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 // emitAssistant renders a consolidated assistant message. Blocks already sent
 // as live deltas are removed by content, while unstreamed blocks and partial
 // tails are still emitted. streamed is nil on history replay.
-func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cwd string, cache toolUseCache, tracker *toolCallTracker, streamed *streamedBlockTracker, parentToolUseID string) error {
+func emitAssistant(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, raw json.RawMessage, cwd string, cache toolUseCache, tracker *toolCallTracker, streamed *streamedBlockTracker, parentToolUseID string) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -145,7 +145,7 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 		content = streamed.consume(content)
 	}
 	for _, b := range content {
-		var update acp.SessionUpdate
+		var update acpsdk.SessionUpdate
 		switch b.Type {
 		case "text":
 			if b.Text == "" || parentToolUseID != "" {
@@ -159,12 +159,12 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 				}
 				text = stripped
 			}
-			update = acp.UpdateAgentMessageText(text)
+			update = acpsdk.UpdateAgentMessageText(text)
 		case "thinking":
 			if b.Thinking == "" || parentToolUseID != "" {
 				continue
 			}
-			update = acp.UpdateAgentThoughtText(b.Thinking)
+			update = acpsdk.UpdateAgentThoughtText(b.Thinking)
 		case "tool_use":
 			if cache != nil && b.ID != "" {
 				cache[b.ID] = b.Name
@@ -176,7 +176,7 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 		default:
 			continue
 		}
-		if err := acpcommon.Notify(ctx, conn, sid, update); err != nil {
+		if err := acp.Notify(ctx, conn, sid, update); err != nil {
 			return err
 		}
 	}
@@ -188,12 +188,12 @@ func emitAssistant(ctx context.Context, conn *acp.AgentSideConnection, sid acp.S
 // toolCallTracker), in which case it sends a tool_call_update that refines
 // the eagerly-emitted call with the now-complete info instead of duplicating
 // it.
-func emitToolUseCall(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, b cliMsgBlock, cwd string, tracker *toolCallTracker, parentToolUseID string) error {
-	send := func(u acp.SessionUpdate) error {
-		return acpcommon.Notify(ctx, conn, sid, u)
+func emitToolUseCall(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, b cliMsgBlock, cwd string, tracker *toolCallTracker, parentToolUseID string) error {
+	send := func(u acpsdk.SessionUpdate) error {
+		return acp.Notify(ctx, conn, sid, u)
 	}
 	start := func() error {
-		u := toolCallStartUpdate(b.ID, b.Name, b.Input, cwd, acp.ToolCallStatusInProgress)
+		u := toolCallStartUpdate(b.ID, b.Name, b.Input, cwd, acpsdk.ToolCallStatusInProgress)
 		withClaudeToolMeta(&u, b.Name, parentToolUseID)
 		return send(u)
 	}
@@ -203,14 +203,14 @@ func emitToolUseCall(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 	}
 
 	refine := func() error {
-		u := toolCallRefineUpdate(b.ID, b.Name, b.Input, cwd, acp.ToolCallStatusInProgress)
+		u := toolCallRefineUpdate(b.ID, b.Name, b.Input, cwd, acpsdk.ToolCallStatusInProgress)
 		withClaudeToolMeta(&u, b.Name, parentToolUseID)
 		return send(u)
 	}
 	return tracker.emit(b.ID, b.Name, parentToolUseID, start, refine)
 }
 
-func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, raw json.RawMessage, cache toolUseCache, tracker *toolCallTracker, parentToolUseID string) error {
+func emitToolResults(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, raw json.RawMessage, cache toolUseCache, tracker *toolCallTracker, parentToolUseID string) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -221,7 +221,7 @@ func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 	for _, b := range m.Content {
 		if b.Type == "text" && parentToolUseID == "" && strings.Contains(b.Text, "<local-command-stdout>") {
 			if text, ok := stripMarkerTags(b.Text); ok {
-				if err := acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(text)); err != nil {
+				if err := acp.Notify(ctx, conn, sid, acpsdk.UpdateAgentMessageText(text)); err != nil {
 					return err
 				}
 			}
@@ -238,24 +238,24 @@ func emitToolResults(ctx context.Context, conn *acp.AgentSideConnection, sid acp
 		if tracker != nil && !tracker.complete(b.ToolUseID) {
 			continue
 		}
-		status := acp.ToolCallStatusCompleted
+		status := acpsdk.ToolCallStatusCompleted
 		if b.IsError {
-			status = acp.ToolCallStatusFailed
+			status = acpsdk.ToolCallStatusFailed
 		}
-		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(status)}
+		opts := []acpsdk.ToolCallUpdateOpt{acpsdk.WithUpdateStatus(status)}
 		if content := toolResultContent(name, b); len(content) > 0 {
-			opts = append(opts, acp.WithUpdateContent(content))
+			opts = append(opts, acpsdk.WithUpdateContent(content))
 		}
-		u := acp.UpdateToolCall(acp.ToolCallId(b.ToolUseID), opts...)
+		u := acpsdk.UpdateToolCall(acpsdk.ToolCallId(b.ToolUseID), opts...)
 		withClaudeToolMeta(&u, name, parentToolUseID)
-		if err := acpcommon.Notify(ctx, conn, sid, u); err != nil {
+		if err := acp.Notify(ctx, conn, sid, u); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func withClaudeToolMeta(update *acp.SessionUpdate, toolName, parentToolUseID string) {
+func withClaudeToolMeta(update *acpsdk.SessionUpdate, toolName, parentToolUseID string) {
 	meta := map[string]any{"toolName": toolName}
 	if parentToolUseID != "" {
 		meta["parentToolUseId"] = parentToolUseID
@@ -269,7 +269,7 @@ func withClaudeToolMeta(update *acp.SessionUpdate, toolName, parentToolUseID str
 	}
 }
 
-func toolResultContent(name string, b cliMsgBlock) []acp.ToolCallContent {
+func toolResultContent(name string, b cliMsgBlock) []acpsdk.ToolCallContent {
 	text, parts, isArray := decodeToolResult(b.Content)
 	subagent := (name == "Agent" || name == "Task") && !b.IsError
 	if isArray {
@@ -283,36 +283,36 @@ func toolResultContent(name string, b cliMsgBlock) []acp.ToolCallContent {
 	return textToolResultContent(name, text, b.IsError)
 }
 
-func textToolResultContent(name, text string, isError bool) []acp.ToolCallContent {
+func textToolResultContent(name, text string, isError bool) []acpsdk.ToolCallContent {
 	if isError {
 		if text == "" {
 			return nil
 		}
-		return []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(codeFence(text)))}
+		return []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(codeFence(text)))}
 	}
 	switch name {
 	case "Read":
 		if text == "" {
 			return nil
 		}
-		return []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(markdownEscape(text)))}
+		return []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(markdownEscape(text)))}
 	case "Bash", "PowerShell":
 		if strings.TrimSpace(text) == "" {
 			return nil
 		}
-		return []acp.ToolCallContent{acp.ToolContent(acp.TextBlock("```console\n" + strings.TrimRight(text, "\n") + "\n```"))}
+		return []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock("```console\n" + strings.TrimRight(text, "\n") + "\n```"))}
 	case "Edit", "Write", "MultiEdit":
 		return nil
 	default:
 		if text == "" {
 			return nil
 		}
-		return []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(text))}
+		return []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(text))}
 	}
 }
 
-func resultBlocks(parts []cliMsgBlock, name string, isError, subagent bool) []acp.ToolCallContent {
-	blocks := make([]acp.ToolCallContent, 0, len(parts))
+func resultBlocks(parts []cliMsgBlock, name string, isError, subagent bool) []acpsdk.ToolCallContent {
+	blocks := make([]acpsdk.ToolCallContent, 0, len(parts))
 	firstText := true
 	for _, part := range parts {
 		switch part.Type {
@@ -328,24 +328,24 @@ func resultBlocks(parts []cliMsgBlock, name string, isError, subagent bool) []ac
 				text = replacePartialOutputNote(text)
 			}
 			firstText = false
-			blocks = append(blocks, acp.ToolContent(acp.TextBlock(formatResultText(name, text, isError))))
+			blocks = append(blocks, acpsdk.ToolContent(acpsdk.TextBlock(formatResultText(name, text, isError))))
 		case "image":
 			if part.Source == nil {
-				blocks = append(blocks, acp.ToolContent(acp.TextBlock(formatRichResultText("[image: file reference]", isError))))
+				blocks = append(blocks, acpsdk.ToolContent(acpsdk.TextBlock(formatRichResultText("[image: file reference]", isError))))
 				continue
 			}
 			switch {
 			case part.Source.Type == "base64" && part.Source.Data != "":
-				blocks = append(blocks, acp.ToolContent(acp.ImageBlock(part.Source.Data, part.Source.MediaType)))
+				blocks = append(blocks, acpsdk.ToolContent(acpsdk.ImageBlock(part.Source.Data, part.Source.MediaType)))
 			case part.Source.Type == "base64":
 				continue
 			case part.Source.Type == "url" && strings.TrimSpace(part.Source.URL) != "":
-				blocks = append(blocks, acp.ToolContent(acp.TextBlock(formatRichResultText("[image: "+part.Source.URL+"]", isError))))
+				blocks = append(blocks, acpsdk.ToolContent(acpsdk.TextBlock(formatRichResultText("[image: "+part.Source.URL+"]", isError))))
 			default:
-				blocks = append(blocks, acp.ToolContent(acp.TextBlock(formatRichResultText("[image: file reference]", isError))))
+				blocks = append(blocks, acpsdk.ToolContent(acpsdk.TextBlock(formatRichResultText("[image: file reference]", isError))))
 			}
 		case "document":
-			blocks = append(blocks, acp.ToolContent(acp.TextBlock(formatRichResultText(documentPlaceholder(part), isError))))
+			blocks = append(blocks, acpsdk.ToolContent(acpsdk.TextBlock(formatRichResultText(documentPlaceholder(part), isError))))
 		}
 	}
 	return blocks

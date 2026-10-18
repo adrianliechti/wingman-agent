@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 const (
@@ -76,11 +76,11 @@ type editorTransformInputError struct {
 
 func (e editorTransformInputError) Error() string { return e.message }
 
-func newEditorTransformService(cfg *agent.Config) *editorTransformService {
+func newEditorTransformService(cfg *harness.Config) *editorTransformService {
 	service := &editorTransformService{}
 	service.complete = func(ctx context.Context, prompt string) (editorTransformCompletion, error) {
 		modelID, effort := resolveGenerationTarget(cfg, "utility", "")
-		result, err := cfg.Generate(ctx, agent.GenerateOptions{
+		result, err := cfg.Generate(ctx, harness.GenerateOptions{
 			Model:           modelID,
 			Effort:          effort,
 			Instructions:    editorTransformInstructions,

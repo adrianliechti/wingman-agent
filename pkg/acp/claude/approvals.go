@@ -9,18 +9,18 @@ import (
 	"strings"
 	"sync"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
-	"github.com/coder/acp-go-sdk"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
+	acpsdk "github.com/coder/acp-go-sdk"
 )
 
 const (
-	optionAllowOnce   acp.PermissionOptionId = "allow-once"
-	optionAllowAlways acp.PermissionOptionId = "allow-always"
-	optionRejectOnce  acp.PermissionOptionId = "reject-once"
+	optionAllowOnce   acpsdk.PermissionOptionId = "allow-once"
+	optionAllowAlways acpsdk.PermissionOptionId = "allow-always"
+	optionRejectOnce  acpsdk.PermissionOptionId = "reject-once"
 
-	optionExitPlanAuto   acp.PermissionOptionId = "exit-plan-auto"
-	optionExitPlanBypass acp.PermissionOptionId = "exit-plan-bypass"
-	optionExitPlanReject acp.PermissionOptionId = "exit-plan-reject"
+	optionExitPlanAuto   acpsdk.PermissionOptionId = "exit-plan-auto"
+	optionExitPlanBypass acpsdk.PermissionOptionId = "exit-plan-bypass"
+	optionExitPlanReject acpsdk.PermissionOptionId = "exit-plan-reject"
 )
 
 // toolCallTracker decides, for a given tool_use id, whether the next sighting
@@ -115,37 +115,37 @@ func (t *toolCallTracker) complete(id string) bool {
 	return true
 }
 
-func permissionOptions(req controlRequestBody) []acp.PermissionOption {
-	allowOnce := acp.PermissionOption{OptionId: optionAllowOnce, Name: "Allow Once", Kind: acp.PermissionOptionKindAllowOnce}
-	reject := acp.PermissionOption{OptionId: optionRejectOnce, Name: "Deny", Kind: acp.PermissionOptionKindRejectOnce}
-	options := []acp.PermissionOption{allowOnce}
+func permissionOptions(req controlRequestBody) []acpsdk.PermissionOption {
+	allowOnce := acpsdk.PermissionOption{OptionId: optionAllowOnce, Name: "Allow Once", Kind: acpsdk.PermissionOptionKindAllowOnce}
+	reject := acpsdk.PermissionOption{OptionId: optionRejectOnce, Name: "Deny", Kind: acpsdk.PermissionOptionKindRejectOnce}
+	options := []acpsdk.PermissionOption{allowOnce}
 	// A rule the user's own ask forced, or one broader than this ask, must not be persisted.
 	if !req.SuppressAlwaysAllowRule && !hasJSONValue(req.MatchedAskRule) {
-		options = append(options, acp.PermissionOption{
-			OptionId: optionAllowAlways, Name: "Always Allow", Kind: acp.PermissionOptionKindAllowAlways,
+		options = append(options, acpsdk.PermissionOption{
+			OptionId: optionAllowAlways, Name: "Always Allow", Kind: acpsdk.PermissionOptionKindAllowAlways,
 			Meta: map[string]any{"permission": permissionMetadataForAlwaysAllow(req)},
 		})
 	}
 	// ACP has no pre-selected option, so order is the only way to honor default_to_no.
 	if req.DefaultToNo {
-		return append([]acp.PermissionOption{reject}, options...)
+		return append([]acpsdk.PermissionOption{reject}, options...)
 	}
 	return append(options, reject)
 }
 
 // Bypass leads only when the session was in bypass before it entered plan mode.
-func exitPlanOptions(allowBypass bool, prePlanMode string) []acp.PermissionOption {
-	auto := acp.PermissionOption{OptionId: optionExitPlanAuto, Name: "Yes, and use auto mode", Kind: acp.PermissionOptionKindAllowAlways}
-	bypass := acp.PermissionOption{OptionId: optionExitPlanBypass, Name: "Yes, and bypass permissions", Kind: acp.PermissionOptionKindAllowAlways}
-	options := []acp.PermissionOption{auto}
+func exitPlanOptions(allowBypass bool, prePlanMode string) []acpsdk.PermissionOption {
+	auto := acpsdk.PermissionOption{OptionId: optionExitPlanAuto, Name: "Yes, and use auto mode", Kind: acpsdk.PermissionOptionKindAllowAlways}
+	bypass := acpsdk.PermissionOption{OptionId: optionExitPlanBypass, Name: "Yes, and bypass permissions", Kind: acpsdk.PermissionOptionKindAllowAlways}
+	options := []acpsdk.PermissionOption{auto}
 	if allowBypass {
 		if prePlanMode == bypassModeID {
-			options = []acp.PermissionOption{bypass, auto}
+			options = []acpsdk.PermissionOption{bypass, auto}
 		} else {
 			options = append(options, bypass)
 		}
 	}
-	return append(options, acp.PermissionOption{OptionId: optionExitPlanReject, Name: "No, keep planning", Kind: acp.PermissionOptionKindRejectOnce})
+	return append(options, acpsdk.PermissionOption{OptionId: optionExitPlanReject, Name: "No, keep planning", Kind: acpsdk.PermissionOptionKindRejectOnce})
 }
 
 func hasJSONValue(raw json.RawMessage) bool {
@@ -155,8 +155,8 @@ func hasJSONValue(raw json.RawMessage) bool {
 
 type approver struct {
 	ctx            context.Context
-	conn           *acp.AgentSideConnection
-	sid            acp.SessionId
+	conn           *acpsdk.AgentSideConnection
+	sid            acpsdk.SessionId
 	out            *streamWriter
 	cwd            string
 	emitted        *toolCallTracker
@@ -167,9 +167,9 @@ type approver struct {
 	prePlanMode    func() string
 }
 
-func pendingToolCall(id string, kind acp.ToolKind) acp.ToolCallUpdate {
-	status := acp.ToolCallStatusPending
-	return acp.ToolCallUpdate{ToolCallId: acp.ToolCallId(id), Kind: &kind, Status: &status}
+func pendingToolCall(id string, kind acpsdk.ToolKind) acpsdk.ToolCallUpdate {
+	status := acpsdk.ToolCallStatusPending
+	return acpsdk.ToolCallUpdate{ToolCallId: acpsdk.ToolCallId(id), Kind: &kind, Status: &status}
 }
 
 func (a *approver) handle(req controlRequest) {
@@ -225,10 +225,10 @@ func (a *approver) handle(req controlRequest) {
 	tc.RawInput = info.rawInput
 	tc.Locations = info.locations
 	if req.Request.Description != "" {
-		tc.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(req.Request.Description))}
+		tc.Content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(req.Request.Description))}
 	}
 
-	var options []acp.PermissionOption
+	var options []acpsdk.PermissionOption
 	if name == "ExitPlanMode" {
 		prePlan := ""
 		if a.prePlanMode != nil {
@@ -238,14 +238,14 @@ func (a *approver) handle(req controlRequest) {
 	} else {
 		options = permissionOptions(req.Request)
 	}
-	resp, err := acpcommon.Call(a.ctx, func() (acp.RequestPermissionResponse, error) {
-		return a.conn.RequestPermission(a.ctx, acp.RequestPermissionRequest{
+	resp, err := acp.Call(a.ctx, func() (acpsdk.RequestPermissionResponse, error) {
+		return a.conn.RequestPermission(a.ctx, acpsdk.RequestPermissionRequest{
 			SessionId: a.sid,
 			ToolCall:  tc,
 			Options:   options,
 		})
 	})
-	var selected acp.PermissionOptionId
+	var selected acpsdk.PermissionOptionId
 	if err == nil && resp.Outcome.Cancelled == nil && resp.Outcome.Selected != nil {
 		selected = resp.Outcome.Selected.OptionId
 	}
@@ -463,8 +463,8 @@ func parseAskQuestions(raw json.RawMessage) []askQuestion {
 	return out
 }
 
-func askOptionID(i int) acp.PermissionOptionId {
-	return acp.PermissionOptionId("ask-" + strconv.Itoa(i))
+func askOptionID(i int) acpsdk.PermissionOptionId {
+	return acpsdk.PermissionOptionId("ask-" + strconv.Itoa(i))
 }
 
 func askFieldKey(i int) string {
@@ -482,7 +482,7 @@ func askMessage(questions []askQuestion) string {
 	return "Please answer the following questions."
 }
 
-func askElicitationSchema(questions []askQuestion) acp.UnstableElicitationSchema {
+func askElicitationSchema(questions []askQuestion) acpsdk.UnstableElicitationSchema {
 	single := len(questions) == 1
 	props := map[string]any{}
 	for i, q := range questions {
@@ -524,7 +524,7 @@ func askElicitationSchema(questions []askQuestion) acp.UnstableElicitationSchema
 			},
 		}
 	}
-	return acp.UnstableElicitationSchema{Type: acp.UnstableElicitationSchemaTypeObject, Properties: props}
+	return acpsdk.UnstableElicitationSchema{Type: acpsdk.UnstableElicitationSchemaTypeObject, Properties: props}
 }
 
 // A single-select's custom text rides along as notes when an option was also picked.
@@ -603,7 +603,7 @@ func (a *approver) handleAskUserQuestion(req controlRequest, parentToolUseID str
 	answers := map[string]any{}
 	presented := false
 	for _, q := range questions {
-		tc := pendingToolCall(req.Request.ToolUseID, acp.ToolKindOther)
+		tc := pendingToolCall(req.Request.ToolUseID, acpsdk.ToolKindOther)
 		title := q.Question
 		tc.Title = &title
 		claudeMeta := map[string]any{"toolName": req.Request.ToolName}
@@ -612,14 +612,14 @@ func (a *approver) handleAskUserQuestion(req controlRequest, parentToolUseID str
 		}
 		tc.Meta = map[string]any{"claudeCode": claudeMeta}
 
-		opts := make([]acp.PermissionOption, 0, len(q.Options)+1)
+		opts := make([]acpsdk.PermissionOption, 0, len(q.Options)+1)
 		for i, o := range q.Options {
-			opts = append(opts, acp.PermissionOption{OptionId: askOptionID(i), Name: o.Label, Kind: acp.PermissionOptionKindAllowOnce})
+			opts = append(opts, acpsdk.PermissionOption{OptionId: askOptionID(i), Name: o.Label, Kind: acpsdk.PermissionOptionKindAllowOnce})
 		}
-		opts = append(opts, acp.PermissionOption{OptionId: "ask-skip", Name: "Skip", Kind: acp.PermissionOptionKindRejectOnce})
+		opts = append(opts, acpsdk.PermissionOption{OptionId: "ask-skip", Name: "Skip", Kind: acpsdk.PermissionOptionKindRejectOnce})
 
-		resp, err := acpcommon.Call(a.ctx, func() (acp.RequestPermissionResponse, error) {
-			return a.conn.RequestPermission(a.ctx, acp.RequestPermissionRequest{
+		resp, err := acp.Call(a.ctx, func() (acpsdk.RequestPermissionResponse, error) {
+			return a.conn.RequestPermission(a.ctx, acpsdk.RequestPermissionRequest{
 				SessionId: a.sid,
 				ToolCall:  tc,
 				Options:   opts,
@@ -649,9 +649,9 @@ func (a *approver) handleAskUserQuestion(req controlRequest, parentToolUseID str
 // return means the client failed the elicitation call despite advertising it,
 // and the caller should fall back to the permission flow.
 func (a *approver) askViaElicitation(req controlRequest, questions []askQuestion) bool {
-	resp, err := acpcommon.Call(a.ctx, func() (acp.UnstableCreateElicitationResponse, error) {
-		return a.conn.UnstableCreateElicitation(a.ctx, acp.UnstableCreateElicitationRequest{
-			Form: &acp.UnstableCreateElicitationForm{
+	resp, err := acp.Call(a.ctx, func() (acpsdk.UnstableCreateElicitationResponse, error) {
+		return a.conn.UnstableCreateElicitation(a.ctx, acpsdk.UnstableCreateElicitationRequest{
+			Form: &acpsdk.UnstableCreateElicitationForm{
 				Message:         askMessage(questions),
 				Mode:            "form",
 				RequestedSchema: askElicitationSchema(questions),
@@ -695,9 +695,9 @@ func (a *approver) respondAskAnswers(req controlRequest, answers, annotations ma
 }
 
 func (a *approver) emitToolCallStart(id, name string, rawInput json.RawMessage, parentToolUseID string) error {
-	u := toolCallStartUpdate(id, name, rawInput, a.cwd, acp.ToolCallStatusPending)
+	u := toolCallStartUpdate(id, name, rawInput, a.cwd, acpsdk.ToolCallStatusPending)
 	withClaudeToolMeta(&u, name, parentToolUseID)
-	return a.conn.SessionUpdate(a.ctx, acp.SessionNotification{
+	return a.conn.SessionUpdate(a.ctx, acpsdk.SessionNotification{
 		SessionId: a.sid,
 		Update:    u,
 	})

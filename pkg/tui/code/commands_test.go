@@ -5,10 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
@@ -55,6 +59,42 @@ func TestEditorReplaceRange(t *testing.T) {
 	}
 	if e.cursor != 13 {
 		t.Fatalf("cursor = %d, want 13", e.cursor)
+	}
+}
+
+type compactUITestAgent struct {
+	*uiTestAgent
+	focus string
+}
+
+func (a *compactUITestAgent) Compact(_ context.Context, _ string, focus string) (harness.CompactResult, error) {
+	a.focus = focus
+	return harness.CompactResult{TokensBefore: 120_000, TokensAfter: 18_000}, nil
+}
+
+func TestCompactCommandRunsThroughTurnManagerWithFocus(t *testing.T) {
+	a, _ := newDiffPanelTestApp(t, 80, 20)
+	if a.findBuiltin("/compact") != nil {
+		t.Fatal("/compact offered for an agent that cannot compact")
+	}
+	compactor := &compactUITestAgent{uiTestAgent: a.agent.(*uiTestAgent)}
+	a.agent = compactor
+	a.queue = make(chan func(), 8)
+	a.turns = code.NewTurnManager(context.Background(), compactor, nil)
+	defer a.turns.Close()
+
+	a.editor.SetText("/compact keep the API design")
+	a.submitInput()
+	if !a.operationPending || !strings.Contains(a.operationStatus, "Compacting") {
+		t.Fatalf("pending=%t status=%q", a.operationPending, a.operationStatus)
+	}
+	waitForSessionOperation(t, a)
+
+	if compactor.focus != "keep the API design" {
+		t.Fatalf("focus = %q", compactor.focus)
+	}
+	if chat := ansi.Strip(strings.Join(a.chat, "\n")); !strings.Contains(chat, "Context compacted · ~120.0K → ~18.0K tokens") {
+		t.Fatalf("chat missing result:\n%s", chat)
 	}
 }
 

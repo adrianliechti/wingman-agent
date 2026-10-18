@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
@@ -63,8 +63,8 @@ func (a *turnManagerTestAgent) ListSessions(context.Context) ([]SessionInfo, err
 func (a *turnManagerTestAgent) NewSession(context.Context) (string, error)          { return "s", nil }
 func (a *turnManagerTestAgent) LoadSession(context.Context, string) error           { return nil }
 func (a *turnManagerTestAgent) DeleteSession(context.Context, string) error         { return nil }
-func (a *turnManagerTestAgent) Messages(string) []agent.Message                     { return nil }
-func (a *turnManagerTestAgent) Usage(string) agent.Usage                            { return agent.Usage{} }
+func (a *turnManagerTestAgent) Messages(string) []harness.Message                   { return nil }
+func (a *turnManagerTestAgent) Usage(string) harness.Usage                          { return harness.Usage{} }
 func (a *turnManagerTestAgent) Close() error                                        { return nil }
 
 func (a *turnManagerTestAgent) LoadTurnQueue(sessionID string) (TurnQueueState, error) {
@@ -90,33 +90,33 @@ func cloneTurnInputs(inputs []TurnInput) []TurnInput {
 	out := make([]TurnInput, len(inputs))
 	for i := range inputs {
 		out[i] = inputs[i]
-		out[i].Content = agent.CloneContent(inputs[i].Content)
+		out[i].Content = harness.CloneContent(inputs[i].Content)
 	}
 	return out
 }
 
-func (a *turnManagerTestAgent) Send(ctx context.Context, _ string, input []agent.Content) (iter.Seq2[agent.Message, error], error) {
+func (a *turnManagerTestAgent) Send(ctx context.Context, _ string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	text := input[0].Text
 	if text == "panic" {
 		panic("test panic")
 	}
-	return func(yield func(agent.Message, error) bool) {
+	return func(yield func(harness.Message, error) bool) {
 		a.starts <- text
 		a.sessionIDs <- SessionIDFromContext(ctx)
 		if text == "reset" {
-			agent.EmitStreamEvent(ctx, agent.StreamEventReset)
+			harness.EmitStreamEvent(ctx, harness.StreamEventReset)
 		}
 		select {
 		case <-ctx.Done():
-			yield(agent.Message{}, ctx.Err())
+			yield(harness.Message{}, ctx.Err())
 			return
 		case <-a.releases:
 		}
 		if text == "incomplete" {
-			yield(agent.Message{}, agent.ErrTurnIncomplete)
+			yield(harness.Message{}, harness.ErrTurnIncomplete)
 			return
 		}
-		yield(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "done " + text}}}, nil)
+		yield(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "done " + text}}}, nil)
 	}, nil
 }
 
@@ -138,8 +138,8 @@ func TestTurnManagerInstallsSessionIDOnRunContext(t *testing.T) {
 func TestTurnManagerRestoresQueuedInputsPaused(t *testing.T) {
 	a := newTurnManagerTestAgent()
 	if err := a.SaveTurnQueue("s", TurnQueueState{Inputs: []TurnInput{
-		{ID: "one", Intent: TurnInputFollowUp, Content: []agent.Content{{Text: "first restored"}}},
-		{ID: "two", Intent: TurnInputFollowUp, Content: []agent.Content{{Text: "second restored"}}},
+		{ID: "one", Intent: TurnInputFollowUp, Content: []harness.Content{{Text: "first restored"}}},
+		{ID: "two", Intent: TurnInputFollowUp, Content: []harness.Content{{Text: "second restored"}}},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestTurnManagerForwardsStreamLifecycleEvents(t *testing.T) {
 	for {
 		select {
 		case ev := <-events:
-			if ev.StreamEvent == agent.StreamEventReset {
+			if ev.StreamEvent == harness.StreamEventReset {
 				if ev.SessionID != "s" || ev.InputID != "1" || ev.Message != nil {
 					t.Fatalf("stream event metadata = %+v", ev)
 				}
@@ -224,7 +224,7 @@ func (a *turnManagerTestAgent) Steer(_ context.Context, _ string, input TurnInpu
 }
 
 func turnInput(id, text string, intent TurnInputIntent) TurnInput {
-	return TurnInput{ID: id, Intent: intent, Content: []agent.Content{{Text: text}}}
+	return TurnInput{ID: id, Intent: intent, Content: []harness.Content{{Text: text}}}
 }
 
 func waitValue[T any](t *testing.T, ch <-chan T) T {
@@ -251,6 +251,97 @@ func waitForState(t *testing.T, events <-chan TurnEvent, id string, state TurnIn
 		case <-deadline:
 			t.Fatalf("timed out waiting for %s=%s", id, state)
 		}
+	}
+}
+
+type compactingTestAgent struct {
+	*turnManagerTestAgent
+	compacts chan string
+	release  chan error
+}
+
+func newCompactingTestAgent() *compactingTestAgent {
+	return &compactingTestAgent{turnManagerTestAgent: newTurnManagerTestAgent(), compacts: make(chan string, 1), release: make(chan error, 1)}
+}
+
+func (a *compactingTestAgent) Compact(ctx context.Context, _ string, focus string) (harness.CompactResult, error) {
+	a.compacts <- focus
+	select {
+	case <-ctx.Done():
+		return harness.CompactResult{}, ctx.Err()
+	case err := <-a.release:
+		return harness.CompactResult{TokensBefore: 100, TokensAfter: 10}, err
+	}
+}
+
+func TestTurnManagerCompactionQueuesInputsBehindIt(t *testing.T) {
+	a := newCompactingTestAgent()
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+
+	results := make(chan harness.CompactResult, 1)
+	if err := m.StartCompact("s", "api design", func(result harness.CompactResult, err error) {
+		if err != nil {
+			t.Error(err)
+		}
+		results <- result
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if focus := waitValue(t, a.compacts); focus != "api design" {
+		t.Fatalf("focus = %q", focus)
+	}
+	if !m.Snapshot("s").Compacting {
+		t.Fatal("snapshot does not report the running compaction")
+	}
+	if err := m.StartCompact("s", "", func(harness.CompactResult, error) {}); !errors.Is(err, ErrTurnInProgress) {
+		t.Fatalf("second compaction err = %v", err)
+	}
+	snap, err := m.Submit(context.Background(), "s", turnInput("1", "after", TurnInputFollowUp))
+	if err != nil || snap.State != TurnInputQueued {
+		t.Fatalf("input during compaction = %+v, %v", snap, err)
+	}
+
+	a.release <- nil
+	if got := waitValue(t, results); got.TokensAfter != 10 {
+		t.Fatalf("result = %+v", got)
+	}
+	if text := waitValue(t, a.starts); text != "after" {
+		t.Fatalf("queued input started as %q", text)
+	}
+	a.releases <- struct{}{}
+}
+
+func TestTurnManagerCancelStopsCompactionAndPausesQueue(t *testing.T) {
+	a := newCompactingTestAgent()
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+
+	errs := make(chan error, 1)
+	if err := m.StartCompact("s", "", func(_ harness.CompactResult, err error) { errs <- err }); err != nil {
+		t.Fatal(err)
+	}
+	waitValue(t, a.compacts)
+	if _, err := m.Submit(context.Background(), "s", turnInput("1", "after", TurnInputFollowUp)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CancelCurrent("s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitValue(t, errs); !errors.Is(err, context.Canceled) {
+		t.Fatalf("compaction err = %v", err)
+	}
+	snap := m.Snapshot("s")
+	if snap.Compacting || !snap.Paused || len(snap.Inputs) != 1 || snap.Inputs[0].State != TurnInputQueued {
+		t.Fatalf("snapshot after cancel = %+v", snap)
+	}
+}
+
+func TestTurnManagerCompactionRequiresCapability(t *testing.T) {
+	m := NewTurnManager(context.Background(), newTurnManagerTestAgent(), nil)
+	defer m.Close()
+	if err := m.StartCompact("s", "", func(harness.CompactResult, error) {}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("err = %v", err)
 	}
 }
 

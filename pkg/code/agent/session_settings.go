@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
@@ -44,11 +44,23 @@ func (a *Agent) saveSessionSettingsLocked(s *sessionState) error {
 	if s == nil || a.sessionsDir == "" {
 		return nil
 	}
-	dir, err := session.ArtifactDir(a.sessionsDir, s.id)
+	return a.writeSessionSettings(s.id, sessionSettings{Model: s.modelID, Effort: s.effort})
+}
+
+func (a *Agent) copySessionSettings(fromID, toID string) error {
+	settings, err := a.loadSessionSettings(fromID)
+	if err != nil || settings == (sessionSettings{}) {
+		return err
+	}
+	return a.writeSessionSettings(toID, settings)
+}
+
+func (a *Agent) writeSessionSettings(id string, settings sessionSettings) error {
+	dir, err := session.ArtifactDir(a.sessionsDir, id)
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(sessionSettings{Model: s.modelID, Effort: s.effort})
+	data, err := json.Marshal(settings)
 	if err != nil {
 		return err
 	}

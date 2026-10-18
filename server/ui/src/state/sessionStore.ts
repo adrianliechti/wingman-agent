@@ -24,6 +24,8 @@ export type SessionSettings = {
 	mode: string;
 	unattended?: boolean;
 	canDelete: boolean;
+	canFork?: boolean;
+	canCompact?: boolean;
 };
 export type SettingsPatch = Partial<
 	Pick<SessionSettings, "model" | "effort" | "mode" | "unattended">
@@ -33,6 +35,7 @@ export type SessionFields = {
 	phase: Phase;
 	retry?: { attempt: number; reason: string; delayMillis: number };
 	error: string | null;
+	compaction?: { tokensBefore: number; tokensAfter: number };
 	usage: {
 		inputTokens: number;
 		cachedTokens: number;
@@ -129,6 +132,7 @@ function normalize(fields: SessionFields): SessionFields {
 		phase: fields.phase,
 		retry: fields.retry,
 		error: fields.error,
+		compaction: fields.compaction,
 		usage: fields.usage,
 		prompts: fields.prompts,
 		queuePaused: fields.queuePaused,

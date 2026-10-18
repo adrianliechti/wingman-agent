@@ -96,7 +96,7 @@ func TestImageHistoryE2EThroughACP(t *testing.T) {
 			}
 			for load := range 2 {
 				id := fmt.Sprintf(`"load-%d"`, load)
-				peer.send(t, id, "session/load", `{"sessionId":"images","cwd":"/contract","mcpServers":[]}`)
+				peer.send(t, id, "session/load", `{"sessionId":"images","cwd":`+contractCwdJSON+`,"mcpServers":[]}`)
 				var blocks []acp.ContentBlock
 				var metadata []map[string]any
 				for {

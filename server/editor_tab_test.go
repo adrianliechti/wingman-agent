@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/settings"
 )
 
@@ -530,7 +530,7 @@ func TestUTF16PositionConversions(t *testing.T) {
 
 func TestEditorTabModelOverride(t *testing.T) {
 	t.Setenv("WINGMAN_MODEL_TAB", "")
-	cfg, err := agent.DefaultConfig()
+	cfg, err := harness.ConfigFromEnvironment()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,13 +547,13 @@ func TestEditorTabModelOverride(t *testing.T) {
 }
 
 func TestEditorTabGenerationTargetUsesCompatibleLowestEffort(t *testing.T) {
-	cfg := &agent.Config{
+	cfg := &harness.Config{
 		Model: func() string { return "main-model" },
-		RoleModel: func(role string) (agent.ModelOption, bool) {
+		RoleModel: func(role string) (harness.ModelOption, bool) {
 			if role != "utility" {
-				return agent.ModelOption{}, false
+				return harness.ModelOption{}, false
 			}
-			return agent.ModelOption{
+			return harness.ModelOption{
 				ID:      "custom-reasoner",
 				Efforts: []string{"low", "high", "max"},
 			}, true
@@ -567,7 +567,7 @@ func TestEditorTabGenerationTargetUsesCompatibleLowestEffort(t *testing.T) {
 	if modelID != "gpt-5.6-luna" || effort != "none" {
 		t.Fatalf("override target = %q/%q", modelID, effort)
 	}
-	modelID, effort = resolveGenerationTarget(&agent.Config{
+	modelID, effort = resolveGenerationTarget(&harness.Config{
 		Model: func() string { return "custom-model" },
 	}, "utility", "")
 	if modelID != "custom-model" || effort != "" {

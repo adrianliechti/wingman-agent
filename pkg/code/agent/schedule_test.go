@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 )
 
 func newScheduleSession(t *testing.T) *sessionState {
@@ -335,4 +335,3 @@ func TestFireScheduleSkipsTaskPausedDuringGate(t *testing.T) {
 		t.Fatalf("paused task should not fire: %+v", ev)
 	}
 }
-

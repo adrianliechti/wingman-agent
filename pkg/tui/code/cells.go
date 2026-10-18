@@ -5,8 +5,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/markdown"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -292,6 +292,34 @@ func tailPreview(lines []string, n int) []string {
 	return append(out, lines[len(lines)-n:]...)
 }
 
+// trimBlankLines keeps padding from taking up space in activity previews.
+// Content indentation and blank lines inside the output stay intact.
+func trimBlankLines(lines []string) []string {
+	for len(lines) > 0 && strings.TrimSpace(markdown.Sanitize(lines[0])) == "" {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && strings.TrimSpace(markdown.Sanitize(lines[len(lines)-1])) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+// trimShellTail drops trailing blank lines and the "Command completed" footer
+// so a collapsed preview shows real output instead of padding.
+func trimShellTail(lines []string) []string {
+	trimBlank := func(lines []string) []string {
+		for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+			lines = lines[:len(lines)-1]
+		}
+		return lines
+	}
+	lines = trimBlank(lines)
+	if len(lines) > 0 && lines[len(lines)-1] == "Command completed" {
+		lines = trimBlank(lines[:len(lines)-1])
+	}
+	return lines
+}
+
 // headPreview keeps the first n lines — diffs read from the top.
 func headPreview(lines []string, n int) []string {
 	if len(lines) <= n+1 {
@@ -301,7 +329,7 @@ func headPreview(lines []string, n int) []string {
 	return append(out, fmt.Sprintf("… +%d more (ctrl+o transcript)", len(lines)-n))
 }
 
-func cellTool(result *agent.ToolResult, width int, full bool) []string {
+func cellTool(result *harness.ToolResult, width int, full bool) []string {
 	name := result.Name
 
 	hint := tool.ExtractHint(result.Args, result.Name)
@@ -310,6 +338,9 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 
 	colorize := func(s string) string { return dim(markdown.Sanitize(s)) }
 	preview := strings.Split(output, "\n")
+	if !full {
+		preview = trimBlankLines(preview)
+	}
 
 	info := ""
 	body := preview
@@ -317,7 +348,7 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 	switch {
 	case isShellTool(name):
 		if !full {
-			body = tailPreview(preview, 3)
+			body = tailPreview(trimShellTail(preview), 3)
 		}
 	case isMutationTool(name):
 		t := theme.Default
@@ -341,7 +372,7 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 			}
 			if len(preview) == 1 {
 				info = preview[0]
-			} else if output != "" {
+			} else if len(preview) > 0 {
 				info = fmt.Sprintf("%d lines", len(preview))
 			}
 		}
@@ -376,9 +407,11 @@ func cellUserShell(command, output string, exitCode int, width int, full bool) [
 	if output != "" {
 		body := strings.Split(output, "\n")
 		if !full {
-			body = tailPreview(body, userShellOutputMaxLines)
+			body = tailPreview(trimBlankLines(body), userShellOutputMaxLines)
 		}
-		lines = append(lines, continuationWrap(strings.Join(body, "\n"), width, colorize)...)
+		if len(body) > 0 {
+			lines = append(lines, continuationWrap(strings.Join(body, "\n"), width, colorize)...)
+		}
 	} else if !errored {
 		lines = append(lines, continuationWrap("(no output)", width, colorize)...)
 	}
@@ -389,9 +422,8 @@ func cellUserShell(command, output string, exitCode int, width int, full bool) [
 func cellToolProgress(name, hint, progress string, width int) []string {
 	lines := []string{toolTitleLine(name, hint, "", width, true, false)}
 
-	if progress != "" {
-		inner := max(width-len(cellIndent)-2, 10)
-		text := markdown.Sanitize(strings.ReplaceAll(progress, "\n", " "))
+	if text := strings.TrimSpace(markdown.Sanitize(strings.ReplaceAll(progress, "\n", " "))); text != "" {
+		inner := max(width-len(cellIndent)-2, 1)
 		lines = append(lines, cellIndent+"  "+dim(ansi.Truncate(text, inner, "…")))
 	}
 

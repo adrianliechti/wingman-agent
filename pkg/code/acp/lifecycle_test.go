@@ -8,9 +8,9 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	acpsdk "github.com/coder/acp-go-sdk"
 )
 
@@ -60,7 +60,7 @@ func TestCancelledTurnDrainsLateUpdatesBeforeNextPrompt(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		stream, err := a.Send(ctx, id, []agent.Content{{Text: "first"}})
+		stream, err := a.Send(ctx, id, []harness.Content{{Text: "first"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -76,14 +76,14 @@ func TestCancelledTurnDrainsLateUpdatesBeforeNextPrompt(t *testing.T) {
 		cancel()
 		<-peer.cancelled
 		synctest.Wait()
-		if _, err := a.Send(context.Background(), id, []agent.Content{{Text: "too soon"}}); !errors.Is(err, code.ErrTurnInProgress) {
+		if _, err := a.Send(context.Background(), id, []harness.Content{{Text: "too soon"}}); !errors.Is(err, code.ErrTurnInProgress) {
 			t.Fatalf("next prompt started before cancellation drained: %v", err)
 		}
 		close(finish)
 		if err := <-completed; !errors.Is(err, context.Canceled) {
 			t.Fatalf("cancel = %v", err)
 		}
-		next, err := a.Send(context.Background(), id, []agent.Content{{Text: "second"}})
+		next, err := a.Send(context.Background(), id, []harness.Content{{Text: "second"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -134,7 +134,7 @@ func TestUnreadTurnCannotBlockAnotherSession(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		flood, err := a.Send(context.Background(), id, []agent.Content{{Text: "flood"}})
+		flood, err := a.Send(context.Background(), id, []harness.Content{{Text: "flood"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -144,7 +144,7 @@ func TestUnreadTurnCannotBlockAnotherSession(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		stream, err := a.Send(context.Background(), other, []agent.Content{{Text: "other"}})
+		stream, err := a.Send(context.Background(), other, []harness.Content{{Text: "other"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -271,7 +271,7 @@ func TestSessionUpdateCallbackCanIssueACPRequest(t *testing.T) {
 		}
 		called := make(chan error, 1)
 		a.SetSessionUpdateHandler(func(string) { _, err := a.ListSessions(context.Background()); called <- err })
-		stream, err := a.Send(context.Background(), id, []agent.Content{{Text: "go"}})
+		stream, err := a.Send(context.Background(), id, []harness.Content{{Text: "go"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -302,7 +302,7 @@ func TestUnsettledCancellationRetiresConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		stream, err := a.Send(ctx, id, []agent.Content{{Text: "unresponsive"}})
+		stream, err := a.Send(ctx, id, []harness.Content{{Text: "unresponsive"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -386,7 +386,7 @@ func TestMalformedPromptStopReasonIsNotSuccess(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			stream, err := a.Send(context.Background(), id, []agent.Content{{Text: "go"}})
+			stream, err := a.Send(context.Background(), id, []harness.Content{{Text: "go"}})
 			if err != nil {
 				t.Fatal(err)
 			}

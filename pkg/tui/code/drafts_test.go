@@ -4,12 +4,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
@@ -17,7 +18,7 @@ func TestDraftStorePersistsAttachmentsAndDoesNotResurrectSentDraft(t *testing.T)
 	dir := t.TempDir()
 	workspace := &corecode.Workspace{MemoryPath: filepath.Join(dir, "memory")}
 	store := newDraftStore(workspace, "backend")
-	draft := composerState{Text: "unsent", Files: []string{"main.go"}, Content: []agent.Content{{Text: "attachment context"}}}
+	draft := composerState{Text: "unsent", Files: []string{"main.go"}, Content: []harness.Content{{Text: "attachment context"}}}
 	store.Set("session", draft)
 	if err := store.Flush(); err != nil {
 		t.Fatal(err)
@@ -48,7 +49,8 @@ func TestDraftStorePersistsAttachmentsAndDoesNotResurrectSentDraft(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0077 != 0 {
+	// Windows has no POSIX permission bits; os.Stat always reports 0666 there.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
 		t.Fatalf("draft permissions = %v", info.Mode())
 	}
 }

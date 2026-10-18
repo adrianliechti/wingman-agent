@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 )
 
 const (

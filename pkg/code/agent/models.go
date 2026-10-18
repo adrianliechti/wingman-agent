@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
@@ -144,7 +144,7 @@ func (a *Agent) SetModel(_ context.Context, sessionID, id string) error {
 	if model.CanonicalID(a.selectedModelLocked(s, available)) != canonical {
 		effort = ""
 	}
-	if !a.options.IsolateSessionSettings || sessionID == "" {
+	if !a.cfg.IsolateSessions || sessionID == "" {
 		if model.CanonicalID(a.selectedModelLocked(nil, available)) != canonical {
 			a.effort = ""
 		}
@@ -241,7 +241,7 @@ func (a *Agent) SetEffort(_ context.Context, sessionID, value string) error {
 		a.modelMu.Unlock()
 		return fmt.Errorf("effort %q is not supported by %s (supported: %s)", value, currentModel, strings.Join(supported, ", "))
 	}
-	if !a.options.IsolateSessionSettings || sessionID == "" {
+	if !a.cfg.IsolateSessions || sessionID == "" {
 		a.effort = value
 	}
 	if s != nil {

@@ -30,7 +30,7 @@ func TestSessionInUseReportsActionableErrorAndCanRetry(t *testing.T) {
 				}
 			})
 			peer := newProtocolPeer(t, agent)
-			params := `{"sessionId":"locked-session","cwd":"/contract","mcpServers":[]}`
+			params := `{"sessionId":"locked-session","cwd":` + contractCwdJSON + `,"mcpServers":[]}`
 			peer.send(t, `"held"`, method, params)
 			frame := peer.response(t, `"held"`)
 			if frame.Error == nil || frame.Error.Code != -32600 || !strings.Contains(frame.Error.Message, "another Codex client") {
@@ -94,7 +94,7 @@ func TestUnrelatedThreadLockErrorsKeepTheirDiagnostics(t *testing.T) {
 		}
 	})
 	peer := newProtocolPeer(t, agent)
-	peer.send(t, `"load"`, "session/load", `{"sessionId":"s","cwd":"/contract","mcpServers":[]}`)
+	peer.send(t, `"load"`, "session/load", `{"sessionId":"s","cwd":`+contractCwdJSON+`,"mcpServers":[]}`)
 	frame := peer.response(t, `"load"`)
 	if frame.Error == nil || frame.Error.Code != -32603 || !strings.Contains(string(frame.Error.Data), "failed to acquire thread writer lock") {
 		t.Fatalf("unrelated lock error = %+v", frame.Error)

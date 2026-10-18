@@ -12,10 +12,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/code/agents"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -121,7 +120,7 @@ func runExec(ctx context.Context, args []string) error {
 	return runScript(ctx, opts)
 }
 
-func runScript(ctx context.Context, opts scriptOptions) error {
+func runScript(ctx context.Context, opts scriptOptions) (err error) {
 	readStdin := false
 	if info, statErr := os.Stdin.Stat(); statErr == nil {
 		readStdin = info.Mode()&os.ModeCharDevice == 0
@@ -144,21 +143,15 @@ func runScript(ctx context.Context, opts scriptOptions) error {
 		return err
 	}
 	opts.WorkDir = wd
-	ws, err := code.NewWorkspace(wd)
+	host, err := newAgentHost(ctx, wd, opts.Agent)
 	if err != nil {
 		return err
 	}
-	defer ws.Close()
-	stopToolUpdate := startManagedToolUpdate(ctx, ws)
+	defer func() { err = errors.Join(err, host.Close()) }()
+	stopToolUpdate := startManagedToolUpdate(ctx, host.workspace)
 	defer stopToolUpdate()
 
-	a, err := agents.New(ctx, ws, opts.Agent, nil)
-	if err != nil {
-		return err
-	}
-	defer a.Close()
-
-	return executeScript(ctx, a, opts, prompt, os.Stdout, os.Stderr)
+	return executeScript(ctx, host.agent, opts, prompt, os.Stdout, os.Stderr)
 }
 
 func scriptPrompt(prompt string, stdin io.Reader, readStdin, allowEmpty bool) (string, error) {
@@ -260,24 +253,24 @@ func executeScript(ctx context.Context, a code.Agent, opts scriptOptions, prompt
 		return err
 	}
 
-	input := []agent.Content{{Text: prompt}}
+	input := []harness.Content{{Text: prompt}}
 	if ws := a.Workspace(); ws != nil {
 		for _, invocation := range skill.Invocations(opts.Prompt, ws.Skills()) {
 			block, err := invocation.Instructions(ws.RootPath)
 			if err != nil {
 				return fmt.Errorf("load skill %q: %w", invocation.Skill.Name, err)
 			}
-			input = append(input, agent.Content{Text: block, Hidden: true})
+			input = append(input, harness.Content{Text: block, Hidden: true})
 		}
 	}
 
 	reporter := newScriptReporter(opts.Debug, errOut)
-	send := func(turnInput []agent.Content, schema map[string]any) error {
+	send := func(turnInput []harness.Content, schema map[string]any) error {
 		streamCtx := code.WithSessionID(ctx, sessionID)
 		if schema != nil {
-			streamCtx = agent.WithOutputSchema(streamCtx, schema)
+			streamCtx = harness.WithOutputSchema(streamCtx, schema)
 		}
-		streamCtx = agent.WithStreamEventHandlers(streamCtx, agent.StreamEventHandlers{
+		streamCtx = harness.WithStreamEventHandlers(streamCtx, harness.StreamEventHandlers{
 			Reset:  reporter.reset,
 			Commit: reporter.commit,
 		})
@@ -303,13 +296,13 @@ func executeScript(ctx context.Context, a code.Agent, opts scriptOptions, prompt
 		return reporter.fail(err)
 	}
 	if opts.JSON || outputSchema != nil {
-		finalize := []agent.Content{
+		finalize := []harness.Content{
 			{Text: "Using the completed work from the previous turn, return the final result now."},
 		}
 		if outputSchema != nil {
-			finalize = append(finalize, agent.Content{Text: outputSchema.instructions(), Hidden: true})
+			finalize = append(finalize, harness.Content{Text: outputSchema.instructions(), Hidden: true})
 		} else {
-			finalize = append(finalize, agent.Content{Text: jsonOutputInstructions(), Hidden: true})
+			finalize = append(finalize, harness.Content{Text: jsonOutputInstructions(), Hidden: true})
 		}
 		schema := map[string]any{}
 		if outputSchema != nil {
@@ -470,7 +463,7 @@ func newScriptReporter(debug bool, errOut io.Writer) *scriptReporter {
 	}
 }
 
-func (r *scriptReporter) add(message agent.Message) {
+func (r *scriptReporter) add(message harness.Message) {
 	r.collector.Add(message)
 	for _, content := range message.Content {
 		if content.Hidden {
@@ -551,7 +544,7 @@ func (r *scriptReporter) writeToolArgs(args string) {
 	r.writeIndented(args)
 }
 
-func (r *scriptReporter) writeToolResult(result *agent.ToolResult) {
+func (r *scriptReporter) writeToolResult(result *harness.ToolResult) {
 	_, err := fmt.Fprintf(r.errOut, "✓ %s\n", scriptToolLabel(result.Name, result.Args))
 	r.setErr(err)
 	r.writeIndented(result.Content)
@@ -603,8 +596,8 @@ type scriptTextCollector struct {
 	current  strings.Builder
 }
 
-func (c *scriptTextCollector) Add(message agent.Message) {
-	if message.Role != agent.RoleAssistant {
+func (c *scriptTextCollector) Add(message harness.Message) {
+	if message.Role != harness.RoleAssistant {
 		return
 	}
 	for _, content := range message.Content {
@@ -627,13 +620,13 @@ func (c *scriptTextCollector) Text() string {
 	return c.accepted.String() + c.current.String()
 }
 
-func finalAssistantText(messages []agent.Message) string {
+func finalAssistantText(messages []harness.Message) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		message := messages[i]
-		if message.Role == agent.RoleUser && !message.Hidden {
+		if message.Role == harness.RoleUser && !message.Hidden {
 			return ""
 		}
-		if message.Role != agent.RoleAssistant || message.Hidden {
+		if message.Role != harness.RoleAssistant || message.Hidden {
 			continue
 		}
 		var result strings.Builder

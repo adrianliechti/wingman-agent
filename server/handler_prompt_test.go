@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 func newPromptTestServer() *backendRuntime {
@@ -41,7 +41,7 @@ func waitForPendingPrompt(t *testing.T, s *backendRuntime, sessionID string) str
 	}
 }
 
-func TestConfirmUsesActionAndSessionScope(t *testing.T) {
+func TestConfirmDoesNotTurnSessionScopeIntoBlanketApproval(t *testing.T) {
 	s := newPromptTestServer()
 	ctx, cancel := context.WithTimeout(code.WithSessionID(context.Background(), "session-1"), time.Second)
 	defer cancel()
@@ -67,9 +67,17 @@ func TestConfirmUsesActionAndSessionScope(t *testing.T) {
 	if first.err != nil || !first.approved {
 		t.Fatalf("Confirm() = (%v, %v), want (true, nil)", first.approved, first.err)
 	}
-	approved, err := s.Confirm(ctx, "Run another command?")
-	if err != nil || !approved {
-		t.Fatalf("remembered Confirm() = (%v, %v), want (true, nil)", approved, err)
+	go func() {
+		approved, err := s.Confirm(ctx, "Run another command?")
+		done <- result{approved: approved, err: err}
+	}()
+	promptID = waitForPendingPrompt(t, s, "session-1")
+	if err := s.session("session-1").resolvePrompt(Command{PromptID: promptID, Action: string(tool.ElicitDecline)}); err != nil {
+		t.Fatal(err)
+	}
+	second := <-done
+	if second.err != nil || second.approved {
+		t.Fatalf("second action bypassed approval: %+v", second)
 	}
 }
 

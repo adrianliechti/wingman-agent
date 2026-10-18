@@ -12,20 +12,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
+	acpsdk "github.com/coder/acp-go-sdk"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/internal/process"
 )
 
 type session struct {
-	id    acp.SessionId
+	id    acpsdk.SessionId
 	cwd   string
 	agent *Agent
 
-	promptMu       acpcommon.PromptGate
+	promptMu       acp.PromptGate
 	mu             sync.Mutex
 	closed         bool
 	modelID        string
@@ -34,7 +34,7 @@ type session struct {
 	mode           string
 	prePlanMode    string
 	allowBypass    bool
-	mcpServers     []acp.McpServer
+	mcpServers     []acpsdk.McpServer
 	additionalDirs []string
 	resumeFrom     string
 	forkOnResume   bool
@@ -44,7 +44,7 @@ type session struct {
 	proc           *claudeProc
 }
 
-func (a *Agent) newSession(id acp.SessionId, cwd, model, effort string, additionalDirs []string) *session {
+func (a *Agent) newSession(id acpsdk.SessionId, cwd, model, effort string, additionalDirs []string) *session {
 	s := &session{
 		id:             id,
 		cwd:            cwd,
@@ -115,7 +115,7 @@ func (s *session) isClosed() bool {
 	return s.closed
 }
 
-func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.StopReason, *acp.Usage, error) {
+func (s *session) runTurn(ctx context.Context, prompt []acpsdk.ContentBlock) (acpsdk.StopReason, *acpsdk.Usage, error) {
 	p, err := s.ensureProc()
 	if err != nil {
 		return "", nil, err
@@ -126,7 +126,7 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return acp.StopReasonCancelled, nil, nil
+		return acpsdk.StopReasonCancelled, nil, nil
 	}
 	s.cancel = cancel
 	s.mu.Unlock()
@@ -154,18 +154,18 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 		select {
 		case r := <-p.results:
 			p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, true)
-			return acp.StopReasonCancelled, r.usage, nil
+			return acpsdk.StopReasonCancelled, r.usage, nil
 		case <-p.dead:
 		case <-time.After(5 * time.Second):
 			s.dropProc(p)
 		}
 		// No further results can arrive from a dead or dropped process.
 		p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, false)
-		return acp.StopReasonCancelled, nil, nil
+		return acpsdk.StopReasonCancelled, nil, nil
 	case r := <-p.results:
 		if turnCtx.Err() != nil {
 			p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, true)
-			return acp.StopReasonCancelled, r.usage, nil
+			return acpsdk.StopReasonCancelled, r.usage, nil
 		}
 		if r.err != nil {
 			s.dropProc(p)
@@ -176,7 +176,7 @@ func (s *session) runTurn(ctx context.Context, prompt []acp.ContentBlock) (acp.S
 	case <-p.dead:
 		if turnCtx.Err() != nil {
 			p.closeCancelledToolCalls(ctx, s.agent.conn, s.id, false)
-			return acp.StopReasonCancelled, nil, nil
+			return acpsdk.StopReasonCancelled, nil, nil
 		}
 		// Preserve a result already read immediately before process EOF.
 		select {
@@ -219,9 +219,9 @@ func (s *session) pushTitleUpdate(ctx context.Context) {
 
 	t := title
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
-	_ = s.agent.conn.SessionUpdate(ctx, acp.SessionNotification{
+	_ = s.agent.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
 		SessionId: s.id,
-		Update: acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{
+		Update: acpsdk.SessionUpdate{SessionInfoUpdate: &acpsdk.SessionSessionInfoUpdate{
 			SessionUpdate: "session_info_update",
 			Title:         &t,
 			UpdatedAt:     &updatedAt,
@@ -273,7 +273,7 @@ func (s *session) ensureProc() (*claudeProc, error) {
 
 	p := &claudeProc{
 		cmd:             cmd,
-		out:             &streamWriter{w: acpcommon.NewConnectionWriter(stdin, 0)},
+		out:             &streamWriter{w: acp.NewConnectionWriter(stdin, 0)},
 		stdin:           stdin,
 		sig:             sig,
 		kill:            kill,
@@ -393,9 +393,9 @@ func (p *claudeProc) parentForAgent(agentID string) string {
 }
 
 type turnResult struct {
-	stop  acp.StopReason
+	stop  acpsdk.StopReason
 	err   error
-	usage *acp.Usage
+	usage *acpsdk.Usage
 }
 
 func (p *claudeProc) isDead() bool {
@@ -424,7 +424,7 @@ func (p *claudeProc) shutdown() {
 	})
 }
 
-func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, r io.Reader) {
+func (p *claudeProc) read(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, r io.Reader) {
 	defer close(p.dead)
 	defer p.finishTurn()
 	stderr := p.session.agent.stderr
@@ -474,7 +474,7 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 				if isSyntheticLoginMessage(message) {
 					if p.finishTurn() {
 						select {
-						case p.results <- turnResult{err: acp.NewAuthRequired(nil)}:
+						case p.results <- turnResult{err: acpsdk.NewAuthRequired(nil)}:
 						default:
 						}
 					}
@@ -539,16 +539,16 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 				continue
 			}
 			// Cached answers may arrive only in result, with no generated tokens.
-			if fallback && result.Subtype == "success" && tr.err == nil && tr.stop == acp.StopReasonEndTurn &&
+			if fallback && result.Subtype == "success" && tr.err == nil && tr.stop == acpsdk.StopReasonEndTurn &&
 				(result.Usage == nil || result.Usage.OutputTokens == 0) {
 				if text, ok := stripMarkerTags(result.Result); ok {
-					if err := acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(text)); err != nil {
+					if err := acp.Notify(ctx, conn, sid, acpsdk.UpdateAgentMessageText(text)); err != nil {
 						tr.err = fmt.Errorf("send result text: %w", err)
 					}
 				}
 			}
 			if usageUpd := p.contextUsage.resultUpdate(result, p.models); usageUpd != nil {
-				if err := acpcommon.Notify(ctx, conn, sid, *usageUpd); err != nil && tr.err == nil {
+				if err := acp.Notify(ctx, conn, sid, *usageUpd); err != nil && tr.err == nil {
 					tr.err = fmt.Errorf("send usage: %w", err)
 				}
 			}
@@ -558,7 +558,7 @@ func (p *claudeProc) read(ctx context.Context, conn *acp.AgentSideConnection, si
 			}
 		case "rate_limit_event":
 			if note := rateLimitNote(env); note != "" {
-				if err := acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(note)); err != nil {
+				if err := acp.Notify(ctx, conn, sid, acpsdk.UpdateAgentMessageText(note)); err != nil {
 					p.failTurn(fmt.Errorf("send rate limit notice: %w", err))
 					return
 				}
@@ -626,7 +626,7 @@ func taskProgressNote(env cliEnvelope) string {
 }
 
 // reportLoadErrors surfaces system/init's mcp_server_errors and plugin_errors.
-func reportLoadErrors(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) {
+func reportLoadErrors(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, env cliEnvelope) {
 	var lines []string
 	for _, e := range env.MCPServerErrors {
 		lines = append(lines, fmt.Sprintf("- MCP server %q skipped (%s): %s", e.label(), e.Type, e.Message))
@@ -642,11 +642,11 @@ func reportLoadErrors(ctx context.Context, conn *acp.AgentSideConnection, sid ac
 	if len(lines) == 0 {
 		return
 	}
-	_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid,
-		Update: acp.UpdateAgentMessageText("Startup warnings:\n" + strings.Join(lines, "\n") + "\n\n")})
+	_ = conn.SessionUpdate(ctx, acpsdk.SessionNotification{SessionId: sid,
+		Update: acpsdk.UpdateAgentMessageText("Startup warnings:\n" + strings.Join(lines, "\n") + "\n\n")})
 }
 
-func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) {
+func (p *claudeProc) handleSystem(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, env cliEnvelope) {
 	switch env.Subtype {
 	case "init":
 		p.contextUsage.setModel(env.Model)
@@ -678,7 +678,7 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		}
 		if env.State == "idle" && p.finishTurn() {
 			select {
-			case p.results <- turnResult{err: acp.NewInternalError("claude went idle without producing a result; partial output may be incomplete")}:
+			case p.results <- turnResult{err: acpsdk.NewInternalError("claude went idle without producing a result; partial output may be incomplete")}:
 			default:
 			}
 		}
@@ -699,7 +699,7 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		if env.RefusalExplanation != "" {
 			message += "\n\n" + env.RefusalExplanation
 		}
-		_ = acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(message))
+		_ = acp.Notify(ctx, conn, sid, acpsdk.UpdateAgentMessageText(message))
 		if env.Direction != "revert" {
 			p.applyFallbackModel(ctx, conn, sid, env.FallbackModel)
 		}
@@ -719,7 +719,7 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		}
 		if text != "" {
 			p.markTurnOutput(false, true)
-			_ = acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(text))
+			_ = acp.Notify(ctx, conn, sid, acpsdk.UpdateAgentMessageText(text))
 		}
 
 	case "compact_boundary":
@@ -733,7 +733,7 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		}
 		p.contextUsage.compact(postTokens)
 		if update := p.contextUsage.update(0); update != nil {
-			_ = acpcommon.Notify(ctx, conn, sid, *update)
+			_ = acp.Notify(ctx, conn, sid, *update)
 		}
 
 	case "informational":
@@ -745,16 +745,16 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 		if env.Level != "" && env.Level != "info" {
 			text = "**" + strings.ToUpper(env.Level[:1]) + env.Level[1:] + ":** " + content
 		}
-		update := acp.UpdateAgentMessageText(text)
+		update := acpsdk.UpdateAgentMessageText(text)
 		update.AgentMessageChunk.Meta = map[string]any{"claudeCode": map[string]any{"kind": "informational", "level": env.Level}}
 		p.markTurnOutput(true, false)
-		_ = acpcommon.Notify(ctx, conn, sid, update)
+		_ = acp.Notify(ctx, conn, sid, update)
 
 	case "local_command_output":
 		var out string
 		if json.Unmarshal(env.Content, &out) == nil && strings.TrimSpace(out) != "" {
 			p.markTurnOutput(true, false)
-			_ = acpcommon.Notify(ctx, conn, sid, acp.UpdateAgentMessageText(out))
+			_ = acp.Notify(ctx, conn, sid, acpsdk.UpdateAgentMessageText(out))
 		}
 
 	case "permission_denied":
@@ -768,9 +768,9 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 			if json.Unmarshal(env.Message, &detail) == nil && detail != "" {
 				msg = "Permission denied: " + detail
 			}
-			_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdateToolCall(acp.ToolCallId(toolCallID),
-				acp.WithUpdateStatus(acp.ToolCallStatusFailed),
-				acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(msg))}),
+			_ = conn.SessionUpdate(ctx, acpsdk.SessionNotification{SessionId: sid, Update: acpsdk.UpdateToolCall(acpsdk.ToolCallId(toolCallID),
+				acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusFailed),
+				acpsdk.WithUpdateContent([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(msg))}),
 			)})
 		}
 
@@ -784,16 +784,16 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn *acp.AgentSideConnec
 	case "task_progress":
 		if toolCallID := p.subagentParent(env.TaskID, env.ToolUseID); p.canReportTask(toolCallID, env.TaskType) {
 			if note := taskProgressNote(env); note != "" {
-				_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdateToolCall(acp.ToolCallId(toolCallID),
-					acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(note))}),
+				_ = conn.SessionUpdate(ctx, acpsdk.SessionNotification{SessionId: sid, Update: acpsdk.UpdateToolCall(acpsdk.ToolCallId(toolCallID),
+					acpsdk.WithUpdateContent([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(note))}),
 				)})
 			}
 		}
 
 	case "task_notification":
 		if toolCallID := p.subagentParent(env.TaskID, env.ToolUseID); p.canReportTask(toolCallID, env.TaskType) && strings.TrimSpace(env.Summary) != "" {
-			_ = conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: sid, Update: acp.UpdateToolCall(acp.ToolCallId(toolCallID),
-				acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock(strings.TrimSpace(env.Summary)))}),
+			_ = conn.SessionUpdate(ctx, acpsdk.SessionNotification{SessionId: sid, Update: acpsdk.UpdateToolCall(acpsdk.ToolCallId(toolCallID),
+				acpsdk.WithUpdateContent([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(strings.TrimSpace(env.Summary)))}),
 			)})
 		}
 		p.subagentMu.Lock()
@@ -841,7 +841,7 @@ func (p *claudeProc) runsInBackground(agentToolUseID string) bool {
 // subagent's interrupted result is written only to its own transcript, and a
 // dead or dropped process reports nothing. While the process lives, calls of
 // a background subagent stay open because that subagent keeps running.
-func (p *claudeProc) closeCancelledToolCalls(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, keepBackground bool) {
+func (p *claudeProc) closeCancelledToolCalls(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, keepBackground bool) {
 	// A result can win the select even when EOF is already ready. Session
 	// close also makes the process unavailable before its reader reports EOF.
 	keepBackground = keepBackground && !p.isDead() && (p.session == nil || !p.session.isClosed())
@@ -853,12 +853,12 @@ func (p *claudeProc) closeCancelledToolCalls(ctx context.Context, conn *acp.Agen
 		return keepBackground && call.parentToolUseID != "" && p.runsInBackground(call.parentToolUseID)
 	})
 	for _, call := range closed {
-		u := acp.UpdateToolCall(acp.ToolCallId(call.id),
-			acp.WithUpdateStatus(acp.ToolCallStatusFailed),
-			acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock("The turn was cancelled before this tool call returned a result."))}),
+		u := acpsdk.UpdateToolCall(acpsdk.ToolCallId(call.id),
+			acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusFailed),
+			acpsdk.WithUpdateContent([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock("The turn was cancelled before this tool call returned a result."))}),
 		)
 		withClaudeToolMeta(&u, call.name, call.parentToolUseID)
-		_ = acpcommon.Notify(ctx, conn, sid, u)
+		_ = acp.Notify(ctx, conn, sid, u)
 	}
 }
 
@@ -866,7 +866,7 @@ func (p *claudeProc) canReportTask(toolCallID, taskType string) bool {
 	return p.emitted.has(toolCallID) && p.tools[toolCallID] != "Monitor" && taskType != "local_monitor"
 }
 
-func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, env cliEnvelope) error {
+func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, env cliEnvelope) error {
 	toolCallID := env.ToolUseID
 	if !p.emitted.has(toolCallID) {
 		toolCallID = env.ParentToolUseID
@@ -878,7 +878,7 @@ func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acp.AgentSide
 	if name == "" {
 		name = p.tools[toolCallID]
 	}
-	update := acp.UpdateToolCall(acp.ToolCallId(toolCallID), acp.WithUpdateStatus(acp.ToolCallStatusInProgress))
+	update := acpsdk.UpdateToolCall(acpsdk.ToolCallId(toolCallID), acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusInProgress))
 	claudeMeta := map[string]any{"toolName": name, "toolResponse": map[string]any{"elapsedTimeSeconds": env.ElapsedTimeSeconds}}
 	if env.SubagentType != "" {
 		claudeMeta["toolResponse"].(map[string]any)["subagentType"] = env.SubagentType
@@ -889,10 +889,10 @@ func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acp.AgentSide
 	if update.ToolCallUpdate != nil {
 		update.ToolCallUpdate.Meta = map[string]any{"claudeCode": claudeMeta}
 	}
-	return acpcommon.Notify(ctx, conn, sid, update)
+	return acp.Notify(ctx, conn, sid, update)
 }
 
-func (p *claudeProc) applyFallbackModel(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, fallback string) {
+func (p *claudeProc) applyFallbackModel(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, fallback string) {
 	modelID := fallback
 	if m := resolveModel(p.models, fallback); m != nil {
 		modelID = m.ID
@@ -901,20 +901,20 @@ func (p *claudeProc) applyFallbackModel(ctx context.Context, conn *acp.AgentSide
 	p.session.mu.Lock()
 	p.session.modelID = modelID
 	p.session.modelOverride = false
-	if m := findModel(p.models, modelID); m != nil && !acpcommon.IsValidEffort(m.EffortLevels, p.session.effort) {
+	if m := findModel(p.models, modelID); m != nil && !acp.IsValidEffort(m.EffortLevels, p.session.effort) {
 		p.session.effort = "default"
 	}
 	p.sig = p.session.spawnSigLocked()
 	effort := p.session.effort
 	p.session.mu.Unlock()
 
-	_ = acpcommon.Notify(ctx, conn, sid, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
+	_ = acp.Notify(ctx, conn, sid, acpsdk.SessionUpdate{ConfigOptionUpdate: &acpsdk.SessionConfigOptionUpdate{
 		SessionUpdate: "config_option_update",
 		ConfigOptions: buildConfigOptions(p.models, modelID, effort),
 	}})
 }
 
-func (p *claudeProc) applyMode(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, modeID string) {
+func (p *claudeProc) applyMode(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, modeID string) {
 	if findMode(modeID) == nil {
 		return
 	}
@@ -926,9 +926,9 @@ func (p *claudeProc) applyMode(ctx context.Context, conn *acp.AgentSideConnectio
 	if !changed {
 		return
 	}
-	_ = acpcommon.Notify(ctx, conn, sid, acp.SessionUpdate{CurrentModeUpdate: &acp.SessionCurrentModeUpdate{
+	_ = acp.Notify(ctx, conn, sid, acpsdk.SessionUpdate{CurrentModeUpdate: &acpsdk.SessionCurrentModeUpdate{
 		SessionUpdate: "current_mode_update",
-		CurrentModeId: acp.SessionModeId(modeID),
+		CurrentModeId: acpsdk.SessionModeId(modeID),
 	}})
 }
 
@@ -969,40 +969,40 @@ func resultToTurn(line []byte) turnResult {
 
 func resultOutcome(r cliResult) turnResult {
 	if r.IsError && strings.Contains(r.Result, "Please run /login") {
-		return turnResult{err: acp.NewAuthRequired(nil)}
+		return turnResult{err: acpsdk.NewAuthRequired(nil)}
 	}
 	switch r.Subtype {
 	case "success", "error_during_execution":
 		if r.StopReason == "max_tokens" {
-			return turnResult{stop: acp.StopReasonMaxTokens}
+			return turnResult{stop: acpsdk.StopReasonMaxTokens}
 		}
 		if r.StopReason == "refusal" {
-			return turnResult{stop: acp.StopReasonRefusal}
+			return turnResult{stop: acpsdk.StopReasonRefusal}
 		}
 		if r.IsError {
-			return turnResult{err: acp.NewInternalError(resultErrMessage(r))}
+			return turnResult{err: acpsdk.NewInternalError(resultErrMessage(r))}
 		}
-		return turnResult{stop: acp.StopReasonEndTurn}
+		return turnResult{stop: acpsdk.StopReasonEndTurn}
 	case "error_max_budget_usd", "error_max_turns", "error_max_structured_output_retries":
 		if r.IsError {
-			return turnResult{err: acp.NewInternalError(resultErrMessage(r))}
+			return turnResult{err: acpsdk.NewInternalError(resultErrMessage(r))}
 		}
-		return turnResult{stop: acp.StopReasonMaxTurnRequests}
+		return turnResult{stop: acpsdk.StopReasonMaxTurnRequests}
 	default:
 		if r.IsError {
-			return turnResult{err: acp.NewInternalError(resultErrMessage(r))}
+			return turnResult{err: acpsdk.NewInternalError(resultErrMessage(r))}
 		}
-		return turnResult{stop: acp.StopReasonEndTurn}
+		return turnResult{stop: acpsdk.StopReasonEndTurn}
 	}
 }
 
-func resultUsage(r cliResult) *acp.Usage {
+func resultUsage(r cliResult) *acpsdk.Usage {
 	if r.Usage == nil {
 		return nil
 	}
 	u := *r.Usage
 	cacheRead, cacheWrite := u.CacheReadInputTokens, u.CacheCreationInputTokens
-	return &acp.Usage{
+	return &acpsdk.Usage{
 		InputTokens:       u.InputTokens,
 		OutputTokens:      u.OutputTokens,
 		CachedReadTokens:  &cacheRead,
@@ -1093,7 +1093,7 @@ func (s *session) cliArgsLocked() []string {
 	return args
 }
 
-func promptMessage(blocks []acp.ContentBlock) cliInput {
+func promptMessage(blocks []acpsdk.ContentBlock) cliInput {
 	in := cliInput{Type: "user", Message: cliInputMessage{Role: "user"}}
 	add := func(c cliInputContent) { in.Message.Content = append(in.Message.Content, c) }
 	var contextBlocks []cliInputContent

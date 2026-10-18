@@ -4,23 +4,20 @@ import (
 	"context"
 	"slices"
 	"testing"
-	"time"
-
-	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	wingmanmcp "github.com/adrianliechti/wingman-agent/pkg/mcp"
-	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 )
 
-func TestResolveOptionsFromEnvironment(t *testing.T) {
+func TestOptionsFromEnvironment(t *testing.T) {
 	for _, value := range []string{"1", "true", "TRUE", "yes", "on"} {
 		t.Run(value, func(t *testing.T) {
 			t.Setenv("WINGMAN_DISABLE_SHELL", value)
-			if !resolveOptions(nil).DisableShell {
-				t.Fatalf("WINGMAN_DISABLE_SHELL=%q did not disable shell", value)
+			t.Setenv("WINGMAN_SANDBOX_NETWORK", value)
+			resolved := optionsFromEnvironment()
+			if !resolved.DisableShell || !resolved.SandboxNetwork {
+				t.Fatalf("WINGMAN_DISABLE_SHELL/WINGMAN_SANDBOX_NETWORK=%q did not enable options: %+v", value, resolved)
 			}
 		})
 	}
@@ -28,28 +25,50 @@ func TestResolveOptionsFromEnvironment(t *testing.T) {
 	for _, value := range []string{"", "0", "false", "no", "off", "anything"} {
 		t.Run("ignored_"+value, func(t *testing.T) {
 			t.Setenv("WINGMAN_DISABLE_SHELL", value)
-			if resolveOptions(nil).DisableShell {
-				t.Fatalf("WINGMAN_DISABLE_SHELL=%q disabled shell", value)
+			t.Setenv("WINGMAN_SANDBOX_NETWORK", value)
+			resolved := optionsFromEnvironment()
+			if resolved.DisableShell || resolved.SandboxNetwork {
+				t.Fatalf("WINGMAN_DISABLE_SHELL/WINGMAN_SANDBOX_NETWORK=%q enabled options: %+v", value, resolved)
+			}
+		})
+	}
+
+	for _, value := range []string{"off", "false", "0", "no", "disabled", " OFF "} {
+		t.Run("sandbox_off_"+value, func(t *testing.T) {
+			t.Setenv("WINGMAN_SANDBOX", value)
+			if !optionsFromEnvironment().DisableSandbox {
+				t.Fatalf("WINGMAN_SANDBOX=%q did not disable sandbox", value)
+			}
+		})
+	}
+
+	for _, value := range []string{"", "workspace", "workspace-write", "WORKSPACE", "on", "true", "1", "typo"} {
+		t.Run("sandbox_on_"+value, func(t *testing.T) {
+			t.Setenv("WINGMAN_SANDBOX", value)
+			if optionsFromEnvironment().DisableSandbox {
+				t.Fatalf("WINGMAN_SANDBOX=%q disabled sandbox", value)
 			}
 		})
 	}
 
 	t.Setenv("WINGMAN_DISABLE_SHELL", "")
+	t.Setenv("WINGMAN_SANDBOX", "off")
+	t.Setenv("WINGMAN_SANDBOX_NETWORK", "on")
 	t.Setenv("WINGMAN_DISABLE_WEBSEARCH", "yes")
 	t.Setenv("WINGMAN_DISABLE_WEBFETCH", "on")
-	resolved := resolveOptions(nil)
-	if !resolved.DisableWebSearch || !resolved.DisableWebFetch {
-		t.Fatalf("resolved options = %+v, want web disabled", resolved)
+	resolved := optionsFromEnvironment()
+	if !resolved.DisableWebSearch || !resolved.DisableWebFetch || !resolved.DisableSandbox || !resolved.SandboxNetwork {
+		t.Fatalf("resolved options = %+v", resolved)
 	}
 }
 
-func TestResolveOptionsIgnoresSeparatedWebEnvironmentNames(t *testing.T) {
+func TestOptionsFromEnvironmentIgnoresSeparatedWebEnvironmentNames(t *testing.T) {
 	t.Setenv("WINGMAN_DISABLE_WEBSEARCH", "")
 	t.Setenv("WINGMAN_DISABLE_WEBFETCH", "")
 	t.Setenv("WINGMAN_DISABLE_WEB_SEARCH", "1")
 	t.Setenv("WINGMAN_DISABLE_WEB_FETCH", "1")
 
-	resolved := resolveOptions(nil)
+	resolved := optionsFromEnvironment()
 	if resolved.DisableWebSearch || resolved.DisableWebFetch {
 		t.Fatalf("separated names unexpectedly changed options: %+v", resolved)
 	}
@@ -84,7 +103,7 @@ func TestExplicitOptionsDisableOnlySelectedToolFamilies(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			a := New(workspace, &harness.Config{}, nil, test.options)
+			a := New(workspace, Config{Options: test.options}, nil)
 			defer a.Close()
 			sessionID, err := a.NewSession(context.Background())
 			if err != nil {
@@ -101,13 +120,18 @@ func TestEnvironmentOptionsAreResolvedAtAgentStartup(t *testing.T) {
 	t.Setenv("WINGMAN_DISABLE_WEBSEARCH", "true")
 	t.Setenv("WINGMAN_DISABLE_WEBFETCH", "yes")
 
-	a := New(workspace, &harness.Config{}, nil)
-	defer a.Close()
+	options := optionsFromEnvironment()
 
 	// The environment is a startup input, not mutable per-session state.
 	t.Setenv("WINGMAN_DISABLE_SHELL", "")
 	t.Setenv("WINGMAN_DISABLE_WEBSEARCH", "")
 	t.Setenv("WINGMAN_DISABLE_WEBFETCH", "")
+
+	a := New(workspace, Config{Options: options}, nil)
+	defer a.Close()
+	options.DisableShell = false
+	options.DisableWebSearch = false
+	options.DisableWebFetch = false
 
 	sessionID, err := a.NewSession(context.Background())
 	if err != nil {
@@ -119,66 +143,95 @@ func TestEnvironmentOptionsAreResolvedAtAgentStartup(t *testing.T) {
 	)
 }
 
-func TestTelemetryOptionOverridesHarnessConfig(t *testing.T) {
+func TestNewUsesExplicitSettingsWithoutEnvironmentMerge(t *testing.T) {
 	workspace := newOptionsTestWorkspace(t)
-	inherited := &telemetry.Telemetry{}
-	override := &telemetry.Telemetry{}
-	a := New(workspace, &harness.Config{Telemetry: inherited}, nil, Options{Telemetry: override})
-	defer a.Close()
-	sessionID, err := a.NewSession(context.Background())
+	t.Setenv("WINGMAN_DISABLE_SHELL", "1")
+	t.Setenv("WINGMAN_DISABLE_WEBSEARCH", "1")
+	t.Setenv("WINGMAN_DISABLE_WEBFETCH", "1")
+	t.Setenv("WINGMAN_SANDBOX_NETWORK", "1")
+	t.Setenv("WINGMAN_MODEL", "environment-model")
+	t.Setenv("WINGMAN_EFFORT", "low")
+	t.Setenv("WINGMAN_MODEL_COMPLEX", "environment-complex")
+	t.Setenv("WINGMAN_MODEL_UTILITY", "environment-utility")
+	t.Setenv("OTEL_SDK_DISABLED", "true")
+	t.Setenv("WINGMAN_OUTPUT_TOKEN_BUDGET", "")
+	t.Setenv("WINGMAN_TASK_MAX_TOKENS", "")
+	t.Setenv("WINGMAN_TASK_TIMEOUT", "")
+	cfg, err := DefaultConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := a.session(sessionID)
-	if state == nil {
-		t.Fatal("session state was not created")
+	if cfg.Model() != "environment-model" || cfg.Effort() != "low" || cfg.ComplexModel != "environment-complex" || cfg.UtilityModel != "environment-utility" || !cfg.DisableShell || !cfg.DisableWebSearch || !cfg.DisableWebFetch || !cfg.SandboxNetwork {
+		t.Fatal("DefaultConfig did not load model and tool settings together")
 	}
-	if state.aa.Telemetry != override {
-		t.Fatalf("session telemetry = %p, want explicit override %p", state.aa.Telemetry, override)
+	cfg.Model = func() string { return "gpt-6-sol" }
+	cfg.Effort = func() string { return "high" }
+	cfg.MaxTurns = 7
+	cfg.DisableShell = false
+	cfg.DisableWebSearch = false
+	cfg.DisableWebFetch = false
+	cfg.SandboxNetwork = false
+	cfg.ComplexModel = "gpt-6-astra"
+	cfg.UtilityModel = "gpt-6-luna"
+	a := New(workspace, cfg, nil)
+	defer a.Close()
+
+	// Changing caller-owned startup values must not change this agent or future sessions.
+	cfg.Model = func() string { return "changed-model" }
+	cfg.Effort = func() string { return "low" }
+	cfg.MaxTurns = 1
+	cfg.DisableShell = true
+	if a.modelID != "gpt-6-sol" || a.effort != "high" || a.complexModel != "gpt-6-astra" || a.utilityModel != "gpt-6-luna" {
+		t.Fatalf("unexpected startup model settings: %q / %q / %q / %q", a.modelID, a.effort, a.complexModel, a.utilityModel)
+	}
+	id, err := a.NewSession(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTools(t, a, id, nil, []string{"exec", "exec_session", "search_web", "fetch"})
+	s := a.session(id)
+	if s.aa.MaxTurns != 7 || s.aa.Model() != "gpt-6-sol" || s.aa.Effort() != "high" {
+		t.Fatal("session did not retain its startup config")
+	}
+	if s.scriptOptions.Shell.Network || s.scriptOptions.Shell.DisableSandbox {
+		t.Fatal("session did not retain explicit sandbox settings")
 	}
 }
 
-func TestCloseWithOwnedTelemetryClosesWorkspaceMCPSessions(t *testing.T) {
+func TestConfigHooksAreOwnedByAgentAndSessions(t *testing.T) {
 	workspace := newOptionsTestWorkspace(t)
-	manager := wingmanmcp.NewManager(&wingmanmcp.Config{Servers: map[string]wingmanmcp.ServerConfig{}})
-	workspace.MCP = manager
+	var inherited, replaced int
+	cfg := Config{}
+	cfg.Hooks.SessionEnd = []hook.SessionEnd{func(context.Context, string) { inherited++ }}
+	a := New(workspace, cfg, nil)
+	defer a.Close()
 
-	clientTransport, serverTransport := sdkmcp.NewInMemoryTransports()
-	server := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "test", Version: "1.0.0"}, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	// Caller changes after construction must not affect future sessions.
+	cfg.Hooks.SessionEnd[0] = func(context.Context, string) { t.Error("caller hook reached a session") }
+	first, err := a.NewSession(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = serverSession.Close() })
-	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
-	clientSession, err := client.Connect(ctx, clientTransport, nil)
-	if err != nil {
+	if len(a.session(first).aa.Hooks.SessionEnd) != 1 {
+		t.Fatal("session lost the configured lifecycle hook")
+	}
+	// A session's changes must not affect its siblings or the startup config.
+	a.session(first).aa.Hooks.SessionEnd[0] = func(context.Context, string) { replaced++ }
+	if _, err := a.NewSession(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	manager.AddSession("test", clientSession)
-
-	a := New(workspace, &harness.Config{Telemetry: &telemetry.Telemetry{}}, nil, Options{
-		ShutdownTelemetryOnClose: true,
-	})
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
-
-	waited := make(chan error, 1)
-	go func() { waited <- clientSession.Wait() }()
-	select {
-	case <-waited:
-	case <-ctx.Done():
-		t.Fatal("owned telemetry shutdown left the MCP session open")
+	if inherited != 1 || replaced != 1 {
+		t.Fatalf("session end calls: inherited=%d replaced=%d, want 1 each", inherited, replaced)
 	}
 }
 
 func TestLegacyToolsAreNotExposed(t *testing.T) {
 	workspace := newOptionsTestWorkspace(t)
 
-	a := New(workspace, &harness.Config{}, nil)
+	a := New(workspace, Config{Options: optionsFromEnvironment()}, nil)
 	defer a.Close()
 	sessionID, err := a.NewSession(context.Background())
 	if err != nil {
@@ -193,6 +246,8 @@ func newOptionsTestWorkspace(t *testing.T) *code.Workspace {
 	testenv.WingmanHome(t)
 	for _, name := range []string{
 		"WINGMAN_DISABLE_SHELL",
+		"WINGMAN_SANDBOX",
+		"WINGMAN_SANDBOX_NETWORK",
 		"WINGMAN_DISABLE_WEBSEARCH",
 		"WINGMAN_DISABLE_WEBFETCH",
 	} {

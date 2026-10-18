@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	codeagent "github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/clipboard"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
@@ -70,7 +70,7 @@ func (b *syncBuffer) Text() string {
 }
 
 type tuiE2EHarness struct {
-	agent     *codeagent.Agent
+	agent     *agent.Agent
 	app       *App
 	sessionID string
 	input     io.Writer
@@ -92,7 +92,7 @@ func newTUIE2EHarness(t *testing.T) *tuiE2EHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	codeAgent := codeagent.New(workspace, cfg, nil)
+	codeAgent := agent.New(workspace, cfg, nil)
 	sessionID, err := codeAgent.NewSession(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +121,9 @@ func newTUIE2EHarness(t *testing.T) *tuiE2EHarness {
 			t.Error("TUI did not stop")
 		}
 		inW.Close()
+		_ = codeAgent.Close()
 		workspace.Close()
+		_ = cfg.Telemetry.Shutdown(context.Background())
 		cancel()
 	})
 
@@ -141,12 +143,12 @@ func TestTUIE2ESendsAndRendersTurn(t *testing.T) {
 
 	waitForTUI(t, func() bool {
 		messages := h.visibleMessages()
-		return len(messages) >= 2 && messages[len(messages)-1].Role == agent.RoleAssistant
+		return len(messages) >= 2 && messages[len(messages)-1].Role == harness.RoleAssistant
 	})
 	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "E2E reply") })
 
 	messages := h.visibleMessages()
-	if messages[0].Role != agent.RoleUser || messages[0].Content[0].Text != "hello e2e" {
+	if messages[0].Role != harness.RoleUser || messages[0].Content[0].Text != "hello e2e" {
 		t.Fatalf("user message = %+v", messages[0])
 	}
 }
@@ -288,7 +290,7 @@ func TestTUIE2ENativeToolRoundKeepsOrder(t *testing.T) {
 	}
 }
 
-func finalMessageText(messages []agent.Message) string {
+func finalMessageText(messages []harness.Message) string {
 	if len(messages) == 0 {
 		return ""
 	}
@@ -322,7 +324,7 @@ func TestTUIE2ECommandCenterAndTranscriptSearch(t *testing.T) {
 	h.postText(t, "hello transcript")
 	waitForTUI(t, func() bool {
 		messages := h.visibleMessages()
-		return len(messages) >= 2 && messages[len(messages)-1].Role == agent.RoleAssistant
+		return len(messages) >= 2 && messages[len(messages)-1].Role == harness.RoleAssistant
 	})
 
 	if _, err := io.WriteString(h.input, "\x0f"); err != nil { // ctrl+o
@@ -485,19 +487,19 @@ func TestTUIE2ESteersActiveTurn(t *testing.T) {
 
 	waitForTUI(t, func() bool {
 		messages := h.visibleMessages()
-		return len(messages) >= 4 && messages[len(messages)-1].Role == agent.RoleAssistant
+		return len(messages) >= 4 && messages[len(messages)-1].Role == harness.RoleAssistant
 	})
 	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "Steering applied") })
 
 	messages := h.visibleMessages()
 	want := []struct {
-		role agent.MessageRole
+		role harness.MessageRole
 		text string
 	}{
-		{agent.RoleUser, "initial request"},
-		{agent.RoleAssistant, "Working"},
-		{agent.RoleUser, "steer this turn"},
-		{agent.RoleAssistant, "Steering applied"},
+		{harness.RoleUser, "initial request"},
+		{harness.RoleAssistant, "Working"},
+		{harness.RoleUser, "steer this turn"},
+		{harness.RoleAssistant, "Steering applied"},
 	}
 	if len(messages) != len(want) {
 		t.Fatalf("messages = %+v", messages)
@@ -511,8 +513,8 @@ func TestTUIE2ESteersActiveTurn(t *testing.T) {
 
 // The transcript contract excludes hidden session context. Test user-visible
 // behavior without depending on the harness's provider context representation.
-func (h *tuiE2EHarness) visibleMessages() []agent.Message {
-	var visible []agent.Message
+func (h *tuiE2EHarness) visibleMessages() []harness.Message {
+	var visible []harness.Message
 	for _, message := range h.agent.Messages(h.sessionID) {
 		if !message.Hidden {
 			visible = append(visible, message)

@@ -19,21 +19,21 @@ import (
 
 	"github.com/google/uuid"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/external"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/hook/truncation"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/task"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
-	elicittool "github.com/adrianliechti/wingman-agent/pkg/agent/tool/elicit"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fetch"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/fs"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/schedule"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/subagent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/truncation"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	elicittool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/elicit"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fetch"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/shell"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/subagent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
@@ -42,8 +42,7 @@ import (
 
 type Agent struct {
 	workspace *code.Workspace
-	cfg       *harness.Config
-	options   Options
+	cfg       Config
 
 	uiMu    sync.RWMutex
 	ui      code.UI
@@ -81,6 +80,7 @@ type sessionState struct {
 	// goroutine and written from the UI one.
 	mode        atomic.Value // sessionMode
 	unattended  atomic.Bool
+	reviews     reviewBreaker
 	toolSet     *tool.Set
 	turnTools   atomic.Value // []tool.Tool, pinned for the running turn
 	execManager *shell.ExecManager
@@ -95,11 +95,14 @@ type sessionState struct {
 	changedMu    sync.Mutex
 	changedPaths []string
 
+	hookContextMu sync.Mutex
+	hookContext   []string
+
 	projectInstructionsMu   sync.Mutex
 	projectInstructionCache projectInstructionCache
 
 	cancelMu    sync.Mutex
-	cancelFn    context.CancelFunc
+	cancelFn    context.CancelCauseFunc
 	cancelGen   uint64
 	closed      bool
 	startSource string
@@ -139,34 +142,32 @@ func (s *sessionState) permissionMode() string {
 	return "default"
 }
 
-// New constructs a built-in code agent. Options are optional so existing
-// callers keep the default tool set; multiple values are combined.
-func New(ws *code.Workspace, cfg *harness.Config, ui code.UI, options ...Options) *Agent {
-	resolvedOptions := resolveOptions(options)
+// New creates a code agent; the caller keeps ownership of the workspace and telemetry.
+func New(ws *code.Workspace, cfg Config, ui code.UI) *Agent {
+	cfg.Config = *cfg.Config.Clone()
 	a := &Agent{
 		workspace:    ws,
 		cfg:          cfg,
-		options:      resolvedOptions,
 		ui:           ui,
-		modelID:      harness.DefaultModel(),
-		effort:       harness.DefaultEffort(),
-		complexModel: harness.DefaultComplexModel(),
-		utilityModel: harness.DefaultUtilityModel(),
+		complexModel: cfg.ComplexModel,
+		utilityModel: cfg.UtilityModel,
 		sessionsDir:  filepath.Join(filepath.Dir(ws.MemoryPath), "sessions"),
 		sessions:     map[string]*sessionState{},
 	}
-	a.prompts = &tool.Elicitation{Elicit: a.elicit, Confirm: a.confirm}
+	if cfg.Model != nil {
+		a.modelID = cfg.Model()
+	}
+	if cfg.Effort != nil {
+		a.effort = cfg.Effort()
+	}
+	a.prompts = &tool.Elicitation{Elicit: a.elicit, Confirm: a.confirm, Review: a.review}
 
 	// MCP servers elicit through the same UI surface as the elicit tool. Their
 	// requests may arrive without session correlation. Web embedders require
 	// an explicit session; single-client embedders retain their routing fallback.
 	if ws.MCP != nil {
 		ws.MCP.SetElicit(a.elicit)
-		tel := cfg.Telemetry
-		if resolvedOptions.Telemetry != nil {
-			tel = resolvedOptions.Telemetry
-		}
-		ws.MCP.SetTelemetry(tel)
+		ws.MCP.SetTelemetry(cfg.Telemetry)
 	}
 
 	return a
@@ -284,6 +285,41 @@ func (a *Agent) LoadSession(_ context.Context, id string) error {
 	return nil
 }
 
+// ForkSession copies history, model and mode; tasks, schedules and queued inputs stay with the source.
+func (a *Agent) ForkSession(ctx context.Context, id, title string) (string, error) {
+	newID := uuid.NewString()
+	source := a.session(id)
+	if err := a.forkJournal(source, id, newID, title); err != nil {
+		return "", err
+	}
+	err := a.copySessionSettings(id, newID)
+	if err == nil {
+		err = a.LoadSession(ctx, newID)
+	}
+	if err != nil {
+		_ = session.Delete(a.sessionsDir, newID)
+		return "", err
+	}
+	if fork := a.session(newID); fork != nil && source != nil {
+		fork.setMode(source.currentMode())
+		fork.unattended.Store(source.unattended.Load())
+	}
+	return newID, nil
+}
+
+func (a *Agent) forkJournal(source *sessionState, id, newID, title string) error {
+	if source == nil {
+		return session.Fork(a.sessionsDir, id, newID, title)
+	}
+	// Claiming the session keeps a turn from starting while the journal is copied.
+	gen, err := source.claimTurn(func(error) {})
+	if err != nil {
+		return err
+	}
+	defer source.clearCancel(gen)
+	return session.Fork(a.sessionsDir, id, newID, title)
+}
+
 func (a *Agent) DeleteSession(_ context.Context, id string) error {
 	a.mu.Lock()
 	s, inMem := a.sessions[id]
@@ -345,6 +381,21 @@ func (a *Agent) Recap(ctx context.Context, id string) (string, error) {
 		return "", fmt.Errorf("session %s not found", id)
 	}
 	return s.aa.Recap(ctx)
+}
+
+func (a *Agent) Compact(ctx context.Context, id, focus string) (harness.CompactResult, error) {
+	s := a.session(id)
+	if s == nil {
+		return harness.CompactResult{}, fmt.Errorf("session %s not found", id)
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	gen, err := s.claimTurn(cancel)
+	if err != nil {
+		return harness.CompactResult{}, err
+	}
+	defer s.clearCancel(gen)
+	return s.aa.Compact(hook.WithRuntime(ctx, s.hookRuntime()), focus)
 }
 
 func (a *Agent) ContextStats(id string) (harness.ContextStats, bool) {
@@ -464,13 +515,13 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 
 	a.lastActive.Store(id)
 
-	sendCtx, cancel := context.WithCancel(code.WithSessionID(ctx, id))
+	sendCtx, cancel := context.WithCancelCause(code.WithSessionID(ctx, id))
 	// Startup cannot ask a web client without session correlation. Defer local
 	// configuration approval until this turn, where prompts have an owner.
 	if a.workspace.MCP != nil && len(a.workspace.MCP.TrustRequired) > 0 {
 		if err := a.workspace.InitMCP(sendCtx, a.currentUI()); err != nil {
 			if sendCtx.Err() != nil {
-				cancel()
+				cancel(nil)
 				return nil, sendCtx.Err()
 			}
 			input = append(slices.Clone(input), harness.Content{Text: "Some MCP servers are unavailable: " + err.Error(), Hidden: true})
@@ -478,14 +529,14 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 	}
 	stream, gen, err := s.beginSend(sendCtx, input, cancel)
 	if err != nil {
-		cancel()
+		cancel(nil)
 		return nil, err
 	}
 
 	return func(yield func(harness.Message, error) bool) {
 		defer func() {
 			s.clearCancel(gen)
-			cancel()
+			cancel(nil)
 		}()
 		for msg, err := range stream {
 			if !yield(msg, err) {
@@ -512,7 +563,7 @@ func (a *Agent) Steer(_ context.Context, id string, input code.TurnInput) error 
 
 func (a *Agent) Cancel(id string) {
 	if s := a.session(id); s != nil {
-		s.cancel()
+		s.cancel(harness.ErrInterrupted)
 	}
 }
 
@@ -529,26 +580,11 @@ func (a *Agent) Close() error {
 	for _, s := range sessions {
 		s.close()
 	}
-	if a.options.ShutdownTelemetryOnClose {
-		// The MCP manager can retain session-duration observations until the
-		// workspace closes. End those sessions while the owned meter provider is
-		// still accepting records; Workspace.Close may safely close them again.
-		if a.workspace != nil && a.workspace.MCP != nil {
-			a.workspace.MCP.Close()
-		}
-		tel := a.options.Telemetry
-		if tel == nil {
-			tel = a.cfg.Telemetry
-		}
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return tel.Shutdown(shutdownCtx)
-	}
 	return nil
 }
 
 var wingmanModes = []code.Mode{
-	{ID: code.AgentModeID, Name: "Agent", Description: "Make changes and run checks."},
+	{ID: code.AgentModeID, Name: "Agent", Description: "Make changes and run checks. Risky actions are reviewed automatically."},
 	{ID: code.PlanModeID, Name: "Plan", Description: "Read-only. Proposes a plan."},
 }
 
@@ -607,10 +643,7 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	if err != nil {
 		return nil, err
 	}
-	sessionCfg := a.cfg.Derive()
-	if a.options.Telemetry != nil {
-		sessionCfg.Telemetry = a.options.Telemetry
-	}
+	sessionCfg := a.cfg.Clone()
 	s := &sessionState{
 		id:      id,
 		parent:  a,
@@ -654,40 +687,70 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 		)
 	}
 
+	hookAsync := external.NewAsync(func(runtime hook.Runtime, parts []string) {
+		// A subagent's hook context describes calls the main turn never saw.
+		if runtime.AgentID != "" {
+			return
+		}
+		if !s.aa.QueueInput([]harness.Content{{Text: strings.Join(parts, "\n\n"), Hidden: true}}) {
+			s.stashHookContext(parts)
+		}
+	})
+	hookOptions := external.BuildOptions{Async: hookAsync, MCP: ws.CallMCPTool, SpillDir: ws.ScratchPath}
+	hookTrust := attendedTrust{TrustStore: ws.HookTrust(), session: s}
+
 	// Workspace hooks come with the repo, not the user — gate them behind a
-	// one-time confirmation so a cloned project cannot run commands unprompted.
-	var workspaceGate *external.Gate
+	// confirmation so a cloned project cannot run commands unprompted.
+	workspaceOptions := hookOptions
 	if rules := workspaceHooks.RuleCount(); rules > 0 {
-		workspaceGate = &external.Gate{
-			Confirm: elicit.Confirm,
-			Message: fmt.Sprintf("Run %d workspace hook rule(s) from %s?", rules, workspaceHooksPath),
+		fingerprint, _ := workspaceHooks.Fingerprint(ws.RootPath, workspaceHooksPath)
+		workspaceOptions.Gate = &external.Gate{
+			Confirm:     a.confirm,
+			Message:     fmt.Sprintf("Run %d workspace hook rule(s) from %s?\n\nApproval is remembered until these hooks change.", rules, workspaceHooksPath),
+			Fingerprint: func() string { return fingerprint },
+			Store:       hookTrust,
 		}
 	}
 
-	sessionCfg.Hooks.Append(globalHooks.Build(ws.RootPath, nil))
-	sessionCfg.Hooks.Append(workspaceHooks.Build(ws.RootPath, workspaceGate))
+	sessionCfg.Hooks.Append(globalHooks.BuildWithOptions(ws.RootPath, hookOptions))
+	sessionCfg.Hooks.Append(workspaceHooks.BuildWithOptions(ws.RootPath, workspaceOptions))
 	for i := range ws.Plugins {
 		p := &ws.Plugins[i]
 		if p.Hooks == nil || p.Hooks.RuleCount() == 0 {
 			continue
 		}
-		pluginGate := &external.Gate{
-			Confirm: elicit.Confirm,
-			Message: fmt.Sprintf("Run %d hook rule(s) from plugin %q at %s?", p.Hooks.RuleCount(), p.Name, p.Root),
-		}
-		sessionCfg.Hooks.Append(p.Hooks.BuildWithOptions(ws.RootPath, external.BuildOptions{
-			Gate: pluginGate,
-			Environment: map[string]string{
-				"PLUGIN_ROOT": p.Root,
-				"PLUGIN_DATA": p.Data,
+		declarations, declarationsErr := p.Hooks.Fingerprint(ws.RootPath, p.Name, p.Root, p.Data)
+		pluginOptions := hookOptions
+		pluginOptions.Gate = &external.Gate{
+			Confirm: a.confirm,
+			Message: fmt.Sprintf("Run %d hook rule(s) from plugin %q at %s?\n\nApproval is remembered until the plugin changes.", p.Hooks.RuleCount(), p.Name, p.Root),
+			Fingerprint: func() string {
+				content, err := external.ContentHash(p.Root)
+				if declarationsErr != nil || err != nil {
+					return ""
+				}
+				return declarations + "/" + content
 			},
-		}))
+			Store: hookTrust,
+		}
+		pluginOptions.Environment = map[string]string{
+			"PLUGIN_ROOT":        p.Root,
+			"PLUGIN_DATA":        p.Data,
+			"CLAUDE_PLUGIN_ROOT": p.Root,
+			"CLAUDE_PLUGIN_DATA": p.Data,
+		}
+		sessionCfg.Hooks.Append(p.Hooks.BuildWithOptions(ws.RootPath, pluginOptions))
 	}
 	sessionCfg.Hooks.TransformToolResult = append(sessionCfg.Hooks.TransformToolResult,
 		truncation.Transform(ws.ScratchPath),
 	)
 
 	allowedReadRoots, allowedWriteRoots := sessionFileRoots(ws)
+	if !a.cfg.DisableShell && !a.cfg.DisableSandbox {
+		if err := shell.CheckSandbox(ws.RootPath); err != nil {
+			return nil, fmt.Errorf("sandbox unavailable (WINGMAN_SANDBOX=off explicitly disables isolation): %w", err)
+		}
+	}
 
 	artifactDir, err := session.ArtifactDir(a.sessionsDir, id)
 	if err != nil {
@@ -703,34 +766,45 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	s.freshness = fs.NewFreshness(ws.Root)
 	s.schedules = schedule.NewFileStore(filepath.Join(artifactDir, "schedules"))
 	s.watchStop = make(chan struct{})
-	approvals := shell.NewApprovals()
 
 	sessionCfg.Hooks.UserPromptSubmit = append(sessionCfg.Hooks.UserPromptSubmit,
 		func(context.Context, string) (hook.Outcome, error) {
 			s.sweepFileChanges()
-			notice := formatFileChangeNotice(s.takeFileChanges())
-			if notice == "" {
-				return hook.Outcome{}, nil
+			parts := s.takeHookContext()
+			if notice := formatFileChangeNotice(s.takeFileChanges()); notice != "" {
+				parts = append(parts, notice)
 			}
-			return hook.Outcome{AdditionalContext: []string{notice}}, nil
+			return hook.Outcome{AdditionalContext: parts}, nil
 		},
 	)
 
-	shellOpts := &shell.Options{ScratchDir: ws.ScratchPath}
-	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.options.DisableShell, Elicitation: elicit, Approvals: approvals, Shell: shellOpts}
+	privateTemp, err := os.MkdirTemp("", "wingman-session-")
+	if err != nil {
+		return nil, fmt.Errorf("create private session temp: %w", err)
+	}
+	shellOpts := &shell.Options{
+		ScratchDir:         ws.ScratchPath,
+		TempDir:            privateTemp,
+		DisableSandbox:     a.cfg.DisableSandbox,
+		Network:            a.cfg.SandboxNetwork,
+		ExtraWritableRoots: []string{ws.MemoryPath},
+	}
+	allowedReadRoots = append(allowedReadRoots, privateTemp)
+	allowedWriteRoots = append(allowedWriteRoots, privateTemp)
+	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.cfg.DisableShell, Elicitation: elicit, Shell: shellOpts}
 	go s.watchFileChanges()
 	go s.runSchedules()
 
 	var shellTools []tool.Tool
-	if !a.options.DisableShell {
-		shellTools = shell.ExecTools(s.execManager, ws.RootPath, elicit, approvals, shellOpts)
+	if !a.cfg.DisableShell {
+		shellTools = shell.ExecTools(s.execManager, ws.RootPath, elicit, shellOpts)
 	}
 	var webFetchTools []tool.Tool
-	if !a.options.DisableWebFetch {
+	if !a.cfg.DisableWebFetch {
 		webFetchTools = fetch.Tools(elicit)
 	}
 	var webSearchTools []tool.Tool
-	if !a.options.DisableWebSearch {
+	if !a.cfg.DisableWebSearch {
 		webSearchTools = websearch.Tools(elicit)
 	}
 
@@ -750,12 +824,17 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	s.toolSet = tool.NewSet(baseTools...)
 	// Close runs in reverse: tasks first so background subagents are canceled
 	// before their shared exec sessions are killed.
+	s.toolSet.Own("private temporary files", func() error { return os.RemoveAll(privateTemp) })
 	s.toolSet.Own("exec manager", func() error {
 		s.execManager.Close()
 		return nil
 	})
 	s.toolSet.Own("task registry", func() error {
 		s.tasks.Close()
+		return nil
+	})
+	s.toolSet.Own("async hooks", func() error {
+		hookAsync.Close()
 		return nil
 	})
 	return s, nil
@@ -783,22 +862,6 @@ func sessionFileRoots(ws *code.Workspace) (readRoots, writeRoots []string) {
 		writeRoots = append(writeRoots, ws.MemoryPath)
 	}
 
-	// Agents stage scratch files (downscaled images, montages, compile helpers,
-	// intermediate outputs) under the OS temp dir. Allow the file tools to both
-	// read and write it — the shell tool can already write there, so restricting
-	// only the dedicated tools just pushes work onto shell.
-	readRoots = append(readRoots, os.TempDir())
-	writeRoots = append(writeRoots, os.TempDir())
-
-	// WINGMAN_SANDBOX=off lifts the workspace path restriction entirely so the
-	// file tools reach the whole filesystem like the shell tool already does —
-	// e.g. reading and editing /etc configs on system-administration tasks. "*"
-	// is the wildcard root the fs matcher treats as "any absolute path": a
-	// platform-agnostic marker, avoiding a fragile per-OS filesystem-root path.
-	if harness.SandboxDisabled() {
-		readRoots = append(readRoots, "*")
-		writeRoots = append(writeRoots, "*")
-	}
 	return readRoots, writeRoots
 }
 
@@ -846,7 +909,13 @@ func userHooksConfigPath() string {
 }
 
 func (a *Agent) promptContext(ctx context.Context) context.Context {
-	if a.options.RequireSessionContext || code.SessionIDFromContext(ctx) != "" {
+	if code.SessionIDFromContext(ctx) != "" {
+		return ctx
+	}
+	if sid := hook.RuntimeFromContext(ctx).SessionID; sid != "" && a.session(sid) != nil {
+		return code.WithSessionID(ctx, sid)
+	}
+	if a.cfg.IsolateSessions {
 		return ctx
 	}
 
@@ -875,30 +944,11 @@ func (a *Agent) elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elicit
 	return ui.Elicit(ctx, req)
 }
 
+// confirm asks a person, or approves in unattended mode; tool approvals go through review.
 func (a *Agent) confirm(ctx context.Context, message string) (bool, error) {
 	ctx = a.promptContext(ctx)
-	if s := a.session(code.SessionIDFromContext(ctx)); s != nil {
-		if call, ok := hook.ToolCallFromContext(ctx); ok {
-			allowed := false
-			for _, run := range s.aa.Hooks.PermissionRequest {
-				outcome, err := run(ctx, call)
-				if err != nil {
-					continue
-				}
-				switch outcome.Behavior {
-				case hook.PermissionDeny:
-					return false, nil
-				case hook.PermissionAllow:
-					allowed = true
-				}
-			}
-			if allowed {
-				return true, nil
-			}
-		}
-		if s.unattended.Load() {
-			return true, nil
-		}
+	if s := a.session(code.SessionIDFromContext(ctx)); s != nil && s.unattended.Load() {
+		return true, nil
 	}
 	ui := a.currentUI()
 	if ui == nil {
@@ -907,37 +957,18 @@ func (a *Agent) confirm(ctx context.Context, message string) (bool, error) {
 	return ui.Confirm(ctx, message)
 }
 
-func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, cancel context.CancelFunc) (iter.Seq2[harness.Message, error], uint64, error) {
+func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, cancel context.CancelCauseFunc) (iter.Seq2[harness.Message, error], uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
 	catalog := collectManagedTools(s.parent.workspace)
-
-	s.cancelMu.Lock()
-	if s.closed {
-		s.cancelMu.Unlock()
-		return nil, 0, errors.New("session is closed")
-	}
-	if s.cancelFn != nil || s.aa.Running() {
-		s.cancelMu.Unlock()
-		return nil, 0, code.ErrTurnInProgress
+	// Claiming before setup lets Cancel and Close reach hooks that wait on UI or external processes.
+	gen, err := s.claimTurn(cancel)
+	if err != nil {
+		return nil, 0, err
 	}
 	s.turnTools.Store(catalog)
-	s.cancelGen++
-	gen := s.cancelGen
-	s.cancelFn = cancel
-	s.cancelMu.Unlock()
-
-	// Hooks can wait on UI or external processes. Cancel and Close must be
-	// able to reach this turn while its synchronous setup is still running.
-	ctx = hook.WithRuntime(ctx, hook.Runtime{
-		SessionID:      s.aa.CacheKey,
-		CWD:            s.parent.workspace.RootPath,
-		Model:          s.aa.Model(),
-		PermissionMode: s.permissionMode(),
-		StartSource:    s.startSource,
-	})
-	stream, err := s.aa.Send(ctx, input)
+	stream, err := s.aa.Send(hook.WithRuntime(ctx, s.hookRuntime()), input)
 	if err != nil {
 		s.clearCancel(gen)
 		return nil, 0, err
@@ -947,6 +978,31 @@ func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, c
 		return nil, 0, errors.New("agent returned a nil turn stream")
 	}
 	return stream, gen, nil
+}
+
+// claimTurn reserves the session for one operation; release it with clearCancel.
+func (s *sessionState) claimTurn(cancel context.CancelCauseFunc) (uint64, error) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	if s.closed {
+		return 0, errors.New("session is closed")
+	}
+	if s.cancelFn != nil || s.aa.Running() {
+		return 0, code.ErrTurnInProgress
+	}
+	s.cancelGen++
+	s.cancelFn = cancel
+	return s.cancelGen, nil
+}
+
+func (s *sessionState) hookRuntime() hook.Runtime {
+	return hook.Runtime{
+		SessionID:      s.aa.CacheKey,
+		CWD:            s.parent.workspace.RootPath,
+		Model:          s.aa.Model(),
+		PermissionMode: s.permissionMode(),
+		StartSource:    s.startSource,
+	}
 }
 
 func (s *sessionState) clearCancel(gen uint64) {
@@ -959,12 +1015,12 @@ func (s *sessionState) clearCancel(gen uint64) {
 	s.cancelMu.Unlock()
 }
 
-func (s *sessionState) cancel() {
+func (s *sessionState) cancel(cause error) {
 	s.cancelMu.Lock()
 	fn := s.cancelFn
 	s.cancelMu.Unlock()
 	if fn != nil {
-		fn()
+		fn(cause)
 	}
 }
 
@@ -980,7 +1036,7 @@ func (s *sessionState) close() {
 	s.cancelFn = nil
 	s.cancelMu.Unlock()
 	if fn != nil {
-		fn()
+		fn(nil)
 	}
 	close(s.watchStop)
 	_ = s.toolSet.Close()
@@ -1042,6 +1098,34 @@ func (s *sessionState) stashFileChanges(paths []string) {
 		}
 	}
 	s.changedMu.Unlock()
+}
+
+// stashHookContext holds async hook output that finished between turns for the next prompt.
+func (s *sessionState) stashHookContext(parts []string) {
+	s.hookContextMu.Lock()
+	s.hookContext = append(s.hookContext, parts...)
+	s.hookContextMu.Unlock()
+}
+
+func (s *sessionState) takeHookContext() []string {
+	s.hookContextMu.Lock()
+	parts := s.hookContext
+	s.hookContext = nil
+	s.hookContextMu.Unlock()
+	return parts
+}
+
+// attendedTrust remembers only approvals a person gave; unattended ones last for the session.
+type attendedTrust struct {
+	external.TrustStore
+	session *sessionState
+}
+
+func (t attendedTrust) Trust(fingerprint string) error {
+	if t.session.unattended.Load() {
+		return nil
+	}
+	return t.TrustStore.Trust(fingerprint)
 }
 
 const fileChangeNoticeMax = 20

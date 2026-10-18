@@ -3,16 +3,15 @@ package agent
 import (
 	"testing"
 
-	harness "github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
 func TestLoadSessionRestoresSelectedModelAfterRestart(t *testing.T) {
 	ws := newOptionsTestWorkspace(t)
-	cfg := &harness.Config{}
-	opts := Options{IsolateSessionSettings: true}
+	cfg := Config{Options: Options{IsolateSessions: true}}
 
-	a := New(ws, cfg, nil, opts)
+	a := New(ws, cfg, nil)
 	const id = "persisted-settings"
 	if err := session.Save(a.sessionsDir, id, harness.State{Messages: []harness.Message{{Role: harness.RoleUser, Content: []harness.Content{{Text: "hi"}}}}}); err != nil {
 		t.Fatal(err)
@@ -28,7 +27,7 @@ func TestLoadSessionRestoresSelectedModelAfterRestart(t *testing.T) {
 	}
 	a.Close()
 
-	reopened := New(ws, cfg, nil, opts)
+	reopened := New(ws, cfg, nil)
 	defer reopened.Close()
 	// A model picked on the startup session must not leak into the resumed one.
 	startup, err := reopened.NewSession(t.Context())

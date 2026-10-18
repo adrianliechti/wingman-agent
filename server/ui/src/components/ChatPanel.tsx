@@ -19,7 +19,8 @@ import {
 	useCallback,
 } from "react";
 import { ComposerDraft } from "../state/composerDraft.ts";
-import { splitSessionKey } from "../state/sessionStore.ts";
+import { isDraft, splitSessionKey } from "../state/sessionStore.ts";
+import { formatTokens } from "../utils/usage";
 import { useSessionSettings } from "../state/workspaceContext.ts";
 import { useToast } from "./ui/Feedback.tsx";
 import { atTextareaEdge } from "../utils/textareaNavigation";
@@ -55,6 +56,7 @@ export interface ChatPanelProps {
 	entries: ChatEntry[];
 	phase: Phase;
 	retry?: { attempt: number; reason: string; delayMillis: number };
+	compaction?: { tokensBefore: number; tokensAfter: number };
 	available?: boolean;
 	onSend: (
 		text: string,
@@ -63,6 +65,7 @@ export interface ChatPanelProps {
 		intent?: TurnInputIntent,
 	) => boolean | Promise<boolean>;
 	onCancel: (clearQueue?: boolean) => void;
+	onCompact?: (focus: string) => boolean | Promise<boolean>;
 	pendingInputs?: PendingTurnInput[];
 	queuePaused?: boolean;
 	canSteer?: boolean;
@@ -118,6 +121,12 @@ function slashTokenAt(
 	return null;
 }
 
+// compactFocus returns the focus of a /compact command, or null for other input.
+function compactFocus(text: string): string | null {
+	const match = /^\/compact(?:\s+([\s\S]*))?$/.exec(text);
+	return match ? (match[1] ?? "").trim() : null;
+}
+
 function wordEndAt(text: string, caret: number): number {
 	let end = Math.min(caret, text.length);
 	while (end < text.length) {
@@ -137,9 +146,11 @@ export function ChatPanel({
 	entries,
 	phase,
 	retry,
+	compaction,
 	available = true,
 	onSend,
 	onCancel,
+	onCompact,
 	pendingInputs = [],
 	queuePaused = false,
 	canSteer = false,
@@ -529,6 +540,20 @@ export function ChatPanel({
 		) {
 			return false;
 		}
+		const focus = compactFocus(text);
+		if (
+			focus !== null &&
+			onCompact &&
+			settings.canCompact &&
+			!current.editingQueueId &&
+			current.files.length + current.images.length === 0
+		) {
+			if (!sessionId || isDraft(sessionId)) {
+				toast({ title: "Nothing to compact yet" });
+				return false;
+			}
+			return draft.submit(() => onCompact(focus));
+		}
 		submitPendingRef.current = true;
 		const focused = document.activeElement;
 		const sent = await draft.submit(({ images, files, editingQueueId }) => {
@@ -858,6 +883,17 @@ export function ChatPanel({
 			<div className="absolute bottom-0 left-0 right-0 z-20">
 				<div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none" />
 				<div className="mx-auto w-full max-w-4xl bg-bg px-4 pb-3">
+					{phase === "compacting" && (
+						<div role="status" className="mb-2 text-[12px] text-fg-muted">
+							Compacting context…
+						</div>
+					)}
+					{phase === "idle" && compaction && (
+						<div role="status" className="mb-2 text-[12px] text-fg-dim">
+							Context compacted · ~{formatTokens(compaction.tokensBefore)} → ~
+							{formatTokens(compaction.tokensAfter)} tokens
+						</div>
+					)}
 					{phase === "retrying" && (
 						<div role="status" className="mb-2 text-[12px] text-warning">
 							Retrying

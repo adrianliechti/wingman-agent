@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 type lifecycleAgent struct {
@@ -24,13 +24,13 @@ type lifecycleAgent struct {
 	setModel          func(context.Context, string, string) error
 }
 
-func (a *lifecycleAgent) Send(ctx context.Context, _ string, _ []agent.Content) (iter.Seq2[agent.Message, error], error) {
-	return func(yield func(agent.Message, error) bool) {
-		yield(agent.Message{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "working"}}}, nil)
+func (a *lifecycleAgent) Send(ctx context.Context, _ string, _ []harness.Content) (iter.Seq2[harness.Message, error], error) {
+	return func(yield func(harness.Message, error) bool) {
+		yield(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "working"}}}, nil)
 		<-ctx.Done()
 		close(a.cancelled)
 		<-a.release
-		yield(agent.Message{}, ctx.Err())
+		yield(harness.Message{}, ctx.Err())
 	}, nil
 }
 func (a *lifecycleAgent) DeleteSession(context.Context, string) error {

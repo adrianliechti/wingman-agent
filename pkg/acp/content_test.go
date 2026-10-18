@@ -5,13 +5,13 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 func TestPromptContentRoundTrip(t *testing.T) {
-	input := []agent.Content{
+	input := []harness.Content{
 		{Text: "hello"},
-		{File: &agent.File{Data: "data:image/png;base64,aGVsbG8="}},
+		{File: &harness.File{Data: "data:image/png;base64,aGVsbG8="}},
 	}
 
 	blocks := ContentToBlocks(input)
@@ -26,9 +26,9 @@ func TestPromptContentRoundTrip(t *testing.T) {
 }
 
 func TestContentToBlocksPreservesTextAndImageFromOneContent(t *testing.T) {
-	blocks := ContentToBlocks([]agent.Content{{
+	blocks := ContentToBlocks([]harness.Content{{
 		Text: "describe this",
-		File: &agent.File{Data: "data:image/png;base64,aGVsbG8="},
+		File: &harness.File{Data: "data:image/png;base64,aGVsbG8="},
 	}})
 	if len(blocks) != 2 || blocks[0].Text == nil || blocks[0].Text.Text != "describe this" ||
 		blocks[1].Image == nil || blocks[1].Image.Data != "aGVsbG8=" || blocks[1].Image.MimeType != "image/png" {
@@ -37,9 +37,9 @@ func TestContentToBlocksPreservesTextAndImageFromOneContent(t *testing.T) {
 }
 
 func TestContentToBlocksIgnoresMalformedAttachmentsWithoutDroppingText(t *testing.T) {
-	blocks := ContentToBlocks([]agent.Content{{
+	blocks := ContentToBlocks([]harness.Content{{
 		Text: "keep me",
-		File: &agent.File{Data: "not-a-data-url"},
+		File: &harness.File{Data: "not-a-data-url"},
 	}})
 	if len(blocks) != 1 || blocks[0].Text == nil || blocks[0].Text.Text != "keep me" {
 		t.Fatalf("blocks = %+v", blocks)

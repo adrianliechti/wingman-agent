@@ -14,8 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/clipboard"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
@@ -252,13 +253,13 @@ func TestApplyClipboardContentsShowsErrorsAndEmptyState(t *testing.T) {
 }
 
 func TestLastAssistantTextIncludesAllVisibleBlocks(t *testing.T) {
-	messages := []agent.Message{
-		{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "older"}}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{{ToolCall: &agent.ToolCall{Name: "read"}}}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{
+	messages := []harness.Message{
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "older"}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{{ToolCall: &harness.ToolCall{Name: "read"}}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{
 			{Text: "first"},
 			{Text: "secret", Hidden: true},
-			{ToolCall: &agent.ToolCall{Name: "shell"}},
+			{ToolCall: &harness.ToolCall{Name: "shell"}},
 			{Text: "second"},
 		}},
 	}
@@ -269,9 +270,9 @@ func TestLastAssistantTextIncludesAllVisibleBlocks(t *testing.T) {
 }
 
 func TestLastAssistantTextSkipsToolOnlyMessage(t *testing.T) {
-	messages := []agent.Message{
-		{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "answer"}}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{{ToolCall: &agent.ToolCall{Name: "read"}}}},
+	messages := []harness.Message{
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "answer"}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{{ToolCall: &harness.ToolCall{Name: "read"}}}},
 	}
 	if got := lastAssistantText(messages); got != "answer" {
 		t.Fatalf("lastAssistantText() = %q, want answer", got)
@@ -279,9 +280,9 @@ func TestLastAssistantTextSkipsToolOnlyMessage(t *testing.T) {
 }
 
 func TestLastAssistantTextSkipsWhitespaceOnlyMessage(t *testing.T) {
-	messages := []agent.Message{
-		{Role: agent.RoleAssistant, Content: []agent.Content{{Text: "answer"}}},
-		{Role: agent.RoleAssistant, Content: []agent.Content{{Text: " \n\t"}}},
+	messages := []harness.Message{
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "answer"}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Text: " \n\t"}}},
 	}
 	if got := lastAssistantText(messages); got != "answer" {
 		t.Fatalf("lastAssistantText() = %q, want answer", got)
@@ -291,9 +292,9 @@ func TestLastAssistantTextSkipsWhitespaceOnlyMessage(t *testing.T) {
 func TestCopyLastResponseUsesInjectedWriter(t *testing.T) {
 	var written string
 	a := &App{
-		agent: newUITestAgent([]agent.Message{{
-			Role:    agent.RoleAssistant,
-			Content: []agent.Content{{Text: "first"}, {Text: "second"}},
+		agent: newUITestAgent([]harness.Message{{
+			Role:    harness.RoleAssistant,
+			Content: []harness.Content{{Text: "first"}, {Text: "second"}},
 		}}),
 		clipboardWrite: func(text string) error {
 			written = text
@@ -317,8 +318,8 @@ func TestCopyLastResponseShowsMissingResponse(t *testing.T) {
 
 func TestCopyLastResponseShowsBackendError(t *testing.T) {
 	a := &App{
-		agent: newUITestAgent([]agent.Message{{
-			Role: agent.RoleAssistant, Content: []agent.Content{{Text: "answer"}},
+		agent: newUITestAgent([]harness.Message{{
+			Role: harness.RoleAssistant, Content: []harness.Content{{Text: "answer"}},
 		}}),
 		clipboardWrite: func(string) error { return errors.New("unavailable") },
 	}
@@ -349,7 +350,7 @@ func TestDetectFilePathsMultiFileFormats(t *testing.T) {
 		t.Fatalf("quoted paths = %#v, want %#v", got, []string{imgOne, imgTwo})
 	}
 
-	uriList := fmt.Sprintf("# comment\nfile://%s\nfile://%s\n", filepath.ToSlash(imgOne), strings.ReplaceAll(filepath.ToSlash(imgTwo), " ", "%20"))
+	uriList := fmt.Sprintf("# comment\n%s\n%s\n", fileuri.FromPath(imgOne), fileuri.FromPath(imgTwo))
 	if got := detectFilePaths(uriList, dir); !reflect.DeepEqual(got, []string{imgOne, imgTwo}) {
 		t.Fatalf("uri-list paths = %#v, want %#v", got, []string{imgOne, imgTwo})
 	}
@@ -413,4 +414,3 @@ func TestApplyClipboardContentsMultiImages(t *testing.T) {
 		t.Fatalf("toast = %#v, want Attached 2 items", a.toast)
 	}
 }
-

@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/coder/acp-go-sdk"
 )
 
 const taskPrompt = `Fix the invoice-total bug reported in this repository: tax must be calculated on the discounted subtotal, not on the original subtotal. Begin by searching for the relevant symbols, inspect the implementation and focused tests, make the smallest correct code change, and run the focused test. Do not use subagents. Finish with a concise summary.`

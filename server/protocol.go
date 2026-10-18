@@ -1,7 +1,7 @@
 package server
 
 import (
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 const (
@@ -42,19 +42,19 @@ type Frame struct {
 	Session string `json:"session,omitempty"`
 	Backend string `json:"backend,omitempty"`
 
-	Text      string               `json:"text,omitempty"`
-	ID        string               `json:"id,omitempty"`
-	Name      string               `json:"name,omitempty"`
-	Kind      string               `json:"kind,omitempty"`
-	Args      string               `json:"args,omitempty"`
-	Locations []agent.ToolLocation `json:"locations,omitempty"`
-	Hint      string               `json:"hint,omitempty"`
-	Content   string               `json:"content,omitempty"`
-	Phase     string               `json:"phase,omitempty"`
-	Message   string               `json:"message,omitempty"`
-	Part      int                  `json:"part,omitempty"`
-	Partial   bool                 `json:"partial,omitempty"`
-	Input     *TurnQueueEntry      `json:"input,omitempty"`
+	Text      string                 `json:"text,omitempty"`
+	ID        string                 `json:"id,omitempty"`
+	Name      string                 `json:"name,omitempty"`
+	Kind      string                 `json:"kind,omitempty"`
+	Args      string                 `json:"args,omitempty"`
+	Locations []harness.ToolLocation `json:"locations,omitempty"`
+	Hint      string                 `json:"hint,omitempty"`
+	Content   string                 `json:"content,omitempty"`
+	Phase     string                 `json:"phase,omitempty"`
+	Message   string                 `json:"message,omitempty"`
+	Part      int                    `json:"part,omitempty"`
+	Partial   bool                   `json:"partial,omitempty"`
+	Input     *TurnQueueEntry        `json:"input,omitempty"`
 }
 
 type TurnQueueEntry struct {
@@ -94,21 +94,21 @@ type ConversationReasoning struct {
 }
 
 type ConversationTool struct {
-	ID        string               `json:"id,omitempty"`
-	Name      string               `json:"name"`
-	Kind      string               `json:"kind,omitempty"`
-	Args      string               `json:"args,omitempty"`
-	Locations []agent.ToolLocation `json:"locations,omitempty"`
-	Hint      string               `json:"hint,omitempty"`
+	ID        string                 `json:"id,omitempty"`
+	Name      string                 `json:"name"`
+	Kind      string                 `json:"kind,omitempty"`
+	Args      string                 `json:"args,omitempty"`
+	Locations []harness.ToolLocation `json:"locations,omitempty"`
+	Hint      string                 `json:"hint,omitempty"`
 }
 
 type ConversationResult struct {
-	ID        string               `json:"id,omitempty"`
-	Name      string               `json:"name"`
-	Kind      string               `json:"kind,omitempty"`
-	Args      string               `json:"args,omitempty"`
-	Locations []agent.ToolLocation `json:"locations,omitempty"`
-	Content   string               `json:"content"`
+	ID        string                 `json:"id,omitempty"`
+	Name      string                 `json:"name"`
+	Kind      string                 `json:"kind,omitempty"`
+	Args      string                 `json:"args,omitempty"`
+	Locations []harness.ToolLocation `json:"locations,omitempty"`
+	Content   string                 `json:"content"`
 }
 
 type FileEntry struct {

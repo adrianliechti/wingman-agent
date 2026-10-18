@@ -88,7 +88,7 @@ func TestLoadSessionReadsCompleteHistoryOrReportsFailure(t *testing.T) {
 			}()
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			_, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: "history", Cwd: "/contract", McpServers: []acp.McpServer{}})
+			_, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: "history", Cwd: contractCwd, McpServers: []acp.McpServer{}})
 			if mode == "read-error" || mode == "page-error" || mode == "repeated-cursor" {
 				if err == nil || ctx.Err() != nil {
 					t.Fatalf("incomplete history silently succeeded or looped: %v", err)

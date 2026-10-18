@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 )
 
@@ -38,16 +40,9 @@ func (w *Workspace) approveMCP(ctx context.Context, ui UI, name string, server m
 		return fmt.Errorf("MCP server %s was not approved; restart the workspace to reconsider", name)
 	}
 	path := filepath.Join(projectStateDir(w.RootPath), "mcp-trust.json")
-	trusted := map[string]bool{}
-	if data, readErr := os.ReadFile(path); readErr == nil {
-		if err := json.Unmarshal(data, &trusted); err != nil {
-			return fmt.Errorf("read MCP approvals: %w", err)
-		}
-	} else if !os.IsNotExist(readErr) {
-		return fmt.Errorf("read MCP approvals: %w", readErr)
-	}
-	if trusted == nil {
-		trusted = map[string]bool{}
+	trusted, err := readTrustFile(path)
+	if err != nil {
+		return fmt.Errorf("read MCP approvals: %w", err)
 	}
 	if trusted[fingerprint] {
 		w.mcpTrustDecisions[fingerprint] = true
@@ -80,6 +75,65 @@ func (w *Workspace) approveMCP(ctx context.Context, ui UI, name string, server m
 		return fmt.Errorf("MCP server %s was not approved", name)
 	}
 	trusted[fingerprint] = true
+	if err := writeTrustFile(path, trusted); err != nil {
+		return err
+	}
+	w.mcpTrustDecisions[fingerprint] = true
+	return nil
+}
+
+// HookTrust stores approved hook fingerprints outside the repository.
+func (w *Workspace) HookTrust() external.TrustStore {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.hookTrust == nil {
+		w.hookTrust = &trustFile{path: filepath.Join(projectStateDir(w.RootPath), "hook-trust.json")}
+	}
+	return w.hookTrust
+}
+
+type trustFile struct {
+	mu   sync.Mutex
+	path string
+}
+
+func (t *trustFile) Trusted(fingerprint string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	trusted, err := readTrustFile(t.path)
+	return err == nil && trusted[fingerprint]
+}
+
+func (t *trustFile) Trust(fingerprint string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	trusted, err := readTrustFile(t.path)
+	if err != nil {
+		return err
+	}
+	trusted[fingerprint] = true
+	return writeTrustFile(t.path, trusted)
+}
+
+func readTrustFile(path string) (map[string]bool, error) {
+	trusted := map[string]bool{}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return trusted, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(data, &trusted); err != nil {
+		return nil, err
+	}
+	if trusted == nil {
+		trusted = map[string]bool{}
+	}
+	return trusted, nil
+}
+
+func writeTrustFile(path string, trusted map[string]bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
@@ -87,7 +141,7 @@ func (w *Workspace) approveMCP(ctx context.Context, ui UI, name string, server m
 	if err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".mcp-trust-*")
+	file, err := os.CreateTemp(filepath.Dir(path), "."+strings.TrimSuffix(filepath.Base(path), ".json")+"-*")
 	if err != nil {
 		return err
 	}
@@ -104,9 +158,5 @@ func (w *Workspace) approveMCP(ctx context.Context, ui UI, name string, server m
 	if closeErr != nil {
 		return closeErr
 	}
-	if err := os.Rename(file.Name(), path); err != nil {
-		return err
-	}
-	w.mcpTrustDecisions[fingerprint] = true
-	return nil
+	return os.Rename(file.Name(), path)
 }

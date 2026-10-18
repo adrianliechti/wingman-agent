@@ -15,11 +15,11 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
-	wingmcp "github.com/adrianliechti/wingman-agent/pkg/mcp"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
@@ -418,7 +418,7 @@ func TestWorkspaceRefreshesMCPToolsAfterListChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manager := wingmcp.NewManager(&wingmcp.Config{Servers: map[string]wingmcp.ServerConfig{}})
+	manager := mcp.NewManager(&mcp.Config{Servers: map[string]mcp.ServerConfig{}})
 	manager.AddSession("dynamic", clientSession)
 	w := &Workspace{MCP: manager}
 	defer w.Close()
@@ -820,6 +820,11 @@ func TestLoadBundledSkillsIncludesCoreWorkflows(t *testing.T) {
 		t.Fatalf("system skills marker = %q, %v", marker, err)
 	}
 
+	resources := map[string][]string{
+		"architecture":    {"references/diagrams.md"},
+		"security-review": {"references/triage.md", "references/remediation.md"},
+		"skill-creator":   {"assets/.gitignore", "assets/SKILL.template.md", "references/skill-format.md"},
+	}
 	names := make(map[string]bool, len(skills))
 	for _, sk := range skills {
 		names[sk.Name] = true
@@ -830,24 +835,27 @@ func TestLoadBundledSkillsIncludesCoreWorkflows(t *testing.T) {
 			t.Errorf("skill %q has empty content", sk.Name)
 		}
 		switch sk.Name {
-		case "architecture", "code-review", "commit", "debug", "feature-dev", "patch", "pull-request", "security-review", "system-design", "test", "threat-model", "triage", "vuln-scan":
+		case "architecture", "code-review", "commit", "debug", "feature-dev", "pull-request", "security-review", "simplify", "test", "threat-model":
 			if !strings.Contains(sk.Content, "$ARGUMENTS") {
 				t.Errorf("argument-taking skill %q does not expose Claude-compatible $ARGUMENTS", sk.Name)
 			}
 		}
-		if sk.Name == "skill-creator" {
-			for _, resource := range []string{"assets/.gitignore", "assets/SKILL.template.md", "references/skill-format.md"} {
-				if _, err := os.Stat(filepath.Join(sk.Location, filepath.FromSlash(resource))); err != nil {
-					t.Errorf("skill-creator resource %q was not copied: %v", resource, err)
-				}
+		if !strings.HasPrefix(sk.Location, systemRoot+string(filepath.Separator)) {
+			t.Errorf("skill %q location %q is outside managed system skills", sk.Name, sk.Location)
+		}
+		for _, resource := range resources[sk.Name] {
+			want, err := bundledFS.ReadFile("skills/" + sk.Name + "/" + resource)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if !strings.HasPrefix(sk.Location, systemRoot+string(filepath.Separator)) {
-				t.Errorf("skill-creator location %q is outside managed system skills", sk.Location)
+			got, err := os.ReadFile(filepath.Join(sk.Location, filepath.FromSlash(resource)))
+			if err != nil || string(got) != string(want) {
+				t.Errorf("skill %q resource %q differs from bundle: %v", sk.Name, resource, err)
 			}
 		}
 	}
 
-	for _, name := range []string{
+	wantNames := []string{
 		"architecture",
 		"code-review",
 		"commit",
@@ -855,17 +863,17 @@ func TestLoadBundledSkillsIncludesCoreWorkflows(t *testing.T) {
 		"feature-dev",
 		"init",
 		"memory",
-		"patch",
 		"pull-request",
 		"security-review",
 		"skill-creator",
 		"simplify",
-		"system-design",
 		"test",
 		"threat-model",
-		"triage",
-		"vuln-scan",
-	} {
+	}
+	if len(skills) != len(wantNames) {
+		t.Errorf("loaded %d bundled skills, want %d; got %v", len(skills), len(wantNames), names)
+	}
+	for _, name := range wantNames {
 		if !names[name] {
 			t.Errorf("bundled skill %q was not loaded; got %v", name, names)
 		}

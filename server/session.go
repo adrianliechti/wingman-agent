@@ -8,31 +8,31 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/google/uuid"
 )
 
 // TranscriptEntry is the visible Wingman model. Provider messages, retry
 // bookkeeping, hidden instructions and journal events never cross this boundary.
 type TranscriptEntry struct {
-	ID            string               `json:"id"`
-	Type          string               `json:"type"`
-	Content       string               `json:"content"`
-	MessageID     string               `json:"messageId,omitempty"`
-	InputID       string               `json:"inputId,omitempty"`
-	Files         []string             `json:"files,omitempty"`
-	Images        []string             `json:"images,omitempty"`
-	ToolID        string               `json:"toolId,omitempty"`
-	ToolName      string               `json:"toolName,omitempty"`
-	ToolKind      string               `json:"toolKind,omitempty"`
-	ToolArgs      string               `json:"toolArgs,omitempty"`
-	ToolLocations []agent.ToolLocation `json:"toolLocations,omitempty"`
-	ToolHint      string               `json:"toolHint,omitempty"`
-	ToolResult    *string              `json:"toolResult,omitempty"`
-	ToolPartial   bool                 `json:"toolPartial,omitempty"`
-	ReasoningID   string               `json:"reasoningId,omitempty"`
+	ID            string                 `json:"id"`
+	Type          string                 `json:"type"`
+	Content       string                 `json:"content"`
+	MessageID     string                 `json:"messageId,omitempty"`
+	InputID       string                 `json:"inputId,omitempty"`
+	Files         []string               `json:"files,omitempty"`
+	Images        []string               `json:"images,omitempty"`
+	ToolID        string                 `json:"toolId,omitempty"`
+	ToolName      string                 `json:"toolName,omitempty"`
+	ToolKind      string                 `json:"toolKind,omitempty"`
+	ToolArgs      string                 `json:"toolArgs,omitempty"`
+	ToolLocations []harness.ToolLocation `json:"toolLocations,omitempty"`
+	ToolHint      string                 `json:"toolHint,omitempty"`
+	ToolResult    *string                `json:"toolResult,omitempty"`
+	ToolPartial   bool                   `json:"toolPartial,omitempty"`
+	ReasoningID   string                 `json:"reasoningId,omitempty"`
 }
 
 type PromptView struct {
@@ -51,6 +51,8 @@ type SessionSettings struct {
 	Modes       []modeOption  `json:"modes"`
 	Unattended  *bool         `json:"unattended,omitempty"`
 	CanDelete   bool          `json:"canDelete"`
+	CanFork     bool          `json:"canFork"`
+	CanCompact  bool          `json:"canCompact"`
 	ModelsError string        `json:"modelsError,omitempty"`
 }
 
@@ -69,18 +71,24 @@ type UsageView struct {
 	ContextWindow   int64 `json:"contextWindow"`
 }
 
+type CompactionView struct {
+	TokensBefore int64 `json:"tokensBefore"`
+	TokensAfter  int64 `json:"tokensAfter"`
+}
+
 type SessionState struct {
-	Status        string            `json:"status"`
-	Phase         string            `json:"phase"`
-	Retry         *agent.RetryInfo  `json:"retry,omitempty"`
-	Error         *string           `json:"error"`
-	Usage         UsageView         `json:"usage"`
-	Prompts       []PromptView      `json:"prompts"`
-	PendingInputs []TurnQueueEntry  `json:"pendingInputs"`
-	QueuePaused   bool              `json:"queuePaused"`
-	CanSteer      bool              `json:"canSteer"`
-	Settings      SessionSettings   `json:"settings"`
-	ToolProgress  map[string]string `json:"toolProgress"`
+	Status        string             `json:"status"`
+	Phase         string             `json:"phase"`
+	Retry         *harness.RetryInfo `json:"retry,omitempty"`
+	Error         *string            `json:"error"`
+	Compaction    *CompactionView    `json:"compaction,omitempty"`
+	Usage         UsageView          `json:"usage"`
+	Prompts       []PromptView       `json:"prompts"`
+	PendingInputs []TurnQueueEntry   `json:"pendingInputs"`
+	QueuePaused   bool               `json:"queuePaused"`
+	CanSteer      bool               `json:"canSteer"`
+	Settings      SessionSettings    `json:"settings"`
+	ToolProgress  map[string]string  `json:"toolProgress"`
 }
 
 type SessionChange struct {
@@ -112,7 +120,6 @@ type sessionController struct {
 	state       SessionState
 	subscribers map[sessionSubscription]struct{}
 	prompts     map[string]pendingPrompt
-	confirmAll  bool
 	textID      string
 	reasoningID string
 	attempt     map[string]bool
@@ -169,7 +176,9 @@ func (b *backendRuntime) settings(sid string) SessionSettings {
 	models, model := b.agent.Models(sid)
 	effort, efforts := b.agent.Effort(sid)
 	modes, mode := b.agent.Modes(sid)
-	state := SessionSettings{Model: model, Effort: effort, Efforts: append([]string{}, efforts...), Mode: mode, Modes: toModeState(modes, mode).Modes, Models: []modelOption{}, CanDelete: supportsDelete(b.agent)}
+	_, canFork := b.agent.(code.SessionForker)
+	_, canCompact := b.agent.(code.Compactor)
+	state := SessionSettings{Model: model, Effort: effort, Efforts: append([]string{}, efforts...), Mode: mode, Modes: toModeState(modes, mode).Modes, Models: []modelOption{}, CanDelete: supportsDelete(b.agent), CanFork: canFork, CanCompact: canCompact}
 	if discovery, ok := b.agent.(interface{ ModelDiscoveryError() error }); ok {
 		if err := discovery.ModelDiscoveryError(); err != nil {
 			state.ModelsError = err.Error()
@@ -195,7 +204,7 @@ func (c *sessionController) refreshSettings() {
 	settings := c.backend.settings(c.ref.SessionID)
 	usage := c.backend.agent.Usage(c.ref.SessionID)
 	if usage.ContextWindow <= 0 && usage.LastInputTokens > 0 {
-		usage.ContextWindow = int64(agent.ContextWindowFor(settings.Model))
+		usage.ContextWindow = int64(harness.ContextWindowFor(settings.Model))
 	}
 	u := UsageView{usage.InputTokens, usage.CacheReadInputTokens, usage.OutputTokens, usage.LastInputTokens, usage.ContextWindow}
 	c.mu.Lock()
@@ -283,6 +292,7 @@ func (c *sessionController) apply(f Frame) {
 	case EvtTurnInput:
 		if f.Input != nil && (f.Input.State == string(code.TurnInputActive) || f.Input.State == string(code.TurnInputSteered)) {
 			c.state.Error = nil
+			c.state.Compaction = nil
 			if f.Input.Origin != "task" && (f.Input.Text != "" || len(f.Input.Files)+len(f.Input.Images) > 0) {
 				c.upsertLocked(TranscriptEntry{ID: "input:" + f.Input.ID, InputID: f.Input.ID, Type: "user", Content: f.Input.Text, Files: f.Input.Files, Images: f.Input.Images})
 			}
@@ -385,17 +395,17 @@ func visibleInput(input code.TurnInput) code.TurnInputDisplay {
 	return out
 }
 
-func transcriptEntries(messages []agent.Message) []TranscriptEntry {
+func transcriptEntries(messages []harness.Message) []TranscriptEntry {
 	entries := []TranscriptEntry{}
 	for mi, m := range convertMessages(messages) {
 		if m.Role == "user" {
 			input := code.TurnInput{}
 			for _, part := range m.Content {
 				if part.Text != "" {
-					input.Content = append(input.Content, agent.Content{Text: part.Text})
+					input.Content = append(input.Content, harness.Content{Text: part.Text})
 				}
 				if part.Image != nil {
-					input.Content = append(input.Content, agent.Content{File: &agent.File{Data: part.Image.Data}})
+					input.Content = append(input.Content, harness.Content{File: &harness.File{Data: part.Image.Data}})
 				}
 			}
 			v := visibleInput(input)

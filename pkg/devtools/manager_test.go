@@ -306,7 +306,11 @@ func TestMavenRecipeUsesWrapperAsInstallerPrerequisite(t *testing.T) {
 		t.Fatalf("Status without Maven = %+v, %v", statuses, err)
 	}
 
-	wrapper := filepath.Join(workspace, "mvnw")
+	wrapperName := "mvnw"
+	if runtime.GOOS == "windows" {
+		wrapperName = "mvnw.cmd"
+	}
+	wrapper := filepath.Join(workspace, wrapperName)
 	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

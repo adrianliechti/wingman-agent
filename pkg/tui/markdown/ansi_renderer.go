@@ -83,11 +83,36 @@ func (r *ANSIRenderer) renderDocument(w util.BufWriter, source []byte, node ast.
 	return ast.WalkContinue, nil
 }
 
+// Some blocks supply their own trailing gap. Reuse it when rendering the
+// next block, including when a list or quote contains the trailing gap.
+func hasTrailingGap(node ast.Node) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind() {
+	case ast.KindCodeBlock, ast.KindFencedCodeBlock, east.KindTable:
+		return true
+	case ast.KindList, ast.KindBlockquote:
+		return hasTrailingGap(node.LastChild())
+	case ast.KindListItem:
+		// Tight list text relies on the item's closing newline. Other
+		// children already end a line, so the item finishes with a gap.
+		last := node.LastChild()
+		return last != nil && last.Kind() != ast.KindTextBlock
+	}
+	return false
+}
+
+func needsBlockSeparator(node ast.Node) bool {
+	previous := node.PreviousSibling()
+	return previous != nil && !hasTrailingGap(previous)
+}
+
 func (r *ANSIRenderer) renderHeading(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.Heading)
 
 	if entering {
-		if node.PreviousSibling() != nil {
+		if needsBlockSeparator(node) {
 			w.WriteString("\n")
 		}
 		fmt.Fprintf(w, "%s%s%s ", r.dim(), strings.Repeat("#", n.Level), ansi.Reset+ansi.Bold)
@@ -102,7 +127,7 @@ func (r *ANSIRenderer) renderHeading(w util.BufWriter, source []byte, node ast.N
 
 func (r *ANSIRenderer) renderBlockquote(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		if node.PreviousSibling() != nil {
+		if needsBlockSeparator(node) {
 			w.WriteString("\n")
 		}
 		fmt.Fprintf(w, "%s> %s", r.dim(), ansi.Reset)
@@ -113,18 +138,7 @@ func (r *ANSIRenderer) renderBlockquote(w util.BufWriter, source []byte, node as
 
 func (r *ANSIRenderer) renderCodeBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		if node.PreviousSibling() != nil {
-			w.WriteString("\n")
-		}
-		n := node.(*ast.CodeBlock)
-		var code strings.Builder
-		lines := n.Lines()
-
-		for i := 0; i < lines.Len(); i++ {
-			line := lines.At(i)
-			code.Write(line.Value(source))
-		}
-		w.WriteString(formatCodeBlock(code.String(), "", r.theme))
+		r.writeCodeBlock(w, source, node, "")
 	}
 
 	return ast.WalkContinue, nil
@@ -132,9 +146,6 @@ func (r *ANSIRenderer) renderCodeBlock(w util.BufWriter, source []byte, node ast
 
 func (r *ANSIRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		if node.PreviousSibling() != nil {
-			w.WriteString("\n")
-		}
 		n := node.(*ast.FencedCodeBlock)
 		lang := ""
 
@@ -144,22 +155,28 @@ func (r *ANSIRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte, no
 				lang = lang[:idx]
 			}
 		}
-		var code strings.Builder
-		lines := n.Lines()
-
-		for i := 0; i < lines.Len(); i++ {
-			line := lines.At(i)
-			code.Write(line.Value(source))
-		}
-		w.WriteString(formatCodeBlock(code.String(), lang, r.theme))
+		r.writeCodeBlock(w, source, node, lang)
 	}
 
 	return ast.WalkContinue, nil
 }
 
+func (r *ANSIRenderer) writeCodeBlock(w util.BufWriter, source []byte, node ast.Node, lang string) {
+	previous := node.PreviousSibling()
+	if !hasTrailingGap(previous) {
+		w.WriteString("\n")
+		// Tight list text has no paragraph terminator of its own.
+		if previous != nil && previous.Kind() == ast.KindTextBlock {
+			w.WriteString("\n")
+		}
+	}
+	w.WriteString(formatCodeBlock(string(node.Lines().Value(source)), lang, r.theme))
+	w.WriteString("\n")
+}
+
 func (r *ANSIRenderer) renderParagraph(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		if node.PreviousSibling() != nil {
+		if needsBlockSeparator(node) {
 			w.WriteString("\n")
 		}
 	} else {
@@ -171,7 +188,9 @@ func (r *ANSIRenderer) renderParagraph(w util.BufWriter, source []byte, node ast
 
 func (r *ANSIRenderer) renderList(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		if node.PreviousSibling() != nil {
+		if previous := node.PreviousSibling(); previous != nil && previous.Kind() == ast.KindTextBlock {
+			w.WriteString("\n")
+		} else if needsBlockSeparator(node) {
 			if _, isListItem := node.Parent().(*ast.ListItem); !isListItem {
 				w.WriteString("\n")
 			}
@@ -207,7 +226,7 @@ func (r *ANSIRenderer) renderListItem(w util.BufWriter, source []byte, node ast.
 		} else {
 			fmt.Fprintf(w, "%s%s•%s ", indent.String(), r.dim(), ansi.Reset)
 		}
-	} else {
+	} else if !hasTrailingGap(node.LastChild()) {
 		w.WriteString("\n")
 	}
 
@@ -216,7 +235,7 @@ func (r *ANSIRenderer) renderListItem(w util.BufWriter, source []byte, node ast.
 
 func (r *ANSIRenderer) renderThematicBreak(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		if node.PreviousSibling() != nil {
+		if needsBlockSeparator(node) {
 			w.WriteString("\n")
 		}
 		fmt.Fprintf(w, "%s%s%s\n", r.border(), strings.Repeat("─", 40), ansi.Reset)

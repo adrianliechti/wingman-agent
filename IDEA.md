@@ -8,19 +8,19 @@ Unmerged branches: `feature/sandbox`, `feature/browser`, `feature/remote` (80–
 
 ## Next
 
-1. **Auto-review approvals** — utility model judges risky shell/fetch calls instead of prompting; reason + one retry; circuit breaker on repeated denials (CC auto mode, Codex auto-review).
+1. **Auto-review follow-ups** — read-only investigation tools for the reviewer (inspect an `rm` target, git remotes); `/approve` one retry of a recent denial; reviewer status in the UI (Codex).
 2. **Permission rules** — declarative allow/ask/deny with `tool(pattern)`, deny > ask > allow; grants double as sandbox config (AG).
-3. **OS sandbox** — revive `feature/sandbox`: Seatbelt/bubblewrap, network domain allowlist (all three).
+3. **OS sandbox** — revive `feature/sandbox` and its escalation path: commands run sandboxed, only blocked ones go to the reviewer; then plan mode and read-only subagents use a read-only sandbox and the shell classifier shrinks to Codex size (all three).
 4. **Worktree isolation** — per subagent and per session, `.worktreeinclude`, merge-back (all three).
 5. **`/goal`** — persisted objective, independent evaluator decides "done", token/time budget (all three).
-6. **Session ergonomics** — `/compact [focus]`, `/fork` + edit-earlier-message-and-fork, `/btw` side question, rename + content search (all three).
+6. **Session ergonomics** — edit-earlier-message-and-fork, `/btw` side question, rename + content search (all three).
 7. **MCP context cost** — tool search / deferred schemas; forward image content (dropped today) (CC, Codex).
 8. **Commentable artifacts** — inline comments on plans, diffs, screenshots → "Proceed" or send all as one review (AG).
 9. **Browser agent** — revive `feature/browser`: screenshots, console, DOM, recordings (all three).
 
 ## Agent & CLI
 
-- **Hooks** — run `mcp_tool`/`async` handlers (Codex ships both now, so the "Codex parity" skip is stale); `prompt`/`agent` handlers (CC); events PostToolUseFailure, PermissionDenied, Notification, FileChanged, Interrupt; hash-based hook trust (Codex).
+- **Hooks** — `prompt`/`agent` handlers once Codex runs them; events PostToolUseFailure, PermissionDenied, Notification, FileChanged (CC); a channel for `systemMessage`/`statusMessage`; deliver async output into subagents.
 - **Skills** — enforce `allowed-tools` (parsed, unused); `paths` globs for activation; `` !`cmd` `` output injection (CC).
 - **Instructions** — `@path` imports in AGENTS.md; glob-scoped `.agents/rules/*.md` (CC, AG).
 - **Memory** — `/learn` proposes a memory/rule/skill diff the user approves (AG); list/delete UI.

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
@@ -38,7 +38,7 @@ func TestStreamCellsRefreshForContentLayoutAndTheme(t *testing.T) {
 	check(80)
 	a.streamCurrent = streamSnapshot{toolName: "shell", toolHint: "go test", toolProgress: "running"}
 	check(80)
-	a.streamCurrent.completeTool(&agent.ToolResult{Name: "shell", Content: "all tests passed"})
+	a.streamCurrent.completeTool(&harness.ToolResult{Name: "shell", Content: "all tests passed"})
 	check(80)
 	a.promptActive = true
 	check(80)
@@ -124,7 +124,7 @@ func TestSurfacesFitResponsiveWidths(t *testing.T) {
 	a := &App{
 		ctx: context.Background(), agent: newUITestAgent(nil), sessionID: "session",
 		editor:          NewEditor(),
-		pendingContent:  []agent.Content{{File: &agent.File{Data: "image"}}},
+		pendingContent:  []harness.Content{{File: &harness.File{Data: "image"}}},
 		pendingFiles:    []string{"pkg/tui/code/view.go"},
 		lastInputTokens: 35, contextWindow: 100,
 	}

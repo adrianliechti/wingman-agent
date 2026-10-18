@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
 	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
 type uiTestAgent struct {
 	workspace *corecode.Workspace
-	messages  []agent.Message
+	messages  []harness.Message
 	revision  uint64
 	snapshots int
 	model     string
@@ -24,7 +24,7 @@ type uiTestAgent struct {
 	sessions  []corecode.SessionInfo
 }
 
-func newUITestAgent(messages []agent.Message) *uiTestAgent {
+func newUITestAgent(messages []harness.Message) *uiTestAgent {
 	return &uiTestAgent{
 		workspace: &corecode.Workspace{RootPath: "/workspace"},
 		messages:  messages,
@@ -71,25 +71,25 @@ func (a *uiTestAgent) ListSessions(context.Context) ([]corecode.SessionInfo, err
 func (a *uiTestAgent) NewSession(context.Context) (string, error)  { return "new", nil }
 func (a *uiTestAgent) LoadSession(context.Context, string) error   { return nil }
 func (a *uiTestAgent) DeleteSession(context.Context, string) error { return nil }
-func (a *uiTestAgent) Messages(string) []agent.Message             { return a.messages }
+func (a *uiTestAgent) Messages(string) []harness.Message           { return a.messages }
 func (a *uiTestAgent) HistorySnapshot(string) corecode.HistorySnapshot {
 	a.snapshots++
-	return corecode.HistorySnapshot{Messages: agent.CloneMessages(a.messages), Revision: a.revision}
+	return corecode.HistorySnapshot{Messages: harness.CloneMessages(a.messages), Revision: a.revision}
 }
 func (a *uiTestAgent) HistoryVersion(string) corecode.HistoryVersion {
 	return corecode.HistoryVersion{Revision: a.revision, MessageCount: len(a.messages)}
 }
-func (a *uiTestAgent) Usage(string) agent.Usage { return agent.Usage{} }
-func (a *uiTestAgent) Send(context.Context, string, []agent.Content) (iter.Seq2[agent.Message, error], error) {
-	return func(func(agent.Message, error) bool) {}, nil
+func (a *uiTestAgent) Usage(string) harness.Usage { return harness.Usage{} }
+func (a *uiTestAgent) Send(context.Context, string, []harness.Content) (iter.Seq2[harness.Message, error], error) {
+	return func(func(harness.Message, error) bool) {}, nil
 }
 func (a *uiTestAgent) Cancel(string) {}
 func (a *uiTestAgent) Close() error  { return nil }
 
 func (a *uiTestAgent) RecordUserShellCommand(_ string, command, output string, exitCode int, duration time.Duration) error {
-	a.messages = append(a.messages, agent.Message{
-		Role:    agent.RoleUser,
-		Content: []agent.Content{{Text: corecode.FormatUserShellCommand(command, output, exitCode, duration)}},
+	a.messages = append(a.messages, harness.Message{
+		Role:    harness.RoleUser,
+		Content: []harness.Content{{Text: corecode.FormatUserShellCommand(command, output, exitCode, duration)}},
 	})
 	a.revision++
 	return nil
@@ -97,7 +97,8 @@ func (a *uiTestAgent) RecordUserShellCommand(_ string, command, output string, e
 
 func waitForSessionOperation(t *testing.T, a *App) {
 	t.Helper()
-	deadline := time.NewTimer(2 * time.Second)
+	// Generous ceiling: a cold PowerShell start alone can take seconds.
+	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
 	for a.operationPending {
 		select {

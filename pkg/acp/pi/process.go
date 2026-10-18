@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	acpcommon "github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/google/uuid"
 
 	processutil "github.com/adrianliechti/wingman-agent/internal/process"
@@ -40,7 +40,7 @@ type process struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
 
-	writeMu   acpcommon.PromptGate
+	writeMu   acp.PromptGate
 	closeOnce sync.Once
 	failOnce  sync.Once
 
@@ -90,7 +90,7 @@ func spawn(opts spawnOptions) (*process, error) {
 
 	p := &process{
 		cmd:     cmd,
-		stdin:   acpcommon.NewConnectionWriter(stdin, 0),
+		stdin:   acp.NewConnectionWriter(stdin, 0),
 		pending: map[string]chan rpcResponse{},
 		done:    make(chan struct{}),
 	}
@@ -200,7 +200,7 @@ func (p *process) writeLineContext(ctx context.Context, v any) error {
 	default:
 	}
 
-	_, err = acpcommon.Call(ctx, func() (int, error) {
+	_, err = acp.Call(ctx, func() (int, error) {
 		n, err := p.stdin.Write(append(data, '\n'))
 		if err == nil && n != len(data)+1 {
 			err = io.ErrShortWrite

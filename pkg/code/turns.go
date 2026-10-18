@@ -7,7 +7,7 @@ import (
 	"maps"
 	"sync"
 
-	"github.com/adrianliechti/wingman-agent/pkg/agent"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 type managedTurnInput struct {
@@ -26,10 +26,11 @@ type managedTurnSession struct {
 	queued  []*managedTurnInput
 	steered []*managedTurnInput
 
-	cancel          context.CancelFunc
+	cancel          context.CancelCauseFunc
 	cancelRequested bool
 	paused          bool
 	running         bool
+	compacting      bool
 	ids             map[string]struct{}
 }
 
@@ -311,19 +312,19 @@ func (m *TurnManager) runSession(sessionID string, s *managedTurnSession) {
 			s.mu.Unlock()
 			return
 		}
-		runCtx, cancel := context.WithCancel(WithSessionID(m.ctx, sessionID))
+		runCtx, cancel := context.WithCancelCause(WithSessionID(m.ctx, sessionID))
 		s.cancel = cancel
 		cancelBeforeStart := s.cancelRequested || m.ctx.Err() != nil
 		s.mu.Unlock()
 
 		var runErr error
 		if cancelBeforeStart {
-			cancel()
+			cancel(nil)
 			runErr = context.Canceled
 		} else {
 			runErr = m.executeInput(runCtx, sessionID, item)
 		}
-		cancel()
+		cancel(nil)
 
 		s.mu.Lock()
 		cancelled := s.cancelRequested || errors.Is(runErr, context.Canceled)
@@ -340,33 +341,14 @@ func (m *TurnManager) runSession(sessionID string, s *managedTurnSession) {
 		state := TurnInputCompleted
 		if cancelled {
 			state = TurnInputCancelled
-		} else if errors.Is(runErr, agent.ErrTurnIncomplete) {
+		} else if errors.Is(runErr, harness.ErrTurnIncomplete) {
 			state = TurnInputIncomplete
 		} else if runErr != nil {
 			state = TurnInputFailed
 		}
 		item.terminal, item.err = state, runErr
 
-		var next *managedTurnInput
-		promote := func() error {
-			if m.ctx.Err() == nil && !s.paused && len(s.queued) > 0 {
-				next = s.queued[0]
-				s.queued = s.queued[1:]
-				s.active = next
-			}
-			if err := m.persistLocked(sessionID, s); err != nil {
-				if next != nil {
-					s.active = nil
-					s.queued = append([]*managedTurnInput{next}, s.queued...)
-					next = nil
-				}
-				s.paused = len(s.queued) > 0
-				s.queueErr = err
-				return err
-			}
-			return nil
-		}
-		persistErr := promote()
+		next, persistErr := m.promoteLocked(sessionID, s)
 		// Keep running true until terminal callbacks have projected the finished
 		// turn. New submits during finalization remain queued behind that boundary.
 		s.mu.Unlock()
@@ -376,7 +358,7 @@ func (m *TurnManager) runSession(sessionID string, s *managedTurnSession) {
 		}
 		s.mu.Lock()
 		if next == nil && persistErr == nil {
-			persistErr = promote()
+			next, persistErr = m.promoteLocked(sessionID, s)
 		}
 		s.running = next != nil
 		s.mu.Unlock()
@@ -396,16 +378,16 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 			err = fmt.Errorf("agent turn panicked: %v", recovered)
 		}
 	}()
-	ctx = agent.WithInputID(ctx, item.input.ID)
-	ctx = agent.WithStreamEventHandlers(ctx, agent.StreamEventHandlers{
-		Retry: func(info agent.RetryInfo) {
+	ctx = harness.WithInputID(ctx, item.input.ID)
+	ctx = harness.WithStreamEventHandlers(ctx, harness.StreamEventHandlers{
+		Retry: func(info harness.RetryInfo) {
 			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, Retry: &info})
 		},
 		Reset: func() {
-			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, StreamEvent: agent.StreamEventReset})
+			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, StreamEvent: harness.StreamEventReset})
 		},
 		Commit: func() {
-			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, StreamEvent: agent.StreamEventCommit})
+			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, StreamEvent: harness.StreamEventCommit})
 		},
 	})
 	stream, err := m.agent.Send(ctx, sessionID, item.input.Content)
@@ -423,6 +405,79 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 		m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, Message: &copy})
 	}
 	return nil
+}
+
+// StartCompact runs compaction as the session's exclusive operation; inputs queue behind it.
+func (m *TurnManager) StartCompact(sessionID, focus string, done func(harness.CompactResult, error)) error {
+	compactor, ok := m.agent.(Compactor)
+	if !ok {
+		return errors.ErrUnsupported
+	}
+	if !m.beginWork() {
+		return m.ctx.Err()
+	}
+	defer m.workers.Done()
+	s := m.session(sessionID)
+	s.mu.Lock()
+	if !s.queueLoaded {
+		err := s.queueErr
+		s.mu.Unlock()
+		return err
+	}
+	if s.active != nil || s.running {
+		s.mu.Unlock()
+		return ErrTurnInProgress
+	}
+	ctx, cancel := context.WithCancelCause(WithSessionID(m.ctx, sessionID))
+	s.running, s.compacting = true, true
+	s.cancel, s.cancelRequested = cancel, false
+	s.done = make(chan struct{})
+	finished := s.done
+	s.mu.Unlock()
+
+	m.workers.Go(func() {
+		defer close(finished)
+		result, err := compactor.Compact(ctx, sessionID, focus)
+		cancel(nil)
+
+		s.mu.Lock()
+		s.compacting = false
+		s.cancel, s.cancelRequested = nil, false
+		next, persistErr := m.promoteLocked(sessionID, s)
+		s.running = next != nil
+		s.mu.Unlock()
+
+		done(result, err)
+		if persistErr != nil {
+			m.emit(TurnEvent{SessionID: sessionID, State: TurnInputFailed, Err: persistErr})
+		}
+		if next == nil {
+			return
+		}
+		m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(next.input), InputID: next.input.ID, State: TurnInputActive, Intent: next.input.Intent})
+		m.runSession(sessionID, s)
+	})
+	return nil
+}
+
+// promoteLocked activates the next queued input unless paused and persists the queue.
+func (m *TurnManager) promoteLocked(sessionID string, s *managedTurnSession) (*managedTurnInput, error) {
+	var next *managedTurnInput
+	if m.ctx.Err() == nil && !s.paused && len(s.queued) > 0 {
+		next = s.queued[0]
+		s.queued = s.queued[1:]
+		s.active = next
+	}
+	if err := m.persistLocked(sessionID, s); err != nil {
+		if next != nil {
+			s.active = nil
+			s.queued = append([]*managedTurnInput{next}, s.queued...)
+		}
+		s.paused = len(s.queued) > 0
+		s.queueErr = err
+		return nil, err
+	}
+	return next, nil
 }
 
 func (m *TurnManager) RemoveQueued(sessionID, inputID string) error {
@@ -549,7 +604,7 @@ func (m *TurnManager) cancelSession(sessionID string, clearQueue bool) error {
 	s.mu.Unlock()
 
 	if cancel != nil {
-		cancel()
+		cancel(harness.ErrInterrupted)
 	}
 	m.agent.Cancel(sessionID)
 	for _, item := range queued {
@@ -654,7 +709,7 @@ func (m *TurnManager) Snapshot(sessionID string) TurnSnapshot {
 	s := m.session(sessionID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := TurnSnapshot{Paused: s.paused, Features: m.Features(sessionID), Error: s.queueErr}
+	out := TurnSnapshot{Paused: s.paused, Compacting: s.compacting, Features: m.Features(sessionID), Error: s.queueErr}
 	if s.active != nil {
 		out.Inputs = append(out.Inputs, TurnInputSnapshot{
 			Input: CloneTurnInput(s.active.input), ID: s.active.input.ID, State: TurnInputActive, Intent: s.active.input.Intent,
@@ -702,7 +757,7 @@ func (m *TurnManager) Close() {
 		cancel := s.cancel
 		s.mu.Unlock()
 		if cancel != nil {
-			cancel()
+			cancel(nil)
 		}
 		m.agent.Cancel(id)
 	}
