@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/adrianliechti/wingman-agent/pkg/external/antigravity"
 	"github.com/adrianliechti/wingman-agent/pkg/external/claude"
 	"github.com/adrianliechti/wingman-agent/pkg/external/claude-desktop"
 	"github.com/adrianliechti/wingman-agent/pkg/external/codex"
@@ -27,6 +28,8 @@ func runRun(ctx context.Context, args []string) {
 	var err error
 
 	switch args[0] {
+	case "antigravity":
+		err = antigravity.Run(ctx, args[1:], nil)
 	case "claude":
 		err = claude.Run(ctx, args[1:], nil)
 	case "claude-desktop":

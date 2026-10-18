@@ -119,7 +119,7 @@ Usage:
   wingman extract <path>        Extract text from a document (PDF, DOCX, XLSX, PPTX, ...)
 
 Run targets:
-  claude, claude-desktop, codex, copilot, gemini, goose, junie, opencode, pi
+  antigravity, claude, claude-desktop, codex, copilot, gemini, goose, junie, opencode, pi
 
 TUI flags:
   --agent, -a name     Use wingman or any detected/configured agent (default: wingman)
