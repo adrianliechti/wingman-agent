@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
 )
 
@@ -194,14 +193,8 @@ func (a *Agent) newStepRequest(ctx context.Context, nativeContinuation bool) (co
 		instructions = a.Instructions()
 	}
 
-	// Re-read per round like model and instructions: the session mode can
-	// change mid-turn, and it decides which tools are offered.
-	var tools []tool.Tool
-	if a.Tools != nil {
-		// A catalog may reuse its backing slice when settings change.
-		// Keep the executors offered by this request until it completes.
-		tools = slices.Clone(a.Tools())
-	}
+	// Policy stays live even when the catalog is pinned for this turn.
+	tools := a.AvailableTools()
 	var outputSchema map[string]any
 	if schema, ok := OutputSchemaFromContext(ctx); ok {
 		outputSchema = schema

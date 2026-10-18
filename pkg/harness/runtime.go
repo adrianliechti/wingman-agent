@@ -79,6 +79,8 @@ type RuntimeEvent struct {
 // EventRecorder is the durability boundary. Implementations must append the
 // whole batch in order or return an error without reporting success. Agent
 // applies events to its in-memory projections only after this call succeeds.
+// Appends deliberately have no operation context: completed effects still
+// need durable records after cancellation (for example, a successful undo).
 type EventRecorder interface {
 	AppendEvents(events []RuntimeEvent) error
 }

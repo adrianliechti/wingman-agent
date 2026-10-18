@@ -9,6 +9,7 @@ import (
 	"maps"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -53,6 +54,12 @@ type Agent struct {
 	queueMu         sync.Mutex
 	running         bool
 	finishing       bool
+	closed          bool
+	cancel          context.CancelCauseFunc
+	closeWait       <-chan struct{}
+	turnID          string
+	turnTools       []tool.Tool
+	toolsPinned     bool
 	pendingInput    []Message
 	startOnce       sync.Once
 	toolRunsMu      sync.Mutex
@@ -84,7 +91,7 @@ func (a *Agent) QueueInputWithID(input []Content, id string) bool {
 	input = CloneContent(input)
 	a.queueMu.Lock()
 	defer a.queueMu.Unlock()
-	if !a.running || a.finishing {
+	if !a.running || a.finishing || a.closed {
 		return false
 	}
 	message := userMessage(input)
@@ -96,7 +103,8 @@ func (a *Agent) QueueInputWithID(input []Content, id string) bool {
 // Send starts exactly one turn. It never queues implicitly: callers that want
 // to guide the active turn must use QueueInput, while FIFO follow-ups belong in
 // a caller-owned session orchestrator. Setup errors are returned immediately;
-// failures after the turn starts are yielded by the returned stream.
+// failures after the turn starts are yielded by the returned stream. Consume
+// the stream exactly once, including after cancellation, to settle the turn.
 func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, error], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -106,16 +114,53 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	}
 	input = CloneContent(input)
 
-	a.queueMu.Lock()
-	if a.running {
-		a.queueMu.Unlock()
-		return nil, ErrTurnInProgress
+	ctx, endOperation, err := a.beginOperation(ctx, false)
+	if err != nil {
+		return nil, err
 	}
-	a.running = true
-	a.finishing = false
-	a.queueMu.Unlock()
-
 	ctx, cancelBudget := a.Config.withTaskBudget(ctx)
+	release := func() {
+		cancelBudget()
+		endOperation()
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
+	stream, err := a.send(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	handedOff = true
+	var consumed atomic.Bool
+	return func(yield func(Message, error) bool) {
+		if !consumed.CompareAndSwap(false, true) {
+			yield(Message{}, errors.New("agent turn stream already consumed"))
+			return
+		}
+		defer release()
+		stream(yield)
+	}, nil
+}
+
+func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, error], error) {
+	if a.PrepareTurn != nil {
+		var err error
+		input, err = a.PrepareTurn(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		input = CloneContent(input)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(input) == 0 {
+		return nil, ErrEmptyInput
+	}
+	a.pinTools()
 	runtime := a.hookRuntime(ctx)
 	runtime.TurnID = uuid.NewString()
 	ctx = hook.WithRuntime(ctx, runtime)
@@ -126,21 +171,40 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	if err := a.recordEvents(RuntimeEvent{
 		Type: EventTurnStarted, TurnID: runtime.TurnID, Model: runtime.Model,
 	}); err != nil {
-		cancelBudget()
-		a.setRunning(false)
 		telemetryInvocation.End(telemetry.Outcome{Err: err})
 		return nil, err
 	}
+	a.queueMu.Lock()
+	a.turnID = runtime.TurnID
+	a.finishing = false
+	a.queueMu.Unlock()
+
+	// Setup and streaming share one terminal path. A panic in a startup hook
+	// must settle the ledger just like a panic after stream consumption starts.
+	var finishOnce sync.Once
+	var terminalErr error
+	finish := func(status RuntimeStatus, outcomeErr error) error {
+		finishOnce.Do(func() {
+			defer func() {
+				telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(outcomeErr, terminalErr)})
+			}()
+			terminalErr = a.finishTurn(ctx, runtime.TurnID, status, outcomeErr, turnUsageBefore)
+		})
+		return terminalErr
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			finish(RuntimeFailed, fmt.Errorf("agent turn setup panicked: %v", r))
+			panic(r)
+		}
+	}()
 
 	failSetup := func(err error) (iter.Seq2[Message, error], error) {
-		defer cancelBudget()
 		status := RuntimeFailed
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			status = RuntimeInterrupted
 		}
-		terminalErr := a.finishTurn(ctx, runtime.TurnID, status, err, turnUsageBefore)
-		telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(err, terminalErr)})
-		return nil, errors.Join(err, terminalErr)
+		return nil, errors.Join(err, finish(status, err))
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -180,7 +244,6 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	}
 
 	return func(yield func(Message, error) bool) {
-		defer cancelBudget()
 		status := RuntimeCompleted
 		var outcomeErr error
 		consumerOpen := true
@@ -190,8 +253,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				status = RuntimeFailed
 				outcomeErr = fmt.Errorf("agent turn panicked: %v", r)
 			}
-			finishErr := a.finishTurn(ctx, runtime.TurnID, status, outcomeErr, turnUsageBefore)
-			telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(outcomeErr, finishErr)})
+			finishErr := finish(status, outcomeErr)
 			if r != nil {
 				panic(r)
 			}
@@ -587,15 +649,6 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 	return resp, runErr
 }
 
-func (a *Agent) setRunning(running bool) {
-	a.queueMu.Lock()
-	a.running = running
-	if !running {
-		a.finishing = false
-	}
-	a.queueMu.Unlock()
-}
-
 func (a *Agent) finishTurn(ctx context.Context, turnID string, status RuntimeStatus, outcomeErr error, before Usage) error {
 	a.queueMu.Lock()
 	a.finishing = true
@@ -626,7 +679,6 @@ func (a *Agent) finishTurn(ctx context.Context, turnID string, status RuntimeSta
 	if status == RuntimeInterrupted && errors.Is(context.Cause(ctx), ErrInterrupted) {
 		a.runInterruptHooks(ctx)
 	}
-	a.setRunning(false)
 	return errors.Join(appendErr, recordErr)
 }
 

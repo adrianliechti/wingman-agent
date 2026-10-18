@@ -222,15 +222,11 @@ type CompactResult struct {
 
 // Compact checkpoints the context between turns; focus tells the summary what to keep.
 func (a *Agent) Compact(ctx context.Context, focus string) (CompactResult, error) {
-	a.queueMu.Lock()
-	if a.running {
-		a.queueMu.Unlock()
-		return CompactResult{}, ErrTurnInProgress
+	ctx, release, err := a.beginOperation(ctx, true)
+	if err != nil {
+		return CompactResult{}, err
 	}
-	// finishing keeps QueueInput from accepting steering that no turn consumes.
-	a.running, a.finishing = true, true
-	a.queueMu.Unlock()
-	defer a.setRunning(false)
+	defer release()
 
 	if !slices.ContainsFunc(a.requestMessages(), func(m Message) bool { return m.Role == RoleAssistant }) {
 		return CompactResult{}, ErrNothingToCompact

@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
@@ -393,5 +394,38 @@ func TestUnattendedHookApprovalIsNotRemembered(t *testing.T) {
 	s.unattended.Store(false)
 	if err := trust.Trust("sha256:asked"); err != nil || !store["sha256:asked"] {
 		t.Fatalf("attended approval not persisted: %v %v", store, err)
+	}
+}
+
+func TestInlineReviewsShareForegroundTurnBudget(t *testing.T) {
+	s := &sessionState{aa: &harness.Agent{Config: &harness.Config{}}}
+	stream, err := s.aa.Send(t.Context(), []harness.Content{{Text: "work"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID := s.aa.ActiveTurnID()
+	if parentID == "" {
+		t.Fatal("active turn has no ID")
+	}
+	for i := range reviewConsecutiveDenials {
+		ctx := hook.WithRuntime(t.Context(), hook.Runtime{TurnID: fmt.Sprintf("inline-child-%d", i)})
+		key := s.reviewTurn(ctx)
+		if key != parentID {
+			t.Fatalf("child review key = %q, want %q", key, parentID)
+		}
+		_, _, tripped := s.reviews.record(key, true)
+		if tripped != (i == reviewConsecutiveDenials-1) {
+			t.Fatal("inline child reset the rejection budget")
+		}
+		background := tool.WithBackgroundOrigin(ctx, "detached")
+		if s.reviewTurn(background) == parentID {
+			t.Fatal("background task shared foreground rejection budget")
+		}
+	}
+	s.aa.Cancel(nil)
+	for range stream {
+	}
+	if s.aa.ActiveTurnID() != "" {
+		t.Fatal("completed turn kept its active ID")
 	}
 }

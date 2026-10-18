@@ -88,6 +88,19 @@ type Config struct {
 	Tools        func() []tool.Tool
 	Instructions func() string
 
+	// PrepareTurn runs after reserving the session, before hooks and catalog
+	// capture. It may prepare host resources or append context to the input.
+	PrepareTurn func(context.Context, []Content) ([]Content, error)
+	// CloseSession releases host-owned resources before SessionEnd hooks.
+	// Neither callback is inherited by delegated agents.
+	CloseSession func() error
+
+	// PinTools snapshots Tools after PrepareTurn for the duration of a turn.
+	// FilterTools applies current host policy to an owned copy of that catalog
+	// at each request boundary. Leave PinTools false for a fully live catalog.
+	PinTools    bool
+	FilterTools func([]tool.Tool) []tool.Tool
+
 	// PermissionMode reports the active mode for hooks at each request boundary.
 	PermissionMode func() string
 
@@ -174,6 +187,8 @@ func (c *Config) Derive() *Config {
 	child.Hooks.SessionStart = nil
 	child.Hooks.SessionEnd = nil
 	child.Hooks.Interrupt = nil
+	child.PrepareTurn = nil
+	child.CloseSession = nil
 	return child
 }
 

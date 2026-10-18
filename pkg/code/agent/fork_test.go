@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -128,9 +129,18 @@ func TestForkSessionRefusesRunningTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := a.session(id)
-	source.cancelMu.Lock()
-	source.cancelFn = func(error) {}
-	source.cancelMu.Unlock()
+	busy, release := make(chan struct{}), make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = source.aa.RunExclusive(t.Context(), func(context.Context) error {
+			close(busy)
+			<-release
+			return nil
+		})
+	}()
+	<-busy
+	defer func() { close(release); <-done }()
 
 	if _, err := a.ForkSession(t.Context(), id, ""); !errors.Is(err, code.ErrTurnInProgress) {
 		t.Fatalf("fork while busy = %v, want ErrTurnInProgress", err)

@@ -60,7 +60,7 @@ func (a *Agent) ContextStats() ContextStats {
 		}
 
 		if a.Tools != nil {
-			req.tools = a.Tools()
+			req.tools = a.AvailableTools()
 			for _, t := range req.tools {
 				size := len(t.Name) + len(t.Description)
 				if params, err := json.Marshal(t.Parameters); err == nil {

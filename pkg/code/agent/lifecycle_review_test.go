@@ -5,10 +5,12 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
@@ -74,5 +76,111 @@ func TestLoadCannotResurrectSessionDuringDeletion(t *testing.T) {
 	}
 	if a.session(id) != nil {
 		t.Fatal("deleted session was resurrected in memory")
+	}
+}
+
+func TestSessionWorkersWaitForRegistration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a := New(newOptionsTestWorkspace(t), Config{Options: Options{DisableShell: true}}, nil)
+		defer a.Close()
+		s, err := a.buildSession("not-published")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.close()
+		if err := s.schedules.Mutate(func(tasks []schedule.Task) ([]schedule.Task, error) {
+			return append(tasks, schedule.Task{ID: "due", Prompt: "check", Schedule: "every 1h", Status: schedule.StatusActive, CreatedAt: time.Now().Add(-2 * time.Hour)}), nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Second)
+		select {
+		case event := <-s.tasks.Events():
+			t.Fatalf("unpublished session ran background work: %+v", event)
+		default:
+		}
+		jobs, err := s.schedules.List()
+		if err != nil || len(jobs) != 1 || jobs[0].FireSeq != 0 {
+			t.Fatalf("unpublished schedule changed: %+v, %v", jobs, err)
+		}
+		if err := a.registerSession(t.Context(), s); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case event := <-s.tasks.Events():
+			if event.ID != "due" || a.session(s.id) != s {
+				t.Fatalf("published event = %+v", event)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("published session did not start its workers")
+		}
+	})
+}
+
+type blockedScheduleStore struct {
+	schedule.ObservableStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockedScheduleStore) Mutate(fn func([]schedule.Task) ([]schedule.Task, error)) error {
+	close(s.entered)
+	<-s.release
+	return s.ObservableStore.Mutate(fn)
+}
+
+func TestSessionCloseJoinsScheduleWrites(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a := New(newOptionsTestWorkspace(t), Config{Options: Options{DisableShell: true}}, nil)
+		defer a.Close()
+		s, err := a.buildSession("closing-schedule")
+		if err != nil {
+			t.Fatal(err)
+		}
+		store := &blockedScheduleStore{ObservableStore: schedule.NewMemoryStore(), entered: make(chan struct{}), release: make(chan struct{})}
+		unblock := sync.OnceFunc(func() { close(store.release) })
+		defer unblock()
+		s.schedules = store
+		if err := store.ObservableStore.Mutate(func(tasks []schedule.Task) ([]schedule.Task, error) {
+			return append(tasks, schedule.Task{ID: "due", Schedule: "every 1h", Status: schedule.StatusActive, CreatedAt: time.Now().Add(-2 * time.Hour)}), nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.registerSession(t.Context(), s); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Second)
+		select {
+		case <-store.entered:
+		default:
+			t.Fatal("scheduler did not reach store write")
+		}
+		closed := make(chan struct{})
+		go func() { defer close(closed); a.Close() }()
+		synctest.Wait()
+		select {
+		case <-closed:
+			t.Error("close returned while the scheduler could still write")
+		default:
+		}
+		unblock()
+		<-closed
+		jobs, err := store.List()
+		if err != nil || len(jobs) != 1 || jobs[0].FireSeq != 0 {
+			t.Fatalf("canceled write changed schedule: %+v, %v", jobs, err)
+		}
+	})
+}
+
+func TestCanceledNewSessionDoesNotPublish(t *testing.T) {
+	a := New(newOptionsTestWorkspace(t), Config{Options: Options{DisableShell: true}}, nil)
+	defer a.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := a.NewSession(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("NewSession error = %v", err)
+	}
+	if len(a.sessions) != 0 {
+		t.Fatal("canceled request published a session")
 	}
 }

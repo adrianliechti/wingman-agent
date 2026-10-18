@@ -70,7 +70,7 @@ func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, er
 		if origin := tool.BackgroundOrigin(ctx); origin != "" && s.tasks != nil {
 			_ = s.tasks.Stop(origin)
 		} else {
-			s.cancel(nil)
+			s.aa.Cancel(nil)
 		}
 	}
 	return tool.Verdict{Reason: reason}, nil
@@ -84,10 +84,10 @@ func (s *sessionState) reviewTurn(ctx context.Context) string {
 	if origin := tool.BackgroundOrigin(ctx); origin != "" {
 		return origin + ":" + turn
 	}
-	s.cancelMu.Lock()
-	defer s.cancelMu.Unlock()
-	if s.cancelFn != nil {
-		return fmt.Sprintf("turn-%d", s.cancelGen)
+	// Inline children share the foreground turn's rejection budget. Detached
+	// tasks above keep their own budget and cancellation target.
+	if active := s.aa.ActiveTurnID(); active != "" {
+		return active
 	}
 	return turn
 }

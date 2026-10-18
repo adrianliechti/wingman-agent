@@ -83,7 +83,6 @@ type sessionState struct {
 	unattended  atomic.Bool
 	reviews     reviewBreaker
 	toolSet     *tool.Set
-	turnTools   atomic.Value // []tool.Tool, pinned for the running turn
 	execManager *shell.ExecManager
 	tasks       *task.Registry
 
@@ -91,7 +90,6 @@ type sessionState struct {
 	scriptOptions *schedule.Options
 
 	freshness *fs.Freshness
-	watchStop chan struct{}
 
 	changedMu    sync.Mutex
 	changedPaths []string
@@ -102,11 +100,8 @@ type sessionState struct {
 	projectInstructionsMu   sync.Mutex
 	projectInstructionCache projectInstructionCache
 
-	cancelMu    sync.Mutex
-	cancelFn    context.CancelCauseFunc
-	cancelGen   uint64
-	closed      bool
-	startSource string
+	startSource     string
+	startBackground func() // Invoked under parent.mu only after registration.
 }
 
 type sessionMode string
@@ -214,7 +209,10 @@ func (a *Agent) ListSessions(_ context.Context) ([]code.SessionInfo, error) {
 	return out, nil
 }
 
-func (a *Agent) NewSession(_ context.Context) (string, error) {
+func (a *Agent) NewSession(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
@@ -228,14 +226,9 @@ func (a *Agent) NewSession(_ context.Context) (string, error) {
 		return "", err
 	}
 	s.startSource = "startup"
-	a.mu.Lock()
-	if a.closed {
-		a.mu.Unlock()
-		s.close()
-		return "", errors.New("agent is closed")
+	if err := a.registerSession(ctx, s); err != nil {
+		return "", err
 	}
-	a.sessions[id] = s
-	a.mu.Unlock()
 	return id, nil
 }
 
@@ -245,7 +238,7 @@ func (a *Agent) LoadSession(ctx context.Context, id string) error {
 		return err
 	}
 	defer unlock()
-	return a.loadSession(id)
+	return a.loadSession(ctx, id)
 }
 
 // Recovery and deletion both mutate durable session state. Serialize them per
@@ -269,7 +262,7 @@ func (a *Agent) lockSession(ctx context.Context, id string) (func(), error) {
 	}
 }
 
-func (a *Agent) loadSession(id string) error {
+func (a *Agent) loadSession(ctx context.Context, id string) error {
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
@@ -300,13 +293,24 @@ func (a *Agent) loadSession(id string) error {
 		return err
 	}
 
+	return a.registerSession(ctx, s)
+}
+
+// registerSession publishes fully restored state before enabling background
+// work. Holding mu across startup also keeps Close from overtaking worker Add.
+func (a *Agent) registerSession(ctx context.Context, s *sessionState) error {
 	a.mu.Lock()
-	if a.closed {
+	err := ctx.Err()
+	if err == nil && a.closed {
+		err = errors.New("agent is closed")
+	}
+	if err != nil {
 		a.mu.Unlock()
 		s.close()
-		return errors.New("agent is closed")
+		return err
 	}
-	a.sessions[id] = s
+	a.sessions[s.id] = s
+	s.startBackground()
 	a.mu.Unlock()
 	return nil
 }
@@ -315,7 +319,7 @@ func (a *Agent) loadSession(id string) error {
 func (a *Agent) ForkSession(ctx context.Context, id, title string) (string, error) {
 	newID := uuid.NewString()
 	source := a.session(id)
-	if err := a.forkJournal(source, id, newID, title); err != nil {
+	if err := a.forkJournal(ctx, source, id, newID, title); err != nil {
 		return "", err
 	}
 	err := a.copySessionSettings(id, newID)
@@ -333,17 +337,13 @@ func (a *Agent) ForkSession(ctx context.Context, id, title string) (string, erro
 	return newID, nil
 }
 
-func (a *Agent) forkJournal(source *sessionState, id, newID, title string) error {
+func (a *Agent) forkJournal(ctx context.Context, source *sessionState, id, newID, title string) error {
 	if source == nil {
 		return session.Fork(a.sessionsDir, id, newID, title)
 	}
-	// Claiming the session keeps a turn from starting while the journal is copied.
-	gen, err := source.claimTurn(func(error) {})
-	if err != nil {
-		return err
-	}
-	defer source.clearCancel(gen)
-	return session.Fork(a.sessionsDir, id, newID, title)
+	return source.aa.RunExclusive(ctx, func(context.Context) error {
+		return session.Fork(a.sessionsDir, id, newID, title)
+	})
 }
 
 func (a *Agent) DeleteSession(ctx context.Context, id string) error {
@@ -429,13 +429,6 @@ func (a *Agent) Compact(ctx context.Context, id, focus string) (harness.CompactR
 	if s == nil {
 		return harness.CompactResult{}, fmt.Errorf("session %s not found", id)
 	}
-	ctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	gen, err := s.claimTurn(cancel)
-	if err != nil {
-		return harness.CompactResult{}, err
-	}
-	defer s.clearCancel(gen)
 	return s.aa.Compact(hook.WithRuntime(ctx, s.hookRuntime()), focus)
 }
 
@@ -556,24 +549,8 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 
 	a.lastActive.Store(id)
 
-	sendCtx, cancel := context.WithCancelCause(code.WithSessionID(ctx, id))
-	stream, gen, err := s.beginSend(sendCtx, input, cancel)
-	if err != nil {
-		cancel(nil)
-		return nil, err
-	}
-
-	return func(yield func(harness.Message, error) bool) {
-		defer func() {
-			s.clearCancel(gen)
-			cancel(nil)
-		}()
-		for msg, err := range stream {
-			if !yield(msg, err) {
-				return
-			}
-		}
-	}, nil
+	ctx = hook.WithRuntime(code.WithSessionID(ctx, id), s.hookRuntime())
+	return s.aa.Send(ctx, input)
 }
 
 func (a *Agent) TurnFeatures(string) code.TurnFeatures {
@@ -593,7 +570,7 @@ func (a *Agent) Steer(_ context.Context, id string, input code.TurnInput) error 
 
 func (a *Agent) Cancel(id string) {
 	if s := a.session(id); s != nil {
-		s.cancel(harness.ErrInterrupted)
+		s.aa.Cancel(harness.ErrInterrupted)
 	}
 }
 
@@ -682,7 +659,20 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	}
 	s.aa.CacheKey = id
 	s.setMode(modeAgent)
-	sessionCfg.Tools = s.tools
+	sessionCfg.Tools = s.catalogTools
+	sessionCfg.PinTools = true
+	sessionCfg.FilterTools = s.filterTools
+	prepare := sessionCfg.PrepareTurn
+	sessionCfg.PrepareTurn = func(ctx context.Context, input []harness.Content) ([]harness.Content, error) {
+		if prepare != nil {
+			var err error
+			input, err = prepare(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return s.prepareTurn(ctx, input)
+	}
 	sessionCfg.Instructions = s.instructions
 	sessionCfg.ContextInstructions = s.contextInstructions
 	sessionCfg.PermissionMode = s.permissionMode
@@ -795,7 +785,6 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	})
 	s.freshness = fs.NewFreshness(ws.Root)
 	s.schedules = schedule.NewFileStore(filepath.Join(artifactDir, "schedules"))
-	s.watchStop = make(chan struct{})
 
 	sessionCfg.Hooks.UserPromptSubmit = append(sessionCfg.Hooks.UserPromptSubmit,
 		func(context.Context, string) (hook.Outcome, error) {
@@ -822,8 +811,6 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	allowedReadRoots = append(allowedReadRoots, privateTemp)
 	allowedWriteRoots = append(allowedWriteRoots, privateTemp)
 	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.cfg.DisableShell, Elicitation: elicit, Shell: shellOpts}
-	go s.watchFileChanges()
-	go s.runSchedules()
 
 	var shellTools []tool.Tool
 	if !a.cfg.DisableShell {
@@ -867,6 +854,22 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 		hookAsync.Close()
 		return nil
 	})
+	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
+	var background sync.WaitGroup
+	s.startBackground = func() {
+		background.Go(func() { s.watchFileChanges(backgroundCtx) })
+		background.Go(func() { s.scheduleRunner().Run(backgroundCtx) })
+	}
+	closeSession := sessionCfg.CloseSession
+	sessionCfg.CloseSession = func() error {
+		cancelBackground()
+		background.Wait()
+		err := s.toolSet.Close()
+		if closeSession != nil {
+			err = errors.Join(err, closeSession())
+		}
+		return err
+	}
 	return s, nil
 }
 
@@ -987,59 +990,19 @@ func (a *Agent) confirm(ctx context.Context, message string) (bool, error) {
 	return ui.Confirm(ctx, message)
 }
 
-func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, cancel context.CancelCauseFunc) (iter.Seq2[harness.Message, error], uint64, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, 0, err
-	}
-	// Claim before any setup so Cancel, Close and overlapping sends also reach
-	// MCP approval prompts and connection attempts.
-	gen, err := s.claimTurn(cancel)
-	if err != nil {
-		return nil, 0, err
-	}
+func (s *sessionState) prepareTurn(ctx context.Context, input []harness.Content) ([]harness.Content, error) {
 	a := s.parent
-	// Startup cannot ask a web client without session correlation. Defer local
-	// configuration approval until this turn, where prompts have an owner.
+	// Startup cannot ask a web client without session correlation. The harness
+	// reserves the session and owns cancellation before entering preparation.
 	if a.workspace.MCP != nil && len(a.workspace.MCP.TrustRequired) > 0 {
 		if err := a.workspace.InitMCP(ctx, a.currentUI()); err != nil {
 			if ctx.Err() != nil {
-				s.clearCancel(gen)
-				return nil, 0, ctx.Err()
+				return nil, ctx.Err()
 			}
 			input = append(slices.Clone(input), harness.Content{Text: "Some MCP servers are unavailable: " + err.Error(), Hidden: true})
 		}
 	}
-	catalog := collectManagedTools(a.workspace)
-	if catalog == nil {
-		// nil means no turn snapshot; an empty catalog still needs pinning.
-		catalog = []tool.Tool{}
-	}
-	s.turnTools.Store(catalog)
-	stream, err := s.aa.Send(hook.WithRuntime(ctx, s.hookRuntime()), input)
-	if err != nil {
-		s.clearCancel(gen)
-		return nil, 0, err
-	}
-	if stream == nil {
-		s.clearCancel(gen)
-		return nil, 0, errors.New("agent returned a nil turn stream")
-	}
-	return stream, gen, nil
-}
-
-// claimTurn reserves the session for one operation; release it with clearCancel.
-func (s *sessionState) claimTurn(cancel context.CancelCauseFunc) (uint64, error) {
-	s.cancelMu.Lock()
-	defer s.cancelMu.Unlock()
-	if s.closed {
-		return 0, errors.New("session is closed")
-	}
-	if s.cancelFn != nil || s.aa.Running() {
-		return 0, code.ErrTurnInProgress
-	}
-	s.cancelGen++
-	s.cancelFn = cancel
-	return s.cancelGen, nil
+	return input, nil
 }
 
 func (s *sessionState) hookRuntime() hook.Runtime {
@@ -1052,67 +1015,22 @@ func (s *sessionState) hookRuntime() hook.Runtime {
 	}
 }
 
-func (s *sessionState) clearCancel(gen uint64) {
-	s.cancelMu.Lock()
-	last := s.cancelGen == gen
-	if last {
-		s.cancelFn = nil
-		s.turnTools.Store([]tool.Tool(nil))
-	}
-	s.cancelMu.Unlock()
-}
-
-func (s *sessionState) cancel(cause error) {
-	s.cancelMu.Lock()
-	fn := s.cancelFn
-	s.cancelMu.Unlock()
-	if fn != nil {
-		fn(cause)
-	}
-}
-
 func (s *sessionState) close() {
-	s.cancelMu.Lock()
-	if s.closed {
-		s.cancelMu.Unlock()
-		return
-	}
-	s.closed = true
-	s.cancelGen++
-	fn := s.cancelFn
-	s.cancelFn = nil
-	s.cancelMu.Unlock()
-	if fn != nil {
-		fn(nil)
-	}
-	close(s.watchStop)
-	_ = s.toolSet.Close()
-
-	if hooks := s.aa.Hooks.SessionEnd; len(hooks) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		ctx = hook.WithRuntime(ctx, hook.Runtime{
-			SessionID:      s.aa.CacheKey,
-			CWD:            s.parent.workspace.RootPath,
-			Model:          s.aa.Model(),
-			PermissionMode: "default",
-		})
-		for _, h := range hooks {
-			h(ctx, "other")
-		}
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = s.aa.Close(hook.WithRuntime(ctx, s.hookRuntime()), "other")
 }
 
 // watchFileChanges announces external file modifications mid-turn: while a
 // turn runs, tracked files that changed outside the session's file tools are
 // reported to the model as hidden context at the next model boundary. Idle
 // periods are swept lazily by the UserPromptSubmit hook instead.
-func (s *sessionState) watchFileChanges() {
+func (s *sessionState) watchFileChanges(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-s.watchStop:
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			if !s.aa.Running() {
@@ -1201,8 +1119,15 @@ func formatFileChangeNotice(paths []string) string {
 }
 
 func (s *sessionState) tools() []tool.Tool {
-	tools := s.toolSet.Slice()
-	tools = append(tools, s.managedTools()...)
+	return s.aa.AvailableTools()
+}
+
+func (s *sessionState) catalogTools() []tool.Tool {
+	mcpTools, lspTools := s.parent.workspace.ManagedTools()
+	return slices.Concat(s.toolSet.Slice(), mcpTools, lspTools)
+}
+
+func (s *sessionState) filterTools(tools []tool.Tool) []tool.Tool {
 	for i, t := range tools {
 		if t.Name == "lsp" {
 			tools[i] = s.freshness.TrackSnapshots(t)
@@ -1216,22 +1141,6 @@ func (s *sessionState) tools() []tool.Tool {
 	}
 	slices.SortStableFunc(tools, func(a, b tool.Tool) int { return cmp.Compare(a.Name, b.Name) })
 	return tools
-}
-
-// managedTools stays pinned for the length of a turn: the harness asks for the
-// tool set once per round so a mode switch lands mid-turn, and an MCP
-// tools/list_changed arriving between rounds must not reshape the catalog under
-// the running turn.
-func (s *sessionState) managedTools() []tool.Tool {
-	if pinned, ok := s.turnTools.Load().([]tool.Tool); ok && pinned != nil {
-		return pinned
-	}
-	return collectManagedTools(s.parent.workspace)
-}
-
-func collectManagedTools(ws *code.Workspace) []tool.Tool {
-	mcpTools, lspTools := ws.ManagedTools()
-	return slices.Concat(mcpTools, lspTools)
 }
 
 func planModeTools(tools []tool.Tool) []tool.Tool {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
@@ -108,7 +109,16 @@ func TestModeSwitchReachesToolsWhileCatalogStaysPinned(t *testing.T) {
 		),
 	}
 	s.setMode(modeAgent)
-	s.turnTools.Store([]tool.Tool{{Name: "mcp_search"}})
+	catalog := []tool.Tool{{Name: "elicit"}, {Name: "read"}, {Name: "mcp_search"}}
+	s.aa = &harness.Agent{Config: &harness.Config{
+		Tools: func() []tool.Tool { return catalog }, FilterTools: s.filterTools, PinTools: true,
+	}}
+	stream, err := s.aa.Send(t.Context(), []harness.Content{{Text: "test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A nil catalog arriving mid-turn must not replace the snapshot.
+	catalog = nil
 
 	has := func(name string) bool {
 		return slices.ContainsFunc(s.tools(), func(t tool.Tool) bool { return t.Name == name })
@@ -126,7 +136,9 @@ func TestModeSwitchReachesToolsWhileCatalogStaysPinned(t *testing.T) {
 		t.Fatalf("pinned catalog lost mid-turn: %#v", s.tools())
 	}
 
-	s.clearCancel(s.cancelGen)
+	s.aa.Cancel(nil)
+	for range stream {
+	}
 	if has("mcp_search") {
 		t.Fatalf("catalog stayed pinned after the turn: %#v", s.tools())
 	}
@@ -141,6 +153,7 @@ func TestUnattendedModeOwnsToolsAndInstructions(t *testing.T) {
 		),
 	}
 	s.setMode(modeUnattended)
+	s.aa = &harness.Agent{Config: &harness.Config{Tools: s.catalogTools, FilterTools: s.filterTools}}
 
 	tools := s.tools()
 	if len(tools) != 1 || tools[0].Name != "read" {
@@ -166,6 +179,7 @@ func TestPlanAndUnattendedAreIndependent(t *testing.T) {
 			tool.Tool{Name: "elicit", Effect: tool.StaticEffect(tool.EffectReadOnly)},
 		),
 	}
+	s.aa = &harness.Agent{Config: &harness.Config{Tools: s.catalogTools, FilterTools: s.filterTools}}
 	a := upstreamAgent("gpt-6-sol", "gpt-6-astra")
 	a.sessions["sid"] = s
 	ctx := context.Background()

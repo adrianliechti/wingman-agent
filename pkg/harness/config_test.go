@@ -13,7 +13,7 @@ import (
 
 func TestDerivedConfigScopesHooksToDelegatedAgents(t *testing.T) {
 	var calls int
-	cfg := &Config{Hooks: hook.Hooks{
+	cfg := &Config{PrepareTurn: func(context.Context, []Content) ([]Content, error) { return nil, nil }, CloseSession: func() error { return nil }, Hooks: hook.Hooks{
 		SessionStart:     []hook.SessionStart{nil},
 		SessionEnd:       []hook.SessionEnd{nil},
 		UserPromptSubmit: []hook.UserPromptSubmit{nil},
@@ -24,6 +24,9 @@ func TestDerivedConfigScopesHooksToDelegatedAgents(t *testing.T) {
 		}},
 	}}
 	child := cfg.Derive()
+	if child.PrepareTurn != nil || child.CloseSession != nil {
+		t.Fatal("delegated agent inherited session callbacks")
+	}
 	if len(child.Hooks.SessionStart)+len(child.Hooks.SessionEnd)+len(child.Hooks.UserPromptSubmit)+len(child.Hooks.Interrupt) != 0 {
 		t.Fatal("delegated agent inherited top-level lifecycle hooks")
 	}

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
 )
@@ -33,9 +34,10 @@ func TestSessionLSPPreviewProtectsOrdinaryEdit(t *testing.T) {
 		toolSet:   tool.NewSet(fs.Tools(root, &fs.Options{Freshness: freshness})...),
 	}
 	s.setMode(modeAgent)
-	s.turnTools.Store([]tool.Tool{{Name: "lsp", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) {
+	s.toolSet = tool.NewSet(append(s.toolSet.Slice(), tool.Tool{Name: "lsp", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) {
 		return tool.Result{Content: "preview", Metadata: map[string]any{tool.FileSnapshotsMetadata: []tool.FileSnapshot{{Path: path, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(before)))}}}}, nil
-	}}})
+	}})...)
+	s.aa = &harness.Agent{Config: &harness.Config{Tools: s.catalogTools, FilterTools: s.filterTools}}
 	var preview, edit tool.Tool
 	for _, candidate := range s.tools() {
 		switch candidate.Name {

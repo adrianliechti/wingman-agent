@@ -183,11 +183,11 @@ func newSubagentRunner(parent *harness.Config, typ subagentType, spec durableSpe
 	// Empty effort means auto and is also part of the child's snapshot. Do not
 	// leave it bound to the parent's mutable effort callback on spawn or resume.
 	subcfg.Effort = func() string { return spec.Effort }
-	subcfg.Tools = func() []tool.Tool {
-		var tools []tool.Tool
-		if parent.Tools != nil {
-			tools = toolsForType(parent.Tools(), typ)
+	subcfg.FilterTools = func(tools []tool.Tool) []tool.Tool {
+		if parent.FilterTools != nil {
+			tools = parent.FilterTools(tools)
 		}
+		tools = toolsForType(tools, typ)
 		if collector != nil {
 			tools = append(tools, collector.tool())
 		}
@@ -485,7 +485,11 @@ func Tools(cfg *harness.Config, sharedContext func([]tool.Tool) string, tasks *t
 			if sharedContext != nil {
 				var childTools []tool.Tool
 				if cfg.Tools != nil {
-					childTools = toolsForType(cfg.Tools(), typ)
+					childTools = slices.Clone(cfg.Tools())
+					if cfg.FilterTools != nil {
+						childTools = cfg.FilterTools(childTools)
+					}
+					childTools = toolsForType(childTools, typ)
 				}
 				if c := strings.TrimSpace(sharedContext(childTools)); c != "" {
 					instructions.WriteString("\n\n" + c)
