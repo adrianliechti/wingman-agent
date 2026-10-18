@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -188,7 +189,7 @@ func TestScopedPermissionsRetainSeatbeltBoundaries(t *testing.T) {
 			if !tc.root {
 				writeCheck = "! " + writeCheck
 			}
-			checks := []string{networkCheck, writeCheck, "! touch " + shellTestQuote(filepath.Join(outside, tc.name)), `touch "$TMPDIR/private"`}
+			checks := []string{networkCheck, writeCheck, "! touch " + shellTestQuote(filepath.Join(outside, tc.name)), `touch "$TMPDIR/private"`, `mkdir -p "$TMPDIR/.git"`}
 			cmd, err := buildToolCommand(t.Context(), strings.Join(checks, " && "), workspace, workspace, opts, false)
 			if err != nil {
 				t.Fatal(err)
@@ -201,6 +202,22 @@ func TestScopedPermissionsRetainSeatbeltBoundaries(t *testing.T) {
 				t.Fatalf("scoped grant changed other boundaries: %v\n%s", err, output)
 			}
 		})
+	}
+}
+
+func TestSeatbeltProfileAllowsProtectedNamesInsideTempDir(t *testing.T) {
+	workspace := "/repo"
+	tempDir := "/private/tmp/wingman-command-123"
+	profile, _ := seatbeltProfile(sandboxPolicy{
+		WritableRoots: []string{workspace, tempDir},
+		TempDir:       tempDir,
+		ProtectedRoot: workspace,
+	})
+	if !strings.Contains(profile, regexp.QuoteMeta(workspace)+"/") {
+		t.Fatalf("expected protected rules for workspace in profile:\n%s", profile)
+	}
+	if strings.Contains(profile, regexp.QuoteMeta(tempDir)+"/") {
+		t.Fatalf("tempDir must not have protected subpath deny rules:\n%s", profile)
 	}
 }
 

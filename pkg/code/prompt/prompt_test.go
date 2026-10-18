@@ -25,6 +25,7 @@ func TestVariantFor(t *testing.T) {
 	for _, id := range []string{
 		"nemotron-3.5-bolt", "nvidia/nemotron-3-ultra-550b-a55b", "deepseek-v4-pro", "mistral-large-4",
 		"qwen3.8-max", "qwen/qwen3.8-27b", "glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6",
+		"gemini-4-argon", "google/gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.1-pro",
 	} {
 		if v := VariantFor(id); v != def {
 			t.Errorf("VariantFor(%s) = distinct variant, want default", id)
@@ -34,7 +35,6 @@ func TestVariantFor(t *testing.T) {
 	for _, id := range []string{
 		"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.1", "gpt-4o",
 		"claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-6", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
-		"gemini-4-argon", "gemini-3.7-flash", "gemini-3.6-flash",
 	} {
 		v := VariantFor(id)
 
@@ -598,48 +598,6 @@ func TestFallbackPlanContract(t *testing.T) {
 	} {
 		if strings.Contains(plan, unwanted) {
 			t.Errorf("fallback plan prompt contains unnecessary routing guidance %q", unwanted)
-		}
-	}
-}
-
-func TestGeminiAgentContract(t *testing.T) {
-	for _, id := range []string{"gemini-4-argon", "google/gemini-4-argon", "gemini-3.1-pro", "gemini-3.7-flash", "google/gemini-3.8-flash"} {
-		if VariantFor(id) != VariantFor("gemini-3.6-flash") {
-			t.Errorf("%s should share the Gemini family prompt", id)
-		}
-	}
-
-	agent := strings.ToLower(BuildBaseInstructions(VariantFor("gemini-4-argon").Agent, SectionData{ToolNames: allPromptTools()}))
-
-	for _, want := range []string{
-		"<identity>",
-		"<guidelines>",
-		"<communication_style>",
-		"preserve unrelated comments and docstrings",
-		"most specific available tool",
-		"polite wording such as \"can you fix\" is a request to act",
-		"explicit plan mode and unattended instructions take precedence",
-		"preserve the user's work",
-		"narrowest relevant validation",
-		"wait for required checks to finish and inspect their exit status",
-		"do not stage, commit, create branches, or push unless requested",
-	} {
-		if !strings.Contains(agent, want) {
-			t.Errorf("Gemini agent prompt missing adapted guidance %q", want)
-		}
-	}
-
-	for _, unwanted := range []string{
-		"gemini cli", "gemini.md", "run_shell_command", "read_file", "write_file", "write_todos", "update_topic",
-		"ask_user", "activate_skill", "enter_plan_mode", "codebase_investigator", "wait_for_previous", "is_background",
-		"agent_name", "<untrusted_context>", "<hook_context>", "/bug",
-		"antigravity", "view_file", "run_command", "manage_task", "invoke_subagent", "define_subagent",
-		"replace_file_content", "ask_question", "<appdatadir>", "transcript.jsonl", "conversation://", "file://",
-		"critical instruction 1", "94>thought", "assume all requests are inquiries", "obtain their approval before proceeding",
-		"do not* provide summaries", "after an `edit` tool execution",
-	} {
-		if strings.Contains(agent, unwanted) {
-			t.Errorf("Gemini agent prompt contains obsolete or vendor harness instruction %q", unwanted)
 		}
 	}
 }

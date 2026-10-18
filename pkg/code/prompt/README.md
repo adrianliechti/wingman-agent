@@ -114,10 +114,10 @@ template no longer treats arbitrary reminder tags in tool output as trusted
 instructions. Shared family routing does not imply every older Claude ID was
 captured.
 
-### Fallback (Qwen, Nemotron, GLM, Kimi, MiniMax, Grok, DeepSeek, Mistral)
+### Fallback (Gemini, Qwen, Nemotron, GLM, Kimi, MiniMax, Grok, DeepSeek, Mistral)
 
-Only Claude, GPT, and Gemini keep variants, each adapted from a captured vendor
-CLI request. Every other model uses the fallback. The former Qwen, GLM, Kimi,
+Only Claude and GPT keep variants, each adapted from a captured vendor CLI
+request. Every other model uses the fallback. The former Qwen, GLM, Kimi,
 MiniMax, and Grok templates were paraphrases rather than vendor captures: Qwen
 from Qwen Code, the others from VS Code Copilot's per-vendor prompts. Their
 sources contain no model-version-specific instructions: Qwen Code (0.25.2) varies
@@ -136,6 +136,8 @@ writing style, and update cadence stay GPT-specific. Formatting differences
 such as GLM 4.x's capitalized MUST rules and section names were not kept.
 
 All model variants and the fallback receive the same shared runtime contract.
+Templates do not restate rules it already covers, such as commit limits,
+preserving user changes, parallel reads, and claims about checks.
 GPT-5.1/5.2 no longer suggest asking to run validation that the task already
 authorizes. The fallback also clarifies action requests, persistent authorization,
 task steering, and completion checks. Shared Plan mode follows the same
@@ -147,17 +149,21 @@ as Wingman runtime instructions.
 
 ### Gemini / Antigravity
 
-The Gemini template replaces the previous gemini-cli-derived prompt with a
-Wingman adaptation of requests captured from Antigravity CLI **1.4.0** (Homebrew
-build `5281842794987520`) on 2026-10-16. The executable SHA-256 was
-`a4502aaf310b2fd6eb657fcfec2fcc31a690fbbd0c2d14c8eefbb556409024ce`.
+Gemini models use the fallback. The removed Gemini template adapted requests
+captured from Antigravity CLI **1.4.0** (Homebrew build `5281842794987520`) on
+2026-10-16; the executable SHA-256 was
+`a4502aaf310b2fd6eb657fcfec2fcc31a690fbbd0c2d14c8eefbb556409024ce`. Unlike the
+Claude and GPT variants, it was a Wingman rewrite rather than a close vendor
+adaptation. Once it stopped restating shared runtime rules and took the
+fallback's context-reuse and focused-change guidance, it was mostly a subset of
+the fallback.
 
 The capture uses the CLI's Gemini API-key provider and its documented
 [`GOOGLE_GEMINI_BASE_URL` override](https://www.antigravity.google/docs/install?tab=cli),
 pointed at a localhost mock with a dummy key. Separate configuration and workspace
 directories isolate the run. Synthetic text responses let the CLI finish without
-model inference or agent tool execution. These are actual serialized requests,
-not prompts reconstructed from model responses or binary strings.
+model inference or agent tool execution. Re-capture a newer release to check
+whether it adds model-specific instructions worth a variant.
 
 Reproduce from the repository root (Python standard library and `agy` required):
 
@@ -185,21 +191,11 @@ Observed API-provider requests:
 After normalizing temporary paths and conversation IDs, Pro's two prompts match,
 and Flash's two prompts match. Pro adds a dedicated-tool preference and a literal
 thought-prefix instruction; otherwise the prompts are identical. The shared
-Gemini template retains the useful tool preference without the private output
-protocol. Effort differences belong to request configuration, not prompt routing.
+runtime's tool preference covers the former; the private output protocol is not
+used. Effort differences belong to request configuration, not prompt routing.
 The captures also contain a separate short title-generation request; it is not
 the coding agent's system prompt. No Gemini 4 or signed-in account-provider prompt
-was captured; the family fallback does not imply those prompts were inspected.
-
-The adaptation keeps Antigravity's identity/guidelines/communication structure,
-documentation preservation, targeted delegation, and concise responses. Wingman's
-own execution, authorization, verification, and security rules fill in the
-runtime contract. Tool names and edit/background behavior follow Wingman's
-schemas. Shared sections still provide skills, project guidance, and environment;
-shared mode instructions retain precedence. Antigravity's artifacts, transcript
-paths, messaging system, slash commands, file URI scheme, and thought prefix are
-not part of this harness. The previous default-to-inquiry rule, repeated approval
-gates, contradictory summary rules, and mandatory exhaustive testing are removed.
+was captured.
 
 Request capture and prompt tests establish provenance and compatibility. They
 do not demonstrate improved model behavior or benchmark performance.

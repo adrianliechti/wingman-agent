@@ -762,6 +762,9 @@ func isEnvAssignment(word string) bool {
 
 func isSingleCommandReadOnly(command string) bool {
 	command = strings.TrimSpace(command)
+	if strings.Contains(command, "`") {
+		return false
+	}
 
 	fields, ok := splitShellWords(command)
 	if !ok || len(fields) == 0 {
@@ -1275,6 +1278,11 @@ func isDangerousSingleCommand(command string) bool {
 }
 
 func isDangerousSingleCommandDialect(command string, dialect shellDialect) bool {
+	if dialect == dialectPowerShell {
+		if decoded := decodePowerShellBackticks(command); decoded != command && isDangerousSingleCommandDialect(decoded, dialect) {
+			return true
+		}
+	}
 	fields, ok := splitShellWords(strings.TrimSpace(command))
 	if !ok {
 		return true

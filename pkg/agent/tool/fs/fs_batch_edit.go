@@ -23,7 +23,7 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 		Description: strings.Join([]string{
 			"Create or edit one or more UTF-8 text files using string replacements, with batch validation and rollback on commit errors.",
 			"- Put every independent replacement or file creation you already know about into one `edits` array; do not call this tool repeatedly when the changes can be batched.",
-			"- Read an existing file before editing it, and preserve its indentation exactly. Never include the read tool's line-number prefix.",
+			"- Read an existing file before your first edit to it, and preserve its indentation exactly. Never include the read tool's line-number prefix.",
 			"- Each `old_string` must occur exactly once unless `replace_all` is true. Include enough unchanged surrounding text to make it unique.",
 			"- Exact matches take priority. If none exist, matching tolerates typography, trailing whitespace, copied line numbers, uniform indentation shifts, and small blank-line differences; ambiguous matches are rejected.",
 			"- Input and resulting files are limited to 10 MiB each. Binary files are not supported.",

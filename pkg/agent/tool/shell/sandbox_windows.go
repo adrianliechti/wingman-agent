@@ -406,6 +406,22 @@ var sandboxEnvironments struct {
 	cached []*cachedSandboxEnvironment
 }
 
+// invalidateSandboxEnvironments drops idle cached environments so a rescan of
+// volume read paths does not keep serving environments built from stale paths.
+func invalidateSandboxEnvironments() {
+	sandboxEnvironments.Lock()
+	defer sandboxEnvironments.Unlock()
+	kept := sandboxEnvironments.cached[:0]
+	for _, candidate := range sandboxEnvironments.cached {
+		if candidate.active == 0 {
+			closeNativeSandboxEnvironment(candidate.handle)
+			continue
+		}
+		kept = append(kept, candidate)
+	}
+	sandboxEnvironments.cached = kept
+}
+
 // acquireNativeSandboxEnvironment retains an environment until release is
 // called after a failed launch or after the command's entire job has stopped.
 func acquireNativeSandboxEnvironment(policy nativeFilesystemPolicy) (windows.Handle, func(), error) {
@@ -621,12 +637,19 @@ func sandboxEnviron(environ []string) []string {
 
 func sandboxEnvironmentBlock(env []string) *uint16 {
 	env = slices.Clone(env)
-	slices.SortFunc(env, func(a, b string) int { return strings.Compare(strings.ToUpper(a), strings.ToUpper(b)) })
+	slices.SortFunc(env, func(a, b string) int {
+		keyA, _, _ := strings.Cut(a, "=")
+		keyB, _, _ := strings.Cut(b, "=")
+		return strings.Compare(strings.ToUpper(keyA), strings.ToUpper(keyB))
+	})
 	var block []uint16
 	for _, kv := range env {
 		if u, err := windows.UTF16FromString(kv); err == nil {
 			block = append(block, u...)
 		}
+	}
+	if len(block) == 0 {
+		block = append(block, 0)
 	}
 	block = append(block, 0)
 	return &block[0]

@@ -207,13 +207,14 @@ func sandboxVolumeReads() ([]string, error) {
 	return paths, nil
 }
 
-// invalidateSandboxVolumeReads drops the cached volume reads and reports
-// whether anything was cached.
+// invalidateSandboxVolumeReads drops the cached volume reads and idle cached
+// environments, and reports whether anything was cached.
 func invalidateSandboxVolumeReads() bool {
 	sandboxVolumeCache.Lock()
-	defer sandboxVolumeCache.Unlock()
 	cached := sandboxVolumeCache.paths != nil
 	sandboxVolumeCache.paths = nil
+	sandboxVolumeCache.Unlock()
+	invalidateSandboxEnvironments()
 	return cached
 }
 

@@ -21,6 +21,10 @@ const (
 // sandboxPolicy is what a platform backend enforces for one command.
 type sandboxPolicy struct {
 	WritableRoots []string
+	// TempDir is the command's private temporary directory; protected-config
+	// subpath rules do not apply beneath it so tools and tests can stage VCS or
+	// agent fixtures inside $TMPDIR.
+	TempDir string
 	// ProtectedRoot keeps git, editor, and agent configuration read-only beneath the workspace.
 	ProtectedRoot string
 	// DenyRead hides existing credential paths.
@@ -55,7 +59,17 @@ func existingProtectedPaths(root string) []string {
 }
 
 func sandboxProtectedRoots(policy sandboxPolicy) []string {
-	roots := slices.Clone(policy.WritableRoots)
+	var roots []string
+	tempDir := ""
+	if policy.TempDir != "" {
+		tempDir = canonicalPath(policy.TempDir)
+	}
+	for _, root := range policy.WritableRoots {
+		if tempDir != "" && (root == tempDir || strings.EqualFold(root, tempDir)) {
+			continue
+		}
+		roots = append(roots, root)
+	}
 	if policy.ProtectedRoot != "" && !slices.Contains(roots, policy.ProtectedRoot) {
 		roots = append(roots, policy.ProtectedRoot)
 	}
@@ -154,13 +168,21 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 		return nil, fmt.Errorf("resolve sandbox shell %q: %w", shellPath, err)
 	}
 
+	tempDir := ""
+	if opts.TempDir != "" {
+		tempDir = canonicalPath(opts.TempDir)
+	}
 	policy := sandboxPolicy{
 		WritableRoots: writableRootsFor(workspaceDir, opts.ExtraWritableRoots),
+		TempDir:       tempDir,
 		ProtectedRoot: workspaceDir,
 		DenyRead:      credentialPaths(),
 		Network:       sandboxNetworkEnabled() || opts.Network,
 	}
 	for _, root := range policy.WritableRoots {
+		if tempDir != "" && (root == tempDir || strings.EqualFold(root, tempDir)) {
+			continue
+		}
 		if err := validateWritableRoot(root); err != nil {
 			return nil, err
 		}
