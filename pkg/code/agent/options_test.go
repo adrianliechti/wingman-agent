@@ -19,8 +19,10 @@ func TestResolveOptionsFromEnvironment(t *testing.T) {
 	for _, value := range []string{"1", "true", "TRUE", "yes", "on"} {
 		t.Run(value, func(t *testing.T) {
 			t.Setenv("WINGMAN_DISABLE_SHELL", value)
-			if !resolveOptions(nil).DisableShell {
-				t.Fatalf("WINGMAN_DISABLE_SHELL=%q did not disable shell", value)
+			t.Setenv("WINGMAN_SANDBOX_NETWORK", value)
+			resolved := resolveOptions(nil)
+			if !resolved.DisableShell || resolved.Sandbox == nil || resolved.Sandbox.Network == nil || !*resolved.Sandbox.Network {
+				t.Fatalf("WINGMAN_DISABLE_SHELL/WINGMAN_SANDBOX_NETWORK=%q did not enable options: %+v", value, resolved)
 			}
 		})
 	}
@@ -28,18 +30,49 @@ func TestResolveOptionsFromEnvironment(t *testing.T) {
 	for _, value := range []string{"", "0", "false", "no", "off", "anything"} {
 		t.Run("ignored_"+value, func(t *testing.T) {
 			t.Setenv("WINGMAN_DISABLE_SHELL", value)
-			if resolveOptions(nil).DisableShell {
-				t.Fatalf("WINGMAN_DISABLE_SHELL=%q disabled shell", value)
+			t.Setenv("WINGMAN_SANDBOX_NETWORK", value)
+			resolved := resolveOptions(nil)
+			if resolved.DisableShell || resolved.Sandbox == nil || resolved.Sandbox.Network == nil || *resolved.Sandbox.Network {
+				t.Fatalf("WINGMAN_DISABLE_SHELL/WINGMAN_SANDBOX_NETWORK=%q enabled options: %+v", value, resolved)
+			}
+		})
+	}
+
+	for _, value := range []string{"off", "false", "0", "no", "disabled", " OFF "} {
+		t.Run("sandbox_off_"+value, func(t *testing.T) {
+			t.Setenv("WINGMAN_SANDBOX", value)
+			if !resolveOptions(nil).DisableSandbox {
+				t.Fatalf("WINGMAN_SANDBOX=%q did not disable sandbox", value)
+			}
+		})
+	}
+
+	for _, value := range []string{"", "workspace", "workspace-write", "WORKSPACE", "on", "true", "1", "typo"} {
+		t.Run("sandbox_on_"+value, func(t *testing.T) {
+			t.Setenv("WINGMAN_SANDBOX", value)
+			if resolveOptions(nil).DisableSandbox {
+				t.Fatalf("WINGMAN_SANDBOX=%q disabled sandbox", value)
 			}
 		})
 	}
 
 	t.Setenv("WINGMAN_DISABLE_SHELL", "")
+	t.Setenv("WINGMAN_SANDBOX", "off")
+	t.Setenv("WINGMAN_SANDBOX_NETWORK", "on")
 	t.Setenv("WINGMAN_DISABLE_WEBSEARCH", "yes")
 	t.Setenv("WINGMAN_DISABLE_WEBFETCH", "on")
 	resolved := resolveOptions(nil)
-	if !resolved.DisableWebSearch || !resolved.DisableWebFetch {
-		t.Fatalf("resolved options = %+v, want web disabled", resolved)
+	if !resolved.DisableWebSearch || !resolved.DisableWebFetch || !resolved.DisableSandbox || !*resolved.Sandbox.Network {
+		t.Fatalf("resolved options = %+v", resolved)
+	}
+
+	overridden := resolveOptions([]Options{{
+		Sandbox: &SandboxOptions{
+			Network: new(false),
+		},
+	}})
+	if *overridden.Sandbox.Network {
+		t.Fatalf("explicit SandboxOptions did not override environment: %+v", overridden.Sandbox)
 	}
 }
 
@@ -193,6 +226,8 @@ func newOptionsTestWorkspace(t *testing.T) *code.Workspace {
 	testenv.WingmanHome(t)
 	for _, name := range []string{
 		"WINGMAN_DISABLE_SHELL",
+		"WINGMAN_SANDBOX",
+		"WINGMAN_SANDBOX_NETWORK",
 		"WINGMAN_DISABLE_WEBSEARCH",
 		"WINGMAN_DISABLE_WEBFETCH",
 	} {

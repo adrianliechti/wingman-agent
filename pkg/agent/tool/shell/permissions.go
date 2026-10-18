@@ -30,7 +30,7 @@ func executionOptions(workspace string, args map[string]any, base *Options) (*Op
 	default:
 		return nil, "", fmt.Errorf("invalid sandbox_permissions %q", mode)
 	}
-	if mode != "use_default" && !workspaceSandboxEnabled() {
+	if mode != "use_default" && !workspaceSandboxEnabled(opts) {
 		return nil, "", fmt.Errorf("sandbox permission requests require an active, non-inherited sandbox")
 	}
 	network, _ := args["network"].(bool)
@@ -92,7 +92,7 @@ func validateWritableRoot(root string) error {
 }
 
 func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, workspace, workdir, mode, justification string, opts *Options) error {
-	sandboxed := workspaceSandboxEnabled() && mode != "require_escalated"
+	sandboxed := workspaceSandboxEnabled(opts) && mode != "require_escalated"
 	if mode == "use_default" && !IsDangerousCommand(command) {
 		return nil
 	}
@@ -110,7 +110,7 @@ func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, wo
 		roots = append(roots, canonicalPath(opts.TempDir))
 	}
 	policy := map[string]any{
-		"sandboxed": sandboxed, "network": !sandboxed || sandboxNetworkEnabled() || opts.Network,
+		"sandboxed": sandboxed, "network": !sandboxed || opts.Network,
 		"writable_roots": roots, "protected_directories": protectedDirs,
 		"protected_files":   append(slices.Clone(protectedFiles), protectedRootFiles...),
 		"denied_read_paths": credentialPaths(), "host_unix_sockets": false,

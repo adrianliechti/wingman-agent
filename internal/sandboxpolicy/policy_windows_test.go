@@ -8,7 +8,6 @@ import (
 )
 
 func TestCheckWriteAcrossVolumes(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	root := `F:\workspace`
 	if err := CheckWrite(root, `C:\Users\dev\notes.txt`); err != nil {
 		t.Fatalf("write on another drive: %v", err)

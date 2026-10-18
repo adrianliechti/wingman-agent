@@ -8,7 +8,6 @@ import (
 )
 
 func TestEditRejectsProtectedPathsBeforeWritingBatch(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	for _, protected := range []string{".git/config", ".git", "sub/.git/config", ".agents/new.md", ".vscode/settings.json", "mcp.json", ".envrc"} {
 		t.Run(protected, func(t *testing.T) {
 			dir := t.TempDir()
@@ -32,7 +31,6 @@ func TestEditRejectsProtectedPathsBeforeWritingBatch(t *testing.T) {
 }
 
 func TestEditRejectsProtectedPathThroughSymlink(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	for _, reverse := range []bool{false, true} {
 		dir := t.TempDir()
 		target, alias := ".git", "alias"
@@ -58,15 +56,14 @@ func TestEditRejectsProtectedPathThroughSymlink(t *testing.T) {
 	}
 }
 
-func TestExplicitSandboxOptOutAllowsProtectedFileEdit(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "off")
+func TestEditStillRejectsProtectedFileWhenShellSandboxDisabled(t *testing.T) {
 	root, err := os.OpenRoot(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer root.Close()
 	_, err = EditTool(root).Execute(t.Context(), map[string]any{"edits": []any{map[string]any{"file_path": ".git/config", "old_string": "", "new_string": "fixture"}}})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "protected") {
+		t.Fatalf("edit = %v", err)
 	}
 }

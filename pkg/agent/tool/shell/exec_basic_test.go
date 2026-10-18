@@ -16,7 +16,7 @@ func runExec(t *testing.T, command string) tool.Result {
 	t.Helper()
 	manager := NewExecManager(nil)
 	t.Cleanup(manager.Close)
-	result, err := ExecTools(manager, t.TempDir(), nil, nil)[0].Execute(context.Background(), map[string]any{
+	result, err := ExecTools(manager, t.TempDir(), nil, &Options{DisableSandbox: true})[0].Execute(context.Background(), map[string]any{
 		"command": command,
 		"wait":    10,
 	})
@@ -60,7 +60,7 @@ func TestExecCommandWorkdirAndEnvironment(t *testing.T) {
 
 	manager := NewExecManager(nil)
 	defer manager.Close()
-	execTool := ExecTools(manager, workDir, nil, nil)[0]
+	execTool := ExecTools(manager, workDir, nil, &Options{DisableSandbox: true})[0]
 	command, want := "printf '%s|%s' \"$PWD\" \"$GIT_EDITOR\"", "/sub|true"
 	if runtime.GOOS == "windows" {
 		command, want = `Write-Output "$PWD|$env:GIT_EDITOR"`, `\sub|true`
@@ -90,7 +90,7 @@ func TestExecCommandElicitsOnlyForDangerousCommands(t *testing.T) {
 	}}
 	manager := NewExecManager(nil)
 	defer manager.Close()
-	execTool := ExecTools(manager, workDir, elicit, nil)[0]
+	execTool := ExecTools(manager, workDir, elicit, &Options{DisableSandbox: true})[0]
 
 	if _, err := execTool.Execute(context.Background(), map[string]any{"command": "printf hi > out.txt", "wait": 10}); err != nil {
 		t.Fatalf("benign command failed: %v", err)
@@ -111,7 +111,7 @@ func TestExecCommandTimeoutKillsTheProcess(t *testing.T) {
 	defer manager.Close()
 
 	started := time.Now()
-	result, err := ExecTools(manager, t.TempDir(), nil, nil)[0].Execute(context.Background(), map[string]any{
+	result, err := ExecTools(manager, t.TempDir(), nil, &Options{DisableSandbox: true})[0].Execute(context.Background(), map[string]any{
 		"command": "sleep 30",
 		"timeout": 1,
 		"wait":    20,
@@ -134,7 +134,7 @@ func TestExecCommandBackgroundsOnceOutputGoesQuiet(t *testing.T) {
 
 	manager := NewExecManager(nil)
 	defer manager.Close()
-	execTool := ExecTools(manager, t.TempDir(), nil, nil)[0]
+	execTool := ExecTools(manager, t.TempDir(), nil, &Options{DisableSandbox: true})[0]
 
 	started := time.Now()
 	result, err := execTool.Execute(context.Background(), map[string]any{

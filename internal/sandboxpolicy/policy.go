@@ -12,15 +12,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 )
 
-func Enabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("WINGMAN_SANDBOX"))) {
-	case "off", "false", "0", "no", "disabled":
-		return false
-	default:
-		return true
-	}
-}
-
 // Git metadata is protected as a whole, including worktree pointer files.
 var ProtectedDirs = []string{".git", ".vscode", ".idea", ".codex", ".wingman", ".agents", ".claude"}
 var ProtectedFiles = []string{".envrc"}
@@ -62,9 +53,6 @@ func ProtectedRelative(path string) bool {
 // CheckWrite checks both the requested spelling and its resolved destination.
 // It also covers new descendants of an existing symlinked directory.
 func CheckWrite(root, path string) error {
-	if !Enabled() {
-		return nil
-	}
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(root, path)
 	}

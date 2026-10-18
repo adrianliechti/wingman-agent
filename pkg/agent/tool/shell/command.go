@@ -25,9 +25,9 @@ func safetyGuardLine(elicit *tool.Elicitation) string {
 	return "- Safety guard: routine commands run directly; risky actions and permission expansions require approval for each execution."
 }
 
-func sandboxGuideLine() string {
+func sandboxGuideLine(opts *Options) string {
 	network := "IP network access is blocked by default"
-	if sandboxNetworkEnabled() {
+	if opts != nil && opts.Network {
 		network = "IP network access is enabled by host configuration"
 	}
 	protection := "Protected Git metadata, editor settings and agent configuration stay read-only."
@@ -48,7 +48,7 @@ func looksLikeSandboxDenial(output string, err error) bool {
 	return slices.ContainsFunc(sandboxDenialHints, func(hint string) bool { return strings.Contains(output, hint) })
 }
 
-func resolveWorkdir(workDir string, args map[string]any) (string, error) {
+func resolveWorkdir(workDir string, args map[string]any, opts *Options) (string, error) {
 	value, _ := args["workdir"].(string)
 	value = strings.TrimSpace(value)
 
@@ -71,7 +71,7 @@ func resolveWorkdir(workDir string, args map[string]any) (string, error) {
 	if err != nil || !info.IsDir() {
 		return "", fmt.Errorf("workdir %q is not an accessible directory", value)
 	}
-	if workspaceSandboxEnabled() && args["sandbox_permissions"] != "require_escalated" && !pathWithin(workDir, value) {
+	if workspaceSandboxEnabled(opts) && args["sandbox_permissions"] != "require_escalated" && !pathWithin(workDir, value) {
 		if args["sandbox_permissions"] == "require_permissions" {
 			if roots, ok := args["writable_roots"].([]any); ok {
 				for _, root := range roots {
@@ -105,7 +105,7 @@ func ToolCommand(ctx context.Context, command, workspaceDir, workingDir string, 
 
 func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir string, opts *Options, escalated bool) (*exec.Cmd, error) {
 	var sandbox *sandboxOptions
-	if workspaceSandboxEnabled() && !escalated {
+	if workspaceSandboxEnabled(opts) && !escalated {
 		sandbox = &sandboxOptions{WorkspaceDir: workspaceDir}
 		if opts != nil {
 			sandbox.ExtraWritableRoots = append([]string(nil), opts.ExtraWritableRoots...)

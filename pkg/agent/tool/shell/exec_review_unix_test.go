@@ -41,7 +41,7 @@ func TestExecDangerousCommandRequiresAvailableApproval(t *testing.T) {
 			}
 			m := NewExecManager(nil)
 			defer m.Close()
-			_, err := ExecTools(m, dir, elicit, nil)[0].Execute(t.Context(), map[string]any{"command": "rm -rf preserve-me", "wait": 10})
+			_, err := ExecTools(m, dir, elicit, &Options{DisableSandbox: true})[0].Execute(t.Context(), map[string]any{"command": "rm -rf preserve-me", "wait": 10})
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("unapproved command: %v", err)
 			}
@@ -76,7 +76,7 @@ func TestExecRechecksApprovalAfterFilesChange(t *testing.T) {
 			}
 			m := NewExecManager(nil)
 			defer m.Close()
-			exec := ExecTools(m, dir, elicit, nil)[0]
+			exec := ExecTools(m, dir, elicit, &Options{DisableSandbox: true})[0]
 			args := map[string]any{"command": "rm -rf fixture", "wait": 10}
 			if err := os.WriteFile(marker, []byte("disposable"), 0600); err != nil {
 				t.Fatal(err)
@@ -125,7 +125,7 @@ func TestExecChecksLifecycleBeforeStarting(t *testing.T) {
 				}
 				want = "too many running sessions"
 			}
-			_, err := ExecTools(m, t.TempDir(), nil, nil)[0].Execute(ctx, map[string]any{"command": "echo side-effect", "wait": 0})
+			_, err := ExecTools(m, t.TempDir(), nil, &Options{DisableSandbox: true})[0].Execute(ctx, map[string]any{"command": "echo side-effect", "wait": 0})
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("expected %q before trying to start process, got %v", want, err)
 			}
@@ -138,7 +138,7 @@ func TestExecRejectsInvalidOptionsBeforeStarting(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			m := NewExecManager(nil)
 			defer m.Close()
-			_, err := ExecTools(m, t.TempDir(), nil, nil)[0].Execute(t.Context(), map[string]any{"command": "true", key: value})
+			_, err := ExecTools(m, t.TempDir(), nil, &Options{DisableSandbox: true})[0].Execute(t.Context(), map[string]any{"command": "true", key: value})
 			if err == nil || !strings.Contains(err.Error(), key) {
 				t.Fatalf("invalid %s accepted: %v", key, err)
 			}
@@ -166,7 +166,7 @@ func TestExecSessionCancelledInputHasNoSideEffects(t *testing.T) {
 func TestExecKillReportsValidationExitStatus(t *testing.T) {
 	m := NewExecManager(nil)
 	defer m.Close()
-	tools := ExecTools(m, t.TempDir(), nil, nil)
+	tools := ExecTools(m, t.TempDir(), nil, &Options{DisableSandbox: true})
 	started, err := tools[0].Execute(t.Context(), map[string]any{"command": "sleep 30", "validation": true, "wait": 0})
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestExecKillReportsValidationExitStatus(t *testing.T) {
 func TestExecBlockedPipeWriteTerminatesOnCancellation(t *testing.T) {
 	m := NewExecManager(nil)
 	defer m.Close()
-	tools := ExecTools(m, t.TempDir(), nil, nil)
+	tools := ExecTools(m, t.TempDir(), nil, &Options{DisableSandbox: true})
 	started, err := tools[0].Execute(t.Context(), map[string]any{"command": "sleep 30", "wait": 0})
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +204,7 @@ func TestExecFailedStartReleasesCapacity(t *testing.T) {
 	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
 	m := NewExecManager(nil)
 	defer m.Close()
-	tools := ExecTools(m, t.TempDir(), nil, nil)
+	tools := ExecTools(m, t.TempDir(), nil, &Options{DisableSandbox: true})
 	for range maxExecSessions + 1 {
 		if _, err := tools[0].Execute(t.Context(), map[string]any{"command": "true"}); err == nil || !strings.Contains(err.Error(), "failed to start") {
 			t.Fatalf("failed launch leaked capacity: %v", err)

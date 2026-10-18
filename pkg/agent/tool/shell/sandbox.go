@@ -14,8 +14,7 @@ import (
 )
 
 const (
-	workspaceSandboxActiveEnv  = "WINGMAN_SANDBOX_ACTIVE"
-	workspaceSandboxNetworkEnv = "WINGMAN_SANDBOX_NETWORK"
+	workspaceSandboxActiveEnv = "WINGMAN_SANDBOX_ACTIVE"
 )
 
 // sandboxPolicy is what a platform backend enforces for one command.
@@ -79,17 +78,13 @@ func sandboxProtectedRoots(policy sandboxPolicy) []string {
 // CheckSandbox detects unavailable backends before a session starts. Launch
 // errors (for example disabled user namespaces) still fail closed at execution.
 func CheckSandbox(workspace string) error {
-	if !workspaceSandboxEnabled() {
+	if !workspaceSandboxEnabled(nil) {
 		return nil
 	}
 	if err := validateWritableRoot(canonicalPath(workspace)); err != nil {
 		return err
 	}
 	return platformSandboxCheck(workspace, sandboxPolicy{WritableRoots: []string{workspace}, ProtectedRoot: workspace})
-}
-
-func sandboxNetworkEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv(workspaceSandboxNetworkEnv)), "on")
 }
 
 // credentialPaths returns the existing credential stores sandboxed commands must not read.
@@ -114,14 +109,14 @@ func credentialPaths() []string {
 }
 
 // Normal mode uses an OS boundary. Disabling it is an explicit host setting.
-func workspaceSandboxEnabled() bool {
+func workspaceSandboxEnabled(opts *Options) bool {
 	// Native sandboxes are inherited by descendants. Avoid trying to apply a
 	// second Seatbelt profile or Bubblewrap namespace when a sandboxed command
 	// starts another Wingman shell runner.
 	if os.Getenv(workspaceSandboxActiveEnv) == "1" {
 		return false
 	}
-	return sandboxpolicy.Enabled()
+	return opts == nil || !opts.DisableSandbox
 }
 
 func pathWithin(root, candidate string) bool {
@@ -177,7 +172,7 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 		TempDir:       tempDir,
 		ProtectedRoot: workspaceDir,
 		DenyRead:      credentialPaths(),
-		Network:       sandboxNetworkEnabled() || opts.Network,
+		Network:       opts.Network,
 	}
 	for _, root := range policy.WritableRoots {
 		if tempDir != "" && (root == tempDir || strings.EqualFold(root, tempDir)) {

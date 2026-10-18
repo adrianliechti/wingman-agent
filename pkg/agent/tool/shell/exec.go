@@ -511,8 +511,8 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, o
 		"wait":        map[string]any{"type": "integer", "minimum": 0, "description": fmt.Sprintf("Seconds to wait before backgrounding (default %d, capped at %d; 0 backgrounds immediately).", defaultExecWait, maxExecWait)},
 		"timeout":     map[string]any{"type": "integer", "minimum": 0, "maximum": maxExecTimeout, "description": "Seconds after which the command is killed. Omit or set 0 to let it run until it exits or the agent session closes."},
 	}
-	if workspaceSandboxEnabled() {
-		commandLines = append(commandLines, sandboxGuideLine())
+	if workspaceSandboxEnabled(opts) {
+		commandLines = append(commandLines, sandboxGuideLine(opts))
 		properties["sandbox_permissions"] = map[string]any{"type": "string", "enum": []string{"use_default", "require_permissions", "require_escalated"}, "description": "require_permissions grants network or additional writable roots for one command after review while retaining the sandbox. require_escalated runs outside the sandbox after review."}
 		properties["network"] = map[string]any{"type": "boolean", "description": "Request IP network access with require_permissions."}
 		properties["writable_roots"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Existing directories to make writable with require_permissions. Protected configuration and credentials stay restricted."}
@@ -615,12 +615,12 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	if err != nil {
 		return tool.Result{}, err
 	}
-	dir, err := resolveWorkdir(workDir, args)
+	dir, err := resolveWorkdir(workDir, args, opts)
 	if err != nil {
 		return tool.Result{}, err
 	}
 
-	sandboxed := workspaceSandboxEnabled()
+	sandboxed := workspaceSandboxEnabled(opts)
 	escalated := sandboxed && permissionMode == "require_escalated"
 	justification, _ := args["justification"].(string)
 	err = confirmExecution(ctx, elicit, command, workDir, dir, permissionMode, justification, opts)

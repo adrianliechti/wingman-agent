@@ -41,9 +41,9 @@ func TestClosedAgentRejectsNewSession(t *testing.T) {
 }
 
 func TestSessionFileRootsKeepSystemSkillsReadOnly(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "")
 	volumeRoot := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
 	systemRoot := filepath.Join(volumeRoot, "wingman-system-skills", ".system")
+	outsideRoot := filepath.Join(volumeRoot, "wingman-outside-workspace")
 	ws := &code.Workspace{
 		RootPath:         t.TempDir(),
 		ScratchPath:      t.TempDir(),
@@ -56,6 +56,9 @@ func TestSessionFileRootsKeepSystemSkillsReadOnly(t *testing.T) {
 	}
 	if pathCoveredByRoots(systemRoot, writeRoots) {
 		t.Fatalf("system skills root %q is writable from %#v", systemRoot, writeRoots)
+	}
+	if pathCoveredByRoots(outsideRoot, readRoots) || pathCoveredByRoots(outsideRoot, writeRoots) {
+		t.Fatalf("outside path %q should not be covered by file roots (read=%#v, write=%#v)", outsideRoot, readRoots, writeRoots)
 	}
 }
 

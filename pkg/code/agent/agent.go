@@ -767,7 +767,8 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	)
 
 	allowedReadRoots, allowedWriteRoots := sessionFileRoots(ws)
-	if !a.options.DisableShell {
+	sandboxNetwork := a.options.Sandbox != nil && a.options.Sandbox.Network != nil && *a.options.Sandbox.Network
+	if !a.options.DisableShell && !a.options.DisableSandbox {
 		if err := shell.CheckSandbox(ws.RootPath); err != nil {
 			return nil, fmt.Errorf("sandbox unavailable (WINGMAN_SANDBOX=off explicitly disables isolation): %w", err)
 		}
@@ -803,7 +804,13 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create private session temp: %w", err)
 	}
-	shellOpts := &shell.Options{ScratchDir: ws.ScratchPath, TempDir: privateTemp, ExtraWritableRoots: []string{ws.MemoryPath}}
+	shellOpts := &shell.Options{
+		ScratchDir:         ws.ScratchPath,
+		TempDir:            privateTemp,
+		DisableSandbox:     a.options.DisableSandbox,
+		Network:            sandboxNetwork,
+		ExtraWritableRoots: []string{ws.MemoryPath},
+	}
 	allowedReadRoots = append(allowedReadRoots, privateTemp)
 	allowedWriteRoots = append(allowedWriteRoots, privateTemp)
 	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.options.DisableShell, Elicitation: elicit, Shell: shellOpts}
@@ -877,15 +884,6 @@ func sessionFileRoots(ws *code.Workspace) (readRoots, writeRoots []string) {
 		writeRoots = append(writeRoots, ws.MemoryPath)
 	}
 
-	// WINGMAN_SANDBOX=off lifts the workspace path restriction entirely so the
-	// file tools reach the whole filesystem like the shell tool already does —
-	// e.g. reading and editing /etc configs on system-administration tasks. "*"
-	// is the wildcard root the fs matcher treats as "any absolute path": a
-	// platform-agnostic marker, avoiding a fragile per-OS filesystem-root path.
-	if harness.SandboxDisabled() {
-		readRoots = append(readRoots, "*")
-		writeRoots = append(writeRoots, "*")
-	}
 	return readRoots, writeRoots
 }
 

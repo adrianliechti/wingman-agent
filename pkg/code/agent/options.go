@@ -15,8 +15,11 @@ type Options struct {
 	RequireSessionContext  bool
 	IsolateSessionSettings bool
 	DisableShell           bool
+	DisableSandbox         bool
 	DisableWebSearch       bool
 	DisableWebFetch        bool
+
+	Sandbox *SandboxOptions
 
 	// Telemetry overrides the pipeline on the underlying agent.Config. A nil
 	// value inherits that config, including automatic standard OTEL environment
@@ -31,24 +34,48 @@ type Options struct {
 	ShutdownTelemetryOnClose bool
 }
 
+// SandboxOptions configures the OS sandbox used for shell commands and
+// scheduled scripts. A nil value or nil fields inherit the environment
+// defaults (WINGMAN_SANDBOX_NETWORK).
+type SandboxOptions struct {
+	Network *bool
+}
+
 func resolveOptions(options []Options) Options {
 	resolved := Options{
 		DisableShell:     environmentEnabled("WINGMAN_DISABLE_SHELL"),
+		DisableSandbox:   sandboxDisabledFromEnv(),
 		DisableWebSearch: environmentEnabled("WINGMAN_DISABLE_WEBSEARCH"),
 		DisableWebFetch:  environmentEnabled("WINGMAN_DISABLE_WEBFETCH"),
+		Sandbox: &SandboxOptions{
+			Network: new(environmentEnabled("WINGMAN_SANDBOX_NETWORK")),
+		},
 	}
 	for _, option := range options {
 		resolved.RequireSessionContext = resolved.RequireSessionContext || option.RequireSessionContext
 		resolved.IsolateSessionSettings = resolved.IsolateSessionSettings || option.IsolateSessionSettings
 		resolved.DisableShell = resolved.DisableShell || option.DisableShell
+		resolved.DisableSandbox = resolved.DisableSandbox || option.DisableSandbox
 		resolved.DisableWebSearch = resolved.DisableWebSearch || option.DisableWebSearch
 		resolved.DisableWebFetch = resolved.DisableWebFetch || option.DisableWebFetch
+		if option.Sandbox != nil && option.Sandbox.Network != nil {
+			resolved.Sandbox.Network = new(*option.Sandbox.Network)
+		}
 		if option.Telemetry != nil {
 			resolved.Telemetry = option.Telemetry
 		}
 		resolved.ShutdownTelemetryOnClose = resolved.ShutdownTelemetryOnClose || option.ShutdownTelemetryOnClose
 	}
 	return resolved
+}
+
+func sandboxDisabledFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WINGMAN_SANDBOX"))) {
+	case "off", "false", "0", "no", "disabled":
+		return true
+	default:
+		return false
+	}
 }
 
 func environmentEnabled(name string) bool {

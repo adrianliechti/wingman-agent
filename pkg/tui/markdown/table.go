@@ -20,7 +20,7 @@ func (r *ANSIRenderer) renderTable(w util.BufWriter, source []byte, node ast.Nod
 		w.WriteString("\n")
 		return ast.WalkContinue, nil
 	}
-	if node.PreviousSibling() != nil {
+	if needsBlockSeparator(node) {
 		w.WriteString("\n")
 	}
 	table := node.(*east.Table)

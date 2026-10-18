@@ -58,11 +58,11 @@ func TestGateFiltersSecretsAndHonorsEnvironmentPolicy(t *testing.T) {
 		t.Skip("POSIX script")
 	}
 	t.Setenv("OPENAI_API_KEY", "regression-test-value")
-	_, out, err := RunGate(t.Context(), t.TempDir(), `printf '%s' "${OPENAI_API_KEY-unset}"`)
+	_, out, err := RunGate(t.Context(), t.TempDir(), `printf '%s' "${OPENAI_API_KEY-unset}"`, &Options{Shell: &shell.Options{DisableSandbox: true}})
 	if err != nil || out != "unset" {
 		t.Fatalf("default environment: %q, %v", out, err)
 	}
-	opts := &Options{Shell: &shell.Options{Environment: &shell.EnvironmentPolicy{Replace: map[string]string{"WINGMAN_GATE_TEST": "replacement"}}}}
+	opts := &Options{Shell: &shell.Options{DisableSandbox: true, Environment: &shell.EnvironmentPolicy{Replace: map[string]string{"WINGMAN_GATE_TEST": "replacement"}}}}
 	_, out, err = RunGate(t.Context(), t.TempDir(), `printf '%s' "$WINGMAN_GATE_TEST"`, opts)
 	if err != nil || out != "replacement" {
 		t.Fatalf("configured environment: %q, %v", out, err)
@@ -114,7 +114,7 @@ func TestScheduledScriptRechecksReviewAfterCreationAndExecution(t *testing.T) {
 	marker := filepath.Join(dir, "fixture")
 	store := NewMemoryStore()
 	calls := 0
-	opts := &Options{WorkDir: dir, Elicitation: &tool.Elicitation{Review: func(context.Context, tool.Approval) (tool.Verdict, error) {
+	opts := &Options{WorkDir: dir, Shell: &shell.Options{DisableSandbox: true}, Elicitation: &tool.Elicitation{Review: func(context.Context, tool.Approval) (tool.Verdict, error) {
 		calls++
 		return tool.Verdict{Allowed: calls <= 2, Reason: "new user work"}, nil
 	}}}

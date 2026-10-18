@@ -14,6 +14,8 @@ type Options struct {
 	// TempDir is private to the session. Shared host temp directories are never
 	// granted to commands merely because they are temporary storage.
 	TempDir string
+	// DisableSandbox runs model-generated commands without the OS sandbox.
+	DisableSandbox bool
 	// Network grants IP networking for this execution while retaining the
 	// filesystem sandbox. Only the approval path may set this per command.
 	Network bool

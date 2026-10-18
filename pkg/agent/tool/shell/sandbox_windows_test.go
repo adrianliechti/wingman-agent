@@ -31,7 +31,6 @@ func TestWindowsSandboxRejectsBroadWritableRoots(t *testing.T) {
 }
 
 func TestWindowsSandboxLaunchesWithNetworkOff(t *testing.T) {
-	t.Setenv(workspaceSandboxNetworkEnv, "off")
 	sandboxTestHome(t)
 	workspace := t.TempDir()
 	cmd, err := buildCommandWithEnvironment(t.Context(), "exit 0", workspace, os.Environ(), &sandboxOptions{WorkspaceDir: workspace})
@@ -77,14 +76,9 @@ func TestWindowsSandboxNetworkPolicy(t *testing.T) {
 	workspace := t.TempDir()
 	for _, enabled := range []bool{true, false} {
 		t.Run(fmt.Sprintf("enabled=%t", enabled), func(t *testing.T) {
-			value := "off"
-			if enabled {
-				value = "on"
-			}
-			t.Setenv(workspaceSandboxNetworkEnv, value)
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
-			cmd, err := buildCommandWithEnvironment(ctx, command, workspace, os.Environ(), &sandboxOptions{WorkspaceDir: workspace})
+			cmd, err := buildCommandWithEnvironment(ctx, command, workspace, os.Environ(), &sandboxOptions{WorkspaceDir: workspace, Network: enabled})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -385,7 +379,6 @@ func TestWindowsSandboxPreservesUserStderrAndExitCode(t *testing.T) {
 }
 
 func TestWindowsSandboxEnforcesPolicy(t *testing.T) {
-	t.Setenv(workspaceSandboxNetworkEnv, "")
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	home := sandboxTestHome(t)
 	workspace := canonicalPath(t.TempDir())
@@ -465,7 +458,6 @@ func TestWindowsSandboxEnforcesPolicy(t *testing.T) {
 }
 
 func TestWindowsSandboxDoesNotGrantOtherWorkspace(t *testing.T) {
-	t.Setenv(workspaceSandboxNetworkEnv, "")
 	sandboxTestHome(t)
 	workspace := t.TempDir()
 	outside := t.TempDir()
@@ -483,7 +475,6 @@ func TestWindowsSandboxDoesNotGrantOtherWorkspace(t *testing.T) {
 }
 
 func TestWindowsSandboxCancellationKillsBackgroundChildren(t *testing.T) {
-	t.Setenv(workspaceSandboxNetworkEnv, "")
 	sandboxTestHome(t)
 	workspace := t.TempDir()
 	before := sandboxSecuritySnapshot(t, workspace)
@@ -553,7 +544,6 @@ func warmWindowsSandbox(t *testing.T, workspace string) {
 }
 
 func TestWindowsSandboxProtectsWorktreeGitFile(t *testing.T) {
-	t.Setenv(workspaceSandboxNetworkEnv, "")
 	sandboxTestHome(t)
 	workspace := t.TempDir()
 	gitFile := filepath.Join(workspace, ".git")
@@ -613,7 +603,6 @@ func TestWindowsSandboxReadsGitWorktree(t *testing.T) {
 }
 
 func TestWindowsSandboxKillsBackgroundChildren(t *testing.T) {
-	t.Setenv(workspaceSandboxNetworkEnv, "")
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	sandboxTestHome(t)
 	workspace := canonicalPath(t.TempDir())

@@ -292,6 +292,18 @@ func tailPreview(lines []string, n int) []string {
 	return append(out, lines[len(lines)-n:]...)
 }
 
+// trimBlankLines keeps padding from taking up space in activity previews.
+// Content indentation and blank lines inside the output stay intact.
+func trimBlankLines(lines []string) []string {
+	for len(lines) > 0 && strings.TrimSpace(markdown.Sanitize(lines[0])) == "" {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && strings.TrimSpace(markdown.Sanitize(lines[len(lines)-1])) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
 // trimShellTail drops trailing blank lines and the "Command completed" footer
 // so a collapsed preview shows real output instead of padding.
 func trimShellTail(lines []string) []string {
@@ -326,6 +338,9 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 
 	colorize := func(s string) string { return dim(markdown.Sanitize(s)) }
 	preview := strings.Split(output, "\n")
+	if !full {
+		preview = trimBlankLines(preview)
+	}
 
 	info := ""
 	body := preview
@@ -357,7 +372,7 @@ func cellTool(result *agent.ToolResult, width int, full bool) []string {
 			}
 			if len(preview) == 1 {
 				info = preview[0]
-			} else if output != "" {
+			} else if len(preview) > 0 {
 				info = fmt.Sprintf("%d lines", len(preview))
 			}
 		}
@@ -392,9 +407,11 @@ func cellUserShell(command, output string, exitCode int, width int, full bool) [
 	if output != "" {
 		body := strings.Split(output, "\n")
 		if !full {
-			body = tailPreview(body, userShellOutputMaxLines)
+			body = tailPreview(trimBlankLines(body), userShellOutputMaxLines)
 		}
-		lines = append(lines, continuationWrap(strings.Join(body, "\n"), width, colorize)...)
+		if len(body) > 0 {
+			lines = append(lines, continuationWrap(strings.Join(body, "\n"), width, colorize)...)
+		}
 	} else if !errored {
 		lines = append(lines, continuationWrap("(no output)", width, colorize)...)
 	}
@@ -405,9 +422,8 @@ func cellUserShell(command, output string, exitCode int, width int, full bool) [
 func cellToolProgress(name, hint, progress string, width int) []string {
 	lines := []string{toolTitleLine(name, hint, "", width, true, false)}
 
-	if progress != "" {
-		inner := max(width-len(cellIndent)-2, 10)
-		text := markdown.Sanitize(strings.ReplaceAll(progress, "\n", " "))
+	if text := strings.TrimSpace(markdown.Sanitize(strings.ReplaceAll(progress, "\n", " "))); text != "" {
+		inner := max(width-len(cellIndent)-2, 1)
 		lines = append(lines, cellIndent+"  "+dim(ansi.Truncate(text, inner, "…")))
 	}
 

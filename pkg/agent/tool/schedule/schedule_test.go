@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/agent/tool/shell"
 )
 
 func TestScheduleTaskRejectsNonPositiveInterval(t *testing.T) {
@@ -279,20 +280,21 @@ func TestParseScheduleAcceptsLocalTimestamp(t *testing.T) {
 func TestRunGate(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
+	opts := &Options{Shell: &shell.Options{DisableSandbox: true}}
 
-	if wake, _, err := RunGate(ctx, dir, `echo '{"wake": false}'`); wake || err != nil {
+	if wake, _, err := RunGate(ctx, dir, `echo '{"wake": false}'`, opts); wake || err != nil {
 		t.Fatalf("wake=false output should skip the run, got wake=%v err=%v", wake, err)
 	}
-	if wake, _, err := RunGate(ctx, dir, `echo '{"wake": true, "data": [1]}'`); !wake || err != nil {
+	if wake, _, err := RunGate(ctx, dir, `echo '{"wake": true, "data": [1]}'`, opts); !wake || err != nil {
 		t.Fatalf("wake=true output should wake the agent, got wake=%v err=%v", wake, err)
 	}
-	if wake, out, _ := RunGate(ctx, dir, `echo checking; echo '{"wake": false}'`); wake || !strings.Contains(out, "checking") {
+	if wake, out, _ := RunGate(ctx, dir, `echo checking; echo '{"wake": false}'`, opts); wake || !strings.Contains(out, "checking") {
 		t.Fatalf("trailing JSON line should be honored, got wake=%v out=%q", wake, out)
 	}
-	if wake, _, err := RunGate(ctx, dir, `echo not-json`); !wake || err != nil {
+	if wake, _, err := RunGate(ctx, dir, `echo not-json`, opts); !wake || err != nil {
 		t.Fatalf("non-JSON output should fail open without an error, got wake=%v err=%v", wake, err)
 	}
-	if wake, out, err := RunGate(ctx, dir, `exit 3`); !wake || err == nil || !strings.Contains(out, "failed") {
+	if wake, out, err := RunGate(ctx, dir, `exit 3`, opts); !wake || err == nil || !strings.Contains(out, "failed") {
 		t.Fatalf("script failure should fail open with a note and an error, got wake=%v out=%q err=%v", wake, out, err)
 	}
 }
@@ -313,7 +315,7 @@ echo '{"wake": false}'
 	}
 	dir := t.TempDir()
 	task := Task{Script: script}
-	wake, output, err := RunTaskGate(t.Context(), dir, task, &Options{Elicitation: &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) { return true, nil }}})
+	wake, output, err := RunTaskGate(t.Context(), dir, task, &Options{Shell: &shell.Options{DisableSandbox: true}, Elicitation: &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) { return true, nil }}})
 	if err != nil || wake {
 		t.Fatalf("gate decision: wake=%v, err=%v, output=%q", wake, err, output)
 	}

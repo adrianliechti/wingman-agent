@@ -156,9 +156,7 @@ func TestSeatbeltProfileProtectsConfigAndCredentials(t *testing.T) {
 }
 
 func TestScopedPermissionsRetainSeatbeltBoundaries(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
-	t.Setenv(workspaceSandboxNetworkEnv, "off")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) }))
 	defer server.Close()
 	workspace, extra, outside := t.TempDir(), t.TempDir(), t.TempDir()

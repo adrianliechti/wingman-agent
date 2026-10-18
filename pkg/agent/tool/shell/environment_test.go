@@ -51,7 +51,7 @@ func TestToolCommandUsesFilteredEnvironment(t *testing.T) {
 	t.Setenv("WINGMAN_TEST_VISIBLE", "visible")
 
 	workDir := t.TempDir()
-	cmd, err := buildToolCommand(context.Background(), environmentPrintCommand(), workDir, workDir, nil, false)
+	cmd, err := buildToolCommand(context.Background(), environmentPrintCommand(), workDir, workDir, &Options{DisableSandbox: true}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

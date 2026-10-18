@@ -14,7 +14,6 @@ import (
 )
 
 func TestResolveWorkdirWorkspaceSandbox(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
 
 	workspace := t.TempDir()
@@ -24,16 +23,15 @@ func TestResolveWorkdirWorkspaceSandbox(t *testing.T) {
 	}
 	outside := t.TempDir()
 
-	if got, err := resolveWorkdir(workspace, map[string]any{"workdir": inside}); err != nil || got != inside {
+	if got, err := resolveWorkdir(workspace, map[string]any{"workdir": inside}, nil); err != nil || got != inside {
 		t.Fatalf("inside workdir = %q, %v", got, err)
 	}
-	if _, err := resolveWorkdir(workspace, map[string]any{"workdir": outside}); err == nil || !strings.Contains(err.Error(), "outside sandbox workspace") {
+	if _, err := resolveWorkdir(workspace, map[string]any{"workdir": outside}, nil); err == nil || !strings.Contains(err.Error(), "outside sandbox workspace") {
 		t.Fatalf("outside workdir error = %v", err)
 	}
 }
 
 func TestResolveWorkdirWorkspaceSandboxRejectsSymlinkEscape(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
 
 	workspace := t.TempDir()
@@ -43,35 +41,24 @@ func TestResolveWorkdirWorkspaceSandboxRejectsSymlinkEscape(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	if _, err := resolveWorkdir(workspace, map[string]any{"workdir": link}); err == nil || !strings.Contains(err.Error(), "outside sandbox workspace") {
+	if _, err := resolveWorkdir(workspace, map[string]any{"workdir": link}, nil); err == nil || !strings.Contains(err.Error(), "outside sandbox workspace") {
 		t.Fatalf("symlink workdir error = %v", err)
 	}
 }
 
 func TestWorkspaceSandboxIsDefaultAndRequiresExplicitOptOut(t *testing.T) {
 	t.Setenv(workspaceSandboxActiveEnv, "")
-	for _, value := range []string{"off", "false", "0", "no", "disabled"} {
-		t.Run(value, func(t *testing.T) {
-			t.Setenv("WINGMAN_SANDBOX", value)
-			if workspaceSandboxEnabled() {
-				t.Fatalf("sandbox enabled for %q", value)
-			}
-		})
+	if !workspaceSandboxEnabled(nil) || !workspaceSandboxEnabled(&Options{}) {
+		t.Fatal("sandbox should be enabled by default")
 	}
-	for _, value := range []string{"", "workspace", "workspace-write", "WORKSPACE", "1", "typo"} {
-		t.Run(value, func(t *testing.T) {
-			t.Setenv("WINGMAN_SANDBOX", value)
-			if !workspaceSandboxEnabled() {
-				t.Fatalf("sandbox disabled for %q", value)
-			}
-		})
+	if workspaceSandboxEnabled(&Options{DisableSandbox: true}) {
+		t.Fatal("sandbox enabled when DisableSandbox is true")
 	}
 }
 
 func TestWorkspaceSandboxDoesNotNest(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "1")
-	if workspaceSandboxEnabled() {
+	if workspaceSandboxEnabled(nil) {
 		t.Fatal("sandbox should be inherited instead of nested")
 	}
 }
@@ -114,7 +101,6 @@ func TestExecSandboxConfinesWritesToWorkspace(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		t.Skip("no sandbox backend on this platform")
 	}
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	home := sandboxTestHome(t)
 	outside := filepath.Join(home, fmt.Sprintf(".wingman-sandbox-test-%d", os.Getpid()))
@@ -145,7 +131,6 @@ func TestExecEscalationRunsOutsideSandboxAfterApproval(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		t.Skip("no sandbox backend on this platform")
 	}
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	home := sandboxTestHome(t)
 	outside := filepath.Join(home, fmt.Sprintf(".wingman-escalation-test-%d", os.Getpid()))
@@ -192,7 +177,6 @@ func TestExecEscalationRunsOutsideSandboxAfterApproval(t *testing.T) {
 }
 
 func TestExecEscalationFailsClosedWithoutApprover(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	manager := NewExecManager(nil)
 	defer manager.Close()
@@ -205,10 +189,9 @@ func TestExecEscalationFailsClosedWithoutApprover(t *testing.T) {
 }
 
 func TestExecOffersEscalationOnlyWhenSandboxed(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "off")
 	manager := NewExecManager(nil)
 	defer manager.Close()
-	if _, ok := ExecTools(manager, t.TempDir(), nil, nil)[0].Parameters["properties"].(map[string]any)["sandbox_permissions"]; ok {
+	if _, ok := ExecTools(manager, t.TempDir(), nil, &Options{DisableSandbox: true})[0].Parameters["properties"].(map[string]any)["sandbox_permissions"]; ok {
 		t.Fatal("unsandboxed exec offers sandbox_permissions")
 	}
 }

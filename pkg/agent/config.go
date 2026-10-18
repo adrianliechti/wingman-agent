@@ -14,7 +14,6 @@ import (
 	"github.com/openai/openai-go/v3/option"
 
 	"github.com/adrianliechti/wingman-agent/internal/provider"
-	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/agent/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
@@ -377,10 +376,6 @@ func effortFromEnv(name string) string {
 	default:
 		return ""
 	}
-}
-
-func SandboxDisabled() bool {
-	return !sandboxpolicy.Enabled()
 }
 
 func createClient() openai.Client {

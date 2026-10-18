@@ -115,8 +115,10 @@ func highlightCode(code, lang string) string {
 }
 
 func formatCodeBlock(code, lang string, t theme.Theme) string {
-	highlighted := highlightCode(code, lang)
-	lines := strings.Split(strings.TrimSuffix(highlighted, "\n"), "\n")
+	// Trim the line terminator before highlighting: an ANSI reset after it
+	// would otherwise look like another (empty) numbered line.
+	highlighted := highlightCode(strings.TrimSuffix(code, "\n"), lang)
+	lines := strings.Split(highlighted, "\n")
 
 	dim := ansi.Fg(t.BrBlack)
 

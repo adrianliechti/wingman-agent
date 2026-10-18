@@ -12,7 +12,6 @@ import (
 )
 
 func TestEscalationVerdictsAreNeverReused(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	reviews := 0
 	elicit := &tool.Elicitation{Review: func(context.Context, tool.Approval) (tool.Verdict, error) {
@@ -35,9 +34,7 @@ func TestEscalationVerdictsAreNeverReused(t *testing.T) {
 }
 
 func TestPermissionRequestPreservesSandboxAndDoesNotMutateBase(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
-	t.Setenv(workspaceSandboxNetworkEnv, "off")
 	workspace, extra, temp := t.TempDir(), t.TempDir(), t.TempDir()
 	base := &Options{TempDir: temp}
 	opts, mode, err := executionOptions(workspace, map[string]any{"sandbox_permissions": "require_permissions", "network": true, "writable_roots": []any{extra}, "justification": "download fixture"}, base)
@@ -68,7 +65,6 @@ func TestPermissionRequestPreservesSandboxAndDoesNotMutateBase(t *testing.T) {
 }
 
 func TestMalformedPermissionRequestsFailBeforeApproval(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	workspace := t.TempDir()
 	for _, args := range []map[string]any{
@@ -87,8 +83,11 @@ func TestMalformedPermissionRequestsFailBeforeApproval(t *testing.T) {
 }
 
 func TestSandboxNetworkAndTempAreRestrictedByDefault(t *testing.T) {
-	t.Setenv(workspaceSandboxNetworkEnv, "")
-	if sandboxNetworkEnabled() {
+	opts, _, err := executionOptions(t.TempDir(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts != nil && opts.Network {
 		t.Fatal("network enabled by default")
 	}
 	roots := writableRootsFor(t.TempDir(), nil)
@@ -108,7 +107,6 @@ func TestPermissionExpansionsCannotMasqueradeAsReadOnly(t *testing.T) {
 }
 
 func TestScopedRootCannotSelectProtectedConfiguration(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	workspace, outside := t.TempDir(), t.TempDir()
 	for _, name := range []string{".git", ".agents", ".codex", ".vscode"} {
@@ -123,7 +121,6 @@ func TestScopedRootCannotSelectProtectedConfiguration(t *testing.T) {
 }
 
 func TestPermissionReviewRejectsChangedRootAlias(t *testing.T) {
-	t.Setenv("WINGMAN_SANDBOX", "workspace")
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	first, second, parent := t.TempDir(), t.TempDir(), t.TempDir()
 	alias := filepath.Join(parent, "workspace")

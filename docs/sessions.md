@@ -122,7 +122,9 @@ approval is unavailable.
 The agent's shell commands and scheduled scripts use an OS sandbox by default:
 Seatbelt on macOS, bubblewrap (`bwrap`) with seccomp on Linux, and a native
 process security environment (PSEC) on Windows. Unavailable backends fail closed.
-Set `WINGMAN_SANDBOX=off` to explicitly disable isolation.
+Set `WINGMAN_SANDBOX=off` to explicitly disable shell OS isolation; file and
+search tools (`read`, `edit`, `glob`, `grep`) keep their workspace roots and
+protected-configuration checks regardless.
 
 - Commands can read most files, but not credentials such as `~/.ssh`,
   `~/.aws`, `~/.gnupg`, `~/.kube`, or Wingman's MCP tokens. Common authentication
