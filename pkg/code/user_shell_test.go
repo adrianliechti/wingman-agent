@@ -38,6 +38,18 @@ func TestFormatAndParseUserShellCommand(t *testing.T) {
 	}
 }
 
+func TestParseUserShellCommandWithTagsInCommand(t *testing.T) {
+	command := "echo '</command>' '<result>'"
+	formatted := FormatUserShellCommand(command, "</command> <result>\n", 0, time.Millisecond)
+	cmd, output, _, ok := ParseUserShellCommand(formatted)
+	if !ok {
+		t.Fatalf("ParseUserShellCommand failed on:\n%s", formatted)
+	}
+	if cmd != command || output != "</command> <result>" {
+		t.Fatalf("got (%q, %q), want (%q, %q)", cmd, output, command, "</command> <result>")
+	}
+}
+
 func TestParseUserShellCommandNonZeroEmptyOutput(t *testing.T) {
 	formatted := FormatUserShellCommand("false", "", 1, 10*time.Millisecond)
 	cmd, output, exitCode, ok := ParseUserShellCommand(formatted)

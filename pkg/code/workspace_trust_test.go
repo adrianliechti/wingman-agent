@@ -3,11 +3,17 @@ package code
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
@@ -17,6 +23,55 @@ import (
 type trustUI struct {
 	calls int
 	allow bool
+}
+
+type waitingTrustUI struct {
+	entered chan struct{}
+}
+
+func (u waitingTrustUI) Confirm(ctx context.Context, _ string) (bool, error) {
+	select {
+	case u.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return false, ctx.Err()
+}
+
+func (waitingTrustUI) Elicit(context.Context, tool.ElicitRequest) (tool.ElicitResult, error) {
+	panic("unexpected elicitation")
+}
+
+func TestMCPInitializationWaitIsCancellable(t *testing.T) {
+	testenv.WingmanHome(t)
+	manager := mcp.NewManager(&mcp.Config{Servers: map[string]mcp.ServerConfig{"local": {Command: "must-not-launch"}}})
+	manager.TrustRequired = map[string]string{"local": "mcp.json"}
+	ws := &Workspace{RootPath: t.TempDir(), MCP: manager}
+	defer ws.Close()
+	ui := waitingTrustUI{entered: make(chan struct{}, 1)}
+	firstCtx, cancelFirst := context.WithCancel(t.Context())
+	first := make(chan error, 1)
+	go func() { first <- ws.InitMCP(firstCtx, ui) }()
+	defer func() { cancelFirst(); <-first }()
+	select {
+	case <-ui.entered:
+	case <-time.After(time.Second):
+		t.Fatal("first approval was not reached")
+	}
+	secondCtx, cancelSecond := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancelSecond()
+	second := make(chan error, 1)
+	go func() { second <- ws.InitMCP(secondCtx, ui) }()
+	select {
+	case err := <-second:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("cancelled initialization = %v", err)
+		}
+	case <-time.After(time.Second):
+		cancelFirst()
+		<-second
+		t.Fatal("cancelled initialization waited for another session's approval")
+	}
 }
 
 func (u *trustUI) Confirm(context.Context, string) (bool, error) { u.calls++; return u.allow, nil }
@@ -31,37 +86,37 @@ func TestMCPTrustBindsToExactConfigurationAndWorkspace(t *testing.T) {
 	manager.TrustRequired = map[string]string{"local": filepath.Join(root, "mcp.json")}
 	ws := &Workspace{RootPath: root, MCP: manager}
 	config := mcp.ServerConfig{Command: "example", Args: []string{"serve"}, Env: map[string]string{"EXAMPLE": "one"}}
-	if err := ws.approveMCP(t.Context(), nil, "local", config); err == nil {
+	if err := ws.approveMCP(t.Context(), manager, nil, "local", config); err == nil {
 		t.Fatal("startup trusted a repository configuration")
 	}
 	ui := &trustUI{allow: true}
-	if err := ws.approveMCP(t.Context(), ui, "local", config); err != nil {
+	if err := ws.approveMCP(t.Context(), manager, ui, "local", config); err != nil {
 		t.Fatal(err)
 	}
 	if ui.calls != 1 {
 		t.Fatalf("approval calls = %d", ui.calls)
 	}
 	ws = &Workspace{RootPath: root, MCP: manager}
-	if err := ws.approveMCP(t.Context(), nil, "local", config); err != nil {
+	if err := ws.approveMCP(t.Context(), manager, nil, "local", config); err != nil {
 		t.Fatalf("approved config did not survive restart: %v", err)
 	}
 	changed := config
 	changed.Args = []string{"different"}
-	if err := ws.approveMCP(t.Context(), nil, "local", changed); err == nil {
+	if err := ws.approveMCP(t.Context(), manager, nil, "local", changed); err == nil {
 		t.Fatal("changed command inherited approval")
 	}
 	changed = config
 	changed.Env = map[string]string{"EXAMPLE": "two"}
-	if err := ws.approveMCP(t.Context(), nil, "local", changed); err == nil {
+	if err := ws.approveMCP(t.Context(), manager, nil, "local", changed); err == nil {
 		t.Fatal("changed environment inherited approval")
 	}
 	changed = config
 	changed.Dir = t.TempDir()
-	if err := ws.approveMCP(t.Context(), nil, "local", changed); err == nil {
+	if err := ws.approveMCP(t.Context(), manager, nil, "local", changed); err == nil {
 		t.Fatal("changed working directory inherited approval")
 	}
 	other := &Workspace{RootPath: t.TempDir(), MCP: manager}
-	if err := other.approveMCP(t.Context(), nil, "local", config); err == nil {
+	if err := other.approveMCP(t.Context(), manager, nil, "local", config); err == nil {
 		t.Fatal("other workspace inherited approval")
 	}
 	info, err := os.Stat(filepath.Join(projectStateDir(root), "mcp-trust.json"))
@@ -138,5 +193,65 @@ func TestProjectMCPIsBlockedBeforeStartingItsProcess(t *testing.T) {
 	}
 	if len(manager.Sessions()) != 0 {
 		t.Fatal("unapproved server connected")
+	}
+}
+
+type closingTrustUI struct{ ws *Workspace }
+
+func (u closingTrustUI) Confirm(context.Context, string) (bool, error) {
+	u.ws.Close()
+	return true, nil
+}
+
+func (closingTrustUI) Elicit(context.Context, tool.ElicitRequest) (tool.ElicitResult, error) {
+	panic("unexpected elicitation")
+}
+
+func TestMCPInitializationRacingCloseLeavesNoSessions(t *testing.T) {
+	testenv.WingmanHome(t)
+	server := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "test", Version: "1.0.0"}, nil)
+	httpServer := httptest.NewServer(sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server { return server }, nil))
+	defer httpServer.Close()
+	headers := map[string]string{"Authorization": "Bearer test"}
+	manager := mcp.NewManager(&mcp.Config{Servers: map[string]mcp.ServerConfig{
+		"first":  {URL: httpServer.URL + "/first", Headers: headers},
+		"second": {URL: httpServer.URL + "/second", Headers: headers},
+	}})
+	defer manager.Close()
+	manager.TrustRequired = map[string]string{"first": "mcp.json", "second": "mcp.json"}
+	ws := &Workspace{RootPath: t.TempDir(), MCP: manager}
+
+	_ = ws.InitMCP(t.Context(), closingTrustUI{ws})
+
+	sessions := manager.Sessions()
+	if len(sessions) == 0 {
+		t.Fatal("approved servers did not connect")
+	}
+	for name, session := range sessions {
+		done := make(chan struct{})
+		go func() { _ = session.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("MCP session %s outlived the closed workspace", name)
+		}
+	}
+}
+
+func TestLoadMCPKeepsProjectConfigWhenGlobalIsInvalid(t *testing.T) {
+	testenv.WingmanHome(t)
+	if err := os.MkdirAll(filepath.Dir(globalMCPConfigPath()), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(globalMCPConfigPath(), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mcp.json"), []byte(`{"mcpServers":{"local":{"command":"example"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager := loadMCP(dir, nil)
+	if manager == nil || manager.Servers["local"].Command != "example" || manager.TrustRequired["local"] == "" {
+		t.Fatalf("project MCP config was dropped: %+v", manager)
 	}
 }

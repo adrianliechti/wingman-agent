@@ -105,7 +105,8 @@ type toolCall struct {
 	kind      string
 	args      string
 	locations []harness.ToolLocation
-	diff      string
+	content   string
+	rawOutput string
 }
 
 type turn struct {
@@ -143,10 +144,18 @@ func (t *turn) send(msg harness.Message) {
 	}
 }
 
+// messages holds t.mu only for the last message, the one emit mutates, so long histories don't stall SessionUpdate.
 func (t *turn) messages() []harness.Message {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	return harness.CloneMessages(t.emitted)
+	n := len(t.emitted)
+	if n == 0 {
+		t.mu.Unlock()
+		return nil
+	}
+	prefix := t.emitted[: n-1 : n-1]
+	last := harness.CloneMessages(t.emitted[n-1:])
+	t.mu.Unlock()
+	return append(harness.CloneMessages(prefix), last...)
 }
 
 // cancelOutstandingToolCalls renders tool calls that never reached a terminal status.
@@ -591,13 +600,9 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 	sess.applyModes(resp.Modes)
 	sess.loaded = true
 	a.mu.Lock()
+	a.applyPendingLocked(id, sess)
 	a.sessions[id] = sess
-	pending := a.pending[id]
-	delete(a.pending, id)
 	a.mu.Unlock()
-	for _, update := range pending {
-		a.applySessionStateUpdate(sess, update)
-	}
 	if err := a.applySessionDefaults(ctx, sess); err != nil {
 		a.mu.Lock()
 		delete(a.sessions, id)
@@ -614,7 +619,7 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 
 func (a *Agent) LoadSession(ctx context.Context, id string) error {
 	var ferr error
-	for _, err := range a.LoadSessionStream(ctx, id) {
+	for _, err := range a.loadSessionStream(ctx, id, false) {
 		if err != nil {
 			ferr = err
 		}
@@ -623,39 +628,29 @@ func (a *Agent) LoadSession(ctx context.Context, id string) error {
 }
 
 func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]harness.Message, error] {
+	return a.loadSessionStream(ctx, id, true)
+}
+
+func (a *Agent) loadSessionStream(ctx context.Context, id string, snapshots bool) iter.Seq2[[]harness.Message, error] {
 	if !a.caps.LoadSession && a.caps.SessionCapabilities.Resume == nil {
 		return func(yield func([]harness.Message, error) bool) {
 			yield(nil, errors.ErrUnsupported)
 		}
 	}
 
-	a.mu.Lock()
-	sess, exists := a.sessions[id]
-	if !exists {
-		sess = &sessionState{
-			id:        acpsdk.SessionId(id),
-			toolCalls: map[string]toolCall{},
-		}
-		a.sessions[id] = sess
-	}
-	pending := a.pending[id]
-	delete(a.pending, id)
-	a.mu.Unlock()
-	for _, update := range pending {
-		a.applySessionStateUpdate(sess, update)
-	}
-
-	sess.mu.Lock()
-	if sess.loaded {
-		snap := harness.CloneMessages(sess.messages)
-		sess.mu.Unlock()
-		return func(yield func([]harness.Message, error) bool) {
-			yield(snap, nil)
-		}
-	}
-	sess.mu.Unlock()
-
 	return func(yield func([]harness.Message, error) bool) {
+		a.mu.Lock()
+		sess, exists := a.sessions[id]
+		if !exists {
+			sess = &sessionState{
+				id:        acpsdk.SessionId(id),
+				toolCalls: map[string]toolCall{},
+			}
+			a.applyPendingLocked(id, sess)
+			a.sessions[id] = sess
+		}
+		a.mu.Unlock()
+
 		loadCtx, cancel := context.WithCancel(ctx)
 		t := &turn{
 			ctx:    loadCtx,
@@ -700,11 +695,14 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ha
 				sess.loaded = true
 			}
 			sess.mu.Unlock()
+			if !ok && !exists {
+				a.mu.Lock()
+				if a.sessions[id] == sess {
+					delete(a.sessions, id)
+				}
+				a.mu.Unlock()
+			}
 		}()
-
-		snapshot := func() []harness.Message {
-			return t.messages()
-		}
 
 		loadErrCh := make(chan error, 1)
 		go func() {
@@ -752,7 +750,7 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ha
 					return
 				}
 				ok = true
-				yield(snapshot(), nil)
+				yield(t.messages(), nil)
 				return
 			case ev := <-t.events:
 				if ev.done {
@@ -762,7 +760,14 @@ func (a *Agent) LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]ha
 					}
 					continue
 				}
-				if !yield(snapshot(), nil) {
+				if !snapshots {
+					continue
+				}
+				// Coalesce a replay burst so history is cloned once per batch, not per event.
+				for len(t.events) > 0 {
+					<-t.events
+				}
+				if !yield(t.messages(), nil) {
 					return
 				}
 			}
@@ -1128,11 +1133,8 @@ func (a *Agent) shutdown() {
 }
 
 func (a *Agent) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) error {
-	sess := a.session(string(n.SessionId))
+	sess := a.sessionOrDefer(string(n.SessionId), n.Update)
 	if sess == nil {
-		if isSessionStateUpdate(n.Update) {
-			a.rememberPendingUpdate(string(n.SessionId), n.Update)
-		}
 		return nil
 	}
 	if a.applySessionStateUpdate(sess, n.Update) {
@@ -1167,15 +1169,19 @@ func isSessionStateUpdate(update acpsdk.SessionUpdate) bool {
 		update.AvailableCommandsUpdate != nil || update.SessionInfoUpdate != nil || update.UsageUpdate != nil
 }
 
-func (a *Agent) rememberPendingUpdate(id string, update acpsdk.SessionUpdate) {
-	if id == "" {
-		return
-	}
+// sessionOrDefer looks up and defers under one lock so a concurrent registration cannot strand the update.
+func (a *Agent) sessionOrDefer(id string, update acpsdk.SessionUpdate) *sessionState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if sess := a.sessions[id]; sess != nil {
+		return sess
+	}
+	if id == "" || !isSessionStateUpdate(update) {
+		return nil
+	}
 	updates, exists := a.pending[id]
 	if !exists && len(a.pending) >= 128 {
-		return
+		return nil
 	}
 	if len(updates) < 32 {
 		if a.pending == nil {
@@ -1183,6 +1189,15 @@ func (a *Agent) rememberPendingUpdate(id string, update acpsdk.SessionUpdate) {
 		}
 		a.pending[id] = append(updates, update)
 	}
+	return nil
+}
+
+// applyPendingLocked must run before sess is published so deferred updates cannot overwrite newer direct ones.
+func (a *Agent) applyPendingLocked(id string, sess *sessionState) {
+	for _, update := range a.pending[id] {
+		a.applySessionStateUpdate(sess, update)
+	}
+	delete(a.pending, id)
 }
 
 func (a *Agent) applySessionStateUpdate(sess *sessionState, update acpsdk.SessionUpdate) bool {
@@ -1329,7 +1344,7 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		sess.toolCallsMu.Lock()
 		sess.toolCalls[string(tc.ToolCallId)] = toolCall{
 			name: name, kind: kind, args: args, locations: locations,
-			diff: toolCallDiffText(tc.Content),
+			content: toolCallContentText(tc.Content), rawOutput: rawValueToString(tc.RawOutput),
 		}
 		sess.toolCallsMu.Unlock()
 		callMsg := emit(harness.RoleAssistant, harness.Content{ToolCall: &harness.ToolCall{
@@ -1390,8 +1405,13 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		if tu.Locations != nil {
 			prior.locations = agentToolLocations(a.workspaceRoot(), tu.Locations)
 		}
-		if diff := toolCallDiffText(tu.Content); diff != "" {
-			prior.diff = diff
+		if tu.Content != nil {
+			// Updates replace content when present; omitted content retains the
+			// latest snapshot, including on a status-only completion.
+			prior.content = toolCallContentText(tu.Content)
+		}
+		if tu.RawOutput != nil {
+			prior.rawOutput = rawValueToString(tu.RawOutput)
 		}
 		sess.toolCalls[string(tu.ToolCallId)] = prior
 		sess.toolCallsMu.Unlock()
@@ -1408,12 +1428,9 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		prior = sess.toolCalls[string(tu.ToolCallId)]
 		delete(sess.toolCalls, string(tu.ToolCallId))
 		sess.toolCallsMu.Unlock()
-		body := toolCallContentText(tu.Content)
+		body := prior.content
 		if body == "" {
-			body = prior.diff
-		}
-		if body == "" && tu.RawOutput != nil {
-			body = rawValueToString(tu.RawOutput)
+			body = prior.rawOutput
 		}
 		if body == "" && status == acpsdk.ToolCallStatusFailed {
 			body = "tool call failed"
@@ -1874,7 +1891,7 @@ func (a *Agent) ReadTextFile(_ context.Context, p acpsdk.ReadTextFileRequest) (a
 			start = min(*p.Line-1, len(lines))
 		}
 		end := len(lines)
-		if p.Limit != nil && *p.Limit > 0 && start+*p.Limit < end {
+		if p.Limit != nil && *p.Limit > 0 && *p.Limit < end-start {
 			end = start + *p.Limit
 		}
 		content = strings.Join(lines[start:end], "\n")

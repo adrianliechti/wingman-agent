@@ -16,16 +16,17 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 )
 
-// approveMCP runs under mcpCatalogMu. Approval is bound to the exact loaded
+// approveMCP runs under the MCP catalog gate. Approval is bound to the exact loaded
 // configuration and working directory, and stored outside the repository.
-func (w *Workspace) approveMCP(ctx context.Context, ui UI, name string, server mcp.ServerConfig) error {
+func (w *Workspace) approveMCP(ctx context.Context, manager *mcp.Manager, ui UI, name string, server mcp.ServerConfig) error {
+	source := manager.TrustRequired[name]
 	config, err := json.Marshal(struct {
 		Workspace string
 		Name      string
 		Source    string
 		Directory string
 		Config    mcp.ServerConfig
-	}{w.RootPath, name, w.MCP.TrustRequired[name], server.Dir, server})
+	}{w.RootPath, name, source, server.Dir, server})
 	if err != nil {
 		return err
 	}
@@ -49,7 +50,7 @@ func (w *Workspace) approveMCP(ctx context.Context, ui UI, name string, server m
 		return nil
 	}
 	if ui == nil {
-		return fmt.Errorf("MCP server %s needs approval of %s before it can connect", name, w.MCP.TrustRequired[name])
+		return fmt.Errorf("MCP server %s needs approval of %s before it can connect", name, source)
 	}
 	description := server.URL
 	if server.Command != "" {
@@ -59,7 +60,7 @@ func (w *Workspace) approveMCP(ctx context.Context, ui UI, name string, server m
 	if dir == "" {
 		dir = w.RootPath
 	}
-	message := fmt.Sprintf("Allow MCP server %q from %s?\n\n%s\nWorking directory: %s\n\nThis configuration can execute code or contact its server. Approval is remembered for this exact configuration.", name, w.MCP.TrustRequired[name], description, dir)
+	message := fmt.Sprintf("Allow MCP server %q from %s?\n\n%s\nWorking directory: %s\n\nThis configuration can execute code or contact its server. Approval is remembered for this exact configuration.", name, source, description, dir)
 	if len(server.Env) > 0 {
 		message += "\nEnvironment overrides: " + strings.Join(slices.Sorted(maps.Keys(server.Env)), ", ")
 	}

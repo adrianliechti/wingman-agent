@@ -85,7 +85,8 @@ type Workspace struct {
 	mcpToolsByServer map[string][]tool.Tool
 	lspTools         []tool.Tool
 
-	mcpCatalogMu      sync.Mutex
+	mcpCatalogOnce    sync.Once
+	mcpCatalogGate    chan struct{}
 	mcpTrustDecisions map[string]bool
 	hookTrust         *trustFile
 	mcpRefreshCancel  context.CancelFunc
@@ -222,23 +223,38 @@ func loadMCP(workDir string, plugins []plugin.Plugin) *mcp.Manager {
 		fmt.Fprintf(os.Stderr, "plugin: %s\n", diagnostic)
 	}
 
-	manager, _ := mcp.Load(globalMCPConfigPath(), filepath.Join(workDir, "mcp.json"))
-
-	if manager == nil {
-		if len(servers) == 0 {
-			return nil
-		}
-
-		manager = mcp.NewManager(&mcp.Config{Servers: map[string]mcp.ServerConfig{}})
-	}
-
-	manager.TrustRequired = map[string]string{}
+	// Load each file on its own so one broken config does not hide the other.
 	projectConfig := filepath.Join(workDir, "mcp.json")
-	if cfg, err := mcp.LoadConfig(projectConfig); err == nil {
-		for name := range cfg.Servers {
-			manager.TrustRequired[name] = projectConfig
+	configs := map[string]mcp.ServerConfig{}
+	trustRequired := map[string]string{}
+	found := false
+	for _, path := range []string{globalMCPConfigPath(), projectConfig} {
+		if path == "" {
+			continue
+		}
+		cfg, err := mcp.LoadConfig(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mcp: %s: %v\n", path, err)
+			continue
+		}
+		found = true
+		maps.Copy(configs, cfg.Servers)
+		if path == projectConfig {
+			for name := range cfg.Servers {
+				trustRequired[name] = projectConfig
+			}
 		}
 	}
+
+	if !found && len(servers) == 0 {
+		return nil
+	}
+
+	manager := mcp.NewManager(&mcp.Config{Servers: configs})
+	manager.TrustRequired = trustRequired
 	configured := slices.Sorted(maps.Keys(manager.Servers))
 
 	for _, name := range slices.Sorted(maps.Keys(servers)) {
@@ -564,16 +580,26 @@ func (w *Workspace) InitMCP(ctx context.Context, ui ...UI) error {
 		return nil
 	}
 
-	w.mcpCatalogMu.Lock()
-	defer w.mcpCatalogMu.Unlock()
+	if err := w.lockMCPCatalog(ctx); err != nil {
+		return err
+	}
+	defer w.unlockMCPCatalog()
 	w.startMCPToolRefreshes(manager)
 	var confirm UI
 	if len(ui) > 0 {
 		confirm = ui[0]
 	}
 	connectErr := manager.Connect(ctx, func(ctx context.Context, name string, server mcp.ServerConfig) error {
-		return w.approveMCP(ctx, confirm, name, server)
+		return w.approveMCP(ctx, manager, confirm, name, server)
 	})
+	w.mu.RLock()
+	closed = w.closed
+	w.mu.RUnlock()
+	if closed {
+		// Close already closed the sessions it saw; Connect may have added more.
+		manager.Close()
+		return connectErr
+	}
 
 	sessions := manager.Sessions()
 	toolsByServer := make(map[string][]tool.Tool)
@@ -595,6 +621,24 @@ func (w *Workspace) InitMCP(ctx context.Context, ui ...UI) error {
 	w.mu.Unlock()
 	return errors.Join(toolsErrs...)
 }
+
+// MCP initialization can wait for another session's approval dialog. Waiting
+// callers must remain cancellable without cancelling the dialog's owner.
+func (w *Workspace) lockMCPCatalog(ctx context.Context) error {
+	w.mcpCatalogOnce.Do(func() { w.mcpCatalogGate = make(chan struct{}, 1) })
+	select {
+	case w.mcpCatalogGate <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			w.unlockMCPCatalog()
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (w *Workspace) unlockMCPCatalog() { <-w.mcpCatalogGate }
 
 func (w *Workspace) startMCPToolRefreshes(manager *mcp.Manager) {
 	w.mu.Lock()
@@ -622,11 +666,10 @@ func (w *Workspace) scheduleMCPToolRefresh(ctx context.Context, manager *mcp.Man
 }
 
 func (w *Workspace) refreshMCPServerTools(ctx context.Context, manager *mcp.Manager, serverName string) {
-	w.mcpCatalogMu.Lock()
-	defer w.mcpCatalogMu.Unlock()
-	if ctx.Err() != nil {
+	if err := w.lockMCPCatalog(ctx); err != nil {
 		return
 	}
+	defer w.unlockMCPCatalog()
 
 	session := manager.Session(serverName)
 	if session == nil {
@@ -1439,12 +1482,13 @@ func splitFrontmatter(text string) (fm, body string, ok bool) {
 	if !found {
 		return "", "", false
 	}
-	before, after, ok := strings.Cut(rest, "\n---")
+	// The leading newline lets an empty block close on its first line.
+	before, after, ok := strings.Cut("\n"+rest, "\n---")
 	if !ok {
 		return "", "", false
 	}
 	body = strings.TrimLeft(after, "\r\n")
-	return before, body, true
+	return strings.TrimPrefix(before, "\n"), body, true
 }
 
 func (w *Workspace) ManagedTools() (mcpTools, lspTools []tool.Tool) {
@@ -1576,7 +1620,10 @@ func findCanonicalGitRoot(dir string) string {
 			if info.IsDir() {
 				return cur
 			}
-			return resolveWorktreeRoot(cur, gitPath)
+			if root := resolveWorktreeRoot(cur, gitPath); root != "" {
+				return root
+			}
+			return cur
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur {
@@ -1612,8 +1659,9 @@ func resolveWorktreeRoot(worktreeDir, gitFile string) string {
 		return filepath.Dir(filepath.Clean(common))
 	}
 
+	// Submodules also live under .git (in modules/), but they are their own project.
 	parent := filepath.Dir(filepath.Dir(gitdir))
-	if filepath.Base(parent) == ".git" {
+	if filepath.Base(filepath.Dir(gitdir)) == "worktrees" && filepath.Base(parent) == ".git" {
 		return filepath.Dir(parent)
 	}
 	return ""
@@ -1644,22 +1692,55 @@ func loadBundledSkills() ([]skill.Skill, string, error) {
 	// within this process so two projects cannot interleave the refresh.
 	bundledSkillsInstallMu.Lock()
 	defer bundledSkillsInstallMu.Unlock()
-	markerPath := filepath.Join(destination, bundledSkillsMarkerFile)
-	marker, markerErr := os.ReadFile(markerPath)
-	if markerErr != nil || strings.TrimSpace(string(marker)) != fingerprint {
-		if err := os.RemoveAll(destination); err != nil {
-			return nil, "", fmt.Errorf("remove system skills: %w", err)
-		}
-		if err := os.CopyFS(destination, source); err != nil {
-			return nil, "", fmt.Errorf("copy system skills: %w", err)
-		}
-		if err := os.WriteFile(markerPath, []byte(fingerprint+"\n"), 0644); err != nil {
-			return nil, "", fmt.Errorf("mark system skills: %w", err)
+	if !bundledSkillsInstalled(destination, fingerprint) {
+		if err := installBundledSkills(source, destination, fingerprint); err != nil {
+			return nil, "", err
 		}
 	}
 
 	skills, err := skill.LoadBundledAt(source, ".", destination)
 	return skills, destination, err
+}
+
+func bundledSkillsInstalled(destination, fingerprint string) bool {
+	marker, err := os.ReadFile(filepath.Join(destination, bundledSkillsMarkerFile))
+	return err == nil && strings.TrimSpace(string(marker)) == fingerprint
+}
+
+// Staging outside skill roots and swapping by rename keeps other processes from seeing a partial tree.
+func installBundledSkills(source fs.FS, destination, fingerprint string) error {
+	stagingRoot := filepath.Dir(filepath.Dir(destination))
+	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+		return fmt.Errorf("create system skills: %w", err)
+	}
+	staging, err := os.MkdirTemp(stagingRoot, ".skills-system-*")
+	if err != nil {
+		return fmt.Errorf("create system skills: %w", err)
+	}
+	defer os.RemoveAll(staging)
+	if err := os.CopyFS(staging, source); err != nil {
+		return fmt.Errorf("copy system skills: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, bundledSkillsMarkerFile), []byte(fingerprint+"\n"), 0644); err != nil {
+		return fmt.Errorf("mark system skills: %w", err)
+	}
+
+	previous := staging + "-previous"
+	defer os.RemoveAll(previous)
+	var swapErr error
+	for range 5 {
+		if swapErr = os.Rename(staging, destination); swapErr == nil {
+			return nil
+		}
+		if bundledSkillsInstalled(destination, fingerprint) {
+			return nil
+		}
+		os.RemoveAll(previous)
+		if err := os.Rename(destination, previous); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			swapErr = err
+		}
+	}
+	return fmt.Errorf("install system skills: %w", swapErr)
 }
 
 func bundledSkillsFingerprint(source fs.FS) (string, error) {

@@ -1,11 +1,55 @@
 package agent
 
 import (
+	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
+
+func TestConcurrentLoadSessionReconcilesOnce(t *testing.T) {
+	ws := newOptionsTestWorkspace(t)
+	var ended atomic.Int64
+	a := New(ws, Config{Options: Options{DisableShell: true}, Config: harness.Config{
+		Hooks: hook.Hooks{SessionEnd: []hook.SessionEnd{func(context.Context, string) { ended.Add(1) }}},
+	}}, nil)
+	defer a.Close()
+	const id = "concurrent-resume"
+	if err := session.Save(a.sessionsDir, id, harness.State{Events: []harness.RuntimeEvent{
+		{ID: "start-event", Sequence: 1, Type: harness.EventTurnStarted, TurnID: "interrupted-turn"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	const callers = 16
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var workers sync.WaitGroup
+	for range callers {
+		workers.Go(func() {
+			<-start
+			errs <- a.LoadSession(t.Context(), id)
+		})
+	}
+	close(start)
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent resume failed: %v", err)
+		}
+	}
+	if got := ended.Load(); got != 0 {
+		t.Errorf("resume closed %d duplicate sessions and ran their end hooks", got)
+	}
+	state := a.session(id).aa.StateSnapshot()
+	if len(state.Events) != 2 || state.Events[1].Type != harness.EventTurnTerminal {
+		t.Fatalf("resumed events = %+v", state.Events)
+	}
+}
 
 func TestLoadSessionRestoresSelectedModelAfterRestart(t *testing.T) {
 	ws := newOptionsTestWorkspace(t)

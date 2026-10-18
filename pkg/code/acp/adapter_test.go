@@ -263,6 +263,64 @@ func TestLoadSessionStreamReplaysAndCachesHistory(t *testing.T) {
 	}
 }
 
+func TestLongReplayDoesNotOverflowNotificationQueue(t *testing.T) {
+	const messages = 4000
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			var serverConn *acpsdk.AgentSideConnection
+			remote := &adapterProtocolAgent{caps: acpsdk.AgentCapabilities{LoadSession: true}}
+			remote.loadFn = func(ctx context.Context, req acpsdk.LoadSessionRequest) (acpsdk.LoadSessionResponse, error) {
+				for i := range messages {
+					id := fmt.Sprint(i)
+					update := acpsdk.SessionUpdate{UserMessageChunk: &acpsdk.SessionUpdateUserMessageChunk{Content: acpsdk.TextBlock("question"), MessageId: &id}}
+					if i%2 == 1 {
+						update = acpsdk.SessionUpdate{AgentMessageChunk: &acpsdk.SessionUpdateAgentMessageChunk{Content: acpsdk.TextBlock("answer"), MessageId: &id}}
+					}
+					if err := serverConn.SessionUpdate(ctx, acpsdk.SessionNotification{SessionId: req.SessionId, Update: update}); err != nil {
+						return acpsdk.LoadSessionResponse{}, err
+					}
+				}
+				return acpsdk.LoadSessionResponse{}, nil
+			}
+			a, err := NewInProcess(
+				context.Background(), &code.Workspace{RootPath: t.TempDir()}, "test", remote,
+				func(conn *acpsdk.AgentSideConnection) { serverConn = conn }, nil,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = a.Close() })
+
+			if stream {
+				for _, err := range a.LoadSessionStream(context.Background(), "long") {
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else if err := a.LoadSession(context.Background(), "long"); err != nil {
+				t.Fatal(err)
+			}
+			if n := len(a.Messages("long")); n != messages {
+				t.Fatalf("loaded %d messages, want %d", n, messages)
+			}
+		})
+	}
+}
+
+func TestFailedLoadDoesNotRegisterSession(t *testing.T) {
+	remote := &adapterProtocolAgent{caps: acpsdk.AgentCapabilities{LoadSession: true}}
+	remote.loadFn = func(context.Context, acpsdk.LoadSessionRequest) (acpsdk.LoadSessionResponse, error) {
+		return acpsdk.LoadSessionResponse{}, errors.New("unknown session")
+	}
+	a := newAdapterForTest(t, remote)
+	if err := a.LoadSession(context.Background(), "missing"); err == nil {
+		t.Fatal("load of an unknown session succeeded")
+	}
+	if _, err := a.Send(context.Background(), "missing", []harness.Content{{Text: "hi"}}); err == nil {
+		t.Fatal("send accepted a session that failed to load")
+	}
+}
+
 func TestInitializationRejectsUnsupportedProtocolVersion(t *testing.T) {
 	_, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, "future", &adapterProtocolAgent{protocol: 2}, nil, nil)
 	if err == nil {

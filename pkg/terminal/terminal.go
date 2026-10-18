@@ -207,14 +207,17 @@ func (s *Session) Resize(cols, rows int) error {
 	cols, rows = normalizeSize(cols, rows)
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed || (cols == s.cols && rows == s.rows) {
-		s.mu.Unlock()
 		return nil
 	}
+	// Apply and publish sizes in the same order. A failed resize must leave
+	// the last applied size intact so the same request can be retried.
+	if err := s.pty.Resize(cols, rows); err != nil {
+		return err
+	}
 	s.cols, s.rows = cols, rows
-	s.mu.Unlock()
-
-	return s.pty.Resize(cols, rows)
+	return nil
 }
 
 // Subscribe returns the scrollback captured so far plus a channel of

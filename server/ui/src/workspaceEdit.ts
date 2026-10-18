@@ -219,16 +219,23 @@ function offsetAt(content: string, line: number, character: number): number {
 		offset < content.length && currentLine < line;
 		offset++
 	) {
-		if (content.charCodeAt(offset) === 10) {
+		const code = content.charCodeAt(offset);
+		if (code === 13 || code === 10) {
+			if (code === 13 && content.charCodeAt(offset + 1) === 10) offset++;
 			currentLine++;
 			lineStart = offset + 1;
 		}
 	}
 	if (currentLine !== line)
 		throw new Error("Text edit line is outside the document.");
-	let lineEnd = content.indexOf("\n", lineStart);
-	if (lineEnd < 0) lineEnd = content.length;
-	if (lineEnd > lineStart && content.charCodeAt(lineEnd - 1) === 13) lineEnd--;
+	let lineEnd = lineStart;
+	while (
+		lineEnd < content.length &&
+		content.charCodeAt(lineEnd) !== 13 &&
+		content.charCodeAt(lineEnd) !== 10
+	) {
+		lineEnd++;
+	}
 	if (character > lineEnd - lineStart) {
 		throw new Error("Text edit character is outside the line.");
 	}

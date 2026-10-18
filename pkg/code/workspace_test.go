@@ -3,6 +3,7 @@ package code
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -666,6 +667,31 @@ func TestFindCanonicalGitRoot_WorktreeFallbackWithoutCommondir(t *testing.T) {
 	}
 }
 
+func TestFindCanonicalGitRoot_GitFileWithoutWorktreeIsItsOwnRoot(t *testing.T) {
+	parent := t.TempDir()
+	initRepo(t, parent)
+	submodule := filepath.Join(parent, "sub")
+	if err := os.MkdirAll(filepath.Join(submodule, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(parent, ".git", "modules", "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(submodule, ".git"), "gitdir: ../.git/modules/sub\n")
+	if got := findCanonicalGitRoot(filepath.Join(submodule, "pkg")); got != filepath.Clean(submodule) {
+		t.Errorf("submodule resolved to %q, want %q", got, submodule)
+	}
+
+	separate := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(separate, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(separate, ".git"), "gitdir: "+filepath.Join(t.TempDir(), "repo.git")+"\n")
+	if got := findCanonicalGitRoot(filepath.Join(separate, "pkg")); got != filepath.Clean(separate) {
+		t.Errorf("separate git dir resolved to %q, want %q", got, separate)
+	}
+}
+
 func TestProjectKey_WorktreesShareKey(t *testing.T) {
 	parent := t.TempDir()
 	mainRoot := filepath.Join(parent, "repo")
@@ -805,6 +831,14 @@ func TestMemoryContent_CacheInvalidatesOnFileChange(t *testing.T) {
 	}
 }
 
+func TestExtractMemoryHookSkipsEmptyFrontmatter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "note.md")
+	mustWrite(t, path, "---\n---\n# Heading\n")
+	if got := extractMemoryHook(path); got != "Heading" {
+		t.Errorf("hook = %q, want %q", got, "Heading")
+	}
+}
+
 func TestLoadBundledSkillsIncludesCoreWorkflows(t *testing.T) {
 	testenv.UserHome(t)
 	home := testenv.WingmanHome(t)
@@ -935,6 +969,53 @@ func TestLoadBundledSkillsReusesMatchingSystemSnapshot(t *testing.T) {
 	}
 	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "keep" {
 		t.Fatalf("matching system snapshot was unnecessarily replaced: %q, %v", data, err)
+	}
+}
+
+func TestInstallBundledSkillsToleratesConcurrentInstallers(t *testing.T) {
+	testenv.UserHome(t)
+	home := testenv.WingmanHome(t)
+	source, err := fs.Sub(bundledFS, "skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := bundledSkillsFingerprint(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(home, "skills", ".system")
+	if err := os.MkdirAll(destination, 0755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(destination, bundledSkillsMarkerFile), "old-fingerprint")
+
+	// Calling the installer directly bypasses the in-process mutex, like separate processes do.
+	errs := make(chan error, 8)
+	var wg sync.WaitGroup
+	for range cap(errs) {
+		wg.Go(func() { errs <- installBundledSkills(source, destination, fingerprint) })
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !bundledSkillsInstalled(destination, fingerprint) {
+		t.Fatal("system skills snapshot was not installed")
+	}
+	if _, err := os.Stat(filepath.Join(destination, "feature-dev", "SKILL.md")); err != nil {
+		t.Fatalf("installed snapshot is incomplete: %v", err)
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".skills-system-") {
+			t.Fatalf("staging directory left behind: %s", entry.Name())
+		}
 	}
 }
 

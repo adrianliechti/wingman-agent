@@ -60,9 +60,10 @@ type Agent struct {
 	upstreamModels    map[string]bool
 	modelDiscoveryErr error
 
-	mu       sync.Mutex
-	sessions map[string]*sessionState
-	closed   bool
+	mu           sync.Mutex
+	sessions     map[string]*sessionState
+	closed       bool
+	sessionGates sync.Map // session ID -> chan struct{}
 }
 
 var _ code.Agent = (*Agent)(nil)
@@ -238,7 +239,37 @@ func (a *Agent) NewSession(_ context.Context) (string, error) {
 	return id, nil
 }
 
-func (a *Agent) LoadSession(_ context.Context, id string) error {
+func (a *Agent) LoadSession(ctx context.Context, id string) error {
+	unlock, err := a.lockSession(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return a.loadSession(id)
+}
+
+// Recovery and deletion both mutate durable session state. Serialize them per
+// session, while allowing callers to cancel their wait and other sessions to load.
+func (a *Agent) lockSession(ctx context.Context, id string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	value, _ := a.sessionGates.LoadOrStore(id, make(chan struct{}, 1))
+	gate := value.(chan struct{})
+	select {
+	case gate <- struct{}{}:
+		unlock := func() { <-gate }
+		if err := ctx.Err(); err != nil {
+			unlock()
+			return nil, err
+		}
+		return unlock, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (a *Agent) loadSession(id string) error {
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
@@ -274,11 +305,6 @@ func (a *Agent) LoadSession(_ context.Context, id string) error {
 		a.mu.Unlock()
 		s.close()
 		return errors.New("agent is closed")
-	}
-	if _, loaded := a.sessions[id]; loaded {
-		a.mu.Unlock()
-		s.close()
-		return nil
 	}
 	a.sessions[id] = s
 	a.mu.Unlock()
@@ -320,7 +346,12 @@ func (a *Agent) forkJournal(source *sessionState, id, newID, title string) error
 	return session.Fork(a.sessionsDir, id, newID, title)
 }
 
-func (a *Agent) DeleteSession(_ context.Context, id string) error {
+func (a *Agent) DeleteSession(ctx context.Context, id string) error {
+	unlock, err := a.lockSession(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	a.mu.Lock()
 	s, inMem := a.sessions[id]
 	if inMem {
@@ -338,6 +369,16 @@ func (a *Agent) DeleteSession(_ context.Context, id string) error {
 }
 
 func (a *Agent) Save(id string) error {
+	// Deletion removes the session before running end hooks. A save from one
+	// of those hooks must stay a no-op rather than wait on its own deletion.
+	if a.session(id) == nil {
+		return nil
+	}
+	unlock, err := a.lockSession(context.Background(), id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	a.mu.Lock()
 	s, ok := a.sessions[id]
 	a.mu.Unlock()
@@ -516,17 +557,6 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 	a.lastActive.Store(id)
 
 	sendCtx, cancel := context.WithCancelCause(code.WithSessionID(ctx, id))
-	// Startup cannot ask a web client without session correlation. Defer local
-	// configuration approval until this turn, where prompts have an owner.
-	if a.workspace.MCP != nil && len(a.workspace.MCP.TrustRequired) > 0 {
-		if err := a.workspace.InitMCP(sendCtx, a.currentUI()); err != nil {
-			if sendCtx.Err() != nil {
-				cancel(nil)
-				return nil, sendCtx.Err()
-			}
-			input = append(slices.Clone(input), harness.Content{Text: "Some MCP servers are unavailable: " + err.Error(), Hidden: true})
-		}
-	}
 	stream, gen, err := s.beginSend(sendCtx, input, cancel)
 	if err != nil {
 		cancel(nil)
@@ -961,11 +991,28 @@ func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, c
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
-	catalog := collectManagedTools(s.parent.workspace)
-	// Claiming before setup lets Cancel and Close reach hooks that wait on UI or external processes.
+	// Claim before any setup so Cancel, Close and overlapping sends also reach
+	// MCP approval prompts and connection attempts.
 	gen, err := s.claimTurn(cancel)
 	if err != nil {
 		return nil, 0, err
+	}
+	a := s.parent
+	// Startup cannot ask a web client without session correlation. Defer local
+	// configuration approval until this turn, where prompts have an owner.
+	if a.workspace.MCP != nil && len(a.workspace.MCP.TrustRequired) > 0 {
+		if err := a.workspace.InitMCP(ctx, a.currentUI()); err != nil {
+			if ctx.Err() != nil {
+				s.clearCancel(gen)
+				return nil, 0, ctx.Err()
+			}
+			input = append(slices.Clone(input), harness.Content{Text: "Some MCP servers are unavailable: " + err.Error(), Hidden: true})
+		}
+	}
+	catalog := collectManagedTools(a.workspace)
+	if catalog == nil {
+		// nil means no turn snapshot; an empty catalog still needs pinning.
+		catalog = []tool.Tool{}
 	}
 	s.turnTools.Store(catalog)
 	stream, err := s.aa.Send(hook.WithRuntime(ctx, s.hookRuntime()), input)

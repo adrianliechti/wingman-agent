@@ -49,6 +49,7 @@ type Journal struct {
 type journalCoordinator struct {
 	mu           sync.Mutex
 	initialized  bool
+	deleted      bool
 	lastSequence uint64
 	createdAt    time.Time
 }
@@ -85,6 +86,9 @@ func OpenJournal(sessionsDir, id string) (*Journal, error) {
 	coord := journalCoord(path)
 	coord.mu.Lock()
 	defer coord.mu.Unlock()
+	if coord.deleted {
+		return nil, fmt.Errorf("session journal %s was deleted", id)
+	}
 	if err := ensureCurrentFormat(sessionsDir, id); err != nil {
 		return nil, err
 	}
@@ -122,6 +126,9 @@ func (j *Journal) appendMissing(events []harness.RuntimeEvent) error {
 }
 
 func (j *Journal) appendLocked(events []harness.RuntimeEvent, skipExisting bool) error {
+	if j.coord.deleted {
+		return fmt.Errorf("session journal %s was deleted", j.id)
+	}
 	var pending []harness.RuntimeEvent
 	for _, event := range events {
 		if skipExisting && event.Sequence <= j.coord.lastSequence {
@@ -369,6 +376,14 @@ func Delete(sessionsDir, id string) error {
 	if err != nil {
 		return err
 	}
+	// Serialize deletion with append, and invalidate every existing writer.
+	// Cancelling a turn does not stop its deferred terminal events immediately.
+	key := filepath.Clean(sessionPath(sessionsDir, id))
+	coord := journalCoord(key)
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	coord.deleted = true
+	defer journalCoordinators.CompareAndDelete(key, coord)
 	paths := []string{sessionPath(sessionsDir, id), filepath.Join(sessionsDir, id+".json")}
 	var errs []error
 	for _, path := range paths {
@@ -379,7 +394,6 @@ func Delete(sessionsDir, id string) error {
 	if err := os.RemoveAll(artifactDir); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, err)
 	}
-	journalCoordinators.Delete(filepath.Clean(sessionPath(sessionsDir, id)))
 	return errors.Join(errs...)
 }
 
@@ -464,9 +478,8 @@ func loadCurrent(path, fallbackID string, infoOnly bool) (currentLoad, error) {
 	return currentLoad{session: s, lastSequence: last}, nil
 }
 
-// repairIncompleteTail removes only a final unterminated record. A torn append
-// can then be safely followed by new facts instead of hiding everything after
-// the corrupt fragment from the JSONL reader.
+// repairIncompleteTail removes a torn final record, or terminates a complete
+// one missing its newline. Loading and reopening must preserve the same facts.
 func repairIncompleteTail(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -479,6 +492,17 @@ func repairIncompleteTail(path string) error {
 		return nil
 	}
 	cut := bytes.LastIndexByte(data, '\n') + 1
+	if json.Valid(data[cut:]) {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			return err
+		}
+		_, err = f.Write([]byte{'\n'})
+		if err == nil {
+			err = f.Sync()
+		}
+		return errors.Join(err, f.Close())
+	}
 	if cut == 0 {
 		return fmt.Errorf("session journal has no complete record")
 	}

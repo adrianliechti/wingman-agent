@@ -165,6 +165,9 @@ func (m *TurnManager) Features(sessionID string) TurnFeatures {
 // Submit rejects duplicate live input IDs. Transport receipts own retry
 // deduplication. A steer that loses a turn-boundary race becomes a FIFO follow-up.
 func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnInput) (TurnInputSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return TurnInputSnapshot{}, err
+	}
 	if !m.beginWork() {
 		return TurnInputSnapshot{}, m.ctx.Err()
 	}
@@ -192,6 +195,10 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 
 	s := m.session(sessionID)
 	s.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return TurnInputSnapshot{}, err
+	}
 	if !s.queueLoaded || m.ctx.Err() != nil {
 		err := s.queueErr
 		if m.ctx.Err() != nil {
@@ -256,6 +263,11 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 
 	item := &managedTurnInput{input: input}
 	s.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		delete(s.ids, input.ID)
+		s.mu.Unlock()
+		return TurnInputSnapshot{}, err
+	}
 	if err := m.ctx.Err(); err != nil {
 		delete(s.ids, input.ID)
 		s.mu.Unlock()
@@ -444,10 +456,17 @@ func (m *TurnManager) StartCompact(sessionID, focus string, done func(harness.Co
 		s.compacting = false
 		s.cancel, s.cancelRequested = nil, false
 		next, persistErr := m.promoteLocked(sessionID, s)
-		s.running = next != nil
+		// Keep the session reserved until the completion callback has published
+		// its result, just as runSession does for a finished turn.
 		s.mu.Unlock()
 
 		done(result, err)
+		s.mu.Lock()
+		if next == nil && persistErr == nil {
+			next, persistErr = m.promoteLocked(sessionID, s)
+		}
+		s.running = next != nil
+		s.mu.Unlock()
 		if persistErr != nil {
 			m.emit(TurnEvent{SessionID: sessionID, State: TurnInputFailed, Err: persistErr})
 		}
@@ -501,13 +520,18 @@ func (m *TurnManager) RemoveQueued(sessionID, inputID string) error {
 		s.mu.Unlock()
 		return ErrInputNotQueued
 	}
+	previousPaused := s.paused
 	s.queued = append(s.queued[:idx], s.queued[idx+1:]...)
 	delete(s.ids, inputID)
+	if len(s.queued) == 0 {
+		s.paused = false
+	}
 	if err := m.persistLocked(sessionID, s); err != nil {
 		s.queued = append(s.queued, nil)
 		copy(s.queued[idx+1:], s.queued[idx:])
 		s.queued[idx] = removed
 		s.ids[inputID] = struct{}{}
+		s.paused = previousPaused
 		s.mu.Unlock()
 		return err
 	}
@@ -535,9 +559,7 @@ func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnI
 			continue
 		}
 		replacement.ID = inputID
-		if replacement.Intent == "" {
-			replacement.Intent = item.input.Intent
-		}
+		replacement.Intent = TurnInputFollowUp
 		replacement = CloneTurnInput(replacement)
 		previous = item.input
 		item.input = replacement

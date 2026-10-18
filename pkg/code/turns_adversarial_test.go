@@ -3,9 +3,13 @@ package code
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 type faultQueueAgent struct {
@@ -15,6 +19,39 @@ type faultQueueAgent struct {
 	writes       atomic.Int32
 	loadStarted  chan struct{}
 	loadRelease  chan struct{}
+}
+
+func TestTurnManagerRejectsCancelledAdmission(t *testing.T) {
+	for _, duringLoad := range []bool{false, true} {
+		t.Run(fmt.Sprint("during load=", duringLoad), func(t *testing.T) {
+			a := &faultQueueAgent{turnManagerTestAgent: newTurnManagerTestAgent()}
+			m := NewTurnManager(t.Context(), a, nil)
+			defer m.Close()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if duringLoad {
+				a.loadStarted, a.loadRelease = make(chan struct{}), make(chan struct{})
+			} else {
+				cancel()
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := m.Submit(ctx, "slow", turnInput("cancelled", "must not run", TurnInputFollowUp))
+				done <- err
+			}()
+			if duringLoad {
+				<-a.loadStarted
+				cancel()
+				close(a.loadRelease)
+			}
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancelled submission = %v", err)
+			}
+			if state := m.Snapshot("slow"); len(state.Inputs) != 0 || a.writes.Load() != 0 {
+				t.Fatalf("cancelled input was admitted: %+v, writes=%d", state, a.writes.Load())
+			}
+		})
+	}
 }
 
 func (a *faultQueueAgent) LoadTurnQueue(id string) (TurnQueueState, error) {
@@ -186,5 +223,38 @@ func TestTurnManagerFinalizationPrecedesNextExecution(t *testing.T) {
 	close(release)
 	if got := waitValue(t, a.starts); got != "two" {
 		t.Fatalf("started %q", got)
+	}
+}
+
+func TestTurnManagerCompactionFinalizationPrecedesNextExecution(t *testing.T) {
+	a := newCompactingTestAgent()
+	m := NewTurnManager(t.Context(), a, nil)
+	defer m.Close()
+	finalizing, release := make(chan struct{}), make(chan struct{})
+	releaseFinalization := sync.OnceFunc(func() { close(release) })
+	if err := m.StartCompact("s", "", func(harness.CompactResult, error) {
+		close(finalizing)
+		<-release
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer releaseFinalization()
+	_ = waitValue(t, a.compacts)
+	a.release <- nil
+	select {
+	case <-finalizing:
+	case <-time.After(time.Second):
+		t.Fatal("compaction did not reach finalization")
+	}
+	next, err := m.Submit(t.Context(), "s", turnInput("after", "after", TurnInputFollowUp))
+	if err != nil || next.State != TurnInputQueued {
+		t.Errorf("submission during compaction finalization: %+v %v", next, err)
+	}
+	if err := m.StartCompact("s", "", func(harness.CompactResult, error) {}); !errors.Is(err, ErrTurnInProgress) {
+		t.Errorf("compaction during finalization = %v, want ErrTurnInProgress", err)
+	}
+	releaseFinalization()
+	if started := waitValue(t, a.starts); started != "after" {
+		t.Errorf("started %q, want queued input", started)
 	}
 }

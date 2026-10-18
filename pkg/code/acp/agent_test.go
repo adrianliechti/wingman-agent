@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,18 @@ func TestTextFileCallbacksSupportAbsolutePaths(t *testing.T) {
 	}
 	if _, err := a.ReadTextFile(context.Background(), acp.ReadTextFileRequest{Path: "relative.txt"}); err == nil {
 		t.Fatal("relative path was accepted")
+	}
+}
+
+func TestReadTextFileClampsHugeLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(path, []byte("a\nb\nc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	line, limit := 2, math.MaxInt
+	resp, err := (&Agent{}).ReadTextFile(context.Background(), acp.ReadTextFileRequest{Path: path, Line: &line, Limit: &limit})
+	if err != nil || resp.Content != "b\nc" {
+		t.Fatalf("read = %q, %v", resp.Content, err)
 	}
 }
 

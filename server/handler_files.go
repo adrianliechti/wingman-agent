@@ -691,6 +691,37 @@ func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source not found", http.StatusNotFound)
 		return
 	}
+	if info.IsDir() {
+		// Check identities as well as paths: a destination parent can be an
+		// in-workspace symlink into the source. Creating it first would make the
+		// recursive copy consume its own output indefinitely.
+		rootInfo, err := root.Stat(".")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for parent := filepath.Dir(toRel); ; {
+			ancestor, err := root.Stat(parent)
+			if errors.Is(err, fs.ErrNotExist) && parent != "." {
+				parent = filepath.Dir(parent)
+				continue
+			}
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if os.SameFile(info, ancestor) {
+				http.Error(w, "cannot copy a folder into itself", http.StatusBadRequest)
+				return
+			}
+			if os.SameFile(rootInfo, ancestor) {
+				break
+			}
+			// Do not clean this path: alias/.. must resolve the real parent of
+			// the alias target, rather than the alias's lexical parent.
+			parent += string(filepath.Separator) + ".."
+		}
+	}
 
 	if err := copyPathInRoot(root, fromRel, toRel, info); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -702,6 +733,13 @@ func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 func copyPathInRoot(root *os.Root, src, dst string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := root.Readlink(src)
+		if err != nil {
+			return err
+		}
+		return root.Symlink(target, dst)
+	}
 	if info.IsDir() {
 		if err := root.MkdirAll(dst, info.Mode().Perm()); err != nil {
 			return err

@@ -28,7 +28,7 @@ func (a *Agent) UndoTurn(ctx context.Context, sessionID, turnID string) error {
 	}
 	s.cancelMu.Lock()
 	defer s.cancelMu.Unlock()
-	if s.closed || s.aa.Running() {
+	if s.closed || s.cancelFn != nil || s.aa.Running() {
 		return fmt.Errorf("stop the active turn before undoing edits")
 	}
 	for _, review := range s.aa.TurnReviews() {

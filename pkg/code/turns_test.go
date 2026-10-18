@@ -412,6 +412,55 @@ func TestTurnManagerTerminalHandlerCanInspectPromotedFollowUp(t *testing.T) {
 	a.releases <- struct{}{}
 }
 
+func TestTurnManagerRemovingLastPausedInputUnpauses(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	events := make(chan TurnEvent, 32)
+	m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	_ = waitValue(t, a.starts)
+	_, _ = m.Submit(context.Background(), "s", turnInput("2", "two", TurnInputFollowUp))
+	m.CancelCurrent("s")
+	waitForState(t, events, "1", TurnInputCancelled)
+	if err := m.RemoveQueued("s", "2"); err != nil {
+		t.Fatal(err)
+	}
+	if snap := m.Snapshot("s"); snap.Paused || len(snap.Inputs) != 0 {
+		t.Fatalf("snapshot after removing last paused input = %+v", snap)
+	}
+	if state, _ := a.LoadTurnQueue("s"); state.Paused {
+		t.Fatal("persisted queue still paused")
+	}
+	snap, err := m.Submit(context.Background(), "s", turnInput("3", "three", TurnInputFollowUp))
+	if err != nil || snap.State != TurnInputActive {
+		t.Fatalf("submit after emptied queue = %+v, %v", snap, err)
+	}
+	if got := waitValue(t, a.starts); got != "three" {
+		t.Fatalf("start = %q", got)
+	}
+	a.releases <- struct{}{}
+}
+
+func TestTurnManagerReplaceQueuedKeepsFollowUpIntent(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	_ = waitValue(t, a.starts)
+	_, _ = m.Submit(context.Background(), "s", turnInput("2", "two", TurnInputFollowUp))
+	if err := m.ReplaceQueued("s", "2", turnInput("ignored", "new", TurnInputSteer)); err != nil {
+		t.Fatal(err)
+	}
+	snap := m.Snapshot("s")
+	if len(snap.Inputs) != 2 || snap.Inputs[1].Intent != TurnInputFollowUp {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	a.releases <- struct{}{}
+	_ = waitValue(t, a.starts)
+	a.releases <- struct{}{}
+}
+
 func TestTurnManagerCancelPausesAndResumesQueue(t *testing.T) {
 	a := newTurnManagerTestAgent()
 	events := make(chan TurnEvent, 32)

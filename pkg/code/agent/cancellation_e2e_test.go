@@ -15,6 +15,8 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 )
 
 func cancellationE2EAgent(t *testing.T, hooks hook.Hooks) (*Agent, string, *atomic.Int64) {
@@ -44,8 +46,28 @@ func cancellationE2EAgent(t *testing.T, hooks hook.Hooks) (*Agent, string, *atom
 	return a, id, requests
 }
 
+type mcpApprovalUI struct {
+	confirm func(context.Context, string) (bool, error)
+}
+
+func (u mcpApprovalUI) Confirm(ctx context.Context, message string) (bool, error) {
+	return u.confirm(ctx, message)
+}
+
+func (mcpApprovalUI) Elicit(context.Context, tool.ElicitRequest) (tool.ElicitResult, error) {
+	panic("unexpected elicitation")
+}
+
+func requireMCPApproval(a *Agent, confirm func(context.Context, string) (bool, error)) {
+	a.workspace.MCP = mcp.NewManager(&mcp.Config{Servers: map[string]mcp.ServerConfig{
+		"local": {Command: "must-not-launch"},
+	}})
+	a.workspace.MCP.TrustRequired = map[string]string{"local": "mcp.json"}
+	a.SetUI(mcpApprovalUI{confirm: confirm})
+}
+
 func TestSessionStartupCancellationE2E(t *testing.T) {
-	for _, phase := range []string{"session start", "user prompt"} {
+	for _, phase := range []string{"session start", "user prompt", "MCP approval"} {
 		t.Run(phase, func(t *testing.T) {
 			for _, action := range []string{"cancel", "close"} {
 				t.Run(action, func(t *testing.T) {
@@ -62,10 +84,16 @@ func TestSessionStartupCancellationE2E(t *testing.T) {
 					var hooks hook.Hooks
 					if phase == "session start" {
 						hooks.SessionStart = []hook.SessionStart{block}
-					} else {
+					} else if phase == "user prompt" {
 						hooks.UserPromptSubmit = []hook.UserPromptSubmit{block}
 					}
 					a, id, requests := cancellationE2EAgent(t, hooks)
+					if phase == "MCP approval" {
+						requireMCPApproval(a, func(ctx context.Context, message string) (bool, error) {
+							_, err := block(ctx, message)
+							return false, err
+						})
+					}
 					ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 					defer cancel()
 					finished := make(chan error, 1)
@@ -131,6 +159,73 @@ func TestSessionStartupCancellationE2E(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConcurrentSendDuringMCPApproval(t *testing.T) {
+	a, id, requests := cancellationE2EAgent(t, hook.Hooks{})
+	entered := make(chan struct{})
+	requireMCPApproval(a, func(ctx context.Context, _ string) (bool, error) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-ctx.Done()
+		return false, ctx.Err()
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	first := make(chan error, 1)
+	go func() {
+		_, err := a.Send(ctx, id, []harness.Content{{Text: "first"}})
+		first <- err
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("MCP approval was not reached")
+	}
+	overlapCtx, cancelOverlap := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancelOverlap()
+	second := make(chan error, 1)
+	go func() {
+		_, err := a.Send(overlapCtx, id, []harness.Content{{Text: "overlap"}})
+		second <- err
+	}()
+	select {
+	case err := <-second:
+		if !errors.Is(err, code.ErrTurnInProgress) {
+			t.Errorf("concurrent send = %v, want ErrTurnInProgress", err)
+		}
+	case <-overlapCtx.Done():
+		t.Error("concurrent send blocked behind MCP approval")
+		cancel()
+		<-second
+	}
+	cancel()
+	if err := <-first; !errors.Is(err, context.Canceled) || requests.Load() != 0 {
+		t.Fatalf("first turn error=%v requests=%d", err, requests.Load())
+	}
+}
+
+func TestTurnPinsInitiallyEmptyManagedTools(t *testing.T) {
+	a, id, _ := cancellationE2EAgent(t, hook.Hooks{})
+	stream, err := a.Send(t.Context(), id, []harness.Content{{Text: "hello"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.workspace.WarmUp()
+	_, lspTools := a.workspace.ManagedTools()
+	if len(lspTools) == 0 {
+		t.Fatal("workspace warmup did not publish language tools")
+	}
+	assertTools(t, a, id, []string{"lsp"}, nil)
+	for _, err := range stream {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertTools(t, a, id, nil, []string{"lsp"})
 }
 
 func TestConcurrentSessionStartupSendE2E(t *testing.T) {

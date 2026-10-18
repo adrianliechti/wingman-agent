@@ -78,6 +78,35 @@ test("applies LSP UTF-16 positions without splitting astral characters", () => {
 	);
 });
 
+test("applies edits across CR, LF, and CRLF line endings", () => {
+	for (const ending of ["\r", "\n", "\r\n"]) {
+		assert.equal(
+			applyTextEdits(`first${ending}second${ending}`, [
+				{
+					range: {
+						start: { line: 1, character: 0 },
+						end: { line: 2, character: 0 },
+					},
+					newText: `updated${ending}`,
+				},
+			]),
+			`first${ending}updated${ending}`,
+		);
+		assert.equal(
+			applyTextEdits(`first${ending}second`, [
+				{
+					range: {
+						start: { line: 0, character: 5 },
+						end: { line: 1, character: 0 },
+					},
+					newText: "/",
+				},
+			]),
+			"first/second",
+		);
+	}
+});
+
 test("preserves the declared order of insertions at one position", () => {
 	assert.equal(
 		applyTextEdits("ab", [

@@ -66,16 +66,16 @@ func ParseUserShellCommand(text string) (command string, output string, exitCode
 		return "", "", 0, false
 	}
 
-	cmdStart := strings.Index(trimmed, userShellCommandTag)
-	cmdEnd := strings.Index(trimmed, userShellCmdEndTag)
-	resStart := strings.Index(trimmed, userShellResultTag)
-	resEnd := strings.LastIndex(trimmed, userShellResEndTag)
-	if cmdStart < 0 || cmdEnd <= cmdStart || resStart <= cmdEnd || resEnd <= resStart {
+	// The formatter writes these tags on their own lines, so a command containing them stays intact.
+	head, rest, found := strings.Cut(trimmed, "\n"+userShellCmdEndTag+"\n"+userShellResultTag+"\n")
+	_, command, hasCommand := strings.Cut(head, userShellCommandTag)
+	resEnd := strings.LastIndex(rest, userShellResEndTag)
+	if !found || !hasCommand || resEnd < 0 {
 		return "", "", 0, false
 	}
 
-	command = strings.TrimSpace(trimmed[cmdStart+len(userShellCommandTag) : cmdEnd])
-	result := strings.Trim(trimmed[resStart+len(userShellResultTag):resEnd], "\r\n")
+	command = strings.TrimSpace(command)
+	result := strings.Trim(rest[:resEnd], "\r\n")
 
 	for line := range strings.SplitSeq(result, "\n") {
 		if after, found := strings.CutPrefix(strings.TrimSpace(line), "Exit code:"); found {
