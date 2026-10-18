@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,25 +232,37 @@ func writeMeta(path string) error {
 	return writeJSON(path, meta)
 }
 
+// gatewayProfile returns every setting Wingman owns; restore removes exactly these keys.
+func gatewayProfile(baseURL, authToken string) map[string]any {
+	return map[string]any{
+		"inferenceProvider":            "gateway",
+		"inferenceGatewayBaseUrl":      strings.TrimRight(baseURL, "/"),
+		"inferenceGatewayApiKey":       authToken,
+		"inferenceGatewayAuthScheme":   "bearer",
+		"inferenceCredentialKind":      "static",
+		"modelDiscoveryEnabled":        true,
+		"modelCatalogEnabled":          false,
+		"deploymentOrganizationUuid":   profileID,
+		"deploymentDisplayName":        profileName,
+		"disableDeploymentModeChooser": true,
+		"chatTabEnabled":               true,
+		"coworkEgressAllowedHosts":     coworkEgressAllowedHosts,
+		"disableEssentialTelemetry":    true,
+		"disableNonessentialTelemetry": true,
+		"disableFeatureDiscovery":      true,
+		"skipWebFetchPreflight":        true,
+		// Desktop sessions lack CLAUDE_CODE_AUTO_MODE_SERVER=0, so classifier calls would leave the gateway API path.
+		"autoModeEnabled": false,
+	}
+}
+
 func writeGatewayProfile(path, baseURL, authToken string) error {
 	cfg, err := readJSONAllowMissing(path)
 	if err != nil {
 		return fmt.Errorf("parse Claude Desktop Wingman profile: %w", err)
 	}
 
-	cfg["inferenceProvider"] = "gateway"
-	cfg["inferenceGatewayBaseUrl"] = strings.TrimRight(baseURL, "/")
-	cfg["inferenceGatewayApiKey"] = authToken
-	cfg["inferenceGatewayAuthScheme"] = "bearer"
-	cfg["deploymentOrganizationUuid"] = profileID
-	cfg["disableDeploymentModeChooser"] = true
-	cfg["chatTabEnabled"] = true
-	cfg["coworkEgressAllowedHosts"] = coworkEgressAllowedHosts
-	cfg["disableEssentialTelemetry"] = true
-	cfg["disableNonessentialTelemetry"] = true
-	// Auto mode makes separate classifier requests through the configured
-	// provider. Keep it disabled until that contract is supported explicitly.
-	cfg["autoModeEnabled"] = false
+	maps.Copy(cfg, gatewayProfile(baseURL, authToken))
 	delete(cfg, "inferenceModels")
 
 	return writeJSON(path, cfg)
@@ -299,17 +312,11 @@ func restoreProfile(path string) error {
 		return nil
 	}
 
-	cfg["disableDeploymentModeChooser"] = false
-	delete(cfg, "inferenceProvider")
-	delete(cfg, "inferenceGatewayBaseUrl")
-	delete(cfg, "inferenceGatewayApiKey")
-	delete(cfg, "inferenceGatewayAuthScheme")
-	delete(cfg, "deploymentOrganizationUuid")
+	for key := range gatewayProfile("", "") {
+		delete(cfg, key)
+	}
 	delete(cfg, "inferenceModels")
-	delete(cfg, "coworkEgressAllowedHosts")
-	delete(cfg, "disableEssentialTelemetry")
-	delete(cfg, "disableNonessentialTelemetry")
-	delete(cfg, "autoModeEnabled")
+	cfg["disableDeploymentModeChooser"] = false
 
 	return writeJSON(path, cfg)
 }

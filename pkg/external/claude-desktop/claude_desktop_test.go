@@ -24,12 +24,18 @@ func TestWriteGatewayProfileConfiguresCurrentClaudeSurfaces(t *testing.T) {
 		"inferenceGatewayBaseUrl":      "https://wingman.example",
 		"inferenceGatewayApiKey":       "secret",
 		"inferenceGatewayAuthScheme":   "bearer",
+		"inferenceCredentialKind":      "static",
+		"modelDiscoveryEnabled":        true,
+		"modelCatalogEnabled":          false,
 		"deploymentOrganizationUuid":   profileID,
+		"deploymentDisplayName":        "Wingman",
 		"disableDeploymentModeChooser": true,
 		"chatTabEnabled":               true,
 		"coworkEgressAllowedHosts":     []any{"*"},
 		"disableEssentialTelemetry":    true,
 		"disableNonessentialTelemetry": true,
+		"disableFeatureDiscovery":      true,
+		"skipWebFetchPreflight":        true,
 		"autoModeEnabled":              false,
 	}
 	for key, value := range want {
@@ -81,7 +87,7 @@ func TestConfigureTargetsActivatesThirdPartyModeLast(t *testing.T) {
 
 func TestRestoreProfileRemovesWingmanOverrides(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "profile.json")
-	if err := os.WriteFile(path, []byte(`{"existing":"keep"}`), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"existing":"keep","inferenceModels":["legacy"]}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeGatewayProfile(path, "https://wingman.example", "secret"); err != nil {
@@ -92,21 +98,8 @@ func TestRestoreProfileRemovesWingmanOverrides(t *testing.T) {
 	}
 
 	cfg := readTestJSON(t, path)
-	for _, key := range []string{
-		"inferenceProvider",
-		"inferenceGatewayBaseUrl",
-		"inferenceGatewayApiKey",
-		"inferenceGatewayAuthScheme",
-		"deploymentOrganizationUuid",
-		"inferenceModels",
-		"coworkEgressAllowedHosts",
-		"disableEssentialTelemetry",
-		"disableNonessentialTelemetry",
-		"autoModeEnabled",
-	} {
-		if _, ok := cfg[key]; ok {
-			t.Errorf("%s should be removed during restore", key)
-		}
+	if len(cfg) != 2 {
+		t.Errorf("restored profile = %#v, want only existing and disableDeploymentModeChooser", cfg)
 	}
 	if cfg["disableDeploymentModeChooser"] != false {
 		t.Errorf("disableDeploymentModeChooser = %#v, want false", cfg["disableDeploymentModeChooser"])
