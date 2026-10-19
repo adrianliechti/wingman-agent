@@ -31,6 +31,7 @@ func (t *Terminal) watchResize() {
 	if t.in == nil {
 		return
 	}
+	width, height := t.Size()
 
 	go func() {
 		ticker := time.NewTicker(500 * time.Millisecond)
@@ -38,7 +39,7 @@ func (t *Terminal) watchResize() {
 		for {
 			select {
 			case <-ticker.C:
-				t.checkResize()
+				width, height = t.checkResize(width, height)
 			case <-t.done:
 				return
 			}

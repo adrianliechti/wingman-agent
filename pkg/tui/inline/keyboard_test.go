@@ -53,6 +53,51 @@ func TestExtendedKeyboardIgnoresReleasesAndMalformedInput(t *testing.T) {
 	}
 }
 
+func TestUnboundControlKeysDoNotBecomePlainActions(t *testing.T) {
+	for _, sequence := range []string{
+		"13;5u", "13;6u", "13;7u", "57414;5u", // Ctrl+Enter, with other modifiers.
+		"9;5u", "9;6u", "27;5u", "127;5u", // Ctrl+Tab/Esc/Backspace.
+		"27;5;13~", "27;6;9~", // xterm modifyOtherKeys.
+	} {
+		in, events := testInputReader()
+		in.buf = []byte("\x1b[" + sequence)
+		in.process()
+		if len(events) != 0 {
+			t.Errorf("unbound Ctrl chord %q became %#v", sequence, nextEvent(t, events))
+		}
+	}
+}
+
+func TestEscapeBeforeAnotherKey(t *testing.T) {
+	for _, tc := range []struct {
+		sequence string
+		want     KeyEvent
+	}{
+		{"\x1b\x1b[A", KeyEvent{Key: KeyUp}},
+		{"\x1b\x1b", KeyEvent{Key: KeyEsc}},
+	} {
+		for split := 0; split <= len(tc.sequence); split++ {
+			in, events := testInputReader()
+			in.buf = []byte(tc.sequence[:split])
+			in.process()
+			in.buf = append(in.buf, tc.sequence[split:]...)
+			in.process()
+			if string(in.buf) == "\x1b" {
+				in.processBareEsc()
+			}
+			if got := nextEvent(t, events); got != (KeyEvent{Key: KeyEsc}) {
+				t.Fatalf("%q split %d: first key = %#v, want Escape", tc.sequence, split, got)
+			}
+			if got := nextEvent(t, events); got != tc.want {
+				t.Fatalf("%q split %d: next key = %#v, want %#v", tc.sequence, split, got, tc.want)
+			}
+			if len(events) != 0 {
+				t.Fatal("Escape leaked extra input")
+			}
+		}
+	}
+}
+
 func TestKeyboardModeRestoredInsideAlternateScreen(t *testing.T) {
 	var out strings.Builder
 	term := NewTerminal(WithIO(strings.NewReader(""), &out, func() (int, int) { return 80, 24 }))

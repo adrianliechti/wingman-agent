@@ -87,24 +87,30 @@ func TestRunWaitsForStartupBeforeReturning(t *testing.T) {
 }
 
 type startupDiffWriter struct {
-	ready chan struct{}
-	once  sync.Once
+	ready     chan struct{}
+	typed     chan struct{}
+	once      sync.Once
+	typedOnce sync.Once
 }
 
 func (w *startupDiffWriter) Write(data []byte) (int, error) {
-	if strings.Contains(ansi.Strip(string(data)), "1 file changed") {
+	text := ansi.Strip(string(data))
+	if strings.Contains(text, "1 file changed") {
 		w.once.Do(func() { close(w.ready) })
+	}
+	if strings.Contains(text, "typing with changes") {
+		w.typedOnce.Do(func() { close(w.typed) })
 	}
 	return len(data), nil
 }
 
-func TestStartupLoadsDiffsWhileModelDiscoveryIsBlocked(t *testing.T) {
+func TestStartupLoadsDiffsAndAcceptsInputWhileModelDiscoveryIsBlocked(t *testing.T) {
 	testenv.WingmanHome(t)
 	dir := t.TempDir()
 	if _, err := git.PlainInit(dir, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("startup diff\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "bundle.js"), []byte(strings.Repeat("const value = 123;", 200_000)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	agent := &blockedModelAgent{
@@ -115,8 +121,9 @@ func TestStartupLoadsDiffsWhileModelDiscoveryIsBlocked(t *testing.T) {
 	agent.workspace = &corecode.Workspace{RootPath: dir}
 	ctx, cancel := context.WithCancel(context.Background())
 	app := New(ctx, agent, "session")
-	output := &startupDiffWriter{ready: make(chan struct{})}
-	app.WithTerminal(inline.NewTerminal(inline.WithIO(strings.NewReader(""), output, func() (int, int) {
+	inputR, inputW := io.Pipe()
+	output := &startupDiffWriter{ready: make(chan struct{}), typed: make(chan struct{})}
+	app.WithTerminal(inline.NewTerminal(inline.WithIO(inputR, output, func() (int, int) {
 		return 180, 24
 	})))
 	runDone := make(chan error, 1)
@@ -125,6 +132,7 @@ func TestStartupLoadsDiffsWhileModelDiscoveryIsBlocked(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		app.stop()
+		inputW.Close()
 		select {
 		case err := <-runDone:
 			if err != nil {
@@ -145,6 +153,14 @@ func TestStartupLoadsDiffsWhileModelDiscoveryIsBlocked(t *testing.T) {
 		t.Logf("diff panel rendered after %s while model discovery was still blocked", time.Since(started))
 	case <-time.After(5 * time.Second):
 		t.Fatal("model discovery blocked the first diff panel")
+	}
+	if _, err := io.WriteString(inputW, "typing with changes"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-output.typed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("chat typing froze with the startup diff visible")
 	}
 
 	app.stop()

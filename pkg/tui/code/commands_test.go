@@ -85,8 +85,8 @@ func TestCompactCommandRunsThroughTurnManagerWithFocus(t *testing.T) {
 
 	a.editor.SetText("/compact keep the API design")
 	a.submitInput()
-	if !a.operationPending || !strings.Contains(a.operationStatus, "Compacting") {
-		t.Fatalf("pending=%t status=%q", a.operationPending, a.operationStatus)
+	if footer := ansi.Strip(a.footerLine(80)); !strings.Contains(footer, "Compacting context · Esc cancels") {
+		t.Fatalf("footer = %q, want compaction status", footer)
 	}
 	waitForSessionOperation(t, a)
 
@@ -128,18 +128,20 @@ Migrate the requested component.
 
 	agent := newUITestAgent(nil)
 	agent.workspace.RootPath = workDir
-	a := &App{ctx: context.Background(), agent: agent, editor: NewEditor()}
+	a := &App{ctx: t.Context(), queue: make(chan func(), 8), agent: agent, editor: NewEditor()}
 	a.editor.SetText("/mig")
 	a.syncCommandPopup()
 	// Discovery is asynchronous; drive the same metadata refresh as the UI.
-	deadline := time.Now().Add(2 * time.Second)
-	for a.skillRefreshPending.Load() && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+	for a.skillRefreshPending {
+		select {
+		case update := <-a.queue:
+			update()
+		case <-timeout.C:
+			t.Fatal("skill discovery did not complete")
+		}
 	}
-	if a.skillRefreshPending.Load() {
-		t.Fatal("skill discovery did not complete")
-	}
-	a.refreshMetadata()
 
 	item, ok := a.popup.Current()
 	if !ok || item.ID != "/migrate" || item.Label != "/migrate [component] [from] [to]" {

@@ -3,16 +3,21 @@ package code
 import (
 	"context"
 	"errors"
+	"io"
 	"iter"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
+	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
 func drainStateUpdates(a *App) {
@@ -20,9 +25,140 @@ func drainStateUpdates(a *App) {
 		select {
 		case update := <-a.queue:
 			update()
+		case <-a.renderRequests:
+			a.applyPendingPhase()
+			a.refreshMetadata()
+			a.invalidate()
 		default:
 			return
 		}
+	}
+}
+
+func TestRenderRequestsCoalesceAndThrottleOnUILoop(t *testing.T) {
+	testenv.WingmanHome(t)
+	testenv.UserHome(t)
+	dir := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		coder := newUITestAgent(nil)
+		coder.workspace.RootPath = dir
+		a := New(t.Context(), coder, "session")
+		a.WithTerminal(inline.NewTerminal(inline.WithIO(strings.NewReader(""), io.Discard, func() (int, int) {
+			return 100, 24
+		})))
+		done := make(chan error, 1)
+		go func() { done <- a.Run() }()
+		defer func() {
+			a.stop()
+			if err := <-done; err != nil {
+				t.Error(err)
+			}
+		}()
+		synctest.Wait()
+
+		a.withCurrentSession("session", func() { a.queuePhase(PhaseThinking) })
+		synctest.Wait()
+		if a.getPhase() != PhaseThinking {
+			t.Fatal("first render request was delayed")
+		}
+		a.withCurrentSession("session", func() { a.queuePhase(PhaseToolRunning) })
+		var producers sync.WaitGroup
+		for range 100 {
+			producers.Go(a.requestRender)
+		}
+		producers.Wait()
+		synctest.Wait()
+		if a.getPhase() != PhaseThinking || len(a.renderRequests) != 1 {
+			t.Fatal("requests were not coalesced during the render cooldown")
+		}
+		time.Sleep(renderInterval - time.Nanosecond)
+		synctest.Wait()
+		if a.getPhase() != PhaseThinking {
+			t.Fatal("render request bypassed the frame limit")
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if a.getPhase() != PhaseToolRunning || len(a.renderRequests) != 0 {
+			t.Fatal("buffered request was not applied after the cooldown")
+		}
+		// Quit while another request is waiting on the timer. Shutdown must
+		// not need to wait for or drain a background render callback.
+		a.requestRender()
+	})
+}
+
+func TestStoppingPhaseSurvivesLateUpdatesUntilIdle(t *testing.T) {
+	a := &App{sessionEpoch: 1}
+	a.setPhase(PhaseStopping)
+	for _, phase := range []AppPhase{PhaseThinking, PhaseStreaming, PhaseToolRunning, PhaseRetrying} {
+		a.pendingPhase.Store(&phaseUpdate{epoch: 1, phase: phase})
+		a.applyPendingPhase()
+		if a.getPhase() != PhaseStopping {
+			t.Fatalf("late %v update cleared stopping state", phase)
+		}
+	}
+	a.setPhase(PhaseIdle)
+	a.setPhase(PhaseThinking)
+	if a.getPhase() != PhaseThinking {
+		t.Fatal("stopping state leaked into the next turn")
+	}
+}
+
+type scheduleCountTestAgent struct {
+	*uiTestAgent
+	store schedule.Store
+}
+
+func (a *scheduleCountTestAgent) Schedules(string) schedule.Store { return a.store }
+
+type scheduleCountTestStore struct {
+	schedule.Store
+	list func() ([]schedule.Task, error)
+}
+
+func (s scheduleCountTestStore) List() ([]schedule.Task, error) { return s.list() }
+
+func TestScheduleCountCompletionRunsOnUILoop(t *testing.T) {
+	for _, outcome := range []string{"success", "error", "session changed"} {
+		t.Run(outcome, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				a, coder := newStreamTestApp(nil)
+				calls := 0
+				a.agent = &scheduleCountTestAgent{uiTestAgent: coder, store: scheduleCountTestStore{list: func() ([]schedule.Task, error) {
+					calls++
+					if outcome == "error" {
+						return nil, errors.New("unavailable")
+					}
+					return []schedule.Task{{Status: schedule.StatusActive}}, nil
+				}}}
+				a.activeScheduleCount()
+				synctest.Wait() // Completion is waiting in the UI queue.
+				if outcome == "session changed" {
+					a.sessionID = "other"
+					a.sessionEpoch++
+				}
+				time.Sleep(2 * time.Second)
+				a.activeScheduleCount()
+				synctest.Wait()
+				if calls != 1 || !a.scheduleCountPending || a.scheduleCount != 0 {
+					t.Fatalf("completion escaped UI queue: calls=%d pending=%t count=%d", calls, a.scheduleCountPending, a.scheduleCount)
+				}
+				drainStateUpdates(a)
+				want := 0
+				if outcome == "success" {
+					want = 1
+				}
+				if a.scheduleCountPending || a.scheduleCount != want {
+					t.Fatalf("completion pending=%t count=%d, want %d", a.scheduleCountPending, a.scheduleCount, want)
+				}
+				a.activeScheduleCount()
+				synctest.Wait()
+				drainStateUpdates(a)
+				if calls != 2 {
+					t.Fatal("refresh did not become available after completion")
+				}
+			})
+		})
 	}
 }
 

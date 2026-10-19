@@ -2,8 +2,9 @@ package telemetry
 
 import (
 	"encoding/json"
+	"maps"
 	"math"
-	"sort"
+	"slices"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -41,13 +42,8 @@ func StructuredValue(value any) (attribute.Value, bool) {
 		}
 		return attribute.SliceValue(values...), true
 	case map[string]any:
-		keys := make([]string, 0, len(value))
-		for key := range value {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		attrs := make([]attribute.KeyValue, 0, len(keys))
-		for _, key := range keys {
+		attrs := make([]attribute.KeyValue, 0, len(value))
+		for _, key := range slices.Sorted(maps.Keys(value)) {
 			if converted, ok := StructuredValue(value[key]); ok {
 				attrs = append(attrs, attribute.KeyValue{Key: attribute.Key(key), Value: converted})
 			}

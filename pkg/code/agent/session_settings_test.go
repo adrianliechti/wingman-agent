@@ -45,7 +45,7 @@ func TestConcurrentLoadSessionReconcilesOnce(t *testing.T) {
 	if got := ended.Load(); got != 0 {
 		t.Errorf("resume closed %d duplicate sessions and ran their end hooks", got)
 	}
-	state := a.session(id).aa.StateSnapshot()
+	state := a.session(id).harness.StateSnapshot()
 	if len(state.Events) != 2 || state.Events[1].Type != harness.EventTurnTerminal {
 		t.Fatalf("resumed events = %+v", state.Events)
 	}

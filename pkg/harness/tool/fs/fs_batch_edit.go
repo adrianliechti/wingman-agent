@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -291,9 +292,7 @@ func compatibleBatchEntries(args map[string]any) ([]map[string]any, error) {
 		}
 		if _, hasPath := entry["file_path"]; !hasPath && commonPath != "" {
 			copy := make(map[string]any, len(entry)+1)
-			for key, value := range entry {
-				copy[key] = value
-			}
+			maps.Copy(copy, entry)
 			copy["file_path"] = commonPath
 			entry = copy
 		}

@@ -93,7 +93,7 @@ func TestReadPaginationSurvivesFullOutputPipeline(t *testing.T) {
 					t.Fatal("harness removed read content")
 				}
 				body, _, _ := strings.Cut(out.Content, "\n\n[Showing")
-				for _, row := range strings.Split(body, "\n") {
+				for row := range strings.SplitSeq(body, "\n") {
 					number, value, ok := strings.Cut(row, "\t")
 					if !ok {
 						t.Fatalf("missing line number: %q", row)

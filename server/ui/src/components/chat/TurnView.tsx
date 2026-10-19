@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ChatEntry } from "../../hooks/useWebSocket";
+import type { ChatEntry } from "../../types/session";
 import { sampleSpinnerVerb } from "../../spinnerVerbs";
 import type { Phase } from "../../types/protocol";
 import { EntryView, ToolGroupView } from "./entries";
@@ -23,7 +23,7 @@ export const TurnView = memo(function TurnView({
 	onOpenFile,
 }: TurnViewProps) {
 	const canCollapse =
-		!isActive && turn.final !== null && turn.working.length > 0;
+		!isActive && turn.reply.length > 0 && turn.working.length > 0;
 	const [override, setOverride] = useState<boolean | null>(null);
 	const expanded = override ?? !canCollapse;
 	// Manual toggle keeps scrollTop unchanged: the disclosure header sits above
@@ -56,7 +56,7 @@ export const TurnView = memo(function TurnView({
 							onOpenFile={onOpenFile}
 						/>
 						{isActive &&
-							!(phase === "streaming" && turn.final?.type === "assistant") &&
+							!(phase === "streaming" && turn.reply.length > 0) &&
 							turn.working[turn.working.length - 1]?.type !== "reasoning" && (
 								<PhaseIndicator />
 							)}
@@ -69,15 +69,16 @@ export const TurnView = memo(function TurnView({
 						className="mb-4"
 					/>
 				))}
-			{turn.final && (
+			{turn.reply.map((entry, index) => (
 				<EntryView
-					entry={turn.final}
+					key={entry.id}
+					entry={entry}
 					isStreaming={
-						isActive && phase === "streaming" && turn.final.type === "assistant"
+						isActive && phase === "streaming" && index === turn.reply.length - 1
 					}
 				/>
-			)}
-			{isActive && turn.working.length === 0 && !turn.final && (
+			))}
+			{isActive && turn.working.length === 0 && turn.reply.length === 0 && (
 				<PhaseIndicator />
 			)}
 			<TurnReviewCard inputId={turn.user?.inputId} onOpenFile={onOpenFile} />
@@ -97,7 +98,11 @@ function areTurnPropsEqual(prev: TurnViewProps, next: TurnViewProps) {
 }
 
 function sameTurnEntries(a: Turn, b: Turn) {
-	if (a.key !== b.key || a.user !== b.user || a.final !== b.final) return false;
+	if (a.key !== b.key || a.user !== b.user) return false;
+	if (a.reply.length !== b.reply.length) return false;
+	for (let i = 0; i < a.reply.length; i++) {
+		if (a.reply[i] !== b.reply[i]) return false;
+	}
 	if (a.working.length !== b.working.length) return false;
 	for (let i = 0; i < a.working.length; i++) {
 		if (a.working[i] !== b.working[i]) return false;

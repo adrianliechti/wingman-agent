@@ -182,7 +182,7 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 		if !errors.Is(runErr, harness.ErrTurnIncomplete) || requests.Load() != 3 {
 			t.Fatalf("fault outcome=%v requests=%d", runErr, requests.Load())
 		}
-		for _, event := range a.session(id).aa.StateSnapshot().Events {
+		for _, event := range a.session(id).harness.StateSnapshot().Events {
 			if event.Type == harness.EventToolStarted {
 				t.Fatal("fault turn unexpectedly executed a tool")
 			}
@@ -194,7 +194,7 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 		if err := a.LoadSession(ctx, id); err != nil {
 			t.Fatal(err)
 		}
-		saved := a.session(id).aa.TurnReviews()
+		saved := a.session(id).harness.TurnReviews()
 		if len(saved) != 1 || saved[0].Outcome != "incomplete" {
 			t.Fatalf("restored reviews=%+v", saved)
 		}
@@ -216,7 +216,7 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	defer manager.Close()
 	toolStarted, releaseTool := make(chan struct{}), make(chan struct{})
 	var steered atomic.Bool
-	a.session(id).aa.Hooks.PostToolUse = append(a.session(id).aa.Hooks.PostToolUse,
+	a.session(id).harness.Hooks.PostToolUse = append(a.session(id).harness.Hooks.PostToolUse,
 		func(ctx context.Context, call tool.ToolCall, _ string) (hook.Outcome, error) {
 			if call.Name != "read" || !steered.CompareAndSwap(false, true) {
 				return hook.Outcome{}, nil
@@ -261,7 +261,7 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 			t.Fatal(ctx.Err())
 		}
 	}
-	reviews := a.session(id).aa.TurnReviews()
+	reviews := a.session(id).harness.TurnReviews()
 	workIndex := 0
 	if faultRequests == 3 {
 		workIndex = 1

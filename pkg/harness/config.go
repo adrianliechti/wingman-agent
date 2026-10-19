@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -87,6 +88,12 @@ type Config struct {
 	Effort       func() string
 	Tools        func() []tool.Tool
 	Instructions func() string
+
+	// PinTools snapshots Tools after Agent.PrepareTurn for the duration of a turn.
+	// FilterTools applies current host policy to an owned copy of that catalog
+	// at each request boundary. Leave PinTools false for a fully live catalog.
+	PinTools    bool
+	FilterTools func([]tool.Tool) []tool.Tool
 
 	// PermissionMode reports the active mode for hooks at each request boundary.
 	PermissionMode func() string
@@ -248,7 +255,7 @@ func ConfigFromEnvironment() (*Config, error) {
 	if value := strings.TrimSpace(os.Getenv("WINGMAN_OUTPUT_TOKEN_BUDGET")); value != "" {
 		budget, err := strconv.Atoi(value)
 		if err != nil || budget < 0 {
-			return nil, fmt.Errorf("WINGMAN_OUTPUT_TOKEN_BUDGET must be a nonnegative integer")
+			return nil, errors.New("WINGMAN_OUTPUT_TOKEN_BUDGET must be a nonnegative integer")
 		}
 		cfg.OutputTokenBudget = budget
 	}

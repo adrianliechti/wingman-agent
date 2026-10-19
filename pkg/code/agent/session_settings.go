@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
@@ -82,9 +83,9 @@ func (a *Agent) restoreSessionSettings(s *sessionState, state harness.State) {
 }
 
 func lastTurnModel(events []harness.RuntimeEvent) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type == harness.EventTurnStarted && events[i].Model != "" {
-			return events[i].Model
+	for _, event := range slices.Backward(events) {
+		if event.Type == harness.EventTurnStarted && event.Model != "" {
+			return event.Model
 		}
 	}
 	return ""
@@ -98,23 +99,17 @@ func writeFileAtomic(dir, name string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
 		return err
 	}
-	if err := os.Rename(tmp.Name(), filepath.Join(dir, name)); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	return nil
+	return os.Rename(tmp.Name(), filepath.Join(dir, name))
 }

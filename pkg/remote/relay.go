@@ -28,7 +28,6 @@ type Relay struct {
 	cancel  context.CancelFunc
 	csrf    *http.CrossOriginProtection
 	mu      sync.Mutex
-	closed  bool
 	tunnels map[string]*relayTunnel
 }
 
@@ -146,7 +145,7 @@ func (r *Relay) handleConnect(w http.ResponseWriter, req *http.Request) {
 // Caller holds r.mu. A reconnect may replace only its own registration.
 func (r *Relay) registrationConflict(id, key string) bool {
 	previous := r.tunnels[id]
-	return r.closed || (previous != nil && subtle.ConstantTimeCompare([]byte(previous.key), []byte(key)) != 1)
+	return r.ctx.Err() != nil || (previous != nil && subtle.ConstantTimeCompare([]byte(previous.key), []byte(key)) != 1)
 }
 
 func (s *relayTunnel) close() {
@@ -257,9 +256,8 @@ func (r *Relay) lookup(id, key string) *relayTunnel {
 func (r *Relay) Close() {
 	r.cancel()
 	r.mu.Lock()
-	r.closed = true
 	tunnels := r.tunnels
-	r.tunnels = make(map[string]*relayTunnel)
+	r.tunnels = nil
 	r.mu.Unlock()
 	for _, sess := range tunnels {
 		sess.close()

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -925,11 +926,7 @@ func cloneJSONMap(value map[string]any) map[string]any {
 	if value == nil {
 		return map[string]any{}
 	}
-	result := make(map[string]any, len(value))
-	for key, item := range value {
-		result[key] = item
-	}
-	return result
+	return maps.Clone(value)
 }
 
 func (s *Server) validateDebugPlan(plan *debugLaunchPlan, adapters []dap.AdapterInfo) error {

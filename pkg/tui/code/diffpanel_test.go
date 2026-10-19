@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/changes"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
@@ -47,9 +49,21 @@ func newDiffPanelTestApp(t *testing.T, width, height int) (*App, *strings.Builde
 	term.Resized(width, height)
 	term.EnterAlt()
 
-	a := &App{ctx: context.Background(), agent: newUITestAgent(nil), sessionID: "session", editor: NewEditor()}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	a := &App{ctx: ctx, queue: make(chan func(), 1), agent: newUITestAgent(nil), sessionID: "session", editor: NewEditor()}
 	a.WithTerminal(term)
 	return a, &out
+}
+
+func finishDiffPanel(t *testing.T, a *App) {
+	t.Helper()
+	select {
+	case apply := <-a.queue:
+		apply()
+	case <-time.After(5 * time.Second):
+		t.Fatal("diff formatting did not finish")
+	}
 }
 
 func TestDiffPanelLinesShowStatsAndFileLineNumbers(t *testing.T) {
@@ -113,6 +127,8 @@ func TestRenderSplitsWideTerminalForDiffPanel(t *testing.T) {
 	}
 
 	a.render()
+	finishDiffPanel(t, a)
+	a.render()
 	if !a.diffPanelShowing {
 		t.Fatal("render did not mark the panel as showing")
 	}
@@ -154,6 +170,8 @@ func TestDiffPanelWheelScrollsPanelOnly(t *testing.T) {
 	a, _ := newDiffPanelTestApp(t, 180, 10)
 	a.diffPanel.diffs = diffPanelFixture
 	a.render()
+	finishDiffPanel(t, a)
+	a.render()
 
 	a.handleMouse(inline.MouseEvent{Kind: inline.MouseWheel, WheelDelta: 1, X: 179, Y: 5})
 	if a.diffPanel.offset != 3 {
@@ -166,6 +184,7 @@ func TestDiffPanelWheelScrollsPanelOnly(t *testing.T) {
 
 func TestDiffPanelPinsSummaryAndCurrentFile(t *testing.T) {
 	p := &diffPanel{diffs: diffPanelFixture}
+	p.header, p.lines, p.sections = renderDiffPanelLines(p.diffs, nil, 69)
 
 	top := p.render(70, 8)
 	if len(top) != 8 || !strings.Contains(ansi.Strip(top[0]), "2 files changed") {
@@ -199,6 +218,53 @@ func TestDiffPanelPinsSummaryAndCurrentFile(t *testing.T) {
 	if got := strings.TrimSpace(ansi.CutPlain(p.render(70, 4)[1], 0, 69)); got != "notes.txt" {
 		t.Fatalf("pinned file after second section = %q", got)
 	}
+}
+
+func TestDiffPanelFormatsWithoutBlockingInput(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a, out := newDiffPanelTestApp(t, 180, 24)
+		a.diffPanel.diffs = []changes.FileDiff{{Path: "bundle.js", Patch: "@@ -0,0 +1 @@\n+" + strings.Repeat("const value = 123;", 200_000)}}
+		a.render()
+		if !a.diffPanel.formatting || a.diffPanel.lines != nil {
+			t.Fatal("render formatted the diff on the input loop")
+		}
+		for _, r := range "hello" {
+			a.handleEvent(inline.KeyEvent{Key: inline.KeyRune, Rune: r})
+		}
+		a.render()
+		if a.editor.Text() != "hello" || !strings.Contains(ansi.Strip(out.String()), "hello") {
+			t.Fatal("chat input was not rendered while the diff was formatting")
+		}
+		synctest.Wait()
+		finishDiffPanel(t, a)
+		a.render()
+		if a.diffPanel.formatting || !strings.Contains(ansi.Strip(out.String()), "1 file changed") {
+			t.Fatal("completed diff was not rendered")
+		}
+	})
+}
+
+func TestDiffPanelDiscardsOutdatedFormatting(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a, out := newDiffPanelTestApp(t, 180, 24)
+		a.diffPanel.diffs = diffPanelFixture
+		a.render()
+		a.diffPanel.diffs = []changes.FileDiff{{Path: "latest.txt", Patch: "@@ -0,0 +1 @@\n+latest"}}
+		a.diffPanel.revision++
+		a.term.Resized(160, 24)
+		synctest.Wait()
+		finishDiffPanel(t, a)
+		if a.diffPanel.lines != nil {
+			t.Fatal("outdated diff replaced the current snapshot")
+		}
+		a.render()
+		synctest.Wait()
+		finishDiffPanel(t, a)
+		a.render()
+		if a.diffPanel.linesWidth != a.diffPanelWidth(160) || !strings.Contains(ansi.Strip(out.String()), "latest.txt") {
+			t.Fatal("latest diff did not render at the resized width")
+		}
+	})
 }
 
 func TestDiffPanelCapsVeryLongLines(t *testing.T) {

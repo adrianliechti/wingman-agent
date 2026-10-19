@@ -3,8 +3,8 @@ module github.com/adrianliechti/wingman-agent
 go 1.26.3
 
 require (
-	github.com/adrianliechti/go-extract v0.0.0-20261016221110-30128859586a
-	github.com/adrianliechti/go-shell v0.1.8
+	github.com/adrianliechti/go-extract v0.0.0-20261019225112-18858ce775f0
+	github.com/adrianliechti/go-shell v0.1.9
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/bmatcuk/doublestar/v4 v4.10.3
 	github.com/coder/acp-go-sdk v0.13.5
@@ -19,7 +19,7 @@ require (
 	github.com/hashicorp/yamux v0.1.2
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/odvcencio/gotreesitter v0.56.0
-	github.com/openai/openai-go/v3 v3.78.0
+	github.com/openai/openai-go/v3 v3.82.0
 	github.com/rivo/uniseg v0.4.7
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/sahilm/fuzzy v0.1.3

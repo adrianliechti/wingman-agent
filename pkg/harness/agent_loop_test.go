@@ -593,17 +593,21 @@ func TestSendDoesNotRetryVisibleOutputWithoutResetCapability(t *testing.T) {
 func TestEndRunPreservesQueuedUserInput(t *testing.T) {
 	a := &Agent{
 		Config:       &Config{},
-		running:      true,
 		pendingInput: []Message{{Role: RoleUser, InputID: "queued-id", Content: []Content{{Text: "queued"}}}},
 	}
 
 	if err := a.recordEvents(RuntimeEvent{Type: EventTurnStarted, TurnID: "turn"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.finishTurn(t.Context(), "turn", RuntimeInterrupted, context.Canceled, Usage{}); err != nil {
+	ctx, release, err := a.beginOperation(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.finishTurn(ctx, "turn", RuntimeInterrupted, context.Canceled, Usage{}); err != nil {
 		t.Fatal(err)
 	}
 
+	release()
 	if a.running || len(a.pendingInput) != 0 {
 		t.Fatalf("run state was not cleared: running=%v pending=%d", a.running, len(a.pendingInput))
 	}

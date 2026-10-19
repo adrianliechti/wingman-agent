@@ -425,7 +425,7 @@ func alternation(pattern string) []string {
 		return nil
 	}
 	var out []string
-	for _, alt := range strings.Split(inner, "|") {
+	for alt := range strings.SplitSeq(inner, "|") {
 		if isIdentifier(alt) {
 			out = append(out, alt)
 		}

@@ -80,11 +80,11 @@ func TestMouseClosesDiffPanelAtRenderedButton(t *testing.T) {
 	a.diffPanel.diffs = diffPanelFixture
 	a.render()
 	header := ansi.Strip(a.diffPanel.render(a.diffPanelWidth(180), 20)[0])
-	button := strings.Index(header, "×")
-	if button < 0 {
+	before, _, ok := strings.Cut(header, "×")
+	if !ok {
 		t.Fatal("panel header has no close button")
 	}
-	x := a.width() + 2 + ansi.Width(header[:button]) + 1
+	x := a.width() + 2 + ansi.Width(before) + 1
 	a.handleEvent(inline.MouseEvent{Kind: inline.MousePress, X: x, Y: 2})
 	if a.diffPanel.hidden {
 		t.Fatal("click below close button hid the panel")
@@ -111,8 +111,8 @@ func clickVisiblePopupLabel(t *testing.T, a *App, label string) {
 	}
 	for i, line := range lines {
 		plain := ansi.Strip(line)
-		if index := strings.Index(plain, label); index >= 0 {
-			x := ansi.Width(plain[:index]) + 1
+		if before, _, ok := strings.Cut(plain, label); ok {
+			x := ansi.Width(before) + 1
 			y := height - len(lines) + i + 1
 			if x > width {
 				t.Fatal("item lies outside terminal")
@@ -274,7 +274,7 @@ func TestMouseFooterClearsHiddenActions(t *testing.T) {
 	a.render()
 	// The gap between commands and files has no action.
 	a.handleEvent(inline.MouseEvent{Kind: inline.MousePress, X: len("ctrl+p commands") + 1, Y: 20})
-	if a.popup != nil || a.operationPending {
+	if a.popup != nil || a.operation != operationNone {
 		t.Fatal("footer gap activated an action")
 	}
 	a.showToast("tab plan", theme.Default.Foreground)
@@ -283,7 +283,7 @@ func TestMouseFooterClearsHiddenActions(t *testing.T) {
 		t.Fatal("toast retained hidden footer actions")
 	}
 	a.handleEvent(inline.MouseEvent{Kind: inline.MousePress, X: 30, Y: 20})
-	if a.operationPending {
+	if a.operation != operationNone {
 		t.Fatal("toast click activated hidden mode action")
 	}
 	a.toast = nil

@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -96,4 +98,60 @@ func TestBackendStartupAfterShutdownIsDisposedAndJoined(t *testing.T) {
 	if !disposed.Load() {
 		t.Fatal("late backend leaked")
 	}
+}
+
+func TestFailedBackendStartupCanBeRetried(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, _, _ := newProtocolServer(t)
+		release := make(chan struct{})
+		failure := errors.New("startup failed")
+		var calls, disposals atomic.Int32
+		create := func(context.Context) (code.Agent, error) {
+			calls.Add(1)
+			<-release
+			return &lifecycleAgent{protocolAgent: &protocolAgent{}, closeAgent: func() error {
+				disposals.Add(1)
+				return nil
+			}}, failure
+		}
+		results := make(chan error, 2)
+		for range cap(results) {
+			go func() {
+				backend, err := s.resolveBackend("retry", create)
+				if backend != nil {
+					t.Error("failed startup published a backend")
+				}
+				results <- err
+			}()
+		}
+		synctest.Wait()
+		close(release)
+		for range cap(results) {
+			if err := <-results; !errors.Is(err, failure) {
+				t.Fatalf("shared startup error = %v, want %v", err, failure)
+			}
+		}
+		if calls.Load() != 1 || disposals.Load() != 1 {
+			t.Fatalf("failed startup created %d agents and disposed %d, want 1 each", calls.Load(), disposals.Load())
+		}
+
+		var want *backendRuntime
+		for range 2 {
+			backend, err := s.resolveBackend("retry", func(context.Context) (code.Agent, error) {
+				calls.Add(1)
+				return &protocolAgent{}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want == nil {
+				want = backend
+			} else if backend != want {
+				t.Fatal("successful retry was not reused")
+			}
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("startup attempts = %d, want 2", calls.Load())
+		}
+	})
 }

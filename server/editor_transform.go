@@ -257,8 +257,7 @@ func (s *Server) handleEditorTransform(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "inline transformation timed out", http.StatusGatewayTimeout)
 			return
 		}
-		var inputErr editorTransformInputError
-		if errors.As(err, &inputErr) {
+		if _, ok := errors.AsType[editorTransformInputError](err); ok {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

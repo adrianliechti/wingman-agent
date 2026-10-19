@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -714,10 +715,7 @@ func compactToolArgs(args map[string]any, omit ...string) any {
 	if len(args) == 0 {
 		return nil
 	}
-	display := make(map[string]any, len(args))
-	for key, value := range args {
-		display[key] = value
-	}
+	display := maps.Clone(args)
 	for _, key := range omit {
 		delete(display, key)
 	}

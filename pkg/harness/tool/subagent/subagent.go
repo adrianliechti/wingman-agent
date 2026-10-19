@@ -183,11 +183,11 @@ func newSubagentRunner(parent *harness.Config, typ subagentType, spec durableSpe
 	// Empty effort means auto and is also part of the child's snapshot. Do not
 	// leave it bound to the parent's mutable effort callback on spawn or resume.
 	subcfg.Effort = func() string { return spec.Effort }
-	subcfg.Tools = func() []tool.Tool {
-		var tools []tool.Tool
-		if parent.Tools != nil {
-			tools = toolsForType(parent.Tools(), typ)
+	subcfg.FilterTools = func(tools []tool.Tool) []tool.Tool {
+		if parent.FilterTools != nil {
+			tools = parent.FilterTools(tools)
 		}
+		tools = toolsForType(tools, typ)
 		if collector != nil {
 			tools = append(tools, collector.tool())
 		}
@@ -207,7 +207,7 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 		defer r.collector.take()
 	}
 	if tk != nil {
-		r.sub.Recorder = harness.EventRecorderFunc(tk.AppendAgentEvents)
+		r.sub.Recorder = tk
 		defer func() {
 			if persistErr := tk.SetAgentState(r.sub.StateSnapshot()); persistErr != nil {
 				err = errors.Join(err, fmt.Errorf("persist child agent state: %w", persistErr))
@@ -260,8 +260,7 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 	// Stop hooks can end the stream without returning an error. The ledger
 	// remains authoritative about whether the child actually completed.
 	if runErr == nil {
-		for i := len(state.Events) - 1; i >= 0; i-- {
-			event := state.Events[i]
+		for _, event := range slices.Backward(state.Events) {
 			if event.Type == harness.EventTurnTerminal && event.Terminal != nil {
 				if event.Terminal.Status != harness.RuntimeCompleted {
 					runErr = fmt.Errorf("agent turn %s: %s", event.Terminal.Status, event.Terminal.Error)
@@ -337,7 +336,7 @@ func bindRestoredTasks(parent *harness.Config, types map[string]subagentType, ta
 		if err != nil {
 			continue
 		}
-		runner.sub.Recorder = harness.EventRecorderFunc(tk.AppendAgentEvents)
+		runner.sub.Recorder = tk
 		if err := runner.sub.ReconcileInterrupted("process restarted before the child operation settled"); err != nil {
 			continue
 		}
@@ -485,17 +484,22 @@ func Tools(cfg *harness.Config, sharedContext func([]tool.Tool) string, tasks *t
 			if sharedContext != nil {
 				var childTools []tool.Tool
 				if cfg.Tools != nil {
-					childTools = toolsForType(cfg.Tools(), typ)
+					childTools = slices.Clone(cfg.Tools())
+					if cfg.FilterTools != nil {
+						childTools = cfg.FilterTools(childTools)
+					}
+					childTools = toolsForType(childTools, typ)
 				}
 				if c := strings.TrimSpace(sharedContext(childTools)); c != "" {
 					instructions.WriteString("\n\n" + c)
 				}
 			}
-			for _, h := range cfg.Hooks.SubagentStart {
+			for i, h := range cfg.Hooks.SubagentStart {
 				if err := ctx.Err(); err != nil {
 					return tool.Result{}, err
 				}
 				outcome, err := h(ctx, agentID, subagentName)
+				hook.ReportError(ctx, "SubagentStart", "", i, err)
 				if err == nil && len(outcome.AdditionalContext) > 0 {
 					instructions.WriteString("\n\n" + strings.Join(outcome.AdditionalContext, "\n\n"))
 				}

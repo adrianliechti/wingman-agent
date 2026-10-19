@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -12,7 +13,7 @@ func textOutsideSingleQuotes(command string) string {
 	inSingle := false
 	inDouble := false
 	escaped := false
-	for i := 0; i < len(out); i++ {
+	for i := range out {
 		ch := out[i]
 		if escaped {
 			if inSingle {
@@ -869,10 +870,8 @@ func hasShellSessionPoisoning(statements []string) bool {
 		case "function", "filter":
 			return len(args) > 0
 		case "export", "readonly", "declare", "typeset", "local":
-			for _, arg := range args {
-				if dangerousSessionAssignment(arg) {
-					return true
-				}
+			if slices.ContainsFunc(args, dangerousSessionAssignment) {
+				return true
 			}
 		case "printf":
 			for i, arg := range args {
@@ -998,10 +997,8 @@ func hasSensitiveCredentialRead(statements []string) bool {
 		if isSensitiveCredentialPath(segment) {
 			return true
 		}
-		for _, arg := range resolved[1:] {
-			if isSensitiveCredentialPath(arg) {
-				return true
-			}
+		if slices.ContainsFunc(resolved[1:], isSensitiveCredentialPath) {
+			return true
 		}
 	}
 	return false

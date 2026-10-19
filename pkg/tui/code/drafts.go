@@ -3,7 +3,6 @@ package code
 import (
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/internal/statefile"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -108,19 +108,7 @@ func (s *draftStore) Flush() error {
 		if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 			return err
 		}
-		file, err := os.CreateTemp(filepath.Dir(s.path), ".draft-*")
-		if err != nil {
-			return err
-		}
-		_, writeErr := file.Write(data)
-		syncErr := file.Sync()
-		closeErr := file.Close()
-		err = errors.Join(writeErr, syncErr, closeErr)
-		if err == nil {
-			err = os.Rename(file.Name(), s.path)
-		}
-		_ = os.Remove(file.Name())
-		if err != nil {
+		if err := statefile.Write(s.path, data); err != nil {
 			return err
 		}
 		s.mu.Lock()

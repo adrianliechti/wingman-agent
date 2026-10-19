@@ -2,16 +2,92 @@ package harness
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 func yieldAll(Message, error) bool { return true }
+
+func TestParallelToolResultsKeepCallOrderWhenRecorded(t *testing.T) {
+	for _, rejectBatch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reject_batch=%t", rejectBatch), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				first, second := make(chan struct{}), make(chan struct{})
+				started := make(chan struct{}, 2)
+				tools := []tool.Tool{{
+					Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly),
+					Execute: func(_ context.Context, args map[string]any) (tool.Result, error) {
+						started <- struct{}{}
+						id := args["id"].(string)
+						if id == "first" {
+							<-first
+						} else {
+							<-second
+						}
+						return tool.Text(id), nil
+					},
+				}}
+				var recorded []string
+				rejected := false
+				a := &Agent{Config: &Config{ToolTimeout: -1}, Recorder: EventRecorderFunc(func(events []RuntimeEvent) error {
+					var ids []string
+					for _, event := range events {
+						if event.Type == EventToolTerminal {
+							ids = append(ids, event.Tool.CallID)
+						}
+					}
+					if rejectBatch && len(ids) > 1 {
+						rejected = true
+						return errors.New("batch rejected")
+					}
+					recorded = append(recorded, ids...)
+					return nil
+				})}
+				var visible []string
+				done := make(chan error, 1)
+				go func() {
+					done <- a.processToolCalls(t.Context(), []ToolCall{
+						{ID: "first", Name: "read", Args: `{"id":"first"}`},
+						{ID: "second", Name: "read", Args: `{"id":"second"}`},
+					}, tools, func(m Message, _ error) bool {
+						if result := m.Content[0].ToolResult; result != nil {
+							if result.IsError || result.Content != result.ID {
+								t.Errorf("result lost during persistence: %+v", result)
+							}
+							visible = append(visible, result.ID)
+						}
+						return true
+					})
+				}()
+				<-started
+				<-started
+				close(second)
+				synctest.Wait()
+				close(first)
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				if len(started) != 0 {
+					t.Fatal("persistence recovery executed tools again")
+				}
+				if rejected != rejectBatch || !slices.Equal(recorded, []string{"first", "second"}) {
+					t.Fatalf("rejected=%t recorded=%v; results must be recorded once in call order", rejected, recorded)
+				}
+				if !slices.Equal(visible, []string{"second", "first"}) {
+					t.Fatalf("visible=%v; results must be delivered in completion order", visible)
+				}
+			})
+		})
+	}
+}
 
 func TestProcessToolCallsRunsReadsConcurrently(t *testing.T) {
 	var mu sync.Mutex
@@ -128,6 +204,58 @@ func TestDuplicateToolCallIDExecutesOnce(t *testing.T) {
 	if calls != 1 || first.Content != "written" || second.Content != "written" {
 		t.Fatalf("calls=%d results=(%+v, %+v)", calls, first, second)
 	}
+}
+
+func TestCanceledDuplicateWaiterLeavesToolAndOtherWaitersRunning(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started, release := make(chan struct{}), make(chan struct{})
+		calls := 0
+		tools := []tool.Tool{{
+			Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly),
+			Execute: func(context.Context, map[string]any) (tool.Result, error) {
+				calls++
+				close(started)
+				<-release
+				return tool.Result{Content: "read", Metadata: map[string]any{"version": 1}}, nil
+			},
+		}}
+		a := &Agent{Config: &Config{ToolTimeout: -1}}
+		call := ToolCall{ID: "shared", Name: "read", Args: `{}`}
+		results := make(chan tool.Result, 2)
+		go func() { results <- a.runSingleToolCallOutcomeDeferred(t.Context(), call, tools).result }()
+		<-started
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		canceled := make(chan tool.Result, 1)
+		go func() { canceled <- a.runSingleToolCallOutcomeDeferred(ctx, call, tools).result }()
+		go func() { results <- a.runSingleToolCallOutcomeDeferred(t.Context(), call, tools).result }()
+		synctest.Wait()
+		cancel()
+		if result := <-canceled; !result.IsError || result.Content != interruptedWaitResult {
+			t.Fatalf("canceled waiter = %+v", result)
+		}
+		select {
+		case result := <-results:
+			t.Fatalf("canceling a waiter finished another call: %+v", result)
+		default:
+		}
+
+		close(release)
+		first, second := <-results, <-results
+		if calls != 1 || first.IsError || second.IsError || first.Content != "read" || second.Content != "read" {
+			t.Fatalf("calls=%d, results=(%+v, %+v)", calls, first, second)
+		}
+		first.Metadata["version"] = 2
+		if second.Metadata["version"] != 1 {
+			t.Fatal("waiters share mutable result metadata")
+		}
+		second.Metadata["version"] = 3
+		cached := a.runSingleToolCallOutcomeDeferred(t.Context(), call, tools).result
+		if cached.Metadata["version"] != 1 || calls != 1 {
+			t.Fatalf("cached result changed or executed again: result=%+v calls=%d", cached, calls)
+		}
+	})
 }
 
 func TestRetainedToolResultPreventsReplayAfterRestore(t *testing.T) {

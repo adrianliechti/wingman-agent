@@ -1,12 +1,7 @@
 import { Loader2 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
-import mermaidAssetURL from "mermaid/dist/mermaid.min.js?url";
 import { useColorScheme } from "../hooks/useColorScheme";
 import { PanZoomCanvas } from "./PanZoomCanvas";
-
-type Mermaid = (typeof import("mermaid"))["default"];
-
-let mermaidPromise: Promise<Mermaid> | null = null;
 
 function prepareSVG(svg: string) {
 	// Mermaid's C4 renderer currently emits xlink:href for person icons without
@@ -56,35 +51,6 @@ function prepareSVG(svg: string) {
 	return { normalized, size };
 }
 
-function loadMermaid(): Promise<Mermaid> {
-	const loaded = (globalThis as typeof globalThis & { mermaid?: Mermaid })
-		.mermaid;
-	if (loaded) return Promise.resolve(loaded);
-	if (mermaidPromise) return mermaidPromise;
-
-	mermaidPromise = new Promise<Mermaid>((resolve, reject) => {
-		const script = document.createElement("script");
-		script.src = mermaidAssetURL;
-		script.async = true;
-		script.onload = () => {
-			const mermaid = (globalThis as typeof globalThis & { mermaid?: Mermaid })
-				.mermaid;
-			if (mermaid) {
-				resolve(mermaid);
-			} else {
-				reject(new Error("Mermaid loaded without exposing its API"));
-			}
-		};
-		script.onerror = () => reject(new Error("Could not load Mermaid"));
-		document.head.append(script);
-	}).catch((error: unknown) => {
-		mermaidPromise = null;
-		throw error;
-	});
-
-	return mermaidPromise;
-}
-
 export function MermaidPreview({ text, path }: { text: string; path: string }) {
 	const scheme = useColorScheme();
 	const reactId = useId();
@@ -106,13 +72,13 @@ export function MermaidPreview({ text, path }: { text: string; path: string }) {
 		let active = true;
 		let nextURL: string | null = null;
 
-		void loadMermaid()
-			.then(async (mermaid) => {
+		void import("mermaid")
+			.then(async ({ default: mermaid }) => {
 				mermaid.initialize({
 					startOnLoad: false,
 					securityLevel: "strict",
 					suppressErrorRendering: true,
-					theme: scheme === "dark" ? "dark" : "default",
+					theme: scheme === "dark" ? "redux-dark-color" : "redux-color",
 				});
 				const renderId = `mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, "")}`;
 				const { svg } = await mermaid.render(renderId, text);

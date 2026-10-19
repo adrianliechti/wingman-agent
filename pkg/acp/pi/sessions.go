@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
@@ -66,8 +65,8 @@ func listSessionFiles(sessionsDir string) []sessionFileInfo {
 		out = append(out, info)
 	}
 
-	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].UpdatedAt > out[j].UpdatedAt
+	slices.SortStableFunc(out, func(a, b sessionFileInfo) int {
+		return strings.Compare(b.UpdatedAt, a.UpdatedAt)
 	})
 	return out
 }

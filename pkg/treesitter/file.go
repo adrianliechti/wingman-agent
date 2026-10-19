@@ -1,7 +1,8 @@
 package treesitter
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"strings"
 
 	"github.com/odvcencio/gotreesitter"
@@ -55,11 +56,8 @@ func FileSymbols(filename string, src []byte) []*Symbol {
 		})
 	}
 
-	sort.SliceStable(spans, func(i, j int) bool {
-		if spans[i].start != spans[j].start {
-			return spans[i].start < spans[j].start
-		}
-		return spans[i].end > spans[j].end
+	slices.SortStableFunc(spans, func(a, b span) int {
+		return cmp.Or(cmp.Compare(a.start, b.start), cmp.Compare(b.end, a.end))
 	})
 
 	var roots []*Symbol
@@ -248,10 +246,8 @@ func semanticTypeForKind(kind Kind) string {
 }
 
 func appendUnique(values []string, value string) []string {
-	for _, existing := range values {
-		if existing == value {
-			return values
-		}
+	if slices.Contains(values, value) {
+		return values
 	}
 	return append(values, value)
 }

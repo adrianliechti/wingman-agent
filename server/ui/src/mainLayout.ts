@@ -151,22 +151,44 @@ export type LayoutState = {
 	rightActiveId: string;
 	currentSessionId: string;
 };
-export type LayoutAction = {
-	[K in keyof LayoutState]: {
-		field: K;
-		value: LayoutState[K] | ((previous: LayoutState[K]) => LayoutState[K]);
-	};
-}[keyof LayoutState];
+export type LayoutAction =
+	| {
+			type: "tabs";
+			value: CenterTab[] | ((previous: CenterTab[]) => CenterTab[]);
+	  }
+	| { type: "activate"; id: string }
+	| { type: "mapTabs"; transform: (tab: CenterTab) => CenterTab };
+
 export function layoutReducer(
 	state: LayoutState,
 	action: LayoutAction,
 ): LayoutState {
-	const value =
-		typeof action.value === "function"
-			? (action.value as (previous: unknown) => unknown)(state[action.field])
-			: action.value;
-	if (value === state[action.field]) return state;
-	const next = { ...state, [action.field]: value } as LayoutState;
+	const next = { ...state };
+	switch (action.type) {
+		case "tabs":
+			next.tabs =
+				typeof action.value === "function"
+					? action.value(state.tabs)
+					: action.value;
+			if (next.tabs === state.tabs) return state;
+			break;
+		case "activate":
+			if (action.id === state.activeTabId) return state;
+			next.activeTabId = action.id;
+			break;
+		case "mapTabs": {
+			next.tabs = state.tabs.map(action.transform);
+			// Tab IDs can change when files move or an untitled file is saved.
+			// Remap every selection before repairing the layout.
+			const ids = new Map(
+				state.tabs.map((tab, i) => [tab.id, next.tabs[i].id]),
+			);
+			next.activeTabId = ids.get(state.activeTabId) ?? state.activeTabId;
+			next.leftActiveId = ids.get(state.leftActiveId) ?? state.leftActiveId;
+			next.rightActiveId = ids.get(state.rightActiveId) ?? state.rightActiveId;
+			break;
+		}
+	}
 	if (!next.tabs.some((tab) => paneOf(tab) === "left"))
 		next.tabs = next.tabs.map((tab) => ({ ...tab, pane: undefined }));
 	const active =

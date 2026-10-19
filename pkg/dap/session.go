@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -649,9 +650,7 @@ func (session *Session) respondStartDebugging(request *godap.StartDebuggingReque
 		return
 	}
 	arguments := make(map[string]any, len(request.Arguments.Configuration)+1)
-	for key, value := range request.Arguments.Configuration {
-		arguments[key] = value
-	}
+	maps.Copy(arguments, request.Arguments.Configuration)
 	arguments["request"] = requestName
 	childPlan := session.plan
 	childPlan.Adapter.Transport = TransportConnect

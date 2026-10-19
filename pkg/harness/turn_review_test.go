@@ -1,7 +1,10 @@
 package harness
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
@@ -178,5 +181,112 @@ func TestTurnReviewChildCannotConfirmAnUnknownCommandLaunch(t *testing.T) {
 	})[0]
 	if review.Validation != "not_confirmed" {
 		t.Fatalf("unknown launch was treated as checking the latest edits: %+v", review)
+	}
+}
+
+func undoTestAgent(t *testing.T, terminal *RuntimeTerminal, files bool) *Agent {
+	t.Helper()
+	a := &Agent{Config: &Config{}}
+	events := []RuntimeEvent{{Type: EventTurnStarted, TurnID: "turn"}}
+	if files {
+		events = append(events, reviewResult(2, "edit", "", map[string]any{tool.FileChangesMetadata: []tool.FileChange{{Path: "notes.txt", Before: "before", After: "after", BeforeExists: true, AfterExists: true}}}))
+	}
+	if terminal != nil {
+		events = append(events, RuntimeEvent{Type: EventTurnTerminal, TurnID: "turn", Terminal: terminal})
+	}
+	if err := a.recordEvents(events...); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func TestUndoRejectsIneligibleTurnsBeforeApplying(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		terminal *RuntimeTerminal
+		files    bool
+		id       string
+	}{
+		{"running", nil, true, "turn"},
+		{"uncertain", &RuntimeTerminal{Status: RuntimeInterrupted, OutcomeUncertain: true}, true, "turn"},
+		{"no edits", &RuntimeTerminal{Status: RuntimeCompleted}, false, "turn"},
+		{"unknown", &RuntimeTerminal{Status: RuntimeCompleted}, true, "missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := undoTestAgent(t, tc.terminal, tc.files)
+			err := a.UndoTurn(t.Context(), tc.id, func(context.Context, []tool.FileChange) error {
+				t.Error("ineligible undo applied changes")
+				return nil
+			})
+			if err == nil || a.Running() {
+				t.Fatalf("undo error=%v, running=%v", err, a.Running())
+			}
+		})
+	}
+}
+
+func TestUndoOwnsSessionThroughApplyAndRecording(t *testing.T) {
+	a := undoTestAgent(t, &RuntimeTerminal{Status: RuntimeCompleted}, true)
+	assertReserved := func() {
+		t.Helper()
+		if _, err := a.Send(t.Context(), []Content{{Text: "overlap"}}); !errors.Is(err, ErrTurnInProgress) {
+			t.Errorf("send during undo = %v", err)
+		}
+		if a.QueueInput([]Content{{Text: "steer"}}) {
+			t.Error("undo accepted steering")
+		}
+	}
+	a.Recorder = EventRecorderFunc(func(events []RuntimeEvent) error {
+		assertReserved()
+		if len(events) != 2 || events[0].Type != EventTurnUndo {
+			t.Errorf("undo events = %+v", events)
+		}
+		return nil
+	})
+	if err := a.UndoTurn(t.Context(), "turn", func(ctx context.Context, files []tool.FileChange) error {
+		assertReserved()
+		if len(files) != 1 || files[0].Before != "before" || ctx.Err() != nil {
+			t.Errorf("undo input = %v, %v", files, ctx.Err())
+		}
+		// Cancellation after successful restoration must not lose its record.
+		a.Cancel(nil)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if a.Running() || !a.TurnReviews()[0].Undone {
+		t.Fatal("undo did not settle")
+	}
+	if err := a.UndoTurn(t.Context(), "turn", func(context.Context, []tool.FileChange) error {
+		t.Error("undo applied twice")
+		return nil
+	}); err == nil {
+		t.Fatal("repeated undo succeeded")
+	}
+}
+
+func TestUndoDistinguishesApplyAndJournalFailures(t *testing.T) {
+	for _, failure := range []string{"apply", "record"} {
+		t.Run(failure, func(t *testing.T) {
+			a := undoTestAgent(t, &RuntimeTerminal{Status: RuntimeCompleted}, true)
+			failed := errors.New("storage failed")
+			recorded := false
+			a.Recorder = EventRecorderFunc(func([]RuntimeEvent) error {
+				recorded = true
+				return failed
+			})
+			err := a.UndoTurn(t.Context(), "turn", func(context.Context, []tool.FileChange) error {
+				if failure == "apply" {
+					return failed
+				}
+				return nil
+			})
+			if !errors.Is(err, failed) || recorded != (failure == "record") || a.Running() || a.TurnReviews()[0].Undone {
+				t.Fatalf("undo error=%v recorded=%v", err, recorded)
+			}
+			if failure == "record" && !strings.Contains(err.Error(), "edits were undone") {
+				t.Fatalf("error hides the completed file changes: %v", err)
+			}
+		})
 	}
 }

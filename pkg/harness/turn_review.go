@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -222,6 +223,43 @@ func (a *Agent) TurnReviews() []TurnReview {
 	a.ensureStateLocked()
 	return BuildTurnReviews(a.Events)
 }
-func (a *Agent) RecordTurnUndo(id string) error {
+
+// UndoTurn validates a completed turn and excludes other session operations
+// while apply restores its tracked files. A successful apply is recorded even
+// if cancellation arrives afterward, so history reflects the filesystem.
+func (a *Agent) UndoTurn(ctx context.Context, id string, apply func(context.Context, []tool.FileChange) error) error {
+	return a.RunExclusive(ctx, func(ctx context.Context) error {
+		if apply == nil {
+			return fmt.Errorf("undo requires a file-change handler")
+		}
+		for _, review := range a.TurnReviews() {
+			if review.ID != id {
+				continue
+			}
+			if review.Undone {
+				return fmt.Errorf("these edits were already undone")
+			}
+			if review.Outcome == "running" || review.Uncertain {
+				return fmt.Errorf("this turn has an unconfirmed outcome; inspect the files first")
+			}
+			if len(review.Files) == 0 {
+				return fmt.Errorf("this turn has no tracked edits to undo")
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := apply(ctx, review.Files); err != nil {
+				return err
+			}
+			if err := a.recordTurnUndo(id); err != nil {
+				return fmt.Errorf("edits were undone, but the undo record could not be saved: %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("turn not found")
+	})
+}
+
+func (a *Agent) recordTurnUndo(id string) error {
 	return a.recordEvents(RuntimeEvent{Type: EventTurnUndo, TurnID: id}, RuntimeEvent{Type: EventMessage, Message: &Message{Role: RoleUser, Hidden: true, Content: []Content{{Text: fmt.Sprintf("The user undid the tracked file edits from turn %s. Re-read affected files before continuing.", id)}}}})
 }

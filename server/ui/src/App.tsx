@@ -152,7 +152,7 @@ import { useCapabilities } from "./hooks/useCapabilities";
 import { useAutoHidingScrollbars } from "./hooks/useAutoHidingScrollbars";
 import { type OpenDocument, useOpenDocuments } from "./hooks/useOpenDocuments";
 import { useServerQueryInvalidation } from "./hooks/useServerQueryInvalidation";
-import { useWebSocket } from "./hooks/useWebSocket";
+import { useSessions } from "./hooks/useSessions";
 import type {
 	CompareMode,
 	DiffLayer,
@@ -361,17 +361,11 @@ export default function App() {
 		connected,
 		sessions,
 		sendChat,
-		cancel,
-		removeQueued,
-		updateQueued,
-		resumeQueue,
-		clearQueue,
-		compact,
+		command,
 		dismissError,
-		respondPrompt,
 		subscribe,
 		observe,
-	} = useWebSocket();
+	} = useSessions();
 	useServerQueryInvalidation(subscribe, connected);
 	const queryClient = useQueryClient();
 	const toast = useToast();
@@ -503,9 +497,7 @@ export default function App() {
 		currentSessionId,
 		setTabs,
 		setActiveTabId,
-		setLeftActiveId,
-		setRightActiveId,
-		setCurrentSessionId,
+		mapTabs,
 	} = useMainLayout({
 		tabs: [
 			initialTab,
@@ -905,13 +897,9 @@ export default function App() {
 	);
 	useEffect(() => observe(JSON.parse(observedKeys)), [observe, observedKeys]);
 
-	const streamEstimate = 0; // Only provider-reported usage is shown; streaming text is not token accounting.
-	const outputTokens = usage.outputTokens + streamEstimate;
-
 	const activateTab = (tab: CenterTab) => {
 		setActiveTabId(tab.id);
 		if (tab.type === "chat") {
-			setCurrentSessionId(tab.sessionId ?? "");
 			selectBackend(
 				tab.backendId ??
 					(tab.sessionId ? splitSessionKey(tab.sessionId).backendId : agentId),
@@ -1045,10 +1033,7 @@ export default function App() {
 		const movedTabs = new Map(
 			tabs.map((tab) => [tab.id, moveWorkspaceTab(tab, from, to)]),
 		);
-		setTabs((current) => current.map((tab) => moveWorkspaceTab(tab, from, to)));
-		setActiveTabId(movedTabs.get(activeTabId)?.id ?? activeTabId);
-		setLeftActiveId(movedTabs.get(leftActiveId)?.id ?? leftActiveId);
-		setRightActiveId(movedTabs.get(rightActiveId)?.id ?? rightActiveId);
+		mapTabs((tab) => moveWorkspaceTab(tab, from, to));
 		setFileViews((current) => {
 			let changed = false;
 			const next = { ...current };
@@ -1284,10 +1269,7 @@ export default function App() {
 				paneTabs[Math.min(paneIdx, paneTabs.length - 1)] ??
 				navigable[Math.min(idx, navigable.length - 1)];
 			if (fallback) activateTab(fallback);
-			else {
-				setActiveTabId("");
-				setCurrentSessionId("");
-			}
+			else setActiveTabId("");
 		}
 	};
 
@@ -1409,25 +1391,17 @@ export default function App() {
 		openCreatedDocument(created);
 		const nextId = `file:${created.path}`;
 		closeDocument(request.sourcePath);
-		setTabs((current) =>
-			current.map((tab) =>
-				tab.id === request.sourceTabId
-					? {
-							...tab,
-							id: nextId,
-							label: created.path.split("/").pop() || created.path,
-							path: created.path,
-							external: undefined,
-							preview: undefined,
-						}
-					: tab,
-			),
-		);
-		setLeftActiveId((current) =>
-			current === request.sourceTabId ? nextId : current,
-		);
-		setRightActiveId((current) =>
-			current === request.sourceTabId ? nextId : current,
+		mapTabs((tab) =>
+			tab.id === request.sourceTabId
+				? {
+						...tab,
+						id: nextId,
+						label: created.path.split("/").pop() || created.path,
+						path: created.path,
+						external: undefined,
+						preview: undefined,
+					}
+				: tab,
 		);
 		setFileViews((current) => {
 			if (!(request.sourceTabId in current)) return current;
@@ -1814,7 +1788,6 @@ export default function App() {
 	};
 
 	const handleSessionDeleted = (id: string) => {
-		setCurrentSessionId((prev) => (prev === id ? "" : prev));
 		const tab = tabs.find((t) => t.type === "chat" && t.sessionId === id);
 		if (tab) closeTabNow(tab.id);
 	};
@@ -2280,7 +2253,7 @@ export default function App() {
 						label: "Compact context",
 						hint: "/compact",
 						icon: <FoldVertical size={12} className="text-fg-dim shrink-0" />,
-						run: () => void compact(sessionId),
+						run: () => void command(sessionId, { type: "compact", text: "" }),
 					},
 				]
 			: []),
@@ -2491,25 +2464,7 @@ export default function App() {
 						onSend={(text, files, images, intent) =>
 							sendForSession(key, text, files, images, intent, tab.id)
 						}
-						onCancel={(clear) => {
-							if (key) cancel(key, clear ?? false);
-						}}
-						onCompact={(focus) => (key ? compact(key, focus) : false)}
-						onRemoveQueued={(id, state) => {
-							if (!key) return;
-							if (state === "queued" || state === "sending") {
-								removeQueued(key, id);
-							}
-						}}
-						onUpdateQueued={(id, text, files, images) =>
-							key ? updateQueued(key, id, text, files, images) : false
-						}
-						onResumeQueue={() => {
-							if (key) resumeQueue(key);
-						}}
-						onClearQueue={() => {
-							if (key) clearQueue(key);
-						}}
+						onCommand={(value) => command(key, value)}
 						loading={
 							isDraft(key)
 								? backendId !== "wingman" && !draftError
@@ -2521,9 +2476,6 @@ export default function App() {
 						error={sess?.error ?? null}
 						onDismissError={() => {
 							if (key) dismissError(key);
-						}}
-						onPromptReply={(id, reply) => {
-							void respondPrompt(key, id, reply);
 						}}
 						onOpenFile={openFile}
 						seed={tab.id === activeTabId ? composerSeed : null}
@@ -2801,14 +2753,13 @@ export default function App() {
 			className="flex shrink-0 items-center pr-2"
 		>
 			{activeTab.type === "chat" &&
-				(usage.inputTokens > 0 || outputTokens > 0) && (
+				(usage.inputTokens > 0 || usage.outputTokens > 0) && (
 					<UsageIndicator
 						inputTokens={usage.inputTokens}
 						cachedTokens={usage.cachedTokens}
-						outputTokens={outputTokens}
+						outputTokens={usage.outputTokens}
 						lastInputTokens={usage.lastInputTokens}
 						contextWindow={usage.contextWindow}
-						outputEstimated={streamEstimate > 0}
 					/>
 				)}
 			{activeTab.type === "chat" && (
@@ -4407,37 +4358,24 @@ function UsageIndicator({
 	outputTokens,
 	lastInputTokens,
 	contextWindow,
-	outputEstimated,
 }: {
 	inputTokens: number;
 	cachedTokens: number;
 	outputTokens: number;
 	lastInputTokens: number;
 	contextWindow: number;
-	outputEstimated: boolean;
 }) {
 	const [open, setOpen] = useState(false);
 	const [button, setButton] = useState<HTMLButtonElement | null>(null);
-	const hasContext = contextWindow > 0 && lastInputTokens > 0;
-	const used = hasContext ? Math.min(lastInputTokens, contextWindow) : 0;
-	const usedPercent = hasContext ? Math.round((used / contextWindow) * 100) : 0;
-	const leftPercent =
-		contextRemainingPercent(lastInputTokens, contextWindow) ?? 0;
-	const freeTokens = hasContext ? Math.max(0, contextWindow - used) : 0;
 	const visible = shouldShowContextIndicator(lastInputTokens, contextWindow);
 	if (!visible && open) setOpen(false);
-	const tone = !hasContext
-		? "text-fg-dim"
-		: leftPercent <= 10
-			? "text-danger"
-			: leftPercent <= 30
-				? "text-warning"
-				: "text-fg-dim";
-
-	const hoverSummary = hasContext
-		? `${leftPercent}% context left · ${formatTokens(used)} of ${formatTokens(contextWindow)} used · ↑${formatTokens(inputTokens)} · ↓${outputEstimated ? "~" : ""}${formatTokens(outputTokens)}`
-		: `↑${formatTokens(inputTokens)} input · ↓${outputEstimated ? "~" : ""}${formatTokens(outputTokens)} output`;
 	if (!visible) return null;
+	const used = Math.min(lastInputTokens, contextWindow);
+	const usedPercent = Math.round((used / contextWindow) * 100);
+	const leftPercent = contextRemainingPercent(lastInputTokens, contextWindow)!;
+	const freeTokens = Math.max(0, contextWindow - used);
+	const tone = leftPercent <= 10 ? "text-danger" : "text-warning";
+	const hoverSummary = `${leftPercent}% context left · ${formatTokens(used)} of ${formatTokens(contextWindow)} used · ↑${formatTokens(inputTokens)} · ↓${formatTokens(outputTokens)}`;
 
 	return (
 		<>
@@ -4446,12 +4384,12 @@ function UsageIndicator({
 				type="button"
 				className={`flex h-8 shrink-0 items-center rounded-md px-2 text-[11px] tabular-nums transition-colors hover:bg-bg-hover ${tone}`}
 				title={hoverSummary}
-				aria-label={hasContext ? `${leftPercent}% context left` : "Token usage"}
+				aria-label={`${leftPercent}% context left`}
 				aria-haspopup="dialog"
 				aria-expanded={open}
 				onClick={() => setOpen((value) => !value)}
 			>
-				{hasContext ? `${leftPercent}%` : "Usage"}
+				{leftPercent}%
 			</button>
 			<FloatingSurface
 				open={open}
@@ -4464,33 +4402,21 @@ function UsageIndicator({
 				className="z-[100] w-72 rounded-lg border border-border bg-bg-elevated p-3 shadow-2xl"
 			>
 				<div className="text-[12px] font-medium text-fg">Context usage</div>
-				{hasContext ? (
-					<>
-						<div className="mt-1 text-[11px] text-fg-muted">
-							{formatTokens(used)} / {formatTokens(contextWindow)} tokens ·{" "}
-							{usedPercent}% used
-						</div>
-						<div className="mt-2 h-1.5 overflow-hidden rounded-full bg-bg-active">
-							<div
-								className={`h-full rounded-full ${leftPercent <= 10 ? "bg-danger" : leftPercent <= 30 ? "bg-warning" : "bg-accent"}`}
-								style={{ width: `${usedPercent}%` }}
-							/>
-						</div>
-					</>
-				) : (
-					<div className="mt-1 text-[11px] text-fg-dim">
-						Context-window data is unavailable for this session.
-					</div>
-				)}
+				<div className="mt-1 text-[11px] text-fg-muted">
+					{formatTokens(used)} / {formatTokens(contextWindow)} tokens ·{" "}
+					{usedPercent}% used
+				</div>
+				<div className="mt-2 h-1.5 overflow-hidden rounded-full bg-bg-active">
+					<div
+						className={`h-full rounded-full ${leftPercent <= 10 ? "bg-danger" : "bg-warning"}`}
+						style={{ width: `${usedPercent}%` }}
+					/>
+				</div>
 				<dl className="mt-3 grid grid-cols-[1fr_auto] gap-x-4 gap-y-1.5 text-[11px]">
-					{hasContext && (
-						<>
-							<dt className="text-fg-dim">Free space</dt>
-							<dd className="text-right font-mono text-fg-muted">
-								{freeTokens.toLocaleString()} ({leftPercent}%)
-							</dd>
-						</>
-					)}
+					<dt className="text-fg-dim">Free space</dt>
+					<dd className="text-right font-mono text-fg-muted">
+						{freeTokens.toLocaleString()} ({leftPercent}%)
+					</dd>
 					<dt className="text-fg-dim">Input tokens</dt>
 					<dd className="text-right font-mono text-fg-muted">
 						{inputTokens.toLocaleString()}
@@ -4501,7 +4427,6 @@ function UsageIndicator({
 					</dd>
 					<dt className="text-fg-dim">Output tokens</dt>
 					<dd className="text-right font-mono text-fg-muted">
-						{outputEstimated ? "~" : ""}
 						{outputTokens.toLocaleString()}
 					</dd>
 				</dl>

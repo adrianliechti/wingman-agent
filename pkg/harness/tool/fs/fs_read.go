@@ -198,7 +198,7 @@ func formatReadWithin(content []byte, startLine, limit, budget int) string {
 	var numbered []string
 	selectedBytes := 0
 
-	for i := 0; i < offset; i++ {
+	for range offset {
 		_, remaining, _ = strings.Cut(remaining, "\n")
 	}
 	for lineNum := startLine; lineNum <= end; lineNum++ {

@@ -141,7 +141,9 @@ func (s *Server) bindBackend(id string, a code.Agent) *backendRuntime {
 	return b
 }
 
-type backendStartup struct {
+// backendEntry holds either a running backend or its shared startup. Startup
+// publishes runtime and err by closing done; failures are removed for retry.
+type backendEntry struct {
 	done    chan struct{}
 	runtime *backendRuntime
 	err     error
@@ -154,54 +156,51 @@ func (s *Server) backend(id string) (*backendRuntime, error) {
 }
 
 func (s *Server) resolveBackend(id string, create func(context.Context) (code.Agent, error)) (*backendRuntime, error) {
-	s.runtimesMu.Lock()
+	s.backendsMu.Lock()
 	if err := s.ctx.Err(); err != nil {
-		s.runtimesMu.Unlock()
+		s.backendsMu.Unlock()
 		return nil, err
 	}
-	if b := s.runtimes[id]; b != nil {
-		s.runtimesMu.Unlock()
-		return b, nil
-	}
 	if id == "" {
-		s.runtimesMu.Unlock()
+		s.backendsMu.Unlock()
 		return nil, errors.New("backend id required")
 	}
-	if pending := s.starting[id]; pending != nil {
-		s.runtimesMu.Unlock()
+	if entry := s.backends[id]; entry != nil {
+		runtime := entry.runtime
+		s.backendsMu.Unlock()
+		if runtime != nil {
+			return runtime, nil
+		}
 		select {
-		case <-pending.done:
-			return pending.runtime, pending.err
+		case <-entry.done:
+			return entry.runtime, entry.err
 		case <-s.ctx.Done():
 			return nil, s.ctx.Err()
 		}
 	}
-	if s.starting == nil {
-		s.starting = make(map[string]*backendStartup)
-	}
-	pending := &backendStartup{done: make(chan struct{})}
-	s.starting[id] = pending
+	entry := &backendEntry{done: make(chan struct{})}
+	s.backends[id] = entry
 	// Reserve before releasing the registry lock so Close joins late startup.
 	s.background.Add(1)
-	s.runtimesMu.Unlock()
+	s.backendsMu.Unlock()
 	defer s.background.Done()
 	a, err := create(s.ctx)
-	s.runtimesMu.Lock()
+	s.backendsMu.Lock()
 	if err == nil {
 		err = s.ctx.Err()
 	}
 	if err == nil {
-		pending.runtime = s.bindBackend(id, a)
-		s.runtimes[id] = pending.runtime
+		entry.runtime = s.bindBackend(id, a)
+	} else {
+		delete(s.backends, id)
 	}
-	pending.err = err
-	delete(s.starting, id)
-	close(pending.done)
-	s.runtimesMu.Unlock()
+	entry.err = err
+	close(entry.done)
+	s.backendsMu.Unlock()
 	if err != nil && a != nil {
 		_ = a.Close()
 	}
-	return pending.runtime, pending.err
+	return entry.runtime, entry.err
 }
 
 func (b *backendRuntime) session(id string) *sessionController {

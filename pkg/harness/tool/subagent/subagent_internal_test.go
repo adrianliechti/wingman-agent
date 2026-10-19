@@ -451,3 +451,48 @@ func TestVerificationRetainsRealExecutionTools(t *testing.T) {
 		}
 	}
 }
+
+type closeFunc func() error
+
+func (f closeFunc) Close() error { return f() }
+
+func TestDelegatedAgentPinsCatalogButKeepsParentPolicyLive(t *testing.T) {
+	readOnly := false
+	catalog := []tool.Tool{{Name: "read"}, {Name: "edit"}}
+	parent := &harness.Agent{Config: &harness.Config{
+		PinTools: true,
+		Tools:    func() []tool.Tool { return catalog },
+		FilterTools: func(tools []tool.Tool) []tool.Tool {
+			if readOnly {
+				return slices.DeleteFunc(tools, func(t tool.Tool) bool { return t.Name == "edit" || t.Name == "report" })
+			}
+			return tools
+		},
+	}, PrepareTurn: func(context.Context, []harness.Content) ([]harness.Content, error) {
+		t.Fatal("child ran parent preparation")
+		return nil, nil
+	}}
+	parent.Resources = closeFunc(func() error { t.Fatal("child closed parent resources"); return nil })
+	runner, err := newSubagentRunner(parent.Config, subagentType{AllowTool: allowNonAgentTool}, durableSpec{
+		Version: durableSpecVersion, AgentID: "child", AgentType: "test", Schema: map[string]any{"type": "string"},
+	}, harness.State{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := runner.sub.Send(t.Context(), []harness.Content{{Text: "work"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog = nil
+	readOnly = true
+	tools := runner.sub.AvailableTools()
+	if len(tools) != 2 || tools[0].Name != "read" || tools[1].Name != "report" {
+		t.Fatalf("child lost live policy, its snapshot, or its result tool: %v", tools)
+	}
+	runner.sub.Cancel(nil)
+	for range stream {
+	}
+	if err := runner.sub.Close(t.Context(), "other"); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -63,7 +63,7 @@ func TestTasksAPI(t *testing.T) {
 		t.Fatalf("unknown task status = %d, want 404", res.StatusCode)
 	}
 
-	reg := app.runtimes["wingman"].sessionTasks(created.ID)
+	reg := app.backends["wingman"].runtime.sessionTasks(created.ID)
 	if reg == nil {
 		t.Fatal("no registry for coder session")
 	}

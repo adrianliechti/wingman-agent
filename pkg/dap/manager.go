@@ -424,9 +424,7 @@ func resolvePlan(workspace string, selected detectedAdapter, options StartOption
 	if arguments == nil {
 		arguments = make(map[string]any)
 	}
-	for key, value := range options.Configuration {
-		arguments[key] = value
-	}
+	maps.Copy(arguments, options.Configuration)
 	arguments, err = ResolveConfigurationPaths(workspace, projectDir, selected.adapter.ConfigurationPaths, arguments)
 	if err != nil {
 		return Plan{}, err

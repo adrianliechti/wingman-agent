@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -121,7 +122,7 @@ func (as *fakeAuthServer) authorize(w http.ResponseWriter, r *http.Request) {
 	case !known || reject:
 		values.Set("error", "invalid_client")
 		values.Set("error_description", "unknown client")
-	case !contains(redirects, q.Get("redirect_uri")):
+	case !slices.Contains(redirects, q.Get("redirect_uri")):
 		values.Set("error", "invalid_request")
 		values.Set("error_description", "redirect_uri mismatch")
 	case q.Get("code_challenge_method") != "S256":
@@ -203,16 +204,6 @@ func (as *fakeAuthServer) verify(ctx context.Context, token string, r *http.Requ
 	}
 
 	return &auth.TokenInfo{Expiration: expiry}, nil
-}
-
-func contains(list []string, value string) bool {
-	for _, item := range list {
-		if item == value {
-			return true
-		}
-	}
-
-	return false
 }
 
 // newProtectedServer serves an MCP server behind bearer auth pointing at as.

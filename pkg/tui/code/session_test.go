@@ -17,6 +17,7 @@ func newStreamTestApp(messages []harness.Message) (*App, *uiTestAgent) {
 	return &App{
 		ctx: context.Background(), agent: testAgent, sessionID: "session",
 		term: inline.NewTerminal(), queue: make(chan func(), 64), quit: make(chan struct{}),
+		renderRequests: make(chan struct{}, 1),
 	}, testAgent
 }
 
@@ -166,12 +167,14 @@ func TestStreamCommitReplacesPartialToolWithDefinitiveCall(t *testing.T) {
 	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
 		ToolCall: &harness.ToolCall{ID: "call-1", Name: "shell", Args: `{"command":"go te"}`, Partial: true},
 	}}})
-	a.renderPending.Store(false)
+	<-a.renderRequests
 	a.handleTurnEvent(code.TurnEvent{SessionID: "session", StreamEvent: harness.StreamEventCommit})
 	if snapshots := a.snapshotStreamState(); len(snapshots) != 0 {
 		t.Fatalf("commit retained non-authoritative tool call: %+v", snapshots)
 	}
-	if !a.renderPending.Load() {
+	select {
+	case <-a.renderRequests:
+	default:
 		t.Fatal("commit did not schedule removal of the partial tool")
 	}
 

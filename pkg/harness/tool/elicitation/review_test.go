@@ -1,4 +1,4 @@
-package elicit_test
+package elicitation_test
 
 import (
 	"context"
@@ -6,12 +6,12 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/elicit"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/elicitation"
 )
 
 func TestMalformedQuestionsNeverReachUI(t *testing.T) {
 	called := false
-	inspect := elicit.Tools(&tool.Elicitation{Elicit: func(context.Context, tool.ElicitRequest) (tool.ElicitResult, error) {
+	inspect := elicitation.Tools(&tool.Elicitation{Elicit: func(context.Context, tool.ElicitRequest) (tool.ElicitResult, error) {
 		called = true
 		return tool.ElicitResult{Action: tool.ElicitCancel}, nil
 	}})[0]
@@ -49,7 +49,7 @@ func TestElicitCancellationAndUnknownResponses(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	called := false
-	inspect := elicit.Tools(&tool.Elicitation{Elicit: func(context.Context, tool.ElicitRequest) (tool.ElicitResult, error) {
+	inspect := elicitation.Tools(&tool.Elicitation{Elicit: func(context.Context, tool.ElicitRequest) (tool.ElicitResult, error) {
 		called = true
 		return tool.ElicitResult{Action: "invalid"}, nil
 	}})[0]
@@ -60,7 +60,7 @@ func TestElicitCancellationAndUnknownResponses(t *testing.T) {
 		t.Fatal("invalid action reported as user dismissal")
 	}
 	ctx, cancel = context.WithCancel(t.Context())
-	inspect = elicit.Tools(&tool.Elicitation{Elicit: func(context.Context, tool.ElicitRequest) (tool.ElicitResult, error) {
+	inspect = elicitation.Tools(&tool.Elicitation{Elicit: func(context.Context, tool.ElicitRequest) (tool.ElicitResult, error) {
 		cancel()
 		return tool.ElicitResult{Action: tool.ElicitAccept, Content: map[string]any{"q_1": "answer"}}, nil
 	}})[0]

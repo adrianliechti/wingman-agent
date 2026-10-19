@@ -1,4 +1,4 @@
-package elicit
+package elicitation
 
 import (
 	"context"

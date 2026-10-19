@@ -1,17 +1,11 @@
 import { useState, useSyncExternalStore } from "react";
-import { workspaceClient } from "../state/workspaceClient.ts";
-import type { PromptReply, TurnInputIntent } from "../types/protocol.ts";
+import { workspaceClient, type Command } from "../state/workspaceClient.ts";
+import type { TurnInputIntent } from "../types/protocol.ts";
 import { useToast } from "../components/ui/Feedback.tsx";
-export type {
-	ChatEntry,
-	PendingPrompt,
-	PendingTurnInput,
-} from "../types/session.ts";
-export type { PromptReply } from "../types/protocol.ts";
 
 // React bindings only. Transport, delivery receipts, and the ordered session
 // store each have an owner outside the component lifecycle.
-export function useWebSocket() {
+export function useSessions() {
 	const client = workspaceClient();
 	const views = useSyncExternalStore(
 		client.store.subscribeRender,
@@ -29,10 +23,7 @@ export function useWebSocket() {
 			{ ...view, error: dismissed[key] === view.error ? null : view.error },
 		]),
 	);
-	const run = async (
-		key: string,
-		command: Parameters<typeof client.command>[1],
-	) => {
+	const command = async (key: string, command: Command) => {
 		try {
 			await client.command(key, command);
 			return true;
@@ -45,7 +36,10 @@ export function useWebSocket() {
 			return false;
 		}
 	};
-	const actions = {
+	return {
+		connected,
+		sessions,
+		command,
 		subscribe: client.subscribe,
 		observe: (keys: string[]) => {
 			const releases = keys.map((key) => client.watch(key));
@@ -70,28 +64,10 @@ export function useWebSocket() {
 				return false;
 			}
 		},
-		cancel: (key: string, clearQueue = false) =>
-			run(key, { type: "cancel", clearQueue }),
-		removeQueued: (key: string, inputId: string) =>
-			run(key, { type: "queue_remove", inputId }),
-		updateQueued: (
-			key: string,
-			inputId: string,
-			text: string,
-			files?: string[],
-			images?: string[],
-		) => run(key, { type: "queue_update", inputId, text, files, images }),
-		resumeQueue: (key: string) => run(key, { type: "queue_resume" }),
-		compact: (key: string, focus = "") =>
-			run(key, { type: "compact", text: focus }),
-		clearQueue: (key: string) => run(key, { type: "queue_clear" }),
 		dismissError: (key: string) =>
 			setDismissed((current) => ({
 				...current,
 				[key]: client.store.getSnapshot()[key]?.error,
 			})),
-		respondPrompt: (key: string, promptId: string, reply: PromptReply) =>
-			run(key, { type: "prompt_response", promptId, ...reply }),
 	};
-	return { ...actions, connected, sessions };
 }

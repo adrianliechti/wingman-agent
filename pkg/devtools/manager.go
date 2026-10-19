@@ -1013,16 +1013,13 @@ func maintainUpdateLock(path, token string, now func() time.Time) func() {
 		}
 	}()
 
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			close(stop)
-			<-done
-			if ownsUpdateLock(path, token) {
-				_ = os.Remove(path)
-			}
-		})
-	}
+	return sync.OnceFunc(func() {
+		close(stop)
+		<-done
+		if ownsUpdateLock(path, token) {
+			_ = os.Remove(path)
+		}
+	})
 }
 
 func ownsUpdateLock(path, token string) bool {

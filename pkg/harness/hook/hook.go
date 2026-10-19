@@ -96,6 +96,13 @@ type Stop func(ctx context.Context, lastAssistantMessage string, active bool) (O
 // Interrupt observes a turn the user interrupted; it cannot change the outcome.
 type Interrupt func(ctx context.Context)
 
+// Hooks run in registration order within each event. Prompt and pre-tool errors
+// reject the input or call; post-tool and transform errors replace its result.
+// SessionStart, Stop, SubagentStart/Stop, compaction and permission callbacks
+// report errors and retain their existing best-effort behavior. Permission
+// errors leave the decision to the host's remaining approval policy.
+// SessionEnd and Interrupt are observation-only. External adapters additionally
+// apply their protocol's ordering and error rules within each registration.
 type Hooks struct {
 	PreToolUse          []PreToolUse
 	PermissionRequest   []PermissionRequest

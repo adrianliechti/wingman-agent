@@ -144,6 +144,9 @@ func (o *twoPaneOverlay) HandlePaste(text string) bool {
 }
 
 func (o *twoPaneOverlay) HandleKey(ev inline.KeyEvent) bool {
+	if ev.Key == inline.KeyCtrl && ev.Rune == 'c' {
+		return true
+	}
 	if o.searching {
 		o.handleSearchKey(ev)
 		return false
@@ -208,8 +211,6 @@ func (o *twoPaneOverlay) HandleKey(ev inline.KeyEvent) bool {
 				o.moveSelection(1)
 			}
 		}
-	case inline.KeyCtrl:
-		return ev.Rune == 'c'
 	case inline.KeyRune:
 		switch ev.Rune {
 		case '/':

@@ -2,7 +2,8 @@ package telemetry
 
 import (
 	"context"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -125,12 +126,7 @@ func (t *Telemetry) startMCPOperation(ctx context.Context, req MCPClientRequest,
 		if arguments, ok := StructuredObjectValue(req.Arguments); ok {
 			spanAttrs = append(spanAttrs, attribute.KeyValue{Key: keyToolCallArguments, Value: arguments})
 		}
-		keys := make([]string, 0, len(req.PromptVariables))
-		for key := range req.PromptVariables {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
+		for _, key := range slices.Sorted(maps.Keys(req.PromptVariables)) {
 			spanAttrs = append(spanAttrs, attribute.String("gen_ai.prompt.variable."+key, req.PromptVariables[key]))
 		}
 	}

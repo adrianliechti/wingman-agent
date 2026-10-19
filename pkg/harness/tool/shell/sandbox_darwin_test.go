@@ -20,7 +20,7 @@ import (
 func TestSeatbeltProfileUsesParameterizedWritableRoots(t *testing.T) {
 	profile, definitions := seatbeltProfile(sandboxPolicy{WritableRoots: []string{"/repo with spaces", "/private/tmp"}, Network: true})
 
-	writeGrant := strings.Split(strings.Split(profile, "(allow file-write*")[1], "(deny appleevent-send)")[0]
+	writeGrant, _, _ := strings.Cut(strings.Split(profile, "(allow file-write*")[1], "(deny appleevent-send)")
 	if strings.Contains(writeGrant, "/repo with spaces") {
 		t.Fatalf("write grant interpolates an untrusted path directly: %s", writeGrant)
 	}

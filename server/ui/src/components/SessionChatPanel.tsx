@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { isDraft } from "../state/sessionStore";
+import type { Command } from "../state/workspaceClient";
 import { listTurnReviews, turnReviewKey } from "../api/turnReviews";
 import { TurnReviewsContext } from "./chat/turnReviewContext";
 import { useSessionView } from "../hooks/useSessionView";
@@ -8,21 +9,33 @@ import { ChatPanel, type ChatPanelProps } from "./ChatPanel";
 const EMPTY: never[] = [];
 // A mounted chat subscribes to its own transcript. The workspace layout only
 // observes summaries, so tokens in another session do not rerender its panes.
-export function SessionChatPanel(
-	props: Omit<
-		ChatPanelProps,
-		| "entries"
-		| "phase"
-		| "pendingInputs"
-		| "queuePaused"
-		| "canSteer"
-		| "prompts"
-		| "toolProgress"
-		| "compaction"
-	>,
-) {
+export function SessionChatPanel({
+	onCommand,
+	...props
+}: Omit<
+	ChatPanelProps,
+	| "entries"
+	| "phase"
+	| "pendingInputs"
+	| "queuePaused"
+	| "canSteer"
+	| "prompts"
+	| "toolProgress"
+	| "compaction"
+	| "retry"
+	| "incomplete"
+	| "onCancel"
+	| "onCompact"
+	| "onRemoveQueued"
+	| "onUpdateQueued"
+	| "onResumeQueue"
+	| "onClearQueue"
+	| "onPromptReply"
+> & { onCommand: (command: Command) => Promise<boolean> }) {
 	const view = useSessionView(props.sessionId);
 	const session = props.sessionId ?? "";
+	const command = (value: Command) =>
+		session ? onCommand(value) : Promise.resolve(false);
 	const client = useQueryClient();
 	const query = useQuery({
 		queryKey: turnReviewKey(session),
@@ -47,6 +60,26 @@ export function SessionChatPanel(
 		<TurnReviewsContext value={context}>
 			<ChatPanel
 				{...props}
+				onCancel={(clearQueue = false) => {
+					void command({ type: "cancel", clearQueue });
+				}}
+				onCompact={(text) => command({ type: "compact", text })}
+				onRemoveQueued={(inputId, state) => {
+					if (state === "queued" || state === "sending")
+						void command({ type: "queue_remove", inputId });
+				}}
+				onUpdateQueued={(inputId, text, files, images) =>
+					command({ type: "queue_update", inputId, text, files, images })
+				}
+				onResumeQueue={() => {
+					void command({ type: "queue_resume" });
+				}}
+				onClearQueue={() => {
+					void command({ type: "queue_clear" });
+				}}
+				onPromptReply={(promptId, reply) => {
+					void onCommand({ type: "prompt_response", promptId, ...reply });
+				}}
 				entries={view?.entries ?? EMPTY}
 				phase={view?.phase ?? "idle"}
 				retry={view?.retry}

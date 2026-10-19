@@ -74,8 +74,8 @@ func (m *Manager) installRustup(ctx context.Context, item recipe, stage string) 
 
 func activeRustToolchain(output []byte) string {
 	lines := strings.Split(string(output), "\n")
-	for index := len(lines) - 1; index >= 0; index-- {
-		fields := strings.Fields(lines[index])
+	for _, line := range slices.Backward(lines) {
+		fields := strings.Fields(line)
 		if len(fields) == 0 || strings.HasSuffix(fields[0], ":") {
 			continue
 		}

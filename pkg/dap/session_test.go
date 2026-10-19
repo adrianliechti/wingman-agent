@@ -131,8 +131,13 @@ func TestSessionClosesConnectionAfterUnexpectedEOF(t *testing.T) {
 	}, connection)
 
 	select {
-	case <-connection.closed:
+	case <-session.resourceDone:
 	case <-time.After(time.Second):
+		t.Fatal("session did not finish after unexpected EOF")
+	}
+	select {
+	case <-connection.closed:
+	default:
 		t.Fatal("session left the failed adapter connection open")
 	}
 	status := session.Status()
@@ -148,8 +153,13 @@ func TestSessionReportsPlainEOFAsUnexpectedWhileRunning(t *testing.T) {
 	}, connection)
 
 	select {
-	case <-connection.closed:
+	case <-session.resourceDone:
 	case <-time.After(time.Second):
+		t.Fatal("session did not finish after EOF")
+	}
+	select {
+	case <-connection.closed:
+	default:
 		t.Fatal("session left the failed adapter connection open")
 	}
 	status := session.Status()

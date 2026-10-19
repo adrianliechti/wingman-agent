@@ -441,7 +441,7 @@ func lineContaining(lineStarts []int, offset int) int {
 }
 
 func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, onFile func(path, relPath string, d fs.DirEntry) error) error {
-	for _, component := range strings.Split(root, "/") {
+	for component := range strings.SplitSeq(root, "/") {
 		if vcsDirs[component] {
 			return nil
 		}

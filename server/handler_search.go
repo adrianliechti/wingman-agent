@@ -216,9 +216,7 @@ func (c *workspaceSearchConfig) searchFile(content string, limit int) ([]workspa
 	lines := strings.Split(content, "\n")
 	result := make([]workspaceSearchMatch, 0)
 	for lineIndex, line := range lines {
-		if strings.HasSuffix(line, "\r") {
-			line = strings.TrimSuffix(line, "\r")
-		}
+		line = strings.TrimSuffix(line, "\r")
 		indexes := c.pattern.FindAllStringSubmatchIndex(line, -1)
 		for _, groups := range indexes {
 			start, end := groups[0], groups[1]

@@ -121,9 +121,11 @@ func pythonEntryPointCode(module, function string, windows bool) string {
 	if windows {
 		quote = `'`
 	}
-	code := "import importlib,sys; f=importlib.import_module(" + quote + module + quote + ")"
-	for _, attribute := range strings.Split(function, ".") {
-		code += "; f=getattr(f," + quote + attribute + quote + ")"
+	var code strings.Builder
+	code.WriteString("import importlib,sys; f=importlib.import_module(" + quote + module + quote + ")")
+	for attribute := range strings.SplitSeq(function, ".") {
+		code.WriteString("; f=getattr(f," + quote + attribute + quote + ")")
 	}
-	return code + "; sys.exit(f())"
+	code.WriteString("; sys.exit(f())")
+	return code.String()
 }

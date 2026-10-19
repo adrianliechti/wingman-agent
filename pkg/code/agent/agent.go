@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,17 +22,11 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/truncation"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
-	elicittool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/elicit"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fetch"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/shell"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/subagent"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
@@ -44,11 +37,8 @@ type Agent struct {
 	workspace *code.Workspace
 	cfg       Config
 
-	uiMu    sync.RWMutex
 	ui      code.UI
 	prompts *tool.Elicitation
-
-	lastActive atomic.Value
 
 	sessionsDir string
 
@@ -60,38 +50,35 @@ type Agent struct {
 	upstreamModels    map[string]bool
 	modelDiscoveryErr error
 
-	mu           sync.Mutex
+	mu           sync.Mutex // Protects ui and session bookkeeping.
 	sessions     map[string]*sessionState
+	lastActive   string
 	closed       bool
-	sessionGates sync.Map // session ID -> chan struct{}
+	sessionLocks map[string]*sessionLock
 }
 
 var _ code.Agent = (*Agent)(nil)
 
 type sessionState struct {
+	resources sessionResources
+
 	id      string
 	parent  *Agent
-	aa      *harness.Agent
-	journal *session.Journal
+	harness *harness.Agent
 
 	modelID string
 	effort  *string // nil inherits the agent default; an empty value selects auto.
 
-	// mode is switchable while a turn is running, so it is read from the turn
-	// goroutine and written from the UI one.
-	mode        atomic.Value // sessionMode
-	unattended  atomic.Bool
-	reviews     reviewBreaker
-	toolSet     *tool.Set
-	turnTools   atomic.Value // []tool.Tool, pinned for the running turn
-	execManager *shell.ExecManager
-	tasks       *task.Registry
+	// Plan mode can change while a turn is running.
+	planMode   atomic.Bool
+	unattended atomic.Bool
+	reviews    reviewBreaker
+	tools      []tool.Tool
 
 	schedules     schedule.ObservableStore
 	scriptOptions *schedule.Options
 
 	freshness *fs.Freshness
-	watchStop chan struct{}
 
 	changedMu    sync.Mutex
 	changedPaths []string
@@ -102,10 +89,6 @@ type sessionState struct {
 	projectInstructionsMu   sync.Mutex
 	projectInstructionCache projectInstructionCache
 
-	cancelMu    sync.Mutex
-	cancelFn    context.CancelCauseFunc
-	cancelGen   uint64
-	closed      bool
 	startSource string
 }
 
@@ -118,8 +101,8 @@ const (
 )
 
 func (s *sessionState) currentMode() sessionMode {
-	if mode, ok := s.mode.Load().(sessionMode); ok && mode != "" {
-		return mode
+	if s.planMode.Load() {
+		return modePlan
 	}
 	return modeAgent
 }
@@ -128,9 +111,8 @@ func (s *sessionState) setMode(mode sessionMode) {
 	// Retain the legacy unattended mode as a shortcut for existing callers.
 	if mode == modeUnattended {
 		s.unattended.Store(true)
-		mode = modeAgent
 	}
-	s.mode.Store(mode)
+	s.planMode.Store(mode == modePlan)
 }
 
 func (s *sessionState) permissionMode() string {
@@ -174,27 +156,18 @@ func New(ws *code.Workspace, cfg Config, ui code.UI) *Agent {
 	return a
 }
 
-func (a *Agent) anySessionID() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for id := range a.sessions {
-		return id
-	}
-	return ""
-}
-
 func (a *Agent) Name() string               { return code.BuiltinAgentName }
 func (a *Agent) Workspace() *code.Workspace { return a.workspace }
 
 func (a *Agent) SetUI(ui code.UI) {
-	a.uiMu.Lock()
+	a.mu.Lock()
 	a.ui = ui
-	a.uiMu.Unlock()
+	a.mu.Unlock()
 }
 
 func (a *Agent) currentUI() code.UI {
-	a.uiMu.RLock()
-	defer a.uiMu.RUnlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return a.ui
 }
 
@@ -214,7 +187,10 @@ func (a *Agent) ListSessions(_ context.Context) ([]code.SessionInfo, error) {
 	return out, nil
 }
 
-func (a *Agent) NewSession(_ context.Context) (string, error) {
+func (a *Agent) NewSession(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
@@ -228,14 +204,9 @@ func (a *Agent) NewSession(_ context.Context) (string, error) {
 		return "", err
 	}
 	s.startSource = "startup"
-	a.mu.Lock()
-	if a.closed {
-		a.mu.Unlock()
-		s.close()
-		return "", errors.New("agent is closed")
+	if err := a.registerSession(ctx, s); err != nil {
+		return "", err
 	}
-	a.sessions[id] = s
-	a.mu.Unlock()
 	return id, nil
 }
 
@@ -245,31 +216,10 @@ func (a *Agent) LoadSession(ctx context.Context, id string) error {
 		return err
 	}
 	defer unlock()
-	return a.loadSession(id)
+	return a.loadSession(ctx, id)
 }
 
-// Recovery and deletion both mutate durable session state. Serialize them per
-// session, while allowing callers to cancel their wait and other sessions to load.
-func (a *Agent) lockSession(ctx context.Context, id string) (func(), error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	value, _ := a.sessionGates.LoadOrStore(id, make(chan struct{}, 1))
-	gate := value.(chan struct{})
-	select {
-	case gate <- struct{}{}:
-		unlock := func() { <-gate }
-		if err := ctx.Err(); err != nil {
-			unlock()
-			return nil, err
-		}
-		return unlock, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-func (a *Agent) loadSession(id string) error {
+func (a *Agent) loadSession(ctx context.Context, id string) error {
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
@@ -291,22 +241,34 @@ func (a *Agent) loadSession(id string) error {
 	}
 	s.startSource = "resume"
 	a.restoreSessionSettings(s, saved.State)
-	if err := s.aa.Restore(saved.State); err != nil {
-		s.close()
-		return err
+	if err := s.harness.Restore(saved.State); err != nil {
+		return errors.Join(err, s.close())
 	}
-	if err := s.aa.ReconcileInterrupted("process restarted before the operation settled"); err != nil {
-		s.close()
-		return err
+	if err := s.harness.ReconcileInterrupted("process restarted before the operation settled"); err != nil {
+		return errors.Join(err, s.close())
 	}
 
+	return a.registerSession(ctx, s)
+}
+
+// registerSession publishes fully restored state before enabling background
+// work. Holding mu across startup also keeps Close from overtaking worker Add.
+func (a *Agent) registerSession(ctx context.Context, s *sessionState) error {
 	a.mu.Lock()
-	if a.closed {
-		a.mu.Unlock()
-		s.close()
-		return errors.New("agent is closed")
+	err := ctx.Err()
+	if err == nil && a.closed {
+		err = errors.New("agent is closed")
 	}
-	a.sessions[id] = s
+	if err != nil {
+		a.mu.Unlock()
+		return errors.Join(err, s.close())
+	}
+	a.sessions[s.id] = s
+	if err := s.harness.Go(s.watchFileChanges, s.scheduleRunner().Run); err != nil {
+		delete(a.sessions, s.id)
+		a.mu.Unlock()
+		return errors.Join(err, s.close())
+	}
 	a.mu.Unlock()
 	return nil
 }
@@ -315,7 +277,7 @@ func (a *Agent) loadSession(id string) error {
 func (a *Agent) ForkSession(ctx context.Context, id, title string) (string, error) {
 	newID := uuid.NewString()
 	source := a.session(id)
-	if err := a.forkJournal(source, id, newID, title); err != nil {
+	if err := a.forkJournal(ctx, source, id, newID, title); err != nil {
 		return "", err
 	}
 	err := a.copySessionSettings(id, newID)
@@ -333,17 +295,13 @@ func (a *Agent) ForkSession(ctx context.Context, id, title string) (string, erro
 	return newID, nil
 }
 
-func (a *Agent) forkJournal(source *sessionState, id, newID, title string) error {
+func (a *Agent) forkJournal(ctx context.Context, source *sessionState, id, newID, title string) error {
 	if source == nil {
 		return session.Fork(a.sessionsDir, id, newID, title)
 	}
-	// Claiming the session keeps a turn from starting while the journal is copied.
-	gen, err := source.claimTurn(func(error) {})
-	if err != nil {
-		return err
-	}
-	defer source.clearCancel(gen)
-	return session.Fork(a.sessionsDir, id, newID, title)
+	return source.harness.RunExclusive(ctx, func(context.Context) error {
+		return session.Fork(a.sessionsDir, id, newID, title)
+	})
 }
 
 func (a *Agent) DeleteSession(ctx context.Context, id string) error {
@@ -359,13 +317,15 @@ func (a *Agent) DeleteSession(ctx context.Context, id string) error {
 	}
 	a.mu.Unlock()
 
+	var closeErr error
 	if inMem {
-		s.close()
+		closeErr = s.close()
 	}
-	if err := session.Delete(a.sessionsDir, id); err != nil && !os.IsNotExist(err) {
-		return err
+	deleteErr := session.Delete(a.sessionsDir, id)
+	if os.IsNotExist(deleteErr) {
+		deleteErr = nil
 	}
-	return nil
+	return errors.Join(closeErr, deleteErr)
 }
 
 func (a *Agent) Save(id string) error {
@@ -385,7 +345,7 @@ func (a *Agent) Save(id string) error {
 	if !ok {
 		return nil
 	}
-	return session.Save(a.sessionsDir, id, s.aa.StateSnapshot())
+	return session.Save(a.sessionsDir, id, s.harness.StateSnapshot())
 }
 
 func (a *Agent) SessionsDir() string { return a.sessionsDir }
@@ -395,7 +355,7 @@ func (a *Agent) Messages(id string) []harness.Message {
 	if s == nil {
 		return nil
 	}
-	return s.aa.MessagesSnapshot()
+	return s.harness.MessagesSnapshot()
 }
 
 func (a *Agent) HistorySnapshot(id string) code.HistorySnapshot {
@@ -403,7 +363,7 @@ func (a *Agent) HistorySnapshot(id string) code.HistorySnapshot {
 	if s == nil {
 		return code.HistorySnapshot{}
 	}
-	state := s.aa.StateSnapshot()
+	state := s.harness.StateSnapshot()
 	return code.HistorySnapshot{Messages: state.Messages, Revision: state.Revision}
 }
 
@@ -412,7 +372,7 @@ func (a *Agent) HistoryVersion(id string) code.HistoryVersion {
 	if s == nil {
 		return code.HistoryVersion{}
 	}
-	messageCount, revision := s.aa.StateVersion()
+	messageCount, revision := s.harness.StateVersion()
 	return code.HistoryVersion{Revision: revision, MessageCount: messageCount}
 }
 
@@ -421,7 +381,7 @@ func (a *Agent) Recap(ctx context.Context, id string) (string, error) {
 	if s == nil {
 		return "", fmt.Errorf("session %s not found", id)
 	}
-	return s.aa.Recap(ctx)
+	return s.harness.Recap(ctx)
 }
 
 func (a *Agent) Compact(ctx context.Context, id, focus string) (harness.CompactResult, error) {
@@ -429,14 +389,7 @@ func (a *Agent) Compact(ctx context.Context, id, focus string) (harness.CompactR
 	if s == nil {
 		return harness.CompactResult{}, fmt.Errorf("session %s not found", id)
 	}
-	ctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	gen, err := s.claimTurn(cancel)
-	if err != nil {
-		return harness.CompactResult{}, err
-	}
-	defer s.clearCancel(gen)
-	return s.aa.Compact(hook.WithRuntime(ctx, s.hookRuntime()), focus)
+	return s.harness.Compact(hook.WithRuntime(ctx, s.hookRuntime()), focus)
 }
 
 func (a *Agent) ContextStats(id string) (harness.ContextStats, bool) {
@@ -444,7 +397,7 @@ func (a *Agent) ContextStats(id string) (harness.ContextStats, bool) {
 	if s == nil {
 		return harness.ContextStats{}, false
 	}
-	return s.aa.ContextStats(), true
+	return s.harness.ContextStats(), true
 }
 
 func (a *Agent) Usage(id string) harness.Usage {
@@ -452,7 +405,7 @@ func (a *Agent) Usage(id string) harness.Usage {
 	if s == nil {
 		return harness.Usage{}
 	}
-	return s.aa.UsageSnapshot()
+	return s.harness.UsageSnapshot()
 }
 
 func (a *Agent) session(id string) *sessionState {
@@ -470,33 +423,33 @@ func (a *Agent) Tasks(id string) *task.Registry {
 	if s == nil {
 		return nil
 	}
-	return s.tasks
+	return s.resources.tasks
 }
 
 // ExecSessions exposes commands that exec left running so web clients
 // can present them with the session's other background work.
 func (a *Agent) ExecSessions(id string) []shell.ExecSessionInfo {
 	s := a.session(id)
-	if s == nil || s.execManager == nil {
+	if s == nil || s.resources.execManager == nil {
 		return nil
 	}
-	return s.execManager.BackgroundSessions()
+	return s.resources.execManager.BackgroundSessions()
 }
 
 func (a *Agent) ExecSession(id string, execID int) (shell.ExecSessionInfo, bool) {
 	s := a.session(id)
-	if s == nil || s.execManager == nil {
+	if s == nil || s.resources.execManager == nil {
 		return shell.ExecSessionInfo{}, false
 	}
-	return s.execManager.BackgroundSession(execID)
+	return s.resources.execManager.BackgroundSession(execID)
 }
 
 func (a *Agent) StopExecSession(id string, execID int) error {
 	s := a.session(id)
-	if s == nil || s.execManager == nil {
+	if s == nil || s.resources.execManager == nil {
 		return fmt.Errorf("session not found")
 	}
-	return s.execManager.StopBackgroundSession(execID)
+	return s.resources.execManager.StopBackgroundSession(execID)
 }
 
 // RecordUserShellCommand records a user-executed `!` shell command and its
@@ -511,7 +464,7 @@ func (a *Agent) RecordUserShellCommand(id, command, output string, exitCode int,
 		Role:    harness.RoleUser,
 		Content: []harness.Content{{Text: code.FormatUserShellCommand(command, output, exitCode, duration)}},
 	}
-	if err := s.aa.RecordMessage(msg); err != nil {
+	if err := s.harness.RecordMessage(msg); err != nil {
 		return err
 	}
 	return a.Save(id)
@@ -534,8 +487,8 @@ func (a *Agent) RunningTaskCount() int {
 	defer a.mu.Unlock()
 	total := 0
 	for _, s := range a.sessions {
-		running, _ := s.tasks.Counts()
-		total += running + len(s.execManager.BackgroundSessions())
+		running, _ := s.resources.tasks.Counts()
+		total += running + len(s.resources.execManager.BackgroundSessions())
 	}
 	return total
 }
@@ -549,31 +502,16 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 	}
 	a.mu.Lock()
 	s, ok := a.sessions[id]
+	if ok {
+		a.lastActive = id
+	}
 	a.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("session %s not found; call NewSession first", id)
 	}
 
-	a.lastActive.Store(id)
-
-	sendCtx, cancel := context.WithCancelCause(code.WithSessionID(ctx, id))
-	stream, gen, err := s.beginSend(sendCtx, input, cancel)
-	if err != nil {
-		cancel(nil)
-		return nil, err
-	}
-
-	return func(yield func(harness.Message, error) bool) {
-		defer func() {
-			s.clearCancel(gen)
-			cancel(nil)
-		}()
-		for msg, err := range stream {
-			if !yield(msg, err) {
-				return
-			}
-		}
-	}, nil
+	ctx = hook.WithRuntime(code.WithSessionID(ctx, id), s.hookRuntime())
+	return s.harness.Send(ctx, input)
 }
 
 func (a *Agent) TurnFeatures(string) code.TurnFeatures {
@@ -585,7 +523,7 @@ func (a *Agent) Steer(_ context.Context, id string, input code.TurnInput) error 
 	if s == nil {
 		return fmt.Errorf("session %s not found", id)
 	}
-	if !s.aa.QueueInputWithID(input.Content, input.ID) {
+	if !s.harness.QueueInputWithID(input.Content, input.ID) {
 		return code.ErrNoActiveTurn
 	}
 	return nil
@@ -593,7 +531,7 @@ func (a *Agent) Steer(_ context.Context, id string, input code.TurnInput) error 
 
 func (a *Agent) Cancel(id string) {
 	if s := a.session(id); s != nil {
-		s.cancel(harness.ErrInterrupted)
+		s.harness.Cancel(harness.ErrInterrupted)
 	}
 }
 
@@ -604,13 +542,17 @@ func (a *Agent) Close() error {
 		return nil
 	}
 	a.closed = true
-	sessions := slices.Collect(maps.Values(a.sessions))
-	a.sessions = map[string]*sessionState{}
+	sessions := a.sessions
+	a.sessions = nil
+	a.lastActive = ""
 	a.mu.Unlock()
+	var errs []error
 	for _, s := range sessions {
-		s.close()
+		if err := s.close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 var wingmanModes = []code.Mode{
@@ -619,13 +561,11 @@ var wingmanModes = []code.Mode{
 }
 
 func (a *Agent) Modes(sessionID string) ([]code.Mode, string) {
-	out := make([]code.Mode, len(wingmanModes))
-	copy(out, wingmanModes)
 	current := code.AgentModeID
 	if s := a.session(sessionID); s != nil {
 		current = string(s.currentMode())
 	}
-	return out, current
+	return slices.Clone(wingmanModes), current
 }
 
 func (a *Agent) SetMode(_ context.Context, sessionID, modeID string) error {
@@ -665,234 +605,7 @@ func (a *Agent) Tools(id string) []tool.Tool {
 	if s == nil {
 		return nil
 	}
-	return s.tools()
-}
-
-func (a *Agent) buildSession(id string) (*sessionState, error) {
-	journal, err := session.OpenJournal(a.sessionsDir, id)
-	if err != nil {
-		return nil, err
-	}
-	sessionCfg := a.cfg.Clone()
-	s := &sessionState{
-		id:      id,
-		parent:  a,
-		aa:      &harness.Agent{Config: sessionCfg, Recorder: journal},
-		journal: journal,
-	}
-	s.aa.CacheKey = id
-	s.setMode(modeAgent)
-	sessionCfg.Tools = s.tools
-	sessionCfg.Instructions = s.instructions
-	sessionCfg.ContextInstructions = s.contextInstructions
-	sessionCfg.PermissionMode = s.permissionMode
-	if sessionCfg.RequireFinish == nil {
-		sessionCfg.RequireFinish = requiresFinish
-	}
-	sessionCfg.Model = func() string {
-		option, _ := a.roleModel(s, "")
-		return option.ID
-	}
-	sessionCfg.Effort = func() string {
-		return a.effortFor(s)
-	}
-	sessionCfg.RoleModel = func(role string) (harness.ModelOption, bool) {
-		return a.roleModel(s, role)
-	}
-	elicit := a.prompts
-	ws := a.workspace
-
-	globalHooks, globalErr := external.Load(userHooksConfigPath())
-	workspaceHooksPath := filepath.Join(ws.RootPath, ".codex", "hooks.json")
-	workspaceHooks, workspaceErr := external.Load(workspaceHooksPath)
-
-	// Fail closed: a hook config the user wrote but that no longer parses must
-	// not silently disable the guards it configures.
-	if err := errors.Join(globalErr, workspaceErr); err != nil {
-		message := fmt.Sprintf("hook configuration is invalid; fix or remove it to unblock tools: %v", err)
-		sessionCfg.Hooks.PreToolUse = append(sessionCfg.Hooks.PreToolUse,
-			func(context.Context, tool.ToolCall) (hook.PreToolUseOutcome, error) {
-				return hook.PreToolUseOutcome{Outcome: hook.Outcome{Block: true, Reason: message}}, nil
-			},
-		)
-	}
-
-	hookAsync := external.NewAsync(func(runtime hook.Runtime, parts []string) {
-		// A subagent's hook context describes calls the main turn never saw.
-		if runtime.AgentID != "" {
-			return
-		}
-		if !s.aa.QueueInput([]harness.Content{{Text: strings.Join(parts, "\n\n"), Hidden: true}}) {
-			s.stashHookContext(parts)
-		}
-	})
-	hookOptions := external.BuildOptions{Async: hookAsync, MCP: ws.CallMCPTool, SpillDir: ws.ScratchPath}
-	hookTrust := attendedTrust{TrustStore: ws.HookTrust(), session: s}
-
-	// Workspace hooks come with the repo, not the user — gate them behind a
-	// confirmation so a cloned project cannot run commands unprompted.
-	workspaceOptions := hookOptions
-	if rules := workspaceHooks.RuleCount(); rules > 0 {
-		fingerprint, _ := workspaceHooks.Fingerprint(ws.RootPath, workspaceHooksPath)
-		workspaceOptions.Gate = &external.Gate{
-			Confirm:     a.confirm,
-			Message:     fmt.Sprintf("Run %d workspace hook rule(s) from %s?\n\nApproval is remembered until these hooks change.", rules, workspaceHooksPath),
-			Fingerprint: func() string { return fingerprint },
-			Store:       hookTrust,
-		}
-	}
-
-	sessionCfg.Hooks.Append(globalHooks.BuildWithOptions(ws.RootPath, hookOptions))
-	sessionCfg.Hooks.Append(workspaceHooks.BuildWithOptions(ws.RootPath, workspaceOptions))
-	for i := range ws.Plugins {
-		p := &ws.Plugins[i]
-		if p.Hooks == nil || p.Hooks.RuleCount() == 0 {
-			continue
-		}
-		declarations, declarationsErr := p.Hooks.Fingerprint(ws.RootPath, p.Name, p.Root, p.Data)
-		pluginOptions := hookOptions
-		pluginOptions.Gate = &external.Gate{
-			Confirm: a.confirm,
-			Message: fmt.Sprintf("Run %d hook rule(s) from plugin %q at %s?\n\nApproval is remembered until the plugin changes.", p.Hooks.RuleCount(), p.Name, p.Root),
-			Fingerprint: func() string {
-				content, err := external.ContentHash(p.Root)
-				if declarationsErr != nil || err != nil {
-					return ""
-				}
-				return declarations + "/" + content
-			},
-			Store: hookTrust,
-		}
-		pluginOptions.Environment = map[string]string{
-			"PLUGIN_ROOT":        p.Root,
-			"PLUGIN_DATA":        p.Data,
-			"CLAUDE_PLUGIN_ROOT": p.Root,
-			"CLAUDE_PLUGIN_DATA": p.Data,
-		}
-		sessionCfg.Hooks.Append(p.Hooks.BuildWithOptions(ws.RootPath, pluginOptions))
-	}
-	sessionCfg.Hooks.TransformToolResult = append(sessionCfg.Hooks.TransformToolResult,
-		truncation.Transform(ws.ScratchPath),
-	)
-
-	allowedReadRoots, allowedWriteRoots := sessionFileRoots(ws)
-	if !a.cfg.DisableShell && !a.cfg.DisableSandbox {
-		if err := shell.CheckSandbox(ws.RootPath); err != nil {
-			return nil, fmt.Errorf("sandbox unavailable (WINGMAN_SANDBOX=off explicitly disables isolation): %w", err)
-		}
-	}
-
-	artifactDir, err := session.ArtifactDir(a.sessionsDir, id)
-	if err != nil {
-		return nil, err
-	}
-	s.tasks, err = task.NewFileRegistry(filepath.Join(artifactDir, "tasks.json"))
-	if err != nil {
-		return nil, fmt.Errorf("restore background tasks: %w", err)
-	}
-	s.execManager = shell.NewExecManager(func(e shell.ExecExit) {
-		s.tasks.Publish(execExitEvent(e))
-	})
-	s.freshness = fs.NewFreshness(ws.Root)
-	s.schedules = schedule.NewFileStore(filepath.Join(artifactDir, "schedules"))
-	s.watchStop = make(chan struct{})
-
-	sessionCfg.Hooks.UserPromptSubmit = append(sessionCfg.Hooks.UserPromptSubmit,
-		func(context.Context, string) (hook.Outcome, error) {
-			s.sweepFileChanges()
-			parts := s.takeHookContext()
-			if notice := formatFileChangeNotice(s.takeFileChanges()); notice != "" {
-				parts = append(parts, notice)
-			}
-			return hook.Outcome{AdditionalContext: parts}, nil
-		},
-	)
-
-	privateTemp, err := os.MkdirTemp("", "wingman-session-")
-	if err != nil {
-		return nil, fmt.Errorf("create private session temp: %w", err)
-	}
-	shellOpts := &shell.Options{
-		ScratchDir:         ws.ScratchPath,
-		TempDir:            privateTemp,
-		DisableSandbox:     a.cfg.DisableSandbox,
-		Network:            a.cfg.SandboxNetwork,
-		ExtraWritableRoots: []string{ws.MemoryPath},
-	}
-	allowedReadRoots = append(allowedReadRoots, privateTemp)
-	allowedWriteRoots = append(allowedWriteRoots, privateTemp)
-	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.cfg.DisableShell, Elicitation: elicit, Shell: shellOpts}
-	go s.watchFileChanges()
-	go s.runSchedules()
-
-	var shellTools []tool.Tool
-	if !a.cfg.DisableShell {
-		shellTools = shell.ExecTools(s.execManager, ws.RootPath, elicit, shellOpts)
-	}
-	var webFetchTools []tool.Tool
-	if !a.cfg.DisableWebFetch {
-		webFetchTools = fetch.Tools(elicit)
-	}
-	var webSearchTools []tool.Tool
-	if !a.cfg.DisableWebSearch {
-		webSearchTools = websearch.Tools(elicit)
-	}
-
-	baseTools := slices.Concat(
-		ws.WithEditDiagnostics(fs.Tools(ws.Root, &fs.Options{
-			AllowedReadRoots:  allowedReadRoots,
-			AllowedWriteRoots: allowedWriteRoots,
-			Freshness:         s.freshness,
-		})),
-		shellTools,
-		schedule.Tools(s.schedules, s.scriptOptions),
-		elicittool.Tools(elicit),
-		webFetchTools,
-		webSearchTools,
-		subagent.Tools(sessionCfg, s.subagentContext, s.tasks, subagent.Discover(ws.RootPath)...),
-	)
-	s.toolSet = tool.NewSet(baseTools...)
-	// Close runs in reverse: tasks first so background subagents are canceled
-	// before their shared exec sessions are killed.
-	s.toolSet.Own("private temporary files", func() error { return os.RemoveAll(privateTemp) })
-	s.toolSet.Own("exec manager", func() error {
-		s.execManager.Close()
-		return nil
-	})
-	s.toolSet.Own("task registry", func() error {
-		s.tasks.Close()
-		return nil
-	})
-	s.toolSet.Own("async hooks", func() error {
-		hookAsync.Close()
-		return nil
-	})
-	return s, nil
-}
-
-func sessionFileRoots(ws *code.Workspace) (readRoots, writeRoots []string) {
-	readRoots = skill.DiscoveryRoots(ws.RootPath)
-	for _, sk := range ws.Skills() {
-		if sk.Bundled {
-			continue
-		}
-		if path := sk.AbsoluteDir(ws.RootPath); path != "" {
-			readRoots = append(readRoots, path)
-		}
-	}
-	// System skills live outside the workspace, but their references and scripts
-	// must remain readable. Deliberately do not add this root to write roots.
-	if ws.SystemSkillsPath != "" {
-		readRoots = append(readRoots, ws.SystemSkillsPath)
-	}
-	readRoots = append(readRoots, ws.ScratchPath)
-
-	if ws.MemoryPath != "" {
-		readRoots = append(readRoots, ws.MemoryPath)
-		writeRoots = append(writeRoots, ws.MemoryPath)
-	}
-
-	return readRoots, writeRoots
+	return s.harness.AvailableTools()
 }
 
 // execExitNotifyLimit caps how much trailing output of a backgrounded command
@@ -930,36 +643,26 @@ func execExitEvent(e shell.ExecExit) task.Event {
 	}
 }
 
-func userHooksConfigPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".codex", "hooks.json")
-}
-
 func (a *Agent) promptContext(ctx context.Context) context.Context {
 	if code.SessionIDFromContext(ctx) != "" {
 		return ctx
 	}
-	if sid := hook.RuntimeFromContext(ctx).SessionID; sid != "" && a.session(sid) != nil {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if sid := hook.RuntimeFromContext(ctx).SessionID; a.sessions[sid] != nil {
 		return code.WithSessionID(ctx, sid)
 	}
 	if a.cfg.IsolateSessions {
 		return ctx
 	}
 
-	sid, _ := a.lastActive.Load().(string)
-	if sid != "" && a.session(sid) == nil {
-		sid = ""
+	if a.sessions[a.lastActive] != nil {
+		return code.WithSessionID(ctx, a.lastActive)
 	}
-	if sid == "" {
-		sid = a.anySessionID()
+	for sid := range a.sessions {
+		return code.WithSessionID(ctx, sid)
 	}
-	if sid == "" {
-		return ctx
-	}
-	return code.WithSessionID(ctx, sid)
+	return ctx
 }
 
 func (a *Agent) elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
@@ -987,135 +690,53 @@ func (a *Agent) confirm(ctx context.Context, message string) (bool, error) {
 	return ui.Confirm(ctx, message)
 }
 
-func (s *sessionState) beginSend(ctx context.Context, input []harness.Content, cancel context.CancelCauseFunc) (iter.Seq2[harness.Message, error], uint64, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, 0, err
-	}
-	// Claim before any setup so Cancel, Close and overlapping sends also reach
-	// MCP approval prompts and connection attempts.
-	gen, err := s.claimTurn(cancel)
-	if err != nil {
-		return nil, 0, err
-	}
+func (s *sessionState) prepareTurn(ctx context.Context, input []harness.Content) ([]harness.Content, error) {
 	a := s.parent
-	// Startup cannot ask a web client without session correlation. Defer local
-	// configuration approval until this turn, where prompts have an owner.
+	// Startup cannot ask a web client without session correlation. The harness
+	// reserves the session and owns cancellation before entering preparation.
 	if a.workspace.MCP != nil && len(a.workspace.MCP.TrustRequired) > 0 {
 		if err := a.workspace.InitMCP(ctx, a.currentUI()); err != nil {
 			if ctx.Err() != nil {
-				s.clearCancel(gen)
-				return nil, 0, ctx.Err()
+				return nil, ctx.Err()
 			}
 			input = append(slices.Clone(input), harness.Content{Text: "Some MCP servers are unavailable: " + err.Error(), Hidden: true})
 		}
 	}
-	catalog := collectManagedTools(a.workspace)
-	if catalog == nil {
-		// nil means no turn snapshot; an empty catalog still needs pinning.
-		catalog = []tool.Tool{}
-	}
-	s.turnTools.Store(catalog)
-	stream, err := s.aa.Send(hook.WithRuntime(ctx, s.hookRuntime()), input)
-	if err != nil {
-		s.clearCancel(gen)
-		return nil, 0, err
-	}
-	if stream == nil {
-		s.clearCancel(gen)
-		return nil, 0, errors.New("agent returned a nil turn stream")
-	}
-	return stream, gen, nil
-}
-
-// claimTurn reserves the session for one operation; release it with clearCancel.
-func (s *sessionState) claimTurn(cancel context.CancelCauseFunc) (uint64, error) {
-	s.cancelMu.Lock()
-	defer s.cancelMu.Unlock()
-	if s.closed {
-		return 0, errors.New("session is closed")
-	}
-	if s.cancelFn != nil || s.aa.Running() {
-		return 0, code.ErrTurnInProgress
-	}
-	s.cancelGen++
-	s.cancelFn = cancel
-	return s.cancelGen, nil
+	return input, nil
 }
 
 func (s *sessionState) hookRuntime() hook.Runtime {
 	return hook.Runtime{
-		SessionID:      s.aa.CacheKey,
+		SessionID:      s.harness.CacheKey,
 		CWD:            s.parent.workspace.RootPath,
-		Model:          s.aa.Model(),
+		Model:          s.harness.Model(),
 		PermissionMode: s.permissionMode(),
 		StartSource:    s.startSource,
 	}
 }
 
-func (s *sessionState) clearCancel(gen uint64) {
-	s.cancelMu.Lock()
-	last := s.cancelGen == gen
-	if last {
-		s.cancelFn = nil
-		s.turnTools.Store([]tool.Tool(nil))
+func (s *sessionState) close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.harness.Close(hook.WithRuntime(ctx, s.hookRuntime()), "other"); err != nil {
+		return fmt.Errorf("close session %s: %w", s.id, err)
 	}
-	s.cancelMu.Unlock()
-}
-
-func (s *sessionState) cancel(cause error) {
-	s.cancelMu.Lock()
-	fn := s.cancelFn
-	s.cancelMu.Unlock()
-	if fn != nil {
-		fn(cause)
-	}
-}
-
-func (s *sessionState) close() {
-	s.cancelMu.Lock()
-	if s.closed {
-		s.cancelMu.Unlock()
-		return
-	}
-	s.closed = true
-	s.cancelGen++
-	fn := s.cancelFn
-	s.cancelFn = nil
-	s.cancelMu.Unlock()
-	if fn != nil {
-		fn(nil)
-	}
-	close(s.watchStop)
-	_ = s.toolSet.Close()
-
-	if hooks := s.aa.Hooks.SessionEnd; len(hooks) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		ctx = hook.WithRuntime(ctx, hook.Runtime{
-			SessionID:      s.aa.CacheKey,
-			CWD:            s.parent.workspace.RootPath,
-			Model:          s.aa.Model(),
-			PermissionMode: "default",
-		})
-		for _, h := range hooks {
-			h(ctx, "other")
-		}
-	}
+	return nil
 }
 
 // watchFileChanges announces external file modifications mid-turn: while a
 // turn runs, tracked files that changed outside the session's file tools are
 // reported to the model as hidden context at the next model boundary. Idle
 // periods are swept lazily by the UserPromptSubmit hook instead.
-func (s *sessionState) watchFileChanges() {
+func (s *sessionState) watchFileChanges(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-s.watchStop:
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !s.aa.Running() {
+			if !s.harness.Running() {
 				continue
 			}
 			s.sweepFileChanges()
@@ -1124,7 +745,7 @@ func (s *sessionState) watchFileChanges() {
 				continue
 			}
 			notice := formatFileChangeNotice(paths)
-			if !s.aa.QueueInput([]harness.Content{{Text: notice, Hidden: true}}) {
+			if !s.harness.QueueInput([]harness.Content{{Text: notice, Hidden: true}}) {
 				s.stashFileChanges(paths)
 			}
 		}
@@ -1162,19 +783,6 @@ func (s *sessionState) takeHookContext() []string {
 	return parts
 }
 
-// attendedTrust remembers only approvals a person gave; unattended ones last for the session.
-type attendedTrust struct {
-	external.TrustStore
-	session *sessionState
-}
-
-func (t attendedTrust) Trust(fingerprint string) error {
-	if t.session.unattended.Load() {
-		return nil
-	}
-	return t.TrustStore.Trust(fingerprint)
-}
-
 const fileChangeNoticeMax = 20
 
 func (s *sessionState) takeFileChanges() []string {
@@ -1200,9 +808,12 @@ func formatFileChangeNotice(paths []string) string {
 	return fmt.Sprintf("<system-reminder>These files changed on disk outside this session's file tools (edited by the user, a linter, or a shell command): %s%s. Your memory of their content is stale — re-read them before editing, take the external changes into account, and never revert them.</system-reminder>", strings.Join(listed, ", "), suffix)
 }
 
-func (s *sessionState) tools() []tool.Tool {
-	tools := s.toolSet.Slice()
-	tools = append(tools, s.managedTools()...)
+func (s *sessionState) catalogTools() []tool.Tool {
+	mcpTools, lspTools := s.parent.workspace.ManagedTools()
+	return slices.Concat(s.tools, mcpTools, lspTools)
+}
+
+func (s *sessionState) filterTools(tools []tool.Tool) []tool.Tool {
 	for i, t := range tools {
 		if t.Name == "lsp" {
 			tools[i] = s.freshness.TrackSnapshots(t)
@@ -1216,22 +827,6 @@ func (s *sessionState) tools() []tool.Tool {
 	}
 	slices.SortStableFunc(tools, func(a, b tool.Tool) int { return cmp.Compare(a.Name, b.Name) })
 	return tools
-}
-
-// managedTools stays pinned for the length of a turn: the harness asks for the
-// tool set once per round so a mode switch lands mid-turn, and an MCP
-// tools/list_changed arriving between rounds must not reshape the catalog under
-// the running turn.
-func (s *sessionState) managedTools() []tool.Tool {
-	if pinned, ok := s.turnTools.Load().([]tool.Tool); ok && pinned != nil {
-		return pinned
-	}
-	return collectManagedTools(s.parent.workspace)
-}
-
-func collectManagedTools(ws *code.Workspace) []tool.Tool {
-	mcpTools, lspTools := ws.ManagedTools()
-	return slices.Concat(mcpTools, lspTools)
 }
 
 func planModeTools(tools []tool.Tool) []tool.Tool {
@@ -1263,7 +858,7 @@ func planModeEffectExecute(t tool.Tool) func(context.Context, map[string]any) (t
 func (s *sessionState) instructions() string {
 	option, _ := s.parent.roleModel(s, "")
 	base, data := instructionTemplate(option.ID, prompt.SectionData{
-		ToolNames:      promptToolNames(s.tools()),
+		ToolNames:      promptToolNames(s.harness.AvailableTools()),
 		PlanMode:       s.currentMode() == modePlan,
 		UnattendedMode: s.unattended.Load(),
 	})
@@ -1318,7 +913,7 @@ func (s *sessionState) instructionsData() prompt.SectionData {
 	ws := s.parent.workspace
 	now := time.Now()
 	return prompt.SectionData{
-		ToolNames:           promptToolNames(s.tools()),
+		ToolNames:           promptToolNames(s.harness.AvailableTools()),
 		PlanMode:            s.currentMode() == modePlan,
 		UnattendedMode:      s.unattended.Load(),
 		Date:                now.Format("2006-01-02"),

@@ -80,5 +80,10 @@ func extendedKey(seq string) (KeyEvent, bool) {
 			}
 		}
 	}
+	if m&4 != 0 && k.Key != KeyCtrl {
+		// Unbound Ctrl+Enter/Tab/etc. must not become plain Enter/Tab and
+		// accidentally submit a draft or switch modes.
+		return KeyEvent{}, false
+	}
 	return k, true
 }

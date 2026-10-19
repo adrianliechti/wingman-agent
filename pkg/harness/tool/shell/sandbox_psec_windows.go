@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -260,8 +261,8 @@ func encodeNativeSandboxPolicy(policy nativeFilesystemPolicy) []byte {
 			offsets[i] = b.CreateString(path)
 		}
 		b.StartVector(4, len(paths), 4)
-		for i := len(offsets) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(offsets[i])
+		for _, offset := range slices.Backward(offsets) {
+			b.PrependUOffsetT(offset)
 		}
 		return b.EndVector(len(paths))
 	}

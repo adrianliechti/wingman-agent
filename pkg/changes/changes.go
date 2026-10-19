@@ -9,7 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -481,7 +481,7 @@ func (m *Manager) status() ([]statusEntry, error) {
 			conflict:     fileStatus.Staging == git.UpdatedButUnmerged || fileStatus.Worktree == git.UpdatedButUnmerged,
 		})
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
+	slices.SortFunc(entries, func(a, b statusEntry) int { return strings.Compare(a.path, b.path) })
 	return entries, nil
 }
 

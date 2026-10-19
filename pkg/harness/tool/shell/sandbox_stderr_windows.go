@@ -35,10 +35,7 @@ func copyPowerShellStartupStderr(dst io.Writer, src io.Reader, marker string) er
 		if errors.Is(err, bufio.ErrBufferFull) {
 			// Keep enough of a long line to recognize a marker split across
 			// reads, including its optional CRLF, without buffering the line.
-			keep := len(marker) + 2
-			if keep > len(line) {
-				keep = len(line)
-			}
+			keep := min(len(marker)+2, len(line))
 			if err := writeSandboxStderr(dst, line[:len(line)-keep]); err != nil {
 				return err
 			}

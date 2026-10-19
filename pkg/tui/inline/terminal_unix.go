@@ -19,13 +19,14 @@ func (t *Terminal) watchResize() {
 
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGWINCH)
+	width, height := t.Size()
 
 	go func() {
 		defer signal.Stop(ch)
 		for {
 			select {
 			case <-ch:
-				t.checkResize()
+				width, height = t.checkResize(width, height)
 			case <-t.done:
 				return
 			}

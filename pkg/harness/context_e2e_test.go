@@ -473,7 +473,7 @@ func TestContextTrimmingE2EOnlyUnderPressure(t *testing.T) {
 		return hook.Outcome{Block: rounds.Load() == 1}, nil
 	}}
 	a := &harness.Agent{Config: cfg, Messages: []harness.Message{{Role: harness.RoleUser, Content: []harness.Content{{Text: "original task"}}}}}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		id := fmt.Sprintf("old-%d", i)
 		a.Messages = append(a.Messages,
 			harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolCall: &harness.ToolCall{ID: id, Name: "read", Args: "{}"}}}},

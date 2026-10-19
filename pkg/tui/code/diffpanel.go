@@ -26,8 +26,8 @@ const (
 )
 
 // diffPanel is the side pane showing working tree changes next to the chat
-// on wide terminals. Diffs load off the UI loop and refresh when the
-// workspace change fingerprint moves.
+// on wide terminals. Diffs load and format off the UI loop and refresh when
+// the workspace change fingerprint moves.
 type diffPanel struct {
 	hidden      bool
 	requested   bool
@@ -47,6 +47,8 @@ type diffPanel struct {
 	lines      []string
 	sections   []diffSection
 	linesWidth int
+	revision   uint64
+	formatting bool
 	offset     int
 	rows       int
 }
@@ -140,12 +142,36 @@ func (a *App) pollDiffPanel(force bool) {
 			p.loading = false
 			p.fingerprint = fingerprint
 			p.diffs, p.err = diffs, err
-			p.lines = nil
+			p.revision++
+			p.header, p.lines, p.sections = "", nil, nil
 			switch {
 			case force && err != nil:
 				a.showToast(err.Error(), theme.Default.Yellow)
 			case force && len(diffs) == 0:
 				a.showToast("Working tree clean", theme.Default.BrBlack)
+			}
+			a.invalidate()
+		})
+	}()
+}
+
+// prepareDiffPanel formats one snapshot at a time. If changes arrive while it
+// runs, discard that result; the next frame will schedule the latest snapshot.
+// A resize can reuse the old lines until they have been wrapped at the new width.
+func (a *App) prepareDiffPanel(width int) {
+	p := &a.diffPanel
+	if p.formatting || (p.lines != nil && p.linesWidth == width) {
+		return
+	}
+	p.formatting = true
+	diffs, err, revision := p.diffs, p.err, p.revision
+	go func() {
+		header, lines, sections := renderDiffPanelLines(diffs, err, width-1)
+		a.post(func() {
+			p.formatting = false
+			if p.revision == revision {
+				p.header, p.lines, p.sections = header, lines, sections
+				p.linesWidth = width
 			}
 			a.invalidate()
 		})
@@ -166,9 +192,13 @@ func (p *diffPanel) render(width, height int) []string {
 	if width <= 0 || height <= 0 {
 		return nil
 	}
-	if p.lines == nil || p.linesWidth != width {
-		p.header, p.lines, p.sections = renderDiffPanelLines(p.diffs, p.err, width-1)
-		p.linesWidth = width
+	if p.lines == nil {
+		out := make([]string, height)
+		out[0] = closeHeader(dim("Loading changes…"), width)
+		for i := range out {
+			out[i] = panelLine(out[i], width)
+		}
+		return out
 	}
 	rows := height - 1
 	sticky := ""
@@ -221,7 +251,7 @@ func renderDiffPanelLines(diffs []changes.FileDiff, err error, width int) (heade
 	width = max(width, 20)
 
 	if err != nil {
-		return colored(t.Yellow, ansi.Truncate(err.Error(), width, "…")), nil, nil
+		return colored(t.Yellow, ansi.Truncate(err.Error(), width, "…")), []string{}, nil
 	}
 
 	var totalInsertions, totalDeletions int

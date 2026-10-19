@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -95,59 +96,62 @@ func (s *Service) PostEditDiagnostics(ctx context.Context, filePath string) stri
 }
 
 func collectWorkspaceDiagnostics(ctx context.Context, manager *lsp.Manager) WorkspaceReport {
-	report := WorkspaceReport{Diagnostics: make(map[string][]Diagnostic)}
 	projects := manager.Projects()
-	unavailable := make(map[string]bool)
-	var mu sync.Mutex
+	reports := make([]WorkspaceReport, len(projects))
 	var wg sync.WaitGroup
 
-	for _, project := range projects {
+	for i, project := range projects {
 		if ctx.Err() != nil {
 			break
 		}
-		wg.Add(1)
-		go func(project lsp.Project) {
-			defer wg.Done()
-			if ctx.Err() != nil {
-				return
-			}
-			session, err := manager.ProjectSession(ctx, project)
-			if err != nil {
-				mu.Lock()
-				unavailable[projectLabel(manager.WorkingDir(), project)] = true
-				mu.Unlock()
-				return
-			}
-			files, uris, total, truncated := openDiagnosticFiles(ctx, project, projects, session)
-			idle := waitForServerIdle(ctx, session, serverIdleTimeout)
-			waitForPushedDiagnostics(ctx, session, uris, min(30*time.Second, 5*time.Second+time.Duration(len(uris))*20*time.Millisecond))
-			states := collectDiagnosticStates(ctx, session, uris)
-
-			mu.Lock()
-			defer mu.Unlock()
-			report.CheckedFiles += len(files)
-			report.DiscoveredFiles += total
-			report.DiscoveryTruncated = report.DiscoveryTruncated || truncated
-			if !idle || session.Age() < serverWarmupWindow {
-				report.Analyzing = true
-			}
-			for i, file := range files {
-				if !states[i].known {
-					report.UnknownFiles++
-					continue
-				}
-				if values := DiagnosticsFromProtocol(states[i].diagnostics); len(values) > 0 {
-					report.Diagnostics[file] = values
-				}
-			}
-		}(project)
+		wg.Go(func() { reports[i] = collectProjectDiagnostics(ctx, manager, project, projects) })
 	}
 	wg.Wait()
 
-	for name := range unavailable {
-		report.UnavailableServers = append(report.UnavailableServers, name)
+	report := WorkspaceReport{Diagnostics: make(map[string][]Diagnostic)}
+	for _, project := range reports {
+		maps.Copy(report.Diagnostics, project.Diagnostics)
+		report.CheckedFiles += project.CheckedFiles
+		report.DiscoveredFiles += project.DiscoveredFiles
+		report.UnknownFiles += project.UnknownFiles
+		report.DiscoveryTruncated = report.DiscoveryTruncated || project.DiscoveryTruncated
+		report.Analyzing = report.Analyzing || project.Analyzing
+		report.UnavailableServers = append(report.UnavailableServers, project.UnavailableServers...)
 	}
 	slices.Sort(report.UnavailableServers)
+	report.UnavailableServers = slices.Compact(report.UnavailableServers)
+	return report
+}
+
+func collectProjectDiagnostics(ctx context.Context, manager *lsp.Manager, project lsp.Project, projects []lsp.Project) WorkspaceReport {
+	if ctx.Err() != nil {
+		return WorkspaceReport{}
+	}
+	session, err := manager.ProjectSession(ctx, project)
+	if err != nil {
+		return WorkspaceReport{UnavailableServers: []string{projectLabel(manager.WorkingDir(), project)}}
+	}
+	files, uris, total, truncated := openDiagnosticFiles(ctx, project, projects, session)
+	idle := waitForServerIdle(ctx, session, serverIdleTimeout)
+	waitForPushedDiagnostics(ctx, session, uris, min(30*time.Second, 5*time.Second+time.Duration(len(uris))*20*time.Millisecond))
+	states := collectDiagnosticStates(ctx, session, uris)
+
+	report := WorkspaceReport{
+		Diagnostics:        make(map[string][]Diagnostic),
+		CheckedFiles:       len(files),
+		DiscoveredFiles:    total,
+		DiscoveryTruncated: truncated,
+		Analyzing:          !idle || session.Age() < serverWarmupWindow,
+	}
+	for i, file := range files {
+		if !states[i].known {
+			report.UnknownFiles++
+			continue
+		}
+		if values := DiagnosticsFromProtocol(states[i].diagnostics); len(values) > 0 {
+			report.Diagnostics[file] = values
+		}
+	}
 	return report
 }
 
@@ -268,21 +272,18 @@ func collectDiagnosticStates(ctx context.Context, session *lsp.Session, uris []s
 	jobs := make(chan int)
 	var workers sync.WaitGroup
 	for range min(8, len(uris)) {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			for i := range jobs {
 				states[i].diagnostics, states[i].known = session.DiagnosticsState(ctx, uris[i])
 			}
-		}()
+		})
 	}
+dispatch:
 	for i := range uris {
 		select {
 		case jobs <- i:
 		case <-ctx.Done():
-			close(jobs)
-			workers.Wait()
-			return states
+			break dispatch
 		}
 	}
 	close(jobs)

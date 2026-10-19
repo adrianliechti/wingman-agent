@@ -1,5 +1,5 @@
 import { Pencil, Play, X } from "lucide-react";
-import type { PendingTurnInput } from "../hooks/useWebSocket";
+import type { PendingTurnInput } from "../types/session";
 import type { TurnInputState } from "../types/protocol";
 
 interface Props {

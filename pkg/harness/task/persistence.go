@@ -22,7 +22,7 @@ type taskSnapshot struct {
 	Description string          `json:"description"`
 	AgentType   string          `json:"agent_type"`
 	Started     time.Time       `json:"started"`
-	Finished    time.Time       `json:"finished,omitempty"`
+	Finished    time.Time       `json:"finished,omitzero"`
 	Status      Status          `json:"status"`
 	Result      string          `json:"result,omitempty"`
 	Activity    string          `json:"activity,omitempty"`
@@ -118,10 +118,7 @@ func (r *Registry) persist() error {
 	}
 	r.persistGate.RLock()
 	defer r.persistGate.RUnlock()
-	r.mu.Lock()
-	closed := r.closed
-	r.mu.Unlock()
-	if closed {
+	if r.ctx.Err() != nil {
 		return errRegistryClosed
 	}
 	r.persistMu.Lock()
@@ -146,25 +143,19 @@ func (r *Registry) persist() error {
 	if err != nil {
 		return err
 	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
 		return err
 	}
-	if err := os.Rename(tmp.Name(), r.path); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	return nil
+	return os.Rename(tmp.Name(), r.path)
 }
 
 // Retry only the save, never the task's work. Brief retries recover transient
@@ -172,7 +163,7 @@ func (r *Registry) persist() error {
 // shutdown cancels backoff and continues to exclude writes after Close.
 func (r *Registry) persistCompletion() error {
 	var err error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range 3 {
 		if attempt > 0 {
 			timer := time.NewTimer(time.Duration(attempt) * 100 * time.Millisecond)
 			select {
@@ -223,10 +214,7 @@ func (r *Registry) childJournal(id string) (*session.Journal, error) {
 func (r *Registry) appendAgentEvents(id string, events []harness.RuntimeEvent) error {
 	r.persistGate.RLock()
 	defer r.persistGate.RUnlock()
-	r.mu.Lock()
-	closed := r.closed
-	r.mu.Unlock()
-	if closed {
+	if r.ctx.Err() != nil {
 		return errRegistryClosed
 	}
 	journal, err := r.childJournal(id)
@@ -242,10 +230,7 @@ func (r *Registry) saveAgentState(id string, state harness.State) error {
 	}
 	r.persistGate.RLock()
 	defer r.persistGate.RUnlock()
-	r.mu.Lock()
-	closed := r.closed
-	r.mu.Unlock()
-	if closed {
+	if r.ctx.Err() != nil {
 		return errRegistryClosed
 	}
 	return session.Save(r.agentLedgerDir(), id, state)

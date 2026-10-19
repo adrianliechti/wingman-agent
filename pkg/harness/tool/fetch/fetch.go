@@ -124,8 +124,7 @@ func execute(ctx context.Context, args map[string]any, elicit *tool.Elicitation,
 
 	resp, err := client.Do(req)
 	if err != nil {
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
+		if urlErr, ok := errors.AsType[*url.Error](err); ok {
 			if u, parseErr := url.Parse(urlErr.URL); parseErr == nil {
 				urlErr.URL = u.Redacted()
 			}

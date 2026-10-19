@@ -49,7 +49,7 @@ func TestPopupScrollbarAndCloseAtRightEdge(t *testing.T) {
 
 func TestDiffScrollbarIncludesPinnedRowsAndFinalLine(t *testing.T) {
 	p := &diffPanel{diffs: diffPanelFixture}
-	p.render(70, 8)
+	p.header, p.lines, p.sections = renderDiffPanelLines(p.diffs, nil, 69)
 	p.offset = p.sections[0].nameRow + 1
 	lines := p.render(70, 8)
 	assertRightEdge(t, lines[0], 70, "×")

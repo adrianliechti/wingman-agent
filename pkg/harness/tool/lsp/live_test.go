@@ -42,7 +42,7 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 		"refs.go":  "package sample\n\nfunc Target() int { return 42 }\n",
 		"decoy.go": "package sample\n\n// Target is also mentioned in documentation.\nvar Text = \"Target\"\nfunc Shadow() int { Target := 7; return Target }\n",
 	}
-	for i := 0; i < 125; i++ {
+	for i := range 125 {
 		files["refs.go"] += fmt.Sprintf("func Use%03d() int { return Target() }\n", i)
 	}
 	files["types.go"] += "func CrossFile() {}\n"
@@ -113,7 +113,7 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 			output.WriteString(result.Content)
 		}
 		found := 0
-		for i := 0; i < 125; i++ {
+		for i := range 125 {
 			if strings.Contains(output.String(), fmt.Sprintf("refs.go:%d:", i+4)) {
 				found++
 			}

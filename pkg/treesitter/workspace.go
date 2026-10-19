@@ -2,6 +2,7 @@ package treesitter
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"io/fs"
@@ -10,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -162,7 +162,7 @@ func (w *Workspace) Implementations(ctx context.Context, file string, src []byte
 	if err != nil {
 		return nil, err
 	}
-	sortDefinitions(defs)
+	slices.SortStableFunc(defs, compareDefinitions)
 	return defs, nil
 }
 
@@ -228,8 +228,9 @@ func (w *Workspace) Symbols(ctx context.Context, query string, limit int, includ
 		}
 		return 0
 	}
-	sortDefinitions(defs)
-	sort.SliceStable(defs, func(i, j int) bool { return score(defs[i]) > score(defs[j]) })
+	slices.SortStableFunc(defs, func(a, b Definition) int {
+		return cmp.Or(cmp.Compare(score(b), score(a)), compareDefinitions(a, b))
+	})
 	truncated := limit > 0 && len(defs) > limit
 	if truncated {
 		defs = defs[:limit]
@@ -583,9 +584,8 @@ func (n nearness) proximity(d Definition) int {
 // rank orders declarations: an imported package named by the qualifier, the
 // same file, the same directory, then other imported directories.
 func (n nearness) rank(defs []Definition) []Definition {
-	sortDefinitions(defs)
-	sort.SliceStable(defs, func(i, j int) bool {
-		return n.proximity(defs[i]) > n.proximity(defs[j])
+	slices.SortStableFunc(defs, func(a, b Definition) int {
+		return cmp.Or(cmp.Compare(n.proximity(b), n.proximity(a)), compareDefinitions(a, b))
 	})
 	return defs
 }
@@ -600,19 +600,9 @@ func compareDefinitions(a, b Definition) int {
 	return a.NameRange.StartCol - b.NameRange.StartCol
 }
 
-func sortDefinitions(defs []Definition) {
-	slices.SortStableFunc(defs, compareDefinitions)
-}
-
 func sortLocations(out []Location) {
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].File != out[j].File {
-			return out[i].File < out[j].File
-		}
-		if out[i].Line != out[j].Line {
-			return out[i].Line < out[j].Line
-		}
-		return out[i].Col < out[j].Col
+	slices.SortFunc(out, func(a, b Location) int {
+		return cmp.Or(strings.Compare(a.File, b.File), cmp.Compare(a.Line, b.Line), cmp.Compare(a.Col, b.Col))
 	})
 }
 

@@ -8,10 +8,11 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -165,14 +166,8 @@ func (s *sessionState) cancelOutstandingToolCalls(t *turn) []harness.Message {
 	s.toolCalls = map[string]toolCall{}
 	s.toolCallsMu.Unlock()
 
-	ids := make([]string, 0, len(pending))
-	for id := range pending {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-
-	messages := make([]harness.Message, 0, len(ids))
-	for _, id := range ids {
+	messages := make([]harness.Message, 0, len(pending))
+	for _, id := range slices.Sorted(maps.Keys(pending)) {
 		call := pending[id]
 		msg := harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: &harness.ToolResult{
 			ID:        id,
@@ -1714,18 +1709,13 @@ func (a *Agent) activeSessionID() string {
 }
 
 func elicitFieldsFromSchema(schema acpsdk.UnstableElicitationSchema) []tool.ElicitField {
-	names := make([]string, 0, len(schema.Properties))
-	for name := range schema.Properties {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	required := map[string]bool{}
 	for _, r := range schema.Required {
 		required[r] = true
 	}
 
-	fields := make([]tool.ElicitField, 0, len(names))
-	for _, name := range names {
+	fields := make([]tool.ElicitField, 0, len(schema.Properties))
+	for _, name := range slices.Sorted(maps.Keys(schema.Properties)) {
 		prop, _ := schema.Properties[name].(map[string]any)
 		f := tool.ElicitField{Name: name, Required: required[name]}
 		f.Title, _ = prop["title"].(string)

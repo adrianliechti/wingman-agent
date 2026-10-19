@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
@@ -33,8 +34,8 @@ func TestLauncherSmoke(t *testing.T) {
 	get := func(path string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest("GET", "http://localhost"+path, nil)
-		if app.server != nil {
-			req.Header.Set("X-Wingman-Instance", app.server.InstanceID())
+		if srv := app.server.Load(); srv != nil {
+			req.Header.Set("X-Wingman-Instance", srv.InstanceID())
 		}
 		app.ServeHTTP(rec, req)
 		return rec
@@ -43,8 +44,8 @@ func TestLauncherSmoke(t *testing.T) {
 	post := func(path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", "http://localhost"+path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		if app.server != nil {
-			req.Header.Set("X-Wingman-Instance", app.server.InstanceID())
+		if srv := app.server.Load(); srv != nil {
+			req.Header.Set("X-Wingman-Instance", srv.InstanceID())
 		}
 		rec := httptest.NewRecorder()
 		app.ServeHTTP(rec, req)
@@ -133,5 +134,73 @@ func TestLauncherRejectsRebindingAndCrossOriginCommands(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin command allowed: %d", response.Code)
+	}
+}
+
+func TestConcurrentWorkspaceReplacementsHaveOneWinner(t *testing.T) {
+	testenv.UserHome(t)
+	testenv.WingmanHome(t)
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+	}))
+	defer gateway.Close()
+	t.Setenv("WINGMAN_URL", gateway.URL)
+	t.Setenv("WINGMAN_TOKEN", "test")
+	app := &App{}
+	app.launcher = app.newLauncher()
+	t.Cleanup(func() {
+		if srv := app.server.Load(); srv != nil {
+			srv.Close()
+		}
+	})
+	open := httptest.NewRequest(http.MethodPost, "http://localhost/app/workspaces/open", strings.NewReader(`{"path":`+jsonString(t, t.TempDir())+`}`))
+	opened := httptest.NewRecorder()
+	app.ServeHTTP(opened, open)
+	if opened.Code != http.StatusNoContent {
+		t.Fatalf("open workspace: %d %s", opened.Code, opened.Body)
+	}
+	previous := app.server.Load()
+	t.Cleanup(previous.Close)
+
+	start := make(chan struct{})
+	results := make(chan int, 2)
+	var workers sync.WaitGroup
+	for range cap(results) {
+		request := httptest.NewRequest(http.MethodPost, "http://localhost/app/workspaces/open", strings.NewReader(`{"path":`+jsonString(t, t.TempDir())+`,"replace":true}`))
+		request.Header.Set("X-Wingman-Instance", previous.InstanceID())
+		workers.Go(func() {
+			<-start
+			response := httptest.NewRecorder()
+			app.ServeHTTP(response, request)
+			results <- response.Code
+		})
+	}
+	workers.Go(func() {
+		<-start
+		for range 20 {
+			app.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "http://localhost/", nil))
+		}
+	})
+	close(start)
+	workers.Wait()
+	close(results)
+	counts := map[int]int{}
+	for status := range results {
+		counts[status]++
+	}
+	if counts[http.StatusNoContent] != 1 || counts[http.StatusConflict] != 1 {
+		t.Fatalf("replacement responses = %v", counts)
+	}
+	current := app.server.Load()
+	if current == previous {
+		t.Fatal("successful replacement did not mount the new workspace")
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/capabilities", nil)
+	request.Header.Set("X-Wingman-Instance", current.InstanceID())
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("replacement is unavailable: %d %s", response.Code, response.Body)
 	}
 }

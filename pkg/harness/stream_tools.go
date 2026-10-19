@@ -80,7 +80,7 @@ func (r *streamToolRound) drain(yield func(Message, error) bool) error {
 	var err error
 	for _, entry := range r.calls {
 		<-entry.done
-		outcome := r.agent.commitDeferredToolOutcome(entry.call, entry.outcome)
+		outcome := r.agent.commitToolOutcome(entry.call, entry.outcome)
 		message := toolResultMessage(entry.call, outcome.result)
 		if !outcome.recorded {
 			if appendErr := r.agent.appendMessages(message); appendErr != nil {

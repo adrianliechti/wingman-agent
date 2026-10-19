@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -256,22 +257,11 @@ func (s *otlpSummary) add(signal string, message proto.Message) {
 
 func cloneOTLPSummary(source otlpSummary) otlpSummary {
 	clone := source
-	clone.ExportBatches = cloneCountMap(source.ExportBatches)
-	clone.Resources = cloneCountMap(source.Resources)
-	clone.Spans = cloneCountMap(source.Spans)
-	clone.MetricExports = cloneCountMap(source.MetricExports)
-	clone.LogEvents = cloneCountMap(source.LogEvents)
-	return clone
-}
-
-func cloneCountMap(source map[string]int) map[string]int {
-	if source == nil {
-		return nil
-	}
-	clone := make(map[string]int, len(source))
-	for key, value := range source {
-		clone[key] = value
-	}
+	clone.ExportBatches = maps.Clone(source.ExportBatches)
+	clone.Resources = maps.Clone(source.Resources)
+	clone.Spans = maps.Clone(source.Spans)
+	clone.MetricExports = maps.Clone(source.MetricExports)
+	clone.LogEvents = maps.Clone(source.LogEvents)
 	return clone
 }
 

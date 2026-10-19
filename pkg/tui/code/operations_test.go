@@ -25,6 +25,9 @@ func TestSessionOperationAllowsInputAndCanBeCancelled(t *testing.T) {
 	}
 	app.handleKey(inline.KeyEvent{Key: inline.KeyEsc})
 	waitForSessionOperation(t, app)
+	if app.operationCancel != nil {
+		t.Fatal("cancelled operation retained its cancellation function")
+	}
 	if app.editor.Text() != "a" {
 		t.Fatal("cancelling settings discarded draft")
 	}
@@ -53,6 +56,9 @@ func TestSettingsOperationCanAskForApprovalOnUIThread(t *testing.T) {
 	waitForSessionOperation(t, app)
 	if !finished {
 		t.Fatal("approved operation did not finish")
+	}
+	if app.operationCancel != nil {
+		t.Fatal("completed operation retained its cancellation function")
 	}
 	if app.getPhase() != PhaseIdle {
 		t.Fatalf("settings approval left an idle session running: %v", app.getPhase())

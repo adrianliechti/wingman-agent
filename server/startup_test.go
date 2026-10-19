@@ -49,6 +49,32 @@ func TestListenLocalReservesDefaultAndFallbackPorts(t *testing.T) {
 	}
 }
 
+func TestRunStopsForCancelledContext(t *testing.T) {
+	for _, source := range []string{"caller", "workspace"} {
+		t.Run(source, func(t *testing.T) {
+			s, _, _ := newProtocolServer(t)
+			s.noBrowser = true
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if source == "caller" {
+				cancel()
+			} else {
+				s.cancel()
+			}
+			done := make(chan error, 1)
+			go func() { done <- s.Run(ctx, 0) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Run did not stop after " + source + " cancellation")
+			}
+		})
+	}
+}
+
 func TestModelDiscoveryFailureReachesLateWebClient(t *testing.T) {
 	testenv.WingmanHome(t)
 	var fail atomic.Bool

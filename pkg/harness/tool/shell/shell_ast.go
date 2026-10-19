@@ -35,13 +35,11 @@ type shellSyntax struct {
 }
 
 var (
-	bashLanguageOnce sync.Once
-	bashLanguage     *gotreesitter.Language
-	bashParsers      sync.Pool
+	bashLanguage = sync.OnceValue(grammars.BashLanguage)
+	bashParsers  = sync.Pool{New: func() any { return gotreesitter.NewParser(bashLanguage()) }}
 
-	powerShellLanguageOnce sync.Once
-	powerShellLanguage     *gotreesitter.Language
-	powerShellParsers      sync.Pool
+	powerShellLanguage = sync.OnceValue(grammars.PowershellLanguage)
+	powerShellParsers  = sync.Pool{New: func() any { return gotreesitter.NewParser(powerShellLanguage()) }}
 )
 
 func platformShellDialect() shellDialect {
@@ -54,11 +52,9 @@ func platformShellDialect() shellDialect {
 func languageForDialect(dialect shellDialect) *gotreesitter.Language {
 	switch dialect {
 	case dialectPowerShell:
-		powerShellLanguageOnce.Do(func() { powerShellLanguage = grammars.PowershellLanguage() })
-		return powerShellLanguage
+		return powerShellLanguage()
 	default:
-		bashLanguageOnce.Do(func() { bashLanguage = grammars.BashLanguage() })
-		return bashLanguage
+		return bashLanguage()
 	}
 }
 
@@ -82,10 +78,7 @@ func parseShellSyntax(source string, dialect shellDialect) (result shellSyntax) 
 
 	lang := languageForDialect(dialect)
 	pool := parserPoolForDialect(dialect)
-	parser, _ := pool.Get().(*gotreesitter.Parser)
-	if parser == nil {
-		parser = gotreesitter.NewParser(lang)
-	}
+	parser := pool.Get().(*gotreesitter.Parser)
 	parserReusable := false
 	defer func() {
 		if parserReusable {
@@ -446,9 +439,9 @@ func isASCIILetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <
 // followsPowerShellWord reports whether the dash word continues a command:
 // the previous non-blank character on its line must end another word.
 func followsPowerShellWord(before []byte) bool {
-	for i := len(before) - 1; i >= 0; i-- {
-		if !isPowerShellArgumentSeparator(before[i]) {
-			return strings.IndexByte(";|&({}\n\r=,", before[i]) < 0
+	for _, b := range slices.Backward(before) {
+		if !isPowerShellArgumentSeparator(b) {
+			return strings.IndexByte(";|&({}\n\r=,", b) < 0
 		}
 	}
 	return false
@@ -493,8 +486,7 @@ func blankRangePreservingLines(value []byte, start, end uint32) {
 
 func redirectTarget(node *gotreesitter.Node, lang *gotreesitter.Language, source []byte) string {
 	children := node.Children()
-	for i := len(children) - 1; i >= 0; i-- {
-		child := children[i]
+	for _, child := range slices.Backward(children) {
 		typeName := child.Type(lang)
 		if !child.IsNamed() || typeName == "heredoc_body" || typeName == "heredoc_end" || typeName == "heredoc_start" {
 			continue

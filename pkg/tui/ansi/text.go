@@ -335,20 +335,25 @@ func Highlight(text string, from, to int, style string) string {
 // CutPlain returns the plain-text content of styled text between display
 // columns [from, to).
 func CutPlain(text string, from, to int) string {
-	p := &parser{}
-	p.feed(text)
-
 	var sb strings.Builder
 	col := 0
 
-	for _, seg := range p.segments {
-		if col >= to {
+	// Read only as far as the requested columns. Parsing the whole string
+	// first can allocate gigabytes when clipping a minified diff line.
+	for len(text) > 0 && col < to {
+		if text[0] == 0x1b {
+			_, text = readEscape(text)
+			continue
+		}
+		gr := uniseg.NewGraphemes(text)
+		if !gr.Next() {
 			break
 		}
 		if col >= from {
-			sb.WriteString(seg.text)
+			sb.WriteString(gr.Str())
 		}
-		col += seg.width
+		col += gr.Width()
+		text = text[len(gr.Str()):]
 	}
 
 	return sb.String()

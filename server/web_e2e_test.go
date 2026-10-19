@@ -3,7 +3,6 @@
 package server
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -414,8 +413,7 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 	t.Setenv("WINGMAN_URL", modelServer.URL)
 	t.Setenv("WINGMAN_MODEL", "gpt-5.4")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	app, err := New(ctx, workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)

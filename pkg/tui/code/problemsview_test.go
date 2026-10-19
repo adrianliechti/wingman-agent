@@ -8,14 +8,32 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
 
-func TestDiagnosticsScanningStatusShowsInFooter(t *testing.T) {
-	a := &App{
-		operationPending: true,
-		operationStatus:  "Scanning workspace problems · Esc cancels",
+func TestDiagnosticsFooterFollowsBackgroundUpdates(t *testing.T) {
+	a, _ := newStreamTestApp(nil)
+	a.operation = operationDiagnostics
+	for _, progress := range []string{"", "Installing gopls", "Starting gopls", ""} {
+		a.dirty = false
+		a.SetBackgroundStatus(progress, false)
+		drainStateUpdates(a)
+		if !a.dirty {
+			t.Fatal("progress update did not request a render")
+		}
+		want := "Scanning workspace problems"
+		if progress != "" {
+			want += " · " + progress
+		}
+		want += " · Esc cancels"
+		if footer := strings.TrimSpace(ansi.Strip(a.footerLine(100))); footer != want {
+			t.Fatalf("footer = %q, want %q", footer, want)
+		}
 	}
-	footer := ansi.Strip(a.footerLine(80))
-	if !strings.Contains(footer, "Scanning workspace problems · Esc cancels") {
-		t.Fatalf("footer = %q, want scanning status", footer)
+
+	// A queued progress update must not relabel the next operation.
+	a.SetBackgroundStatus("Starting gopls", false)
+	a.operation = operationCompact
+	drainStateUpdates(a)
+	if footer := strings.TrimSpace(ansi.Strip(a.footerLine(100))); footer != "Compacting context · Esc cancels" {
+		t.Fatalf("late progress replaced compaction status: %q", footer)
 	}
 }
 

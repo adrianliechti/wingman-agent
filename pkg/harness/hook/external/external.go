@@ -2,6 +2,7 @@ package external
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -296,6 +296,8 @@ func (c *Config) Build(workDir string, gate *Gate) hook.Hooks {
 
 // BuildOptions supplies source-specific trust and environment settings.
 type BuildOptions struct {
+	// Source identifies the configuration file or plugin in diagnostics.
+	Source      string
 	Gate        *Gate
 	Environment map[string]string
 	// Async runs handlers marked async; without it they are skipped.
@@ -424,8 +426,8 @@ func runEvent(ctx context.Context, workDir string, options BuildOptions, event s
 	runtime := hook.RuntimeFromContext(ctx)
 	for _, selected := range background {
 		options.Async.start(runtime, func(ctx context.Context) []string {
-			result := selected.handler.run(ctx, workDir, event, input, options)
-			return parseResult(event, result).AdditionalContext
+			result := selected.run(ctx, workDir, event, input, options)
+			return parseReportedResult(ctx, event, options.Source, result).AdditionalContext
 		})
 	}
 	if len(synchronous) == 0 {
@@ -434,8 +436,7 @@ func runEvent(ctx context.Context, workDir string, options BuildOptions, event s
 	ch := make(chan runResult, len(synchronous))
 	for _, selected := range synchronous {
 		go func() {
-			result := selected.handler.run(ctx, workDir, event, input, options)
-			result.configuredOrder = selected.configuredOrder
+			result := selected.run(ctx, workDir, event, input, options)
 			ch <- result
 		}()
 	}
@@ -447,10 +448,23 @@ func runEvent(ctx context.Context, workDir string, options BuildOptions, event s
 	}
 	// Codex reports and aggregates in configured order even though handlers run
 	// concurrently. completionOrder remains attached for rewrite arbitration.
-	sort.SliceStable(results, func(i, j int) bool {
-		return results[i].configuredOrder < results[j].configuredOrder
+	slices.SortStableFunc(results, func(a, b runResult) int {
+		return cmp.Compare(a.configuredOrder, b.configuredOrder)
 	})
 	return results
+}
+
+func (selected selectedHandler) run(ctx context.Context, workDir, event string, input []byte, options BuildOptions) runResult {
+	result := selected.handler.run(ctx, workDir, event, input, options)
+	result.configuredOrder = selected.configuredOrder
+	err := result.err
+	if err == nil && result.exitCode != 0 && result.exitCode != 2 {
+		// Exit 2 is a protocol decision, not an execution failure. Do not log
+		// stderr: hook output can contain tool input or other private content.
+		err = fmt.Errorf("handler exited with code %d", result.exitCode)
+	}
+	hook.ReportError(ctx, event, options.Source, selected.configuredOrder, err)
+	return result
 }
 
 // observeOnly events run at teardown: they must stay short and never prompt for trust.
@@ -726,6 +740,13 @@ type parsedResult struct {
 	hook.Outcome
 	updatedInput json.RawMessage
 	permission   hook.PermissionRequestOutcome
+	diagnostic   error
+}
+
+func parseReportedResult(ctx context.Context, event, source string, result runResult) parsedResult {
+	parsed := parseResult(event, result)
+	hook.ReportError(ctx, event, source, result.configuredOrder, parsed.diagnostic)
+	return parsed
 }
 
 func parseResult(event string, result runResult) parsedResult {
@@ -774,13 +795,13 @@ func parseResult(event string, result runResult) parsedResult {
 				boundAdditionalContext(result.stdout, result.additionalContextLimit, result.spillDir),
 			}}}
 		}
-		return parsedResult{}
+		return parsedResult{diagnostic: errors.New("hook response is invalid JSON or contains unsupported fields")}
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return parsedResult{}
+		return parsedResult{diagnostic: errors.New("hook response must contain exactly one JSON object")}
 	}
 	if !validWireOutput(event, output) {
-		return parsedResult{}
+		return parsedResult{diagnostic: errors.New("hook response contains invalid fields for this event")}
 	}
 	specific := output.HookSpecificOutput
 	parsed := parsedResult{}
@@ -960,11 +981,11 @@ func validWireOutput(event string, output wireOutput) bool {
 	return false
 }
 
-func aggregate(event string, results []runResult) parsedResult {
+func aggregate(ctx context.Context, event, source string, results []runResult) parsedResult {
 	var combined parsedResult
 	latestRewrite := -1
 	for _, result := range results {
-		parsed := spillFeedback(event, parseResult(event, result), result.spillDir)
+		parsed := spillFeedback(event, parseReportedResult(ctx, event, source, result), result.spillDir)
 		combined.AdditionalContext = append(combined.AdditionalContext, parsed.AdditionalContext...)
 		if parsed.Stop && !combined.Stop {
 			combined.Stop = true
@@ -1071,7 +1092,7 @@ func (c *Config) preToolUse(workDir string, options BuildOptions) hook.PreToolUs
 		payload := commonPayload(ctx, "PreToolUse", workDir)
 		addSubagent(payload, hook.RuntimeFromContext(ctx))
 		payload["tool_name"], payload["tool_input"], payload["tool_use_id"] = name, input, call.ID
-		parsed := aggregate("PreToolUse", runEvent(ctx, workDir, options, "PreToolUse", c.Hooks.PreToolUse, aliases, payload))
+		parsed := aggregate(ctx, "PreToolUse", options.Source, runEvent(ctx, workDir, options, "PreToolUse", c.Hooks.PreToolUse, aliases, payload))
 		return hook.PreToolUseOutcome{Outcome: parsed.Outcome, UpdatedInput: restoreToolInput(call, parsed.updatedInput)}, nil
 	}
 }
@@ -1082,7 +1103,7 @@ func (c *Config) permissionRequest(workDir string, options BuildOptions) hook.Pe
 		payload := commonPayload(ctx, "PermissionRequest", workDir)
 		addSubagent(payload, hook.RuntimeFromContext(ctx))
 		payload["tool_name"], payload["tool_input"] = name, input
-		return aggregate("PermissionRequest", runEvent(ctx, workDir, options, "PermissionRequest", c.Hooks.PermissionRequest, aliases, payload)).permission, nil
+		return aggregate(ctx, "PermissionRequest", options.Source, runEvent(ctx, workDir, options, "PermissionRequest", c.Hooks.PermissionRequest, aliases, payload)).permission, nil
 	}
 }
 
@@ -1092,7 +1113,7 @@ func (c *Config) postToolUse(workDir string, options BuildOptions) hook.PostTool
 		payload := commonPayload(ctx, "PostToolUse", workDir)
 		addSubagent(payload, hook.RuntimeFromContext(ctx))
 		payload["tool_name"], payload["tool_input"], payload["tool_use_id"], payload["tool_response"] = name, input, call.ID, result
-		return aggregate("PostToolUse", runEvent(ctx, workDir, options, "PostToolUse", c.Hooks.PostToolUse, aliases, payload)).Outcome, nil
+		return aggregate(ctx, "PostToolUse", options.Source, runEvent(ctx, workDir, options, "PostToolUse", c.Hooks.PostToolUse, aliases, payload)).Outcome, nil
 	}
 }
 
@@ -1101,7 +1122,7 @@ func (c *Config) userPromptSubmit(workDir string, options BuildOptions) hook.Use
 		payload := commonPayload(ctx, "UserPromptSubmit", workDir)
 		addSubagent(payload, hook.RuntimeFromContext(ctx))
 		payload["prompt"] = prompt
-		return aggregate("UserPromptSubmit", runEvent(ctx, workDir, options, "UserPromptSubmit", c.Hooks.UserPromptSubmit, nil, payload)).Outcome, nil
+		return aggregate(ctx, "UserPromptSubmit", options.Source, runEvent(ctx, workDir, options, "UserPromptSubmit", c.Hooks.UserPromptSubmit, nil, payload)).Outcome, nil
 	}
 }
 
@@ -1110,7 +1131,7 @@ func (c *Config) sessionStart(workDir string, options BuildOptions) hook.Session
 		payload := commonPayload(ctx, "SessionStart", workDir)
 		delete(payload, "turn_id")
 		payload["source"] = source
-		return aggregate("SessionStart", runEvent(ctx, workDir, options, "SessionStart", c.Hooks.SessionStart, []string{source}, payload)).Outcome, nil
+		return aggregate(ctx, "SessionStart", options.Source, runEvent(ctx, workDir, options, "SessionStart", c.Hooks.SessionStart, []string{source}, payload)).Outcome, nil
 	}
 }
 
@@ -1129,7 +1150,7 @@ func (c *Config) subagentStart(workDir string, options BuildOptions) hook.Subage
 	return func(ctx context.Context, agentID, agentType string) (hook.Outcome, error) {
 		payload := commonPayload(ctx, "SubagentStart", workDir)
 		payload["agent_id"], payload["agent_type"] = agentID, agentType
-		return aggregate("SubagentStart", runEvent(ctx, workDir, options, "SubagentStart", c.Hooks.SubagentStart, []string{agentType}, payload)).Outcome, nil
+		return aggregate(ctx, "SubagentStart", options.Source, runEvent(ctx, workDir, options, "SubagentStart", c.Hooks.SubagentStart, []string{agentType}, payload)).Outcome, nil
 	}
 }
 
@@ -1138,7 +1159,7 @@ func (c *Config) subagentStop(workDir string, options BuildOptions) hook.Subagen
 		payload := commonPayload(ctx, "SubagentStop", workDir)
 		payload["agent_id"], payload["agent_type"] = agentID, agentType
 		payload["agent_transcript_path"], payload["stop_hook_active"], payload["last_assistant_message"] = nil, active, result
-		return aggregate("SubagentStop", runEvent(ctx, workDir, options, "SubagentStop", c.Hooks.SubagentStop, []string{agentType}, payload)).Outcome, nil
+		return aggregate(ctx, "SubagentStop", options.Source, runEvent(ctx, workDir, options, "SubagentStop", c.Hooks.SubagentStop, []string{agentType}, payload)).Outcome, nil
 	}
 }
 
@@ -1148,7 +1169,7 @@ func (c *Config) preCompact(workDir string, options BuildOptions) hook.PreCompac
 		delete(payload, "permission_mode")
 		addSubagent(payload, hook.RuntimeFromContext(ctx))
 		payload["trigger"] = trigger
-		return aggregate("PreCompact", runEvent(ctx, workDir, options, "PreCompact", c.Hooks.PreCompact, []string{trigger}, payload)).Outcome, nil
+		return aggregate(ctx, "PreCompact", options.Source, runEvent(ctx, workDir, options, "PreCompact", c.Hooks.PreCompact, []string{trigger}, payload)).Outcome, nil
 	}
 }
 
@@ -1158,7 +1179,7 @@ func (c *Config) postCompact(workDir string, options BuildOptions) hook.PostComp
 		delete(payload, "permission_mode")
 		addSubagent(payload, hook.RuntimeFromContext(ctx))
 		payload["trigger"] = trigger
-		return aggregate("PostCompact", runEvent(ctx, workDir, options, "PostCompact", c.Hooks.PostCompact, []string{trigger}, payload)).Outcome, nil
+		return aggregate(ctx, "PostCompact", options.Source, runEvent(ctx, workDir, options, "PostCompact", c.Hooks.PostCompact, []string{trigger}, payload)).Outcome, nil
 	}
 }
 
@@ -1173,7 +1194,7 @@ func (c *Config) stop(workDir string, options BuildOptions) hook.Stop {
 	return func(ctx context.Context, lastAssistantMessage string, active bool) (hook.Outcome, error) {
 		payload := commonPayload(ctx, "Stop", workDir)
 		payload["stop_hook_active"], payload["last_assistant_message"] = active, nullable(lastAssistantMessage)
-		return aggregate("Stop", runEvent(ctx, workDir, options, "Stop", c.Hooks.Stop, nil, payload)).Outcome, nil
+		return aggregate(ctx, "Stop", options.Source, runEvent(ctx, workDir, options, "Stop", c.Hooks.Stop, nil, payload)).Outcome, nil
 	}
 }
 

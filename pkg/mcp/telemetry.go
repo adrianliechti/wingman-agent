@@ -116,8 +116,7 @@ func mcpOperationResult(result sdkmcp.Result, err error) telemetry.MCPClientResu
 		observed.ProtocolVersion = initialized.ProtocolVersion
 	}
 	if err != nil {
-		var rpcErr *sdkjsonrpc.Error
-		if errors.As(err, &rpcErr) {
+		if rpcErr, ok := errors.AsType[*sdkjsonrpc.Error](err); ok {
 			observed.StatusCode = strconv.FormatInt(rpcErr.Code, 10)
 			observed.ErrorType = observed.StatusCode
 			observed.StatusDescription = rpcErr.Message

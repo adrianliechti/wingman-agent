@@ -76,62 +76,29 @@ export function TasksPanel({ sessionId, sessionRunning, onOpenTask }: Props) {
 		queryClient.invalidateQueries({
 			queryKey: queryKeys.tasks.session(sessionId),
 		});
-	const removeMutation = useMutation({
+	const reportError = (title: string, error: unknown) =>
+		toast({
+			title,
+			description: error instanceof Error ? error.message : String(error),
+			tone: "error",
+		});
+	const { mutate: removeSchedule } = useMutation({
 		mutationFn: (id: string) => deleteSchedule(sessionId, id),
 		onSuccess: refresh,
+		onError: (error) => reportError("Scheduled task is still there", error),
 	});
-	const scheduleStatusMutation = useMutation({
+	const { mutate: setScheduleStatus } = useMutation({
 		mutationFn: ({ id, action }: { id: string; action: "pause" | "resume" }) =>
 			setSchedulePaused(sessionId, id, action === "pause"),
 		onSuccess: refresh,
+		onError: (error, { action }) =>
+			reportError(`Scheduled task was not ${action}d`, error),
 	});
-	const stopMutation = useMutation({
+	const { mutate: stop } = useMutation({
 		mutationFn: (id: string) => stopTask(sessionId, id),
 		onSuccess: refresh,
+		onError: (error) => reportError("Task is still running", error),
 	});
-
-	const removeSchedule = async (id: string) => {
-		try {
-			await removeMutation.mutateAsync(id);
-		} catch (removeError) {
-			toast({
-				title: "Scheduled task is still there",
-				description:
-					removeError instanceof Error
-						? removeError.message
-						: String(removeError),
-				tone: "error",
-			});
-		}
-	};
-
-	const setScheduleStatus = async (id: string, action: "pause" | "resume") => {
-		try {
-			await scheduleStatusMutation.mutateAsync({ id, action });
-		} catch (statusError) {
-			toast({
-				title: `Scheduled task was not ${action}d`,
-				description:
-					statusError instanceof Error
-						? statusError.message
-						: String(statusError),
-				tone: "error",
-			});
-		}
-	};
-
-	const stop = async (id: string) => {
-		try {
-			await stopMutation.mutateAsync(id);
-		} catch (stopError) {
-			toast({
-				title: "Task is still running",
-				description:
-					stopError instanceof Error ? stopError.message : String(stopError),
-				tone: "error",
-			});
-		}
-	};
 
 	return (
 		<div className="relative flex h-full flex-col overflow-hidden bg-transparent">
@@ -176,10 +143,10 @@ export function TasksPanel({ sessionId, sessionRunning, onOpenTask }: Props) {
 									: "Pause scheduled task"
 							}
 							onClick={() =>
-								void setScheduleStatus(
-									s.id,
-									s.status === "paused" ? "resume" : "pause",
-								)
+								setScheduleStatus({
+									id: s.id,
+									action: s.status === "paused" ? "resume" : "pause",
+								})
 							}
 						>
 							<span className="group-hover:hidden group-focus/action:hidden">
@@ -241,7 +208,7 @@ export function TasksPanel({ sessionId, sessionRunning, onOpenTask }: Props) {
 								title={
 									t.agent_type === "command" ? "Stop command" : "Stop agent"
 								}
-								onClick={() => void stop(t.id)}
+								onClick={() => stop(t.id)}
 							>
 								<span className="group-hover:hidden group-focus/action:hidden">
 									<TaskStatusIcon status={t.status} />
@@ -278,11 +245,11 @@ export function TasksPanel({ sessionId, sessionRunning, onOpenTask }: Props) {
 					menu={menu}
 					onClose={() => setMenu(null)}
 					onOpenTask={onOpenTask}
-					onRemoveSchedule={(schedule) => setDeleteTarget(schedule)}
+					onRemoveSchedule={setDeleteTarget}
 					onSetScheduleStatus={(id, action) =>
-						void setScheduleStatus(id, action)
+						setScheduleStatus({ id, action })
 					}
-					onStopTask={(id) => void stop(id)}
+					onStopTask={stop}
 				/>
 			)}
 			<Dialog
@@ -308,7 +275,7 @@ export function TasksPanel({ sessionId, sessionRunning, onOpenTask }: Props) {
 					onClick={() => {
 						const target = deleteTarget;
 						setDeleteTarget(null);
-						if (target) void removeSchedule(target.id);
+						if (target) removeSchedule(target.id);
 					}}
 				>
 					Delete
@@ -474,8 +441,4 @@ function TaskStatusIcon({
 				/>
 			);
 	}
-}
-
-export function TasksTabIcon() {
-	return <Bot size={12} />;
 }

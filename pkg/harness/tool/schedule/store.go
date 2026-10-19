@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/adrianliechti/wingman-agent/internal/statefile"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -121,22 +122,7 @@ func (s *FileStore) save(tasks []Task) error {
 		return err
 	}
 
-	tmp, err := os.CreateTemp(s.dir, tasksFile+".tmp-")
-	if err != nil {
-		return err
-	}
-
-	if _, err := tmp.Write(out); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-
-	return os.Rename(tmp.Name(), s.Path())
+	return statefile.Write(s.Path(), out)
 }
 
 type MemoryStore struct {

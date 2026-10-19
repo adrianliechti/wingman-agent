@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
@@ -146,7 +147,7 @@ func TestShellApprovalDoesNotSurviveLeavingUnattendedMode(t *testing.T) {
 	a, ui, ctx, inputs := newReviewSession(t, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"Preserve new user work."}`)
 	id := code.SessionIDFromContext(ctx)
 	var exec tool.Tool
-	for _, candidate := range a.session(id).toolSet.Slice() {
+	for _, candidate := range a.session(id).tools {
 		if candidate.Name == "exec" {
 			exec = candidate
 			break
@@ -248,7 +249,7 @@ func TestPermissionHooksDecideBeforeReviewAndUnattended(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a, ui, ctx, inputs := newReviewSession(t, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"Not requested."}`)
 			id := code.SessionIDFromContext(ctx)
-			a.session(id).aa.Hooks.PermissionRequest = tc.hooks
+			a.session(id).harness.Hooks.PermissionRequest = tc.hooks
 			if err := a.SetUnattended(ctx, id, tc.unattended); err != nil {
 				t.Fatal(err)
 			}
@@ -286,7 +287,7 @@ func TestSandboxedExecSendsExecutionPolicyToReviewerAndHonoursDenial(t *testing.
 	}
 	a, ui, ctx, inputs := newReviewSession(t, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"Not requested."}`)
 	var exec tool.Tool
-	for _, candidate := range a.session(code.SessionIDFromContext(ctx)).toolSet.Slice() {
+	for _, candidate := range a.session(code.SessionIDFromContext(ctx)).tools {
 		if candidate.Name == "exec" {
 			exec = candidate
 		}
@@ -393,5 +394,38 @@ func TestUnattendedHookApprovalIsNotRemembered(t *testing.T) {
 	s.unattended.Store(false)
 	if err := trust.Trust("sha256:asked"); err != nil || !store["sha256:asked"] {
 		t.Fatalf("attended approval not persisted: %v %v", store, err)
+	}
+}
+
+func TestInlineReviewsShareForegroundTurnBudget(t *testing.T) {
+	s := &sessionState{harness: &harness.Agent{Config: &harness.Config{}}}
+	stream, err := s.harness.Send(t.Context(), []harness.Content{{Text: "work"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID := s.harness.ActiveTurnID()
+	if parentID == "" {
+		t.Fatal("active turn has no ID")
+	}
+	for i := range reviewConsecutiveDenials {
+		ctx := hook.WithRuntime(t.Context(), hook.Runtime{TurnID: fmt.Sprintf("inline-child-%d", i)})
+		key := s.reviewTurn(ctx)
+		if key != parentID {
+			t.Fatalf("child review key = %q, want %q", key, parentID)
+		}
+		_, _, tripped := s.reviews.record(key, true)
+		if tripped != (i == reviewConsecutiveDenials-1) {
+			t.Fatal("inline child reset the rejection budget")
+		}
+		background := tool.WithBackgroundOrigin(ctx, "detached")
+		if s.reviewTurn(background) == parentID {
+			t.Fatal("background task shared foreground rejection budget")
+		}
+	}
+	s.harness.Cancel(nil)
+	for range stream {
+	}
+	if s.harness.ActiveTurnID() != "" {
+		t.Fatal("completed turn kept its active ID")
 	}
 }
