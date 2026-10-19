@@ -1,5 +1,9 @@
 dario.cat/mergo v1.0.2 h1:85+piFYR1tMbRrLcDwR18y4UKJ3aH1Tbzi24VRW1TK8=
 dario.cat/mergo v1.0.2/go.mod h1:E/hbnu0NxMFBjpMIE34DRGLWqDy0g5FuKDhCb31ngxA=
+github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.2 h1:utpeoEeZjd+A8J41zvoLsOOrqXHhX1Kx/X/tCW9dEYQ=
+github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.2/go.mod h1:iptorS+VYKFL2N6PnebpS91dubG35eAOEERnT4PJbQU=
+github.com/Azure/azure-sdk-for-go/sdk/internal v1.12.0 h1:fhqpLE3UEXi9lPaBRpQ6XuRW0nU7hgg4zlmZZa+a9q4=
+github.com/Azure/azure-sdk-for-go/sdk/internal v1.12.0/go.mod h1:7dCRMLwisfRH3dBupKeNCioWYUZ4SS09Z14H+7i8ZoY=
 github.com/JohannesKaufmann/dom v0.3.1 h1:J16l9JAHWgkFPR3VIPbQ1gvS0cWab6laK1q7PFL3qh0=
 github.com/JohannesKaufmann/dom v0.3.1/go.mod h1:BZPkf8ZeYrBgABjwJn9iiKt8aiCtkxpHkevms+Yp2DE=
 github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2 h1:XFJZFWESIWlUEHHjzBuv8RvrtCWnSGlimEX17ysSDb8=
@@ -11,10 +15,10 @@ github.com/ProtonMail/go-crypto v1.5.2 h1:cucYnvqcY7UOXVD//mSyjeaPY0SSN3v5cDkYPx
 github.com/ProtonMail/go-crypto v1.5.2/go.mod h1:/RaSu30DaKO4RY+XdV/ACcCcZkGr7AhUIduq5sjzzCo=
 github.com/abemedia/go-cfb v0.2.0 h1:amLvu7/DX65XtcmMuc0an/t09W36gMOrnYwLxGGmwX8=
 github.com/abemedia/go-cfb v0.2.0/go.mod h1:ytSRuNKf2VMDQDs8TSZ/VmkVfS4giAdc4xl5XOnpKKA=
-github.com/adrianliechti/go-extract v0.0.0-20261016221110-30128859586a h1:LNvbSyfSlZ8lMs7VGzrPNlKrEZ+ykPY4iO0/E0zscJ8=
-github.com/adrianliechti/go-extract v0.0.0-20261016221110-30128859586a/go.mod h1:BHEE8zst0Rq/IBSy9OTTl9IMMA5AT7CkY8Y4fGUTGLI=
-github.com/adrianliechti/go-shell v0.1.8 h1:83Pl6t7bs5ALyZAerOIovak79pxzikasbWFax547SC4=
-github.com/adrianliechti/go-shell v0.1.8/go.mod h1:ceiJeDGIjNryQ49XFHE+dUAaI9ava9J5gbZwsfkUj08=
+github.com/adrianliechti/go-extract v0.0.0-20261019225112-18858ce775f0 h1:N7OuIvbanQH00IccMF6TmYP3n/PbUvs4WocOVZDR3OI=
+github.com/adrianliechti/go-extract v0.0.0-20261019225112-18858ce775f0/go.mod h1:sqNmlE16r3S7OPvKl8tJrdXfjq8Zg1n58JBFwt1xWPc=
+github.com/adrianliechti/go-shell v0.1.9 h1:/3Lmz3qrSTH3/pfHf08hF81YYxIyp6yLLPKUzy3VvMc=
+github.com/adrianliechti/go-shell v0.1.9/go.mod h1:WwNDLx2RxEuyTc8kb90wyytIG21QfTL4yjnLyAtU9uo=
 github.com/alecthomas/assert/v2 v2.11.0 h1:2Q9r3ki8+JYXvGsDyBXwH3LcJ+WK5D0gc5E8vS6K3D0=
 github.com/alecthomas/assert/v2 v2.11.0/go.mod h1:Bze95FyfUr7x34QZrjL+XP+0qgp/zg8yS+TtBj1WA3k=
 github.com/alecthomas/chroma/v2 v2.27.0 h1:FodwmyOBgJULFYmDqibcp9pvfDLWdtPRh9v/r5BXYZs=
@@ -121,8 +125,8 @@ github.com/odvcencio/gotreesitter v0.56.0 h1:2cyxAbG9yAMs1d8xTAxq3HWrKh8m7mi7pAj
 github.com/odvcencio/gotreesitter v0.56.0/go.mod h1:hBVkghd0paaYAVwd2087vfwdeU984bQbMo9LvpE0moo=
 github.com/onsi/gomega v1.34.1 h1:EUMJIKUjM8sKjYbtxQI9A4z2o+rruxnzNvpknOXie6k=
 github.com/onsi/gomega v1.34.1/go.mod h1:kU1QgUvBDLXBJq618Xvm2LUX6rSAfRaFRTcdOeDLwwY=
-github.com/openai/openai-go/v3 v3.78.0 h1:KdQbpdzY5Y5O5PgnNXeE09J7MHuQuus4DiQz4W9tzyo=
-github.com/openai/openai-go/v3 v3.78.0/go.mod h1:DR+2KZPQo+WIGmWLxmNBEf6LxOqKw4jc2ZqXvQ1oUNE=
+github.com/openai/openai-go/v3 v3.82.0 h1:MIBQQt9kEfdRtiOwQy3LV4vZ+82401prZD+IoUraEw4=
+github.com/openai/openai-go/v3 v3.82.0/go.mod h1:i+lM+NFmWP+Yd+fYKEaPxUINBx+vZtRmY5gaszSfsiQ=
 github.com/pdfcpu/pdfcpu v0.16.2 h1:x6Y+jOn4Ieu3TZ+B3eNgjS9aLsybm3azz6pEMiZfE2Q=
 github.com/pdfcpu/pdfcpu v0.16.2/go.mod h1:QcoG3vO7d8MllF6JHsXvMUTYKlLTxAmuc12GFABoqPA=
 github.com/pjbgf/sha1cd v0.7.0 h1:ZRNPKHj+gfkLBf0KJv/p1Hmz+7bqCT5o311YX0nq+DA=
