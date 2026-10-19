@@ -253,7 +253,7 @@ export function ChatPanel({
 		const stable = new Set<string>();
 		for (const t of sourceTurns) {
 			if (t.user) stable.add(t.user.id);
-			if (t.final) stable.add(t.final.id);
+			for (const entry of t.reply) stable.add(entry.id);
 		}
 		const cRect = c.getBoundingClientRect();
 		let visible: { id: string; viewportTop: number } | null = null;

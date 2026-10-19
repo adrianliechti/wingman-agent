@@ -75,3 +75,18 @@ func TestTwoPaneWideEnterAndRowWidth(t *testing.T) {
 		t.Fatal("enter did not focus the detail pane")
 	}
 }
+
+func TestTwoPaneCtrlCClosesWhileSearching(t *testing.T) {
+	o := newTwoPaneOverlay("changes", "1 file", 1,
+		func(bool, int) string { return "main.go" },
+		func(int) []string { return []string{"diff"} },
+		func(int) string { return "main.go" },
+	)
+	o.HandleKey(inline.KeyEvent{Key: inline.KeyRune, Rune: '/'})
+	if !o.searching {
+		t.Fatal("search did not open")
+	}
+	if !o.HandleKey(inline.KeyEvent{Key: inline.KeyCtrl, Rune: 'c'}) {
+		t.Fatal("Ctrl+C was swallowed by the overlay search")
+	}
+}

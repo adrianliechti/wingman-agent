@@ -357,18 +357,20 @@ async function expectFloatingInViewport(
 	element: Locator,
 	padding = 8,
 ) {
-	const box = await element.boundingBox();
 	const viewport = page.viewportSize();
-	expect(box).not.toBeNull();
 	expect(viewport).not.toBeNull();
-	expect(box!.x).toBeGreaterThanOrEqual(padding - 1);
-	expect(box!.y).toBeGreaterThanOrEqual(padding - 1);
-	expect(box!.x + box!.width).toBeLessThanOrEqual(
-		viewport!.width - padding + 1,
-	);
-	expect(box!.y + box!.height).toBeLessThanOrEqual(
-		viewport!.height - padding + 1,
-	);
+	await expect(async () => {
+		const box = await element.boundingBox();
+		expect(box).not.toBeNull();
+		expect(box!.x).toBeGreaterThanOrEqual(padding - 1);
+		expect(box!.y).toBeGreaterThanOrEqual(padding - 1);
+		expect(box!.x + box!.width).toBeLessThanOrEqual(
+			viewport!.width - padding + 1,
+		);
+		expect(box!.y + box!.height).toBeLessThanOrEqual(
+			viewport!.height - padding + 1,
+		);
+	}).toPass();
 	expect(
 		await element.evaluate(
 			(node) => !document.getElementById("root")?.contains(node),
@@ -460,6 +462,60 @@ test("reveals scrollbars only for direct user scrolling", async ({ page }) => {
 	await expect(history).not.toHaveClass(/scrollbar-active/, { timeout: 2_000 });
 });
 
+test("keeps diagrams and their follow-up answer visible in a finished turn", async ({
+	page,
+}) => {
+	const id = "multipart-answer";
+	await mockSavedSessions(
+		page,
+		[{ id, title: "Diagram examples", updated_at: "2026-01-01T00:00:00Z" }],
+		[],
+		"wingman",
+		[
+			{ id: "question", type: "user", content: "Show two diagram examples" },
+			{ id: "thinking", type: "reasoning", content: "Choosing examples" },
+			{
+				id: "flowchart-answer",
+				type: "assistant",
+				content: "```mermaid\nflowchart LR\n  Source --> Preview\n```",
+			},
+			{
+				id: "sequence-answer",
+				type: "assistant",
+				content:
+					"```mermaid\nsequenceDiagram\n  User->>App: Open preview\n  App-->>User: Diagram\n```",
+			},
+			{
+				id: "summary-answer",
+				type: "assistant",
+				content: "The flowchart and sequence diagram are shown above.",
+			},
+		],
+	);
+	await composer(page);
+	await openSessions(page);
+	await sessionRow(page, id).click();
+	for (const entryId of ["flowchart-answer", "sequence-answer"]) {
+		const diagram = page.locator(
+			`[data-entry-id="${entryId}"] [data-mermaid-preview] img`,
+		);
+		await expect(diagram).toBeVisible();
+		await expect
+			.poll(() =>
+				diagram.evaluate((image: HTMLImageElement) => image.naturalWidth),
+			)
+			.toBeGreaterThan(0);
+	}
+	await expect(page.locator('[data-entry-id="summary-answer"]')).toContainText(
+		"The flowchart and sequence diagram are shown above.",
+	);
+	await expect(page.locator('[data-entry-id="thinking"]')).toHaveCount(0);
+	await page.getByRole("button", { name: "1 thought", exact: true }).click();
+	await expect(page.locator('[data-entry-id="thinking"]')).toContainText(
+		"Choosing examples",
+	);
+});
+
 test("preserves the visible reply when a finished turn collapses its working steps", async ({
 	page,
 }) => {
@@ -475,7 +531,7 @@ test("preserves the visible reply when a finished turn collapses its working ste
 		{ id: "current-user", type: "user", content: "Current question" },
 		{
 			id: "working-reply",
-			type: "assistant",
+			type: "reasoning",
 			content: "Working through the details.\n\n".repeat(30),
 		},
 		{
@@ -4469,7 +4525,7 @@ test("runs a coding tool and renders its result", async ({ page }) => {
 	await expect(tool).toBeVisible();
 	await tool.click();
 	await expect(
-		page.getByText(/Applied 1 edits across 1 files atomically/),
+		page.getByText(/Applied 1 edits across 1 files\./),
 	).toBeVisible();
 	await expect(
 		page.getByText("Created the requested file", { exact: true }),
@@ -5130,6 +5186,7 @@ test("previews selection transformations and can hand the selection to chat", as
 	const prompt = page.getByRole("dialog", { name: "Transform selection" });
 	await expect(prompt).toBeVisible();
 	await prompt.getByRole("button", { name: "Refactor", exact: true }).click();
+	await expect(prompt).toBeHidden();
 	await expect(
 		page
 			.locator(".monaco-editor:visible")
@@ -5153,6 +5210,7 @@ test("previews selection transformations and can hand the selection to chat", as
 		.getByRole("textbox", { name: "Transformation instruction" })
 		.fill("Make it clearer");
 	await prompt.getByRole("button", { name: "Generate", exact: true }).click();
+	await expect(prompt).toBeHidden();
 	await expect(
 		page
 			.locator(".monaco-editor:visible")
@@ -5180,15 +5238,21 @@ test("previews selection transformations and can hand the selection to chat", as
 	await selectOriginal();
 	await page.keyboard.press("Shift+F10");
 	const menu = page.getByRole("menu", { name: "Editor actions" });
+	await expect(menu.locator('[role="menuitem"]:enabled').first()).toBeFocused();
 	const menuLabels = await menu.getByRole("menuitem").allTextContents();
 	expect(menuLabels.indexOf("Chat about this…")).toBeLessThan(
 		menuLabels.findIndex((label) => label.startsWith("Transform Selection…")),
 	);
 	await page.keyboard.press("Escape");
+	await expect(menu).toBeHidden();
+	await expect(
+		editor.getByRole("textbox", { name: "Editor content", exact: true }),
+	).toBeFocused();
 	await page.keyboard.press("ControlOrMeta+K");
 	palette = page.getByRole("dialog", { name: "Command palette" });
-	paletteActions = await palette.getByRole("option").allTextContents();
-	expect(paletteActions).toContain("Chat about this…Selected text");
+	await expect(
+		palette.getByRole("option", { name: "Chat about this… Selected text" }),
+	).toBeVisible();
 	await palette
 		.getByRole("option", { name: "Chat about this… Selected text" })
 		.click();
@@ -5357,7 +5421,15 @@ test("previews structured data and delimited tables", async ({ page }) => {
 });
 
 test("renders Mermaid diagrams", async ({ page }) => {
+	await page.emulateMedia({ colorScheme: "light" });
+	const diagramRequests: string[] = [];
+	page.on("request", (request) => {
+		if (/\/assets\/.*(?:mermaid|elk)/.test(request.url())) {
+			diagramRequests.push(request.url());
+		}
+	});
 	await composer(page);
+	expect(diagramRequests).toHaveLength(0);
 	await page.getByRole("treeitem", { name: /flow-preview\.mmd/ }).click();
 	const preview = page.getByRole("img", {
 		name: "Preview of flow-preview.mmd",
@@ -5366,8 +5438,47 @@ test("renders Mermaid diagrams", async ({ page }) => {
 	await expect
 		.poll(() => preview.evaluate((image) => image.naturalWidth))
 		.toBeGreaterThan(0);
+	expect(diagramRequests.some((url) => url.includes("elk"))).toBe(true);
+	const lightImage = await preview.getAttribute("src");
+	await page.emulateMedia({ colorScheme: "dark" });
+	await expect(preview).not.toHaveAttribute("src", lightImage!);
+	await expect
+		.poll(() => preview.evaluate((image) => image.naturalWidth))
+		.toBeGreaterThan(0);
 	await page.getByTitle("Show code editor").click();
 	await expect(page.locator(".monaco-editor")).toBeVisible();
+});
+
+test("Mermaid preview reports invalid diagrams and recovers after an edit", async ({
+	page,
+	request,
+}) => {
+	const path = "invalid-diagram.mmd";
+	const created = await request.post("/api/files", {
+		data: { path, content: "flowchart LR\n  A --> [\n" },
+	});
+	expect(created.ok()).toBeTruthy();
+	await composer(page);
+	await page.getByRole("treeitem", { name: path }).click();
+	await expect(page.getByRole("alert")).toContainText(
+		`Could not preview ${path}`,
+	);
+	const original = await request.get(`/api/files/read?path=${path}`);
+	const { revision } = await original.json();
+	const written = await request.post("/api/files/write", {
+		data: {
+			path,
+			revision,
+			content: "flowchart LR\n  A --> B\n",
+		},
+	});
+	expect(written.ok()).toBeTruthy();
+	const preview = page.getByRole("img", { name: `Preview of ${path}` });
+	await expect(preview).toBeVisible();
+	await expect
+		.poll(() => preview.evaluate((image) => image.naturalWidth))
+		.toBeGreaterThan(0);
+	await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
 test("protects unsaved file edits when closing a tab", async ({

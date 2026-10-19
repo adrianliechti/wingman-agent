@@ -5,7 +5,7 @@ To use the browser UI, run `wingman server` in your project directory. See the
 
 ## Build from source
 
-From this directory:
+Use Node.js 22.12+ (or a newer supported release). From this directory:
 
 ```bash
 npm install
@@ -16,6 +16,10 @@ The build writes assets to `../static`, which the Go server embeds. Rebuild
 those assets before rebuilding the server or running browser tests.
 
 From the repository root, `task run:web` builds the UI and starts the server.
+
+Mermaid 12 previews require an ES2024-capable browser (Safari 17.4+). Diagram
+renderers load on demand and use Mermaid's default layouts and look, with
+light and dark color themes that follow the app.
 
 ## Frontend development
 

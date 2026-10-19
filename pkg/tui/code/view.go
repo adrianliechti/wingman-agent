@@ -425,6 +425,7 @@ func (a *App) render() {
 
 	if panelWidth > 0 {
 		padding := ansi.Reset + " " + panelLine(" ", 1)
+		a.prepareDiffPanel(panelWidth)
 		panel := a.diffPanel.render(panelWidth, height)
 		for len(frame) < height {
 			frame = append(frame, "")

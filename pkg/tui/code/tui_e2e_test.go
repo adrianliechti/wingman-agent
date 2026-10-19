@@ -368,6 +368,61 @@ func TestTUIE2ECommandCenterAndTranscriptSearch(t *testing.T) {
 	})
 }
 
+func TestTUIE2EShortcutsWithDiffPanel(t *testing.T) {
+	model := tuiModelServer(t)
+	defer model.Close()
+	t.Setenv("WINGMAN_URL", model.URL)
+	t.Setenv("WINGMAN_MODEL", "gpt-5.4")
+	t.Setenv("WINGMAN_CALLER", "e2e")
+	h := newTUIE2EHarness(t)
+	h.onUI(t, func() {
+		h.app.diffPanel.hidden = false
+		h.app.diffPanel.diffs = diffPanelFixture
+		h.app.handleEvent(inline.ResizeEvent{Width: 180, Height: 35})
+	})
+	h.waitForUI(t, func() bool { return h.app.diffPanelShowing && h.app.diffPanel.lines != nil })
+	writeKeys := func(keys string) {
+		t.Helper()
+		if _, err := io.WriteString(h.input, keys); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Ctrl+Enter/Tab are unbound; neither may send this draft or change mode.
+	writeKeys("draft\x1b[13;5u\x1b[9;5u!\x10")
+	h.waitForUI(t, func() bool { return h.app.popup != nil && h.app.popup.kind == popupPalette })
+	h.onUI(t, func() {
+		_, mode := h.agent.Modes(h.sessionID)
+		if h.app.editor.Text() != "draft!" || mode != "agent" {
+			t.Error("unbound control chord submitted the draft or changed mode")
+		}
+	})
+	// Alt+Enter must remain scoped to the picker, even with a nonempty draft.
+	writeKeys("\x1b\rtranscript")
+	h.waitForUI(t, func() bool { return h.app.popup != nil && h.app.popup.query == "transcript" })
+	h.onUI(t, func() {
+		if h.app.editor.Text() != "draft!" || len(h.agent.Messages(h.sessionID)) != 0 || len(h.app.turns.Snapshot(h.sessionID).Inputs) != 0 {
+			t.Error("Alt+Enter sent or queued the draft behind the command picker")
+		}
+	})
+	// Close the picker, then exercise both newline encodings and line editing.
+	writeKeys("\x10\x0a\x1b[13;2usecond\x01\x0bline")
+	h.waitForUI(t, func() bool { return h.app.editor.Text() == "draft!\n\nline" })
+	writeKeys("\x09")
+	h.waitForUI(t, func() bool { _, mode := h.agent.Modes(h.sessionID); return mode == "plan" })
+	writeKeys("\x1b[Z")
+	h.waitForUI(t, func() bool { return h.app.unattended() })
+	writeKeys("\x0f")
+	h.waitForUI(t, func() bool { _, ok := h.app.overlay.(*transcriptOverlay); return ok })
+	writeKeys("\x1b[111;5u")
+	h.waitForUI(t, func() bool { return h.app.overlay == nil })
+	h.onUI(t, func() {
+		if h.app.editor.Text() != "draft!\n\nline" || !h.app.diffPanelShowing {
+			t.Error("shortcuts lost the draft or hid the diff panel")
+		}
+	})
+}
+
 func TestTUIE2EConfirmAndElicitPopups(t *testing.T) {
 	model := tuiModelServer(t)
 	defer model.Close()

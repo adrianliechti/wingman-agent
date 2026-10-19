@@ -136,3 +136,22 @@ func TestAltEnterQueuesAndShiftEnterInsertsNewline(t *testing.T) {
 		t.Fatalf("Alt+Enter did not queue: %+v", snapshot)
 	}
 }
+
+func TestModifiedEnterDoesNotSubmitBehindPicker(t *testing.T) {
+	for _, kind := range []popupKind{popupList, popupPalette} {
+		for _, key := range []inline.KeyEvent{{Key: inline.KeyEnter, Alt: true}, {Key: inline.KeyEnter, Shift: true}} {
+			app, _ := newQueueTestApp(t, 1)
+			app.editor.SetText("keep my draft")
+			accepted := false
+			popup := newPopup(kind, "pick", []PopupItem{{ID: "one", Label: "one"}}, func([]string) { accepted = true })
+			app.popup = popup
+			app.handleKey(key)
+			if app.editor.Text() != "keep my draft" || len(app.turns.Snapshot("session").Inputs) != 1 {
+				t.Fatalf("%+v changed or queued the draft behind picker %v", key, kind)
+			}
+			if app.popup != popup || accepted {
+				t.Fatalf("%+v accepted or closed picker %v", key, kind)
+			}
+		}
+	}
+}

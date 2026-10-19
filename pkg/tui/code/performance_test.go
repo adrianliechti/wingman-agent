@@ -6,8 +6,29 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/adrianliechti/wingman-agent/pkg/changes"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
+
+func BenchmarkDiffPanelLargePatch(b *testing.B) {
+	for _, scenario := range []struct {
+		name string
+		body string
+	}{
+		{"minified", strings.Repeat("const value = 123;", 200_000)},
+		{"many_lines", strings.Repeat("+const value = 123;\n", 20_000)},
+	} {
+		b.Run(scenario.name, func(b *testing.B) {
+			diffs := []changes.FileDiff{{Path: "bundle.js", Status: changes.StatusModified, Patch: "@@ -0,0 +1 @@\n+" + scenario.body}}
+			b.ReportAllocs()
+			for b.Loop() {
+				panel := diffPanel{diffs: diffs}
+				panel.header, panel.lines, panel.sections = renderDiffPanelLines(diffs, nil, 79)
+				panel.render(80, 24)
+			}
+		})
+	}
+}
 
 func BenchmarkTUIRender(b *testing.B) {
 	for _, scenario := range []struct {

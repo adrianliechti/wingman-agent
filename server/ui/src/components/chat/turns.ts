@@ -4,7 +4,7 @@ export interface Turn {
 	key: string;
 	user: ChatEntry | null;
 	working: ChatEntry[];
-	final: ChatEntry | null;
+	reply: ChatEntry[];
 }
 
 export function buildTurns(entries: ChatEntry[]): Turn[] {
@@ -17,19 +17,18 @@ export function buildTurns(entries: ChatEntry[]): Turn[] {
 				key: e.type === "user" ? e.id : `turn-${counter++}`,
 				user: e.type === "user" ? e : null,
 				working: [],
-				final: null,
+				reply: [],
 			});
 			if (e.type === "user") continue;
 		}
 		const t = turns[turns.length - 1];
-		if (t.final) {
-			t.working.push(t.final);
-			t.final = null;
-		}
 		if (e.type === "assistant") {
-			t.final = e;
+			t.reply.push(e);
 		} else {
-			t.working.push(e);
+			// Text followed by more work is progress; consecutive trailing
+			// assistant messages are all parts of the visible answer.
+			t.working.push(...t.reply, e);
+			t.reply = [];
 		}
 	}
 

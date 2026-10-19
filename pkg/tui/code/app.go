@@ -1207,15 +1207,18 @@ func (a *App) handleKey(ev inline.KeyEvent) {
 		return
 	}
 
+	// A picker owns Enter while it is open. Modified Enter must not submit
+	// the composer's draft or accept a selection behind that focused picker.
+	if ev.Key == inline.KeyEnter && (ev.Alt || ev.Shift) && a.popup != nil && (a.popup.kind == popupList || a.popup.kind == popupPalette) {
+		return
+	}
 	if ev.Key == inline.KeyEnter && ev.Alt && !ev.Shift && !a.promptActive && !a.askActive {
 		a.submitInputIntent(code.TurnInputFollowUp)
 		return
 	}
 	if ev.Key == inline.KeyEnter && ev.Shift {
-		if a.popup == nil || a.popup.kind == popupCommands || a.popup.kind == popupFiles {
-			a.editor.HandleKey(ev)
-			a.syncCommandPopup()
-		}
+		a.editor.HandleKey(ev)
+		a.syncCommandPopup()
 		return
 	}
 

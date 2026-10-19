@@ -112,8 +112,15 @@ In the terminal UI, use `@` to attach files and `Ctrl+P` to find commands.
 | `Shift+Enter` or `Ctrl+J` | Insert a new line |
 | `Alt+Enter` | Queue a follow-up |
 | `Tab` | Switch between Agent and Plan mode |
+| `Shift+Tab` | Toggle unattended mode |
+| `Ctrl+P` | Open or close the command picker |
+| `Ctrl+O` | Open or close the transcript |
+| `Ctrl+Q` | Manage queued follow-ups |
+| `Ctrl+V` | Paste into the focused input |
+| `Ctrl+Y` | Copy the last response |
 | `Escape` | Cancel the current response or close a menu |
-| `Ctrl+C` twice | Exit |
+| `Ctrl+C` | Clear the draft, interrupt work, or close a menu |
+| `Ctrl+C` twice with an empty draft | Exit |
 | `/model` | Choose a model and reasoning effort |
 | `/agent` or `/plan` | Switch to Agent or Plan mode |
 | `/agents` | Watch agents and view scheduled tasks |

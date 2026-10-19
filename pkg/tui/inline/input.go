@@ -227,6 +227,13 @@ func (in *inputReader) consumeRune(first byte) {
 
 func (in *inputReader) consumeEscape() {
 	buf := in.buf
+	if len(buf) >= 2 && buf[1] == 0x1b {
+		// Escape followed by Escape or another escape-encoded key. Keep the
+		// second prefix for the next event instead of interpreting Alt+ESC.
+		in.buf = buf[1:]
+		in.emit(KeyEvent{Key: KeyEsc})
+		return
+	}
 	if len(buf) >= 2 && strings.ContainsRune("]P_^X", rune(buf[1])) {
 		// Late OSC/DCS replies are terminal protocol, not composer input.
 		// Consume incrementally so an unterminated reply cannot grow a buffer.
