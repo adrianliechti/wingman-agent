@@ -6,7 +6,7 @@ import {
 	LoaderCircle,
 } from "lucide-react";
 import { memo, useContext, useEffect, useRef, useState } from "react";
-import type { ChatEntry } from "../../hooks/useWebSocket";
+import type { ChatEntry } from "../../types/session";
 import type { Phase, ToolLocation } from "../../types/protocol";
 import { MarkdownContent } from "../MarkdownContent";
 import { looksLikeDiffPath, shouldRenderDiff } from "./diffOutput";

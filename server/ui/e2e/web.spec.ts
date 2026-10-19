@@ -1482,7 +1482,7 @@ test("chat drafts keep their own content and settings across tab switches", asyn
 		page.getByTitle("Mode: Plan").filter({ visible: true }),
 	).toBeVisible();
 	await expect(
-		page.getByTitle("second · default").filter({ visible: true }),
+		page.getByTitle("second · auto").filter({ visible: true }),
 	).toBeVisible();
 	await expect(
 		page.getByTitle("context.gif").filter({ visible: true }),
@@ -1501,7 +1501,7 @@ test("chat drafts keep their own content and settings across tab switches", asyn
 		page.getByTitle("Mode: Agent").filter({ visible: true }),
 	).toBeVisible();
 	await expect(
-		page.getByTitle("first · default").filter({ visible: true }),
+		page.getByTitle("first · auto").filter({ visible: true }),
 	).toBeVisible();
 	await expect(input).toHaveValue("Draft in the first tab");
 	await page.locator('[data-center-tab^="draft:wingman:"]').last().click();

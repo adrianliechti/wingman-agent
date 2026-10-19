@@ -1,4 +1,4 @@
-import type { ChatEntry } from "../../hooks/useWebSocket";
+import type { ChatEntry } from "../../types/session";
 
 export interface Turn {
 	key: string;

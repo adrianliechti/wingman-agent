@@ -30,9 +30,13 @@ import type {
 	ChatEntry,
 	PendingPrompt,
 	PendingTurnInput,
+} from "../types/session";
+import type {
+	Phase,
 	PromptReply,
-} from "../hooks/useWebSocket";
-import type { Phase, TurnInputIntent, TurnInputState } from "../types/protocol";
+	TurnInputIntent,
+	TurnInputState,
+} from "../types/protocol";
 import { ToolProgressContext } from "./chat/progress";
 import { type PendingImage, processImage } from "./chat/images";
 import { PromptBar } from "./chat/PromptBar";

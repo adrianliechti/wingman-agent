@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ChatEntry } from "../../hooks/useWebSocket";
+import type { ChatEntry } from "../../types/session";
 import { sampleSpinnerVerb } from "../../spinnerVerbs";
 import type { Phase } from "../../types/protocol";
 import { EntryView, ToolGroupView } from "./entries";

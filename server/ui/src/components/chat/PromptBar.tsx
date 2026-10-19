@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { PendingPrompt, PromptReply } from "../../hooks/useWebSocket";
-import type { PromptField } from "../../types/protocol";
+import type { PendingPrompt } from "../../types/session";
+import type { PromptField, PromptReply } from "../../types/protocol";
 
 function ownValue<T>(values: Record<string, T>, key: string): T | undefined {
 	return Object.hasOwn(values, key) ? values[key] : undefined;
