@@ -55,9 +55,40 @@ func TestTurnQueueFailsVisiblyWhenDeliveryCannotKeepUp(t *testing.T) {
 		if _, err := stream.next(nil); err == nil {
 			t.Fatal("overflow silently dropped events")
 		}
-		if stream.bytes.Load() > maxQueuedTurnBytes || stream.queued() > maxQueuedTurnEvents {
+		if stream.bytes > maxQueuedTurnBytes || len(stream.events) > maxQueuedTurnEvents {
 			t.Fatal("delivery queue exceeded its bounds")
 		}
+	}
+}
+
+func TestTurnQueueReleasesCapacityAndPreservesBarriers(t *testing.T) {
+	stream := newTurnStream(t.Context())
+	full := turnEvent{rpcMessage: rpcMessage{Params: make(json.RawMessage, maxQueuedTurnBytes)}}
+	if !stream.push(full) {
+		t.Fatal("queue rejected an event at the byte limit")
+	}
+	next := turnEvent{rpcMessage: rpcMessage{Method: "next"}}
+	if stream.push(next) {
+		t.Fatal("queue admitted an event over the byte limit")
+	}
+	barrier := make(chan struct{})
+	if !stream.push(turnEvent{processed: barrier}) {
+		t.Fatal("full queue rejected an internal delivery barrier")
+	}
+	if event, ok := stream.pop(); !ok || len(event.Params) != maxQueuedTurnBytes {
+		t.Fatal("queue lost its first event")
+	}
+	if !stream.push(next) {
+		t.Fatal("consumed payload still counts toward the byte limit")
+	}
+	if event, ok := stream.pop(); !ok || event.processed != barrier {
+		t.Fatal("new event overtook the delivery barrier")
+	}
+	if event, ok := stream.pop(); !ok || event.Method != "next" {
+		t.Fatal("queue lost the next event")
+	}
+	if stream.bytes != 0 {
+		t.Fatalf("drained queue retains %d bytes", stream.bytes)
 	}
 }
 

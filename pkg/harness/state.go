@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 type State struct {
@@ -40,7 +41,7 @@ func (a *Agent) appendMessages(messages ...Message) error {
 func messageEvents(messages ...Message) []RuntimeEvent {
 	events := make([]RuntimeEvent, 0, len(messages))
 	for i := range messages {
-		message := CloneMessages([]Message{messages[i]})[0]
+		message := cloneMessage(messages[i])
 		events = append(events, RuntimeEvent{Type: EventMessage, Message: &message})
 	}
 	return events
@@ -102,7 +103,17 @@ func (a *Agent) StateVersion() (messageCount int, revision uint64) {
 // Restore replaces all runtime state from a snapshot. When Events is present,
 // every projection is rebuilt from it and duplicated snapshot fields are
 // ignored. Event-less state is treated as an in-memory legacy snapshot.
+// Invalid events leave the current state unchanged.
 func (a *Agent) Restore(state State) error {
+	events := cloneRuntimeEvents(state.Events)
+	var index runtimeEventIndex
+	if len(events) > 0 {
+		index = newRuntimeEventIndex()
+		if err := validateRuntimeBatch(events, index); err != nil {
+			return err
+		}
+	}
+
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
 
@@ -117,12 +128,7 @@ func (a *Agent) Restore(state State) error {
 	a.runtimeIndex = runtimeEventIndex{}
 	a.runtimeIndexSet = false
 
-	if len(state.Events) > 0 {
-		events := cloneRuntimeEvents(state.Events)
-		index := newRuntimeEventIndex()
-		if err := validateRuntimeBatch(events, index); err != nil {
-			return err
-		}
+	if len(events) > 0 {
 		for _, event := range events {
 			index.observe(event)
 			a.applyEventLocked(event)
@@ -163,7 +169,7 @@ func (a *Agent) synthesizeEventsLocked() {
 	sequence := uint64(0)
 	for i := range a.Messages {
 		sequence++
-		message := CloneMessages([]Message{a.Messages[i]})[0]
+		message := cloneMessage(a.Messages[i])
 		a.Events = append(a.Events, RuntimeEvent{
 			Sequence: sequence,
 			ID:       fmt.Sprintf("legacy-message-%d", sequence),
@@ -210,14 +216,18 @@ func messagesEqual(a, b []Message) bool {
 func CloneMessages(messages []Message) []Message {
 	out := make([]Message, len(messages))
 	for i, message := range messages {
-		out[i] = message
-		out[i].Content = CloneContent(message.Content)
+		out[i] = cloneMessage(message)
 	}
 	return out
 }
 
-// CloneContent returns an independent copy suitable for retaining after an API
-// call. Content only contains value fields and one level of pointer fields.
+func cloneMessage(message Message) Message {
+	message.Content = CloneContent(message.Content)
+	return message
+}
+
+// CloneContent copies content and its display metadata. Tool-result metadata
+// maps are copied, but their values remain shared and must be treated as immutable.
 func CloneContent(in []Content) []Content {
 	out := make([]Content, len(in))
 	for i, content := range in {
@@ -232,25 +242,28 @@ func CloneContent(in []Content) []Content {
 		}
 		if content.ToolCall != nil {
 			call := *content.ToolCall
-			if call.Presentation != nil {
-				presentation := *call.Presentation
-				presentation.Locations = append([]ToolLocation(nil), presentation.Locations...)
-				call.Presentation = &presentation
-			}
+			call.Locations = slices.Clone(call.Locations)
+			call.Presentation = cloneToolPresentation(call.Presentation)
 			out[i].ToolCall = &call
 		}
 		if content.ToolResult != nil {
 			result := *content.ToolResult
-			if result.Presentation != nil {
-				presentation := *result.Presentation
-				presentation.Locations = append([]ToolLocation(nil), presentation.Locations...)
-				result.Presentation = &presentation
-			}
+			result.Locations = slices.Clone(result.Locations)
+			result.Presentation = cloneToolPresentation(result.Presentation)
 			result.Metadata = maps.Clone(result.Metadata)
 			out[i].ToolResult = &result
 		}
 	}
 	return out
+}
+
+func cloneToolPresentation(presentation *ToolPresentation) *ToolPresentation {
+	if presentation == nil {
+		return nil
+	}
+	clone := *presentation
+	clone.Locations = slices.Clone(presentation.Locations)
+	return &clone
 }
 
 func (s *State) Save(path string) error {
@@ -268,25 +281,24 @@ func (s *State) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("failed to write state: %w", err)
 	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
 
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
 		return fmt.Errorf("failed to write state: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
 		return fmt.Errorf("failed to write state: %w", err)
 	}
 
 	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
 		return fmt.Errorf("failed to write state: %w", err)
 	}
 
 	return nil
 }
 
+// Load replaces the state from path, leaving it unchanged on error.
 func (s *State) Load(path string) error {
 	data, err := os.ReadFile(path)
 
@@ -294,9 +306,10 @@ func (s *State) Load(path string) error {
 		return fmt.Errorf("failed to read state: %w", err)
 	}
 
-	if err := json.Unmarshal(data, s); err != nil {
+	var state State
+	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("failed to parse state: %w", err)
 	}
-
+	*s = state
 	return nil
 }

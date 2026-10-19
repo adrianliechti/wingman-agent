@@ -18,8 +18,8 @@ import (
 // configureHooks preserves registration order: host hooks, invalid-config guard,
 // user, workspace and plugin hooks, then session context. Result transforms run
 // in their own harness stage after post-tool hooks and their additional context.
-func (s *sessionState) configureHooks() func() error {
-	a, sessionCfg := s.parent, s.aa.Config
+func (s *sessionState) configureHooks() {
+	a, sessionCfg := s.parent, s.harness.Config
 	ws := a.workspace
 	globalHooksPath := userHooksConfigPath()
 	globalHooks, globalErr := external.Load(globalHooksPath)
@@ -37,16 +37,16 @@ func (s *sessionState) configureHooks() func() error {
 		)
 	}
 
-	hookAsync := external.NewAsync(func(runtime hook.Runtime, parts []string) {
+	s.resources.hooks = external.NewAsync(func(runtime hook.Runtime, parts []string) {
 		// A subagent's hook context describes calls the main turn never saw.
 		if runtime.AgentID != "" {
 			return
 		}
-		if !s.aa.QueueInput([]harness.Content{{Text: strings.Join(parts, "\n\n"), Hidden: true}}) {
+		if !s.harness.QueueInput([]harness.Content{{Text: strings.Join(parts, "\n\n"), Hidden: true}}) {
 			s.stashHookContext(parts)
 		}
 	})
-	hookOptions := external.BuildOptions{Source: globalHooksPath, Async: hookAsync, MCP: ws.CallMCPTool, SpillDir: ws.ScratchPath}
+	hookOptions := external.BuildOptions{Source: globalHooksPath, Async: s.resources.hooks, MCP: ws.CallMCPTool, SpillDir: ws.ScratchPath}
 	hookTrust := attendedTrust{TrustStore: ws.HookTrust(), session: s}
 
 	// Workspace hooks come with the repo, not the user — gate them behind a
@@ -107,11 +107,6 @@ func (s *sessionState) configureHooks() func() error {
 			return hook.Outcome{AdditionalContext: parts}, nil
 		},
 	)
-
-	return func() error {
-		hookAsync.Close()
-		return nil
-	}
 }
 
 func userHooksConfigPath() string {

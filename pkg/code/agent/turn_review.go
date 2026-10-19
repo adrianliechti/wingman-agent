@@ -19,7 +19,7 @@ func (a *Agent) TurnReviews(ctx context.Context, id string) ([]harness.TurnRevie
 	if s == nil {
 		return nil, fmt.Errorf("session not found")
 	}
-	return s.aa.TurnReviews(), nil
+	return s.harness.TurnReviews(), nil
 }
 
 func (a *Agent) UndoTurn(ctx context.Context, sessionID, turnID string) error {
@@ -27,7 +27,7 @@ func (a *Agent) UndoTurn(ctx context.Context, sessionID, turnID string) error {
 	if s == nil {
 		return fmt.Errorf("session not loaded")
 	}
-	return s.aa.UndoTurn(ctx, turnID, func(ctx context.Context, files []tool.FileChange) error {
+	return s.harness.UndoTurn(ctx, turnID, func(ctx context.Context, files []tool.FileChange) error {
 		return fs.UndoFileChanges(ctx, a.workspace.Root, files)
 	})
 }

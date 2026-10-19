@@ -51,10 +51,9 @@ func TestEmptyCatalogIsPinnedAfterPreparation(t *testing.T) {
 	a := &Agent{Config: &Config{
 		PinTools: true,
 		Tools:    func() []tool.Tool { return catalog },
-		PrepareTurn: func(_ context.Context, input []Content) ([]Content, error) {
-			catalog = nil
-			return input, nil
-		},
+	}, PrepareTurn: func(_ context.Context, input []Content) ([]Content, error) {
+		catalog = nil
+		return input, nil
 	}}
 	stream, err := a.Send(t.Context(), []Content{{Text: "start"}})
 	if err != nil {
@@ -69,5 +68,15 @@ func TestEmptyCatalogIsPinnedAfterPreparation(t *testing.T) {
 	}
 	if tools := a.AvailableTools(); len(tools) != 1 || tools[0].Name != "arrived_mid_turn" {
 		t.Fatalf("catalog did not refresh after the turn: %v", tools)
+	}
+}
+
+func TestContextStatsIncludesToolsAddedByPolicy(t *testing.T) {
+	a := &Agent{Config: &Config{FilterTools: func(tools []tool.Tool) []tool.Tool {
+		return append(tools, tool.Tool{Name: "report", Description: "Report a structured result"})
+	}}}
+	stats := a.ContextStats()
+	if stats.ToolsTokens == 0 || len(stats.ToolStats) != 1 || stats.ToolStats[0].Name != "report" {
+		t.Fatalf("policy-provided tools missing from context stats: %+v", stats)
 	}
 }

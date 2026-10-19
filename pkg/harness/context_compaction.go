@@ -222,7 +222,7 @@ type CompactResult struct {
 
 // Compact checkpoints the context between turns; focus tells the summary what to keep.
 func (a *Agent) Compact(ctx context.Context, focus string) (CompactResult, error) {
-	ctx, release, err := a.beginOperation(ctx, true)
+	ctx, release, err := a.beginOperation(ctx)
 	if err != nil {
 		return CompactResult{}, err
 	}

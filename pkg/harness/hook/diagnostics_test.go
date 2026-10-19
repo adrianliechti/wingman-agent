@@ -34,6 +34,10 @@ func TestReportErrorCorrelatesFailuresAndIgnoresOperationCancellation(t *testing
 	cancel()
 	ReportError(canceled, "Stop", "", 0, nil)
 	ReportError(canceled, "Stop", "", 0, fmt.Errorf("hook: %w", context.Canceled))
+	cause := errors.New("host canceled the operation")
+	withCause, cancelCause := context.WithCancelCause(ctx)
+	cancelCause(cause)
+	ReportError(withCause, "Stop", "", 0, fmt.Errorf("hook: %w", cause))
 	if logs.Len() != 0 {
 		t.Fatalf("operation cancellation reported as hook failure: %s", &logs)
 	}

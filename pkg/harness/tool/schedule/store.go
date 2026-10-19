@@ -125,14 +125,13 @@ func (s *FileStore) save(tasks []Task) error {
 	if err != nil {
 		return err
 	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
 
 	if _, err := tmp.Write(out); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
 		return err
 	}
 

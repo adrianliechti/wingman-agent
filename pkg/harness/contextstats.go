@@ -1,8 +1,9 @@
 package harness
 
 import (
+	"cmp"
 	"encoding/json"
-	"sort"
+	"slices"
 )
 
 type ToolStat struct {
@@ -59,21 +60,19 @@ func (a *Agent) ContextStats() ContextStats {
 			req.messages = append(req.messages, update)
 		}
 
-		if a.Tools != nil {
-			req.tools = a.AvailableTools()
-			for _, t := range req.tools {
-				size := len(t.Name) + len(t.Description)
-				if params, err := json.Marshal(t.Parameters); err == nil {
-					size += len(params)
-				}
-				tokens := estimateTokens(size)
-				stats.ToolsTokens += tokens
-				stats.ToolStats = append(stats.ToolStats, ToolStat{Name: t.Name, Tokens: tokens})
+		req.tools = a.AvailableTools()
+		for _, t := range req.tools {
+			size := len(t.Name) + len(t.Description)
+			if params, err := json.Marshal(t.Parameters); err == nil {
+				size += len(params)
 			}
-			sort.Slice(stats.ToolStats, func(i, j int) bool {
-				return stats.ToolStats[i].Tokens > stats.ToolStats[j].Tokens
-			})
+			tokens := estimateTokens(size)
+			stats.ToolsTokens += tokens
+			stats.ToolStats = append(stats.ToolStats, ToolStat{Name: t.Name, Tokens: tokens})
 		}
+		slices.SortFunc(stats.ToolStats, func(a, b ToolStat) int {
+			return cmp.Compare(b.Tokens, a.Tokens)
+		})
 	}
 
 	for _, m := range req.messages {

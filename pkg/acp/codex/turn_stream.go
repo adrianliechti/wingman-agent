@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"sync/atomic"
 )
 
 const (
@@ -21,7 +20,7 @@ type turnStream struct {
 	mu     sync.Mutex
 	events []turnEvent
 	signal chan struct{}
-	bytes  atomic.Int64
+	bytes  int // Queued payload size; protected with events by mu.
 	failed chan error
 	ready  chan struct{}
 	turnID string // published by closing ready
@@ -43,25 +42,25 @@ func (s *turnStream) enqueue(method string, params json.RawMessage) {
 	if s.ctx.Err() != nil {
 		return
 	}
-	size := int64(len(method) + len(params))
-	if s.bytes.Add(size) <= maxQueuedTurnBytes && s.push(turnEvent{rpcMessage: rpcMessage{Method: method, Params: params}}, maxQueuedTurnEvents) {
+	if s.push(turnEvent{rpcMessage: rpcMessage{Method: method, Params: params}}) {
 		return
 	}
-	s.bytes.Add(-size)
 	select {
 	case s.failed <- fmt.Errorf("Codex updates exceeded the client delivery queue"):
 	default:
 	}
 }
 
-// push appends unless the queue already holds limit events; limit < 0 means unbounded.
-func (s *turnStream) push(event turnEvent, limit int) bool {
+// push bounds provider updates while always admitting internal delivery barriers.
+func (s *turnStream) push(event turnEvent) bool {
 	s.mu.Lock()
-	if limit >= 0 && len(s.events) >= limit {
+	size := len(event.Method) + len(event.Params)
+	if event.processed == nil && (len(s.events) >= maxQueuedTurnEvents || s.bytes+size > maxQueuedTurnBytes) {
 		s.mu.Unlock()
 		return false
 	}
 	s.events = append(s.events, event)
+	s.bytes += size
 	s.mu.Unlock()
 	select {
 	case s.signal <- struct{}{}:
@@ -77,18 +76,13 @@ func (s *turnStream) pop() (turnEvent, bool) {
 		return turnEvent{}, false
 	}
 	event := s.events[0]
+	s.bytes -= len(event.Method) + len(event.Params)
 	s.events[0] = turnEvent{}
 	s.events = s.events[1:]
 	if len(s.events) == 0 {
 		s.events = nil
 	}
 	return event, true
-}
-
-func (s *turnStream) queued() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.events)
 }
 
 func (s *turnStream) started(turnID string) {
@@ -108,7 +102,7 @@ func (s *turnStream) acceptsRequest(ctx context.Context, turnID string) bool {
 	// Flush earlier tool-start updates before opening a permission dialog.
 	// Only the request goroutine waits; the RPC reader must remain available.
 	processed := make(chan struct{})
-	s.push(turnEvent{processed: processed}, -1)
+	s.push(turnEvent{processed: processed})
 	select {
 	case <-processed:
 		return ctx.Err() == nil
@@ -151,7 +145,6 @@ func (s *turnStream) next(rpc *rpcClient) (turnEvent, error) {
 	// Drain already-read events before EOF, including a final turn/completed.
 	for {
 		if event, ok := s.pop(); ok {
-			s.bytes.Add(-int64(len(event.Method) + len(event.Params)))
 			return event, nil
 		}
 		select {
@@ -162,7 +155,6 @@ func (s *turnStream) next(rpc *rpcClient) (turnEvent, error) {
 			return event, err
 		case <-rpc.done:
 			if event, ok := s.pop(); ok {
-				s.bytes.Add(-int64(len(event.Method) + len(event.Params)))
 				return event, nil
 			}
 			return event, rpc.closedError()

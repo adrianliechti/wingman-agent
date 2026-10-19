@@ -5,11 +5,148 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 )
+
+type closeFunc func() error
+
+func (f closeFunc) Close() error { return f() }
+
+func TestCloseReleasesResourcesOnceWithoutConfig(t *testing.T) {
+	var closed int
+	failure := errors.New("cleanup failed")
+	a := &Agent{Resources: closeFunc(func() error { closed++; return failure })}
+	err := a.Close(t.Context(), "other")
+	if !errors.Is(err, failure) || closed != 1 {
+		t.Fatalf("cleanup error = %v", err)
+	}
+	if err := a.Close(t.Context(), "again"); err != nil || closed != 1 {
+		t.Fatalf("repeated close = %v, closed = %d", err, closed)
+	}
+}
+
+func TestCloseJoinsWorkersBeforeReleasingResources(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a := &Agent{}
+		entered, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		defer unblock()
+		var cleaned bool
+		a.Resources = closeFunc(func() error { cleaned = true; return nil })
+		if err := a.Go(func(ctx context.Context) {
+			close(entered)
+			<-ctx.Done()
+			close(canceled)
+			<-release
+		}); err != nil {
+			t.Fatal(err)
+		}
+		<-entered
+		if err := a.RunExclusive(t.Context(), func(context.Context) error { return nil }); err != nil {
+			t.Fatalf("worker reserved the turn: %v", err)
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- a.Close(t.Context(), "other") }()
+		<-canceled
+		synctest.Wait()
+		if cleaned {
+			t.Fatal("resource closed before its worker exited")
+		}
+		if err := a.Go(func(context.Context) { t.Error("closed agent started a worker") }); !errors.Is(err, ErrClosed) {
+			t.Fatalf("worker after close = %v", err)
+		}
+		unblock()
+		if err := <-closed; err != nil || !cleaned {
+			t.Fatalf("close = %v, cleaned = %v", err, cleaned)
+		}
+	})
+}
+
+func TestCloseWaitsForTurnSetupBeforeReleasingResources(t *testing.T) {
+	for _, phase := range []string{"preparation", "session start", "user prompt"} {
+		t.Run(phase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				entered, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				unblock := sync.OnceFunc(func() { close(release) })
+				defer unblock()
+				block := func(ctx context.Context, _ string) (hook.Outcome, error) {
+					close(entered)
+					<-ctx.Done()
+					close(canceled)
+					<-release
+					return hook.Outcome{}, ctx.Err()
+				}
+				var cleaned bool
+				a := &Agent{Config: &Config{}, Resources: closeFunc(func() error { cleaned = true; return nil })}
+				switch phase {
+				case "preparation":
+					a.PrepareTurn = func(ctx context.Context, _ []Content) ([]Content, error) {
+						_, err := block(ctx, "")
+						return nil, err
+					}
+				case "session start":
+					a.Hooks.SessionStart = []hook.SessionStart{block}
+				case "user prompt":
+					a.Hooks.UserPromptSubmit = []hook.UserPromptSubmit{block}
+				}
+				sent := make(chan error, 1)
+				go func() {
+					_, err := a.Send(t.Context(), []Content{{Text: "start"}})
+					sent <- err
+				}()
+				<-entered
+				closed := make(chan error, 1)
+				go func() { closed <- a.Close(t.Context(), "other") }()
+				<-canceled
+				synctest.Wait()
+				if cleaned {
+					t.Error("resources closed while turn setup was still unwinding")
+				}
+				unblock()
+				if err := <-sent; !errors.Is(err, context.Canceled) {
+					t.Fatalf("send = %v", err)
+				}
+				if err := <-closed; err != nil || !cleaned || a.Running() {
+					t.Fatalf("close = %v, cleaned = %v, running = %v", err, cleaned, a.Running())
+				}
+			})
+		})
+	}
+}
+
+func TestCloseDoesNotWaitForUnconsumedStream(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a := &Agent{Config: &Config{}}
+		stream, err := a.Send(t.Context(), []Content{{Text: "start"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- a.Close(t.Context(), "other") }()
+		synctest.Wait()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Error("close waited for an unconsumed stream")
+		}
+		for _, err := range stream {
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("closed stream = %v", err)
+			}
+		}
+		if a.Running() || a.TurnReviews()[0].Outcome != string(RuntimeInterrupted) {
+			t.Fatal("consuming the canceled stream did not settle the turn")
+		}
+	})
+}
 
 func TestOperationReservationIncludesPreparation(t *testing.T) {
 	for _, closeSession := range []bool{false, true} {
@@ -17,11 +154,11 @@ func TestOperationReservationIncludesPreparation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 			defer cancel()
 			entered := make(chan struct{})
-			a := &Agent{Config: &Config{PrepareTurn: func(ctx context.Context, _ []Content) ([]Content, error) {
+			a := &Agent{Config: &Config{}, PrepareTurn: func(ctx context.Context, _ []Content) ([]Content, error) {
 				close(entered)
 				<-ctx.Done()
 				return nil, context.Cause(ctx)
-			}}}
+			}}
 			finished := make(chan error, 1)
 			go func() {
 				_, err := a.Send(ctx, []Content{{Text: "first"}})
@@ -112,13 +249,12 @@ func TestPreparationFailureReleasesBudgetAndReservation(t *testing.T) {
 		var setupContext context.Context
 		a := &Agent{Config: &Config{
 			MaxTaskDuration: time.Minute,
-			PrepareTurn: func(ctx context.Context, _ []Content) ([]Content, error) {
-				setupContext = ctx
-				if panicSetup {
-					panic("preparation failed")
-				}
-				return nil, errors.New("preparation failed")
-			},
+		}, PrepareTurn: func(ctx context.Context, _ []Content) ([]Content, error) {
+			setupContext = ctx
+			if panicSetup {
+				panic("preparation failed")
+			}
+			return nil, errors.New("preparation failed")
 		}}
 		func() {
 			defer func() {
@@ -140,7 +276,6 @@ func TestCloseRunsCleanupAndEndHooksOnce(t *testing.T) {
 	var calls []string
 	cleanupErr := errors.New("cleanup failed")
 	a := &Agent{Config: &Config{
-		CloseSession: func() error { calls = append(calls, "cleanup"); return cleanupErr },
 		Hooks: hook.Hooks{SessionEnd: []hook.SessionEnd{func(ctx context.Context, reason string) {
 			calls = append(calls, reason)
 			if hook.RuntimeFromContext(ctx).SessionID != "session" {
@@ -148,6 +283,7 @@ func TestCloseRunsCleanupAndEndHooksOnce(t *testing.T) {
 			}
 		}}},
 	}}
+	a.Resources = closeFunc(func() error { calls = append(calls, "cleanup"); return cleanupErr })
 	ctx := hook.WithRuntime(t.Context(), hook.Runtime{SessionID: "session"})
 	if err := a.Close(ctx, "deleted"); !errors.Is(err, cleanupErr) {
 		t.Fatal(err)
@@ -187,13 +323,59 @@ func TestConsumedStreamCannotAffectLaterOperation(t *testing.T) {
 	}
 }
 
+func TestConcurrentStreamConsumptionFinalizesTurnOnce(t *testing.T) {
+	var interrupted atomic.Int32
+	a := &Agent{Config: &Config{Hooks: hook.Hooks{
+		Interrupt: []hook.Interrupt{func(context.Context) { interrupted.Add(1) }},
+	}}}
+	stream, err := a.Send(t.Context(), []Content{{Text: "start"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Cancel(ErrInterrupted)
+	errorsSeen := make(chan error, 2)
+	var consumers sync.WaitGroup
+	for range 2 {
+		consumers.Go(func() {
+			for _, err := range stream {
+				if err != nil {
+					errorsSeen <- err
+				}
+			}
+		})
+	}
+	consumers.Wait()
+	close(errorsSeen)
+	var canceled, rejected int
+	for err := range errorsSeen {
+		if errors.Is(err, context.Canceled) {
+			canceled++
+		} else {
+			rejected++
+		}
+	}
+	if canceled != 1 || rejected != 1 || interrupted.Load() != 1 || a.Running() {
+		t.Fatalf("canceled=%d rejected=%d interrupts=%d running=%v", canceled, rejected, interrupted.Load(), a.Running())
+	}
+	var terminals int
+	for _, event := range a.StateSnapshot().Events {
+		if event.Type == EventTurnTerminal {
+			terminals++
+		}
+	}
+	if terminals != 1 {
+		t.Fatalf("recorded %d turn terminals", terminals)
+	}
+}
+
 func TestCloseWaitsForSynchronousFinalizationBeforeCleanup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	entered, canceled, release, cleaned := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })
 	defer unblock()
-	a := &Agent{Config: &Config{CloseSession: func() error { close(cleaned); return nil }}}
+	a := &Agent{Config: &Config{}}
+	a.Resources = closeFunc(func() error { close(cleaned); return nil })
 	operationDone := make(chan error, 1)
 	go func() {
 		operationDone <- a.RunExclusive(ctx, func(ctx context.Context) error {

@@ -637,7 +637,7 @@ func (a *App) activeScheduleCount() int {
 		a.scheduleCount = 0
 		a.scheduleCountAt = time.Time{}
 	}
-	if time.Since(a.scheduleCountAt) < time.Second || a.scheduleCountPending.Load() {
+	if time.Since(a.scheduleCountAt) < time.Second || a.scheduleCountPending {
 		return a.scheduleCount
 	}
 	sp, ok := a.agent.(scheduleProvider)
@@ -650,14 +650,10 @@ func (a *App) activeScheduleCount() int {
 	}
 
 	a.scheduleCountAt = time.Now()
-	a.scheduleCountPending.Store(true)
+	a.scheduleCountPending = true
 	id, epoch := a.sessionID, a.sessionEpoch
 	go func() {
-		defer a.scheduleCountPending.Store(false)
 		jobs, err := store.List()
-		if err != nil {
-			return
-		}
 		count := 0
 		for _, job := range jobs {
 			if job.Status == schedule.StatusActive {
@@ -665,7 +661,8 @@ func (a *App) activeScheduleCount() int {
 			}
 		}
 		a.post(func() {
-			if a.sessionID == id && a.sessionEpoch == epoch && a.scheduleCount != count {
+			a.scheduleCountPending = false
+			if err == nil && a.sessionID == id && a.sessionEpoch == epoch && a.scheduleCount != count {
 				a.scheduleCount = count
 				a.invalidate()
 			}

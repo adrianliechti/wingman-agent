@@ -248,7 +248,8 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 	defer stream.Close()
 
 	var outputItems []responses.ResponseInputItemUnionParam
-	var usageDelta Usage
+	var final *responses.Response
+	incomplete := false
 
 	pendingCalls := map[int64]*pendingToolCall{}
 	type outputPart struct {
@@ -264,14 +265,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 		parts[key].WriteString(delta)
 	}
 
-	incomplete := false
-	incompleteReason := ""
-	responseID := ""
-	responseModel := ""
-	stopReason := ""
-	var endTurn *bool
 	outputStarted := false
-	terminalEvent := false
 	emit := func(msg Message) bool {
 		if !yield(msg, nil) {
 			return false
@@ -439,31 +433,11 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 			}
 
 		case responses.ResponseCompletedEvent:
-			endTurn = responseEndTurn(&e.Response)
-			stopReason = responseStopReason(&e.Response)
-			usageDelta = responseToUsage(e.Response)
-			responseID = e.Response.ID
-			responseModel = e.Response.Model
-			terminalEvent = true
-			if items := outputItemsToInput(e.Response.Output); len(items) >= len(outputItems) && len(items) > 0 {
-				outputItems = items
-			}
+			final = &e.Response
 
 		case responses.ResponseIncompleteEvent:
-			stopReason = responseStopReason(&e.Response)
-			// Output was cut short (e.g. max output tokens). The final response
-			// carries the partial items — including a message that never got an
-			// output_item.done — so prefer it over the accumulated stream items,
-			// or the resume round would regenerate everything already streamed.
-			usageDelta = responseToUsage(e.Response)
-			responseID = e.Response.ID
-			responseModel = e.Response.Model
+			final = &e.Response
 			incomplete = true
-			incompleteReason = e.Response.IncompleteDetails.Reason
-			terminalEvent = true
-			if items := outputItemsToInput(e.Response.Output); len(items) > 0 {
-				outputItems = items
-			}
 
 		case responses.ResponseFailedEvent:
 			return nil, &responseFailure{
@@ -483,7 +457,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 
 		// completed and incomplete carry the authoritative final response.
 		// Do not wait for a redundant [DONE] marker or connection close.
-		if terminalEvent {
+		if final != nil {
 			break
 		}
 	}
@@ -494,36 +468,40 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 		}
 		return nil, &streamFailure{err: withProviderDetails(err), outputStarted: outputStarted}
 	}
-	if !terminalEvent {
+	if final == nil {
 		return nil, &streamFailure{
 			err:           io.ErrUnexpectedEOF,
 			outputStarted: outputStarted,
 		}
 	}
 
+	// Completed responses must not discard items already received. After a
+	// cutoff, prefer the final output even when shorter: it includes partial
+	// items that never received output_item.done and must survive continuation.
+	if items := outputItemsToInput(final.Output); len(items) > 0 && (incomplete || len(items) >= len(outputItems)) {
+		outputItems = items
+	}
 	if err := reconcile(outputItems); err != nil {
 		return nil, err
 	}
-	messages := r.outputMessages(outputItems)
+	resp := &response{
+		messages:   r.outputMessages(outputItems),
+		usage:      responseToUsage(*final),
+		id:         final.ID,
+		model:      final.Model,
+		stopReason: responseStopReason(final),
+		incomplete: incomplete,
+	}
 
 	status := "completed"
 	if incomplete {
 		status = "incomplete"
+		resp.incompleteReason = final.IncompleteDetails.Reason
+	} else {
+		resp.endTurn = responseEndTurn(final)
 	}
-	finishReasons := telemetryFinishReasons(status, incompleteReason, messages)
-	return &response{
-		messages: messages,
-		usage:    usageDelta,
-		id:       responseID,
-		model:    responseModel,
-
-		finishReasons: finishReasons,
-		stopReason:    stopReason,
-		endTurn:       endTurn,
-
-		incomplete:       incomplete,
-		incompleteReason: incompleteReason,
-	}, nil
+	resp.finishReasons = telemetryFinishReasons(status, resp.incompleteReason, resp.messages)
+	return resp, nil
 }
 
 // outputItemsToInput applies the same replay checks to item-done events and

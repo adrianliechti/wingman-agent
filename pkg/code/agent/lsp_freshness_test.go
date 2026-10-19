@@ -31,15 +31,15 @@ func TestSessionLSPPreviewProtectsOrdinaryEdit(t *testing.T) {
 	s := &sessionState{
 		parent:    &Agent{workspace: &code.Workspace{}},
 		freshness: freshness,
-		toolSet:   tool.NewSet(fs.Tools(root, &fs.Options{Freshness: freshness})...),
+		tools:     fs.Tools(root, &fs.Options{Freshness: freshness}),
 	}
 	s.setMode(modeAgent)
-	s.toolSet = tool.NewSet(append(s.toolSet.Slice(), tool.Tool{Name: "lsp", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) {
+	s.tools = append(s.tools, tool.Tool{Name: "lsp", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) {
 		return tool.Result{Content: "preview", Metadata: map[string]any{tool.FileSnapshotsMetadata: []tool.FileSnapshot{{Path: path, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(before)))}}}}, nil
-	}})...)
-	s.aa = &harness.Agent{Config: &harness.Config{Tools: s.catalogTools, FilterTools: s.filterTools}}
+	}})
+	s.harness = &harness.Agent{Config: &harness.Config{Tools: s.catalogTools, FilterTools: s.filterTools}}
 	var preview, edit tool.Tool
-	for _, candidate := range s.tools() {
+	for _, candidate := range s.harness.AvailableTools() {
 		switch candidate.Name {
 		case "lsp":
 			preview = candidate
@@ -64,7 +64,7 @@ func TestSessionLSPPreviewProtectsOrdinaryEdit(t *testing.T) {
 		t.Fatalf("session did not enforce the private preview snapshot: %v", err)
 	}
 	s.setMode(modePlan)
-	for _, candidate := range s.tools() {
+	for _, candidate := range s.harness.AvailableTools() {
 		if candidate.Name == "edit" {
 			t.Fatal("preview tracking exposed edit in plan mode")
 		}

@@ -3,7 +3,6 @@ package harness
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -55,14 +54,14 @@ func (c *Config) loadTaskLimits() error {
 	if value := strings.TrimSpace(os.Getenv("WINGMAN_TASK_MAX_TOKENS")); value != "" {
 		limit, err := strconv.ParseInt(value, 10, 64)
 		if err != nil || limit < 0 {
-			return fmt.Errorf("WINGMAN_TASK_MAX_TOKENS must be a nonnegative integer")
+			return errors.New("WINGMAN_TASK_MAX_TOKENS must be a nonnegative integer")
 		}
 		c.MaxTaskTokens = limit
 	}
 	if value := strings.TrimSpace(os.Getenv("WINGMAN_TASK_TIMEOUT")); value != "" {
 		limit, err := time.ParseDuration(value)
 		if err != nil || limit < 0 {
-			return fmt.Errorf("WINGMAN_TASK_TIMEOUT must be a nonnegative duration, such as 20m")
+			return errors.New("WINGMAN_TASK_TIMEOUT must be a nonnegative duration, such as 20m")
 		}
 		c.MaxTaskDuration = limit
 	}

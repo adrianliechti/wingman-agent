@@ -35,13 +35,11 @@ type shellSyntax struct {
 }
 
 var (
-	bashLanguageOnce sync.Once
-	bashLanguage     *gotreesitter.Language
-	bashParsers      sync.Pool
+	bashLanguage = sync.OnceValue(grammars.BashLanguage)
+	bashParsers  = sync.Pool{New: func() any { return gotreesitter.NewParser(bashLanguage()) }}
 
-	powerShellLanguageOnce sync.Once
-	powerShellLanguage     *gotreesitter.Language
-	powerShellParsers      sync.Pool
+	powerShellLanguage = sync.OnceValue(grammars.PowershellLanguage)
+	powerShellParsers  = sync.Pool{New: func() any { return gotreesitter.NewParser(powerShellLanguage()) }}
 )
 
 func platformShellDialect() shellDialect {
@@ -54,11 +52,9 @@ func platformShellDialect() shellDialect {
 func languageForDialect(dialect shellDialect) *gotreesitter.Language {
 	switch dialect {
 	case dialectPowerShell:
-		powerShellLanguageOnce.Do(func() { powerShellLanguage = grammars.PowershellLanguage() })
-		return powerShellLanguage
+		return powerShellLanguage()
 	default:
-		bashLanguageOnce.Do(func() { bashLanguage = grammars.BashLanguage() })
-		return bashLanguage
+		return bashLanguage()
 	}
 }
 
@@ -82,10 +78,7 @@ func parseShellSyntax(source string, dialect shellDialect) (result shellSyntax) 
 
 	lang := languageForDialect(dialect)
 	pool := parserPoolForDialect(dialect)
-	parser, _ := pool.Get().(*gotreesitter.Parser)
-	if parser == nil {
-		parser = gotreesitter.NewParser(lang)
-	}
+	parser := pool.Get().(*gotreesitter.Parser)
 	parserReusable := false
 	defer func() {
 		if parserReusable {

@@ -25,7 +25,7 @@ func (u *promptCaptureUI) Confirm(ctx context.Context, _ string) (bool, error) {
 func TestPromptContextUsesLastActiveSession(t *testing.T) {
 	ui := &promptCaptureUI{}
 	a := &Agent{ui: ui, sessions: map[string]*sessionState{"active": {}, "fallback": {}}}
-	a.lastActive.Store("active")
+	a.lastActive = "active"
 
 	if _, err := a.elicit(context.Background(), tool.ElicitRequest{Message: "question"}); err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestPromptContextUsesLastActiveSession(t *testing.T) {
 
 func TestWebPromptContextNeverGuessesAnOwner(t *testing.T) {
 	a := &Agent{cfg: Config{Options: Options{IsolateSessions: true}}, sessions: map[string]*sessionState{"one": {}, "two": {}}}
-	a.lastActive.Store("one")
+	a.lastActive = "one"
 	if got := code.SessionIDFromContext(a.promptContext(context.Background())); got != "" {
 		t.Fatalf("guessed session %q", got)
 	}

@@ -3,7 +3,6 @@ package harness
 import (
 	"context"
 	"errors"
-	"sync"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 )
@@ -11,9 +10,29 @@ import (
 // ErrClosed means the session has been closed and cannot start more work.
 var ErrClosed = errors.New("agent session is closed")
 
+// Go starts workers whose lifetime belongs to the agent, independent of any
+// turn. Close cancels their context and waits for them before releasing resources.
+// Workers must honor cancellation and must not call Close on this agent.
+func (a *Agent) Go(workers ...func(context.Context)) error {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+	if a.closed {
+		return ErrClosed
+	}
+	if a.backgroundCtx == nil {
+		a.backgroundCtx, a.cancelBackground = context.WithCancel(context.Background())
+	}
+	ctx := a.backgroundCtx
+	for _, worker := range workers {
+		a.background.Go(func() { worker(ctx) })
+	}
+	return nil
+}
+
 // beginOperation owns the session through preparation and finalization. A
 // canceled operation keeps its reservation until its caller has unwound.
-func (a *Agent) beginOperation(ctx context.Context, waitOnClose bool) (context.Context, func(), error) {
+// The owner calls the returned release function exactly once.
+func (a *Agent) beginOperation(ctx context.Context) (context.Context, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -28,24 +47,29 @@ func (a *Agent) beginOperation(ctx context.Context, waitOnClose bool) (context.C
 	ctx, cancel := context.WithCancelCause(ctx)
 	a.running, a.finishing = true, true
 	a.cancel = cancel
-	var done chan struct{}
-	if waitOnClose {
-		done = make(chan struct{})
-	}
-	a.closeWait = done
-	return ctx, sync.OnceFunc(func() {
+	a.operationDone = make(chan struct{})
+	return ctx, func() {
 		cancel(nil)
 		a.queueMu.Lock()
 		a.cancel = nil
-		a.closeWait = nil
 		a.turnID = ""
 		a.running, a.finishing = false, false
 		a.turnTools, a.toolsPinned = nil, false
-		if done != nil {
-			close(done)
+		if a.operationDone != nil {
+			close(a.operationDone)
+			a.operationDone = nil
 		}
 		a.queueMu.Unlock()
-	}), nil
+	}, nil
+}
+
+// detachStream ends Close's wait for setup without releasing the turn's
+// reservation. Streaming stays owned by its consumer through finalization.
+func (a *Agent) detachStream() {
+	a.queueMu.Lock()
+	close(a.operationDone)
+	a.operationDone = nil
+	a.queueMu.Unlock()
 }
 
 // ActiveTurnID identifies the Send operation through finalization. It is empty
@@ -61,7 +85,7 @@ func (a *Agent) ActiveTurnID() string {
 // not start another operation or call Close on this agent. Include finalization
 // in fn and honor its context: Close waits for synchronous operations to settle.
 func (a *Agent) RunExclusive(ctx context.Context, fn func(context.Context) error) error {
-	ctx, release, err := a.beginOperation(ctx, true)
+	ctx, release, err := a.beginOperation(ctx)
 	if err != nil {
 		return err
 	}
@@ -79,9 +103,10 @@ func (a *Agent) Cancel(cause error) {
 	}
 }
 
-// Close rejects new operations, cancels active work, releases host resources,
-// and invokes SessionEnd hooks once. Synchronous operations settle before
-// cleanup; Close does not wait for a Send stream consumer.
+// Close rejects new operations, cancels active work, joins workers, releases
+// owned resources, and invokes SessionEnd hooks once. Synchronous operations
+// and turn setup settle before cleanup; Close does not wait for a Send stream
+// consumer. Setup callbacks must not call Close on this agent.
 // The caller supplies a cleanup context independent of the active turn.
 func (a *Agent) Close(ctx context.Context, reason string) error {
 	a.queueMu.Lock()
@@ -91,20 +116,25 @@ func (a *Agent) Close(ctx context.Context, reason string) error {
 	}
 	a.closed = true
 	cancel := a.cancel
-	done := a.closeWait
+	done := a.operationDone
+	cancelBackground := a.cancelBackground
 	a.queueMu.Unlock()
 	if cancel != nil {
 		cancel(nil)
 	}
+	if cancelBackground != nil {
+		cancelBackground()
+	}
 	if done != nil {
 		<-done
 	}
-	if a.Config == nil {
-		return nil
-	}
+	a.background.Wait()
 	var err error
-	if a.CloseSession != nil {
-		err = a.CloseSession()
+	if a.Resources != nil {
+		err = a.Resources.Close()
+	}
+	if a.Config == nil {
+		return err
 	}
 	ctx = hook.WithRuntime(ctx, a.hookRuntime(ctx))
 	for _, h := range a.Hooks.SessionEnd {

@@ -51,7 +51,7 @@ func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, er
 		}
 	}
 
-	review, err := s.aa.ReviewAction(ctx, action)
+	review, err := s.harness.ReviewAction(ctx, action)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return tool.Verdict{}, ctxErr
@@ -67,10 +67,10 @@ func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, er
 	reason := review.Rejection()
 	if consecutive, recent, tripped := s.reviews.record(turn, true); tripped {
 		reason += fmt.Sprintf("\nAutomatic review rejected too many actions this turn (%d consecutive, %d in the last %d); the turn was interrupted.", consecutive, recent, reviewRecentWindow)
-		if origin := tool.BackgroundOrigin(ctx); origin != "" && s.tasks != nil {
-			_ = s.tasks.Stop(origin)
+		if origin := tool.BackgroundOrigin(ctx); origin != "" && s.resources.tasks != nil {
+			_ = s.resources.tasks.Stop(origin)
 		} else {
-			s.aa.Cancel(nil)
+			s.harness.Cancel(nil)
 		}
 	}
 	return tool.Verdict{Reason: reason}, nil
@@ -86,7 +86,7 @@ func (s *sessionState) reviewTurn(ctx context.Context) string {
 	}
 	// Inline children share the foreground turn's rejection budget. Detached
 	// tasks above keep their own budget and cancellation target.
-	if active := s.aa.ActiveTurnID(); active != "" {
+	if active := s.harness.ActiveTurnID(); active != "" {
 		return active
 	}
 	return turn
@@ -98,7 +98,7 @@ func (s *sessionState) permissionHooks(ctx context.Context) (allowed, decided bo
 	if !ok {
 		return false, false
 	}
-	for i, run := range s.aa.Hooks.PermissionRequest {
+	for i, run := range s.harness.Hooks.PermissionRequest {
 		outcome, err := run(ctx, call)
 		if err != nil {
 			hook.ReportError(ctx, "PermissionRequest", "", i, err)

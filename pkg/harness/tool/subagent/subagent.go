@@ -207,7 +207,7 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 		defer r.collector.take()
 	}
 	if tk != nil {
-		r.sub.Recorder = harness.EventRecorderFunc(tk.AppendAgentEvents)
+		r.sub.Recorder = tk
 		defer func() {
 			if persistErr := tk.SetAgentState(r.sub.StateSnapshot()); persistErr != nil {
 				err = errors.Join(err, fmt.Errorf("persist child agent state: %w", persistErr))
@@ -337,7 +337,7 @@ func bindRestoredTasks(parent *harness.Config, types map[string]subagentType, ta
 		if err != nil {
 			continue
 		}
-		runner.sub.Recorder = harness.EventRecorderFunc(tk.AppendAgentEvents)
+		runner.sub.Recorder = tk
 		if err := runner.sub.ReconcileInterrupted("process restarted before the child operation settled"); err != nil {
 			continue
 		}

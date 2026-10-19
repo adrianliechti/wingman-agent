@@ -110,7 +110,7 @@ func cloneRuntimeEvents(events []RuntimeEvent) []RuntimeEvent {
 	for i := range events {
 		out[i] = events[i]
 		if events[i].Message != nil {
-			message := CloneMessages([]Message{*events[i].Message})[0]
+			message := cloneMessage(*events[i].Message)
 			out[i].Message = &message
 		}
 		out[i].Context = CloneMessages(events[i].Context)
@@ -167,17 +167,6 @@ func (a *Agent) recordEvents(events ...RuntimeEvent) error {
 	for _, event := range prepared {
 		a.applyEventLocked(event)
 		a.runtimeIndex.observe(event)
-	}
-	return nil
-}
-
-func validateRuntimeEvents(events []RuntimeEvent) error {
-	index := newRuntimeEventIndex()
-	if err := validateRuntimeBatch(events, index); err != nil {
-		return err
-	}
-	for _, event := range events {
-		index.observe(event)
 	}
 	return nil
 }
@@ -336,9 +325,9 @@ func (a *Agent) applyEventLocked(event RuntimeEvent) {
 	switch event.Type {
 	case EventMessage:
 		if event.Message != nil {
-			message := CloneMessages([]Message{*event.Message})[0]
+			message := cloneMessage(*event.Message)
 			a.Messages = append(a.Messages, message)
-			a.contextMessages = append(a.contextMessages, CloneMessages([]Message{message})[0])
+			a.contextMessages = append(a.contextMessages, cloneMessage(message))
 			a.contextSet = true
 		}
 	case EventContextCheckpoint:

@@ -22,7 +22,7 @@ func (s *sessionState) scheduleRunner() *schedule.Runner {
 			if fire.GateOutput != "" {
 				prompt += "\n\nPre-check script output:\n\n" + fire.GateOutput
 			}
-			s.tasks.Publish(task.Event{
+			s.resources.tasks.Publish(task.Event{
 				ID:          fire.Task.ID,
 				Kind:        task.KindSchedule,
 				AgentType:   "schedule",

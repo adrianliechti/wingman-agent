@@ -18,9 +18,7 @@ func (a *App) getPhase() AppPhase {
 }
 
 func (a *App) setPhase(phase AppPhase) {
-	if phase == PhaseIdle {
-		a.stopRequested.Store(false)
-	} else if a.stopRequested.Load() {
+	if a.getPhase() == PhaseStopping && phase != PhaseIdle {
 		phase = PhaseStopping
 	}
 	prev := AppPhase(a.phase.Swap(int32(phase)))
@@ -513,21 +511,10 @@ const renderInterval = 40 * time.Millisecond
 
 // requestRender coalesces repaints from streaming goroutines.
 func (a *App) requestRender() {
-	if !a.renderPending.CompareAndSwap(false, true) {
-		return
+	select {
+	case a.renderRequests <- struct{}{}:
+	default:
 	}
-
-	delay := max(renderInterval-time.Duration(time.Now().UnixNano()-a.renderLast.Load()), 0)
-
-	time.AfterFunc(delay, func() {
-		a.post(func() {
-			a.renderPending.Store(false)
-			a.applyPendingPhase()
-			a.refreshMetadata()
-			a.renderLast.Store(time.Now().UnixNano())
-			a.invalidate()
-		})
-	})
 }
 
 func (a *App) handleTurnEvent(ev code.TurnEvent) {

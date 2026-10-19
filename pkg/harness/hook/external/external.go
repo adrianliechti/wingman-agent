@@ -2,6 +2,7 @@ package external
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -448,8 +448,8 @@ func runEvent(ctx context.Context, workDir string, options BuildOptions, event s
 	}
 	// Codex reports and aggregates in configured order even though handlers run
 	// concurrently. completionOrder remains attached for rewrite arbitration.
-	sort.SliceStable(results, func(i, j int) bool {
-		return results[i].configuredOrder < results[j].configuredOrder
+	slices.SortStableFunc(results, func(a, b runResult) int {
+		return cmp.Compare(a.configuredOrder, b.configuredOrder)
 	})
 	return results
 }

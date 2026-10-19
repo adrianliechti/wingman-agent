@@ -60,9 +60,8 @@ type ExecManager struct {
 	onExit func(ExecExit)
 
 	mu       sync.Mutex
-	closed   bool
 	nextID   int
-	sessions map[int]*execSession
+	sessions map[int]*execSession // Nil after Close; no more sessions may be added.
 }
 
 func NewExecManager(onExit func(ExecExit)) *ExecManager {
@@ -114,12 +113,8 @@ func (m *ExecManager) StopBackgroundSession(id int) error {
 
 func (m *ExecManager) Close() {
 	m.mu.Lock()
-	m.closed = true
-	sessions := make([]*execSession, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		sessions = append(sessions, s)
-	}
-	m.sessions = map[int]*execSession{}
+	sessions := m.sessions
+	m.sessions = nil
 	m.mu.Unlock()
 
 	for _, s := range sessions {
@@ -130,7 +125,7 @@ func (m *ExecManager) Close() {
 func (m *ExecManager) add(s *execSession) (int, error) {
 	m.mu.Lock()
 
-	if m.closed {
+	if m.sessions == nil {
 		m.mu.Unlock()
 		s.cancel()
 		return 0, fmt.Errorf("agent session is closed")
@@ -222,7 +217,7 @@ func (m *ExecManager) endWait(s *execSession) {
 // process exited).
 func (m *ExecManager) notifyExit(s *execSession) {
 	m.mu.Lock()
-	if m.closed || m.onExit == nil || !s.backgrounded || s.waiters > 0 || s.notified || m.sessions[s.id] != s {
+	if m.onExit == nil || !s.backgrounded || s.waiters > 0 || s.notified || m.sessions[s.id] != s {
 		m.mu.Unlock()
 		return
 	}

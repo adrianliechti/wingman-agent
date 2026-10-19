@@ -45,14 +45,13 @@ type App struct {
 	pendingPhase         atomic.Pointer[phaseUpdate]
 	phaseStart           time.Time
 	metadataPending      atomic.Bool
-	skillRefreshPending  atomic.Bool
+	skillRefreshPending  bool // Owned by the UI loop, including completion updates.
 	skillRefreshAt       time.Time
-	scheduleCountPending atomic.Bool
+	scheduleCountPending bool
 	scheduleCountAt      time.Time
 	scheduleCountSession string
 	scheduleCount        int
 	queueDirty           atomic.Bool
-	stopRequested        atomic.Bool
 
 	spinnerFrame int
 	quitDeadline time.Time
@@ -149,9 +148,8 @@ type App struct {
 
 	taskPumpStop chan struct{}
 
-	renderPending atomic.Bool
-	renderLast    atomic.Int64
-	dirty         bool
+	renderRequests chan struct{}
+	dirty          bool
 
 	streamStateMu   sync.Mutex
 	streamCurrent   streamSnapshot
@@ -215,8 +213,9 @@ func New(ctx context.Context, coderAgent code.Agent, sessionID string) *App {
 		agent: coderAgent,
 		term:  inline.NewTerminal(),
 
-		queue: make(chan func(), 64),
-		quit:  make(chan struct{}),
+		queue:          make(chan func(), 64),
+		quit:           make(chan struct{}),
+		renderRequests: make(chan struct{}, 1),
 
 		sessionID:    sessionID,
 		sessionEpoch: 1,
@@ -712,6 +711,10 @@ func (a *App) Run() error {
 
 	ticker := time.NewTicker(spinnerInterval)
 	defer ticker.Stop()
+	renderTimer := time.NewTimer(renderInterval)
+	renderTimer.Stop()
+	defer renderTimer.Stop()
+	renderRequests := a.renderRequests
 	motionTimer := time.NewTimer(time.Hour)
 	motionTimer.Stop()
 	defer motionTimer.Stop()
@@ -736,6 +739,18 @@ func (a *App) Run() error {
 
 		case fn := <-a.queue:
 			fn()
+
+		case <-renderRequests:
+			a.applyPendingPhase()
+			a.refreshMetadata()
+			a.invalidate()
+			// Keep one request buffered during the cooldown. Producers can
+			// keep updating state without waiting for the UI or a timer.
+			renderRequests = nil
+			renderTimer.Reset(renderInterval)
+
+		case <-renderTimer.C:
+			renderRequests = a.renderRequests
 
 		case <-motionTimer.C:
 			a.invalidate()
@@ -1429,7 +1444,6 @@ func (a *App) cancelStream() {
 		a.showToast(err.Error(), theme.Default.Red)
 		return
 	}
-	a.stopRequested.Store(true)
 	a.setPhase(PhaseStopping)
 	a.syncQueuedInputs()
 

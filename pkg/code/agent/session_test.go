@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,13 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
+type failingResources struct {
+	io.Closer
+	err error
+}
+
+func (r failingResources) Close() error { return errors.Join(r.Closer.Close(), r.err) }
+
 func TestCloseReportsAllSessionFailuresAndStillRunsEndHooks(t *testing.T) {
 	a := New(newOptionsTestWorkspace(t), Config{Options: Options{DisableShell: true}}, nil)
 	defer a.Close()
@@ -33,8 +41,8 @@ func TestCloseReportsAllSessionFailuresAndStillRunsEndHooks(t *testing.T) {
 		}
 		ids = append(ids, id)
 		s := a.session(id)
-		s.toolSet.Own("failing resource", func() error { return failure })
-		s.aa.Hooks.SessionEnd = append(s.aa.Hooks.SessionEnd, func(context.Context, string) { ended++ })
+		s.harness.Resources = failingResources{Closer: s.harness.Resources, err: failure}
+		s.harness.Hooks.SessionEnd = append(s.harness.Hooks.SessionEnd, func(context.Context, string) { ended++ })
 	}
 	err := a.Close()
 	for i, failure := range failures {
@@ -54,14 +62,15 @@ func TestDeleteSessionReportsCleanupFailureAndCompletesDeletion(t *testing.T) {
 	failure := errors.New("host cleanup failed")
 	a := New(newOptionsTestWorkspace(t), Config{
 		Options: Options{DisableShell: true},
-		Config:  harness.Config{CloseSession: func() error { return failure }},
 	}, nil)
 	defer a.Close()
 	id, err := a.NewSession(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.session(id).aa.RecordMessage(harness.Message{Role: harness.RoleUser, Content: []harness.Content{{Text: "saved"}}}); err != nil {
+	s := a.session(id)
+	s.harness.Resources = failingResources{Closer: s.harness.Resources, err: failure}
+	if err := a.session(id).harness.RecordMessage(harness.Message{Role: harness.RoleUser, Content: []harness.Content{{Text: "saved"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Save(id); err != nil {
@@ -84,8 +93,7 @@ func TestRegistrationFailurePreservesCancellationAndCleanupError(t *testing.T) {
 	a := New(newOptionsTestWorkspace(t), Config{
 		Options: Options{DisableShell: true},
 		Config: harness.Config{
-			CloseSession: func() error { return failure },
-			Hooks:        hook.Hooks{SessionEnd: []hook.SessionEnd{func(context.Context, string) { ended++ }}},
+			Hooks: hook.Hooks{SessionEnd: []hook.SessionEnd{func(context.Context, string) { ended++ }}},
 		},
 	}, nil)
 	defer a.Close()
@@ -93,6 +101,7 @@ func TestRegistrationFailurePreservesCancellationAndCleanupError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.harness.Resources = failingResources{Closer: s.harness.Resources, err: failure}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	err = a.registerSession(ctx, s)
@@ -102,7 +111,13 @@ func TestRegistrationFailurePreservesCancellationAndCleanupError(t *testing.T) {
 }
 
 func TestFailedSessionConstructionRemovesPrivateTemp(t *testing.T) {
-	a := New(newOptionsTestWorkspace(t), Config{Options: Options{DisableShell: true}}, nil)
+	var ended int
+	a := New(newOptionsTestWorkspace(t), Config{
+		Options: Options{DisableShell: true},
+		Config: harness.Config{Hooks: hook.Hooks{
+			SessionEnd: []hook.SessionEnd{func(context.Context, string) { ended++ }},
+		}},
+	}, nil)
 	defer a.Close()
 	artifacts, err := session.ArtifactDir(a.sessionsDir, "invalid-tasks")
 	if err != nil {
@@ -125,16 +140,19 @@ func TestFailedSessionConstructionRemovesPrivateTemp(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("failed construction left temporary resources: %v, %v", entries, err)
 	}
+	if ended != 0 {
+		t.Fatal("failed construction fired session-end hooks")
+	}
 }
 
 func TestRestoredSubagentInheritsHooksBeforeToolConstruction(t *testing.T) {
 	a, id, _ := cancellationE2EAgent(t, hook.Hooks{})
-	if err := a.session(id).aa.RecordMessage(harness.Message{Role: harness.RoleUser, Content: []harness.Content{{Text: "saved"}}}); err != nil {
+	if err := a.session(id).harness.RecordMessage(harness.Message{Role: harness.RoleUser, Content: []harness.Content{{Text: "saved"}}}); err != nil {
 		t.Fatal(err)
 	}
 	const agentID = "restored-child"
 	spec := json.RawMessage(`{"version":1,"agent_id":"restored-child","agent_type":"explore","instructions":"answer briefly","model":"test-model"}`)
-	created, err := a.session(id).tasks.AdoptAgent(agentID, "restored", "explore", "done", time.Second, func(tk *task.Task) error {
+	created, err := a.session(id).resources.tasks.AdoptAgent(agentID, "restored", "explore", "done", time.Second, func(tk *task.Task) error {
 		return tk.SetDurableAgent(agentID, harness.State{}, spec)
 	})
 	if err != nil {
@@ -165,7 +183,7 @@ func TestRestoredSubagentInheritsHooksBeforeToolConstruction(t *testing.T) {
 	if err := restored.LoadSession(t.Context(), id); err != nil {
 		t.Fatal(err)
 	}
-	registry := restored.session(id).tasks
+	registry := restored.session(id).resources.tasks
 	child := registry.Get(created.ID)
 	if child == nil || !child.SupportsResume() {
 		t.Fatal("restored child cannot resume")

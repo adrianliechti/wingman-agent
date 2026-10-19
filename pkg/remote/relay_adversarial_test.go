@@ -176,6 +176,36 @@ func TestClosedRelayRejectsNewRegistration(t *testing.T) {
 	}
 }
 
+func TestConcurrentRelayCloseDisconnectsWorkspace(t *testing.T) {
+	relay := NewRelay("secret")
+	server := httptest.NewServer(relay)
+	defer server.Close()
+	defer relay.Close()
+	credentials := startTestWorkspace(t, server.URL, "secret")
+	tunnel := relay.lookup(credentials.ID, credentials.Key)
+	if tunnel == nil {
+		t.Fatal("workspace did not register")
+	}
+	var closers sync.WaitGroup
+	for range 8 {
+		closers.Go(relay.Close)
+	}
+	closers.Wait()
+	select {
+	case <-tunnel.mux.CloseChan():
+	default:
+		t.Fatal("Close left the workspace tunnel running")
+	}
+	if relay.lookup(credentials.ID, credentials.Key) != nil {
+		t.Fatal("closed relay still exposes a workspace")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := Serve(ctx, ClientOptions{Relay: server.URL, Token: "secret", Credentials: credentials}, testHandler()); !errors.Is(err, errRejected) {
+		t.Fatalf("registration after concurrent Close: %v", err)
+	}
+}
+
 func TestTunnelReconnectsWithoutPairingAgain(t *testing.T) {
 	relay := NewRelay("secret")
 	server := httptest.NewServer(relay)

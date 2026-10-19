@@ -599,7 +599,7 @@ func TestEndRunPreservesQueuedUserInput(t *testing.T) {
 	if err := a.recordEvents(RuntimeEvent{Type: EventTurnStarted, TurnID: "turn"}); err != nil {
 		t.Fatal(err)
 	}
-	ctx, release, err := a.beginOperation(t.Context(), false)
+	ctx, release, err := a.beginOperation(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}

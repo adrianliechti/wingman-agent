@@ -9,18 +9,17 @@ import (
 
 // Async runs observe-only handlers in the background and delivers their context when they finish.
 type Async struct {
-	deliver func(runtime hook.Runtime, context []string)
+	deliver func(runtime hook.Runtime, parts []string)
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	slots  chan struct{}
 
-	mu     sync.Mutex
-	wg     sync.WaitGroup
-	closed bool
+	mu sync.Mutex // Serializes worker admission with cancellation before Wait.
+	wg sync.WaitGroup
 }
 
-func NewAsync(deliver func(runtime hook.Runtime, context []string)) *Async {
+func NewAsync(deliver func(runtime hook.Runtime, parts []string)) *Async {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Async{
 		deliver: deliver,
@@ -33,7 +32,7 @@ func NewAsync(deliver func(runtime hook.Runtime, context []string)) *Async {
 func (a *Async) start(runtime hook.Runtime, run func(ctx context.Context) []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed {
+	if a.ctx.Err() != nil {
 		return
 	}
 	// Async hooks are best-effort: a full pool drops the run instead of parking goroutines.
@@ -42,16 +41,14 @@ func (a *Async) start(runtime hook.Runtime, run func(ctx context.Context) []stri
 	default:
 		return
 	}
-	a.wg.Add(1)
-	go func() {
-		defer a.wg.Done()
+	a.wg.Go(func() {
 		defer func() { <-a.slots }()
-		context := run(hook.WithRuntime(a.ctx, runtime))
-		if len(context) == 0 || a.ctx.Err() != nil || a.deliver == nil {
+		parts := run(hook.WithRuntime(a.ctx, runtime))
+		if len(parts) == 0 || a.ctx.Err() != nil || a.deliver == nil {
 			return
 		}
-		a.deliver(runtime, context)
-	}()
+		a.deliver(runtime, parts)
+	})
 }
 
 func (a *Async) Close() {
@@ -59,8 +56,7 @@ func (a *Async) Close() {
 		return
 	}
 	a.mu.Lock()
-	a.closed = true
-	a.mu.Unlock()
 	a.cancel()
+	a.mu.Unlock()
 	a.wg.Wait()
 }

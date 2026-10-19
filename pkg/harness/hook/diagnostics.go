@@ -11,7 +11,7 @@ import (
 // source is empty for in-process callbacks. Arguments and hook output are not
 // logged. Cancellation of the containing operation is not a hook failure.
 func ReportError(ctx context.Context, event, source string, index int, err error) {
-	if err == nil || ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+	if err == nil || ctx.Err() != nil && (errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx))) {
 		return
 	}
 	runtime := RuntimeFromContext(ctx)

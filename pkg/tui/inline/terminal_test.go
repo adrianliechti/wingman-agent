@@ -1,9 +1,40 @@
 package inline
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
+
+func TestResizeWatcherTracksQueuedChanges(t *testing.T) {
+	actualWidth, actualHeight := 80, 24
+	terminal := NewTerminal(WithIO(strings.NewReader(""), io.Discard, func() (int, int) {
+		return actualWidth, actualHeight
+	}))
+	terminal.Resized(80, 24)
+	width, height := terminal.Size()
+	for _, size := range [][2]int{{80, 24}, {100, 30}, {100, 30}, {80, 24}} {
+		actualWidth, actualHeight = size[0], size[1]
+		width, height = terminal.checkResize(width, height)
+	}
+	if width, height := terminal.Size(); width != 80 || height != 24 {
+		t.Fatal("watcher changed rendering dimensions before the UI handled its events")
+	}
+	// The UI was busy: one resize and its reversal should be queued, with no
+	// duplicate for the repeated observation and no lost reversal.
+	if len(terminal.events) != 2 {
+		t.Fatalf("queued %d resize events, want 2", len(terminal.events))
+	}
+	for _, want := range []ResizeEvent{{Width: 100, Height: 30}, {Width: 80, Height: 24}} {
+		if event := <-terminal.Events(); event != want {
+			t.Fatalf("resize event = %+v, want %+v", event, want)
+		}
+		terminal.Resized(want.Width, want.Height)
+		if width, height := terminal.Size(); width != want.Width || height != want.Height {
+			t.Fatalf("UI dimensions = %dx%d, want %+v", width, height, want)
+		}
+	}
+}
 
 // vtScreen is a minimal terminal emulator covering the sequences the
 // renderer emits: CUP, EL, ED.

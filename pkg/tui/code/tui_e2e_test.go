@@ -84,6 +84,35 @@ func (h *tuiE2EHarness) postText(t *testing.T, value string) {
 	}
 }
 
+// onUI keeps test reads and writes on the goroutine that owns the UI state.
+func (h *tuiE2EHarness) onUI(t *testing.T, fn func()) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	select {
+	case h.app.queue <- func() { fn(); close(done) }:
+	case <-ctx.Done():
+		t.Fatal("timed out queuing UI check")
+	case <-h.app.quit:
+		t.Fatal("TUI stopped before UI check")
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for UI check")
+	}
+}
+
+func (h *tuiE2EHarness) waitForUI(t *testing.T, condition func() bool) {
+	t.Helper()
+	waitForTUI(t, func() bool {
+		var ready bool
+		h.onUI(t, func() { ready = condition() })
+		return ready
+	})
+}
+
 func newTUIE2EHarness(t *testing.T) *tuiE2EHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -170,15 +199,12 @@ func TestTUIE2EPasteWaitsForExplicitSubmit(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newTUIE2EHarness(t)
 			var reads atomic.Int32
-			ready := make(chan struct{})
-			h.app.post(func() {
+			h.onUI(t, func() {
 				h.app.clipboardRead = func() ([]clipboard.Content, error) {
 					reads.Add(1)
 					return []clipboard.Content{{Text: pasted}}, nil
 				}
-				close(ready)
 			})
-			<-ready
 			if _, err := io.WriteString(h.input, sequence); err != nil {
 				t.Fatal(err)
 			}
@@ -278,7 +304,8 @@ func TestTUIE2ENativeToolRoundKeepsOrder(t *testing.T) {
 		return h.app.getPhase() == PhaseIdle && len(messages) >= 4 && strings.Contains(finalMessageText(messages), "After tool.")
 	})
 
-	transcript := ansi.Strip(strings.Join(h.app.chatViewLines(100), "\n"))
+	var transcript string
+	h.onUI(t, func() { transcript = ansi.Strip(strings.Join(h.app.chatViewLines(100), "\n")) })
 	beforeAt := strings.Index(transcript, "Before tool.")
 	toolAt := strings.Index(transcript, "glob *")
 	afterAt := strings.Index(transcript, "After tool.")
@@ -312,14 +339,12 @@ func TestTUIE2ECommandCenterAndTranscriptSearch(t *testing.T) {
 	if _, err := io.WriteString(h.input, "\x10"); err != nil { // ctrl+p
 		t.Fatal(err)
 	}
-	waitForTUI(t, func() bool { return h.app.popup != nil && h.app.popup.kind == popupPalette })
-	if !strings.Contains(h.output.Text(), "commands") {
-		t.Fatal("command center was not rendered")
-	}
+	h.waitForUI(t, func() bool { return h.app.popup != nil && h.app.popup.kind == popupPalette })
+	waitForTUI(t, func() bool { return strings.Contains(h.output.Text(), "commands") })
 	if _, err := io.WriteString(h.input, "\x10"); err != nil {
 		t.Fatal(err)
 	}
-	waitForTUI(t, func() bool { return h.app.popup == nil })
+	h.waitForUI(t, func() bool { return h.app.popup == nil })
 
 	h.postText(t, "hello transcript")
 	waitForTUI(t, func() bool {
@@ -330,14 +355,14 @@ func TestTUIE2ECommandCenterAndTranscriptSearch(t *testing.T) {
 	if _, err := io.WriteString(h.input, "\x0f"); err != nil { // ctrl+o
 		t.Fatal(err)
 	}
-	waitForTUI(t, func() bool {
+	h.waitForUI(t, func() bool {
 		_, ok := h.app.overlay.(*transcriptOverlay)
 		return ok
 	})
 	if _, err := io.WriteString(h.input, "/reply\r"); err != nil {
 		t.Fatal(err)
 	}
-	waitForTUI(t, func() bool {
+	h.waitForUI(t, func() bool {
 		o, ok := h.app.overlay.(*transcriptOverlay)
 		return ok && o.query == "reply" && len(o.matches) == 1
 	})

@@ -3,7 +3,9 @@ package task_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
@@ -102,21 +104,64 @@ func TestRunAgentLifecycle(t *testing.T) {
 	}
 }
 
-func TestRunAgentPreparationFailureRollsBack(t *testing.T) {
-	r := task.NewRegistry()
-	defer r.Close()
-	prepareErr := errors.New("preparation failed")
-	_, _, err := r.RunAgent(t.Context(), "sync", "inspect", "explore", func(*task.Task) error {
-		return prepareErr
-	}, func(context.Context, *task.Task) (string, error) {
-		t.Error("ran after failed preparation")
-		return "", nil
-	})
-	if !errors.Is(err, prepareErr) {
-		t.Fatal(err)
-	}
-	if running, total := r.Counts(); running != 0 || total != 0 {
-		t.Fatalf("failed admission leaked: running=%d total=%d", running, total)
+func TestTaskPreparationRollsBack(t *testing.T) {
+	for _, kind := range []string{"background", "synchronous", "adopted"} {
+		for _, failure := range []string{"error", "panic", "shutdown"} {
+			t.Run(kind+"/"+failure, func(t *testing.T) {
+				r := task.NewRegistry()
+				defer r.Close()
+				prepareErr := errors.New("preparation failed")
+				prepare := func(*task.Task) error {
+					switch failure {
+					case "panic":
+						panic(prepareErr)
+					case "shutdown":
+						r.Close()
+						return nil
+					default:
+						return prepareErr
+					}
+				}
+				run := func(context.Context, *task.Task) (string, error) {
+					t.Error("ran after failed preparation")
+					return "", nil
+				}
+				var err error
+				var recovered any
+				func() {
+					defer func() { recovered = recover() }()
+					switch kind {
+					case "background":
+						_, err = r.LaunchAgent("prepared", "inspect", "explore", prepare, run)
+					case "synchronous":
+						_, _, err = r.RunAgent(t.Context(), "prepared", "inspect", "explore", prepare, run)
+					case "adopted":
+						_, err = r.AdoptAgent("prepared", "inspect", "explore", "done", 0, prepare)
+					}
+				}()
+				if failure == "panic" {
+					if recovered != prepareErr {
+						t.Fatalf("panic = %v, want %v", recovered, prepareErr)
+					}
+				} else if recovered != nil || err == nil || (failure == "error" && !errors.Is(err, prepareErr)) {
+					t.Fatalf("error = %v, panic = %v", err, recovered)
+				}
+				if running, total := r.Counts(); running != 0 || total != 0 {
+					t.Fatalf("failed admission leaked: running=%d total=%d", running, total)
+				}
+				if failure != "shutdown" {
+					// A failed attempt must release both its identity and its capacity.
+					if tk, err := r.AdoptAgent("prepared", "retry", "explore", "done", 0, nil); err != nil || tk == nil {
+						t.Fatalf("retry = %v, %v", tk, err)
+					}
+					for i := 1; i < task.MaxPerSession; i++ {
+						if r.Adopt("next", "explore", "done", 0) == nil {
+							t.Fatalf("failed preparation consumed capacity: admitted only %d tasks", i)
+						}
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -239,28 +284,43 @@ func TestConcurrencyCapRejectsLaunch(t *testing.T) {
 }
 
 func TestCloseCancelsRunningAndRejectsLaunch(t *testing.T) {
-	r := task.NewRegistry()
+	synctest.Test(t, func(t *testing.T) {
+		r := task.NewRegistry()
+		defer r.Close()
+		if _, err := r.Launch("d", "explore", func(ctx context.Context, _ *task.Task) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		}); err != nil {
+			t.Fatal(err)
+		}
 
-	canceled := make(chan struct{})
-	if _, err := r.Launch("d", "explore", func(ctx context.Context, _ *task.Task) (string, error) {
-		<-ctx.Done()
-		close(canceled)
-		return "", ctx.Err()
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	r.Close()
-
-	select {
-	case <-canceled:
-	case <-time.After(5 * time.Second):
-		t.Fatal("running task was not canceled by Close")
-	}
-
-	if _, err := r.Launch("d", "explore", func(context.Context, *task.Task) (string, error) { return "", nil }); err == nil {
-		t.Fatal("launch after Close should error")
-	}
+		var closers sync.WaitGroup
+		for range 4 {
+			closers.Go(r.Close)
+		}
+		closers.Wait()
+		synctest.Wait()
+		select {
+		case <-r.Done():
+		default:
+			t.Fatal("Close did not signal shutdown")
+		}
+		if running, _ := r.Counts(); running != 0 {
+			t.Fatal("running task did not settle after Close")
+		}
+		if _, err := r.Launch("d", "explore", func(context.Context, *task.Task) (string, error) {
+			t.Error("closed registry ran new work")
+			return "", nil
+		}); err == nil {
+			t.Fatal("launch after Close should error")
+		}
+		r.Publish(task.Event{ID: "late-event"})
+		select {
+		case event := <-r.Events():
+			t.Fatalf("delivered an event after shutdown: %+v", event)
+		default:
+		}
+	})
 }
 
 func TestRelaunchRunsAgainAndKeepsIdentity(t *testing.T) {

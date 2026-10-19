@@ -190,7 +190,7 @@ func TestNewUsesExplicitSettingsWithoutEnvironmentMerge(t *testing.T) {
 	}
 	assertTools(t, a, id, nil, []string{"exec", "exec_session", "search_web", "fetch"})
 	s := a.session(id)
-	if s.aa.MaxTurns != 7 || s.aa.Model() != "gpt-6-sol" || s.aa.Effort() != "high" {
+	if s.harness.MaxTurns != 7 || s.harness.Model() != "gpt-6-sol" || s.harness.Effort() != "high" {
 		t.Fatal("session did not retain its startup config")
 	}
 	if s.scriptOptions.Shell.Network || s.scriptOptions.Shell.DisableSandbox {
@@ -212,11 +212,11 @@ func TestConfigHooksAreOwnedByAgentAndSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(a.session(first).aa.Hooks.SessionEnd) != 1 {
+	if len(a.session(first).harness.Hooks.SessionEnd) != 1 {
 		t.Fatal("session lost the configured lifecycle hook")
 	}
 	// A session's changes must not affect its siblings or the startup config.
-	a.session(first).aa.Hooks.SessionEnd[0] = func(context.Context, string) { replaced++ }
+	a.session(first).harness.Hooks.SessionEnd[0] = func(context.Context, string) { replaced++ }
 	if _, err := a.NewSession(t.Context()); err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -88,14 +89,7 @@ type Config struct {
 	Tools        func() []tool.Tool
 	Instructions func() string
 
-	// PrepareTurn runs after reserving the session, before hooks and catalog
-	// capture. It may prepare host resources or append context to the input.
-	PrepareTurn func(context.Context, []Content) ([]Content, error)
-	// CloseSession releases host-owned resources before SessionEnd hooks.
-	// Neither callback is inherited by delegated agents.
-	CloseSession func() error
-
-	// PinTools snapshots Tools after PrepareTurn for the duration of a turn.
+	// PinTools snapshots Tools after Agent.PrepareTurn for the duration of a turn.
 	// FilterTools applies current host policy to an owned copy of that catalog
 	// at each request boundary. Leave PinTools false for a fully live catalog.
 	PinTools    bool
@@ -187,8 +181,6 @@ func (c *Config) Derive() *Config {
 	child.Hooks.SessionStart = nil
 	child.Hooks.SessionEnd = nil
 	child.Hooks.Interrupt = nil
-	child.PrepareTurn = nil
-	child.CloseSession = nil
 	return child
 }
 
@@ -263,7 +255,7 @@ func ConfigFromEnvironment() (*Config, error) {
 	if value := strings.TrimSpace(os.Getenv("WINGMAN_OUTPUT_TOKEN_BUDGET")); value != "" {
 		budget, err := strconv.Atoi(value)
 		if err != nil || budget < 0 {
-			return nil, fmt.Errorf("WINGMAN_OUTPUT_TOKEN_BUDGET must be a nonnegative integer")
+			return nil, errors.New("WINGMAN_OUTPUT_TOKEN_BUDGET must be a nonnegative integer")
 		}
 		cfg.OutputTokenBudget = budget
 	}

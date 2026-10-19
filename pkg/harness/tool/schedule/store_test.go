@@ -101,6 +101,24 @@ func TestFileStoreKeepsMutateAtomicOnError(t *testing.T) {
 	}
 }
 
+func TestFileStoreCleansUpFailedSave(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	// A directory at the destination makes rename fail after writing the temp file.
+	if err := os.Mkdir(store.Path(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.save([]Task{{ID: "unsaved"}}); err == nil {
+		t.Fatal("save replaced a directory")
+	}
+	entries, err := os.ReadDir(store.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != tasksFile || !entries[0].IsDir() {
+		t.Fatalf("failed save left temporary files: %v", entries)
+	}
+}
+
 func TestMemoryStoreSignalsChanges(t *testing.T) {
 	store := NewMemoryStore()
 

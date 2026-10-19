@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -38,11 +37,8 @@ type Agent struct {
 	workspace *code.Workspace
 	cfg       Config
 
-	uiMu    sync.RWMutex
 	ui      code.UI
 	prompts *tool.Elicitation
-
-	lastActive atomic.Value
 
 	sessionsDir string
 
@@ -54,31 +50,30 @@ type Agent struct {
 	upstreamModels    map[string]bool
 	modelDiscoveryErr error
 
-	mu           sync.Mutex
+	mu           sync.Mutex // Protects ui and session bookkeeping.
 	sessions     map[string]*sessionState
+	lastActive   string
 	closed       bool
-	sessionGates sync.Map // session ID -> chan struct{}
+	sessionLocks map[string]*sessionLock
 }
 
 var _ code.Agent = (*Agent)(nil)
 
 type sessionState struct {
+	resources sessionResources
+
 	id      string
 	parent  *Agent
-	aa      *harness.Agent
-	journal *session.Journal
+	harness *harness.Agent
 
 	modelID string
 	effort  *string // nil inherits the agent default; an empty value selects auto.
 
-	// mode is switchable while a turn is running, so it is read from the turn
-	// goroutine and written from the UI one.
-	mode        atomic.Value // sessionMode
-	unattended  atomic.Bool
-	reviews     reviewBreaker
-	toolSet     *tool.Set
-	execManager *shell.ExecManager
-	tasks       *task.Registry
+	// Plan mode can change while a turn is running.
+	planMode   atomic.Bool
+	unattended atomic.Bool
+	reviews    reviewBreaker
+	tools      []tool.Tool
 
 	schedules     schedule.ObservableStore
 	scriptOptions *schedule.Options
@@ -94,8 +89,7 @@ type sessionState struct {
 	projectInstructionsMu   sync.Mutex
 	projectInstructionCache projectInstructionCache
 
-	startSource     string
-	startBackground func() // Invoked under parent.mu only after registration.
+	startSource string
 }
 
 type sessionMode string
@@ -107,8 +101,8 @@ const (
 )
 
 func (s *sessionState) currentMode() sessionMode {
-	if mode, ok := s.mode.Load().(sessionMode); ok && mode != "" {
-		return mode
+	if s.planMode.Load() {
+		return modePlan
 	}
 	return modeAgent
 }
@@ -117,9 +111,8 @@ func (s *sessionState) setMode(mode sessionMode) {
 	// Retain the legacy unattended mode as a shortcut for existing callers.
 	if mode == modeUnattended {
 		s.unattended.Store(true)
-		mode = modeAgent
 	}
-	s.mode.Store(mode)
+	s.planMode.Store(mode == modePlan)
 }
 
 func (s *sessionState) permissionMode() string {
@@ -163,27 +156,18 @@ func New(ws *code.Workspace, cfg Config, ui code.UI) *Agent {
 	return a
 }
 
-func (a *Agent) anySessionID() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for id := range a.sessions {
-		return id
-	}
-	return ""
-}
-
 func (a *Agent) Name() string               { return code.BuiltinAgentName }
 func (a *Agent) Workspace() *code.Workspace { return a.workspace }
 
 func (a *Agent) SetUI(ui code.UI) {
-	a.uiMu.Lock()
+	a.mu.Lock()
 	a.ui = ui
-	a.uiMu.Unlock()
+	a.mu.Unlock()
 }
 
 func (a *Agent) currentUI() code.UI {
-	a.uiMu.RLock()
-	defer a.uiMu.RUnlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return a.ui
 }
 
@@ -235,27 +219,6 @@ func (a *Agent) LoadSession(ctx context.Context, id string) error {
 	return a.loadSession(ctx, id)
 }
 
-// Recovery and deletion both mutate durable session state. Serialize them per
-// session, while allowing callers to cancel their wait and other sessions to load.
-func (a *Agent) lockSession(ctx context.Context, id string) (func(), error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	value, _ := a.sessionGates.LoadOrStore(id, make(chan struct{}, 1))
-	gate := value.(chan struct{})
-	select {
-	case gate <- struct{}{}:
-		unlock := func() { <-gate }
-		if err := ctx.Err(); err != nil {
-			unlock()
-			return nil, err
-		}
-		return unlock, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
 func (a *Agent) loadSession(ctx context.Context, id string) error {
 	a.mu.Lock()
 	if a.closed {
@@ -278,10 +241,10 @@ func (a *Agent) loadSession(ctx context.Context, id string) error {
 	}
 	s.startSource = "resume"
 	a.restoreSessionSettings(s, saved.State)
-	if err := s.aa.Restore(saved.State); err != nil {
+	if err := s.harness.Restore(saved.State); err != nil {
 		return errors.Join(err, s.close())
 	}
-	if err := s.aa.ReconcileInterrupted("process restarted before the operation settled"); err != nil {
+	if err := s.harness.ReconcileInterrupted("process restarted before the operation settled"); err != nil {
 		return errors.Join(err, s.close())
 	}
 
@@ -301,7 +264,11 @@ func (a *Agent) registerSession(ctx context.Context, s *sessionState) error {
 		return errors.Join(err, s.close())
 	}
 	a.sessions[s.id] = s
-	s.startBackground()
+	if err := s.harness.Go(s.watchFileChanges, s.scheduleRunner().Run); err != nil {
+		delete(a.sessions, s.id)
+		a.mu.Unlock()
+		return errors.Join(err, s.close())
+	}
 	a.mu.Unlock()
 	return nil
 }
@@ -332,7 +299,7 @@ func (a *Agent) forkJournal(ctx context.Context, source *sessionState, id, newID
 	if source == nil {
 		return session.Fork(a.sessionsDir, id, newID, title)
 	}
-	return source.aa.RunExclusive(ctx, func(context.Context) error {
+	return source.harness.RunExclusive(ctx, func(context.Context) error {
 		return session.Fork(a.sessionsDir, id, newID, title)
 	})
 }
@@ -378,7 +345,7 @@ func (a *Agent) Save(id string) error {
 	if !ok {
 		return nil
 	}
-	return session.Save(a.sessionsDir, id, s.aa.StateSnapshot())
+	return session.Save(a.sessionsDir, id, s.harness.StateSnapshot())
 }
 
 func (a *Agent) SessionsDir() string { return a.sessionsDir }
@@ -388,7 +355,7 @@ func (a *Agent) Messages(id string) []harness.Message {
 	if s == nil {
 		return nil
 	}
-	return s.aa.MessagesSnapshot()
+	return s.harness.MessagesSnapshot()
 }
 
 func (a *Agent) HistorySnapshot(id string) code.HistorySnapshot {
@@ -396,7 +363,7 @@ func (a *Agent) HistorySnapshot(id string) code.HistorySnapshot {
 	if s == nil {
 		return code.HistorySnapshot{}
 	}
-	state := s.aa.StateSnapshot()
+	state := s.harness.StateSnapshot()
 	return code.HistorySnapshot{Messages: state.Messages, Revision: state.Revision}
 }
 
@@ -405,7 +372,7 @@ func (a *Agent) HistoryVersion(id string) code.HistoryVersion {
 	if s == nil {
 		return code.HistoryVersion{}
 	}
-	messageCount, revision := s.aa.StateVersion()
+	messageCount, revision := s.harness.StateVersion()
 	return code.HistoryVersion{Revision: revision, MessageCount: messageCount}
 }
 
@@ -414,7 +381,7 @@ func (a *Agent) Recap(ctx context.Context, id string) (string, error) {
 	if s == nil {
 		return "", fmt.Errorf("session %s not found", id)
 	}
-	return s.aa.Recap(ctx)
+	return s.harness.Recap(ctx)
 }
 
 func (a *Agent) Compact(ctx context.Context, id, focus string) (harness.CompactResult, error) {
@@ -422,7 +389,7 @@ func (a *Agent) Compact(ctx context.Context, id, focus string) (harness.CompactR
 	if s == nil {
 		return harness.CompactResult{}, fmt.Errorf("session %s not found", id)
 	}
-	return s.aa.Compact(hook.WithRuntime(ctx, s.hookRuntime()), focus)
+	return s.harness.Compact(hook.WithRuntime(ctx, s.hookRuntime()), focus)
 }
 
 func (a *Agent) ContextStats(id string) (harness.ContextStats, bool) {
@@ -430,7 +397,7 @@ func (a *Agent) ContextStats(id string) (harness.ContextStats, bool) {
 	if s == nil {
 		return harness.ContextStats{}, false
 	}
-	return s.aa.ContextStats(), true
+	return s.harness.ContextStats(), true
 }
 
 func (a *Agent) Usage(id string) harness.Usage {
@@ -438,7 +405,7 @@ func (a *Agent) Usage(id string) harness.Usage {
 	if s == nil {
 		return harness.Usage{}
 	}
-	return s.aa.UsageSnapshot()
+	return s.harness.UsageSnapshot()
 }
 
 func (a *Agent) session(id string) *sessionState {
@@ -456,33 +423,33 @@ func (a *Agent) Tasks(id string) *task.Registry {
 	if s == nil {
 		return nil
 	}
-	return s.tasks
+	return s.resources.tasks
 }
 
 // ExecSessions exposes commands that exec left running so web clients
 // can present them with the session's other background work.
 func (a *Agent) ExecSessions(id string) []shell.ExecSessionInfo {
 	s := a.session(id)
-	if s == nil || s.execManager == nil {
+	if s == nil || s.resources.execManager == nil {
 		return nil
 	}
-	return s.execManager.BackgroundSessions()
+	return s.resources.execManager.BackgroundSessions()
 }
 
 func (a *Agent) ExecSession(id string, execID int) (shell.ExecSessionInfo, bool) {
 	s := a.session(id)
-	if s == nil || s.execManager == nil {
+	if s == nil || s.resources.execManager == nil {
 		return shell.ExecSessionInfo{}, false
 	}
-	return s.execManager.BackgroundSession(execID)
+	return s.resources.execManager.BackgroundSession(execID)
 }
 
 func (a *Agent) StopExecSession(id string, execID int) error {
 	s := a.session(id)
-	if s == nil || s.execManager == nil {
+	if s == nil || s.resources.execManager == nil {
 		return fmt.Errorf("session not found")
 	}
-	return s.execManager.StopBackgroundSession(execID)
+	return s.resources.execManager.StopBackgroundSession(execID)
 }
 
 // RecordUserShellCommand records a user-executed `!` shell command and its
@@ -497,7 +464,7 @@ func (a *Agent) RecordUserShellCommand(id, command, output string, exitCode int,
 		Role:    harness.RoleUser,
 		Content: []harness.Content{{Text: code.FormatUserShellCommand(command, output, exitCode, duration)}},
 	}
-	if err := s.aa.RecordMessage(msg); err != nil {
+	if err := s.harness.RecordMessage(msg); err != nil {
 		return err
 	}
 	return a.Save(id)
@@ -520,8 +487,8 @@ func (a *Agent) RunningTaskCount() int {
 	defer a.mu.Unlock()
 	total := 0
 	for _, s := range a.sessions {
-		running, _ := s.tasks.Counts()
-		total += running + len(s.execManager.BackgroundSessions())
+		running, _ := s.resources.tasks.Counts()
+		total += running + len(s.resources.execManager.BackgroundSessions())
 	}
 	return total
 }
@@ -535,15 +502,16 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 	}
 	a.mu.Lock()
 	s, ok := a.sessions[id]
+	if ok {
+		a.lastActive = id
+	}
 	a.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("session %s not found; call NewSession first", id)
 	}
 
-	a.lastActive.Store(id)
-
 	ctx = hook.WithRuntime(code.WithSessionID(ctx, id), s.hookRuntime())
-	return s.aa.Send(ctx, input)
+	return s.harness.Send(ctx, input)
 }
 
 func (a *Agent) TurnFeatures(string) code.TurnFeatures {
@@ -555,7 +523,7 @@ func (a *Agent) Steer(_ context.Context, id string, input code.TurnInput) error 
 	if s == nil {
 		return fmt.Errorf("session %s not found", id)
 	}
-	if !s.aa.QueueInputWithID(input.Content, input.ID) {
+	if !s.harness.QueueInputWithID(input.Content, input.ID) {
 		return code.ErrNoActiveTurn
 	}
 	return nil
@@ -563,7 +531,7 @@ func (a *Agent) Steer(_ context.Context, id string, input code.TurnInput) error 
 
 func (a *Agent) Cancel(id string) {
 	if s := a.session(id); s != nil {
-		s.aa.Cancel(harness.ErrInterrupted)
+		s.harness.Cancel(harness.ErrInterrupted)
 	}
 }
 
@@ -574,8 +542,9 @@ func (a *Agent) Close() error {
 		return nil
 	}
 	a.closed = true
-	sessions := slices.Collect(maps.Values(a.sessions))
-	a.sessions = map[string]*sessionState{}
+	sessions := a.sessions
+	a.sessions = nil
+	a.lastActive = ""
 	a.mu.Unlock()
 	var errs []error
 	for _, s := range sessions {
@@ -592,13 +561,11 @@ var wingmanModes = []code.Mode{
 }
 
 func (a *Agent) Modes(sessionID string) ([]code.Mode, string) {
-	out := make([]code.Mode, len(wingmanModes))
-	copy(out, wingmanModes)
 	current := code.AgentModeID
 	if s := a.session(sessionID); s != nil {
 		current = string(s.currentMode())
 	}
-	return out, current
+	return slices.Clone(wingmanModes), current
 }
 
 func (a *Agent) SetMode(_ context.Context, sessionID, modeID string) error {
@@ -638,7 +605,7 @@ func (a *Agent) Tools(id string) []tool.Tool {
 	if s == nil {
 		return nil
 	}
-	return s.tools()
+	return s.harness.AvailableTools()
 }
 
 // execExitNotifyLimit caps how much trailing output of a backgrounded command
@@ -680,24 +647,22 @@ func (a *Agent) promptContext(ctx context.Context) context.Context {
 	if code.SessionIDFromContext(ctx) != "" {
 		return ctx
 	}
-	if sid := hook.RuntimeFromContext(ctx).SessionID; sid != "" && a.session(sid) != nil {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if sid := hook.RuntimeFromContext(ctx).SessionID; a.sessions[sid] != nil {
 		return code.WithSessionID(ctx, sid)
 	}
 	if a.cfg.IsolateSessions {
 		return ctx
 	}
 
-	sid, _ := a.lastActive.Load().(string)
-	if sid != "" && a.session(sid) == nil {
-		sid = ""
+	if a.sessions[a.lastActive] != nil {
+		return code.WithSessionID(ctx, a.lastActive)
 	}
-	if sid == "" {
-		sid = a.anySessionID()
+	for sid := range a.sessions {
+		return code.WithSessionID(ctx, sid)
 	}
-	if sid == "" {
-		return ctx
-	}
-	return code.WithSessionID(ctx, sid)
+	return ctx
 }
 
 func (a *Agent) elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
@@ -742,9 +707,9 @@ func (s *sessionState) prepareTurn(ctx context.Context, input []harness.Content)
 
 func (s *sessionState) hookRuntime() hook.Runtime {
 	return hook.Runtime{
-		SessionID:      s.aa.CacheKey,
+		SessionID:      s.harness.CacheKey,
 		CWD:            s.parent.workspace.RootPath,
-		Model:          s.aa.Model(),
+		Model:          s.harness.Model(),
 		PermissionMode: s.permissionMode(),
 		StartSource:    s.startSource,
 	}
@@ -753,7 +718,7 @@ func (s *sessionState) hookRuntime() hook.Runtime {
 func (s *sessionState) close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := s.aa.Close(hook.WithRuntime(ctx, s.hookRuntime()), "other"); err != nil {
+	if err := s.harness.Close(hook.WithRuntime(ctx, s.hookRuntime()), "other"); err != nil {
 		return fmt.Errorf("close session %s: %w", s.id, err)
 	}
 	return nil
@@ -771,7 +736,7 @@ func (s *sessionState) watchFileChanges(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !s.aa.Running() {
+			if !s.harness.Running() {
 				continue
 			}
 			s.sweepFileChanges()
@@ -780,7 +745,7 @@ func (s *sessionState) watchFileChanges(ctx context.Context) {
 				continue
 			}
 			notice := formatFileChangeNotice(paths)
-			if !s.aa.QueueInput([]harness.Content{{Text: notice, Hidden: true}}) {
+			if !s.harness.QueueInput([]harness.Content{{Text: notice, Hidden: true}}) {
 				s.stashFileChanges(paths)
 			}
 		}
@@ -843,13 +808,9 @@ func formatFileChangeNotice(paths []string) string {
 	return fmt.Sprintf("<system-reminder>These files changed on disk outside this session's file tools (edited by the user, a linter, or a shell command): %s%s. Your memory of their content is stale — re-read them before editing, take the external changes into account, and never revert them.</system-reminder>", strings.Join(listed, ", "), suffix)
 }
 
-func (s *sessionState) tools() []tool.Tool {
-	return s.aa.AvailableTools()
-}
-
 func (s *sessionState) catalogTools() []tool.Tool {
 	mcpTools, lspTools := s.parent.workspace.ManagedTools()
-	return slices.Concat(s.toolSet.Slice(), mcpTools, lspTools)
+	return slices.Concat(s.tools, mcpTools, lspTools)
 }
 
 func (s *sessionState) filterTools(tools []tool.Tool) []tool.Tool {
@@ -897,7 +858,7 @@ func planModeEffectExecute(t tool.Tool) func(context.Context, map[string]any) (t
 func (s *sessionState) instructions() string {
 	option, _ := s.parent.roleModel(s, "")
 	base, data := instructionTemplate(option.ID, prompt.SectionData{
-		ToolNames:      promptToolNames(s.tools()),
+		ToolNames:      promptToolNames(s.harness.AvailableTools()),
 		PlanMode:       s.currentMode() == modePlan,
 		UnattendedMode: s.unattended.Load(),
 	})
@@ -952,7 +913,7 @@ func (s *sessionState) instructionsData() prompt.SectionData {
 	ws := s.parent.workspace
 	now := time.Now()
 	return prompt.SectionData{
-		ToolNames:           promptToolNames(s.tools()),
+		ToolNames:           promptToolNames(s.harness.AvailableTools()),
 		PlanMode:            s.currentMode() == modePlan,
 		UnattendedMode:      s.unattended.Load(),
 		Date:                now.Format("2006-01-02"),

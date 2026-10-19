@@ -4,16 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"slices"
-	"sync"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
-	elicittool "github.com/adrianliechti/wingman-agent/pkg/harness/tool/elicit"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/elicitation"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fetch"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
@@ -24,6 +23,79 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
+type sessionLock struct {
+	token chan struct{}
+	refs  int // Holder and waiters; protected by Agent.mu.
+}
+
+// Recovery, saving and deletion serialize per session. The channel allows a
+// caller to cancel its wait; the map entry lives only while callers use it.
+func (a *Agent) lockSession(ctx context.Context, id string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	lock := a.sessionLocks[id]
+	if lock == nil {
+		lock = &sessionLock{token: make(chan struct{}, 1)}
+		if a.sessionLocks == nil {
+			a.sessionLocks = make(map[string]*sessionLock)
+		}
+		a.sessionLocks[id] = lock
+	}
+	lock.refs++
+	a.mu.Unlock()
+	release := func() {
+		a.mu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(a.sessionLocks, id)
+		}
+		a.mu.Unlock()
+	}
+	select {
+	case lock.token <- struct{}{}:
+		unlock := func() {
+			<-lock.token
+			release()
+		}
+		if err := ctx.Err(); err != nil {
+			unlock()
+			return nil, err
+		}
+		return unlock, nil
+	case <-ctx.Done():
+		release()
+		return nil, ctx.Err()
+	}
+}
+
+// sessionResources owns the tools' dependencies. Its zero value is safe to
+// close, so incomplete construction follows the same cleanup path.
+type sessionResources struct {
+	hooks       *external.Async
+	tasks       *task.Registry
+	execManager *shell.ExecManager
+	tempDir     string
+}
+
+var _ io.Closer = (*sessionResources)(nil)
+
+func (r *sessionResources) Close() error {
+	r.hooks.Close()
+	// Children share execution sessions, so cancel them before closing exec.
+	r.tasks.Close()
+	if r.execManager != nil {
+		r.execManager.Close()
+	}
+	if r.tempDir != "" {
+		if err := os.RemoveAll(r.tempDir); err != nil {
+			return fmt.Errorf("remove session temporary files: %w", err)
+		}
+	}
+	return nil
+}
+
 func (a *Agent) buildSession(id string) (*sessionState, error) {
 	journal, err := session.OpenJournal(a.sessionsDir, id)
 	if err != nil {
@@ -32,40 +104,27 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 	s := &sessionState{
 		id:      id,
 		parent:  a,
-		aa:      &harness.Agent{Config: a.cfg.Clone(), Recorder: journal},
-		journal: journal,
+		harness: &harness.Agent{Config: a.cfg.Clone(), Recorder: journal},
 	}
+	s.harness.Resources = &s.resources
 	s.configureHarness()
 	// Restoring subagent tools derives child configs immediately, so hooks
 	// must be complete before constructing the catalog.
-	closeHooks := s.configureHooks()
+	s.configureHooks()
 	if err := s.configureTools(); err != nil {
-		return nil, errors.Join(err, closeHooks())
+		return nil, errors.Join(err, s.resources.Close())
 	}
-	s.toolSet.Own("async hooks", closeHooks)
-	s.configureLifecycle()
 	return s, nil
 }
 
 // configureHarness binds the session's live host policy before tools capture it.
 func (s *sessionState) configureHarness() {
-	a, sessionCfg := s.parent, s.aa.Config
-	s.aa.CacheKey = s.id
-	s.setMode(modeAgent)
+	a, sessionCfg := s.parent, s.harness.Config
+	s.harness.CacheKey = s.id
 	sessionCfg.Tools = s.catalogTools
 	sessionCfg.PinTools = true
 	sessionCfg.FilterTools = s.filterTools
-	prepare := sessionCfg.PrepareTurn
-	sessionCfg.PrepareTurn = func(ctx context.Context, input []harness.Content) ([]harness.Content, error) {
-		if prepare != nil {
-			var err error
-			input, err = prepare(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-		}
-		return s.prepareTurn(ctx, input)
-	}
+	s.harness.PrepareTurn = s.prepareTurn
 	sessionCfg.Instructions = s.instructions
 	sessionCfg.ContextInstructions = s.contextInstructions
 	sessionCfg.PermissionMode = s.permissionMode
@@ -84,10 +143,10 @@ func (s *sessionState) configureHarness() {
 	}
 }
 
-// configureTools acquires session resources and transfers ownership to toolSet.
-// All fallible setup precedes tool publication; failed restore removes the temp directory.
+// configureTools fills the session's resources before publishing its tools.
+// buildSession closes the resource owner if setup fails.
 func (s *sessionState) configureTools() error {
-	a, sessionCfg := s.parent, s.aa.Config
+	a, sessionCfg := s.parent, s.harness.Config
 	ws, elicit := a.workspace, a.prompts
 	allowedReadRoots, allowedWriteRoots := sessionFileRoots(ws)
 	if !a.cfg.DisableShell && !a.cfg.DisableSandbox {
@@ -104,12 +163,13 @@ func (s *sessionState) configureTools() error {
 	if err != nil {
 		return fmt.Errorf("create private session temp: %w", err)
 	}
-	s.tasks, err = task.NewFileRegistry(filepath.Join(artifactDir, "tasks.json"))
+	s.resources.tempDir = privateTemp
+	s.resources.tasks, err = task.NewFileRegistry(filepath.Join(artifactDir, "tasks.json"))
 	if err != nil {
-		return errors.Join(fmt.Errorf("restore background tasks: %w", err), os.RemoveAll(privateTemp))
+		return fmt.Errorf("restore background tasks: %w", err)
 	}
-	s.execManager = shell.NewExecManager(func(e shell.ExecExit) {
-		s.tasks.Publish(execExitEvent(e))
+	s.resources.execManager = shell.NewExecManager(func(e shell.ExecExit) {
+		s.resources.tasks.Publish(execExitEvent(e))
 	})
 	s.freshness = fs.NewFreshness(ws.Root)
 	s.schedules = schedule.NewFileStore(filepath.Join(artifactDir, "schedules"))
@@ -125,66 +185,24 @@ func (s *sessionState) configureTools() error {
 	allowedWriteRoots = append(allowedWriteRoots, privateTemp)
 	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.cfg.DisableShell, Elicitation: elicit, Shell: shellOpts}
 
-	var shellTools []tool.Tool
+	tools := ws.WithEditDiagnostics(fs.Tools(ws.Root, &fs.Options{
+		AllowedReadRoots:  allowedReadRoots,
+		AllowedWriteRoots: allowedWriteRoots,
+		Freshness:         s.freshness,
+	}))
 	if !a.cfg.DisableShell {
-		shellTools = shell.ExecTools(s.execManager, ws.RootPath, elicit, shellOpts)
+		tools = append(tools, shell.ExecTools(s.resources.execManager, ws.RootPath, elicit, shellOpts)...)
 	}
-	var webFetchTools []tool.Tool
+	tools = append(tools, schedule.Tools(s.schedules, s.scriptOptions)...)
+	tools = append(tools, elicitation.Tools(elicit)...)
 	if !a.cfg.DisableWebFetch {
-		webFetchTools = fetch.Tools(elicit)
+		tools = append(tools, fetch.Tools(elicit)...)
 	}
-	var webSearchTools []tool.Tool
 	if !a.cfg.DisableWebSearch {
-		webSearchTools = websearch.Tools(elicit)
+		tools = append(tools, websearch.Tools(elicit)...)
 	}
-
-	baseTools := slices.Concat(
-		ws.WithEditDiagnostics(fs.Tools(ws.Root, &fs.Options{
-			AllowedReadRoots:  allowedReadRoots,
-			AllowedWriteRoots: allowedWriteRoots,
-			Freshness:         s.freshness,
-		})),
-		shellTools,
-		schedule.Tools(s.schedules, s.scriptOptions),
-		elicittool.Tools(elicit),
-		webFetchTools,
-		webSearchTools,
-		subagent.Tools(sessionCfg, s.subagentContext, s.tasks, subagent.Discover(ws.RootPath)...),
-	)
-	s.toolSet = tool.NewSet(baseTools...)
-	// Close runs in reverse: tasks first so background subagents are canceled
-	// before their shared exec sessions are killed.
-	s.toolSet.Own("private temporary files", func() error { return os.RemoveAll(privateTemp) })
-	s.toolSet.Own("exec manager", func() error {
-		s.execManager.Close()
-		return nil
-	})
-	s.toolSet.Own("task registry", func() error {
-		s.tasks.Close()
-		return nil
-	})
+	s.tools = append(tools, subagent.Tools(sessionCfg, s.subagentContext, s.resources.tasks, subagent.Discover(ws.RootPath)...)...)
 	return nil
-}
-
-// configureLifecycle starts workers only after registration and joins them before cleanup.
-func (s *sessionState) configureLifecycle() {
-	sessionCfg := s.aa.Config
-	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
-	var background sync.WaitGroup
-	s.startBackground = func() {
-		background.Go(func() { s.watchFileChanges(backgroundCtx) })
-		background.Go(func() { s.scheduleRunner().Run(backgroundCtx) })
-	}
-	closeSession := sessionCfg.CloseSession
-	sessionCfg.CloseSession = func() error {
-		cancelBackground()
-		background.Wait()
-		err := s.toolSet.Close()
-		if closeSession != nil {
-			err = errors.Join(err, closeSession())
-		}
-		return err
-	}
 }
 
 func sessionFileRoots(ws *code.Workspace) (readRoots, writeRoots []string) {

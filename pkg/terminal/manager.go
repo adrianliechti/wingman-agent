@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -17,8 +18,7 @@ type Manager struct {
 
 	mu       sync.Mutex
 	order    []string
-	sessions map[string]*Session
-	closed   bool
+	sessions map[string]*Session // Nil after Close; no more sessions may be created.
 
 	onExit func(id string)
 }
@@ -46,7 +46,7 @@ func (m *Manager) Create(shell string, cols, rows int) (*Session, error) {
 	// handleExit before the session is registered.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.closed {
+	if m.sessions == nil {
 		return nil, errors.New("terminal manager is closed")
 	}
 
@@ -75,7 +75,7 @@ func (m *Manager) CreateCommand(spec CommandSpec, cols, rows int) (*Session, err
 	// handleExit before the session is registered.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.closed {
+	if m.sessions == nil {
 		return nil, errors.New("terminal manager is closed")
 	}
 
@@ -155,16 +155,8 @@ func (m *Manager) Remove(id string) bool {
 
 func (m *Manager) Close() {
 	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return
-	}
-	m.closed = true
-	sessions := make([]*Session, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		sessions = append(sessions, s)
-	}
-	m.sessions = map[string]*Session{}
+	sessions := m.sessions
+	m.sessions = nil
 	m.order = nil
 	m.onExit = nil
 	m.mu.Unlock()
@@ -182,11 +174,8 @@ func (m *Manager) take(id string) *Session {
 		return nil
 	}
 	delete(m.sessions, id)
-	for i, sid := range m.order {
-		if sid == id {
-			m.order = append(m.order[:i], m.order[i+1:]...)
-			break
-		}
+	if i := slices.Index(m.order, id); i >= 0 {
+		m.order = slices.Delete(m.order, i, i+1)
 	}
 	return s
 }

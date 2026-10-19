@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -145,9 +146,9 @@ func (t *Task) DurableAgent() (string, harness.State, json.RawMessage) {
 	return t.AgentID, cloneAgentState(t.agentState), append(json.RawMessage(nil), t.resumeData...)
 }
 
-// AppendAgentEvents implements the child's live durability boundary. Events
+// AppendEvents implements harness.EventRecorder for the child agent. Events
 // have already been assigned monotonically by that child Agent.
-func (t *Task) AppendAgentEvents(events []harness.RuntimeEvent) error {
+func (t *Task) AppendEvents(events []harness.RuntimeEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -367,7 +368,7 @@ func (t *Task) Elapsed() time.Duration {
 // for agent_output until the session ends; background completion events are
 // buffered so a consumer that attaches late still receives them.
 type Registry struct {
-	ctx    context.Context
+	ctx    context.Context // Cancellation is the registry's closed state.
 	cancel context.CancelFunc
 
 	events chan Event
@@ -376,7 +377,6 @@ type Registry struct {
 	tasks    []*Task
 	running  int
 	launched int
-	closed   bool
 
 	path          string
 	persistMu     sync.Mutex
@@ -408,10 +408,7 @@ func (r *Registry) Events() <-chan Event { return r.events }
 // Publish delivers an external background event (e.g. an exec exit)
 // through the session's notification channel alongside subagent completions.
 func (r *Registry) Publish(ev Event) {
-	r.mu.Lock()
-	closed := r.closed
-	r.mu.Unlock()
-	if closed {
+	if r.ctx.Err() != nil {
 		return
 	}
 	r.send(ev)
@@ -448,9 +445,6 @@ func (r *Registry) Launch(description, agentType string, run func(ctx context.Co
 // that is persisted before the goroutine can start.
 func (r *Registry) LaunchAgent(agentID, description, agentType string, prepare func(*Task) error, run func(ctx context.Context, t *Task) (string, error)) (*Task, error) {
 	ctx, cancel := context.WithTimeout(r.ctx, MaxRunDuration)
-	if agentID == "" {
-		agentID = uuid.NewString()
-	}
 	t, err := r.start(agentID, description, agentType, cancel, true, prepare)
 	if err != nil {
 		cancel()
@@ -484,7 +478,7 @@ func (r *Registry) RunAgent(ctx context.Context, agentID, description, agentType
 
 func (r *Registry) start(agentID, description, agentType string, cancel context.CancelFunc, background bool, prepare func(*Task) error) (*Task, error) {
 	r.mu.Lock()
-	if r.closed {
+	if r.ctx.Err() != nil {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("session is shutting down")
 	}
@@ -524,37 +518,30 @@ func (r *Registry) start(agentID, description, agentType string, cancel context.
 	r.running++
 	r.launched++
 	r.mu.Unlock()
-	if prepare != nil {
-		if err := prepare(t); err != nil {
+	ready := false
+	defer func() {
+		if !ready {
 			r.mu.Lock()
 			r.removeTaskLocked(t)
 			r.running--
 			r.launched--
 			r.mu.Unlock()
 			cancel()
+		}
+	}()
+	if prepare != nil {
+		if err := prepare(t); err != nil {
 			return nil, err
 		}
 	}
 	if err := r.persist(); err != nil {
-		r.mu.Lock()
-		r.removeTaskLocked(t)
-		r.running--
-		r.launched--
-		r.mu.Unlock()
-		cancel()
 		return nil, err
 	}
-	r.mu.Lock()
-	if r.closed {
-		r.removeTaskLocked(t)
-		r.running--
-		r.launched--
-		r.mu.Unlock()
-		cancel()
-		return nil, fmt.Errorf("session is shutting down")
+	if r.ctx.Err() != nil {
+		return nil, errors.New("session is shutting down")
 	}
-	r.mu.Unlock()
 
+	ready = true
 	return t, nil
 }
 
@@ -571,7 +558,7 @@ func (r *Registry) Adopt(description, agentType, result string, elapsed time.Dur
 // visible to agent_send or UI readers.
 func (r *Registry) AdoptAgent(agentID, description, agentType, result string, elapsed time.Duration, prepare func(*Task) error) (*Task, error) {
 	r.mu.Lock()
-	if r.closed || r.launched >= MaxPerSession {
+	if r.ctx.Err() != nil || r.launched >= MaxPerSession {
 		r.mu.Unlock()
 		return nil, nil
 	}
@@ -600,39 +587,33 @@ func (r *Registry) AdoptAgent(agentID, description, agentType, result string, el
 	r.tasks = append(r.tasks, t)
 	r.launched++
 	r.mu.Unlock()
-	if prepare != nil {
-		if err := prepare(t); err != nil {
+	ready := false
+	defer func() {
+		if !ready {
 			r.mu.Lock()
 			r.removeTaskLocked(t)
 			r.launched--
 			r.mu.Unlock()
+		}
+	}()
+	if prepare != nil {
+		if err := prepare(t); err != nil {
 			return nil, err
 		}
 	}
 	if err := r.persist(); err != nil {
-		r.mu.Lock()
-		r.removeTaskLocked(t)
-		r.launched--
-		r.mu.Unlock()
 		return nil, err
 	}
-	r.mu.Lock()
-	if r.closed {
-		r.removeTaskLocked(t)
-		r.launched--
-		r.mu.Unlock()
-		return nil, fmt.Errorf("session is shutting down")
+	if r.ctx.Err() != nil {
+		return nil, errors.New("session is shutting down")
 	}
-	r.mu.Unlock()
+	ready = true
 	return t, nil
 }
 
 func (r *Registry) removeTaskLocked(target *Task) {
-	for i, current := range r.tasks {
-		if current == target {
-			r.tasks = append(r.tasks[:i], r.tasks[i+1:]...)
-			return
-		}
+	if i := slices.Index(r.tasks, target); i >= 0 {
+		r.tasks = slices.Delete(r.tasks, i, i+1)
 	}
 }
 
@@ -671,7 +652,7 @@ func (r *Registry) uniqueTaskIDLocked(agentID string) string {
 // reset for the new run, and completion fires another event.
 func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (string, error)) error {
 	r.mu.Lock()
-	if r.closed {
+	if r.ctx.Err() != nil {
 		r.mu.Unlock()
 		return fmt.Errorf("session is shutting down")
 	}
@@ -712,7 +693,11 @@ func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (str
 	r.running++
 	r.launched++
 	r.mu.Unlock()
-	rollback := func() {
+	started := false
+	defer func() {
+		if started {
+			return
+		}
 		t.mu.Lock()
 		t.status = prevStatus
 		t.stopped = prevStopped
@@ -728,21 +713,16 @@ func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (str
 		r.launched--
 		r.mu.Unlock()
 		cancel()
-	}
+	}()
 	if err := r.persist(); err != nil {
-		rollback()
 		return err
 	}
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		rollback()
-		return fmt.Errorf("session is shutting down")
+	if r.ctx.Err() != nil {
+		return errors.New("session is shutting down")
 	}
-	r.mu.Unlock()
 
 	go r.execute(ctx, cancel, t, true, run)
-
+	started = true
 	return nil
 }
 
@@ -811,11 +791,10 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 
 	r.mu.Lock()
 	r.running--
-	closed := r.closed
 	r.mu.Unlock()
 
-	if notify && !closed {
-		r.send(ev)
+	if notify {
+		r.Publish(ev)
 	}
 	return result, err
 }
@@ -834,7 +813,7 @@ func (r *Registry) Get(id string) *Task {
 func (r *Registry) List() []*Task {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]*Task(nil), r.tasks...)
+	return slices.Clone(r.tasks)
 }
 
 func (r *Registry) Counts() (running, total int) {
@@ -875,12 +854,5 @@ func (r *Registry) Close() {
 	// longer recreate durable state after their session directory is deleted.
 	r.persistGate.Lock()
 	defer r.persistGate.Unlock()
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return
-	}
-	r.closed = true
-	r.mu.Unlock()
 	r.cancel()
 }

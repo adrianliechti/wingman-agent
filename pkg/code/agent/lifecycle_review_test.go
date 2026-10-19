@@ -14,6 +14,73 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
+func TestSessionLocksPreserveWaitersAndReleaseUnusedEntries(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a := &Agent{}
+		unlock, err := a.lockSession(t.Context(), "same")
+		if err != nil {
+			t.Fatal(err)
+		}
+		releaseFirst := sync.OnceFunc(unlock)
+		defer releaseFirst()
+		type result struct {
+			unlock func()
+			err    error
+		}
+		waiter := func(ctx context.Context) <-chan result {
+			done := make(chan result, 1)
+			go func() {
+				unlock, err := a.lockSession(ctx, "same")
+				done <- result{unlock, err}
+			}()
+			return done
+		}
+		second := waiter(t.Context())
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		canceled := waiter(ctx)
+		synctest.Wait()
+		cancel()
+		if got := <-canceled; !errors.Is(got.err, context.Canceled) || got.unlock != nil {
+			t.Fatalf("canceled waiter = %+v", got)
+		}
+		other, err := a.lockSession(t.Context(), "other")
+		if err != nil {
+			t.Fatal(err)
+		}
+		other()
+		releaseFirst()
+		acquired := <-second
+		if acquired.err != nil {
+			t.Fatal(acquired.err)
+		}
+		releaseSecond := sync.OnceFunc(acquired.unlock)
+		defer releaseSecond()
+		third := waiter(t.Context())
+		synctest.Wait()
+		select {
+		case got := <-third:
+			if got.unlock != nil {
+				got.unlock()
+			}
+			t.Fatalf("session lock replaced while still in use: %+v", got)
+		default:
+		}
+		releaseSecond()
+		acquired = <-third
+		if acquired.err != nil {
+			t.Fatal(acquired.err)
+		}
+		acquired.unlock()
+		if len(a.sessionLocks) != 0 {
+			t.Fatalf("retained %d idle session locks", len(a.sessionLocks))
+		}
+		if unlock, err := a.lockSession(ctx, "canceled"); !errors.Is(err, context.Canceled) || unlock != nil || len(a.sessionLocks) != 0 {
+			t.Fatalf("already canceled lock returned unlock = %t, error = %v, entries = %d", unlock != nil, err, len(a.sessionLocks))
+		}
+	})
+}
+
 func TestLoadCannotResurrectSessionDuringDeletion(t *testing.T) {
 	ws := newOptionsTestWorkspace(t)
 	const id = "delete-and-load"
@@ -95,7 +162,7 @@ func TestSessionWorkersWaitForRegistration(t *testing.T) {
 		}
 		time.Sleep(2 * time.Second)
 		select {
-		case event := <-s.tasks.Events():
+		case event := <-s.resources.tasks.Events():
 			t.Fatalf("unpublished session ran background work: %+v", event)
 		default:
 		}
@@ -107,7 +174,7 @@ func TestSessionWorkersWaitForRegistration(t *testing.T) {
 			t.Fatal(err)
 		}
 		select {
-		case event := <-s.tasks.Events():
+		case event := <-s.resources.tasks.Events():
 			if event.ID != "due" || a.session(s.id) != s {
 				t.Fatalf("published event = %+v", event)
 			}

@@ -133,7 +133,7 @@ func TestForkSessionRefusesRunningTurn(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = source.aa.RunExclusive(t.Context(), func(context.Context) error {
+		_ = source.harness.RunExclusive(t.Context(), func(context.Context) error {
 			close(busy)
 			<-release
 			return nil

@@ -1,4 +1,4 @@
-package elicit_test
+package elicitation_test
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
-	. "github.com/adrianliechti/wingman-agent/pkg/harness/tool/elicit"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/elicitation"
 )
 
 func answering(content map[string]any, capture *tool.ElicitRequest) *tool.Elicitation {
@@ -34,17 +34,17 @@ func question(q, header string, options ...map[string]any) map[string]any {
 }
 
 func TestToolsReturnsNilWithoutElicitation(t *testing.T) {
-	if got := Tools(nil); got != nil {
-		t.Fatalf("Tools(nil) = %v, want nil", got)
+	if got := elicitation.Tools(nil); got != nil {
+		t.Fatalf("elicitation.Tools(nil) = %v, want nil", got)
 	}
 
-	if got := Tools(&tool.Elicitation{}); got != nil {
+	if got := elicitation.Tools(&tool.Elicitation{}); got != nil {
 		t.Fatalf("Tools with nil Elicit = %v, want nil", got)
 	}
 }
 
 func TestToolsReturnsHiddenElicitTool(t *testing.T) {
-	tools := Tools(answering(nil, nil))
+	tools := elicitation.Tools(answering(nil, nil))
 	if len(tools) != 1 {
 		t.Fatalf("len(Tools) = %d, want 1", len(tools))
 	}
@@ -68,7 +68,7 @@ func TestToolsReturnsHiddenElicitTool(t *testing.T) {
 
 func TestExecuteAllowsHeaderlessSingleQuestion(t *testing.T) {
 	var captured tool.ElicitRequest
-	et := Tools(answering(map[string]any{"q_1": "blue"}, &captured))[0]
+	et := elicitation.Tools(answering(map[string]any{"q_1": "blue"}, &captured))[0]
 
 	answer, err := et.Execute(context.Background(), map[string]any{
 		"questions": []any{map[string]any{"question": "Favorite color?"}},
@@ -89,7 +89,7 @@ func TestExecuteAllowsHeaderlessSingleQuestion(t *testing.T) {
 }
 
 func TestExecuteValidatesQuestions(t *testing.T) {
-	et := Tools(answering(nil, nil))[0]
+	et := elicitation.Tools(answering(nil, nil))[0]
 
 	cases := []struct {
 		name string
@@ -128,7 +128,7 @@ func TestExecuteValidatesQuestions(t *testing.T) {
 
 func TestExecuteSingleQuestionHoistsMessage(t *testing.T) {
 	var got tool.ElicitRequest
-	et := Tools(answering(map[string]any{"database": "Postgres"}, &got))[0]
+	et := elicitation.Tools(answering(map[string]any{"database": "Postgres"}, &got))[0]
 
 	result, err := et.Execute(context.Background(), map[string]any{
 		"questions": []any{question("Which database?", "Database",
@@ -166,7 +166,7 @@ func TestExecuteSingleQuestionHoistsMessage(t *testing.T) {
 
 func TestExecuteMultipleQuestionsAndMultiSelect(t *testing.T) {
 	var got tool.ElicitRequest
-	et := Tools(answering(map[string]any{
+	et := elicitation.Tools(answering(map[string]any{
 		"scope":    []any{"API", "CLI"},
 		"language": "Go",
 	}, &got))[0]
@@ -210,12 +210,12 @@ func TestExecuteRendersDeclineAndCancel(t *testing.T) {
 		tool.ElicitDecline: "declined",
 		tool.ElicitCancel:  "dismissed",
 	} {
-		elicitation := &tool.Elicitation{
+		prompts := &tool.Elicitation{
 			Elicit: func(context.Context, tool.ElicitRequest) (tool.ElicitResult, error) {
 				return tool.ElicitResult{Action: action}, nil
 			},
 		}
-		et := Tools(elicitation)[0]
+		et := elicitation.Tools(prompts)[0]
 
 		result, err := et.Execute(context.Background(), map[string]any{
 			"questions": []any{question("?", "Q")},
@@ -231,12 +231,12 @@ func TestExecuteRendersDeclineAndCancel(t *testing.T) {
 
 func TestExecutePropagatesElicitationError(t *testing.T) {
 	sentinel := errors.New("transport down")
-	elicitation := &tool.Elicitation{
+	prompts := &tool.Elicitation{
 		Elicit: func(context.Context, tool.ElicitRequest) (tool.ElicitResult, error) {
 			return tool.ElicitResult{}, sentinel
 		},
 	}
-	et := Tools(elicitation)[0]
+	et := elicitation.Tools(prompts)[0]
 
 	_, err := et.Execute(context.Background(), map[string]any{
 		"questions": []any{question("?", "Q")},
@@ -248,7 +248,7 @@ func TestExecutePropagatesElicitationError(t *testing.T) {
 
 func TestExecuteDeduplicatesCollidingHeaderSlugsAndFiltersEmptySelections(t *testing.T) {
 	var got tool.ElicitRequest
-	et := Tools(answering(map[string]any{
+	et := elicitation.Tools(answering(map[string]any{
 		"a_3": "first",
 		"a":   []any{"", nil},
 		"a_4": []string{"  one ", "", "two  "},

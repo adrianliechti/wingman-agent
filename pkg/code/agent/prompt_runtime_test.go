@@ -45,7 +45,7 @@ func TestSharedPromptReferencesRegisteredToolSchemas(t *testing.T) {
 			}
 		}
 	}
-	for _, candidate := range s.tools() {
+	for _, candidate := range s.harness.AvailableTools() {
 		identifiers[candidate.Name] = true
 		collectProperties(candidate.Parameters)
 		parameters, err := json.Marshal(candidate.Parameters)
@@ -59,7 +59,7 @@ func TestSharedPromptReferencesRegisteredToolSchemas(t *testing.T) {
 	// Inspect actual shared prose against the registered schemas, including
 	// nested edit and question parameters. Code-intelligence operation names
 	// have a separate contract and are not tool names or parameter keys.
-	instructions := prompt.BuildBaseInstructions("", prompt.SectionData{ToolNames: promptToolNames(s.tools())})
+	instructions := prompt.BuildBaseInstructions("", prompt.SectionData{ToolNames: promptToolNames(s.harness.AvailableTools())})
 	var checked strings.Builder
 	for _, section := range strings.Split(instructions, "\n\n# ") {
 		if !strings.HasPrefix(section, "Code intelligence\n") {
@@ -175,10 +175,10 @@ func TestDelegatedRequestsIncludeRuntimeAndActiveMode(t *testing.T) {
 				s.setMode(modePlan)
 			}
 			s.unattended.Store(tc.unattended)
-			originalTools := s.toolSet
+			originalTools := s.tools
 			if tc.disableWeb || tc.disableShell {
 				var filtered []tool.Tool
-				for _, candidate := range s.toolSet.Slice() {
+				for _, candidate := range s.tools {
 					if tc.disableWeb && (candidate.Name == "search_web" || candidate.Name == "fetch") {
 						continue
 					}
@@ -187,11 +187,11 @@ func TestDelegatedRequestsIncludeRuntimeAndActiveMode(t *testing.T) {
 					}
 					filtered = append(filtered, candidate)
 				}
-				s.toolSet = tool.NewSet(filtered...)
-				t.Cleanup(func() { s.toolSet = originalTools })
+				s.tools = filtered
+				t.Cleanup(func() { s.tools = originalTools })
 			}
 			called := false
-			for _, candidate := range s.tools() {
+			for _, candidate := range s.harness.AvailableTools() {
 				if candidate.Name != "agent" {
 					continue
 				}

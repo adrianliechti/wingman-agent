@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"maps"
 	"strings"
@@ -32,6 +33,15 @@ const maxStreamRetries = 5
 type Agent struct {
 	*Config
 
+	// PrepareTurn runs with the operation reserved, before hooks and tool
+	// capture. Set it before using the agent. It belongs to this instance;
+	// delegated agents inherit Config, not their parent's preparation.
+	PrepareTurn func(context.Context, []Content) ([]Content, error)
+
+	// Resources belongs to this instance. Close releases it after workers exit
+	// and before SessionEnd hooks. Set it before using the agent.
+	Resources io.Closer
+
 	// Events is the canonical append-only runtime ledger. Messages is its
 	// materialized conversation projection and remains exported for source
 	// compatibility; provider context is maintained separately.
@@ -51,25 +61,31 @@ type Agent struct {
 	contextUsage    contextUsageAnchor
 	runtimeIndex    runtimeEventIndex
 	runtimeIndexSet bool
-	queueMu         sync.Mutex
-	running         bool
-	finishing       bool
-	closed          bool
-	cancel          context.CancelCauseFunc
-	closeWait       <-chan struct{}
-	turnID          string
-	turnTools       []tool.Tool
-	toolsPinned     bool
-	pendingInput    []Message
-	startOnce       sync.Once
-	toolRunsMu      sync.Mutex
-	toolRuns        map[string]*toolRun
+
+	queueMu       sync.Mutex
+	running       bool
+	finishing     bool
+	closed        bool
+	cancel        context.CancelCauseFunc
+	operationDone chan struct{}
+	turnID        string
+	turnTools     []tool.Tool
+	toolsPinned   bool
+	pendingInput  []Message
+	started       bool // Only accessed by the operation owner.
+
+	backgroundCtx    context.Context
+	cancelBackground context.CancelFunc
+	background       sync.WaitGroup
+
+	toolRunsMu sync.Mutex
+	toolRuns   map[string]*toolRun
 }
 
 type toolRun struct {
 	signature string
 	done      chan struct{}
-	result    tool.Result
+	result    tool.Result // Published by closing done; immutable afterward.
 }
 
 // Running reports whether a turn is currently active.
@@ -114,7 +130,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	}
 	input = CloneContent(input)
 
-	ctx, endOperation, err := a.beginOperation(ctx, false)
+	ctx, endOperation, err := a.beginOperation(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -133,6 +149,9 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	if err != nil {
 		return nil, err
 	}
+	// Setup has finished using session resources. The caller now owns stream
+	// consumption; Close can cancel it without waiting on an idle consumer.
+	a.detachStream()
 	handedOff = true
 	var consumed atomic.Bool
 	return func(yield func(Message, error) bool) {
@@ -181,15 +200,17 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 
 	// Setup and streaming share one terminal path. A panic in a startup hook
 	// must settle the ledger just like a panic after stream consumption starts.
-	var finishOnce sync.Once
+	finished := false
 	var terminalErr error
 	finish := func(status RuntimeStatus, outcomeErr error) error {
-		finishOnce.Do(func() {
-			defer func() {
-				telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(outcomeErr, terminalErr)})
-			}()
-			terminalErr = a.finishTurn(ctx, runtime.TurnID, status, outcomeErr, turnUsageBefore)
-		})
+		if finished {
+			return terminalErr
+		}
+		finished = true
+		defer func() {
+			telemetryInvocation.End(telemetry.Outcome{Err: errors.Join(outcomeErr, terminalErr)})
+		}()
+		terminalErr = a.finishTurn(ctx, runtime.TurnID, status, outcomeErr, turnUsageBefore)
 		return terminalErr
 	}
 	defer func() {
@@ -212,13 +233,14 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 	}
 	var sessionStartOutcome hook.Outcome
 	var sessionStartErr error
-	a.startOnce.Do(func() {
+	if !a.started {
+		a.started = true
 		source := runtime.StartSource
 		if source == "" {
 			source = "startup"
 		}
 		sessionStartOutcome, sessionStartErr = a.runSessionStartHooks(ctx, source)
-	})
+	}
 	if sessionStartErr != nil {
 		return failSetup(sessionStartErr)
 	}
@@ -728,7 +750,7 @@ func (a *Agent) processToolCalls(ctx context.Context, calls []ToolCall, tools []
 		if end-start > 1 {
 			err = a.processToolCallsParallel(ctx, calls[start:end], tools, yield)
 		} else {
-			err = a.processToolCallsSequential(ctx, calls[start:end], tools, yield)
+			err = a.processToolCall(ctx, calls[start], tools, yield)
 		}
 
 		if err != nil {
@@ -741,26 +763,24 @@ func (a *Agent) processToolCalls(ctx context.Context, calls []ToolCall, tools []
 	return context.Cause(ctx)
 }
 
-func (a *Agent) processToolCallsSequential(ctx context.Context, calls []ToolCall, tools []tool.Tool, yield func(Message, error) bool) error {
-	for _, tc := range calls {
-		if err := ctx.Err(); err != nil {
-			return context.Cause(ctx)
-		}
-		if !yield(toolCallMessage(tc), nil) {
-			return errYieldStopped
-		}
+func (a *Agent) processToolCall(ctx context.Context, tc ToolCall, tools []tool.Tool, yield func(Message, error) bool) error {
+	if err := ctx.Err(); err != nil {
+		return context.Cause(ctx)
+	}
+	if !yield(toolCallMessage(tc), nil) {
+		return errYieldStopped
+	}
 
-		outcome := a.runSingleToolCallOutcome(ctx, tc, tools)
-		resultMsg := toolResultMessage(tc, outcome.result)
-		if !outcome.recorded {
-			if err := a.appendMessages(resultMsg); err != nil {
-				return err
-			}
+	outcome := a.runSingleToolCallOutcome(ctx, tc, tools)
+	resultMsg := toolResultMessage(tc, outcome.result)
+	if !outcome.recorded {
+		if err := a.appendMessages(resultMsg); err != nil {
+			return err
 		}
+	}
 
-		if !yield(resultMsg, nil) {
-			return errYieldStopped
-		}
+	if !yield(resultMsg, nil) {
+		return errYieldStopped
 	}
 
 	return context.Cause(ctx)
@@ -813,25 +833,20 @@ func (a *Agent) processToolCallsParallel(ctx context.Context, calls []ToolCall, 
 	var batchEvents []RuntimeEvent
 	allDeferred := len(calls) > 0
 	for i, tc := range calls {
-		if outcomes[i].deferredCommit == nil {
+		commit := outcomes[i].deferredCommit
+		if commit == nil {
 			allDeferred = false
 			break
 		}
-		commit := outcomes[i].deferredCommit
-		batchEvents = append(batchEvents, a.toolOutcomeEvents(tc, outcomes[i].result, commit.operationID, commit.turnID, commit.effect)...)
+		batchEvents = append(batchEvents, toolOutcomeEvents(tc, outcomes[i].result, *commit)...)
 		resultMessages[i] = toolResultMessage(tc, outcomes[i].result)
 	}
-	if allDeferred && a.recordEvents(batchEvents...) == nil {
-		for i := range outcomes {
-			outcomes[i].recorded = true
-			outcomes[i].deferredCommit = nil
-		}
-	} else {
+	if !allDeferred || a.recordEvents(batchEvents...) != nil {
 		var unrecorded []Message
 		for i, tc := range calls {
-			outcomes[i] = a.commitDeferredToolOutcome(tc, outcomes[i])
-			resultMessages[i] = toolResultMessage(tc, outcomes[i].result)
-			if !outcomes[i].recorded {
+			outcome := a.commitToolOutcome(tc, outcomes[i])
+			resultMessages[i] = toolResultMessage(tc, outcome.result)
+			if !outcome.recorded {
 				unrecorded = append(unrecorded, resultMessages[i])
 			}
 		}
@@ -879,53 +894,45 @@ const (
 )
 
 func toolResultMessage(tc ToolCall, result tool.Result) Message {
-	presentation := NewToolPresentation(tc.Name, tc.Kind, tc.Args, tc.Locations)
-	if tool.IsImageResult(result.Content) {
-		return Message{
-			Role: RoleAssistant,
-			Content: []Content{
-				{ToolResult: &ToolResult{
-					ID: tc.ID, Name: tc.Name, Kind: tc.Kind, Args: tc.Args,
-					Locations: tc.Locations, Presentation: presentation,
-					Content: imageResultPlaceholder, IsError: result.IsError, Metadata: result.Metadata,
-				}},
-				{File: &File{Data: result.Content}},
-			},
-		}
-	}
-
-	return Message{
+	message := Message{
 		Role: RoleAssistant,
 		Content: []Content{{ToolResult: &ToolResult{
 			ID: tc.ID, Name: tc.Name, Kind: tc.Kind, Args: tc.Args,
-			Locations: tc.Locations, Presentation: presentation,
+			Locations: tc.Locations, Presentation: NewToolPresentation(tc.Name, tc.Kind, tc.Args, tc.Locations),
 			Content: result.Content, IsError: result.IsError, Metadata: result.Metadata,
 		}}},
 	}
+	if tool.IsImageResult(result.Content) {
+		message.Content[0].ToolResult.Content = imageResultPlaceholder
+		message.Content = append(message.Content, Content{File: &File{Data: result.Content}})
+	}
+	return message
 }
 
 func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool.Tool) tool.Result {
 	return a.runSingleToolCallOutcome(ctx, tc, tools).result
 }
 
-func (a *Agent) runSingleToolCallOutcome(ctx context.Context, tc ToolCall, tools []tool.Tool) (outcome toolCallOutcome) {
+func (a *Agent) runSingleToolCallOutcome(ctx context.Context, tc ToolCall, tools []tool.Tool) toolCallOutcome {
 	return a.runSingleToolCallOutcomeMode(ctx, tc, tools, false)
 }
 
-func (a *Agent) runSingleToolCallOutcomeDeferred(ctx context.Context, tc ToolCall, tools []tool.Tool) (outcome toolCallOutcome) {
+func (a *Agent) runSingleToolCallOutcomeDeferred(ctx context.Context, tc ToolCall, tools []tool.Tool) toolCallOutcome {
 	return a.runSingleToolCallOutcomeMode(ctx, tc, tools, true)
 }
 
 func (a *Agent) runSingleToolCallOutcomeMode(ctx context.Context, tc ToolCall, tools []tool.Tool, deferCommit bool) (outcome toolCallOutcome) {
+	var run *toolRun
 	defer func() {
 		if r := recover(); r != nil {
 			outcome = toolCallOutcome{result: tool.Error(fmt.Sprintf("error: tool %s panicked: %v", tc.Name, r))}
 		}
+		// Cache failures too, so duplicate callers receive the same outcome.
+		if run != nil {
+			run.result = cloneToolResult(outcome.result)
+			close(run.done)
+		}
 	}()
-	return a.toolCallOutcome(ctx, tc, tools, deferCommit)
-}
-
-func (a *Agent) toolCallOutcome(ctx context.Context, tc ToolCall, tools []tool.Tool, deferCommit bool) (outcome toolCallOutcome) {
 	if tc.ID == "" {
 		return a.executeToolOperation(ctx, tc, tools, deferCommit)
 	}
@@ -952,21 +959,9 @@ func (a *Agent) toolCallOutcome(ctx context.Context, tc ToolCall, tools []tool.T
 			return toolCallOutcome{result: tool.Error(interruptedWaitResult)}
 		}
 	}
-	run := &toolRun{signature: signature, done: make(chan struct{})}
+	run = &toolRun{signature: signature, done: make(chan struct{})}
 	a.toolRuns[tc.ID] = run
 	a.toolRunsMu.Unlock()
-
-	// A panic must be cached as the error it becomes; otherwise a duplicate
-	// call would replay the zero-value (successful) result.
-	defer func() {
-		if r := recover(); r != nil {
-			outcome = toolCallOutcome{result: tool.Error(fmt.Sprintf("error: tool %s panicked: %v", tc.Name, r))}
-		}
-		a.toolRunsMu.Lock()
-		run.result = cloneToolResult(outcome.result)
-		close(run.done)
-		a.toolRunsMu.Unlock()
-	}()
 	return a.executeToolOperation(ctx, tc, tools, deferCommit)
 }
 
@@ -1028,28 +1023,31 @@ func (a *Agent) executeToolOperation(ctx context.Context, tc ToolCall, tools []t
 	}
 	telemetryExecution.End(toolOutcome)
 	telemetryEnded = true
-	if deferCommit {
-		return toolCallOutcome{
-			result: result,
-			deferredCommit: &toolCommit{
-				operationID: operationID,
-				turnID:      started.TurnID,
-				effect:      effect,
-			},
-		}
+	outcome := toolCallOutcome{
+		result: result,
+		deferredCommit: &toolCommit{
+			operationID: operationID,
+			turnID:      started.TurnID,
+			effect:      effect,
+		},
 	}
-	return a.commitToolOutcome(tc, result, operationID, started.TurnID, effect)
+	if deferCommit {
+		return outcome
+	}
+	return a.commitToolOutcome(tc, outcome)
 }
 
-func (a *Agent) commitDeferredToolOutcome(tc ToolCall, outcome toolCallOutcome) toolCallOutcome {
+func (a *Agent) commitToolOutcome(tc ToolCall, outcome toolCallOutcome) toolCallOutcome {
 	if outcome.deferredCommit == nil {
 		return outcome
 	}
-	commit := outcome.deferredCommit
-	return a.commitToolOutcome(tc, outcome.result, commit.operationID, commit.turnID, commit.effect)
+	if err := a.recordEvents(toolOutcomeEvents(tc, outcome.result, *outcome.deferredCommit)...); err != nil {
+		return toolCallOutcome{result: tool.Error(fmt.Sprintf("error: tool finished but its result and terminal fact could not be persisted: %v", err))}
+	}
+	return toolCallOutcome{result: outcome.result, recorded: true}
 }
 
-func (a *Agent) toolOutcomeEvents(tc ToolCall, result tool.Result, operationID, turnID string, effect tool.Effect) []RuntimeEvent {
+func toolOutcomeEvents(tc ToolCall, result tool.Result, commit toolCommit) []RuntimeEvent {
 	status := RuntimeCompleted
 	if result.IsError {
 		status = RuntimeFailed
@@ -1064,18 +1062,11 @@ func (a *Agent) toolOutcomeEvents(tc ToolCall, result tool.Result, operationID, 
 	resultMessage := toolResultMessage(tc, result)
 	return append(messageEvents(resultMessage), RuntimeEvent{
 		Type:        EventToolTerminal,
-		TurnID:      turnID,
-		OperationID: operationID,
-		Tool:        &RuntimeTool{CallID: tc.ID, Name: tc.Name, Args: tc.Args, Effect: string(effect), IsError: result.IsError},
+		TurnID:      commit.turnID,
+		OperationID: commit.operationID,
+		Tool:        &RuntimeTool{CallID: tc.ID, Name: tc.Name, Args: tc.Args, Effect: string(commit.effect), IsError: result.IsError},
 		Terminal:    terminal,
 	})
-}
-
-func (a *Agent) commitToolOutcome(tc ToolCall, result tool.Result, operationID, turnID string, effect tool.Effect) toolCallOutcome {
-	if err := a.recordEvents(a.toolOutcomeEvents(tc, result, operationID, turnID, effect)...); err != nil {
-		return toolCallOutcome{result: tool.Error(fmt.Sprintf("error: tool finished but its result and terminal fact could not be persisted: %v", err))}
-	}
-	return toolCallOutcome{result: result, recorded: true}
 }
 
 func genericToolTelemetryValue(mcpMethod, arguments string) any {
