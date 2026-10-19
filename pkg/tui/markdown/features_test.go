@@ -29,7 +29,7 @@ func TestFileReferencesAndMultilineLinks(t *testing.T) {
 	}
 	const destination = "https://example.com/source"
 	got := Render("[before `main file.go`\nafter]("+destination+")", Options{Directory: directory})
-	for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(got), "\n") {
 		if strings.Count(line, "\x1b]8;;"+destination+"\x1b\\") != 1 || !strings.Contains(line, ansi.HyperlinkEnd) {
 			t.Fatalf("nested code or a line break lost the outer link: %q", got)
 		}
@@ -48,7 +48,7 @@ func TestTablesAdaptToContentWidthWithoutDroppingValues(t *testing.T) {
 	const source = "| Name | Description | Status |\n| :--- | :--- | ---: |\n| **alpha** | useful details about the change | ready |\n| 日本語 | [source](https://example.com) | pending |\n"
 	for _, width := range []int{100, 60, 35, 20, 8} {
 		rendered := Render(source, Options{Width: width})
-		for _, line := range strings.Split(rendered, "\n") {
+		for line := range strings.SplitSeq(rendered, "\n") {
 			if ansi.Width(line) > width {
 				t.Fatalf("width %d overflowed with %q (%d columns)", width, line, ansi.Width(line))
 			}

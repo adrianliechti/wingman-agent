@@ -312,8 +312,8 @@ func readTCPAdapterOutput(reader io.Reader, prefix string, output func(string, s
 	for {
 		line, err := buffered.ReadString('\n')
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, prefix) {
-			address := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+		if after, ok := strings.CutPrefix(trimmed, prefix); ok {
+			address := strings.TrimSpace(after)
 			if address == "" {
 				ready <- readyResult{err: errors.New("adapter reported an empty listen address")}
 				return

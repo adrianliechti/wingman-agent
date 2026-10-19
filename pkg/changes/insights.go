@@ -1,9 +1,10 @@
 package changes
 
 import (
+	"cmp"
 	"context"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -222,11 +223,8 @@ func gitInsights(ctx context.Context, root string) (GitInsightsResult, error) {
 		})
 	}
 	res.TotalAuthors = len(res.Authors)
-	sort.Slice(res.Authors, func(i, j int) bool {
-		if res.Authors[i].Commits != res.Authors[j].Commits {
-			return res.Authors[i].Commits > res.Authors[j].Commits
-		}
-		return res.Authors[i].Name < res.Authors[j].Name
+	slices.SortFunc(res.Authors, func(a, b AuthorStat) int {
+		return cmp.Or(cmp.Compare(b.Commits, a.Commits), strings.Compare(a.Name, b.Name))
 	})
 
 	series := res.Authors
@@ -264,11 +262,8 @@ func gitInsights(ctx context.Context, root string) (GitInsightsResult, error) {
 	for m, n := range moduleCommits {
 		res.Modules = append(res.Modules, ModuleActivity{Module: m, Commits: n})
 	}
-	sort.Slice(res.Modules, func(i, j int) bool {
-		if res.Modules[i].Commits != res.Modules[j].Commits {
-			return res.Modules[i].Commits > res.Modules[j].Commits
-		}
-		return res.Modules[i].Module < res.Modules[j].Module
+	slices.SortFunc(res.Modules, func(a, b ModuleActivity) int {
+		return cmp.Or(cmp.Compare(b.Commits, a.Commits), strings.Compare(a.Module, b.Module))
 	})
 	if len(res.Modules) > insightsTopModules {
 		res.Modules = res.Modules[:insightsTopModules]
@@ -279,22 +274,16 @@ func gitInsights(ctx context.Context, root string) (GitInsightsResult, error) {
 		for name, commits := range agg.authorCommits {
 			entry.RecentAuthors = append(entry.RecentAuthors, AuthorContribution{Name: name, Commits: commits})
 		}
-		sort.Slice(entry.RecentAuthors, func(i, j int) bool {
-			if entry.RecentAuthors[i].Commits != entry.RecentAuthors[j].Commits {
-				return entry.RecentAuthors[i].Commits > entry.RecentAuthors[j].Commits
-			}
-			return entry.RecentAuthors[i].Name < entry.RecentAuthors[j].Name
+		slices.SortFunc(entry.RecentAuthors, func(a, b AuthorContribution) int {
+			return cmp.Or(cmp.Compare(b.Commits, a.Commits), strings.Compare(a.Name, b.Name))
 		})
 		if len(entry.RecentAuthors) > 3 {
 			entry.RecentAuthors = entry.RecentAuthors[:3]
 		}
 		res.Churn = append(res.Churn, entry)
 	}
-	sort.Slice(res.Churn, func(i, j int) bool {
-		if res.Churn[i].Commits != res.Churn[j].Commits {
-			return res.Churn[i].Commits > res.Churn[j].Commits
-		}
-		return res.Churn[i].File < res.Churn[j].File
+	slices.SortFunc(res.Churn, func(a, b ChurnStat) int {
+		return cmp.Or(cmp.Compare(b.Commits, a.Commits), strings.Compare(a.File, b.File))
 	})
 	if len(res.Churn) > insightsTopChurn {
 		res.Churn = res.Churn[:insightsTopChurn]

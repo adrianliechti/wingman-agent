@@ -1,6 +1,9 @@
 package harness
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 const sessionContextPrefix = "[Session context]\nThis is the complete current session context. It replaces all earlier session context messages; omitted sections no longer apply.\n\n"
 
@@ -9,8 +12,8 @@ func isSessionContext(m Message) bool {
 }
 
 func lastSessionContextIndex(messages []Message) int {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if isSessionContext(messages[i]) {
+	for i, message := range slices.Backward(messages) {
+		if isSessionContext(message) {
 			return i
 		}
 	}

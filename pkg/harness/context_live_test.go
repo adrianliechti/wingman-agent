@@ -233,8 +233,8 @@ func testLiveContext(t *testing.T, model, switchModel string) {
 		return lastAssistantText(a.MessagesSnapshot())
 	}
 	fixture := image.NewRGBA(image.Rect(0, 0, 32, 32))
-	for y := 0; y < 32; y++ {
-		for x := 0; x < 32; x++ {
+	for y := range 32 {
+		for x := range 32 {
 			fixture.SetRGBA(x, y, color.RGBA{R: 255, A: 255})
 		}
 	}
@@ -352,7 +352,7 @@ func testLiveContext(t *testing.T, model, switchModel string) {
 		t.Fatalf("live auto compaction: context revision=%d, want %d", a.StateSnapshot().ContextRevision, revisionBefore+1)
 	}
 	statuses := make(map[string]string)
-	for _, line := range strings.Split(reply, "\n") {
+	for line := range strings.SplitSeq(reply, "\n") {
 		separator := strings.IndexAny(line, ":;")
 		if separator < 0 {
 			continue

@@ -744,8 +744,7 @@ func (s *Server) handleEditorTab(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Tab prediction timed out", http.StatusGatewayTimeout)
 			return
 		}
-		var inputErr editorTabInputError
-		if errors.As(err, &inputErr) {
+		if _, ok := errors.AsType[editorTabInputError](err); ok {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

@@ -22,7 +22,7 @@ type taskSnapshot struct {
 	Description string          `json:"description"`
 	AgentType   string          `json:"agent_type"`
 	Started     time.Time       `json:"started"`
-	Finished    time.Time       `json:"finished,omitempty"`
+	Finished    time.Time       `json:"finished,omitzero"`
 	Status      Status          `json:"status"`
 	Result      string          `json:"result,omitempty"`
 	Activity    string          `json:"activity,omitempty"`
@@ -163,7 +163,7 @@ func (r *Registry) persist() error {
 // shutdown cancels backoff and continues to exclude writes after Close.
 func (r *Registry) persistCompletion() error {
 	var err error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range 3 {
 		if attempt > 0 {
 			timer := time.NewTimer(time.Duration(attempt) * 100 * time.Millisecond)
 			select {

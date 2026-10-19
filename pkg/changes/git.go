@@ -1,11 +1,13 @@
 package changes
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
@@ -91,11 +93,8 @@ func (m *Manager) Branches(ctx context.Context, refresh bool) ([]GitBranch, stri
 	if err != nil {
 		return nil, "", fmt.Errorf("list Git branches: %w", err)
 	}
-	sort.Slice(branches, func(i, j int) bool {
-		if branches[i].Remote != branches[j].Remote {
-			return branches[i].Remote < branches[j].Remote
-		}
-		return branches[i].Name < branches[j].Name
+	slices.SortFunc(branches, func(a, b GitBranch) int {
+		return cmp.Or(strings.Compare(a.Remote, b.Remote), strings.Compare(a.Name, b.Name))
 	})
 	return branches, warning, nil
 }
@@ -388,13 +387,8 @@ func (m *Manager) fetchAllLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read Git config: %w", err)
 	}
-	names := make([]string, 0, len(cfg.Remotes))
-	for name := range cfg.Remotes {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	var fetchErrors []error
-	for _, name := range names {
+	for _, name := range slices.Sorted(maps.Keys(cfg.Remotes)) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -437,7 +431,7 @@ func (m *Manager) ensureNoStagedChangesOutsideScope() error {
 	if len(outside) == 0 {
 		return nil
 	}
-	sort.Strings(outside)
+	slices.Sort(outside)
 	const maxExamples = 3
 	examples := outside
 	if len(examples) > maxExamples {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/adrianliechti/wingman-agent/internal/statefile"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 )
@@ -142,22 +143,5 @@ func writeTrustFile(path string, trusted map[string]bool) error {
 	if err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(filepath.Dir(path), "."+strings.TrimSuffix(filepath.Base(path), ".json")+"-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(file.Name())
-	_, writeErr := file.Write(data)
-	syncErr := file.Sync()
-	closeErr := file.Close()
-	if writeErr != nil {
-		return writeErr
-	}
-	if syncErr != nil {
-		return syncErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	return os.Rename(file.Name(), path)
+	return statefile.Write(path, data)
 }

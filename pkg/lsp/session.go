@@ -860,24 +860,24 @@ func (s *Session) initialize(ctx context.Context) error {
 		InitializationOptions: protocol.LSPAny(s.server.InitializationOptions),
 		Capabilities: protocol.ClientCapabilities{
 			Workspace: &protocol.WorkspaceClientCapabilities{
-				ApplyEdit:        pointer(true),
-				WorkspaceFolders: pointer(true),
+				ApplyEdit:        new(true),
+				WorkspaceFolders: new(true),
 				WorkspaceEdit: &protocol.WorkspaceEditClientCapabilities{
-					DocumentChanges:         pointer(true),
+					DocumentChanges:         new(true),
 					FailureHandling:         protocol.FailureHandlingKindTextOnlyTransactional,
-					NormalizesLineEndings:   pointer(false),
+					NormalizesLineEndings:   new(false),
 					ChangeAnnotationSupport: &protocol.ChangeAnnotationsSupportOptions{},
 				},
 			},
 			TextDocument: &protocol.TextDocumentClientCapabilities{
-				Synchronization: &protocol.TextDocumentSyncClientCapabilities{DidSave: pointer(true)},
+				Synchronization: &protocol.TextDocumentSyncClientCapabilities{DidSave: new(true)},
 				Completion: &protocol.CompletionClientCapabilities{
-					ContextSupport: pointer(true),
+					ContextSupport: new(true),
 					CompletionItem: &protocol.ClientCompletionItemOptions{
-						SnippetSupport:          pointer(true),
-						CommitCharactersSupport: pointer(true),
-						PreselectSupport:        pointer(true),
-						InsertReplaceSupport:    pointer(true),
+						SnippetSupport:          new(true),
+						CommitCharactersSupport: new(true),
+						PreselectSupport:        new(true),
+						InsertReplaceSupport:    new(true),
 						DocumentationFormat:     []protocol.MarkupKind{protocol.MarkupKindMarkdown, protocol.MarkupKindPlainText},
 						ResolveSupport: protocol.ClientCompletionItemResolveOptions{
 							Properties: []string{"documentation", "detail", "additionalTextEdits", "command"},
@@ -885,27 +885,27 @@ func (s *Session) initialize(ctx context.Context) error {
 					},
 				},
 				SignatureHelp: &protocol.SignatureHelpClientCapabilities{
-					ContextSupport: pointer(true),
+					ContextSupport: new(true),
 					SignatureInformation: &protocol.ClientSignatureInformationOptions{
 						DocumentationFormat:    []protocol.MarkupKind{protocol.MarkupKindMarkdown, protocol.MarkupKindPlainText},
-						ParameterInformation:   &protocol.ClientSignatureParameterInformationOptions{LabelOffsetSupport: pointer(true)},
-						ActiveParameterSupport: pointer(true),
+						ParameterInformation:   &protocol.ClientSignatureParameterInformationOptions{LabelOffsetSupport: new(true)},
+						ActiveParameterSupport: new(true),
 					},
 				},
 				Hover:             &protocol.HoverClientCapabilities{ContentFormat: []protocol.MarkupKind{protocol.MarkupKindMarkdown, protocol.MarkupKindPlainText}},
-				Definition:        &protocol.DefinitionClientCapabilities{LinkSupport: pointer(true)},
+				Definition:        &protocol.DefinitionClientCapabilities{LinkSupport: new(true)},
 				TypeDefinition:    &protocol.TypeDefinitionClientCapabilities{},
 				References:        &protocol.ReferenceClientCapabilities{},
 				Implementation:    &protocol.ImplementationClientCapabilities{},
-				DocumentSymbol:    &protocol.DocumentSymbolClientCapabilities{HierarchicalDocumentSymbolSupport: pointer(true)},
+				DocumentSymbol:    &protocol.DocumentSymbolClientCapabilities{HierarchicalDocumentSymbolSupport: new(true)},
 				DocumentHighlight: &protocol.DocumentHighlightClientCapabilities{},
 				FoldingRange:      &protocol.FoldingRangeClientCapabilities{},
-				Rename:            &protocol.RenameClientCapabilities{PrepareSupport: pointer(true), HonorsChangeAnnotations: pointer(true)},
+				Rename:            &protocol.RenameClientCapabilities{PrepareSupport: new(true), HonorsChangeAnnotations: new(true)},
 				CodeAction: &protocol.CodeActionClientCapabilities{
-					IsPreferredSupport:      pointer(true),
-					DisabledSupport:         pointer(true),
-					DataSupport:             pointer(true),
-					HonorsChangeAnnotations: pointer(true),
+					IsPreferredSupport:      new(true),
+					DisabledSupport:         new(true),
+					DataSupport:             new(true),
+					HonorsChangeAnnotations: new(true),
 					CodeActionLiteralSupport: protocol.ClientCodeActionLiteralOptions{
 						CodeActionKind: protocol.ClientCodeActionKindOptions{ValueSet: []protocol.CodeActionKind{
 							protocol.CodeActionKindQuickFix,
@@ -945,7 +945,7 @@ func (s *Session) initialize(ctx context.Context) error {
 				Diagnostic:    &protocol.DiagnosticClientCapabilities{},
 				CallHierarchy: &protocol.CallHierarchyClientCapabilities{},
 			},
-			Window: &protocol.WindowClientCapabilities{WorkDoneProgress: pointer(true)},
+			Window: &protocol.WindowClientCapabilities{WorkDoneProgress: new(true)},
 		},
 	}
 
@@ -962,8 +962,6 @@ func (s *Session) initialize(ctx context.Context) error {
 
 	return nil
 }
-
-func pointer[T any](value T) *T { return &value }
 
 func (s *Session) Capabilities() protocol.ServerCapabilities {
 	return s.capabilities

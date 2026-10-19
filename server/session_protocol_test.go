@@ -108,10 +108,10 @@ func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Cont
 func newProtocolServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, runtimes: map[string]*backendRuntime{}, wsConns: map[*websocket.Conn]*wsClient{}}
+	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}, wsConns: map[*websocket.Conn]*wsClient{}}
 	a := &protocolAgent{}
 	b := s.bindBackend("one", a)
-	s.runtimes[b.id] = b
+	s.backends[b.id] = &backendEntry{runtime: b}
 	s.mux = chi.NewRouter()
 	s.mux.Route("/api", s.registerSessionRoutes)
 	s.handler = s.checkInstance(s.mux)
@@ -331,7 +331,7 @@ func TestSessionBackendsOwnIdenticalNativeIDsAndDeletionIsTerminal(t *testing.T)
 	s, one, a := newProtocolServer(t)
 	otherAgent := &protocolAgent{}
 	two := s.bindBackend("two", otherAgent)
-	s.runtimes["two"] = two
+	s.backends["two"] = &backendEntry{runtime: two}
 	c := one.session("same")
 	c.load()
 	other := two.session("same")
@@ -387,7 +387,7 @@ func TestSessionSettingsRoundTripIndependentUnattendedPolicy(t *testing.T) {
 	s, other, _ := newProtocolServer(t)
 	a := &unattendedProtocolAgent{protocolAgent: &protocolAgent{model: "selected-model"}}
 	b := s.bindBackend("policy", a)
-	s.runtimes["policy"] = b
+	s.backends["policy"] = &backendEntry{runtime: b}
 	c := b.session("saved")
 	c.load()
 	for _, enabled := range []bool{true, false} {
@@ -516,7 +516,7 @@ func TestSessionCompactCommandReportsPhaseAndOutcome(t *testing.T) {
 	s, other, _ := newProtocolServer(t)
 	a := &compactingProtocolAgent{protocolAgent: &protocolAgent{}, focus: make(chan string, 1), release: make(chan error, 1)}
 	b := s.bindBackend("compact", a)
-	s.runtimes["compact"] = b
+	s.backends["compact"] = &backendEntry{runtime: b}
 	c := b.session("saved")
 	c.load()
 	if !b.settings("saved").CanCompact || other.settings("saved").CanCompact {

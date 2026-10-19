@@ -150,7 +150,7 @@ func TestManagerActivitiesAreReadOnlyAndProjectScoped(t *testing.T) {
 	session.alive.Store(true)
 	manager := NewManager(root)
 	defer manager.cancel()
-	manager.sessions["go"] = session
+	manager.sessions["go"] = &sessionEntry{session: session}
 
 	activities := manager.Activities()
 	if len(activities) != 1 || activities[0].Server != "gopls" || activities[0].Label != "Go" || activities[0].ProjectDir != root || !activities[0].Analyzing || len(activities[0].Operations) != 1 {
@@ -169,7 +169,7 @@ func TestGetSessionStopsRestartingAfterRepeatedCrashes(t *testing.T) {
 
 	// Each round simulates a session that started and then died.
 	for attempt := 1; attempt <= maxRestarts; attempt++ {
-		manager.sessions[key] = &Session{}
+		manager.sessions[key] = &sessionEntry{session: &Session{}}
 		if _, err := manager.getSession(context.Background(), project); err == nil {
 			t.Fatalf("attempt %d: expected the restart to fail", attempt)
 		}
@@ -178,7 +178,7 @@ func TestGetSessionStopsRestartingAfterRepeatedCrashes(t *testing.T) {
 		}
 	}
 
-	manager.sessions[key] = &Session{}
+	manager.sessions[key] = &sessionEntry{session: &Session{}}
 	_, err := manager.getSession(context.Background(), project)
 	if err == nil || !strings.Contains(err.Error(), "not restarting") {
 		t.Fatalf("err = %v, want the restart cap to apply", err)

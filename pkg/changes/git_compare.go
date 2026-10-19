@@ -6,7 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -188,13 +189,7 @@ func (m *Manager) compareWorktree(ctx context.Context, baseCommit *object.Commit
 	if err != nil {
 		return CompareResult{}, err
 	}
-	paths := make([]string, 0, len(candidates))
-	for path := range candidates {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-
-	for _, path := range paths {
+	for _, path := range slices.Sorted(maps.Keys(candidates)) {
 		if err := ctx.Err(); err != nil {
 			return CompareResult{}, err
 		}
@@ -364,8 +359,8 @@ func (m *Manager) HistoryLimit(ctx context.Context, limit int) ([]GitCommit, err
 	if err != nil {
 		return nil, fmt.Errorf("list Git references: %w", err)
 	}
-	for hash := range refsByHash {
-		sort.Strings(refsByHash[hash])
+	for _, refs := range refsByHash {
+		slices.Sort(refs)
 	}
 
 	iter, err := m.repo.Log(&git.LogOptions{All: true, Order: git.LogOrderCommitterTime})

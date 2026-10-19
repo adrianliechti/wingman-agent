@@ -100,7 +100,7 @@ func waitForSessionOperation(t *testing.T, a *App) {
 	// Generous ceiling: a cold PowerShell start alone can take seconds.
 	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
-	for a.operationPending {
+	for a.operation != operationNone {
 		select {
 		case fn := <-a.queue:
 			fn()

@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 const previewCookieName = "wingman_preview_root"
@@ -27,7 +26,6 @@ type filePreviewServer struct {
 	listener net.Listener
 	server   *http.Server
 	done     chan struct{}
-	close    sync.Once
 }
 
 func newFilePreviewServer(root *os.Root) (*filePreviewServer, error) {
@@ -78,10 +76,8 @@ func (p *filePreviewServer) startURL(file, requestHost string) string {
 }
 
 func (p *filePreviewServer) Close() {
-	p.close.Do(func() {
-		_ = p.server.Close()
-		<-p.done
-	})
+	_ = p.server.Close()
+	<-p.done
 }
 
 func (p *filePreviewServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {

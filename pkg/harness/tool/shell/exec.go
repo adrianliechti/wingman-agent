@@ -404,9 +404,9 @@ func sanitizeOutput(s string) string {
 		}
 		segments := strings.Split(line, "\r")
 		keep := ""
-		for j := len(segments) - 1; j >= 0; j-- {
-			if segments[j] != "" {
-				keep = segments[j]
+		for _, segment := range slices.Backward(segments) {
+			if segment != "" {
+				keep = segment
 				break
 			}
 		}

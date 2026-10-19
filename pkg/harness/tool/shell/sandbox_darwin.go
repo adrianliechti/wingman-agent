@@ -45,7 +45,8 @@ func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 	}
 	writeRules := paramRules("WRITABLE_ROOT", policy.WritableRoots)
 
-	profile := `(version 1)
+	var profile strings.Builder
+	profile.WriteString(`(version 1)
 (deny default)
 (allow process-exec)
 (allow process-fork)
@@ -103,22 +104,22 @@ func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 (allow pseudo-tty)
 (deny appleevent-send)
 (deny lsopen)
-`
+`)
 	if policy.Network {
-		profile += seatbeltNetwork
+		profile.WriteString(seatbeltNetwork)
 	}
 	var protectedPaths []string
 	for _, root := range sandboxProtectedRoots(policy) {
-		profile += seatbeltProtectedRules(root)
+		profile.WriteString(seatbeltProtectedRules(root))
 		protectedPaths = append(protectedPaths, existingProtectedPaths(root)...)
 	}
 	if rules := paramRules("PROTECTED_PATH", protectedPaths); rules != "" {
-		profile += "(deny file-write*" + rules + ")\n"
+		profile.WriteString("(deny file-write*" + rules + ")\n")
 	}
 	if denyRules := paramRules("DENY_READ", policy.DenyRead); denyRules != "" {
-		profile += "(deny file-read*" + denyRules + ")\n(deny file-write*" + denyRules + ")\n"
+		profile.WriteString("(deny file-read*" + denyRules + ")\n(deny file-write*" + denyRules + ")\n")
 	}
-	return profile, definitions
+	return profile.String(), definitions
 }
 
 // seatbeltNetwork allows IP traffic plus the DNS and TLS trust services it needs, following Codex.

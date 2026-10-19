@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/adrianliechti/go-shell"
@@ -24,8 +24,7 @@ import (
 var publicFS embed.FS
 
 type App struct {
-	mu     sync.Mutex
-	server *server.Server
+	server atomic.Pointer[server.Server]
 
 	launcher http.Handler
 }
@@ -92,11 +91,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.mu.Lock()
-	srv := a.server
-	a.mu.Unlock()
-
-	if srv != nil {
+	if srv := a.server.Load(); srv != nil {
 		srv.ServeHTTP(w, r)
 		return
 	}
@@ -167,20 +162,15 @@ func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.mu.Lock()
-	current := a.server
+	current := a.server.Load()
 	if current != nil && request.Replace && r.Header.Get("X-Wingman-Instance") != current.InstanceID() {
-		a.mu.Unlock()
 		http.Error(w, "workspace instance changed; reload the workspace", http.StatusConflict)
 		return
 	}
 	if current != nil && !request.Replace {
-		a.mu.Unlock()
 		http.Error(w, "workspace already open", http.StatusConflict)
 		return
 	}
-	a.mu.Unlock()
-
 	srv, err := server.New(context.Background(), request.Path, nil)
 
 	if err != nil {
@@ -188,15 +178,11 @@ func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.mu.Lock()
-	if a.server != current {
-		a.mu.Unlock()
+	if !a.server.CompareAndSwap(current, srv) {
 		srv.Close()
 		http.Error(w, "workspace changed while opening", http.StatusConflict)
 		return
 	}
-	a.server = srv
-	a.mu.Unlock()
 
 	_, _ = settings.Update(func(settings *settings.Settings) {
 		settings.AddWorkspace(request.Path)
@@ -223,10 +209,7 @@ func (a *App) handleSelectFolder(w http.ResponseWriter, r *http.Request) {
 // shutdown gives normal cleanup a brief opportunity to finish without making
 // native app termination depend on a slow protocol handshake or installer.
 func (a *App) shutdown() {
-	a.mu.Lock()
-	srv := a.server
-	a.mu.Unlock()
-
+	srv := a.server.Load()
 	if srv == nil {
 		return
 	}

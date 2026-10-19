@@ -1,6 +1,7 @@
 package prompt
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -17,9 +18,7 @@ func allPromptTools() []string {
 
 func TestPromptGuidanceFollowsAvailableTools(t *testing.T) {
 	models := map[string]Variant{"fallback": VariantFor("")}
-	for name, variant := range variants {
-		models[name] = variant
-	}
+	maps.Copy(models, variants)
 	for _, tools := range [][]string{nil, {"read", "glob", "grep"}, {"lsp"}, {"search_web"}, {"fetch"}, {"agent"}, allPromptTools()} {
 		// File discovery and reading are always registered, including in Plan
 		// mode and every supported child role. Only optional tools vary.

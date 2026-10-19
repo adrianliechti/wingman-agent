@@ -31,9 +31,9 @@ func (a *forkingProtocolAgent) ForkSession(_ context.Context, id, title string) 
 func newForkProtocolServer(t *testing.T, a code.Agent) *Server {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, runtimes: map[string]*backendRuntime{}, wsConns: map[*websocket.Conn]*wsClient{}}
+	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}, wsConns: map[*websocket.Conn]*wsClient{}}
 	b := s.bindBackend("one", a)
-	s.runtimes[b.id] = b
+	s.backends[b.id] = &backendEntry{runtime: b}
 	s.mux = chi.NewRouter()
 	s.mux.Route("/api", s.registerSessionRoutes)
 	s.handler = s.checkInstance(s.mux)
@@ -62,7 +62,7 @@ func TestForkSessionCreatesAndDeduplicates(t *testing.T) {
 	if receipt.Ref.SessionID != "forked-saved" || receipt.Outcome != "created" {
 		t.Fatalf("receipt = %+v", receipt)
 	}
-	if !s.runtimes["one"].settings("").CanFork {
+	if !s.backends["one"].runtime.settings("").CanFork {
 		t.Fatal("settings do not advertise forking")
 	}
 }
@@ -81,7 +81,7 @@ func TestForkSessionRejectsBusyMissingAndUnsupported(t *testing.T) {
 	if rec := protocolRequest(t, plain, "/api/v2/backends/one/sessions", Command{ID: "unsupported", Type: "fork", Source: "saved"}); rec.Code != 400 {
 		t.Fatalf("fork on a non-forking agent: %d %s", rec.Code, rec.Body)
 	}
-	if plain.runtimes["one"].settings("").CanFork {
+	if plain.backends["one"].runtime.settings("").CanFork {
 		t.Fatal("non-forking agent advertises forking")
 	}
 }

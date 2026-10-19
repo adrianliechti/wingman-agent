@@ -65,9 +65,8 @@ type Server struct {
 	closeOnce  sync.Once
 	background sync.WaitGroup
 
-	runtimesMu sync.Mutex
-	runtimes   map[string]*backendRuntime
-	starting   map[string]*backendStartup
+	backendsMu sync.Mutex
+	backends   map[string]*backendEntry
 	scope      WorkspaceScope
 	wsMu       sync.Mutex
 	wsConns    map[*websocket.Conn]*wsClient
@@ -119,7 +118,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 		telemetry: cfg.Telemetry,
 		ctx:       serverCtx,
 		cancel:    cancel,
-		runtimes:  make(map[string]*backendRuntime),
+		backends:  make(map[string]*backendEntry),
 		wsConns:   map[*websocket.Conn]*wsClient{},
 	}
 	defer func() {
@@ -144,7 +143,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 	cfg.IsolateSessions = true
 	wa := agent.New(ws, cfg, nil)
 	rt := s.bindBackend(code.BuiltinAgentName, wa)
-	s.runtimes[code.BuiltinAgentName] = rt
+	s.backends[code.BuiltinAgentName] = &backendEntry{runtime: rt}
 	s.Config = cfg.Clone()
 	s.RoleModel = wa.RoleModel
 	s.Model = func() string {
@@ -255,15 +254,19 @@ func (s *Server) Close() {
 			_ = client.conn.CloseNow()
 		}
 		s.wsMu.Unlock()
-		s.runtimesMu.Lock()
-		runtimes := make([]*backendRuntime, 0, len(s.runtimes))
-		for _, rt := range s.runtimes {
+		s.backendsMu.Lock()
+		runtimes := make([]*backendRuntime, 0, len(s.backends))
+		for _, entry := range s.backends {
+			rt := entry.runtime
+			if rt == nil {
+				continue
+			}
 			rt.operationMu.Lock()
 			rt.closing = true
 			rt.operationMu.Unlock()
 			runtimes = append(runtimes, rt)
 		}
-		s.runtimesMu.Unlock()
+		s.backendsMu.Unlock()
 		for _, rt := range runtimes {
 			rt.turns.SetHandler(nil)
 			rt.turns.Close()
@@ -305,17 +308,11 @@ func (s *Server) Run(ctx context.Context, port int) error {
 		Handler: s,
 	}
 
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = srv.Close()
-		case <-s.ctx.Done():
-			_ = srv.Close()
-		case <-done:
-		}
-	}()
+	closeServer := func() { _ = srv.Close() }
+	stopOnSignal := context.AfterFunc(ctx, closeServer)
+	defer stopOnSignal()
+	stopOnClose := context.AfterFunc(s.ctx, closeServer)
+	defer stopOnClose()
 
 	url := fmt.Sprintf("http://localhost:%d", listener.Addr().(*net.TCPAddr).Port)
 	fmt.Fprintf(os.Stderr, "Wingman running at %s\n", url)

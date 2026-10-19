@@ -46,7 +46,7 @@ func newQueueTestApp(t *testing.T, count int) (*App, *queueTestAgent) {
 	app.ctx = t.Context()
 	app.editor = NewEditor()
 	fakeQueue := &queueTestAgent{uiTestAgent: fake, sent: make(chan string, count+1)}
-	for i := 0; i < count; i++ {
+	for i := range count {
 		fakeQueue.persisted.Inputs = append(fakeQueue.persisted.Inputs, corecode.TurnInput{ID: strings.Repeat("x", i+1), Content: []harness.Content{{Text: "recovered follow-up"}}})
 	}
 	app.agent = fakeQueue

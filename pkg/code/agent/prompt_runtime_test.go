@@ -61,7 +61,7 @@ func TestSharedPromptReferencesRegisteredToolSchemas(t *testing.T) {
 	// have a separate contract and are not tool names or parameter keys.
 	instructions := prompt.BuildBaseInstructions("", prompt.SectionData{ToolNames: promptToolNames(s.harness.AvailableTools())})
 	var checked strings.Builder
-	for _, section := range strings.Split(instructions, "\n\n# ") {
+	for section := range strings.SplitSeq(instructions, "\n\n# ") {
 		if !strings.HasPrefix(section, "Code intelligence\n") {
 			checked.WriteString(section)
 		}

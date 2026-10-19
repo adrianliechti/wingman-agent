@@ -79,18 +79,19 @@ func serverStatus(manager *lsp.Manager, args map[string]any) (tool.Result, error
 			}
 			return tool.Text("LSP unavailable for this file. " + fallbackAdvice), nil
 		}
-		content := "Detected server: " + server.Name
+		var content strings.Builder
+		content.WriteString("Detected server: " + server.Name)
 		if session, ok := manager.ActiveSession(path); ok {
-			content += fmt.Sprintf("; running; analyzing=%t\nSupported operations:", session.Analyzing())
+			fmt.Fprintf(&content, "; running; analyzing=%t\nSupported operations:", session.Analyzing())
 			for _, op := range []string{"goToDefinition", "goToTypeDefinition", "findReferences", "goToImplementation", "hover", "documentSymbol", "workspaceSymbol", "incomingCalls", "outgoingCalls", "previewRename", "codeActions"} {
 				if requireCapability(session.Capabilities(), op) == nil {
-					content += " " + op
+					content.WriteString(" " + op)
 				}
 			}
 		} else {
-			content += "; not running. Capabilities unknown until first query; detection does not guarantee successful startup."
+			content.WriteString("; not running. Capabilities unknown until first query; detection does not guarantee successful startup.")
 		}
-		return tool.Text(content), nil
+		return tool.Text(content.String()), nil
 	}
 	projects := manager.Projects()
 	if len(projects) == 0 {

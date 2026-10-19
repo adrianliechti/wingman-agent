@@ -49,8 +49,7 @@ func retainedWindowStart(messages []Message, budget int) int {
 	start := len(messages)
 	total := 0
 	pendingCalls := make(map[string]bool)
-	for i := len(messages) - 1; i >= 0; i-- {
-		m := messages[i]
+	for i, m := range slices.Backward(messages) {
 		if isCompactionSummary(m) {
 			break
 		}

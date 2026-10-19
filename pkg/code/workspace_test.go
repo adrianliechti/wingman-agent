@@ -330,15 +330,13 @@ Build the plan.`)
 
 	var readers sync.WaitGroup
 	for range 4 {
-		readers.Add(1)
-		go func() {
-			defer readers.Done()
+		readers.Go(func() {
 			for range 100 {
 				skills := ws.Skills()
 				_ = skill.FormatForPrompt(skills)
 				_ = skill.FindSkill("speckit-plan", skills)
 			}
-		}()
+		})
 	}
 	for range 25 {
 		ws.RefreshSkills()

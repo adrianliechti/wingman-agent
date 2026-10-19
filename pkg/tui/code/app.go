@@ -133,18 +133,16 @@ type App struct {
 	clipboardRead  func() ([]clipboard.Content, error)
 	clipboardWrite func(string) error
 
-	turns            *code.TurnManager
-	queuePaused      bool
-	queueCount       int
-	editingQueueID   string
-	beforeQueueEdit  *composerState
-	drafts           *draftStore
-	draftChangedAt   time.Time
-	draftPending     bool
-	operationPending bool
-	operationStatus  string
-	shellRunning     bool
-	operationCancel  context.CancelFunc
+	turns           *code.TurnManager
+	queuePaused     bool
+	queueCount      int
+	editingQueueID  string
+	beforeQueueEdit *composerState
+	drafts          *draftStore
+	draftChangedAt  time.Time
+	draftPending    bool
+	operation       operationKind
+	operationCancel context.CancelFunc
 
 	taskPumpStop chan struct{}
 
@@ -1560,7 +1558,7 @@ func (a *App) showRecap() {
 
 // compactContext goes through the turn manager so follow-ups queue behind it.
 func (a *App) compactContext(focus string) {
-	if a.operationPending {
+	if a.operation != operationNone {
 		a.showToast("Wait for the current operation or press Esc to cancel", theme.Default.Yellow)
 		return
 	}
@@ -1570,8 +1568,7 @@ func (a *App) compactContext(focus string) {
 	id, epoch := a.sessionID, a.sessionEpoch
 	err := a.turns.StartCompact(id, focus, func(result harness.CompactResult, err error) {
 		a.post(func() {
-			a.operationPending = false
-			a.operationStatus = ""
+			a.operation = operationNone
 			a.operationCancel = nil
 			if a.sessionID != id || a.sessionEpoch != epoch {
 				return
@@ -1592,8 +1589,7 @@ func (a *App) compactContext(focus string) {
 		a.appendChat(cellNotice(fmt.Sprintf("Compaction failed: %v", err), theme.Default.Yellow, a.width()))
 		return
 	}
-	a.operationPending = true
-	a.operationStatus = "Compacting context · Esc cancels"
+	a.operation = operationCompact
 	a.operationCancel = func() { _ = a.turns.CancelCurrent(id) }
 	a.invalidate()
 }

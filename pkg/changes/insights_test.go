@@ -119,7 +119,7 @@ func TestGitInsightsKeepsTotalAuthorCountWhenListIsCapped(t *testing.T) {
 	}
 
 	when := time.Now()
-	for i := 0; i < insightsTopAuthors+2; i++ {
+	for i := range insightsTopAuthors + 2 {
 		writeFile(t, dir, "owned.go", fmt.Sprintf("package p\n// revision %d\n", i))
 		if _, err := wt.Add("owned.go"); err != nil {
 			t.Fatal(err)

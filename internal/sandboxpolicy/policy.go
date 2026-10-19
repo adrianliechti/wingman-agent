@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
@@ -29,25 +30,15 @@ func ProtectedRelative(path string) bool {
 	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		path = strings.ToLower(path)
 	}
-	parts := strings.Split(path, "/")
-	for _, part := range parts {
-		for _, name := range ProtectedDirs {
-			if part == name {
-				return true
-			}
+	for part := range strings.SplitSeq(path, "/") {
+		if slices.Contains(ProtectedDirs, part) {
+			return true
 		}
-		for _, name := range ProtectedFiles {
-			if part == name {
-				return true
-			}
-		}
-	}
-	for _, name := range ProtectedRootFiles {
-		if path == name {
+		if slices.Contains(ProtectedFiles, part) {
 			return true
 		}
 	}
-	return false
+	return slices.Contains(ProtectedRootFiles, path)
 }
 
 // CheckWrite checks both the requested spelling and its resolved destination.

@@ -305,7 +305,7 @@ func pathContainsSegment(path, segment string) bool {
 	if segment == "" {
 		return true
 	}
-	for _, part := range strings.Split(filepath.Clean(path), string(filepath.Separator)) {
+	for part := range strings.SplitSeq(filepath.Clean(path), string(filepath.Separator)) {
 		if strings.EqualFold(part, segment) {
 			return true
 		}

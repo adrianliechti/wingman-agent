@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -269,8 +270,7 @@ func (a *App) reconcileCommittedMessage(msg harness.Message) {
 
 func (a *App) reconcileCurrentTurn(messages []harness.Message) {
 	start := 0
-	for i := len(messages) - 1; i >= 0; i-- {
-		message := messages[i]
+	for i, message := range slices.Backward(messages) {
 		if message.Role == harness.RoleUser && !message.Hidden {
 			start = i
 			break

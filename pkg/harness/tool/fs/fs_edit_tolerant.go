@@ -300,7 +300,7 @@ func applyBlankLineTolerantEdit(content string, op editOp, pathArg string) (stri
 	for k := 0; k+m <= len(fileNonEmpty); {
 		candidate := fileNonEmpty[k : k+m]
 		keysMatch := true
-		for j := 0; j < m; j++ {
+		for j := range m {
 			fileLine := content[candidate[j].cl.start:candidate[j].cl.end]
 			if lineKey(fileLine) != lineKey(oldNonEmpty[j].text) {
 				keysMatch = false

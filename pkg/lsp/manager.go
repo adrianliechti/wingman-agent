@@ -23,10 +23,8 @@ type Manager struct {
 	lifecycle  context.Context
 	cancel     context.CancelFunc
 	connect    sessionConnector
-	sessions   map[string]*Session
-	starting   map[string]*sessionStart
+	sessions   map[string]*sessionEntry
 	restarts   map[string]int
-	warming    map[string]bool
 	closed     bool
 	mu         sync.Mutex
 
@@ -73,7 +71,9 @@ func WithManagedTools(tools tooling.ManagedTools) ManagerOption {
 	}
 }
 
-type sessionStart struct {
+// sessionEntry is shared by warmup and on-demand callers. The result is
+// published by closing done; failed entries are removed so later calls retry.
+type sessionEntry struct {
 	done    chan struct{}
 	session *Session
 	err     error
@@ -90,10 +90,8 @@ func NewManager(workingDir string, options ...ManagerOption) *Manager {
 		lifecycle:  lifecycle,
 		cancel:     cancel,
 		connect:    connect,
-		sessions:   make(map[string]*Session),
-		starting:   make(map[string]*sessionStart),
+		sessions:   make(map[string]*sessionEntry),
 		restarts:   make(map[string]int),
-		warming:    make(map[string]bool),
 	}
 	for _, option := range options {
 		if option != nil {
@@ -173,9 +171,9 @@ func (m *Manager) SetServerInitializationOptions(name string, value any) error {
 
 	var stale []*Session
 	m.mu.Lock()
-	for key, session := range m.sessions {
-		if session != nil && strings.EqualFold(session.server.Name, name) {
-			stale = append(stale, session)
+	for key, entry := range m.sessions {
+		if entry.session != nil && strings.EqualFold(entry.session.server.Name, name) {
+			stale = append(stale, entry.session)
 			delete(m.sessions, key)
 		}
 	}
@@ -261,7 +259,7 @@ func (m *Manager) ProjectSession(ctx context.Context, project Project) (*Session
 
 func (m *Manager) WarmUpFile(filePath string) {
 	if project := m.findProject(filePath); project != nil {
-		m.warmUp(*project)
+		_, _ = m.getOrStartSession(*project)
 	}
 }
 
@@ -283,56 +281,53 @@ func (m *Manager) GetSession(ctx context.Context, filePath string) (*Session, er
 }
 
 func (m *Manager) getSession(ctx context.Context, project projectRoot) (*Session, error) {
-	server := project.Server
-	key := projectKey(project)
-
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("LSP manager is closed")
+	entry, err := m.getOrStartSession(project)
+	if err != nil {
+		return nil, err
 	}
-	if session := m.sessions[key]; session != nil && session.IsAlive() {
-		m.mu.Unlock()
-		return session, nil
-	}
-	if start := m.starting[key]; start != nil {
-		m.mu.Unlock()
-		return waitForSessionStart(ctx, start)
-	}
-
-	var openedDocuments []openDocument
-	restarting := false
-	if previous := m.sessions[key]; previous != nil {
-		openedDocuments = previous.openedDocuments()
-		delete(m.sessions, key)
-		m.restarts[key]++
-		restarting = true
-	}
-	if m.restarts[key] > maxRestarts {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("LSP server %s crashed %d times, not restarting", server.Name, maxRestarts)
-	}
-	start := &sessionStart{done: make(chan struct{})}
-	m.starting[key] = start
-	m.mu.Unlock()
-
-	// Session startup is shared workspace state. Keep it alive when the request
-	// that discovered the server is cancelled (for example, when a hover moves)
-	// and let each caller stop waiting independently.
-	go m.startSession(project, key, start, openedDocuments, restarting)
-	return waitForSessionStart(ctx, start)
-}
-
-func waitForSessionStart(ctx context.Context, start *sessionStart) (*Session, error) {
 	select {
-	case <-start.done:
-		return start.session, start.err
+	case <-entry.done:
+		return entry.session, entry.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
-func (m *Manager) startSession(project projectRoot, key string, start *sessionStart, openedDocuments []openDocument, restarting bool) {
+func (m *Manager) getOrStartSession(project projectRoot) (*sessionEntry, error) {
+	server := project.Server
+	key := projectKey(project)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, fmt.Errorf("LSP manager is closed")
+	}
+
+	var openedDocuments []openDocument
+	restarting := false
+	if previous := m.sessions[key]; previous != nil {
+		if previous.session == nil || previous.session.IsAlive() {
+			return previous, nil
+		}
+		openedDocuments = previous.session.openedDocuments()
+		delete(m.sessions, key)
+		m.restarts[key]++
+		restarting = true
+	}
+	if m.restarts[key] > maxRestarts {
+		return nil, fmt.Errorf("LSP server %s crashed %d times, not restarting", server.Name, maxRestarts)
+	}
+	entry := &sessionEntry{done: make(chan struct{})}
+	m.sessions[key] = entry
+
+	// Session startup is shared workspace state. Keep it alive when the request
+	// that discovered the server is cancelled (for example, when a hover moves)
+	// and let each caller stop waiting independently.
+	go m.startSession(project, key, entry, openedDocuments, restarting)
+	return entry, nil
+}
+
+func (m *Manager) startSession(project projectRoot, key string, entry *sessionEntry, openedDocuments []openDocument, restarting bool) {
 	server := project.Server
 	parent := m.lifecycle
 	if parent == nil {
@@ -381,22 +376,17 @@ func (m *Manager) startSession(project projectRoot, key string, start *sessionSt
 		err = fmt.Errorf("LSP server %s initialization options changed during startup", server.Name)
 	}
 	if err == nil {
-		m.sessions[key] = session
+		entry.session = session
+	} else {
+		delete(m.sessions, key)
 	}
-	start.session = session
-	start.err = err
-	if err != nil {
-		start.session = nil
-	}
-	delete(m.starting, key)
-	close(start.done)
+	entry.err = err
+	close(entry.done)
 	m.mu.Unlock()
 	m.detectMu.Unlock()
 
-	if err != nil {
-		if session != nil {
-			session.Close()
-		}
+	if err != nil && session != nil {
+		session.Close()
 	}
 }
 
@@ -409,8 +399,8 @@ func (m *Manager) ActiveSession(filePath string) (*Session, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if session, ok := m.sessions[projectKey(*project)]; ok && session.IsAlive() {
-		return session, true
+	if entry := m.sessions[projectKey(*project)]; entry != nil && entry.session != nil && entry.session.IsAlive() {
+		return entry.session, true
 	}
 	return nil, false
 }
@@ -418,9 +408,9 @@ func (m *Manager) ActiveSession(filePath string) (*Session, bool) {
 func (m *Manager) Activities() []ServerActivity {
 	m.mu.Lock()
 	sessions := make([]*Session, 0, len(m.sessions))
-	for _, session := range m.sessions {
-		if session != nil && session.IsAlive() {
-			sessions = append(sessions, session)
+	for _, entry := range m.sessions {
+		if entry.session != nil && entry.session.IsAlive() {
+			sessions = append(sessions, entry.session)
 		}
 	}
 	m.mu.Unlock()
@@ -452,50 +442,15 @@ func (m *Manager) Activities() []ServerActivity {
 
 func (m *Manager) WarmUpServers() {
 	go func() {
-		if m.lifecycle != nil {
-			select {
-			case <-m.lifecycle.Done():
-				return
-			default:
-			}
+		if m.lifecycle != nil && m.lifecycle.Err() != nil {
+			return
 		}
 		for _, project := range m.detect() {
-			if m.lifecycle != nil {
-				select {
-				case <-m.lifecycle.Done():
-					return
-				default:
-				}
+			if m.lifecycle != nil && m.lifecycle.Err() != nil {
+				return
 			}
-			m.warmUp(project)
+			_, _ = m.getOrStartSession(project)
 		}
-	}()
-}
-
-func (m *Manager) warmUp(project projectRoot) {
-	key := projectKey(project)
-	m.mu.Lock()
-	if m.closed || m.warming[key] {
-		m.mu.Unlock()
-		return
-	}
-	m.warming[key] = true
-	m.mu.Unlock()
-
-	go func() {
-		defer func() {
-			m.mu.Lock()
-			delete(m.warming, key)
-			m.mu.Unlock()
-		}()
-
-		parent := m.lifecycle
-		if parent == nil {
-			parent = context.Background()
-		}
-		ctx, cancel := context.WithTimeout(parent, 2*startupTimeout)
-		defer cancel()
-		m.getSession(ctx, project)
 	}()
 }
 
@@ -507,8 +462,8 @@ func (m *Manager) Close() {
 	}
 	m.closed = true
 	sessions := make([]*Session, 0, len(m.sessions))
-	for _, session := range m.sessions {
-		sessions = append(sessions, session)
+	for _, entry := range m.sessions {
+		sessions = append(sessions, entry.session)
 	}
 	clear(m.sessions)
 	m.mu.Unlock()

@@ -1,6 +1,7 @@
 package prompt
 
 import (
+	"maps"
 	"strings"
 	"testing"
 
@@ -175,9 +176,7 @@ func TestTaggedModelVariants(t *testing.T) {
 
 func TestSharedRuntimeAcrossModelsAndModes(t *testing.T) {
 	models := map[string]Variant{"fallback": VariantFor("")}
-	for name, variant := range variants {
-		models[name] = variant
-	}
+	maps.Copy(models, variants)
 	for name, variant := range models {
 		for _, mode := range []string{"", modePlan, modeUnattended, modePlan + "\n\n" + modeUnattended} {
 			data := SectionData{ModeInstructions: mode, ToolNames: allPromptTools()}

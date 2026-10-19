@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -237,10 +238,10 @@ func normalizeComparisonRun(candidate reportCandidate) (comparisonRun, error) {
 			MetricFamilies: len(summary.MetricExports),
 			MetricExports:  sumCountMap(summary.MetricExports),
 			LogRecords:     summary.LogRecords,
-			Resources:      cloneCountMap(summary.Resources),
-			Spans:          cloneCountMap(summary.Spans),
-			Metrics:        cloneCountMap(summary.MetricExports),
-			Events:         cloneCountMap(summary.LogEvents),
+			Resources:      maps.Clone(summary.Resources),
+			Spans:          maps.Clone(summary.Spans),
+			Metrics:        maps.Clone(summary.MetricExports),
+			Events:         maps.Clone(summary.LogEvents),
 		},
 	}
 	if result.Agent == "codex" && run.Telemetry.TraceBatches == 0 {

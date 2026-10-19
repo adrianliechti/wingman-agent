@@ -8,6 +8,7 @@ import (
 	"io"
 	"iter"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -496,9 +497,9 @@ func contentText(input []Content) string {
 }
 
 func lastAssistantText(messages []Message) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == RoleAssistant {
-			if text := contentText(messages[i].Content); text != "" {
+	for _, message := range slices.Backward(messages) {
+		if message.Role == RoleAssistant {
+			if text := contentText(message.Content); text != "" {
 				return text
 			}
 		}
@@ -1106,9 +1107,9 @@ func (a *Agent) beginToolRound() {
 func (a *Agent) retainedToolResult(tc ToolCall) (tool.Result, bool) {
 	a.stateMu.RLock()
 	defer a.stateMu.RUnlock()
-	for i := len(a.Messages) - 1; i >= 0; i-- {
-		for j := len(a.Messages[i].Content) - 1; j >= 0; j-- {
-			result := a.Messages[i].Content[j].ToolResult
+	for _, message := range slices.Backward(a.Messages) {
+		for j, part := range slices.Backward(message.Content) {
+			result := part.ToolResult
 			if result == nil || result.ID != tc.ID {
 				continue
 			}
@@ -1119,8 +1120,8 @@ func (a *Agent) retainedToolResult(tc ToolCall) (tool.Result, bool) {
 				return tool.Result{}, false
 			}
 			content := result.Content
-			if content == imageResultPlaceholder && j+1 < len(a.Messages[i].Content) {
-				if file := a.Messages[i].Content[j+1].File; file != nil {
+			if content == imageResultPlaceholder && j+1 < len(message.Content) {
+				if file := message.Content[j+1].File; file != nil {
 					content = file.Data
 				}
 			}

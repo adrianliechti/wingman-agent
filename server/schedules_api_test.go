@@ -38,7 +38,7 @@ func TestSchedulesAPI(t *testing.T) {
 		t.Fatalf("schedules = %+v, want empty", got)
 	}
 
-	store := app.runtimes["wingman"].sessionSchedules(created.ID)
+	store := app.backends["wingman"].runtime.sessionSchedules(created.ID)
 	if store == nil {
 		t.Fatal("session has no schedule store")
 	}

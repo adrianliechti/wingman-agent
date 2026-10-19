@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -484,9 +485,7 @@ func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nod
 	}
 	switch agentName {
 	case "claude":
-		for key, value := range claudeTelemetryEnvironment(otlpURL, model) {
-			environment[key] = value
-		}
+		maps.Copy(environment, claudeTelemetryEnvironment(otlpURL, model))
 	}
 	cmd.Env = replaceEnv(os.Environ(), environment)
 	stdin, err := cmd.StdinPipe()

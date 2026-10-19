@@ -154,7 +154,7 @@ func TestEditorTabPromptPreservesAnEmptyPreviousDocument(t *testing.T) {
 
 func TestEditorTabPromptKeepsDistantRecentRename(t *testing.T) {
 	lines := []string{"package main", "", "func main() {", "\tuserName := \"Ada\""}
-	for index := 0; index < 30; index++ {
+	for index := range 30 {
 		lines = append(lines, fmt.Sprintf("\twork(%d)", index))
 	}
 	useLine := len(lines) + 1
@@ -184,7 +184,7 @@ func TestEditorTabPromptKeepsDistantRecentRename(t *testing.T) {
 
 func TestEditorTabPromptBoundsLargeFilesWithoutLosingHeaderOrCursor(t *testing.T) {
 	lines := []string{"package example", "", `import "fmt"`, ""}
-	for index := 0; index < 7_000; index++ {
+	for index := range 7_000 {
 		lines = append(lines, fmt.Sprintf("var item%04d = fmt.Sprint(%d)", index, index))
 	}
 	content := strings.Join(lines, "\n") + "\n"
@@ -651,7 +651,7 @@ func TestEditorTabShowsMediumIntentByDefault(t *testing.T) {
 
 func TestHandleEditorTabPropagatesDistantRename(t *testing.T) {
 	lines := []string{"package main", "", "func main() {", "\tuserName := \"Ada\""}
-	for index := 0; index < 30; index++ {
+	for index := range 30 {
 		lines = append(lines, fmt.Sprintf("\twork(%d)", index))
 	}
 	useLine := len(lines) + 1

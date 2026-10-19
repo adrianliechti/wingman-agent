@@ -78,7 +78,7 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 				return tool.Result{}, fmt.Errorf("invalid glob pattern: %w", err)
 			}
 
-			for _, component := range strings.Split(target.SearchDirFS, "/") {
+			for component := range strings.SplitSeq(target.SearchDirFS, "/") {
 				if vcsDirs[component] {
 					return tool.Text("No files found"), nil
 				}
@@ -232,7 +232,7 @@ func (f globSearchFS) Stat(name string) (fs.FileInfo, error) {
 	}
 	var info fs.FileInfo
 	prefix := ""
-	for _, component := range strings.Split(name, "/") {
+	for component := range strings.SplitSeq(name, "/") {
 		if err := f.ctx.Err(); err != nil {
 			return nil, err
 		}

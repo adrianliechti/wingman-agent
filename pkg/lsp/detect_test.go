@@ -318,10 +318,8 @@ func TestIndexWorkspaceKeepsHiddenDirectoryMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, path := range indexWorkspace(root).matching(".project") {
-		if path == marker {
-			return
-		}
+	if slices.Contains(indexWorkspace(root).matching(".project"), marker) {
+		return
 	}
 	t.Fatalf("hidden directory marker %q was not recorded", marker)
 }

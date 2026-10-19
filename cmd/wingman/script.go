@@ -621,8 +621,7 @@ func (c *scriptTextCollector) Text() string {
 }
 
 func finalAssistantText(messages []harness.Message) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		message := messages[i]
+	for _, message := range slices.Backward(messages) {
 		if message.Role == harness.RoleUser && !message.Hidden {
 			return ""
 		}

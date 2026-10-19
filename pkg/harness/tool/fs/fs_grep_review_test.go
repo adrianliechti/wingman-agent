@@ -172,7 +172,7 @@ func TestGrepBytePaginationHasNoGaps(t *testing.T) {
 			t.Fatalf("output exceeds byte budget: %d", len(result.Content))
 		}
 		count := 0
-		for _, line := range strings.Split(result.Content, "\n") {
+		for line := range strings.SplitSeq(result.Content, "\n") {
 			if strings.HasPrefix(line, "file:") {
 				want := fmt.Sprintf("file:%d:needle %03d ", skip+count+1, skip+count)
 				if !strings.HasPrefix(line, want) {

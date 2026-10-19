@@ -85,8 +85,8 @@ func TestCompactCommandRunsThroughTurnManagerWithFocus(t *testing.T) {
 
 	a.editor.SetText("/compact keep the API design")
 	a.submitInput()
-	if !a.operationPending || !strings.Contains(a.operationStatus, "Compacting") {
-		t.Fatalf("pending=%t status=%q", a.operationPending, a.operationStatus)
+	if footer := ansi.Strip(a.footerLine(80)); !strings.Contains(footer, "Compacting context · Esc cancels") {
+		t.Fatalf("footer = %q, want compaction status", footer)
 	}
 	waitForSessionOperation(t, a)
 

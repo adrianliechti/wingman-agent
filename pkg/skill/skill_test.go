@@ -363,7 +363,7 @@ func TestFormatForPromptShortensDescriptionsAtWords(t *testing.T) {
 	if len(result) > 8000 || strings.Contains(result, "&#39;") {
 		t.Fatalf("prompt length = %d or escaped apostrophes: %q", len(result), result)
 	}
-	for _, line := range strings.Split(result, "\n") {
+	for line := range strings.SplitSeq(result, "\n") {
 		description, ok := strings.CutPrefix(strings.TrimSpace(line), "<description>")
 		if !ok {
 			continue

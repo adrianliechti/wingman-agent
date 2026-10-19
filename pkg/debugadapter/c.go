@@ -115,7 +115,7 @@ func (adapter cAdapter) Plan(request Request) (Plan, error) {
 	}
 	var flags []string
 	if content, err := root.ReadFile("compile_flags.txt"); err == nil {
-		for _, line := range strings.Split(string(content), "\n") {
+		for line := range strings.SplitSeq(string(content), "\n") {
 			if flag := strings.TrimSpace(line); flag != "" {
 				flags = append(flags, flag)
 			}

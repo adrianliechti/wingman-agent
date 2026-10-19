@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/oauth2"
 
+	"github.com/adrianliechti/wingman-agent/internal/statefile"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 )
 
@@ -144,11 +145,5 @@ func (s *CredentialStore) write(entries map[string]*Credential) error {
 		return err
 	}
 
-	tmp := s.path + ".tmp"
-
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-
-	return os.Rename(tmp, s.path)
+	return statefile.Write(s.path, data)
 }

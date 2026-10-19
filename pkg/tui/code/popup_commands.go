@@ -20,8 +20,8 @@ func commandLine(text string) string {
 // Prefer a command name over an incidental match in its description. Ranking
 // chooses the selection without rearranging the visible catalog.
 func commandMatchRank(label, query string) int {
-	if strings.HasPrefix(label, "/") {
-		label, _, _ = strings.Cut(strings.TrimPrefix(label, "/"), " ")
+	if after, ok := strings.CutPrefix(label, "/"); ok {
+		label, _, _ = strings.Cut(after, " ")
 	}
 	label = strings.ToLower(label)
 	query = strings.ToLower(strings.TrimPrefix(query, "/"))

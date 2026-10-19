@@ -260,8 +260,7 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 	// Stop hooks can end the stream without returning an error. The ledger
 	// remains authoritative about whether the child actually completed.
 	if runErr == nil {
-		for i := len(state.Events) - 1; i >= 0; i-- {
-			event := state.Events[i]
+		for _, event := range slices.Backward(state.Events) {
 			if event.Type == harness.EventTurnTerminal && event.Terminal != nil {
 				if event.Terminal.Status != harness.RuntimeCompleted {
 					runErr = fmt.Errorf("agent turn %s: %s", event.Terminal.Status, event.Terminal.Error)

@@ -253,7 +253,7 @@ func (t *Terminal) RenderAlt(lines []string, cursor *Pos) {
 		clipped[i] = ansi.Truncate(line, max(width, 0), "")
 	}
 	lines = clipped
-	for i := 0; i < height; i++ {
+	for i := range height {
 		line := ""
 		if i < len(lines) {
 			line = lines[i]

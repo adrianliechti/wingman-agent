@@ -22,7 +22,7 @@ type fileDiagnostics struct {
 }
 
 func (a *App) showDiagnosticsView() {
-	if a.operationPending {
+	if a.operation != operationNone {
 		a.showToast("Wait for the current operation or press Esc to cancel", theme.Default.Yellow)
 		return
 	}
@@ -33,48 +33,17 @@ func (a *App) showDiagnosticsView() {
 	}
 
 	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
-	a.operationPending = true
-	a.operationStatus = "Scanning workspace problems · Esc cancels"
+	a.operation = operationDiagnostics
 	a.operationCancel = cancel
 	a.invalidate()
 
 	go func() {
 		defer cancel()
 
-		done := make(chan struct{})
-		go func() {
-			ticker := time.NewTicker(250 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-done:
-					return
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					a.post(func() {
-						if !a.operationPending || a.operationStatus == "" {
-							return
-						}
-						status := "Scanning workspace problems · Esc cancels"
-						if a.backgroundStatus != "" {
-							status = "Scanning workspace problems · " + a.backgroundStatus + " · Esc cancels"
-						}
-						if a.operationStatus != status {
-							a.operationStatus = status
-							a.invalidate()
-						}
-					})
-				}
-			}
-		}()
-
 		files, report, err := a.collectDiagnostics(ctx)
-		close(done)
 
 		a.post(func() {
-			a.operationPending = false
-			a.operationStatus = ""
+			a.operation = operationNone
 			a.operationCancel = nil
 			if errors.Is(err, context.Canceled) {
 				a.invalidate()

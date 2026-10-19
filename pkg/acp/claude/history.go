@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -145,9 +145,8 @@ func listProjectSessions(cwd string) ([]acpsdk.SessionInfo, error) {
 			out = append(out, si)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-
-		return *out[i].UpdatedAt > *out[j].UpdatedAt
+	slices.SortFunc(out, func(a, b acpsdk.SessionInfo) int {
+		return strings.Compare(*b.UpdatedAt, *a.UpdatedAt)
 	})
 	return out, nil
 }

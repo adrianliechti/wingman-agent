@@ -56,7 +56,7 @@ func TestLiveEditorTabModels(t *testing.T) {
 	}
 	cases = append(cases, liveEditorTabRepositoryCases(t)...)
 
-	for _, model := range strings.Split(modelList, ",") {
+	for model := range strings.SplitSeq(modelList, ",") {
 		model = strings.TrimSpace(model)
 		if model == "" {
 			continue

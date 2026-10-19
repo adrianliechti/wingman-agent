@@ -69,9 +69,9 @@ func (a *lifecycleAgent) SetModel(ctx context.Context, id, model string) error {
 }
 
 func installProtocolAgent(s *Server, a code.Agent) *backendRuntime {
-	s.runtimes["one"].turns.Close()
+	s.backends["one"].runtime.turns.Close()
 	b := s.bindBackend("one", a)
-	s.runtimes["one"] = b
+	s.backends["one"] = &backendEntry{runtime: b}
 	return b
 }
 

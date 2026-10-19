@@ -1,6 +1,9 @@
 package tool
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 func closeJSONPrefix(s string) string {
 	var stack []byte
@@ -56,8 +59,8 @@ func closeJSONPrefix(s string) string {
 		out = strings.TrimSuffix(out, ",")
 	}
 
-	for i := len(stack) - 1; i >= 0; i-- {
-		if stack[i] == '{' {
+	for _, open := range slices.Backward(stack) {
+		if open == '{' {
 			out += "}"
 		} else {
 			out += "]"

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
@@ -82,9 +83,9 @@ func (a *Agent) restoreSessionSettings(s *sessionState, state harness.State) {
 }
 
 func lastTurnModel(events []harness.RuntimeEvent) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type == harness.EventTurnStarted && events[i].Model != "" {
-			return events[i].Model
+	for _, event := range slices.Backward(events) {
+		if event.Type == harness.EventTurnStarted && event.Model != "" {
+			return event.Model
 		}
 	}
 	return ""

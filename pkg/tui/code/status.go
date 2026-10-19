@@ -168,14 +168,20 @@ func (a *App) footerLine(width int) string {
 		return withRight(colored(a.toast.color, a.toast.message))
 	}
 
-	if a.operationPending {
-		if a.shellRunning {
-			return withRight(colored(t.Magenta, "Running shell command · Esc cancels"))
+	if a.operation != operationNone {
+		label, color := "Updating session", t.Cyan
+		switch a.operation {
+		case operationShell:
+			label, color = "Running shell command", t.Magenta
+		case operationDiagnostics:
+			label = "Scanning workspace problems"
+			if a.backgroundStatus != "" {
+				label += " · " + a.backgroundStatus
+			}
+		case operationCompact:
+			label = "Compacting context"
 		}
-		if a.operationStatus != "" {
-			return withRight(colored(t.Cyan, a.operationStatus))
-		}
-		return withRight(colored(t.Cyan, "Updating session · Esc cancels"))
+		return withRight(colored(color, label+" · Esc cancels"))
 	}
 	if activity := a.activityStatus(width - 2*len(cellIndent) - ansi.Width(rightText)); activity != "" {
 		return withRight(activity)

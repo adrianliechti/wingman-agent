@@ -42,8 +42,8 @@ func MajorVersionAtLeast(ctx context.Context, command string, minimum int, worki
 	if err == nil && minimum < 0 {
 		result = true
 	} else if err == nil {
-		for _, field := range strings.Fields(string(output)) {
-			majorText := strings.SplitN(strings.TrimPrefix(field, "v"), ".", 2)[0]
+		for field := range strings.FieldsSeq(string(output)) {
+			majorText, _, _ := strings.Cut(strings.TrimPrefix(field, "v"), ".")
 			major, atoiErr := strconv.Atoi(majorText)
 			if atoiErr == nil {
 				result = major >= minimum

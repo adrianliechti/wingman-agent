@@ -163,7 +163,7 @@ func packageScriptTargets(path, directory string, source []byte) ([]Target, erro
 }
 
 func isNodePackageScript(command string) bool {
-	for _, field := range strings.Fields(command) {
+	for field := range strings.FieldsSeq(command) {
 		field = strings.Trim(field, `"';&|()`)
 		field = strings.ToLower(filepath.Base(filepath.FromSlash(field)))
 		switch field {
@@ -445,7 +445,7 @@ func absoluteProjectDir(request Request) string {
 }
 
 func nodePackageManager(projectDir, declared string) string {
-	if name := strings.SplitN(strings.TrimSpace(declared), "@", 2)[0]; name == "npm" || name == "pnpm" || name == "yarn" || name == "bun" {
+	if name, _, _ := strings.Cut(strings.TrimSpace(declared), "@"); name == "npm" || name == "pnpm" || name == "yarn" || name == "bun" {
 		return name
 	}
 	for _, candidate := range []struct{ file, command string }{
