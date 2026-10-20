@@ -81,6 +81,31 @@ func TestCustomEnvironmentPolicyExtendsDefault(t *testing.T) {
 	}
 }
 
+func TestToolCommandTempOutsideSandbox(t *testing.T) {
+	t.Setenv(workspaceSandboxActiveEnv, "")
+	workspace, sessionTemp := t.TempDir(), t.TempDir()
+	for _, tc := range []struct {
+		name                     string
+		disabled, escalated, own bool
+	}{
+		{name: "sandbox disabled", disabled: true, own: true},
+		{name: "escalated", escalated: true},
+	} {
+		cmd, err := buildToolCommand(t.Context(), "exit 0", workspace, workspace, &Options{
+			TempDir: sessionTemp, DisableSandbox: tc.disabled,
+		}, tc.escalated)
+		if err != nil {
+			t.Fatal(err)
+		}
+		environ := "\n" + strings.Join(cmd.Env, "\n")
+		for _, key := range []string{"TMPDIR", "TEMP", "TMP"} {
+			if strings.Contains(environ, "\n"+key+"="+sessionTemp) != tc.own {
+				t.Errorf("%s: %s uses private temp = %t, want %t", tc.name, key, !tc.own, tc.own)
+			}
+		}
+	}
+}
+
 func environmentPrintCommand() string {
 	if os.PathSeparator == '\\' {
 		return `[Console]::WriteLine("$env:OPENAI_API_KEY|$env:WINGMAN_TEST_VISIBLE")`

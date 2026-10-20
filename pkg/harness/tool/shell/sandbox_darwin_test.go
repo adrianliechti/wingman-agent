@@ -156,10 +156,10 @@ func TestSeatbeltProfileProtectsConfigAndCredentials(t *testing.T) {
 }
 
 func TestScopedPermissionsRetainSeatbeltBoundaries(t *testing.T) {
-	t.Setenv(workspaceSandboxActiveEnv, "")
+	f := newEscapeFixture(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) }))
 	defer server.Close()
-	workspace, extra, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	extra := t.TempDir()
 	curl := "/usr/bin/curl --noproxy '*' -fsS --max-time 2 " + shellTestQuote(server.URL)
 	for _, tc := range []struct {
 		name          string
@@ -175,7 +175,7 @@ func TestScopedPermissionsRetainSeatbeltBoundaries(t *testing.T) {
 					args["writable_roots"] = []any{extra}
 				}
 			}
-			opts, _, err := executionOptions(workspace, args, &Options{TempDir: t.TempDir()})
+			opts, _, err := executionOptions(f.workspace, args, &Options{TempDir: t.TempDir()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -187,16 +187,8 @@ func TestScopedPermissionsRetainSeatbeltBoundaries(t *testing.T) {
 			if !tc.root {
 				writeCheck = "! " + writeCheck
 			}
-			checks := []string{networkCheck, writeCheck, "! touch " + shellTestQuote(filepath.Join(outside, tc.name)), `touch "$TMPDIR/private"`, `mkdir -p "$TMPDIR/.git"`}
-			cmd, err := buildToolCommand(t.Context(), strings.Join(checks, " && "), workspace, workspace, opts, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			output, err := cmd.CombinedOutput()
-			if err != nil && strings.Contains(string(output), "sandbox_apply: Operation not permitted") {
-				t.Skip("nested Seatbelt profiles are unavailable")
-			}
-			if err != nil {
+			checks := []string{networkCheck, writeCheck, "! touch " + shellTestQuote(filepath.Join(f.outside, tc.name)), `touch "$TMPDIR/private"`, `mkdir -p "$TMPDIR/.git"`}
+			if output, err := runSandboxed(t, f.workspace, strings.Join(checks, " && "), opts); err != nil {
 				t.Fatalf("scoped grant changed other boundaries: %v\n%s", err, output)
 			}
 		})
@@ -227,7 +219,7 @@ func TestSeatbeltProfileBlocksHostUnixSocketsEvenInsideWritableRoots(t *testing.
 	// Socket paths are limited to about 104 bytes, too short for t.TempDir.
 	short, err := os.MkdirTemp("/tmp", "wm")
 	if err != nil {
-		t.Fatal(err)
+		t.Skipf("short socket dir unavailable: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(short) })
 	workspace := canonicalPath(short)

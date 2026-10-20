@@ -46,6 +46,43 @@ func TestResolveWorkdirWorkspaceSandboxRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestResolveWorkdirAllowsConfiguredRootsWithoutNewPermission(t *testing.T) {
+	t.Setenv(workspaceSandboxActiveEnv, "")
+	workspace, memory, temp, outside := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	opts := &Options{TempDir: temp, ExtraWritableRoots: []string{memory}}
+	for _, root := range []string{memory, temp} {
+		if got, err := resolveWorkdir(workspace, map[string]any{"workdir": root}, opts); err != nil || got != root {
+			t.Errorf("configured workdir %q = %q, %v", root, got, err)
+		}
+	}
+	link := filepath.Join(temp, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := resolveWorkdir(workspace, map[string]any{"workdir": link}, opts); err == nil {
+		t.Fatal("configured temp root allowed a symlink escape")
+	}
+}
+
+func TestResolveWorkdirUsesOnlyValidatedPerCommandRoots(t *testing.T) {
+	t.Setenv(workspaceSandboxActiveEnv, "")
+	workspace, outside := t.TempDir(), t.TempDir()
+	args := map[string]any{"workdir": outside, "sandbox_permissions": "require_permissions", "writable_roots": []any{outside}, "justification": "test external project"}
+	opts, _, err := executionOptions(workspace, args, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := resolveWorkdir(workspace, args, opts); err != nil || got != outside {
+		t.Fatalf("validated workdir = %q, %v", got, err)
+	}
+	if _, err := resolveWorkdir(workspace, args, nil); err == nil {
+		t.Fatal("unvalidated root accepted directly from tool arguments")
+	}
+	if _, err := resolveWorkdir(workspace, map[string]any{"workdir": outside}, nil); err == nil {
+		t.Fatal("per-command root granted to a later command")
+	}
+}
+
 func TestWorkspaceSandboxIsDefaultAndRequiresExplicitOptOut(t *testing.T) {
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	if !workspaceSandboxEnabled(nil) || !workspaceSandboxEnabled(&Options{}) {
@@ -68,7 +105,7 @@ func TestWritableRootsForIncludesValidExtraRoots(t *testing.T) {
 	extra := t.TempDir()
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 
-	roots := writableRootsFor(workspace, []string{extra, missing, "", extra})
+	roots := writableRootsFor(workspace, []string{extra, missing, "", extra}, extra)
 
 	if !slices.Contains(roots, canonicalPath(workspace)) {
 		t.Fatalf("roots missing workspace: %q", roots)
@@ -111,11 +148,11 @@ func TestExecSandboxConfinesWritesToWorkspace(t *testing.T) {
 	exec := ExecTools(manager, t.TempDir(), nil, nil)[0]
 	run := func(command string) tool.Result {
 		result, err := exec.Execute(context.Background(), map[string]any{"command": command, "wait": 60})
-		if err != nil {
+		if err != nil || strings.Contains(result.Content, "sandbox_apply: Operation not permitted") {
 			if runtime.GOOS == "windows" {
 				t.Fatal(err)
 			}
-			t.Skipf("sandbox backend unavailable: %v", err)
+			t.Skipf("sandbox backend unavailable: %v %s", err, result.Content)
 		}
 		return result
 	}
@@ -152,11 +189,11 @@ func TestExecEscalationRunsOutsideSandboxAfterApproval(t *testing.T) {
 	}
 
 	denied, err := exec.Execute(context.Background(), map[string]any{"command": touchCommand(outside), "wait": 10})
-	if err != nil {
+	if err != nil || strings.Contains(denied.Content, "sandbox_apply: Operation not permitted") {
 		if runtime.GOOS == "windows" {
 			t.Fatal(err)
 		}
-		t.Skipf("sandbox backend unavailable: %v", err)
+		t.Skipf("sandbox backend unavailable: %v %s", err, denied.Content)
 	}
 	if !denied.IsError || !strings.Contains(denied.Content, "require_escalated") {
 		t.Fatalf("sandbox denial carries no escalation hint: %s", denied.Content)

@@ -8,3 +8,13 @@
 {{- if .Shell}}
 - Shell: {{.Shell}}
 {{- end}}
+{{- if and (.HasTools "read") .FileReadRoots}}
+- File-tool readable roots: {{range $i, $root := .FileReadRoots}}{{if $i}}, {{end}}`{{$root}}`{{end}}.
+- File-tool path arguments do not expand environment variables; use literal paths from these roots.
+{{- end}}
+{{- if and (.HasTools "edit") .FileWriteRoots}}
+- File-tool writable roots: {{range $i, $root := .FileWriteRoots}}{{if $i}}, {{end}}`{{$root}}`{{end}}. Protected configuration remains read-only.
+{{- end}}
+{{- if and (.HasTools "exec") .ShellContext}}
+{{.ShellContext}}
+{{- end}}

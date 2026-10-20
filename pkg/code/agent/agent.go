@@ -78,7 +78,9 @@ type sessionState struct {
 	schedules     schedule.ObservableStore
 	scriptOptions *schedule.Options
 
-	freshness *fs.Freshness
+	freshness      *fs.Freshness
+	fileReadRoots  []string
+	fileWriteRoots []string
 
 	changedMu    sync.Mutex
 	changedPaths []string
@@ -912,6 +914,10 @@ func instructionTemplate(modelID string, data prompt.SectionData) (string, promp
 func (s *sessionState) instructionsData() prompt.SectionData {
 	ws := s.parent.workspace
 	now := time.Now()
+	var shellContext string
+	if s.scriptOptions != nil {
+		shellContext = shell.ExecutionContext(ws.RootPath, s.scriptOptions.Shell)
+	}
 	return prompt.SectionData{
 		ToolNames:           promptToolNames(s.harness.AvailableTools()),
 		PlanMode:            s.currentMode() == modePlan,
@@ -922,11 +928,35 @@ func (s *sessionState) instructionsData() prompt.SectionData {
 		Arch:                runtime.GOARCH,
 		WorkingDir:          ws.RootPath,
 		Shell:               localShell(),
+		FileReadRoots:       promptRoots(append([]string{ws.RootPath}, s.fileReadRoots...)),
+		FileWriteRoots:      promptRoots(append([]string{ws.RootPath}, s.fileWriteRoots...)),
+		ShellContext:        shellContext,
 		MemoryDir:           ws.MemoryPath,
 		MemoryContent:       ws.MemoryContent(),
 		Skills:              skill.FormatForPrompt(ws.Skills()),
 		ProjectInstructions: s.projectInstructions(),
 	}
+}
+
+// promptRoots keeps existing roots once, omitting those inside an earlier listed root.
+func promptRoots(roots []string) []string {
+	var listed []string
+	for _, root := range roots {
+		if !filepath.IsAbs(root) {
+			continue
+		}
+		if info, err := os.Stat(root); err != nil || !info.IsDir() {
+			continue
+		}
+		if slices.ContainsFunc(listed, func(parent string) bool {
+			rel, err := filepath.Rel(parent, root)
+			return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+		}) {
+			continue
+		}
+		listed = append(listed, root)
+	}
+	return listed
 }
 
 func localShell() string {

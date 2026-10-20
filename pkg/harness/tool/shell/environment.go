@@ -75,6 +75,16 @@ func environmentForTools(opts *Options) []string {
 	return policy.Filter(os.Environ())
 }
 
+// Only temp is redirected: a cache variable would override the tool's configured path (go env, .npmrc).
+func environmentWithTemp(environment []string, tempDir string) []string {
+	if tempDir != "" {
+		for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+			environment = setEnvironment(environment, key, tempDir)
+		}
+	}
+	return environment
+}
+
 // Filter applies the policy to KEY=value entries. Matching is
 // case-insensitive on Windows and supports a trailing * prefix pattern.
 func (p EnvironmentPolicy) Filter(environ []string) []string {

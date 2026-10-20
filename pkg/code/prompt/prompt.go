@@ -173,6 +173,9 @@ type SectionData struct {
 	Arch                string
 	WorkingDir          string
 	Shell               string
+	FileReadRoots       []string
+	FileWriteRoots      []string
+	ShellContext        string
 	MemoryDir           string
 	MemoryContent       string
 	Skills              string

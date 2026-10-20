@@ -262,6 +262,117 @@ func TestSandboxIsolatesTemporaryStorage(t *testing.T) {
 	}
 }
 
+func TestSandboxPreservesToolCacheConfiguration(t *testing.T) {
+	f := newEscapeFixture(t)
+	t.Setenv("GOCACHE", "")
+	t.Setenv("npm_config_cache", "")
+	t.Setenv("NPM_CONFIG_CACHE", "")
+	t.Setenv("GOTOOLCHAIN", "local")
+	goCache := filepath.Join(f.workspace, "configured-go-cache")
+	npmCache := filepath.Join(f.workspace, "configured-npm-cache")
+	goEnv := filepath.Join(f.workspace, "go.env")
+	writeFixture(t, goEnv, "GOCACHE="+goCache+"\n")
+	t.Setenv("GOENV", goEnv)
+	writeFixture(t, filepath.Join(f.workspace, ".npmrc"), "cache="+npmCache+"\n")
+	for _, tc := range []struct{ binary, command, cache string }{
+		{"go", "go env GOCACHE", goCache},
+		{"npm", "npm config get cache", npmCache},
+	} {
+		t.Run(tc.binary, func(t *testing.T) {
+			if _, err := exec.LookPath(tc.binary); err != nil {
+				t.Skip(err)
+			}
+			out, err := runSandboxed(t, f.workspace, tc.command, &Options{TempDir: t.TempDir()})
+			if err != nil || strings.TrimSpace(out) != tc.cache {
+				t.Fatalf("tool cache configuration overridden: want %s, got %s (%v)", tc.cache, out, err)
+			}
+		})
+	}
+}
+
+func TestSandboxGoBuildReadsUnwritableHostCache(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("Go is not installed")
+	}
+	f := newEscapeFixture(t)
+	for key, value := range map[string]string{"GOCACHE": canonicalPath(t.TempDir()), "GOENV": "off", "GOFLAGS": "", "GOTMPDIR": "", "GOTOOLCHAIN": "local", "GOPROXY": "off"} {
+		t.Setenv(key, value)
+	}
+	source := filepath.Join(f.workspace, "sandbox_test.go")
+	writeFixture(t, filepath.Join(f.workspace, "go.mod"), "module example.test/sandbox\n\ngo 1.26\n")
+	writeFixture(t, source, "package sandbox\nimport \"testing\"\nfunc TestBuild(t *testing.T) {}\n")
+	// Warm the cache outside the sandbox, as a developer's earlier builds would.
+	warm := exec.Command("go", "test", "./...")
+	warm.Dir = f.workspace
+	if output, err := warm.CombinedOutput(); err != nil {
+		t.Fatalf("warm host cache: %v\n%s", err, output)
+	}
+	// An edit older than Go's index cutoff (2s) makes Go index the package again.
+	writeFixture(t, source, "package sandbox\nimport \"testing\"\nfunc TestBuild(t *testing.T) { t.Log() }\n")
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(source, past, past); err != nil {
+		t.Fatal(err)
+	}
+	command := `touch "$GOCACHE/probe" 2>/dev/null && echo CACHE_WRITABLE; GODEBUG=goindex=0 go test -count=1 ./...`
+	output, err := runSandboxed(t, f.workspace, command, &Options{TempDir: t.TempDir()})
+	if strings.Contains(output, "CACHE_WRITABLE") {
+		t.Fatal("host Go cache is writable inside the sandbox")
+	}
+	if err != nil || !strings.Contains(output, "ok") {
+		t.Fatalf("Go test with an unwritable host cache failed inside sandbox: %v\n%s", err, output)
+	}
+}
+
+func TestSandboxRecreatesRemovedPrivateTemp(t *testing.T) {
+	f := newEscapeFixture(t)
+	opts := &Options{TempDir: filepath.Join(t.TempDir(), "session")}
+	_, _ = runSandboxed(t, f.workspace, `rm -rf "$TMPDIR"`, opts)
+	output, err := runSandboxed(t, f.workspace, `touch "$TMPDIR/after" && echo TEMP_OK`, opts)
+	if err != nil || !strings.Contains(output, "TEMP_OK") {
+		t.Fatalf("private temp not restored after removal: %v\n%s", err, output)
+	}
+}
+
+func TestSandboxPrivateTempCannotBeSwappedForLink(t *testing.T) {
+	f := newEscapeFixture(t)
+	for name, swap := range map[string]string{
+		"remove": `rm -rf "$TMPDIR"; ln -s "$HOME" "$TMPDIR"`,
+		"rename": `mv "$TMPDIR" ` + escapeQuote(filepath.Join(f.workspace, "moved")) + `; ln -s "$HOME" "$TMPDIR"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := &Options{TempDir: filepath.Join(canonicalPath(t.TempDir()), "session")}
+			if err := os.Mkdir(opts.TempDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = runSandboxed(t, f.workspace, swap, opts)
+			if !isRealDir(opts.TempDir) {
+				t.Fatal("sandboxed command replaced its private temp root")
+			}
+		})
+	}
+}
+
+func TestSandboxReplacesLinkedPrivateTemp(t *testing.T) {
+	f := newEscapeFixture(t)
+	opts := &Options{TempDir: filepath.Join(canonicalPath(t.TempDir()), "session")}
+	// An escalated command runs unsandboxed and could leave this link behind.
+	if err := os.Symlink(f.home, opts.TempDir); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = runSandboxed(t, f.workspace, `printf x > "$HOME/.zshrc"`, opts)
+	if _, err := os.Lstat(filepath.Join(f.home, ".zshrc")); err == nil {
+		t.Fatal("linked private temp granted writes to its target")
+	}
+	if !isRealDir(opts.TempDir) {
+		t.Fatal("linked private temp was not replaced")
+	}
+}
+
+func isRealDir(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().Type() == os.ModeDir
+}
+
 func TestSandboxProtectsRepositoryConfiguration(t *testing.T) {
 	f := newEscapeFixture(t)
 	if _, err := exec.LookPath("git"); err != nil {
@@ -329,7 +440,7 @@ func TestSandboxNetworkGrantStillBlocksHostSockets(t *testing.T) {
 	// Socket paths are limited to about 104 bytes, too short for t.TempDir.
 	short, err := os.MkdirTemp("/tmp", "wm")
 	if err != nil {
-		t.Fatal(err)
+		t.Skipf("short socket dir unavailable: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(short) })
 	socket := filepath.Join(short, "s")

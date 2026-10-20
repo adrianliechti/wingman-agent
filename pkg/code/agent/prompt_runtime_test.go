@@ -13,6 +13,60 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
+func TestSessionContextDescribesConfiguredAccess(t *testing.T) {
+	t.Setenv("WINGMAN_SANDBOX_ACTIVE", "")
+	for _, tc := range []struct {
+		name    string
+		options Options
+	}{
+		{name: "sandboxed"},
+		{name: "network enabled", options: Options{SandboxNetwork: true}},
+		{name: "unsandboxed", options: Options{DisableSandbox: true}},
+		{name: "shell disabled", options: Options{DisableShell: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := New(newOptionsTestWorkspace(t), Config{Options: tc.options}, nil)
+			t.Cleanup(func() { _ = a.Close() })
+			id, err := a.NewSession(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := a.session(id)
+			check := func(got string, hasExec, hasEdit bool) {
+				t.Helper()
+				for _, path := range []string{a.workspace.RootPath, s.resources.tempDir} {
+					if !strings.Contains(got, "`"+path+"`") {
+						t.Errorf("session context omits accessible path %q", path)
+					}
+				}
+				if strings.Contains(got, "- Shell sandbox:") != hasExec {
+					t.Error("shell context does not follow available tools")
+				}
+				if strings.Contains(got, "File-tool writable roots:") != hasEdit {
+					t.Error("file write context does not follow available tools")
+				}
+				if hasExec {
+					if tc.options.DisableSandbox {
+						if !strings.Contains(got, "disabled by host configuration") || strings.Contains(got, "Shell writable roots:") {
+							t.Error("unsandboxed context describes a restricted shell")
+						}
+					} else {
+						if !strings.Contains(got, "TMPDIR = TEMP = TMP = `"+s.resources.tempDir+"`") {
+							t.Error("context omits actual private temporary directory")
+						}
+						if strings.Contains(got, "Shell IP network: enabled") != tc.options.SandboxNetwork {
+							t.Error("context network access does not match execution options")
+						}
+					}
+				}
+			}
+			check(s.contextInstructions(), !tc.options.DisableShell, true)
+			check(s.subagentContext(s.harness.AvailableTools()), !tc.options.DisableShell, true)
+			check(s.subagentContext([]tool.Tool{{Name: "read"}}), false, false)
+		})
+	}
+}
+
 func TestSharedPromptReferencesRegisteredToolSchemas(t *testing.T) {
 	a := New(newOptionsTestWorkspace(t), Config{Options: optionsFromEnvironment()}, nil)
 	t.Cleanup(func() { _ = a.Close() })

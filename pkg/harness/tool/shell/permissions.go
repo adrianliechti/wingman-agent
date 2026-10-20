@@ -105,13 +105,9 @@ func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, wo
 	} else if mode == "require_permissions" {
 		kind = "sandbox_permissions"
 	}
-	roots := writableRootsFor(workspace, opts.ExtraWritableRoots)
-	if opts.TempDir != "" {
-		roots = append(roots, canonicalPath(opts.TempDir))
-	}
 	policy := map[string]any{
 		"sandboxed": sandboxed, "network": !sandboxed || opts.Network,
-		"writable_roots": roots, "protected_directories": protectedDirs,
+		"writable_roots": opts.writableRoots(workspace), "protected_directories": protectedDirs,
 		"protected_files":   append(slices.Clone(protectedFiles), protectedRootFiles...),
 		"denied_read_paths": credentialPaths(), "host_unix_sockets": false,
 	}

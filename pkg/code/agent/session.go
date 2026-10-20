@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
@@ -163,6 +164,8 @@ func (s *sessionState) configureTools() error {
 	if err != nil {
 		return fmt.Errorf("create private session temp: %w", err)
 	}
+	// Use the sandbox's spelling everywhere (macOS /var is /private/var; Windows junctions/short names).
+	privateTemp = sandboxpolicy.Canonical(privateTemp)
 	s.resources.tempDir = privateTemp
 	s.resources.tasks, err = task.NewFileRegistry(filepath.Join(artifactDir, "tasks.json"))
 	if err != nil {
@@ -183,6 +186,7 @@ func (s *sessionState) configureTools() error {
 	}
 	allowedReadRoots = append(allowedReadRoots, privateTemp)
 	allowedWriteRoots = append(allowedWriteRoots, privateTemp)
+	s.fileReadRoots, s.fileWriteRoots = allowedReadRoots, allowedWriteRoots
 	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.cfg.DisableShell, Elicitation: elicit, Shell: shellOpts}
 
 	tools := ws.WithEditDiagnostics(fs.Tools(ws.Root, &fs.Options{

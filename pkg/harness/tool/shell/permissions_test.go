@@ -90,7 +90,7 @@ func TestSandboxNetworkAndTempAreRestrictedByDefault(t *testing.T) {
 	if opts != nil && opts.Network {
 		t.Fatal("network enabled by default")
 	}
-	roots := writableRootsFor(t.TempDir(), nil)
+	roots := writableRootsFor(t.TempDir(), nil, "")
 	for _, root := range roots {
 		if root == canonicalPath(os.TempDir()) || root == canonicalPath("/tmp") {
 			t.Fatalf("shared temp granted: %v", roots)

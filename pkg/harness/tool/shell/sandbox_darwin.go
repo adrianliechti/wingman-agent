@@ -116,6 +116,10 @@ func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 	if rules := paramRules("PROTECTED_PATH", protectedPaths); rules != "" {
 		profile.WriteString("(deny file-write*" + rules + ")\n")
 	}
+	// Temp skips the protected-root rules, but swapping its root for a link would redirect the next command's grant.
+	if policy.TempDir != "" {
+		profile.WriteString("(deny file-write-unlink (literal " + seatbeltString(policy.TempDir) + "))\n")
+	}
 	if denyRules := paramRules("DENY_READ", policy.DenyRead); denyRules != "" {
 		profile.WriteString("(deny file-read*" + denyRules + ")\n(deny file-write*" + denyRules + ")\n")
 	}

@@ -285,6 +285,7 @@ func TestSandboxedExecSendsExecutionPolicyToReviewerAndHonoursDenial(t *testing.
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX script")
 	}
+	t.Setenv("WINGMAN_SANDBOX_ACTIVE", "")
 	a, ui, ctx, inputs := newReviewSession(t, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"Not requested."}`)
 	var exec tool.Tool
 	for _, candidate := range a.session(code.SessionIDFromContext(ctx)).tools {

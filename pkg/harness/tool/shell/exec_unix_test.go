@@ -67,6 +67,18 @@ func TestExecCommandCompletes(t *testing.T) {
 	}
 }
 
+func TestExecCommandCanStartInPrivateTempWithoutApproval(t *testing.T) {
+	m := NewExecManager(nil)
+	defer m.Close()
+	workspace, tempDir := t.TempDir(), t.TempDir()
+	result, err := executeExecCommand(t.Context(), m, workspace, nil, &Options{TempDir: tempDir}, map[string]any{
+		"command": "pwd", "workdir": tempDir,
+	})
+	if err != nil || result.IsError || !strings.Contains(result.Content, canonicalPath(tempDir)) {
+		t.Fatalf("private temp workdir failed: %v %s", err, result.Content)
+	}
+}
+
 func TestExecCommandExitCode(t *testing.T) {
 	m := NewExecManager(nil)
 	defer m.Close()
@@ -524,5 +536,26 @@ func TestExecSessionBufferCap(t *testing.T) {
 
 	if s.drain() != "" {
 		t.Fatal("expected empty buffer after drain")
+	}
+}
+
+func TestExecRecreatesRemovedPrivateTempForSubsequentWorkdir(t *testing.T) {
+	m := NewExecManager(nil)
+	defer m.Close()
+	workspace := t.TempDir()
+	privateTemp := filepath.Join(t.TempDir(), "private-temp")
+	opts := &Options{TempDir: privateTemp, DisableSandbox: true}
+	allow := &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) { return true, nil }}
+
+	if res, err := executeExecCommand(t.Context(), m, workspace, allow, opts, map[string]any{"command": `rmdir "$TMPDIR"`, "wait": 10}); err != nil || res.IsError {
+		t.Fatalf("remove private temp: %v %s", err, res.Content)
+	}
+	if info, err := os.Stat(privateTemp); err != nil || !info.IsDir() {
+		t.Fatalf("private temp not restored on exit: %v", err)
+	}
+	_ = os.RemoveAll(privateTemp)
+	res, err := executeExecCommand(t.Context(), m, workspace, nil, opts, map[string]any{"command": "pwd", "workdir": privateTemp, "wait": 10})
+	if err != nil || res.IsError || !strings.Contains(res.Content, privateTemp) {
+		t.Fatalf("subsequent workdir in private temp: %v %s", err, res.Content)
 	}
 }

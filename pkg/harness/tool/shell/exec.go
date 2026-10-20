@@ -498,31 +498,31 @@ func ExecTools(manager *ExecManager, workDir string, elicit *tool.Elicitation, o
 
 	commandLines = append(commandLines, safetyGuardLine(elicit))
 	properties := map[string]any{
-		"command":     map[string]any{"type": "string", "description": "Command to run."},
+		"command":     map[string]any{"type": "string", "description": "Shell source to execute. Environment variables expand according to the host shell's syntax."},
 		"validation":  map[string]any{"type": "boolean", "description": "Set true for a test, build, lint or other check of the changes. The review records its actual exit status; use false for ordinary commands."},
 		"description": map[string]any{"type": "string", "description": "Short label (e.g. \"Start dev server\")."},
-		"workdir":     map[string]any{"type": "string", "description": "Directory to run the command in (absolute, or relative to the workspace). Defaults to the workspace root."},
+		"workdir":     map[string]any{"type": "string", "description": "Existing directory, absolute or relative to the workspace; defaults to the workspace root. Environment variables are not expanded. Within the sandbox, use a configured or requested writable root or its subdirectory."},
 		"tty":         map[string]any{"type": "boolean", "description": "Run in a pseudo-terminal (Unix only)."},
 		"wait":        map[string]any{"type": "integer", "minimum": 0, "description": fmt.Sprintf("Seconds to wait before backgrounding (default %d, capped at %d; 0 backgrounds immediately).", defaultExecWait, maxExecWait)},
 		"timeout":     map[string]any{"type": "integer", "minimum": 0, "maximum": maxExecTimeout, "description": "Seconds after which the command is killed. Omit or set 0 to let it run until it exits or the agent session closes."},
 	}
 	if workspaceSandboxEnabled(opts) {
 		commandLines = append(commandLines, sandboxGuideLine(opts))
-		properties["sandbox_permissions"] = map[string]any{"type": "string", "enum": []string{"use_default", "require_permissions", "require_escalated"}, "description": "require_permissions grants network or additional writable roots for one command after review while retaining the sandbox. require_escalated runs outside the sandbox after review."}
-		properties["network"] = map[string]any{"type": "boolean", "description": "Request IP network access with require_permissions."}
-		properties["writable_roots"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Existing directories to make writable with require_permissions. Protected configuration and credentials stay restricted."}
-		properties["justification"] = map[string]any{"type": "string", "description": "Why this command needs the requested permissions."}
+		properties["sandbox_permissions"] = map[string]any{"type": "string", "enum": []string{"use_default", "require_permissions", "require_escalated"}, "description": "Omit or use use_default for configured access. require_permissions needs justification plus network=true and/or nonempty writable_roots; retains the sandbox. require_escalated needs justification and no network/writable_roots; removes the local sandbox. Both requests follow the current approval policy and apply only to this execution."}
+		properties["network"] = map[string]any{"type": "boolean", "description": "Set true with sandbox_permissions=require_permissions to request IP network access for this command. Omit otherwise. Does not provide credentials."}
+		properties["writable_roots"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "With require_permissions: existing directories to make writable for this command, absolute or relative to the workspace. No environment-variable or ~ expansion. Choose narrow directories; filesystem roots, home, shared host temp and protected configuration cannot be granted. Does not expand file-tool access."}
+		properties["justification"] = map[string]any{"type": "string", "description": "Required nonempty explanation for require_permissions or require_escalated: state the operation, the access it needs and why configured access is insufficient."}
 	}
 	commandDescription := strings.Join(commandLines, "\n")
 
 	sessionDescription := strings.Join([]string{
 		"Interact with a session started by `exec`: poll new output (no input), write to its stdin (`input`), close stdin (`eof`), or terminate it (`kill`).",
 		"- Waits up to `wait` seconds for output (or exit) before returning.",
-		"- `input` supports C-style escapes (\\n Enter, \\e Esc, \\t, \\uHHHH; \\\\ for a literal backslash); anything else is sent verbatim with nothing appended. Include \\n to submit a line to an interactive program, else it is typed but not entered (e.g. save in vi with \"\\e:w file\\n\"). Destructive or privilege-escalating input lines require the same user confirmation as shell commands.",
+		"- `input` supports C-style escapes (\\n Enter, \\e Esc, \\t, \\uHHHH; \\\\ for a literal backslash); anything else is sent verbatim with nothing appended. Include \\n to submit a line to an interactive program, else it is typed but not entered (e.g. save in vi with \"\\e:w file\\n\"). Destructive or privilege-escalating input follows the same approval policy as shell commands.",
 		"- \\u0003 (Ctrl-C) interrupts the process: on tty sessions via the terminal, otherwise via SIGINT to the process group (Unix only).",
 		"- On tty sessions, `eof` sends Ctrl-D instead of closing stdin.",
 		"- Cancelling a blocked stdin write requests termination and closes stdin, because some input may already have been delivered. Poll cancellation alone leaves the command running.",
-		"- Destructive input is confirmed for each submission; approvals are not reused across changing interactive process state.",
+		"- The harness checks each input submission; approvals are not reused across changing interactive process state. Do not use stdin to bypass an execution denial or expand the running command's sandbox permissions.",
 		"- Sessions end when the process exits, is killed, or the agent session closes.",
 	}, "\n")
 
@@ -610,13 +610,16 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	if err != nil {
 		return tool.Result{}, err
 	}
+	sandboxed := workspaceSandboxEnabled(opts)
+	escalated := sandboxed && permissionMode == "require_escalated"
+	if err := ensurePrivateTemp(opts, escalated); err != nil {
+		return tool.Result{}, err
+	}
 	dir, err := resolveWorkdir(workDir, args, opts)
 	if err != nil {
 		return tool.Result{}, err
 	}
 
-	sandboxed := workspaceSandboxEnabled(opts)
-	escalated := sandboxed && permissionMode == "require_escalated"
 	justification, _ := args["justification"].(string)
 	err = confirmExecution(ctx, elicit, command, workDir, dir, permissionMode, justification, opts)
 	if err != nil {
@@ -639,8 +642,9 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		return tool.Result{}, err
 	}
 	cmd.Env = setEnvironment(cmd.Env, "NO_COLOR", "1")
-	cmd.Env = setEnvironment(cmd.Env, "PAGER", "cat")
-	cmd.Env = setEnvironment(cmd.Env, "GIT_PAGER", "cat")
+	for _, key := range []string{"PAGER", "GIT_PAGER", "GH_PAGER"} {
+		cmd.Env = setEnvironment(cmd.Env, key, "cat")
+	}
 
 	description, _ := args["description"].(string)
 	validation, _ := args["validation"].(bool)
@@ -688,6 +692,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		go func() {
 			defer cancel()
 			err := cmd.Wait()
+			_ = ensurePrivateTemp(opts, escalated)
 			exitedAt := time.Now()
 			select {
 			case <-copyDone:
@@ -717,6 +722,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		go func() {
 			defer cancel()
 			s.exitErr = cmd.Wait()
+			_ = ensurePrivateTemp(opts, escalated)
 			s.exitedAt = time.Now()
 			close(s.done)
 			m.notifyExit(s)
@@ -1053,7 +1059,7 @@ func completedSessionResult(s *execSession) tool.Result {
 	}
 	output, notice := s.drain(), s.exitNotice()
 	if s.sandboxed && looksLikeSandboxDenial(output, s.exitErr) {
-		notice += "\nThe sandbox may have blocked this command. Request the needed access with sandbox_permissions \"require_permissions\", network or writable_roots, and a justification. Use require_escalated only when the sandbox itself must be removed."
+		notice += "\nPossible sandbox denial; this output alone does not establish the cause. Identify the failed path or operation before retrying. For an unwritable disposable cache or temp path, redirect only that path to private temp as described in exec. If required access exceeds the configured sandbox, request require_permissions with justification and the needed network=true and/or writable_roots. Use require_escalated with justification only if scoped grants cannot support the operation; omit network and writable_roots. Do not bypass approval denials."
 	}
 	result := s.result(sessionResult(output, notice))
 	result.IsError = s.exitErr != nil

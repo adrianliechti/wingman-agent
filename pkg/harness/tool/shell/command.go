@@ -17,12 +17,9 @@ import (
 
 func safetyGuardLine(elicit *tool.Elicitation) string {
 	if elicit == nil || (elicit.Confirm == nil && elicit.Review == nil) {
-		return "- Risky commands and permission expansions cannot run because no approver is available. Routine commands can run within the configured sandbox."
+		return "- No approver is available. Commands classified as risky and requests to expand permissions will be rejected; use commands within the configured access that do not require approval."
 	}
-	if elicit.Review != nil {
-		return "- Safety guard: routine commands run directly. Risky actions and permission expansions receive automatic review for each execution. A denial states its reason and must not be worked around."
-	}
-	return "- Safety guard: routine commands run directly; risky actions and permission expansions require approval for each execution."
+	return "- The harness applies the current mode's approval policy to risky commands and permission requests on each execution. Submit execution permission requests through this tool's parameters. Do not bypass an approval denial by changing tools, command spelling or execution mode."
 }
 
 func sandboxGuideLine(opts *Options) string {
@@ -30,11 +27,21 @@ func sandboxGuideLine(opts *Options) string {
 	if opts != nil && opts.Network {
 		network = "IP network access is enabled by host configuration"
 	}
-	protection := "Protected Git metadata, editor settings and agent configuration stay read-only."
+	protection := "Treat protected Git metadata, editor settings and agent configuration in project roots as read-only. Private temp permits configuration fixtures."
 	if runtime.GOOS != "darwin" {
-		protection += " The native backend only protects paths that exist when the command starts; never create protected configuration through a command."
+		protection += " OS enforcement covers only existing protected paths at project roots; do not bypass this restriction with newly created or nested paths."
 	}
-	return "- Commands run in an OS sandbox. Writes are limited to the workspace, project memory and private temporary storage ($TMPDIR/$TEMP). Known credential stores are hidden and common authentication variables are removed. " + protection + " " + network + ". For a download or additional directory access, use sandbox_permissions=\"require_permissions\", network=true and/or writable_roots, with a justification. These grants apply to one execution and retain the sandbox. Reserve require_escalated for operations that genuinely need to run outside the sandbox. Every permission expansion is reviewed again."
+	cacheExample := `npm ci --cache "$TMPDIR/npm-cache"`
+	if runtime.GOOS == "windows" {
+		cacheExample = `npm ci --cache "$env:TEMP\npm-cache"`
+	}
+	return strings.Join([]string{
+		"- Commands run in an OS sandbox. Use the Shell writable roots in Environment context to choose output paths and workdir. Known credential stores are hidden. " + protection,
+		"- Use private TMPDIR/TEMP/TMP for temporary files; do not assume /tmp is writable. Expand environment variables inside command using the host shell's syntax. In workdir and writable_roots, supply literal paths, not environment-variable references.",
+		"- Preserve inherited tool/cache configuration; many tools still read a cache they cannot write. Set GODEBUG=goindex=0 for Go commands so they read the host build cache without writing its package index. Only if a command still fails writing a disposable cache, redirect that cache to private temp for the command, e.g. " + cacheExample + "; likewise PIP_CACHE_DIR, UV_CACHE_DIR or GOCACHE/GOTMPDIR. Do not reset HOME, GOPATH, GOMODCACHE, CARGO_HOME or XDG_CACHE_HOME to repair one cache error.",
+		"- " + network + ". Use default permissions when configured access suffices. For required network access or writes outside listed roots, request require_permissions with the needed network/writable_roots and justification. Grants retain the sandbox and apply to the launched command, not later exec calls.",
+		"- Request require_escalated only when the required operation cannot run with scoped grants. It removes the local sandbox and private TMPDIR for the launched command, so pass staged files by absolute path; supply justification and omit network/writable_roots.",
+	}, "\n")
 }
 
 // sandboxDenialHints follows Codex (plus the Windows spellings): output words that suggest the sandbox blocked a failed command.
@@ -71,22 +78,11 @@ func resolveWorkdir(workDir string, args map[string]any, opts *Options) (string,
 	if err != nil || !info.IsDir() {
 		return "", fmt.Errorf("workdir %q is not an accessible directory", value)
 	}
-	if workspaceSandboxEnabled(opts) && args["sandbox_permissions"] != "require_escalated" && !pathWithin(workDir, value) {
-		if args["sandbox_permissions"] == "require_permissions" {
-			if roots, ok := args["writable_roots"].([]any); ok {
-				for _, root := range roots {
-					if path, ok := root.(string); ok {
-						if !filepath.IsAbs(path) {
-							path = filepath.Join(workDir, path)
-						}
-						if pathWithin(path, value) {
-							return value, nil
-						}
-					}
-				}
-			}
+	if workspaceSandboxEnabled(opts) && args["sandbox_permissions"] != "require_escalated" {
+		// executionOptions has already merged validated per-command grants into opts.
+		if !slices.ContainsFunc(opts.writableRoots(workDir), func(root string) bool { return pathWithin(root, value) }) {
+			return "", fmt.Errorf("workdir %q is outside sandbox workspace %q and configured writable roots", value, workDir)
 		}
-		return "", fmt.Errorf("workdir %q is outside sandbox workspace %q", value, workDir)
 	}
 
 	return value, nil
@@ -103,7 +99,26 @@ func ToolCommand(ctx context.Context, command, workspaceDir, workingDir string, 
 	return buildToolCommand(ctx, command, workspaceDir, workingDir, opts, false)
 }
 
+func ensurePrivateTemp(opts *Options, escalated bool) error {
+	if opts == nil || opts.TempDir == "" || escalated {
+		return nil
+	}
+	// An earlier command may have removed private temp or replaced it with a link, whose target the sandbox would grant.
+	if info, err := os.Lstat(opts.TempDir); err == nil && info.Mode().Type() != os.ModeDir {
+		if err := os.Remove(opts.TempDir); err != nil {
+			return fmt.Errorf("replace private temp: %w", err)
+		}
+	}
+	if err := os.MkdirAll(opts.TempDir, 0o700); err != nil {
+		return fmt.Errorf("create private temp: %w", err)
+	}
+	return nil
+}
+
 func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir string, opts *Options, escalated bool) (*exec.Cmd, error) {
+	if err := ensurePrivateTemp(opts, escalated); err != nil {
+		return nil, err
+	}
 	var sandbox *sandboxOptions
 	if workspaceSandboxEnabled(opts) && !escalated {
 		sandbox = &sandboxOptions{WorkspaceDir: workspaceDir}
@@ -122,17 +137,19 @@ func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir str
 			sandbox.TempDir = canonicalPath(dir)
 			context.AfterFunc(ctx, func() { _ = os.RemoveAll(dir) })
 		}
-		sandbox.ExtraWritableRoots = append(sandbox.ExtraWritableRoots, sandbox.TempDir)
 	}
-	return buildCommandWithEnvironment(ctx, command, workingDir, environmentForTools(opts), sandbox)
+	environment := environmentForTools(opts)
+	if sandbox == nil && !escalated && opts != nil {
+		// Escalated runs keep the host temp: sandboxed commands can write private temp.
+		environment = environmentWithTemp(environment, opts.TempDir)
+	}
+	return buildCommandWithEnvironment(ctx, command, workingDir, environment, sandbox)
 }
 
 func buildCommandWithEnvironment(ctx context.Context, command, workingDir string, environment []string, sandbox *sandboxOptions) (*exec.Cmd, error) {
 	var cmd *exec.Cmd
-	if sandbox != nil && sandbox.TempDir != "" {
-		for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
-			environment = setEnvironment(environment, key, sandbox.TempDir)
-		}
+	if sandbox != nil {
+		environment = environmentWithTemp(environment, sandbox.TempDir)
 	}
 
 	if runtime.GOOS == "windows" {

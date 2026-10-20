@@ -64,7 +64,7 @@ func sandboxProtectedRoots(policy sandboxPolicy) []string {
 		tempDir = canonicalPath(policy.TempDir)
 	}
 	for _, root := range policy.WritableRoots {
-		if tempDir != "" && (root == tempDir || strings.EqualFold(root, tempDir)) {
+		if tempDir != "" && strings.EqualFold(root, tempDir) {
 			continue
 		}
 		roots = append(roots, root)
@@ -146,11 +146,8 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 			return nil, fmt.Errorf("sandbox %s %q is not an accessible directory", label, path)
 		}
 	}
-	allowedWorkdir := pathWithin(workspaceDir, workingDir)
-	for _, root := range opts.ExtraWritableRoots {
-		allowedWorkdir = allowedWorkdir || pathWithin(root, workingDir)
-	}
-	if !allowedWorkdir {
+	roots := writableRootsFor(workspaceDir, opts.ExtraWritableRoots, opts.TempDir)
+	if !slices.ContainsFunc(roots, func(root string) bool { return pathWithin(root, workingDir) }) {
 		return nil, fmt.Errorf("workdir %q is outside sandbox workspace %q", workingDir, workspaceDir)
 	}
 
@@ -168,7 +165,7 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 		tempDir = canonicalPath(opts.TempDir)
 	}
 	policy := sandboxPolicy{
-		WritableRoots: writableRootsFor(workspaceDir, opts.ExtraWritableRoots),
+		WritableRoots: roots,
 		TempDir:       tempDir,
 		ProtectedRoot: workspaceDir,
 		DenyRead:      credentialPaths(),
@@ -189,15 +186,10 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 	return exec.CommandContext(ctx, path, args...), nil
 }
 
-// writableRootsFor assembles the sandbox's writable roots: the workspace,
-// any extra roots the caller needs (e.g. the memory directory), and the OS
-// temp dirs every command may stage files under. Entries that don't resolve
-// to an accessible directory are dropped rather than failing the command —
-// an extra root is a nice-to-have, not a precondition like the workspace.
-func writableRootsFor(workspaceDir string, extraWritableRoots []string) []string {
+// writableRootsFor lists the workspace, extra roots and private temp; missing extra roots are skipped.
+func writableRootsFor(workspaceDir string, extraWritableRoots []string, tempDir string) []string {
 	writableRoots := []string{canonicalPath(workspaceDir)}
-	candidates := extraWritableRoots
-	for _, path := range candidates {
+	for _, path := range append(slices.Clone(extraWritableRoots), tempDir) {
 		if path == "" {
 			continue
 		}
@@ -207,4 +199,11 @@ func writableRootsFor(workspaceDir string, extraWritableRoots []string) []string
 		}
 	}
 	return writableRoots
+}
+
+func (opts *Options) writableRoots(workspace string) []string {
+	if opts == nil {
+		return writableRootsFor(workspace, nil, "")
+	}
+	return writableRootsFor(workspace, opts.ExtraWritableRoots, opts.TempDir)
 }
