@@ -28,11 +28,3 @@ func TestExecutionContextKeepsPrivateTempWithDisabledOrInheritedSandbox(t *testi
 		}
 	}
 }
-
-func TestExecutionContextNotesHostTempForEscalation(t *testing.T) {
-	t.Setenv(workspaceSandboxActiveEnv, "")
-	got := ExecutionContext(t.TempDir(), &Options{TempDir: t.TempDir()})
-	if !strings.Contains(got, "Escalated commands use the host temporary directory") {
-		t.Fatalf("context implies escalated commands share private temp: %s", got)
-	}
-}

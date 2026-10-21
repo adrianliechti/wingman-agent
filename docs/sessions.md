@@ -102,13 +102,15 @@ restarts, preserve unsent drafts and editor buffers before reloading.
 In Agent mode, a reviewer model checks risky actions, such as destructive
 shell commands, fetches from new sites, and scheduled scripts, before they run.
 It uses the utility model and the conversation to judge whether you asked for
-the action. A denied action returns its reason to the agent. To allow it, say so
-in the chat; critical actions such as secret exfiltration stay denied. After
+the action. What it approves runs. What it declines during a turn, including
+destructive and critical-risk actions, is shown to you with its risk and
+rationale; if you decline too, the agent receives the reason. Background tasks
+and scheduled pre-checks do not wait for you; their denials stand. After
 repeated denials in one turn, the turn stops. Unattended mode runs every action
 without review.
 
-Wingman asks you only when the reviewer cannot decide, and for trust prompts
-such as running hooks from a cloned repository. Answer the prompt shown for the
+Wingman also asks you when the reviewer fails, and for trust prompts such as
+running hooks from a cloned repository. Answer the prompt shown for the
 relevant session. In the browser, `Alt+A`
 focuses a prompt; `Y` or `N` then allows or declines that action. An approval
 does not disable later reviews. Each risky command, scheduled script execution,
@@ -128,21 +130,27 @@ protected-configuration checks regardless.
 
 - Commands can read most files, but not credentials such as `~/.ssh`,
   `~/.aws`, `~/.gnupg`, `~/.kube`, or Wingman's MCP tokens. Common authentication
-  environment variables, including GitHub and cloud tokens, are removed.
+  environment variables, including GitHub and cloud tokens and the SSH agent,
+  are removed; commands approved to run outside the sandbox keep them.
 - They write only to the workspace, project memory, and private temporary
   storage (`$TMPDIR`/`$TEMP`). The shared host temporary directory is read-only.
-- Git metadata, including the index and worktree pointer files, editor settings,
-  `.envrc`, and agent configuration are protected. The edit tool checks the same
-  protected names, including files that do not exist yet.
+- Editor settings, `.envrc`, and agent configuration are protected. The edit
+  tool checks the same protected names, including files that do not exist yet.
+- Git metadata is writable, so commands can stage, commit and switch branches.
+  The sandbox guards against mistakes, not a hostile command: a hook written
+  into `.git` runs unsandboxed whenever Git runs outside the sandbox, such as
+  your own commands or an approved escalation.
 - IP network access is off. A command can request `sandbox_permissions:
   "require_permissions"` with `network: true` and/or `writable_roots`, plus a
   justification. Reviewed grants apply to one execution and keep the sandbox.
   `WINGMAN_SANDBOX_NETWORK=on` enables IP networking globally instead.
 - Host Unix sockets, including Docker and SSH agents, stay blocked on macOS
   and Linux, even with IP networking enabled. macOS allows its DNS service.
-- `sandbox_permissions: "require_escalated"` requests execution outside the
-  sandbox when scoped permissions cannot do the job, such as a Git commit.
-  In Agent mode the reviewer decides; Unattended mode allows the request.
+- When a command that finishes within its wait fails with a likely sandbox
+  denial, such as `git push` resolving its remote or reading `~/.ssh`, Wingman
+  asks to re-run the whole command once outside the sandbox. Validation runs
+  such as tests are not re-run, since their output often quotes such errors.
+  The model can also request `sandbox_permissions: "require_escalated"` up front.
 
 Routine commands run without review. The shell classifier still identifies
 destructive intent and supplies Plan mode, read-only subagent, and parallel
@@ -170,8 +178,6 @@ does not provision sandbox users or require elevation.
   capabilities before launching. Unsupported hosts fail without an ACL fallback.
 - Windows supplies private temporary storage for each environment and sets its
   `TEMP` and `TMP`. The host's shared temporary directory is not writable.
-- Existing `.git` metadata is read-only, including a worktree's `.git` pointer
-  file. This also blocks commands that update the index or create commits.
 - Existing protected editor and agent paths are read-only. Paths that do not
   exist when the command starts are not covered.
 - Existing files with multiple hardlinks beneath writable roots are denied

@@ -46,7 +46,7 @@ func TestPermissionRequestPreservesSandboxAndDoesNotMutateBase(t *testing.T) {
 		action = req.Action
 		return tool.Verdict{Allowed: true}, nil
 	}}
-	if err := confirmExecution(t.Context(), elicit, "echo fixture", workspace, workspace, mode, "download fixture", opts); err != nil {
+	if err := confirmExecution(t.Context(), elicit, "echo fixture", workspace, workspace, mode, "download fixture", "", opts); err != nil {
 		t.Fatal(err)
 	}
 	policy := action["execution_policy"].(map[string]any)
@@ -109,7 +109,7 @@ func TestPermissionExpansionsCannotMasqueradeAsReadOnly(t *testing.T) {
 func TestScopedRootCannotSelectProtectedConfiguration(t *testing.T) {
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	workspace, outside := t.TempDir(), t.TempDir()
-	for _, name := range []string{".git", ".agents", ".codex", ".vscode"} {
+	for _, name := range []string{".agents", ".codex", ".vscode"} {
 		root := filepath.Join(outside, name)
 		if err := os.Mkdir(root, 0700); err != nil {
 			t.Fatal(err)
@@ -136,7 +136,7 @@ func TestPermissionReviewRejectsChangedRootAlias(t *testing.T) {
 		}
 		return tool.Verdict{Allowed: true}, nil
 	}}
-	if err := confirmExecution(t.Context(), elicit, "echo fixture", alias, alias, "require_permissions", "fixture", &Options{Network: true}); err == nil {
+	if err := confirmExecution(t.Context(), elicit, "echo fixture", alias, alias, "require_permissions", "fixture", "", &Options{Network: true}); err == nil {
 		t.Fatal("approval followed a changed workspace alias")
 	}
 }

@@ -15,7 +15,7 @@ func TestCheckWriteAcrossVolumes(t *testing.T) {
 	if err := CheckWrite(root, `\\server\share\notes.txt`); err != nil {
 		t.Fatalf("write on a share: %v", err)
 	}
-	if err := CheckWrite(root, filepath.Join(root, ".git", "config")); err == nil {
+	if err := CheckWrite(root, filepath.Join(root, ".vscode", "settings.json")); err == nil {
 		t.Fatal("protected path on the workspace drive was writable")
 	}
 }

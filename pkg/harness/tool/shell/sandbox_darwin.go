@@ -141,7 +141,7 @@ const seatbeltNetwork = `(allow network-outbound (remote ip "*:*"))
 `
 
 // seatbeltProtectedRules denies writes to protected paths at any depth and
-// blocks renaming .git or the workspace, which would sidestep the path rules.
+// blocks renaming the workspace, which would sidestep the path rules.
 func seatbeltProtectedRules(root string) string {
 	prefix := "^" + regexp.QuoteMeta(root) + "/"
 	var filters []string
@@ -155,7 +155,7 @@ func seatbeltProtectedRules(root string) string {
 		filters = append(filters, seatbeltRegex(prefix+regexp.QuoteMeta(file)+"$"))
 	}
 	return "(deny file-write*\n " + strings.Join(filters, "\n ") + ")\n" +
-		"(deny file-write-unlink " + seatbeltRegex(prefix+`(.*/)?\.git$`) + " (literal " + seatbeltString(root) + "))\n"
+		"(deny file-write-unlink (literal " + seatbeltString(root) + "))\n"
 }
 
 func seatbeltRegex(pattern string) string {

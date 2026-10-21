@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
@@ -188,28 +190,99 @@ func TestExecEscalationRunsOutsideSandboxAfterApproval(t *testing.T) {
 		t.Fatal("sandboxed exec does not offer sandbox_permissions")
 	}
 
-	denied, err := exec.Execute(context.Background(), map[string]any{"command": touchCommand(outside), "wait": 10})
-	if err != nil || strings.Contains(denied.Content, "sandbox_apply: Operation not permitted") {
-		if runtime.GOOS == "windows" {
-			t.Fatal(err)
-		}
-		t.Skipf("sandbox backend unavailable: %v %s", err, denied.Content)
-	}
-	if !denied.IsError || !strings.Contains(denied.Content, "require_escalated") {
-		t.Fatalf("sandbox denial carries no escalation hint: %s", denied.Content)
-	}
 	escalated, err := exec.Execute(context.Background(), map[string]any{
 		"command": touchCommand(outside), "wait": 10,
 		"sandbox_permissions": "require_escalated", "justification": "write a marker in the home directory",
 	})
-	if err != nil || escalated.IsError {
-		t.Fatalf("escalated command failed: %v %s", err, escalated.Content)
+	if err != nil || strings.Contains(escalated.Content, "sandbox_apply: Operation not permitted") {
+		if runtime.GOOS == "windows" {
+			t.Fatal(err)
+		}
+		t.Skipf("sandbox backend unavailable: %v %s", err, escalated.Content)
+	}
+	if escalated.IsError {
+		t.Fatalf("escalated command failed: %s", escalated.Content)
 	}
 	if len(approvals) != 1 || approvals[0].Action["type"] != "sandbox_escalation" || !strings.Contains(approvals[0].Message, "write a marker") {
 		t.Fatalf("approvals = %+v", approvals)
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Fatalf("escalated command did not run outside the sandbox: %v", err)
+	}
+}
+
+// A command the sandbox blocks is re-run outside it once that is approved.
+func TestExecRetriesSandboxDenialOutsideSandbox(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+		t.Skip("no sandbox backend on this platform")
+	}
+	t.Setenv(workspaceSandboxActiveEnv, "")
+	home := sandboxTestHome(t)
+	outside := filepath.Join(home, fmt.Sprintf(".wingman-retry-test-%d", os.Getpid()))
+	defer os.Remove(outside)
+
+	type reviewed struct {
+		approval tool.Approval
+		call     tool.ToolCall
+	}
+	review := func(verdict tool.Verdict) func(*[]reviewed) *tool.Elicitation {
+		return func(reviews *[]reviewed) *tool.Elicitation {
+			return &tool.Elicitation{Review: func(ctx context.Context, req tool.Approval) (tool.Verdict, error) {
+				call, _ := hook.ToolCallFromContext(ctx)
+				*reviews = append(*reviews, reviewed{req, call})
+				return verdict, nil
+			}}
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		elicit     func(*[]reviewed) *tool.Elicitation
+		validation bool
+		allowed    bool
+		reviews    int
+		notice     string
+	}{
+		{"approved", review(tool.Verdict{Allowed: true}), false, true, 1, "re-running the command outside the sandbox"},
+		{"declined", review(tool.Verdict{Reason: "fixture denial"}), false, false, 1, "not approved: fixture denial"},
+		{"no approver", func(*[]reviewed) *tool.Elicitation { return nil }, false, false, 0, "not approved: command requires approval"},
+		{"validation", review(tool.Verdict{Allowed: true}), true, false, 0, "Possible sandbox denial"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer os.Remove(outside)
+			var reviews []reviewed
+			manager := NewExecManager(nil)
+			defer manager.Close()
+			args := map[string]any{"command": touchCommand(outside), "wait": 10, "validation": tc.validation}
+			raw, _ := json.Marshal(args)
+			ctx := hook.WithToolCall(context.Background(), tool.ToolCall{ID: "call-1", Name: "exec", Args: string(raw)})
+			result, err := ExecTools(manager, t.TempDir(), tc.elicit(&reviews), nil)[0].Execute(ctx, args)
+			if err != nil || strings.Contains(result.Content, "sandbox_apply: Operation not permitted") {
+				if runtime.GOOS == "windows" {
+					t.Fatal(err)
+				}
+				t.Skipf("sandbox backend unavailable: %v %s", err, result.Content)
+			}
+			if result.IsError == tc.allowed || !strings.Contains(result.Content, tc.notice) {
+				t.Fatalf("result = %+v", result)
+			}
+			if _, err := os.Stat(outside); (err == nil) != tc.allowed {
+				t.Fatalf("outside write after %s retry: %v", tc.name, err)
+			}
+			if len(reviews) != tc.reviews {
+				t.Fatalf("reviews = %+v", reviews)
+			}
+			if tc.reviews == 0 {
+				return
+			}
+			approval := reviews[0].approval
+			if denial, _ := approval.Action["sandbox_denial"].(string); approval.Action["type"] != "sandbox_escalation" || denial == "" || !strings.Contains(approval.Message, "the sandbox blocked it: "+denial) {
+				t.Fatalf("retry approval lacks the sandbox denial: %+v", approval)
+			}
+			// Permission hooks judge the escalated call, not the sandboxed one.
+			if !strings.Contains(reviews[0].call.Args, `"sandbox_permissions":"require_escalated"`) {
+				t.Fatalf("permission hooks see the sandboxed call: %s", reviews[0].call.Args)
+			}
+		})
 	}
 }
 

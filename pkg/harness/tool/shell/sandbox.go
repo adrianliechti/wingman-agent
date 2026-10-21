@@ -24,14 +24,14 @@ type sandboxPolicy struct {
 	// subpath rules do not apply beneath it so tools and tests can stage VCS or
 	// agent fixtures inside $TMPDIR.
 	TempDir string
-	// ProtectedRoot keeps git, editor, and agent configuration read-only beneath the workspace.
+	// ProtectedRoot keeps editor and agent configuration read-only beneath the workspace.
 	ProtectedRoot string
 	// DenyRead hides existing credential paths.
 	DenyRead []string
 	Network  bool
 }
 
-// Writes here would later run code outside the sandbox: through git, editors, direnv, shells, or agent config.
+// Writes here would later run code outside the sandbox: through editors, direnv, shells, or agent config.
 var (
 	protectedDirs      = sandboxpolicy.ProtectedDirs
 	protectedFiles     = sandboxpolicy.ProtectedFiles

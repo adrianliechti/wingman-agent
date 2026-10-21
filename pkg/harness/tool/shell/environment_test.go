@@ -70,14 +70,18 @@ func TestCustomEnvironmentPolicyExtendsDefault(t *testing.T) {
 	t.Setenv("WINGMAN_TEST_SECRET", "custom-denied")
 	t.Setenv("WINGMAN_TEST_VISIBLE", "visible")
 
-	environ := strings.Join(environmentForTools(&Options{Environment: &EnvironmentPolicy{
-		Deny: []string{"WINGMAN_TEST_SECRET"},
-	}}), "\n")
+	opts := &Options{Environment: &EnvironmentPolicy{Deny: []string{"WINGMAN_TEST_SECRET"}}}
+	environ := strings.Join(environmentForTools(opts, false), "\n")
 	if strings.Contains(environ, "default-denied") || strings.Contains(environ, "custom-denied") {
 		t.Fatalf("custom policy disabled a deny rule: %s", environ)
 	}
 	if !strings.Contains(environ, "WINGMAN_TEST_VISIBLE=visible") {
 		t.Fatalf("custom policy removed an ordinary variable: %s", environ)
+	}
+	// Escalated commands keep the user's credentials but not the host's own denials.
+	escalated := strings.Join(environmentForTools(opts, true), "\n")
+	if !strings.Contains(escalated, "default-denied") || strings.Contains(escalated, "custom-denied") {
+		t.Fatalf("escalated environment: %s", escalated)
 	}
 }
 
@@ -85,10 +89,10 @@ func TestToolCommandTempOutsideSandbox(t *testing.T) {
 	t.Setenv(workspaceSandboxActiveEnv, "")
 	workspace, sessionTemp := t.TempDir(), t.TempDir()
 	for _, tc := range []struct {
-		name                     string
-		disabled, escalated, own bool
+		name                string
+		disabled, escalated bool
 	}{
-		{name: "sandbox disabled", disabled: true, own: true},
+		{name: "sandbox disabled", disabled: true},
 		{name: "escalated", escalated: true},
 	} {
 		cmd, err := buildToolCommand(t.Context(), "exit 0", workspace, workspace, &Options{
@@ -99,8 +103,8 @@ func TestToolCommandTempOutsideSandbox(t *testing.T) {
 		}
 		environ := "\n" + strings.Join(cmd.Env, "\n")
 		for _, key := range []string{"TMPDIR", "TEMP", "TMP"} {
-			if strings.Contains(environ, "\n"+key+"="+sessionTemp) != tc.own {
-				t.Errorf("%s: %s uses private temp = %t, want %t", tc.name, key, !tc.own, tc.own)
+			if !strings.Contains(environ, "\n"+key+"="+sessionTemp) {
+				t.Errorf("%s: %s does not use private temp", tc.name, key)
 			}
 		}
 	}

@@ -91,7 +91,9 @@ func validateWritableRoot(root string) error {
 	return nil
 }
 
-func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, workspace, workdir, mode, justification string, opts *Options) error {
+// confirmExecution approves one execution. denial, when set, quotes the failed
+// sandboxed run of the same command that this request retries.
+func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, workspace, workdir, mode, justification, denial string, opts *Options) error {
 	sandboxed := workspaceSandboxEnabled(opts) && mode != "require_escalated"
 	if mode == "use_default" && !IsDangerousCommand(command) {
 		return nil
@@ -129,6 +131,9 @@ func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, wo
 	if justification != "" {
 		text += "\nJustification: " + justification
 	}
+	if denial != "" {
+		text += "\nRe-runs the whole command; the sandbox blocked it: " + denial
+	}
 	// Review can take time. A changed symlink must not silently redirect a
 	// reviewed grant, workspace, or working directory before launch.
 	boundaries := map[string]string{}
@@ -137,10 +142,14 @@ func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, wo
 			boundaries[path] = canonicalPath(path)
 		}
 	}
+	action := map[string]any{"type": kind, "command": command, "workdir": workdir,
+		"workspace": workspace, "execution_policy": policy, "justification": justification}
+	if denial != "" {
+		action["sandbox_denial"] = denial
+	}
 	verdict, err := elicit.Approve(ctx, tool.Approval{
 		Message: "❯ " + approvalDisplayText(text),
-		Action: map[string]any{"type": kind, "command": command, "workdir": workdir,
-			"workspace": workspace, "execution_policy": policy, "justification": justification},
+		Action:  action,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get approval: %w", err)

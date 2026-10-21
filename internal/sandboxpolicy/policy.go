@@ -13,8 +13,10 @@ import (
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 )
 
-// Git metadata is protected as a whole, including worktree pointer files.
-var ProtectedDirs = []string{".git", ".vscode", ".idea", ".codex", ".wingman", ".agents", ".claude"}
+// Git metadata stays writable so commands can stage and commit. The sandbox
+// prevents accidents; it does not stop a hostile command from planting hooks
+// that the user's own Git runs later.
+var ProtectedDirs = []string{".vscode", ".idea", ".codex", ".wingman", ".agents", ".claude"}
 var ProtectedFiles = []string{".envrc"}
 var ProtectedRootFiles = []string{"mcp.json", ".mcp.json", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile"}
 

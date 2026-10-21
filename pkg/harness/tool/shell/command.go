@@ -27,7 +27,7 @@ func sandboxGuideLine(opts *Options) string {
 	if opts != nil && opts.Network {
 		network = "IP network access is enabled by host configuration"
 	}
-	protection := "Treat protected Git metadata, editor settings and agent configuration in project roots as read-only. Private temp permits configuration fixtures."
+	protection := "Editor settings and agent configuration in project roots are read-only inside the sandbox. Private temp permits configuration fixtures."
 	if runtime.GOOS != "darwin" {
 		protection += " OS enforcement covers only existing protected paths at project roots; do not bypass this restriction with newly created or nested paths."
 	}
@@ -40,19 +40,49 @@ func sandboxGuideLine(opts *Options) string {
 		"- Use private TMPDIR/TEMP/TMP for temporary files; do not assume /tmp is writable. Expand environment variables inside command using the host shell's syntax. In workdir and writable_roots, supply literal paths, not environment-variable references.",
 		"- Preserve inherited tool/cache configuration; many tools still read a cache they cannot write. Set GODEBUG=goindex=0 for Go commands so they read the host build cache without writing its package index. Only if a command still fails writing a disposable cache, redirect that cache to private temp for the command, e.g. " + cacheExample + "; likewise PIP_CACHE_DIR, UV_CACHE_DIR or GOCACHE/GOTMPDIR. Do not reset HOME, GOPATH, GOMODCACHE, CARGO_HOME or XDG_CACHE_HOME to repair one cache error.",
 		"- " + network + ". Use default permissions when configured access suffices. For required network access or writes outside listed roots, request require_permissions with the needed network/writable_roots and justification. Grants retain the sandbox and apply to the launched command, not later exec calls.",
-		"- Request require_escalated only when the required operation cannot run with scoped grants. It removes the local sandbox and private TMPDIR for the launched command, so pass staged files by absolute path; supply justification and omit network/writable_roots.",
+		"- Request require_escalated only when the required operation cannot run with scoped grants. It removes the local sandbox for the launched command; supply justification and omit network/writable_roots.",
+		"- Run commands that need host credentials, such as git push, with default permissions. When a command that finishes within the wait fails with a likely sandbox denial, the harness requests approval and re-runs the whole command once outside the sandbox; the result says so. Keep such commands out of long or non-repeatable command chains. Validation runs are not re-run.",
 	}, "\n")
 }
 
-// sandboxDenialHints follows Codex (plus the Windows spellings): output words that suggest the sandbox blocked a failed command.
-var sandboxDenialHints = []string{"operation not permitted", "permission denied", "read-only file system", "sandbox", "is denied"}
+// sandboxDenialHints are the OS errors of a blocked write or read, including the
+// Windows spelling, and ssh failing to read its hidden known hosts.
+var sandboxDenialHints = []string{"operation not permitted", "permission denied", "read-only file system", "is denied", "host key verification failed"}
 
-func looksLikeSandboxDenial(output string, err error) bool {
-	if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() <= 0 {
-		return false
+// offlineDenialHints are the name-resolution and routing failures of a sandbox without IP networking, such as git push.
+var offlineDenialHints = []string{"could not resolve host", "temporary failure in name resolution", "name or service not known", "nodename nor servname", "getaddrinfo", "network is unreachable", "no such host"}
+
+// sandboxLauncherPrefixes start the errors of a sandbox that failed to start;
+// the command never ran, so running it outside the sandbox is no remedy.
+var sandboxLauncherPrefixes = []string{"bwrap:", "sandbox-exec:", "wingman sandbox:"}
+
+// sandboxDenial returns the first output line suggesting the sandbox blocked a failed command, or "".
+func sandboxDenial(output string, err error, network bool) string {
+	// Like Codex, skip usage errors (2) and commands that cannot run or were not found (126, 127).
+	exitErr, ok := errors.AsType[*exec.ExitError](err)
+	if !ok || exitErr.ExitCode() <= 0 || slices.Contains([]int{2, 126, 127}, exitErr.ExitCode()) {
+		return ""
 	}
-	output = strings.ToLower(output)
-	return slices.ContainsFunc(sandboxDenialHints, func(hint string) bool { return strings.Contains(output, hint) })
+	for line := range strings.Lines(output) {
+		if slices.ContainsFunc(sandboxLauncherPrefixes, func(prefix string) bool { return strings.HasPrefix(line, prefix) }) {
+			return ""
+		}
+	}
+	hints := sandboxDenialHints
+	if !network {
+		hints = slices.Concat(sandboxDenialHints, offlineDenialHints)
+	}
+	for line := range strings.Lines(output) {
+		lower := strings.ToLower(line)
+		if slices.ContainsFunc(hints, func(hint string) bool { return strings.Contains(lower, hint) }) {
+			line = strings.TrimSpace(line)
+			if runes := []rune(line); len(runes) > 300 {
+				line = string(runes[:300]) + "…"
+			}
+			return line
+		}
+	}
+	return ""
 }
 
 func resolveWorkdir(workDir string, args map[string]any, opts *Options) (string, error) {
@@ -99,8 +129,8 @@ func ToolCommand(ctx context.Context, command, workspaceDir, workingDir string, 
 	return buildToolCommand(ctx, command, workspaceDir, workingDir, opts, false)
 }
 
-func ensurePrivateTemp(opts *Options, escalated bool) error {
-	if opts == nil || opts.TempDir == "" || escalated {
+func ensurePrivateTemp(opts *Options) error {
+	if opts == nil || opts.TempDir == "" {
 		return nil
 	}
 	// An earlier command may have removed private temp or replaced it with a link, whose target the sandbox would grant.
@@ -116,7 +146,7 @@ func ensurePrivateTemp(opts *Options, escalated bool) error {
 }
 
 func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir string, opts *Options, escalated bool) (*exec.Cmd, error) {
-	if err := ensurePrivateTemp(opts, escalated); err != nil {
+	if err := ensurePrivateTemp(opts); err != nil {
 		return nil, err
 	}
 	var sandbox *sandboxOptions
@@ -138,9 +168,8 @@ func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir str
 			context.AfterFunc(ctx, func() { _ = os.RemoveAll(dir) })
 		}
 	}
-	environment := environmentForTools(opts)
-	if sandbox == nil && !escalated && opts != nil {
-		// Escalated runs keep the host temp: sandboxed commands can write private temp.
+	environment := environmentForTools(opts, escalated)
+	if sandbox == nil && opts != nil {
 		environment = environmentWithTemp(environment, opts.TempDir)
 	}
 	return buildCommandWithEnvironment(ctx, command, workingDir, environment, sandbox)

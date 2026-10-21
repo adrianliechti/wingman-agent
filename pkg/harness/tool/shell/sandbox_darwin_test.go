@@ -116,7 +116,7 @@ func shellTestQuote(value string) string {
 func TestSeatbeltProfileProtectsConfigAndCredentials(t *testing.T) {
 	workspace := canonicalPath(t.TempDir())
 	secrets := canonicalPath(t.TempDir())
-	for _, dir := range []string{".git/hooks", "sub/.git/hooks"} {
+	for _, dir := range []string{".git/hooks", ".claude"} {
 		if err := os.MkdirAll(filepath.Join(workspace, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -135,9 +135,9 @@ func TestSeatbeltProfileProtectsConfigAndCredentials(t *testing.T) {
 
 	profile, definitions := seatbeltProfile(sandboxPolicy{WritableRoots: []string{workspace}, ProtectedRoot: workspace, DenyRead: []string{secrets}})
 	checks := []string{
-		"touch ok.txt", "! touch .git/ORIG_HEAD",
-		"! touch .git/hooks/pre-commit", "! touch sub/.git/hooks/pre-commit", "! sh -c 'echo x >> .git/config'",
-		"! mkdir .vscode", "! touch mcp.json", "! mv .git moved", "! cat " + shellTestQuote(filepath.Join(secrets, "key")),
+		"touch ok.txt", "touch .git/ORIG_HEAD", "sh -c 'echo x >> .git/config'", "mv .git moved", "mv moved .git",
+		"! touch .claude/settings.json", "! mkdir -p sub/.claude", "! mv .claude moved-claude",
+		"! mkdir .vscode", "! touch mcp.json", "! cat " + shellTestQuote(filepath.Join(secrets, "key")),
 		"! touch agent-config/bypass",
 		"! mkdir .CoDeX", "! touch .EnVrC", "! touch .mCp.JsOn",
 	}
