@@ -4,13 +4,13 @@ Backlog from comparing against Claude Code 2.1.302 (CC), Codex 0.163 / app (Code
 Antigravity App 2.24 / CLI 1.4 (AG), plus VS Code and Cursor for the editor.
 Last refreshed 2026-10-17.
 
-Unmerged branches: `feature/sandbox`, `feature/browser`, `feature/remote` (80–90 commits behind `main`).
+Unmerged branch: `feature/browser` (90 commits behind `main`).
 
 ## Next
 
 1. **Auto-review follow-ups** — read-only investigation tools for the reviewer (inspect an `rm` target, git remotes); `/approve` one retry of a recent denial; reviewer status in the UI (Codex).
 2. **Permission rules** — declarative allow/ask/deny with `tool(pattern)`, deny > ask > allow; grants double as sandbox config (AG).
-3. **OS sandbox** — revive `feature/sandbox` and its escalation path: commands run sandboxed, only blocked ones go to the reviewer; then plan mode and read-only subagents use a read-only sandbox and the shell classifier shrinks to Codex size (all three).
+3. **Sandbox follow-ups** — plan mode and read-only subagents use a read-only sandbox; the shell classifier shrinks to Codex size (all three).
 4. **Worktree isolation** — per subagent and per session, `.worktreeinclude`, merge-back (all three).
 5. **`/goal`** — persisted objective, independent evaluator decides "done", token/time budget (all three).
 6. **Session ergonomics** — edit-earlier-message-and-fork, `/btw` side question, rename + content search (all three).
@@ -53,7 +53,7 @@ Unmerged branches: `feature/sandbox`, `feature/browser`, `feature/remote` (80–
 
 ## Platform
 
-- **Remote** — revive `feature/remote` (SSH); WSL and devcontainers.
+- **Remote** — SSH workspaces in the launcher; WSL and devcontainers.
 - **Notifications** — push "done / needs input" over the relay (AG, CC).
 - **Marketplace UI** — install plugins and MCP servers from the web UI; plugin-provided side panels (AG UI Extensions).
 - **Triggers** — GitHub, Slack, webhook-started runs (CC, Codex).

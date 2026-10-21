@@ -29,9 +29,9 @@ func TestAdversarialReadOnlyRules(t *testing.T) {
 
 func TestAdversarialCommandsRequireReview(t *testing.T) {
 	for _, command := range []string{
-		`echo payload > .git/config`, `echo payload > sub/.agents/agent.md`,
+		`echo payload > .vscode/tasks.json`, `echo payload > sub/.agents/agent.md`,
 		`tee .vscode/settings.json`, `touch .envrc`, `mkdir .claude`,
-		`cp payload .git/hooks/pre-commit`, `cp -t .git/hooks payload`,
+		`cp payload .claude/settings.json`, `cp -t .claude payload`,
 		`mv .agents ordinary`, `rm .envrc`,
 		`echo payload > .bashrc`, `tee /etc/profile`, `touch .zshrc`,
 		`mkdir /etc/fixture`, `cp payload ~/.config/git/config`,
@@ -42,7 +42,7 @@ func TestAdversarialCommandsRequireReview(t *testing.T) {
 		`git -cfoo.bar=baz status`, `rm --rec fixture`,
 		`command env BASH_ENV=./startup bash -c ':'`,
 		`nice env GIT_SSH_COMMAND=./helper git ls-remote origin`,
-		`fd pattern -xrm -rf fixture`, `cat <> .git/config`, `cat <> .bashrc`,
+		`fd pattern -xrm -rf fixture`, `cat <> .vscode/tasks.json`, `cat <> .bashrc`,
 		`cat < ~/.ssh/id_ed25519`,
 		`find . -exec rm {} +`, `find . -type f -exec rm -f {} +`, `find . -execdir rm {} \;`,
 		`find . -ok /bin/unlink {} \;`, `find . -okdir command rm {} \;`,

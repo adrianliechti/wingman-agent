@@ -60,8 +60,13 @@ func DefaultEnvironmentPolicy() EnvironmentPolicy {
 	return EnvironmentPolicy{Deny: append([]string(nil), defaultDeniedEnvironment...)}
 }
 
-func environmentForTools(opts *Options) []string {
+// environmentForTools filters the host environment. Escalated commands run with
+// the user's privileges, so they keep the credentials the default policy removes.
+func environmentForTools(opts *Options, escalated bool) []string {
 	policy := DefaultEnvironmentPolicy()
+	if escalated {
+		policy.Deny = nil
+	}
 	for pattern := range strings.SplitSeq(os.Getenv("WINGMAN_ENV_ALLOW"), ",") {
 		if pattern = strings.TrimSpace(pattern); pattern != "" {
 			policy.Allow = append(policy.Allow, pattern)

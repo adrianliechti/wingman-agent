@@ -3,9 +3,11 @@ package shell
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os/exec"
 	"runtime"
@@ -17,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
@@ -239,6 +242,7 @@ func (m *ExecManager) notifyExit(s *execSession) {
 type execSession struct {
 	id          int
 	sandboxed   bool
+	network     bool
 	validation  bool
 	command     string
 	workdir     string
@@ -610,9 +614,8 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	if err != nil {
 		return tool.Result{}, err
 	}
-	sandboxed := workspaceSandboxEnabled(opts)
-	escalated := sandboxed && permissionMode == "require_escalated"
-	if err := ensurePrivateTemp(opts, escalated); err != nil {
+	escalated := permissionMode == "require_escalated"
+	if err := ensurePrivateTemp(opts); err != nil {
 		return tool.Result{}, err
 	}
 	dir, err := resolveWorkdir(workDir, args, opts)
@@ -621,7 +624,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	}
 
 	justification, _ := args["justification"].(string)
-	err = confirmExecution(ctx, elicit, command, workDir, dir, permissionMode, justification, opts)
+	err = confirmExecution(ctx, elicit, command, workDir, dir, permissionMode, justification, "", opts)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -633,31 +636,104 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	if runtime.GOOS == "windows" {
 		tty = false
 	}
+	description, _ := args["description"].(string)
+	validation, _ := args["validation"].(bool)
 
+	run := execRun{
+		command:     command,
+		description: strings.TrimSpace(description),
+		dir:         dir,
+		opts:        opts,
+		escalated:   escalated,
+		tty:         tty,
+		validation:  validation,
+		wait:        wait,
+		timeout:     timeout,
+	}
+	result, denial, err := startExec(ctx, m, workDir, run)
+	if err != nil || denial == "" {
+		return result, err
+	}
+	// Test and build output often quotes denials of its own; a check is not re-run.
+	if validation {
+		result.Content += "\n" + sandboxDenialNotice
+		return result, nil
+	}
+	return retryOutsideSandbox(ctx, m, elicit, workDir, run, args, result, denial)
+}
+
+// execRun is one launch of an exec command.
+type execRun struct {
+	command     string
+	description string
+	dir         string
+	opts        *Options
+	escalated   bool
+	tty         bool
+	validation  bool
+	wait        int
+	timeout     int
+}
+
+// retryOutsideSandbox re-runs a command whose sandboxed run failed with a likely
+// sandbox denial, once running it outside the sandbox is approved.
+func retryOutsideSandbox(ctx context.Context, m *ExecManager, elicit *tool.Elicitation, workDir string, run execRun, args map[string]any, denied tool.Result, denial string) (tool.Result, error) {
+	// Permission hooks and the reviewer see the call as it now runs.
+	escalatedArgs := maps.Clone(args)
+	escalatedArgs["sandbox_permissions"] = "require_escalated"
+	delete(escalatedArgs, "network")
+	delete(escalatedArgs, "writable_roots")
+	if call, ok := hook.ToolCallFromContext(ctx); ok {
+		if raw, err := json.Marshal(escalatedArgs); err == nil {
+			call.Args = string(raw)
+			ctx = hook.WithToolCall(ctx, call)
+		}
+	}
+	justification, _ := args["justification"].(string)
+	err := confirmExecution(ctx, elicit, run.command, workDir, run.dir, "require_escalated", justification, denial, run.opts)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return tool.Result{}, ctxErr
+	}
+	if err != nil {
+		denied.Content += "\n" + sandboxDenialNotice + "\nRunning it outside the sandbox was not approved: " + err.Error()
+		return denied, nil
+	}
+	run.escalated = true
+	result, _, err := startExec(ctx, m, workDir, run)
+	if err != nil {
+		return tool.Result{}, err
+	}
+	result.Content += "\nThe sandbox blocked the first run (" + denial + "); this result is from re-running the command outside the sandbox after approval."
+	return result, nil
+}
+
+// startExec launches run and waits until it exits or moves to the background.
+// denial quotes the output of a sandboxed run that exited with a likely sandbox
+// denial; the result does not explain it yet.
+func startExec(ctx context.Context, m *ExecManager, workDir string, run execRun) (tool.Result, string, error) {
+	opts, escalated := run.opts, run.escalated
 	sctx, cancel := context.WithCancel(context.Background())
 
-	cmd, err := buildToolCommand(sctx, command, workDir, dir, opts, escalated)
+	cmd, err := buildToolCommand(sctx, run.command, workDir, run.dir, opts, escalated)
 	if err != nil {
 		cancel()
-		return tool.Result{}, err
+		return tool.Result{}, "", err
 	}
 	cmd.Env = setEnvironment(cmd.Env, "NO_COLOR", "1")
 	for _, key := range []string{"PAGER", "GIT_PAGER", "GH_PAGER"} {
 		cmd.Env = setEnvironment(cmd.Env, key, "cat")
 	}
 
-	description, _ := args["description"].(string)
-	validation, _ := args["validation"].(bool)
-
 	s := &execSession{
-		sandboxed:   sandboxed && !escalated,
-		validation:  validation,
-		command:     command,
-		workdir:     dir,
-		description: strings.TrimSpace(description),
+		sandboxed:   workspaceSandboxEnabled(opts) && !escalated,
+		network:     opts != nil && opts.Network,
+		validation:  run.validation,
+		command:     run.command,
+		workdir:     run.dir,
+		description: run.description,
 		started:     time.Now(),
-		tty:         tty,
-		timeout:     timeout,
+		tty:         run.tty,
+		timeout:     run.timeout,
 		cancel:      cancel,
 		interrupt:   func() error { return interruptProcessGroup(cmd) },
 		done:        make(chan struct{}),
@@ -666,7 +742,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	// execute a command, and Close must be able to cancel a concurrent launch.
 	id, err := m.add(s)
 	if err != nil {
-		return tool.Result{}, err
+		return tool.Result{}, "", err
 	}
 	started := false
 	defer func() {
@@ -676,11 +752,11 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		}
 	}()
 
-	if tty {
+	if run.tty {
 		master, err := startTTY(cmd)
 		if err != nil {
 			cancel()
-			return tool.Result{}, fmt.Errorf("failed to start command: %w", err)
+			return tool.Result{}, "", fmt.Errorf("failed to start command: %w", err)
 		}
 		s.stdin = master
 
@@ -692,7 +768,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		go func() {
 			defer cancel()
 			err := cmd.Wait()
-			_ = ensurePrivateTemp(opts, escalated)
+			_ = ensurePrivateTemp(opts)
 			exitedAt := time.Now()
 			select {
 			case <-copyDone:
@@ -708,7 +784,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		stdin, err := cmd.StdinPipe()
 		if err != nil {
 			cancel()
-			return tool.Result{}, err
+			return tool.Result{}, "", err
 		}
 		s.stdin = stdin
 		cmd.Stdout = s
@@ -716,13 +792,13 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 
 		if err := cmd.Start(); err != nil {
 			cancel()
-			return tool.Result{}, fmt.Errorf("failed to start command: %w", err)
+			return tool.Result{}, "", fmt.Errorf("failed to start command: %w", err)
 		}
 
 		go func() {
 			defer cancel()
 			s.exitErr = cmd.Wait()
-			_ = ensurePrivateTemp(opts, escalated)
+			_ = ensurePrivateTemp(opts)
 			s.exitedAt = time.Now()
 			close(s.done)
 			m.notifyExit(s)
@@ -730,9 +806,9 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	}
 	started = true
 
-	if timeout > 0 {
+	if run.timeout > 0 {
 		go func() {
-			t := time.NewTimer(time.Duration(timeout) * time.Second)
+			t := time.NewTimer(time.Duration(run.timeout) * time.Second)
 			defer t.Stop()
 			select {
 			case <-s.done:
@@ -745,7 +821,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		}()
 	}
 
-	timer := time.NewTimer(time.Duration(wait) * time.Second)
+	timer := time.NewTimer(time.Duration(run.wait) * time.Second)
 	defer timer.Stop()
 
 	grace := execIdleGrace
@@ -764,7 +840,8 @@ waiting:
 		select {
 		case <-s.done:
 			m.remove(id)
-			return completedSessionResult(s), nil
+			result, denial := completedRun(s)
+			return result, denial, nil
 		case <-timer.C:
 			break waiting
 		case <-ctx.Done():
@@ -779,7 +856,8 @@ waiting:
 
 	if s.exited() {
 		m.remove(id)
-		return completedSessionResult(s), nil
+		result, denial := completedRun(s)
+		return result, denial, nil
 	}
 
 	output := s.drain()
@@ -789,7 +867,7 @@ waiting:
 	if idled {
 		notice = fmt.Sprintf("Started and idle (no new output for %s), running with session_id %d — use exec_session to poll output, send input, or kill it", grace, id)
 	}
-	return s.result(sessionResult(output, notice)), nil
+	return s.result(sessionResult(output, notice)), "", nil
 }
 
 func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicitation, args map[string]any) (tool.Result, error) {
@@ -1052,16 +1130,28 @@ func (s *execSession) result(content string) tool.Result {
 	}
 }
 
+const sandboxDenialNotice = "Possible sandbox denial; this output alone does not establish the cause. For an unwritable disposable cache or temp path, redirect only that path to private temp as described in exec. Do not bypass approval denials."
+
 func completedSessionResult(s *execSession) tool.Result {
+	result, denial := completedRun(s)
+	if denial != "" {
+		result.Content += "\n" + sandboxDenialNotice
+	}
+	return result
+}
+
+// completedRun reports an exited session and the output line suggesting the sandbox blocked it, if any.
+func completedRun(s *execSession) (tool.Result, string) {
 	duration := s.exitedAt.Sub(s.started)
 	if s.exitedAt.IsZero() {
 		duration = time.Since(s.started)
 	}
-	output, notice := s.drain(), s.exitNotice()
-	if s.sandboxed && looksLikeSandboxDenial(output, s.exitErr) {
-		notice += "\nPossible sandbox denial; this output alone does not establish the cause. Identify the failed path or operation before retrying. For an unwritable disposable cache or temp path, redirect only that path to private temp as described in exec. If required access exceeds the configured sandbox, request require_permissions with justification and the needed network=true and/or writable_roots. Use require_escalated with justification only if scoped grants cannot support the operation; omit network and writable_roots. Do not bypass approval denials."
+	output := s.drain()
+	denial := ""
+	if s.sandboxed {
+		denial = sandboxDenial(output, s.exitErr, s.network)
 	}
-	result := s.result(sessionResult(output, notice))
+	result := s.result(sessionResult(output, s.exitNotice()))
 	result.IsError = s.exitErr != nil
 	result.Metadata["duration_ms"] = duration.Milliseconds()
 	if exitErr, ok := errors.AsType[*exec.ExitError](s.exitErr); ok {
@@ -1069,7 +1159,7 @@ func completedSessionResult(s *execSession) tool.Result {
 	} else if s.exitErr == nil {
 		result.Metadata["exit_code"] = 0
 	}
-	return result
+	return result, denial
 }
 
 func classifyExecSession(args map[string]any) tool.Effect {

@@ -62,14 +62,12 @@ wingman
 ```
 
 Try asking: “Explain how this project works”, “Fix the failing tests”, or
-“Add input validation to the signup form”. Risky actions are reviewed automatically before they run.
+“Add input validation to the signup form”. Risky actions are reviewed automatically before they run; you decide what the reviewer declines.
 Use Plan mode to explore an approach before making changes.
 
 The built-in agent runs shell commands in a sandbox with writes limited to the
 workspace, project memory, and private session temporary storage. `TMPDIR`,
-`TEMP`, and `TMP` point to that private directory. Approved escalated commands
-use the host temporary directory instead, so sandboxed commands cannot plant
-files that unsandboxed tools pick up. Tool cache settings are inherited,
+`TEMP`, and `TMP` point to that private directory. Tool cache settings are inherited,
 including configuration in `go env -w` and `.npmrc`. Go reads the host build
 cache it cannot write when run with `GODEBUG=goindex=0`. The model receives the
 actual writable roots and network policy, and redirects a cache into private

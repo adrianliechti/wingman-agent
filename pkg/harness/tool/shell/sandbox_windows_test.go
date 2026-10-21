@@ -419,6 +419,7 @@ func TestWindowsSandboxEnforcesPolicy(t *testing.T) {
 		"NUL":                 `cmd /c "echo hi> NUL"; if ($LASTEXITCODE) { exit 1 }`,
 		"delete own file":     `Set-Content gone.txt x; Remove-Item gone.txt`,
 		"git config readable": `Get-Content .git\config`,
+		"git metadata write":  `Add-Content .git\config x; Set-Content .git\hooks\x changed; Rename-Item .git moved-git; Rename-Item moved-git .git`,
 		"private temp env":    `if ($env:TEMP -ne $env:TMP -or $env:WINGMAN_SANDBOX_ACTIVE -ne '1') { Write-Output "TEMP=$env:TEMP TMP=$env:TMP ACTIVE=$env:WINGMAN_SANDBOX_ACTIVE"; exit 1 }`,
 	}
 	for name, command := range allowed {
@@ -430,14 +431,11 @@ func TestWindowsSandboxEnforcesPolicy(t *testing.T) {
 		"write outside":      `Set-Content '` + filepath.Join(outside, "escape.txt") + `' x`,
 		"write home":         `Set-Content '` + filepath.Join(home, "escape.txt") + `' x`,
 		"read credentials":   `Get-Content '` + filepath.Join(home, ".ssh", "id_ed25519") + `'`,
-		"edit git config":    `Add-Content .git\config x`,
-		"replace git config": `Set-Content .git\config.new x; Move-Item -Force .git\config.new .git\config`,
-		"add git hook":       `Set-Content .git\hooks\pre-commit x`,
 		"edit vscode":        `Set-Content .vscode\a.json x`,
-		"rename git":         `Rename-Item .git moved`,
+		"replace vscode":     `Set-Content a.json.new x; Move-Item -Force a.json.new .vscode\a.json`,
 		"rename vscode":      `Rename-Item .vscode moved-vscode`,
 		"rename workspace":   `Rename-Item -LiteralPath '` + workspace + `' -NewName moved-workspace`,
-		"remove config deny": `$acl = Get-Acl .git\config; $acl.SetAccessRuleProtection($true, $false); $acl.Access | ForEach-Object { [void]$acl.RemoveAccessRuleSpecific($_) }; $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('Everyone', 'FullControl', 'Allow')); Set-Acl .git\config $acl; Add-Content .git\config x`,
+		"remove config deny": `$acl = Get-Acl .vscode\a.json; $acl.SetAccessRuleProtection($true, $false); $acl.Access | ForEach-Object { [void]$acl.RemoveAccessRuleSpecific($_) }; $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('Everyone', 'FullControl', 'Allow')); Set-Acl .vscode\a.json $acl; Add-Content .vscode\a.json x`,
 	}
 	for name, command := range denied {
 		if out, ok := run(command + `; if (-not $?) { exit 1 }`); ok {
@@ -452,8 +450,8 @@ func TestWindowsSandboxEnforcesPolicy(t *testing.T) {
 			t.Errorf("%s was written", path)
 		}
 	}
-	if data, _ := os.ReadFile(filepath.Join(workspace, ".git", "config")); string(data) != "[core]" {
-		t.Errorf(".git/config changed: %q", data)
+	if data, _ := os.ReadFile(filepath.Join(workspace, ".vscode", "a.json")); string(data) != "{}" {
+		t.Errorf(".vscode/a.json changed: %q", data)
 	}
 }
 
@@ -541,27 +539,6 @@ func warmWindowsSandbox(t *testing.T, workspace string) {
 		t.Fatalf("cold sandbox startup: %v %s", err, out)
 	}
 	t.Logf("cold sandbox startup took %s", time.Since(started))
-}
-
-func TestWindowsSandboxProtectsWorktreeGitFile(t *testing.T) {
-	sandboxTestHome(t)
-	workspace := t.TempDir()
-	gitFile := filepath.Join(workspace, ".git")
-	content := "gitdir: ../main/.git/worktrees/feature\n"
-	if err := os.WriteFile(gitFile, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cmd, err := buildCommandWithEnvironment(t.Context(), `Set-Content .git 'gitdir: malicious'; if (-not $?) { exit 1 }`, workspace, os.Environ(), &sandboxOptions{WorkspaceDir: workspace})
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Errorf("worktree .git file was writable: %s", out)
-	}
-	if data, err := os.ReadFile(gitFile); err != nil || string(data) != content {
-		t.Errorf("worktree .git changed: %q, %v", data, err)
-	}
 }
 
 func TestWindowsSandboxReadsGitWorktree(t *testing.T) {

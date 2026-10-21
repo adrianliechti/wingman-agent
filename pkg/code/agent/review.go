@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -19,7 +20,8 @@ const (
 	reviewArgumentBytes      = 8 * 1024
 )
 
-// review decides approvals: permission hooks, then the reviewer; the user only when review fails.
+// review decides approvals: permission hooks, then the reviewer; the user when
+// review fails, or declines in a foreground turn.
 func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, error) {
 	ctx = a.promptContext(ctx)
 	s := a.session(code.SessionIDFromContext(ctx))
@@ -64,7 +66,24 @@ func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, er
 		s.reviews.record(turn, false)
 		return tool.Verdict{Allowed: true}, nil
 	}
+	// The reviewer only approves on the user's behalf; in a foreground turn, what
+	// it declines is the user's call. Background work and schedule gates would wait
+	// for an answer nobody is there to give.
+	ask := turn != "" && tool.BackgroundOrigin(ctx) == "" && a.currentUI() != nil
+	if ask {
+		ok, err := a.confirm(ctx, fmt.Sprintf("%s\n\nAutomatic review declined (risk: %s): %s", req.Message, review.RiskLevel, strings.TrimSpace(review.Rationale)))
+		if err != nil {
+			return tool.Verdict{}, err
+		}
+		if ok {
+			s.reviews.record(turn, false)
+			return tool.Verdict{Allowed: true}, nil
+		}
+	}
 	reason := review.Rejection()
+	if ask {
+		reason += "\nThe user also declined it when asked."
+	}
 	if consecutive, recent, tripped := s.reviews.record(turn, true); tripped {
 		reason += fmt.Sprintf("\nAutomatic review rejected too many actions this turn (%d consecutive, %d in the last %d); the turn was interrupted.", consecutive, recent, reviewRecentWindow)
 		if origin := tool.BackgroundOrigin(ctx); origin != "" && s.resources.tasks != nil {

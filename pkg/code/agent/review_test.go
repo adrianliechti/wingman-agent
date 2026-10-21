@@ -78,8 +78,9 @@ func newReviewSession(t *testing.T, verdict string) (*Agent, *reviewUI, context.
 	return a, ui, code.WithSessionID(t.Context(), id), &inputs
 }
 
-func TestReviewDeniesWithoutAskingAndTripsBreaker(t *testing.T) {
+func TestReviewAsksUserAndTripsBreakerOnDeclines(t *testing.T) {
 	a, ui, sessionCtx, inputs := newReviewSession(t, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"Deletes the home directory."}`)
+	ui.decline = true
 	approval := tool.Approval{Message: "❯ rm -rf ~", Action: map[string]any{"type": "shell_command", "text": "rm -rf ~"}}
 	for range reviewConsecutiveDenials {
 		if verdict, err := a.review(sessionCtx, approval); err != nil || strings.Contains(verdict.Reason, "turn was interrupted") {
@@ -100,8 +101,8 @@ func TestReviewDeniesWithoutAskingAndTripsBreaker(t *testing.T) {
 	if !strings.Contains(verdict.Reason, "turn was interrupted") {
 		t.Fatalf("breaker did not trip: %q", verdict.Reason)
 	}
-	if len(ui.confirms) != 0 {
-		t.Fatalf("user was asked: %v", ui.confirms)
+	if len(ui.confirms) != reviewConsecutiveDenials || !strings.Contains(ui.confirms[0], "Automatic review declined (risk: high): Deletes the home directory.") {
+		t.Fatalf("confirms = %v", ui.confirms)
 	}
 	// The planned action is JSON-encoded, so Windows path separators are escaped.
 	workspace, _ := json.Marshal(a.workspace.RootPath)
@@ -195,7 +196,7 @@ func TestReviewDeniesModelAllowsThatViolateTheOutcomeTable(t *testing.T) {
 			t.Errorf("%s: verdict = %+v, %v", verdict, got, err)
 		}
 		if len(ui.confirms) != 0 {
-			t.Errorf("%s: user was asked: %v", verdict, ui.confirms)
+			t.Errorf("%s: user was asked outside a turn: %v", verdict, ui.confirms)
 		}
 	}
 }
@@ -341,7 +342,38 @@ func TestSandboxedExecSendsExecutionPolicyToReviewerAndHonoursDenial(t *testing.
 		t.Fatal("denied escalation ran")
 	}
 	if len(ui.confirms) != 0 {
-		t.Fatalf("user was asked: %v", ui.confirms)
+		t.Fatalf("user was asked outside a turn: %v", ui.confirms)
+	}
+}
+
+// In a foreground turn the user decides what the reviewer declines, critical
+// risk included; their approvals do not count toward the breaker. Background
+// tasks are not asked.
+func TestReviewAsksUserBeforeDenying(t *testing.T) {
+	for _, verdict := range []string{
+		`{"risk_level":"high","user_authorization":"low","outcome":"deny","rationale":"Pushes to a remote."}`,
+		`{"risk_level":"critical","user_authorization":"unknown","outcome":"deny","rationale":"Pushes to a remote."}`,
+	} {
+		a, ui, sessionCtx, _ := newReviewSession(t, verdict)
+		approval := tool.Approval{Message: "❯ git push  [outside the sandbox]", Action: map[string]any{"type": "sandbox_escalation"}}
+		ctx := hook.WithRuntime(sessionCtx, hook.Runtime{TurnID: "turn-1"})
+		for i := range reviewConsecutiveDenials + 1 {
+			if got, err := a.review(ctx, approval); err != nil || !got.Allowed {
+				t.Fatalf("%s: user-approved action %d = %+v, %v", verdict, i, got, err)
+			}
+		}
+		if len(ui.confirms) != reviewConsecutiveDenials+1 || !strings.Contains(ui.confirms[0], "Pushes to a remote.") {
+			t.Fatalf("%s: confirms = %v", verdict, ui.confirms)
+		}
+		ui.decline = true
+		if got, err := a.review(ctx, approval); err != nil || got.Allowed || !strings.Contains(got.Reason, "Pushes to a remote.") || !strings.Contains(got.Reason, "The user also declined it") {
+			t.Fatalf("%s: user-declined action = %+v, %v", verdict, got, err)
+		}
+		asked := len(ui.confirms)
+		background := tool.WithBackgroundOrigin(ctx, "task-1")
+		if got, err := a.review(background, approval); err != nil || got.Allowed || strings.Contains(got.Reason, "The user also declined it") || len(ui.confirms) != asked {
+			t.Fatalf("%s: background action = %+v, %v; confirms %v", verdict, got, err, ui.confirms)
+		}
 	}
 }
 

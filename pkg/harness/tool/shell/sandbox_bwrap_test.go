@@ -83,8 +83,10 @@ func TestBubblewrapArgsProtectConfigHideCredentialsAndCutNetwork(t *testing.T) {
 	workspace := t.TempDir()
 	secrets := t.TempDir()
 	netrc := filepath.Join(t.TempDir(), ".netrc")
-	if err := os.MkdirAll(filepath.Join(workspace, ".git", "hooks"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, dir := range []string{".claude", ".git"} {
+		if err := os.MkdirAll(filepath.Join(workspace, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(netrc, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -94,10 +96,10 @@ func TestBubblewrapArgsProtectConfigHideCredentialsAndCutNetwork(t *testing.T) {
 		ProtectedRoot: workspace,
 		DenyRead:      []string{secrets, netrc},
 	})
-	hooks := filepath.Join(workspace, ".git")
+	claude := filepath.Join(workspace, ".claude")
 	for _, sequence := range [][]string{
 		{"--unshare-net"},
-		{"--ro-bind", hooks, hooks},
+		{"--ro-bind", claude, claude},
 		{"--tmpfs", secrets},
 		{"--ro-bind", "/dev/null", netrc},
 	} {
@@ -105,7 +107,7 @@ func TestBubblewrapArgsProtectConfigHideCredentialsAndCutNetwork(t *testing.T) {
 			t.Errorf("args do not contain %q: %q", sequence, args)
 		}
 	}
-	if slices.Contains(args, filepath.Join(workspace, ".vscode")) {
-		t.Fatalf("missing protected path was mounted: %q", args)
+	if slices.Contains(args, filepath.Join(workspace, ".vscode")) || slices.Contains(args, filepath.Join(workspace, ".git")) {
+		t.Fatalf("missing protected path or Git metadata was mounted: %q", args)
 	}
 }

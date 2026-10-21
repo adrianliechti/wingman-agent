@@ -8,7 +8,7 @@ import (
 )
 
 func TestEditRejectsProtectedPathsBeforeWritingBatch(t *testing.T) {
-	for _, protected := range []string{".git/config", ".git", "sub/.git/config", ".agents/new.md", ".vscode/settings.json", "mcp.json", ".envrc"} {
+	for _, protected := range []string{".vscode/settings.json", ".vscode", "sub/.vscode/settings.json", ".agents/new.md", "mcp.json", ".envrc"} {
 		t.Run(protected, func(t *testing.T) {
 			dir := t.TempDir()
 			root, err := os.OpenRoot(dir)
@@ -33,7 +33,7 @@ func TestEditRejectsProtectedPathsBeforeWritingBatch(t *testing.T) {
 func TestEditRejectsProtectedPathThroughSymlink(t *testing.T) {
 	for _, reverse := range []bool{false, true} {
 		dir := t.TempDir()
-		target, alias := ".git", "alias"
+		target, alias := ".vscode", "alias"
 		if reverse {
 			target, alias = alias, target
 		}
@@ -47,7 +47,7 @@ func TestEditRejectsProtectedPathThroughSymlink(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		args := map[string]any{"edits": []any{map[string]any{"file_path": "alias/config", "old_string": "", "new_string": "payload"}}}
+		args := map[string]any{"edits": []any{map[string]any{"file_path": "alias/settings.json", "old_string": "", "new_string": "payload"}}}
 		_, err = EditTool(root).Execute(t.Context(), args)
 		root.Close()
 		if err == nil || !strings.Contains(err.Error(), "protected") {
@@ -62,7 +62,7 @@ func TestEditStillRejectsProtectedFileWhenShellSandboxDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	_, err = EditTool(root).Execute(t.Context(), map[string]any{"edits": []any{map[string]any{"file_path": ".git/config", "old_string": "", "new_string": "fixture"}}})
+	_, err = EditTool(root).Execute(t.Context(), map[string]any{"edits": []any{map[string]any{"file_path": ".vscode/settings.json", "old_string": "", "new_string": "fixture"}}})
 	if err == nil || !strings.Contains(err.Error(), "protected") {
 		t.Fatalf("edit = %v", err)
 	}

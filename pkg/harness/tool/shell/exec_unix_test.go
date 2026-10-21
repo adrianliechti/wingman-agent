@@ -559,3 +559,27 @@ func TestExecRecreatesRemovedPrivateTempForSubsequentWorkdir(t *testing.T) {
 		t.Fatalf("subsequent workdir in private temp: %v %s", err, res.Content)
 	}
 }
+
+// Escalated runs keep the session's private temp, so staged files stay reachable.
+func TestExecEscalationKeepsPrivateTemp(t *testing.T) {
+	t.Setenv(workspaceSandboxActiveEnv, "")
+	privateTemp := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(privateTemp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(privateTemp, "staged"), []byte("staged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	elicit := &tool.Elicitation{Review: func(context.Context, tool.Approval) (tool.Verdict, error) {
+		return tool.Verdict{Allowed: true}, nil
+	}}
+	m := NewExecManager(nil)
+	defer m.Close()
+	result, err := executeExecCommand(t.Context(), m, t.TempDir(), elicit, &Options{TempDir: privateTemp}, map[string]any{
+		"command": `cat "$TMPDIR/staged"`, "wait": 10,
+		"sandbox_permissions": "require_escalated", "justification": "read a staged file",
+	})
+	if err != nil || result.IsError || !strings.Contains(result.Content, "staged") {
+		t.Fatalf("escalated run lost private temp: %+v, %v", result, err)
+	}
+}
