@@ -217,6 +217,11 @@ func (p *process) writeLineContext(ctx context.Context, v any) error {
 }
 
 func (p *process) request(ctx context.Context, cmd map[string]any) (rpcResponse, error) {
+	return p.requestWithin(ctx, cmd, 0)
+}
+
+// requestWithin bounds only the reply wait, since abandoning a write retires the transport.
+func (p *process) requestWithin(ctx context.Context, cmd map[string]any, wait time.Duration) (rpcResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return rpcResponse{}, err
 	}
@@ -233,6 +238,12 @@ func (p *process) request(ctx context.Context, cmd map[string]any) (rpcResponse,
 		delete(p.pending, id)
 		p.mu.Unlock()
 		return rpcResponse{}, err
+	}
+
+	if wait > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wait)
+		defer cancel()
 	}
 
 	select {
@@ -286,6 +297,16 @@ func (p *process) setModel(ctx context.Context, provider, modelID string) error 
 func (p *process) setThinkingLevel(ctx context.Context, level string) error {
 	_, err := p.request(ctx, map[string]any{"type": "set_thinking_level", "level": level})
 	return err
+}
+
+func (p *process) setSessionName(ctx context.Context, name string) error {
+	_, err := p.request(ctx, map[string]any{"type": "set_session_name", "name": name})
+	return err
+}
+
+func (p *process) getSessionStats(ctx context.Context, wait time.Duration) (json.RawMessage, error) {
+	resp, err := p.requestWithin(ctx, map[string]any{"type": "get_session_stats"}, wait)
+	return resp.Data, err
 }
 
 func (p *process) getMessages(ctx context.Context) (json.RawMessage, error) {

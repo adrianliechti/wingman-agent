@@ -223,7 +223,7 @@ func TestRunMustReportUnexpectedBackendExit(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			err := Run(ctx, Options{
-				Path: os.Args[0], ExtraArgs: []string{"-test.run=^TestExitedBackendHelper$"},
+				Path: os.Args[0], ExtraArgs: []string{"-test.run=^TestExitedBackendHelper$", "--"},
 				Env: append(os.Environ(), "WINGMAN_ACP_EXIT_HELPER="+mode), Stderr: io.Discard,
 			}, reader, io.Discard, nil)
 			if err == nil || !strings.Contains(err.Error(), "exit status 23") {

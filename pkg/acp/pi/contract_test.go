@@ -46,6 +46,7 @@ func runPiContractHelper() {
 			Type    string `json:"type"`
 			ID      string `json:"id"`
 			Message string `json:"message"`
+			Name    string `json:"name"`
 		}
 		if json.Unmarshal(scanner.Bytes(), &req) != nil || req.ID == "" {
 			continue
@@ -93,6 +94,11 @@ func runPiContractHelper() {
 			writePiResponse(req.ID, map[string]any{})
 		case "get_messages":
 			writePiResponse(req.ID, map[string]any{"messages": []any{}})
+		case "set_session_name":
+			writePiContract(map[string]any{"type": "session_info_changed", "name": req.Name})
+			writePiResponse(req.ID, nil)
+		case "get_session_stats":
+			writePiResponse(req.ID, map[string]any{"contextUsage": map[string]any{"tokens": 42, "contextWindow": 1000}})
 		default:
 			writePiContract(map[string]any{"type": "response", "id": req.ID, "success": false, "error": "unsupported"})
 		}

@@ -68,18 +68,39 @@ func bypassDisabledBySettings(cwd string, env []string) bool {
 	return false
 }
 
+func claudeConfigDir(env []string) string {
+	getenv := func(key string) string {
+		if env == nil {
+			return os.Getenv(key)
+		}
+		// exec.Cmd uses the last value, and only inherits the parent environment when Env is nil.
+		for i := len(env) - 1; i >= 0; i-- {
+			name, value, ok := strings.Cut(env[i], "=")
+			if ok && (name == key || runtime.GOOS == "windows" && strings.EqualFold(name, key)) {
+				return value
+			}
+		}
+		return ""
+	}
+	if dir := getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return dir
+	}
+	homeKey := "HOME"
+	if runtime.GOOS == "windows" {
+		homeKey = "USERPROFILE"
+	}
+	home := getenv(homeKey)
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
+}
+
 func settingsPaths(cwd string, env []string) []string {
-	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
-	for _, kv := range env {
-		if v, ok := strings.CutPrefix(kv, "CLAUDE_CONFIG_DIR="); ok {
-			configDir = v
-		}
-	}
-	if configDir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			configDir = filepath.Join(home, ".claude")
-		}
-	}
+	configDir := claudeConfigDir(env)
 	var paths []string
 	switch runtime.GOOS {
 	case "darwin":
@@ -109,6 +130,7 @@ func headerMap(headers []acp.HttpHeader) map[string]string {
 type cliEnvelope struct {
 	Type               string          `json:"type"`
 	Subtype            string          `json:"subtype,omitempty"`
+	RequestID          string          `json:"request_id,omitempty"`
 	Message            json.RawMessage `json:"message,omitempty"`
 	Event              json.RawMessage `json:"event,omitempty"`
 	Content            json.RawMessage `json:"content,omitempty"`

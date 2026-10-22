@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -70,6 +71,19 @@ func (s *session) setModeLocked(modeID string) {
 	s.mode = modeID
 }
 
+// Before the first prompt, the client's model and mode choices exist only in memory.
+func (s *session) inheritConfig(from *session) {
+	from.mu.Lock()
+	modelID, modelOverride, effort, mode, prePlanMode := from.modelID, from.modelOverride, from.effort, from.mode, from.prePlanMode
+	from.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modelID, s.modelOverride, s.effort = modelID, modelOverride, effort
+	if mode != bypassModeID || s.allowBypass {
+		s.mode, s.prePlanMode = mode, prePlanMode
+	}
+}
+
 func (s *session) currentPrePlanMode() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -118,6 +132,9 @@ func (s *session) isClosed() bool {
 func (s *session) runTurn(ctx context.Context, prompt []acpsdk.ContentBlock) (acpsdk.StopReason, *acpsdk.Usage, error) {
 	p, err := s.ensureProc()
 	if err != nil {
+		if s.isClosed() {
+			return acpsdk.StopReasonCancelled, nil, nil
+		}
 		return "", nil, err
 	}
 
@@ -198,11 +215,11 @@ func (s *session) runTurn(ctx context.Context, prompt []acpsdk.ContentBlock) (ac
 // JSONL file — so we read it back at turn end, the same point a new title
 // would have landed, and only notify when it actually changed.
 func (s *session) pushTitleUpdate(ctx context.Context) {
-	dir := projectDirFor(s.cwd)
-	if dir == "" {
+	path := transcriptPath(s.cwd, string(s.id), s.agent.env)
+	if path == "" {
 		return
 	}
-	title, _ := scanSessionMetadata(filepath.Join(dir, string(s.id)+".jsonl"))
+	title, _ := scanSessionMetadata(path)
 	if title == "" {
 		return
 	}
@@ -335,6 +352,8 @@ type claudeProc struct {
 	subagentMu          sync.Mutex
 	subagentParents     map[string]string
 	backgroundTasks     map[string]bool
+	requestMu           sync.Mutex
+	requests            map[string]context.CancelCauseFunc
 	results             chan turnResult
 	dead                chan struct{}
 	shutdownOnce        sync.Once
@@ -390,6 +409,33 @@ func (p *claudeProc) parentForAgent(agentID string) string {
 	p.subagentMu.Lock()
 	defer p.subagentMu.Unlock()
 	return p.subagentParents[agentID]
+}
+
+var errRequestWithdrawn = errors.New("claude withdrew the request")
+
+func (p *claudeProc) trackRequest(turnCtx context.Context, requestID string) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(turnCtx)
+	p.requestMu.Lock()
+	if p.requests == nil {
+		p.requests = map[string]context.CancelCauseFunc{}
+	}
+	p.requests[requestID] = cancel
+	p.requestMu.Unlock()
+	return ctx, func() {
+		p.requestMu.Lock()
+		delete(p.requests, requestID)
+		p.requestMu.Unlock()
+		cancel(nil)
+	}
+}
+
+func (p *claudeProc) withdrawRequest(requestID string) {
+	p.requestMu.Lock()
+	cancel := p.requests[requestID]
+	p.requestMu.Unlock()
+	if cancel != nil {
+		cancel(errRequestWithdrawn)
+	}
 }
 
 type turnResult struct {
@@ -508,14 +554,21 @@ func (p *claudeProc) read(ctx context.Context, conn *acpsdk.AgentSideConnection,
 				// turn must never inherit an earlier request's permission answer.
 				perTurn := *app
 				p.turnMu.Lock()
-				perTurn.ctx = p.turnCtx
+				turnCtx := p.turnCtx
 				p.turnMu.Unlock()
-				if perTurn.ctx == nil {
+				if turnCtx == nil {
 					app.respondDeny(req.RequestID)
 					continue
 				}
-				go perTurn.handle(req)
+				var done func()
+				perTurn.ctx, done = p.trackRequest(turnCtx, req.RequestID)
+				go func() {
+					defer done()
+					perTurn.handle(req)
+				}()
 			}
+		case "control_cancel_request":
+			p.withdrawRequest(env.RequestID)
 		case "result":
 			if env.ParentToolUseID != "" || env.ParentAgentID != "" {
 				continue

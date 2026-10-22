@@ -13,6 +13,7 @@ import (
 	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
@@ -20,48 +21,83 @@ import (
 
 const maxProjectKeyLen = 200
 
-func projectsRoot() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+func projectsRoot(env []string) string {
+	dir := claudeConfigDir(env)
+	if dir == "" {
 		return ""
 	}
-	return filepath.Join(home, ".claude", "projects")
+	return filepath.Join(dir, "projects")
 }
 
+// encodeCwd matches Claude Code, which replaces every UTF-16 unit that is not ASCII alphanumeric.
 func encodeCwd(cwd string) string {
-	if cwd == "" {
-		return ""
-	}
-	b := make([]byte, len(cwd))
-	for i := 0; i < len(cwd); i++ {
-		c := cwd[i]
+	var b strings.Builder
+	for _, r := range cwd {
 		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-			b[i] = c
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			b.WriteString("--")
 		default:
-			b[i] = '-'
+			b.WriteByte('-')
 		}
 	}
-	if len(b) > maxProjectKeyLen {
-
-		b = b[:maxProjectKeyLen]
-	}
-	return string(b)
+	return b.String()
 }
 
-func projectDirFor(cwd string) string {
+func projectDirsFor(cwd string, env []string) []string {
+	root := projectsRoot(env)
+	if cwd == "" || root == "" {
+		return nil
+	}
+	key := encodeCwd(resolveProjectCwd(cwd))
+	if len(key) <= maxProjectKeyLen {
+		return []string{filepath.Join(root, key)}
+	}
+	// Longer names have runtime-specific hash suffixes. These candidates need a transcript cwd check.
+	prefix := key[:maxProjectKeyLen] + "-"
+	entries, _ := os.ReadDir(root)
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
+			dirs = append(dirs, filepath.Join(root, e.Name()))
+		}
+	}
+	return dirs
+}
+
+func resolveProjectCwd(cwd string) string {
+	if cwd != "" {
+		if resolved, err := pathutil.Resolve(cwd); err == nil {
+			return resolved
+		}
+	}
+	return cwd
+}
+
+func matchesProjectCwd(cwd, recordedCwd string) bool {
 	if cwd == "" {
-		return ""
+		return true
 	}
-	root := projectsRoot()
-	if root == "" {
-		return ""
+	if recordedCwd == "" {
+		// A truncated prefix cannot identify the project without its recorded cwd.
+		return len(encodeCwd(cwd)) <= maxProjectKeyLen
 	}
-	resolved := cwd
-	if r, err := pathutil.Resolve(cwd); err == nil {
-		resolved = r
+	return cwd == resolveProjectCwd(recordedCwd)
+}
+
+func transcriptPath(cwd, id string, env []string) string {
+	cwd = resolveProjectCwd(cwd)
+	for _, dir := range projectDirsFor(cwd, env) {
+		path := filepath.Join(dir, id+".jsonl")
+		if _, err := os.Stat(path); err == nil {
+			if len(encodeCwd(cwd)) > maxProjectKeyLen && !matchesProjectCwd(cwd, scanSessionCwd(path)) {
+				continue
+			}
+			return path
+		}
 	}
-	return filepath.Join(root, encodeCwd(resolved))
+	return ""
 }
 
 type historyHeader struct {
@@ -100,8 +136,9 @@ func scanSessionModel(path string) string {
 	return model
 }
 
-func listProjectSessions(cwd string) ([]acpsdk.SessionInfo, error) {
-	dirs, err := projectDirs(cwd)
+func listProjectSessions(cwd string, env []string) ([]acpsdk.SessionInfo, error) {
+	cwd = resolveProjectCwd(cwd)
+	dirs, err := projectDirs(cwd, env)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +162,9 @@ func listProjectSessions(cwd string) ([]acpsdk.SessionInfo, error) {
 			}
 			id := strings.TrimSuffix(name, ".jsonl")
 			title, recordedCwd := scanSessionMetadata(filepath.Join(dir, name))
+			if !matchesProjectCwd(cwd, recordedCwd) {
+				continue
+			}
 			sessCwd := recordedCwd
 			if sessCwd == "" {
 				sessCwd = cwd
@@ -151,15 +191,11 @@ func listProjectSessions(cwd string) ([]acpsdk.SessionInfo, error) {
 	return out, nil
 }
 
-func projectDirs(cwd string) ([]string, error) {
+func projectDirs(cwd string, env []string) ([]string, error) {
 	if cwd != "" {
-		d := projectDirFor(cwd)
-		if d == "" {
-			return nil, nil
-		}
-		return []string{d}, nil
+		return projectDirsFor(cwd, env), nil
 	}
-	root := projectsRoot()
+	root := projectsRoot(env)
 	if root == "" {
 		return nil, nil
 	}
@@ -180,8 +216,12 @@ func projectDirs(cwd string) ([]string, error) {
 	return out, nil
 }
 
-func deleteProjectSession(id acpsdk.SessionId) error {
-	dirs, err := projectDirs("")
+func deleteProjectSession(id acpsdk.SessionId, env []string) error {
+	// Claude Code names transcripts by UUID; any other id must not reach the filesystem.
+	if uuid.Validate(string(id)) != nil {
+		return nil
+	}
+	dirs, err := projectDirs("", env)
 	if err != nil {
 		return err
 	}
@@ -193,13 +233,26 @@ func deleteProjectSession(id acpsdk.SessionId) error {
 	return nil
 }
 
-func sessionExists(cwd string, id acpsdk.SessionId) bool {
-	dir := projectDirFor(cwd)
-	if dir == "" {
-		return false
+func sessionExists(cwd string, id acpsdk.SessionId, env []string) bool {
+	return transcriptPath(cwd, string(id), env) != ""
+}
+
+func scanSessionCwd(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
 	}
-	_, err := os.Stat(filepath.Join(dir, string(id)+".jsonl"))
-	return err == nil
+	defer f.Close()
+	scanner := newCLIScanner(f)
+	for scanner.Scan() {
+		var h struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &h) == nil && h.Cwd != "" {
+			return h.Cwd
+		}
+	}
+	return ""
 }
 
 func scanSessionMetadata(path string) (title, cwd string) {
@@ -277,12 +330,11 @@ func truncateTitle(s string) string {
 	return s[:max-1] + "…"
 }
 
-func replayHistory(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, cwd string) error {
-	dir := projectDirFor(cwd)
-	if dir == "" {
+func replayHistory(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, cwd, transcriptID string, env []string) error {
+	path := transcriptPath(cwd, transcriptID, env)
+	if path == "" {
 		return nil
 	}
-	path := filepath.Join(dir, string(sid)+".jsonl")
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -36,7 +36,8 @@ func Spawn(ctx context.Context, opts Options) (*Agent, error) {
 		codexPath = codexcli.BinPath()
 	}
 
-	args := append(append([]string{}, opts.ExtraArgs...), "app-server")
+	// A closed session otherwise keeps its rollout writer lock and MCP servers for 30 minutes.
+	args := append(append([]string{}, opts.ExtraArgs...), "--config", "thread_unload_delay_secs=0", "app-server")
 	cmd := exec.CommandContext(ctx, codexPath, args...)
 	cmd.WaitDelay = 2 * time.Second
 	process.Hide(cmd)
@@ -60,6 +61,7 @@ func Spawn(ctx context.Context, opts Options) (*Agent, error) {
 		return nil, fmt.Errorf("codex: stdout pipe: %w", err)
 	}
 	cmd.Stdout = stdoutWriter
+	workDir := newWorkingDirectory(cmd.Dir)
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
@@ -70,6 +72,7 @@ func Spawn(ctx context.Context, opts Options) (*Agent, error) {
 
 	rpc := newRPCClient(stdin, stdout)
 	client := newCodexClient(rpc)
+	client.workDir = workDir
 	a := newAgent(client, opts.Model, opts.Effort)
 	a.cmd = cmd
 	a.stdin = stdin

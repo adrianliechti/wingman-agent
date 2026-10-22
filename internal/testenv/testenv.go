@@ -20,6 +20,7 @@ func UserHome(t testing.TB) string {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("USERPROFILE", dir)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	return dir
 }
 

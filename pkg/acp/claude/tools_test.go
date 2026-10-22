@@ -650,6 +650,24 @@ func TestPowerShellRendersLikeBash(t *testing.T) {
 	}
 }
 
+func TestShellAcceptsCommandDescriptionSpelling(t *testing.T) {
+	info := toolInfoFromToolUse("Bash", json.RawMessage(`{"command":"ls","command_description":"List files"}`), "/proj")
+	if len(info.content) != 1 || info.content[0].Content.Content.Text.Text != "List files" {
+		t.Fatalf("content = %#v", info.content)
+	}
+	args, ok := info.rawInput.(map[string]any)
+	if !ok || args["command"] != "ls" || args["command_description"] != nil {
+		t.Fatalf("display input = %#v", info.rawInput)
+	}
+}
+
+func TestGrepAcceptsFilePathSpelling(t *testing.T) {
+	info := toolInfoFromToolUse("Grep", json.RawMessage(`{"pattern":"a","file_path":"/proj/src"}`), "/proj")
+	if len(info.locations) != 1 || info.locations[0].Path != "/proj/src" {
+		t.Fatalf("locations = %#v", info.locations)
+	}
+}
+
 func TestSubagentHandbackFrameIsUnwrapped(t *testing.T) {
 	framed := handbackHeader + "\n  Report line one\n    indented code\n  last line"
 	for _, raw := range []string{framed, "  NOTE: this agent stopped at its 5-turn limit before finishing.\n" + framed} {

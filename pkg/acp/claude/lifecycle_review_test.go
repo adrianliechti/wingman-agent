@@ -87,6 +87,47 @@ func TestProcessPermissionsFollowTurnCancellation(t *testing.T) {
 	})
 }
 
+func TestWithdrawnPermissionEndsDialogWithoutAnswer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		agentIO, clientIO := net.Pipe()
+		defer agentIO.Close()
+		defer clientIO.Close()
+		a := New(Options{Stderr: io.Discard})
+		conn := acp.NewAgentSideConnection(a, agentIO, agentIO)
+		client := &delayedPermissionClient{entered: make(chan context.Context, 1), release: make(chan struct{})}
+		_ = acp.NewClientSideConnection(client, clientIO, clientIO)
+		var out bytes.Buffer
+		p := &claudeProc{
+			session: a.newSession("s", t.TempDir(), "default", "", nil),
+			out:     &streamWriter{w: &out}, results: make(chan turnResult, 1), dead: make(chan struct{}),
+			emitted: newToolCallTracker(),
+		}
+		p.beginTurn(context.Background())
+		reader, writer := io.Pipe()
+		defer reader.Close()
+		defer writer.Close()
+		go p.read(context.Background(), conn, "s", reader)
+		_, _ = io.WriteString(writer, `{"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"tool-1","input":{"command":"pwd"}}}`+"\n")
+		uiCtx := <-client.entered
+		_, _ = io.WriteString(writer, `{"type":"control_cancel_request","request_id":"permission-1"}`+"\n")
+		synctest.Wait()
+		if uiCtx.Err() == nil {
+			t.Error("a withdrawn request left the permission dialog open")
+		}
+		close(client.release)
+		synctest.Wait()
+		if out.Len() != 0 {
+			t.Fatalf("withdrawn request was answered: %q", out.String())
+		}
+		p.turnMu.Lock()
+		turnErr := p.turnCtx.Err()
+		p.turnMu.Unlock()
+		if turnErr != nil {
+			t.Fatal("withdrawing one request cancelled the turn")
+		}
+	})
+}
+
 func TestDuplicateResultCannotCompleteTheNextTurn(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		a := New(Options{Stderr: io.Discard})

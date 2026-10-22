@@ -111,3 +111,9 @@ func TestBubblewrapArgsProtectConfigHideCredentialsAndCutNetwork(t *testing.T) {
 		t.Fatalf("missing protected path or Git metadata was mounted: %q", args)
 	}
 }
+
+func TestFindBubblewrapRefusesWritableWellKnownPaths(t *testing.T) {
+	if bwrap, err := findBubblewrap([]string{"/"}); err == nil {
+		t.Fatalf("findBubblewrap returned %s from a writable root", bwrap)
+	}
+}

@@ -127,18 +127,20 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		return toolInfo{title: title, kind: acpsdk.ToolKindThink, content: content}
 
 	case "Bash", "PowerShell":
+		// The CLI also accepts the command_description spelling.
 		var in struct {
-			Command     string `json:"command"`
-			Description string `json:"description"`
+			Command            string `json:"command"`
+			Description        string `json:"description"`
+			CommandDescription string `json:"command_description"`
 		}
 		_ = json.Unmarshal(rawInput, &in)
 		var content []acpsdk.ToolCallContent
-		if in.Description != "" {
-			content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(in.Description))}
+		if description := cmp.Or(in.Description, in.CommandDescription); description != "" {
+			content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(description))}
 		}
 		return toolInfo{
 			title: "Run command", kind: acpsdk.ToolKindExecute,
-			rawInput: displayInput(rawInput, "description"), content: content,
+			rawInput: displayInput(rawInput, "description", "command_description"), content: content,
 		}
 
 	case "Read":
@@ -225,14 +227,16 @@ func toolInfoFromToolUse(name string, rawInput json.RawMessage, cwd string) tool
 		}
 
 	case "Grep":
+		// The CLI also accepts the file_path spelling.
 		var in struct {
-			Path string `json:"path"`
+			Path     string `json:"path"`
+			FilePath string `json:"file_path"`
 		}
 		_ = json.Unmarshal(rawInput, &in)
 		return toolInfo{
 			title: "Search files", kind: acpsdk.ToolKindSearch,
-			rawInput:  displayInput(rawInput, "path"),
-			locations: displayLocation(in.Path, cwd, 0),
+			rawInput:  displayInput(rawInput, "path", "file_path"),
+			locations: displayLocation(cmp.Or(in.Path, in.FilePath), cwd, 0),
 		}
 
 	case "WebFetch":

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"sync"
 
@@ -232,8 +231,9 @@ func (a *Agent) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk
 		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
 	}
 	defer s.promptMu.Unlock()
+	// A prompt that raced session/close ends like one the close cancelled.
 	if s.isClosed() {
-		return acpsdk.PromptResponse{}, fmt.Errorf("session %s is closed", params.SessionId)
+		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled, UserMessageId: params.MessageId}, nil
 	}
 	if ctx.Err() != nil {
 		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled, UserMessageId: params.MessageId}, nil
@@ -329,7 +329,7 @@ func (a *Agent) UnstableDeleteSession(_ context.Context, params acpsdk.UnstableD
 	if s != nil {
 		s.close()
 	}
-	if err := deleteProjectSession(params.SessionId); err != nil {
+	if err := deleteProjectSession(params.SessionId, a.env); err != nil {
 		return acpsdk.UnstableDeleteSessionResponse{}, err
 	}
 	return acpsdk.UnstableDeleteSessionResponse{}, nil
@@ -340,7 +340,7 @@ func (a *Agent) ListSessions(_ context.Context, params acpsdk.ListSessionsReques
 	if params.Cwd != nil {
 		cwd = *params.Cwd
 	}
-	sessions, err := listProjectSessions(cwd)
+	sessions, err := listProjectSessions(cwd, a.env)
 	if err != nil {
 		return acpsdk.ListSessionsResponse{}, err
 	}
@@ -355,11 +355,12 @@ func (a *Agent) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionRe
 	if err != nil {
 		return acpsdk.ResumeSessionResponse{}, err
 	}
-	if !sessionExists(cwd, params.SessionId) {
-		return acpsdk.ResumeSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, cwd)
+	src, err := a.resumeSourceFor(cwd, params.SessionId)
+	if err != nil {
+		return acpsdk.ResumeSessionResponse{}, err
 	}
 	a.ensureModels(ctx)
-	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, params.Meta, string(params.SessionId), false)
+	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, params.Meta, src)
 	a.sendAvailableCommands(s)
 	return acpsdk.ResumeSessionResponse{
 		Modes:         buildSessionModeState(s.mode, s.allowBypass),
@@ -375,13 +376,16 @@ func (a *Agent) LoadSession(ctx context.Context, params acpsdk.LoadSessionReques
 	if err != nil {
 		return acpsdk.LoadSessionResponse{}, err
 	}
-	if !sessionExists(cwd, params.SessionId) {
-		return acpsdk.LoadSessionResponse{}, fmt.Errorf("no on-disk session %s for cwd %s", params.SessionId, cwd)
+	src, err := a.resumeSourceFor(cwd, params.SessionId)
+	if err != nil {
+		return acpsdk.LoadSessionResponse{}, err
 	}
 	a.ensureModels(ctx)
-	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, params.Meta, string(params.SessionId), false)
-	if err := replayHistory(ctx, a.conn, params.SessionId, cwd); err != nil {
-		return acpsdk.LoadSessionResponse{}, fmt.Errorf("replay history: %w", err)
+	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, params.Meta, src)
+	if src.from != "" {
+		if err := replayHistory(ctx, a.conn, params.SessionId, cwd, src.from, a.env); err != nil {
+			return acpsdk.LoadSessionResponse{}, fmt.Errorf("replay history: %w", err)
+		}
 	}
 	a.sendAvailableCommands(s)
 	return acpsdk.LoadSessionResponse{
@@ -400,7 +404,7 @@ func (a *Agent) UnstableForkSession(_ context.Context, params acpsdk.UnstableFor
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
 	newID := acpsdk.SessionId(uuid.NewString())
-	s := a.adoptSession(newID, cwd, additional, servers, params.Meta, string(params.SessionId), true)
+	s := a.adoptSession(newID, cwd, additional, servers, params.Meta, resumeSource{from: string(params.SessionId), fork: true})
 	a.sendAvailableCommands(s)
 
 	return acpsdk.UnstableForkSessionResponse{
@@ -410,12 +414,34 @@ func (a *Agent) UnstableForkSession(_ context.Context, params acpsdk.UnstableFor
 	}, nil
 }
 
-func (a *Agent) adoptSession(id acpsdk.SessionId, cwd string, additionalDirs []string, mcpServers []acpsdk.McpServer, meta map[string]any, resumeFrom string, fork bool) *session {
+type resumeSource struct {
+	from string
+	fork bool
+	live *session
+}
+
+func (a *Agent) resumeSourceFor(cwd string, id acpsdk.SessionId) (resumeSource, error) {
+	src := resumeSource{from: string(id)}
+	if live := a.lookup(id); live != nil {
+		live.mu.Lock()
+		if !live.started {
+			src = resumeSource{from: live.resumeFrom, fork: live.forkOnResume, live: live}
+		}
+		live.mu.Unlock()
+	}
+	// Claude Code writes a session's own transcript only at its first prompt.
+	if src.from == string(id) && !sessionExists(cwd, id, a.env) {
+		return resumeSource{}, fmt.Errorf("no on-disk session %s for cwd %s", id, cwd)
+	}
+	return src, nil
+}
+
+func (a *Agent) adoptSession(id acpsdk.SessionId, cwd string, additionalDirs []string, mcpServers []acpsdk.McpServer, meta map[string]any, src resumeSource) *session {
 	modelID, effort := normalizeSessionConfig(a.models, a.defaultModel, a.defaultEffort)
 	s := a.newSession(id, cwd, modelID, effort, additionalDirs)
+	resumeFrom := src.from
 	if resumeFrom != "" && (a.defaultModel == "" || a.defaultModel == "default") {
-		path := filepath.Join(projectDirFor(cwd), resumeFrom+".jsonl")
-		if live := scanSessionModel(path); live != "" {
+		if live := scanSessionModel(transcriptPath(cwd, resumeFrom, a.env)); live != "" {
 			if m := resolveResumedModel(a.models, live); m != nil {
 				s.modelID = m.ID
 			} else {
@@ -428,7 +454,10 @@ func (a *Agent) adoptSession(id acpsdk.SessionId, cwd string, additionalDirs []s
 	s.mcpServers = mcpServers
 	s.allowBypass = a.bypassAllowed(cwd, meta)
 	s.resumeFrom = resumeFrom
-	s.forkOnResume = fork
+	s.forkOnResume = src.fork
+	if src.live != nil {
+		s.inheritConfig(src.live)
+	}
 	a.storeSession(s)
 	return s
 }

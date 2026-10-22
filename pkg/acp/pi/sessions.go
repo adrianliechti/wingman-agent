@@ -2,7 +2,9 @@ package pi
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -28,45 +30,42 @@ type sessionFileInfo struct {
 }
 
 func listSessionFiles(sessionsDir string) []sessionFileInfo {
-	var files []string
-	_ = pathutil.WalkDir(sessionsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !d.IsDir() && strings.HasSuffix(d.Name(), ".jsonl") {
-			files = append(files, path)
-		}
-		return nil
-	})
-
-	var out []sessionFileInfo
-	for _, file := range files {
-		first := readFirstLine(file)
-		id, cwd, ok := parseSessionHeader(first)
-		if !ok {
-			continue
-		}
-
-		info := sessionFileInfo{ID: id, Cwd: cwd, Path: file}
-
-		tail := readTail(file, tailBytes)
-		info.Title = pickTitleFromTail(tail)
+	out := scanSessionHeaders(sessionsDir)
+	for i := range out {
+		info := &out[i]
+		tail, whole := readTail(info.Path, tailBytes)
+		info.Title = sessionName(info.Path, tail, whole)
 		info.UpdatedAt = pickUpdatedAtFromTail(tail)
 
 		if info.UpdatedAt == "" {
-			if st, err := os.Stat(file); err == nil {
+			if st, err := os.Stat(info.Path); err == nil {
 				info.UpdatedAt = st.ModTime().UTC().Format("2006-01-02T15:04:05Z07:00")
 			}
 		}
 		if info.Title == "" {
-			info.Title = pickFirstUserMessage(file)
+			info.Title = pickFirstUserMessage(info.Path)
 		}
-
-		out = append(out, info)
 	}
 
 	slices.SortStableFunc(out, func(a, b sessionFileInfo) int {
 		return strings.Compare(b.UpdatedAt, a.UpdatedAt)
+	})
+	return out
+}
+
+func scanSessionHeaders(sessionsDir string) []sessionFileInfo {
+	var out []sessionFileInfo
+	_ = pathutil.WalkDir(sessionsDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
+			return nil
+		}
+		if id, cwd, ok := parseSessionHeader(readFirstLine(path)); ok {
+			out = append(out, sessionFileInfo{ID: id, Cwd: cwd, Path: path})
+		}
+		return nil
 	})
 	return out
 }
@@ -79,7 +78,7 @@ func canonicalPath(path string) string {
 }
 
 func findSessionFile(sessionsDir, sessionID string) (sessionFileInfo, bool) {
-	for _, s := range listSessionFiles(sessionsDir) {
+	for _, s := range scanSessionHeaders(sessionsDir) {
 		if s.ID == sessionID {
 			return s, true
 		}
@@ -99,23 +98,24 @@ func readFirstLine(path string) string {
 	return strings.TrimSpace(line)
 }
 
-func readTail(path string, n int64) string {
+// readTail also reports whether the tail covers the whole file.
+func readTail(path string, n int64) (string, bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return "", true
 	}
 	defer f.Close()
 
 	st, err := f.Stat()
 	if err != nil {
-		return ""
+		return "", true
 	}
 	start := max(st.Size()-n, 0)
 	if _, err := f.Seek(start, 0); err != nil {
-		return ""
+		return "", true
 	}
 	data, _ := io.ReadAll(f)
-	return string(data)
+	return string(data), start == 0
 }
 
 func parseSessionHeader(line string) (id, cwd string, ok bool) {
@@ -136,22 +136,69 @@ func parseSessionHeader(line string) (id, cwd string, ok bool) {
 	return h.ID, h.Cwd, true
 }
 
-func pickTitleFromTail(tail string) string {
+func readSessionTitle(path string) (name, prompt string) {
+	tail, whole := readTail(path, tailBytes)
+	return sessionName(path, tail, whole), pickFirstUserMessage(path)
+}
+
+// sessionName follows Pi: the latest session_info entry wins, and an empty name clears it.
+func sessionName(path, tail string, whole bool) string {
+	if name, ok := pickNameFromTail(tail); ok || whole {
+		return name
+	}
+	return scanSessionName(path)
+}
+
+func pickNameFromTail(tail string) (string, bool) {
 	lines := strings.Split(tail, "\n")
 	for _, line := range slices.Backward(lines) {
-		line := strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var obj struct {
-			Type string `json:"type"`
-			Name string `json:"name"`
-		}
-		if json.Unmarshal([]byte(line), &obj) == nil && obj.Type == "session_info" && strings.TrimSpace(obj.Name) != "" {
-			return strings.TrimSpace(obj.Name)
+		if name, ok := parseSessionName([]byte(line)); ok {
+			return name, true
 		}
 	}
-	return ""
+	return "", false
+}
+
+func scanSessionName(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	name := ""
+	r := bufio.NewReaderSize(f, headBytes)
+	for {
+		line, err := r.ReadSlice('\n')
+		oversized := false
+		for errors.Is(err, bufio.ErrBufferFull) {
+			// Oversized lines hold message payloads, never a session name.
+			oversized = true
+			_, err = r.ReadSlice('\n')
+		}
+		if !oversized {
+			if n, ok := parseSessionName(line); ok {
+				name = n
+			}
+		}
+		if err != nil {
+			return name
+		}
+	}
+}
+
+func parseSessionName(line []byte) (string, bool) {
+	if !bytes.Contains(line, []byte(`"session_info"`)) {
+		return "", false
+	}
+	var obj struct {
+		Type string  `json:"type"`
+		Name *string `json:"name"`
+	}
+	if json.Unmarshal(line, &obj) != nil || obj.Type != "session_info" || obj.Name == nil {
+		return "", false
+	}
+	return strings.TrimSpace(*obj.Name), true
 }
 
 func pickUpdatedAtFromTail(tail string) string {
@@ -201,44 +248,35 @@ func pickFirstUserMessage(path string) string {
 		if json.Unmarshal([]byte(line), &obj) != nil || obj.Type != "message" || obj.Message.Role != "user" {
 			continue
 		}
-		if text := normalizePiText(obj.Message.Content); text != "" {
-			return truncate(text, 80)
+		if title := sessionTitleText(piMessageTexts(obj.Message.Content)); title != "" {
+			return title
 		}
 	}
 	return ""
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+const maxTitleRunes = 80
+
+func sessionTitleText(texts []string) string {
+	title := strings.Join(strings.Fields(strings.Join(texts, " ")), " ")
+	if runes := []rune(title); len(runes) > maxTitleRunes {
+		title = string(runes[:maxTitleRunes])
 	}
-	return s[:n]
+	return title
 }
 
-func normalizePiText(content json.RawMessage) string {
-	if len(content) == 0 {
-		return ""
-	}
-
+func piMessageTexts(content json.RawMessage) []string {
 	var s string
 	if json.Unmarshal(content, &s) == nil {
-		return s
+		return []string{s}
 	}
-
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(content, &blocks) != nil {
-		return ""
-	}
-	var b strings.Builder
-	for _, c := range blocks {
-		if c.Type == "text" {
-			b.WriteString(c.Text)
+	var texts []string
+	for _, block := range parsePiMessageContent(content) {
+		if block.Type == "text" {
+			texts = append(texts, block.Text)
 		}
 	}
-	return b.String()
+	return texts
 }
 
 func replayMessages(send func(acp.SessionUpdate), data json.RawMessage, cwd string) {

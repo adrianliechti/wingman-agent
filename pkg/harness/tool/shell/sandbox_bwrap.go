@@ -69,9 +69,19 @@ func bubblewrapArgs(shell, command, workingDir string, policy sandboxPolicy) []s
 }
 
 func findBubblewrap(writableRoots []string) (string, error) {
+	// Sandboxed commands could plant a bwrap in a writable root that a later command runs unsandboxed.
+	trusted := func(path string) bool {
+		for _, root := range writableRoots {
+			if pathWithin(root, path) {
+				return false
+			}
+		}
+		return true
+	}
 	for _, candidate := range []string{"/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"} {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
+		path := canonicalPath(candidate)
+		if info, err := os.Stat(path); err == nil && !info.IsDir() && trusted(path) {
+			return path, nil
 		}
 	}
 
@@ -84,10 +94,8 @@ func findBubblewrap(writableRoots []string) (string, error) {
 		return "", fmt.Errorf("resolve bubblewrap path: %w", err)
 	}
 	path = canonicalPath(path)
-	for _, root := range writableRoots {
-		if pathWithin(root, path) {
-			return "", fmt.Errorf("refusing bubblewrap executable from writable sandbox root: %s", path)
-		}
+	if !trusted(path) {
+		return "", fmt.Errorf("refusing bubblewrap executable from writable sandbox root: %s", path)
 	}
 	return path, nil
 }

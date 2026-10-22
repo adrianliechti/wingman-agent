@@ -112,7 +112,7 @@ func ensureClaudeContractHistory() {
 	if err != nil {
 		return
 	}
-	dir := projectDirFor(cwd)
+	dir := projectDirsFor(cwd, nil)[0]
 	if os.MkdirAll(dir, 0o755) != nil {
 		return
 	}

@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -720,6 +721,10 @@ func (a *approver) respondDeny(requestID string) {
 }
 
 func (a *approver) writeResponse(requestID string, body map[string]any) {
+	// Claude Code has forgotten a request it withdrew, so any answer would be an orphan.
+	if a.ctx != nil && errors.Is(context.Cause(a.ctx), errRequestWithdrawn) {
+		return
+	}
 	if a.ctx != nil && a.ctx.Err() != nil && body["behavior"] == "allow" {
 		body = map[string]any{"behavior": "deny", "message": "Request cancelled"}
 	}

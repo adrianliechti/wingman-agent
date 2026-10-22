@@ -1,15 +1,18 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 )
@@ -114,5 +117,123 @@ func TestPlanModeRemembersPreviousMode(t *testing.T) {
 	s.setModeLocked(defaultModeID)
 	if s.prePlanMode != "" {
 		t.Fatalf("pre-plan mode = %q after leaving plan", s.prePlanMode)
+	}
+}
+
+func TestResumeKeepsUnpromptedLiveSession(t *testing.T) {
+	testenv.UserHome(t)
+	ctx := context.Background()
+	a := New(Options{Path: filepath.Join(t.TempDir(), "missing-claude"), Stderr: io.Discard})
+	cwd, added := t.TempDir(), t.TempDir()
+	created, err := a.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: created.SessionId, ModeId: planModeID}); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := a.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: created.SessionId, Cwd: cwd, AdditionalDirectories: []string{added}})
+	if err != nil {
+		t.Fatalf("resume of a session that was never prompted: %v", err)
+	}
+	if resumed.Modes == nil || resumed.Modes.CurrentModeId != planModeID {
+		t.Fatalf("modes = %+v, want the live session's plan mode", resumed.Modes)
+	}
+	s := a.lookup(created.SessionId)
+	s.mu.Lock()
+	args := strings.Join(s.cliArgsLocked(), " ")
+	s.mu.Unlock()
+	if strings.Contains(args, "--resume") || !strings.Contains(args, "--session-id "+string(created.SessionId)) || !strings.Contains(args, "--add-dir "+added) {
+		t.Fatalf("args = %s, want a fresh start under the same id with the new directory", args)
+	}
+	if _, err := a.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: acp.SessionId(uuid.NewString()), Cwd: cwd}); err == nil {
+		t.Fatal("resume of an unknown session succeeded")
+	}
+}
+
+func TestLoadOfUnpromptedForkReplaysItsSource(t *testing.T) {
+	testenv.UserHome(t)
+	ctx := context.Background()
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	wire := &bytes.Buffer{}
+	a := New(Options{Path: filepath.Join(t.TempDir(), "missing-claude"), Stderr: io.Discard})
+	a.SetAgentConnection(acp.NewAgentSideConnection(a, wire, reader))
+	cwd := t.TempDir()
+	source := uuid.NewString()
+	dir := projectDirsFor(cwd, nil)[0]
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transcript := `{"type":"user","message":{"role":"user","content":"remember PELICAN"}}` + "\n" +
+		`{"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"OK"}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, source+".jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fork, err := a.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{SessionId: acp.SessionId(source), Cwd: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.LoadSession(ctx, acp.LoadSessionRequest{SessionId: fork.SessionId, Cwd: cwd, McpServers: []acp.McpServer{}}); err != nil {
+		t.Fatalf("load of a fork that was never prompted: %v", err)
+	}
+	var user, agent string
+	for _, update := range readTranscriptUpdates(t, wire.Bytes()) {
+		if chunk := update.UserMessageChunk; chunk != nil && chunk.Content.Text != nil {
+			user += chunk.Content.Text.Text
+		}
+		if chunk := update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
+			agent += chunk.Content.Text.Text
+		}
+	}
+	if user != "remember PELICAN" || agent != "OK" {
+		t.Fatalf("replay = user %q, agent %q, want the source's history", user, agent)
+	}
+	s := a.lookup(fork.SessionId)
+	s.mu.Lock()
+	args := strings.Join(s.cliArgsLocked(), " ")
+	s.mu.Unlock()
+	if !strings.Contains(args, "--resume "+source+" --session-id "+string(fork.SessionId)+" --fork-session") {
+		t.Fatalf("args = %s, want the fork still pending", args)
+	}
+}
+
+func TestPromptRacingCloseEndsCancelled(t *testing.T) {
+	a := New(Options{Stderr: io.Discard})
+	s := a.newSession("s", t.TempDir(), "default", "", nil)
+	a.storeSession(s)
+	s.close()
+	resp, err := a.Prompt(context.Background(), acp.PromptRequest{SessionId: s.id, Prompt: []acp.ContentBlock{acp.TextBlock("hello")}})
+	if err != nil || resp.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("prompt = %+v, %v, want cancelled", resp, err)
+	}
+}
+
+func TestDeleteSessionTouchesOnlySessionTranscripts(t *testing.T) {
+	home := testenv.UserHome(t)
+	a := New(Options{Stderr: io.Discard})
+	project := filepath.Join(home, ".claude", "projects", "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(home, ".claude", "outside.jsonl")
+	id := uuid.NewString()
+	transcript := filepath.Join(project, id+".jsonl")
+	for _, path := range []string{outside, transcript} {
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, sid := range []string{"../../outside", uuid.NewString(), id} {
+		if _, err := a.UnstableDeleteSession(context.Background(), acp.UnstableDeleteSessionRequest{SessionId: acp.SessionId(sid)}); err != nil {
+			t.Fatalf("delete %q: %v", sid, err)
+		}
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("delete reached a file outside the session store: %v", err)
+	}
+	if _, err := os.Stat(transcript); !os.IsNotExist(err) {
+		t.Fatalf("transcript survived its delete: %v", err)
 	}
 }

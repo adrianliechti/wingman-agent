@@ -3,6 +3,9 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -98,5 +101,92 @@ func TestUnrelatedThreadLockErrorsKeepTheirDiagnostics(t *testing.T) {
 	frame := peer.response(t, `"load"`)
 	if frame.Error == nil || frame.Error.Code != -32603 || !strings.Contains(string(frame.Error.Data), "failed to acquire thread writer lock") {
 		t.Fatalf("unrelated lock error = %+v", frame.Error)
+	}
+}
+
+func TestListSessionsLeavesOutExecRunsAndTitlesOneLine(t *testing.T) {
+	listParams := make(chan threadListParams, 1)
+	agent, _ := scriptedAgent(t, func(s *contractAppServer, req rpcMessage) {
+		var p threadListParams
+		_ = json.Unmarshal(req.Params, &p)
+		listParams <- p
+		blank, named := " \n ", "  Fix\tthe   build "
+		s.respond(req, threadListResponse{Data: []threadSummary{
+			{ID: "blank-name", Name: &blank, Preview: "first line\n\nsecond line"},
+			{ID: "named", Name: &named, Preview: "ignored"},
+			{ID: "untitled", Preview: "   "},
+		}})
+	})
+	resp, err := agent.ListSessions(context.Background(), acp.ListSessionsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := <-listParams; !slices.Equal(p.SourceKinds, []string{"cli", "vscode", "appServer", "unknown"}) || !p.UseStateDBOnly {
+		t.Fatalf("thread/list params = %+v", p)
+	}
+	var titles []string
+	for _, session := range resp.Sessions {
+		title := "<nil>"
+		if session.Title != nil {
+			title = *session.Title
+		}
+		titles = append(titles, title)
+	}
+	if want := []string{"first line second line", "Fix the build", "<nil>"}; !slices.Equal(titles, want) {
+		t.Fatalf("titles = %q, want %q", titles, want)
+	}
+}
+
+func TestConfigLoadErrorNamesDeletedWorkingDirectory(t *testing.T) {
+	requests := []struct{ method, backend, params, failure string }{
+		{"session/new", "thread/start", `{"cwd":` + contractCwdJSON + `,"mcpServers":[]}`,
+			"failed to load configuration: No such file or directory (os error 2)"},
+		{"session/resume", "thread/resume", `{"sessionId":"s","cwd":` + contractCwdJSON + `,"mcpServers":[]}`,
+			"failed to load config: No such file or directory (os error 2)"},
+	}
+	for _, tt := range []struct {
+		name    string
+		change  func(dir string) error
+		explain bool
+	}{
+		{"deleted", os.Remove, true},
+		{"recreated", func(dir string) error {
+			if err := os.Remove(dir); err != nil {
+				return err
+			}
+			return os.Mkdir(dir, 0o755)
+		}, true},
+		{"present", func(string) error { return nil }, false},
+	} {
+		for _, req := range requests {
+			t.Run(tt.name+"/"+req.method, func(t *testing.T) {
+				dir := filepath.Join(t.TempDir(), "workspace")
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				agent, _ := scriptedAgent(t, func(s *contractAppServer, r rpcMessage) {
+					if r.Method == req.backend {
+						s.respondError(r, -32600, req.failure)
+						return
+					}
+					s.respond(r, map[string]any{})
+				})
+				agent.codex.workDir = newWorkingDirectory(dir)
+				if err := tt.change(dir); err != nil {
+					t.Fatal(err)
+				}
+				peer := newProtocolPeer(t, agent)
+				peer.send(t, `"open"`, req.method, req.params)
+				frame := peer.response(t, `"open"`)
+				if frame.Error == nil {
+					t.Fatalf("%s succeeded", req.method)
+				}
+				data := string(frame.Error.Data)
+				explained := strings.Contains(data, "working directory "+strings.Trim(jsonString(dir), `"`)+" was deleted or replaced")
+				if explained != tt.explain || explained == strings.Contains(data, req.failure) {
+					t.Fatalf("error data = %s", data)
+				}
+			})
+		}
 	}
 }

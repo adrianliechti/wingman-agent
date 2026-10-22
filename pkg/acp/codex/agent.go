@@ -637,11 +637,10 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acpsdk.Unstabl
 func (a *Agent) ListSessions(ctx context.Context, params acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
 	lp := threadListParams{
 		Cursor: params.Cursor,
-		SourceKinds: []string{
-			"cli", "vscode", "exec", "appServer",
-			"subAgent", "subAgentReview", "subAgentCompact",
-			"subAgentThreadSpawn", "subAgentOther", "unknown",
-		},
+		// Exec, review, compact and subagent threads are not chats, so leave them out as the Codex TUI does.
+		SourceKinds: []string{"cli", "vscode", "appServer", "unknown"},
+		// Without it Codex rescans every rollout file on each page.
+		UseStateDBOnly: true,
 	}
 	if params.Cwd != nil && *params.Cwd != "" {
 		lp.Cwd = *params.Cwd
@@ -664,12 +663,14 @@ func (a *Agent) ListSessions(ctx context.Context, params acpsdk.ListSessionsRequ
 }
 
 func sessionTitle(t threadSummary) *string {
-	if t.Name != nil && *t.Name != "" {
-		return t.Name
+	var name string
+	if t.Name != nil {
+		name = *t.Name
 	}
-	if t.Preview != "" {
-		p := t.Preview
-		return &p
+	for _, candidate := range []string{name, t.Preview} {
+		if title := strings.Join(strings.Fields(candidate), " "); title != "" {
+			return &title
+		}
 	}
 	return nil
 }

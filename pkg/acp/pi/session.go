@@ -31,6 +31,10 @@ type session struct {
 	thinkingLevels []string
 	thinking       string
 
+	title       string
+	promptTitle string
+	autoTitle   bool
+
 	cancelTurn context.CancelFunc
 	closeOnce  sync.Once
 }
@@ -66,6 +70,103 @@ func (s *session) refreshConfiguration(ctx context.Context) error {
 	s.thinking = state.thinking()
 	s.mu.Unlock()
 	return nil
+}
+
+// Restored titles omit updatedAt because loading a session is not activity.
+func (s *session) titleUpdate(title string, activity bool) *acpsdk.SessionUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if title == "" || title == s.title {
+		return nil
+	}
+	s.title = title
+	info := &acpsdk.SessionSessionInfoUpdate{SessionUpdate: "session_info_update", Title: &title}
+	if activity {
+		now := time.Now().UTC().Format(time.RFC3339)
+		info.UpdatedAt = &now
+	}
+	return &acpsdk.SessionUpdate{SessionInfoUpdate: info}
+}
+
+func (s *session) fallbackTitle() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.promptTitle
+}
+
+func (s *session) restoreTitle(path string) string {
+	name, prompt := readSessionTitle(path)
+	s.mu.Lock()
+	s.promptTitle = prompt
+	s.mu.Unlock()
+	if name != "" {
+		return name
+	}
+	return prompt
+}
+
+func (s *session) nameFromPrompt(ctx context.Context, prompt []acpsdk.ContentBlock) *acpsdk.SessionUpdate {
+	title := promptTitle(prompt)
+	s.mu.Lock()
+	pending := s.autoTitle && title != ""
+	if pending {
+		s.autoTitle = false
+		s.promptTitle = title
+	}
+	s.mu.Unlock()
+	if !pending {
+		return nil
+	}
+
+	stateData, err := s.proc.getState(ctx)
+	if err != nil {
+		return nil
+	}
+	if name := strings.TrimSpace(parseState(stateData).SessionName); name != "" {
+		return s.titleUpdate(name, true)
+	}
+	if err := s.proc.setSessionName(ctx, title); err != nil {
+		return nil
+	}
+	return s.titleUpdate(title, true)
+}
+
+const contextUsageTimeout = time.Second
+
+func (s *session) publishContextUsage(ctx context.Context, conn *acpsdk.AgentSideConnection) {
+	if conn == nil {
+		return
+	}
+	data, err := s.proc.getSessionStats(ctx, contextUsageTimeout)
+	if err != nil {
+		return
+	}
+	if u := parseContextUsage(data); u != nil {
+		_ = acp.Notify(ctx, conn, s.id, *u)
+	}
+}
+
+func parseContextUsage(data json.RawMessage) *acpsdk.SessionUpdate {
+	var stats struct {
+		Cost         float64 `json:"cost"`
+		ContextUsage *struct {
+			Tokens        *int `json:"tokens"`
+			ContextWindow int  `json:"contextWindow"`
+		} `json:"contextUsage"`
+	}
+	if json.Unmarshal(data, &stats) != nil || stats.ContextUsage == nil {
+		return nil
+	}
+	usage := stats.ContextUsage
+	// Pi reports null tokens until the first reply after a compaction.
+	if usage.Tokens == nil || *usage.Tokens < 0 || usage.ContextWindow <= 0 {
+		return nil
+	}
+	update := &acpsdk.SessionUsageUpdate{SessionUpdate: "usage_update", Used: *usage.Tokens, Size: usage.ContextWindow}
+	if stats.Cost > 0 {
+		update.Cost = &acpsdk.Cost{Amount: stats.Cost, Currency: "USD"}
+	}
+	return &acpsdk.SessionUpdate{UsageUpdate: update}
 }
 
 func (s *session) close() {
@@ -138,6 +239,10 @@ func (s *session) runTurn(ctx context.Context, conn *acpsdk.AgentSideConnection,
 	s.proc.setHandler(t.handle)
 	defer s.proc.setHandler(nil)
 
+	if u := s.nameFromPrompt(turnCtx, prompt); u != nil {
+		t.emit(*u)
+	}
+
 	go func() {
 		err := s.proc.prompt(turnCtx, message, images)
 		t.onPromptResult(err)
@@ -151,6 +256,7 @@ func (s *session) runTurn(ctx context.Context, conn *acpsdk.AgentSideConnection,
 		if err == nil {
 			select {
 			case <-t.settled:
+				s.publishContextUsage(ctx, conn)
 				return acpsdk.StopReasonCancelled, nil
 			case <-s.proc.done:
 			case <-time.After(2 * time.Second):
@@ -169,6 +275,9 @@ func (s *session) runTurn(ctx context.Context, conn *acpsdk.AgentSideConnection,
 		}
 		return "", errors.New("pi process exited unexpectedly")
 	case res := <-t.done:
+		if res.err == nil {
+			s.publishContextUsage(ctx, conn)
+		}
 		return res.stop, res.err
 	}
 }
@@ -279,6 +388,22 @@ func (t *turn) handle(raw json.RawMessage) {
 
 	case "compaction_end":
 		t.emit(acpsdk.UpdateAgentMessageText("Automatic compaction finished.\n\n"))
+
+	case "session_info_changed":
+		var p struct {
+			Name *string `json:"name"`
+		}
+		if json.Unmarshal(raw, &p) != nil {
+			return
+		}
+		// Pi omits the name when it is cleared, which lists the session by its first prompt.
+		title := t.sess.fallbackTitle()
+		if p.Name != nil && strings.TrimSpace(*p.Name) != "" {
+			title = strings.TrimSpace(*p.Name)
+		}
+		if u := t.sess.titleUpdate(title, true); u != nil {
+			t.emit(*u)
+		}
 
 	case "agent_settled":
 		reason := acpsdk.StopReasonEndTurn
@@ -861,6 +986,16 @@ func promptToPi(blocks []acpsdk.ContentBlock) (string, []piImage) {
 	}
 
 	return b.String(), images
+}
+
+func promptTitle(blocks []acpsdk.ContentBlock) string {
+	var texts []string
+	for _, block := range blocks {
+		if block.Text != nil {
+			texts = append(texts, block.Text.Text)
+		}
+	}
+	return sessionTitleText(texts)
 }
 
 func splitDataURL(s string) (mime, data string, ok bool) {

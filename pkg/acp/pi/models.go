@@ -57,6 +57,7 @@ func parseAvailableModels(data json.RawMessage) []modelEntry {
 
 type piState struct {
 	SessionID     string `json:"sessionId"`
+	SessionName   string `json:"sessionName"`
 	ThinkingLevel string `json:"thinkingLevel"`
 	Model         struct {
 		Provider string `json:"provider"`

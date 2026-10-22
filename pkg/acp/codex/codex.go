@@ -26,6 +26,8 @@ type codexClient struct {
 	mcpStartupVersion uint64
 	mcpStartup        map[mcpStartupKey]mcpStartupState
 	mcpStartupChanged chan struct{}
+
+	workDir workingDirectory
 }
 
 type mcpStartupKey struct {
@@ -363,6 +365,7 @@ type threadListParams struct {
 	Cwd            any      `json:"cwd,omitempty"`
 	SourceKinds    []string `json:"sourceKinds,omitempty"`
 	ModelProviders []string `json:"modelProviders,omitempty"`
+	UseStateDBOnly bool     `json:"useStateDbOnly,omitempty"`
 }
 
 type threadListResponse struct {
@@ -587,7 +590,7 @@ func (c *codexClient) initialize(ctx context.Context, p initializeParams) error 
 func (c *codexClient) threadStart(ctx context.Context, p threadStartParams) (threadStartResponse, error) {
 	var out threadStartResponse
 	err := c.rpc.call(ctx, "thread/start", p, &out)
-	return out, err
+	return out, explainConfigLoadError(err, c.workDir)
 }
 
 func (c *codexClient) turnStart(ctx context.Context, p turnStartParams) (turnStartResponse, error) {
@@ -608,13 +611,13 @@ func (c *codexClient) turnSteer(ctx context.Context, p turnSteerParams) error {
 func (c *codexClient) threadResume(ctx context.Context, p threadResumeParams) (threadResumeResponse, error) {
 	var out threadResumeResponse
 	err := c.rpc.call(ctx, "thread/resume", p, &out)
-	return out, err
+	return out, explainConfigLoadError(err, c.workDir)
 }
 
 func (c *codexClient) threadFork(ctx context.Context, p threadForkParams) (threadForkResponse, error) {
 	var out threadForkResponse
 	err := c.rpc.call(ctx, "thread/fork", p, &out)
-	return out, err
+	return out, explainConfigLoadError(err, c.workDir)
 }
 
 func (c *codexClient) threadRead(ctx context.Context, p threadReadParams) (threadReadResponse, error) {

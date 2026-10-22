@@ -2,11 +2,58 @@ package codex
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
 )
+
+type workingDirectory struct {
+	path string
+	info os.FileInfo
+}
+
+func newWorkingDirectory(dir string) workingDirectory {
+	if dir == "" {
+		dir, _ = os.Getwd()
+	} else if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return workingDirectory{}
+	}
+	return workingDirectory{path: dir, info: info}
+}
+
+// A directory recreated at the same path counts too: the process still runs in the deleted one.
+func (w workingDirectory) replaced() bool {
+	if w.info == nil {
+		return false
+	}
+	info, err := os.Stat(w.path)
+	return err != nil || !os.SameFile(w.info, info)
+}
+
+var configLoadErrorPattern = regexp.MustCompile(`(?i)\bload(ing)? config`)
+
+// Codex loads project config from its process directory, so deleting it fails every config load with a bare ENOENT.
+func explainConfigLoadError(err error, dir workingDirectory) error {
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) || !configLoadErrorPattern.MatchString(rpcErr.Message) ||
+		!strings.Contains(rpcErr.Message, "No such file or directory") || !dir.replaced() {
+		return err
+	}
+	return &rpcError{
+		Code:    rpcErr.Code,
+		Message: fmt.Sprintf("Codex cannot read its configuration: its working directory %s was deleted or replaced after the agent started. Restart the agent.", dir.path),
+		Data:    rpcErr.Data,
+	}
+}
 
 func sessionResumeError(err error) error {
 	// The Go SDK recognizes RequestError only as a direct value, so wrapping

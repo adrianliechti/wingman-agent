@@ -263,6 +263,34 @@ func TestObserveOnlyEventsNeverPromptTheGate(t *testing.T) {
 	}
 }
 
+func TestParseAcceptsCodexModelRequestEvents(t *testing.T) {
+	cfg, err := Parse("hooks.json", []byte(`{"hooks":{
+  "PreModelRequest":[{"hooks":[{"type":"command","command":"log-request","async":true}]}],
+  "PostModelRequest":[{"matcher":"ignored","hooks":[{"type":"command","command":"log-usage"}]}],
+  "PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"check"}]}]
+}}`))
+	if err != nil {
+		t.Fatalf("a Codex hooks.json with model request hooks must not fail closed: %v", err)
+	}
+	merged := &Config{}
+	merged.Merge(cfg)
+	if merged.RuleCount() != 3 || len(merged.Hooks.PostModelRequest) != 1 {
+		t.Fatalf("merged config = %+v", merged.Hooks)
+	}
+	if built := merged.Build(t.TempDir(), nil); len(built.PreToolUse) != 1 {
+		t.Fatalf("PreToolUse hooks = %d, want 1", len(built.PreToolUse))
+	}
+
+	for name, data := range map[string]string{
+		"invalid handler": `{"hooks":{"PostModelRequest":[{"hooks":[{"type":"command"}]}]}}`,
+		"unknown event":   `{"hooks":{"Notification":[{"hooks":[{"type":"command","command":"true"}]}]}}`,
+	} {
+		if _, err := Parse(name, []byte(data)); err == nil {
+			t.Fatalf("%s: Parse succeeded", name)
+		}
+	}
+}
+
 func TestConfigFingerprintTracksDeclarationsAndIdentity(t *testing.T) {
 	preToolUse := func(command string) *Config {
 		return &Config{Hooks: Events{PreToolUse: []MatcherGroup{{Matcher: "Bash", Hooks: []Handler{{Type: "command", Command: command}}}}}}

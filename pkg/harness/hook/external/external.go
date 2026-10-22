@@ -100,6 +100,9 @@ type Config struct {
 }
 
 type Events struct {
+	// Codex runs model request hooks as observers only, so parsing without running them weakens no guard.
+	PreModelRequest   []MatcherGroup `json:"PreModelRequest,omitempty"`
+	PostModelRequest  []MatcherGroup `json:"PostModelRequest,omitempty"`
 	PreToolUse        []MatcherGroup `json:"PreToolUse,omitempty"`
 	PermissionRequest []MatcherGroup `json:"PermissionRequest,omitempty"`
 	PostToolUse       []MatcherGroup `json:"PostToolUse,omitempty"`
@@ -243,6 +246,8 @@ func (c *Config) merge(other Config) {
 	if c.Description == "" {
 		c.Description = other.Description
 	}
+	c.Hooks.PreModelRequest = append(c.Hooks.PreModelRequest, other.Hooks.PreModelRequest...)
+	c.Hooks.PostModelRequest = append(c.Hooks.PostModelRequest, other.Hooks.PostModelRequest...)
 	c.Hooks.PreToolUse = append(c.Hooks.PreToolUse, other.Hooks.PreToolUse...)
 	c.Hooks.PermissionRequest = append(c.Hooks.PermissionRequest, other.Hooks.PermissionRequest...)
 	c.Hooks.PostToolUse = append(c.Hooks.PostToolUse, other.Hooks.PostToolUse...)
@@ -272,6 +277,8 @@ type namedGroups struct {
 
 func (c *Config) allEvents() []namedGroups {
 	return []namedGroups{
+		{"PreModelRequest", &c.Hooks.PreModelRequest},
+		{"PostModelRequest", &c.Hooks.PostModelRequest},
 		{"PreToolUse", &c.Hooks.PreToolUse},
 		{"PermissionRequest", &c.Hooks.PermissionRequest},
 		{"PostToolUse", &c.Hooks.PostToolUse},

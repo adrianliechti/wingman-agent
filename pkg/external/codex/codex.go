@@ -50,6 +50,8 @@ func BuildArgs(cfg *CodexConfig) []string {
 		"--config", "features.ultrafast_mode=false",
 		"--config", "features.daemon_auto_start=false",
 		"--config", "features.realtime_conversation=false",
+		// Incremental updates re-declare tools in history, which the gateway would forward as duplicates.
+		"--config", "features.incremental_tools=false",
 		// Avoid persisting a snapshot of the parent shell's credentials.
 		"--config", "features.shell_snapshot=false",
 		"--config", "shell_environment_policy.ignore_default_excludes=false",

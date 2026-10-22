@@ -32,6 +32,7 @@ func TestBuildArgsDisablesUnsupportedCodexFeatures(t *testing.T) {
 		"features.api_key_model_discovery=false",
 		"features.daemon_auto_start=false",
 		"features.realtime_conversation=false",
+		"features.incremental_tools=false",
 		"features.shell_snapshot=false",
 		"shell_environment_policy.ignore_default_excludes=false",
 		"shell_environment_policy.set.WINGMAN_TOKEN=\"\"",

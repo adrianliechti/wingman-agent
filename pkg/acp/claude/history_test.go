@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,10 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
+
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
+	"github.com/adrianliechti/wingman-agent/internal/testenv"
 )
 
 func TestScanSessionMetadataPrefersLatestAITitle(t *testing.T) {
@@ -150,5 +155,172 @@ func TestReplayHidesInjectedAndLoginText(t *testing.T) {
 	}
 	if got := transcriptText(updates); got != "yes" {
 		t.Fatalf("agent text = %q, want login text hidden", got)
+	}
+}
+
+func TestTranscriptPathFollowsClaudeProjectNaming(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", config)
+	if got := encodeCwd("/a/ü😀b"); got != "-a----b" {
+		t.Fatalf("encodeCwd = %q, want one dash per UTF-16 unit", got)
+	}
+
+	cwd := filepath.Join(t.TempDir(), filepath.FromSlash(strings.Repeat("long-segment/", 20)))
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := pathutil.Resolve(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := encodeCwd(resolved)
+	dir := filepath.Join(config, "projects", key[:maxProjectKeyLen]+"-1x2y3z")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeHistoryTranscript(t, filepath.Join(dir, "s.jsonl"), cwd, "hello")
+	if got := transcriptPath(cwd, "s", nil); got != filepath.Join(dir, "s.jsonl") {
+		t.Fatalf("transcriptPath = %q, want the hashed project directory under CLAUDE_CONFIG_DIR", got)
+	}
+	if got := transcriptPath(cwd, "missing", nil); got != "" {
+		t.Fatalf("transcriptPath of a missing transcript = %q", got)
+	}
+}
+
+func writeHistoryTranscript(t *testing.T, path, cwd, text string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(map[string]any{
+		"type": "user", "cwd": cwd,
+		"message": map[string]string{"role": "user", "content": text},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHistoryUsesSubprocessEnvironment(t *testing.T) {
+	home := testenv.UserHome(t)
+	parentConfig, childConfig, childHome := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", parentConfig)
+	cwd, err := pathutil.Resolve(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		env    []string
+		config string
+	}{
+		{"inherited", nil, parentConfig},
+		{"overridden", []string{"CLAUDE_CONFIG_DIR=" + childConfig}, childConfig},
+		{"cleared", []string{"CLAUDE_CONFIG_DIR=", "HOME=" + home, "USERPROFILE=" + home}, filepath.Join(home, ".claude")},
+		{"omitted", []string{"HOME=" + home, "USERPROFILE=" + home}, filepath.Join(home, ".claude")},
+		{"child home", []string{"HOME=" + childHome, "USERPROFILE=" + childHome}, filepath.Join(childHome, ".claude")},
+		{"last value wins", []string{"CLAUDE_CONFIG_DIR=" + parentConfig, "CLAUDE_CONFIG_DIR=" + childConfig}, childConfig},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := acp.SessionId(uuid.NewString())
+			otherConfig := parentConfig
+			if tc.config == parentConfig {
+				otherConfig = childConfig
+			}
+			path := filepath.Join(tc.config, "projects", encodeCwd(cwd), string(id)+".jsonl")
+			otherPath := filepath.Join(otherConfig, "projects", encodeCwd(cwd), string(id)+".jsonl")
+			writeHistoryTranscript(t, path, cwd, "expected profile")
+			writeHistoryTranscript(t, otherPath, cwd, "other profile")
+
+			a := New(Options{Env: tc.env, Stderr: io.Discard})
+			a.modelsLoaded = true
+			t.Cleanup(func() { _ = a.Close() })
+			reader, writer := io.Pipe()
+			t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+			wire := &bytes.Buffer{}
+			a.SetAgentConnection(acp.NewAgentSideConnection(a, wire, reader))
+			ctx := context.Background()
+
+			listed, err := a.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &cwd})
+			if err != nil || len(listed.Sessions) != 1 || listed.Sessions[0].Title == nil || *listed.Sessions[0].Title != "expected profile" {
+				t.Fatalf("list = %+v, %v", listed, err)
+			}
+			if _, err := a.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: id, Cwd: cwd}); err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			if _, err := a.LoadSession(ctx, acp.LoadSessionRequest{SessionId: id, Cwd: cwd}); err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			a.lookup(id).pushTitleUpdate(ctx)
+			var replayed, title string
+			for _, update := range readTranscriptUpdates(t, wire.Bytes()) {
+				if chunk := update.UserMessageChunk; chunk != nil && chunk.Content.Text != nil {
+					replayed += chunk.Content.Text.Text
+				}
+				if info := update.SessionInfoUpdate; info != nil && info.Title != nil {
+					title = *info.Title
+				}
+			}
+			if replayed != "expected profile" || title != "expected profile" {
+				t.Fatalf("replay = %q, title = %q", replayed, title)
+			}
+			if _, err := a.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: id}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("selected profile transcript survived deletion: %v", err)
+			}
+			if _, err := os.Stat(otherPath); err != nil {
+				t.Fatalf("other profile transcript was affected: %v", err)
+			}
+			// The next case reuses the profile roots.
+			if err := os.Remove(otherPath); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestLongProjectPrefixesKeepHistoriesSeparate(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", config)
+	shared := filepath.Join(t.TempDir(), filepath.FromSlash(strings.Repeat("long-segment/", 20)))
+	cwds := []string{filepath.Join(shared, "a"), filepath.Join(shared, "b")}
+	ids := []string{uuid.NewString(), uuid.NewString()}
+	paths := make([]string, len(cwds))
+	for i := range cwds {
+		if err := os.MkdirAll(cwds[i], 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		cwds[i], err = pathutil.Resolve(cwds[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := encodeCwd(cwds[i])
+		dir := filepath.Join(config, "projects", key[:maxProjectKeyLen]+"-hash"+filepath.Base(cwds[i]))
+		paths[i] = filepath.Join(dir, ids[i]+".jsonl")
+		writeHistoryTranscript(t, paths[i], cwds[i], "hello")
+		writeHistoryTranscript(t, filepath.Join(dir, "unknown.jsonl"), "", "no recorded cwd")
+	}
+	for i, cwd := range cwds {
+		listed, err := listProjectSessions(cwd, nil)
+		if err != nil || len(listed) != 1 || string(listed[0].SessionId) != ids[i] {
+			t.Fatalf("list %s = %+v, %v", cwd, listed, err)
+		}
+		if got := transcriptPath(cwd, ids[i], nil); got != paths[i] {
+			t.Fatalf("own transcript = %q, want %q", got, paths[i])
+		}
+		for _, id := range []string{ids[1-i], "unknown"} {
+			if got := transcriptPath(cwd, id, nil); got != "" {
+				t.Fatalf("transcript %s from another or unknown project = %q", id, got)
+			}
+		}
+	}
+	if all, err := listProjectSessions("", nil); err != nil || len(all) != 2 {
+		t.Fatalf("unfiltered list = %+v, %v", all, err)
 	}
 }

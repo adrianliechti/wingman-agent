@@ -175,12 +175,14 @@ func (a *Agent) NewSession(ctx context.Context, params acpsdk.NewSessionRequest)
 	s := newSession(id, cwd, proc)
 	s.cleanup = bridge.cleanup
 	s.models = models
+	s.autoTitle = true
 	if err := s.refreshConfiguration(ctx); err != nil {
 		s.close()
 		return acpsdk.NewSessionResponse{}, err
 	}
 
 	a.storeSession(s)
+	a.publishInitialUsage(s)
 
 	return acpsdk.NewSessionResponse{
 		SessionId:     id,
@@ -244,6 +246,8 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSes
 		if err := s.refreshConfiguration(ctx); err != nil {
 			return acpsdk.SetSessionConfigOptionResponse{}, err
 		}
+		// Models differ in context window size.
+		s.publishContextUsage(ctx, a.conn)
 
 	case effortConfigID:
 		s.mu.Lock()
@@ -399,8 +403,24 @@ func (a *Agent) LoadSession(ctx context.Context, params acpsdk.LoadSessionReques
 	if data, err := proc.getMessages(ctx); err == nil {
 		replayMessages(send, data, cwd)
 	}
+	if u := s.titleUpdate(s.restoreTitle(file.Path), false); u != nil {
+		send(*u)
+	}
+	s.publishContextUsage(ctx, a.conn)
 
 	return acpsdk.LoadSessionResponse{ConfigOptions: s.configOptions()}, nil
+}
+
+func (a *Agent) publishInitialUsage(s *session) {
+	if a.conn == nil {
+		return
+	}
+	// Asynchronous so it normally follows the response that tells the client the session id.
+	go func() {
+		if a.lookup(s.id) == s {
+			s.publishContextUsage(context.Background(), a.conn)
+		}
+	}()
 }
 
 func (a *Agent) spawnSessionProcess(ctx context.Context, cwd string, extraArgs []string, servers []acpsdk.McpServer) (*process, *preparedMCPBridge, error) {
@@ -498,6 +518,7 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acpsdk.UnstableF
 	}
 
 	a.storeSession(s)
+	a.publishInitialUsage(s)
 	return acpsdk.UnstableForkSessionResponse{SessionId: id}, nil
 }
 
