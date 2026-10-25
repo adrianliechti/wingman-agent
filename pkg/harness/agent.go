@@ -629,7 +629,7 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 			runErr = context.Canceled
 		}
 	}
-	if runErr == nil && resp != nil && (len(resp.messages) < len(committed) || !messagesEqual(committed, resp.messages[:len(committed)])) {
+	if runErr == nil && resp != nil && !committedPrefixEqual(committed, resp.messages) {
 		runErr = fmt.Errorf("final response does not match its committed output items")
 	}
 	if resp != nil {

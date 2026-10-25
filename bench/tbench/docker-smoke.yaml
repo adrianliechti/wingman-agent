@@ -1,0 +1,5 @@
+# The comparison tasks each use a single service and need no Compose DNS.
+# Reuse Docker's bridge so a busy local daemon needs no new address pool.
+services:
+  main:
+    network_mode: bridge

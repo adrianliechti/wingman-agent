@@ -199,6 +199,27 @@ func (a *Agent) synthesizeEventsLocked() {
 	}
 }
 
+// committedPrefixEqual reports whether final restates the committed items.
+// Providers may re-encrypt an opaque reasoning payload between its done event
+// and the final snapshot, so it only has to be present on both sides.
+func committedPrefixEqual(committed, final []Message) bool {
+	if len(final) < len(committed) {
+		return false
+	}
+	final = CloneMessages(final[:len(committed)])
+	for i, message := range committed {
+		for j, content := range message.Content {
+			if content.Reasoning == nil || content.Reasoning.Content == "" || j >= len(final[i].Content) {
+				continue
+			}
+			if r := final[i].Content[j].Reasoning; r != nil && r.Content != "" {
+				r.Content = content.Reasoning.Content
+			}
+		}
+	}
+	return messagesEqual(committed, final)
+}
+
 func messagesEqual(a, b []Message) bool {
 	if len(a) == 0 && len(b) == 0 {
 		return true

@@ -1,6 +1,8 @@
 version: "3"
 
 vars:
+  DATASET: '{{default "terminal-bench/terminal-bench@4.0.0" .DATASET}}'
+  ENVIRONMENT: '{{default "modal" .ENVIRONMENT}}'
   MODEL: '{{default "openai/gpt-5.4" .MODEL}}'
   WINGMAN_MODEL: '{{default "gpt-5.4" .WINGMAN_MODEL}}'
   CONCURRENCY: '{{default "1" .CONCURRENCY}}'
@@ -10,19 +12,7 @@ vars:
   LIMIT: '{{default "" .LIMIT}}'
   EFFORT: '{{default "" .EFFORT}}'
   RETRIES: '{{default "2" .RETRIES}}'
-
-  # Lightweight default set: the full dataset minus tasks that genuinely cannot
-  # run on this host — Windows/nested-virt containers, and heavy ML/R/Coq/physics
-  # installs that time out under x86 emulation on Apple Silicon. Transient Docker
-  # image-pull failures (network EOF) are NOT excluded here; RETRIES recovers
-  # those. Override with your own EXCLUDE to adjust.
-  DEFAULT_EXCLUDE: >-
-    install-windows-3-11 gpt2-codegolf qemu-alpine-ssh qemu-startup
-    compile-compcert fix-ocaml-gc prove-plus-comm
-    bn-fit-modify mcmc-sampling-stan rstan-to-pystan
-    caffe-cifar-10 hf-model-inference pytorch-model-cli pytorch-model-recovery
-    torch-pipeline-parallelism torch-tensor-parallelism train-fasttext
-    mteb-leaderboard mteb-retrieve sam-cell-seg reshard-c4-data tune-mjcf
+  ATTEMPTS: '{{default "1" .ATTEMPTS}}'
 
 tasks:
   setup:
@@ -40,12 +30,24 @@ tasks:
       - uv sync --locked --python 3.12
 
   check:
-    desc: Verify Harbor, Docker, credentials, and the Wingman agent descriptor
+    desc: Verify Harbor, the selected sandbox, credentials, and the Wingman agent descriptor
     deps: [setup]
     dir: '{{.TASKFILE_DIR}}/..'
     cmds:
       - bench/.venv/bin/harbor --version
-      - docker info --format 'Docker {{`{{.ServerVersion}}`}}'
+      - |
+        case "{{.ENVIRONMENT}}" in
+          docker)
+            docker info --format 'Docker {{`{{.ServerVersion}}`}}'
+            ;;
+          modal)
+            bench/.venv/bin/python -c 'from harbor.environments.modal import ModalEnvironment; ModalEnvironment.preflight()'
+            ;;
+          *)
+            echo "Unsupported ENVIRONMENT={{.ENVIRONMENT}}; use modal or docker" >&2
+            exit 1
+            ;;
+        esac
       - python3 -m json.tool bench/tbench/agent.json >/dev/null
       - |
         if [ -z "${WINGMAN_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
@@ -54,8 +56,11 @@ tasks:
         fi
 
   tbench:
-    desc: Run Terminal-Bench 2 with configurable concurrency
-    deps: [check]
+    desc: Run Terminal-Bench 4 with configurable sandbox, concurrency, and attempts
+    deps:
+      - task: check
+        vars:
+          ENVIRONMENT: '{{.ENVIRONMENT}}'
     dir: '{{.TASKFILE_DIR}}/..'
     env:
       PYTHONPATH: '{{.TASKFILE_DIR}}/..'
@@ -64,14 +69,16 @@ tasks:
         bash -euo pipefail -c '
           args=(
             bench/.venv/bin/harbor run
-            --dataset terminal-bench/terminal-bench-2
+            --dataset "{{.DATASET}}"
+            --env "{{.ENVIRONMENT}}"
             --extra-instruction-path bench/tbench/instructions.md
             --agent bench.tbench.agent:WingmanAgent
             --model "{{.MODEL}}"
             --n-concurrent "{{.CONCURRENCY}}"
+            --n-attempts "{{.ATTEMPTS}}"
             --agent-timeout-multiplier "{{.AGENT_TIMEOUT_MULTIPLIER}}"
             --max-retries "{{.RETRIES}}"
-            --jobs-dir bench/jobs
+            --jobs-dir "{{.TASKFILE_DIR}}/jobs"
             --yes
           )
 
@@ -118,20 +125,28 @@ tasks:
         '
 
   default:
-    desc: Run the lightweight default set (skips Windows/heavy-ML tasks that can't provision or are too slow on macOS)
+    desc: Run Terminal-Bench 4 on Modal, including GPU tasks
     cmds:
       - task: tbench
-        vars:
-          EXCLUDE: '{{.DEFAULT_EXCLUDE}}'
 
   quick:
-    desc: Run one representative task from the official Terminal-Bench 2 dataset
+    desc: Run one CPU task from Terminal-Bench 4 in the selected sandbox
     cmds:
       - task: tbench
         vars:
           CONCURRENCY: "1"
-          INCLUDE: openssl-selfsigned-cert
+          ATTEMPTS: "1"
+          INCLUDE: html-js-filter
           LIMIT: "1"
+
+  compare:
+    desc: Compare Wingman and Claude CLI on two CPU tasks through the local gateway
+    deps: [setup]
+    dir: '{{.TASKFILE_DIR}}/..'
+    env:
+      PYTHONPATH: '{{.TASKFILE_DIR}}/..'
+    cmds:
+      - bench/.venv/bin/harbor run --config bench/tbench/compare.yaml --jobs-dir '{{.TASKFILE_DIR}}/jobs' --yes
 
   clean:
     desc: Remove the local benchmark environment and Harbor job outputs

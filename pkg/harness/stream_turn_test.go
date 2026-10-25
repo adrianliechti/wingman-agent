@@ -401,3 +401,20 @@ func TestStreamingDuplicateCallRunsOnce(t *testing.T) {
 		}
 	})
 }
+
+// OpenAI re-encrypts a reasoning item's payload between its done event and the
+// final snapshot. Both ciphertexts replay; the run must not fail over them.
+func TestCompleteAcceptsReencryptedReasoningInFinalResponse(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const done = `{"type":"reasoning","id":"rs_probe","encrypted_content":"opaque-a","summary":[]}`
+		const final = `{"type":"reasoning","id":"rs_probe","encrypted_content":"opaque-b","summary":[]}`
+		client := streamingTestClient(func(*http.Request) string {
+			return itemDoneEvents(done, finalAnswerOutput) +
+				fmt.Sprintf("data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"output\":[%s,%s],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n", final, finalAnswerOutput)
+		})
+		a := &Agent{Config: &Config{client: &client, MaxTurns: 1}}
+		if err := runLoopTurn(t.Context(), a, "work"); err != nil {
+			t.Fatal(err)
+		}
+	})
+}

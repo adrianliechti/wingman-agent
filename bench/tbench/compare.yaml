@@ -1,0 +1,43 @@
+# Exploratory comparison: two CPU tasks, one attempt per agent, five minutes
+# of agent execution per task. This is not a full-budget leaderboard run.
+# The Taskfile supplies an absolute jobs_dir so Compose artifact copies resolve
+# against the host filesystem rather than the task's project directory.
+n_attempts: 1
+n_concurrent_trials: 1
+retry:
+  max_retries: 0
+environment:
+  type: docker
+  # kwargs applies the overlay to the agent and the separate verifier sandbox.
+  kwargs:
+    extra_docker_compose:
+      - bench/tbench/docker-smoke.yaml
+extra_instruction_paths:
+  - bench/tbench/instructions.md
+agents:
+  - import_path: bench.tbench.agent:WingmanAgent
+    model_name: anthropic/claude-sonnet-5-5
+    override_timeout_sec: 300
+    env:
+      WINGMAN_URL: ${WINGMAN_BENCH_URL:-http://host.docker.internal:4242}
+      WINGMAN_TOKEN: ${WINGMAN_BENCH_TOKEN:-local-benchmark-placeholder}
+      WINGMAN_MODEL: claude-sonnet-5-5
+      WINGMAN_EFFORT: medium
+      WINGMAN_ELICITATION: accept
+      WINGMAN_SANDBOX: "off"
+  - name: claude-code
+    # With a custom Anthropic endpoint Harbor passes this ID to Claude as-is.
+    model_name: claude-sonnet-5-5
+    override_timeout_sec: 300
+    kwargs:
+      version: 2.1.310
+      reasoning_effort: medium
+    env:
+      ANTHROPIC_BASE_URL: ${WINGMAN_BENCH_URL:-http://host.docker.internal:4242}
+      ANTHROPIC_API_KEY: ${WINGMAN_BENCH_TOKEN:-local-benchmark-placeholder}
+datasets:
+  - name: terminal-bench/terminal-bench
+    ref: 4.0.0
+    task_names:
+      - terminal-bench/bun-sourcemap-leak
+      - terminal-bench/wal-recovery-ordering
