@@ -91,6 +91,7 @@ var gpt56Efforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
 var gpt6SolLunaEfforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
 var gpt6AstraEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 var gpt61SolEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+var gpt61TerraEfforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
 var claudeAlwaysThinkingEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 var claudeHaiku55Efforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
 var qwen38Efforts = []string{"none", "low", "medium", "xhigh"}
@@ -382,6 +383,21 @@ var Models = []Model{
 
 		Effort:    "low",
 		Efforts:   gpt61SolEfforts,
+		Verbosity: "low",
+	},
+	{
+		ID: "gpt-6.1-terra",
+
+		Namespace: "openai",
+		Name:      "GPT 6.1 Terra",
+		Class:     ClassMedium,
+
+		Output: 128000,
+
+		Context:          1050000,
+		ContextThreshold: 272_000,
+
+		Efforts:   gpt61TerraEfforts,
 		Verbosity: "low",
 	},
 	{

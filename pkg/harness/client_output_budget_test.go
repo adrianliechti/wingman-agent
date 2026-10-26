@@ -34,6 +34,8 @@ func TestAgentSendsSupportedOutputTokenBudget(t *testing.T) {
 		{model: "gpt-6-astra", budget: 12_345, want: 12_345},
 		{model: "openai/gpt-6-astra", want: 64_000},
 		{model: "openai/gpt-6-astra", budget: 96_000, want: 96_000},
+		{model: "gpt-6.1-terra", want: 64_000},
+		{model: "openai/gpt-6.1-terra", budget: 256_000, want: 128_000},
 		{model: "qwen3.8:27b-mlx", want: 64_000},
 		{model: "gpt-5.3-codex-spark", budget: 128_000, want: 32_000},
 		{model: "budget-64k", want: 64_000},

@@ -89,7 +89,8 @@ func TestModelSelectionCrossFamilyFallback(t *testing.T) {
 		utility   string
 	}{
 		{[]string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}, "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"},
-		{[]string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}, "gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"},
+		{[]string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}, "gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"},
+		{[]string{"gpt-6-astra", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}, "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna"},
 		{[]string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}, "gpt-6-sol", "gpt-6-astra", "gpt-6-luna"},
 	} {
 		g := upstreamAgent(tc.available...)
@@ -207,7 +208,7 @@ func TestSessionAutoEffortOverridesGlobalSetting(t *testing.T) {
 }
 
 func TestEffortDefaultsFollowModelAcrossModes(t *testing.T) {
-	for _, id := range []string{"claude-sonnet-5-5", "gpt-6-sol", "gpt-6-astra", "qwen3.8:27b-mlx"} {
+	for _, id := range []string{"claude-sonnet-5-5", "gpt-6-sol", "gpt-6-astra", "gpt-6.1-terra", "qwen3.8:27b-mlx"} {
 		t.Run(id, func(t *testing.T) {
 			a := upstreamAgent(id)
 			s := &sessionState{}
@@ -250,6 +251,26 @@ func TestReasoningOnlyGPTEffortDefaultsAndClampsOverrides(t *testing.T) {
 
 			if err := a.SetEffort(context.Background(), "", "none"); err == nil {
 				t.Fatal("SetEffort accepted unsupported effort none")
+			}
+		})
+	}
+}
+
+func TestGPT61TerraPreservesSupportedEfforts(t *testing.T) {
+	for _, id := range []string{"gpt-6.1-terra", "~openai/GPT-6.1-TERRA:latest"} {
+		t.Run(id, func(t *testing.T) {
+			a := upstreamAgent(id)
+			current, values := a.Effort("")
+			if current != "auto" || !slices.Equal(values, []string{"auto", "none", "low", "medium", "high", "xhigh", "max"}) {
+				t.Fatalf("effort selector = %q/%v", current, values)
+			}
+			for _, effort := range values[1:] {
+				if err := a.SetEffort(t.Context(), "", effort); err != nil {
+					t.Fatal(err)
+				}
+				if got := a.effortFor(nil); got != effort {
+					t.Fatalf("effort = %q, want %q", got, effort)
+				}
 			}
 		})
 	}

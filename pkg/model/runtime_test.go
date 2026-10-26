@@ -26,6 +26,7 @@ func TestModelRuntimeFields(t *testing.T) {
 		{"claude-haiku-4-5", 200_000, nil},
 		{"gpt-6-astra", 272_000, gpt6AstraEfforts},
 		{"gpt-6.1-sol", 272_000, gpt61SolEfforts},
+		{"gpt-6.1-terra", 272_000, gpt61TerraEfforts},
 		{"gpt-6-sol", 272_000, gpt6SolLunaEfforts},
 		{"gpt-6-luna", 272_000, gpt6SolLunaEfforts},
 		{"gpt-5.6-sol", 272_000, gpt56Efforts},
@@ -61,7 +62,7 @@ func TestModelRuntimeFields(t *testing.T) {
 	}
 
 	t.Setenv("WINGMAN_CONTEXT_WINDOW_MODE", "full")
-	for id, want := range map[string]int{"gpt-6-astra": 1_050_000, "gpt-6.1-sol": 1_050_000, "gpt-6-sol": 1_050_000, "gpt-6-luna": 1_050_000, "gpt-5.6-sol": 1_050_000, "MiniMax-M3": 1_000_000, "grok-4.6": 500_000} {
+	for id, want := range map[string]int{"gpt-6-astra": 1_050_000, "gpt-6.1-sol": 1_050_000, "gpt-6.1-terra": 1_050_000, "gpt-6-sol": 1_050_000, "gpt-6-luna": 1_050_000, "gpt-5.6-sol": 1_050_000, "MiniMax-M3": 1_000_000, "grok-4.6": 500_000} {
 		m, _ := Find(id)
 		if got := m.ContextTokens(); got != want {
 			t.Errorf("Find(%q).ContextTokens() with full context mode = %d, want %d", id, got, want)

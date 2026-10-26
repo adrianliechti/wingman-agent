@@ -35,6 +35,7 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"claude-mythos-5-1", "Claude Mythos 5.1", ClassLarge, 1_000_000, 128_000},
 		{"gpt-6-astra", "GPT 6 Astra", ClassLarge, 1_050_000, 128_000},
 		{"gpt-6.1-sol", "GPT 6.1 Sol", ClassMedium, 1_050_000, 128_000},
+		{"gpt-6.1-terra", "GPT 6.1 Terra", ClassMedium, 1_050_000, 128_000},
 		{"gpt-6-sol", "GPT 6 Sol", ClassMedium, 1_050_000, 128_000},
 		{"gpt-6-luna", "GPT 6 Luna", ClassSmall, 1_050_000, 128_000},
 	}
@@ -54,15 +55,16 @@ func TestCurrentProviderModels(t *testing.T) {
 
 func TestCurrentProviderModelAvailability(t *testing.T) {
 	available := Available(map[string]bool{
-		"gpt-6-astra":  true,
-		"gpt-6.1-sol":  true,
-		"gpt-6-sol":    true,
-		"gpt-6-luna":   true,
-		"gpt-5.4-nano": true,
-		"kimi-k3":      true,
-		"glm-5.3":      true,
-		"MiniMax-M3":   true,
-		"grok-4.6":     true,
+		"gpt-6-astra":   true,
+		"gpt-6.1-sol":   true,
+		"gpt-6.1-terra": true,
+		"gpt-6-sol":     true,
+		"gpt-6-luna":    true,
+		"gpt-5.4-nano":  true,
+		"kimi-k3":       true,
+		"glm-5.3":       true,
+		"MiniMax-M3":    true,
+		"grok-4.6":      true,
 	})
 
 	ids := make([]string, 0, len(available))
@@ -70,7 +72,7 @@ func TestCurrentProviderModelAvailability(t *testing.T) {
 		ids = append(ids, m.ID)
 	}
 
-	if want := []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6"}; !slices.Equal(ids, want) {
+	if want := []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6"}; !slices.Equal(ids, want) {
 		t.Fatalf("Available() ids = %v, want %v", ids, want)
 	}
 }
@@ -255,6 +257,7 @@ func TestCanonicalID(t *testing.T) {
 		"openai/gpt-5.6":                     "gpt-5.6-sol",
 		"~openai/GPT-6-ASTRA:latest":         "gpt-6-astra",
 		"~openai/GPT-6.1-SOL:latest":         "gpt-6.1-sol",
+		"~openai/GPT-6.1-TERRA:latest":       "gpt-6.1-terra",
 		"qwen/qwen3.8-27b:Q4_K_M":            "qwen3.8",
 		"anthropic/claude-sonnet-5-5:latest": "claude-sonnet-5-5",
 		"MiniMax-M3":                         "minimax-m3",
@@ -289,6 +292,7 @@ func TestProviderPrefixedModelMapping(t *testing.T) {
 		"openai/gpt-5.6-sol":          "GPT 5.6 Sol",
 		"openai/gpt-6-astra":          "GPT 6 Astra",
 		"openai/gpt-6.1-sol":          "GPT 6.1 Sol",
+		"openai/gpt-6.1-terra":        "GPT 6.1 Terra",
 		"openai/gpt-6-sol":            "GPT 6 Sol",
 		"openai/gpt-6-luna":           "GPT 6 Luna",
 		"google/gemini-3.1-pro":       "Gemini 3.1 Pro",
