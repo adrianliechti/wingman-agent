@@ -17,6 +17,10 @@ those assets before rebuilding the server or running browser tests.
 
 From the repository root, `task run:web` builds the UI and starts the server.
 
+Vite uses Oxc for React transforms, including automatic memoization through
+`oxc-transform-react`. This native React Compiler integration is experimental;
+keep its version compatible with `@vitejs/plugin-react` when updating dependencies.
+
 Mermaid 12 previews require an ES2024-capable browser (Safari 17.4+). Diagram
 renderers load on demand and use Mermaid's default layouts and look, with
 light and dark color themes that follow the app.
