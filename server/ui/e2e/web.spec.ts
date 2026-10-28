@@ -4542,7 +4542,7 @@ test("runs a coding tool and renders its result", async ({ page }) => {
 	await expect(usage).toHaveCount(0);
 });
 
-test("renders streaming Markdown with lazy Monaco highlighting", async ({
+test("renders streaming Markdown with TanStack highlighting", async ({
 	page,
 }) => {
 	const input = await composer(page);
@@ -4560,9 +4560,7 @@ test("renders streaming Markdown with lazy Monaco highlighting", async ({
 	await expect(goBlock.locator("pre > code")).toHaveText(
 		'package main\n\nfunc main() { println("ok") }',
 	);
-	await expect(goBlock.locator(".md-token-keyword").first()).toHaveText(
-		"package",
-	);
+	await expect(goBlock.locator(".th-keyword").first()).toHaveText("package");
 	await expect(
 		goBlock.getByRole("button", { name: "Copy code" }),
 	).toBeVisible();
@@ -4592,6 +4590,156 @@ test("renders streaming Markdown with lazy Monaco highlighting", async ({
 	await expect(
 		markdown.getByRole("link", { name: "Documentation" }),
 	).toHaveAttribute("target", "_blank");
+});
+
+test("preserves highlighted code, aliases and links without loading Monaco", async ({
+	page,
+	context,
+}) => {
+	const samples = [
+		{ lang: "c", code: "int main() {\n\treturn 42;\n}", token: "return" },
+		{ lang: "rs", code: 'fn main() { println!("🦀"); }', token: "fn" },
+		{ lang: "GOLANG", code: "package main", token: "package" },
+		{
+			lang: "tsx",
+			code: 'const view = <a href="https://example.com/docs">Hi</a>;',
+			token: "const",
+		},
+		{ lang: "bash", code: 'echo "https://example.com/${USER}"', token: "echo" },
+		{
+			lang: "py",
+			code: 'def read():\n\treturn """first\n\nlast"""',
+			token: "def",
+		},
+		{
+			lang: "unknown-language",
+			code: '<img src=x onerror="alert(1)">\n\n  https://example.com/plain',
+			token: null,
+		},
+		{
+			lang: "js",
+			meta: 'file="example.js" lineNumbers {1} ins={2} del={4}',
+			code: 'const first = 1;  \nconst url = "https://example.com/docs";\n\n// tail  ',
+			token: "const",
+		},
+	];
+	const editorRequests: string[] = [];
+	page.on("request", (request) => {
+		if (/\/monacoRuntime\.js(?:\?|$)/.test(request.url())) {
+			editorRequests.push(request.url());
+		}
+	});
+	await mockSavedSessions(
+		page,
+		[
+			{
+				id: "highlight",
+				title: "Highlight samples",
+				updated_at: "2026-10-28T00:00:00Z",
+			},
+		],
+		[],
+		"wingman",
+		[
+			{ id: "user", type: "user", content: "Show code samples" },
+			{
+				id: "code",
+				type: "assistant",
+				content:
+					samples
+						.map(
+							({ lang, code, meta = "" }) =>
+								`\`\`\`${lang} ${meta}\n${code}\n\`\`\``,
+						)
+						.join("\n\n") +
+					"\n\nSee https://example.com/__docs__/page and footnote[^note].\n\n[^note]: Reference text.",
+			},
+		],
+	);
+	await page.goto("/wingman/highlight");
+	const markdown = page.locator(
+		'[data-entry-id="code"] [data-markdown-content]',
+	);
+	for (const { lang, code, token } of samples) {
+		const block = markdown.locator(
+			`[data-markdown-code][data-language="${lang}"]`,
+		);
+		await expect(block.locator("pre > code")).toHaveText(code);
+		// textContent catches whitespace changes that toHaveText normalizes.
+		expect(await block.locator("pre > code").textContent()).toBe(code);
+		if (token) {
+			await expect(
+				block
+					.locator(".th-token")
+					.filter({ hasText: new RegExp(`^${token}$`) })
+					.first(),
+			).toBeAttached();
+		} else {
+			await expect(block.locator(".th-token")).toHaveCount(0);
+			await expect(block.locator("img")).toHaveCount(0);
+		}
+	}
+	const shellBlock = markdown.locator('[data-language="bash"]');
+	const annotatedBlock = markdown.locator('[data-language="js"]');
+	await expect(
+		annotatedBlock.locator("[data-markdown-code-header]"),
+	).toContainText("example.js");
+	await expect(annotatedBlock.locator(".th-line")).toHaveCount(4);
+	await expect(annotatedBlock.locator(".th-line--highlighted")).toHaveAttribute(
+		"data-line",
+		"1",
+	);
+	await expect(annotatedBlock.locator(".th-line--inserted")).toHaveAttribute(
+		"data-line",
+		"2",
+	);
+	await expect(annotatedBlock.locator(".th-line--deleted")).toHaveAttribute(
+		"data-line",
+		"4",
+	);
+	await expect(annotatedBlock.locator("pre")).toHaveClass(
+		/th-code--line-numbers/,
+	);
+	await expect(
+		markdown.getByRole("link", {
+			name: "https://example.com/__docs__/page",
+			exact: true,
+		}),
+	).toHaveAttribute("href", "https://example.com/__docs__/page");
+	const footnoteReference = markdown.locator("[data-footnote-ref]");
+	const footnoteTarget = await footnoteReference.getAttribute("href");
+	await expect(markdown.locator(footnoteTarget!)).toContainText(
+		"Reference text.",
+	);
+	await expect(markdown.locator("#footnote-label")).toHaveClass("sr-only");
+	const links = shellBlock.locator("a.md-code-link");
+	const href = "https://example.com/${USER}";
+	expect((await links.allTextContents()).join("")).toBe(href);
+	for (const link of await links.all()) {
+		await expect(link).toHaveAttribute("href", href);
+	}
+	const link = links.first();
+	expect(
+		await link.evaluate((element) =>
+			element.dispatchEvent(
+				new MouseEvent("click", { bubbles: true, cancelable: true }),
+			),
+		),
+	).toBe(false);
+	await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+	await shellBlock
+		.getByRole("button", { name: "Copy code", exact: true })
+		.click();
+	expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+		samples[4].code,
+	);
+	await annotatedBlock
+		.getByRole("button", { name: "Copy code", exact: true })
+		.click();
+	expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+		samples[7].code,
+	);
+	expect(editorRequests).toEqual([]);
 });
 
 test("renders an elicitation form and returns the chosen option", async ({
@@ -6718,17 +6866,25 @@ test("recovery: drafts survive reload with attachments and recover after closing
 test("recovery: chat startup defers the editor until a file opens", async ({
 	page,
 }) => {
-	const editors: string[] = [];
+	const runtimes: string[] = [];
 	page.on("request", (request) => {
-		if (/\/assets\/editor\.js/.test(request.url())) editors.push(request.url());
+		if (/\/assets\/monacoRuntime\.js(?:\?|$)/.test(request.url())) {
+			runtimes.push(request.url());
+		}
 	});
 	await composer(page);
 	// Network idleness proves preload did not just lag behind the first paint.
 	await page.waitForLoadState("networkidle");
-	expect(editors).toHaveLength(0);
+	expect(runtimes).toHaveLength(0);
+	expect(await page.evaluate(() => typeof window.MonacoEnvironment)).toBe(
+		"undefined",
+	);
 	await page.getByRole("treeitem", { name: /editable\.txt/ }).click();
 	await expect(page.locator(".monaco-editor").first()).toBeVisible();
-	expect(editors).toHaveLength(1);
+	expect(runtimes).toHaveLength(1);
+	expect(
+		await page.evaluate(() => typeof window.MonacoEnvironment?.getWorker),
+	).toBe("function");
 });
 
 for (const unavailable of [false, true]) {

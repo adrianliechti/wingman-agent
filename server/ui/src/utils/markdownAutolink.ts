@@ -1,14 +1,12 @@
-import type {
-	InlineNode,
-	MarkdownExtension,
-	TextNode,
-} from "@tanstack/markdown";
+import type { MarkdownExtension } from "@tanstack/markdown";
 
 // A URL in CommonMark <...> autolink form (which the parser leaves as text), or
 // a bare http(s):// or www. URL. The bare www. form must not start mid-word
 // ("runwww.example.com"). Only web schemes match, so hrefs need no sanitizing.
 const URL_PATTERN =
 	/<(https?:\/\/[^\s<>]+)>|(?<![\w.])(?:https?:\/\/|www\.)[^\s<>]+/gi;
+// Sticky matching only inspects the current parser position, never a suffix scan.
+const INLINE_URL_PATTERN = new RegExp(URL_PATTERN.source, "iy");
 
 // Cheap pre-check so the common URL-free text node skips the regex scan.
 const MAYBE_URL = /:\/\/|www\./i;
@@ -45,6 +43,19 @@ export interface UrlMatch {
 	bracketed: boolean;
 }
 
+function matchUrl(match: RegExpExecArray): UrlMatch | undefined {
+	const [whole, bracketed] = match;
+	const url = bracketed ?? trimTrailing(whole);
+	if (!HAS_HOST.test(url)) return undefined;
+	const start = match.index + (bracketed ? 1 : 0);
+	return {
+		start,
+		end: start + url.length,
+		href: /^www\./i.test(url) ? `https://${url}` : url,
+		bracketed: bracketed !== undefined,
+	};
+}
+
 // Finds the URLs in a plain string. Shared by the markdown extension and the
 // code renderer so both agree on URL boundaries.
 export function findUrls(value: string): UrlMatch[] {
@@ -52,66 +63,36 @@ export function findUrls(value: string): UrlMatch[] {
 
 	const urls: UrlMatch[] = [];
 	for (const match of value.matchAll(URL_PATTERN)) {
-		const [whole, bracketed] = match;
-		const url = bracketed ?? trimTrailing(whole);
-		if (!HAS_HOST.test(url)) continue;
-
-		const start = match.index + (bracketed ? 1 : 0);
-		urls.push({
-			start,
-			end: start + url.length,
-			href: /^www\./i.test(url) ? `https://${url}` : url,
-			bracketed: bracketed !== undefined,
-		});
+		const url = matchUrl(match);
+		if (url) urls.push(url);
 	}
 	return urls;
 }
 
-// Splits a text node into text and link nodes, dropping any <...> wrapper.
-function linkifyText(node: TextNode): InlineNode | InlineNode[] {
-	const { value } = node;
-	const urls = findUrls(value);
-	if (urls.length === 0) return node;
-
-	const nodes: InlineNode[] = [];
-	let cursor = 0;
-	for (const { start, end, href, bracketed } of urls) {
-		const from = bracketed ? start - 1 : start;
-		if (from > cursor) {
-			nodes.push({ type: "text", value: value.slice(cursor, from) });
-		}
-		nodes.push({
-			type: "link",
-			href,
-			children: [{ type: "text", value: value.slice(start, end) }],
-		});
-		cursor = bracketed ? end + 1 : end;
-	}
-	if (cursor < value.length) {
-		nodes.push({ type: "text", value: value.slice(cursor) });
-	}
-	return nodes;
-}
-
-// transformInline runs once per inline container, so nested children (strong,
-// emphasis, ...) are walked here. Existing links are skipped to avoid nesting.
-function transformNodes(nodes: InlineNode[]): InlineNode[] {
-	return nodes.flatMap((node): InlineNode | InlineNode[] => {
-		if (node.type === "text") return linkifyText(node);
-		if ("children" in node && node.type !== "link") {
-			return { ...node, children: transformNodes(node.children) };
-		}
-		return node;
-	});
-}
-
-// Turns URLs in already-tokenized inline text into link nodes. Code spans and
-// fences are separate node types by then, so URLs in code stay untouched.
-// Known gap: emphasis is tokenized first, so a URL containing "*…*" or
-// "/__x__" is split at the emphasis and only the part before it is linked.
+// Parse URLs before emphasis can split their paths. The Markdown parser keeps
+// code/escapes ahead of this hook and exposes link context to avoid nested links.
 export function autolinkExtension(): MarkdownExtension {
 	return {
 		name: "autolink",
-		transformInline: transformNodes,
+		inlineParser: {
+			markers: "<hHwW",
+			parse({ source, index, inLink }) {
+				if (inLink) return undefined;
+				INLINE_URL_PATTERN.lastIndex = index;
+				const match = INLINE_URL_PATTERN.exec(source);
+				const url = match && matchUrl(match);
+				if (!url) return undefined;
+				return {
+					length: url.end + (url.bracketed ? 1 : 0) - index,
+					node: {
+						type: "link",
+						href: url.href,
+						children: [
+							{ type: "text", value: source.slice(url.start, url.end) },
+						],
+					},
+				};
+			},
+		},
 	};
 }

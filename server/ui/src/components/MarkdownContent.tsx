@@ -1,3 +1,9 @@
+import {
+	renderTokens,
+	tokenize,
+	type HighlightRenderNode,
+} from "@tanstack/highlight";
+import { parseCodeFenceMeta } from "@tanstack/highlight/markdown";
 import { streamingMarkdownExtension } from "@tanstack/markdown/extensions/streaming";
 import {
 	Markdown,
@@ -5,7 +11,6 @@ import {
 	type MarkdownComponents,
 } from "@tanstack/markdown/react";
 import { Check, Code2, Copy, Image } from "lucide-react";
-let monaco: typeof import("monaco-editor") | undefined;
 import {
 	Children,
 	createContext,
@@ -29,82 +34,6 @@ import { MermaidPreview } from "./MermaidPreview";
 const MARKDOWN_EXTENSIONS = [streamingMarkdownExtension(), autolinkExtension()];
 const MarkdownStreamingContext = createContext(false);
 
-const LANGUAGE_ALIASES: Record<string, string> = {
-	bash: "shell",
-	"c++": "cpp",
-	cs: "csharp",
-	golang: "go",
-	js: "javascript",
-	jsx: "javascript",
-	md: "markdown",
-	plaintext: "plaintext",
-	py: "python",
-	rb: "ruby",
-	sh: "shell",
-	text: "plaintext",
-	ts: "typescript",
-	tsx: "typescript",
-	yml: "yaml",
-	zsh: "shell",
-};
-
-const languageLoads = new Map<string, Promise<string | null>>();
-
-function resolveMonacoLanguage(language: string) {
-	const requested = language.trim().toLowerCase();
-	const normalized = LANGUAGE_ALIASES[requested] ?? requested;
-	if (!normalized || normalized === "plaintext") return null;
-
-	return (
-		monaco?.languages.getLanguages().find((candidate) => {
-			if (candidate.id.toLowerCase() === normalized) return true;
-			if (
-				candidate.aliases?.some((alias) => alias.toLowerCase() === normalized)
-			)
-				return true;
-			return candidate.extensions?.some(
-				(extension) => extension.slice(1).toLowerCase() === normalized,
-			);
-		})?.id ?? null
-	);
-}
-
-async function loadMonacoLanguage(language: string) {
-	if (!language || language === "plaintext") return null;
-	monaco ??= (await import("../monacoRuntime")).monaco;
-	const languageId = resolveMonacoLanguage(language);
-	if (!languageId) return Promise.resolve(null);
-
-	let load = languageLoads.get(languageId);
-	if (!load) {
-		// Monaco's public colorize API waits for the language's lazy tokenizer.
-		// Discarding its empty HTML result lets us render safe React nodes below.
-		load = monaco.editor
-			.colorize("", languageId, {})
-			.then(() => languageId)
-			.catch(() => null);
-		languageLoads.set(languageId, load);
-	}
-	return load;
-}
-
-function tokenClass(type: string) {
-	if (type.includes("comment")) return "md-token-comment";
-	if (type.includes("string")) return "md-token-string";
-	if (type.includes("regexp")) return "md-token-regexp";
-	if (type.includes("keyword")) return "md-token-keyword";
-	if (type.includes("number") || type.includes("numeric"))
-		return "md-token-number";
-	if (/(^|\.)(type|class|namespace)(\.|$)/.test(type)) return "md-token-type";
-	if (type.includes("attribute")) return "md-token-attribute";
-	if (type.includes("tag")) return "md-token-tag";
-	if (type.includes("function")) return "md-token-function";
-	if (type.includes("variable")) return "md-token-variable";
-	if (type.includes("operator") || type.includes("delimiter"))
-		return "md-token-operator";
-	return undefined;
-}
-
 // Code links only open on Ctrl/Cmd+click, like in an editor, so a plain click
 // still selects text.
 function openOnModifierClick(event: MouseEvent<HTMLAnchorElement>) {
@@ -112,16 +41,18 @@ function openOnModifierClick(event: MouseEvent<HTMLAnchorElement>) {
 }
 
 // Wraps the URL parts of text[start, end) in Ctrl/Cmd+click links. `urls` are
-// found on the whole line, so a URL spanning several tokens still links.
+// found on the whole source, so a URL spanning several tokens still links.
 function withCodeLinks(
 	text: string,
 	urls: UrlMatch[],
 	start = 0,
 	end = text.length,
+	firstUrl = 0,
 ): ReactNode[] {
 	const parts: ReactNode[] = [];
 	let cursor = start;
-	for (const url of urls) {
+	for (let i = firstUrl; i < urls.length && urls[i].start < end; i++) {
+		const url = urls[i];
 		const from = Math.max(url.start, cursor);
 		const to = Math.min(url.end, end);
 		if (from >= to) continue;
@@ -145,34 +76,44 @@ function withCodeLinks(
 	return parts;
 }
 
-function highlightedCode(code: string, languageId: string): ReactNode[] {
-	const lines = code.split("\n");
-	const tokenLines = monaco?.editor.tokenize(code, languageId) ?? [];
+function highlightedCode(
+	code: string,
+	language: string,
+	options: ReturnType<typeof parseCodeFenceMeta>,
+): ReactNode[] {
+	// Render tokens as React nodes to keep code links and the original copy text.
+	// The view helpers trim source text; tokenize/renderTokens preserve it.
+	const { tokens } = tokenize(code, { lang: language });
+	const urls = findUrls(code);
+	let offset = 0;
+	let urlIndex = 0;
 
-	return lines.flatMap((line, lineIndex) => {
-		const tokens = tokenLines[lineIndex] ?? [];
-		const urls = findUrls(line);
-		const content: ReactNode[] = tokens.map((token, tokenIndex) => {
-			const end = tokens[tokenIndex + 1]?.offset ?? line.length;
-			return (
-				<span
-					key={`${lineIndex}:${token.offset}`}
-					className={tokenClass(token.type)}
-				>
-					{withCodeLinks(line, urls, token.offset, end)}
-				</span>
-			);
-		});
+	function renderNode(node: HighlightRenderNode, key: number): ReactNode {
+		if (node.type === "text") {
+			const start = offset;
+			offset += node.value.length;
+			while (urlIndex < urls.length && urls[urlIndex].end <= start) urlIndex++;
+			return withCodeLinks(code, urls, start, offset, urlIndex);
+		}
+		return (
+			<span
+				key={key}
+				className={node.classNames.join(" ")}
+				data-line={node.data?.line}
+			>
+				{node.children.map(renderNode)}
+			</span>
+		);
+	}
 
-		if (lineIndex < lines.length - 1) content.push("\n");
-		return content;
-	});
+	return renderTokens(tokens, options).map(renderNode);
 }
 
 type CodePreProps = MarkdownComponentProps<"pre"> & {
 	"data-code-title"?: string;
 	"data-filename"?: string;
 	"data-lang"?: string;
+	"data-meta"?: string;
 };
 
 function nodeText(node: ReactNode): string {
@@ -194,27 +135,17 @@ function MarkdownCodeBlock({ children, ...props }: CodePreProps) {
 	);
 	const code = codeElement ? nodeText(codeElement.props.children) : "";
 	const language = props["data-lang"] ?? "plaintext";
-	const label = props["data-filename"] ?? props["data-code-title"] ?? language;
-	const [loaded, setLoaded] = useState<{
-		source: string;
-		languageId: string | null;
-	} | null>(null);
-	const loadedLanguage = loaded?.source === language ? loaded.languageId : null;
+	const fence = parseCodeFenceMeta(props["data-meta"]);
+	const label =
+		props["data-filename"] ??
+		props["data-code-title"] ??
+		fence.title ??
+		language;
 	const [copied, setCopied] = useState(false);
 	const [showMermaidSource, setShowMermaidSource] = useState(false);
 	const copyTimer = useRef<number | undefined>(undefined);
 	const mermaid = language.trim().toLowerCase() === "mermaid";
 	const streaming = useContext(MarkdownStreamingContext);
-
-	useEffect(() => {
-		let active = true;
-		void loadMonacoLanguage(language).then((languageId) => {
-			if (active) setLoaded({ source: language, languageId });
-		});
-		return () => {
-			active = false;
-		};
-	}, [language]);
 
 	useEffect(
 		() => () => {
@@ -223,10 +154,6 @@ function MarkdownCodeBlock({ children, ...props }: CodePreProps) {
 		},
 		[],
 	);
-
-	const renderedCode = loadedLanguage
-		? highlightedCode(code, loadedLanguage)
-		: withCodeLinks(code, findUrls(code));
 
 	function copyCode() {
 		void navigator.clipboard.writeText(code).then(() => {
@@ -313,8 +240,13 @@ function MarkdownCodeBlock({ children, ...props }: CodePreProps) {
 					{copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
 				</button>
 			</div>
-			<pre {...props}>
-				<code className={`language-${language}`}>{renderedCode}</code>
+			<pre
+				{...props}
+				className={`${props.className ?? ""}${fence.lineNumbers ? " th-code--line-numbers" : ""}`}
+			>
+				<code className={`language-${language}`}>
+					{highlightedCode(code, language, fence)}
+				</code>
 			</pre>
 		</div>
 	);
@@ -342,9 +274,14 @@ const components = {
 			</h1>
 		);
 	},
-	h2({ children }: MarkdownComponentProps<"h2">) {
+	h2({ children, className, ...props }: MarkdownComponentProps<"h2">) {
 		return (
-			<h2 className="mt-3.5 mb-1.5 font-semibold text-[14px] text-fg">
+			<h2
+				{...props}
+				className={
+					className ?? "mt-3.5 mb-1.5 font-semibold text-[14px] text-fg"
+				}
+			>
 				{children}
 			</h2>
 		);
@@ -371,8 +308,12 @@ const components = {
 			</ol>
 		);
 	},
-	li({ children }: MarkdownComponentProps<"li">) {
-		return <li className="mb-0.5">{children}</li>;
+	li({ children, ...props }: MarkdownComponentProps<"li">) {
+		return (
+			<li {...props} className="mb-0.5">
+				{children}
+			</li>
+		);
 	},
 	blockquote({ children }: MarkdownComponentProps<"blockquote">) {
 		return (

@@ -409,8 +409,7 @@ html[data-window-chrome="windows-overlay"] .window-app-menu {
 	margin-block: 1rem;
 }
 
-/* Code blocks reuse Monaco's lazy language tokenizers, but remain lightweight
-   React markup instead of editor instances. */
+/* Code blocks use TanStack Highlight tokens with the app's theme colors. */
 [data-markdown-code] {
 	margin-block: 0.625rem;
 	background: var(--color-bg-surface);
@@ -528,35 +527,74 @@ html[data-window-chrome="windows-overlay"] .window-app-menu {
 	text-decoration-style: solid;
 }
 
-.md-token-comment {
+.th-comment,
+.th-meta {
 	color: var(--color-fg-dim);
 	font-style: italic;
 }
-.md-token-keyword,
-.md-token-type {
+.th-keyword,
+.th-literal,
+.th-heading,
+.th-type {
 	color: var(--color-purple);
 }
-.md-token-string {
+.th-string,
+.th-code-inline,
+.th-link,
+.th-inserted {
 	color: var(--color-success);
 }
-.md-token-number,
-.md-token-attribute {
+.th-number,
+.th-attr,
+.th-property {
 	color: var(--color-warning);
 }
-.md-token-regexp {
-	color: var(--color-orange);
-}
-.md-token-tag {
+.th-tag,
+.th-selector,
+.th-deleted {
 	color: var(--color-danger);
 }
-.md-token-function {
+.th-function,
+.th-command {
 	color: var(--color-info);
 }
-.md-token-variable {
+.th-variable {
 	color: var(--color-fg);
 }
-.md-token-operator {
+.th-operator {
 	color: var(--color-fg-muted);
+}
+
+[data-markdown-code] .th-line {
+	display: inline-block;
+	width: 100%;
+}
+.th-code--line-numbers .th-line::before {
+	content: attr(data-line);
+	display: inline-block;
+	width: 4ch;
+	margin-right: 1.5ch;
+	text-align: right;
+	color: var(--color-fg-dim);
+	user-select: none;
+}
+.th-line--highlighted {
+	background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+.th-line--inserted {
+	background: color-mix(in srgb, var(--color-success) 12%, transparent);
+}
+.th-line--deleted {
+	background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+}
+.th-line--error {
+	text-decoration: underline wavy var(--color-danger);
+}
+.th-line--warning {
+	text-decoration: underline wavy var(--color-warning);
+}
+[data-markdown-code]:has(.th-line--focused) .th-line:not(.th-line--focused) {
+	opacity: 0.55;
 }
 
 /* Comparison rows have one outer scroller and a fixed collapsed-context view. */
