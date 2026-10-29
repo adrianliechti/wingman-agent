@@ -285,6 +285,8 @@ func (b *backendRuntime) handleSessions(w http.ResponseWriter, r *http.Request) 
 }
 
 type Command struct {
+	requireIdle bool
+
 	ID         string               `json:"id"`
 	Epoch      string               `json:"epoch,omitempty"`
 	Type       string               `json:"type"`
@@ -389,6 +391,12 @@ func (b *backendRuntime) handleNewSession(w http.ResponseWriter, r *http.Request
 	c.mu.Unlock()
 	c.opMu.Unlock()
 	c.refreshSettings()
+	if b.ahp != nil {
+		a := b.ahp.attach(c, canonicalAHPURI(b.id, id), command.Title, time.Now())
+		b.ahp.mu.Lock()
+		b.ahp.notifyRoot("root/sessionAdded", tSessionAdded(a))
+		b.ahp.mu.Unlock()
+	}
 	b.ensureTaskPump(id)
 	b.broadcast(Frame{Type: EvtSessionsChanged})
 	writeJSON(w, receipt)
@@ -472,6 +480,12 @@ func (c *sessionController) execute(command Command) error {
 	}
 	switch command.Type {
 	case "send", "queue_update":
+		if command.requireIdle {
+			snapshot := b.turns.Snapshot(sid)
+			if snapshotHasActive(snapshot) || snapshot.Compacting {
+				return code.ErrTurnInProgress
+			}
+		}
 		if command.Type == "send" && command.InputID != "" && command.InputID != command.ID {
 			return errors.New("input id must equal the send request id")
 		}

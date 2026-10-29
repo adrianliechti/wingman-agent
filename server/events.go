@@ -61,6 +61,9 @@ func (c *sessionController) publishLocked(changes ...SessionChange) {
 	for subscription := range c.subscribers {
 		subscription.client.deliver(sessionEvent{Type: "session.update", SubscriptionID: subscription.id, Ref: c.ref, Epoch: c.epoch, PreviousRevision: previous, Revision: c.revision, Changes: changes})
 	}
+	if c.ahp != nil {
+		c.ahp.syncLocked(c, changes)
+	}
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {

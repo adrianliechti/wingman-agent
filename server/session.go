@@ -123,6 +123,9 @@ type sessionController struct {
 	textID      string
 	reasoningID string
 	attempt     map[string]bool
+	activeInput string
+	lastOutcome string
+	ahp         *ahpSession
 }
 
 func newSessionController(b *backendRuntime, id string) *sessionController {
@@ -290,6 +293,16 @@ func (c *sessionController) apply(f Frame) {
 	case EvtToolProgress:
 		c.state.ToolProgress[f.ID] = f.Text
 	case EvtTurnInput:
+		if f.Input != nil {
+			switch code.TurnInputState(f.Input.State) {
+			case code.TurnInputActive:
+				c.activeInput, c.lastOutcome = f.Input.ID, ""
+			case code.TurnInputCompleted, code.TurnInputFailed, code.TurnInputCancelled:
+				if c.activeInput == f.Input.ID {
+					c.activeInput, c.lastOutcome = "", f.Input.State
+				}
+			}
+		}
 		if f.Input != nil && (f.Input.State == string(code.TurnInputActive) || f.Input.State == string(code.TurnInputSteered)) {
 			c.state.Error = nil
 			c.state.Compaction = nil

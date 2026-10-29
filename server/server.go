@@ -71,6 +71,8 @@ type Server struct {
 	wsMu       sync.Mutex
 	wsConns    map[*websocket.Conn]*wsClient
 	sendMu     sync.Mutex
+	ahpOnce    sync.Once
+	ahp        *ahpHost
 
 	lspExternalMu    sync.Mutex
 	lspExternalPaths map[string]bool
@@ -132,6 +134,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 	}
 	s.workspace = ws
 	s.scope = workspaceScope(ws.RootPath)
+	s.ahpHost()
 
 	s.terminals = terminal.NewManager(ws.RootPath)
 	s.terminals.SetExitHandler(s.onTerminalExit)
@@ -247,6 +250,9 @@ func (s *Server) Close() {
 		if s.cancel != nil {
 			s.cancel()
 		}
+		if s.ahp != nil {
+			s.ahp.close()
+		}
 
 		s.wsMu.Lock()
 		for _, client := range s.wsConns {
@@ -316,6 +322,7 @@ func (s *Server) Run(ctx context.Context, port int) error {
 
 	url := fmt.Sprintf("http://localhost:%d", listener.Addr().(*net.TCPAddr).Port)
 	fmt.Fprintf(os.Stderr, "Wingman running at %s\n", url)
+	fmt.Fprintf(os.Stderr, "AHP endpoint: ws://localhost:%d/ahp\n", listener.Addr().(*net.TCPAddr).Port)
 
 	if !s.noBrowser {
 		openBrowser(url)
@@ -328,6 +335,8 @@ func (s *Server) Run(ctx context.Context, port int) error {
 }
 
 func (s *Server) registerRoutes(r chi.Router) {
+	s.ahpHost()
+	r.Get("/ahp", s.handleAHP)
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/files", func(r chi.Router) {
 			r.Get("/", s.handleFiles)

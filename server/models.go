@@ -43,6 +43,9 @@ func (b *backendRuntime) refreshModels() error {
 			view.refreshSettings()
 		}
 		b.broadcast(Frame{Type: EvtModelChanged})
+		if b.ahp != nil {
+			b.ahp.publishAgents()
+		}
 		return nil, err
 	})
 	return err

@@ -17,6 +17,7 @@ require (
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/yamux v0.1.2
+	github.com/microsoft/agent-host-protocol/clients/go v1.0.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/odvcencio/gotreesitter v0.56.0
 	github.com/openai/openai-go/v3 v3.82.0

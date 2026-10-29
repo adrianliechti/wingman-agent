@@ -112,6 +112,9 @@ languages and sample projects.
 
 For access from a phone or another computer, see [remote web access](docs/remote-control.md).
 
+To use Wingman in VS Code's Agents window, connect to the server's
+[Agent Host Protocol endpoint](docs/ahp.md) at `ws://localhost:9000/ahp`.
+
 ## Everyday controls
 
 In the terminal UI, use `@` to attach files and `Ctrl+P` to find commands.
