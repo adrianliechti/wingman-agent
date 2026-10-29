@@ -82,6 +82,65 @@ test(
 		await ahp.ready();
 		const vscode = await peer("vscode-test");
 		t.after(() => vscode.shutdown());
+		await t.test(
+			"standard resources and browser file facade preserve content and conflicts",
+			async () => {
+				const path = "resource-fixture/deep/file 🌍.txt";
+				const directory = pathToFileURL(`${root}/resource-fixture/deep`).href;
+				await vscode.resourceMkdir({ uri: directory });
+				await vscode.resourceMkdir({ uri: directory });
+				const created = await browser.files.create(path, {
+					content: "hello 🌍\n",
+				});
+				assert.equal(created?.content, "hello 🌍\n");
+				assert.ok(
+					(await browser.files.list("resource-fixture/deep")).some(
+						(file) => file.name === "file 🌍.txt",
+					),
+				);
+				const read = await browser.files.read(path);
+				const metadata = await vscode.resourceResolve({
+					uri: pathToFileURL(`${root}/${path}`).href,
+				});
+				assert.equal(read.revision, metadata.etag);
+				await browser.files.write({
+					path,
+					content: "updated",
+					revision: read.revision,
+				});
+				await assert.rejects(
+					browser.files.write({
+						path,
+						content: "stale",
+						revision: read.revision,
+					}),
+					(error: any) => error.code === -32011,
+				);
+				await browser.files.copy(path, "resource-copy.txt");
+				await assert.rejects(
+					browser.files.copy(path, "resource-copy.txt"),
+					(error: any) => error.code === -32010,
+				);
+				await browser.files.move("resource-copy.txt", "resource-moved.txt");
+				assert.equal(
+					(await browser.files.read("resource-moved.txt")).content,
+					"updated",
+				);
+				assert.ok(
+					(await browser.files.search("resource-moved")).some(
+						(file) => file.path === "resource-moved.txt",
+					),
+				);
+				await browser.files.delete("resource-fixture");
+				await browser.files.delete("resource-fixture");
+				await assert.rejects(
+					browser.files.read(path),
+					(error: any) => error.code === -32008,
+				);
+				await browser.files.delete("resource-moved.txt");
+			},
+		);
+
 		let key = "",
 			uri = "",
 			chatURI = "";

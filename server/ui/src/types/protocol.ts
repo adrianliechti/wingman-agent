@@ -55,7 +55,7 @@ export interface FileEntry {
 	name: string;
 	path: string;
 	is_dir: boolean;
-	size: number;
+	size?: number;
 }
 
 export interface FileContent {

@@ -26,6 +26,12 @@ const fixtureURI = (backend: string, id: string) =>
 /** Browser presentation fixtures speak AHP. Real integration tests exercise the
  * Go host; these fixtures deliberately control latency and transcript contents. */
 export class AHPFixture {
+	resourceHandlers: {
+		method: string;
+		path?: string;
+		run: (route: any) => Promise<void>;
+	}[] = [];
+	resourceObservers = new Set<(request: any, reply?: any) => void>();
 	sessions = new Map<string, FixtureSession>();
 	backends = new Set<string>();
 	connections = new Set<WebSocketRoute>();
@@ -260,6 +266,22 @@ export class AHPFixture {
 			}
 			this.connections.add(socket);
 			const server = socket.connectToServer();
+			const waiting = new Map<unknown, (reply: any) => void>();
+			const forwarded = new Map<unknown, any>();
+			server.onMessage((wire) => {
+				const message = JSON.parse(String(wire));
+				const request = forwarded.get(message.id);
+				if (request) {
+					for (const observer of this.resourceObservers)
+						observer(request, message);
+					forwarded.delete(message.id);
+				}
+				const resolve = waiting.get(message.id);
+				if (resolve) {
+					waiting.delete(message.id);
+					resolve(message);
+				} else socket.send(wire);
+			});
 			let clientId = "";
 			socket.onClose(() => {
 				this.connections.delete(socket);
@@ -285,6 +307,44 @@ export class AHPFixture {
 					);
 				try {
 					if (request.method === "initialize") clientId = p.clientId;
+					for (const observer of this.resourceObservers) observer(request);
+					const resourceHandler = [...this.resourceHandlers]
+						.reverse()
+						.find(
+							(handler) =>
+								handler.method === request.method &&
+								(!handler.path ||
+									decodeURIComponent(p.uri ?? "").endsWith("/" + handler.path)),
+						);
+					if (resourceHandler) {
+						await resourceHandler.run({
+							params: p,
+							fetch: async () => {
+								const response = await new Promise<any>((resolve) => {
+									waiting.set(request.id, resolve);
+									forwarded.set(request.id, request);
+									server.send(wire);
+								});
+								return { json: async () => response.result, frame: response };
+							},
+							fulfill: async ({ response, json }: any) => {
+								socket.send(
+									JSON.stringify(
+										response?.frame && json === undefined
+											? response.frame
+											: { jsonrpc: "2.0", id: request.id, result: json },
+									),
+								);
+							},
+							continue: async () => {
+								forwarded.set(request.id, request);
+								server.send(wire);
+							},
+						});
+						return;
+					}
+					forwarded.set(request.id, request);
+
 					if (
 						request.method === "resolveSessionConfig" &&
 						this.backends.has(p.provider)
@@ -449,4 +509,36 @@ export async function ahpFixture(page: Page) {
 		await fixture.install(page);
 	}
 	return fixture;
+}
+
+export async function mockResource(
+	page: Page,
+	method: string,
+	run: (route: any) => Promise<void>,
+	path?: string,
+) {
+	const fixture = await ahpFixture(page);
+	fixture.resourceHandlers.push({ method, path, run });
+}
+export async function waitResource(
+	page: Page,
+	method: string,
+	path?: string,
+	result = false,
+) {
+	const fixture = await ahpFixture(page);
+	return new Promise<void>((resolve) => {
+		const listener = (request: any, reply?: any) => {
+			if (
+				request.method === method &&
+				(!path ||
+					decodeURIComponent(request.params?.uri ?? "").endsWith("/" + path)) &&
+				(!result || reply)
+			) {
+				fixture.resourceObservers.delete(listener);
+				resolve();
+			}
+		};
+		fixture.resourceObservers.add(listener);
+	});
 }

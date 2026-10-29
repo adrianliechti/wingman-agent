@@ -61,6 +61,13 @@ export class AHPConnection {
 	private sequence = 0;
 	private actions = new Map<string, PendingAction>();
 	private observers = new Map<string, Observer>();
+	private notifications = new Set<(method: string, params: any) => void>();
+	onNotification(listener: (method: string, params: any) => void) {
+		this.notifications.add(listener);
+		return () => {
+			this.notifications.delete(listener);
+		};
+	}
 	private connectionListeners = new Set<() => void>();
 	private eventListeners = new Set<(event: ServerMessage) => void>();
 	private connected = false;
@@ -166,6 +173,9 @@ export class AHPConnection {
 											? frame.text
 											: new TextDecoder().decode(frame.data),
 									);
+						if (message.method)
+							for (const listener of this.notifications)
+								listener(message.method, message.params);
 						if (message.method === "action")
 							this.action(message.params as ActionEnvelope);
 						else if (message.method === "x-wingman/workspaceChanged")

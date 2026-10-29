@@ -1,9 +1,9 @@
 import { workspaceURL } from "./http.ts";
-import { scopedFetch } from "./http.ts";
 import { queryOptions } from "@tanstack/react-query";
-import type { FileContent, FileEntry } from "../types/protocol";
-import { APIError, fetchJSON, fetchOK } from "./http.ts";
+import type { FileContent } from "../types/protocol";
 import { queryKeys } from "./query.ts";
+import { workspaceClient } from "../state/workspaceClient.ts";
+import { resourceErrorCode } from "../state/fileClient.ts";
 
 export interface FileHit {
 	path: string;
@@ -11,15 +11,15 @@ export interface FileHit {
 }
 
 export function workspaceFilePreviewURL(path: string): string {
-	return workspaceURL(`/api/files/preview?path=${encodeURIComponent(path)}`);
+	return workspaceURL(`/preview?path=${encodeURIComponent(path)}`);
 }
 
 export function workspaceFileDownloadURL(path: string): string {
-	return workspaceURL(`/api/files/download?path=${encodeURIComponent(path)}`);
+	return workspaceURL(`/content?path=${encodeURIComponent(path)}`);
 }
 
 export function isWorkspaceFileConflict(error: unknown): boolean {
-	return error instanceof APIError && error.status === 409;
+	return [-32010, -32011].includes(resourceErrorCode(error) ?? 0);
 }
 
 export interface CreateFileOptions {
@@ -39,117 +39,63 @@ export type WriteFileResult =
 	| { ok: false; conflict: true; error: string };
 
 export async function deleteWorkspaceFile(path: string): Promise<void> {
-	await fetchOK(`/api/files?path=${encodeURIComponent(path)}`, {
-		method: "DELETE",
-	});
+	await workspaceClient().files.delete(path);
 }
-
 export async function moveWorkspaceFile(
 	from: string,
 	to: string,
 ): Promise<void> {
-	await fetchOK("/api/files/rename", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ from, to }),
-	});
+	await workspaceClient().files.move(from, to);
 }
-
 export async function copyWorkspaceFile(
 	from: string,
 	to: string,
 ): Promise<void> {
-	await fetchOK("/api/files/copy", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ from, to }),
-	});
+	await workspaceClient().files.copy(from, to);
 }
-
-export async function getAbsoluteWorkspacePath(path: string): Promise<string> {
-	const result = await fetchJSON<{ path: string }>(
-		`/api/files/path?path=${encodeURIComponent(path)}`,
-	);
-	return result.path;
+export function getAbsoluteWorkspacePath(path: string): Promise<string> {
+	return workspaceClient().files.absolutePath(path);
 }
-
 export async function revealWorkspaceFile(path: string): Promise<void> {
-	await fetchOK("/api/files/reveal", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ path }),
-	});
+	await workspaceClient().files.reveal(path);
 }
-
 export const fileQueries = {
 	tree: (path: string) =>
 		queryOptions({
 			queryKey: queryKeys.files.tree(path),
-			queryFn: ({ signal }) =>
-				fetchJSON<FileEntry[]>(`/api/files?path=${encodeURIComponent(path)}`, {
-					signal,
-				}),
+			queryFn: ({ signal }) => workspaceClient().files.list(path, signal),
 		}),
 	search: (query: string) =>
 		queryOptions({
 			queryKey: queryKeys.files.search(query),
-			queryFn: ({ signal }) =>
-				fetchJSON<FileHit[]>(
-					`/api/files/search?q=${encodeURIComponent(query)}`,
-					{ signal },
-				),
+			queryFn: ({ signal }) => workspaceClient().files.search(query, signal),
 		}),
 };
-
-export async function readWorkspaceFile(
+export function readWorkspaceFile(
 	path: string,
 	external = false,
+	signal?: AbortSignal,
 ): Promise<FileContent> {
-	const endpoint = external ? "/api/lsp/file" : "/api/files/read";
-	const response = await scopedFetch(
-		`${endpoint}?path=${encodeURIComponent(path)}`,
-	);
-	if (!response.ok) throw await responseError(response, "Failed to load file");
-	return response.json() as Promise<FileContent>;
+	return workspaceClient().files.read(path, external, signal);
 }
-
-export async function createWorkspaceFile(
+export function createWorkspaceFile(
 	path: string,
 	options: CreateFileOptions = {},
 ): Promise<FileContent | null> {
-	const response = await scopedFetch("/api/files", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ path, ...options }),
-	});
-	if (!response.ok) throw await responseError(response, "File creation failed");
-	if (response.status === 204) return null;
-	return response.json() as Promise<FileContent>;
+	return workspaceClient().files.create(path, options);
 }
-
 export async function writeWorkspaceFile(
 	input: WriteFileInput,
 ): Promise<WriteFileResult> {
-	const response = await scopedFetch("/api/files/write", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(input),
-	});
-	if (response.status === 409) {
-		return {
-			ok: false,
-			conflict: true,
-			error: (await response.text()).trim() || "File changed on disk.",
-		};
+	try {
+		return { ok: true, ...(await workspaceClient().files.write(input)) };
+	} catch (error) {
+		if (resourceErrorCode(error) === -32011)
+			return {
+				ok: false,
+				conflict: true,
+				error: error instanceof Error ? error.message : "File changed on disk.",
+			};
+		throw error;
 	}
-	if (!response.ok) throw await responseError(response, "Failed to save file");
-	return { ok: true, ...((await response.json()) as { revision: string }) };
-}
-
-async function responseError(
-	response: Response,
-	fallback: string,
-): Promise<Error> {
-	const detail = (await response.text()).trim();
-	return new Error(detail || `${fallback} (${response.status}).`);
 }

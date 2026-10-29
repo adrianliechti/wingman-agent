@@ -5,6 +5,7 @@ package server
 // Lock order is sessionController.mu -> ahpHost.mu; never the reverse.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -71,6 +72,9 @@ type ahpActionReceipt struct {
 }
 
 type ahpConnection struct {
+	resourceCtx   context.Context
+	searchMu      sync.Mutex
+	searches      map[string]context.CancelFunc
 	host          *ahpHost
 	writer        *wsClient
 	id            string
@@ -172,7 +176,9 @@ func (s *Server) handleAHP(w http.ResponseWriter, r *http.Request) {
 	defer conn.CloseNow()
 	conn.SetReadLimit(32 << 20)
 	h := s.ahpHost()
-	c := &ahpConnection{host: h, writer: newWSClient(conn), subscriptions: map[string]bool{}}
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	c := &ahpConnection{host: h, writer: newWSClient(conn), subscriptions: map[string]bool{}, resourceCtx: ctx, searches: map[string]context.CancelFunc{}}
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -234,6 +240,10 @@ func (s *Server) handleAHP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+			continue
+		}
+		if req.Method == "x-wingman/textSearch" {
+			c.startFileSearch(req)
 			continue
 		}
 		result, err := c.request(req)
@@ -645,6 +655,10 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 		return nil, ahpInvalid("channel required")
 	}
 	switch req.Method {
+	case "x-wingman/fileSearch", "x-wingman/revealResource":
+		return h.fileExtension(req)
+	case "x-wingman/cancelSearch":
+		return c.cancelFileSearch(req.Params)
 	case "createTerminal":
 		return c.createTerminal(req.Params)
 	case "createResourceWatch":
@@ -731,8 +745,9 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 			return nil, err
 		}
 		return struct{}{}, a.command(Command{ID: "ahp-dispose:" + a.resource, Epoch: a.controller.epoch, Type: "delete"})
-	case "resourceList", "resourceRead", "resourceResolve", "resourceRequest":
-		return h.resource(req)
+	case "resourceList", "resourceRead", "resourceResolve", "resourceRequest", "resourceWrite", "resourceCopy", "resourceMove", "resourceDelete", "resourceMkdir":
+		result, err := h.resource(req)
+		return result, ahpResourceError(err)
 	default:
 		return nil, &ahpRPCError{Code: -32601, Message: "method not supported: " + req.Method}
 	}

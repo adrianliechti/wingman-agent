@@ -1,6 +1,6 @@
 import { workspaceClient } from "./state/workspaceClient.ts";
 import { editEnvelope } from "./state/lspClient.ts";
-import { scopedFetch } from "./api/http.ts";
+import { readWorkspaceFile } from "./api/files.ts";
 import type { Monaco } from "@monaco-editor/react";
 import type * as MonacoTypes from "monaco-editor";
 import type {
@@ -400,13 +400,12 @@ export function createMonacoLSPBridge({
 				const target = lspLocationTarget(targetURI, workspaceURI);
 				if (!target) return null;
 				if (!target.external && target.path === file.path) return targetURI;
-				const fileResponse = await scopedFetch(
-					`${target.external ? "/api/lsp/file" : "/api/files/read"}?path=${encodeURIComponent(target.path)}`,
-					{ signal },
+				const targetFile = await readWorkspaceFile(
+					target.path,
+					target.external,
+					signal,
 				);
-				if (!fileResponse.ok || disposed || token.isCancellationRequested)
-					return null;
-				const targetFile = (await fileResponse.json()) as FileContent;
+				if (disposed || token.isCancellationRequested) return null;
 				if (targetFile.binary || targetFile.content === undefined) return null;
 
 				const key = uri.toString();

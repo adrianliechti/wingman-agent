@@ -12,7 +12,7 @@ export class LSPClient {
 			rootUri: null,
 			capabilities: {
 				general: { positionEncodings: ["utf-16"] },
-				workspace: { applyEdit: true },
+				workspace: { applyEdit: true, textDocumentContent: {} },
 				textDocument: {
 					synchronization: { didSave: true },
 					completion: { completionItem: { snippetSupport: true } },

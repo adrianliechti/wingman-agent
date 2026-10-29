@@ -332,23 +332,9 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Get("/ahp", s.handleAHP)
 	r.Get("/lsp", s.handleLSP)
 	r.Get("/dap", s.handleDAP)
+	r.Get("/content", s.handleFileDownload)
+	r.Get("/preview", s.handleFilePreview)
 	r.Route("/api", func(r chi.Router) {
-		r.Route("/files", func(r chi.Router) {
-			r.Get("/", s.handleFiles)
-			r.Post("/", s.handleFileCreate)
-			r.Delete("/", s.handleFileDelete)
-			r.Get("/read", s.handleFileRead)
-			r.Get("/search", s.handleFilesSearch)
-			r.Post("/content-search", s.handleWorkspaceSearch)
-			r.Get("/path", s.handleFilePath)
-			r.Get("/download", s.handleFileDownload)
-			r.Get("/preview", s.handleFilePreview)
-			r.Post("/reveal", s.handleFileReveal)
-			r.Post("/rename", s.handleFileRename)
-			r.Post("/copy", s.handleFileCopy)
-			r.Post("/write", s.handleFileWrite)
-			r.Post("/write-batch", s.handleFileWriteBatch)
-		})
 
 		r.Route("/diffs", func(r chi.Router) {
 			r.Get("/", s.handleDiffs)
@@ -379,7 +365,6 @@ func (s *Server) registerRoutes(r chi.Router) {
 
 		// Workspace setup and external source retrieval are host services; editor
 		// and debugger operations use the LSP and DAP WebSocket gateways.
-		r.Get("/lsp/file", s.handleLSPExternalFile)
 		r.Post("/debug/targets", s.handleDebugTargets)
 		r.Post("/debug/plan", s.handleDebugPlan)
 		r.Post("/editor/tab", s.handleEditorTab)

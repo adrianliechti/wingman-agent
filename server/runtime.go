@@ -61,7 +61,7 @@ func (s *Server) InstanceID() string { return s.scope.InstanceID }
 
 func (s *Server) checkInstance(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/v2/bootstrap") || r.URL.Path == "/lsp" || r.URL.Path == "/dap" {
+		if (strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/v2/bootstrap") || r.URL.Path == "/lsp" || r.URL.Path == "/dap" || r.URL.Path == "/content" || r.URL.Path == "/preview" {
 			instance := r.Header.Get(instanceHeader)
 			if instance == "" {
 				instance = r.URL.Query().Get("instance")

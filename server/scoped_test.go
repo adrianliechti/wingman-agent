@@ -17,6 +17,35 @@ func scopedTestHandler(app *Server) http.Handler {
 // These adapters are test-only entry points into validation and workspace services.
 func legacyEditorTestHandler(app *Server, route string) http.HandlerFunc {
 	switch route {
+	case "GET /api/files":
+		return app.handleFiles
+	case "POST /api/files":
+		return app.handleFileCreate
+	case "DELETE /api/files":
+		return app.handleFileDelete
+	case "GET /api/files/read":
+		return app.handleFileRead
+	case "GET /api/files/search":
+		return app.handleFilesSearch
+	case "POST /api/files/content-search":
+		return app.handleWorkspaceSearch
+	case "GET /api/files/path":
+		return app.handleFilePath
+	case "GET /api/files/download":
+		return app.handleFileDownload
+	case "GET /api/files/preview":
+		return app.handleFilePreview
+	case "POST /api/files/reveal":
+		return app.handleFileReveal
+	case "POST /api/files/rename":
+		return app.handleFileRename
+	case "POST /api/files/copy":
+		return app.handleFileCopy
+	case "POST /api/files/write":
+		return app.handleFileWrite
+	case "GET /api/lsp/file":
+		return app.handleLSPExternalFile
+
 	case "GET /api/lsp/status":
 		return app.handleLSPStatus
 	case "GET /api/lsp/capabilities":

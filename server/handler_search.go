@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -76,16 +77,32 @@ func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	config, err := newWorkspaceSearchConfig(request)
-	if err != nil {
+	if _, err := newWorkspaceSearchConfig(request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
 	w.Header().Set("Content-Type", "application/x-ndjson")
-	w.Header().Set("Cache-Control", "no-store")
 	encoder := json.NewEncoder(w)
 	flusher, _ := w.(http.Flusher)
+	err := s.searchWorkspace(r.Context(), request, func(event workspaceSearchEvent) error {
+		if err := encoder.Encode(event); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	})
+	if err != nil {
+		return
+	}
+}
+
+func (s *Server) searchWorkspace(ctx context.Context, request workspaceSearchRequest, emit func(workspaceSearchEvent) error) error {
+	config, err := newWorkspaceSearchConfig(request)
+	if err != nil {
+		return err
+	}
 	fys := s.workspace.Root.FS()
 	ignore := newWorkspaceSearchIgnore(fys)
 	files, matches := 0, 0
@@ -95,7 +112,7 @@ func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
 		if walkErr != nil {
 			return nil
 		}
-		if err := r.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if entry.Type()&fs.ModeSymlink != 0 {
@@ -135,7 +152,7 @@ func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
 		if more || matches >= config.limit {
 			truncated = true
 		}
-		if err := encoder.Encode(workspaceSearchEvent{
+		if err := emit(workspaceSearchEvent{
 			Type: "file",
 			File: &workspaceSearchFile{
 				Path:     filepath.ToSlash(filePath),
@@ -145,18 +162,15 @@ func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
 		}); err != nil {
 			return err
 		}
-		if flusher != nil {
-			flusher.Flush()
-		}
 		if matches >= config.limit {
 			return fs.SkipAll
 		}
 		return nil
 	})
 	if err != nil {
-		return
+		return err
 	}
-	_ = encoder.Encode(workspaceSearchEvent{
+	return emit(workspaceSearchEvent{
 		Type:      "done",
 		Files:     files,
 		Matches:   matches,

@@ -1,4 +1,4 @@
-import { scopedFetch } from "./http.ts";
+import { workspaceClient } from "../state/workspaceClient.ts";
 export interface WorkspaceSearchRequest {
 	query: string;
 	replacement: string;
@@ -32,70 +32,39 @@ export interface WorkspaceSearchSummary {
 	truncated: boolean;
 }
 
-interface WorkspaceSearchFileEvent {
-	type: "file";
-	file: WorkspaceSearchFile;
-}
-
-interface WorkspaceSearchDoneEvent extends WorkspaceSearchSummary {
-	type: "done";
-}
-
-type WorkspaceSearchEvent = WorkspaceSearchFileEvent | WorkspaceSearchDoneEvent;
-
 export async function streamWorkspaceSearch(
 	request: WorkspaceSearchRequest,
 	onFile: (file: WorkspaceSearchFile) => void,
 	signal?: AbortSignal,
 ): Promise<WorkspaceSearchSummary> {
-	const response = await scopedFetch("/api/files/content-search", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(request),
-		signal,
+	signal?.throwIfAborted();
+	const ahp = workspaceClient().ahp;
+	await ahp.ready();
+	signal?.throwIfAborted();
+	const searchId = crypto.randomUUID();
+	const release = ahp.onNotification((method, params) => {
+		if (
+			method === "x-wingman/searchProgress" &&
+			params.searchId === searchId &&
+			!signal?.aborted
+		)
+			onFile(params.file);
 	});
-	if (!response.ok) {
-		const detail = (await response.text()).trim();
-		throw new Error(detail || `Search failed (${response.status}).`);
-	}
-	if (!response.body) throw new Error("Search response was empty.");
-
-	const reader = response.body.getReader();
-	const decoder = new TextDecoder();
-	let buffer = "";
-	let summary: WorkspaceSearchSummary = {
-		files: 0,
-		matches: 0,
-		truncated: false,
+	const cancel = () => {
+		void ahp
+			.extension("x-wingman/cancelSearch", { channel: "ahp-root://", searchId })
+			.catch(() => {});
 	};
-
-	const accept = (line: string) => {
-		if (!line.trim()) return;
-		const event = JSON.parse(line) as WorkspaceSearchEvent;
-		if (event.type === "file") {
-			onFile(event.file);
-			summary.files++;
-			summary.matches += event.file.matches.length;
-		} else if (event.type === "done") {
-			summary = {
-				files: event.files,
-				matches: event.matches,
-				truncated: event.truncated ?? false,
-			};
-		}
-	};
-
-	while (true) {
-		const { value, done } = await reader.read();
-		buffer += decoder.decode(value, { stream: !done });
-		let newline = buffer.indexOf("\n");
-		while (newline >= 0) {
-			accept(buffer.slice(0, newline));
-			buffer = buffer.slice(newline + 1);
-			newline = buffer.indexOf("\n");
-		}
-		if (done) break;
+	signal?.addEventListener("abort", cancel, { once: true });
+	try {
+		const result = await ahp.extension<WorkspaceSearchSummary>(
+			"x-wingman/textSearch",
+			{ channel: "ahp-root://", searchId, ...request },
+		);
+		signal?.throwIfAborted();
+		return result;
+	} finally {
+		release();
+		signal?.removeEventListener("abort", cancel);
 	}
-	accept(buffer);
-	return summary;
 }

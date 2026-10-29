@@ -72,9 +72,12 @@ Content-Length framing on stdio/TCP. The `instance` value comes from
 replacement workspace. It is an identity check, not an authentication token.
 
 The former session-command/event, terminal, LSP-operation, and debug-operation
-HTTP routes are removed. HTTP still serves the UI, bootstrap, files, settings,
+HTTP routes are removed. HTTP still serves the UI, bootstrap, settings,
 Git/reviews, tasks/schedules, debugger discovery/installation/planning, and
-read-only external files explicitly returned by a language server.
+binary content/downloads, and isolated website previews. All `/api/files` routes
+and `/api/lsp/file` are removed. `/content?path=…` retains browser range/streaming
+support; `/preview?path=…` redirects to the existing isolated preview origin.
+Both URLs retain the workspace instance check.
 
 ## AHP support
 
@@ -93,6 +96,29 @@ owner can be replaced; a connected owner's terminal remains read-only to other
 clients. Scrollback is bounded to 256 KiB. Shell-integration markers are filtered
 without splitting UTF-8 characters. The small `x-wingman/terminalStatus`
 extension supplies the foreground-process check used by close confirmation.
+
+Workspace file operations use standard AHP `resourceList`, `resourceRead`,
+`resourceResolve`, `resourceWrite`, `resourceCopy`, `resourceMove`,
+`resourceDelete`, and `resourceMkdir`. Directory creation uses `mkdir -p`
+semantics. Copy/move from the web UI refuse existing destinations. Deleting an
+already-missing resource is treated as success by the web UI. `resourceResolve`
+returns content-hash `etag` values for files up to 16 MiB, and saves use `ifMatch`
+to reject stale contents. The browser derives the same SHA-256 revision from the
+exact bytes read or saved, avoiding a later metadata read racing another writer.
+Reads and writes are bounded to 16 MiB; binary reads use base64. Larger binary
+files remain available through the streaming content URL. The file tree derives
+paths and directory flags, applies its UI filtering locally, and no longer
+transfers unused entry sizes. Language and text sizes are derived locally.
+
+The former batch-save API had no UI callers and has been deleted. Multi-file
+editor changes remain unsaved buffers; each save retains its own conflict check.
+`x-wingman/fileSearch` supplies the file picker, `x-wingman/textSearch` streams
+`x-wingman/searchProgress` results, and `x-wingman/cancelSearch` cancels a search.
+Searches are connection-scoped, bounded to four active requests and one minute,
+and retain existing ignore/glob/regex/replacement behavior. `x-wingman/revealResource`
+opens a file in the host's file manager. These are Wingman extensions, not AHP
+standard methods. Upstream `completions` targets chat input/attachments, rather
+than general workspace search.
 
 Workspace resource access is confined to the project. Recursive resource
 watches support include/exclude globs. The shared uncommitted changeset exposes
@@ -117,7 +143,10 @@ positions. Unsaved buffers are restored after reconnect. Supported requests cove
 completion/resolve, hover, definitions, implementations, references, signatures,
 symbols, highlights, folding, semantic tokens, rename, code actions/resolve,
 commands, formatting, inlay hints, and pull diagnostics. Cancellation uses
-`$/cancelRequest`. Command edits use `workspace/applyEdit` requests and receive
+`$/cancelRequest`. The gateway also implements LSP 3.18
+`workspace/textDocumentContent` for read-only external source files explicitly
+returned by language servers; this does not require those servers to implement
+3.18. Command edits use `workspace/applyEdit` requests and receive
 the browser's application result. Edit metadata retains revision checks and
 multi-file review. `wingman/documentCapabilities` reports the selected file's
 capabilities; `wingman/activity` reports managed-language-service progress.

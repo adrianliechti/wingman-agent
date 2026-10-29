@@ -1,3 +1,8 @@
+import {
+	readSavedFile,
+	writeSavedFile,
+	createSavedFile,
+} from "./fileFixture.ts";
 import { loseFirstInputReceipt } from "./ahpFaults.ts";
 import { mockDebugSession } from "./dapFixture.ts";
 import {
@@ -5,7 +10,7 @@ import {
 	waitLanguageResult,
 	probeLanguageCapabilities,
 } from "./lspFixture.ts";
-import { ahpFixture } from "./ahpFixture.ts";
+import { ahpFixture, mockResource, waitResource } from "./ahpFixture.ts";
 import { emptySession, sessionKey } from "../src/state/sessionStore.ts";
 import type {
 	ChatEntry,
@@ -258,12 +263,12 @@ async function openSessions(page: Page) {
 	).toBeVisible();
 }
 
-async function resetCompletionFile(request: APIRequestContext) {
+async function resetCompletionFile(_request: APIRequestContext) {
 	// Browser contexts are isolated, but these tests share the saved workspace.
-	const original = await request.get("/api/files/read?path=completion.go");
+	const original = await readSavedFile("completion.go");
 	expect(original.ok()).toBeTruthy();
 	const { revision } = await original.json();
-	const reset = await request.post("/api/files/write", {
+	const reset = await writeSavedFile({
 		data: { path: "completion.go", content: "package main\n", revision },
 	});
 	expect(reset.ok()).toBeTruthy();
@@ -2492,6 +2497,7 @@ test("shows file actions above panel clipping", async ({ page }) => {
 test("background file refresh preserves the language server's unsaved buffer", async ({
 	page,
 }) => {
+	await ahpFixture(page);
 	await writeFile(workspacePath("review-lsp.txt"), "on disk\n");
 	const events: { event: string; path: string; content: string }[] = [];
 	await mockLanguage(page, /textDocument\/did/, async (route) => {
@@ -2506,11 +2512,9 @@ test("background file refresh preserves the language server's unsaved buffer", a
 	await page.keyboard.press("Control+End");
 	await page.keyboard.insertText("unsaved change");
 	await expect.poll(() => events.at(-1)?.content).toContain("unsaved change");
-	const refresh = page.waitForResponse(
-		/\/api\/files\/read\?path=review-lsp.txt/,
-	);
+	const refresh = waitResource(page, "resourceRead", "review-lsp.txt", true);
 	await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-	await (await refresh).finished();
+	await refresh;
 	// Allow the document refresh and debounced LSP queue to finish.
 	await page.waitForTimeout(250);
 	expect(events.at(-1)?.content).toContain("unsaved change");
@@ -2527,19 +2531,19 @@ test("renaming a file while it loads completes the editor at its new path", asyn
 	const held = new Promise<void>((resolve) => {
 		releaseRead = resolve;
 	});
-	await page.route(
-		/\/api\/files\/read\?path=review-loading.txt$/,
+	await mockResource(
+		page,
+		"resourceRead",
 		async (route) => {
 			const response = await route.fetch();
 			await held;
 			await route.fulfill({ response });
 		},
+		"review-loading.txt",
 	);
 	await composer(page);
 	const file = page.getByRole("treeitem", { name: "review-loading.txt" });
-	const read = page.waitForRequest(
-		/\/api\/files\/read\?path=review-loading.txt$/,
-	);
+	const read = waitResource(page, "resourceRead", "review-loading.txt");
 	await file.click();
 	await read;
 	await file.click({ button: "right" });
@@ -2558,7 +2562,6 @@ test("renaming a file while it loads completes the editor at its new path", asyn
 
 test("saving preserves edits made while the write is pending", async ({
 	page,
-	request,
 }) => {
 	await writeFile(workspacePath("review-save.txt"), "original\n");
 	let releaseWrite!: () => void;
@@ -2566,7 +2569,7 @@ test("saving preserves edits made while the write is pending", async ({
 		releaseWrite = resolve;
 	});
 	let writes = 0;
-	await page.route(/\/api\/files\/write$/, async (route) => {
+	await mockResource(page, "resourceWrite", async (route) => {
 		writes++;
 		const response = await route.fetch();
 		if (writes === 1) await held;
@@ -2600,21 +2603,16 @@ test("saving preserves edits made while the write is pending", async ({
 		page.getByRole("dialog", { name: "Overwrite newer file?" }),
 	).toHaveCount(0);
 	expect(writes).toBe(1);
-	const firstSave = await (
-		await request.get("/api/files/read?path=review-save.txt")
-	).json();
+	const firstSave = await (await readSavedFile("review-save.txt")).json();
 	expect(firstSave.content).toBe("original\nfirst edit");
 	await page.keyboard.press("ControlOrMeta+S");
 	await expect(tab).not.toHaveAttribute("aria-label", /unsaved changes/);
-	const finalSave = await (
-		await request.get("/api/files/read?path=review-save.txt")
-	).json();
+	const finalSave = await (await readSavedFile("review-save.txt")).json();
 	expect(finalSave.content).toContain("and newer edit");
 });
 
 test("creates, saves, refreshes, and protects files changed on disk", async ({
 	page,
-	request,
 }) => {
 	await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
 	await composer(page);
@@ -2638,7 +2636,7 @@ test("creates, saves, refreshes, and protects files changed on disk", async ({
 	await page.keyboard.press("ControlOrMeta+S");
 	await expect(createdTab).not.toHaveAttribute("aria-label", /unsaved changes/);
 
-	let read = await request.get("/api/files/read?path=web-created.go");
+	let read = await readSavedFile("web-created.go");
 	expect(read.ok()).toBeTruthy();
 	let file = (await read.json()) as { content: string; revision: string };
 	expect(file.content).toContain("initialVersion");
@@ -2676,7 +2674,7 @@ test("creates, saves, refreshes, and protects files changed on disk", async ({
 	await overwriteDialog.getByRole("button", { name: "Overwrite" }).click();
 	await expect(overwriteDialog).not.toBeVisible();
 
-	read = await request.get("/api/files/read?path=web-created.go");
+	read = await readSavedFile("web-created.go");
 	file = (await read.json()) as { content: string; revision: string };
 	expect(file.content).toContain("localVersion");
 	expect(file.content).not.toContain("newerDiskVersion");
@@ -2694,9 +2692,7 @@ test("creates, saves, refreshes, and protects files changed on disk", async ({
 	await nestedName.fill("child.go");
 	await nestedName.press("Enter");
 	await expect(page.getByRole("tab", { name: /child\.go/ })).toBeVisible();
-	const nestedRead = await request.get(
-		"/api/files/read?path=nested%2Fchild.go",
-	);
+	const nestedRead = await readSavedFile("nested%2Fchild.go");
 	expect(nestedRead.ok()).toBeTruthy();
 
 	workspaceMenu = await openWorkspaceMenu(page);
@@ -2750,14 +2746,12 @@ test("creates, saves, refreshes, and protects files changed on disk", async ({
 	await expect(
 		page.getByRole("tab", { name: /web-created\.go/ }),
 	).not.toHaveAttribute("aria-label", /unsaved changes/);
-	const movedRead = await request.get(
-		"/api/files/read?path=web-folder%2Fweb-created.go",
-	);
+	const movedRead = await readSavedFile("web-folder%2Fweb-created.go");
 	expect(movedRead.ok()).toBeTruthy();
 	expect(((await movedRead.json()) as { content: string }).content).toContain(
 		"savedAfterMove",
 	);
-	const oldRead = await request.get("/api/files/read?path=web-created.go");
+	const oldRead = await readSavedFile("web-created.go");
 	expect(oldRead.status()).toBe(404);
 
 	const originalFile = page
@@ -2774,12 +2768,8 @@ test("creates, saves, refreshes, and protects files changed on disk", async ({
 		.getByRole("menuitem", { name: "Paste" })
 		.click();
 
-	const originalCopySource = await request.get(
-		"/api/files/read?path=editable.txt",
-	);
-	const copiedFile = await request.get(
-		"/api/files/read?path=web-folder%2Feditable.txt",
-	);
+	const originalCopySource = await readSavedFile("editable.txt");
+	const copiedFile = await readSavedFile("web-folder%2Feditable.txt");
 	expect(originalCopySource.ok()).toBeTruthy();
 	expect(copiedFile.ok()).toBeTruthy();
 	expect(((await copiedFile.json()) as { content: string }).content).toBe(
@@ -3032,7 +3022,6 @@ test("upgrades an open editor when its language server becomes available", async
 
 test("save awaits LSP actions that add and remove Go imports", async ({
 	page,
-	request,
 }) => {
 	let workspaceURI = "";
 	const sourceActions: string[] = [];
@@ -3041,7 +3030,7 @@ test("save awaits LSP actions that add and remove Go imports", async ({
 		releaseActions = resolve;
 	});
 	let writes = 0;
-	await page.route(/\/api\/files\/write$/, async (route) => {
+	await mockResource(page, "resourceWrite", async (route) => {
 		writes++;
 		await route.continue();
 	});
@@ -3142,7 +3131,7 @@ test("save awaits LSP actions that add and remove Go imports", async ({
 		page.getByRole("tab", { name: /completion\.go/ }),
 	).not.toHaveAttribute("aria-label", /unsaved changes/);
 	expect(writes).toBe(1);
-	const read = await request.get("/api/files/read?path=completion.go");
+	const read = await readSavedFile("completion.go");
 	const saved = (await read.json()) as { content: string };
 	expect(saved.content).toContain('import "fmt"');
 	expect(saved.content).not.toContain('import "os"');
@@ -3281,7 +3270,7 @@ test("applies one command-driven quick action without moving the cursor", async 
 		page.getByRole("tab", { name: /completion\.go/ }),
 	).toHaveAttribute("aria-label", /unsaved changes/);
 
-	const beforeSave = await request.get("/api/files/read?path=completion.go");
+	const beforeSave = await readSavedFile("completion.go");
 	expect(((await beforeSave.json()) as { content: string }).content).toBe(
 		"package main\n",
 	);
@@ -3289,16 +3278,13 @@ test("applies one command-driven quick action without moving the cursor", async 
 	await expect(
 		page.getByRole("tab", { name: /completion\.go/ }),
 	).not.toHaveAttribute("aria-label", /unsaved changes/);
-	const afterSave = await request.get("/api/files/read?path=completion.go");
+	const afterSave = await readSavedFile("completion.go");
 	expect(((await afterSave.json()) as { content: string }).content).toBe(
 		"// generated\npackage mainX\n",
 	);
 });
 
-test("save applies real gopls organize-imports edits", async ({
-	page,
-	request,
-}) => {
+test("save applies real gopls organize-imports edits", async ({ page }) => {
 	const capabilities = await probeLanguageCapabilities("organize-imports.go");
 
 	test.skip(
@@ -3318,9 +3304,7 @@ test("save applies real gopls organize-imports edits", async ({
 	await page.keyboard.press("ControlOrMeta+S");
 	await expect
 		.poll(async () => {
-			const response = await request.get(
-				"/api/files/read?path=organize-imports.go",
-			);
+			const response = await readSavedFile("organize-imports.go");
 			return ((await response.json()) as { content: string }).content;
 		})
 		.toBe(
@@ -3458,9 +3442,7 @@ test("Tab propagates a recent rename through the real model endpoint", async ({
 	await page.keyboard.press("ControlOrMeta+S");
 	await expect
 		.poll(async () => {
-			const saved = await request.get(
-				"/api/files/read?path=tab-effectiveness.go",
-			);
+			const saved = await readSavedFile("tab-effectiveness.go");
 			return ((await saved.json()) as { content: string }).content;
 		})
 		.toContain("println(accountName)");
@@ -3499,7 +3481,7 @@ test("Tab stays idle until an edit and accepts a cursor completion", async ({
 	await openTabFixture(page, /tab-ghost\.go/, "total := price *");
 	await page.waitForTimeout(400);
 	expect(predictions).toBe(0);
-	const synchronized = await request.post("/api/files/write", {
+	const synchronized = await writeSavedFile({
 		data: {
 			path: "tab-ghost.go",
 			content:
@@ -3645,7 +3627,7 @@ test("keeps composer pickers visible in a constrained window", async ({
 	page,
 }) => {
 	await page.setViewportSize({ width: 420, height: 300 });
-	await page.route(/\/api\/files\/search/, async (route) => {
+	await mockResource(page, "x-wingman/fileSearch", async (route) => {
 		await route.fulfill({
 			json: Array.from({ length: 30 }, (_, index) => ({
 				path: `src/nested/example-${index}.ts`,
@@ -5167,7 +5149,6 @@ test("uses Wingman's dynamic editor context menu", async ({
 
 test("previews selection transformations and can hand the selection to chat", async ({
 	page,
-	request,
 }) => {
 	const requests: Array<{
 		path: string;
@@ -5265,7 +5246,7 @@ test("previews selection transformations and can hand the selection to chat", as
 	await expect
 		.poll(() => page.locator(".monaco-editor:visible").count())
 		.toBe(1);
-	const disk = await request.get("/api/files/read?path=editable.txt");
+	const disk = await readSavedFile("editable.txt");
 	expect(((await disk.json()) as { content: string }).content).toBe(
 		"original\n",
 	);
@@ -5310,7 +5291,6 @@ test("previews selection transformations and can hand the selection to chat", as
 
 test("routes native File menu commands through shared file handling", async ({
 	page,
-	request,
 }) => {
 	await page.addInitScript(() => {
 		const states: Array<{ command: string; enabled: boolean }> = [];
@@ -5371,7 +5351,7 @@ test("routes native File menu commands through shared file handling", async ({
 	await saveAs.getByRole("button", { name: "Save" }).click();
 
 	await expect(page.getByRole("tab", { name: "menu-copy.txt" })).toBeVisible();
-	let read = await request.get("/api/files/read?path=menu-copy.txt");
+	let read = await readSavedFile("menu-copy.txt");
 	expect(read.ok()).toBeTruthy();
 	let file = (await read.json()) as { content: string };
 	expect(file.content).toContain("created through the File menu");
@@ -5383,7 +5363,7 @@ test("routes native File menu commands through shared file handling", async ({
 	);
 	await expect
 		.poll(async () => {
-			read = await request.get("/api/files/read?path=menu-copy.txt");
+			read = await readSavedFile("menu-copy.txt");
 			file = (await read.json()) as { content: string };
 			return file.content;
 		})
@@ -5488,10 +5468,9 @@ test("renders Mermaid diagrams", async ({ page }) => {
 
 test("Mermaid preview reports invalid diagrams and recovers after an edit", async ({
 	page,
-	request,
 }) => {
 	const path = "invalid-diagram.mmd";
-	const created = await request.post("/api/files", {
+	const created = await createSavedFile({
 		data: { path, content: "flowchart LR\n  A --> [\n" },
 	});
 	expect(created.ok()).toBeTruthy();
@@ -5500,9 +5479,9 @@ test("Mermaid preview reports invalid diagrams and recovers after an edit", asyn
 	await expect(page.getByRole("alert")).toContainText(
 		`Could not preview ${path}`,
 	);
-	const original = await request.get(`/api/files/read?path=${path}`);
+	const original = await readSavedFile(`${path}`);
 	const { revision } = await original.json();
-	const written = await request.post("/api/files/write", {
+	const written = await writeSavedFile({
 		data: {
 			path,
 			revision,
@@ -5518,10 +5497,7 @@ test("Mermaid preview reports invalid diagrams and recovers after an edit", asyn
 	await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
-test("protects unsaved file edits when closing a tab", async ({
-	page,
-	request,
-}) => {
+test("protects unsaved file edits when closing a tab", async ({ page }) => {
 	await composer(page);
 	await page.getByRole("treeitem", { name: /editable\.txt/ }).click();
 	const editor = page.locator(".monaco-editor");
@@ -5549,7 +5525,7 @@ test("protects unsaved file edits when closing a tab", async ({
 	await closeDialog.getByRole("button", { name: "Discard" }).click();
 	await expect(page.getByRole("tab", { name: /editable\.txt/ })).toHaveCount(0);
 
-	const response = await request.get("/api/files/read?path=editable.txt");
+	const response = await readSavedFile("editable.txt");
 	expect(response.ok()).toBeTruthy();
 	expect((await response.json()).content).toBe("original\n");
 });
@@ -5557,6 +5533,7 @@ test("protects unsaved file edits when closing a tab", async ({
 test("closing multiple dirty tabs prompts in order and waits for pending saves", async ({
 	page,
 }) => {
+	await ahpFixture(page);
 	for (const name of ["review-close-a.txt", "review-close-b.txt"])
 		await writeFile(workspacePath(name), "original\n");
 	await composer(page);
@@ -5588,12 +5565,12 @@ test("closing multiple dirty tabs prompts in order and waits for pending saves",
 	const held = new Promise<void>((resolve) => {
 		releaseWrite = resolve;
 	});
-	await page.route(/\/api\/files\/write$/, async (route) => {
+	await mockResource(page, "resourceWrite", async (route) => {
 		await held;
 		await route.continue();
 	});
 	await lastTab.press("Delete");
-	const write = page.waitForRequest(/\/api\/files\/write$/);
+	const write = waitResource(page, "resourceWrite");
 	await dialog.getByRole("button", { name: "Save", exact: true }).click();
 	await write;
 	await expect(dialog.getByRole("button", { name: "Cancel" })).toBeDisabled();
@@ -6590,7 +6567,6 @@ test("recovery: switching files preserves undo history", async ({ page }) => {
 
 test("recovery: reusing a renamed file's path keeps editor contents and undo separate", async ({
 	page,
-	request,
 }) => {
 	await writeFile(workspacePath("review-model-old.txt"), "first document\n");
 	await composer(page);
@@ -6615,7 +6591,7 @@ test("recovery: reusing a renamed file's path keeps editor contents and undo sep
 	).toBeVisible();
 	await expect(lines).toContainText("first document unsaved edit");
 
-	const created = await request.post("/api/files", {
+	const created = await createSavedFile({
 		data: { path: "review-model-old.txt", content: "second document\n" },
 	});
 	expect(created.ok()).toBeTruthy();

@@ -93,6 +93,19 @@ func TestLSPWebSocketDocumentVersionsAndScope(t *testing.T) {
 	if len(tokens) == 0 || len(tokens)%5 != 0 {
 		t.Fatal(tokens)
 	}
+	external := filepath.Join(t.TempDir(), "dependency.go")
+	if err := os.WriteFile(external, []byte("package dependency\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	externalParams := map[string]any{"uri": fileuri.FromPath(external)}
+	if response := call(8, "workspace/textDocumentContent", externalParams); response["error"] == nil {
+		t.Fatal("unreported external file was exposed")
+	}
+	app.allowLSPExternalFile(filepath.ToSlash(external))
+	if response := call(9, "workspace/textDocumentContent", externalParams); response["error"] != nil || response["result"].(map[string]any)["text"] != "package dependency\n" {
+		t.Fatal(response)
+	}
+
 	if err := os.Remove(filepath.Join(root, "main.go")); err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +127,8 @@ func TestLSPWebSocketDocumentVersionsAndScope(t *testing.T) {
 func TestLegacyProtocolRoutesAreRemoved(t *testing.T) {
 	app := newDebugTestServer(t, t.TempDir())
 	for _, route := range []string{
+		"GET /api/files", "POST /api/files", "DELETE /api/files", "GET /api/files/read", "GET /api/files/search", "POST /api/files/content-search", "POST /api/files/write", "POST /api/files/write-batch", "POST /api/files/rename", "POST /api/files/copy", "GET /api/files/path", "POST /api/files/reveal", "GET /api/files/download", "GET /api/files/preview", "GET /api/lsp/file",
+
 		"GET /api/v2/events",
 		"GET /api/v2/backends/one/sessions",
 		"POST /api/v2/backends/one/sessions",

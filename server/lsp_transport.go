@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
@@ -183,6 +185,7 @@ func (c *lspConnection) capabilities() map[string]any {
 		"semanticTokensProvider":           map[string]any{"legend": map[string]any{"tokenTypes": lspTokenTypes, "tokenModifiers": lspTokenModifiers}, "full": true},
 		"inlayHintProvider":                true, "diagnosticProvider": map[string]any{"interFileDependencies": true, "workspaceDiagnostics": true},
 		"executeCommandProvider": map[string]any{"commands": []string{}},
+		"workspace":              map[string]any{"textDocumentContent": map[string]any{"schemes": []string{"file"}}},
 		"experimental":           map[string]any{"wingman": map[string]any{"workspaceURI": fileuri.FromPath(c.server.workspace.RootPath), "scope": c.server.scope, "documentCapabilities": true}},
 	}
 }
@@ -305,6 +308,41 @@ type lspFeatureParams struct {
 
 func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map[string]lspBuffer) (any, error) {
 	s, w := c.server, c.server.workspace
+	if req.Method == "workspace/textDocumentContent" {
+		var p struct {
+			URI string `json:"uri"`
+		}
+		if json.Unmarshal(req.Params, &p) != nil {
+			return nil, ahpInvalid("invalid content request")
+		}
+		path, ok := fileuri.Path(p.URI)
+		if !ok {
+			return nil, ahpInvalid("expected a file URI")
+		}
+		if !s.lspExternalFileAllowed(filepath.ToSlash(path)) {
+			return nil, &ahpRPCError{Code: -32008, Message: "source file not found"}
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() || info.Size() > ahpResourceLimit {
+			return nil, ahpInvalid("source is not a readable text file")
+		}
+		data, err := io.ReadAll(io.LimitReader(f, ahpResourceLimit+1))
+		if err != nil {
+			return nil, err
+		}
+		if len(data) > ahpResourceLimit || isBinary(data) || !utf8.Valid(data) {
+			return nil, ahpInvalid("source is not a readable text file")
+		}
+		return map[string]string{"text": string(data)}, nil
+	}
 	if req.Method == "workspace/diagnostic" {
 		report := w.Diagnostics(ctx)
 		items := []any{}

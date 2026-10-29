@@ -1,3 +1,4 @@
+import { FileClient } from "./fileClient.ts";
 import { DAPClient } from "./dapClient.ts";
 import { LSPClient } from "./lspClient.ts";
 import {
@@ -79,6 +80,7 @@ export class WorkspaceClient {
 	readonly ahp: AHPConnection;
 	readonly lsp: LSPClient;
 	readonly dap: DAPClient;
+	readonly files: FileClient;
 	private observed = new Map<string, { count: number; release: () => void }>();
 	private resources = new Map<string, string>();
 	private sends = new Map<
@@ -93,6 +95,7 @@ export class WorkspaceClient {
 	constructor(scope: Bootstrap, ahp = new AHPConnection(scope)) {
 		this.lsp = new LSPClient(scope.instanceId);
 		this.dap = new DAPClient(scope.instanceId);
+		this.files = new FileClient(ahp, this.lsp);
 		this.scope = scope;
 		this.ahp = ahp;
 		this.http = createWorkspaceHTTP(scope.instanceId);
