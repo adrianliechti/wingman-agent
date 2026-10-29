@@ -1,3 +1,11 @@
+import { loseFirstInputReceipt } from "./ahpFaults.ts";
+import { mockDebugSession } from "./dapFixture.ts";
+import {
+	mockLanguage,
+	waitLanguageResult,
+	probeLanguageCapabilities,
+} from "./lspFixture.ts";
+import { ahpFixture } from "./ahpFixture.ts";
 import { emptySession, sessionKey } from "../src/state/sessionStore.ts";
 import type {
 	ChatEntry,
@@ -28,49 +36,18 @@ async function mockSavedSessions(
 	entries: ChatEntry[] = [],
 	phase: "idle" | "tool_running" = "idle",
 ) {
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
-	await page.route(
-		new RegExp(`/api/v2/backends/${backend}/sessions$`),
-		async (route) => {
-			if (route.request().method() === "GET")
-				await route.fulfill({ json: sessions });
-			else await route.continue();
-		},
-	);
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		const server = socket.connectToServer();
-		socket.onMessage((message) => {
-			const command = JSON.parse(String(message));
-			if (
-				command.type === "subscribe" &&
-				command.ref.backendId === backend &&
-				sessions.some((session) => session.id === command.ref.sessionId)
-			) {
-				const id = command.ref.sessionId;
-				if (!loaded.includes(id)) loaded.push(id);
-				socket.send(
-					JSON.stringify({
-						type: "session.snapshot",
-						subscriptionId: command.subscriptionId,
-						ref: {
-							workspaceId: scope.workspaceId,
-							backendId: backend,
-							sessionId: id,
-						},
-						epoch: `fixture:${id}`,
-						revision: 0,
-						entries,
-						state: {
-							...emptySession(sessionKey(backend, id)),
-							status: "ready",
-							phase,
-						},
-					}),
-				);
-			} else server.send(message);
-		});
-	});
+	const fixture = await ahpFixture(page);
+	const priorLoad = fixture.onLoad;
+	fixture.onLoad = (session) => {
+		priorLoad(session);
+		if (session.backend === backend && !loaded.includes(session.id))
+			loaded.push(session.id);
+	};
+	fixture.backends.add(backend);
+	for (const session of sessions) fixture.add(backend, session, entries, phase);
+	return fixture;
 }
+
 function sessionRow(page: Page, id: string) {
 	return page
 		.locator(`[data-session-id=${JSON.stringify(sessionKey("wingman", id))}]`)
@@ -192,14 +169,21 @@ async function mockACPBackend(
 			url.searchParams.get("backend") === backend,
 		(route) => route.fulfill({ json: [] }),
 	);
-	const creations: { id: string }[] = [];
-	const commands: {
-		type: string;
-		model?: string;
-		mode?: string;
-		text?: string;
-	}[] = [];
+	const fixture = await ahpFixture(page);
+	fixture.backends.add(backend);
+	const control = {
+		creations: [] as { id: string }[],
+		commands: [] as {
+			type: string;
+			model?: string;
+			mode?: string;
+			text?: string;
+		}[],
+		beforeCreate: async (_params: any) => {},
+		beforeCommand: async (_command: any) => {},
+	};
 	const settings = {
+		...emptySession("").settings,
 		models: [
 			{ id: `${backend}-test`, name: "Test model" },
 			{ id: `${backend}-other`, name: "Other model" },
@@ -214,11 +198,24 @@ async function mockACPBackend(
 		effort: "default",
 		canDelete: false,
 	};
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
+	if (entries.length) {
+		const saved = fixture.add(
+			backend,
+			{
+				id: "new-session",
+				title: "Session",
+				updated_at: "2026-01-01T00:00:00Z",
+			},
+			entries,
+		);
+		saved.settings = settings;
+	}
+	const scope = fixture.scope;
 	await page.route(/\/api\/v2\/bootstrap$/, (route) =>
 		route.fulfill({
 			json: {
 				...scope,
+				protocol: 2,
 				backends: [
 					{ id: "wingman", name: "Wingman" },
 					{ id: backend, name: backend },
@@ -226,81 +223,30 @@ async function mockACPBackend(
 			},
 		}),
 	);
-	// ACP's initialize response has no session configuration. Only session/new
-	// supplies the model and mode, even if backend defaults were already cached.
 	await page.route(
 		new RegExp(`/api/v2/backends/${backend}/settings$`),
 		(route) => route.fulfill({ json: emptySession("").settings }),
 	);
-	await page.route(
-		new RegExp(`/api/v2/backends/${backend}/sessions$`),
-		async (route) => {
-			if (route.request().method() === "GET") {
-				await route.fulfill({ json: [] });
-				return;
-			}
-			creations.push(route.request().postDataJSON());
-			await route.fulfill({
-				json: {
-					ref: {
-						workspaceId: scope.workspaceId,
-						backendId: backend,
-						sessionId: "new-session",
-					},
-					epoch: "acp-epoch",
-					outcome: "created",
-				},
-			});
-		},
-	);
-	let publish = () => {};
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		const server = socket.connectToServer();
-		let subscription: { subscriptionId: string; ref: object } | undefined;
-		let revision = 0;
-		publish = () => {
-			if (!subscription) return;
-			socket.send(
-				JSON.stringify({
-					type: "session.snapshot",
-					...subscription,
-					epoch: "acp-epoch",
-					revision: revision++,
-					state: { ...emptySession(""), status: "ready", settings },
-					entries,
-				}),
-			);
-		};
-		socket.onMessage((message) => {
-			const request = JSON.parse(String(message));
-			if (request.type === "subscribe" && request.ref.backendId === backend) {
-				subscription = {
-					subscriptionId: request.subscriptionId,
-					ref: request.ref,
-				};
-				publish();
-			} else if (
-				request.type === "unsubscribe" &&
-				request.subscriptionId === subscription?.subscriptionId
-			) {
-				subscription = undefined;
-			} else server.send(message);
-		});
-	});
-	await page.route(
-		new RegExp(`/api/v2/backends/${backend}/sessions/new-session/commands$`),
-		async (route) => {
-			const command = route.request().postDataJSON();
-			commands.push(command);
-			if (command.type === "settings") {
-				if (command.model) settings.model = command.model;
-				if (command.mode) settings.mode = command.mode;
-				publish();
-			}
-			await route.fulfill({ json: { outcome: "accepted" } });
-		},
-	);
-	return { creations, commands };
+	fixture.onCreate = async (params) => {
+		await control.beforeCreate(params);
+		control.creations.push({ id: params.channel });
+		const session = fixture.add(
+			backend,
+			{
+				id: "new-session",
+				title: "Session",
+				updated_at: "2026-01-01T00:00:00Z",
+			},
+			entries,
+		);
+		session.settings = settings;
+		return session;
+	};
+	fixture.onCommand = async (command) => {
+		await control.beforeCommand(command);
+		control.commands.push(command);
+	};
+	return control;
 }
 
 async function openSessions(page: Page) {
@@ -520,8 +466,8 @@ test("preserves the visible reply when a finished turn collapses its working ste
 	page,
 }) => {
 	const id = "scroll-snapshot";
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
-	const entries = [
+
+	const entries: ChatEntry[] = [
 		{ id: "previous-user", type: "user", content: "Earlier question" },
 		{
 			id: "previous-reply",
@@ -540,48 +486,17 @@ test("preserves the visible reply when a finished turn collapses its working ste
 			content: "Final response anchor.\n\n".repeat(30),
 		},
 	];
-	let finishTurn = () => {
-		throw new Error("Session has not been subscribed");
-	};
-	await page.route(/\/api\/v2\/backends\/wingman\/sessions$/, (route) =>
-		route.fulfill({
-			json: [
-				{ id, title: "Scroll snapshot", updated_at: "2026-01-01T00:00:00Z" },
-			],
-		}),
+	const fixture = await ahpFixture(page);
+	const session = fixture.add(
+		"wingman",
+		{ id, title: "Scroll snapshot", updated_at: "2026-01-01T00:00:00Z" },
+		entries,
+		"streaming",
 	);
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		const server = socket.connectToServer();
-		socket.onMessage((message) => {
-			const command = JSON.parse(String(message));
-			if (command.type !== "subscribe" || command.ref.sessionId !== id) {
-				server.send(message);
-				return;
-			}
-			const sendSnapshot = (phase: "streaming" | "idle", revision: number) =>
-				socket.send(
-					JSON.stringify({
-						type: "session.snapshot",
-						subscriptionId: command.subscriptionId,
-						ref: {
-							workspaceId: scope.workspaceId,
-							backendId: "wingman",
-							sessionId: id,
-						},
-						epoch: `fixture:${id}`,
-						revision,
-						entries,
-						state: {
-							...emptySession(sessionKey("wingman", id)),
-							status: "ready",
-							phase,
-						},
-					}),
-				);
-			sendSnapshot("streaming", 0);
-			finishTurn = () => sendSnapshot("idle", 1);
-		});
-	});
+	const finishTurn = () => {
+		session.phase = "idle";
+		fixture.publish(session);
+	};
 
 	await composer(page);
 	await openSessions(page);
@@ -643,7 +558,7 @@ test("keeps mixed background activity compact in the titlebar", async ({
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/status$/, async (route) => {
+	await mockLanguage(page, "wingman/activity", async (route) => {
 		await route.fulfill({
 			json: {
 				analyzing: true,
@@ -1387,13 +1302,10 @@ for (const action of [
 			release = resolve;
 		});
 		let started = false;
-		await page.route(/\/api\/v2\/backends\/codex\/sessions$/, async (route) => {
-			if (route.request().method() === "POST") {
-				started = true;
-				await gate;
-			}
-			await route.fallback();
-		});
+		backend.beforeCreate = async () => {
+			started = true;
+			await gate;
+		};
 		try {
 			await page.goto("/codex");
 			const input = page
@@ -1416,13 +1328,7 @@ for (const action of [
 					await chatTab.locator("[data-tab-close]").click();
 				}
 			}
-			const creationResponse = page.waitForResponse(
-				(response) =>
-					response.url().endsWith("/api/v2/backends/codex/sessions") &&
-					response.request().method() === "POST",
-			);
 			release();
-			await (await creationResponse).finished();
 			await expect.poll(() => backend.creations.length).toBe(1);
 			if (action === "send early") {
 				await expect
@@ -1570,16 +1476,12 @@ test("ACP chat delivery preserves newer edits and stays pending across tab switc
 	const backend = await mockACPBackend(page);
 	const receipt = Promise.withResolvers<void>();
 	let attempts = 0;
-	await page.route(
-		/\/api\/v2\/backends\/codex\/sessions\/new-session\/commands$/,
-		async (route) => {
-			if (route.request().postDataJSON().type === "send") {
-				attempts++;
-				await receipt.promise;
-			}
-			await route.fallback();
-		},
-	);
+	backend.beforeCommand = async (command) => {
+		if (command.type === "send") {
+			attempts++;
+			await receipt.promise;
+		}
+	};
 	try {
 		await page.goto("/codex");
 		await expect(
@@ -1622,16 +1524,10 @@ test("ACP chat initialization errors allow retrying the same session creation", 
 }) => {
 	const backend = await mockACPBackend(page);
 	const attempts: { id: string }[] = [];
-	await page.route(/\/api\/v2\/backends\/codex\/sessions$/, async (route) => {
-		if (route.request().method() === "POST") {
-			attempts.push(route.request().postDataJSON());
-			if (attempts.length === 1) {
-				await route.fulfill({ status: 502, body: "Codex startup failed" });
-				return;
-			}
-		}
-		await route.fallback();
-	});
+	backend.beforeCreate = async (params) => {
+		attempts.push({ id: params.channel });
+		if (attempts.length === 1) throw new Error("Codex startup failed");
+	};
 	await page.goto("/codex");
 	await expect(
 		page.getByText("Codex startup failed", { exact: false }),
@@ -1739,11 +1635,7 @@ test("groups diagnostics by file and opens individual problems", async ({
 			source: "gopls",
 		},
 	];
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
-		if (route.request().method() === "POST") {
-			await route.fulfill({ json: diagnostics });
-			return;
-		}
+	await mockLanguage(page, "workspace/diagnostic", async (route) => {
 		await route.fulfill({
 			json: {
 				diagnostics,
@@ -2500,17 +2392,13 @@ test("shows and copies diagnostics for comparison failures", async ({
 test("keeps the session context menu above panel clipping", async ({
 	page,
 }) => {
-	await page.route(/\/api\/v2\/backends\/wingman\/sessions$/, async (route) => {
-		await route.fulfill({
-			json: [
-				{
-					id: "menu-clipping-check",
-					title: "Menu clipping check",
-					updated_at: "2026-08-11T00:00:00Z",
-				},
-			],
-		});
-	});
+	await mockSavedSessions(page, [
+		{
+			id: "menu-clipping-check",
+			title: "Menu clipping check",
+			updated_at: "2026-08-11T00:00:00Z",
+		},
+	]);
 	await page.route(/\/api\/v2\/backends\/wingman\/settings$/, async (route) => {
 		await route.fulfill({
 			json: {
@@ -2606,8 +2494,8 @@ test("background file refresh preserves the language server's unsaved buffer", a
 }) => {
 	await writeFile(workspacePath("review-lsp.txt"), "on disk\n");
 	const events: { event: string; path: string; content: string }[] = [];
-	await page.route(/\/api\/lsp\/document$/, async (route) => {
-		events.push(route.request().postDataJSON());
+	await mockLanguage(page, /textDocument\/did/, async (route) => {
+		events.push(route.presentation());
 		await route.fulfill({ status: 204 });
 	});
 	await composer(page);
@@ -2685,8 +2573,8 @@ test("saving preserves edits made while the write is pending", async ({
 		await route.fulfill({ response });
 	});
 	const events: { event: string; content: string }[] = [];
-	await page.route(/\/api\/lsp\/document$/, async (route) => {
-		events.push(route.request().postDataJSON());
+	await mockLanguage(page, /textDocument\/did/, async (route) => {
+		events.push(route.presentation());
 		await route.fulfill({ status: 204 });
 	});
 	await composer(page);
@@ -2904,8 +2792,8 @@ test("uses Monaco's live buffer for automatic completion and parameter hints", a
 }) => {
 	let completionContent = "";
 	let signatureContent = "";
-	await page.route(/\/api\/lsp\/completions$/, async (route) => {
-		const body = route.request().postDataJSON() as { content?: string };
+	await mockLanguage(page, "textDocument/completion", async (route) => {
+		const body = route.presentation() as { content?: string };
 		completionContent = body.content ?? "";
 		await route.fulfill({
 			json: {
@@ -2916,8 +2804,8 @@ test("uses Monaco's live buffer for automatic completion and parameter hints", a
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/signature-help$/, async (route) => {
-		const body = route.request().postDataJSON() as { content?: string };
+	await mockLanguage(page, "textDocument/signatureHelp", async (route) => {
+		const body = route.presentation() as { content?: string };
 		signatureContent = body.content ?? "";
 		await route.fulfill({
 			json: {
@@ -2934,7 +2822,10 @@ test("uses Monaco's live buffer for automatic completion and parameter hints", a
 	});
 
 	await composer(page);
-	const capabilitiesResponse = page.waitForResponse(/\/api\/lsp\/capabilities/);
+	const capabilitiesResponse = waitLanguageResult(
+		page,
+		"wingman/documentCapabilities",
+	);
 	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
 	await capabilitiesResponse;
 	const editor = page.locator(".monaco-editor");
@@ -2985,7 +2876,7 @@ test("syntax-highlights shell scripts without a language server", async ({
 test("leaves TypeScript project diagnostics to the active language server", async ({
 	page,
 }) => {
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		await route.fulfill({
 			json: {
 				workspace_uri: "file:///workspace",
@@ -2993,7 +2884,7 @@ test("leaves TypeScript project diagnostics to the active language server", asyn
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
+	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
 		await route.fulfill({ json: [] });
 	});
 
@@ -3010,7 +2901,7 @@ test("leaves TypeScript project diagnostics to the active language server", asyn
 
 test("shows one project-aware TypeScript hover", async ({ page }) => {
 	let hoverRequests = 0;
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		await route.fulfill({
 			json: {
 				workspace_uri: "file:///workspace",
@@ -3019,10 +2910,10 @@ test("shows one project-aware TypeScript hover", async ({ page }) => {
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
+	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
 		await route.fulfill({ json: [] });
 	});
-	await page.route(/\/api\/lsp\/hover$/, async (route) => {
+	await mockLanguage(page, "textDocument/hover", async (route) => {
 		hoverRequests++;
 		await route.fulfill({
 			json: {
@@ -3052,7 +2943,7 @@ test("does not flash standalone diagnostics while the project LSP starts", async
 	const capabilitiesReady = new Promise<void>((resolve) => {
 		releaseCapabilities = resolve;
 	});
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		capabilitiesRequested = true;
 		await capabilitiesReady;
 		await route.fulfill({
@@ -3062,7 +2953,7 @@ test("does not flash standalone diagnostics while the project LSP starts", async
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
+	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
 		await route.fulfill({ json: [] });
 	});
 
@@ -3106,7 +2997,7 @@ test("upgrades an open editor when its language server becomes available", async
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		editorCapabilityRequests++;
 		await route.fulfill({
 			json: {
@@ -3116,7 +3007,7 @@ test("upgrades an open editor when its language server becomes available", async
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
+	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
 		await route.fulfill({ json: [] });
 	});
 
@@ -3154,7 +3045,7 @@ test("save awaits LSP actions that add and remove Go imports", async ({
 		writes++;
 		await route.continue();
 	});
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		const response = await route.fetch();
 		const capabilities = (await response.json()) as Record<string, unknown>;
 		workspaceURI = String(capabilities.workspace_uri ?? "");
@@ -3167,8 +3058,8 @@ test("save awaits LSP actions that add and remove Go imports", async ({
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/code-actions$/, async (route) => {
-		const body = route.request().postDataJSON() as {
+	await mockLanguage(page, "textDocument/codeAction", async (route) => {
+		const body = route.presentation() as {
 			content: string;
 			only?: string[];
 		};
@@ -3227,7 +3118,10 @@ test("save awaits LSP actions that add and remove Go imports", async ({
 	});
 
 	await composer(page);
-	const capabilitiesResponse = page.waitForResponse(/\/api\/lsp\/capabilities/);
+	const capabilitiesResponse = waitLanguageResult(
+		page,
+		"wingman/documentCapabilities",
+	);
 	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
 	await capabilitiesResponse;
 	const editor = page.locator(".monaco-editor").first();
@@ -3262,7 +3156,7 @@ test("applies one command-driven quick action without moving the cursor", async 
 	let workspaceURI = "";
 	let invokedRequests = 0;
 	let commandExecutions = 0;
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		const response = await route.fetch();
 		const capabilities = (await response.json()) as Record<string, unknown>;
 		workspaceURI = String(capabilities.workspace_uri ?? "");
@@ -3275,7 +3169,7 @@ test("applies one command-driven quick action without moving the cursor", async 
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
+	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
 		await route.fulfill({
 			json: [
 				{
@@ -3291,8 +3185,8 @@ test("applies one command-driven quick action without moving the cursor", async 
 			],
 		});
 	});
-	await page.route(/\/api\/lsp\/code-actions$/, async (route) => {
-		const body = route.request().postDataJSON() as {
+	await mockLanguage(page, "textDocument/codeAction", async (route) => {
+		const body = route.presentation() as {
 			content: string;
 			trigger_kind?: number;
 			only?: string[];
@@ -3319,9 +3213,9 @@ test("applies one command-driven quick action without moving the cursor", async 
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/execute-command$/, async (route) => {
+	await mockLanguage(page, "workspace/executeCommand", async (route) => {
 		commandExecutions++;
-		const body = route.request().postDataJSON() as { content: string };
+		const body = route.presentation() as { content: string };
 		const documentURI = `${workspaceURI.replace(/\/$/, "")}/completion.go`;
 		await route.fulfill({
 			json: {
@@ -3357,7 +3251,10 @@ test("applies one command-driven quick action without moving the cursor", async 
 	});
 
 	await composer(page);
-	const capabilitiesResponse = page.waitForResponse(/\/api\/lsp\/capabilities/);
+	const capabilitiesResponse = waitLanguageResult(
+		page,
+		"wingman/documentCapabilities",
+	);
 	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
 	await capabilitiesResponse;
 	const editor = page.locator(".monaco-editor").first();
@@ -3402,13 +3299,8 @@ test("save applies real gopls organize-imports edits", async ({
 	page,
 	request,
 }) => {
-	const capabilitiesResponse = await request.get(
-		"/api/lsp/capabilities?path=organize-imports.go",
-	);
-	const capabilities = (await capabilitiesResponse.json()) as {
-		language_server?: boolean;
-		code_actions?: boolean;
-	};
+	const capabilities = await probeLanguageCapabilities("organize-imports.go");
+
 	test.skip(
 		!capabilities.language_server || !capabilities.code_actions,
 		"gopls is not available in this environment",
@@ -4764,13 +4656,10 @@ test("elicitation preserves multi-select and Other with object-property field na
 	page,
 }) => {
 	const replies: unknown[] = [];
-	await page.route(/\/sessions\/review-active\/commands$/, async (route) => {
-		const body = route.request().postDataJSON();
+	const fixture = await ahpFixture(page);
+	fixture.onCommand = async (body) => {
 		replies.push(body);
-		await route.fulfill({
-			json: { requestId: body.requestId, accepted: true },
-		});
-	});
+	};
 	await reviewActive(page, undefined, [
 		{
 			id: "elicit-properties",
@@ -4903,7 +4792,7 @@ test("terminal reconnect restores scrollback and accepts new input", async ({
 }) => {
 	let connections = 0;
 	let disconnect = () => {};
-	await page.routeWebSocket(/\/api\/terminals\/[^/]+\/ws(?:\?|$)/, (socket) => {
+	await page.routeWebSocket(/\/ahp(?:\?|$)/, (socket) => {
 		connections++;
 		socket.connectToServer();
 		disconnect = () =>
@@ -5136,7 +5025,7 @@ test("uses Wingman's dynamic editor context menu", async ({
 	await resetCompletionFile(request);
 	await page.setViewportSize({ width: 640, height: 400 });
 	let definitionRequested = false;
-	await page.route(/\/api\/lsp\/definition$/, async (route) => {
+	await mockLanguage(page, "textDocument/definition", async (route) => {
 		definitionRequested = true;
 		await route.fulfill({ json: [] });
 	});
@@ -6026,26 +5915,16 @@ test("stops the active debugger when the Debug tab closes", async ({
 			},
 		});
 	});
-	await page.route(/\/api\/debug\/inspection(?:\?[^#]*)?$/, async (route) => {
-		await route.fulfill({
-			json: { session, output: "ready\n", threads: [], frames: [] },
-		});
-	});
-	await page.route(/\/api\/debug\/session$/, async (route) => {
-		await route.fulfill({ json: { session } });
-	});
-	await page.route(/\/api\/debug\/state(?:\?[^#]*)?$/, async (route) => {
-		await route.fulfill({
-			json: { available: true, session, breakpoints: [] },
-		});
-	});
-	await page.route(/\/api\/debug\/control$/, async (route) => {
-		controls.push(route.request().postDataJSON());
-		session = { ...session, state: "terminated", state_version: 4 };
-		await route.fulfill({
-			json: { session },
-		});
-	});
+	await mockDebugSession(
+		page,
+		() => ({ session, output: "ready\n" }),
+		(command, params) => {
+			if (command !== "disconnect") return;
+			controls.push(params);
+			session = { ...session, state: "terminated", state_version: 4 };
+			return {};
+		},
+	);
 
 	await composer(page);
 	const debugTab = page.locator('[data-center-tab="debug"]');
@@ -6097,8 +5976,8 @@ test("stops the active debugger when the Debug tab closes", async ({
 
 	await expect.poll(() => controls.length).toBe(1);
 	expect(controls[0]).toMatchObject({
-		operation: "stop",
-		session_id: session.session_id,
+		terminateDebuggee: true,
+		_wingmanSessionId: session.session_id,
 	});
 	await expect(debugTab).toHaveCount(0);
 });
@@ -6139,31 +6018,27 @@ test("follows debugger stops into the source editor", async ({ page }) => {
 			},
 		});
 	});
-	await page.route(/\/api\/debug\/state(?:\?[^#]*)?$/, async (route) => {
-		await route.fulfill({
-			json: {
-				available: true,
-				session,
-				breakpoints: [],
-				frame:
-					session.state === "stopped"
-						? {
-								id: 21,
-								name: "main",
-								source: { path: "debug-follow.go" },
-								line: 70,
-								column: 5,
-							}
-						: undefined,
-			},
-		});
-	});
-	await page.route(/\/api\/debug\/evaluate$/, async (route) => {
-		evaluations.push(route.request().postDataJSON());
-		await route.fulfill({
-			json: { result: "70", type: "int", variables_reference: 0 },
-		});
-	});
+	await mockDebugSession(
+		page,
+		() => ({
+			session,
+			frame:
+				session.state === "stopped"
+					? {
+							id: 21,
+							name: "main",
+							source: { path: "debug-follow.go" },
+							line: 70,
+							column: 5,
+						}
+					: undefined,
+		}),
+		(command, params) => {
+			if (command !== "evaluate") return;
+			evaluations.push(params);
+			return { result: "70", type: "int", variablesReference: 0 };
+		},
+	);
 
 	await composer(page);
 	await expect(page.locator('[data-center-tab="debug"]')).toBeVisible();
@@ -6184,11 +6059,11 @@ test("follows debugger stops into the source editor", async ({ page }) => {
 	await expect.poll(() => evaluations.length).toBe(1);
 	expect(evaluations[0]).toMatchObject({
 		expression: "breakpointTarget",
-		session_id: "debug-follow-session",
-		frame_id: 21,
-		state_version: 2,
+		_wingmanSessionId: "debug-follow-session",
+		frameId: 21,
+		_wingmanStateVersion: 2,
 	});
-	expect(evaluations[0]).not.toHaveProperty("context");
+	expect(evaluations[0].context).toBe("hover");
 	await expect(page.locator(".monaco-hover:visible")).toContainText("70");
 });
 
@@ -6220,26 +6095,13 @@ test("retries a lost input receipt without executing the input twice", async ({
 	page,
 	request,
 }) => {
+	const requestIDs: string[] = [];
+	await loseFirstInputReceipt(page, requestIDs);
 	const input = await composer(page);
 	const before = await (
 		await request.get(`${controlURL()}/model-stats`)
 	).json();
-	const requestIDs: string[] = [];
-	await page.route(
-		"**/api/v2/backends/wingman/sessions/*/commands",
-		async (route) => {
-			const command = route.request().postDataJSON();
-			if (command.type !== "send") {
-				await route.continue();
-				return;
-			}
-			requestIDs.push(command.id);
-			if (requestIDs.length === 1) {
-				await route.fetch();
-				await route.abort("failed");
-			} else await route.continue();
-		},
-	);
+
 	await input.fill("render markdown");
 	await input.press("Enter");
 	await expect(
@@ -6268,16 +6130,20 @@ test("keeps unsent drafts available when the workspace instance changes", async 
 }) => {
 	let changed = false;
 	let closeConnection = () => {};
-	await page.route(/\/api\/v2\/bootstrap$/, async (route) => {
-		const response = await route.fetch();
-		const scope = await response.json();
-		await route.fulfill({
-			json: changed ? { ...scope, instanceId: "replacement" } : scope,
+	await page.routeWebSocket(/\/ahp(?:\?|$)/, (socket) => {
+		const server = socket.connectToServer();
+		server.onMessage((wire) => {
+			const message = JSON.parse(String(wire));
+			if (changed && message.result?.snapshots)
+				for (const snapshot of message.result.snapshots)
+					if (snapshot.resource === "ahp-root://")
+						snapshot.state._meta.wingman.instanceId = "replacement";
+			socket.send(JSON.stringify(message));
 		});
-	});
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		socket.connectToServer();
-		closeConnection = () => socket.close();
+		closeConnection = () => {
+			socket.close();
+			server.close();
+		};
 	});
 	const input = await composer(page);
 	await input.fill("Keep this unsent draft");
@@ -6537,6 +6403,8 @@ test.describe("remote access", () => {
 		page,
 		request,
 	}) => {
+		const ids: string[] = [];
+		await loseFirstInputReceipt(page, ids);
 		await page.goto(process.env.E2E_PAIR_URL!);
 		const input = page
 			.getByPlaceholder("Message Wingman…")
@@ -6545,19 +6413,7 @@ test.describe("remote access", () => {
 		const before = await (
 			await request.get(`${controlURL()}/model-stats`)
 		).json();
-		const ids: string[] = [];
-		await page.route(
-			"**/api/v2/backends/wingman/sessions/*/commands",
-			async (route) => {
-				const command = route.request().postDataJSON();
-				if (command.type !== "send") return route.continue();
-				ids.push(command.id);
-				if (ids.length === 1) {
-					await route.fetch();
-					await route.abort("failed");
-				} else await route.continue();
-			},
-		);
+
 		await input.fill("render markdown");
 		await input.press("Enter");
 		await expect(
@@ -6597,59 +6453,21 @@ async function reviewActive(
 	pendingInputs: PendingTurnInput[] = [],
 ) {
 	const id = "review-active";
-	let offline = false;
-	let closeSocket = () => {};
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
-	let finish = () => {
-		throw new Error("not subscribed");
-	};
-	await page.route(/\/api\/v2\/backends\/wingman\/sessions$/, (route) =>
-		route.fulfill({
-			json: [
-				{ id, title: "Review active turn", updated_at: "2026-09-13T00:00:00Z" },
-			],
-		}),
+	const fixture = await ahpFixture(page);
+	const session = fixture.add(
+		"wingman",
+		{ id, title: "Review active turn", updated_at: "2026-09-13T00:00:00Z" },
+		entries,
+		"streaming",
 	);
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		if (offline) {
-			socket.close();
-			return;
-		}
-		closeSocket = () => socket.close();
-		const server = socket.connectToServer();
-		socket.onMessage((message) => {
-			const command = JSON.parse(String(message));
-			if (command.type !== "subscribe" || command.ref.sessionId !== id) {
-				server.send(message);
-				return;
-			}
-			const send = (phase: string, revision: number) =>
-				socket.send(
-					JSON.stringify({
-						type: "session.snapshot",
-						subscriptionId: command.subscriptionId,
-						ref: {
-							workspaceId: scope.workspaceId,
-							backendId: "wingman",
-							sessionId: id,
-						},
-						epoch: "review-epoch",
-						revision,
-						entries,
-						state: {
-							...emptySession(sessionKey("wingman", id)),
-							status: "ready",
-							phase,
-							canSteer: true,
-							prompts,
-							pendingInputs,
-						},
-					}),
-				);
-			send("streaming", 0);
-			finish = () => send("idle", 1);
-		});
-	});
+	session.prompts = prompts;
+	session.pendingInputs = pendingInputs;
+	session.canSteer = true;
+	const finish = () => {
+		session.phase = "idle";
+		fixture.publish(session);
+	};
+
 	const input = await composer(page);
 	if (await page.locator("[data-mobile-navigation]").isVisible()) {
 		await page
@@ -6669,10 +6487,7 @@ async function reviewActive(
 	return {
 		input,
 		finish: () => finish(),
-		disconnect: () => {
-			offline = true;
-			closeSocket();
-		},
+		disconnect: () => fixture.disconnect(),
 	};
 }
 
@@ -7093,13 +6908,10 @@ test("recovery: approval shortcuts require deliberate focus and preserve the com
 	page,
 }) => {
 	const replies: unknown[] = [];
-	await page.route(/\/sessions\/review-active\/commands$/, async (route) => {
-		const body = route.request().postDataJSON();
+	const fixture = await ahpFixture(page);
+	fixture.onCommand = async (body) => {
 		replies.push(body);
-		await route.fulfill({
-			json: { requestId: body.requestId, accepted: true },
-		});
-	});
+	};
 	const { input } = await reviewActive(page, undefined, [
 		{
 			id: "approval",
@@ -7150,13 +6962,10 @@ test("recovery: queue edits retain the separate composer draft through reload", 
 	page,
 }) => {
 	const updates: unknown[] = [];
-	await page.route(/\/sessions\/review-active\/commands$/, async (route) => {
-		const body = route.request().postDataJSON();
+	const fixture = await ahpFixture(page);
+	fixture.onCommand = async (body) => {
 		updates.push(body);
-		await route.fulfill({
-			json: { requestId: body.requestId, accepted: true },
-		});
-	});
+	};
 	const { input } = await reviewActive(
 		page,
 		undefined,
@@ -7239,7 +7048,7 @@ test("recovery: streaming output is followed until the user scrolls away", async
 	page,
 }) => {
 	const id = "review-active";
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
+
 	const entries: ChatEntry[] = Array.from({ length: 10 }, (_, index) => [
 		{
 			id: `u-${index}`,
@@ -7253,66 +7062,27 @@ test("recovery: streaming output is followed until the user scrolls away", async
 			content: `Response number ${index}: ` + "Completed work. ".repeat(40),
 		},
 	]).flat();
-	await page.route(/\/api\/v2\/backends\/wingman\/sessions$/, (route) =>
-		route.fulfill({
-			json: [{ id, title: "Streaming", updated_at: "2026-09-13T00:00:00Z" }],
-		}),
+	const fixture = await ahpFixture(page);
+	const session = fixture.add(
+		"wingman",
+		{ id, title: "Streaming", updated_at: "2026-09-13T00:00:00Z" },
+		entries,
+		"streaming",
 	);
 	let revision = 0;
-	let stream = () => {};
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		const server = socket.connectToServer();
-		socket.onMessage((message) => {
-			const command = JSON.parse(String(message));
-			if (command.type !== "subscribe" || command.ref.sessionId !== id) {
-				server.send(message);
-				return;
-			}
-			const base = {
-				subscriptionId: command.subscriptionId,
-				ref: {
-					workspaceId: scope.workspaceId,
-					backendId: "wingman",
-					sessionId: id,
-				},
-				epoch: "streaming-epoch",
-			};
-			socket.send(
-				JSON.stringify({
-					...base,
-					type: "session.snapshot",
-					revision,
-					entries,
-					state: {
-						...emptySession(sessionKey("wingman", id)),
-						status: "ready",
-						phase: "streaming",
-					},
-				}),
-			);
-			stream = () => {
-				revision++;
-				socket.send(
-					JSON.stringify({
-						...base,
-						type: "session.update",
-						previousRevision: revision - 1,
-						revision,
-						changes: [
-							{
-								type: "entry.upsert",
-								entry: {
-									id: "a-live",
-									type: "assistant",
-									content: "More output.\n\n".repeat(revision * 10),
-								},
-							},
-						],
-					}),
-				);
-			};
-		});
-	});
+	const stream = () => {
+		revision++;
+		const existing = session.entries.find((entry) => entry.id === "a-live");
+		if (existing) existing.content = "More output.\n\n".repeat(revision * 10);
+		else
+			session.entries.push({
+				id: "a-live",
+				type: "assistant",
+				content: "More output.\n\n".repeat(revision * 10),
+			});
+		fixture.publish(session);
+	};
+
 	await composer(page);
 	await openSessions(page);
 	await sessionRow(page, id).click();

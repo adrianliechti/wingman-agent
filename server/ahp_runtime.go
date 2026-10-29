@@ -12,6 +12,40 @@ import (
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
+func (h *ahpHost) sessionExtension(req ahpRequest) (any, error) {
+	var p struct {
+		Channel   string `json:"channel"`
+		ID        string `json:"id"`
+		Epoch     string `json:"epoch"`
+		Text      string `json:"text"`
+		Operation string `json:"operation"`
+	}
+	if json.Unmarshal(req.Params, &p) != nil || p.ID == "" || p.Epoch == "" {
+		return nil, ahpInvalid("request identity and epoch required")
+	}
+	a, err := h.ensureSession(p.Channel)
+	if err != nil {
+		return nil, err
+	}
+	command := Command{ID: p.ID, Epoch: p.Epoch, Text: p.Text}
+	switch req.Method {
+	case "x-wingman/compact":
+		command.Type = "compact"
+	case "x-wingman/queueControl":
+		switch p.Operation {
+		case "clear":
+			command.Type = "queue_clear"
+		case "resume":
+			command.Type = "queue_resume"
+		case "cancelAll":
+			command.Type, command.ClearQueue = "cancel", true
+		default:
+			return nil, ahpInvalid("unknown queue operation")
+		}
+	}
+	return struct{}{}, a.command(command)
+}
+
 // Wingman-specific presentation data complements AHP's transcript, prompts and
 // queue. Execution remains owned by the session controller and TurnManager.
 type ahpRuntimeInfo struct {
@@ -65,7 +99,7 @@ func (a *ahpSession) syncQueue(c *sessionController) {
 	next := map[string]t.PendingMessage{}
 	kinds := map[string]t.PendingMessageKind{}
 	for _, input := range c.state.PendingInputs {
-		if input.Origin == "task" || input.State == "active" {
+		if input.Origin == "task" || input.State != "queued" {
 			continue
 		}
 		kind := t.PendingMessageKindQueued
@@ -75,18 +109,15 @@ func (a *ahpSession) syncQueue(c *sessionController) {
 		message := a.host.message(input.Text, input.Files, input.Images)
 		meta, _ := json.Marshal(map[string]any{"state": input.State, "position": input.Position})
 		message.Meta = map[string]json.RawMessage{"wingman": meta}
-		next[input.ID] = t.PendingMessage{Id: input.ID, Message: message}
+		next[input.ID] = t.PendingMessage{Id: input.ID, Kind: ahpPtr(kind), Message: message}
 		kinds[input.ID] = kind
 	}
 	previous := append([]t.PendingMessage{}, a.chat.QueuedMessages...)
-	if a.chat.SteeringMessage != nil {
-		previous = append(previous, *a.chat.SteeringMessage)
-	}
 	for _, old := range previous {
 		if _, exists := next[old.Id]; !exists {
 			kind := t.PendingMessageKindQueued
-			if a.chat.SteeringMessage != nil && a.chat.SteeringMessage.Id == old.Id {
-				kind = t.PendingMessageKindSteering
+			if old.Kind != nil {
+				kind = *old.Kind
 			}
 			a.chatAction(t.StateAction{Value: &t.ChatPendingMessageRemovedAction{Type: t.ActionTypeChatPendingMessageRemoved, Kind: kind, Id: old.Id}})
 		}

@@ -68,12 +68,13 @@ type Server struct {
 	backendsMu sync.Mutex
 	backends   map[string]*backendEntry
 	scope      WorkspaceScope
-	wsMu       sync.Mutex
-	wsConns    map[*websocket.Conn]*wsClient
 	sendMu     sync.Mutex
 	ahpOnce    sync.Once
 	ahp        *ahpHost
 
+	dapReferenceSeq  atomic.Uint64
+	lspDocumentsMu   sync.Mutex
+	lspDocuments     map[string]map[*lspConnection]struct{}
 	lspExternalMu    sync.Mutex
 	lspExternalPaths map[string]bool
 	fileWriteMu      sync.Mutex
@@ -121,7 +122,6 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 		ctx:       serverCtx,
 		cancel:    cancel,
 		backends:  make(map[string]*backendEntry),
-		wsConns:   map[*websocket.Conn]*wsClient{},
 	}
 	defer func() {
 		if err != nil {
@@ -137,7 +137,6 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 	s.ahpHost()
 
 	s.terminals = terminal.NewManager(ws.RootPath)
-	s.terminals.SetExitHandler(s.onTerminalExit)
 	s.preview, err = newFilePreviewServer(ws.Root)
 	if err != nil {
 		return nil, err
@@ -254,12 +253,6 @@ func (s *Server) Close() {
 			s.ahp.close()
 		}
 
-		s.wsMu.Lock()
-		for _, client := range s.wsConns {
-			client.close()
-			_ = client.conn.CloseNow()
-		}
-		s.wsMu.Unlock()
 		s.backendsMu.Lock()
 		runtimes := make([]*backendRuntime, 0, len(s.backends))
 		for _, entry := range s.backends {
@@ -337,6 +330,8 @@ func (s *Server) Run(ctx context.Context, port int) error {
 func (s *Server) registerRoutes(r chi.Router) {
 	s.ahpHost()
 	r.Get("/ahp", s.handleAHP)
+	r.Get("/lsp", s.handleLSP)
+	r.Get("/dap", s.handleDAP)
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/files", func(r chi.Router) {
 			r.Get("/", s.handleFiles)
@@ -380,57 +375,13 @@ func (s *Server) registerRoutes(r chi.Router) {
 
 		s.registerSessionRoutes(r)
 
-		r.Route("/terminals", func(r chi.Router) {
-			r.Get("/", s.handleTerminals)
-			r.Post("/", s.handleNewTerminal)
-			r.Get("/shells", s.handleTerminalShells)
-			r.Get("/{id}", s.handleTerminal)
-			r.Delete("/{id}", s.handleDeleteTerminal)
-			r.HandleFunc("/{id}/ws", s.handleTerminalWebSocket)
-		})
+		r.Get("/terminals/shells", s.handleTerminalShells)
 
-		r.Route("/lsp", func(r chi.Router) {
-			r.Get("/status", s.handleLSPStatus)
-			r.Get("/capabilities", s.handleLSPEditorCapabilities)
-			r.Post("/document", s.handleLSPDocumentLifecycle)
-			r.Get("/diagnostics", s.handleDiagnostics)
-			r.Post("/diagnostics", s.handleLSPFileDiagnostics)
-			r.Post("/definition", s.handleLSPDefinition)
-			r.Post("/type-definition", s.handleLSPTypeDefinition)
-			r.Post("/implementations", s.handleLSPImplementations)
-			r.Post("/references", s.handleLSPReferences)
-			r.Post("/hover", s.handleLSPHover)
-			r.Post("/completions", s.handleLSPCompletions)
-			r.Post("/completions/resolve", s.handleLSPCompletionResolve)
-			r.Post("/signature-help", s.handleLSPSignatureHelp)
-			r.Post("/document-symbols", s.handleLSPDocumentSymbols)
-			r.Post("/document-highlights", s.handleLSPDocumentHighlights)
-			r.Post("/folding-ranges", s.handleLSPFoldingRanges)
-			r.Post("/semantic-tokens", s.handleLSPSemanticTokens)
-			r.Post("/rename/prepare", s.handleLSPPrepareRename)
-			r.Post("/rename", s.handleLSPRename)
-			r.Post("/code-actions", s.handleLSPCodeActions)
-			r.Post("/code-actions/resolve", s.handleLSPCodeActionResolve)
-			r.Post("/execute-command", s.handleLSPExecuteCommand)
-			r.Post("/formatting", s.handleLSPFormatting)
-			r.Post("/formatting/range", s.handleLSPRangeFormatting)
-			r.Post("/formatting/on-type", s.handleLSPOnTypeFormatting)
-			r.Post("/inlay-hints", s.handleLSPInlayHints)
-			r.Get("/file", s.handleLSPExternalFile)
-		})
-		r.Route("/debug", func(r chi.Router) {
-			r.Post("/targets", s.handleDebugTargets)
-			r.Post("/plan", s.handleDebugPlan)
-			r.Post("/start", s.handleDebugStart)
-			r.Get("/session", s.handleDebugSession)
-			r.Get("/state", s.handleDebugState)
-			r.Get("/inspection", s.handleDebugInspection)
-			r.Put("/breakpoints", s.handleDebugBreakpoints)
-			r.Post("/control", s.handleDebugControl)
-			r.Post("/evaluate", s.handleDebugEvaluate)
-			r.Post("/scopes", s.handleDebugScopes)
-			r.Post("/variables", s.handleDebugVariables)
-		})
+		// Workspace setup and external source retrieval are host services; editor
+		// and debugger operations use the LSP and DAP WebSocket gateways.
+		r.Get("/lsp/file", s.handleLSPExternalFile)
+		r.Post("/debug/targets", s.handleDebugTargets)
+		r.Post("/debug/plan", s.handleDebugPlan)
 		r.Post("/editor/tab", s.handleEditorTab)
 		r.Post("/editor/transform", s.handleEditorTransform)
 		r.Post("/settings/editor.tab.completion", s.handleEditorTabSettings)
@@ -518,20 +469,10 @@ func (c *wsClient) run() {
 func (s *Server) send(f Frame) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
-	data, err := json.Marshal(f)
-	if err != nil {
-		return
-	}
-	s.wsMu.Lock()
-	clients := make([]*wsClient, 0, len(s.wsConns))
-	for _, c := range s.wsConns {
-		clients = append(clients, c)
-	}
-	s.wsMu.Unlock()
-	for _, c := range clients {
-		if !c.enqueue(data) {
-			_ = c.conn.CloseNow()
-		}
+	if s.ahp != nil {
+		s.ahp.mu.Lock()
+		s.ahp.notifyRoot("x-wingman/workspaceChanged", map[string]any{"channel": "ahp-root://", "event": f})
+		s.ahp.mu.Unlock()
 	}
 }
 
@@ -629,9 +570,12 @@ func (s *Server) debugAvailable(ctx context.Context) bool {
 }
 
 func (s *Server) hasClients() bool {
-	s.wsMu.Lock()
-	defer s.wsMu.Unlock()
-	return len(s.wsConns) > 0
+	if s.ahp == nil {
+		return false
+	}
+	s.ahp.mu.Lock()
+	defer s.ahp.mu.Unlock()
+	return len(s.ahp.clients) > 0
 }
 
 func (s *Server) flushFiles() {

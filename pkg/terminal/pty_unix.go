@@ -5,6 +5,7 @@ package terminal
 import (
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/creack/pty"
@@ -18,6 +19,7 @@ const ptySupported = true
 type unixPTY struct {
 	cmd    *exec.Cmd
 	master *os.File
+	exited atomic.Bool
 }
 
 func startPTY(spec CommandSpec, cols, rows int) (Terminal, error) {
@@ -60,11 +62,13 @@ func (p *unixPTY) HasForegroundProcess() bool {
 }
 
 func (p *unixPTY) Wait() error {
-	return p.cmd.Wait()
+	err := p.cmd.Wait()
+	p.exited.Store(true)
+	return err
 }
 
 func (p *unixPTY) Close() error {
-	if p.cmd.Process != nil {
+	if p.cmd.Process != nil && !p.exited.Load() {
 		if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL); err != nil {
 			_ = p.cmd.Process.Kill()
 		}

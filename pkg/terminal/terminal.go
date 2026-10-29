@@ -316,7 +316,7 @@ func (s *Session) finish() {
 		return
 	}
 	s.closed = true
-	var exit *exec.ExitError
+	var exit interface{ ExitCode() int }
 	if err == nil {
 		s.exitKnown = true
 	} else if errors.As(err, &exit) && exit.ExitCode() >= 0 {

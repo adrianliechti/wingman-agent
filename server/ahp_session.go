@@ -45,13 +45,18 @@ func newAHPSession(h *ahpHost, c *sessionController, resource, title string, upd
 	stamp := updated.UTC().Format(time.RFC3339Nano)
 	chatURI := ahpChatURI(resource)
 	return &ahpSession{host: h, controller: c, resource: resource, created: stamp, prompts: map[string]*ahpPrompt{}, pending: map[string]*ahpPendingAction{},
-		state: t.SessionState{Provider: c.ref.BackendID, Title: title, Status: t.SessionStatusIdle, Lifecycle: t.SessionLifecycleReady, ActiveClients: []t.SessionActiveClient{}, Chats: []t.ChatSummary{{Resource: chatURI, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp}}, DefaultChat: &chatURI, WorkingDirectories: []string{h.directoryURI()}, Config: ahpConfig(c.state.Settings)},
-		chat:  t.ChatState{Resource: chatURI, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}},
+		state: t.SessionState{Changesets: h.changesetCatalogue(), Provider: c.ref.BackendID, Title: title, Status: t.SessionStatusIdle, Lifecycle: t.SessionLifecycleReady, ActiveClients: []t.SessionActiveClient{}, Chats: []t.ChatSummary{{Resource: chatURI, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp}}, DefaultChat: &chatURI, WorkingDirectories: []string{h.directoryURI()}, Config: ahpConfig(c.state.Settings)},
+		chat:  t.ChatState{Resource: chatURI, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: map[string]json.RawMessage{}}},
 	}
 }
 
+func ahpSummaryMeta(ref SessionRef) map[string]json.RawMessage {
+	data, _ := json.Marshal(ref)
+	return map[string]json.RawMessage{"wingman.ref": data}
+}
+
 func (a *ahpSession) summary() t.SessionSummary {
-	return t.SessionSummary{Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.chat.Status, CreatedAt: a.created, ModifiedAt: a.chat.ModifiedAt, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []t.SessionChatSummary{{Resource: a.chat.Resource, Title: a.chat.Title, Status: &a.chat.Status}}}
+	return t.SessionSummary{Meta: ahpSummaryMeta(a.controller.ref), Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.chat.Status, CreatedAt: a.created, ModifiedAt: a.chat.ModifiedAt, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []t.SessionChatSummary{{Resource: a.chat.Resource, Title: a.chat.Title, Status: &a.chat.Status}}}
 }
 
 func (a *ahpSession) emit(channel string, action t.StateAction) {
@@ -263,7 +268,8 @@ func (a *ahpSession) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) 
 		if e.Type == "user" {
 			if c.activeInput != "" && len(turns) > 0 && turns[len(turns)-1].Id == c.activeInput && e.InputID != c.activeInput {
 				last := &turns[len(turns)-1]
-				last.ResponseParts = append(last.ResponseParts, t.ResponsePart{Value: &t.MarkdownResponsePart{Kind: t.ResponsePartKindMarkdown, Id: e.ID, Content: "**Follow-up:** " + e.Content}})
+				input, _ := json.Marshal(e)
+				last.ResponseParts = append(last.ResponseParts, t.ResponsePart{Value: &t.SystemNotificationResponsePart{Kind: t.ResponsePartKindSystemNotification, Content: t.NewStringOrMarkdownPlain("User follow-up: " + e.Content), Meta: map[string]json.RawMessage{"wingman.input": input}}})
 				continue
 			}
 			id := e.InputID
@@ -272,6 +278,8 @@ func (a *ahpSession) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) 
 			}
 			stamp := a.created
 			message := a.host.message(e.Content, e.Files, e.Images)
+			identity, _ := json.Marshal(map[string]string{"id": e.ID, "messageId": e.MessageID})
+			message.Meta = map[string]json.RawMessage{"wingman.entry": identity}
 			if pending := a.pending["start:"+id]; pending != nil {
 				if started, ok := pending.params.Action.Value.(*t.ChatTurnStartedAction); ok {
 					message = started.Message
@@ -363,15 +371,25 @@ func ahpEntryPart(e TranscriptEntry) (t.ResponsePart, bool) {
 		if id == "" {
 			id = e.ID
 		}
+		metadata, _ := json.Marshal(map[string]any{"id": e.ID, "messageId": e.MessageID, "images": e.Images, "toolKind": e.ToolKind, "toolLocations": e.ToolLocations, "toolHint": e.ToolHint})
+		meta := map[string]json.RawMessage{"wingman": metadata}
+		// VS Code's optional presentation conventions. These are rendering hints;
+		// ownership, permissions, and tool results remain standard AHP state.
+		switch e.ToolKind {
+		case "execute":
+			meta["toolKind"] = json.RawMessage(`"terminal"`)
+		case "read", "search":
+			meta["toolKind"], _ = json.Marshal(e.ToolKind)
+		}
 		invocation := t.NewStringOrMarkdownPlain(e.ToolName)
 		input := &t.ToolInput{Inline: &e.ToolArgs}
 		var call t.ToolCallState
 		if e.ToolResult != nil {
-			call.Value = &t.ToolCallCompletedState{ToolCallId: id, ToolName: e.ToolName, DisplayName: e.ToolName, Status: t.ToolCallStatusCompleted, InvocationMessage: invocation, ToolInput: input, Confirmed: t.ToolCallConfirmationReasonNotNeeded, Success: true, PastTenseMessage: invocation, Content: []t.ToolResultContent{{Value: &t.ToolResultTextContent{Type: t.ToolResultContentTypeText, Text: *e.ToolResult}}}}
+			call.Value = &t.ToolCallCompletedState{Meta: meta, ToolCallId: id, ToolName: e.ToolName, DisplayName: e.ToolName, Status: t.ToolCallStatusCompleted, InvocationMessage: invocation, ToolInput: input, Confirmed: t.ToolCallConfirmationReasonNotNeeded, Success: true, PastTenseMessage: invocation, Content: []t.ToolResultContent{{Value: &t.ToolResultTextContent{Type: t.ToolResultContentTypeText, Text: *e.ToolResult}}}}
 		} else if e.ToolPartial {
-			call.Value = &t.ToolCallStreamingState{ToolCallId: id, ToolName: e.ToolName, DisplayName: e.ToolName, Status: t.ToolCallStatusStreaming, PartialInput: &e.ToolArgs}
+			call.Value = &t.ToolCallStreamingState{Meta: meta, ToolCallId: id, ToolName: e.ToolName, DisplayName: e.ToolName, Status: t.ToolCallStatusStreaming, PartialInput: &e.ToolArgs}
 		} else {
-			call.Value = &t.ToolCallRunningState{ToolCallId: id, ToolName: e.ToolName, DisplayName: e.ToolName, Status: t.ToolCallStatusRunning, InvocationMessage: invocation, ToolInput: input, Confirmed: t.ToolCallConfirmationReasonNotNeeded}
+			call.Value = &t.ToolCallRunningState{Meta: meta, ToolCallId: id, ToolName: e.ToolName, DisplayName: e.ToolName, Status: t.ToolCallStatusRunning, InvocationMessage: invocation, ToolInput: input, Confirmed: t.ToolCallConfirmationReasonNotNeeded}
 		}
 		return t.ResponsePart{Value: &t.ToolCallResponsePart{Kind: t.ResponsePartKindToolCall, ToolCall: call}}, true
 	}
@@ -434,20 +452,25 @@ func (a *ahpSession) syncParts(parts []t.ResponsePart) bool {
 
 func (a *ahpSession) appendTool(turn string, call t.ToolCallState) {
 	var id, name, display string
+	var meta map[string]json.RawMessage
 	switch c := call.Value.(type) {
 	case *t.ToolCallStreamingState:
 		id, name, display = c.ToolCallId, c.ToolName, c.DisplayName
+		meta = c.Meta
 	case *t.ToolCallRunningState:
 		id, name, display = c.ToolCallId, c.ToolName, c.DisplayName
+		meta = c.Meta
 	case *t.ToolCallPendingConfirmationState:
 		id, name, display = c.ToolCallId, c.ToolName, c.DisplayName
+		meta = c.Meta
 	case *t.ToolCallCompletedState:
 		id, name, display = c.ToolCallId, c.ToolName, c.DisplayName
+		meta = c.Meta
 	default:
 		a.chatAction(t.StateAction{Value: &t.ChatResponsePartAction{Type: t.ActionTypeChatResponsePart, TurnId: turn, Part: t.ResponsePart{Value: &t.ToolCallResponsePart{Kind: t.ResponsePartKindToolCall, ToolCall: call}}}})
 		return
 	}
-	a.chatAction(t.StateAction{Value: &t.ChatToolCallStartAction{Type: t.ActionTypeChatToolCallStart, TurnId: turn, ToolCallId: id, ToolName: name, DisplayName: display}})
+	a.chatAction(t.StateAction{Value: &t.ChatToolCallStartAction{Type: t.ActionTypeChatToolCallStart, TurnId: turn, ToolCallId: id, ToolName: name, DisplayName: display, Meta: meta}})
 	switch c := call.Value.(type) {
 	case *t.ToolCallPendingConfirmationState:
 		a.chatAction(t.StateAction{Value: &t.ChatToolCallReadyAction{Type: t.ActionTypeChatToolCallReady, TurnId: turn, ToolCallId: id, InvocationMessage: c.InvocationMessage, ToolInput: c.ToolInput}})

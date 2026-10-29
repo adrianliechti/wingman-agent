@@ -27,7 +27,7 @@ export function DebugTab({ onOpenFile, onStopped }: Props) {
 		staleTime: 0,
 		queryFn: ({ signal }) => getDebugInspection(signal),
 		refetchInterval: (current) =>
-			debugInspectionPollInterval(current.state.data, 600, 1_500),
+			debugInspectionPollInterval(current.state.data, 10_000, 10_000),
 		structuralSharing: (previous, next) =>
 			preserveDebugInspection(previous, next as DebugInspection),
 	});

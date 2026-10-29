@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -65,48 +64,124 @@ func pairTestRemote(t *testing.T, client *http.Client, relayURL string, credenti
 	}
 }
 
-func remoteCommand(t *testing.T, client *http.Client, relayURL, instance string, command Command) (int, string) {
-	t.Helper()
-	body, _ := json.Marshal(command)
-	req, _ := http.NewRequestWithContext(t.Context(), "POST", relayURL+"/api/v2/backends/one/sessions/saved/commands", bytes.NewReader(body))
-	req.Header.Set(instanceHeader, instance)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", relayURL)
-	response, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	result, _ := io.ReadAll(response.Body)
-	return response.StatusCode, string(result)
+type remoteAHPFrame struct {
+	ID     int             `json:"id"`
+	Result json.RawMessage `json:"result"`
+	Params json.RawMessage `json:"params"`
+	Error  *ahpRPCError    `json:"error"`
+	Method string          `json:"method"`
 }
 
-func remoteSnapshot(t *testing.T, client *http.Client, relayURL string, c *sessionController) sessionEvent {
+func remoteAHP(t *testing.T, client *http.Client, relayURL string) *websocket.Conn {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
 	origin, _ := url.Parse(relayURL)
 	headers := http.Header{"Origin": {relayURL}}
 	for _, cookie := range client.Jar.Cookies(origin) {
 		headers.Add("Cookie", cookie.String())
 	}
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(relayURL, "http")+"/api/v2/events?instance="+c.backend.scope.InstanceID, &websocket.DialOptions{HTTPHeader: headers})
+	conn, _, err := websocket.Dial(t.Context(), "ws"+strings.TrimPrefix(relayURL, "http")+"/ahp", &websocket.DialOptions{HTTPHeader: headers})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.CloseNow()
-	if err := wsjson.Write(ctx, conn, subscriptionRequest{Type: "subscribe", SubscriptionID: "remote", Ref: c.ref}); err != nil {
+	return conn
+}
+
+func remoteRPC(t *testing.T, conn *websocket.Conn, method string, params any) json.RawMessage {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := wsjson.Write(ctx, conn, map[string]any{"jsonrpc": "2.0", "id": 1, "method": method, "params": params}); err != nil {
 		t.Fatal(err)
 	}
 	for {
-		var event sessionEvent
-		if err := wsjson.Read(ctx, conn, &event); err != nil {
+		var frame remoteAHPFrame
+		if err := wsjson.Read(ctx, conn, &frame); err != nil {
 			t.Fatal(err)
 		}
-		if event.Type == "session.snapshot" {
-			return event
+		if frame.ID == 1 {
+			if frame.Error != nil {
+				t.Fatal(frame.Error)
+			}
+			return frame.Result
 		}
 	}
+}
+
+func remoteInitialize(t *testing.T, conn *websocket.Conn) string {
+	result := remoteRPC(t, conn, "initialize", map[string]any{"channel": "ahp-root://", "clientId": "remote-test", "protocolVersions": []string{"1.1.0"}, "initialSubscriptions": []string{"ahp-root://"}})
+	var initialized struct {
+		Snapshots []struct {
+			State struct {
+				Meta struct {
+					Wingman WorkspaceScope `json:"wingman"`
+				} `json:"_meta"`
+			} `json:"state"`
+		} `json:"snapshots"`
+	}
+	if err := json.Unmarshal(result, &initialized); err != nil {
+		t.Fatal(err)
+	}
+	return initialized.Snapshots[0].State.Meta.Wingman.InstanceID
+}
+
+func remoteCommand(t *testing.T, client *http.Client, relayURL, instance string, command Command) (int, string) {
+	t.Helper()
+	conn := remoteAHP(t, client, relayURL)
+	defer conn.CloseNow()
+	// Like the browser, bind the initialized workspace before replaying any command.
+	if remoteInitialize(t, conn) != instance {
+		return 409, "workspace replaced"
+	}
+	resolved := remoteRPC(t, conn, "x-wingman/resolveSession", map[string]any{"channel": "ahp-root://", "backend": "one", "session": "saved"})
+	var resource struct {
+		Resource string `json:"resource"`
+	}
+	_ = json.Unmarshal(resolved, &resource)
+	snapshot := remoteRPC(t, conn, "subscribe", map[string]string{"channel": resource.Resource})
+	var session struct {
+		Snapshot struct {
+			State struct {
+				DefaultChat string `json:"defaultChat"`
+			} `json:"state"`
+		} `json:"snapshot"`
+	}
+	_ = json.Unmarshal(snapshot, &session)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	params := map[string]any{"channel": session.Snapshot.State.DefaultChat, "clientSeq": 1, "action": map[string]any{"type": "chat/pendingMessageSet", "id": command.ID, "kind": "queued", "message": map[string]any{"text": command.Text, "origin": map[string]string{"kind": "user"}}}}
+	if err := wsjson.Write(ctx, conn, map[string]any{"jsonrpc": "2.0", "method": "dispatchAction", "params": params}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		var frame remoteAHPFrame
+		if err := wsjson.Read(ctx, conn, &frame); err != nil {
+			t.Fatal(err)
+		}
+		if frame.Method != "action" {
+			continue
+		}
+		var action struct {
+			Origin *struct {
+				ClientID string `json:"clientId"`
+			} `json:"origin"`
+			Rejection *string `json:"rejectionReason"`
+		}
+		_ = json.Unmarshal(frame.Params, &action)
+		if action.Origin != nil && action.Origin.ClientID == "remote-test" {
+			if action.Rejection != nil {
+				return 409, *action.Rejection
+			}
+			return 200, string(frame.Params)
+		}
+	}
+}
+
+func remoteSnapshot(t *testing.T, client *http.Client, relayURL string, c *sessionController) json.RawMessage {
+	t.Helper()
+	conn := remoteAHP(t, client, relayURL)
+	defer conn.CloseNow()
+	remoteInitialize(t, conn)
+	return remoteRPC(t, conn, "subscribe", map[string]string{"channel": ahpChatURI(canonicalAHPURI(c.ref.BackendID, c.ref.SessionID))})
 }
 
 func TestRemoteUsesExistingReceiptsAndRecoversLiveSessionAfterTunnelRestart(t *testing.T) {
@@ -146,7 +221,7 @@ func TestRemoteUsesExistingReceiptsAndRecoversLiveSessionAfterTunnelRestart(t *t
 	}
 	connectTestRemote(t, s, web.URL, credentials)
 	after := remoteSnapshot(t, client, web.URL, c)
-	if after.Epoch != before.Epoch || after.Revision != before.Revision || after.Entries[len(after.Entries)-1].Content != "live prefix" {
+	if !strings.Contains(string(after), "live prefix") || !bytes.Equal(before, after) {
 		t.Fatalf("reconnect did not recover the running session: %+v", after)
 	}
 	if a.sent.Load() != 1 {

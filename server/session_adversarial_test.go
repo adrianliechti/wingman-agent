@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"iter"
+	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
@@ -213,7 +214,14 @@ func TestBackendReadsCancelWithEitherRequestOrWorkspace(t *testing.T) {
 			req := httptest.NewRequest("GET", "/api/v2/backends/one/sessions", nil).WithContext(ctx)
 			req.Header.Set(instanceHeader, s.scope.InstanceID)
 			done := make(chan struct{})
-			go func() { s.ServeHTTP(httptest.NewRecorder(), req); close(done) }()
+			go func() {
+				handler := s.backendOperation(func(b *backendRuntime, _ http.ResponseWriter, r *http.Request) {
+					_, _ = b.agent.ListSessions(r.Context())
+				})
+				req.SetPathValue("backend", "one")
+				handler(httptest.NewRecorder(), req)
+				close(done)
+			}()
 			<-started
 			closed := make(chan struct{})
 			if source == "workspace" {
@@ -239,20 +247,5 @@ func TestBackendReadsCancelWithEitherRequestOrWorkspace(t *testing.T) {
 				t.Fatal("workspace shutdown did not finish")
 			}
 		})
-	}
-}
-
-func TestSessionMultipleSubscriptionsOnOneSocketAreIndependent(t *testing.T) {
-	_, b, _ := newProtocolServer(t)
-	c, client := b.session("saved"), newWSClient(nil)
-	c.subscribe(client, "first")
-	_ = receiveEvent(t, client)
-	c.subscribe(client, "second")
-	_ = receiveEvent(t, client)
-	c.unsubscribe(client, "second")
-	c.apply(Frame{Type: EvtTextDelta, ID: "text", Text: "hello"})
-	event := receiveEvent(t, client)
-	if event.SubscriptionID != "first" || event.Type != "session.update" {
-		t.Fatalf("remaining subscription: %+v", event)
 	}
 }

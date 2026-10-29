@@ -1,3 +1,4 @@
+import { workspaceClient } from "./state/workspaceClient.ts";
 import type { Monaco } from "@monaco-editor/react";
 import type * as MonacoTypes from "monaco-editor";
 import {
@@ -95,13 +96,7 @@ export function createMonacoDebugBridge({
 	function schedulePoll() {
 		window.clearTimeout(pollTimer);
 		if (disposed) return;
-		const delay = !state?.available
-			? 4_000
-			: state.session?.state === "running"
-				? 700
-				: state.session?.state === "stopped"
-					? 2_000
-					: 1_500;
+		const delay = 10_000;
 		pollTimer = window.setTimeout(() => void refresh(), delay);
 	}
 
@@ -288,10 +283,17 @@ export function createMonacoDebugBridge({
 		);
 	}
 
+	const releaseEvents = workspaceClient().dap.subscribe((event) => {
+		if (event === "wingman/status" || event === "disconnected") {
+			window.clearTimeout(pollTimer);
+			pollTimer = window.setTimeout(() => void refresh(), 16);
+		}
+	});
 	void refresh();
 
 	return {
 		dispose() {
+			releaseEvents();
 			if (disposed) return;
 			disposed = true;
 			window.clearTimeout(pollTimer);

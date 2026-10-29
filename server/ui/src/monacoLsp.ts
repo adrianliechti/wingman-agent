@@ -1,3 +1,5 @@
+import { workspaceClient } from "./state/workspaceClient.ts";
+import { editEnvelope } from "./state/lspClient.ts";
 import { scopedFetch } from "./api/http.ts";
 import type { Monaco } from "@monaco-editor/react";
 import type * as MonacoTypes from "monaco-editor";
@@ -18,7 +20,6 @@ import type {
 } from "vscode-languageserver-types";
 import type { DiagnosticEntry, FileContent } from "./types/protocol";
 import {
-	combineWorkspaceEditEnvelopes,
 	type WorkspaceDocumentSnapshot,
 	type WorkspaceEditEnvelope,
 } from "./workspaceEdit";
@@ -213,22 +214,19 @@ export function createMonacoLSPBridge({
 		const controller = new AbortController();
 		requests.add(controller);
 		try {
-			const response = await postJSONRequired<LSPCommandResponse>(
-				"/api/lsp/execute-command",
-				{
-					...documentRequest(file.path, sourceModel!),
-					command,
-				},
+			await workspaceClient().lsp.feature(
+				"workspace/executeCommand",
+				{ ...documentRequest(file.path, sourceModel!), command },
 				controller.signal,
+				async (params) => {
+					const applied = await onApplyWorkspaceEdit?.(
+						editEnvelope(params.edit),
+						params.label || fallbackLabel,
+					);
+					if (applied) appliedCodeActions++;
+					return applied ?? false;
+				},
 			);
-			const requested = response.edits ?? [];
-			if (requested.length === 0) return true;
-			const applied = await onApplyWorkspaceEdit?.(
-				combineWorkspaceEditEnvelopes(requested),
-				requested.find((item) => item.label)?.label || fallbackLabel,
-			);
-			if (!applied) return false;
-			appliedCodeActions++;
 			return true;
 		} catch (error) {
 			if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -254,7 +252,7 @@ export function createMonacoLSPBridge({
 			requests.add(controller);
 			try {
 				const resolved = await postJSON<LSPResolvedCodeActionResponse>(
-					"/api/lsp/code-actions/resolve",
+					"codeAction/resolve",
 					{
 						...documentRequest(file.path, sourceModel),
 						action,
@@ -310,7 +308,7 @@ export function createMonacoLSPBridge({
 		requests.add(controller);
 		try {
 			const response = await postJSON<LSPCodeActionsResponse>(
-				"/api/lsp/code-actions",
+				"textDocument/codeAction",
 				{
 					...documentRequest(file.path, sourceModel),
 					range: protocolRange(sourceModel.getFullModelRange()),
@@ -500,7 +498,7 @@ export function createMonacoLSPBridge({
 						if (model !== sourceModel) return;
 						return trackedRequest(token, async (signal) => {
 							const list = await postJSON<LSPCompletionList>(
-								"/api/lsp/completions",
+								"textDocument/completion",
 								{
 									...positionRequest(file.path, model, position),
 									trigger_kind: context.triggerKind + 1,
@@ -541,7 +539,7 @@ export function createMonacoLSPBridge({
 								if (!source) return suggestion;
 								return trackedRequest(token, async (signal) => {
 									const resolved = await postJSON<LSPCompletionItem>(
-										"/api/lsp/completions/resolve",
+										"completionItem/resolve",
 										{
 											...documentRequest(file.path, source.model),
 											item: source.item,
@@ -587,7 +585,7 @@ export function createMonacoLSPBridge({
 						if (model !== sourceModel) return;
 						return trackedRequest(token, async (signal) => {
 							const help = await postJSON<LSPSignatureHelp>(
-								"/api/lsp/signature-help",
+								"textDocument/signatureHelp",
 								{
 									...positionRequest(file.path, model, position),
 									trigger_kind: context.triggerKind,
@@ -614,7 +612,8 @@ export function createMonacoLSPBridge({
 						model: MonacoTypes.editor.ITextModel,
 						position: MonacoTypes.Position,
 						token: MonacoTypes.CancellationToken,
-					) => provideLocations("/api/lsp/definition", model, position, token),
+					) =>
+						provideLocations("textDocument/definition", model, position, token),
 				}),
 			);
 		}
@@ -627,7 +626,7 @@ export function createMonacoLSPBridge({
 						token: MonacoTypes.CancellationToken,
 					) =>
 						provideLocations(
-							"/api/lsp/type-definition",
+							"textDocument/typeDefinition",
 							model,
 							position,
 							token,
@@ -644,7 +643,7 @@ export function createMonacoLSPBridge({
 						token: MonacoTypes.CancellationToken,
 					) =>
 						provideLocations(
-							"/api/lsp/implementations",
+							"textDocument/implementation",
 							model,
 							position,
 							token,
@@ -660,7 +659,8 @@ export function createMonacoLSPBridge({
 						position: MonacoTypes.Position,
 						_context: MonacoTypes.languages.ReferenceContext,
 						token: MonacoTypes.CancellationToken,
-					) => provideLocations("/api/lsp/references", model, position, token),
+					) =>
+						provideLocations("textDocument/references", model, position, token),
 				}),
 			);
 		}
@@ -675,7 +675,7 @@ export function createMonacoLSPBridge({
 						if (model !== sourceModel) return;
 						return trackedRequest(token, async (signal) => {
 							const result = await postJSON<{ contents: string }>(
-								"/api/lsp/hover",
+								"textDocument/hover",
 								positionRequest(file.path, model, position),
 								signal,
 							);
@@ -697,7 +697,7 @@ export function createMonacoLSPBridge({
 						if (model !== sourceModel) return;
 						return trackedRequest(token, async (signal) => {
 							const symbols = await postJSON<LSPDocumentSymbol[]>(
-								"/api/lsp/document-symbols",
+								"textDocument/documentSymbol",
 								documentRequest(file.path, model),
 								signal,
 							);
@@ -718,7 +718,7 @@ export function createMonacoLSPBridge({
 						if (model !== sourceModel) return;
 						return trackedRequest(token, async (signal) => {
 							const highlights = await postJSON<LSPDocumentHighlight[]>(
-								"/api/lsp/document-highlights",
+								"textDocument/documentHighlight",
 								positionRequest(file.path, model, position),
 								signal,
 							);
@@ -745,7 +745,7 @@ export function createMonacoLSPBridge({
 						if (model !== sourceModel) return;
 						return trackedRequest(token, async (signal) => {
 							const ranges = await postJSON<LSPFoldingRange[]>(
-								"/api/lsp/folding-ranges",
+								"textDocument/foldingRange",
 								documentRequest(file.path, model),
 								signal,
 							);
@@ -773,12 +773,14 @@ export function createMonacoLSPBridge({
 					) {
 						if (model !== sourceModel) return;
 						return trackedRequest(token, async (signal) => {
-							const tokens = await postJSON<LSPSemanticToken[]>(
-								"/api/lsp/semantic-tokens",
+							const tokens = await postJSON<{ data: number[] }>(
+								"textDocument/semanticTokens/full",
 								documentRequest(file.path, model),
 								signal,
 							);
-							return tokens ? encodeSemanticTokens(tokens) : undefined;
+							return tokens
+								? { data: new Uint32Array(tokens.data) }
+								: undefined;
 						});
 					},
 					releaseDocumentSemanticTokens() {},
@@ -798,7 +800,7 @@ export function createMonacoLSPBridge({
 									if (model !== sourceModel) return;
 									return trackedRequest(token, async (signal) => {
 										const result = await postJSON<LSPPrepareRenameResult>(
-											"/api/lsp/rename/prepare",
+											"textDocument/prepareRename",
 											positionRequest(file.path, model, position),
 											signal,
 										);
@@ -831,7 +833,7 @@ export function createMonacoLSPBridge({
 						if (model !== sourceModel) return;
 						return trackedRequest(token, async (signal) => {
 							const response = await postJSON<WorkspaceEditEnvelope>(
-								"/api/lsp/rename",
+								"textDocument/rename",
 								{
 									...positionRequest(file.path, model, position),
 									new_name: newName,
@@ -866,7 +868,7 @@ export function createMonacoLSPBridge({
 							if (model !== sourceModel) return;
 							return trackedRequest(token, async (signal) => {
 								const response = await postJSON<LSPCodeActionsResponse>(
-									"/api/lsp/code-actions",
+									"textDocument/codeAction",
 									{
 										...documentRequest(file.path, model),
 										range: protocolRange(range),
@@ -932,7 +934,7 @@ export function createMonacoLSPBridge({
 					) {
 						if (model !== sourceModel) return;
 						return provideFormattingEdits(
-							"/api/lsp/formatting",
+							"textDocument/formatting",
 							model,
 							{ ...documentRequest(file.path, model), options },
 							token,
@@ -955,7 +957,7 @@ export function createMonacoLSPBridge({
 						) {
 							if (model !== sourceModel) return;
 							return provideFormattingEdits(
-								"/api/lsp/formatting/range",
+								"textDocument/rangeFormatting",
 								model,
 								{
 									...documentRequest(file.path, model),
@@ -983,7 +985,7 @@ export function createMonacoLSPBridge({
 					) {
 						if (model !== sourceModel) return;
 						return provideFormattingEdits(
-							"/api/lsp/formatting/on-type",
+							"textDocument/onTypeFormatting",
 							model,
 							{
 								...positionRequest(file.path, model, position),
@@ -1008,7 +1010,7 @@ export function createMonacoLSPBridge({
 						if (model !== sourceModel) return;
 						return trackedRequest(token, async (signal) => {
 							const hints = await postJSON<LSPInlayHint[]>(
-								"/api/lsp/inlay-hints",
+								"textDocument/inlayHint",
 								{
 									...documentRequest(file.path, model),
 									range: protocolRange(range),
@@ -1121,7 +1123,7 @@ export function createMonacoLSPBridge({
 			const revision = ++diagnosticsRevision;
 			try {
 				const diagnostics = await postJSON<DiagnosticEntry[]>(
-					"/api/lsp/diagnostics",
+					"textDocument/diagnostic",
 					documentRequest(file.path, sourceModel),
 					controller.signal,
 				);
@@ -1173,14 +1175,6 @@ export function createMonacoLSPBridge({
 			definitionTargets.clear();
 		},
 	};
-}
-
-interface LSPSemanticToken {
-	line: number;
-	character: number;
-	length: number;
-	type: string;
-	modifiers?: string[];
 }
 
 interface LSPFileTarget {
@@ -1250,14 +1244,6 @@ interface LSPResolvedCodeActionResponse {
 	documents: Record<string, WorkspaceDocumentSnapshot>;
 }
 
-interface LSPCommandEditResponse extends WorkspaceEditEnvelope {
-	label?: string;
-}
-
-interface LSPCommandResponse {
-	edits: LSPCommandEditResponse[];
-}
-
 interface LSPEditorCapabilities {
 	workspace_uri: string;
 	language_server: boolean;
@@ -1315,48 +1301,32 @@ const structuralCapabilities: LSPEditorCapabilities = {
 };
 
 async function postJSON<T>(
-	endpoint: string,
+	method: string,
 	body: unknown,
 	signal: AbortSignal,
 ): Promise<T | undefined> {
-	const response = await scopedFetch(endpoint, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-		signal,
-	});
-	if (!response.ok) return undefined;
-	return (await response.json()) as T;
-}
-
-async function postJSONRequired<T>(
-	endpoint: string,
-	body: unknown,
-	signal: AbortSignal,
-): Promise<T> {
-	const response = await scopedFetch(endpoint, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-		signal,
-	});
-	if (!response.ok) {
-		const detail = (await response.text()).trim();
-		throw new Error(detail || `Request failed (${response.status})`);
+	try {
+		return await workspaceClient().lsp.feature<T>(
+			method,
+			body as Record<string, unknown>,
+			signal,
+		);
+	} catch (error) {
+		if (signal.aborted) throw error;
+		return undefined;
 	}
-	return (await response.json()) as T;
 }
 
 async function getEditorCapabilities(
 	path: string,
 	signal: AbortSignal,
 ): Promise<LSPEditorCapabilities> {
-	const response = await scopedFetch(
-		`/api/lsp/capabilities?path=${encodeURIComponent(path)}`,
-		{ signal },
-	);
-	if (!response.ok) throw new Error("Editor capabilities unavailable");
-	const capabilities = (await response.json()) as LSPEditorCapabilities;
+	const capabilities =
+		await workspaceClient().lsp.feature<LSPEditorCapabilities>(
+			"wingman/documentCapabilities",
+			{ path },
+			signal,
+		);
 	return {
 		...capabilities,
 		completion_trigger_characters:
@@ -1518,46 +1488,6 @@ function foldingKind(monaco: Monaco, kind?: string) {
 		case "region":
 			return monaco.languages.FoldingRangeKind.Region;
 	}
-}
-
-function encodeSemanticTokens(
-	tokens: LSPSemanticToken[],
-): MonacoTypes.languages.SemanticTokens {
-	const sorted = tokens
-		.filter(
-			(token) => token.length > 0 && semanticTokenTypes.includes(token.type),
-		)
-		.toSorted(
-			(a, b) =>
-				a.line - b.line || a.character - b.character || a.length - b.length,
-		);
-	const data = new Uint32Array(sorted.length * 5);
-	let previousLine = 0;
-	let previousCharacter = 0;
-	for (let index = 0; index < sorted.length; index++) {
-		const token = sorted[index];
-		const lineDelta = token.line - previousLine;
-		const characterDelta =
-			lineDelta === 0 ? token.character - previousCharacter : token.character;
-		let modifierBits = 0;
-		for (const modifier of token.modifiers ?? []) {
-			const modifierIndex = semanticTokenModifiers.indexOf(modifier);
-			if (modifierIndex >= 0) modifierBits |= 1 << modifierIndex;
-		}
-		data.set(
-			[
-				lineDelta,
-				characterDelta,
-				token.length,
-				semanticTokenTypes.indexOf(token.type),
-				modifierBits,
-			],
-			index * 5,
-		);
-		previousLine = token.line;
-		previousCharacter = token.character;
-	}
-	return { data };
 }
 
 function documentation(value?: string | MarkupContent) {

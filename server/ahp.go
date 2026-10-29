@@ -1,6 +1,6 @@
 package server
 
-// AHP is an additional view of the server's existing sessions. The native
+// AHP is the shared browser and IDE session transport. The native
 // controller remains the owner of execution, command receipts and prompts.
 // Lock order is sessionController.mu -> ahpHost.mu; never the reverse.
 
@@ -28,29 +28,39 @@ import (
 )
 
 type ahpHost struct {
-	server       *Server
-	mu           sync.Mutex
-	createMu     sync.Mutex
-	terminalMu   sync.Mutex
-	terminalOnce sync.Once
-	terminals    map[string]*ahpTerminal
-	done         chan struct{}
-	seq          int64
-	clients      map[*ahpConnection]struct{}
-	sessions     map[string]*ahpSession
-	aliases      map[string]ahpAlias
-	receipts     map[string]*ahpClientReceipts
-	closed       bool
+	server             *Server
+	mu                 sync.Mutex
+	createMu           sync.Mutex
+	terminalMu         sync.Mutex
+	terminalOnce       sync.Once
+	terminals          map[string]*ahpTerminal
+	watches            map[string]*ahpResourceWatch
+	watchOnce          sync.Once
+	changesMu          sync.Mutex
+	changesOnce        sync.Once
+	changesFingerprint uint64 // protected by changesMu
+	changes            *t.ChangesetState
+	contents           map[string]string
+	done               chan struct{}
+	seq                int64
+	clients            map[*ahpConnection]struct{}
+	sessions           map[string]*ahpSession
+	aliases            map[string]ahpAlias
+	receipts           map[string]*ahpClientReceipts
+	closed             bool
 }
 
 type ahpAlias struct {
-	Resource string `json:"resource"`
-	Backend  string `json:"backend"`
-	Session  string `json:"session"`
+	Resource           string `json:"resource"`
+	Backend            string `json:"backend"`
+	Session            string `json:"session"`
+	RequestFingerprint string `json:"requestFingerprint,omitempty"`
+	CreationError      string `json:"creationError,omitempty"`
 }
 
 type ahpClientReceipts struct {
 	mu      sync.Mutex // Serialize one identity, including overlapping reconnects.
+	version string
 	last    int64
 	entries map[int64]*ahpActionReceipt
 }
@@ -64,6 +74,7 @@ type ahpConnection struct {
 	host          *ahpHost
 	writer        *wsClient
 	id            string
+	version       string
 	initialized   bool
 	subscriptions map[string]bool // protected by host.mu
 }
@@ -306,6 +317,21 @@ func (h *ahpHost) publishAgents() {
 }
 
 func (h *ahpHost) publish(channel string, action t.StateAction, origin *t.ActionOrigin, rejection *string) t.ActionEnvelope {
+	// 1.0 reducers keep queued and steering input in separate slots. Clear the
+	// opposite slot before a kind change, without changing 1.1's stable ordering.
+	if set, ok := action.Value.(*t.ChatPendingMessageSetAction); ok && rejection == nil {
+		h.seq++
+		kind := t.PendingMessageKindQueued
+		if set.Kind == kind {
+			kind = t.PendingMessageKindSteering
+		}
+		remove := t.StateAction{Value: &t.ChatPendingMessageRemovedAction{Type: t.ActionTypeChatPendingMessageRemoved, Kind: kind, Id: set.Id}}
+		for c := range h.clients {
+			if c.legacyQueue() && c.subscriptions[channel] {
+				c.notify("action", t.ActionEnvelope{Channel: channel, Action: remove, ServerSeq: h.seq})
+			}
+		}
+	}
 	h.seq++
 	envelope := t.ActionEnvelope{Channel: channel, Action: action, ServerSeq: h.seq, Origin: origin, RejectionReason: rejection}
 	for c := range h.clients {
@@ -314,6 +340,24 @@ func (h *ahpHost) publish(channel string, action t.StateAction, origin *t.Action
 		}
 	}
 	return envelope
+}
+
+func (c *ahpConnection) legacyQueue() bool {
+	return c.version == "" || strings.HasPrefix(c.version, "0.") || strings.HasPrefix(c.version, "1.0.")
+}
+
+func (c *ahpConnection) chatSnapshot(chat *t.ChatState) *t.ChatState {
+	if !c.legacyQueue() {
+		return chat
+	}
+	state := *chat
+	state.QueuedMessages = nil
+	for _, message := range chat.QueuedMessages {
+		if message.Kind == nil || *message.Kind == t.PendingMessageKindQueued {
+			state.QueuedMessages = append(state.QueuedMessages, message)
+		}
+	}
+	return &state
 }
 
 func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
@@ -384,6 +428,10 @@ func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
 			h.receipts[clientID] = &ahpClientReceipts{entries: map[int64]*ahpActionReceipt{}}
 		}
 		c.id = clientID
+		if version != "" {
+			h.receipts[clientID].version = version
+		}
+		c.version = h.receipts[clientID].version
 		c.initialized = true
 	}
 	if len(c.subscriptions)+len(channels) > 128 {
@@ -397,6 +445,11 @@ func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
 			state.Root = root
 		} else if terminal := h.terminals[channel]; terminal != nil {
 			state.Terminal = &terminal.state
+		} else if watch := h.watches[channel]; watch != nil {
+			state.ResourceWatch = &watch.state
+			watch.touched = time.Now()
+		} else if channel == ahpWorkspaceChanges && h.changes != nil {
+			state.Changeset = h.changes
 		} else {
 			a := h.sessionByChannel(channel)
 			if a == nil || a.deleted {
@@ -408,7 +461,7 @@ func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
 			if channel == a.resource {
 				state.Session = &a.state
 			} else {
-				state.Chat = &a.chat
+				state.Chat = c.chatSnapshot(&a.chat)
 			}
 		}
 		c.subscriptions[channel] = true
@@ -462,6 +515,8 @@ func (h *ahpHost) root() (t.RootState, error) {
 	}
 	resources, _ := json.Marshal(map[string]any{"platform": platform, "architecture": runtime.GOARCH, "cpuCount": runtime.NumCPU()})
 	root := t.RootState{Agents: []t.AgentInfo{}, Meta: map[string]json.RawMessage{"vscode.agentHost.resources": resources}}
+	workspace, _ := json.Marshal(map[string]any{"workspaceId": h.server.scope.WorkspaceID, "instanceId": h.server.scope.InstanceID, "directory": h.directoryURI()})
+	root.Meta["wingman"] = workspace
 	for _, entry := range available {
 		info := t.AgentInfo{Provider: entry.ID, DisplayName: entry.Name, Description: entry.Name + " in Wingman", Models: []t.SessionModelInfo{}}
 		h.server.backendsMu.Lock()
@@ -592,6 +647,39 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 	switch req.Method {
 	case "createTerminal":
 		return c.createTerminal(req.Params)
+	case "createResourceWatch":
+		return h.createResourceWatch(req.Params)
+	case "x-wingman/resolveSession":
+		var p struct {
+			Backend string `json:"backend"`
+			Session string `json:"session"`
+		}
+		if json.Unmarshal(req.Params, &p) != nil || p.Backend == "" || p.Session == "" {
+			return nil, ahpInvalid("session identity required")
+		}
+		resource := canonicalAHPURI(p.Backend, p.Session)
+		h.mu.Lock()
+		for uri, alias := range h.aliases {
+			if alias.Backend == p.Backend && alias.Session == p.Session {
+				resource = uri
+				break
+			}
+		}
+		h.mu.Unlock()
+		return map[string]string{"resource": resource}, nil
+	case "x-wingman/compact", "x-wingman/queueControl":
+		return h.sessionExtension(req)
+	case "x-wingman/terminalStatus":
+		h.mu.Lock()
+		terminal := h.terminals[base.Channel]
+		h.mu.Unlock()
+		if terminal == nil {
+			return nil, &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "terminal not found"}
+		}
+		return map[string]bool{"busy": terminal.session.HasForegroundProcess()}, nil
+	case "x-wingman/focus":
+		h.server.flushFiles()
+		return struct{}{}, nil
 	case "disposeTerminal":
 		return c.disposeTerminal(base.Channel)
 	case "listSessions":
@@ -670,10 +758,16 @@ func (h *ahpHost) createSession(raw json.RawMessage, clientID string) (any, erro
 	h.createMu.Lock()
 	defer h.createMu.Unlock()
 	h.mu.Lock()
-	_, exists := h.aliases[p.Channel]
+	alias, exists := h.aliases[p.Channel]
 	existing := h.sessions[p.Channel]
 	h.mu.Unlock()
-	if exists || existing != nil {
+	requestData, _ := json.Marshal(p)
+	requestHash := sha256.Sum256(requestData)
+	fingerprint := hex.EncodeToString(requestHash[:])
+	if exists && alias.RequestFingerprint != "" && alias.RequestFingerprint != fingerprint {
+		return nil, ahpInvalid("session channel reused with different creation parameters")
+	}
+	if (exists && alias.CreationError == "") || (!exists && existing != nil) {
 		return nil, &ahpRPCError{Code: -32003, Message: "session already exists"}
 	}
 	b, err := h.server.backend(provider)
@@ -684,34 +778,52 @@ func (h *ahpHost) createSession(raw json.RawMessage, clientID string) (any, erro
 		return nil, errors.New("workspace closed")
 	}
 	defer b.operations.Done()
-	id, err := b.agent.NewSession(b.ctx)
-	if err != nil {
-		return nil, err
+	command := Command{ID: "ahp-create:" + p.Channel, Type: "create"}
+	if data := p.Meta["wingman.fork"]; data != nil {
+		var fork struct {
+			Source string `json:"source"`
+			Title  string `json:"title"`
+		}
+		if json.Unmarshal(data, &fork) != nil {
+			return nil, ahpInvalid("invalid fork request")
+		}
+		source, loadErr := h.ensureSession(fork.Source)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		if _, ok := b.agent.(code.SessionForker); !ok || source.controller.ref.BackendID != provider {
+			return nil, ahpInvalid("provider does not support this fork")
+		}
+		command.Type, command.Source, command.Title = "fork", source.controller.ref.SessionID, fork.Title
 	}
-	alias := ahpAlias{Resource: p.Channel, Backend: provider, Session: id}
-	if err = h.saveAlias(alias); err != nil {
-		_ = b.agent.DeleteSession(b.ctx, id)
-		return nil, err
+	if !exists {
+		record := b.createSession(command)
+		if record.status != 0 {
+			return nil, ahpInvalid(record.message)
+		}
+		alias = ahpAlias{Resource: p.Channel, Backend: provider, Session: record.receipt.Ref.SessionID, RequestFingerprint: fingerprint, CreationError: "session configuration is incomplete"}
+		if err = h.saveAlias(alias); err != nil {
+			return nil, err
+		}
 	}
+	id := alias.Session
 	h.mu.Lock()
 	h.aliases[p.Channel] = alias
 	h.mu.Unlock()
 	c := b.session(id)
-	c.opMu.Lock()
-	c.loaded = true
-	c.replaceHistory()
-	c.mu.Lock()
-	c.state.Status = "ready"
-	c.publishStateLocked()
-	c.mu.Unlock()
-	c.opMu.Unlock()
-	c.refreshSettings()
-	a := h.attach(c, p.Channel, "", time.Now())
+	a := h.attach(c, p.Channel, command.Title, time.Now())
 	if len(p.Config) > 0 {
 		if err = a.setConfig("ahp-create-config:"+p.Channel, p.Config); err != nil {
 			return nil, err
 		}
 	}
+	alias.CreationError = ""
+	if err = h.saveAlias(alias); err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	h.aliases[p.Channel] = alias
+	h.mu.Unlock()
 	h.mu.Lock()
 	if p.ActiveClient != nil {
 		a.sessionAction(t.StateAction{Value: &t.SessionActiveClientSetAction{Type: t.ActionTypeSessionActiveClientSet, ActiveClient: *p.ActiveClient}})
@@ -772,7 +884,7 @@ func (h *ahpHost) listSessions(raw json.RawMessage) (any, error) {
 			h.mu.Unlock()
 			stamp := session.UpdatedAt.UTC().Format(time.RFC3339Nano)
 			chat := ahpChatURI(resource)
-			items = append(items, t.SessionSummary{Resource: resource, Provider: b.id, Title: session.Title, Status: t.SessionStatusIdle, CreatedAt: stamp, ModifiedAt: stamp, WorkingDirectories: []string{h.directoryURI()}, DefaultChat: &chat})
+			items = append(items, t.SessionSummary{Meta: ahpSummaryMeta(SessionRef{WorkspaceID: b.scope.WorkspaceID, BackendID: b.id, SessionID: session.ID}), Resource: resource, Provider: b.id, Title: session.Title, Status: t.SessionStatusIdle, CreatedAt: stamp, ModifiedAt: stamp, WorkingDirectories: []string{h.directoryURI()}, DefaultChat: &chat})
 			seen[resource] = true
 		}
 	}

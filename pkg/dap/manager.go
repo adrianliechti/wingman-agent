@@ -31,6 +31,7 @@ type detectedAdapter struct {
 }
 
 type Manager struct {
+	changed   chan struct{}
 	root      string
 	adapters  []AdapterDescriptor
 	lookup    func(string) string
@@ -302,6 +303,7 @@ func (m *Manager) Start(ctx context.Context, options StartOptions) (*Session, er
 			}
 			previous := m.session
 			m.session = session
+			m.notifyChangedLocked()
 			m.mu.Unlock()
 			if previous != nil {
 				previous.Close()
@@ -317,6 +319,7 @@ func (m *Manager) Start(ctx context.Context, options StartOptions) (*Session, er
 	}
 	previous := m.session
 	m.session = session
+	m.notifyChangedLocked()
 	m.mu.Unlock()
 	if previous != nil {
 		previous.Close()
@@ -689,6 +692,7 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	m.mu.Lock()
 	if m.session == session {
 		m.session = nil
+		m.notifyChangedLocked()
 	}
 	m.mu.Unlock()
 	if disconnectErr != nil && status.State != StateTerminated {
@@ -706,8 +710,25 @@ func (m *Manager) Close() {
 	m.closed = true
 	session := m.session
 	m.session = nil
+	m.notifyChangedLocked()
 	m.mu.Unlock()
 	if session != nil {
 		session.Close()
+	}
+}
+
+// Changes wakes workspace observers when a session is created, replaced or removed.
+func (m *Manager) Changes() <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.changed == nil {
+		m.changed = make(chan struct{})
+	}
+	return m.changed
+}
+func (m *Manager) notifyChangedLocked() {
+	if m.changed != nil {
+		close(m.changed)
+		m.changed = nil
 	}
 }

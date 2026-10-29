@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -24,21 +23,17 @@ func TestTasksAPI(t *testing.T) {
 	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
-	res, err := http.Post(web.URL+"/api/v2/backends/wingman/sessions", "application/json", strings.NewReader(`{"id":"create-test","type":"create"}`))
-	if err != nil {
-		t.Fatal(err)
+	record := app.backends["wingman"].runtime.createSession(Command{ID: "create-test", Type: "create"})
+	if record.status != 0 {
+		t.Fatal(record.message)
 	}
-	var receipt Receipt
-	if err := json.NewDecoder(res.Body).Decode(&receipt); err != nil {
-		t.Fatal(err)
-	}
-	res.Body.Close()
+	receipt := record.receipt
 	created := struct{ ID string }{receipt.Ref.SessionID}
 	if created.ID == "" {
 		t.Fatal("no session id")
 	}
 
-	res, err = http.Get(web.URL + "/api/v2/backends/wingman/sessions/" + created.ID + "/tasks")
+	res, err := http.Get(web.URL + "/api/v2/backends/wingman/sessions/" + created.ID + "/tasks")
 	if err != nil {
 		t.Fatal(err)
 	}

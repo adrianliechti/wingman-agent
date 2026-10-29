@@ -56,6 +56,34 @@ func (h *ahpHost) resource(req ahpRequest) (any, error) {
 	if json.Unmarshal(req.Params, &p) != nil || p.Channel != t.RootResourceURI {
 		return nil, ahpInvalid("root channel and resource URI required")
 	}
+	if strings.HasPrefix(p.URI, "ahp-content:") {
+		h.mu.Lock()
+		content, exists := h.contents[p.URI]
+		h.mu.Unlock()
+		if !exists {
+			return nil, &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "changeset content is no longer retained; refresh the changeset"}
+		}
+		switch req.Method {
+		case "resourceRead":
+			encoding := p.Encoding
+			if encoding == "" {
+				encoding = t.ContentEncodingUtf8
+			}
+			if encoding == t.ContentEncodingBase64 {
+				content = base64.StdEncoding.EncodeToString([]byte(content))
+			} else if encoding != t.ContentEncodingUtf8 {
+				return nil, ahpInvalid("unsupported encoding")
+			}
+			return t.ResourceReadResult{Data: content, Encoding: encoding, ContentType: ahpPtr("text/plain")}, nil
+		case "resourceResolve":
+			return t.ResourceResolveResult{Uri: p.URI, Type: t.ResourceTypeFile, Size: ahpPtr(int64(len(content)))}, nil
+		case "resourceRequest":
+			if !p.Write {
+				return struct{}{}, nil
+			}
+		}
+		return nil, ahpInvalid("changeset content is read-only")
+	}
 	rel, err := h.resourcePath(p.URI)
 	if err != nil {
 		return nil, err

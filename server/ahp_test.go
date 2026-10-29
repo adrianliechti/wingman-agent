@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -185,61 +184,6 @@ func TestAHPClientStreamingSharedSessionAndReconnect(t *testing.T) {
 	}
 }
 
-func TestAHPApprovalSharedWithBrowserAndStaleReply(t *testing.T) {
-	s, b, agent, endpoint := ahpTestServer(t)
-	agent.gate = make(chan struct{})
-	client := ahpTestClient(t, endpoint, "approver")
-	chat := ahpCreate(t, client, "ahp-session:/approval")
-	state, sub := ahpSubscribeChat(t, client, chat)
-	ahpSend(t, client, chat, "turn", 1)
-	ahpUntil(t, state, sub, func(types.ActionEnvelope) bool {
-		return state.ActiveTurn != nil && len(state.ActiveTurn.ResponseParts) > 0
-	})
-	result := make(chan bool, 1)
-	go func() {
-		ok, _ := b.Confirm(code.WithSessionID(t.Context(), "session-1"), "Run a command?")
-		result <- ok
-	}()
-	var toolID string
-	ahpUntil(t, state, sub, func(types.ActionEnvelope) bool {
-		for _, part := range state.ActiveTurn.ResponseParts {
-			if p, ok := part.Value.(*types.ToolCallResponsePart); ok {
-				if call, ok := p.ToolCall.Value.(*types.ToolCallPendingConfirmationState); ok {
-					toolID = call.ToolCallId
-					return true
-				}
-			}
-		}
-		return false
-	})
-	c := b.session("session-1")
-	body, _ := json.Marshal(Command{ID: "browser-answer", Epoch: c.epoch, Type: "prompt_response", PromptID: strings.TrimPrefix(toolID, "approval:"), Action: "accept"})
-	req := httptest.NewRequest(http.MethodPost, "http://localhost/api/v2/backends/one/sessions/session-1/commands", bytes.NewReader(body))
-	req.Header.Set(instanceHeader, s.scope.InstanceID)
-	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("browser answer failed: %s", rec.Body.String())
-	}
-	select {
-	case ok := <-result:
-		if !ok {
-			t.Fatal("approval was not accepted")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("approval blocked")
-	}
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool {
-		_, ok := e.Action.Value.(*types.ChatToolCallCompleteAction)
-		return ok
-	})
-	if err := client.Notify(t.Context(), "dispatchAction", types.DispatchActionParams{Channel: chat, ClientSeq: 2, Action: types.StateAction{Value: &types.ChatToolCallConfirmedAction{Type: types.ActionTypeChatToolCallConfirmed, TurnId: "turn", ToolCallId: toolID, Approved: false}}}); err != nil {
-		t.Fatal(err)
-	}
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { return e.RejectionReason != nil })
-	close(agent.gate)
-}
-
 func TestAHPRejectBusySendAndCancel(t *testing.T) {
 	_, _, agent, endpoint := ahpTestServer(t)
 	agent.gate = make(chan struct{})
@@ -379,46 +323,6 @@ func TestAHPPersistedSessionURI(t *testing.T) {
 	if s.scope.WorkspaceID != other.scope.WorkspaceID {
 		t.Fatal("fixture must share the workspace namespace")
 	}
-}
-
-func TestAHPBrowserCreatedSessionAndTurn(t *testing.T) {
-	s, b, agent, endpoint := ahpTestServer(t)
-	agent.gate = make(chan struct{})
-	client := ahpTestClient(t, endpoint, "browser-observer")
-	// Use the existing native command path, with the same request as the UI.
-	nativeRequest := func(path string, command Command) *httptest.ResponseRecorder {
-		body, _ := json.Marshal(command)
-		req := httptest.NewRequest(http.MethodPost, "http://localhost"+path, bytes.NewReader(body))
-		req.Header.Set(instanceHeader, s.scope.InstanceID)
-		rec := httptest.NewRecorder()
-		s.ServeHTTP(rec, req)
-		return rec
-	}
-	rec := nativeRequest("/api/v2/backends/one/sessions", Command{ID: "browser-create", Type: "create"})
-	if rec.Code != 200 {
-		t.Fatal(rec.Body.String())
-	}
-	var sessions types.ListSessionsResult
-	if err := client.Request(t.Context(), "listSessions", types.ListSessionsParams{Channel: types.RootResourceURI}, &sessions); err != nil {
-		t.Fatal(err)
-	}
-	if len(sessions.Items) != 1 {
-		t.Fatalf("browser session missing: %+v", sessions)
-	}
-	chat := *sessions.Items[0].DefaultChat
-	state, sub := ahpSubscribeChat(t, client, chat)
-	c := b.session("session-1")
-	rec = nativeRequest("/api/v2/backends/one/sessions/session-1/commands", Command{ID: "browser-turn", Epoch: c.epoch, Type: "send", Text: "from browser"})
-	if rec.Code != 200 {
-		t.Fatal(rec.Body.String())
-	}
-	ahpUntil(t, state, sub, func(types.ActionEnvelope) bool {
-		return state.ActiveTurn != nil && len(state.ActiveTurn.ResponseParts) > 0
-	})
-	if state.ActiveTurn.Id != "browser-turn" || state.ActiveTurn.Message.Text != "from browser" {
-		t.Fatalf("wrong turn: %+v", state.ActiveTurn)
-	}
-	close(agent.gate)
 }
 
 func TestAHPBuiltinAgentRoundTrip(t *testing.T) {

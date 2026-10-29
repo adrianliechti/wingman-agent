@@ -40,6 +40,7 @@ type pendingRequest struct {
 type outputBuffer struct {
 	mu      sync.Mutex
 	content string
+	changed chan struct{}
 }
 
 type terminalBinding struct {
@@ -55,6 +56,10 @@ func (buffer *outputBuffer) append(category, value string) {
 		value = "[" + category + "] " + value
 	}
 	buffer.mu.Lock()
+	if buffer.changed != nil {
+		close(buffer.changed)
+		buffer.changed = nil
+	}
 	buffer.content += value
 	if len(buffer.content) > maxOutputBytes {
 		buffer.content = buffer.content[len(buffer.content)-maxOutputBytes:]
@@ -297,6 +302,26 @@ func (session *Session) Output() string {
 		output += child.Output()
 	}
 	return output
+}
+
+// Changes returns edge-triggered wakeups. Subscribe before reading Status and
+// Output, then resubscribe after either channel closes. No adapter messages are
+// consumed by observers, and browser disconnection never owns this process.
+func (session *Session) Changes() (state, output <-chan struct{}) {
+	session.mu.Lock()
+	state, child := session.stateChanged, session.child
+	session.mu.Unlock()
+	if child != nil {
+		_, output = child.Changes()
+		return state, output
+	}
+	session.output.mu.Lock()
+	if session.output.changed == nil {
+		session.output.changed = make(chan struct{})
+	}
+	output = session.output.changed
+	session.output.mu.Unlock()
+	return state, output
 }
 
 func (session *Session) initializeAndLaunch(ctx context.Context, options StartOptions) error {

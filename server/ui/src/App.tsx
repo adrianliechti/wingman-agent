@@ -368,6 +368,28 @@ export default function App() {
 	} = useSessions();
 	useServerQueryInvalidation(subscribe, connected);
 	const queryClient = useQueryClient();
+	useEffect(() => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let stateChanged = false;
+		const release = client.dap.subscribe((event) => {
+			if (!["wingman/status", "output", "disconnected"].includes(event)) return;
+			stateChanged ||= event !== "output";
+			if (timer !== undefined) return;
+			timer = setTimeout(() => {
+				const key = stateChanged ? queryKeys.debug.all : queryKeys.debug.output;
+				timer = undefined;
+				stateChanged = false;
+				void queryClient.invalidateQueries(
+					{ queryKey: key },
+					{ cancelRefetch: false },
+				);
+			}, 16);
+		});
+		return () => {
+			release();
+			clearTimeout(timer);
+		};
+	}, [client, queryClient]);
 	const toast = useToast();
 	const {
 		documents,
@@ -1167,7 +1189,7 @@ export default function App() {
 		refetchInterval: (current) => {
 			const session = current.state.data?.session;
 			if (!session || session.state === "terminated") return false;
-			return session.state === "running" ? 500 : 1_250;
+			return 10_000;
 		},
 	});
 

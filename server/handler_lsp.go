@@ -73,6 +73,10 @@ type lspServiceActivity struct {
 }
 
 func (s *Server) handleLSPStatus(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, s.lspActivity())
+}
+
+func (s *Server) lspActivity() lspActivityResponse {
 	activities := s.workspace.LSPActivities()
 	services := make([]lspServiceActivity, 0, len(activities))
 	analyzing := false
@@ -91,7 +95,7 @@ func (s *Server) handleLSPStatus(w http.ResponseWriter, _ *http.Request) {
 		})
 		analyzing = analyzing || activity.Analyzing
 	}
-	writeJSON(w, lspActivityResponse{Analyzing: analyzing, Services: services})
+	return lspActivityResponse{Analyzing: analyzing, Services: services}
 }
 
 func (s *Server) handleLSPEditorCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +104,11 @@ func (s *Server) handleLSPEditorCapabilities(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	capabilities, hasServer, err := s.workspace.EditorLSPCapabilities(r.Context(), filePath)
+	writeJSON(w, s.lspEditorCapabilities(r.Context(), filePath))
+}
+
+func (s *Server) lspEditorCapabilities(ctx context.Context, filePath string) editorCapabilitiesResponse {
+	capabilities, hasServer, err := s.workspace.EditorLSPCapabilities(ctx, filePath)
 	if err != nil {
 		// A missing or failed server must not disable structural fallbacks.
 		hasServer = false
@@ -144,7 +152,7 @@ func (s *Server) handleLSPEditorCapabilities(w http.ResponseWriter, r *http.Requ
 		response.SemanticTokens = true
 		response.InlayHints = lsp.CapabilityEnabled(capabilities.InlayHintProvider)
 	}
-	writeJSON(w, response)
+	return response
 }
 
 func renameCapabilities(value any) (enabled, prepare bool) {

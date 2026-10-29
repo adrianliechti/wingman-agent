@@ -26,6 +26,17 @@ type ahpTerminal struct {
 }
 
 func (h *ahpHost) prepareChannel(channel string) error {
+	if channel == ahpWorkspaceChanges {
+		return h.ensureChangeset()
+	}
+	if strings.HasPrefix(channel, "ahp-resource-watch:") {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.watches[channel] == nil {
+			return &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "watch not found"}
+		}
+		return nil
+	}
 	if strings.HasPrefix(channel, "ahp-terminal:") {
 		h.startTerminals()
 		h.mu.Lock()
@@ -196,6 +207,15 @@ func (h *ahpHost) publishTerminalsLocked() {
 }
 
 func (h *ahpHost) terminalDataLocked(a *ahpTerminal, data string) {
+	if title := a.filter.title; title != "" {
+		a.filter.title = ""
+		if title != a.state.Title {
+			action := t.StateAction{Value: &t.TerminalTitleChangedAction{Type: t.ActionTypeTerminalTitleChanged, Title: title}}
+			ahp.ApplyActionToTerminal(&a.state, action)
+			h.publish(a.resource, action, nil, nil)
+			h.publishTerminalsLocked()
+		}
+	}
 	if data == "" {
 		return
 	}
@@ -375,7 +395,10 @@ func (c *ahpConnection) executeTerminalAction(p t.DispatchActionParams) error {
 
 // Streaming UTF-8 and OSC parser. Shell integration markers are removed even
 // when split across PTY reads; ordinary OSC title/color sequences are retained.
-type terminalOutputFilter struct{ pending []byte }
+type terminalOutputFilter struct {
+	pending []byte
+	title   string
+}
 
 func (f *terminalOutputFilter) feed(data []byte) string {
 	f.pending = append(f.pending, data...)
@@ -405,6 +428,14 @@ func (f *terminalOutputFilter) feed(data []byte) string {
 					break
 				}
 				osc := string(p[2:end])
+				if strings.HasPrefix(osc, "0;") || strings.HasPrefix(osc, "2;") {
+					title := strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(osc[2:], "\x07"), "\x1b\\"))
+					runes := []rune(title)
+					if len(runes) > 80 {
+						runes = runes[:80]
+					}
+					f.title = string(runes)
+				}
 				if !strings.HasPrefix(osc, "133;") && !strings.HasPrefix(osc, "633;") && !strings.HasPrefix(osc, "1337;") {
 					out.WriteString(strings.ToValidUTF8(string(p[:end]), "�"))
 				}

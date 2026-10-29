@@ -9,10 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -63,7 +61,7 @@ func (s *Server) InstanceID() string { return s.scope.InstanceID }
 
 func (s *Server) checkInstance(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/v2/bootstrap" {
+		if (strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/v2/bootstrap") || r.URL.Path == "/lsp" || r.URL.Path == "/dap" {
 			instance := r.Header.Get(instanceHeader)
 			if instance == "" {
 				instance = r.URL.Query().Get("instance")
@@ -243,17 +241,13 @@ func (s *Server) registerSessionRoutes(r chi.Router) {
 				Backends []AgentEntry `json:"backends"`
 			}{s.scope, 2, backends})
 		})
-		r.HandleFunc("/events", s.handleWebSocket)
 		r.Route("/backends/{backend}", func(r chi.Router) {
 			r.Get("/settings", s.backendOperation((*backendRuntime).handleDefaultSettings))
 			r.Post("/models/refresh", s.backendOperation((*backendRuntime).handleRefreshModels))
-			r.Get("/sessions", s.backendOperation((*backendRuntime).handleSessions))
-			r.Post("/sessions", s.backendHandler((*backendRuntime).handleNewSession))
 			r.Route("/sessions/{id}", func(r chi.Router) {
 				r.Get("/reviews", s.backendOperation((*backendRuntime).handleTurnReviews))
 				r.Get("/reviews/{turnID}", s.backendOperation((*backendRuntime).handleTurnReviews))
 				r.Post("/reviews/{turnID}/undo", s.backendOperation((*backendRuntime).handleTurnUndo))
-				r.Post("/commands", s.backendHandler((*backendRuntime).handleCommand))
 				r.Get("/tasks", s.backendOperation((*backendRuntime).handleTasks))
 				r.Get("/tasks/{taskID}", s.backendOperation((*backendRuntime).handleTask))
 				r.Post("/tasks/{taskID}/stop", s.backendOperation((*backendRuntime).handleTaskStop))
@@ -264,24 +258,6 @@ func (s *Server) registerSessionRoutes(r chi.Router) {
 			})
 		})
 	})
-}
-
-func (b *backendRuntime) handleSessions(w http.ResponseWriter, r *http.Request) {
-	infos, err := b.agent.ListSessions(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), 502)
-		return
-	}
-	out := make([]SessionEntry, 0, len(infos))
-	for _, si := range infos {
-		ent := SessionEntry{ID: si.ID, Title: si.Title}
-		if !si.UpdatedAt.IsZero() {
-			ent.UpdatedAt = si.UpdatedAt.Format(time.RFC3339)
-		}
-		out = append(out, ent)
-	}
-	slices.SortFunc(out, func(a, b SessionEntry) int { return strings.Compare(b.UpdatedAt, a.UpdatedAt) })
-	writeJSON(w, out)
 }
 
 type Command struct {
@@ -333,35 +309,30 @@ func commandFingerprint(command Command) [32]byte {
 	return sha256.Sum256(data)
 }
 
-func (b *backendRuntime) handleNewSession(w http.ResponseWriter, r *http.Request) {
-	var command Command
-	if err := decodeJSONRequest(w, r, &command, 32<<20); err != nil {
-		return
+// createSession owns native creation and its retry receipt independently of transport.
+func (b *backendRuntime) createSession(command Command) commandReceipt {
+	failure := func(status int, message string) commandReceipt {
+		return commandReceipt{status: status, message: message}
 	}
 	if !b.beginOperation() {
-		http.Error(w, "workspace closed", 409)
-		return
+		return failure(409, "workspace closed")
 	}
 	defer b.operations.Done()
 	if command.ID == "" || command.Type != "create" && command.Type != "fork" {
-		http.Error(w, "create or fork command and request id required", 400)
-		return
+		return failure(400, "create or fork command and request id required")
 	}
 	forker, canFork := b.agent.(code.SessionForker)
 	if command.Type == "fork" && (!canFork || command.Source == "") {
-		http.Error(w, "fork requires a source session on an agent that supports forking", 400)
-		return
+		return failure(400, "fork requires a source session on an agent that supports forking")
 	}
 	b.createMu.Lock()
 	defer b.createMu.Unlock()
 	fingerprint := commandFingerprint(command)
 	if previous, ok := b.creations[command.ID]; ok {
 		if previous.fingerprint != fingerprint {
-			http.Error(w, "request id reused with different content", 409)
-			return
+			return failure(409, "request id reused with different content")
 		}
-		writeJSON(w, previous.receipt)
-		return
+		return commandReceipt{receipt: previous.receipt}
 	}
 	var id string
 	var err error
@@ -375,12 +346,10 @@ func (b *backendRuntime) handleNewSession(w http.ResponseWriter, r *http.Request
 		if errors.Is(err, code.ErrTurnInProgress) {
 			status = 409
 		}
-		http.Error(w, err.Error(), status)
-		return
+		return failure(status, err.Error())
 	}
 	c := b.session(id)
 	c.opMu.Lock()
-	// Record creation before configuring it: retries must never create a second session.
 	receipt := Receipt{ID: command.ID, Ref: c.ref, Epoch: c.epoch, Outcome: "created"}
 	b.creations[command.ID] = creationReceipt{fingerprint, receipt}
 	c.loaded = true
@@ -391,38 +360,8 @@ func (b *backendRuntime) handleNewSession(w http.ResponseWriter, r *http.Request
 	c.mu.Unlock()
 	c.opMu.Unlock()
 	c.refreshSettings()
-	if b.ahp != nil {
-		a := b.ahp.attach(c, canonicalAHPURI(b.id, id), command.Title, time.Now())
-		b.ahp.mu.Lock()
-		b.ahp.notifyRoot("root/sessionAdded", tSessionAdded(a))
-		b.ahp.mu.Unlock()
-	}
 	b.ensureTaskPump(id)
-	b.broadcast(Frame{Type: EvtSessionsChanged})
-	writeJSON(w, receipt)
-}
-
-func (b *backendRuntime) handleCommand(w http.ResponseWriter, r *http.Request) {
-	var command Command
-	if err := decodeJSONRequest(w, r, &command, 32<<20); err != nil {
-		return
-	}
-	if !b.beginOperation() {
-		http.Error(w, "workspace closed", 409)
-		return
-	}
-	defer b.operations.Done()
-	if command.ID == "" || command.Epoch == "" {
-		http.Error(w, "request id and session epoch required", 400)
-		return
-	}
-	c := b.session(r.PathValue("id"))
-	record := c.command(r.Context(), command)
-	if record.status != 0 {
-		http.Error(w, record.message, record.status)
-	} else {
-		writeJSON(w, record.receipt)
-	}
+	return commandReceipt{receipt: receipt}
 }
 
 // All commands share one receipt ledger, including prompts. Reserve IDs before

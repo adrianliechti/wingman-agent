@@ -1,7 +1,10 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-import { getTerminalWebSocketURL } from "../api/websocket";
+import { terminalURI, ownTerminalClaim } from "../api/terminals.ts";
+import { workspaceClient } from "../state/workspaceClient.ts";
+import { ActionType } from "../state/ahpValues.ts";
+import type { TerminalState } from "@microsoft/agent-host-protocol";
 import { useColorScheme } from "../hooks/useColorScheme";
 
 interface Props {
@@ -11,14 +14,13 @@ interface Props {
 	onTitle: (id: string, title: string) => void;
 }
 
-export function TerminalView({ id, active, onExit, onTitle }: Props) {
+export function TerminalView({ id, active, onTitle }: Props) {
 	const hostRef = useRef<HTMLDivElement>(null);
 	const termRef = useRef<Terminal | null>(null);
 	const fitRef = useRef<FitAddon | null>(null);
 	const scheme = useColorScheme();
-	const [reconnecting, setReconnecting] = useState(false);
+	const [status, setStatus] = useState("");
 
-	const handleExit = useEffectEvent(onExit);
 	const handleTitle = useEffectEvent(onTitle);
 
 	useEffect(() => {
@@ -43,59 +45,87 @@ export function TerminalView({ id, active, onExit, onTitle }: Props) {
 		termRef.current = term;
 		fitRef.current = fit;
 
-		let ws: WebSocket;
-		let reconnectTimer: number | undefined;
-		let reconnectDelay = 500;
-		let attached = false;
-		let stopped = false;
-		const pending: string[] = [];
-		const send = (msg: Record<string, unknown>) => {
-			const data = JSON.stringify(msg);
-			if (ws.readyState === WebSocket.OPEN) ws.send(data);
-			else if (ws.readyState === WebSocket.CONNECTING) pending.push(data);
+		const ahp = workspaceClient().ahp,
+			uri = terminalURI(id);
+		let owned = false,
+			exited = false,
+			stopped = false;
+		term.options.disableStdin = true;
+		const report = (error: unknown) => {
+			if (!stopped)
+				setStatus(error instanceof Error ? error.message : String(error));
 		};
-
-		const connect = () => {
-			ws = new WebSocket(getTerminalWebSocketURL(id));
-			ws.binaryType = "arraybuffer";
-			ws.onopen = () => {
-				// Every attachment replays the server's scrollback. Clear the old
-				// screen first so reconnecting does not duplicate terminal output.
-				if (attached) term.reset();
-				attached = true;
-				reconnectDelay = 500;
-				term.options.disableStdin = false;
-				setReconnecting(false);
-				for (const data of pending) ws.send(data);
-				pending.length = 0;
-				send({ type: "resize", cols: term.cols, rows: term.rows });
-			};
-			ws.onmessage = (e) => {
-				if (typeof e.data === "string") {
-					try {
-						if (JSON.parse(e.data).type === "exit") {
-							stopped = true;
-							handleExit(id);
-						}
-					} catch {}
-					return;
-				}
-				term.write(new Uint8Array(e.data as ArrayBuffer));
-			};
-			ws.onclose = () => {
-				if (stopped) return;
-				term.options.disableStdin = true;
-				setReconnecting(true);
-				reconnectTimer = window.setTimeout(connect, reconnectDelay);
-				reconnectDelay = Math.min(reconnectDelay * 2, 10_000);
-			};
+		const resize = () => {
+			if (owned && !exited && ahp.getConnected())
+				void ahp
+					.dispatch(uri, {
+						type: ActionType.TerminalResized,
+						cols: term.cols,
+						rows: term.rows,
+					})
+					.catch(report);
 		};
-		connect();
+		let claiming = false;
+		const release = ahp.watch(uri, (event) => {
+			const state = event.state as TerminalState;
+			owned =
+				state.claim.kind === "client" && state.claim.clientId === ahp.clientId;
+			exited = state.lifecycle.status === "exited";
+			term.options.disableStdin = !owned || exited || !ahp.getConnected();
+			if (event.snapshot) {
+				term.reset();
+				term.write(
+					state.content
+						.map((part) => (part.type === "command" ? part.output : part.value))
+						.join(""),
+				);
+				resize();
+			} else if (event.action?.action.type === "terminal/data")
+				term.write(event.action.action.data);
+			else if (event.action?.action.type === "terminal/cleared") term.reset();
+			if (
+				event.snapshot ||
+				event.action?.action.type === "terminal/titleChanged"
+			)
+				handleTitle(id, state.title);
+			setStatus(
+				exited
+					? `Exited${state.lifecycle.status === "exited" && state.lifecycle.exitCode !== undefined ? ` (${state.lifecycle.exitCode})` : ""}`
+					: owned
+						? ""
+						: "Read only · owned by another client",
+			);
+			if (!owned && !claiming && event.snapshot) {
+				claiming = true;
+				void ahp
+					.dispatch(uri, {
+						type: ActionType.TerminalClaimed,
+						claim: ownTerminalClaim(),
+					})
+					.catch(() => {})
+					.finally(() => {
+						claiming = false;
+					});
+			}
+		});
+		void ahp.read<TerminalState>(uri).catch(report);
+		const releaseConnection = ahp.subscribeConnection(() => {
+			term.options.disableStdin = true;
+			if (!ahp.getConnected())
+				setStatus(
+					ahp.getReplaced()
+						? "Workspace changed. Reload to reconnect."
+						: "Reconnecting terminal…",
+				);
+		});
+		const dataSub = term.onData((data) => {
+			if (owned && !exited && ahp.getConnected())
+				void ahp
+					.dispatch(uri, { type: ActionType.TerminalInput, data })
+					.catch(report);
+		});
+		const resizeSub = term.onResize(resize);
 
-		const dataSub = term.onData((data) => send({ type: "input", data }));
-		const resizeSub = term.onResize(({ cols, rows }) =>
-			send({ type: "resize", cols, rows }),
-		);
 		// OSC 0/2 — shells and full-screen apps name their window this way. The
 		// scrollback replay re-emits the last one, so a reattach keeps the name.
 		const titleSub = term.onTitleChange((title) =>
@@ -110,15 +140,13 @@ export function TerminalView({ id, active, onExit, onTitle }: Props) {
 
 		return () => {
 			stopped = true;
-			window.clearTimeout(reconnectTimer);
+			release();
+			releaseConnection();
 			observer.disconnect();
 			dataSub.dispose();
 			resizeSub.dispose();
 			titleSub.dispose();
-			ws.onmessage = null;
-			ws.onopen = null;
-			ws.onclose = null;
-			ws.close();
+
 			term.dispose();
 			termRef.current = null;
 			fitRef.current = null;
@@ -142,12 +170,12 @@ export function TerminalView({ id, active, onExit, onTitle }: Props) {
 	return (
 		<div className="relative h-full w-full bg-bg">
 			<div ref={hostRef} className="h-full w-full px-2 py-1" />
-			{reconnecting && (
+			{status && (
 				<div
 					role="status"
 					className="absolute top-2 right-2 rounded bg-bg-elevated px-2 py-1 text-[11px] text-fg-muted"
 				>
-					Reconnecting terminal…
+					{status}
 				</div>
 			)}
 		</div>

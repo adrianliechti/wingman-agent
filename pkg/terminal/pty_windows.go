@@ -103,6 +103,7 @@ func startPTY(spec CommandSpec, cols, rows int) (Terminal, error) {
 type exitError struct{ code int }
 
 func (e *exitError) Error() string { return fmt.Sprintf("process exited with code %d", e.code) }
+func (e *exitError) ExitCode() int { return e.code }
 
 // launch starts the command bound to the pseudo console through CreateProcess
 // with a STARTUPINFOEX carrying the pseudo-console attribute.

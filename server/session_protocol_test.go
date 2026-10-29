@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +8,7 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -108,42 +108,47 @@ func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Cont
 func newProtocolServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}, wsConns: map[*websocket.Conn]*wsClient{}}
+	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}}
 	a := &protocolAgent{}
 	b := s.bindBackend("one", a)
 	s.backends[b.id] = &backendEntry{runtime: b}
 	s.mux = chi.NewRouter()
 	s.mux.Route("/api", s.registerSessionRoutes)
+	s.mux.Get("/ahp", s.handleAHP)
 	s.handler = s.checkInstance(s.mux)
 	t.Cleanup(s.Close)
 	return s, b, a
 }
+
+// Controller tests address domain operations directly. Wire behavior is covered
+// separately by the official TypeScript client and AHP WebSocket tests.
 func protocolRequest(t *testing.T, s *Server, path string, command Command) *httptest.ResponseRecorder {
 	t.Helper()
-	body, err := json.Marshal(command)
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	b, err := s.backend(parts[3])
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
-	req.Header.Set(instanceHeader, s.scope.InstanceID)
+	var record commandReceipt
+	if len(parts) == 5 {
+		record = b.createSession(command)
+	} else {
+		if !b.beginOperation() {
+			record = commandReceipt{status: 409, message: "workspace closed"}
+		} else {
+			defer b.operations.Done()
+			record = b.session(parts[5]).command(t.Context(), command)
+		}
+	}
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
+	if record.status != 0 {
+		http.Error(rec, record.message, record.status)
+	} else {
+		writeJSON(rec, record.receipt)
+	}
 	return rec
 }
-func receiveEvent(t *testing.T, client *wsClient) sessionEvent {
-	t.Helper()
-	select {
-	case data := <-client.outbox:
-		var event sessionEvent
-		if err := json.Unmarshal(data, &event); err != nil {
-			t.Fatal(err)
-		}
-		return event
-	case <-time.After(time.Second):
-		t.Fatal("missing session event")
-		return sessionEvent{}
-	}
-}
+
 func waitProtocol(t *testing.T, predicate func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -155,56 +160,16 @@ func waitProtocol(t *testing.T, predicate func() bool) {
 	}
 }
 
-func TestSessionSnapshotRetainsLiveTextAndHasTargetedSubscriptions(t *testing.T) {
-	_, b, a := newProtocolServer(t)
-	a.gate = make(chan struct{})
-	c := b.session("saved")
-	c.load()
-	first := newWSClient(nil)
-	other := newWSClient(nil)
-	c.subscribe(first, "first")
-	unrelated := b.session("unrelated")
-	unrelated.subscribe(other, "other")
-	_ = receiveEvent(t, other)
-	_, err := b.turns.Submit(b.ctx, "saved", code.TurnInput{ID: "input", Content: []harness.Content{{Text: "question"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitProtocol(t, func() bool {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		return len(c.entries) > 1 && c.entries[len(c.entries)-1].Content == "live prefix"
-	})
-	reconnect := newWSClient(nil)
-	c.subscribe(reconnect, "reconnected")
-	snapshot := receiveEvent(t, reconnect)
-	if snapshot.Type != "session.snapshot" || snapshot.Entries[len(snapshot.Entries)-1].Content != "live prefix" {
-		t.Fatalf("snapshot: %+v", snapshot)
-	}
-	if len(snapshot.State.PendingInputs) != 0 {
-		t.Fatalf("active transcript input also appeared in queue: %+v", snapshot.State.PendingInputs)
-	}
-	if a.loaded.Load() != 1 {
-		t.Fatalf("loads = %d", a.loaded.Load())
-	}
-	select {
-	case data := <-other.outbox:
-		t.Fatalf("unrelated subscriber received %s", data)
-	default:
-	}
-	close(a.gate)
-}
-
 func TestSessionRestoresEditableQueueAndRejectsMissingHistory(t *testing.T) {
 	s, b, a := newProtocolServer(t)
 	a.queue = code.TurnQueueState{Inputs: []code.TurnInput{{ID: "saved-input", Intent: code.TurnInputFollowUp, Content: []harness.Content{{Text: "original"}, {Text: "[File: main.go]"}, {Text: "secret", Hidden: true}}}}}
 	c := b.session("saved")
 	c.load()
-	client := newWSClient(nil)
-	c.subscribe(client, "sub")
-	snapshot := receiveEvent(t, client)
-	if len(snapshot.State.PendingInputs) != 1 || snapshot.State.PendingInputs[0].ID != "saved-input" || snapshot.State.PendingInputs[0].Text != "original" || !snapshot.State.QueuePaused {
-		t.Fatalf("restored queue: %+v", snapshot.State)
+	c.mu.Lock()
+	state := c.state
+	c.mu.Unlock()
+	if len(state.PendingInputs) != 1 || state.PendingInputs[0].ID != "saved-input" || state.PendingInputs[0].Text != "original" || !state.QueuePaused {
+		t.Fatalf("restored queue: %+v", state)
 	}
 	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "edit", Epoch: c.epoch, Type: "queue_update", InputID: "saved-input", Text: "edited", Files: []string{"next.go"}})
 	if rec.Code != 200 {
@@ -260,33 +225,6 @@ func TestSessionReceiptsDeduplicateAfterCompletionAndCreation(t *testing.T) {
 	}
 }
 
-func TestSessionSnapshotsCannotBeOvertakenByUpdates(t *testing.T) {
-	_, b, _ := newProtocolServer(t)
-	c := b.session("saved")
-	c.load()
-	for range 50 {
-		client := newWSClient(nil)
-		var wg sync.WaitGroup
-		wg.Go(func() { c.subscribe(client, "s") })
-		wg.Go(func() { c.apply(Frame{Type: EvtTextDelta, ID: "a", Text: "x"}) })
-		wg.Wait()
-		event := receiveEvent(t, client)
-		if event.Type != "session.snapshot" {
-			t.Fatalf("first frame: %+v", event)
-		}
-		select {
-		case data := <-client.outbox:
-			var update sessionEvent
-			_ = json.Unmarshal(data, &update)
-			if update.PreviousRevision != event.Revision {
-				t.Fatalf("gap: snapshot %d, update %d", event.Revision, update.PreviousRevision)
-			}
-		default:
-		}
-		c.unsubscribe(client, "s")
-	}
-}
-
 func TestSessionPromptResponsesRemainAvailableDuringLoadAndHaveOneWinner(t *testing.T) {
 	s, b, _ := newProtocolServer(t)
 	c := b.session("saved")
@@ -319,10 +257,9 @@ func TestSessionPromptResponsesRemainAvailableDuringLoadAndHaveOneWinner(t *test
 	if rec := protocolRequest(t, s, path, command); rec.Code != 409 {
 		t.Fatal("second response won")
 	}
-	client := newWSClient(nil)
-	c.subscribe(client, "reconnect")
-	snapshot := receiveEvent(t, client)
-	if len(snapshot.State.Prompts) != 0 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.state.Prompts) != 0 {
 		t.Fatal("resolved prompt survived reconnect")
 	}
 }
@@ -426,38 +363,23 @@ func TestSessionQueuePersistenceFailureDoesNotAcknowledgeClearing(t *testing.T) 
 	}
 }
 
-func TestSessionWebSocketInstanceAndClose(t *testing.T) {
-	s, b, _ := newProtocolServer(t)
+func TestAHPWebSocketClosesWithWorkspace(t *testing.T) {
+	s, _, _ := newProtocolServer(t)
 	web := httptest.NewServer(s)
 	defer web.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
-	endpoint := "ws" + web.URL[4:] + "/api/v2/events?instance="
-	if conn, response, err := websocket.Dial(ctx, endpoint+"old", nil); err == nil {
-		conn.CloseNow()
-		t.Fatal("old workspace socket accepted")
-	} else if response == nil || response.StatusCode != 409 {
-		t.Fatalf("unexpected rejection: %v", err)
-	}
-	conn, _, err := websocket.Dial(ctx, endpoint+s.scope.InstanceID, nil)
+	conn, _, err := websocket.Dial(ctx, "ws"+web.URL[4:]+"/ahp", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.CloseNow()
-	data, _ := json.Marshal(subscriptionRequest{Type: "subscribe", SubscriptionID: "socket", Ref: b.session("saved").ref})
-	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+	request := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"channel":"ahp-root://","clientId":"close-test","protocolVersions":["1.0.0"]}}`
+	if err := conn.Write(ctx, websocket.MessageText, []byte(request)); err != nil {
 		t.Fatal(err)
 	}
-	_, data, err = conn.Read(ctx)
-	if err != nil {
+	if _, _, err := conn.Read(ctx); err != nil {
 		t.Fatal(err)
-	}
-	var snapshot sessionEvent
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.Type != "session.snapshot" {
-		t.Fatalf("first frame: %s", data)
 	}
 	s.Close()
 	for {
@@ -466,7 +388,7 @@ func TestSessionWebSocketInstanceAndClose(t *testing.T) {
 		}
 	}
 	if ctx.Err() != nil {
-		t.Fatal("workspace close did not close the websocket")
+		t.Fatal("workspace close did not close AHP")
 	}
 }
 

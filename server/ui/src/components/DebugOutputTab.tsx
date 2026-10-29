@@ -15,7 +15,7 @@ export function DebugOutputTab() {
 		staleTime: 0,
 		queryFn: ({ signal }) => getDebugOutput(signal),
 		refetchInterval: (current) =>
-			debugInspectionPollInterval(current.state.data, 500, 1_500),
+			debugInspectionPollInterval(current.state.data, 10_000, 10_000),
 		structuralSharing: (previous, next) =>
 			preserveDebugOutput(previous, next as DebugInspection),
 	});

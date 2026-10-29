@@ -5,9 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"maps"
 	"strings"
-	"github.com/adrianliechti/wingman-agent/pkg/code"
 
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
@@ -123,17 +123,54 @@ func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) e
 	switch action := p.Action.Value.(type) {
 	case *t.ChatPendingMessageSetAction:
 		if !chat || action.Id == "" || action.Message.Origin.Kind != t.MessageKindUser || (action.Kind != t.PendingMessageKindQueued && action.Kind != t.PendingMessageKindSteering) {
-			h.mu.Unlock(); return ahpInvalid("valid user pending message required")
+			h.mu.Unlock()
+			return ahpInvalid("valid user pending message required")
 		}
 		command.Type, command.ID, command.Text, command.Intent = "send", action.Id, action.Message.Text, code.TurnInputFollowUp
-		if action.Kind == t.PendingMessageKindSteering { command.Intent = code.TurnInputSteer }
-		for _, queued := range a.chat.QueuedMessages { if queued.Id == action.Id { command.Type, command.InputID, command.ID = "queue_update", action.Id, fmt.Sprintf("ahp:%s:%d", c.id, p.ClientSeq) } }
-		if a.chat.SteeringMessage != nil && a.chat.SteeringMessage.Id == action.Id { command.Type, command.InputID, command.ID = "queue_update", action.Id, fmt.Sprintf("ahp:%s:%d", c.id, p.ClientSeq) }
+		if action.Kind == t.PendingMessageKindSteering {
+			command.Intent = code.TurnInputSteer
+		}
+		for _, queued := range a.chat.QueuedMessages {
+			if queued.Id == action.Id {
+				command.Type, command.InputID, command.ID = "queue_update", action.Id, fmt.Sprintf("ahp:%s:%d", c.id, p.ClientSeq)
+			}
+		}
+		if a.chat.SteeringMessage != nil && a.chat.SteeringMessage.Id == action.Id {
+			command.Type, command.InputID, command.ID = "queue_update", action.Id, fmt.Sprintf("ahp:%s:%d", c.id, p.ClientSeq)
+		}
 		h.mu.Unlock()
-		if err := h.attachments(action.Message, &command); err != nil { return err }
-		return a.command(command)
+		if err := h.attachments(action.Message, &command); err != nil {
+			return err
+		}
+		if err := a.command(command); err != nil {
+			return err
+		}
+		h.mu.Lock()
+		// An idle queue may consume the message before the controller ever
+		// exposes it as pending. Acknowledge acceptance and consumption together
+		// so clients never retain a ghost queued message after the turn starts.
+		if pending := a.pending[ahpActionKey(p.Action)]; pending != nil && pending.envelope == nil {
+			queued := false
+			for _, item := range a.chat.QueuedMessages {
+				if item.Id == action.Id {
+					queued = true
+				}
+			}
+			if a.chat.SteeringMessage != nil && a.chat.SteeringMessage.Id == action.Id {
+				queued = true
+			}
+			a.chatAction(p.Action)
+			if !queued {
+				a.chatAction(t.StateAction{Value: &t.ChatPendingMessageRemovedAction{Type: t.ActionTypeChatPendingMessageRemoved, Kind: action.Kind, Id: action.Id}})
+			}
+		}
+		h.mu.Unlock()
+		return nil
 	case *t.ChatPendingMessageRemovedAction:
-		if !chat || action.Id == "" { h.mu.Unlock(); return ahpInvalid("chat and pending message required") }
+		if !chat || action.Id == "" {
+			h.mu.Unlock()
+			return ahpInvalid("chat and pending message required")
+		}
 		command.Type, command.InputID = "queue_remove", action.Id
 		h.mu.Unlock()
 		return a.command(command)
@@ -183,6 +220,12 @@ func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) e
 			return ahpInvalid("editing approval input is not supported")
 		}
 		command.Type, command.PromptID, command.Action = "prompt_response", id, "decline"
+		if scope := action.Meta["wingman.scope"]; scope != nil {
+			if json.Unmarshal(scope, &command.Scope) != nil || (command.Scope != "once" && command.Scope != "session") {
+				h.mu.Unlock()
+				return ahpInvalid("invalid approval scope")
+			}
+		}
 		if action.Approved {
 			command.Action = "accept"
 		}
@@ -307,7 +350,9 @@ func (a *ahpSession) setConfig(id string, values map[string]json.RawMessage) err
 	for key, value := range values {
 		if key == "unattended" {
 			var enabled bool
-			if json.Unmarshal(value, &enabled) != nil { return ahpInvalid("unattended must be a boolean") }
+			if json.Unmarshal(value, &enabled) != nil {
+				return ahpInvalid("unattended must be a boolean")
+			}
 			command.Unattended = &enabled
 			continue
 		}
