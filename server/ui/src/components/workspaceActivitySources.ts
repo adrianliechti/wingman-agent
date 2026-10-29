@@ -1,4 +1,4 @@
-import type { ManagedToolsStatus } from "../api/capabilities";
+import type { ManagedToolsStatus } from "../api/workspace";
 import type { LSPServiceActivity } from "../types/protocol";
 import type { ActivityItem } from "./ActivityCenter";
 

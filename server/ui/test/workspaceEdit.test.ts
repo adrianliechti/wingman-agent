@@ -107,6 +107,28 @@ test("applies edits across CR, LF, and CRLF line endings", () => {
 	}
 });
 
+test("clamps positions past the line or document end", () => {
+	assert.equal(
+		applyTextEdits("one\ntwo", [
+			{
+				range: {
+					start: { line: 0, character: 99 },
+					end: { line: 1, character: 0 },
+				},
+				newText: " ",
+			},
+			{
+				range: {
+					start: { line: 1, character: 3 },
+					end: { line: 2, character: 0 },
+				},
+				newText: "!",
+			},
+		]),
+		"one two!",
+	);
+});
+
 test("preserves the declared order of insertions at one position", () => {
 	assert.equal(
 		applyTextEdits("ab", [

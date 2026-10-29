@@ -12,10 +12,6 @@ import {
 } from "react";
 import type { DebugAction, DebugTarget } from "../api/debug";
 import {
-	transformEditorSelection,
-	type EditorTransformRange,
-} from "../api/editor";
-import {
 	workspaceFileDownloadURL,
 	workspaceFilePreviewURL,
 } from "../api/files";
@@ -31,19 +27,12 @@ import {
 	createMonacoDebugBridge,
 	type MonacoDebugBridge,
 } from "../monacoDebug";
-import { createMonacoTabBridge, type MonacoTabBridge } from "../monacoTab";
-import {
-	createMonacoTransformBridge,
-	isEditorTransformResponse,
-	type MonacoTransformBridge,
-} from "../monacoTransform";
 import { defineWingmanThemes, wingmanThemeName } from "../monacoThemes";
 import type { ServerMessage } from "../types/protocol";
 import type { WorkspaceEditEnvelope } from "../workspaceEdit";
 import { textPreviewKind } from "../utils/filePreview";
 import { DataPreview } from "./DataPreview";
 import { EditorContextMenu } from "./EditorContextMenu";
-import { InlineTransformPrompt } from "./InlineTransformPrompt";
 import { MarkdownContent } from "./MarkdownContent";
 import { MermaidPreview } from "./MermaidPreview";
 import { useToast } from "./ui/Feedback";
@@ -71,29 +60,24 @@ interface Props {
 	onLaunchDebug?: (target: DebugTarget, action: DebugAction) => void;
 	onAskSelection?: (selection: EditorSelectionContext) => void;
 	view?: "code" | "preview";
-	tabEnabled?: boolean;
 	languageServicesKey?: string;
 }
 
 export interface EditorSelectionContext {
 	path: string;
 	language: string;
-	range: EditorTransformRange;
+	range: {
+		start_line: number;
+		start_column: number;
+		end_line: number;
+		end_column: number;
+	};
 	text: string;
 }
 
 export interface FileTabHandle {
 	hasSelection: () => boolean;
 	chatAboutSelection: () => boolean;
-	transformSelection: () => boolean;
-}
-
-interface TransformTarget {
-	reference: { x: number; y: number };
-	range: EditorTransformRange;
-	expectedText: string;
-	version: number;
-	label: string;
 }
 
 type CodeEditor = Parameters<OnMount>[0];
@@ -204,7 +188,6 @@ export function FileTab({
 	onLaunchDebug,
 	onAskSelection,
 	view = "code",
-	tabEnabled = false,
 	languageServicesKey = "",
 }: Props) {
 	const retainedModelRef = useRef<ReturnType<
@@ -216,8 +199,6 @@ export function FileTab({
 	const saveParticipantDisposeRef = useRef<(() => void) | null>(null);
 	const lspBridgeRef = useRef<MonacoLSPBridge | null>(null);
 	const debugBridgeRef = useRef<MonacoDebugBridge | null>(null);
-	const tabBridgeRef = useRef<MonacoTabBridge | null>(null);
-	const transformBridgeRef = useRef<MonacoTransformBridge | null>(null);
 	const diagnosticsTimerRef = useRef<number | null>(null);
 	const onOpenFileRef = useRef(onOpenFile);
 	const onApplyWorkspaceEditRef = useRef(onApplyWorkspaceEdit);
@@ -234,8 +215,6 @@ export function FileTab({
 		altKey: boolean;
 		editor: Parameters<OnMount>[0];
 	} | null>(null);
-	const [transformTarget, setTransformTarget] =
-		useState<TransformTarget | null>(null);
 	const [, setLanguageFeaturesRevision] = useState(0);
 
 	useEffect(() => {
@@ -260,10 +239,6 @@ export function FileTab({
 		disposeLSPIntegration();
 		debugBridgeRef.current?.dispose();
 		debugBridgeRef.current = null;
-		transformBridgeRef.current?.dispose();
-		transformBridgeRef.current = null;
-		tabBridgeRef.current?.dispose();
-		tabBridgeRef.current = null;
 		if (retainedModelRef.current) {
 			retainedModelRef.current.release(
 				editorRef.current?.saveViewState() ?? null,
@@ -273,81 +248,32 @@ export function FileTab({
 		editorRef.current = null;
 		monacoRef.current = null;
 	}, [disposeLSPIntegration]);
-	const refreshTabIntegration = useCallback(() => {
-		tabBridgeRef.current?.dispose();
-		tabBridgeRef.current = null;
-		if (
-			!tabEnabled ||
-			document.external ||
-			document.untitled ||
-			!file ||
-			!editorRef.current ||
-			!monacoRef.current
-		) {
-			return;
-		}
-		tabBridgeRef.current = createMonacoTabBridge({
-			monaco: monacoRef.current,
-			editor: editorRef.current,
-			path: file.path,
-		});
-	}, [document.external, document.untitled, file, tabEnabled]);
-
-	const selectionTarget = (
-		editor: Parameters<OnMount>[0],
-	): TransformTarget | null => {
+	const selectionContext = (
+		editor: CodeEditor,
+	): EditorSelectionContext | null => {
 		if (document.external || document.untitled || !file) return null;
 		const model = editor.getModel();
 		const selection = editor.getSelection();
 		if (!model || !selection || selection.isEmpty()) return null;
-		const start = selection.getStartPosition();
-		const end = selection.getEndPosition();
-		const visible = editor.getScrolledVisiblePosition(end);
-		const bounds = editor.getDomNode()?.getBoundingClientRect();
-		if (!bounds) return null;
 		return {
-			reference: {
-				x: bounds.left + (visible?.left ?? 8),
-				y: bounds.top + (visible?.top ?? 8) + (visible?.height ?? 16),
-			},
+			path: file.path,
+			language: file.language ?? "",
 			range: {
-				start_line: start.lineNumber,
-				start_column: start.column,
-				end_line: end.lineNumber,
-				end_column: end.column,
+				start_line: selection.startLineNumber,
+				start_column: selection.startColumn,
+				end_line: selection.endLineNumber,
+				end_column: selection.endColumn,
 			},
-			expectedText: model.getValueInRange(selection),
-			version: model.getVersionId(),
-			label:
-				start.lineNumber === end.lineNumber
-					? `${file.path}:${start.lineNumber}`
-					: `${file.path}:${start.lineNumber}-${end.lineNumber}`,
+			text: model.getValueInRange(selection),
 		};
 	};
 
-	const openTransformPrompt = (editor: Parameters<OnMount>[0]) => {
-		const target = selectionTarget(editor);
-		if (!target) return;
+	const askAboutSelection = (editor: CodeEditor | null) => {
+		const selection = editor && selectionContext(editor);
+		if (!selection) return false;
+		onAskSelectionRef.current?.(selection);
 		setContextMenu(null);
-		setTransformTarget(target);
-	};
-
-	const askWithSelectionTarget = (target: TransformTarget) => {
-		if (!file) return;
-		onAskSelectionRef.current?.({
-			path: file.path,
-			language: file.language ?? "",
-			range: target.range,
-			text: target.expectedText,
-		});
-		setContextMenu(null);
-		setTransformTarget(null);
-	};
-
-	const askAboutSelection = (editor: Parameters<OnMount>[0] | null) => {
-		if (!editor) return;
-		const target = selectionTarget(editor);
-		if (target) askWithSelectionTarget(target);
+		return true;
 	};
 
 	useImperativeHandle(ref, () => ({
@@ -357,18 +283,7 @@ export function FileTab({
 			const selection = editorRef.current?.getSelection();
 			return !!selection && !selection.isEmpty();
 		},
-		chatAboutSelection: () => {
-			const editor = editorRef.current;
-			if (!editor || !selectionTarget(editor)) return false;
-			askAboutSelection(editor);
-			return true;
-		},
-		transformSelection: () => {
-			const editor = editorRef.current;
-			if (!editor || !selectionTarget(editor)) return false;
-			openTransformPrompt(editor);
-			return true;
-		},
+		chatAboutSelection: () => askAboutSelection(editorRef.current),
 	}));
 
 	useEffect(() => {
@@ -385,14 +300,6 @@ export function FileTab({
 			disposeEditorIntegration();
 		};
 	}, [disposeEditorIntegration]);
-
-	useEffect(() => {
-		refreshTabIntegration();
-		return () => {
-			tabBridgeRef.current?.dispose();
-			tabBridgeRef.current = null;
-		};
-	}, [refreshTabIntegration]);
 
 	useEffect(() => {
 		if (view !== "code") {
@@ -595,11 +502,6 @@ export function FileTab({
 								document.draft,
 								syncingEditorRef,
 							);
-							transformBridgeRef.current = createMonacoTransformBridge(
-								monaco,
-								editor,
-							);
-							refreshTabIntegration();
 							// Wingman owns the command surface; keep Monaco's standalone
 							// palette shortcuts from opening a second command UI.
 							editor.addCommand(monaco.KeyCode.F1, () => {});
@@ -695,55 +597,8 @@ export function FileTab({
 					supportsLanguageFeature={(feature) =>
 						lspBridgeRef.current?.supports(feature) ?? false
 					}
-					onTransformSelection={() => openTransformPrompt(contextMenu.editor)}
 					onAskSelection={() => askAboutSelection(contextMenu.editor)}
 					onClose={() => setContextMenu(null)}
-				/>
-			)}
-			{view === "code" && transformTarget && (
-				<InlineTransformPrompt
-					reference={transformTarget.reference}
-					selectionLabel={transformTarget.label}
-					onTransform={async (instruction, signal) => {
-						const editor = editorRef.current;
-						const model = editor?.getModel();
-						if (!editor || !model || !file) {
-							throw new Error("The editor is no longer available.");
-						}
-						if (model.getVersionId() !== transformTarget.version) {
-							throw new Error(
-								"The selection changed. Select it again and retry.",
-							);
-						}
-						const result = await transformEditorSelection(
-							{
-								path: file.path,
-								content: model.getValue(),
-								range: transformTarget.range,
-								instruction,
-								version: transformTarget.version,
-							},
-							signal,
-						);
-						if (!isEditorTransformResponse(result)) {
-							throw new Error("Wingman returned an invalid transformation.");
-						}
-						if (result.version !== transformTarget.version) {
-							throw new Error("The transformation response is stale.");
-						}
-						if (!result.edit) {
-							throw new Error("Wingman did not find a useful change.");
-						}
-						if (
-							!transformBridgeRef.current?.preview(result.edit, result.version)
-						) {
-							throw new Error(
-								"The selection changed before the preview opened.",
-							);
-						}
-					}}
-					onAskWingman={() => askWithSelectionTarget(transformTarget)}
-					onClose={() => setTransformTarget(null)}
 				/>
 			)}
 		</div>

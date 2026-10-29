@@ -64,32 +64,6 @@ func emitE2ETextResponse(w http.ResponseWriter, id, text string) {
 	fmt.Fprint(w, "data: [DONE]\n\n")
 }
 
-func emitE2ETabResponse(w http.ResponseWriter, updatedWindow, editIntent string) {
-	w.Header().Set("Content-Type", "application/json")
-	structured, _ := json.Marshal(map[string]string{
-		"updated_window": updatedWindow,
-		"edit_intent":    editIntent,
-	})
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"id":     "resp_tab",
-		"object": "response",
-		"status": "completed",
-		"output": []any{map[string]any{
-			"id": "msg_tab", "type": "message", "role": "assistant", "status": "completed",
-			"content": []any{map[string]any{
-				"type": "output_text", "text": string(structured), "annotations": []any{},
-			}},
-		}},
-		"usage": map[string]any{
-			"input_tokens": 8, "input_tokens_details": map[string]any{"cached_tokens": 0}, "output_tokens": 2,
-		},
-	})
-}
-
-func emitE2ETabNoop(w http.ResponseWriter) {
-	emitE2ETabResponse(w, "", "no_edit")
-}
-
 func (m *webE2EModel) handleTool(w http.ResponseWriter) {
 	if m.toolRequests.Add(1) == 1 {
 		args, _ := json.Marshal(map[string]any{
@@ -205,25 +179,6 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 	case "/v1/responses":
 		m.requests.Add(1)
 		body, _ := io.ReadAll(r.Body)
-		if strings.Contains(string(body), `"updated_window"`) && strings.Contains(string(body), `"edit_intent"`) {
-			var request struct {
-				Input string `json:"input"`
-			}
-			_ = json.Unmarshal(body, &request)
-			if strings.Contains(request.Input, "File: tab-effectiveness.go") &&
-				strings.Contains(request.Input, "-    userName := \"Ada\"") &&
-				strings.Contains(request.Input, "+    accountName := \"Ada\"") &&
-				strings.Contains(request.Input, "println(userName)") {
-				emitE2ETabResponse(
-					w,
-					"    accountName := \"Ada\"\n    prepare()\n    validate()\n    println(accountName)\n}\n",
-					"high",
-				)
-				return
-			}
-			emitE2ETabNoop(w)
-			return
-		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		if m.handleTaskFixture(w, r, body) {
 			return
@@ -380,17 +335,6 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 		0o644,
 	); err != nil {
 		t.Fatal(err)
-	}
-	tabFiles := map[string]string{
-		"tab-effectiveness.go": "package main\n\nfunc display() {\n    userName := \"Ada\"\n    prepare()\n    validate()\n    println(userName)\n}\n",
-		"tab-ghost.go":         "package main\n\nfunc main() {\n\ttotal := price *\n\t_ = total\n}\n",
-		"tab-multiline.txt":    "first\nold one\nold two\nlast\n",
-		"tab-stale.txt":        "first :=\nsecond :=\n",
-	}
-	for name, content := range tabFiles {
-		if err := os.WriteFile(filepath.Join(workDir, name), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
 	}
 	if err := os.WriteFile(
 		filepath.Join(workDir, "go.mod"),

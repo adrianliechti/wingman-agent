@@ -67,7 +67,7 @@ test("debug preparation streams progress before the plan across split chunks", a
 	);
 	const controller = new AbortController();
 	t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-		assert.equal(url, "/api/debug/plan");
+		assert.equal(url, "/api/workspace/debug/plan");
 		assert.equal(
 			new Headers(init.headers).get("Accept"),
 			"application/x-ndjson",

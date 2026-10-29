@@ -169,9 +169,11 @@ test("LSP cancels requests, correlates out-of-order results and answers workspac
 		"workspace/executeCommand",
 		{ command: "fix" },
 		undefined,
-		async (params) => {
-			edit = params.edit;
-			return true;
+		{
+			applyEdit: async (params) => {
+				edit = params.edit;
+				return true;
+			},
 		},
 	);
 	await until(() => socket.sent.at(-1).method === "workspace/executeCommand");

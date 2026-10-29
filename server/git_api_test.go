@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
+	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
 func TestGitAPIStageCommitPushAndPull(t *testing.T) {
@@ -101,18 +103,8 @@ func TestGitAPIStageCommitPushAndPull(t *testing.T) {
 
 func getGitBranches(t *testing.T, baseURL string) GitBranches {
 	t.Helper()
-	res, err := http.Get(baseURL + "/api/git/branches")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("branches endpoint = %d", res.StatusCode)
-	}
 	var branches GitBranches
-	if err := json.NewDecoder(res.Body).Decode(&branches); err != nil {
-		t.Fatal(err)
-	}
+	gitCall(t, baseURL, "git/branches", map[string]any{}, &branches)
 	return branches
 }
 
@@ -154,18 +146,8 @@ func TestGitAPIBranchFetchIsExplicit(t *testing.T) {
 		t.Fatalf("read-only branch listing attempted a fetch: %q", branches.Warning)
 	}
 
-	res, err := http.Post(web.URL+"/api/git/fetch", "application/json", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("fetch endpoint = %d", res.StatusCode)
-	}
 	var refreshed GitBranches
-	if err := json.NewDecoder(res.Body).Decode(&refreshed); err != nil {
-		t.Fatal(err)
-	}
+	gitCall(t, web.URL, "git/branches", map[string]any{"refresh": true}, &refreshed)
 	if refreshed.Warning == "" {
 		t.Fatal("fetch against a missing remote returned no warning")
 	}
@@ -186,24 +168,20 @@ func TestGitAPIInitCreatesRepository(t *testing.T) {
 	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
-	res, err := http.Get(web.URL + "/api/git/status")
-	if err != nil {
-		t.Fatal(err)
+	errRPC := gitCallError(t, web.URL, "git/status", map[string]any{}, nil)
+	if errRPC == nil || errRPC.Status != 404 {
+		t.Fatalf("status before init: %v", errRPC)
 	}
-	res.Body.Close()
-	if res.StatusCode != http.StatusNotFound {
-		t.Fatalf("status before init = %d, want %d", res.StatusCode, http.StatusNotFound)
-	}
-	caps := getCapabilities(t, web.URL)
-	assertRequiredCapabilityTypes(t, caps)
-	if caps["git"] != false || caps["git_init"] != true {
-		t.Fatalf("capabilities before init = %v", caps)
+	caps := getWorkspaceInfo(t, web.URL)
+	assertWorkspaceInfo(t, caps)
+	if getGitStatusNullable(t, web.URL) != nil {
+		t.Fatalf("workspace before init = %v", caps)
 	}
 
 	postGit(t, web.URL, "init", "")
-	caps = getCapabilities(t, web.URL)
-	if caps["git"] != true || caps["git_init"] != false {
-		t.Fatalf("capabilities after init = %v", caps)
+	caps = getWorkspaceInfo(t, web.URL)
+	if getGitStatusNullable(t, web.URL) == nil {
+		t.Fatalf("workspace after init = %v", caps)
 	}
 	if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
 		t.Fatalf("missing .git directory: %v", err)
@@ -216,13 +194,9 @@ func TestGitAPIInitCreatesRepository(t *testing.T) {
 		t.Fatalf("status after init = %+v", status)
 	}
 
-	res, err = http.Post(web.URL+"/api/git/init", "application/json", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	res.Body.Close()
-	if res.StatusCode != http.StatusConflict {
-		t.Fatalf("second init = %d, want %d", res.StatusCode, http.StatusConflict)
+	errRPC = gitCallError(t, web.URL, "git/run", map[string]any{"action": "init"}, nil)
+	if errRPC == nil || errRPC.Status != 409 {
+		t.Fatalf("second init: %v", errRPC)
 	}
 }
 
@@ -242,8 +216,8 @@ func TestGitAPIInitRemovesDanglingShadowPointer(t *testing.T) {
 	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
-	caps := getCapabilities(t, web.URL)
-	if caps["git_init"] != true {
+	caps := getWorkspaceInfo(t, web.URL)
+	if getGitStatusNullable(t, web.URL) != nil {
 		t.Fatalf("capabilities = %v", caps)
 	}
 	postGit(t, web.URL, "init", "")
@@ -270,14 +244,13 @@ func TestGitAPIRejectsInvalidPath(t *testing.T) {
 	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
-	res, err := http.Post(web.URL+"/api/git/stage", "application/json", strings.NewReader(`{"paths":["../outside"]}`))
-	if err != nil {
-		t.Fatal(err)
+	client := ahpTestClient(t, "ws"+strings.TrimPrefix(web.URL, "http")+"/ahp", "path-test")
+	var result any
+	err = client.Request(t.Context(), "invokeChangesetOperation", map[string]any{"channel": ahpUnstagedChanges, "operationId": "stage", "target": map[string]any{"kind": "resource", "resource": "file:///outside"}}, &result)
+	if err == nil {
+		t.Fatal("outside path accepted")
 	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
-	}
+
 }
 
 func TestGitAPIStageAll(t *testing.T) {
@@ -320,19 +293,21 @@ func TestGitAPIRejectsLooseJSON(t *testing.T) {
 	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
-	for name, body := range map[string]string{
-		"unknown field":   `{"paths":["hello.txt"],"recursive":true}`,
-		"trailing value":  `{"paths":["hello.txt"]} {}`,
-		"empty path list": `{"paths":[]}`,
+	for name, request := range map[string]struct{ path, body string }{
+		"unknown field":      {"commits", `{"message":"test","recursive":true}`},
+		"trailing value":     {"commits", `{"message":"test"} {}`},
+		"wrong action field": {"pull", `{"message":"test"}`},
+		"empty commit":       {"commits", `{"message":""}`},
+		"action override":    {"commits", `{"action":"pull","message":"test"}`},
 	} {
 		t.Run(name, func(t *testing.T) {
-			res, err := http.Post(web.URL+"/api/git/stage", "application/json", strings.NewReader(body))
+			response, err := http.Post(web.URL+"/api/workspace/git/"+request.path, "application/json", strings.NewReader(request.body))
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer res.Body.Close()
-			if res.StatusCode != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("invalid request returned %d", response.StatusCode)
 			}
 		})
 	}
@@ -381,18 +356,8 @@ func TestGitAPIHistoryAndCompare(t *testing.T) {
 	postGit(t, web.URL, "stage", `{"paths":["feature.txt"]}`)
 	postGit(t, web.URL, "commit", `{"message":"feature commit"}`)
 
-	res, err := http.Get(web.URL + "/api/git/history")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("history endpoint = %d", res.StatusCode)
-	}
 	var history []GitCommit
-	if err := json.NewDecoder(res.Body).Decode(&history); err != nil {
-		t.Fatal(err)
-	}
+	gitCall(t, web.URL, "git/history", map[string]any{}, &history)
 	foundFeature := false
 	foundUnreferenced := false
 	initialHash := ""
@@ -406,39 +371,27 @@ func TestGitAPIHistoryAndCompare(t *testing.T) {
 	if len(history) != 3 || !foundFeature || !foundUnreferenced || initialHash == "" {
 		t.Fatalf("history = %+v", history)
 	}
-
-	rootURL := web.URL + "/api/git/compare?base=%3Aempty&head=" + url.QueryEscape(initialHash) + "&mode=direct"
-	res, err = http.Get(rootURL)
+	insightsResponse, err := http.Get(web.URL + "/api/workspace/insights")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		message, _ := io.ReadAll(res.Body)
-		t.Fatalf("root comparison endpoint = %d: %s", res.StatusCode, message)
+	defer insightsResponse.Body.Close()
+	var insights struct {
+		Commits int `json:"commits"`
 	}
-	var rootComparison GitCompare
-	if err := json.NewDecoder(res.Body).Decode(&rootComparison); err != nil {
+	if err := json.NewDecoder(insightsResponse.Body).Decode(&insights); err != nil {
 		t.Fatal(err)
 	}
+	if insightsResponse.StatusCode != http.StatusOK || insights.Commits != len(history) {
+		t.Fatalf("workspace insights = %+v, status %d", insights, insightsResponse.StatusCode)
+	}
+
+	rootComparison := getGitComparison(t, web.URL, ":empty", initialHash, "direct")
 	if len(rootComparison.Files) != 1 || rootComparison.Files[0].Path != "base.txt" || rootComparison.Files[0].Status != "added" {
 		t.Fatalf("root comparison = %+v", rootComparison)
 	}
 
-	compareURL := web.URL + "/api/git/compare?base=" + url.QueryEscape(mainBranch) + "&head=feature%2Fcompare&mode=merge-base"
-	res, err = http.Get(compareURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		message, _ := io.ReadAll(res.Body)
-		t.Fatalf("compare endpoint = %d: %s", res.StatusCode, message)
-	}
-	var comparison GitCompare
-	if err := json.NewDecoder(res.Body).Decode(&comparison); err != nil {
-		t.Fatal(err)
-	}
+	comparison := getGitComparison(t, web.URL, mainBranch, "feature/compare", "merge-base")
 	if comparison.MergeBaseHash == "" || len(comparison.Files) != 1 || comparison.Files[0].Path != "feature.txt" || !strings.Contains(comparison.Files[0].Patch, "+feature") {
 		t.Fatalf("comparison = %+v", comparison)
 	}
@@ -452,20 +405,7 @@ func TestGitAPIHistoryAndCompare(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repoDir, "local.txt"), []byte("untracked\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	worktreeURL := web.URL + "/api/git/compare?base=" + url.QueryEscape(mainBranch) + "&head=" + url.QueryEscape(":worktree") + "&mode=merge-base"
-	res, err = http.Get(worktreeURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		message, _ := io.ReadAll(res.Body)
-		t.Fatalf("worktree compare endpoint = %d: %s", res.StatusCode, message)
-	}
-	comparison = GitCompare{}
-	if err := json.NewDecoder(res.Body).Decode(&comparison); err != nil {
-		t.Fatal(err)
-	}
+	comparison = getGitComparison(t, web.URL, mainBranch, ":worktree", "merge-base")
 	if comparison.Head != ":worktree" || comparison.MergeBaseHash == "" || len(comparison.Files) != 2 {
 		t.Fatalf("worktree comparison = %+v", comparison)
 	}
@@ -478,15 +418,15 @@ func TestGitAPIHistoryAndCompare(t *testing.T) {
 	}
 }
 
-func getCapabilities(t *testing.T, baseURL string) map[string]any {
+func getWorkspaceInfo(t *testing.T, baseURL string) map[string]any {
 	t.Helper()
-	res, err := http.Get(baseURL + "/api/capabilities")
+	res, err := http.Get(baseURL + "/api/workspace")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		t.Fatalf("capabilities endpoint = %d", res.StatusCode)
+		t.Fatalf("workspace endpoint = %d", res.StatusCode)
 	}
 	var caps map[string]any
 	if err := json.NewDecoder(res.Body).Decode(&caps); err != nil {
@@ -495,49 +435,224 @@ func getCapabilities(t *testing.T, baseURL string) map[string]any {
 	return caps
 }
 
-func assertRequiredCapabilityTypes(t *testing.T, caps map[string]any) {
+func assertWorkspaceInfo(t *testing.T, caps map[string]any) {
 	t.Helper()
-	for _, name := range []string{"git", "git_init", "lsp", "debug", "tasks", "terminal"} {
+	for _, name := range []string{"lsp", "debug"} {
 		if _, ok := caps[name].(bool); !ok {
 			t.Errorf("capability %q = %#v, want non-null boolean", name, caps[name])
 		}
 	}
-	if _, ok := caps["diffs"]; ok {
-		t.Error("legacy duplicate capability \"diffs\" is still present")
+	for _, name := range []string{"diffs", "git_init", "tasks", "terminal", "workspace_name", "git", "backends"} {
+		if _, exists := caps[name]; exists {
+			t.Errorf("redundant field %q remains", name)
+		}
 	}
-	for _, name := range []string{"platform", "workspace_name"} {
+	if _, ok := caps["shells"].([]any); !ok {
+		t.Fatalf("shells must be a non-null array: %v", caps["shells"])
+	}
+
+	for _, name := range []string{"platform", "name", "path", "workspaceId", "instanceId"} {
 		if _, ok := caps[name].(string); !ok {
 			t.Errorf("capability %q = %#v, want non-null string", name, caps[name])
 		}
 	}
 }
 
-func getGitStatus(t *testing.T, baseURL string) GitStatus {
+func getGitStatusNullable(t *testing.T, baseURL string) *GitStatus {
 	t.Helper()
-	res, err := http.Get(baseURL + "/api/git/status")
+	var status *GitStatus
+	response, err := http.Get(baseURL + "/api/workspace/git")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("status endpoint = %d", res.StatusCode)
-	}
-	var status GitStatus
-	if err := json.NewDecoder(res.Body).Decode(&status); err != nil {
+	defer response.Body.Close()
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
 		t.Fatal(err)
 	}
 	return status
 }
 
+func getGitStatus(t *testing.T, baseURL string) GitStatus {
+	t.Helper()
+	var status GitStatus
+	gitCall(t, baseURL, "git/status", map[string]any{}, &status)
+	return status
+}
+
 func postGit(t *testing.T, baseURL, action, body string) {
 	t.Helper()
-	res, err := http.Post(baseURL+"/api/git/"+action, "application/json", strings.NewReader(body))
+	params := map[string]any{}
+	if body != "" {
+		if err := json.Unmarshal([]byte(body), &params); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if action == "stage" || action == "unstage" {
+		channel := ahpUnstagedChanges
+		if action == "unstage" {
+			channel = ahpStagedChanges
+		}
+		client := ahpTestClient(t, "ws"+strings.TrimPrefix(baseURL, "http")+"/ahp", "git-"+action+body)
+		result, sub, err := client.Subscribe(t.Context(), channel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sub.Close()
+		invoke := func(target any) {
+			request := map[string]any{"channel": channel, "operationId": action}
+			if target != nil {
+				request["target"] = target
+			}
+			if err := client.Request(t.Context(), "invokeChangesetOperation", request, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if paths, ok := params["paths"].([]any); ok {
+			for _, path := range paths {
+				var target *types.ChangesetOperationResourceTarget
+				for _, file := range result.Snapshot.State.Changeset.Files {
+					if strings.HasSuffix(file.Id, "/"+path.(string)) {
+						target = &types.ChangesetOperationResourceTarget{Kind: "resource", Resource: file.Id, Nonce: file.Nonce}
+						break
+					}
+				}
+				if target == nil {
+					t.Fatalf("change not found: %v", path)
+				}
+				invoke(target)
+			}
+		} else {
+			invoke(nil)
+		}
+		return
+	}
+	if action == "branches" {
+		action = "createBranch"
+	}
+	params["action"] = action
+	gitCall(t, baseURL, "git/run", params, nil)
+}
+
+func gitCall(t *testing.T, baseURL, method string, params any, target any) {
+	t.Helper()
+	if err := gitCallError(t, baseURL, method, params, target); err != nil {
+		t.Fatalf("%s: %v", method, err)
+	}
+}
+func gitCallError(t *testing.T, baseURL, method string, params any, target any) *gitHTTPError {
+	t.Helper()
+	p, _ := params.(map[string]any)
+	verb, path := http.MethodGet, ""
+	body := map[string]any{}
+	switch method {
+	case "git/status":
+		path = "/api/workspace/git"
+	case "git/history":
+		path = "/api/workspace/git/commits"
+	case "git/branches":
+		path = "/api/workspace/git/branches"
+		if p["refresh"] == true {
+			verb, path = http.MethodPost, "/api/workspace/git/fetch"
+		}
+	case "git/diff":
+		query := url.Values{}
+		for k, v := range p {
+			query.Set(k, v.(string))
+		}
+		path = "/api/workspace/git/diff?" + query.Encode()
+	case "git/run":
+		verb = http.MethodPost
+		action := p["action"].(string)
+		endpoint := map[string]string{"createBranch": "branches", "commit": "commits"}[action]
+		if endpoint == "" {
+			endpoint = action
+		}
+		path = "/api/workspace/git/" + endpoint
+		for k, v := range p {
+			if k != "action" {
+				body[k] = v
+			}
+		}
+	default:
+		t.Fatalf("unknown test operation: %s", method)
+	}
+	data, _ := json.Marshal(body)
+	request, err := http.NewRequestWithContext(t.Context(), verb, baseURL+path, strings.NewReader(string(data)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		message, _ := io.ReadAll(res.Body)
-		t.Fatalf("%s status = %d: %s", action, res.StatusCode, message)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer response.Body.Close()
+	data, err = io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != 200 {
+		return &gitHTTPError{Status: response.StatusCode, Message: string(data)}
+	}
+	if method == "git/status" && string(bytes.TrimSpace(data)) == "null" {
+		return &gitHTTPError{Status: 404, Message: "not a Git repository"}
+	}
+	if target != nil {
+		if err := json.Unmarshal(data, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return nil
+}
+
+type gitHTTPError struct {
+	Status  int
+	Message string
+}
+
+func (e *gitHTTPError) Error() string { return e.Message }
+
+type GitCompare struct {
+	Base          string      `json:"base"`
+	Head          string      `json:"head"`
+	BaseHash      string      `json:"base_hash"`
+	HeadHash      string      `json:"head_hash"`
+	MergeBaseHash string      `json:"merge_base_hash,omitempty"`
+	Files         []DiffEntry `json:"files"`
+}
+
+func getGitComparison(t *testing.T, baseURL, base, head, mode string) GitCompare {
+	t.Helper()
+	var result struct {
+		GitCompare
+		Channel string `json:"channel"`
+	}
+	gitCall(t, baseURL, "git/diff", map[string]any{"base": base, "head": head, "mode": mode}, &result)
+	client := ahpTestClient(t, "ws"+strings.TrimPrefix(baseURL, "http")+"/ahp", "comparison"+result.Channel)
+	snapshot, sub, err := client.Subscribe(t.Context(), result.Channel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	for _, file := range snapshot.Snapshot.State.Changeset.Files {
+		var meta struct {
+			Patch types.ContentRef `json:"patch"`
+		}
+		if err := json.Unmarshal(file.Meta["wingman"], &meta); err != nil {
+			t.Fatal(err)
+		}
+		var content types.ResourceReadResult
+		if err := client.Request(t.Context(), "resourceRead", map[string]any{"channel": "ahp-root://", "uri": meta.Patch.Uri}, &content); err != nil {
+			t.Fatal(err)
+		}
+		path := file.Id[strings.LastIndex(file.Id, "/")+1:]
+		status := "modified"
+		if file.Edit.Before == nil {
+			status = "added"
+		}
+		if file.Edit.After == nil {
+			status = "deleted"
+		}
+		result.Files = append(result.Files, DiffEntry{Path: path, Status: status, Patch: content.Data})
+	}
+	return result.GitCompare
 }

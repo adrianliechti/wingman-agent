@@ -13,12 +13,14 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
-func (s *backendRuntime) buildInput(msg Command) []harness.Content {
+func (s *backendRuntime) buildInput(sessionID string, msg Command) []harness.Content {
 	var input []harness.Content
 	if msg.Text != "" {
 		input = append(input, harness.Content{Text: msg.Text})
-		for _, block := range s.skillBlocks(msg.Text) {
-			input = append(input, harness.Content{Text: block, Hidden: true})
+		if !s.isPromptCommand(sessionID, msg.Text) {
+			for _, block := range s.skillBlocks(msg.Text) {
+				input = append(input, harness.Content{Text: block, Hidden: true})
+			}
 		}
 	}
 	var rootPath string

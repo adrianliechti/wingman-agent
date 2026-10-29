@@ -53,6 +53,8 @@ export interface DebugPlanBreakpoint {
 }
 
 export interface DebugLaunchPlan {
+	/** Host-side reviewed plan; launches refer to it instead of trusting this copy. */
+	id?: string;
 	action: DebugAction;
 	title: string;
 	adapter: string;
@@ -119,6 +121,7 @@ export interface DebugState {
 	session?: DebugSession;
 	frame?: DebugStackFrame;
 	breakpoints: DebugSourceBreakpoint[];
+	resolved?: DebugBreakpoint[];
 	frame_error?: string;
 }
 
@@ -136,6 +139,7 @@ export interface DebugBreakpoint {
 	message?: string;
 	line?: number;
 	column?: number;
+	reason?: "pending" | "failed";
 }
 
 export interface DebugThread {
@@ -180,7 +184,7 @@ export async function discoverDebugTargets(
 	content: string,
 	signal?: AbortSignal,
 ) {
-	return fetchJSON<{ targets: DebugTarget[] }>("/api/debug/targets", {
+	return fetchJSON<{ targets: DebugTarget[] }>("/api/workspace/debug/targets", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ path, content }),
@@ -199,7 +203,7 @@ export async function generateDebugPlan(
 	onProgress?: (progress: DebugToolProgress) => void,
 	onTools?: (tools: DebugToolStatus[]) => void,
 ): Promise<DebugPlanResult> {
-	const response = await fetchOK("/api/debug/plan", {
+	const response = await fetchOK("/api/workspace/debug/plan", {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",

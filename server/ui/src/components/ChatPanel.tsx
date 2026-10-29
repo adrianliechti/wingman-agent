@@ -1,3 +1,4 @@
+import type { MessageAttachment } from "@microsoft/agent-host-protocol";
 import { VirtualTurns } from "./chat/VirtualTurns";
 import {
 	ArrowUp,
@@ -25,7 +26,11 @@ import { useSessionSettings } from "../state/workspaceContext.ts";
 import { useToast } from "./ui/Feedback.tsx";
 import { atTextareaEdge } from "../utils/textareaNavigation";
 import { useColorScheme } from "../hooks/useColorScheme";
-import { type Skill, useSkills } from "../hooks/useSkills";
+import { useChatCommands } from "../hooks/useChatCommands";
+import {
+	type ChatCommand,
+	selectedCommandAttachments,
+} from "../api/chatCommands";
 import type {
 	ChatEntry,
 	PendingPrompt,
@@ -47,7 +52,7 @@ import { FilePicker } from "./FilePicker";
 import { AgentPicker } from "./AgentPicker";
 import { ModelPicker } from "./ModelPicker";
 import { ModePicker } from "./ModePicker";
-import { SkillPicker } from "./SkillPicker";
+import { CommandPicker } from "./CommandPicker";
 import { TurnQueue } from "./TurnQueue";
 import { IncompleteTurnNotice } from "./chat/IncompleteTurnNotice";
 
@@ -67,6 +72,7 @@ export interface ChatPanelProps {
 		files?: string[],
 		images?: string[],
 		intent?: TurnInputIntent,
+		completions?: MessageAttachment[],
 	) => boolean | Promise<boolean>;
 	onCancel: (clearQueue?: boolean) => void;
 	onCompact?: (focus: string) => boolean | Promise<boolean>;
@@ -79,6 +85,7 @@ export interface ChatPanelProps {
 		text: string,
 		files?: string[],
 		images?: string[],
+		completions?: MessageAttachment[],
 	) => boolean | Promise<boolean>;
 	onResumeQueue?: () => void;
 	onClearQueue?: () => void;
@@ -92,6 +99,7 @@ export interface ChatPanelProps {
 	onOpenFile?: (path: string, line?: number) => void;
 	seed?: {
 		text: string;
+		completions?: MessageAttachment[];
 		files?: string[];
 		append?: boolean;
 		nonce: number;
@@ -327,6 +335,11 @@ export function ChatPanel({
 		if (!seed || consumedSeed.current === seed.nonce) return;
 		consumedSeed.current = seed.nonce;
 		const current = draft.getSnapshot();
+		draft.update({
+			completions: seed.append
+				? [...(current.completions ?? []), ...(seed.completions ?? [])]
+				: seed.completions,
+		});
 		setDraft(
 			seed.append && current.text.trim()
 				? `${current.text}\n\n${seed.text}`
@@ -353,7 +366,12 @@ export function ChatPanel({
 		setSkillSelection({ token: tokenKey, index });
 
 	const tokenOpen = !!skillToken;
-	const skills = useSkills(sessionId, tokenOpen);
+	const skills = useChatCommands(
+		sessionId,
+		tokenOpen,
+		settings.canCompact,
+		!!skillToken && skillToken.start > 0,
+	);
 
 	const skillQuery = skillToken ? skillToken.query.toLowerCase() : null;
 	const skillMatches = useMemo(() => {
@@ -560,27 +578,32 @@ export function ChatPanel({
 		}
 		submitPendingRef.current = true;
 		const focused = document.activeElement;
-		const sent = await draft.submit(({ images, files, editingQueueId }) => {
-			const imageData =
-				images.length > 0 ? images.map((i) => i.dataUrl) : undefined;
-			if (editingQueueId && onUpdateQueued) {
-				return onUpdateQueued(
-					editingQueueId,
-					text,
-					files.length > 0 ? files : undefined,
-					imageData,
-				);
-			} else {
-				const nextIntent =
-					intent ?? (isActive && canSteer ? "steer" : "follow_up");
-				return onSend(
-					text,
-					files.length > 0 ? files : undefined,
-					imageData,
-					nextIntent,
-				);
-			}
-		});
+		const sent = await draft.submit(
+			({ images, files, editingQueueId, completions }) => {
+				const selected = selectedCommandAttachments(text, completions);
+				const imageData =
+					images.length > 0 ? images.map((i) => i.dataUrl) : undefined;
+				if (editingQueueId && onUpdateQueued) {
+					return onUpdateQueued(
+						editingQueueId,
+						text,
+						files.length > 0 ? files : undefined,
+						imageData,
+						selected,
+					);
+				} else {
+					const nextIntent =
+						intent ?? (isActive && canSteer ? "steer" : "follow_up");
+					return onSend(
+						text,
+						files.length > 0 ? files : undefined,
+						imageData,
+						nextIntent,
+						selected,
+					);
+				}
+			},
+		);
 		if (!sent) {
 			submitPendingRef.current = false;
 			return false;
@@ -597,13 +620,22 @@ export function ChatPanel({
 
 	// selectSkill completes the slash token at the caret in place; only a lone
 	// leading command without an input hint submits directly.
-	const selectSkill = (s: Skill) => {
+	const selectSkill = (s: ChatCommand) => {
 		const tok = slashTokenAt(input, caret);
 		if (!tok) return;
 
 		const end = wordEndAt(input, caret);
 		const whole = tok.start === 0 && end === input.length;
 		const needsInput = !!s.input_hint;
+		if (s.attachment)
+			draft.update({
+				completions: [
+					...(draft.getSnapshot().completions ?? []).filter(
+						(item) => item.label !== s.attachment!.label,
+					),
+					s.attachment,
+				],
+			});
 
 		if (whole && !needsInput) {
 			void handleSubmit(undefined, `/${s.name}`);
@@ -1004,7 +1036,7 @@ export function ChatPanel({
 								</div>
 							)}
 							{showSkills && (
-								<SkillPicker
+								<CommandPicker
 									anchor={composer}
 									skills={skillMatches}
 									active={activeSkill}

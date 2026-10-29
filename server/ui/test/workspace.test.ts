@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getInspectAvailability } from "../src/api/capabilities.ts";
+import { getInspectAvailability } from "../src/api/workspace.ts";
 
 test("keeps debugger availability independent from Inspect diagnostics", () => {
 	assert.deepEqual(getInspectAvailability(null), {

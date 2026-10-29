@@ -56,6 +56,20 @@ func TestDiffsIfChangedTracksWorktreeIndexAndHead(t *testing.T) {
 				t.Fatalf("forced snapshot = %+v, %d, %v", forced, same, err)
 			}
 			previous = fingerprint
+			for _, layer := range []DiffLayer{DiffStaged, DiffUnstaged} {
+				files, fingerprint, err := m.DiffsLayerIfChanged(ctx, layer, 0)
+				want := 0
+				if step.name == "modified" && layer == DiffUnstaged || step.name == "staged" && layer == DiffStaged {
+					want = 1
+				}
+				if err != nil || len(files) != want {
+					t.Fatalf("%s: files=%+v err=%v", layer, files, err)
+				}
+				unchanged, same, err := m.DiffsLayerIfChanged(ctx, layer, fingerprint)
+				if err != nil || unchanged != nil || same != fingerprint {
+					t.Fatalf("cached %s: files=%+v err=%v", layer, unchanged, err)
+				}
+			}
 		})
 	}
 

@@ -1,7 +1,7 @@
 import type * as monaco from "monaco-editor";
 import {
 	initializeWorkspace,
-	fetchBootstrap,
+	fetchWorkspace,
 } from "./state/workspaceClient.ts";
 import { WorkspaceProvider } from "./state/WorkspaceProvider.tsx";
 import { initializeComposerDrafts } from "./state/composerDrafts.ts";
@@ -11,7 +11,7 @@ import { createRoot } from "react-dom/client";
 import "./devicon-slim.css";
 import "./index.css";
 import App from "./App.tsx";
-import { createServerQueryClient } from "./api/query.ts";
+import { createServerQueryClient, queryKeys } from "./api/query.ts";
 import { AppCrashed } from "./AppCrashed.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary.tsx";
 import { ToastProvider } from "./components/ui/Feedback.tsx";
@@ -34,11 +34,13 @@ declare global {
 }
 
 const root = createRoot(document.getElementById("root")!);
-fetchBootstrap()
+fetchWorkspace()
 	.then(async (scope) => {
 		initializeWorkspace(scope);
 		await initializeComposerDrafts(scope.workspaceId);
 		const queryClient = createServerQueryClient();
+		const { backends: _backends, ...workspace } = scope;
+		queryClient.setQueryData(queryKeys.workspace, workspace);
 		root.render(
 			<StrictMode>
 				<QueryClientProvider client={queryClient}>

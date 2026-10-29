@@ -30,6 +30,7 @@ export interface ChatEntry {
 	toolId?: string;
 	toolPartial?: boolean;
 	reasoningId?: string;
+	reasoningDuration?: number;
 }
 
 export interface PendingTurnInput {

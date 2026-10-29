@@ -19,7 +19,7 @@ const (
 	EvtGitIndexChanged     = "git_index_changed"
 	EvtSessionsChanged     = "sessions_changed"
 	EvtDiagnosticsChanged  = "diagnostics_changed"
-	EvtCapabilitiesChanged = "capabilities_changed"
+	EvtWorkspaceChanged = "workspace_changed"
 	EvtModelChanged        = "model_changed"
 	EvtTurnInput           = "turn_input"
 	EvtTasksChanged        = "tasks_changed"

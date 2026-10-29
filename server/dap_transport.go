@@ -5,13 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
-	"strings"
 	"sync"
+	"time"
 
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
+)
+
+var (
+	errDebugNotStopped = errors.New("debug session must be stopped to inspect it")
+	errDAPUnsupported  = errors.New("unsupported DAP command")
 )
 
 type dapBrowserRequest struct {
@@ -21,10 +30,17 @@ type dapBrowserRequest struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 type dapReference struct {
+	native int
+	kind   string
+}
+type dapEpoch struct {
 	session string
 	version uint64
-	native  int
-	kind    string
+}
+type dapJob struct {
+	req  dapBrowserRequest
+	ctx  context.Context
+	done func()
 }
 type dapConnection struct {
 	*editorSocket
@@ -34,7 +50,9 @@ type dapConnection struct {
 	mu         sync.Mutex
 	configured chan struct{}
 	bound      string
+	epoch      dapEpoch
 	references map[int]dapReference
+	ids        map[dapReference]int
 }
 
 func (s *Server) handleDAP(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +61,20 @@ func (s *Server) handleDAP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer peer.close()
-	c := &dapConnection{editorSocket: peer, server: s, references: map[int]dapReference{}}
+	c := &dapConnection{editorSocket: peer, server: s, references: map[int]dapReference{}, ids: map[dapReference]int{}}
+	// Requests run in order, so the last setBreakpoints for a file wins. Launch
+	// waits for configurationDone and evaluation can be slow; both run aside.
+	queue := make(chan dapJob, 128)
+	go func() {
+		for {
+			select {
+			case <-peer.ctx.Done():
+				return
+			case job := <-queue:
+				c.run(job)
+			}
+		}
+	}()
 	initialized := false
 	for {
 		_, data, err := peer.writer.conn.Read(peer.ctx)
@@ -80,7 +111,9 @@ func (s *Server) handleDAP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			initialized = true
-			c.reply(req, map[string]any{"supportsConfigurationDoneRequest": true, "supportsCancelRequest": true, "supportsConditionalBreakpoints": true, "supportsHitConditionalBreakpoints": true, "supportsLogPoints": true, "supportsEvaluateForHovers": true, "_wingman": map[string]any{"workspacePath": s.workspace.RootPath, "scope": s.scope, "persistentSession": true}}, nil)
+			// Breakpoint and evaluation features depend on the adapter and arrive
+			// in a capabilities event once a session is known.
+			c.reply(req, map[string]any{"supportsConfigurationDoneRequest": true, "supportsCancelRequest": true, "supportTerminateDebuggee": true, "supportsTerminateRequest": true, "_wingman": map[string]any{"workspacePath": s.workspace.RootPath, "scope": s.scope, "persistentSession": true}}, nil)
 			go c.observe()
 			continue
 		}
@@ -88,13 +121,34 @@ func (s *Server) handleDAP(w http.ResponseWriter, r *http.Request) {
 			c.reply(req, nil, errors.New("initialize is required"))
 			continue
 		}
-		ctx, done, err := peer.begin(strconv.Itoa(req.Seq))
+		timeout := 2 * time.Minute
+		if req.Command == "launch" || req.Command == "attach" {
+			timeout = 0 // prelaunch builds and adapter startup carry their own limits
+		}
+		ctx, done, err := peer.begin(strconv.Itoa(req.Seq), timeout)
 		if err != nil {
 			c.reply(req, nil, err)
 			continue
 		}
-		go func() { defer done(); result, err := c.request(ctx, req); c.reply(req, result, err) }()
+		job := dapJob{req: req, ctx: ctx, done: done}
+		if req.Command == "launch" || req.Command == "attach" || req.Command == "evaluate" {
+			go c.run(job)
+			continue
+		}
+		select {
+		case queue <- job:
+		default:
+			done()
+			peer.cancel()
+			return
+		}
 	}
+}
+
+func (c *dapConnection) run(job dapJob) {
+	defer job.done()
+	result, err := c.request(job.ctx, job.req)
+	c.reply(job.req, result, editorRequestError(job.ctx, err))
 }
 
 func (c *dapConnection) sendDAP(value map[string]any) {
@@ -104,10 +158,27 @@ func (c *dapConnection) sendDAP(value map[string]any) {
 	value["seq"] = c.sequence
 	c.send(value)
 }
+
+// reply puts DAP's short error code in message and the readable text in
+// body.error, which clients show to the user.
 func (c *dapConnection) reply(req dapBrowserRequest, result any, err error) {
 	message := map[string]any{"type": "response", "request_seq": req.Seq, "command": req.Command, "success": err == nil}
 	if err != nil {
-		message["message"] = err.Error()
+		code := "failed"
+		switch {
+		case errors.Is(err, errEditorCancelled):
+			code = "cancelled"
+		case errors.Is(err, errEditorTimeout):
+			code = "timeout"
+		case errors.Is(err, errDebugNotStopped):
+			code = "notStopped"
+		case errors.Is(err, errDebugStateChanged):
+			code = "stateChanged"
+		case errors.Is(err, errDAPUnsupported):
+			code = "notSupported"
+		}
+		message["message"] = code
+		message["body"] = map[string]any{"error": map[string]any{"id": 1, "format": err.Error(), "showUser": code != "cancelled"}}
 	} else {
 		if result == nil {
 			result = map[string]any{}
@@ -142,35 +213,61 @@ func (c *dapConnection) sourcePath(value string) (string, error) {
 	return filepath.Join(c.server.workspace.RootPath, rel), nil
 }
 
+// framePath reports adapter paths through the workspace's own spelling;
+// adapters often resolve symlinks such as macOS /var -> /private/var.
+func (c *dapConnection) framePath(path, resolvedRoot string) string {
+	root := c.server.workspace.RootPath
+	if rel, err := filepath.Rel(root, path); err == nil && filepath.IsLocal(rel) {
+		return path
+	}
+	resolved, err := pathutil.Resolve(filepath.Clean(path))
+	if err != nil || resolvedRoot == "" {
+		return path
+	}
+	if rel, err := filepath.Rel(resolvedRoot, resolved); err == nil && filepath.IsLocal(rel) {
+		return filepath.Join(root, rel)
+	}
+	return path
+}
+
+// reference maps an adapter id into this connection's id space. Ids belong to
+// one stop of one session; a newer stop discards every earlier id.
 func (c *dapConnection) reference(status dap.Status, native int, kind string) (int, error) {
 	if native <= 0 {
 		return 0, nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for key, value := range c.references {
-		if value.session != status.SessionID || value.version != status.StateVersion {
-			delete(c.references, key)
+	epoch := dapEpoch{status.SessionID, status.StateVersion}
+	if epoch != c.epoch {
+		if epoch.session == c.epoch.session && epoch.version < c.epoch.version {
+			return 0, errDebugStateChanged
 		}
+		c.epoch = epoch
+		clear(c.references)
+		clear(c.ids)
 	}
-	ref := dapReference{status.SessionID, status.StateVersion, native, kind}
-	for key, value := range c.references {
-		if value == ref {
-			return key, nil
-		}
+	ref := dapReference{native, kind}
+	if id, ok := c.ids[ref]; ok {
+		return id, nil
 	}
 	id := int(c.server.dapReferenceSeq.Add(1))
 	if len(c.references) >= 65536 || id >= 1<<31-1 {
 		return 0, errors.New("debug reference limit reached; reconnect")
 	}
+	if c.references == nil || c.ids == nil {
+		c.references, c.ids = map[int]dapReference{}, map[dapReference]int{}
+	}
 	c.references[id] = ref
+	c.ids[ref] = id
 	return id, nil
 }
 func (c *dapConnection) nativeReference(status dap.Status, id int, kind string) (int, error) {
 	c.mu.Lock()
 	ref, exists := c.references[id]
+	current := c.epoch == dapEpoch{status.SessionID, status.StateVersion}
 	c.mu.Unlock()
-	if !exists || ref.kind != kind || ref.session != status.SessionID || ref.version != status.StateVersion || status.State != dap.StateStopped {
+	if !exists || !current || ref.kind != kind || status.State != dap.StateStopped {
 		return 0, errDebugStateChanged
 	}
 	return ref.native, nil
@@ -186,9 +283,11 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 			HitCondition string `json:"hitCondition"`
 			LogMessage   string `json:"logMessage"`
 		} `json:"breakpoints"`
+		Filters      []string         `json:"filters"`
 		ThreadID     int              `json:"threadId"`
 		FrameID      int              `json:"frameId"`
 		Reference    int              `json:"variablesReference"`
+		Filter       string           `json:"filter"`
 		Start        int              `json:"start"`
 		Count        int              `json:"count"`
 		StartFrame   int              `json:"startFrame"`
@@ -197,6 +296,7 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 		Context      string           `json:"context"`
 		SessionID    string           `json:"_wingmanSessionId"`
 		StateVersion uint64           `json:"_wingmanStateVersion"`
+		PlanID       string           `json:"_wingmanPlanId"`
 		Plan         *debugLaunchPlan `json:"_wingmanPlan"`
 		Terminate    *bool            `json:"terminateDebuggee"`
 	}
@@ -218,9 +318,20 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 		}
 		return nil, nil
 	}
+	var plan debugLaunchPlan
 	if req.Command == "launch" || req.Command == "attach" {
-		if p.Plan == nil || p.Plan.Request != req.Command {
-			return nil, errors.New("launch requires a matching reviewed _wingmanPlan")
+		if p.PlanID == "" {
+			return nil, errors.New("launch requires the _wingmanPlanId of a reviewed plan")
+		}
+		if err := c.server.workspace.WithDAPManager(func(manager *dap.Manager) error {
+			var err error
+			plan, err = c.server.reviewedDebugPlan(manager, p.PlanID, p.Plan)
+			return err
+		}); err != nil {
+			return nil, err
+		}
+		if plan.Request != req.Command {
+			return nil, fmt.Errorf("the reviewed plan uses %s, not %s", plan.Request, req.Command)
 		}
 		c.mu.Lock()
 		if c.configured != nil {
@@ -246,10 +357,10 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 			if err != nil {
 				return err
 			}
-			if err := c.server.validateDebugPlan(p.Plan, adapters); err != nil {
+			if err := c.server.validateDebugPlan(&plan, adapters); err != nil {
 				return err
 			}
-			session, err := manager.Start(ctx, c.server.debugStartOptions(*p.Plan))
+			session, err := manager.Start(ctx, c.server.debugStartOptions(plan))
 			if err != nil {
 				return err
 			}
@@ -258,17 +369,18 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 			c.mu.Unlock()
 			return nil
 		case "wingman/status":
-			body := map[string]any{"output": "", "breakpoints": []dap.SourceBreakpoint{}}
+			body := map[string]any{"output": "", "_wingmanOutputOffset": 0, "breakpoints": []dap.SourceBreakpoint{}, "resolved": []dap.Breakpoint{}}
 			if p.Source.Path != "" {
 				path, err := c.sourcePath(p.Source.Path)
 				if err != nil {
 					return err
 				}
 				body["breakpoints"] = nonNilSourceBreakpoints(manager.Breakpoints(path))
+				body["resolved"] = manager.ResolvedSourceBreakpoints(path)
 			}
 			if session := manager.ActiveSession(); session != nil {
 				body["session"] = session.Status()
-				body["output"] = session.Output()
+				body["output"], body["_wingmanOutputOffset"] = session.OutputSnapshot()
 				c.mu.Lock()
 				c.bound = session.ID()
 				c.mu.Unlock()
@@ -288,12 +400,16 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 			if err != nil {
 				return err
 			}
-			if resolved == nil {
-				for _, point := range values {
-					resolved = append(resolved, dap.Breakpoint{Line: point.Line, Column: point.Column, Verified: false, Message: "Pending debug session"})
-				}
-			}
 			result = map[string]any{"breakpoints": nonNilDAPBreakpoints(resolved)}
+			return nil
+		case "setExceptionBreakpoints":
+			if p.Filters == nil {
+				p.Filters = []string{}
+			}
+			if err := manager.SetExceptionBreakpoints(ctx, p.Filters); err != nil {
+				return err
+			}
+			result = map[string]any{}
 			return nil
 		}
 		c.mu.Lock()
@@ -313,23 +429,29 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 		if p.StateVersion != 0 && p.StateVersion != before.StateVersion {
 			return errDebugStateChanged
 		}
-		inspect := req.Command == "stackTrace" || req.Command == "scopes" || req.Command == "variables" || req.Command == "evaluate"
+		// Evaluation without a frame uses the global scope and may run while
+		// the debuggee is running.
+		inspect := req.Command == "stackTrace" || req.Command == "scopes" || req.Command == "variables" || req.Command == "evaluate" && p.FrameID != 0
 		if inspect && before.State != dap.StateStopped {
-			return errors.New("debug session must be stopped to inspect it")
+			return errDebugNotStopped
 		}
 		switch req.Command {
-		case "continue", "next", "stepIn", "stepOut", "stepBack", "pause":
-			methods := map[string]func(context.Context, int) error{"continue": session.Continue, "next": session.Next, "stepIn": session.StepIn, "stepOut": session.StepOut, "stepBack": session.StepBack, "pause": session.Pause}
+		case "continue":
+			all, callErr := session.ContinueThread(ctx, p.ThreadID)
+			err = callErr
+			result = map[string]any{"allThreadsContinued": all}
+		case "next", "stepIn", "stepOut", "stepBack", "reverseContinue", "pause":
+			methods := map[string]func(context.Context, int) error{"next": session.Next, "stepIn": session.StepIn, "stepOut": session.StepOut, "stepBack": session.StepBack, "reverseContinue": session.ReverseContinue, "pause": session.Pause}
 			err = methods[req.Command](ctx, p.ThreadID)
-			if req.Command == "continue" {
-				result = map[string]any{"allThreadsContinued": true}
-			}
 		case "disconnect":
-			if p.Terminate == nil || !*p.Terminate {
-				result = map[string]any{}
-				return nil
+			// DAP ends a launched debuggee by default and leaves an attached one running.
+			terminate := before.Request != "attach"
+			if p.Terminate != nil {
+				terminate = *p.Terminate
 			}
-			return manager.Stop(ctx, bound)
+			return manager.Disconnect(ctx, bound, terminate)
+		case "terminate":
+			return manager.Terminate(ctx, bound)
 		case "threads":
 			threads, callErr := session.Threads(ctx)
 			err = callErr
@@ -338,11 +460,8 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 			}
 			result = map[string]any{"threads": threads}
 		case "stackTrace":
-			if p.StartFrame < 0 || p.Levels < 0 || p.Levels > 1000 {
+			if p.StartFrame < 0 || p.Levels < 0 {
 				return errors.New("invalid stack range")
-			}
-			if p.Levels == 0 {
-				p.Levels = 100
 			}
 			frames, total, callErr := session.StackTrace(ctx, p.ThreadID, p.StartFrame, p.Levels)
 			if callErr != nil {
@@ -351,13 +470,21 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 			if frames == nil {
 				frames = []dap.StackFrame{}
 			}
+			resolvedRoot, _ := pathutil.Resolve(filepath.Clean(c.server.workspace.RootPath))
 			for i := range frames {
 				frames[i].ID, err = c.reference(before, frames[i].ID, "frame")
 				if err != nil {
 					return err
 				}
+				if source := frames[i].Source; source != nil && source.Path != "" {
+					source.Path = c.framePath(source.Path, resolvedRoot)
+				}
 			}
-			result = map[string]any{"stackFrames": frames, "totalFrames": total}
+			body := map[string]any{"stackFrames": frames}
+			if total > 0 {
+				body["totalFrames"] = total
+			}
+			result = body
 		case "scopes":
 			id, err := c.nativeReference(before, p.FrameID, "frame")
 			if err != nil {
@@ -381,13 +508,13 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 			if err != nil {
 				return err
 			}
-			if p.Start < 0 || p.Count < 0 || p.Count > 500 {
+			if p.Start < 0 || p.Count < 0 {
 				return errors.New("invalid variable range")
 			}
-			if p.Count == 0 {
-				p.Count = 200
+			if p.Filter != "" && p.Filter != "indexed" && p.Filter != "named" {
+				return errors.New("variables filter must be indexed or named")
 			}
-			variables, err := session.Variables(ctx, id, p.Start, p.Count)
+			variables, err := session.FilteredVariables(ctx, id, p.Filter, p.Start, p.Count)
 			if err != nil {
 				return err
 			}
@@ -408,23 +535,23 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 					return err
 				}
 			}
-			if p.Context == "" {
-				p.Context = "hover"
-			}
-			if p.Context != "hover" && p.Context != "watch" && p.Context != "repl" {
-				return errors.New("unsupported evaluation context")
-			}
 			value, err := session.EvaluateContext(ctx, p.Expression, frameID, p.Context)
 			if err != nil {
 				return err
 			}
-			id, err := c.reference(before, value.VariablesReference, "variable")
-			if err != nil {
-				return err
+			state := before
+			if !inspect {
+				state = session.Status()
+			}
+			id := 0
+			if state.State == dap.StateStopped {
+				if id, err = c.reference(state, value.VariablesReference, "variable"); err != nil {
+					return err
+				}
 			}
 			result = map[string]any{"result": value.Result, "type": value.Type, "variablesReference": id, "namedVariables": value.NamedVariables, "indexedVariables": value.IndexedVariables}
 		default:
-			return fmt.Errorf("unsupported DAP command: %s", req.Command)
+			return fmt.Errorf("%w: %s", errDAPUnsupported, req.Command)
 		}
 		if inspect && debugStatusChanged(before, session.Status()) {
 			return errDebugStateChanged
@@ -434,57 +561,60 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 	return result, err
 }
 
+// dapObserver remembers what one connection has been told, so every
+// lifecycle transition, output chunk and verification is sent exactly once.
+type dapObserver struct {
+	status        *dap.Status
+	stop          uint64
+	exited        bool
+	terminated    bool
+	outputSession string
+	outputOffset  int64
+	capabilities  string
+	breakpoints   map[int]dap.ResolvedBreakpoint
+}
+
 func (c *dapConnection) observe() {
-	var previous *dap.Status
-	output := ""
+	var o dapObserver
+	first := true
 	for {
 		var changed, stateChanged, outputChanged <-chan struct{}
+		var session *dap.Session
 		var status *dap.Status
-		currentOutput := ""
+		var resolved map[int]dap.ResolvedBreakpoint
 		err := c.server.workspace.WithDAPManager(func(manager *dap.Manager) error {
 			changed = manager.Changes()
-			if session := manager.ActiveSession(); session != nil {
+			resolved = manager.ResolvedBreakpoints()
+			if session = manager.ActiveSession(); session != nil {
 				stateChanged, outputChanged = session.Changes()
 				current := session.Status()
 				status = &current
-				currentOutput = session.Output()
 			}
 			return nil
 		})
 		if err != nil {
 			return
 		}
-		if status != nil && (previous == nil || debugStatusChanged(*previous, *status)) {
-			c.event("wingman/status", map[string]any{"session": status})
-			c.event("capabilities", map[string]any{"capabilities": map[string]any{"supportsStepBack": status.Capabilities.SupportsStepBack}})
-			switch status.State {
-			case dap.StateStopped:
-				body := map[string]any{"reason": "pause"}
-				if stop := status.Stop; stop != nil {
-					body = map[string]any{"reason": stop.Reason, "description": stop.Description, "threadId": stop.ThreadID, "allThreadsStopped": stop.AllThreadsStopped, "hitBreakpointIds": stop.HitBreakpointIDs}
+		if first {
+			// A new connection restores through wingman/status. Replaying lifecycle
+			// events would end a session this client never saw end.
+			first = false
+			o.status, o.breakpoints = status, resolved
+			if status != nil {
+				o.terminated = status.State == dap.StateTerminated
+				o.exited = o.terminated && status.ExitCode != nil
+				if status.Stop != nil {
+					o.stop = status.Stop.Sequence
 				}
-				c.event("stopped", body)
-			case dap.StateRunning:
-				c.event("continued", map[string]any{"threadId": 0, "allThreadsContinued": true})
-			case dap.StateTerminated:
-				if status.ExitCode != nil {
-					c.event("exited", map[string]any{"exitCode": *status.ExitCode})
-				}
-				c.event("terminated", map[string]any{})
+				o.outputSession = status.SessionID
+				_, o.outputOffset = session.OutputSnapshot()
+				c.sendCapabilities(&o, status.Capabilities)
 			}
-		} else if status == nil && previous != nil {
-			c.event("wingman/status", map[string]any{"session": nil})
-			c.event("terminated", map[string]any{})
+		} else {
+			c.sendOutput(&o, session, status)
+			c.sendLifecycle(&o, status)
+			c.sendBreakpoints(&o, resolved)
 		}
-		if status != nil && (previous == nil || previous.SessionID != status.SessionID) {
-			output = ""
-		}
-		if output != currentOutput {
-			delta := strings.TrimPrefix(currentOutput, output)
-			c.event("output", map[string]any{"category": "console", "output": delta, "_wingmanReplace": !strings.HasPrefix(currentOutput, output)})
-			output = currentOutput
-		}
-		previous = status
 		select {
 		case <-c.ctx.Done():
 			return
@@ -493,4 +623,134 @@ func (c *dapConnection) observe() {
 		case <-outputChanged:
 		}
 	}
+}
+
+func (c *dapConnection) sendOutput(o *dapObserver, session *dap.Session, status *dap.Status) {
+	if session == nil {
+		return
+	}
+	if status.SessionID != o.outputSession {
+		o.outputSession, o.outputOffset = status.SessionID, 0
+	}
+	chunks, end := session.OutputSince(o.outputOffset)
+	for i := 0; i < len(chunks); {
+		// Adjacent chunks of one category travel as one event.
+		output, j := chunks[i].Output, i+1
+		for ; j < len(chunks) && chunks[j].Category == chunks[i].Category; j++ {
+			output += chunks[j].Output
+		}
+		c.event("output", map[string]any{"category": chunks[i].Category, "output": output, "_wingmanOffset": chunks[i].Offset, "_wingmanSessionId": status.SessionID})
+		i = j
+	}
+	o.outputOffset = end
+}
+
+func (c *dapConnection) sendLifecycle(o *dapObserver, status *dap.Status) {
+	previous := o.status
+	o.status = status
+	if status == nil {
+		if previous != nil {
+			c.event("wingman/status", map[string]any{"session": nil})
+			if !o.terminated {
+				c.event("terminated", map[string]any{})
+			}
+		}
+		o.exited, o.terminated, o.stop = false, false, 0
+		return
+	}
+	if previous != nil && previous.SessionID != status.SessionID {
+		previous = nil
+		o.exited, o.terminated, o.stop = false, false, 0
+	}
+	if previous == nil || debugStatusChanged(*previous, *status) {
+		c.event("wingman/status", map[string]any{"session": status})
+	}
+	c.sendCapabilities(o, status.Capabilities)
+	wasStopped := previous != nil && previous.State == dap.StateStopped
+	switch status.State {
+	case dap.StateStopped:
+		if wasStopped {
+			for _, thread := range previous.StoppedThreads {
+				if !slices.Contains(status.StoppedThreads, thread) {
+					c.event("continued", map[string]any{"threadId": thread, "allThreadsContinued": false})
+				}
+			}
+		}
+		if stop := status.Stop; stop != nil && stop.Sequence != o.stop {
+			o.stop = stop.Sequence
+			c.event("stopped", map[string]any{"reason": stop.Reason, "description": stop.Description, "threadId": stop.ThreadID, "allThreadsStopped": stop.AllThreadsStopped, "hitBreakpointIds": nonNilInts(stop.HitBreakpointIDs)})
+		} else if stop == nil && !wasStopped {
+			c.event("stopped", map[string]any{"reason": "pause"})
+		}
+	case dap.StateRunning:
+		if wasStopped {
+			body := map[string]any{"allThreadsContinued": true}
+			if previous.Stop != nil {
+				body["threadId"] = previous.Stop.ThreadID
+			}
+			c.event("continued", body)
+		}
+	case dap.StateTerminated:
+		if status.ExitCode != nil && !o.exited {
+			o.exited = true
+			c.event("exited", map[string]any{"exitCode": *status.ExitCode})
+		}
+		if !o.terminated {
+			o.terminated = true
+			c.event("terminated", map[string]any{})
+		}
+	}
+}
+
+// sendCapabilities forwards the adapter features the gateway passes through,
+// once per change.
+func (c *dapConnection) sendCapabilities(o *dapObserver, capabilities dap.Capabilities) {
+	filters := []any{}
+	for _, filter := range capabilities.ExceptionFilters {
+		filters = append(filters, map[string]any{"filter": filter.Filter, "label": filter.Label, "description": filter.Description, "default": filter.Default})
+	}
+	body := map[string]any{
+		"supportsStepBack":                  capabilities.SupportsStepBack,
+		"supportsConditionalBreakpoints":    capabilities.SupportsConditionalBreakpoints,
+		"supportsHitConditionalBreakpoints": capabilities.SupportsHitConditionalBreakpoints,
+		"supportsLogPoints":                 capabilities.SupportsLogPoints,
+		"supportsEvaluateForHovers":         capabilities.SupportsEvaluateForHovers,
+		"exceptionBreakpointFilters":        filters,
+	}
+	data, _ := json.Marshal(body)
+	if string(data) != o.capabilities {
+		o.capabilities = string(data)
+		c.event("capabilities", map[string]any{"capabilities": body})
+	}
+}
+
+func (c *dapConnection) sendBreakpoints(o *dapObserver, resolved map[int]dap.ResolvedBreakpoint) {
+	for _, id := range slices.Sorted(maps.Keys(resolved)) {
+		breakpoint := resolved[id]
+		if previous, ok := o.breakpoints[id]; ok && reflect.DeepEqual(previous, breakpoint) {
+			continue
+		}
+		wire := map[string]any{"id": id, "verified": breakpoint.Verified, "source": map[string]any{"path": breakpoint.Path}}
+		if breakpoint.Message != "" {
+			wire["message"] = breakpoint.Message
+		}
+		if breakpoint.Line > 0 {
+			wire["line"] = breakpoint.Line
+		}
+		if breakpoint.Column > 0 {
+			wire["column"] = breakpoint.Column
+		}
+		if breakpoint.Reason != "" {
+			wire["reason"] = breakpoint.Reason
+		}
+		c.event("breakpoint", map[string]any{"reason": "changed", "breakpoint": wire})
+	}
+	o.breakpoints = resolved
+}
+
+func nonNilInts(values []int) []int {
+	if values == nil {
+		return []int{}
+	}
+	return values
 }

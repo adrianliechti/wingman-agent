@@ -1,5 +1,6 @@
 import { EditorConnection } from "./editorConnection.ts";
 import type {
+	DebugBreakpoint,
 	DebugInspection,
 	DebugLaunchPlan,
 	DebugSession,
@@ -16,6 +17,10 @@ export class DAPClient {
 	private root = "";
 	private session?: DebugSession;
 	private output = "";
+	// UTF-16 offset that follows `output` in the host's output stream.
+	private outputEnd = 0;
+	private outputSession?: string;
+	private restored = false;
 	private revision = 0;
 	private listeners = new Set<(event: string) => void>();
 	constructor(instance: string) {
@@ -33,18 +38,51 @@ export class DAPClient {
 				"/";
 		};
 		this.connection.onEvent((event, body) => {
-			if (event === "wingman/status" || event === "output") this.revision++;
+			if (event === "disconnected") this.restored = false;
 			if (event === "wingman/status") {
-				if (this.session?.session_id !== body.session?.session_id)
-					this.output = "";
+				this.revision++;
+				this.resetOutput(body.session?.session_id);
 				this.session = body.session ?? undefined;
 			}
-			if (event === "output")
-				this.output = body._wingmanReplace
-					? body.output
-					: (this.output + body.output).slice(-2 * 1024 * 1024);
+			if (event === "output") {
+				if (body._wingmanSessionId) this.resetOutput(body._wingmanSessionId);
+				this.appendOutput(body.output, body._wingmanOffset);
+			}
 			for (const listener of this.listeners) listener(event);
 		});
+	}
+	private resetOutput(sessionID?: string) {
+		if (this.outputSession === sessionID) return;
+		this.output = "";
+		this.outputEnd = 0;
+		this.outputSession = sessionID;
+	}
+	// The host sends each output range once; a status snapshot can overlap
+	// output events that were already in flight.
+	private appendOutput(text: string, offset?: number) {
+		if (offset === undefined) {
+			this.output += text;
+		} else {
+			if (offset + text.length <= this.outputEnd) return;
+			this.output += text.slice(Math.max(0, this.outputEnd - offset));
+			this.outputEnd = offset + text.length;
+		}
+		if (this.output.length > 2 * 1024 * 1024)
+			this.output = this.output.slice(-2 * 1024 * 1024);
+	}
+	private absolute(path: string) {
+		return this.root + path.replace(/^\/+/, "");
+	}
+	private relative(path: string) {
+		const normalized = path.replaceAll("\\", "/");
+		// Windows paths compare case-insensitively, including the drive letter.
+		const windows = /^[a-z]:\//i.test(this.root);
+		const [candidate, root] = windows
+			? [normalized.toLowerCase(), this.root.toLowerCase()]
+			: [normalized, this.root];
+		return root && candidate.startsWith(root)
+			? normalized.slice(root.length)
+			: "";
 	}
 	close() {
 		this.connection.close();
@@ -60,27 +98,38 @@ export class DAPClient {
 	}
 	private frame(frame: DebugStackFrame) {
 		if (!frame.source?.path) return frame;
-		const path = frame.source.path.replaceAll("\\", "/");
 		return {
 			...frame,
-			source: {
-				...frame.source,
-				path: path.startsWith(this.root) ? path.slice(this.root.length) : "",
-			},
+			source: { ...frame.source, path: this.relative(frame.source.path) },
 		};
 	}
 	async status(path?: string, signal?: AbortSignal) {
+		await this.connection.ready();
 		const revision = this.revision;
 		const result = await this.connection.request<{
 			session?: DebugSession;
 			output: string;
+			_wingmanOutputOffset: number;
 			breakpoints: DebugSourceBreakpoint[];
-		}>("wingman/status", { source: path ? { path } : undefined }, signal);
-		// Never overwrite an event that overtook this snapshot response.
-		if (revision === this.revision) {
-			this.session = result.session;
+			resolved: DebugBreakpoint[];
+		}>(
+			"wingman/status",
+			{ source: path ? { path: this.absolute(path) } : undefined },
+			signal,
+		);
+		// Never overwrite a status event that overtook this snapshot response.
+		if (revision === this.revision) this.session = result.session;
+		const sessionID = result.session?.session_id;
+		if (
+			sessionID === this.session?.session_id &&
+			(sessionID !== this.outputSession ||
+				result._wingmanOutputOffset >= this.outputEnd)
+		) {
 			this.output = result.output;
+			this.outputEnd = result._wingmanOutputOffset;
+			this.outputSession = sessionID;
 		}
+		this.restored = true;
 		return { ...result, session: this.session, output: this.output };
 	}
 	async launch(
@@ -99,10 +148,13 @@ export class DAPClient {
 					.catch((error) => lifecycle.abort(error));
 		});
 		try {
+			// The host launches its own reviewed copy; only the dialog's choices
+			// travel with the id. Prelaunch builds can outlast any fixed timeout.
 			await this.connection.request(
 				plan.request,
-				{ _wingmanPlan: plan },
+				{ _wingmanPlanId: plan.id, _wingmanPlan: plan },
 				requestSignal,
+				{ timeout: 0 },
 			);
 			await configuring;
 			requestSignal.throwIfAborted();
@@ -121,6 +173,7 @@ export class DAPClient {
 			available: true,
 			session: status.session,
 			breakpoints: status.breakpoints,
+			resolved: status.resolved,
 		};
 		if (status.session?.state === "stopped") {
 			try {
@@ -155,6 +208,15 @@ export class DAPClient {
 		details: boolean,
 		signal?: AbortSignal,
 	): Promise<DebugInspection> {
+		// Output arrives incrementally; refetching the whole buffer per event
+		// is only needed before this connection has restored it.
+		if (!details && this.restored)
+			return {
+				session: this.session,
+				output: this.output,
+				threads: [],
+				frames: [],
+			};
 		const status = await this.status(undefined, signal);
 		const result: DebugInspection = {
 			session: status.session,
@@ -190,10 +252,11 @@ export class DAPClient {
 		breakpoints: DebugSourceBreakpoint[],
 		signal?: AbortSignal,
 	) {
+		await this.connection.ready();
 		const result = await this.connection.request<any>(
 			"setBreakpoints",
 			{
-				source: { path },
+				source: { path: this.absolute(path) },
 				breakpoints: breakpoints.map((point) => ({
 					line: point.line,
 					column: point.column,

@@ -97,6 +97,11 @@ const ReasoningView = memo(function ReasoningView({
 			data-entry-id={entry.id}
 			className="mb-4 border-l-2 border-purple pl-3 select-text"
 		>
+			{entry.reasoningDuration !== undefined && (
+				<div className="text-[10px] text-fg-dim font-mono mb-0.5">
+					Thought for {formatReasoningDuration(entry.reasoningDuration)}
+				</div>
+			)}
 			<div className="text-[11px] whitespace-pre-wrap break-words text-fg-dim font-mono leading-relaxed italic">
 				{summary}
 				{isStreaming && (
@@ -106,6 +111,14 @@ const ReasoningView = memo(function ReasoningView({
 		</div>
 	);
 });
+
+function formatReasoningDuration(ms: number): string {
+	if (ms < 1000) return "<1s";
+	const seconds = Math.round(ms / 1000);
+	return seconds < 60
+		? `${seconds}s`
+		: `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
 
 export const ToolGroupView = memo(function ToolGroupView({
 	entries,

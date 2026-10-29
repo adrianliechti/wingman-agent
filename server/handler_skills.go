@@ -2,10 +2,7 @@ package server
 
 import (
 	"net/http"
-	"slices"
-	"strings"
 
-	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
@@ -34,6 +31,14 @@ func (s *Server) skillBlocks(text string) []string {
 }
 
 func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.skillCatalogue())
+}
+
+// The catalogue belongs to the workspace. Listing it never starts a backend.
+func (s *Server) skillCatalogue() []SkillEntry {
+	if s.workspace == nil {
+		return []SkillEntry{}
+	}
 	s.refreshSkills()
 	skills := s.workspace.Skills()
 	result := make([]SkillEntry, 0, len(skills))
@@ -43,38 +48,10 @@ func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
 			hint = "[optional arguments]"
 		}
 		result = append(result, SkillEntry{
-			Name:        sk.Name,
+			Name:        sk.Qualified(),
 			Description: sk.Description,
 			InputHint:   hint,
 		})
 	}
-	if backend := r.URL.Query().Get("backend"); backend != "" {
-		runtime, err := s.backend(backend)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		active := runtime.agent
-		if _, ok := active.(code.Compactor); ok {
-			result = slices.DeleteFunc(result, func(entry SkillEntry) bool { return entry.Name == "compact" })
-			result = append(result, SkillEntry{Name: "compact", Description: "Summarize the conversation to free context", InputHint: "[focus]"})
-		}
-		if provider, ok := active.(code.CommandProvider); ok {
-			seen := make(map[string]bool, len(result))
-			for _, item := range result {
-				seen[item.Name] = true
-			}
-			for _, command := range provider.Commands(r.URL.Query().Get("session")) {
-				name := strings.TrimPrefix(command.Name, "/")
-				if name == "" || seen[name] {
-					continue
-				}
-				entry := SkillEntry{Name: name, Description: command.Description, InputHint: command.InputHint}
-				result = append(result, entry)
-				seen[name] = true
-			}
-		}
-	}
-
-	writeJSON(w, result)
+	return result
 }

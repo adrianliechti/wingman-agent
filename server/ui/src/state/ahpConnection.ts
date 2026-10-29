@@ -1,5 +1,8 @@
 import {
 	chatReducer,
+	changesetReducer,
+	type ChangesetState,
+	type ChangesetAction,
 	sessionReducer,
 	terminalReducer,
 	rootReducer,
@@ -24,7 +27,12 @@ import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 import type { ServerMessage } from "../types/protocol.ts";
 import type { WorkspaceScope } from "./sessionStore.ts";
 
-export type ChannelState = ChatState | SessionState | TerminalState | RootState;
+export type ChannelState =
+	| ChatState
+	| SessionState
+	| TerminalState
+	| RootState
+	| ChangesetState;
 export type ChannelUpdate = {
 	state: ChannelState;
 	action?: ActionEnvelope;
@@ -390,6 +398,11 @@ export class AHPConnection {
 				observer.state as SessionState,
 				action as SessionAction,
 			);
+		else if (channel.startsWith("ahp-changeset:"))
+			observer.state = changesetReducer(
+				observer.state as ChangesetState,
+				action as ChangesetAction,
+			);
 		else if (channel.startsWith("ahp-terminal:"))
 			observer.state = terminalReducer(
 				observer.state as TerminalState,
@@ -409,6 +422,21 @@ export class AHPConnection {
 			if (snapshot || action?.action.type === "root/terminalsChanged")
 				this.emit({ type: "terminals_changed" });
 		}
+		if (
+			!snapshot &&
+			uri.startsWith("ahp-changeset:") &&
+			[
+				"changeset/fileSet",
+				"changeset/fileRemoved",
+				"changeset/statusChanged",
+			].includes(action?.action.type ?? "")
+		)
+			this.emit({
+				type:
+					uri.endsWith("/staged") || uri.endsWith("/unstaged")
+						? "git_index_changed"
+						: "diffs_changed",
+			});
 		for (const fn of observer.listeners)
 			fn({
 				state: observer.state!,

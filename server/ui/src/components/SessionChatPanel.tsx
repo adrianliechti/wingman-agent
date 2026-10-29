@@ -68,8 +68,15 @@ export function SessionChatPanel({
 					if (state === "queued" || state === "sending")
 						void command({ type: "queue_remove", inputId });
 				}}
-				onUpdateQueued={(inputId, text, files, images) =>
-					command({ type: "queue_update", inputId, text, files, images })
+				onUpdateQueued={(inputId, text, files, images, completions) =>
+					command({
+						type: "queue_update",
+						inputId,
+						text,
+						files,
+						images,
+						completions,
+					})
 				}
 				onResumeQueue={() => {
 					void command({ type: "queue_resume" });

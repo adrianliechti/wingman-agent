@@ -455,21 +455,27 @@ func TestAHPNotFoundErrors(t *testing.T) {
 	}
 }
 
-func TestAHPAcceptsAnyOrigin(t *testing.T) {
+func TestAHPOriginPolicy(t *testing.T) {
 	_, _, _, endpoint := ahpTestServer(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	for _, origin := range []string{"", "null", "https://client.example", "http://localhost:3000", "vscode-file://vscode-app", "custom-app://desktop"} {
+	host, _ := url.Parse(endpoint)
+	for origin, allowed := range map[string]bool{
+		"": true, "http://" + host.Host: true, "vscode-file://vscode-app": true, "vscode-webview://panel": true, "custom-app://desktop": true,
+		"null": false, "https://client.example": false, "http://localhost:3000": false, "file://": false,
+	} {
 		t.Run(origin, func(t *testing.T) {
 			headers := http.Header{"Sec-Fetch-Site": []string{"cross-site"}, "Sec-Fetch-Mode": []string{"websocket"}}
 			if origin != "" {
 				headers.Set("Origin", origin)
 			}
 			conn, _, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: headers})
-			if err != nil {
-				t.Fatal(err)
+			if allowed != (err == nil) {
+				t.Fatalf("allowed=%v, err=%v", allowed, err)
 			}
-			conn.CloseNow()
+			if conn != nil {
+				conn.CloseNow()
+			}
 		})
 	}
 }

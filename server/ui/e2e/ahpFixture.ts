@@ -41,6 +41,7 @@ export class AHPFixture {
 	onLoad = (_session: FixtureSession) => {};
 	onCreate?: (params: any) => Promise<FixtureSession>;
 	onCommand?: (command: any, session: FixtureSession) => Promise<void>;
+	onCompletions?: (params: any, session: FixtureSession) => any[];
 	constructor(readonly scope: { workspaceId: string; instanceId: string }) {}
 	add(
 		backend: string,
@@ -387,6 +388,10 @@ export class AHPFixture {
 						return;
 					}
 					const session = this.find(p.channel);
+					if (session && request.method === "completions") {
+						reply({ items: this.onCompletions?.(p, session) ?? [] });
+						return;
+					}
 					if (session && request.method === "subscribe") {
 						this.onLoad(session);
 						const peers = this.subscriptions.get(p.channel) ?? new Set();
@@ -424,6 +429,7 @@ export class AHPFixture {
 											id: action.id,
 											inputId: action.id,
 											text: action.message.text,
+											attachments: action.message.attachments,
 										}
 									: action.type === "chat/toolCallConfirmed"
 										? {
@@ -503,7 +509,7 @@ export class AHPFixture {
 export async function ahpFixture(page: Page) {
 	let fixture = fixtures.get(page);
 	if (!fixture) {
-		const scope = await (await page.request.get("/api/v2/bootstrap")).json();
+		const scope = await (await page.request.get("/api/workspace")).json();
 		fixture = new AHPFixture(scope);
 		fixtures.set(page, fixture);
 		await fixture.install(page);

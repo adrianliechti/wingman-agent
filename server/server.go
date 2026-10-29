@@ -81,16 +81,9 @@ type Server struct {
 
 	terminals        *terminal.Manager
 	preview          *filePreviewServer
-	tab              *editorTabService
-	transforms       *editorTransformService
-	commitMessages   *gitCommitMessageService
 	settingsMu       sync.Mutex
-	tabEnabled       atomic.Bool
 	terminalPosition atomic.Value
 	sidebarPosition  atomic.Value
-	tabRequestMu     sync.Mutex
-	tabRequestID     uint64
-	tabRequestCancel context.CancelFunc
 
 	files           *watch.Monitor
 	skillFiles      *watch.Monitor
@@ -98,6 +91,7 @@ type Server struct {
 	prevLSP         bool
 	prevDebug       bool
 	prevFingerprint uint64
+	lspRefreshing   atomic.Bool
 
 	managedToolsMu sync.RWMutex
 	managedTools   managedToolsStatus
@@ -152,14 +146,9 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 		option, _ := wa.RoleModel("")
 		return option.ID
 	}
-	s.tab = newEditorTabService(s.Config)
-	s.transforms = newEditorTransformService(s.Config)
-	s.commitMessages = newGitCommitMessageService(s.Config)
-	s.tabEnabled.Store(true)
 	s.terminalPosition.Store(settings.WindowTerminalPositionTab)
 	s.sidebarPosition.Store(settings.WindowSidebarPositionRight)
 	if userSettings, loadErr := settings.Load(); loadErr == nil {
-		s.tabEnabled.Store(userSettings.EditorTabCompletion)
 		s.terminalPosition.Store(userSettings.WindowTerminalPosition)
 		s.sidebarPosition.Store(userSettings.WindowSidebarPosition)
 	}
@@ -336,44 +325,30 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Get("/preview", s.handleFilePreview)
 	r.Route("/api", func(r chi.Router) {
 
-		r.Route("/diffs", func(r chi.Router) {
-			r.Get("/", s.handleDiffs)
-			r.Post("/revert", s.handleDiffRevert)
-		})
-
-		r.Route("/git", func(r chi.Router) {
-			r.Post("/init", s.handleGitInit)
-			r.Get("/status", s.handleGitStatus)
-			r.Get("/branches", s.handleGitBranches)
-			r.Post("/fetch", s.handleGitFetch)
-			r.Get("/history", s.handleGitHistory)
-			r.Get("/insights", s.handleGitInsights)
-			r.Get("/compare", s.handleGitCompare)
-			r.Post("/branches", s.handleGitCreateBranch)
-			r.Post("/checkout", s.handleGitCheckoutBranch)
-			r.Post("/stage", s.handleGitStage)
-			r.Post("/unstage", s.handleGitUnstage)
-			r.Post("/commit", s.handleGitCommit)
-			r.Post("/commit-message", s.handleGitCommitMessage)
-			r.Post("/pull", s.handleGitPull)
-			r.Post("/push", s.handleGitPush)
-		})
-
 		s.registerSessionRoutes(r)
-
-		r.Get("/terminals/shells", s.handleTerminalShells)
 
 		// Workspace setup and external source retrieval are host services; editor
 		// and debugger operations use the LSP and DAP WebSocket gateways.
-		r.Post("/debug/targets", s.handleDebugTargets)
-		r.Post("/debug/plan", s.handleDebugPlan)
-		r.Post("/editor/tab", s.handleEditorTab)
-		r.Post("/editor/transform", s.handleEditorTransform)
-		r.Post("/settings/editor.tab.completion", s.handleEditorTabSettings)
+		r.Post("/workspace/debug/targets", s.handleDebugTargets)
+		r.Post("/workspace/debug/plan", s.handleDebugPlan)
 		r.Post("/settings/window.terminal.position", s.handleWindowTerminalSettings)
 		r.Post("/settings/window.sidebar.position", s.handleWindowSidebarSettings)
-		r.Get("/skills", s.handleSkills)
-		r.Get("/capabilities", s.handleCapabilities)
+		r.Get("/workspace/skills", s.handleSkills)
+		r.Get("/workspace", s.handleWorkspace)
+		r.Get("/workspace/insights", s.handleWorkspaceInsights)
+		r.Route("/workspace/git", func(r chi.Router) {
+			r.Get("/", s.handleWorkspaceGit)
+			r.Get("/commits", s.handleGitCommits)
+			r.Post("/commits", s.handleGitAction("commit"))
+			r.Get("/branches", s.handleGitBranches)
+			r.Post("/branches", s.handleGitAction("createBranch"))
+			r.Get("/diff", s.handleGitDiff)
+			r.Post("/checkout", s.handleGitAction("checkout"))
+			r.Post("/fetch", s.handleGitFetch)
+			r.Post("/pull", s.handleGitAction("pull"))
+			r.Post("/push", s.handleGitAction("push"))
+			r.Post("/init", s.handleGitAction("init"))
+		})
 	})
 
 	fileServer := http.FileServer(http.FS(StaticFS))
@@ -461,19 +436,17 @@ func (s *Server) send(f Frame) {
 	}
 }
 
-type capabilitiesResponse struct {
-	Git                    bool                            `json:"git"`
-	GitInit                bool                            `json:"git_init"`
+type workspaceResponse struct {
+	WorkspaceScope
+	Protocol               int                             `json:"protocol"`
+	Name                   string                          `json:"name"`
+	Path                   string                          `json:"path"`
+	Shells                 []terminal.Shell                `json:"shells"`
 	LSP                    bool                            `json:"lsp"`
 	Debug                  bool                            `json:"debug"`
-	Tasks                  bool                            `json:"tasks"`
-	Terminal               bool                            `json:"terminal"`
-	Tab                    bool                            `json:"tab"`
-	EditorTab              bool                            `json:"editor.tab.completion"`
 	WindowTerminalPosition settings.WindowTerminalPosition `json:"window.terminal.position"`
 	WindowSidebarPosition  settings.WindowSidebarPosition  `json:"window.sidebar.position"`
 	Platform               string                          `json:"platform"`
-	WorkspaceName          string                          `json:"workspace_name"`
 	ManagedTools           *managedToolsStatus             `json:"managed_tools,omitempty"`
 }
 
@@ -492,7 +465,7 @@ func (s *Server) setManagedToolsStatus(status managedToolsStatus) {
 	s.managedToolsMu.Lock()
 	s.managedTools = status
 	s.managedToolsMu.Unlock()
-	s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+	s.broadcast(Frame{Type: EvtWorkspaceChanged})
 }
 
 func (s *Server) managedToolsStatus() managedToolsStatus {
@@ -501,27 +474,24 @@ func (s *Server) managedToolsStatus() managedToolsStatus {
 	return s.managedTools
 }
 
-func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	ws := s.workspace
-	hasChanges := ws.HasChanges()
-	caps := capabilitiesResponse{
-		Git:                    hasChanges,
-		GitInit:                !hasChanges,
+	info := workspaceResponse{
+		WorkspaceScope:         s.scope,
+		Protocol:               2,
+		Name:                   filepath.Base(ws.RootPath),
+		Path:                   ws.RootPath,
+		Shells:                 append([]terminal.Shell{}, terminal.Shells()...),
 		LSP:                    ws.HasLSP(),
 		Debug:                  s.debugAvailable(r.Context()),
-		Tasks:                  true,
-		Terminal:               terminal.Supported(),
-		Tab:                    s.tab != nil,
-		EditorTab:              s.tab != nil && s.tabEnabled.Load(),
 		WindowTerminalPosition: s.windowTerminalPosition(),
 		WindowSidebarPosition:  s.windowSidebarPosition(),
 		Platform:               runtime.GOOS,
-		WorkspaceName:          filepath.Base(ws.RootPath),
 	}
 	if status := s.managedToolsStatus(); status.State != "" {
-		caps.ManagedTools = &status
+		info.ManagedTools = &status
 	}
-	writeJSON(w, caps)
+	writeJSON(w, info)
 }
 
 func (s *Server) windowTerminalPosition() settings.WindowTerminalPosition {
@@ -576,7 +546,7 @@ func (s *Server) checkWorkspace() {
 	gitNow := ws.IsGitRepo()
 	if gitNow != s.prevGit {
 		ws.SyncProjectMode()
-		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+		s.broadcast(Frame{Type: EvtWorkspaceChanged})
 		if ws.HasLSP() {
 			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 		}
@@ -586,7 +556,7 @@ func (s *Server) checkWorkspace() {
 	lspNow := ws.HasLSP()
 	if lspNow != s.prevLSP {
 		s.prevLSP = lspNow
-		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+		s.broadcast(Frame{Type: EvtWorkspaceChanged})
 		if lspNow {
 			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 		}
@@ -595,12 +565,13 @@ func (s *Server) checkWorkspace() {
 	debugNow := s.debugAvailable(s.ctx)
 	if debugNow != s.prevDebug {
 		s.prevDebug = debugNow
-		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+		s.broadcast(Frame{Type: EvtWorkspaceChanged})
 	}
 
 	if !ws.HasChanges() {
 		s.broadcast(Frame{Type: EvtFilesChanged})
 		if ws.HasLSP() {
+			s.refreshLSPDocuments()
 			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 		}
 		return
@@ -608,12 +579,28 @@ func (s *Server) checkWorkspace() {
 	fp := ws.ChangesFingerprint(s.ctx)
 	if fp != s.prevFingerprint {
 		s.prevFingerprint = fp
+		if ws.HasLSP() {
+			s.refreshLSPDocuments()
+		}
 		s.broadcast(Frame{Type: EvtFilesChanged})
 		s.broadcast(Frame{Type: EvtDiffsChanged})
 		if ws.HasLSP() {
 			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 		}
 	}
+}
+
+// A slow language server must not stall the workspace poller.
+func (s *Server) refreshLSPDocuments() {
+	if !s.lspRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+	s.background.Go(func() {
+		defer s.lspRefreshing.Store(false)
+		ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+		defer cancel()
+		s.workspace.RefreshLSPDocuments(ctx)
+	})
 }
 
 func (s *Server) refreshSkills() {

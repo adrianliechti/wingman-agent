@@ -64,9 +64,10 @@ type CommandSpec struct {
 }
 
 type Session struct {
-	id    string
-	title string
-	shell string
+	id      string
+	title   string
+	shell   string
+	command bool
 
 	pty Terminal
 
@@ -152,6 +153,9 @@ func newCommandSession(id string, spec CommandSpec, cols, rows int, onExit func(
 
 	return s, nil
 }
+
+// IsCommand reports a session created by CreateCommand rather than a shell.
+func (s *Session) IsCommand() bool { return s.command }
 
 func (s *Session) ID() string {
 	return s.id

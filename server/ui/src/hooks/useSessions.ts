@@ -1,3 +1,4 @@
+import type { MessageAttachment } from "@microsoft/agent-host-protocol";
 import { useState, useSyncExternalStore } from "react";
 import { workspaceClient, type Command } from "../state/workspaceClient.ts";
 import type { TurnInputIntent } from "../types/protocol.ts";
@@ -51,9 +52,10 @@ export function useSessions() {
 			files?: string[],
 			images?: string[],
 			intent: TurnInputIntent = "follow_up",
+			completions?: MessageAttachment[],
 		) => {
 			try {
-				await client.send(key, text, files, images, intent);
+				await client.send(key, text, files, images, intent, completions);
 				return true;
 			} catch (error) {
 				toast({

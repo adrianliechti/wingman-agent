@@ -28,7 +28,7 @@ export type ServerMessage = {
 		| "git_index_changed"
 		| "sessions_changed"
 		| "diagnostics_changed"
-		| "capabilities_changed"
+		| "workspace_changed"
 		| "model_changed"
 		| "tasks_changed"
 		| "terminals_changed"

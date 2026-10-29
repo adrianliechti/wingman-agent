@@ -76,6 +76,9 @@ export class AHPSessionProjection {
 				type: part.kind === "markdown" ? "assistant" : "reasoning",
 				content,
 				...(images.length ? { images } : {}),
+				...(part.kind === "reasoning" && part.duration !== undefined
+					? { reasoningDuration: part.duration }
+					: {}),
 			};
 		} else if (part.kind === "systemNotification") {
 			const input = part._meta?.["wingman.input"] as ChatEntry | undefined;

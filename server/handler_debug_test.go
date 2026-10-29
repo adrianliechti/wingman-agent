@@ -33,7 +33,7 @@ func TestDebugTargetsReturnsGoCodeLensCandidates(t *testing.T) {
 
 	app := newDebugTestServer(t, root)
 	body := bytes.NewBufferString(`{"path":"main.go","content":"package main\n\nfunc main() {}\n"}`)
-	request := httptest.NewRequest(http.MethodPost, "/api/debug/targets", body)
+	request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/targets", body)
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
@@ -68,7 +68,7 @@ func TestDebugTargetsReturnsNativeCodeLensCandidates(t *testing.T) {
 				t.Fatal(err)
 			}
 			response := httptest.NewRecorder()
-			serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/debug/targets", bytes.NewReader(body)))
+			serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/workspace/debug/targets", bytes.NewReader(body)))
 			if response.Code != http.StatusOK {
 				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
 			}
@@ -89,7 +89,7 @@ func TestDebugTargetsRejectsTrailingJSON(t *testing.T) {
 	root := t.TempDir()
 	writeDebugTestFile(t, root, "main.go", "package main\n\nfunc main() {}\n")
 	app := newDebugTestServer(t, root)
-	request := httptest.NewRequest(http.MethodPost, "/api/debug/targets", bytes.NewBufferString(`{"path":"main.go"} {"path":"main.go"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/targets", bytes.NewBufferString(`{"path":"main.go"} {"path":"main.go"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
@@ -101,7 +101,7 @@ func TestDebugTargetsRejectsTrailingJSON(t *testing.T) {
 func TestDebugPlanRequiresCodeLensTarget(t *testing.T) {
 	root := t.TempDir()
 	app := newDebugTestServer(t, root)
-	request := httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewBufferString(`{"action":"debug"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewBufferString(`{"action":"debug"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
@@ -150,7 +150,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 	}
 
 	response := httptest.NewRecorder()
-	serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/debug/targets", strings.NewReader(`{"path":"main.go"}`)))
+	serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/workspace/debug/targets", strings.NewReader(`{"path":"main.go"}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("targets status = %d: %s", response.Code, response.Body.String())
 	}
@@ -168,7 +168,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 		t.Fatal(err)
 	}
 	for _, accept := range []string{"application/json", "application/x-ndjson"} {
-		request := httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(body))
+		request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(body))
 		request.Header.Set("Accept", accept)
 		response = httptest.NewRecorder()
 		serveTestHTTP(app, response, request)
@@ -194,7 +194,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 		}
 		defer release()
 		for _, accept := range []string{"application/json", "application/x-ndjson"} {
-			request := httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(confirmedBody))
+			request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(confirmedBody))
 			request.Header.Set("Accept", accept)
 			response := httptest.NewRecorder()
 			serveTestHTTP(app, response, request)
@@ -209,7 +209,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 			}
 		}
 	})
-	request := httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(confirmedBody))
+	request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(confirmedBody))
 	request.Header.Set("Accept", "application/x-ndjson")
 	response = httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
@@ -258,7 +258,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 	if err := os.WriteFile(goCommand, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	request = httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(body))
+	request = httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(body))
 	response = httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
 	if response.Code != http.StatusOK {
@@ -275,7 +275,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 	if err := os.WriteFile(statusPath, []byte(time.Now().Add(-48*time.Hour).UTC().Format(time.RFC3339Nano)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	request = httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(body))
+	request = httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(body))
 	request.Header.Set("Accept", "application/x-ndjson")
 	response = httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
@@ -343,7 +343,7 @@ func TestDebugPlanFindsToolInstalledAfterCachedDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(body)))
+	serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(body)))
 	var plan debugLaunchPlan
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &plan) != nil || plan.Adapter != "delve" {
 		t.Fatalf("plan = %d: %s", response.Code, response.Body.String())
@@ -405,7 +405,7 @@ func TestDebugPlanRechecksHostAfterUpdateLockFailure(t *testing.T) {
 				}
 			}}
 			defer os.Chmod(tools, 0o755)
-			request := httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(body))
+			request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(body))
 			request.Header.Set("Accept", "application/x-ndjson")
 			serveTestHTTP(app, response, request)
 			decoder := json.NewDecoder(response.Body)

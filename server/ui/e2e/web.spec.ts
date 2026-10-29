@@ -1,9 +1,11 @@
+import { mockWorkspace } from "./workspaceFixture.ts";
 import {
 	readSavedFile,
 	writeSavedFile,
 	createSavedFile,
 } from "./fileFixture.ts";
 import { loseFirstInputReceipt } from "./ahpFaults.ts";
+import { mockGit } from "./gitFixture.ts";
 import { mockDebugSession } from "./dapFixture.ts";
 import {
 	mockLanguage,
@@ -58,6 +60,124 @@ function sessionRow(page: Page, id: string) {
 		.locator(`[data-session-id=${JSON.stringify(sessionKey("wingman", id))}]`)
 		.filter({ visible: true });
 }
+
+test("draft skill picker uses the workspace catalogue and keeps qualified names", async ({
+	page,
+}) => {
+	const requests: string[] = [];
+	await page.route("**/api/workspace/skills", (route) => {
+		requests.push(route.request().url());
+		return route.fulfill({
+			json: [
+				{
+					name: "shared",
+					description: "Project workflow",
+					input_hint: "[topic]",
+				},
+				{
+					name: "reports:shared",
+					description: "Plugin workflow",
+					input_hint: "[topic]",
+				},
+			],
+		});
+	});
+	const input = await composer(page);
+	await input.fill("/sha");
+	const picker = page.getByRole("listbox", { name: "Commands and skills" });
+	await expect(picker.getByRole("option")).toHaveCount(2);
+	await picker.getByRole("option", { name: /\/reports:shared/ }).click();
+	await expect(input).toHaveValue("/reports:shared ");
+	await expect.poll(() => requests.length).toBeGreaterThan(0);
+	for (const url of requests) expect(new URL(url).search).toBe("");
+});
+
+test("session command picker preserves completion metadata through reload and send", async ({
+	page,
+}) => {
+	const id = "command-picker";
+	const fixture = await mockSavedSessions(page, [
+		{ id, title: "Commands", updated_at: "2026-01-01T00:00:00Z" },
+	]);
+	const attachment = {
+		type: "simple",
+		label: "/reports:shared",
+		displayKind: "skill",
+		_meta: {
+			wingman: {
+				kind: "skill",
+				name: "reports:shared",
+				description: "Plugin workflow",
+				input_hint: "[topic]",
+			},
+			opaque: { keep: [1, 2] },
+		},
+	};
+	const sent: any[] = [];
+	const channels: string[] = [];
+	fixture.onCompletions = (params, session) => {
+		channels.push(params.channel);
+		expect(session.id).toBe(id);
+		return [
+			{ insertText: "/reports:shared", rangeStart: 0, rangeEnd: 1, attachment },
+			{
+				insertText: "/native",
+				rangeStart: 0,
+				rangeEnd: 1,
+				attachment: {
+					type: "simple",
+					label: "/native",
+					displayKind: "command",
+					_meta: {
+						wingman: {
+							kind: "command",
+							name: "native",
+							description: "Backend command",
+						},
+					},
+				},
+			},
+		];
+	};
+	fixture.onCommand = async (command) => {
+		sent.push(command);
+	};
+	await page.goto(`/wingman/${id}`);
+	let input = page
+		.getByPlaceholder("Message Wingman…")
+		.filter({ visible: true });
+	await input.fill("/rep");
+	let picker = page.getByRole("listbox", { name: "Commands and skills" });
+	await picker.getByRole("option", { name: /\/reports:shared/ }).click();
+	await input.fill("/reports:shared topic");
+	await page.reload();
+	input = page.getByPlaceholder("Message Wingman…").filter({ visible: true });
+	await expect(input).toHaveValue("/reports:shared topic");
+	await page.getByRole("button", { name: "Send (Enter)", exact: true }).click();
+	await expect
+		.poll(() => sent.filter((command) => command.type === "send").length)
+		.toBe(1);
+	expect(sent.find((command) => command.type === "send")).toMatchObject({
+		text: "/reports:shared topic",
+		attachments: [attachment],
+	});
+	await expect(input).toHaveValue("");
+	await input.fill("/nat");
+	picker = page.getByRole("listbox", { name: "Commands and skills" });
+	await picker.getByRole("option", { name: /\/native/ }).click();
+	await expect
+		.poll(() => sent.filter((command) => command.type === "send").length)
+		.toBe(2);
+	expect(sent.filter((command) => command.type === "send")[1]).toMatchObject({
+		text: "/native",
+		attachments: [
+			{ label: "/native", _meta: { wingman: { kind: "command" } } },
+		],
+	});
+	expect(channels.every((channel) => channel.startsWith("ahp-chat:"))).toBe(
+		true,
+	);
+});
 
 test("renders read and fetch image attachments in restored transcripts", async ({
 	page,
@@ -168,12 +288,6 @@ async function mockACPBackend(
 	await page.route(new RegExp(`/api/v2/backends/${backend}/`), (route) =>
 		route.fulfill({ json: [] }),
 	);
-	await page.route(
-		(url) =>
-			url.pathname === "/api/skills" &&
-			url.searchParams.get("backend") === backend,
-		(route) => route.fulfill({ json: [] }),
-	);
 	const fixture = await ahpFixture(page);
 	fixture.backends.add(backend);
 	const control = {
@@ -216,7 +330,7 @@ async function mockACPBackend(
 		saved.settings = settings;
 	}
 	const scope = fixture.scope;
-	await page.route(/\/api\/v2\/bootstrap$/, (route) =>
+	await mockWorkspace(page, (route) =>
 		route.fulfill({
 			json: {
 				...scope,
@@ -272,26 +386,6 @@ async function resetCompletionFile(_request: APIRequestContext) {
 		data: { path: "completion.go", content: "package main\n", revision },
 	});
 	expect(reset.ok()).toBeTruthy();
-}
-
-async function openTabFixture(page: Page, file: RegExp, lineText: string) {
-	await composer(page);
-	await page.getByRole("treeitem", { name: file }).click();
-	await expect(page.locator(".monaco-editor")).toBeVisible();
-	const line = page.locator(".view-line", { hasText: lineText }).first();
-	await expect(line).toBeVisible();
-	await line.click();
-	await page.keyboard.press("End");
-}
-
-async function setEditorTabCompletion(
-	request: APIRequestContext,
-	enabled: boolean,
-) {
-	const response = await request.post("/api/settings/editor.tab.completion", {
-		data: { "editor.tab.completion": enabled },
-	});
-	expect(response.ok()).toBeTruthy();
 }
 
 async function openWorkspaceMenu(page: Page) {
@@ -539,19 +633,14 @@ test("preserves the visible reply when a finished turn collapses its working ste
 test("keeps mixed background activity compact in the titlebar", async ({
 	page,
 }) => {
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
-				git_init: false,
 				lsp: true,
 				debug: false,
-				tasks: false,
-				terminal: true,
-				tab: false,
-				"editor.tab.completion": false,
 				platform: "linux",
-				workspace_name: "workspace",
+				name: "workspace",
 				managed_tools: {
 					state: "installing",
 					phase: "updating",
@@ -1555,7 +1644,7 @@ test("ACP chat initialization errors allow retrying the same session creation", 
 
 test("uses canonical product names for agents", async ({ page }) => {
 	await mockACPBackend(page, "claude");
-	await page.route(/\/api\/v2\/bootstrap$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		const response = await route.fetch();
 		const scope = await response.json();
 		await route.fulfill({
@@ -1600,17 +1689,14 @@ test("uses canonical product names for agents", async ({ page }) => {
 test("groups diagnostics by file and opens individual problems", async ({
 	page,
 }) => {
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
-				git_init: false,
 				lsp: true,
 				debug: false,
-				tasks: false,
-				terminal: true,
 				platform: "linux",
-				workspace_name: "workspace",
+				name: "workspace",
 			},
 		});
 	});
@@ -1680,17 +1766,15 @@ test("groups diagnostics by file and opens individual problems", async ({
 });
 
 test("uses each Git status slot for its stage action", async ({ page }) => {
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: true,
 				lsp: false,
-				tasks: false,
-				terminal: true,
 			},
 		});
 	});
-	await page.route(/\/api\/git\/status$/, async (route) => {
+	await mockGit(page, "status", async (route) => {
 		await route.fulfill({
 			json: {
 				branch: "main",
@@ -1716,7 +1800,7 @@ test("uses each Git status slot for its stage action", async ({ page }) => {
 			},
 		});
 	});
-	await page.route(/\/api\/git\/(?:branches|fetch)$/, async (route) => {
+	await mockGit(page, "branches", async (route) => {
 		await route.fulfill({
 			json: {
 				branches: [{ name: "main", current: true, remote: "" }],
@@ -1801,20 +1885,18 @@ test("uses each Git status slot for its stage action", async ({ page }) => {
 	).toBeVisible();
 });
 
-test("generates staged commit messages without overwriting concurrent edits", async ({
+test("commits a manually entered message with a responsive footer", async ({
 	page,
 }) => {
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: true,
 				lsp: false,
-				tasks: false,
-				terminal: true,
 			},
 		});
 	});
-	await page.route(/\/api\/git\/status$/, async (route) => {
+	await mockGit(page, "status", async (route) => {
 		await route.fulfill({
 			json: {
 				branch: "main",
@@ -1833,34 +1915,9 @@ test("generates staged commit messages without overwriting concurrent edits", as
 			},
 		});
 	});
-	let generated = 0;
-	let releaseSecond!: () => void;
-	let secondStarted!: () => void;
-	const waitForSecond = new Promise<void>((resolve) => {
-		secondStarted = resolve;
-	});
-	const secondRelease = new Promise<void>((resolve) => {
-		releaseSecond = resolve;
-	});
-	const firstMessage =
-		"Generated staged message 1\n\nExplain the staged behavior with enough detail to wrap in the narrow commit footer.";
-	await page.route(/\/api\/git\/commit-message$/, async (route) => {
-		generated++;
-		if (generated === 2) {
-			secondStarted();
-			await secondRelease;
-		}
-		await route.fulfill({
-			json: {
-				message:
-					generated === 1
-						? firstMessage
-						: `Generated staged message ${generated}`,
-			},
-		});
-	});
 	let commits = 0;
-	await page.route(/\/api\/git\/commit$/, async (route) => {
+	await mockGit(page, "commit", async (route) => {
+		expect(route.params).toEqual({ message: enteredMessage });
 		commits++;
 		await route.fulfill({ json: { output: "Committed" } });
 	});
@@ -1871,11 +1928,9 @@ test("generates staged commit messages without overwriting concurrent edits", as
 		.getByRole("tab", { name: "Changes", exact: true })
 		.click();
 	const message = page.getByRole("textbox", { name: "Commit message" });
-	const generate = page.getByRole("button", {
-		name: "Generate commit message",
-	});
-	await generate.click();
-	await expect(message).toHaveValue(firstMessage);
+	const enteredMessage =
+		"Describe staged changes\n\nExplain the staged behavior with enough detail to wrap in the narrow commit footer.";
+	await message.fill(enteredMessage);
 	expect(
 		await message.evaluate((element) => ({
 			tag: element.tagName,
@@ -1883,7 +1938,6 @@ test("generates staged commit messages without overwriting concurrent edits", as
 		})),
 	).toEqual({ tag: "TEXTAREA", height: expect.any(Number) });
 	expect((await message.boundingBox())!.height).toBeGreaterThan(28);
-	await expect(generate).toBeHidden();
 	const commit = page.getByRole("button", { name: "Commit", exact: true });
 	await expect(commit).toBeVisible();
 	const messageBox = await message.boundingBox();
@@ -1895,20 +1949,9 @@ test("generates staged commit messages without overwriting concurrent edits", as
 	);
 	expect(commits).toBe(0);
 
-	await message.fill("");
-	await expect(generate).toBeVisible();
-	await generate.click();
-	await waitForSecond;
-	await message.fill("Keep my hand-written message");
-	releaseSecond();
-	await expect(message).toHaveValue("Keep my hand-written message");
-	await expect(
-		page.getByText(
-			"Generated message was not inserted because the commit box changed.",
-			{ exact: true },
-		),
-	).toBeVisible();
-	expect(commits).toBe(0);
+	await commit.click();
+	await expect(message).toHaveValue("");
+	expect(commits).toBe(1);
 });
 
 test("compares branches and commits in a main content tab", async ({
@@ -1937,17 +1980,15 @@ test("compares branches and commits in a main content tab", async ({
 	const compareBases: string[] = [];
 	const compareHeads: string[] = [];
 	const historyQueries: string[] = [];
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: true,
 				lsp: false,
-				tasks: false,
-				terminal: true,
 			},
 		});
 	});
-	await page.route(/\/api\/git\/status$/, async (route) => {
+	await mockGit(page, "status", async (route) => {
 		await route.fulfill({
 			json: {
 				branch: "feature",
@@ -1958,15 +1999,15 @@ test("compares branches and commits in a main content tab", async ({
 			},
 		});
 	});
-	await page.route(/\/api\/git\/(?:branches|fetch)$/, async (route) => {
+	await mockGit(page, "branches", async (route) => {
 		await route.fulfill({
 			json: {
 				branches: [{ name: "feature", current: true }, { name: "main" }],
 			},
 		});
 	});
-	await page.route(/\/api\/git\/history/, async (route) => {
-		historyQueries.push(new URL(route.request().url()).search);
+	await mockGit(page, "commits", async (route) => {
+		historyQueries.push(JSON.stringify(route.params));
 		await route.fulfill({
 			json: [
 				{
@@ -1997,21 +2038,18 @@ test("compares branches and commits in a main content tab", async ({
 			],
 		});
 	});
-	await page.route(/\/api\/git\/compare/, async (route) => {
-		const request = new URL(route.request().url());
-		compareModes.push(request.searchParams.get("mode") || "");
-		compareBases.push(request.searchParams.get("base") || "");
-		compareHeads.push(request.searchParams.get("head") || "");
+	await mockGit(page, "diff", async (route) => {
+		const request = route.params;
+		compareModes.push(request.mode || "");
+		compareBases.push(request.base || "");
+		compareHeads.push(request.head || "");
 		await route.fulfill({
 			json: {
-				base: request.searchParams.get("base"),
-				head: request.searchParams.get("head"),
-				base_hash:
-					request.searchParams.get("base") === ":empty" ? "" : baseHash,
+				base: request.base,
+				head: request.head,
+				base_hash: request.base === ":empty" ? "" : baseHash,
 				head_hash: headHash,
-				...(request.searchParams.get("mode") === "merge-base"
-					? { merge_base_hash: baseHash }
-					: {}),
+				...(request.mode === "merge-base" ? { merge_base_hash: baseHash } : {}),
 				files: Array.from({ length: 80 }, (_, index) => {
 					if (index === 1) {
 						return {
@@ -2176,7 +2214,7 @@ test("compares branches and commits in a main content tab", async ({
 	await expect(page.getByText("Unreferenced work")).toBeVisible();
 	await expect.poll(() => historyQueries.length).toBeGreaterThan(0);
 	expect(
-		historyQueries.every((query) => !new URLSearchParams(query).has("limit")),
+		historyQueries.every((query) => !Object.hasOwn(JSON.parse(query), "limit")),
 	).toBe(true);
 	const historyList = page.locator("[data-virtual-git-history]");
 	await expect(historyList).toBeVisible();
@@ -2332,17 +2370,15 @@ test("shows and copies diagnostics for comparison failures", async ({
 	context,
 }) => {
 	await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: true,
 				lsp: false,
-				tasks: false,
-				terminal: true,
 			},
 		});
 	});
-	await page.route(/\/api\/git\/status$/, async (route) => {
+	await mockGit(page, "status", async (route) => {
 		await route.fulfill({
 			json: {
 				branch: "feature/router",
@@ -2353,18 +2389,20 @@ test("shows and copies diagnostics for comparison failures", async ({
 			},
 		});
 	});
-	await page.route(/\/api\/git\/(?:branches|fetch)$/, async (route) => {
+	await mockGit(page, "branches", async (route) => {
 		await route.fulfill({
 			json: {
 				branches: [{ name: "feature/router", current: true }, { name: "main" }],
 			},
 		});
 	});
-	await page.route(/\/api\/git\/compare/, async (route) => {
+	await mockGit(page, "diff", async (route) => {
 		await route.fulfill({
-			status: 409,
-			contentType: "text/plain",
-			body: "read tree entry examples/coding-router.yaml: directory not found",
+			error: {
+				code: -32009,
+				message:
+					"read tree entry examples/coding-router.yaml: directory not found",
+			},
 		});
 	});
 
@@ -2387,7 +2425,7 @@ test("shows and copies diagnostics for comparison failures", async ({
 	const copiedError = await page.evaluate(() => navigator.clipboard.readText());
 	expect(copiedError).toContain("Operation: Compare Git revisions");
 	expect(copiedError).toContain("Target: :worktree");
-	expect(copiedError).toContain("Response: HTTP 409");
+	expect(copiedError).toContain("Request: GET /api/workspace/git/diff");
 	expect(copiedError).toContain("Client stack:");
 	expect(copiedError).toContain(
 		"Server response:\nread tree entry examples/coding-router.yaml",
@@ -2812,12 +2850,12 @@ test("uses Monaco's live buffer for automatic completion and parameter hints", a
 	});
 
 	await composer(page);
-	const capabilitiesResponse = waitLanguageResult(
+	const workspaceResponse = waitLanguageResult(
 		page,
 		"wingman/documentCapabilities",
 	);
 	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
-	await capabilitiesResponse;
+	await workspaceResponse;
 	const editor = page.locator(".monaco-editor");
 	await expect(editor).toBeVisible();
 	await editor.click({ button: "right" });
@@ -2970,19 +3008,14 @@ test("upgrades an open editor when its language server becomes available", async
 	let languageServer = false;
 	let toolsState: "installing" | "ready" = "installing";
 	let editorCapabilityRequests = 0;
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
-				git_init: false,
 				lsp: languageServer,
 				debug: false,
-				tasks: false,
-				terminal: false,
-				tab: false,
-				"editor.tab.completion": false,
 				platform: "linux",
-				workspace_name: "workspace",
+				name: "workspace",
 				managed_tools: { state: toolsState },
 			},
 		});
@@ -3107,12 +3140,12 @@ test("save awaits LSP actions that add and remove Go imports", async ({
 	});
 
 	await composer(page);
-	const capabilitiesResponse = waitLanguageResult(
+	const workspaceResponse = waitLanguageResult(
 		page,
 		"wingman/documentCapabilities",
 	);
 	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
-	await capabilitiesResponse;
+	await workspaceResponse;
 	const editor = page.locator(".monaco-editor").first();
 	await expect(editor).toBeVisible();
 	await editor.click();
@@ -3240,12 +3273,12 @@ test("applies one command-driven quick action without moving the cursor", async 
 	});
 
 	await composer(page);
-	const capabilitiesResponse = waitLanguageResult(
+	const workspaceResponse = waitLanguageResult(
 		page,
 		"wingman/documentCapabilities",
 	);
 	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
-	await capabilitiesResponse;
+	await workspaceResponse;
 	const editor = page.locator(".monaco-editor").first();
 	const packageLine = editor.locator(".view-line", { hasText: "package main" });
 	await expect(packageLine).toBeVisible();
@@ -3312,17 +3345,9 @@ test("save applies real gopls organize-imports edits", async ({ page }) => {
 		);
 });
 
-test("toggles editor.tab.completion from the command palette", async ({
+test("keeps the command palette mounted while filtering commands", async ({
 	page,
-	request,
 }) => {
-	const initial = await request.get("/api/capabilities");
-	expect(initial.ok()).toBeTruthy();
-	expect(
-		((await initial.json()) as Record<string, unknown>)[
-			"editor.tab.completion"
-		],
-	).toBe(true);
 	await composer(page);
 	await page.keyboard.press("Control+k");
 	const commandInput = page.getByRole("combobox", { name: "Search commands" });
@@ -3336,291 +3361,17 @@ test("toggles editor.tab.completion from the command palette", async ({
 	await expect(commandInput).toHaveAttribute("autocorrect", "off");
 	await expect(commandInput).toHaveAttribute("autocapitalize", "none");
 	await expect(commandInput).toHaveAttribute("spellcheck", "false");
-	await commandInput.pressSequentially("tab completion");
-	await expect(commandInput).toHaveValue("tab completion");
+	await commandInput.pressSequentially("find in files");
+	await expect(commandInput).toHaveValue("find in files");
 	await expect(commandInput).toHaveAttribute(
 		"data-mount-marker",
 		"palette-input",
 	);
 	await expect(palette).toHaveAttribute("data-mount-marker", "palette");
-	const disable = page.getByRole("option", {
-		name: /Disable Tab Completion/,
-	});
-	await expect(disable).toBeVisible();
-	await disable.click();
 	await expect(
-		page.getByText("Tab Completion disabled", { exact: true }),
+		page.getByRole("option", { name: /Find in files/ }),
 	).toBeVisible();
-
-	await page.keyboard.press("Control+k");
-	await expect(
-		page.getByRole("option", { name: /Enable Tab Completion/ }),
-	).toBeVisible();
-});
-
-test("Tab propagates a recent rename through the real model endpoint", async ({
-	page,
-	request,
-}) => {
-	await setEditorTabCompletion(request, true);
-	await openTabFixture(page, /tab-effectiveness\.go/, 'userName := "Ada"');
-
-	let predictionRequests = 0;
-	const predictionBodies: Array<{
-		line: number;
-		column: number;
-		version: number;
-		content: string;
-		previous_content: string;
-	}> = [];
-	const isTabRequest = (candidate: { method(): string; url(): string }) =>
-		candidate.method() === "POST" &&
-		new URL(candidate.url()).pathname === "/api/editor/tab";
-	page.on("request", (candidate) => {
-		if (!isTabRequest(candidate)) return;
-		predictionRequests++;
-		predictionBodies.push(candidate.postDataJSON());
-	});
-	const tabRequest = page.waitForRequest(isTabRequest);
-	const tabResponse = page.waitForResponse(
-		(response) =>
-			response.request().method() === "POST" &&
-			new URL(response.url()).pathname === "/api/editor/tab",
-	);
-	const declaration = page
-		.locator(".view-line", { hasText: 'userName := "Ada"' })
-		.first();
-	await declaration.click();
-	await page.keyboard.press("Home");
-	for (let index = 0; index < "userName".length; index++) {
-		await page.keyboard.press("Shift+ArrowRight");
-	}
-	await page.keyboard.insertText("accountName");
-
-	const observed = await tabRequest;
-	const body = observed.postDataJSON() as {
-		content: string;
-		previous_content: string;
-	};
-	expect(body.previous_content).toContain('userName := "Ada"');
-	expect(body.content).toContain('accountName := "Ada"');
-	expect(body.content).toContain("println(userName)");
-	const response = (await (await tabResponse).json()) as {
-		edit: unknown;
-	};
-	expect(response.edit).toEqual({
-		insert_text: "account",
-		expected_text: "user",
-		range: {
-			start_line: 7,
-			start_column: 13,
-			end_line: 7,
-			end_column: 17,
-		},
-	});
-
-	await page.waitForTimeout(200);
-	await page.keyboard.press("Tab");
-	const correctedUse = page
-		.locator(".view-line:visible", { hasText: "println(accountName)" })
-		.first();
-	// Monaco either accepts immediately or first focuses its long-distance
-	// preview. In the latter presentation, the next Tab accepts the same item.
-	if (!(await correctedUse.isVisible())) await page.keyboard.press("Tab");
-	await expect(correctedUse).toBeVisible();
-	await expect(
-		page.locator(".view-line:visible", { hasText: "println(userName)" }),
-	).toHaveCount(0);
-	// Acceptance is the end of this edit burst: Monaco may ask its providers
-	// again for the changed model, but that must not purchase another result.
-	await page.waitForTimeout(700);
-	expect(
-		predictionRequests,
-		`Tab prediction requests: ${JSON.stringify(predictionBodies)}`,
-	).toBe(1);
-
-	await page.keyboard.press("ControlOrMeta+S");
-	await expect
-		.poll(async () => {
-			const saved = await readSavedFile("tab-effectiveness.go");
-			return ((await saved.json()) as { content: string }).content;
-		})
-		.toContain("println(accountName)");
-});
-
-test("Tab stays idle until an edit and accepts a cursor completion", async ({
-	page,
-	request,
-}) => {
-	await setEditorTabCompletion(request, true);
-	let predictions = 0;
-	await page.route(/\/api\/editor\/tab$/, async (route) => {
-		predictions++;
-		const body = route.request().postDataJSON() as {
-			line: number;
-			column: number;
-			version: number;
-		};
-		await route.fulfill({
-			json: {
-				version: body.version,
-				edit: {
-					insert_text: "quantity",
-					expected_text: "",
-					range: {
-						start_line: body.line,
-						start_column: body.column,
-						end_line: body.line,
-						end_column: body.column,
-					},
-				},
-			},
-		});
-	});
-
-	await openTabFixture(page, /tab-ghost\.go/, "total := price *");
-	await page.waitForTimeout(400);
-	expect(predictions).toBe(0);
-	const synchronized = await writeSavedFile({
-		data: {
-			path: "tab-ghost.go",
-			content:
-				"package main\n\nfunc main() {\n\ttotal := price *\n\t_ = total\n}\n\n// synchronized externally\n",
-			force: true,
-		},
-	});
-	expect(synchronized.ok()).toBeTruthy();
-	await expect(
-		page.locator(".view-line", { hasText: "synchronized externally" }),
-	).toBeVisible();
-	await page.waitForTimeout(500);
-	expect(predictions).toBe(0);
-	await page.locator(".view-line", { hasText: "total := price *" }).click();
-	await page.keyboard.press("End");
-
-	await page.keyboard.type(" ");
-	await page.keyboard.press("Backspace");
-	await page.waitForTimeout(400);
-	expect(predictions).toBe(0);
-
-	await page.keyboard.type(" ");
-	const ghost = page.locator(".ghost-text-decoration", {
-		hasText: "quantity",
-	});
-	await expect(ghost).toBeVisible();
-	await page.keyboard.press("Tab");
-	await expect(
-		page.locator(".view-line", { hasText: "price * quantity" }).first(),
-	).toBeVisible();
-	await page.waitForTimeout(700);
-	expect(predictions).toBe(1);
-});
-
-test("Tab renders and accepts a real multiline Monaco inline edit", async ({
-	page,
-	request,
-}) => {
-	await setEditorTabCompletion(request, true);
-	await page.route(/\/api\/editor\/tab$/, async (route) => {
-		const body = route.request().postDataJSON() as { version: number };
-		await route.fulfill({
-			json: {
-				version: body.version,
-				edit: {
-					insert_text: "if ready {\n  new one\n  new two\n}\n",
-					expected_text: "old one \nold two\n",
-					range: {
-						start_line: 2,
-						start_column: 1,
-						end_line: 4,
-						end_column: 1,
-					},
-				},
-			},
-		});
-	});
-
-	await openTabFixture(page, /tab-multiline\.txt/, "old one");
-	await page.keyboard.type(" ");
-	const preview = page.locator(".monaco-editor:visible").filter({
-		hasText: "new one",
-	});
-	await expect(preview.first()).toBeVisible();
-	await expect
-		.poll(() => page.locator(".monaco-editor:visible").count())
-		.toBeGreaterThan(1);
-	await page.keyboard.press("Tab");
-	await expect
-		.poll(() => page.locator(".monaco-editor:visible").count())
-		.toBe(1);
-	await expect(
-		page.locator(".view-line", { hasText: "if ready" }).first(),
-	).toBeVisible();
-	await expect(page.locator(".view-line", { hasText: "old one" })).toHaveCount(
-		0,
-	);
-});
-
-test("Tab drops a delayed response after the cursor moves", async ({
-	page,
-	request,
-}) => {
-	await setEditorTabCompletion(request, true);
-	let firstStarted!: () => void;
-	const started = new Promise<void>((resolve) => {
-		firstStarted = resolve;
-	});
-	await page.route(/\/api\/editor\/tab$/, async (route) => {
-		const body = route.request().postDataJSON() as {
-			line: number;
-			column: number;
-			version: number;
-		};
-		const first = body.line === 1;
-		if (first) {
-			firstStarted();
-			await new Promise((resolve) => setTimeout(resolve, 900));
-		}
-		try {
-			await route.fulfill({
-				json: {
-					version: body.version,
-					edit: {
-						insert_text: first ? "oldValue" : " newValue",
-						expected_text: "",
-						range: {
-							start_line: body.line,
-							start_column: body.column,
-							end_line: body.line,
-							end_column: body.column,
-						},
-					},
-				},
-			});
-		} catch {
-			// The cursor move is expected to abort the first routed request.
-		}
-	});
-
-	await openTabFixture(page, /tab-stale\.txt/, "first :=");
-	await page.keyboard.type(" ");
-	await started;
-	const second = page.locator(".view-line", { hasText: "second :=" }).first();
-	await second.click();
-	await page.keyboard.press("End");
-	const currentGhost = page.locator(".ghost-text-decoration", {
-		hasText: "newValue",
-	});
-	await expect(currentGhost).toBeVisible();
-	await page.waitForTimeout(1_000);
-	await expect(currentGhost).toBeVisible();
-	await expect(
-		page.locator(".ghost-text-decoration", { hasText: "oldValue" }),
-	).toHaveCount(0);
-	await page.keyboard.press("Tab");
-	await expect(
-		page.locator(".view-line", { hasText: "second := newValue" }).first(),
-	).toBeVisible();
+	await page.keyboard.press("Escape");
 });
 
 test("keeps composer pickers visible in a constrained window", async ({
@@ -3663,9 +3414,9 @@ test("discovers new agents after earlier tasks finish during the same turn", asy
 		[],
 		"tool_running",
 	);
-	await page.route(/\/api\/capabilities$/, (route) =>
+	await mockWorkspace(page, (route) =>
 		route.fulfill({
-			json: { git: false, lsp: false, tasks: true, terminal: true },
+			json: { git: false, lsp: false },
 		}),
 	);
 	let running = false;
@@ -3851,13 +3602,11 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 			updated_at: "2026-08-11T00:00:00Z",
 		},
 	]);
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
 				lsp: false,
-				tasks: true,
-				terminal: true,
 			},
 		});
 	});
@@ -4151,7 +3900,7 @@ test("moves the sidebar between sides and persists its position", async ({
 		await expect(center).toHaveAttribute("data-mount-marker", "original");
 		await expect(input).toHaveValue("Keep this draft when moving the sidebar");
 
-		const capabilities = await (await request.get("/api/capabilities")).json();
+		const capabilities = await (await request.get("/api/workspace")).json();
 		expect(capabilities["window.sidebar.position"]).toBe("right");
 		await page.reload();
 		await expect(sidePanel).toHaveAttribute("data-panel-side", "right");
@@ -4177,7 +3926,7 @@ for (const position of ["left", "right"] as const) {
 	test(`aligns the ${position} sidebar with desktop window controls`, async ({
 		page,
 	}) => {
-		await page.route("/api/capabilities", async (route) => {
+		await mockWorkspace(page, async (route) => {
 			const response = await route.fetch();
 			await route.fulfill({
 				json: {
@@ -4932,7 +4681,7 @@ test("docks only terminals at the bottom with tabs on the right", async ({
 			return !!(screen && list && list.x >= screen.x + screen.width - 1);
 		})
 		.toBe(true);
-	const bottomCapabilities = await request.get("/api/capabilities");
+	const bottomCapabilities = await request.get("/api/workspace");
 	expect(
 		((await bottomCapabilities.json()) as Record<string, unknown>)[
 			"window.terminal.position"
@@ -4944,7 +4693,7 @@ test("docks only terminals at the bottom with tabs on the right", async ({
 		.getByRole("option", { name: "Show Terminal in Tab", exact: true })
 		.click();
 	await expect(dock).toHaveCount(0);
-	const tabCapabilities = await request.get("/api/capabilities");
+	const tabCapabilities = await request.get("/api/workspace");
 	expect(
 		((await tabCapabilities.json()) as Record<string, unknown>)[
 			"window.terminal.position"
@@ -5147,36 +4896,7 @@ test("uses Wingman's dynamic editor context menu", async ({
 	await expect(viewLines).toContainText("package main");
 });
 
-test("previews selection transformations and can hand the selection to chat", async ({
-	page,
-}) => {
-	const requests: Array<{
-		path: string;
-		content: string;
-		instruction: string;
-		version: number;
-		range: {
-			start_line: number;
-			start_column: number;
-			end_line: number;
-			end_column: number;
-		};
-	}> = [];
-	await page.route(/\/api\/editor\/transform$/, async (route) => {
-		const body = route.request().postDataJSON() as (typeof requests)[number];
-		requests.push(body);
-		await route.fulfill({
-			json: {
-				version: body.version,
-				edit: {
-					range: body.range,
-					expected_text: "original",
-					replacement: "transformed",
-				},
-			},
-		});
-	});
-
+test("hands the editor selection to chat", async ({ page }) => {
 	await composer(page);
 	await page.getByRole("treeitem", { name: /editable\.txt/ }).click();
 	const editor = page.locator(".monaco-editor").first();
@@ -5191,83 +4911,16 @@ test("previews selection transformations and can hand the selection to chat", as
 	};
 
 	await selectOriginal();
-	await page.keyboard.press("ControlOrMeta+K");
-	let palette = page.getByRole("dialog", { name: "Command palette" });
-	await expect(palette).toBeVisible();
-	let paletteActions = await palette.getByRole("option").allTextContents();
-	expect(paletteActions.indexOf("Chat about this…Selected text")).toBeLessThan(
-		paletteActions.indexOf("Transform selection…Selected text"),
-	);
-	await palette
-		.getByRole("option", { name: "Transform selection… Selected text" })
-		.click();
-	const prompt = page.getByRole("dialog", { name: "Transform selection" });
-	await expect(prompt).toBeVisible();
-	await prompt.getByRole("button", { name: "Refactor", exact: true }).click();
-	await expect(prompt).toBeHidden();
-	await expect(
-		page
-			.locator(".monaco-editor:visible")
-			.filter({ hasText: "transformed" })
-			.first(),
-	).toBeVisible();
-	expect(requests).toHaveLength(1);
-	expect(requests[0].path).toBe("editable.txt");
-	expect(requests[0].content).toBe("original\n");
-	expect(requests[0].instruction).toContain("Refactor this selection");
-	await page.keyboard.press("Escape");
-	await expect(original).toBeVisible();
-
-	await selectOriginal();
-	await page.keyboard.press("ControlOrMeta+K");
-	palette = page.getByRole("dialog", { name: "Command palette" });
-	await palette
-		.getByRole("option", { name: "Transform selection… Selected text" })
-		.click();
-	await prompt
-		.getByRole("textbox", { name: "Transformation instruction" })
-		.fill("Make it clearer");
-	await prompt.getByRole("button", { name: "Generate", exact: true }).click();
-	await expect(prompt).toBeHidden();
-	await expect(
-		page
-			.locator(".monaco-editor:visible")
-			.filter({ hasText: "transformed" })
-			.first(),
-	).toBeVisible();
-	await page.keyboard.press("Tab");
-	const transformed = page
-		.locator(".view-line:visible", { hasText: "transformed" })
-		.first();
-	// Monaco may use the first Tab to focus its range-edit preview and the
-	// second to accept, depending on available editor space.
-	if (!(await transformed.isVisible())) await page.keyboard.press("Tab");
-	await expect(transformed).toBeVisible();
-	await expect
-		.poll(() => page.locator(".monaco-editor:visible").count())
-		.toBe(1);
-	const disk = await readSavedFile("editable.txt");
-	expect(((await disk.json()) as { content: string }).content).toBe(
-		"original\n",
-	);
-	await page.keyboard.press("ControlOrMeta+Z");
-	await expect(original).toBeVisible();
-
-	await selectOriginal();
 	await page.keyboard.press("Shift+F10");
 	const menu = page.getByRole("menu", { name: "Editor actions" });
 	await expect(menu.locator('[role="menuitem"]:enabled').first()).toBeFocused();
-	const menuLabels = await menu.getByRole("menuitem").allTextContents();
-	expect(menuLabels.indexOf("Chat about this…")).toBeLessThan(
-		menuLabels.findIndex((label) => label.startsWith("Transform Selection…")),
-	);
 	await page.keyboard.press("Escape");
 	await expect(menu).toBeHidden();
 	await expect(
 		editor.getByRole("textbox", { name: "Editor content", exact: true }),
 	).toBeFocused();
 	await page.keyboard.press("ControlOrMeta+K");
-	palette = page.getByRole("dialog", { name: "Command palette" });
+	const palette = page.getByRole("dialog", { name: "Command palette" });
 	await expect(
 		palette.getByRole("option", { name: "Chat about this… Selected text" }),
 	).toBeVisible();
@@ -5631,10 +5284,10 @@ test("asks before installing the debugger and shows popup state and retry", asyn
 		workspacePath("completion.go"),
 		"package main\n\nfunc main() {}\n",
 	);
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		const response = await route.fetch();
 		await route.fulfill({
-			json: { ...(await response.json()), debug: false, tab: false },
+			json: { ...(await response.json()), debug: false },
 		});
 	});
 	await page.addInitScript(() => {
@@ -5651,7 +5304,8 @@ test("asks before installing the debugger and shows popup state and retry", asyn
 			},
 		];
 		window.fetch = (input, init) => {
-			if (input !== "/api/debug/plan") return originalFetch(input, init);
+			if (input !== "/api/workspace/debug/plan")
+				return originalFetch(input, init);
 			const install = JSON.parse(init?.body as string).install;
 			if (!install && !installedPlan) {
 				return Promise.resolve(
@@ -5878,17 +5532,14 @@ test("stops the active debugger when the Debug tab closes", async ({
 	};
 	const controls: Array<Record<string, unknown>> = [];
 
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
-				git_init: false,
 				lsp: false,
 				debug: true,
-				tasks: false,
-				terminal: true,
 				platform: "linux",
-				workspace_name: "workspace",
+				name: "workspace",
 			},
 		});
 	});
@@ -5981,17 +5632,14 @@ test("follows debugger stops into the source editor", async ({ page }) => {
 	};
 	const evaluations: Array<Record<string, unknown>> = [];
 
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
-				git_init: false,
 				lsp: false,
 				debug: true,
-				tasks: false,
-				terminal: false,
 				platform: "linux",
-				workspace_name: "workspace",
+				name: "workspace",
 			},
 		});
 	});
@@ -6135,8 +5783,11 @@ test("keeps unsent drafts available when the workspace instance changes", async 
 test("closing the last session leaves empty space and new chat keeps its backend", async ({
 	page,
 }) => {
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
-	await page.route("**/api/v2/bootstrap", (route) =>
+	const scope = {
+		...(await (await page.request.get("/api/workspace")).json()),
+		backends: await (await page.request.get("/api/v2/backends")).json(),
+	};
+	await mockWorkspace(page, (route) =>
 		route.fulfill({
 			json: {
 				...scope,
@@ -6235,8 +5886,11 @@ test.describe("phone navigation", () => {
 	test("switches agents and opens the selected agent's sessions without nested popups", async ({
 		page,
 	}) => {
-		const scope = await (await page.request.get("/api/v2/bootstrap")).json();
-		await page.route("**/api/v2/bootstrap", (route) =>
+		const scope = {
+			...(await (await page.request.get("/api/workspace")).json()),
+			backends: await (await page.request.get("/api/v2/backends")).json(),
+		};
+		await mockWorkspace(page, (route) =>
 			route.fulfill({
 				json: {
 					...scope,
@@ -6682,7 +6336,10 @@ for (const unavailable of [false, true]) {
 	test(`recovery: backup journals tolerate damaged data with IndexedDB ${unavailable ? "unavailable" : "available"}`, async ({
 		page,
 	}) => {
-		const scope = await (await page.request.get("/api/v2/bootstrap")).json();
+		const scope = {
+			...(await (await page.request.get("/api/workspace")).json()),
+			backends: await (await page.request.get("/api/v2/backends")).json(),
+		};
 		await page.addInitScript(
 			({ workspace, unavailable }) => {
 				const prefix = `wingman-pending-drafts:${workspace}:`;

@@ -6,7 +6,8 @@ import { useWorkspace, type SettingsPatch } from "../state/workspaceContext.ts";
 import type { SessionSettings } from "../state/sessionStore.ts";
 import { sessionQueries, type SessionInfo } from "../api/sessions";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
-import { type Skill, useSkills } from "../hooks/useSkills";
+import { useChatCommands } from "../hooks/useChatCommands";
+import type { ChatCommand } from "../api/chatCommands";
 import { ModelProviderIcon } from "./ModelProviderIcon";
 import { useToast } from "./ui/Feedback";
 
@@ -18,7 +19,7 @@ export interface PaletteAction {
 	run: () => void;
 }
 
-export type PaletteSkill = Skill;
+export type PaletteSkill = ChatCommand;
 
 interface Item {
 	key: string;
@@ -58,7 +59,7 @@ export function CommandPalette({
 	const [query, setQuery] = useState("");
 	const [activeKey, setActiveKey] = useState<string | null>(null);
 	const listRef = useRef<HTMLDivElement>(null);
-	const skills = useSkills(sessionId);
+	const skills = useChatCommands(sessionId, true, settings.canCompact);
 	const { backend } = useWorkspace();
 	const sessionList =
 		useQuery(sessionQueries.list(backend)).data ?? EMPTY_SESSIONS;
@@ -125,7 +126,12 @@ export function CommandPalette({
 			if (!match(s.name, s.description)) continue;
 			out.push({
 				key: `skill:${s.name}`,
-				group: "Skills",
+				group:
+					s.kind === "skill"
+						? "Skills"
+						: s.kind === "action"
+							? "Session"
+							: "Commands",
 				label: `/${s.name}`,
 				hint: s.description || s.input_hint,
 				icon: <Sparkles size={12} className="text-fg-dim shrink-0" />,

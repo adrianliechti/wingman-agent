@@ -29,7 +29,22 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 	}
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, b, agent := newProtocolServer(t)
+	b.agent = &completionProtocolAgent{agent}
 	root := t.TempDir()
+	for path, content := range map[string]string{
+		".agents/skills/shared/SKILL.md":                  "---\nname: shared\ndescription: Project shared workflow\n---\nPROJECT WORKFLOW $ARGUMENTS",
+		".agents/skills/native/SKILL.md":                  "---\nname: native\ndescription: Workspace skill with a native command name\n---\nWORKSPACE NATIVE SKILL",
+		".wingman/plugins/reports/plugin.json":            `{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"reports"}`,
+		".wingman/plugins/reports/skills/shared/SKILL.md": "---\nname: shared\ndescription: Plugin shared workflow\n---\nPLUGIN WORKFLOW $ARGUMENTS",
+	} {
+		full := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, args := range [][]string{{"init", "-q"}, {"config", "user.email", "test@example.invalid"}, {"config", "user.name", "AHP test"}} {
 		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git fixture: %v: %s", err, out)
@@ -38,7 +53,7 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("original\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"add", "tracked.txt"}, {"-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture"}} {
+	for _, args := range [][]string{{"add", "."}, {"-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture"}} {
 		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git fixture: %v: %s", err, out)
 		}
@@ -55,6 +70,11 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 	var release sync.Once
 	t.Cleanup(func() { release.Do(func() { close(agent.gate) }) })
 	s.mux.Get("/ahp", s.handleAHP)
+	s.mux.Get("/api/workspace", s.handleWorkspace)
+	s.mux.Get("/api/workspace/skills", s.handleSkills)
+	s.mux.Get("/fixture/inputs", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, agent.Messages("")) })
+	s.mux.Get("/api/workspace/git/diff", s.handleGitDiff)
+	s.mux.Get("/api/workspace/git", s.handleWorkspaceGit)
 	s.mux.Post("/fixture/release", func(w http.ResponseWriter, r *http.Request) {
 		release.Do(func() { close(agent.gate) })
 		w.WriteHeader(204)
@@ -85,5 +105,14 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 		t.Fatalf("TypeScript client integration: %v\n%s", err, output)
 	} else {
 		t.Log(string(output))
+	}
+}
+
+type completionProtocolAgent struct{ *protocolAgent }
+
+func (a *completionProtocolAgent) Commands(sessionID string) []code.Command {
+	return []code.Command{
+		{Name: "/native", Description: "A native backend command", InputHint: "[target]"},
+		{Name: "only-" + sessionID, Description: "Only this session"},
 	}
 }

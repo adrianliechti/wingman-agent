@@ -22,9 +22,18 @@ type ahpSession struct {
 	deleted          bool
 	prompts          map[string]*ahpPrompt
 	pending          map[string]*ahpPendingAction
+	reasoning        map[string]*ahpReasoningTiming
 	projectedInput   string
 	projectedOutcome string
 	projectedPrompts []PromptView
+}
+
+// The host is the producer of reasoning timing: a run starts at its first
+// text and ends when the next content part starts or the turn ends.
+type ahpReasoningTiming struct {
+	started   time.Time
+	startedAt string
+	duration  *int64
 }
 
 type ahpPrompt struct {
@@ -44,7 +53,7 @@ type ahpPendingAction struct {
 func newAHPSession(h *ahpHost, c *sessionController, resource, title string, updated time.Time) *ahpSession {
 	stamp := updated.UTC().Format(time.RFC3339Nano)
 	chatURI := ahpChatURI(resource)
-	return &ahpSession{host: h, controller: c, resource: resource, created: stamp, prompts: map[string]*ahpPrompt{}, pending: map[string]*ahpPendingAction{},
+	return &ahpSession{host: h, controller: c, resource: resource, created: stamp, prompts: map[string]*ahpPrompt{}, pending: map[string]*ahpPendingAction{}, reasoning: map[string]*ahpReasoningTiming{},
 		state: t.SessionState{Changesets: h.changesetCatalogue(), Provider: c.ref.BackendID, Title: title, Status: t.SessionStatusIdle, Lifecycle: t.SessionLifecycleReady, ActiveClients: []t.SessionActiveClient{}, Chats: []t.ChatSummary{{Resource: chatURI, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp}}, DefaultChat: &chatURI, WorkingDirectories: []string{h.directoryURI()}, Config: ahpConfig(c.state.Settings)},
 		chat:  t.ChatState{Resource: chatURI, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: map[string]json.RawMessage{}}},
 	}
@@ -135,7 +144,7 @@ func (a *ahpSession) syncLocked(c *sessionController, changes []SessionChange) {
 				}
 			case *t.ReasoningResponsePart:
 				if p.Id == change.ID {
-					a.chatAction(t.StateAction{Value: &t.ChatReasoningAction{Type: t.ActionTypeChatReasoning, TurnId: a.chat.ActiveTurn.Id, PartId: p.Id, Content: change.Text}})
+					a.chatAction(t.StateAction{Value: &t.ChatReasoningAction{Type: t.ActionTypeChatReasoning, TurnId: a.chat.ActiveTurn.Id, PartId: p.Id, Content: change.Text, StartedAt: a.startReasoning(p.Id, change.Text)}})
 					return
 				}
 			}
@@ -168,6 +177,9 @@ func (a *ahpSession) syncProjection(c *sessionController, changes []SessionChang
 			if p.response == nil && !slices.ContainsFunc(c.state.Prompts, func(v PromptView) bool { return v.ID == id }) {
 				p.response = &Command{Action: "cancel"}
 			}
+		}
+		if old := a.chat.ActiveTurn; old != nil && c.activeInput != old.Id {
+			a.closeReasoning() // final timing precedes the turn's terminal action
 		}
 		turns, active := a.transcript(c)
 		if old := a.chat.ActiveTurn; old != nil && (active == nil || active.Id != old.Id) {
@@ -264,6 +276,7 @@ func (a *ahpSession) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) 
 		old = append(old, t.Turn{Id: active.Id, StartedAt: &active.StartedAt, Message: active.Message, ResponseParts: active.ResponseParts, State: t.TurnStateComplete})
 	}
 	turns := []t.Turn{}
+	seen := map[string]bool{}
 	for _, e := range c.entries {
 		if e.Type == "user" {
 			if c.activeInput != "" && len(turns) > 0 && turns[len(turns)-1].Id == c.activeInput && e.InputID != c.activeInput {
@@ -309,8 +322,19 @@ func (a *ahpSession) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) 
 			continue
 		}
 		if part, ok := ahpEntryPart(e); ok {
+			if p, ok := part.Value.(*t.ReasoningResponsePart); ok {
+				seen[p.Id] = true
+				if timing := a.reasoning[p.Id]; timing != nil {
+					p.StartedAt, p.Duration = &timing.startedAt, timing.duration
+				}
+			}
 			last := &turns[len(turns)-1]
 			last.ResponseParts = append(last.ResponseParts, part)
+		}
+	}
+	for id := range a.reasoning {
+		if !seen[id] {
+			delete(a.reasoning, id)
 		}
 	}
 	for i := range turns {
@@ -403,6 +427,15 @@ func (a *ahpSession) syncParts(parts []t.ResponsePart) bool {
 	}
 	for i, next := range parts {
 		if i >= len(active.ResponseParts) {
+			switch p := next.Value.(type) {
+			case *t.MarkdownResponsePart, *t.ToolCallResponsePart:
+				a.closeReasoning()
+			case *t.ReasoningResponsePart:
+				a.closeReasoning()
+				if stamp := a.startReasoning(p.Id, p.Content); stamp != nil {
+					p.StartedAt = stamp
+				}
+			}
 			if call, ok := next.Value.(*t.ToolCallResponsePart); ok {
 				a.appendTool(active.Id, call.ToolCall)
 			} else if input, ok := next.Value.(*t.InputRequestResponsePart); ok && input.Response == nil {
@@ -428,7 +461,7 @@ func (a *ahpSession) syncParts(parts []t.ResponsePart) bool {
 			if !ok || p.Id != n.Id || !strings.HasPrefix(n.Content, p.Content) {
 				return false
 			}
-			a.chatAction(t.StateAction{Value: &t.ChatReasoningAction{Type: t.ActionTypeChatReasoning, TurnId: active.Id, PartId: n.Id, Content: strings.TrimPrefix(n.Content, p.Content)}})
+			a.chatAction(t.StateAction{Value: &t.ChatReasoningAction{Type: t.ActionTypeChatReasoning, TurnId: active.Id, PartId: n.Id, Content: strings.TrimPrefix(n.Content, p.Content), StartedAt: a.startReasoning(n.Id, n.Content)}})
 		case *t.ToolCallResponsePart:
 			p, ok := previous.Value.(*t.ToolCallResponsePart)
 			if !ok {
@@ -448,6 +481,35 @@ func (a *ahpSession) syncParts(parts []t.ResponsePart) bool {
 		}
 	}
 	return true
+}
+
+func (a *ahpSession) startReasoning(id, content string) *string {
+	if content == "" || a.reasoning[id] != nil {
+		return nil
+	}
+	now := time.Now()
+	timing := &ahpReasoningTiming{started: now, startedAt: now.UTC().Format(time.RFC3339Nano)}
+	a.reasoning[id] = timing
+	return &timing.startedAt
+}
+
+func (a *ahpSession) closeReasoning() {
+	active := a.chat.ActiveTurn
+	if active == nil {
+		return
+	}
+	for _, part := range active.ResponseParts {
+		p, ok := part.Value.(*t.ReasoningResponsePart)
+		if !ok {
+			continue
+		}
+		timing := a.reasoning[p.Id]
+		if timing == nil || timing.duration != nil {
+			continue
+		}
+		timing.duration = ahpPtr(max(0, time.Since(timing.started).Milliseconds()))
+		a.chatAction(t.StateAction{Value: &t.ChatReasoningAction{Type: t.ActionTypeChatReasoning, TurnId: active.Id, PartId: p.Id, Duration: timing.duration}})
+	}
 }
 
 func (a *ahpSession) appendTool(turn string, call t.ToolCallState) {

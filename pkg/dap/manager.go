@@ -45,10 +45,22 @@ type Manager struct {
 	missing    []detectedAdapter
 	detectedAt time.Time
 
-	mu          sync.Mutex
-	session     *Session
-	breakpoints map[string][]SourceBreakpoint
-	closed      bool
+	// breakpointMu orders breakpoint updates sent to adapters, so a later edit
+	// is never overtaken by an earlier one.
+	breakpointMu sync.Mutex
+
+	mu               sync.Mutex
+	session          *Session
+	breakpoints      map[string][]SourceBreakpoint
+	breakpointsAt    uint64
+	breakpointEdits  map[string]uint64
+	breakpointIDs    map[string]map[[2]int]int
+	nextBreakpointID int
+	resolved         map[int]ResolvedBreakpoint
+	exceptionFilters []string
+	exceptionsSet    bool
+	plans            map[string]reviewedPlan
+	closed           bool
 }
 
 type sessionStarter func(context.Context, string, Plan, StartOptions) (*Session, error)
@@ -99,11 +111,14 @@ func (m *Manager) InvalidateDetection() {
 
 func newManager(root string, adapters []AdapterDescriptor, lookup func(string) string, starter sessionStarter) *Manager {
 	return &Manager{
-		root:        filepath.Clean(root),
-		adapters:    cloneAdapters(adapters),
-		lookup:      lookup,
-		start:       starter,
-		breakpoints: make(map[string][]SourceBreakpoint),
+		root:            filepath.Clean(root),
+		adapters:        cloneAdapters(adapters),
+		lookup:          lookup,
+		start:           starter,
+		breakpoints:     make(map[string][]SourceBreakpoint),
+		breakpointEdits: make(map[string]uint64),
+		breakpointIDs:   make(map[string]map[[2]int]int),
+		resolved:        make(map[int]ResolvedBreakpoint),
 	}
 }
 
@@ -244,17 +259,35 @@ func (m *Manager) Start(ctx context.Context, options StartOptions) (*Session, er
 		m.mu.Unlock()
 		return nil, err
 	}
-	combinedBreakpoints := make(map[string][]SourceBreakpoint, len(options.Breakpoints)+len(m.breakpoints))
-	for path, breakpoints := range options.Breakpoints {
-		combinedBreakpoints[filepath.Clean(path)] = slices.Clone(breakpoints)
-	}
-	for path, breakpoints := range m.breakpoints {
-		path = filepath.Clean(path)
-		combinedBreakpoints[path] = mergeSourceBreakpoints(combinedBreakpoints[path], breakpoints)
-	}
-	options.Breakpoints = combinedBreakpoints
+	planned := cloneSourceBreakpointSets(options.Breakpoints)
+	options.Breakpoints, _ = m.combinedBreakpointsLocked(planned)
 	options.terminalLauncher = m.terminal
 	options.adapterConnector = m.connector
+	options.hooks = sessionHooks{
+		breakpointSource: func() (map[string][]SourceBreakpoint, uint64) {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			return m.combinedBreakpointsLocked(planned)
+		},
+		exceptionFilters: func() ([]string, bool) {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			return slices.Clone(m.exceptionFilters), m.exceptionsSet
+		},
+		breakpointID: func(path string, line, column int) int {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			return m.breakpointIDs[filepath.Clean(path)][[2]int{line, column}]
+		},
+		onBreakpoint: m.resolveBreakpoint,
+	}
+	// A new session verifies every editor breakpoint again.
+	for path, ids := range m.breakpointIDs {
+		for position, id := range ids {
+			m.resolved[id] = ResolvedBreakpoint{Path: path, Breakpoint: pendingBreakpoint(id, position[0], position[1])}
+		}
+	}
+	m.notifyChangedLocked()
 	m.mu.Unlock()
 
 	values, err := m.detect(ctx)
@@ -324,7 +357,118 @@ func (m *Manager) Start(ctx context.Context, options StartOptions) (*Session, er
 	if previous != nil {
 		previous.Close()
 	}
+	m.resyncBreakpoints(ctx, session)
 	return session, nil
+}
+
+func (m *Manager) combinedBreakpointsLocked(planned map[string][]SourceBreakpoint) (map[string][]SourceBreakpoint, uint64) {
+	combined := cloneSourceBreakpointSets(planned)
+	for path, breakpoints := range m.breakpoints {
+		path = filepath.Clean(path)
+		combined[path] = mergeSourceBreakpoints(combined[path], breakpoints)
+	}
+	return combined, m.breakpointsAt
+}
+
+// resyncBreakpoints sends edits made after the session read the editor's
+// breakpoints during configuration but before it became the active session.
+func (m *Manager) resyncBreakpoints(ctx context.Context, session *Session) {
+	m.breakpointMu.Lock()
+	defer m.breakpointMu.Unlock()
+	session.mu.Lock()
+	since := session.configured
+	session.mu.Unlock()
+	m.mu.Lock()
+	var paths []string
+	for path, edited := range m.breakpointEdits {
+		if edited > since {
+			paths = append(paths, path)
+		}
+	}
+	slices.Sort(paths)
+	values := make([][]SourceBreakpoint, len(paths))
+	for index, path := range paths {
+		values[index] = slices.Clone(m.breakpoints[path])
+	}
+	m.mu.Unlock()
+	for index, path := range paths {
+		if resolved, err := session.SetBreakpoints(ctx, path, values[index]); err == nil {
+			m.publishResolved(path, values[index], resolved)
+		}
+	}
+}
+
+func pendingBreakpoint(id, line, column int) Breakpoint {
+	return Breakpoint{ID: id, Line: line, Column: column, Reason: "pending"}
+}
+
+// resolveBreakpoint records an adapter's verification of an editor breakpoint,
+// identified by its requested position.
+func (m *Manager) resolveBreakpoint(path string, line, column int, breakpoint Breakpoint) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	path = filepath.Clean(path)
+	id := m.breakpointIDs[path][[2]int{line, column}]
+	if id == 0 {
+		return
+	}
+	breakpoint.ID = id
+	breakpoint.Reason = ""
+	if breakpoint.Line == 0 {
+		breakpoint.Line, breakpoint.Column = line, column
+	}
+	m.resolved[id] = ResolvedBreakpoint{Path: path, Breakpoint: breakpoint}
+	m.notifyChangedLocked()
+}
+
+// publishResolved translates adapter results, which follow request order, to
+// the editor's stable breakpoint ids.
+func (m *Manager) publishResolved(path string, requested []SourceBreakpoint, resolved []Breakpoint) []Breakpoint {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]Breakpoint, 0, len(requested))
+	for index, value := range requested {
+		id := m.breakpointIDs[path][[2]int{value.Line, value.Column}]
+		breakpoint := pendingBreakpoint(id, value.Line, value.Column)
+		if index < len(resolved) {
+			breakpoint = resolved[index]
+			breakpoint.ID = id
+			if breakpoint.Line == 0 {
+				breakpoint.Line, breakpoint.Column = value.Line, value.Column
+			}
+		}
+		if id != 0 {
+			m.resolved[id] = ResolvedBreakpoint{Path: path, Breakpoint: breakpoint}
+		}
+		result = append(result, breakpoint)
+	}
+	m.notifyChangedLocked()
+	return result
+}
+
+// ResolvedBreakpoints returns the latest verification of every editor
+// breakpoint by its stable id.
+func (m *Manager) ResolvedBreakpoints() map[int]ResolvedBreakpoint {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return maps.Clone(m.resolved)
+}
+
+// ResolvedSourceBreakpoints returns verification for one file in editor order.
+func (m *Manager) ResolvedSourceBreakpoints(path string) []Breakpoint {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	path = filepath.Clean(path)
+	result := []Breakpoint{}
+	for _, value := range m.breakpoints[path] {
+		id := m.breakpointIDs[path][[2]int{value.Line, value.Column}]
+		if resolved, ok := m.resolved[id]; ok {
+			result = append(result, resolved.Breakpoint)
+		} else {
+			result = append(result, pendingBreakpoint(id, value.Line, value.Column))
+		}
+	}
+	return result
 }
 
 func (m *Manager) registeredAdapter(name string) *AdapterDescriptor {
@@ -664,31 +808,95 @@ func (m *Manager) Breakpoints(path string) []SourceBreakpoint {
 	return slices.Clone(m.breakpoints[filepath.Clean(path)])
 }
 
+// SetBreakpoints replaces one file's editor breakpoints and returns them with
+// stable ids. Without a running session they are pending; a starting session
+// picks them up during configuration or right after it becomes active.
 func (m *Manager) SetBreakpoints(ctx context.Context, path string, values []SourceBreakpoint) ([]Breakpoint, error) {
 	if err := validateSourceBreakpoints(values); err != nil {
 		return nil, err
 	}
 	path = filepath.Clean(path)
+	m.breakpointMu.Lock()
+	defer m.breakpointMu.Unlock()
 	m.mu.Lock()
 	m.breakpoints[path] = slices.Clone(values)
 	if len(values) == 0 {
 		delete(m.breakpoints, path)
 	}
+	m.breakpointsAt++
+	m.breakpointEdits[path] = m.breakpointsAt
+	previous := m.breakpointIDs[path]
+	ids := make(map[[2]int]int, len(values))
+	for _, value := range values {
+		position := [2]int{value.Line, value.Column}
+		if id, ok := previous[position]; ok {
+			ids[position] = id
+		} else if _, ok := ids[position]; !ok {
+			m.nextBreakpointID++
+			ids[position] = m.nextBreakpointID
+		}
+	}
+	for position, id := range previous {
+		if _, kept := ids[position]; !kept {
+			delete(m.resolved, id)
+		}
+	}
+	if len(ids) == 0 {
+		delete(m.breakpointIDs, path)
+	} else {
+		m.breakpointIDs[path] = ids
+	}
 	session := m.session
 	m.mu.Unlock()
 	if session == nil || session.Status().State == StateTerminated {
-		return nil, nil
+		return m.publishResolved(path, values, nil), nil
 	}
-	return session.SetBreakpoints(ctx, path, values)
+	resolved, err := session.SetBreakpoints(ctx, path, values)
+	if err != nil {
+		return nil, err
+	}
+	return m.publishResolved(path, values, resolved), nil
+}
+
+// SetExceptionBreakpoints selects exception filters for the current and
+// future sessions; until called, sessions use the adapter's defaults.
+func (m *Manager) SetExceptionBreakpoints(ctx context.Context, filters []string) error {
+	m.mu.Lock()
+	m.exceptionFilters, m.exceptionsSet = slices.Clone(filters), true
+	session := m.session
+	m.mu.Unlock()
+	if session == nil || session.Status().State == StateTerminated {
+		return nil
+	}
+	return session.SetExceptionBreakpoints(ctx, filters)
 }
 
 func (m *Manager) Stop(ctx context.Context, id string) error {
+	return m.Disconnect(ctx, id, true)
+}
+
+// Terminate asks the debuggee to exit gracefully, falling back to a
+// terminating disconnect when the adapter has no terminate request.
+func (m *Manager) Terminate(ctx context.Context, id string) error {
+	session, err := m.Session(id)
+	if err != nil {
+		return err
+	}
+	if requested, err := session.Terminate(ctx); requested {
+		return err
+	}
+	return m.Disconnect(ctx, id, true)
+}
+
+// Disconnect ends the session; terminate also ends the debuggee rather than
+// leaving it running detached from the debugger.
+func (m *Manager) Disconnect(ctx context.Context, id string, terminate bool) error {
 	session, err := m.Session(id)
 	if err != nil {
 		return err
 	}
 	status := session.Status()
-	disconnectErr := session.Disconnect(ctx, true)
+	disconnectErr := session.Disconnect(ctx, terminate)
 	m.mu.Lock()
 	if m.session == session {
 		m.session = nil

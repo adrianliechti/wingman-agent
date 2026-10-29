@@ -103,7 +103,7 @@ func (s *Service) withLSPDocument(ctx context.Context, filePath string, content 
 
 func syncDocument(ctx context.Context, session *lsp.Session, filePath string, content *string) (string, error) {
 	if content != nil {
-		return session.SyncDocument(ctx, filePath, *content)
+		return session.SyncRequestDocument(ctx, filePath, *content)
 	}
 	return session.OpenDocument(ctx, filePath)
 }
@@ -118,11 +118,7 @@ func (s *Service) SyncDocument(ctx context.Context, filePath, content string, sa
 	if err != nil {
 		return err
 	}
-	if saved {
-		_, err = session.SaveDocument(ctx, filePath, content)
-	} else {
-		_, err = session.SyncDocument(ctx, filePath, content)
-	}
+	_, err = session.SyncEditorDocument(ctx, filePath, content, saved)
 	return err
 }
 
@@ -163,6 +159,14 @@ func (s *Service) DocumentContent(filePath string) (string, bool) {
 		return "", false
 	}
 	return session.DocumentContent(filePath)
+}
+
+func (s *Service) RefreshDiskDocuments(ctx context.Context) {
+	s.lifeMu.RLock()
+	defer s.lifeMu.RUnlock()
+	if !s.closed {
+		s.manager.RefreshDiskDocuments(ctx)
+	}
 }
 
 func (s *Service) Activities() []lsp.ServerActivity {

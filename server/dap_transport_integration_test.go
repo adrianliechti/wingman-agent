@@ -46,10 +46,18 @@ func TestDAPWebSocketLaunchInspectReconnect(t *testing.T) {
 		return response["body"].(map[string]any)
 	}
 	call("initialize", map[string]any{"adapterID": "wingman"})
+	plan := debugLaunchPlan{Adapter: "fixture", Request: "launch", ProjectDir: ".", IO: "output", Configuration: map[string]any{"program": filepath.Join(root, "main.go")}}
+	planID := app.workspace.DAP.RememberPlan(plan)
+	seq++
+	rejected := editorTestReply(t, conn, ctx, map[string]any{"seq": seq, "type": "request", "command": "launch", "arguments": map[string]any{"_wingmanPlanId": "unknown", "_wingmanPlan": plan}})
+	if rejected["success"] != false {
+		t.Fatal("launch accepted a plan the host never reviewed", rejected)
+	}
 	seq++
 	launchSeq := seq
-	plan := debugLaunchPlan{Adapter: "fixture", Request: "launch", ProjectDir: ".", IO: "output", Configuration: map[string]any{"program": filepath.Join(root, "main.go")}}
-	if err := wsjson.Write(ctx, conn, map[string]any{"seq": seq, "type": "request", "command": "launch", "arguments": map[string]any{"_wingmanPlan": plan}}); err != nil {
+	edited := plan
+	edited.PreLaunch = &dap.ProcessLaunch{Title: "injected", Command: "/bin/sh", Args: []string{"-c", "touch injected"}}
+	if err := wsjson.Write(ctx, conn, map[string]any{"seq": seq, "type": "request", "command": "launch", "arguments": map[string]any{"_wingmanPlanId": planID, "_wingmanPlan": edited}}); err != nil {
 		t.Fatal(err)
 	}
 	for {
@@ -84,6 +92,9 @@ func TestDAPWebSocketLaunchInspectReconnect(t *testing.T) {
 	if status["session"].(map[string]any)["state"] != "stopped" {
 		t.Fatal(status)
 	}
+	if _, err := os.Stat(filepath.Join(root, "injected")); err == nil {
+		t.Fatal("launch ran a client-supplied prelaunch command")
+	}
 	frames := call("stackTrace", map[string]any{"threadId": 1})["stackFrames"].([]any)
 	frame := frames[0].(map[string]any)["id"]
 	scopes := call("scopes", map[string]any{"frameId": frame})["scopes"].([]any)
@@ -97,7 +108,7 @@ func TestDAPWebSocketLaunchInspectReconnect(t *testing.T) {
 	}
 	call("continue", map[string]any{"threadId": 1})
 	seq++
-	rejected := editorTestReply(t, conn, ctx, map[string]any{"seq": seq, "type": "request", "command": "variables", "arguments": map[string]any{"variablesReference": reference}})
+	rejected = editorTestReply(t, conn, ctx, map[string]any{"seq": seq, "type": "request", "command": "variables", "arguments": map[string]any{"variablesReference": reference}})
 	if rejected["success"] != false {
 		t.Fatal("reference survived resume", rejected)
 	}
@@ -105,17 +116,79 @@ func TestDAPWebSocketLaunchInspectReconnect(t *testing.T) {
 	conn, ctx = dialEditorTest(t, app, "/dap")
 	call("initialize", map[string]any{"adapterID": "wingman"})
 	status = call("wingman/status", nil)
-	if status["session"].(map[string]any)["session_id"] != id || status["output"] != "fixture ready\n" {
+	if status["session"].(map[string]any)["session_id"] != id || status["output"] != "fixture ready\n" || status["_wingmanOutputOffset"] != float64(len("fixture ready\n")) {
 		t.Fatal("reconnect did not retain the process and output", status)
 	}
 	seq++
 	rejected = editorTestReply(t, conn, ctx, map[string]any{"seq": seq, "type": "request", "command": "scopes", "arguments": map[string]any{"frameId": frame}})
-	if rejected["success"] != false {
+	if rejected["success"] != false || rejected["message"] != "stateChanged" {
 		t.Fatal("reference survived reconnect", rejected)
 	}
-	call("disconnect", map[string]any{"terminateDebuggee": true})
+	// DAP terminates a launched debuggee when disconnect omits terminateDebuggee.
+	seq++
+	disconnectSeq := seq
+	if err := wsjson.Write(ctx, conn, map[string]any{"seq": seq, "type": "request", "command": "disconnect"}); err != nil {
+		t.Fatal(err)
+	}
+	events := map[string]int{}
+	for {
+		var message map[string]any
+		if err := wsjson.Read(ctx, conn, &message); err != nil {
+			t.Fatal(err)
+		}
+		if message["type"] == "event" {
+			events[message["event"].(string)]++
+		}
+		if message["type"] == "response" && message["request_seq"] == float64(disconnectSeq) {
+			if message["success"] != true {
+				t.Fatal(message)
+			}
+			break
+		}
+	}
 	if call("wingman/status", nil)["session"] != nil {
 		t.Fatal("disconnect did not stop the process")
+	}
+	if events["output"] != 0 || events["exited"] > 1 || events["terminated"] > 1 {
+		t.Fatalf("reconnected client received replayed output or duplicate lifecycle events: %v", events)
+	}
+}
+
+// Rapid gutter edits must reach the host in order.
+func TestDAPWebSocketOrdersBreakpointRequests(t *testing.T) {
+	root := t.TempDir()
+	writeDebugTestFile(t, root, "main.go", "package main\nfunc main() {}\n")
+	app := newDebugTestServer(t, root)
+	app.scope = WorkspaceScope{"workspace", "instance"}
+	conn, ctx := dialEditorTest(t, app, "/dap")
+	if response := editorTestReply(t, conn, ctx, map[string]any{"seq": float64(1), "type": "request", "command": "initialize", "arguments": map[string]any{"adapterID": "wingman"}}); response["success"] != true {
+		t.Fatal(response)
+	}
+	source := map[string]any{"path": filepath.Join(root, "main.go")}
+	for line := 1; line <= 60; line++ {
+		request := map[string]any{"seq": float64(line + 1), "type": "request", "command": "setBreakpoints", "arguments": map[string]any{"source": source, "breakpoints": []any{map[string]any{"line": line}}}}
+		if err := wsjson.Write(ctx, conn, request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var last map[string]any
+	for last == nil {
+		var message map[string]any
+		if err := wsjson.Read(ctx, conn, &message); err != nil {
+			t.Fatal(err)
+		}
+		if message["type"] == "response" && message["request_seq"] == float64(61) {
+			last = message
+		}
+	}
+	status := editorTestReply(t, conn, ctx, map[string]any{"seq": float64(62), "type": "request", "command": "wingman/status", "arguments": map[string]any{"source": source}})
+	points := status["body"].(map[string]any)["breakpoints"].([]any)
+	if len(points) != 1 || points[0].(map[string]any)["line"] != float64(60) {
+		t.Fatalf("the last setBreakpoints must win: %v", points)
+	}
+	resolved := last["body"].(map[string]any)["breakpoints"].([]any)[0].(map[string]any)
+	if resolved["reason"] != "pending" || resolved["verified"] != false || resolved["id"] == nil {
+		t.Fatalf("breakpoints without a session must be pending with an id: %v", resolved)
 	}
 }
 

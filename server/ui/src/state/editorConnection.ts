@@ -1,3 +1,10 @@
+export interface EditorRequestOptions {
+	/** Handles LSP workspace/applyEdit requests issued while this request runs. */
+	applyEdit?: (params: any) => Promise<boolean>;
+	/** Milliseconds before the request is cancelled; 0 waits indefinitely. */
+	timeout?: number;
+}
+
 /** Shared socket lifecycle only. LSP is JSON-RPC; DAP keeps its own envelope. */
 export class EditorConnection {
 	private socket?: WebSocket;
@@ -104,12 +111,12 @@ export class EditorConnection {
 		method: string,
 		params: unknown,
 		signal?: AbortSignal,
-		applyEdit?: (params: any) => Promise<boolean>,
+		options: EditorRequestOptions = {},
 	): Promise<T> {
 		signal?.throwIfAborted();
 		await abortable(this.connect(), signal);
 		signal?.throwIfAborted();
-		return this.sendRequest(method, params, signal, applyEdit);
+		return this.sendRequest(method, params, signal, options);
 	}
 	notify(method: string, params: unknown) {
 		if (this.mode !== "lsp")
@@ -125,7 +132,7 @@ export class EditorConnection {
 		method: string,
 		params: unknown,
 		signal?: AbortSignal,
-		applyEdit?: (params: any) => Promise<boolean>,
+		{ applyEdit, timeout = 120000 }: EditorRequestOptions = {},
 	): Promise<T> {
 		const id = ++this.sequence;
 		return new Promise<T>((resolve, reject) => {
@@ -147,7 +154,7 @@ export class EditorConnection {
 						});
 				}
 			};
-			const timer = setTimeout(cancel, 120000);
+			const timer = timeout > 0 ? setTimeout(cancel, timeout) : undefined;
 			const cleanup = () => {
 				clearTimeout(timer);
 				signal?.removeEventListener("abort", cancel);
@@ -230,6 +237,7 @@ export class EditorConnection {
 			pending.reject(
 				new Error(
 					message.error?.message ??
+						message.body?.error?.format ??
 						message.message ??
 						"Protocol request failed",
 				),

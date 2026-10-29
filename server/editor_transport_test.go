@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"go.lsp.dev/jsonrpc2"
 )
 
 func dialEditorTest(t *testing.T, app *Server, path string) (*websocket.Conn, context.Context) {
@@ -124,17 +127,141 @@ func TestLSPWebSocketDocumentVersionsAndScope(t *testing.T) {
 	}
 }
 
+func TestLSPWebSocketProtocolErrorsAndEmptyResults(t *testing.T) {
+	root := t.TempDir()
+	writeDebugTestFile(t, root, "main.go", "package main\n\nfunc Disk() {}\n\nfunc use() { Disk() }\n")
+	writeDebugTestFile(t, root, "notes.txt", "plain text\n")
+	app := newDebugTestServer(t, root)
+	conn, ctx := dialEditorTest(t, app, "/lsp")
+	code := func(response map[string]any) any {
+		t.Helper()
+		failure, _ := response["error"].(map[string]any)
+		if failure == nil {
+			t.Fatalf("expected an error: %v", response)
+		}
+		return failure["code"]
+	}
+	next := func(raw string) map[string]any {
+		t.Helper()
+		if err := conn.Write(ctx, websocket.MessageText, []byte(raw)); err != nil {
+			t.Fatal(err)
+		}
+		var response map[string]any
+		if err := wsjson.Read(ctx, conn, &response); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	call := func(id float64, method string, params any) map[string]any {
+		return editorTestReply(t, conn, ctx, map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+	}
+	if response := next("{"); code(response) != float64(-32700) || response["id"] != nil {
+		t.Fatalf("parse error: %v", response)
+	}
+	if response := next(`{"jsonrpc":"2.0","id":{"x":1},"method":"initialize"}`); code(response) != float64(-32600) || response["id"] != nil {
+		t.Fatalf("object id: %v", response)
+	}
+	if response := next(`{"jsonrpc":"2.0"}`); code(response) != float64(-32600) {
+		t.Fatalf("message without method or id: %v", response)
+	}
+	call(1, "initialize", map[string]any{"capabilities": map[string]any{}})
+	if response := call(2, "initialize", map[string]any{}); code(response) != float64(-32600) {
+		t.Fatalf("second initialize: %v", response)
+	}
+	if response := call(3, "initialized", map[string]any{}); code(response) != float64(-32600) {
+		t.Fatalf("initialized sent as a request: %v", response)
+	}
+
+	text := fileuri.FromPath(filepath.Join(root, "notes.txt"))
+	for method, want := range map[string]string{"textDocument/formatting": "null", "textDocument/codeAction": "[]", "textDocument/inlayHint": "null"} {
+		response := call(4, method, map[string]any{"textDocument": map[string]any{"uri": text}, "range": map[string]any{}, "options": map[string]any{"tabSize": 2, "insertSpaces": true}, "context": map[string]any{"diagnostics": []any{}}})
+		if wire, _ := json.Marshal(response["result"]); response["error"] != nil || string(wire) != want {
+			t.Fatalf("%s without a language server: %v", method, response)
+		}
+	}
+	source := fileuri.FromPath(filepath.Join(root, "main.go"))
+	if response := call(5, "textDocument/hover", map[string]any{"textDocument": map[string]any{"uri": source}, "position": map[string]any{"line": 1, "character": 0}}); response["error"] != nil || response["result"] != nil {
+		t.Fatalf("hover over a blank line: %v", response)
+	}
+	references := func(include bool) int {
+		t.Helper()
+		response := call(6, "textDocument/references", map[string]any{"textDocument": map[string]any{"uri": source}, "position": map[string]any{"line": 2, "character": 5}, "context": map[string]any{"includeDeclaration": include}})
+		locations, ok := response["result"].([]any)
+		if !ok {
+			t.Fatalf("references: %v", response)
+		}
+		return len(locations)
+	}
+	if with, without := references(true), references(false); with != without+1 {
+		t.Fatalf("includeDeclaration ignored: %d with, %d without", with, without)
+	}
+	call(7, "shutdown", nil)
+	if response := call(8, "textDocument/hover", map[string]any{}); code(response) != float64(-32600) {
+		t.Fatalf("request after shutdown: %v", response)
+	}
+}
+
+func TestEditorSocketErrorCodes(t *testing.T) {
+	socket := &editorSocket{ctx: t.Context(), writer: newWSClient(nil), pending: map[string]context.CancelCauseFunc{}}
+	cancelled, done, _ := socket.begin("1", time.Minute)
+	defer done()
+	socket.cancelRequest("1")
+	expired, finish, _ := socket.begin("2", time.Nanosecond)
+	defer finish()
+	<-expired.Done()
+	for err, want := range map[error]float64{
+		editorRequestError(cancelled, context.Canceled):                                      -32800,
+		editorRequestError(expired, context.DeadlineExceeded):                                -32803,
+		fmt.Errorf("rename: %w", &jsonrpc2.Error{Code: -32801, Message: "content modified"}): -32801,
+		errors.New("failed"): -32603,
+	} {
+		socket.reply(json.RawMessage("1"), nil, err)
+		var response struct {
+			Error struct {
+				Code float64 `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(<-socket.writer.outbox, &response); err != nil || response.Error.Code != want {
+			t.Fatalf("%v: code %v, want %v", err, response.Error.Code, want)
+		}
+	}
+}
+
+func TestEditorSocketsRejectForeignOrigins(t *testing.T) {
+	app := newDebugTestServer(t, t.TempDir())
+	web := httptest.NewServer(app.checkInstance(app.mux))
+	t.Cleanup(web.Close)
+	for _, path := range []string{"/lsp", "/dap"} {
+		for _, origin := range []string{"null", "https://client.example", "vscode-file://vscode-app"} {
+			conn, _, err := websocket.Dial(t.Context(), strings.Replace(web.URL, "http:", "ws:", 1)+path+"?instance="+app.scope.InstanceID, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{origin}}})
+			if err == nil {
+				conn.CloseNow()
+				t.Fatalf("%s accepted origin %s", path, origin)
+			}
+		}
+	}
+}
+
 func TestLegacyProtocolRoutesAreRemoved(t *testing.T) {
 	app := newDebugTestServer(t, t.TempDir())
 	for _, route := range []string{
+		"GET /api/capabilities", "GET /api/v2/bootstrap", "GET /api/terminals/shells",
 		"GET /api/files", "POST /api/files", "DELETE /api/files", "GET /api/files/read", "GET /api/files/search", "POST /api/files/content-search", "POST /api/files/write", "POST /api/files/write-batch", "POST /api/files/rename", "POST /api/files/copy", "GET /api/files/path", "POST /api/files/reveal", "GET /api/files/download", "GET /api/files/preview", "GET /api/lsp/file",
 
+		"GET /api/git/commits", "POST /api/git/commits", "GET /api/git/branches", "POST /api/git/branches", "GET /api/git/diff",
+		"POST /api/git/init", "POST /api/git/checkout", "POST /api/git/fetch", "POST /api/git/pull", "POST /api/git/push",
+		"GET /api/git/status", "GET /api/git/history", "GET /api/git/insights", "GET /api/git/compare",
+		"POST /api/git/stage", "POST /api/git/unstage", "POST /api/git/commit", "POST /api/git/commit-message",
+		"GET /api/diffs", "POST /api/diffs/revert",
+		"POST /api/editor/tab", "POST /api/editor/transform",
+		"POST /api/settings/editor.tab.completion",
 		"GET /api/v2/events",
 		"GET /api/v2/backends/one/sessions",
 		"POST /api/v2/backends/one/sessions",
 		"POST /api/v2/backends/one/sessions/saved/commands",
 		"GET /api/terminals", "POST /api/terminals",
 		"POST /api/lsp/hover", "POST /api/lsp/document",
+		"POST /api/debug/targets", "POST /api/debug/plan", "GET /api/skills",
 		"GET /api/debug/state", "POST /api/debug/start", "POST /api/debug/control",
 	} {
 		t.Run(route, func(t *testing.T) {

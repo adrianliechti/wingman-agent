@@ -94,7 +94,7 @@ func (h *ahpHost) resource(req ahpRequest) (any, error) {
 	}
 	if strings.HasPrefix(p.URI, "ahp-content:") {
 		h.mu.Lock()
-		content, exists := h.contents[p.URI]
+		content, exists := h.changesetContentLocked(p.URI)
 		h.mu.Unlock()
 		if !exists {
 			return nil, &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "changeset content is no longer retained; refresh the changeset"}

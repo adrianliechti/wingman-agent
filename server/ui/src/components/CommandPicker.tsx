@@ -1,20 +1,20 @@
 import { Sparkles } from "lucide-react";
-import type { Skill } from "../hooks/useSkills";
+import type { ChatCommand } from "../api/chatCommands";
 import { FloatingSurface } from "./ui/Floating";
 
 interface Props {
 	anchor: Element | null;
-	skills: Skill[];
+	skills: ChatCommand[];
 	active: number;
-	onSelect: (skill: Skill) => void;
+	onSelect: (skill: ChatCommand) => void;
 	onHover: (index: number) => void;
 	onClose: () => void;
 }
 
-// SkillPicker renders the completion list for the slash token at the caret.
+// CommandPicker renders the completion list for the slash token at the caret.
 // The composer owns the data and keyboard navigation; this component only
 // renders and reports mouse interactions.
-export function SkillPicker({
+export function CommandPicker({
 	anchor,
 	skills,
 	active,
@@ -31,7 +31,7 @@ export function SkillPicker({
 			reference={anchor}
 			placement="top-start"
 			role="listbox"
-			label="Skills"
+			label="Commands and skills"
 			returnFocus={false}
 			className="z-[100] w-[360px] bg-bg-elevated/95 backdrop-blur-sm border border-border rounded-md shadow-xl overflow-hidden"
 		>
@@ -57,6 +57,13 @@ export function SkillPicker({
 								<div className="flex items-baseline gap-2">
 									<span className="font-mono text-[12px] text-fg">
 										/{s.name}
+									</span>
+									<span className="text-[10px] text-fg-dim">
+										{s.kind === "skill"
+											? "Skill"
+											: s.kind === "action"
+												? "Action"
+												: "Command"}
 									</span>
 									{s.input_hint && (
 										<span className="text-[10.5px] text-fg-dim font-mono truncate">

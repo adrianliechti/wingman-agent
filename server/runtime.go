@@ -61,11 +61,14 @@ func (s *Server) InstanceID() string { return s.scope.InstanceID }
 
 func (s *Server) checkInstance(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/v2/bootstrap") || r.URL.Path == "/lsp" || r.URL.Path == "/dap" || r.URL.Path == "/content" || r.URL.Path == "/preview" {
-			instance := r.Header.Get(instanceHeader)
-			if instance == "" {
-				instance = r.URL.Query().Get("instance")
-			} // sockets and download links
+		instance := r.Header.Get(instanceHeader)
+		if instance == "" {
+			instance = r.URL.Query().Get("instance")
+		}
+		// Discovery is initially unscoped. Later refreshes carry the instance
+		// and must reject a replacement workspace like all other operations.
+		protected := (strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/workspace") || r.URL.Path == "/lsp" || r.URL.Path == "/dap" || r.URL.Path == "/content" || r.URL.Path == "/preview"
+		if protected || r.URL.Path == "/api/workspace" && instance != "" {
 			if instance != s.scope.InstanceID || s.ctx.Err() != nil {
 				http.Error(w, "workspace instance changed; reload the workspace", http.StatusConflict)
 				return
@@ -225,22 +228,7 @@ func (s *Server) backendHandler(fn func(*backendRuntime, http.ResponseWriter, *h
 
 func (s *Server) registerSessionRoutes(r chi.Router) {
 	r.Route("/v2", func(r chi.Router) {
-		r.Get("/bootstrap", func(w http.ResponseWriter, r *http.Request) {
-			available, err := agents.Available()
-			if err != nil {
-				http.Error(w, err.Error(), 500)
-				return
-			}
-			backends := []AgentEntry{{ID: code.BuiltinAgentName, Name: "Wingman"}}
-			for _, a := range available {
-				backends = append(backends, AgentEntry{ID: a.ID, Name: a.Name})
-			}
-			writeJSON(w, struct {
-				WorkspaceScope
-				Protocol int          `json:"protocol"`
-				Backends []AgentEntry `json:"backends"`
-			}{s.scope, 2, backends})
-		})
+		r.Get("/backends", s.handleBackends)
 		r.Route("/backends/{backend}", func(r chi.Router) {
 			r.Get("/settings", s.backendOperation((*backendRuntime).handleDefaultSettings))
 			r.Post("/models/refresh", s.backendOperation((*backendRuntime).handleRefreshModels))
@@ -433,7 +421,7 @@ func (c *sessionController) execute(command Command) error {
 			id = command.ID
 		}
 		input := code.TurnInput{ID: id, Intent: command.Intent, Origin: "user", Display: &code.TurnInputDisplay{Text: command.Text, Files: command.Files, Images: command.Images}}
-		input.Content = b.buildInput(command)
+		input.Content = b.buildInput(sid, command)
 		if command.Type == "queue_update" {
 			if err := b.turns.ReplaceQueued(sid, id, input); err != nil {
 				return err
@@ -544,4 +532,17 @@ func (b *backendRuntime) onToolProgress(ctx context.Context, callID, text string
 	if sid := code.SessionIDFromContext(ctx); sid != "" {
 		b.sendSession(sid, Frame{Type: EvtToolProgress, ID: callID, Text: text})
 	}
+}
+
+func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
+	available, err := agents.Available()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	backends := []AgentEntry{{ID: code.BuiltinAgentName, Name: "Wingman"}}
+	for _, a := range available {
+		backends = append(backends, AgentEntry{ID: a.ID, Name: a.Name})
+	}
+	writeJSON(w, backends)
 }

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const revision = "0b7b7f9f4ceb2fbd8846557416f765ac73da647d";
+const revision = "d7a5579b1733fb2e1e4a2c653442e26c7b7226dd";
 const repo = resolve(process.argv[2] ?? "../agent-host-protocol");
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ui = join(root, "server/ui");

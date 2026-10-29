@@ -144,6 +144,15 @@ func (m *Manager) Diffs(ctx context.Context) ([]FileDiff, error) {
 // DiffsIfChanged returns combined diffs and their fingerprint from one status
 // scan. An unchanged fingerprint returns nil diffs. Pass zero to force a load.
 func (m *Manager) DiffsIfChanged(ctx context.Context, previous uint64) ([]FileDiff, uint64, error) {
+	return m.DiffsLayerIfChanged(ctx, DiffCombined, previous)
+}
+
+// DiffsLayerIfChanged skips loading unchanged file contents for any Git layer.
+// The status, fingerprint, and diff belong to the same manager snapshot.
+func (m *Manager) DiffsLayerIfChanged(ctx context.Context, layer DiffLayer, previous uint64) ([]FileDiff, uint64, error) {
+	if layer != DiffCombined && layer != DiffStaged && layer != DiffUnstaged {
+		return nil, 0, errors.New("invalid diff layer")
+	}
 	if err := m.lock(ctx); err != nil {
 		return nil, 0, err
 	}
@@ -157,7 +166,7 @@ func (m *Manager) DiffsIfChanged(ctx context.Context, previous uint64) ([]FileDi
 	if previous != 0 && fingerprint == previous {
 		return nil, fingerprint, nil
 	}
-	diffs, err := m.diffsLocked(ctx, entries, DiffCombined)
+	diffs, err := m.diffsLocked(ctx, entries, layer)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -166,7 +175,7 @@ func (m *Manager) DiffsIfChanged(ctx context.Context, previous uint64) ([]FileDi
 
 // DiffsLayer returns a consistent snapshot of every change in one Git layer.
 // The manager lock stays held while the status, HEAD tree, and file contents
-// are read so callers such as commit-message generation never mix snapshots.
+// are read so callers never mix snapshots.
 func (m *Manager) DiffsLayer(ctx context.Context, layer DiffLayer) ([]FileDiff, error) {
 	if err := m.ready(); err != nil {
 		return nil, err

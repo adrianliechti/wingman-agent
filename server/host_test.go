@@ -9,7 +9,7 @@ import (
 func TestLocalTransportRejectsDNSRebindingBeforeBootstrap(t *testing.T) {
 	for _, host := range []string{"attacker.example:9000", "localhost.attacker.example:9000", "localhost@attacker.example", "127.0.0.1.attacker.example:9000"} {
 		handler := LocalHostOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("bootstrap reached hostile Host") }))
-		req := httptest.NewRequest("GET", "http://"+host+"/api/v2/bootstrap", nil)
+		req := httptest.NewRequest("GET", "http://"+host+"/api/workspace", nil)
 		req.Host = host
 		req.Header.Set("Origin", "http://"+host)
 		req.Header.Set("Sec-Fetch-Site", "same-origin")

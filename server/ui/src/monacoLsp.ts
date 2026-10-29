@@ -25,43 +25,6 @@ import {
 } from "./workspaceEdit";
 
 const markerOwner = "wingman-lsp";
-const semanticTokenTypes = [
-	"namespace",
-	"type",
-	"class",
-	"enum",
-	"interface",
-	"struct",
-	"typeParameter",
-	"parameter",
-	"variable",
-	"property",
-	"enumMember",
-	"event",
-	"function",
-	"method",
-	"macro",
-	"label",
-	"comment",
-	"string",
-	"keyword",
-	"number",
-	"regexp",
-	"operator",
-	"decorator",
-];
-const semanticTokenModifiers = [
-	"declaration",
-	"definition",
-	"readonly",
-	"static",
-	"deprecated",
-	"abstract",
-	"async",
-	"modification",
-	"documentation",
-	"defaultLibrary",
-];
 let bridgeSequence = 0;
 const modelProviderOwners = new WeakMap<
 	MonacoTypes.editor.ITextModel,
@@ -761,10 +724,7 @@ export function createMonacoLSPBridge({
 		if (capabilities.semantic_tokens) {
 			disposables.push(
 				monaco.languages.registerDocumentSemanticTokensProvider(file.language, {
-					getLegend: () => ({
-						tokenTypes: semanticTokenTypes,
-						tokenModifiers: semanticTokenModifiers,
-					}),
+					getLegend: () => workspaceClient().lsp.semanticTokensLegend,
 					provideDocumentSemanticTokens(
 						model: MonacoTypes.editor.ITextModel,
 						_lastResultID: string | null,

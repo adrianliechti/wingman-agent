@@ -38,7 +38,6 @@ func (position WindowSidebarPosition) Valid() bool {
 
 type Settings struct {
 	TUIDiffPanelHidden     bool                   `json:"tui.diffPanel.hidden,omitempty"`
-	EditorTabCompletion    bool                   `json:"editor.tab.completion"`
 	WindowTerminalPosition WindowTerminalPosition `json:"window.terminal.position"`
 	WindowSidebarPosition  WindowSidebarPosition  `json:"window.sidebar.position"`
 	Workspaces             []string               `json:"workspaces,omitempty"`
@@ -102,7 +101,6 @@ func Update(update func(*Settings)) (Settings, error) {
 
 func load() (Settings, error) {
 	value := Settings{
-		EditorTabCompletion:    true,
 		WindowTerminalPosition: WindowTerminalPositionTab,
 		WindowSidebarPosition:  WindowSidebarPositionRight,
 	}

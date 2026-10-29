@@ -110,6 +110,7 @@ func (m *Manager) CreateCommand(spec CommandSpec, cols, rows int) (*Session, err
 	if err != nil {
 		return nil, err
 	}
+	session.command = true
 	m.sessions[session.ID()] = session
 	m.order = append(m.order, session.ID())
 	m.publishLocked(Event{Kind: "created", Session: session})

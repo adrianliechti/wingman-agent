@@ -353,7 +353,9 @@ func (m *Manager) startSession(project projectRoot, key string, entry *sessionEn
 				continue
 			}
 			var syncErr error
-			if document.Saved {
+			if document.Editor {
+				_, syncErr = session.SyncEditorDocument(connectCtx, document.Path, document.Content, document.Saved)
+			} else if document.Saved {
 				_, syncErr = session.SaveDocument(connectCtx, document.Path, document.Content)
 			} else {
 				_, syncErr = session.SyncDocument(connectCtx, document.Path, document.Content)
@@ -403,6 +405,21 @@ func (m *Manager) ActiveSession(filePath string) (*Session, bool) {
 		return entry.session, true
 	}
 	return nil, false
+}
+
+// RefreshDiskDocuments refreshes the disk-backed documents of live sessions.
+func (m *Manager) RefreshDiskDocuments(ctx context.Context) {
+	m.mu.Lock()
+	sessions := make([]*Session, 0, len(m.sessions))
+	for _, entry := range m.sessions {
+		if entry.session != nil && entry.session.IsAlive() {
+			sessions = append(sessions, entry.session)
+		}
+	}
+	m.mu.Unlock()
+	for _, session := range sessions {
+		session.RefreshDiskDocuments(ctx)
+	}
 }
 
 func (m *Manager) Activities() []ServerActivity {

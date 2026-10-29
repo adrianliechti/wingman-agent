@@ -1,11 +1,18 @@
+import type { MessageAttachment } from "@microsoft/agent-host-protocol";
 import type { PendingImage } from "../components/chat/images.ts";
 
 export type ComposerContent = {
 	text: string;
 	files: string[];
 	images: PendingImage[];
+	completions?: MessageAttachment[];
 	editingQueueId: string | null;
-	previousDraft?: { text: string; files: string[]; images: PendingImage[] };
+	previousDraft?: {
+		text: string;
+		files: string[];
+		images: PendingImage[];
+		completions?: MessageAttachment[];
+	};
 };
 type ComposerSnapshot = ComposerContent & {
 	submitting: boolean;
@@ -46,6 +53,7 @@ export class ComposerDraft {
 	private publish(patch: Partial<ComposerSnapshot>) {
 		this.value = { ...this.value, ...patch };
 		if (!this.value.previousDraft) delete this.value.previousDraft;
+		if (!this.value.completions?.length) delete this.value.completions;
 		for (const listener of this.listeners) listener();
 	}
 	readonly update = (patch: Partial<ComposerContent>) => {
@@ -53,14 +61,21 @@ export class ComposerDraft {
 		this.publish({ ...patch, error: null });
 	};
 	beginQueueEdit(content: ComposerContent) {
-		const { text, files, images, previousDraft } = this.value;
+		const { text, files, images, completions, previousDraft } = this.value;
 		this.update({
 			...content,
-			previousDraft: previousDraft ?? { text, files, images },
+			completions: content.completions,
+			previousDraft: previousDraft ?? {
+				text,
+				files,
+				images,
+				...(completions ? { completions } : {}),
+			},
 		});
 	}
 	cancelQueueEdit() {
 		this.update({
+			completions: undefined,
 			...this.value.previousDraft,
 			editingQueueId: null,
 			previousDraft: undefined,
@@ -86,6 +101,7 @@ export class ComposerDraft {
 			...(sent && this.revision === revision
 				? {
 						...emptyContent(),
+						completions: undefined,
 						...content.previousDraft,
 						previousDraft: undefined,
 					}

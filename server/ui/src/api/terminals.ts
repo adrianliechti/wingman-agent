@@ -5,8 +5,7 @@ import type {
 	TerminalInfo,
 } from "@microsoft/agent-host-protocol";
 import { RpcError } from "@microsoft/agent-host-protocol/client";
-import type { ShellEntry, TerminalEntry } from "../types/protocol";
-import { fetchJSON } from "./http.ts";
+import type { TerminalEntry } from "../types/protocol";
 import { queryKeys } from "./query.ts";
 import { workspaceClient } from "../state/workspaceClient.ts";
 import { ActionType } from "../state/ahpValues.ts";
@@ -33,12 +32,6 @@ export function ownTerminalClaim(): TerminalClaim {
 	} as TerminalClaim;
 }
 export const terminalQueries = {
-	shells: () =>
-		queryOptions({
-			queryKey: queryKeys.terminals.shells,
-			queryFn: ({ signal }) =>
-				fetchJSON<ShellEntry[]>("/api/terminals/shells", { signal }),
-		}),
 	list: () =>
 		queryOptions({
 			queryKey: queryKeys.terminals.list,

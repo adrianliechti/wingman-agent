@@ -4,20 +4,23 @@ import type { ServerMessage } from "../types/protocol";
 
 export const queryKeys = {
 	all: ["server"] as const,
-	capabilities: ["server", "capabilities"] as const,
+	workspace: ["server", "workspace"] as const,
 	sessions: {
 		all: ["server", "sessions"] as const,
 		list: (backend: string) => ["server", "sessions", "list", backend] as const,
 	},
 	skills: {
 		all: ["server", "skills"] as const,
-		list: (sessionId?: string) =>
-			["server", "skills", sessionId ?? ""] as const,
+		list: ["server", "skills", "list"] as const,
+	},
+	chatCommands: {
+		all: ["server", "chat-commands"] as const,
+		list: (sessionId?: string, inline = false) =>
+			["server", "chat-commands", sessionId ?? "", inline] as const,
 	},
 	terminals: {
 		all: ["server", "terminals"] as const,
 		list: ["server", "terminals", "list"] as const,
-		shells: ["server", "terminals", "shells"] as const,
 	},
 	diagnostics: {
 		all: ["server", "diagnostics"] as const,
@@ -129,8 +132,8 @@ export function invalidateForServerMessage(
 	};
 
 	switch (message.type) {
-		case "capabilities_changed":
-			invalidate(queryKeys.capabilities);
+		case "workspace_changed":
+			invalidate(queryKeys.workspace);
 			break;
 		case "model_changed":
 			invalidate(["server", "backend-settings"]);
@@ -140,6 +143,7 @@ export function invalidateForServerMessage(
 			break;
 		case "skills_changed":
 			invalidate(queryKeys.skills.all);
+			invalidate(queryKeys.chatCommands.all);
 			break;
 		case "terminals_changed":
 			invalidate(queryKeys.terminals.all);

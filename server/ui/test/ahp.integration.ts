@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, readFile, mkdir } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
 import { AhpClient as V1Client } from "@microsoft/agent-host-protocol-v1/client";
@@ -38,6 +38,7 @@ async function peer(id: string) {
 		initialSubscriptions: ["ahp-root://"],
 	});
 	assert.equal(result.protocolVersion, "1.1.0");
+	assert.ok(result.completionTriggerCharacters?.includes("/"));
 	return client;
 }
 async function observe(
@@ -174,6 +175,107 @@ test(
 		assert.equal(initialized.protocolVersion, "1.0.0");
 		const legacyChat = await observe(legacy, chatURI, v1ChatReducer);
 		t.after(legacyChat.close);
+		await t.test(
+			"workspace skills and chat completions retain scope, namespaces and UTF-16 ranges",
+			async () => {
+				const headers = { "X-Wingman-Instance": scope.instanceId };
+				const catalogue = await (
+					await fetch(
+						`${base}/api/workspace/skills?backend=not-a-backend&session=missing`,
+						{ headers },
+					)
+				).json();
+				assert.ok(catalogue.some((s: any) => s.name === "shared"));
+				assert.ok(catalogue.some((s: any) => s.name === "reports:shared"));
+				assert.equal(
+					new Set(catalogue.map((s: any) => s.name)).size,
+					catalogue.length,
+				);
+				assert.ok(!catalogue.some((s: any) => s.name.startsWith("only-")));
+				assert.equal(
+					(await fetch(`${base}/api/skills`, { headers })).status,
+					404,
+				);
+				const complete = (
+					text: string,
+					offset = text.length,
+					channel = chatURI,
+				) =>
+					vscode.request("completions", {
+						channel,
+						kind: "userMessage" as any,
+						text,
+						offset,
+					});
+				const all = (await complete("/")).items;
+				const native = all.find((item) => item.insertText === "/native")!;
+				assert.equal((native.attachment._meta!.wingman as any).kind, "command");
+				assert.equal(
+					all.filter((item) => item.insertText === "/native").length,
+					1,
+				);
+				const inline = await complete("🌍 /shaXYZ after", "🌍 /sha".length);
+				assert.ok(inline.items.some((item) => item.insertText === "/shared"));
+				assert.ok(
+					inline.items.some((item) => item.insertText === "/reports:shared"),
+				);
+				assert.ok(
+					inline.items.every(
+						(item) => item.rangeStart === 3 && item.rangeEnd === 10,
+					),
+				);
+				assert.ok(
+					inline.items.every(
+						(item) => (item.attachment._meta!.wingman as any).kind === "skill",
+					),
+				);
+				assert.equal(
+					(
+						(await complete("use /native")).items[0].attachment._meta!
+							.wingman as any
+					).kind,
+					"skill",
+				);
+				assert.deepEqual((await complete("https://example/sha")).items, []);
+				assert.deepEqual((await complete("/tmp/sha")).items, []);
+				assert.deepEqual((await complete("ordinary text")).items, []);
+				for (const offset of [-1, 100, 1])
+					await assert.rejects(
+						complete("🌍 /", offset),
+						(error: any) => error.code === -32602,
+					);
+				await assert.rejects(
+					complete("/", 1, uri),
+					(error: any) => error.code === -32602,
+				);
+				await assert.rejects(
+					complete("/", 1, "ahp-chat:/unknown"),
+					(error: any) => error.code === -32001,
+				);
+				await assert.rejects(
+					vscode.request("completions", {
+						channel: chatURI,
+						kind: "userMessage",
+						text: "/",
+					} as any),
+					(error: any) => error.code === -32602,
+				);
+				const second = await browser.create("one", "completion-scope");
+				const secondSession = await ahp.read<any>(
+					await browser.resource(second),
+				);
+				const other = (await complete("/", 1, secondSession.defaultChat)).items;
+				assert.ok(all.some((item) => item.insertText === "/only-session-1"));
+				assert.ok(!other.some((item) => item.insertText === "/only-session-1"));
+				const old = await legacy.request("completions", {
+					channel: chatURI,
+					kind: "userMessage" as any,
+					text: "/reports:",
+					offset: 9,
+				});
+				assert.equal(old.items[0].insertText, "/reports:shared");
+			},
+		);
 		await t.test(
 			"saved session subscriptions may mount before the workspace connection starts",
 			async () => {
@@ -490,6 +592,182 @@ test(
 				await assert.rejects(
 					vscode.resourceRead({ uri: "file:///etc/passwd" }),
 					/outside/,
+				);
+			},
+		);
+		await t.test(
+			"workspace Git status and AHP layer operations share authoritative changesets",
+			async () => {
+				const stagedURI = "ahp-changeset:/wingman/staged";
+				const unstagedURI = "ahp-changeset:/wingman/unstaged";
+				const staged = await observe(vscode, stagedURI, changesetReducer);
+				const unstaged = await observe(vscode, unstagedURI, changesetReducer);
+				const tracked = (state: any) =>
+					state.files.find((file: any) => file.id.endsWith("/tracked.txt"));
+				try {
+					const old = tracked(unstaged.state);
+					assert.ok(old?.nonce);
+					await writeFile(`${root}/tracked.txt`, "ready to stage\n");
+					await assert.rejects(
+						vscode.request("invokeChangesetOperation", {
+							channel: unstagedURI,
+							operationId: "stage",
+							target: {
+								kind: "resource" as any,
+								resource: old.id,
+								nonce: old.nonce,
+							},
+						}),
+						(error: any) => error.code === -32011,
+					);
+					const status = await browser.http.fetchJSON<any>(
+						`${base}/api/workspace/git`,
+					);
+					assert.equal(
+						status.files.find((file: any) => file.path === "tracked.txt")
+							.staged,
+						false,
+					);
+					await browser.changesets.operate(unstagedURI, "stage", [
+						"tracked.txt",
+					]);
+					await until(
+						() => tracked(staged.state) && !tracked(unstaged.state),
+						"stage notification",
+					);
+					const files = await browser.changesets.files(
+						stagedURI,
+						"tracked.txt",
+					);
+					assert.equal(files[0].original, "original\n");
+					assert.equal(files[0].modified, "ready to stage\n");
+					assert.match(files[0].patch, /\+ready to stage/);
+					await writeFile(
+						`${root}/tracked.txt`,
+						"discard this working draft\n",
+					);
+					await until(() => tracked(unstaged.state), "new unstaged edit");
+					// Resource-only discard must not accept an implicit whole-workspace target.
+					await assert.rejects(
+						vscode.request("invokeChangesetOperation", {
+							channel: unstagedURI,
+							operationId: "discard-changes",
+						}),
+						/scope/,
+					);
+					await assert.rejects(
+						vscode.request("invokeChangesetOperation", {
+							channel: unstagedURI,
+							operationId: "stage",
+							target: {
+								kind: "resource" as any,
+								resource: "file:///outside.txt",
+							},
+						}),
+						/not in this changeset/,
+					);
+					await browser.changesets.operate(unstagedURI, "discard-changes", [
+						"tracked.txt",
+					]);
+					assert.equal(
+						await readFile(`${root}/tracked.txt`, "utf8"),
+						"ready to stage\n",
+					);
+					assert.ok(tracked(staged.state), "discard preserves the index");
+					const comparison = await browser.http.fetchJSON<any>(
+						`${base}/api/workspace/git/diff?${new URLSearchParams({ base: "HEAD", head: ":worktree", mode: "direct" })}`,
+					);
+					assert.equal(
+						comparison.files,
+						undefined,
+						"diffs are delivered through AHP",
+					);
+					assert.match(comparison.channel, /^ahp-changeset:/);
+					await writeFile(`${root}/tracked.txt`, "later working edit\n");
+					const compared = await browser.changesets.files(
+						comparison.channel,
+						"tracked.txt",
+					);
+					assert.equal(
+						compared[0].modified,
+						"ready to stage\n",
+						"comparison content is immutable",
+					);
+					await assert.rejects(
+						vscode.request("invokeChangesetOperation", {
+							channel: comparison.channel,
+							operationId: "stage",
+						}),
+						/no operations/,
+					);
+					await browser.changesets.operate(stagedURI, "unstage", [
+						"tracked.txt",
+					]);
+					await until(() => !tracked(staged.state), "unstage notification");
+				} finally {
+					await staged.close();
+					await unstaged.close();
+				}
+			},
+		);
+		await t.test(
+			"accepted plugin skills expand once and native commands bypass conflicting skill instructions",
+			async () => {
+				const inputKey = await browser.create("one", "completion-inputs");
+				const state = await ahp.read<any>(await browser.resource(inputKey));
+				const items = await vscode.request("completions", {
+					channel: state.defaultChat,
+					kind: "userMessage" as any,
+					text: "/reports:",
+					offset: 9,
+				});
+				const plugin = items.items[0];
+				await browser.send(
+					inputKey,
+					`${plugin.insertText} arguments`,
+					[],
+					[],
+					"follow_up",
+					[plugin.attachment],
+				);
+				const userInputs = async () =>
+					(
+						await (
+							await fetch(`${base}/fixture/inputs`, {
+								headers: { "X-Wingman-Instance": scope.instanceId },
+							})
+						).json()
+					).filter((m: any) => m.role === "user");
+				const deadline = Date.now() + 5000;
+				let inputs: any[] = [];
+				while (
+					!(inputs = await userInputs()).some((m: any) =>
+						m.content.some((c: any) =>
+							c.text?.includes("PLUGIN WORKFLOW arguments"),
+						),
+					)
+				) {
+					assert.ok(Date.now() < deadline, "plugin input reached the provider");
+					await delay(10);
+				}
+				const pluginInput = inputs.find(
+					(m) => m.content[0].text === "/reports:shared arguments",
+				);
+				assert.equal(pluginInput.content.length, 2);
+				assert.ok(pluginInput.content[1].hidden);
+				assert.ok(!pluginInput.content[1].text.includes("PROJECT WORKFLOW"));
+				await browser.send(inputKey, "/native target");
+				while (
+					!(inputs = await userInputs()).some(
+						(m: any) => m.content[0].text === "/native target",
+					)
+				) {
+					assert.ok(Date.now() < deadline, "native input reached the provider");
+					await delay(10);
+				}
+				assert.deepEqual(
+					inputs.find((m) => m.content[0].text === "/native target").content,
+					[{ text: "/native target" }],
 				);
 			},
 		);

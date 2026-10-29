@@ -26,8 +26,8 @@ type ahpTerminal struct {
 }
 
 func (h *ahpHost) prepareChannel(channel string) error {
-	if channel == ahpWorkspaceChanges {
-		return h.ensureChangeset()
+	if strings.HasPrefix(channel, "ahp-changeset:") {
+		return h.ensureChangeset(channel)
 	}
 	if strings.HasPrefix(channel, "ahp-resource-watch:") {
 		h.mu.Lock()

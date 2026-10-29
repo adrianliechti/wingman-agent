@@ -93,7 +93,7 @@ func TestLauncherSmoke(t *testing.T) {
 		t.Fatalf("app commands unavailable after open: %d", rec.Code)
 	}
 
-	if rec := get("/api/capabilities"); rec.Code != http.StatusOK {
+	if rec := get("/api/workspace"); rec.Code != http.StatusOK {
 		t.Fatalf("workspace server not mounted: %d %q", rec.Code, rec.Body.String())
 	}
 
@@ -196,7 +196,7 @@ func TestConcurrentWorkspaceReplacementsHaveOneWinner(t *testing.T) {
 	if current == previous {
 		t.Fatal("successful replacement did not mount the new workspace")
 	}
-	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/capabilities", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/workspace", nil)
 	request.Header.Set("X-Wingman-Instance", current.InstanceID())
 	response := httptest.NewRecorder()
 	app.ServeHTTP(response, request)

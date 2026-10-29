@@ -87,6 +87,102 @@ func TestDocumentSyncPolicyAndIncrementalChange(t *testing.T) {
 	}
 }
 
+func TestRequestSnapshotsNeverRewindEditorDocuments(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "main.go")
+	session := &Session{documents: map[string]*document{}}
+	content := func() string {
+		t.Helper()
+		value, _ := session.DocumentContent(path)
+		return value
+	}
+	if _, err := session.SyncRequestDocument(ctx, path, "request 1"); err != nil || content() != "request 1" {
+		t.Fatalf("request snapshot of an unowned document: %q, %v", content(), err)
+	}
+	if _, err := session.SyncEditorDocument(ctx, path, "editor 2", false); err != nil {
+		t.Fatal(err)
+	}
+	// A request captured before the editor's newer change must not replace it.
+	if _, err := session.SyncRequestDocument(ctx, path, "request 1"); err != nil || content() != "editor 2" {
+		t.Fatalf("request snapshot rewound the editor document: %q, %v", content(), err)
+	}
+	if err := session.CloseDocument(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.SyncRequestDocument(ctx, path, "request 3"); err != nil || content() != "request 3" {
+		t.Fatalf("closed document kept editor ownership: %q, %v", content(), err)
+	}
+}
+
+func TestRefreshDiskDocumentsFollowsDiskButNotEditors(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	disk, editor := filepath.Join(root, "disk.go"), filepath.Join(root, "editor.go")
+	for _, path := range []string{disk, editor} {
+		if err := os.WriteFile(path, []byte("one\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := &Session{documents: map[string]*document{}}
+	if _, err := session.OpenDocument(ctx, disk); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.SyncEditorDocument(ctx, editor, "one\n", true); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{disk, editor} {
+		if err := os.WriteFile(path, []byte("two two\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session.RefreshDiskDocuments(ctx)
+	if content, _ := session.DocumentContent(disk); content != "two two\n" {
+		t.Fatalf("disk-backed document stayed stale: %q", content)
+	}
+	if content, _ := session.DocumentContent(editor); content != "one\n" {
+		t.Fatalf("editor-owned document was replaced from disk: %q", content)
+	}
+	if err := os.Remove(disk); err != nil {
+		t.Fatal(err)
+	}
+	session.RefreshDiskDocuments(ctx)
+	if _, open := session.DocumentContent(disk); open {
+		t.Fatal("deleted file stayed open")
+	}
+}
+
+func TestCommandEditsReportTheClientsDecision(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	session := &Session{rootURI: fileuri.FromPath(root)}
+	client := &sessionClient{session: session}
+	edit := func(path string) *protocol.ApplyWorkspaceEditParams {
+		return &protocol.ApplyWorkspaceEditParams{Edit: protocol.WorkspaceEdit{Changes: map[lspuri.URI][]protocol.TextEdit{
+			lspuri.MustParse(fileuri.FromPath(path)): {{NewText: "x"}},
+		}}}
+	}
+	inside := edit(filepath.Join(root, "main.go"))
+	if result, _ := client.ApplyEdit(ctx, inside); result.Applied {
+		t.Fatal("an edit outside a command was applied")
+	}
+	decisions := []bool{}
+	accept := false
+	session.applyEdit = func(CommandWorkspaceEdit) bool {
+		decisions = append(decisions, accept)
+		return accept
+	}
+	if result, _ := client.ApplyEdit(ctx, inside); result.Applied || result.FailureReason == nil {
+		t.Fatalf("a declined edit was reported as applied: %+v", result)
+	}
+	accept = true
+	if result, _ := client.ApplyEdit(ctx, inside); !result.Applied {
+		t.Fatalf("an accepted edit was reported as declined: %+v", result)
+	}
+	if result, _ := client.ApplyEdit(ctx, edit(filepath.Join(filepath.Dir(root), "outside.go"))); result.Applied || len(decisions) != 2 {
+		t.Fatalf("an edit outside the workspace reached the client: %+v, %d decisions", result, len(decisions))
+	}
+}
+
 func TestOpenDocumentDoesNotReplaceDirtyEditorBuffer(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "main.go")

@@ -18,10 +18,11 @@ test("server defaults keep fresh data quiet and stale data recoverable", () => {
 	assert.equal(defaults.mutations, undefined);
 });
 
-test("skills events invalidate every session-scoped skill catalog", () => {
+test("skills events invalidate the workspace catalogue and session command pickers", () => {
 	const client = new QueryClient();
-	const first = queryKeys.skills.list("one");
-	const second = queryKeys.skills.list("two");
+	const first = queryKeys.chatCommands.list("one");
+	const second = queryKeys.chatCommands.list("two");
+	client.setQueryData(queryKeys.skills.list, []);
 	client.setQueryData(first, []);
 	client.setQueryData(second, []);
 
@@ -29,6 +30,10 @@ test("skills events invalidate every session-scoped skill catalog", () => {
 
 	assert.equal(client.getQueryState(first)?.isInvalidated, true);
 	assert.equal(client.getQueryState(second)?.isInvalidated, true);
+	assert.equal(
+		client.getQueryState(queryKeys.skills.list)?.isInvalidated,
+		true,
+	);
 });
 
 test("diff events invalidate diff and Git query families", () => {

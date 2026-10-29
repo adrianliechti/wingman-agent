@@ -1,3 +1,5 @@
+import type { WorkspaceInfo } from "../api/workspace.ts";
+import { ChangesetClient } from "./changesetClient.ts";
 import { FileClient } from "./fileClient.ts";
 import { DAPClient } from "./dapClient.ts";
 import { LSPClient } from "./lspClient.ts";
@@ -41,18 +43,17 @@ export type Bootstrap = WorkspaceScope & {
 	protocol: number;
 	backends: { id: string; name: string }[];
 };
-export async function fetchBootstrap(): Promise<Bootstrap> {
-	const response = await fetch("/api/v2/bootstrap");
+export async function fetchWorkspace(): Promise<WorkspaceInfo & Bootstrap> {
+	const response = await fetch("/api/workspace");
 	if (!response.ok) throw new APIError(await response.text(), response.status);
-	const scope = (await response.json()) as Bootstrap;
-	if (
-		scope.protocol !== 2 ||
-		!scope.instanceId ||
-		!scope.workspaceId ||
-		!Array.isArray(scope.backends)
-	)
+	const scope = (await response.json()) as WorkspaceInfo;
+	if (scope.protocol !== 2 || !scope.instanceId || !scope.workspaceId)
 		throw new Error("Unsupported workspace protocol. Reload the application.");
-	return scope;
+	const backends = await createWorkspaceHTTP(scope.instanceId).fetchJSON<
+		Bootstrap["backends"]
+	>("/api/v2/backends");
+	if (!Array.isArray(backends)) throw new Error("Invalid backend catalogue");
+	return { ...scope, backends };
 }
 
 export type Receipt = {
@@ -81,6 +82,7 @@ export class WorkspaceClient {
 	readonly lsp: LSPClient;
 	readonly dap: DAPClient;
 	readonly files: FileClient;
+	readonly changesets: ChangesetClient;
 	private observed = new Map<string, { count: number; release: () => void }>();
 	private resources = new Map<string, string>();
 	private sends = new Map<
@@ -96,6 +98,7 @@ export class WorkspaceClient {
 		this.lsp = new LSPClient(scope.instanceId);
 		this.dap = new DAPClient(scope.instanceId);
 		this.files = new FileClient(ahp, this.lsp);
+		this.changesets = new ChangesetClient(ahp);
 		this.scope = scope;
 		this.ahp = ahp;
 		this.http = createWorkspaceHTTP(scope.instanceId);
@@ -113,6 +116,7 @@ export class WorkspaceClient {
 		this.ahp.start();
 	}
 	stop() {
+		this.changesets.close();
 		this.dap.close();
 		this.lsp.close();
 		this.ahp.stop();
@@ -229,6 +233,7 @@ export class WorkspaceClient {
 		text: string,
 		files: string[] = [],
 		images: string[] = [],
+		completions: MessageAttachment[] = [],
 	): Message {
 		const attachments: MessageAttachment[] = files.map((file) => ({
 			type: MessageAttachmentKind.Resource,
@@ -248,7 +253,11 @@ export class WorkspaceClient {
 					data: match[2],
 				});
 		}
-		return { text, attachments, origin: { kind: MessageKind.User } };
+		return {
+			text,
+			attachments: [...attachments, ...completions],
+			origin: { kind: MessageKind.User },
+		};
 	}
 	async command(key: string, command: Command): Promise<Receipt> {
 		const { uri, chat, info } = await this.state(key);
@@ -271,6 +280,7 @@ export class WorkspaceClient {
 						String(command.text ?? ""),
 						command.files as string[],
 						command.images as string[],
+						command.completions as MessageAttachment[],
 					),
 				};
 				break;
@@ -379,8 +389,16 @@ export class WorkspaceClient {
 		files: string[] = [],
 		images: string[] = [],
 		intent = "follow_up",
+		completions: MessageAttachment[] = [],
 	) {
-		const fingerprint = JSON.stringify([key, text, files, images, intent]);
+		const fingerprint = JSON.stringify([
+			key,
+			text,
+			files,
+			images,
+			intent,
+			completions,
+		]);
 		let entry = this.sends.get(fingerprint);
 		if (!entry) {
 			entry = {
@@ -390,6 +408,7 @@ export class WorkspaceClient {
 					text,
 					files: [...files],
 					images: [...images],
+					completions: structuredClone(completions),
 					intent,
 				},
 			};

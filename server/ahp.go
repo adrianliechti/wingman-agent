@@ -24,31 +24,30 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agents"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
+	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/coder/websocket"
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
 type ahpHost struct {
-	server             *Server
-	mu                 sync.Mutex
-	createMu           sync.Mutex
-	terminalMu         sync.Mutex
-	terminalOnce       sync.Once
-	terminals          map[string]*ahpTerminal
-	watches            map[string]*ahpResourceWatch
-	watchOnce          sync.Once
-	changesMu          sync.Mutex
-	changesOnce        sync.Once
-	changesFingerprint uint64 // protected by changesMu
-	changes            *t.ChangesetState
-	contents           map[string]string
-	done               chan struct{}
-	seq                int64
-	clients            map[*ahpConnection]struct{}
-	sessions           map[string]*ahpSession
-	aliases            map[string]ahpAlias
-	receipts           map[string]*ahpClientReceipts
-	closed             bool
+	server       *Server
+	mu           sync.Mutex
+	createMu     sync.Mutex
+	terminalMu   sync.Mutex
+	terminalOnce sync.Once
+	terminals    map[string]*ahpTerminal
+	watches      map[string]*ahpResourceWatch
+	watchOnce    sync.Once
+	changesMu    sync.Mutex
+	changesOnce  sync.Once
+	changesets   map[string]*ahpChangeset
+	done         chan struct{}
+	seq          int64
+	clients      map[*ahpConnection]struct{}
+	sessions     map[string]*ahpSession
+	aliases      map[string]ahpAlias
+	receipts     map[string]*ahpClientReceipts
+	closed       bool
 }
 
 type ahpAlias struct {
@@ -166,9 +165,29 @@ func (h *ahpHost) close() {
 	}
 }
 
+// Web pages always send an http(s) or "null" Origin, so only the same-origin
+// Web UI may use one. Native clients send none; desktop web views (VS Code's
+// vscode-file://) use their own schemes, which no website can claim.
+func ahpOriginAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if u.Scheme == "http" || u.Scheme == "https" {
+		return strings.EqualFold(u.Host, r.Host)
+	}
+	return true
+}
+
 func (s *Server) handleAHP(w http.ResponseWriter, r *http.Request) {
-	// The local AHP endpoint intentionally accepts clients from any origin.
-	// The server's loopback listener and Host validation still apply.
+	if !ahpOriginAllowed(r) {
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return
@@ -458,8 +477,8 @@ func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
 		} else if watch := h.watches[channel]; watch != nil {
 			state.ResourceWatch = &watch.state
 			watch.touched = time.Now()
-		} else if channel == ahpWorkspaceChanges && h.changes != nil {
-			state.Changeset = h.changes
+		} else if changeset := h.changesets[channel]; changeset != nil {
+			state.Changeset = &changeset.state
 		} else {
 			a := h.sessionByChannel(channel)
 			if a == nil || a.deleted {
@@ -480,7 +499,7 @@ func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
 	switch req.Method {
 	case "initialize":
 		dir := h.directoryURI()
-		c.reply(req.ID, t.InitializeResult{ProtocolVersion: version, ServerSeq: h.seq, ServerInfo: &t.Implementation{Name: "wingman", Title: ahpPtr("Wingman")}, Snapshots: snapshots, DefaultDirectory: &dir}, nil)
+		c.reply(req.ID, t.InitializeResult{ProtocolVersion: version, ServerSeq: h.seq, ServerInfo: &t.Implementation{Name: "wingman", Title: ahpPtr("Wingman")}, Snapshots: snapshots, DefaultDirectory: &dir, CompletionTriggerCharacters: []string{"/"}}, nil)
 	case "reconnect":
 		// AHP explicitly permits snapshot recovery when replay is unavailable.
 		c.reply(req.ID, map[string]any{"type": "snapshot", "snapshots": snapshots}, nil)
@@ -539,13 +558,28 @@ func (h *ahpHost) root() (t.RootState, error) {
 		if runtime != nil && runtime.beginOperation() {
 			models, _ := runtime.agent.Models("")
 			for _, m := range models {
-				info.Models = append(info.Models, t.SessionModelInfo{Id: m.ID, Name: m.Name, Provider: entry.ID})
+				info.Models = append(info.Models, ahpModelInfo(entry.ID, m))
 			}
 			runtime.operations.Done()
 		}
 		root.Agents = append(root.Agents, info)
 	}
 	return root, nil
+}
+
+func ahpModelInfo(provider string, m model.Model) t.SessionModelInfo {
+	info := t.SessionModelInfo{Id: m.ID, Name: m.Name, Provider: provider}
+	if m.Namespace != "" {
+		info.Vendor = &m.Namespace
+	}
+	if m.Context > 0 {
+		info.MaxContextWindow = ahpPtr(int64(m.Context))
+		info.MaxPromptTokens = ahpPtr(int64(m.InputTokens()))
+	}
+	if m.Output > 0 {
+		info.MaxOutputTokens = ahpPtr(int64(m.Output))
+	}
+	return info
 }
 
 func validAHPSessionURI(resource string) bool {
@@ -655,6 +689,8 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 		return nil, ahpInvalid("channel required")
 	}
 	switch req.Method {
+	case "invokeChangesetOperation":
+		return h.invokeChangesetOperation(req.Params)
 	case "x-wingman/fileSearch", "x-wingman/revealResource":
 		return h.fileExtension(req)
 	case "x-wingman/cancelSearch":
@@ -731,7 +767,7 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 	case "sessionConfigCompletions":
 		return t.SessionConfigCompletionsResult{Items: []t.SessionConfigValueItem{}}, nil
 	case "completions":
-		return t.CompletionsResult{Items: []t.CompletionItem{}}, nil
+		return h.completions(req.Params)
 	case "fetchTurns":
 		var p t.FetchTurnsParams
 		if json.Unmarshal(req.Params, &p) != nil || p.Cursor != nil {

@@ -7,6 +7,7 @@ import {
 	getDebugState,
 	setDebugBreakpoints,
 	type DebugAction,
+	type DebugBreakpoint,
 	type DebugSourceBreakpoint,
 	type DebugState,
 	type DebugTarget,
@@ -24,6 +25,15 @@ export interface MonacoDebugBridge {
 }
 
 let bridgeSequence = 0;
+
+function breakpointHover(verification?: DebugBreakpoint) {
+	if (!verification || verification.verified) return "Debug breakpoint";
+	if (verification.reason === "pending")
+		return "Debug breakpoint (applies when the debugger starts)";
+	return verification.message
+		? `Unverified breakpoint: ${verification.message}`
+		: "Unverified breakpoint";
+}
 
 export function createMonacoDebugBridge({
 	monaco,
@@ -43,6 +53,8 @@ export function createMonacoDebugBridge({
 	let pollTimer = 0;
 	let state: DebugState | null = null;
 	let breakpoints: DebugSourceBreakpoint[] = [];
+	// Adapter verification, in the same order as `breakpoints`.
+	let resolved: DebugBreakpoint[] = [];
 	let breakpointMutation = false;
 	let breakpointRevision = 0;
 
@@ -55,12 +67,15 @@ export function createMonacoDebugBridge({
 		if (!model || disposed) return;
 		breakpointDecorations.set(
 			breakpoints
-				.filter((breakpoint) => breakpoint.line >= 1)
-				.map((breakpoint) => ({
+				.map((breakpoint, index) => ({ breakpoint, verification: resolved[index] }))
+				.filter(({ breakpoint }) => breakpoint.line >= 1)
+				.map(({ breakpoint, verification }) => ({
 					range: new monaco.Range(breakpoint.line, 1, breakpoint.line, 1),
 					options: {
 						glyphMarginClassName: "wingman-debug-breakpoint",
-						glyphMarginHoverMessage: { value: "Debug breakpoint" },
+						glyphMarginHoverMessage: {
+							value: breakpointHover(verification),
+						},
 					},
 				})),
 		);
@@ -89,7 +104,10 @@ export function createMonacoDebugBridge({
 
 	function applyState(next: DebugState) {
 		state = next;
-		if (!breakpointMutation) breakpoints = next.breakpoints ?? [];
+		if (!breakpointMutation) {
+			breakpoints = next.breakpoints ?? [];
+			resolved = next.resolved ?? [];
+		}
 		applyDecorations();
 	}
 
@@ -126,6 +144,7 @@ export function createMonacoDebugBridge({
 			? previous.filter((breakpoint) => breakpoint.line !== line)
 			: [...previous, { line }].sort((left, right) => left.line - right.line);
 		breakpointMutation = true;
+		resolved = [];
 		applyDecorations();
 		const controller = new AbortController();
 		try {
@@ -133,7 +152,10 @@ export function createMonacoDebugBridge({
 				controller,
 				setDebugBreakpoints(path, breakpoints, controller.signal),
 			);
-			if (revision === breakpointRevision) breakpoints = result.breakpoints;
+			if (revision === breakpointRevision) {
+				breakpoints = result.breakpoints;
+				resolved = result.resolved ?? [];
+			}
 		} catch {
 			if (revision === breakpointRevision) breakpoints = previous;
 		} finally {

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import type { ManagedToolsStatus } from "../api/capabilities";
+import type { ManagedToolsStatus } from "../api/workspace";
 import { getLSPActivity } from "../api/lsp";
 import { queryKeys } from "../api/query";
 import { ActivityCenter, type ActivityItem } from "./ActivityCenter";

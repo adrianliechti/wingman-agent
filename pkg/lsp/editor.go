@@ -12,8 +12,8 @@ import (
 )
 
 // CommandWorkspaceEdit is an edit a language server asks the client to apply
-// while executing a workspace command. The caller remains responsible for
-// validating and applying it.
+// while executing a workspace command. Its URIs are confined to the project;
+// the caller remains responsible for reviewing and applying it.
 type CommandWorkspaceEdit struct {
 	Label string
 	Edit  protocol.WorkspaceEdit
@@ -78,46 +78,41 @@ func (s *Session) ExecuteCommand(ctx context.Context, command protocol.Command) 
 	})
 }
 
-// ExecuteCommandWithEdits accepts workspace/applyEdit callbacks for the
-// duration of one serialized command and returns them to the editor client.
-func (s *Session) ExecuteCommandWithEdits(ctx context.Context, command protocol.Command) (result any, edits []CommandWorkspaceEdit, err error) {
+// ExecuteCommandWithEdits runs one serialized command. Each workspace/applyEdit
+// the server sends meanwhile goes to apply, and the server receives its answer.
+func (s *Session) ExecuteCommandWithEdits(ctx context.Context, command protocol.Command, apply func(CommandWorkspaceEdit) bool) (any, error) {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
 
 	s.applyEditMu.Lock()
-	s.captureEdits = true
-	s.commandEdits = nil
+	s.applyEdit = apply
 	s.applyEditMu.Unlock()
 	defer func() {
 		s.applyEditMu.Lock()
-		edits = s.commandEdits
-		s.commandEdits = nil
-		s.captureEdits = false
+		s.applyEdit = nil
 		s.applyEditMu.Unlock()
 	}()
 
-	result, err = s.rpc.ExecuteCommand(ctx, &protocol.ExecuteCommandParams{
+	return s.rpc.ExecuteCommand(ctx, &protocol.ExecuteCommandParams{
 		Command:   command.Command,
 		Arguments: command.Arguments,
 	})
-	return result, edits, err
 }
 
-func (s *Session) captureCommandEdit(params *protocol.ApplyWorkspaceEditParams) error {
+func (s *Session) commandEdit(params *protocol.ApplyWorkspaceEditParams) (func(CommandWorkspaceEdit) bool, CommandWorkspaceEdit, error) {
 	s.applyEditMu.Lock()
 	defer s.applyEditMu.Unlock()
-	if !s.captureEdits {
-		return fmt.Errorf("the client is not executing a command")
+	if s.applyEdit == nil {
+		return nil, CommandWorkspaceEdit{}, fmt.Errorf("the client is not executing a command")
 	}
 	if err := s.validateCommandEdit(params.Edit); err != nil {
-		return err
+		return nil, CommandWorkspaceEdit{}, err
 	}
 	label := ""
 	if params.Label != nil {
 		label = *params.Label
 	}
-	s.commandEdits = append(s.commandEdits, CommandWorkspaceEdit{Label: label, Edit: params.Edit})
-	return nil
+	return s.applyEdit, CommandWorkspaceEdit{Label: label, Edit: params.Edit}, nil
 }
 
 func (s *Session) validateCommandEdit(edit protocol.WorkspaceEdit) error {

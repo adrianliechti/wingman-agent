@@ -4,6 +4,10 @@ import { EditorConnection } from "./editorConnection.ts";
 export class LSPClient {
 	readonly connection: EditorConnection;
 	private root = "";
+	semanticTokensLegend = {
+		tokenTypes: [] as string[],
+		tokenModifiers: [] as string[],
+	};
 	private documents = new Map<string, { text: string; version: number }>();
 	constructor(instance: string) {
 		this.connection = new EditorConnection("lsp", instance, {
@@ -12,10 +16,36 @@ export class LSPClient {
 			rootUri: null,
 			capabilities: {
 				general: { positionEncodings: ["utf-16"] },
-				workspace: { applyEdit: true, textDocumentContent: {} },
+				workspace: {
+					applyEdit: true,
+					workspaceEdit: {
+						documentChanges: true,
+						changeAnnotationSupport: {},
+					},
+					textDocumentContent: {},
+				},
 				textDocument: {
 					synchronization: { didSave: true },
-					completion: { completionItem: { snippetSupport: true } },
+					completion: {
+						completionItem: {
+							snippetSupport: true,
+							insertReplaceSupport: true,
+						},
+					},
+					hover: { contentFormat: ["markdown", "plaintext"] },
+					documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+					rename: { prepareSupport: true },
+					codeAction: {
+						codeActionLiteralSupport: {
+							codeActionKind: {
+								valueSet: ["", "quickfix", "refactor", "source"],
+							},
+						},
+						isPreferredSupport: true,
+						disabledSupport: true,
+						dataSupport: true,
+						resolveSupport: { properties: ["edit"] },
+					},
 					diagnostic: {},
 					semanticTokens: { requests: { full: true } },
 				},
@@ -27,6 +57,9 @@ export class LSPClient {
 					/\/$/,
 					"",
 				) + "/";
+			this.semanticTokensLegend =
+				result.capabilities.semanticTokensProvider?.legend ??
+				this.semanticTokensLegend;
 			for (const [path, doc] of this.documents) this.open(path, doc);
 		};
 	}
@@ -129,12 +162,11 @@ export class LSPClient {
 		if (method === "codeAction/resolve") params = body.action;
 		if (method === "workspace/executeCommand")
 			Object.assign(params, body.command);
-		const value = await this.connection.request<any>(
-			method,
-			params,
-			signal,
+		const value = await this.connection.request<any>(method, params, signal, {
 			applyEdit,
-		);
+			// Command edits wait for the user's review; the host bounds the native call.
+			timeout: method === "workspace/executeCommand" ? 0 : undefined,
+		});
 		// Only presentation adaptation lives here; wire values remain LSP values.
 		if (method === "textDocument/hover")
 			return { contents: value?.contents?.value ?? value?.contents ?? "" } as T;

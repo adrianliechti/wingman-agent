@@ -42,6 +42,7 @@ type debugPlanBreakpoint struct {
 }
 
 type debugLaunchPlan struct {
+	ID                  string                `json:"id,omitempty"`
 	Action              string                `json:"action"`
 	Title               string                `json:"title"`
 	Adapter             string                `json:"adapter"`
@@ -238,7 +239,7 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	if changed {
-		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+		s.broadcast(Frame{Type: EvtWorkspaceChanged})
 	}
 	if ctx.Err() != nil {
 		return
@@ -310,6 +311,13 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.validateDebugPlan(&plan, adapterInfo); err != nil {
 		fail(fmt.Errorf("invalid deterministic debug configuration: %w", err), http.StatusUnprocessableEntity)
+		return
+	}
+	if err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
+		plan.ID = manager.RememberPlan(cloneDebugLaunchPlan(plan))
+		return nil
+	}); err != nil {
+		fail(err, http.StatusServiceUnavailable)
 		return
 	}
 	if streaming {
@@ -911,6 +919,49 @@ func (s *Server) debugStartOptions(plan debugLaunchPlan) dap.StartOptions {
 		}
 	}
 	return options
+}
+
+func cloneDebugLaunchPlan(plan debugLaunchPlan) debugLaunchPlan {
+	plan.Configuration = cloneJSONMap(plan.Configuration)
+	plan.Breakpoints = slices.Clone(plan.Breakpoints)
+	plan.FunctionBreakpoints = slices.Clone(plan.FunctionBreakpoints)
+	plan.PreLaunch = cloneDebugProcessLaunch(plan.PreLaunch)
+	return plan
+}
+
+// reviewedDebugPlan starts from the plan the host generated. The browser may
+// change only what its review dialog offers: I/O, adapter options and whether
+// the plan's initial breakpoints apply. Commands such as prelaunch never come
+// from the client.
+func (s *Server) reviewedDebugPlan(manager *dap.Manager, id string, edits *debugLaunchPlan) (debugLaunchPlan, error) {
+	value, ok := manager.ReviewedPlan(id)
+	stored, valid := value.(debugLaunchPlan)
+	if !ok || !valid {
+		return debugLaunchPlan{}, errors.New("the reviewed debug plan has expired; prepare the launch again")
+	}
+	plan := cloneDebugLaunchPlan(stored)
+	if edits == nil {
+		return plan, nil
+	}
+	if edits.IO != "" {
+		plan.IO = edits.IO
+	}
+	if edits.Configuration != nil {
+		plan.Configuration = cloneJSONMap(edits.Configuration)
+	}
+	for _, breakpoint := range edits.Breakpoints {
+		if !slices.Contains(stored.Breakpoints, breakpoint) {
+			return debugLaunchPlan{}, errors.New("launch breakpoints must come from the reviewed plan")
+		}
+	}
+	for _, name := range edits.FunctionBreakpoints {
+		if !slices.Contains(stored.FunctionBreakpoints, name) {
+			return debugLaunchPlan{}, errors.New("launch function breakpoints must come from the reviewed plan")
+		}
+	}
+	plan.Breakpoints = slices.Clone(edits.Breakpoints)
+	plan.FunctionBreakpoints = slices.Clone(edits.FunctionBreakpoints)
+	return plan, nil
 }
 
 func cloneDebugProcessLaunch(value *dap.ProcessLaunch) *dap.ProcessLaunch {

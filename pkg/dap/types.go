@@ -127,6 +127,17 @@ type StartOptions struct {
 	PreLaunch           *ProcessLaunch
 	terminalLauncher    TerminalLauncher
 	adapterConnector    AdapterConnector
+	hooks               sessionHooks
+}
+
+// sessionHooks connect a session to its manager's editor-owned state. Child
+// sessions inherit them so every adapter in a debug tree shares one view.
+type sessionHooks struct {
+	output           *outputBuffer
+	breakpointSource func() (map[string][]SourceBreakpoint, uint64)
+	exceptionFilters func() ([]string, bool)
+	breakpointID     func(path string, line, column int) int
+	onBreakpoint     func(path string, line, column int, breakpoint Breakpoint)
 }
 
 // ProcessLaunch is a process owned by the debug session and started before
@@ -183,6 +194,8 @@ type Stop struct {
 	ThreadID          int    `json:"thread_id,omitempty"`
 	AllThreadsStopped bool   `json:"all_threads_stopped,omitempty"`
 	HitBreakpointIDs  []int  `json:"hit_breakpoint_ids,omitempty"`
+	// Sequence identifies one adapter stopped event across all sessions.
+	Sequence uint64 `json:"-"`
 }
 
 type Status struct {
@@ -198,13 +211,37 @@ type Status struct {
 	StateVersion uint64       `json:"state_version"`
 	State        State        `json:"state"`
 	Stop         *Stop        `json:"stop,omitempty"`
-	ExitCode     *int         `json:"exit_code,omitempty"`
-	StartedAt    time.Time    `json:"started_at"`
-	Error        string       `json:"error,omitempty"`
+	// StoppedThreads lists suspended threads when the adapter stops them individually.
+	StoppedThreads []int     `json:"stopped_threads,omitempty"`
+	ExitCode       *int      `json:"exit_code,omitempty"`
+	StartedAt      time.Time `json:"started_at"`
+	Error          string    `json:"error,omitempty"`
 }
 
 type Capabilities struct {
-	SupportsStepBack bool `json:"supports_step_back"`
+	SupportsStepBack                  bool              `json:"supports_step_back"`
+	SupportsTerminateRequest          bool              `json:"supports_terminate_request,omitempty"`
+	SupportsCancelRequest             bool              `json:"supports_cancel_request,omitempty"`
+	SupportsConditionalBreakpoints    bool              `json:"supports_conditional_breakpoints,omitempty"`
+	SupportsHitConditionalBreakpoints bool              `json:"supports_hit_conditional_breakpoints,omitempty"`
+	SupportsLogPoints                 bool              `json:"supports_log_points,omitempty"`
+	SupportsEvaluateForHovers         bool              `json:"supports_evaluate_for_hovers,omitempty"`
+	ExceptionFilters                  []ExceptionFilter `json:"exception_filters,omitempty"`
+}
+
+type ExceptionFilter struct {
+	Filter      string `json:"filter"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+	Default     bool   `json:"default,omitempty"`
+}
+
+// OutputChunk is debugger output with its DAP category. Offset counts UTF-16
+// code units since the session started, so browsers can slice it directly.
+type OutputChunk struct {
+	Category string `json:"category"`
+	Output   string `json:"output"`
+	Offset   int64  `json:"offset"`
 }
 
 type Thread struct {
@@ -257,4 +294,11 @@ type Breakpoint struct {
 	Message  string `json:"message,omitempty"`
 	Line     int    `json:"line,omitempty"`
 	Column   int    `json:"column,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// ResolvedBreakpoint is the adapter's latest verification of an editor breakpoint.
+type ResolvedBreakpoint struct {
+	Path string
+	Breakpoint
 }

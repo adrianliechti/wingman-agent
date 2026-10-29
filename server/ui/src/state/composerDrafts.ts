@@ -24,13 +24,14 @@ const hasContent = (c: ComposerContent) =>
 		c.previousDraft?.images.length
 	);
 const contentOf = (draft: ComposerDraft): ComposerContent => {
-	const { text, files, images, editingQueueId, previousDraft } =
+	const { text, files, images, completions, editingQueueId, previousDraft } =
 		draft.getSnapshot();
 	return {
 		text,
 		files,
 		images,
 		editingQueueId,
+		...(completions?.length ? { completions } : {}),
 		...(previousDraft ? { previousDraft } : {}),
 	};
 };
@@ -41,6 +42,11 @@ function isDraftContent(value: unknown): boolean {
 	const content = value as Partial<ComposerContent> | null;
 	return (
 		typeof content?.text === "string" &&
+		(content.completions === undefined ||
+			(Array.isArray(content.completions) &&
+				content.completions.every(
+					(item) => item?.type === "simple" && typeof item.label === "string",
+				))) &&
 		Array.isArray(content.files) &&
 		content.files.every((path) => typeof path === "string") &&
 		Array.isArray(content.images) &&
@@ -174,6 +180,7 @@ export class ComposerDrafts {
 				content.text === previous.text &&
 				content.files === previous.files &&
 				content.images === previous.images &&
+				content.completions === previous.completions &&
 				content.previousDraft === previous.previousDraft &&
 				content.editingQueueId === previous.editingQueueId
 			)

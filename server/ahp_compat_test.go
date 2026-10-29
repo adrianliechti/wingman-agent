@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -102,6 +103,47 @@ func TestAHPSnapshotPrecedesConcurrentUpdates(test *testing.T) {
 		h.mu.Lock()
 		delete(h.clients, peer)
 		h.mu.Unlock()
+	}
+}
+
+func TestAHPReasoningTimingEndsAtNextPartAndSurvivesCompletion(test *testing.T) {
+	s, b, _ := newProtocolServer(test)
+	c := b.session("saved")
+	c.load()
+	h := s.ahpHost()
+	a := h.attach(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	reasoning := func(parts []t.ResponsePart) t.ReasoningResponsePart {
+		test.Helper()
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for _, part := range parts {
+			if p, ok := part.Value.(*t.ReasoningResponsePart); ok {
+				return *p
+			}
+		}
+		test.Fatal("missing reasoning part")
+		return t.ReasoningResponsePart{}
+	}
+	entry := turnQueueEntry(code.TurnInput{ID: "turn", Content: []harness.Content{{Text: "hello"}}}, code.TurnInputActive, 0)
+	c.apply(Frame{Type: EvtTurnInput, Input: &entry})
+	c.apply(Frame{Type: EvtReasoningDelta, ID: "think", Text: "Thinking"})
+	time.Sleep(20 * time.Millisecond)
+	c.apply(Frame{Type: EvtReasoningDelta, ID: "think", Text: " more"})
+	if part := reasoning(a.chat.ActiveTurn.ResponseParts); part.StartedAt == nil || part.Duration != nil || part.Content != "Thinking more" {
+		test.Fatalf("open reasoning run: %+v", part)
+	}
+	c.apply(Frame{Type: EvtTextDelta, ID: "answer", Text: "Done"})
+	part := reasoning(a.chat.ActiveTurn.ResponseParts)
+	if part.Duration == nil || *part.Duration < 20 {
+		test.Fatalf("markdown must end the reasoning run: %+v", part)
+	}
+	done := turnQueueEntry(code.TurnInput{ID: "turn"}, code.TurnInputCompleted, 0)
+	c.apply(Frame{Type: EvtTurnInput, Input: &done})
+	if len(a.chat.Turns) != 1 || a.chat.ActiveTurn != nil {
+		test.Fatalf("turn did not complete: %+v", a.chat)
+	}
+	if completed := reasoning(a.chat.Turns[0].ResponseParts); !reflect.DeepEqual(completed, part) {
+		test.Fatalf("completion changed timing: %+v != %+v", completed, part)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/remote"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -234,6 +235,12 @@ func TestRemotePairingSwitchCannotRedirectAnOldWorkspaceCommand(t *testing.T) {
 	first, _, _ := newProtocolServer(t)
 	second, b, a := newProtocolServer(t)
 	second.scope = WorkspaceScope{WorkspaceID: "second-workspace", InstanceID: "second-instance"}
+	workspace, err := code.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.workspace = workspace
+	second.mux.Get("/api/workspace", second.handleWorkspace)
 	c := b.session("saved")
 	c.load()
 	relay := remote.NewRelay("test-token")
@@ -251,7 +258,7 @@ func TestRemotePairingSwitchCannotRedirectAnOldWorkspaceCommand(t *testing.T) {
 		t.Fatalf("old browser mutated newly paired workspace: status=%d sends=%d", status, a.sent.Load())
 	}
 	first.Close()
-	response, err := client.Get(web.URL + "/api/v2/bootstrap")
+	response, err := client.Get(web.URL + "/api/workspace")
 	if err != nil {
 		t.Fatal(err)
 	}
