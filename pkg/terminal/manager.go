@@ -21,12 +21,22 @@ type Manager struct {
 	sessions map[string]*Session // Nil after Close; no more sessions may be created.
 
 	onExit func(id string)
+	subs   map[chan Event]struct{}
 }
+
+// Event describes catalogue changes. Output has its own per-session stream.
+type Event struct {
+	Kind    string
+	Session *Session
+}
+
+const MaxSessions = 128
 
 func NewManager(dir string) *Manager {
 	return &Manager{
 		dir:      dir,
 		sessions: map[string]*Session{},
+		subs:     map[chan Event]struct{}{},
 	}
 }
 
@@ -37,9 +47,19 @@ func (m *Manager) SetExitHandler(fn func(id string)) {
 }
 
 func (m *Manager) Create(shell string, cols, rows int) (*Session, error) {
+	return m.CreateShell(shell, "", "", cols, rows)
+}
+
+// CreateShell selects an installed shell and confines its working directory to
+// this workspace, just like editor-owned commands.
+func (m *Manager) CreateShell(shell, dir, title string, cols, rows int) (*Session, error) {
 	resolved, ok := resolveShell(shell)
 	if !ok {
 		return nil, fmt.Errorf("unknown shell %q", shell)
+	}
+	dir, err := m.commandDir(dir)
+	if err != nil {
+		return nil, err
 	}
 
 	// Held across the whole creation so a shell that exits immediately cannot run
@@ -49,8 +69,11 @@ func (m *Manager) Create(shell string, cols, rows int) (*Session, error) {
 	if m.sessions == nil {
 		return nil, errors.New("terminal manager is closed")
 	}
+	if len(m.sessions) >= MaxSessions {
+		return nil, errors.New("terminal limit reached; dispose an existing terminal")
+	}
 
-	s, err := newSession(uuid.NewString(), resolved, m.dir, cols, rows, m.handleExit)
+	s, err := newCommandSession(uuid.NewString(), CommandSpec{Path: resolved, Dir: dir, Title: title}, cols, rows, m.handleExit)
 
 	if err != nil {
 		return nil, err
@@ -58,6 +81,7 @@ func (m *Manager) Create(shell string, cols, rows int) (*Session, error) {
 
 	m.sessions[s.ID()] = s
 	m.order = append(m.order, s.ID())
+	m.publishLocked(Event{Kind: "created", Session: s})
 
 	return s, nil
 }
@@ -78,6 +102,9 @@ func (m *Manager) CreateCommand(spec CommandSpec, cols, rows int) (*Session, err
 	if m.sessions == nil {
 		return nil, errors.New("terminal manager is closed")
 	}
+	if len(m.sessions) >= MaxSessions {
+		return nil, errors.New("terminal limit reached; dispose an existing terminal")
+	}
 
 	session, err := newCommandSession(uuid.NewString(), spec, cols, rows, m.handleExit)
 	if err != nil {
@@ -85,6 +112,7 @@ func (m *Manager) CreateCommand(spec CommandSpec, cols, rows int) (*Session, err
 	}
 	m.sessions[session.ID()] = session
 	m.order = append(m.order, session.ID())
+	m.publishLocked(Event{Kind: "created", Session: session})
 	return session, nil
 }
 
@@ -135,6 +163,10 @@ func (m *Manager) Get(id string) *Session {
 func (m *Manager) List() []*Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.listLocked()
+}
+
+func (m *Manager) listLocked() []*Session {
 	out := make([]*Session, 0, len(m.order))
 	for _, id := range m.order {
 		if s, ok := m.sessions[id]; ok {
@@ -159,6 +191,10 @@ func (m *Manager) Close() {
 	m.sessions = nil
 	m.order = nil
 	m.onExit = nil
+	for ch := range m.subs {
+		close(ch)
+		delete(m.subs, ch)
+	}
 	m.mu.Unlock()
 
 	for _, s := range sessions {
@@ -174,6 +210,7 @@ func (m *Manager) take(id string) *Session {
 		return nil
 	}
 	delete(m.sessions, id)
+	m.publishLocked(Event{Kind: "removed", Session: s})
 	if i := slices.Index(m.order, id); i >= 0 {
 		m.order = slices.Delete(m.order, i, i+1)
 	}
@@ -183,11 +220,44 @@ func (m *Manager) take(id string) *Session {
 func (m *Manager) handleExit(s *Session) {
 	m.mu.Lock()
 	fn := m.onExit
+	if m.sessions[s.ID()] == s {
+		m.publishLocked(Event{Kind: "exited", Session: s})
+	}
 	m.mu.Unlock()
-
-	m.take(s.ID())
 
 	if fn != nil {
 		fn(s.ID())
+	}
+}
+
+// Subscribe atomically captures the catalogue and starts observing changes.
+// A slow observer is disconnected and must subscribe again for a fresh view.
+func (m *Manager) Subscribe() ([]*Session, <-chan Event, func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ch := make(chan Event, 64)
+	if m.sessions == nil {
+		close(ch)
+	} else {
+		m.subs[ch] = struct{}{}
+	}
+	return m.listLocked(), ch, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if _, ok := m.subs[ch]; ok {
+			delete(m.subs, ch)
+			close(ch)
+		}
+	}
+}
+
+func (m *Manager) publishLocked(event Event) {
+	for ch := range m.subs {
+		select {
+		case ch <- event:
+		default:
+			delete(m.subs, ch)
+			close(ch)
+		}
 	}
 }

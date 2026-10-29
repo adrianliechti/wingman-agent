@@ -28,16 +28,19 @@ import (
 )
 
 type ahpHost struct {
-	server   *Server
-	mu       sync.Mutex
-	actionMu sync.Mutex
-	createMu sync.Mutex
-	seq      int64
-	clients  map[*ahpConnection]struct{}
-	sessions map[string]*ahpSession
-	aliases  map[string]ahpAlias
-	receipts map[string]*ahpClientReceipts
-	closed   bool
+	server       *Server
+	mu           sync.Mutex
+	createMu     sync.Mutex
+	terminalMu   sync.Mutex
+	terminalOnce sync.Once
+	terminals    map[string]*ahpTerminal
+	done         chan struct{}
+	seq          int64
+	clients      map[*ahpConnection]struct{}
+	sessions     map[string]*ahpSession
+	aliases      map[string]ahpAlias
+	receipts     map[string]*ahpClientReceipts
+	closed       bool
 }
 
 type ahpAlias struct {
@@ -47,6 +50,7 @@ type ahpAlias struct {
 }
 
 type ahpClientReceipts struct {
+	mu      sync.Mutex // Serialize one identity, including overlapping reconnects.
 	last    int64
 	entries map[int64]*ahpActionReceipt
 }
@@ -82,7 +86,7 @@ func ahpInvalid(message string) error { return &ahpRPCError{Code: -32602, Messag
 
 func (s *Server) ahpHost() *ahpHost {
 	s.ahpOnce.Do(func() {
-		h := &ahpHost{server: s, clients: map[*ahpConnection]struct{}{}, sessions: map[string]*ahpSession{}, aliases: map[string]ahpAlias{}, receipts: map[string]*ahpClientReceipts{}}
+		h := &ahpHost{server: s, clients: map[*ahpConnection]struct{}{}, sessions: map[string]*ahpSession{}, aliases: map[string]ahpAlias{}, receipts: map[string]*ahpClientReceipts{}, terminals: map[string]*ahpTerminal{}, done: make(chan struct{})}
 		if dir, err := h.aliasDirectory(); err == nil {
 			files, _ := os.ReadDir(dir)
 			for _, file := range files {
@@ -136,7 +140,11 @@ func (h *ahpHost) saveAlias(alias ahpAlias) error {
 func (h *ahpHost) close() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
 	h.closed = true
+	close(h.done)
 	for c := range h.clients {
 		c.writer.close()
 		_ = c.writer.conn.CloseNow()
@@ -360,7 +368,7 @@ func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
 				return err
 			}
 			root = &state
-		} else if _, err := h.ensureSession(channel); err != nil {
+		} else if err := h.prepareChannel(channel); err != nil {
 			if req.Method != "reconnect" {
 				return err
 			}
@@ -385,7 +393,10 @@ func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
 	for _, channel := range channels {
 		var state t.SnapshotState
 		if channel == t.RootResourceURI {
+			root.Terminals = h.terminalCatalogueLocked()
 			state.Root = root
+		} else if terminal := h.terminals[channel]; terminal != nil {
+			state.Terminal = &terminal.state
 		} else {
 			a := h.sessionByChannel(channel)
 			if a == nil || a.deleted {
@@ -425,6 +436,7 @@ func (h *ahpHost) directoryURI() string {
 }
 
 func (h *ahpHost) root() (t.RootState, error) {
+	h.startTerminals()
 	available := []AgentEntry{{ID: code.BuiltinAgentName, Name: "Wingman"}}
 	if h.server.workspace != nil {
 		external, err := agents.Available()
@@ -578,6 +590,10 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 		return nil, ahpInvalid("channel required")
 	}
 	switch req.Method {
+	case "createTerminal":
+		return c.createTerminal(req.Params)
+	case "disposeTerminal":
+		return c.disposeTerminal(base.Channel)
 	case "listSessions":
 		if base.Channel != t.RootResourceURI {
 			return nil, ahpInvalid("root channel required")

@@ -73,12 +73,16 @@ type Session struct {
 	done   chan struct{}
 	onExit func(*Session)
 
-	mu     sync.Mutex
-	buf    []byte
-	subs   map[chan []byte]struct{}
-	cols   int
-	rows   int
-	closed bool
+	mu        sync.Mutex
+	buf       []byte
+	subs      map[chan []byte]struct{}
+	cols      int
+	rows      int
+	closed    bool
+	stopOnce  sync.Once
+	exitCode  int
+	exitKnown bool
+	cwd       string
 }
 
 func Supported() bool {
@@ -129,6 +133,7 @@ func newCommandSession(id string, spec CommandSpec, cols, rows int, onExit func(
 		id:    id,
 		title: strings.TrimSpace(spec.Title),
 		shell: path,
+		cwd:   dir,
 
 		pty: p,
 
@@ -158,6 +163,15 @@ func (s *Session) Title() string {
 
 func (s *Session) Shell() string {
 	return s.shell
+}
+
+func (s *Session) Cwd() string { return s.cwd }
+
+// ExitCode is available after Done closes. A killed process may have no code.
+func (s *Session) ExitCode() (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exitCode, s.exitKnown
 }
 
 func (s *Session) ProcessID() int {
@@ -250,15 +264,8 @@ func (s *Session) unsubscribe(c chan []byte) {
 }
 
 func (s *Session) Close() error {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		<-s.done
-		return nil
-	}
-	s.mu.Unlock()
-
-	err := s.pty.Close()
+	var err error
+	s.stopOnce.Do(func() { err = s.pty.Close() })
 	<-s.done
 	return err
 }
@@ -299,24 +306,30 @@ func (s *Session) publish(p []byte) {
 }
 
 func (s *Session) finish() {
+	// Wait before closing the PTY so a natural exit retains its actual status.
+	// Close remains able to terminate the process while Wait is in progress.
+	err := s.pty.Wait()
+	s.stopOnce.Do(func() { _ = s.pty.Close() })
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return
 	}
 	s.closed = true
+	var exit *exec.ExitError
+	if err == nil {
+		s.exitKnown = true
+	} else if errors.As(err, &exit) && exit.ExitCode() >= 0 {
+		s.exitCode, s.exitKnown = exit.ExitCode(), true
+	}
 	subs := s.subs
 	s.subs = map[chan []byte]struct{}{}
 	s.mu.Unlock()
 
+	close(s.done)
 	for c := range subs {
 		close(c)
 	}
-
-	_ = s.pty.Close()
-	_ = s.pty.Wait()
-
-	close(s.done)
 
 	if s.onExit != nil {
 		s.onExit(s)

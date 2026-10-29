@@ -13,15 +13,18 @@ import (
 )
 
 type ahpSession struct {
-	host       *ahpHost
-	controller *sessionController
-	resource   string
-	created    string
-	state      t.SessionState
-	chat       t.ChatState
-	deleted    bool
-	prompts    map[string]*ahpPrompt
-	pending    map[string]*ahpPendingAction
+	host             *ahpHost
+	controller       *sessionController
+	resource         string
+	created          string
+	state            t.SessionState
+	chat             t.ChatState
+	deleted          bool
+	prompts          map[string]*ahpPrompt
+	pending          map[string]*ahpPendingAction
+	projectedInput   string
+	projectedOutcome string
+	projectedPrompts []PromptView
 }
 
 type ahpPrompt struct {
@@ -67,6 +70,10 @@ func (a *ahpSession) emit(channel string, action t.StateAction) {
 
 func ahpActionKey(action t.StateAction) string {
 	switch v := action.Value.(type) {
+	case *t.ChatPendingMessageSetAction:
+		return "pending-set:" + v.Id
+	case *t.ChatPendingMessageRemovedAction:
+		return "pending-remove:" + v.Id
 	case *t.ChatTurnStartedAction:
 		return "start:" + v.TurnId
 	case *t.ChatTurnCancelledAction:
@@ -132,58 +139,68 @@ func (a *ahpSession) syncLocked(c *sessionController, changes []SessionChange) {
 	a.syncProjection(c, changes)
 }
 
-func (a *ahpSession) syncProjection(c *sessionController, _ []SessionChange) {
+func (a *ahpSession) syncProjection(c *sessionController, changes []SessionChange) {
 	previousSummary := a.summary()
-	for _, p := range c.state.Prompts {
-		if a.prompts[p.ID] == nil {
-			turn := c.activeInput
-			if a.chat.ActiveTurn != nil {
-				turn = a.chat.ActiveTurn.Id
-			}
-			a.prompts[p.ID] = &ahpPrompt{view: p, turn: turn}
+	transcriptChanged := changes == nil || a.projectedInput != c.activeInput || a.projectedOutcome != c.lastOutcome || !reflect.DeepEqual(a.projectedPrompts, c.state.Prompts)
+	for _, change := range changes {
+		if change.Type != "state.replace" {
+			transcriptChanged = true
 		}
 	}
-	for id, p := range a.prompts {
-		if p.response == nil && !slices.ContainsFunc(c.state.Prompts, func(v PromptView) bool { return v.ID == id }) {
-			p.response = &Command{Action: "cancel"}
-		}
-	}
-	turns, active := a.transcript(c)
-	if old := a.chat.ActiveTurn; old != nil && (active == nil || active.Id != old.Id) {
-		state := t.TurnStateComplete
-		if len(turns) > 0 {
-			state = turns[len(turns)-1].State
-		}
-		a.finishTurn(old.Id, state, c.state.Error)
-	}
-	if !reflect.DeepEqual(a.chat.Turns, turns) {
-		a.chatAction(t.StateAction{Value: &t.ChatTruncatedAction{Type: t.ActionTypeChatTruncated}})
-		if active == nil && len(turns) > 0 && turns[len(turns)-1].State == t.TurnStateError {
-			last := turns[len(turns)-1]
-			a.chatAction(t.StateAction{Value: &t.ChatTurnsLoadedAction{Type: t.ActionTypeChatTurnsLoaded, Turns: turns[:len(turns)-1]}})
-			a.chatAction(t.StateAction{Value: &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: last.Id, StartedAt: *last.StartedAt, Message: last.Message}})
-			for _, part := range last.ResponseParts {
-				if _, isError := part.Value.(*t.ErrorResponsePart); !isError {
-					a.chatAction(t.StateAction{Value: &t.ChatResponsePartAction{Type: t.ActionTypeChatResponsePart, TurnId: last.Id, Part: part}})
+	if transcriptChanged {
+		a.projectedInput, a.projectedOutcome = c.activeInput, c.lastOutcome
+		a.projectedPrompts = slices.Clone(c.state.Prompts)
+		for _, p := range c.state.Prompts {
+			if a.prompts[p.ID] == nil {
+				turn := c.activeInput
+				if a.chat.ActiveTurn != nil {
+					turn = a.chat.ActiveTurn.Id
 				}
+				a.prompts[p.ID] = &ahpPrompt{view: p, turn: turn}
 			}
-			a.finishTurn(last.Id, t.TurnStateError, c.state.Error)
-		} else {
-			a.chatAction(t.StateAction{Value: &t.ChatTurnsLoadedAction{Type: t.ActionTypeChatTurnsLoaded, Turns: turns}})
 		}
-	}
-	if active != nil {
-		if a.chat.ActiveTurn == nil || a.chat.ActiveTurn.Id != active.Id {
-			a.chatAction(t.StateAction{Value: &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: active.Id, StartedAt: active.StartedAt, Message: active.Message}})
-		}
-		if !a.syncParts(active.ResponseParts) {
-			var keep *string
-			if len(a.chat.Turns) > 0 {
-				keep = &a.chat.Turns[len(a.chat.Turns)-1].Id
+		for id, p := range a.prompts {
+			if p.response == nil && !slices.ContainsFunc(c.state.Prompts, func(v PromptView) bool { return v.ID == id }) {
+				p.response = &Command{Action: "cancel"}
 			}
-			a.chatAction(t.StateAction{Value: &t.ChatTruncatedAction{Type: t.ActionTypeChatTruncated, TurnId: keep}})
-			a.chatAction(t.StateAction{Value: &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: active.Id, StartedAt: active.StartedAt, Message: active.Message}})
-			a.syncParts(active.ResponseParts)
+		}
+		turns, active := a.transcript(c)
+		if old := a.chat.ActiveTurn; old != nil && (active == nil || active.Id != old.Id) {
+			state := t.TurnStateComplete
+			if len(turns) > 0 {
+				state = turns[len(turns)-1].State
+			}
+			a.finishTurn(old.Id, state, c.state.Error)
+		}
+		if !reflect.DeepEqual(a.chat.Turns, turns) {
+			a.chatAction(t.StateAction{Value: &t.ChatTruncatedAction{Type: t.ActionTypeChatTruncated}})
+			if active == nil && len(turns) > 0 && turns[len(turns)-1].State == t.TurnStateError {
+				last := turns[len(turns)-1]
+				a.chatAction(t.StateAction{Value: &t.ChatTurnsLoadedAction{Type: t.ActionTypeChatTurnsLoaded, Turns: turns[:len(turns)-1]}})
+				a.chatAction(t.StateAction{Value: &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: last.Id, StartedAt: *last.StartedAt, Message: last.Message}})
+				for _, part := range last.ResponseParts {
+					if _, isError := part.Value.(*t.ErrorResponsePart); !isError {
+						a.chatAction(t.StateAction{Value: &t.ChatResponsePartAction{Type: t.ActionTypeChatResponsePart, TurnId: last.Id, Part: part}})
+					}
+				}
+				a.finishTurn(last.Id, t.TurnStateError, c.state.Error)
+			} else {
+				a.chatAction(t.StateAction{Value: &t.ChatTurnsLoadedAction{Type: t.ActionTypeChatTurnsLoaded, Turns: turns}})
+			}
+		}
+		if active != nil {
+			if a.chat.ActiveTurn == nil || a.chat.ActiveTurn.Id != active.Id {
+				a.chatAction(t.StateAction{Value: &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: active.Id, StartedAt: active.StartedAt, Message: active.Message}})
+			}
+			if !a.syncParts(active.ResponseParts) {
+				var keep *string
+				if len(a.chat.Turns) > 0 {
+					keep = &a.chat.Turns[len(a.chat.Turns)-1].Id
+				}
+				a.chatAction(t.StateAction{Value: &t.ChatTruncatedAction{Type: t.ActionTypeChatTruncated, TurnId: keep}})
+				a.chatAction(t.StateAction{Value: &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: active.Id, StartedAt: active.StartedAt, Message: active.Message}})
+				a.syncParts(active.ResponseParts)
+			}
 		}
 	}
 	config := ahpConfig(c.state.Settings)
@@ -193,6 +210,11 @@ func (a *ahpSession) syncProjection(c *sessionController, _ []SessionChange) {
 	if !reflect.DeepEqual(a.state.Config.Values, config.Values) {
 		a.sessionAction(t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: config.Values, Replace: ahpPtr(true)}})
 	}
+	// Configuration choices can change when a provider discovers models or a
+	// model changes its effort options. Snapshots must always carry the new schema.
+	a.state.Config.Schema = config.Schema
+	a.syncRuntime(c)
+	a.syncQueue(c)
 	a.syncInputNeeded()
 	if a.state.Title == "New session" && len(c.entries) > 0 {
 		for _, e := range c.entries {
@@ -249,7 +271,7 @@ func (a *ahpSession) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) 
 				id = e.ID
 			}
 			stamp := a.created
-			message := t.Message{Text: e.Content, Origin: t.MessageOrigin{Kind: t.MessageKindUser}}
+			message := a.host.message(e.Content, e.Files, e.Images)
 			if pending := a.pending["start:"+id]; pending != nil {
 				if started, ok := pending.params.Action.Value.(*t.ChatTurnStartedAction); ok {
 					message = started.Message
@@ -607,5 +629,10 @@ func ahpConfig(settings SessionSettings) *t.SessionConfigState {
 		labels = append(labels, m.Name)
 	}
 	add("mode", "Mode", settings.Mode, modes, labels)
+	if settings.Unattended != nil {
+		value, _ := json.Marshal(*settings.Unattended)
+		cfg.Schema.Properties["unattended"] = t.SessionConfigPropertySchema{Type: "boolean", Title: "Unattended", SessionMutable: ahpPtr(true), Default: ahpPtr(json.RawMessage(value))}
+		cfg.Values["unattended"] = value
+	}
 	return cfg
 }

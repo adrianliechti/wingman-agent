@@ -123,11 +123,17 @@ func TestSessionEchoAndExit(t *testing.T) {
 		t.Fatal("session never exited")
 	}
 
-	if m.Get(s.ID()) != nil {
-		t.Fatal("exited session still registered")
+	if m.Get(s.ID()) != s {
+		t.Fatal("exited session lost its retained output")
 	}
 	if !s.Exited() {
 		t.Fatal("session not marked exited")
+	}
+	if code, known := s.ExitCode(); !known || code != 0 {
+		t.Fatalf("natural exit = %d, known %v", code, known)
+	}
+	if !m.Remove(s.ID()) || m.Get(s.ID()) != nil {
+		t.Fatal("explicit disposal did not remove retained terminal")
 	}
 }
 

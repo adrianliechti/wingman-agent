@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
@@ -19,14 +20,16 @@ func (c *ahpConnection) dispatch(raw json.RawMessage) {
 	}
 	data, _ := json.Marshal(p)
 	fingerprint := sha256.Sum256(data)
-	h.actionMu.Lock()
-	defer h.actionMu.Unlock()
 	h.mu.Lock()
 	ledger := h.receipts[c.id]
 	if ledger == nil {
 		ledger = &ahpClientReceipts{entries: map[int64]*ahpActionReceipt{}}
 		h.receipts[c.id] = ledger
 	}
+	h.mu.Unlock()
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	h.mu.Lock()
 	if previous, ok := ledger.entries[p.ClientSeq]; ok {
 		if previous.fingerprint == fingerprint {
 			if previous.envelope != nil {
@@ -49,9 +52,15 @@ func (c *ahpConnection) dispatch(raw json.RawMessage) {
 	ledger.last = p.ClientSeq
 	ledger.entries[p.ClientSeq] = receipt
 	h.mu.Unlock()
-	a, err := h.ensureSession(p.Channel)
+	var a *ahpSession
+	var err error
 	pending := &ahpPendingAction{params: p, origin: t.ActionOrigin{ClientId: c.id, ClientSeq: p.ClientSeq}, receipt: receipt}
-	if err == nil {
+	if strings.HasPrefix(p.Channel, "ahp-terminal:") {
+		err = c.executeTerminalAction(p)
+	} else {
+		a, err = h.ensureSession(p.Channel)
+	}
+	if err == nil && a != nil {
 		h.mu.Lock()
 		if a.pending[ahpActionKey(p.Action)] != nil {
 			err = ahpInvalid("action is already in progress")
@@ -112,6 +121,22 @@ func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) e
 		return ahpInvalid("unknown channel")
 	}
 	switch action := p.Action.Value.(type) {
+	case *t.ChatPendingMessageSetAction:
+		if !chat || action.Id == "" || action.Message.Origin.Kind != t.MessageKindUser || (action.Kind != t.PendingMessageKindQueued && action.Kind != t.PendingMessageKindSteering) {
+			h.mu.Unlock(); return ahpInvalid("valid user pending message required")
+		}
+		command.Type, command.ID, command.Text, command.Intent = "send", action.Id, action.Message.Text, code.TurnInputFollowUp
+		if action.Kind == t.PendingMessageKindSteering { command.Intent = code.TurnInputSteer }
+		for _, queued := range a.chat.QueuedMessages { if queued.Id == action.Id { command.Type, command.InputID, command.ID = "queue_update", action.Id, fmt.Sprintf("ahp:%s:%d", c.id, p.ClientSeq) } }
+		if a.chat.SteeringMessage != nil && a.chat.SteeringMessage.Id == action.Id { command.Type, command.InputID, command.ID = "queue_update", action.Id, fmt.Sprintf("ahp:%s:%d", c.id, p.ClientSeq) }
+		h.mu.Unlock()
+		if err := h.attachments(action.Message, &command); err != nil { return err }
+		return a.command(command)
+	case *t.ChatPendingMessageRemovedAction:
+		if !chat || action.Id == "" { h.mu.Unlock(); return ahpInvalid("chat and pending message required") }
+		command.Type, command.InputID = "queue_remove", action.Id
+		h.mu.Unlock()
+		return a.command(command)
 	case *t.ChatTurnStartedAction:
 		if !chat || action.TurnId == "" || a.chat.ActiveTurn != nil {
 			h.mu.Unlock()
@@ -280,6 +305,12 @@ func ahpAnswerValues(view PromptView, content map[string]any) map[string]t.ChatI
 func (a *ahpSession) setConfig(id string, values map[string]json.RawMessage) error {
 	command := Command{ID: id, Epoch: a.controller.epoch, Type: "settings"}
 	for key, value := range values {
+		if key == "unattended" {
+			var enabled bool
+			if json.Unmarshal(value, &enabled) != nil { return ahpInvalid("unattended must be a boolean") }
+			command.Unattended = &enabled
+			continue
+		}
 		var text string
 		if json.Unmarshal(value, &text) != nil {
 			return ahpInvalid("configuration values must be strings")
