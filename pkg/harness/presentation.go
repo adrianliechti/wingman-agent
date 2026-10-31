@@ -13,6 +13,9 @@ func NewToolPresentation(name, kind, args string, locations []ToolLocation) *Too
 	locs := slices.Clone(locations)
 	if len(locs) == 0 && p.Path != "" {
 		locs = []ToolLocation{{Path: p.Path, Line: p.Line}}
+		for _, path := range p.Paths {
+			locs = append(locs, ToolLocation{Path: path})
+		}
 	}
 	return &ToolPresentation{
 		Title: p.Title, Kind: p.Kind, Args: p.Args, Hint: p.Hint, Locations: locs,

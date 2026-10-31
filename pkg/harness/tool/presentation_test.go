@@ -3,6 +3,7 @@ package tool
 import (
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -57,12 +58,12 @@ func TestPresentCompactsBuiltInTools(t *testing.T) {
 		},
 		{
 			name: "edit", args: `{"edits":[{"file_path":"pkg/a.go","old_string":"a","new_string":"b"},{"file_path":"pkg/b.go","old_string":"c","new_string":"d"}]}`,
-			want: Presentation{Title: "Edit file", Kind: "edit", Path: "pkg/a.go", Hint: "2 edits · 2 files"},
+			want: Presentation{Title: "Edit file", Kind: "edit", Path: "pkg/a.go", Paths: []string{"pkg/b.go"}, Hint: "2 edits · 2 files"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := Present(tc.name, tc.kind, tc.args, tc.hasLocation); got != tc.want {
+			if got := Present(tc.name, tc.kind, tc.args, tc.hasLocation); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("Present() = %#v, want %#v", got, tc.want)
 			}
 		})
@@ -75,7 +76,7 @@ func TestPresentDerivesHintsForHumanizedNames(t *testing.T) {
 		t.Fatalf("input presentation = %#v", input)
 	}
 	args := `{"session_id":42,"input":"yes\n","wait":10}`
-	if got, want := Present("Continue command", "", args, false), Present("exec_session", "", args, false); got != want {
+	if got, want := Present("Continue command", "", args, false), Present("exec_session", "", args, false); !reflect.DeepEqual(got, want) {
 		t.Fatalf("humanized exec_session lost input: %#v, want %#v", got, want)
 	}
 }
@@ -110,7 +111,7 @@ func TestPresentRenamedToolsAndLegacyAliases(t *testing.T) {
 			if got.Title != tc.title || got.Hint != tc.hint {
 				t.Fatalf("presentation = %#v", got)
 			}
-			if legacy := Present(tc.legacy, "", tc.args, false); legacy != got {
+			if legacy := Present(tc.legacy, "", tc.args, false); !reflect.DeepEqual(legacy, got) {
 				t.Fatalf("legacy presentation = %#v, want %#v", legacy, got)
 			}
 		})

@@ -216,7 +216,9 @@ test("renders read and fetch image attachments in restored transcripts", async (
 		entries,
 	);
 	await page.goto("/wingman/images");
-	await page.getByRole("button", { name: "2 tools", exact: true }).click();
+	await page
+		.getByRole("button", { name: "Read a file, fetched a page", exact: true })
+		.click();
 	for (const id of ["user", "read-image", "fetch-image"]) {
 		const preview = page.locator(
 			`[data-entry-id="${id === "user" ? "user:user" : id}"] img`,
@@ -530,11 +532,10 @@ test("keeps diagrams and their follow-up answer visible in a finished turn", asy
 	await expect(page.locator('[data-entry-id="summary-answer"]')).toContainText(
 		"The flowchart and sequence diagram are shown above.",
 	);
-	await expect(page.locator('[data-entry-id="thinking"]')).toHaveCount(0);
-	await page.getByRole("button", { name: "1 thought", exact: true }).click();
-	await expect(page.locator('[data-entry-id="thinking"]')).toContainText(
-		"Choosing examples",
-	);
+	const thinking = page.locator('[data-entry-id="thinking"]');
+	await expect(thinking).not.toContainText("Choosing examples");
+	await thinking.getByRole("button", { name: "Thought", exact: true }).click();
+	await expect(thinking).toContainText("Choosing examples");
 });
 
 test("preserves the visible reply when a finished turn collapses its working steps", async ({
@@ -552,8 +553,16 @@ test("preserves the visible reply when a finished turn collapses its working ste
 		{ id: "current-user", type: "user", content: "Current question" },
 		{
 			id: "working-reply",
-			type: "reasoning",
+			type: "assistant",
 			content: "Working through the details.\n\n".repeat(30),
+		},
+		{
+			id: "working-tool",
+			type: "tool",
+			content: "",
+			toolName: "Read file",
+			toolKind: "read",
+			toolResult: "done",
 		},
 		{
 			id: "visible-reply",
@@ -3263,6 +3272,9 @@ test("keeps composer pickers visible in a constrained window", async ({
 	const picker = page.getByRole("dialog", { name: "Find a file" });
 	await expect(picker).toBeVisible();
 	await expect(picker.getByPlaceholder("Search files…")).toBeFocused();
+	await expect(
+		picker.getByRole("button", { name: "Attach image from your computer" }),
+	).toBeVisible();
 	await expectFloatingInViewport(page, picker);
 	await page.keyboard.press("Escape");
 	await expect(picker).toBeHidden();
@@ -3901,7 +3913,6 @@ test("composer hides mode then model as session history narrows the chat", async
 		await expect(harness).toBeVisible();
 		await expect(input).toHaveValue("Keep this draft while resizing");
 		await expect(composerBox.getByTitle("Add file context")).toBeVisible();
-		await expect(composerBox.getByTitle("Attach image")).toBeVisible();
 		await expect(composerBox.getByTitle("Send (Enter)")).toBeEnabled();
 		await expect
 			.poll(() =>
@@ -4005,7 +4016,9 @@ test("runs a coding tool and renders its result", async ({ page }) => {
 	await input.fill("create e2e-result.txt");
 	await input.press("Enter");
 
-	await page.getByRole("button", { name: "1 tool" }).click();
+	await page
+		.getByRole("button", { name: "Edited a file", exact: true })
+		.click();
 	const tool = page.getByRole("button", { name: /^Edit file/ });
 	await expect(tool).toBeVisible();
 	await tool.click();
@@ -6313,7 +6326,8 @@ test("recovery: turn review previews attributed edits and refuses a conflicting 
 	const { finish } = await reviewActive(page);
 	finish();
 	const card = page.locator("[data-turn-review]");
-	await expect(card).toContainText("1 file changed · Validation passed");
+	await expect(card).toContainText("1 file changed");
+	await expect(card).toContainText("Validation passed");
 	await card.getByRole("button", { name: /Review changes/ }).click();
 	await expect(card).toContainText("exit 0");
 	await expect(card).toContainText("packages/frontend");

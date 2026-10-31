@@ -1,14 +1,6 @@
 import type { MessageAttachment } from "@microsoft/agent-host-protocol";
 import { VirtualTurns } from "./chat/VirtualTurns";
-import {
-	ArrowUp,
-	Loader2,
-	ListPlus,
-	Paperclip,
-	Plus,
-	Square,
-	X,
-} from "lucide-react";
+import { ArrowUp, ListEnd, Loader2, Plus, Square, X } from "lucide-react";
 import {
 	useEffect,
 	useEffectEvent,
@@ -185,6 +177,7 @@ export function ChatPanel({
 		submitting,
 		error: sendError,
 	} = useSyncExternalStore(draft.subscribe, draft.getSnapshot);
+	const hasDraft = !!input.trim() || images.length > 0 || files.length > 0;
 	const [caret, setCaret] = useState(input.length);
 	const [dismissedToken, setDismissedToken] = useState<string | null>(null);
 	const [showPicker, setShowPicker] = useState(false);
@@ -1074,7 +1067,7 @@ export function ChatPanel({
 								<textarea
 									ref={textareaRef}
 									autoFocus
-									className="chat-composer-textarea field-sizing-content w-full appearance-none bg-transparent text-fg text-[12px] font-mono resize-none leading-[1.7] placeholder:text-fg-dim max-h-[40vh] overflow-y-auto"
+									className="chat-composer-textarea field-sizing-content w-full appearance-none bg-transparent text-fg text-[13px] resize-none leading-relaxed placeholder:text-fg-dim max-h-[40vh] overflow-y-auto"
 									value={input}
 									onChange={(e) => {
 										historyIdxRef.current = null;
@@ -1108,6 +1101,10 @@ export function ChatPanel({
 												anchor={filePickerButton}
 												onSelect={addFile}
 												onClose={() => setShowPicker(false)}
+												onUpload={() => {
+													setShowPicker(false);
+													imageInputRef.current?.click();
+												}}
 											/>
 										)}
 									</div>
@@ -1166,36 +1163,41 @@ export function ChatPanel({
 									/>
 								</div>
 
-								<div className="flex shrink-0 items-center gap-0">
-									<button
-										type="button"
-										className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-										onClick={() => imageInputRef.current?.click()}
-										title="Attach image"
-									>
-										<Paperclip size={14} />
-									</button>
+								{/* Send stays right-most; run-only controls appear to its left so nothing visible moves. */}
+								<div className="flex shrink-0 items-center gap-1">
+									{isActive && !editingQueueId && hasDraft && (
+										<button
+											type="button"
+											className="flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40"
+											disabled={!available || submitting || prompts.length > 0}
+											onClick={() => void handleSubmit("follow_up")}
+											title="Queue after current turn (Alt+Enter)"
+											aria-label="Queue after current turn (Alt+Enter)"
+										>
+											<ListEnd size={14} />
+										</button>
+									)}
 									{isActive && (
 										<button
 											type="button"
-											className="w-8 h-8 flex items-center justify-center rounded text-danger hover:bg-bg-hover"
+											className="flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg"
 											title="Stop (Esc)"
 											aria-label="Stop (Esc)"
 											disabled={!available}
 											onClick={() => onCancel()}
 										>
-											<Square size={12} fill="currentColor" />
+											<Square size={11} fill="currentColor" />
 										</button>
 									)}
 									<button
 										type="button"
-										className="w-8 h-8 flex items-center justify-center rounded text-fg-muted hover:bg-bg-hover disabled:opacity-40"
+										className="flex h-7 w-7 items-center justify-center rounded-full bg-fg text-bg transition-colors hover:bg-fg-muted disabled:bg-bg-active disabled:text-fg-dim"
 										onClick={() => void handleSubmit()}
 										disabled={
 											!available ||
 											submitting ||
 											prompts.length > 0 ||
-											(!input.trim() && !images.length && !files.length)
+											!hasDraft
 										}
 										title={
 											editingQueueId
@@ -1207,22 +1209,6 @@ export function ChatPanel({
 									>
 										<ArrowUp size={14} />
 									</button>
-									{isActive && !editingQueueId && (
-										<button
-											type="button"
-											className="w-8 h-8 flex items-center justify-center rounded text-fg-muted hover:bg-bg-hover disabled:opacity-40"
-											disabled={
-												!available ||
-												submitting ||
-												prompts.length > 0 ||
-												(!input.trim() && !images.length && !files.length)
-											}
-											onClick={() => void handleSubmit("follow_up")}
-											title="Queue after current turn (Alt+Enter)"
-										>
-											<ListPlus size={14} />
-										</button>
-									)}
 								</div>
 							</div>
 						</div>

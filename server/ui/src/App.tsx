@@ -150,6 +150,7 @@ import {
 import { FloatingMenu, FloatingSurface } from "./components/ui/Floating";
 import { AgentSessions } from "./components/AgentSessions";
 import { useWorkspaceInfo } from "./hooks/useWorkspaceInfo";
+import { isAbsolutePath, workspaceFileTarget } from "./utils/workspacePath";
 import { useAutoHidingScrollbars } from "./hooks/useAutoHidingScrollbars";
 import { type OpenDocument, useOpenDocuments } from "./hooks/useOpenDocuments";
 import { useServerQueryInvalidation } from "./hooks/useServerQueryInvalidation";
@@ -976,6 +977,11 @@ export default function App() {
 		external?: boolean,
 		disposition: TabDisposition = "preview",
 	) => {
+		// Tool locations and links carry absolute paths even inside the workspace.
+		if (!external && workspace?.path && isAbsolutePath(path))
+			({ path, external } = workspaceFileTarget(path, workspace.path));
+		// The workspace root itself is a folder, not a document.
+		if (!path) return;
 		openDocument(path, external ?? false);
 		const existing = tabs.find((t) => t.type === "file" && t.path === path);
 		if (existing) {

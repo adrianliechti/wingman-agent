@@ -1,6 +1,19 @@
 import { lazy, Suspense, useContext, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getTurnReview, turnReviewKey, undoTurn } from "../../api/turnReviews";
+import {
+	ChevronRight,
+	CircleAlert,
+	CircleCheck,
+	CircleDashed,
+	CircleX,
+	FileDiff,
+} from "lucide-react";
+import {
+	getTurnReview,
+	turnReviewKey,
+	undoTurn,
+	type TurnFileChange,
+} from "../../api/turnReviews";
 import { useToast } from "../ui/Feedback";
 import { TurnReviewsContext } from "./turnReviewContext";
 const ReviewDiff = lazy(async () => {
@@ -13,6 +26,11 @@ const validationLabels: Record<string, string> = {
 	outdated: "Checks predate the latest edits",
 	not_confirmed: "Validation not confirmed",
 	not_run: "Validation not run",
+};
+const validationIcons: Record<string, React.ReactNode> = {
+	passed: <CircleCheck size={12} className="text-success" />,
+	failed: <CircleX size={12} className="text-danger" />,
+	outdated: <CircleAlert size={12} />,
 };
 
 export function TurnReviewCard({
@@ -41,106 +59,145 @@ export function TurnReviewCard({
 	)
 		return null;
 	const count = new Set(review.files.map((file) => file.path)).size;
+	const added = review.added ?? 0;
+	const removed = review.removed ?? 0;
 	const detail = query.data;
 	return (
-		<div
-			data-turn-review
-			className="mb-5 rounded-lg border border-border-subtle bg-bg-surface/50 text-[12px]"
-		>
-			<button
-				type="button"
-				className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-fg-muted hover:text-fg"
-				onClick={() => setExpanded(!expanded)}
-				aria-expanded={expanded}
-			>
-				<span>
-					{count} {count === 1 ? "file" : "files"} changed ·{" "}
-					{validationLabels[review.validation] ?? "Validation not confirmed"}
-					{review.undone ? " · Undone" : ""}
-					{review.outcome === "incomplete" ? " · Incomplete" : ""}
-				</span>
-				<span>{expanded ? "Hide" : "Review changes"}</span>
-			</button>
+		<div data-turn-review className="mb-6 text-[12px]">
+			<div className="flex items-center gap-2 text-fg-dim">
+				<span className="h-px flex-1 bg-border-subtle" />
+				<button
+					type="button"
+					className="group flex min-w-0 items-center gap-1.5 rounded px-1.5 py-0.5 transition-colors hover:bg-bg-hover hover:text-fg-muted"
+					onClick={() => setExpanded(!expanded)}
+					aria-expanded={expanded}
+				>
+					<FileDiff size={12} className="shrink-0" />
+					<span className="truncate">
+						{count} {count === 1 ? "file" : "files"} changed
+					</span>
+					{(added > 0 || removed > 0) && (
+						<span className="shrink-0 font-mono text-[11px] tabular-nums">
+							<span className="text-success">+{added}</span>{" "}
+							<span className="text-danger">−{removed}</span>
+						</span>
+					)}
+					<span aria-hidden="true">·</span>
+					<span className="shrink-0">
+						{validationIcons[review.validation] ?? <CircleDashed size={12} />}
+					</span>
+					<span className="truncate">
+						{validationLabels[review.validation] ?? "Validation not confirmed"}
+						{review.undone ? " · Undone" : ""}
+						{review.outcome === "incomplete" ? " · Incomplete" : ""}
+					</span>
+					<span className="sr-only">
+						{expanded ? "Hide changes" : "Review changes"}
+					</span>
+					<ChevronRight
+						size={12}
+						className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+					/>
+				</button>
+				<span className="h-px flex-1 bg-border-subtle" />
+			</div>
 			{expanded && (
-				<div className="border-t border-border-subtle p-3">
-					<p className="mb-2 text-fg-dim">
+				<div className="mt-2 rounded-lg border border-border-subtle bg-bg-surface/50">
+					<p className="px-3 pt-2.5 pb-1.5 text-fg-dim">
 						Turn {review.outcome}.{" "}
 						{review.untracked
 							? "These diffs cover tracked edits; commands and external tools may have made other changes."
 							: "These diffs start from the files as the agent found them."}
 					</p>
-					{query.isPending && <p role="status">Loading changes…</p>}
+					{query.isPending && (
+						<p role="status" className="px-3 pb-2 text-fg-dim">
+							Loading changes…
+						</p>
+					)}
 					{query.error && (
-						<p role="alert" className="text-danger">
+						<p role="alert" className="px-3 pb-2 text-danger">
 							{String(query.error)}
 						</p>
 					)}
-					{detail?.files.map((file, index) => (
-						<ReviewFile
-							key={`${file.path}:${index}`}
-							file={file}
-							onOpenFile={onOpenFile}
-						/>
-					))}
-					{review.checks.map((check, index) => (
-						<div key={index} className="mb-1 break-words font-mono">
-							<span
-								className={
-									check.outcome === "passed" ? "text-success" : "text-warning"
-								}
-							>
-								{check.outcome.replaceAll("_", " ")}
-								{check.exitCode !== undefined
-									? ` (exit ${check.exitCode})`
-									: ""}
-							</span>{" "}
-							· {check.command}
-							{check.workdir && (
-								<span className="text-fg-dim"> · {check.workdir}</span>
-							)}
+					{detail && (
+						<div className="px-1.5 pb-1">
+							{detail.files.map((file, index) => (
+								<ReviewFile
+									key={`${file.path}:${index}`}
+									file={file}
+									onOpenFile={onOpenFile}
+								/>
+							))}
 						</div>
-					))}
-					{count > 0 && (
-						<button
-							type="button"
-							className="mt-3 rounded border border-border px-3 py-2 text-fg-muted hover:bg-bg-hover disabled:opacity-40"
-							disabled={
-								!detail ||
-								!context.available ||
-								context.active ||
-								review.uncertain ||
-								review.undone ||
-								undoing
-							}
-							onClick={async () => {
-								setUndoing(true);
-								try {
-									await undoTurn(context.session, review.id);
-									await client.invalidateQueries({
-										queryKey: turnReviewKey(context.session),
-									});
-									toast({ title: "Tracked edits undone", tone: "success" });
-								} catch (error) {
-									toast({
-										title: "Could not undo this turn",
-										description: String(error),
-										tone: "error",
-									});
-								}
-								setUndoing(false);
-							}}
-						>
-							{review.undone
-								? "Edits undone"
-								: undoing
-									? "Undoing…"
-									: "Undo tracked edits"}
-						</button>
+					)}
+					{review.checks.length > 0 && (
+						<div className="border-t border-border-subtle px-3 py-2">
+							{review.checks.map((check, index) => (
+								<div
+									key={index}
+									className="mb-1 font-mono break-words last:mb-0"
+								>
+									<span
+										className={
+											check.outcome === "passed"
+												? "text-success"
+												: "text-warning"
+										}
+									>
+										{check.outcome.replaceAll("_", " ")}
+										{check.exitCode !== undefined
+											? ` (exit ${check.exitCode})`
+											: ""}
+									</span>{" "}
+									· {check.command}
+									{check.workdir && (
+										<span className="text-fg-dim"> · {check.workdir}</span>
+									)}
+								</div>
+							))}
+						</div>
 					)}
 					{count > 0 && (
-						<p className="mt-2 text-fg-dim">
-							Undo stops if a file has changed since the agent edited it.
-						</p>
+						<div className="flex items-center gap-3 border-t border-border-subtle px-3 py-2">
+							<button
+								type="button"
+								className="rounded border border-border px-2.5 py-1 text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40"
+								disabled={
+									!detail ||
+									!context.available ||
+									context.active ||
+									review.uncertain ||
+									review.undone ||
+									undoing
+								}
+								onClick={async () => {
+									setUndoing(true);
+									try {
+										await undoTurn(context.session, review.id);
+										await client.invalidateQueries({
+											queryKey: turnReviewKey(context.session),
+										});
+										toast({ title: "Tracked edits undone", tone: "success" });
+									} catch (error) {
+										toast({
+											title: "Could not undo this turn",
+											description: String(error),
+											tone: "error",
+										});
+									}
+									setUndoing(false);
+								}}
+							>
+								{review.undone
+									? "Edits undone"
+									: undoing
+										? "Undoing…"
+										: "Undo tracked edits"}
+							</button>
+							<p className="text-fg-dim">
+								Undo stops if a file has changed since the agent edited it.
+							</p>
+						</div>
 					)}
 				</div>
 			)}
@@ -152,33 +209,60 @@ function ReviewFile({
 	file,
 	onOpenFile,
 }: {
-	file: import("../../api/turnReviews").TurnFileChange;
+	file: TurnFileChange;
 	onOpenFile?: (path: string) => void;
 }) {
 	const [open, setOpen] = useState(false);
+	const status = !file.beforeExists
+		? { letter: "A", className: "text-success", label: "Added" }
+		: !file.afterExists
+			? { letter: "D", className: "text-danger", label: "Deleted" }
+			: { letter: "M", className: "text-fg-dim", label: "Modified" };
+	const slash = file.path.lastIndexOf("/");
 	return (
-		<details
-			onToggle={(event) => setOpen(event.currentTarget.open)}
-			className="mb-2 rounded border border-border-subtle"
-		>
-			<summary className="cursor-pointer px-2 py-2 font-mono">
-				{file.path}
+		<details onToggle={(event) => setOpen(event.currentTarget.open)}>
+			<summary className="flex cursor-pointer list-none items-center gap-2 rounded px-1.5 py-1 hover:bg-bg-hover [&::-webkit-details-marker]:hidden">
+				<ChevronRight
+					size={12}
+					className={`shrink-0 text-fg-dim transition-transform ${open ? "rotate-90" : ""}`}
+				/>
+				<span
+					className={`w-3 shrink-0 text-center font-mono text-[11px] font-semibold ${status.className}`}
+					title={status.label}
+				>
+					{status.letter}
+				</span>
+				<span
+					className="min-w-0 flex-1 truncate font-mono text-[11px]"
+					title={file.path}
+				>
+					<span className="text-fg">{file.path.slice(slash + 1)}</span>
+					{slash > 0 && (
+						<span className="ml-2 text-fg-dim">
+							{file.path.slice(0, slash)}
+						</span>
+					)}
+				</span>
 			</summary>
 			{open && (
-				<>
-					<button
-						type="button"
-						className="px-2 py-1 underline"
-						onClick={() => onOpenFile?.(file.path)}
-					>
-						Open file
-					</button>
-					<div className="h-80">
-						<Suspense fallback={<p>Loading diff…</p>}>
+				<div className="mt-1 mb-2 ml-6">
+					{onOpenFile && file.afterExists && (
+						<button
+							type="button"
+							className="mb-1 text-fg-dim underline-offset-2 hover:text-fg hover:underline"
+							onClick={() => onOpenFile(file.path)}
+						>
+							Open file
+						</button>
+					)}
+					<div className="h-80 overflow-hidden rounded border border-border-subtle">
+						<Suspense
+							fallback={<p className="p-2 text-fg-dim">Loading diff…</p>}
+						>
 							<ReviewDiff file={file} />
 						</Suspense>
 					</div>
-				</>
+				</div>
 			)}
 		</details>
 	);

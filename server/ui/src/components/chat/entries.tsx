@@ -1,25 +1,37 @@
 import { VirtualOutput } from "./VirtualOutput";
 import {
-	ChevronDown,
+	Brain,
 	ChevronRight,
+	FilePen,
+	FileSymlink,
 	FileText,
+	Globe,
 	LoaderCircle,
+	Search,
+	SquareTerminal,
+	Trash2,
+	Wrench,
 } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 import type { ChatEntry } from "../../types/session";
 import type { Phase, ToolLocation } from "../../types/protocol";
 import { MarkdownContent } from "../MarkdownContent";
 import { looksLikeDiffPath, shouldRenderDiff } from "./diffOutput";
+import { type ToolBucket, toolBucket } from "./stepSummary";
 
 export const EntryView = memo(function EntryView({
 	entry,
 	isStreaming,
+	live = false,
 }: {
 	entry: ChatEntry;
 	isStreaming: boolean;
+	live?: boolean;
 }) {
 	if (entry.type === "reasoning") {
-		return <ReasoningView entry={entry} isStreaming={isStreaming} />;
+		return (
+			<ReasoningView entry={entry} isStreaming={isStreaming} live={live} />
+		);
 	}
 	if (entry.type === "notice") {
 		return (
@@ -33,91 +45,118 @@ export const EntryView = memo(function EntryView({
 		);
 	}
 
-	const isUser = entry.type === "user";
-
-	return (
-		<div data-entry-id={entry.id} className="mb-4 select-text">
+	if (entry.type === "user") {
+		return (
 			<div
-				className={`border-l-2 ${isUser ? "border-success" : "border-purple"} pl-3 text-[12px] leading-[1.7] break-words min-w-0 font-mono`}
+				data-entry-id={entry.id}
+				className="mb-5 flex justify-end select-text"
 			>
-				{isUser ? (
-					<>
-						{entry.content && (
-							<span className="whitespace-pre-wrap text-fg">
-								{entry.content}
-							</span>
-						)}
-						{entry.files && entry.files.length > 0 && (
-							<div
-								className={`flex flex-wrap gap-1 ${entry.content ? "mt-2" : ""}`}
-							>
-								{entry.files.map((path) => (
-									<span
-										key={path}
-										className="max-w-[240px] truncate rounded bg-bg-active px-1.5 py-0.5 text-[10px] text-fg-muted"
-										title={path}
-									>
-										{path.split("/").pop() || path}
-									</span>
-								))}
-							</div>
-						)}
-					</>
-				) : (
-					<MarkdownContent text={entry.content} streaming={isStreaming} />
-				)}
-				{entry.images && entry.images.length > 0 && (
-					<div
-						className={`flex flex-wrap gap-1.5 ${entry.content || (entry.files?.length ?? 0) > 0 ? "mt-2" : ""}`}
-					>
-						{entry.images.map((src, i) => (
-							<a
-								key={`${entry.id}-img-${i}`}
-								href={src}
-								target="_blank"
-								rel="noreferrer"
-								className="block rounded overflow-hidden bg-bg-active"
-							>
-								<img
-									src={src}
-									alt="attachment"
-									className="block max-h-40 max-w-[240px] object-contain"
-								/>
-							</a>
-						))}
-					</div>
-				)}
+				<div className="min-w-0 max-w-[85%] rounded-lg border border-border-subtle bg-bg-surface px-3 py-2 text-[13px] leading-relaxed break-words text-fg">
+					{entry.content && (
+						<div className="whitespace-pre-wrap">{entry.content}</div>
+					)}
+					{entry.files && entry.files.length > 0 && (
+						<div
+							className={`flex flex-wrap gap-1 ${entry.content ? "mt-2" : ""}`}
+						>
+							{entry.files.map((path) => (
+								<span
+									key={path}
+									className="max-w-[240px] truncate rounded bg-bg-active px-1.5 py-0.5 font-mono text-[11px] text-fg-muted"
+									title={path}
+								>
+									{path.split("/").pop() || path}
+								</span>
+							))}
+						</div>
+					)}
+					<EntryImages
+						entry={entry}
+						spaced={!!entry.content || (entry.files?.length ?? 0) > 0}
+					/>
+				</div>
 			</div>
-		</div>
-	);
-});
-
-const ReasoningView = memo(function ReasoningView({
-	entry,
-	isStreaming,
-}: {
-	entry: ChatEntry;
-	isStreaming: boolean;
-}) {
-	const summary = entry.content || "";
-	if (!summary) return null;
+		);
+	}
 
 	return (
 		<div
 			data-entry-id={entry.id}
-			className="mb-4 border-l-2 border-purple pl-3 select-text"
+			className="mb-4 min-w-0 select-text text-[13px] leading-[1.65] break-words"
 		>
-			{entry.reasoningDuration !== undefined && (
-				<div className="text-[10px] text-fg-dim font-mono mb-0.5">
-					Thought for {formatReasoningDuration(entry.reasoningDuration)}
+			<MarkdownContent text={entry.content} streaming={isStreaming} />
+			<EntryImages entry={entry} spaced={!!entry.content} />
+		</div>
+	);
+});
+
+function EntryImages({ entry, spaced }: { entry: ChatEntry; spaced: boolean }) {
+	if (!entry.images?.length) return null;
+	return (
+		<div className={`flex flex-wrap gap-1.5 ${spaced ? "mt-2" : ""}`}>
+			{entry.images.map((src, i) => (
+				<a
+					key={`${entry.id}-img-${i}`}
+					href={src}
+					target="_blank"
+					rel="noreferrer"
+					className="block overflow-hidden rounded bg-bg-active"
+				>
+					<img
+						src={src}
+						alt="attachment"
+						className="block max-h-40 max-w-[240px] object-contain"
+					/>
+				</a>
+			))}
+		</div>
+	);
+}
+
+const ReasoningView = memo(function ReasoningView({
+	entry,
+	isStreaming,
+	live,
+}: {
+	entry: ChatEntry;
+	isStreaming: boolean;
+	live: boolean;
+}) {
+	// Thoughts stay open while their turn runs and fold when it settles, where
+	// the transcript keeps the reader's scroll position.
+	const [open, setOpen] = useState<boolean | null>(null);
+	const expanded = open ?? live;
+	const summary = entry.content || "";
+	if (!summary) return null;
+
+	return (
+		<div data-entry-id={entry.id} className="mb-3 select-text">
+			<button
+				type="button"
+				onClick={() => setOpen(!expanded)}
+				aria-expanded={expanded}
+				className="group flex items-center gap-2 py-[3px] text-[12px] text-fg-dim transition-colors hover:text-fg-muted"
+			>
+				<DisclosureIcon
+					icon={<Brain size={12} aria-hidden="true" />}
+					expanded={expanded}
+				/>
+				<span className={isStreaming ? "text-shimmer" : ""}>
+					{isStreaming
+						? "Thinking"
+						: entry.reasoningDuration !== undefined
+							? `Thought for ${formatReasoningDuration(entry.reasoningDuration)}`
+							: "Thought"}
+				</span>
+			</button>
+			{expanded && (
+				<div className="mt-1 mb-1 ml-[5px] border-l border-border-subtle pl-[15px] text-[12px] leading-relaxed whitespace-pre-wrap break-words text-fg-dim">
+					{summary}
+					{isStreaming && (
+						<span className="ml-0.5 inline-block h-[10px] w-[3px] animate-[pulse_1.4s_ease-in-out_infinite] bg-fg-dim/40 align-text-bottom" />
+					)}
 				</div>
 			)}
-			<div className="text-[11px] whitespace-pre-wrap break-words text-fg-dim font-mono leading-relaxed italic">
-				{summary}
-				{isStreaming && (
-					<span className="inline-block w-[3px] h-[10px] bg-fg-dim/40 align-text-bottom ml-0.5 animate-[pulse_1.4s_ease-in-out_infinite]" />
-				)}
-			</div>
 		</div>
 	);
 });
@@ -142,7 +181,7 @@ export const ToolGroupView = memo(function ToolGroupView({
 	onOpenFile?: (path: string, line?: number) => void;
 }) {
 	return (
-		<div className="mb-4">
+		<div className="mb-3">
 			{entries.map((entry) => {
 				const running =
 					isTrailing && phase !== "idle" && entry.toolResult === undefined;
@@ -230,41 +269,36 @@ const ToolRow = memo(function ToolRow({
 			onMouseEnter={() => setHovered(true)}
 			onMouseLeave={() => setHovered(false)}
 		>
-			<div className="border-l-2 border-purple pl-3">
-				<div className="flex min-w-0 flex-nowrap items-center gap-2 overflow-hidden py-0.5">
+			<div>
+				<div className="flex min-w-0 flex-nowrap items-center gap-1 overflow-hidden py-[3px]">
 					<button
 						type="button"
 						aria-expanded={canExpand ? expanded : undefined}
 						aria-disabled={!canExpand}
 						tabIndex={canExpand ? 0 : -1}
-						className={`flex min-w-0 items-center gap-2 overflow-hidden text-left text-[12px] transition-colors ${
-							canExpand ? "cursor-pointer" : "cursor-default"
+						className={`group flex min-w-0 items-center gap-2 overflow-hidden text-left text-[12px] text-fg-muted transition-colors ${
+							canExpand ? "cursor-pointer hover:text-fg" : "cursor-default"
 						}`}
 						onClick={() => canExpand && setExpanded(!expanded)}
 					>
-						<span className="text-fg-dim flex w-3 shrink-0 items-center justify-center">
-							{running ? (
+						{running ? (
+							<span className="flex w-3 shrink-0 items-center justify-center text-fg-dim">
 								<LoaderCircle
-									size={11}
+									size={12}
 									className="animate-spin"
 									aria-label={
 										entry.toolPartial ? "Preparing tool" : "Tool running"
 									}
 								/>
-							) : !canExpand ? (
-								<span
-									className="h-1 w-1 rounded-full bg-current opacity-60"
-									aria-hidden="true"
-								/>
-							) : expanded ? (
-								<ChevronDown size={12} />
-							) : (
-								<ChevronRight size={12} />
-							)}
-						</span>
-						<span className="text-purple font-mono text-[11px] shrink-0">
-							{toolLabel}
-						</span>
+							</span>
+						) : (
+							<DisclosureIcon
+								icon={<ToolIcon entry={entry} />}
+								expanded={expanded}
+								disabled={!canExpand}
+							/>
+						)}
+						<span className="shrink-0">{toolLabel}</span>
 						{headerHint && (
 							<span
 								className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-dim"
@@ -280,14 +314,11 @@ const ToolRow = memo(function ToolRow({
 								<button
 									key={`${location.path}:${location.line ?? ""}:${index}`}
 									type="button"
-									className="flex min-w-0 max-w-[260px] cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg"
+									className="min-w-0 max-w-[260px] cursor-pointer truncate rounded px-1 py-px font-mono text-[11px] text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg"
 									title={location.path}
 									onClick={() => onOpenFile(location.path, location.line)}
 								>
-									<FileText size={10} className="shrink-0" />
-									<span className="truncate">
-										{toolLocationLabel(location)}
-									</span>
+									{toolLocationLabel(location)}
 								</button>
 							))}
 						</div>
@@ -295,13 +326,13 @@ const ToolRow = memo(function ToolRow({
 				</div>
 				{expanded && canExpand && (
 					<div
-						className={`mt-1 px-3 py-2 text-[11px] whitespace-pre-wrap break-all text-fg-dim bg-bg-surface rounded-md font-mono leading-relaxed ${
+						className={`mt-1 mb-1.5 ml-5 rounded-md bg-bg-surface px-3 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all text-fg-dim ${
 							showAll ? "max-h-[50vh] overflow-y-auto overscroll-contain" : ""
 						}`}
 					>
 						{command ? (
 							<div className="text-fg">
-								<span className="text-purple">$ </span>
+								<span className="text-fg-dim">$ </span>
 								{command}
 								{workdir && (
 									<span className="text-fg-dim"> [in {workdir}]</span>
@@ -332,7 +363,7 @@ const ToolRow = memo(function ToolRow({
 				)}
 			</div>
 			{expanded && result && (
-				<div className="pl-3 h-4 mt-0.5 flex items-center gap-3">
+				<div className="mb-1 flex h-4 items-center gap-3 pl-5">
 					{overflows && (
 						<button
 							type="button"
@@ -396,6 +427,60 @@ function diffLineClass(line: string): string {
 		return "text-fg-dim italic";
 	}
 	return "";
+}
+
+// Rows show their kind icon at rest and the disclosure chevron on hover or while open.
+function DisclosureIcon({
+	icon,
+	expanded,
+	disabled = false,
+}: {
+	icon: React.ReactNode;
+	expanded: boolean;
+	disabled?: boolean;
+}) {
+	return (
+		<span className="flex w-3 shrink-0 items-center justify-center text-fg-dim">
+			<span
+				className={
+					expanded
+						? "hidden"
+						: disabled
+							? "flex"
+							: "flex group-hover:hidden group-focus-visible:hidden"
+				}
+			>
+				{icon}
+			</span>
+			{!disabled && (
+				<ChevronRight
+					size={12}
+					aria-hidden="true"
+					className={
+						expanded
+							? "rotate-90"
+							: "hidden group-hover:block group-focus-visible:block"
+					}
+				/>
+			)}
+		</span>
+	);
+}
+
+const toolIcons: Record<ToolBucket, typeof FileText> = {
+	edit: FilePen,
+	delete: Trash2,
+	move: FileSymlink,
+	execute: SquareTerminal,
+	read: FileText,
+	search: Search,
+	fetch: Globe,
+};
+
+function ToolIcon({ entry }: { entry: ChatEntry }) {
+	const bucket = toolBucket(entry);
+	const Icon = bucket ? toolIcons[bucket] : Wrench;
+	return <Icon size={12} aria-hidden="true" />;
 }
 
 function toolLocationLabel(location: ToolLocation): string {

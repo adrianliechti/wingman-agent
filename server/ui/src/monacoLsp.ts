@@ -1,6 +1,10 @@
 import { workspaceClient } from "./state/workspaceClient.ts";
 import { editEnvelope, lspSourceScheme } from "./state/lspClient.ts";
 import { readWorkspaceFile } from "./api/files.ts";
+import {
+	type WorkspaceFileTarget,
+	workspaceFileTarget,
+} from "./utils/workspacePath.ts";
 import type { Monaco } from "@monaco-editor/react";
 import type * as MonacoTypes from "monaco-editor";
 import type {
@@ -1136,42 +1140,17 @@ export function createMonacoLSPBridge({
 	};
 }
 
-interface LSPFileTarget {
-	path: string;
-	external: boolean;
-}
-
 function lspLocationTarget(
 	locationURI: string,
 	workspaceURI: string,
-): LSPFileTarget | null {
+): WorkspaceFileTarget | null {
 	// Sources outside the workspace open read-only through textDocumentContent.
 	if (locationURI.startsWith(`${lspSourceScheme}:`))
 		return { path: locationURI, external: true };
 	const targetPath = fileURIPath(locationURI);
 	const rootPath = fileURIPath(workspaceURI);
 	if (!targetPath || !rootPath) return null;
-
-	const normalizedRoot = rootPath.endsWith("/")
-		? rootPath.slice(0, -1)
-		: rootPath;
-	const caseInsensitive = /^[a-z]:\//i.test(normalizedRoot);
-	const comparableTarget = caseInsensitive
-		? targetPath.toLowerCase()
-		: targetPath;
-	const comparableRoot = caseInsensitive
-		? normalizedRoot.toLowerCase()
-		: normalizedRoot;
-	if (
-		comparableTarget === comparableRoot ||
-		comparableTarget.startsWith(`${comparableRoot}/`)
-	) {
-		return {
-			path: targetPath.slice(normalizedRoot.length).replace(/^\/+/, ""),
-			external: false,
-		};
-	}
-	return { path: targetPath, external: true };
+	return workspaceFileTarget(targetPath, rootPath);
 }
 
 function fileURIPath(value: string): string | null {

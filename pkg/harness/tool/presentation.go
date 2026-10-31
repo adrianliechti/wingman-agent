@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -20,6 +21,8 @@ type Presentation struct {
 	Hint  string
 	Path  string
 	Line  int
+	// Paths lists further files a batch edit touches, after Path.
+	Paths []string
 }
 
 type presentationSpec struct {
@@ -227,7 +230,9 @@ func Present(name, kind, argsJSON string, hasLocation bool) Presentation {
 			}
 		}
 		if p.Path == "" && (name == "edit" || name == "Edit file") {
-			p.Path = firstBatchEditPath(args)
+			if paths := batchEditPaths(args); len(paths) > 0 {
+				p.Path, p.Paths = paths[0], paths[1:]
+			}
 		}
 		hasLocation = p.Path != ""
 	}
@@ -275,17 +280,17 @@ func Present(name, kind, argsJSON string, hasLocation bool) Presentation {
 	return p
 }
 
-func firstBatchEditPath(args map[string]any) string {
-	edits, ok := args["edits"].([]any)
-	if !ok || len(edits) == 0 {
-		return ""
+// batchEditPaths returns each distinct file a batch edit touches, in order.
+func batchEditPaths(args map[string]any) []string {
+	edits, _ := args["edits"].([]any)
+	var paths []string
+	for _, value := range edits {
+		entry, _ := value.(map[string]any)
+		if path, _ := entry["file_path"].(string); path != "" && !slices.Contains(paths, path) {
+			paths = append(paths, path)
+		}
 	}
-	first, ok := edits[0].(map[string]any)
-	if !ok {
-		return ""
-	}
-	path, _ := first["file_path"].(string)
-	return path
+	return paths
 }
 
 func batchEditHint(argsJSON string) string {
@@ -297,14 +302,7 @@ func batchEditHint(argsJSON string) string {
 	if !ok || len(edits) == 0 {
 		return ""
 	}
-	files := make(map[string]struct{})
-	for _, value := range edits {
-		entry, _ := value.(map[string]any)
-		path, _ := entry["file_path"].(string)
-		if path != "" {
-			files[path] = struct{}{}
-		}
-	}
+	files := batchEditPaths(args)
 	label := "edit"
 	if len(edits) != 1 {
 		label = "edits"

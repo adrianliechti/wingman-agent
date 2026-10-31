@@ -1,9 +1,4 @@
-import {
-	useEffect,
-	useState,
-	useSyncExternalStore,
-	type ReactNode,
-} from "react";
+import { useState, useSyncExternalStore, type ReactNode } from "react";
 import { WorkspaceContext, type SettingsPatch } from "./workspaceContext.ts";
 import { workspaceClient } from "./workspaceClient.ts";
 import { useRootAgents } from "../hooks/useAgents.ts";
@@ -31,10 +26,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 			...current,
 			[key]: { ...current[key], ...patch },
 		}));
-	useEffect(() => {
-		client.start();
-		return () => client.stop();
-	}, [client]);
+	// initializeWorkspace owns the connection. Stopping it on unmount would let
+	// StrictMode's remount fail in-flight reads.
 	const value = { backend, selectBackend, drafts, setDraft };
 	return (
 		<WorkspaceContext value={value}>

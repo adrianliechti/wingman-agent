@@ -2,6 +2,14 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
+// Every route the workspace server serves outside the UI bundle.
+export function proxyToServer(target: string) {
+	const routes = ["/api", "/ahp", "/lsp", "/dap", "/content", "/preview"];
+	return Object.fromEntries(
+		routes.map((route) => [route, { target, ws: true }]),
+	);
+}
+
 export default defineConfig({
 	plugins: [react({ compiler: true }), tailwindcss()],
 	build: {
@@ -25,8 +33,6 @@ export default defineConfig({
 		},
 	},
 	server: {
-		proxy: {
-			"/api": { target: "http://localhost:4242", ws: true },
-		},
+		proxy: proxyToServer("http://localhost:4242"),
 	},
 });

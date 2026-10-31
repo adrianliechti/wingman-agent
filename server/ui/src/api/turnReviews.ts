@@ -23,6 +23,9 @@ export type TurnReview = {
 	untracked: boolean;
 	uncertain: boolean;
 	undone: boolean;
+	// Net line counts; only review listings carry them.
+	added?: number;
+	removed?: number;
 };
 export const turnReviewKey = (session: string) =>
 	["server", "turn-reviews", session] as const;

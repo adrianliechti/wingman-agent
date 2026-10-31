@@ -1,9 +1,10 @@
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatEntry } from "../../types/session";
 import { sampleSpinnerVerb } from "../../spinnerVerbs";
 import type { Phase } from "../../types/protocol";
 import { EntryView, ToolGroupView } from "./entries";
+import { summarizeSteps } from "./stepSummary";
 import type { Turn } from "./turns";
 import { TurnReviewCard } from "./TurnReviews";
 
@@ -22,8 +23,15 @@ export const TurnView = memo(function TurnView({
 	applyPendingAnchor,
 	onOpenFile,
 }: TurnViewProps) {
+	// Only tool runs fold into a summary; thoughts fold themselves and progress
+	// text stays readable.
 	const canCollapse =
-		!isActive && turn.reply.length > 0 && turn.working.length > 0;
+		!isActive &&
+		turn.reply.length > 0 &&
+		turn.working.some((entry) => entry.type === "tool");
+	const last = turn.working.at(-1);
+	const thinkingVisibly =
+		phase === "thinking" && last?.type === "reasoning" && !!last.content;
 	const [override, setOverride] = useState<boolean | null>(null);
 	const expanded = override ?? !canCollapse;
 	// Manual toggle keeps scrollTop unchanged: the disclosure header sits above
@@ -57,9 +65,7 @@ export const TurnView = memo(function TurnView({
 						/>
 						{isActive &&
 							!(phase === "streaming" && turn.reply.length > 0) &&
-							turn.working[turn.working.length - 1]?.type !== "reasoning" && (
-								<PhaseIndicator />
-							)}
+							!thinkingVisibly && <PhaseIndicator />}
 					</>
 				) : (
 					<WorkingHeader
@@ -152,7 +158,12 @@ const WorkingExpanded = memo(function WorkingExpanded({
 			phase === "thinking" &&
 			entry.type === "reasoning";
 		nodes.push(
-			<EntryView key={entry.id} entry={entry} isStreaming={isStreaming} />,
+			<EntryView
+				key={entry.id}
+				entry={entry}
+				isStreaming={isStreaming}
+				live={isActive}
+			/>,
 		);
 		i++;
 	}
@@ -172,17 +183,7 @@ const WorkingExpanded = memo(function WorkingExpanded({
 	);
 });
 
-function workingSummaryText(entries: ChatEntry[]): string {
-	const tools = entries.filter((e) => e.type === "tool").length;
-	const thoughts = entries.filter((e) => e.type === "reasoning").length;
-	const parts: string[] = [];
-	if (thoughts) parts.push(`${thoughts} thought${thoughts === 1 ? "" : "s"}`);
-	if (tools) parts.push(`${tools} tool${tools === 1 ? "" : "s"}`);
-	return parts.length > 0 ? parts.join(", ") : "Worked";
-}
-
-// Disclosure header for the working steps. Same row toggles both ways:
-// down-chevron when expanded (steps shown below), right-chevron when collapsed.
+// Disclosure header for the working steps; the same row toggles both ways.
 const WorkingHeader = memo(function WorkingHeader({
 	entries,
 	expanded,
@@ -198,14 +199,14 @@ const WorkingHeader = memo(function WorkingHeader({
 		<button
 			type="button"
 			onClick={onToggle}
-			className={`flex items-center gap-2 py-0.5 cursor-pointer text-[11px] text-fg-dim hover:text-fg transition-colors ${className}`}
+			aria-expanded={expanded}
+			className={`flex cursor-pointer items-center gap-2 py-[3px] text-[12px] text-fg-dim transition-colors hover:text-fg-muted ${className}`}
 		>
-			{expanded ? (
-				<ChevronDown size={12} className="shrink-0" />
-			) : (
-				<ChevronRight size={12} className="shrink-0" />
-			)}
-			<span className="font-mono">{workingSummaryText(entries)}</span>
+			<ChevronRight
+				size={12}
+				className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+			/>
+			<span>{summarizeSteps(entries)}</span>
 		</button>
 	);
 });
@@ -227,27 +228,11 @@ function PhaseIndicator() {
 	const elapsed = Math.max(0, Math.floor((clock.now - clock.startedAt) / 1000));
 
 	return (
-		<div className="mb-4 pl-3">
-			<div className="flex items-baseline gap-1.5 text-[12px] text-fg-dim font-mono italic">
-				<span>{verb}</span>
-				<span className="inline-flex gap-[3px]">
-					<span
-						className="w-[3px] h-[3px] rounded-full bg-fg-dim animate-pulse"
-						style={{ animationDelay: "0ms", animationDuration: "1.2s" }}
-					/>
-					<span
-						className="w-[3px] h-[3px] rounded-full bg-fg-dim animate-pulse"
-						style={{ animationDelay: "200ms", animationDuration: "1.2s" }}
-					/>
-					<span
-						className="w-[3px] h-[3px] rounded-full bg-fg-dim animate-pulse"
-						style={{ animationDelay: "400ms", animationDuration: "1.2s" }}
-					/>
-				</span>
-				<span className="not-italic text-fg-dim/70">
-					{elapsed}s · esc to interrupt
-				</span>
-			</div>
+		<div className="mb-4 flex items-baseline gap-2 py-[3px] text-[12px]">
+			<span className="text-shimmer">{verb}…</span>
+			<span className="text-fg-dim/70 tabular-nums">
+				{elapsed}s · esc to interrupt
+			</span>
 		</div>
 	);
 }

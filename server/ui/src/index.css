@@ -318,6 +318,30 @@ html[data-window-chrome="windows-overlay"] .window-app-menu {
 	background: var(--color-selection);
 }
 
+/* In-progress labels: a highlight sweeps across dim text instead of a spinner. */
+.text-shimmer {
+	background: linear-gradient(
+			90deg,
+			var(--color-fg-dim) 40%,
+			var(--color-fg) 50%,
+			var(--color-fg-dim) 60%
+		)
+		0 0 / 250% 100%;
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+	animation: text-shimmer 2s linear infinite;
+}
+
+@keyframes text-shimmer {
+	from {
+		background-position: 100% 0;
+	}
+	to {
+		background-position: 0% 0;
+	}
+}
+
 @media (prefers-reduced-motion: reduce) {
 	*,
 	*::before,

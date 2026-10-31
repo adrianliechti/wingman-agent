@@ -21,8 +21,8 @@ func ExtractHint(argsJSON, toolName string) string {
 		return wdFallback(toolName)
 	}
 	if toolName == "edit" || toolName == "Edit file" {
-		if path := firstBatchEditPath(args); path != "" {
-			return normalizeWorkspacePath(strings.Join(strings.Fields(path), " "))
+		if paths := batchEditPaths(args); len(paths) > 0 {
+			return normalizeWorkspacePath(strings.Join(strings.Fields(paths[0]), " "))
 		}
 	}
 
