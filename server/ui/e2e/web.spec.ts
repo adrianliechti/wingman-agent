@@ -1363,25 +1363,26 @@ for (const action of [
 test("chat drafts keep their own content and settings across tab switches", async ({
 	page,
 }) => {
-	await page.route(/\/api\/v2\/backends\/wingman\/settings$/, (route) =>
-		route.fulfill({
-			json: {
-				...emptySession("").settings,
-				models: [
-					{ id: "first", name: "First model" },
-					{ id: "second", name: "Second model" },
-				],
-				model: "first",
-				effort: "default",
-				efforts: ["default"],
-				modes: [
-					{ id: "agent", name: "Agent" },
-					{ id: "plan", name: "Plan" },
-				],
-				mode: "agent",
+	const fixture = await ahpFixture(page);
+	fixture.sessionConfig.set("wingman", {
+		schema: {
+			type: "object",
+			properties: {
+				model: {
+					type: "string",
+					enum: ["first", "second"],
+					enumLabels: ["First model", "Second model"],
+				},
+				effort: { type: "string", enum: ["default"] },
+				mode: {
+					type: "string",
+					enum: ["agent", "plan"],
+					enumLabels: ["Agent", "Plan"],
+				},
 			},
-		}),
-	);
+		},
+		values: { model: "first", effort: "default", mode: "agent" },
+	});
 	const input = await composer(page);
 	const firstTab = page.locator('[data-center-tab^="draft:wingman:"]').first();
 	await input.fill("Draft in the first tab");
@@ -1525,22 +1526,9 @@ test("ACP chat initialization errors allow retrying the same session creation", 
 
 test("uses canonical product names for agents", async ({ page }) => {
 	await mockACPBackend(page, "claude");
-	await mockWorkspace(page, async (route) => {
-		const response = await route.fetch();
-		const scope = await response.json();
-		await route.fulfill({
-			json: {
-				...scope,
-				backends: [
-					{ id: "wingman", name: "Wingman" },
-					...["claude", "codex", "copilot", "opencode", "pi"].map((id) => ({
-						id,
-						name: id,
-					})),
-				],
-			},
-		});
-	});
+	const fixture = await ahpFixture(page);
+	for (const id of ["claude", "codex", "copilot", "opencode", "pi"])
+		fixture.agents.set(id, id);
 	await composer(page);
 	await page.keyboard.press("Control+k");
 	const palette = page.getByRole("dialog", { name: "Command palette" });
@@ -3869,25 +3857,26 @@ test("composer hides mode then model as session history narrows the chat", async
 	page,
 }) => {
 	await mockACPBackend(page);
-	await page.route(/\/api\/v2\/backends\/wingman\/settings$/, (route) =>
-		route.fulfill({
-			json: {
-				...emptySession("").settings,
-				models: [
-					{
-						id: "long-model",
-						name: "A model with a long provider and version name",
-					},
-				],
-				model: "long-model",
-				effort: "default",
-				modes: [
-					{ id: "agent", name: "Agent mode with a longer descriptive name" },
-				],
-				mode: "agent",
+	const fixture = await ahpFixture(page);
+	fixture.sessionConfig.set("wingman", {
+		schema: {
+			type: "object",
+			properties: {
+				model: {
+					type: "string",
+					enum: ["long-model"],
+					enumLabels: ["A model with a long provider and version name"],
+				},
+				effort: { type: "string", enum: ["default"] },
+				mode: {
+					type: "string",
+					enum: ["agent"],
+					enumLabels: ["Agent mode with a longer descriptive name"],
+				},
 			},
-		}),
-	);
+		},
+		values: { model: "long-model", effort: "default", mode: "agent" },
+	});
 	const input = await composer(page);
 	await input.fill("Keep this draft while resizing");
 	const composerBox = page.locator("[data-chat-composer]");

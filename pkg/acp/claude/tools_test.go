@@ -24,6 +24,7 @@ func TestResultToTurn(t *testing.T) {
 		{"success max_tokens", `{"type":"result","subtype":"success","stop_reason":"max_tokens"}`, acp.StopReasonMaxTokens, false},
 		{"success refusal", `{"type":"result","subtype":"success","stop_reason":"refusal"}`, acp.StopReasonRefusal, false},
 		{"success is_error", `{"type":"result","subtype":"success","is_error":true,"result":"boom"}`, "", true},
+		{"short login instruction", `{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Run /login"}`, "", true},
 		{"login required", `{"type":"result","subtype":"success","is_error":true,"result":"Please run /login first"}`, "", true},
 		{"login text in a successful answer", `{"type":"result","subtype":"success","result":"Tell them: Please run /login"}`, acp.StopReasonEndTurn, false},
 		{"error_during_execution", `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["x","y"]}`, "", true},

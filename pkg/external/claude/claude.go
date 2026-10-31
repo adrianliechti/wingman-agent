@@ -71,7 +71,7 @@ func BuildVars(cfg *ClaudeConfig) map[string]string {
 // entries otherwise overwrite the process environment, including opt-outs.
 // Keep credentials out of this map because settings are passed on the argv.
 func privacyVars() map[string]string {
-	return map[string]string{
+	vars := map[string]string{
 		"DISABLE_TELEMETRY":                           "1",
 		"DISABLE_ERROR_REPORTING":                     "1",
 		"DISABLE_GROWTHBOOK":                          "1",
@@ -135,12 +135,20 @@ func privacyVars() map[string]string {
 
 		"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
 	}
+	maps.Copy(vars, hostVars())
+	return vars
 }
 
 func BuildArgs(cfg *ClaudeConfig) []string {
-	args := []string{"--settings", `{"disableRemoteControl":true}`}
+	settings := map[string]any{
+		"disableRemoteControl":          true,
+		"disableWorkflows":              true,
+		"ultracode":                     false,
+		"workflowKeywordTriggerEnabled": false,
+		"env":                           hostVars(),
+	}
 	if cfg != nil {
-		settings := map[string]any{
+		maps.Copy(settings, map[string]any{
 			"disableRemoteControl":      true,
 			"disableClaudeAiConnectors": true,
 			"syncClaudeAiSkills":        false,
@@ -153,9 +161,12 @@ func BuildArgs(cfg *ClaudeConfig) []string {
 			"apiKeyHelper":              "",
 			"otelHeadersHelper":         "",
 			"env":                       privacyVars(),
-		}
-		settingsJSON, _ := json.Marshal(settings)
-		args = []string{"--settings", string(settingsJSON), "--no-chrome"}
+		})
+	}
+	settingsJSON, _ := json.Marshal(settings)
+	args := []string{"--settings", string(settingsJSON)}
+	if cfg != nil {
+		args = append(args, "--no-chrome")
 		// The SDK's parent policy channel is required: --settings alone does
 		// not enforce managed model restrictions. Never change machine policy.
 		// "exact" also keeps Default on a listed model; enforceAvailableModels
@@ -176,6 +187,14 @@ func BuildEnv(parent []string, cfg *ClaudeConfig) []string {
 	// Background tasks use ANTHROPIC_DEFAULT_HAIKU_MODEL instead of the
 	// deprecated small/fast model override.
 	return external.MergeEnv(parent, BuildVars(cfg), "ANTHROPIC_SMALL_FAST_MODEL")
+}
+
+// The host owns effort and task orchestration, including on the native backend.
+func hostVars() map[string]string {
+	return map[string]string{
+		"CLAUDE_CODE_DISABLE_WORKFLOWS":  "1",
+		"CLAUDE_CODE_DISABLE_ULTRATHINK": "1",
+	}
 }
 
 func FindPath() (string, error) {

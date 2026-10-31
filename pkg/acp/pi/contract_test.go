@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 	"github.com/coder/acp-go-sdk"
+	"github.com/google/uuid"
+
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
 const (
@@ -39,6 +41,16 @@ func TestPiContractHelper(t *testing.T) {
 }
 
 func runPiContractHelper() {
+	sessionID := contractSessionID
+	if os.Getenv("ACP_TCK_AGENT") == "1" {
+		sessionID = uuid.NewString()
+	}
+	if data, err := os.ReadFile(os.Getenv(mcpConfigEnv)); err == nil {
+		var config mcpBridgeConfig
+		if json.Unmarshal(data, &config) == nil {
+			_ = os.WriteFile(config.StatusPath, []byte(`{"ready":true}`), 0o600)
+		}
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	cloned := false
 	for scanner.Scan() {
@@ -55,12 +67,12 @@ func runPiContractHelper() {
 		case "get_available_models":
 			writePiResponse(req.ID, map[string]any{"models": []any{map[string]any{"provider": "contract", "id": "model", "name": "Contract Model"}}})
 		case "get_state":
-			sessionID := contractSessionID
+			id := sessionID
 			if cloned {
-				sessionID = contractForkID
+				id = contractForkID
 			}
 			writePiResponse(req.ID, map[string]any{
-				"sessionId":     sessionID,
+				"sessionId":     id,
 				"thinkingLevel": "medium",
 				"model":         map[string]any{"provider": "contract", "id": "model"},
 			})
@@ -207,6 +219,28 @@ func TestLiveForkSessionWithInstalledPi(t *testing.T) {
 	if _, ok := findSessionFile(sessionsDir, string(resp.SessionId)); !ok {
 		t.Fatalf("Pi did not persist cloned session %q", resp.SessionId)
 	}
+
+	t.Run("before first prompt", func(t *testing.T) {
+		created, err := agent.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		source := agent.lookup(created.SessionId)
+		forked, err := agent.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{SessionId: created.SessionId, Cwd: cwd})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if forked.SessionId == "" || forked.SessionId == created.SessionId {
+			t.Fatalf("invalid empty fork id %q", forked.SessionId)
+		}
+		clone := agent.lookup(forked.SessionId)
+		if clone.currentModel != source.currentModel || clone.thinking != source.thinking {
+			t.Fatalf("fork changed configuration: %s/%s -> %s/%s", source.currentModel, source.thinking, clone.currentModel, clone.thinking)
+		}
+		if agent.lookup(created.SessionId) != source || source.isClosed() {
+			t.Fatal("fork replaced or closed the source")
+		}
+	})
 }
 
 func writePiDelta(text string) {
@@ -224,3 +258,7 @@ func writePiContract(value any) {
 	b, _ := json.Marshal(value)
 	_, _ = os.Stdout.Write(append(b, '\n'))
 }
+
+func TestACPV2Contract(t *testing.T) { acptest.RunV2(t, newContractAgent) }
+
+func TestACPTCK(t *testing.T) { acptest.ServeTCK(t, newContractAgent) }

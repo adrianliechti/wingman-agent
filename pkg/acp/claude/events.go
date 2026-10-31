@@ -88,7 +88,7 @@ func (t *streamedBlockTracker) consume(content []cliMsgBlock) []cliMsgBlock {
 	return kept
 }
 
-func emitStreamEvent(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, raw json.RawMessage, streamed *streamedBlockTracker) error {
+func emitStreamEvent(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, raw json.RawMessage, streamed *streamedBlockTracker) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -132,7 +132,7 @@ func emitStreamEvent(ctx context.Context, conn *acpsdk.AgentSideConnection, sid 
 // emitAssistant renders a consolidated assistant message. Blocks already sent
 // as live deltas are removed by content, while unstreamed blocks and partial
 // tails are still emitted. streamed is nil on history replay.
-func emitAssistant(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, raw json.RawMessage, cwd string, cache toolUseCache, tracker *toolCallTracker, streamed *streamedBlockTracker, parentToolUseID string) error {
+func emitAssistant(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, raw json.RawMessage, cwd string, cache toolUseCache, tracker *toolCallTracker, streamed *streamedBlockTracker, parentToolUseID string) error {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -188,7 +188,7 @@ func emitAssistant(ctx context.Context, conn *acpsdk.AgentSideConnection, sid ac
 // toolCallTracker), in which case it sends a tool_call_update that refines
 // the eagerly-emitted call with the now-complete info instead of duplicating
 // it.
-func emitToolUseCall(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, b cliMsgBlock, cwd string, tracker *toolCallTracker, parentToolUseID string) error {
+func emitToolUseCall(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, b cliMsgBlock, cwd string, tracker *toolCallTracker, parentToolUseID string) error {
 	send := func(u acpsdk.SessionUpdate) error {
 		return acp.Notify(ctx, conn, sid, u)
 	}
@@ -210,7 +210,7 @@ func emitToolUseCall(ctx context.Context, conn *acpsdk.AgentSideConnection, sid 
 	return tracker.emit(b.ID, b.Name, parentToolUseID, start, refine)
 }
 
-func emitToolResults(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, raw json.RawMessage, cache toolUseCache, tracker *toolCallTracker, parentToolUseID string) error {
+func emitToolResults(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, raw json.RawMessage, cache toolUseCache, tracker *toolCallTracker, parentToolUseID string) error {
 	if len(raw) == 0 {
 		return nil
 	}

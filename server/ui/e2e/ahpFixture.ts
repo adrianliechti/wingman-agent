@@ -54,6 +54,8 @@ export class AHPFixture {
 	backends = new Set<string>();
 	/** Display names of the providers the fixture adds to the host's root. */
 	agents = new Map<string, string>();
+	// resolveSessionConfig results by provider, replacing the host's defaults.
+	sessionConfig = new Map<string, { schema: any; values: any }>();
 	connections = new Set<WebSocketRoute>();
 	subscriptions = new Map<string, Set<WebSocketRoute>>();
 	offline = false;
@@ -381,9 +383,15 @@ export class AHPFixture {
 				this.send(channel, { type: "chat/responsePart", turnId: id, part });
 		}
 	}
+	// Agent CLIs installed on the test machine must not leak into the list.
 	private withAgents(agents: any[]) {
-		const known = new Set(agents.map((agent) => agent.provider));
-		const extra = [...new Set([...this.backends, ...this.agents.keys()])]
+		const fixtures = [...new Set([...this.backends, ...this.agents.keys()])];
+		const host = agents.filter(
+			(agent) =>
+				agent.provider === "wingman" || fixtures.includes(agent.provider),
+		);
+		const known = new Set(host.map((agent) => agent.provider));
+		const extra = fixtures
 			.filter((id) => !known.has(id))
 			.map((id) => ({
 				provider: id,
@@ -391,7 +399,7 @@ export class AHPFixture {
 				description: "",
 				models: [],
 			}));
-		return [...agents, ...extra];
+		return [...host, ...extra];
 	}
 	disconnect() {
 		this.offline = true;
@@ -495,9 +503,15 @@ export class AHPFixture {
 
 					if (
 						request.method === "resolveSessionConfig" &&
-						this.backends.has(p.provider)
+						(this.sessionConfig.has(p.provider) ||
+							this.backends.has(p.provider))
 					) {
-						reply({ schema: { type: "object", properties: {} }, values: {} });
+						reply(
+							this.sessionConfig.get(p.provider) ?? {
+								schema: { type: "object", properties: {} },
+								values: {},
+							},
+						);
 						return;
 					}
 					if (request.method === "listSessions") {

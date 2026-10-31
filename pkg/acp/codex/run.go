@@ -10,9 +10,10 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
+	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/adrianliechti/wingman-agent/internal/process"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	codexcli "github.com/adrianliechti/wingman-agent/pkg/external/codex"
 )
 
@@ -107,7 +108,7 @@ func (a *Agent) Close() error {
 		for _, s := range a.sessions {
 			sessions = append(sessions, s)
 		}
-		a.sessions = make(map[acp.SessionId]*session)
+		a.sessions = make(map[acpsdk.SessionId]*session)
 		a.mu.Unlock()
 		for _, s := range sessions {
 			s.markClosed()
@@ -140,11 +141,10 @@ func Run(ctx context.Context, opts Options, in io.Reader, out io.Writer, logger 
 
 	writer := newClientWriter(out)
 	defer writer.Close()
-	conn := acp.NewAgentSideConnection(a, writer, in)
+	conn := acp.NewAgentConnection(a, writer, in)
 	if logger != nil {
 		conn.SetLogger(logger)
 	}
-	a.SetAgentConnection(conn)
 
 	select {
 	case <-conn.Done():

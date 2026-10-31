@@ -14,11 +14,11 @@ import (
 	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
-
-	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/google/uuid"
 
 	"github.com/adrianliechti/wingman-agent/internal/process"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 type session struct {
@@ -156,6 +156,9 @@ func (s *session) runTurn(ctx context.Context, prompt []acpsdk.ContentBlock) (ac
 	p.beginTurn(turnCtx)
 	input := promptMessage(prompt)
 	p.turnMu.Lock()
+	if id := harness.InputIDFromContext(ctx); uuid.Validate(id) == nil {
+		p.turnID = id
+	}
 	input.UUID = p.turnID
 	p.turnMu.Unlock()
 	if err := p.out.writeJSON(input); err != nil {
@@ -164,6 +167,7 @@ func (s *session) runTurn(ctx context.Context, prompt []acpsdk.ContentBlock) (ac
 		return "", nil, fmt.Errorf("write prompt: %w", err)
 	}
 
+	acp.PromptAccepted(ctx, input.UUID)
 	select {
 	case <-turnCtx.Done():
 
@@ -470,7 +474,7 @@ func (p *claudeProc) shutdown() {
 	})
 }
 
-func (p *claudeProc) read(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, r io.Reader) {
+func (p *claudeProc) read(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, r io.Reader) {
 	defer close(p.dead)
 	defer p.finishTurn()
 	stderr := p.session.agent.stderr
@@ -679,7 +683,7 @@ func taskProgressNote(env cliEnvelope) string {
 }
 
 // reportLoadErrors surfaces system/init's mcp_server_errors and plugin_errors.
-func reportLoadErrors(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, env cliEnvelope) {
+func reportLoadErrors(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, env cliEnvelope) {
 	var lines []string
 	for _, e := range env.MCPServerErrors {
 		lines = append(lines, fmt.Sprintf("- MCP server %q skipped (%s): %s", e.label(), e.Type, e.Message))
@@ -699,7 +703,7 @@ func reportLoadErrors(ctx context.Context, conn *acpsdk.AgentSideConnection, sid
 		Update: acpsdk.UpdateAgentMessageText("Startup warnings:\n" + strings.Join(lines, "\n") + "\n\n")})
 }
 
-func (p *claudeProc) handleSystem(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, env cliEnvelope) {
+func (p *claudeProc) handleSystem(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, env cliEnvelope) {
 	switch env.Subtype {
 	case "init":
 		p.contextUsage.setModel(env.Model)
@@ -894,7 +898,7 @@ func (p *claudeProc) runsInBackground(agentToolUseID string) bool {
 // subagent's interrupted result is written only to its own transcript, and a
 // dead or dropped process reports nothing. While the process lives, calls of
 // a background subagent stay open because that subagent keeps running.
-func (p *claudeProc) closeCancelledToolCalls(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, keepBackground bool) {
+func (p *claudeProc) closeCancelledToolCalls(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, keepBackground bool) {
 	// A result can win the select even when EOF is already ready. Session
 	// close also makes the process unavailable before its reader reports EOF.
 	keepBackground = keepBackground && !p.isDead() && (p.session == nil || !p.session.isClosed())
@@ -919,7 +923,7 @@ func (p *claudeProc) canReportTask(toolCallID, taskType string) bool {
 	return p.emitted.has(toolCallID) && p.tools[toolCallID] != "Monitor" && taskType != "local_monitor"
 }
 
-func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, env cliEnvelope) error {
+func (p *claudeProc) handleToolProgress(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, env cliEnvelope) error {
 	toolCallID := env.ToolUseID
 	if !p.emitted.has(toolCallID) {
 		toolCallID = env.ParentToolUseID
@@ -945,7 +949,7 @@ func (p *claudeProc) handleToolProgress(ctx context.Context, conn *acpsdk.AgentS
 	return acp.Notify(ctx, conn, sid, update)
 }
 
-func (p *claudeProc) applyFallbackModel(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, fallback string) {
+func (p *claudeProc) applyFallbackModel(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, fallback string) {
 	modelID := fallback
 	if m := resolveModel(p.models, fallback); m != nil {
 		modelID = m.ID
@@ -967,7 +971,7 @@ func (p *claudeProc) applyFallbackModel(ctx context.Context, conn *acpsdk.AgentS
 	}})
 }
 
-func (p *claudeProc) applyMode(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, modeID string) {
+func (p *claudeProc) applyMode(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, modeID string) {
 	if findMode(modeID) == nil {
 		return
 	}
@@ -1008,7 +1012,7 @@ func (r cliResult) autonomous() bool {
 
 func isSyntheticLoginMessage(m cliMessage) bool {
 	return m.Model == "<synthetic>" && len(m.Content) == 1 && m.Content[0].Type == "text" &&
-		strings.Contains(m.Content[0].Text, "Please run /login")
+		requiresLogin(m.Content[0].Text)
 }
 
 func resultToTurn(line []byte) turnResult {
@@ -1021,7 +1025,7 @@ func resultToTurn(line []byte) turnResult {
 }
 
 func resultOutcome(r cliResult) turnResult {
-	if r.IsError && strings.Contains(r.Result, "Please run /login") {
+	if r.IsError && requiresLogin(r.Result) {
 		return turnResult{err: acpsdk.NewAuthRequired(nil)}
 	}
 	switch r.Subtype {
@@ -1206,3 +1210,5 @@ func formatResourceLink(name, uri string) string {
 	}
 	return uri
 }
+
+func requiresLogin(text string) bool { return strings.Contains(strings.ToLower(text), "run /login") }

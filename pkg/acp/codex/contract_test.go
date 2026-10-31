@@ -174,3 +174,7 @@ func (s *contractAppServer) send(msg rpcMessage) {
 	_, _ = s.conn.Write(append(b, '\n'))
 	s.mu.Unlock()
 }
+
+func TestACPV2Contract(t *testing.T) { acptest.RunV2(t, newContractAgent) }
+
+func TestACPTCK(t *testing.T) { acptest.ServeTCK(t, newContractAgent) }

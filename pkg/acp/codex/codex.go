@@ -408,12 +408,13 @@ type threadSummary struct {
 }
 
 type turnStartParams struct {
-	ThreadID       string `json:"threadId"`
-	Input          []any  `json:"input"`
-	ApprovalPolicy any    `json:"approvalPolicy,omitempty"`
-	SandboxPolicy  any    `json:"sandboxPolicy,omitempty"`
-	Model          string `json:"model,omitempty"`
-	Effort         string `json:"effort,omitempty"`
+	ClientUserMessageID string `json:"clientUserMessageId,omitempty"`
+	ThreadID            string `json:"threadId"`
+	Input               []any  `json:"input"`
+	ApprovalPolicy      any    `json:"approvalPolicy,omitempty"`
+	SandboxPolicy       any    `json:"sandboxPolicy,omitempty"`
+	Model               string `json:"model,omitempty"`
+	Effort              string `json:"effort,omitempty"`
 }
 
 type turnStartResponse struct {

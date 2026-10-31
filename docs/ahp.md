@@ -94,12 +94,21 @@ flags are removed. Git status is fetched separately from `/api/workspace/git`,
 which returns `null` when repository initialization is available; `git_init` is
 therefore also removed. `/api/workspace/insights` returns Git activity statistics.
 
-`GET /api/v2/backends` returns the backend catalogue. Startup reads workspace
-identity first, then fetches backends with the returned instance ID before
-initializing its protocol connections. The catalogue is no longer duplicated in
-`/api/workspace`. Backend settings and model refresh stay under
-`/api/v2/backends/{provider}`. Turn reviews, tasks and schedules live under
-`/api/v2/chats/{chat}`, where `{chat}` is the URL-encoded chat URI.
+Agents and their models come from the AHP root state, and a new chat's default
+settings from `resolveSessionConfig`; `/api/v2/backends` and its settings route
+are removed. `POST /api/v2/backends/{provider}/models/refresh` retries model
+discovery. Turn reviews, tasks and schedules live under `/api/v2/chats/{chat}`,
+where `{chat}` is the URL-encoded chat URI.
+
+Workspace tools that are not protocol state use REST:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/workspace/files?query=…` | File picker: up to 50 visible paths containing the query |
+| `POST /api/workspace/search` | Text search; streams NDJSON `file` events, then `done` (or `error`); aborting the request cancels it. At most 8 at once, one minute each |
+| `POST /api/workspace/reveal` | Shows a workspace path in the host's file manager |
+| `GET /api/workspace/terminals/{terminal}/status` | `{busy}`: whether a terminal runs a command besides its shell |
+| `GET /api/workspace/activity` | Language-service and analysis progress |
 
 ## Git and AHP changesets
 
@@ -202,8 +211,8 @@ terminals. They support discovery, creation, ownership, input, resize, titles,
 clear, disposal, reconnect scrollback, and retained exit status. A disconnected
 owner can be replaced; a connected owner's terminal remains read-only to other
 clients. Scrollback is bounded to 256 KiB. Shell-integration markers are filtered
-without splitting UTF-8 characters. The small `x-wingman/terminalStatus`
-extension supplies the foreground-process check used by close confirmation.
+without splitting UTF-8 characters. Close confirmation asks the terminal status
+route whether a foreground process runs.
 
 Workspace file operations use standard AHP `resourceList`, `resourceRead`,
 `resourceResolve`, `resourceWrite`, `resourceCopy`, `resourceMove`,
@@ -220,13 +229,8 @@ transfers unused entry sizes. Language and text sizes are derived locally.
 
 The former batch-save API had no UI callers and has been deleted. Multi-file
 editor changes remain unsaved buffers; each save retains its own conflict check.
-`x-wingman/fileSearch` supplies the file picker, `x-wingman/textSearch` streams
-`x-wingman/searchProgress` results, and `x-wingman/cancelSearch` cancels a search.
-Searches are connection-scoped, bounded to four active requests and one minute,
-and retain existing ignore/glob/regex/replacement behavior. `x-wingman/revealResource`
-opens a file in the host's file manager. These are Wingman extensions, not AHP
-standard methods. Upstream `completions` targets chat input/attachments, rather
-than general workspace search.
+File picker, text search and reveal use the REST routes above; upstream
+`completions` targets chat input and attachments, not workspace search.
 
 Workspace resource access is confined to the project. Recursive resource
 watches support include/exclude globs. The shared uncommitted changeset exposes
@@ -245,10 +249,15 @@ negotiates 1.1; 1.0 clients receive the legacy queue/steering projection.
 Side chats, chats from other providers, client-provided tools, TCP channels,
 experimental channel windows, and protocol-native automations are not
 advertised. Draft/archive/title overrides currently last for the host process.
-The remaining Wingman extensions are file and text search, `revealResource`,
-`terminalStatus`, `focus`, `workspaceChanged`, the root's `_meta.wingman`
-workspace identity, `createTerminal`'s `_meta["wingman.shell"]`, and completion
-attachments' `_meta.wingman` descriptions.
+The remaining Wingman extensions are the `x-wingman/workspaceChanged` root
+notification (`files_changed`, `workspace_changed`, `skills_changed` and
+`tasks_changed`), the root's `_meta["wingman.workspace"]` identity used to
+detect a replaced workspace, and `createTerminal`'s `_meta["wingman.shell"]`.
+Sessions, models, terminals and Git changes reach clients through the standard
+root notifications and changeset channels. Wingman also follows VS Code's
+`_meta` conventions: `vscode.agentHost.resources` on the root, `toolKind` on tool
+calls, and `command`, `description`, `argumentHint` and `isSkill` on completion
+attachments.
 
 ## Skills and commands
 
@@ -263,8 +272,9 @@ completion trigger. Native commands come from that session's backend, take
 precedence over same-named skills at the start of a message, and are not offered
 inline. Skill instructions are expanded by the host; native commands are passed
 to the backend without expanding a conflicting skill. Completion attachments
-identify `skill` versus `command` and carry descriptions and argument hints in
-`_meta.wingman`. The WebUI preserves those attachments through draft recovery
+identify `skill` versus `command` with `displayKind` and carry VS Code's
+`command`, `description`, `argumentHint` and `isSkill` metadata. The WebUI
+preserves those attachments through draft recovery
 and delivery. Draft chats use the workspace catalogue until a session exists.
 `/compact` is offered as a command when the backend can compact.
 
@@ -300,9 +310,10 @@ and carries `textDocument` to select the underlying language service. A
 browser for review, and the server receives the user's decision; the command's
 two-minute limit pauses during the review. Edit metadata retains revision checks
 and multi-file review, and document versions in edits are the editor's.
-`wingman/documentCapabilities` reports the selected file's capabilities;
-`wingman/activity` reports managed-language-service progress. Edit and
-diagnostic results carry optional `_wingman` metadata.
+`wingman/documentCapabilities` reports the selected file's capabilities. When a
+client declares `workspace.diagnostics.refreshSupport`, the host sends
+`workspace/diagnostic/refresh` after workspace or language-service changes. Edit
+and diagnostic results carry optional `_wingman` metadata.
 
 DAP supports initialize, launch/attach, configurationDone, source and exception
 breakpoints, continue/next/stepIn/stepOut/stepBack/reverseContinue/pause,
@@ -343,6 +354,20 @@ node scripts/vendor-ahp.mjs /path/to/agent-host-protocol
 ```
 
 ## Validation
+
+`TestAHPConformance` checks selected upstream subscription and recovery contracts
+against the real WebSocket host for both AHP 1.0 and 1.1. It covers version
+fallback, initial snapshots, multi-client broadcast, duplicate subscriptions,
+channel isolation, unsubscribe/resubscribe, server-only action rejection, and
+reconnect followed by live delivery. Raw frames expose unexpected deliveries;
+Microsoft's Go reducer checks that client state agrees with fresh snapshots.
+The provider fixture needs no model credentials, Node, or VS Code. This is a
+focused local suite based on the upstream contracts, not the complete VS Code
+conformance runner.
+
+```bash
+go test -race ./server -run '^TestAHPConformance$' -count=1 -v
+```
 
 Tests exercise the official pinned TypeScript SDK and the released 1.0 npm SDK
 against the Go host, including shared sessions, actions, typed questions,

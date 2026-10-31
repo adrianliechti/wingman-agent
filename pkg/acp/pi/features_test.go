@@ -87,7 +87,7 @@ func TestFailedLoadKeepsExistingLiveSession(t *testing.T) {
 	t.Cleanup(func() { _ = a.Close() })
 
 	_, err := a.LoadSession(context.Background(), acp.LoadSessionRequest{
-		SessionId: id, Cwd: cwd, McpServers: []acp.McpServer{},
+		SessionId: id, Cwd: t.TempDir(), McpServers: []acp.McpServer{},
 	})
 	if err == nil {
 		t.Fatal("load with a missing Pi executable succeeded")

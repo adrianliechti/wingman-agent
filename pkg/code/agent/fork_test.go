@@ -25,6 +25,34 @@ func seedForkSource(t *testing.T, a *Agent, id string) {
 	}
 }
 
+func TestForkSessionBeforeFirstPrompt(t *testing.T) {
+	a := New(newOptionsTestWorkspace(t), Config{}, nil)
+	defer a.Close()
+	id, err := a.NewSession(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetModel(t.Context(), id, "gpt-6-sol"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetMode(t.Context(), id, code.PlanModeID); err != nil {
+		t.Fatal(err)
+	}
+	fork, err := a.ForkSession(t.Context(), id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fork == id || !a.HasSession(id) || !a.HasSession(fork) || len(a.Messages(fork)) != 0 {
+		t.Fatalf("invalid empty fork %q from %q", fork, id)
+	}
+	if _, model := a.Models(fork); model != "gpt-6-sol" {
+		t.Fatalf("fork model = %q", model)
+	}
+	if _, mode := a.Modes(fork); mode != code.PlanModeID {
+		t.Fatalf("fork mode = %q", mode)
+	}
+}
+
 func TestForkSessionCarriesHistorySettingsAndMode(t *testing.T) {
 	ws := newOptionsTestWorkspace(t)
 	a := New(ws, Config{Options: Options{IsolateSessions: true}}, nil)

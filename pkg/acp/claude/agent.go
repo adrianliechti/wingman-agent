@@ -13,6 +13,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	claudecli "github.com/adrianliechti/wingman-agent/pkg/external/claude"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 func binPath() string {
@@ -34,7 +35,7 @@ type Options struct {
 }
 
 type Agent struct {
-	conn *acpsdk.AgentSideConnection
+	conn acp.ClientConnection
 
 	mu              sync.Mutex
 	sessions        map[acpsdk.SessionId]*session
@@ -85,7 +86,7 @@ func New(opts Options) *Agent {
 	}
 }
 
-func (a *Agent) SetAgentConnection(conn *acpsdk.AgentSideConnection) { a.conn = conn }
+func (a *Agent) SetClientConnection(conn acp.ClientConnection) { a.conn = conn }
 
 func (a *Agent) Close() error {
 	a.mu.Lock()
@@ -223,6 +224,9 @@ func (a *Agent) NewSession(ctx context.Context, params acpsdk.NewSessionRequest)
 }
 
 func (a *Agent) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
+	if params.MessageId != nil {
+		ctx = harness.WithInputID(ctx, *params.MessageId)
+	}
 	s := a.lookup(params.SessionId)
 	if s == nil {
 		return acpsdk.PromptResponse{}, fmt.Errorf("session %s not found", params.SessionId)
@@ -270,7 +274,7 @@ func (a *Agent) SetSessionMode(_ context.Context, params acpsdk.SetSessionModeRe
 	return acpsdk.SetSessionModeResponse{}, nil
 }
 
-func (a *Agent) SetSessionConfigOption(_ context.Context, params acpsdk.SetSessionConfigOptionRequest) (acpsdk.SetSessionConfigOptionResponse, error) {
+func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSessionConfigOptionRequest) (response acpsdk.SetSessionConfigOptionResponse, err error) {
 	if params.ValueId == nil {
 		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("only value-id config options supported")
 	}
@@ -282,7 +286,13 @@ func (a *Agent) SetSessionConfigOption(_ context.Context, params acpsdk.SetSessi
 	value := string(v.Value)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	before := buildConfigOptions(a.models, s.modelID, s.effort)
+	defer func() {
+		s.mu.Unlock()
+		if err == nil && a.lookup(s.id) == s {
+			err = acp.NotifyConfig(ctx, a.conn, s.id, before, response.ConfigOptions)
+		}
+	}()
 	switch string(v.ConfigId) {
 	case modelConfigID:
 		m := resolveModel(a.models, value)
@@ -480,3 +490,5 @@ func (a *Agent) storeSession(s *session) {
 		old.close()
 	}
 }
+
+func (a *Agent) SetAgentConnection(conn *acpsdk.AgentSideConnection) { a.SetClientConnection(conn) }

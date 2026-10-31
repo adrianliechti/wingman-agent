@@ -12,8 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
 type recordingClient struct {
@@ -185,6 +186,7 @@ func TestSessionInfoChangedForwardsValidNames(t *testing.T) {
 				`{"type":"session_info_changed","name":"Extension title"}`,
 				`{"type":"session_info_changed","name":"Extension title"}`,
 				`{"type":"session_info_changed","name":123}`,
+				`{"type":"session_info_changed","name":null}`,
 				`{"type":"session_info_changed","name":{"text":"invalid"}}`,
 				`{"type":"session_info_changed"}`,
 				`{"type":"session_info_changed"}`,

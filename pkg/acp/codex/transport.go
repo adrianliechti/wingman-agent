@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	acpsdk "github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 const clientWriteTimeout = acp.WriteTimeout
@@ -19,7 +20,7 @@ func newClientWriter(w io.Writer) *acp.ConnectionWriter {
 
 // Also honor cancellation when an embedding host supplies its own ACP
 // connection. SDK calls may be waiting to acquire its shared write mutex.
-func callClient[T any](ctx context.Context, conn *acpsdk.AgentSideConnection, call func() (T, error)) (T, error) {
+func callClient[T any](ctx context.Context, conn acp.ClientConnection, call func() (T, error)) (T, error) {
 	var zero T
 	if err := ctx.Err(); err != nil {
 		return zero, err
@@ -43,7 +44,7 @@ func callClient[T any](ctx context.Context, conn *acpsdk.AgentSideConnection, ca
 	}
 }
 
-func notifyClient(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, update acpsdk.SessionUpdate) error {
+func notifyClient(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, update acpsdk.SessionUpdate) error {
 	ctx, cancel := context.WithTimeout(ctx, clientWriteTimeout)
 	defer cancel()
 	_, err := callClient(ctx, conn, func() (struct{}, error) {

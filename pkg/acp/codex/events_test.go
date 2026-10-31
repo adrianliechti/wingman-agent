@@ -50,6 +50,21 @@ func TestMessageUpdatesCarryIDsAndPhase(t *testing.T) {
 	}
 }
 
+func TestReplayUserMessageRetainsClientIdentity(t *testing.T) {
+	for _, clientID := range []string{"", "accepted-message"} {
+		item, _ := json.Marshal(map[string]any{"type": "userMessage", "id": "backend-message", "clientId": clientID, "content": []any{map[string]any{"type": "text", "text": "remember"}}})
+		var updates []acp.SessionUpdate
+		replayItem(func(update acp.SessionUpdate) { updates = append(updates, update) }, item, nil)
+		want := clientID
+		if want == "" {
+			want = "backend-message"
+		}
+		if len(updates) != 1 || updates[0].UserMessageChunk == nil || updates[0].UserMessageChunk.MessageId == nil || *updates[0].UserMessageChunk.MessageId != want {
+			t.Fatalf("replayed user identity = %#v, want %q", updates, want)
+		}
+	}
+}
+
 func TestElicitationParamsPreserveSchemaAndURLFields(t *testing.T) {
 	var p elicitationParams
 	err := json.Unmarshal([]byte(`{"threadId":"t","serverName":"mcp","mode":"form","message":"Choose","requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}}},"url":"https://example.com","elicitationId":"e-1","_meta":{"persist":"session"}}`), &p)
