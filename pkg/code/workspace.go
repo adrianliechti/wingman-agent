@@ -83,6 +83,7 @@ type Workspace struct {
 	warmed           bool
 	debugRegistry    *debugadapter.Registry
 	mcpToolsByServer map[string][]tool.Tool
+	mcpApproval      *tool.Elicitation
 	lspTools         []tool.Tool
 
 	mcpCatalogOnce    sync.Once
@@ -571,10 +572,18 @@ func (w *Workspace) DebugRegistry() *debugadapter.Registry {
 	return debugadapter.NewRegistry(manager)
 }
 
+// SetMCPApproval must run before InitMCP: tools capture the approver when listed.
+func (w *Workspace) SetMCPApproval(elicit *tool.Elicitation) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.mcpApproval = elicit
+}
+
 func (w *Workspace) InitMCP(ctx context.Context, ui ...UI) error {
 	w.mu.RLock()
 	manager := w.MCP
 	closed := w.closed
+	approval := w.mcpApproval
 	w.mu.RUnlock()
 	if manager == nil || closed {
 		return nil
@@ -606,7 +615,7 @@ func (w *Workspace) InitMCP(ctx context.Context, ui ...UI) error {
 	toolsErrs := []error{connectErr}
 	for _, serverName := range slices.Sorted(maps.Keys(sessions)) {
 		session := sessions[serverName]
-		tools, err := mcptool.ToolsForServer(ctx, serverName, session)
+		tools, err := mcptool.ToolsForServer(ctx, serverName, session, approval)
 		if err != nil {
 			toolsErrs = append(toolsErrs, fmt.Errorf("list MCP tools from %s: %w", serverName, err))
 			continue
@@ -675,8 +684,11 @@ func (w *Workspace) refreshMCPServerTools(ctx context.Context, manager *mcp.Mana
 	if session == nil {
 		return
 	}
+	w.mu.RLock()
+	approval := w.mcpApproval
+	w.mu.RUnlock()
 
-	tools, err := mcptool.ToolsForServer(ctx, serverName, session)
+	tools, err := mcptool.ToolsForServer(ctx, serverName, session, approval)
 	if err != nil {
 		if ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to refresh tools from MCP server %s: %v\n", serverName, err)
@@ -815,6 +827,24 @@ func (w *Workspace) SyncEditorDocument(ctx context.Context, filePath, content st
 	return service.SyncDocument(ctx, filePath, content, saved)
 }
 
+// LSPFilesChanged tells language servers about changes on disk.
+func (w *Workspace) LSPFilesChanged(ctx context.Context, changes []lsp.FileChange) {
+	w.mu.RLock()
+	service := w.Language
+	w.mu.RUnlock()
+	if service != nil {
+		service.FilesChanged(ctx, changes)
+	}
+}
+
+func (w *Workspace) LSPVirtualContent(ctx context.Context, uri string) (string, error) {
+	service, err := w.languageService()
+	if err != nil {
+		return "", err
+	}
+	return service.VirtualContent(ctx, uri)
+}
+
 func (w *Workspace) CloseEditorDocument(ctx context.Context, filePath string) error {
 	w.mu.RLock()
 	service := w.Language
@@ -914,12 +944,12 @@ func (w *Workspace) ImplementationLocations(ctx context.Context, filePath string
 	return service.ImplementationLocations(ctx, filePath, content, line, column)
 }
 
-func (w *Workspace) ReferenceLocations(ctx context.Context, filePath string, content *string, line, column int) ([]lsp.Location, error) {
+func (w *Workspace) ReferenceLocations(ctx context.Context, filePath string, content *string, line, column int, includeDeclaration bool) ([]lsp.Location, error) {
 	service, err := w.languageService()
 	if err != nil {
 		return nil, err
 	}
-	return service.ReferenceLocations(ctx, filePath, content, line, column)
+	return service.ReferenceLocations(ctx, filePath, content, line, column, includeDeclaration)
 }
 
 func (w *Workspace) HoverInformation(ctx context.Context, filePath string, content *string, line, column int) (string, error) {
@@ -928,6 +958,14 @@ func (w *Workspace) HoverInformation(ctx context.Context, filePath string, conte
 		return "", err
 	}
 	return service.Hover(ctx, filePath, content, line, column)
+}
+
+func (w *Workspace) HoverRange(ctx context.Context, filePath string, content *string, line, column int) (string, *lsp.Range, error) {
+	service, err := w.languageService()
+	if err != nil {
+		return "", nil, err
+	}
+	return service.HoverRange(ctx, filePath, content, line, column)
 }
 
 // CompletionItems asks the file's language server first and falls back to
@@ -1004,12 +1042,12 @@ func (w *Workspace) ExecuteLSPCommand(ctx context.Context, filePath string, cont
 	return service.ExecuteCommand(ctx, filePath, content, command)
 }
 
-func (w *Workspace) ExecuteLSPCommandWithEdits(ctx context.Context, filePath string, content *string, command lsp.Command) (any, []lsp.CommandWorkspaceEdit, error) {
+func (w *Workspace) ExecuteLSPCommandWithEdits(ctx context.Context, filePath string, content *string, command lsp.Command, apply func(lsp.CommandWorkspaceEdit) bool) (any, error) {
 	service, err := w.languageService()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return service.ExecuteCommandWithEdits(ctx, filePath, content, command)
+	return service.ExecuteCommandWithEdits(ctx, filePath, content, command, apply)
 }
 
 func (w *Workspace) Formatting(ctx context.Context, filePath string, content *string, options lsp.FormattingOptions) ([]lsp.TextEdit, error) {
@@ -1180,6 +1218,15 @@ func (w *Workspace) DiffsLayer(ctx context.Context, layer changes.DiffLayer) ([]
 		return nil, changes.ErrNotGitRepository
 	}
 	return w.Changes.DiffsLayer(ctx, layer)
+}
+
+func (w *Workspace) DiffsLayerIfChanged(ctx context.Context, layer changes.DiffLayer, previous uint64) ([]changes.FileDiff, uint64, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.Changes == nil {
+		return nil, 0, changes.ErrNotGitRepository
+	}
+	return w.Changes.DiffsLayerIfChanged(ctx, layer, previous)
 }
 
 func (w *Workspace) Diff(ctx context.Context, path string, layer changes.DiffLayer) (changes.FileDiff, error) {

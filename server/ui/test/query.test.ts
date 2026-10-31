@@ -18,10 +18,11 @@ test("server defaults keep fresh data quiet and stale data recoverable", () => {
 	assert.equal(defaults.mutations, undefined);
 });
 
-test("skills events invalidate every session-scoped skill catalog", () => {
+test("skills events invalidate the workspace catalogue and session command pickers", () => {
 	const client = new QueryClient();
-	const first = queryKeys.skills.list("one");
-	const second = queryKeys.skills.list("two");
+	const first = queryKeys.chatCommands.list("one");
+	const second = queryKeys.chatCommands.list("two");
+	client.setQueryData(queryKeys.skills.list, []);
 	client.setQueryData(first, []);
 	client.setQueryData(second, []);
 
@@ -29,6 +30,10 @@ test("skills events invalidate every session-scoped skill catalog", () => {
 
 	assert.equal(client.getQueryState(first)?.isInvalidated, true);
 	assert.equal(client.getQueryState(second)?.isInvalidated, true);
+	assert.equal(
+		client.getQueryState(queryKeys.skills.list)?.isInvalidated,
+		true,
+	);
 });
 
 test("diff events invalidate diff and Git query families", () => {
@@ -71,20 +76,28 @@ test("Git index events refresh status before dependent diff views", async () => 
 	assert.equal(client.getQueryState(history)?.isInvalidated, false);
 });
 
-test("task events only invalidate the affected session when identified", () => {
+test("task events only invalidate the affected chat when identified", () => {
 	const client = new QueryClient();
-	const first = queryKeys.tasks.list(JSON.stringify(["wingman", "one"]));
-	const second = queryKeys.tasks.list("two");
+	const first = queryKeys.tasks.list("ahp-chat:/one");
+	const second = queryKeys.tasks.list("ahp-chat:/two");
 	client.setQueryData(first, []);
 	client.setQueryData(second, []);
 
 	invalidateForServerMessage(client, {
 		type: "tasks_changed",
-		session: "one",
+		session: "ahp-chat:/one",
 	});
 
 	assert.equal(client.getQueryState(first)?.isInvalidated, true);
 	assert.equal(client.getQueryState(second)?.isInvalidated, false);
+
+	// A native session id cannot be mapped to its chat URI here.
+	invalidateForServerMessage(client, {
+		type: "tasks_changed",
+		backend: "wingman",
+		session: "two",
+	});
+	assert.equal(client.getQueryState(second)?.isInvalidated, true);
 });
 
 test("reconnect invalidation covers every server query family", () => {

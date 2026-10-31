@@ -27,9 +27,11 @@ const (
 	// maxDescriptionBytes bounds what a single MCP tool can permanently add to
 	// every request; verbose servers otherwise inflate the prompt unbounded.
 	maxDescriptionBytes = 2 * 1024
+
+	maxApprovalArgumentBytes = 4 * 1024
 )
 
-func Tools(ctx context.Context, m *mcp.Manager) ([]tool.Tool, error) {
+func Tools(ctx context.Context, m *mcp.Manager, elicit *tool.Elicitation) ([]tool.Tool, error) {
 	if m == nil {
 		return nil, nil
 	}
@@ -48,7 +50,7 @@ func Tools(ctx context.Context, m *mcp.Manager) ([]tool.Tool, error) {
 		if session == nil {
 			continue
 		}
-		serverTools, err := ToolsForServer(ctx, serverName, session)
+		serverTools, err := ToolsForServer(ctx, serverName, session, elicit)
 		if err != nil {
 			if ctx.Err() != nil {
 				return tools, ctx.Err()
@@ -62,7 +64,7 @@ func Tools(ctx context.Context, m *mcp.Manager) ([]tool.Tool, error) {
 	return tools, nil
 }
 
-func ToolsForServer(ctx context.Context, serverName string, session *sdkmcp.ClientSession) ([]tool.Tool, error) {
+func ToolsForServer(ctx context.Context, serverName string, session *sdkmcp.ClientSession, elicit *tool.Elicitation) ([]tool.Tool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -86,14 +88,15 @@ func ToolsForServer(ctx context.Context, serverName string, session *sdkmcp.Clie
 
 	tools := make([]tool.Tool, 0, len(listed))
 	for _, mcpTool := range listed {
-		tools = append(tools, convertTool(serverName, session, *mcpTool))
+		tools = append(tools, convertTool(serverName, session, *mcpTool, elicit))
 	}
 	return tools, nil
 }
 
-func convertTool(serverName string, session *sdkmcp.ClientSession, mcpTool sdkmcp.Tool) tool.Tool {
+func convertTool(serverName string, session *sdkmcp.ClientSession, mcpTool sdkmcp.Tool, elicit *tool.Elicitation) tool.Tool {
+	approve := requiresApproval(mcpTool.Annotations)
 	effect := tool.EffectMutates
-	if mcpTool.Annotations != nil && mcpTool.Annotations.ReadOnlyHint {
+	if !approve && mcpTool.Annotations.ReadOnlyHint {
 		effect = tool.EffectReadOnly
 	}
 	protocolVersion := ""
@@ -112,9 +115,69 @@ func convertTool(serverName string, session *sdkmcp.ClientSession, mcpTool sdkmc
 			MCPProtocolVersion: protocolVersion,
 		},
 		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+			if approve {
+				if err := approveCall(ctx, elicit, serverName, mcpTool, args); err != nil {
+					return tool.Result{}, err
+				}
+			}
 			return callTool(ctx, session, mcpTool.Name, args)
 		},
 	}
+}
+
+// Unannotated MCP tools default to destructive and open-world.
+func requiresApproval(a *sdkmcp.ToolAnnotations) bool {
+	if a == nil || (a.DestructiveHint != nil && *a.DestructiveHint) {
+		return true
+	}
+	if a.ReadOnlyHint {
+		return false
+	}
+	return a.DestructiveHint == nil || a.OpenWorldHint == nil || *a.OpenWorldHint
+}
+
+func approveCall(ctx context.Context, elicit *tool.Elicitation, serverName string, mcpTool sdkmcp.Tool, args map[string]any) error {
+	if elicit == nil || (elicit.Confirm == nil && elicit.Review == nil) {
+		return fmt.Errorf("MCP tool %s requires approval, which is unavailable here", mcpTool.Name)
+	}
+
+	action := map[string]any{"type": "mcp_tool_call", "server": serverName, "tool_name": mcpTool.Name}
+	if mcpTool.Description != "" {
+		action["tool_description"] = text.TruncateHead(mcpTool.Description, maxDescriptionBytes)
+	}
+	if hints := annotationHints(mcpTool.Annotations); len(hints) > 0 {
+		action["annotations"] = hints
+	}
+
+	message := fmt.Sprintf("Call %s on MCP server %s?", mcpTool.Name, serverName)
+	if len(args) > 0 {
+		if preview, err := json.MarshalIndent(args, "", "  "); err == nil {
+			message += "\n" + text.TruncateHead(string(preview), maxApprovalArgumentBytes)
+		}
+	}
+
+	verdict, err := elicit.Approve(ctx, tool.Approval{Message: message, Action: action})
+	if err != nil {
+		return fmt.Errorf("failed to get approval: %w", err)
+	}
+	return verdict.Err("the user declined calling MCP tool " + mcpTool.Name)
+}
+
+func annotationHints(a *sdkmcp.ToolAnnotations) map[string]bool {
+	hints := map[string]bool{}
+	if a == nil {
+		return hints
+	}
+	if a.ReadOnlyHint {
+		hints["readOnlyHint"] = true
+	}
+	if a.DestructiveHint != nil {
+		hints["destructiveHint"] = *a.DestructiveHint
+	}
+	if a.OpenWorldHint != nil {
+		hints["openWorldHint"] = *a.OpenWorldHint
+	}
+	return hints
 }
 
 func schemaToParams(serverName string, mcpTool sdkmcp.Tool) map[string]any {

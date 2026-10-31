@@ -17,6 +17,7 @@
 	},
 	"dependencies": {
 		"@floating-ui/react": "^0.27.20",
+		"@microsoft/agent-host-protocol": "file:vendor/microsoft-agent-host-protocol-1.1.0-dev.d7a5579b1733.tgz",
 		"@monaco-editor/react": "^4.7.0",
 		"@tailwindcss/vite": "^4.3.3",
 		"@tanstack/highlight": "^1.2.0",
@@ -41,6 +42,7 @@
 	},
 	"devDependencies": {
 		"@axe-core/playwright": "^4.14.0",
+		"@microsoft/agent-host-protocol-v1": "npm:@microsoft/agent-host-protocol@1.0.0",
 		"@playwright/test": "~1.64.1",
 		"@types/node": "^26.6.6",
 		"@types/react": "^19.3.0",

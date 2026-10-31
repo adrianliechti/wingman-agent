@@ -337,6 +337,32 @@ func TestTurnManagerCancelStopsCompactionAndPausesQueue(t *testing.T) {
 	}
 }
 
+func TestTurnManagerRunsQueuedCompactInputAsATurn(t *testing.T) {
+	a := newCompactingTestAgent()
+	events := make(chan TurnEvent, 32)
+	m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+	defer m.Close()
+
+	if _, err := m.Submit(context.Background(), "s", turnInput("1", "first", TurnInputFollowUp)); err != nil {
+		t.Fatal(err)
+	}
+	waitValue(t, a.starts)
+	compact := TurnInput{ID: "2", Intent: TurnInputSteer, Compact: true, Content: []harness.Content{{Text: "api design"}}}
+	if snap, err := m.Submit(context.Background(), "s", compact); err != nil || snap.State != TurnInputQueued {
+		t.Fatalf("compact behind a turn = %+v, %v", snap, err)
+	}
+	a.releases <- struct{}{}
+	if focus := waitValue(t, a.compacts); focus != "api design" || !m.Snapshot("s").Compacting {
+		t.Fatalf("focus = %q", focus)
+	}
+	a.release <- nil
+	for ev := waitForState(t, events, "2", TurnInputActive); ev.Compaction == nil; ev = <-events {
+	}
+	if ev := waitForState(t, events, "2", TurnInputCompleted); !ev.Executed {
+		t.Fatalf("compaction terminal = %+v", ev)
+	}
+}
+
 func TestTurnManagerCompactionRequiresCapability(t *testing.T) {
 	m := NewTurnManager(context.Background(), newTurnManagerTestAgent(), nil)
 	defer m.Close()

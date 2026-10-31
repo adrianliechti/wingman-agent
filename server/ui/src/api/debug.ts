@@ -1,3 +1,4 @@
+import { workspaceClient } from "../state/workspaceClient.ts";
 import { fetchJSON, fetchOK } from "./http.ts";
 
 export type DebugAction = "run" | "debug";
@@ -52,6 +53,8 @@ export interface DebugPlanBreakpoint {
 }
 
 export interface DebugLaunchPlan {
+	/** Host-side reviewed plan; launches refer to it instead of trusting this copy. */
+	id?: string;
 	action: DebugAction;
 	title: string;
 	adapter: string;
@@ -118,6 +121,7 @@ export interface DebugState {
 	session?: DebugSession;
 	frame?: DebugStackFrame;
 	breakpoints: DebugSourceBreakpoint[];
+	resolved?: DebugBreakpoint[];
 	frame_error?: string;
 }
 
@@ -135,6 +139,7 @@ export interface DebugBreakpoint {
 	message?: string;
 	line?: number;
 	column?: number;
+	reason?: "pending" | "failed";
 }
 
 export interface DebugThread {
@@ -179,7 +184,7 @@ export async function discoverDebugTargets(
 	content: string,
 	signal?: AbortSignal,
 ) {
-	return fetchJSON<{ targets: DebugTarget[] }>("/api/debug/targets", {
+	return fetchJSON<{ targets: DebugTarget[] }>("/api/workspace/debug/targets", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ path, content }),
@@ -198,7 +203,7 @@ export async function generateDebugPlan(
 	onProgress?: (progress: DebugToolProgress) => void,
 	onTools?: (tools: DebugToolStatus[]) => void,
 ): Promise<DebugPlanResult> {
-	const response = await fetchOK("/api/debug/plan", {
+	const response = await fetchOK("/api/workspace/debug/plan", {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
@@ -248,56 +253,29 @@ export async function generateDebugPlan(
 	return result;
 }
 
-export async function startDebugPlan(
-	plan: DebugLaunchPlan,
-	signal?: AbortSignal,
-) {
-	return fetchJSON<DebugSession>("/api/debug/start", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(plan),
-		signal,
-	});
+export function startDebugPlan(plan: DebugLaunchPlan, signal?: AbortSignal) {
+	return workspaceClient().dap.launch(plan, signal);
 }
-
-export async function getDebugState(path?: string, signal?: AbortSignal) {
-	const query = path ? `?path=${encodeURIComponent(path)}` : "";
-	return fetchJSON<DebugState>(`/api/debug/state${query}`, { signal });
+export function getDebugState(path?: string, signal?: AbortSignal) {
+	return workspaceClient().dap.state(path, signal);
 }
-
-export async function getDebugSession(signal?: AbortSignal) {
-	return fetchJSON<{ session?: DebugSession }>("/api/debug/session", {
-		signal,
-	});
+export function getDebugSession(signal?: AbortSignal) {
+	return workspaceClient().dap.status(undefined, signal);
 }
-
-export async function getDebugInspection(signal?: AbortSignal) {
-	return fetchJSON<DebugInspection>("/api/debug/inspection", { signal });
+export function getDebugInspection(signal?: AbortSignal) {
+	return workspaceClient().dap.inspection(true, signal);
 }
-
-export async function getDebugOutput(signal?: AbortSignal) {
-	return fetchJSON<DebugInspection>("/api/debug/inspection?details=false", {
-		signal,
-	});
+export function getDebugOutput(signal?: AbortSignal) {
+	return workspaceClient().dap.inspection(false, signal);
 }
-
-export async function setDebugBreakpoints(
+export function setDebugBreakpoints(
 	path: string,
 	breakpoints: DebugSourceBreakpoint[],
 	signal?: AbortSignal,
 ) {
-	return fetchJSON<{
-		breakpoints: DebugSourceBreakpoint[];
-		resolved: DebugBreakpoint[];
-	}>("/api/debug/breakpoints", {
-		method: "PUT",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ path, breakpoints }),
-		signal,
-	});
+	return workspaceClient().dap.breakpoints(path, breakpoints, signal);
 }
-
-export async function controlDebug(
+export function controlDebug(
 	operation:
 		| "continue"
 		| "next"
@@ -310,70 +288,41 @@ export async function controlDebug(
 	threadId?: number,
 	signal?: AbortSignal,
 ) {
-	return fetchJSON<{ session?: DebugSession }>("/api/debug/control", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			operation,
-			session_id: sessionId,
-			thread_id: threadId,
-		}),
-		signal,
-	});
+	return workspaceClient().dap.control(operation, sessionId, threadId, signal);
 }
-
-export async function evaluateDebug(
+export function evaluateDebug(
 	expression: string,
 	sessionId?: string,
 	frameId?: number,
 	stateVersion?: number,
 	signal?: AbortSignal,
 ) {
-	return fetchJSON<DebugEvaluation>("/api/debug/evaluate", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			expression,
-			session_id: sessionId,
-			frame_id: frameId,
-			state_version: stateVersion,
-		}),
+	return workspaceClient().dap.evaluate(
+		expression,
+		sessionId,
+		frameId,
+		stateVersion,
 		signal,
-	});
+	);
 }
-
-export async function getDebugScopes(
+export function getDebugScopes(
 	frameId: number,
 	sessionId?: string,
 	stateVersion?: number,
 	signal?: AbortSignal,
 ) {
-	return fetchJSON<{ scopes: DebugScopeInspection[] }>("/api/debug/scopes", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			frame_id: frameId,
-			session_id: sessionId,
-			state_version: stateVersion,
-		}),
-		signal,
-	});
+	return workspaceClient().dap.scopes(frameId, sessionId, stateVersion, signal);
 }
-
-export async function getDebugVariables(
+export function getDebugVariables(
 	variablesReference: number,
 	sessionId?: string,
 	stateVersion?: number,
 	signal?: AbortSignal,
 ) {
-	return fetchJSON<{ variables: DebugVariable[] }>("/api/debug/variables", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			variables_reference: variablesReference,
-			session_id: sessionId,
-			state_version: stateVersion,
-		}),
+	return workspaceClient().dap.variables(
+		variablesReference,
+		sessionId,
+		stateVersion,
 		signal,
-	});
+	);
 }

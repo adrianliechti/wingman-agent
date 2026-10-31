@@ -8,11 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -22,6 +22,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -63,11 +64,14 @@ func (s *Server) InstanceID() string { return s.scope.InstanceID }
 
 func (s *Server) checkInstance(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/v2/bootstrap" {
-			instance := r.Header.Get(instanceHeader)
-			if instance == "" {
-				instance = r.URL.Query().Get("instance")
-			} // sockets and download links
+		instance := r.Header.Get(instanceHeader)
+		if instance == "" {
+			instance = r.URL.Query().Get("instance")
+		}
+		// Discovery is initially unscoped. Later refreshes carry the instance
+		// and must reject a replacement workspace like all other operations.
+		protected := (strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/workspace") || r.URL.Path == "/lsp" || r.URL.Path == "/dap" || r.URL.Path == "/content" || r.URL.Path == "/preview"
+		if protected || r.URL.Path == "/api/workspace" && instance != "" {
 			if instance != s.scope.InstanceID || s.ctx.Err() != nil {
 				http.Error(w, "workspace instance changed; reload the workspace", http.StatusConflict)
 				return
@@ -134,7 +138,6 @@ func (s *Server) bindBackend(id string, a code.Agent) *backendRuntime {
 				return
 			}
 			b.session(sid).refreshSettings()
-			b.broadcast(Frame{Type: EvtSessionsChanged})
 			b.broadcast(Frame{Type: EvtSkillsChanged})
 		})
 	}
@@ -203,6 +206,22 @@ func (s *Server) resolveBackend(id string, create func(context.Context) (code.Ag
 	return entry.runtime, entry.err
 }
 
+// discard forgets a controller that never loaded, such as one for an
+// unknown session id, so lookups cannot grow the session map.
+func (b *backendRuntime) discard(id string, c *sessionController) {
+	c.opMu.Lock()
+	loaded := c.loaded
+	c.opMu.Unlock()
+	c.mu.Lock()
+	attached := c.ahp != nil
+	c.mu.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !loaded && !attached && b.sessions[id] == c {
+		delete(b.sessions, id)
+	}
+}
+
 func (b *backendRuntime) session(id string) *sessionController {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -227,76 +246,59 @@ func (s *Server) backendHandler(fn func(*backendRuntime, http.ResponseWriter, *h
 
 func (s *Server) registerSessionRoutes(r chi.Router) {
 	r.Route("/v2", func(r chi.Router) {
-		r.Get("/bootstrap", func(w http.ResponseWriter, r *http.Request) {
-			available, err := agents.Available()
-			if err != nil {
-				http.Error(w, err.Error(), 500)
-				return
-			}
-			backends := []AgentEntry{{ID: code.BuiltinAgentName, Name: "Wingman"}}
-			for _, a := range available {
-				backends = append(backends, AgentEntry{ID: a.ID, Name: a.Name})
-			}
-			writeJSON(w, struct {
-				WorkspaceScope
-				Protocol int          `json:"protocol"`
-				Backends []AgentEntry `json:"backends"`
-			}{s.scope, 2, backends})
-		})
-		r.HandleFunc("/events", s.handleWebSocket)
-		r.Route("/backends/{backend}", func(r chi.Router) {
-			r.Get("/settings", s.backendOperation((*backendRuntime).handleDefaultSettings))
-			r.Post("/models/refresh", s.backendOperation((*backendRuntime).handleRefreshModels))
-			r.Get("/sessions", s.backendOperation((*backendRuntime).handleSessions))
-			r.Post("/sessions", s.backendHandler((*backendRuntime).handleNewSession))
-			r.Route("/sessions/{id}", func(r chi.Router) {
-				r.Get("/reviews", s.backendOperation((*backendRuntime).handleTurnReviews))
-				r.Get("/reviews/{turnID}", s.backendOperation((*backendRuntime).handleTurnReviews))
-				r.Post("/reviews/{turnID}/undo", s.backendOperation((*backendRuntime).handleTurnUndo))
-				r.Post("/commands", s.backendHandler((*backendRuntime).handleCommand))
-				r.Get("/tasks", s.backendOperation((*backendRuntime).handleTasks))
-				r.Get("/tasks/{taskID}", s.backendOperation((*backendRuntime).handleTask))
-				r.Post("/tasks/{taskID}/stop", s.backendOperation((*backendRuntime).handleTaskStop))
-				r.Get("/schedules", s.backendOperation((*backendRuntime).handleSchedules))
-				r.Delete("/schedules/{scheduleID}", s.backendOperation((*backendRuntime).handleScheduleDelete))
-				r.Post("/schedules/{scheduleID}/pause", s.backendOperation((*backendRuntime).handleSchedulePause))
-				r.Post("/schedules/{scheduleID}/resume", s.backendOperation((*backendRuntime).handleScheduleResume))
-			})
+		r.Post("/backends/{backend}/models/refresh", s.backendOperation((*backendRuntime).handleRefreshModels))
+		r.Route("/chats/{chat}", func(r chi.Router) {
+			r.Use(s.chatRoute)
+			r.Get("/reviews", s.backendOperation((*backendRuntime).handleTurnReviews))
+			r.Get("/reviews/{turnID}", s.backendOperation((*backendRuntime).handleTurnReviews))
+			r.Post("/reviews/{turnID}/undo", s.backendOperation((*backendRuntime).handleTurnUndo))
+			r.Get("/tasks", s.backendOperation((*backendRuntime).handleTasks))
+			r.Get("/tasks/{taskID}", s.backendOperation((*backendRuntime).handleTask))
+			r.Post("/tasks/{taskID}/stop", s.backendOperation((*backendRuntime).handleTaskStop))
+			r.Get("/schedules", s.backendOperation((*backendRuntime).handleSchedules))
+			r.Delete("/schedules/{scheduleID}", s.backendOperation((*backendRuntime).handleScheduleDelete))
+			r.Post("/schedules/{scheduleID}/pause", s.backendOperation((*backendRuntime).handleSchedulePause))
+			r.Post("/schedules/{scheduleID}/resume", s.backendOperation((*backendRuntime).handleScheduleResume))
 		})
 	})
 }
 
-func (b *backendRuntime) handleSessions(w http.ResponseWriter, r *http.Request) {
-	infos, err := b.agent.ListSessions(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), 502)
-		return
-	}
-	out := make([]SessionEntry, 0, len(infos))
-	for _, si := range infos {
-		ent := SessionEntry{ID: si.ID, Title: si.Title}
-		if !si.UpdatedAt.IsZero() {
-			ent.UpdatedAt = si.UpdatedAt.Format(time.RFC3339)
+// chatRoute resolves the AHP chat URI in the path to the native session the
+// handlers address by backend and id.
+func (s *Server) chatRoute(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chat, err := url.PathUnescape(chi.URLParam(r, "chat"))
+		if err != nil {
+			http.Error(w, "invalid chat URI", http.StatusBadRequest)
+			return
 		}
-		out = append(out, ent)
-	}
-	slices.SortFunc(out, func(a, b SessionEntry) int { return strings.Compare(b.UpdatedAt, a.UpdatedAt) })
-	writeJSON(w, out)
+		_, ch, err := s.ahpHost().ensureSession(chat)
+		if err != nil || ch == nil {
+			http.Error(w, "chat not found", http.StatusNotFound)
+			return
+		}
+		r.SetPathValue("backend", ch.controller.backend.id)
+		r.SetPathValue("id", ch.controller.ref.SessionID)
+		next.ServeHTTP(w, r)
+	})
 }
 
 type Command struct {
+	requireIdle bool
+	option      *t.ConfirmationOption // the approval option an AHP client chose
+
 	ID         string               `json:"id"`
 	Epoch      string               `json:"epoch,omitempty"`
 	Type       string               `json:"type"`
 	InputID    string               `json:"inputId,omitempty"`
 	Text       string               `json:"text,omitempty"`
+	Context    []string             `json:"context,omitempty"` // model-only attachment text
 	Files      []string             `json:"files,omitempty"`
 	Images     []string             `json:"images,omitempty"`
 	Intent     code.TurnInputIntent `json:"intent,omitempty"`
 	ClearQueue bool                 `json:"clearQueue,omitempty"`
 	PromptID   string               `json:"promptId,omitempty"`
 	Action     string               `json:"action,omitempty"`
-	Scope      string               `json:"scope,omitempty"`
 	Content    map[string]any       `json:"content,omitempty"`
 	Model      *string              `json:"model,omitempty"`
 	Effort     *string              `json:"effort,omitempty"`
@@ -331,39 +333,40 @@ func commandFingerprint(command Command) [32]byte {
 	return sha256.Sum256(data)
 }
 
-func (b *backendRuntime) handleNewSession(w http.ResponseWriter, r *http.Request) {
-	var command Command
-	if err := decodeJSONRequest(w, r, &command, 32<<20); err != nil {
-		return
+// createSession owns native creation and its retry receipt independently of transport.
+func (b *backendRuntime) createSession(command Command) commandReceipt {
+	failure := func(status int, message string) commandReceipt {
+		return commandReceipt{status: status, message: message}
 	}
 	if !b.beginOperation() {
-		http.Error(w, "workspace closed", 409)
-		return
+		return failure(409, "workspace closed")
 	}
 	defer b.operations.Done()
 	if command.ID == "" || command.Type != "create" && command.Type != "fork" {
-		http.Error(w, "create or fork command and request id required", 400)
-		return
+		return failure(400, "create or fork command and request id required")
 	}
 	forker, canFork := b.agent.(code.SessionForker)
 	if command.Type == "fork" && (!canFork || command.Source == "") {
-		http.Error(w, "fork requires a source session on an agent that supports forking", 400)
-		return
+		return failure(400, "fork requires a source session on an agent that supports forking")
 	}
 	b.createMu.Lock()
 	defer b.createMu.Unlock()
 	fingerprint := commandFingerprint(command)
 	if previous, ok := b.creations[command.ID]; ok {
 		if previous.fingerprint != fingerprint {
-			http.Error(w, "request id reused with different content", 409)
-			return
+			return failure(409, "request id reused with different content")
 		}
-		writeJSON(w, previous.receipt)
-		return
+		return commandReceipt{receipt: previous.receipt}
 	}
 	var id string
 	var err error
-	if command.Type == "fork" {
+	if command.Type == "fork" && command.InputID != "" {
+		through, ok := b.agent.(code.SessionTurnForker)
+		if !ok {
+			return failure(400, "agent cannot fork through an earlier turn")
+		}
+		id, err = through.ForkSessionThrough(code.WithSessionID(b.ctx, command.Source), command.Source, command.InputID, command.Title)
+	} else if command.Type == "fork" {
 		id, err = forker.ForkSession(code.WithSessionID(b.ctx, command.Source), command.Source, command.Title)
 	} else {
 		id, err = b.agent.NewSession(b.ctx)
@@ -373,12 +376,10 @@ func (b *backendRuntime) handleNewSession(w http.ResponseWriter, r *http.Request
 		if errors.Is(err, code.ErrTurnInProgress) {
 			status = 409
 		}
-		http.Error(w, err.Error(), status)
-		return
+		return failure(status, err.Error())
 	}
 	c := b.session(id)
 	c.opMu.Lock()
-	// Record creation before configuring it: retries must never create a second session.
 	receipt := Receipt{ID: command.ID, Ref: c.ref, Epoch: c.epoch, Outcome: "created"}
 	b.creations[command.ID] = creationReceipt{fingerprint, receipt}
 	c.loaded = true
@@ -390,31 +391,7 @@ func (b *backendRuntime) handleNewSession(w http.ResponseWriter, r *http.Request
 	c.opMu.Unlock()
 	c.refreshSettings()
 	b.ensureTaskPump(id)
-	b.broadcast(Frame{Type: EvtSessionsChanged})
-	writeJSON(w, receipt)
-}
-
-func (b *backendRuntime) handleCommand(w http.ResponseWriter, r *http.Request) {
-	var command Command
-	if err := decodeJSONRequest(w, r, &command, 32<<20); err != nil {
-		return
-	}
-	if !b.beginOperation() {
-		http.Error(w, "workspace closed", 409)
-		return
-	}
-	defer b.operations.Done()
-	if command.ID == "" || command.Epoch == "" {
-		http.Error(w, "request id and session epoch required", 400)
-		return
-	}
-	c := b.session(r.PathValue("id"))
-	record := c.command(r.Context(), command)
-	if record.status != 0 {
-		http.Error(w, record.message, record.status)
-	} else {
-		writeJSON(w, record.receipt)
-	}
+	return commandReceipt{receipt: receipt}
 }
 
 // All commands share one receipt ledger, including prompts. Reserve IDs before
@@ -443,6 +420,8 @@ func (c *sessionController) command(ctx context.Context, command Command) comman
 	}
 	record := &commandReceipt{fingerprint: fingerprint, done: make(chan struct{}), receipt: Receipt{ID: command.ID, Ref: c.ref, Epoch: c.epoch, Outcome: "accepted"}}
 	c.receipts[command.ID] = record
+	c.receiptOrder = append(c.receiptOrder, command.ID)
+	c.pruneReceiptsLocked()
 	c.receiptMu.Unlock()
 	defer close(record.done)
 	var err error
@@ -462,6 +441,23 @@ func (c *sessionController) command(ctx context.Context, command Command) comman
 	return *record
 }
 
+const receiptLimit = 1024
+
+// pruneReceiptsLocked forgets the oldest completed receipts beyond the limit;
+// in-flight ones stay so their IDs cannot be reused. Caller holds receiptMu.
+func (c *sessionController) pruneReceiptsLocked() {
+	for i := 0; len(c.receipts) > receiptLimit && i < len(c.receiptOrder); {
+		id := c.receiptOrder[i]
+		select {
+		case <-c.receipts[id].done:
+			delete(c.receipts, id)
+			c.receiptOrder = slices.Delete(c.receiptOrder, i, i+1)
+		default:
+			i++
+		}
+	}
+}
+
 func (c *sessionController) execute(command Command) error {
 	b, sid := c.backend, c.ref.SessionID
 	if err := b.ctx.Err(); err != nil {
@@ -472,6 +468,12 @@ func (c *sessionController) execute(command Command) error {
 	}
 	switch command.Type {
 	case "send", "queue_update":
+		if command.requireIdle {
+			snapshot := b.turns.Snapshot(sid)
+			if snapshotHasActive(snapshot) || snapshot.Compacting {
+				return code.ErrTurnInProgress
+			}
+		}
 		if command.Type == "send" && command.InputID != "" && command.InputID != command.ID {
 			return errors.New("input id must equal the send request id")
 		}
@@ -480,7 +482,25 @@ func (c *sessionController) execute(command Command) error {
 			id = command.ID
 		}
 		input := code.TurnInput{ID: id, Intent: command.Intent, Origin: "user", Display: &code.TurnInputDisplay{Text: command.Text, Files: command.Files, Images: command.Images}}
-		input.Content = b.buildInput(command)
+		if _, canCompact := b.agent.(code.Compactor); canCompact && isCompactCommand(command.Text) {
+			input.Compact = true
+			if focus := compactFocus(command.Text); focus != "" {
+				input.Content = []harness.Content{{Text: focus}}
+			}
+		} else {
+			input.Content = b.buildInput(sid, command)
+		}
+		// A queue recovered after a restart waits for the user; sending continues
+		// it, after the input when that input must start now.
+		if command.Type == "send" && b.turns.Snapshot(sid).Paused {
+			if command.requireIdle {
+				if err := b.turns.Unpause(sid); err != nil {
+					return err
+				}
+			} else {
+				b.turns.Resume(sid)
+			}
+		}
 		if command.Type == "queue_update" {
 			if err := b.turns.ReplaceQueued(sid, id, input); err != nil {
 				return err
@@ -491,21 +511,16 @@ func (c *sessionController) execute(command Command) error {
 			}
 		}
 		b.ensureTaskPump(sid)
-	case "compact":
-		c.mu.Lock()
-		c.state.Error, c.state.Compaction = nil, nil
-		c.mu.Unlock()
-		if err := b.turns.StartCompact(sid, command.Text, func(result harness.CompactResult, err error) {
-			b.finishCompaction(sid, result, err)
-		}); err != nil {
-			return err
-		}
 	case "queue_remove":
 		if err := b.turns.RemoveQueued(sid, command.InputID); err != nil {
 			return err
 		}
 	case "cancel":
-		if command.ClearQueue {
+		if command.InputID != "" {
+			if err := b.turns.CancelTurn(sid, command.InputID, command.ClearQueue); err != nil {
+				return err
+			}
+		} else if command.ClearQueue {
 			if err := b.turns.CancelAll(sid); err != nil {
 				return err
 			}
@@ -513,15 +528,6 @@ func (c *sessionController) execute(command Command) error {
 			if err := b.turns.CancelCurrent(sid); err != nil {
 				return err
 			}
-		}
-	case "queue_clear":
-		if err := b.turns.ClearQueue(sid); err != nil {
-			return err
-		}
-	case "queue_resume":
-		b.turns.Resume(sid)
-		if err := b.turns.Snapshot(sid).Error; err != nil {
-			return err
 		}
 	case "settings":
 		ctx := code.WithSessionID(b.ctx, sid)
@@ -575,16 +581,11 @@ func (c *sessionController) execute(command Command) error {
 		c.state.Prompts = []PromptView{}
 		c.publishStateLocked()
 		c.mu.Unlock()
-		b.broadcast(Frame{Type: EvtSessionsChanged})
 	default:
 		return fmt.Errorf("unknown session command %q", command.Type)
 	}
 	b.sendTurnSnapshot(sid)
 	return nil
-}
-
-func (b *backendRuntime) handleDefaultSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, b.settings(""))
 }
 
 func (b *backendRuntime) onToolProgress(ctx context.Context, callID, text string) {

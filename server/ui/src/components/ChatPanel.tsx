@@ -1,13 +1,6 @@
+import type { MessageAttachment } from "@microsoft/agent-host-protocol";
 import { VirtualTurns } from "./chat/VirtualTurns";
-import {
-	ArrowUp,
-	Loader2,
-	ListPlus,
-	Paperclip,
-	Plus,
-	Square,
-	X,
-} from "lucide-react";
+import { ArrowUp, ListEnd, Loader2, Plus, Square, X } from "lucide-react";
 import {
 	useEffect,
 	useEffectEvent,
@@ -19,13 +12,17 @@ import {
 	useCallback,
 } from "react";
 import { ComposerDraft } from "../state/composerDraft.ts";
-import { isDraft, splitSessionKey } from "../state/sessionStore.ts";
-import { formatTokens } from "../utils/usage";
+import { isDraft } from "../state/sessionStore.ts";
+import { workspaceClient } from "../state/workspaceClient.ts";
 import { useSessionSettings } from "../state/workspaceContext.ts";
 import { useToast } from "./ui/Feedback.tsx";
 import { atTextareaEdge } from "../utils/textareaNavigation";
 import { useColorScheme } from "../hooks/useColorScheme";
-import { type Skill, useSkills } from "../hooks/useSkills";
+import { useCanCompact, useChatCommands } from "../hooks/useChatCommands";
+import {
+	type ChatCommand,
+	selectedCommandAttachments,
+} from "../api/chatCommands";
 import type {
 	ChatEntry,
 	PendingPrompt,
@@ -37,7 +34,6 @@ import type {
 	TurnInputIntent,
 	TurnInputState,
 } from "../types/protocol";
-import { ToolProgressContext } from "./chat/progress";
 import { type PendingImage, processImage } from "./chat/images";
 import { PromptBar } from "./chat/PromptBar";
 import { ScrollSnapshot } from "./chat/ScrollSnapshot";
@@ -47,7 +43,7 @@ import { FilePicker } from "./FilePicker";
 import { AgentPicker } from "./AgentPicker";
 import { ModelPicker } from "./ModelPicker";
 import { ModePicker } from "./ModePicker";
-import { SkillPicker } from "./SkillPicker";
+import { CommandPicker } from "./CommandPicker";
 import { TurnQueue } from "./TurnQueue";
 import { IncompleteTurnNotice } from "./chat/IncompleteTurnNotice";
 
@@ -59,28 +55,26 @@ export interface ChatPanelProps {
 	placeholder?: string;
 	entries: ChatEntry[];
 	phase: Phase;
-	retry?: { attempt: number; reason: string; delayMillis: number };
-	compaction?: { tokensBefore: number; tokensAfter: number };
+	activity?: string;
 	available?: boolean;
 	onSend: (
 		text: string,
 		files?: string[],
 		images?: string[],
 		intent?: TurnInputIntent,
+		completions?: MessageAttachment[],
 	) => boolean | Promise<boolean>;
-	onCancel: (clearQueue?: boolean) => void;
+	onCancel: () => void;
 	onCompact?: (focus: string) => boolean | Promise<boolean>;
 	pendingInputs?: PendingTurnInput[];
-	queuePaused?: boolean;
-	canSteer?: boolean;
 	onRemoveQueued?: (id: string, state: TurnInputState) => void;
 	onUpdateQueued?: (
 		id: string,
 		text: string,
 		files?: string[],
 		images?: string[],
+		completions?: MessageAttachment[],
 	) => boolean | Promise<boolean>;
-	onResumeQueue?: () => void;
 	onClearQueue?: () => void;
 	loading?: boolean;
 	loadError?: string | null;
@@ -92,12 +86,12 @@ export interface ChatPanelProps {
 	onOpenFile?: (path: string, line?: number) => void;
 	seed?: {
 		text: string;
+		completions?: MessageAttachment[];
 		files?: string[];
 		append?: boolean;
 		nonce: number;
 	} | null;
 	onSeedConsumed?: (nonce: number) => void;
-	toolProgress?: Record<string, string>;
 }
 
 const PIN_TOP_GAP = 16;
@@ -141,6 +135,9 @@ function wordEndAt(text: string, caret: number): number {
 	return end;
 }
 
+const composerIconButton =
+	"flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40";
+
 export function ChatPanel({
 	draft,
 	draftId,
@@ -149,18 +146,14 @@ export function ChatPanel({
 	placeholder = "Message Wingman…",
 	entries,
 	phase,
-	retry,
-	compaction,
+	activity,
 	available = true,
 	onSend,
 	onCancel,
 	onCompact,
 	pendingInputs = [],
-	queuePaused = false,
-	canSteer = false,
 	onRemoveQueued,
 	onUpdateQueued,
-	onResumeQueue,
 	onClearQueue,
 	loading,
 	loadError,
@@ -172,7 +165,6 @@ export function ChatPanel({
 	onOpenFile,
 	seed,
 	onSeedConsumed,
-	toolProgress,
 }: ChatPanelProps) {
 	const scheme = useColorScheme();
 	const toast = useToast();
@@ -188,6 +180,8 @@ export function ChatPanel({
 		submitting,
 		error: sendError,
 	} = useSyncExternalStore(draft.subscribe, draft.getSnapshot);
+	const hasDraft = !!input.trim() || images.length > 0 || files.length > 0;
+	const blocked = !available || submitting || prompts.length > 0;
 	const [caret, setCaret] = useState(input.length);
 	const [dismissedToken, setDismissedToken] = useState<string | null>(null);
 	const [showPicker, setShowPicker] = useState(false);
@@ -327,6 +321,11 @@ export function ChatPanel({
 		if (!seed || consumedSeed.current === seed.nonce) return;
 		consumedSeed.current = seed.nonce;
 		const current = draft.getSnapshot();
+		draft.update({
+			completions: seed.append
+				? [...(current.completions ?? []), ...(seed.completions ?? [])]
+				: seed.completions,
+		});
 		setDraft(
 			seed.append && current.text.trim()
 				? `${current.text}\n\n${seed.text}`
@@ -353,7 +352,12 @@ export function ChatPanel({
 		setSkillSelection({ token: tokenKey, index });
 
 	const tokenOpen = !!skillToken;
-	const skills = useSkills(sessionId, tokenOpen);
+	const skills = useChatCommands(
+		sessionId,
+		tokenOpen,
+		!!skillToken && skillToken.start > 0,
+	);
+	const canCompact = useCanCompact(sessionId);
 
 	const skillQuery = skillToken ? skillToken.query.toLowerCase() : null;
 	const skillMatches = useMemo(() => {
@@ -548,7 +552,7 @@ export function ChatPanel({
 		if (
 			focus !== null &&
 			onCompact &&
-			settings.canCompact &&
+			canCompact &&
 			!current.editingQueueId &&
 			current.files.length + current.images.length === 0
 		) {
@@ -560,27 +564,31 @@ export function ChatPanel({
 		}
 		submitPendingRef.current = true;
 		const focused = document.activeElement;
-		const sent = await draft.submit(({ images, files, editingQueueId }) => {
-			const imageData =
-				images.length > 0 ? images.map((i) => i.dataUrl) : undefined;
-			if (editingQueueId && onUpdateQueued) {
-				return onUpdateQueued(
-					editingQueueId,
-					text,
-					files.length > 0 ? files : undefined,
-					imageData,
-				);
-			} else {
-				const nextIntent =
-					intent ?? (isActive && canSteer ? "steer" : "follow_up");
-				return onSend(
-					text,
-					files.length > 0 ? files : undefined,
-					imageData,
-					nextIntent,
-				);
-			}
-		});
+		const sent = await draft.submit(
+			({ images, files, editingQueueId, completions }) => {
+				const selected = selectedCommandAttachments(text, completions);
+				const imageData =
+					images.length > 0 ? images.map((i) => i.dataUrl) : undefined;
+				if (editingQueueId && onUpdateQueued) {
+					return onUpdateQueued(
+						editingQueueId,
+						text,
+						files.length > 0 ? files : undefined,
+						imageData,
+						selected,
+					);
+				} else {
+					const nextIntent = intent ?? (isActive ? "steer" : "follow_up");
+					return onSend(
+						text,
+						files.length > 0 ? files : undefined,
+						imageData,
+						nextIntent,
+						selected,
+					);
+				}
+			},
+		);
 		if (!sent) {
 			submitPendingRef.current = false;
 			return false;
@@ -597,13 +605,22 @@ export function ChatPanel({
 
 	// selectSkill completes the slash token at the caret in place; only a lone
 	// leading command without an input hint submits directly.
-	const selectSkill = (s: Skill) => {
+	const selectSkill = (s: ChatCommand) => {
 		const tok = slashTokenAt(input, caret);
 		if (!tok) return;
 
 		const end = wordEndAt(input, caret);
 		const whole = tok.start === 0 && end === input.length;
 		const needsInput = !!s.input_hint;
+		if (s.attachment)
+			draft.update({
+				completions: [
+					...(draft.getSnapshot().completions ?? []).filter(
+						(item) => item.label !== s.attachment!.label,
+					),
+					s.attachment,
+				],
+			});
 
 		if (whole && !needsInput) {
 			void handleSubmit(undefined, `/${s.name}`);
@@ -853,32 +870,30 @@ export function ChatPanel({
 					</div>
 				) : (
 					<div className="mx-auto w-full max-w-4xl px-4 py-4" ref={contentRef}>
-						<ToolProgressContext value={toolProgress ?? {}}>
-							{turns.length > 80 ? (
-								<VirtualTurns
-									turns={turns}
-									phase={phase}
-									scroll={containerRef}
-									onOpenFile={onOpenFile}
-									applyPendingAnchor={applyPendingAnchor}
-								/>
-							) : (
-								turns.map((turn, idx) => {
-									const isLastTurn = idx === turns.length - 1;
-									const isActive = isLastTurn && phase !== "idle";
-									return (
-										<TurnView
-											key={turn.key}
-											turn={turn}
-											isActive={isActive}
-											phase={phase}
-											applyPendingAnchor={applyPendingAnchor}
-											onOpenFile={onOpenFile}
-										/>
-									);
-								})
-							)}
-						</ToolProgressContext>
+						{turns.length > 80 ? (
+							<VirtualTurns
+								turns={turns}
+								phase={phase}
+								scroll={containerRef}
+								onOpenFile={onOpenFile}
+								applyPendingAnchor={applyPendingAnchor}
+							/>
+						) : (
+							turns.map((turn, idx) => {
+								const isLastTurn = idx === turns.length - 1;
+								const isActive = isLastTurn && phase !== "idle";
+								return (
+									<TurnView
+										key={turn.key}
+										turn={turn}
+										isActive={isActive}
+										phase={phase}
+										applyPendingAnchor={applyPendingAnchor}
+										onOpenFile={onOpenFile}
+									/>
+								);
+							})
+						)}
 					</div>
 				)}
 				<div ref={spacerRef} aria-hidden style={{ height: 0 }} />
@@ -887,23 +902,13 @@ export function ChatPanel({
 			<div className="absolute bottom-0 left-0 right-0 z-20">
 				<div className="h-6 bg-gradient-to-t from-bg to-transparent pointer-events-none" />
 				<div className="mx-auto w-full max-w-4xl bg-bg px-4 pb-3">
-					{phase === "compacting" && (
-						<div role="status" className="mb-2 text-[12px] text-fg-muted">
-							Compacting context…
-						</div>
-					)}
-					{phase === "idle" && compaction && (
-						<div role="status" className="mb-2 text-[12px] text-fg-dim">
-							Context compacted · ~{formatTokens(compaction.tokensBefore)} → ~
-							{formatTokens(compaction.tokensAfter)} tokens
-						</div>
-					)}
-					{phase === "retrying" && (
-						<div role="status" className="mb-2 text-[12px] text-warning">
-							Retrying
-							{retry
-								? ` · ${retry.reason} · attempt ${retry.attempt} in ${(retry.delayMillis / 1000).toFixed(1)}s`
-								: "…"}
+					{activity && (
+						<div
+							role="status"
+							className="mb-2 truncate text-[12px] text-fg-muted"
+							title={activity}
+						>
+							{activity}
 						</div>
 					)}
 					{awayFromLatest && (
@@ -931,22 +936,15 @@ export function ChatPanel({
 					{showQueue && (
 						<TurnQueue
 							items={pendingInputs}
-							paused={queuePaused}
 							onEdit={editPendingInput}
 							onRemove={onRemoveQueued}
-							onResume={onResumeQueue}
 							onClear={onClearQueue}
 						/>
 					)}
 					{incomplete && !isActive && (
 						<IncompleteTurnNotice
 							key={sessionId}
-							disabled={
-								!available ||
-								submitting ||
-								prompts.length > 0 ||
-								pendingInputs.length > 0
-							}
+							disabled={blocked || pendingInputs.length > 0}
 							onContinue={() =>
 								onSend(
 									"Continue the unfinished task from the saved conversation. Check what was already completed and avoid repeating it.",
@@ -1004,7 +1002,7 @@ export function ChatPanel({
 								</div>
 							)}
 							{showSkills && (
-								<SkillPicker
+								<CommandPicker
 									anchor={composer}
 									skills={skillMatches}
 									active={activeSkill}
@@ -1068,7 +1066,7 @@ export function ChatPanel({
 								<textarea
 									ref={textareaRef}
 									autoFocus
-									className="chat-composer-textarea field-sizing-content w-full appearance-none bg-transparent text-fg text-[12px] font-mono resize-none leading-[1.7] placeholder:text-fg-dim max-h-[40vh] overflow-y-auto"
+									className="chat-composer-textarea field-sizing-content w-full appearance-none bg-transparent text-fg text-[13px] resize-none leading-relaxed placeholder:text-fg-dim max-h-[40vh] overflow-y-auto"
 									value={input}
 									onChange={(e) => {
 										historyIdxRef.current = null;
@@ -1102,6 +1100,10 @@ export function ChatPanel({
 												anchor={filePickerButton}
 												onSelect={addFile}
 												onClose={() => setShowPicker(false)}
+												onUpload={() => {
+													setShowPicker(false);
+													imageInputRef.current?.click();
+												}}
 											/>
 										)}
 									</div>
@@ -1119,7 +1121,7 @@ export function ChatPanel({
 									<AgentPicker
 										currentId={
 											sessionId
-												? splitSessionKey(sessionId).backendId
+												? workspaceClient().backendOf(sessionId)
 												: undefined
 										}
 										onSelect={onSelectBackend}
@@ -1160,65 +1162,47 @@ export function ChatPanel({
 									/>
 								</div>
 
-								<div className="flex shrink-0 items-center gap-0">
-									<button
-										type="button"
-										className="w-7 h-7 flex items-center justify-center rounded text-fg-dim hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-										onClick={() => imageInputRef.current?.click()}
-										title="Attach image"
-									>
-										<Paperclip size={14} />
-									</button>
+								{/* Send stays right-most; run-only controls appear to its left so nothing visible moves. */}
+								<div className="flex shrink-0 items-center gap-1">
+									{isActive && !editingQueueId && hasDraft && (
+										<button
+											type="button"
+											className={composerIconButton}
+											disabled={blocked}
+											onClick={() => void handleSubmit("follow_up")}
+											title="Queue after current turn (Alt+Enter)"
+											aria-label="Queue after current turn (Alt+Enter)"
+										>
+											<ListEnd size={14} />
+										</button>
+									)}
 									{isActive && (
 										<button
 											type="button"
-											className="w-8 h-8 flex items-center justify-center rounded text-danger hover:bg-bg-hover"
+											className={composerIconButton}
 											title="Stop (Esc)"
 											aria-label="Stop (Esc)"
 											disabled={!available}
-											onClick={() => onCancel(false)}
+											onClick={() => onCancel()}
 										>
-											<Square size={12} fill="currentColor" />
+											<Square size={11} fill="currentColor" />
 										</button>
 									)}
 									<button
 										type="button"
-										className="w-8 h-8 flex items-center justify-center rounded text-fg-muted hover:bg-bg-hover disabled:opacity-40"
+										className="flex h-7 w-7 items-center justify-center rounded-full bg-fg text-bg transition-colors hover:bg-fg-muted disabled:bg-bg-active disabled:text-fg-dim"
 										onClick={() => void handleSubmit()}
-										disabled={
-											!available ||
-											submitting ||
-											prompts.length > 0 ||
-											(!input.trim() && !images.length && !files.length)
-										}
+										disabled={blocked || !hasDraft}
 										title={
 											editingQueueId
 												? "Update queued message (Enter)"
-												: isActive && canSteer
+												: isActive
 													? "Steer current turn (Enter) · Queue with Alt+Enter"
-													: isActive
-														? "Queue follow-up (Enter)"
-														: "Send (Enter)"
+													: "Send (Enter)"
 										}
 									>
 										<ArrowUp size={14} />
 									</button>
-									{isActive && canSteer && !editingQueueId && (
-										<button
-											type="button"
-											className="w-8 h-8 flex items-center justify-center rounded text-fg-muted hover:bg-bg-hover disabled:opacity-40"
-											disabled={
-												!available ||
-												submitting ||
-												prompts.length > 0 ||
-												(!input.trim() && !images.length && !files.length)
-											}
-											onClick={() => void handleSubmit("follow_up")}
-											title="Queue after current turn (Alt+Enter)"
-										>
-											<ListPlus size={14} />
-										</button>
-									)}
 								</div>
 							</div>
 						</div>

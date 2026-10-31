@@ -1,6 +1,7 @@
 package language
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -34,6 +35,8 @@ type Diagnostic struct {
 	Code     any      `json:"code,omitempty"`
 	Source   string   `json:"source,omitempty"`
 	Message  string   `json:"message"`
+	// Wire is the server's complete diagnostic, including tags and data.
+	Wire json.RawMessage `json:"-"`
 }
 
 type WorkspaceReport struct {
@@ -66,9 +69,18 @@ func DiagnosticsFromProtocol(values []lsp.Diagnostic) []Diagnostic {
 			Code:     value.Code,
 			Source:   source,
 			Message:  message,
+			Wire:     wireDiagnostic(value),
 		})
 	}
 	return result
+}
+
+func wireDiagnostic(value lsp.Diagnostic) json.RawMessage {
+	data, err := lsp.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 func FormatDiagnosticLine(path string, diagnostic Diagnostic) string {

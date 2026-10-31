@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
@@ -181,8 +182,11 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 	if input.ID == "" {
 		return TurnInputSnapshot{}, errors.New("input id required")
 	}
-	if len(input.Content) == 0 {
+	if len(input.Content) == 0 && !input.Compact {
 		return TurnInputSnapshot{}, errors.New("input content required")
+	}
+	if input.Compact {
+		input.Intent = TurnInputFollowUp
 	}
 	switch input.Intent {
 	case "":
@@ -390,6 +394,21 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 			err = fmt.Errorf("agent turn panicked: %v", recovered)
 		}
 	}()
+	if item.input.Compact {
+		compactor, ok := m.agent.(Compactor)
+		if !ok {
+			return errors.ErrUnsupported
+		}
+		var focus []string
+		for _, content := range item.input.Content {
+			focus = append(focus, content.AsText())
+		}
+		result, err := compactor.Compact(ctx, sessionID, strings.Join(focus, "\n"))
+		if err == nil {
+			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, Compaction: &result})
+		}
+		return err
+	}
 	ctx = harness.WithInputID(ctx, item.input.ID)
 	ctx = harness.WithStreamEventHandlers(ctx, harness.StreamEventHandlers{
 		Retry: func(info harness.RetryInfo) {
@@ -542,7 +561,7 @@ func (m *TurnManager) RemoveQueued(sessionID, inputID string) error {
 }
 
 func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnInput) error {
-	if len(replacement.Content) == 0 {
+	if len(replacement.Content) == 0 && !replacement.Compact {
 		return errors.New("input content required")
 	}
 	s := m.session(sessionID)
@@ -582,21 +601,34 @@ func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnI
 
 // CancelCurrent interrupts the active turn and pauses queued follow-ups.
 func (m *TurnManager) CancelCurrent(sessionID string) error {
-	return m.cancelSession(sessionID, false)
+	return m.cancelSession(sessionID, "", false)
 }
 
 // CancelAll interrupts the active turn and cancels every queued follow-up.
 func (m *TurnManager) CancelAll(sessionID string) error {
-	return m.cancelSession(sessionID, true)
+	return m.cancelSession(sessionID, "", true)
 }
 
-func (m *TurnManager) cancelSession(sessionID string, clearQueue bool) error {
+// CancelTurn interrupts inputID's turn like CancelCurrent or CancelAll, and
+// changes nothing with ErrNoActiveTurn once that turn is no longer active.
+func (m *TurnManager) CancelTurn(sessionID, inputID string, clearQueue bool) error {
+	if inputID == "" {
+		return errors.New("input id required")
+	}
+	return m.cancelSession(sessionID, inputID, clearQueue)
+}
+
+func (m *TurnManager) cancelSession(sessionID, inputID string, clearQueue bool) error {
 	s := m.session(sessionID)
 	s.mu.Lock()
 	if !s.queueLoaded {
 		err := s.queueErr
 		s.mu.Unlock()
 		return err
+	}
+	if inputID != "" && (s.active == nil || s.active.input.ID != inputID) {
+		s.mu.Unlock()
+		return ErrNoActiveTurn
 	}
 	previousQueue, previousPaused, previousCancelled := s.queued, s.paused, s.cancelRequested
 	s.cancelRequested = s.active != nil
@@ -687,6 +719,26 @@ func (m *TurnManager) StopSession(ctx context.Context, sessionID string) error {
 	}
 }
 
+// Unpause lets a recovered queue continue after the next turn without
+// starting it now.
+func (m *TurnManager) Unpause(sessionID string) error {
+	s := m.session(sessionID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.queueLoaded {
+		return s.queueErr
+	}
+	if !s.paused {
+		return nil
+	}
+	s.paused = false
+	if err := m.persistLocked(sessionID, s); err != nil {
+		s.paused = true
+		return err
+	}
+	return nil
+}
+
 func (m *TurnManager) Resume(sessionID string) bool {
 	if !m.beginWork() {
 		return false
@@ -731,7 +783,7 @@ func (m *TurnManager) Snapshot(sessionID string) TurnSnapshot {
 	s := m.session(sessionID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := TurnSnapshot{Paused: s.paused, Compacting: s.compacting, Features: m.Features(sessionID), Error: s.queueErr}
+	out := TurnSnapshot{Paused: s.paused, Compacting: s.compacting || s.active != nil && s.active.input.Compact, Features: m.Features(sessionID), Error: s.queueErr}
 	if s.active != nil {
 		out.Inputs = append(out.Inputs, TurnInputSnapshot{
 			Input: CloneTurnInput(s.active.input), ID: s.active.input.ID, State: TurnInputActive, Intent: s.active.input.Intent,

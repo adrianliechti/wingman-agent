@@ -47,8 +47,8 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	}
 	writer := acp.NewConnectionWriter(out, 0)
 	defer writer.Close()
-	s.conn = acpsdk.NewAgentSideConnection(s, writer, in)
-	s.conn.SetLogger(slog.Default())
+	conn := acp.NewAgentConnection(s, writer, in)
+	conn.SetLogger(slog.Default())
 
 	select {
 	case <-s.conn.Done():
@@ -63,7 +63,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 var serverMCPCapabilities = acpsdk.McpCapabilities{Http: true, Sse: true}
 
 type Server struct {
-	conn   *acpsdk.AgentSideConnection
+	conn   acp.ClientConnection
 	config agent.Config
 
 	mu          sync.Mutex
@@ -840,10 +840,14 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (respo
 	// ACP agent_message_chunk updates cannot be retracted. Deliberately leave
 	// Reset unsupported so a recoverable error after visible output terminates
 	// the attempt instead of duplicating it with an invisible retry.
+	if params.MessageId != nil {
+		ctx = harness.WithInputID(ctx, *params.MessageId)
+	}
 	stream, err := sess.agent.Send(ctx, string(sess.id), acp.ContentFromBlocks(params.Prompt))
 	if err != nil {
 		return acpsdk.PromptResponse{}, err
 	}
+	acp.PromptAccepted(ctx, "")
 	for msg, err := range stream {
 		if notifyErr != nil {
 			return acpsdk.PromptResponse{}, notifyErr
@@ -1027,12 +1031,15 @@ func (s *Server) loadAndAttach(ctx context.Context, cwdParam string, id acpsdk.S
 
 func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messages []harness.Message) error {
 	var notifyErr error
-	notify := func(u acpsdk.SessionUpdate) {
-		if notifyErr == nil {
-			notifyErr = acp.Notify(ctx, s.conn, sid, u)
-		}
-	}
 	for _, m := range messages {
+		notify := func(u acpsdk.SessionUpdate) {
+			if u.UserMessageChunk != nil && m.InputID != "" {
+				u.UserMessageChunk.MessageId = new(m.InputID)
+			}
+			if notifyErr == nil {
+				notifyErr = acp.Notify(ctx, s.conn, sid, u)
+			}
+		}
 		if m.Hidden {
 			continue
 		}
@@ -1284,3 +1291,5 @@ func sdkToolLocations(locations []harness.ToolLocation) []acpsdk.ToolCallLocatio
 func sessionNotFound(id acpsdk.SessionId) *acpsdk.RequestError {
 	return &acpsdk.RequestError{Code: -32002, Message: "Resource not found", Data: map[string]any{"sessionId": string(id)}}
 }
+
+func (s *Server) SetClientConnection(conn acp.ClientConnection) { s.conn = conn }

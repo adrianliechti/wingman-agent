@@ -2,6 +2,7 @@ package dap
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	godap "github.com/google/go-dap"
 )
@@ -39,7 +41,12 @@ type pendingRequest struct {
 
 type outputBuffer struct {
 	mu      sync.Mutex
-	content string
+	chunks  []OutputChunk
+	size    int
+	end     int64
+	trimmed bool
+	changed chan struct{}
+	partial map[string]string // an incomplete trailing UTF-8 sequence per category
 }
 
 type terminalBinding struct {
@@ -47,26 +54,123 @@ type terminalBinding struct {
 	cancel  func()
 }
 
+var stopSequence atomic.Uint64
+
 func (buffer *outputBuffer) append(category, value string) {
+	// Telemetry is for the client's telemetry pipeline, never the user.
+	if value == "" || category == "telemetry" {
+		return
+	}
+	switch category {
+	case "stdout", "stderr", "console", "important":
+	default:
+		category = "console"
+	}
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	// Byte-chunked streams can split a character; offsets must count it once.
+	value = buffer.partial[category] + value
+	delete(buffer.partial, category)
+	if cut := incompleteSuffix(value); cut < len(value) {
+		if buffer.partial == nil {
+			buffer.partial = map[string]string{}
+		}
+		buffer.partial[category], value = value[cut:], value[:cut]
+	}
 	if value == "" {
 		return
 	}
-	if category != "" && category != "stdout" && category != "console" {
-		value = "[" + category + "] " + value
+	if buffer.changed != nil {
+		close(buffer.changed)
+		buffer.changed = nil
 	}
-	buffer.mu.Lock()
-	buffer.content += value
-	if len(buffer.content) > maxOutputBytes {
-		buffer.content = buffer.content[len(buffer.content)-maxOutputBytes:]
-		buffer.content = "[earlier debugger output truncated]\n" + buffer.content
+	buffer.chunks = append(buffer.chunks, OutputChunk{Category: category, Output: value, Offset: buffer.end})
+	buffer.end += utf16Length(value)
+	buffer.size += len(value)
+	for buffer.size > maxOutputBytes && len(buffer.chunks) > 0 {
+		buffer.trimmed = true
+		first := &buffer.chunks[0]
+		if excess := buffer.size - maxOutputBytes; excess < len(first.Output) {
+			for excess < len(first.Output) && !utf8.RuneStart(first.Output[excess]) {
+				excess++
+			}
+			first.Offset += utf16Length(first.Output[:excess])
+			first.Output = first.Output[excess:]
+			buffer.size -= excess
+			if first.Output != "" {
+				break
+			}
+		} else {
+			buffer.size -= len(first.Output)
+		}
+		buffer.chunks = buffer.chunks[1:]
 	}
-	buffer.mu.Unlock()
+	if len(buffer.chunks) > 64 && len(buffer.chunks)*2 < cap(buffer.chunks) {
+		buffer.chunks = slices.Clone(buffer.chunks)
+	}
 }
 
 func (buffer *outputBuffer) String() string {
+	text, _ := buffer.snapshot()
+	return text
+}
+
+// snapshot returns the retained text and the offset that follows it.
+func (buffer *outputBuffer) snapshot() (string, int64) {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
-	return buffer.content
+	var text strings.Builder
+	if buffer.trimmed {
+		text.WriteString("[earlier debugger output truncated]\n")
+	}
+	for _, chunk := range buffer.chunks {
+		text.WriteString(chunk.Output)
+	}
+	return text.String(), buffer.end
+}
+
+// since returns chunks starting at or after offset. An offset that predates
+// the retained window returns everything still retained.
+func (buffer *outputBuffer) since(offset int64) ([]OutputChunk, int64) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	index, _ := slices.BinarySearchFunc(buffer.chunks, offset, func(chunk OutputChunk, offset int64) int {
+		return cmp.Compare(chunk.Offset, offset)
+	})
+	return slices.Clone(buffer.chunks[index:]), buffer.end
+}
+
+func (buffer *outputBuffer) changes() <-chan struct{} {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	if buffer.changed == nil {
+		buffer.changed = make(chan struct{})
+	}
+	return buffer.changed
+}
+
+// incompleteSuffix returns where an unfinished trailing UTF-8 sequence starts.
+func incompleteSuffix(value string) int {
+	for index := len(value) - 1; index >= 0 && index >= len(value)-utf8.UTFMax; index-- {
+		if utf8.RuneStart(value[index]) {
+			if !utf8.FullRuneInString(value[index:]) {
+				return index
+			}
+			break
+		}
+	}
+	return len(value)
+}
+
+func utf16Length(value string) int64 {
+	var length int64
+	for _, r := range value {
+		length++
+		if r >= 0x10000 {
+			length++
+		}
+	}
+	return length
 }
 
 type Session struct {
@@ -74,7 +178,8 @@ type Session struct {
 	plan       Plan
 	connection *adapterConnection
 	startedAt  time.Time
-	output     outputBuffer
+	output     *outputBuffer
+	hooks      sessionHooks
 
 	writeMu sync.Mutex
 	seq     int
@@ -85,14 +190,24 @@ type Session struct {
 	mu           sync.Mutex
 	state        State
 	stop         *Stop
+	threadStops  map[int]Stop
+	allStopped   bool
 	exitCode     *int
 	terminalErr  error
 	capabilities Capabilities
+	adapter      godap.Capabilities
 	terminalID   string
 	terminals    []terminalBinding
 	parent       *Session
-	child        *Session
+	child        *Session // the focused child; requests without an id go here
+	children     []*Session
+	childRoutes  childRoutes
+	presented    presentedChild
 	breakpoints  map[string][]SourceBreakpoint
+	adapterIDs   map[int]breakpointRef
+	configured   uint64 // editor breakpoint version applied during configuration
+	exceptionsAt uint64 // editor exception filter version applied during configuration
+	editVersion  uint64 // version of breakpoints, which children configure from
 	functions    []FunctionBreakpoint
 	preLaunch    *debugProcess
 	stateVersion uint64
@@ -109,15 +224,34 @@ type Session struct {
 	closeOnce     sync.Once
 	terminateOnce sync.Once
 	disconnectMu  sync.Mutex
+	breakpointMu  sync.Mutex // orders breakpoint updates, so a child's resync never overtakes an edit
 
 	terminalLauncher TerminalLauncher
 }
 
+// presentedChild is the child Status reports and the version reported for it.
+type presentedChild struct {
+	child   *Session
+	version uint64
+	epoch   uint64
+}
+
+type breakpointRef struct {
+	path         string
+	line, column int
+}
+
 func startSession(ctx context.Context, id string, plan Plan, options StartOptions) (*Session, error) {
+	output := options.hooks.output
+	if output == nil {
+		output = &outputBuffer{}
+	}
 	session := &Session{
 		id:               id,
 		plan:             plan,
 		startedAt:        time.Now(),
+		output:           output,
+		hooks:            options.hooks,
 		pending:          make(map[int]chan responseResult),
 		state:            StateStarting,
 		stateChanged:     make(chan struct{}),
@@ -126,6 +260,7 @@ func startSession(ctx context.Context, id string, plan Plan, options StartOption
 		resourceDone:     make(chan struct{}),
 		terminalLauncher: options.terminalLauncher,
 		breakpoints:      cloneSourceBreakpointSets(options.Breakpoints),
+		adapterIDs:       make(map[int]breakpointRef),
 		functions:        slices.Clone(options.FunctionBreakpoints),
 	}
 	if plan.PreLaunch != nil {
@@ -224,6 +359,7 @@ func newConnectedSession(id string, plan Plan, connection io.ReadWriteCloser) *S
 		plan:         plan,
 		connection:   &adapterConnection{ReadWriteCloser: connection},
 		startedAt:    time.Now(),
+		output:       &outputBuffer{},
 		pending:      make(map[int]chan responseResult),
 		state:        StateStarting,
 		stateChanged: make(chan struct{}),
@@ -231,6 +367,7 @@ func newConnectedSession(id string, plan Plan, connection io.ReadWriteCloser) *S
 		launchDone:   make(chan struct{}),
 		resourceDone: make(chan struct{}),
 		breakpoints:  make(map[string][]SourceBreakpoint),
+		adapterIDs:   make(map[int]breakpointRef),
 	}
 	session.alive.Store(true)
 	go session.readLoop()
@@ -239,22 +376,42 @@ func newConnectedSession(id string, plan Plan, connection io.ReadWriteCloser) *S
 
 func (session *Session) ID() string { return session.id }
 
+// Status reports a live child's state as this session's. Its version follows
+// that child only, so a sibling's activity keeps references valid.
 func (session *Session) Status() Status {
-	if child := session.childSession(); child != nil {
-		status := child.Status()
-		session.mu.Lock()
-		status.SessionID = session.id
-		status.StateVersion = session.stateVersion
-		status.StartedAt = session.startedAt
-		session.mu.Unlock()
-		return status
+	child := session.primaryChild()
+	var status Status
+	if child != nil {
+		status = child.Status()
 	}
-	return session.ownStatus()
-}
-
-func (session *Session) ownStatus() Status {
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	if child == nil || status.State == StateTerminated {
+		if session.presented.child != nil {
+			session.stateVersion++
+			session.presented = presentedChild{}
+		}
+		return session.ownStatusLocked()
+	}
+	if session.presented.child != child || session.presented.version != status.StateVersion {
+		session.stateVersion++
+		session.presented = presentedChild{child: child, version: status.StateVersion, epoch: session.stateVersion}
+	}
+	status.SessionID = session.id
+	status.StateVersion = session.presented.epoch
+	status.StartedAt = session.startedAt
+	status.Request = session.plan.Request
+	status.TerminalID = cmp.Or(session.terminalID, status.TerminalID)
+	if status.Stop != nil {
+		status.Stop.ThreadID = session.childIDLocked("thread", child, 0, status.Stop.ThreadID)
+	}
+	for i, thread := range status.StoppedThreads {
+		status.StoppedThreads[i] = session.childIDLocked("thread", child, 0, thread)
+	}
+	return status
+}
+
+func (session *Session) ownStatusLocked() Status {
 	status := Status{
 		SessionID:    session.id,
 		Adapter:      session.plan.Adapter.Name,
@@ -275,6 +432,10 @@ func (session *Session) ownStatus() Status {
 		stop.HitBreakpointIDs = slices.Clone(session.stop.HitBreakpointIDs)
 		status.Stop = &stop
 	}
+	status.Capabilities.ExceptionFilters = slices.Clone(session.capabilities.ExceptionFilters)
+	if session.state == StateStopped && !session.allStopped && len(session.threadStops) > 0 {
+		status.StoppedThreads = slices.Sorted(maps.Keys(session.threadStops))
+	}
 	if session.terminalErr != nil &&
 		!errors.Is(session.terminalErr, io.EOF) &&
 		!errors.Is(session.terminalErr, errSessionClosed) {
@@ -291,12 +452,25 @@ func cloneInt(value *int) *int {
 	return &copy
 }
 
-func (session *Session) Output() string {
-	output := session.output.String()
-	if child := session.childSession(); child != nil {
-		output += child.Output()
-	}
-	return output
+// Output includes every child session; children share their parent's buffer.
+func (session *Session) Output() string { return session.output.String() }
+
+// OutputSnapshot returns the retained output and the offset that follows it.
+func (session *Session) OutputSnapshot() (string, int64) { return session.output.snapshot() }
+
+// OutputSince returns output chunks from offset and the new end offset.
+func (session *Session) OutputSince(offset int64) ([]OutputChunk, int64) {
+	return session.output.since(offset)
+}
+
+// Changes returns edge-triggered wakeups. Subscribe before reading Status and
+// Output, then resubscribe after either channel closes. No adapter messages are
+// consumed by observers, and browser disconnection never owns this process.
+func (session *Session) Changes() (state, output <-chan struct{}) {
+	session.mu.Lock()
+	state = session.stateChanged
+	session.mu.Unlock()
+	return state, session.output.changes()
 }
 
 func (session *Session) initializeAndLaunch(ctx context.Context, options StartOptions) error {
@@ -325,7 +499,8 @@ func (session *Session) initializeAndLaunch(ctx context.Context, options StartOp
 		return fmt.Errorf("initialize returned %T", response)
 	}
 	session.mu.Lock()
-	session.capabilities = Capabilities{SupportsStepBack: initialized.Body.SupportsStepBack}
+	session.adapter = initialized.Body
+	session.capabilities = adapterCapabilities(initialized.Body)
 	session.mu.Unlock()
 	session.setState(StateConfiguring, nil)
 
@@ -383,18 +558,26 @@ func (session *Session) initializeAndLaunch(ctx context.Context, options StartOp
 
 configure:
 
-	breakpointSets := make(map[string][]SourceBreakpoint, len(options.Breakpoints))
-	for path, breakpoints := range options.Breakpoints {
-		breakpointSets[path] = slices.Clone(breakpoints)
+	breakpointSets := cloneSourceBreakpointSets(options.Breakpoints)
+	if source := session.hooks.breakpointSource; source != nil {
+		// Breakpoints toggled during a prelaunch build or adapter start apply now.
+		var version uint64
+		breakpointSets, version = source()
+		session.mu.Lock()
+		session.configured = version
+		session.breakpoints = cloneSourceBreakpointSets(breakpointSets)
+		session.mu.Unlock()
 	}
-	paths := make([]string, 0, len(breakpointSets))
-	for path := range breakpointSets {
-		paths = append(paths, path)
-	}
-	slices.Sort(paths)
-	for _, path := range paths {
+	for _, path := range slices.Sorted(maps.Keys(breakpointSets)) {
 		breakpoints := breakpointSets[path]
-		if _, err := session.SetBreakpoints(ctx, path, breakpoints); err != nil {
+		resolved, err := session.SetBreakpoints(ctx, path, breakpoints)
+		if err != nil {
+			return err
+		}
+		session.reportBreakpoints(path, breakpoints, resolved)
+	}
+	if filters, ok := session.initialExceptionFilters(); ok {
+		if err := session.sendExceptionBreakpoints(ctx, filters); err != nil {
 			return err
 		}
 	}
@@ -494,7 +677,23 @@ func (session *Session) awaitRequest(ctx context.Context, pending pendingRequest
 		return result.message, nil
 	case <-ctx.Done():
 		session.removePending(pending.seq)
+		session.cancelAdapterRequest(pending)
 		return nil, ctx.Err()
+	}
+}
+
+// cancelAdapterRequest lets the adapter stop work nobody is waiting for. Its
+// response to the cancelled request is ignored once the pending entry is gone.
+func (session *Session) cancelAdapterRequest(pending pendingRequest) {
+	session.mu.Lock()
+	supported := session.adapter.SupportsCancelRequest
+	session.mu.Unlock()
+	if !supported || pending.command == "cancel" || pending.command == "disconnect" {
+		return
+	}
+	cancel, err := session.sendRequest(&godap.CancelRequest{Request: request("cancel"), Arguments: &godap.CancelArguments{RequestId: pending.seq}})
+	if err == nil {
+		session.removePending(cancel.seq)
 	}
 }
 
@@ -547,6 +746,13 @@ func (session *Session) readLoop() {
 	}
 }
 
+// continueResponse keeps DAP's default: an omitted allThreadsContinued means
+// true, which go-dap's plain bool cannot represent.
+type continueResponse struct {
+	*godap.ContinueResponse
+	allThreadsContinued bool
+}
+
 // readDAPMessage preserves extension compatibility. google/go-dap provides
 // concrete types for the standard protocol, but adapters are explicitly
 // allowed to add events and requests. Decode unknown extensions to their base
@@ -558,6 +764,16 @@ func readDAPMessage(reader *bufio.Reader) (godap.Message, error) {
 		return nil, err
 	}
 	message, err := godap.DecodeProtocolMessage(content)
+	if response, ok := message.(*godap.ContinueResponse); ok && err == nil {
+		var wire struct {
+			Body struct {
+				AllThreadsContinued *bool `json:"allThreadsContinued"`
+			} `json:"body"`
+		}
+		_ = json.Unmarshal(content, &wire)
+		all := wire.Body.AllThreadsContinued
+		return &continueResponse{ContinueResponse: response, allThreadsContinued: all == nil || *all}, nil
+	}
 	if err == nil {
 		return message, nil
 	}
@@ -587,19 +803,37 @@ func (session *Session) handleEvent(message godap.EventMessage) {
 	case *godap.InitializedEvent:
 		session.initOnce.Do(func() { close(session.initialized) })
 	case *godap.StoppedEvent:
-		session.mu.Lock()
-		session.state = StateStopped
-		session.stop = &Stop{
+		stop := Stop{
 			Reason:            event.Body.Reason,
 			Description:       event.Body.Description,
 			ThreadID:          event.Body.ThreadId,
 			AllThreadsStopped: event.Body.AllThreadsStopped,
-			HitBreakpointIDs:  slices.Clone(event.Body.HitBreakpointIds),
+			HitBreakpointIDs:  session.gatewayBreakpointIDs(event.Body.HitBreakpointIds),
+			Sequence:          stopSequence.Add(1),
 		}
+		session.mu.Lock()
+		session.recordStopLocked(stop)
+		session.notifyStateLocked()
+		parent := session.parent
+		session.mu.Unlock()
+		if parent != nil {
+			parent.focusChild(session)
+		}
+	case *godap.ContinuedEvent:
+		session.mu.Lock()
+		session.resumeThreadLocked(event.Body.ThreadId, event.Body.AllThreadsContinued)
 		session.notifyStateLocked()
 		session.mu.Unlock()
-	case *godap.ContinuedEvent:
-		session.setState(StateRunning, nil)
+	case *godap.BreakpointEvent:
+		if event.Body.Reason != "changed" {
+			return
+		}
+		session.mu.Lock()
+		ref, ok := session.adapterIDs[event.Body.Breakpoint.Id]
+		session.mu.Unlock()
+		if ok && session.hooks.onBreakpoint != nil {
+			session.hooks.onBreakpoint(ref.path, ref.line, ref.column, breakpointsFromWire([]godap.Breakpoint{event.Body.Breakpoint})[0])
+		}
 	case *godap.ExitedEvent:
 		exitCode := event.Body.ExitCode
 		session.mu.Lock()
@@ -615,6 +849,52 @@ func (session *Session) handleEvent(message godap.EventMessage) {
 	case *godap.OutputEvent:
 		session.output.append(event.Body.Category, event.Body.Output)
 	}
+}
+
+// recordStopLocked tracks suspended threads. All-stop adapters suspend every
+// thread at once; others stop and resume threads individually.
+func (session *Session) recordStopLocked(stop Stop) {
+	if stop.AllThreadsStopped || session.state != StateStopped || session.threadStops == nil {
+		session.threadStops = map[int]Stop{}
+		session.allStopped = stop.AllThreadsStopped
+	}
+	session.threadStops[stop.ThreadID] = stop
+	session.state = StateStopped
+	session.stop = &stop
+}
+
+func (session *Session) resumeThreadLocked(threadID int, all bool) {
+	if session.state == StateStopped && !all && !session.allStopped {
+		delete(session.threadStops, threadID)
+		if len(session.threadStops) > 0 {
+			if session.stop == nil || session.stop.ThreadID == threadID {
+				next := session.threadStops[slices.Min(slices.Collect(maps.Keys(session.threadStops)))]
+				session.stop = &next
+			}
+			return
+		}
+	}
+	session.state, session.stop = StateRunning, nil
+	session.threadStops, session.allStopped = nil, false
+}
+
+func (session *Session) gatewayBreakpointIDs(ids []int) []int {
+	if session.hooks.breakpointID == nil {
+		return slices.Clone(ids)
+	}
+	var result []int
+	for _, id := range ids {
+		session.mu.Lock()
+		ref, ok := session.adapterIDs[id]
+		session.mu.Unlock()
+		if !ok {
+			continue
+		}
+		if gateway := session.hooks.breakpointID(ref.path, ref.line, ref.column); gateway > 0 {
+			result = append(result, gateway)
+		}
+	}
+	return result
 }
 
 func (session *Session) closeAfterTermination() {
@@ -662,25 +942,30 @@ func (session *Session) respondStartDebugging(request *godap.StartDebuggingReque
 
 	ctx, cancel := context.WithTimeout(context.Background(), adapterStartupTimeout)
 	defer cancel()
-	child, err := startSession(ctx, session.id+"-child", childPlan, StartOptions{
+	hooks := session.hooks
+	hooks.output = session.output
+	hooks.breakpointSource = func() (map[string][]SourceBreakpoint, uint64) {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		return cloneSourceBreakpointSets(session.breakpoints), session.editVersion
+	}
+	child, err := startSession(ctx, fmt.Sprintf("%s-child-%d", session.id, request.Seq), childPlan, StartOptions{
 		Breakpoints:         session.breakpointSnapshot(),
 		FunctionBreakpoints: session.functionBreakpointSnapshot(),
 		terminalLauncher:    session.terminalLauncher,
 		adapterConnector:    connector,
+		hooks:               hooks,
 	})
 	if err != nil {
 		session.respondError(&request.Request, "startDebugging", err.Error())
 		return
 	}
-	previous, attached := session.attachChild(child)
-	if !attached {
+	if !session.attachChild(child) {
 		child.Close()
 		session.respondError(&request.Request, "startDebugging", "The parent debug session ended while its child session was starting")
 		return
 	}
-	if previous != nil {
-		previous.Close()
-	}
+	session.resyncChild(ctx, child)
 	session.respond(&godap.StartDebuggingResponse{Response: godap.Response{
 		ProtocolMessage: godap.ProtocolMessage{Type: "response"},
 		RequestSeq:      request.Seq,
@@ -691,8 +976,9 @@ func (session *Session) respondStartDebugging(request *godap.StartDebuggingReque
 
 // attachChild transfers ownership only while the parent is still active. A
 // child can take long enough to start that the parent is closed concurrently;
-// installing it afterward would leak the child adapter and debuggee.
-func (session *Session) attachChild(child *Session) (*Session, bool) {
+// installing it afterward would leak the child adapter and debuggee. Earlier
+// children keep running: adapters start one child per target or worker.
+func (session *Session) attachChild(child *Session) bool {
 	child.mu.Lock()
 	child.parent = session
 	child.mu.Unlock()
@@ -705,21 +991,78 @@ func (session *Session) attachChild(child *Session) (*Session, bool) {
 			child.parent = nil
 		}
 		child.mu.Unlock()
-		return nil, false
+		return false
 	}
-	previous := session.child
+	session.children = append(session.children, child)
 	session.child = child
 	session.notifyStateLocked()
 	session.mu.Unlock()
+	return true
+}
 
-	if previous != nil {
-		previous.mu.Lock()
-		if previous.parent == session {
-			previous.parent = nil
+// resyncChild sends edits made while the child configured, before it was attached.
+func (session *Session) resyncChild(ctx context.Context, child *Session) {
+	session.breakpointMu.Lock()
+	defer session.breakpointMu.Unlock()
+	session.mu.Lock()
+	current, version := cloneSourceBreakpointSets(session.breakpoints), session.editVersion
+	session.mu.Unlock()
+	child.mu.Lock()
+	since, applied, exceptionsSince := child.configured, cloneSourceBreakpointSets(child.breakpoints), child.exceptionsAt
+	child.mu.Unlock()
+	if since != version {
+		for path := range applied {
+			if _, ok := current[path]; !ok {
+				current[path] = nil
+			}
 		}
-		previous.mu.Unlock()
+		for _, path := range slices.Sorted(maps.Keys(current)) {
+			if slices.Equal(applied[path], current[path]) {
+				continue
+			}
+			if resolved, err := child.SetBreakpoints(ctx, path, current[path]); err == nil {
+				child.reportBreakpoints(path, current[path], resolved)
+			}
+		}
 	}
-	return previous, true
+	if source := child.hooks.exceptionFilters; source != nil {
+		if filters, set, version := source(); set && version != exceptionsSince {
+			_ = child.SetExceptionBreakpoints(ctx, filters)
+		}
+	}
+}
+
+func (session *Session) focusChild(child *Session) {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.child != child && slices.Contains(session.children, child) {
+		session.child = child
+		session.notifyStateLocked()
+	}
+}
+
+func (session *Session) removeChild(child *Session) {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	index := slices.Index(session.children, child)
+	if index < 0 {
+		return
+	}
+	session.children = slices.Delete(session.children, index, index+1)
+	session.forgetChildRoutes(child)
+	if session.child == child {
+		session.child = nil
+		if len(session.children) > 0 {
+			session.child = session.children[len(session.children)-1]
+		}
+	}
+	session.notifyStateLocked()
+}
+
+func (session *Session) childSessions() []*Session {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return slices.Clone(session.children)
 }
 
 func (session *Session) childSession() *Session {
@@ -906,7 +1249,11 @@ func (session *Session) finish(err error) {
 			session.terminalErr = err
 		}
 		session.notifyStateLocked()
+		parent := session.parent
 		session.mu.Unlock()
+		if parent != nil {
+			parent.removeChild(session)
+		}
 
 		session.pendingMu.Lock()
 		pending := session.pending
@@ -957,16 +1304,11 @@ func (session *Session) notifyChildStateChanged() {
 func (session *Session) waitForStop(ctx context.Context, after uint64) (Status, bool) {
 	for {
 		session.mu.Lock()
-		version := session.stateVersion
-		state := session.state
-		child := session.child
 		changed := session.stateChanged
 		session.mu.Unlock()
-		if child != nil {
-			state = child.Status().State
-		}
-		if version > after && (state == StateStopped || state == StateTerminated) {
-			return session.Status(), true
+		status := session.Status()
+		if status.StateVersion > after && (status.State == StateStopped || status.State == StateTerminated) {
+			return status, true
 		}
 		select {
 		case <-changed:
@@ -987,16 +1329,27 @@ func (session *Session) SetBreakpoints(ctx context.Context, path string, values 
 		return nil, err
 	}
 	path = filepath.Clean(path)
+	session.breakpointMu.Lock()
+	defer session.breakpointMu.Unlock()
 	session.mu.Lock()
 	if len(values) == 0 {
 		delete(session.breakpoints, path)
 	} else {
 		session.breakpoints[path] = slices.Clone(values)
 	}
-	child := session.child
+	session.editVersion++
+	children, focused := slices.Clone(session.children), session.child
 	session.mu.Unlock()
-	if child != nil {
-		return child.SetBreakpoints(ctx, path, values)
+	if len(children) > 0 {
+		var result []Breakpoint
+		var resultErr error
+		for _, child := range children {
+			resolved, err := child.SetBreakpoints(ctx, path, values)
+			if child == focused || result == nil && resultErr == nil {
+				result, resultErr = resolved, err
+			}
+		}
+		return result, resultErr
 	}
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(session.plan.ProjectDir, path)
@@ -1026,7 +1379,114 @@ func (session *Session) SetBreakpoints(ctx context.Context, path string, values 
 	if !ok {
 		return nil, fmt.Errorf("setBreakpoints returned %T", response)
 	}
-	return breakpointsFromWire(result.Body.Breakpoints), nil
+	resolved := breakpointsFromWire(result.Body.Breakpoints)
+	session.mu.Lock()
+	for id, ref := range session.adapterIDs {
+		if ref.path == path {
+			delete(session.adapterIDs, id)
+		}
+	}
+	// Results follow request order; adapter ids are translated through the
+	// requested position because adapters may move a verified breakpoint.
+	for index, breakpoint := range resolved {
+		if breakpoint.ID != 0 && index < len(values) {
+			session.adapterIDs[breakpoint.ID] = breakpointRef{path: path, line: values[index].Line, column: values[index].Column}
+		}
+	}
+	session.mu.Unlock()
+	return resolved, nil
+}
+
+// reportBreakpoints publishes verification from setBreakpoints calls that the
+// manager did not issue itself, such as the configuration step.
+func (session *Session) reportBreakpoints(path string, requested []SourceBreakpoint, resolved []Breakpoint) {
+	if session.hooks.onBreakpoint == nil {
+		return
+	}
+	path = filepath.Clean(path)
+	for index, breakpoint := range resolved {
+		if index < len(requested) {
+			session.hooks.onBreakpoint(path, requested[index].Line, requested[index].Column, breakpoint)
+		}
+	}
+}
+
+func adapterCapabilities(adapter godap.Capabilities) Capabilities {
+	capabilities := Capabilities{
+		SupportsStepBack:                  adapter.SupportsStepBack,
+		SupportsTerminateRequest:          adapter.SupportsTerminateRequest,
+		SupportsCancelRequest:             adapter.SupportsCancelRequest,
+		SupportsConditionalBreakpoints:    adapter.SupportsConditionalBreakpoints,
+		SupportsHitConditionalBreakpoints: adapter.SupportsHitConditionalBreakpoints,
+		SupportsLogPoints:                 adapter.SupportsLogPoints,
+		SupportsEvaluateForHovers:         adapter.SupportsEvaluateForHovers,
+	}
+	for _, filter := range adapter.ExceptionBreakpointFilters {
+		capabilities.ExceptionFilters = append(capabilities.ExceptionFilters, ExceptionFilter{
+			Filter: filter.Filter, Label: filter.Label, Description: filter.Description, Default: filter.Default,
+		})
+	}
+	return capabilities
+}
+
+// initialExceptionFilters returns the editor's selection, or the adapter's
+// defaults when the editor has not chosen any filters.
+func (session *Session) initialExceptionFilters() ([]string, bool) {
+	var selected []string
+	set := false
+	if source := session.hooks.exceptionFilters; source != nil {
+		var version uint64
+		selected, set, version = source()
+		session.mu.Lock()
+		session.exceptionsAt = version
+		session.mu.Unlock()
+	}
+	session.mu.Lock()
+	available := slices.Clone(session.capabilities.ExceptionFilters)
+	session.mu.Unlock()
+	if len(available) == 0 {
+		return nil, false
+	}
+	if set {
+		return selected, true
+	}
+	filters := []string{}
+	for _, filter := range available {
+		if filter.Default {
+			filters = append(filters, filter.Filter)
+		}
+	}
+	return filters, true
+}
+
+func (session *Session) SetExceptionBreakpoints(ctx context.Context, filters []string) error {
+	session.breakpointMu.Lock()
+	defer session.breakpointMu.Unlock()
+	children := session.childSessions()
+	if len(children) > 0 {
+		var firstErr error
+		for _, child := range children {
+			if err := child.SetExceptionBreakpoints(ctx, filters); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+	if len(session.Status().Capabilities.ExceptionFilters) == 0 {
+		return nil
+	}
+	return session.sendExceptionBreakpoints(ctx, filters)
+}
+
+func (session *Session) sendExceptionBreakpoints(ctx context.Context, filters []string) error {
+	_, err := session.request(ctx, &godap.SetExceptionBreakpointsRequest{
+		Request:   request("setExceptionBreakpoints"),
+		Arguments: godap.SetExceptionBreakpointsArguments{Filters: slices.Clone(filters)},
+	})
+	if err != nil {
+		return fmt.Errorf("set exception breakpoints: %w", err)
+	}
+	return nil
 }
 
 func validateSourceBreakpoints(values []SourceBreakpoint) error {
@@ -1047,10 +1507,18 @@ func (session *Session) SetFunctionBreakpoints(ctx context.Context, values []Fun
 	}
 	session.mu.Lock()
 	session.functions = slices.Clone(values)
-	child := session.child
+	children, focused := slices.Clone(session.children), session.child
 	session.mu.Unlock()
-	if child != nil {
-		return child.SetFunctionBreakpoints(ctx, values)
+	if len(children) > 0 {
+		var result []Breakpoint
+		var resultErr error
+		for _, child := range children {
+			resolved, err := child.SetFunctionBreakpoints(ctx, values)
+			if child == focused || result == nil && resultErr == nil {
+				result, resultErr = resolved, err
+			}
+		}
+		return result, resultErr
 	}
 	wire := make([]godap.FunctionBreakpoint, 0, len(values))
 	for _, value := range values {
@@ -1088,120 +1556,198 @@ func breakpointsFromWire(values []godap.Breakpoint) []Breakpoint {
 }
 
 func (session *Session) Continue(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.Continue(ctx, threadID)
+	_, err := session.ContinueThread(ctx, threadID)
+	return err
+}
+
+// ContinueThread reports whether the adapter resumed every thread.
+func (session *Session) ContinueThread(ctx context.Context, threadID int) (bool, error) {
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return false, err
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	if route.child != nil {
+		return route.child.ContinueThread(ctx, route.native)
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
+	if err != nil {
+		return false, err
+	}
+	response, epoch, err := session.resume(ctx, threadID, &godap.ContinueRequest{Request: request("continue"), Arguments: godap.ContinueArguments{ThreadId: threadID}})
+	if err != nil {
+		return false, err
+	}
+	all := true
+	if wire, ok := response.(*continueResponse); ok {
+		all = wire.allThreadsContinued
+	}
+	if all {
+		session.mu.Lock()
+		if session.state == StateStopped && session.stateVersion == epoch {
+			session.resumeThreadLocked(threadID, true)
+			session.notifyStateLocked()
+		}
+		session.mu.Unlock()
+	}
+	return all, nil
+}
+
+func (session *Session) ReverseContinue(ctx context.Context, threadID int) error {
+	route, err := session.threadChild(threadID)
 	if err != nil {
 		return err
 	}
-	return session.resumeRequest(ctx, &godap.ContinueRequest{Request: request("continue"), Arguments: godap.ContinueArguments{ThreadId: threadID}})
+	if route.child != nil {
+		return route.child.ReverseContinue(ctx, route.native)
+	}
+	if !session.Status().Capabilities.SupportsStepBack {
+		return fmt.Errorf("debug adapter %s does not support reverse execution", session.plan.Adapter.Name)
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
+	if err != nil {
+		return err
+	}
+	return session.resumeRequest(ctx, threadID, &godap.ReverseContinueRequest{Request: request("reverseContinue"), Arguments: godap.ReverseContinueArguments{ThreadId: threadID}})
 }
 
 func (session *Session) Next(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.Next(ctx, threadID)
-	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	route, err := session.threadChild(threadID)
 	if err != nil {
 		return err
 	}
-	return session.resumeRequest(ctx, &godap.NextRequest{Request: request("next"), Arguments: godap.NextArguments{ThreadId: threadID}})
+	if route.child != nil {
+		return route.child.Next(ctx, route.native)
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
+	if err != nil {
+		return err
+	}
+	return session.resumeRequest(ctx, threadID, &godap.NextRequest{Request: request("next"), Arguments: godap.NextArguments{ThreadId: threadID}})
 }
 
 func (session *Session) StepIn(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.StepIn(ctx, threadID)
-	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	route, err := session.threadChild(threadID)
 	if err != nil {
 		return err
 	}
-	return session.resumeRequest(ctx, &godap.StepInRequest{Request: request("stepIn"), Arguments: godap.StepInArguments{ThreadId: threadID}})
+	if route.child != nil {
+		return route.child.StepIn(ctx, route.native)
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
+	if err != nil {
+		return err
+	}
+	return session.resumeRequest(ctx, threadID, &godap.StepInRequest{Request: request("stepIn"), Arguments: godap.StepInArguments{ThreadId: threadID}})
 }
 
 func (session *Session) StepOut(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.StepOut(ctx, threadID)
-	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	route, err := session.threadChild(threadID)
 	if err != nil {
 		return err
 	}
-	return session.resumeRequest(ctx, &godap.StepOutRequest{Request: request("stepOut"), Arguments: godap.StepOutArguments{ThreadId: threadID}})
+	if route.child != nil {
+		return route.child.StepOut(ctx, route.native)
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
+	if err != nil {
+		return err
+	}
+	return session.resumeRequest(ctx, threadID, &godap.StepOutRequest{Request: request("stepOut"), Arguments: godap.StepOutArguments{ThreadId: threadID}})
 }
 
 func (session *Session) StepBack(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.StepBack(ctx, threadID)
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return err
+	}
+	if route.child != nil {
+		return route.child.StepBack(ctx, route.native)
 	}
 	if !session.Status().Capabilities.SupportsStepBack {
 		return fmt.Errorf("debug adapter %s does not support stepping backward", session.plan.Adapter.Name)
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	threadID, err = session.resolveThreadID(ctx, threadID)
 	if err != nil {
 		return err
 	}
-	return session.resumeRequest(ctx, &godap.StepBackRequest{
+	return session.resumeRequest(ctx, threadID, &godap.StepBackRequest{
 		Request:   request("stepBack"),
 		Arguments: godap.StepBackArguments{ThreadId: threadID},
 	})
 }
 
-func (session *Session) resumeRequest(ctx context.Context, message godap.RequestMessage) error {
-	// Mark the session running before sending. A fast adapter can emit the next
-	// stopped event immediately after its response; updating state afterwards
-	// would race with and overwrite that newer event. The stopped check and
-	// transition are one critical section for the same reason.
-	previousStop, runningEpoch, err := session.beginResume(message.GetRequest().Command)
-	if err != nil {
-		return err
-	}
-	_, err = session.request(ctx, message)
-	if err != nil {
-		session.restoreFailedResume(runningEpoch, previousStop)
-		return err
-	}
-	return nil
+func (session *Session) resumeRequest(ctx context.Context, threadID int, message godap.RequestMessage) error {
+	_, _, err := session.resume(ctx, threadID, message)
+	return err
 }
 
-func (session *Session) beginResume(command string) (*Stop, uint64, error) {
+// resume marks the thread running before sending. A fast adapter can emit the
+// next stopped event immediately after its response; updating state afterwards
+// would race with and overwrite that newer event. The stopped check and
+// transition are one critical section for the same reason.
+func (session *Session) resume(ctx context.Context, threadID int, message godap.RequestMessage) (godap.ResponseMessage, uint64, error) {
+	previous, runningEpoch, err := session.beginResume(message.GetRequest().Command, threadID)
+	if err != nil {
+		return nil, 0, err
+	}
+	response, err := session.request(ctx, message)
+	if err != nil {
+		// A cancelled or timed-out request may already have resumed the debuggee.
+		if ctx.Err() == nil {
+			session.restoreFailedResume(runningEpoch, previous)
+		}
+		return nil, 0, err
+	}
+	return response, runningEpoch, nil
+}
+
+type stopState struct {
+	state       State
+	stop        *Stop
+	threadStops map[int]Stop
+	allStopped  bool
+}
+
+func (session *Session) beginResume(command string, threadID int) (stopState, uint64, error) {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	if session.state != StateStopped {
-		return nil, 0, fmt.Errorf("debug session must be stopped before %s", command)
+		return stopState{}, 0, fmt.Errorf("debug session must be stopped before %s", command)
 	}
-	previousStop := session.stop
-	if previousStop != nil {
-		clone := *previousStop
-		clone.HitBreakpointIDs = slices.Clone(previousStop.HitBreakpointIDs)
-		previousStop = &clone
+	previous := stopState{state: session.state, stop: session.stop, threadStops: maps.Clone(session.threadStops), allStopped: session.allStopped}
+	if previous.stop != nil {
+		clone := *previous.stop
+		clone.HitBreakpointIDs = slices.Clone(previous.stop.HitBreakpointIDs)
+		previous.stop = &clone
 	}
-	session.state = StateRunning
-	session.stop = nil
+	session.resumeThreadLocked(threadID, false)
 	session.notifyStateLocked()
-	return previousStop, session.stateVersion, nil
+	return previous, session.stateVersion, nil
 }
 
 // restoreFailedResume rolls back the optimistic running state only when no
 // newer adapter event has arrived. Checking and restoring under one lock keeps
 // a stopped or continued event from being overwritten between those steps.
-func (session *Session) restoreFailedResume(runningEpoch uint64, stop *Stop) {
+func (session *Session) restoreFailedResume(runningEpoch uint64, previous stopState) {
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if session.state != StateRunning || session.stateVersion != runningEpoch {
+	if session.stateVersion != runningEpoch {
 		return
 	}
-	session.state = StateStopped
-	session.stop = stop
+	session.state, session.stop = previous.state, previous.stop
+	session.threadStops, session.allStopped = previous.threadStops, previous.allStopped
 	session.notifyStateLocked()
 }
 
 func (session *Session) Pause(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.Pause(ctx, threadID)
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return err
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	if route.child != nil {
+		return route.child.Pause(ctx, route.native)
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
 	if err != nil {
 		return err
 	}
@@ -1216,8 +1762,25 @@ func (session *Session) WaitForStop(ctx context.Context, after uint64) (Status, 
 func (session *Session) StateEpoch() uint64 { return session.stateEpoch() }
 
 func (session *Session) Threads(ctx context.Context) ([]Thread, error) {
-	if child := session.childSession(); child != nil {
-		return child.Threads(ctx)
+	if children := session.childSessions(); len(children) > 0 {
+		var merged []Thread
+		for _, child := range children {
+			threads, err := child.Threads(ctx)
+			if err != nil {
+				if child == session.primaryChild() {
+					return nil, err
+				}
+				continue // a child that is starting or ending has no threads yet
+			}
+			for _, thread := range threads {
+				thread.ID = session.childID("thread", child, 0, thread.ID)
+				if len(children) > 1 {
+					thread.Name = childLabel(child) + ": " + thread.Name
+				}
+				merged = append(merged, thread)
+			}
+		}
+		return merged, nil
 	}
 	response, err := session.request(ctx, &godap.ThreadsRequest{Request: request("threads")})
 	if err != nil {
@@ -1253,10 +1816,18 @@ func (session *Session) resolveThreadID(ctx context.Context, threadID int) (int,
 }
 
 func (session *Session) StackTrace(ctx context.Context, threadID, start, levels int) ([]StackFrame, int, error) {
-	if child := session.childSession(); child != nil {
-		return child.StackTrace(ctx, threadID, start, levels)
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return nil, 0, err
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	if route.child != nil {
+		frames, total, err := route.child.StackTrace(ctx, route.native, start, levels)
+		for i := range frames {
+			frames[i].ID = session.childID("frame", route.child, route.epoch, frames[i].ID)
+		}
+		return frames, total, err
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1283,8 +1854,16 @@ func (session *Session) StackTrace(ctx context.Context, threadID, start, levels 
 }
 
 func (session *Session) Scopes(ctx context.Context, frameID int) ([]Scope, error) {
-	if child := session.childSession(); child != nil {
-		return child.Scopes(ctx, frameID)
+	if session.childSession() != nil {
+		route, err := session.routeChild("frame", frameID)
+		if err != nil {
+			return nil, err
+		}
+		scopes, err := route.child.Scopes(ctx, route.native)
+		for i := range scopes {
+			scopes[i].VariablesReference = session.childID("variable", route.child, route.epoch, scopes[i].VariablesReference)
+		}
+		return scopes, err
 	}
 	if frameID <= 0 {
 		frames, _, err := session.StackTrace(ctx, 0, 0, 1)
@@ -1315,15 +1894,28 @@ func (session *Session) Scopes(ctx context.Context, frameID int) ([]Scope, error
 }
 
 func (session *Session) Variables(ctx context.Context, reference, start, count int) ([]Variable, error) {
-	if child := session.childSession(); child != nil {
-		return child.Variables(ctx, reference, start, count)
+	return session.FilteredVariables(ctx, reference, "", start, count)
+}
+
+// FilteredVariables passes DAP's "indexed" or "named" filter; zero count means all.
+func (session *Session) FilteredVariables(ctx context.Context, reference int, filter string, start, count int) ([]Variable, error) {
+	if session.childSession() != nil {
+		route, err := session.routeChild("variable", reference)
+		if err != nil {
+			return nil, err
+		}
+		variables, err := route.child.FilteredVariables(ctx, route.native, filter, start, count)
+		for i := range variables {
+			variables[i].VariablesReference = session.childID("variable", route.child, route.epoch, variables[i].VariablesReference)
+		}
+		return variables, err
 	}
 	if reference <= 0 {
 		return nil, errors.New("variables_reference must be a positive integer returned by scopes, variables, or evaluate")
 	}
 	response, err := session.request(ctx, &godap.VariablesRequest{
 		Request:   request("variables"),
-		Arguments: godap.VariablesArguments{VariablesReference: reference, Start: start, Count: count},
+		Arguments: godap.VariablesArguments{VariablesReference: reference, Filter: filter, Start: start, Count: count},
 	})
 	if err != nil {
 		return nil, err
@@ -1350,8 +1942,14 @@ func (session *Session) Evaluate(ctx context.Context, expression string, frameID
 // as "repl", "hover", or "watch". Adapters may format or restrict results
 // differently for each context.
 func (session *Session) EvaluateContext(ctx context.Context, expression string, frameID int, evaluationContext string) (Evaluation, error) {
-	if child := session.childSession(); child != nil {
-		return child.EvaluateContext(ctx, expression, frameID, evaluationContext)
+	if session.childSession() != nil {
+		route, err := session.routeChild("frame", frameID)
+		if err != nil {
+			return Evaluation{}, err
+		}
+		evaluation, err := route.child.EvaluateContext(ctx, expression, route.native, evaluationContext)
+		evaluation.VariablesReference = session.childID("variable", route.child, route.epoch, evaluation.VariablesReference)
+		return evaluation, err
 	}
 	if strings.TrimSpace(expression) == "" {
 		return Evaluation{}, errors.New("expression is required")
@@ -1360,15 +1958,8 @@ func (session *Session) EvaluateContext(ctx context.Context, expression string, 
 	if evaluationContext == "" {
 		evaluationContext = "repl"
 	}
-	if frameID <= 0 && session.Status().State == StateStopped {
-		frames, _, err := session.StackTrace(ctx, 0, 0, 1)
-		if err != nil {
-			return Evaluation{}, err
-		}
-		if len(frames) > 0 {
-			frameID = frames[0].ID
-		}
-	}
+	// Without a frame, DAP evaluates in the global scope.
+	frameID = max(frameID, 0)
 	response, err := session.request(ctx, &godap.EvaluateRequest{
 		Request:   request("evaluate"),
 		Arguments: godap.EvaluateArguments{Expression: expression, FrameId: frameID, Context: evaluationContext},
@@ -1386,6 +1977,14 @@ func (session *Session) EvaluateContext(ctx context.Context, expression string, 
 	}, nil
 }
 
+// disconnectRequest keeps terminateDebuggee: false, which go-dap omits.
+type disconnectRequest struct {
+	godap.Request
+	Arguments struct {
+		TerminateDebuggee bool `json:"terminateDebuggee"`
+	} `json:"arguments"`
+}
+
 func (session *Session) Disconnect(ctx context.Context, terminate bool) error {
 	// Process and connection watchers can finish concurrently with a user stop.
 	// Publish ownership intent before either side observes process exit so a
@@ -1393,7 +1992,7 @@ func (session *Session) Disconnect(ctx context.Context, terminate bool) error {
 	session.disconnecting.Store(true)
 	session.disconnectMu.Lock()
 	defer session.disconnectMu.Unlock()
-	if child := session.childSession(); child != nil {
+	for _, child := range session.childSessions() {
 		_ = child.Disconnect(ctx, terminate)
 	}
 
@@ -1409,10 +2008,9 @@ func (session *Session) Disconnect(ctx context.Context, terminate bool) error {
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
-		_, err := session.request(disconnectCtx, &godap.DisconnectRequest{
-			Request:   request("disconnect"),
-			Arguments: &godap.DisconnectArguments{TerminateDebuggee: terminate},
-		})
+		disconnect := &disconnectRequest{Request: request("disconnect")}
+		disconnect.Arguments.TerminateDebuggee = terminate
+		_, err := session.request(disconnectCtx, disconnect)
 		result <- err
 	}()
 
@@ -1441,6 +2039,20 @@ func (session *Session) Disconnect(ctx context.Context, terminate bool) error {
 	return requestErr
 }
 
+// Terminate asks the debuggee to end gracefully. The adapter's terminated
+// event then closes the session. It reports false when the adapter lacks the
+// terminate request, so the caller can disconnect instead.
+func (session *Session) Terminate(ctx context.Context) (bool, error) {
+	session.mu.Lock()
+	supported := session.adapter.SupportsTerminateRequest
+	session.mu.Unlock()
+	if !supported || !session.alive.Load() {
+		return false, nil
+	}
+	_, err := session.request(ctx, &godap.TerminateRequest{Request: request("terminate"), Arguments: &godap.TerminateArguments{}})
+	return true, err
+}
+
 func (session *Session) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -1462,12 +2074,12 @@ func (session *Session) closeResourcesWithError(closeErr error) {
 			session.preLaunch.Close()
 		}
 		session.mu.Lock()
-		child := session.child
-		session.child = nil
+		children := session.children
+		session.child, session.children = nil, nil
 		terminals := slices.Clone(session.terminals)
 		session.terminals = nil
 		session.mu.Unlock()
-		if child != nil {
+		for _, child := range children {
 			child.mu.Lock()
 			if child.parent == session {
 				child.parent = nil

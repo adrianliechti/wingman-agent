@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { File } from "lucide-react";
+import { File, Paperclip } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { fileQueries } from "../api/files";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
@@ -9,9 +9,10 @@ interface Props {
 	anchor: Element | null;
 	onSelect: (path: string) => void;
 	onClose: () => void;
+	onUpload: () => void;
 }
 
-export function FilePicker({ anchor, onSelect, onClose }: Props) {
+export function FilePicker({ anchor, onSelect, onClose, onUpload }: Props) {
 	const [query, setQuery] = useState("");
 	const [active, setActive] = useState(0);
 	const inputRef = useRef<HTMLInputElement>(null);
@@ -52,7 +53,7 @@ export function FilePicker({ anchor, onSelect, onClose }: Props) {
 			focusOnOpen
 			className="z-[100] w-[360px] bg-bg-elevated/95 backdrop-blur-sm border border-border rounded-md shadow-xl overflow-hidden"
 		>
-			<div className="px-3 py-2 border-b border-border-subtle">
+			<div className="flex items-center gap-2 border-b border-border-subtle py-1.5 pr-1.5 pl-3">
 				<input
 					ref={inputRef}
 					autoCapitalize="none"
@@ -67,8 +68,17 @@ export function FilePicker({ anchor, onSelect, onClose }: Props) {
 					}}
 					onKeyDown={onKey}
 					placeholder="Search files…"
-					className="w-full bg-transparent text-fg text-[12px] outline-none placeholder:text-fg-dim"
+					className="min-w-0 flex-1 bg-transparent text-fg text-[12px] outline-none placeholder:text-fg-dim"
 				/>
+				<button
+					type="button"
+					onClick={onUpload}
+					className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg"
+					title="Attach image from your computer"
+					aria-label="Attach image from your computer"
+				>
+					<Paperclip size={13} />
+				</button>
 			</div>
 			<div className="max-h-[280px] overflow-y-auto py-1">
 				{hits.length === 0 ? (

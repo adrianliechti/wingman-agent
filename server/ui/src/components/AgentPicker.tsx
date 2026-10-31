@@ -1,7 +1,7 @@
 import { Check } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useWorkspace } from "../state/workspaceContext.ts";
-import { workspaceClient } from "../state/workspaceClient.ts";
+import { useAgents } from "../hooks/useAgents.ts";
 import { formatAgentName } from "../utils/agents";
 import { AgentIcon } from "./AgentIcon";
 import { FloatingMenu } from "./ui/Floating";
@@ -17,7 +17,7 @@ interface Props {
 export function AgentPicker({ onSelect, currentId, newChat, disabled }: Props) {
 	const { backend } = useWorkspace();
 	const current = currentId ?? backend;
-	const agents = workspaceClient().scope.backends;
+	const agents = useAgents();
 	const [open, setOpen] = useState(false);
 	const [button, setButton] = useState<HTMLButtonElement | null>(null);
 	const toggleOpen = () => setOpen((value) => !value);

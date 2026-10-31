@@ -1,6 +1,9 @@
 package tool
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"path/filepath"
+)
 
 const FileChangesMetadata = "file_changes"
 
@@ -13,6 +16,28 @@ type FileChange struct {
 	BeforeExists bool   `json:"beforeExists"`
 	AfterExists  bool   `json:"afterExists"`
 	Mode         uint32 `json:"mode"`
+}
+
+// NetFileChanges folds each file's edits into one change, from the version the
+// agent first found to the last one it wrote, keyed by the cleaned path. gap
+// names the first file whose edit did not start where the previous one ended.
+func NetFileChanges(changes []FileChange) (net []FileChange, gap string) {
+	indexes := map[string]int{}
+	for _, change := range changes {
+		path := filepath.Clean(filepath.FromSlash(change.Path))
+		if index, ok := indexes[path]; ok {
+			previous := &net[index]
+			if gap == "" && (previous.After != change.Before || previous.AfterExists != change.BeforeExists || previous.Mode != change.Mode) {
+				gap = path
+			}
+			previous.After, previous.AfterExists = change.After, change.AfterExists
+			continue
+		}
+		indexes[path] = len(net)
+		change.Path = path
+		net = append(net, change)
+	}
+	return net, gap
 }
 
 func ResultFileChanges(metadata map[string]any) ([]FileChange, error) {

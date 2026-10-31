@@ -680,14 +680,14 @@ func TestResumeLoadAndForkReportPlanMode(t *testing.T) {
 			})
 			ctx := context.Background()
 			if tt.localMode != "" {
-				agent.registerSession("thread-1", "m", "", tt.localMode, nil)
+				agent.registerSession("thread-1", "", "m", "", tt.localMode, nil)
 			}
 			resumed, err := agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: "thread-1", Cwd: workCwd})
 			if err != nil || collaboration(resumed.ConfigOptions) != tt.want {
 				t.Fatalf("resume = %#v, %v", resumed.ConfigOptions, err)
 			}
 			if tt.localMode != "" {
-				agent.registerSession("thread-1", "m", "", tt.localMode, nil)
+				agent.registerSession("thread-1", "", "m", "", tt.localMode, nil)
 			}
 			loaded, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: "thread-1", Cwd: workCwd, McpServers: []acp.McpServer{}})
 			if err != nil || collaboration(loaded.ConfigOptions) != tt.want {
@@ -716,6 +716,47 @@ func TestResumeLoadAndForkReportPlanMode(t *testing.T) {
 			}
 			if tt.want == defaultCollaborationMode && len(settings) != 0 {
 				t.Fatalf("settings updates = %v", settings)
+			}
+		})
+	}
+}
+
+func TestForkBeforeFirstPromptPreservesConfiguration(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		t.Run(fmt.Sprintf("empty=%v", empty), func(t *testing.T) {
+			started := make(chan threadStartParams, 1)
+			agent, _ := scriptedAgent(t, func(s *contractAppServer, req rpcMessage) {
+				switch req.Method {
+				case "thread/fork":
+					s.respondError(req, -32600, "no rollout found for thread id source")
+				case "thread/start":
+					var p threadStartParams
+					_ = json.Unmarshal(req.Params, &p)
+					started <- p
+					s.respond(req, map[string]any{"thread": map[string]any{"id": "fork"}, "model": "m", "reasoningEffort": "high"})
+				default:
+					s.respond(req, map[string]any{})
+				}
+			})
+			cwd := t.TempDir()
+			source := agent.registerSession("source", cwd, "m", "high", defaultCollaborationMode, nil)
+			source.unprompted = empty
+			response, err := agent.UnstableForkSession(context.Background(), acp.UnstableForkSessionRequest{SessionId: source.id, Cwd: cwd})
+			if !empty {
+				if err == nil || len(started) != 0 {
+					t.Fatalf("missing persisted history must not create an empty fork: %v", err)
+				}
+				return
+			}
+			if err != nil || response.SessionId != "fork" {
+				t.Fatalf("fork = %#v, %v", response, err)
+			}
+			p := <-started
+			if p.Model != "m" || p.Config["model_reasoning_effort"] != "high" {
+				t.Fatalf("fork configuration = %#v", p)
+			}
+			if agent.lookup(source.id) != source || !agent.lookup(response.SessionId).unprompted {
+				t.Fatal("fork replaced the source or lost its empty state")
 			}
 		})
 	}

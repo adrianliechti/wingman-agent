@@ -39,7 +39,7 @@ Specify $ARGUMENTS.
 
 	server := &Server{workspace: workspace}
 	response := httptest.NewRecorder()
-	server.handleSkills(response, httptest.NewRequest("GET", "/api/skills", nil))
+	server.handleSkills(response, httptest.NewRequest("GET", "/api/workspace/skills", nil))
 	if response.Code != 200 {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}

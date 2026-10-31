@@ -92,6 +92,9 @@ func (c *sessionController) resolvePromptLocked(command Command) error {
 	}
 	// Removal is the atomic winner selection for responses from multiple clients.
 	delete(c.prompts, command.PromptID)
+	if c.ahp != nil {
+		c.ahp.resolvePromptLocked(command)
+	}
 	p.reply <- command
 	c.publishPromptsLocked()
 	return nil

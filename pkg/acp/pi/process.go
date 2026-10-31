@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/google/uuid"
 
 	processutil "github.com/adrianliechti/wingman-agent/internal/process"
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 var errProcessClosed = errors.New("pi process closed")

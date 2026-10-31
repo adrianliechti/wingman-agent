@@ -3,6 +3,11 @@ package codex
 import "github.com/coder/acp-go-sdk"
 
 func userMessageUpdate(content acp.ContentBlock, id string) acp.SessionUpdate {
+	if content.Text != nil {
+		copy := *content.Text
+		copy.Text = renderQuestionReply(copy.Text)
+		content.Text = &copy
+	}
 	u := acp.UpdateUserMessage(content)
 	// The SDK omits text-block _meta when encoding ContentBlock. Preserve
 	// attachment references on the enclosing message chunk, which survives.

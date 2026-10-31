@@ -130,6 +130,11 @@ type SessionForker interface {
 	ForkSession(ctx context.Context, id, title string) (string, error)
 }
 
+// SessionTurnForker forks a session through the turn of one of its inputs.
+type SessionTurnForker interface {
+	ForkSessionThrough(ctx context.Context, id, inputID, title string) (string, error)
+}
+
 type SessionLoadStreamer interface {
 	LoadSessionStream(ctx context.Context, id string) iter.Seq2[[]harness.Message, error]
 }

@@ -179,3 +179,7 @@ func writeClaudeContract(value any) {
 	b, _ := json.Marshal(value)
 	_, _ = os.Stdout.Write(append(b, '\n'))
 }
+
+func TestACPV2Contract(t *testing.T) { acptest.RunV2(t, newContractAgent) }
+
+func TestACPTCK(t *testing.T) { acptest.ServeTCK(t, newContractAgent) }

@@ -1,23 +1,25 @@
-import { sessionKey } from "../state/sessionStore.ts";
 import { QueryClient, type QueryKey } from "@tanstack/react-query";
 import type { ServerMessage } from "../types/protocol";
 
 export const queryKeys = {
 	all: ["server"] as const,
-	capabilities: ["server", "capabilities"] as const,
+	workspace: ["server", "workspace"] as const,
 	sessions: {
 		all: ["server", "sessions"] as const,
 		list: (backend: string) => ["server", "sessions", "list", backend] as const,
 	},
 	skills: {
 		all: ["server", "skills"] as const,
-		list: (sessionId?: string) =>
-			["server", "skills", sessionId ?? ""] as const,
+		list: ["server", "skills", "list"] as const,
+	},
+	chatCommands: {
+		all: ["server", "chat-commands"] as const,
+		list: (sessionId?: string, inline = false) =>
+			["server", "chat-commands", sessionId ?? "", inline] as const,
 	},
 	terminals: {
 		all: ["server", "terminals"] as const,
 		list: ["server", "terminals", "list"] as const,
-		shells: ["server", "terminals", "shells"] as const,
 	},
 	diagnostics: {
 		all: ["server", "diagnostics"] as const,
@@ -129,17 +131,15 @@ export function invalidateForServerMessage(
 	};
 
 	switch (message.type) {
-		case "capabilities_changed":
-			invalidate(queryKeys.capabilities);
-			break;
-		case "model_changed":
-			invalidate(["server", "backend-settings"]);
+		case "workspace_changed":
+			invalidate(queryKeys.workspace);
 			break;
 		case "sessions_changed":
 			invalidate(queryKeys.sessions.all);
 			break;
 		case "skills_changed":
 			invalidate(queryKeys.skills.all);
+			invalidate(queryKeys.chatCommands.all);
 			break;
 		case "terminals_changed":
 			invalidate(queryKeys.terminals.all);
@@ -159,10 +159,8 @@ export function invalidateForServerMessage(
 			break;
 		case "tasks_changed":
 			invalidate(
-				message.session
-					? queryKeys.tasks.session(
-							sessionKey(message.backend ?? "wingman", message.session),
-						)
+				message.session?.startsWith("ahp-chat:")
+					? queryKeys.tasks.session(message.session)
 					: queryKeys.tasks.all,
 			);
 			break;

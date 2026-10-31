@@ -35,15 +35,15 @@ func (s *Service) ImplementationLocations(ctx context.Context, filePath string, 
 	)
 }
 
-func (s *Service) ReferenceLocations(ctx context.Context, filePath string, content *string, line, column int) ([]lsp.Location, error) {
+func (s *Service) ReferenceLocations(ctx context.Context, filePath string, content *string, line, column int, includeDeclaration bool) ([]lsp.Location, error) {
 	return s.structuralLocations(
 		ctx, filePath, content, line, column,
 		func(capabilities lsp.ServerCapabilities) any { return capabilities.ReferencesProvider },
 		func(session *lsp.Session, uri string) ([]lsp.Location, error) {
-			return session.ReferenceLocations(ctx, uri, line, column)
+			return session.ReferenceLocations(ctx, uri, line, column, includeDeclaration)
 		},
 		func(ctx context.Context, filePath string, content *string, line, column int) ([]lsp.Location, error) {
-			locations, _, err := s.TreeSitterReferences(ctx, filePath, content, line, column, true)
+			locations, _, err := s.TreeSitterReferences(ctx, filePath, content, line, column, includeDeclaration)
 			return locations, err
 		},
 	)
@@ -102,6 +102,12 @@ func (s *Service) locationRequest(ctx context.Context, filePath string, content 
 }
 
 func (s *Service) Hover(ctx context.Context, filePath string, content *string, line, column int) (string, error) {
+	text, _, err := s.HoverRange(ctx, filePath, content, line, column)
+	return text, err
+}
+
+// HoverRange also returns the range a language server's hover applies to.
+func (s *Service) HoverRange(ctx context.Context, filePath string, content *string, line, column int) (string, *lsp.Range, error) {
 	if s.hasLSPServerFor(filePath) {
 		var hover *lsp.Hover
 		supported := false
@@ -115,13 +121,17 @@ func (s *Service) Hover(ctx context.Context, filePath string, content *string, l
 			return err
 		})
 		if supported && err == nil {
-			return HoverText(hover), nil
+			if hover == nil {
+				return "", nil, nil
+			}
+			return HoverText(hover), hover.Range, nil
 		}
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return "", nil, ctx.Err()
 		}
 	}
-	return s.TreeSitterHover(ctx, filePath, content, line, column)
+	text, err := s.TreeSitterHover(ctx, filePath, content, line, column)
+	return text, nil, err
 }
 
 func (s *Service) CompletionItems(ctx context.Context, filePath string, content *string, line, column int, completionContext *lsp.CompletionContext) (lsp.CompletionList, error) {
@@ -224,15 +234,14 @@ func (s *Service) ExecuteCommand(ctx context.Context, filePath string, content *
 	return result, err
 }
 
-func (s *Service) ExecuteCommandWithEdits(ctx context.Context, filePath string, content *string, command lsp.Command) (any, []lsp.CommandWorkspaceEdit, error) {
+func (s *Service) ExecuteCommandWithEdits(ctx context.Context, filePath string, content *string, command lsp.Command, apply func(lsp.CommandWorkspaceEdit) bool) (any, error) {
 	var result any
-	var edits []lsp.CommandWorkspaceEdit
 	err := s.withLSPDocument(ctx, filePath, content, func(session *lsp.Session, _ string) error {
 		var err error
-		result, edits, err = session.ExecuteCommandWithEdits(ctx, command)
+		result, err = session.ExecuteCommandWithEdits(ctx, command, apply)
 		return err
 	})
-	return result, edits, err
+	return result, err
 }
 
 func (s *Service) Formatting(ctx context.Context, filePath string, content *string, options lsp.FormattingOptions) ([]lsp.TextEdit, error) {

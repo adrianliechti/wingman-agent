@@ -28,6 +28,12 @@ Plan mode is supported. Approve the resulting plan in the client to continue
 with implementation. Task-list notifications are not forwarded as ACP plan
 updates, so a client may show the plan as conversation text.
 
+Wingman disables Ultracode workflows and their keyword trigger, remote control,
+and the `ultrathink` effort override in both native and gateway launches. The
+client's model, effort, and mode controls remain authoritative. Gateway launches
+also restrict model choices to the gateway catalog and disable Claude's
+background telemetry and account-management commands.
+
 ## Troubleshooting
 
 If authentication fails, check the CLI's login and inherited provider environment

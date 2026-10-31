@@ -20,6 +20,24 @@ func TestLineHunksSeparatesDistantChanges(t *testing.T) {
 	}
 }
 
+func TestLineStatsCountsChangedLines(t *testing.T) {
+	for _, tc := range []struct {
+		name, before, after string
+		added, removed      int
+	}{
+		{"create", "", "a\nb\nc", 3, 0},
+		{"delete", "a\nb\n", "", 0, 2},
+		{"replace one line", "a\nb\nc\n", "a\nB\nc\n", 1, 1},
+		{"insert", "a\nc\n", "a\nb\nc\n", 1, 0},
+		{"unchanged", "a\n", "a\n", 0, 0},
+	} {
+		added, removed := LineStats(tc.before, tc.after, time.Second)
+		if added != tc.added || removed != tc.removed {
+			t.Errorf("%s: got +%d -%d, want +%d -%d", tc.name, added, removed, tc.added, tc.removed)
+		}
+	}
+}
+
 func TestCharacterHunksSeparatesFormattingFromRename(t *testing.T) {
 	before := "\tcontextBudget := sourceBudget - headerBudget\n\textra := localBudget - areaBytes\n"
 	after := "contextBudget := sourceBudget - headerBudget\n\textra := contextBudget - areaBytes\n"

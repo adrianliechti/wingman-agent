@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -24,21 +25,17 @@ func TestTasksAPI(t *testing.T) {
 	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
-	res, err := http.Post(web.URL+"/api/v2/backends/wingman/sessions", "application/json", strings.NewReader(`{"id":"create-test","type":"create"}`))
-	if err != nil {
-		t.Fatal(err)
+	record := app.backends["wingman"].runtime.createSession(Command{ID: "create-test", Type: "create"})
+	if record.status != 0 {
+		t.Fatal(record.message)
 	}
-	var receipt Receipt
-	if err := json.NewDecoder(res.Body).Decode(&receipt); err != nil {
-		t.Fatal(err)
-	}
-	res.Body.Close()
+	receipt := record.receipt
 	created := struct{ ID string }{receipt.Ref.SessionID}
 	if created.ID == "" {
 		t.Fatal("no session id")
 	}
 
-	res, err = http.Get(web.URL + "/api/v2/backends/wingman/sessions/" + created.ID + "/tasks")
+	res, err := http.Get(web.URL + chatAPIPath("wingman", created.ID) + "/tasks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,8 +50,16 @@ func TestTasksAPI(t *testing.T) {
 	if len(tasks) != 0 {
 		t.Fatalf("tasks = %+v, want empty", tasks)
 	}
+	reviews, err := http.Get(web.URL + chatAPIPath("wingman", created.ID) + "/reviews")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviews.Body.Close()
+	if reviews.StatusCode != http.StatusOK {
+		t.Fatalf("reviews status = %d", reviews.StatusCode)
+	}
 
-	res, err = http.Get(web.URL + "/api/v2/backends/wingman/sessions/" + created.ID + "/tasks/nope")
+	res, err = http.Get(web.URL + chatAPIPath("wingman", created.ID) + "/tasks/nope")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +87,7 @@ func TestTasksAPI(t *testing.T) {
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		res, err = http.Get(web.URL + "/api/v2/backends/wingman/sessions/" + created.ID + "/tasks/" + launched.ID)
+		res, err = http.Get(web.URL + chatAPIPath("wingman", created.ID) + "/tasks/" + launched.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -102,4 +107,9 @@ func TestTasksAPI(t *testing.T) {
 	if detail.ID != launched.ID || detail.Result != "probe result" {
 		t.Fatalf("detail = %+v", detail)
 	}
+}
+
+// chatAPIPath encodes the chat URI as the web UI's encodeURIComponent does.
+func chatAPIPath(backend, id string) string {
+	return "/api/v2/chats/" + strings.ReplaceAll(url.PathEscape(ahpChatURI(canonicalAHPURI(backend, id))), ":", "%3A")
 }

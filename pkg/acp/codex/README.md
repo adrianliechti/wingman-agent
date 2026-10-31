@@ -32,6 +32,13 @@ Loading a saved session replays its conversation and attachments. Command
 output is shown when the command completes and retains at most the last 1 MiB
 per command, with a marker when earlier output is omitted.
 
+File-citation directives render as Markdown links in streamed replies and
+history. Codex's Visualize skill is disabled for these editor sessions.
+
+Clients advertising form elicitation can answer Codex's asynchronous questions
+while it continues working. Answers are sent to the turn that asked them;
+finishing or cancelling that turn closes its outstanding forms.
+
 ## Troubleshooting
 
 If authentication fails, sign in through the CLI and check inherited API

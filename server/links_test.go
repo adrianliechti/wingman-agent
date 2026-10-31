@@ -5,8 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/dap"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
 func TestWorkspaceIdentityAndDebugFramesThroughDirectoryLinks(t *testing.T) {
@@ -26,19 +27,16 @@ func TestWorkspaceIdentityAndDebugFramesThroughDirectoryLinks(t *testing.T) {
 			if actual.WorkspaceID != alias.WorkspaceID || actual.InstanceID == alias.InstanceID {
 				t.Fatalf("workspace identity mismatch: actual = %+v, alias = %+v", actual, alias)
 			}
-			for _, path := range []string{filepath.Join(target, "main.go"), filepath.Join(root, "main.go"), "main.go"} {
-				frame := dap.StackFrame{Source: &dap.Source{Path: path}}
-				normalizeDebugFrame(root, &frame)
-				if frame.Source.Path != "main.go" {
-					t.Errorf("frame %q normalized to %q", path, frame.Source.Path)
+			// Adapters report resolved paths; frames keep the workspace's own spelling.
+			c := &dapConnection{server: &Server{workspace: &code.Workspace{RootPath: root}}}
+			resolvedRoot, _ := pathutil.Resolve(root)
+			for _, path := range []string{filepath.Join(target, "main.go"), filepath.Join(root, "main.go")} {
+				if got := c.framePath(path, resolvedRoot); got != filepath.Join(root, "main.go") {
+					t.Errorf("frame %q mapped to %q", path, got)
 				}
 			}
-			for _, path := range []string{filepath.Join(root, "escape", "main.go"), filepath.Join(outside, "main.go")} {
-				frame := dap.StackFrame{Source: &dap.Source{Path: path}}
-				normalizeDebugFrame(root, &frame)
-				if frame.Source.Path != "" {
-					t.Errorf("outside frame %q retained as %q", path, frame.Source.Path)
-				}
+			if path := filepath.Join(outside, "main.go"); c.framePath(path, resolvedRoot) != path {
+				t.Errorf("outside frame %q was mapped into the workspace", path)
 			}
 		})
 	}

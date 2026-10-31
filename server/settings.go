@@ -35,7 +35,7 @@ func (s *Server) handleWindowTerminalSettings(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+	s.broadcast(Frame{Type: EvtWorkspaceChanged})
 	writeJSON(w, map[string]settings.WindowTerminalPosition{
 		"window.terminal.position": updated.WindowTerminalPosition,
 	})
@@ -69,7 +69,7 @@ func (s *Server) handleWindowSidebarSettings(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+	s.broadcast(Frame{Type: EvtWorkspaceChanged})
 	writeJSON(w, map[string]settings.WindowSidebarPosition{
 		"window.sidebar.position": updated.WindowSidebarPosition,
 	})

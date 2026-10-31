@@ -5,6 +5,8 @@ package terminal
 import (
 	"os"
 	"os/exec"
+	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/creack/pty"
@@ -18,6 +20,11 @@ const ptySupported = true
 type unixPTY struct {
 	cmd    *exec.Cmd
 	master *os.File
+	exited atomic.Bool
+
+	// ioctls read the descriptor, which Close releases for reuse.
+	mu     sync.Mutex
+	closed bool
 }
 
 func startPTY(spec CommandSpec, cols, rows int) (Terminal, error) {
@@ -41,6 +48,11 @@ func (p *unixPTY) Read(b []byte) (int, error)  { return p.master.Read(b) }
 func (p *unixPTY) Write(b []byte) (int, error) { return p.master.Write(b) }
 
 func (p *unixPTY) Resize(cols, rows int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return os.ErrClosed
+	}
 	return pty.Setsize(p.master, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
 
@@ -55,19 +67,29 @@ func (p *unixPTY) HasForegroundProcess() bool {
 	if p.master == nil || p.cmd.Process == nil {
 		return false
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
 	foregroundGroup, err := unix.IoctlGetInt(int(p.master.Fd()), unix.TIOCGPGRP)
 	return err == nil && foregroundGroup > 0 && foregroundGroup != p.cmd.Process.Pid
 }
 
 func (p *unixPTY) Wait() error {
-	return p.cmd.Wait()
+	err := p.cmd.Wait()
+	p.exited.Store(true)
+	return err
 }
 
 func (p *unixPTY) Close() error {
-	if p.cmd.Process != nil {
+	if p.cmd.Process != nil && !p.exited.Load() {
 		if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL); err != nil {
 			_ = p.cmd.Process.Kill()
 		}
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
 	return p.master.Close()
 }

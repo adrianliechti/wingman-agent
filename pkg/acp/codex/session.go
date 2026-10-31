@@ -11,17 +11,21 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
+	acpsdk "github.com/coder/acp-go-sdk"
 
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 type session struct {
-	id acp.SessionId
+	id  acpsdk.SessionId
+	cwd string
 
 	promptGate            chan struct{}
 	mu                    sync.Mutex
 	closed                bool
+	unprompted            bool
 	closedCh              chan struct{}
 	modelID               string
 	effort                string
@@ -59,7 +63,7 @@ type turnStartResult struct {
 	err      error
 }
 
-func newSession(id acp.SessionId, model, effort string, additionalDirectories []string) *session {
+func newSession(id acpsdk.SessionId, model, effort string, additionalDirectories []string) *session {
 	return &session{
 		id: id, modelID: model, effort: effort, mode: defaultModeID,
 		promptGate: make(chan struct{}, 1), closedCh: make(chan struct{}),
@@ -94,7 +98,7 @@ func (s *session) interrupt(ctx context.Context, cc *codexClient) {
 	}
 }
 
-func (s *session) steer(ctx context.Context, cc *codexClient, prompt []acp.ContentBlock, messageID string) error {
+func (s *session) steer(ctx context.Context, cc *codexClient, prompt []acpsdk.ContentBlock, messageID string) error {
 	s.mu.Lock()
 	turnID := s.currentTurnID
 	s.mu.Unlock()
@@ -127,7 +131,7 @@ func classifySteerError(err error) error {
 	}
 }
 
-func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc *codexClient, clientCapabilities acp.ClientCapabilities, models []modelEntry, prompt []acp.ContentBlock) (acp.StopReason, *acp.Usage, error) {
+func (s *session) runTurn(ctx context.Context, conn acp.ClientConnection, cc *codexClient, clientCapabilities acpsdk.ClientCapabilities, models []modelEntry, prompt []acpsdk.ContentBlock) (acpsdk.StopReason, *acpsdk.Usage, error) {
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -136,9 +140,10 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return acp.StopReasonCancelled, nil, nil
+		return acpsdk.StopReasonCancelled, nil, nil
 	}
 	s.cancelTurn = cancel
+	s.unprompted = false
 	s.interruptPending = false
 	s.interruptDone = nil
 	model := s.modelID
@@ -156,6 +161,7 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 		s.mu.Unlock()
 	}()
 
+	messageID := harness.InputIDFromContext(ctx)
 	var tokens *promptTokenUsage
 	disp := newEventDispatcher(turnCtx, conn, s.id)
 
@@ -183,9 +189,12 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 		}
 		stream := newTurnStream(runCtx)
 		disp = newEventDispatcher(runCtx, conn, s.id)
+		disp.messageID = messageID
 		disp.tokens = tokens
+		disp.cwd = s.cwd
 		runDisp := disp
 		app := newApprover(runCtx, conn, s.id, clientCapabilities)
+		disp.onAsyncQuestions = asyncQuestionHandler(runCtx, app, cc, stream)
 		handlers := &threadHandlers{
 			onNotification: stream.enqueue,
 			onExecApproval: func(ctx context.Context, p execApprovalParams) execApprovalResponse {
@@ -257,11 +266,13 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 			s.mu.Unlock()
 		}()
 		params := turnStartParams{
-			ThreadID:       threadID,
-			Input:          input,
-			ApprovalPolicy: mode.approvalPolicy,
-			SandboxPolicy:  sandboxPolicyWithRoots(mode.sandboxPolicy, additionalDirectories),
+			ClientUserMessageID: messageID,
+			ThreadID:            threadID,
+			Input:               input,
+			ApprovalPolicy:      mode.approvalPolicy,
+			SandboxPolicy:       sandboxPolicyWithRoots(mode.sandboxPolicy, additionalDirectories),
 		}
+		messageID = "" // Follow-up plan turns must not reuse the user's message id.
 		if model != "" && model != "default" {
 			params.Model = model
 		}
@@ -357,30 +368,30 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 	tc, err := run(promptToInput(prompt))
 	if err != nil {
 		if turnCtx.Err() != nil {
-			return acp.StopReasonCancelled, disp.getUsage(), nil
+			return acpsdk.StopReasonCancelled, disp.getUsage(), nil
 		}
 		return "", nil, err
 	}
 	if err := disp.getFailure(); err != nil {
 		return "", nil, err
 	}
-	if stopReasonFor(tc.Turn.Status) != acp.StopReasonEndTurn || collaborationMode != planCollaborationMode {
+	if stopReasonFor(tc.Turn.Status) != acpsdk.StopReasonEndTurn || collaborationMode != planCollaborationMode {
 		return stopReasonFor(tc.Turn.Status), disp.getUsage(), nil
 	}
 
 	plan := disp.takeCompletedPlan()
 	if plan == nil {
-		return acp.StopReasonEndTurn, disp.getUsage(), nil
+		return acpsdk.StopReasonEndTurn, disp.getUsage(), nil
 	}
 	approved, err := requestPlanImplementation(turnCtx, conn, s.id, plan)
 	if turnCtx.Err() != nil {
-		return acp.StopReasonCancelled, disp.getUsage(), nil
+		return acpsdk.StopReasonCancelled, disp.getUsage(), nil
 	}
 	if err != nil {
 		return "", nil, err
 	}
 	if !approved {
-		return acp.StopReasonEndTurn, disp.getUsage(), nil
+		return acpsdk.StopReasonEndTurn, disp.getUsage(), nil
 	}
 	if err := cc.threadSettingsUpdate(turnCtx, newThreadSettingsUpdate(threadID, model, effort, defaultCollaborationMode)); err != nil {
 		return "", nil, fmt.Errorf("thread/settings/update: %w", err)
@@ -388,17 +399,17 @@ func (s *session) runTurn(ctx context.Context, conn *acp.AgentSideConnection, cc
 	s.mu.Lock()
 	s.collaborationMode = defaultCollaborationMode
 	s.mu.Unlock()
-	if err := notifyClient(turnCtx, conn, s.id, acp.SessionUpdate{ConfigOptionUpdate: &acp.SessionConfigOptionUpdate{
+	if err := notifyClient(turnCtx, conn, s.id, acpsdk.SessionUpdate{ConfigOptionUpdate: &acpsdk.SessionConfigOptionUpdate{
 		SessionUpdate: "config_option_update",
 		ConfigOptions: buildConfigOptions(models, model, effort, defaultCollaborationMode),
 	}}); err != nil {
 		return "", nil, err
 	}
 
-	tc, err = run(promptToInput([]acp.ContentBlock{acp.TextBlock("Implement the approved plan.")}))
+	tc, err = run(promptToInput([]acpsdk.ContentBlock{acpsdk.TextBlock("Implement the approved plan.")}))
 	if err != nil {
 		if turnCtx.Err() != nil {
-			return acp.StopReasonCancelled, disp.getUsage(), nil
+			return acpsdk.StopReasonCancelled, disp.getUsage(), nil
 		}
 		return "", nil, err
 	}
@@ -455,35 +466,35 @@ func requestTurnInterrupt(ctx context.Context, cc *codexClient, threadID, turnID
 	}
 }
 
-func requestPlanImplementation(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, plan *completedPlan) (bool, error) {
+func requestPlanImplementation(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, plan *completedPlan) (bool, error) {
 	const (
-		implement = acp.PermissionOptionId("implement_plan")
-		revise    = acp.PermissionOptionId("revise_plan")
+		implement = acpsdk.PermissionOptionId("implement_plan")
+		revise    = acpsdk.PermissionOptionId("revise_plan")
 	)
-	id := acp.ToolCallId("plan-review:" + plan.itemID)
-	start := acp.StartToolCall(
+	id := acpsdk.ToolCallId("plan-review:" + plan.itemID)
+	start := acpsdk.StartToolCall(
 		id,
 		"Implement this plan?",
-		acp.WithStartKind(acp.ToolKindSwitchMode),
-		acp.WithStartStatus(acp.ToolCallStatusPending),
-		acp.WithStartRawInput(map[string]any{"plan": plan.text}),
+		acpsdk.WithStartKind(acpsdk.ToolKindSwitchMode),
+		acpsdk.WithStartStatus(acpsdk.ToolCallStatusPending),
+		acpsdk.WithStartRawInput(map[string]any{"plan": plan.text}),
 	)
 	if err := notifyClient(ctx, conn, sid, start); err != nil {
 		return false, err
 	}
-	response, err := callClient(ctx, conn, func() (acp.RequestPermissionResponse, error) {
-		return conn.RequestPermission(ctx, acp.RequestPermissionRequest{
+	response, err := callClient(ctx, conn, func() (acpsdk.RequestPermissionResponse, error) {
+		return conn.RequestPermission(ctx, acpsdk.RequestPermissionRequest{
 			SessionId: sid,
-			ToolCall: acp.ToolCallUpdate{
+			ToolCall: acpsdk.ToolCallUpdate{
 				ToolCallId: id,
 				Title:      new("Implement this plan?"),
-				Kind:       acp.Ptr(acp.ToolKindSwitchMode),
-				Status:     acp.Ptr(acp.ToolCallStatusPending),
+				Kind:       acpsdk.Ptr(acpsdk.ToolKindSwitchMode),
+				Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
 				RawInput:   map[string]any{"plan": plan.text},
 			},
-			Options: []acp.PermissionOption{
-				{OptionId: implement, Name: "Yes, implement this plan", Kind: acp.PermissionOptionKindAllowOnce},
-				{OptionId: revise, Name: "No, and tell Codex what to do differently", Kind: acp.PermissionOptionKindRejectOnce},
+			Options: []acpsdk.PermissionOption{
+				{OptionId: implement, Name: "Yes, implement this plan", Kind: acpsdk.PermissionOptionKindAllowOnce},
+				{OptionId: revise, Name: "No, and tell Codex what to do differently", Kind: acpsdk.PermissionOptionKindRejectOnce},
 			},
 		})
 	})
@@ -500,10 +511,10 @@ func requestPlanImplementation(ctx context.Context, conn *acp.AgentSideConnectio
 	}
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
-	err = notifyClient(finishCtx, conn, sid, acp.UpdateToolCall(
+	err = notifyClient(finishCtx, conn, sid, acpsdk.UpdateToolCall(
 		id,
-		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
-		acp.WithUpdateRawOutput(output),
+		acpsdk.WithUpdateStatus(acpsdk.ToolCallStatusCompleted),
+		acpsdk.WithUpdateRawOutput(output),
 	))
 	return approved, err
 }
@@ -522,11 +533,14 @@ func sandboxPolicyWithRoots(policy any, roots []string) any {
 	return copy
 }
 
-func streamThreadHistory(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId, turns []rawTurn, toolOutputs map[string]string) error {
+func streamThreadHistory(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, cwd string, turns []rawTurn, toolOutputs map[string]string) error {
 	var sendErr error
-	send := func(u acp.SessionUpdate) {
+	send := func(u acpsdk.SessionUpdate) {
 		if sendErr != nil {
 			return
+		}
+		if message := u.AgentMessageChunk; message != nil && message.Content.Text != nil {
+			message.Content.Text.Text = renderCitations(message.Content.Text.Text, cwd)
 		}
 		sendErr = notifyClient(ctx, conn, sid, u)
 	}
@@ -541,19 +555,19 @@ func streamThreadHistory(ctx context.Context, conn *acp.AgentSideConnection, sid
 	return nil
 }
 
-func replayToolResult(send func(acp.SessionUpdate), id, status string, content []acp.ToolCallContent) {
+func replayToolResult(send func(acpsdk.SessionUpdate), id, status string, content []acpsdk.ToolCallContent) {
 	st := toolStatusFor(status)
-	if st != acp.ToolCallStatusCompleted && st != acp.ToolCallStatusFailed {
+	if st != acpsdk.ToolCallStatusCompleted && st != acpsdk.ToolCallStatusFailed {
 		return
 	}
-	opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(st)}
+	opts := []acpsdk.ToolCallUpdateOpt{acpsdk.WithUpdateStatus(st)}
 	if len(content) > 0 {
-		opts = append(opts, acp.WithUpdateContent(content))
+		opts = append(opts, acpsdk.WithUpdateContent(content))
 	}
-	send(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
+	send(acpsdk.UpdateToolCall(acpsdk.ToolCallId(id), opts...))
 }
 
-func replayToolText(send func(acp.SessionUpdate), id, status string, outputs map[string]string, fallbacks ...string) {
+func replayToolText(send func(acpsdk.SessionUpdate), id, status string, outputs map[string]string, fallbacks ...string) {
 	out := outputs[id]
 	if out == "" {
 		for _, fallback := range fallbacks {
@@ -566,10 +580,10 @@ func replayToolText(send func(acp.SessionUpdate), id, status string, outputs map
 	if out == "" {
 		return
 	}
-	replayToolResult(send, id, status, []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(boundedToolOutput(out)))})
+	replayToolResult(send, id, status, []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(boundedToolOutput(out)))})
 }
 
-func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs map[string]string) {
+func replayItem(send func(acpsdk.SessionUpdate), raw json.RawMessage, toolOutputs map[string]string) {
 	var probe struct {
 		Type string `json:"type"`
 		ID   string `json:"id"`
@@ -580,9 +594,13 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 	switch probe.Type {
 	case "userMessage":
 		var it struct {
-			Content []json.RawMessage `json:"content"`
+			ClientID string            `json:"clientId"`
+			Content  []json.RawMessage `json:"content"`
 		}
 		_ = json.Unmarshal(raw, &it)
+		if it.ClientID != "" {
+			probe.ID = it.ClientID
+		}
 		for _, block := range historyUserInputs(it.Content) {
 			send(userMessageUpdate(block, probe.ID))
 		}
@@ -613,7 +631,7 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 		}
 		_ = json.Unmarshal(raw, &it)
 		if it.Text != "" {
-			send(acp.UpdateAgentMessageText("Plan:\n" + it.Text))
+			send(acpsdk.UpdateAgentMessageText("Plan:\n" + it.Text))
 		}
 
 	case "commandExecution":
@@ -632,12 +650,12 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 			Status string `json:"status"`
 		}
 		_ = json.Unmarshal(raw, &it)
-		opts := []acp.ToolCallStartOpt{
-			acp.WithStartKind(acp.ToolKindEdit),
-			acp.WithStartStatus(toolStatusFor(it.Status)),
+		opts := []acpsdk.ToolCallStartOpt{
+			acpsdk.WithStartKind(acpsdk.ToolKindEdit),
+			acpsdk.WithStartStatus(toolStatusFor(it.Status)),
 		}
 		opts = appendDisplayLocations(opts, fileChangeLocations(raw))
-		send(acp.StartToolCall(acp.ToolCallId(probe.ID), "Edit files", opts...))
+		send(acpsdk.StartToolCall(acpsdk.ToolCallId(probe.ID), "Edit files", opts...))
 		if content := fileChangeContent(raw); len(content) > 0 {
 			replayToolResult(send, probe.ID, it.Status, content)
 		}
@@ -653,7 +671,7 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 		}
 
 	case "webSearch":
-		send(webSearchStartToolCall(raw, acp.ToolCallStatusCompleted))
+		send(webSearchStartToolCall(raw, acpsdk.ToolCallStatusCompleted))
 		replayToolText(send, probe.ID, "completed", toolOutputs)
 
 	case "imageView":
@@ -672,7 +690,7 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 		}
 
 	case "subAgentActivity":
-		if u, ok := subAgentStartToolCall(raw, acp.ToolCallStatusCompleted); ok {
+		if u, ok := subAgentStartToolCall(raw, acpsdk.ToolCallStatusCompleted); ok {
 			send(u)
 		}
 
@@ -685,17 +703,17 @@ func replayItem(send func(acp.SessionUpdate), raw json.RawMessage, toolOutputs m
 		}
 		_ = json.Unmarshal(raw, &it)
 		if text := strings.TrimSpace(it.Review); text != "" {
-			send(acp.UpdateAgentMessageText(text + "\n\n"))
+			send(acpsdk.UpdateAgentMessageText(text + "\n\n"))
 		}
 	}
 }
 
-func userInputToBlock(raw json.RawMessage) (acp.ContentBlock, bool) {
+func userInputToBlock(raw json.RawMessage) (acpsdk.ContentBlock, bool) {
 	var probe struct {
 		Type string `json:"type"`
 	}
 	if json.Unmarshal(raw, &probe) != nil {
-		return acp.ContentBlock{}, false
+		return acpsdk.ContentBlock{}, false
 	}
 	switch probe.Type {
 	case "text":
@@ -704,9 +722,9 @@ func userInputToBlock(raw json.RawMessage) (acp.ContentBlock, bool) {
 		}
 		_ = json.Unmarshal(raw, &it)
 		if it.Text == "" {
-			return acp.ContentBlock{}, false
+			return acpsdk.ContentBlock{}, false
 		}
-		return acp.TextBlock(it.Text), true
+		return acpsdk.TextBlock(it.Text), true
 	case "image":
 		var it struct {
 			URL    string `json:"url"`
@@ -714,12 +732,12 @@ func userInputToBlock(raw json.RawMessage) (acp.ContentBlock, bool) {
 			Detail string `json:"detail"`
 		}
 		if json.Unmarshal(raw, &it) != nil {
-			return acp.ContentBlock{}, false
+			return acpsdk.ContentBlock{}, false
 		}
 		if it.FileID != "" {
 			// File IDs are opaque provider references, not downloadable URLs.
 			// Keep the attachment visible and retain its identity for clients.
-			block := acp.TextBlock("Image attachment (preview unavailable): " + it.FileID)
+			block := acpsdk.TextBlock("Image attachment (preview unavailable): " + it.FileID)
 			metadata := map[string]any{"fileId": it.FileID}
 			if it.Detail != "" {
 				metadata["detail"] = it.Detail
@@ -728,54 +746,54 @@ func userInputToBlock(raw json.RawMessage) (acp.ContentBlock, bool) {
 			return block, true
 		}
 		if it.URL != "" {
-			return acp.TextBlock(formatURIAsLink("image", it.URL)), true
+			return acpsdk.TextBlock(formatURIAsLink("image", it.URL)), true
 		}
-		return acp.ContentBlock{}, false
+		return acpsdk.ContentBlock{}, false
 	case "localImage", "localAudio", "mention":
 		var it struct {
 			Path string `json:"path"`
 			Name string `json:"name"`
 		}
 		if json.Unmarshal(raw, &it) != nil || it.Path == "" {
-			return acp.ContentBlock{}, false
+			return acpsdk.ContentBlock{}, false
 		}
 		name := path.Base(strings.ReplaceAll(it.Path, `\`, "/"))
 		if probe.Type == "mention" && strings.TrimSpace(it.Name) != "" {
 			name = it.Name
 		}
 		if uri, ok := attachmentFileURI(it.Path); ok {
-			return acp.ResourceLinkBlock(name, uri), true
+			return acpsdk.ResourceLinkBlock(name, uri), true
 		}
-		return acp.TextBlock(formatURIAsLink(name, it.Path)), true
+		return acpsdk.TextBlock(formatURIAsLink(name, it.Path)), true
 	case "audio":
 		var it struct {
 			URL string `json:"url"`
 		}
 		if json.Unmarshal(raw, &it) != nil || it.URL == "" {
-			return acp.ContentBlock{}, false
+			return acpsdk.ContentBlock{}, false
 		}
-		return acp.TextBlock(formatURIAsLink("audio", it.URL)), true
+		return acpsdk.TextBlock(formatURIAsLink("audio", it.URL)), true
 	case "skill":
 		var it struct {
 			Name string `json:"name"`
 			Path string `json:"path"`
 		}
 		_ = json.Unmarshal(raw, &it)
-		return acp.TextBlock(fmt.Sprintf("skill:%s (%s)", it.Name, it.Path)), true
+		return acpsdk.TextBlock(fmt.Sprintf("skill:%s (%s)", it.Name, it.Path)), true
 	}
-	return acp.ContentBlock{}, false
+	return acpsdk.ContentBlock{}, false
 }
 
-func stopReasonFor(status string) acp.StopReason {
+func stopReasonFor(status string) acpsdk.StopReason {
 	switch status {
 	case "interrupted":
-		return acp.StopReasonCancelled
+		return acpsdk.StopReasonCancelled
 	default:
-		return acp.StopReasonEndTurn
+		return acpsdk.StopReasonEndTurn
 	}
 }
 
-func promptToInput(blocks []acp.ContentBlock) []any {
+func promptToInput(blocks []acpsdk.ContentBlock) []any {
 	out := make([]any, 0, len(blocks))
 	for _, b := range blocks {
 		switch {

@@ -6,8 +6,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 )
 
 var (

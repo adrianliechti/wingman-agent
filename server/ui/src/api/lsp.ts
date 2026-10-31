@@ -2,20 +2,23 @@ import type {
 	LSPActivityStatus,
 	WorkspaceDiagnostics,
 } from "../types/protocol";
-import { fetchJSON, fetchOK } from "./http.ts";
+import { workspaceClient } from "../state/workspaceClient.ts";
+import { fetchJSON } from "./http.ts";
 
 export type LSPDocumentEvent = "open" | "change" | "save" | "close";
 
 export function getWorkspaceDiagnostics(
 	signal?: AbortSignal,
 ): Promise<WorkspaceDiagnostics> {
-	return fetchJSON<WorkspaceDiagnostics>("/api/lsp/diagnostics", { signal });
+	return workspaceClient().lsp.workspaceDiagnostics(
+		signal,
+	) as Promise<WorkspaceDiagnostics>;
 }
 
 export function getLSPActivity(
 	signal?: AbortSignal,
 ): Promise<LSPActivityStatus> {
-	return fetchJSON<LSPActivityStatus>("/api/lsp/status", { signal });
+	return fetchJSON<LSPActivityStatus>("/api/workspace/activity", { signal });
 }
 
 export async function syncLSPDocument(
@@ -23,10 +26,5 @@ export async function syncLSPDocument(
 	path: string,
 	content = "",
 ): Promise<void> {
-	await fetchOK("/api/lsp/document", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ event, path, content }),
-		keepalive: event === "close",
-	});
+	await workspaceClient().lsp.sync(event, path, content);
 }

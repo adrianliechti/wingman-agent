@@ -40,6 +40,7 @@ type FileDiff struct {
 	Patch        string
 	Original     string
 	Modified     string
+	Binary       bool // Original and Modified are empty
 }
 
 type DiffLayer string
@@ -144,6 +145,15 @@ func (m *Manager) Diffs(ctx context.Context) ([]FileDiff, error) {
 // DiffsIfChanged returns combined diffs and their fingerprint from one status
 // scan. An unchanged fingerprint returns nil diffs. Pass zero to force a load.
 func (m *Manager) DiffsIfChanged(ctx context.Context, previous uint64) ([]FileDiff, uint64, error) {
+	return m.DiffsLayerIfChanged(ctx, DiffCombined, previous)
+}
+
+// DiffsLayerIfChanged skips loading unchanged file contents for any Git layer.
+// The status, fingerprint, and diff belong to the same manager snapshot.
+func (m *Manager) DiffsLayerIfChanged(ctx context.Context, layer DiffLayer, previous uint64) ([]FileDiff, uint64, error) {
+	if layer != DiffCombined && layer != DiffStaged && layer != DiffUnstaged {
+		return nil, 0, errors.New("invalid diff layer")
+	}
 	if err := m.lock(ctx); err != nil {
 		return nil, 0, err
 	}
@@ -157,7 +167,7 @@ func (m *Manager) DiffsIfChanged(ctx context.Context, previous uint64) ([]FileDi
 	if previous != 0 && fingerprint == previous {
 		return nil, fingerprint, nil
 	}
-	diffs, err := m.diffsLocked(ctx, entries, DiffCombined)
+	diffs, err := m.diffsLocked(ctx, entries, layer)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -166,7 +176,7 @@ func (m *Manager) DiffsIfChanged(ctx context.Context, previous uint64) ([]FileDi
 
 // DiffsLayer returns a consistent snapshot of every change in one Git layer.
 // The manager lock stays held while the status, HEAD tree, and file contents
-// are read so callers such as commit-message generation never mix snapshots.
+// are read so callers never mix snapshots.
 func (m *Manager) DiffsLayer(ctx context.Context, layer DiffLayer) ([]FileDiff, error) {
 	if err := m.ready(); err != nil {
 		return nil, err
@@ -401,7 +411,7 @@ func (m *Manager) fileDiff(ctx context.Context, head *object.Tree, entry statusE
 	}
 
 	diff := FileDiff{Path: entry.path, OriginalPath: entry.originalPath, Status: status, Patch: patch}
-	if !isBinary(original) && !isBinary(modified) {
+	if diff.Binary = isBinary(original) || isBinary(modified); !diff.Binary {
 		diff.Original = string(original)
 		diff.Modified = string(modified)
 	}
@@ -421,19 +431,19 @@ func (m *Manager) restoreWorktreeFromIndex(path string) error {
 		return errors.New("discarding submodule changes is not supported")
 	}
 
-	clean := filepath.Clean(filepath.FromSlash(path))
-	if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return errors.New("invalid change path")
+	root, clean, err := m.openWorktreePath(path)
+	if err != nil {
+		return err
 	}
-	target := filepath.Join(m.workingDir, clean)
-	if err := os.RemoveAll(target); err != nil {
+	defer root.Close()
+	if err := root.RemoveAll(clean); err != nil {
 		return fmt.Errorf("remove changed file: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	if err := root.MkdirAll(filepath.Dir(clean), 0o755); err != nil {
 		return fmt.Errorf("create parent directory: %w", err)
 	}
 	if mode == filemode.Symlink {
-		if err := os.Symlink(string(data), target); err != nil {
+		if err := root.Symlink(string(data), clean); err != nil {
 			return fmt.Errorf("restore symlink: %w", err)
 		}
 		return nil
@@ -442,10 +452,30 @@ func (m *Manager) restoreWorktreeFromIndex(path string) error {
 	if mode == filemode.Executable {
 		perm = 0o755
 	}
-	if err := os.WriteFile(target, data, perm); err != nil {
+	if err := root.WriteFile(clean, data, perm); err != nil {
 		return fmt.Errorf("restore changed file: %w", err)
 	}
 	return nil
+}
+
+// openWorktreePath confines a change path to the worktree. Like Git, it never
+// writes beyond a symlink in a leading path component.
+func (m *Manager) openWorktreePath(path string) (*os.Root, string, error) {
+	clean := filepath.Clean(filepath.FromSlash(path))
+	if clean == "." || !filepath.IsLocal(clean) {
+		return nil, "", errors.New("invalid change path")
+	}
+	root, err := os.OpenRoot(m.workingDir)
+	if err != nil {
+		return nil, "", err
+	}
+	for parent := filepath.Dir(clean); parent != "."; parent = filepath.Dir(parent) {
+		if info, err := root.Lstat(parent); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			root.Close()
+			return nil, "", fmt.Errorf("%s is beyond the symbolic link %s", filepath.ToSlash(clean), filepath.ToSlash(parent))
+		}
+	}
+	return root, clean, nil
 }
 
 func (m *Manager) status() ([]statusEntry, error) {
@@ -706,11 +736,12 @@ func (m *Manager) objectPath(path string) string {
 }
 
 func (m *Manager) remove(path string) error {
-	clean := filepath.Clean(filepath.FromSlash(path))
-	if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return errors.New("invalid change path")
+	root, clean, err := m.openWorktreePath(path)
+	if err != nil {
+		return err
 	}
-	return os.RemoveAll(filepath.Join(m.workingDir, clean))
+	defer root.Close()
+	return root.RemoveAll(clean)
 }
 
 type encodedPatch struct {

@@ -18,15 +18,18 @@ func UndoFileChanges(ctx context.Context, root *os.Root, changes []tool.FileChan
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	files := make([]tool.FileChange, 0, len(changes))
-	indexes := map[string]int{}
 	for _, change := range changes {
 		if !filepath.IsLocal(change.Path) {
 			return fmt.Errorf("cannot undo a change outside the workspace: %s", change.Path)
 		}
-		path := filepath.Clean(filepath.FromSlash(change.Path))
+	}
+	files, gap := tool.NetFileChanges(changes)
+	if gap != "" {
+		return fmt.Errorf("cannot undo %s: another edit occurred between the agent's edits", gap)
+	}
+	for _, file := range files {
 		// Undo never follows a substituted symlink, even within the workspace.
-		for part := path; part != "."; part = filepath.Dir(part) {
+		for part := file.Path; part != "."; part = filepath.Dir(part) {
 			info, err := root.Lstat(part)
 			if err == nil && info.Mode()&os.ModeSymlink != 0 {
 				return fmt.Errorf("cannot undo through symlink: %s", part)
@@ -34,17 +37,6 @@ func UndoFileChanges(ctx context.Context, root *os.Root, changes []tool.FileChan
 			if err != nil && !os.IsNotExist(err) {
 				return err
 			}
-		}
-		if index, ok := indexes[path]; ok {
-			previous := &files[index]
-			if previous.After != change.Before || previous.AfterExists != change.BeforeExists || previous.Mode != change.Mode {
-				return fmt.Errorf("cannot undo %s: another edit occurred between the agent's edits", path)
-			}
-			previous.After, previous.AfterExists = change.After, change.AfterExists
-		} else {
-			indexes[path] = len(files)
-			change.Path = path
-			files = append(files, change)
 		}
 	}
 	tx := &fileTransaction{}

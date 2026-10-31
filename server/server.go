@@ -26,7 +26,9 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
+	"github.com/adrianliechti/wingman-agent/pkg/filewatch"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/remote"
 	"github.com/adrianliechti/wingman-agent/pkg/settings"
 	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
@@ -68,26 +70,24 @@ type Server struct {
 	backendsMu sync.Mutex
 	backends   map[string]*backendEntry
 	scope      WorkspaceScope
-	wsMu       sync.Mutex
-	wsConns    map[*websocket.Conn]*wsClient
 	sendMu     sync.Mutex
+	ahpOnce    sync.Once
+	ahp        *ahpHost
 
+	dapReferenceSeq  atomic.Uint64
+	searches         atomic.Int32
+	lspDocumentsMu   sync.Mutex
+	lspDocuments     map[string]*lspDocument
+	lspRefreshers    map[*lspConnection]struct{} // clients that re-pull diagnostics on request
 	lspExternalMu    sync.Mutex
 	lspExternalPaths map[string]bool
 	fileWriteMu      sync.Mutex
 
 	terminals        *terminal.Manager
 	preview          *filePreviewServer
-	tab              *editorTabService
-	transforms       *editorTransformService
-	commitMessages   *gitCommitMessageService
 	settingsMu       sync.Mutex
-	tabEnabled       atomic.Bool
 	terminalPosition atomic.Value
 	sidebarPosition  atomic.Value
-	tabRequestMu     sync.Mutex
-	tabRequestID     uint64
-	tabRequestCancel context.CancelFunc
 
 	files           *watch.Monitor
 	skillFiles      *watch.Monitor
@@ -95,6 +95,8 @@ type Server struct {
 	prevLSP         bool
 	prevDebug       bool
 	prevFingerprint uint64
+	workspaceFiles  filewatch.Source // feeds language-server file watchers
+	fileScanning    atomic.Bool
 
 	managedToolsMu sync.RWMutex
 	managedTools   managedToolsStatus
@@ -119,7 +121,6 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 		ctx:       serverCtx,
 		cancel:    cancel,
 		backends:  make(map[string]*backendEntry),
-		wsConns:   map[*websocket.Conn]*wsClient{},
 	}
 	defer func() {
 		if err != nil {
@@ -132,9 +133,9 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 	}
 	s.workspace = ws
 	s.scope = workspaceScope(ws.RootPath)
+	s.ahpHost()
 
 	s.terminals = terminal.NewManager(ws.RootPath)
-	s.terminals.SetExitHandler(s.onTerminalExit)
 	s.preview, err = newFilePreviewServer(ws.Root)
 	if err != nil {
 		return nil, err
@@ -150,14 +151,9 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 		option, _ := wa.RoleModel("")
 		return option.ID
 	}
-	s.tab = newEditorTabService(s.Config)
-	s.transforms = newEditorTransformService(s.Config)
-	s.commitMessages = newGitCommitMessageService(s.Config)
-	s.tabEnabled.Store(true)
 	s.terminalPosition.Store(settings.WindowTerminalPositionTab)
 	s.sidebarPosition.Store(settings.WindowSidebarPositionRight)
 	if userSettings, loadErr := settings.Load(); loadErr == nil {
-		s.tabEnabled.Store(userSettings.EditorTabCompletion)
 		s.terminalPosition.Store(userSettings.WindowTerminalPosition)
 		s.sidebarPosition.Store(userSettings.WindowSidebarPosition)
 	}
@@ -174,6 +170,12 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 	s.prevLSP = ws.HasLSP()
 	s.prevDebug = s.debugAvailable(serverCtx)
 	s.files = watch.New(watch.Options{Active: s.hasClients}, s.checkWorkspace)
+	s.workspaceFiles = filewatch.NewScanner(ws.Root.FS(), ".", filewatch.Options{
+		Recursive: true,
+		Skip:      func(_ string, entry fs.DirEntry) bool { return entry.IsDir() && isExcludedDir(entry.Name()) },
+		Track:     func(_ string, entry fs.DirEntry) bool { return !entry.IsDir() },
+		Limit:     100000,
+	})
 	s.background.Go(func() {
 		s.files.Run(serverCtx)
 	})
@@ -247,13 +249,10 @@ func (s *Server) Close() {
 		if s.cancel != nil {
 			s.cancel()
 		}
-
-		s.wsMu.Lock()
-		for _, client := range s.wsConns {
-			client.close()
-			_ = client.conn.CloseNow()
+		if s.ahp != nil {
+			s.ahp.close()
 		}
-		s.wsMu.Unlock()
+
 		s.backendsMu.Lock()
 		runtimes := make([]*backendRuntime, 0, len(s.backends))
 		for _, entry := range s.backends {
@@ -316,6 +315,7 @@ func (s *Server) Run(ctx context.Context, port int) error {
 
 	url := fmt.Sprintf("http://localhost:%d", listener.Addr().(*net.TCPAddr).Port)
 	fmt.Fprintf(os.Stderr, "Wingman running at %s\n", url)
+	fmt.Fprintf(os.Stderr, "AHP endpoint: ws://localhost:%d/ahp\n", listener.Addr().(*net.TCPAddr).Port)
 
 	if !s.noBrowser {
 		openBrowser(url)
@@ -328,107 +328,43 @@ func (s *Server) Run(ctx context.Context, port int) error {
 }
 
 func (s *Server) registerRoutes(r chi.Router) {
+	s.ahpHost()
+	r.Get("/ahp", s.handleAHP)
+	r.Get("/lsp", s.handleLSP)
+	r.Get("/dap", s.handleDAP)
+	r.Get("/content", s.handleFileDownload)
+	r.Get("/preview", s.handleFilePreview)
 	r.Route("/api", func(r chi.Router) {
-		r.Route("/files", func(r chi.Router) {
-			r.Get("/", s.handleFiles)
-			r.Post("/", s.handleFileCreate)
-			r.Delete("/", s.handleFileDelete)
-			r.Get("/read", s.handleFileRead)
-			r.Get("/search", s.handleFilesSearch)
-			r.Post("/content-search", s.handleWorkspaceSearch)
-			r.Get("/path", s.handleFilePath)
-			r.Get("/download", s.handleFileDownload)
-			r.Get("/preview", s.handleFilePreview)
-			r.Post("/reveal", s.handleFileReveal)
-			r.Post("/rename", s.handleFileRename)
-			r.Post("/copy", s.handleFileCopy)
-			r.Post("/write", s.handleFileWrite)
-			r.Post("/write-batch", s.handleFileWriteBatch)
-		})
-
-		r.Route("/diffs", func(r chi.Router) {
-			r.Get("/", s.handleDiffs)
-			r.Post("/revert", s.handleDiffRevert)
-		})
-
-		r.Route("/git", func(r chi.Router) {
-			r.Post("/init", s.handleGitInit)
-			r.Get("/status", s.handleGitStatus)
-			r.Get("/branches", s.handleGitBranches)
-			r.Post("/fetch", s.handleGitFetch)
-			r.Get("/history", s.handleGitHistory)
-			r.Get("/insights", s.handleGitInsights)
-			r.Get("/compare", s.handleGitCompare)
-			r.Post("/branches", s.handleGitCreateBranch)
-			r.Post("/checkout", s.handleGitCheckoutBranch)
-			r.Post("/stage", s.handleGitStage)
-			r.Post("/unstage", s.handleGitUnstage)
-			r.Post("/commit", s.handleGitCommit)
-			r.Post("/commit-message", s.handleGitCommitMessage)
-			r.Post("/pull", s.handleGitPull)
-			r.Post("/push", s.handleGitPush)
-		})
 
 		s.registerSessionRoutes(r)
 
-		r.Route("/terminals", func(r chi.Router) {
-			r.Get("/", s.handleTerminals)
-			r.Post("/", s.handleNewTerminal)
-			r.Get("/shells", s.handleTerminalShells)
-			r.Get("/{id}", s.handleTerminal)
-			r.Delete("/{id}", s.handleDeleteTerminal)
-			r.HandleFunc("/{id}/ws", s.handleTerminalWebSocket)
-		})
-
-		r.Route("/lsp", func(r chi.Router) {
-			r.Get("/status", s.handleLSPStatus)
-			r.Get("/capabilities", s.handleLSPEditorCapabilities)
-			r.Post("/document", s.handleLSPDocumentLifecycle)
-			r.Get("/diagnostics", s.handleDiagnostics)
-			r.Post("/diagnostics", s.handleLSPFileDiagnostics)
-			r.Post("/definition", s.handleLSPDefinition)
-			r.Post("/type-definition", s.handleLSPTypeDefinition)
-			r.Post("/implementations", s.handleLSPImplementations)
-			r.Post("/references", s.handleLSPReferences)
-			r.Post("/hover", s.handleLSPHover)
-			r.Post("/completions", s.handleLSPCompletions)
-			r.Post("/completions/resolve", s.handleLSPCompletionResolve)
-			r.Post("/signature-help", s.handleLSPSignatureHelp)
-			r.Post("/document-symbols", s.handleLSPDocumentSymbols)
-			r.Post("/document-highlights", s.handleLSPDocumentHighlights)
-			r.Post("/folding-ranges", s.handleLSPFoldingRanges)
-			r.Post("/semantic-tokens", s.handleLSPSemanticTokens)
-			r.Post("/rename/prepare", s.handleLSPPrepareRename)
-			r.Post("/rename", s.handleLSPRename)
-			r.Post("/code-actions", s.handleLSPCodeActions)
-			r.Post("/code-actions/resolve", s.handleLSPCodeActionResolve)
-			r.Post("/execute-command", s.handleLSPExecuteCommand)
-			r.Post("/formatting", s.handleLSPFormatting)
-			r.Post("/formatting/range", s.handleLSPRangeFormatting)
-			r.Post("/formatting/on-type", s.handleLSPOnTypeFormatting)
-			r.Post("/inlay-hints", s.handleLSPInlayHints)
-			r.Get("/file", s.handleLSPExternalFile)
-		})
-		r.Route("/debug", func(r chi.Router) {
-			r.Post("/targets", s.handleDebugTargets)
-			r.Post("/plan", s.handleDebugPlan)
-			r.Post("/start", s.handleDebugStart)
-			r.Get("/session", s.handleDebugSession)
-			r.Get("/state", s.handleDebugState)
-			r.Get("/inspection", s.handleDebugInspection)
-			r.Put("/breakpoints", s.handleDebugBreakpoints)
-			r.Post("/control", s.handleDebugControl)
-			r.Post("/evaluate", s.handleDebugEvaluate)
-			r.Post("/scopes", s.handleDebugScopes)
-			r.Post("/variables", s.handleDebugVariables)
-		})
-		r.Post("/editor/tab", s.handleEditorTab)
-		r.Post("/editor/transform", s.handleEditorTransform)
-		r.Post("/settings/editor.tab.completion", s.handleEditorTabSettings)
+		// Workspace setup and external source retrieval are host services; editor
+		// and debugger operations use the LSP and DAP WebSocket gateways.
+		r.Post("/workspace/debug/targets", s.handleDebugTargets)
+		r.Post("/workspace/debug/plan", s.handleDebugPlan)
 		r.Post("/settings/window.terminal.position", s.handleWindowTerminalSettings)
 		r.Post("/settings/window.sidebar.position", s.handleWindowSidebarSettings)
-		r.Get("/skills", s.handleSkills)
-		r.Get("/capabilities", s.handleCapabilities)
+		r.Get("/workspace/skills", s.handleSkills)
+		r.Get("/workspace/activity", s.handleWorkspaceActivity)
+		r.Get("/workspace/files", s.handleFileSearch)
+		r.Post("/workspace/search", s.handleWorkspaceSearch)
+		r.Post("/workspace/reveal", s.handleReveal)
+		r.Get("/workspace/terminals/{terminal}/status", s.handleTerminalStatus)
+		r.Get("/workspace", s.handleWorkspace)
+		r.Get("/workspace/insights", s.handleWorkspaceInsights)
+		r.Route("/workspace/git", func(r chi.Router) {
+			r.Get("/", s.handleWorkspaceGit)
+			r.Get("/commits", s.handleGitCommits)
+			r.Post("/commits", s.handleGitAction("commit"))
+			r.Get("/branches", s.handleGitBranches)
+			r.Post("/branches", s.handleGitAction("createBranch"))
+			r.Get("/diff", s.handleGitDiff)
+			r.Post("/checkout", s.handleGitAction("checkout"))
+			r.Post("/fetch", s.handleGitFetch)
+			r.Post("/pull", s.handleGitAction("pull"))
+			r.Post("/push", s.handleGitAction("push"))
+			r.Post("/init", s.handleGitAction("init"))
+		})
 	})
 
 	fileServer := http.FileServer(http.FS(StaticFS))
@@ -509,36 +445,24 @@ func (c *wsClient) run() {
 func (s *Server) send(f Frame) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
-	data, err := json.Marshal(f)
-	if err != nil {
-		return
-	}
-	s.wsMu.Lock()
-	clients := make([]*wsClient, 0, len(s.wsConns))
-	for _, c := range s.wsConns {
-		clients = append(clients, c)
-	}
-	s.wsMu.Unlock()
-	for _, c := range clients {
-		if !c.enqueue(data) {
-			_ = c.conn.CloseNow()
-		}
+	if s.ahp != nil {
+		s.ahp.mu.Lock()
+		s.ahp.notifyRoot("x-wingman/workspaceChanged", map[string]any{"channel": "ahp-root://", "event": f})
+		s.ahp.mu.Unlock()
 	}
 }
 
-type capabilitiesResponse struct {
-	Git                    bool                            `json:"git"`
-	GitInit                bool                            `json:"git_init"`
+type workspaceResponse struct {
+	WorkspaceScope
+	Protocol               int                             `json:"protocol"`
+	Name                   string                          `json:"name"`
+	Path                   string                          `json:"path"`
+	Shells                 []terminal.Shell                `json:"shells"`
 	LSP                    bool                            `json:"lsp"`
 	Debug                  bool                            `json:"debug"`
-	Tasks                  bool                            `json:"tasks"`
-	Terminal               bool                            `json:"terminal"`
-	Tab                    bool                            `json:"tab"`
-	EditorTab              bool                            `json:"editor.tab.completion"`
 	WindowTerminalPosition settings.WindowTerminalPosition `json:"window.terminal.position"`
 	WindowSidebarPosition  settings.WindowSidebarPosition  `json:"window.sidebar.position"`
 	Platform               string                          `json:"platform"`
-	WorkspaceName          string                          `json:"workspace_name"`
 	ManagedTools           *managedToolsStatus             `json:"managed_tools,omitempty"`
 }
 
@@ -557,7 +481,7 @@ func (s *Server) setManagedToolsStatus(status managedToolsStatus) {
 	s.managedToolsMu.Lock()
 	s.managedTools = status
 	s.managedToolsMu.Unlock()
-	s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+	s.broadcast(Frame{Type: EvtWorkspaceChanged})
 }
 
 func (s *Server) managedToolsStatus() managedToolsStatus {
@@ -566,27 +490,24 @@ func (s *Server) managedToolsStatus() managedToolsStatus {
 	return s.managedTools
 }
 
-func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	ws := s.workspace
-	hasChanges := ws.HasChanges()
-	caps := capabilitiesResponse{
-		Git:                    hasChanges,
-		GitInit:                !hasChanges,
+	info := workspaceResponse{
+		WorkspaceScope:         s.scope,
+		Protocol:               2,
+		Name:                   filepath.Base(ws.RootPath),
+		Path:                   ws.RootPath,
+		Shells:                 append([]terminal.Shell{}, terminal.Shells()...),
 		LSP:                    ws.HasLSP(),
 		Debug:                  s.debugAvailable(r.Context()),
-		Tasks:                  true,
-		Terminal:               terminal.Supported(),
-		Tab:                    s.tab != nil,
-		EditorTab:              s.tab != nil && s.tabEnabled.Load(),
 		WindowTerminalPosition: s.windowTerminalPosition(),
 		WindowSidebarPosition:  s.windowSidebarPosition(),
 		Platform:               runtime.GOOS,
-		WorkspaceName:          filepath.Base(ws.RootPath),
 	}
 	if status := s.managedToolsStatus(); status.State != "" {
-		caps.ManagedTools = &status
+		info.ManagedTools = &status
 	}
-	writeJSON(w, caps)
+	writeJSON(w, info)
 }
 
 func (s *Server) windowTerminalPosition() settings.WindowTerminalPosition {
@@ -620,9 +541,12 @@ func (s *Server) debugAvailable(ctx context.Context) bool {
 }
 
 func (s *Server) hasClients() bool {
-	s.wsMu.Lock()
-	defer s.wsMu.Unlock()
-	return len(s.wsConns) > 0
+	if s.ahp == nil {
+		return false
+	}
+	s.ahp.mu.Lock()
+	defer s.ahp.mu.Unlock()
+	return len(s.ahp.clients) > 0
 }
 
 func (s *Server) flushFiles() {
@@ -638,9 +562,9 @@ func (s *Server) checkWorkspace() {
 	gitNow := ws.IsGitRepo()
 	if gitNow != s.prevGit {
 		ws.SyncProjectMode()
-		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+		s.broadcast(Frame{Type: EvtWorkspaceChanged})
 		if ws.HasLSP() {
-			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
+			s.refreshDiagnostics()
 		}
 		s.prevGit = gitNow
 	}
@@ -648,22 +572,25 @@ func (s *Server) checkWorkspace() {
 	lspNow := ws.HasLSP()
 	if lspNow != s.prevLSP {
 		s.prevLSP = lspNow
-		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+		s.broadcast(Frame{Type: EvtWorkspaceChanged})
 		if lspNow {
-			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
+			s.refreshDiagnostics()
 		}
 	}
 
 	debugNow := s.debugAvailable(s.ctx)
 	if debugNow != s.prevDebug {
 		s.prevDebug = debugNow
-		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+		s.broadcast(Frame{Type: EvtWorkspaceChanged})
 	}
 
+	if ws.HasLSP() {
+		s.scanWorkspaceFiles()
+	}
 	if !ws.HasChanges() {
 		s.broadcast(Frame{Type: EvtFilesChanged})
 		if ws.HasLSP() {
-			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
+			s.refreshDiagnostics()
 		}
 		return
 	}
@@ -671,11 +598,39 @@ func (s *Server) checkWorkspace() {
 	if fp != s.prevFingerprint {
 		s.prevFingerprint = fp
 		s.broadcast(Frame{Type: EvtFilesChanged})
-		s.broadcast(Frame{Type: EvtDiffsChanged})
 		if ws.HasLSP() {
-			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
+			s.refreshDiagnostics()
 		}
 	}
+}
+
+// Dependency, build and hidden directories are too large or irrelevant to watch.
+func isExcludedDir(name string) bool { return strings.HasPrefix(name, ".") || excludedDirs[name] }
+
+// scanWorkspaceFiles passes disk changes to language servers. A slow walk
+// or language server must not stall the workspace poller.
+func (s *Server) scanWorkspaceFiles() {
+	if !s.fileScanning.CompareAndSwap(false, true) {
+		return
+	}
+	s.background.Go(func() {
+		defer s.fileScanning.Store(false)
+		ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+		defer cancel()
+		s.syncWorkspaceFiles(ctx)
+	})
+}
+
+func (s *Server) syncWorkspaceFiles(ctx context.Context) {
+	changes, err := s.workspaceFiles.Changes(ctx)
+	if err != nil || len(changes) == 0 {
+		return
+	}
+	events := make([]lsp.FileChange, 0, len(changes))
+	for _, change := range changes {
+		events = append(events, lsp.FileChange{Path: filepath.Join(s.workspace.RootPath, filepath.FromSlash(change.Path)), Type: lsp.FileChangeType(change.Type)})
+	}
+	s.workspace.LSPFilesChanged(ctx, events)
 }
 
 func (s *Server) refreshSkills() {

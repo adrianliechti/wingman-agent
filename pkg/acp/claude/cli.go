@@ -128,6 +128,7 @@ func headerMap(headers []acp.HttpHeader) map[string]string {
 }
 
 type cliEnvelope struct {
+	UUID               string          `json:"uuid,omitempty"`
 	Type               string          `json:"type"`
 	Subtype            string          `json:"subtype,omitempty"`
 	RequestID          string          `json:"request_id,omitempty"`

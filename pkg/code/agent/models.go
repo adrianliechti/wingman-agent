@@ -163,7 +163,6 @@ func (a *Agent) FetchModels(ctx context.Context) error {
 	models, err := a.cfg.Models(ctx)
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
-	a.modelDiscoveryErr = err
 	if err != nil {
 		return err
 	}
@@ -173,14 +172,6 @@ func (a *Agent) FetchModels(ctx context.Context) error {
 	}
 	a.upstreamModels = ids
 	return nil
-}
-
-// ModelDiscoveryError reports discovery failure without discarding the last
-// known model list or preventing the use of an explicitly configured model.
-func (a *Agent) ModelDiscoveryError() error {
-	a.modelMu.Lock()
-	defer a.modelMu.Unlock()
-	return a.modelDiscoveryErr
 }
 
 var effortValues = append([]string{"auto"}, model.EffortLevels()...)

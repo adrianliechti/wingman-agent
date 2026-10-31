@@ -11,8 +11,8 @@ import (
 func NewToolPresentation(name, kind, args string, locations []ToolLocation) *ToolPresentation {
 	p := tool.Present(name, kind, args, len(locations) > 0)
 	locs := slices.Clone(locations)
-	if len(locs) == 0 && p.Path != "" {
-		locs = []ToolLocation{{Path: p.Path, Line: p.Line}}
+	if len(locs) == 0 {
+		locs = p.Locations
 	}
 	return &ToolPresentation{
 		Title: p.Title, Kind: p.Kind, Args: p.Args, Hint: p.Hint, Locations: locs,

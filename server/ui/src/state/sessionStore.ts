@@ -9,23 +9,15 @@ import type { ModeOption } from "../api/sessions.ts";
 import { summarizeSession, type SessionSummary } from "./sessionSummary.ts";
 
 export type WorkspaceScope = { workspaceId: string; instanceId: string };
-export type SessionRef = {
-	workspaceId: string;
-	backendId: string;
-	sessionId: string;
-};
 export type SessionSettings = {
 	models: ModelInfo[];
-	modelsError?: string;
 	model: string;
 	effort: string;
 	efforts: string[];
 	modes: ModeOption[];
 	mode: string;
 	unattended?: boolean;
-	canDelete: boolean;
 	canFork?: boolean;
-	canCompact?: boolean;
 };
 export type SettingsPatch = Partial<
 	Pick<SessionSettings, "model" | "effort" | "mode" | "unattended">
@@ -33,9 +25,9 @@ export type SettingsPatch = Partial<
 export type SessionFields = {
 	status: "loading" | "ready" | "error" | "deleted";
 	phase: Phase;
-	retry?: { attempt: number; reason: string; delayMillis: number };
+	/** The host's status line: a retry, tool progress or compaction. */
+	activity?: string;
 	error: string | null;
-	compaction?: { tokensBefore: number; tokensAfter: number };
 	usage: {
 		inputTokens: number;
 		cachedTokens: number;
@@ -45,50 +37,87 @@ export type SessionFields = {
 	};
 	prompts: PendingPrompt[];
 	pendingInputs: PendingTurnInput[];
-	queuePaused: boolean;
-	canSteer: boolean;
 	settings: SessionSettings;
-	toolProgress: Record<string, string>;
 };
 export type SessionView = SessionFields & {
+	/** The chat URI; a tab shows one chat. */
 	id: string;
+	/** The URI of the session the chat belongs to. */
+	session: string;
+	provider: string;
 	entries: ChatEntry[];
-	epoch: string;
 	revision: number;
 	synchronized: boolean;
 };
-export type SessionChange =
-	| { type: "entries.replace"; entries?: ChatEntry[] }
-	| { type: "entry.upsert"; entry: ChatEntry }
-	| { type: "entry.append"; id: string; text: string }
-	| { type: "entries.remove"; ids: string[] }
-	| { type: "state.replace"; state: SessionFields };
-export type SessionEvent = {
-	type: "session.snapshot" | "session.update" | "session.error";
-	subscriptionId: string;
-	ref: SessionRef;
-	epoch: string;
-	revision: number;
-	previousRevision: number;
-	state?: SessionFields;
-	entries?: ChatEntry[];
-	changes?: SessionChange[];
-	message?: string;
-};
 
-export function sessionKey(backendId: string, sessionId: string): string {
-	return JSON.stringify([backendId, sessionId]);
-}
-export function splitSessionKey(key: string): {
-	backendId: string;
-	sessionId: string;
-} {
-	if (!key) return { backendId: "wingman", sessionId: "" };
-	const [backendId, sessionId] = JSON.parse(key) as [string, string];
-	return { backendId, sessionId };
+/** A chat that does not exist yet; real chats are keyed by their chat URI. */
+export function draftKey(backendId: string): string {
+	return JSON.stringify([backendId, ""]);
 }
 export function isDraft(key: string): boolean {
-	return !splitSessionKey(key).sessionId;
+	return !key.startsWith("ahp-chat:");
+}
+export function draftBackend(key: string): string {
+	try {
+		const [backendId] = JSON.parse(key) as [unknown];
+		if (typeof backendId === "string" && backendId) return backendId;
+	} catch {
+		// Not a draft key.
+	}
+	return "wingman";
+}
+
+function base64url(value: string): string {
+	let binary = "";
+	for (const byte of new TextEncoder().encode(value))
+		binary += String.fromCharCode(byte);
+	return btoa(binary)
+		.replace(/\+/g, "-")
+		.replace(/\//g, "_")
+		.replace(/=+$/, "");
+}
+function fromBase64url(value: string): string {
+	const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
+	return new TextDecoder().decode(
+		Uint8Array.from(binary, (char) => char.charCodeAt(0)),
+	);
+}
+/** The host's canonical chat URI for a native session it has not aliased. */
+export function canonicalChatURI(backendId: string, sessionId: string): string {
+	return `ahp-chat:/wingman/${base64url(backendId)}/${base64url(sessionId)}`;
+}
+/** The provider a canonical chat or session URI names, if any. */
+export function canonicalBackend(uri: string): string | undefined {
+	const match = /^ahp-(?:chat|session):\/wingman\/([^/]+)\/[^/]+$/.exec(uri);
+	if (!match) return;
+	try {
+		return fromBase64url(match[1]);
+	} catch {
+		return;
+	}
+}
+export function chatToSession(uri: string): string {
+	return uri.replace(/^ahp-chat:/, "ahp-session:");
+}
+export function sessionToChat(uri: string): string {
+	return uri.replace(/^ahp-session:/, "ahp-chat:");
+}
+/** Keys were `["backend","sessionId"]` before URI identity; drafts stay drafts. */
+export function migrateSessionKey(key: string): string {
+	if (!key || key.startsWith("ahp-chat:")) return key;
+	if (key.startsWith("ahp-session:")) return sessionToChat(key);
+	try {
+		const [backendId, sessionId] = JSON.parse(key) as [unknown, unknown];
+		if (
+			typeof backendId === "string" &&
+			typeof sessionId === "string" &&
+			sessionId
+		)
+			return canonicalChatURI(backendId, sessionId);
+	} catch {
+		// Not a legacy key.
+	}
+	return key;
 }
 
 export const EMPTY_SETTINGS: SessionSettings = {
@@ -98,12 +127,12 @@ export const EMPTY_SETTINGS: SessionSettings = {
 	efforts: [],
 	modes: [],
 	mode: "",
-	canDelete: false,
 };
 export function emptySession(id: string): SessionView {
 	return {
 		id,
-		epoch: "",
+		session: "",
+		provider: "",
 		revision: 0,
 		synchronized: false,
 		status: "loading",
@@ -119,41 +148,18 @@ export function emptySession(id: string): SessionView {
 		},
 		prompts: [],
 		pendingInputs: [],
-		queuePaused: false,
-		canSteer: false,
 		settings: EMPTY_SETTINGS,
-		toolProgress: {},
 	};
 }
-function normalize(fields: SessionFields): SessionFields {
-	return {
-		// The event envelope alone owns identity, revision, and transcript.
-		status: fields.status,
-		phase: fields.phase,
-		retry: fields.retry,
-		error: fields.error,
-		compaction: fields.compaction,
-		usage: fields.usage,
-		prompts: fields.prompts,
-		queuePaused: fields.queuePaused,
-		canSteer: fields.canSteer,
-		settings: fields.settings,
-		toolProgress: fields.toolProgress,
-		pendingInputs: fields.pendingInputs
-			.filter((input) => input.origin !== "task")
-			.map((input) => ({
-				...input,
-				text: input.text ?? "",
-				files: input.files ?? [],
-				images: input.images ?? [],
-				position: input.position ?? 0,
-			})),
-	};
-}
-
-// The only browser owner of authoritative session state. It applies explicit
-// changes and validates ordering; it never reconstructs provider history.
+// React presentation cache. AHPConnection owns wire ordering and reducers;
+// AHPSessionProjection maps channel state into these UI views.
 export class SessionStore {
+	// Presentation state comes from the official AHP reducers. The store only
+	// batches React notifications and retains summaries for closed tabs.
+	set(key: string, view: SessionView) {
+		this.views = { ...this.views, [key]: view };
+		this.emit(key);
+	}
 	private views: Record<string, SessionView> = {};
 	private summaries: Record<string, SessionSummary> = {};
 	readonly getSummaries = () => this.summaries;
@@ -165,7 +171,7 @@ export class SessionStore {
 			this.renderListeners.delete(listener);
 		};
 	};
-	private subscriptions = new Map<string, string>();
+	private subscriptions = new Set<string>();
 	private listeners = new Set<() => void>();
 	readonly getSnapshot = () => this.views;
 	readonly subscribe = (listener: () => void) => {
@@ -187,8 +193,8 @@ export class SessionStore {
 				for (const listener of this.renderListeners) listener();
 			}, 16);
 	}
-	expect(key: string, subscriptionId: string) {
-		this.subscriptions.set(key, subscriptionId);
+	expect(key: string) {
+		this.subscriptions.add(key);
 		const previous = this.views[key] ?? emptySession(key);
 		this.views = {
 			...this.views,
@@ -227,80 +233,5 @@ export class SessionStore {
 			]),
 		);
 		this.emit();
-	}
-	apply(event: SessionEvent): "applied" | "ignored" | "resubscribe" {
-		const key = sessionKey(event.ref.backendId, event.ref.sessionId);
-		if (this.subscriptions.get(key) !== event.subscriptionId) return "ignored";
-		const previous = this.views[key] ?? emptySession(key);
-		let next: SessionView;
-		if (event.type === "session.error") {
-			next = {
-				...previous,
-				status: "error",
-				error: event.message ?? "Could not load session",
-				synchronized: false,
-			};
-		} else if (event.type === "session.snapshot" && event.state) {
-			if (
-				previous.synchronized &&
-				event.epoch === previous.epoch &&
-				event.revision <= previous.revision
-			)
-				return "ignored";
-			next = {
-				...normalize(event.state),
-				id: key,
-				entries: event.entries ?? [],
-				epoch: event.epoch,
-				revision: event.revision,
-				synchronized: true,
-			};
-		} else {
-			if (!previous.synchronized) return "ignored";
-			if (event.epoch !== previous.epoch) return "resubscribe";
-			if (event.revision <= previous.revision) return "ignored";
-			if (
-				event.previousRevision !== previous.revision ||
-				event.revision !== previous.revision + 1
-			)
-				return "resubscribe";
-			next = { ...previous, revision: event.revision };
-			for (const change of event.changes ?? []) {
-				switch (change.type) {
-					case "entries.replace":
-						next.entries = change.entries ?? [];
-						break;
-					case "entry.upsert": {
-						const index = next.entries.findIndex(
-							(entry) => entry.id === change.entry.id,
-						);
-						next.entries = [...next.entries];
-						if (index < 0) next.entries.push(change.entry);
-						else next.entries[index] = change.entry;
-						break;
-					}
-					case "entry.append":
-						if (!next.entries.some((entry) => entry.id === change.id))
-							return "resubscribe";
-						next.entries = next.entries.map((entry) =>
-							entry.id === change.id
-								? { ...entry, content: entry.content + change.text }
-								: entry,
-						);
-						break;
-					case "entries.remove": {
-						const ids = new Set(change.ids);
-						next.entries = next.entries.filter((entry) => !ids.has(entry.id));
-						break;
-					}
-					case "state.replace":
-						next = { ...next, ...normalize(change.state) };
-						break;
-				}
-			}
-		}
-		this.views = { ...this.views, [key]: next };
-		this.emit(key);
-		return "applied";
 	}
 }

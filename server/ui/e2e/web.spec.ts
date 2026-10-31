@@ -1,4 +1,19 @@
-import { emptySession, sessionKey } from "../src/state/sessionStore.ts";
+import { mockWorkspace } from "./workspaceFixture.ts";
+import {
+	readSavedFile,
+	writeSavedFile,
+	createSavedFile,
+} from "./fileFixture.ts";
+import { loseFirstInputReceipt } from "./ahpFaults.ts";
+import { mockGit } from "./gitFixture.ts";
+import { mockDebugSession } from "./dapFixture.ts";
+import {
+	mockLanguage,
+	waitLanguageResult,
+	probeLanguageCapabilities,
+} from "./lspFixture.ts";
+import { ahpFixture, mockResource, waitResource } from "./ahpFixture.ts";
+import { canonicalChatURI, emptySession } from "../src/state/sessionStore.ts";
 import type {
 	ChatEntry,
 	PendingPrompt,
@@ -28,54 +43,133 @@ async function mockSavedSessions(
 	entries: ChatEntry[] = [],
 	phase: "idle" | "tool_running" = "idle",
 ) {
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
-	await page.route(
-		new RegExp(`/api/v2/backends/${backend}/sessions$`),
-		async (route) => {
-			if (route.request().method() === "GET")
-				await route.fulfill({ json: sessions });
-			else await route.continue();
-		},
-	);
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		const server = socket.connectToServer();
-		socket.onMessage((message) => {
-			const command = JSON.parse(String(message));
-			if (
-				command.type === "subscribe" &&
-				command.ref.backendId === backend &&
-				sessions.some((session) => session.id === command.ref.sessionId)
-			) {
-				const id = command.ref.sessionId;
-				if (!loaded.includes(id)) loaded.push(id);
-				socket.send(
-					JSON.stringify({
-						type: "session.snapshot",
-						subscriptionId: command.subscriptionId,
-						ref: {
-							workspaceId: scope.workspaceId,
-							backendId: backend,
-							sessionId: id,
-						},
-						epoch: `fixture:${id}`,
-						revision: 0,
-						entries,
-						state: {
-							...emptySession(sessionKey(backend, id)),
-							status: "ready",
-							phase,
-						},
-					}),
-				);
-			} else server.send(message);
-		});
-	});
+	const fixture = await ahpFixture(page);
+	const priorLoad = fixture.onLoad;
+	fixture.onLoad = (session) => {
+		priorLoad(session);
+		if (session.backend === backend && !loaded.includes(session.id))
+			loaded.push(session.id);
+	};
+	fixture.backends.add(backend);
+	for (const session of sessions) fixture.add(backend, session, entries, phase);
+	return fixture;
 }
+
 function sessionRow(page: Page, id: string) {
 	return page
-		.locator(`[data-session-id=${JSON.stringify(sessionKey("wingman", id))}]`)
+		.locator(
+			`[data-session-id=${JSON.stringify(canonicalChatURI("wingman", id))}]`,
+		)
 		.filter({ visible: true });
 }
+
+test("draft skill picker uses the workspace catalogue and keeps qualified names", async ({
+	page,
+}) => {
+	const requests: string[] = [];
+	await page.route("**/api/workspace/skills", (route) => {
+		requests.push(route.request().url());
+		return route.fulfill({
+			json: [
+				{
+					name: "shared",
+					description: "Project workflow",
+					input_hint: "[topic]",
+				},
+				{
+					name: "reports:shared",
+					description: "Plugin workflow",
+					input_hint: "[topic]",
+				},
+			],
+		});
+	});
+	const input = await composer(page);
+	await input.fill("/sha");
+	const picker = page.getByRole("listbox", { name: "Commands and skills" });
+	await expect(picker.getByRole("option")).toHaveCount(2);
+	await picker.getByRole("option", { name: /\/reports:shared/ }).click();
+	await expect(input).toHaveValue("/reports:shared ");
+	await expect.poll(() => requests.length).toBeGreaterThan(0);
+	for (const url of requests) expect(new URL(url).search).toBe("");
+});
+
+test("session command picker preserves completion metadata through reload and send", async ({
+	page,
+}) => {
+	const id = "command-picker";
+	const fixture = await mockSavedSessions(page, [
+		{ id, title: "Commands", updated_at: "2026-01-01T00:00:00Z" },
+	]);
+	const attachment = {
+		type: "simple",
+		label: "/reports:shared",
+		displayKind: "skill",
+		_meta: {
+			command: "reports:shared",
+			isSkill: true,
+			description: "Plugin workflow",
+			argumentHint: "[topic]",
+			opaque: { keep: [1, 2] },
+		},
+	};
+	const sent: any[] = [];
+	const channels: string[] = [];
+	fixture.onCompletions = (params, session) => {
+		channels.push(params.channel);
+		expect(session.id).toBe(id);
+		return [
+			{ insertText: "/reports:shared", rangeStart: 0, rangeEnd: 1, attachment },
+			{
+				insertText: "/native",
+				rangeStart: 0,
+				rangeEnd: 1,
+				attachment: {
+					type: "simple",
+					label: "/native",
+					displayKind: "command",
+					_meta: { command: "native", description: "Backend command" },
+				},
+			},
+		];
+	};
+	fixture.onCommand = async (command) => {
+		sent.push(command);
+	};
+	await page.goto(`/wingman/${id}`);
+	let input = page
+		.getByPlaceholder("Message Wingman…")
+		.filter({ visible: true });
+	await input.fill("/rep");
+	let picker = page.getByRole("listbox", { name: "Commands and skills" });
+	await picker.getByRole("option", { name: /\/reports:shared/ }).click();
+	await input.fill("/reports:shared topic");
+	await page.reload();
+	input = page.getByPlaceholder("Message Wingman…").filter({ visible: true });
+	await expect(input).toHaveValue("/reports:shared topic");
+	await page.getByRole("button", { name: "Send (Enter)", exact: true }).click();
+	await expect
+		.poll(() => sent.filter((command) => command.type === "send").length)
+		.toBe(1);
+	expect(sent.find((command) => command.type === "send")).toMatchObject({
+		text: "/reports:shared topic",
+		attachments: [attachment],
+	});
+	await expect(input).toHaveValue("");
+	await input.fill("/nat");
+	picker = page.getByRole("listbox", { name: "Commands and skills" });
+	await picker.getByRole("option", { name: /\/native/ }).click();
+	await expect
+		.poll(() => sent.filter((command) => command.type === "send").length)
+		.toBe(2);
+	expect(sent.filter((command) => command.type === "send")[1]).toMatchObject({
+		text: "/native",
+		attachments: [{ label: "/native", _meta: { command: "native" } }],
+	});
+	expect(channels.every((channel) => channel.startsWith("ahp-chat:"))).toBe(
+		true,
+	);
+});
 
 test("renders read and fetch image attachments in restored transcripts", async ({
 	page,
@@ -122,9 +216,13 @@ test("renders read and fetch image attachments in restored transcripts", async (
 		entries,
 	);
 	await page.goto("/wingman/images");
-	await page.getByRole("button", { name: "2 tools", exact: true }).click();
+	await page
+		.getByRole("button", { name: "Read a file, fetched a page", exact: true })
+		.click();
 	for (const id of ["user", "read-image", "fetch-image"]) {
-		const preview = page.locator(`[data-entry-id="${id}"] img`);
+		const preview = page.locator(
+			`[data-entry-id="${id === "user" ? "user:user" : id}"] img`,
+		);
 		await expect(preview).toBeVisible();
 		await expect(preview).toHaveAttribute("src", image);
 		await expect
@@ -136,7 +234,7 @@ test("renders read and fetch image attachments in restored transcripts", async (
 });
 function sessionTab(page: Page, id: string) {
 	return page.locator(
-		`[data-center-tab=${JSON.stringify(`chat:${sessionKey("wingman", id)}`)}]`,
+		`[data-center-tab=${JSON.stringify(`chat:${canonicalChatURI("wingman", id)}`)}]`,
 	);
 }
 
@@ -186,20 +284,21 @@ async function mockACPBackend(
 	await page.route(new RegExp(`/api/v2/backends/${backend}/`), (route) =>
 		route.fulfill({ json: [] }),
 	);
-	await page.route(
-		(url) =>
-			url.pathname === "/api/skills" &&
-			url.searchParams.get("backend") === backend,
-		(route) => route.fulfill({ json: [] }),
-	);
-	const creations: { id: string }[] = [];
-	const commands: {
-		type: string;
-		model?: string;
-		mode?: string;
-		text?: string;
-	}[] = [];
+	const fixture = await ahpFixture(page);
+	fixture.backends.add(backend);
+	const control = {
+		creations: [] as { id: string }[],
+		commands: [] as {
+			type: string;
+			model?: string;
+			mode?: string;
+			text?: string;
+		}[],
+		beforeCreate: async (_params: any) => {},
+		beforeCommand: async (_command: any) => {},
+	};
 	const settings = {
+		...emptySession("").settings,
 		models: [
 			{ id: `${backend}-test`, name: "Test model" },
 			{ id: `${backend}-other`, name: "Other model" },
@@ -212,95 +311,39 @@ async function mockACPBackend(
 		mode: "agent",
 		efforts: ["default"],
 		effort: "default",
-		canDelete: false,
 	};
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
-	await page.route(/\/api\/v2\/bootstrap$/, (route) =>
-		route.fulfill({
-			json: {
-				...scope,
-				backends: [
-					{ id: "wingman", name: "Wingman" },
-					{ id: backend, name: backend },
-				],
+	if (entries.length) {
+		const saved = fixture.add(
+			backend,
+			{
+				id: "new-session",
+				title: "Session",
+				updated_at: "2026-01-01T00:00:00Z",
 			},
-		}),
-	);
-	// ACP's initialize response has no session configuration. Only session/new
-	// supplies the model and mode, even if backend defaults were already cached.
-	await page.route(
-		new RegExp(`/api/v2/backends/${backend}/settings$`),
-		(route) => route.fulfill({ json: emptySession("").settings }),
-	);
-	await page.route(
-		new RegExp(`/api/v2/backends/${backend}/sessions$`),
-		async (route) => {
-			if (route.request().method() === "GET") {
-				await route.fulfill({ json: [] });
-				return;
-			}
-			creations.push(route.request().postDataJSON());
-			await route.fulfill({
-				json: {
-					ref: {
-						workspaceId: scope.workspaceId,
-						backendId: backend,
-						sessionId: "new-session",
-					},
-					epoch: "acp-epoch",
-					outcome: "created",
-				},
-			});
-		},
-	);
-	let publish = () => {};
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		const server = socket.connectToServer();
-		let subscription: { subscriptionId: string; ref: object } | undefined;
-		let revision = 0;
-		publish = () => {
-			if (!subscription) return;
-			socket.send(
-				JSON.stringify({
-					type: "session.snapshot",
-					...subscription,
-					epoch: "acp-epoch",
-					revision: revision++,
-					state: { ...emptySession(""), status: "ready", settings },
-					entries,
-				}),
-			);
-		};
-		socket.onMessage((message) => {
-			const request = JSON.parse(String(message));
-			if (request.type === "subscribe" && request.ref.backendId === backend) {
-				subscription = {
-					subscriptionId: request.subscriptionId,
-					ref: request.ref,
-				};
-				publish();
-			} else if (
-				request.type === "unsubscribe" &&
-				request.subscriptionId === subscription?.subscriptionId
-			) {
-				subscription = undefined;
-			} else server.send(message);
-		});
-	});
-	await page.route(
-		new RegExp(`/api/v2/backends/${backend}/sessions/new-session/commands$`),
-		async (route) => {
-			const command = route.request().postDataJSON();
-			commands.push(command);
-			if (command.type === "settings") {
-				if (command.model) settings.model = command.model;
-				if (command.mode) settings.mode = command.mode;
-				publish();
-			}
-			await route.fulfill({ json: { outcome: "accepted" } });
-		},
-	);
-	return { creations, commands };
+			entries,
+		);
+		saved.settings = settings;
+	}
+	fixture.onCreate = async (params) => {
+		await control.beforeCreate(params);
+		control.creations.push({ id: params.channel });
+		const session = fixture.add(
+			backend,
+			{
+				id: "new-session",
+				title: "Session",
+				updated_at: "2026-01-01T00:00:00Z",
+			},
+			entries,
+		);
+		session.settings = settings;
+		return session;
+	};
+	fixture.onCommand = async (command) => {
+		await control.beforeCommand(command);
+		control.commands.push(command);
+	};
+	return control;
 }
 
 async function openSessions(page: Page) {
@@ -312,35 +355,15 @@ async function openSessions(page: Page) {
 	).toBeVisible();
 }
 
-async function resetCompletionFile(request: APIRequestContext) {
+async function resetCompletionFile(_request: APIRequestContext) {
 	// Browser contexts are isolated, but these tests share the saved workspace.
-	const original = await request.get("/api/files/read?path=completion.go");
+	const original = await readSavedFile("completion.go");
 	expect(original.ok()).toBeTruthy();
 	const { revision } = await original.json();
-	const reset = await request.post("/api/files/write", {
+	const reset = await writeSavedFile({
 		data: { path: "completion.go", content: "package main\n", revision },
 	});
 	expect(reset.ok()).toBeTruthy();
-}
-
-async function openTabFixture(page: Page, file: RegExp, lineText: string) {
-	await composer(page);
-	await page.getByRole("treeitem", { name: file }).click();
-	await expect(page.locator(".monaco-editor")).toBeVisible();
-	const line = page.locator(".view-line", { hasText: lineText }).first();
-	await expect(line).toBeVisible();
-	await line.click();
-	await page.keyboard.press("End");
-}
-
-async function setEditorTabCompletion(
-	request: APIRequestContext,
-	enabled: boolean,
-) {
-	const response = await request.post("/api/settings/editor.tab.completion", {
-		data: { "editor.tab.completion": enabled },
-	});
-	expect(response.ok()).toBeTruthy();
 }
 
 async function openWorkspaceMenu(page: Page) {
@@ -509,19 +532,18 @@ test("keeps diagrams and their follow-up answer visible in a finished turn", asy
 	await expect(page.locator('[data-entry-id="summary-answer"]')).toContainText(
 		"The flowchart and sequence diagram are shown above.",
 	);
-	await expect(page.locator('[data-entry-id="thinking"]')).toHaveCount(0);
-	await page.getByRole("button", { name: "1 thought", exact: true }).click();
-	await expect(page.locator('[data-entry-id="thinking"]')).toContainText(
-		"Choosing examples",
-	);
+	const thinking = page.locator('[data-entry-id="thinking"]');
+	await expect(thinking).not.toContainText("Choosing examples");
+	await thinking.getByRole("button", { name: "Thought", exact: true }).click();
+	await expect(thinking).toContainText("Choosing examples");
 });
 
 test("preserves the visible reply when a finished turn collapses its working steps", async ({
 	page,
 }) => {
 	const id = "scroll-snapshot";
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
-	const entries = [
+
+	const entries: ChatEntry[] = [
 		{ id: "previous-user", type: "user", content: "Earlier question" },
 		{
 			id: "previous-reply",
@@ -531,8 +553,16 @@ test("preserves the visible reply when a finished turn collapses its working ste
 		{ id: "current-user", type: "user", content: "Current question" },
 		{
 			id: "working-reply",
-			type: "reasoning",
+			type: "assistant",
 			content: "Working through the details.\n\n".repeat(30),
+		},
+		{
+			id: "working-tool",
+			type: "tool",
+			content: "",
+			toolName: "Read file",
+			toolKind: "read",
+			toolResult: "done",
 		},
 		{
 			id: "visible-reply",
@@ -540,48 +570,17 @@ test("preserves the visible reply when a finished turn collapses its working ste
 			content: "Final response anchor.\n\n".repeat(30),
 		},
 	];
-	let finishTurn = () => {
-		throw new Error("Session has not been subscribed");
-	};
-	await page.route(/\/api\/v2\/backends\/wingman\/sessions$/, (route) =>
-		route.fulfill({
-			json: [
-				{ id, title: "Scroll snapshot", updated_at: "2026-01-01T00:00:00Z" },
-			],
-		}),
+	const fixture = await ahpFixture(page);
+	const session = fixture.add(
+		"wingman",
+		{ id, title: "Scroll snapshot", updated_at: "2026-01-01T00:00:00Z" },
+		entries,
+		"streaming",
 	);
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		const server = socket.connectToServer();
-		socket.onMessage((message) => {
-			const command = JSON.parse(String(message));
-			if (command.type !== "subscribe" || command.ref.sessionId !== id) {
-				server.send(message);
-				return;
-			}
-			const sendSnapshot = (phase: "streaming" | "idle", revision: number) =>
-				socket.send(
-					JSON.stringify({
-						type: "session.snapshot",
-						subscriptionId: command.subscriptionId,
-						ref: {
-							workspaceId: scope.workspaceId,
-							backendId: "wingman",
-							sessionId: id,
-						},
-						epoch: `fixture:${id}`,
-						revision,
-						entries,
-						state: {
-							...emptySession(sessionKey("wingman", id)),
-							status: "ready",
-							phase,
-						},
-					}),
-				);
-			sendSnapshot("streaming", 0);
-			finishTurn = () => sendSnapshot("idle", 1);
-		});
-	});
+	const finishTurn = () => {
+		session.phase = "idle";
+		fixture.publish(session);
+	};
 
 	await composer(page);
 	await openSessions(page);
@@ -619,19 +618,14 @@ test("preserves the visible reply when a finished turn collapses its working ste
 test("keeps mixed background activity compact in the titlebar", async ({
 	page,
 }) => {
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
-				git_init: false,
 				lsp: true,
 				debug: false,
-				tasks: false,
-				terminal: true,
-				tab: false,
-				"editor.tab.completion": false,
 				platform: "linux",
-				workspace_name: "workspace",
+				name: "workspace",
 				managed_tools: {
 					state: "installing",
 					phase: "updating",
@@ -643,7 +637,7 @@ test("keeps mixed background activity compact in the titlebar", async ({
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/status$/, async (route) => {
+	await page.route("**/api/workspace/activity", async (route) => {
 		await route.fulfill({
 			json: {
 				analyzing: true,
@@ -1222,110 +1216,6 @@ test("composer harness switching preserves existing conversations and their draf
 	).toBeVisible();
 });
 
-test("model discovery warning is compact and scoped to Wingman", async ({
-	page,
-}) => {
-	await mockACPBackend(page);
-	const message = "Connection refused at http://localhost:4242/v1/models";
-	await page.route(/\/api\/v2\/backends\/wingman\/settings$/, async (route) => {
-		const response = await route.fetch();
-		await route.fulfill({
-			json: { ...(await response.json()), modelsError: message },
-		});
-	});
-	const input = await composer(page);
-	const warning = page
-		.getByLabel("Model discovery failed")
-		.filter({ visible: true });
-	await expect(warning).toBeVisible();
-	await page
-		.locator("[data-composer-model] button")
-		.filter({ visible: true })
-		.click();
-	const picker = page.getByRole("dialog", {
-		name: "Model and reasoning effort",
-	});
-	await expect(picker.getByText(message, { exact: true })).toHaveCount(0);
-	await expect(picker.locator("details")).toHaveCount(0);
-	await expect(
-		picker.getByRole("button", { name: "Retry model discovery", exact: true }),
-	).toBeVisible();
-	await page.keyboard.press("Escape");
-	await expect(input).toBeEnabled();
-	await page.keyboard.press("Control+k");
-	const palette = page.getByRole("dialog", { name: "Command palette" });
-	await palette
-		.getByRole("combobox", { name: "Search commands" })
-		.fill("new chat");
-	await palette
-		.getByRole("option", { name: "New Chat (Codex)", exact: true })
-		.click();
-	await expect(
-		page.getByPlaceholder("Message Codex…").filter({ visible: true }),
-	).toBeVisible();
-	await expect(warning).toHaveCount(0);
-});
-
-test("model discovery retry recovers without restarting the workspace", async ({
-	page,
-}) => {
-	const refreshURL = "/api/v2/backends/wingman/models/refresh";
-	await page.request.post(`${controlURL()}/model-discovery?fail=true`);
-	try {
-		const failure = await page.request.post(refreshURL);
-		expect(failure.status()).toBe(502);
-		await composer(page);
-		const warning = page
-			.getByLabel("Model discovery failed")
-			.filter({ visible: true });
-		await expect(warning).toBeVisible();
-		await page
-			.locator("[data-composer-model] button")
-			.filter({ visible: true })
-			.click();
-		const picker = page.getByRole("dialog", {
-			name: "Model and reasoning effort",
-		});
-		const retry = picker.getByRole("button", {
-			name: "Retry model discovery",
-			exact: true,
-		});
-		await expect(retry).toHaveText("");
-		await expect(retry.locator("svg")).toBeVisible();
-		let release!: () => void;
-		const gate = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		await page.route(
-			`**${refreshURL}`,
-			async (route) => {
-				await gate;
-				await route.continue();
-			},
-			{ times: 1 },
-		);
-		try {
-			await retry.click();
-			await expect(retry).toBeDisabled();
-			await expect(retry).toHaveAttribute("aria-busy", "true");
-		} finally {
-			release();
-		}
-		await expect(retry).toBeEnabled();
-		await expect(warning).toBeVisible();
-		await page.request.post(`${controlURL()}/model-discovery?fail=false`);
-		await retry.click();
-		await expect(warning).toHaveCount(0);
-		await expect(
-			picker.getByRole("option", { name: "GPT 5.4", exact: true }),
-		).toBeVisible();
-		await expect(retry).toHaveCount(0);
-	} finally {
-		await page.request.post(`${controlURL()}/model-discovery?fail=false`);
-		await page.request.post(refreshURL);
-	}
-});
-
 test("new ACP chats load mode and model before the first message", async ({
 	page,
 }) => {
@@ -1387,13 +1277,10 @@ for (const action of [
 			release = resolve;
 		});
 		let started = false;
-		await page.route(/\/api\/v2\/backends\/codex\/sessions$/, async (route) => {
-			if (route.request().method() === "POST") {
-				started = true;
-				await gate;
-			}
-			await route.fallback();
-		});
+		backend.beforeCreate = async () => {
+			started = true;
+			await gate;
+		};
 		try {
 			await page.goto("/codex");
 			const input = page
@@ -1416,13 +1303,7 @@ for (const action of [
 					await chatTab.locator("[data-tab-close]").click();
 				}
 			}
-			const creationResponse = page.waitForResponse(
-				(response) =>
-					response.url().endsWith("/api/v2/backends/codex/sessions") &&
-					response.request().method() === "POST",
-			);
 			release();
-			await (await creationResponse).finished();
 			await expect.poll(() => backend.creations.length).toBe(1);
 			if (action === "send early") {
 				await expect
@@ -1482,25 +1363,26 @@ for (const action of [
 test("chat drafts keep their own content and settings across tab switches", async ({
 	page,
 }) => {
-	await page.route(/\/api\/v2\/backends\/wingman\/settings$/, (route) =>
-		route.fulfill({
-			json: {
-				...emptySession("").settings,
-				models: [
-					{ id: "first", name: "First model" },
-					{ id: "second", name: "Second model" },
-				],
-				model: "first",
-				effort: "default",
-				efforts: ["default"],
-				modes: [
-					{ id: "agent", name: "Agent" },
-					{ id: "plan", name: "Plan" },
-				],
-				mode: "agent",
+	const fixture = await ahpFixture(page);
+	fixture.sessionConfig.set("wingman", {
+		schema: {
+			type: "object",
+			properties: {
+				model: {
+					type: "string",
+					enum: ["first", "second"],
+					enumLabels: ["First model", "Second model"],
+				},
+				effort: { type: "string", enum: ["default"] },
+				mode: {
+					type: "string",
+					enum: ["agent", "plan"],
+					enumLabels: ["Agent", "Plan"],
+				},
 			},
-		}),
-	);
+		},
+		values: { model: "first", effort: "default", mode: "agent" },
+	});
 	const input = await composer(page);
 	const firstTab = page.locator('[data-center-tab^="draft:wingman:"]').first();
 	await input.fill("Draft in the first tab");
@@ -1570,16 +1452,12 @@ test("ACP chat delivery preserves newer edits and stays pending across tab switc
 	const backend = await mockACPBackend(page);
 	const receipt = Promise.withResolvers<void>();
 	let attempts = 0;
-	await page.route(
-		/\/api\/v2\/backends\/codex\/sessions\/new-session\/commands$/,
-		async (route) => {
-			if (route.request().postDataJSON().type === "send") {
-				attempts++;
-				await receipt.promise;
-			}
-			await route.fallback();
-		},
-	);
+	backend.beforeCommand = async (command) => {
+		if (command.type === "send") {
+			attempts++;
+			await receipt.promise;
+		}
+	};
 	try {
 		await page.goto("/codex");
 		await expect(
@@ -1622,16 +1500,10 @@ test("ACP chat initialization errors allow retrying the same session creation", 
 }) => {
 	const backend = await mockACPBackend(page);
 	const attempts: { id: string }[] = [];
-	await page.route(/\/api\/v2\/backends\/codex\/sessions$/, async (route) => {
-		if (route.request().method() === "POST") {
-			attempts.push(route.request().postDataJSON());
-			if (attempts.length === 1) {
-				await route.fulfill({ status: 502, body: "Codex startup failed" });
-				return;
-			}
-		}
-		await route.fallback();
-	});
+	backend.beforeCreate = async (params) => {
+		attempts.push({ id: params.channel });
+		if (attempts.length === 1) throw new Error("Codex startup failed");
+	};
 	await page.goto("/codex");
 	await expect(
 		page.getByText("Codex startup failed", { exact: false }),
@@ -1654,22 +1526,9 @@ test("ACP chat initialization errors allow retrying the same session creation", 
 
 test("uses canonical product names for agents", async ({ page }) => {
 	await mockACPBackend(page, "claude");
-	await page.route(/\/api\/v2\/bootstrap$/, async (route) => {
-		const response = await route.fetch();
-		const scope = await response.json();
-		await route.fulfill({
-			json: {
-				...scope,
-				backends: [
-					{ id: "wingman", name: "Wingman" },
-					...["claude", "codex", "copilot", "opencode", "pi"].map((id) => ({
-						id,
-						name: id,
-					})),
-				],
-			},
-		});
-	});
+	const fixture = await ahpFixture(page);
+	for (const id of ["claude", "codex", "copilot", "opencode", "pi"])
+		fixture.agents.set(id, id);
 	await composer(page);
 	await page.keyboard.press("Control+k");
 	const palette = page.getByRole("dialog", { name: "Command palette" });
@@ -1699,17 +1558,14 @@ test("uses canonical product names for agents", async ({ page }) => {
 test("groups diagnostics by file and opens individual problems", async ({
 	page,
 }) => {
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
-				git_init: false,
 				lsp: true,
 				debug: false,
-				tasks: false,
-				terminal: true,
 				platform: "linux",
-				workspace_name: "workspace",
+				name: "workspace",
 			},
 		});
 	});
@@ -1739,11 +1595,7 @@ test("groups diagnostics by file and opens individual problems", async ({
 			source: "gopls",
 		},
 	];
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
-		if (route.request().method() === "POST") {
-			await route.fulfill({ json: diagnostics });
-			return;
-		}
+	await mockLanguage(page, "workspace/diagnostic", async (route) => {
 		await route.fulfill({
 			json: {
 				diagnostics,
@@ -1783,17 +1635,15 @@ test("groups diagnostics by file and opens individual problems", async ({
 });
 
 test("uses each Git status slot for its stage action", async ({ page }) => {
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: true,
 				lsp: false,
-				tasks: false,
-				terminal: true,
 			},
 		});
 	});
-	await page.route(/\/api\/git\/status$/, async (route) => {
+	await mockGit(page, "status", async (route) => {
 		await route.fulfill({
 			json: {
 				branch: "main",
@@ -1819,7 +1669,7 @@ test("uses each Git status slot for its stage action", async ({ page }) => {
 			},
 		});
 	});
-	await page.route(/\/api\/git\/(?:branches|fetch)$/, async (route) => {
+	await mockGit(page, "branches", async (route) => {
 		await route.fulfill({
 			json: {
 				branches: [{ name: "main", current: true, remote: "" }],
@@ -1904,20 +1754,18 @@ test("uses each Git status slot for its stage action", async ({ page }) => {
 	).toBeVisible();
 });
 
-test("generates staged commit messages without overwriting concurrent edits", async ({
+test("commits a manually entered message with a responsive footer", async ({
 	page,
 }) => {
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: true,
 				lsp: false,
-				tasks: false,
-				terminal: true,
 			},
 		});
 	});
-	await page.route(/\/api\/git\/status$/, async (route) => {
+	await mockGit(page, "status", async (route) => {
 		await route.fulfill({
 			json: {
 				branch: "main",
@@ -1936,34 +1784,9 @@ test("generates staged commit messages without overwriting concurrent edits", as
 			},
 		});
 	});
-	let generated = 0;
-	let releaseSecond!: () => void;
-	let secondStarted!: () => void;
-	const waitForSecond = new Promise<void>((resolve) => {
-		secondStarted = resolve;
-	});
-	const secondRelease = new Promise<void>((resolve) => {
-		releaseSecond = resolve;
-	});
-	const firstMessage =
-		"Generated staged message 1\n\nExplain the staged behavior with enough detail to wrap in the narrow commit footer.";
-	await page.route(/\/api\/git\/commit-message$/, async (route) => {
-		generated++;
-		if (generated === 2) {
-			secondStarted();
-			await secondRelease;
-		}
-		await route.fulfill({
-			json: {
-				message:
-					generated === 1
-						? firstMessage
-						: `Generated staged message ${generated}`,
-			},
-		});
-	});
 	let commits = 0;
-	await page.route(/\/api\/git\/commit$/, async (route) => {
+	await mockGit(page, "commit", async (route) => {
+		expect(route.params).toEqual({ message: enteredMessage });
 		commits++;
 		await route.fulfill({ json: { output: "Committed" } });
 	});
@@ -1974,11 +1797,9 @@ test("generates staged commit messages without overwriting concurrent edits", as
 		.getByRole("tab", { name: "Changes", exact: true })
 		.click();
 	const message = page.getByRole("textbox", { name: "Commit message" });
-	const generate = page.getByRole("button", {
-		name: "Generate commit message",
-	});
-	await generate.click();
-	await expect(message).toHaveValue(firstMessage);
+	const enteredMessage =
+		"Describe staged changes\n\nExplain the staged behavior with enough detail to wrap in the narrow commit footer.";
+	await message.fill(enteredMessage);
 	expect(
 		await message.evaluate((element) => ({
 			tag: element.tagName,
@@ -1986,7 +1807,6 @@ test("generates staged commit messages without overwriting concurrent edits", as
 		})),
 	).toEqual({ tag: "TEXTAREA", height: expect.any(Number) });
 	expect((await message.boundingBox())!.height).toBeGreaterThan(28);
-	await expect(generate).toBeHidden();
 	const commit = page.getByRole("button", { name: "Commit", exact: true });
 	await expect(commit).toBeVisible();
 	const messageBox = await message.boundingBox();
@@ -1998,20 +1818,9 @@ test("generates staged commit messages without overwriting concurrent edits", as
 	);
 	expect(commits).toBe(0);
 
-	await message.fill("");
-	await expect(generate).toBeVisible();
-	await generate.click();
-	await waitForSecond;
-	await message.fill("Keep my hand-written message");
-	releaseSecond();
-	await expect(message).toHaveValue("Keep my hand-written message");
-	await expect(
-		page.getByText(
-			"Generated message was not inserted because the commit box changed.",
-			{ exact: true },
-		),
-	).toBeVisible();
-	expect(commits).toBe(0);
+	await commit.click();
+	await expect(message).toHaveValue("");
+	expect(commits).toBe(1);
 });
 
 test("compares branches and commits in a main content tab", async ({
@@ -2040,17 +1849,15 @@ test("compares branches and commits in a main content tab", async ({
 	const compareBases: string[] = [];
 	const compareHeads: string[] = [];
 	const historyQueries: string[] = [];
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: true,
 				lsp: false,
-				tasks: false,
-				terminal: true,
 			},
 		});
 	});
-	await page.route(/\/api\/git\/status$/, async (route) => {
+	await mockGit(page, "status", async (route) => {
 		await route.fulfill({
 			json: {
 				branch: "feature",
@@ -2061,15 +1868,15 @@ test("compares branches and commits in a main content tab", async ({
 			},
 		});
 	});
-	await page.route(/\/api\/git\/(?:branches|fetch)$/, async (route) => {
+	await mockGit(page, "branches", async (route) => {
 		await route.fulfill({
 			json: {
 				branches: [{ name: "feature", current: true }, { name: "main" }],
 			},
 		});
 	});
-	await page.route(/\/api\/git\/history/, async (route) => {
-		historyQueries.push(new URL(route.request().url()).search);
+	await mockGit(page, "commits", async (route) => {
+		historyQueries.push(JSON.stringify(route.params));
 		await route.fulfill({
 			json: [
 				{
@@ -2100,21 +1907,18 @@ test("compares branches and commits in a main content tab", async ({
 			],
 		});
 	});
-	await page.route(/\/api\/git\/compare/, async (route) => {
-		const request = new URL(route.request().url());
-		compareModes.push(request.searchParams.get("mode") || "");
-		compareBases.push(request.searchParams.get("base") || "");
-		compareHeads.push(request.searchParams.get("head") || "");
+	await mockGit(page, "diff", async (route) => {
+		const request = route.params;
+		compareModes.push(request.mode || "");
+		compareBases.push(request.base || "");
+		compareHeads.push(request.head || "");
 		await route.fulfill({
 			json: {
-				base: request.searchParams.get("base"),
-				head: request.searchParams.get("head"),
-				base_hash:
-					request.searchParams.get("base") === ":empty" ? "" : baseHash,
+				base: request.base,
+				head: request.head,
+				base_hash: request.base === ":empty" ? "" : baseHash,
 				head_hash: headHash,
-				...(request.searchParams.get("mode") === "merge-base"
-					? { merge_base_hash: baseHash }
-					: {}),
+				...(request.mode === "merge-base" ? { merge_base_hash: baseHash } : {}),
 				files: Array.from({ length: 80 }, (_, index) => {
 					if (index === 1) {
 						return {
@@ -2279,7 +2083,7 @@ test("compares branches and commits in a main content tab", async ({
 	await expect(page.getByText("Unreferenced work")).toBeVisible();
 	await expect.poll(() => historyQueries.length).toBeGreaterThan(0);
 	expect(
-		historyQueries.every((query) => !new URLSearchParams(query).has("limit")),
+		historyQueries.every((query) => !Object.hasOwn(JSON.parse(query), "limit")),
 	).toBe(true);
 	const historyList = page.locator("[data-virtual-git-history]");
 	await expect(historyList).toBeVisible();
@@ -2435,17 +2239,15 @@ test("shows and copies diagnostics for comparison failures", async ({
 	context,
 }) => {
 	await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: true,
 				lsp: false,
-				tasks: false,
-				terminal: true,
 			},
 		});
 	});
-	await page.route(/\/api\/git\/status$/, async (route) => {
+	await mockGit(page, "status", async (route) => {
 		await route.fulfill({
 			json: {
 				branch: "feature/router",
@@ -2456,18 +2258,20 @@ test("shows and copies diagnostics for comparison failures", async ({
 			},
 		});
 	});
-	await page.route(/\/api\/git\/(?:branches|fetch)$/, async (route) => {
+	await mockGit(page, "branches", async (route) => {
 		await route.fulfill({
 			json: {
 				branches: [{ name: "feature/router", current: true }, { name: "main" }],
 			},
 		});
 	});
-	await page.route(/\/api\/git\/compare/, async (route) => {
+	await mockGit(page, "diff", async (route) => {
 		await route.fulfill({
-			status: 409,
-			contentType: "text/plain",
-			body: "read tree entry examples/coding-router.yaml: directory not found",
+			error: {
+				code: -32009,
+				message:
+					"read tree entry examples/coding-router.yaml: directory not found",
+			},
 		});
 	});
 
@@ -2490,7 +2294,7 @@ test("shows and copies diagnostics for comparison failures", async ({
 	const copiedError = await page.evaluate(() => navigator.clipboard.readText());
 	expect(copiedError).toContain("Operation: Compare Git revisions");
 	expect(copiedError).toContain("Target: :worktree");
-	expect(copiedError).toContain("Response: HTTP 409");
+	expect(copiedError).toContain("Request: GET /api/workspace/git/diff");
 	expect(copiedError).toContain("Client stack:");
 	expect(copiedError).toContain(
 		"Server response:\nread tree entry examples/coding-router.yaml",
@@ -2500,17 +2304,13 @@ test("shows and copies diagnostics for comparison failures", async ({
 test("keeps the session context menu above panel clipping", async ({
 	page,
 }) => {
-	await page.route(/\/api\/v2\/backends\/wingman\/sessions$/, async (route) => {
-		await route.fulfill({
-			json: [
-				{
-					id: "menu-clipping-check",
-					title: "Menu clipping check",
-					updated_at: "2026-08-11T00:00:00Z",
-				},
-			],
-		});
-	});
+	await mockSavedSessions(page, [
+		{
+			id: "menu-clipping-check",
+			title: "Menu clipping check",
+			updated_at: "2026-08-11T00:00:00Z",
+		},
+	]);
 	await page.route(/\/api\/v2\/backends\/wingman\/settings$/, async (route) => {
 		await route.fulfill({
 			json: {
@@ -2520,7 +2320,6 @@ test("keeps the session context menu above panel clipping", async ({
 				mode: "",
 				efforts: [],
 				effort: "",
-				canDelete: true,
 			},
 		});
 	});
@@ -2604,10 +2403,11 @@ test("shows file actions above panel clipping", async ({ page }) => {
 test("background file refresh preserves the language server's unsaved buffer", async ({
 	page,
 }) => {
+	await ahpFixture(page);
 	await writeFile(workspacePath("review-lsp.txt"), "on disk\n");
 	const events: { event: string; path: string; content: string }[] = [];
-	await page.route(/\/api\/lsp\/document$/, async (route) => {
-		events.push(route.request().postDataJSON());
+	await mockLanguage(page, /textDocument\/did/, async (route) => {
+		events.push(route.presentation());
 		await route.fulfill({ status: 204 });
 	});
 	await composer(page);
@@ -2618,11 +2418,9 @@ test("background file refresh preserves the language server's unsaved buffer", a
 	await page.keyboard.press("Control+End");
 	await page.keyboard.insertText("unsaved change");
 	await expect.poll(() => events.at(-1)?.content).toContain("unsaved change");
-	const refresh = page.waitForResponse(
-		/\/api\/files\/read\?path=review-lsp.txt/,
-	);
+	const refresh = waitResource(page, "resourceRead", "review-lsp.txt", true);
 	await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-	await (await refresh).finished();
+	await refresh;
 	// Allow the document refresh and debounced LSP queue to finish.
 	await page.waitForTimeout(250);
 	expect(events.at(-1)?.content).toContain("unsaved change");
@@ -2639,19 +2437,19 @@ test("renaming a file while it loads completes the editor at its new path", asyn
 	const held = new Promise<void>((resolve) => {
 		releaseRead = resolve;
 	});
-	await page.route(
-		/\/api\/files\/read\?path=review-loading.txt$/,
+	await mockResource(
+		page,
+		"resourceRead",
 		async (route) => {
 			const response = await route.fetch();
 			await held;
 			await route.fulfill({ response });
 		},
+		"review-loading.txt",
 	);
 	await composer(page);
 	const file = page.getByRole("treeitem", { name: "review-loading.txt" });
-	const read = page.waitForRequest(
-		/\/api\/files\/read\?path=review-loading.txt$/,
-	);
+	const read = waitResource(page, "resourceRead", "review-loading.txt");
 	await file.click();
 	await read;
 	await file.click({ button: "right" });
@@ -2670,7 +2468,6 @@ test("renaming a file while it loads completes the editor at its new path", asyn
 
 test("saving preserves edits made while the write is pending", async ({
 	page,
-	request,
 }) => {
 	await writeFile(workspacePath("review-save.txt"), "original\n");
 	let releaseWrite!: () => void;
@@ -2678,15 +2475,15 @@ test("saving preserves edits made while the write is pending", async ({
 		releaseWrite = resolve;
 	});
 	let writes = 0;
-	await page.route(/\/api\/files\/write$/, async (route) => {
+	await mockResource(page, "resourceWrite", async (route) => {
 		writes++;
 		const response = await route.fetch();
 		if (writes === 1) await held;
 		await route.fulfill({ response });
 	});
 	const events: { event: string; content: string }[] = [];
-	await page.route(/\/api\/lsp\/document$/, async (route) => {
-		events.push(route.request().postDataJSON());
+	await mockLanguage(page, /textDocument\/did/, async (route) => {
+		events.push(route.presentation());
 		await route.fulfill({ status: 204 });
 	});
 	await composer(page);
@@ -2712,21 +2509,16 @@ test("saving preserves edits made while the write is pending", async ({
 		page.getByRole("dialog", { name: "Overwrite newer file?" }),
 	).toHaveCount(0);
 	expect(writes).toBe(1);
-	const firstSave = await (
-		await request.get("/api/files/read?path=review-save.txt")
-	).json();
+	const firstSave = await (await readSavedFile("review-save.txt")).json();
 	expect(firstSave.content).toBe("original\nfirst edit");
 	await page.keyboard.press("ControlOrMeta+S");
 	await expect(tab).not.toHaveAttribute("aria-label", /unsaved changes/);
-	const finalSave = await (
-		await request.get("/api/files/read?path=review-save.txt")
-	).json();
+	const finalSave = await (await readSavedFile("review-save.txt")).json();
 	expect(finalSave.content).toContain("and newer edit");
 });
 
 test("creates, saves, refreshes, and protects files changed on disk", async ({
 	page,
-	request,
 }) => {
 	await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
 	await composer(page);
@@ -2750,7 +2542,7 @@ test("creates, saves, refreshes, and protects files changed on disk", async ({
 	await page.keyboard.press("ControlOrMeta+S");
 	await expect(createdTab).not.toHaveAttribute("aria-label", /unsaved changes/);
 
-	let read = await request.get("/api/files/read?path=web-created.go");
+	let read = await readSavedFile("web-created.go");
 	expect(read.ok()).toBeTruthy();
 	let file = (await read.json()) as { content: string; revision: string };
 	expect(file.content).toContain("initialVersion");
@@ -2788,7 +2580,7 @@ test("creates, saves, refreshes, and protects files changed on disk", async ({
 	await overwriteDialog.getByRole("button", { name: "Overwrite" }).click();
 	await expect(overwriteDialog).not.toBeVisible();
 
-	read = await request.get("/api/files/read?path=web-created.go");
+	read = await readSavedFile("web-created.go");
 	file = (await read.json()) as { content: string; revision: string };
 	expect(file.content).toContain("localVersion");
 	expect(file.content).not.toContain("newerDiskVersion");
@@ -2806,9 +2598,7 @@ test("creates, saves, refreshes, and protects files changed on disk", async ({
 	await nestedName.fill("child.go");
 	await nestedName.press("Enter");
 	await expect(page.getByRole("tab", { name: /child\.go/ })).toBeVisible();
-	const nestedRead = await request.get(
-		"/api/files/read?path=nested%2Fchild.go",
-	);
+	const nestedRead = await readSavedFile("nested%2Fchild.go");
 	expect(nestedRead.ok()).toBeTruthy();
 
 	workspaceMenu = await openWorkspaceMenu(page);
@@ -2862,14 +2652,12 @@ test("creates, saves, refreshes, and protects files changed on disk", async ({
 	await expect(
 		page.getByRole("tab", { name: /web-created\.go/ }),
 	).not.toHaveAttribute("aria-label", /unsaved changes/);
-	const movedRead = await request.get(
-		"/api/files/read?path=web-folder%2Fweb-created.go",
-	);
+	const movedRead = await readSavedFile("web-folder%2Fweb-created.go");
 	expect(movedRead.ok()).toBeTruthy();
 	expect(((await movedRead.json()) as { content: string }).content).toContain(
 		"savedAfterMove",
 	);
-	const oldRead = await request.get("/api/files/read?path=web-created.go");
+	const oldRead = await readSavedFile("web-created.go");
 	expect(oldRead.status()).toBe(404);
 
 	const originalFile = page
@@ -2886,12 +2674,8 @@ test("creates, saves, refreshes, and protects files changed on disk", async ({
 		.getByRole("menuitem", { name: "Paste" })
 		.click();
 
-	const originalCopySource = await request.get(
-		"/api/files/read?path=editable.txt",
-	);
-	const copiedFile = await request.get(
-		"/api/files/read?path=web-folder%2Feditable.txt",
-	);
+	const originalCopySource = await readSavedFile("editable.txt");
+	const copiedFile = await readSavedFile("web-folder%2Feditable.txt");
 	expect(originalCopySource.ok()).toBeTruthy();
 	expect(copiedFile.ok()).toBeTruthy();
 	expect(((await copiedFile.json()) as { content: string }).content).toBe(
@@ -2904,8 +2688,8 @@ test("uses Monaco's live buffer for automatic completion and parameter hints", a
 }) => {
 	let completionContent = "";
 	let signatureContent = "";
-	await page.route(/\/api\/lsp\/completions$/, async (route) => {
-		const body = route.request().postDataJSON() as { content?: string };
+	await mockLanguage(page, "textDocument/completion", async (route) => {
+		const body = route.presentation() as { content?: string };
 		completionContent = body.content ?? "";
 		await route.fulfill({
 			json: {
@@ -2916,8 +2700,8 @@ test("uses Monaco's live buffer for automatic completion and parameter hints", a
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/signature-help$/, async (route) => {
-		const body = route.request().postDataJSON() as { content?: string };
+	await mockLanguage(page, "textDocument/signatureHelp", async (route) => {
+		const body = route.presentation() as { content?: string };
 		signatureContent = body.content ?? "";
 		await route.fulfill({
 			json: {
@@ -2934,9 +2718,12 @@ test("uses Monaco's live buffer for automatic completion and parameter hints", a
 	});
 
 	await composer(page);
-	const capabilitiesResponse = page.waitForResponse(/\/api\/lsp\/capabilities/);
+	const workspaceResponse = waitLanguageResult(
+		page,
+		"wingman/documentCapabilities",
+	);
 	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
-	await capabilitiesResponse;
+	await workspaceResponse;
 	const editor = page.locator(".monaco-editor");
 	await expect(editor).toBeVisible();
 	await editor.click({ button: "right" });
@@ -2985,7 +2772,7 @@ test("syntax-highlights shell scripts without a language server", async ({
 test("leaves TypeScript project diagnostics to the active language server", async ({
 	page,
 }) => {
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		await route.fulfill({
 			json: {
 				workspace_uri: "file:///workspace",
@@ -2993,7 +2780,7 @@ test("leaves TypeScript project diagnostics to the active language server", asyn
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
+	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
 		await route.fulfill({ json: [] });
 	});
 
@@ -3010,7 +2797,7 @@ test("leaves TypeScript project diagnostics to the active language server", asyn
 
 test("shows one project-aware TypeScript hover", async ({ page }) => {
 	let hoverRequests = 0;
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		await route.fulfill({
 			json: {
 				workspace_uri: "file:///workspace",
@@ -3019,10 +2806,10 @@ test("shows one project-aware TypeScript hover", async ({ page }) => {
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
+	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
 		await route.fulfill({ json: [] });
 	});
-	await page.route(/\/api\/lsp\/hover$/, async (route) => {
+	await mockLanguage(page, "textDocument/hover", async (route) => {
 		hoverRequests++;
 		await route.fulfill({
 			json: {
@@ -3052,7 +2839,7 @@ test("does not flash standalone diagnostics while the project LSP starts", async
 	const capabilitiesReady = new Promise<void>((resolve) => {
 		releaseCapabilities = resolve;
 	});
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		capabilitiesRequested = true;
 		await capabilitiesReady;
 		await route.fulfill({
@@ -3062,7 +2849,7 @@ test("does not flash standalone diagnostics while the project LSP starts", async
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
+	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
 		await route.fulfill({ json: [] });
 	});
 
@@ -3089,24 +2876,19 @@ test("upgrades an open editor when its language server becomes available", async
 	let languageServer = false;
 	let toolsState: "installing" | "ready" = "installing";
 	let editorCapabilityRequests = 0;
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
-				git_init: false,
 				lsp: languageServer,
 				debug: false,
-				tasks: false,
-				terminal: false,
-				tab: false,
-				"editor.tab.completion": false,
 				platform: "linux",
-				workspace_name: "workspace",
+				name: "workspace",
 				managed_tools: { state: toolsState },
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		editorCapabilityRequests++;
 		await route.fulfill({
 			json: {
@@ -3116,7 +2898,7 @@ test("upgrades an open editor when its language server becomes available", async
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
+	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
 		await route.fulfill({ json: [] });
 	});
 
@@ -3141,7 +2923,6 @@ test("upgrades an open editor when its language server becomes available", async
 
 test("save awaits LSP actions that add and remove Go imports", async ({
 	page,
-	request,
 }) => {
 	let workspaceURI = "";
 	const sourceActions: string[] = [];
@@ -3150,11 +2931,11 @@ test("save awaits LSP actions that add and remove Go imports", async ({
 		releaseActions = resolve;
 	});
 	let writes = 0;
-	await page.route(/\/api\/files\/write$/, async (route) => {
+	await mockResource(page, "resourceWrite", async (route) => {
 		writes++;
 		await route.continue();
 	});
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		const response = await route.fetch();
 		const capabilities = (await response.json()) as Record<string, unknown>;
 		workspaceURI = String(capabilities.workspace_uri ?? "");
@@ -3167,8 +2948,8 @@ test("save awaits LSP actions that add and remove Go imports", async ({
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/code-actions$/, async (route) => {
-		const body = route.request().postDataJSON() as {
+	await mockLanguage(page, "textDocument/codeAction", async (route) => {
+		const body = route.presentation() as {
 			content: string;
 			only?: string[];
 		};
@@ -3227,9 +3008,12 @@ test("save awaits LSP actions that add and remove Go imports", async ({
 	});
 
 	await composer(page);
-	const capabilitiesResponse = page.waitForResponse(/\/api\/lsp\/capabilities/);
+	const workspaceResponse = waitLanguageResult(
+		page,
+		"wingman/documentCapabilities",
+	);
 	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
-	await capabilitiesResponse;
+	await workspaceResponse;
 	const editor = page.locator(".monaco-editor").first();
 	await expect(editor).toBeVisible();
 	await editor.click();
@@ -3248,7 +3032,7 @@ test("save awaits LSP actions that add and remove Go imports", async ({
 		page.getByRole("tab", { name: /completion\.go/ }),
 	).not.toHaveAttribute("aria-label", /unsaved changes/);
 	expect(writes).toBe(1);
-	const read = await request.get("/api/files/read?path=completion.go");
+	const read = await readSavedFile("completion.go");
 	const saved = (await read.json()) as { content: string };
 	expect(saved.content).toContain('import "fmt"');
 	expect(saved.content).not.toContain('import "os"');
@@ -3262,7 +3046,7 @@ test("applies one command-driven quick action without moving the cursor", async 
 	let workspaceURI = "";
 	let invokedRequests = 0;
 	let commandExecutions = 0;
-	await page.route(/\/api\/lsp\/capabilities\?/, async (route) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
 		const response = await route.fetch();
 		const capabilities = (await response.json()) as Record<string, unknown>;
 		workspaceURI = String(capabilities.workspace_uri ?? "");
@@ -3275,7 +3059,7 @@ test("applies one command-driven quick action without moving the cursor", async 
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/diagnostics$/, async (route) => {
+	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
 		await route.fulfill({
 			json: [
 				{
@@ -3291,8 +3075,8 @@ test("applies one command-driven quick action without moving the cursor", async 
 			],
 		});
 	});
-	await page.route(/\/api\/lsp\/code-actions$/, async (route) => {
-		const body = route.request().postDataJSON() as {
+	await mockLanguage(page, "textDocument/codeAction", async (route) => {
+		const body = route.presentation() as {
 			content: string;
 			trigger_kind?: number;
 			only?: string[];
@@ -3319,9 +3103,9 @@ test("applies one command-driven quick action without moving the cursor", async 
 			},
 		});
 	});
-	await page.route(/\/api\/lsp\/execute-command$/, async (route) => {
+	await mockLanguage(page, "workspace/executeCommand", async (route) => {
 		commandExecutions++;
-		const body = route.request().postDataJSON() as { content: string };
+		const body = route.presentation() as { content: string };
 		const documentURI = `${workspaceURI.replace(/\/$/, "")}/completion.go`;
 		await route.fulfill({
 			json: {
@@ -3357,9 +3141,12 @@ test("applies one command-driven quick action without moving the cursor", async 
 	});
 
 	await composer(page);
-	const capabilitiesResponse = page.waitForResponse(/\/api\/lsp\/capabilities/);
+	const workspaceResponse = waitLanguageResult(
+		page,
+		"wingman/documentCapabilities",
+	);
 	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
-	await capabilitiesResponse;
+	await workspaceResponse;
 	const editor = page.locator(".monaco-editor").first();
 	const packageLine = editor.locator(".view-line", { hasText: "package main" });
 	await expect(packageLine).toBeVisible();
@@ -3384,7 +3171,7 @@ test("applies one command-driven quick action without moving the cursor", async 
 		page.getByRole("tab", { name: /completion\.go/ }),
 	).toHaveAttribute("aria-label", /unsaved changes/);
 
-	const beforeSave = await request.get("/api/files/read?path=completion.go");
+	const beforeSave = await readSavedFile("completion.go");
 	expect(((await beforeSave.json()) as { content: string }).content).toBe(
 		"package main\n",
 	);
@@ -3392,23 +3179,15 @@ test("applies one command-driven quick action without moving the cursor", async 
 	await expect(
 		page.getByRole("tab", { name: /completion\.go/ }),
 	).not.toHaveAttribute("aria-label", /unsaved changes/);
-	const afterSave = await request.get("/api/files/read?path=completion.go");
+	const afterSave = await readSavedFile("completion.go");
 	expect(((await afterSave.json()) as { content: string }).content).toBe(
 		"// generated\npackage mainX\n",
 	);
 });
 
-test("save applies real gopls organize-imports edits", async ({
-	page,
-	request,
-}) => {
-	const capabilitiesResponse = await request.get(
-		"/api/lsp/capabilities?path=organize-imports.go",
-	);
-	const capabilities = (await capabilitiesResponse.json()) as {
-		language_server?: boolean;
-		code_actions?: boolean;
-	};
+test("save applies real gopls organize-imports edits", async ({ page }) => {
+	const capabilities = await probeLanguageCapabilities("organize-imports.go");
+
 	test.skip(
 		!capabilities.language_server || !capabilities.code_actions,
 		"gopls is not available in this environment",
@@ -3426,9 +3205,7 @@ test("save applies real gopls organize-imports edits", async ({
 	await page.keyboard.press("ControlOrMeta+S");
 	await expect
 		.poll(async () => {
-			const response = await request.get(
-				"/api/files/read?path=organize-imports.go",
-			);
+			const response = await readSavedFile("organize-imports.go");
 			return ((await response.json()) as { content: string }).content;
 		})
 		.toBe(
@@ -3436,17 +3213,9 @@ test("save applies real gopls organize-imports edits", async ({
 		);
 });
 
-test("toggles editor.tab.completion from the command palette", async ({
+test("keeps the command palette mounted while filtering commands", async ({
 	page,
-	request,
 }) => {
-	const initial = await request.get("/api/capabilities");
-	expect(initial.ok()).toBeTruthy();
-	expect(
-		((await initial.json()) as Record<string, unknown>)[
-			"editor.tab.completion"
-		],
-	).toBe(true);
 	await composer(page);
 	await page.keyboard.press("Control+k");
 	const commandInput = page.getByRole("combobox", { name: "Search commands" });
@@ -3460,300 +3229,24 @@ test("toggles editor.tab.completion from the command palette", async ({
 	await expect(commandInput).toHaveAttribute("autocorrect", "off");
 	await expect(commandInput).toHaveAttribute("autocapitalize", "none");
 	await expect(commandInput).toHaveAttribute("spellcheck", "false");
-	await commandInput.pressSequentially("tab completion");
-	await expect(commandInput).toHaveValue("tab completion");
+	await commandInput.pressSequentially("find in files");
+	await expect(commandInput).toHaveValue("find in files");
 	await expect(commandInput).toHaveAttribute(
 		"data-mount-marker",
 		"palette-input",
 	);
 	await expect(palette).toHaveAttribute("data-mount-marker", "palette");
-	const disable = page.getByRole("option", {
-		name: /Disable Tab Completion/,
-	});
-	await expect(disable).toBeVisible();
-	await disable.click();
 	await expect(
-		page.getByText("Tab Completion disabled", { exact: true }),
+		page.getByRole("option", { name: /Find in files/ }),
 	).toBeVisible();
-
-	await page.keyboard.press("Control+k");
-	await expect(
-		page.getByRole("option", { name: /Enable Tab Completion/ }),
-	).toBeVisible();
-});
-
-test("Tab propagates a recent rename through the real model endpoint", async ({
-	page,
-	request,
-}) => {
-	await setEditorTabCompletion(request, true);
-	await openTabFixture(page, /tab-effectiveness\.go/, 'userName := "Ada"');
-
-	let predictionRequests = 0;
-	const predictionBodies: Array<{
-		line: number;
-		column: number;
-		version: number;
-		content: string;
-		previous_content: string;
-	}> = [];
-	const isTabRequest = (candidate: { method(): string; url(): string }) =>
-		candidate.method() === "POST" &&
-		new URL(candidate.url()).pathname === "/api/editor/tab";
-	page.on("request", (candidate) => {
-		if (!isTabRequest(candidate)) return;
-		predictionRequests++;
-		predictionBodies.push(candidate.postDataJSON());
-	});
-	const tabRequest = page.waitForRequest(isTabRequest);
-	const tabResponse = page.waitForResponse(
-		(response) =>
-			response.request().method() === "POST" &&
-			new URL(response.url()).pathname === "/api/editor/tab",
-	);
-	const declaration = page
-		.locator(".view-line", { hasText: 'userName := "Ada"' })
-		.first();
-	await declaration.click();
-	await page.keyboard.press("Home");
-	for (let index = 0; index < "userName".length; index++) {
-		await page.keyboard.press("Shift+ArrowRight");
-	}
-	await page.keyboard.insertText("accountName");
-
-	const observed = await tabRequest;
-	const body = observed.postDataJSON() as {
-		content: string;
-		previous_content: string;
-	};
-	expect(body.previous_content).toContain('userName := "Ada"');
-	expect(body.content).toContain('accountName := "Ada"');
-	expect(body.content).toContain("println(userName)");
-	const response = (await (await tabResponse).json()) as {
-		edit: unknown;
-	};
-	expect(response.edit).toEqual({
-		insert_text: "account",
-		expected_text: "user",
-		range: {
-			start_line: 7,
-			start_column: 13,
-			end_line: 7,
-			end_column: 17,
-		},
-	});
-
-	await page.waitForTimeout(200);
-	await page.keyboard.press("Tab");
-	const correctedUse = page
-		.locator(".view-line:visible", { hasText: "println(accountName)" })
-		.first();
-	// Monaco either accepts immediately or first focuses its long-distance
-	// preview. In the latter presentation, the next Tab accepts the same item.
-	if (!(await correctedUse.isVisible())) await page.keyboard.press("Tab");
-	await expect(correctedUse).toBeVisible();
-	await expect(
-		page.locator(".view-line:visible", { hasText: "println(userName)" }),
-	).toHaveCount(0);
-	// Acceptance is the end of this edit burst: Monaco may ask its providers
-	// again for the changed model, but that must not purchase another result.
-	await page.waitForTimeout(700);
-	expect(
-		predictionRequests,
-		`Tab prediction requests: ${JSON.stringify(predictionBodies)}`,
-	).toBe(1);
-
-	await page.keyboard.press("ControlOrMeta+S");
-	await expect
-		.poll(async () => {
-			const saved = await request.get(
-				"/api/files/read?path=tab-effectiveness.go",
-			);
-			return ((await saved.json()) as { content: string }).content;
-		})
-		.toContain("println(accountName)");
-});
-
-test("Tab stays idle until an edit and accepts a cursor completion", async ({
-	page,
-	request,
-}) => {
-	await setEditorTabCompletion(request, true);
-	let predictions = 0;
-	await page.route(/\/api\/editor\/tab$/, async (route) => {
-		predictions++;
-		const body = route.request().postDataJSON() as {
-			line: number;
-			column: number;
-			version: number;
-		};
-		await route.fulfill({
-			json: {
-				version: body.version,
-				edit: {
-					insert_text: "quantity",
-					expected_text: "",
-					range: {
-						start_line: body.line,
-						start_column: body.column,
-						end_line: body.line,
-						end_column: body.column,
-					},
-				},
-			},
-		});
-	});
-
-	await openTabFixture(page, /tab-ghost\.go/, "total := price *");
-	await page.waitForTimeout(400);
-	expect(predictions).toBe(0);
-	const synchronized = await request.post("/api/files/write", {
-		data: {
-			path: "tab-ghost.go",
-			content:
-				"package main\n\nfunc main() {\n\ttotal := price *\n\t_ = total\n}\n\n// synchronized externally\n",
-			force: true,
-		},
-	});
-	expect(synchronized.ok()).toBeTruthy();
-	await expect(
-		page.locator(".view-line", { hasText: "synchronized externally" }),
-	).toBeVisible();
-	await page.waitForTimeout(500);
-	expect(predictions).toBe(0);
-	await page.locator(".view-line", { hasText: "total := price *" }).click();
-	await page.keyboard.press("End");
-
-	await page.keyboard.type(" ");
-	await page.keyboard.press("Backspace");
-	await page.waitForTimeout(400);
-	expect(predictions).toBe(0);
-
-	await page.keyboard.type(" ");
-	const ghost = page.locator(".ghost-text-decoration", {
-		hasText: "quantity",
-	});
-	await expect(ghost).toBeVisible();
-	await page.keyboard.press("Tab");
-	await expect(
-		page.locator(".view-line", { hasText: "price * quantity" }).first(),
-	).toBeVisible();
-	await page.waitForTimeout(700);
-	expect(predictions).toBe(1);
-});
-
-test("Tab renders and accepts a real multiline Monaco inline edit", async ({
-	page,
-	request,
-}) => {
-	await setEditorTabCompletion(request, true);
-	await page.route(/\/api\/editor\/tab$/, async (route) => {
-		const body = route.request().postDataJSON() as { version: number };
-		await route.fulfill({
-			json: {
-				version: body.version,
-				edit: {
-					insert_text: "if ready {\n  new one\n  new two\n}\n",
-					expected_text: "old one \nold two\n",
-					range: {
-						start_line: 2,
-						start_column: 1,
-						end_line: 4,
-						end_column: 1,
-					},
-				},
-			},
-		});
-	});
-
-	await openTabFixture(page, /tab-multiline\.txt/, "old one");
-	await page.keyboard.type(" ");
-	const preview = page.locator(".monaco-editor:visible").filter({
-		hasText: "new one",
-	});
-	await expect(preview.first()).toBeVisible();
-	await expect
-		.poll(() => page.locator(".monaco-editor:visible").count())
-		.toBeGreaterThan(1);
-	await page.keyboard.press("Tab");
-	await expect
-		.poll(() => page.locator(".monaco-editor:visible").count())
-		.toBe(1);
-	await expect(
-		page.locator(".view-line", { hasText: "if ready" }).first(),
-	).toBeVisible();
-	await expect(page.locator(".view-line", { hasText: "old one" })).toHaveCount(
-		0,
-	);
-});
-
-test("Tab drops a delayed response after the cursor moves", async ({
-	page,
-	request,
-}) => {
-	await setEditorTabCompletion(request, true);
-	let firstStarted!: () => void;
-	const started = new Promise<void>((resolve) => {
-		firstStarted = resolve;
-	});
-	await page.route(/\/api\/editor\/tab$/, async (route) => {
-		const body = route.request().postDataJSON() as {
-			line: number;
-			column: number;
-			version: number;
-		};
-		const first = body.line === 1;
-		if (first) {
-			firstStarted();
-			await new Promise((resolve) => setTimeout(resolve, 900));
-		}
-		try {
-			await route.fulfill({
-				json: {
-					version: body.version,
-					edit: {
-						insert_text: first ? "oldValue" : " newValue",
-						expected_text: "",
-						range: {
-							start_line: body.line,
-							start_column: body.column,
-							end_line: body.line,
-							end_column: body.column,
-						},
-					},
-				},
-			});
-		} catch {
-			// The cursor move is expected to abort the first routed request.
-		}
-	});
-
-	await openTabFixture(page, /tab-stale\.txt/, "first :=");
-	await page.keyboard.type(" ");
-	await started;
-	const second = page.locator(".view-line", { hasText: "second :=" }).first();
-	await second.click();
-	await page.keyboard.press("End");
-	const currentGhost = page.locator(".ghost-text-decoration", {
-		hasText: "newValue",
-	});
-	await expect(currentGhost).toBeVisible();
-	await page.waitForTimeout(1_000);
-	await expect(currentGhost).toBeVisible();
-	await expect(
-		page.locator(".ghost-text-decoration", { hasText: "oldValue" }),
-	).toHaveCount(0);
-	await page.keyboard.press("Tab");
-	await expect(
-		page.locator(".view-line", { hasText: "second := newValue" }).first(),
-	).toBeVisible();
+	await page.keyboard.press("Escape");
 });
 
 test("keeps composer pickers visible in a constrained window", async ({
 	page,
 }) => {
 	await page.setViewportSize({ width: 420, height: 300 });
-	await page.route(/\/api\/files\/search/, async (route) => {
+	await page.route(/\/api\/workspace\/files(\?|$)/, async (route) => {
 		await route.fulfill({
 			json: Array.from({ length: 30 }, (_, index) => ({
 				path: `src/nested/example-${index}.ts`,
@@ -3767,6 +3260,9 @@ test("keeps composer pickers visible in a constrained window", async ({
 	const picker = page.getByRole("dialog", { name: "Find a file" });
 	await expect(picker).toBeVisible();
 	await expect(picker.getByPlaceholder("Search files…")).toBeFocused();
+	await expect(
+		picker.getByRole("button", { name: "Attach image from your computer" }),
+	).toBeVisible();
 	await expectFloatingInViewport(page, picker);
 	await page.keyboard.press("Escape");
 	await expect(picker).toBeHidden();
@@ -3789,31 +3285,28 @@ test("discovers new agents after earlier tasks finish during the same turn", asy
 		[],
 		"tool_running",
 	);
-	await page.route(/\/api\/capabilities$/, (route) =>
+	await mockWorkspace(page, (route) =>
 		route.fulfill({
-			json: { git: false, lsp: false, tasks: true, terminal: true },
+			json: { git: false, lsp: false },
 		}),
 	);
 	let running = false;
-	await page.route(
-		/\/api\/v2\/backends\/wingman\/sessions\/[^/]+\/tasks$/,
-		(route) =>
-			route.fulfill({
-				json: [
-					{
-						id: "review",
-						description: "New review",
-						agent_type: "code-reviewer",
-						status: running ? "running" : "done",
-						elapsed_seconds: 3,
-						seq: running ? 2 : 1,
-					},
-				],
-			}),
+	await page.route(/\/api\/v2\/chats\/[^/]+\/tasks$/, (route) =>
+		route.fulfill({
+			json: [
+				{
+					id: "review",
+					description: "New review",
+					agent_type: "code-reviewer",
+					status: running ? "running" : "done",
+					elapsed_seconds: 3,
+					seq: running ? 2 : 1,
+				},
+			],
+		}),
 	);
-	await page.route(
-		/\/api\/v2\/backends\/wingman\/sessions\/[^/]+\/schedules$/,
-		(route) => route.fulfill({ json: [] }),
+	await page.route(/\/api\/v2\/chats\/[^/]+\/schedules$/, (route) =>
+		route.fulfill({ json: [] }),
 	);
 	await composer(page);
 	await openSessions(page);
@@ -3977,55 +3470,47 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 			updated_at: "2026-08-11T00:00:00Z",
 		},
 	]);
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
 				lsp: false,
-				tasks: true,
-				terminal: true,
 			},
 		});
 	});
 	let taskListRequests = 0;
-	await page.route(
-		/\/api\/v2\/backends\/wingman\/sessions\/[^/]+\/tasks$/,
-		async (route) => {
-			taskListRequests++;
-			await route.fulfill({
-				json:
-					taskListRequests === 1
-						? []
-						: [
-								{
-									id: "running-check",
-									description: "Review changes",
-									agent_type: "explore",
-									status: "running",
-									activity: "Reading files",
-									elapsed_seconds: 3,
-									seq: 1,
-								},
-							],
-			});
-		},
-	);
-	await page.route(
-		/\/api\/v2\/backends\/wingman\/sessions\/[^/]+\/schedules$/,
-		async (route) => {
-			await route.fulfill({
-				json: [
-					{
-						id: "deploy-check",
-						prompt: "Check deploy",
-						schedule: "every 1h",
-						status: "active",
-						next_in: "in 42m",
-					},
-				],
-			});
-		},
-	);
+	await page.route(/\/api\/v2\/chats\/[^/]+\/tasks$/, async (route) => {
+		taskListRequests++;
+		await route.fulfill({
+			json:
+				taskListRequests === 1
+					? []
+					: [
+							{
+								id: "running-check",
+								description: "Review changes",
+								agent_type: "explore",
+								status: "running",
+								activity: "Reading files",
+								elapsed_seconds: 3,
+								seq: 1,
+							},
+						],
+		});
+	});
+	await page.route(/\/api\/v2\/chats\/[^/]+\/schedules$/, async (route) => {
+		await route.fulfill({
+			json: [
+				{
+					id: "deploy-check",
+					prompt: "Check deploy",
+					schedule: "every 1h",
+					status: "active",
+					next_in: "in 42m",
+				},
+			],
+		});
+	});
 	await composer(page);
 	await openSessions(page);
 	await page.getByTitle("Agent menu check").click();
@@ -4277,7 +3762,7 @@ test("moves the sidebar between sides and persists its position", async ({
 		await expect(center).toHaveAttribute("data-mount-marker", "original");
 		await expect(input).toHaveValue("Keep this draft when moving the sidebar");
 
-		const capabilities = await (await request.get("/api/capabilities")).json();
+		const capabilities = await (await request.get("/api/workspace")).json();
 		expect(capabilities["window.sidebar.position"]).toBe("right");
 		await page.reload();
 		await expect(sidePanel).toHaveAttribute("data-panel-side", "right");
@@ -4303,7 +3788,7 @@ for (const position of ["left", "right"] as const) {
 	test(`aligns the ${position} sidebar with desktop window controls`, async ({
 		page,
 	}) => {
-		await page.route("/api/capabilities", async (route) => {
+		await mockWorkspace(page, async (route) => {
 			const response = await route.fetch();
 			await route.fulfill({
 				json: {
@@ -4372,25 +3857,26 @@ test("composer hides mode then model as session history narrows the chat", async
 	page,
 }) => {
 	await mockACPBackend(page);
-	await page.route(/\/api\/v2\/backends\/wingman\/settings$/, (route) =>
-		route.fulfill({
-			json: {
-				...emptySession("").settings,
-				models: [
-					{
-						id: "long-model",
-						name: "A model with a long provider and version name",
-					},
-				],
-				model: "long-model",
-				effort: "default",
-				modes: [
-					{ id: "agent", name: "Agent mode with a longer descriptive name" },
-				],
-				mode: "agent",
+	const fixture = await ahpFixture(page);
+	fixture.sessionConfig.set("wingman", {
+		schema: {
+			type: "object",
+			properties: {
+				model: {
+					type: "string",
+					enum: ["long-model"],
+					enumLabels: ["A model with a long provider and version name"],
+				},
+				effort: { type: "string", enum: ["default"] },
+				mode: {
+					type: "string",
+					enum: ["agent"],
+					enumLabels: ["Agent mode with a longer descriptive name"],
+				},
 			},
-		}),
-	);
+		},
+		values: { model: "long-model", effort: "default", mode: "agent" },
+	});
 	const input = await composer(page);
 	await input.fill("Keep this draft while resizing");
 	const composerBox = page.locator("[data-chat-composer]");
@@ -4416,7 +3902,6 @@ test("composer hides mode then model as session history narrows the chat", async
 		await expect(harness).toBeVisible();
 		await expect(input).toHaveValue("Keep this draft while resizing");
 		await expect(composerBox.getByTitle("Add file context")).toBeVisible();
-		await expect(composerBox.getByTitle("Attach image")).toBeVisible();
 		await expect(composerBox.getByTitle("Send (Enter)")).toBeEnabled();
 		await expect
 			.poll(() =>
@@ -4520,7 +4005,9 @@ test("runs a coding tool and renders its result", async ({ page }) => {
 	await input.fill("create e2e-result.txt");
 	await input.press("Enter");
 
-	await page.getByRole("button", { name: "1 tool" }).click();
+	await page
+		.getByRole("button", { name: "Edited a file", exact: true })
+		.click();
 	const tool = page.getByRole("button", { name: /^Edit file/ });
 	await expect(tool).toBeVisible();
 	await tool.click();
@@ -4764,13 +4251,10 @@ test("elicitation preserves multi-select and Other with object-property field na
 	page,
 }) => {
 	const replies: unknown[] = [];
-	await page.route(/\/sessions\/review-active\/commands$/, async (route) => {
-		const body = route.request().postDataJSON();
+	const fixture = await ahpFixture(page);
+	fixture.onCommand = async (body) => {
 		replies.push(body);
-		await route.fulfill({
-			json: { requestId: body.requestId, accepted: true },
-		});
-	});
+	};
 	await reviewActive(page, undefined, [
 		{
 			id: "elicit-properties",
@@ -4903,7 +4387,7 @@ test("terminal reconnect restores scrollback and accepts new input", async ({
 }) => {
 	let connections = 0;
 	let disconnect = () => {};
-	await page.routeWebSocket(/\/api\/terminals\/[^/]+\/ws(?:\?|$)/, (socket) => {
+	await page.routeWebSocket(/\/ahp(?:\?|$)/, (socket) => {
 		connections++;
 		socket.connectToServer();
 		disconnect = () =>
@@ -5061,7 +4545,7 @@ test("docks only terminals at the bottom with tabs on the right", async ({
 			return !!(screen && list && list.x >= screen.x + screen.width - 1);
 		})
 		.toBe(true);
-	const bottomCapabilities = await request.get("/api/capabilities");
+	const bottomCapabilities = await request.get("/api/workspace");
 	expect(
 		((await bottomCapabilities.json()) as Record<string, unknown>)[
 			"window.terminal.position"
@@ -5073,7 +4557,7 @@ test("docks only terminals at the bottom with tabs on the right", async ({
 		.getByRole("option", { name: "Show Terminal in Tab", exact: true })
 		.click();
 	await expect(dock).toHaveCount(0);
-	const tabCapabilities = await request.get("/api/capabilities");
+	const tabCapabilities = await request.get("/api/workspace");
 	expect(
 		((await tabCapabilities.json()) as Record<string, unknown>)[
 			"window.terminal.position"
@@ -5136,7 +4620,7 @@ test("uses Wingman's dynamic editor context menu", async ({
 	await resetCompletionFile(request);
 	await page.setViewportSize({ width: 640, height: 400 });
 	let definitionRequested = false;
-	await page.route(/\/api\/lsp\/definition$/, async (route) => {
+	await mockLanguage(page, "textDocument/definition", async (route) => {
 		definitionRequested = true;
 		await route.fulfill({ json: [] });
 	});
@@ -5276,37 +4760,7 @@ test("uses Wingman's dynamic editor context menu", async ({
 	await expect(viewLines).toContainText("package main");
 });
 
-test("previews selection transformations and can hand the selection to chat", async ({
-	page,
-	request,
-}) => {
-	const requests: Array<{
-		path: string;
-		content: string;
-		instruction: string;
-		version: number;
-		range: {
-			start_line: number;
-			start_column: number;
-			end_line: number;
-			end_column: number;
-		};
-	}> = [];
-	await page.route(/\/api\/editor\/transform$/, async (route) => {
-		const body = route.request().postDataJSON() as (typeof requests)[number];
-		requests.push(body);
-		await route.fulfill({
-			json: {
-				version: body.version,
-				edit: {
-					range: body.range,
-					expected_text: "original",
-					replacement: "transformed",
-				},
-			},
-		});
-	});
-
+test("hands the editor selection to chat", async ({ page }) => {
 	await composer(page);
 	await page.getByRole("treeitem", { name: /editable\.txt/ }).click();
 	const editor = page.locator(".monaco-editor").first();
@@ -5321,83 +4775,16 @@ test("previews selection transformations and can hand the selection to chat", as
 	};
 
 	await selectOriginal();
-	await page.keyboard.press("ControlOrMeta+K");
-	let palette = page.getByRole("dialog", { name: "Command palette" });
-	await expect(palette).toBeVisible();
-	let paletteActions = await palette.getByRole("option").allTextContents();
-	expect(paletteActions.indexOf("Chat about this…Selected text")).toBeLessThan(
-		paletteActions.indexOf("Transform selection…Selected text"),
-	);
-	await palette
-		.getByRole("option", { name: "Transform selection… Selected text" })
-		.click();
-	const prompt = page.getByRole("dialog", { name: "Transform selection" });
-	await expect(prompt).toBeVisible();
-	await prompt.getByRole("button", { name: "Refactor", exact: true }).click();
-	await expect(prompt).toBeHidden();
-	await expect(
-		page
-			.locator(".monaco-editor:visible")
-			.filter({ hasText: "transformed" })
-			.first(),
-	).toBeVisible();
-	expect(requests).toHaveLength(1);
-	expect(requests[0].path).toBe("editable.txt");
-	expect(requests[0].content).toBe("original\n");
-	expect(requests[0].instruction).toContain("Refactor this selection");
-	await page.keyboard.press("Escape");
-	await expect(original).toBeVisible();
-
-	await selectOriginal();
-	await page.keyboard.press("ControlOrMeta+K");
-	palette = page.getByRole("dialog", { name: "Command palette" });
-	await palette
-		.getByRole("option", { name: "Transform selection… Selected text" })
-		.click();
-	await prompt
-		.getByRole("textbox", { name: "Transformation instruction" })
-		.fill("Make it clearer");
-	await prompt.getByRole("button", { name: "Generate", exact: true }).click();
-	await expect(prompt).toBeHidden();
-	await expect(
-		page
-			.locator(".monaco-editor:visible")
-			.filter({ hasText: "transformed" })
-			.first(),
-	).toBeVisible();
-	await page.keyboard.press("Tab");
-	const transformed = page
-		.locator(".view-line:visible", { hasText: "transformed" })
-		.first();
-	// Monaco may use the first Tab to focus its range-edit preview and the
-	// second to accept, depending on available editor space.
-	if (!(await transformed.isVisible())) await page.keyboard.press("Tab");
-	await expect(transformed).toBeVisible();
-	await expect
-		.poll(() => page.locator(".monaco-editor:visible").count())
-		.toBe(1);
-	const disk = await request.get("/api/files/read?path=editable.txt");
-	expect(((await disk.json()) as { content: string }).content).toBe(
-		"original\n",
-	);
-	await page.keyboard.press("ControlOrMeta+Z");
-	await expect(original).toBeVisible();
-
-	await selectOriginal();
 	await page.keyboard.press("Shift+F10");
 	const menu = page.getByRole("menu", { name: "Editor actions" });
 	await expect(menu.locator('[role="menuitem"]:enabled').first()).toBeFocused();
-	const menuLabels = await menu.getByRole("menuitem").allTextContents();
-	expect(menuLabels.indexOf("Chat about this…")).toBeLessThan(
-		menuLabels.findIndex((label) => label.startsWith("Transform Selection…")),
-	);
 	await page.keyboard.press("Escape");
 	await expect(menu).toBeHidden();
 	await expect(
 		editor.getByRole("textbox", { name: "Editor content", exact: true }),
 	).toBeFocused();
 	await page.keyboard.press("ControlOrMeta+K");
-	palette = page.getByRole("dialog", { name: "Command palette" });
+	const palette = page.getByRole("dialog", { name: "Command palette" });
 	await expect(
 		palette.getByRole("option", { name: "Chat about this… Selected text" }),
 	).toBeVisible();
@@ -5421,7 +4808,6 @@ test("previews selection transformations and can hand the selection to chat", as
 
 test("routes native File menu commands through shared file handling", async ({
 	page,
-	request,
 }) => {
 	await page.addInitScript(() => {
 		const states: Array<{ command: string; enabled: boolean }> = [];
@@ -5482,7 +4868,7 @@ test("routes native File menu commands through shared file handling", async ({
 	await saveAs.getByRole("button", { name: "Save" }).click();
 
 	await expect(page.getByRole("tab", { name: "menu-copy.txt" })).toBeVisible();
-	let read = await request.get("/api/files/read?path=menu-copy.txt");
+	let read = await readSavedFile("menu-copy.txt");
 	expect(read.ok()).toBeTruthy();
 	let file = (await read.json()) as { content: string };
 	expect(file.content).toContain("created through the File menu");
@@ -5494,7 +4880,7 @@ test("routes native File menu commands through shared file handling", async ({
 	);
 	await expect
 		.poll(async () => {
-			read = await request.get("/api/files/read?path=menu-copy.txt");
+			read = await readSavedFile("menu-copy.txt");
 			file = (await read.json()) as { content: string };
 			return file.content;
 		})
@@ -5599,10 +4985,9 @@ test("renders Mermaid diagrams", async ({ page }) => {
 
 test("Mermaid preview reports invalid diagrams and recovers after an edit", async ({
 	page,
-	request,
 }) => {
 	const path = "invalid-diagram.mmd";
-	const created = await request.post("/api/files", {
+	const created = await createSavedFile({
 		data: { path, content: "flowchart LR\n  A --> [\n" },
 	});
 	expect(created.ok()).toBeTruthy();
@@ -5611,9 +4996,9 @@ test("Mermaid preview reports invalid diagrams and recovers after an edit", asyn
 	await expect(page.getByRole("alert")).toContainText(
 		`Could not preview ${path}`,
 	);
-	const original = await request.get(`/api/files/read?path=${path}`);
+	const original = await readSavedFile(`${path}`);
 	const { revision } = await original.json();
-	const written = await request.post("/api/files/write", {
+	const written = await writeSavedFile({
 		data: {
 			path,
 			revision,
@@ -5629,10 +5014,7 @@ test("Mermaid preview reports invalid diagrams and recovers after an edit", asyn
 	await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
-test("protects unsaved file edits when closing a tab", async ({
-	page,
-	request,
-}) => {
+test("protects unsaved file edits when closing a tab", async ({ page }) => {
 	await composer(page);
 	await page.getByRole("treeitem", { name: /editable\.txt/ }).click();
 	const editor = page.locator(".monaco-editor");
@@ -5660,7 +5042,7 @@ test("protects unsaved file edits when closing a tab", async ({
 	await closeDialog.getByRole("button", { name: "Discard" }).click();
 	await expect(page.getByRole("tab", { name: /editable\.txt/ })).toHaveCount(0);
 
-	const response = await request.get("/api/files/read?path=editable.txt");
+	const response = await readSavedFile("editable.txt");
 	expect(response.ok()).toBeTruthy();
 	expect((await response.json()).content).toBe("original\n");
 });
@@ -5668,6 +5050,7 @@ test("protects unsaved file edits when closing a tab", async ({
 test("closing multiple dirty tabs prompts in order and waits for pending saves", async ({
 	page,
 }) => {
+	await ahpFixture(page);
 	for (const name of ["review-close-a.txt", "review-close-b.txt"])
 		await writeFile(workspacePath(name), "original\n");
 	await composer(page);
@@ -5699,12 +5082,12 @@ test("closing multiple dirty tabs prompts in order and waits for pending saves",
 	const held = new Promise<void>((resolve) => {
 		releaseWrite = resolve;
 	});
-	await page.route(/\/api\/files\/write$/, async (route) => {
+	await mockResource(page, "resourceWrite", async (route) => {
 		await held;
 		await route.continue();
 	});
 	await lastTab.press("Delete");
-	const write = page.waitForRequest(/\/api\/files\/write$/);
+	const write = waitResource(page, "resourceWrite");
 	await dialog.getByRole("button", { name: "Save", exact: true }).click();
 	await write;
 	await expect(dialog.getByRole("button", { name: "Cancel" })).toBeDisabled();
@@ -5765,10 +5148,10 @@ test("asks before installing the debugger and shows popup state and retry", asyn
 		workspacePath("completion.go"),
 		"package main\n\nfunc main() {}\n",
 	);
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		const response = await route.fetch();
 		await route.fulfill({
-			json: { ...(await response.json()), debug: false, tab: false },
+			json: { ...(await response.json()), debug: false },
 		});
 	});
 	await page.addInitScript(() => {
@@ -5785,7 +5168,8 @@ test("asks before installing the debugger and shows popup state and retry", asyn
 			},
 		];
 		window.fetch = (input, init) => {
-			if (input !== "/api/debug/plan") return originalFetch(input, init);
+			if (input !== "/api/workspace/debug/plan")
+				return originalFetch(input, init);
 			const install = JSON.parse(init?.body as string).install;
 			if (!install && !installedPlan) {
 				return Promise.resolve(
@@ -6012,40 +5396,27 @@ test("stops the active debugger when the Debug tab closes", async ({
 	};
 	const controls: Array<Record<string, unknown>> = [];
 
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
-				git_init: false,
 				lsp: false,
 				debug: true,
-				tasks: false,
-				terminal: true,
 				platform: "linux",
-				workspace_name: "workspace",
+				name: "workspace",
 			},
 		});
 	});
-	await page.route(/\/api\/debug\/inspection(?:\?[^#]*)?$/, async (route) => {
-		await route.fulfill({
-			json: { session, output: "ready\n", threads: [], frames: [] },
-		});
-	});
-	await page.route(/\/api\/debug\/session$/, async (route) => {
-		await route.fulfill({ json: { session } });
-	});
-	await page.route(/\/api\/debug\/state(?:\?[^#]*)?$/, async (route) => {
-		await route.fulfill({
-			json: { available: true, session, breakpoints: [] },
-		});
-	});
-	await page.route(/\/api\/debug\/control$/, async (route) => {
-		controls.push(route.request().postDataJSON());
-		session = { ...session, state: "terminated", state_version: 4 };
-		await route.fulfill({
-			json: { session },
-		});
-	});
+	await mockDebugSession(
+		page,
+		() => ({ session, output: "ready\n" }),
+		(command, params) => {
+			if (command !== "disconnect") return;
+			controls.push(params);
+			session = { ...session, state: "terminated", state_version: 4 };
+			return {};
+		},
+	);
 
 	await composer(page);
 	const debugTab = page.locator('[data-center-tab="debug"]');
@@ -6097,8 +5468,8 @@ test("stops the active debugger when the Debug tab closes", async ({
 
 	await expect.poll(() => controls.length).toBe(1);
 	expect(controls[0]).toMatchObject({
-		operation: "stop",
-		session_id: session.session_id,
+		terminateDebuggee: true,
+		_wingmanSessionId: session.session_id,
 	});
 	await expect(debugTab).toHaveCount(0);
 });
@@ -6125,45 +5496,38 @@ test("follows debugger stops into the source editor", async ({ page }) => {
 	};
 	const evaluations: Array<Record<string, unknown>> = [];
 
-	await page.route(/\/api\/capabilities$/, async (route) => {
+	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: false,
-				git_init: false,
 				lsp: false,
 				debug: true,
-				tasks: false,
-				terminal: false,
 				platform: "linux",
-				workspace_name: "workspace",
+				name: "workspace",
 			},
 		});
 	});
-	await page.route(/\/api\/debug\/state(?:\?[^#]*)?$/, async (route) => {
-		await route.fulfill({
-			json: {
-				available: true,
-				session,
-				breakpoints: [],
-				frame:
-					session.state === "stopped"
-						? {
-								id: 21,
-								name: "main",
-								source: { path: "debug-follow.go" },
-								line: 70,
-								column: 5,
-							}
-						: undefined,
-			},
-		});
-	});
-	await page.route(/\/api\/debug\/evaluate$/, async (route) => {
-		evaluations.push(route.request().postDataJSON());
-		await route.fulfill({
-			json: { result: "70", type: "int", variables_reference: 0 },
-		});
-	});
+	await mockDebugSession(
+		page,
+		() => ({
+			session,
+			frame:
+				session.state === "stopped"
+					? {
+							id: 21,
+							name: "main",
+							source: { path: "debug-follow.go" },
+							line: 70,
+							column: 5,
+						}
+					: undefined,
+		}),
+		(command, params) => {
+			if (command !== "evaluate") return;
+			evaluations.push(params);
+			return { result: "70", type: "int", variablesReference: 0 };
+		},
+	);
 
 	await composer(page);
 	await expect(page.locator('[data-center-tab="debug"]')).toBeVisible();
@@ -6184,11 +5548,11 @@ test("follows debugger stops into the source editor", async ({ page }) => {
 	await expect.poll(() => evaluations.length).toBe(1);
 	expect(evaluations[0]).toMatchObject({
 		expression: "breakpointTarget",
-		session_id: "debug-follow-session",
-		frame_id: 21,
-		state_version: 2,
+		_wingmanSessionId: "debug-follow-session",
+		frameId: 21,
+		_wingmanStateVersion: 2,
 	});
-	expect(evaluations[0]).not.toHaveProperty("context");
+	expect(evaluations[0].context).toBe("hover");
 	await expect(page.locator(".monaco-hover:visible")).toContainText("70");
 });
 
@@ -6220,26 +5584,13 @@ test("retries a lost input receipt without executing the input twice", async ({
 	page,
 	request,
 }) => {
+	const requestIDs: string[] = [];
+	await loseFirstInputReceipt(page, requestIDs);
 	const input = await composer(page);
 	const before = await (
 		await request.get(`${controlURL()}/model-stats`)
 	).json();
-	const requestIDs: string[] = [];
-	await page.route(
-		"**/api/v2/backends/wingman/sessions/*/commands",
-		async (route) => {
-			const command = route.request().postDataJSON();
-			if (command.type !== "send") {
-				await route.continue();
-				return;
-			}
-			requestIDs.push(command.id);
-			if (requestIDs.length === 1) {
-				await route.fetch();
-				await route.abort("failed");
-			} else await route.continue();
-		},
-	);
+
 	await input.fill("render markdown");
 	await input.press("Enter");
 	await expect(
@@ -6268,16 +5619,21 @@ test("keeps unsent drafts available when the workspace instance changes", async 
 }) => {
 	let changed = false;
 	let closeConnection = () => {};
-	await page.route(/\/api\/v2\/bootstrap$/, async (route) => {
-		const response = await route.fetch();
-		const scope = await response.json();
-		await route.fulfill({
-			json: changed ? { ...scope, instanceId: "replacement" } : scope,
+	await page.routeWebSocket(/\/ahp(?:\?|$)/, (socket) => {
+		const server = socket.connectToServer();
+		server.onMessage((wire) => {
+			const message = JSON.parse(String(wire));
+			if (changed && message.result?.snapshots)
+				for (const snapshot of message.result.snapshots)
+					if (snapshot.resource === "ahp-root://")
+						snapshot.state._meta["wingman.workspace"].instanceId =
+							"replacement";
+			socket.send(JSON.stringify(message));
 		});
-	});
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		socket.connectToServer();
-		closeConnection = () => socket.close();
+		closeConnection = () => {
+			socket.close();
+			server.close();
+		};
 	});
 	const input = await composer(page);
 	await input.fill("Keep this unsent draft");
@@ -6292,18 +5648,7 @@ test("keeps unsent drafts available when the workspace instance changes", async 
 test("closing the last session leaves empty space and new chat keeps its backend", async ({
 	page,
 }) => {
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
-	await page.route("**/api/v2/bootstrap", (route) =>
-		route.fulfill({
-			json: {
-				...scope,
-				backends: [...scope.backends, { id: "fixture", name: "Fixture" }],
-			},
-		}),
-	);
-	await page.route("**/api/v2/backends/fixture/settings", (route) =>
-		route.fulfill({ json: emptySession("").settings }),
-	);
+	(await ahpFixture(page)).agents.set("fixture", "Fixture");
 	await mockSavedSessions(
 		page,
 		[
@@ -6392,25 +5737,10 @@ test.describe("phone navigation", () => {
 	test("switches agents and opens the selected agent's sessions without nested popups", async ({
 		page,
 	}) => {
-		const scope = await (await page.request.get("/api/v2/bootstrap")).json();
-		await page.route("**/api/v2/bootstrap", (route) =>
-			route.fulfill({
-				json: {
-					...scope,
-					backends: [
-						...scope.backends,
-						{ id: "fixture", name: "Fixture" },
-						...Array.from({ length: 20 }, (_, index) => ({
-							id: `agent-${index}`,
-							name: `Agent ${index}`,
-						})),
-					],
-				},
-			}),
-		);
-		await page.route("**/api/v2/backends/fixture/settings", (route) =>
-			route.fulfill({ json: emptySession("").settings }),
-		);
+		const fixture = await ahpFixture(page);
+		fixture.agents.set("fixture", "Fixture");
+		for (let index = 0; index < 20; index++)
+			fixture.agents.set(`agent-${index}`, `Agent ${index}`);
 		await mockSavedSessions(
 			page,
 			[
@@ -6436,9 +5766,13 @@ test.describe("phone navigation", () => {
 			.tap();
 		const dialog = page.getByRole("dialog", { name: "Sessions", exact: true });
 		await expect(dialog).toBeVisible();
-		await dialog.getByRole("button", { name: /From another browser/ }).tap();
+		await dialog.getByRole("button", { name: /^From another browser/ }).tap();
 		await expect(dialog).not.toBeVisible();
-		await expect(page).toHaveURL(/\/fixture\/phone-saved$/);
+		await expect(page).toHaveURL(
+			new RegExp(
+				`/fixture/${encodeURIComponent(canonicalChatURI("fixture", "phone-saved"))}$`,
+			),
+		);
 		await expect(picker).toHaveValue("fixture");
 		await expect(
 			page.getByPlaceholder("Message Fixture…").filter({ visible: true }),
@@ -6537,6 +5871,8 @@ test.describe("remote access", () => {
 		page,
 		request,
 	}) => {
+		const ids: string[] = [];
+		await loseFirstInputReceipt(page, ids);
 		await page.goto(process.env.E2E_PAIR_URL!);
 		const input = page
 			.getByPlaceholder("Message Wingman…")
@@ -6545,19 +5881,7 @@ test.describe("remote access", () => {
 		const before = await (
 			await request.get(`${controlURL()}/model-stats`)
 		).json();
-		const ids: string[] = [];
-		await page.route(
-			"**/api/v2/backends/wingman/sessions/*/commands",
-			async (route) => {
-				const command = route.request().postDataJSON();
-				if (command.type !== "send") return route.continue();
-				ids.push(command.id);
-				if (ids.length === 1) {
-					await route.fetch();
-					await route.abort("failed");
-				} else await route.continue();
-			},
-		);
+
 		await input.fill("render markdown");
 		await input.press("Enter");
 		await expect(
@@ -6597,59 +5921,20 @@ async function reviewActive(
 	pendingInputs: PendingTurnInput[] = [],
 ) {
 	const id = "review-active";
-	let offline = false;
-	let closeSocket = () => {};
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
-	let finish = () => {
-		throw new Error("not subscribed");
-	};
-	await page.route(/\/api\/v2\/backends\/wingman\/sessions$/, (route) =>
-		route.fulfill({
-			json: [
-				{ id, title: "Review active turn", updated_at: "2026-09-13T00:00:00Z" },
-			],
-		}),
+	const fixture = await ahpFixture(page);
+	const session = fixture.add(
+		"wingman",
+		{ id, title: "Review active turn", updated_at: "2026-09-13T00:00:00Z" },
+		entries,
+		"streaming",
 	);
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		if (offline) {
-			socket.close();
-			return;
-		}
-		closeSocket = () => socket.close();
-		const server = socket.connectToServer();
-		socket.onMessage((message) => {
-			const command = JSON.parse(String(message));
-			if (command.type !== "subscribe" || command.ref.sessionId !== id) {
-				server.send(message);
-				return;
-			}
-			const send = (phase: string, revision: number) =>
-				socket.send(
-					JSON.stringify({
-						type: "session.snapshot",
-						subscriptionId: command.subscriptionId,
-						ref: {
-							workspaceId: scope.workspaceId,
-							backendId: "wingman",
-							sessionId: id,
-						},
-						epoch: "review-epoch",
-						revision,
-						entries,
-						state: {
-							...emptySession(sessionKey("wingman", id)),
-							status: "ready",
-							phase,
-							canSteer: true,
-							prompts,
-							pendingInputs,
-						},
-					}),
-				);
-			send("streaming", 0);
-			finish = () => send("idle", 1);
-		});
-	});
+	session.prompts = prompts;
+	session.pendingInputs = pendingInputs;
+	const finish = () => {
+		session.phase = "idle";
+		fixture.publish(session);
+	};
+
 	const input = await composer(page);
 	if (await page.locator("[data-mobile-navigation]").isVisible()) {
 		await page
@@ -6669,10 +5954,7 @@ async function reviewActive(
 	return {
 		input,
 		finish: () => finish(),
-		disconnect: () => {
-			offline = true;
-			closeSocket();
-		},
+		disconnect: () => fixture.disconnect(),
 	};
 }
 
@@ -6775,7 +6057,6 @@ test("recovery: switching files preserves undo history", async ({ page }) => {
 
 test("recovery: reusing a renamed file's path keeps editor contents and undo separate", async ({
 	page,
-	request,
 }) => {
 	await writeFile(workspacePath("review-model-old.txt"), "first document\n");
 	await composer(page);
@@ -6800,7 +6081,7 @@ test("recovery: reusing a renamed file's path keeps editor contents and undo sep
 	).toBeVisible();
 	await expect(lines).toContainText("first document unsaved edit");
 
-	const created = await request.post("/api/files", {
+	const created = await createSavedFile({
 		data: { path: "review-model-old.txt", content: "second document\n" },
 	});
 	expect(created.ok()).toBeTruthy();
@@ -6891,7 +6172,7 @@ for (const unavailable of [false, true]) {
 	test(`recovery: backup journals tolerate damaged data with IndexedDB ${unavailable ? "unavailable" : "available"}`, async ({
 		page,
 	}) => {
-		const scope = await (await page.request.get("/api/v2/bootstrap")).json();
+		const scope = await (await page.request.get("/api/workspace")).json();
 		await page.addInitScript(
 			({ workspace, unavailable }) => {
 				const prefix = `wingman-pending-drafts:${workspace}:`;
@@ -6996,6 +6277,9 @@ test("recovery: turn review previews attributed edits and refuses a conflicting 
 				after: "original user work plus agent change\n",
 				beforeExists: true,
 				afterExists: true,
+				// The listing carries net line counts; the detail carries contents.
+				added: 1,
+				removed: 1,
 			},
 		],
 		checks: [
@@ -7008,7 +6292,9 @@ test("recovery: turn review previews attributed edits and refuses a conflicting 
 		],
 	});
 	await page.route(
-		/\/sessions\/review-active\/reviews(?:\/review-turn(?:\/undo)?)?$/,
+		new RegExp(
+			`/chats/${encodeURIComponent(canonicalChatURI("wingman", "review-active"))}/reviews(?:/review-turn(?:/undo)?)?$`,
+		),
 		async (route) => {
 			if (route.request().method() === "POST") {
 				attempts++;
@@ -7032,7 +6318,8 @@ test("recovery: turn review previews attributed edits and refuses a conflicting 
 	const { finish } = await reviewActive(page);
 	finish();
 	const card = page.locator("[data-turn-review]");
-	await expect(card).toContainText("1 file changed · Validation passed");
+	await expect(card).toContainText("1 file changed");
+	await expect(card).toContainText("Validation passed");
 	await card.getByRole("button", { name: /Review changes/ }).click();
 	await expect(card).toContainText("exit 0");
 	await expect(card).toContainText("packages/frontend");
@@ -7093,13 +6380,10 @@ test("recovery: approval shortcuts require deliberate focus and preserve the com
 	page,
 }) => {
 	const replies: unknown[] = [];
-	await page.route(/\/sessions\/review-active\/commands$/, async (route) => {
-		const body = route.request().postDataJSON();
+	const fixture = await ahpFixture(page);
+	fixture.onCommand = async (body) => {
 		replies.push(body);
-		await route.fulfill({
-			json: { requestId: body.requestId, accepted: true },
-		});
-	});
+	};
 	const { input } = await reviewActive(page, undefined, [
 		{
 			id: "approval",
@@ -7150,13 +6434,10 @@ test("recovery: queue edits retain the separate composer draft through reload", 
 	page,
 }) => {
 	const updates: unknown[] = [];
-	await page.route(/\/sessions\/review-active\/commands$/, async (route) => {
-		const body = route.request().postDataJSON();
+	const fixture = await ahpFixture(page);
+	fixture.onCommand = async (body) => {
 		updates.push(body);
-		await route.fulfill({
-			json: { requestId: body.requestId, accepted: true },
-		});
-	});
+	};
 	const { input } = await reviewActive(
 		page,
 		undefined,
@@ -7239,7 +6520,7 @@ test("recovery: streaming output is followed until the user scrolls away", async
 	page,
 }) => {
 	const id = "review-active";
-	const scope = await (await page.request.get("/api/v2/bootstrap")).json();
+
 	const entries: ChatEntry[] = Array.from({ length: 10 }, (_, index) => [
 		{
 			id: `u-${index}`,
@@ -7253,66 +6534,27 @@ test("recovery: streaming output is followed until the user scrolls away", async
 			content: `Response number ${index}: ` + "Completed work. ".repeat(40),
 		},
 	]).flat();
-	await page.route(/\/api\/v2\/backends\/wingman\/sessions$/, (route) =>
-		route.fulfill({
-			json: [{ id, title: "Streaming", updated_at: "2026-09-13T00:00:00Z" }],
-		}),
+	const fixture = await ahpFixture(page);
+	const session = fixture.add(
+		"wingman",
+		{ id, title: "Streaming", updated_at: "2026-09-13T00:00:00Z" },
+		entries,
+		"streaming",
 	);
 	let revision = 0;
-	let stream = () => {};
-	await page.routeWebSocket(/\/api\/v2\/events/, (socket) => {
-		const server = socket.connectToServer();
-		socket.onMessage((message) => {
-			const command = JSON.parse(String(message));
-			if (command.type !== "subscribe" || command.ref.sessionId !== id) {
-				server.send(message);
-				return;
-			}
-			const base = {
-				subscriptionId: command.subscriptionId,
-				ref: {
-					workspaceId: scope.workspaceId,
-					backendId: "wingman",
-					sessionId: id,
-				},
-				epoch: "streaming-epoch",
-			};
-			socket.send(
-				JSON.stringify({
-					...base,
-					type: "session.snapshot",
-					revision,
-					entries,
-					state: {
-						...emptySession(sessionKey("wingman", id)),
-						status: "ready",
-						phase: "streaming",
-					},
-				}),
-			);
-			stream = () => {
-				revision++;
-				socket.send(
-					JSON.stringify({
-						...base,
-						type: "session.update",
-						previousRevision: revision - 1,
-						revision,
-						changes: [
-							{
-								type: "entry.upsert",
-								entry: {
-									id: "a-live",
-									type: "assistant",
-									content: "More output.\n\n".repeat(revision * 10),
-								},
-							},
-						],
-					}),
-				);
-			};
-		});
-	});
+	const stream = () => {
+		revision++;
+		const existing = session.entries.find((entry) => entry.id === "a-live");
+		if (existing) existing.content = "More output.\n\n".repeat(revision * 10);
+		else
+			session.entries.push({
+				id: "a-live",
+				type: "assistant",
+				content: "More output.\n\n".repeat(revision * 10),
+			});
+		fixture.publish(session);
+	};
+
 	await composer(page);
 	await openSessions(page);
 	await sessionRow(page, id).click();

@@ -42,13 +42,12 @@ type Agent struct {
 
 	sessionsDir string
 
-	modelMu           sync.Mutex
-	modelID           string
-	effort            string
-	complexModel      string
-	utilityModel      string
-	upstreamModels    map[string]bool
-	modelDiscoveryErr error
+	modelMu        sync.Mutex
+	modelID        string
+	effort         string
+	complexModel   string
+	utilityModel   string
+	upstreamModels map[string]bool
 
 	mu           sync.Mutex // Protects ui and session bookkeeping.
 	sessions     map[string]*sessionState
@@ -153,6 +152,7 @@ func New(ws *code.Workspace, cfg Config, ui code.UI) *Agent {
 	if ws.MCP != nil {
 		ws.MCP.SetElicit(a.elicit)
 		ws.MCP.SetTelemetry(cfg.Telemetry)
+		ws.SetMCPApproval(a.prompts)
 	}
 
 	return a
@@ -277,14 +277,38 @@ func (a *Agent) registerSession(ctx context.Context, s *sessionState) error {
 
 // ForkSession copies history, model and mode; tasks, schedules and queued inputs stay with the source.
 func (a *Agent) ForkSession(ctx context.Context, id, title string) (string, error) {
+	return a.fork(ctx, id, func(source *sessionState, newID string) (bool, error) {
+		return a.forkJournal(ctx, source, id, newID, title)
+	})
+}
+
+// ForkSessionThrough forks history through the turn of one user input. Only
+// committed history is copied, so the source may keep running.
+func (a *Agent) ForkSessionThrough(ctx context.Context, id, inputID, title string) (string, error) {
+	return a.fork(ctx, id, func(_ *sessionState, newID string) (bool, error) {
+		return false, session.ForkThrough(a.sessionsDir, id, newID, title, inputID)
+	})
+}
+
+func (a *Agent) fork(ctx context.Context, id string, journal func(source *sessionState, newID string) (bool, error)) (string, error) {
 	newID := uuid.NewString()
 	source := a.session(id)
-	if err := a.forkJournal(ctx, source, id, newID, title); err != nil {
+	empty, err := journal(source, newID)
+	if err != nil {
 		return "", err
 	}
-	err := a.copySessionSettings(id, newID)
+	err = a.copySessionSettings(id, newID)
 	if err == nil {
-		err = a.LoadSession(ctx, newID)
+		if empty {
+			var fork *sessionState
+			fork, err = a.buildSession(newID)
+			if err == nil {
+				a.restoreSessionSettings(fork, harness.State{})
+				err = a.registerSession(ctx, fork)
+			}
+		} else {
+			err = a.LoadSession(ctx, newID)
+		}
 	}
 	if err != nil {
 		_ = session.Delete(a.sessionsDir, newID)
@@ -297,13 +321,21 @@ func (a *Agent) ForkSession(ctx context.Context, id, title string) (string, erro
 	return newID, nil
 }
 
-func (a *Agent) forkJournal(ctx context.Context, source *sessionState, id, newID, title string) error {
+func (a *Agent) forkJournal(ctx context.Context, source *sessionState, id, newID, title string) (bool, error) {
 	if source == nil {
-		return session.Fork(a.sessionsDir, id, newID, title)
+		return false, session.Fork(a.sessionsDir, id, newID, title)
 	}
-	return source.harness.RunExclusive(ctx, func(context.Context) error {
+	var empty bool
+	err := source.harness.RunExclusive(ctx, func(context.Context) error {
+		// A new session has no journal until its first event, but can still
+		// be forked with its model, effort, and permission settings intact.
+		empty = len(source.harness.StateSnapshot().Events) == 0
+		if empty {
+			return nil
+		}
 		return session.Fork(a.sessionsDir, id, newID, title)
 	})
+	return empty, err
 }
 
 func (a *Agent) DeleteSession(ctx context.Context, id string) error {

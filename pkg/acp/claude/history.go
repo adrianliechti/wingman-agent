@@ -330,7 +330,7 @@ func truncateTitle(s string) string {
 	return s[:max-1] + "…"
 }
 
-func replayHistory(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, cwd, transcriptID string, env []string) error {
+func replayHistory(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, cwd, transcriptID string, env []string) error {
 	path := transcriptPath(cwd, transcriptID, env)
 	if path == "" {
 		return nil
@@ -346,7 +346,7 @@ func replayHistory(ctx context.Context, conn *acpsdk.AgentSideConnection, sid ac
 	return streamHistory(ctx, conn, sid, cwd, f)
 }
 
-func streamHistory(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, cwd string, r io.Reader) error {
+func streamHistory(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, cwd string, r io.Reader) error {
 	cache := toolUseCache{}
 	scanner := newCLIScanner(r)
 	for scanner.Scan() {
@@ -363,7 +363,7 @@ func streamHistory(ctx context.Context, conn *acpsdk.AgentSideConnection, sid ac
 		}
 		switch env.Type {
 		case "user":
-			if err := replayUserMessage(ctx, conn, sid, env.Message, cache, env.ParentToolUseID); err != nil {
+			if err := replayUserMessage(ctx, conn, sid, env.Message, cache, env.ParentToolUseID, env.UUID); err != nil {
 				return err
 			}
 		case "assistant":
@@ -428,9 +428,16 @@ func replayUserText(text string) (string, bool) {
 	return name, true
 }
 
-func replayUserMessage(ctx context.Context, conn *acpsdk.AgentSideConnection, sid acpsdk.SessionId, raw json.RawMessage, cache toolUseCache, parentToolUseID string) error {
+func replayUserMessage(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, raw json.RawMessage, cache toolUseCache, parentToolUseID, messageID string) error {
 	if len(raw) == 0 {
 		return nil
+	}
+	userText := func(text string) acpsdk.SessionUpdate {
+		update := acpsdk.UpdateUserMessageText(text)
+		if messageID != "" {
+			update.UserMessageChunk.MessageId = new(messageID)
+		}
+		return update
 	}
 	var msg struct {
 		Content json.RawMessage `json:"content"`
@@ -448,7 +455,7 @@ func replayUserMessage(ctx context.Context, conn *acpsdk.AgentSideConnection, si
 		if !ok {
 			return nil
 		}
-		return acp.Notify(ctx, conn, sid, acpsdk.UpdateUserMessageText(text))
+		return acp.Notify(ctx, conn, sid, userText(text))
 	}
 
 	var blocks []cliMsgBlock
@@ -465,7 +472,7 @@ func replayUserMessage(ctx context.Context, conn *acpsdk.AgentSideConnection, si
 			if !ok {
 				continue
 			}
-			if err := acp.Notify(ctx, conn, sid, acpsdk.UpdateUserMessageText(text)); err != nil {
+			if err := acp.Notify(ctx, conn, sid, userText(text)); err != nil {
 				return err
 			}
 		case "tool_result":

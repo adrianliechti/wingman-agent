@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +8,8 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,6 +33,7 @@ type protocolAgent struct {
 	sent     atomic.Int32
 	loaded   atomic.Int32
 	gate     chan struct{}
+	creating chan struct{} // when set, NewSession waits for it to close
 }
 
 func (a *protocolAgent) Name() string { return "test" }
@@ -50,6 +52,9 @@ func (a *protocolAgent) SetModel(_ context.Context, _, value string) error {
 	return nil
 }
 func (a *protocolAgent) NewSession(context.Context) (string, error) {
+	if a.creating != nil {
+		<-a.creating
+	}
 	return fmt.Sprintf("session-%d", a.created.Add(1)), nil
 }
 func (a *protocolAgent) LoadSession(_ context.Context, id string) error {
@@ -85,7 +90,7 @@ func (a *protocolAgent) Close() error  { return nil }
 func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	a.sent.Add(1)
 	a.mu.Lock()
-	a.messages = append(a.messages, harness.Message{Role: harness.RoleUser, Content: harness.CloneContent(input)})
+	a.messages = append(a.messages, harness.Message{Role: harness.RoleUser, InputID: harness.InputIDFromContext(ctx), Content: harness.CloneContent(input)})
 	a.mu.Unlock()
 	return func(yield func(harness.Message, error) bool) {
 		if !yield(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "live prefix", TextID: "answer"}}}, nil) {
@@ -108,42 +113,47 @@ func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Cont
 func newProtocolServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}, wsConns: map[*websocket.Conn]*wsClient{}}
+	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}}
 	a := &protocolAgent{}
 	b := s.bindBackend("one", a)
 	s.backends[b.id] = &backendEntry{runtime: b}
 	s.mux = chi.NewRouter()
 	s.mux.Route("/api", s.registerSessionRoutes)
+	s.mux.Get("/ahp", s.handleAHP)
 	s.handler = s.checkInstance(s.mux)
 	t.Cleanup(s.Close)
 	return s, b, a
 }
+
+// Controller tests address domain operations directly. Wire behavior is covered
+// separately by the official TypeScript client and AHP WebSocket tests.
 func protocolRequest(t *testing.T, s *Server, path string, command Command) *httptest.ResponseRecorder {
 	t.Helper()
-	body, err := json.Marshal(command)
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	b, err := s.backend(parts[3])
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
-	req.Header.Set(instanceHeader, s.scope.InstanceID)
+	var record commandReceipt
+	if len(parts) == 5 {
+		record = b.createSession(command)
+	} else {
+		if !b.beginOperation() {
+			record = commandReceipt{status: 409, message: "workspace closed"}
+		} else {
+			defer b.operations.Done()
+			record = b.session(parts[5]).command(t.Context(), command)
+		}
+	}
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
+	if record.status != 0 {
+		http.Error(rec, record.message, record.status)
+	} else {
+		writeJSON(rec, record.receipt)
+	}
 	return rec
 }
-func receiveEvent(t *testing.T, client *wsClient) sessionEvent {
-	t.Helper()
-	select {
-	case data := <-client.outbox:
-		var event sessionEvent
-		if err := json.Unmarshal(data, &event); err != nil {
-			t.Fatal(err)
-		}
-		return event
-	case <-time.After(time.Second):
-		t.Fatal("missing session event")
-		return sessionEvent{}
-	}
-}
+
 func waitProtocol(t *testing.T, predicate func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -155,56 +165,16 @@ func waitProtocol(t *testing.T, predicate func() bool) {
 	}
 }
 
-func TestSessionSnapshotRetainsLiveTextAndHasTargetedSubscriptions(t *testing.T) {
-	_, b, a := newProtocolServer(t)
-	a.gate = make(chan struct{})
-	c := b.session("saved")
-	c.load()
-	first := newWSClient(nil)
-	other := newWSClient(nil)
-	c.subscribe(first, "first")
-	unrelated := b.session("unrelated")
-	unrelated.subscribe(other, "other")
-	_ = receiveEvent(t, other)
-	_, err := b.turns.Submit(b.ctx, "saved", code.TurnInput{ID: "input", Content: []harness.Content{{Text: "question"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitProtocol(t, func() bool {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		return len(c.entries) > 1 && c.entries[len(c.entries)-1].Content == "live prefix"
-	})
-	reconnect := newWSClient(nil)
-	c.subscribe(reconnect, "reconnected")
-	snapshot := receiveEvent(t, reconnect)
-	if snapshot.Type != "session.snapshot" || snapshot.Entries[len(snapshot.Entries)-1].Content != "live prefix" {
-		t.Fatalf("snapshot: %+v", snapshot)
-	}
-	if len(snapshot.State.PendingInputs) != 0 {
-		t.Fatalf("active transcript input also appeared in queue: %+v", snapshot.State.PendingInputs)
-	}
-	if a.loaded.Load() != 1 {
-		t.Fatalf("loads = %d", a.loaded.Load())
-	}
-	select {
-	case data := <-other.outbox:
-		t.Fatalf("unrelated subscriber received %s", data)
-	default:
-	}
-	close(a.gate)
-}
-
 func TestSessionRestoresEditableQueueAndRejectsMissingHistory(t *testing.T) {
 	s, b, a := newProtocolServer(t)
 	a.queue = code.TurnQueueState{Inputs: []code.TurnInput{{ID: "saved-input", Intent: code.TurnInputFollowUp, Content: []harness.Content{{Text: "original"}, {Text: "[File: main.go]"}, {Text: "secret", Hidden: true}}}}}
 	c := b.session("saved")
 	c.load()
-	client := newWSClient(nil)
-	c.subscribe(client, "sub")
-	snapshot := receiveEvent(t, client)
-	if len(snapshot.State.PendingInputs) != 1 || snapshot.State.PendingInputs[0].ID != "saved-input" || snapshot.State.PendingInputs[0].Text != "original" || !snapshot.State.QueuePaused {
-		t.Fatalf("restored queue: %+v", snapshot.State)
+	c.mu.Lock()
+	state := c.state
+	c.mu.Unlock()
+	if len(state.PendingInputs) != 1 || state.PendingInputs[0].ID != "saved-input" || state.PendingInputs[0].Text != "original" || !b.turns.Snapshot("saved").Paused {
+		t.Fatalf("restored queue: %+v", state)
 	}
 	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "edit", Epoch: c.epoch, Type: "queue_update", InputID: "saved-input", Text: "edited", Files: []string{"next.go"}})
 	if rec.Code != 200 {
@@ -260,33 +230,6 @@ func TestSessionReceiptsDeduplicateAfterCompletionAndCreation(t *testing.T) {
 	}
 }
 
-func TestSessionSnapshotsCannotBeOvertakenByUpdates(t *testing.T) {
-	_, b, _ := newProtocolServer(t)
-	c := b.session("saved")
-	c.load()
-	for range 50 {
-		client := newWSClient(nil)
-		var wg sync.WaitGroup
-		wg.Go(func() { c.subscribe(client, "s") })
-		wg.Go(func() { c.apply(Frame{Type: EvtTextDelta, ID: "a", Text: "x"}) })
-		wg.Wait()
-		event := receiveEvent(t, client)
-		if event.Type != "session.snapshot" {
-			t.Fatalf("first frame: %+v", event)
-		}
-		select {
-		case data := <-client.outbox:
-			var update sessionEvent
-			_ = json.Unmarshal(data, &update)
-			if update.PreviousRevision != event.Revision {
-				t.Fatalf("gap: snapshot %d, update %d", event.Revision, update.PreviousRevision)
-			}
-		default:
-		}
-		c.unsubscribe(client, "s")
-	}
-}
-
 func TestSessionPromptResponsesRemainAvailableDuringLoadAndHaveOneWinner(t *testing.T) {
 	s, b, _ := newProtocolServer(t)
 	c := b.session("saved")
@@ -319,10 +262,9 @@ func TestSessionPromptResponsesRemainAvailableDuringLoadAndHaveOneWinner(t *test
 	if rec := protocolRequest(t, s, path, command); rec.Code != 409 {
 		t.Fatal("second response won")
 	}
-	client := newWSClient(nil)
-	c.subscribe(client, "reconnect")
-	snapshot := receiveEvent(t, client)
-	if len(snapshot.State.Prompts) != 0 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.state.Prompts) != 0 {
 		t.Fatal("resolved prompt survived reconnect")
 	}
 }
@@ -415,49 +357,32 @@ func TestSessionQueuePersistenceFailureDoesNotAcknowledgeClearing(t *testing.T) 
 	a.mu.Lock()
 	a.failSave = true
 	a.mu.Unlock()
-	for _, kind := range []string{"queue_clear", "cancel"} {
-		rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: kind, Epoch: c.epoch, Type: kind, ClearQueue: true})
-		if rec.Code != 409 {
-			t.Fatalf("%s silently succeeded: %d", kind, rec.Code)
-		}
+	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "cancel", Epoch: c.epoch, Type: "cancel", ClearQueue: true})
+	if rec.Code != 409 {
+		t.Fatalf("cancel silently succeeded: %d", rec.Code)
 	}
 	if len(b.turns.Snapshot("saved").Inputs) != 1 {
 		t.Fatal("failed persistence removed the input")
 	}
 }
 
-func TestSessionWebSocketInstanceAndClose(t *testing.T) {
-	s, b, _ := newProtocolServer(t)
+func TestAHPWebSocketClosesWithWorkspace(t *testing.T) {
+	s, _, _ := newProtocolServer(t)
 	web := httptest.NewServer(s)
 	defer web.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
-	endpoint := "ws" + web.URL[4:] + "/api/v2/events?instance="
-	if conn, response, err := websocket.Dial(ctx, endpoint+"old", nil); err == nil {
-		conn.CloseNow()
-		t.Fatal("old workspace socket accepted")
-	} else if response == nil || response.StatusCode != 409 {
-		t.Fatalf("unexpected rejection: %v", err)
-	}
-	conn, _, err := websocket.Dial(ctx, endpoint+s.scope.InstanceID, nil)
+	conn, _, err := websocket.Dial(ctx, "ws"+web.URL[4:]+"/ahp", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.CloseNow()
-	data, _ := json.Marshal(subscriptionRequest{Type: "subscribe", SubscriptionID: "socket", Ref: b.session("saved").ref})
-	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+	request := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"channel":"ahp-root://","clientId":"close-test","protocolVersions":["1.0.0"]}}`
+	if err := conn.Write(ctx, websocket.MessageText, []byte(request)); err != nil {
 		t.Fatal(err)
 	}
-	_, data, err = conn.Read(ctx)
-	if err != nil {
+	if _, _, err := conn.Read(ctx); err != nil {
 		t.Fatal(err)
-	}
-	var snapshot sessionEvent
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.Type != "session.snapshot" {
-		t.Fatalf("first frame: %s", data)
 	}
 	s.Close()
 	for {
@@ -466,7 +391,7 @@ func TestSessionWebSocketInstanceAndClose(t *testing.T) {
 		}
 	}
 	if ctx.Err() != nil {
-		t.Fatal("workspace close did not close the websocket")
+		t.Fatal("workspace close did not close AHP")
 	}
 }
 
@@ -512,7 +437,7 @@ func (a *compactingProtocolAgent) Compact(ctx context.Context, _, focus string) 
 	}
 }
 
-func TestSessionCompactCommandReportsPhaseAndOutcome(t *testing.T) {
+func TestSessionCompactMessageRunsAsTurn(t *testing.T) {
 	s, other, _ := newProtocolServer(t)
 	a := &compactingProtocolAgent{protocolAgent: &protocolAgent{}, focus: make(chan string, 1), release: make(chan error, 1)}
 	b := s.bindBackend("compact", a)
@@ -528,27 +453,38 @@ func TestSessionCompactCommandReportsPhaseAndOutcome(t *testing.T) {
 		return c.state
 	}
 
-	rec := protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-1", Epoch: c.epoch, Type: "compact", Text: "api design"})
-	if rec.Code != 200 {
-		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
-	}
-	if focus := <-a.focus; focus != "api design" || state().Phase != "compacting" {
-		t.Fatalf("focus=%q phase=%q", focus, state().Phase)
-	}
-	a.release <- nil
-	waitProtocol(t, func() bool { return state().Phase == "idle" && state().Compaction != nil })
-	if st := state(); st.Compaction.TokensAfter != 90 || st.Error != nil {
-		t.Fatalf("state after compaction = %+v", st)
+	entries := func() []TranscriptEntry {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return slices.Clone(c.entries)
 	}
 
-	rec = protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-2", Epoch: c.epoch, Type: "compact"})
+	rec := protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-1", Epoch: c.epoch, Type: "send", Text: "/compact api design"})
 	if rec.Code != 200 {
 		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
 	}
-	<-a.focus
+	if focus := <-a.focus; focus != "api design" {
+		t.Fatalf("focus=%q", focus)
+	}
+	waitProtocol(t, func() bool { return state().Phase == "compacting" })
+	a.release <- nil
+	waitProtocol(t, func() bool { return state().Phase == "idle" && len(entries()) == 2 })
+	// The agent's history has no record of the compaction; the turn survives its reload.
+	c.replaceHistory()
+	if e := entries(); len(e) != 2 || e[0].ID != "input:compact-1" || e[0].Content != "/compact api design" || e[1].Type != "notice" || e[1].Content != "Context compacted · ~900 → ~90 tokens" || state().Error != nil {
+		t.Fatalf("compaction turn = %+v", e)
+	}
+
+	rec = protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-2", Epoch: c.epoch, Type: "send", Text: "/compact"})
+	if rec.Code != 200 {
+		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
+	}
+	if focus := <-a.focus; focus != "" {
+		t.Fatalf("focus=%q", focus)
+	}
 	a.release <- errors.New("compaction did not reduce context")
 	waitProtocol(t, func() bool { return state().Phase == "idle" && state().Error != nil })
-	if st := state(); *st.Error != "compaction did not reduce context" || st.Compaction != nil {
-		t.Fatalf("state after failure = %+v", st)
+	if st, e := state(), entries(); *st.Error != "compaction did not reduce context" || len(e) != 3 || e[2].ID != "input:compact-2" {
+		t.Fatalf("state after failure = %+v %+v", st, e)
 	}
 }

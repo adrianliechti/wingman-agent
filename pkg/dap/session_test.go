@@ -3,6 +3,7 @@ package dap
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -404,7 +405,7 @@ func TestFailedResumeDoesNotOverwriteNewerAdapterState(t *testing.T) {
 
 	newer := &Stop{Reason: "exception", ThreadID: 2}
 	session.setState(StateStopped, newer)
-	session.restoreFailedResume(4, original)
+	session.restoreFailedResume(4, stopState{state: StateStopped, stop: original})
 
 	status := session.Status()
 	if status.State != StateStopped || status.Stop == nil || status.Stop.Reason != newer.Reason || status.Stop.ThreadID != newer.ThreadID {
@@ -415,7 +416,7 @@ func TestFailedResumeDoesNotOverwriteNewerAdapterState(t *testing.T) {
 func TestBeginResumeChecksAndTransitionsStateAtomically(t *testing.T) {
 	stop := &Stop{Reason: "breakpoint", HitBreakpointIDs: []int{7}}
 	session := &Session{state: StateStopped, stop: stop, stateVersion: 2, stateChanged: make(chan struct{})}
-	previous, epoch, err := session.beginResume("next")
+	previous, epoch, err := session.beginResume("next", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,10 +424,10 @@ func TestBeginResumeChecksAndTransitionsStateAtomically(t *testing.T) {
 		t.Fatalf("state = %s, stop = %#v, epoch = %d", session.state, session.stop, epoch)
 	}
 	stop.HitBreakpointIDs[0] = 9
-	if previous == nil || !slices.Equal(previous.HitBreakpointIDs, []int{7}) {
-		t.Fatalf("previous stop was not isolated: %#v", previous)
+	if previous.stop == nil || !slices.Equal(previous.stop.HitBreakpointIDs, []int{7}) {
+		t.Fatalf("previous stop was not isolated: %#v", previous.stop)
 	}
-	if _, _, err := session.beginResume("next"); err == nil {
+	if _, _, err := session.beginResume("next", 0); err == nil {
 		t.Fatal("second resume transition accepted a running session")
 	}
 }
@@ -465,33 +466,108 @@ func TestSessionDisconnectForcesCleanupWhenAdapterDoesNotRespond(t *testing.T) {
 func TestAttachChildRejectsTerminatedParent(t *testing.T) {
 	parent := &Session{state: StateTerminated, stateChanged: make(chan struct{})}
 	child := &Session{state: StateRunning, stateChanged: make(chan struct{})}
-	if previous, attached := parent.attachChild(child); attached || previous != nil {
-		t.Fatalf("attachChild = (%v, %v), want (nil, false)", previous, attached)
+	if parent.attachChild(child) {
+		t.Fatal("terminated parent accepted a child")
 	}
 	if child.parent != nil {
 		t.Fatal("rejected child retained its parent")
 	}
-	if parent.child != nil {
+	if parent.child != nil || len(parent.children) != 0 {
 		t.Fatal("terminated parent retained the rejected child")
 	}
 }
 
-func TestAttachChildReplacesOwnership(t *testing.T) {
+func TestAttachChildKeepsEarlierChildren(t *testing.T) {
 	parent := &Session{state: StateRunning, stateChanged: make(chan struct{})}
 	parent.alive.Store(true)
-	oldChild := &Session{state: StateRunning, stateChanged: make(chan struct{}), parent: parent}
-	newChild := &Session{state: StateRunning, stateChanged: make(chan struct{})}
-	parent.child = oldChild
+	first := &Session{state: StateRunning, stateChanged: make(chan struct{})}
+	second := &Session{state: StateRunning, stateChanged: make(chan struct{})}
+	if !parent.attachChild(first) || !parent.attachChild(second) {
+		t.Fatal("active parent rejected a child")
+	}
+	if parent.child != second || first.parent != parent || second.parent != parent || len(parent.children) != 2 {
+		t.Fatal("a new child must not detach earlier children")
+	}
+	parent.focusChild(first)
+	if parent.child != first {
+		t.Fatal("a stopped child did not take focus")
+	}
+	parent.removeChild(first)
+	if parent.child != second || !slices.Equal(parent.children, []*Session{second}) {
+		t.Fatalf("focus did not move to the remaining child: %v", parent.children)
+	}
+}
 
-	previous, attached := parent.attachChild(newChild)
-	if !attached || previous != oldChild {
-		t.Fatalf("attachChild = (%p, %v), want (%p, true)", previous, attached, oldChild)
+func TestChildSessionsShareOneIDSpace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	parent := &Session{id: "parent", state: StateRunning, stateChanged: make(chan struct{})}
+	parent.alive.Store(true)
+	children := map[string]*Session{}
+	for _, name := range []string{"worker A", "worker B"} {
+		client, server := net.Pipe()
+		adapter := newFakeAdapter(t, server)
+		adapter.answer = name
+		go adapter.serve()
+		plan := Plan{Adapter: AdapterDescriptor{Name: "fake"}, Request: "launch", Arguments: map[string]any{"request": "launch", "name": name}}
+		child := newConnectedSession(name, plan, client)
+		defer child.Close()
+		if err := child.initializeAndLaunch(ctx, StartOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := child.WaitForStop(ctx, 0); !ok {
+			t.Fatal("child did not stop on entry")
+		}
+		if !parent.attachChild(child) {
+			t.Fatal("parent rejected a child")
+		}
+		children[name] = child
 	}
-	if parent.child != newChild || newChild.parent != parent {
-		t.Fatal("new child ownership was not connected")
+	// Both adapters report thread 11, frame 21 and variables 31.
+	threads, err := parent.Threads(ctx)
+	if err != nil || len(threads) != 2 || threads[0].ID == threads[1].ID {
+		t.Fatalf("merged threads = %+v, %v", threads, err)
 	}
-	if oldChild.parent != nil {
-		t.Fatal("replaced child retained its parent")
+	for _, thread := range threads {
+		name, _, _ := strings.Cut(thread.Name, ": ")
+		frames, _, err := parent.StackTrace(ctx, thread.ID, 0, 20)
+		if err != nil || len(frames) != 1 {
+			t.Fatalf("%s frames = %+v, %v", name, frames, err)
+		}
+		scopes, err := parent.Scopes(ctx, frames[0].ID)
+		if err != nil || len(scopes) != 1 {
+			t.Fatalf("%s scopes = %+v, %v", name, scopes, err)
+		}
+		variables, err := parent.Variables(ctx, scopes[0].VariablesReference, 0, 0)
+		if err != nil || len(variables) != 1 || variables[0].Value != name {
+			t.Fatalf("thread %q reached the wrong child: %+v, %v", thread.Name, variables, err)
+		}
+	}
+	if status := parent.Status(); status.Stop == nil || !slices.ContainsFunc(threads, func(thread Thread) bool { return thread.ID == status.Stop.ThreadID }) {
+		t.Fatalf("stopped thread %+v is not one of the merged threads %+v", status.Stop, threads)
+	}
+}
+
+func TestPerThreadStopsResumeIndividually(t *testing.T) {
+	session := &Session{state: StateRunning, stateChanged: make(chan struct{})}
+	session.recordStopLocked(Stop{Reason: "breakpoint", ThreadID: 1})
+	session.recordStopLocked(Stop{Reason: "breakpoint", ThreadID: 2})
+	session.resumeThreadLocked(1, false)
+	if session.state != StateStopped || session.stop.ThreadID != 2 {
+		t.Fatalf("state = %s, stop = %#v; thread 2 must stay suspended", session.state, session.stop)
+	}
+	if status := session.Status(); !slices.Equal(status.StoppedThreads, []int{2}) {
+		t.Fatalf("stopped threads = %v, want [2]", status.StoppedThreads)
+	}
+	session.resumeThreadLocked(2, false)
+	if session.state != StateRunning {
+		t.Fatalf("state = %s after every thread resumed", session.state)
+	}
+
+	session.recordStopLocked(Stop{Reason: "pause", ThreadID: 1, AllThreadsStopped: true})
+	session.resumeThreadLocked(1, false)
+	if session.state != StateRunning {
+		t.Fatal("resuming an all-stop adapter must resume every thread")
 	}
 }
 
@@ -545,8 +621,19 @@ type fakeAdapter struct {
 	seq    int
 
 	launchSeq            int
+	answer               string // the "answer" variable value; "42" when empty
 	sourceBreakpointLine int
+	breakpointLines      [][]int
 	functionBreakpoint   string
+}
+
+func (adapter *fakeAdapter) lastBreakpointLines() []int {
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if len(adapter.breakpointLines) == 0 {
+		return nil
+	}
+	return adapter.breakpointLines[len(adapter.breakpointLines)-1]
 }
 
 func newFakeAdapter(t *testing.T, conn net.Conn) *fakeAdapter {
@@ -577,12 +664,21 @@ func (adapter *fakeAdapter) serve() {
 			adapter.launchSeq = request.Seq
 			adapter.send(&godap.InitializedEvent{Event: adapter.event("initialized")})
 		case *godap.SetBreakpointsRequest:
-			if len(request.Arguments.Breakpoints) > 0 {
-				adapter.sourceBreakpointLine = request.Arguments.Breakpoints[0].Line
+			var lines []int
+			var verified []godap.Breakpoint
+			for index, breakpoint := range request.Arguments.Breakpoints {
+				lines = append(lines, breakpoint.Line)
+				verified = append(verified, godap.Breakpoint{Id: request.Seq*100 + index, Verified: true, Line: breakpoint.Line})
 			}
+			adapter.mu.Lock()
+			if len(lines) > 0 {
+				adapter.sourceBreakpointLine = lines[0]
+			}
+			adapter.breakpointLines = append(adapter.breakpointLines, lines)
+			adapter.mu.Unlock()
 			adapter.send(&godap.SetBreakpointsResponse{
 				Response: adapter.response(request.Seq, "setBreakpoints"),
-				Body:     godap.SetBreakpointsResponseBody{Breakpoints: []godap.Breakpoint{{Id: 1, Verified: true, Line: adapter.sourceBreakpointLine}}},
+				Body:     godap.SetBreakpointsResponseBody{Breakpoints: verified},
 			})
 		case *godap.SetFunctionBreakpointsRequest:
 			if len(request.Arguments.Breakpoints) > 0 {
@@ -623,7 +719,7 @@ func (adapter *fakeAdapter) serve() {
 			adapter.send(&godap.VariablesResponse{
 				Response: adapter.response(request.Seq, "variables"),
 				Body: godap.VariablesResponseBody{Variables: []godap.Variable{{
-					Name: "answer", Value: "42", Type: "int",
+					Name: "answer", Value: cmp.Or(adapter.answer, "42"), Type: "int",
 				}}},
 			})
 		case *godap.EvaluateRequest:

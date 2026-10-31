@@ -41,46 +41,6 @@ func waitForPendingPrompt(t *testing.T, s *backendRuntime, sessionID string) str
 	}
 }
 
-func TestConfirmDoesNotTurnSessionScopeIntoBlanketApproval(t *testing.T) {
-	s := newPromptTestServer()
-	ctx, cancel := context.WithTimeout(code.WithSessionID(context.Background(), "session-1"), time.Second)
-	defer cancel()
-
-	type result struct {
-		approved bool
-		err      error
-	}
-	done := make(chan result, 1)
-	go func() {
-		approved, err := s.Confirm(ctx, "Run command?")
-		done <- result{approved: approved, err: err}
-	}()
-
-	promptID := waitForPendingPrompt(t, s, "session-1")
-	s.session(code.SessionIDFromContext(ctx)).resolvePrompt(Command{
-		PromptID: promptID,
-		Action:   string(tool.ElicitAccept),
-		Scope:    PromptScopeSession,
-	})
-
-	first := <-done
-	if first.err != nil || !first.approved {
-		t.Fatalf("Confirm() = (%v, %v), want (true, nil)", first.approved, first.err)
-	}
-	go func() {
-		approved, err := s.Confirm(ctx, "Run another command?")
-		done <- result{approved: approved, err: err}
-	}()
-	promptID = waitForPendingPrompt(t, s, "session-1")
-	if err := s.session("session-1").resolvePrompt(Command{PromptID: promptID, Action: string(tool.ElicitDecline)}); err != nil {
-		t.Fatal(err)
-	}
-	second := <-done
-	if second.err != nil || second.approved {
-		t.Fatalf("second action bypassed approval: %+v", second)
-	}
-}
-
 func TestElicitUsesActionAndStructuredContent(t *testing.T) {
 	s := newPromptTestServer()
 	ctx, cancel := context.WithTimeout(code.WithSessionID(context.Background(), "session-2"), time.Second)

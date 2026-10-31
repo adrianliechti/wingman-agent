@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -84,6 +85,198 @@ func TestDocumentSyncPolicyAndIncrementalChange(t *testing.T) {
 	change, ok := changes[0].(*protocol.TextDocumentContentChangePartial)
 	if !ok || change.Range.End.Line != 1 || change.Range.End.Character != 3 || change.Text != "replacement" {
 		t.Fatalf("incremental change = %#v", changes[0])
+	}
+}
+
+func TestRequestSnapshotsNeverRewindEditorDocuments(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "main.go")
+	session := &Session{documents: map[string]*document{}}
+	content := func() string {
+		t.Helper()
+		value, _ := session.DocumentContent(path)
+		return value
+	}
+	if _, err := session.SyncRequestDocument(ctx, path, "request 1"); err != nil || content() != "request 1" {
+		t.Fatalf("request snapshot of an unowned document: %q, %v", content(), err)
+	}
+	if _, err := session.SyncEditorDocument(ctx, path, "editor 2", false); err != nil {
+		t.Fatal(err)
+	}
+	// A request captured before the editor's newer change must not replace it.
+	if _, err := session.SyncRequestDocument(ctx, path, "request 1"); err != nil || content() != "editor 2" {
+		t.Fatalf("request snapshot rewound the editor document: %q, %v", content(), err)
+	}
+	if err := session.CloseDocument(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.SyncRequestDocument(ctx, path, "request 3"); err != nil || content() != "request 3" {
+		t.Fatalf("closed document kept editor ownership: %q, %v", content(), err)
+	}
+}
+
+func TestFilesChangedRefreshesDiskDocumentsButNotEditors(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	disk, editor := filepath.Join(root, "disk.go"), filepath.Join(root, "editor.go")
+	for _, path := range []string{disk, editor} {
+		if err := os.WriteFile(path, []byte("one\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := &Session{documents: map[string]*document{}}
+	if _, err := session.OpenDocument(ctx, disk); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.SyncEditorDocument(ctx, editor, "one\n", true); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{disk, editor} {
+		if err := os.WriteFile(path, []byte("two\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	changed := []FileChange{{Path: disk, Type: protocol.FileChangeTypeChanged}, {Path: editor, Type: protocol.FileChangeTypeChanged}}
+	if err := session.FilesChanged(ctx, changed); err != nil {
+		t.Fatal(err)
+	}
+	if content, _ := session.DocumentContent(disk); content != "two\n" {
+		t.Fatalf("disk-backed document stayed stale: %q", content)
+	}
+	if content, _ := session.DocumentContent(editor); content != "one\n" {
+		t.Fatalf("editor-owned document was replaced from disk: %q", content)
+	}
+	if err := session.FilesChanged(ctx, []FileChange{{Path: disk, Type: protocol.FileChangeTypeDeleted}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, open := session.DocumentContent(disk); open {
+		t.Fatal("deleted file stayed open")
+	}
+}
+
+type watchedFilesRecorder struct {
+	protocol.UnimplementedServer
+	events []protocol.FileEvent
+}
+
+func (r *watchedFilesRecorder) DidChangeWatchedFiles(_ context.Context, params *protocol.DidChangeWatchedFilesParams) error {
+	r.events = append(r.events, params.Changes...)
+	return nil
+}
+
+func TestFilesChangedReportsRegisteredWatchers(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	rpc := &watchedFilesRecorder{}
+	session := &Session{rootURI: fileuri.FromPath(root), rpc: rpc, documents: map[string]*document{}}
+	client := &sessionClient{session: session}
+	register := func(id, options string) {
+		t.Helper()
+		if err := client.RegisterCapability(ctx, &protocol.RegistrationParams{Registrations: []protocol.Registration{{ID: id, Method: "workspace/didChangeWatchedFiles", RegisterOptions: protocol.LSPAny(options)}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	register("go", `{"watchers":[{"globPattern":"**/*.go"}]}`)
+	register("mod", `{"watchers":[{"globPattern":{"baseUri":"`+fileuri.FromPath(root)+`","pattern":"go.mod"},"kind":4}]}`)
+	path := func(name string) string { return filepath.Join(root, name) }
+	changes := []FileChange{
+		{Path: path("pkg/main.go"), Type: protocol.FileChangeTypeCreated},
+		{Path: path("notes.txt"), Type: protocol.FileChangeTypeChanged},
+		{Path: path("go.mod"), Type: protocol.FileChangeTypeChanged},
+		{Path: path("go.mod"), Type: protocol.FileChangeTypeDeleted},
+	}
+	if err := session.FilesChanged(ctx, changes); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpc.events) != 2 || string(rpc.events[0].URI) != fileuri.FromPath(path("pkg/main.go")) || rpc.events[1].Type != protocol.FileChangeTypeDeleted {
+		t.Fatalf("events = %+v, want the .go creation and the go.mod deletion", rpc.events)
+	}
+	if err := client.UnregisterCapability(ctx, &protocol.UnregistrationParams{Unregisterations: []protocol.Unregistration{{ID: "go", Method: "workspace/didChangeWatchedFiles"}}}); err != nil {
+		t.Fatal(err)
+	}
+	rpc.events = nil
+	if err := session.FilesChanged(ctx, changes[:1]); err != nil || len(rpc.events) != 0 {
+		t.Fatalf("unregistered watcher still reported %+v, %v", rpc.events, err)
+	}
+}
+
+func TestCommandEditsReportTheClientsDecision(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	session := &Session{rootURI: fileuri.FromPath(root)}
+	client := &sessionClient{session: session}
+	edit := func(path string) *protocol.ApplyWorkspaceEditParams {
+		return &protocol.ApplyWorkspaceEditParams{Edit: protocol.WorkspaceEdit{Changes: map[lspuri.URI][]protocol.TextEdit{
+			lspuri.MustParse(fileuri.FromPath(path)): {{NewText: "x"}},
+		}}}
+	}
+	inside := edit(filepath.Join(root, "main.go"))
+	if result, _ := client.ApplyEdit(ctx, inside); result.Applied {
+		t.Fatal("an edit outside a command was applied")
+	}
+	decisions := []bool{}
+	accept := false
+	session.applyEdit = func(CommandWorkspaceEdit) bool {
+		decisions = append(decisions, accept)
+		return accept
+	}
+	if result, _ := client.ApplyEdit(ctx, inside); result.Applied || result.FailureReason == nil {
+		t.Fatalf("a declined edit was reported as applied: %+v", result)
+	}
+	accept = true
+	if result, _ := client.ApplyEdit(ctx, inside); !result.Applied {
+		t.Fatalf("an accepted edit was reported as declined: %+v", result)
+	}
+	if result, _ := client.ApplyEdit(ctx, edit(filepath.Join(filepath.Dir(root), "outside.go"))); result.Applied || len(decisions) != 2 {
+		t.Fatalf("an edit outside the workspace reached the client: %+v, %d decisions", result, len(decisions))
+	}
+}
+
+func TestCommandEditReviewDoesNotBlockTheServersMessages(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	hostSide, serverSide := net.Pipe()
+	session := &Session{rootURI: fileuri.FromPath(root), documents: map[string]*document{}}
+	_, conn, _ := protocol.NewClient(ctx, &sessionClient{session: session}, jsonrpc2.NewStream(hostSide))
+	defer conn.Close()
+	server := jsonrpc2.NewConn(jsonrpc2.NewStream(serverSide))
+	server.Go(ctx, jsonrpc2.MethodNotFoundHandler)
+	defer server.Close()
+
+	review := make(chan bool)
+	reviewing := make(chan struct{})
+	session.applyEdit = func(CommandWorkspaceEdit) bool {
+		close(reviewing)
+		return <-review
+	}
+	uri := fileuri.FromPath(filepath.Join(root, "main.go"))
+	applied := make(chan protocol.ApplyWorkspaceEditResult, 1)
+	go func() {
+		var result protocol.ApplyWorkspaceEditResult
+		_, _ = server.Call(ctx, "workspace/applyEdit", protocol.ApplyWorkspaceEditParams{Edit: protocol.WorkspaceEdit{Changes: map[lspuri.URI][]protocol.TextEdit{lspuri.MustParse(uri): {{NewText: "x"}}}}}, &result)
+		applied <- result
+	}()
+	<-reviewing
+	if err := server.Notify(ctx, "textDocument/publishDiagnostics", protocol.PublishDiagnosticsParams{URI: lspuri.MustParse(uri), Diagnostics: []protocol.Diagnostic{{Message: protocol.String("pending review")}}}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		session.mu.Lock()
+		published := session.documents[uri] != nil && session.documents[uri].published
+		session.mu.Unlock()
+		if published {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("diagnostics waited for the edit review")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	review <- true
+	if result := <-applied; !result.Applied {
+		t.Fatalf("reviewed edit = %+v, want applied", result)
 	}
 }
 

@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
-import { getGitInsights, getGitStatus } from "../api/git";
+import { getGitInsights } from "../api/workspace";
+import { gitStatusQuery } from "../api/git";
 import { queryKeys } from "../api/query";
 
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -89,13 +90,12 @@ export function InsightsView({
 	onOpenFile: (path: string, line?: number) => void;
 }) {
 	const headQuery = useQuery({
-		queryKey: queryKeys.git.status,
-		queryFn: ({ signal }) => getGitStatus(signal),
-		select: (status) => status.head,
+		...gitStatusQuery,
+		select: (status) => status?.head,
 	});
 	const query = useQuery({
 		queryKey: [...queryKeys.gitInsights, headQuery.data],
-		enabled: headQuery.isSuccess,
+		enabled: headQuery.isSuccess && headQuery.data !== undefined,
 		queryFn: ({ signal }) => getGitInsights(signal),
 	});
 	const insights = query.data ?? null;

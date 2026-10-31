@@ -1,14 +1,21 @@
 import type { ChatEntry } from "./session.ts";
 export type PromptAction = "accept" | "decline" | "cancel";
-export type PromptScope = "once" | "session";
+
+/** A confirmation choice; `id` is sent back as the selected option. */
+export interface PromptOption {
+	id: string;
+	label: string;
+	kind: "approve" | "deny";
+	group?: number;
+}
 
 export type PromptReply =
 	| {
 			action: "accept";
 			content?: Record<string, unknown>;
-			scope?: PromptScope;
+			option?: string;
 	  }
-	| { action: Exclude<PromptAction, "accept"> };
+	| { action: Exclude<PromptAction, "accept">; option?: string };
 
 export type TurnInputIntent = "follow_up" | "steer";
 export type TurnInputState =
@@ -28,8 +35,7 @@ export type ServerMessage = {
 		| "git_index_changed"
 		| "sessions_changed"
 		| "diagnostics_changed"
-		| "capabilities_changed"
-		| "model_changed"
+		| "workspace_changed"
 		| "tasks_changed"
 		| "terminals_changed"
 		| "skills_changed";
@@ -37,14 +43,7 @@ export type ServerMessage = {
 	backend?: string;
 };
 
-export type Phase =
-	| "idle"
-	| "thinking"
-	| "streaming"
-	| "tool_running"
-	| "retrying"
-	| "compacting"
-	| "stopping";
+export type Phase = "idle" | "thinking" | "streaming" | "tool_running";
 
 export interface ToolLocation {
 	path: string;
@@ -55,7 +54,7 @@ export interface FileEntry {
 	name: string;
 	path: string;
 	is_dir: boolean;
-	size: number;
+	size?: number;
 }
 
 export interface FileContent {
@@ -220,10 +219,9 @@ export interface PromptField {
 	description?: string;
 	required?: boolean;
 	enum?: string[];
+	enum_labels?: string[];
 	enum_descriptions?: string[];
-	enum_previews?: string[];
 	strict?: boolean;
 	multiple?: boolean;
-	custom_answer_for?: string;
 	default?: unknown;
 }

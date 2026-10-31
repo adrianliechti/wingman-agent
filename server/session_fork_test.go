@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -31,7 +30,7 @@ func (a *forkingProtocolAgent) ForkSession(_ context.Context, id, title string) 
 func newForkProtocolServer(t *testing.T, a code.Agent) *Server {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}, wsConns: map[*websocket.Conn]*wsClient{}}
+	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}}
 	b := s.bindBackend("one", a)
 	s.backends[b.id] = &backendEntry{runtime: b}
 	s.mux = chi.NewRouter()

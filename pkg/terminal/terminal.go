@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -9,14 +10,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 const (
 	maxScrollback = 256 << 10
 	compactSlack  = 64 << 10
 
-	readChunk        = 32 << 10
-	subscriberBuffer = 64
+	readChunk = 32 << 10
 
 	DefaultCols = 80
 	DefaultRows = 24
@@ -64,21 +65,27 @@ type CommandSpec struct {
 }
 
 type Session struct {
-	id    string
-	title string
-	shell string
+	id      string
+	title   string
+	shell   string
+	command bool
 
 	pty Terminal
 
 	done   chan struct{}
 	onExit func(*Session)
 
-	mu     sync.Mutex
-	buf    []byte
-	subs   map[chan []byte]struct{}
-	cols   int
-	rows   int
-	closed bool
+	mu        sync.Mutex
+	buf       []byte
+	written   int64 // output bytes produced so far
+	subs      map[*subscriber]struct{}
+	cols      int
+	rows      int
+	closed    bool
+	stopOnce  sync.Once
+	exitCode  int
+	exitKnown bool
+	cwd       string
 }
 
 func Supported() bool {
@@ -129,12 +136,13 @@ func newCommandSession(id string, spec CommandSpec, cols, rows int, onExit func(
 		id:    id,
 		title: strings.TrimSpace(spec.Title),
 		shell: path,
+		cwd:   dir,
 
 		pty: p,
 
 		done:   make(chan struct{}),
 		onExit: onExit,
-		subs:   map[chan []byte]struct{}{},
+		subs:   map[*subscriber]struct{}{},
 
 		cols: cols,
 		rows: rows,
@@ -148,6 +156,9 @@ func newCommandSession(id string, spec CommandSpec, cols, rows int, onExit func(
 	return s, nil
 }
 
+// IsCommand reports a session created by CreateCommand rather than a shell.
+func (s *Session) IsCommand() bool { return s.command }
+
 func (s *Session) ID() string {
 	return s.id
 }
@@ -158,6 +169,15 @@ func (s *Session) Title() string {
 
 func (s *Session) Shell() string {
 	return s.shell
+}
+
+func (s *Session) Cwd() string { return s.cwd }
+
+// ExitCode is available after Done closes. A killed process may have no code.
+func (s *Session) ExitCode() (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exitCode, s.exitKnown
 }
 
 func (s *Session) ProcessID() int {
@@ -221,44 +241,121 @@ func (s *Session) Resize(cols, rows int) error {
 }
 
 // Subscribe returns the scrollback captured so far plus a channel of
-// subsequent output. The channel is closed when the session ends or when the
-// subscriber falls too far behind; cancel must always be called.
+// subsequent output. Bursts are coalesced; the channel is closed once the
+// session's output is delivered after it ends, or when the subscriber falls a
+// whole scrollback behind and must subscribe again. cancel must be called.
 func (s *Session) Subscribe() (snapshot []byte, ch <-chan []byte, cancel func()) {
-	c := make(chan []byte, subscriberBuffer)
-
-	s.mu.Lock()
-	snapshot = append([]byte(nil), s.buf...)
-	if s.closed {
-		s.mu.Unlock()
-		close(c)
-		return snapshot, c, func() {}
-	}
-	s.subs[c] = struct{}{}
-	s.mu.Unlock()
-
-	return snapshot, c, func() { s.unsubscribe(c) }
+	snapshot, _, ch, cancel = s.SubscribeAt()
+	return snapshot, ch, cancel
 }
 
-func (s *Session) unsubscribe(c chan []byte) {
+// SubscribeAt also returns the snapshot's end offset, so a closed stream can be checked against Written.
+func (s *Session) SubscribeAt() (snapshot []byte, offset int64, ch <-chan []byte, cancel func()) {
+	s.mu.Lock()
+	snapshot, offset = append([]byte(nil), s.buf...), s.written
+	if s.closed {
+		s.mu.Unlock()
+		c := make(chan []byte)
+		close(c)
+		return snapshot, offset, c, func() {}
+	}
+	sub := newSubscriber()
+	s.subs[sub] = struct{}{}
+	s.mu.Unlock()
+
+	return snapshot, offset, sub.out, func() { s.unsubscribe(sub) }
+}
+
+// Written returns the number of output bytes the session has produced.
+func (s *Session) Written() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.subs[c]; !ok {
-		return
+	return s.written
+}
+
+func (s *Session) unsubscribe(sub *subscriber) {
+	s.mu.Lock()
+	delete(s.subs, sub)
+	s.mu.Unlock()
+	sub.cancel()
+}
+
+type subscriber struct {
+	out      chan []byte
+	wake     chan struct{}
+	stop     chan struct{}
+	stopOnce sync.Once
+
+	mu      sync.Mutex
+	pending []byte
+	ended   bool // deliver what is pending, then close
+	behind  bool // close without delivering
+}
+
+func newSubscriber() *subscriber {
+	sub := &subscriber{out: make(chan []byte), wake: make(chan struct{}, 1), stop: make(chan struct{})}
+	go sub.run()
+	return sub
+}
+
+func (sub *subscriber) add(chunk []byte) {
+	sub.mu.Lock()
+	if len(sub.pending)+len(chunk) > maxScrollback {
+		sub.behind, sub.pending = true, nil
+	} else if !sub.behind {
+		sub.pending = append(sub.pending, chunk...)
 	}
-	delete(s.subs, c)
-	close(c)
+	sub.mu.Unlock()
+	sub.signal()
+}
+
+func (sub *subscriber) end() {
+	sub.mu.Lock()
+	sub.ended = true
+	sub.mu.Unlock()
+	sub.signal()
+}
+
+func (sub *subscriber) signal() {
+	select {
+	case sub.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (sub *subscriber) cancel() { sub.stopOnce.Do(func() { close(sub.stop) }) }
+
+func (sub *subscriber) run() {
+	defer close(sub.out)
+	for {
+		select {
+		case <-sub.wake:
+		case <-sub.stop:
+			return
+		}
+		for {
+			sub.mu.Lock()
+			data, ended, behind := sub.pending, sub.ended, sub.behind
+			sub.pending = nil
+			sub.mu.Unlock()
+			if behind || len(data) == 0 && ended {
+				return
+			}
+			if len(data) == 0 {
+				break
+			}
+			select {
+			case sub.out <- data:
+			case <-sub.stop:
+				return
+			}
+		}
+	}
 }
 
 func (s *Session) Close() error {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		<-s.done
-		return nil
-	}
-	s.mu.Unlock()
-
-	err := s.pty.Close()
+	var err error
+	s.stopOnce.Do(func() { err = s.pty.Close() })
 	<-s.done
 	return err
 }
@@ -284,43 +381,65 @@ func (s *Session) publish(p []byte) {
 	defer s.mu.Unlock()
 
 	s.buf = append(s.buf, chunk...)
+	s.written += int64(len(chunk))
 	if len(s.buf) > maxScrollback+compactSlack {
-		s.buf = append(make([]byte, 0, maxScrollback+compactSlack), s.buf[len(s.buf)-maxScrollback:]...)
+		s.buf = append(make([]byte, 0, maxScrollback+compactSlack), SafeTail(s.buf, maxScrollback)...)
 	}
 
-	for c := range s.subs {
-		select {
-		case c <- chunk:
-		default:
-			delete(s.subs, c)
-			close(c)
-		}
+	for sub := range s.subs {
+		sub.add(chunk)
 	}
 }
 
 func (s *Session) finish() {
+	// Wait before closing the PTY so a natural exit retains its actual status.
+	// Close remains able to terminate the process while Wait is in progress.
+	err := s.pty.Wait()
+	s.stopOnce.Do(func() { _ = s.pty.Close() })
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return
 	}
 	s.closed = true
+	var exit interface{ ExitCode() int }
+	if err == nil {
+		s.exitKnown = true
+	} else if errors.As(err, &exit) && exit.ExitCode() >= 0 {
+		s.exitCode, s.exitKnown = exit.ExitCode(), true
+	}
 	subs := s.subs
-	s.subs = map[chan []byte]struct{}{}
+	s.subs = map[*subscriber]struct{}{}
 	s.mu.Unlock()
 
-	for c := range subs {
-		close(c)
-	}
-
-	_ = s.pty.Close()
-	_ = s.pty.Wait()
-
 	close(s.done)
+	for sub := range subs {
+		sub.end()
+	}
 
 	if s.onExit != nil {
 		s.onExit(s)
 	}
+}
+
+// SafeTail returns at most limit trailing bytes of data. It starts after a
+// newline or at an escape sequence when one is near, otherwise at a character,
+// so a replay never begins inside an escape sequence or a UTF-8 character.
+func SafeTail(data []byte, limit int) []byte {
+	if len(data) <= limit {
+		return data
+	}
+	tail := data[len(data)-limit:]
+	if i := bytes.IndexAny(tail[:min(len(tail), 4<<10)], "\n\x1b"); i >= 0 {
+		if tail[i] == '\n' {
+			return tail[i+1:]
+		}
+		return tail[i:]
+	}
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return tail
 }
 
 func normalizeSize(cols, rows int) (int, int) {

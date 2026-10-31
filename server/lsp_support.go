@@ -1,0 +1,307 @@
+package server
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net/http"
+	"net/url"
+	"os"
+	pathpkg "path"
+	"path/filepath"
+	"strings"
+
+	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
+	"github.com/adrianliechti/wingman-agent/pkg/lsp"
+	lspuri "go.lsp.dev/uri"
+)
+
+type editorCapabilitiesResponse struct {
+	WorkspaceURI                      string   `json:"workspace_uri"`
+	LanguageServer                    bool     `json:"language_server"`
+	Completion                        bool     `json:"completion"`
+	CompletionResolve                 bool     `json:"completion_resolve"`
+	CompletionTriggerCharacters       []string `json:"completion_trigger_characters"`
+	SignatureHelp                     bool     `json:"signature_help"`
+	SignatureHelpTriggerCharacters    []string `json:"signature_help_trigger_characters"`
+	SignatureHelpRetriggerCharacters  []string `json:"signature_help_retrigger_characters"`
+	Hover                             bool     `json:"hover"`
+	Definition                        bool     `json:"definition"`
+	TypeDefinition                    bool     `json:"type_definition"`
+	References                        bool     `json:"references"`
+	Implementation                    bool     `json:"implementation"`
+	DocumentSymbols                   bool     `json:"document_symbols"`
+	DocumentHighlights                bool     `json:"document_highlights"`
+	FoldingRanges                     bool     `json:"folding_ranges"`
+	Rename                            bool     `json:"rename"`
+	RenamePrepare                     bool     `json:"rename_prepare"`
+	CodeActions                       bool     `json:"code_actions"`
+	CodeActionResolve                 bool     `json:"code_action_resolve"`
+	DocumentFormatting                bool     `json:"document_formatting"`
+	RangeFormatting                   bool     `json:"range_formatting"`
+	OnTypeFormattingTriggerCharacters []string `json:"on_type_formatting_trigger_characters"`
+	SemanticTokens                    bool     `json:"semantic_tokens"`
+	InlayHints                        bool     `json:"inlay_hints"`
+}
+
+type lspActivityResponse struct {
+	Analyzing bool                 `json:"analyzing"`
+	Services  []lspServiceActivity `json:"services"`
+}
+
+type lspServiceActivity struct {
+	Server     string             `json:"server"`
+	Label      string             `json:"label"`
+	Project    string             `json:"project"`
+	Analyzing  bool               `json:"analyzing"`
+	Operations []lsp.WorkProgress `json:"operations"`
+}
+
+func (s *Server) handleWorkspaceActivity(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.lspActivity())
+}
+
+func (s *Server) lspActivity() lspActivityResponse {
+	activities := s.workspace.LSPActivities()
+	services := make([]lspServiceActivity, 0, len(activities))
+	analyzing := false
+	for _, activity := range activities {
+		project, err := filepath.Rel(s.workspace.RootPath, activity.ProjectDir)
+		if err != nil || project == ".." || filepath.IsAbs(project) || strings.HasPrefix(project, ".."+string(filepath.Separator)) {
+			project = filepath.Base(activity.ProjectDir)
+		}
+		project = filepath.ToSlash(project)
+		services = append(services, lspServiceActivity{
+			Server:     activity.Server,
+			Label:      activity.Label,
+			Project:    project,
+			Analyzing:  activity.Analyzing,
+			Operations: activity.Operations,
+		})
+		analyzing = analyzing || activity.Analyzing
+	}
+	return lspActivityResponse{Analyzing: analyzing, Services: services}
+}
+
+func (s *Server) lspEditorCapabilities(ctx context.Context, filePath string) editorCapabilitiesResponse {
+	capabilities, hasServer, err := s.workspace.EditorLSPCapabilities(ctx, filePath)
+	if err != nil {
+		// A missing or failed server must not disable structural fallbacks.
+		hasServer = false
+	}
+	response := editorCapabilitiesResponse{
+		WorkspaceURI:       fileuri.FromPath(s.workspace.RootPath),
+		LanguageServer:     hasServer,
+		Completion:         true,
+		Hover:              true,
+		Definition:         true,
+		References:         true,
+		Implementation:     true,
+		DocumentSymbols:    true,
+		DocumentHighlights: true,
+		FoldingRanges:      true,
+		SemanticTokens:     true,
+	}
+	if hasServer {
+		if provider := capabilities.CompletionProvider; provider != nil {
+			response.CompletionResolve = provider.ResolveProvider != nil && *provider.ResolveProvider
+			response.CompletionTriggerCharacters = nonNilStrings(provider.TriggerCharacters)
+		}
+		if provider := capabilities.SignatureHelpProvider; provider != nil {
+			response.SignatureHelp = true
+			response.SignatureHelpTriggerCharacters = nonNilStrings(provider.TriggerCharacters)
+			response.SignatureHelpRetriggerCharacters = nonNilStrings(provider.RetriggerCharacters)
+		}
+		// Structural features remain available when the server omits them or
+		// fails later; only type-aware features are strictly capability-gated.
+		response.TypeDefinition = lsp.CapabilityEnabled(capabilities.TypeDefinitionProvider)
+		response.Rename, response.RenamePrepare = renameCapabilities(capabilities.RenameProvider)
+		response.CodeActions, response.CodeActionResolve = codeActionCapabilities(capabilities.CodeActionProvider)
+		response.DocumentFormatting = lsp.CapabilityEnabled(capabilities.DocumentFormattingProvider)
+		response.RangeFormatting = lsp.CapabilityEnabled(capabilities.DocumentRangeFormattingProvider)
+		if provider := capabilities.DocumentOnTypeFormattingProvider; provider.FirstTriggerCharacter != "" {
+			response.OnTypeFormattingTriggerCharacters = append(
+				[]string{provider.FirstTriggerCharacter},
+				provider.MoreTriggerCharacter...,
+			)
+		}
+		response.SemanticTokens = true
+		response.InlayHints = lsp.CapabilityEnabled(capabilities.InlayHintProvider)
+	}
+	return response
+}
+
+func renameCapabilities(value any) (enabled, prepare bool) {
+	switch provider := value.(type) {
+	case lsp.Boolean:
+		return bool(provider), false
+	case *lsp.RenameOptions:
+		return true, provider.PrepareProvider != nil && *provider.PrepareProvider
+	default:
+		return false, false
+	}
+}
+
+func codeActionCapabilities(value any) (enabled, resolve bool) {
+	switch provider := value.(type) {
+	case lsp.Boolean:
+		return bool(provider), false
+	case *lsp.CodeActionOptions:
+		return true, provider.ResolveProvider != nil && *provider.ResolveProvider
+	default:
+		return false, false
+	}
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
+// Documents outside the workspace are served read-only under this scheme:
+// files as wingman-source:/path and a language server's own virtual
+// documents as wingman-source://<scheme>/<base64 URI>/<name>.
+const lspSourceScheme = "wingman-source"
+
+// lspSource maps a location a language server reported outside the workspace
+// to its wingman-source URI and allows workspace/textDocumentContent to serve
+// exactly that URI. It reports false for workspace files and unreadable files.
+func (s *Server) lspSource(location string) (string, bool) {
+	u, err := url.Parse(location)
+	if err != nil || u.Scheme == "" {
+		return "", false
+	}
+	source := &url.URL{Scheme: lspSourceScheme}
+	if u.Scheme == "file" {
+		path, ok := fileuri.Path(location)
+		if !ok {
+			return "", false
+		}
+		if rel, err := filepath.Rel(s.workspace.RootPath, path); err == nil && filepath.IsLocal(rel) {
+			return "", false
+		}
+		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+			return "", false
+		}
+		file, _ := url.Parse(fileuri.FromPath(path))
+		source.Path = file.Path
+	} else {
+		name := pathpkg.Base(u.Path)
+		if name == "." || name == "/" {
+			name = u.Scheme
+		}
+		source.Host, source.Path = u.Scheme, "/"+base64.RawURLEncoding.EncodeToString([]byte(location))+"/"+name
+	}
+	canonical, ok := canonicalLSPSource(source.String())
+	if !ok {
+		return "", false
+	}
+	s.lspExternalMu.Lock()
+	defer s.lspExternalMu.Unlock()
+	if s.lspExternalPaths == nil {
+		s.lspExternalPaths = make(map[string]bool)
+	}
+	s.lspExternalPaths[canonical] = true
+	return canonical, true
+}
+
+// Clients and the LSP codec rewrite URIs to vscode-uri's canonical form, so
+// the allow-list compares that form.
+func canonicalLSPSource(value string) (string, bool) {
+	canonical, err := lspuri.Parse(value)
+	return string(canonical), err == nil && canonical.Scheme() == lspSourceScheme
+}
+
+// lspSourceTarget resolves an allowed wingman-source URI to a file path or to
+// the language server's original virtual URI.
+func (s *Server) lspSourceTarget(source string) (path, virtual string, ok bool) {
+	canonical, ok := canonicalLSPSource(source)
+	if !ok {
+		return "", "", false
+	}
+	s.lspExternalMu.Lock()
+	allowed := s.lspExternalPaths[canonical]
+	s.lspExternalMu.Unlock()
+	u, err := url.Parse(canonical)
+	if !allowed || err != nil {
+		return "", "", false
+	}
+	if u.Host == "" {
+		path, ok = fileuri.Path((&url.URL{Scheme: "file", Path: u.Path}).String())
+		return path, "", ok
+	}
+	encoded, _, _ := strings.Cut(strings.TrimPrefix(u.Path, "/"), "/")
+	data, err := base64.RawURLEncoding.DecodeString(encoded)
+	return "", string(data), err == nil
+}
+
+type lspWorkspaceDocument struct {
+	Path string `json:"path"`
+	// Revision identifies the exact content the language server used. For an
+	// open document that can intentionally differ from the disk revision.
+	Revision string `json:"revision,omitempty"`
+	Exists   bool   `json:"exists"`
+}
+
+func (s *Server) workspaceEditDocuments(edits ...*lsp.WorkspaceEdit) (map[string]lspWorkspaceDocument, error) {
+	documents := make(map[string]lspWorkspaceDocument)
+	for _, edit := range edits {
+		for _, key := range workspaceEditURIs(edit) {
+			if _, exists := documents[key]; exists {
+				continue
+			}
+			filePath, ok := fileuri.Path(key)
+			if !ok {
+				return nil, fmt.Errorf("language server edit targets a non-file URI")
+			}
+			rel, err := filepath.Rel(s.workspace.RootPath, filePath)
+			if err != nil || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return nil, fmt.Errorf("language server edit targets a file outside the workspace")
+			}
+			content, err := s.workspace.Root.ReadFile(rel)
+			switch {
+			case err == nil:
+				document := lspWorkspaceDocument{Path: filepath.ToSlash(rel), Revision: fileRevision(content), Exists: true}
+				if buffer, ok := s.workspace.EditorLSPDocumentContent(filePath); ok {
+					document.Revision = fileRevision([]byte(buffer))
+				}
+				documents[key] = document
+			case errors.Is(err, fs.ErrNotExist):
+				documents[key] = lspWorkspaceDocument{Path: filepath.ToSlash(rel), Exists: false}
+			default:
+				return nil, err
+			}
+		}
+	}
+	return documents, nil
+}
+
+func workspaceEditURIs(edit *lsp.WorkspaceEdit) []string {
+	if edit == nil {
+		return nil
+	}
+	result := make([]string, 0, len(edit.Changes)+len(edit.DocumentChanges))
+	if edit.DocumentChanges != nil {
+		for _, change := range edit.DocumentChanges {
+			switch change := change.(type) {
+			case *lsp.TextDocumentEdit:
+				result = append(result, change.TextDocument.URI.String())
+			case *lsp.CreateFile:
+				result = append(result, change.URI.String())
+			case *lsp.RenameFile:
+				result = append(result, change.OldURI.String(), change.NewURI.String())
+			case *lsp.DeleteFile:
+				result = append(result, change.URI.String())
+			}
+		}
+		return result
+	}
+	for documentURI := range edit.Changes {
+		result = append(result, documentURI.String())
+	}
+	return result
+}

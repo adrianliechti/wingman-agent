@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
@@ -133,7 +133,7 @@ func (s *session) nameFromPrompt(ctx context.Context, prompt []acpsdk.ContentBlo
 
 const contextUsageTimeout = time.Second
 
-func (s *session) publishContextUsage(ctx context.Context, conn *acpsdk.AgentSideConnection) {
+func (s *session) publishContextUsage(ctx context.Context, conn acp.ClientConnection) {
 	if conn == nil {
 		return
 	}
@@ -206,7 +206,7 @@ type turnResult struct {
 	err  error
 }
 
-func (s *session) runTurn(ctx context.Context, conn *acpsdk.AgentSideConnection, prompt []acpsdk.ContentBlock) (acpsdk.StopReason, error) {
+func (s *session) runTurn(ctx context.Context, conn acp.ClientConnection, prompt []acpsdk.ContentBlock) (acpsdk.StopReason, error) {
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -284,7 +284,7 @@ func (s *session) runTurn(ctx context.Context, conn *acpsdk.AgentSideConnection,
 
 type turn struct {
 	ctx  context.Context
-	conn *acpsdk.AgentSideConnection
+	conn acp.ClientConnection
 	sess *session
 
 	done       chan turnResult
@@ -352,6 +352,16 @@ func (t *turn) handle(raw json.RawMessage) {
 	}
 
 	switch probe.Type {
+	case "message_start":
+		var event struct {
+			Message struct {
+				Role      string `json:"role"`
+				Timestamp int64  `json:"timestamp"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(raw, &event) == nil && event.Message.Role == "user" {
+			acp.PromptAccepted(t.ctx, piMessageID(event.Message.Role, event.Message.Timestamp))
+		}
 	case "message_update":
 		t.handleMessageUpdate(raw)
 
@@ -391,15 +401,21 @@ func (t *turn) handle(raw json.RawMessage) {
 
 	case "session_info_changed":
 		var p struct {
-			Name *string `json:"name"`
+			Name json.RawMessage `json:"name"`
 		}
 		if json.Unmarshal(raw, &p) != nil {
 			return
 		}
 		// Pi omits the name when it is cleared, which lists the session by its first prompt.
 		title := t.sess.fallbackTitle()
-		if p.Name != nil && strings.TrimSpace(*p.Name) != "" {
-			title = strings.TrimSpace(*p.Name)
+		if len(p.Name) > 0 {
+			var name string
+			if string(p.Name) == "null" || json.Unmarshal(p.Name, &name) != nil {
+				return
+			}
+			if strings.TrimSpace(name) != "" {
+				title = strings.TrimSpace(name)
+			}
 		}
 		if u := t.sess.titleUpdate(title, true); u != nil {
 			t.emit(*u)

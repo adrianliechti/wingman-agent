@@ -1,5 +1,5 @@
 import { isDraft } from "../state/sessionStore.ts";
-import { sessionPath } from "../state/workspaceClient.ts";
+import { chatPath } from "../state/workspaceClient.ts";
 import type { ScheduleEntry, TaskDetail, TaskEntry } from "../types/protocol";
 import { fetchJSON, fetchOK } from "./http.ts";
 
@@ -8,7 +8,7 @@ export function listTasks(
 	signal?: AbortSignal,
 ): Promise<TaskEntry[]> {
 	if (isDraft(sessionId)) return Promise.resolve([]);
-	return fetchJSON<TaskEntry[]>(`${sessionPath(sessionId)}/tasks`, {
+	return fetchJSON<TaskEntry[]>(`${chatPath(sessionId)}/tasks`, {
 		signal,
 	});
 }
@@ -18,7 +18,7 @@ export function listSchedules(
 	signal?: AbortSignal,
 ): Promise<ScheduleEntry[]> {
 	if (isDraft(sessionId)) return Promise.resolve([]);
-	return fetchJSON<ScheduleEntry[]>(`${sessionPath(sessionId)}/schedules`, {
+	return fetchJSON<ScheduleEntry[]>(`${chatPath(sessionId)}/schedules`, {
 		signal,
 	});
 }
@@ -29,7 +29,7 @@ export function getTask(
 	signal?: AbortSignal,
 ): Promise<TaskDetail> {
 	return fetchJSON<TaskDetail>(
-		`${sessionPath(sessionId)}/tasks/${encodeURIComponent(taskId)}`,
+		`${chatPath(sessionId)}/tasks/${encodeURIComponent(taskId)}`,
 		{ signal },
 	);
 }
@@ -39,7 +39,7 @@ export async function deleteSchedule(
 	scheduleId: string,
 ): Promise<void> {
 	await fetchOK(
-		`${sessionPath(sessionId)}/schedules/${encodeURIComponent(scheduleId)}`,
+		`${chatPath(sessionId)}/schedules/${encodeURIComponent(scheduleId)}`,
 		{ method: "DELETE" },
 	);
 }
@@ -50,7 +50,7 @@ export async function setSchedulePaused(
 	paused: boolean,
 ): Promise<void> {
 	await fetchOK(
-		`${sessionPath(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/${paused ? "pause" : "resume"}`,
+		`${chatPath(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/${paused ? "pause" : "resume"}`,
 		{ method: "POST" },
 	);
 }
@@ -60,7 +60,7 @@ export async function stopTask(
 	taskId: string,
 ): Promise<void> {
 	await fetchOK(
-		`${sessionPath(sessionId)}/tasks/${encodeURIComponent(taskId)}/stop`,
+		`${chatPath(sessionId)}/tasks/${encodeURIComponent(taskId)}/stop`,
 		{ method: "POST" },
 	);
 }

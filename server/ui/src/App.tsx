@@ -1,5 +1,8 @@
+import type { MessageAttachment } from "@microsoft/agent-host-protocol";
+import { gitStatusQuery } from "./api/git";
 import { useMainLayout } from "./hooks/useMainLayout.ts";
 import { useMobileLayout } from "./hooks/useMobileLayout.ts";
+import { useAgents } from "./hooks/useAgents.ts";
 import { MobileNavigation } from "./components/MobileNavigation";
 import {
 	useWorkspace,
@@ -7,7 +10,7 @@ import {
 	draftSettingsKey,
 } from "./state/workspaceContext.ts";
 import { composerDrafts as getComposerDrafts } from "./state/composerDrafts.ts";
-import { isDraft, sessionKey, splitSessionKey } from "./state/sessionStore.ts";
+import { canonicalChatURI, draftKey, isDraft } from "./state/sessionStore.ts";
 import { workspaceClient } from "./state/workspaceClient.ts";
 import {
 	type QueryClient,
@@ -47,7 +50,6 @@ import {
 	Search,
 	Save,
 	SaveAll,
-	Sparkles,
 	SquareTerminal,
 	Stethoscope,
 	Wrench,
@@ -72,7 +74,7 @@ import {
 	Separator,
 	usePanelRef,
 } from "react-resizable-panels";
-import { getInspectAvailability } from "./api/capabilities";
+import { getInspectAvailability } from "./api/workspace";
 import {
 	controlDebug,
 	getDebugSession,
@@ -83,7 +85,6 @@ import { createWorkspaceFile } from "./api/files";
 import { queryKeys } from "./api/query";
 import { deleteSession, forkSession, type SessionInfo } from "./api/sessions";
 import {
-	setEditorTabCompletion,
 	setWindowSidebarPosition,
 	setWindowTerminalPosition,
 } from "./api/settings";
@@ -148,11 +149,13 @@ import {
 } from "./components/ui/Feedback";
 import { FloatingMenu, FloatingSurface } from "./components/ui/Floating";
 import { AgentSessions } from "./components/AgentSessions";
-import { useCapabilities } from "./hooks/useCapabilities";
+import { useWorkspaceInfo } from "./hooks/useWorkspaceInfo";
+import { isAbsolutePath, workspaceFileTarget } from "./utils/workspacePath";
 import { useAutoHidingScrollbars } from "./hooks/useAutoHidingScrollbars";
 import { type OpenDocument, useOpenDocuments } from "./hooks/useOpenDocuments";
 import { useServerQueryInvalidation } from "./hooks/useServerQueryInvalidation";
 import { useSessions } from "./hooks/useSessions";
+import { useCanCompact } from "./hooks/useChatCommands";
 import type {
 	CompareMode,
 	DiffLayer,
@@ -334,6 +337,7 @@ export default function App() {
 	const mobile = useMobileLayout();
 	const { backend: agentId, selectBackend, drafts } = useWorkspace();
 	const [client] = useState(workspaceClient);
+	const agents = useAgents();
 	const [composerDrafts] = useState(getComposerDrafts);
 	const draftStorageError = useSyncExternalStore(
 		composerDrafts.subscribe,
@@ -345,7 +349,10 @@ export default function App() {
 			location.pathname.split("/").filter(Boolean)[1] ?? "",
 		);
 		if (sid) {
-			const key = sessionKey(agentId, sid);
+			// Links before chat URIs carried the native session id.
+			const key = sid.startsWith("ahp-chat:")
+				? sid
+				: canonicalChatURI(agentId, sid);
 			return {
 				id: chatTabId(key),
 				type: "chat",
@@ -361,13 +368,35 @@ export default function App() {
 		connected,
 		sessions,
 		sendChat,
-		command,
+		act,
 		dismissError,
 		subscribe,
 		observe,
 	} = useSessions();
 	useServerQueryInvalidation(subscribe, connected);
 	const queryClient = useQueryClient();
+	useEffect(() => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let stateChanged = false;
+		const release = client.dap.subscribe((event) => {
+			if (!["wingman/status", "output", "disconnected"].includes(event)) return;
+			stateChanged ||= event !== "output";
+			if (timer !== undefined) return;
+			timer = setTimeout(() => {
+				const key = stateChanged ? queryKeys.debug.all : queryKeys.debug.output;
+				timer = undefined;
+				stateChanged = false;
+				void queryClient.invalidateQueries(
+					{ queryKey: key },
+					{ cancelRefetch: false },
+				);
+			}, 16);
+		});
+		return () => {
+			release();
+			clearTimeout(timer);
+		};
+	}, [client, queryClient]);
 	const toast = useToast();
 	const {
 		documents,
@@ -383,41 +412,14 @@ export default function App() {
 		moveDocuments,
 		applyWorkspaceEdit,
 	} = useOpenDocuments(subscribe);
-	const capabilities = useCapabilities();
-	const showChanges = !!(capabilities?.git || capabilities?.git_init);
+	const workspace = useWorkspaceInfo();
+	const gitState = useQuery(gitStatusQuery);
 	const { inspect: showInspect, debug: showDebug } =
-		getInspectAvailability(capabilities);
-	const showAgents = capabilities?.tasks ?? false;
-	const showTerminal = capabilities?.terminal ?? false;
-	const tabAvailable = capabilities?.tab ?? false;
-	const tabEnabled =
-		tabAvailable && (capabilities?.["editor.tab.completion"] ?? false);
-	const languageServicesKey = `${capabilities?.lsp ?? false}:${capabilities?.managed_tools?.state ?? ""}`;
-	const toggleEditorTabCompletion = async () => {
-		try {
-			await setEditorTabCompletion(!tabEnabled);
-		} catch (error) {
-			toast({
-				title: "Could not change Tab Completion",
-				description: String(error),
-				tone: "error",
-			});
-			return;
-		}
-		void queryClient.invalidateQueries({
-			queryKey: queryKeys.capabilities,
-		});
-		toast({
-			title: `Tab Completion ${tabEnabled ? "disabled" : "enabled"}`,
-			description: tabEnabled
-				? undefined
-				: "Completions use model requests while you type.",
-		});
-	};
+		getInspectAvailability(workspace);
+	const languageServicesKey = `${workspace?.lsp ?? false}:${workspace?.managed_tools?.state ?? ""}`;
 	const [requestedWorkspaceTab, setRequestedWorkspaceTab] =
 		useState<WorkspaceTab>("files");
-	const terminalDocked =
-		capabilities?.["window.terminal.position"] === "bottom";
+	const terminalDocked = workspace?.["window.terminal.position"] === "bottom";
 	const [activeDockedTerminalId, setActiveDockedTerminalId] = useState("");
 	const lastCenterActiveIdRef = useRef(initialTab.id);
 	const [problemsRefreshKey, setProblemsRefreshKey] = useState(0);
@@ -425,7 +427,7 @@ export default function App() {
 	const [searchFocusKey, setSearchFocusKey] = useState(0);
 	const [sidePanelCollapsed, setSidePanelCollapsed] = useState(false);
 	const preferredSidebarPosition =
-		capabilities?.["window.sidebar.position"] ?? "right";
+		workspace?.["window.sidebar.position"] ?? "right";
 	const [sidebarLayout, setSidebarLayout] = useState({
 		position: preferredSidebarPosition,
 		defaultSize: `${SIDE_PANEL_DEFAULT_SIZE}px`,
@@ -456,7 +458,7 @@ export default function App() {
 		const observer = new ResizeObserver(updateCompactMode);
 		observer.observe(element);
 		return () => observer.disconnect();
-	}, [sidePanelCollapsed, sidebarPosition, showChanges, showInspect]);
+	}, [sidePanelCollapsed, sidebarPosition, showInspect]);
 	const appRef = useRef<HTMLDivElement>(null);
 	const sidePanelWidthRef = useRef(SIDE_PANEL_DEFAULT_SIZE);
 	const sidePanelRef = usePanelRef();
@@ -476,14 +478,9 @@ export default function App() {
 	const [debugDetailsWidth, setDebugDetailsWidth] = useState(
 		DEBUG_DETAILS_MIN_SIZE,
 	);
-	const terminalShells =
-		useQuery({
-			...terminalQueries.shells(),
-			enabled: showTerminal,
-		}).data ?? EMPTY_SHELLS;
+	const terminalShells = workspace?.shells ?? EMPTY_SHELLS;
 	const terminalsQuery = useQuery({
 		...terminalQueries.list(),
-		enabled: showTerminal,
 	});
 	const terminalCreatingRef = useRef(false);
 	const debugTerminalIDsRef = useRef(new Set<string>());
@@ -522,6 +519,7 @@ export default function App() {
 		useState<FileTabHandle | null>(null);
 	const [composerSeed, setComposerSeed] = useState<{
 		text: string;
+		completions?: MessageAttachment[];
 		files?: string[];
 		append?: boolean;
 		nonce: number;
@@ -691,7 +689,7 @@ export default function App() {
 	};
 
 	useEffect(() => {
-		if (!showTerminal || !terminalsQuery.data) return;
+		if (!terminalsQuery.data) return;
 		const entries = terminalsQuery.data;
 		const ids = new Set(entries.map((entry) => entry.id));
 		const debugTerminalIDs = [...debugTerminalIDsRef.current];
@@ -714,7 +712,7 @@ export default function App() {
 			}
 			return next;
 		});
-	}, [showTerminal, terminalsQuery.data, setTabs]);
+	}, [terminalsQuery.data, setTabs]);
 
 	const handleShortcutKey = useEffectEvent((e: KeyboardEvent) => {
 		// Ctrl/Cmd+P matches the TUI command center (and suppresses the
@@ -773,7 +771,7 @@ export default function App() {
 		: undefined;
 	const activeTasksQuery = useQuery({
 		queryKey: queryKeys.tasks.list(activeTaskSessionId),
-		enabled: showAgents && !!activeTaskSessionId,
+		enabled: !!activeTaskSessionId,
 		queryFn: ({ signal }) => listTasks(activeTaskSessionId, signal),
 		refetchInterval: (query) =>
 			(activeTaskPhase && activeTaskPhase !== "idle") ||
@@ -785,7 +783,7 @@ export default function App() {
 	});
 	const activeSchedulesQuery = useQuery({
 		queryKey: queryKeys.tasks.schedules(activeTaskSessionId),
-		enabled: showAgents && !!activeTaskSessionId,
+		enabled: !!activeTaskSessionId,
 		queryFn: ({ signal }) => listSchedules(activeTaskSessionId, signal),
 		refetchInterval: (query) =>
 			(query.state.data?.length ?? 0) > 0 ? 30000 : false,
@@ -797,11 +795,11 @@ export default function App() {
 		working: activeTasks.some((task) => task.status === "running"),
 	};
 	useEffect(() => {
-		if (!showAgents || !activeTaskSessionId || !activeTaskPhase) return;
+		if (!activeTaskSessionId || !activeTaskPhase) return;
 		void queryClient.invalidateQueries({
 			queryKey: queryKeys.tasks.session(activeTaskSessionId),
 		});
-	}, [activeTaskPhase, activeTaskSessionId, queryClient, showAgents]);
+	}, [activeTaskPhase, activeTaskSessionId, queryClient]);
 	const activeDockedTerminal =
 		terminalTabs.find((tab) => tab.id === activeDockedTerminalId) ??
 		terminalTabs[0];
@@ -870,11 +868,10 @@ export default function App() {
 								: "Show data preview";
 	const sessionId =
 		activeTab.type === "chat"
-			? activeTab.sessionId || sessionKey(activeTab.backendId ?? agentId, "")
-			: currentSessionId || sessionKey(agentId, "");
+			? activeTab.sessionId || draftKey(activeTab.backendId ?? agentId)
+			: currentSessionId || draftKey(agentId);
 	const workspaceTab =
-		(requestedWorkspaceTab === "changes" && !showChanges) ||
-		(requestedWorkspaceTab === "inspect" && !showInspect)
+		requestedWorkspaceTab === "inspect" && !showInspect
 			? "files"
 			: requestedWorkspaceTab;
 
@@ -884,12 +881,12 @@ export default function App() {
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
 
 	useEffect(() => {
-		const ref = splitSessionKey(sessionId);
-		const path = ref.sessionId
-			? `/${encodeURIComponent(ref.backendId)}/${encodeURIComponent(ref.sessionId)}`
-			: `/${encodeURIComponent(agentId)}`;
+		const path = isDraft(sessionId)
+			? `/${encodeURIComponent(agentId)}`
+			: `/${encodeURIComponent(client.backendOf(sessionId))}/${encodeURIComponent(sessionId)}`;
 		if (location.pathname !== path) window.history.replaceState(null, "", path);
-	}, [agentId, sessionId]);
+		// The provider of a restored chat is known once it loads.
+	}, [client, agentId, sessionId, activeSession?.status]);
 	const observedKeys = JSON.stringify(
 		tabs
 			.filter((tab) => tab.type === "chat" && tab.sessionId)
@@ -902,7 +899,7 @@ export default function App() {
 		if (tab.type === "chat") {
 			selectBackend(
 				tab.backendId ??
-					(tab.sessionId ? splitSessionKey(tab.sessionId).backendId : agentId),
+					(tab.sessionId ? client.backendOf(tab.sessionId) : agentId),
 			);
 		}
 	};
@@ -966,7 +963,7 @@ export default function App() {
 		const tab: CenterTab = {
 			id: recovered?.id ?? chatTabId(sid),
 			type: "chat",
-			backendId: splitSessionKey(sid).backendId,
+			backendId: client.backendOf(sid),
 			label: "Session",
 			sessionId: sid,
 		};
@@ -980,6 +977,11 @@ export default function App() {
 		external?: boolean,
 		disposition: TabDisposition = "preview",
 	) => {
+		// Tool locations and links carry absolute paths even inside the workspace.
+		if (!external && workspace?.path && isAbsolutePath(path))
+			({ path, external } = workspaceFileTarget(path, workspace.path));
+		// The workspace root itself is a folder, not a document.
+		if (!path) return;
 		openDocument(path, external ?? false);
 		const existing = tabs.find((t) => t.type === "file" && t.path === path);
 		if (existing) {
@@ -1167,7 +1169,7 @@ export default function App() {
 		refetchInterval: (current) => {
 			const session = current.state.data?.session;
 			if (!session || session.state === "terminated") return false;
-			return session.state === "running" ? 500 : 1_250;
+			return 10_000;
 		},
 	});
 
@@ -1742,10 +1744,10 @@ export default function App() {
 			(activeTab.type === "chat"
 				? (activeTab.backendId ??
 					(activeTab.sessionId
-						? splitSessionKey(activeTab.sessionId).backendId
+						? client.backendOf(activeTab.sessionId)
 						: agentId))
 				: currentSessionId
-					? splitSessionKey(currentSessionId).backendId
+					? client.backendOf(currentSessionId)
 					: agentId);
 		const tab = draftChatTab(backend);
 		selectBackend(backend);
@@ -1754,7 +1756,7 @@ export default function App() {
 	};
 	const handleBackendSelect = (backend: string, source = activeTab) => {
 		const currentBackend = source.sessionId
-			? splitSessionKey(source.sessionId).backendId
+			? client.backendOf(source.sessionId)
 			: (source.backendId ?? agentId);
 		if (backend === currentBackend) return;
 		const session = client.store.getSnapshot()[source.sessionId ?? ""];
@@ -1805,10 +1807,16 @@ export default function App() {
 			return;
 		}
 		const id = sessionDelete.id;
+		// Deleting a default chat deletes its session; a fork leaves the session.
 		queryClient.setQueryData(
-			queryKeys.sessions.list(splitSessionKey(id).backendId),
+			queryKeys.sessions.list(client.backendOf(id)),
 			(current: SessionInfo[] = []) =>
-				current.filter((session) => session.id !== id),
+				current
+					.filter((session) => session.id !== id)
+					.map((session) => ({
+						...session,
+						chats: session.chats.filter((chat) => chat.id !== id),
+					})),
 		);
 		setSessionDelete(null);
 		handleSessionDeleted(id);
@@ -1818,7 +1826,7 @@ export default function App() {
 		id: string,
 		disposition: TabDisposition = "keep",
 	) => {
-		selectBackend(splitSessionKey(id).backendId);
+		selectBackend(client.backendOf(id));
 		openChatTab(id, disposition);
 	};
 
@@ -1834,6 +1842,10 @@ export default function App() {
 			});
 			return;
 		}
+		// A new chat changes its session, not the root catalogue.
+		void queryClient.invalidateQueries({
+			queryKey: queryKeys.sessions.list(client.backendOf(id)),
+		});
 		handleSessionSelect(forked, "keep");
 	};
 	const draftCreations = useRef(new Map<string, Promise<string>>());
@@ -1845,7 +1857,7 @@ export default function App() {
 		key: string,
 		draftTabId?: string,
 	): Promise<string> => {
-		const owner = splitSessionKey(key).backendId;
+		const owner = client.backendOf(key);
 		const draft = draftTabId
 			? tabs.find(
 					(tab) =>
@@ -1869,7 +1881,7 @@ export default function App() {
 			.then(async (id) => {
 				const settings = drafts[draftSettingsKey(key, draftID)];
 				if (settings && Object.keys(settings).length)
-					await client.command(id, { type: "settings", ...settings });
+					await client.configure(id, settings);
 				if (draft) {
 					// Keep the composer mounted and preserve current navigation. The
 					// draft may have moved, closed, or changed backend during startup.
@@ -1912,7 +1924,7 @@ export default function App() {
 			const creationKey = JSON.stringify([backend, tab.id]);
 			if (draftInitializationAttempts.current.has(creationKey)) continue;
 			draftInitializationAttempts.current.add(creationKey);
-			void initializeDraftSession(sessionKey(backend, ""), tab.id).catch(() => {
+			void initializeDraftSession(draftKey(backend), tab.id).catch(() => {
 				/* The draft shows the error; sending retries the request. */
 			});
 		}
@@ -1928,6 +1940,18 @@ export default function App() {
 				current.filter((tab) => !tab.sessionId || !deleted.has(tab.sessionId)),
 			);
 	}, [sessions, tabs, setTabs]);
+	// The tab keeps its id so its composer draft stays attached.
+	const redirectTabs = useEffectEvent((from: string, to: string) =>
+		mapTabs((tab) =>
+			tab.type === "chat" && tab.sessionId === from
+				? { ...tab, sessionId: to }
+				: tab,
+		),
+	);
+	useEffect(
+		() => client.onRedirect((from, to) => redirectTabs(from, to)),
+		[client],
+	);
 
 	const sendForSession = async (
 		key: string,
@@ -1936,11 +1960,12 @@ export default function App() {
 		images?: string[],
 		intent: TurnInputIntent = "follow_up",
 		draftTabId?: string,
+		completions?: MessageAttachment[],
 	): Promise<boolean> => {
 		let sid = key;
 		try {
 			if (isDraft(key)) sid = await createSessionForDraft(key, draftTabId);
-			return sendChat(sid, text, files, images, intent);
+			return sendChat(sid, text, files, images, intent, completions);
 		} catch {
 			return false;
 		}
@@ -1951,7 +1976,17 @@ export default function App() {
 		files?: string[],
 		images?: string[],
 		intent: TurnInputIntent = "follow_up",
-	): Promise<boolean> => sendForSession(sessionId, text, files, images, intent);
+		completions?: MessageAttachment[],
+	): Promise<boolean> =>
+		sendForSession(
+			sessionId,
+			text,
+			files,
+			images,
+			intent,
+			undefined,
+			completions,
+		);
 
 	const focusChat = () => {
 		const tab =
@@ -1984,10 +2019,20 @@ export default function App() {
 	const runSkill = (skill: PaletteSkill) => {
 		focusChat();
 		if (skill.input_hint) {
-			setComposerSeed({ text: `/${skill.name} `, nonce: Date.now() });
+			setComposerSeed({
+				text: `/${skill.name} `,
+				completions: skill.attachment ? [skill.attachment] : undefined,
+				nonce: Date.now(),
+			});
 			return;
 		}
-		void handleSend(`/${skill.name}`);
+		void handleSend(
+			`/${skill.name}`,
+			undefined,
+			undefined,
+			"follow_up",
+			skill.attachment ? [skill.attachment] : undefined,
+		);
 	};
 
 	const settingsTabId =
@@ -1997,10 +2042,11 @@ export default function App() {
 					(tab) =>
 						tab.type === "chat" &&
 						!tab.sessionId &&
-						(tab.backendId ?? agentId) === splitSessionKey(sessionId).backendId,
+						(tab.backendId ?? agentId) === client.backendOf(sessionId),
 				)?.id;
 	const { settings: activeSettings, setSettings: setActiveSettings } =
 		useSessionSettings(sessionId, settingsTabId);
+	const canCompact = useCanCompact(sessionId);
 	const { modes, mode } = activeSettings;
 	const selectMode = (mode: string) =>
 		setActiveSettings({ mode }).catch((error) => {
@@ -2053,7 +2099,7 @@ export default function App() {
 		try {
 			await setWindowSidebarPosition(position);
 			void queryClient.invalidateQueries({
-				queryKey: queryKeys.capabilities,
+				queryKey: queryKeys.workspace,
 			});
 		} catch (error) {
 			toast({
@@ -2089,7 +2135,7 @@ export default function App() {
 			setActiveTabId(activeDockedTerminalTabId);
 		}
 		void queryClient.invalidateQueries({
-			queryKey: queryKeys.capabilities,
+			queryKey: queryKeys.workspace,
 		});
 	};
 	const showSidePanel = (tab: WorkspaceTab) => {
@@ -2205,19 +2251,12 @@ export default function App() {
 						icon: <MessageSquare size={12} className="text-fg-dim shrink-0" />,
 						run: () => void paletteEditorActions.chatAboutSelection(),
 					},
-					{
-						id: "editor.transform-selection",
-						label: "Transform selection…",
-						hint: "Selected text",
-						icon: <Sparkles size={12} className="text-fg-dim shrink-0" />,
-						run: () => void paletteEditorActions.transformSelection(),
-					},
 				]
 			: []),
-		...client.scope.backends.map((backend) => ({
+		...agents.map((backend) => ({
 			id: `new-session:${backend.id}`,
 			label:
-				client.scope.backends.length > 1
+				agents.length > 1
 					? `New Chat (${formatAgentName(backend.id, backend.name)})`
 					: "New Chat",
 			icon: <MessageSquarePlus size={12} className="text-fg-dim shrink-0" />,
@@ -2243,7 +2282,7 @@ export default function App() {
 					},
 				]
 			: []),
-		...(activeSettings.canCompact &&
+		...(canCompact &&
 		activeTab.type === "chat" &&
 		!isDraft(sessionId) &&
 		phase === "idle"
@@ -2253,7 +2292,7 @@ export default function App() {
 						label: "Compact context",
 						hint: "/compact",
 						icon: <FoldVertical size={12} className="text-fg-dim shrink-0" />,
-						run: () => void command(sessionId, { type: "compact", text: "" }),
+						run: () => void act((client) => client.compact(sessionId)),
 					},
 				]
 			: []),
@@ -2273,17 +2312,13 @@ export default function App() {
 			),
 			run: () => void toggleSidebarPlacement(),
 		},
-		...(showChanges
-			? [
-					{
-						id: "show-changes",
-						label: "Show changes",
-						icon: <GitCompare size={12} className="text-fg-dim shrink-0" />,
-						run: () => showSidePanel("changes"),
-					},
-				]
-			: []),
-		...(capabilities?.git
+		{
+			id: "show-changes",
+			label: "Show changes",
+			icon: <GitCompare size={12} className="text-fg-dim shrink-0" />,
+			run: () => showSidePanel("changes"),
+		},
+		...(gitState.data
 			? [
 					{
 						id: "insights",
@@ -2293,57 +2328,35 @@ export default function App() {
 					},
 				]
 			: []),
-		...(showTerminal
-			? [
-					...(terminalShells.length === 0
-						? [
-								{
-									id: "new-terminal",
-									label: "New Terminal",
-									hint: TERMINAL_SHORTCUT,
-									icon: (
-										<SquareTerminal
-											size={12}
-											className="text-fg-dim shrink-0"
-										/>
-									),
-									run: () => void createTerminal(),
-								},
-							]
-						: terminalShells.map((shell, index) => ({
-								id: `new-terminal-${index}`,
-								label: `New Terminal (${terminalShellName(shell.name)})`,
-								hint: index === 0 ? TERMINAL_SHORTCUT : undefined,
-								icon: (
-									<SquareTerminal size={12} className="text-fg-dim shrink-0" />
-								),
-								run: () => void createTerminal(shell.id),
-							}))),
-					{
-						id: "terminal-placement",
-						label: terminalDocked
-							? "Show Terminal in Tab"
-							: "Show Terminal at Bottom",
-						icon: terminalDocked ? (
-							<PanelTop size={12} className="text-fg-dim shrink-0" />
-						) : (
-							<PanelBottom size={12} className="text-fg-dim shrink-0" />
-						),
-						run: () => void toggleTerminalPlacement(),
-					},
-				]
-			: []),
-		...(tabAvailable
+		...(terminalShells.length === 0
 			? [
 					{
-						id: "editor.tab.completion",
-						label: `${tabEnabled ? "Disable" : "Enable"} Tab Completion`,
-						hint: `${tabEnabled ? "On" : "Off"} · uses model requests while typing`,
-						icon: <Sparkles size={12} className="text-fg-dim shrink-0" />,
-						run: () => void toggleEditorTabCompletion(),
+						id: "new-terminal",
+						label: "New Terminal",
+						hint: TERMINAL_SHORTCUT,
+						icon: <SquareTerminal size={12} className="text-fg-dim shrink-0" />,
+						run: () => void createTerminal(),
 					},
 				]
-			: []),
+			: terminalShells.map((shell, index) => ({
+					id: `new-terminal-${index}`,
+					label: `New Terminal (${terminalShellName(shell.name)})`,
+					hint: index === 0 ? TERMINAL_SHORTCUT : undefined,
+					icon: <SquareTerminal size={12} className="text-fg-dim shrink-0" />,
+					run: () => void createTerminal(shell.id),
+				}))),
+		{
+			id: "terminal-placement",
+			label: terminalDocked
+				? "Show Terminal in Tab"
+				: "Show Terminal at Bottom",
+			icon: terminalDocked ? (
+				<PanelTop size={12} className="text-fg-dim shrink-0" />
+			) : (
+				<PanelBottom size={12} className="text-fg-dim shrink-0" />
+			),
+			run: () => void toggleTerminalPlacement(),
+		},
 		{
 			id: "find-in-files",
 			label: "Find in files",
@@ -2381,9 +2394,7 @@ export default function App() {
 		if (!tab.sessionId) {
 			const backend = tab.backendId ?? agentId;
 			if (backend === "wingman") return tab.label;
-			const definition = client.scope.backends.find(
-				(item) => item.id === backend,
-			);
+			const definition = agents.find((item) => item.id === backend);
 			return formatAgentName(backend, definition?.name);
 		}
 		const sess = sessions[tab.sessionId];
@@ -2427,11 +2438,11 @@ export default function App() {
 
 	const renderTabContent = (tab: CenterTab): ReactNode => {
 		if (tab.type === "chat") {
-			const key = tab.sessionId || sessionKey(tab.backendId ?? agentId, "");
-			const backendId = splitSessionKey(key).backendId;
-			const backend = client.scope.backends.find(
-				(candidate) => candidate.id === backendId,
-			);
+			const key = tab.sessionId || draftKey(tab.backendId ?? agentId);
+			const backendId = isDraft(key)
+				? (tab.backendId ?? agentId)
+				: client.backendOf(key);
+			const backend = agents.find((candidate) => candidate.id === backendId);
 			const sess = key ? sessions[key] : undefined;
 			const composerDraft = composerDrafts.get(tab);
 			const draftError = !tab.sessionId
@@ -2442,7 +2453,6 @@ export default function App() {
 					view={chatAuxiliaryViews[tab.id]}
 					sessionId={key}
 					backendId={backendId}
-					showAgents={showAgents}
 					runningSessionIds={runningSessionIds}
 					onSessionSelect={(id, disposition) => {
 						const tabId = chatTabId(id);
@@ -2461,10 +2471,18 @@ export default function App() {
 						sessionId={key}
 						onSelectBackend={(id) => handleBackendSelect(id, tab)}
 						placeholder={`Message ${formatAgentName(backendId, backend?.name)}…`}
-						onSend={(text, files, images, intent) =>
-							sendForSession(key, text, files, images, intent, tab.id)
+						onSend={(text, files, images, intent, completions) =>
+							sendForSession(
+								key,
+								text,
+								files,
+								images,
+								intent,
+								tab.id,
+								completions,
+							)
 						}
-						onCommand={(value) => command(key, value)}
+						onAct={act}
 						loading={
 							isDraft(key)
 								? backendId !== "wingman" && !draftError
@@ -2597,7 +2615,6 @@ export default function App() {
 						else fileTabHandlesRef.current.delete(tab.id);
 					}}
 					document={document}
-					tabEnabled={tabEnabled}
 					line={tab.line}
 					column={tab.column}
 					navigationKey={tab.navigationKey}
@@ -2764,7 +2781,7 @@ export default function App() {
 				)}
 			{activeTab.type === "chat" && (
 				<>
-					{showAgents && activeTaskActivity.available && (
+					{activeTaskActivity.available && (
 						<button
 							type="button"
 							className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors hover:text-fg-muted ${activeChatAuxiliary === "agents" ? "bg-bg-active text-fg" : "text-fg-muted hover:bg-bg-hover"}`}
@@ -2884,12 +2901,12 @@ export default function App() {
 			)}
 			<NewItemLauncher
 				onNewChat={() => void handleNewSession()}
-				onNewTerminal={showTerminal ? () => void createTerminal() : undefined}
+				onNewTerminal={() => void createTerminal()}
 				onNewTextFile={workspaceSwitching ? undefined : openUntitledFile}
 			/>
 			<WorkspaceActivity
-				hasLSP={capabilities?.lsp ?? false}
-				tools={capabilities?.managed_tools}
+				hasLSP={workspace?.lsp ?? false}
+				tools={workspace?.managed_tools}
 			/>
 		</div>
 	);
@@ -2900,9 +2917,7 @@ export default function App() {
 		label: string;
 	}[] = [
 		{ id: "files", icon: FolderTree, label: "Files" },
-		...(showChanges
-			? ([{ id: "changes", icon: GitCompareArrows, label: "Changes" }] as const)
-			: []),
+		{ id: "changes", icon: GitCompareArrows, label: "Changes" },
 		...(showInspect
 			? ([{ id: "inspect", icon: Stethoscope, label: "Inspect" }] as const)
 			: []),
@@ -2962,11 +2977,10 @@ export default function App() {
 						/>
 					</div>
 				</div>
-				{workspaceTab === "inspect" ? null : workspaceTab === "changes" &&
-				  showChanges ? (
+				{workspaceTab === "inspect" ? null : workspaceTab === "changes" ? (
 					<DiffsPanel
-						git={capabilities?.git ?? false}
-						canInit={capabilities?.git_init ?? false}
+						git={!!gitState.data || gitState.isError}
+						canInit={gitState.data === null}
 						onOpenDiff={openDiff}
 						onOpenCompare={openCompare}
 						onOpenInsights={openInsights}
@@ -2976,7 +2990,7 @@ export default function App() {
 					/>
 				) : (
 					<WorkspaceFilesPanel
-						workspaceName={capabilities?.workspace_name ?? "Files"}
+						workspaceName={workspace?.name ?? "Files"}
 						headerContent={
 							debugSession && debugSession.state !== "terminated" ? (
 								<DebugToolbar
@@ -2998,7 +3012,7 @@ export default function App() {
 							openFile(path, line, column, undefined, disposition)
 						}
 						onApplyWorkspaceEdit={requestWorkspaceEdit}
-						platform={capabilities?.platform}
+						platform={workspace?.platform}
 						subscribe={subscribe}
 					/>
 				)}
@@ -3693,7 +3707,7 @@ export default function App() {
 					className="absolute top-2 right-3 z-140 flex items-center gap-1.5 rounded border border-border bg-bg px-2 py-1 text-[11px] text-fg-muted shadow"
 				>
 					<Loader2 size={12} className="animate-spin" /> Reconnecting
-					<button className="underline" onClick={() => client.focus()}>
+					<button className="underline" onClick={() => client.reconnect()}>
 						Retry
 					</button>
 				</div>
@@ -3729,7 +3743,6 @@ function ChatTabLayout({
 	view,
 	sessionId,
 	backendId,
-	showAgents,
 	runningSessionIds,
 	onSessionSelect,
 	onSessionDelete,
@@ -3740,7 +3753,6 @@ function ChatTabLayout({
 	view?: ChatAuxiliaryView;
 	sessionId: string;
 	backendId: string;
-	showAgents: boolean;
 	runningSessionIds: Set<string>;
 	onSessionSelect: (id: string, disposition?: TabDisposition) => void;
 	onSessionDelete: (id: string, title: string) => void;
@@ -3775,15 +3787,13 @@ function ChatTabLayout({
 							onSessionFork={onSessionFork}
 						/>
 					</div>
-					{showAgents && (
-						<div className={view === "agents" ? "h-full" : "hidden"}>
-							<TasksPanel
-								sessionRunning={runningSessionIds.has(sessionId)}
-								sessionId={isDraft(sessionId) ? "" : sessionId}
-								onOpenTask={onOpenTask}
-							/>
-						</div>
-					)}
+					<div className={view === "agents" ? "h-full" : "hidden"}>
+						<TasksPanel
+							sessionRunning={runningSessionIds.has(sessionId)}
+							sessionId={isDraft(sessionId) ? "" : sessionId}
+							onOpenTask={onOpenTask}
+						/>
+					</div>
 				</div>
 			</aside>
 		</div>

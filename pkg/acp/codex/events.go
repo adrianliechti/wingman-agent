@@ -9,14 +9,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coder/acp-go-sdk"
+	acpsdk "github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type eventDispatcher struct {
-	ctx       context.Context
-	conn      *acp.AgentSideConnection
-	sessionID acp.SessionId
-	done      chan turnCompleted
+	onAsyncQuestions func(string, []asyncQuestion)
+	messageID        string
+	cwd              string
+	citations        map[string]*citationStream
+	ctx              context.Context
+	conn             acp.ClientConnection
+	sessionID        acpsdk.SessionId
+	done             chan turnCompleted
 
 	toolOut         map[string]*toolOutput
 	seenReasoning   map[string]bool
@@ -32,7 +38,7 @@ type eventDispatcher struct {
 	// The prompt event loop owns the remaining state.
 	failure       error
 	lastError     *turnError
-	usage         *acp.Usage
+	usage         *acpsdk.Usage
 	completedPlan *completedPlan
 
 	// tokens accumulates usage across every backend turn of one prompt.
@@ -44,13 +50,14 @@ type completedPlan struct {
 	text   string
 }
 
-func newEventDispatcher(ctx context.Context, conn *acp.AgentSideConnection, sid acp.SessionId) *eventDispatcher {
+func newEventDispatcher(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId) *eventDispatcher {
 	return &eventDispatcher{
 		ctx:             ctx,
 		conn:            conn,
 		sessionID:       sid,
 		done:            make(chan turnCompleted, 1),
 		toolOut:         map[string]*toolOutput{},
+		citations:       map[string]*citationStream{},
 		seenReasoning:   map[string]bool{},
 		seenAgentText:   map[string]bool{},
 		guardianStarted: map[string]bool{},
@@ -83,11 +90,11 @@ func (d *eventDispatcher) setFailure(err error) {
 	}
 }
 
-func (d *eventDispatcher) setUsage(u *acp.Usage) {
+func (d *eventDispatcher) setUsage(u *acpsdk.Usage) {
 	d.usage = u
 }
 
-func (d *eventDispatcher) getUsage() *acp.Usage {
+func (d *eventDispatcher) getUsage() *acpsdk.Usage {
 	if d.tokens != nil {
 		if u := d.tokens.usage(); u != nil {
 			return u
@@ -163,11 +170,11 @@ func isAuthenticationError(info json.RawMessage) bool {
 	return false
 }
 
-func (d *eventDispatcher) update(u acp.SessionUpdate) {
+func (d *eventDispatcher) update(u acpsdk.SessionUpdate) {
 	d.updateWithContext(d.ctx, u)
 }
 
-func (d *eventDispatcher) updateWithContext(ctx context.Context, u acp.SessionUpdate) {
+func (d *eventDispatcher) updateWithContext(ctx context.Context, u acpsdk.SessionUpdate) {
 	if ctx.Err() != nil || d.getFailure() != nil {
 		return
 	}
@@ -196,7 +203,14 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		}
 		if json.Unmarshal(params, &p) == nil && p.Delta != "" {
 			d.seenAgentText[p.ItemID] = true
-			d.update(agentMessageUpdate(p.Delta, p.ItemID, d.agentPhases[p.ItemID]))
+			stream := d.citations[p.ItemID]
+			if stream == nil {
+				stream = &citationStream{cwd: d.cwd}
+				d.citations[p.ItemID] = stream
+			}
+			if text := stream.push(p.Delta); text != "" {
+				d.update(agentMessageUpdate(text, p.ItemID, d.agentPhases[p.ItemID]))
+			}
 		}
 
 	case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
@@ -221,9 +235,11 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		}
 
 	case "item/started":
+		d.acceptUserMessage(params)
 		d.handleItemStarted(params)
 
 	case "item/completed":
+		d.acceptUserMessage(params)
 		d.handleItemCompleted(params)
 
 	case "item/autoApprovalReview/started":
@@ -254,7 +270,7 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 	case "thread/goal/cleared":
 		if d.lastGoal != "" {
 			d.lastGoal = ""
-			d.update(acp.UpdateAgentMessageText("\n\nGoal cleared.\n\n"))
+			d.update(acpsdk.UpdateAgentMessageText("\n\nGoal cleared.\n\n"))
 		}
 
 	case "error":
@@ -269,7 +285,7 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 		// ACP auth_required starts the client's login flow; repeating the refusal as text adds noise.
 		if isAuthenticationError(p.Error.CodexErrorInfo) {
 			if p.WillRetry == nil || !*p.WillRetry {
-				d.setFailure(acp.NewAuthRequired(nil))
+				d.setFailure(acpsdk.NewAuthRequired(nil))
 				select {
 				case d.done <- turnCompleted{}:
 				default:
@@ -278,7 +294,7 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			return
 		}
 		if p.Error.Message != "" {
-			d.update(acp.UpdateAgentMessageText(readableServiceErrorMessage(p.Error.Message) + "\n\n"))
+			d.update(acpsdk.UpdateAgentMessageText(readableServiceErrorMessage(p.Error.Message) + "\n\n"))
 		}
 		if (p.WillRetry != nil && !*p.WillRetry) || (p.WillRetry == nil && isFatalTurnError(p.Error.CodexErrorInfo)) {
 			d.setFailure(&p.Error)
@@ -294,7 +310,7 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			Message string `json:"message"`
 		}
 		if json.Unmarshal(params, &p) == nil && p.Message != "" {
-			d.update(acp.UpdateAgentMessageText("Warning: " + p.Message + "\n\n"))
+			d.update(acpsdk.UpdateAgentMessageText("Warning: " + p.Message + "\n\n"))
 		}
 
 	case "item/commandExecution/outputDelta":
@@ -320,7 +336,7 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			if p.Details != "" {
 				text += "\n\n" + p.Details
 			}
-			d.update(acp.UpdateAgentMessageText(text + "\n\n"))
+			d.update(acpsdk.UpdateAgentMessageText(text + "\n\n"))
 		}
 
 	case "model/rerouted":
@@ -330,10 +346,16 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			Reason    string `json:"reason"`
 		}
 		if json.Unmarshal(params, &p) == nil && p.ToModel != "" {
-			d.update(acp.UpdateAgentThoughtText(fmt.Sprintf("Model rerouted from %s to %s (%s).\n\n", p.FromModel, p.ToModel, p.Reason)))
+			d.update(acpsdk.UpdateAgentThoughtText(fmt.Sprintf("Model rerouted from %s to %s (%s).\n\n", p.FromModel, p.ToModel, p.Reason)))
 		}
 
 	case "turn/completed":
+		for id, stream := range d.citations {
+			if text := stream.flush(); text != "" {
+				d.update(agentMessageUpdate(text, id, d.agentPhases[id]))
+			}
+			delete(d.citations, id)
+		}
 		var tc turnCompleted
 		if err := json.Unmarshal(params, &tc); err != nil {
 			d.setFailure(fmt.Errorf("decode turn/completed: %w", err))
@@ -346,7 +368,7 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 					tc.Turn.Error = &turnError{}
 				}
 				if isAuthenticationError(tc.Turn.Error.CodexErrorInfo) {
-					d.setFailure(acp.NewAuthRequired(nil))
+					d.setFailure(acpsdk.NewAuthRequired(nil))
 				} else {
 					d.setFailure(tc.Turn.Error)
 				}
@@ -383,7 +405,19 @@ func (d *eventDispatcher) handleGoalUpdated(params json.RawMessage) {
 	} else {
 		text = fmt.Sprintf("Goal updated (%s): %s", status, objective)
 	}
-	d.update(acp.UpdateAgentMessageText("\n\n" + text + "\n\n"))
+	d.update(acpsdk.UpdateAgentMessageText("\n\n" + text + "\n\n"))
+}
+
+func (d *eventDispatcher) acceptUserMessage(params json.RawMessage) {
+	var event struct {
+		Item struct {
+			Type     string `json:"type"`
+			ClientID string `json:"clientId"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(params, &event) == nil && event.Item.Type == "userMessage" && d.messageID != "" && event.Item.ClientID == d.messageID {
+		acp.PromptAccepted(d.ctx, d.messageID)
+	}
 }
 
 func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
@@ -412,18 +446,18 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 		d.agentPhases[id] = it.Phase
 
 	case "fileChange":
-		opts := []acp.ToolCallStartOpt{
-			acp.WithStartKind(acp.ToolKindEdit),
-			acp.WithStartStatus(acp.ToolCallStatusInProgress),
+		opts := []acpsdk.ToolCallStartOpt{
+			acpsdk.WithStartKind(acpsdk.ToolKindEdit),
+			acpsdk.WithStartStatus(acpsdk.ToolCallStatusInProgress),
 		}
 		if content := fileChangeContent(env.Item); len(content) > 0 {
-			opts = append(opts, acp.WithStartContent(content))
+			opts = append(opts, acpsdk.WithStartContent(content))
 		}
 		opts = appendDisplayLocations(opts, fileChangeLocations(env.Item))
-		d.update(acp.StartToolCall(acp.ToolCallId(id), "Edit files", opts...))
+		d.update(acpsdk.StartToolCall(acpsdk.ToolCallId(id), "Edit files", opts...))
 
 	case "commandExecution", "mcpToolCall", "dynamicToolCall":
-		if u, ok := itemToolCallStart(env.Item, id, kind, acp.ToolCallStatusInProgress); ok {
+		if u, ok := itemToolCallStart(env.Item, id, kind, acpsdk.ToolCallStatusInProgress); ok {
 			if kind == "commandExecution" {
 				d.setCommandName(id, toolNameFromMeta(u.ToolCall.Meta))
 			}
@@ -431,7 +465,7 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 		}
 
 	case "webSearch":
-		d.update(webSearchStartToolCall(env.Item, acp.ToolCallStatusInProgress))
+		d.update(webSearchStartToolCall(env.Item, acpsdk.ToolCallStatusInProgress))
 
 	case "imageView":
 		if u, ok := imageViewToolCall(env.Item); ok {
@@ -448,7 +482,7 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 		}
 
 	case "subAgentActivity":
-		if u, ok := subAgentStartToolCall(env.Item, acp.ToolCallStatusInProgress); ok {
+		if u, ok := subAgentStartToolCall(env.Item, acpsdk.ToolCallStatusInProgress); ok {
 			d.startedTools[id] = true
 			d.update(u)
 		}
@@ -473,13 +507,24 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 	switch kind {
 	case "agentMessage":
 		var it struct {
-			Phase string `json:"phase"`
-			Text  string `json:"text"`
+			Phase     string          `json:"phase"`
+			Text      string          `json:"text"`
+			Delivery  string          `json:"delivery"`
+			Questions []asyncQuestion `json:"questions"`
 		}
 		_ = json.Unmarshal(env.Item, &it)
 		d.agentPhases[id] = it.Phase
 		if !d.seenAgentText[id] && it.Text != "" {
-			d.update(agentMessageUpdate(it.Text, id, it.Phase))
+			d.update(agentMessageUpdate(renderCitations(it.Text, d.cwd), id, it.Phase))
+		}
+		if stream := d.citations[id]; stream != nil {
+			if text := stream.flush(); text != "" {
+				d.update(agentMessageUpdate(text, id, it.Phase))
+			}
+			delete(d.citations, id)
+		}
+		if it.Delivery == "async" && d.onAsyncQuestions != nil {
+			d.onAsyncQuestions(id, it.Questions)
 		}
 		delete(d.seenAgentText, id)
 		delete(d.agentPhases, id)
@@ -492,7 +537,7 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		}
 		_ = json.Unmarshal(env.Item, &it)
 		d.setCommandName(id, "")
-		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(toolStatusFor(it.Status))}
+		opts := []acpsdk.ToolCallUpdateOpt{acpsdk.WithUpdateStatus(toolStatusFor(it.Status))}
 
 		output := ""
 		if buffered := d.toolOut[id]; buffered != nil {
@@ -501,12 +546,12 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 			output = boundedToolOutput(*it.AggregatedOutput)
 		}
 		if output != "" {
-			opts = append(opts, acp.WithUpdateContent([]acp.ToolCallContent{
-				acp.ToolContent(acp.TextBlock(output)),
+			opts = append(opts, acpsdk.WithUpdateContent([]acpsdk.ToolCallContent{
+				acpsdk.ToolContent(acpsdk.TextBlock(output)),
 			}))
 		}
 		delete(d.toolOut, id)
-		u := acp.UpdateToolCall(acp.ToolCallId(id), opts...)
+		u := acpsdk.UpdateToolCall(acpsdk.ToolCallId(id), opts...)
 		u.ToolCallUpdate.Meta = toolNameMeta(commandToolName(it.Source))
 		d.update(u)
 
@@ -515,11 +560,11 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 			Status string `json:"status"`
 		}
 		_ = json.Unmarshal(env.Item, &it)
-		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(toolStatusFor(it.Status))}
+		opts := []acpsdk.ToolCallUpdateOpt{acpsdk.WithUpdateStatus(toolStatusFor(it.Status))}
 		if content := fileChangeContent(env.Item); len(content) > 0 {
-			opts = append(opts, acp.WithUpdateContent(content))
+			opts = append(opts, acpsdk.WithUpdateContent(content))
 		}
-		d.update(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
+		d.update(acpsdk.UpdateToolCall(acpsdk.ToolCallId(id), opts...))
 
 	case "dynamicToolCall":
 		var it struct {
@@ -528,7 +573,7 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 			Tool      string `json:"tool"`
 		}
 		_ = json.Unmarshal(env.Item, &it)
-		u := acp.UpdateToolCall(acp.ToolCallId(id), acp.WithUpdateStatus(toolStatusFor(it.Status)))
+		u := acpsdk.UpdateToolCall(acpsdk.ToolCallId(id), acpsdk.WithUpdateStatus(toolStatusFor(it.Status)))
 		u.ToolCallUpdate.Meta = toolNameMeta(functionToolName(it.Tool, it.Namespace))
 		d.update(u)
 
@@ -544,15 +589,15 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		_ = json.Unmarshal(env.Item, &it)
 		var args any
 		_ = json.Unmarshal(it.Args, &args)
-		opts := []acp.ToolCallUpdateOpt{
-			acp.WithUpdateStatus(toolStatusFor(it.Status)),
-			acp.WithUpdateRawInput(args),
+		opts := []acpsdk.ToolCallUpdateOpt{
+			acpsdk.WithUpdateStatus(toolStatusFor(it.Status)),
+			acpsdk.WithUpdateRawInput(args),
 		}
 		if out := mcpRawOutput(it.Result, it.Error); out != nil {
-			opts = append(opts, acp.WithUpdateRawOutput(out))
+			opts = append(opts, acpsdk.WithUpdateRawOutput(out))
 		}
 		delete(d.toolOut, id)
-		d.update(acp.UpdateToolCall(acp.ToolCallId(id), opts...))
+		d.update(acpsdk.UpdateToolCall(acpsdk.ToolCallId(id), opts...))
 
 	case "webSearch":
 		d.update(webSearchCompleteToolCall(env.Item))
@@ -581,7 +626,7 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 			if u, ok := subAgentCompleteToolCall(env.Item); ok {
 				d.update(u)
 			}
-		} else if u, ok := subAgentStartToolCall(env.Item, acp.ToolCallStatusCompleted); ok {
+		} else if u, ok := subAgentStartToolCall(env.Item, acpsdk.ToolCallStatusCompleted); ok {
 			d.update(u)
 		}
 
@@ -594,7 +639,7 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		}
 		_ = json.Unmarshal(env.Item, &it)
 		if it.Text != "" {
-			d.update(acp.UpdateAgentMessageText("Plan:\n" + it.Text))
+			d.update(acpsdk.UpdateAgentMessageText("Plan:\n" + it.Text))
 			d.setCompletedPlan(id, it.Text)
 		}
 
@@ -604,7 +649,7 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		}
 		_ = json.Unmarshal(env.Item, &it)
 		if text := strings.TrimSpace(it.Review); text != "" {
-			d.update(acp.UpdateAgentMessageText(text + "\n\n"))
+			d.update(acpsdk.UpdateAgentMessageText(text + "\n\n"))
 		}
 
 	case "reasoning":
@@ -618,7 +663,7 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		}
 		_ = json.Unmarshal(env.Item, &it)
 		if text := joinReasoning(it.Summary, it.Content); text != "" {
-			d.update(acp.UpdateAgentThoughtText(text))
+			d.update(acpsdk.UpdateAgentThoughtText(text))
 		}
 	}
 }
@@ -698,7 +743,7 @@ func (d *eventDispatcher) handleTokenUsage(params json.RawMessage) {
 		d.setUsage(last.acpUsage())
 	}
 	if size := p.TokenUsage.ModelContextWindow; size > 0 {
-		d.update(acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{
+		d.update(acpsdk.SessionUpdate{UsageUpdate: &acpsdk.SessionUsageUpdate{
 			SessionUpdate: "usage_update",
 			Used:          last.TotalTokens,
 			Size:          size,
@@ -717,14 +762,14 @@ func peekItem(item json.RawMessage) (id, kind string, ok bool) {
 	return probe.ID, probe.Type, probe.ID != "" && probe.Type != ""
 }
 
-func toolStatusFor(s string) acp.ToolCallStatus {
+func toolStatusFor(s string) acpsdk.ToolCallStatus {
 	switch s {
 	case "inProgress":
-		return acp.ToolCallStatusInProgress
+		return acpsdk.ToolCallStatusInProgress
 	case "failed", "declined", "interrupted":
-		return acp.ToolCallStatusFailed
+		return acpsdk.ToolCallStatusFailed
 	default:
-		return acp.ToolCallStatusCompleted
+		return acpsdk.ToolCallStatusCompleted
 	}
 }
 
@@ -737,11 +782,11 @@ type commandAction struct {
 // The ACP SDK mirrors a lone location into rawInput.path. Codex already
 // supplies the location as a file chip, so clear that synthetic input to keep
 // clients from rendering the same path again as a hint and expanded argument.
-func appendDisplayLocations(opts []acp.ToolCallStartOpt, locations []acp.ToolCallLocation) []acp.ToolCallStartOpt {
+func appendDisplayLocations(opts []acpsdk.ToolCallStartOpt, locations []acpsdk.ToolCallLocation) []acpsdk.ToolCallStartOpt {
 	if len(locations) == 0 {
 		return opts
 	}
-	return append(opts, acp.WithStartLocations(locations), acp.WithStartRawInput(nil))
+	return append(opts, acpsdk.WithStartLocations(locations), acpsdk.WithStartRawInput(nil))
 }
 
 func commandRawInput(command, cwd string) map[string]any {
@@ -752,7 +797,7 @@ func commandRawInput(command, cwd string) map[string]any {
 	return input
 }
 
-func commandActionToolCall(actions []commandAction) (title string, kind acp.ToolKind, rawInput any, locations []acp.ToolCallLocation, ok bool) {
+func commandActionToolCall(actions []commandAction) (title string, kind acpsdk.ToolKind, rawInput any, locations []acpsdk.ToolCallLocation, ok bool) {
 	if len(actions) != 1 {
 		return "", "", nil, nil, false
 	}
@@ -762,23 +807,23 @@ func commandActionToolCall(actions []commandAction) (title string, kind acp.Tool
 		if a.Path == "" {
 			return "", "", nil, nil, false
 		}
-		return "Read file", acp.ToolKindRead, nil, []acp.ToolCallLocation{{Path: a.Path}}, true
+		return "Read file", acpsdk.ToolKindRead, nil, []acpsdk.ToolCallLocation{{Path: a.Path}}, true
 	case "search":
-		var locations []acp.ToolCallLocation
+		var locations []acpsdk.ToolCallLocation
 		if a.Path != "" {
-			locations = []acp.ToolCallLocation{{Path: a.Path}}
+			locations = []acpsdk.ToolCallLocation{{Path: a.Path}}
 		}
 		var input any
 		if a.Query != "" {
 			input = map[string]any{"query": a.Query}
 		}
-		return "Search files", acp.ToolKindSearch, input, locations, true
+		return "Search files", acpsdk.ToolKindSearch, input, locations, true
 	case "listFiles":
-		var locations []acp.ToolCallLocation
+		var locations []acpsdk.ToolCallLocation
 		if a.Path != "" {
-			locations = []acp.ToolCallLocation{{Path: a.Path}}
+			locations = []acpsdk.ToolCallLocation{{Path: a.Path}}
 		}
-		return "List files", acp.ToolKindRead, nil, locations, true
+		return "List files", acpsdk.ToolKindRead, nil, locations, true
 	}
 	return "", "", nil, nil, false
 }
@@ -791,14 +836,14 @@ type fileChange struct {
 	Diff string `json:"diff"`
 }
 
-func fileChangeContent(raw json.RawMessage) []acp.ToolCallContent {
+func fileChangeContent(raw json.RawMessage) []acpsdk.ToolCallContent {
 	var it struct {
 		Changes []fileChange `json:"changes"`
 	}
 	if err := json.Unmarshal(raw, &it); err != nil {
 		return nil
 	}
-	var content []acp.ToolCallContent
+	var content []acpsdk.ToolCallContent
 	for _, ch := range it.Changes {
 		if ch.Path == "" {
 			continue
@@ -818,8 +863,8 @@ func fileChangeContent(raw json.RawMessage) []acp.ToolCallContent {
 			}
 		}
 		meta := map[string]any{"kind": ch.Kind.Type}
-		content = append(content, acp.ToolCallContent{
-			Diff: &acp.ToolCallContentDiff{
+		content = append(content, acpsdk.ToolCallContent{
+			Diff: &acpsdk.ToolCallContentDiff{
 				Type:    "diff",
 				Path:    ch.Path,
 				OldText: oldText,
@@ -831,7 +876,7 @@ func fileChangeContent(raw json.RawMessage) []acp.ToolCallContent {
 	return content
 }
 
-func fileChangeLocations(raw json.RawMessage) []acp.ToolCallLocation {
+func fileChangeLocations(raw json.RawMessage) []acpsdk.ToolCallLocation {
 	var it struct {
 		Changes []fileChange `json:"changes"`
 	}
@@ -839,13 +884,13 @@ func fileChangeLocations(raw json.RawMessage) []acp.ToolCallLocation {
 		return nil
 	}
 	seen := make(map[string]bool)
-	locations := make([]acp.ToolCallLocation, 0, len(it.Changes))
+	locations := make([]acpsdk.ToolCallLocation, 0, len(it.Changes))
 	for _, change := range it.Changes {
 		if change.Path == "" || seen[change.Path] {
 			continue
 		}
 		seen[change.Path] = true
-		locations = append(locations, acp.ToolCallLocation{Path: change.Path})
+		locations = append(locations, acpsdk.ToolCallLocation{Path: change.Path})
 	}
 	return locations
 }

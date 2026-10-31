@@ -94,25 +94,16 @@ func Run(ctx context.Context, args []string, options *Options) error {
 }
 
 func BuildEnv(parent []string, dir string) []string {
-	if parent == nil {
-		parent = os.Environ()
-	}
-
 	vars := map[string]string{
-		"PI_CODING_AGENT_DIR": dir,
-
 		"PI_OFFLINE":            "1",
 		"PI_SKIP_VERSION_CHECK": "1",
+		"PI_TELEMETRY":          "0",
 	}
-
-	env := make([]string, 0, len(parent)+len(vars))
-	env = append(env, parent...)
-
-	for k, v := range vars {
-		env = append(env, k+"="+v)
+	// Native launches retain their own credentials and session directory.
+	if dir != "" {
+		vars["PI_CODING_AGENT_DIR"] = dir
 	}
-
-	return env
+	return external.MergeEnv(parent, vars)
 }
 
 func BuildArgs(cfg *PiConfig) []string {

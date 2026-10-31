@@ -155,3 +155,7 @@ func writeContractSSE(w io.Writer, event map[string]any) {
 	data, _ := json.Marshal(event)
 	_, _ = w.Write(append(append([]byte("data: "), data...), '\n', '\n'))
 }
+
+func TestACPV2Contract(t *testing.T) { acptest.RunV2(t, newContractServer) }
+
+func TestACPTCK(t *testing.T) { acptest.ServeTCK(t, newContractServer) }

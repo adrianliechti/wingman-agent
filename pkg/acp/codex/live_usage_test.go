@@ -201,7 +201,7 @@ func TestLiveCodexUsageWithInitialCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume with compaction limit: %v", err)
 	}
-	agent.registerSession(ns.SessionId, resumed.Model, derefEffort(resumed.ReasoningEffort), defaultCollaborationMode, nil)
+	agent.registerSession(ns.SessionId, cwd, resumed.Model, derefEffort(resumed.ReasoningEffort), defaultCollaborationMode, nil)
 	requests := recordLiveUsage(agent, ns.SessionId)
 	r, err := cc.Prompt(ctx, acp.PromptRequest{SessionId: ns.SessionId, Prompt: []acp.ContentBlock{acp.TextBlock("Reply with exactly: SECOND")}})
 	if err != nil || r.StopReason != acp.StopReasonEndTurn {

@@ -9,11 +9,13 @@ import (
 	"io/fs"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 
-	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
+
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 )
 
 const (
@@ -291,6 +293,7 @@ func replayMessages(send func(acp.SessionUpdate), data json.RawMessage, cwd stri
 	for _, raw := range d.Messages {
 		var m struct {
 			Role       string          `json:"role"`
+			Timestamp  int64           `json:"timestamp"`
 			Content    json.RawMessage `json:"content"`
 			ToolName   string          `json:"toolName"`
 			ToolCallID string          `json:"toolCallId"`
@@ -301,12 +304,26 @@ func replayMessages(send func(acp.SessionUpdate), data json.RawMessage, cwd stri
 			continue
 		}
 
+		messageID := piMessageID(m.Role, m.Timestamp)
+		message := func(update acp.SessionUpdate) {
+			if messageID != "" {
+				switch {
+				case update.UserMessageChunk != nil:
+					update.UserMessageChunk.MessageId = new(messageID)
+				case update.AgentMessageChunk != nil:
+					update.AgentMessageChunk.MessageId = new(messageID)
+				case update.AgentThoughtChunk != nil:
+					update.AgentThoughtChunk.MessageId = new(messageID + "-thought")
+				}
+			}
+			send(update)
+		}
 		switch m.Role {
 		case "user":
 			var text string
 			if json.Unmarshal(m.Content, &text) == nil {
 				if text != "" {
-					send(acp.UpdateUserMessage(acp.TextBlock(text)))
+					message(acp.UpdateUserMessage(acp.TextBlock(text)))
 				}
 				continue
 			}
@@ -314,11 +331,11 @@ func replayMessages(send func(acp.SessionUpdate), data json.RawMessage, cwd stri
 				switch block.Type {
 				case "text":
 					if block.Text != "" {
-						send(acp.UpdateUserMessage(acp.TextBlock(block.Text)))
+						message(acp.UpdateUserMessage(acp.TextBlock(block.Text)))
 					}
 				case "image":
 					if block.Data != "" {
-						send(acp.UpdateUserMessage(acp.ImageBlock(block.Data, block.MimeType)))
+						message(acp.UpdateUserMessage(acp.ImageBlock(block.Data, block.MimeType)))
 					}
 				}
 			}
@@ -328,11 +345,11 @@ func replayMessages(send func(acp.SessionUpdate), data json.RawMessage, cwd stri
 				switch block.Type {
 				case "text":
 					if block.Text != "" {
-						send(acp.UpdateAgentMessageText(block.Text))
+						message(acp.UpdateAgentMessageText(block.Text))
 					}
 				case "thinking":
 					if block.Thinking != "" {
-						send(acp.UpdateAgentThoughtText(block.Thinking))
+						message(acp.UpdateAgentThoughtText(block.Thinking))
 					}
 				case "toolCall":
 					if block.ID == "" {
@@ -408,4 +425,12 @@ func piToolResultContent(content json.RawMessage) []acp.ToolCallContent {
 		}
 	}
 	return out
+}
+
+// Pi persists message timestamps and includes them in message_start events.
+func piMessageID(role string, timestamp int64) string {
+	if timestamp <= 0 {
+		return ""
+	}
+	return role + "-" + strconv.FormatInt(timestamp, 10)
 }

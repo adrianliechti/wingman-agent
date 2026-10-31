@@ -33,13 +33,14 @@ type Session struct {
 	cancelFunc context.CancelFunc
 
 	documentMu   sync.Mutex
-	commandMu    sync.Mutex
+	commands     chan struct{} // holds the running command; see acquireCommand
 	applyEditMu  sync.Mutex
 	mu           sync.Mutex
 	documents    map[string]*document
 	progress     map[string]WorkProgress
-	commandEdits []CommandWorkspaceEdit
-	captureEdits bool
+	applyEdit    func(CommandWorkspaceEdit) bool
+	watchMu      sync.Mutex
+	watchers     map[string][]fileWatcher // by registration id
 	created      time.Time
 	pullDiags    bool
 	capabilities protocol.ServerCapabilities
@@ -55,6 +56,7 @@ type document struct {
 	sum     uint64
 	version int
 	saved   bool
+	editor  bool // kept current, in order, by an editor connection
 	content string
 
 	wireDiagnostics []protocol.Diagnostic
@@ -160,17 +162,23 @@ func (c *sessionClient) WorkDoneProgressCreate(context.Context, *protocol.WorkDo
 	return nil
 }
 
+// protocol.Handlers already runs every handler asynchronously, so waiting for
+// the user's review here does not hold up the server's other messages.
 func (c *sessionClient) ApplyEdit(_ context.Context, params *protocol.ApplyWorkspaceEditParams) (*protocol.ApplyWorkspaceEditResult, error) {
 	if params == nil {
 		reason := "the language server sent an empty workspace edit request"
 		return &protocol.ApplyWorkspaceEditResult{Applied: false, FailureReason: &reason}, nil
 	}
-	if err := c.session.captureCommandEdit(params); err == nil {
-		return &protocol.ApplyWorkspaceEditResult{Applied: true}, nil
-	} else {
+	apply, edit, err := c.session.commandEdit(params)
+	if err != nil {
 		reason := err.Error()
 		return &protocol.ApplyWorkspaceEditResult{Applied: false, FailureReason: &reason}, nil
 	}
+	if !apply(edit) {
+		reason := "the workspace edit was not applied"
+		return &protocol.ApplyWorkspaceEditResult{Applied: false, FailureReason: &reason}, nil
+	}
+	return &protocol.ApplyWorkspaceEditResult{Applied: true}, nil
 }
 
 func (c *sessionClient) Progress(_ context.Context, params *protocol.ProgressParams) error {
@@ -272,6 +280,7 @@ type openDocument struct {
 	Path    string
 	Content string
 	Saved   bool
+	Editor  bool
 }
 
 func (s *Session) openedDocuments() []openDocument {
@@ -286,6 +295,7 @@ func (s *Session) openedDocuments() []openDocument {
 				Path:    path,
 				Content: doc.content,
 				Saved:   doc.saved,
+				Editor:  doc.editor,
 			})
 		}
 	}
@@ -348,34 +358,60 @@ func isTransientError(err error) bool {
 }
 
 func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, error) {
+	s.documentMu.Lock()
+	defer s.documentMu.Unlock()
+	return s.openDocumentLocked(ctx, filePath)
+}
+
+func (s *Session) openDocumentLocked(ctx context.Context, filePath string) (string, error) {
 	uri := fileuri.FromPath(filePath)
 	s.mu.Lock()
 	doc := s.documents[uri]
 	dirty := doc != nil && doc.opened && !doc.saved
 	s.mu.Unlock()
 	if dirty {
-		// A disk-backed request must never replace an editor-owned unsaved
-		// buffer. Feature requests from the editor carry their content and will
-		// synchronize it explicitly through SyncDocument.
+		// A disk-backed request must never replace an unsaved buffer.
 		return uri, nil
 	}
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
 	}
-	return s.syncDocument(ctx, filePath, content, true)
+	return s.syncDocumentLocked(ctx, filePath, content, true, false)
 }
 
 // SyncDocument updates the language server with an editor buffer without
 // claiming that the buffer has been saved to disk.
 func (s *Session) SyncDocument(ctx context.Context, filePath, content string) (string, error) {
-	return s.syncDocument(ctx, filePath, []byte(content), false)
+	return s.syncDocument(ctx, filePath, []byte(content), false, false)
 }
 
 // SaveDocument synchronizes an editor buffer and explicitly tells the server
 // that the same content has been persisted to disk.
 func (s *Session) SaveDocument(ctx context.Context, filePath, content string) (string, error) {
-	return s.syncDocument(ctx, filePath, []byte(content), true)
+	return s.syncDocument(ctx, filePath, []byte(content), true, false)
+}
+
+// SyncEditorDocument applies an editor's in-order buffer update and marks the
+// document as editor-owned until it is closed.
+func (s *Session) SyncEditorDocument(ctx context.Context, filePath, content string, saved bool) (string, error) {
+	return s.syncDocument(ctx, filePath, []byte(content), saved, true)
+}
+
+// SyncRequestDocument makes a request's buffer snapshot available, unless an
+// editor already keeps the document current: the snapshot may be older.
+func (s *Session) SyncRequestDocument(ctx context.Context, filePath, content string) (string, error) {
+	s.documentMu.Lock()
+	defer s.documentMu.Unlock()
+	uri := fileuri.FromPath(filePath)
+	s.mu.Lock()
+	doc := s.documents[uri]
+	owned := doc != nil && doc.opened && doc.editor
+	s.mu.Unlock()
+	if owned {
+		return uri, nil
+	}
+	return s.syncDocumentLocked(ctx, filePath, []byte(content), false, false)
 }
 
 // CloseDocument ends the lifetime of an editor-owned document. A session can
@@ -384,7 +420,10 @@ func (s *Session) SaveDocument(ctx context.Context, filePath, content string) (s
 func (s *Session) CloseDocument(ctx context.Context, filePath string) error {
 	s.documentMu.Lock()
 	defer s.documentMu.Unlock()
+	return s.closeDocumentLocked(ctx, filePath)
+}
 
+func (s *Session) closeDocumentLocked(ctx context.Context, filePath string) error {
 	uri := fileuri.FromPath(filePath)
 	s.mu.Lock()
 	doc := s.documents[uri]
@@ -393,18 +432,27 @@ func (s *Session) CloseDocument(ctx context.Context, filePath string) error {
 	if !opened {
 		return nil
 	}
-	if s.documentSyncPolicy().openClose {
-		if err := s.rpc.DidClose(ctx, &protocol.DidCloseTextDocumentParams{
+	var err error
+	if s.documentSyncPolicy().openClose && s.IsAlive() {
+		err = s.rpc.DidClose(ctx, &protocol.DidCloseTextDocumentParams{
 			TextDocument: protocol.TextDocumentIdentifier{URI: lspuri.MustParse(uri)},
-		}); err != nil {
-			return fmt.Errorf("didClose: %w", err)
-		}
+		})
 	}
 
 	s.mu.Lock()
 	delete(s.documents, uri)
 	s.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("didClose: %w", err)
+	}
 	return nil
+}
+
+// forgetDocument drops a document without telling the stopped server.
+func (s *Session) forgetDocument(filePath string) {
+	s.mu.Lock()
+	delete(s.documents, fileuri.FromPath(filePath))
+	s.mu.Unlock()
 }
 
 func (s *Session) DocumentContent(filePath string) (string, bool) {
@@ -428,10 +476,13 @@ func (s *Session) DocumentSnapshot(filePath string) (string, int, bool) {
 	return doc.content, doc.version, true
 }
 
-func (s *Session) syncDocument(ctx context.Context, filePath string, content []byte, saved bool) (string, error) {
+func (s *Session) syncDocument(ctx context.Context, filePath string, content []byte, saved, editor bool) (string, error) {
 	s.documentMu.Lock()
 	defer s.documentMu.Unlock()
+	return s.syncDocumentLocked(ctx, filePath, content, saved, editor)
+}
 
+func (s *Session) syncDocumentLocked(ctx context.Context, filePath string, content []byte, saved, editor bool) (string, error) {
 	uri := fileuri.FromPath(filePath)
 
 	h := fnv.New64a()
@@ -515,6 +566,7 @@ func (s *Session) syncDocument(ctx context.Context, filePath string, content []b
 	doc.opened = true
 	doc.sum = sum
 	doc.saved = saved
+	doc.editor = doc.editor || editor
 	doc.content = string(content)
 	if !opened {
 		doc.version = 1
@@ -862,6 +914,11 @@ func (s *Session) initialize(ctx context.Context) error {
 			Workspace: &protocol.WorkspaceClientCapabilities{
 				ApplyEdit:        new(true),
 				WorkspaceFolders: new(true),
+				DidChangeWatchedFiles: &protocol.DidChangeWatchedFilesClientCapabilities{
+					DynamicRegistration:    new(true),
+					RelativePatternSupport: new(true),
+				},
+				TextDocumentContent: &protocol.TextDocumentContentClientCapabilities{},
 				WorkspaceEdit: &protocol.WorkspaceEditClientCapabilities{
 					DocumentChanges:         new(true),
 					FailureHandling:         protocol.FailureHandlingKindTextOnlyTransactional,

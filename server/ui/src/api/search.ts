@@ -1,4 +1,4 @@
-import { scopedFetch } from "./http.ts";
+import { fetchOK } from "./http.ts";
 export interface WorkspaceSearchRequest {
 	query: string;
 	replacement: string;
@@ -32,70 +32,37 @@ export interface WorkspaceSearchSummary {
 	truncated: boolean;
 }
 
-interface WorkspaceSearchFileEvent {
-	type: "file";
-	file: WorkspaceSearchFile;
-}
-
-interface WorkspaceSearchDoneEvent extends WorkspaceSearchSummary {
-	type: "done";
-}
-
-type WorkspaceSearchEvent = WorkspaceSearchFileEvent | WorkspaceSearchDoneEvent;
-
 export async function streamWorkspaceSearch(
 	request: WorkspaceSearchRequest,
 	onFile: (file: WorkspaceSearchFile) => void,
 	signal?: AbortSignal,
 ): Promise<WorkspaceSearchSummary> {
-	const response = await scopedFetch("/api/files/content-search", {
+	const response = await fetchOK("/api/workspace/search", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(request),
 		signal,
 	});
-	if (!response.ok) {
-		const detail = (await response.text()).trim();
-		throw new Error(detail || `Search failed (${response.status}).`);
-	}
-	if (!response.body) throw new Error("Search response was empty.");
-
-	const reader = response.body.getReader();
-	const decoder = new TextDecoder();
+	if (!response.body) throw new Error("Search returned no results stream");
+	const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
 	let buffer = "";
-	let summary: WorkspaceSearchSummary = {
-		files: 0,
-		matches: 0,
-		truncated: false,
-	};
-
-	const accept = (line: string) => {
-		if (!line.trim()) return;
-		const event = JSON.parse(line) as WorkspaceSearchEvent;
-		if (event.type === "file") {
-			onFile(event.file);
-			summary.files++;
-			summary.matches += event.file.matches.length;
-		} else if (event.type === "done") {
-			summary = {
-				files: event.files,
-				matches: event.matches,
-				truncated: event.truncated ?? false,
-			};
+	for (;;) {
+		const { done, value } = await reader.read();
+		buffer += value ?? "";
+		const lines = buffer.split("\n");
+		buffer = done ? "" : lines.pop()!;
+		for (const line of lines) {
+			if (!line.trim()) continue;
+			const event = JSON.parse(line);
+			if (event.type === "file") onFile(event.file);
+			else if (event.type === "error") throw new Error(event.message);
+			else if (event.type === "done")
+				return {
+					files: event.files,
+					matches: event.matches,
+					truncated: event.truncated,
+				};
 		}
-	};
-
-	while (true) {
-		const { value, done } = await reader.read();
-		buffer += decoder.decode(value, { stream: !done });
-		let newline = buffer.indexOf("\n");
-		while (newline >= 0) {
-			accept(buffer.slice(0, newline));
-			buffer = buffer.slice(newline + 1);
-			newline = buffer.indexOf("\n");
-		}
-		if (done) break;
+		if (done) throw new Error("Search ended without a summary");
 	}
-	accept(buffer);
-	return summary;
 }

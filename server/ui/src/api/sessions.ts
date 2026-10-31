@@ -1,12 +1,14 @@
 import { queryOptions } from "@tanstack/react-query";
-import { fetchJSON } from "./http.ts";
 import { queryKeys } from "./query.ts";
-import { sessionKey } from "../state/sessionStore.ts";
 import { workspaceClient } from "../state/workspaceClient.ts";
+/** A session in the catalogue, opened through its default chat `id`. */
 export interface SessionInfo {
 	id: string;
+	session: string;
 	title?: string;
 	updated_at: string;
+	/** The default chat first, then forks. */
+	chats: { id: string; title?: string }[];
 }
 export interface ModeOption {
 	id: string;
@@ -18,24 +20,19 @@ export interface ModeState {
 	mode: string;
 }
 export async function deleteSession(key: string): Promise<void> {
-	await workspaceClient().command(key, { type: "delete" });
+	await workspaceClient().dispose(key);
 }
-export function forkSession(key: string, title?: string): Promise<string> {
-	return workspaceClient().fork(key, title);
+export function forkSession(
+	key: string,
+	title?: string,
+	turnId?: string,
+): Promise<string> {
+	return workspaceClient().fork(key, title, turnId);
 }
 export const sessionQueries = {
 	list: (backend: string) =>
 		queryOptions({
 			queryKey: queryKeys.sessions.list(backend),
-			queryFn: async ({ signal }) =>
-				(
-					await fetchJSON<SessionInfo[]>(
-						`/api/v2/backends/${encodeURIComponent(backend)}/sessions`,
-						{ signal },
-					)
-				).map((session) => ({
-					...session,
-					id: sessionKey(backend, session.id),
-				})),
+			queryFn: () => workspaceClient().list(backend),
 		}),
 };

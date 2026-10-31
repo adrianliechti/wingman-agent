@@ -80,3 +80,26 @@ func TestGatewayPrivacyOverridesInheritedSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestHostDisablesWorkflowAndEffortKeywordOverrides(t *testing.T) {
+	for _, cfg := range []*ClaudeConfig{nil, {Models: []string{"claude-opus-5-5"}}} {
+		args := BuildArgs(cfg)
+		for _, flag := range []string{"--settings", "--managed-settings"} {
+			i := slices.Index(args, flag)
+			if i < 0 {
+				continue
+			}
+			var settings map[string]any
+			if err := json.Unmarshal([]byte(args[i+1]), &settings); err != nil {
+				t.Fatal(err)
+			}
+			if settings["ultracode"] != false || settings["disableWorkflows"] != true || settings["workflowKeywordTriggerEnabled"] != false {
+				t.Fatalf("%s leaves workflow orchestration enabled: %v", flag, settings)
+			}
+			env := settings["env"].(map[string]any)
+			if env["CLAUDE_CODE_DISABLE_WORKFLOWS"] != "1" || env["CLAUDE_CODE_DISABLE_ULTRATHINK"] != "1" {
+				t.Fatalf("%s leaves keyword overrides enabled: %v", flag, env)
+			}
+		}
+	}
+}

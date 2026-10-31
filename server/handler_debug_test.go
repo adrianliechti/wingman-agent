@@ -33,7 +33,7 @@ func TestDebugTargetsReturnsGoCodeLensCandidates(t *testing.T) {
 
 	app := newDebugTestServer(t, root)
 	body := bytes.NewBufferString(`{"path":"main.go","content":"package main\n\nfunc main() {}\n"}`)
-	request := httptest.NewRequest(http.MethodPost, "/api/debug/targets", body)
+	request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/targets", body)
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
@@ -68,7 +68,7 @@ func TestDebugTargetsReturnsNativeCodeLensCandidates(t *testing.T) {
 				t.Fatal(err)
 			}
 			response := httptest.NewRecorder()
-			serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/debug/targets", bytes.NewReader(body)))
+			serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/workspace/debug/targets", bytes.NewReader(body)))
 			if response.Code != http.StatusOK {
 				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
 			}
@@ -89,7 +89,7 @@ func TestDebugTargetsRejectsTrailingJSON(t *testing.T) {
 	root := t.TempDir()
 	writeDebugTestFile(t, root, "main.go", "package main\n\nfunc main() {}\n")
 	app := newDebugTestServer(t, root)
-	request := httptest.NewRequest(http.MethodPost, "/api/debug/targets", bytes.NewBufferString(`{"path":"main.go"} {"path":"main.go"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/targets", bytes.NewBufferString(`{"path":"main.go"} {"path":"main.go"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
@@ -101,7 +101,7 @@ func TestDebugTargetsRejectsTrailingJSON(t *testing.T) {
 func TestDebugPlanRequiresCodeLensTarget(t *testing.T) {
 	root := t.TempDir()
 	app := newDebugTestServer(t, root)
-	request := httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewBufferString(`{"action":"debug"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewBufferString(`{"action":"debug"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
@@ -150,7 +150,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 	}
 
 	response := httptest.NewRecorder()
-	serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/debug/targets", strings.NewReader(`{"path":"main.go"}`)))
+	serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/workspace/debug/targets", strings.NewReader(`{"path":"main.go"}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("targets status = %d: %s", response.Code, response.Body.String())
 	}
@@ -168,7 +168,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 		t.Fatal(err)
 	}
 	for _, accept := range []string{"application/json", "application/x-ndjson"} {
-		request := httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(body))
+		request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(body))
 		request.Header.Set("Accept", accept)
 		response = httptest.NewRecorder()
 		serveTestHTTP(app, response, request)
@@ -194,7 +194,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 		}
 		defer release()
 		for _, accept := range []string{"application/json", "application/x-ndjson"} {
-			request := httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(confirmedBody))
+			request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(confirmedBody))
 			request.Header.Set("Accept", accept)
 			response := httptest.NewRecorder()
 			serveTestHTTP(app, response, request)
@@ -209,7 +209,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 			}
 		}
 	})
-	request := httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(confirmedBody))
+	request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(confirmedBody))
 	request.Header.Set("Accept", "application/x-ndjson")
 	response = httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
@@ -258,7 +258,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 	if err := os.WriteFile(goCommand, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	request = httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(body))
+	request = httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(body))
 	response = httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
 	if response.Code != http.StatusOK {
@@ -275,7 +275,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 	if err := os.WriteFile(statusPath, []byte(time.Now().Add(-48*time.Hour).UTC().Format(time.RFC3339Nano)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	request = httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(body))
+	request = httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(body))
 	request.Header.Set("Accept", "application/x-ndjson")
 	response = httptest.NewRecorder()
 	serveTestHTTP(app, response, request)
@@ -343,7 +343,7 @@ func TestDebugPlanFindsToolInstalledAfterCachedDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(body)))
+	serveTestHTTP(app, response, httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(body)))
 	var plan debugLaunchPlan
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &plan) != nil || plan.Adapter != "delve" {
 		t.Fatalf("plan = %d: %s", response.Code, response.Body.String())
@@ -405,7 +405,7 @@ func TestDebugPlanRechecksHostAfterUpdateLockFailure(t *testing.T) {
 				}
 			}}
 			defer os.Chmod(tools, 0o755)
-			request := httptest.NewRequest(http.MethodPost, "/api/debug/plan", bytes.NewReader(body))
+			request := httptest.NewRequest(http.MethodPost, "/api/workspace/debug/plan", bytes.NewReader(body))
 			request.Header.Set("Accept", "application/x-ndjson")
 			serveTestHTTP(app, response, request)
 			decoder := json.NewDecoder(response.Body)
@@ -443,92 +443,6 @@ func TestDetectDebugTargetsUsesCurrentFile(t *testing.T) {
 	}
 }
 
-func TestDebugBreakpointsPersistWithoutActiveSession(t *testing.T) {
-	root := t.TempDir()
-	writeDebugTestFile(t, root, "main.go", "package main\n\nfunc main() {}\n")
-	app := newDebugTestServer(t, root)
-
-	request := httptest.NewRequest(http.MethodPut, "/api/debug/breakpoints", bytes.NewBufferString(`{"path":"main.go","breakpoints":[{"line":3}]}`))
-	request.Header.Set("Content-Type", "application/json")
-	response := httptest.NewRecorder()
-	serveTestHTTP(app, response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("set status = %d, body = %s", response.Code, response.Body.String())
-	}
-
-	request = httptest.NewRequest(http.MethodGet, "/api/debug/state?path=main.go", nil)
-	response = httptest.NewRecorder()
-	serveTestHTTP(app, response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("state status = %d, body = %s", response.Code, response.Body.String())
-	}
-	var state debugStateResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
-		t.Fatal(err)
-	}
-	if len(state.Breakpoints) != 1 || state.Breakpoints[0].Line != 3 {
-		t.Fatalf("breakpoints = %#v", state.Breakpoints)
-	}
-}
-
-func TestDebugInspectionWithoutActiveSession(t *testing.T) {
-	root := t.TempDir()
-	app := newDebugTestServer(t, root)
-	request := httptest.NewRequest(http.MethodGet, "/api/debug/inspection", nil)
-	response := httptest.NewRecorder()
-	serveTestHTTP(app, response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	var inspection debugInspectionResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &inspection); err != nil {
-		t.Fatal(err)
-	}
-	if inspection.Session != nil || inspection.Output != "" || inspection.Threads == nil || inspection.Frames == nil {
-		t.Fatalf("inspection = %#v", inspection)
-	}
-}
-
-func TestDebugSessionWithoutActiveSession(t *testing.T) {
-	root := t.TempDir()
-	app := newDebugTestServer(t, root)
-	request := httptest.NewRequest(http.MethodGet, "/api/debug/session", nil)
-	response := httptest.NewRecorder()
-	serveTestHTTP(app, response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	var result debugSessionResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Session != nil {
-		t.Fatalf("session = %#v", result.Session)
-	}
-}
-
-func TestDebugFrameInspectionRequiresStateVersion(t *testing.T) {
-	root := t.TempDir()
-	app := newDebugTestServer(t, root)
-	tests := []struct {
-		path string
-		body string
-	}{
-		{path: "/api/debug/evaluate", body: `{"expression":"value","frame_id":1}`},
-		{path: "/api/debug/scopes", body: `{"frame_id":1}`},
-		{path: "/api/debug/variables", body: `{"variables_reference":1}`},
-	}
-	for _, test := range tests {
-		request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
-		request.Header.Set("Content-Type", "application/json")
-		response := httptest.NewRecorder()
-		serveTestHTTP(app, response, request)
-		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "state_version") {
-			t.Fatalf("%s: status = %d, body = %q", test.path, response.Code, response.Body.String())
-		}
-	}
-}
-
 func TestDebugStatusChangedUsesSessionEpoch(t *testing.T) {
 	base := dap.Status{SessionID: "session", StateVersion: 7, State: dap.StateStopped}
 	if debugStatusChanged(base, base) {
@@ -544,149 +458,6 @@ func TestDebugStatusChangedUsesSessionEpoch(t *testing.T) {
 	replacement.SessionID = "replacement"
 	if !debugStatusChanged(base, replacement) {
 		t.Fatal("replacement debugger session was not detected")
-	}
-}
-
-func TestDebugInspectionErrorUsesConflictAndTimeoutStatuses(t *testing.T) {
-	tests := []struct {
-		err  error
-		want int
-	}{
-		{err: errDebugStateChanged, want: http.StatusConflict},
-		{err: context.DeadlineExceeded, want: http.StatusGatewayTimeout},
-		{err: errors.New("invalid request"), want: http.StatusBadRequest},
-	}
-	for _, test := range tests {
-		response := httptest.NewRecorder()
-		writeDebugInspectionError(response, test.err)
-		if response.Code != test.want {
-			t.Fatalf("error %v: status = %d, want %d", test.err, response.Code, test.want)
-		}
-	}
-}
-
-func TestNormalizeDebugFrameResolvesWorkspaceSymlinks(t *testing.T) {
-	realRoot := t.TempDir()
-	writeDebugTestFile(t, realRoot, "main.go", "package main\n")
-	linkRoot := filepath.Join(t.TempDir(), "workspace")
-	if err := os.Symlink(realRoot, linkRoot); err != nil {
-		t.Skipf("workspace symlinks are unavailable: %v", err)
-	}
-
-	frame := dap.StackFrame{Source: &dap.Source{Path: filepath.Join(realRoot, "main.go")}}
-	normalizeDebugFrame(linkRoot, &frame)
-	if frame.Source.Path != "main.go" {
-		t.Fatalf("normalized path = %q, want main.go", frame.Source.Path)
-	}
-
-	outside := filepath.Join(t.TempDir(), "outside.go")
-	if err := os.WriteFile(outside, []byte("package outside\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(realRoot, "linked.go")); err != nil {
-		t.Skipf("source symlinks are unavailable: %v", err)
-	}
-	frame.Source.Path = filepath.Join(linkRoot, "linked.go")
-	normalizeDebugFrame(linkRoot, &frame)
-	if frame.Source.Path != "" {
-		t.Fatalf("outside symlink normalized to %q", frame.Source.Path)
-	}
-}
-
-func TestLiveDebugInspectionReturnsGoVariables(t *testing.T) {
-	if os.Getenv("WINGMAN_LIVE_DAP") == "" {
-		t.Skip("set WINGMAN_LIVE_DAP=1 to run a real Delve session")
-	}
-	root := t.TempDir()
-	writeDebugTestFile(t, root, "go.mod", "module example.com/debuginspection\n\ngo 1.24\n")
-	writeDebugTestFile(t, root, "main.go", `package main
-
-import "fmt"
-
-func work(value int) int {
-	return value + 1
-}
-
-func main() {
-	fmt.Println(work(41))
-}
-`)
-	app := newDebugTestServer(t, root)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	var session *dap.Session
-	if err := app.workspace.WithDAPManager(func(manager *dap.Manager) error {
-		adapters, err := manager.Adapters(ctx)
-		if err != nil {
-			return err
-		}
-		if len(adapters) == 0 {
-			t.Skip("Delve is not installed")
-		}
-		session, err = manager.Start(ctx, dap.StartOptions{
-			Adapter: "delve",
-			Configuration: map[string]any{
-				"mode":    "debug",
-				"program": filepath.Join(root, "main.go"),
-			},
-			Breakpoints: map[string][]dap.SourceBreakpoint{
-				filepath.Join(root, "main.go"): {{Line: 6}},
-			},
-		})
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-	status := session.Status()
-	if status.State != dap.StateStopped {
-		status, _ = session.WaitForStop(ctx, session.StateEpoch())
-	}
-	if status.State != dap.StateStopped {
-		t.Fatalf("status = %+v\noutput:\n%s", status, session.Output())
-	}
-
-	request := httptest.NewRequest(http.MethodGet, "/api/debug/inspection", nil)
-	response := httptest.NewRecorder()
-	serveTestHTTP(app, response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	var inspection debugInspectionResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &inspection); err != nil {
-		t.Fatal(err)
-	}
-	if inspection.Session == nil || len(inspection.Frames) == 0 {
-		t.Fatalf("inspection did not return stack frames: %#v", inspection)
-	}
-	scopesBody, err := json.Marshal(map[string]any{
-		"session_id":    inspection.Session.SessionID,
-		"state_version": inspection.Session.StateVersion,
-		"frame_id":      inspection.Frames[0].ID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request = httptest.NewRequest(http.MethodPost, "/api/debug/scopes", bytes.NewReader(scopesBody))
-	request.Header.Set("Content-Type", "application/json")
-	response = httptest.NewRecorder()
-	serveTestHTTP(app, response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("scopes status = %d, body = %s", response.Code, response.Body.String())
-	}
-	var result struct {
-		Scopes []debugScopeInspection `json:"scopes"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	var variables []dap.Variable
-	for _, scope := range result.Scopes {
-		variables = append(variables, scope.Variables...)
-	}
-	if !slices.ContainsFunc(variables, func(variable dap.Variable) bool {
-		return variable.Name == "value" && variable.Value == "41"
-	}) {
-		t.Fatalf("scopes did not return value=41: %#v", result.Scopes)
 	}
 }
 
@@ -744,15 +515,6 @@ func TestSelectTargetDebugProjectPrefersNearestProject(t *testing.T) {
 	}
 	if project != "services/api" {
 		t.Fatalf("project = %q", project)
-	}
-}
-
-func TestDebugControlWaitForUsesServerPolicy(t *testing.T) {
-	if got := debugControlWaitFor("pause"); got != 750*time.Millisecond {
-		t.Fatalf("pause wait = %v", got)
-	}
-	if got := debugControlWaitFor("next"); got != 150*time.Millisecond {
-		t.Fatalf("step wait = %v", got)
 	}
 }
 

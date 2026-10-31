@@ -226,8 +226,8 @@ function offsetAt(content: string, line: number, character: number): number {
 			lineStart = offset + 1;
 		}
 	}
-	if (currentLine !== line)
-		throw new Error("Text edit line is outside the document.");
+	// LSP positions past the end clamp to the document end and line length.
+	if (currentLine !== line) return content.length;
 	let lineEnd = lineStart;
 	while (
 		lineEnd < content.length &&
@@ -236,8 +236,5 @@ function offsetAt(content: string, line: number, character: number): number {
 	) {
 		lineEnd++;
 	}
-	if (character > lineEnd - lineStart) {
-		throw new Error("Text edit character is outside the line.");
-	}
-	return lineStart + character;
+	return lineStart + Math.min(character, lineEnd - lineStart);
 }

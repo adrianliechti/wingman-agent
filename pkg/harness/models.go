@@ -1,5 +1,7 @@
 package harness
 
+import "github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+
 type ModelInfo struct {
 	ID string
 }
@@ -128,10 +130,7 @@ type ToolPresentation struct {
 	Locations []ToolLocation `json:"locations,omitempty"`
 }
 
-type ToolLocation struct {
-	Path string `json:"path"`
-	Line int    `json:"line,omitempty"`
-}
+type ToolLocation = tool.Location
 
 type Reasoning struct {
 	ID string `json:"id,omitempty"`

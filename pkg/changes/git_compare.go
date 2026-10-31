@@ -244,7 +244,7 @@ func (m *Manager) compareWorktree(ctx context.Context, baseCommit *object.Commit
 		if originalPath != path {
 			diff.OriginalPath = originalPath
 		}
-		if !isBinary(original) && !isBinary(modified) {
+		if diff.Binary = isBinary(original) || isBinary(modified); !diff.Binary {
 			diff.Original = string(original)
 			diff.Modified = string(modified)
 		}
@@ -489,7 +489,7 @@ func (m *Manager) committedFileDiff(ctx context.Context, baseTree, headTree *obj
 		return FileDiff{}, false, err
 	}
 	diff := FileDiff{Path: path, OriginalPath: originalPath, Status: status, Patch: patch}
-	if !isBinary(original) && !isBinary(modified) {
+	if diff.Binary = isBinary(original) || isBinary(modified); !diff.Binary {
 		diff.Original = string(original)
 		diff.Modified = string(modified)
 	}

@@ -13,22 +13,14 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
-	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
 )
 
-const (
-	debugRequestLimit       = 2 << 20
-	debugControlWait        = 150 * time.Millisecond
-	debugPauseWait          = 750 * time.Millisecond
-	debugStateRequestBudget = 2 * time.Second
-	debugInspectionBudget   = 5 * time.Second
-)
+const debugRequestLimit = 2 << 20
 
 var errDebugStateChanged = errors.New("debug session state changed; refresh and try again")
 
@@ -42,6 +34,7 @@ type debugPlanBreakpoint struct {
 }
 
 type debugLaunchPlan struct {
+	ID                  string                `json:"id,omitempty"`
 	Action              string                `json:"action"`
 	Title               string                `json:"title"`
 	Adapter             string                `json:"adapter"`
@@ -53,32 +46,6 @@ type debugLaunchPlan struct {
 	Breakpoints         []debugPlanBreakpoint `json:"breakpoints"`
 	FunctionBreakpoints []string              `json:"function_breakpoints"`
 	PreLaunch           *dap.ProcessLaunch    `json:"prelaunch,omitempty"`
-}
-
-type debugStateResponse struct {
-	Available   bool                   `json:"available"`
-	Session     *dap.Status            `json:"session,omitempty"`
-	Frame       *dap.StackFrame        `json:"frame,omitempty"`
-	Breakpoints []dap.SourceBreakpoint `json:"breakpoints"`
-	FrameError  string                 `json:"frame_error,omitempty"`
-}
-
-type debugSessionResponse struct {
-	Session *dap.Status `json:"session,omitempty"`
-}
-
-type debugScopeInspection struct {
-	Scope     dap.Scope      `json:"scope"`
-	Variables []dap.Variable `json:"variables"`
-	Error     string         `json:"error,omitempty"`
-}
-
-type debugInspectionResponse struct {
-	Session *dap.Status      `json:"session,omitempty"`
-	Output  string           `json:"output"`
-	Threads []dap.Thread     `json:"threads"`
-	Frames  []dap.StackFrame `json:"frames"`
-	Error   string           `json:"error,omitempty"`
 }
 
 func (s *Server) handleDebugTargets(w http.ResponseWriter, r *http.Request) {
@@ -238,7 +205,7 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	if changed {
-		s.broadcast(Frame{Type: EvtCapabilitiesChanged})
+		s.broadcast(Frame{Type: EvtWorkspaceChanged})
 	}
 	if ctx.Err() != nil {
 		return
@@ -312,6 +279,13 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		fail(fmt.Errorf("invalid deterministic debug configuration: %w", err), http.StatusUnprocessableEntity)
 		return
 	}
+	if err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
+		plan.ID = manager.RememberPlan(cloneDebugLaunchPlan(plan))
+		return nil
+	}); err != nil {
+		fail(err, http.StatusServiceUnavailable)
+		return
+	}
 	if streaming {
 		warning := ""
 		if installErr != nil {
@@ -321,471 +295,6 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 	} else {
 		writeJSON(w, plan)
 	}
-}
-
-func (s *Server) handleDebugStart(w http.ResponseWriter, r *http.Request) {
-	var plan debugLaunchPlan
-	if err := decodeDebugJSON(w, r, &plan); err != nil {
-		return
-	}
-	var status dap.Status
-	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
-		adapters, err := manager.Adapters(r.Context())
-		if err != nil {
-			return err
-		}
-		if err := s.validateDebugPlan(&plan, adapters); err != nil {
-			return err
-		}
-		options := s.debugStartOptions(plan)
-		session, err := manager.Start(r.Context(), options)
-		if err != nil {
-			return err
-		}
-		status = session.Status()
-		return nil
-	})
-	if err != nil {
-		code := http.StatusBadRequest
-		if errors.Is(err, dap.ErrActiveSession) || errors.Is(err, dap.ErrBusy) {
-			code = http.StatusConflict
-		}
-		http.Error(w, err.Error(), code)
-		return
-	}
-	writeJSON(w, status)
-}
-
-func (s *Server) handleDebugSession(w http.ResponseWriter, _ *http.Request) {
-	response := debugSessionResponse{}
-	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
-		if session := manager.ActiveSession(); session != nil {
-			status := session.Status()
-			response.Session = &status
-		}
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	writeJSON(w, response)
-}
-
-func (s *Server) handleDebugState(w http.ResponseWriter, r *http.Request) {
-	var sourcePath string
-	if requested := r.URL.Query().Get("path"); requested != "" {
-		rel, ok := s.resolveExistingRegularFile(w, requested)
-		if !ok {
-			return
-		}
-		sourcePath = filepath.Join(s.workspace.RootPath, rel)
-	}
-	response := debugStateResponse{Breakpoints: []dap.SourceBreakpoint{}}
-	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
-		if sourcePath != "" {
-			response.Breakpoints = manager.Breakpoints(sourcePath)
-		}
-		session := manager.ActiveSession()
-		if session == nil {
-			adapters, err := manager.Adapters(r.Context())
-			if err != nil {
-				return err
-			}
-			response.Available = len(adapters) > 0
-			return nil
-		}
-		response.Available = true
-		status := session.Status()
-		response.Session = &status
-		if status.State != dap.StateStopped {
-			return nil
-		}
-		requestCtx, cancel := context.WithTimeout(r.Context(), debugStateRequestBudget)
-		defer cancel()
-		threadID := 0
-		if status.Stop != nil {
-			threadID = status.Stop.ThreadID
-		}
-		frames, _, frameErr := session.StackTrace(requestCtx, threadID, 0, 1)
-		current := session.Status()
-		if debugStatusChanged(status, current) {
-			// A resume, another stop, or termination can overtake stackTrace.
-			// Never pair a frame from that newer state with the stale stop epoch.
-			response.Session = &current
-			return nil
-		}
-		if frameErr != nil {
-			response.FrameError = frameErr.Error()
-			return nil
-		}
-		if len(frames) > 0 {
-			frame := frames[0]
-			normalizeDebugFrame(s.workspace.RootPath, &frame)
-			response.Frame = &frame
-		}
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	writeJSON(w, response)
-}
-
-func (s *Server) handleDebugInspection(w http.ResponseWriter, r *http.Request) {
-	response := debugInspectionResponse{
-		Output:  "",
-		Threads: []dap.Thread{},
-		Frames:  []dap.StackFrame{},
-	}
-	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
-		session := manager.ActiveSession()
-		if session == nil {
-			return nil
-		}
-		status := session.Status()
-		response.Session = &status
-		response.Output = session.Output()
-		if r.URL.Query().Get("details") == "false" {
-			return nil
-		}
-		if status.State != dap.StateStopped {
-			return nil
-		}
-
-		requestCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-		threads, threadsErr := session.Threads(requestCtx)
-		current := session.Status()
-		if debugStatusChanged(status, current) {
-			response.Session = &current
-			return nil
-		}
-		if threadsErr != nil {
-			response.Error = threadsErr.Error()
-			return nil
-		}
-		response.Threads = threads
-		threadID := 0
-		if status.Stop != nil {
-			threadID = status.Stop.ThreadID
-		}
-		frames, _, framesErr := session.StackTrace(requestCtx, threadID, 0, 100)
-		current = session.Status()
-		if debugStatusChanged(status, current) {
-			response.Session = &current
-			response.Threads = []dap.Thread{}
-			return nil
-		}
-		if framesErr != nil {
-			response.Error = framesErr.Error()
-			return nil
-		}
-		for index := range frames {
-			normalizeDebugFrame(s.workspace.RootPath, &frames[index])
-		}
-		response.Frames = frames
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	writeJSON(w, response)
-}
-
-func (s *Server) handleDebugBreakpoints(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Path        string                 `json:"path"`
-		Breakpoints []dap.SourceBreakpoint `json:"breakpoints"`
-	}
-	if err := decodeDebugJSON(w, r, &body); err != nil {
-		return
-	}
-	rel, ok := s.resolveExistingRegularFile(w, body.Path)
-	if !ok {
-		return
-	}
-	for _, breakpoint := range body.Breakpoints {
-		if breakpoint.Line < 1 || breakpoint.Column < 0 {
-			http.Error(w, "breakpoint lines must be positive", http.StatusBadRequest)
-			return
-		}
-	}
-	path := filepath.Join(s.workspace.RootPath, rel)
-	var resolved []dap.Breakpoint
-	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
-		var err error
-		resolved, err = manager.SetBreakpoints(r.Context(), path, body.Breakpoints)
-		return err
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	writeJSON(w, map[string]any{
-		"breakpoints": nonNilSourceBreakpoints(body.Breakpoints),
-		"resolved":    nonNilDAPBreakpoints(resolved),
-	})
-}
-
-func (s *Server) handleDebugControl(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Operation string `json:"operation"`
-		SessionID string `json:"session_id,omitempty"`
-		ThreadID  int    `json:"thread_id,omitempty"`
-	}
-	if err := decodeDebugJSON(w, r, &body); err != nil {
-		return
-	}
-	body.Operation = strings.TrimSpace(body.Operation)
-	waitTimeout := debugControlWaitFor(body.Operation)
-	var status *dap.Status
-	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
-		session, err := manager.Session(strings.TrimSpace(body.SessionID))
-		if err != nil {
-			return err
-		}
-		before := session.StateEpoch()
-		switch body.Operation {
-		case "continue":
-			err = session.Continue(r.Context(), body.ThreadID)
-		case "next":
-			err = session.Next(r.Context(), body.ThreadID)
-		case "stepIn":
-			err = session.StepIn(r.Context(), body.ThreadID)
-		case "stepOut":
-			err = session.StepOut(r.Context(), body.ThreadID)
-		case "stepBack":
-			err = session.StepBack(r.Context(), body.ThreadID)
-		case "pause":
-			err = session.Pause(r.Context(), body.ThreadID)
-		case "stop":
-			err = manager.Stop(r.Context(), body.SessionID)
-			current := session.Status()
-			status = &current
-		default:
-			return fmt.Errorf("unknown debug operation %q", body.Operation)
-		}
-		if err != nil || body.Operation == "stop" {
-			return err
-		}
-		if waitTimeout > 0 {
-			waitCtx, cancel := context.WithTimeout(r.Context(), waitTimeout)
-			_, _ = session.WaitForStop(waitCtx, before)
-			cancel()
-		}
-		current := session.Status()
-		status = &current
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, map[string]any{"session": status})
-}
-
-func debugControlWaitFor(operation string) time.Duration {
-	if operation == "pause" {
-		return debugPauseWait
-	}
-	return debugControlWait
-}
-
-func (s *Server) handleDebugEvaluate(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		SessionID    string `json:"session_id,omitempty"`
-		StateVersion uint64 `json:"state_version,omitempty"`
-		Expression   string `json:"expression"`
-		FrameID      int    `json:"frame_id,omitempty"`
-		Context      string `json:"context,omitempty"`
-	}
-	if err := decodeDebugJSON(w, r, &body); err != nil {
-		return
-	}
-	if body.Context == "" {
-		body.Context = "hover"
-	}
-	if body.Context != "hover" && body.Context != "watch" && body.Context != "repl" {
-		http.Error(w, "invalid evaluate context", http.StatusBadRequest)
-		return
-	}
-	if body.FrameID > 0 && body.StateVersion == 0 {
-		http.Error(w, "state_version must be positive when frame_id is set", http.StatusBadRequest)
-		return
-	}
-	requestCtx, cancel := context.WithTimeout(r.Context(), debugInspectionBudget)
-	defer cancel()
-	var evaluation dap.Evaluation
-	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
-		session, err := manager.Session(strings.TrimSpace(body.SessionID))
-		if err != nil {
-			return err
-		}
-		var before dap.Status
-		if body.StateVersion > 0 {
-			before, err = debugStopAtVersion(session, body.StateVersion)
-			if err != nil {
-				return err
-			}
-		}
-		evaluation, err = session.EvaluateContext(requestCtx, body.Expression, body.FrameID, body.Context)
-		if body.StateVersion > 0 && debugStatusChanged(before, session.Status()) {
-			return errDebugStateChanged
-		}
-		return err
-	})
-	if err != nil {
-		writeDebugInspectionError(w, err)
-		return
-	}
-	writeJSON(w, evaluation)
-}
-
-func (s *Server) handleDebugScopes(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		SessionID    string `json:"session_id,omitempty"`
-		StateVersion uint64 `json:"state_version"`
-		FrameID      int    `json:"frame_id"`
-	}
-	if err := decodeDebugJSON(w, r, &body); err != nil {
-		return
-	}
-	if body.FrameID <= 0 {
-		http.Error(w, "frame_id must be positive", http.StatusBadRequest)
-		return
-	}
-	if body.StateVersion == 0 {
-		http.Error(w, "state_version must be positive", http.StatusBadRequest)
-		return
-	}
-	requestCtx, cancel := context.WithTimeout(r.Context(), debugInspectionBudget)
-	defer cancel()
-	var scopes []debugScopeInspection
-	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
-		session, err := manager.Session(strings.TrimSpace(body.SessionID))
-		if err != nil {
-			return err
-		}
-		before, err := debugStopAtVersion(session, body.StateVersion)
-		if err != nil {
-			return err
-		}
-		scopes, err = inspectDebugScopes(requestCtx, session, body.FrameID, before)
-		return err
-	})
-	if err != nil {
-		writeDebugInspectionError(w, err)
-		return
-	}
-	if scopes == nil {
-		scopes = []debugScopeInspection{}
-	}
-	writeJSON(w, map[string]any{"scopes": scopes})
-}
-
-func inspectDebugScopes(ctx context.Context, session *dap.Session, frameID int, before dap.Status) ([]debugScopeInspection, error) {
-	scopes, err := session.Scopes(ctx, frameID)
-	if debugStatusChanged(before, session.Status()) {
-		return nil, errDebugStateChanged
-	}
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
-		}
-		return []debugScopeInspection{{Error: err.Error()}}, nil
-	}
-	result := make([]debugScopeInspection, 0, len(scopes))
-	for _, scope := range scopes {
-		inspection := debugScopeInspection{Scope: scope, Variables: []dap.Variable{}}
-		if scope.VariablesReference > 0 {
-			variables, err := session.Variables(ctx, scope.VariablesReference, 0, 200)
-			if debugStatusChanged(before, session.Status()) {
-				return nil, errDebugStateChanged
-			}
-			if err != nil {
-				inspection.Error = err.Error()
-			} else {
-				inspection.Variables = variables
-			}
-		}
-		result = append(result, inspection)
-	}
-	return result, nil
-}
-
-func (s *Server) handleDebugVariables(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		SessionID    string `json:"session_id,omitempty"`
-		StateVersion uint64 `json:"state_version"`
-		Reference    int    `json:"variables_reference"`
-		Start        int    `json:"start,omitempty"`
-		Count        int    `json:"count,omitempty"`
-	}
-	if err := decodeDebugJSON(w, r, &body); err != nil {
-		return
-	}
-	if body.Reference <= 0 || body.Start < 0 || body.Count < 0 || body.Count > 500 {
-		http.Error(w, "invalid variables range", http.StatusBadRequest)
-		return
-	}
-	if body.StateVersion == 0 {
-		http.Error(w, "state_version must be positive", http.StatusBadRequest)
-		return
-	}
-	if body.Count == 0 {
-		body.Count = 200
-	}
-	requestCtx, cancel := context.WithTimeout(r.Context(), debugInspectionBudget)
-	defer cancel()
-	var variables []dap.Variable
-	err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
-		session, err := manager.Session(strings.TrimSpace(body.SessionID))
-		if err != nil {
-			return err
-		}
-		before, err := debugStopAtVersion(session, body.StateVersion)
-		if err != nil {
-			return err
-		}
-		variables, err = session.Variables(requestCtx, body.Reference, body.Start, body.Count)
-		if debugStatusChanged(before, session.Status()) {
-			return errDebugStateChanged
-		}
-		return err
-	})
-	if err != nil {
-		writeDebugInspectionError(w, err)
-		return
-	}
-	if variables == nil {
-		variables = []dap.Variable{}
-	}
-	writeJSON(w, map[string]any{"variables": variables})
-}
-
-func debugStopAtVersion(session *dap.Session, version uint64) (dap.Status, error) {
-	status := session.Status()
-	if status.State != dap.StateStopped {
-		return dap.Status{}, errors.New("debug session must be stopped to inspect it")
-	}
-	if status.StateVersion != version {
-		return dap.Status{}, errDebugStateChanged
-	}
-	return status, nil
-}
-
-func writeDebugInspectionError(w http.ResponseWriter, err error) {
-	status := http.StatusBadRequest
-	switch {
-	case errors.Is(err, errDebugStateChanged):
-		status = http.StatusConflict
-	case errors.Is(err, context.DeadlineExceeded):
-		status = http.StatusGatewayTimeout
-	}
-	http.Error(w, err.Error(), status)
 }
 
 func decodeDebugJSON(w http.ResponseWriter, r *http.Request, target any) error {
@@ -862,28 +371,6 @@ func nonNilDAPBreakpoints(values []dap.Breakpoint) []dap.Breakpoint {
 	return values
 }
 
-func normalizeDebugFrame(root string, frame *dap.StackFrame) {
-	if frame == nil || frame.Source == nil || frame.Source.Path == "" {
-		return
-	}
-	path := frame.Source.Path
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(root, path)
-	}
-	resolvedRoot, rootErr := pathutil.Resolve(filepath.Clean(root))
-	resolvedPath, pathErr := pathutil.Resolve(filepath.Clean(path))
-	if rootErr != nil || pathErr != nil {
-		frame.Source.Path = ""
-		return
-	}
-	rel, err := filepath.Rel(resolvedRoot, resolvedPath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		frame.Source.Path = ""
-		return
-	}
-	frame.Source.Path = filepath.ToSlash(rel)
-}
-
 func debugStatusChanged(before, after dap.Status) bool {
 	return before.SessionID != after.SessionID || before.StateVersion != after.StateVersion
 }
@@ -911,6 +398,49 @@ func (s *Server) debugStartOptions(plan debugLaunchPlan) dap.StartOptions {
 		}
 	}
 	return options
+}
+
+func cloneDebugLaunchPlan(plan debugLaunchPlan) debugLaunchPlan {
+	plan.Configuration = cloneJSONMap(plan.Configuration)
+	plan.Breakpoints = slices.Clone(plan.Breakpoints)
+	plan.FunctionBreakpoints = slices.Clone(plan.FunctionBreakpoints)
+	plan.PreLaunch = cloneDebugProcessLaunch(plan.PreLaunch)
+	return plan
+}
+
+// reviewedDebugPlan starts from the plan the host generated. The browser may
+// change only what its review dialog offers: I/O, adapter options and whether
+// the plan's initial breakpoints apply. Commands such as prelaunch never come
+// from the client.
+func (s *Server) reviewedDebugPlan(manager *dap.Manager, id string, edits *debugLaunchPlan) (debugLaunchPlan, error) {
+	value, ok := manager.ReviewedPlan(id)
+	stored, valid := value.(debugLaunchPlan)
+	if !ok || !valid {
+		return debugLaunchPlan{}, errors.New("the reviewed debug plan has expired; prepare the launch again")
+	}
+	plan := cloneDebugLaunchPlan(stored)
+	if edits == nil {
+		return plan, nil
+	}
+	if edits.IO != "" {
+		plan.IO = edits.IO
+	}
+	if edits.Configuration != nil {
+		plan.Configuration = cloneJSONMap(edits.Configuration)
+	}
+	for _, breakpoint := range edits.Breakpoints {
+		if !slices.Contains(stored.Breakpoints, breakpoint) {
+			return debugLaunchPlan{}, errors.New("launch breakpoints must come from the reviewed plan")
+		}
+	}
+	for _, name := range edits.FunctionBreakpoints {
+		if !slices.Contains(stored.FunctionBreakpoints, name) {
+			return debugLaunchPlan{}, errors.New("launch function breakpoints must come from the reviewed plan")
+		}
+	}
+	plan.Breakpoints = slices.Clone(edits.Breakpoints)
+	plan.FunctionBreakpoints = slices.Clone(edits.FunctionBreakpoints)
+	return plan, nil
 }
 
 func cloneDebugProcessLaunch(value *dap.ProcessLaunch) *dap.ProcessLaunch {

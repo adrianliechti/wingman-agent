@@ -15,6 +15,13 @@ func (s *Server) LaunchTerminal(_ context.Context, launch dap.TerminalLaunch) (d
 	if s.terminals == nil || !terminal.Supported() {
 		return nil, errors.New("terminals are not supported on this host")
 	}
+	// Each debug run replaces earlier finished debuggee terminals so they do
+	// not accumulate up to the terminal limit.
+	for _, session := range s.terminals.List() {
+		if session.IsCommand() && session.Exited() {
+			s.terminals.Remove(session.ID())
+		}
+	}
 	process, err := s.terminals.CreateCommand(terminal.CommandSpec{
 		Path:  launch.Path,
 		Args:  launch.Args,
@@ -25,6 +32,5 @@ func (s *Server) LaunchTerminal(_ context.Context, launch dap.TerminalLaunch) (d
 	if err != nil {
 		return nil, err
 	}
-	s.broadcast(Frame{Type: EvtTerminalsChanged})
 	return process, nil
 }

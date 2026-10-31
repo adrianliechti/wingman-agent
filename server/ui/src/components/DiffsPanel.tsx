@@ -1,3 +1,4 @@
+import { gitStatusQuery } from "../api/git";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	ArrowDownToLine,
@@ -17,7 +18,6 @@ import {
 	RefreshCw,
 	RotateCcw,
 	Search,
-	Sparkles,
 } from "lucide-react";
 import {
 	useEffect,
@@ -38,8 +38,6 @@ import { listDiffs, revertDiff } from "../api/diffs";
 import {
 	fetchGitBranches,
 	getGitBranches,
-	getGitStatus,
-	generateGitCommitMessage,
 	initializeGitRepository,
 	runGitCommand,
 	type GitCommand,
@@ -59,6 +57,7 @@ import { PanelEmptyState } from "./ui/EmptyState";
 import { Dialog, dialogButtonClass } from "./ui/Feedback";
 import { FloatingMenu, FloatingSurface } from "./ui/Floating";
 import { GitHistoryPanel } from "./GitCompareControls";
+import { statusColor } from "../utils/diffStatus";
 
 interface Props {
 	git?: boolean;
@@ -110,12 +109,13 @@ export function DiffsPanel({
 	onOpenFile,
 }: Props) {
 	const queryClient = useQueryClient();
-	const changesQuery = useQuery<GitStatus | DiffEntry[]>({
-		queryKey: git ? queryKeys.git.status : queryKeys.diffs.list(),
-		enabled: git || !canInit,
-		queryFn: ({ signal }) =>
-			git ? getGitStatus(signal) : listDiffs({ signal }),
+	const statusQuery = useQuery({ ...gitStatusQuery, enabled: git });
+	const diffsQuery = useQuery({
+		queryKey: queryKeys.diffs.list(),
+		enabled: !git && !canInit && !statusQuery.isPending,
+		queryFn: ({ signal }) => listDiffs({ signal }),
 	});
+	const changesQuery = git ? statusQuery : diffsQuery;
 	const diffs = git
 		? []
 		: ((changesQuery.data as DiffEntry[] | undefined) ?? []);
@@ -126,7 +126,6 @@ export function DiffsPanel({
 	const [menu, setMenu] = useState<MenuState | null>(null);
 	const [busy, setBusy] = useState("");
 	const [message, setMessage] = useState("");
-	const messageRef = useRef("");
 	const [operationError, setError] = useState("");
 	const error =
 		operationError ||
@@ -145,9 +144,7 @@ export function DiffsPanel({
 			return invalidateGitIndexQueries(queryClient);
 		}
 		return queryClient.invalidateQueries(
-			{
-				queryKey: git ? queryKeys.git.all : queryKeys.diffs.all,
-			},
+			{ queryKey: git ? queryKeys.git.all : queryKeys.diffs.all },
 			{ cancelRefetch: false },
 		);
 	};
@@ -179,30 +176,7 @@ export function DiffsPanel({
 		setRevertTarget(diff);
 	};
 
-	const updateMessage = (value: string) => {
-		messageRef.current = value;
-		setMessage(value);
-	};
-
-	const generateCommitMessage = async () => {
-		const initial = messageRef.current;
-		setBusy("commit-message");
-		setError("");
-		setNotice("");
-		try {
-			const generated = await generateGitCommitMessage();
-			if (messageRef.current === initial) {
-				updateMessage(generated);
-			} else {
-				setNotice(
-					"Generated message was not inserted because the commit box changed.",
-				);
-			}
-		} catch (error) {
-			setError(error instanceof Error ? error.message : String(error));
-		}
-		setBusy("");
-	};
+	const updateMessage = setMessage;
 
 	const confirmRevert = async () => {
 		const diff = revertTarget;
@@ -241,7 +215,6 @@ export function DiffsPanel({
 					onCommit={async () => {
 						if (await request({ type: "commit", message })) updateMessage("");
 					}}
-					onGenerateMessage={generateCommitMessage}
 					onRevert={(file) => requestRevert(gitFileAsDiff(file))}
 				/>
 				<RevertDialog
@@ -330,7 +303,7 @@ function GitInitPrompt() {
 		try {
 			await initializeGitRepository();
 			await Promise.all([
-				queryClient.invalidateQueries({ queryKey: queryKeys.capabilities }),
+				queryClient.invalidateQueries({ queryKey: queryKeys.workspace }),
 				queryClient.invalidateQueries({ queryKey: queryKeys.git.all }),
 			]);
 		} catch (e) {
@@ -421,7 +394,6 @@ function GitChanges({
 	onOpenInsights,
 	onOpenFile,
 	onCommit,
-	onGenerateMessage,
 	onRevert,
 }: {
 	status: GitStatus;
@@ -446,7 +418,6 @@ function GitChanges({
 	onOpenInsights?: () => void;
 	onOpenFile?: (path: string, disposition?: TabDisposition) => void;
 	onCommit: () => Promise<void>;
-	onGenerateMessage: () => Promise<void>;
 	onRevert: (file: GitFileStatus) => void;
 }) {
 	const [menu, setMenu] = useState<GitMenuState | null>(null);
@@ -674,7 +645,7 @@ function GitChanges({
 										stackCommitAction ? "w-full flex-none" : "flex-1"
 									}`}
 								/>
-								{message.trim() ? (
+								{message.trim() && (
 									<button
 										ref={commitButtonRef}
 										type="submit"
@@ -690,21 +661,6 @@ function GitChanges({
 											<GitCommitHorizontal size={11} />
 										)}
 										Commit
-									</button>
-								) : (
-									<button
-										type="button"
-										disabled={disabled}
-										onClick={() => void onGenerateMessage()}
-										title="Generate commit message from staged changes"
-										aria-label="Generate commit message"
-										className="mb-0.5 mr-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-dim hover:bg-bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-30"
-									>
-										{busy === "commit-message" ? (
-											<Loader2 size={11} className="animate-spin" />
-										) : (
-											<Sparkles size={11} />
-										)}
 									</button>
 								)}
 							</div>
@@ -838,6 +794,7 @@ function BranchPicker({
 		mutationFn: fetchGitBranches,
 		onSuccess: (branches) => {
 			queryClient.setQueryData(queryKeys.git.branches, branches);
+			void queryClient.invalidateQueries({ queryKey: queryKeys.git.status });
 		},
 	});
 	const refetchBranches = branchesQuery.refetch;
@@ -1414,13 +1371,6 @@ function gitStatusLabel(file: GitFileStatus, staged: boolean) {
 
 function diffStatusLabel(diff: DiffEntry) {
 	return diff.status === "added" ? "A" : diff.status === "deleted" ? "D" : "M";
-}
-
-function statusColor(status: string, conflict?: boolean) {
-	if (conflict) return "text-danger";
-	if (status === "A" || status === "?") return "text-success";
-	if (status === "D") return "text-danger";
-	return "text-warning";
 }
 
 function DiffMenuItem({

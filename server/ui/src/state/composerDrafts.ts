@@ -1,5 +1,6 @@
 import { ComposerDraft, type ComposerContent } from "./composerDraft.ts";
-import type { CenterTab } from "../mainLayout.ts";
+import { chatTabId, type CenterTab } from "../mainLayout.ts";
+import { migrateSessionKey } from "./sessionStore.ts";
 
 export type SavedDraft = {
 	tab: CenterTab;
@@ -24,13 +25,14 @@ const hasContent = (c: ComposerContent) =>
 		c.previousDraft?.images.length
 	);
 const contentOf = (draft: ComposerDraft): ComposerContent => {
-	const { text, files, images, editingQueueId, previousDraft } =
+	const { text, files, images, completions, editingQueueId, previousDraft } =
 		draft.getSnapshot();
 	return {
 		text,
 		files,
 		images,
 		editingQueueId,
+		...(completions?.length ? { completions } : {}),
 		...(previousDraft ? { previousDraft } : {}),
 	};
 };
@@ -41,6 +43,11 @@ function isDraftContent(value: unknown): boolean {
 	const content = value as Partial<ComposerContent> | null;
 	return (
 		typeof content?.text === "string" &&
+		(content.completions === undefined ||
+			(Array.isArray(content.completions) &&
+				content.completions.every(
+					(item) => item?.type === "simple" && typeof item.label === "string",
+				))) &&
 		Array.isArray(content.files) &&
 		content.files.every((path) => typeof path === "string") &&
 		Array.isArray(content.images) &&
@@ -71,6 +78,17 @@ function isSavedDraft(value: unknown): value is SavedDraft {
 	);
 }
 
+/** Tabs saved before chat URIs keyed sessions as `["backend","id"]`. */
+export function migrateTab(tab: CenterTab): CenterTab {
+	const sessionId = migrateSessionKey(tab.sessionId ?? "");
+	if (sessionId === (tab.sessionId ?? "")) return tab;
+	return {
+		...tab,
+		id: tab.id === chatTabId(tab.sessionId!) ? chatTabId(sessionId) : tab.id,
+		sessionId,
+	};
+}
+
 // Draft ownership outlives mounted panels and closed tabs. IndexedDB retains
 // attachments as well as text, without a synchronous multi-megabyte write on
 // every keystroke. One ordered writer prevents late saves resurrecting sends.
@@ -93,8 +111,9 @@ export class ComposerDrafts {
 				const records = recover
 					? (this.storage.recover?.() ?? [])
 					: await this.storage.read();
-				for (const record of records) {
-					if (!isSavedDraft(record)) continue;
+				for (const value of records) {
+					if (!isSavedDraft(value)) continue;
+					const record = { ...value, tab: migrateTab(value.tab) };
 					const saved = this.records.get(record.tab.id);
 					if (saved && saved.updated >= record.updated) continue;
 					this.records.set(record.tab.id, record);
@@ -174,6 +193,7 @@ export class ComposerDrafts {
 				content.text === previous.text &&
 				content.files === previous.files &&
 				content.images === previous.images &&
+				content.completions === previous.completions &&
 				content.previousDraft === previous.previousDraft &&
 				content.editingQueueId === previous.editingQueueId
 			)

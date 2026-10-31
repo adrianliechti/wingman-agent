@@ -77,6 +77,7 @@ type sessionEntry struct {
 	done    chan struct{}
 	session *Session
 	err     error
+	closed  []string // documents closed while the session starts
 }
 
 type sessionConnector func(context.Context, string, Server) (*Session, error)
@@ -349,11 +350,16 @@ func (m *Manager) startSession(project projectRoot, key string, entry *sessionEn
 	}
 	if err == nil {
 		for _, document := range openedDocuments {
-			if document.Path == "" {
+			m.mu.Lock()
+			closed := slices.Contains(entry.closed, document.Path)
+			m.mu.Unlock()
+			if document.Path == "" || closed {
 				continue
 			}
 			var syncErr error
-			if document.Saved {
+			if document.Editor {
+				_, syncErr = session.SyncEditorDocument(connectCtx, document.Path, document.Content, document.Saved)
+			} else if document.Saved {
 				_, syncErr = session.SaveDocument(connectCtx, document.Path, document.Content)
 			} else {
 				_, syncErr = session.SyncDocument(connectCtx, document.Path, document.Content)
@@ -381,6 +387,8 @@ func (m *Manager) startSession(project projectRoot, key string, entry *sessionEn
 		delete(m.sessions, key)
 	}
 	entry.err = err
+	closed := entry.closed
+	entry.closed = nil
 	close(entry.done)
 	m.mu.Unlock()
 	m.detectMu.Unlock()
@@ -388,6 +396,36 @@ func (m *Manager) startSession(project projectRoot, key string, entry *sessionEn
 	if err != nil && session != nil {
 		session.Close()
 	}
+	if err == nil {
+		for _, path := range closed {
+			_ = session.CloseDocument(connectCtx, path)
+		}
+	}
+}
+
+// CloseDocument ends an editor document's lifetime, also while its server is
+// stopped or restarting, so that a restart does not restore it.
+func (m *Manager) CloseDocument(ctx context.Context, filePath string) error {
+	project := m.findProject(filePath)
+	if project == nil {
+		return nil
+	}
+	m.mu.Lock()
+	entry := m.sessions[projectKey(*project)]
+	switch {
+	case entry == nil:
+	case entry.session == nil:
+		entry.closed = append(entry.closed, filePath)
+	case !entry.session.IsAlive():
+		// Under m.mu, so a restart's snapshot of open documents excludes it.
+		entry.session.forgetDocument(filePath)
+	default:
+		session := entry.session
+		m.mu.Unlock()
+		return session.CloseDocument(ctx, filePath)
+	}
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *Manager) ActiveSession(filePath string) (*Session, bool) {
@@ -403,6 +441,21 @@ func (m *Manager) ActiveSession(filePath string) (*Session, bool) {
 		return entry.session, true
 	}
 	return nil, false
+}
+
+// FilesChanged passes disk changes to every live session.
+func (m *Manager) FilesChanged(ctx context.Context, changes []FileChange) {
+	m.mu.Lock()
+	sessions := make([]*Session, 0, len(m.sessions))
+	for _, entry := range m.sessions {
+		if entry.session != nil && entry.session.IsAlive() {
+			sessions = append(sessions, entry.session)
+		}
+	}
+	m.mu.Unlock()
+	for _, session := range sessions {
+		_ = session.FilesChanged(ctx, changes)
+	}
 }
 
 func (m *Manager) Activities() []ServerActivity {

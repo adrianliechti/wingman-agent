@@ -103,7 +103,7 @@ func (s *Service) withLSPDocument(ctx context.Context, filePath string, content 
 
 func syncDocument(ctx context.Context, session *lsp.Session, filePath string, content *string) (string, error) {
 	if content != nil {
-		return session.SyncDocument(ctx, filePath, *content)
+		return session.SyncRequestDocument(ctx, filePath, *content)
 	}
 	return session.OpenDocument(ctx, filePath)
 }
@@ -118,11 +118,7 @@ func (s *Service) SyncDocument(ctx context.Context, filePath, content string, sa
 	if err != nil {
 		return err
 	}
-	if saved {
-		_, err = session.SaveDocument(ctx, filePath, content)
-	} else {
-		_, err = session.SyncDocument(ctx, filePath, content)
-	}
+	_, err = session.SyncEditorDocument(ctx, filePath, content, saved)
 	return err
 }
 
@@ -132,11 +128,7 @@ func (s *Service) CloseDocument(ctx context.Context, filePath string) error {
 	if s.closed {
 		return nil
 	}
-	session, ok := s.manager.ActiveSession(filePath)
-	if !ok {
-		return nil
-	}
-	return session.CloseDocument(ctx, filePath)
+	return s.manager.CloseDocument(ctx, filePath)
 }
 
 func (s *Service) Capabilities(ctx context.Context, filePath string) (lsp.ServerCapabilities, bool, error) {
@@ -163,6 +155,24 @@ func (s *Service) DocumentContent(filePath string) (string, bool) {
 		return "", false
 	}
 	return session.DocumentContent(filePath)
+}
+
+func (s *Service) FilesChanged(ctx context.Context, changes []lsp.FileChange) {
+	s.lifeMu.RLock()
+	defer s.lifeMu.RUnlock()
+	if !s.closed {
+		s.manager.FilesChanged(ctx, changes)
+	}
+}
+
+// VirtualContent reads a virtual document a language server returned.
+func (s *Service) VirtualContent(ctx context.Context, uri string) (string, error) {
+	s.lifeMu.RLock()
+	defer s.lifeMu.RUnlock()
+	if s.closed {
+		return "", fmt.Errorf("code intelligence service is closed")
+	}
+	return s.manager.VirtualContent(ctx, uri)
 }
 
 func (s *Service) Activities() []lsp.ServerActivity {

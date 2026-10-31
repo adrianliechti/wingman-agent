@@ -209,6 +209,48 @@ func Save(sessionsDir, id string, state harness.State) error {
 
 // Fork copies id's journal, not its sidecar artifacts, into newID; title defaults to "Fork of <source>".
 func Fork(sessionsDir, id, newID, title string) error {
+	return fork(sessionsDir, id, newID, title, "")
+}
+
+// ForkThrough forks history up to the next user input after inputID, so the
+// fork ends with that input's turn.
+func ForkThrough(sessionsDir, id, newID, title, inputID string) error {
+	if inputID == "" {
+		return fmt.Errorf("input id required")
+	}
+	return fork(sessionsDir, id, newID, title, inputID)
+}
+
+func cutThrough(events []harness.RuntimeEvent, inputID string) ([]harness.RuntimeEvent, bool) {
+	input := func(e harness.RuntimeEvent) string {
+		if e.Type == harness.EventMessage && e.Message != nil && e.Message.Role == harness.RoleUser {
+			return e.Message.InputID
+		}
+		return ""
+	}
+	start := slices.IndexFunc(events, func(e harness.RuntimeEvent) bool { return input(e) == inputID })
+	if start < 0 {
+		return nil, false
+	}
+	turn := ""
+	for i := start - 1; i >= 0 && turn == ""; i-- {
+		if events[i].Type == harness.EventTurnStarted {
+			turn = events[i].TurnID
+		}
+	}
+	ended := false
+	for i := start + 1; i < len(events); i++ {
+		// A steering input shares its turn; loading closes the cut turn as interrupted.
+		// A checkpoint after the turn, such as /compact, belongs to what follows.
+		if events[i].Type == harness.EventTurnStarted || input(events[i]) != "" && input(events[i]) != inputID || ended && events[i].Type == harness.EventContextCheckpoint {
+			return events[:i], true
+		}
+		ended = ended || events[i].Type == harness.EventTurnTerminal && turn != "" && events[i].TurnID == turn
+	}
+	return events, true
+}
+
+func fork(sessionsDir, id, newID, title, through string) error {
 	if sessionsDir == "" {
 		return fmt.Errorf("no sessions directory available")
 	}
@@ -230,6 +272,12 @@ func Fork(sessionsDir, id, newID, title string) error {
 		return err
 	}
 	events := loaded.session.State.Events
+	if through != "" {
+		var ok bool
+		if events, ok = cutThrough(events, through); !ok {
+			return fmt.Errorf("session %s has no input %s", id, through)
+		}
+	}
 	if len(events) == 0 {
 		return fmt.Errorf("session %s has no history to fork", id)
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -456,5 +457,38 @@ func TestForkTitleAndErrors(t *testing.T) {
 	}
 	if err := Fork(dir, "s1", "../escape", ""); err == nil {
 		t.Fatal("fork accepted an invalid session ID")
+	}
+}
+
+func TestForkThroughEndsWithTheInputsTurn(t *testing.T) {
+	dir := t.TempDir()
+	var events []harness.RuntimeEvent
+	add := func(e harness.RuntimeEvent) {
+		e.Sequence = uint64(len(events) + 1)
+		e.ID = "event-" + strconv.FormatUint(e.Sequence, 10)
+		e.At = time.Now().UTC()
+		events = append(events, e)
+	}
+	for _, input := range []string{"a", "b"} {
+		add(harness.RuntimeEvent{Type: harness.EventTurnStarted, TurnID: "turn-" + input})
+		add(harness.RuntimeEvent{Type: harness.EventMessage, Message: &harness.Message{Role: harness.RoleUser, InputID: input, Content: []harness.Content{{Text: "ask " + input}}}})
+		add(harness.RuntimeEvent{Type: harness.EventMessage, Message: &harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "answer " + input}}}})
+		add(harness.RuntimeEvent{Type: harness.EventTurnTerminal, TurnID: "turn-" + input, Terminal: &harness.RuntimeTerminal{Status: harness.RuntimeCompleted}})
+	}
+	if err := Save(dir, "s1", harness.State{Events: events}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ForkThrough(dir, "s1", "s2", "", "a"); err != nil {
+		t.Fatal(err)
+	}
+	forked, err := Load(dir, "s2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(forked.State.Messages) != 2 || forked.State.Messages[1].Content[0].Text != "answer a" {
+		t.Fatalf("forked messages = %+v", forked.State.Messages)
+	}
+	if err := ForkThrough(dir, "s1", "s3", "", "missing"); err == nil {
+		t.Fatal("fork through an unknown input succeeded")
 	}
 }

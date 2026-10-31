@@ -66,6 +66,8 @@ type TurnInput struct {
 	// A nil display denotes an older queue record and is normalized on read.
 	Display *TurnInputDisplay `json:"display,omitempty"`
 	Origin  string            `json:"origin,omitempty"`
+	// Compact runs compaction instead of a model turn; Content is its focus.
+	Compact bool `json:"compact,omitempty"`
 }
 
 type TurnInputDisplay struct {
@@ -130,7 +132,9 @@ type TurnEvent struct {
 	// Message is only valid for the duration of the synchronous event handler.
 	// Handlers that retain it must copy its content.
 	Message *harness.Message
-	Err     error
+	// Compaction is a compact input's result, reported before its terminal state.
+	Compaction *harness.CompactResult
+	Err        error
 	// Executed is true only for the primary input whose Agent.Send call ended.
 	// Steered and removed queued inputs also receive terminal states but must not
 	// trigger turn-finalization side effects such as checkpoints.

@@ -7,19 +7,25 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
-func (s *backendRuntime) buildInput(msg Command) []harness.Content {
+func (s *backendRuntime) buildInput(sessionID string, msg Command) []harness.Content {
 	var input []harness.Content
 	if msg.Text != "" {
 		input = append(input, harness.Content{Text: msg.Text})
-		for _, block := range s.skillBlocks(msg.Text) {
-			input = append(input, harness.Content{Text: block, Hidden: true})
+		if !s.isPromptCommand(sessionID, msg.Text) {
+			for _, block := range s.skillBlocks(msg.Text) {
+				input = append(input, harness.Content{Text: block, Hidden: true})
+			}
 		}
+	}
+	for _, text := range msg.Context {
+		input = append(input, harness.Content{Text: text, Hidden: true})
 	}
 	var rootPath string
 	if s.workspace != nil {
@@ -83,6 +89,14 @@ func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
 		c.state.Phase, c.state.Retry = "retrying", ev.Retry
 		c.publishStateLocked()
 		c.mu.Unlock()
+		return
+	}
+	if ev.Compaction != nil {
+		c := s.session(ev.SessionID)
+		c.mu.Lock()
+		c.compactedLocked(ev.InputID, *ev.Compaction)
+		c.mu.Unlock()
+		s.sendUsageIfChanged(ev.SessionID)
 		return
 	}
 	if ev.StreamEvent != 0 {
@@ -176,7 +190,6 @@ func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
 	switch ev.State {
 	case code.TurnInputActive:
 		s.setSessionPhase(ev.SessionID, "thinking")
-		s.broadcast(Frame{Type: EvtSessionsChanged})
 	case code.TurnInputFailed:
 		if ev.Err != nil && !errors.Is(ev.Err, context.Canceled) {
 			s.sendSession(ev.SessionID, Frame{Type: EvtError, Message: ev.Err.Error()})
@@ -205,13 +218,12 @@ func (s *backendRuntime) finalizeTurn(sid string) {
 	s.flushFiles()
 
 	if ws != nil && ws.HasLSP() {
-		s.broadcast(Frame{Type: EvtDiagnosticsChanged})
+		s.refreshDiagnostics()
 	}
 
 	// Persistence belongs to the backend's journal, including partial and
 	// interrupted turns. Web finalization only refreshes resource projections.
 	if len(a.Messages(sid)) > 0 {
-		s.broadcast(Frame{Type: EvtSessionsChanged})
 	}
 
 }
@@ -246,7 +258,6 @@ func (s *backendRuntime) sendTurnSnapshot(sessionID string) {
 		queue = append(queue, turnQueueEntry(input.Input, input.State, input.Position))
 	}
 	c.state.PendingInputs = queue
-	c.state.QueuePaused = snapshot.Paused
 	c.state.CanSteer = snapshot.Features.Steer
 	if snapshot.Error != nil {
 		message := snapshot.Error.Error()
@@ -263,27 +274,19 @@ func (s *backendRuntime) sendTurnSnapshot(sessionID string) {
 	c.publishStateLocked()
 }
 
-func (s *backendRuntime) finishCompaction(sessionID string, result harness.CompactResult, err error) {
-	c := s.session(sessionID)
-	c.mu.Lock()
-	if c.state.Status != "deleted" {
-		switch {
-		case errors.Is(err, context.Canceled):
-		case err != nil:
-			message := err.Error()
-			c.state.Error = &message
-		default:
-			c.state.Compaction = &CompactionView{TokensBefore: result.TokensBefore, TokensAfter: result.TokensAfter}
-		}
-	}
-	c.mu.Unlock()
-	s.sendUsageIfChanged(sessionID)
-	s.sendTurnSnapshot(sessionID)
+// isCompactCommand recognizes "/compact [focus]", which runs as a compaction turn.
+func isCompactCommand(text string) bool {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(text), "/compact")
+	return ok && (rest == "" || rest[0] == ' ' || rest[0] == '\n')
+}
+
+func compactFocus(text string) string {
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "/compact"))
 }
 
 func turnQueueEntry(input code.TurnInput, state code.TurnInputState, position int) TurnQueueEntry {
 	display := visibleInput(code.CloneTurnInput(input))
-	return TurnQueueEntry{ID: input.ID, State: string(state), Intent: string(input.Intent), Position: position, Text: display.Text, Files: display.Files, Images: display.Images, Origin: input.Origin}
+	return TurnQueueEntry{ID: input.ID, State: string(state), Intent: string(input.Intent), Position: position, Text: display.Text, Files: display.Files, Images: display.Images, Origin: input.Origin, Compact: input.Compact}
 }
 
 func (s *backendRuntime) sendUsageIfChanged(sessionID string) {

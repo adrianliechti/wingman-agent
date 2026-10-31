@@ -10,8 +10,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	acpsdk "github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 const (
@@ -156,7 +157,7 @@ func hasJSONValue(raw json.RawMessage) bool {
 
 type approver struct {
 	ctx            context.Context
-	conn           *acpsdk.AgentSideConnection
+	conn           acp.ClientConnection
 	sid            acpsdk.SessionId
 	out            *streamWriter
 	cwd            string

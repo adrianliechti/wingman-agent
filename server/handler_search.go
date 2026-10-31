@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -19,6 +21,7 @@ import (
 )
 
 const (
+	maxWorkspaceSearches        = 8
 	defaultWorkspaceSearchLimit = 20000
 	maxWorkspaceSearchLimit     = 20000
 	maxWorkspaceSearchFileSize  = 5 << 20
@@ -68,24 +71,11 @@ type workspaceSearchConfig struct {
 	limit   int
 }
 
-func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
-	var request workspaceSearchRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
-	if err := decoder.Decode(&request); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
-		return
-	}
-
+func (s *Server) searchWorkspace(ctx context.Context, request workspaceSearchRequest, emit func(workspaceSearchEvent) error) error {
 	config, err := newWorkspaceSearchConfig(request)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		return err
 	}
-
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	w.Header().Set("Cache-Control", "no-store")
-	encoder := json.NewEncoder(w)
-	flusher, _ := w.(http.Flusher)
 	fys := s.workspace.Root.FS()
 	ignore := newWorkspaceSearchIgnore(fys)
 	files, matches := 0, 0
@@ -95,7 +85,7 @@ func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
 		if walkErr != nil {
 			return nil
 		}
-		if err := r.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if entry.Type()&fs.ModeSymlink != 0 {
@@ -135,7 +125,7 @@ func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
 		if more || matches >= config.limit {
 			truncated = true
 		}
-		if err := encoder.Encode(workspaceSearchEvent{
+		if err := emit(workspaceSearchEvent{
 			Type: "file",
 			File: &workspaceSearchFile{
 				Path:     filepath.ToSlash(filePath),
@@ -145,18 +135,15 @@ func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
 		}); err != nil {
 			return err
 		}
-		if flusher != nil {
-			flusher.Flush()
-		}
 		if matches >= config.limit {
 			return fs.SkipAll
 		}
 		return nil
 	})
 	if err != nil {
-		return
+		return err
 	}
-	_ = encoder.Encode(workspaceSearchEvent{
+	return emit(workspaceSearchEvent{
 		Type:      "done",
 		Files:     files,
 		Matches:   matches,
@@ -386,4 +373,51 @@ func workspaceSearchDomain(dir string) []string {
 		return nil
 	}
 	return strings.Split(filepath.ToSlash(dir), "/")
+}
+
+// handleWorkspaceSearch streams matching files as NDJSON; aborting the request
+// cancels the search.
+func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
+	var request workspaceSearchRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		http.Error(w, "invalid search request", http.StatusBadRequest)
+		return
+	}
+	if _, err := newWorkspaceSearchConfig(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if s.searches.Add(1) > maxWorkspaceSearches {
+		s.searches.Add(-1)
+		http.Error(w, "too many searches", http.StatusTooManyRequests)
+		return
+	}
+	defer s.searches.Add(-1)
+	deadline := time.Now().Add(time.Minute)
+	ctx, cancel := context.WithDeadline(r.Context(), deadline)
+	defer cancel()
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	encoder, flush := json.NewEncoder(w), http.NewResponseController(w)
+	// A client that stops reading would otherwise hold its search slot forever.
+	_ = flush.SetWriteDeadline(deadline)
+	defer flush.SetWriteDeadline(time.Time{})
+	var summary workspaceSearchEvent
+	err := s.searchWorkspace(ctx, request, func(event workspaceSearchEvent) error {
+		if event.Type == "done" {
+			summary = event
+			return nil
+		}
+		if err := encoder.Encode(event); err != nil {
+			return err
+		}
+		return flush.Flush()
+	})
+	if err != nil {
+		_ = encoder.Encode(map[string]string{"type": "error", "message": err.Error()})
+		return
+	}
+	_ = encoder.Encode(map[string]any{"type": "done", "files": summary.Files, "matches": summary.Matches, "truncated": summary.Truncated})
 }
