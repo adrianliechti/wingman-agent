@@ -593,3 +593,28 @@ test("queued messages are numbered from one in the order they are shown", () => 
 			`positions follow the displayed order: ${JSON.stringify(inputs.map((input) => [input.id, input.position]))}`,
 		);
 });
+
+test("a turn the host started itself shows its response without a user message", () => {
+	const projection = new AHPSessionProjection();
+	const chat = reviewRun([], {
+		resource: reviewChatURI,
+		title: "Review",
+		status: 1,
+		modifiedAt: "",
+		turns: [
+			{
+				id: "task",
+				message: { text: "", origin: { kind: "systemNotification" } },
+				responseParts: [
+					{ kind: "markdown", id: "task-m", content: "Task finished" },
+				],
+				state: "complete",
+			},
+		],
+	});
+	const view = projection.project(reviewChatURI, reviewSession, chat, 1);
+	assert.deepEqual(
+		view.entries.map((entry) => [entry.type, entry.content]),
+		[["assistant", "Task finished"]],
+	);
+});

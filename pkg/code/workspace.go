@@ -83,6 +83,7 @@ type Workspace struct {
 	warmed           bool
 	debugRegistry    *debugadapter.Registry
 	mcpToolsByServer map[string][]tool.Tool
+	mcpApproval      *tool.Elicitation
 	lspTools         []tool.Tool
 
 	mcpCatalogOnce    sync.Once
@@ -571,10 +572,18 @@ func (w *Workspace) DebugRegistry() *debugadapter.Registry {
 	return debugadapter.NewRegistry(manager)
 }
 
+// SetMCPApproval must run before InitMCP: tools capture the approver when listed.
+func (w *Workspace) SetMCPApproval(elicit *tool.Elicitation) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.mcpApproval = elicit
+}
+
 func (w *Workspace) InitMCP(ctx context.Context, ui ...UI) error {
 	w.mu.RLock()
 	manager := w.MCP
 	closed := w.closed
+	approval := w.mcpApproval
 	w.mu.RUnlock()
 	if manager == nil || closed {
 		return nil
@@ -606,7 +615,7 @@ func (w *Workspace) InitMCP(ctx context.Context, ui ...UI) error {
 	toolsErrs := []error{connectErr}
 	for _, serverName := range slices.Sorted(maps.Keys(sessions)) {
 		session := sessions[serverName]
-		tools, err := mcptool.ToolsForServer(ctx, serverName, session)
+		tools, err := mcptool.ToolsForServer(ctx, serverName, session, approval)
 		if err != nil {
 			toolsErrs = append(toolsErrs, fmt.Errorf("list MCP tools from %s: %w", serverName, err))
 			continue
@@ -675,8 +684,11 @@ func (w *Workspace) refreshMCPServerTools(ctx context.Context, manager *mcp.Mana
 	if session == nil {
 		return
 	}
+	w.mu.RLock()
+	approval := w.mcpApproval
+	w.mu.RUnlock()
 
-	tools, err := mcptool.ToolsForServer(ctx, serverName, session)
+	tools, err := mcptool.ToolsForServer(ctx, serverName, session, approval)
 	if err != nil {
 		if ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to refresh tools from MCP server %s: %v\n", serverName, err)

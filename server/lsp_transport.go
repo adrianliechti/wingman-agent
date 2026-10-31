@@ -25,7 +25,21 @@ type lspBuffer struct {
 	path    string
 	text    string
 	version int
+	saved   bool
 }
+
+// lspDocument is the language server's single copy of a file that several
+// connections may have open; mu orders its synchronization.
+type lspDocument struct {
+	mu      sync.Mutex
+	owners  map[*lspConnection]struct{} // guarded by Server.lspDocumentsMu
+	writer  *lspConnection              // whose buffer the language server has
+	changes uint64                      // counts writer switches
+}
+
+// lspQueueLimit bounds the bytes waiting behind a slow document notification.
+const lspQueueLimit = 128 << 20
+
 type lspConnection struct {
 	*editorSocket
 	server    *Server
@@ -55,103 +69,97 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 	// Document notifications are processed in receive order. Requests begin only
 	// after preceding changes have been applied; cancellation never queues behind
 	// a slow language server.
-	type task struct {
-		ahpRequest
-		ctx  context.Context
-		done func()
-	}
-	queue := make(chan task, 128)
+	queue := &lspQueue{ready: make(chan struct{}, 1)}
 	go func() {
 		defer c.releaseDocuments()
 		initialized, shutdown := false, false
 		for {
-			select {
-			case <-peer.ctx.Done():
+			job, ok := queue.pop(peer.ctx)
+			if !ok {
 				return
-			case job := <-queue:
-				request := job.ahpRequest
-				ctx, done := job.ctx, job.done
-				if request.Method == "initialize" {
-					done()
-					if initialized {
-						peer.reply(request.ID, nil, &ahpRPCError{Code: -32600, Message: "already initialized"})
-						continue
-					}
-					initialized = true
-					var params struct {
-						Capabilities struct {
-							Workspace struct {
-								Diagnostics struct {
-									RefreshSupport bool `json:"refreshSupport"`
-								} `json:"diagnostics"`
-							} `json:"workspace"`
-						} `json:"capabilities"`
-					}
-					if json.Unmarshal(request.Params, &params) == nil && params.Capabilities.Workspace.Diagnostics.RefreshSupport {
-						s.lspDocumentsMu.Lock()
-						if s.lspRefreshers == nil {
-							s.lspRefreshers = map[*lspConnection]struct{}{}
-						}
-						s.lspRefreshers[c] = struct{}{}
-						s.lspDocumentsMu.Unlock()
-					}
-					peer.reply(request.ID, map[string]any{"serverInfo": map[string]any{"name": "Wingman"}, "capabilities": c.capabilities()}, nil)
-					continue
-				}
-				if request.Method == "exit" {
-					peer.cancel()
-					return
-				}
-				if !initialized {
-					done()
-					peer.reply(request.ID, nil, &ahpRPCError{Code: -32002, Message: "language connection is not initialized"})
-					continue
-				}
-				if shutdown {
-					done()
-					peer.reply(request.ID, nil, &ahpRPCError{Code: -32600, Message: "language connection is shut down"})
-					continue
-				}
-				if request.Method == "initialized" {
-					done()
-					peer.reply(request.ID, nil, &ahpRPCError{Code: -32600, Message: "initialized is a notification"})
-					continue
-				}
-				if request.Method == "shutdown" {
-					done()
-					shutdown = true
-					peer.reply(request.ID, nil, nil)
-					continue
-				}
-				if len(request.ID) == 0 {
-					if err := c.documentNotification(request.Method, request.Params); err != nil {
-						peer.notify("window/logMessage", map[string]any{"type": 1, "message": err.Error()})
-					}
-					continue
-				}
-				if err := ctx.Err(); err != nil {
-					done()
-					peer.reply(request.ID, nil, err)
-					continue
-				}
-				// Capture buffers before the next notification is processed.
-				c.mu.Lock()
-				buffers := make(map[string]lspBuffer, len(c.documents))
-				for uri, doc := range c.documents {
-					buffers[uri] = doc
-				}
-				c.mu.Unlock()
-				go func() {
-					defer done()
-					result, err := c.request(ctx, request, buffers)
-					if err == nil && result != nil {
-						var data []byte
-						data, err = lsp.Marshal(result)
-						result = json.RawMessage(data)
-					}
-					peer.reply(request.ID, result, editorRequestError(ctx, err))
-				}()
 			}
+			request := job.ahpRequest
+			ctx, done := job.ctx, job.done
+			if request.Method == "initialize" {
+				done()
+				if initialized {
+					peer.reply(request.ID, nil, &ahpRPCError{Code: -32600, Message: "already initialized"})
+					continue
+				}
+				initialized = true
+				var params struct {
+					Capabilities struct {
+						Workspace struct {
+							Diagnostics struct {
+								RefreshSupport bool `json:"refreshSupport"`
+							} `json:"diagnostics"`
+						} `json:"workspace"`
+					} `json:"capabilities"`
+				}
+				if json.Unmarshal(request.Params, &params) == nil && params.Capabilities.Workspace.Diagnostics.RefreshSupport {
+					s.lspDocumentsMu.Lock()
+					if s.lspRefreshers == nil {
+						s.lspRefreshers = map[*lspConnection]struct{}{}
+					}
+					s.lspRefreshers[c] = struct{}{}
+					s.lspDocumentsMu.Unlock()
+				}
+				peer.reply(request.ID, map[string]any{"serverInfo": map[string]any{"name": "Wingman"}, "capabilities": c.capabilities()}, nil)
+				continue
+			}
+			if request.Method == "exit" {
+				peer.cancel()
+				return
+			}
+			if !initialized {
+				done()
+				peer.reply(request.ID, nil, &ahpRPCError{Code: -32002, Message: "language connection is not initialized"})
+				continue
+			}
+			if shutdown {
+				done()
+				peer.reply(request.ID, nil, &ahpRPCError{Code: -32600, Message: "language connection is shut down"})
+				continue
+			}
+			if request.Method == "initialized" {
+				done()
+				peer.reply(request.ID, nil, &ahpRPCError{Code: -32600, Message: "initialized is a notification"})
+				continue
+			}
+			if request.Method == "shutdown" {
+				done()
+				shutdown = true
+				peer.reply(request.ID, nil, nil)
+				continue
+			}
+			if len(request.ID) == 0 {
+				if err := c.documentNotification(request.Method, request.Params); err != nil {
+					peer.notify("window/logMessage", map[string]any{"type": 1, "message": err.Error()})
+				}
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				done()
+				peer.reply(request.ID, nil, editorRequestError(ctx, err))
+				continue
+			}
+			// Capture buffers before the next notification is processed.
+			c.mu.Lock()
+			buffers := make(map[string]lspBuffer, len(c.documents))
+			for uri, doc := range c.documents {
+				buffers[uri] = doc
+			}
+			c.mu.Unlock()
+			go func() {
+				defer done()
+				result, err := c.request(ctx, request, buffers)
+				if err == nil && result != nil {
+					var data []byte
+					data, err = lsp.Marshal(result)
+					result = json.RawMessage(data)
+				}
+				peer.reply(request.ID, result, editorRequestError(ctx, err))
+			}()
 		}
 	}()
 	for {
@@ -163,16 +171,15 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 			peer.reply(json.RawMessage("null"), nil, &ahpRPCError{Code: -32700, Message: "parse error"})
 			continue
 		}
-		var request ahpRequest
-		if json.Unmarshal(data, &request) != nil || request.JSONRPC != "2.0" || !validLSPID(request.ID) || request.Method == "" && len(request.ID) == 0 {
-			id := json.RawMessage("null")
-			if len(request.ID) > 0 && validLSPID(request.ID) {
-				id = request.ID
-			}
-			peer.reply(id, nil, &ahpRPCError{Code: -32600, Message: "invalid JSON-RPC message"})
-			continue
+		var message struct {
+			ahpRequest
+			Result json.RawMessage `json:"result"`
+			Error  json.RawMessage `json:"error"`
 		}
-		if request.Method == "" {
+		decodeErr := json.Unmarshal(data, &message)
+		request := message.ahpRequest
+		if decodeErr == nil && request.Method == "" && (len(request.ID) > 0 || message.Result != nil || message.Error != nil) {
+			// Responses, even malformed ones, are never answered.
 			c.mu.Lock()
 			ch := c.replies[string(request.ID)]
 			c.mu.Unlock()
@@ -184,6 +191,14 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
+		if decodeErr != nil || request.JSONRPC != "2.0" || !validLSPID(request.ID) || request.Method == "" {
+			id := json.RawMessage("null")
+			if len(request.ID) > 0 && validLSPID(request.ID) {
+				id = request.ID
+			}
+			peer.reply(id, nil, &ahpRPCError{Code: -32600, Message: "invalid JSON-RPC message"})
+			continue
+		}
 		if request.Method == "$/cancelRequest" {
 			var p struct {
 				ID json.RawMessage `json:"id"`
@@ -192,7 +207,18 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 			peer.cancelRequest(string(p.ID))
 			continue
 		}
-		job := task{ahpRequest: request, ctx: peer.ctx, done: func() {}}
+		job := lspTask{ahpRequest: request, ctx: peer.ctx, done: func() {}, size: len(data)}
+		if len(request.ID) == 0 && request.Method == "textDocument/didChange" {
+			var p struct {
+				TextDocument struct {
+					URI     string `json:"uri"`
+					Version int    `json:"version"`
+				} `json:"textDocument"`
+			}
+			if json.Unmarshal(request.Params, &p) == nil {
+				job.change, job.version = p.TextDocument.URI, p.TextDocument.Version
+			}
+		}
 		if len(request.ID) > 0 {
 			timeout := 2 * time.Minute
 			if request.Method == "workspace/executeCommand" {
@@ -205,13 +231,65 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 			}
 			job.ctx, job.done = ctx, done
 		}
-		select {
-		case queue <- job:
-		case <-peer.ctx.Done():
-			return
-		default:
+		if !queue.push(job) {
 			peer.cancel()
 			return
+		}
+	}
+}
+
+type lspTask struct {
+	ahpRequest
+	ctx     context.Context
+	done    func()
+	size    int
+	change  string // document of a didChange notification
+	version int
+}
+
+// lspQueue holds messages waiting behind a document notification. Consecutive
+// full-text changes to one document collapse into the newest, so typing while
+// a language server starts does not grow it.
+type lspQueue struct {
+	mu    sync.Mutex
+	jobs  []lspTask
+	bytes int
+	ready chan struct{}
+}
+
+func (q *lspQueue) push(job lspTask) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if n := len(q.jobs); n > 0 && job.change != "" && q.jobs[n-1].change == job.change && job.version > q.jobs[n-1].version {
+		q.bytes -= q.jobs[n-1].size
+		q.jobs[n-1] = job
+	} else {
+		q.jobs = append(q.jobs, job)
+	}
+	q.bytes += job.size
+	select {
+	case q.ready <- struct{}{}:
+	default:
+	}
+	return q.bytes <= lspQueueLimit
+}
+
+func (q *lspQueue) pop(ctx context.Context) (lspTask, bool) {
+	for {
+		q.mu.Lock()
+		if len(q.jobs) > 0 && ctx.Err() == nil {
+			job := q.jobs[0]
+			q.jobs[0] = lspTask{}
+			q.jobs = q.jobs[1:]
+			q.bytes -= job.size
+			q.mu.Unlock()
+			return job, true
+		}
+		q.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return lspTask{}, false
+		case <-q.ready:
 		}
 	}
 }
@@ -283,8 +361,9 @@ func (c *lspConnection) documentNotification(method string, raw json.RawMessage)
 		c.mu.Lock()
 		doc, exists := c.documents[uri]
 		delete(c.documents, uri)
+		_, aliased := c.buffer(doc.path)
 		c.mu.Unlock()
-		if exists {
+		if exists && !aliased {
 			// The file may have been deleted or renamed since didOpen.
 			return c.releaseDocument(doc.path)
 		}
@@ -334,21 +413,81 @@ func (c *lspConnection) documentNotification(method string, raw json.RawMessage)
 		c.mu.Unlock()
 		return nil
 	}
+	doc.saved = saved
 	c.documents[uri] = doc
 	c.mu.Unlock()
 	s := c.server
 	s.lspDocumentsMu.Lock()
 	if s.lspDocuments == nil {
-		s.lspDocuments = map[string]map[*lspConnection]struct{}{}
+		s.lspDocuments = map[string]*lspDocument{}
 	}
-	if s.lspDocuments[path] == nil {
-		s.lspDocuments[path] = map[*lspConnection]struct{}{}
+	shared := s.lspDocuments[path]
+	if shared == nil {
+		shared = &lspDocument{owners: map[*lspConnection]struct{}{}}
+		s.lspDocuments[path] = shared
 	}
-	s.lspDocuments[path][c] = struct{}{}
+	shared.owners[c] = struct{}{}
 	s.lspDocumentsMu.Unlock()
 	// This connection's queue keeps updates ordered while a cold language
-	// server starts; no gateway lock is held across that wait.
-	return s.workspace.SyncEditorDocument(c.ctx, path, doc.text, saved)
+	// server starts; only this document waits.
+	shared.mu.Lock()
+	defer shared.mu.Unlock()
+	return c.syncShared(c.ctx, shared, path)
+}
+
+// buffer finds this connection's buffer of a file; c.mu must be held.
+func (c *lspConnection) buffer(path string) (lspBuffer, bool) {
+	for _, doc := range c.documents {
+		if doc.path == path {
+			return doc, true
+		}
+	}
+	return lspBuffer{}, false
+}
+
+// syncShared gives the language server this connection's current buffer of
+// path; shared.mu must be held.
+func (c *lspConnection) syncShared(ctx context.Context, shared *lspDocument, path string) error {
+	c.mu.Lock()
+	doc, ok := c.buffer(path)
+	c.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	if shared.writer != c {
+		shared.writer = c
+		shared.changes++
+	}
+	if err := c.server.workspace.SyncEditorDocument(ctx, path, doc.text, doc.saved); err != nil {
+		shared.writer = nil
+		return err
+	}
+	return nil
+}
+
+// claimDocument makes the language server use this connection's buffer of path
+// for a request. The returned check reports whether it still does.
+func (c *lspConnection) claimDocument(ctx context.Context, path string) (func() bool, error) {
+	s := c.server
+	s.lspDocumentsMu.Lock()
+	shared := s.lspDocuments[path]
+	s.lspDocumentsMu.Unlock()
+	if shared == nil {
+		return nil, nil
+	}
+	shared.mu.Lock()
+	defer shared.mu.Unlock()
+	if shared.writer != c {
+		if err := c.syncShared(ctx, shared, path); err != nil {
+			return nil, err
+		}
+	}
+	changes := shared.changes
+	return func() bool {
+		shared.mu.Lock()
+		defer shared.mu.Unlock()
+		return shared.changes == changes
+	}, nil
 }
 
 func (c *lspConnection) applyEdit(ctx context.Context, origin json.RawMessage, label string, edit any) (bool, error) {
@@ -380,27 +519,62 @@ func (c *lspConnection) applyEdit(ctx context.Context, origin json.RawMessage, l
 	}
 }
 
+// releaseDocument closes the language server's document when its last owner
+// leaves, or restores a remaining owner's buffer in place of this one.
 func (c *lspConnection) releaseDocument(path string) error {
 	s := c.server
 	s.lspDocumentsMu.Lock()
-	defer s.lspDocumentsMu.Unlock()
-	owners := s.lspDocuments[path]
-	delete(owners, c)
-	if len(owners) != 0 {
+	shared := s.lspDocuments[path]
+	s.lspDocumentsMu.Unlock()
+	if shared == nil {
 		return nil
 	}
-	delete(s.lspDocuments, path)
+	shared.mu.Lock()
+	defer shared.mu.Unlock()
+	s.lspDocumentsMu.Lock()
+	delete(shared.owners, c)
+	_, current := shared.owners[shared.writer]
+	owners := make([]*lspConnection, 0, len(shared.owners))
+	for owner := range shared.owners {
+		owners = append(owners, owner)
+	}
+	s.lspDocumentsMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return s.workspace.CloseEditorDocument(ctx, path)
+	if len(owners) > 0 {
+		for _, owner := range owners {
+			if current {
+				break
+			}
+			if err := owner.syncShared(ctx, shared, path); err != nil {
+				return err
+			}
+			current = shared.writer == owner
+		}
+		return nil
+	}
+	shared.writer = nil
+	err := s.workspace.CloseEditorDocument(ctx, path)
+	// The entry stays registered during the close so a new owner waits for it.
+	s.lspDocumentsMu.Lock()
+	if len(shared.owners) == 0 && s.lspDocuments[path] == shared {
+		delete(s.lspDocuments, path)
+	}
+	s.lspDocumentsMu.Unlock()
+	return err
 }
+
 func (c *lspConnection) releaseDocuments() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	paths := map[string]bool{}
 	for _, doc := range c.documents {
-		_ = c.releaseDocument(doc.path)
+		paths[doc.path] = true
 	}
 	clear(c.documents)
+	c.mu.Unlock()
+	for path := range paths {
+		_ = c.releaseDocument(path)
+	}
 }
 
 // refreshDiagnostics asks clients to pull diagnostics again (LSP

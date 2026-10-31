@@ -93,6 +93,16 @@ test(
 		await ahp.ready();
 		const vscode = await peer("vscode-test");
 		t.after(() => vscode.shutdown());
+		await t.test("TypeScript files open as editable source", async (t) => {
+			const path = "review-source.ts";
+			const content = "export const answer: number = 42;\n";
+			await browser.files.create(path, { content });
+			t.after(() => browser.files.delete(path));
+			const file = await browser.files.read(path);
+			assert.equal(file.content, content);
+			assert.equal(file.language, "typescript");
+			assert.notEqual(file.binary, true);
+		});
 		await t.test(
 			"standard resources and browser file facade preserve content and conflicts",
 			async () => {

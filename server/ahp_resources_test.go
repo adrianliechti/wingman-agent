@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"mime"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,6 +12,49 @@ import (
 
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
+
+func TestAHPResourceContentTypeDistinguishesTextFromMedia(test *testing.T) {
+	// Simulate an OS mapping .ts to MPEG video without changing the process's
+	// real .ts mapping or depending on a particular host MIME database.
+	const extension = ".wingman-review-video"
+	if err := mime.AddExtensionType(extension, "video/mp2t"); err != nil {
+		test.Fatal(err)
+	}
+	_, host, root := reviewWorkspaceResourceHost(test)
+	for _, tt := range []struct {
+		name, content, contentType string
+		encoding                   t.ContentEncoding
+	}{
+		{"source" + extension, "export const greeting = '世界';\n", "text/plain; charset=utf-8", t.ContentEncodingUtf8},
+		{"empty" + extension, "", "text/plain; charset=utf-8", t.ContentEncodingUtf8},
+		{"stream" + extension, "G\x00\x10\xffbinary", "video/mp2t", t.ContentEncodingBase64},
+		{"image.png", "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR", "image/png", t.ContentEncodingBase64},
+		{"vector.svg", `<svg xmlns="http://www.w3.org/2000/svg"></svg>`, "image/svg+xml", t.ContentEncodingUtf8},
+		{"data.json", `{"answer":42}`, "application/json", t.ContentEncodingUtf8},
+	} {
+		test.Run(tt.name, func(test *testing.T) {
+			if err := os.WriteFile(filepath.Join(root, tt.name), []byte(tt.content), 0o600); err != nil {
+				test.Fatal(err)
+			}
+			uri := host.fileURI(tt.name)
+			resolved, err := reviewWorkspaceResourceCall(host, "resourceResolve", map[string]any{"uri": uri})
+			if err != nil {
+				test.Fatal(err)
+			}
+			metadata := resolved.(t.ResourceResolveResult)
+			if metadata.ContentType == nil || *metadata.ContentType != tt.contentType {
+				test.Fatalf("metadata = %+v, want contentType %q", metadata, tt.contentType)
+			}
+			read, err := reviewWorkspaceResourceCall(host, "resourceRead", map[string]any{"uri": uri})
+			if err != nil {
+				test.Fatal(err)
+			}
+			if result := read.(t.ResourceReadResult); result.Encoding != tt.encoding {
+				test.Fatalf("encoding = %q, want %q", result.Encoding, tt.encoding)
+			}
+		})
+	}
+}
 
 func TestAHPResourcesPreserveFileSemantics(test *testing.T) {
 	root := test.TempDir()

@@ -59,6 +59,7 @@ type Manager struct {
 	resolved         map[int]ResolvedBreakpoint
 	exceptionFilters []string
 	exceptionsSet    bool
+	exceptionsAt     uint64
 	plans            map[string]reviewedPlan
 	closed           bool
 }
@@ -269,10 +270,10 @@ func (m *Manager) Start(ctx context.Context, options StartOptions) (*Session, er
 			defer m.mu.Unlock()
 			return m.combinedBreakpointsLocked(planned)
 		},
-		exceptionFilters: func() ([]string, bool) {
+		exceptionFilters: func() ([]string, bool, uint64) {
 			m.mu.Lock()
 			defer m.mu.Unlock()
-			return slices.Clone(m.exceptionFilters), m.exceptionsSet
+			return slices.Clone(m.exceptionFilters), m.exceptionsSet, m.exceptionsAt
 		},
 		breakpointID: func(path string, line, column int) int {
 			m.mu.Lock()
@@ -370,15 +371,16 @@ func (m *Manager) combinedBreakpointsLocked(planned map[string][]SourceBreakpoin
 	return combined, m.breakpointsAt
 }
 
-// resyncBreakpoints sends edits made after the session read the editor's
-// breakpoints during configuration but before it became the active session.
+// resyncBreakpoints sends breakpoint and exception filter edits made after the
+// session configured but before it became the active session.
 func (m *Manager) resyncBreakpoints(ctx context.Context, session *Session) {
 	m.breakpointMu.Lock()
 	defer m.breakpointMu.Unlock()
 	session.mu.Lock()
-	since := session.configured
+	since, exceptionsSince := session.configured, session.exceptionsAt
 	session.mu.Unlock()
 	m.mu.Lock()
+	filters, exceptionsChanged := slices.Clone(m.exceptionFilters), m.exceptionsAt != exceptionsSince
 	var paths []string
 	for path, edited := range m.breakpointEdits {
 		if edited > since {
@@ -395,6 +397,9 @@ func (m *Manager) resyncBreakpoints(ctx context.Context, session *Session) {
 		if resolved, err := session.SetBreakpoints(ctx, path, values[index]); err == nil {
 			m.publishResolved(path, values[index], resolved)
 		}
+	}
+	if exceptionsChanged {
+		_ = session.SetExceptionBreakpoints(ctx, filters)
 	}
 }
 
@@ -861,8 +866,11 @@ func (m *Manager) SetBreakpoints(ctx context.Context, path string, values []Sour
 // SetExceptionBreakpoints selects exception filters for the current and
 // future sessions; until called, sessions use the adapter's defaults.
 func (m *Manager) SetExceptionBreakpoints(ctx context.Context, filters []string) error {
+	m.breakpointMu.Lock()
+	defer m.breakpointMu.Unlock()
 	m.mu.Lock()
 	m.exceptionFilters, m.exceptionsSet = slices.Clone(filters), true
+	m.exceptionsAt++
 	session := m.session
 	m.mu.Unlock()
 	if session == nil || session.Status().State == StateTerminated {

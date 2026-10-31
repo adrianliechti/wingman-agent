@@ -46,6 +46,7 @@ type outputBuffer struct {
 	end     int64
 	trimmed bool
 	changed chan struct{}
+	partial map[string]string // an incomplete trailing UTF-8 sequence per category
 }
 
 type terminalBinding struct {
@@ -67,6 +68,18 @@ func (buffer *outputBuffer) append(category, value string) {
 	}
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
+	// Byte-chunked streams can split a character; offsets must count it once.
+	value = buffer.partial[category] + value
+	delete(buffer.partial, category)
+	if cut := incompleteSuffix(value); cut < len(value) {
+		if buffer.partial == nil {
+			buffer.partial = map[string]string{}
+		}
+		buffer.partial[category], value = value[cut:], value[:cut]
+	}
+	if value == "" {
+		return
+	}
 	if buffer.changed != nil {
 		close(buffer.changed)
 		buffer.changed = nil
@@ -136,6 +149,19 @@ func (buffer *outputBuffer) changes() <-chan struct{} {
 	return buffer.changed
 }
 
+// incompleteSuffix returns where an unfinished trailing UTF-8 sequence starts.
+func incompleteSuffix(value string) int {
+	for index := len(value) - 1; index >= 0 && index >= len(value)-utf8.UTFMax; index-- {
+		if utf8.RuneStart(value[index]) {
+			if !utf8.FullRuneInString(value[index:]) {
+				return index
+			}
+			break
+		}
+	}
+	return len(value)
+}
+
 func utf16Length(value string) int64 {
 	var length int64
 	for _, r := range value {
@@ -176,9 +202,12 @@ type Session struct {
 	child        *Session // the focused child; requests without an id go here
 	children     []*Session
 	childRoutes  childRoutes
+	presented    presentedChild
 	breakpoints  map[string][]SourceBreakpoint
 	adapterIDs   map[int]breakpointRef
 	configured   uint64 // editor breakpoint version applied during configuration
+	exceptionsAt uint64 // editor exception filter version applied during configuration
+	editVersion  uint64 // version of breakpoints, which children configure from
 	functions    []FunctionBreakpoint
 	preLaunch    *debugProcess
 	stateVersion uint64
@@ -195,8 +224,16 @@ type Session struct {
 	closeOnce     sync.Once
 	terminateOnce sync.Once
 	disconnectMu  sync.Mutex
+	breakpointMu  sync.Mutex // orders breakpoint updates, so a child's resync never overtakes an edit
 
 	terminalLauncher TerminalLauncher
+}
+
+// presentedChild is the child Status reports and the version reported for it.
+type presentedChild struct {
+	child   *Session
+	version uint64
+	epoch   uint64
 }
 
 type breakpointRef struct {
@@ -339,28 +376,42 @@ func newConnectedSession(id string, plan Plan, connection io.ReadWriteCloser) *S
 
 func (session *Session) ID() string { return session.id }
 
+// Status reports a live child's state as this session's. Its version follows
+// that child only, so a sibling's activity keeps references valid.
 func (session *Session) Status() Status {
-	if child := session.primaryChild(); child != nil {
-		status := child.Status()
-		session.mu.Lock()
-		status.SessionID = session.id
-		status.StateVersion = session.stateVersion
-		status.StartedAt = session.startedAt
-		if status.Stop != nil {
-			status.Stop.ThreadID = session.childIDLocked("thread", child, status.Stop.ThreadID)
-		}
-		for i, thread := range status.StoppedThreads {
-			status.StoppedThreads[i] = session.childIDLocked("thread", child, thread)
-		}
-		session.mu.Unlock()
-		return status
+	child := session.primaryChild()
+	var status Status
+	if child != nil {
+		status = child.Status()
 	}
-	return session.ownStatus()
-}
-
-func (session *Session) ownStatus() Status {
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	if child == nil || status.State == StateTerminated {
+		if session.presented.child != nil {
+			session.stateVersion++
+			session.presented = presentedChild{}
+		}
+		return session.ownStatusLocked()
+	}
+	if session.presented.child != child || session.presented.version != status.StateVersion {
+		session.stateVersion++
+		session.presented = presentedChild{child: child, version: status.StateVersion, epoch: session.stateVersion}
+	}
+	status.SessionID = session.id
+	status.StateVersion = session.presented.epoch
+	status.StartedAt = session.startedAt
+	status.Request = session.plan.Request
+	status.TerminalID = cmp.Or(session.terminalID, status.TerminalID)
+	if status.Stop != nil {
+		status.Stop.ThreadID = session.childIDLocked("thread", child, 0, status.Stop.ThreadID)
+	}
+	for i, thread := range status.StoppedThreads {
+		status.StoppedThreads[i] = session.childIDLocked("thread", child, 0, thread)
+	}
+	return status
+}
+
+func (session *Session) ownStatusLocked() Status {
 	status := Status{
 		SessionID:    session.id,
 		Adapter:      session.plan.Adapter.Name,
@@ -893,7 +944,11 @@ func (session *Session) respondStartDebugging(request *godap.StartDebuggingReque
 	defer cancel()
 	hooks := session.hooks
 	hooks.output = session.output
-	hooks.breakpointSource = func() (map[string][]SourceBreakpoint, uint64) { return session.breakpointSnapshot(), 0 }
+	hooks.breakpointSource = func() (map[string][]SourceBreakpoint, uint64) {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		return cloneSourceBreakpointSets(session.breakpoints), session.editVersion
+	}
 	child, err := startSession(ctx, fmt.Sprintf("%s-child-%d", session.id, request.Seq), childPlan, StartOptions{
 		Breakpoints:         session.breakpointSnapshot(),
 		FunctionBreakpoints: session.functionBreakpointSnapshot(),
@@ -910,6 +965,7 @@ func (session *Session) respondStartDebugging(request *godap.StartDebuggingReque
 		session.respondError(&request.Request, "startDebugging", "The parent debug session ended while its child session was starting")
 		return
 	}
+	session.resyncChild(ctx, child)
 	session.respond(&godap.StartDebuggingResponse{Response: godap.Response{
 		ProtocolMessage: godap.ProtocolMessage{Type: "response"},
 		RequestSeq:      request.Seq,
@@ -942,6 +998,38 @@ func (session *Session) attachChild(child *Session) bool {
 	session.notifyStateLocked()
 	session.mu.Unlock()
 	return true
+}
+
+// resyncChild sends edits made while the child configured, before it was attached.
+func (session *Session) resyncChild(ctx context.Context, child *Session) {
+	session.breakpointMu.Lock()
+	defer session.breakpointMu.Unlock()
+	session.mu.Lock()
+	current, version := cloneSourceBreakpointSets(session.breakpoints), session.editVersion
+	session.mu.Unlock()
+	child.mu.Lock()
+	since, applied, exceptionsSince := child.configured, cloneSourceBreakpointSets(child.breakpoints), child.exceptionsAt
+	child.mu.Unlock()
+	if since != version {
+		for path := range applied {
+			if _, ok := current[path]; !ok {
+				current[path] = nil
+			}
+		}
+		for _, path := range slices.Sorted(maps.Keys(current)) {
+			if slices.Equal(applied[path], current[path]) {
+				continue
+			}
+			if resolved, err := child.SetBreakpoints(ctx, path, current[path]); err == nil {
+				child.reportBreakpoints(path, current[path], resolved)
+			}
+		}
+	}
+	if source := child.hooks.exceptionFilters; source != nil {
+		if filters, set, version := source(); set && version != exceptionsSince {
+			_ = child.SetExceptionBreakpoints(ctx, filters)
+		}
+	}
 }
 
 func (session *Session) focusChild(child *Session) {
@@ -1216,16 +1304,11 @@ func (session *Session) notifyChildStateChanged() {
 func (session *Session) waitForStop(ctx context.Context, after uint64) (Status, bool) {
 	for {
 		session.mu.Lock()
-		version := session.stateVersion
-		state := session.state
-		child := session.child
 		changed := session.stateChanged
 		session.mu.Unlock()
-		if child != nil {
-			state = child.Status().State
-		}
-		if version > after && (state == StateStopped || state == StateTerminated) {
-			return session.Status(), true
+		status := session.Status()
+		if status.StateVersion > after && (status.State == StateStopped || status.State == StateTerminated) {
+			return status, true
 		}
 		select {
 		case <-changed:
@@ -1246,12 +1329,15 @@ func (session *Session) SetBreakpoints(ctx context.Context, path string, values 
 		return nil, err
 	}
 	path = filepath.Clean(path)
+	session.breakpointMu.Lock()
+	defer session.breakpointMu.Unlock()
 	session.mu.Lock()
 	if len(values) == 0 {
 		delete(session.breakpoints, path)
 	} else {
 		session.breakpoints[path] = slices.Clone(values)
 	}
+	session.editVersion++
 	children, focused := slices.Clone(session.children), session.child
 	session.mu.Unlock()
 	if len(children) > 0 {
@@ -1346,16 +1432,23 @@ func adapterCapabilities(adapter godap.Capabilities) Capabilities {
 // initialExceptionFilters returns the editor's selection, or the adapter's
 // defaults when the editor has not chosen any filters.
 func (session *Session) initialExceptionFilters() ([]string, bool) {
+	var selected []string
+	set := false
+	if source := session.hooks.exceptionFilters; source != nil {
+		var version uint64
+		selected, set, version = source()
+		session.mu.Lock()
+		session.exceptionsAt = version
+		session.mu.Unlock()
+	}
 	session.mu.Lock()
 	available := slices.Clone(session.capabilities.ExceptionFilters)
 	session.mu.Unlock()
 	if len(available) == 0 {
 		return nil, false
 	}
-	if source := session.hooks.exceptionFilters; source != nil {
-		if filters, set := source(); set {
-			return filters, true
-		}
+	if set {
+		return selected, true
 	}
 	filters := []string{}
 	for _, filter := range available {
@@ -1367,6 +1460,8 @@ func (session *Session) initialExceptionFilters() ([]string, bool) {
 }
 
 func (session *Session) SetExceptionBreakpoints(ctx context.Context, filters []string) error {
+	session.breakpointMu.Lock()
+	defer session.breakpointMu.Unlock()
 	children := session.childSessions()
 	if len(children) > 0 {
 		var firstErr error
@@ -1467,10 +1562,14 @@ func (session *Session) Continue(ctx context.Context, threadID int) error {
 
 // ContinueThread reports whether the adapter resumed every thread.
 func (session *Session) ContinueThread(ctx context.Context, threadID int) (bool, error) {
-	if child, native := session.threadChild(threadID); child != nil {
-		return child.ContinueThread(ctx, native)
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return false, err
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	if route.child != nil {
+		return route.child.ContinueThread(ctx, route.native)
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
 	if err != nil {
 		return false, err
 	}
@@ -1494,13 +1593,17 @@ func (session *Session) ContinueThread(ctx context.Context, threadID int) (bool,
 }
 
 func (session *Session) ReverseContinue(ctx context.Context, threadID int) error {
-	if child, native := session.threadChild(threadID); child != nil {
-		return child.ReverseContinue(ctx, native)
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return err
+	}
+	if route.child != nil {
+		return route.child.ReverseContinue(ctx, route.native)
 	}
 	if !session.Status().Capabilities.SupportsStepBack {
 		return fmt.Errorf("debug adapter %s does not support reverse execution", session.plan.Adapter.Name)
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	threadID, err = session.resolveThreadID(ctx, threadID)
 	if err != nil {
 		return err
 	}
@@ -1508,10 +1611,14 @@ func (session *Session) ReverseContinue(ctx context.Context, threadID int) error
 }
 
 func (session *Session) Next(ctx context.Context, threadID int) error {
-	if child, native := session.threadChild(threadID); child != nil {
-		return child.Next(ctx, native)
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return err
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	if route.child != nil {
+		return route.child.Next(ctx, route.native)
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
 	if err != nil {
 		return err
 	}
@@ -1519,10 +1626,14 @@ func (session *Session) Next(ctx context.Context, threadID int) error {
 }
 
 func (session *Session) StepIn(ctx context.Context, threadID int) error {
-	if child, native := session.threadChild(threadID); child != nil {
-		return child.StepIn(ctx, native)
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return err
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	if route.child != nil {
+		return route.child.StepIn(ctx, route.native)
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
 	if err != nil {
 		return err
 	}
@@ -1530,10 +1641,14 @@ func (session *Session) StepIn(ctx context.Context, threadID int) error {
 }
 
 func (session *Session) StepOut(ctx context.Context, threadID int) error {
-	if child, native := session.threadChild(threadID); child != nil {
-		return child.StepOut(ctx, native)
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return err
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	if route.child != nil {
+		return route.child.StepOut(ctx, route.native)
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
 	if err != nil {
 		return err
 	}
@@ -1541,13 +1656,17 @@ func (session *Session) StepOut(ctx context.Context, threadID int) error {
 }
 
 func (session *Session) StepBack(ctx context.Context, threadID int) error {
-	if child, native := session.threadChild(threadID); child != nil {
-		return child.StepBack(ctx, native)
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return err
+	}
+	if route.child != nil {
+		return route.child.StepBack(ctx, route.native)
 	}
 	if !session.Status().Capabilities.SupportsStepBack {
 		return fmt.Errorf("debug adapter %s does not support stepping backward", session.plan.Adapter.Name)
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	threadID, err = session.resolveThreadID(ctx, threadID)
 	if err != nil {
 		return err
 	}
@@ -1621,10 +1740,14 @@ func (session *Session) restoreFailedResume(runningEpoch uint64, previous stopSt
 }
 
 func (session *Session) Pause(ctx context.Context, threadID int) error {
-	if child, native := session.threadChild(threadID); child != nil {
-		return child.Pause(ctx, native)
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return err
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	if route.child != nil {
+		return route.child.Pause(ctx, route.native)
+	}
+	threadID, err = session.resolveThreadID(ctx, threadID)
 	if err != nil {
 		return err
 	}
@@ -1650,7 +1773,7 @@ func (session *Session) Threads(ctx context.Context) ([]Thread, error) {
 				continue // a child that is starting or ending has no threads yet
 			}
 			for _, thread := range threads {
-				thread.ID = session.childID("thread", child, thread.ID)
+				thread.ID = session.childID("thread", child, 0, thread.ID)
 				if len(children) > 1 {
 					thread.Name = childLabel(child) + ": " + thread.Name
 				}
@@ -1693,14 +1816,18 @@ func (session *Session) resolveThreadID(ctx context.Context, threadID int) (int,
 }
 
 func (session *Session) StackTrace(ctx context.Context, threadID, start, levels int) ([]StackFrame, int, error) {
-	if child, native := session.threadChild(threadID); child != nil {
-		frames, total, err := child.StackTrace(ctx, native, start, levels)
+	route, err := session.threadChild(threadID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if route.child != nil {
+		frames, total, err := route.child.StackTrace(ctx, route.native, start, levels)
 		for i := range frames {
-			frames[i].ID = session.childID("frame", child, frames[i].ID)
+			frames[i].ID = session.childID("frame", route.child, route.epoch, frames[i].ID)
 		}
 		return frames, total, err
 	}
-	threadID, err := session.resolveThreadID(ctx, threadID)
+	threadID, err = session.resolveThreadID(ctx, threadID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1728,13 +1855,13 @@ func (session *Session) StackTrace(ctx context.Context, threadID, start, levels 
 
 func (session *Session) Scopes(ctx context.Context, frameID int) ([]Scope, error) {
 	if session.childSession() != nil {
-		child, native, err := session.routeChild("frame", frameID)
+		route, err := session.routeChild("frame", frameID)
 		if err != nil {
 			return nil, err
 		}
-		scopes, err := child.Scopes(ctx, native)
+		scopes, err := route.child.Scopes(ctx, route.native)
 		for i := range scopes {
-			scopes[i].VariablesReference = session.childID("variable", child, scopes[i].VariablesReference)
+			scopes[i].VariablesReference = session.childID("variable", route.child, route.epoch, scopes[i].VariablesReference)
 		}
 		return scopes, err
 	}
@@ -1773,13 +1900,13 @@ func (session *Session) Variables(ctx context.Context, reference, start, count i
 // FilteredVariables passes DAP's "indexed" or "named" filter; zero count means all.
 func (session *Session) FilteredVariables(ctx context.Context, reference int, filter string, start, count int) ([]Variable, error) {
 	if session.childSession() != nil {
-		child, native, err := session.routeChild("variable", reference)
+		route, err := session.routeChild("variable", reference)
 		if err != nil {
 			return nil, err
 		}
-		variables, err := child.FilteredVariables(ctx, native, filter, start, count)
+		variables, err := route.child.FilteredVariables(ctx, route.native, filter, start, count)
 		for i := range variables {
-			variables[i].VariablesReference = session.childID("variable", child, variables[i].VariablesReference)
+			variables[i].VariablesReference = session.childID("variable", route.child, route.epoch, variables[i].VariablesReference)
 		}
 		return variables, err
 	}
@@ -1816,12 +1943,12 @@ func (session *Session) Evaluate(ctx context.Context, expression string, frameID
 // differently for each context.
 func (session *Session) EvaluateContext(ctx context.Context, expression string, frameID int, evaluationContext string) (Evaluation, error) {
 	if session.childSession() != nil {
-		child, native, err := session.routeChild("frame", frameID)
+		route, err := session.routeChild("frame", frameID)
 		if err != nil {
 			return Evaluation{}, err
 		}
-		evaluation, err := child.EvaluateContext(ctx, expression, native, evaluationContext)
-		evaluation.VariablesReference = session.childID("variable", child, evaluation.VariablesReference)
+		evaluation, err := route.child.EvaluateContext(ctx, expression, route.native, evaluationContext)
+		evaluation.VariablesReference = session.childID("variable", route.child, route.epoch, evaluation.VariablesReference)
 		return evaluation, err
 	}
 	if strings.TrimSpace(expression) == "" {
@@ -1850,6 +1977,14 @@ func (session *Session) EvaluateContext(ctx context.Context, expression string, 
 	}, nil
 }
 
+// disconnectRequest keeps terminateDebuggee: false, which go-dap omits.
+type disconnectRequest struct {
+	godap.Request
+	Arguments struct {
+		TerminateDebuggee bool `json:"terminateDebuggee"`
+	} `json:"arguments"`
+}
+
 func (session *Session) Disconnect(ctx context.Context, terminate bool) error {
 	// Process and connection watchers can finish concurrently with a user stop.
 	// Publish ownership intent before either side observes process exit so a
@@ -1873,10 +2008,9 @@ func (session *Session) Disconnect(ctx context.Context, terminate bool) error {
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
-		_, err := session.request(disconnectCtx, &godap.DisconnectRequest{
-			Request:   request("disconnect"),
-			Arguments: &godap.DisconnectArguments{TerminateDebuggee: terminate},
-		})
+		disconnect := &disconnectRequest{Request: request("disconnect")}
+		disconnect.Arguments.TerminateDebuggee = terminate
+		_, err := session.request(disconnectCtx, disconnect)
 		result <- err
 	}()
 

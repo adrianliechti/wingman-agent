@@ -427,6 +427,113 @@ func TestReviewDAPBreakpointsChangedDuringChildStartReachChild(t *testing.T) {
 	}
 }
 
+func TestReviewDAPExceptionFiltersChangedDuringChildStartReachChild(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var mu sync.Mutex
+	filters, version := []string{"uncaught"}, uint64(1)
+	hooks := sessionHooks{exceptionFilters: func() ([]string, bool, uint64) {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(filters), true, version
+	}}
+	root := newReviewDAPAdapter(t, 1, "root")
+	root.child = map[string]any{"name": "worker"}
+	child := newReviewDAPAdapter(t, 2, "worker")
+	child.filters = []godap.ExceptionBreakpointsFilter{{Filter: "raised", Label: "Raised"}, {Filter: "uncaught", Label: "Uncaught"}}
+	child.configuring, child.holdConfig = make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(child.holdConfig) })
+	defer release()
+	connector := &reviewDAPConnector{adapters: []*reviewDAPAdapter{root, child}}
+	plan := Plan{Adapter: AdapterDescriptor{Name: "fake", Language: "Test", Transport: TransportConnect}, Request: "launch", Arguments: map[string]any{"request": "launch"}}
+	parent, err := startSession(ctx, "parent", plan, StartOptions{adapterConnector: connector, hooks: hooks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	<-child.configuring
+	if got := child.lastExceptions(); !slices.Equal(got, []string{"uncaught"}) {
+		t.Fatalf("child configured with %v", got)
+	}
+	mu.Lock()
+	filters, version = []string{"raised"}, 2
+	mu.Unlock()
+	if err := parent.SetExceptionBreakpoints(ctx, []string{"raised"}); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err := <-root.childStarted; err != nil {
+		t.Fatal(err)
+	}
+	if got := child.lastExceptions(); !slices.Equal(got, []string{"raised"}) {
+		t.Fatalf("child exception filters = %v, want the selection made while it configured", got)
+	}
+}
+
+// The parent's reported version must grow whenever what it presents changes,
+// including switches between a child's state and its own.
+func TestReviewDAPParentStatusVersionIsMonotonic(t *testing.T) {
+	parent := reviewDAPParent()
+	first := &Session{id: "first", state: StateRunning, stateChanged: make(chan struct{})}
+	if !parent.attachChild(first) {
+		t.Fatal("parent rejected a child")
+	}
+	versions := []uint64{parent.Status().StateVersion}
+	if again := parent.Status().StateVersion; again != versions[0] {
+		t.Fatalf("unchanged status changed version %d -> %d", versions[0], again)
+	}
+	first.setState(StateTerminated, nil)
+	status := parent.Status()
+	if status.State != StateRunning || status.SessionID != "parent" {
+		t.Fatalf("status with only an ended child = %+v", status)
+	}
+	versions = append(versions, status.StateVersion)
+	second := &Session{id: "second", state: StateRunning, stateChanged: make(chan struct{})}
+	if !parent.attachChild(second) {
+		t.Fatal("parent rejected a child")
+	}
+	versions = append(versions, parent.Status().StateVersion)
+	second.mu.Lock()
+	second.recordStopLocked(Stop{Reason: "breakpoint", ThreadID: 4})
+	second.notifyStateLocked()
+	second.mu.Unlock()
+	status = parent.Status()
+	if status.State != StateStopped || status.Stop == nil || status.Stop.ThreadID <= 0 {
+		t.Fatalf("stopped child status = %+v", status)
+	}
+	versions = append(versions, status.StateVersion)
+	for index := 1; index < len(versions); index++ {
+		if versions[index] <= versions[index-1] {
+			t.Fatalf("versions %v are not increasing", versions)
+		}
+	}
+	if epoch := parent.StateEpoch(); epoch < versions[len(versions)-1] {
+		t.Fatalf("StateEpoch %d is behind the reported version %d", epoch, versions[len(versions)-1])
+	}
+}
+
+func TestReviewDAPOutputCarryKeepsStreamsApart(t *testing.T) {
+	var buffer outputBuffer
+	smile := "😀"
+	buffer.append("stdout", "a"+smile[:1])
+	buffer.append("stderr", "\xffwarn\n")
+	buffer.append("stdout", smile[1:3])
+	buffer.append("stdout", smile[3:]+"\n")
+	chunks, end := buffer.since(0)
+	if len(chunks) != 3 || chunks[0].Output != "a" || chunks[1].Output != "\xffwarn\n" || chunks[2].Output != smile+"\n" {
+		t.Fatalf("chunks = %+v", chunks)
+	}
+	text, _ := buffer.snapshot()
+	if want := reviewDAPBrowserLength(t, text); end != want {
+		t.Fatalf("offset %d, browser length %d", end, want)
+	}
+	// A sequence that can never complete is not held back.
+	buffer.append("console", "x\xe2\x82y")
+	if _, after := buffer.since(end); after != end+4 {
+		t.Fatalf("invalid bytes were held: end %d -> %d", end, after)
+	}
+}
+
 // Bug: Status of a session with children reports the focused child's request and terminal, so the gateway's disconnect default and the debuggee terminal follow the child rather than the session the browser launched.
 func TestReviewDAPParentStatusKeepsOwnRequestAndTerminal(t *testing.T) {
 	parent := reviewDAPParent()

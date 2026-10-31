@@ -395,11 +395,15 @@ func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.searches.Add(-1)
-	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	deadline := time.Now().Add(time.Minute)
+	ctx, cancel := context.WithDeadline(r.Context(), deadline)
 	defer cancel()
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-store")
 	encoder, flush := json.NewEncoder(w), http.NewResponseController(w)
+	// A client that stops reading would otherwise hold its search slot forever.
+	_ = flush.SetWriteDeadline(deadline)
+	defer flush.SetWriteDeadline(time.Time{})
 	var summary workspaceSearchEvent
 	err := s.searchWorkspace(ctx, request, func(event workspaceSearchEvent) error {
 		if event.Type == "done" {

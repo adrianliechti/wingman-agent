@@ -74,8 +74,8 @@ func (c *ahpConnection) dispatch(raw json.RawMessage) {
 	}
 }
 
-// ahpCommandID derives a controller command ID from what an action changes,
-// so a retried action reaches the controller's receipt for its first run.
+// ahpCommandID derives a stable controller command ID. Repeated edits use
+// the client identity and sequence; one-shot operations use their entity ID.
 func ahpCommandID(kind string, values ...any) string {
 	data, _ := json.Marshal(values)
 	sum := sha256.Sum256(data)
@@ -108,7 +108,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 		}
 		queued := slices.ContainsFunc(ch.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == action.Id }) || ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id
 		if queued {
-			command.Type, command.InputID, command.ID = "queue_update", action.Id, ahpCommandID("queue-update", action.Id, action.Kind, action.Message)
+			command.Type, command.InputID, command.ID = "queue_update", action.Id, ahpCommandID("queue-update", p.Channel, c.id, p.ClientSeq)
 		}
 		h.mu.Unlock()
 		if err := h.attachments(action.Message, &command); err != nil {
@@ -118,21 +118,27 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			return err
 		}
 		h.mu.Lock()
-		// An idle queue may consume the message before the controller ever
-		// exposes it as pending. Acknowledge acceptance and consumption together
-		// so clients never retain a ghost queued message after the turn starts.
+		// A receipt may outlive its wire acknowledgement. Reply with the
+		// current queue state so a retry cannot restore an older edit. An idle
+		// queue may also have consumed the message before it was projected.
 		if pending := a.pending[ahpActionKey(p.Action)]; pending != nil && pending.envelope == nil {
-			queued := false
-			for _, item := range ch.chat.QueuedMessages {
-				if item.Id == action.Id {
-					queued = true
+			var queued *t.PendingMessage
+			for i := range ch.chat.QueuedMessages {
+				if ch.chat.QueuedMessages[i].Id == action.Id {
+					queued = &ch.chat.QueuedMessages[i]
 				}
 			}
-			if ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id {
-				queued = true
+			if queued == nil && ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id {
+				queued = ch.chat.SteeringMessage
 			}
-			ch.chatAction(p.Action)
-			if !queued {
+			if queued != nil {
+				kind := t.PendingMessageKindQueued
+				if queued.Kind != nil {
+					kind = *queued.Kind
+				}
+				a.acknowledge(p.Action, t.StateAction{Value: &t.ChatPendingMessageSetAction{Type: t.ActionTypeChatPendingMessageSet, Kind: kind, Id: queued.Id, Message: queued.Message}})
+			} else {
+				ch.chatAction(p.Action)
 				ch.chatAction(t.StateAction{Value: &t.ChatPendingMessageRemovedAction{Type: t.ActionTypeChatPendingMessageRemoved, Kind: action.Kind, Id: action.Id}})
 			}
 		}
@@ -177,8 +183,9 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			h.mu.Unlock()
 			return ahpInvalid("turn is no longer active")
 		}
-		// Stopping a turn also drops what was queued behind it.
-		command.Type, command.ID, command.ClearQueue = "cancel", ahpCommandID("cancel", action.TurnId), true
+		// Stopping a turn also drops what was queued behind it; a stop that
+		// arrives after its turn ended must not reach the next one.
+		command.Type, command.ID, command.InputID, command.ClearQueue = "cancel", ahpCommandID("cancel", action.TurnId), action.TurnId, true
 		h.mu.Unlock()
 		return ch.command(command)
 	case *t.ChatToolCallConfirmedAction:
@@ -210,7 +217,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 	case *t.ChatInputCompletedAction:
 		prompt := ch.prompts[action.RequestId]
 		id := ahpCommandID("input", action.RequestId, action.Response, action.Answers)
-		if !chat || prompt == nil || prompt.response != nil || prompt.view.Kind != PromptKindAsk {
+		if !chat || prompt == nil || prompt.response != nil || prompt.view.Kind != PromptKindAsk && prompt.turn != "" {
 			h.mu.Unlock()
 			return ahpInvalid("input request already resolved or expired")
 		}
@@ -233,14 +240,27 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			return ahpInvalid("session channel required")
 		}
 		h.mu.Unlock()
-		return ch.setConfig(ahpCommandID("config", ch.chat.Resource, action.Config, action.Replace), action.Config)
+		if err := ch.setConfig(ahpCommandID("config", p.Channel, c.id, p.ClientSeq), action.Config); err != nil {
+			return err
+		}
+		// The backend may have normalized the values; acknowledge what it holds.
+		h.mu.Lock()
+		a.acknowledge(p.Action, t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: a.state.Config.Values, Replace: ahpPtr(true)}})
+		h.mu.Unlock()
+		return nil
 	case *t.ChatConfigChangedAction:
 		if !chat {
 			h.mu.Unlock()
 			return ahpInvalid("chat channel required")
 		}
 		h.mu.Unlock()
-		return ch.setConfig(ahpCommandID("config", ch.chat.Resource, action.Config, action.Replace), action.Config)
+		if err := ch.setConfig(ahpCommandID("config", p.Channel, c.id, p.ClientSeq), action.Config); err != nil {
+			return err
+		}
+		h.mu.Lock()
+		a.acknowledge(p.Action, t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: ch.chat.Config.Values, Replace: ahpPtr(true)}})
+		h.mu.Unlock()
+		return nil
 	case *t.SessionActiveClientSetAction:
 		if !session || action.ActiveClient.ClientId != c.id {
 			h.mu.Unlock()
@@ -361,7 +381,7 @@ func (h *ahpHost) attachments(message t.Message, command *Command) error {
 		switch a := attachment.Value.(type) {
 		case *t.SimpleMessageAttachment:
 			if a.ModelRepresentation != nil {
-				command.Text += "\n\n" + *a.ModelRepresentation
+				command.Context = append(command.Context, *a.ModelRepresentation)
 			}
 		case *t.MessageResourceAttachment:
 			path, err := h.resourcePath(a.Uri)
@@ -371,7 +391,7 @@ func (h *ahpHost) attachments(message t.Message, command *Command) error {
 			command.Files = append(command.Files, path)
 			if a.Selection != nil {
 				data, _ := json.Marshal(a.Selection)
-				command.Text += "\nSelection in " + path + ": " + string(data)
+				command.Context = append(command.Context, "Selection in "+path+": "+string(data))
 			}
 		case *t.MessageEmbeddedResourceAttachment:
 			data, err := base64.StdEncoding.DecodeString(a.Data)
@@ -381,7 +401,7 @@ func (h *ahpHost) attachments(message t.Message, command *Command) error {
 			if strings.HasPrefix(a.ContentType, "image/") {
 				command.Images = append(command.Images, "data:"+a.ContentType+";base64,"+a.Data)
 			} else if strings.HasPrefix(a.ContentType, "text/") {
-				command.Text += "\n\n" + a.Label + ":\n" + string(data)
+				command.Context = append(command.Context, a.Label+":\n"+string(data))
 			} else {
 				return ahpInvalid("unsupported attachment content type")
 			}

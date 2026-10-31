@@ -86,9 +86,9 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 }
 
 func (a *ahpChat) syncConfig(c *sessionController) {
-	values := ahpConfig(c.state.Settings).Values
-	if a.chat.Config == nil || !reflect.DeepEqual(a.chat.Config.Values, values) {
-		a.chatAction(t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: values, Replace: ahpPtr(true)}})
+	a.config = ahpConfig(c.state.Settings)
+	if a.chat.Config == nil || !reflect.DeepEqual(a.chat.Config.Values, a.config.Values) {
+		a.chatAction(t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: a.config.Values, Replace: ahpPtr(true)}})
 	}
 }
 
@@ -158,6 +158,10 @@ func (a *ahpChat) syncTitle(c *sessionController) {
 			title := []rune(strings.SplitN(e.Content, "\n", 2)[0])
 			if len(title) > 80 {
 				title = title[:80]
+			}
+			// No chat action renames a chat; its session announces the new summary.
+			if a.chat.Title == a.session.state.Title {
+				a.chat.Title = string(title)
 			}
 			a.session.sessionAction(t.StateAction{Value: &t.SessionTitleChangedAction{Type: t.ActionTypeSessionTitleChanged, Title: string(title)}})
 			return

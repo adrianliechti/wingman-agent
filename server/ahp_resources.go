@@ -168,8 +168,18 @@ func (h *ahpHost) resource(req ahpRequest) (any, error) {
 				return nil, err
 			}
 			result.Etag, result.Size = ahpPtr(fileRevision(data)), ahpPtr(int64(len(data)))
+			detected := http.DetectContentType(data)
+			// Extensions can name both source files and media (.ts is also an
+			// MPEG transport stream). Prefer actual text over a media guess,
+			// while retaining structured text types such as JSON and SVG.
+			if result.ContentType != nil && strings.HasPrefix(detected, "text/") && utf8.Valid(data) && !isBinary(data) {
+				media := *result.ContentType
+				if strings.HasPrefix(media, "video/") || strings.HasPrefix(media, "audio/") || strings.HasPrefix(media, "image/") && media != "image/svg+xml" {
+					result.ContentType = &detected
+				}
+			}
 			if result.ContentType == nil {
-				result.ContentType = ahpPtr(http.DetectContentType(data))
+				result.ContentType = &detected
 			}
 		}
 		return result, nil
@@ -202,6 +212,12 @@ func resourceContent(data []byte, encoding t.ContentEncoding) t.ResourceReadResu
 	return t.ResourceReadResult{Data: content, Encoding: encoding, ContentType: ahpPtr(http.DetectContentType(data))}
 }
 func (h *ahpHost) readResourceFile(rel string) ([]byte, error) {
+	// Opening a FIFO or device for reading can block, so check the type first.
+	if info, err := h.server.workspace.Root.Stat(rel); err != nil {
+		return nil, err
+	} else if !info.Mode().IsRegular() {
+		return nil, ahpInvalid("resource must be a regular file")
+	}
 	f, err := h.server.workspace.Root.Open(rel)
 	if err != nil {
 		return nil, err
@@ -280,6 +296,13 @@ func (h *ahpHost) mutateResource(req ahpRequest) (any, error) {
 		if err != nil {
 			break
 		}
+		// On a case-insensitive file system a case-only rename names the source itself.
+		if req.Method == "resourceMove" && strings.EqualFold(rel, destination) {
+			if same, statErr := root.Lstat(destination); statErr == nil && os.SameFile(info, same) {
+				err = root.Rename(rel, destination)
+				break
+			}
+		}
 		// Resolve aliases before any overwrite. A symlink source can point
 		// inside the destination that an overwrite would otherwise remove.
 		canonicalSource, sourceErr := filepath.EvalSymlinks(filepath.Join(h.server.workspace.RootPath, rel))
@@ -320,7 +343,8 @@ func (h *ahpHost) mutateResource(req ahpRequest) (any, error) {
 			if p.FailIfExists {
 				return nil, fs.ErrExist
 			}
-			if req.Method == "resourceCopy" {
+			// Rename replaces a file atomically, but not a directory.
+			if req.Method == "resourceCopy" || info.IsDir() || destinationInfo.IsDir() {
 				if err = root.RemoveAll(destination); err != nil {
 					break
 				}

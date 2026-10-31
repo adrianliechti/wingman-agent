@@ -77,6 +77,7 @@ type sessionEntry struct {
 	done    chan struct{}
 	session *Session
 	err     error
+	closed  []string // documents closed while the session starts
 }
 
 type sessionConnector func(context.Context, string, Server) (*Session, error)
@@ -349,7 +350,10 @@ func (m *Manager) startSession(project projectRoot, key string, entry *sessionEn
 	}
 	if err == nil {
 		for _, document := range openedDocuments {
-			if document.Path == "" {
+			m.mu.Lock()
+			closed := slices.Contains(entry.closed, document.Path)
+			m.mu.Unlock()
+			if document.Path == "" || closed {
 				continue
 			}
 			var syncErr error
@@ -383,6 +387,8 @@ func (m *Manager) startSession(project projectRoot, key string, entry *sessionEn
 		delete(m.sessions, key)
 	}
 	entry.err = err
+	closed := entry.closed
+	entry.closed = nil
 	close(entry.done)
 	m.mu.Unlock()
 	m.detectMu.Unlock()
@@ -390,6 +396,36 @@ func (m *Manager) startSession(project projectRoot, key string, entry *sessionEn
 	if err != nil && session != nil {
 		session.Close()
 	}
+	if err == nil {
+		for _, path := range closed {
+			_ = session.CloseDocument(connectCtx, path)
+		}
+	}
+}
+
+// CloseDocument ends an editor document's lifetime, also while its server is
+// stopped or restarting, so that a restart does not restore it.
+func (m *Manager) CloseDocument(ctx context.Context, filePath string) error {
+	project := m.findProject(filePath)
+	if project == nil {
+		return nil
+	}
+	m.mu.Lock()
+	entry := m.sessions[projectKey(*project)]
+	switch {
+	case entry == nil:
+	case entry.session == nil:
+		entry.closed = append(entry.closed, filePath)
+	case !entry.session.IsAlive():
+		// Under m.mu, so a restart's snapshot of open documents excludes it.
+		entry.session.forgetDocument(filePath)
+	default:
+		session := entry.session
+		m.mu.Unlock()
+		return session.CloseDocument(ctx, filePath)
+	}
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *Manager) ActiveSession(filePath string) (*Session, bool) {

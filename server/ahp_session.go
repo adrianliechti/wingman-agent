@@ -98,7 +98,7 @@ func (a *ahpSession) removeClient(id string) {
 // syncChats publishes session-level consequences of a chat's projection.
 func (a *ahpSession) syncChats(previous t.SessionSummary) {
 	// Session config mirrors the default chat for clients without per-chat config.
-	config := ahpConfig(a.chats[0].controller.state.Settings)
+	config := a.chats[0].config
 	if a.state.Config == nil {
 		a.state.Config = config
 	}
@@ -145,6 +145,12 @@ func (a *ahpSession) syncInputNeeded() {
 }
 
 func (a *ahpChat) inputRequests(wanted map[string]t.SessionInputRequest) {
+	// A prompt raised outside a turn has no part to answer, only this request.
+	for _, p := range a.prompts {
+		if p.turn == "" && p.response == nil {
+			wanted[p.view.ID] = t.SessionInputRequest{Value: &t.SessionChatInputRequest{Id: p.view.ID, Chat: a.chat.Resource, Kind: t.SessionInputRequestKindChatInput, Request: ahpPromptRequest(p)}}
+		}
+	}
 	active := a.chat.ActiveTurn
 	if active == nil {
 		return
@@ -190,5 +196,6 @@ func (a *ahpSession) chatDeleted(ch *ahpChat) {
 	for client := range a.host.clients {
 		delete(client.subscriptions, a.resource)
 	}
+	a.host.forgetAlias(a.resource)
 	a.host.notifyRoot("root/sessionRemoved", t.SessionRemovedParams{Channel: t.RootResourceURI, Session: a.resource})
 }

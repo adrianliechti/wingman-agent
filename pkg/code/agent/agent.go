@@ -152,6 +152,7 @@ func New(ws *code.Workspace, cfg Config, ui code.UI) *Agent {
 	if ws.MCP != nil {
 		ws.MCP.SetElicit(a.elicit)
 		ws.MCP.SetTelemetry(cfg.Telemetry)
+		ws.SetMCPApproval(a.prompts)
 	}
 
 	return a

@@ -107,7 +107,8 @@ func (s *Scanner) walk(ctx context.Context) (map[string]stamp, error) {
 			return ctxErr
 		}
 		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
+			// An unreadable subdirectory must not stop reporting for the rest of the tree.
+			if errors.Is(err, fs.ErrNotExist) || name != s.root && errors.Is(err, fs.ErrPermission) {
 				return nil
 			}
 			return err

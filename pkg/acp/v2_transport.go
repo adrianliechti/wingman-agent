@@ -90,6 +90,19 @@ func (w *v2Wire) Read(p []byte) (int, error) {
 
 var invalidBatchEntry = json.RawMessage(`{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Invalid Request"}}`)
 
+// Forwarding through encoding/json can change a string ID's escape spelling.
+// Compare decoded strings, while preserving numeric IDs without float rounding.
+func v2RequestIDKey(id json.RawMessage) string {
+	id = bytes.TrimSpace(id)
+	if len(id) > 0 && id[0] == '"' {
+		var value string
+		if json.Unmarshal(id, &value) == nil {
+			id, _ = json.Marshal(value)
+		}
+	}
+	return string(id)
+}
+
 func (w *v2Wire) readBatch(line []byte) error {
 	var entries []json.RawMessage
 	if err := json.Unmarshal(line, &entries); err != nil || len(entries) == 0 {
@@ -105,7 +118,7 @@ func (w *v2Wire) readBatch(line []byte) error {
 		}
 		if frame["method"] != nil && frame["id"] != nil {
 			batch.pending++
-			w.batches[string(frame["id"])] = batch
+			w.batches[v2RequestIDKey(frame["id"])] = batch
 		}
 		w.frames = append(w.frames, entry)
 	}
@@ -129,7 +142,7 @@ func (w *v2Wire) request(method string) (string, v2Request) {
 	delete(w.requests, sequence)
 	sent := make(chan struct{})
 	if len(id) > 0 {
-		w.responses[string(id)] = sent
+		w.responses[v2RequestIDKey(id)] = sent
 	} else {
 		close(sent)
 	}
@@ -145,7 +158,7 @@ func (w *v2Wire) Write(p []byte) (int, error) {
 	line := p
 	if json.Unmarshal(p, &frame) == nil && frame.Method == "" && len(frame.ID) > 0 {
 		w.mu.Lock()
-		id := string(frame.ID)
+		id := v2RequestIDKey(frame.ID)
 		if signal := w.responses[id]; signal != nil {
 			sent = append(sent, signal)
 			delete(w.responses, id)

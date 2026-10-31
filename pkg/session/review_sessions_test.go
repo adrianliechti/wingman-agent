@@ -44,7 +44,8 @@ func TestReviewSessionsForkThroughStopsBeforeALaterCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if forked.State.ContextSet || len(forked.State.Messages) != 2 {
+	// Ordinary messages also set ContextSet, so compare the context itself.
+	if len(forked.State.Context) != 2 || forked.State.Context[0].Content[0].Text != "ask a" || len(forked.State.Messages) != 2 {
 		t.Fatalf("fork through a carries a later checkpoint: context=%+v messages=%d", forked.State.Context, len(forked.State.Messages))
 	}
 }

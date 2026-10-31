@@ -457,6 +457,8 @@ export class AHPConnection {
 			[
 				"changeset/fileSet",
 				"changeset/fileRemoved",
+				"changeset/contentChanged",
+				"changeset/cleared",
 				"changeset/statusChanged",
 			].includes(action?.action.type ?? "")
 		)
@@ -474,19 +476,29 @@ export class AHPConnection {
 				connection: this.generation,
 			});
 	}
+	private async open(): Promise<AhpClient> {
+		await this.ready();
+		// The connection can close between ready() settling and this continuation.
+		if (!this.client)
+			throw new Error(
+				this.stopped
+					? "Workspace client stopped."
+					: "Connection lost. Retry after reconnecting.",
+			);
+		return this.client;
+	}
 	async request<M extends keyof CommandMap>(
 		method: M,
 		params: CommandMap[M]["params"],
 	): Promise<CommandMap[M]["result"]> {
-		await this.ready();
-		return this.client!.request(method, params);
+		return (await this.open()).request(method, params);
 	}
 	async dispatch(
 		channel: string,
 		action: StateAction,
 		id: string = crypto.randomUUID(),
 	): Promise<void> {
-		await this.ready();
+		const client = await this.open();
 		let pending = this.actions.get(id);
 		if (pending?.resolve) throw new Error("This action is already pending");
 		if (!pending) {
@@ -506,7 +518,7 @@ export class AHPConnection {
 				reject(new Error("Action delivery unconfirmed. Please retry."));
 			}, 30000);
 			try {
-				this.client!.dispatch(current.channel, current.action, current.seq);
+				client.dispatch(current.channel, current.action, current.seq);
 			} catch (error) {
 				clearTimeout(current.timer);
 				current.resolve = undefined;

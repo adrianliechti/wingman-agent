@@ -187,6 +187,18 @@ func (h *ahpHost) forgetChatAlias(chat string) {
 	}
 }
 
+// Caller holds h.mu.
+func (h *ahpHost) forgetAlias(resource string) {
+	alias, ok := h.aliases[resource]
+	if !ok {
+		return
+	}
+	delete(h.aliases, resource)
+	if dir, err := h.aliasDirectory(); err == nil {
+		_ = os.Remove(h.aliasPath(dir, alias))
+	}
+}
+
 func (h *ahpHost) close() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -790,7 +802,7 @@ func (h *ahpHost) ensureSession(channel string) (*ahpSession, *ahpChat, error) {
 	resource := h.sessionURI(channel)
 	h.mu.Unlock()
 	if a == nil {
-		if _, err := h.loadSession(resource); err != nil {
+		if _, err := h.loadSession(resource, channel != resource); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -806,7 +818,9 @@ func (h *ahpHost) ensureSession(channel string) (*ahpSession, *ahpChat, error) {
 	return a, ch, nil
 }
 
-func (h *ahpHost) loadSession(resource string) (*ahpSession, error) {
+// loadSession loads a session with its chats; a canonical URI whose native
+// session is a fork redirects a chat request to that fork's chat.
+func (h *ahpHost) loadSession(resource string, chat bool) (*ahpSession, error) {
 	if !validAHPSessionURI(resource) {
 		return nil, ahpInvalid("unsupported channel")
 	}
@@ -834,6 +848,9 @@ func (h *ahpHost) loadSession(resource string) (*ahpSession, error) {
 		for _, other := range h.chatAliases {
 			if other.Backend == alias.Backend && other.Session == alias.Session {
 				h.mu.Unlock()
+				if chat {
+					return nil, ahpMoved(other.Chat)
+				}
 				return nil, ahpMoved(other.Resource)
 			}
 		}
@@ -1055,6 +1072,9 @@ func (h *ahpHost) createSession(raw json.RawMessage, clientID string) (any, erro
 	if json.Unmarshal(raw, &p) != nil || !validAHPSessionURI(p.Channel) {
 		return nil, ahpInvalid("valid session channel required")
 	}
+	if strings.HasPrefix(p.Channel, "ahp-session:/wingman/") {
+		return nil, ahpInvalid("ahp-session:/wingman/ names existing native sessions")
+	}
 	if p.ActiveClient != nil && p.ActiveClient.ClientId != clientID {
 		return nil, ahpInvalid("active client identity mismatch")
 	}
@@ -1160,6 +1180,21 @@ func (h *ahpHost) createChat(raw json.RawMessage) (any, error) {
 	}
 	h.createMu.Lock()
 	defer h.createMu.Unlock()
+	compactions := map[string]bool{}
+	if fork != nil {
+		h.mu.Lock()
+		source := a.chat(fork.Chat)
+		h.mu.Unlock()
+		if source != nil {
+			source.controller.mu.Lock()
+			for _, turn := range source.controller.hostTurns {
+				if turn.compact {
+					compactions[turn.entries[0].InputID] = true
+				}
+			}
+			source.controller.mu.Unlock()
+		}
+	}
 	h.mu.Lock()
 	_, aliased := h.chatAliases[p.Chat]
 	_, sessionAliased := h.aliases[h.sessionURI(p.Chat)]
@@ -1184,7 +1219,15 @@ func (h *ahpHost) createChat(raw json.RawMessage) (any, error) {
 		command.Type, command.Source = "fork", source.controller.ref.SessionID
 		// Forking the whole idle history needs no turn boundary in the native journal.
 		if i < len(source.chat.Turns)-1 || source.chat.ActiveTurn != nil {
-			command.InputID = fork.TurnId
+			// A compaction is no input of the journal; fork through the turn before it.
+			for i >= 0 && compactions[source.chat.Turns[i].Id] {
+				i--
+			}
+			if i < 0 {
+				h.mu.Unlock()
+				return nil, ahpInvalid("fork turn must follow a conversation turn")
+			}
+			command.InputID = source.chat.Turns[i].Id
 		}
 	}
 	h.mu.Unlock()

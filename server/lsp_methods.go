@@ -45,6 +45,18 @@ type lspQuery struct {
 	line    int
 	column  int
 	buffers map[string]lspBuffer
+	// unchanged reports whether the language server still has this
+	// connection's buffer, so edits computed for another editor's are refused.
+	unchanged func() bool
+}
+
+var errLSPContentModified = &ahpRPCError{Code: -32801, Message: "another editor changed the document"}
+
+func (q lspQuery) textEdits(edits []lsp.TextEdit, err error) ([]lsp.TextEdit, error) {
+	if err == nil && q.unchanged != nil && !q.unchanged() {
+		return nil, errLSPContentModified
+	}
+	return edits, err
 }
 
 type lspMethod struct {
@@ -102,16 +114,24 @@ func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map
 		return nil, &ahpRPCError{Code: -32601, Message: "unsupported language method: " + req.Method}
 	}
 	q := lspQuery{id: req.ID, raw: req.Params, buffers: buffers}
-	if err := lsp.Unmarshal(req.Params, &q.params); err != nil {
-		return nil, ahpInvalid("invalid language request")
-	}
-	q.uri = q.params.TextDocument.URI
 	if method.resolve {
-		uri, raw, err := unwrapLSPResolve(q.params.Data, req.Params)
+		// The params are the item itself, whose fields are not feature params.
+		var item struct {
+			Data json.RawMessage `json:"data"`
+		}
+		if json.Unmarshal(req.Params, &item) != nil {
+			return nil, ahpInvalid("invalid language request")
+		}
+		uri, raw, err := unwrapLSPResolve(item.Data, req.Params)
 		if err != nil {
 			return nil, err
 		}
 		q.uri, q.raw = uri, raw
+	} else {
+		if err := lsp.Unmarshal(req.Params, &q.params); err != nil {
+			return nil, ahpInvalid("invalid language request")
+		}
+		q.uri = q.params.TextDocument.URI
 	}
 	var err error
 	if q.path, err = c.path(q.uri); err != nil {
@@ -122,6 +142,9 @@ func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map
 	}
 	if doc, ok := buffers[q.uri]; ok {
 		q.content = &doc.text
+		if q.unchanged, err = c.claimDocument(ctx, q.path); err != nil {
+			return nil, err
+		}
 	}
 	q.line, q.column = q.params.Position.Line, q.params.Position.Character
 	if q.line < 0 || q.column < 0 {
@@ -345,7 +368,7 @@ func (c *lspConnection) rename(ctx context.Context, q lspQuery) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.lspEdit(edit, q.buffers)
+	return c.lspEdit(edit, q)
 }
 
 func (c *lspConnection) codeActions(ctx context.Context, q lspQuery) (any, error) {
@@ -377,7 +400,7 @@ func (c *lspConnection) codeActions(ctx context.Context, q lspQuery) (any, error
 			if err := lsp.Unmarshal(data, &parsed); err != nil {
 				return nil, err
 			}
-			if action["edit"], err = c.lspEdit(&parsed, q.buffers); err != nil {
+			if action["edit"], err = c.lspEdit(&parsed, q); err != nil {
 				return nil, err
 			}
 		}
@@ -404,7 +427,7 @@ func (c *lspConnection) resolveCodeAction(ctx context.Context, q lspQuery) (any,
 	var result map[string]any
 	_ = json.Unmarshal(data, &result)
 	if resolved.Edit != nil {
-		result["edit"], err = c.lspEdit(resolved.Edit, q.buffers)
+		result["edit"], err = c.lspEdit(resolved.Edit, q)
 	}
 	return result, err
 }
@@ -429,7 +452,7 @@ func (c *lspConnection) executeCommand(ctx context.Context, q lspQuery) (any, er
 	apply := func(requested lsp.CommandWorkspaceEdit) bool {
 		timer.Stop()
 		defer timer.Reset(2 * time.Minute)
-		edit, err := c.lspEdit(&requested.Edit, q.buffers)
+		edit, err := c.lspEdit(&requested.Edit, q)
 		if err != nil {
 			return false
 		}
@@ -441,15 +464,15 @@ func (c *lspConnection) executeCommand(ctx context.Context, q lspQuery) (any, er
 }
 
 func (c *lspConnection) formatting(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.workspace.Formatting(ctx, q.path, q.content, q.params.Options)
+	return q.textEdits(c.server.workspace.Formatting(ctx, q.path, q.content, q.params.Options))
 }
 
 func (c *lspConnection) rangeFormatting(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.workspace.RangeFormatting(ctx, q.path, q.content, q.params.Range, q.params.Options)
+	return q.textEdits(c.server.workspace.RangeFormatting(ctx, q.path, q.content, q.params.Range, q.params.Options))
 }
 
 func (c *lspConnection) onTypeFormatting(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.workspace.OnTypeFormatting(ctx, q.path, q.content, q.line, q.column, q.params.Character, q.params.Options)
+	return q.textEdits(c.server.workspace.OnTypeFormatting(ctx, q.path, q.content, q.line, q.column, q.params.Character, q.params.Options))
 }
 
 func (c *lspConnection) inlayHints(ctx context.Context, q lspQuery) (any, error) {
@@ -478,9 +501,12 @@ func routeLSPItems(value any, uri, field string) (any, error) {
 
 // lspEdit labels document edits with this editor's versions; the language
 // server's own version counter means nothing to the client.
-func (c *lspConnection) lspEdit(edit *lsp.WorkspaceEdit, buffers map[string]lspBuffer) (any, error) {
+func (c *lspConnection) lspEdit(edit *lsp.WorkspaceEdit, q lspQuery) (any, error) {
 	if edit == nil {
 		return nil, nil
+	}
+	if q.unchanged != nil && !q.unchanged() {
+		return nil, errLSPContentModified
 	}
 	documents, err := c.server.workspaceEditDocuments(edit)
 	if err != nil {
@@ -501,7 +527,7 @@ func (c *lspConnection) lspEdit(edit *lsp.WorkspaceEdit, buffers map[string]lspB
 			continue
 		}
 		uri, _ := document["uri"].(string)
-		if buffer, ok := buffers[uri]; ok {
+		if buffer, ok := q.buffers[uri]; ok {
 			document["version"] = buffer.version
 		} else {
 			document["version"] = nil

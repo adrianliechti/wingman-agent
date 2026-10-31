@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -291,6 +292,7 @@ type Command struct {
 	Type       string               `json:"type"`
 	InputID    string               `json:"inputId,omitempty"`
 	Text       string               `json:"text,omitempty"`
+	Context    []string             `json:"context,omitempty"` // model-only attachment text
 	Files      []string             `json:"files,omitempty"`
 	Images     []string             `json:"images,omitempty"`
 	Intent     code.TurnInputIntent `json:"intent,omitempty"`
@@ -418,6 +420,8 @@ func (c *sessionController) command(ctx context.Context, command Command) comman
 	}
 	record := &commandReceipt{fingerprint: fingerprint, done: make(chan struct{}), receipt: Receipt{ID: command.ID, Ref: c.ref, Epoch: c.epoch, Outcome: "accepted"}}
 	c.receipts[command.ID] = record
+	c.receiptOrder = append(c.receiptOrder, command.ID)
+	c.pruneReceiptsLocked()
 	c.receiptMu.Unlock()
 	defer close(record.done)
 	var err error
@@ -435,6 +439,23 @@ func (c *sessionController) command(ctx context.Context, command Command) comman
 		record.status, record.message = http.StatusConflict, err.Error()
 	}
 	return *record
+}
+
+const receiptLimit = 1024
+
+// pruneReceiptsLocked forgets the oldest completed receipts beyond the limit;
+// in-flight ones stay so their IDs cannot be reused. Caller holds receiptMu.
+func (c *sessionController) pruneReceiptsLocked() {
+	for i := 0; len(c.receipts) > receiptLimit && i < len(c.receiptOrder); {
+		id := c.receiptOrder[i]
+		select {
+		case <-c.receipts[id].done:
+			delete(c.receipts, id)
+			c.receiptOrder = slices.Delete(c.receiptOrder, i, i+1)
+		default:
+			i++
+		}
+	}
 }
 
 func (c *sessionController) execute(command Command) error {
@@ -469,9 +490,16 @@ func (c *sessionController) execute(command Command) error {
 		} else {
 			input.Content = b.buildInput(sid, command)
 		}
-		// A queue recovered after a restart waits for the user; sending continues it.
+		// A queue recovered after a restart waits for the user; sending continues
+		// it, after the input when that input must start now.
 		if command.Type == "send" && b.turns.Snapshot(sid).Paused {
-			b.turns.Resume(sid)
+			if command.requireIdle {
+				if err := b.turns.Unpause(sid); err != nil {
+					return err
+				}
+			} else {
+				b.turns.Resume(sid)
+			}
 		}
 		if command.Type == "queue_update" {
 			if err := b.turns.ReplaceQueued(sid, id, input); err != nil {
@@ -488,7 +516,11 @@ func (c *sessionController) execute(command Command) error {
 			return err
 		}
 	case "cancel":
-		if command.ClearQueue {
+		if command.InputID != "" {
+			if err := b.turns.CancelTurn(sid, command.InputID, command.ClearQueue); err != nil {
+				return err
+			}
+		} else if command.ClearQueue {
 			if err := b.turns.CancelAll(sid); err != nil {
 				return err
 			}

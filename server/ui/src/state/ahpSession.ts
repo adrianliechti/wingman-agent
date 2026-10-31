@@ -336,15 +336,19 @@ export class AHPSessionProjection {
 	private turn(turn: Turn | ActiveTurn): ChatEntry[] {
 		let result = this.turns.get(turn);
 		if (!result) {
-			result = [
-				{
-					id: `user:${turn.id}`,
-					inputId: turn.id,
-					type: "user",
-					content: turn.message.text,
-					...attachments(turn.message),
-				},
-			];
+			// Turns the host starts itself, such as a background task's result, have no user message.
+			result =
+				turn.message.origin.kind === "user"
+					? [
+							{
+								id: `user:${turn.id}`,
+								inputId: turn.id,
+								type: "user",
+								content: turn.message.text,
+								...attachments(turn.message),
+							},
+						]
+					: [];
 			turn.responseParts.forEach((part, index) => {
 				const entry = this.part(part, `${turn.id}:${index}`);
 				if (entry) result!.push(entry);
@@ -399,13 +403,13 @@ export class AHPSessionProjection {
 			}
 		}
 		const pendingInputs: PendingTurnInput[] = (chat.queuedMessages ?? []).map(
-			(pending, position) => ({
+			(pending) => ({
 				id: pending.id,
 				text: pending.message.text,
 				...attachments(pending.message),
 				state: "queued",
 				intent: pending.kind === "steering" ? "steer" : "follow_up",
-				position,
+				position: 0,
 				origin: "user",
 			}),
 		);
@@ -425,6 +429,10 @@ export class AHPSessionProjection {
 		pendingInputs.sort(
 			(a, b) => Number(b.intent === "steer") - Number(a.intent === "steer"),
 		);
+		// Steering joins the running turn; follow-ups are numbered from 1 like the host's queue.
+		let position = 0;
+		for (const input of pendingInputs)
+			input.position = input.intent === "steer" ? 0 : ++position;
 		const error = chatError(session, chat);
 		return {
 			...emptySession(key),

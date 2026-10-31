@@ -232,11 +232,20 @@ func cutThrough(events []harness.RuntimeEvent, inputID string) ([]harness.Runtim
 	if start < 0 {
 		return nil, false
 	}
+	turn := ""
+	for i := start - 1; i >= 0 && turn == ""; i-- {
+		if events[i].Type == harness.EventTurnStarted {
+			turn = events[i].TurnID
+		}
+	}
+	ended := false
 	for i := start + 1; i < len(events); i++ {
 		// A steering input shares its turn; loading closes the cut turn as interrupted.
-		if events[i].Type == harness.EventTurnStarted || input(events[i]) != "" && input(events[i]) != inputID {
+		// A checkpoint after the turn, such as /compact, belongs to what follows.
+		if events[i].Type == harness.EventTurnStarted || input(events[i]) != "" && input(events[i]) != inputID || ended && events[i].Type == harness.EventContextCheckpoint {
 			return events[:i], true
 		}
+		ended = ended || events[i].Type == harness.EventTurnTerminal && turn != "" && events[i].TurnID == turn
 	}
 	return events, true
 }

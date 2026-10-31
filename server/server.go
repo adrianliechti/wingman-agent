@@ -77,7 +77,7 @@ type Server struct {
 	dapReferenceSeq  atomic.Uint64
 	searches         atomic.Int32
 	lspDocumentsMu   sync.Mutex
-	lspDocuments     map[string]map[*lspConnection]struct{}
+	lspDocuments     map[string]*lspDocument
 	lspRefreshers    map[*lspConnection]struct{} // clients that re-pull diagnostics on request
 	lspExternalMu    sync.Mutex
 	lspExternalPaths map[string]bool

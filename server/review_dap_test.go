@@ -270,6 +270,28 @@ func TestReviewDAPSocketCloseAfterConfigurationKeepsLaunch(t *testing.T) {
 	d.must("disconnect", nil)
 }
 
+// An explicit cancel still stops a launch that outlives its socket.
+func TestReviewDAPCancelAfterConfigurationStopsLaunch(t *testing.T) {
+	app, root := reviewDAPServer(t, "slow")
+	c := reviewDAPDial(t, app)
+	c.must("initialize", map[string]any{"adapterID": "wingman"})
+	launch := c.send("launch", map[string]any{"_wingmanPlanId": reviewDAPRemember(app, root, "launch")})
+	c.waitEvent("initialized", nil)
+	c.must("configurationDone", nil)
+	c.must("cancel", map[string]any{"requestId": launch})
+	if response := c.reply(launch); response["success"] != false || response["message"] != "cancelled" {
+		t.Fatalf("cancelled launch = %v", response)
+	}
+	if session, _ := c.must("wingman/status", nil)["session"].(map[string]any); session != nil && session["state"] != "terminated" {
+		t.Fatalf("cancelled launch left a session: %v", session)
+	}
+	release, err := app.workspace.DAP.BeginPreparation()
+	if err != nil {
+		t.Fatalf("cancelled launch left the debugger busy: %v", err)
+	}
+	release()
+}
+
 // Bug: setBreakpoints requires the source to exist, so breakpoints of a deleted or renamed file can never be cleared and are sent to every later session.
 func TestReviewDAPClearBreakpointsOfDeletedFile(t *testing.T) {
 	root := t.TempDir()

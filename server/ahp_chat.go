@@ -19,7 +19,9 @@ type ahpChat struct {
 	session          *ahpSession
 	controller       *sessionController
 	chat             t.ChatState
+	config           *t.SessionConfigState // the controller's, read without its lock
 	prompts          map[string]*ahpPrompt
+	promptSeq        int
 	reasoning        map[string]*ahpReasoningTiming
 	usageStart       UsageView // the controller's totals when the active turn started
 	removed          bool
@@ -39,7 +41,9 @@ type ahpReasoningTiming struct {
 
 type ahpPrompt struct {
 	view     PromptView
-	turn     string
+	turn     string // empty when no turn was active
+	after    string // the entry it follows in its turn
+	seq      int
 	response *Command
 	answers  map[string]t.ChatInputAnswer
 }
@@ -77,8 +81,9 @@ type ahpPendingAction struct {
 }
 
 func newAHPChat(a *ahpSession, c *sessionController, resource, title, stamp string) *ahpChat {
-	return &ahpChat{host: a.host, session: a, controller: c, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{},
-		chat: t.ChatState{Resource: resource, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: ahpConfig(c.state.Settings).Values}},
+	config := ahpConfig(c.state.Settings)
+	return &ahpChat{host: a.host, session: a, controller: c, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{},
+		chat: t.ChatState{Resource: resource, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: config.Values}},
 	}
 }
 
@@ -95,6 +100,20 @@ func (a *ahpSession) emit(channel string, action t.StateAction) {
 		a.remember(*origin, ahpActionKey(action), envelope)
 		delete(a.pending, ahpActionKey(action))
 	}
+}
+
+// acknowledge answers a client's action with the host's own, such as the
+// values a backend normalized.
+func (a *ahpSession) acknowledge(client, action t.StateAction) {
+	key := ahpActionKey(client)
+	p := a.pending[key]
+	if p == nil || p.envelope != nil {
+		return
+	}
+	envelope := a.host.publish(p.params.Channel, action, &p.origin, nil)
+	p.envelope = &envelope
+	a.remember(p.origin, key, envelope)
+	delete(a.pending, key)
 }
 
 func ahpActionKey(action t.StateAction) string {
@@ -199,7 +218,12 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 				if a.chat.ActiveTurn != nil {
 					turn = a.chat.ActiveTurn.Id
 				}
-				a.prompts[p.ID] = &ahpPrompt{view: p, turn: turn}
+				after := ""
+				if n := len(c.entries); n > 0 {
+					after = c.entries[n-1].ID
+				}
+				a.promptSeq++
+				a.prompts[p.ID] = &ahpPrompt{view: p, turn: turn, after: after, seq: a.promptSeq}
 			}
 		}
 		for id, p := range a.prompts {
@@ -217,6 +241,8 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 				state = turns[len(turns)-1].State
 			}
 			a.finishTurn(old.Id, state, c.state.Error)
+			// The finished turn now carries its duration.
+			turns, active = a.transcript(c)
 		}
 		if !reflect.DeepEqual(a.chat.Turns, turns) {
 			a.chatAction(t.StateAction{Value: &t.ChatTruncatedAction{Type: t.ActionTypeChatTruncated}})
@@ -300,12 +326,14 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 		old = append(old, t.Turn{Id: active.Id, StartedAt: &active.StartedAt, Message: active.Message, ResponseParts: active.ResponseParts, Usage: active.Usage, State: t.TurnStateComplete})
 	}
 	turns := []t.Turn{}
+	anchors := [][]string{} // per turn: its user entry, then the entry of each part
 	seen := map[string]bool{}
 	for _, e := range c.entries {
 		if e.Type == "user" {
 			if c.activeInput != "" && len(turns) > 0 && turns[len(turns)-1].Id == c.activeInput && e.InputID != c.activeInput {
 				last := &turns[len(turns)-1]
 				last.ResponseParts = append(last.ResponseParts, t.ResponsePart{Value: &t.SystemNotificationResponsePart{Kind: t.ResponsePartKindSystemNotification, Content: t.NewStringOrMarkdownPlain(e.Content)}})
+				anchors[len(anchors)-1] = append(anchors[len(anchors)-1], e.ID)
 				continue
 			}
 			id := e.InputID
@@ -315,6 +343,9 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 			var startedAt, duration = (*string)(nil), (*int64)(nil)
 			var usage *t.UsageInfo
 			message := a.host.message(e.Content, e.Files, e.Images)
+			if e.Content == "" && len(e.Files)+len(e.Images) == 0 {
+				message.Origin.Kind = t.MessageKindSystemNotification // such as a background task's result
+			}
 			if pending := a.session.pending["start:"+id]; pending != nil {
 				if started, ok := pending.params.Action.Value.(*t.ChatTurnStartedAction); ok {
 					message = started.Message
@@ -336,6 +367,7 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 				startedAt = ahpPtr(time.Now().UTC().Format(time.RFC3339Nano))
 			}
 			turns = append(turns, t.Turn{Id: id, StartedAt: startedAt, Duration: duration, Usage: usage, Message: message, ResponseParts: []t.ResponsePart{}, State: t.TurnStateComplete})
+			anchors = append(anchors, []string{e.ID})
 			continue
 		}
 		if len(turns) == 0 {
@@ -350,6 +382,7 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 			}
 			last := &turns[len(turns)-1]
 			last.ResponseParts = append(last.ResponseParts, part)
+			anchors[len(anchors)-1] = append(anchors[len(anchors)-1], e.ID)
 		}
 	}
 	for id := range a.reasoning {
@@ -362,15 +395,24 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 		if i < len(old) && old[i].Id == turn.Id {
 			turn.State = old[i].State
 		}
-		ids := []string{}
-		for id, p := range a.prompts {
+		prompts := []*ahpPrompt{}
+		for _, p := range a.prompts {
 			if p.turn == turn.Id {
-				ids = append(ids, id)
+				prompts = append(prompts, p)
 			}
 		}
-		slices.Sort(ids)
-		for _, id := range ids {
-			turn.ResponseParts = append(turn.ResponseParts, ahpPromptPart(a.prompts[id]))
+		slices.SortFunc(prompts, func(x, y *ahpPrompt) int { return x.seq - y.seq })
+		// A prompt stays after the entry it followed, so later parts append to the turn.
+		for _, p := range prompts {
+			at := len(anchors[i]) - 1
+			for at >= 0 && anchors[i][at] != p.after {
+				at--
+			}
+			if at < 0 {
+				at = len(anchors[i]) - 1
+			}
+			turn.ResponseParts = slices.Insert(turn.ResponseParts, at, ahpPromptPart(p))
+			anchors[i] = slices.Insert(anchors[i], at+1, p.after)
 		}
 	}
 	if len(turns) == 0 {
@@ -731,6 +773,14 @@ func ahpPromptPart(p *ahpPrompt) t.ResponsePart {
 		part.Response = &response
 	}
 	return t.ResponsePart{Value: part}
+}
+
+// ahpPromptRequest is a prompt as an input request; an approval has no questions.
+func ahpPromptRequest(p *ahpPrompt) t.ChatInputRequest {
+	if p.view.Kind == PromptKindConfirm {
+		return t.ChatInputRequest{Id: p.view.ID, Message: &p.view.Message, Questions: []t.ChatInputQuestion{}}
+	}
+	return ahpPromptPart(p).Value.(*t.InputRequestResponsePart).Request
 }
 
 func promptDefaultIncludes(value any, option string) bool {

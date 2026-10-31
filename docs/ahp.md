@@ -288,7 +288,10 @@ execution and inspection run over `/dap`. The old `/api/debug/targets` and
 LSP uses full-document synchronization with increasing versions and UTF-16
 positions. Unsaved buffers are restored after reconnect. Editor buffers are
 kept current in order; a request never pushes its own, possibly older, copy to
-the language server. A buffer that matches the file on disk lets agent reads
+the language server. When several connections edit one file, each request is
+answered for its own connection's buffer, closing one restores another's, and
+an edit computed while another connection's buffer took over answers -32801.
+A buffer that matches the file on disk lets agent reads
 refresh it. The host scans the workspace on its file-change checks, skipping
 hidden, dependency and build directories such as `node_modules`; changes reach
 language servers as `workspace/didChangeWatchedFiles` for the watchers they

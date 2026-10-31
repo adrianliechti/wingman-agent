@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"net/http"
 	"path/filepath"
@@ -191,7 +192,8 @@ func (c *dapConnection) event(event string, body any) {
 	c.sendDAP(map[string]any{"type": "event", "event": event, "body": body})
 }
 
-func (c *dapConnection) sourcePath(value string) (string, error) {
+// sourcePath confines a source to the workspace; allowMissing accepts a deleted file.
+func (c *dapConnection) sourcePath(value string, allowMissing bool) (string, error) {
 	if filepath.IsAbs(value) {
 		rel, err := filepath.Rel(c.server.workspace.RootPath, value)
 		if err != nil {
@@ -204,6 +206,9 @@ func (c *dapConnection) sourcePath(value string) (string, error) {
 		return "", errors.New("source is outside the workspace")
 	}
 	info, err := c.server.workspace.Root.Stat(rel)
+	if allowMissing && errors.Is(err, fs.ErrNotExist) {
+		return filepath.Join(c.server.workspace.RootPath, rel), nil
+	}
 	if err != nil {
 		return "", err
 	}
@@ -344,10 +349,24 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 		defer func() { c.mu.Lock(); c.configured = nil; c.mu.Unlock() }()
 		c.event("initialized", map[string]any{})
 		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
 		case <-configured:
+		case <-ctx.Done():
+			select {
+			case <-configured:
+			default:
+				return nil, ctx.Err()
+			}
 		}
+		// A configured launch outlives its socket; only cancel or shutdown stops it.
+		requestCtx := ctx
+		var stop context.CancelFunc
+		ctx, stop = context.WithCancel(c.server.ctx)
+		defer stop()
+		defer context.AfterFunc(requestCtx, func() {
+			if errors.Is(context.Cause(requestCtx), errEditorCancelled) {
+				stop()
+			}
+		})()
 	}
 	var result any
 	err := c.server.workspace.WithDAPManager(func(manager *dap.Manager) error {
@@ -371,7 +390,7 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 		case "wingman/status":
 			body := map[string]any{"output": "", "_wingmanOutputOffset": 0, "breakpoints": []dap.SourceBreakpoint{}, "resolved": []dap.Breakpoint{}}
 			if p.Source.Path != "" {
-				path, err := c.sourcePath(p.Source.Path)
+				path, err := c.sourcePath(p.Source.Path, true)
 				if err != nil {
 					return err
 				}
@@ -388,7 +407,7 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 			result = body
 			return nil
 		case "setBreakpoints":
-			path, err := c.sourcePath(p.Source.Path)
+			path, err := c.sourcePath(p.Source.Path, len(p.Breakpoints) == 0)
 			if err != nil {
 				return err
 			}

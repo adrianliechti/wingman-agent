@@ -69,9 +69,29 @@ func (s *Session) ResolveCodeAction(ctx context.Context, action protocol.CodeAct
 	})
 }
 
+// acquireCommand serializes commands, which may wait for an edit review,
+// without making a waiting caller ignore its cancellation.
+func (s *Session) acquireCommand(ctx context.Context) (func(), error) {
+	s.mu.Lock()
+	if s.commands == nil {
+		s.commands = make(chan struct{}, 1)
+	}
+	commands := s.commands
+	s.mu.Unlock()
+	select {
+	case commands <- struct{}{}:
+		return func() { <-commands }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func (s *Session) ExecuteCommand(ctx context.Context, command protocol.Command) (any, error) {
-	s.commandMu.Lock()
-	defer s.commandMu.Unlock()
+	release, err := s.acquireCommand(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.rpc.ExecuteCommand(ctx, &protocol.ExecuteCommandParams{
 		Command:   command.Command,
 		Arguments: command.Arguments,
@@ -81,8 +101,11 @@ func (s *Session) ExecuteCommand(ctx context.Context, command protocol.Command) 
 // ExecuteCommandWithEdits runs one serialized command. Each workspace/applyEdit
 // the server sends meanwhile goes to apply, and the server receives its answer.
 func (s *Session) ExecuteCommandWithEdits(ctx context.Context, command protocol.Command, apply func(CommandWorkspaceEdit) bool) (any, error) {
-	s.commandMu.Lock()
-	defer s.commandMu.Unlock()
+	release, err := s.acquireCommand(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	s.applyEditMu.Lock()
 	s.applyEdit = apply

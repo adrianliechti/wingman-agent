@@ -29,6 +29,7 @@ type ahpTerminal struct {
 	state    t.TerminalState // protected by host.mu
 	size     int             // bytes of retained content, protected by host.mu
 	opMu     sync.Mutex
+	writeMu  sync.Mutex // orders input writes, which may block until the program reads
 	filter   terminalOutputFilter
 	removed  bool
 }
@@ -152,7 +153,7 @@ func (h *ahpHost) attachTerminal(session *terminal.Session, resource string, cla
 	cols, rows := session.Size()
 	cwd := (&url.URL{Scheme: "file", Path: filepath.ToSlash(session.Cwd())}).String()
 	a := &ahpTerminal{resource: resource, session: session, state: t.TerminalState{Title: session.Title(), Cwd: &cwd, Cols: ahpPtr(int64(cols)), Rows: ahpPtr(int64(rows)), Content: []t.TerminalContentPart{}, Claim: claim, IsPty: ahpPtr(true), SupportsCommandDetection: ahpPtr(false), Lifecycle: t.TerminalLifecycleState{Value: &t.TerminalRunningLifecycleState{Status: t.TerminalLifecycleStatusRunning}}}}
-	snapshot, output, cancel := session.Subscribe()
+	snapshot, offset, output, cancel := session.SubscribeAt()
 	h.mu.Lock()
 	h.terminals[resource] = a
 	h.terminalDataLocked(a, a.filter.feed(snapshot))
@@ -171,11 +172,13 @@ func (h *ahpHost) attachTerminal(session *terminal.Session, resource string, cla
 					return
 				}
 				if ok {
+					offset += int64(len(chunk))
 					h.terminalDataLocked(a, a.filter.feed(chunk))
 					h.mu.Unlock()
 					continue
 				}
-				if session.Exited() {
+				// A stream cut off behind the output closes too; only a complete one reports the exit.
+				if session.Exited() && offset == session.Written() {
 					var code *int64
 					if value, known := session.ExitCode(); known {
 						code = ahpPtr(int64(value))
@@ -191,7 +194,7 @@ func (h *ahpHost) attachTerminal(session *terminal.Session, resource string, cla
 				// append across a gap in the VT stream.
 				h.mu.Unlock()
 				cancel()
-				snapshot, output, cancel = session.Subscribe()
+				snapshot, offset, output, cancel = session.SubscribeAt()
 				h.mu.Lock()
 				a.filter = terminalOutputFilter{}
 				clear := t.StateAction{Value: &t.TerminalClearedAction{Type: t.ActionTypeTerminalCleared}}
@@ -362,60 +365,69 @@ func (c *ahpConnection) executeTerminalAction(p t.DispatchActionParams) error {
 	if a == nil {
 		return &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "terminal not found"}
 	}
+	input, err := c.applyTerminalAction(a, p)
+	if err != nil || input == nil {
+		return err
+	}
+	// A write can block until the program reads; claims and disposal (which closes the PTY) must not wait for it.
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	return a.session.Write(input)
+}
+
+// applyTerminalAction validates and applies an action, returning any input to write.
+func (c *ahpConnection) applyTerminalAction(a *ahpTerminal, p t.DispatchActionParams) ([]byte, error) {
+	h := c.host
 	a.opMu.Lock()
 	defer a.opMu.Unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if a.removed {
-		return ahpInvalid("terminal disposed")
+		return nil, ahpInvalid("terminal disposed")
 	}
 	owned := c.ownsTerminalLocked(a)
 	if action, ok := p.Action.Value.(*t.TerminalClaimedAction); ok {
 		claim, valid := action.Claim.Value.(*t.TerminalClientClaim)
 		if !valid || claim.ClientId == "" {
-			return ahpInvalid("client terminal claim required")
+			return nil, ahpInvalid("client terminal claim required")
 		}
 		if !owned {
 			old, clientOwned := a.state.Claim.Value.(*t.TerminalClientClaim)
 			if !clientOwned || claim.ClientId != c.id {
-				return ahpInvalid("terminal belongs to another owner")
+				return nil, ahpInvalid("terminal belongs to another owner")
 			}
 			for peer := range h.clients {
 				if peer.id == old.ClientId {
-					return ahpInvalid("terminal owner is still connected")
+					return nil, ahpInvalid("terminal owner is still connected")
 				}
 			}
 		}
 	} else if !owned {
-		return ahpInvalid("terminal belongs to another client")
+		return nil, ahpInvalid("terminal belongs to another client")
 	}
 	switch action := p.Action.Value.(type) {
 	case *t.TerminalInputAction:
 		if len(action.Data) > 1<<20 || a.session.Exited() {
-			return ahpInvalid("terminal input is unavailable")
+			return nil, ahpInvalid("terminal input is unavailable")
 		}
-		// PTY writes can block; never hold the publication lock during I/O.
-		h.mu.Unlock()
-		err := a.session.Write([]byte(action.Data))
-		h.mu.Lock()
-		return err
+		return []byte(action.Data), nil
 	case *t.TerminalResizedAction:
 		if action.Cols < 1 || action.Rows < 1 || action.Cols > 1000 || action.Rows > 1000 {
-			return ahpInvalid("invalid terminal dimensions")
+			return nil, ahpInvalid("invalid terminal dimensions")
 		}
 		h.mu.Unlock()
 		err := a.session.Resize(int(action.Cols), int(action.Rows))
 		h.mu.Lock()
 		if err != nil {
-			return err
+			return nil, err
 		}
 	case *t.TerminalTitleChangedAction:
 		if strings.TrimSpace(action.Title) == "" || len(action.Title) > 1024 {
-			return ahpInvalid("invalid terminal title")
+			return nil, ahpInvalid("invalid terminal title")
 		}
 	case *t.TerminalClaimedAction, *t.TerminalClearedAction:
 	default:
-		return ahpInvalid("terminal action is server-only or unsupported")
+		return nil, ahpInvalid("terminal action is server-only or unsupported")
 	}
 	ahp.ApplyActionToTerminal(&a.state, p.Action)
 	switch p.Action.Value.(type) {
@@ -424,7 +436,7 @@ func (c *ahpConnection) executeTerminalAction(p t.DispatchActionParams) error {
 	case *t.TerminalClearedAction:
 		a.size = 0
 	}
-	return nil // dispatch publishes the authoritative acknowledgement exactly once.
+	return nil, nil // dispatch publishes the authoritative acknowledgement exactly once.
 }
 
 // Streaming UTF-8 and OSC parser. Shell integration markers are removed even
@@ -444,15 +456,25 @@ func (f *terminalOutputFilter) feed(data []byte) string {
 				break
 			}
 			if p[1] == ']' {
-				end := -1
+				end, aborted := -1, false
+			scan:
 				for i := 2; i < len(p); i++ {
-					if p[i] == 7 {
+					switch {
+					case p[i] == 7:
 						end = i + 1
-						break
-					}
-					if p[i] == 0x1b && i+1 < len(p) && p[i+1] == '\\' {
-						end = i + 2
-						break
+						break scan
+					// Like xterm.js: ESC ends the string (as ST when '\' follows), CAN and SUB abort it.
+					case p[i] == 0x1b && i+1 < len(p):
+						end = i
+						if p[i+1] == '\\' {
+							end = i + 2
+						}
+						break scan
+					case p[i] == 0x1b:
+						break scan
+					case p[i] == 0x18 || p[i] == 0x1a:
+						end, aborted = i, true
+						break scan
 					}
 				}
 				if end < 0 {
@@ -462,7 +484,7 @@ func (f *terminalOutputFilter) feed(data []byte) string {
 					break
 				}
 				osc := string(p[2:end])
-				if strings.HasPrefix(osc, "0;") || strings.HasPrefix(osc, "2;") {
+				if !aborted && (strings.HasPrefix(osc, "0;") || strings.HasPrefix(osc, "2;")) {
 					title := strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(osc[2:], "\x07"), "\x1b\\"))
 					runes := []rune(title)
 					if len(runes) > 80 {

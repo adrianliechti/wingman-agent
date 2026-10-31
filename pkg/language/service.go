@@ -128,11 +128,7 @@ func (s *Service) CloseDocument(ctx context.Context, filePath string) error {
 	if s.closed {
 		return nil
 	}
-	session, ok := s.manager.ActiveSession(filePath)
-	if !ok {
-		return nil
-	}
-	return session.CloseDocument(ctx, filePath)
+	return s.manager.CloseDocument(ctx, filePath)
 }
 
 func (s *Service) Capabilities(ctx context.Context, filePath string) (lsp.ServerCapabilities, bool, error) {

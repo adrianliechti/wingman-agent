@@ -33,7 +33,7 @@ type Session struct {
 	cancelFunc context.CancelFunc
 
 	documentMu   sync.Mutex
-	commandMu    sync.Mutex
+	commands     chan struct{} // holds the running command; see acquireCommand
 	applyEditMu  sync.Mutex
 	mu           sync.Mutex
 	documents    map[string]*document
@@ -432,18 +432,27 @@ func (s *Session) closeDocumentLocked(ctx context.Context, filePath string) erro
 	if !opened {
 		return nil
 	}
-	if s.documentSyncPolicy().openClose {
-		if err := s.rpc.DidClose(ctx, &protocol.DidCloseTextDocumentParams{
+	var err error
+	if s.documentSyncPolicy().openClose && s.IsAlive() {
+		err = s.rpc.DidClose(ctx, &protocol.DidCloseTextDocumentParams{
 			TextDocument: protocol.TextDocumentIdentifier{URI: lspuri.MustParse(uri)},
-		}); err != nil {
-			return fmt.Errorf("didClose: %w", err)
-		}
+		})
 	}
 
 	s.mu.Lock()
 	delete(s.documents, uri)
 	s.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("didClose: %w", err)
+	}
 	return nil
+}
+
+// forgetDocument drops a document without telling the stopped server.
+func (s *Session) forgetDocument(filePath string) {
+	s.mu.Lock()
+	delete(s.documents, fileuri.FromPath(filePath))
+	s.mu.Unlock()
 }
 
 func (s *Session) DocumentContent(filePath string) (string, bool) {

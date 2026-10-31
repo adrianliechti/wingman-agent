@@ -95,7 +95,11 @@ func (r *Relay) handleConnect(w http.ResponseWriter, req *http.Request) {
 	defer ws.CloseNow()
 
 	conn := websocket.NetConn(req.Context(), ws, websocket.MessageBinary)
-	mux, err := yamux.Client(conn, muxConfig())
+	cfg := muxConfig()
+	// The relay closes a stream only once its browser is gone. Closing is a
+	// half-close, so reset soon or the workspace blocks writing into it.
+	cfg.StreamCloseTimeout = time.Second
+	mux, err := yamux.Client(conn, cfg)
 	if err != nil {
 		return
 	}

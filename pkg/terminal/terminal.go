@@ -77,6 +77,7 @@ type Session struct {
 
 	mu        sync.Mutex
 	buf       []byte
+	written   int64 // output bytes produced so far
 	subs      map[*subscriber]struct{}
 	cols      int
 	rows      int
@@ -244,19 +245,32 @@ func (s *Session) Resize(cols, rows int) error {
 // session's output is delivered after it ends, or when the subscriber falls a
 // whole scrollback behind and must subscribe again. cancel must be called.
 func (s *Session) Subscribe() (snapshot []byte, ch <-chan []byte, cancel func()) {
+	snapshot, _, ch, cancel = s.SubscribeAt()
+	return snapshot, ch, cancel
+}
+
+// SubscribeAt also returns the snapshot's end offset, so a closed stream can be checked against Written.
+func (s *Session) SubscribeAt() (snapshot []byte, offset int64, ch <-chan []byte, cancel func()) {
 	s.mu.Lock()
-	snapshot = append([]byte(nil), s.buf...)
+	snapshot, offset = append([]byte(nil), s.buf...), s.written
 	if s.closed {
 		s.mu.Unlock()
 		c := make(chan []byte)
 		close(c)
-		return snapshot, c, func() {}
+		return snapshot, offset, c, func() {}
 	}
 	sub := newSubscriber()
 	s.subs[sub] = struct{}{}
 	s.mu.Unlock()
 
-	return snapshot, sub.out, func() { s.unsubscribe(sub) }
+	return snapshot, offset, sub.out, func() { s.unsubscribe(sub) }
+}
+
+// Written returns the number of output bytes the session has produced.
+func (s *Session) Written() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.written
 }
 
 func (s *Session) unsubscribe(sub *subscriber) {
@@ -367,6 +381,7 @@ func (s *Session) publish(p []byte) {
 	defer s.mu.Unlock()
 
 	s.buf = append(s.buf, chunk...)
+	s.written += int64(len(chunk))
 	if len(s.buf) > maxScrollback+compactSlack {
 		s.buf = append(make([]byte, 0, maxScrollback+compactSlack), SafeTail(s.buf, maxScrollback)...)
 	}

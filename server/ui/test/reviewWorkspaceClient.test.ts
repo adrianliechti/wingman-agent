@@ -218,7 +218,8 @@ test("a chat disposed while disconnected is reported deleted after reconnecting"
 	disposed = true;
 	ahp.start();
 	await ahp.ready();
-	await reviewSettle(() => view().status !== "ready");
+	// The session channel's error can arrive before the chat's.
+	await reviewSettle(() => view().status === "deleted");
 	assert.equal(view().status, "deleted", String(view().error));
 	release();
 });
@@ -293,8 +294,14 @@ test("creating and forking survive a lost reply without duplicates", async (t) =
 		if (m.method === "createSession" || m.method === "createChat") {
 			const uri = m.params.chat ?? m.params.channel;
 			const drop = m.method === "createSession" ? dropCreate : dropFork;
+			// Like the host: SessionAlreadyExists for sessions, AlreadyExists for chats.
 			if (created.has(uri))
-				await reply({ error: { code: -32003, message: "exists" } });
+				await reply({
+					error: {
+						code: m.method === "createSession" ? -32003 : -32010,
+						message: "already exists",
+					},
+				});
 			else {
 				created.add(uri);
 				if (drop) {

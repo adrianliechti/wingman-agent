@@ -24,6 +24,9 @@ func (s *backendRuntime) buildInput(sessionID string, msg Command) []harness.Con
 			}
 		}
 	}
+	for _, text := range msg.Context {
+		input = append(input, harness.Content{Text: text, Hidden: true})
+	}
 	var rootPath string
 	if s.workspace != nil {
 		rootPath = s.workspace.RootPath

@@ -226,8 +226,10 @@ func (h *ahpHost) refreshChangesetLocked(channel string, force bool) {
 	if h.changesets == nil {
 		h.changesets = map[string]*ahpChangeset{}
 	}
-	if err == nil && !h.changesetFitsLocked(channel, next) {
-		err = fmt.Errorf("retained changesets exceed the 128 MiB content limit")
+	for err == nil && !h.changesetFitsLocked(channel, next) {
+		if !h.evictComparisonLocked(channel) {
+			err = fmt.Errorf("retained changesets exceed the 128 MiB content limit")
+		}
 	}
 	if err != nil {
 		next = &ahpChangeset{state: t.ChangesetState{Status: t.ChangesetStatusError, Files: []t.ChangesetFile{}, Error: &t.ErrorInfo{ErrorType: "workspace", Message: err.Error()}}, touched: time.Now()}
@@ -284,21 +286,30 @@ func (h *ahpHost) comparisonChangeset(diffs []changes.FileDiff) (string, error) 
 		}
 	}
 	for (h.changesets[channel] == nil && comparisons >= 32) || !h.changesetFitsLocked(channel, next) {
-		oldest := ""
-		for uri, c := range h.changesets {
-			if uri != channel && c.comparison && !h.subscribedChangesetLocked(uri) && time.Since(c.touched) > time.Minute &&
-				(oldest == "" || c.touched.Before(h.changesets[oldest].touched)) {
-				oldest = uri
-			}
-		}
-		if oldest == "" {
+		if !h.evictComparisonLocked(channel) {
 			return "", &ahpRPCError{Code: -32009, Message: "too many retained comparisons; close comparisons and retry"}
 		}
-		delete(h.changesets, oldest)
 		comparisons--
 	}
 	h.changesets[channel] = next
 	return channel, nil
+}
+
+// evictComparisonLocked drops the least recently used idle comparison other
+// than keep. It reports whether one was dropped.
+func (h *ahpHost) evictComparisonLocked(keep string) bool {
+	oldest := ""
+	for uri, c := range h.changesets {
+		if uri != keep && c.comparison && !h.subscribedChangesetLocked(uri) && time.Since(c.touched) > time.Minute &&
+			(oldest == "" || c.touched.Before(h.changesets[oldest].touched)) {
+			oldest = uri
+		}
+	}
+	if oldest == "" {
+		return false
+	}
+	delete(h.changesets, oldest)
+	return true
 }
 
 func (h *ahpHost) changesetContentLocked(uri string) (string, bool) {
@@ -360,6 +371,16 @@ func (h *ahpHost) invokeChangesetOperation(data json.RawMessage) (any, error) {
 	var p t.InvokeChangesetOperationParams
 	if err := decodeGitParams(data, &p); err != nil {
 		return nil, err
+	}
+	if p.Target != nil {
+		// The target union decodes leniently; a misspelled nonce must not skip the stale check.
+		var raw struct {
+			Target json.RawMessage `json:"target"`
+		}
+		_ = json.Unmarshal(data, &raw)
+		if err := decodeGitParams(raw.Target, p.Target.Value); err != nil {
+			return nil, err
+		}
 	}
 	if _, ok := changesetLayer(p.Channel); !ok {
 		return nil, ahpInvalid("changeset has no operations")

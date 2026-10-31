@@ -135,7 +135,7 @@ type StartOptions struct {
 type sessionHooks struct {
 	output           *outputBuffer
 	breakpointSource func() (map[string][]SourceBreakpoint, uint64)
-	exceptionFilters func() ([]string, bool)
+	exceptionFilters func() (filters []string, set bool, version uint64)
 	breakpointID     func(path string, line, column int) int
 	onBreakpoint     func(path string, line, column int, breakpoint Breakpoint)
 }

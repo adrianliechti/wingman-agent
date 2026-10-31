@@ -601,21 +601,34 @@ func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnI
 
 // CancelCurrent interrupts the active turn and pauses queued follow-ups.
 func (m *TurnManager) CancelCurrent(sessionID string) error {
-	return m.cancelSession(sessionID, false)
+	return m.cancelSession(sessionID, "", false)
 }
 
 // CancelAll interrupts the active turn and cancels every queued follow-up.
 func (m *TurnManager) CancelAll(sessionID string) error {
-	return m.cancelSession(sessionID, true)
+	return m.cancelSession(sessionID, "", true)
 }
 
-func (m *TurnManager) cancelSession(sessionID string, clearQueue bool) error {
+// CancelTurn interrupts inputID's turn like CancelCurrent or CancelAll, and
+// changes nothing with ErrNoActiveTurn once that turn is no longer active.
+func (m *TurnManager) CancelTurn(sessionID, inputID string, clearQueue bool) error {
+	if inputID == "" {
+		return errors.New("input id required")
+	}
+	return m.cancelSession(sessionID, inputID, clearQueue)
+}
+
+func (m *TurnManager) cancelSession(sessionID, inputID string, clearQueue bool) error {
 	s := m.session(sessionID)
 	s.mu.Lock()
 	if !s.queueLoaded {
 		err := s.queueErr
 		s.mu.Unlock()
 		return err
+	}
+	if inputID != "" && (s.active == nil || s.active.input.ID != inputID) {
+		s.mu.Unlock()
+		return ErrNoActiveTurn
 	}
 	previousQueue, previousPaused, previousCancelled := s.queued, s.paused, s.cancelRequested
 	s.cancelRequested = s.active != nil
@@ -704,6 +717,26 @@ func (m *TurnManager) StopSession(ctx context.Context, sessionID string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Unpause lets a recovered queue continue after the next turn without
+// starting it now.
+func (m *TurnManager) Unpause(sessionID string) error {
+	s := m.session(sessionID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.queueLoaded {
+		return s.queueErr
+	}
+	if !s.paused {
+		return nil
+	}
+	s.paused = false
+	if err := m.persistLocked(sessionID, s); err != nil {
+		s.paused = true
+		return err
+	}
+	return nil
 }
 
 func (m *TurnManager) Resume(sessionID string) bool {

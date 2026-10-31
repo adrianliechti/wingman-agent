@@ -199,6 +199,9 @@ export class WorkspaceClient {
 		if (this.redirects.get(from) === to) return;
 		this.redirects.set(from, to);
 		if (alias.startsWith("ahp-session:")) this.sessions.set(to, alias);
+		this.announce(from, to);
+	}
+	private announce(from: string, to: string) {
 		for (const listener of this.redirectListeners) listener(from, to);
 	}
 	watch(key: string): () => void {
@@ -214,13 +217,18 @@ export class WorkspaceClient {
 				attached = false;
 			let releaseChannels = () => {};
 			const live = () => this.observed.get(key) === current;
-			const failed = (error: unknown) => {
+			const failed = (error: unknown, chat = false) => {
 				const alias = aliasOf(error);
 				if (alias && live()) {
 					void this.redirect(key, alias).catch(() => {});
 					return;
 				}
-				if (live())
+				// The chat's URI is never derived, so the host not knowing it means it is gone.
+				if (chat && error instanceof RpcError && error.code === -32001) {
+					deleted();
+					return;
+				}
+				if (live() && this.store.getSnapshot()[key]?.status !== "deleted")
 					this.store.set(key, {
 						...emptySession(key),
 						status: "error",
@@ -232,7 +240,17 @@ export class WorkspaceClient {
 					this.store.set(key, { ...emptySession(key), status: "deleted" });
 			};
 			const connect = () => {
-				if (!this.ahp.getConnected() || resolving || attached) return;
+				if (resolving || attached) return;
+				const to = this.redirects.get(key);
+				if (to) {
+					// Subscribing a key the host already moved would report it gone.
+					attached = true;
+					queueMicrotask(() => {
+						if (live()) this.announce(key, to);
+					});
+					return;
+				}
+				if (!this.ahp.getConnected()) return;
 				resolving = true;
 				void this.sessionOf(key)
 					.then((uri) => {
@@ -278,7 +296,7 @@ export class WorkspaceClient {
 								chatConnection = event.connection;
 								update();
 							},
-							failed,
+							(error) => failed(error, true),
 						);
 						// Disposal is announced on the root channel only.
 						const releaseRemoval = this.ahp.onNotification((method, params) => {
@@ -618,7 +636,11 @@ export class WorkspaceClient {
 				...(title ? { title } : {}),
 			});
 		} catch (error) {
-			if (!(error instanceof RpcError && error.code === -32003)) throw error;
+			// The chat URI is minted here, so an existing chat is this fork's earlier attempt.
+			const exists =
+				error instanceof RpcError &&
+				(error.code === -32010 || error.code === -32003);
+			if (!exists) throw error;
 		}
 		this.sessions.set(uri, session);
 		this.providers.set(uri, this.backendOf(key));

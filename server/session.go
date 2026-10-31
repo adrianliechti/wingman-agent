@@ -104,6 +104,7 @@ type sessionController struct {
 	loaded         bool
 	deleted        bool
 	receipts       map[string]*commandReceipt
+	receiptOrder   []string
 	deliveredTasks map[string]bool
 	// mu protects the complete projection AND subscription registration/publication.
 	mu          sync.Mutex
@@ -115,15 +116,17 @@ type sessionController struct {
 	attempt     map[string]bool
 	activeInput string
 	lastOutcome string
-	compactions []compactionTurn
+	hostTurns   []hostTurn
 	ahp         *ahpChat
 }
 
-// compactionTurn keeps a compaction turn, which the agent's history does not
-// record, at its place in the transcript.
-type compactionTurn struct {
+// hostTurn keeps a turn whose input the agent's history does not show, a
+// compaction or an invisible input such as a task result, at its place in the
+// transcript.
+type hostTurn struct {
 	at      int // history entries before it
 	entries []TranscriptEntry
+	compact bool // the agent's journal has no input for it
 }
 
 func newSessionController(b *backendRuntime, id string) *sessionController {
@@ -228,7 +231,7 @@ func (c *sessionController) replaceHistory() {
 		return
 	}
 	inserted := 0
-	for _, turn := range c.compactions {
+	for _, turn := range c.hostTurns {
 		at := min(turn.at+inserted, len(entries))
 		entries = slices.Insert(entries, at, turn.entries...)
 		inserted += len(turn.entries)
@@ -261,8 +264,8 @@ func (b *backendRuntime) setSessionPhase(sid, phase string) {
 
 func (c *sessionController) compactedLocked(inputID string, result harness.CompactResult) {
 	notice := TranscriptEntry{ID: "notice:" + inputID, Type: "notice", Content: fmt.Sprintf("Context compacted · ~%s → ~%s tokens", tui.FormatTokens(result.TokensBefore), tui.FormatTokens(result.TokensAfter))}
-	if n := len(c.compactions); n > 0 && c.compactions[n-1].entries[0].InputID == inputID {
-		c.compactions[n-1].entries = append(c.compactions[n-1].entries, notice)
+	if n := len(c.hostTurns); n > 0 && c.hostTurns[n-1].entries[0].InputID == inputID {
+		c.hostTurns[n-1].entries = append(c.hostTurns[n-1].entries, notice)
 	}
 	c.upsertLocked(notice)
 }
@@ -312,15 +315,20 @@ func (c *sessionController) apply(f Frame) {
 		}
 		if f.Input != nil && (f.Input.State == string(code.TurnInputActive) || f.Input.State == string(code.TurnInputSteered)) {
 			c.state.Error = nil
-			if f.Input.Origin != "task" && (f.Input.Text != "" || len(f.Input.Files)+len(f.Input.Images) > 0) {
-				entry := TranscriptEntry{ID: "input:" + f.Input.ID, InputID: f.Input.ID, Type: "user", Content: f.Input.Text, Files: f.Input.Files, Images: f.Input.Images}
+			visible := f.Input.Origin != "task" && (f.Input.Text != "" || len(f.Input.Files)+len(f.Input.Images) > 0)
+			// An active input without visible content still opens its own turn.
+			if visible || f.Input.State == string(code.TurnInputActive) {
+				entry := TranscriptEntry{ID: "input:" + f.Input.ID, InputID: f.Input.ID, Type: "user"}
+				if visible {
+					entry.Content, entry.Files, entry.Images = f.Input.Text, f.Input.Files, f.Input.Images
+				}
 				c.upsertLocked(entry)
-				if f.Input.Compact && c.index(entry.ID) >= 0 && !slices.ContainsFunc(c.compactions, func(turn compactionTurn) bool { return turn.entries[0].ID == entry.ID }) {
+				if (f.Input.Compact || !visible) && c.index(entry.ID) >= 0 && !slices.ContainsFunc(c.hostTurns, func(turn hostTurn) bool { return turn.entries[0].ID == entry.ID }) {
 					at := c.index(entry.ID)
-					for _, turn := range c.compactions {
+					for _, turn := range c.hostTurns {
 						at -= len(turn.entries)
 					}
-					c.compactions = append(c.compactions, compactionTurn{at: max(0, at), entries: []TranscriptEntry{entry}})
+					c.hostTurns = append(c.hostTurns, hostTurn{at: max(0, at), entries: []TranscriptEntry{entry}, compact: f.Input.Compact})
 				}
 			}
 			c.textID = ""

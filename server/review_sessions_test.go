@@ -405,7 +405,7 @@ func TestReviewSessionsNormalizedConfigReachesSubscribers(t *testing.T) {
 	}
 }
 
-// Bug: disposing a session keeps its alias on disk and in memory, so the record leaks forever and the URI reports "session already exists".
+// Bug: disposing a session keeps its alias on disk and in memory, so the record leaks forever and the URI stays taken after a restart.
 func TestReviewSessionsDisposeSessionForgetsItsAlias(t *testing.T) {
 	s, _, _, endpoint := ahpTestServer(t)
 	client := ahpTestClient(t, endpoint, "disposer")
@@ -661,7 +661,10 @@ func TestReviewSessionsAttachmentContentStaysOutOfTheMessageText(t *testing.T) {
 	reviewSessionsDispatch(t, client, chat, 1, &types.ChatTurnStartedAction{Type: types.ActionTypeChatTurnStarted, TurnId: "explain", StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Message: types.Message{Text: "explain", Origin: types.MessageOrigin{Kind: types.MessageKindUser}, Attachments: []types.MessageAttachment{attachment}}})
 	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
 	agent.mu.Lock()
-	sent := agent.messages[0].Content[0].Text
+	sent := ""
+	for _, content := range agent.messages[0].Content {
+		sent += content.Text // the attachment may arrive as its own content part
+	}
 	agent.mu.Unlock()
 	if !strings.Contains(sent, "PRIVATE FILE BODY") {
 		t.Fatalf("the agent did not receive the attachment: %q", sent)
