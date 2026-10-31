@@ -161,11 +161,11 @@ func (s *Service) DocumentContent(filePath string) (string, bool) {
 	return session.DocumentContent(filePath)
 }
 
-func (s *Service) RefreshDiskDocuments(ctx context.Context) {
+func (s *Service) FilesChanged(ctx context.Context, changes []lsp.FileChange) {
 	s.lifeMu.RLock()
 	defer s.lifeMu.RUnlock()
 	if !s.closed {
-		s.manager.RefreshDiskDocuments(ctx)
+		s.manager.FilesChanged(ctx, changes)
 	}
 }
 

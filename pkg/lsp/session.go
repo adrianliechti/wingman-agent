@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +39,8 @@ type Session struct {
 	documents    map[string]*document
 	progress     map[string]WorkProgress
 	applyEdit    func(CommandWorkspaceEdit) bool
+	watchMu      sync.Mutex
+	watchers     map[string][]fileWatcher // by registration id
 	created      time.Time
 	pullDiags    bool
 	capabilities protocol.ServerCapabilities
@@ -57,7 +58,6 @@ type document struct {
 	saved   bool
 	editor  bool // kept current, in order, by an editor connection
 	content string
-	disk    fileStamp // last disk state read into a disk-backed document
 
 	wireDiagnostics []protocol.Diagnostic
 	published       bool
@@ -357,19 +357,6 @@ func isTransientError(err error) bool {
 		wireErr.Code == codeRequestCancelled
 }
 
-type fileStamp struct {
-	size    int64
-	modTime time.Time
-}
-
-func statFile(filePath string) (fileStamp, error) {
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return fileStamp{}, err
-	}
-	return fileStamp{size: info.Size(), modTime: info.ModTime()}, nil
-}
-
 func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, error) {
 	s.documentMu.Lock()
 	defer s.documentMu.Unlock()
@@ -386,51 +373,11 @@ func (s *Session) openDocumentLocked(ctx context.Context, filePath string) (stri
 		// A disk-backed request must never replace an unsaved buffer.
 		return uri, nil
 	}
-	stamp, _ := statFile(filePath)
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
 	}
-	uri, err = s.syncDocumentLocked(ctx, filePath, content, true, false)
-	if err == nil {
-		s.mu.Lock()
-		s.document(uri).disk = stamp
-		s.mu.Unlock()
-	}
-	return uri, err
-}
-
-// RefreshDiskDocuments keeps documents opened from disk current: while open,
-// a server must not read them itself. Editor-owned documents are left to the
-// editor, and deleted files are closed.
-func (s *Session) RefreshDiskDocuments(ctx context.Context) {
-	s.mu.Lock()
-	stale := map[string]fileStamp{}
-	for uri, doc := range s.documents {
-		if path, ok := fileuri.Path(uri); ok && doc.opened && doc.saved && !doc.editor {
-			stale[path] = doc.disk
-		}
-	}
-	s.mu.Unlock()
-	for path, previous := range stale {
-		stamp, err := statFile(path)
-		if err == nil && stamp == previous {
-			continue
-		}
-		s.documentMu.Lock()
-		s.mu.Lock()
-		doc := s.documents[fileuri.FromPath(path)]
-		current := doc != nil && doc.opened && doc.saved && !doc.editor
-		s.mu.Unlock()
-		if current {
-			if errors.Is(err, fs.ErrNotExist) {
-				_ = s.closeDocumentLocked(ctx, path)
-			} else if err == nil {
-				_, _ = s.openDocumentLocked(ctx, path)
-			}
-		}
-		s.documentMu.Unlock()
-	}
+	return s.syncDocumentLocked(ctx, filePath, content, true, false)
 }
 
 // SyncDocument updates the language server with an editor buffer without
@@ -958,6 +905,10 @@ func (s *Session) initialize(ctx context.Context) error {
 			Workspace: &protocol.WorkspaceClientCapabilities{
 				ApplyEdit:        new(true),
 				WorkspaceFolders: new(true),
+				DidChangeWatchedFiles: &protocol.DidChangeWatchedFilesClientCapabilities{
+					DynamicRegistration:    new(true),
+					RelativePatternSupport: new(true),
+				},
 				WorkspaceEdit: &protocol.WorkspaceEditClientCapabilities{
 					DocumentChanges:         new(true),
 					FailureHandling:         protocol.FailureHandlingKindTextOnlyTransactional,

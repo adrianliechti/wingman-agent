@@ -26,7 +26,9 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
+	"github.com/adrianliechti/wingman-agent/pkg/filewatch"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/remote"
 	"github.com/adrianliechti/wingman-agent/pkg/settings"
 	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
@@ -91,7 +93,8 @@ type Server struct {
 	prevLSP         bool
 	prevDebug       bool
 	prevFingerprint uint64
-	lspRefreshing   atomic.Bool
+	workspaceFiles  filewatch.Source // feeds language-server file watchers
+	fileScanning    atomic.Bool
 
 	managedToolsMu sync.RWMutex
 	managedTools   managedToolsStatus
@@ -165,6 +168,12 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 	s.prevLSP = ws.HasLSP()
 	s.prevDebug = s.debugAvailable(serverCtx)
 	s.files = watch.New(watch.Options{Active: s.hasClients}, s.checkWorkspace)
+	s.workspaceFiles = filewatch.NewScanner(ws.Root.FS(), ".", filewatch.Options{
+		Recursive: true,
+		Skip:      func(_ string, entry fs.DirEntry) bool { return entry.IsDir() && isExcludedDir(entry.Name()) },
+		Track:     func(_ string, entry fs.DirEntry) bool { return !entry.IsDir() },
+		Limit:     100000,
+	})
 	s.background.Go(func() {
 		s.files.Run(serverCtx)
 	})
@@ -568,10 +577,12 @@ func (s *Server) checkWorkspace() {
 		s.broadcast(Frame{Type: EvtWorkspaceChanged})
 	}
 
+	if ws.HasLSP() {
+		s.scanWorkspaceFiles()
+	}
 	if !ws.HasChanges() {
 		s.broadcast(Frame{Type: EvtFilesChanged})
 		if ws.HasLSP() {
-			s.refreshLSPDocuments()
 			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
 		}
 		return
@@ -579,9 +590,6 @@ func (s *Server) checkWorkspace() {
 	fp := ws.ChangesFingerprint(s.ctx)
 	if fp != s.prevFingerprint {
 		s.prevFingerprint = fp
-		if ws.HasLSP() {
-			s.refreshLSPDocuments()
-		}
 		s.broadcast(Frame{Type: EvtFilesChanged})
 		s.broadcast(Frame{Type: EvtDiffsChanged})
 		if ws.HasLSP() {
@@ -590,17 +598,33 @@ func (s *Server) checkWorkspace() {
 	}
 }
 
-// A slow language server must not stall the workspace poller.
-func (s *Server) refreshLSPDocuments() {
-	if !s.lspRefreshing.CompareAndSwap(false, true) {
+// Dependency, build and hidden directories are too large or irrelevant to watch.
+func isExcludedDir(name string) bool { return strings.HasPrefix(name, ".") || excludedDirs[name] }
+
+// scanWorkspaceFiles passes disk changes to language servers. A slow walk
+// or language server must not stall the workspace poller.
+func (s *Server) scanWorkspaceFiles() {
+	if !s.fileScanning.CompareAndSwap(false, true) {
 		return
 	}
 	s.background.Go(func() {
-		defer s.lspRefreshing.Store(false)
+		defer s.fileScanning.Store(false)
 		ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 		defer cancel()
-		s.workspace.RefreshLSPDocuments(ctx)
+		s.syncWorkspaceFiles(ctx)
 	})
+}
+
+func (s *Server) syncWorkspaceFiles(ctx context.Context) {
+	changes, err := s.workspaceFiles.Changes(ctx)
+	if err != nil || len(changes) == 0 {
+		return
+	}
+	events := make([]lsp.FileChange, 0, len(changes))
+	for _, change := range changes {
+		events = append(events, lsp.FileChange{Path: filepath.Join(s.workspace.RootPath, filepath.FromSlash(change.Path)), Type: lsp.FileChangeType(change.Type)})
+	}
+	s.workspace.LSPFilesChanged(ctx, events)
 }
 
 func (s *Server) refreshSkills() {

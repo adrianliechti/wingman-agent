@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,6 +118,55 @@ func TestExternalCommandEditsWaitForReview(t *testing.T) {
 				break
 			}
 		}
+	}
+}
+
+func TestExternalWatchedFilesReachTheLanguageServer(t *testing.T) {
+	if !copyTestGopls(t, testenv.WingmanHome(t)) {
+		t.Skip("gopls is not installed")
+	}
+	main := "package main\n\nfunc main() { helper() }\n"
+	app, root := newLSPTestApp(t, map[string]string{"go.mod": "module tmp\n\ngo 1.24\n", "main.go": main})
+	c := newLSPTestClient(t, app, root)
+	c.notify("textDocument/didOpen", map[string]any{"textDocument": map[string]any{"uri": c.uri("main.go"), "languageId": "go", "version": 1, "text": main}})
+	undefined := func() bool {
+		t.Helper()
+		var report struct {
+			Items []struct {
+				Message string `json:"message"`
+			} `json:"items"`
+		}
+		response := c.call("textDocument/diagnostic", map[string]any{"textDocument": map[string]any{"uri": c.uri("main.go")}})
+		if response["error"] != nil {
+			return true // not analyzed yet
+		}
+		data, _ := json.Marshal(response["result"])
+		_ = json.Unmarshal(data, &report)
+		for _, item := range report.Items {
+			if strings.Contains(item.Message, "undefined: helper") {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	for !undefined() {
+		if time.Now().After(deadline) {
+			t.Fatal("gopls never reported the undefined helper")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	app.syncWorkspaceFiles(t.Context()) // baseline
+	// A file created outside any editor reaches gopls only as a watched-file event.
+	if err := os.WriteFile(filepath.Join(root, "helper.go"), []byte("package main\n\nfunc helper() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app.syncWorkspaceFiles(t.Context())
+	for undefined() {
+		if time.Now().After(deadline) {
+			t.Fatal("gopls did not learn about helper.go")
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 

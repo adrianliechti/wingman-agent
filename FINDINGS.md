@@ -107,7 +107,6 @@ The pin is upstream `d7a5579b` (Go module, vendored TS SDK, `scripts/vendor-ahp.
 - **Wrong AHP error codes (code):** a duplicate terminal returns -32003 `SessionAlreadyExists` instead of -32010 `AlreadyExists`; an unknown provider returns -32603 instead of -32002 `ProviderNotFound`; a failed git operation returns -32011 `Conflict` even when nothing conflicts.
 - **Unknown session URIs leave controllers behind (code):** `ensureSession` calls `b.session(id)` before loading, so arbitrary `ahp-session:/wingman/…` subscriptions grow `b.sessions` without bound.
 - **Language server messages wait during a command edit review (code):** the native `workspace/applyEdit` handler blocks the jsonrpc2 reader until the user decides. `jsonrpc2.Async` would release it but closes the stdio stream (probe), so diagnostics and other responses from that server queue until the review ends.
-- **No `workspace/didChangeWatchedFiles` (code):** open documents are refreshed from disk, but language servers hear about new or deleted unopened files only through their own watchers.
 - **`workspace/textDocumentContent` is registered for the `file` scheme (agent):** the 3.18 provider is meant for virtual schemes; other clients may refuse it. Native virtual schemes (jdtls `jdt://`) are not proxied.
 - **Debugging several child sessions (code):** `startDebugging` children are kept, but inspection reaches only the focused child and threads are not merged across children.
 
@@ -137,7 +136,8 @@ The pin is upstream `d7a5579b` (Go module, vendored TS SDK, `scripts/vendor-ahp.
 ### Host
 
 - **Terminal content length:** keep a running count instead of re-joining all content parts on every output chunk (`ahp_terminal.go:222`).
-- **Workspace polling:** feed the changeset from `checkWorkspace` instead of a separate 2 s `git diff` ticker. Today there are three workspace pollers: `checkWorkspace`, the changeset, and a 1 s full walk per resource watch.
+- **Workspace polling:** feed the changeset from `checkWorkspace` instead of a separate 2 s `git diff` ticker. The language-server file scan already runs inside `checkWorkspace`, while each AHP resource watch walks its tree every second. Both use `filewatch.Scanner`, so one shared `filewatch.Source` could serve them.
+- **Native file watching:** a 100,000-file tree takes about 200 ms per scan on macOS. A native `filewatch.Source` would avoid the walk without cgo: `ReadDirectoryChangesW` on Windows and inotify on Linux need only `x/sys`, but FSEvents on macOS needs a purego binding, because kqueue (what `sgtdi/fswatcher` and fsnotify use without cgo) holds one file descriptor per watched file.
 
 ## Suggested order
 

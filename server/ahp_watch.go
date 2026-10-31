@@ -12,22 +12,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/pkg/filewatch"
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/google/uuid"
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
 type ahpResourceWatch struct {
-	state              t.ResourceWatchState
-	rel                string
-	includes, excludes []string
-	files              map[string]watchStamp // owned by the watch loop after initial registration
-	touched            time.Time             // host.mu
-}
-type watchStamp struct {
-	size     int64
-	modified int64
-	mode     fs.FileMode
+	state   t.ResourceWatchState
+	scanner *filewatch.Scanner
+	touched time.Time // host.mu
 }
 
 func watchPatterns(raw *json.RawMessage) ([]string, error) {
@@ -65,7 +59,13 @@ func (h *ahpHost) createResourceWatch(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &ahpResourceWatch{state: t.ResourceWatchState{Root: p.Uri, Recursive: p.Recursive != nil && *p.Recursive, Includes: p.Includes, Excludes: p.Excludes}, rel: filepath.ToSlash(rel), includes: includes, excludes: excludes, touched: time.Now()}
+	w := &ahpResourceWatch{state: t.ResourceWatchState{Root: p.Uri, Recursive: p.Recursive != nil && *p.Recursive, Includes: p.Includes, Excludes: p.Excludes}, touched: time.Now()}
+	w.scanner = filewatch.NewScanner(h.server.workspace.Root.FS(), filepath.ToSlash(rel), filewatch.Options{
+		Recursive: w.state.Recursive,
+		Skip:      func(rel string, _ fs.DirEntry) bool { return matchesWatch(excludes, rel) },
+		Track:     func(rel string, _ fs.DirEntry) bool { return len(includes) == 0 || matchesWatch(includes, rel) },
+		Limit:     100000,
+	})
 	h.mu.Lock()
 	if h.watches == nil {
 		h.watches = map[string]*ahpResourceWatch{}
@@ -82,8 +82,10 @@ func (h *ahpHost) createResourceWatch(raw json.RawMessage) (any, error) {
 	if full {
 		return nil, ahpInvalid("resource watch limit reached")
 	}
-	w.files, err = h.scanWatch(w)
-	if err != nil {
+	if _, err := w.scanner.Changes(h.server.ctx); err != nil {
+		if errors.Is(err, filewatch.ErrLimit) {
+			return nil, ahpInvalid("resource watch exceeds 100000 entries; narrow its root or exclusions")
+		}
 		return nil, err
 	}
 	uri := "ahp-resource-watch:/" + uuid.NewString()
@@ -105,48 +107,6 @@ func matchesWatch(patterns []string, name string) bool {
 		}
 	}
 	return false
-}
-
-func (h *ahpHost) scanWatch(w *ahpResourceWatch) (map[string]watchStamp, error) {
-	files := map[string]watchStamp{}
-	visited := 0
-	err := fs.WalkDir(h.server.workspace.Root.FS(), w.rel, func(name string, entry fs.DirEntry, err error) error {
-		select {
-		case <-h.done:
-			return fs.SkipAll
-		default:
-		}
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		rel, _ := filepath.Rel(filepath.FromSlash(w.rel), filepath.FromSlash(name))
-		rel = filepath.ToSlash(rel)
-		if matchesWatch(w.excludes, rel) {
-			if entry.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		visited++
-		if visited > 100000 {
-			return ahpInvalid("resource watch exceeds 100000 entries; narrow its root or exclusions")
-		}
-		if len(w.includes) == 0 || matchesWatch(w.includes, rel) {
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-			files[name] = watchStamp{size: info.Size(), modified: info.ModTime().UnixNano(), mode: info.Mode()}
-		}
-		if !w.state.Recursive && name != w.rel && entry.IsDir() {
-			return fs.SkipDir
-		}
-		return nil
-	})
-	return files, err
 }
 
 func (h *ahpHost) runResourceWatches() {
@@ -177,30 +137,14 @@ func (h *ahpHost) runResourceWatches() {
 		}
 		h.mu.Unlock()
 		for uri, w := range active {
-			files, err := h.scanWatch(w)
-			if err != nil {
-				continue
-			} // retain the baseline across transient read errors
-			changes := []t.ResourceChange{}
-			for name, stamp := range files {
-				old, exists := w.files[name]
-				if exists && old == stamp {
-					continue
-				}
-				kind := t.ResourceChangeTypeUpdated
-				if !exists {
-					kind = t.ResourceChangeTypeAdded
-				}
-				changes = append(changes, t.ResourceChange{Uri: h.fileURI(name), Type: kind})
+			scanned, err := w.scanner.Changes(h.server.ctx)
+			if err != nil || len(scanned) == 0 {
+				continue // the scanner keeps its baseline across transient read errors
 			}
-			for name := range w.files {
-				if _, exists := files[name]; !exists {
-					changes = append(changes, t.ResourceChange{Uri: h.fileURI(name), Type: t.ResourceChangeTypeDeleted})
-				}
-			}
-			w.files = files
-			if len(changes) == 0 {
-				continue
+			kinds := map[filewatch.ChangeType]t.ResourceChangeType{filewatch.Created: t.ResourceChangeTypeAdded, filewatch.Changed: t.ResourceChangeTypeUpdated, filewatch.Deleted: t.ResourceChangeTypeDeleted}
+			changes := make([]t.ResourceChange, 0, len(scanned))
+			for _, change := range scanned {
+				changes = append(changes, t.ResourceChange{Uri: h.fileURI(change.Path), Type: kinds[change.Type]})
 			}
 			slices.SortFunc(changes, func(a, b t.ResourceChange) int { return strings.Compare(a.Uri, b.Uri) })
 			h.mu.Lock()

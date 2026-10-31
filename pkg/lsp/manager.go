@@ -407,8 +407,8 @@ func (m *Manager) ActiveSession(filePath string) (*Session, bool) {
 	return nil, false
 }
 
-// RefreshDiskDocuments refreshes the disk-backed documents of live sessions.
-func (m *Manager) RefreshDiskDocuments(ctx context.Context) {
+// FilesChanged passes disk changes to every live session.
+func (m *Manager) FilesChanged(ctx context.Context, changes []FileChange) {
 	m.mu.Lock()
 	sessions := make([]*Session, 0, len(m.sessions))
 	for _, entry := range m.sessions {
@@ -418,7 +418,7 @@ func (m *Manager) RefreshDiskDocuments(ctx context.Context) {
 	}
 	m.mu.Unlock()
 	for _, session := range sessions {
-		session.RefreshDiskDocuments(ctx)
+		_ = session.FilesChanged(ctx, changes)
 	}
 }
 

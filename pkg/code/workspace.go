@@ -815,14 +815,13 @@ func (w *Workspace) SyncEditorDocument(ctx context.Context, filePath, content st
 	return service.SyncDocument(ctx, filePath, content, saved)
 }
 
-// RefreshLSPDocuments tells language servers about disk changes to files they
-// hold open on behalf of agent reads and diagnostics scans.
-func (w *Workspace) RefreshLSPDocuments(ctx context.Context) {
+// LSPFilesChanged tells language servers about changes on disk.
+func (w *Workspace) LSPFilesChanged(ctx context.Context, changes []lsp.FileChange) {
 	w.mu.RLock()
 	service := w.Language
 	w.mu.RUnlock()
 	if service != nil {
-		service.RefreshDiskDocuments(ctx)
+		service.FilesChanged(ctx, changes)
 	}
 }
 

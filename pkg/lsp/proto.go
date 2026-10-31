@@ -56,6 +56,7 @@ type CallHierarchyItem = protocol.CallHierarchyItem
 type CallHierarchyIncomingCall = protocol.CallHierarchyIncomingCall
 type CallHierarchyOutgoingCall = protocol.CallHierarchyOutgoingCall
 type Diagnostic = protocol.Diagnostic
+type FileChangeType = protocol.FileChangeType
 type DiagnosticSeverity = protocol.DiagnosticSeverity
 type String = protocol.String
 type MarkupContent = protocol.MarkupContent
